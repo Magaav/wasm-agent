@@ -4398,6 +4398,12 @@ function laneChecklist(lane, rows) {
   const bound=rows.some(row=>String(row.worktree || '') && String(row.workspace_state || '')!=='released');
   const released=rows.length>0 && rows.every(row=>String(row.workspace_state || '')==='released');
   const retired=released ? 'yes' : bound ? 'no' : 'unknown';
+  // `main-only` is a statement about the *lane*, so it has to come from the same recorded facts the
+  // lane is keyed by - branch-or-worktree - and not from the branch name alone. A lane whose children
+  // recorded a worktree and no branch name is a checkout of its own (its header draws that path), and
+  // reporting it as main-only would contradict the row directly above it.
+  const checkout=lane.branch || lane.worktree;
+  const ownCheckout=!!checkout;
   return [
     {outcome:'merged',state:'unknown',
       detail:'this view reads no branch tip and no origin/main ref, so containment is not measured here'},
@@ -4408,9 +4414,9 @@ function laneChecklist(lane, rows) {
         : 'no session record for this lane'},
     {outcome:'clean',state:'unknown',
       detail:"a checkout's own git status is measured by the node's settlement review, which this view is not given"},
-    {outcome:'main-only',state:lane.branch ? 'no':'yes',
-      detail:lane.branch ? 'this lane holds a branch of its own' :
-        'this lane holds no branch of its own: its children work in the node checkout'}];
+    {outcome:'main-only',state:ownCheckout ? 'no':'yes',
+      detail:ownCheckout ? 'this lane holds a checkout of its own ('+checkout+')'
+        : 'this lane holds no branch and no worktree of its own: its children work in the node checkout'}];
 }
 function laneRecord(key,rows) {
   const first=rows[0] || {};
@@ -4499,20 +4505,52 @@ function childRunState(task) {
   if(task.state==='cancelled') return 'unfinished';
   return undefined;
 }
+// The page this view asks a child's transcript for, and what happens when the node refuses the size.
+//
+// `lua/core/session_view.lua` refuses a `byte_limit` above `MAX_BYTES - 2048`, and `MAX_BYTES` is
+// lowered from 51200 to as little as 4096 by `WASM_AGENT_TOOL_OUTPUT_BYTES` - a supported setting under
+// which a hard-coded 40960 made *every* child pane read "Conversation unavailable:
+// invalid_session_byte_limit", with no transcript at all. No route reports that budget to a window, so
+// this asks for the page it wants and, on that refusal, asks again with no byte budget at all (the
+// node's own valid default) and says so in the pane: a conversation that silently shrank is a reader
+// wondering where the rows went. The answer is remembered for every pane, because it is a fact about the
+// node in front of us rather than about one child.
+let panePageBytes=40960;
+let panePageNote='';
+let panePageNoteDetail='';
+async function panePage(pane, options) {
+  const request={action:'session',id:pane.task.subagent_id,limit:200,...options};
+  if(panePageBytes)request.byte_limit=panePageBytes;
+  try { return await orchestratorRequest(request); }
+  catch(error) {
+    if(!panePageBytes || !/invalid_session_byte_limit/.test(String(error.message))) throw error;
+    // The note is one line on purpose: it sits in the pane's status row, and a paragraph there would
+    // take the room the transcript needs (measured: a 250-character note cost 75px of transcript, which
+    // is the readability this pane exists for). The full reason travels in the row's title.
+    panePageNote='page '+Math.round(panePageBytes/1024)+' KiB refused ('+error.message+'): reading the page size the node chooses';
+    panePageNoteDetail='This node bounds a transcript page by its own tool-output budget '+
+      '(WASM_AGENT_TOOL_OUTPUT_BYTES), which is smaller than the '+Math.round(panePageBytes/1024)+
+      ' KiB page this view asked for. The pane renders the page the node returns instead, so a child\'s transcript '+
+      'shows fewer rows here than it would on the default budget.';
+    panePageBytes=0;
+    delete request.byte_limit;
+    return await orchestratorRequest(request);
+  }
+}
 // The rows to draw for one child: the node's newest page, extended backwards while that page opens
 // on a `tool` row whose call sits just above it. In this renderer a result belongs to the call above
 // it, so a page cut between them would draw nothing for evidence the reader came to see. The loop is
 // bounded and normally never runs: one page is the whole conversation.
 async function paneMessages(pane) {
   // More than the node's default page of eight rows, so a child's transcript is the conversation and
-  // not just its tail. The node still bounds the page by bytes and answers with an address for a row
-  // too large to send; the rows are then drawn by the window's own renderer, below.
-  const page=await orchestratorRequest({action:'session',id:pane.task.subagent_id,limit:200,byte_limit:40960});
+  // not just its tail. The node still bounds the page - by bytes, by its own budget - and answers with
+  // an address for a row too large to send; the rows are then drawn by the window's own renderer.
+  const page=await panePage(pane,{});
   let rows=page.messages || [];
   for(let older=0; older<3 && rows[0]?.role==='tool'; older++) {
     const first=Number(rows[0].seq);
     if(!Number.isFinite(first) || first<=1) break;
-    const before=await orchestratorRequest({action:'session',id:pane.task.subagent_id,before_seq:first,limit:200,byte_limit:20480});
+    const before=await panePage(pane,{before_seq:first});
     const earlier=(before.messages || []).filter(row=>Number(row.seq)<first);
     if(!earlier.length) break;
     rows=earlier.concat(rows);
@@ -4536,10 +4574,12 @@ async function refreshAgentPane(pane) {
         stateAt:pane.task.settled_at,active:!pane.task.settled,liveTool:pane.task.preview?.tool});
     }
     // What is left for the pane's own notice is what the shared transcript cannot say: a failure the
-    // child reported, or nothing. `Ready for your next message.` used to sit here, restating the
-    // `completed`/duration footer the run already draws in its own bubble.
-    pane.notice.textContent=pane.task.error ||
-      (pane.task.settled ? '' : 'Working. Steer updates the active run; Send queues a follow-up.');
+    // child reported, a page size this node refused, or nothing. `Ready for your next message.` used to
+    // sit here, restating the `completed`/duration footer the run already draws in its own bubble.
+    pane.notice.textContent=[panePageNote,pane.task.error ||
+      (pane.task.settled ? '' : 'Working. Steer updates the active run; Send queues a follow-up.')]
+      .filter(Boolean).join(' ');
+    if(panePageNote)pane.notice.title=panePageNoteDetail;
   } catch(error) { pane.notice.textContent='Conversation unavailable: '+error.message; }
 }
 function mountOrchestrator() {

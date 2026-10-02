@@ -17,6 +17,10 @@ param(
   [int]$Port = 8917,
   [int]$ClientPort = 8801,
   [string]$WaExe = (Join-Path $env:LOCALAPPDATA "wasm-agent\wa.exe"),
+  # A node whose page budget is lowered (`WASM_AGENT_TOOL_OUTPUT_BYTES`, the knob the benchmark and the
+  # A/B experiments use). The fixture mirrors the node's own validation, and the probe asserts that a
+  # lowered budget costs page size rather than the whole transcript.
+  [int]$ToolOutputBytes = 0,
   [string]$Out = (Join-Path $env:TEMP "wa-probe-subagent-chat")
 )
 $ErrorActionPreference = "Stop"
@@ -52,27 +56,30 @@ $probe = @'
     if (typeof window.__refreshOrchestrator !== "function") throw new Error("the probe cannot reach the app's refresher");
 
     // ---- what the node answers ---------------------------------------------------------------
-    // Six children over three lanes: two on one branch, two on a branch whose checkouts have been
-    // retired, and two with no branch of their own (the node's own checkout = the main lane).
+    // Six children over four lanes, each plan the *recorded* shape the node writes: a branch lane; a
+    // released lane (workspaces.lua's release KEEPS `worktree` and sets `workspace_state='released'`);
+    // a lane whose children recorded a worktree and no branch name (`sessions.workspace_branch` is
+    // TEXT NOT NULL DEFAULT '', so a lane can be keyed by its worktree alone); and the node's own
+    // checkout, which has neither. Children 1-2 alpha, 3-4 beta, 5 gamma, 6 main.
     var lanePlan = [
-      { branch: "change/lane-alpha", worktree: "C:/work/wt-alpha" },
-      { branch: "change/lane-beta", worktree: "C:/work/wt-beta" },
-      { branch: "", worktree: "" }
+      { branch: "change/lane-alpha", worktree: "C:/work/wt-alpha", state: "allocated" },
+      { branch: "change/lane-beta", worktree: "C:/work/wt-beta", state: "released" },
+      { branch: "", worktree: "C:/work/wt-gamma", state: "allocated" },
+      { branch: "", worktree: "", state: "unbound" }
     ];
+    var laneOfChild = [0, 0, 1, 1, 2, 3];
     var tasks = [], sessions = [];
     for (var i = 1; i <= 6; i += 1) {
-      var plan = lanePlan[Math.floor((i - 1) / 2)];
+      var plan = lanePlan[laneOfChild[i - 1]];
       var id = "child-" + i, sid = "child-session-" + i;
-      var retired = i === 3 || i === 4;
       tasks.push({ subagent_id: id, session_id: sid, parent_session_id: "parent-fixture",
         profile: "task-worker", execution_node: "local",
         title: "LONG-TITLE-" + i + " " + new Array(24).join("a deliberately long mission line "),
         prompt: "prompt " + i, state: i <= 4 ? "running" : "completed", settled: i > 4,
         model: "fixture-model-" + i, reasoning: "high", created_at: 100 + i });
       sessions.push({ id: sid, title: "child session " + i, state: i <= 4 ? "unfinished" : "answered",
-        workspace_required: 1, workspace_branch: plan.branch,
-        worktree: retired ? "" : plan.worktree,
-        workspace_state: retired ? "released" : (plan.worktree ? "allocated" : "unbound") });
+        workspace_required: 1, workspace_branch: plan.branch, worktree: plan.worktree,
+        workspace_state: plan.state });
     }
     window.__fixtures.subagents = { subagents: tasks };
     window.__fixtures.sessions = { sessions: sessions };
@@ -98,6 +105,10 @@ $probe = @'
         task: { subagent_id: id, session_id: "child-session-" + n, state: settled ? "completed" : "running",
           settled: settled, profile: "task-worker", model: "fixture-model-" + n, reasoning: "high" } };
     }
+    function respond(value) {
+      return Promise.resolve({ ok: true, status: 200, json: function () { return Promise.resolve(value); },
+        text: function () { return Promise.resolve(JSON.stringify(value)); } });
+    }
     var previousFetch = window.fetch;
     window.fetch = function (input, init) {
       var url = String(typeof input === "string" ? input : (input && input.url) || "");
@@ -106,9 +117,11 @@ $probe = @'
         var request = {};
         try { request = JSON.parse(init.body || "{}"); } catch (error) { request = {}; }
         if (request.action === "session") {
-          var value = page(request.id);
-          return Promise.resolve({ ok: true, status: 200, json: function () { return Promise.resolve(value); },
-            text: function () { return Promise.resolve(JSON.stringify(value)); } });
+          // The node's own validation (lua/core/session_view.lua): a `byte_limit` above MAX_BYTES-2048
+          // is refused, and MAX_BYTES is the budget `WASM_AGENT_TOOL_OUTPUT_BYTES` lowers.
+          var budget = Number(window.__fixtureToolOutputBytes || 0);
+          if (budget > 0 && Number(request.byte_limit || 0) > budget - 2048) return respond({ error: "invalid_session_byte_limit" });
+          return respond(page(request.id));
         }
       }
       return previousFetch(input, init);
@@ -237,25 +250,55 @@ $probe = @'
     var outcomes = ["merged", "retired", "clean", "main-only"];
     var lists = laneElements.map(function (g) {
       var items = Array.prototype.slice.call(g.querySelectorAll(".lane-check"));
-      return { lane: g.dataset.lane, outcomes: items.map(function (item) { return item.dataset.outcome; }),
+      var path = g.querySelector(".lane-path");
+      return { lane: g.dataset.lane, path: path ? path.textContent : "",
+        outcomes: items.map(function (item) { return item.dataset.outcome; }),
         states: items.map(function (item) { return item.dataset.state; }) };
     });
     facts.lanes = { keys: laneKeys, counts: counts, lists: lists };
-    function laneOf(key) { var found = lists.filter(function (list) { return list.lane === key; }); return found[0]; }
-    check(laneKeys.join("|") === ["change/lane-alpha", "change/lane-beta", "main"].sort().join("|"),
-      "cards must be grouped by lane key - the child's recorded branch, or the node's own checkout - saw " + JSON.stringify(laneKeys));
-    check(counts.join(" ") === "change/lane-alpha:2 change/lane-beta:2 main:2",
+    function laneOf(key) { return lists.filter(function (list) { return list.lane === key; })[0]; }
+    function stateOf(key, index) { var lane = laneOf(key); return lane ? lane.states[index] : "no such lane"; }
+    // The page budget first: it decides whether the panes drew their pages at all.
+    var budgetPanes = panes.map(function (pane) {
+      var n = Number(String(pane.dataset.key || "").replace("child-", ""));
+      return { child: n, answer: pane.transcript.textContent.indexOf("CHILD-" + n + "-ANSWER") >= 0,
+        notice: pane.notice ? pane.notice.textContent : "", title: pane.notice ? pane.notice.title : "" };
+    });
+    facts.budget = budgetPanes;
+    if (window.__fixtureToolOutputBytes) {
+      check(budgetPanes.every(function (p) { return p.answer; }) &&
+        budgetPanes.every(function (p) { return p.notice.indexOf("Conversation unavailable") < 0; }),
+        "a node whose page budget is lowered must still show every child's transcript, saw " +
+        JSON.stringify(budgetPanes.map(function (p) { return p.notice; })));
+      check(budgetPanes.some(function (p) { return p.notice.indexOf("invalid_session_byte_limit") >= 0 && p.notice.indexOf("KiB") >= 0; }),
+        "and the pane must say which page size the node refused rather than showing an empty conversation, saw " +
+        JSON.stringify(budgetPanes[0].notice));
+      check(budgetPanes.every(function (p) { return p.title.indexOf("WASM_AGENT_TOOL_OUTPUT_BYTES") >= 0; }),
+        "and every pane must carry the reason where a reader can find it, saw " + JSON.stringify(budgetPanes.map(function (p) { return p.title.slice(0, 60); })));
+    } else {
+      check(budgetPanes.every(function (p) { return p.notice.indexOf("invalid_session_byte_limit") < 0; }),
+        "with the node's default budget no pane may report a refusal it never met, saw " +
+        JSON.stringify(budgetPanes.map(function (p) { return p.notice.slice(0, 60); })));
+    }
+    check(laneKeys.join("|") === ["C:/work/wt-gamma", "change/lane-alpha", "change/lane-beta", "main"].sort().join("|"),
+      "cards must be grouped by the child's recorded checkout - its branch, else its worktree, else the node's own - saw " + JSON.stringify(laneKeys));
+    check(counts.join(" ") === "C:/work/wt-gamma:1 change/lane-alpha:2 change/lane-beta:2 main:1",
       "each lane group must hold that lane's own children, saw " + JSON.stringify(counts));
-    check(lists.length === 3 && lists.every(function (list) {
+    check(lists.length === 4 && lists.every(function (list) {
       return list.outcomes.join(",") === outcomes.join(",") && list.states.length === 4 &&
         list.states.every(function (s) { return s === "yes" || s === "no" || s === "unknown"; });
     }), "every lane must carry the four-outcome checklist, each measured or explicitly unknown, saw " + JSON.stringify(lists));
-    check(!!laneOf("change/lane-beta") && laneOf("change/lane-beta").states[1] === "yes" &&
-      !!laneOf("change/lane-alpha") && laneOf("change/lane-alpha").states[1] === "no",
-      "`retired` must be measured from the lane's recorded checkout, saw " + JSON.stringify(lists));
-    check(!!laneOf("main") && laneOf("main").states[3] === "yes" &&
-      laneOf("change/lane-alpha").states[3] === "no",
-      "`main-only` must be measured from the lane's recorded branch, saw " + JSON.stringify(lists));
+    // A released lane in the shape the node records it: the worktree is kept and the state says released.
+    check(stateOf("change/lane-beta", 1) === "yes" && laneOf("change/lane-beta").path === "C:/work/wt-beta",
+      "`retired` must be measured from the recorded checkout, and a retired lane still shows where it was, saw " + JSON.stringify(laneOf("change/lane-beta")));
+    check(stateOf("change/lane-alpha", 1) === "no",
+      "a lane whose children still hold a bound checkout must not be called retired, saw " + JSON.stringify(laneOf("change/lane-alpha")));
+    // The lane key and the outcome come from the same recorded facts: a worktree of its own is not the
+    // node's checkout, whatever the empty branch column says.
+    check(stateOf("C:/work/wt-gamma", 3) === "no" && laneOf("C:/work/wt-gamma").path === "C:/work/wt-gamma",
+      "a lane keyed on a recorded worktree with no recorded branch must not be reported as main-only, saw " + JSON.stringify(laneOf("C:/work/wt-gamma")));
+    check(stateOf("main", 3) === "yes" && laneOf("main").path === "",
+      "and the lane with neither a branch nor a worktree of its own must be the main-only one, saw " + JSON.stringify(laneOf("main")));
     check(lists.every(function (list) {
       return list.states[0] === "unknown" && list.states[2] === "unknown";
     }), "the two outcomes this view cannot measure must say `unknown` rather than being drawn as facts, saw " + JSON.stringify(lists));
@@ -279,7 +322,8 @@ $index = Join-Path $tmp "index.html"
 $html = Get-Content -Raw $index
 # Fixtures first (app.js reads them as it starts), the probe last (after app.js has booted).
 $html = $html.Replace('<script src="app.js"></script>',
-  '<script src="fixtures.js"></script>' + "`n" + '<script src="app.js"></script>' + "`n" + '<script src="wa-probe.js"></script>')
+  '<script src="fixtures.js"></script>' + "`n" + '<script src="app.js"></script>' + "`n" +
+  '<script>window.__fixtureToolOutputBytes = ' + $ToolOutputBytes + ';</script>' + "`n" + '<script src="wa-probe.js"></script>')
 Set-Content -Path $index -Value $html -NoNewline
 
 # The probe drives the window through the app's own entry points, as a reader does by clicking. These
@@ -309,6 +353,9 @@ foreach ($entry in @(Get-ChildItem Env: | Where-Object { $_.Name -like 'WASM_AGE
   [Environment]::SetEnvironmentVariable($entry.Name, $null, 'Process')
 }
 $env:WASM_AGENT_HOME = Join-Path $tmp 'home'
+# The fixture is what enforces the node's rule (the page's API calls are stubbed), but the server this
+# harness serves the page from gets the same setting, so nothing here claims a budget it did not set.
+if ($ToolOutputBytes -gt 0) { $env:WASM_AGENT_TOOL_OUTPUT_BYTES = "$ToolOutputBytes" }
 $server = $null
 try {
   $server = Start-Process -FilePath $WaExe -ArgumentList @("serve", "--db", $db, "--port", "$Port", "--client-port", "$ClientPort", "--ui", $tmp) -WindowStyle Hidden -PassThru
@@ -342,6 +389,7 @@ try {
 } finally {
   if ($server) { Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue }
   Remove-Item Env:WASM_AGENT_HOME -ErrorAction SilentlyContinue
+  Remove-Item Env:WASM_AGENT_TOOL_OUTPUT_BYTES -ErrorAction SilentlyContinue
   foreach ($key in $runtimeEnvironment.Keys) { [Environment]::SetEnvironmentVariable($key, $runtimeEnvironment[$key], 'Process') }
   $resolvedTmp = [IO.Path]::GetFullPath($tmp)
   $resolvedTemp = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())

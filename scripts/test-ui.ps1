@@ -972,11 +972,42 @@ $harness = @'
   var panes=[...showroom.panes.values()];
   var firstRect=panes[0].getBoundingClientRect(), secondRect=panes[1].getBoundingClientRect(), thirdRect=panes[2].getBoundingClientRect();
   check(firstRect.width>200 && secondRect.left>firstRect.left && thirdRect.top>firstRect.top,'four panes must form a readable two by two grid');
+  // The child transcript route. `POST /subagents` with `action:'session'` is the page
+  // `lua/core/session_view.lua` answers (rows, a task echo, and an address for a row too large to
+  // send); the stubbed fetch above answers every other subagent action, so this wraps it to add that
+  // one route. Everything the checks below assert is then drawn by the production path -
+  // refreshAgentPane -> panePage -> paintChildTranscript - and not by a test-only renderer hook.
+  var childPages={};
+  var stubFetch=window.fetch;
+  window.fetch=function(input,init){
+    var url=String(typeof input==='string'?input:(input&&input.url)||'');
+    var path=new URL(url,location.href).pathname.replace(/^\/+|\/+$/g,'');
+    if(path==='subagents'&&init&&init.method==='POST'){
+      var request={};try{request=JSON.parse(init.body||'{}');}catch(error){request={};}
+      if(request.action==='session'){
+        // A node whose page budget is lowered (`WASM_AGENT_TOOL_OUTPUT_BYTES` lowers `MAX_BYTES`)
+        // refuses a sized request exactly here, and accepts the unsized one.
+        if(window.__fixtureRefuseBytes&&request.byte_limit!=null){
+          return Promise.resolve({ok:true,status:200,json:function(){return Promise.resolve({error:'invalid_session_byte_limit'});},
+            text:function(){return Promise.resolve('{"error":"invalid_session_byte_limit"}');}});
+        }
+        var page=childPages[request.id]||{session_id:'unknown',returned:0,messages:[],task:null};
+        return Promise.resolve({ok:true,status:200,json:function(){return Promise.resolve(page);},
+          text:function(){return Promise.resolve(JSON.stringify(page));}});
+      }
+    }
+    return stubFetch(input,init);
+  };
   panes[0].input.value='keep my draft';
-  window.__paintChildTranscript(panes[0].transcript,[{seq:1,role:'user',content:'hello'},
-    {seq:2,role:'assistant',content:'',tool_calls:[{id:'call-0',function:{name:'read',arguments:'{"path":"a"}'}}]},
-    {seq:3,role:'tool',tool_call_id:'call-0',tool_name:'read',content:'original tool evidence',tool_calls:[]},
-    {seq:4,role:'assistant',content:'answer'}],{state:'answered'});
+  // Page one, read through the production path: the pane asks the node's route, and the app draws what
+  // comes back. `tile-0` is the pane's subagent id and `session-0` its session.
+  childPages['tile-0']={session_id:'session-0',returned:4,view:'full',note:'Bounded inspection only; original transcript unchanged.',
+    messages:[{seq:1,role:'user',content:'hello',created_at:1,tool_calls:[]},
+      {seq:2,role:'assistant',content:'',created_at:1,tool_calls:[{id:'call-0',function:{name:'read',arguments:'{"path":"a"}'}}]},
+      {seq:3,role:'tool',tool_call_id:'call-0',tool_name:'read',content:'original tool evidence',created_at:2,tool_calls:[]},
+      {seq:4,role:'assistant',content:'answer',created_at:3,tool_calls:[]}],
+    task:{subagent_id:'tile-0',session_id:'session-0',state:'answered',settled:true,profile:'worker',model:'fixture',reasoning:'max'}};
+  await window.__refreshAgentPane(panes[0]);
   check(panes[0].querySelectorAll('wa-message').length===2 &&
     panes[0].querySelector('wa-run wa-trace .tool-line').textContent.includes('read') &&
     panes[0].querySelector('wa-trace .tool-output').textContent.includes('original tool evidence'),
@@ -985,9 +1016,14 @@ $harness = @'
     'a pane draws its run status inside the bubble body, the way the window\'s own chat does');
   // A pane is a repaint of the page the node returned, not an accumulator: a second page replaces the
   // first, exactly as the window's own chat replaces its transcript when it repaints.
-  window.__paintChildTranscript(panes[0].transcript,[{seq:4,role:'user',content:'next'},{seq:5,role:'assistant',phase:'commentary',content:'Checking…'},
-    {seq:6,role:'assistant',reasoning:'considering',tool_calls:[{id:'call-1',function:{name:'read',arguments:'{}'}}]},
-    {seq:7,role:'tool',tool_name:'read',content:'result text',tool_calls:[]},{seq:8,role:'assistant',content:'**done**'}],{state:'answered'});
+  childPages['tile-0']={session_id:'session-0',returned:5,view:'full',note:'Bounded inspection only; original transcript unchanged.',
+    messages:[{seq:4,role:'user',content:'next',created_at:4,tool_calls:[]},
+      {seq:5,role:'assistant',phase:'commentary',content:'Checking…',created_at:4,tool_calls:[]},
+      {seq:6,role:'assistant',content:'',created_at:4,reasoning:'considering',tool_calls:[{id:'call-1',function:{name:'read',arguments:'{}'}}]},
+      {seq:7,role:'tool',tool_call_id:'call-1',tool_name:'read',content:'result text',created_at:5,tool_calls:[]},
+      {seq:8,role:'assistant',content:'**done**',created_at:6,tool_calls:[]}],
+    task:{subagent_id:'tile-0',session_id:'session-0',state:'answered',settled:true,profile:'worker',model:'fixture',reasoning:'max'}};
+  await window.__refreshAgentPane(panes[0]);
   check(panes[0].querySelectorAll('wa-message').length===2 &&
     panes[0].querySelectorAll('wa-run').length===1 &&
     !!panes[0].querySelector('wa-commentary') && !!panes[0].querySelector('wa-reasoning') &&
@@ -1026,6 +1062,81 @@ $harness = @'
   check(!promotedFrame.open && showroom.windows.size===0,
     'closing the frame must close the promoted conversation, not the workspace pane it came from');
   promotedFrame.remove();   // leave the document as this run found it
+
+  // LANES. The claim: the cards are grouped by the child's recorded checkout - its workspace branch,
+  // else its worktree - and each lane states its end state as an outcome checklist. Driven through the
+  // app's own refresh (the dispatch list and `/sessions`), so a lane key or an outcome cannot be
+  // asserted against a shape the app does not use. The recorded shapes are the ones the node really
+  // writes, including a released checkout (`workspaces.lua`'s release KEEPS `worktree` and sets
+  // `workspace_state='released'`) and a checkout with no recorded branch name
+  // (`sessions.workspace_branch TEXT NOT NULL DEFAULT ''`) - the row shape whose `main-only` outcome
+  // must still be answered from the lane's own key rather than from the branch name alone.
+  var lanesPanel=document.createElement('wa-orchestrator');
+  lanesPanel.style.cssText='position:fixed;inset:0;width:1200px;height:800px;z-index:9998';
+  document.body.append(lanesPanel);
+  var laneTasks=[
+    {subagent_id:'lane-child-a',session_id:'lane-session-a',profile:'worker',model:'fixture',reasoning:'max',execution_node:'local',state:'running',settled:false,created_at:1,prompt:'alpha work'},
+    {subagent_id:'lane-child-a2',session_id:'lane-session-a2',profile:'worker',model:'fixture',reasoning:'max',execution_node:'local',state:'running',settled:false,created_at:2,prompt:'alpha work two'},
+    {subagent_id:'lane-child-b',session_id:'lane-session-b',profile:'worker',model:'fixture',reasoning:'max',execution_node:'local',state:'running',settled:false,created_at:3,prompt:'beta work'},
+    {subagent_id:'lane-child-c',session_id:'lane-session-c',profile:'worker',model:'fixture',reasoning:'max',execution_node:'local',state:'running',settled:false,created_at:4,prompt:'gamma work'},
+    {subagent_id:'lane-child-d',session_id:'lane-session-d',profile:'worker',model:'fixture',reasoning:'max',execution_node:'local',state:'running',settled:false,created_at:5,prompt:'main work'}];
+  var savedSubagents=window.__fixtures.subagents, savedSessions=window.__fixtures.sessions;
+  window.__fixtures.subagents={subagents:laneTasks};
+  window.__fixtures.sessions={sessions:[
+    {id:'lane-session-a',title:'alpha',state:'unfinished',workspace_required:1,workspace_branch:'change/lane-alpha',worktree:'C:/work/wt-alpha',workspace_state:'allocated'},
+    {id:'lane-session-a2',title:'alpha two',state:'unfinished',workspace_required:1,workspace_branch:'change/lane-alpha',worktree:'C:/work/wt-alpha',workspace_state:'allocated'},
+    {id:'lane-session-b',title:'beta',state:'unfinished',workspace_required:1,workspace_branch:'change/lane-beta',worktree:'C:/work/wt-beta',workspace_state:'released'},
+    {id:'lane-session-c',title:'gamma',state:'unfinished',workspace_required:1,workspace_branch:'',worktree:'C:/work/wt-gamma',workspace_state:'allocated'},
+    {id:'lane-session-d',title:'main',state:'unfinished',workspace_required:1,workspace_branch:'',worktree:'',workspace_state:'unbound'}]};
+  // The page for the pane this block pins, so the app's own refresh paints a child through
+  // refreshAgentPane -> panePage -> paintChildTranscript - the seam production uses.
+  childPages['lane-child-a']={session_id:'lane-session-a',returned:2,view:'full',note:'Bounded inspection only.',
+    messages:[{seq:1,role:'user',content:'LANE-QUESTION',created_at:1,tool_calls:[]},
+      {seq:2,role:'assistant',content:'LANE-ANSWER',created_at:2,tool_calls:[]}],
+    task:{subagent_id:'lane-child-a',session_id:'lane-session-a',state:'running',settled:false,profile:'worker',model:'fixture',reasoning:'max'}};
+  window.__setOrchestratorPanel(lanesPanel);
+  for(var laneTry=0;laneTry<20&&lanesPanel.querySelectorAll('nav .lane').length!==4;laneTry+=1){
+    await window.__refreshOrchestrator();
+    for(var laneTick=0;laneTick<20;laneTick+=1) await tick();
+  }
+  var lanePane=lanesPanel.pin(laneTasks[0]);
+  // The panel polls on its own timer, and a refresh asked for while one is in flight is skipped: ask
+  // until the pane has drawn its child's page.
+  for(var paneTry=0;paneTry<20&&!lanePane.transcript.textContent.includes('LANE-ANSWER');paneTry+=1){
+    await window.__refreshOrchestrator();
+    for(var paneTick=0;paneTick<20;paneTick+=1) await tick();
+  }
+  var laneGroups=[...lanesPanel.querySelectorAll('nav .lane')];
+  var laneKeys=laneGroups.map(group=>group.dataset.lane).sort();
+  var laneCounts=laneGroups.map(group=>group.dataset.lane+':'+group.querySelectorAll('.agent-card').length).sort();
+  var laneStates=key=>{var group=laneGroups.find(item=>item.dataset.lane===key);
+    return group?[...group.querySelectorAll('.lane-check')].map(item=>item.dataset.outcome+'='+item.dataset.state).join(' '):'no such lane';};
+  var lanePath=key=>{var group=laneGroups.find(item=>item.dataset.lane===key);var path=group?group.querySelector('.lane-path'):null;
+    return path?path.textContent:'';};
+  check(laneKeys.join('|')===['C:/work/wt-gamma','change/lane-alpha','change/lane-beta','main'].sort().join('|') &&
+    laneCounts.join(' ')==='C:/work/wt-gamma:1 change/lane-alpha:2 change/lane-beta:1 main:1',
+    'cards must be grouped by the child\'s recorded checkout (branch, else worktree), saw ' +
+    JSON.stringify(laneKeys) + ' ' + JSON.stringify(laneCounts));
+  check(laneStates('change/lane-alpha')==='merged=unknown retired=no clean=unknown main-only=no' &&
+    laneStates('change/lane-beta')==='merged=unknown retired=yes clean=unknown main-only=no' &&
+    laneStates('C:/work/wt-gamma')==='merged=unknown retired=no clean=unknown main-only=no' &&
+    laneStates('main')==='merged=unknown retired=unknown clean=unknown main-only=yes',
+    'each lane\'s four outcomes must come from its own recorded checkout, saw alpha[' + laneStates('change/lane-alpha') +
+    '] beta[' + laneStates('change/lane-beta') + '] gamma[' + laneStates('C:/work/wt-gamma') + '] main[' + laneStates('main') + ']');
+  check(lanePath('change/lane-beta')==='C:/work/wt-beta' && lanePath('C:/work/wt-gamma')==='C:/work/wt-gamma' &&
+    lanePath('main')==='',
+    'a lane must show the recorded worktree it is keyed or grouped by, saw ' +
+    JSON.stringify([lanePath('change/lane-beta'),lanePath('C:/work/wt-gamma'),lanePath('main')]));
+  check(!!lanePane && lanePane.querySelectorAll('wa-message').length===2 &&
+    lanePane.transcript.textContent.includes('LANE-ANSWER') &&
+    !!lanePane.transcript.querySelector('wa-message.assistant > .body.steps'),
+    'the app\'s own refresh must paint a pinned child through the production path, saw ' +
+    lanePane.transcript.children.length + ' node(s) ' + lanePane.transcript.textContent.slice(0,120) +
+    ' | notice: ' + lanePane.notice.textContent.slice(0,120));
+  window.__setOrchestratorPanel(null);
+  lanesPanel.remove();
+  window.__fixtures.subagents=savedSubagents;
+  window.__fixtures.sessions=savedSessions;
 
   // THE SHARED CHAT SHELL. A child panel is a host of the same component the main conversation is, so
   // one chat improvement - model strip, sound, file appending, send button, text area, transcript -
@@ -1095,21 +1206,26 @@ $harness = @'
   // A bounded child page hands an oversized row back as an address. The window's own rendering path
   // draws the node's placeholder sentence for it; what it must not grow is a retrieval button the
   // main chat does not have (the exact bytes are reachable through the session tool, not from here).
-  window.__paintChildTranscript(panes[0].transcript,[{seq:9,role:'assistant',created_at:Date.now()/1000,
-    omitted:true,content:'[Oversized message: retrieve the original using evidence.]',
-    evidence:{message_id:'original'},tool_calls:[]}],{state:'answered'});
+  childPages['tile-0']={session_id:'session-0',returned:1,view:'full',note:'Bounded inspection only.',
+    messages:[{seq:9,role:'assistant',created_at:Date.now()/1000,
+      omitted:true,content:'[Oversized message: retrieve the original using evidence.]',
+      evidence:{message_id:'original'},tool_calls:[]}],
+    task:{subagent_id:'tile-0',session_id:'session-0',state:'answered',settled:true,profile:'worker',model:'fixture',reasoning:'max'}};
+  await window.__refreshAgentPane(panes[0]);
   check(![...panes[0].transcript.querySelectorAll('button')].some(b=>b.textContent.includes('Load original message')) &&
     panes[0].transcript.textContent.includes('retrieve the original using evidence'),
     'an oversized child row must say so in the node\'s words, without a pane-only retrieval button');
   var livePane=panes[1];
   var liveStart=Date.now()/1000-65;
-  var liveRows=[{seq:1,role:'user',content:'Run the check',created_at:liveStart,tool_calls:[]},
-    {seq:2,role:'assistant',content:'',created_at:liveStart,tool_calls:[{id:'live-call',function:{name:'bash',arguments:'{}'}}]}];
+  // A child streams to the node, not to this window: the node reports the call in flight on the task
+  // (`preview.tool`), and the production read carries it into the one renderer as `liveTool`, which is
+  // how a running child shows the step it is on.
+  childPages['tile-1']={session_id:'session-1',returned:2,view:'full',note:'Bounded inspection only.',
+    messages:[{seq:1,role:'user',content:'Run the check',created_at:liveStart,tool_calls:[]},
+      {seq:2,role:'assistant',content:'',created_at:liveStart,tool_calls:[{id:'live-call',function:{name:'bash',arguments:'{}'}}]}],
+    task:{subagent_id:'tile-1',session_id:'session-1',state:'running',settled:false,profile:'worker',model:'fixture',reasoning:'max'}};
   livePane.task={...agents[1],title:'Verify live worker chat',started_at:liveStart,preview:{status:'running bash',tool:{name:'bash',call_id:'live-call',arguments:{command:'slow check'},started_at:liveStart}}};
-  // A child streams to the node, not to this window: the call the node reports as in flight travels
-  // into the one renderer as `liveTool`, which is how a running child shows the step it is on.
-  window.__paintChildTranscript(livePane.transcript,liveRows,{state:'unfinished',active:true,
-    liveTool:livePane.task.preview.tool});
+  await window.__refreshAgentPane(livePane);
   check(livePane.querySelector('.agent-pane-head strong').textContent==='Verify live worker chat','worker heading names its task rather than profile');
   check(!!livePane.querySelector('wa-trace')?.open && livePane.querySelectorAll('.tool-line.pending').length===1,
     'running worker tool is open and deduplicated before settlement, saw trace=' + !!livePane.querySelector('wa-trace') +
@@ -1122,10 +1238,13 @@ $harness = @'
   liveTrace.open=false;
   livePane.task={...livePane.task,preview:{...livePane.task.preview,text:'progress arrived'}};
   check(livePane.querySelector('wa-trace')===liveTrace && liveTrace.open===false && livePane.preview.textContent.includes('progress arrived'),'a live task update must refresh the readout without rebuilding the reader\'s transcript, so their fold choice survives');
-  window.__paintChildTranscript(livePane.transcript,[liveRows[0],liveRows[1],
-    {seq:3,role:'tool',tool_call_id:'live-call',tool_name:'bash',ok:0,content:'check failed',created_at:liveStart+60,tool_calls:[]},
-    {seq:4,role:'assistant',content:'Failure explained',ok:0,created_at:liveStart+65,tool_calls:[]}],
-    {state:'failed',stateAt:liveStart+65,active:false});
+  childPages['tile-1']={session_id:'session-1',returned:4,view:'full',note:'Bounded inspection only.',
+    messages:[{seq:1,role:'user',content:'Run the check',created_at:liveStart,tool_calls:[]},
+      {seq:2,role:'assistant',content:'',created_at:liveStart,tool_calls:[{id:'live-call',function:{name:'bash',arguments:'{}'}}]},
+      {seq:3,role:'tool',tool_call_id:'live-call',tool_name:'bash',ok:0,content:'check failed',created_at:liveStart+60,tool_calls:[]},
+      {seq:4,role:'assistant',content:'Failure explained',ok:0,created_at:liveStart+65,tool_calls:[]}],
+    task:{subagent_id:'tile-1',session_id:'session-1',state:'failed',settled:true,settled_at:liveStart+65,profile:'worker',model:'fixture',reasoning:'max'}};
+  await window.__refreshAgentPane(livePane);
   livePane.task={...livePane.task,settled:true,state:'failed',settled_at:liveStart+65,preview:null};
   check(!livePane.querySelector('.tool-line.pending') && !!livePane.querySelector('.tool-line.err'),'worker failure settles the original live tool, saw pending=' +
     livePane.querySelectorAll('.tool-line.pending').length + ' lines=' +
@@ -1133,8 +1252,29 @@ $harness = @'
     ' text=' + livePane.transcript.textContent.slice(0,120));
   check(livePane.querySelector('wa-message[role="assistant"]').body.querySelector(':scope > .chat-content-run-status')?.textContent.includes('1:05'),'elapsed footer is inside the worker balloon');
   check(livePane.statusLine.textContent.includes('failed') && livePane.statusLine.querySelector('.spinner').hidden,'settled worker status stops its spinner');
+  // THE PAGE BUDGET IS THE NODE'S. `lua/core/session_view.lua` refuses a `byte_limit` above
+  // `MAX_BYTES-2048`, and `WASM_AGENT_TOOL_OUTPUT_BYTES` lowers that budget; a hard-coded request made
+  // every child pane read `Conversation unavailable: invalid_session_byte_limit` with no transcript at
+  // all. The stub refuses a sized request exactly as the node does and accepts the unsized one, so this
+  // asserts what the fix promises: a lowered budget costs page size, never the transcript, and the pane
+  // says which size it asked for and that the node refused it.
+  childPages['tile-3']={session_id:'session-3',returned:2,view:'full',note:'Bounded inspection only.',
+    messages:[{seq:1,role:'user',content:'BUDGET-QUESTION',created_at:1,tool_calls:[]},
+      {seq:2,role:'assistant',content:'BUDGET-ANSWER',created_at:2,tool_calls:[]}],
+    task:{subagent_id:'tile-3',session_id:'session-3',state:'answered',settled:true,profile:'worker',model:'fixture',reasoning:'max'}};
+  window.__fixtureRefuseBytes=true;
+  await window.__refreshAgentPane(panes[3]);
+  window.__fixtureRefuseBytes=false;
+  check(panes[3].querySelectorAll('wa-message').length===2 &&
+    panes[3].transcript.textContent.includes('BUDGET-ANSWER') &&
+    /invalid_session_byte_limit/.test(panes[3].notice.textContent) && /KiB/.test(panes[3].notice.textContent),
+    'a lowered tool-output budget must cost page size, not the transcript, and the pane must say so, saw: '
+    + panes[3].notice.textContent);
   showroom.unpin('tile-0');
-  check(showroom.panes.size===3 && showroom.sidebar.querySelectorAll('.agent-card').length===4,'collapse must keep the running agent in the sidebar');
+  check(showroom.panes.size===3 && showroom.sidebar.querySelectorAll('.agent-card').length===4 &&
+    [...showroom.sidebar.querySelectorAll('.agent-card-mission')].some(mission=>mission.textContent==='task 0'),
+    'collapse must keep the running agent\'s card in the sidebar, saw ' +
+    [...showroom.sidebar.querySelectorAll('.agent-card-mission')].map(mission=>mission.textContent).join('|'));
   showroom.configure({policy:{enabled:true,nodes:[{node:'cloud',max_tasks:2},{node:'local',max_tasks:0}]},nodes:[]});
   check(showroom.policy.nodes[0].node==='cloud' && showroom.policy.nodes[1].max_tasks===0,'node order and zero-capacity devices must round trip');
   // WHAT IS RUNNING, ON WHICH MACHINE. The dispatch table is a placement record, so a child started
@@ -2814,7 +2954,7 @@ Add-Content -Path $app -Value "`nwindow.__cancelRunForTest = cancelRun;"
 
 Add-Content -Path $app -Value "`nwindow.__resetFollow = () => { followedSeq = 0; lastFollowAt = 0; }; window.__followRun = followRun; window.__repaintMessages = repaintMessages; window.__ensureMeta = ensureMeta; window.__expireRecoveryBackoff = () => { transcriptRetryAt=0; metadataRetryAt=0; }; window.__followedSeq = () => followedSeq;"
 
-Add-Content -Path $app -Value "`nwindow.__liveChildRows = liveChildRows; window.__refreshOrchestrator = refreshOrchestrator; window.__setOrchestratorPanel = (panel) => { orchestratorPanel = panel; }; window.__paintChildTranscript = paintChildTranscript;"
+Add-Content -Path $app -Value "`nwindow.__liveChildRows = liveChildRows; window.__refreshOrchestrator = refreshOrchestrator; window.__setOrchestratorPanel = (panel) => { orchestratorPanel = panel; }; window.__paintChildTranscript = paintChildTranscript; window.__refreshAgentPane = refreshAgentPane;"
 
 $server = $null
 $edge = @(
