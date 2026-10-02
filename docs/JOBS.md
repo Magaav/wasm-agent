@@ -243,6 +243,67 @@ See [ARTIFACTS.md](ARTIFACTS.md).
 Legacy `wake` remains a distinct action for the operator's own conversation. It is not a substitute for a
 profile and never carries one's authority.
 
+## The deterministic half of a wake: `prepare`
+
+A `wake` may carry one extra field: a `prepare` script the sentinel runs **before** it submits the message.
+What the script prints is parsed as JSON, and the `instruction` string it returns is injected into the
+wake's own instructions - above the untrusted event block, never inside it. Nothing in the model turn then
+has to re-derive what a diff and a set membership already decided.
+
+```json
+{
+  "id": "onSubagentReturn",
+  "name": "onSubagentReturn",
+  "trigger": {"kind": "event", "topic": "subagent.return"},
+  "action": {
+    "kind": "wake",
+    "session": "COORDINATOR_SESSION_ID",
+    "prepare": {"script": "<install>/scripts/subagent-return-prepare.sh", "timeout_seconds": 120},
+    "prompt": "...the fixed operating instruction..."
+  }
+}
+```
+
+Four rules keep it a step rather than a second action language:
+
+- **It is a `run` step in everything the boundary cares about.** The script must be absolute and inside
+  `WA_SENTINEL_SCRIPTS`, it is started through the same shell a `run` action uses, its timeout is bounded
+  the same way, it receives the delivery's event as `WA_JOB_EVENT_FILE`, it is cancelled if the job is
+  disabled or revised while it runs, and what it prints is its result. A step that prints no `instruction`,
+  or no JSON at all, **fails the delivery**: a wake with an empty instruction in it is worse than no wake.
+- **It exists only on `wake`.** Any other action carrying `prepare` is refused by name
+  (`prepare_is_only_for_a_wake_action`) rather than accepted and ignored - the same reason a control no
+  step reads is refused.
+- **It costs no model call.** The decidable half of the message is decided by a script; the wake that
+  follows is the one budgeted turn, and it starts from the block instead of rebuilding it.
+- **One place builds the message.** `wake_blocks` in `rust/wa-sentinel/src/jobs.rs` composes the
+  instruction half of every wake, and it is where the child-return **notification** moves when it leaves the
+  completion outbox (`lua/core/completions.lua`'s `wa_completion_run`, which today assembles its own
+  `[Child completion notice]` wake inside the node). It becomes one more block built from the same delivered
+  event, not a second message to the same conversation: two wakes for one settled child are two turns, and
+  the second one then spends its first sentence denying it is the first.
+
+### `onSubagentReturn`: the shipped hook, and what it decides
+
+`jobs/on-subagent-return.json` is the hook: every settled child - completed, refused, cancelled, failed,
+unknown - wakes the coordinator, with a block that names the child and its state, its recorded branch, tip
+and worktree, the diff against `origin/main` measured in that worktree, a **deploy verdict**, and the
+operating instruction for that verdict. `jobs/subagent-return-observe.json` is its deterministic source: a
+30-second `run` pass over the node's own record of its children (`POST /subagents {action:"list"}` plus one
+`status` per settled child) that emits one `subagent.return` event per child, keyed by the child's id - so
+the store's own `UNIQUE(job_id,revision,event_id)` dedupe is what makes "one wake per settle" true, however
+often the pass runs. Both install disabled, like every other definition.
+
+The verdict is one predicate in `scripts/subagent-return-hook.mjs`
+(`DEPLOY_SHIPPED_DIRECTORIES` / `DEPLOY_SHIPPED_SCRIPTS` / `DEPLOY_SHIPPED_SCRIPT_PATTERNS`, read through
+`shipsToDeploy`): a child that touched something a deploy ships (`ui/**`, `rust/**`, `lua/**`, `skills/**`,
+or the `scripts/**` files a deploy copies) is `deploy required at the wave's end` - one deploy at the end of
+the wave, never one per child, never from the child's branch; documentation and tests only is `no install
+impact`. A child whose artifacts could not be read is `cannot be computed`, never `no install impact`: "we
+could not look" and "we looked and found nothing" are different answers, and only one of them is evidence.
+`scripts/test-subagent-return-hook.cjs` drives every state through a real sentinel, falsifies a mutation of
+the predicate, and shows the firing costs no provider call.
+
 ## Queue and recovery contract
 
 `rust/wa-jobs` enforces durable deduplication on (job, revision, event id), atomic

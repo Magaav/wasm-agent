@@ -223,6 +223,9 @@ is about 29 ms here; it cannot explain the field audit's 88.2-second bash p95 or
   through the real host, the Lua-projected result, and `operation start`/`await`; the
   marker it reads back only resolves from the directory the shell actually started in.
 * `scripts/test-jobs.cjs`: real sentinel and Chrome event delivery; no paid inference.
+* `scripts/test-subagent-return-hook.cjs`: the `onSubagentReturn` job through a real sentinel - every
+  child state, both deploy verdicts and an unreadable checkout, the predicate falsified by mutation, and no
+  provider call to fire it; real git checkouts, no model.
 * `scripts/test-operation-control.cjs`: a real tool holds the run worker while
   another interpreter lists/reads/cancels it; the run then continues (local mock
   provider, zero paid inference).
