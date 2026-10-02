@@ -550,7 +550,11 @@ async function observe(options) {
       if (revision === null) {
         report.errors.push(`${childId}: intent_revision_unavailable; emitting again`);
       } else {
-        const receipt = effectExists(options, revision, childId, event);
+        // The receipt compares the payload that was actually emitted, not the one this pass just
+        // recomputed: a measurement that moved between the two (a child's worktree gains a file) would make
+        // `payload_match` false, and the intent would be re-emitted on every tick for ever - deduped, so no
+        // extra wake, but never settled.
+        const receipt = effectExists(options, revision, childId, pending.payload || event);
         if (receipt.acknowledged) {
           state.reported[childId] = {state: state_name, at: new Date().toISOString(), via: 'receipt', revision};
           delete state.pending[childId];

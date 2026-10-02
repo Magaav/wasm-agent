@@ -225,11 +225,16 @@ is about 29 ms here; it cannot explain the field audit's 88.2-second bash p95 or
 * `scripts/test-jobs.cjs`: real sentinel and Chrome event delivery; no paid inference.
 * `scripts/test-subagent-return-hook.cjs`: the `onSubagentReturn` job through a real sentinel - every
   child state, both deploy verdicts, the three unmeasurable cases, the uncommitted half, the dedupe key
-  pinned across a re-put, the cursor converging through the store's receipt, `prepare` refused at `job put`,
-  and no provider call to fire it; real git checkouts, no model.
+  pinned across a re-put, the cursor converging through the store's receipt (including when the
+  measurement moved after the intent), the ledger's bound, `prepare` refused at `job put`, the supersede
+  marker written with the enable rather than on a tick, four manifest mutations and six installer
+  mutations of the shipped-set guard, and no provider call to fire it; real git checkouts, no model.
 * `scripts/check-deploy-shipped.mjs`: the shipped set the hook's verdict is read from, re-derived from
-  `scripts/deploy.sh` and `scripts/upgrade.sh` (and from what `scripts/ship-wave.mjs` writes); it fails when
-  an installer copies a path `scripts/deploy-shipped.json` does not cover.
+  `scripts/deploy.sh` and `scripts/upgrade.sh` (every copy-like line, in every spelling, plus what
+  `scripts/ship-wave.mjs` writes); it fails when an installer copies a path `scripts/deploy-shipped.json`
+  does not cover, when a copy names a path neither in the tree nor built by that installer, and when the
+  derivation stops seeing a copy form it used to see. Registered as the `deployShipped` proof with a floor
+  of its own 76 checks.
 * `scripts/test-operation-control.cjs`: a real tool holds the run worker while
   another interpreter lists/reads/cancels it; the run then continues (local mock
   provider, zero paid inference).

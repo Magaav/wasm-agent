@@ -227,8 +227,11 @@ async function main() {
 
   const env = { ...process.env, WASM_AGENT_HOME: root, WASM_AGENT_PORT: String(port),
     // Both budget names explicitly: the claim lane reads WA_SENTINEL_JOB_WAKE_BUDGET first, and an
-    // ambient value from the live node (6) would otherwise decide this fixture's lane capacity.
-    WA_SENTINEL_WAKE_BUDGET: "24", WA_SENTINEL_JOB_WAKE_BUDGET: "24", WA_SENTINEL_JOB_RESERVED_CHILD_CAPACITY: "1",
+    // ambient value from the live node (6) would otherwise decide this fixture's lane capacity. The figure is
+    // generous on purpose: a *suppressed* wake delivery (one the ledger answers `already_woken`) is still
+    // claimed and executed, so it still spends this allowance - the fixture drives more deliveries than it
+    // sends messages.
+    WA_SENTINEL_WAKE_BUDGET: "200", WA_SENTINEL_JOB_WAKE_BUDGET: "200", WA_SENTINEL_JOB_RESERVED_CHILD_CAPACITY: "1",
     WA_SENTINEL_SCRIPTS: `${path.join(repo, "scripts")};${root}`, WA_SENTINEL_BIN: sentinel,
     WA_SENTINEL_AUTH_SESSION: "fixture-auth-session",
     WA_SENTINEL_RETURN_STATE: path.join(root, "subagent-return-reported.json"),
@@ -302,6 +305,14 @@ async function main() {
   fs.writeFileSync(fixtureFile, JSON.stringify(fixtureSource));
   cli(env, "put", fixtureFile);
   cli(env, "enable", "onSubagentReturn");
+  // The supersede marker follows the CLI's own enable/disable immediately - before the watcher exists, so no
+  // tick can be what wrote it. A marker that only appeared on a tick left a window in which a child settling
+  // between `job enable` and that tick was announced twice (the supersede-ordering finding).
+  check(fs.existsSync(markerFile), "job enable writes the supersede marker with the enable, before any tick");
+  cli(env, "disable", "onSubagentReturn");
+  check(!fs.existsSync(markerFile), "job disable removes it with the disable, before any tick");
+  cli(env, "enable", "onSubagentReturn");
+  check(fs.existsSync(markerFile), "and re-enabling writes it again");
   cli(env, "enable", "subagent-return-observe-fixture");
 
   child(sentinel, ["watch"], env);
@@ -359,20 +370,70 @@ async function main() {
   process.stdout.write(`--- the injected block for ${CHILDREN[0].id} ---\n${blockFor(CHILDREN[0].id)}\n`
     + `--- and for the child whose tip equals main with an uncommitted shipped change ---\n${blockFor("child-dirty-shipped")}\n`);
 
-  // The shipped set: the manifest the predicate reads, checked against the installers themselves.
-  const shippedCheck = spawnSync(process.execPath, [path.join(repo, "scripts", "check-deploy-shipped.mjs")],
-    { encoding: "utf8", windowsHide: true, timeout: 120000 });
+  // The shipped set: the manifest the predicate reads, checked against the installers themselves - and
+  // then the guard falsified, because a guard that derives less than it claims is how the class this hook
+  // exists for went missing the first time. Every mutation below stayed GREEN before this pass: a manifest
+  // entry dropped for `jobs/**` / `scripts/whatsapp-*` / `scripts/subagent-return-*` (the derivation missed
+  // the quote-then-slash spelling deploy.sh uses for every glob), a plain `cp`/`install`, and a copied path
+  // that is not in the tree (skipped with a note).
+  const checker = path.join(repo, "scripts", "check-deploy-shipped.mjs");
+  const runChecker = (args) => spawnSync(process.execPath, [checker, ...args], { encoding: "utf8", windowsHide: true, timeout: 120000 });
+  const shippedCheck = runChecker([]);
   check(shippedCheck.status === 0, `check-deploy-shipped passes: ${(shippedCheck.stdout || shippedCheck.stderr).trim()}`);
-  const mutantManifest = JSON.parse(fs.readFileSync(path.join(repo, "scripts", "deploy-shipped.json"), "utf8"));
-  mutantManifest.directories = mutantManifest.directories.filter((entry) => entry !== "jobs/");
-  mutantManifest.files = mutantManifest.files.filter((entry) => entry !== "scripts/upgrade.sh");
-  const mutantFile = path.join(root, "deploy-shipped-mutant.json");
-  fs.writeFileSync(mutantFile, JSON.stringify(mutantManifest));
-  const mutantCheck = spawnSync(process.execPath, [path.join(repo, "scripts", "check-deploy-shipped.mjs"), mutantFile],
-    { encoding: "utf8", windowsHide: true, timeout: 120000 });
-  check(mutantCheck.status !== 0, "dropping jobs/** and upgrade.sh from the shipped set makes the check go red");
-  check(/FAIL the predicate covers (jobs\/|scripts\/upgrade\.sh)/.test(mutantCheck.stderr || ""),
-    `the failure names the copied path that is missing: ${(mutantCheck.stderr || "").trim().split("\n")[0]}`);
+  check(/deploy shipped ok \(\d+ checks/.test(shippedCheck.stdout || ""),
+    "and prints one terminal verdict with its check count, so the gate can pin a floor");
+  const baseManifest = JSON.parse(fs.readFileSync(path.join(repo, "scripts", "deploy-shipped.json"), "utf8"));
+  const mutateManifest = (name, mutate) => {
+    const manifest = JSON.parse(JSON.stringify(baseManifest));
+    mutate(manifest);
+    const file = path.join(root, name);
+    fs.writeFileSync(file, JSON.stringify(manifest));
+    return file;
+  };
+  const mutations = [
+    ["jobs/** dropped", mutateManifest("m-jobs.json", (m) => { m.directories = m.directories.filter((entry) => entry !== "jobs/"); }), /FAIL the predicate covers jobs\//],
+    ["scripts/whatsapp-* dropped", mutateManifest("m-whatsapp.json", (m) => { m.globs = m.globs.filter((entry) => entry !== "scripts/whatsapp-*"); }), /FAIL the predicate covers scripts\/whatsapp-/],
+    ["scripts/subagent-return-* dropped", mutateManifest("m-sr.json", (m) => { m.globs = m.globs.filter((entry) => entry !== "scripts/subagent-return-*"); }), /FAIL the predicate covers scripts\/subagent-return-/],
+    ["scripts/upgrade.sh dropped", mutateManifest("m-upgrade.json", (m) => { m.files = m.files.filter((entry) => entry !== "scripts/upgrade.sh"); }), /FAIL the predicate covers scripts\/upgrade\.sh/],
+  ];
+  for (const [label, file, expected] of mutations) {
+    const result = runChecker([file]);
+    check(result.status !== 0, `a manifest with ${label} makes the guard go red`);
+    check(expected.test(result.stderr || ""),
+      `and the failure names the path: ${label}: ${(result.stderr || "").trim().split("\n").filter((line) => line.includes("FAIL"))[0]}`);
+  }
+  // Mutations of the installers themselves: the guard must read every copy-like line, in every spelling,
+  // and refuse to pass a rule it cannot instantiate.
+  const installerMutations = [
+    ["a plain cp of an uncovered path", '  cp "$ROOT/scripts/gate-lane.mjs" "$INSTALL_DIR/scripts/" || fail "m"', /FAIL the predicate covers scripts\/gate-lane\.mjs/],
+    ["an install -m copy", '  install -m 644 "$ROOT/scripts/check-naming.sh" "$INSTALL_DIR/scripts/" || fail "m"', /FAIL the predicate covers scripts\/check-naming\.sh/],
+    ["a copy of a path absent from the tree", '  cp -f "$ROOT/scripts/ghost-absent.mjs" "$INSTALL_DIR/scripts/" || fail "m"', /FAIL copies scripts\/ghost-absent\.mjs .*not in the tree/],
+    ["a loop over an absent glob", '  for source in "$ROOT/scripts/ghost-glob-*"; do cp -f "$source" "$INSTALL_DIR/scripts/"; done', /FAIL the predicate covers scripts\/ghost-glob-probe/],
+    ["a copy from a target/ nobody builds", '  cp -f "$ROOT/rust/plugins/nobody-builds-this/target/release/ghost.wasm" "$INSTALL_DIR/plugins/" || fail "m"', /FAIL copies rust\/plugins\/nobody-builds-this\/target\/release\/ghost\.wasm/],
+  ];
+  for (const [index, [label, line, expected]] of installerMutations.entries()) {
+    const dir = path.join(root, `installers-${index}`);
+    fs.mkdirSync(dir, { recursive: true });
+    for (const name of ["deploy.sh", "upgrade.sh"]) fs.copyFileSync(path.join(repo, "scripts", name), path.join(dir, name));
+    fs.appendFileSync(path.join(dir, "deploy.sh"), `\n${line}\n`);
+    const result = runChecker(["--installers", dir]);
+    check(result.status !== 0, `a deploy.sh with ${label} makes the guard go red`);
+    check(expected.test(result.stderr || ""),
+      `and the failure names it: ${label}: ${(result.stderr || "").trim().split("\n").filter((entry) => entry.includes("FAIL"))[0]}`);
+  }
+  // The build-output rule is derived, not "anything under target/": removing the build that produces a
+  // copied output must turn that copy into an absent path.
+  const noBuildDir = path.join(root, "installers-no-build");
+  fs.mkdirSync(noBuildDir, { recursive: true });
+  for (const name of ["deploy.sh", "upgrade.sh"]) fs.copyFileSync(path.join(repo, "scripts", name), path.join(noBuildDir, name));
+  const pluginBuild = 'cargo build --manifest-path "$ROOT/rust/plugins/whatsapp-transcript/Cargo.toml"';
+  const deployText = fs.readFileSync(path.join(noBuildDir, "deploy.sh"), "utf8");
+  check(deployText.includes(pluginBuild), "the plugin build line is where this mutation expects it");
+  fs.writeFileSync(path.join(noBuildDir, "deploy.sh"), deployText.replace(pluginBuild, `true # was: ${pluginBuild}`));
+  const noBuild = runChecker(["--installers", noBuildDir]);
+  check(noBuild.status !== 0, "removing the build that produces a copied output makes the guard go red");
+  check(/FAIL copies rust\/plugins\/whatsapp-transcript\/target\/.*not in the tree and this installer does not build it/.test(noBuild.stderr || ""),
+    `and it names the output nobody builds: ${(noBuild.stderr || "").trim().split("\n").filter((entry) => entry.includes("FAIL"))[0]}`);
 
   // Firing the hook is a script and a diff, never an inference call.
   const paths = new Set(requests.map((entry) => entry.path));
@@ -445,9 +506,76 @@ async function main() {
     .every((entry) => !(entry.detail || "").includes("already_woken") || entry.state === "completed"),
     "the suppressed deliveries completed rather than failing");
 
+  // A pending intent must reconcile against the payload it actually emitted (the cursor finding). The
+  // measurement moving between the intent and the reconciliation used to make `payload_match` false, so the
+  // pass re-emitted that child on every tick for ever: deduped, so no extra wake, but never settled.
+  const reworkChild = CHILDREN[0].id;
+  const wakesBeforeIntents = wakes.length;
+  cli(env, "disable", "onSubagentReturn");
+  fs.rmSync(stateFile, { force: true });
+  const intentPass = JSON.parse((await runObserver()).stdout);
+  check(intentPass.emitted === 0 && intentPass.duplicates === CHILDREN.length,
+    `with the hook off every child stays a durable intent (${JSON.stringify({ emitted: intentPass.emitted, duplicates: intentPass.duplicates })})`);
+  const savedPayload = (JSON.parse(fs.readFileSync(stateFile, "utf8")).pending[reworkChild] || {}).payload;
+  check(!!savedPayload && savedPayload.child_id === reworkChild, "the intent carries the payload it emitted");
+  cli(env, "enable", "onSubagentReturn");
+  const deliveryPass = JSON.parse((await runObserver()).stdout);
+  check(deliveryPass.emitted === CHILDREN.length, `re-enabling lets the intents through (${deliveryPass.emitted} deliveries)`);
+  await sleep(1500);
+  check(wakes.length === wakesBeforeIntents, "and the wake ledger still holds each child to one message");
+  // Now the window the finding is about: a durable intent whose delivery exists, with the measurement moved
+  // since. The store's receipt compares payloads, so only the emitted payload can match it.
+  const hookRevision = cli(env, "list").find((job) => job.id === "onSubagentReturn").revision;
+  const crafted = JSON.parse(fs.readFileSync(stateFile, "utf8"));
+  delete crafted.reported[reworkChild];
+  crafted.pending[reworkChild] = { event_id: reworkChild, at: new Date().toISOString(), revision: hookRevision, payload: savedPayload };
+  fs.writeFileSync(stateFile, JSON.stringify(crafted));
+  fs.mkdirSync(path.join(root, reworkChild, "ui"), { recursive: true });
+  fs.writeFileSync(path.join(root, reworkChild, "ui", "second.js"), "another change\n");
+  git("-C", path.join(root, reworkChild), "add", "-A");
+  git("-C", path.join(root, reworkChild), "commit", "-qm", "more work");
+  const reconcilePass = JSON.parse((await runObserver()).stdout);
+  check(reconcilePass.emitted === 0 && reconcilePass.duplicates === 0 && reconcilePass.reconciled === 1 && reconcilePass.errors.length === 0,
+    `a moved measurement still reconciles the intent through the payload it emitted (${JSON.stringify({ emitted: reconcilePass.emitted, duplicates: reconcilePass.duplicates, reconciled: reconcilePass.reconciled, errors: reconcilePass.errors })})`);
+  const settled = JSON.parse((await runObserver()).stdout);
+  check(settled.known === CHILDREN.length && settled.duplicates === 0 && settled.reconciled === 0,
+    `and the cursor settles instead of re-emitting for ever (${JSON.stringify({ known: settled.known, duplicates: settled.duplicates, reconciled: settled.reconciled })})`);
+  check(wakes.length === wakesBeforeIntents, "neither pass produced a second message for any child");
+
+  // The wake ledger is bounded (the wake-ledger finding): it grew one entry per child ever woken. Seed it
+  // past the bound, re-wake one child, and the file must come back bounded - newest keys kept, oldest
+  // dropped. What the bound preserves is stated where it is implemented: a child that settles again is still
+  // deduped while its key is inside the window.
+  const ledgerSeeded = JSON.parse(fs.readFileSync(ledgerFile, "utf8"));
+  const seedAt = Math.floor(Date.now() / 1000);
+  for (let index = 0; index < 520; index += 1) {
+    ledgerSeeded.keys[`synthetic-old-${index}`] = { at: seedAt - 100000 + index, delivery: 0 };
+  }
+  delete ledgerSeeded.keys[reworkChild];
+  fs.writeFileSync(ledgerFile, JSON.stringify(ledgerSeeded));
+  const stateForRewake = JSON.parse(fs.readFileSync(stateFile, "utf8"));
+  delete stateForRewake.reported[reworkChild];
+  delete stateForRewake.pending[reworkChild];
+  fs.writeFileSync(stateFile, JSON.stringify(stateForRewake));
+  cli(env, "disable", "onSubagentReturn");
+  cli(env, "enable", "onSubagentReturn"); // a new revision: the store's dedupe is scoped to it
+  const wakesBeforeRewake = wakes.length;
+  const rewakePass = JSON.parse((await runObserver()).stdout);
+  check(rewakePass.emitted === 1, `a child whose key left the ledger is woken again (${rewakePass.emitted})`);
+  await until(() => wakes.length === wakesBeforeRewake + 1, "the re-woken child produced one message");
+  const pruned = Object.keys(JSON.parse(fs.readFileSync(ledgerFile, "utf8")).keys);
+  check(pruned.length <= 512, `the ledger is bounded after a wake (${pruned.length} keys)`);
+  check(pruned.includes(reworkChild), "the key just written survives the bound");
+  check(!pruned.includes("synthetic-old-0"), "the oldest key is dropped");
+  check(pruned.includes("synthetic-old-519"), "the newest seeded key survives");
+  check(pruned.filter((key) => key.startsWith("synthetic-old-")).length === 512 - CHILDREN.length,
+    "and the bound keeps the newest by the time they were woken");
+
   // Disabling the hook removes the marker: the outbox notice is not suppressed by a job that is off.
   cli(env, "disable", "onSubagentReturn");
-  await until(() => !fs.existsSync(markerFile), "the marker is removed when the hook is disabled");
+  check(!fs.existsSync(markerFile), "job disable removes the marker immediately, not on the next tick");
+  await sleep(500);
+  check(!fs.existsSync(markerFile), "and it stays gone while the job is off");
 
   // The path predicate, falsified two ways: a path added or removed from the same diff, and the
   // predicate constant itself mutated.
@@ -490,8 +618,8 @@ async function main() {
   const composed = JSON.parse(offline.stdout);
   check(composed.verdict === "deploy required at the wave's end" && composed.instruction.includes("DEPLOY VERDICT"),
     "with nothing listening it still composes the verdict and instruction - no provider call to fire the hook");
-  check(requests.filter((entry) => entry.path === "/chat").length === CHILDREN.length,
-    "the unreachable-node pass added no wake and no model call");
+  check(requests.filter((entry) => entry.path === "/chat").length === wakes.length,
+    `the unreachable-node pass added no wake and no model call (${wakes.length} messages, one per submitted wake)`);
   check(spawnSync(process.execPath, [path.join(repo, "scripts", "subagent-return-hook.mjs"), "--compose"],
     { encoding: "utf8", windowsHide: true }).status === 4, "a compose with no event is refused, not guessed");
 

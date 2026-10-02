@@ -1857,10 +1857,13 @@ WA_SCRIPT="scripts/test-completion-packet.lua" "$BIN" --db "$DB.completion-packe
 run_proof_fixture jobs 37 node scripts/test-job-subagents.cjs
 # The `onSubagentReturn` hook: every settled child, in every state, woken with a deterministically
 # measured deploy verdict and its operating instruction. A real sentinel, real git checkouts, no model.
-run_proof_fixture subagentReturn 168 node scripts/test-subagent-return-hook.cjs
+run_proof_fixture subagentReturn 206 node scripts/test-subagent-return-hook.cjs
 # The shipped set the hook's verdict is read from, re-derived from the installers themselves: this fails
-# when deploy.sh or upgrade.sh installs something scripts/deploy-shipped.json does not cover.
-gate_run node scripts/check-deploy-shipped.mjs
+# when deploy.sh or upgrade.sh installs something scripts/deploy-shipped.json does not cover, when a copy
+# names a path that is neither in the tree nor built by that installer, or when the derivation itself
+# stops seeing a copy form it used to see. A proof fixture rather than a bare gate_run, so its 76 checks
+# have a floor: a guard nobody counts is a guard that can lose checks silently.
+run_proof_fixture deployShipped 76 node scripts/check-deploy-shipped.mjs
 run_proof_fixture orchestration 33 node scripts/test-orchestration-e2e.cjs "$BIN"
 run_proof_fixture whatsapp 40 node scripts/test-whatsapp-subagent-e2e.cjs
 # The reader's acted cursor: a message may be consumed only when a durable decision exists for it, the
