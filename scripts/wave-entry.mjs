@@ -106,12 +106,20 @@ export function monitor(repo) {
       db.prepare("UPDATE waves SET state='blocked',reason='external_monitor_budget_unverifiable' WHERE id=?").run(latest.id);
       return {ok:false,state:'blocked',disable_monitor:true,reason:'external_monitor_budget_unverifiable'};
     }
+    // A tick that FOUND the owner is not an observation of its absence. `observations` counts the ticks that
+    // looked for the owner and found none - the only ticks the 120 budget is sized for - so a live owner must
+    // not spend it. Incrementing before this check made every scheduled tick spend the budget: a wave whose
+    // owner was alive and driving it reached `external_monitor_observation_budget_exhausted_owner_preserved`
+    // on tick 121, which at the declared 30 s cadence (`watcherDefinition`) is about one hour of being
+    // watched, and a blocked wave fences every future admission. Measured: 200 ticks with an owner lease
+    // absent-but-unresolved leave the budget at 0, and an owner the lease proves dead still spends one
+    // (`scripts/test-wave-monitor-budget.mjs`).
+    if(status.owner_liveness!==false)return {ok:false,state:'owner_live_or_unverifiable',disable_monitor:false};
     db.prepare('UPDATE monitor SET observations=observations+1 WHERE id=?').run(latest.id);
     if(db.prepare('SELECT observations FROM monitor WHERE id=?').get(latest.id).observations>120) {
       db.prepare("UPDATE waves SET state='blocked',reason='external_monitor_observation_budget_exhausted_owner_preserved' WHERE id=?").run(latest.id);
       return {ok:false,state:'blocked',disable_monitor:true};
     }
-    if(status.owner_liveness!==false)return {ok:false,state:'owner_live_or_unverifiable',disable_monitor:false};
     const attempts=db.prepare('SELECT attempts FROM monitor WHERE id=?').get(latest.id).attempts;
     if(!Number.isSafeInteger(attempts) || attempts<0 || attempts>=3) {
       db.prepare("UPDATE waves SET state='blocked',reason='external_monitor_restart_budget_exhausted' WHERE id=?").run(latest.id);

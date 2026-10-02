@@ -1,0 +1,30 @@
+{
+  "schema": 1,
+  "contract": "What a lane must reach to be ENDED in this repository: every tip the lane delivered is contained in origin/main, origin carries only main, origin/main IS the verified integration baseline, and no delivery the lane produced is still unresolved. The deterministic answer is one command - skills/git-orchestrator/scripts/audit.mjs verify <repo> origin/main - which exits 0 only when all four hold; it runs at a landing's exit and at the next wave's entry (scripts/lib/lane-boundary.mjs, wired in scripts/wave-lifecycle.mjs). A lane that has not reached this is not ended: it is producing, blocked, or waiting for the merge lane, and it says which.",
+  "end_state": {
+    "statement": "origin carries only refs/heads/main at the verified baseline; every delivered tip is an ancestor of origin/main; the next wave re-verifies this baseline rather than trusting the previous receipt",
+    "repository_refs": "main only, local and remote",
+    "detector": ["node", "skills/git-orchestrator/scripts/audit.mjs", "verify", ".", "origin/main"],
+    "refused_when": "discovery_incomplete, integration_incomplete, origin_not_main_only, origin_main_is_not_the_target"
+  },
+  "gate": {
+    "on": "release",
+    "why": "the full gate is a release's, not a landing's (2026-10-02): an evolution landing is merged, LF-checked and reported, and scripts/wave-release.mjs is what gates an exact tree and names it"
+  },
+  "deploy": {
+    "when": "after the release gate has named the exact tree, queued through the sentinel from outside the run that produced the change - never from inside that run's own turn",
+    "evidence": "installed.txt and deploy-result.json, read back rather than the request's receipt"
+  },
+  "remote": {
+    "main_only": true,
+    "push_guard": ".githooks/pre-push refuses a push whose destination ref is not refs/heads/main while this file declares remote.main_only"
+  },
+  "checks": {
+    "enter": [
+      ["node", "skills/git-orchestrator/scripts/audit.mjs", "verify", ".", "origin/main"]
+    ],
+    "exit": [
+      ["node", "skills/git-orchestrator/scripts/audit.mjs", "verify", ".", "origin/main"]
+    ]
+  }
+}

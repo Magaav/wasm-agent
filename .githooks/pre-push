@@ -1,0 +1,119 @@
+#!/usr/bin/env bash
+# Refuse to publish a branch other than `main` on a repository that has declared origin main-only.
+#
+# WHY THIS EXISTS. The push side had nothing. `.githooks/pre-commit` and `.githooks/commit-msg` refuse a
+# direct *commit* on `main` and they say what they are: convenience, with measured bypasses
+# (`scripts/test-main-guard.sh`). Nothing refused the other half of the same mistake - publishing a ref
+# that makes origin stop being main-only - and this repository's end state is exactly that origin carries
+# `main` and nothing else (`lane-policy.json`, `remote.main_only`, and the boundary detector at
+# `scripts/lib/lane-boundary.mjs`). A branch on the remote is not a scratch artifact: it is an input the
+# integration audit then has to classify, work an owner may still be driving, and a ref the retirement
+# step has to prove before it can be deleted.
+#
+# WHO THIS AFFECTS, AND WHO IT DOES NOT. The decision is the repository's, read from its own
+# `lane-policy.json`: with no file, or with `remote.main_only` false, this hook allows the push and says
+# so. So fixtures, other projects and any repository that has not declared the end state are untouched -
+# an absent file means no extra requirement. In a repository that HAS declared it, the integration remote
+# (named `origin`, or `remote.name` in the policy) accepts `refs/heads/main` and a ref deletion (which
+# moves toward the end state), and refuses anything else by name.
+#
+# WHAT THIS CLAIMS, EXACTLY - the same class of claim as the commit guard, and it must not be read for
+# more. A client-side hook sees only the `git push` porcelain, so `git push --no-verify`, `git -c
+# core.hooksPath=<empty> push`, a push from a checkout whose `core.hooksPath` is not this directory, and
+# any other transport (a `git push` inside a wrapper that unsets hooks, a direct `receive-pack` caller)
+# skip this file entirely. `scripts/test-push-guard.sh` measures each of those rather than asserting they
+# do not exist. The enforcement point that cannot be skipped is remote-side: branch protection on
+# `origin/main`, or a `pre-receive` hook that refuses an update of any ref other than `main`. Until one
+# of those exists, this hook prevents the ordinary mistake and the documented way through - it does not
+# make an origin ref impossible.
+set -uo pipefail
+
+policy_file() {
+  local top
+  top="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+  [ -n "$top" ] || return 1
+  printf '%s/lane-policy.json' "$top"
+}
+
+remote_name() {
+  local policy="$1" declared
+  declared="$(remote_block "$policy" | sed -n 's/.*"name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
+  printf '%s' "${declared:-origin}"
+}
+
+# The `remote` object of the policy, so "name" and "main_only" are read from the declaration that owns
+# them and not from a word that happens to appear elsewhere in the contract text. A policy written on one
+# line yields that line, which the two field readers still parse.
+remote_block() {
+  sed -n '/"remote"[[:space:]]*:/,/}/{p;}' "$1" 2>/dev/null
+}
+
+main_only() {
+  local policy="$1" value
+  value="$(remote_block "$policy" | sed -n 's/.*"main_only"[[:space:]]*:[[:space:]]*\(true\|false\).*/\1/p' | head -1)"
+  printf '%s' "${value:-}"
+}
+
+target_remote="${1:-origin}"
+policy="$(policy_file || true)"
+
+if [ -z "$policy" ] || [ ! -f "$policy" ]; then
+  # No declaration, no requirement. Said out loud, because a hook that silently has no opinion is
+  # indistinguishable from a hook that is not installed.
+  echo "pre-push: no lane-policy.json in this repository; the push side adds no requirement (an absent file means no extra requirements)" >&2
+  exit 0
+fi
+
+declared_main_only="$(main_only "$policy")"
+if [ -z "$declared_main_only" ]; then
+  cat >&2 <<MESSAGE
+pre-push: refusing the push: $policy exists but names no readable "main_only" decision.
+
+  A repository that declares a lane policy is judged by it, so a decision this hook cannot read is a
+  refusal and not an assumption. Add \"remote\": {\"main_only\": true|false} to $policy (or delete the
+  file to withdraw the whole policy), then push again.
+MESSAGE
+  exit 1
+fi
+
+integration_remote="$(remote_name "$policy")"
+if [ "$declared_main_only" != "true" ] || [ "$target_remote" != "$integration_remote" ]; then
+  echo "pre-push: allowed - $policy declares main_only=$declared_main_only and this push targets '$target_remote'" >&2
+  exit 0
+fi
+
+# git's pre-push protocol: one line per ref, on stdin.
+#   <local ref> <local sha> <remote ref> <remote sha>
+# A deletion is local ref "(delete)" with an all-zero local sha; it removes a ref, which is the direction
+# the declared end state wants, and the retirement path already validates the advertised SHA itself.
+refused=""
+while read -r local_ref local_sha remote_ref remote_sha; do
+  [ -n "${remote_ref:-}" ] || continue
+  case "$local_sha" in 0*|"") [ "$local_ref" = "(delete)" ] && continue ;; esac
+  case "$remote_ref" in
+    refs/heads/main) continue ;;
+  esac
+  refused="${refused}${refused:+ }${local_ref} -> ${remote_ref}"
+done
+
+if [ -z "$refused" ]; then
+  exit 0
+fi
+
+cat >&2 <<MESSAGE
+pre-push: refusing to publish a branch other than 'main' on '$integration_remote'.
+
+  refused:   $refused
+  declared:  $policy - remote.main_only=$declared_main_only
+
+This repository's end state is that '$integration_remote' carries refs/heads/main and nothing else, and a
+branch on '$integration_remote' is an input every later stage has to classify, own and retire. Publish
+through the lane instead: your branch is your deliverable locally, the merge lane merges the reviewed tip
+and pushes 'main'.
+
+If this repository should accept branch pushes after all, change the declaration that refuses them here
+(remote.main_only in $policy) rather than bypassing the hook - and if what you want is an enforcement
+point that cannot be skipped, it is remote-side (branch protection on '$integration_remote/main', or a
+pre-receive hook), not this file.
+MESSAGE
+exit 1

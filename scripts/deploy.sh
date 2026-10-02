@@ -144,6 +144,44 @@ if [ "${WASM_AGENT_IN_TURN:-}" = "1" ]; then
   fail "cannot deploy from a running turn: it cannot become idle while this command waits. Build, then request an upgrade through wa-sentinel; see skills/self-update/SKILL.md"
 fi
 
+# 0a. The preconditions of running this at all: the platform's own shell, and an install directory that
+#     exists. Each one refuses BY NAME, before anything is written, because the failure it replaces is a
+#     deploy that "runs" for a while and then fails every write it attempts. (The third precondition - the
+#     toolchain - is refused in step 4, where the build that needs it happens, so the questions that are
+#     about *this tree* are answered first.)
+#
+#     WHY (reproduced 2026-10-02). A deploy was run from a bash with no LOCALAPPDATA - a WSL shell, where
+#     `uname -s` is Linux and `HOME` is `/home/<user>` - against this repository, which is installed by the
+#     platform's own shell (Git's bash on Windows). The historical default then resolved to
+#     `<HOME>/AppData/Local/wasm-agent`, a directory that does not exist on that machine, and the script
+#     went on: the target was a path nothing had ever installed into, every read of `installed.txt` and
+#     `serve.pid` was empty, and the run ended in one of the later write failures instead of saying what
+#     was wrong. `HOME=/home/victor` and a missing `$INSTALL_DIR` are both visible in the first second -
+#     so they are refused in the first second, and `scripts/test-deploy-preconditions.sh` runs this script
+#     under exactly that stripped environment and asserts each refusal by name.
+#
+#     Is this shell the platform's gate shell? `WASM_AGENT_HOME`, `LOCALAPPDATA`, `USERPROFILE` and every
+#     default in `scripts/lib/service-target.sh` are asked in the gate shell's vocabulary. A Linux bash
+#     with Windows interop (WSL) answers none of them the way this machine's install does, so it refuses
+#     here rather than deploying into a path that will never be the running node.
+is_wsl_bash() {
+  if [ -n "${WSL_DISTRO_NAME:-}" ] || [ -n "${WSL_INTEROP:-}" ]; then return 0; fi
+  case "$(uname -s 2>/dev/null)" in
+    Linux*)
+      case "$(uname -r 2>/dev/null)" in
+        *icrosoft*|*WSL*) return 0 ;;
+      esac ;;
+  esac
+  return 1
+}
+if is_wsl_bash; then
+  fail "refused(not_the_gate_shell): this is a WSL (Linux) bash - uname -s=$(uname -s 2>/dev/null), uname -r=$(uname -r 2>/dev/null) - and this deploy installs a node for the platform whose gate shell it is, which on Windows is Git's bash and on Linux is that machine's bash. HOME here is ${HOME:-unset}, so the install directory and the service it must agree with are resolved in a different vocabulary from the machine's own. Run it in the platform's shell: 'C:/Program Files/Git/bin/bash.exe' for a Windows install (or scripts/install.sh), and the cloud tree's own bash for a Linux one. Nothing was written."
+fi
+
+if [ ! -d "$INSTALL_DIR" ]; then
+  fail "refused(install_dir_missing): the install directory does not exist and carries no install record: $INSTALL_DIR (installed.txt: absent, serve.pid: absent, source: ${WA_SERVICE_CLAIM:-no service and no node on :$PORT named one}). A deploy writes installed.txt, the scripts and the binary into this directory, so every write would fail one at a time and none of them would say why. Either this is a first install - create the directory first (mkdir -p) or run scripts/install.sh, which does - or the machine's own answer is being read in the wrong vocabulary: state it explicitly (WA_INSTALL_DIR=<where the node lives>) after checking it yourself with scripts/lib/service-target.sh. Nothing was written."
+fi
+
 # 0. The machine's own answer to "where does the node live" is the service that runs it, and a deploy that
 #    disagrees with that must refuse instead of installing quietly beside the running node. Two installs on
 #    one machine is not a cosmetic problem: the service keeps running the old one, the deploy replaces the
@@ -312,6 +350,16 @@ if [ -f "$ROOT/rust/Cargo.toml" ]; then
     note "not release-verified: deploying tree $SOURCE_TREE as a preview - no complete exact-tree gate evidence ($GATE_PROOF); set WA_DEPLOY_REQUIRE_RELEASE_PROOF=1 to refuse instead"
   fi
 fi
+
+# The toolchain this step needs, refused BY NAME before anything is compiled. It is checked here rather
+# than at the top of the script on purpose: a machine without cargo should still be told about the dirty
+# tree, the tree behind main, the downgrade or the held port that this run would also have to refuse, and
+# those questions are about this tree and are answered before the build. A machine without cargo used to
+# reach the build and fail there with a build error that named no cause.
+#
+# Written as a one-line guard because `scripts/test-deploy-gate-policy.sh` reads the proof block above out
+# of this file by its markers, and the `fi` of an unindented `if` here would close that block early.
+command -v cargo >/dev/null 2>&1 || fail "refused(cargo_unavailable): cargo is not on PATH (PATH=${PATH:-unset}); this step builds the tree with 'cargo build --release --offline --manifest-path rust/Cargo.toml', so a deploy without it cannot build what it would install. Install Rust (https://rustup.rs), or run the deploy on the tree that has the toolchain (the cloud tree builds this repository). Nothing was built and nothing was installed. To build or test without installing, use the gate's own command instead: bash scripts/test.sh."
 
 ( cd rust && cargo build --release --offline -p wa-host ) || fail "the build failed"
 # The sentinel is its own crate, outside the `rust/` workspace (which lists only `wa-host`), so it is
