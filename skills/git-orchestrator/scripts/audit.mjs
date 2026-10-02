@@ -164,8 +164,15 @@ export function audit(repo,{target='origin/main',includePRs=false,listPRs=github
   const originMainOnly=originHeads.length===1 && originHeads[0].name==='main';
   const originMainMatchesTarget=originMainOnly && originHeads[0].sha===targetSha;
   const sourceGateVerified=gateProof.status==='verified';
+  // The full gate became a RELEASE's, not a landing's, on 2026-10-02 (`scripts/merge-lane.mjs` defaults
+  // to `--gate-mode none`; `scripts/wave-release.mjs` is where a tree is gated and named). So a receipt
+  // on this tree is now REPORTED - `release_verified` - rather than required for the integration
+  // baseline: requiring it here made `verify` refuse a legitimately ungated main, which is the very
+  // baseline this tool exists to certify. What the baseline still requires is unchanged - every
+  // in-scope tip integrated, origin containing only main, and origin's main at the target - and the
+  // gate proof remains visible for whoever wants it.
   return {schema_version:1,repo,target,target_sha:targetSha,include_prs:includePRs,discovery_complete:errors.length===0,
-    integration_complete:errors.length===0 && pending.length===0,verification_complete:errors.length===0 && pending.length===0 && originMainMatchesTarget && sourceGateVerified,source_gate_verified:sourceGateVerified,
+    integration_complete:errors.length===0 && pending.length===0,verification_complete:errors.length===0 && pending.length===0 && originMainMatchesTarget,release_verified:sourceGateVerified,source_gate_verified:sourceGateVerified,
     pending_tips:pending.length,origin_heads:originHeads,origin_main_only:originMainOnly,origin_main_matches_target:originMainMatchesTarget,
     counts:{candidate_tips:candidates.length,pending_tips:pending.length,excluded_pr_tips:candidates.filter(item=>item.state==='excluded_pr').length,
       merge_conflicts:conflicts,merge_errors:mergeErrors,gate_run_count:gateProof.run_count,worktrees:worktrees.length,dirty_worktrees:worktrees.filter(item=>item.dirty===true).length},
