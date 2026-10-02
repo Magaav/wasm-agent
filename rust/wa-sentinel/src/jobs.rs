@@ -100,7 +100,14 @@ pub fn cli(args: &[String]) -> Result<()> {
         "enable" | "disable" => s.enable(
             args.get(1).context("job enable|disable <id>")?,
             action == "enable",
-        ),
+        )
+        .map(|value| {
+            // The supersede marker follows the store's own state now, not on the next watcher tick: a marker
+            // that only appears on a tick leaves a window in which a settle between `job enable` and that
+            // tick is announced twice (see `sync_completion_wake_marker`).
+            sync_completion_wake_marker(&s);
+            value
+        }),
         // Removing a job is deliberate and irreversible from the store's side: the definition lives in
         // the tree, so a forgotten job comes back by shipping its template again - or not at all, which
         // is the point for a row whose template is gone.
@@ -169,6 +176,41 @@ pub fn cli(args: &[String]) -> Result<()> {
     println!("{}", serde_json::to_string_pretty(&value)?);
     Ok(())
 }
+/// Write or remove the marker that tells the node's completion outbox that another path supersedes its
+/// child-return notice, from the job store's own enabled state.
+///
+/// Called from the watcher's tick *and* from the `job enable`/`job disable` verbs, so the documented
+/// enable path does not depend on the next tick: a marker that only appears on a tick leaves a window in
+/// which a settle is announced twice. Idempotent and cheap - it rewrites only when the set of superseding
+/// jobs actually changed.
+fn sync_completion_wake_marker(store: &wa_jobs::Store) {
+    let Ok(list) = store.list() else { return };
+    let Some(jobs) = list.as_array() else { return };
+    let mut by: Vec<String> = jobs
+        .iter()
+        .filter(|job| job["enabled"] == true)
+        .filter(|job| job["supersedes"].as_str() == Some("completion_wake"))
+        .filter_map(|job| job["id"].as_str().map(str::to_string))
+        .collect();
+    by.sort();
+    let marker = sentinel_dir().join("completion-wake-superseded");
+    let current: Option<Value> = std::fs::read_to_string(&marker)
+        .ok()
+        .and_then(|raw| serde_json::from_str(&raw).ok());
+    let current_by: Vec<String> = current
+        .as_ref()
+        .and_then(|value| value["by"].as_array().cloned())
+        .map(|items| items.iter().filter_map(|item| item.as_str().map(str::to_string)).collect())
+        .unwrap_or_default();
+    if by.is_empty() {
+        if current.is_some() {
+            let _ = std::fs::remove_file(&marker);
+        }
+    } else if current_by != by {
+        let _ = wa_operation::atomic_json(&marker, &json!({"schema":1,"by":by,"at":now_epoch() as i64}));
+    }
+}
+
 pub struct Runner {
     observers: std::collections::HashMap<String, std::thread::JoinHandle<()>>,
 }
@@ -282,39 +324,17 @@ impl Runner {
         // child-return notice the completion outbox sends: while a job that declares
         // `"supersedes": "completion_wake"` is enabled, the marker below is present and
         // `lua/core/completions.lua`'s `wa_completion_run` does not send its own wake - so one settled
-        // child produces one message, not two. The marker is derived here, from the job store's own
-        // enabled state, in the process that owns that store: it is a fact about the installation, not a
-        // second setting that can disagree with the job list. An absent marker means today's behaviour.
-        {
-            let mut by: Vec<String> = list
-                .as_array()
-                .unwrap()
-                .iter()
-                .filter(|job| job["enabled"] == true)
-                .filter(|job| job["supersedes"].as_str() == Some("completion_wake"))
-                .filter_map(|job| job["id"].as_str().map(str::to_string))
-                .collect();
-            by.sort();
-            let marker = sentinel_dir().join("completion-wake-superseded");
-            let current: Option<Value> = std::fs::read_to_string(&marker)
-                .ok()
-                .and_then(|raw| serde_json::from_str(&raw).ok());
-            let current_by: Vec<String> = current
-                .as_ref()
-                .and_then(|value| value["by"].as_array().cloned())
-                .map(|items| items.iter().filter_map(|item| item.as_str().map(str::to_string)).collect())
-                .unwrap_or_default();
-            if by.is_empty() {
-                if current.is_some() {
-                    let _ = std::fs::remove_file(&marker);
-                }
-            } else if current_by != by {
-                let _ = wa_operation::atomic_json(
-                    &marker,
-                    &json!({"schema":1,"by":by,"at":now_epoch() as i64}),
-                );
-            }
-        }
+        // child produces one message, not two. The marker is derived from the job store's own enabled
+        // state, in the process that owns that store: it is a fact about the installation, not a second
+        // setting that can disagree with the job list. An absent marker means today's behaviour.
+        //
+        // `sync_completion_wake_marker` is called here *and* from the `enable`/`disable` CLI verbs, because
+        // a marker that only appears on the next tick leaves a window: a child settling between `job
+        // enable` and the tick is still announced twice. The documented enable path closes it; a toggle
+        // through the node's `/jobs` route (the Engine) does not run this binary, and its residual window is
+        // one watcher iteration - `std::thread::sleep(Duration::from_millis(200))` in `watch` (main.rs), so
+        // at most ~200 ms plus one tick's work. docs/JOBS.md states it.
+        sync_completion_wake_marker(&s);
         // Two explicit lanes. A deterministic `run` is claimed even while a person's turn is running -
         // the inbox ingest must not stop because somebody is chatting. An inference action (`wake` or
         // `subagent`) is only claimed when its own lane has capacity, so it can never push a person's turn
@@ -759,6 +779,9 @@ fn wake_ledger_contains(id: &str, key: &str) -> Result<bool> {
     let value: Value = serde_json::from_str(&raw).unwrap_or_else(|_| json!({"keys":{}}));
     Ok(value["keys"].get(key).is_some())
 }
+/// How many woken keys the ledger keeps. It is a bound on the file, not on the guarantee: see
+/// `wake_ledger_record` for what it preserves.
+const WAKE_LEDGER_LIMIT: usize = 512;
 fn wake_ledger_record(id: &str, key: &str, delivery: i64) -> Result<()> {
     let path = wake_ledger_path(id);
     let mut value: Value = std::fs::read_to_string(&path)
@@ -770,6 +793,28 @@ fn wake_ledger_record(id: &str, key: &str, delivery: i64) -> Result<()> {
     }
     value["schema"] = json!(1);
     value["keys"][key] = json!({"at":now_epoch() as i64,"delivery":delivery});
+    // The ledger is bounded to the newest `WAKE_LEDGER_LIMIT` keys. What the bound preserves: a child that
+    // settles again is still deduped while its key is inside the window - and a continuation is a *new*
+    // child id, so a repeat of the same id is rare, while 512 woken children is far more than a node sees
+    // between two settles of one child. What it gives up: an id woken more than 512 wakes ago could be
+    // woken again if it somehow settled again. The alternative is a file that grows one entry per child
+    // ever woken for the life of the installation, which is how a bounded promise becomes an unbounded
+    // disk cost.
+    let mut entries: Vec<(String, i64)> = value["keys"]
+        .as_object()
+        .map(|map| map.iter().map(|(name, entry)| (name.clone(), entry["at"].as_i64().unwrap_or(0))).collect())
+        .unwrap_or_default();
+    if entries.len() > WAKE_LEDGER_LIMIT {
+        entries.sort_by(|left, right| right.1.cmp(&left.1));
+        entries.truncate(WAKE_LEDGER_LIMIT);
+        let mut kept = serde_json::Map::new();
+        for (name, _) in &entries {
+            if let Some(entry) = value["keys"].get(name) {
+                kept.insert(name.clone(), entry.clone());
+            }
+        }
+        value["keys"] = Value::Object(kept);
+    }
     wa_operation::atomic_json(&path, &value)?;
     Ok(())
 }

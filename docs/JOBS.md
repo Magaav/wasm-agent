@@ -286,13 +286,27 @@ Six rules keep it a step rather than a second action language:
   a ledger keyed on that field (`<sentinel>/wake-dedupe-<job id>.json`), and a delivery whose key is already
   in it completes without submitting a second message (`already_woken:<key>` in `job history`). The ledger
   is written only after a submission was confirmed, so the remaining window is a rare duplicate rather than
-  a lost message. Like `prepare`, it is refused anywhere but a top-level `wake`.
+  a lost message; and it is **bounded to the newest 512 keys** (`WAKE_LEDGER_LIMIT`), so it is a file with
+  a size rather than one entry per child ever woken. What the bound preserves: a child that settles again is
+  still deduped while its key is inside the window - a continuation is a *new* child id, so a repeat of the
+  same id is rare, and 512 woken children is far more than a node sees between two settles of one child.
+  What it gives up: an id woken more than 512 wakes ago could be woken again if it somehow settled again.
+  Like `prepare`, it is refused anywhere but a top-level `wake`.
 - **`supersedes` is how a job replaces another notification path.** `"supersedes": "completion_wake"` makes
-  the watcher write `<sentinel>/completion-wake-superseded` (naming the enabled jobs, derived from the job
-  store's own enabled state) and remove it when none is enabled. `lua/core/completions.lua`'s
-  `wa_completion_run` reads that marker and does **not** send its own `[Child completion notice]` wake for a
-  settled child while it is present, recording `state='superseded'` on the outbox row instead. Without the
-  marker nothing changes. This is what stops one settle from producing two wakes.
+  the sentinel write `<sentinel>/completion-wake-superseded` (naming the enabled jobs, derived from the job
+  store's own enabled state) and remove it when none is enabled. It is written by the watcher's tick **and
+  by the `job enable`/`job disable` verbs themselves**, so the documented enable path has no window: a
+  marker that only appeared on a tick left one in which a child settling between `job enable` and that tick
+  was announced twice. `lua/core/completions.lua`'s `wa_completion_run` reads the marker and does **not**
+  send its own `[Child completion notice]` wake for a settled child while it is present, recording
+  `state='superseded'` on the outbox row instead. Without the marker nothing changes.
+
+  The residual window is named rather than hidden: a toggle through the node's `/jobs` route (the Engine's
+  switch) does not run the sentinel binary, so its marker arrives on the next watcher iteration -
+  `std::thread::sleep(Duration::from_millis(200))` in `watch` (`rust/wa-sentinel/src/main.rs`), i.e. at most
+  ~200 ms plus one tick's work, during which one settle could still be announced twice. Closing that too
+  means the node's own toggle path writing the marker, which is `rust/wa-host`'s route and not this
+  delivery's.
 - **One place builds the message.** `wake_blocks` in `rust/wa-sentinel/src/jobs.rs` composes the
   instruction half of every wake. The child-return **notification** has moved into it: the hook's block
   carries a `notification:` line built from the same evaluation packet (state, session, model, provider,
@@ -314,11 +328,24 @@ the two converges on the next pass instead of re-emitting that child for ever. B
 
 The verdict is read from one declaration of what a deploy installs: `scripts/deploy-shipped.json`, which
 `scripts/check-deploy-shipped.mjs` re-derives from `scripts/deploy.sh` and `scripts/upgrade.sh` on every
-gate run (it also runs `scripts/ship-wave.mjs` and checks every file it writes), failing when an installer
-copies something the manifest does not cover. The predicate is `shipsToDeploy` in
-`scripts/subagent-return-hook.mjs`. This replaced a hand-written list that missed `jobs/**` and
-`scripts/upgrade.sh` - two classes a deploy installs, both of which were answered `no install impact`,
-which is the direction this delivery exists to prevent.
+gate run and which the gate pins with a floor (`run_proof_fixture deployShipped 76`). The derivation reads
+**every copy-like line** - `cp`, `cp -f`, `cp -R`, `install`, `mv`, and the `for source in` loops that feed
+them - in every spelling the installers use (`"$ROOT/x"`, `"$ROOT"/x`, `$ROOT/x`), resolves the installer
+variables whose value is a source path from the installer's own assignment, runs `scripts/ship-wave.mjs`
+and checks every file it writes, and asserts a control set so the predicate cannot become "everything".
+
+It refuses to pass a rule it cannot instantiate: a directory or glob with no example in the tree is
+instantiated synthetically, and an exact path that neither exists nor is built by that same installer is a
+**failure naming the path** - never a silent skip. A copied path under a `target/` directory is accepted
+only for a crate the same installer builds (`cargo build --manifest-path "$ROOT/<crate>/Cargo.toml"`, with
+comments stripped first), which is how the WhatsApp transcript plugin's build output is covered rather than
+skipped. `node scripts/check-deploy-shipped.mjs --list` prints the whole derivation, rule by rule, for a
+reviewer. This replaced a hand-written list that missed `jobs/**` and `scripts/upgrade.sh` - two classes a
+deploy installs, both of which were answered `no install impact` - and then a first version of this check
+that derived less than it claimed (the quote-then-slash spelling, plain `cp`/`install`, and absent paths
+were invisible, so dropping `jobs/`, `scripts/whatsapp-*` or `scripts/subagent-return-*` from the manifest
+stayed green). The suite falsifies all of those now: four manifest mutations and six installer mutations,
+including a copy of a path that is not in the tree and a copy from a `target/` nobody builds.
 
 A child that touched something a deploy ships (`ui/**`, `rust/**`, `lua/**`, `skills/**`, `jobs/**`,
 `deploy/**`, or the `scripts/**` files a deploy copies) is `deploy required at the wave's end` - one deploy
@@ -329,8 +356,8 @@ fallback), a checkout that reports uncommitted work the pass could not see, and 
 cannot be read. The uncommitted half counts: a child whose tip equals `main` and whose worktree holds an
 uncommitted shipped change is deploy impact.
 `scripts/test-subagent-return-hook.cjs` drives every state through a real sentinel, pins the dedupe key,
-falsifies the manifest, and shows the firing costs no provider call; `scripts/test-completion-wake.cjs`
-shows the outbox going quiet while the hook's marker is present.
+falsifies the manifest and the derivation, and shows the firing costs no provider call;
+`scripts/test-completion-wake.cjs` shows the outbox going quiet while the hook's marker is present.
 
 ## Queue and recovery contract
 
