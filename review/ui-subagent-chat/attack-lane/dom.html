@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html lang="en"><head>
+<script id="wa-error-reporter">
+// Report this page's own failures to the node. Installed first, inline, so it catches everything after
+// it - including a syntax or load error in app.js, which is exactly the case that leaves a window looking
+// alive while its page is dead. A page that cannot run cannot tell anyone it cannot run, so the only place
+// this can live is here.
+(function () {
+  var sent = 0;
+  function report(kind, text) {
+    try {
+      if (sent > 20) return;            // a loop must not be able to flood the node
+      sent += 1;
+      var body = JSON.stringify({ kind: kind, text: String(text).slice(0, 2000), url: location.href });
+      var request = new XMLHttpRequest();
+      request.open("POST", "/log", true);
+      request.setRequestHeader("Content-Type", "application/json");
+      request.send(body);
+    } catch (error) { /* nothing left to do if even this fails */ }
+  }
+  window.addEventListener("error", function (event) {
+    report("error", (event && event.message ? event.message : "error") + " @ " + (event && event.filename) + ":" + (event && event.lineno));
+  });
+  window.addEventListener("unhandledrejection", function (event) {
+    report("rejection", (event && event.reason && (event.reason.stack || event.reason.message)) || "unhandled rejection");
+  });
+  var realError = console.error;
+  console.error = function () {
+    report("console", Array.prototype.map.call(arguments, function (a) {
+      return a && a.stack ? a.stack : String(a);
+    }).join(" "));
+    return realError.apply(console, arguments);
+  };
+})();
+</script>
+
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0b0d12">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="wasm-agent">
+  <title>wasm-agent</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icon-192.png" sizes="192x192" type="image/png">
+  <link rel="apple-touch-icon" href="icon-192.png">
+  <link rel="stylesheet" href="style.css">
+  <script>
+    if ("serviceWorker" in navigator) {
+      window.addEventListener("load", () => navigator.serviceWorker.register("service-worker.js")
+        .catch((error) => console.error("service worker registration failed", error)));
+    }
+  </script>
+  <script>
+    // Surface runtime errors in the window title (GUI builds have no console).
+    window.addEventListener("error", (event) => {
+      document.title = "wasm-agent · error: " + (event.message || event.error);
+    });
+    window.addEventListener("unhandledrejection", (event) => {
+      const reason = event.reason;
+      document.title = "wasm-agent · error: " + ((reason && reason.message) || reason);
+    });
+  </script>
+</head>
+<body class="expanded view-only">
+  <div id="orb" class="orb" title="wasm-agent">
+    <span class="orb-ring"></span>
+    <span class="orb-core"></span>
+  </div>
+
+  <div id="panel" class="panel">
+    <header class="topbar" id="dragbar">
+      <div class="brand"><span class="dot"></span> wasm-agent</div>
+      <div class="meta" id="meta">local · local · fixture-model</div>
+      <div class="topbar-actions">
+        <button id="engine-btn" class="topbar-btn" type="button" title="Engine (Ctrl+E)" aria-label="Engine">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.8"></rect><rect x="14" y="3" width="7" height="7" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.8"></rect><rect x="3" y="14" width="7" height="7" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.8"></rect><rect x="14" y="14" width="7" height="7" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.8"></rect></svg>
+        </button>
+        <button id="term-btn" class="topbar-btn" type="button" title="Shell (Ctrl+`)" aria-label="Shell">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7l5 5-5 5" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"></path><path d="M12 17h8" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"></path></svg>
+        </button>
+        <button id="orchestrator-btn" class="topbar-btn" type="button" title="Orchestrator window (Ctrl+D)" aria-label="Orchestrator window">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4v12" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"></path><circle cx="7" cy="18.5" r="1.9" fill="none" stroke="currentColor" stroke-width="1.8"></circle><circle cx="7" cy="4" r="1.9" fill="none" stroke="currentColor" stroke-width="1.8"></circle><path d="M15 4v12" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"></path><circle cx="15" cy="18.5" r="1.9" fill="none" stroke="currentColor" stroke-width="1.8"></circle><circle cx="15" cy="4" r="1.9" fill="none" stroke="currentColor" stroke-width="1.8"></circle></svg>
+        </button>
+        <button id="collapse" class="collapse" title="Collapse to avatar" aria-label="Collapse to avatar">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 9l7 7 7-7" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"></path></svg>
+        </button>
+      </div>
+    </header>
+
+    <!-- The conversation is the shared shell (components.js). The app authors the children only it has:
+         the jump control and the empty state (no data-slot, so they land in the transcript region), the
+         account/mic/status chips, the Steer action, and the status balloon - which stays authored here
+         because it is the model/harness diagnostics panel (§6), not chat furniture. -->
+    <wa-chat-shell id="chat" primary="">
+  <div class="messages" data-part="content" id="messages"><wa-message role="user" class="msg user"><div class="who">you</div><div class="body">Which config file does the node read, and did it change yesterday?</div></wa-message><wa-message role="assistant" class="msg assistant"><div class="who">wasm-agent</div><div class="body steps"><wa-run class="run"><button type="button" class="trace-head" aria-expanded="false"><span class="trace-glyph">⚙</span><span class="trace-label">run</span><span class="trace-meta">1 tool call · 10.0s</span><span class="trace-chevron">›</span></button><div class="run-body" hidden=""><wa-reasoning class="reasoning"><button type="button" class="trace-head" aria-expanded="false"><span class="trace-glyph">✳</span><span class="trace-label">thinking</span><span class="trace-meta">62 chars</span><span class="trace-chevron">›</span></button><div class="reasoning-body" hidden="">The module names CONFIG_FILE; check it and yesterday's change.</div></wa-reasoning><wa-trace class="trace" open=""><button type="button" class="trace-head" aria-expanded="true"><span class="trace-glyph">⚙</span><span class="trace-label">1 tool call</span><span class="trace-meta">read · 7ms</span><span class="trace-chevron">⌄</span></button><ol class="trace-body"><li class="tool-line ok"><div class="tool-head"><span class="tool-title"><b>read</b> lua/core/paths.lua</span><span class="tool-outcome">1 lines</span></div><div class="tool-output" hidden="">{
+ "content": "CONFIG_FILE = ~/.wasm-agent/config\nLEGACY_CONFIG = ~/.wasm-agent.json"
+}</div><div class="tool-progress" hidden=""></div></li></ol></wa-trace></div></wa-run><div class="seg">It reads `CONFIG_FILE` (`~/.wasm-agent/config`), with `LEGACY_CONFIG` still honoured as a fallback.<br><br>Yesterday's change added the legacy fallback and documented it. Two files moved:</div><wa-diff class="diff" data-message-id=""><div class="diff-row"><button type="button" class="trace-head" aria-expanded="false"><span class="trace-glyph">Δ</span><span class="trace-label">2 files changed</span><span class="trace-meta">+7 −1</span><span class="trace-chevron">›</span></button><button type="button" class="diff-toggle" data-act="undo" title="" aria-label="" disabled=""><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 7H14.5a5.5 5.5 0 0 1 0 11H8" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></path><path d="M12 4 8.5 7 12 10" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></path></svg></button></div><ul class="diff-body" hidden=""><li><button type="button" class="diff-file" title="what changed in lua/core/paths.lua"><span class="diff-path">lua/core/paths.lua</span><span class="diff-stat"><span class="plus">+3</span><span class="minus">−1</span></span></button></li><li><button type="button" class="diff-file" title="what changed in docs/CONFIG.md"><span class="diff-path">docs/CONFIG.md</span><span class="diff-stat"><span class="plus">+4</span><span class="minus">−0</span></span><span class="diff-tag">new</span></button></li></ul><div class="diff-note" hidden=""></div></wa-diff><div class="status chat-content-run-status finished"><span class="chat-content-run-label">completed</span><span class="chat-content-run-elapsed">0:10</span></div></div></wa-message></div>
+  <div class="chat-host" data-part="host"></div>
+  <form class="composer" data-part="composer" id="composer">
+    <div class="attachments" data-part="attachments" id="attachments"></div>
+    <div class="composer-row">
+      <textarea rows="1" data-part="input" placeholder="Message wasm-agent…" id="input"></textarea>
+      <button class="send" type="submit" data-part="send" title="Send" aria-label="Send" id="send">
+        <svg class="icon-send" viewBox="0 0 24 24" aria-hidden="true"><path d="M2 21 23 12 2 3v7l15 2-15 2z"></path></svg>
+        <svg class="icon-stop" viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2"></rect></svg>
+      </button>
+    </div>
+    <div class="composer-footer">
+      <div class="footer-left" data-part="footer-left"><button id="user-btn" class="chip user-chip" type="button" data-slot="footer-left" title="Signed in as foundation · 0 tools" aria-haspopup="true" aria-label="Signed in as foundation · 0 tools">
+        <span class="user-avatar" id="user-avatar">ma</span>
+      </button><button id="status-btn" class="chip" type="button" data-slot="footer-left" title="Provider, model and usage" aria-haspopup="true" aria-expanded="false">
+        <span class="chip-dot"></span>
+        <span id="chip-model">fixture-model</span>
+        <span id="chip-usage" class="chip-usage"></span>
+      </button><button id="mic" class="icon-btn" type="button" data-slot="footer-left" title="Talk with voice" aria-label="Talk with voice">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a3 3 0 0 1 3 3v5a3 3 0 0 1-6 0V6a3 3 0 0 1 3-3zm7 8a7 7 0 0 1-6 6.9V21h-2v-3.1A7 7 0 0 1 5 11h2a5 5 0 0 0 10 0h2z"></path></svg>
+      </button>
+        <button class="icon-btn" type="button" data-part="attach" title="Append a file" aria-label="Append a file" id="attach">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16.5 6.6 8.7 14.4a1.5 1.5 0 0 0 2.1 2.1l7.8-7.8a3.5 3.5 0 0 0-5-5l-8.1 8.1a5.5 5.5 0 0 0 7.8 7.8l6.7-6.7-1.4-1.4-6.7 6.7a3.5 3.5 0 0 1-5-5l8.1-8.1a1.5 1.5 0 0 1 2.1 2.1z"></path></svg>
+        </button>
+        <input type="file" data-part="file" hidden="" multiple="" id="file">
+      </div>
+      <div class="footer-right" data-part="footer-right"><button id="steer" type="button" data-slot="footer-right" hidden="" title="Send this text to the active run (Ctrl+Enter)">Steer</button>
+        <span class="composer-model" data-part="model" title="Model used for the latest request: previous-model" id="composer-model">previous-model</span>
+      </div>
+    </div>
+  <wa-balloon id="status-balloon" class="popover" data-slot="balloon" anchor="status-btn" hidden="">
+        <div class="pop-row">
+          <label class="pop-head" for="provider-select">provider</label>
+          <select id="provider-select" class="wa-select"></select>
+        </div>
+        <div class="pop-row">
+          <label class="pop-head" for="model-select">model</label>
+          <select id="model-select" class="wa-select"></select>
+        </div>
+        <div class="pop-row">
+          <label class="pop-head" for="reasoning-select">reasoning</label>
+          <select id="reasoning-select" class="wa-select"></select>
+        </div>
+        <div id="settings-error" class="usage-note" role="alert"></div>
+        <div id="settings-note" class="usage-note"></div>
+        <div class="pop-head">context</div>
+        <div id="context-box" class="usage-box"></div>
+        <div class="pop-head">limits</div>
+        <div id="limits-box" class="usage-box"></div>
+        <div class="pop-head">tokens</div>
+        <div id="usage-box" class="usage-box"></div>
+        <wa-harness-status id="harness-status"></wa-harness-status>
+        <div class="pop-foot" id="pop-foot"></div>
+      </wa-balloon></form></wa-chat-shell>
+
+    <section id="terminal" class="terminal" hidden="">
+      <header class="term-bar">
+        <span class="term-title" id="term-title">shell</span>
+        <button id="term-close" class="icon-btn" type="button" title="Back to chat (Esc)">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 6l-6 6 6 6" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"></path><path d="M19 6v12" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"></path></svg>
+        </button>
+      </header>
+      <div id="term-out" class="term-out"></div>
+      <form id="term-form" class="term-in">
+        <span class="term-prompt">&gt;</span>
+        <input id="term-cmd" autocomplete="off" spellcheck="false" placeholder="shell on this machine — :spells, :run &lt;name&gt;, :clear">
+      </form>
+    </section>
+
+    <section id="engine" class="engine" hidden="">
+      <header class="engine-bar">
+        <span class="engine-title">engine</span>
+        <span class="engine-sub" id="engine-sub"></span>
+        <button id="engine-close" class="icon-btn" type="button" title="Back to chat (Esc)">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 6l-6 6 6 6" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"></path><path d="M19 6v12" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"></path></svg>
+        </button>
+      </header>
+      <div class="engine-body">
+        <div class="engine-topic">
+          <button class="engine-head" type="button" data-target="nodes-box">
+            <span class="engine-caret">▸</span><span class="engine-name">nodes</span>
+            <span class="engine-note" id="nodes-binding"></span>
+          </button>
+          <div class="engine-content" id="nodes-box" hidden=""></div>
+        </div>
+        <div class="engine-topic">
+          <button class="engine-head" type="button" data-target="tasks-box">
+              <span class="engine-caret">▸</span><span class="engine-name">tasks</span>
+            <span class="engine-note">on this node</span>
+          </button>
+          <div class="engine-content" id="tasks-box" hidden=""><wa-tasks><details><summary>New child task</summary><form class="task-form"><label>Parent conversation<select aria-label="Parent conversation"></select></label><label>Approved profile<select aria-label="Approved profile"></select></label><label>Task and completion criteria<textarea aria-label="Task and completion criteria" required="" rows="3"></textarea></label><button type="submit">Start child task</button></form></details><button type="button">Refresh tasks</button><p role="status"></p><div class="task-list"></div><pre class="task-evidence" hidden=""></pre><button type="button" hidden="">Load more output</button></wa-tasks></div>
+        </div>
+        <div class="engine-topic">
+          <button class="engine-head" type="button" data-target="sessions-box">
+            <span class="engine-caret">▸</span><span class="engine-name">sessions</span>
+            <span class="engine-note" id="sessions-note"></span>
+          </button>
+          <div class="engine-content" id="sessions-box" hidden=""></div>
+        </div>
+        <div class="engine-topic">
+          <button class="engine-head" type="button" data-target="skills-box">
+            <span class="engine-caret">▸</span><span class="engine-name">skills</span>
+            <span class="engine-note" id="skills-note"></span>
+          </button>
+          <div class="engine-content" id="skills-box" hidden=""></div>
+        </div>
+        <div class="engine-topic">
+          <button class="engine-head" type="button" data-target="spells-box">
+            <span class="engine-caret">▸</span><span class="engine-name">spells</span>
+            <span class="engine-note" id="spells-note"></span>
+          </button>
+          <div class="engine-content" id="spells-box" hidden=""></div>
+        </div>
+        <div class="engine-topic">
+          <button class="engine-head" type="button" data-target="tools-box">
+            <span class="engine-caret">▸</span><span class="engine-name">tools</span>
+            <span class="engine-note">advertised tool surface</span>
+          </button>
+          <div class="engine-content" id="tools-box" hidden=""></div>
+        </div>
+        <div class="engine-topic">
+          <button class="engine-head" type="button" data-target="jobs-box">
+            <span class="engine-caret">▸</span><span class="engine-name">jobs</span>
+            <span class="engine-note">triggers → queued actions</span>
+          </button>
+          <div class="engine-content" id="jobs-box" hidden=""><wa-jobs></wa-jobs></div>
+        </div>
+        <!-- The bell for THIS device. Its state lives in this window's own storage, so it is per
+             machine by construction and not a node setting: the node cannot know which device is
+             awake, and a device the operator is not sitting at must not decide for this one. The
+             state is on the topic row itself, so it is readable without expanding the card. -->
+        <div class="engine-topic">
+          <button class="engine-head" type="button" data-target="notify-box">
+            <span class="engine-caret">▸</span><span class="engine-name">notifications</span>
+            <span class="engine-note" id="notify-state">off on this device</span>
+          </button>
+          <div class="engine-content" id="notify-box" hidden="">
+            <label class="notify-toggle" for="notify-bell">
+              <input id="notify-bell" type="checkbox">
+              <span class="notify-bell" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3.5a5 5 0 0 0-5 5v3.1L5.4 15.2h13.2L17 11.6V8.5a5 5 0 0 0-5-5z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"></path><path d="M9.8 18a2.3 2.3 0 0 0 4.4 0" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"></path></svg></span>
+              <span class="notify-label">Notify this device when a child task settles and needs evaluation</span>
+            </label>
+            <p class="notify-detail" id="notify-detail">Nothing is raised on this device while this is off, including the test below. The choice is stored in this window's own storage, so it is per device: the node is not told and no other device is affected.</p>
+            <div class="notify-actions">
+              <button id="notify-test" class="notify-test" type="button" disabled="">Send a test notification</button>
+              <span class="notify-result" id="notify-result" role="status" aria-live="polite"></span>
+            </div>
+            <p class="notify-detail notify-diagnostic">Shell-level check, with no window page involved:
+              <code>wa-window.exe --notify-test "title" "body"</code> — exits 0 when Windows accepted the
+              toast and 3 when it did not, and writes the result to
+              <code>%LOCALAPPDATA%\wasm-agent\wa-window.log</code>.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="control" class="control" hidden="">
+      <header class="control-bar">
+        <span class="control-title" id="control-title">control</span>
+        <span class="control-hint" id="control-hint"></span>
+        <label class="control-live"><input id="control-live" type="checkbox" checked=""> live</label>
+        <button id="control-refresh" class="icon-btn" type="button" title="Force a full frame">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5V2L7 6l5 4V7a5 5 0 1 1-5 5H5a7 7 0 1 0 7-7z"></path></svg>
+        </button>
+        <button id="control-max" class="icon-btn" type="button" title="Maximize">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="2" fill="none" stroke="currentColor" stroke-width="2"></rect></svg>
+        </button>
+        <button id="control-close" class="icon-btn" type="button" title="Close control">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"></path></svg>
+        </button>
+      </header>
+      <div class="control-view" id="control-view">
+        <canvas id="control-canvas"></canvas>
+      </div>
+      <form id="control-keys" class="control-keys">
+        <input id="control-text" autocomplete="off" placeholder="type text, Enter sends it to the node">
+        <button class="icon-btn" type="submit" title="Send text">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h12M13 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"></path></svg>
+        </button>
+      </form>
+    </section>
+  </div>
+
+  <wa-menu id="user-menu" class="menu" hidden=""></wa-menu>
+  <wa-menu id="context-menu" class="menu" hidden=""></wa-menu>
+  <!-- The `/` commands, anchored to the composer rather than to a point, so they sit above the
+       field the reader is typing in instead of over it. -->
+  <wa-menu id="command-menu" anchor="input" class="menu" hidden=""></wa-menu>
+
+  <script src="components.js"></script>
+  <script src="test-fixtures.js"></script>
+<script src="app.js"></script>
+<script src="wa-review-probe.js"></script><pre id="wa-probe" data-status="fail" style="position: fixed; bottom: 0px; left: 0px; right: 0px; z-index: 99; pointer-events: none; background: rgb(0, 0, 0); color: rgb(0, 255, 0); font: 10px monospace; padding: 4px; max-height: 45%; overflow: auto;">ATTACK PROBE FAIL (2 checks, 1 failures) phase=done | FAILURES: a lane whose children recorded their OWN worktree must not be called main-only (its children do not work in the node checkout), saw main-only=yes with the reason "main-only · yes · this lane holds no branch of its own: its children work in the node checkout" beside the lane path "C:/work/wt-gamma" || FACTS {"lanes":[{"key":"C:/work/wt-gamma","path":"C:/work/wt-gamma","checklist":[{"outcome":"merged","state":"unknown","reason":"merged · unknown · this view reads no branch tip and no origin/main ref, so containment is not measured here"},{"outcome":"retired","state":"no","reason":"retired · no · a child of this lane still holds a bound checkout"},{"outcome":"clean","state":"unknown","reason":"clean · unknown · a checkout's own git status is measured by the node's settlement review, which this view is not given"},{"outcome":"main-only","state":"yes","reason":"main-only · yes · this lane holds no branch of its own: its children work in the node checkout"}]}],"observed":{"mainOnly":"yes","retired":"no"}}</pre>
+
+
+<wa-orchestrator><header class="orchestrator-head"><strong>Orchestrator</strong><span class="orchestrator-status" role="status">1 live child(ren) · 1 dispatch record(s) · closing this window keeps work running</span><button type="button" data-action="refresh">Refresh</button><button type="button" data-action="close">Back to main chat</button></header><div class="orchestrator-body"><aside class="orchestrator-sidebar"><details class="live-children" open=""><summary>Live children</summary><p class="live-children-counts" role="status">foundation: 2 running · 1 queued · 3 active · settled: 1 cancelled, 4 completed, 1 failed, 0 unknown</p><div class="live-children-list"><button type="button" class="live-child" data-state="running" data-session="child-session-x" data-node="local" data-source="dispatch" data-subagent="child-x" aria-label="worktree-without-branch · running on foundation · child-session-x"><span class="live-child-head"><span class="live-child-state">running</span><span class="live-child-node" title="local · the machine the dispatcher sent this child to">foundation</span></span><span class="live-child-title" title="worktree-without-branch">worktree-without-branch</span><span class="live-child-id" title="session id">child-session-x</span></button></div><p class="live-children-foot">A peer's own live children are not reachable from here. A row with a dispatch record names the machine the dispatcher chose; a row with no record is read from the ledger of the node that holds it.</p></details><details class="placement"><summary>Node order and limits</summary><p>Fill in order. A limit of 0 keeps a device out of background execution.</p><label><input type="checkbox" class="placement-enabled"> Use ordered placement</label><div class="placement-nodes"><div class="placement-node" data-node="local"><label>foundation <input type="number" min="0" max="128" step="1" aria-label="foundation task limit"></label><button type="button" title="Higher priority">↑</button><button type="button" title="Lower priority">↓</button></div><div class="placement-node" data-node="bbbbbbbb-5555-6666-7777-888888888888"><label>openclaw <input type="number" min="0" max="128" step="1" aria-label="openclaw task limit"></label><button type="button" title="Higher priority">↑</button><button type="button" title="Lower priority">↓</button></div></div><button type="button" data-action="save-placement">Save placement</button></details><nav aria-label="Agents"><section class="lane" data-lane="C:/work/wt-gamma"><header class="lane-head"><span class="lane-key" title="C:/work/wt-gamma">C:/work/wt-gamma</span><span class="lane-count">1 child</span><span class="lane-path" title="C:/work/wt-gamma">C:/work/wt-gamma</span></header><div class="lane-children"><button type="button" class="agent-card" data-state="running" aria-label="worktree-without-branch · fixture-model · high · running"><span class="agent-card-mission" title="worktree-without-branch">worktree-without-branch</span><span class="agent-card-details"><span class="agent-card-model">fixture-model · high</span><span class="agent-card-status">running</span></span></button></div><ul class="lane-checklist"><li class="lane-check" data-outcome="merged" data-state="unknown" title="merged · unknown · this view reads no branch tip and no origin/main ref, so containment is not measured here"><span class="lane-check-name">merged</span><span class="lane-check-state">unknown</span></li><li class="lane-check" data-outcome="retired" data-state="no" title="retired · no · a child of this lane still holds a bound checkout"><span class="lane-check-name">retired</span><span class="lane-check-state">no</span></li><li class="lane-check" data-outcome="clean" data-state="unknown" title="clean · unknown · a checkout's own git status is measured by the node's settlement review, which this view is not given"><span class="lane-check-name">clean</span><span class="lane-check-state">unknown</span></li><li class="lane-check" data-outcome="main-only" data-state="yes" title="main-only · yes · this lane holds no branch of its own: its children work in the node checkout"><span class="lane-check-name">main-only</span><span class="lane-check-state">yes</span></li></ul></section></nav></aside><main class="orchestrator-canvas"><p class="orchestrator-empty">Agents appear here when delegated from the main chat. Select a card to follow its conversation.</p></main></div></wa-orchestrator></body></html>
