@@ -45,9 +45,17 @@ export function checkAdmission(repo,{phase='produce'}={}) {
     const named={activity:newest.activity,convergence:newest.convergence,runtime_state:newest.runtime_state,reason:newest.reason||current.reason||'',
       unfinished:unfinished.map(entry=>({id:entry.row.id,state:entry.row.state,activity:entry.verdict.activity,convergence:entry.verdict.convergence,runtime_state:entry.verdict.runtime_state,reason:entry.verdict.reason}))};
     if(phase==='observe')return {ok:true,wave_verified:true,wave_id:current.id,store:row.store,phase,...named};
-    if(current.state==='complete')throw Error('next_wave_requires_fresh_public_start');
     const freeze=path.join(row.store,'freeze.json');
     if(fs.existsSync(freeze) && phase!=='land')throw Error('wave_closing_frozen');
+    // A COMPLETE NEWEST WAVE IS NOT A FENCE ON PRODUCING. It ends the umbrella, so the
+    // repository-level acts still require a fresh public start - and that refusal now NAMES the
+    // older unfinished rows, because a completed wave beside an unfinished one is a mixed store
+    // and the operator has to see both. Producing and allocating are admitted: the wave is OFF
+    // (nothing is running), and an unrelated old row must not fence a repository that is working.
+    if(current.state==='complete') {
+      if(!['land','admit'].includes(phase))return {ok:true,wave_verified:true,wave_id:current.id,store:row.store,phase,...named,note:'the newest wave is complete; producing and allocating are not fenced by it'};
+      throw Error(`next_wave_requires_fresh_public_start:${current.id}${unfinished.length?`:unfinished:${unfinished.map(entry=>entry.row.id).join(',')}`:''}`);
+    }
     // THE REPOSITORY-LEVEL ACTS. Landing and independent delivery admission are admitted only while
     // no unfinished wave's convergence is unverified - and that holds whether or not agents are
     // working right now: a live umbrella does not make an unverified convergence verified.
