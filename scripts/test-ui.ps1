@@ -35,6 +35,42 @@ $harness = @'
   try {
   var tick = function () { return Promise.resolve(); };
   function check(ok, label) { if (!ok) problems.push(label); }
+  // THE INSPECTOR WINDOW. `?view=inspect` is the chat *itself* in a window of its own, and the one thing
+  // that makes it an inspector rather than a DOM panel is that the page leaves the browser's own context
+  // menu alone: Chrome's `Inspect element` lives in that menu. A shell is installed here, exactly as in
+  // the main stage, because the rule only means anything for a page that HAS a shell.
+  if (new URLSearchParams(location.search).get("view") === "inspect") {
+    window.__setShell(window.__makeShell());
+    await window.rendererLoaded;
+    for (var inspectTick = 0; inspectTick < 200 && !document.body.classList.contains("expanded"); inspectTick++) await tick();
+    check(document.body.classList.contains("expanded") && !document.body.classList.contains("view-only"),
+      "the inspector must show the chat itself, not a stripped view, saw body: " + document.body.className);
+    check(!!document.getElementById("input") && !!document.getElementById("steer") && !!document.getElementById("attach"),
+      "the inspector must open the furniture it is there to inspect, saw composer: " + !!document.getElementById("input")
+        + " steer: " + !!document.getElementById("steer") + " append-file: " + !!document.getElementById("attach"));
+    var inspectMenuEvent = new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 20, clientY: 20 });
+    var inspectSwallowed = !document.dispatchEvent(inspectMenuEvent);
+    check(!inspectSwallowed && inspectMenuEvent.defaultPrevented === false,
+      "the inspector must leave the browser's own context menu alone - Chrome's Inspect element is in it");
+    check(!document.getElementById("context-menu").hasAttribute("open"),
+      "and the app's own menu must not be drawn in the inspector in its place");
+    check(window.__shellCalls.filter(function (call) { return call.call === "openView"; }).length === 0,
+      "the inspector window must not open a second window of its own, saw " + JSON.stringify(window.__shellCalls));
+    // A second window that posted a turn or started a run would be a second client of the same
+    // conversation, which is the opposite of "look at it without disturbing it". The read count is
+    // asserted first, so an instrument that recorded nothing cannot pass this by being empty.
+    var inspectCalls = window.__calls || [];
+    var inspectPosts = inspectCalls.filter(function (call) { return call.method === "POST"; });
+    check(inspectCalls.length > 0,
+      "the inspector must have read from the node, saw " + inspectCalls.length + " call(s)");
+    check(inspectPosts.length === 0,
+      "the inspector must only read: no POST may come from it, saw " + JSON.stringify(inspectPosts.slice(0, 3)));
+    var inspectLog = document.createElement("pre");
+    inspectLog.id = "harness-log";
+    inspectLog.textContent = problems.length ? ("UI FAIL: " + problems.join(" ;; ")) : "UI PASS (inspect window)";
+    document.body.append(inspectLog);
+    return;
+  }
   // The provider, reasoning and model controls have one renderer now (renderControls): they are
   // three views of one settings payload, so the harness draws them through it - and through the two
   // it replaced when this page is an older app.js, so a case added for it fails on the behaviour
@@ -1177,6 +1213,62 @@ $harness = @'
     'and its own credits - account, status chip and balloon, mic and Steer - anchored to the shared shell');
   check(['engine-btn','term-btn','orchestrator-btn','collapse'].every(function(id){return !!document.getElementById(id);}),
     'the main window keeps the topbar controls a child panel must not have');
+
+  // THE ACTION ROW AND THE APPEND-FILE CONTROL ARE ONE IMPLEMENTATION. The main chat's Steer and a child
+  // pane's Steer/Cancel are the same `<wa-chat-actions>` element, and every control it holds - and the
+  // append-file button the shell ships - comes out of the shell's own `chatControl()` factory: one class,
+  // `.chat-control`, is the whole box. The assertions are structural on purpose. Two rules that happen to
+  // measure the same today is exactly what the owner forbade, so the class identity, the shared factory
+  // and a freshly built pair of components are asserted beside the measurement.
+  var boxOf=function(el){ if(!el) return null; var rect=el.getBoundingClientRect(), style=getComputedStyle(el);
+    return {h:Math.round(rect.height),w:Math.round(rect.width),padTop:style.paddingTop,padLeft:style.paddingLeft,
+      radius:style.borderRadius,border:style.borderTopWidth,cls:el.className}; };
+  var paneRow=paneShell.querySelector('wa-chat-actions');
+  var mainRow=mainShell.querySelector('wa-chat-actions');
+  var mainSteer=document.getElementById('steer');
+  var mainAttach=document.getElementById('attach');
+  var paneSteer=paneRow?paneRow.querySelector('button[data-action="steer"]'):null;
+  var paneAttach=paneShell.querySelector('[data-part="attach"]');
+  check(!!mainRow && !!paneRow && mainRow.tagName==='WA-CHAT-ACTIONS' && paneRow.tagName==='WA-CHAT-ACTIONS'
+    && mainRow.constructor===paneRow.constructor && mainRow.constructor===customElements.get('wa-chat-actions'),
+    'the action row must be the one shared component on both surfaces, saw main: '
+      + (mainRow?mainRow.tagName+' '+(mainRow.constructor===customElements.get('wa-chat-actions')):'none') + ' / child: '
+      + (paneRow?paneRow.tagName+' '+(paneRow.constructor===customElements.get('wa-chat-actions')):'none'));
+  check(!!mainSteer && !!mainAttach && !!paneSteer && !!paneAttach && mainSteer.parentElement===mainRow
+    && paneSteer.parentElement===paneRow && mainRow.controls.indexOf(mainSteer)>=0,
+    'the actions must be the shared row\'s own controls, saw ' +
+      (mainSteer?String(mainSteer.parentElement&&mainSteer.parentElement.tagName):'no steer') + ' / ' +
+      (paneSteer?String(paneSteer.parentElement&&paneSteer.parentElement.tagName):'no child steer'));
+  var footerBoxes=[mainAttach,mainSteer,paneAttach,paneSteer].map(boxOf);
+  check(footerBoxes.every(function(box){return box && box.cls==='chat-control';}),
+    'every footer control must be the factory\'s own class, saw ' + JSON.stringify(footerBoxes.map(function(box){return box?box.cls:null;})));
+  // The pane's own pair is on screen through the app's own path, so it is measured here; the main chat's
+  // Steer only appears while a run is in flight, and is measured where that run is (the busy section below).
+  check(!!footerBoxes[2] && footerBoxes[2].h===30 && !!footerBoxes[3] && footerBoxes[3].h===footerBoxes[2].h,
+    'in a child pane the Steer control must follow the append-file control\'s height, saw '
+      + JSON.stringify(footerBoxes.map(function(box){return box?box.h:null;})));
+  check(footerBoxes.every(function(box){return box && box.radius===footerBoxes[0].radius
+    && box.border===footerBoxes[0].border && box.padTop===footerBoxes[0].padTop;}),
+    'one box means one height, border, radius and vertical padding, saw '
+      + JSON.stringify(footerBoxes.map(function(box){return box?box.radius+'/'+box.border+'/'+box.padTop:null;})));
+  // A shell and a row built by the components themselves, with nothing authored: the control a row makes and
+  // the control a shell makes must be the same control. That is "same implementation" where two surfaces are
+  // involved, and it fails on the duplicated style block the height check alone would not catch.
+  var freshShell=document.createElement('wa-chat-shell');
+  var freshRow=document.createElement('wa-chat-actions');
+  var declaration=document.createElement('button');
+  declaration.type='button'; declaration.dataset.action='steer'; declaration.textContent='Steer';
+  freshRow.append(declaration);
+  document.body.append(freshShell,freshRow);
+  var freshAttach=freshShell.querySelector('[data-part="attach"]');
+  var freshAction=freshRow.querySelector('button[data-action="steer"]');
+  check(!!freshAttach && !!freshAction && freshAction.tagName===freshAttach.tagName
+    && freshAction.className===freshAttach.className && freshAction.className==='chat-control'
+    && boxOf(freshAttach).h===boxOf(freshAction).h && boxOf(freshAction).h===footerBoxes[0].h,
+    'a shell and a row built from the components alone must produce the same control, saw '
+      + (freshAttach?freshAttach.className+' '+boxOf(freshAttach).h:'none') + ' / '
+      + (freshAction?freshAction.className+' '+boxOf(freshAction).h:'none'));
+  freshShell.remove(); freshRow.remove();
   // Requirement: a child panel's header is its own two controls, with the icons asked for.
   var header=panes[1].querySelector('.agent-pane-head');
   var headerButtons=header?Array.prototype.slice.call(header.querySelectorAll('button')):[];
@@ -1546,6 +1638,29 @@ $harness = @'
   check(busyInput.value === "the next task", "Enter during a run must preserve the queued draft");
   check(busyEnter.defaultPrevented, "the busy Enter key must not fall through to form submission");
   check(!document.getElementById('steer').hidden,'active run exposes explicit steering');
+  // The owner's own complaint, measured where the app itself reveals the control: with a run in flight the
+  // main chat's Steer is on screen and it must be the append-file control's own box. The harness has the
+  // engine view open here, which hides the composer, so the *computed* box is asserted first - and then the
+  // rendered one, with that one body class taken off for the measurement and put back exactly as it was.
+  var busySteer=document.getElementById('steer'), busyAttach=document.getElementById('attach');
+  var busySteerStyle=getComputedStyle(busySteer), busyAttachStyle=getComputedStyle(busyAttach);
+  var boxNote=function(style){return style.height+' / min '+style.minWidth+' / radius '+style.borderRadius
+    + ' / border '+style.borderTopWidth; };
+  check(busySteerStyle.height===busyAttachStyle.height && busyAttachStyle.height==='30px'
+    && busySteerStyle.minWidth===busyAttachStyle.minWidth && busySteerStyle.borderTopWidth===busyAttachStyle.borderTopWidth
+    && busySteerStyle.borderRadius===busyAttachStyle.borderRadius,
+    'the main chat\'s Steer must compute to the append-file control\'s own box while a run is active, saw steer ['
+      + boxNote(busySteerStyle) + '] and append-file [' + boxNote(busyAttachStyle) + '], classes '
+      + busySteer.className + ' / ' + busyAttach.className);
+  var engineWasOpen=document.body.classList.contains('engine');
+  if(engineWasOpen) document.body.classList.remove('engine');
+  var busySteerRect=busySteer.getBoundingClientRect(), busyAttachRect=busyAttach.getBoundingClientRect();
+  if(engineWasOpen) document.body.classList.add('engine');
+  check(Math.round(busySteerRect.height)===Math.round(busyAttachRect.height) && Math.round(busyAttachRect.height)===30,
+    'the main chat\'s Steer must measure the append-file control\'s height while a run is active, saw steer '
+      + Math.round(busySteerRect.height) + 'px (w ' + Math.round(busySteerRect.width) + ') and append-file '
+      + Math.round(busyAttachRect.height) + 'px (w ' + Math.round(busyAttachRect.width) + '), body '
+      + document.body.className);
   document.getElementById('steer').click();
   for(var st=0;st<10;st++)await tick();
   check(window.__calls.some(call=>call.url==='subagents' && String(call.body).includes('steer_session')) && busyInput.value==='', 'steering sends durably and clears only accepted draft');
@@ -2909,6 +3024,36 @@ $harness = @'
   check(mainBox.value==='' && document.getElementById('messages').textContent.indexOf('VERB-FROM-THE-SHARED-SHELL')>=0 &&
     document.querySelectorAll('wa-message.user').length===userTurnsBefore+1,
     'Enter in the main composer must still send through the shared shell, saw value: ' + mainBox.value);
+
+  // THE `inspect` MENU ITEM. The main window draws its own right-click menu, and the inspector is asked for
+  // immediately after `Reload window`. Its action asks the shell for ONE named view: the name is what the
+  // shell keys a view by, so a second invocation reuses the window that is already open instead of stacking
+  // another - and nothing else is touched (no reload, no navigation, no window replaced).
+  window.__shellCalls.length=0;
+  window.__setShell(window.__makeShell());
+  var menuEvent=new MouseEvent('contextmenu',{bubbles:true,cancelable:true,clientX:30,clientY:30});
+  var menuSwallowed=!document.dispatchEvent(menuEvent);
+  check(menuSwallowed && menuEvent.defaultPrevented,
+    'the main window must draw its own right-click menu, saw prevented=' + menuEvent.defaultPrevented);
+  var contextItems=document.getElementById('context-menu').items || [];
+  var contextLabels=contextItems.map(function(item){return item.label || (item.separator ? '---' : '');});
+  var inspectAt=contextLabels.indexOf('inspect');
+  check(inspectAt>=0 && contextLabels[inspectAt-1]==='Reload window',
+    'inspect must be the menu item immediately after Reload window, saw ' + JSON.stringify(contextLabels));
+  var inspectItem=contextItems[inspectAt];
+  if (inspectItem && typeof inspectItem.action==='function') inspectItem.action();
+  var opened=window.__shellCalls.filter(function(call){return call.call==='openView';});
+  check(opened.length===1 && opened[0].view==='inspect' && /[?&]view=inspect/.test(opened[0].url),
+    'the inspect item must ask the shell for the inspect window on this node\'s URL, saw ' + JSON.stringify(opened));
+  if (inspectItem && typeof inspectItem.action==='function') inspectItem.action();
+  var askedAgain=window.__shellCalls.filter(function(call){return call.call==='openView';});
+  var viewNames=askedAgain.map(function(call){return call.view;}).filter(function(name,index,all){return all.indexOf(name)===index;});
+  check(askedAgain.length===2 && viewNames.length===1 && askedAgain[1].url===askedAgain[0].url,
+    'a second inspect must ask for the same one window rather than stack another, saw ' + JSON.stringify(askedAgain));
+  check(window.__shellCalls.every(function(call){return call.call==='openView';}),
+    'and it must touch nothing else in the window it was asked from, saw ' + JSON.stringify(window.__shellCalls));
+  if (typeof document.getElementById('context-menu').close==='function') document.getElementById('context-menu').close();
+  window.__setShell(null);
 } catch (error) {
     // A throw must still produce a log: a reporter that swallows its own failure is worse
     // than none, and "the harness did not run" is a symptom with no cause.
@@ -3010,12 +3155,37 @@ try {
     exit 1
   }
   $result = $match.Groups[1].Value.Trim()
-  if ($result -eq "UI PASS (reload and startup recovery)") {
-    Write-Host "  ok   UI structure, mid-run reload, and startup recovery" -ForegroundColor Green
-  } else {
+  if ($result -ne "UI PASS (reload and startup recovery)") {
     Write-Host "  FAIL $result" -ForegroundColor Red
     exit 1
   }
+  # The inspector window, as a real second load of the same page: `?view=inspect` is the chat itself in a
+  # window of its own, and what its stage asserts is the half a page can be held to - it shows the chat
+  # rather than a stripped view, and it leaves the browser's own context menu alone (Chrome's element
+  # inspection lives in that menu, so a page that swallowed it would leave a DOM panel and no inspector).
+  # One verdict line either way, exactly like the first load.
+  $inspectDump = ""
+  $inspectPrevious = $ErrorActionPreference
+  $ErrorActionPreference = "Continue"
+  try {
+    # The same native-command trap as above: a browser writes to stderr even when it succeeds, and under
+    # `Stop` that aborts the script.
+    $inspectDump = & $edge --headless=new --disable-gpu --virtual-time-budget=10000 "--user-data-dir=$profile" --dump-dom "http://127.0.0.1:$Port/?view=inspect" 2>$null | Out-String
+  } finally { $ErrorActionPreference = $inspectPrevious }
+  $inspectMatch = [regex]::Match($inspectDump, '<pre id="harness-log"[^>]*>([\s\S]*?)</pre>')
+  if (-not $inspectMatch.Success) {
+    $inspectDebug = Join-Path $env:TEMP "wa-ui-inspect-dump.html"
+    Set-Content -Path $inspectDebug -Value $inspectDump
+    Write-Host "  !  the inspect stage did not run (no log in the DOM dump)" -ForegroundColor Red
+    Write-Host ("     dump written to " + $inspectDebug + " (" + $inspectDump.Length + " chars)")
+    exit 1
+  }
+  $inspectResult = $inspectMatch.Groups[1].Value.Trim()
+  if ($inspectResult -ne "UI PASS (inspect window)") {
+    Write-Host "  FAIL $inspectResult" -ForegroundColor Red
+    exit 1
+  }
+  Write-Host "  ok   UI structure, mid-run reload, startup recovery, and the inspect window" -ForegroundColor Green
 } finally {
   if ($server) { Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue }
   Remove-Item Env:WASM_AGENT_HOME -ErrorAction SilentlyContinue

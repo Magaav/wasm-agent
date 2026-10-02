@@ -1461,6 +1461,34 @@ function chatReadAsDataURL(file) {
   });
 }
 
+// One control, built in one place.
+//
+// Every control the composer footer carries - the append-file button the shell ships, and the actions a
+// host puts beside it (`<wa-chat-actions>` below) - is built here, and `chat-control` (style.css) is the
+// whole box. That is the point: the two cannot be the same height because two rules happen to agree
+// today, and a change to the one box moves all of them. `text` is what makes a control a labelled one;
+// the box is the same, and only its width follows its own label.
+function chatControl({ part = "", action = "", id = "", text = "", name = "", title = "", icon = "" } = {}) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "chat-control";
+  if (part) button.setAttribute("data-part", part);
+  if (action) button.dataset.action = action;
+  if (id) button.id = id;
+  if (text) { button.dataset.label = text; button.textContent = text; }
+  // A control that is a glyph and nothing else keeps its name in `title`/`aria-label`, the way the
+  // append-file control always has: the reader still knows what the paperclip does.
+  const accessible = name || text;
+  if (accessible) button.setAttribute("aria-label", accessible);
+  button.title = title || accessible || action;
+  if (icon) button.innerHTML = icon;
+  return button;
+}
+
+// The append-file glyph. The button around it is not authored here: `_ensure()` builds it with
+// `chatControl()`, so this footer has one control factory rather than one markup path plus one code path.
+const CHAT_ATTACH_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16.5 6.6 8.7 14.4a1.5 1.5 0 0 0 2.1 2.1l7.8-7.8a3.5 3.5 0 0 0-5-5l-8.1 8.1a5.5 5.5 0 0 0 7.8 7.8l6.7-6.7-1.4-1.4-6.7 6.7a3.5 3.5 0 0 1-5-5l8.1-8.1a1.5 1.5 0 0 1 2.1 2.1z"/></svg>';
+
 const CHAT_SHELL_MARKUP = `
   <div class="messages" data-part="content"></div>
   <div class="chat-host" data-part="host"></div>
@@ -1474,12 +1502,7 @@ const CHAT_SHELL_MARKUP = `
       </button>
     </div>
     <div class="composer-footer">
-      <div class="footer-left" data-part="footer-left">
-        <button class="icon-btn" type="button" data-part="attach" title="Append a file" aria-label="Append a file">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16.5 6.6 8.7 14.4a1.5 1.5 0 0 0 2.1 2.1l7.8-7.8a3.5 3.5 0 0 0-5-5l-8.1 8.1a5.5 5.5 0 0 0 7.8 7.8l6.7-6.7-1.4-1.4-6.7 6.7a3.5 3.5 0 0 1-5-5l8.1-8.1a1.5 1.5 0 0 1 2.1 2.1z"/></svg>
-        </button>
-        <input type="file" data-part="file" hidden multiple />
-      </div>
+      <div class="footer-left" data-part="footer-left"></div>
       <div class="footer-right" data-part="footer-right">
         <span class="composer-model" data-part="model" title="Model used for the latest request">connecting…</span>
       </div>
@@ -1503,8 +1526,14 @@ class WaChatShell extends HTMLElement {
     this._attachmentsEl = part("attachments");
     this._input = part("input");
     this._send = part("send");
-    this._attach = part("attach");
-    this._file = part("file");
+    // The two controls this footer always had, built instead of authored: the attach button and the
+    // file input it drives (".footer-left" holds a host's own children, then these).
+    this._attach = chatControl({ part: "attach", name: "Append a file", title: "Append a file", icon: CHAT_ATTACH_ICON });
+    this._file = document.createElement("input");
+    this._file.type = "file";
+    this._file.multiple = true;
+    this._file.hidden = true;
+    this._file.setAttribute("data-part", "file");
     this._footerLeft = part("footer-left");
     this._footerRight = part("footer-right");
     this._modelEl = part("model");
@@ -1520,6 +1549,7 @@ class WaChatShell extends HTMLElement {
       else this._content.append(node);
     }
     this._footerLeft.prepend(...left);
+    this._footerLeft.append(this._attach, this._file);
     this._footerRight.prepend(...right);
     this._form.append(...balloons);
     if (this.hasAttribute("placeholder")) this._input.placeholder = this.getAttribute("placeholder");
@@ -1826,6 +1856,47 @@ class WaChatShell extends HTMLElement {
 WaChatShell._instances = 0;
 customElements.define("wa-chat-shell", WaChatShell);
 
+// The row of per-message actions a chat footer carries: the main chat's Steer, and a child pane's Steer
+// and Cancel task. It is the *same row* on both surfaces because it is this one element, and its buttons
+// are the same control as the append-file button because it builds them with `chatControl()`.
+//
+// A host authors *declarations*: one child per action, carrying `data-action`, its label as its text, and
+// whatever `id`/`title`/`hidden` state the host addresses (`app.js` keeps `#steer`). The row replaces each
+// declaration with the built control, so a host never hand-builds a button that has to agree with another.
+//
+// Built once, on connect: a host wires its own listeners onto the controls it addressed by id, so a
+// reconnect - the shell moves its authored children into the footer - must leave them exactly as they are.
+class WaChatActions extends HTMLElement {
+  connectedCallback() { this._ensure(); }
+
+  _ensure() {
+    if (this._built) return;
+    this._built = true;
+    this.classList.add("chat-actions");
+    const declarations = Array.from(this.children).filter((node) => node.dataset && node.dataset.action);
+    this.replaceChildren(...declarations.map((node) => {
+      const control = chatControl({ action: node.dataset.action, id: node.id || "",
+        text: node.textContent.trim(), title: node.getAttribute("title") || "" });
+      // A declaration that starts hidden is a control the host reveals later (`#steer`).
+      if (node.hidden === true) control.hidden = true;
+      return control;
+    }));
+    // The row hears its own clicks and says *which action* was chosen, so a host is never listening to a
+    // particular button: a control may be built later than the host wired itself, and the host is still
+    // told. (A host that addresses one control by id - app.js's `#steer` - can still listen to it itself.)
+    this.addEventListener("click", (event) => {
+      const control = event.target instanceof Element ? event.target.closest("button[data-action]") : null;
+      if (!control || control.parentNode !== this) return;
+      this.dispatchEvent(new CustomEvent("chat-action",
+        { bubbles: true, detail: { action: control.dataset.action, control: control } }));
+    });
+  }
+
+  // What a host addresses, instead of a class it has to know about.
+  get controls() { this._ensure(); return Array.from(this.querySelectorAll("button[data-action]")); }
+}
+customElements.define("wa-chat-actions", WaChatActions);
+
 function agentTaskTitle(task) {
   const text=String(task.title || task.prompt || '').replace(/\s+/g,' ').trim();
   return text ? (text.length>90 ? text.slice(0,87)+'…' : text) : 'Untitled task';
@@ -1861,6 +1932,22 @@ class WaAgentSession extends HTMLElement {
     this.shell = document.createElement("wa-chat-shell");
     this.shell.setAttribute("placeholder", "Talk to this agent…");
     this.shell.setAttribute("label", "Message this agent");
+    // Steer and Cancel are the panel's own: they reach the child routes, and they sit where the main
+    // chat keeps its per-message actions. The row is the shared one and it is authored the way the main
+    // chat authors its own - a `data-slot="footer-right"` child of the shell - so a child pane and the
+    // main conversation build their actions out of one component and one control factory. It is
+    // appended before the shell is built (the first property access below), because that is when the
+    // shell reads its authored children into their slots.
+    const actions = document.createElement("wa-chat-actions");
+    actions.setAttribute("data-slot", "footer-right");
+    for (const [action, label] of [["steer", "Steer"], ["cancel", "Cancel task"]]) {
+      const declaration = document.createElement("button");
+      declaration.type = "button";
+      declaration.dataset.action = action;
+      declaration.textContent = label;
+      actions.append(declaration);
+    }
+    this.shell.append(actions);
     this.append(this.shell);
     this.form = this.shell.form;
     this.input = this.shell.input;
@@ -1874,25 +1961,19 @@ class WaAgentSession extends HTMLElement {
     this.statusLine.setAttribute("role", "status");
     this.notice = document.createElement("div"); this.notice.className = "agent-notice"; this.notice.setAttribute("role", "status");
     this.shell.host.append(this.preview, this.statusLine, this.notice);
-    // Steer and Cancel are the panel's own: they reach the child routes, and they sit where the main
-    // chat keeps its per-message actions.
-    const actions = document.createElement("div");
-    actions.className = "chat-actions";
-    for (const [action, label] of [["steer", "Steer"], ["cancel", "Cancel task"]]) {
-      const button = document.createElement("button");
-      button.type = "button"; button.className = "chat-action"; button.dataset.action = action; button.textContent = label;
-      actions.append(button);
-    }
-    this.shell.footerRight.prepend(actions);
     this.startClock();
     // `Send` and `Steer` are one draft leaving in two ways, so they are one path with a name: the
     // shell hands over the text and the attachments, and this element decides what a child accepts.
     this.shell.addEventListener("chat-send", () => this.sendDraft());
     this.shell.addEventListener("chat-files", (event) => this.collectFiles(event.detail.files));
-    this.querySelectorAll('[data-action]').forEach(button => button.addEventListener('click', () => {
-      if (button.dataset.action === 'steer') this.sendDraft('steer');
-      else this.emit(button.dataset.action);
-    }));
+    // The row is the pane's own two actions, and it says which one was chosen.
+    actions.addEventListener("chat-action", (event) => {
+      if (event.detail.action === "steer") this.sendDraft("steer");
+      else this.emit(event.detail.action);
+    });
+    // The panel's header is the pane's own two controls (close, expand), not the row's.
+    this.querySelectorAll('.agent-pane-head [data-action]').forEach(button =>
+      button.addEventListener('click', () => this.emit(button.dataset.action)));
   }
   // The same text reuses the same idempotency key, so a retry after a lost answer cannot arrive twice.
   sendDraft(action = 'message') {
