@@ -161,15 +161,27 @@ hand and read `sentinel.log`; do not hand-edit the database or the binary while 
 bash scripts/deploy.sh --reason "what changed and why"
 ```
 
-Run this from outside the node's run. It refuses a dirty tree, refuses a tree behind `origin/main`, proves the binary on a scratch port before it
+Run this from outside the node's run. It refuses a dirty tree, refuses a tree behind `origin/main` and refuses
+a HEAD that is not on it, proves the binary on a scratch port before it
 goes near the running node, installs through `scripts/upgrade.sh`, records commit/branch/hash/time/reason in
-`installed.txt`, and refuses if the pid answering is not the pid the install recorded. Since 2026-10-02 it
-no longer requires a full-gate receipt: a deploy is the **preview path** (the operator wants to see a landed
-change now), the full gate belongs to a **release** (`scripts/wave-release.mjs`), and
-`WA_DEPLOY_REQUIRE_RELEASE_PROOF=1` restores the refusal for whoever wants a deploy that cannot run
-unverified. The refusals are paid
-for: a node behind main served a diff route that answered `unknown_action:patch`; a gate that stopped one of
+`installed.txt`, and refuses if the pid answering is not the pid the install recorded. Since 2026-10-02 a
+deploy is a **stage of its own**, not a step of the release gate: it does not wait for a release and does not
+consult a release proof at all (speed is the default path), while the full gate belongs to a **release**
+(`scripts/wave-release.mjs`), which is what certifies an exact tree. `WA_DEPLOY_REQUIRE_RELEASE_PROOF=1`
+(off by default) is the only way to ask for the strict path, and the deploy is then refused by name when the
+tree carries no proof. The refusals that remain are about **state**: dirty tree, HEAD not on `origin/main`, a
+downgrade of what is installed, a port held by another install, an install directory the machine's service
+does not run its node from. They are paid for: a node behind main served a diff route that answered
+`unknown_action:patch`; a gate that stopped one of
 two listeners reported success because the *other* node answered `/health`.
+
+`installed.txt` after a deploy is the **deploy's own** record: `source_provenance=clean-built-by-deploy` and
+`record_role=final`, naming the exact commit, the installed binary's hash and the hash of the sentinel the
+deploy installed. `upgrade.sh` records the bytes it places with `source_provenance=unverified-binary` and,
+when a deploy called it, `record_role=interim` - so a record left at `interim` means a deploy died between
+installing the node and writing its own record (that happened on 2026-10-02 19:30: the installed `deploy.sh`
+was `cp`ed over itself while running, which killed the shell mid-file). `scripts/verify-install.sh` fails an
+interim record by name.
 
 **A POSIX path handed to a native Windows process is silently unusable.** An upgrade once started this node
 with `--ui /c/Users/...`, so it could not read `index.html` and answered 404 for `/` - the window showed

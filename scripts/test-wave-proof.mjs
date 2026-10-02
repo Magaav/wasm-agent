@@ -1,5 +1,5 @@
 import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import assert from 'node:assert/strict';import {spawnSync} from 'node:child_process';
-import {verifyDelivered} from './lib/wave-delivery.mjs';import {positiveCurrentOwner} from './lib/wave-owners.mjs';import {fullProof,findFullProof,retainFullProof} from './lib/full-gate-proof.mjs';import crypto from 'node:crypto';
+import {verifyDelivered} from './lib/wave-delivery.mjs';import {positiveInFlightAgent,positiveResolvedBinding} from './lib/wave-owners.mjs';import {fullProof,findFullProof,retainFullProof} from './lib/full-gate-proof.mjs';import crypto from 'node:crypto';
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'wa-wave-proof-real-'));let checks=0,passed=false;
 const git=(...args)=>{const r=spawnSync('git',args,{cwd:root,encoding:'utf8',windowsHide:true});assert.equal(r.status,0,r.stderr);return r.stdout.trim();};
 const check=(value,label)=>{assert.ok(value,label);checks++;};
@@ -11,9 +11,24 @@ try{
  check(verifyDelivered(root,record,main).ok,'real immutable review/admission/landing prove delivery');git('branch','-d','change/fixture');check(verifyDelivered(root,record,main).ok,'delivery proof survives retirement of branch');
  for(const bad of [{...record,review:{...record.review,tip:base}},{...record,review:{...record.review,tree:'f'.repeat(40)}},{...record,admission:{...record.admission,by:'producer'}},{...record,admission:{...record.admission,tip:base}}])check(!verifyDelivered(root,bad,main).ok,'stale or self-authorized delivery proof rejected');
  const unmerged=git('commit-tree',tree,'-p',tip,'-m','unlanded');check(!verifyDelivered(root,{...record,tip:unmerged,review:{...record.review,tip:unmerged},admission:{...record.admission,tip:unmerged}},main).ok,'unmerged tip cannot borrow landing.sha main');
- const terminal={connected:true,orphaned:false,incarnationId:'inc-1'},card={worktreeInstanceId:'inst-1',agents:[{state:'done',interrupted:false,paneKey:'pane-1',updatedAt:1}]},worker={dispatchStatus:'completed',workerState:'succeeded',terminalState:'retained',projection:{stage:{activity:'done'},liveness:{verdict:'live'}}};
- check(positiveCurrentOwner(worker,terminal,card),'positive current owner can be frozen');check(!positiveCurrentOwner({...worker,projection:{stage:{activity:'unknown'},liveness:{verdict:'unverifiable'}}},terminal,card),'unverifiable old retained dispatch cannot authorize freeze');check(!positiveCurrentOwner(worker,terminal,{agents:[{state:'working'}]}),'new current activity rejects old settlement');
- check(!positiveCurrentOwner(worker,{...terminal,incarnationId:undefined},card),'absent terminal incarnation is not a matching identity');check(!positiveCurrentOwner(worker,terminal,{...card,worktreeInstanceId:undefined}),'absent actor generation is not a matching identity');check(!positiveCurrentOwner(worker,terminal,{...card,agents:[{state:'done',interrupted:false,paneKey:'pane-1'}]}),'absent pane generation cannot authorize freeze');check(!positiveCurrentOwner(worker,terminal,{...card,agents:[{state:'done',interrupted:false,paneKey:'',updatedAt:1}]}),'absent pane identity cannot authorize freeze');check(!positiveCurrentOwner(worker,terminal,{...card,agents:[{state:'done',interrupted:false,paneKey:'pane-1',updatedAt:1},{state:'done',interrupted:false,paneKey:'pane-1',updatedAt:2}]}),'duplicate pane identity cannot authorize freeze');
+ // OUR OWN OWNERSHIP IDENTITY. These are the node-runtime facts the wave proofs read instead of
+ // a third-party card: a session's own turn, and a binding that is really reconciled.
+ const agent={session:'s-1',worktree:'C:/data/wa-worktree-s-1',state:'allocated',in_flight:true,turn:{run_id:'r-1',boot:'b-1',state:'active',updated_at:1}};
+ check(positiveInFlightAgent(agent),'a positively identified in-flight agent is what makes a wave ON');
+ check(!positiveInFlightAgent({...agent,in_flight:false}),'a session that is not in flight is not activity');
+ check(!positiveInFlightAgent({...agent,turn:{...agent.turn,state:'settled'}}),'a settled turn is not a running agent');
+ check(!positiveInFlightAgent({...agent,turn:{...agent.turn,run_id:''}}),'an agent that cannot name its run is not a matching identity');
+ check(!positiveInFlightAgent({...agent,turn:{...agent.turn,boot:''}}),'an agent that cannot name its boot is not a matching identity');
+ check(!positiveInFlightAgent({...agent,turn:{...agent.turn,updated_at:undefined}}),'an agent with no turn stamp cannot authorize a freeze');
+ check(!positiveInFlightAgent({...agent,worktree:''}),'an agent with no tree cannot authorize a freeze');
+ check(!positiveInFlightAgent({...agent,session:''}),'an agent with no session identity cannot authorize a freeze');
+ check(positiveResolvedBinding({state:'released',registered:false}),'a released binding with no tree left is settled');
+ check(!positiveResolvedBinding({state:'released',registered:true}),'a released binding whose tree is still registered is not settled');
+ check(positiveResolvedBinding({state:'parked',registered:true,detached:true,branch:'',recorded_branch:''}),'a parked detached exact tip is settled');
+ check(!positiveResolvedBinding({state:'parked',registered:true,detached:false,branch:'change/x'}),'a parked binding still on a branch is not settled');
+ check(!positiveResolvedBinding({state:'parked',registered:false,detached:true}),'a parked binding with no tree is not settled');
+ check(!positiveResolvedBinding({state:'allocated',registered:true,detached:false}),'an allocated binding is not settled');
+ check(!positiveResolvedBinding({state:'release_unknown',registered:true}),'an unresolved transition is never settled');
  // Real committed source + a real tracked gate runner, actually executed, then
  // retained so its execution identity survives retirement; never a fake removed clone.
  const gitIn=(repo,...args)=>{const r=spawnSync('git',args,{cwd:repo,encoding:'utf8',windowsHide:true});assert.equal(r.status,0,r.stderr);return r.stdout.trim();};

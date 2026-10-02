@@ -9,6 +9,7 @@ import {DatabaseSync} from 'node:sqlite';
 import {listRecords} from './lib/delivery-store.mjs';
 import {verifyDelivered} from './lib/wave-delivery.mjs';
 import {frozenOwners,ownerInventory} from './lib/wave-owners.mjs';
+import {activityInventory,sourceOfConfig,orcaView} from './lib/wave-activity.mjs';
 import {operationSafety} from './wave-adapter.mjs';
 const [kind,file]=process.argv.slice(2);
 const hash=data=>crypto.createHash('sha256').update(data).digest('hex');
@@ -36,7 +37,11 @@ try {
     }else unresolved=claims;
     evidence={observed_claims:claims.length,note:'Lease/PID age never reconciles a claim; use the resource API with inspected effects.'};
   } else if(kind==='owners') {
-    const owners=process.env.WA_WAVE_ADMISSION==='1'?ownerInventory(config):frozenOwners(config,wave_id,main);unresolved=owners.unresolved;evidence=owners;
+    const owners=process.env.WA_WAVE_ADMISSION==='1'?ownerInventory(config):frozenOwners(config,wave_id,main);
+    // COMPLETION FOLDS IN THE LEFTOVERS. An allocated managed binding is work a retirement plan
+    // may still be settling, so the freeze fence reports it separately - but a wave cannot be
+    // complete while this repository still holds an unreconciled managed workspace.
+    unresolved=[...owners.unresolved,...(owners.leftovers||[])];evidence=owners;
   } else if(kind==='deliveries') {
     if(!config.delivery_store || !fs.existsSync(config.delivery_store))fail('delivery_store_missing');
     const records=listRecords(config.delivery_store);
@@ -46,25 +51,37 @@ try {
     }
     evidence={records:records.length};
   } else if(kind==='registries') {
-    const listing=run(['git','-C',config.repo,'worktree','list','--porcelain','-z'],config.repo);
-    const trees=listing.split('\0\0').filter(Boolean).map(row=>Object.fromEntries(row.split('\0').filter(Boolean).map(line=>{const space=line.indexOf(' ');return space<0?[line,true]:[line.slice(0,space),line.slice(space+1)];})));
-    const byPath=new Map(trees.map(tree=>[key(tree.worktree),tree]));
-    const sessions=rows(path.join(config.data,'memory.db'),"SELECT id,worktree,workspace_required,workspace_state,workspace_branch,workspace_start_state FROM sessions WHERE workspace_required=1 OR worktree!=''");
-    for(const session of sessions) {
-      if(session.workspace_state==='released')continue;
-      const tree=byPath.get(key(session.worktree));
-      if(session.workspace_state==='parked') {
-        const parked=JSON.parse(session.workspace_start_state || '{}').park_reconciliation;
-        if(!tree?.detached || !parked?.evidence || tree.HEAD!==parked.head || session.workspace_branch)unresolved.push({session:session.id,reason:'parked_binding_mismatch'});
-      } else if(session.workspace_required || key(session.worktree)!==key(config.repo))unresolved.push({session:session.id,reason:'finished_workspace_binding_not_released_or_parked'});
+    // OUR OWN REGISTRY. The repository's real Git worktree list, the node's own session
+    // bindings, and the agreement between them. No third party is consulted: an `orca`
+    // binary is at most an optional viewer, and its absence changes no verdict.
+    const source=sourceOfConfig(config);
+    const inventory=activityInventory(source);
+    if(!inventory.ok)fail('own_registry_inventory_unavailable:'+inventory.reason);
+    const trees=inventory.trees,bindings=inventory.bindings;
+    const byPath=new Map(trees.map(tree=>[key(tree.path),tree]));
+    for(const binding of bindings) {
+      if(binding.state==='released') {
+        if(binding.registered || fs.existsSync(binding.worktree))unresolved.push({session:binding.session,reason:'released_binding_tree_present',worktree:binding.worktree});
+        continue;
+      }
+      const tree=byPath.get(key(binding.worktree));
+      if(!tree)unresolved.push({session:binding.session,reason:'binding_tree_not_registered',worktree:binding.worktree,state:binding.state});
+      else {
+        if(binding.state==='parked') {
+          if(!tree.detached || tree.branch || binding.branch || binding.recorded_branch)unresolved.push({session:binding.session,reason:'parked_binding_not_a_detached_exact_tip',worktree:binding.worktree});
+        } else if((tree.branch||'')!==(binding.recorded_branch||'')) {
+          unresolved.push({session:binding.session,reason:'binding_branch_disagrees_with_git',worktree:binding.worktree,tree_branch:tree.branch,recorded:binding.recorded_branch});
+        }
+      }
     }
-    const orca=JSON.parse(run([config.orca || 'orca','worktree','list','--repo',`id:${config.orca_repo_id}`,'--json'],config.repo));
-    if(orca.ok!==true || orca.result?.truncated!==false || !Array.isArray(orca.result?.worktrees))fail('orca_registry_incomplete');
-    for(const card of orca.result.worktrees) {
-      const tree=byPath.get(key(card.path));
-      if(!tree || key(card.git?.path)!==key(card.path) || (card.branch || '')!==(tree.branch || '') || (card.git?.branch || '')!==(tree.branch || '') || card.head!==tree.HEAD)unresolved.push({card:card.id,reason:'orca_git_branch_or_path_mismatch'});
+    for(const tree of trees) {
+      if(key(tree.path)===key(config.repo))continue;
+      if(bindings.some(binding=>key(binding.worktree)===key(tree.path)))continue;
+      unresolved.push({worktree:tree.path,reason:'unowned_worktree_registration',head:tree.head,branch:tree.branch});
     }
-    evidence={git_worktrees:trees.length,runtime_bindings:sessions.length,orca_cards:orca.result.worktrees.length};
+    for(const item of inventory.unresolved)if(!unresolved.some(x=>x.reason===item.reason&&key(x.worktree||'')===key(item.worktree||'')&&x.session===item.session))unresolved.push(item);
+    for(const item of inventory.leftovers)if(!unresolved.some(x=>x.reason===item.reason&&key(x.worktree||'')===key(item.worktree||'')&&x.session===item.session))unresolved.push(item);
+    evidence={git_worktrees:trees.length,runtime_bindings:bindings.length,managed_bindings:inventory.held.length,canonical:config.repo,third_party:'none',orca_view:orcaView(source,{enabled:config.orca_view===true})};
   } else if(kind==='runtime') {
     const raw=fs.readFileSync(path.join(config.install,'installed.txt'),'utf8');
     const installed=Object.fromEntries(raw.split(/\r?\n/).filter(Boolean).map(line=>{const equal=line.indexOf('=');return [line.slice(0,equal),line.slice(equal+1)];}));

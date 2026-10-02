@@ -1763,6 +1763,13 @@ gate_run node scripts/test-delivery-admission.mjs
 gate_run node scripts/test-wave-release.mjs
 gate_run bash scripts/test-deploy-gate-policy.sh
 gate_run bash scripts/test-deploy-preconditions.sh
+# The install record, and the self-ship that used to kill the deploy before it wrote one. Both read the real
+# record step / ship helper out of deploy.sh and upgrade.sh and run them against a private install
+# directory: the deploy's record must name the exact commit with `source_provenance=clean-built-by-deploy`
+# and `record_role=final` over upgrade.sh's interim record, and a script that replaces itself while it runs
+# must finish (the 2026-10-02 deploy died there and left `commit=unknown` while serving 2f02b4c).
+gate_run bash scripts/test-deploy-record.sh
+gate_run bash scripts/test-deploy-self-ship.sh
 gate_run node scripts/test-delivery-refresh.mjs
 env -u GATE_LANE_HELD node scripts/test-gate-lane-wiring.cjs
 gate_run node scripts/test-openai-sub.cjs "$BIN"
@@ -1848,6 +1855,9 @@ done
 # the wake that must never be replayed. Model-free: the scheduler seam is counted, not driven.
 WA_SCRIPT="scripts/test-completion-packet.lua" "$BIN" --db "$DB.completion-packet"
 run_proof_fixture jobs 37 node scripts/test-job-subagents.cjs
+# The `onSubagentReturn` hook: every settled child, in every state, woken with a deterministically
+# measured deploy verdict and its operating instruction. A real sentinel, real git checkouts, no model.
+run_proof_fixture subagentReturn 80 node scripts/test-subagent-return-hook.cjs
 run_proof_fixture orchestration 33 node scripts/test-orchestration-e2e.cjs "$BIN"
 run_proof_fixture whatsapp 40 node scripts/test-whatsapp-subagent-e2e.cjs
 # The reader's acted cursor: a message may be consumed only when a durable decision exists for it, the

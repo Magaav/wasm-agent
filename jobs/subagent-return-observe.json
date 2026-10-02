@@ -1,0 +1,13 @@
+{
+  "id": "subagent-return-observe",
+  "name": "Report every settled child to onSubagentReturn",
+  "trigger": {
+    "kind": "schedule",
+    "every_seconds": 30
+  },
+  "action": {
+    "kind": "run",
+    "script": "PREPARED_BY_INSTALL/scripts/subagent-return-observe.sh",
+    "timeout_seconds": 180
+  }
+}

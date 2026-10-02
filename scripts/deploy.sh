@@ -324,30 +324,38 @@ fi
 
 # 4. Build.
 echo "deploy: building"
-# A release proof is looked up and RECORDED here, but it is no longer a precondition of deploying. A
-# deploy is the preview path: the operator asks for it and wants to see the change now, and the gate
-# belongs to a RELEASE (scripts/wave-release.mjs), which is what certifies an exact tree. The invariant
-# this block used to enforce - "no effect before its proof" - now reads "no RELEASE before its proof",
-# because the effect a deploy makes is deliberately early.
+# NO RELEASE PROOF IS CONSULTED HERE, and that is the default. A deploy and a release are two stages,
+# not one gate: `scripts/wave-release.mjs` is what runs the full gate and names the exact tree it
+# certified, and this deploy is how a change that has landed becomes the installed one - the operator
+# asks for it and wants to see it now. Tying the two together made the fast path wait on a
+# certification it does not need, and it read the relation backwards: a deploy is evidence ABOUT a
+# release, never the licence to make one. Nothing in this script asks a release for permission, and
+# with the knob below unset the tree is not even handed to the proof lookup - no lookup, no refusal
+# about a receipt nobody asked for, and the deploy decision cannot be changed by the presence or
+# absence of gate evidence.
 #
-# The refusal is still available and still exact: WA_DEPLOY_REQUIRE_RELEASE_PROOF=1 restores it, and a
-# source tree without a complete exact-tree receipt is then refused by name. A cautious deploy, or a
-# future release-only policy, sets that; nothing selects it automatically.
-if [ -f "$ROOT/rust/Cargo.toml" ]; then
+# What still guards this path is state, not paperwork: the tree must be clean (step 1), its HEAD must
+# be on origin/main with nothing behind it (step 2), it may not be a downgrade of what is installed
+# (step 3), the port it will be restarted onto must not be someone else's node (step 2b), and the
+# install it writes must be the one the machine runs the node from (step 0).
+#
+# WA_DEPLOY_REQUIRE_RELEASE_PROOF=1 restores the strict behaviour for anyone who wants it - a
+# release-only machine, or an operator who will not install without an exact-tree receipt: the proof
+# is then looked up, and a tree without one is refused BY NAME. It is OFF by default because speed is
+# the default path, and nothing selects it automatically.
+if [ -n "${WA_DEPLOY_REQUIRE_RELEASE_PROOF:-}" ] && [ -f "$ROOT/rust/Cargo.toml" ]; then
+  echo "deploy: WA_DEPLOY_REQUIRE_RELEASE_PROOF is set - this deploy refuses a tree without a release proof"
   SOURCE_TREE="$(git rev-parse HEAD^{tree})"
   PROOF_REPO="$ROOT"; PROOF_SCRIPT="$ROOT/scripts/lib/full-gate-proof.mjs"
   if command -v cygpath >/dev/null 2>&1; then
     PROOF_REPO="$(cygpath -w "$PROOF_REPO")"; PROOF_SCRIPT="$(cygpath -w "$PROOF_SCRIPT")"
   fi
-  # 2 is "no complete identical-tree receipt", which is expected on the preview path; the JSON says
-  # which it is, and the note below carries it into deploy.log either way.
+  # 2 is "no complete identical-tree receipt", and on this path that is a refusal, not a note.
   GATE_PROOF="$(node "$PROOF_SCRIPT" "$PROOF_REPO" "$SOURCE_TREE" 2>&1)" || true
   if printf '%s' "$GATE_PROOF" | grep -q '"verified":true'; then
     note "release proof: this tree carries complete exact-tree verification for $SOURCE_TREE: $GATE_PROOF"
-  elif [ -n "${WA_DEPLOY_REQUIRE_RELEASE_PROOF:-}" ]; then
-    fail "complete gate proof required for source tree $SOURCE_TREE (WA_DEPLOY_REQUIRE_RELEASE_PROOF is set): $GATE_PROOF"
   else
-    note "not release-verified: deploying tree $SOURCE_TREE as a preview - no complete exact-tree gate evidence ($GATE_PROOF); set WA_DEPLOY_REQUIRE_RELEASE_PROOF=1 to refuse instead"
+    fail "complete gate proof required for source tree $SOURCE_TREE (WA_DEPLOY_REQUIRE_RELEASE_PROOF is set): $GATE_PROOF"
   fi
 fi
 
@@ -429,13 +437,24 @@ printf '%s\n' "$RUNTIME_PATH" > "$RUNTIME_RECORD" && mv -f "$RUNTIME_RECORD" "$I
   || fail "could not atomically record runtime worktree"
 export WA_RUNTIME_WORKTREE="$RUNTIME_PATH"
 
+# wa-deploy-upgrade-invocation: begin
+# Everything upgrade.sh is told goes on the command's own lines, and the COMMENTS LIVE ABOVE IT on purpose.
+# That is not style. bash drops a simple command's whole `VAR=value \` prefix when a comment line sits
+# inside the continuation, and MEASURED on 2026-10-02 (`FOO=1 \` / `# comment` / `bash -c 'echo "[$FOO]"'`
+# printed `[]`) it drops it silently while still running the command - so comment lines that were once
+# between the assignments and `bash "$UPGRADE"` here meant upgrade.sh never received WA_UPGRADE_VIA,
+# WA_UPGRADE_REASON or WA_INSTALL_DIR. The install record of a deploy then said `via=upgrade.sh` and
+# `reason=upgrade requested` (the values that mean "someone ran upgrade.sh by hand"), which is exactly what
+# installed.txt held on 2026-10-02 19:30 - the deploy's caller identity was erased by a comment.
+#
+# upgrade.sh writes to a *file*, not into a pipe. A deploy runs detached, and a detached process's stdout
+# belongs to whoever spawned it - so when that parent went away, a write into the pipe raised SIGPIPE and
+# upgrade.sh died with exit 141 before it could say what it was doing. That transcript is also the evidence
+# that was missing: the failure was reported and nothing could say why.
 WA_INSTALL_DIR="$INSTALL_DIR" WA_PORT="$PORT" WA_CLIENT_PORT="$CLIENT_PORT" \
   WA_UPGRADE_REASON="$REASON" WA_UPGRADE_VIA=deploy.sh \
-  # upgrade.sh writes to a *file*, not into a pipe. A deploy runs detached, and a detached process's stdout
-  # belongs to whoever spawned it - so when that parent went away, a write into the pipe raised SIGPIPE and
-  # upgrade.sh died with exit 141 before it could say what it was doing. That transcript is also the evidence
-  # that was missing: the failure was reported and nothing could say why.
   bash "$UPGRADE" "$(cd "$(dirname "$NEW")" && pwd)/$(basename "$NEW")" > "$INSTALL_DIR/deploy-upgrade.log" 2>&1
+# wa-deploy-upgrade-invocation: end
 UPGRADE_STATUS=$?
 # Reporting must never fail the deploy: with stdout gone, `sed` dies of EPIPE and pipefail would then report
 # its status instead of upgrade.sh's.
@@ -555,6 +574,74 @@ cmp -s "$UPGRADE" "$INSTALL_DIR/scripts/upgrade.sh" || fail "the node is install
 UPGRADE_HASH="$(sha256sum < "$INSTALL_DIR/scripts/upgrade.sh" 2>/dev/null | awk '{print $1}')"
 [ -n "$UPGRADE_HASH" ] || fail "the node is installed but upgrade.sh could not be hashed"
 
+# The install record, in one place, called twice - once here and once as this deploy's last write (step 8).
+# It is a function because the record must exist the moment the facts it names are true, and because two
+# copies of a record format drift apart.
+#
+# `record_role=final` is what separates this record from upgrade.sh's. upgrade.sh installs bytes and can
+# only certify the hash it placed (`source_provenance=unverified-binary`); when THIS script calls it, its
+# record says `record_role=interim` and `via=deploy.sh`, because the deploy is the owner of the install's
+# record - it is the only party that knows the commit the binary was built from. So a reader who finds an
+# interim record as the LAST one is looking at a deploy that did not finish its record step. That state was
+# reached on 2026-10-02 19:30 and nothing could name it: installed.txt said `commit=unknown` while the node
+# served 2f02b4c's build, and the only trace of the death was a line on a detached process's stdout. What
+# killed that run is at the ship_file rule below.
+record_installed() {
+  local record_tmp reason_line
+  record_tmp="$INSTALL_DIR/.installed.txt.deploy.$$"
+  reason_line="$(printf '%s' "$REASON" | tr '\r\n' '  ')"
+  # `install_dir=` is the record's own statement of where it was written, and of which directory the machine
+  # runs the node from. A record that cannot say that is a record a later reader has to guess about - and
+  # `~/.wasm-agent/installed.txt`, empty on the node this rule was written for, is what guessing looks like.
+  printf 'commit=%s\nbranch=%s\ndirty=%s\nsha256=%s\nsentinel_sha256=%s\nupgrade_sha256=%s\ninstall_dir=%s\nservice_install_dir=%s\nsource_provenance=clean-built-by-deploy\nrecord_role=final\nvia=deploy.sh\nat=%s\nreason=%s\n' \
+    "$COMMIT" "$BRANCH" "$DIRTY" "$HASH" "$SENTINEL_HASH" "$UPGRADE_HASH" "$INSTALL_DIR" "${WA_SERVICE_DIR:-unverified}" \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$reason_line" \
+    > "$record_tmp" && mv -f "$record_tmp" "$INSTALL_DIR/installed.txt" \
+    || fail "node installed, but installed.txt could not be committed atomically"
+}
+
+# Record what is installed HERE, not only at the end. Every fact this record names - the exact commit, the
+# binary hash, the sentinel hash, the install directory - is already true at this point, and the steps that
+# follow (shipping scripts, putting job definitions) can still refuse or die. Writing it now means a deploy
+# that dies after the node is installed leaves the deploy's own exact-commit record, not upgrade.sh's
+# interim one - which is the state that made `verify-install.sh` report `installed unknown is not an
+# ancestor of tree ...` on 2026-10-02. The write at step 8 confirms the same content as the deploy's last
+# act, so "the final record is deploy.sh's" holds whichever of the two the run reaches.
+record_installed
+
+# Ship one file beside the binary without ever rewriting a file in place.
+#
+# WHY (measured, 2026-10-02 19:30). This script ships its own copy into the install - the sentinel's `deploy`
+# verb resolves `<install>/scripts/deploy.sh`, so a deploy has to leave the next one able to run - and the
+# running script IS that path when the sentinel starts it. `cp -f` over it rewrites the very file bash is
+# reading, and bash tracks its position by BYTE OFFSET into the file: rewrite it under a running script and
+# the next read lands in the middle of a line. MEASURED in that run: the deploy printed
+# `deploy: sentinel pid 16712 -> 2904`, then `/…/deploy.sh: line 534: syntax error near unexpected token '('`,
+# and the shell exited there - silently, because a parse error reaches none of this script's own `fail`
+# paths and deploy.log therefore got no line at all. Everything after it was skipped: the pipeline and the
+# wave scripts were never shipped (two of them stayed at the 5b1ffdc build while the tree was 2f02b4c),
+# installed.txt kept upgrade.sh's interim record, the recorded sentinel_sha256 was the pre-replacement
+# sentinel's, deploy-result.json kept the previous deploy's verdict, and the session waiting for the wake
+# was never told. MEASURED in the regression fixture (scripts/test-deploy-self-ship.sh): over a running
+# script the `cp` form stops the run at that line - sometimes with status 0, which is worse.
+#
+# Staging beside the destination and renaming is the fix, and it is the pattern this project already uses
+# for a running binary (upgrade.sh's sentinel swap): the interpreter keeps the bytes it already opened, the
+# install gets the new file, and no reader is interrupted. MEASURED on this machine (Git bash on Windows),
+# the rename form runs the rest of the script.
+ship_file() { # source destination what
+  local source="$1" destination="$2" what="$3" staged
+  cmp -s "$source" "$destination" && return 0
+  mkdir -p "$(dirname "$destination")" || fail "node installed, but could not create $(dirname "$destination")"
+  staged="$destination.ship.$$"
+  cp -f "$source" "$staged" || { rm -f "$staged"; fail "node installed, but could not stage $what"; }
+  if mv -f "$staged" "$destination" && cmp -s "$source" "$destination"; then
+    return 0
+  fi
+  rm -f "$staged"
+  fail "node installed, but could not ship $what"
+}
+
 # Ship this script beside the binary too. The sentinel's `deploy` verb resolves `scripts/deploy.sh`
 # beside the installed binary first - that is where an install keeps the scripts it is allowed to run -
 # but `upgrade.sh` ships only itself, so a `request deploy` from an installed node found no deploy.sh
@@ -564,10 +651,7 @@ UPGRADE_HASH="$(sha256sum < "$INSTALL_DIR/scripts/upgrade.sh" 2>/dev/null | awk 
 DEPLOY_SRC="$ROOT/scripts/deploy.sh"
 [ -f "$DEPLOY_SRC" ] || DEPLOY_SRC="$0"
 if [ -f "$DEPLOY_SRC" ]; then
-  mkdir -p "$INSTALL_DIR/scripts"
-  cmp -s "$DEPLOY_SRC" "$INSTALL_DIR/scripts/deploy.sh" \
-    || cp -f "$DEPLOY_SRC" "$INSTALL_DIR/scripts/deploy.sh" \
-    || fail "node installed, but could not ship deploy.sh beside the binary"
+  ship_file "$DEPLOY_SRC" "$INSTALL_DIR/scripts/deploy.sh" "deploy.sh beside the binary"
 fi
 
 # ...and the helper that answers "where does this machine's node live", beside the copy of this script that
@@ -577,10 +661,7 @@ fi
 LIB_SRC="$WA_LIB"
 [ -f "$LIB_SRC" ] || LIB_SRC="$ROOT/scripts/lib/service-target.sh"
 if [ -f "$LIB_SRC" ]; then
-  mkdir -p "$INSTALL_DIR/scripts/lib"
-  cmp -s "$LIB_SRC" "$INSTALL_DIR/scripts/lib/service-target.sh" \
-    || cp -f "$LIB_SRC" "$INSTALL_DIR/scripts/lib/service-target.sh" \
-    || fail "node installed, but could not ship scripts/lib/service-target.sh beside deploy.sh"
+  ship_file "$LIB_SRC" "$INSTALL_DIR/scripts/lib/service-target.sh" "scripts/lib/service-target.sh beside deploy.sh"
 fi
 
 # Ship the WhatsApp pipeline with the node it belongs to. `upgrade.sh` installs the binary, the UI and the
@@ -643,7 +724,17 @@ if [ -d "$ROOT/jobs" ] && [ -d "$ROOT/scripts" ]; then
     done
   done
   INSTALL_MIXED="$(cygpath -m "$INSTALL_DIR" 2>/dev/null || printf '%s' "$INSTALL_DIR")"
-  for source in "$ROOT"/jobs/whatsapp-*.json; do
+  # The `onSubagentReturn` hook's own scripts, shipped beside the job that names them and before that job
+  # is put: a definition installed ahead of its script is a job that fails on the machine it was installed
+  # on. They import only Node builtins, so there is no `./lib/...` closure to derive here - unlike the
+  # WhatsApp pipeline above, whose modules are found from the imports it writes.
+  for source in "$ROOT"/scripts/subagent-return-*; do
+    [ -f "$source" ] || continue
+    cp -f "$source" "$INSTALL_DIR/scripts/" \
+      || fail "node installed, but could not ship $(basename "$source")"
+    PIPELINE=$((PIPELINE + 1))
+  done
+  for source in "$ROOT"/jobs/whatsapp-*.json "$ROOT"/jobs/on-subagent-return.json "$ROOT"/jobs/subagent-return-observe.json; do
     [ -f "$source" ] || continue
     JOB_NAME="$(basename "$source" .json)"
     # The job files name their script as PREPARED_BY_INSTALL/... so one file works from a checkout and from
@@ -685,17 +776,7 @@ if command -v cygpath >/dev/null 2>&1; then
 fi
 node "$WAVE_SHIP" "$WAVE_ROOT" "$WAVE_INSTALL" || fail "node installed, but wave continuation scripts are not import-closed"
 
-RECORD_TMP="$INSTALL_DIR/.installed.txt.deploy.$$"
-REASON_LINE="$(printf '%s' "$REASON" | tr '\r\n' '  ')"
-# `install_dir=` is the record's own statement of where it was written, and of which directory the machine
-# runs the node from. A record that cannot say that is a record a later reader has to guess about - and
-# `~/.wasm-agent/installed.txt`, empty on the node this rule was written for, is what guessing looks like.
-printf 'commit=%s\nbranch=%s\ndirty=%s\nsha256=%s\nsentinel_sha256=%s\nupgrade_sha256=%s\ninstall_dir=%s\nservice_install_dir=%s\nsource_provenance=clean-built-by-deploy\nvia=deploy.sh\nat=%s\nreason=%s\n' \
-  "$COMMIT" "$BRANCH" "$DIRTY" "$HASH" "$SENTINEL_HASH" "$UPGRADE_HASH" "$INSTALL_DIR" "${WA_SERVICE_DIR:-unverified}" \
-  "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$REASON_LINE" \
-  > "$RECORD_TMP" && mv -f "$RECORD_TMP" "$INSTALL_DIR/installed.txt" \
-  || fail "node installed, but installed.txt could not be committed atomically"
-
+record_installed
 echo "deploy: installed $COMMIT ($HASH)"
 echo "deploy: recorded in $INSTALL_DIR/installed.txt"
 echo "deploy: /health -> $(curl -s -m 5 "http://127.0.0.1:$PORT/health" | head -c 260)"
