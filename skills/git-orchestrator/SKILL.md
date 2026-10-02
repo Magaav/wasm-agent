@@ -48,9 +48,14 @@ commit. The guard enforces this case and no other.
 
 1. the **reviewer's independent verdict** on the exact tip, from a lane that did not produce it
    (an agent's report is evidence, not verification - `docs/FACTORY.md`, invariant 1);
-2. the **merged tree's own gate receipt** - exit status, skip count, log hash, and the tree it is
-   bound to - because a merge changes the tree and the branch's receipt covers only the branch (no
-   effect before its proof - invariant 2);
+2. the **merged tree's own gate receipt** *when the landing is a release* - exit status, skip count,
+   log hash, and the tree it is bound to - because a merge changes the tree and the branch's receipt
+   covers only the branch (no effect before its proof - invariant 2). Since 2026-10-02 the full gate
+   is a **release's**, not a landing's: an evolution landing is merged, LF-checked and reported
+   (`--gate-mode none`, the default; `release_verified: false` in its JSON), and
+   `scripts/wave-release.mjs` is what gates an exact tree, records the receipt and names it. What did
+   not change is invariant 2 itself - a branch's receipt never covers the merge - so a release is
+   gated on the merged tree it will certify, never on the branch it came from;
 3. the **provenance trailer** on every commit, and a merge whose subject names the branch it merged;
 4. the **ref read back from the remote** after the push, never the push's own output;
 5. the **delivery's record** (`scripts/delivery-record.mjs`): a landing starts from the delivery's record,

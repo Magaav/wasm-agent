@@ -1751,6 +1751,8 @@ gate_run node scripts/test-merge-lane.mjs
 gate_run node scripts/test-merge-gate-source.mjs
 gate_run node scripts/test-merge-lane-retention.mjs
 gate_run node scripts/test-delivery-admission.mjs
+gate_run node scripts/test-wave-release.mjs
+gate_run bash scripts/test-deploy-gate-policy.sh
 gate_run node scripts/test-delivery-refresh.mjs
 env -u GATE_LANE_HELD node scripts/test-gate-lane-wiring.cjs
 gate_run node scripts/test-openai-sub.cjs "$BIN"

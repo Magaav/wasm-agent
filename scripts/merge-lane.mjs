@@ -27,6 +27,11 @@
 //   --all-pending          take every pending tip discovery names (sorted by ref name)
 //   --jobs <n|default>     WA_GATE_JOBS for the gate (default 2: the measured setting)
 //   --gate-command <line>  gate to run in the clone (default: bash scripts/test.sh).
+//   --gate-mode <none|full>  whether the merged tree is gated. The default is `none`: an evolution
+//                          landing merges reviewed work and reports it, and the full gate belongs to a
+//                          RELEASE (scripts/wave-release.mjs), which is what makes `release_verified`
+//                          true. `full` restores gating on the landing itself, and
+//                          `WA_MERGE_LANE_GATE_MODE=full` does it without changing an entry point.
 //                          A test seam: it is recorded verbatim in the output.
 //   --timeout-seconds <n>  gate timeout (default 3600)
 //   --clone <path>         use this directory as the disposable clone
@@ -286,9 +291,13 @@ export function parseArgs(argv) {
     timeoutSeconds: 3600, clone: null, keepClone: false, hooks: true, partial: false, json: null, repo: null, deliveryStore: null,
     keepClones: retentionKeep(process.env[CLONE_KEEP_VARIABLE], CLONE_KEEP_VARIABLE),
     reuse: true, reuseTreeNamed: false,
-    reuseTree: String(process.env.WA_MERGE_LANE_TREE || '').trim() || path.join(os.homedir(), '.wasm-agent', 'merge-lane-tree')};
+    reuseTree: String(process.env.WA_MERGE_LANE_TREE || '').trim() || path.join(os.homedir(), '.wasm-agent', 'merge-lane-tree'),
+    // The evolution path: a landing is merged, checked for the LF invariant and reported, and it is a
+    // RELEASE that runs the full gate on an exact tree. `WA_MERGE_LANE_GATE_MODE=full` puts the gate
+    // back on the landing for a run - the restore knob, never selected by accident.
+    gateMode: String(process.env.WA_MERGE_LANE_GATE_MODE || '').trim() || 'none'};
   if (String(process.env.WA_MERGE_LANE_TREE || '').trim()) options.reuseTreeNamed = true;
-  const needs = new Set(['--repo', '--base', '--jobs', '--gate-command', '--timeout-seconds', '--clone', '--json', '--reuse-tree', '--delivery-store']);
+  const needs = new Set(['--repo', '--base', '--jobs', '--gate-command', '--gate-mode', '--timeout-seconds', '--clone', '--json', '--reuse-tree', '--delivery-store']);
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     if (needs.has(arg)) {
@@ -300,6 +309,7 @@ export function parseArgs(argv) {
       else if (arg === '--base') options.base = value;
       else if (arg === '--jobs') options.jobs = value;
       else if (arg === '--gate-command') options.gateCommand = value;
+      else if (arg === '--gate-mode') options.gateMode = value;
       else if (arg === '--timeout-seconds') options.timeoutSeconds = Number(value);
       else if (arg === '--clone') options.clone = value;
       else if (arg === '--reuse-tree') { options.reuseTree = value; options.reuseTreeNamed = true; }
@@ -315,6 +325,7 @@ export function parseArgs(argv) {
   if (!options.repo) options.repo = process.env.WA_MERGE_LANE_REPO || '';
   if (!options.repo) throw Error('--repo <path> is required (or WA_MERGE_LANE_REPO); this lane refuses to guess which repository it is landing into');
   if (options.base.startsWith('-')) throw Error('invalid --base');
+  if (!['none', 'full'].includes(options.gateMode)) throw Error(`--gate-mode must be none or full (got ${options.gateMode}); the full gate is a release's, not a landing's`);
   if (!(options.tips.length || options.allPending)) options.allPending = true;
   if (options.allPending && options.tips.length) throw Error('name tips or use --all-pending, not both');
   return options;
@@ -998,16 +1009,16 @@ async function main() {
   }
 
   // 4. The gate, on the MERGED tree. Invariant 2: a branch's receipt never covers the merge.
-  let gate = {command: options.gateCommand, ran: false, refused: false, exit: null, ms: null, log: null, log_sha256: null,
+  let gate = {command: options.gateCommand, mode: options.gateMode, ran: false, refused: false, exit: null, ms: null, log: null, log_sha256: null,
     skipped: null, verdict_line: null, verdict_found: false, lane: null};
-  const existingFull = clone && options.gateCommand==='bash scripts/test.sh'
-    ? findFullProof(gitDir,candidateTree) : {verified:false,reason:'no candidate or custom gate command'};
+  const existingFull = clone && options.gateMode==='full' && options.gateCommand==='bash scripts/test.sh'
+    ? findFullProof(gitDir,candidateTree) : {verified:false,reason:'not a full-mode gate, no candidate, or a custom gate command'};
   if (existingFull.verified) {
     gate={...gate,reused:true,exit:0,ms:0,log:existingFull.log,log_sha256:existingFull.log_sha256,
       skipped:existingFull.skipped,verdict_line:existingFull.verdict_line,verdict_found:true,proof:existingFull};
     note(`merge-lane: complete identical-tree gate evidence reused from ${existingFull.receipt}; no new gate run`);
   }
-  if (!gate.reused && clone && crlf.state !== 'offenders' && (!blocked.length || options.partial)) {
+  if (options.gateMode === 'full' && !gate.reused && clone && crlf.state !== 'offenders' && (!blocked.length || options.partial)) {
     // Inside `.git`, not the worktree: the gate asks for a clean tree (scripts/test-deploy-downgrade.sh
     // refuses on dirt), so the lane's own log must not be the dirt it reports.
     const logPath = path.join(clone.git_dir, 'wa-merge-lane-gate.log');
@@ -1152,8 +1163,16 @@ async function main() {
     }
     fs.writeFileSync(gate.full_receipt,JSON.stringify(receipt,null,2)+'\n');
   }
+  // Two questions, two fields, and they are different questions. `pass` answers "may this candidate be
+  // published", which is what the reserved merger's publisher reads (`verdict`, `gate.exit`,
+  // `push_precondition.can_push`); `release_verified` answers "was this exact tree gated", and only
+  // `--gate-mode full` can make that true. An evolution landing is therefore `pass` with
+  // `gate.mode: "none"` and `release_verified: false`: a clean merge is not a verified tree, and the
+  // field that says so is `release_verified`, never the verdict.
+  const evolutionLanding = options.gateMode === 'none' && !gate.ran && !gate.reused && !gate.refused;
   const verdict = blocked.length ? 'blocked'
     : !candidateMerges && !accepted.length ? 'nothing_to_merge'
+    : evolutionLanding ? 'pass'
     : (gate.ran || gate.reused) ? (gatePassed ? 'pass' : 'gate_failed')
     : gate.refused ? 'gate_refused'
     : 'merge_only';
@@ -1175,6 +1194,8 @@ async function main() {
     base_ref_before: baseSha, base_ref_after: targetRefAfter,
     main_moved_by_this_run: mainMoved,
     pushed: false,
+    gate_mode: options.gateMode,
+    release_verified: Boolean(gatePassed && options.gateCommand === 'bash scripts/test.sh'),
     inputs, blocked: blocked.map(record => ({name: record.name, sha: record.sha, reason: record.reason,
       conflicts: record.conflicts || record.merge?.conflicts || []})),
     skipped: skipped.map(record => ({name: record.name, sha: record.sha, reason: record.reason})),
@@ -1226,7 +1247,7 @@ async function main() {
   if (options.json) fs.writeFileSync(path.resolve(options.json), `${JSON.stringify(result, null, 2)}\n`);
   note(`merge-lane: ${verdict} (exit ${exitCode}); candidate ${candidateTree}; gate ${gate.ran
     ? `exit ${gate.exit}, ${gate.skipped ?? '?'} skipped${gate.lane?.waited_ms >= 1000 ? ` after waiting ${(gate.lane.waited_ms / 1000).toFixed(0)}s for slot #${gate.lane.request}` : ''}`
-    : gate.reused ? 'identical-tree full proof reused; zero new runs' : gate.refused ? 'not run, the gate lane granted no slot' : 'not run'}`);
+    : gate.reused ? 'identical-tree full proof reused; zero new runs' : gate.refused ? 'not run, the gate lane granted no slot' : `NOT RUN by policy (--gate-mode ${options.gateMode})`}${evolutionLanding ? '; this landing is merged, not verified - a release gate is what verifies a tree' : ''}`);
   process.stdout.write(`${JSON.stringify(result)}\n`);
   return exitCode;
 }
