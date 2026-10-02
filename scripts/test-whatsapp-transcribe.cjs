@@ -155,7 +155,7 @@ assert.equal(partBlocked.value.part, 2);
 assert.equal(effect("voice4:transcript:1").state, "sent");
 assert.equal(effect("voice4:transcript:2"), undefined);
 const partResumed = pass({ WA_TEST_STT_FAIL: "1" });
-assert.equal(partResumed.value.state, "sent", "cached parts resume without running STT again");
+assert.equal(partResumed.value.state, "sent", "cached parts resume without running STT again: " + JSON.stringify(partResumed.value));
 assert.equal(sent().filter((row) => row.body.includes("(1/3)")).length, 1);
 assert.equal(sent().filter((row) => row.body.includes("(2/3)")).length, 1);
 assert.equal(sent().filter((row) => row.body.includes("(3/3)")).length, 1);

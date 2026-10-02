@@ -3,6 +3,7 @@
 //
 //   node scripts/whatsapp-trigger.mjs install       # pin the trigger to the live WhatsApp target, job put
 //   node scripts/whatsapp-trigger.mjs status        # the job's source_status + whether the hook is live
+//   node scripts/whatsapp-trigger.mjs repair        # re-pin/re-install when the pin names a dead target
 //   node scripts/whatsapp-trigger.mjs reload-test    # reload the page and measure what survived
 //
 // Why this and not my own daemon: the sentinel is the process that is already persistent, already
@@ -88,6 +89,19 @@ function installDir() {
   return path.join(local, "wasm-agent");
 }
 
+// The drift the status line could only *report*: the pin names a target id that no longer exists, so no page
+// event arrives and nothing installs the document-start hook - a browser restart replaces the target id and
+// the installed job keeps the old one until something re-pins it. The repair is a re-install of the same
+// definition against the live target, and the decision is a pure function of the installed job and the live
+// target, so "no drift" is a no-op rather than a rewrite.
+export function repairPlan(job, liveTargetId) {
+  const pinned = job && job.trigger ? String(job.trigger.websocket_url || "") : "";
+  const pinnedId = pinned.split("/devtools/page/")[1] || "";
+  if (!pinnedId) return { action: "install", pinnedId: "", liveId: liveTargetId };
+  if (pinnedId !== liveTargetId) return { action: "re-pin", pinnedId: pinnedId, liveId: liveTargetId };
+  return { action: "none", pinnedId: pinnedId, liveId: liveTargetId };
+}
+
 function sentinelBinary() {
   const candidate = path.join(installDir(), "wa-sentinel.exe");
   return fs.existsSync(candidate) ? candidate : path.join(installDir(), "wa-sentinel");
@@ -155,6 +169,40 @@ if (command === "install") {
   } else {
     console.log(JSON.stringify({ ok: true, cdp: { host: endpoint.host, port: endpoint.port }, target: target.id, job: mine }, null, 1));
   }
+} else if (command === "repair") {
+  // The repair, not the report. Idempotent: a pin that already names the live target writes nothing.
+  const mine = await jobStatus();
+  const plan = repairPlan(mine, target.id);
+  if (plan.action === "none") {
+    console.log(JSON.stringify({ ok: true, action: "none", pin: plan.pinnedId, live_target: plan.liveId, did: [] }));
+  } else {
+    const definition = jobDefinition(target);
+    const file = path.join(installDir(), "scripts", `${JOB_ID}.job.json`);
+    const report = { ok: false, action: plan.action, pin: plan.pinnedId, live_target: plan.liveId, wrote: file, did: [] };
+    try {
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, JSON.stringify(definition, null, 1));
+      report.did.push(plan.action + ": rewrote " + JOB_ID + ".job.json against the live target");
+    } catch (error) {
+      report.error = "job_file_not_written";
+      report.detail = String((error && error.message) || error).slice(0, 200);
+      console.log(JSON.stringify(report));
+      process.exit(6);
+    }
+    try {
+      const { execFileSync } = await import("node:child_process");
+      report.put = execFileSync(sentinelBinary(), ["job", "put", file], { encoding: "utf8" }).trim().slice(-160);
+      report.did.push("job put");
+      report.ok = true;
+    } catch (error) {
+      // A re-pin that could not be handed to the sentinel is a refusal with a name, not a silence: the file
+      // is written but the installed job is still pinned to the dead target.
+      report.error = "job_put_failed";
+      report.detail = String((error && error.message) || error).slice(0, 200);
+    }
+    console.log(JSON.stringify(report));
+    if (!report.ok) process.exitCode = 6;
+  }
 } else if (command === "reload-test") {
   // What survives a page reload? The sentinel installs the binding and evaluates the setup once, so the
   // page-side hook is the thing in question - and so is the binding, which Chrome may re-apply per
@@ -197,6 +245,6 @@ if (command === "install") {
   }, null, 1));
   ws.close();
 } else {
-  console.log(JSON.stringify({ error: "unknown_command", commands: ["install", "status", "reload-test"] }));
+  console.log(JSON.stringify({ error: "unknown_command", commands: ["install", "status", "repair", "reload-test"] }));
   process.exit(2);
 }

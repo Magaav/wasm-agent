@@ -7,6 +7,14 @@ speech recognition locally, formats the result through the internal WASM plugin,
 and sends the text to the original conversation through WhatsApp's injected
 `WAWebSendTextMsgChatAction.sendTextMsgToChat` app action. It never opens/focuses the chat or dispatches input events.
 
+The download is the app's own `WAWebDownloadManager.downloadManager.downloadAndMaybeDecrypt`, and this build
+checks the *declared mimetype* against the msg-type allowlist before it fetches anything: the request carries
+the message's own `mimetype` verbatim (`audio/ogg; codecs=opus` for a ptt here), and a message that declares
+none is refused as `audio_mimetype_missing` instead of being left to the build's `application/octet-stream`
+default. The action's own rejection is reported with its type and message
+(`audio_download_failed:<name>: <message>`, e.g. `InvalidMediaFileType`), never as CDP's wrapper text
+`Uncaught (in promise)` - which names nothing and hid this lane's failure for months.
+
 No audio or transcript goes to an STT provider. The Python runner uses
 `local_files_only=True` and the job sets `HF_HUB_OFFLINE=1`. Download the model
 **before** enabling the job. The model is multilingual `small` by default and
@@ -65,15 +73,21 @@ them before sending and confirms each part independently.
   are refused; the job reports their message ids and reasons.
 - Audio is capped at 20 MiB. Each tick handles at most one pending recording;
   the pending list survives restarts and reaches below the read cursor.
-- A failed download or recognition remains pending and is retried. The job's
-  result names the failing step and message id. A confirmed send is recorded in
-  `effect_sends`; an ambiguous send is recorded as `unknown` and is never
-  replayed automatically.
+- A failed download or recognition remains pending and is retried, and the cursor is not advanced past a
+  note the pass did not settle: a `retryable` failure keeps the note reachable rather than leaving the
+  position beyond it. The job's result names the failing step, the message id and the underlying error, and
+  the pending row carries them, so a note that ages out of the window is refused as
+  `transcription_refused reason=stale_audio` **with** the step and the error that lost it. A pass that drops
+  a queued note reports `ok:false`; `ok:true` with nothing pending and nothing refused is only true when
+  nothing was lost. A confirmed send is recorded in `effect_sends`; an ambiguous send is recorded as
+  `unknown` and is never replayed automatically.
 - The new job is installed disabled. Enabling it authorizes transcript replies to source conversations through the store action; this does not clear unread markers. Human drafts and unsupported target metadata still refuse before dispatch.
 
 `node scripts/test-whatsapp-transcribe.cjs` proves the Lua, SQLite, WASM,
 reservation, retry, and no-duplicate path with fake media and send adapters.
-`node scripts/test-whatsapp-audio.mjs` checks the browser-side media guards.
+`node scripts/test-whatsapp-audio-loss.cjs` proves the failed-download path: retryable, named, and impossible
+to turn into an invisible skip. `node scripts/test-whatsapp-audio.mjs` checks the browser-side media guards
+and the download contract (the declared mimetype, and the rejection reason instead of the wrapper text).
 The raw app-action path has live read-only compatibility evidence, but no live
 transcript message has been sent; explicit operator approval is required before that external-effect proof.
 

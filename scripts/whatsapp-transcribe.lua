@@ -73,11 +73,20 @@ for id, value in pairs(pending) do
   local at = type(value) == "table" and tonumber(value.sent_at) or nil
   if at and at < now - MAX_AGE then stale_pending[#stale_pending + 1] = tostring(id) end
 end
+-- A queued note that aged out is refused here, and that refusal is part of the step result, naming the
+-- failure that put it in this list (a download that never succeeded). Dropping it quietly is how this lane
+-- reported {"ok":true,"pending":0,"processed":0,"refused":[]} - "fine" - while every voice note was lost.
+local stale_refused = {}
+local swept = {}
 for _, id in ipairs(stale_pending) do
   local detail = pending[id] or {}
   pending[id] = nil
+  swept[id] = true
   effects.new("wa-transcript:" .. id).record({message_id=id, conversation_id=tostring(detail.conversation_id or ""),
     decision="transcription_refused", reason="stale_audio"})
+  stale_refused[#stale_refused + 1] = {message_id=id, reason="stale_audio",
+    step=tostring(detail.step or "pending"), error=tostring(detail.error or "expired_before_it_was_processed"),
+    attempts=tonumber(detail.attempts) or 0}
 end
 if #stale_pending > 0 then memory.meta_set("whatsapp_transcribe_pending", json.encode(pending)) end
 local floor = math.max(0, cursor - 3600)
@@ -117,6 +126,14 @@ if not primed then
   end
   memory.meta_set("whatsapp_transcribe_cursor_ids", json.encode(primed_ids))
   memory.meta_set("whatsapp_transcribe_primed", "true")
+  -- A first run adopts the store and answers nothing, but a note the sweep above refused still has to be
+  -- reported: "primed" must not be a way to lose a queued note quietly either.
+  if #stale_refused > 0 then
+    print(json.encode({ok=false,primed=true,cursor=math.floor(newest),processed=0,refused=stale_refused,
+      step=stale_refused[1].step,error=stale_refused[1].error,message_id=stale_refused[1].message_id,
+      reason="stale_audio",state="refused"}))
+    os.exit(1)
+  end
   print(json.encode({ok=true,primed=true,cursor=math.floor(newest),processed=0}))
   return
 end
@@ -135,7 +152,7 @@ for _, message in ipairs(payload.messages or {}) do
   if at > newest then newest = at; newest_ids = {} end
   if at == newest then newest_ids[id] = true end
   local chat = chats[tostring(message.conversation_id or "")]
-  if (at > cursor or (at == cursor and not cursor_ids[id]))
+  if not swept[id] and (at > cursor or (at == cursor and not cursor_ids[id]))
       and message.direction == "incoming" and audio_kind(message) then
     local reason
     if not chat then reason = "conversation_not_found"
@@ -153,7 +170,18 @@ for _, message in ipairs(payload.messages or {}) do
         decision="transcription_refused",reason=reason})
       refused[#refused + 1] = {message_id=id,reason=reason}
     else
-      pending[id] = {conversation_id=tostring(message.conversation_id),sent_at=at}
+      -- Re-queued, not re-created: a note already in `pending` keeps what the earlier pass learned about it
+      -- (the transcript parts it produced, the step and error that last failed it). Replacing the entry here
+      -- threw the cached parts away and re-ran the recognizer - and, for a note that had failed, re-ran the
+      -- failure instead of reporting it.
+      local queued = pending[id]
+      if type(queued) == "table" then
+        queued.conversation_id = tostring(message.conversation_id)
+        queued.sent_at = at
+        pending[id] = queued
+      else
+        pending[id] = {conversation_id=tostring(message.conversation_id),sent_at=at}
+      end
     end
   end
 end
@@ -184,6 +212,14 @@ for _, id in ipairs(ids) do
           effect.record({message_id=id,conversation_id=detail.conversation_id,
             decision="transcription_refused",reason=problem})
           pending[id] = nil
+        else
+          -- The reason travels with the pending row. A retry is not silent, and if the note later ages out
+          -- the refusal above can name the step and the underlying error that lost it instead of only
+          -- "stale_audio" - the underlying error being the one fact this lane never recorded.
+          detail.step = step
+          detail.error = problem
+          detail.attempts = (tonumber(detail.attempts) or 0) + 1
+          pending[id] = detail
         end
         result = {ok=false,step=step,error=problem,message_id=id,
           state=terminal[problem] and "refused" or "retryable"}
@@ -270,9 +306,46 @@ end
 if result.ok and #ids > 0 and result.processed == 0 then
   result = {ok=false,step="source",error="pending_audio_not_in_browser_store",pending=#ids,cursor=math.floor(newest)}
 end
+-- The cursor is a position, and a position may not move past audio this pass did not *settle*. Written
+-- here, after the pass, because only now is it known which notes settled: a note that was sent has left
+-- `pending`, while a note whose download failed is still in it. Advancing past the latter is what turned
+-- "retryable" into a permanent skip - the next pass could no longer reach it, and the sweep above then
+-- dropped it invisibly. The clamp is bounded by MAX_AGE, since the sweep clears the entry once it ages out,
+-- and a crash between the two writes loses nothing: the pending list is the durable half.
+local advance = newest
+for _, value in pairs(pending) do
+  local at = type(value) == "table" and tonumber(value.sent_at) or nil
+  if at and at - 1 < advance then advance = math.max(cursor, at - 1) end
+end
+if advance < newest then
+  -- The cursor and the ids that belong to it move together. `cursor_ids` is the set of messages *at* the
+  -- cursor's own timestamp - that is what makes "the cursor's second" a consumed position instead of a
+  -- window that re-opens - so a clamped cursor needs the ids of the timestamp it was clamped to. Writing
+  -- the newer timestamp's ids here would hand every already-settled note of the clamped second back to the
+  -- next pass, ahead of the note that is still pending.
+  local advance_ids = {}
+  for id, message in pairs(present) do
+    if tonumber(message.sent_at) == advance then advance_ids[id] = true end
+  end
+  memory.meta_set("whatsapp_transcribe_cursor_ids", json.encode(advance_ids))
+end
+memory.meta_set("whatsapp_transcribe_cursor", math.floor(advance))
 memory.meta_set("whatsapp_transcribe_pending", json.encode(pending))
+-- The sweep's refusals join the scan's: one list, in the step result, whatever refused the note.
+for _, entry in ipairs(stale_refused) do refused[#refused + 1] = entry end
 result.refused = refused
 result.pending = 0
 for _ in pairs(pending) do result.pending = result.pending + 1 end
+-- A refusal is a result, not a deletion: a pass that lost a queued note says so, with the id, the step and
+-- the error that lost it. "ok, nothing pending, nothing refused" is only true when nothing was lost.
+if #stale_refused > 0 and result.ok then
+  local first = stale_refused[1]
+  result.ok = false
+  result.step = tostring(first.step)
+  result.error = tostring(first.error)
+  result.message_id = first.message_id
+  result.reason = "stale_audio"
+  result.state = "refused"
+end
 print(json.encode(result))
 if not result.ok then os.exit(1) end

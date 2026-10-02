@@ -48,3 +48,15 @@ fi
 
 echo "whatsapp preflight ok cdp=$(field host):$(field port) chats=$(field chats) bound=$(field bound) hook=$(field hook)"
 [ -n "$trigger_line" ] && echo "whatsapp preflight $trigger_line"
+
+# Drift is no longer only a report. A pin that names a target that is not there means no page events arrive
+# and nothing installs the document-start hook, and the trigger is what keeps the hook across reloads. So the
+# preflight repairs it - idempotent, since a pin already on the live target writes nothing - and says what it
+# did. A repair that fails is named on its own line rather than passed over. It does not fail the preflight:
+# the trigger is a second path to the same page, and the scheduled lane must not go down with it.
+case "$trigger_line" in
+  *"drift=yes"*|*"pin=none"*)
+    repair_line="$(timeout 60 node "$ROOT/scripts/whatsapp-trigger.mjs" repair 2>/dev/null | tail -1)"
+    echo "whatsapp preflight trigger-repair ${repair_line:-no_verdict}"
+    ;;
+esac
