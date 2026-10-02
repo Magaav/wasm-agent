@@ -1,0 +1,143 @@
+### c1_no_branch_no_worktree - no recorded branch and no worktree
+pass: observed=1 settled=1 emitted=1 duplicates=0 unreadable=[c1_no_branch_no_worktree] errors=[]
+store: deliveries=1 event_id=c1_no_branch_no_worktree state=queued
+payload: changed_paths=ABSENT changed_paths_error=artifacts_unreadable
+payload: source=-
+composed verdict: cannot be computed (changed_paths_unmeasured: artifacts_unreadable)
+  | changed paths vs origin/main: NOT MEASURED: artifacts_unreadable
+  | DEPLOY VERDICT: cannot be computed (changed_paths_unmeasured: artifacts_unreadable)
+
+### c2_no_completion_packet - completion packet absent
+pass: observed=1 settled=1 emitted=1 duplicates=0 unreadable=[c2_no_completion_packet] errors=[]
+store: deliveries=1 event_id=c2_no_completion_packet state=queued
+payload: changed_paths=ABSENT changed_paths_error=artifacts_unreadable
+payload: source=-
+composed verdict: cannot be computed (artifacts_unreadable: artifact_facts_failed: no session record)
+  | artifacts: UNREADABLE (artifact_facts_failed: no session record)
+  | changed paths vs origin/main: NOT MEASURED: artifacts_unreadable
+  | DEPLOY VERDICT: cannot be computed (artifacts_unreadable: artifact_facts_failed: no session record)
+
+### c3_worktree_gone - recorded worktree no longer exists
+pass: observed=1 settled=1 emitted=1 duplicates=0 unreadable=[] errors=[]
+store: deliveries=1 event_id=c3_worktree_gone state=queued
+payload: changed_paths=ABSENT changed_paths_error=no_main_ref_in_child_worktree
+payload: source=-
+composed verdict: cannot be computed (changed_paths_unmeasured: no_main_ref_in_child_worktree)
+  | changed paths vs origin/main: NOT MEASURED: no_main_ref_in_child_worktree
+  | DEPLOY VERDICT: cannot be computed (changed_paths_unmeasured: no_main_ref_in_child_worktree)
+
+### c4_tip_equals_main - tip equals main (branch at main, no commits)
+pass: observed=1 settled=1 emitted=1 duplicates=0 unreadable=[] errors=[]
+store: deliveries=1 event_id=c4_tip_equals_main state=queued
+payload: changed_paths=[] changed_paths_error=-
+payload: source=git -C C:\Users\Victor\AppData\Local\Temp\wa-review-ffda98e4\co2\equals-main diff --name-only refs/remotes/origin/main...c28745175194919260392a5f833855fb42f8f633
+composed verdict: no install impact
+  | changed paths vs origin/main: 0 (git -C C:\Users\Victor\AppData\Local\Temp\wa-review-ffda98e4\co2\equals-main diff --name-only refs/remotes/origin/main...c28745175194919260392a5f833855fb42f8f633): 
+  | DEPLOY VERDICT: no install impact
+
+### c4b_tip_equals_main_dirty - tip equals main, uncommitted ui/** change in the worktree
+pass: observed=1 settled=1 emitted=1 duplicates=0 unreadable=[] errors=[]
+store: deliveries=1 event_id=c4b_tip_equals_main_dirty state=queued
+payload: changed_paths=[] changed_paths_error=-
+payload: source=git -C C:\Users\Victor\AppData\Local\Temp\wa-review-ffda98e4\co2\equals-main-dirty diff --name-only refs/remotes/origin/main...c28745175194919260392a5f833855fb42f8f633
+composed verdict: no install impact
+  | changed paths vs origin/main: 0 (git -C C:\Users\Victor\AppData\Local\Temp\wa-review-ffda98e4\co2\equals-main-dirty diff --name-only refs/remotes/origin/main...c28745175194919260392a5f833855fb42f8f633): 
+  | DEPLOY VERDICT: no install impact
+
+### c5_tip_unreachable_from_main - tip not reachable from origin/main (orphan commit)
+pass: observed=1 settled=1 emitted=1 duplicates=0 unreadable=[] errors=[]
+store: deliveries=1 event_id=c5_tip_unreachable_from_main state=queued
+payload: changed_paths=["README.md","unrelated.txt"] changed_paths_error=-
+payload: source=git -C C:\Users\Victor\AppData\Local\Temp\wa-review-ffda98e4\co2\equals-main diff --name-only refs/remotes/origin/main 7f7a2391e0488cb299e9e2eb65acae84d4cbde36
+composed verdict: no install impact
+  | changed paths vs origin/main: 2 (git -C C:\Users\Victor\AppData\Local\Temp\wa-review-ffda98e4\co2\equals-main diff --name-only refs/remotes/origin/main 7f7a2391e0488cb299e9e2eb65acae84d4cbde36): README.md, unrelated.txt
+  | DEPLOY VERDICT: no install impact
+
+### c6_only_shipped_script - ONLY scripts/whatsapp-read.mjs
+pass: observed=1 settled=1 emitted=1 duplicates=0 unreadable=[] errors=[]
+store: deliveries=1 event_id=c6_only_shipped_script state=queued
+payload: changed_paths=["scripts/whatsapp-read.mjs"] changed_paths_error=-
+payload: source=git -C C:\Users\Victor\AppData\Local\Temp\wa-review-ffda98e4\co2\shipped-script diff --name-only refs/remotes/origin/main...c00b6f2c1e9a6e793e039d9474b5502aef36a7a7
+composed verdict: deploy required at the wave's end
+  | changed paths vs origin/main: 1 (git -C C:\Users\Victor\AppData\Local\Temp\wa-review-ffda98e4\co2\shipped-script diff --name-only refs/remotes/origin/main...c00b6f2c1e9a6e793e039d9474b5502aef36a7a7): scripts/whatsapp-read.mjs
+  | DEPLOY VERDICT: deploy required at the wave's end
+
+### c7_only_test_file - ONLY tests/probe.cjs
+pass: observed=1 settled=1 emitted=1 duplicates=0 unreadable=[] errors=[]
+store: deliveries=1 event_id=c7_only_test_file state=queued
+payload: changed_paths=["tests/probe.cjs"] changed_paths_error=-
+payload: source=git -C C:\Users\Victor\AppData\Local\Temp\wa-review-ffda98e4\co2\test-file diff --name-only refs/remotes/origin/main...3ad5f8a7561d1136c391037ee692fd7201d5cb02
+composed verdict: no install impact
+  | changed paths vs origin/main: 1 (git -C C:\Users\Victor\AppData\Local\Temp\wa-review-ffda98e4\co2\test-file diff --name-only refs/remotes/origin/main...3ad5f8a7561d1136c391037ee692fd7201d5cb02): tests/probe.cjs
+  | DEPLOY VERDICT: no install impact
+
+### c8_only_job_definition - ONLY jobs/on-subagent-return.json
+pass: observed=1 settled=1 emitted=1 duplicates=0 unreadable=[] errors=[]
+store: deliveries=1 event_id=c8_only_job_definition state=queued
+payload: changed_paths=["jobs/on-subagent-return.json"] changed_paths_error=-
+payload: source=git -C C:\Users\Victor\AppData\Local\Temp\wa-review-ffda98e4\co2\job-definition diff --name-only refs/remotes/origin/main...90207d98f8d193a100be12b0cef87ce4ab3e29e8
+composed verdict: no install impact
+  | changed paths vs origin/main: 1 (git -C C:\Users\Victor\AppData\Local\Temp\wa-review-ffda98e4\co2\job-definition diff --name-only refs/remotes/origin/main...90207d98f8d193a100be12b0cef87ce4ab3e29e8): jobs/on-subagent-return.json
+  | DEPLOY VERDICT: no install impact
+
+### c9_only_wave_script - ONLY scripts/wave-probe.sh
+pass: observed=1 settled=1 emitted=1 duplicates=0 unreadable=[] errors=[]
+store: deliveries=1 event_id=c9_only_wave_script state=queued
+payload: changed_paths=["scripts/wave-probe.sh"] changed_paths_error=-
+payload: source=git -C C:\Users\Victor\AppData\Local\Temp\wa-review-ffda98e4\co2\wave-script diff --name-only refs/remotes/origin/main...5646bee70de8dc29d19e2f9bcc7a6fc8309f8891
+composed verdict: deploy required at the wave's end
+  | changed paths vs origin/main: 1 (git -C C:\Users\Victor\AppData\Local\Temp\wa-review-ffda98e4\co2\wave-script diff --name-only refs/remotes/origin/main...5646bee70de8dc29d19e2f9bcc7a6fc8309f8891): scripts/wave-probe.sh
+  | DEPLOY VERDICT: deploy required at the wave's end
+
+### c10_ship_wave_mjs - ONLY scripts/ship-wave.mjs
+pass: observed=1 settled=1 emitted=1 duplicates=0 unreadable=[] errors=[]
+store: deliveries=1 event_id=c10_ship_wave_mjs state=queued
+payload: changed_paths=["scripts/ship-wave.mjs"] changed_paths_error=-
+payload: source=git -C C:\Users\Victor\AppData\Local\Temp\wa-review-ffda98e4\co2\ship-wave diff --name-only refs/remotes/origin/main...3ed7ac17b27590d86fdda8c93874d19f4a826109
+composed verdict: no install impact
+  | changed paths vs origin/main: 1 (git -C C:\Users\Victor\AppData\Local\Temp\wa-review-ffda98e4\co2\ship-wave diff --name-only refs/remotes/origin/main...3ed7ac17b27590d86fdda8c93874d19f4a826109): scripts/ship-wave.mjs
+  | DEPLOY VERDICT: no install impact
+
+### c11_lib_module - ONLY scripts/lib/probe.cjs
+pass: observed=1 settled=1 emitted=1 duplicates=0 unreadable=[] errors=[]
+store: deliveries=1 event_id=c11_lib_module state=queued
+payload: changed_paths=["scripts/lib/probe.cjs"] changed_paths_error=-
+payload: source=git -C C:\Users\Victor\AppData\Local\Temp\wa-review-ffda98e4\co2\lib-module diff --name-only refs/remotes/origin/main...adb8e69a9da0e44f3c84fd24c278d845b1c7b03c
+composed verdict: deploy required at the wave's end
+  | changed paths vs origin/main: 1 (git -C C:\Users\Victor\AppData\Local\Temp\wa-review-ffda98e4\co2\lib-module diff --name-only refs/remotes/origin/main...adb8e69a9da0e44f3c84fd24c278d845b1c7b03c): scripts/lib/probe.cjs
+  | DEPLOY VERDICT: deploy required at the wave's end
+
+### c12_lib_nested - ONLY scripts/lib/nested/probe.cjs
+pass: observed=1 settled=1 emitted=1 duplicates=0 unreadable=[] errors=[]
+store: deliveries=1 event_id=c12_lib_nested state=queued
+payload: changed_paths=["scripts/lib/nested/probe.cjs"] changed_paths_error=-
+payload: source=git -C C:\Users\Victor\AppData\Local\Temp\wa-review-ffda98e4\co2\lib-nested diff --name-only refs/remotes/origin/main...baacce493a0beda74e3394d3c5fe5e4b6deb5a56
+composed verdict: no install impact
+  | changed paths vs origin/main: 1 (git -C C:\Users\Victor\AppData\Local\Temp\wa-review-ffda98e4\co2\lib-nested diff --name-only refs/remotes/origin/main...baacce493a0beda74e3394d3c5fe5e4b6deb5a56): scripts/lib/nested/probe.cjs
+  | DEPLOY VERDICT: no install impact
+
+### c13_deploy_sh - ONLY scripts/deploy.sh
+pass: observed=1 settled=1 emitted=1 duplicates=0 unreadable=[] errors=[]
+store: deliveries=1 event_id=c13_deploy_sh state=queued
+payload: changed_paths=["scripts/deploy.sh"] changed_paths_error=-
+payload: source=git -C C:\Users\Victor\AppData\Local\Temp\wa-review-ffda98e4\co2\deploy-sh diff --name-only refs/remotes/origin/main...d342c6bc749d47bdc28176416d98563576a13027
+composed verdict: deploy required at the wave's end
+  | changed paths vs origin/main: 1 (git -C C:\Users\Victor\AppData\Local\Temp\wa-review-ffda98e4\co2\deploy-sh diff --name-only refs/remotes/origin/main...d342c6bc749d47bdc28176416d98563576a13027): scripts/deploy.sh
+  | DEPLOY VERDICT: deploy required at the wave's end
+
+### d0_one_wake_per_settle
+pass1: emitted=1 duplicates=0 deliveries=1 wakes=1
+pass2 after the cursor file is deleted: emitted=0 duplicates=1 deliveries=1 wakes=1
+after a re-put (revision 3) and a lost cursor: emitted=1 duplicates=0
+store rows for child-dedupe: rev2#1:completed rev4#2:completed
+wakes for one settle: 2
+  wake -> probe-coordinator: DEPLOY VERDICT: deploy required at the wave's end
+  wake -> probe-coordinator: DEPLOY VERDICT: deploy required at the wave's end
+### d1_settles_while_the_pass_is_mid_run
+pass A while it was still running: observed=1 settled=0 emitted=0
+pass B after it settled: observed=2 settled=2 emitted=1 wakes=1
+pass C (same children again): emitted=0 duplicates=0 wakes=1
+### d2_settles_and_leaves_the_record_before_a_pass
+pass A while child-gone was running: settled=1 emitted=0
+pass B after it settled and left the record: observed=1 settled=1 emitted=0
+wakes for child-gone: 0 -> a settle that leaves the record before a pass is never reported

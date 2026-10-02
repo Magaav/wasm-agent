@@ -1,0 +1,17 @@
+### p1_outside_allowlist put=0 delivery=failed wakes=
+  detail: wake prepare step needs an absolute script inside WA_SENTINEL_SCRIPTS
+### p2_metachar put=0 delivery=completed wakes=1
+  detail: 2 events, done=true
+  named file itself ran=true  instruction in the wake=true  (if a shell had run 'evil.sh;exit 42' the delivery would fail with code 42 and there would be no wake)
+### p2b_metachar_missing put=0 delivery=failed wakes=
+  detail: wake prepare step needs an absolute script inside WA_SENTINEL_SCRIPTS
+### p3_huge_timeout put=0 delivery=failed wakes=
+  detail: invalid_operation_budget
+  for comparison, a RUN action with timeout_seconds=999999999: put status=1 says: sentinel: invalid_action_timeout
+### p4_prepare_on_run put=0 delivery=failed wakes=
+  detail: prepare_is_only_for_a_wake_action
+### p5_pipeline_step_prepare put=0 delivery=completed wakes=
+  detail: pipeline completed 1 step(s), handed on 0 item(s)
+  the step's prepare script ran=false  (its marker file)
+### p6_relative_script put=0 delivery=failed wakes=
+  detail: wake prepare step needs an absolute script inside WA_SENTINEL_SCRIPTS
