@@ -1,0 +1,37 @@
+{
+ "verdict": "ATTACK PROBE FAIL (2 checks, 1 failures) phase=done | FAILURES: a lane whose children recorded their OWN worktree must not be called main-only (its children do not work in the node checkout), saw main-only=yes with the reason \"main-only · yes · this lane holds no branch of its own: its children work in the node checkout\" beside the lane path \"C:/work/wt-gamma\"",
+ "facts": {
+  "lanes": [
+   {
+    "key": "C:/work/wt-gamma",
+    "path": "C:/work/wt-gamma",
+    "checklist": [
+     {
+      "outcome": "merged",
+      "state": "unknown",
+      "reason": "merged · unknown · this view reads no branch tip and no origin/main ref, so containment is not measured here"
+     },
+     {
+      "outcome": "retired",
+      "state": "no",
+      "reason": "retired · no · a child of this lane still holds a bound checkout"
+     },
+     {
+      "outcome": "clean",
+      "state": "unknown",
+      "reason": "clean · unknown · a checkout's own git status is measured by the node's settlement review, which this view is not given"
+     },
+     {
+      "outcome": "main-only",
+      "state": "yes",
+      "reason": "main-only · yes · this lane holds no branch of its own: its children work in the node checkout"
+     }
+    ]
+   }
+  ],
+  "observed": {
+   "mainOnly": "yes",
+   "retired": "no"
+  }
+ }
+}

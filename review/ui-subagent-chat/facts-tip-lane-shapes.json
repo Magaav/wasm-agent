@@ -1,0 +1,182 @@
+{
+ "verdict": "LANE SHAPES PASS (7 checks, 0 failures) phase=done",
+ "facts": {
+  "lanes": [
+   {
+    "key": "change/lane-alpha",
+    "path": "C:/work/wt-alpha",
+    "count": 1,
+    "checklist": [
+     {
+      "outcome": "merged",
+      "state": "unknown",
+      "reason": "merged · unknown · this view reads no branch tip and no origin/main ref, so containment is not measured here"
+     },
+     {
+      "outcome": "retired",
+      "state": "no",
+      "reason": "retired · no · a child of this lane still holds a bound checkout"
+     },
+     {
+      "outcome": "clean",
+      "state": "unknown",
+      "reason": "clean · unknown · a checkout's own git status is measured by the node's settlement review, which this view is not given"
+     },
+     {
+      "outcome": "main-only",
+      "state": "no",
+      "reason": "main-only · no · this lane holds a checkout of its own (change/lane-alpha)"
+     }
+    ]
+   },
+   {
+    "key": "change/lane-beta",
+    "path": "C:/work/wt-beta",
+    "count": 1,
+    "checklist": [
+     {
+      "outcome": "merged",
+      "state": "unknown",
+      "reason": "merged · unknown · this view reads no branch tip and no origin/main ref, so containment is not measured here"
+     },
+     {
+      "outcome": "retired",
+      "state": "yes",
+      "reason": "retired · yes · every child of this lane recorded a released checkout; the branch is retained"
+     },
+     {
+      "outcome": "clean",
+      "state": "unknown",
+      "reason": "clean · unknown · a checkout's own git status is measured by the node's settlement review, which this view is not given"
+     },
+     {
+      "outcome": "main-only",
+      "state": "no",
+      "reason": "main-only · no · this lane holds a checkout of its own (change/lane-beta)"
+     }
+    ]
+   },
+   {
+    "key": "C:/work/wt-gamma",
+    "path": "C:/work/wt-gamma",
+    "count": 1,
+    "checklist": [
+     {
+      "outcome": "merged",
+      "state": "unknown",
+      "reason": "merged · unknown · this view reads no branch tip and no origin/main ref, so containment is not measured here"
+     },
+     {
+      "outcome": "retired",
+      "state": "no",
+      "reason": "retired · no · a child of this lane still holds a bound checkout"
+     },
+     {
+      "outcome": "clean",
+      "state": "unknown",
+      "reason": "clean · unknown · a checkout's own git status is measured by the node's settlement review, which this view is not given"
+     },
+     {
+      "outcome": "main-only",
+      "state": "no",
+      "reason": "main-only · no · this lane holds a checkout of its own (C:/work/wt-gamma)"
+     }
+    ]
+   },
+   {
+    "key": "main",
+    "path": null,
+    "count": 1,
+    "checklist": [
+     {
+      "outcome": "merged",
+      "state": "unknown",
+      "reason": "merged · unknown · this view reads no branch tip and no origin/main ref, so containment is not measured here"
+     },
+     {
+      "outcome": "retired",
+      "state": "unknown",
+      "reason": "retired · unknown · no child of this lane recorded a released checkout; nothing was retired here"
+     },
+     {
+      "outcome": "clean",
+      "state": "unknown",
+      "reason": "clean · unknown · a checkout's own git status is measured by the node's settlement review, which this view is not given"
+     },
+     {
+      "outcome": "main-only",
+      "state": "yes",
+      "reason": "main-only · yes · this lane holds no branch and no worktree of its own: its children work in the node checkout"
+     }
+    ]
+   },
+   {
+    "key": "no recorded checkout",
+    "path": null,
+    "count": 1,
+    "checklist": [
+     {
+      "outcome": "merged",
+      "state": "unknown",
+      "reason": "merged · unknown · no session record for this child"
+     },
+     {
+      "outcome": "retired",
+      "state": "unknown",
+      "reason": "retired · unknown · no session record for this child"
+     },
+     {
+      "outcome": "clean",
+      "state": "unknown",
+      "reason": "clean · unknown · no session record for this child"
+     },
+     {
+      "outcome": "main-only",
+      "state": "unknown",
+      "reason": "main-only · unknown · no session record for this child"
+     }
+    ]
+   }
+  ],
+  "sentinelCollision": {
+   "lanes": [
+    {
+     "key": "change/lane-alpha",
+     "path": "C:/work/wt-alpha",
+     "count": 1,
+     "mainOnly": "no",
+     "reason": "main-only · no · this lane holds a checkout of its own (change/lane-alpha)"
+    },
+    {
+     "key": "change/lane-beta",
+     "path": "C:/work/wt-beta",
+     "count": 1,
+     "mainOnly": "no",
+     "reason": "main-only · no · this lane holds a checkout of its own (change/lane-beta)"
+    },
+    {
+     "key": "C:/work/wt-gamma",
+     "path": "C:/work/wt-gamma",
+     "count": 1,
+     "mainOnly": "no",
+     "reason": "main-only · no · this lane holds a checkout of its own (C:/work/wt-gamma)"
+    },
+    {
+     "key": "main",
+     "path": "C:/work/wt-sentinel",
+     "count": 2,
+     "mainOnly": "no",
+     "reason": "main-only · no · this lane holds a checkout of its own (C:/work/wt-sentinel)"
+    },
+    {
+     "key": "no recorded checkout",
+     "path": null,
+     "count": 1,
+     "mainOnly": "unknown",
+     "reason": "main-only · unknown · no session record for this child"
+    }
+   ],
+   "merged": true
+  }
+ }
+}

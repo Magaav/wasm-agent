@@ -1,0 +1,953 @@
+{
+ "verdict": "REVIEW PROBE PASS (27 checks, 0 failures) phase=done",
+ "facts": {
+  "viewport": {
+   "w": 1022,
+   "h": 1040,
+   "dpr": 0.5
+  },
+  "canvas": {
+   "clientHeight": 982,
+   "scrollHeight": 1100,
+   "rect": {
+    "x": 250,
+    "y": 58.47,
+    "top": 58.47,
+    "left": 250,
+    "w": 772,
+    "h": 981.53,
+    "right": 1022,
+    "bottom": 1040
+   }
+  },
+  "panes": [
+   {
+    "key": "child-1",
+    "pane": {
+     "rect": {
+      "x": 255,
+      "y": 63.47,
+      "top": 63.47,
+      "left": 255,
+      "w": 378.5,
+      "h": 360,
+      "right": 633.5,
+      "bottom": 423.47
+     },
+     "h": 360
+    },
+    "head": {
+     "rect": {
+      "x": 257,
+      "y": 65.47,
+      "top": 65.47,
+      "left": 257,
+      "w": 374.5,
+      "h": 42,
+      "right": 631.5,
+      "bottom": 107.47
+     },
+     "computedHeight": "42px",
+     "computedMaxHeight": "44px",
+     "clientHeight": 40,
+     "scrollHeight": 40,
+     "titleRect": {
+      "x": 262,
+      "y": 74.22,
+      "top": 74.22,
+      "left": 262,
+      "w": 164,
+      "h": 22.47,
+      "right": 426,
+      "bottom": 96.69
+     },
+     "subtitleRect": {
+      "x": 431,
+      "y": 76.16,
+      "top": 76.16,
+      "left": 431,
+      "w": 125.5,
+      "h": 18.59,
+      "right": 556.5,
+      "bottom": 94.75
+     },
+     "titleLen": 88,
+     "titleClientWidth": 164,
+     "titleScrollWidth": 702,
+     "titleTextOverflow": "ellipsis",
+     "subtitleLen": 54,
+     "controls": 2,
+     "controlsInside": true,
+     "controlRects": [
+      {
+       "x": 561.5,
+       "y": 70.47,
+       "top": 70.47,
+       "left": 561.5,
+       "w": 30,
+       "h": 30,
+       "right": 591.5,
+       "bottom": 100.47
+      },
+      {
+       "x": 596.5,
+       "y": 70.47,
+       "top": 70.47,
+       "left": 596.5,
+       "w": 30,
+       "h": 30,
+       "right": 626.5,
+       "bottom": 100.47
+      }
+     ]
+    },
+    "transcript": {
+     "clientHeight": 138,
+     "scrollHeight": 740,
+     "rect": {
+      "x": 257,
+      "y": 107.47,
+      "top": 107.47,
+      "left": 257,
+      "w": 374.5,
+      "h": 138.09,
+      "right": 631.5,
+      "bottom": 245.56
+     },
+     "messages": [
+      337.13,
+      377.72
+     ],
+     "minMessageHeight": 337.13,
+     "answerPresent": true,
+     "hitInside": true,
+     "hitTag": "DIV",
+     "hitText": "CHILD-1-ANSWER a long paragraph of child"
+    },
+    "controls": {
+     "actionRowSelector": ".chat-actions",
+     "actionButtonSelector": ".chat-actions .chat-action",
+     "attachSelector": "wa-chat-shell [data-part=\"attach\"]",
+     "actionRowHeight": 30,
+     "actionButtonHeight": 30,
+     "attachHeight": 30,
+     "actionButtonComputed": "30px",
+     "attachComputed": "30px",
+     "actionButtonOffset": 30,
+     "attachOffset": 30
+    },
+    "path": {
+     "sharedShell": true,
+     "showMessagesType": "undefined",
+     "earlierElement": false,
+     "earlierText": false,
+     "retrieveText": false,
+     "notice": "Working. Steer updates the active run; Send queues a follow-up.",
+     "bodySteps": true,
+     "footerInBubble": false,
+     "footerLabel": null,
+     "footerElapsed": null,
+     "footerAtTranscriptRoot": false,
+     "statusLineHidden": false
+    },
+    "fold": {
+     "okLine": true,
+     "okOutputHidden": true,
+     "errLine": true,
+     "errOutputHidden": false,
+     "errRecorded": false
+    }
+   },
+   {
+    "key": "child-2",
+    "pane": {
+     "rect": {
+      "x": 638.5,
+      "y": 63.47,
+      "top": 63.47,
+      "left": 638.5,
+      "w": 378.5,
+      "h": 360,
+      "right": 1017,
+      "bottom": 423.47
+     },
+     "h": 360
+    },
+    "head": {
+     "rect": {
+      "x": 640.5,
+      "y": 65.47,
+      "top": 65.47,
+      "left": 640.5,
+      "w": 374.5,
+      "h": 42,
+      "right": 1015,
+      "bottom": 107.47
+     },
+     "computedHeight": "42px",
+     "computedMaxHeight": "44px",
+     "clientHeight": 40,
+     "scrollHeight": 40,
+     "titleRect": {
+      "x": 645.5,
+      "y": 74.22,
+      "top": 74.22,
+      "left": 645.5,
+      "w": 164,
+      "h": 22.47,
+      "right": 809.5,
+      "bottom": 96.69
+     },
+     "subtitleRect": {
+      "x": 814.5,
+      "y": 76.16,
+      "top": 76.16,
+      "left": 814.5,
+      "w": 125.5,
+      "h": 18.59,
+      "right": 940,
+      "bottom": 94.75
+     },
+     "titleLen": 88,
+     "titleClientWidth": 164,
+     "titleScrollWidth": 702,
+     "titleTextOverflow": "ellipsis",
+     "subtitleLen": 54,
+     "controls": 2,
+     "controlsInside": true,
+     "controlRects": [
+      {
+       "x": 945,
+       "y": 70.47,
+       "top": 70.47,
+       "left": 945,
+       "w": 30,
+       "h": 30,
+       "right": 975,
+       "bottom": 100.47
+      },
+      {
+       "x": 980,
+       "y": 70.47,
+       "top": 70.47,
+       "left": 980,
+       "w": 30,
+       "h": 30,
+       "right": 1010,
+       "bottom": 100.47
+      }
+     ]
+    },
+    "transcript": {
+     "clientHeight": 138,
+     "scrollHeight": 740,
+     "rect": {
+      "x": 640.5,
+      "y": 107.47,
+      "top": 107.47,
+      "left": 640.5,
+      "w": 374.5,
+      "h": 138.09,
+      "right": 1015,
+      "bottom": 245.56
+     },
+     "messages": [
+      337.13,
+      377.72
+     ],
+     "minMessageHeight": 337.13,
+     "answerPresent": true,
+     "hitInside": true,
+     "hitTag": "DIV",
+     "hitText": "CHILD-2-ANSWER a long paragraph of child"
+    },
+    "controls": {
+     "actionRowSelector": ".chat-actions",
+     "actionButtonSelector": ".chat-actions .chat-action",
+     "attachSelector": "wa-chat-shell [data-part=\"attach\"]",
+     "actionRowHeight": 30,
+     "actionButtonHeight": 30,
+     "attachHeight": 30,
+     "actionButtonComputed": "30px",
+     "attachComputed": "30px",
+     "actionButtonOffset": 30,
+     "attachOffset": 30
+    },
+    "path": {
+     "sharedShell": true,
+     "showMessagesType": "undefined",
+     "earlierElement": false,
+     "earlierText": false,
+     "retrieveText": false,
+     "notice": "Working. Steer updates the active run; Send queues a follow-up.",
+     "bodySteps": true,
+     "footerInBubble": false,
+     "footerLabel": null,
+     "footerElapsed": null,
+     "footerAtTranscriptRoot": false,
+     "statusLineHidden": false
+    },
+    "fold": {
+     "okLine": true,
+     "okOutputHidden": true,
+     "errLine": true,
+     "errOutputHidden": false,
+     "errRecorded": false
+    }
+   },
+   {
+    "key": "child-3",
+    "pane": {
+     "rect": {
+      "x": 255,
+      "y": 428.47,
+      "top": 428.47,
+      "left": 255,
+      "w": 378.5,
+      "h": 360,
+      "right": 633.5,
+      "bottom": 788.47
+     },
+     "h": 360
+    },
+    "head": {
+     "rect": {
+      "x": 257,
+      "y": 430.47,
+      "top": 430.47,
+      "left": 257,
+      "w": 374.5,
+      "h": 42,
+      "right": 631.5,
+      "bottom": 472.47
+     },
+     "computedHeight": "42px",
+     "computedMaxHeight": "44px",
+     "clientHeight": 40,
+     "scrollHeight": 40,
+     "titleRect": {
+      "x": 262,
+      "y": 439.22,
+      "top": 439.22,
+      "left": 262,
+      "w": 164,
+      "h": 22.47,
+      "right": 426,
+      "bottom": 461.69
+     },
+     "subtitleRect": {
+      "x": 431,
+      "y": 441.16,
+      "top": 441.16,
+      "left": 431,
+      "w": 125.5,
+      "h": 18.59,
+      "right": 556.5,
+      "bottom": 459.75
+     },
+     "titleLen": 88,
+     "titleClientWidth": 164,
+     "titleScrollWidth": 702,
+     "titleTextOverflow": "ellipsis",
+     "subtitleLen": 54,
+     "controls": 2,
+     "controlsInside": true,
+     "controlRects": [
+      {
+       "x": 561.5,
+       "y": 435.47,
+       "top": 435.47,
+       "left": 561.5,
+       "w": 30,
+       "h": 30,
+       "right": 591.5,
+       "bottom": 465.47
+      },
+      {
+       "x": 596.5,
+       "y": 435.47,
+       "top": 435.47,
+       "left": 596.5,
+       "w": 30,
+       "h": 30,
+       "right": 626.5,
+       "bottom": 465.47
+      }
+     ]
+    },
+    "transcript": {
+     "clientHeight": 138,
+     "scrollHeight": 740,
+     "rect": {
+      "x": 257,
+      "y": 472.47,
+      "top": 472.47,
+      "left": 257,
+      "w": 374.5,
+      "h": 138.09,
+      "right": 631.5,
+      "bottom": 610.56
+     },
+     "messages": [
+      337.13,
+      377.72
+     ],
+     "minMessageHeight": 337.13,
+     "answerPresent": true,
+     "hitInside": true,
+     "hitTag": "DIV",
+     "hitText": "CHILD-3-ANSWER a long paragraph of child"
+    },
+    "controls": {
+     "actionRowSelector": ".chat-actions",
+     "actionButtonSelector": ".chat-actions .chat-action",
+     "attachSelector": "wa-chat-shell [data-part=\"attach\"]",
+     "actionRowHeight": 30,
+     "actionButtonHeight": 30,
+     "attachHeight": 30,
+     "actionButtonComputed": "30px",
+     "attachComputed": "30px",
+     "actionButtonOffset": 30,
+     "attachOffset": 30
+    },
+    "path": {
+     "sharedShell": true,
+     "showMessagesType": "undefined",
+     "earlierElement": false,
+     "earlierText": false,
+     "retrieveText": false,
+     "notice": "Working. Steer updates the active run; Send queues a follow-up.",
+     "bodySteps": true,
+     "footerInBubble": false,
+     "footerLabel": null,
+     "footerElapsed": null,
+     "footerAtTranscriptRoot": false,
+     "statusLineHidden": false
+    },
+    "fold": {
+     "okLine": true,
+     "okOutputHidden": true,
+     "errLine": true,
+     "errOutputHidden": false,
+     "errRecorded": false
+    }
+   },
+   {
+    "key": "child-4",
+    "pane": {
+     "rect": {
+      "x": 638.5,
+      "y": 428.47,
+      "top": 428.47,
+      "left": 638.5,
+      "w": 378.5,
+      "h": 360,
+      "right": 1017,
+      "bottom": 788.47
+     },
+     "h": 360
+    },
+    "head": {
+     "rect": {
+      "x": 640.5,
+      "y": 430.47,
+      "top": 430.47,
+      "left": 640.5,
+      "w": 374.5,
+      "h": 42,
+      "right": 1015,
+      "bottom": 472.47
+     },
+     "computedHeight": "42px",
+     "computedMaxHeight": "44px",
+     "clientHeight": 40,
+     "scrollHeight": 40,
+     "titleRect": {
+      "x": 645.5,
+      "y": 439.22,
+      "top": 439.22,
+      "left": 645.5,
+      "w": 164,
+      "h": 22.47,
+      "right": 809.5,
+      "bottom": 461.69
+     },
+     "subtitleRect": {
+      "x": 814.5,
+      "y": 441.16,
+      "top": 441.16,
+      "left": 814.5,
+      "w": 125.5,
+      "h": 18.59,
+      "right": 940,
+      "bottom": 459.75
+     },
+     "titleLen": 88,
+     "titleClientWidth": 164,
+     "titleScrollWidth": 702,
+     "titleTextOverflow": "ellipsis",
+     "subtitleLen": 54,
+     "controls": 2,
+     "controlsInside": true,
+     "controlRects": [
+      {
+       "x": 945,
+       "y": 435.47,
+       "top": 435.47,
+       "left": 945,
+       "w": 30,
+       "h": 30,
+       "right": 975,
+       "bottom": 465.47
+      },
+      {
+       "x": 980,
+       "y": 435.47,
+       "top": 435.47,
+       "left": 980,
+       "w": 30,
+       "h": 30,
+       "right": 1010,
+       "bottom": 465.47
+      }
+     ]
+    },
+    "transcript": {
+     "clientHeight": 138,
+     "scrollHeight": 740,
+     "rect": {
+      "x": 640.5,
+      "y": 472.47,
+      "top": 472.47,
+      "left": 640.5,
+      "w": 374.5,
+      "h": 138.09,
+      "right": 1015,
+      "bottom": 610.56
+     },
+     "messages": [
+      337.13,
+      377.72
+     ],
+     "minMessageHeight": 337.13,
+     "answerPresent": true,
+     "hitInside": true,
+     "hitTag": "DIV",
+     "hitText": "CHILD-4-ANSWER a long paragraph of child"
+    },
+    "controls": {
+     "actionRowSelector": ".chat-actions",
+     "actionButtonSelector": ".chat-actions .chat-action",
+     "attachSelector": "wa-chat-shell [data-part=\"attach\"]",
+     "actionRowHeight": 30,
+     "actionButtonHeight": 30,
+     "attachHeight": 30,
+     "actionButtonComputed": "30px",
+     "attachComputed": "30px",
+     "actionButtonOffset": 30,
+     "attachOffset": 30
+    },
+    "path": {
+     "sharedShell": true,
+     "showMessagesType": "undefined",
+     "earlierElement": false,
+     "earlierText": false,
+     "retrieveText": false,
+     "notice": "Working. Steer updates the active run; Send queues a follow-up.",
+     "bodySteps": true,
+     "footerInBubble": false,
+     "footerLabel": null,
+     "footerElapsed": null,
+     "footerAtTranscriptRoot": false,
+     "statusLineHidden": false
+    },
+    "fold": {
+     "okLine": true,
+     "okOutputHidden": true,
+     "errLine": true,
+     "errOutputHidden": false,
+     "errRecorded": false
+    }
+   },
+   {
+    "key": "child-5",
+    "pane": {
+     "rect": {
+      "x": 255,
+      "y": 675.47,
+      "top": 675.47,
+      "left": 255,
+      "w": 378.5,
+      "h": 360,
+      "right": 633.5,
+      "bottom": 1035.47
+     },
+     "h": 360
+    },
+    "head": {
+     "rect": {
+      "x": 257,
+      "y": 795.47,
+      "top": 795.47,
+      "left": 257,
+      "w": 374.5,
+      "h": 42,
+      "right": 631.5,
+      "bottom": 837.47
+     },
+     "computedHeight": "42px",
+     "computedMaxHeight": "44px",
+     "clientHeight": 40,
+     "scrollHeight": 40,
+     "titleRect": {
+      "x": 262,
+      "y": 686.22,
+      "top": 686.22,
+      "left": 262,
+      "w": 164,
+      "h": 22.47,
+      "right": 426,
+      "bottom": 708.69
+     },
+     "subtitleRect": {
+      "x": 431,
+      "y": 688.16,
+      "top": 688.16,
+      "left": 431,
+      "w": 125.5,
+      "h": 18.59,
+      "right": 556.5,
+      "bottom": 706.75
+     },
+     "titleLen": 88,
+     "titleClientWidth": 164,
+     "titleScrollWidth": 702,
+     "titleTextOverflow": "ellipsis",
+     "subtitleLen": 56,
+     "controls": 2,
+     "controlsInside": true,
+     "controlRects": [
+      {
+       "x": 561.5,
+       "y": 682.47,
+       "top": 682.47,
+       "left": 561.5,
+       "w": 30,
+       "h": 30,
+       "right": 591.5,
+       "bottom": 712.47
+      },
+      {
+       "x": 596.5,
+       "y": 682.47,
+       "top": 682.47,
+       "left": 596.5,
+       "w": 30,
+       "h": 30,
+       "right": 626.5,
+       "bottom": 712.47
+      }
+     ]
+    },
+    "transcript": {
+     "clientHeight": 209,
+     "scrollHeight": 774,
+     "rect": {
+      "x": 257,
+      "y": 719.47,
+      "top": 719.47,
+      "left": 257,
+      "w": 374.5,
+      "h": 209.41,
+      "right": 631.5,
+      "bottom": 928.88
+     },
+     "messages": [
+      337.13,
+      411.75
+     ],
+     "minMessageHeight": 337.13,
+     "answerPresent": true,
+     "hitInside": true,
+     "hitTag": "DIV",
+     "hitText": "CHILD-5-ANSWER a long paragraph of child"
+    },
+    "controls": {
+     "actionRowSelector": ".chat-actions",
+     "actionButtonSelector": ".chat-actions .chat-action",
+     "attachSelector": "wa-chat-shell [data-part=\"attach\"]",
+     "actionRowHeight": 30,
+     "actionButtonHeight": 30,
+     "attachHeight": 30,
+     "actionButtonComputed": "30px",
+     "attachComputed": "30px",
+     "actionButtonOffset": 30,
+     "attachOffset": 30
+    },
+    "path": {
+     "sharedShell": true,
+     "showMessagesType": "undefined",
+     "earlierElement": false,
+     "earlierText": false,
+     "retrieveText": false,
+     "notice": "",
+     "bodySteps": true,
+     "footerInBubble": true,
+     "footerLabel": "completed",
+     "footerElapsed": "0:06",
+     "footerAtTranscriptRoot": false,
+     "statusLineHidden": true
+    },
+    "fold": {
+     "okLine": true,
+     "okOutputHidden": true,
+     "errLine": true,
+     "errOutputHidden": false,
+     "errRecorded": false
+    }
+   },
+   {
+    "key": "child-6",
+    "pane": {
+     "rect": {
+      "x": 638.5,
+      "y": 675.47,
+      "top": 675.47,
+      "left": 638.5,
+      "w": 378.5,
+      "h": 360,
+      "right": 1017,
+      "bottom": 1035.47
+     },
+     "h": 360
+    },
+    "head": {
+     "rect": {
+      "x": 640.5,
+      "y": 677.47,
+      "top": 677.47,
+      "left": 640.5,
+      "w": 374.5,
+      "h": 42,
+      "right": 1015,
+      "bottom": 719.47
+     },
+     "computedHeight": "42px",
+     "computedMaxHeight": "44px",
+     "clientHeight": 40,
+     "scrollHeight": 40,
+     "titleRect": {
+      "x": 645.5,
+      "y": 686.22,
+      "top": 686.22,
+      "left": 645.5,
+      "w": 164,
+      "h": 22.47,
+      "right": 809.5,
+      "bottom": 708.69
+     },
+     "subtitleRect": {
+      "x": 814.5,
+      "y": 688.16,
+      "top": 688.16,
+      "left": 814.5,
+      "w": 125.5,
+      "h": 18.59,
+      "right": 940,
+      "bottom": 706.75
+     },
+     "titleLen": 88,
+     "titleClientWidth": 164,
+     "titleScrollWidth": 702,
+     "titleTextOverflow": "ellipsis",
+     "subtitleLen": 56,
+     "controls": 2,
+     "controlsInside": true,
+     "controlRects": [
+      {
+       "x": 945,
+       "y": 682.47,
+       "top": 682.47,
+       "left": 945,
+       "w": 30,
+       "h": 30,
+       "right": 975,
+       "bottom": 712.47
+      },
+      {
+       "x": 980,
+       "y": 682.47,
+       "top": 682.47,
+       "left": 980,
+       "w": 30,
+       "h": 30,
+       "right": 1010,
+       "bottom": 712.47
+      }
+     ]
+    },
+    "transcript": {
+     "clientHeight": 209,
+     "scrollHeight": 774,
+     "rect": {
+      "x": 640.5,
+      "y": 719.47,
+      "top": 719.47,
+      "left": 640.5,
+      "w": 374.5,
+      "h": 209.41,
+      "right": 1015,
+      "bottom": 928.88
+     },
+     "messages": [
+      337.13,
+      411.75
+     ],
+     "minMessageHeight": 337.13,
+     "answerPresent": true,
+     "hitInside": true,
+     "hitTag": "DIV",
+     "hitText": "CHILD-6-ANSWER a long paragraph of child"
+    },
+    "controls": {
+     "actionRowSelector": ".chat-actions",
+     "actionButtonSelector": ".chat-actions .chat-action",
+     "attachSelector": "wa-chat-shell [data-part=\"attach\"]",
+     "actionRowHeight": 30,
+     "actionButtonHeight": 30,
+     "attachHeight": 30,
+     "actionButtonComputed": "30px",
+     "attachComputed": "30px",
+     "actionButtonOffset": 30,
+     "attachOffset": 30
+    },
+    "path": {
+     "sharedShell": true,
+     "showMessagesType": "undefined",
+     "earlierElement": false,
+     "earlierText": false,
+     "retrieveText": false,
+     "notice": "",
+     "bodySteps": true,
+     "footerInBubble": true,
+     "footerLabel": "completed",
+     "footerElapsed": "0:05",
+     "footerAtTranscriptRoot": false,
+     "statusLineHidden": true
+    },
+    "fold": {
+     "okLine": true,
+     "okOutputHidden": true,
+     "errLine": true,
+     "errOutputHidden": false,
+     "errRecorded": false
+    }
+   }
+  ],
+  "canvasScrolled": true,
+  "mainWrapper": {
+   "classes": "messages",
+   "part": "content"
+  },
+  "shapes": {
+   "child": "WA-MESSAGE.msg.user[];WA-MESSAGE.assistant.msg[WA-RUN.run{BUTTON.trace-head,DIV.run-body},DIV.seg{BR.},DIV.chat-content-run-status.finished.status{SPAN.chat-content-run-label,SPAN.chat-content-run-elapsed}]",
+   "chat": "WA-MESSAGE.msg.user[];WA-MESSAGE.assistant.msg[WA-RUN.run{BUTTON.trace-head,DIV.run-body},DIV.seg{BR.},DIV.chat-content-run-status.finished.status{SPAN.chat-content-run-label,SPAN.chat-content-run-elapsed}]"
+  },
+  "mainChatAfterRepaint": "WA-MESSAGE.msg.user[];WA-MESSAGE.assistant.msg[WA-RUN.run{BUTTON.trace-head,DIV.run-body},DIV.seg{BR.},DIV.chat-content-run-status.finished.status{SPAN.chat-content-run-label,SPAN.chat-content-run-elapsed}]",
+  "lanes": [
+   {
+    "key": "change/lane-alpha",
+    "path": "C:/work/wt-alpha",
+    "count": 2,
+    "checklist": [
+     {
+      "outcome": "merged",
+      "state": "unknown",
+      "shown": "unknown",
+      "reason": "merged · unknown · this view reads no branch tip and no origin/main ref, so containment is not measured here"
+     },
+     {
+      "outcome": "retired",
+      "state": "no",
+      "shown": "no",
+      "reason": "retired · no · a child of this lane still holds a bound checkout"
+     },
+     {
+      "outcome": "clean",
+      "state": "unknown",
+      "shown": "unknown",
+      "reason": "clean · unknown · a checkout's own git status is measured by the node's settlement review, which this view is not given"
+     },
+     {
+      "outcome": "main-only",
+      "state": "no",
+      "shown": "no",
+      "reason": "main-only · no · this lane holds a branch of its own"
+     }
+    ]
+   },
+   {
+    "key": "change/lane-beta",
+    "path": "C:/work/wt-beta",
+    "count": 2,
+    "checklist": [
+     {
+      "outcome": "merged",
+      "state": "unknown",
+      "shown": "unknown",
+      "reason": "merged · unknown · this view reads no branch tip and no origin/main ref, so containment is not measured here"
+     },
+     {
+      "outcome": "retired",
+      "state": "yes",
+      "shown": "yes",
+      "reason": "retired · yes · every child of this lane recorded a released checkout; the branch is retained"
+     },
+     {
+      "outcome": "clean",
+      "state": "unknown",
+      "shown": "unknown",
+      "reason": "clean · unknown · a checkout's own git status is measured by the node's settlement review, which this view is not given"
+     },
+     {
+      "outcome": "main-only",
+      "state": "no",
+      "shown": "no",
+      "reason": "main-only · no · this lane holds a branch of its own"
+     }
+    ]
+   },
+   {
+    "key": "main",
+    "path": null,
+    "count": 2,
+    "checklist": [
+     {
+      "outcome": "merged",
+      "state": "unknown",
+      "shown": "unknown",
+      "reason": "merged · unknown · this view reads no branch tip and no origin/main ref, so containment is not measured here"
+     },
+     {
+      "outcome": "retired",
+      "state": "unknown",
+      "shown": "unknown",
+      "reason": "retired · unknown · no child of this lane recorded a released checkout; nothing was retired here"
+     },
+     {
+      "outcome": "clean",
+      "state": "unknown",
+      "shown": "unknown",
+      "reason": "clean · unknown · a checkout's own git status is measured by the node's settlement review, which this view is not given"
+     },
+     {
+      "outcome": "main-only",
+      "state": "yes",
+      "shown": "yes",
+      "reason": "main-only · yes · this lane holds no branch of its own: its children work in the node checkout"
+     }
+    ]
+   }
+  ]
+ }
+}

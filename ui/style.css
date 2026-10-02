@@ -59,11 +59,27 @@ button.live-child:hover, button.live-child:focus-visible { background:var(--pane
 .agent-card[data-state="unknown"], .agent-card[data-state="failed"] { border-left-color:#f77; }
 .agent-card[data-state="completed"], .agent-card[data-state="cancelled"] { opacity:.72; }
 .agent-card:hover, .agent-card:focus-visible { background:var(--panel-2); border-color:var(--accent); }
+/* A lane: the checkout a child was given, the children working in it, and its end state. The
+   sidebar is a list of lanes rather than a flat list of children, because "what is still owed here"
+   is a question about a checkout - six children in one worktree used to be six unrelated cards. */
+.lane { display:flex; flex-direction:column; gap:var(--gap); padding:var(--space); border:1px solid var(--line); border-radius:var(--radius-sm); background:var(--panel); }
+.lane-head { display:flex; align-items:baseline; gap:var(--gap); flex-wrap:wrap; min-width:0; }
+.lane-key { flex:1; min-width:0; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; font-weight:600; }
+.lane-count { flex:none; color:var(--muted); font-size:11px; }
+.lane-path { flex-basis:100%; min-width:0; color:var(--muted); font-size:11px; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }
+.lane-children { display:flex; flex-direction:column; gap:var(--gap); }
+.lane-checklist { display:flex; flex-direction:column; gap:2px; margin:0; padding:0; list-style:none; }
+.lane-check { display:flex; align-items:baseline; gap:var(--gap); color:var(--muted); font-size:11px; }
+.lane-check-name { min-width:75px; }
+.lane-check-state { flex:none; margin-left:auto; text-align:right; text-transform:uppercase; letter-spacing:.04em; }
+.lane-check[data-state="yes"] .lane-check-state { color:var(--ok); }
+.lane-check[data-state="no"] .lane-check-state { color:var(--warn); }
+.lane-check[data-state="unknown"] .lane-check-state { color:var(--muted); }
 .placement { padding:var(--space); margin-bottom:var(--space); color:var(--muted); font-size:12px; }
 .placement-node { display:flex; align-items:center; gap:var(--gap); padding:var(--space) 0; }
 .placement-node label { flex:1; overflow-wrap:anywhere; }
 .placement-node input { width:55px; }
-.orchestrator-canvas { flex:1; min-width:0; display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); grid-auto-rows:minmax(250px,1fr); gap:var(--gap); padding:var(--space); overflow:auto; }
+.orchestrator-canvas { flex:1; min-width:0; display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); grid-auto-rows:minmax(360px,1fr); gap:var(--gap); padding:var(--space); overflow:auto; }
 .orchestrator-canvas[data-count="0"], .orchestrator-canvas[data-count="1"] { grid-template-columns:minmax(0,1fr); }
 .orchestrator-canvas[data-count="3"] { grid-template-columns:repeat(3,minmax(0,1fr)); }
 /* The chat shell: one element the main conversation and every child pane both host. It is the flex
@@ -74,7 +90,13 @@ wa-chat-shell { flex:1; min-width:0; min-height:0; display:flex; flex-direction:
 .chat-host { display:flex; flex-direction:column; }
 .chat-host:empty { display:none; }
 wa-agent-session { min-width:0; min-height:0; display:flex; flex-direction:column; background:var(--panel); border:1px solid var(--line); border-radius:var(--radius); overflow:hidden; }
-.agent-pane-head { padding:var(--space); flex-wrap:wrap; }
+.agent-pane-head { padding:var(--space); flex-wrap:nowrap; max-height:44px; overflow:hidden; }
+/* The pane's header is a fixed strip, never a growing one. It holds the two controls that act on the
+   panel and one line naming the child, so a long title or a long model/reasoning/node list
+   ellipsizes instead of pushing the conversation down. The cap is the row itself - 2 x 5px padding,
+   a 30px control, its border - and it is stated here rather than left to whatever text arrives. */
+.agent-pane-head strong { flex:none; max-width:45%; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
+.agent-pane-head span { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 /* The pane's header controls are strokes: `.icon-btn svg { fill:currentColor }` would turn the squared
    outline into a solid block. */
 .agent-pane-head .icon-btn svg { fill:none; }
@@ -83,9 +105,12 @@ wa-agent-session { min-width:0; min-height:0; display:flex; flex-direction:colum
 .agent-transcript wa-message.assistant { width:min(760px,100%); }
 .agent-transcript wa-run { width:100%; }
 .agent-transcript pre { overflow:auto; white-space:pre-wrap; overflow-wrap:anywhere; }
-/* A pane's own per-message actions (Steer, Cancel task), where the main chat keeps its Steer. */
+/* A pane's own per-message actions (Steer, Cancel task), where the main chat keeps its Steer. They
+   sit on the composer's footer row, beside the control that appends a file, so they are the height
+   of that control: 30px, the shell's own control size (`.icon-btn`), padding on the 5px scale. A row
+   of 31px buttons next to a 30px control reads as two rows that do not line up. */
 .chat-actions { display:flex; align-items:center; gap:var(--gap); }
-.chat-action { border:1px solid var(--line); border-radius:var(--radius); padding:var(--space) var(--pad); background:var(--panel-2); color:var(--text); cursor:pointer; font:inherit; font-size:12px; }
+.chat-action { display:inline-flex; align-items:center; height:30px; padding:0 var(--pad); border:1px solid var(--line); border-radius:var(--radius); background:var(--panel-2); color:var(--text); cursor:pointer; font:inherit; font-size:12px; }
 .chat-action:hover { border-color:var(--accent); }
 .chat-action:disabled { opacity:.5; cursor:default; }
 .agent-notice { padding:0 var(--space); color:var(--muted); font-size:12px; overflow-wrap:anywhere; }
@@ -151,7 +176,7 @@ body.compact {
 a[href] { color: #8bbcff; text-decoration: underline; text-underline-offset: .15em; }
 a[href]:hover { opacity: .8; }
 a[href]:focus-visible { outline: 2px solid #8bbcff; outline-offset: 2px; }
-#steer, .chat-action { border: 1px solid var(--line); border-radius: var(--radius); padding: var(--pad); background: var(--panel-2); color: var(--text); cursor: pointer; }
+#steer { border: 1px solid var(--line); border-radius: var(--radius); padding: var(--pad); background: var(--panel-2); color: var(--text); cursor: pointer; }
 
 .topbar {
   display: flex; align-items: center; justify-content: space-between;
