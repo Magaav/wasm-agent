@@ -224,8 +224,12 @@ is about 29 ms here; it cannot explain the field audit's 88.2-second bash p95 or
   marker it reads back only resolves from the directory the shell actually started in.
 * `scripts/test-jobs.cjs`: real sentinel and Chrome event delivery; no paid inference.
 * `scripts/test-subagent-return-hook.cjs`: the `onSubagentReturn` job through a real sentinel - every
-  child state, both deploy verdicts and an unreadable checkout, the predicate falsified by mutation, and no
-  provider call to fire it; real git checkouts, no model.
+  child state, both deploy verdicts, the three unmeasurable cases, the uncommitted half, the dedupe key
+  pinned across a re-put, the cursor converging through the store's receipt, `prepare` refused at `job put`,
+  and no provider call to fire it; real git checkouts, no model.
+* `scripts/check-deploy-shipped.mjs`: the shipped set the hook's verdict is read from, re-derived from
+  `scripts/deploy.sh` and `scripts/upgrade.sh` (and from what `scripts/ship-wave.mjs` writes); it fails when
+  an installer copies a path `scripts/deploy-shipped.json` does not cover.
 * `scripts/test-operation-control.cjs`: a real tool holds the run worker while
   another interpreter lists/reads/cancels it; the run then continues (local mock
   provider, zero paid inference).

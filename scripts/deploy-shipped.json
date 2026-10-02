@@ -1,0 +1,44 @@
+{
+  "schema": 1,
+  "declared_by": "Derived from the two things that install a tree: scripts/deploy.sh (an upgrade of a running install) and scripts/upgrade.sh (the self-update path). scripts/check-deploy-shipped.mjs re-derives the list from them on every gate run and fails when either installs something this file does not cover, so this file cannot drift from the installers without the gate saying so. The predicate the hook answers with is read from here (scripts/subagent-return-hook.mjs, loadShipped/shipsToDeploy) - one declaration, one reader.",
+  "directories": [
+    "ui/",
+    "rust/",
+    "lua/",
+    "skills/",
+    "jobs/",
+    "deploy/"
+  ],
+  "files": [
+    "scripts/deploy.sh",
+    "scripts/upgrade.sh",
+    "scripts/lib/service-target.sh",
+    "scripts/deploy-shipped.json"
+  ],
+  "globs": [
+    "scripts/whatsapp-*",
+    "scripts/lib/*",
+    "scripts/wave-*",
+    "scripts/subagent-return-*"
+  ],
+  "wave_closure_files": [
+    "scripts/delivery-admission.mjs",
+    "scripts/gate-check.mjs",
+    "scripts/gate-checks.mjs",
+    "scripts/producer-admission.mjs"
+  ],
+  "invoked_but_not_installed": [
+    "scripts/ship-wave.mjs"
+  ],
+  "over_included": {
+    "jobs/": "deploy.sh installs the job definitions it names (jobs/whatsapp-*.json, jobs/on-subagent-return.json, jobs/subagent-return-observe.json) into the sentinel's job store, and every definition in jobs/ changes what the node runs. The whole directory is therefore treated as shipped: over-inclusion costs a needless deploy decision, under-inclusion is a node running a job nobody decided about.",
+    "scripts/lib/*": "deploy.sh ships the scripts/lib modules the shipped scripts import, found by grepping `./lib/<name>` out of each shipped script. The whole flat directory is treated as shipped for the same reason (the glob is flat, matching that grep: scripts/lib/nested/x is NOT covered).",
+    "deploy/": "install.sh installs deploy/*.service, deploy/caddy and deploy/env.example on a fresh install. Neither deploy.sh nor upgrade.sh copies them, so this entry is deliberately conservative rather than derived: a child editing the install path is not reported as having no install impact."
+  },
+  "notes": [
+    "ui/** and skills/** are installed by scripts/upgrade.sh ($SOURCE_UI assets and $SOURCE_ROOT/skills/*).",
+    "rust/** is what the installed binaries are built from (wa.exe, wa-sentinel.exe, wa-window.exe, the WhatsApp transcript plugin) and lua/** is what the host loads as its Lua core, so a change to either needs a rebuilt, redeployed binary.",
+    "scripts/upgrade.sh installs itself (upgrade.sh:386-389) and scripts/deploy.sh installs its own copy and scripts/lib/service-target.sh (deploy.sh:569-582) - the two entries that were missing from the hand-written predicate this manifest replaces.",
+    "scripts/ship-wave.mjs is run by deploy.sh but is not copied into the install: it ships the scripts/wave-* closure, not itself. scripts/check-deploy-shipped.mjs runs it and checks every file it writes is covered here - that is how wave_closure_files was found (the closure of lib/wave-guard.mjs and lib/full-gate-proof.mjs reaches four scripts that are not named wave-*)."
+  ]
+}
