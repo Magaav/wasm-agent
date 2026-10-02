@@ -155,7 +155,7 @@ The sentinel keeps `.pre-upgrade` beside the binary and swaps it back if the new
 `/health` on a scratch port. If you are reading this *because* the node is down, start the sentinel by
 hand and read `sentinel.log`; do not hand-edit the database or the binary while it is holding them.
 
-## The one way to install (added later, and it is the gate)
+## The one way to install (added later; `scripts/deploy.sh`)
 
 ```
 bash scripts/deploy.sh --reason "what changed and why"
@@ -163,7 +163,11 @@ bash scripts/deploy.sh --reason "what changed and why"
 
 Run this from outside the node's run. It refuses a dirty tree, refuses a tree behind `origin/main`, proves the binary on a scratch port before it
 goes near the running node, installs through `scripts/upgrade.sh`, records commit/branch/hash/time/reason in
-`installed.txt`, and refuses if the pid answering is not the pid the install recorded. The refusals are paid
+`installed.txt`, and refuses if the pid answering is not the pid the install recorded. Since 2026-10-02 it
+no longer requires a full-gate receipt: a deploy is the **preview path** (the operator wants to see a landed
+change now), the full gate belongs to a **release** (`scripts/wave-release.mjs`), and
+`WA_DEPLOY_REQUIRE_RELEASE_PROOF=1` restores the refusal for whoever wants a deploy that cannot run
+unverified. The refusals are paid
 for: a node behind main served a diff route that answered `unknown_action:patch`; a gate that stopped one of
 two listeners reported success because the *other* node answered `/health`.
 

@@ -72,8 +72,8 @@ The `pre-commit` hook enforces it - that hook is the contract, this line is the 
 - **Install only through the gate, and never run it from inside a run.** `scripts/deploy.sh` cannot
   become idle while the turn that asked waits, so from inside a run you *queue* it:
   `wa-sentinel request upgrade` for the node and UI, `wa-sentinel request deploy` when the change is in
-  the sentinel itself, each with `--session`/`--prompt` to be woken after. The gate, its refusals and
-  the sentinel path are in `skills/self-update/SKILL.md`; never copy a binary over a running one by hand.
+  the sentinel itself, each with `--session`/`--prompt` to be woken after. Its refusals and the sentinel
+  path are in `skills/self-update/SKILL.md`; never copy a binary over a running one by hand.
 - **Never hand a POSIX path to a native Windows process.** `/c/...` is unusable as an
   argument: the node starts, cannot read `index.html`, and answers 404 for `/` while
   looking healthy. Convert it (`cygpath -w`).

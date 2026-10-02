@@ -52,9 +52,12 @@ After this implementation passes the unchanged complete coverage requirement for
    exact Git tree, real exit/run count, duration, terminal verdict, skips and log hash. A custom
    stand-in gate never creates reusable production evidence. Merge receipts/logs survive clone
    removal under `wa-combined-gate.json` in the invoking lane's Git metadata; source-tree changes
-   require execution. `deploy.sh` requires discoverable complete proof for a real Rust source
-   workspace before building/installing. It still proves the built binary on a scratch port and
-   verifies the actual installed PID/artifact. No focused receipt authorizes installation.
+   require execution. `deploy.sh` *looks up* discoverable complete proof for a real Rust source
+   workspace and records what it found, but does not require it: a deploy is the preview path, so the
+   operator sees a landed change now, and `WA_DEPLOY_REQUIRE_RELEASE_PROOF=1` restores the refusal by
+   name. The proof a release needs is produced and verified by `scripts/wave-release.mjs` (2026-10-02).
+   A deploy still proves the built binary on a scratch port and verifies the actual installed
+   PID/artifact. No focused receipt authorizes installation.
 
 Queue wait, build/check duration, combined verification and live installation are different
 measurements. An identical-tree reuse has zero new gate runs and retains the original measured

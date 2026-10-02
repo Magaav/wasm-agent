@@ -145,7 +145,12 @@ export function audit(repo,{target='main'}={}) {
 `);
   return {dir, tip: 'change/tip', env: extra => laneEnv({WA_MERGE_LANE_AUDIT: audit, ...extra})};
 }
-const merge = (fixture, args, env = {}) => run(process.execPath, [mergeRunner, '--repo', fixture.dir, ...args],
+// The merge lane consumes the reservation only when it GATES, and gating is now `--gate-mode full`
+// (a release's mode: scripts/wave-release.mjs is its entry point). The evolution default merges,
+// LF-checks and reports without asking for a slot at all, so every case below - which is about the
+// reservation - asks for the gated mode. The default's own behaviour is case 6.
+const merge = (fixture, args, env = {}) => run(process.execPath,
+  [mergeRunner, '--repo', fixture.dir, '--gate-mode', 'full', ...args],
   {env: fixture.env(env)});
 
 async function main() {
@@ -206,7 +211,7 @@ async function main() {
     'inspection observes held work without reconciliation');
 
   const waiterRun = background(process.execPath,
-    [mergeRunner, '--repo', mergeFixtureA.dir, '--base', 'main', mergeFixtureA.tip, '--gate-command', passGate],
+    [mergeRunner, '--repo', mergeFixtureA.dir, '--base', 'main', '--gate-mode', 'full', mergeFixtureA.tip, '--gate-command', passGate],
     {env: mergeFixtureA.env()});
   live.waiter = waiterRun;
   const waitingRow = await until(async () => {
@@ -343,13 +348,36 @@ async function main() {
   check(rowOf(status(), 'finish unavailable') === undefined,
     'a lane that could not be consulted took no record, because it was never reached');
   const skewMerge = run(process.execPath, [path.join(broken, 'scripts', 'merge-lane.mjs'),
-    '--repo', mergeFixtureA.dir, '--base', 'main', mergeFixtureA.tip, '--gate-command', passGate],
+    '--repo', mergeFixtureA.dir, '--base', 'main', '--gate-mode', 'full', mergeFixtureA.tip, '--gate-command', passGate],
   {env: mergeFixtureA.env()});
   const skewJson = jsonOf(skewMerge.stdout);
   check(skewMerge.status === 6 && skewJson.verdict === 'gate_refused' && skewJson.gate.ran === false
     && skewJson.gate.lane.mode === 'unavailable' && /unknown option --holder-pid/.test(skewJson.gate.lane.reason),
   'a version skew refuses unreserved execution and names the skew',
   JSON.stringify({exit: skewMerge.status, verdict: skewJson.verdict, lane: skewJson.gate.lane}));
+
+  // ---- 6. the evolution default takes no slot at all ---------------------------------------------
+  // A landing that does not gate has no gate to reserve, and a record it never needs would make "who
+  // holds the gate" answer a question nobody asked. So the default asserts an ABSENCE - and it is the
+  // shape a real landing has: no `--gate-mode` flag at all. `--gate-command` is passed only so the run
+  // cannot reach a real suite; it must not run either.
+  //
+  // The absence is counted, not looked up by label: every case in this fixture merges the same tip and
+  // therefore produces the SAME candidate tree, so a row from case 1 carries the label this run would
+  // have carried. What is asserted is that the ungated run added no mention of a merge-lane reservation.
+  const labelsOf = () => (JSON.stringify(status()).match(/merge-lane [0-9a-f]{12}/g) || []).length;
+  const labelsBefore = labelsOf();
+  const ungatedMerge = run(process.execPath,
+    [mergeRunner, '--repo', mergeFixtureA.dir, '--base', 'main', mergeFixtureA.tip, '--gate-command', passGate],
+    {env: mergeFixtureA.env()});
+  const ungatedJson = jsonOf(ungatedMerge.stdout);
+  check(ungatedMerge.status === 0 && ungatedJson.gate_mode === 'none' && ungatedJson.gate.ran === false
+    && ungatedJson.gate.lane === null && ungatedJson.release_verified === false,
+  'an ungated landing exits 0, records no gate run and claims no release verification',
+  JSON.stringify({exit: ungatedMerge.status, mode: ungatedJson.gate_mode, gate: ungatedJson.gate,
+    release_verified: ungatedJson.release_verified}));
+  check(labelsOf() === labelsBefore,
+    'and it took no record in the reservation lane', `merge-lane rows ${labelsBefore} -> ${labelsOf()}`);
 
   // ---- 6. The transitions, from the lane's own history -------------------------------------------
   const holderHistory = historyOf(heldRow.id);

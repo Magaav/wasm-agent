@@ -85,9 +85,11 @@ Each of these cost real time in this batch; each has a cheap detector.
    A node's own worktree is for its branch; a worker's worktree is its branch's.
 2. **Merge the reviewed tip** with `--no-ff`, naming the branch, or pass an explicit
    merge message — git's `Merge commit '<sha>'` default is refused by the guard.
-3. **Gate the merged tree.** The branch's receipt does not cover the merge. Record exit
-   status, the skip count, and every failure verbatim. `scripts/merge-lane.mjs` is this step
-   plus the two before it, run in a disposable clone; see "The merge lane" below.
+3. **Gate the merged tree when the landing is a release.** The branch's receipt does not cover the
+   merge. Record exit status, the skip count, and every failure verbatim. `scripts/merge-lane.mjs` is this step
+   plus the two before it, run in a disposable clone; see "The merge lane" below. Since 2026-10-02 its
+   default is `--gate-mode none`: an evolution landing is merged and reported, and the full gate belongs to
+   a release (`scripts/wave-release.mjs`), which gates the exact tree it will name.
 4. **Push `origin/main` and read the ref back.** A push that reports success and a ref
    that matches are two facts, not one.
 5. **Prove integration before deleting anything.** `git branch -d` is not proof: on git

@@ -210,7 +210,11 @@ What this section owns is how many of them fit, and what is serial.
   sample per setting, on a box that is not carrying someone else's build. `docs/EVOLUTION.md` ("Gate
   parallelism") has the only pair measured so far; it settles that the knob works and that the cap is
   not free, and it settles no default. 16-32 is the owner's target, not a measured default.
-- **The gate is a reserved serial resource, not a free-for-all.** One gate run per tree at a time;
+- **The gate is a reserved serial resource, not a free-for-all - and since 2026-10-02 it belongs to a
+  RELEASE.** A landing no longer waits for it (`--gate-mode none` is `scripts/merge-lane.mjs`'s
+  default) and neither does a deploy (`WA_DEPLOY_REQUIRE_RELEASE_PROOF` unset); `scripts/wave-release.mjs`
+  runs it on demand or at the end of a wave, and its receipt is the only thing `release_verified: true`
+  means. One gate run per tree at a time;
   `WA_GATE_JOBS=<n>` caps `CARGO_BUILD_JOBS` and `RUST_TEST_THREADS`, and the gate prints what it ran
   with. Two uncapped gates on a 16-core box each claim the whole box - the failure that knob exists
   for - and a gate that ran beside another build is weak evidence about the tree it names: the

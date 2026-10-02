@@ -286,17 +286,31 @@ fi
 
 # 4. Build.
 echo "deploy: building"
-# A real source build needs complete combined-tree verification. Scratch refusal
-# fixtures have no Rust workspace and can reach their mocked build boundary.
+# A release proof is looked up and RECORDED here, but it is no longer a precondition of deploying. A
+# deploy is the preview path: the operator asks for it and wants to see the change now, and the gate
+# belongs to a RELEASE (scripts/wave-release.mjs), which is what certifies an exact tree. The invariant
+# this block used to enforce - "no effect before its proof" - now reads "no RELEASE before its proof",
+# because the effect a deploy makes is deliberately early.
+#
+# The refusal is still available and still exact: WA_DEPLOY_REQUIRE_RELEASE_PROOF=1 restores it, and a
+# source tree without a complete exact-tree receipt is then refused by name. A cautious deploy, or a
+# future release-only policy, sets that; nothing selects it automatically.
 if [ -f "$ROOT/rust/Cargo.toml" ]; then
   SOURCE_TREE="$(git rev-parse HEAD^{tree})"
   PROOF_REPO="$ROOT"; PROOF_SCRIPT="$ROOT/scripts/lib/full-gate-proof.mjs"
   if command -v cygpath >/dev/null 2>&1; then
     PROOF_REPO="$(cygpath -w "$PROOF_REPO")"; PROOF_SCRIPT="$(cygpath -w "$PROOF_SCRIPT")"
   fi
-  GATE_PROOF="$(node "$PROOF_SCRIPT" "$PROOF_REPO" "$SOURCE_TREE" 2>&1)" \
-    || fail "complete gate proof required for source tree $SOURCE_TREE: $GATE_PROOF"
-  note "reusing complete exact-tree verification: $GATE_PROOF"
+  # 2 is "no complete identical-tree receipt", which is expected on the preview path; the JSON says
+  # which it is, and the note below carries it into deploy.log either way.
+  GATE_PROOF="$(node "$PROOF_SCRIPT" "$PROOF_REPO" "$SOURCE_TREE" 2>&1)" || true
+  if printf '%s' "$GATE_PROOF" | grep -q '"verified":true'; then
+    note "release proof: this tree carries complete exact-tree verification for $SOURCE_TREE: $GATE_PROOF"
+  elif [ -n "${WA_DEPLOY_REQUIRE_RELEASE_PROOF:-}" ]; then
+    fail "complete gate proof required for source tree $SOURCE_TREE (WA_DEPLOY_REQUIRE_RELEASE_PROOF is set): $GATE_PROOF"
+  else
+    note "not release-verified: deploying tree $SOURCE_TREE as a preview - no complete exact-tree gate evidence ($GATE_PROOF); set WA_DEPLOY_REQUIRE_RELEASE_PROOF=1 to refuse instead"
+  fi
 fi
 
 ( cd rust && cargo build --release --offline -p wa-host ) || fail "the build failed"

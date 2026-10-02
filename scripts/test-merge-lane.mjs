@@ -42,8 +42,14 @@ function git(cwd, ...args) {
   return result.stdout.trim();
 }
 const write = (file, text) => fs.writeFileSync(file, text);
-function lane(repo, args, environment = {}) {
-  const result = spawnSync(process.execPath, [LANE, '--repo', repo, ...args],
+// Every case below exercises the GATED path, because that is where the spine's decisions live - a
+// verdict line is what makes a pass, a silent exit-0 is not one, a timeout is not one - and gating is
+// now a RELEASE's mode (`--gate-mode full`; scripts/wave-release.mjs is its entry point). So this helper
+// asks for `full` unless the caller names a mode: `'none'` pins the evolution default explicitly, and
+// `null` passes no flag at all, which is what a real landing does. Section 13 pins that default.
+function lane(repo, args, environment = {}, gateMode = 'full') {
+  const modeArgs = gateMode === null ? [] : ['--gate-mode', gateMode];
+  const result = spawnSync(process.execPath, [LANE, '--repo', repo, ...modeArgs, ...args],
     {cwd: repo, encoding: 'utf8', windowsHide: true, env: {...process.env, ...environment,WA_GATE_LANE_DIR:path.join(root,'gate-lane'),GATE_LANE_HELD:'',GATE_LANE_ORIGIN:'',WA_GATE_LANE_WAIT_SECONDS:'15',WA_GATE_LANE_SAMPLE_SECONDS:'0'}});
   let json = null;
   try { json = JSON.parse(result.stdout.trim()); } catch { /* a refusal is JSON too */ }
@@ -407,6 +413,39 @@ export function audit(repo,{target='main'}={}) {
   ok(again.status===0&&again.json.gate.reused===true&&again.json.candidate.gate_run_count===0,'identical tree reuses original retained proof with zero new gate runs',again.stdout);
   const derived=fullProof(JSON.parse(fs.readFileSync(again.json.gate.full_receipt)),again.json.candidate.tree,{ownerRepo:repo});
   ok(derived.verified&&derived.original_receipt.sha256===proof.original_receipt.sha256&&derived.tested_repo===proof.tested_repo&&derived.head===proof.head,'derived receipt preserves untouched original identity');
+
+  // ---- 13. the evolution default: the gate does NOT run, and the report says so ----------------------
+  //
+  // The policy this pins (2026-10-02): the full gate is a RELEASE's, not a landing's. It is pinned by
+  // the outcome, not by the absence of one - the candidate is still merged, the verdict is still `pass`
+  // (that is the real publisher's contract: it pushes on `verdict`, `gate.exit` and `can_push`),
+  // the gate is recorded as not run BY POLICY, and `release_verified` is false, so nothing can read a
+  // clean merge as a verified tree. `null` means no `--gate-mode` flag at all: the true default.
+  console.log('13. the evolution default and its restore knob');
+  const ungated = lane(repo, ['--base', 'main', 'change/one'], env, null);
+  ok(ungated.status === 0, 'the evolution default exits 0', `exit ${ungated.status}`);
+  ok(ungated.json?.verdict === 'pass', 'an ungated landing is still a publishable pass', ungated.json?.verdict);
+  ok(ungated.json?.gate_mode === 'none', 'the default gate mode is none', ungated.json?.gate_mode);
+  ok(ungated.json?.gate?.ran === false && ungated.json?.gate?.reused !== true,
+    'the gate did not run', JSON.stringify(ungated.json?.gate));
+  ok(ungated.json?.release_verified === false,
+    'an ungated landing is NOT release_verified', String(ungated.json?.release_verified));
+  ok(ungated.json?.candidate?.gated === false && ungated.json?.candidate?.gate_run_count === 0,
+    'the candidate records zero gate runs');
+  ok(ungated.json?.push_precondition?.can_push === true, 'the publisher precondition is available without a gate');
+  const ungatedOutput = `${ungated.stdout || ''}${ungated.stderr || ''}`;
+  ok(ungatedOutput.includes('NOT RUN by policy'),
+    'the run says on its own output that the gate did not run by policy');
+  // The restore knob: it must actually put the gate back, not merely change a label.
+  const restored = lane(repo, ['--base', 'main', 'change/one', '--gate-command', gatePass],
+    {...env, WA_MERGE_LANE_GATE_MODE: 'full'}, null);
+  ok(restored.json?.gate_mode === 'full' && restored.json?.gate?.ran === true,
+    'WA_MERGE_LANE_GATE_MODE=full puts the gate back on a landing', JSON.stringify(restored.json?.gate));
+  ok(restored.json?.release_verified === false,
+    'a custom gate command is never release evidence, even in full mode');
+  const badMode = lane(repo, ['--base', 'main', 'change/one', '--gate-mode', 'sometimes'], env, null);
+  ok(badMode.status !== 0 && badMode.json?.error,
+    'an unknown gate mode is refused by name', `exit ${badMode.status}`);
 } catch (error) {
   failed += 1;
   console.log(`  FAIL harness - ${error.message}`);
