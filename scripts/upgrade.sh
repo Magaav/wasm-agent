@@ -92,7 +92,7 @@ fi
 
 file_hash() { [ -f "$1" ] && sha256sum < "$1" 2>/dev/null | awk '{print $1}' || true; }
 record_install() {
-  local hash sentinel_hash upgrade_hash commit branch source_hint reason via stamp record
+  local hash sentinel_hash upgrade_hash commit branch source_hint reason via role stamp record
   hash="$(file_hash "$INSTALLED")"
   sentinel_hash="$(file_hash "$INSTALL_DIR/wa-sentinel.exe")"
   [ -n "$sentinel_hash" ] || sentinel_hash="$(file_hash "$INSTALL_DIR/wa-sentinel")"
@@ -111,10 +111,25 @@ record_install() {
   fi
   reason="$(printf '%s' "${WA_UPGRADE_REASON:-upgrade requested}" | tr '\r\n' '  ')"
   via="$(printf '%s' "${WA_UPGRADE_VIA:-upgrade.sh}" | tr '\r\n' '  ')"
+  # WHOSE record is this? This script installs bytes and can only certify the bytes: a binary built
+  # somewhere else is `source_provenance=unverified-binary`, and a sentinel upgrade may not even know
+  # which commit it came from (`commit=unknown`). That is honest when this *is* the final record - a
+  # hand-run upgrade - and it is INTERIM when a deploy called this script, because the deploy owns the
+  # install's record: it is the party that knows the commit, and it writes the exact-commit record
+  # (`record_role=final`, `source_provenance=clean-built-by-deploy`) together with the sentinel it
+  # installs - which also corrects the `sentinel_sha256` here, taken before that replacement.
+  #
+  # `record_role` is what makes that legible instead of silent. WHY it exists: on 2026-10-02 19:30 a deploy
+  # died between installing the node and its own record step (the exact cause is at the self-ship below),
+  # so this interim record became the last word - installed.txt said `commit=unknown / via=upgrade.sh`
+  # while the node served 2f02b4c's build - and `verify-install.sh` could only report that the installed
+  # commit was unknown. With the role on disk, a verifier reads "a deploy was in flight and did not
+  # finish" instead of "nobody knows".
+  if [ "$via" = "deploy.sh" ]; then role=interim; else role=final; fi
   stamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   record="$INSTALL_DIR/.installed.txt.$$"
-  printf 'commit=%s\nbranch=%s\ndirty=unknown\nsha256=%s\nsentinel_sha256=%s\nupgrade_sha256=%s\nsource_commit_hint=%s\nsource_provenance=unverified-binary\nvia=%s\nat=%s\nreason=%s\n' \
-    "$commit" "$branch" "$hash" "$sentinel_hash" "$upgrade_hash" "$source_hint" "$via" "$stamp" "$reason" > "$record" \
+  printf 'commit=%s\nbranch=%s\ndirty=unknown\nsha256=%s\nsentinel_sha256=%s\nupgrade_sha256=%s\nsource_commit_hint=%s\nsource_provenance=unverified-binary\nrecord_role=%s\nvia=%s\nat=%s\nreason=%s\n' \
+    "$commit" "$branch" "$hash" "$sentinel_hash" "$upgrade_hash" "$source_hint" "$role" "$via" "$stamp" "$reason" > "$record" \
     && mv -f "$record" "$INSTALL_DIR/installed.txt"
 }
 
@@ -361,8 +376,18 @@ if [ "$UI_OK" = "1" ] && wait_health; then
     # copy fails, installed.txt must still name the binary actually serving.
     record_install || { say "node upgraded, but installed.txt could not be recorded"; exit 3; }
     mkdir -p "$INSTALL_DIR/scripts"
+    # Ship beside the binary without ever rewriting a file THIS shell may be reading. When the sentinel runs
+    # this script, `$0` IS `$INSTALL_DIR/scripts/upgrade.sh`; `cp -f` over it rewrites the file bash is
+    # reading, and bash tracks its position by byte offset, so the next read lands inside a line. MEASURED on
+    # deploy.sh's own self-ship, same shape, 2026-10-02 19:30: `/…/deploy.sh: line 534: syntax error near
+    # unexpected token '('` after the sentinel swap, with every later step skipped and no line in deploy.log,
+    # because a parse error reaches none of the script's own refusal paths (and the `cp` form can also just
+    # stop with status 0). Stage beside it and rename: the running shell keeps the bytes it opened.
     if ! cmp -s "$0" "$INSTALL_DIR/scripts/upgrade.sh"; then
-      cp -f "$0" "$INSTALL_DIR/scripts/upgrade.sh" || { say "node upgraded, but could not ship upgrade.sh"; exit 3; }
+      cp -f "$0" "$INSTALL_DIR/scripts/upgrade.sh.new.$$" \
+        && mv -f "$INSTALL_DIR/scripts/upgrade.sh.new.$$" "$INSTALL_DIR/scripts/upgrade.sh" \
+        && cmp -s "$0" "$INSTALL_DIR/scripts/upgrade.sh" \
+        || { rm -f "$INSTALL_DIR/scripts/upgrade.sh.new.$$"; say "node upgraded, but could not ship upgrade.sh"; exit 3; }
     fi
     for skill_source in "$SOURCE_ROOT"/skills/*; do
       skill="${skill_source##*/}"

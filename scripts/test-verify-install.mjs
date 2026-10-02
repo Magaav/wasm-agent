@@ -41,7 +41,7 @@ try {
   git('add','.');git('commit','-qm','built artifact fixture');
   const installedCommit=git('rev-parse','--short','HEAD');
   const hash=file=>crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
-  fs.writeFileSync(path.join(install,'installed.txt'),`commit=${installedCommit}\nsha256=${hash(path.join(install,'wa'))}\nsentinel_sha256=${hash(path.join(install,'wa-sentinel'))}\nvia=fixture\n`);
+  fs.writeFileSync(path.join(install,'installed.txt'),`commit=${installedCommit}\nsha256=${hash(path.join(install,'wa'))}\nsentinel_sha256=${hash(path.join(install,'wa-sentinel'))}\ninstall_dir=${install}\nsource_provenance=clean-built-by-deploy\nrecord_role=final\nvia=deploy.sh\n`);
   fs.writeFileSync(path.join(install,'serve.pid'),'1234');
 
   writeExec(path.join(mock,'curl'),'#!/usr/bin/env bash\necho \'{"ok":true}\'\n');
@@ -62,6 +62,17 @@ try {
   const failedNames=drift.result.results.filter(item=>item.status==='fail').map(item=>item.name);
   check(failedNames.includes('shipped skills/git-orchestrator/SKILL.md == repo')&&failedNames.includes('shipped skills/git-orchestrator/scripts/audit.mjs == repo'),'verdict names both exact source/install mismatches');
   check(fs.readFileSync(path.join(home,'.wasm-agent','skills/git-orchestrator/SKILL.md'),'utf8').endsWith('installed drift fixture\n'),'verifier only observes the installed fixture and does not repair it');
+
+  // An INTERIM record is the state a deploy that died after installing the node leaves behind: upgrade.sh
+  // recorded the bytes it placed, the deploy that owns the record never wrote its exact-commit one. The
+  // verdict must name that, not only report a commit it cannot resolve.
+  const finalRecord=fs.readFileSync(path.join(install,'installed.txt'),'utf8');
+  fs.writeFileSync(path.join(install,'installed.txt'),finalRecord.replace('record_role=final','record_role=interim').replace('source_provenance=clean-built-by-deploy','source_provenance=unverified-binary').replace('commit='+installedCommit,'commit=unknown'));
+  const interim=verify();
+  const interimCheck=interim.result.results.find(item=>item.name==="the install record is its owner's final one");
+  check(interim.status===1&&interimCheck?.status==='fail','an interim record fails verification');
+  check(/did not reach its own record step/.test(interimCheck.detail),`the failure names the cause: ${interimCheck.detail}`);
+  fs.writeFileSync(path.join(install,'installed.txt'),finalRecord);
   console.log(`verify install checks ok (${checks} checks, 0 skipped; isolated source/install fixture)`);
 } finally {
   assert.equal(path.dirname(path.resolve(root)),path.resolve(os.tmpdir()));

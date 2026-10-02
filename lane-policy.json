@@ -12,8 +12,8 @@
     "why": "the full gate is a release's, not a landing's (2026-10-02): an evolution landing is merged, LF-checked and reported, and scripts/wave-release.mjs is what gates an exact tree and names it"
   },
   "deploy": {
-    "when": "after the release gate has named the exact tree, queued through the sentinel from outside the run that produced the change - never from inside that run's own turn",
-    "evidence": "installed.txt and deploy-result.json, read back rather than the request's receipt"
+    "when": "a stage of its own, not a step of the release gate: after the wave's landings are merged and pushed, and whenever a wave changed what the install serves, what origin/main carries is installed without waiting for a release and without looking a release proof up. Queued through the sentinel from outside the run that produced the change - never from inside that run's own turn. The refusals that remain are about state: a dirty tree, a HEAD that is not on origin/main or is behind it, a downgrade of what is installed, a port held by another install, and an install directory the machine's service does not run its node from. WA_DEPLOY_REQUIRE_RELEASE_PROOF=1 (OFF by default - speed is the default path, and release and deploy are separate stages) is the only way to demand a release proof, and the deploy is then refused by name when the tree has none",
+    "evidence": "installed.txt and deploy-result.json, read back rather than the request's receipt; installed.txt must name the exact commit with source_provenance=clean-built-by-deploy and record_role=final, and its sentinel_sha256 must be the sentinel that install carries - an interim record (record_role=interim, source_provenance=unverified-binary) is a deploy that did not finish its record step, never an install to trust"
   },
   "remote": {
     "main_only": true,
