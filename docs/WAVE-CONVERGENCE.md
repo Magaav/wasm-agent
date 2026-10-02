@@ -20,12 +20,50 @@ Public start registers the approved `wave-convergence` sentinel schedule using
 never creates another one. A dead runner's interrupted effect is unknown and
 blocked rather than replayed. At most three continuation admissions and 120
 liveness observations are allowed; exhausted observation preserves the owner
-and records an actionable blockage. Complete/blocked disables the scheduled
+and records an actionable blockage. **A tick that found the owner alive is not
+an observation and spends none of that budget**: `monitor()` used to increment
+`monitor.observations` before it asked whether the owner was alive, so a wave
+being driven by a live owner reached
+`external_monitor_observation_budget_exhausted_owner_preserved` on its 121st
+tick - about one hour at the schedule's own declared `every_seconds: 30` - and a
+blocked wave then fences every future admission. The observation that spends the
+budget is now the one that did *not* find the owner, and the cap still blocks
+(`scripts/test-wave-monitor-budget.mjs`: 200 ticks with a live owner spend 0, an
+owner identity the lease proves absent spends 1, the 121st spent observation
+still blocks durably). Complete/blocked disables the scheduled
 job. A private local test may explicitly use `monitor_mode:external-cli-test`;
 this does not replace production watcher registration. `watcher-definition`
 prints the actual schedule/run procedure. Install must ship this shell and all
 transitive wave modules before activation; no running binary/window is replaced
 by these helpers.
+
+### `start`'s sentinel preflight and the sentinel's `home` (recorded, blocking)
+
+One precondition of `wave-entry.mjs start` is not satisfied on this machine, and
+it is recorded here rather than fixed because the wrong value is in the wave's own
+config, outside this repository. `start` invokes the configured sentinel's
+`preflight` with `WASM_AGENT_HOME` set to the config's `home`; the sentinel reads
+`WASM_AGENT_HOME` as a **home** and looks in `<home>/.wasm-agent/sentinel`, while
+the config's `home` is the *config directory*. Measured 2026-10-02:
+
+```
+$ "<install>/wa-sentinel.exe" preflight
+{"watcher":"running","watcher_pid":16712,...}
+$ WASM_AGENT_HOME=C:/Users/Victor/.wasm-agent "<install>/wa-sentinel.exe" preflight
+{"watcher":"not_running","watcher_pid":null,...}
+$ WASM_AGENT_HOME=C:/Users/Victor "<install>/wa-sentinel.exe" preflight
+{"watcher":"running","watcher_pid":16712,...}
+```
+
+So `start` fails its own preflight with `monitor_watcher_unverifiable` on this
+machine, and the wave was recovered with the sanctioned
+`wave-lifecycle.mjs resume`. Two things are needed before the next wave uses
+`start`: the config's `home` field must mean the same thing the sentinel means by
+`WASM_AGENT_HOME` (or `start` must stop overriding it and let the sentinel answer
+for the machine it runs on), and `scripts/lib/service-target.sh` and `upgrade.sh`
+must agree on that meaning - they currently read the same variable as a home and
+as a config directory. This is a named, blocking precondition, not a claim that
+`start` works.
 
 Full-gate proof now uses the shared `fullProof/findFullProof` implementation and
 the actual terminal `smoke ok` / `smoke ok (N skipped)` format. Retained and durable

@@ -263,6 +263,36 @@ candidate. Exact-tree full evidence can be reused with its log hash, actual exit
 changed source requires execution. Bootstrap, entry points, measurements and limits are in
 [RECOVERY-THROUGHPUT.md](RECOVERY-THROUGHPUT.md).
 
+## The lane boundary and the repository's own lane policy
+
+A lane **ends** when the repository can say so deterministically, and the answer is one command:
+`skills/git-orchestrator/scripts/audit.mjs verify <repo> origin/main` exits 0 only when every in-scope tip
+is integrated into the target, origin carries only `main`, and `origin/main` **is** that target. That
+detection runs at a wave's two boundaries and is implemented once
+(`scripts/lib/lane-boundary.mjs`): a landing's exit and the next wave's entry, wired into the entrypoints
+that already exist (`scripts/wave-lifecycle.mjs`: `create` is the next wave's entry, the completion check
+is the landing's exit). A refusal is by name - `lane_boundary_enter_refused:`, `lane_boundary_exit_refused:`,
+`lane_boundary_detector:integration_incomplete` - and the module re-derives no git check of its own: it runs
+the declared command and parses the audit's own JSON.
+
+What a repository must reach to be ended is **the repository's declaration**, in `lane-policy.json` at its
+root: `contract`, `end_state.statement`, `gate.on = release`, `deploy.when`, and `checks.enter` /
+`checks.exit`. Each declared check is an argv array (no shell interpolation) and each phase must declare
+the detector, so "the same detector at both ends" is a property of the run and not a sentence in a file.
+**An absent file adds no requirement**: the boundary returns `policy_present:false`, runs nothing, and
+refuses nothing - fixtures, other projects and one-off lanes stay free, and that is a measured property
+(`scripts/test-lane-boundary.mjs`). A malformed file is a refusal, not an assumption, because a boundary
+that cannot be read must look like neither a pass nor a silence.
+
+This repository's own declaration is `lane-policy.json`, and it also declares `remote.main_only: true`.
+The push side reads that declaration: `.githooks/pre-push` refuses to publish any ref other than
+`refs/heads/main` on the integration remote, allows `main` and ref deletions (which move toward the end
+state), and allows everything when the file is absent or says `main_only: false`. Like the commit guard it
+is **convenience, not a boundary**: `--no-verify`, `-c core.hooksPath=<empty>` and a checkout whose
+`core.hooksPath` is elsewhere all publish the branch for real, each measured in
+`scripts/test-push-guard.sh`. The enforcement point that cannot be skipped stays remote-side (branch
+protection on `origin/main`, or a `pre-receive` check) and naming it is the owner's decision.
+
 ## Cancellation
 
 `POST /runs {action:"status"|"cancel", thread|conversation:"<id>", run_id?}` is answered on

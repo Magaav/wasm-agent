@@ -191,6 +191,7 @@ gate_run node scripts/test-full-gate-proof.mjs
 gate_run node scripts/test-runtime-install-binding.mjs
 gate_run node scripts/test-wave-ship.mjs
 gate_run node scripts/test-wave-hot-guards.mjs
+gate_run node scripts/test-wave-monitor-budget.mjs
 gate_run node scripts/test-parallel-finish.mjs
 # The execution and automation contracts have native, model-free adversarial tests.
 gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-operation -p wa-jobs
@@ -1726,12 +1727,20 @@ gate_run node scripts/test-execution-terminology.cjs
 # name and what it saw instead of leaving one swallowed line. No build: its fixture is a throwaway
 # repository on `main` (the host export itself is measured by the wa-host test named in that file).
 gate_run bash scripts/test-main-guard.sh
+# ... and its push half: the same repository declares origin main-only, so a push of any other ref is
+# refused by name before the remote moves. `test-push-guard.sh` measures the three ways around it rather
+# than asserting they do not exist - a client-side hook is convenience, not a boundary.
+gate_run bash scripts/test-push-guard.sh
 # The window and this CLI offer the same `/` commands, and `/new` was missing from the CLI for as long
 # as nothing checked it. The rule is the window's list against the REPL's, plus the one sentence that
 # is deliberately written twice (the `/merge` brief).
 gate_run node scripts/test-command-parity.cjs
 gate_run node scripts/test-verify-install.mjs
 gate_run node scripts/test-merge-audit.mjs
+# The boundary the audit's own verify verb answers, run at a wave's two entrypoints: a repository that
+# declares `lane-policy.json` gets its declared checks enforced there, and one that does not gets nothing
+# (proven, not asserted). This also pins that retirement stays one command.
+gate_run node scripts/test-lane-boundary.mjs
 # The factory's lanes, tested where their answers are known in advance. Each of these was written and
 # then not run: scripts/test.sh discovers tests explicitly, so a delivery whose scope stopped short of
 # this file shipped a check that no gate executes - a test nobody runs is a comment. All four are
@@ -1753,6 +1762,7 @@ gate_run node scripts/test-merge-lane-retention.mjs
 gate_run node scripts/test-delivery-admission.mjs
 gate_run node scripts/test-wave-release.mjs
 gate_run bash scripts/test-deploy-gate-policy.sh
+gate_run bash scripts/test-deploy-preconditions.sh
 gate_run node scripts/test-delivery-refresh.mjs
 env -u GATE_LANE_HELD node scripts/test-gate-lane-wiring.cjs
 gate_run node scripts/test-openai-sub.cjs "$BIN"

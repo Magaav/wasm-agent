@@ -1707,11 +1707,47 @@ fn deploy_requests_in(dir: &Path) -> Result<Vec<PathBuf>> {
     Ok(found)
 }
 
+/// The verbs `request` accepts - the same set `perform` knows how to carry out. It lives here, next to the
+/// parser, because `request` is what must refuse a verb it does not recognise: a request file whose only
+/// possible outcome is `unknown verb` is durable state created by a question.
+const REQUEST_VERBS: [&str; 7] = ["restart", "recover", "upgrade", "wake", "deploy", "run", "spell"];
+
+fn print_request_help() {
+    println!("wa-sentinel request <verb> [options]");
+    println!();
+    for verb in REQUEST_VERBS {
+        println!("  {verb}");
+    }
+    println!();
+    println!("  --reason <text>                  why, recorded in the audit log");
+    println!("  --session <id> --prompt <text>   wake that session when the request is done (upgrade, deploy, wake)");
+    println!("  --binary <path>                  the binary to install (upgrade)");
+    println!("  --script <path>                  the allow-listed script to run (run)");
+    println!("  --file <path>                    the exported spell plan (spell)");
+    println!("  --if-no-pending                  deploy only: write nothing when a deploy request is already queued");
+    println!();
+    println!("Nothing is written for a verb this list does not name, and `request --help` writes nothing at all.");
+}
+
 fn request(args: &[String]) -> Result<()> {
     let verb = args.first().cloned().unwrap_or_default();
-    if verb.is_empty() || verb == "help" {
-        print_help();
+    // A question is not a request. `--help` (and `-h`) used to be read as a *verb*, so
+    // `wa-sentinel request --help` wrote a real request file with `verb: "--help"`, which the worker then
+    // moved to `<sentinel>/failed/` as `unknown verb "--help"` (measured 2026-10-02:
+    // `~\.wasm-agent\sentinel\failed\1790963011384686000-16480-00000000000000000000.json`). Asking what a
+    // command does must not create durable state.
+    if verb.is_empty() || verb == "help" || verb == "--help" || verb == "-h" {
+        print_request_help();
         return Ok(());
+    }
+    // ... and neither is a verb this sentinel cannot perform. Refused HERE, by name, before any file
+    // exists: a `failed` record is evidence about an effect that was attempted, and no effect is attempted
+    // for a word the parser did not understand.
+    if !REQUEST_VERBS.contains(&verb.as_str()) {
+        bail!(
+            "unknown request verb {verb:?}; no request was written. The verbs are: {}",
+            REQUEST_VERBS.join(", ")
+        );
     }
     let mut dedupe_deploy=false;
     let mut fields = serde_json::Map::new();
@@ -2604,5 +2640,48 @@ mod watcher_ownership_tests {
         assert!(format!("{:#}",deploy_requests_in(&root).unwrap_err()).contains("unreadable"));
         assert!(root.join("deploy.json").exists());
         std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod request_verb_tests {
+    use super::*;
+
+    /// A question must not create durable state, and an unknown verb must not either. Falsifies the
+    /// behaviour measured on 2026-10-02: `wa-sentinel request --help` wrote a request file with
+    /// `verb: "--help"`, and the worker's own refusal (`unknown verb "--help"`) moved that file into
+    /// `<sentinel>/failed/` - state created by asking what a command does.
+    #[test]
+    fn a_help_or_unknown_request_verb_writes_no_durable_state() {
+        // The sentinel directory is derived from `WASM_AGENT_HOME`, which is process-global.
+        let _alone=ENV_LOCK.lock().unwrap_or_else(|poisoned|poisoned.into_inner());
+        let home=std::env::temp_dir().join(format!("wa-request-verb-{}",std::process::id()));
+        let _=std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).expect("temp home");
+        let previous=std::env::var("WASM_AGENT_HOME").ok();
+        std::env::set_var("WASM_AGENT_HOME",&home);
+        let written=|| ["requests","claimed","done","failed"].iter()
+            .map(|folder| std::fs::read_dir(sentinel_dir().join(folder)).map(|entries|entries.count()).unwrap_or(0))
+            .sum::<usize>();
+        for verb in ["--help","-h","help",""] {
+            request(&[verb.to_string()])
+                .unwrap_or_else(|error| panic!("request {verb:?} must print usage, not fail: {error:#}"));
+            assert_eq!(written(),0,"`request {verb:?}` wrote a request file");
+        }
+        for verb in ["deploi","RESTART","--version"] {
+            let error=request(&[verb.to_string()]).expect_err("an unknown verb must be refused");
+            assert!(error.to_string().contains("unknown request verb"),"{error:#}");
+            assert_eq!(written(),0,"`request {verb:?}` wrote a request file");
+        }
+        // The refusal above is about the verb and not about the box: a known verb still writes exactly one
+        // request, which is what makes the two assertions above mean something.
+        request(&["wake".to_string(),"--session".to_string(),"fixture".to_string()])
+            .expect("a known verb must still be accepted");
+        assert_eq!(written(),1,"a known verb must still write one request");
+        match previous {
+            Some(value)=>std::env::set_var("WASM_AGENT_HOME",value),
+            None=>std::env::remove_var("WASM_AGENT_HOME"),
+        }
+        let _=std::fs::remove_dir_all(&home);
     }
 }

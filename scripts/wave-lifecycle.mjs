@@ -8,6 +8,7 @@ import {spawnSync} from 'node:child_process';
 import {DatabaseSync} from 'node:sqlite';
 import {fileURLToPath} from 'node:url';
 import {fullProof,findFullProof} from './lib/full-gate-proof.mjs';
+import {boundary} from './lib/lane-boundary.mjs';
 
 const hash = data => crypto.createHash('sha256').update(data).digest('hex');
 const requiredChecks = ['operations','claims','runtime','registries','deliveries','owners'];
@@ -144,12 +145,19 @@ export function create(dir, manifest) {
     } else if (manifest.bootstrap !== true) {
       verify(manifest);
     }
+    // THE NEXT WAVE'S ENTRY. Whether this boundary has requirements is the *repository's* statement:
+    // `lane-policy.json` declares them, and a repository without it adds none (proven in
+    // scripts/test-lane-boundary.mjs, "an absent policy adds no requirement"). A bootstrap is the one
+    // entry that is allowed to stand on its independent attestation alone - it exists for a repository
+    // whose baseline is already dirty - so it records the verdict instead of being refused by it.
+    const entry=boundary(manifest.repo,{phase:'enter'});
+    if (!entry.ok && manifest.bootstrap !== true) fail('lane_boundary_enter_refused:'+entry.reasons.join('|'));
     transaction(db,()=>{
       db.prepare('INSERT INTO waves(id,repo,manifest,manifest_hash,state,owner,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)').run(manifest.id,native(manifest.repo),JSON.stringify(manifest),hash(JSON.stringify(manifest)),'pending',manifest.owner,Date.now(),Date.now());
       manifest.steps.forEach((step,i)=>db.prepare("INSERT INTO steps(wave,position,name,state) VALUES(?,?,?,'pending')").run(manifest.id,i,step.name));
       event(db,manifest.id,'created',{owner:manifest.owner,bootstrap:manifest.bootstrap===true});
     });
-    return {ok:true,id:manifest.id,state:'pending',next_action:{argv:[process.execPath,fileURLToPath(import.meta.url),'advance',dir,manifest.id]}};
+    return {ok:true,id:manifest.id,state:'pending',boundary:entry,next_action:{argv:[process.execPath,fileURLToPath(import.meta.url),'advance',dir,manifest.id]}};
   } finally { db.close(); }
 }
 export async function advance(dir,id) {
@@ -214,11 +222,19 @@ export async function advance(dir,id) {
     }
     try {
       const receipt=verify(manifest,id);
+      // THE LANDING'S EXIT. Convergence proofs and the repository's own boundary are different
+      // questions: the proofs say the effects settled, the boundary says this repository is in an
+      // ended state (every delivered tip integrated, origin main-only, origin/main the target). The
+      // detector is the repository's declared `checks.exit`, so this is one implementation run at the
+      // second of the two boundaries - and a refusal blocks the wave with its named reasons rather
+      // than completing it.
+      const exit=boundary(manifest.repo,{phase:'exit'});
+      if (!exit.ok) fail('lane_boundary_exit_refused:'+exit.reasons.join('|'));
       transaction(db,()=>{
-        db.prepare("UPDATE waves SET state='complete',reason=NULL,receipt=?,updated_at=? WHERE id=?").run(JSON.stringify(receipt),Date.now(),id);
-        event(db,id,'complete',receipt);
+        db.prepare("UPDATE waves SET state='complete',reason=NULL,receipt=?,updated_at=? WHERE id=?").run(JSON.stringify({...receipt,boundary:exit}),Date.now(),id);
+        event(db,id,'complete',{...receipt,boundary:exit});
       });
-      return receipt;
+      return {...receipt,boundary:exit};
     } catch(e) { block(db,id,`convergence_failed:${e.message}`); return {ok:false,state:'blocked',reason:e.message}; }
   } finally { held?.close(); db.close(); }
 }
