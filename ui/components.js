@@ -1838,9 +1838,14 @@ function agentElapsed(ms) {
 //
 // The chat inside it is the shared <wa-chat-shell>: the same transcript region, composer, attachment
 // strip, model strip, send button and notification sound as the main conversation. What this element
-// adds is what belongs to a *child*: its own header (close it, promote it), the earlier-messages
-// control, the live readout of the task it is following, and the two child-only actions (Steer,
-// Cancel task) - all of which talk to the app through the same `agent-action` event as before.
+// adds is what belongs to a *child*: its own header (close it, promote it), the live readout of the
+// task it is following, and the two child-only actions (Steer, Cancel task) - all of which talk to
+// the app through the same `agent-action` event as before.
+//
+// The transcript is drawn by app.js's own renderer (`paintChildTranscript`), not here: this element
+// owns the container, and the window owns what a ledger row looks like. A second renderer in this
+// file is what grew the pane an `Earlier messages` control and a `Load original message 3` button
+// that the chat it is a view of never had.
 class WaAgentSession extends HTMLElement {
   connectedCallback() {
     if (this.shell) { this.startClock(); return; }
@@ -1852,7 +1857,7 @@ class WaAgentSession extends HTMLElement {
       + '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5h14v14H5z" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg></button>'
       + '<button type="button" class="icon-btn" data-action="collapse" title="Close this panel" aria-label="Close this panel">'
       + '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg></button>'
-      + '</header><button type="button" class="agent-earlier" hidden>Earlier messages</button>';
+      + '</header>';
     this.shell = document.createElement("wa-chat-shell");
     this.shell.setAttribute("placeholder", "Talk to this agent…");
     this.shell.setAttribute("label", "Message this agent");
@@ -1880,12 +1885,10 @@ class WaAgentSession extends HTMLElement {
     }
     this.shell.footerRight.prepend(actions);
     this.startClock();
-    this.rows = new Map();
     // `Send` and `Steer` are one draft leaving in two ways, so they are one path with a name: the
     // shell hands over the text and the attachments, and this element decides what a child accepts.
     this.shell.addEventListener("chat-send", () => this.sendDraft());
     this.shell.addEventListener("chat-files", (event) => this.collectFiles(event.detail.files));
-    this.querySelector('.agent-earlier').addEventListener('click', () => this.emit('earlier', { before_seq: this.firstSeq }));
     this.querySelectorAll('[data-action]').forEach(button => button.addEventListener('click', () => {
       if (button.dataset.action === 'steer') this.sendDraft('steer');
       else this.emit(button.dataset.action);
@@ -1939,8 +1942,15 @@ class WaAgentSession extends HTMLElement {
     const end=task.settled ? Number(task.settled_at)*1000 : Date.now();
     const duration=started && end ? agentElapsed(end-started) : 'duration unknown';
     this.statusLine.querySelector('.chat-content-run-elapsed').textContent=duration;
-    this.querySelectorAll('[data-live-footer]').forEach(node=>node.querySelector('.chat-content-run-elapsed').textContent=duration);
-    if(this.liveTrace && task.preview?.tool?.started_at)this.liveTrace.setAge((Date.now()/1000)-task.preview.tool.started_at);
+    // The in-flight call's own age, on the line the shared renderer drew. A child streams to the node,
+    // so this element is the only thing polling and the node's own report of the call (`started_at`,
+    // the bound it enforces) is the measurement: `42s of 300s` is readable, a clock nobody runs is not.
+    const live=task.preview?.tool;
+    if(live?.started_at) {
+      const traceElement=this.transcript?.querySelector('wa-trace');
+      if(traceElement?.pending) traceElement.setAge((Date.now()/1000)-live.started_at,
+        live.timeout_ms ? Math.round(live.timeout_ms/1000) : undefined);
+    }
   }
   emit(action,detail={}) { this.dispatchEvent(new CustomEvent('agent-action',{bubbles:true,detail:{action,pane:this,...detail}})); }
   set task(value) {
@@ -1963,131 +1973,20 @@ class WaAgentSession extends HTMLElement {
     this.querySelector('[data-action="steer"]').disabled=!!value.settled || value.state==='unknown';
     this.preview.textContent=[value.preview?.reasoning,value.preview?.commentary,value.preview?.text].filter(Boolean).join('\n');
     this.preview.hidden=!this.preview.textContent;
-    this.statusLine.querySelector('.chat-content-run-label').textContent=value.settled ? value.state : (value.preview?.status || value.state || 'unknown');
+    // The pane's own run readout, for what the shared transcript cannot say while a child is working:
+    // a child streams to the node rather than to this window, so the state and the preview come from
+    // the poll. A settled child says nothing here - its `completed`/`unfinished`/`failed` footer and
+    // its duration are drawn inside its own bubble by the shared renderer, which is where the
+    // window's own chat says the same thing.
+    this.statusLine.querySelector('.chat-content-run-label').textContent=value.preview?.status || value.state || 'unknown';
     this.statusLine.querySelector('.spinner').hidden=!!value.settled || value.state==='unknown';
-    this.statusLine.classList.toggle('finished',!!value.settled);
+    this.statusLine.hidden=!!value.settled || value.state==='unknown';
     // A child that has just finished is the one thing worth hearing while the reader is looking at
     // something else. The shell owns the sound; this is the pane's only call into it.
     if(previous && !previous.settled && value.settled)this.shell.notify();
     this.updateClock();
-    if(this.renderMessages)this.showMessages([],this.renderMessages);
   }
   get task() { return this._task; }
-  showMessages(messages,render,earlier=false) {
-    this.renderMessages=render;
-    const folds=[...this.transcript.querySelectorAll('wa-run,wa-trace,wa-reasoning')].map(node=>({open:node.open,toggled:node._userToggled}));
-    const scroll=this.transcript.scrollTop;
-    const nearBottom=this.transcript.scrollHeight-this.transcript.scrollTop-this.transcript.clientHeight<40;
-    const height=this.transcript.scrollHeight;
-    for(const message of messages || []) this.rows.set(Number(message.seq),message);
-    const ordered=[...this.rows.values()].sort((a,b)=>a.seq-b.seq);
-    const fingerprint=JSON.stringify([ordered,this.task?.subagent_id,this.task?.settled,this.task?.state,this.task?.preview?.tool]);
-    if(fingerprint===this.fingerprint)return;
-    this.fingerprint=fingerprint;
-    this.firstSeq=ordered[0]?.seq;
-    this.lastSeq=ordered.at(-1)?.seq;
-    this.querySelector('.agent-earlier').hidden=!(this.firstSeq>1);
-    const children=[];
-    let bubble=null, run=null, trace=null, calls=0, finalMessage=null;
-    this.liveTrace=null;
-    const boundary=message=>message.run_id || message.runId || null;
-    let runId=null;
-    const startBubble=()=>{
-      if(!bubble) {
-        bubble=document.createElement('wa-message'); bubble.setAttribute('role','assistant');
-        bubble.body.classList.add('steps'); children.push(bubble);
-      }
-      return bubble;
-    };
-    const startRun=()=>{
-      if(!run) {run=document.createElement('wa-run');run.open=true;startBubble().body.prepend(run);}
-      return run;
-    };
-    const finishRun=(live=false)=>{
-      if(trace) {
-        if(!live) {trace.unrecorded();trace.finish();}
-        else {trace.open=true;this.liveTrace=trace;}
-      }
-      if(run)run.setSummary(0,calls,finalMessage?.ms || null);
-      if(bubble && (finalMessage?.ms || live || this.task?.settled)) {
-        const footer=document.createElement('div');footer.className='status chat-content-run-status finished';
-        const label=document.createElement('span');label.className='chat-content-run-label';
-        const elapsed=document.createElement('span');elapsed.className='chat-content-run-elapsed';
-        label.textContent=live ? (this.task?.preview?.status || 'working') : (finalMessage?.ok===0 ? 'failed' : 'completed');
-        elapsed.textContent=finalMessage?.ms ? agentElapsed(finalMessage.ms) : 'duration unknown';
-        if(live)footer.dataset.liveFooter='true';
-        footer.append(label,elapsed);bubble.body.append(footer);
-      }
-      bubble=null;run=null;trace=null;calls=0;finalMessage=null;
-    };
-    for(const message of ordered) {
-      if(message.omitted && message.evidence) {
-        finishRun();
-        const retrieve=document.createElement('button');retrieve.type='button';retrieve.textContent='Load original message '+message.seq;
-        retrieve.addEventListener('click',()=>this.emit('exact',{evidence:message.evidence,button:retrieve}));
-        children.push(retrieve);continue;
-      }
-      const nextId=boundary(message);
-      if(nextId && runId && nextId!==runId)finishRun();
-      if(nextId)runId=nextId;
-      if(message.role==='user') {
-        finishRun();runId=nextId;
-        const user=document.createElement('wa-message');user.setAttribute('role','user');
-        user.body.innerHTML=render(String(message.content || ''));children.push(user);
-        continue;
-      }
-      if(message.role==='tool') {
-        // A tool result belongs to the previous assistant turn, not to its own chat bubble.
-        const name=message.tool_name || 'tool';
-        if(!trace) {trace=document.createElement('wa-trace');startRun().body.append(trace);trace.connectedCallback();}
-        if(!trace.pending) {trace.addTool(name,name,'');calls++;}
-        const pending=trace.querySelector('.tool-line.pending');
-        trace.settle(message.ok===0 ? 'failed' : 'recorded',String(message.content || ''),message.ok===0);
-        const result=pending?.querySelector('.tool-output');
-        if(result && message.content)result.hidden=false;
-        continue;
-      }
-      if(message.role!=='assistant')continue;
-      if(message.ms || message.trace?.length)finalMessage=message;
-      if(message.reasoning) {
-        const thinking=document.createElement('wa-reasoning');thinking.setText(message.reasoning);
-        startRun().body.append(thinking);
-      }
-      if(message.phase==='commentary') {
-        const commentary=document.createElement('wa-commentary');commentary.setText(String(message.content || ''));
-        startRun().body.append(commentary);
-      } else if(message.content) {
-        const segment=document.createElement('div');segment.className='seg';
-        segment.innerHTML=render(String(message.content));startBubble().body.append(segment);
-      }
-      if(message.tool_calls?.length) {
-        if(!trace) {trace=document.createElement('wa-trace');startRun().body.append(trace);trace.connectedCallback();}
-        for(const call of message.tool_calls) {
-          const fn=call.function || call;
-          const name=String(fn.name || 'tool');
-          const args=typeof fn.arguments==='string' ? fn.arguments : JSON.stringify(fn.arguments || {});
-          trace.addTool(name,name,args || '',undefined,call.id);calls++;
-        }
-      }
-    }
-    const active=!this.task?.settled && this.task?.state==='running';
-    const tool=this.task?.preview?.tool;
-    if(active && tool && !ordered.some(row=>row.role==='tool' && row.tool_call_id===tool.call_id)) {
-      if(!trace) {trace=document.createElement('wa-trace');startRun().body.append(trace);trace.connectedCallback();}
-      if(!trace.hasPendingCall(tool.call_id)) {
-        trace.addTool(tool.name,tool.name,JSON.stringify(tool.arguments || {}),tool.timeout_ms,tool.call_id);calls++;
-      }
-    }
-    finishRun(active && !finalMessage);
-    this.transcript.replaceChildren(...children);
-    [...this.transcript.querySelectorAll('wa-run,wa-trace,wa-reasoning')].forEach((node,index)=>{
-      if(folds[index]) {node.open=folds[index].open;node._userToggled=folds[index].toggled;}
-    });
-    if(earlier) this.transcript.scrollTop=scroll+this.transcript.scrollHeight-height;
-    else if(nearBottom) this.transcript.scrollTop=this.transcript.scrollHeight;
-    else this.transcript.scrollTop=scroll;
-    this.updateClock();
-  }
 }
 customElements.define('wa-agent-session',WaAgentSession);
 
@@ -2159,6 +2058,13 @@ class WaOrchestrator extends HTMLElement {
       return element;
     }));
   }
+  // The window's agents, grouped by LANE.
+  //
+  // A lane is the checkout a child was given, and it is the unit a reader reasons about: one
+  // worktree, the children working in it, and what is still owed on it. The lane travels on the task
+  // (`task.lane`), read by the host from the session ledger, because what a lane *is* - a recorded
+  // branch and worktree - is a fact about the node's records rather than about this element. A child
+  // with no branch of its own is in the `main` lane, which is stated, not inferred.
   set data(tasks) {
     this.connectedCallback();
     // Follow-up tasks share a session. One card per conversation, newest run.
@@ -2169,26 +2075,74 @@ class WaOrchestrator extends HTMLElement {
       if(!old || task.created_at>=old.created_at)sessions.set(key,task);
     }
     this.tasks=[...sessions.values()];
-    const cards=this.tasks.map(task=>{
-      const card=document.createElement('button'); card.type='button'; card.className='agent-card';
-      const state=task.state || 'unknown';
-      card.dataset.state=state;
-      const mission=document.createElement('span');mission.className='agent-card-mission';
-      mission.textContent=agentTaskTitle(task);
-      mission.title=mission.textContent;
-      const details=document.createElement('span');details.className='agent-card-details';
-      const model=document.createElement('span');model.className='agent-card-model';model.textContent=[task.model || 'model unknown',task.reasoning || 'reasoning unknown'].join(' · ');
-      const status=document.createElement('span');status.className='agent-card-status';status.textContent=state;
-      details.append(model,status);card.append(mission,details);
-      card.setAttribute('aria-label',`${mission.textContent} · ${model.textContent} · ${state}`);
-      card.addEventListener('click',()=>this.pin(task));
+    const lanes=new Map();
+    for(const task of this.tasks) this.groupByLane(lanes,task);
+    this.sidebar.replaceChildren(...[...lanes.values()].map(group=>this.laneElement(group)));
+    for(const task of this.tasks) {
       for(const pane of this.panes.values()) {
         if(pane.task.session_id && pane.task.session_id===task.session_id && pane.task.execution_node===task.execution_node) pane.task=task;
         else if(pane.task.subagent_id===task.subagent_id)pane.task=task;
       }
-      return card;
-    });
-    this.sidebar.replaceChildren(...cards);
+    }
+  }
+  groupByLane(lanes,task) {
+    const lane=task.lane || {key:'no recorded checkout',label:'no recorded checkout',checklist:[]};
+    const group=lanes.get(lane.key) || {lane,tasks:[]};
+    group.tasks.push(task);
+    lanes.set(lane.key,group);
+  }
+  // One lane: its key, the children it holds, and its end-state checklist. Every entry is a
+  // measurement or an explicit `unknown` carrying the host's reason (`task.lane.checklist`) - a lane
+  // drawn as merged and clean when nobody could read its checkout is the mistake that list exists to
+  // prevent, so the three states a reader can act on (`yes`, `no`, `unknown`) are attributes of the
+  // row rather than words this element invents.
+  laneElement(group) {
+    const lane=group.lane;
+    const section=document.createElement('section');
+    section.className='lane';
+    section.dataset.lane=lane.key;
+    const head=document.createElement('header');head.className='lane-head';
+    const key=document.createElement('span');key.className='lane-key';
+    key.textContent=lane.label || lane.key;key.title=key.textContent;
+    const count=document.createElement('span');count.className='lane-count';
+    count.textContent=group.tasks.length+(group.tasks.length===1 ? ' child' : ' children');
+    head.append(key,count);
+    if(lane.worktree) {
+      const path=document.createElement('span');path.className='lane-path';
+      path.textContent=lane.worktree;path.title=lane.worktree;
+      head.append(path);
+    }
+    section.append(head);
+    const children=document.createElement('div');children.className='lane-children';
+    for(const task of group.tasks) children.append(this.cardElement(task));
+    section.append(children);
+    const checklist=document.createElement('ul');checklist.className='lane-checklist';
+    for(const item of lane.checklist || []) {
+      const row=document.createElement('li');row.className='lane-check';
+      row.dataset.outcome=item.outcome;row.dataset.state=item.state;
+      const name=document.createElement('span');name.className='lane-check-name';name.textContent=item.outcome;
+      const state=document.createElement('span');state.className='lane-check-state';state.textContent=item.state;
+      row.append(name,state);
+      row.title=[item.outcome,item.state,item.detail].filter(Boolean).join(' · ');
+      checklist.append(row);
+    }
+    section.append(checklist);
+    return section;
+  }
+  cardElement(task) {
+    const card=document.createElement('button'); card.type='button'; card.className='agent-card';
+    const state=task.state || 'unknown';
+    card.dataset.state=state;
+    const mission=document.createElement('span');mission.className='agent-card-mission';
+    mission.textContent=agentTaskTitle(task);
+    mission.title=mission.textContent;
+    const details=document.createElement('span');details.className='agent-card-details';
+    const model=document.createElement('span');model.className='agent-card-model';model.textContent=[task.model || 'model unknown',task.reasoning || 'reasoning unknown'].join(' · ');
+    const status=document.createElement('span');status.className='agent-card-status';status.textContent=state;
+    details.append(model,status);card.append(mission,details);
+    card.setAttribute('aria-label',`${mission.textContent} · ${model.textContent} · ${state}`);
+    card.addEventListener('click',()=>this.pin(task));
+    return card;
   }
   // A pane must say which machine it is reading, by name. The task travels unchanged apart from that
   // one display field, so nothing downstream (steer, cancel, the model strip) sees a different task.

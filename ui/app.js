@@ -3,6 +3,12 @@
 // <wa-chat-shell>, the same component a child pane hosts, so a change to the chat is one change.
 const chatShell = document.getElementById("chat");
 const messages = chatShell.content;
+// The transcript a render is pointed at. The window's own conversation is the default; a child
+// pane's transcript is this same renderer aimed at a second container (see paintChildTranscript),
+// which is what makes "a ledger row becomes a bubble" one implementation rather than one per
+// surface. Two renderers is how a child grew an `Earlier messages` control and a `Load original
+// message 3` button that the conversation it is a view of never had.
+let transcript = messages;
 const jump = document.getElementById("jump");
 const meta = document.getElementById("meta");
 const form = chatShell.form;
@@ -346,7 +352,7 @@ function stripThinking(text) {
 }
 
 function atBottom(slack = 40) {
-  return messages.scrollHeight - messages.scrollTop - messages.clientHeight < slack;
+  return transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < slack;
 }
 
 // Sticky scroll. "Follow the bottom" is the default, and it stops only when the
@@ -360,7 +366,7 @@ let pinning = false;
 function pin(force = false) {
   if (!follow && !force) return;
   pinning = true;
-  messages.scrollTop = messages.scrollHeight;
+  transcript.scrollTop = transcript.scrollHeight;
   // Release on the next frame: the scroll event fires asynchronously.
   requestAnimationFrame(() => { pinning = false; });
 }
@@ -407,7 +413,7 @@ let runStartedAt = 0;
 // Re-appending after anything new lands keeps it below; appending an existing child moves
 // it, so this is the whole of it.
 function keepStatusLast() {
-  if (statusLine) messages.append(statusLine);
+  if (statusLine) transcript.append(statusLine);
 }
 
 function currentBubble() {
@@ -415,7 +421,7 @@ function currentBubble() {
     document.getElementById("empty")?.remove();
     runBubble = document.createElement("wa-message");
     runBubble.setAttribute("role", "assistant");
-    messages.append(runBubble);   // connecting is what builds .body
+    transcript.append(runBubble);   // connecting is what builds .body
     runBubble.body.classList.add("steps");
     keepStatusLast();
   }
@@ -426,7 +432,7 @@ function add(role, text, asHtml = false) {
   document.getElementById("empty")?.remove();
   const element = document.createElement("wa-message");
   element.setAttribute("role", role);
-  messages.append(element);
+  transcript.append(element);
   keepStatusLast();
   const body = element.body;
   if (asHtml) body.innerHTML = text; else body.textContent = text;
@@ -466,7 +472,7 @@ function setStatus(text) {
     if (busy && !replayingMessages) startRunStatusTicker();
   }
   statusLabel.textContent = text;
-  if (statusLine.parentNode !== messages) messages.append(statusLine);
+  if (statusLine.parentNode !== transcript) transcript.append(statusLine);
   if (busy) updateRunElapsed();
   else statusElapsed.textContent = "";
   pin();
@@ -1044,10 +1050,13 @@ function stopToolTicker() {
   if (toolTicker) { clearInterval(toolTicker); toolTicker = null; }
 }
 
-function settleTool(result, name) {
+function settleTool(result, name, failed) {
   if (!trace) return;
   const outcome = toolOutcome(name || lastTool, result);
-  trace.settle(outcome.text, toolDetail(result), outcome.failed);
+  // The ledger's own verdict, where the caller has one, outranks what the payload looks like: a
+  // replayed `ok: 0` row carries no exit code, and reading it as a success is how a failed call came
+  // back after a reload as a green line.
+  trace.settle(outcome.text, toolDetail(result), failed === undefined ? outcome.failed : failed === true);
   if ((name || lastTool) === "subagent") renderSubagentCard(result);
   if (!trace.pending) stopToolTicker();
   pin();
@@ -1278,7 +1287,7 @@ function handleEvent(event) {
       : (event.name === "bash" || event.name === "shell" ? execTimeoutSeconds * 1000 : null);
     addTool(event.name, event.arguments, { timeoutMs: boundMs, callId: event.call_id });
   } else if (event.type === "tool_result") {
-    settleTool(event.result, event.name);
+    settleTool(event.result, event.name, event.failed);
   } else if (event.type === "pending_delta") {
     const key = String(event.pending_id || "");
     if (!key) return;
@@ -1598,7 +1607,7 @@ function repaintMessages(rows, options = {}) {
   clearStatus();
   trace = null;
   lastTool = null;
-  messages.replaceChildren();
+  transcript.replaceChildren();
   runBubble = null;
   streamBody = null;
   streamText = "";
@@ -1659,7 +1668,11 @@ function repaintMessages(rows, options = {}) {
       } else if (message.role === "tool") {
         replayRunLastMessage = message;
         if (Number(message.created_at) > 0) replayMessageEndedAt = Number(message.created_at) * 1000;
-        handleEvent({ type: "tool_result", name: message.tool_name, result: { content: message.content } });
+        // The stored row carries the ledger's own verdict (`ok`), and a repaint that dropped it drew a
+        // failed call as a successful one: the payload of a failure has no exit code to read, so
+        // without this the line comes back green.
+        handleEvent({ type: "tool_result", name: message.tool_name,
+          failed: message.ok === 0 ? true : undefined, result: { content: message.content } });
       }
       rendered += 1;
     } catch (error) {
@@ -1670,6 +1683,18 @@ function repaintMessages(rows, options = {}) {
       }
     }
   }
+  // A host with no event stream of its own can hand over the call the node reports as in flight (a
+  // child pane reads the ledger, so this is the only way it can show the step its child is on). The
+  // window's own conversation gets the same line from its `tool` event, so the rule stays here, in the
+  // one renderer, instead of becoming a second one that draws the same thing differently.
+  const liveCall = options.liveTool;
+  let livePending = false;
+  if (options.active && liveCall && liveCall.call_id &&
+      !rows.some((row) => row.role === "tool" && row.tool_call_id === liveCall.call_id)) {
+    handleEvent({ type: "tool", call_id: liveCall.call_id, name: liveCall.name,
+      arguments: liveCall.arguments || {}, timeout_ms: liveCall.timeout_ms });
+    livePending = !!trace?.hasPendingCall(liveCall.call_id);
+  }
   // A repaint is a view of durable rows, and this page holds no stream for the run it draws:
   // a tool call with no recorded result is history, not work this page can watch. Keeping its
   // line pending and starting a ticker invented a clock for a call nobody was timing, and the
@@ -1677,7 +1702,11 @@ function repaintMessages(rows, options = {}) {
   // Replay has no `done` event. Close each historical run at its next user boundary, then use
   // the ledger's current state for the final run. An active run remains open until it settles.
   finishReplayedRun(true, options);
-  if (trace) finishTrace();
+  // A repaint holds no stream for the run it draws, so a call with no recorded result is history: it
+  // is closed as unrecorded rather than left with a clock nobody is timing. The exception is the call
+  // the *node* reports as in flight and the host handed over - that is a measurement, and a child
+  // pane watching its child work is the one reader for whom the run has not stopped.
+  if (trace && !livePending) finishTrace();
   replayingMessages = false;
   // A repaint during a live run is not finished history. Keep its last bubble as the target for
   // the reconnecting event tail; otherwise the in-progress notice and eventual answer split into
@@ -1692,12 +1721,42 @@ function repaintMessages(rows, options = {}) {
   }
   // The rows just drawn are the only place a settlement wake appears. Anything thrown here is the
   // notification's problem, never the transcript's: a toast that fails must not cost the reader a reply.
-  try {
-    announceSettlements(rows);
-  } catch (error) {
-    console.error("settlement notification failed", error);
+  // A child's transcript is not this window's conversation, so a paint of one asks not to notify: the
+  // wake belongs to the thread that delegated the child, and a pane repainted on a poll would raise
+  // the same settlement again on every poll.
+  if (options.notify !== false) {
+    try {
+      announceSettlements(rows);
+    } catch (error) {
+      console.error("settlement notification failed", error);
+    }
   }
   return { rendered, failed, firstFailure };
+}
+
+// Draw a child's conversation with the window's own renderer.
+//
+// The renderer is module-level because a window has one conversation; a child pane is a second
+// container for the same ledger rows, so the target and the render state are saved, the rows are
+// drawn, and both are put back. Nothing else about the path differs - the same handleEvent, the same
+// `wa-message` bubble with a `steps` body, the same run topic, and the same
+// `completed`/`unfinished`/`failed` footer - which is the point: a reader looking at a child and at
+// this window's own chat is looking at one implementation, so a fix to either lands in both.
+function paintChildTranscript(container, rows, options = {}) {
+  if (!container) return null;
+  const saved = { transcript, runBubble, statusLine, statusLabel, statusElapsed, statusSpinner,
+    lastAssistantBody, runStatusTicker, streamBody, streamText, phasePendingText, trace, lastTool,
+    reasoningBlock, streamedCommentaryBlock, streamedCommentaryText, runStartedAt, replayingMessages,
+    replayMessageEndedAt, replayRunLastMessage, renderedMessageIds };
+  transcript = container;
+  try {
+    return repaintMessages(rows || [], { ...options, notify: false });
+  } finally {
+    ({ transcript, runBubble, statusLine, statusLabel, statusElapsed, statusSpinner, lastAssistantBody,
+      runStatusTicker, streamBody, streamText, phasePendingText, trace, lastTool, reasoningBlock,
+      streamedCommentaryBlock, streamedCommentaryText, runStartedAt, replayingMessages,
+      replayMessageEndedAt, replayRunLastMessage, renderedMessageIds } = saved);
+  }
 }
 
 // The newest session for this user is the one that just ran, which is how the window finds out
@@ -4314,6 +4373,82 @@ function liveChildRows({sessions=[], dispatches=[], fleet={}, health={}, errors=
   return {rows,counts:subagentCounts(localName,health),note:note.join(' ')};
 }
 
+// ---- lanes: the checkout a child was given ------------------------------------------------
+//
+// A lane is a *recorded* checkout, not a guess: `/sessions` selects each session's own row, so
+// `worktree`, `workspace_branch`, `workspace_state` and `workspace_error` are the child's workspace
+// as the node stored it. A dispatch row carries no checkout of its own (the runtime's task view has
+// no workspace field), so grouping by anything the dispatcher knows would group by machine rather
+// than by lane - and a lane is what the reader has to reason about: one checkout, the children
+// working in it, and whether anything is still owed on it.
+//
+// A lane's facts are folded across every child that holds its key, because a lane is one checkout:
+// "is this lane retired" is a question about all of its children, not about the first session row a
+// loop happened to see. A child with no branch of its own works in the node's own checkout: that is
+// the `main` lane, stated as such rather than as a missing key.
+const MAIN_LANE='main';
+const UNRECORDED_LANE='no recorded checkout';
+// The four outcomes a lane is read for. Each is a *measurement* or an explicit unknown with the
+// reason: `merged` and `clean` are git facts about a ref (containment in origin/main, a clean tree)
+// which this view is not given, and a check nobody made is worse than no checklist at all.
+function laneChecklist(lane, rows) {
+  // `retired` is a recorded end state, not the absence of a path: a lane whose children recorded a
+  // released checkout has been retired, a lane with a bound checkout has not, and a child that never
+  // had a checkout of its own leaves it unknown rather than answered either way.
+  const bound=rows.some(row=>String(row.worktree || '') && String(row.workspace_state || '')!=='released');
+  const released=rows.length>0 && rows.every(row=>String(row.workspace_state || '')==='released');
+  const retired=released ? 'yes' : bound ? 'no' : 'unknown';
+  return [
+    {outcome:'merged',state:'unknown',
+      detail:'this view reads no branch tip and no origin/main ref, so containment is not measured here'},
+    {outcome:'retired',state:rows.length ? retired : 'unknown',
+      detail:released ? 'every child of this lane recorded a released checkout; the branch is retained'
+        : bound ? 'a child of this lane still holds a bound checkout'
+        : rows.length ? 'no child of this lane recorded a released checkout; nothing was retired here'
+        : 'no session record for this lane'},
+    {outcome:'clean',state:'unknown',
+      detail:"a checkout's own git status is measured by the node's settlement review, which this view is not given"},
+    {outcome:'main-only',state:lane.branch ? 'no':'yes',
+      detail:lane.branch ? 'this lane holds a branch of its own' :
+        'this lane holds no branch of its own: its children work in the node checkout'}];
+}
+function laneRecord(key,rows) {
+  const first=rows[0] || {};
+  const branch=String(first.workspace_branch || '');
+  const worktree=rows.map(row=>String(row.worktree || '')).find(Boolean) || '';
+  const lane={key,recorded:rows.length>0,branch,worktree,children:rows.length,
+    label:branch || worktree || "main (the node's own checkout)"};
+  lane.checklist=laneChecklist(lane,rows);
+  return lane;
+}
+// One read of the session ledger grouped into lanes, indexed by session id: every card's lane comes
+// from here, and the index is what a dispatch row is joined against.
+function lanesBySession(sessions) {
+  const groups=new Map();
+  for(const session of sessions || []) {
+    if(!session || !session.id) continue;
+    const key=String(session.workspace_branch || '') || String(session.worktree || '') || MAIN_LANE;
+    if(!groups.has(key)) groups.set(key,[]);
+    groups.get(key).push(session);
+  }
+  const index=new Map();
+  for(const [key,rows] of groups) {
+    const lane=laneRecord(key,rows);
+    for(const row of rows) index.set(String(row.id),lane);
+  }
+  return index;
+}
+// A child with no session row of its own has no recorded checkout to be grouped by, and saying so is
+// the only honest grouping: inventing a lane for it would file it under somebody else's worktree.
+function taskLane(task,index) {
+  const lane=task.session_id ? index.get(String(task.session_id)) : null;
+  if(lane) return lane;
+  const unknown={key:UNRECORDED_LANE,recorded:false,worktree:'',branch:'',children:1,label:UNRECORDED_LANE};
+  unknown.checklist=['merged','retired','clean','main-only'].map(outcome=>({outcome,state:'unknown',
+    detail:'no session record for this child'}));
+  return unknown;
+}
+
 async function refreshOrchestrator() {
   if(!orchestratorPanel || orchestratorPolling)return;
   orchestratorPolling=true;
@@ -4321,11 +4456,16 @@ async function refreshOrchestrator() {
     const fleet=await orchestratorRequest({action:'fleet'});
     if(!orchestratorPanel.configured)orchestratorPanel.configure(fleet);
     const list=await orchestratorRequest({action:'list'});
-    orchestratorPanel.data=list.subagents || [];
     // The dispatches are not the whole truth about what is running: read the session ledger and the
     // node's own subagent view too, and hand the panel every child with the source of each fact.
     const [sessions,health]=await Promise.all([orchestratorRead('sessions'),orchestratorRead('health')]);
-    const live=liveChildRows({sessions:(sessions.value && sessions.value.sessions) || [],
+    const sessionRows=(sessions.value && sessions.value.sessions) || [];
+    // The cards are grouped by lane, so each one is handed the lane its own session recorded. This
+    // is also the only place the panel needs the ledger for: a card is a child, and its lane is a fact
+    // about where that child works.
+    const lanes=lanesBySession(sessionRows);
+    orchestratorPanel.data=(list.subagents || []).map(task=>({...task,lane:taskLane(task,lanes)}));
+    const live=liveChildRows({sessions:sessionRows,
       dispatches:list.subagents || [],fleet,health:health.value || {},
       errors:[sessions.error,health.error].filter(Boolean)});
     orchestratorPanel.live=live;
@@ -4348,14 +4488,58 @@ async function refreshOrchestrator() {
     if(orchestratorPanel?.isConnected)orchestratorTimer=setTimeout(refreshOrchestrator,2000);
   }
 }
-async function refreshAgentPane(pane,before_seq) {
+// A settled child's own words decide its footer where they are definite: a failure says `failed` and
+// a cancellation says `unfinished`. A completion is left to the ledger's last row - the rule this
+// window's own repaint already uses - because a child that stopped after a tool call ran to
+// completion without answering, and `completed` over a stopped run is the contradiction this must
+// not print.
+function childRunState(task) {
+  if(!task || !task.settled) return 'unfinished';
+  if(task.state==='failed') return 'failed';
+  if(task.state==='cancelled') return 'unfinished';
+  return undefined;
+}
+// The rows to draw for one child: the node's newest page, extended backwards while that page opens
+// on a `tool` row whose call sits just above it. In this renderer a result belongs to the call above
+// it, so a page cut between them would draw nothing for evidence the reader came to see. The loop is
+// bounded and normally never runs: one page is the whole conversation.
+async function paneMessages(pane) {
+  // More than the node's default page of eight rows, so a child's transcript is the conversation and
+  // not just its tail. The node still bounds the page by bytes and answers with an address for a row
+  // too large to send; the rows are then drawn by the window's own renderer, below.
+  const page=await orchestratorRequest({action:'session',id:pane.task.subagent_id,limit:200,byte_limit:40960});
+  let rows=page.messages || [];
+  for(let older=0; older<3 && rows[0]?.role==='tool'; older++) {
+    const first=Number(rows[0].seq);
+    if(!Number.isFinite(first) || first<=1) break;
+    const before=await orchestratorRequest({action:'session',id:pane.task.subagent_id,before_seq:first,limit:200,byte_limit:20480});
+    const earlier=(before.messages || []).filter(row=>Number(row.seq)<first);
+    if(!earlier.length) break;
+    rows=earlier.concat(rows);
+  }
+  return {rows,task:page.task};
+}
+async function refreshAgentPane(pane) {
   if(!pane.task.session_id) { pane.notice.textContent=pane.task.error || 'Waiting for placement…'; return; }
   try {
-    const result=await orchestratorRequest({action:'session',id:pane.task.subagent_id,before_seq,after_seq:before_seq ? undefined : pane.lastSeq});
+    const result=await paneMessages(pane);
     if(!pane.isConnected)return;
     if(result.task)pane.task={...pane.task,...result.task};
-    pane.showMessages(result.messages,renderMarkdown,!!before_seq);
-    pane.notice.textContent=pane.task.error || (pane.task.settled ? 'Ready for your next message.' : 'Working. Steer updates the active run; Send queues a follow-up.');
+    const rows=result.rows;
+    // A repaint throws away the transcript's scroll position and its folded topics, so a poll that
+    // found the same rows, the same state and the same in-flight call leaves the pane it found alone.
+    const painted=JSON.stringify([rows.map(row=>row.seq),pane.task.state,pane.task.settled,
+      pane.task.preview?.tool?.call_id]);
+    if(painted!==pane.painted) {
+      pane.painted=painted;
+      paintChildTranscript(pane.transcript,rows,{state:childRunState(pane.task),
+        stateAt:pane.task.settled_at,active:!pane.task.settled,liveTool:pane.task.preview?.tool});
+    }
+    // What is left for the pane's own notice is what the shared transcript cannot say: a failure the
+    // child reported, or nothing. `Ready for your next message.` used to sit here, restating the
+    // `completed`/duration footer the run already draws in its own bubble.
+    pane.notice.textContent=pane.task.error ||
+      (pane.task.settled ? '' : 'Working. Steer updates the active run; Send queues a follow-up.');
   } catch(error) { pane.notice.textContent='Conversation unavailable: '+error.message; }
 }
 function mountOrchestrator() {
@@ -4376,24 +4560,7 @@ function mountOrchestrator() {
     } catch(error) { orchestratorPanel.message=error.message; }
   });
   orchestratorPanel.addEventListener('agent-action',async event=>{
-    const {action,pane,text,key,before_seq}=event.detail;
-    if(action==='earlier') { await refreshAgentPane(pane,before_seq);return; }
-    if(action==='exact') {
-      const {evidence,button}=event.detail;button.disabled=true;
-      try {
-        let offset=1,version,parts=[],total=0;
-        for(let pages=0;pages<256;pages++) {
-          const part=await orchestratorRequest({action:'session',id:pane.task.subagent_id,message_id:evidence.message_id,byte_offset:offset,message_version:version,byte_limit:20000});
-          if(!part.content || part.next_offset<=offset)throw new Error('original page did not advance');
-          parts.push(part.content);total+=part.content.length;offset=part.next_offset;version=part.message_version;
-          if(total>4000000)throw new Error('Original exceeds 4 MB browser inspection limit; use exact session tool pages.');
-          if(part.eof) {pane.showMessages([JSON.parse(parts.join(''))],renderMarkdown);return;}
-        }
-        throw new Error('Original exceeds browser page limit; use exact session tool pages.');
-      } catch(error) {pane.notice.textContent='Original unavailable: '+error.message;}
-      finally {button.disabled=false;}
-      return;
-    }
+    const {action,pane,text,key}=event.detail;
     if(!['message','steer','cancel'].includes(action))return;
     const button=pane.querySelector(action==='message' ? 'button[type="submit"]' : '[data-action="'+action+'"]');
     button.disabled=true;

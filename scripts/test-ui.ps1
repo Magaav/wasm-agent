@@ -973,18 +973,32 @@ $harness = @'
   var firstRect=panes[0].getBoundingClientRect(), secondRect=panes[1].getBoundingClientRect(), thirdRect=panes[2].getBoundingClientRect();
   check(firstRect.width>200 && secondRect.left>firstRect.left && thirdRect.top>firstRect.top,'four panes must form a readable two by two grid');
   panes[0].input.value='keep my draft';
-  panes[0].showMessages([{seq:1,role:'user',content:'hello'},{seq:2,role:'tool',tool_name:'read',content:'original tool evidence'},{seq:3,role:'assistant',content:'answer'}],text=>text);
-  check(panes[0].querySelectorAll('wa-message').length===2 && panes[0].querySelector('wa-run wa-trace').textContent.includes('original tool evidence'), 'a pane must render original messages and tool evidence inside the shared run topic');
-  panes[0].showMessages([{seq:4,role:'user',content:'next'},{seq:5,role:'assistant',phase:'commentary',content:'Checking…'},
+  window.__paintChildTranscript(panes[0].transcript,[{seq:1,role:'user',content:'hello'},
+    {seq:2,role:'assistant',content:'',tool_calls:[{id:'call-0',function:{name:'read',arguments:'{"path":"a"}'}}]},
+    {seq:3,role:'tool',tool_call_id:'call-0',tool_name:'read',content:'original tool evidence',tool_calls:[]},
+    {seq:4,role:'assistant',content:'answer'}],{state:'answered'});
+  check(panes[0].querySelectorAll('wa-message').length===2 &&
+    panes[0].querySelector('wa-run wa-trace .tool-line').textContent.includes('read') &&
+    panes[0].querySelector('wa-trace .tool-output').textContent.includes('original tool evidence'),
+    'a pane must render the original messages and the tool evidence inside the shared run topic');
+  check(!!panes[0].transcript.querySelector('wa-message.assistant > .body.steps > .chat-content-run-status.finished'),
+    'a pane draws its run status inside the bubble body, the way the window\'s own chat does');
+  // A pane is a repaint of the page the node returned, not an accumulator: a second page replaces the
+  // first, exactly as the window's own chat replaces its transcript when it repaints.
+  window.__paintChildTranscript(panes[0].transcript,[{seq:4,role:'user',content:'next'},{seq:5,role:'assistant',phase:'commentary',content:'Checking…'},
     {seq:6,role:'assistant',reasoning:'considering',tool_calls:[{id:'call-1',function:{name:'read',arguments:'{}'}}]},
-    {seq:7,role:'tool',tool_name:'read',content:'result text'},{seq:8,role:'assistant',content:'**done**'}],text=>text);
-  check(panes[0].querySelectorAll('wa-message').length===4 &&
-    panes[0].querySelectorAll('wa-run').length===2 &&
+    {seq:7,role:'tool',tool_name:'read',content:'result text',tool_calls:[]},{seq:8,role:'assistant',content:'**done**'}],{state:'answered'});
+  check(panes[0].querySelectorAll('wa-message').length===2 &&
+    panes[0].querySelectorAll('wa-run').length===1 &&
     !!panes[0].querySelector('wa-commentary') && !!panes[0].querySelector('wa-reasoning') &&
-    panes[0].querySelectorAll('wa-trace .tool-line').length===2 &&
-    panes[0].querySelector('wa-trace .tool-output').textContent.includes('original tool evidence') &&
-    !panes[0].querySelector('wa-trace .tool-output').hidden,
-    'agent chat must group commentary, thinking, calls and visible results into shared chat components');
+    panes[0].querySelectorAll('wa-trace .tool-line').length===1 &&
+    panes[0].querySelector('wa-trace .tool-line').classList.contains('ok') &&
+    panes[0].querySelector('wa-trace .tool-output').textContent.includes('result text'),
+    'agent chat must group commentary, thinking, calls and results into shared chat components');
+  // The shared chat folds a successful call's payload behind its line and forces only a failure open;
+  // a pane that un-hid it would be the second implementation this replaced.
+  check(panes[0].querySelector('wa-trace .tool-output').hidden===true,
+    'a pane must fold a successful call\'s payload exactly as the window does');
   showroom.data=agents.slice().reverse();
   check([...showroom.panes.values()][0]===panes[0] && panes[0].input.value==='keep my draft','refresh must preserve pane order and drafts');
   // Expand promotes the conversation into its own <wa-window>: a frame the reader can move, resize
@@ -1078,25 +1092,49 @@ $harness = @'
   panes[0].addEventListener('agent-action',event=>{if(event.detail.action==='steer')steerDetail=event.detail;});
   panes[0].querySelector('[data-action="steer"]').click();
   check(steerDetail?.text==='keep my draft' && !!steerDetail.key,'child steering is distinct from queued Send');
-  panes[0].showMessages([{seq:9,role:'tool',omitted:true,evidence:{message_id:'original'}}],text=>text);
-  check([...panes[0].transcript.querySelectorAll('button')].some(b=>b.textContent==='Load original message 9'),'bounded child rows offer exact original retrieval');
+  // A bounded child page hands an oversized row back as an address. The window's own rendering path
+  // draws the node's placeholder sentence for it; what it must not grow is a retrieval button the
+  // main chat does not have (the exact bytes are reachable through the session tool, not from here).
+  window.__paintChildTranscript(panes[0].transcript,[{seq:9,role:'assistant',created_at:Date.now()/1000,
+    omitted:true,content:'[Oversized message: retrieve the original using evidence.]',
+    evidence:{message_id:'original'},tool_calls:[]}],{state:'answered'});
+  check(![...panes[0].transcript.querySelectorAll('button')].some(b=>b.textContent.includes('Load original message')) &&
+    panes[0].transcript.textContent.includes('retrieve the original using evidence'),
+    'an oversized child row must say so in the node\'s words, without a pane-only retrieval button');
   var livePane=panes[1];
   var liveStart=Date.now()/1000-65;
+  var liveRows=[{seq:1,role:'user',content:'Run the check',created_at:liveStart,tool_calls:[]},
+    {seq:2,role:'assistant',content:'',created_at:liveStart,tool_calls:[{id:'live-call',function:{name:'bash',arguments:'{}'}}]}];
   livePane.task={...agents[1],title:'Verify live worker chat',started_at:liveStart,preview:{status:'running bash',tool:{name:'bash',call_id:'live-call',arguments:{command:'slow check'},started_at:liveStart}}};
-  livePane.showMessages([{seq:1,role:'user',content:'Run the check'},{seq:2,role:'assistant',tool_calls:[{id:'live-call',function:{name:'bash',arguments:'{}'}}]}],text=>text);
+  // A child streams to the node, not to this window: the call the node reports as in flight travels
+  // into the one renderer as `liveTool`, which is how a running child shows the step it is on.
+  window.__paintChildTranscript(livePane.transcript,liveRows,{state:'unfinished',active:true,
+    liveTool:livePane.task.preview.tool});
   check(livePane.querySelector('.agent-pane-head strong').textContent==='Verify live worker chat','worker heading names its task rather than profile');
-  check(livePane.querySelector('wa-run').open && livePane.querySelectorAll('.tool-line.pending').length===1,'running worker tool is open and deduplicated before settlement');
+  check(!!livePane.querySelector('wa-trace')?.open && livePane.querySelectorAll('.tool-line.pending').length===1,
+    'running worker tool is open and deduplicated before settlement, saw trace=' + !!livePane.querySelector('wa-trace') +
+    ' open=' + (livePane.querySelector('wa-trace') ? livePane.querySelector('wa-trace').open : 'n/a') +
+    ' pending=' + livePane.querySelectorAll('.tool-line.pending').length +
+    ' lines=' + livePane.querySelectorAll('.tool-line').length +
+    ' bubbles=' + livePane.transcript.children.length);
   check(livePane.statusLine.classList.contains('chat-content-run-status') && livePane.statusLine.textContent.includes('1:05'),'each worker pane has live elapsed run status');
-  livePane.querySelector('wa-run').open=false;
+  var liveTrace=livePane.querySelector('wa-trace');
+  liveTrace.open=false;
   livePane.task={...livePane.task,preview:{...livePane.task.preview,text:'progress arrived'}};
-  check(!livePane.querySelector('wa-run').open && livePane.preview.textContent.includes('progress arrived'),'live text preserves reader fold choice');
-  livePane.showMessages([{seq:3,role:'tool',tool_call_id:'live-call',tool_name:'bash',ok:0,content:'check failed'},{seq:4,role:'assistant',content:'Failure explained',ms:65000,ok:0}],text=>text);
+  check(livePane.querySelector('wa-trace')===liveTrace && liveTrace.open===false && livePane.preview.textContent.includes('progress arrived'),'a live task update must refresh the readout without rebuilding the reader\'s transcript, so their fold choice survives');
+  window.__paintChildTranscript(livePane.transcript,[liveRows[0],liveRows[1],
+    {seq:3,role:'tool',tool_call_id:'live-call',tool_name:'bash',ok:0,content:'check failed',created_at:liveStart+60,tool_calls:[]},
+    {seq:4,role:'assistant',content:'Failure explained',ok:0,created_at:liveStart+65,tool_calls:[]}],
+    {state:'failed',stateAt:liveStart+65,active:false});
   livePane.task={...livePane.task,settled:true,state:'failed',settled_at:liveStart+65,preview:null};
-  check(!livePane.querySelector('.tool-line.pending') && livePane.querySelector('.tool-line.err'),'worker failure settles the original live tool');
-  check(livePane.querySelector('wa-message[role="assistant"] .message-body .chat-content-run-status')?.textContent.includes('1:05') || livePane.querySelector('wa-message[role="assistant"]').body.querySelector('.chat-content-run-status')?.textContent.includes('1:05'),'elapsed footer is inside the worker balloon');
+  check(!livePane.querySelector('.tool-line.pending') && !!livePane.querySelector('.tool-line.err'),'worker failure settles the original live tool, saw pending=' +
+    livePane.querySelectorAll('.tool-line.pending').length + ' lines=' +
+    [...livePane.querySelectorAll('.tool-line')].map(line=>line.className).join('|') +
+    ' text=' + livePane.transcript.textContent.slice(0,120));
+  check(livePane.querySelector('wa-message[role="assistant"]').body.querySelector(':scope > .chat-content-run-status')?.textContent.includes('1:05'),'elapsed footer is inside the worker balloon');
   check(livePane.statusLine.textContent.includes('failed') && livePane.statusLine.querySelector('.spinner').hidden,'settled worker status stops its spinner');
   showroom.unpin('tile-0');
-  check(showroom.panes.size===3 && showroom.sidebar.children.length===4,'collapse must keep the running agent in the sidebar');
+  check(showroom.panes.size===3 && showroom.sidebar.querySelectorAll('.agent-card').length===4,'collapse must keep the running agent in the sidebar');
   showroom.configure({policy:{enabled:true,nodes:[{node:'cloud',max_tasks:2},{node:'local',max_tasks:0}]},nodes:[]});
   check(showroom.policy.nodes[0].node==='cloud' && showroom.policy.nodes[1].max_tasks===0,'node order and zero-capacity devices must round trip');
   // WHAT IS RUNNING, ON WHICH MACHINE. The dispatch table is a placement record, so a child started
@@ -2776,7 +2814,7 @@ Add-Content -Path $app -Value "`nwindow.__cancelRunForTest = cancelRun;"
 
 Add-Content -Path $app -Value "`nwindow.__resetFollow = () => { followedSeq = 0; lastFollowAt = 0; }; window.__followRun = followRun; window.__repaintMessages = repaintMessages; window.__ensureMeta = ensureMeta; window.__expireRecoveryBackoff = () => { transcriptRetryAt=0; metadataRetryAt=0; }; window.__followedSeq = () => followedSeq;"
 
-Add-Content -Path $app -Value "`nwindow.__liveChildRows = liveChildRows; window.__refreshOrchestrator = refreshOrchestrator; window.__setOrchestratorPanel = (panel) => { orchestratorPanel = panel; };"
+Add-Content -Path $app -Value "`nwindow.__liveChildRows = liveChildRows; window.__refreshOrchestrator = refreshOrchestrator; window.__setOrchestratorPanel = (panel) => { orchestratorPanel = panel; }; window.__paintChildTranscript = paintChildTranscript;"
 
 $server = $null
 $edge = @(
