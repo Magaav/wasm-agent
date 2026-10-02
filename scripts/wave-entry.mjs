@@ -32,23 +32,29 @@ export function checkAdmission(repo,{phase='produce'}={}) {
       if(['produce','admit','land'].includes(phase))return {ok:true,wave_verified:false,mode:'unregistered_initial_migration_review',reason:'No wave authority established; public start/allocation/completion still require registration'};
     }
     const row=registration(repo),db=new DatabaseSync(path.join(row.store,'waves.sqlite'),{readOnly:true});
-    let current;try{current=db.prepare('SELECT * FROM waves ORDER BY created_at DESC LIMIT 1').get();}finally{db.close();}
+    let rows;try{rows=db.prepare('SELECT * FROM waves ORDER BY created_at DESC').all();}finally{db.close();}
+    const current=rows[0];
     if(!current)throw Error('registered_wave_not_started');
-    // THE DERIVED ON/OFF, the same fact `create` uses: the wave is on while any child/agent for
-    // this repository is in flight, and off when none is. It is read from the node's own
-    // inventory, never from the durable row's bookkeeping.
-    const verdict=waveActivity(activitySource(JSON.parse(current.manifest)),current);
-    const named={activity:verdict.activity,convergence:verdict.convergence,runtime_state:verdict.runtime_state,reason:verdict.reason||current.reason||''};
+    // EVERY UNFINISHED ROW IS CONSULTED, not just the newest: since the one-row-per-repository index
+    // is gone, two unfinished waves can coexist, and an older one must not be a silent orphan. The
+    // ON/OFF fact is the same one `create` uses: read from the node's own inventory, never from the
+    // durable row's bookkeeping.
+    const verdicts=rows.map(entry=>({row:entry,verdict:waveActivity(activitySource(JSON.parse(entry.manifest)),entry)}));
+    const newest=verdicts[0].verdict;
+    const unfinished=verdicts.filter(entry=>entry.row.state!=='complete');
+    const named={activity:newest.activity,convergence:newest.convergence,runtime_state:newest.runtime_state,reason:newest.reason||current.reason||'',
+      unfinished:unfinished.map(entry=>({id:entry.row.id,state:entry.row.state,activity:entry.verdict.activity,convergence:entry.verdict.convergence,runtime_state:entry.verdict.runtime_state,reason:entry.verdict.reason}))};
     if(phase==='observe')return {ok:true,wave_verified:true,wave_id:current.id,store:row.store,phase,...named};
     if(current.state==='complete')throw Error('next_wave_requires_fresh_public_start');
     const freeze=path.join(row.store,'freeze.json');
     if(fs.existsSync(freeze) && phase!=='land')throw Error('wave_closing_frozen');
-    if(verdict.activity==='on')return {ok:true,wave_verified:true,wave_id:current.id,store:row.store,phase,...named};
-    // OFF. An idle wave must not fence the work that keeps the repository moving: producing and
-    // allocating keep being admitted (that is how lanes work under an idle umbrella), while the
-    // repository-level acts of landing and independent delivery admission stay refused while the
-    // convergence is unverified - and the refusal names that state instead of hiding it.
-    if(current.state==='blocked' && ['land','admit'].includes(phase))throw Error('wave_convergence_unverified:'+current.reason);
+    // THE REPOSITORY-LEVEL ACTS. Landing and independent delivery admission are admitted only while
+    // no unfinished wave's convergence is unverified - and that holds whether or not agents are
+    // working right now: a live umbrella does not make an unverified convergence verified.
+    const unverified=unfinished.find(entry=>!['verified','open'].includes(entry.verdict.convergence));
+    if(['land','admit'].includes(phase) && unverified)throw Error(`wave_convergence_unverified:${unverified.row.id}:${unverified.row.state}:${unverified.verdict.reason}`);
+    // PRODUCING AND ALLOCATING. An ON umbrella admits them, and so does an OFF or unobservable one:
+    // an idle row must never fence the lanes that keep the repository moving.
     return {ok:true,wave_verified:true,wave_id:current.id,store:row.store,phase,...named};
   }catch(e){return {ok:false,wave_verified:false,reason:e.message};}
 }
@@ -99,9 +105,14 @@ export function monitor(repo) {
   const row=registration(repo),db=new DatabaseSync(path.join(row.store,'waves.sqlite'));
   db.exec('PRAGMA synchronous=FULL; CREATE TABLE IF NOT EXISTS monitor(id TEXT PRIMARY KEY,attempts INTEGER NOT NULL DEFAULT 0,observations INTEGER NOT NULL DEFAULT 0,state TEXT NOT NULL,reason TEXT);');
   try {
-    const latest=db.prepare('SELECT id FROM waves ORDER BY created_at DESC LIMIT 1').get();if(!latest)throw Error('wave_not_started');
+    // EVERY UNFINISHED ROW IS READ. The monitor drives the OLDEST unfinished wave (deterministic,
+    // one at a time, each with its own budget), and reports the whole unfinished set - a second
+    // unfinished wave is never silently ignored because a newest-only read did not see it.
+    const unfinished=db.prepare("SELECT id FROM waves WHERE state!='complete' ORDER BY created_at").all().map(entry=>entry.id);
+    if(!unfinished.length)return {ok:true,state:'complete',disable_monitor:true,reason:'no unfinished wave remains'};
+    const latest={id:unfinished[0]};
     const status=inspect(row.store,latest.id);
-    if(status.state==='complete' || status.state==='blocked')return {ok:status.state==='complete',state:status.state,disable_monitor:true,reason:status.reason};
+    if(status.state==='complete' || status.state==='blocked')return {ok:status.state==='complete',state:status.state,disable_monitor:true,reason:status.reason,wave_id:latest.id,unfinished};
     db.prepare("INSERT OR IGNORE INTO monitor(id,state) VALUES(?,'pending')").run(latest.id);
     const budget=db.prepare('SELECT attempts,observations FROM monitor WHERE id=?').get(latest.id);
     if(!Number.isSafeInteger(budget.observations) || budget.observations<0 || !Number.isSafeInteger(budget.attempts) || budget.attempts<0) {
@@ -116,7 +127,7 @@ export function monitor(repo) {
     // watched, and a blocked wave fences every future admission. Measured: 200 ticks with an owner lease
     // absent-but-unresolved leave the budget at 0, and an owner the lease proves dead still spends one
     // (`scripts/test-wave-monitor-budget.mjs`).
-    if(status.owner_liveness!==false)return {ok:false,state:'owner_live_or_unverifiable',disable_monitor:false};
+    if(status.owner_liveness!==false)return {ok:false,state:'owner_live_or_unverifiable',disable_monitor:false,wave_id:latest.id,unfinished};
     db.prepare('UPDATE monitor SET observations=observations+1 WHERE id=?').run(latest.id);
     if(db.prepare('SELECT observations FROM monitor WHERE id=?').get(latest.id).observations>120) {
       db.prepare("UPDATE waves SET state='blocked',reason='external_monitor_observation_budget_exhausted_owner_preserved' WHERE id=?").run(latest.id);
@@ -131,7 +142,7 @@ export function monitor(repo) {
     const result=spawnSync(process.execPath,[path.join(row.source_root,'scripts/wave-entry.mjs'),'finish',row.repo,latest.id],{cwd:JSON.parse(status.manifest).executor_cwd,encoding:'utf8',windowsHide:true,timeout:10800000,maxBuffer:32*1024*1024});
     const after=inspect(row.store,latest.id);
     db.prepare('UPDATE monitor SET state=?,reason=? WHERE id=?').run(after.state,result.error?.message || after.reason || null,latest.id);
-    return {ok:after.state==='complete',state:after.state,disable_monitor:['complete','blocked'].includes(after.state),reason:after.reason,output:result.stdout,error:result.error?.message};
+    return {ok:after.state==='complete',state:after.state,disable_monitor:after.state==='blocked'||!db.prepare("SELECT id FROM waves WHERE state!='complete'").all().length,reason:after.reason,wave_id:latest.id,unfinished,output:result.stdout,error:result.error?.message};
   }finally{db.close();}
 }
 export function watcherDefinition(repo) {

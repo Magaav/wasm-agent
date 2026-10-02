@@ -211,6 +211,47 @@ export function orcaView(source, {enabled = false} = {}) {
   } catch { return {used: false, reason: 'optional_viewer_unreadable'}; }
 }
 
+// NAMED RESOLUTIONS OF ACTIVITY CLAIMS. A claim of current work that cannot be resolved
+// POSITIVELY is never silently treated as OFF and never permanently ON: it is reported with a
+// name, and an operator can resolve that exact claim, with evidence, in the wave store. A
+// resolution binds the claim's identity, so a NEW claim (a different run, child, boot or tree)
+// can never borrow an old one.
+export const CLAIM_RESOLUTIONS = {schema: 1, kind: 'wave-activity-resolutions'};
+export function resolutionsPath(source, commonDir) {
+  return source?.resolutions ? path.resolve(source.resolutions) : path.join(commonDir, 'wa-waves', 'activity-resolutions.json');
+}
+export function readResolutions(file) {
+  if (!fs.existsSync(file)) return {ok: true, file, resolutions: []};
+  try {
+    const value = JSON.parse(fs.readFileSync(file, 'utf8'));
+    if (value?.schema !== CLAIM_RESOLUTIONS.schema || value?.kind !== CLAIM_RESOLUTIONS.kind || !Array.isArray(value.resolutions)) return {ok: false, file, reason: 'activity_resolutions_unreadable', resolutions: []};
+    return {ok: true, file, resolutions: value.resolutions};
+  } catch (e) { return {ok: false, file, reason: `activity_resolutions_unreadable:${e.message}`, resolutions: []}; }
+}
+export function writeResolution(file, resolution) {
+  const current = readResolutions(file);
+  if (!current.ok && fs.existsSync(file)) throw Error(current.reason);
+  const resolutions = [...current.resolutions, resolution];
+  fs.mkdirSync(path.dirname(file), {recursive: true});
+  const temporary = `${file}.tmp-${process.pid}`;
+  fs.writeFileSync(temporary, `${JSON.stringify({schema: CLAIM_RESOLUTIONS.schema, kind: CLAIM_RESOLUTIONS.kind, resolutions}, null, 2)}\n`);
+  fs.renameSync(temporary, file);
+  return resolutions;
+}
+// WHERE THE RESOLUTIONS LIVE: the wave store of this repository, beside `waves.sqlite`.
+export function activityStore(source) {
+  const commonDir = path.resolve(git(source.repo, ['rev-parse', '--path-format=absolute', '--git-common-dir'])).replaceAll('\\', '/');
+  return {commonDir, resolutions: resolutionsPath(source, commonDir)};
+}
+
+// A resolution applies only to the exact claim it was written for.
+export function resolutionMatches(resolution, claim) {
+  if (resolution.session !== claim.session || resolution.claim !== claim.claim) return false;
+  if (String(resolution.worktree || '') !== String(claim.worktree || '')) return false;
+  for (const field of ['child_id', 'run_id', 'boot']) if (String(resolution[field] || '') !== String(claim[field] || '')) return false;
+  return true;
+}
+
 // THE INVENTORY. Everything the wave proofs and the ownership proofs need, from our own records.
 export function activityInventory(source) {
   const store = sessionInventory(source);
@@ -218,15 +259,18 @@ export function activityInventory(source) {
   const commonDir = path.resolve(git(source.repo, ['rev-parse', '--path-format=absolute', '--git-common-dir'])).replaceAll('\\', '/');
   const cache = new Map();
   const probe = source.process_probe === false ? {available: false, why: 'disabled_by_source', text: []} : processProbe();
+  const resolutions = readResolutions(resolutionsPath(source, commonDir));
   const evidence = {
     repository: source.repo, data: source.data, memory_db: store.store, git_common_dir: commonDir,
     session_store: store.ok ? {ok: true, source: store.source, rows: store.sessions.length} : {ok: false, reason: store.reason},
     git_worktrees: trees.length,
     processes: probe.available ? {available: true, checked: probe.checked} : {available: false, why: probe.why || 'unavailable'},
+    activity_resolutions: {file: resolutions.file, ok: resolutions.ok, count: resolutions.resolutions.length, reason: resolutions.reason || ''},
     third_party: 'none: ownership, registry and activity are read from the node runtime and Git only',
     orca_view: orcaView(source, {enabled: source.orca_view === true})
   };
-  if (!store.ok) return {ok: false, complete: false, reason: store.reason, on: null, agents: [], bindings: [], held: [], trees, unresolved: [{reason: store.reason}], leftovers: [], evidence};
+  if (!store.ok) return {ok: false, complete: false, reason: store.reason, on: null, activity: 'unverifiable', agents: [], claims: [], resolved_claims: [], bindings: [], held: [], trees, unresolved: [{reason: store.reason}], leftovers: [], evidence};
+  if (!resolutions.ok) evidence.session_store = {...evidence.session_store, resolutions_warning: resolutions.reason};
 
   const liveTurn = new Map();
   for (const turn of store.turns) if (LIVE_TURN_STATES.includes(String(turn.state))) liveTurn.set(String(turn.session_id), turn);
@@ -235,6 +279,8 @@ export function activityInventory(source) {
 
   const bindings = [];
   const agents = [];
+  const claims = [];
+  const resolved_claims = [];
   const held = [];
   const unresolved = [];
   const leftovers = [];
@@ -250,10 +296,11 @@ export function activityInventory(source) {
     const open = session.ended_at === null || session.ended_at === undefined;
     const turn = liveTurn.get(id) || null;
     const child = liveChild.get(id) || null;
-    // IN FLIGHT: the session is still open AND the node's own state records a turn running for
-    // it (or a child it dispatched that has not settled). A merely open binding is an allocation,
-    // not activity, and is named as such below.
-    const inFlight = open && !RESOLVED_STATES.includes(state) && !UNRESOLVED_STATES.includes(state) && Boolean(turn || child);
+    // A CLAIM OF CURRENT WORK: the session is still open AND the node's own state records a turn
+    // running for it, or a child it dispatched that has not settled. A merely open binding is an
+    // allocation, not activity, and is named as such below.
+    const claim = open && Boolean(turn || child);
+    const corroborated = probe.available ? Boolean(holderOf(probe, treePath)) : null;
     const record = {
       session: id, parent: session.parent_session_id || '', state, managed,
       worktree: treePath.replaceAll('\\', '/'), registered: Boolean(tree),
@@ -263,20 +310,27 @@ export function activityInventory(source) {
       owner: runtimeOwner(session),
       turn: turn ? {run_id: String(turn.run_id || ''), boot: String(turn.boot || ''), state: String(turn.state), updated_at: turn.updated_at} : null,
       child: child ? {child_id: String(child.child_id || ''), state: String(child.state), run_id: String(child.run_id || '')} : null,
-      in_flight: inFlight
+      corroborated, claim: '', in_flight: false
     };
+    // EVERY WAY A CLAIM FAILS TO BE POSITIVE HAS A NAME. An unresolved claim is never counted as
+    // activity and never read as OFF: it makes the activity answer UNVERIFIABLE until the claim is
+    // settled by observation or by a named resolution of that exact claim.
+    if (claim) {
+      if (!treePath || !exists || !tree) record.claim = 'activity_claim_without_a_registered_worktree';
+      else if (RESOLVED_STATES.includes(state)) record.claim = `activity_claim_on_a_resolved_binding_${state}`;
+      else if (UNRESOLVED_STATES.includes(state)) record.claim = `activity_claim_during_binding_transition_${state}`;
+      else if (state !== 'allocated') record.claim = `in_flight_binding_state_${state}`;
+      else if (!turn && corroborated !== true) record.claim = 'child_completion_claim_without_a_live_turn_or_process';
+      else record.in_flight = true;
+    }
     bindings.push(record);
     if (treePath && managed) held.push(record);
-    if (inFlight) {
-      record.corroborated = probe.available ? Boolean(holderOf(probe, treePath)) : null;
-      // A live turn is activity only while the tree it runs in is really there and really
-      // registered. A turn left behind by a tree that has gone is NAMED as stale, not counted.
-      if (!treePath || !exists || !tree) {
-        unresolved.push({session: id, reason: 'stale_in_flight_turn_without_a_registered_worktree', worktree: record.worktree});
-        continue;
-      }
-      if (record.state !== 'allocated') unresolved.push({session: id, reason: `in_flight_binding_state_${state}`, worktree: record.worktree});
-      agents.push(record);
+    if (record.in_flight) { agents.push(record); continue; }
+    if (claim) {
+      const resolution = resolutions.resolutions.find(entry => resolutionMatches(entry, {session: id, claim: record.claim, worktree: record.worktree, child_id: record.child?.child_id || '', run_id: record.turn?.run_id || record.child?.run_id || '', boot: record.turn?.boot || ''}));
+      if (resolution) { record.resolved = {by: resolution.by || '', at: resolution.at || 0, evidence: resolution.evidence || ''}; resolved_claims.push(record); continue; }
+      claims.push(record);
+      unresolved.push({session: id, reason: record.claim, worktree: record.worktree, child_id: record.child?.child_id || '', run_id: record.turn?.run_id || '', boot: record.turn?.boot || '', resolution: `node scripts/wave-activity.mjs resolve <config.json> ${id} \"<observed evidence>\"`});
       continue;
     }
     if (RESOLVED_STATES.includes(state)) {
@@ -309,10 +363,15 @@ export function activityInventory(source) {
     if (!key(tree.path).startsWith(`${key(source.data)}/wa-worktree-`)) continue;
     if (!bindings.some(b => key(b.worktree) === key(tree.path))) unresolved.push({reason: 'unowned_managed_worktree', worktree: tree.path, head: tree.head, branch: tree.branch});
   }
+  // An unreadable resolution record cannot silently drop a resolution.
+  if (!resolutions.ok) unresolved.push({reason: resolutions.reason, file: resolutions.file});
 
+  // THE THREE-VALUED ANSWER. `on` is positively observed work; `off` is a complete inventory with
+  // no claim at all; anything else is UNVERIFIABLE and must never be treated as OFF.
+  const activity = agents.length ? 'on' : claims.length ? 'unverifiable' : 'off';
   return {
-    ok: true, complete: true, on: agents.length > 0, agents, bindings, held, trees, unresolved, leftovers,
-    evidence: {...evidence, in_flight: agents.length, managed_bindings: held.length, unresolved: unresolved.length, leftovers: leftovers.length}
+    ok: true, complete: true, activity, on: activity === 'on', off: activity === 'off', agents, claims, resolved_claims, bindings, held, trees, unresolved, leftovers,
+    evidence: {...evidence, activity, in_flight: agents.length, unresolved_activity_claims: claims.length, resolved_activity_claims: resolved_claims.length, managed_bindings: held.length, unresolved: unresolved.length, leftovers: leftovers.length}
   };
 }
 
@@ -338,14 +397,21 @@ export function waveActivity(source, row) {
   if (source && source.kind === 'node-runtime') {
     inventory = activityInventory(source);
     if (!inventory.ok) { activity = 'unverifiable'; reason = inventory.reason; }
-    else activity = inventory.on ? 'on' : 'off';
+    else {
+      activity = inventory.activity;
+      // A claim that could not be resolved positively is NAMED, so the caller can consult it.
+      if (activity === 'unverifiable') reason = `unresolved_activity_claims:${inventory.claims.map(claim => `${claim.claim}:${claim.session}`).join('|')}`;
+    }
   } else {
     activity = 'unverifiable';
     reason = source?.kind === 'none' ? 'no_activity_source_declared' : 'activity_source_unavailable';
   }
-  const runtime_state = convergence === 'verified' ? 'complete' : activity === 'on' ? 'active' : convergence === 'open' ? 'idle' : 'unverified';
+  // `unknown` is its own reported state: an activity answer that could not be observed is neither
+  // active nor idle, and must never be reported as either.
+  const runtime_state = convergence === 'verified' ? 'complete' : activity === 'on' ? 'active' : activity === 'unverifiable' ? 'unknown' : convergence === 'open' ? 'idle' : 'unverified';
   return {
     wave_id: row?.id, bookkeeping_state: bookkeeping, activity, convergence, runtime_state, legacy_migrated: Boolean(legacy),
+    claims: (inventory?.claims || []).map(claim => ({session: claim.session, claim: claim.claim, worktree: claim.worktree, child_id: claim.child?.child_id || '', run_id: claim.turn?.run_id || claim.child?.run_id || '', boot: claim.turn?.boot || ''})),
     reason: reason || (convergence === 'verified' ? '' : convergence === 'legacy-unverified' ? 'legacy row: its steps never ran and its convergence was never verified' : String(row?.reason || '')),
     agents: inventory?.agents || [], evidence: inventory?.evidence || null, unresolved: inventory?.unresolved || []
   };

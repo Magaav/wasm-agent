@@ -60,10 +60,18 @@ function original(current) {
   return exact;
 }
 
-function migrationFile(dir) { return path.join(dir, 'migration.json'); }
+// ONE RECORD PER WAVE, so a store with more than one legacy row can migrate each of them. The
+// single `migration.json` name this first shipped under is still read for its own wave.
+const safeId = id => String(id).replace(/[^A-Za-z0-9._-]/g, '_');
+function migrationFile(dir, id) { return path.join(dir, `migration-${safeId(id)}.json`); }
+function legacyRecordFile(dir) { return path.join(dir, 'migration.json'); }
+function readRecordFile(file) { try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return null; } }
 
 // The one-row-per-repository unique index is what made an idle row fence the next wave. Dropping it
-// is part of this migration and is reported; `revert` puts it back when it still can.
+// is part of this migration and is reported; `revert` puts it back when it still can - and the
+// reversal is TRANSIENT, because `wave-lifecycle open()` drops it again on the next read-write wave
+// operation (the derived rule cannot coexist with a unique index that cannot see activity).
+const INDEX_TRANSIENCE = 'wave-lifecycle open() drops active_repo again on the next create/advance/reconcile/resume: the derived rule cannot coexist with a unique index that cannot see whether agents are working';
 function indexPresent(db) {
   return db.prepare("SELECT count(*) c FROM sqlite_master WHERE type='index' AND name='active_repo'").get().c > 0;
 }
@@ -93,13 +101,14 @@ export function plan(dir, id = null) {
       legacy_migrated: Boolean(legacy), legacy: legacy ? JSON.parse(legacy) : null,
       steps, original: original(latest),
       one_row_per_repository_index: indexPresent(db) ? 'present (it fences the next wave and is dropped by apply)' : 'already dropped (the derived rule is in force)',
+      one_row_per_repository_index_transient: INDEX_TRANSIENCE,
       // A row is not an activity fact. This is the derived verdict the wave now reports.
       derived: {
         activity: 'off-when-nothing-is-in-flight (read from the node runtime, not from this row)',
         convergence: legacy ? 'legacy-unverified' : latest.state === 'complete' ? 'verified' : latest.state === 'blocked' ? 'unverified' : 'open',
         report: 'the row keeps its durable bookkeeping; the wave reports activity/convergence/runtime_state'
       },
-      reversible: {file: migrationFile(dir), how: `node scripts/wave-migrate.mjs revert ${dir} ${latest.id}`}
+      reversible: {file: migrationFile(dir, latest.id), legacy_record: legacyRecordFile(dir), how: `node scripts/wave-migrate.mjs revert ${dir} ${latest.id}`}
     };
   } finally { db.close(); }
 }
@@ -110,7 +119,21 @@ export function apply(dir, id, actor = 'operator') {
     const current = row(db, id);
     if (current.state === 'complete') fail('completed_wave_needs_no_migration');
     ensureLegacyColumn(db);
+    const file = migrationFile(dir, id);
+    const existing = readRecordFile(file);
+    const legacyRecord = readRecordFile(legacyRecordFile(dir));
+    const namesThisWave = legacyRecord?.wave_id === id;
+    // IDEMPOTENT. A second apply of the same wave is the same request, not an error - and it must
+    // not be an error AFTER the transaction has already committed.
+    if (row(db, id).legacy && (existing || namesThisWave)) {
+      return {ok: true, wave_id: id, state: row(db, id).state, legacy_migrated: true, already_migrated: true, record: existing ? file : legacyRecordFile(dir), original_unchanged: true};
+    }
     if (row(db, id).legacy) fail('wave_already_migrated');
+    // REFUSE BEFORE THE TRANSACTION, NEVER AFTER IT. A record that already exists is either a
+    // leftover of an interrupted revert or another wave's; both need a decision, not a mutation.
+    if (existing) fail(`migration_record_without_migration:${file}:revert or remove the record first`);
+    if (legacyRecord && !namesThisWave) fail(`migration_record_belongs_to_another_wave:${legacyRecord.wave_id}`);
+    if (legacyRecord && namesThisWave) fail(`migration_record_without_migration:${legacyRecordFile(dir)}:revert or remove the record first`);
     const droppedIndex = dropIndex(db);
     const body = {schema: 1, kind: 'derived-activity-migration', wave_id: id, at: Date.now(), by: actor, original: original(current), why: 'the wave is OFF because nothing is in flight; its convergence was never verified and stays named as legacy-unverified'};
     db.exec('BEGIN IMMEDIATE');
@@ -121,11 +144,11 @@ export function apply(dir, id, actor = 'operator') {
     } catch (e) { db.exec('ROLLBACK'); throw e; }
     // A durable, human-readable record beside the store; never overwritten.
     const record = {schema: 1, kind: 'wave-legacy-migration', store: dir, wave_id: id, at: body.at, by: actor, original: body.original, sha256: hash(JSON.stringify(body)), revert: `node scripts/wave-migrate.mjs revert ${dir} ${id}`};
-    fs.writeFileSync(migrationFile(dir), `${JSON.stringify(record)}\n`, {flag: 'wx'});
+    fs.writeFileSync(file, `${JSON.stringify(record)}\n`, {flag: 'wx'});
     const after = row(db, id);
     // PROOF THAT NOTHING ELSE MOVED: every original column is byte-identical.
     for (const column of COLUMNS) if (JSON.stringify(after[column] ?? null) !== JSON.stringify(current[column] ?? null)) fail(`migration_moved_${column}`);
-    return {ok: true, wave_id: id, state: after.state, legacy_migrated: true, record: migrationFile(dir), original_unchanged: true, one_row_per_repository_index_dropped: droppedIndex};
+    return {ok: true, wave_id: id, state: after.state, legacy_migrated: true, record: file, original_unchanged: true, one_row_per_repository_index_dropped: droppedIndex};
   } finally { db.close(); }
 }
 
@@ -148,13 +171,20 @@ export function revert(dir, id) {
       event(db, id, 'legacy_state_migration_reverted', {wave_id: id, at: Date.now(), restored: body.original, sha256: body.sha256 ?? null});
       db.exec('COMMIT');
     } catch (e) { db.exec('ROLLBACK'); throw e; }
-    const file = migrationFile(dir);
-    if (fs.existsSync(file)) {
-      try { if (JSON.parse(fs.readFileSync(file, 'utf8')).wave_id === id) fs.unlinkSync(file); } catch { /* leave an unreadable record alone */ }
+    // Remove whichever record names this wave - the per-wave file, or the single-file name this
+    // first shipped under. A record that names another wave is left alone.
+    const files = [migrationFile(dir, id), legacyRecordFile(dir)];
+    const removed = [];
+    for (const candidate of files) {
+      if (!fs.existsSync(candidate)) continue;
+      const record = readRecordFile(candidate);
+      if (record?.wave_id !== id) continue;
+      try { fs.unlinkSync(candidate); removed.push(candidate); } catch { /* leave an unreadable record alone */ }
     }
     const after = row(db, id);
     const index = restoreIndex(db);
-    return {ok: true, wave_id: id, state: after.state, legacy_migrated: false, restored: original(after), one_row_per_repository_index: index};
+    return {ok: true, wave_id: id, state: after.state, legacy_migrated: false, restored: original(after), removed_records: removed,
+      one_row_per_repository_index: {...index, transient: true, note: INDEX_TRANSIENCE}};
   } finally { db.close(); }
 }
 

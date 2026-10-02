@@ -148,22 +148,28 @@ export function create(dir, manifest) {
     // their recorded state, the real Git worktree list, the node's own turn state). An idle wave
     // never blocks the next one; a wave with a live child still does; and a wave whose activity
     // cannot be observed is named as such instead of being guessed either way.
-    const previous=db.prepare('SELECT * FROM waves WHERE repo=? ORDER BY created_at DESC LIMIT 1').get(native(manifest.repo));
-    let previous_verdict=null;
-    if (previous) {
-      const source=activitySource(JSON.parse(previous.manifest)) || activitySource(manifest);
-      previous_verdict=waveActivity(source, previous);
-      if (previous_verdict.activity==='on') fail(`previous_wave_active:${previous.id}`);
-      if (previous_verdict.activity==='unverifiable') {
-        if (source?.kind!=='none') fail(`previous_wave_activity_unverifiable:${previous.id}:${previous_verdict.reason}`);
-        if (!isolatedRepository(manifest.repo)) fail(`production_activity_source_required:${previous.id}`);
-      }
-      if (previous.state==='complete') {
-        // Completion receipts can go stale. Recheck actual baseline, install, owners
-        // and registries before admitting another wave.
-        verify(JSON.parse(previous.manifest),previous.id,true);
-      }
-    } else if (manifest.bootstrap !== true) {
+    // EVERY UNFINISHED ROW IS READ, not just the newest. The one-row-per-repository index is gone,
+    // so two unfinished waves can coexist; reading only the newest would make the older one a
+    // silent orphan, and reading only the newest would also let an older ACTIVE wave be ignored.
+    const rows=db.prepare('SELECT * FROM waves WHERE repo=? ORDER BY created_at DESC').all(native(manifest.repo));
+    const verdicts=rows.map(row=>{const source=activitySource(JSON.parse(row.manifest))||activitySource(manifest);return {row,source,verdict:waveActivity(source,row)};});
+    const newest=rows[0]||null, newest_verdict=verdicts.length?verdicts[0].verdict:null;
+    const unfinished_report=verdicts.filter(entry=>entry.row.state!=='complete').map(entry=>({id:entry.row.id,state:entry.row.state,activity:entry.verdict.activity,convergence:entry.verdict.convergence,runtime_state:entry.verdict.runtime_state,reason:entry.verdict.reason}));
+    const active=verdicts.find(entry=>entry.verdict.activity==='on');
+    if (active) fail(`previous_wave_active:${active.row.id}`);
+    // AN UNVERIFIABLE ACTIVITY ANSWER IS NOT AN OFF ONE. A claim of current work that could not be
+    // resolved (a turn whose tree is gone, a binding mid-release, an uncorroborated child
+    // completion) makes the answer unverifiable, and the named reason is consulted here.
+    const unobservable=verdicts.find(entry=>entry.verdict.activity==='unverifiable' && entry.row.state!=='complete');
+    if (unobservable) {
+      if (unobservable.source?.kind!=='none') fail(`previous_wave_activity_unverifiable:${unobservable.row.id}:${unobservable.verdict.reason}`);
+      if (!isolatedRepository(manifest.repo)) fail(`production_activity_source_required:${unobservable.row.id}`);
+    }
+    if (newest && newest.state==='complete') {
+      // Completion receipts can go stale. Recheck actual baseline, install, owners
+      // and registries before admitting another wave.
+      verify(JSON.parse(newest.manifest),newest.id,true);
+    } else if (!newest && manifest.bootstrap !== true) {
       verify(manifest);
     }
     // THE NEXT WAVE'S ENTRY. Whether this boundary has requirements is the *repository's* statement:
@@ -176,9 +182,9 @@ export function create(dir, manifest) {
     transaction(db,()=>{
       db.prepare('INSERT INTO waves(id,repo,manifest,manifest_hash,state,owner,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)').run(manifest.id,native(manifest.repo),JSON.stringify(manifest),hash(JSON.stringify(manifest)),'pending',manifest.owner,Date.now(),Date.now());
       manifest.steps.forEach((step,i)=>db.prepare("INSERT INTO steps(wave,position,name,state) VALUES(?,?,?,'pending')").run(manifest.id,i,step.name));
-      event(db,manifest.id,'created',{owner:manifest.owner,bootstrap:manifest.bootstrap===true,previous:previous_verdict?{id:previous.id,activity:previous_verdict.activity,convergence:previous_verdict.convergence,runtime_state:previous_verdict.runtime_state,reason:previous_verdict.reason}:null});
+      event(db,manifest.id,'created',{owner:manifest.owner,bootstrap:manifest.bootstrap===true,previous:newest_verdict?{id:newest.id,activity:newest_verdict.activity,convergence:newest_verdict.convergence,runtime_state:newest_verdict.runtime_state,reason:newest_verdict.reason}:null,unfinished:unfinished_report});
     });
-    return {ok:true,id:manifest.id,state:'pending',boundary:entry,previous:previous_verdict?{id:previous.id,state:previous.state,activity:previous_verdict.activity,convergence:previous_verdict.convergence,runtime_state:previous_verdict.runtime_state,reason:previous_verdict.reason}:null,next_action:{argv:[process.execPath,fileURLToPath(import.meta.url),'advance',dir,manifest.id]}};
+    return {ok:true,id:manifest.id,state:'pending',boundary:entry,previous:newest_verdict?{id:newest.id,state:newest.state,activity:newest_verdict.activity,convergence:newest_verdict.convergence,runtime_state:newest_verdict.runtime_state,reason:newest_verdict.reason}:null,unfinished:unfinished_report,next_action:{argv:[process.execPath,fileURLToPath(import.meta.url),'advance',dir,manifest.id]}};
   } finally { db.close(); }
 }
 export async function advance(dir,id) {
@@ -288,9 +294,23 @@ export function inspect(dir,id) {
     const next_action=state==='complete' || live!==false?{kind:'none',argv:[]}:
       state==='blocked'||state==='unverified'?{kind:'inspect_effects_and_reconcile_or_resume',argv:[]}:
       {kind:'advance',argv:[process.execPath,fileURLToPath(import.meta.url),'advance',dir,id]};
-    return {...row,state,bookkeeping_state:row.state,owner_liveness:live,next_action,activity:verdict.activity,convergence:verdict.convergence,runtime_state:verdict.runtime_state,legacy_migrated:verdict.legacy_migrated,activity_reason:verdict.reason,agents:verdict.agents,activity_evidence:verdict.evidence,steps:db.prepare('SELECT * FROM steps WHERE wave=? ORDER BY position').all(id),events:db.prepare('SELECT * FROM events WHERE wave=? ORDER BY sequence').all(id)};
+    // THIS STORE'S OTHER UNFINISHED ROWS, by their own derived verdicts: a second unfinished wave
+    // must never be a silent orphan of an inspect that only ever looked at one row.
+    const others=db.prepare("SELECT * FROM waves WHERE repo=? AND state!='complete' AND id != ?").all(row.repo,id);
+    const unfinished=others.map(other=>{const otherVerdict=waveActivity(activitySource(JSON.parse(other.manifest)),other);return {id:other.id,state:other.state,activity:otherVerdict.activity,convergence:otherVerdict.convergence,runtime_state:otherVerdict.runtime_state,reason:otherVerdict.reason};});
+    return {...row,state,bookkeeping_state:row.state,owner_liveness:live,next_action,activity:verdict.activity,convergence:verdict.convergence,runtime_state:verdict.runtime_state,legacy_migrated:verdict.legacy_migrated,activity_reason:verdict.reason,agents:verdict.agents,claims:verdict.claims,unfinished,activity_evidence:verdict.evidence,steps:db.prepare('SELECT * FROM steps WHERE wave=? ORDER BY position').all(id),events:db.prepare('SELECT * FROM events WHERE wave=? ORDER BY sequence').all(id)};
   }
   finally { db.close(); }
+}
+// EVERY ROW IN THE STORE, with its derived verdict. `inspect` is by id; this is the store-level view
+// that makes a second unfinished wave visible instead of letting it become an orphan.
+export function list(dir) {
+  const db=new DatabaseSync(path.join(dir,'waves.sqlite'),{readOnly:true});
+  try {
+    const rows=db.prepare('SELECT * FROM waves ORDER BY created_at DESC').all();
+    const waves=rows.map(row=>{const verdict=waveActivity(activitySource(JSON.parse(row.manifest)),row);return {id:row.id,repo:row.repo,state:row.state,reason:row.reason,activity:verdict.activity,convergence:verdict.convergence,runtime_state:verdict.runtime_state,legacy_migrated:verdict.legacy_migrated,created_at:row.created_at};});
+    return {ok:true,store:dir,waves,unfinished:waves.filter(row=>row.state!=='complete').map(row=>row.id)};
+  } finally { db.close(); }
 }
 export function resume(dir,id,evidence) {
   if (!evidence?.trim()) fail('observed_resolution_evidence_required');
@@ -311,10 +331,11 @@ if (process.argv[1] && path.resolve(process.argv[1])===fileURLToPath(import.meta
     if (action==='create') result=create(path.resolve(dir),JSON.parse(fs.readFileSync(id,'utf8')));
     else if (action==='advance') result=await advance(path.resolve(dir),id);
     else if (action==='inspect') result=inspect(path.resolve(dir),id);
+    else if (action==='list') result=list(path.resolve(dir));
     else if (action==='reconcile') result=reconcile(path.resolve(dir),id,JSON.parse(fs.readFileSync(file,'utf8')));
     else if (action==='resume') result=resume(path.resolve(dir),id,file);
     else if (action==='verify') result=verify(JSON.parse(fs.readFileSync(dir,'utf8')));
-    else fail('usage: create DIR MANIFEST | advance DIR ID | inspect DIR ID | reconcile DIR ID EVIDENCE | verify MANIFEST');
+    else fail('usage: create DIR MANIFEST | advance DIR ID | inspect DIR ID | list DIR | reconcile DIR ID EVIDENCE | verify MANIFEST');
     process.stdout.write(`${JSON.stringify(result,null,2)}\n`); if (result.ok===false) process.exitCode=1;
   } catch(e) { process.stdout.write(`${JSON.stringify({ok:false,error:e.message})}\n`); process.exitCode=1; }
 }

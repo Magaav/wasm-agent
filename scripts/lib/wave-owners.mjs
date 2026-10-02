@@ -57,6 +57,7 @@ export function ownerInventory(config) {
   const bindings = inventory.bindings.map(binding => ({session: binding.session, state: binding.state, worktree: binding.worktree, branch: binding.branch, recorded_branch: binding.recorded_branch, head: binding.head, detached: binding.detached, registered: binding.registered, owner: binding.owner, in_flight: binding.in_flight}));
   return {
     ok: !unresolved.length, complete: true, unresolved, leftovers: inventory.leftovers, agents, bindings, held: inventory.held.length,
+    activity: inventory.activity, unresolved_activity_claims: inventory.claims.length, resolved_activity_claims: inventory.resolved_claims.length,
     trees: inventory.trees.map(tree => ({path: tree.path, head: tree.head, branch: tree.branch, detached: tree.detached})),
     evidence: inventory.evidence, third_party: 'none'
   };

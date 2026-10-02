@@ -336,9 +336,9 @@ Report integration (exact accepted main/review/combined gate and skips), deploym
 (exact installed source/artifact/skills and functional evidence), and convergence
 (main-only refs, actual worktrees/registries, operation/claim/owner state and durable
 receipt). A blocked wave retains an owner, exact reason and recovery path; it is
-not called complete or left silently stalled, and while it is idle it does not
-fence producing or allocating - only landing and independent delivery admission
-stay refused until its convergence is verified. A branch delivery can be complete
+not called complete or left silently stalled, and it does not fence producing or
+allocating whether or not agents are working - only landing and independent delivery
+admission stay refused, by name, until its convergence is verified. A branch delivery can be complete
 while independent review/merge/deploy/convergence remain owned by the coordinator.
 
 ### What is measured, and what is policy

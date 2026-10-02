@@ -135,18 +135,19 @@ try {
   const applied=migrationApply(fx.store,'second','lane-d');
   check(applied.ok===true && applied.legacy_migrated===true,'the migration records the legacy row');
   check(applied.original_unchanged===true,'the migration moves no original column');
-  check(fs.existsSync(path.join(fx.store,'migration.json')),'the migration leaves a durable, readable record');
+  check(fs.existsSync(applied.record) && path.basename(applied.record).startsWith('migration-'),'the migration leaves a durable, readable record, one per wave');
   const afterApply=rawRow(fx.store,'second');
   for(const column of ['id','repo','manifest','manifest_hash','state','reason','owner','created_at','updated_at','receipt'])
     check(JSON.stringify(afterApply[column]??null)===JSON.stringify(before[column]??null),`migration left ${column} exactly as it was`);
-  assert.throws(()=>migrationApply(fx.store,'second','lane-d'),/wave_already_migrated/);checks++;
+  const again=migrationApply(fx.store,'second','lane-d');
+  check(again.ok===true && again.already_migrated===true && again.record===applied.record,'a second apply of the same wave is idempotent, never an error after it committed');
   const migrated=inspect(fx.store,'second');
   check(migrated.convergence==='legacy-unverified' && migrated.runtime_state==='unverified','the legacy row is reported as a NAMED unverified state');
   check(migrated.legacy_migrated===true,'and it is visibly marked as migrated');
   check(create(fx.store,{...fx.manifest,id:'fourth',bootstrap:false}).ok===true,'admission keeps working while the legacy row exists');
   const reverted=migrationRevert(fx.store,'second');
   check(reverted.ok===true && reverted.legacy_migrated===false,'the migration reverts');
-  check(!fs.existsSync(path.join(fx.store,'migration.json')),'the migration record is removed on revert');
+  check(!fs.existsSync(applied.record),'the migration record is removed on revert');
   const afterRevert=rawRow(fx.store,'second');
   for(const column of ['id','repo','manifest','manifest_hash','state','reason','owner','created_at','updated_at','receipt'])
     check(JSON.stringify(afterRevert[column]??null)===JSON.stringify(before[column]??null),`revert restored ${column} exactly`);
