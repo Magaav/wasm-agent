@@ -99,6 +99,25 @@ if [ -f "$INSTALL_DIR/installed.txt" ]; then
     record "$(wa_same_dir "$RECORD_DIR" "$INSTALL_DIR" && echo ok || echo fail)" \
       "the record was written for this install" "installed.txt names install_dir=$RECORD_DIR, read from $INSTALL_DIR"
   fi
+  # 1a. WHOSE record is it? `record_role=final` says its writer owned the install's record - deploy.sh, the
+  #     only party that knows the commit the binary was built from. `record_role=interim` says upgrade.sh
+  #     recorded bytes it cannot attribute and a deploy was expected to replace that record with its
+  #     exact-commit one; an interim record that is still the LAST one is a deploy that did not finish its
+  #     record step. That is a failure, not a skip: the install is then serving a build no record names, and
+  #     on 2026-10-02 19:30 exactly that state existed - the verifier's only words for it were "installed
+  #     unknown is not an ancestor of tree 2f02b4c", which names the symptom and hides the cause (a deploy
+  #     that died after installing the node; scripts/deploy.sh's ship_file rule has the measurement).
+  #     A record with no `record_role` is one written before this rule, and this says so rather than
+  #     inventing a role for it.
+  RECORD_ROLE="$(sed_field record_role)"
+  case "$RECORD_ROLE" in
+    final) record ok "the install record is its owner's final one" "record_role=final, via=$(sed_field via)" ;;
+    interim) record fail "the install record is its owner's final one" \
+      "the last record is an INTERIM one (record_role=interim, via=$(sed_field via)): a deploy was installing this node and did not reach its own record step, so installed.txt does not name the commit the node serves" ;;
+    "") record skip "the install record is its owner's final one" \
+      "installed.txt has no record_role - a record written before that field existed, so its role cannot be read" ;;
+    *) record skip "the install record is its owner's final one" "unrecognized record_role=$RECORD_ROLE" ;;
+  esac
 else
   record fail "installed.txt present" "no $INSTALL_DIR/installed.txt - nothing to verify against"
   RECORD_COMMIT=""
