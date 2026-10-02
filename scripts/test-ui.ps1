@@ -1292,12 +1292,18 @@ $harness = @'
       + (freshAction?freshAction.className+' '+boxOf(freshAction).h:'none'));
   freshShell.remove(); freshRow.remove();
 
-  // BEYOND GEOMETRY: WHICH RULES STATE A CONTROL'S BOX. The measurements above cannot tell "one rule states
-  // the box" from "the same box is stated twice with identical values" (a duplicate reads as agreement), and
-  // they say nothing about one control recoloured alone. So the stylesheet is read the way the browser reads
-  // it: every rule that matches one of the four controls is listed with the properties it declares, and the
-  // assertions are about *which* rules are allowed to state the box and the paint. A duplicate box, a
-  // higher-specificity rule that only happens to lose today, and a one-control recolour all fail here.
+  // BEYOND GEOMETRY: WHICH RULES MAY STATE ANYTHING ABOUT A CONTROL AT ALL. The measurements above cannot
+  // tell "one rule states the box" from "the same box is stated twice with identical values" (a duplicate
+  // reads as agreement), and a curated property list is only as good as the properties it remembers:
+  // `margin-top` and `letter-spacing` were outside it, so one control could be nudged alone and every check
+  // stayed green. So the stylesheet is read the way the browser reads it, and the assertions are about *which
+  // rules* may state *anything* about one of the four controls:
+  //   - the box, stated by exactly one rule (`boxAudit`), and the paint by the shared rules (`paintAudit`);
+  //   - nothing else, for any property at all, unless it is the page's own global rule (`strayAudit`);
+  //   - and the two same-kind controls compute *identical* styles, property for property, which is what
+  //     catches a property no stylesheet sets at all (an inline style).
+  // A duplicate box, a higher-specificity rule that only happens to lose today, a one-control recolour, a
+  // one-control margin or a one-control letter-spacing all fail here.
   var carriesBox=function(prop){ return prop==='height'||prop==='min-width'||prop==='border-radius'||prop.indexOf('border')===0; };
   var carriesPaint=function(prop){ return prop==='color'||prop.indexOf('background')===0||prop.indexOf('font')===0; };
   var declaredProperties=function(rule){ var props=[]; for (var i=0;i<rule.style.length;i++) props.push(rule.style[i]); return props; };
@@ -1318,18 +1324,45 @@ $harness = @'
     }
     return out;
   };
-  var statingRules=function(el,isCarried){
+  var rulesMatching=function(el){
     var found=[];
     for (var s=0;s<document.styleSheets.length;s++) {
       var rules=null;
       try { rules=document.styleSheets[s].cssRules; } catch (error) { rules=null; }
       if (rules) collectRules(el,rules,found);
     }
-    var carriers=found.filter(function(rule){ return rule.props.some(isCarried); }).map(function(rule){ return rule.selector; });
-    return carriers.filter(function(name,index,all){ return all.indexOf(name)===index; });
+    var seen=[];
+    return found.filter(function(rule){ if (seen.indexOf(rule.selector)>=0) return false; seen.push(rule.selector); return true; });
   };
-  // The main chat's Steer is hidden until a run is active; unhiding it is the only thing that changes, and
-  // the state is put back so the checks below see the app's own reveal.
+  var statingRules=function(el,isCarried){
+    return rulesMatching(el).filter(function(rule){ return rule.props.some(isCarried); }).map(function(rule){ return rule.selector; });
+  };
+  // The shared implementation, and the page's own globals: `* { box-sizing }` and `[hidden] { display }` are
+  // about every element on the page rather than about a footer control, so the two are named here instead of
+  // the property list being loosened to accommodate them.
+  var SHARED_RULES=['.chat-control','.chat-control[data-label]'];
+  var GLOBAL_RULES=['*','[hidden]'];
+  var GLOBAL_PROPERTIES=['box-sizing','display'];
+  var strayRules=function(el){
+    return rulesMatching(el).filter(function(rule){
+      if (SHARED_RULES.indexOf(rule.selector)>=0||GLOBAL_RULES.indexOf(rule.selector)>=0) return false;
+      return rule.props.some(function(prop){ return GLOBAL_PROPERTIES.indexOf(prop)<0; });
+    }).map(function(rule){ return rule.selector+'['+rule.props.join(',')+']'; });
+  };
+  var strayProperties=function(el){
+    var owned=[];
+    rulesMatching(el).forEach(function(rule){
+      if (SHARED_RULES.indexOf(rule.selector)>=0) owned=owned.concat(rule.props);
+    });
+    var stray=[];
+    rulesMatching(el).forEach(function(rule){
+      if (GLOBAL_RULES.indexOf(rule.selector)>=0) return;
+      rule.props.forEach(function(prop){ if (owned.indexOf(prop)<0&&stray.indexOf(prop)<0) stray.push(prop); });
+    });
+    return stray;
+  };
+  // The main chat's Steer is hidden until a run is active; unhiding it is the only thing that changes, and the
+  // state is put back so the checks below see the app's own reveal.
   var steerWasHidden=mainSteer.hidden;
   mainSteer.hidden=false;
   var auditTargets=[{name:'main append-file',el:mainAttach,labelled:false},{name:'main action',el:mainSteer,labelled:true},
@@ -1345,17 +1378,24 @@ $harness = @'
       return allowed && (auditTargets[index].labelled ? rules.indexOf('.chat-control[data-label]')>=0 : rules.length===1);
     }),
     'a footer control\'s colour, background and font must come from the shared control (and, when labelled, its own variant), saw ' + JSON.stringify(paintAudit));
-  var appearanceProperties=['height','min-width','padding-top','padding-bottom','padding-left','padding-right',
-    'border-top-width','border-right-width','border-bottom-width','border-left-width','border-top-color',
-    'border-right-color','border-bottom-color','border-left-color','border-top-style','border-bottom-style',
-    'border-radius','background-color','background-image','color','display','align-items','justify-content',
-    'flex-grow','flex-shrink','flex-basis','cursor','box-sizing'];
-  var appearance=function(el){ var style=getComputedStyle(el); return appearanceProperties.map(function(name){ return name+'='+style.getPropertyValue(name); }).join(';'); };
-  var appearances={ 'main action':appearance(mainSteer), 'child action':appearance(paneSteer),
-    'main append-file':appearance(mainAttach), 'child append-file':appearance(paneAttach) };
-  check(appearances['main action']===appearances['child action'] && appearances['main append-file']===appearances['child append-file'],
-    'the same kind of control must compute the same appearance on both surfaces - a recolour or an inline style on one alone is not the shared control, saw '
-      + JSON.stringify({mainAction:appearances['main action'],childAction:appearances['child action']}));
+  var strayAudit=auditTargets.map(function(target){
+    return target.name+' -> rules['+strayRules(target.el).join(' | ')+'] properties['+strayProperties(target.el).join(',')+']'; });
+  check(strayAudit.every(function(line){ return /-> rules\[\] properties\[\]$/.test(line); }),
+    'no rule except the shared ones may state anything at all about a footer control: a margin, a letter-spacing or any other property set on one control alone is not the shared control, saw '
+      + JSON.stringify(strayAudit));
+  var computedDiff=function(a,b){
+    var first=getComputedStyle(a), second=getComputedStyle(b), out=[];
+    for (var i=0;i<first.length;i++) {
+      var name=first[i];
+      if (first.getPropertyValue(name)!==second.getPropertyValue(name)) out.push(name+'('+first.getPropertyValue(name)+' vs '+second.getPropertyValue(name)+')');
+    }
+    return out;
+  };
+  var appearanceDiff={ 'main vs child action':computedDiff(mainSteer,paneSteer),
+    'main vs child append-file':computedDiff(mainAttach,paneAttach) };
+  check(appearanceDiff['main vs child action'].length===0 && appearanceDiff['main vs child append-file'].length===0,
+    'the same kind of control must compute the same style on both surfaces, property for property - an inline style on one alone is not the shared control, saw '
+      + JSON.stringify(appearanceDiff));
   mainSteer.hidden=steerWasHidden;
   // Requirement: a child panel's header is its own two controls, with the icons asked for.
   var header=panes[1].querySelector('.agent-pane-head');
@@ -3114,6 +3154,101 @@ $harness = @'
     document.querySelectorAll('wa-message.user').length===userTurnsBefore+1,
     'Enter in the main composer must still send through the shared shell, saw value: ' + mainBox.value);
 
+  // THE FALSE "THE NODE IS NO LONGER RUNNING THIS RUN" ALARM. It bit the owner in the chat: `/health`
+  // answered `worker: "busy"` while the busy node-thread carried an identity this window could not match
+  // to its conversation, and the page announced the run was over - printing the node's own word for
+  // *working*, `(busy)`, in the sentence that said it had stopped. The node pid never changed and every
+  // run of that conversation reads `completed` in the ledger. A window may only call a run over on
+  // evidence about *that run*; an answer it cannot interpret is not evidence of death, and it must never
+  // abort a stream it cannot contradict.
+  var heldStream=null;
+  var liveStream=new ReadableStream({start:function(controller){heldStream=controller;}});
+  var streamFetch=window.fetch;
+  var runThreadNow=window.__chatThread();
+  // The composer must be idle for this to be a *send* rather than a queued draft: the check just above leaves
+  // a fixture run in flight, and its reply lands a tick later.
+  for(var idleTick=0;idleTick<40&&document.getElementById('send').classList.contains('busy');idleTick++) await tick();
+  check(!document.getElementById('send').classList.contains('busy'),
+    'the harness must start the incident from an idle composer, saw the send button still busy');
+  var chatPostsBefore=window.__calls.filter(function(call){return call.url==='chat'&&call.method==='POST';}).length;
+  var chatPosts=function(){return window.__calls.filter(function(call){return call.url==='chat'&&call.method==='POST';}).length;};
+  window.fetch=function(input,init){
+    var url=String(typeof input==='string'?input:(input&&input.url)||'');
+    var path=new URL(url,location.href).pathname.replace(/^\/+|\/+$/g,'');
+    if(path==='chat'&&init&&init.method==='POST'){
+      // Recorded here rather than left to the fixture stub, because this one request is answered by the
+      // held stream below and never reaches the fixture.
+      (window.__calls=window.__calls||[]).push({url:'chat',method:'POST',
+        body:(init&&init.body)||'',headers:(init&&init.headers)||{}});
+      return Promise.resolve({ok:true,status:200,body:liveStream,
+        json:function(){return Promise.resolve({ok:true,reply:'held'});}});
+    }
+    return streamFetch.apply(window,arguments);
+  };
+  var emitStream=function(event){heldStream.enqueue(new TextEncoder().encode('data: '+JSON.stringify(event)+'\n\n'));};
+  var countAlarms=function(){return (document.getElementById('messages').textContent.match(/no longer running/g)||[]).length;};
+  var nodeAnswer=function(worker,threads,runIds){
+    return {ok:true,worker:worker,queue:0,stalled_ms:0,current:null,node_threads:threads,run_ids:runIds||[]};
+  };
+  var watchedInput=document.getElementById('input');
+  watchedInput.value='a turn the node accepted';
+  watchedInput.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true,cancelable:true}));
+  for(var streamTick=0;streamTick<60&&chatPosts()===chatPostsBefore;streamTick++) await tick();
+  await tick();
+  check(!!heldStream && !!window.__watchNow && document.getElementById('send').classList.contains('busy')
+    && chatPosts()===chatPostsBefore+1,
+    'the harness must hold a real run in flight to reproduce the incident, saw stream=' + !!heldStream
+      + ' watch=' + (typeof window.__watchNow) + ' busy=' + document.getElementById('send').classList.contains('busy')
+      + ' posts=' + (chatPosts()-chatPostsBefore));
+  // (a) The node's own run list still names this conversation's run: no thread match needed, and the page
+  // must keep waiting. (b) The node says it is busy and its list does not (yet) carry the run: still
+  // waiting, and the page says only what it knows. Both were the incident; neither is "the run is over".
+  var foreignThread=[{label:'POST /chat',busy_ms:9100,session:'some-other-conversation'}];
+  window.__fixtures.health=nodeAnswer('busy',foreignThread,[{conversation:runThreadNow,run_id:771001,state:'running'}]);
+  await window.__watchNow();
+  var acceptedText=document.getElementById('messages').textContent;
+  check(acceptedText.indexOf('no longer running')<0,
+    'the run the node accepted for this conversation is in its run list: the page must keep waiting, saw: '
+      + acceptedText.slice(Math.max(0,acceptedText.length-220)));
+  window.__fixtures.health=nodeAnswer('busy',foreignThread,[]);
+  await window.__watchNow();
+  var incidentText=document.getElementById('messages').textContent;
+  check(incidentText.indexOf('no longer running')<0,
+    'a busy node whose thread identity this window cannot match must not be reported as the run being over, saw: '
+      + incidentText.slice(Math.max(0,incidentText.length-220)));
+  var statusNow=document.querySelector('.chat-content-run-label');
+  check(!!statusNow && statusNow.textContent.indexOf('cannot identify')>=0 && statusNow.textContent.indexOf('still listening')>=0,
+    'and it must say what it actually knows instead, saw: ' + (statusNow ? statusNow.textContent : 'no status line'));
+  emitStream({type:'delta',text:'STILL-LISTENING'});
+  for(var stillTick=0;stillTick<40&&document.getElementById('messages').textContent.indexOf('STILL-LISTENING')<0;stillTick++) await tick();
+  check(document.getElementById('messages').textContent.indexOf('STILL-LISTENING')>=0,
+    'and it must not cost the reader a live stream it cannot contradict: what the stream sends next must still arrive');
+  // The instrument can see the alarm at all: the same check with the node idle *and* this conversation's run
+  // absent from the node's own list must still report it. Without this the check above could be vacuous.
+  window.__fixtures.health=nodeAnswer('alive',[],[]);
+  await window.__watchNow();
+  var overText=document.getElementById('messages').textContent;
+  check(overText.indexOf('no longer running')>=0,
+    'a run the node is not running any more must still be reported, saw: ' + overText.slice(Math.max(0,overText.length-240)));
+  // A finished run stays silent - decided by the page, and by `done` on the wire.
+  check(!!window.__runStanding && window.__runStanding(nodeAnswer('busy',foreignThread,[]),
+      {session:runThreadNow,runId:null,submitted:new Set(),finished:true})==='finished',
+    'a finished run must decide as finished, saw: ' + (window.__runStanding ? 'not finished' : 'no decision function'));
+  // And the page-level half of the same claim: after `done`, one more check must add nothing at all -
+  // neither a new alarm nor the "I cannot identify this" line, which is what a fix that let the
+  // busy case outrank the finished case would print about a run whose answer is already on screen.
+  emitStream({type:'done',text:'finished'});
+  for(var doneTick=0;doneTick<40;doneTick++) await tick();
+  window.__fixtures.health=nodeAnswer('busy',foreignThread,[]);
+  var alarmsBefore=countAlarms();
+  await window.__watchNow();
+  var statusAfterDone=document.querySelector('.chat-content-run-label');
+  check(countAlarms()===alarmsBefore && (!statusAfterDone || statusAfterDone.textContent.indexOf('cannot identify')<0),
+    'a run that finished must stay silent: no watchdog notice and no "cannot identify" line after `done`, saw alarms '
+      + alarmsBefore + '->' + countAlarms() + ' status: ' + (statusAfterDone ? statusAfterDone.textContent : 'none'));
+  window.fetch=streamFetch;
+  window.__fixtures.health=nodeAnswer('alive',[],[]);
+
   // THE `inspect` MENU ITEM. The main window draws its own right-click menu, and the inspector is asked for
   // immediately after `Reload window`. Its action asks the shell for ONE named view: the name is what the
   // shell keys a view by, so a second invocation reuses the window that is already open instead of stacking
@@ -3187,6 +3322,8 @@ Add-Content -Path $app -Value "`nwindow.handleEvent = handleEvent; window.isConn
 Add-Content -Path $app -Value "`nwindow.__cancelRunForTest = cancelRun;"
 
 Add-Content -Path $app -Value "`nwindow.__resetFollow = () => { followedSeq = 0; lastFollowAt = 0; }; window.__followRun = followRun; window.__repaintMessages = repaintMessages; window.__ensureMeta = ensureMeta; window.__expireRecoveryBackoff = () => { transcriptRetryAt=0; metadataRetryAt=0; }; window.__followedSeq = () => followedSeq;"
+
+Add-Content -Path $app -Value "`nwindow.__watchNow = () => checkWatchedRun && checkWatchedRun(); window.__runStanding = runStanding;"
 
 Add-Content -Path $app -Value "`nwindow.__liveChildRows = liveChildRows; window.__refreshOrchestrator = refreshOrchestrator; window.__setOrchestratorPanel = (panel) => { orchestratorPanel = panel; }; window.__paintChildTranscript = paintChildTranscript; window.__refreshAgentPane = refreshAgentPane;"
 

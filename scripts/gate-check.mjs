@@ -14,12 +14,16 @@ export function checkVerdict(check, exit, output) {
   const text=String(output);
   if(check.verdict==='js')return verdict('js',exit,text);
   if(check.verdict==='browser') {
-    // The browser check's terminal verdict line, matched on its *stable prefix* ("ok   UI structure") and
-    // not on the whole sentence. The sentence behind it names the stages test-ui.ps1 covers, and those
-    // grow: an anchored end-of-line match turned an honest added stage (the inspector window) into a gate
-    // FAIL that only the full gate could see. The prefix is what identifies the verdict; `markers.length===1`
-    // and the FAIL guard below are what keep this from accepting a mangled or repeated report.
-    const markers=text.split(/\r?\n/).filter(line=>/^\s*ok   UI structure\b/.test(line));
+    // The browser check's terminal verdict line, in two parts: the prefix that identifies *which* check this
+    // is ("ok   UI structure"), and a subject this stage owns - the mid-run reload or the startup recovery
+    // it is the verdict for. Deliberately not the whole sentence: the sentence names the stages test-ui.ps1
+    // covers, those grow, and an anchored end-of-line match turned an honest added stage (the inspector
+    // window) into a gate FAIL only the full gate could see. Nor is the prefix alone enough - `ok   UI
+    // structure, and then something else entirely` named no stage at all and was accepted. `markers.length===1`
+    // and the FAIL guard below are what reject a mangled or repeated report.
+    const prefix=/^\s*ok   UI structure\b/;
+    const subjects=[/mid-run reload/i,/startup recovery/i];
+    const markers=text.split(/\r?\n/).filter(line=>prefix.test(line)&&subjects.some(subject=>subject.test(line)));
     return {ok:exit===0&&markers.length===1&&!/^\s*(?:FAIL(?:[:\s]|$)|ALL FAIL(?:[:\s]|$)|DEPENDENCY_MISSING)/m.test(text),reason:'browser_terminal_verdict_required'};
   }
   if(check.verdict==='proof') {
