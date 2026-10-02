@@ -252,6 +252,21 @@ export function resolutionMatches(resolution, claim) {
   return true;
 }
 
+// A CLAIM THAT IS READING AS ON IS STILL A CLAIM. A steering row records that a turn STARTED;
+// the node's own liveness proof for a running turn is a process, and a turn left behind by a dead
+// node process reads as ON forever with no way out. So the operator may resolve a POSITIVE claim
+// too - under the same exact-identity binding and the same evidence requirement - and this is the
+// claim name such a resolution carries.
+export const POSITIVE_CLAIM = 'positive_claim_resolved_by_observation';
+export function claimIdentity(record, claim) {
+  return {session: record.session, claim, worktree: record.worktree, child_id: record.child?.child_id || '', run_id: record.turn?.run_id || record.child?.run_id || '', boot: record.turn?.boot || ''};
+}
+// A process holding the tree is stronger evidence than an old resolution: it can never be cleared.
+export function findResolution(resolutions, identity, {corroborated = null} = {}) {
+  if (corroborated === true) return null;
+  return resolutions.find(entry => resolutionMatches(entry, identity)) || null;
+}
+
 // THE INVENTORY. Everything the wave proofs and the ownership proofs need, from our own records.
 export function activityInventory(source) {
   const store = sessionInventory(source);
@@ -325,9 +340,16 @@ export function activityInventory(source) {
     }
     bindings.push(record);
     if (treePath && managed) held.push(record);
-    if (record.in_flight) { agents.push(record); continue; }
+    if (record.in_flight) {
+      // A positive claim the operator has resolved by observation is no longer activity - unless a
+      // local process is holding its tree, which no resolution may clear.
+      const cleared = findResolution(resolutions.resolutions, claimIdentity(record, POSITIVE_CLAIM), {corroborated});
+      if (cleared) { record.resolved = {by: cleared.by || '', at: cleared.at || 0, evidence: cleared.evidence || '', claim: POSITIVE_CLAIM}; resolved_claims.push(record); continue; }
+      agents.push(record);
+      continue;
+    }
     if (claim) {
-      const resolution = resolutions.resolutions.find(entry => resolutionMatches(entry, {session: id, claim: record.claim, worktree: record.worktree, child_id: record.child?.child_id || '', run_id: record.turn?.run_id || record.child?.run_id || '', boot: record.turn?.boot || ''}));
+      const resolution = findResolution(resolutions.resolutions, claimIdentity(record, record.claim), {corroborated});
       if (resolution) { record.resolved = {by: resolution.by || '', at: resolution.at || 0, evidence: resolution.evidence || ''}; resolved_claims.push(record); continue; }
       claims.push(record);
       unresolved.push({session: id, reason: record.claim, worktree: record.worktree, child_id: record.child?.child_id || '', run_id: record.turn?.run_id || '', boot: record.turn?.boot || '', resolution: `node scripts/wave-activity.mjs resolve <config.json> ${id} \"<observed evidence>\"`});

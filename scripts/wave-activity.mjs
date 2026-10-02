@@ -16,7 +16,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
-import {activityInventory, activityStore, readResolutions, resolutionMatches, sourceOfConfig, writeResolution} from './lib/wave-activity.mjs';
+import {activityInventory, activityStore, POSITIVE_CLAIM, claimIdentity, readResolutions, resolutionMatches, sourceOfConfig, writeResolution} from './lib/wave-activity.mjs';
 
 const fail = reason => { throw new Error(reason); };
 
@@ -29,21 +29,30 @@ function options(argv) {
   return {positional, flags};
 }
 
-function claimIdentity(claim) {
-  return {session: claim.session, claim: claim.claim, worktree: claim.worktree, child_id: claim.child?.child_id || '', run_id: claim.turn?.run_id || claim.child?.run_id || '', boot: claim.turn?.boot || ''};
+function claimSummary(record, claim, extra = {}) {
+  return {session: record.session, worktree: record.worktree, run_id: record.turn?.run_id || record.child?.run_id || '', child_id: record.child?.child_id || '', boot: record.turn?.boot || '', corroborated: record.corroborated ?? null, why: claim, ...extra};
 }
 
+// EVERY CLAIM, positive or not. A claim that reads as ON is still a claim, and an operator must be
+// able to see it - and resolve it - instead of reading the code to find out how.
 export function observe(configFile) {
   const source = sourceOfConfig(JSON.parse(fs.readFileSync(configFile, 'utf8')));
   const inventory = activityInventory(source);
   if (!inventory.ok) fail(`activity_inventory_unavailable:${inventory.reason}`);
   const store = activityStore(source);
   const resolutions = readResolutions(store.resolutions);
+  const command = session => `node scripts/wave-activity.mjs resolve ${configFile} ${session} "<what you observed>"`;
+  const activity_claims = [
+    ...inventory.agents.map(agent => claimSummary(agent, POSITIVE_CLAIM, {positive: true, resolvable: agent.corroborated !== true, resolution: agent.corroborated === true ? 'refused: a local process is holding this tree' : command(agent.session)})),
+    ...inventory.claims.map(claim => claimSummary(claim, claim.claim, {positive: false, resolvable: true, resolution: command(claim.session)})),
+    ...inventory.resolved_claims.map(claim => claimSummary(claim, claim.resolved?.claim || claim.claim, {positive: false, resolvable: false, resolved: claim.resolved}))
+  ];
   return {
     ok: true, activity: inventory.activity, on: inventory.on, off: inventory.off,
     agents: inventory.agents.map(agent => ({session: agent.session, worktree: agent.worktree, run_id: agent.turn?.run_id || '', child_id: agent.child?.child_id || '', corroborated: agent.corroborated})),
-    unresolved_activity_claims: inventory.claims.map(claim => ({...claimIdentity(claim), why: claim.claim, resolution: `node scripts/wave-activity.mjs resolve ${configFile} ${claim.session} "<what you observed>"`})),
-    resolved_activity_claims: inventory.resolved_claims.map(claim => ({...claimIdentity(claim), why: claim.claim, resolved: claim.resolved})),
+    activity_claims,
+    unresolved_activity_claims: inventory.claims.map(claim => ({...claimSummary(claim, claim.claim), resolution: command(claim.session)})),
+    resolved_activity_claims: inventory.resolved_claims.map(claim => ({...claimSummary(claim, claim.resolved?.claim || claim.claim), resolved: claim.resolved})),
     unresolved: inventory.unresolved, leftovers: inventory.leftovers.length, resolutions: {file: store.resolutions, ok: resolutions.ok, count: resolutions.resolutions.length},
     evidence: inventory.evidence
   };
@@ -55,13 +64,22 @@ export function resolve(configFile, session, evidence, flags = {}) {
   const source = sourceOfConfig(JSON.parse(fs.readFileSync(configFile, 'utf8')));
   const inventory = activityInventory(source);
   if (!inventory.ok) fail(`activity_inventory_unavailable:${inventory.reason}`);
-  const claim = inventory.claims.find(entry => entry.session === session);
-  if (!claim) {
-    if (inventory.agents.some(entry => entry.session === session)) fail(`claim_is_not_unresolved:${session}:activity_is_positively_on`);
+  const unresolved = inventory.claims.find(entry => entry.session === session);
+  const positive = inventory.agents.find(entry => entry.session === session);
+  let record = unresolved, claimName = unresolved ? unresolved.claim : '';
+  if (!record && positive) {
+    // A steering row records that a turn STARTED, not that it is running now: a turn left behind
+    // by a dead node process reads as ON with no way out. So a positive claim is resolvable under
+    // the same exact-identity binding - but never while a process holds its tree.
+    if (positive.corroborated === true) fail(`claim_is_corroborated_by_a_local_process:${session}:resolve cannot clear work a process is holding`);
+    record = positive;
+    claimName = POSITIVE_CLAIM;
+  }
+  if (!record) {
     if (inventory.resolved_claims.some(entry => entry.session === session)) fail(`claim_already_resolved:${session}`);
     fail(`claim_not_found:${session}`);
   }
-  const identity = claimIdentity(claim);
+  const identity = claimIdentity(record, claimName);
   // The operator must name the identity that distinguishes this claim from a later one.
   const named = identity.child_id || identity.run_id || identity.boot;
   const given = flags.child || flags.run || flags.boot || '';
@@ -70,12 +88,12 @@ export function resolve(configFile, session, evidence, flags = {}) {
   const store = activityStore(source);
   const existing = readResolutions(store.resolutions);
   if (!existing.ok && fs.existsSync(store.resolutions)) fail(existing.reason);
-  if (existing.resolutions.some(entry => resolutionMatches(entry, identity))) return {ok: true, session, claim: identity.claim, already_resolved: true, file: store.resolutions};
+  if (existing.resolutions.some(entry => resolutionMatches(entry, identity))) return {ok: true, session, claim: claimName, already_resolved: true, file: store.resolutions};
   const resolution = {...identity, evidence, at: Date.now(), by: flags.actor || process.env.WA_WAVE_ACTOR || 'operator'};
   writeResolution(store.resolutions, resolution);
   // REPORT WHAT THE RESOLUTION ACTUALLY DID: the inventory is read again, not assumed.
   const after = activityInventory(source);
-  return {ok: true, session, claim: identity.claim, resolution, file: store.resolutions, activity_after: after.ok ? after.activity : 'unverifiable', unresolved_activity_claims_after: after.ok ? after.claims.length : null};
+  return {ok: true, session, claim: claimName, was_positive: Boolean(positive), resolution, file: store.resolutions, activity_after: after.ok ? after.activity : 'unverifiable', unresolved_activity_claims_after: after.ok ? after.claims.length : null};
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

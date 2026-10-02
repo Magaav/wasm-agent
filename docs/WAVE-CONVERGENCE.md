@@ -69,6 +69,28 @@ is what closes the "false ON that never clears": a stale completion is not a per
 is a named claim with a one-line resolution - and the same claim read as OFF would have admitted
 a second wave over live work.
 
+### What an operator does with each named claim
+
+A named claim is a one-command escape, not a stall. `node scripts/wave-activity.mjs observe
+<config.json>` prints every claim with its identity and the exact `resolve` command for it; you
+do not have to read the code. `resolve` writes `<git-common-dir>/wa-waves/activity-resolutions.json`
+- never hand-edit that file, and never resolve a claim whose tree a live process is holding
+(`claim_is_corroborated_by_a_local_process`).
+
+| claim | what it means | what to check first | the command |
+| --- | --- | --- | --- |
+| `activity_claim_without_a_registered_worktree` | an open session has a running turn, but the tree it names is missing, unregistered, or mid-release - so the node cannot prove the turn is live | `git worktree list` for the path the claim prints; whether the owning node process is gone (the claim's `boot` versus the boot of the turns that are live now); whether the session ended | `resolve CONFIG SESSION "<evidence>" --run <run_id>` (or `--boot <boot>`, or `--child <child_id>` - the flag `observe` prints) |
+| `child_completion_claim_without_a_live_turn_or_process` | only a `child_completions` row (`dispatching`/`accepted`/`running`) claims the work; there is no turn and no process | that row's state and `boot` in the node store; whether the parent session ended; whether the node restarted since | `resolve CONFIG SESSION "<evidence>" --child <child_id>` |
+| `positive_claim_resolved_by_observation` | a turn reads **ON** (a `steering_runs` row in state `active`) but no process holds its tree: the row proves the turn *started*, not that it is running now | whether anything is really in that tree (a build, an agent, an editor holding files); if a process does hold it, the resolution is refused by name | `resolve CONFIG SESSION "<evidence>" --run <run_id>` |
+| `activity_claim_during_binding_transition_<state>`, `activity_claim_on_a_resolved_binding_<state>`, `in_flight_binding_state_<state>` | a turn on a binding that is mid-release/mid-park, already released/parked, or not `allocated` | the session's `workspace_state` and whether a release/park is genuinely in flight | `resolve CONFIG SESSION "<evidence>" --run <run_id>` |
+
+What resolving does, and does not do: the activity answer becomes `off` (so `create()` stops
+refusing `previous_wave_active`/`previous_wave_activity_unverifiable`), it applies **only** to the
+exact turn/child/boot/tree identity it was written for - a new turn is a new claim - and a process
+that starts holding the tree overrides it again. `produce`/`allocate` are never fenced by an
+idle, unverifiable or completed row; `land`/`admit` are (see below). So the two ways out of a
+named claim are always: the node's own state changes, or one `resolve` with evidence.
+
 ### What each boundary does with it
 
 * `create()` reads **every unfinished row**, not just the newest, and refuses when any is **ON**
@@ -77,13 +99,16 @@ a second wave over live work.
   An idle wave never blocks starting the next one, whatever its bookkeeping says; the verdict of
   the newest row is returned as `previous` and **every** unfinished row as `unfinished`.
 * `checkAdmission()` consults **every unfinished row** and reports the whole set. Producing and
-  allocating are admitted while the wave is ON (that is how lanes work under an umbrella) and
-  while it is OFF or unobservable (so an idle row cannot fence live lanes). A closing freeze and
-  a `complete` row still refuse as before. The repository-level acts - `land` (the merge lane)
-  and `admit` (independent delivery admission) - are refused whenever **any** unfinished row's
-  convergence is not `verified`/`open`, i.e. `unverified` or `legacy-unverified`, with the named
-  reason `wave_convergence_unverified:<wave-id>:<state>:<reason>`. That holds **whether or not
-  agents are working**: a live umbrella does not make an unverified convergence verified.
+  allocating are admitted while the wave is ON (that is how lanes work under an umbrella), while
+  it is OFF or unobservable, and when the newest row is **`complete`**: a completed umbrella ends
+  the wave, it does not fence a repository that is producing. A closing freeze still fences
+  producing and allocating, by name. The repository-level acts - `land` (the merge lane) and
+  `admit` (independent delivery admission) - are refused whenever **any** unfinished row's
+  convergence is not `verified`/`open` (`wave_convergence_unverified:<wave-id>:<state>:<reason>`),
+  and when the newest row is `complete` (`next_wave_requires_fresh_public_start:<id>` plus
+  `:unfinished:<older ids>` when older unfinished rows exist, so a mixed store is visible in the
+  refusal itself). That holds **whether or not agents are working**: a live umbrella does not make
+  an unverified convergence verified.
 * `monitor()` drives the **oldest** unfinished wave (deterministic, one at a time, each row with
   its own budget) and reports the whole unfinished set; `list` prints every row with its derived
   verdict, and `inspect(id)` reports the store's other unfinished rows as `unfinished`. A second
