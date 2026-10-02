@@ -724,7 +724,17 @@ if [ -d "$ROOT/jobs" ] && [ -d "$ROOT/scripts" ]; then
     done
   done
   INSTALL_MIXED="$(cygpath -m "$INSTALL_DIR" 2>/dev/null || printf '%s' "$INSTALL_DIR")"
-  for source in "$ROOT"/jobs/whatsapp-*.json; do
+  # The `onSubagentReturn` hook's own scripts, shipped beside the job that names them and before that job
+  # is put: a definition installed ahead of its script is a job that fails on the machine it was installed
+  # on. They import only Node builtins, so there is no `./lib/...` closure to derive here - unlike the
+  # WhatsApp pipeline above, whose modules are found from the imports it writes.
+  for source in "$ROOT"/scripts/subagent-return-*; do
+    [ -f "$source" ] || continue
+    cp -f "$source" "$INSTALL_DIR/scripts/" \
+      || fail "node installed, but could not ship $(basename "$source")"
+    PIPELINE=$((PIPELINE + 1))
+  done
+  for source in "$ROOT"/jobs/whatsapp-*.json "$ROOT"/jobs/on-subagent-return.json "$ROOT"/jobs/subagent-return-observe.json; do
     [ -f "$source" ] || continue
     JOB_NAME="$(basename "$source" .json)"
     # The job files name their script as PREPARED_BY_INSTALL/... so one file works from a checkout and from

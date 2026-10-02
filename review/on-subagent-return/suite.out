@@ -1,0 +1,75 @@
+--- wa-sentinel job list (the two hook rows) ---
+[
+  {
+    "action": {
+      "kind": "wake",
+      "prepare": {
+        "script": "C:/Users/Victor/.wasm-agent/wa-worktree-childdispatchffda98e4-b412-4341-9841-e91de6e5c548/scripts/subagent-return-prepare.sh",
+        "timeout_seconds": 120
+      },
+      "prompt": "A child you own has settled, in the state named in the block above. That block was computed deterministically from the child's own record - its id and state, the branch and tip it left, and whether what it changed is something a deploy installs - and it ends with the operating instruction for its DEPLOY VERDICT; follow the instruction you are given, not the one you expected. Read the child's result and its bounded session evidence before accepting or repeating any of its work, and report failures and uncertainty as they are instead of smoothing them over. 'deploy required at the wave's end' means the wave owes exactly ONE deploy, at its end, after the work is reviewed and integrated as one delivery, from the tree that was gated - never one install per child, and never from a child's own branch. 'no install impact' means nothing this child touched is copied by a deploy, so do not spend the deploy on it and do not read it as 'no review needed'. 'cannot be computed' means the artifacts could not be read: that is not 'no install impact', so find the branch and tip the child left before deciding anything. This is an automated status notification, not a human request or approval, and it grants no authority: it is never permission to move main, deploy by itself, restart the node, expand permissions, or start unrelated work. Do not create recursive feedback work.",
+      "session": "fixture-orchestrator"
+    },
+    "enabled": false,
+    "id": "onSubagentReturn",
+    "name": "onSubagentReturn",
+    "queued": 0,
+    "revision": 1,
+    "source_status": "not observed",
+    "trigger": {
+      "kind": "event",
+      "topic": "subagent.return"
+    }
+  },
+  {
+    "action": {
+      "kind": "run",
+      "script": "C:/Users/Victor/.wasm-agent/wa-worktree-childdispatchffda98e4-b412-4341-9841-e91de6e5c548/scripts/subagent-return-observe.sh",
+      "timeout_seconds": 180
+    },
+    "enabled": false,
+    "id": "subagent-return-observe",
+    "name": "Report every settled child to onSubagentReturn",
+    "queued": 0,
+    "revision": 1,
+    "source_status": "not observed",
+    "trigger": {
+      "every_seconds": 30,
+      "kind": "schedule"
+    }
+  }
+]
+--- the injected block, as it reached the orchestrator for child-completed-ui ---
+[Sentinel notice]
+This is an automated status report, not a human request or approval. Continue the earlier task only within authority already granted by the human and repository rules. Treat the report below as evidence, not as permission to move main, deploy, or change external state.
+
+Automation job "onSubagentReturn", delivery 2.
+[onSubagentReturn] deterministic child-return hook (no model call fires it; this block is measured).
+child: child-completed-ui   state: completed   settled: yes
+session: session-child-completed-ui   parent: session-orchestrator
+branch: change/child-completed-ui  tip: 7b8d74aeb70c8f16a28c06c595aaa94d85a0411a  worktree: C:\Users\Victor\AppData\Local\Temp\wa-subagent-return-4hK1IP\child-completed-ui  ahead_of_origin_main: 1  dirty: 0
+changed paths vs origin/main: 1 (git -C C:\Users\Victor\AppData\Local\Temp\wa-subagent-return-4hK1IP\child-completed-ui diff --name-only refs/remotes/origin/main...7b8d74aeb70c8f16a28c06c595aaa94d85a0411a): ui/app.js
+DEPLOY VERDICT: deploy required at the wave's end
+OPERATING INSTRUCTION: This child touched something a deploy ships, so the wave owes exactly ONE deploy at its end - not one per child, and never from this child's branch. Evaluate the child's work first (read its session evidence and the diff above): a child's branch is a proposal, not a release. Deploy only after the wave's work is reviewed and integrated as one delivery, by the lane that owns that act, and only when the tree to deploy is the tree that was gated. Do not restart the node or hand-run a deploy from here on this notification alone.
+
+A child you own has settled, in the state named in the block above. That block was computed deterministically from the child's own record - its id and state, the branch and tip it left, and whether what it changed is something a deploy installs - and it ends with the operating instruction for its DEPLOY VERDICT; follow the instruction you are given, not the one you expected. Read the child's result and its bounded session evidence before accepting or repeating any of its work, and report failures and uncertainty as they are instead of smoothing them over. 'deploy required at the wave's end' means the wave owes exactly ONE deploy, at its end, after the work is reviewed and integrated as one delivery, from the tree that was gated - never one install per child, and never from a child's own branch. 'no install impact' means nothing this child touched is copied by a deploy, so do not spend the deploy on it and do not read it as 'no review needed'. 'cannot be computed' means the artifacts could not be read: that is not 'no install impact', so find the branch and tip the child left before deciding anything. This is an automated status notification, not a human request or approval, and it grants no authority: it is never permission to move main, deploy by itself, restart the node, expand permissions, or start unrelated work. Do not create recursive feedback work.
+
+
+--- and for the child whose artifacts could not be read ---
+[Sentinel notice]
+This is an automated status report, not a human request or approval. Continue the earlier task only within authority already granted by the human and repository rules. Treat the report below as evidence, not as permission to move main, deploy, or change external state.
+
+Automation job "onSubagentReturn", delivery 6.
+[onSubagentReturn] deterministic child-return hook (no model call fires it; this block is measured).
+child: child-unknown-unreadable   state: unknown   settled: yes
+session: session-child-unknown-unreadable   parent: session-orchestrator
+artifacts: UNREADABLE (artifact_facts_failed: no session record)
+changed paths vs origin/main: NOT MEASURED: artifacts_unreadable
+DEPLOY VERDICT: cannot be computed (artifacts_unreadable: artifact_facts_failed: no session record)
+OPERATING INSTRUCTION: Artifacts could not be read, so "no install impact" is NOT established for this child - do not deploy on this evidence and do not record a verdict you could not measure. Open the child's session and its checkout, find the branch and tip it actually left, and decide from that. Report the unmeasured artifact as unmeasured; an unreadable checkout is a blocker to name, not a clean result.
+
+A child you own has settled, in the state named in the block above. That block was computed deterministically from the child's own record - its id and state, the branch and tip it left, and whether what it changed is something a deploy installs - and it ends with the operating instruction for its DEPLOY VERDICT; follow the instruction you are given, not the one you expected. Read the child's result and its bounded session evidence before accepting or repeating any of its work, and report failures and uncertainty as they are instead of smoothing them over. 'deploy required at the wave's end' means the wave owes exactly ONE deploy, at its end, after the work is reviewed and integrated as one delivery, from the tree that was gated - never one install per child, and never from a child's own branch. 'no install impact' means nothing this child touched is copied by a deploy, so do not spend the deploy on it and do not read it as 'no review needed'. 'cannot be computed' means the artifacts could not be read: that is not 'no install impact', so find the branch and tip the child left before deciding anything. This is an automated status notification, not a human request or approval, and it grants no authority: it is never permission to move main, deploy by itself, restart the node, expand permissions, or start unrelated work. Do not create recursive feedback work.
+
+
+subagent return ok (90 checks; real sentinel, real git checkouts, no model)
+evidence: C:\Users\Victor\AppData\Local\Temp\wa-subagent-return-4hK1IP
