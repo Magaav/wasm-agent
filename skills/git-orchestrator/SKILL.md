@@ -96,7 +96,7 @@ provenance trailer and pushed. Its branch is its deliverable.
   `wa-sentinel request upgrade` for the node and UI, `wa-sentinel request deploy` when the change is
   in the sentinel itself, each with `--session`/`--prompt`, then read `installed.txt` and
   `deploy-result.json` rather than the request's receipt (`skills/self-update/SKILL.md`).
-- **converge** - an explicitly authorized external finisher: pin exact inputs and owner settlements, reconcile operations/claims and runtime/Orca bindings, retire only proven integrated refs, then verify fresh main-only Git, exact installed source/artifact/skills, functional recovery and complete registries. `scripts/wave-lifecycle.mjs` persists this continuation and refuses next-wave admission on a stale/blocked baseline (see `docs/WAVE-CONVERGENCE.md`). No routine permission ping separates these already authorized stages.
+- **converge** - an explicitly authorized external finisher: pin exact inputs and owner settlements, reconcile operations/claims and runtime bindings, retire only proven integrated refs, then verify fresh main-only Git, exact installed source/artifact/skills, functional recovery and complete registries. `scripts/wave-lifecycle.mjs` persists this continuation; a wave is **ON while any child/agent for the repository is in flight and OFF when none is** (derived from the node's own session/turn records, never from the stored row), so an idle row never blocks starting the next wave while a wave whose convergence could not be verified stays a NAMED, visible state (see `docs/WAVE-CONVERGENCE.md`). No routine permission ping separates these already authorized stages.
 
 ### The lanes and what each may do
 
@@ -321,8 +321,10 @@ no unknown effect is replayed automatically.
 The final receipt proves, with fresh readback: only `main` in remote and shared
 local refs; clean canonical main equal to origin/main; only clean integrated
 released/detached finished trees; no unresolved deliveries, relevant operations,
-claims or owners; runtime/Orca/Git agreement; exact combined full gate tree/log
-hash and counted skips; installed accepted main/artifact/skills, healthy runtime
+claims, owners or unowned/unreconciled managed workspaces; Git/runtime agreement
+over the node's OWN inventory (no third-party CLI is required or consulted); exact
+combined full gate tree/log hash and counted skips; installed accepted
+main/artifact/skills, healthy runtime
 and verified functional recovery. Preserve canonical ignored build caches.
 The next wave re-verifies this baseline; a previous passing receipt alone cannot
 admit it. The manifest and proof adapter contracts are in
@@ -334,7 +336,9 @@ Report integration (exact accepted main/review/combined gate and skips), deploym
 (exact installed source/artifact/skills and functional evidence), and convergence
 (main-only refs, actual worktrees/registries, operation/claim/owner state and durable
 receipt). A blocked wave retains an owner, exact reason and recovery path; it is
-not called complete or left silently stalled. A branch delivery can be complete
+not called complete or left silently stalled, and while it is idle it does not
+fence producing or allocating - only landing and independent delivery admission
+stay refused until its convergence is verified. A branch delivery can be complete
 while independent review/merge/deploy/convergence remain owned by the coordinator.
 
 ### What is measured, and what is policy

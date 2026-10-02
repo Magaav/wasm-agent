@@ -2,27 +2,19 @@
 // Production entrypoint: one registered durable wave store per shared repository.
 // A fresh arbitrary directory cannot waive next-wave admission or a closing freeze.
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import {spawnSync} from 'node:child_process';
 import {DatabaseSync} from 'node:sqlite';
 import {fileURLToPath} from 'node:url';
 import {create,inspect,advance} from './wave-lifecycle.mjs';
+import {waveActivity,activitySource,isolatedRepository} from './lib/wave-activity.mjs';
 const hash=x=>crypto.createHash('sha256').update(x).digest('hex');
 const key=x=>{const p=path.resolve(x).replaceAll('\\','/');return process.platform==='win32'?p.toLowerCase():p;};
 function git(repo,...args){const r=spawnSync('git',['-C',repo,...args],{encoding:'utf8',windowsHide:true});if(r.status!==0)throw Error('wave_git_identity_unavailable');return r.stdout.trim();}
 export function location(repo){return path.join(fs.realpathSync(git(repo,'rev-parse','--path-format=absolute','--git-common-dir')),'wa-waves');}
 export function isolated(repo) {
-  const common=git(repo,'rev-parse','--path-format=absolute','--git-common-dir');
-  const origin=spawnSync('git',['-C',repo,'remote','get-url','origin'],{encoding:'utf8',windowsHide:true});
-  // A repository with no `origin` cannot be the shared integration repository, so it
-  // is a throwaway fixture whatever directory it lives in. A fixture that remaps TMPDIR
-  // (to isolate its own home) is no longer under the process temporary root, so the
-  // temp-dir heuristic alone is too narrow. Production always has an `origin`, where the
-  // wave authority guard still applies.
-  if(origin.status!==0)return true;
-  return key(common).startsWith(key(os.tmpdir())+'/');
+  return isolatedRepository(repo);
 }
 function registration(repo) {
   const store=location(repo),file=path.join(store,'registration.json');
@@ -42,12 +34,22 @@ export function checkAdmission(repo,{phase='produce'}={}) {
     const row=registration(repo),db=new DatabaseSync(path.join(row.store,'waves.sqlite'),{readOnly:true});
     let current;try{current=db.prepare('SELECT * FROM waves ORDER BY created_at DESC LIMIT 1').get();}finally{db.close();}
     if(!current)throw Error('registered_wave_not_started');
-    if(phase==='observe')return {ok:true,wave_verified:true,wave_id:current.id,store:row.store,phase};
+    // THE DERIVED ON/OFF, the same fact `create` uses: the wave is on while any child/agent for
+    // this repository is in flight, and off when none is. It is read from the node's own
+    // inventory, never from the durable row's bookkeeping.
+    const verdict=waveActivity(activitySource(JSON.parse(current.manifest)),current);
+    const named={activity:verdict.activity,convergence:verdict.convergence,runtime_state:verdict.runtime_state,reason:verdict.reason||current.reason||''};
+    if(phase==='observe')return {ok:true,wave_verified:true,wave_id:current.id,store:row.store,phase,...named};
     if(current.state==='complete')throw Error('next_wave_requires_fresh_public_start');
-    if(current.state==='blocked')throw Error('wave_blocked:'+current.reason);
     const freeze=path.join(row.store,'freeze.json');
     if(fs.existsSync(freeze) && phase!=='land')throw Error('wave_closing_frozen');
-    return {ok:true,wave_verified:true,wave_id:current.id,store:row.store,phase};
+    if(verdict.activity==='on')return {ok:true,wave_verified:true,wave_id:current.id,store:row.store,phase,...named};
+    // OFF. An idle wave must not fence the work that keeps the repository moving: producing and
+    // allocating keep being admitted (that is how lanes work under an idle umbrella), while the
+    // repository-level acts of landing and independent delivery admission stay refused while the
+    // convergence is unverified - and the refusal names that state instead of hiding it.
+    if(current.state==='blocked' && ['land','admit'].includes(phase))throw Error('wave_convergence_unverified:'+current.reason);
+    return {ok:true,wave_verified:true,wave_id:current.id,store:row.store,phase,...named};
   }catch(e){return {ok:false,wave_verified:false,reason:e.message};}
 }
 export function register(repo,configFile,attestationFile) {

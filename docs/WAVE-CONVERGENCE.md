@@ -1,5 +1,89 @@
 # Durable evolution wave closure
 
+## The wave is ON while agents work, OFF when they do not
+
+The wave's ON/OFF is a **derived** fact, not a stored one. The durable row keeps
+bookkeeping (`pending`/`running`/`blocked`/`complete`) and a receipt, but it is never
+evidence that anyone is working: a crashed finisher leaves `running` behind with nothing
+running, and a row left `pending` says nothing about whether a lane is live.
+
+> The wave is ON while any child/agent **for this repository** is in flight, and OFF when
+> none is. Every time an agent is working the wave is on; when all are off the wave is off.
+
+`scripts/lib/wave-activity.mjs` reads that fact from the node's OWN records - never from a
+durable row and never from a third-party CLI:
+
+| source | what it proves |
+| --- | --- |
+| `memory.db` `sessions` (`worktree`, `workspace_required`, `workspace_state`, `workspace_branch`, `workspace_source_path`, `workspace_start_state`, `ended_at`) | who was given which tree, whether that binding is still allocated/parked/released, and the runtime owner identity (`runtime:<session>:<boot>`) |
+| `memory.db` `steering_runs` / `child_completions` | the node's own record of a turn running now (or a child dispatched and not settled) |
+| `git worktree list --porcelain` of the repository | what Git itself believes: real registrations, tips, branches, detached/locked/prunable |
+| a local holder probe (Win32 CIM / `ps`) | corroboration only: a process naming a live agent's tree. It never vetoes an agent, because a turn is between process spawns more often than a lane is idle |
+
+An agent counts as **in flight** when its session is still open (`ended_at IS NULL`), its
+binding is not released/parked, the node records a running turn (or an unsettled child) for
+it, and the tree it runs in is really there and really registered. A turn left behind by a
+tree that has gone is reported as `stale_in_flight_turn_without_a_registered_worktree`, not
+counted as activity. A binding that is neither resolved nor in flight is a **leftover**
+(`managed_binding_not_reconciled`): work a retirement plan may still be settling, reported
+separately from a hard inconsistency.
+
+`waveActivity()` reports, for any row:
+
+| field | values | meaning |
+| --- | --- | --- |
+| `activity` | `on` \| `off` \| `unverifiable` | the ON/OFF fact. `unverifiable` means the node records could not be read at all - it is named, never guessed |
+| `convergence` | `verified` \| `unverified` \| `legacy-unverified` \| `open` | whether the wave's own completion was proved |
+| `runtime_state` | `complete` \| `active` \| `unverified` \| `idle` | what the wave reports. `active` is only ever derived from real activity |
+
+A wave whose convergence genuinely could not be verified is a **named** state (`blocked`
+durably, `unverified` in the derived report, with its exact reason - an unknown effect, an
+unresolved claim, a missing full-gate receipt). It is never silently treated as complete.
+
+### What each boundary does with it
+
+* `create()` refuses only when the previous wave is **ON** (`previous_wave_active:<id>`). An
+  idle wave never blocks starting the next one, whatever its bookkeeping says; its named
+  convergence is recorded in the new wave's creation event and returned as `previous`.
+  When no activity source can be resolved at all it fails closed
+  (`previous_wave_activity_unverifiable`), and production `start` requires a concrete source.
+* `checkAdmission()` admits producing and allocating while the wave is ON (that is how lanes
+  work under an umbrella) and while it is OFF (`produce`/`allocate` keep being admitted, so an
+  idle row cannot fence live lanes). A closing freeze and a `complete` row still refuse as
+  before. The repository-level acts - `land` (the merge lane) and `admit` (independent
+  delivery admission) - stay refused while the convergence is unverified, with the named
+  reason `wave_convergence_unverified:<reason>`.
+* `inspect()` never reports an active state with nothing running: a durable `running` row
+  whose owner is provably gone and whose inventory is empty is reported as `idle`, with the
+  durable value preserved as `bookkeeping_state`.
+* The one-row-per-repository unique index (`active_repo`) is **replaced** by a lookup index.
+  It encoded "at most one unfinished wave per repository", which is exactly the rule that is
+  gone; a SQL index cannot see whether agents are working. The refusal moved into `create()`,
+  which reads real activity. `scripts/wave-migrate.mjs` reports this and can restore it.
+
+## Migration of a legacy durable row (explicit, non-destructive, reversible)
+
+A live example sat in the shared store: `wave-2026-10-02-subagent-chat-and-enforcement` in
+`pending` with its three steps never run, although no agent was working and all its work was
+in `main`. Under the derived rule that row fences nothing, but it is still a wave whose
+convergence was never verified, and that stays visible.
+
+```text
+node scripts/wave-migrate.mjs plan   <store-dir> [wave-id]
+node scripts/wave-migrate.mjs apply  <store-dir> <wave-id> [actor]
+node scripts/wave-migrate.mjs revert <store-dir> <wave-id>
+```
+
+`apply` moves **no original column**: `state`, `reason`, `receipt`, `owner`, `created_at`,
+`updated_at`, `manifest` and every step row are left exactly as they were. It records the
+exact original bookkeeping in a new additive `legacy` column and in the append-only event
+journal, and writes `migration.json` beside the store (never overwritten). The row then
+reports `convergence: legacy-unverified`, which is a named state: its steps never ran and its
+convergence was never verified. `revert` refuses if anything moved since the migration,
+clears `legacy`, removes the record and (when it still can) restores the `active_repo` index -
+the original columns were never touched, so the reversal is exact by construction. Admission
+keeps admitting producing and allocating throughout.
+
 ## Sanctioned entry and repaired proof boundaries
 
 Use `wave-entry.mjs register <canonical-main> <config> <bootstrap-admission>`
@@ -94,15 +178,21 @@ of main cannot hide an unmerged delivery. The binding remains verifiable after
 its branch is retired. Final read-only observation is distinct from admitting
 new work under a closing freeze.
 
-Owner discovery pages all orchestration runs/workers, inventories every current
-Orca terminal/card for the repository, and requires positive current actor state.
-Unknown activity, orphaned/reused/taken-over panes and incomplete host/page scope
-are blockers. `wave-adapter.mjs freeze <config> <issuer> <reviewer>` records current
-pane incarnations/actor generations and exact tree-owner IDs after real combined
-operation/claim safety. Retirement rechecks that freeze. Runtime allocations now
-record native executor boot/process/creation identity; legacy path-only ownership
-is not silently promoted. Freeze is a cooperative repository admission fence,
-not an OS sandbox against arbitrary privileged file writes.
+Ownership and registry come from OUR OWN inventory, never from a third party. `ownerInventory`
+reads the node's managed session workspaces and their recorded state, the real Git worktree
+list, and the node's own turn/process records (`scripts/lib/wave-activity.mjs`): no unowned or
+unresolved leftovers, exact tree/tip agreement, and parked/released bindings reconciled. A
+registered managed tree with no session binding is `unowned_worktree_registration`; a binding
+whose tree is missing, whose parked shape is not a detached exact tip, or whose transition
+(`releasing`/`parking`/`*_unknown`) never settled is refused by name. If an Orca binary happens
+to exist it may be used **only as an optional viewer** (`orca_view: true`), recorded as
+advisory evidence with `decision_input: false`; its absence changes no verdict, and no proof
+path requires it. `wave-adapter.mjs freeze <config> <issuer> <reviewer>` records the current
+session/turn identity and exact tree-owner IDs after real combined operation/claim safety;
+retirement rechecks that freeze (owner identity, the session's recorded branch, the exact tip)
+before any effect. Runtime allocations record native executor boot/process/creation identity;
+legacy path-only ownership is not silently promoted. Freeze is a cooperative repository
+admission fence, not an OS sandbox against arbitrary privileged file writes.
 
 Concrete adapters are `owner`, `owners`, `dependencies`, `safety`, `operations`,
 `runtime-retire`, `reconcile`, and `registry-post`. Hosting dependencies use complete
@@ -110,11 +200,11 @@ GitHub pull pages bound to the configured origin namespace; actual local Git
 transport has no hosting PR namespace and is labelled as such. Missing hosting
 discovery is a refusal. Managed runtime removal/parking invokes real Lua under
 the session resource fence with expected immutable HEAD, before the mutation.
-Orca removal requires an exact detached owned tree so its API cannot delete an
-advanced feature ref implicitly; parking updates and refreshes the real card.
-Git/runtime/Orca postconditions are checked separately. Missing-tree ordinary
-release now reacquires the explicit reconciliation fence and checks relevant
-operations and branch ancestry; filesystem absence does not bypass either.
+Registry postconditions are read from Git's own worktree list and the session
+binding: a removed tree is unregistered and its binding `released`; a parked tree
+is a real detached exact tip with an empty branch and a `parked` binding. The
+`retire` plan's owner fence is required before any effect, and only then - a target
+whose binding is already released or parked has nothing left to settle.
 
 ## External legacy allocation-safety bridge
 
@@ -336,26 +426,30 @@ attribution and failed/skipped installation checks block completion. The default
 
 | Config | Purpose |
 | --- | --- |
-| `repo`, `data`, `install`, `orca_repo_id` | canonical source and actual runtime/registry roots |
-| `orchestration_run_ids`, optional `orca` | complete explicitly inventoried worker ownership |
+| `repo`, `data`, `install` | canonical source and actual runtime roots. `data` is the node runtime root the activity/ownership inventory reads; there is no third-party registry id to configure |
+| optional `activity` | an explicit activity source for a fixture or a non-default runtime (`{data, process_probe}`); production resolves it from the verifier config |
+| optional `orca_view` | `true` makes an existing Orca binary an optional viewer. Advisory evidence only; never a decision input, never required |
 | `delivery_store` | existing durable delivery records, independent review and landed ancestry |
 | `verify_install_argv` | sanctioned verifier `--json`, zero failures/skips required |
 | `functional_receipt` | accepted-main two-window recovery evidence with `scope:"two-window-recovery"`, `checks`, `log`, `log_sha256`, `ok` |
 | optional `health_url` | fresh health, default local 8799 |
 
 The adapters read index/claims/ledger SQLite read-only, refuse stale allocated
-bindings, compare actual Orca/Git branches and detached parked evidence, verify
-installed clean-built source and binary hash, require the sanctioned installation
-and functional recovery evidence, and fetch health. Their config must inventory
-all managed owners; absence from a partial roster is not settlement. A fresh
-`WA_WAVE_TARGET` bounds operation/claim safety checks during one retirement;
-final checks without a target inventory the whole managed runtime. Original
-diagnostics and transcripts are not rewritten by any verifier.
+bindings, compare the real Git worktree list against the session bindings and
+detached parked evidence, verify installed clean-built source and binary hash,
+require the sanctioned installation and functional recovery evidence, and fetch
+health. Their config must inventory all managed owners; absence from a partial
+roster is not settlement. A fresh `WA_WAVE_TARGET` bounds operation/claim safety
+checks during one retirement; final checks without a target inventory the whole
+managed runtime. Original diagnostics and transcripts are not rewritten by any
+verifier. The `registries` verifier folds leftovers in as well: a wave cannot be
+complete while this repository still holds an unreconciled managed workspace.
 
 ## Evidence and limits
 
 `wave-audit.mjs <repo> <data> <new-report>` creates a non-overwriting read-only audit
-of Git refs/trees/dirt, operation/original hashes, claims, bindings, Orca and health.
+of Git refs/trees/dirt, operation/original hashes, claims, bindings, health and - only when
+`WA_WAVE_ORCA_VIEW=1` asks for it - an advisory Orca view that is never a decision input.
 The 2026-10-01 recovery audit observed 72 Git trees, 35 clean integrated candidates
 still needing positive owner settlement, 36 dirty/ignored trees, four unmerged
 tips, 100,888 operation records, two live operations, 76 uncertain manually edited
@@ -378,10 +472,19 @@ retirement. Stand-in observation receipts are not production deployment proof.
 full-gate receipt schemas. `test-wave-restart.mjs` exercises bounded public
 continuation in external processes. `test-wave-public.mjs` ships the actual entry,
 registers a private local-transport repository, reconciles an exactly drained
-native claim, removes a native session workspace, parks and refreshes a real Orca
-card, and proves main-only local/remote refs. It then requires durable blocking
-because full application gate/deployment evidence is absent; this is contract
-closure proof, not a production completed-wave receipt.
+native claim, removes a native session workspace, parks a second managed session
+workspace through the node's own runtime reconciliation, and proves main-only
+local/remote refs - with no third party anywhere in the fixture. It then requires
+durable blocking because full application gate/deployment evidence is absent; this
+is contract closure proof, not a production completed-wave receipt.
+`test-wave-derived-state.mjs` proves the derived rule on real private Git and a real
+node store: zero live children cannot block the next wave, a live child reports ON, a
+`running` row with nothing running is never reported active, an unverifiable
+convergence stays a named state, and the legacy row's migration is exact and
+reversible. `test-wave-no-orca.mjs` runs the ownership and registry proofs with no
+`orca` reachable on `PATH` and again with a broken one, requires the same verdicts,
+and requires the same proofs to still refuse an unowned tree - so the assertions
+cannot be silently skipped when it is absent.
 
 Risk: explicitly configured local proof adapters and external operator evidence
 remain trusted. These are cooperative evolution safeguards, not an OS security
