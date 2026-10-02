@@ -1,0 +1,87 @@
+?? review/ui-residues/
+== M1: margin-top on the pane's controls alone (the residue the delivery names) ==
+diff --git a/ui/style.css b/ui/style.css
+index 0ea2651..3a0d46a 100644
+--- a/ui/style.css
++++ b/ui/style.css
+@@ -1086,3 +1086,5 @@ wa-tasks summary { cursor: pointer; padding: var(--space); }
+ .task-card[data-state="unknown"] .task-state, .task-card[data-state="failed"] .task-state { color: var(--warn); }
+ .task-actions { display: flex; flex-wrap: wrap; gap: var(--gap); }
+ .task-evidence { white-space: pre-wrap; overflow-wrap: anywhere; padding: var(--pad); background: var(--panel-2); }
++
++wa-agent-session .chat-control { margin-top: 4px; }
+  M1 margin-top on the pane's controls alone
+  test-ui.ps1 exit=1 verdict:   FAIL UI FAIL: no rule except the shared ones may state anything at all about a footer control: a margin, a letter-spacing or any other property set on one control alone is not the shared control, saw ["main append-file -&gt; rules[] properties[]","main action -&gt; rules[] properties[]","child append-file -&gt; rules[wa-agent-session .chat-control[margin-top]] properties[margin-top]","child action -&gt; rules[wa-agent-session .chat-control[margin-top]] properties[margin-top]"] ;; the same kind of control must compute the same style on both surfaces, property for property - an inline style on one alone is not the shared control, saw {"main vs child action":["margin-block-start(0px vs 4px)","margin-top(0px vs 4px)"],"main vs child append-file":["margin-block-start(0px vs 4px)","margin-top(0px vs 4px)"]}
+== M2: letter-spacing on the pane's controls alone (the other named residue) ==
+diff --git a/ui/style.css b/ui/style.css
+index 0ea2651..df82b31 100644
+--- a/ui/style.css
++++ b/ui/style.css
+@@ -1086,3 +1086,5 @@ wa-tasks summary { cursor: pointer; padding: var(--space); }
+ .task-card[data-state="unknown"] .task-state, .task-card[data-state="failed"] .task-state { color: var(--warn); }
+ .task-actions { display: flex; flex-wrap: wrap; gap: var(--gap); }
+ .task-evidence { white-space: pre-wrap; overflow-wrap: anywhere; padding: var(--pad); background: var(--panel-2); }
++
++wa-agent-session .chat-control { letter-spacing: .4px; }
+  M2 letter-spacing on the pane's controls alone
+  test-ui.ps1 exit=1 verdict:   FAIL UI FAIL: no rule except the shared ones may state anything at all about a footer control: a margin, a letter-spacing or any other property set on one control alone is not the shared control, saw ["main append-file -&gt; rules[] properties[]","main action -&gt; rules[] properties[]","child append-file -&gt; rules[wa-agent-session .chat-control[letter-spacing]] properties[letter-spacing]","child action -&gt; rules[wa-agent-session .chat-control[letter-spacing]] properties[letter-spacing]"] ;; the same kind of control must compute the same style on both surfaces, property for property - an inline style on one alone is not the shared control, saw {"main vs child action":["inline-size(55px vs 57px)","letter-spacing(normal vs 0.4px)","perspective-origin(27.5px 15px vs 28.5px 15px)","transform-origin(27.5px 15px vs 28.5px 15px)","width(55px vs 57px)"],"main vs child append-file":["letter-spacing(normal vs 0.4px)"]}
+== M3: the busy-unknown outcome removed (the false alarm comes back) ==
+diff --git a/ui/app.js b/ui/app.js
+index 68f2ef8..9fa4dc9 100644
+--- a/ui/app.js
++++ b/ui/app.js
+@@ -2212,7 +2212,7 @@ function runStanding(health, view = {}) {
+   // identify it" is keep waiting - never "over". The node is not idle, so the run has not been observed
+   // to end, and a page may not end a stream it cannot contradict.
+   const worker = String(health?.worker || "");
+-  if (worker && worker !== "alive") return "busy-unknown";
++  if (false && worker && worker !== "alive") return "busy-unknown";
+   return "over";
+ }
+ 
+  M3 busy-unknown removed
+  test-ui.ps1 exit=1 verdict:   FAIL UI FAIL: a busy node whose thread identity this window cannot match must not be reported as the run being over, saw:  That thread is unchanged and still listed in the engine view.wasm-agentthe node is no longer running this run (busy). Checking the recorded result for recovery.the local node is not answering - start it with `wa ui`0:00 ;; and it must say what it actually knows instead, saw: the local node is not answering - start it with `wa ui`
+== M4: the gate parser back to the prefix alone ==
+diff --git a/scripts/gate-check.mjs b/scripts/gate-check.mjs
+index f2acd52..4994e93 100644
+--- a/scripts/gate-check.mjs
++++ b/scripts/gate-check.mjs
+@@ -23,7 +23,7 @@ export function checkVerdict(check, exit, output) {
+     // and the FAIL guard below are what reject a mangled or repeated report.
+     const prefix=/^\s*ok   UI structure\b/;
+     const subjects=[/mid-run reload/i,/startup recovery/i];
+-    const markers=text.split(/\r?\n/).filter(line=>prefix.test(line)&&subjects.some(subject=>subject.test(line)));
++    const markers=text.split(/\r?\n/).filter(line=>prefix.test(line));
+     return {ok:exit===0&&markers.length===1&&!/^\s*(?:FAIL(?:[:\s]|$)|ALL FAIL(?:[:\s]|$)|DEPENDENCY_MISSING)/m.test(text),reason:'browser_terminal_verdict_required'};
+   }
+   if(check.verdict==='proof') {
+  M4 prefix-only parser
+  node scripts/test-gate-check.mjs exit=1
+  node scripts/gate-check.mjs run ui-browser exit=0
+
+Node.js v24.19.0
+== M5: a rule the audits cannot enumerate - a pseudo-element on the pane's controls alone ==
+diff --git a/ui/style.css b/ui/style.css
+index 0ea2651..5cb956f 100644
+--- a/ui/style.css
++++ b/ui/style.css
+@@ -1086,3 +1086,5 @@ wa-tasks summary { cursor: pointer; padding: var(--space); }
+ .task-card[data-state="unknown"] .task-state, .task-card[data-state="failed"] .task-state { color: var(--warn); }
+ .task-actions { display: flex; flex-wrap: wrap; gap: var(--gap); }
+ .task-evidence { white-space: pre-wrap; overflow-wrap: anywhere; padding: var(--pad); background: var(--panel-2); }
++
++wa-agent-session .chat-control::before { content: "!"; color: red; letter-spacing: 6px; }
+  M5 pseudo-element glyph on the pane's controls alone (expected to SLIP)
+  test-ui.ps1 exit=1 verdict:   FAIL UI FAIL: the same kind of control must compute the same style on both surfaces, property for property - an inline style on one alone is not the shared control, saw {"main vs child action":["inline-size(55px vs 67.6094px)","perspective-origin(27.5px 15px vs 33.7969px 15px)","transform-origin(27.5px 15px vs 33.8047px 15px)","width(55px vs 67.6094px)"],"main vs child append-file":[]}
+  M5 coverage probe exit=0
+  "paneBefore": {
+  "mainBefore": {
+  "paneLetterSpacing": "normal",
+  "paneMarginTop": "0px",
+== M6: the same glyph on the MAIN control instead (the audits' own direction) ==
+  M6 pseudo-element glyph on the main control alone
+  test-ui.ps1 exit=0 verdict:   ok   UI structure, mid-run reload, startup recovery, the inspect window, and a view window
+
+clean tree after the run:
+?? review/ui-residues/
+suites that passed: 2   that failed: 5

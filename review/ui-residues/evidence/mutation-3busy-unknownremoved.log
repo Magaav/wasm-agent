@@ -1,0 +1,3 @@
+M3 busy-unknown removed
+exit=1
+  FAIL UI FAIL: a busy node whose thread identity this window cannot match must not be reported as the run being over, saw:  That thread is unchanged and still listed in the engine view.wasm-agentthe node is no longer running this run (busy). Checking the recorded result for recovery.the local node is not answering - start it with `wa ui`0:00 ;; and it must say what it actually knows instead, saw: the local node is not answering - start it with `wa ui`

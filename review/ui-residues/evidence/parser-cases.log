@@ -1,0 +1,28 @@
+ACCEPTED (as stated)  the real verdict line scripts/test-ui.ps1 prints
+           "  ok   UI structure, mid-run reload, startup recovery, the inspect window, and a view window"  reason=browser_terminal_verdict_required
+ACCEPTED (as stated)  a reordered honest sentence
+           "  ok   UI structure, startup recovery and mid-run reload, with the inspector window and a view window"  reason=browser_terminal_verdict_required
+refused  (as stated)  the delivered negative case (names no stage)
+           "  ok   UI structure, and then something else entirely"  reason=browser_terminal_verdict_required
+refused  (as stated)  the bare prefix
+           "  ok   UI structure"  reason=browser_terminal_verdict_required
+ACCEPTED (as stated)  MY CASE: the sentence denies the stage it is being read as proof of
+           "  ok   UI structure, but startup recovery was skipped and the mid-run reload never ran"  reason=browser_terminal_verdict_required
+ACCEPTED (as stated)  MY CASE: a false stage subject after the prefix
+           "  ok   UI structure, startup recovery of another check entirely"  reason=browser_terminal_verdict_required
+ACCEPTED (as stated)  MY CASE: a subject inside a wordier sentence with no stage of this check
+           "  ok   UI structure, and a mid-run reload of a different page"  reason=browser_terminal_verdict_required
+refused  (as stated)  another check's ok line
+           "  ok   Engine structure is fine"  reason=browser_terminal_verdict_required
+refused  (as stated)  the prefix with a FAIL line anywhere
+           "  ok   UI structure, mid-run reload, and startup recovery\n  FAIL evidence"  reason=browser_terminal_verdict_required
+refused  (as stated)  the verdict twice
+           "  ok   UI structure, mid-run reload, startup recovery\n  ok   UI structure, mid-run reload, startup recovery"  reason=browser_terminal_verdict_required
+refused  (as stated)  a non-zero exit with the verdict present
+           "  ok   UI structure, mid-run reload, and startup recovery"  reason=browser_terminal_verdict_required
+ACCEPTED (as stated)  MY CASE: a lowercase fail line and exit 0
+           "  ok   UI structure, mid-run reload, startup recovery\n  fail: the inspector stage did not run"  reason=browser_terminal_verdict_required
+ACCEPTED (as stated)  MY CASE: DEPENDENCY_MISSING lowercase, exit 0
+           "  ok   UI structure, mid-run reload, startup recovery\n  dependency_missing: no browser"  reason=browser_terminal_verdict_required
+
+13 lines: 0 disagreed with the stated expectation

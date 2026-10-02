@@ -1,0 +1,19 @@
+stage C:\Users\Victor\AppData\Local\Temp\wa-probe-GuoktX  browser msedge.exe  exit 0  dom 23110 bytes
+---- probe result ----
+{
+  "probe": "smoke",
+  "stage": "sleeping",
+  "ticks": 5,
+  "slept": 5,
+  "thread": "aaaaaaaa-0000-0000-0000-000000000001",
+  "watch": "function",
+  "app": "function",
+  "input": true,
+  "busy": false,
+  "calls": 7
+}
+---- browser stderr (first 800 chars) ----
+[16428:3360:1002/203528.442:ERROR:components\edge_ess\vbs_encoder.cc:100] LoadEnclaveImageW failed, error code 577
+[16428:3360:1002/203528.768:ERROR:components\edge_auth\edge_auth_errors.cc:553] EDGE_IDENTITY: Image Fetch FAILED: Error: Primary Error: kAccountImageFetchFailure, Secondary Error: kUnspecified, Platform error: 0, Error string: [empty]
+
+

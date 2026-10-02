@@ -1,0 +1,13 @@
+diff --git a/ui/app.js b/ui/app.js
+index 68f2ef8..9fa4dc9 100644
+--- a/ui/app.js
++++ b/ui/app.js
+@@ -2212,7 +2212,7 @@ function runStanding(health, view = {}) {
+   // identify it" is keep waiting - never "over". The node is not idle, so the run has not been observed
+   // to end, and a page may not end a stream it cannot contradict.
+   const worker = String(health?.worker || "");
+-  if (worker && worker !== "alive") return "busy-unknown";
++  if (false && worker && worker !== "alive") return "busy-unknown";
+   return "over";
+ }
+ 

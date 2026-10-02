@@ -1,0 +1,59 @@
+ui/app.js sha256 f0863052e89b7d5d9a465f68ddb5ca7c2f9b78a9468dde0919f59d0df431cec5  (5683 lines)
+  activeRun: 5 line(s), sha256 808bee3b02d15c1a33ece32017fce7109b778edb667a430a720e109a9895e457
+  threadOfRun: 4 line(s), sha256 3d689a4f2081f07c631c70703d52c160ad0373514e72fed6c232df8bc4d0c30f
+  runStanding: 28 line(s), sha256 2039141ee078ca22c1818055f5c71687cf30af48a5cd9790e00982ae81b258b6
+
+busy-unknown matches-expected  incident: busy node, a thread it cannot match to this conversation, no run id
+             -> KEEPS the stream; the owner's shape: the fix must keep waiting
+over         matches-expected  negative control (non-vacuity): idle node, no thread, no run of this conversation
+             -> ENDS the stream; a genuinely over run must still be reported
+finished     matches-expected  finished: this window watched the run end
+             -> ENDS the stream; silent: nothing to say about an answered run
+over         OBSERVED          INCIDENT + worker "alive" (the same node inside a host call: the aggregate is the beat age)
+             -> ENDS the stream; a node-thread is executing POST /chat for another conversation right now; worker "alive" is the aggregate for a thread that beat inside the last second (serve.rs health_body), so the SAME run answers "busy" or "alive" depending on which side of the beat the poll lands
+over         OBSERVED          INCIDENT + worker "alive" + no node_threads at all (a member-less /health body)
+             -> ENDS the stream; indistinguishable from the negative control: the check cannot be non-vacuous and safe here
+over         OBSERVED          INCIDENT + worker missing (a node older than the field)
+             -> ENDS the stream; the last branch treats "no word" as idle
+busy-unknown matches-expected  INCIDENT + worker "stalled"
+             -> KEEPS the stream; keeps waiting
+running      matches-expected  a node-thread on this conversation
+             -> KEEPS the stream; activeRun
+running      matches-expected  no thread on this conversation, but a thread carrying the accepted run id
+             -> KEEPS the stream; threadOfRun
+running      matches-expected  the accepted run id is on current, not on a node_thread
+             -> KEEPS the stream; threadOfRun reads current too
+running      matches-expected  the accepted run is in run_ids as running
+             -> KEEPS the stream; the node's own record
+running      matches-expected  the accepted run is in run_ids as not_started
+             -> KEEPS the stream; queued counts as live
+over         matches-expected  the accepted run is in run_ids as completed
+             -> ENDS the stream; correct: this run ended
+over         matches-expected  the accepted run is in run_ids as unknown (evidence lost)
+             -> ENDS the stream; the recovery notice's real job
+running      matches-expected  a live run of this conversation the window did not submit
+             -> KEEPS the stream; the third `running` route
+over         OBSERVED          the SAME live run, but it was in the pre-submit baseline (`submitted`)
+             -> ENDS the stream; the baseline exists to tell its queued id from an older run; a RESUMED run (send with resumeSeq) is itself in the baseline, so the node's list saying "running" is discarded and the worker word decides
+busy-unknown matches-expected  the same, worker busy
+             -> KEEPS the stream; saved only by the worker word
+over         OBSERVED          run id reuse: a FOREIGN conversation's run carries the accepted number, terminal
+             -> ENDS the stream; the lookup matches the number only, not the conversation; run ids come from the journal (or, with no journal, from a counter that restarts at 0 per process), so a number is not proof of ownership across a restart
+running      matches-expected  run id reuse, the foreign run live
+             -> KEEPS the stream; safe direction
+running      matches-expected  thread id reused: the busy thread carries a stale session (not this conversation)
+             -> KEEPS the stream; threadOfRun ignores the session, so this is saved by the run id alone
+busy-unknown matches-expected  two conversations of the same window: watching B, A is busy
+             -> KEEPS the stream; the fix's own design case
+over         OBSERVED          two conversations of the same window: watching B, A is busy, worker alive
+             -> ENDS the stream; the same hole as the incident row
+busy-unknown UNEXPECTED        a stalled worker, this conversation's thread present and carrying the run id
+             -> KEEPS the stream; the old code treated stalled+my-thread as NOT running and printed the notice; now a run the node calls stalled is never reported over by this check
+running      matches-expected  a stalled worker, this conversation's thread present, no run id, run_ids live
+             -> KEEPS the stream; same narrowing
+busy-unknown matches-expected  no run_ids at all (an older node), worker busy, no thread
+             -> KEEPS the stream; safe
+over         OBSERVED          no run_ids at all (an older node), worker alive, no thread
+             -> ENDS the stream; the negative control again
+
+26 shapes: 1 disagreed with their stated expectation, 7 of them END a stream the page cannot contradict
