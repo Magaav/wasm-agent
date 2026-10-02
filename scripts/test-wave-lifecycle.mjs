@@ -5,6 +5,7 @@ import path from 'node:path';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import {spawn,spawnSync} from 'node:child_process';
+import {DatabaseSync} from 'node:sqlite';
 import {create,advance,inspect,reconcile,resume,verify,gitBaseline} from './wave-lifecycle.mjs';
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'wa-wave-test-'));
 let checks=0;
@@ -33,6 +34,12 @@ function fixture(name) {
     if(mode==='sleep') { fs.writeFileSync(process.argv[3],String(process.pid)); setTimeout(()=>console.log(JSON.stringify({ok:true})),60000); }
     if(mode==='claim') console.log(JSON.stringify({ok:true,main:process.env.WA_WAVE_MAIN,wave_id:process.env.WA_WAVE_ID,complete:true,unresolved:['uncertain-client']}));`);
   const effects=path.join(executor,'effects');
+  // A private node runtime store: the sessions/steering_runs/child_completions shape the real
+  // `memory.db` has, with nothing in flight. The activity proof reads exactly this.
+  const data=path.join(dir,'data');fs.mkdirSync(data,{recursive:true});
+  const nodeStore=new DatabaseSync(path.join(data,'memory.db'));
+  nodeStore.exec('CREATE TABLE sessions(id TEXT PRIMARY KEY,worktree TEXT NOT NULL DEFAULT \'\',workspace_required INTEGER NOT NULL DEFAULT 0,workspace_state TEXT NOT NULL DEFAULT \'unbound\',workspace_branch TEXT NOT NULL DEFAULT \'\',workspace_base_commit TEXT NOT NULL DEFAULT \'\',workspace_source_path TEXT NOT NULL DEFAULT \'\',workspace_start_state TEXT NOT NULL DEFAULT \'{}\',parent_session_id TEXT,started_at REAL NOT NULL DEFAULT 0,ended_at REAL,updated_at REAL NOT NULL DEFAULT 0);CREATE TABLE steering_runs(session_id TEXT PRIMARY KEY,owner TEXT NOT NULL DEFAULT \'\',run_id TEXT NOT NULL DEFAULT \'\',boot TEXT NOT NULL DEFAULT \'\',state TEXT NOT NULL,updated_at REAL NOT NULL);CREATE TABLE child_completions(child_id TEXT PRIMARY KEY,target_id TEXT NOT NULL DEFAULT \'\',parent_session TEXT NOT NULL DEFAULT \'\',state TEXT NOT NULL,run_id TEXT NOT NULL DEFAULT \'\')');
+  nodeStore.close();
   // Stand-in receipt to exercise exact-tree/hash/skip checks. This fixture has
   // no application gate; it never claims production test coverage.
   const log=path.join(executor,'gate.log'),receipt=path.join(executor,'gate.json');
@@ -44,6 +51,11 @@ function fixture(name) {
     runner:{path:path.join(repo,'skills','parallel-evolution','scripts','finish.mjs'),sha256:hash(path.join(repo,'skills','parallel-evolution','scripts','finish.mjs')),platform:process.platform},
     input_scope:{tree:gateTree,command:'bash scripts/test.sh',gate_sha256:hash(path.join(repo,'scripts','test.sh'))}}));
   const manifest={id:name,owner:'fixture-owner',repo,executor_cwd:executor,bootstrap:true,
+    // THE ACTIVITY SOURCE. The wave's on/off is read from the node's own records, so a fixture
+    // that wants a provable OFF declares a real (private, empty) node runtime store. Nothing
+    // about this fixture is a waiver: `previous_wave_activity_unverifiable` still refuses when a
+    // manifest names no source at all.
+    activity:{data},
     gate_receipt:receipt,
     steps:['land','deploy','retire'].map(name=>({name,argv:[process.execPath,driver,'step',effects],post:{argv:[process.execPath,driver,'post']}})),
     verifiers:Object.fromEntries(['operations','claims','runtime','registries','deliveries','owners'].map(name=>[name,{argv:[process.execPath,driver,'proof']}]))};
@@ -69,7 +81,12 @@ try {
   const zero=fixture('zero');zero.manifest.steps[2].argv=[process.execPath,zero.driver,'zero'];create(zero.store,zero.manifest);
   check((await advance(zero.store,'zero')).ok===false,'zero-released exit zero is not effect settlement or convergence');
   check(inspect(zero.store,'zero').steps[2].state==='unknown','ambiguous cleanup is durably unknown');
-  assert.throws(()=>create(zero.store,{...zero.manifest,id:'forbidden-next'}),/previous_wave_blocked/);checks++;
+  const beside=create(zero.store,{...zero.manifest,id:'idle-next'});
+  check(beside.ok===true,'a wave with zero live children cannot block starting the next wave');
+  check(beside.previous?.id==='zero' && beside.previous.activity==='off','the idle previous wave is reported as off, from the node store and not from its row');
+  check(beside.previous.convergence==='unverified' && beside.previous.runtime_state==='unverified','an unverified convergence is a named state, never a silent completion');
+  check(inspect(zero.store,'zero').state==='blocked' && inspect(zero.store,'zero').runtime_state==='unverified','the unverified convergence stays durable and named');
+  check(inspect(zero.store,'idle-next').state==='pending','the next wave is admitted beside the idle one');
   assert.throws(()=>resume(zero.store,'zero','count inspected'),/unknown_effect/);checks++;
   const uncertain=inspect(zero.store,'zero');
   assert.throws(()=>reconcile(zero.store,'zero',{operation_id:uncertain.steps[2].operation_id,evidence:'x'}),/exact_identity/);checks++;

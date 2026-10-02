@@ -9,6 +9,7 @@ import {DatabaseSync} from 'node:sqlite';
 import {fileURLToPath} from 'node:url';
 import {fullProof,findFullProof} from './lib/full-gate-proof.mjs';
 import {boundary} from './lib/lane-boundary.mjs';
+import {waveActivity,activitySource,isolatedRepository} from './lib/wave-activity.mjs';
 
 const hash = data => crypto.createHash('sha256').update(data).digest('hex');
 const requiredChecks = ['operations','claims','runtime','registries','deliveries','owners'];
@@ -64,9 +65,14 @@ function open(dir) {
   const db = new DatabaseSync(path.join(dir,'waves.sqlite'));
   db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000;
     CREATE TABLE IF NOT EXISTS waves(id TEXT PRIMARY KEY,repo TEXT NOT NULL,manifest TEXT NOT NULL,manifest_hash TEXT NOT NULL,state TEXT NOT NULL,reason TEXT,owner TEXT NOT NULL,boot TEXT,pid INTEGER,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,receipt TEXT);
-    CREATE UNIQUE INDEX IF NOT EXISTS active_repo ON waves(repo) WHERE state!='complete';
     CREATE TABLE IF NOT EXISTS steps(wave TEXT NOT NULL,position INTEGER NOT NULL,name TEXT NOT NULL,state TEXT NOT NULL,operation_id TEXT,attempts INTEGER NOT NULL DEFAULT 0,post_attempts INTEGER NOT NULL DEFAULT 0,next_at INTEGER NOT NULL DEFAULT 0,result TEXT,PRIMARY KEY(wave,position));
     CREATE TABLE IF NOT EXISTS events(sequence INTEGER PRIMARY KEY,wave TEXT NOT NULL,at INTEGER NOT NULL,type TEXT NOT NULL,body TEXT NOT NULL);`);
+  // THE DERIVED RULE REPLACES THE ONE-ROW-PER-REPOSITORY UNIQUE INDEX. That index encoded "at most
+  // one unfinished wave per repository", which is exactly the rule the owner removed: an idle wave
+  // must not block the next one. A durable SQL index cannot know whether agents are working, so the
+  // index is replaced by a lookup index and the refusal moves to `create()`, which reads real
+  // activity. `scripts/wave-migrate.mjs` reports this and can restore the index on revert.
+  db.exec('DROP INDEX IF EXISTS active_repo; CREATE INDEX IF NOT EXISTS waves_repo ON waves(repo, created_at);');
   return db;
 }
 function event(db,id,type,body) { db.prepare('INSERT INTO events(wave,at,type,body) VALUES(?,?,?,?)').run(id,Date.now(),type,JSON.stringify(body)); }
@@ -136,12 +142,27 @@ export function create(dir, manifest) {
   validate(manifest);
   const db=open(dir);
   try {
+    // THE DERIVED ON/OFF. A durable row is bookkeeping, not evidence that anyone is working:
+    // a crashed finisher leaves `running` behind with nothing running. Whether this repository is
+    // being worked on RIGHT NOW is read from the node's own inventory (managed session workspaces,
+    // their recorded state, the real Git worktree list, the node's own turn state). An idle wave
+    // never blocks the next one; a wave with a live child still does; and a wave whose activity
+    // cannot be observed is named as such instead of being guessed either way.
     const previous=db.prepare('SELECT * FROM waves WHERE repo=? ORDER BY created_at DESC LIMIT 1').get(native(manifest.repo));
+    let previous_verdict=null;
     if (previous) {
-      if (previous.state!=='complete') fail(`previous_wave_${previous.state}:${previous.id}`);
-      // Completion receipts can go stale. Recheck actual baseline, install, owners
-      // and registries before admitting another wave.
-      verify(JSON.parse(previous.manifest),previous.id,true);
+      const source=activitySource(JSON.parse(previous.manifest)) || activitySource(manifest);
+      previous_verdict=waveActivity(source, previous);
+      if (previous_verdict.activity==='on') fail(`previous_wave_active:${previous.id}`);
+      if (previous_verdict.activity==='unverifiable') {
+        if (source?.kind!=='none') fail(`previous_wave_activity_unverifiable:${previous.id}:${previous_verdict.reason}`);
+        if (!isolatedRepository(manifest.repo)) fail(`production_activity_source_required:${previous.id}`);
+      }
+      if (previous.state==='complete') {
+        // Completion receipts can go stale. Recheck actual baseline, install, owners
+        // and registries before admitting another wave.
+        verify(JSON.parse(previous.manifest),previous.id,true);
+      }
     } else if (manifest.bootstrap !== true) {
       verify(manifest);
     }
@@ -155,9 +176,9 @@ export function create(dir, manifest) {
     transaction(db,()=>{
       db.prepare('INSERT INTO waves(id,repo,manifest,manifest_hash,state,owner,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)').run(manifest.id,native(manifest.repo),JSON.stringify(manifest),hash(JSON.stringify(manifest)),'pending',manifest.owner,Date.now(),Date.now());
       manifest.steps.forEach((step,i)=>db.prepare("INSERT INTO steps(wave,position,name,state) VALUES(?,?,?,'pending')").run(manifest.id,i,step.name));
-      event(db,manifest.id,'created',{owner:manifest.owner,bootstrap:manifest.bootstrap===true});
+      event(db,manifest.id,'created',{owner:manifest.owner,bootstrap:manifest.bootstrap===true,previous:previous_verdict?{id:previous.id,activity:previous_verdict.activity,convergence:previous_verdict.convergence,runtime_state:previous_verdict.runtime_state,reason:previous_verdict.reason}:null});
     });
-    return {ok:true,id:manifest.id,state:'pending',boundary:entry,next_action:{argv:[process.execPath,fileURLToPath(import.meta.url),'advance',dir,manifest.id]}};
+    return {ok:true,id:manifest.id,state:'pending',boundary:entry,previous:previous_verdict?{id:previous.id,state:previous.state,activity:previous_verdict.activity,convergence:previous_verdict.convergence,runtime_state:previous_verdict.runtime_state,reason:previous_verdict.reason}:null,next_action:{argv:[process.execPath,fileURLToPath(import.meta.url),'advance',dir,manifest.id]}};
   } finally { db.close(); }
 }
 export async function advance(dir,id) {
@@ -259,10 +280,15 @@ export function inspect(dir,id) {
   const db=new DatabaseSync(path.join(dir,'waves.sqlite'),{readOnly:true});
   try {
     const row=wave(db,id),live=alive(dir,row.boot);
-    const next_action=row.state==='complete' || live!==false?{kind:'none',argv:[]}:
-      row.state==='blocked'?{kind:'inspect_effects_and_reconcile_or_resume',argv:[]}:
+    const verdict=waveActivity(activitySource(JSON.parse(row.manifest)),row);
+    // A `running` row with nothing in flight is never reported as an active wave: the derived
+    // verdict decides, and the durable value stays visible as `bookkeeping_state`. Every other
+    // durable state is reported as it is stored, so a blocked wave stays a named blocked state.
+    const state=row.state==='running' && verdict.activity!=='on' ? 'idle' : row.state;
+    const next_action=state==='complete' || live!==false?{kind:'none',argv:[]}:
+      state==='blocked'||state==='unverified'?{kind:'inspect_effects_and_reconcile_or_resume',argv:[]}:
       {kind:'advance',argv:[process.execPath,fileURLToPath(import.meta.url),'advance',dir,id]};
-    return {...row,owner_liveness:live,next_action,steps:db.prepare('SELECT * FROM steps WHERE wave=? ORDER BY position').all(id),events:db.prepare('SELECT * FROM events WHERE wave=? ORDER BY sequence').all(id)};
+    return {...row,state,bookkeeping_state:row.state,owner_liveness:live,next_action,activity:verdict.activity,convergence:verdict.convergence,runtime_state:verdict.runtime_state,legacy_migrated:verdict.legacy_migrated,activity_reason:verdict.reason,agents:verdict.agents,activity_evidence:verdict.evidence,steps:db.prepare('SELECT * FROM steps WHERE wave=? ORDER BY position').all(id),events:db.prepare('SELECT * FROM events WHERE wave=? ORDER BY sequence').all(id)};
   }
   finally { db.close(); }
 }

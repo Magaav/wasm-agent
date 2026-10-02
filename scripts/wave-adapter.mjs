@@ -7,13 +7,14 @@ import crypto from 'node:crypto';
 import {spawnSync} from 'node:child_process';
 import {DatabaseSync} from 'node:sqlite';
 import {fileURLToPath} from 'node:url';
-import {ownerInventory,frozenOwners,orcaJSON} from './lib/wave-owners.mjs';
+import {ownerInventory,frozenOwners} from './lib/wave-owners.mjs';
+import {activityInventory,sourceOfConfig,orcaView} from './lib/wave-activity.mjs';
 import {location} from './wave-entry.mjs';
 const hash=x=>crypto.createHash('sha256').update(x).digest('hex');
 const key=x=>{const p=path.resolve(x).replaceAll('\\','/').replace(/^\/\/\?\//,'');return process.platform==='win32'?p.toLowerCase():p;};
 function command(argv,cwd,env={}){const r=spawnSync(argv[0],argv.slice(1),{cwd,env:{...process.env,...env},encoding:'utf8',windowsHide:true,timeout:30000,maxBuffer:32*1024*1024});if(r.status!==0)throw Error(r.stderr || r.error?.message || 'adapter_command_failed');return r.stdout.trim();}
 const git=(repo,...args)=>command(['git','-C',repo,...args],repo);
-function ledger(config,sql){const db=new DatabaseSync(path.join(config.data,'memory.db'),{readOnly:true});try{return db.prepare(sql).all();}finally{db.close();}}
+function ledger(config,sql,params=[]){const db=new DatabaseSync(path.join(config.data,'memory.db'),{readOnly:true});try{return db.prepare(sql).all(...params);}finally{db.close();}}
 export function native(config,request) {
   if(!config.wa_binary || !config.source_root || !config.home || key(path.join(config.home,'.wasm-agent'))!==key(config.data))throw Error('native_runtime_home_and_source_binding_required');
   const env={WASM_AGENT_HOME:config.home,WASM_AGENT_LUA_ROOT:config.source_root,WA_SCRIPT:path.join(config.source_root,'scripts/wave-observe.lua'),WA_WAVE_OBSERVATION:JSON.stringify(request),WASM_AGENT_RENDEZVOUS:'',WASM_AGENT_RELAY:'',WASM_AGENT_MANAGED:'0'};
@@ -60,45 +61,55 @@ export function freeze(config,issuer,reviewer) {
   for(const tree of plan.worktrees) {
     if(git(tree.path,'rev-parse','HEAD')!==tree.tip)throw Error('freeze_tip_moved');
     const safety=combinedSafety(config,tree.path);if(!safety.ok)throw Error('freeze_relevant_effects_unresolved');
-    const card=observed.cards.find(c=>key(c.path)===key(tree.path));
-    const session=ledger(config,"SELECT id,worktree,workspace_start_state FROM sessions WHERE workspace_required=1").find(s=>key(s.worktree)===key(tree.path));
-    if(!card && !session)throw Error('unmanaged_tree_owner_identity_unverifiable');
-    // A runtime binding is accepted only with explicit creator/process provenance;
-    // historical path/timestamp-only bindings remain blocked for external adjudication.
-    if(!card && !JSON.parse(session.workspace_start_state).executor?.owner_boot)throw Error('runtime_legacy_owner_identity_unverifiable');
-    const actualOwner=card?`orca:${card.instance}`:`runtime:${session.id}:${JSON.parse(session.workspace_start_state).executor.owner_boot}`;
-    if(tree.owner_id!==actualOwner)throw Error('retirement_owner_identity_mismatch');
-    trees.push({path:tree.path,tip:tree.tip,owner_id:tree.owner_id,evidence:JSON.stringify({card,session:session?.id,safety})});
+    // The owner of a tree is the node's own session binding for it, with the runtime identity
+    // that session recorded when it allocated the tree. There is no third-party card to fall
+    // back to, and none is needed: an unbound tree is refused, never assumed idle.
+    const binding=observed.bindings.find(b=>key(b.worktree)===key(tree.path));
+    if(!binding)throw Error('unmanaged_tree_owner_identity_unverifiable');
+    const session=ledger(config,"SELECT id,worktree,workspace_start_state FROM sessions WHERE id=?",[binding.session]).find(s=>s.id===binding.session);
+    if(!session)throw Error('runtime_session_binding_missing');
+    if(!JSON.parse(session.workspace_start_state || '{}').executor?.owner_boot)throw Error('runtime_legacy_owner_identity_unverifiable');
+    if(tree.owner_id!==binding.owner)throw Error('retirement_owner_identity_mismatch');
+    trees.push({path:tree.path,tip:tree.tip,owner_id:tree.owner_id,evidence:JSON.stringify({session:session.id,binding,safety})});
   }
-  const ticket={schema:1,kind:'wave-owner-freeze',repo:config.repo,wave_id:process.env.WA_WAVE_ID,main:git(config.repo,'rev-parse','HEAD'),issuer,reviewer,trees,terminals:observed.terminals,cards:observed.cards};
+  const ticket={schema:1,kind:'wave-owner-freeze',repo:config.repo,wave_id:process.env.WA_WAVE_ID,main:git(config.repo,'rev-parse','HEAD'),issuer,reviewer,trees,agents:observed.agents,bindings:observed.bindings};
   fs.writeFileSync(config.owner_freeze,JSON.stringify(ticket)+'\n',{flag:'wx'});
   fs.writeFileSync(path.join(location(config.repo),'freeze.json'),JSON.stringify({wave_id:ticket.wave_id,ticket:config.owner_freeze,sha256:hash(JSON.stringify(ticket)+'\n')})+'\n',{flag:'wx'});
   return {ok:true,complete:true,unresolved:[],ticket:config.owner_freeze};
 }
 export function registry(config,target,apply=false) {
   const plan=JSON.parse(fs.readFileSync(config.retirement_plan,'utf8')),item=plan.worktrees.find(t=>key(t.path)===key(target));if(!item)throw Error('registry_target_not_in_exact_plan');
-  const cards=orcaJSON(config,['worktree','list','--repo',`id:${config.orca_repo_id}`,'--json']);
-  if(cards.truncated!==false || !Array.isArray(cards.worktrees))throw Error('orca_registry_incomplete');
-  const card=cards.worktrees.find(c=>key(c.path)===key(target));
+  const source=sourceOfConfig(config);
   if(apply) {
-    const owner=frozenOwners(config,process.env.WA_WAVE_ID,plan.main,target,item.tip);if(!owner.ok)throw Error('registry_owner_not_frozen');
+    // THE OWNER FENCE IS REQUIRED BEFORE ANY EFFECT, and only then: a target whose binding is
+    // already released or parked has nothing left to settle (and cannot be in flight), so the
+    // postconditions below are what prove it.
+    const before=activityInventory(source).bindings.find(b=>key(b.worktree)===key(target));
+    let owner=null;
+    if(!before || !['released','parked'].includes(before.state)) {
+      owner=frozenOwners(config,process.env.WA_WAVE_ID,plan.main,target,item.tip);if(!owner.ok)throw Error('registry_owner_not_frozen');
+    }
     if(item.mode==='remove' && fs.existsSync(target)) {
       if(git(target,'rev-parse','HEAD')!==item.tip || spawnSync('git',['-C',target,'symbolic-ref','--quiet','HEAD'],{windowsHide:true}).status!==1)throw Error('removal_requires_exact_detached_tip');
-      if(card)orcaJSON(config,['worktree','rm','--worktree',`id:${card.id}`,'--json']);
-      else git(config.repo,'worktree','remove',target);
+      // The tree is removed through Git itself, so the repository's own registration goes with
+      // it; nothing outside this repository is asked to agree.
+      git(config.repo,'worktree','remove',target);
     }
-    if(item.session_id){const result=native(config,{kind:'registry',item:{...item,evidence:JSON.stringify(owner)}});if(result.ok!==true)throw Error(result.error);}
-    if(card) {
-      if(item.mode==='park')orcaJSON(config,['worktree','set','--worktree',`id:${card.id}`,'--workspace-status','completed','--comment',`Parked by verified wave ${process.env.WA_WAVE_ID} at ${item.tip}`,'--json']);
-    }
+    // The runtime's own binding reconciliation (released / parked) is still the authority for
+    // what the node records about the session, and it is invoked through our own Lua.
+    if(item.session_id){const result=native(config,{kind:'registry',item:{...item,evidence:JSON.stringify(owner||{settled:'binding already reconciled before this call'})}});if(result.ok!==true)throw Error(result.error);}
   }
-  const refreshed=orcaJSON(config,['worktree','list','--repo',`id:${config.orca_repo_id}`,'--json']);
-  if(refreshed.truncated!==false)throw Error('orca_registry_refresh_incomplete');
-  const now=refreshed.worktrees.find(c=>key(c.path)===key(target));
-  if(item.mode==='remove' && (fs.existsSync(target) || now))throw Error('registry_removal_not_observed');
-  if(item.mode==='park' && (!fs.existsSync(target) || git(target,'rev-parse','HEAD')!==item.tip || (now && (now.branch || now.git?.branch))))throw Error('registry_park_not_observed');
-  if(item.session_id){const session=ledger(config,"SELECT id,workspace_state,workspace_branch FROM sessions").find(s=>s.id===item.session_id);if(!session || session.workspace_state!==(item.mode==='park'?'parked':'released') || (item.mode==='park'&&session.workspace_branch))throw Error('runtime_registry_not_reconciled');}
-  return {ok:true,reconciled:true,worktree:target,mode:item.mode};
+  const refreshed=activityInventory(source);
+  if(!refreshed.ok)throw Error('own_registry_refresh_unavailable:'+refreshed.reason);
+  const tree=refreshed.trees.find(entry=>key(entry.path)===key(target));
+  const binding=refreshed.bindings.find(entry=>key(entry.worktree)===key(target));
+  if(item.mode==='remove' && (fs.existsSync(target) || tree))throw Error('registry_removal_not_observed');
+  if(item.mode==='park' && (!fs.existsSync(target) || !tree || tree.head!==item.tip || !tree.detached || tree.branch))throw Error('registry_park_not_observed');
+  if(item.session_id){const session=ledger(config,"SELECT id,workspace_state,workspace_branch FROM sessions").find(s=>s.id===item.session_id);
+    if(!session || session.workspace_state!==(item.mode==='park'?'parked':'released') || (item.mode==='park'&&session.workspace_branch))throw Error('runtime_registry_not_reconciled');
+    if(item.mode==='park' && (!binding || !binding.detached || binding.branch))throw Error('runtime_park_binding_not_reconciled');
+    if(item.mode==='remove' && binding && binding.state!=='released')throw Error('runtime_release_binding_not_reconciled');}
+  return {ok:true,reconciled:true,worktree:target,mode:item.mode,owner:'node-runtime',orca_view:orcaView(source,{enabled:config.orca_view===true})};
 }
 export function runtimeRetirement(config,target) {
   const plan=JSON.parse(fs.readFileSync(config.retirement_plan,'utf8')),item=plan.worktrees.find(t=>key(t.path)===key(target));

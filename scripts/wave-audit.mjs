@@ -47,8 +47,13 @@ for(const [name,file,query] of [
 ]) {
   let db;try{db=new DatabaseSync(file,{readOnly:true});report[name]={path:file,rows:db.prepare(query).all(),liveness:'not inferred from timestamps or PID absence'};}catch(e){report.errors.push({scope:name,error:e.message});}finally{db?.close();}
 }
-const orca=run(['orca','worktree','list','--repo','id:473f6dd7-2953-4426-8837-d112762d705c','--json']);
-try{const value=JSON.parse(orca.stdout);report.orca={code:orca.code,worktrees:value.result?.worktrees?.map(({id,path,branch,workspaceStatus,git,instanceId})=>({id,path,branch,workspaceStatus,git,instanceId})),complete:value.result?.truncated===false};}catch(e){report.errors.push({scope:'orca',error:e.message});}
+// OPTIONAL VIEWER ONLY. A read-only audit must not depend on a third-party CLI: if one is present
+// and explicitly asked for (`WA_WAVE_ORCA_VIEW=1`), what it says is recorded as advisory evidence.
+// Its absence is a fact about the audit, never an error and never a decision input.
+if(process.env.WA_WAVE_ORCA_VIEW==='1') {
+  const orca=run(['orca','worktree','list','--json']);
+  try{const value=JSON.parse(orca.stdout);report.orca={advisory:true,decision_input:false,code:orca.code,worktrees:value.result?.worktrees?.map(({id,path:p,branch,workspaceStatus,git,instanceId})=>({id,path:p,branch,workspaceStatus,git,instanceId})),complete:value.result?.truncated===false};}catch(e){report.orca={advisory:true,decision_input:false,used:false,reason:e.message};}
+} else report.orca={advisory:true,decision_input:false,used:false,reason:'not_requested: this audit reads the node runtime and Git only'};
 try{const response=await fetch('http://127.0.0.1:8799/health',{signal:AbortSignal.timeout(5000)});report.health={status:response.status,body:await response.json()};}catch(e){report.health={error:e.message};}
 report.summary={worktrees:report.worktrees.length,integrated_clean_candidates:report.worktrees.filter(x=>x.retirement.startsWith('candidate')).length,dirty_or_ignored:report.worktrees.filter(x=>x.retirement==='preserve-dirty-or-ignored').length,unmerged:report.worktrees.filter(x=>!x.integrated).length,operations:report.operations.total,unresolved:report.operations.current_unresolved,manual_original_uncertainty:report.operations.unsafe_manual_settlements.length,claims:report.claims?.rows.length,bindings:report.bindings?.rows.length};
 // Never overwrite a diagnostic/report that may be evidence for another run.
