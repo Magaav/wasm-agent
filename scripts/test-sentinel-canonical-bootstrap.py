@@ -17,6 +17,7 @@ parser.add_argument('--sentinel', required=True)
 parser.add_argument('--repo', required=True)
 parser.add_argument('--evidence', required=True)
 args = parser.parse_args()
+raise SystemExit('UNSAFE LEGACY FIXTURE DISABLED: once does not own detached settlement; retained proof is selection-only. Use supervised Rust deploy-protocol fixtures.')
 repo = Path(args.repo).resolve()
 script = repo / 'scripts/deploy.sh'
 assert 'cannot deploy from a running turn' in script.read_text(), 'safety refusal absent'
@@ -50,7 +51,8 @@ try:
             selected = script if label == 'canonical' else stale
             (box / 'requests/proof.json').write_text(json.dumps({
                 'verb': 'deploy', 'reason': 'private canonical selection fixture'}))
-            env = os.environ.copy()
+            env = {key: value for key, value in os.environ.items() if key.upper() in
+                   {'PATH','SYSTEMROOT','WINDIR','COMSPEC','TEMP','TMP','PATHEXT','SYSTEMDRIVE','LOCALAPPDATA'}}
             env.update(WASM_AGENT_HOME=str(home), WA_INSTALL_DIR=str(install),
                        WASM_AGENT_PORT=str(server.server_port), WA_PORT=str(server.server_port),
                        WA_SENTINEL_SUPERVISOR='none', WA_SENTINEL_DEPLOY=str(selected),

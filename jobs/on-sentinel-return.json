@@ -1,0 +1,12 @@
+{
+  "id": "onSentinelReturn",
+  "name": "onSentinelReturn",
+  "trigger": {"kind": "event", "topic": "sentinel.return"},
+  "action": {
+    "kind": "wake",
+    "session": "FROM_REQUEST_EVENT",
+    "dedupe_key": "event_key",
+    "prepare": {"script": "PREPARED_BY_INSTALL/scripts/sentinel-return-prepare.sh", "timeout_seconds": 30},
+    "prompt": "Follow the deterministic onSentinelReturn instruction block. A queued request, watcher acknowledgement or detached launch never establishes installation. No automatic effect replay."
+  }
+}

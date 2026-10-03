@@ -40,9 +40,13 @@ REQUIRE_MAIN=0
 REASON=""
 SESSION=""
 PROMPT=""
+REQUEST_ID=""
+EXPECTED_SHA=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --require-main) REQUIRE_MAIN=1; shift ;;
+    --request-id) REQUEST_ID="${2:-}"; shift 2 ;;
+    --expected-sha) EXPECTED_SHA="${2:-}"; shift 2 ;;
     --reason) REASON="${2:-}"; shift 2 ;;
     --session) SESSION="${2:-}"; shift 2 ;;
     --prompt) PROMPT="${2:-}"; shift 2 ;;
@@ -93,11 +97,16 @@ export WA_SENTINEL_SCRIPTS="${WA_SENTINEL_SCRIPTS:-$WA_SCRIPTS_DIR}"
 # from installed.txt, deploy.log, hashes and the sentinel status. `fail` writes it too, so a refusal is a
 # result and not only a log line.
 write_result() { # ok detail
+  case "$REQUEST_ID" in *[!a-zA-Z0-9-]*) REQUEST_ID="" ;; esac
   _esc() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr '\r\n' '  '; }
-  printf '{"ok":%s,"commit":"%s","branch":"%s","node_sha256":"%s","sentinel_sha256":"%s","watcher_pid":"%s","detail":"%s","reason":"%s","at":"%s"}\n' \
+  printf '{"ok":%s,"commit":"%s","branch":"%s","node_sha256":"%s","sentinel_sha256":"%s","watcher_pid":"%s","detail":"%s","reason":"%s","at":"%s","request_id":"%s","expected_sha":"%s"}\n' \
     "$1" "${COMMIT:-}" "${BRANCH:-}" "${HASH:-}" "${SENTINEL_HASH:-}" \
     "${SENTINEL_NEW_PID:-${SENTINEL_WATCH_PID:-}}" "$(_esc "$2")" "$(_esc "$REASON")" \
-    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$INSTALL_DIR/deploy-result.json" 2>/dev/null || true
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(_esc "$REQUEST_ID")" "$(_esc "$EXPECTED_SHA")" > "$INSTALL_DIR/deploy-result.json" 2>/dev/null || true
+  if [ -n "$REQUEST_ID" ]; then
+    mkdir -p "$SENTINEL_CONFIG/sentinel/deploy-protocol/$REQUEST_ID"
+    cp "$INSTALL_DIR/deploy-result.json" "$SENTINEL_CONFIG/sentinel/deploy-protocol/$REQUEST_ID/result.json" 2>/dev/null || true
+  fi
 }
 
 # A refusal is evidence: the gate saying no, with a reason, at a moment. Printing to stderr is not enough -
@@ -277,10 +286,19 @@ resolve_root() {
   fi
   printf ''
 }
-ROOT="$(resolve_root)"
+if [ -n "$EXPECTED_SHA" ]; then
+  ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+else
+  ROOT="$(resolve_root)"
+fi
 [ -n "$ROOT" ] || fail "cannot tell which worktree to deploy from: run this script from one, set WA_DEPLOY_ROOT, or record it in $INSTALL_DIR/runtime-worktree.txt - a deploy that cannot say what it builds does not build"
 [ -d "$ROOT" ] || fail "the worktree to deploy from does not exist: $ROOT"
 cd "$ROOT" || fail "cannot enter the worktree to deploy from: $ROOT"
+
+# Protocol identity must be safe before any refusal writes per-request evidence.
+if [ -n "$REQUEST_ID" ]; then
+  case "$REQUEST_ID" in *[!a-zA-Z0-9-]*) REQUEST_ID=""; fail "invalid protocol request id" ;; esac
+fi
 
 # 1. Clean. A build from a half-edited tree is not reproducible, and the file being edited is often the one
 #    that matters.
@@ -308,6 +326,11 @@ if git rev-parse --verify -q origin/main >/dev/null; then
     || fail "this tree's commit $(git rev-parse --short HEAD) is not on origin/main; merge it to main and deploy from there - an unmerged deploy leaves main behind the live node"
 fi
 COMMIT="$(git rev-parse --short HEAD)"
+if [ -n "$EXPECTED_SHA" ]; then
+  case "$REQUEST_ID" in ''|*[!a-zA-Z0-9-]*) fail "invalid protocol request id" ;; esac
+  [ "$(git rev-parse HEAD)" = "$EXPECTED_SHA" ] || fail "source changed from expected SHA before build"
+  [ "$(git rev-parse origin/main)" = "$EXPECTED_SHA" ] || fail "expected SHA is not exact origin/main"
+fi
 
 # 2b. The port this deploy will be restarted onto, and who is holding it right now.
 #
@@ -482,6 +505,9 @@ echo "deploy: the new binary answers on a scratch port"
 # 6. Install and restart, through the script that owns that job.
 UPGRADE="$ROOT/scripts/upgrade.sh"
 [ -f "$UPGRADE" ] || fail "no scripts/upgrade.sh to perform the install"
+if [ -n "$EXPECTED_SHA" ]; then
+  [ "$(git rev-parse HEAD)" = "$EXPECTED_SHA" ] && [ -z "$(git status --porcelain)" ] || fail "source changed from expected SHA before install"
+fi
 echo "deploy: installing through upgrade.sh"
 # Default runtime source is canonical main, not the producer/integration lane that
 # happened to build this release. Selection is read-only and refuses dirty/stale
@@ -799,13 +825,13 @@ if [ -d "$ROOT/jobs" ] && [ -d "$ROOT/scripts" ]; then
   # is put: a definition installed ahead of its script is a job that fails on the machine it was installed
   # on. They import only Node builtins, so there is no `./lib/...` closure to derive here - unlike the
   # WhatsApp pipeline above, whose modules are found from the imports it writes.
-  for source in "$ROOT"/scripts/subagent-return-* "$ROOT"/scripts/deploy-shipped.json; do
+  for source in "$ROOT"/scripts/subagent-return-* "$ROOT"/scripts/sentinel-return-* "$ROOT"/scripts/deploy-shipped.json; do
     [ -f "$source" ] || continue
     cp -f "$source" "$INSTALL_DIR/scripts/" \
       || fail "node installed, but could not ship $(basename "$source")"
     PIPELINE=$((PIPELINE + 1))
   done
-  for source in "$ROOT"/jobs/whatsapp-*.json "$ROOT"/jobs/on-subagent-return.json "$ROOT"/jobs/subagent-return-observe.json; do
+  for source in "$ROOT"/jobs/whatsapp-*.json "$ROOT"/jobs/on-subagent-return.json "$ROOT"/jobs/subagent-return-observe.json "$ROOT"/jobs/on-sentinel-return.json "$ROOT"/jobs/sentinel-return-observe.json; do
     [ -f "$source" ] || continue
     JOB_NAME="$(basename "$source" .json)"
     # The job files name their script as PREPARED_BY_INSTALL/... so one file works from a checkout and from

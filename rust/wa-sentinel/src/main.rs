@@ -57,6 +57,10 @@ mod role;
 #[cfg(windows)]
 mod winproc;
 
+mod deploy_protocol;
+#[cfg(test)]
+mod deploy_protocol_tests;
+
 // ---------------------------------------------------------------- paths
 
 pub(crate) fn home() -> PathBuf {
@@ -1504,7 +1508,13 @@ fn perform(request: &Value) -> Result<String> {
             if session.is_empty() != prompt.is_empty() {
                 bail!("deploy continuation requires both --session and --prompt");
             }
-            verb_deploy(session, prompt, reason)
+            if let Some(sha) = request["expected_sha"].as_str() {
+                let script = deploy_protocol::canonical_script(sha)?;
+                let (interpreter, script_arg) = shell_for(&script);
+                let args = vec![script_arg, "--request-id".into(), request["id"].as_str().unwrap_or("").into(),
+                    "--expected-sha".into(), sha.into(), "--reason".into(), reason.into()];
+                start_deploy_detached(&script, &deploy_capture_path(), reason, &interpreter, &args)
+            } else { verb_deploy(session, prompt, reason) }
         }
         "run" => verb_run(request.get("script").and_then(Value::as_str).unwrap_or(""), reason),
         // A plan the agent exported. Validated against a whitelist before a single step runs, and
@@ -1543,7 +1553,11 @@ fn finish_request(claim: &Path, request: &Value) {
             return;
         }
     }
-    let record=json!({"request":request,"ok":ok,"detail":detail,"at":now_epoch()});
+    let phase = if ok && request["verb"] == "deploy" { "spawned" } else if ok { "completed" } else { "failed" };
+    if let Err(error) = deploy_protocol::record(request, claim.file_stem().and_then(|s|s.to_str()).unwrap_or(""), phase, &detail) {
+        audit("protocol-record-failed", &claim.display().to_string(), &error.to_string());
+    }
+    let record=json!({"request":request,"ok":ok,"detail":detail,"at":now_epoch(),"phase":phase});
     let target=sentinel_dir().join(folder).join(claim.file_name().unwrap_or_default());
     match wa_operation::atomic_json(&target,&record) {
         Ok(())=>{let _=std::fs::remove_file(claim);},
@@ -1595,6 +1609,13 @@ impl Held {
 /// Make a held request visible: one line in the log and one on the console, once per request. It is not a
 /// failure and it is not a claim: the request stays where it is and is retried next tick.
 fn announce_hold(held: &mut Held, key: &str, verb: &str, why: &str, asked: &str) {
+    if let Ok(bytes) = std::fs::read(sentinel_dir().join("requests").join(key)) {
+        if let Ok(request) = serde_json::from_slice::<Value>(&bytes) {
+            if let Err(error) = deploy_protocol::record(&request, key.trim_end_matches(".json"), "held", why) {
+                audit("protocol-record-failed", key, &error.to_string());
+            }
+        }
+    }
     if let Some(line) = held.announcement(key, verb, why, asked) {
         audit("maintenance-deferred", &format!("{verb} {key}"), &line);
         say(&format!("{line} - retried next tick"));
@@ -1639,6 +1660,18 @@ fn process_requests(background: bool, held: &mut Held) -> Result<u32> {
         // readable.
         let key=path.file_name().unwrap_or_default().to_string_lossy().to_string();
         let asked=preview["reason"].as_str().unwrap_or("(no reason given)");
+        let protocol_id = key.trim_end_matches(".json");
+        if let Err(error) = deploy_protocol::validate(&preview, protocol_id) {
+            deploy_protocol::record(&preview, protocol_id, "rejected", &error.to_string())?;
+            let claim = sentinel_dir().join("claimed").join(&key);
+            if claim_request(&path, &claim)? {
+                let target = sentinel_dir().join("failed").join(&key);
+                wa_operation::atomic_json(&target, &json!({"request":preview,"ok":false,"detail":error.to_string(),"at":now_epoch()}))?;
+                std::fs::remove_file(claim)?;
+            }
+            continue;
+        }
+        deploy_protocol::record(&preview, protocol_id, "accepted", "watcher observed request; installation not complete")?;
         let capacity=if verb=="recover" {5}else{4};
         if background && REQUEST_ACTIVE.load(Ordering::Acquire)>=capacity {
             announce_hold(held,&key,verb,"the watcher is at its request capacity",asked);
@@ -1721,6 +1754,7 @@ fn print_request_help() {
     println!();
     println!("  --reason <text>                  why, recorded in the audit log");
     println!("  --session <id> --prompt <text>   wake that session when the request is done (upgrade, deploy, wake)");
+    println!("  --expected-sha <full SHA>        deploy protocol: exact published canonical main source");
     println!("  --binary <path>                  the binary to install (upgrade)");
     println!("  --script <path>                  the allow-listed script to run (run)");
     println!("  --file <path>                    the exported spell plan (spell)");
@@ -1755,8 +1789,13 @@ fn request(args: &[String]) -> Result<()> {
     let mut index = 1;
     while index < args.len() {
         if args[index]=="--if-no-pending" {dedupe_deploy=true;index+=1;continue;}
+        if !args[index].starts_with("--") { bail!("request option must start with --; no request written"); }
         let key = args[index].trim_start_matches("--").to_string();
-        let value = args.get(index + 1).cloned().unwrap_or_default();
+        if !["reason","session","prompt","binary","script","file","expected-sha"].contains(&key.as_str()) {
+            bail!("unknown request option {}; no request written",args[index]);
+        }
+        if fields.contains_key(&key) { bail!("duplicate request option; no request written"); }
+        let value = args.get(index + 1).filter(|v| !v.starts_with("--")).cloned().context("request option needs a value")?;
         fields.insert(key, json!(value));
         index += 2;
     }
@@ -1785,10 +1824,21 @@ fn request(args: &[String]) -> Result<()> {
     for folder in ["requests","claimed","done","failed"] {
         if sentinel_dir().join(folder).join(format!("{stamp}.json")).exists() {bail!("request identity collision; existing evidence preserved");}
     }
+    if let Some(sha) = fields.remove("expected-sha") {
+        fields.insert("expected_sha".into(), sha);
+        fields.insert("id".into(), json!(stamp));
+        fields.insert("queued_at".into(), json!(now_epoch()));
+        deploy_protocol::validate(&Value::Object(fields.clone()), &stamp)?;
+    }
     let path = sentinel_dir().join("requests").join(format!("{stamp}.json"));
     // Read the reason before the map is moved into the file: the audit line is written from the same
     // request, and a supervisor's log must not depend on the order of two statements.
     let reason = fields.get("reason").and_then(Value::as_str).unwrap_or("(no reason given)").to_string();
+    if fields.contains_key("expected_sha") {
+        let dir = sentinel_dir().join("deploy-protocol").join(&stamp);
+        std::fs::create_dir_all(&dir)?;
+        wa_operation::atomic_json(&dir.join("intent.json"), &Value::Object(fields.clone()))?;
+    }
     wa_operation::atomic_json(&path,&Value::Object(fields))
         .with_context(|| format!("write {}", path.display()))?;
     audit("request", &verb, &reason);

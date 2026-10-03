@@ -19,7 +19,8 @@
     "scripts/whatsapp-*",
     "scripts/lib/*",
     "scripts/wave-*",
-    "scripts/subagent-return-*"
+    "scripts/subagent-return-*",
+    "scripts/sentinel-return-*"
   ],
   "wave_closure_files": [
     "scripts/delivery-admission.mjs",
