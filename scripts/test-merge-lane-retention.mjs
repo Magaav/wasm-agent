@@ -52,9 +52,9 @@ function git(cwd, ...args) {
 }
 // Every child runs with this file's temp root as its temp root, so the families below are the only
 // ones a sweep can see.
-const fenced = extra => ({...process.env, TEMP: temp, TMP: temp, TMPDIR: temp, ...extra, WA_GATE_LANE_DIR:path.join(root,'gate-lane'),GATE_LANE_HELD:'',GATE_LANE_ORIGIN:'',WA_GATE_LANE_WAIT_SECONDS:'15',WA_GATE_LANE_SAMPLE_SECONDS:'0'});
+const fenced = extra => ({...process.env, TEMP: temp, TMP: temp, TMPDIR: temp, ...extra, WA_MERGE_LANE_GATE_MODE:'',WA_GATE_LANE_DIR:path.join(root,'gate-lane'),GATE_LANE_HELD:'',GATE_LANE_ORIGIN:'',WA_GATE_LANE_WAIT_SECONDS:'15',WA_GATE_LANE_SAMPLE_SECONDS:'0'});
 function lane(repo, args, extra = {}) {
-  const result = spawnSync(process.execPath, [LANE, '--repo', repo, '--gate-command', 'exit 1', ...args],
+  const result = spawnSync(process.execPath, [LANE, '--repo', repo, '--gate-mode', 'full', '--no-reuse-tree', '--gate-command', 'exit 1', ...args],
     {cwd: repo, encoding: 'utf8', windowsHide: true, env: fenced(extra)});
   let json = null;
   try { json = JSON.parse(result.stdout.trim()); } catch { /* a refusal is JSON too */ }
