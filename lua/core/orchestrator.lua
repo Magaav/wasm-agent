@@ -136,15 +136,34 @@ end
 
 -- Status is a signed control read, never a model probe. Old peers and absent
 -- serving state remain unknown/compatible; responsiveness is not quota evidence.
-function M.serving_eligible(destination, model)
+function M.serving_eligible(destination, model, requested_provider)
   if destination=='local' then
     if not provider.serving then return true,'unknown' end
+    if requested_provider and provider.active and provider.active().id~=requested_provider then return true,'provider_route_unavailable' end
     local value=provider.serving(model)
     return value.state~='blocked',value.reason or value.state
   end
-  local ok,value=pcall(nodes.remote_call,destination,'status',{model=model})
-  if ok and type(value)=='table' and ((type(value.serving)=='table' and value.serving.state=='blocked') or value.model_error=='provider_monthly_quota') then
-    return false,'provider_monthly_quota'
+  local target=nodes.find(destination)
+  local node_id=target and target.node_id
+  if not node_id or type(model)~='string' or model=='' then return true,'serving_identity_unknown' end
+  local ok,value=pcall(nodes.remote_call,destination,'status',{model=model,provider=requested_provider,serving_identity_only=true})
+  local identity=ok and type(value)=='table' and value.serving_identity
+  if type(identity)~='table' or identity.node_id~=node_id or identity.model~=model or
+      type(identity.provider)~='string' or identity.provider=='' or
+      (requested_provider and identity.provider~=requested_provider) or
+      type(identity.account_profile)~='string' or identity.account_profile=='' or
+      type(identity.binding)~='string' or not identity.binding:match('^%x+$') or #identity.binding~=64 or
+      type(identity.generation)~='number' or identity.generation<0 or identity.generation%1~=0 then
+    return true,'serving_identity_unknown'
+  end
+  ok,value=pcall(nodes.remote_call,destination,'status',{model=model,provider=requested_provider,serving_identity=identity})
+  local observed=ok and type(value)=='table' and value.serving
+  if type(observed)~='table' then return true,'serving_metadata_unknown' end
+  for _,key in ipairs({'node_id','model','provider','account_profile','binding','generation'}) do
+    if observed[key]~=identity[key] then return true,'serving_identity_changed' end
+  end
+  if observed.state=='blocked' and (observed.reason=='provider_monthly_quota' or observed.reason=='provider_eligibility_corrupt') then
+    return false,observed.reason
   end
   return true,'unknown'
 end
@@ -169,7 +188,7 @@ function M.tick(api)
           local target = item.node == "local" and {local_node=true,online=true} or nodes.find(item.node)
           if target and (target.online ~= false or row.destination ~= "") then
             local destination = target.local_node and "local" or item.node
-            local eligible, reason=M.serving_eligible(destination,args.model)
+            local eligible, reason=M.serving_eligible(destination,args.model,args.provider)
             if not eligible and row.destination=='' then
               exec("UPDATE orchestration_tasks SET detail=? WHERE id=? AND state='queued'",
                 {'waiting_provider_serving:'..reason,row.id})

@@ -19,7 +19,7 @@ function launch(name,args,env) {
 }
 function fixture(name) {
   const home=path.join(work,name);fs.mkdirSync(home,{recursive:true});
-  const env={...clean,WASM_AGENT_HOME:home,WA_GRAPH_WATCH:'0',WASM_AGENT_LUA_ROOT:root};
+  const env={...clean,WASM_AGENT_HOME:home,WA_GRAPH_WATCH:'0',WASM_AGENT_LUA_ROOT:process.env.ORCHESTRATOR_TEST_LUA_ROOT || (process.env.ORCHESTRATOR_TEST_EMBEDDED ? undefined : root)};
   const result=spawnSync(binary,['node'],{cwd:work,env,encoding:'utf8',windowsHide:true});
   assert.equal(result.status,0,result.stderr);
   return {name,env,home,...JSON.parse(result.stdout)};
@@ -116,8 +116,17 @@ print("cancel race ok")
   const b=await until(async()=>{const b=await status(second.subagent_id);return b.session_id && b;},'overflow placement');
   check(b.execution_node==='local' && b.session_id!==a.session_id,'overflow uses next node with a separate session');
   const third=await call({action:'start',prompt:'third',idempotency_key:'third'});
-  await sleep(2500);
-  check((await status(third.subagent_id)).state==='queued','all-full work remains durably queued');
+  // Reservation is visible as placing while the signed admission request is
+  // outstanding. Observe the proven capacity refusal, rather than sampling
+  // that transient state at an arbitrary timer boundary.
+  const queueSamples=[];
+  const full=await until(async()=>{
+    const value=await status(third.subagent_id);queueSamples.push(value);
+    fs.writeFileSync(path.join(work,'all-full-status.json'),JSON.stringify(queueSamples,null,2));
+    assert.ok(!value.session_id && ['queued','placing'].includes(value.state),'all-full task must never be admitted');
+    return value.state==='queued' && value.error==='node_full' && value.attempts>0 && value;
+  },'all-full capacity refusal');
+  check(full.state==='queued','all-full work remains durably queued');
   const steering=await call({action:'steer',id:first.subagent_id,text:'remote corrected requirement',idempotency_key:'remote-steer'});
   assert.equal(steering.state,'queued','signed peer path accepts live steering');
   const turn=await call({action:'message',id:first.subagent_id,text:'follow up',idempotency_key:'follow'});

@@ -53,7 +53,7 @@ check(p.recover_serving('wrong','verified',true).error~=nil,'wrong binding recov
 check(p.recover_serving(p.serving_binding(),'verified',false).error~=nil,'unverified recovery refused')
 if mode=='restart' then
   check(p.recover_serving(p.serving_binding(),'private operator verification',true).ok,'verified bound recovery')
-  outcome={status=200,body=json.encode({choices={{message={content='actual serving'},finish_reason='stop'}}})}
+  outcome={status=200,body=json.encode({model='fixture',choices={{message={content='actual serving'},finish_reason='stop'}}})}
   check(pcall(p.complete_with,'fixture',{{role='user',content='test'}},nil,false,{}),'authenticated success')
   check(p.serving('fixture').state=='observed_serving','actual success recorded')
 end
@@ -61,10 +61,15 @@ end
 dofile('lua/core/memory.lua').setup()
 local real_dofile=dofile
 local peerblocked=true
+local peeridentity={node_id='cloud',model='fixture',provider='opencode-go',account_profile='cloud-account',binding=string.rep('a',64),generation=1}
 local launches={}
 dofile=function(path)
-  if path=='lua/core/nodes.lua' then return {is_master=function() return true end,find=function() return {online=true} end,remote_call=function(_,cap)
-    if cap=='status' then return {model_error=peerblocked and 'provider_monthly_quota' or nil} end
+  if path=='lua/core/nodes.lua' then return {is_master=function() return true end,find=function() return {online=true,node_id='cloud'} end,remote_call=function(_,cap,args)
+    if cap=='status' then
+      if args.serving_identity_only then return {serving_identity=peeridentity} end
+      local value=json.decode(json.encode(peeridentity));value.state=peerblocked and 'blocked' or 'unknown';value.reason='provider_monthly_quota'
+      return {serving=value}
+    end
     launches[#launches+1]='cloud';return {subagent_id='remote'}
   end} end
   if path=='lua/core/users.lua' then return {find=function() return {role='master'} end,is_master=function() return true end} end

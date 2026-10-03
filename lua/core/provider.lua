@@ -294,17 +294,44 @@ local function serving_binding(provider)
 end
 local function serving_setup()
   serving_sql('sql_exec', 'CREATE TABLE IF NOT EXISTS provider_serving(binding TEXT PRIMARY KEY,state TEXT NOT NULL,reason TEXT NOT NULL,model TEXT NOT NULL)')
+  local columns=serving_sql('sql_query','PRAGMA table_info(provider_serving)')
+  for _,column in ipairs(columns) do if column.name=='generation' then return end end
+  -- Additive migration keeps valid predecessor observations and their bindings.
+  local ok,problem=pcall(serving_sql,'sql_exec','ALTER TABLE provider_serving ADD COLUMN generation INTEGER NOT NULL DEFAULT 0')
+  if not ok then
+    for _,column in ipairs(serving_sql('sql_query','PRAGMA table_info(provider_serving)')) do
+      if column.name=='generation' then return end
+    end
+    error(problem)
+  end
+end
+local function valid_serving(row)
+  if type(row.generation)~='number' or row.generation<0 or row.generation%1~=0 or type(row.model)~='string' then return false end
+  return (row.state=='blocked' and row.reason=='provider_monthly_quota' and row.model~='') or
+    (row.state=='observed_serving' and row.reason=='authenticated_success' and row.model~='') or
+    (row.state=='unknown' and (row.reason=='request_pending' or row.reason=='verified_recovery') and row.model=='')
 end
 function M.serving(model, provider)
   provider=provider or M.active()
   if not host.sql_query then return {state='unknown'} end
   serving_setup()
-  local row=serving_sql('sql_query','SELECT state,reason,model FROM provider_serving WHERE binding=?',{serving_binding(provider)})[1]
+  local row=serving_sql('sql_query','SELECT state,reason,model,generation FROM provider_serving WHERE binding=?',{serving_binding(provider)})[1]
+  if row and not valid_serving(row) then return {state='blocked',reason='provider_eligibility_corrupt'} end
   return row or {state='unknown'}
+end
+local function serving_request(provider, model)
+  if not host.sql_query then return nil end
+  serving_setup()
+  local binding=serving_binding(provider)
+  serving_sql('sql_exec',"INSERT OR IGNORE INTO provider_serving(binding,state,reason,model,generation) VALUES(?,'unknown','request_pending','',0)",{binding})
+  local observed=M.serving(model,provider)
+  if observed.state=='blocked' then error(observed.reason) end
+  return {binding=binding,provider=provider.id,model=model,endpoint=provider.base_url:gsub('/+$',''),
+    generation=observed.generation,state=observed.state,reason=observed.reason,observed_model=observed.model}
 end
 -- Only call at the real authenticated HTTP result seam; never with transcript
 -- prose, tool output, catalogue responses or a stringified exception.
-local function record_serving_http(provider, model, response)
+local function record_serving_http(provider, model, response, request)
   if not host.sql_query or provider.api_key=='' or response.error then return end
   if provider.id~='opencode-go' or tonumber(response.status)~=429 then return end
   local ok,payload=pcall(json.decode,response.body or '')
@@ -312,27 +339,54 @@ local function record_serving_http(provider, model, response)
   if type(problem)~='table' or problem.type~='GoUsageLimitError' or
       type(problem.metadata)~='table' or problem.metadata.limitName~='monthly' then return end
   serving_setup()
-  serving_sql('sql_exec',"INSERT INTO provider_serving(binding,state,reason,model) VALUES(?,'blocked','provider_monthly_quota',?) ON CONFLICT(binding) DO UPDATE SET state=excluded.state,reason=excluded.reason,model=excluded.model",
-    {serving_binding(provider),model})
+  serving_sql('sql_exec',"INSERT INTO provider_serving(binding,state,reason,model,generation) VALUES(?,'blocked','provider_monthly_quota',?,1) ON CONFLICT(binding) DO UPDATE SET state=excluded.state,reason=excluded.reason,model=excluded.model,generation=provider_serving.generation+1",
+    {request.binding,model})
 end
 -- Internal operator recovery seam, not a model tool. The caller must verify
 -- recovery independently and supply the exact binding returned by this function.
 function M.serving_binding() return serving_binding(M.active()) end
+-- Control-only identity discovery, separate from the eligibility observation.
+function M.serving_identity(model, requested_provider)
+  local active=M.active()
+  if requested_provider and requested_provider~=active.id then return nil,'provider_route_unavailable' end
+  local identity=json.decode(host.node_identity())
+  local observation=M.serving(model,active)
+  return {node_id=identity.node_id,model=model or M.settings().model,provider=active.id,
+    account_profile=env('WASM_AGENT_PROVIDER_ACCOUNT_PROFILE') or 'default',
+    binding=serving_binding(active),generation=observation.generation or 0}
+end
+function M.serving_status(requested)
+  if type(requested)~='table' then return {state='unknown',reason='serving_identity_required'} end
+  local current,problem=M.serving_identity(requested.model,requested.provider)
+  if not current then return {state='unknown',reason=problem} end
+  for _,key in ipairs({'node_id','model','provider','account_profile','binding','generation'}) do
+    if current[key]~=requested[key] then return {state='unknown',reason='serving_identity_changed'} end
+  end
+  local value=M.serving(requested.model)
+  if (value.generation or 0)~=current.generation then return {state='unknown',reason='serving_identity_changed'} end
+  -- The row's model describes the last observation; quota is account-wide.
+  value.observed_model=value.model
+  for key,field in pairs(current) do value[key]=field end
+  return value
+end
 function M.recover_serving(binding, evidence, operator_verified)
   if operator_verified~=true or binding~=M.serving_binding() or type(evidence)~='string' or evidence=='' then
     return {error='provider_recovery_not_verified'}
   end
   serving_setup()
-  serving_sql('sql_exec','DELETE FROM provider_serving WHERE binding=?',{binding})
+  serving_sql('sql_exec',"INSERT INTO provider_serving(binding,state,reason,model,generation) VALUES(?,'unknown','verified_recovery','',1) ON CONFLICT(binding) DO UPDATE SET state='unknown',reason='verified_recovery',model='',generation=CASE WHEN typeof(provider_serving.generation)='integer' AND provider_serving.generation>=0 THEN provider_serving.generation+1 ELSE 1 END",{binding})
   return {ok=true,state='unknown'}
 end
-local function record_serving_success(provider, model)
-  if not host.sql_query then return end
-  serving_setup()
-  -- Monthly quota is account-route wide. A real authenticated success on that
-  -- route is evidence; time, key changes and catalogue success are not.
-  serving_sql('sql_exec',"INSERT INTO provider_serving(binding,state,reason,model) VALUES(?,'observed_serving','authenticated_success',?) ON CONFLICT(binding) DO UPDATE SET state=excluded.state,reason=excluded.reason,model=excluded.model",
-    {serving_binding(provider),model})
+local function record_serving_success(provider, model, request, result)
+  if not request or result.serving_response_model~=model or
+      (result.finish_reason~='stop' and result.finish_reason~='tool_calls' and result.finish_reason~='function_call') then return end
+  local active=M.active()
+  if serving_binding(active)~=request.binding or active.id~=request.provider or
+      active.base_url:gsub('/+$','')~=request.endpoint then return end
+  -- A result owns only the snapshot preceding its request. A later block or
+  -- recovery wins, including across processes and recovery/unknown ABA cycles.
+  serving_sql('sql_exec',"UPDATE provider_serving SET state='observed_serving',reason='authenticated_success',model=?,generation=generation+1 WHERE binding=? AND generation=? AND state=? AND reason=? AND model=?",
+    {model,request.binding,request.generation,request.state,request.reason,request.observed_model})
 end
 function M.unservable(model, provider)
   local availability=M.serving(model,provider)
@@ -849,6 +903,7 @@ function M.complete_with(model, messages, tools, stream, opts)
   -- provider call is spent on a request that was already doomed. See M.unservable.
   local refusal = M.unservable(body.model, provider)
   if refusal then error(refusal) end
+  local serving_request_binding=serving_request(provider,body.model)
   -- Pi's output cap and reasoning fields follow the model compatibility contract.
   local fields, effective = M.request_options(body.model,messages,opts)
   for key,value in pairs(fields) do body[key]=value end
@@ -907,7 +962,7 @@ function M.complete_with(model, messages, tools, stream, opts)
   end
   if stream then
     local result = json.decode(host.http_stream("POST", url, json.encode(headers), serialized))
-    record_serving_http(provider,body.model,result)
+    record_serving_http(provider,body.model,result,serving_request_binding)
     if result.error then error(redact.text("provider_error: " .. tostring(result.error))) end
     if result.status ~= 200 then
       error(redact.text("provider_http_" .. tostring(result.status) .. ": " .. tostring(result.body):sub(1, 240)))
@@ -922,6 +977,7 @@ function M.complete_with(model, messages, tools, stream, opts)
       tool_calls = result.tool_calls or {},
       usage = result.usage,
       model = body.model,
+      serving_response_model = result.model,
       request_id = result.request_id,
       ttft_ms=result.ttft_ms,
       stream_complete=result.stream_complete,
@@ -942,7 +998,7 @@ function M.complete_with(model, messages, tools, stream, opts)
   end
 
   local response = json.decode(host.http("POST", url, json.encode(headers), serialized))
-  record_serving_http(provider,body.model,response)
+  record_serving_http(provider,body.model,response,serving_request_binding)
   if response.error then error(redact.text("provider_error: " .. tostring(response.error))) end
   if response.status ~= 200 then
     error(redact.text("provider_http_" .. tostring(response.status) .. ": " .. tostring(response.body):sub(1, 240)))
@@ -959,6 +1015,7 @@ function M.complete_with(model, messages, tools, stream, opts)
     tool_calls = message.tool_calls or {},
     usage = payload.usage,
     model = payload.model or body.model,
+    serving_response_model = payload.model,
     request_id = payload.id,
   }
   end)
@@ -971,7 +1028,9 @@ function M.complete_with(model, messages, tools, stream, opts)
   local has_tools=#(result.tool_calls or {})>0
   local meaningful=has_tools or visible~=""
   local complete=result.finish_reason~="length" and result.stream_complete~=false and meaningful
-  if complete and (provider.auth=='subscription' or provider.api_key~='') then record_serving_success(provider,body.model) end
+  if complete and (provider.auth=='subscription' or provider.api_key~='') then
+    record_serving_success(provider,body.model,serving_request_binding,result)
+  end
   local observation=telemetry.finish(span,{ok=complete,model=result.model,
     provider=provider.id,request_id=result.request_id,finish_reason=result.finish_reason,
     usage=result.usage,normalized=telemetry.normalize(result.usage,M.rates(result.model)),
