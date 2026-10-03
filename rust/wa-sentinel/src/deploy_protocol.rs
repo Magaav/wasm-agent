@@ -49,6 +49,10 @@ pub(crate) fn record(request: &Value, id: &str, phase: &str, detail: &str) -> Re
             "session":request["session"],"queued_at":request["queued_at"],"phase":phase,
             "detail":detail,"at":now_epoch()}))?;
     }
+    if phase=="held" && dir.join("state.json").exists() {
+        let state:Value=serde_json::from_slice(&std::fs::read(dir.join("state.json"))?)?;
+        if ["spawned","failed","verified","unknown"].contains(&state["phase"].as_str().unwrap_or("")) {return Ok(());}
+    }
     wa_operation::atomic_json(&dir.join("state.json"), &json!({"schema":1,"id":id,
         "expected_sha":request["expected_sha"],"session":request["session"],
         "queued_at":request["queued_at"],"phase":phase,"detail":detail,"at":now_epoch()}))?;
