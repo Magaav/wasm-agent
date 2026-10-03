@@ -1,0 +1,9 @@
+corners=RED activity-fix=green public=RED   M1 the complete newest row admits land/admit too
+corners=RED activity-fix=green public=RED   M2 findResolution ignores a corroborating process
+corners=RED activity-fix=green public=RED   M3 resolve stops refusing a process-held claim
+corners=RED activity-fix=RED public=RED   M4 a resolution may be borrowed (identity ignored)
+corners=green activity-fix=green public=RED   M5 observe always says a claim is resolvable
+corners=RED activity-fix=green public=RED   M6 the refusal stops naming the older unfinished rows
+corners=RED activity-fix=green public=RED   M7 the closing freeze stops fencing producing
+corners=RED activity-fix=green public=RED   M8 a positive claim is no longer listed as positive
+baseline (unmutated tip)           corners=RED activity-fix=green public=RED

@@ -1,0 +1,21 @@
+retained real public fixture: C:\Users\Victor\AppData\Local\Temp\wa-wave-public-HiFmWP
+node:internal/modules/run_main:107
+    triggerUncaughtException(
+    ^
+
+AssertionError [ERR_ASSERTION]: lua error: ...bf3-5eda1620f33c\.review-private\tip/lua/core/memory.lua:60: no such table: child_completions
+
+
+1 !== 0
+
+    at command (file:///C:/Users/Victor/.wasm-agent/wa-worktree-childdispatch98e77c9b-60c9-4a3f-8bf3-5eda1620f33c/.review-private/tip/scripts/test-wave-public.mjs:14:169)
+    at file:///C:/Users/Victor/.wasm-agent/wa-worktree-childdispatch98e77c9b-60c9-4a3f-8bf3-5eda1620f33c/.review-private/tip/scripts/test-wave-public.mjs:29:29 {
+  generatedMessage: false,
+  code: 'ERR_ASSERTION',
+  actual: 1,
+  expected: 0,
+  operator: 'strictEqual',
+  diff: 'simple'
+}
+
+Node.js v24.19.0

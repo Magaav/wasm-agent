@@ -1,0 +1,3 @@
+merged-activity-corners=0
+merged-derived-state=0
+merged-activity-fix=0

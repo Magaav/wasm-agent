@@ -1,0 +1,1 @@
+wave activity fix ok (62 checks; land/admit refused in both unverified corners, a false OFF never admits, a false ON is named and clears, the migration is idempotent and refuses early, every unfinished row is read, and the index reversal is transient)

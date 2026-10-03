@@ -1,0 +1,16 @@
+{
+  "schema": 1,
+  "delivery": "change/wave-activity-corners",
+  "branch": "change/wave-activity-corners",
+  "repository": "C:\\Users\\Victor\\.wasm-agent\\wa-worktree-childdispatcheae7f780-048c-40ad-ac82-d7c4b7d7ccc2",
+  "tip": "e15bdc1da3fad149da141a4ed0989c4b892478ff",
+  "tree": "a853249966c8b5cc1a4046e823e2b8991bdc3ba7",
+  "producer": "child:dispatch:eae7f780-048c-40ad-ac82-d7c4b7d7ccc2",
+  "review": null,
+  "admission": null,
+  "lane": null,
+  "landing": null,
+  "created_at": "2026-10-02T23:19:41.845Z",
+  "revision": 1,
+  "updated_at": "2026-10-02T23:19:41.846Z"
+}
