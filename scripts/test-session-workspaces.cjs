@@ -51,7 +51,7 @@ function runAsync(script, extras={}) {
     fs.writeFileSync(path.join(install,'runtime-worktree.txt'),`${source.replaceAll('/', '\\')}\n`);
     const seeded=run('test-session-workspaces.lua',{WASM_AGENT_TEST_SOURCE:source});
     check(seeded.status===0,`allocator/fail-closed fixture exit ${seeded.status}: ${seeded.stderr}\n${seeded.stdout}`);
-    check(seeded.stdout.includes('session workspaces ok (23 checks)'),`missing 23-check verdict: ${seeded.stdout}`);
+    check(seeded.stdout.includes('session workspaces ok (31 checks)'),`missing 31-check verdict: ${seeded.stdout}`);
 
     const [a,b]=await Promise.all([
       runAsync('test-session-workspace-worker.lua',{WASM_AGENT_TEST_SESSION:'workspace-a',WASM_AGENT_TEST_CONTENT:'concurrent-a'}),

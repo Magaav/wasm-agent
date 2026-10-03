@@ -155,7 +155,7 @@ M.admin = {
         column = { type = "integer", minimum = 1 }, version = { type = "string" },
         limit = { type = "integer", minimum = 1, maximum = 2000 } }, required = { "path" } } }
   }, { "requests" }),
-  schema("write", "Create or overwrite a text file with the given content.", {
+  schema("write", "Create or overwrite a text file with the given content. A required session workspace also permits its own session-owned evidence scratch root; outside-path refusals name both roots in allowed_writes. No general temp-directory or other-session write grant.", {
     path = { type = "string" }, content = { type = "string" } }, { "path", "content" }),
   schema("edit", "Replace text in one file, in one of two addressing forms, never both. `edits` quotes the exact bytes you can see (old_text/new_text): it must occur exactly once, a miss is refused with the nearest region rather than guessed, and it needs no receipt - this is the form that cannot hit the wrong place. `range_edits` copies a read receipt (selection, unchanged) with replacement_lines and is for replacing structure whose line endings matter, or text that is not quotable; its optional start_line/end_line are inclusive lines inside the receipt's edit_lines frame. Every range is validated against one snapshot and applied atomically, and the result names what each range actually replaced (first_line, last_line, lines, bytes, sha256, first, last) - read that echo, because a slice that stays inside its receipt is never diagnosed for you. No multi-file transaction.", {
     path = { type = "string" },
@@ -520,6 +520,30 @@ local function inside_workspace(root, path)
   return candidate == base or candidate:sub(1, #base + 1) == base .. "/"
 end
 
+-- Resolve the nearest existing ancestor before granting scratch access. Missing host
+-- support fails closed; junctions/symlinks cannot turn staging into another-tree writes.
+local function inside_scratch(root, target)
+  local paths = dofile("lua/core/paths.lua")
+  if not inside_workspace(root, target) or not host.canonical_path then return false end
+  local data = host.canonical_path(paths.data())
+  if not data then return false end
+  local probe = normalized_path(target)
+  while probe ~= '' do
+    local real = host.canonical_path(probe)
+    if real then
+      local expected = normalized_path(probe)
+      local lexical_data = normalized_path(paths.data())
+      if not inside_workspace(lexical_data, expected) then return false end
+      local suffix = expected:sub(#lexical_data + 1)
+      return normalized_path(real):lower() == normalized_path(data .. suffix):lower()
+    end
+    local parent = probe:match('^(.*)/[^/]+$')
+    if not parent or parent == probe then return false end
+    probe = parent
+  end
+  return false
+end
+
 local function required_workspace_error(memory, ctx, name, args)
   local writes_files = name == "write" or name == "edit" or name == "bash"
     or name == "operation" and (args.action or "") == "start"
@@ -546,7 +570,7 @@ local function required_workspace_error(memory, ctx, name, args)
   if name == "write" or name == "edit" then
     local target = resolve_path(memory, ctx, args.path)
     local scratch = workspaces.scratch_root(ctx.session_id)
-    if target and scratch and inside_workspace(scratch, target) then return nil end
+    if target and scratch and inside_scratch(scratch, target) then return nil end
     if target and not inside_workspace(workspace.worktree, target) then
       return {error="workspace_path_outside_binding",path=target,
         allowed_writes={workspace.worktree,scratch}}
@@ -558,7 +582,7 @@ local function required_workspace_error(memory, ctx, name, args)
     end
     local scratch = workspaces.scratch_root(ctx.session_id)
     if not inside_workspace(workspace.worktree, cwd)
-        and not (scratch and inside_workspace(scratch, cwd)) then
+        and not (scratch and inside_scratch(scratch, cwd)) then
       return {error="workspace_cwd_outside_binding",cwd=args.cwd,
         allowed_writes={workspace.worktree,scratch}}
     end

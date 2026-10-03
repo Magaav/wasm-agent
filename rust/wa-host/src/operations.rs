@@ -43,6 +43,15 @@ pub fn manager() -> &'static Manager {
         .with_env_secrets()
     })
 }
+// The preserved draft used script files. A named refusal is the narrower safe route:
+// no script with changed $0 semantics or credential-bearing command artifact is executed.
+fn command_preflight(program: &str, flag: &str, command: &str) -> Result<(), String> {
+    let escaped = |s: &str| s.encode_utf16().map(|c| if c == 34 || c == 92 { 2 } else { 1 }).sum::<usize>();
+    if cfg!(windows) && escaped(program) + escaped(flag) + escaped(command) + 520 > 8192 {
+        return Err(format!("shell_command_too_long: {} bytes; command-line launch refused before execution; use write path=<session_worktree>/command.sh (or the session-owned scratch root named in allowed_writes), then bash on that exact path", command.len()));
+    }
+    Ok(())
+}
 fn spec(
     program: &str,
     flag: &str,
@@ -94,6 +103,7 @@ pub fn foreground(
     cwd: &str,
     seconds: u64,
 ) -> Result<Value, String> {
+    command_preflight(program, flag, command)?;
     let id = manager()
         .start(spec(
             program,
@@ -181,6 +191,7 @@ pub fn control(action: &str, args: &Value, shell: &(String, String)) -> Result<V
                 configure_spec(Spec::command(executable,argv),cwd,seconds,owner,false)
             } else {
                 let command=args["command"].as_str().filter(|s|!s.is_empty()).ok_or("command_required")?;
+                command_preflight(&shell.0, &shell.1, command)?;
                 spec(
                     &shell.0,
                     &shell.1,
