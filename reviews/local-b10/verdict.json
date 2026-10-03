@@ -1,0 +1,18 @@
+{
+  "reviewer": "child:dispatch:f5f425af-bb34-4f2b-84d2-ecadaf4df855",
+  "producer": "child:dispatch:1f044075-6b4b-4bce-b359-40c131d73533",
+  "tip": "b10b3bfc6b9cc13b607a22e710e054c5eab9007a",
+  "tree": "98495270b2c60d43d583872b209f2a3c069685f0",
+  "base": "898a9a238c89c5f64b83cfa219f8c17840b441f9",
+  "verdict": "narrowed",
+  "published": false,
+  "admission_verified": false,
+  "gate_verified": false,
+  "source": "independent allocated reviewer worktree; exact candidate fast-forward; private Git/SQLite fixtures",
+  "checks": {"delivery-refresh": 0, "delivery-admission": 0, "delivery-store": 0, "merge-lane": 0, "independent-attacks": 0, "normal-wave-admit": 2},
+  "findings": [
+    {"class":"coverage", "status":"unverified", "text":"Focused fixtures and three independent actual CLI refusal controls pass. This is not production admission or combined/release gate evidence. Runtime canonical admission remains refused by original legacy-unverified wave."},
+    {"class":"coverage", "status":"unverified", "text":"No deterministic policy/branch/binding mutation between last re-evaluation and store write was injected; record CAS does not lock Git refs or session DB. No production retirement or real canonical producer/reviewer binding mutation attempted."},
+    {"class":"test_precision", "status":"narrowed", "text":"New altered retained-driver assertion rejects an extra top-level runner field by schema allowlist; it does not itself exercise altered original source hash. Positive committed-driver assertion does verify immutable source bytes. Prior uncommitted-driver report was supplied context, not independently rerun here."}
+  ]
+}
