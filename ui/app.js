@@ -1758,7 +1758,9 @@ function paintChildTranscript(container, rows, options = {}) {
     replayMessageEndedAt, replayRunLastMessage, renderedMessageIds };
   transcript = container;
   try {
-    return repaintMessages(rows || [], { ...options, notify: false });
+    const result=repaintMessages(rows || [], { ...options, notify: false });
+    for(const event of options.events || [])handleEvent(event);
+    return result;
   } finally {
     ({ transcript, runBubble, statusLine, statusLabel, statusElapsed, statusSpinner, lastAssistantBody,
       runStatusTicker, streamBody, streamText, phasePendingText, trace, lastTool, reasoningBlock,
@@ -3893,6 +3895,19 @@ async function followRun() {
   if (!mine) return;
   const seq = Number(mine.last_seq) || 0;
   if (seq === followedSeq) return;
+  // The same authenticated attach operation child hosts use; main keeps its live renderer state.
+  if(transcriptRetryAt>Date.now())return;
+  try {
+    const attached=await attachSessionJournal(target,async()=>{
+      const response=await apiFetch('session?id='+encodeURIComponent(target),{headers:apiHeaders()});
+      const page=await response.json();if(!response.ok)throw Error('session_history_unavailable');return page.messages||[];
+    });
+    if(chatSession!==target || conversationEpoch!==epoch || activeNode!==node)return;
+    repaintMessages(attached.rows,{active:/^(running|queued)$/.test(attached.state),notify:false});
+    for(const event of attached.events)handleEvent(event);
+    followedSeq=seq;
+    return;
+  } catch(error) { transcriptRetryAt=Date.now()+3000;return; }
   rememberPlace();
   if (await restoreSession(target, true)) {
     if (chatSession !== target || conversationEpoch !== epoch || activeNode !== node) return;
@@ -4695,6 +4710,29 @@ async function collectSessionHistory(readPage) {
   }
   return rows;
 }
+// Owner-authenticated journal attachment shared by any session host. Ledger checkpoint precedes tail.
+async function attachSessionJournal(thread, readHistory) {
+  let rows=await readHistory();
+  const response=await apiFetch('runs',{method:'POST',headers:apiHeaders({'Content-Type':'application/json'}),body:JSON.stringify({action:'status',thread})});
+  const status=await response.json();
+  if(!response.ok || status.ok!==true || status.conversation!==thread)throw Error('session_run_status_unavailable');
+  const runs=(status.runs||[]).filter(row=>runKey(row)!==null);
+  const current=runs.at(-1);
+  if(!current)return {rows,events:[],state:'unknown'};
+  const events=[];let after=0,checkpoint=null,seen=new Set();
+  for(;;){
+    const replayResponse=await apiFetch('run-events',{method:'POST',headers:apiHeaders({'Content-Type':'application/json'}),body:JSON.stringify({thread,run_id:runKey(current),after})});
+    const replay=await replayResponse.json();
+    if(!replayResponse.ok || runKey(replay)!==runKey(current))throw Error('session_replay_identity_mismatch');
+    if(checkpoint===null){checkpoint=replay.checkpoint_seq;rows=await readHistory();}
+    else if(checkpoint!==replay.checkpoint_seq)throw Error('session_checkpoint_changed_retry');
+    for(const item of replay.events||[])if(!seen.has(item.seq)){seen.add(item.seq);events.push(item.event);}
+    if(!replay.has_more)break;
+    if(replay.next_seq<=after)throw Error('session_event_cursor_did_not_advance');
+    after=replay.next_seq;
+  }
+  return {rows,events,state:current.state,runKey:runKey(current)};
+}
 async function paneMessages(pane) {
   // More than the node's default page of eight rows, so a child's transcript is the conversation and
   // not just its tail. The node still bounds the page - by bytes, by its own budget - and answers with
@@ -4715,12 +4753,15 @@ async function refreshAgentPane(pane) {
   if(!pane.task.session_id) { pane.notice.textContent=pane.task.error || 'Waiting for placement…'; return; }
   try {
     const result=await paneMessages(pane);
+    let attached=null;
+    try {attached=await attachSessionJournal(pane.task.session_id,async()=> (await paneMessages(pane)).rows);}catch(error){pane.notice.textContent='Live journal unavailable: '+error.message;}
+    if(attached){result.rows=attached.rows;result.events=attached.events;}
     if(!pane.isConnected)return;
     if(result.task)pane.task={...pane.task,...result.task};
     const rows=result.rows;
     // A repaint throws away the transcript's scroll position and its folded topics, so a poll that
     // found the same rows, the same state and the same in-flight call leaves the pane it found alone.
-    const painted=JSON.stringify([rows,pane.task.state,pane.task.settled,
+    const painted=JSON.stringify([rows,result.events,pane.task.state,pane.task.settled,
       pane.task.preview?.tool?.call_id]);
     if(painted!==pane.painted) {
       pane.painted=painted;
@@ -4733,7 +4774,7 @@ async function refreshAgentPane(pane) {
       const folded=Array.from(pane.transcript.querySelectorAll('[data-ledger-key]')).map(el=>[el.dataset.ledgerKey,el.hasAttribute('open'),el.classList.contains('open')]);
       const anchorOffset=visible ? visible.getBoundingClientRect().top-pane.transcript.getBoundingClientRect().top : 0;
       paintChildTranscript(pane.transcript,rows,{state:childRunState(pane.task),
-        stateAt:pane.task.settled_at,active:!pane.task.settled,liveTool:pane.task.preview?.tool});
+        stateAt:pane.task.settled_at,active:!pane.task.settled,liveTool:pane.task.preview?.tool,events:result.events});
       for(const [key,attr,cls] of folded) {
         const element=Array.from(pane.transcript.querySelectorAll('[data-ledger-key]')).find(el=>el.dataset.ledgerKey===key);
         if(element){element.toggleAttribute('open',attr);element.classList.toggle('open',cls);}
