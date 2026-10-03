@@ -1,0 +1,50 @@
+{
+  "ok": true,
+  "sentinel": "C:\\Users\\Victor\\AppData\\Local\\WASM-Agent\\wa-sentinel.exe",
+  "sentinel_sha256": "fcd5525cd0e2d29a5bfa1c5d04b232fe7f6777ae1565a7aa13b44be73eceae01",
+  "canonical_sha256": "7336cf31bc3ebee3a06144a70ac0e57057c0791d0e1e7a573c9f0dcb1c337dcb",
+  "cases": [
+    {
+      "case": "canonical",
+      "receipt": {
+        "at": 1790988148,
+        "detail": "deploy started detached (pid 18900, output appended to C:\\Users\\Victor\\AppData\\Local\\Temp\\wa-canonical-bootstrap-nnpdq8ux\\canonical\\.wasm-agent\\sentinel\\deploy.out) from C:\\Users\\Victor\\.wasm-agent\\wa-worktree-childdispatch40f63603-1bc4-4a48-9812-12a1055151be\\scripts\\deploy.sh; it waits for idle, installs the node, the UI and the sentinel, and no continuation was requested (no --session)",
+        "ok": true,
+        "request": {
+          "reason": "private canonical selection fixture",
+          "verb": "deploy"
+        }
+      },
+      "capture": "--- deploy detached at 1790988148 script C:\\Users\\Victor\\.wasm-agent\\wa-worktree-childdispatch40f63603-1bc4-4a48-9812-12a1055151be\\scripts\\deploy.sh reason private canonical selection fixture ---\ndeploy: cannot deploy from a running turn: it cannot become idle while this command waits. Build, then request an upgrade through wa-sentinel; see skills/self-update/SKILL.md\n",
+      "outcome": {
+        "ok": false,
+        "commit": "",
+        "branch": "",
+        "node_sha256": "",
+        "sentinel_sha256": "",
+        "watcher_pid": "",
+        "detail": "cannot deploy from a running turn: it cannot become idle while this command waits. Build, then request an upgrade through wa-sentinel; see skills/self-update/SKILL.md",
+        "reason": "private canonical selection fixture",
+        "at": "2026-10-03T00:42:29Z"
+      },
+      "selected_script": "C:\\Users\\Victor\\.wasm-agent\\wa-worktree-childdispatch40f63603-1bc4-4a48-9812-12a1055151be\\scripts\\deploy.sh"
+    },
+    {
+      "case": "stale-selection",
+      "receipt": {
+        "at": 1790988149,
+        "detail": "deploy started detached (pid 11548, output appended to C:\\Users\\Victor\\AppData\\Local\\Temp\\wa-canonical-bootstrap-nnpdq8ux\\stale-selection\\.wasm-agent\\sentinel\\deploy.out) from C:\\Users\\Victor\\AppData\\Local\\Temp\\wa-canonical-bootstrap-nnpdq8ux\\stale-selection\\stale.sh; it waits for idle, installs the node, the UI and the sentinel, and no continuation was requested (no --session)",
+        "ok": true,
+        "request": {
+          "reason": "private canonical selection fixture",
+          "verb": "deploy"
+        }
+      },
+      "capture": "--- deploy detached at 1790988149 script C:\\Users\\Victor\\AppData\\Local\\Temp\\wa-canonical-bootstrap-nnpdq8ux\\stale-selection\\stale.sh reason private canonical selection fixture ---\nSTALE_SCRIPT_SELECTED\n",
+      "outcome": null,
+      "selected_script": "C:\\Users\\Victor\\AppData\\Local\\Temp\\wa-canonical-bootstrap-nnpdq8ux\\stale-selection\\stale.sh"
+    }
+  ],
+  "live_effects": false,
+  "scope": "installed executable in new process with private environment, not running watcher"
+}

@@ -545,7 +545,7 @@ local function node_capability(capability, args, caller)
     -- Peer ownership comes from the verified identity. A request cannot forge
     -- a local account, become another dispatcher, or change node policy.
     local allowed = { start=true, list=true, profiles=true, status=true, result=true,
-      await=true, cancel=true, message=true, steer=true, steering_status=true, session=true, capacity=true,
+      await=true, cancel=true, message=true, steer=true, steering_status=true, session=true, events=true, capacity=true,
       -- "did you admit a run for this key?" - what a coordinator needs before it may retry a
       -- delivery whose answer it never received.
       resolve=true }

@@ -191,7 +191,23 @@ run_proof_fixture waveActivityFix 62 node scripts/test-wave-activity-fix.mjs
 # END wave-owner safety proofs
 
 gate_phase_begin build
-gate_run cargo build --release --offline --manifest-path rust/Cargo.toml >/dev/null
+ACTUAL_RELEASE_BUILD_LOG="$(git rev-parse --git-path "wa-release-build-${GATE_HOME##*/}.log")"
+echo "actual release build retained: $ACTUAL_RELEASE_BUILD_LOG"
+gate_run cargo build --release --offline --manifest-path rust/Cargo.toml >"$ACTUAL_RELEASE_BUILD_LOG" 2>&1 \
+  || { build_status=$?; cat "$ACTUAL_RELEASE_BUILD_LOG" >&2; exit "$build_status"; }
+
+# BEGIN sentinel-intake required proofs
+CARGO_BUILD_JOBS=2 gate_run cargo test --offline --manifest-path rust/wa-sentinel/Cargo.toml -- --test-threads=2
+if [ "${OS:-}" = "Windows_NT" ]; then
+CARGO_BUILD_JOBS=2 gate_run cargo build --offline --manifest-path rust/wa-sentinel/Cargo.toml
+INTAKE_PROOF="$(git rev-parse --git-path "intake-gate-$(date +%s)-$$")"
+run_proof_fixture sentinelIntake 10 python scripts/test-sentinel-intake-cli.py --sentinel "$PWD/rust/wa-sentinel/target/debug/wa-sentinel.exe" --evidence "$INTAKE_PROOF/cli"
+run_proof_fixture sentinelIntakeMutants 2 python scripts/test-sentinel-intake-mutants.py --repo "$PWD" --evidence "$INTAKE_PROOF/mutants"
+else
+  echo "SKIP: Windows Job CLI proof (portable native intake tests above are required)"
+  SKIPPED=$((SKIPPED + 1))
+fi
+# END sentinel-intake required proofs
 gate_run node scripts/test-install-isolation.mjs
 gate_run node scripts/test-gate-check.mjs
 run_proof_fixture producer 16 node scripts/test-producer-admission.mjs
@@ -250,6 +266,14 @@ SKIPPED=$((SKIPPED + INSTANCE_SKIPPED))
 rm -f "$INSTANCE_VERDICT"
 gate_phase_begin self-update
 BIN=rust/target/release/wa
+[ ! -f "$BIN.exe" ] || BIN="$BIN.exe"
+# BEGIN native-target recovery required proofs
+gate_run cargo test --offline --manifest-path rust/Cargo.toml -p wa-host resources::tests
+run_proof_fixture nativeTarget 29 node scripts/test-native-target-resource.cjs "$BIN"
+run_proof_fixture resourceClaims 47 node scripts/test-resource-claims.cjs "$BIN"
+run_proof_fixture nativeAlias 12 node scripts/test-native-target-alias.cjs "$BIN"
+run_proof_fixture nativeRecovery 66 node scripts/test-wave-native-recovery.mjs "$BIN" "$ACTUAL_RELEASE_BUILD_LOG" '--build-command=cargo build --release --offline --manifest-path rust/Cargo.toml'
+# END native-target recovery required proofs
 # Combined-tree wave fixtures are required when shipped; absence is explicit intermediate coverage.
 for wave_spec in 'lifecycle mjs waveLifecycle 40 no' 'retire mjs waveRetire 20 no' 'executor cjs waveExecutor 11 yes' 'proof mjs waveProof 18 no' 'restart mjs waveRestart 9 no' 'public mjs wavePublic 20 yes'; do
   set -- $wave_spec
@@ -1863,6 +1887,15 @@ run_proof_fixture policy 62 node scripts/test-subagents-policy.cjs "$BIN"
 run_proof_fixture children 18 node scripts/test-subagents.cjs "$BIN"
 run_proof_fixture fleet 20 node scripts/test-orchestrator.cjs "$BIN"
 gate_run node scripts/test-completion-wake.cjs "$BIN"
+if [ "${OS:-}" = "Windows_NT" ]; then
+  gate_run python scripts/test-sentinel-owned-job.py --repo "$PWD" --evidence "$(git rev-parse --git-path owned-return-gate-$$)"
+  run_proof_fixture sentinelInstall 22 python scripts/test-sentinel-owned-job.py --repo "$PWD" --evidence "$(git rev-parse --git-path private-install-gate-$$)" --script "$PWD/scripts/test-sentinel-private-install.cjs" --deadline 1800
+else
+  echo "SKIP: Windows owned return Job proof"
+  SKIPPED=$((SKIPPED + 1))
+  echo "SKIP: Windows actual private installation proof"
+  SKIPPED=$((SKIPPED + 1))
+fi
 for fixture in session-view durable-steering child-compaction child-budget-refusal completion-outbox orchestrator-defaults; do
   WA_SCRIPT="scripts/test-$fixture.lua" "$BIN" --db "$DB.$fixture"
 done
@@ -1879,7 +1912,8 @@ run_proof_fixture subagentReturn 206 node scripts/test-subagent-return-hook.cjs
 # names a path that is neither in the tree nor built by that installer, or when the derivation itself
 # stops seeing a copy form it used to see. A proof fixture rather than a bare gate_run, so its 76 checks
 # have a floor: a guard nobody counts is a guard that can lose checks silently.
-run_proof_fixture deployShipped 76 node scripts/check-deploy-shipped.mjs
+run_proof_fixture deployShipped 92 node scripts/check-deploy-shipped.mjs
+node scripts/test-sentinel-quarantine.mjs || exit 1
 run_proof_fixture orchestration 33 node scripts/test-orchestration-e2e.cjs "$BIN"
 run_proof_fixture whatsapp 40 node scripts/test-whatsapp-subagent-e2e.cjs
 # The reader's acted cursor: a message may be consumed only when a durable decision exists for it, the
@@ -1950,6 +1984,8 @@ case "$(uname -s)" in
     if [ -f scripts/test-recovery-two-window.cjs ]; then
       run_proof_fixture recoveryWindows 13 node scripts/test-recovery-two-window.cjs "$BIN"
       run_proof_fixture recoveryWindows 13 node scripts/test-recovery-two-window.cjs "$BIN" --embedded
+      run_proof_fixture nativeChildBrowser 63 node scripts/test-native-child-browser.cjs "$BIN"
+      run_proof_fixture nativeChildBrowser 63 node scripts/test-native-child-browser.cjs "$BIN" --embedded
     else
       echo "two-window recovery proof SKIPPED - primary recovery fixture absent from this producer tree"
       SKIPPED=$((SKIPPED + 1))

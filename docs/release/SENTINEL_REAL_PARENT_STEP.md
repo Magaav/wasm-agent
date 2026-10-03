@@ -1,0 +1,11 @@
+# Actual Lua parent execution and completion-based observation
+
+Source-built wa-host debug (own rust/Cargo.toml jobs2) and source-built sentinel debug, explicit WASM_AGENT_LUA_ROOT=own root, private SQLite/home/ports/local mock inference. scripts/test-sentinel-real-parent.cjs actual run exit0:8checks0skipped. Real Lua seeded parent record, declared hook installed disabled, immutable ack while watcher active; disabled no wake. Real parent held by mock inference then hook enabled; no consumption while busy, released parent consumes attributed onSentinelReturn prompt and SQLite retains it. Observer waits actual Engine completed receipt/wake ledger before advancing slot, persisted next due10seconds, actual elapsed followup consumed. Private watcher restart and hook disable/enable revision produce no duplicate old slot in observed window. Raw home Temp/wa-sr-real-AJ66wZ; result/CLI/node/watcher logs retained.
+
+Observer no longer advances at enqueue; pending slot survives busy/cancellation and same key re-emits against current revision until completed. Native42tests0failed0ignored after correcting mock fragmented request handling. Prior failing fixture exits/120sec supervision timeout/stream bug preserved; success not borrowed. Normal test.sh reaches real-parent fixture after completion-wake, passing explicit source-built sentinel path with platform suffix. Full combined gate not run.
+
+Limitations: real-parent cleanup awaits exact children, outer harness Windows Job observed operation settled, but fixture itself lacks an independent descendant accounting receipt; no wider tree ownership guarantee. Updating phase elapsed test exercised held followup rather than actual attributed spawned update. Revision test after first completion, not cancellation while busy. Intended state-transition mutant not run. Thus requested stage acceptance still incomplete on those negative/control proofs. No external blocker claimed. Exact-source installer verification and effect admission remain quarantined; no full protocol or I-am-updated claim.
+
+No live watcher/request/install/store/jobs/config/main/push changes, no paid provider. Private inference adapter only. Prior intake commits/refusals preserved.
+
+Agent: wasm-agent node=wasm_the_first session=child:dispatch:40f63603-1bc4-4a48-9812-12a1055151be

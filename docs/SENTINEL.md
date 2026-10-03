@@ -19,6 +19,94 @@ shell. The thing that can restart your agent must not be something your agent ca
 
 ## Asking
 
+### Exact-source deployment and deterministic return
+
+The source-bound protocol uses the native watcher and its declared
+`onSentinelReturn` Engine hook. From an authorized operator outside the installation
+step, queue one immutable intent:
+
+```text
+wa-sentinel request deploy --expected-sha <full 40-character main SHA> \
+  --owner <actual parent user_id> --session <actual parent conversation id> \
+  --reason "why this reviewed source is requested"
+```
+
+The CLI returns a queue receipt. The watcher separately records `intent.json`,
+`ack.json` and `state.json` under `sentinel/deploy-protocol/<request-id>/`.
+An acknowledgement means the watcher observed the immutable request; it grants
+neither effect authority nor installation success. A separate cheap intake lane
+observes new identities while health, source or verifier work is blocked. The
+five-second observation policy is tested on the trusted local runtime, not a hard
+real-time Windows guarantee. A malformed or changed identity produces a named
+problem while preserving the original intent and acknowledgement.
+
+An effect waits for actual parent ownership, the enabled `onSentinelReturn` hook,
+a clean primary `main` checkout exactly equal to both `origin/main` and the
+remote's actual main, an idle node, and native target identity. It resolves the
+canonical deployer from the installed runtime record. The request cannot select
+a script or executable. A durable `effect.json` records full source/tree, script
+hash, parent/owner and native generation before spawn. One installation reservation
+survives watcher replacement; an unsettled earlier effect refuses another.
+Only actual verified installation settles that reservation. Failed/unknown
+effects are retained for explicit reconciliation and are never replayed.
+
+The watcher observes returns natively. The shipped `sentinel-return-observe.sh`
+and `sentinel-return-prepare.sh` invoke `protocol observe` and
+`protocol compose <key-only-event-file>` respectively. General event ingress
+accepts only request/event keys: parent, owner and instructions come from the
+immutable binding and observer journal. The historical JavaScript classifier
+and direct compose APIs remain inert and cannot manufacture completion authority.
+The deterministic hook constructs instructions without a provider call; the
+approved Engine wake then runs the ordinary parent conversation.
+
+A check is due ten seconds after acknowledgement and recurs while updating.
+The native observer validates the immutable ack's full source, request, parent,
+owner, queue identity and integer timestamp (never future dated) before delivery.
+Missing, corrupt, mismatched or unsupported acknowledgements are unknown: they
+create no check, wake or effect authority. Check records retain the exact ack;
+changed acknowledgements and legacy checks without that binding require explicit
+reconciliation, with no fabricated queue-time fallback or automatic replay.
+Observation, return resolution and instruction composition use the same native
+current-check validator: exact request/source/parent and saved ack, supported
+integer observation/deadline timestamps, ten-second cadence and attributable
+due/coalescing revision. Missing established checks, corrupt or unsupported
+checks revoke pending return authority and are never silently reset. Only an
+initial observation may create a check after a genuine ack; earlier missing-ack
+UNKNOWN evidence can remain intact while that first clock starts. Composition
+requires the current check and cannot turn an invalid check's held journal into
+an instruction. This does not add effect or replay authority.
+Busy parents keep one pending event; due observations coalesce on disk rather
+than spawning extra wakes. Revision cancellation before submission can emit the
+same immutable key against the new revision. Before HTTP submission the watcher
+writes a persistent per-event delivery record. A terminal return is confirmed
+only after the root SSE `done` event is consumed; interrupted/ambiguous submission
+is visible and cannot earn a second attempt, even after revision or restart.
+This is the trusted runtime completion boundary, not a guarantee that an
+arbitrary downstream external effect occurred.
+
+Protocol deploys omit the legacy continuation wake. The request-bound installer
+result, final clean-built installation record, and actual fresh verifier must
+agree on full source/tree and actual node/sentinel/script/UI hashes, listener
+and watcher identities, with zero failures or skips. The verifier derives UI
+assets from the installer's declared served list, excluding source test fixtures
+and recognizing only its named recovery backups. A cached green packet or a
+synthetic predicate object cannot establish completion: a positive return reruns
+the actual verifier at delivery. Only that result permits `I am updated`.
+
+The state files and canonical source remain privileged local filesystem state,
+not signed intents or an OS security sandbox. Reserve canonical source while
+installing; a privileged writer racing the bracketed checks remains outside the
+guarantee. Missing outcome after the bounded ten-minute observation becomes
+unknown and must be reconciled without automatic effect retry. New/changed jobs
+still install disabled; enabling the hook is a separate authorized action.
+
+`scripts/test-sentinel-private-install.cjs`, under
+`scripts/test-sentinel-owned-job.py`, exercises a new full private source clone,
+real private bare remote, explicit private home/install/ports, source-built
+binaries, actual deployer/verifier/native processes, and real Lua/SQLite parent.
+Only inference is a labelled local mock. These tests never authorize production
+installation or settle historical production claims.
+
 ```
 wa-sentinel request restart  --reason "why"    # graceful; stays queued while busy
 wa-sentinel request recover  --reason "why"    # explicit interruption; never waits for idle

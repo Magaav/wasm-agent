@@ -1,0 +1,6 @@
+{
+  "id": "sentinel-return-observe",
+  "name": "Reconcile sentinel acknowledgements and outcomes",
+  "trigger": {"kind": "schedule", "every_seconds": 1},
+  "action": {"kind": "run", "script": "PREPARED_BY_INSTALL/scripts/sentinel-return-observe.sh", "timeout_seconds": 30}
+}
