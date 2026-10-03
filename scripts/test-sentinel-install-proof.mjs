@@ -1,0 +1,11 @@
+import assert from 'node:assert/strict';import {installVerdict} from './sentinel-install-proof.mjs';
+const now=Date.now(),at=new Date(now-1000).toISOString(),sha='a'.repeat(40),hash='b'.repeat(64);
+const intent={id:'private',owner:'owner',session:'parent',expected_sha:sha,queued_at:Math.floor((now-10000)/1000)};
+const result={ok:true,request_id:'private',expected_sha:sha,at};
+const installed={resolved_commit:sha,source_provenance:'clean-built-by-deploy',record_role:'final',dirty:'0',at,tree:sha,node_sha256:hash,sentinel_sha256:hash,scripts_sha256:hash,ui_sha256:hash,listener_pid:1,watcher_pid:2};
+const proof={...installed,suite:'verify-install',request_id:'private',expected_sha:sha,owner:'owner',parent:'parent',ok:true,exit:0,checks:50,failed:0,skipped:0};
+assert.equal(installVerdict(intent,result,installed,proof,now).ok,true,'predicate only, not actual install evidence');
+for(const changed of [{...proof,at:undefined},{...proof,at:new Date(now+10000).toISOString()},{...proof,failed:1},{...proof,owner:'victim'},{...proof,node_sha256:'c'.repeat(64)},{...proof,request_id:'other'},{...proof,tree:'c'.repeat(40)}])assert.equal(installVerdict(intent,result,installed,changed,now).ok,false);
+for(const changed of [{...installed,dirty:'1'},{...installed,resolved_commit:sha.slice(0,7)},{...installed,record_role:'interim'},{...installed,source_provenance:'unverified-binary'}])assert.equal(installVerdict(intent,result,changed,proof,now).ok,false);
+assert.equal(installVerdict(intent,result,installed,proof,now+10000).ok,false);
+console.log('install predicate ok (13 checks, 0 skipped; NOT an installed-success proof)');

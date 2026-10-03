@@ -57,6 +57,17 @@ mod role;
 #[cfg(windows)]
 mod winproc;
 
+mod deploy_protocol;
+mod sentinel_return;
+#[cfg(test)]
+mod sentinel_return_tests;
+#[cfg(test)]
+mod return_engine_tests;
+#[cfg(test)]
+mod deploy_protocol_tests;
+#[cfg(test)]
+mod intake_tests;
+
 // ---------------------------------------------------------------- paths
 
 pub(crate) fn home() -> PathBuf {
@@ -1504,7 +1515,14 @@ fn perform(request: &Value) -> Result<String> {
             if session.is_empty() != prompt.is_empty() {
                 bail!("deploy continuation requires both --session and --prompt");
             }
-            verb_deploy(session, prompt, reason)
+            if request.get("expected_sha").is_some() { bail!("protocol_quarantined: no protocol deploy effect admitted"); }
+            if let Some(sha) = request["expected_sha"].as_str() {
+                let script = deploy_protocol::canonical_script(sha)?;
+                let (interpreter, script_arg) = shell_for(&script);
+                let args = vec![script_arg, "--request-id".into(), request["id"].as_str().unwrap_or("").into(),
+                    "--expected-sha".into(), sha.into(), "--reason".into(), reason.into()];
+                start_deploy_detached(&script, &deploy_capture_path(), reason, &interpreter, &args)
+            } else { verb_deploy(session, prompt, reason) }
         }
         "run" => verb_run(request.get("script").and_then(Value::as_str).unwrap_or(""), reason),
         // A plan the agent exported. Validated against a whitelist before a single step runs, and
@@ -1527,6 +1545,12 @@ static REQUEST_ACTIVE: std::sync::atomic::AtomicUsize = std::sync::atomic::Atomi
 static MAINTENANCE_ACTIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 fn finish_request(claim: &Path, request: &Value) {
+    let id=claim.file_stem().and_then(|s|s.to_str()).unwrap_or("");
+    if deploy_protocol::reserved(id) {
+        let _=deploy_protocol::intake(request,id);
+        audit("reserved-effect-held",id,"identity fenced immediately before perform; evidence retained");
+        return;
+    }
     let outcome=std::panic::catch_unwind(std::panic::AssertUnwindSafe(||perform(request)));
     let (folder,ok,detail)=match outcome {
         Ok(Ok(detail))=>("done",true,detail),
@@ -1543,7 +1567,11 @@ fn finish_request(claim: &Path, request: &Value) {
             return;
         }
     }
-    let record=json!({"request":request,"ok":ok,"detail":detail,"at":now_epoch()});
+    let phase = if ok && request["verb"] == "deploy" { "spawned" } else if ok { "completed" } else { "failed" };
+    if let Err(error) = deploy_protocol::record(request, claim.file_stem().and_then(|s|s.to_str()).unwrap_or(""), phase, &detail) {
+        audit("protocol-record-failed", &claim.display().to_string(), &error.to_string());
+    }
+    let record=json!({"request":request,"ok":ok,"detail":detail,"at":now_epoch(),"phase":phase});
     let target=sentinel_dir().join(folder).join(claim.file_name().unwrap_or_default());
     match wa_operation::atomic_json(&target,&record) {
         Ok(())=>{let _=std::fs::remove_file(claim);},
@@ -1595,6 +1623,13 @@ impl Held {
 /// Make a held request visible: one line in the log and one on the console, once per request. It is not a
 /// failure and it is not a claim: the request stays where it is and is retried next tick.
 fn announce_hold(held: &mut Held, key: &str, verb: &str, why: &str, asked: &str) {
+    if let Ok(bytes) = std::fs::read(sentinel_dir().join("requests").join(key)) {
+        if let Ok(request) = serde_json::from_slice::<Value>(&bytes) {
+            if let Err(error) = deploy_protocol::record(&request, key.trim_end_matches(".json"), "held", why) {
+                audit("protocol-record-failed", key, &error.to_string());
+            }
+        }
+    }
     if let Some(line) = held.announcement(key, verb, why, asked) {
         audit("maintenance-deferred", &format!("{verb} {key}"), &line);
         say(&format!("{line} - retried next tick"));
@@ -1611,11 +1646,28 @@ fn process_requests(background: bool, held: &mut Held) -> Result<u32> {
         .collect();
     // Oldest first: a queue that runs backwards is a queue nobody can reason about.
     entries.sort();
+    // Intake ALL identities before any dispatch health call. No effect is admitted here.
+    for path in &entries {
+        let id=path.file_stem().and_then(|s|s.to_str()).unwrap_or("");
+        match std::fs::read(path).and_then(|b|serde_json::from_slice::<Value>(&b).map_err(std::io::Error::other)) {
+            Ok(request) => { if let Err(error)=deploy_protocol::intake(&request,id) { audit("intake-problem",id,&error.to_string()); } },
+            Err(error) => { audit("intake-malformed",id,&error.to_string());
+                let target=sentinel_dir().join("intake-problems");std::fs::create_dir_all(&target)?;
+                let nonce=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos();
+                wa_operation::atomic_json(&target.join(format!("malformed-{}-{nonce}.json",std::process::id())),&json!({"path":path,"raw_bytes":std::fs::read(path).ok(),"detail":error.to_string(),"at":now_epoch()}))?;
+            }
+        }
+    }
     // The newest upgrade in the box, if any. Only it is performed; every older one is superseded.
     let newest_upgrade = newest_upgrade_in(&entries);
     for path in entries {
         use std::sync::atomic::Ordering;
         let preview:Value=std::fs::read(&path).ok().and_then(|b|serde_json::from_slice(&b).ok()).unwrap_or(Value::Null);
+        let reserved_id=path.file_stem().and_then(|s|s.to_str()).unwrap_or("");
+        if deploy_protocol::reserved(reserved_id) {
+            let _=deploy_protocol::intake(&preview,reserved_id);
+            continue; // reserved identity cannot downgrade into any legacy verb
+        }
         // Only the newest upgrade matters. An upgrade installs one binary, so an older request for an
         // older build is superseded, not queued behind it: without this, several agents' upgrades ran
         // in turn - each stopping and starting the node, each able to fail and be retried while a long
@@ -1639,6 +1691,23 @@ fn process_requests(background: bool, held: &mut Held) -> Result<u32> {
         // readable.
         let key=path.file_name().unwrap_or_default().to_string_lossy().to_string();
         let asked=preview["reason"].as_str().unwrap_or("(no reason given)");
+        let protocol_id = key.trim_end_matches(".json");
+        if preview.get("expected_sha").is_some() {
+            if let Err(error)=deploy_protocol::intake(&preview,protocol_id) { audit("intake-problem",protocol_id,&error.to_string()); }
+            // Reserved only: parent ownership and effect path are deliberately not ready.
+            continue;
+        }
+        if let Err(error) = deploy_protocol::validate(&preview, protocol_id) {
+            deploy_protocol::record(&preview, protocol_id, "rejected", &error.to_string())?;
+            let claim = sentinel_dir().join("claimed").join(&key);
+            if claim_request(&path, &claim)? {
+                let target = sentinel_dir().join("failed").join(&key);
+                wa_operation::atomic_json(&target, &json!({"request":preview,"ok":false,"detail":error.to_string(),"at":now_epoch()}))?;
+                std::fs::remove_file(claim)?;
+            }
+            continue;
+        }
+        deploy_protocol::record(&preview, protocol_id, "accepted", "watcher observed request; installation not complete")?;
         let capacity=if verb=="recover" {5}else{4};
         if background && REQUEST_ACTIVE.load(Ordering::Acquire)>=capacity {
             announce_hold(held,&key,verb,"the watcher is at its request capacity",asked);
@@ -1676,6 +1745,12 @@ fn process_requests(background: bool, held: &mut Held) -> Result<u32> {
                 continue;
             }
         };
+        if request.get("expected_sha").is_some() || deploy_protocol::reserved(claim.file_stem().and_then(|s|s.to_str()).unwrap_or("")) {
+            let id=claim.file_stem().and_then(|s|s.to_str()).unwrap_or("");
+            let _=deploy_protocol::intake(&request,id);
+            audit("claimed-protocol-held",id,"effect quarantined; claimed evidence preserved");
+            continue;
+        }
         if background {
             REQUEST_ACTIVE.fetch_add(1,Ordering::AcqRel);
             if management {MAINTENANCE_ACTIVE.store(true,Ordering::Release);}
@@ -1721,6 +1796,7 @@ fn print_request_help() {
     println!();
     println!("  --reason <text>                  why, recorded in the audit log");
     println!("  --session <id> --prompt <text>   wake that session when the request is done (upgrade, deploy, wake)");
+    println!("  --expected-sha <full SHA>        deploy protocol: exact published canonical main source");
     println!("  --binary <path>                  the binary to install (upgrade)");
     println!("  --script <path>                  the allow-listed script to run (run)");
     println!("  --file <path>                    the exported spell plan (spell)");
@@ -1755,8 +1831,13 @@ fn request(args: &[String]) -> Result<()> {
     let mut index = 1;
     while index < args.len() {
         if args[index]=="--if-no-pending" {dedupe_deploy=true;index+=1;continue;}
+        if !args[index].starts_with("--") { bail!("request option must start with --; no request written"); }
         let key = args[index].trim_start_matches("--").to_string();
-        let value = args.get(index + 1).cloned().unwrap_or_default();
+        if !["reason","session","prompt","binary","script","file","expected-sha"].contains(&key.as_str()) {
+            bail!("unknown request option {}; no request written",args[index]);
+        }
+        if fields.contains_key(&key) { bail!("duplicate request option; no request written"); }
+        let value = args.get(index + 1).filter(|v| !v.starts_with("--")).cloned().context("request option needs a value")?;
         fields.insert(key, json!(value));
         index += 2;
     }
@@ -1785,10 +1866,21 @@ fn request(args: &[String]) -> Result<()> {
     for folder in ["requests","claimed","done","failed"] {
         if sentinel_dir().join(folder).join(format!("{stamp}.json")).exists() {bail!("request identity collision; existing evidence preserved");}
     }
+    if let Some(sha) = fields.remove("expected-sha") {
+        fields.insert("expected_sha".into(), sha);
+        fields.insert("id".into(), json!(stamp));
+        fields.insert("queued_at".into(), json!(now_epoch()));
+        deploy_protocol::validate(&Value::Object(fields.clone()), &stamp)?;
+    }
     let path = sentinel_dir().join("requests").join(format!("{stamp}.json"));
     // Read the reason before the map is moved into the file: the audit line is written from the same
     // request, and a supervisor's log must not depend on the order of two statements.
     let reason = fields.get("reason").and_then(Value::as_str).unwrap_or("(no reason given)").to_string();
+    if fields.contains_key("expected_sha") {
+        let dir = sentinel_dir().join("deploy-protocol").join(&stamp);
+        std::fs::create_dir_all(&dir)?;
+        wa_operation::atomic_json(&dir.join("intent.json"), &Value::Object(fields.clone()))?;
+    }
     wa_operation::atomic_json(&path,&Value::Object(fields))
         .with_context(|| format!("write {}", path.display()))?;
     audit("request", &verb, &reason);
@@ -2010,6 +2102,15 @@ fn watch() -> Result<()> {
         }
         if let Err(error) = process_requests(true, &mut held) {
             audit("box-error", "requests", &error.to_string());
+        }
+        if let Ok(entries)=std::fs::read_dir(sentinel_dir().join("deploy-protocol")) {
+            for entry in entries.flatten() {
+                if entry.path().is_dir() {
+                    if let Some(id)=entry.file_name().to_str() {
+                        if let Err(error)=sentinel_return::observe(id) {audit("return-observation-problem",id,&error.to_string());}
+                    }
+                }
+            }
         }
         check_triggers(&mut triggers);
         if let Err(error)=automations.tick() {audit("jobs-error","tick",&error.to_string());}

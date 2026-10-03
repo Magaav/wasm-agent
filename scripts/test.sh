@@ -182,6 +182,19 @@ run_proof_fixture() {
   tail -4 "$log"
 }
 
+# BEGIN sentinel-intake required proofs
+CARGO_BUILD_JOBS=2 gate_run cargo test --offline --manifest-path rust/wa-sentinel/Cargo.toml -- --test-threads=2
+if [ "${OS:-}" = "Windows_NT" ]; then
+CARGO_BUILD_JOBS=2 gate_run cargo build --offline --manifest-path rust/wa-sentinel/Cargo.toml
+INTAKE_PROOF="$(git rev-parse --git-path "intake-gate-$(date +%s)-$$")"
+run_proof_fixture sentinelIntake 10 python scripts/test-sentinel-intake-cli.py --sentinel "$PWD/rust/wa-sentinel/target/debug/wa-sentinel.exe" --evidence "$INTAKE_PROOF/cli"
+run_proof_fixture sentinelIntakeMutants 2 python scripts/test-sentinel-intake-mutants.py --repo "$PWD" --evidence "$INTAKE_PROOF/mutants"
+else
+  echo "SKIP: Windows Job CLI proof (portable native intake tests above are required)"
+  SKIPPED=$((SKIPPED + 1))
+fi
+# END sentinel-intake required proofs
+
 gate_phase_begin build
 gate_run cargo build --release --offline --manifest-path rust/Cargo.toml >/dev/null
 gate_run node scripts/test-install-isolation.mjs
@@ -1854,6 +1867,12 @@ run_proof_fixture policy 62 node scripts/test-subagents-policy.cjs "$BIN"
 run_proof_fixture children 18 node scripts/test-subagents.cjs "$BIN"
 run_proof_fixture fleet 20 node scripts/test-orchestrator.cjs "$BIN"
 gate_run node scripts/test-completion-wake.cjs "$BIN"
+if [ "${OS:-}" = "Windows_NT" ]; then
+  gate_run python scripts/test-sentinel-owned-job.py --repo "$PWD" --evidence "$(git rev-parse --git-path owned-return-gate-$$)"
+else
+  echo "SKIP: Windows owned return Job proof"
+  SKIPPED=$((SKIPPED + 1))
+fi
 for fixture in session-view durable-steering child-compaction child-budget-refusal completion-outbox orchestrator-defaults; do
   WA_SCRIPT="scripts/test-$fixture.lua" "$BIN" --db "$DB.$fixture"
 done
@@ -1870,7 +1889,8 @@ run_proof_fixture subagentReturn 206 node scripts/test-subagent-return-hook.cjs
 # names a path that is neither in the tree nor built by that installer, or when the derivation itself
 # stops seeing a copy form it used to see. A proof fixture rather than a bare gate_run, so its 76 checks
 # have a floor: a guard nobody counts is a guard that can lose checks silently.
-run_proof_fixture deployShipped 76 node scripts/check-deploy-shipped.mjs
+run_proof_fixture deployShipped 82 node scripts/check-deploy-shipped.mjs
+node scripts/test-sentinel-quarantine.mjs || exit 1
 run_proof_fixture orchestration 33 node scripts/test-orchestration-e2e.cjs "$BIN"
 run_proof_fixture whatsapp 40 node scripts/test-whatsapp-subagent-e2e.cjs
 # The reader's acted cursor: a message may be consumed only when a durable decision exists for it, the
