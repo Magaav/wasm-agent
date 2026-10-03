@@ -51,7 +51,7 @@ impl Journal {
         use rusqlite::OptionalExtension;
         let db = self.db.lock().map_err(|e|e.to_string())?;
         db.query_row("SELECT state,request,created_at,updated_at FROM admissions WHERE id=? AND owner=? AND conversation=?",
-            params![id,owner,conversation], |row| Ok(json!({"ok":true,"run_id":id,
+            params![id,owner,conversation], |row| Ok(json!({"ok":true,"run_id":id,"run_key":id.to_string(),
                 "state":row.get::<_,String>(0)?,"request":row.get::<_,String>(1)?,
                 "created_at":row.get::<_,u64>(2)?,"updated_at":row.get::<_,u64>(3)?,
                 "recovery":"Inspect transcript, operations and external effects before submitting a continuation; this request is never replayed automatically."})))
@@ -72,7 +72,7 @@ impl Journal {
         let mut stmt = db.prepare("SELECT id,state,cancel_requested FROM admissions
             WHERE owner=? AND conversation=? ORDER BY id DESC LIMIT 100").map_err(|e| e.to_string())?;
         let rows = stmt.query_map(params![owner, conversation], |row| {
-            Ok(json!({"run_id":row.get::<_,u64>(0)?, "state":row.get::<_,String>(1)?,
+            Ok(json!({"run_id":row.get::<_,u64>(0)?, "run_key":row.get::<_,u64>(0)?.to_string(), "state":row.get::<_,String>(1)?,
                 "cancel_requested":row.get::<_,bool>(2)?}))
         }).map_err(|e| e.to_string())?;
         let mut result = rows.collect::<Result<Vec<_>,_>>().map_err(|e| e.to_string())?;
@@ -122,7 +122,7 @@ impl Journal {
             next = seq;
         }
         let latest: u64 = db.query_row("SELECT COALESCE(MAX(seq),0) FROM events WHERE run_id=?", [id], |row|row.get(0)).map_err(|e|e.to_string())?;
-        Ok(Some(json!({"ok":true,"run_id":id,"state":state,"durable":true,"archive":archive,
+        Ok(Some(json!({"ok":true,"run_id":id,"run_key":id.to_string(),"state":state,"durable":true,"archive":archive,
             "checkpoint_seq":checkpoint_seq,"checkpoint_message_seq":checkpoint_message_seq,
             "next_seq":next,"latest_seq":latest,"has_more":next<latest,"overflow":false,"events":events})))
     }

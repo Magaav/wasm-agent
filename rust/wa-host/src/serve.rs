@@ -847,7 +847,7 @@ fn health_body() -> Vec<u8> {
         // cancelling without guessing. No prompts and no credentials.
         "run_ids": scheduler::global().map(|scheduler| {
             scheduler.run_ids().into_iter().map(|(conversation, run_id, state)| {
-                serde_json::json!({"conversation": conversation, "run_id": run_id, "state": state.as_str()})
+                serde_json::json!({"conversation": conversation, "run_id": run_id, "run_key": run_id.to_string(), "state": state.as_str()})
             }).collect::<Vec<_>>()
         }),
         // Local subagent runtime. `subagents` is the strict, versioned shape `{queued,running,active}`
@@ -1116,6 +1116,24 @@ fn peer_conversation(request: &Request, verified_node_id: &str) -> String {
 /// The response never claims a run stopped: `cancel` sets a request and
 /// reports the state it was in, and the caller polls `status` until the run settles as `cancelled`
 /// or `completed`.
+// Exact wire identity: canonical positive decimal strings, or legacy JS-safe integers.
+// Durable SQLite journal IDs are signed 64-bit; reject unsupported values before dispatch.
+fn parse_run_id(value: Option<&serde_json::Value>) -> Result<Option<u64>, &'static str> {
+    let Some(value) = value else { return Ok(None) };
+    let id = if let Some(text) = value.as_str() {
+        if text.is_empty() || text.starts_with('0') || !text.bytes().all(|b| b.is_ascii_digit()) {
+            return Err("invalid_run_id");
+        }
+        text.parse::<u64>().map_err(|_| "run_id_out_of_range")?
+    } else {
+        let id = value.as_u64().ok_or("invalid_run_id")?;
+        if id > 9_007_199_254_740_991 { return Err("unsafe_numeric_run_id"); }
+        id
+    };
+    if id == 0 || id > i64::MAX as u64 { return Err("run_id_out_of_range"); }
+    Ok(Some(id))
+}
+
 fn handle_runs(request: &Request, resolve_tx: &std::sync::mpsc::SyncSender<ResolveRequest>, deadline: std::time::Instant) -> Reply {
     let owner = match resolve_identity(resolve_tx, &request.session, deadline) {
         Ok(owner) => owner,
@@ -1135,7 +1153,10 @@ fn handle_runs(request: &Request, resolve_tx: &std::sync::mpsc::SyncSender<Resol
     if conversation.is_empty() {
         return (400, "application/json", b"{\"error\":\"conversation_required\"}".to_vec());
     }
-    let run_id = parsed.get("run_id").and_then(|value| value.as_u64());
+    let run_id = match parse_run_id(parsed.get("run_id")) {
+        Ok(id) => id,
+        Err(error) => return (400,"application/json",serde_json::json!({"error":error}).to_string().into_bytes()),
+    };
     let Some(scheduler) = scheduler::global() else {
         return (503, "application/json", b"{\"error\":\"admission_unavailable\"}".to_vec());
     };
@@ -1147,6 +1168,7 @@ fn handle_runs(request: &Request, resolve_tx: &std::sync::mpsc::SyncSender<Resol
                 .map(|view| {
                     serde_json::json!({
                         "run_id": view.run_id,
+                        "run_key": view.run_id.to_string(),
                         "state": view.state.as_str(),
                         "cancel_requested": view.cancel_requested,
                     })
@@ -1179,6 +1201,7 @@ fn handle_runs(request: &Request, resolve_tx: &std::sync::mpsc::SyncSender<Resol
                 let body = serde_json::json!({
                     "ok": true,
                     "run_id": run_id,
+                    "run_key": run_id.to_string(),
                     "cancel_requested": true,
                     "state": state.as_str(),
                 })
@@ -1201,7 +1224,11 @@ fn handle_runs(request: &Request, resolve_tx: &std::sync::mpsc::SyncSender<Resol
 fn handle_run_events(request: &Request, resolve_tx: &std::sync::mpsc::SyncSender<ResolveRequest>, deadline: std::time::Instant) -> Reply {
     let parsed: serde_json::Value = serde_json::from_slice(&request.body).unwrap_or(serde_json::Value::Null);
     let conversation = parsed.get("thread").and_then(|value| value.as_str()).unwrap_or_default();
-    let Some(run_id) = parsed.get("run_id").and_then(|value| value.as_u64()) else {
+    let run_id = match parse_run_id(parsed.get("run_id")) {
+        Ok(id) => id,
+        Err(error) => return (400,"application/json",serde_json::json!({"error":error}).to_string().into_bytes()),
+    };
+    let Some(run_id) = run_id else {
         return (400, "application/json", b"{\"error\":\"run_id_required\"}".to_vec());
     };
     if conversation.is_empty() {
