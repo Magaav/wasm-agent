@@ -9,6 +9,7 @@ import {DatabaseSync} from 'node:sqlite';
 import {fileURLToPath} from 'node:url';
 import {create,inspect,advance} from './wave-lifecycle.mjs';
 import {waveActivity,activitySource,isolatedRepository} from './lib/wave-activity.mjs';
+import {recoveryAdmission} from './lib/wave-recovery.mjs';
 const hash=x=>crypto.createHash('sha256').update(x).digest('hex');
 const key=x=>{const p=path.resolve(x).replaceAll('\\','/');return process.platform==='win32'?p.toLowerCase():p;};
 function git(repo,...args){const r=spawnSync('git',['-C',repo,...args],{encoding:'utf8',windowsHide:true});if(r.status!==0)throw Error('wave_git_identity_unavailable');return r.stdout.trim();}
@@ -23,7 +24,7 @@ function registration(repo) {
   if(row.schema!==1 || key(location(row.repo))!==key(store) || !row.owner || !row.config || !row.source_root)throw Error('wave_registration_unverifiable');
   return {...row,store};
 }
-export function checkAdmission(repo,{phase='produce'}={}) {
+export function checkAdmission(repo,{phase='produce',recovery=null}={}) {
   try {
     if(!['produce','admit','land','allocate','observe'].includes(phase))throw Error('unknown_wave_admission_phase');
     const file=path.join(location(repo),'registration.json');
@@ -60,7 +61,11 @@ export function checkAdmission(repo,{phase='produce'}={}) {
     // no unfinished wave's convergence is unverified - and that holds whether or not agents are
     // working right now: a live umbrella does not make an unverified convergence verified.
     const unverified=unfinished.find(entry=>!['verified','open'].includes(entry.verdict.convergence));
-    if(['land','admit'].includes(phase) && unverified)throw Error(`wave_convergence_unverified:${unverified.row.id}:${unverified.row.state}:${unverified.verdict.reason}`);
+    if(['land','admit'].includes(phase) && unverified){
+      const original_refusal=`wave_convergence_unverified:${unverified.row.id}:${unverified.row.state}:${unverified.verdict.reason}`;
+      if(recovery){if(unfinished.length!==1)throw Error('recovery_multiple_unfinished_waves');return recoveryAdmission(repo,row.store,{phase,recovery,original_refusal,named});}
+      throw Error(original_refusal);
+    }
     // PRODUCING AND ALLOCATING. An ON umbrella admits them, and so does an OFF or unobservable one:
     // an idle row must never fence the lanes that keep the repository moving.
     return {ok:true,wave_verified:true,wave_id:current.id,store:row.store,phase,...named};
