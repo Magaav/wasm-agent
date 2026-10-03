@@ -29,10 +29,12 @@ try {
     [0,'  ok   UI structure, but startup recovery was skipped and the mid-run reload never ran\n'],
     [0,'  ok   UI structure [stages: reload,startup-recovery]\n'],
     [0,real+'fail: missing inspector\n'],[0,real+'dependency_missing: browser\n']])assert(!checkVerdict(browser,exit,text).ok);
-  if(process.platform==='win32' && fs.existsSync('rust/target/debug/wa.exe')) {
-    const http=spawnSync(process.execPath,['scripts/test-run-key-http.cjs'],{encoding:'utf8',windowsHide:true});
+  if(process.platform==='win32') {
+    const candidate=process.env.WA_RUN_KEY_BIN || (fs.existsSync('rust/target/release/wa.exe')?'rust/target/release/wa.exe':'rust/target/debug/wa.exe');
+    assert(fs.existsSync(candidate),'required run-key HTTP candidate missing; build current source or set WA_RUN_KEY_BIN');
+    const http=spawnSync(process.execPath,['scripts/test-run-key-http.cjs',candidate],{encoding:'utf8',windowsHide:true});
     process.stdout.write(http.stdout||'');process.stderr.write(http.stderr||'');
     assert.equal(http.status,0,'real high-ID HTTP regression');
-  } else console.log('SKIP: high-ID HTTP requires Windows candidate rust/target/debug/wa.exe');
+  } else console.log('SKIP: high-ID HTTP requires Windows');
   console.log('gate check runner ok (focused isolation and browser stage contract; HTTP skip separately reported)');
 } finally {fs.rmSync(root,{recursive:true,force:true});}

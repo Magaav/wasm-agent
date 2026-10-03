@@ -1130,7 +1130,7 @@ async function refreshOperationProgress(health, running) {
   // whichever node it is attached to. The `worker:` *prefix* is the operation record's own durable
   // value (rust/wa-operation), not a health field, so it keeps its name too.
   const owners = [];
-  if (running.run_id != null) owners.push("run:" + running.run_id);
+  if (running.run_id != null) owners.push("run:" + runKey(running));
   const nodeThreadId = running.node_thread_id != null
     ? running.node_thread_id
     : (running.worker_id != null ? running.worker_id : running.id);
@@ -2043,7 +2043,7 @@ function startLiveness() {
       node_thread_state: health.worker || "alive",
       queue: health.queue || 0,
       run_state: ownState,
-      current_run_id: running.run_id,
+      current_run_id: runKey(running),
     });
   }, 1000);
 }
