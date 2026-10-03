@@ -1,0 +1,3224 @@
+{
+  "schema": 1,
+  "root": "C:\\Users\\Victor\\AppData\\Local\\Temp\\wa-native-browser-D1t1J7",
+  "checks": [
+    "private repository created",
+    "owned wrapper process creation positively observed",
+    "explicit authenticated native owner credential",
+    "owned wrapper process creation positively observed",
+    "native child admitted",
+    "native journal bound to actual node identity",
+    "genuine native journal first indexed page",
+    "native tool exchange advances durable checkpoint",
+    "native event cursor advances to complete tail",
+    "native raw event ids ordered without gaps",
+    "native raw content exact and once across pages",
+    "actual provider reasoning commentary tool and answer channels retained",
+    "native refuses foreign attempt_id",
+    "native refuses foreign session_id",
+    "native refuses foreign node_id",
+    "native refuses foreign event_node_id",
+    "native refuses foreign event_epoch",
+    "isolated foreign owner credential exists",
+    "native refuses foreign owner before evidence",
+    "native refuses future cursor",
+    "native refuses malformed supplied cursor \"garbage\"",
+    "native refuses malformed supplied cursor true",
+    "native refuses malformed supplied cursor false",
+    "native refuses malformed supplied cursor {}",
+    "native refuses malformed supplied cursor []",
+    "native refuses malformed supplied cursor -1",
+    "native refuses malformed supplied cursor 0.5",
+    "native refuses malformed supplied cursor \"9007199254740993\"",
+    "native refuses malformed supplied cursor \"1.5\"",
+    "native refuses malformed supplied cursor \"-1\"",
+    "native refuses malformed supplied cursor \"\"",
+    "native valid initial/exact decimal cursor 0",
+    "native valid initial/exact decimal cursor \"0\"",
+    "native valid initial/exact decimal cursor \"269\"",
+    "malformed native cursor refuses before identity lookup",
+    "native pane consumes all journal pages exactly once",
+    "genuine native journal attachment supersedes bounded preview",
+    "native repeated attachment exact once",
+    "native layout child admitted 0",
+    "native layout child admitted 1",
+    "native layout child admitted 2",
+    "native layout child admitted 3",
+    "native layout child admitted 4",
+    "six genuine native panes contained in viewport grid",
+    "six native headers capped at44 and shared actions match attachments",
+    "six native shared footer controls contained without overlap",
+    "growing native assistant preserves folds and draft",
+    "growing native assistant retains stable raw-id scroll anchor",
+    "native reasoning has a real inner scroll viewport",
+    "native growing segments retain inner reasoning scroll position",
+    "late native pane response cannot cross attempt identity",
+    "late native attempt response cannot cross stable logical control address",
+    "late native main response cannot cross conversation epoch",
+    "late native main response cannot cross owner credential",
+    "late native main response cannot cross active node",
+    "native bounded session page identity",
+    "native main reload preserves all page cursors and exact once content",
+    "native reconnect exact once new event",
+    "all native child threads settled before scratch retirement",
+    "native main unavailable journal shows stored terminal with visible gap",
+    "native attached pane unavailable journal shows stored terminal with visible source and gap",
+    "native terminal fallback preserves already seen raw DOM and folds",
+    "native terminal fallback preserves raw scroll anchor",
+    "native repeated terminal fallback stored answer exactly once",
+    "native fresh pane same stored terminal despite unavailable journal",
+    "native terminal fallback labels stored message source",
+    "native restored journal never duplicates known terminal answer",
+    "native restored journal retains previously seen raw anchors",
+    "native terminal fallback and restore never replay inference or effects",
+    "native oversized original has exact evidence identity",
+    "native exact original version and byte cursor advances",
+    "native exact original version and byte cursor advances",
+    "native exact original version and byte cursor advances",
+    "native exact original version and byte cursor advances",
+    "native exact original version and byte cursor advances",
+    "native exact original version and byte cursor advances",
+    "native exact original version and byte cursor advances",
+    "native exact original version and byte cursor advances",
+    "native exact original version and byte cursor advances",
+    "native exact original version and byte cursor advances",
+    "native exact original version and byte cursor advances",
+    "native exact original version and byte cursor advances",
+    "native exact original version and byte cursor advances",
+    "native exact original version and byte cursor advances",
+    "native oversized original exact raw bytes without clipping",
+    "native old message version refuses",
+    "native terminal event archive remains owner readable",
+    "private node killed and waited with zero Job processes",
+    "owned wrapper process creation positively observed",
+    "native archive raw ids and content survive actual node restart",
+    "native restart never replays unknown effects or inference",
+    "native continuation has opaque new attempt in same session",
+    "old attempt cannot attach new native attempt",
+    "native write failure cannot become successful settlement",
+    "native partial retained evidence reports write loss",
+    "native write failure retained durably",
+    "all native attempts accounted settled before scratch cleanup",
+    "missing old event evidence is named unavailable",
+    "native exact message cannot cross session",
+    "native unavailable journal visibly falls back to original terminal ledger",
+    "original native assertion floor retained"
+  ],
+  "requests": [
+    {
+      "route": "health",
+      "status": 200,
+      "ms": 429
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 79
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 38
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 44
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 30
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 32
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 41
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 40
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 33
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 27
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 37
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 36
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 40
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 42
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 41
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 39
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 38
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 60
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 37
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 39
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 48
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 34
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 50
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 44
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 28
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 25
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 22
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 25
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 22
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 54
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 4
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 4
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 5
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 4
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 4
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 6
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 6
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 5
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 5
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 4
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 4
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 48
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 44
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 31
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 4
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 80
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 31
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 31
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 42
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 30
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 37
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 27
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 67
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 30
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 36
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 29
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 36
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 37
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 60
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 32
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 32
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 30
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 26
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 29
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 32
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 71
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 30
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 32
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 34
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 35
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 41
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 35
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 84
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 32
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 29
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 39
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 46
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 31
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 34
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 39
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 39
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 45
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 117
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 46
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 43
+    },
+    {
+      "route": "health",
+      "status": 200,
+      "ms": 3
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 47
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 43
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 33
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 41
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 39
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 35
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 44
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 40
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 41
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 37
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 32
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 34
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 36
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 39
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 28
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 32
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 34
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 26
+    },
+    {
+      "route": "health",
+      "status": 200,
+      "ms": 491
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 268
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 36
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 31
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 34
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 32
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 25
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 30
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 28
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 39
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 40
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 28
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 26
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 28
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 27
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 33
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 40
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 26
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 17
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 37
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 20
+    },
+    {
+      "route": "health",
+      "status": 200,
+      "ms": 2
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 18
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 27
+    }
+  ],
+  "models": [
+    {
+      "name": "B",
+      "model": "fixture-model",
+      "toolResults": 0
+    },
+    {
+      "name": "B",
+      "model": "fixture-model",
+      "toolResults": 1
+    },
+    {
+      "name": "NEXT",
+      "model": "fixture-model",
+      "toolResults": 0
+    },
+    {
+      "name": "NEXT",
+      "model": "fixture-model",
+      "toolResults": 0
+    },
+    {
+      "name": "NEXT",
+      "model": "fixture-model",
+      "toolResults": 0
+    },
+    {
+      "name": "NEXT",
+      "model": "fixture-model",
+      "toolResults": 0
+    },
+    {
+      "name": "NEXT",
+      "model": "fixture-model",
+      "toolResults": 0
+    },
+    {
+      "name": "B",
+      "model": "fixture-model",
+      "toolResults": 1
+    }
+  ],
+  "lua": "embedded candidate modules",
+  "binary": {
+    "path": "C:\\Users\\Victor\\AppData\\Local\\Temp\\wa-review-original-ui-target\\debug\\wa.exe",
+    "sha256": "40d3b1351b1a246289839a2ae104248490cf5f761b78349a508d19631a7a04db"
+  },
+  "raw": [
+    {
+      "event": {
+        "n": 2,
+        "type": "round"
+      },
+      "seq": 14
+    },
+    {
+      "event": {
+        "text": "model",
+        "type": "status"
+      },
+      "seq": 15
+    },
+    {
+      "event": {
+        "chars": 21,
+        "text": "LIVE-REASONING START ",
+        "type": "reasoning"
+      },
+      "seq": 16
+    },
+    {
+      "event": {
+        "text": "LIVE-B",
+        "type": "delta"
+      },
+      "seq": 17
+    },
+    {
+      "event": {
+        "text": " raw-0 原始 ",
+        "type": "delta"
+      },
+      "seq": 18
+    },
+    {
+      "event": {
+        "text": " raw-1 原始 ",
+        "type": "delta"
+      },
+      "seq": 19
+    },
+    {
+      "event": {
+        "text": " raw-2 原始 ",
+        "type": "delta"
+      },
+      "seq": 20
+    },
+    {
+      "event": {
+        "text": " raw-3 原始 ",
+        "type": "delta"
+      },
+      "seq": 21
+    },
+    {
+      "event": {
+        "text": " raw-4 原始 ",
+        "type": "delta"
+      },
+      "seq": 22
+    },
+    {
+      "event": {
+        "text": " raw-5 原始 ",
+        "type": "delta"
+      },
+      "seq": 23
+    },
+    {
+      "event": {
+        "text": " raw-6 原始 ",
+        "type": "delta"
+      },
+      "seq": 24
+    },
+    {
+      "event": {
+        "text": " raw-7 原始 ",
+        "type": "delta"
+      },
+      "seq": 25
+    },
+    {
+      "event": {
+        "text": " raw-8 原始 ",
+        "type": "delta"
+      },
+      "seq": 26
+    },
+    {
+      "event": {
+        "text": " raw-9 原始 ",
+        "type": "delta"
+      },
+      "seq": 27
+    },
+    {
+      "event": {
+        "text": " raw-10 原始 ",
+        "type": "delta"
+      },
+      "seq": 28
+    },
+    {
+      "event": {
+        "text": " raw-11 原始 ",
+        "type": "delta"
+      },
+      "seq": 29
+    },
+    {
+      "event": {
+        "text": " raw-12 原始 ",
+        "type": "delta"
+      },
+      "seq": 30
+    },
+    {
+      "event": {
+        "text": " raw-13 原始 ",
+        "type": "delta"
+      },
+      "seq": 31
+    },
+    {
+      "event": {
+        "text": " raw-14 原始 ",
+        "type": "delta"
+      },
+      "seq": 32
+    },
+    {
+      "event": {
+        "text": " raw-15 原始 ",
+        "type": "delta"
+      },
+      "seq": 33
+    },
+    {
+      "event": {
+        "text": " raw-16 原始 ",
+        "type": "delta"
+      },
+      "seq": 34
+    },
+    {
+      "event": {
+        "text": " raw-17 原始 ",
+        "type": "delta"
+      },
+      "seq": 35
+    },
+    {
+      "event": {
+        "text": " raw-18 原始 ",
+        "type": "delta"
+      },
+      "seq": 36
+    },
+    {
+      "event": {
+        "text": " raw-19 原始 ",
+        "type": "delta"
+      },
+      "seq": 37
+    },
+    {
+      "event": {
+        "text": " raw-20 原始 ",
+        "type": "delta"
+      },
+      "seq": 38
+    },
+    {
+      "event": {
+        "text": " raw-21 原始 ",
+        "type": "delta"
+      },
+      "seq": 39
+    },
+    {
+      "event": {
+        "text": " raw-22 原始 ",
+        "type": "delta"
+      },
+      "seq": 40
+    },
+    {
+      "event": {
+        "text": " raw-23 原始 ",
+        "type": "delta"
+      },
+      "seq": 41
+    },
+    {
+      "event": {
+        "text": " raw-24 原始 ",
+        "type": "delta"
+      },
+      "seq": 42
+    },
+    {
+      "event": {
+        "text": " raw-25 原始 ",
+        "type": "delta"
+      },
+      "seq": 43
+    },
+    {
+      "event": {
+        "text": " raw-26 原始 ",
+        "type": "delta"
+      },
+      "seq": 44
+    },
+    {
+      "event": {
+        "text": " raw-27 原始 ",
+        "type": "delta"
+      },
+      "seq": 45
+    },
+    {
+      "event": {
+        "text": " raw-28 原始 ",
+        "type": "delta"
+      },
+      "seq": 46
+    },
+    {
+      "event": {
+        "text": " raw-29 原始 ",
+        "type": "delta"
+      },
+      "seq": 47
+    },
+    {
+      "event": {
+        "text": " raw-30 原始 ",
+        "type": "delta"
+      },
+      "seq": 48
+    },
+    {
+      "event": {
+        "text": " raw-31 原始 ",
+        "type": "delta"
+      },
+      "seq": 49
+    },
+    {
+      "event": {
+        "text": " raw-32 原始 ",
+        "type": "delta"
+      },
+      "seq": 50
+    },
+    {
+      "event": {
+        "text": " raw-33 原始 ",
+        "type": "delta"
+      },
+      "seq": 51
+    },
+    {
+      "event": {
+        "text": " raw-34 原始 ",
+        "type": "delta"
+      },
+      "seq": 52
+    },
+    {
+      "event": {
+        "text": " raw-35 原始 ",
+        "type": "delta"
+      },
+      "seq": 53
+    },
+    {
+      "event": {
+        "text": " raw-36 原始 ",
+        "type": "delta"
+      },
+      "seq": 54
+    },
+    {
+      "event": {
+        "text": " raw-37 原始 ",
+        "type": "delta"
+      },
+      "seq": 55
+    },
+    {
+      "event": {
+        "text": " raw-38 原始 ",
+        "type": "delta"
+      },
+      "seq": 56
+    },
+    {
+      "event": {
+        "text": " raw-39 原始 ",
+        "type": "delta"
+      },
+      "seq": 57
+    },
+    {
+      "event": {
+        "text": " raw-40 原始 ",
+        "type": "delta"
+      },
+      "seq": 58
+    },
+    {
+      "event": {
+        "text": " raw-41 原始 ",
+        "type": "delta"
+      },
+      "seq": 59
+    },
+    {
+      "event": {
+        "text": " raw-42 原始 ",
+        "type": "delta"
+      },
+      "seq": 60
+    },
+    {
+      "event": {
+        "text": " raw-43 原始 ",
+        "type": "delta"
+      },
+      "seq": 61
+    },
+    {
+      "event": {
+        "text": " raw-44 原始 ",
+        "type": "delta"
+      },
+      "seq": 62
+    },
+    {
+      "event": {
+        "text": " raw-45 原始 ",
+        "type": "delta"
+      },
+      "seq": 63
+    },
+    {
+      "event": {
+        "text": " raw-46 原始 ",
+        "type": "delta"
+      },
+      "seq": 64
+    },
+    {
+      "event": {
+        "text": " raw-47 原始 ",
+        "type": "delta"
+      },
+      "seq": 65
+    },
+    {
+      "event": {
+        "text": " raw-48 原始 ",
+        "type": "delta"
+      },
+      "seq": 66
+    },
+    {
+      "event": {
+        "text": " raw-49 原始 ",
+        "type": "delta"
+      },
+      "seq": 67
+    },
+    {
+      "event": {
+        "text": " raw-50 原始 ",
+        "type": "delta"
+      },
+      "seq": 68
+    },
+    {
+      "event": {
+        "text": " raw-51 原始 ",
+        "type": "delta"
+      },
+      "seq": 69
+    },
+    {
+      "event": {
+        "text": " raw-52 原始 ",
+        "type": "delta"
+      },
+      "seq": 70
+    },
+    {
+      "event": {
+        "text": " raw-53 原始 ",
+        "type": "delta"
+      },
+      "seq": 71
+    },
+    {
+      "event": {
+        "text": " raw-54 原始 ",
+        "type": "delta"
+      },
+      "seq": 72
+    },
+    {
+      "event": {
+        "text": " raw-55 原始 ",
+        "type": "delta"
+      },
+      "seq": 73
+    },
+    {
+      "event": {
+        "text": " raw-56 原始 ",
+        "type": "delta"
+      },
+      "seq": 74
+    },
+    {
+      "event": {
+        "text": " raw-57 原始 ",
+        "type": "delta"
+      },
+      "seq": 75
+    },
+    {
+      "event": {
+        "text": " raw-58 原始 ",
+        "type": "delta"
+      },
+      "seq": 76
+    },
+    {
+      "event": {
+        "text": " raw-59 原始 ",
+        "type": "delta"
+      },
+      "seq": 77
+    },
+    {
+      "event": {
+        "text": " raw-60 原始 ",
+        "type": "delta"
+      },
+      "seq": 78
+    },
+    {
+      "event": {
+        "text": " raw-61 原始 ",
+        "type": "delta"
+      },
+      "seq": 79
+    },
+    {
+      "event": {
+        "text": " raw-62 原始 ",
+        "type": "delta"
+      },
+      "seq": 80
+    },
+    {
+      "event": {
+        "text": " raw-63 原始 ",
+        "type": "delta"
+      },
+      "seq": 81
+    },
+    {
+      "event": {
+        "text": " raw-64 原始 ",
+        "type": "delta"
+      },
+      "seq": 82
+    },
+    {
+      "event": {
+        "text": " raw-65 原始 ",
+        "type": "delta"
+      },
+      "seq": 83
+    },
+    {
+      "event": {
+        "text": " raw-66 原始 ",
+        "type": "delta"
+      },
+      "seq": 84
+    },
+    {
+      "event": {
+        "text": " raw-67 原始 ",
+        "type": "delta"
+      },
+      "seq": 85
+    },
+    {
+      "event": {
+        "text": " raw-68 原始 ",
+        "type": "delta"
+      },
+      "seq": 86
+    },
+    {
+      "event": {
+        "text": " raw-69 原始 ",
+        "type": "delta"
+      },
+      "seq": 87
+    },
+    {
+      "event": {
+        "text": " raw-70 原始 ",
+        "type": "delta"
+      },
+      "seq": 88
+    },
+    {
+      "event": {
+        "text": " raw-71 原始 ",
+        "type": "delta"
+      },
+      "seq": 89
+    },
+    {
+      "event": {
+        "text": " raw-72 原始 ",
+        "type": "delta"
+      },
+      "seq": 90
+    },
+    {
+      "event": {
+        "text": " raw-73 原始 ",
+        "type": "delta"
+      },
+      "seq": 91
+    },
+    {
+      "event": {
+        "text": " raw-74 原始 ",
+        "type": "delta"
+      },
+      "seq": 92
+    },
+    {
+      "event": {
+        "text": " raw-75 原始 ",
+        "type": "delta"
+      },
+      "seq": 93
+    },
+    {
+      "event": {
+        "text": " raw-76 原始 ",
+        "type": "delta"
+      },
+      "seq": 94
+    },
+    {
+      "event": {
+        "text": " raw-77 原始 ",
+        "type": "delta"
+      },
+      "seq": 95
+    },
+    {
+      "event": {
+        "text": " raw-78 原始 ",
+        "type": "delta"
+      },
+      "seq": 96
+    },
+    {
+      "event": {
+        "text": " raw-79 原始 ",
+        "type": "delta"
+      },
+      "seq": 97
+    },
+    {
+      "event": {
+        "text": " raw-80 原始 ",
+        "type": "delta"
+      },
+      "seq": 98
+    },
+    {
+      "event": {
+        "text": " raw-81 原始 ",
+        "type": "delta"
+      },
+      "seq": 99
+    },
+    {
+      "event": {
+        "text": " raw-82 原始 ",
+        "type": "delta"
+      },
+      "seq": 100
+    },
+    {
+      "event": {
+        "text": " raw-83 原始 ",
+        "type": "delta"
+      },
+      "seq": 101
+    },
+    {
+      "event": {
+        "text": " raw-84 原始 ",
+        "type": "delta"
+      },
+      "seq": 102
+    },
+    {
+      "event": {
+        "text": " raw-85 原始 ",
+        "type": "delta"
+      },
+      "seq": 103
+    },
+    {
+      "event": {
+        "text": " raw-86 原始 ",
+        "type": "delta"
+      },
+      "seq": 104
+    },
+    {
+      "event": {
+        "text": " raw-87 原始 ",
+        "type": "delta"
+      },
+      "seq": 105
+    },
+    {
+      "event": {
+        "text": " raw-88 原始 ",
+        "type": "delta"
+      },
+      "seq": 106
+    },
+    {
+      "event": {
+        "text": " raw-89 原始 ",
+        "type": "delta"
+      },
+      "seq": 107
+    },
+    {
+      "event": {
+        "text": " raw-90 原始 ",
+        "type": "delta"
+      },
+      "seq": 108
+    },
+    {
+      "event": {
+        "text": " raw-91 原始 ",
+        "type": "delta"
+      },
+      "seq": 109
+    },
+    {
+      "event": {
+        "text": " raw-92 原始 ",
+        "type": "delta"
+      },
+      "seq": 110
+    },
+    {
+      "event": {
+        "text": " raw-93 原始 ",
+        "type": "delta"
+      },
+      "seq": 111
+    },
+    {
+      "event": {
+        "text": " raw-94 原始 ",
+        "type": "delta"
+      },
+      "seq": 112
+    },
+    {
+      "event": {
+        "text": " raw-95 原始 ",
+        "type": "delta"
+      },
+      "seq": 113
+    },
+    {
+      "event": {
+        "text": " raw-96 原始 ",
+        "type": "delta"
+      },
+      "seq": 114
+    },
+    {
+      "event": {
+        "text": " raw-97 原始 ",
+        "type": "delta"
+      },
+      "seq": 115
+    },
+    {
+      "event": {
+        "text": " raw-98 原始 ",
+        "type": "delta"
+      },
+      "seq": 116
+    },
+    {
+      "event": {
+        "text": " raw-99 原始 ",
+        "type": "delta"
+      },
+      "seq": 117
+    },
+    {
+      "event": {
+        "text": " raw-100 原始 ",
+        "type": "delta"
+      },
+      "seq": 118
+    },
+    {
+      "event": {
+        "text": " raw-101 原始 ",
+        "type": "delta"
+      },
+      "seq": 119
+    },
+    {
+      "event": {
+        "text": " raw-102 原始 ",
+        "type": "delta"
+      },
+      "seq": 120
+    },
+    {
+      "event": {
+        "text": " raw-103 原始 ",
+        "type": "delta"
+      },
+      "seq": 121
+    },
+    {
+      "event": {
+        "text": " raw-104 原始 ",
+        "type": "delta"
+      },
+      "seq": 122
+    },
+    {
+      "event": {
+        "text": " raw-105 原始 ",
+        "type": "delta"
+      },
+      "seq": 123
+    },
+    {
+      "event": {
+        "text": " raw-106 原始 ",
+        "type": "delta"
+      },
+      "seq": 124
+    },
+    {
+      "event": {
+        "text": " raw-107 原始 ",
+        "type": "delta"
+      },
+      "seq": 125
+    },
+    {
+      "event": {
+        "text": " raw-108 原始 ",
+        "type": "delta"
+      },
+      "seq": 126
+    },
+    {
+      "event": {
+        "text": " raw-109 原始 ",
+        "type": "delta"
+      },
+      "seq": 127
+    },
+    {
+      "event": {
+        "text": " raw-110 原始 ",
+        "type": "delta"
+      },
+      "seq": 128
+    },
+    {
+      "event": {
+        "text": " raw-111 原始 ",
+        "type": "delta"
+      },
+      "seq": 129
+    },
+    {
+      "event": {
+        "text": " raw-112 原始 ",
+        "type": "delta"
+      },
+      "seq": 130
+    },
+    {
+      "event": {
+        "text": " raw-113 原始 ",
+        "type": "delta"
+      },
+      "seq": 131
+    },
+    {
+      "event": {
+        "text": " raw-114 原始 ",
+        "type": "delta"
+      },
+      "seq": 132
+    },
+    {
+      "event": {
+        "text": " raw-115 原始 ",
+        "type": "delta"
+      },
+      "seq": 133
+    },
+    {
+      "event": {
+        "text": " raw-116 原始 ",
+        "type": "delta"
+      },
+      "seq": 134
+    },
+    {
+      "event": {
+        "text": " raw-117 原始 ",
+        "type": "delta"
+      },
+      "seq": 135
+    },
+    {
+      "event": {
+        "text": " raw-118 原始 ",
+        "type": "delta"
+      },
+      "seq": 136
+    },
+    {
+      "event": {
+        "text": " raw-119 原始 ",
+        "type": "delta"
+      },
+      "seq": 137
+    },
+    {
+      "event": {
+        "text": " raw-120 原始 ",
+        "type": "delta"
+      },
+      "seq": 138
+    },
+    {
+      "event": {
+        "text": " raw-121 原始 ",
+        "type": "delta"
+      },
+      "seq": 139
+    },
+    {
+      "event": {
+        "text": " raw-122 原始 ",
+        "type": "delta"
+      },
+      "seq": 140
+    },
+    {
+      "event": {
+        "text": " raw-123 原始 ",
+        "type": "delta"
+      },
+      "seq": 141
+    },
+    {
+      "event": {
+        "text": " raw-124 原始 ",
+        "type": "delta"
+      },
+      "seq": 142
+    },
+    {
+      "event": {
+        "text": " raw-125 原始 ",
+        "type": "delta"
+      },
+      "seq": 143
+    },
+    {
+      "event": {
+        "text": " raw-126 原始 ",
+        "type": "delta"
+      },
+      "seq": 144
+    },
+    {
+      "event": {
+        "text": " raw-127 原始 ",
+        "type": "delta"
+      },
+      "seq": 145
+    },
+    {
+      "event": {
+        "text": " raw-128 原始 ",
+        "type": "delta"
+      },
+      "seq": 146
+    },
+    {
+      "event": {
+        "text": " raw-129 原始 ",
+        "type": "delta"
+      },
+      "seq": 147
+    },
+    {
+      "event": {
+        "text": " raw-130 原始 ",
+        "type": "delta"
+      },
+      "seq": 148
+    },
+    {
+      "event": {
+        "text": " raw-131 原始 ",
+        "type": "delta"
+      },
+      "seq": 149
+    },
+    {
+      "event": {
+        "text": " raw-132 原始 ",
+        "type": "delta"
+      },
+      "seq": 150
+    },
+    {
+      "event": {
+        "text": " raw-133 原始 ",
+        "type": "delta"
+      },
+      "seq": 151
+    },
+    {
+      "event": {
+        "text": " raw-134 原始 ",
+        "type": "delta"
+      },
+      "seq": 152
+    },
+    {
+      "event": {
+        "text": " raw-135 原始 ",
+        "type": "delta"
+      },
+      "seq": 153
+    },
+    {
+      "event": {
+        "text": " raw-136 原始 ",
+        "type": "delta"
+      },
+      "seq": 154
+    },
+    {
+      "event": {
+        "text": " raw-137 原始 ",
+        "type": "delta"
+      },
+      "seq": 155
+    },
+    {
+      "event": {
+        "text": " raw-138 原始 ",
+        "type": "delta"
+      },
+      "seq": 156
+    },
+    {
+      "event": {
+        "text": " raw-139 原始 ",
+        "type": "delta"
+      },
+      "seq": 157
+    },
+    {
+      "event": {
+        "text": " raw-140 原始 ",
+        "type": "delta"
+      },
+      "seq": 158
+    },
+    {
+      "event": {
+        "text": " raw-141 原始 ",
+        "type": "delta"
+      },
+      "seq": 159
+    },
+    {
+      "event": {
+        "text": " raw-142 原始 ",
+        "type": "delta"
+      },
+      "seq": 160
+    },
+    {
+      "event": {
+        "text": " raw-143 原始 ",
+        "type": "delta"
+      },
+      "seq": 161
+    },
+    {
+      "event": {
+        "text": " raw-144 原始 ",
+        "type": "delta"
+      },
+      "seq": 162
+    },
+    {
+      "event": {
+        "text": " raw-145 原始 ",
+        "type": "delta"
+      },
+      "seq": 163
+    },
+    {
+      "event": {
+        "text": " raw-146 原始 ",
+        "type": "delta"
+      },
+      "seq": 164
+    },
+    {
+      "event": {
+        "text": " raw-147 原始 ",
+        "type": "delta"
+      },
+      "seq": 165
+    },
+    {
+      "event": {
+        "text": " raw-148 原始 ",
+        "type": "delta"
+      },
+      "seq": 166
+    },
+    {
+      "event": {
+        "text": " raw-149 原始 ",
+        "type": "delta"
+      },
+      "seq": 167
+    },
+    {
+      "event": {
+        "text": " raw-150 原始 ",
+        "type": "delta"
+      },
+      "seq": 168
+    },
+    {
+      "event": {
+        "text": " raw-151 原始 ",
+        "type": "delta"
+      },
+      "seq": 169
+    },
+    {
+      "event": {
+        "text": " raw-152 原始 ",
+        "type": "delta"
+      },
+      "seq": 170
+    },
+    {
+      "event": {
+        "text": " raw-153 原始 ",
+        "type": "delta"
+      },
+      "seq": 171
+    },
+    {
+      "event": {
+        "text": " raw-154 原始 ",
+        "type": "delta"
+      },
+      "seq": 172
+    },
+    {
+      "event": {
+        "text": " raw-155 原始 ",
+        "type": "delta"
+      },
+      "seq": 173
+    },
+    {
+      "event": {
+        "text": " raw-156 原始 ",
+        "type": "delta"
+      },
+      "seq": 174
+    },
+    {
+      "event": {
+        "text": " raw-157 原始 ",
+        "type": "delta"
+      },
+      "seq": 175
+    },
+    {
+      "event": {
+        "text": " raw-158 原始 ",
+        "type": "delta"
+      },
+      "seq": 176
+    },
+    {
+      "event": {
+        "text": " raw-159 原始 ",
+        "type": "delta"
+      },
+      "seq": 177
+    },
+    {
+      "event": {
+        "text": " raw-160 原始 ",
+        "type": "delta"
+      },
+      "seq": 178
+    },
+    {
+      "event": {
+        "text": " raw-161 原始 ",
+        "type": "delta"
+      },
+      "seq": 179
+    },
+    {
+      "event": {
+        "text": " raw-162 原始 ",
+        "type": "delta"
+      },
+      "seq": 180
+    },
+    {
+      "event": {
+        "text": " raw-163 原始 ",
+        "type": "delta"
+      },
+      "seq": 181
+    },
+    {
+      "event": {
+        "text": " raw-164 原始 ",
+        "type": "delta"
+      },
+      "seq": 182
+    },
+    {
+      "event": {
+        "text": " raw-165 原始 ",
+        "type": "delta"
+      },
+      "seq": 183
+    },
+    {
+      "event": {
+        "text": " raw-166 原始 ",
+        "type": "delta"
+      },
+      "seq": 184
+    },
+    {
+      "event": {
+        "text": " raw-167 原始 ",
+        "type": "delta"
+      },
+      "seq": 185
+    },
+    {
+      "event": {
+        "text": " raw-168 原始 ",
+        "type": "delta"
+      },
+      "seq": 186
+    },
+    {
+      "event": {
+        "text": " raw-169 原始 ",
+        "type": "delta"
+      },
+      "seq": 187
+    },
+    {
+      "event": {
+        "text": " raw-170 原始 ",
+        "type": "delta"
+      },
+      "seq": 188
+    },
+    {
+      "event": {
+        "text": " raw-171 原始 ",
+        "type": "delta"
+      },
+      "seq": 189
+    },
+    {
+      "event": {
+        "text": " raw-172 原始 ",
+        "type": "delta"
+      },
+      "seq": 190
+    },
+    {
+      "event": {
+        "text": " raw-173 原始 ",
+        "type": "delta"
+      },
+      "seq": 191
+    },
+    {
+      "event": {
+        "text": " raw-174 原始 ",
+        "type": "delta"
+      },
+      "seq": 192
+    },
+    {
+      "event": {
+        "text": " raw-175 原始 ",
+        "type": "delta"
+      },
+      "seq": 193
+    },
+    {
+      "event": {
+        "text": " raw-176 原始 ",
+        "type": "delta"
+      },
+      "seq": 194
+    },
+    {
+      "event": {
+        "text": " raw-177 原始 ",
+        "type": "delta"
+      },
+      "seq": 195
+    },
+    {
+      "event": {
+        "text": " raw-178 原始 ",
+        "type": "delta"
+      },
+      "seq": 196
+    },
+    {
+      "event": {
+        "text": " raw-179 原始 ",
+        "type": "delta"
+      },
+      "seq": 197
+    },
+    {
+      "event": {
+        "text": " raw-180 原始 ",
+        "type": "delta"
+      },
+      "seq": 198
+    },
+    {
+      "event": {
+        "text": " raw-181 原始 ",
+        "type": "delta"
+      },
+      "seq": 199
+    },
+    {
+      "event": {
+        "text": " raw-182 原始 ",
+        "type": "delta"
+      },
+      "seq": 200
+    },
+    {
+      "event": {
+        "text": " raw-183 原始 ",
+        "type": "delta"
+      },
+      "seq": 201
+    },
+    {
+      "event": {
+        "text": " raw-184 原始 ",
+        "type": "delta"
+      },
+      "seq": 202
+    },
+    {
+      "event": {
+        "text": " raw-185 原始 ",
+        "type": "delta"
+      },
+      "seq": 203
+    },
+    {
+      "event": {
+        "text": " raw-186 原始 ",
+        "type": "delta"
+      },
+      "seq": 204
+    },
+    {
+      "event": {
+        "text": " raw-187 原始 ",
+        "type": "delta"
+      },
+      "seq": 205
+    },
+    {
+      "event": {
+        "text": " raw-188 原始 ",
+        "type": "delta"
+      },
+      "seq": 206
+    },
+    {
+      "event": {
+        "text": " raw-189 原始 ",
+        "type": "delta"
+      },
+      "seq": 207
+    },
+    {
+      "event": {
+        "text": " raw-190 原始 ",
+        "type": "delta"
+      },
+      "seq": 208
+    },
+    {
+      "event": {
+        "text": " raw-191 原始 ",
+        "type": "delta"
+      },
+      "seq": 209
+    },
+    {
+      "event": {
+        "text": " raw-192 原始 ",
+        "type": "delta"
+      },
+      "seq": 210
+    },
+    {
+      "event": {
+        "text": " raw-193 原始 ",
+        "type": "delta"
+      },
+      "seq": 211
+    },
+    {
+      "event": {
+        "text": " raw-194 原始 ",
+        "type": "delta"
+      },
+      "seq": 212
+    },
+    {
+      "event": {
+        "text": " raw-195 原始 ",
+        "type": "delta"
+      },
+      "seq": 213
+    },
+    {
+      "event": {
+        "text": " raw-196 原始 ",
+        "type": "delta"
+      },
+      "seq": 214
+    },
+    {
+      "event": {
+        "text": " raw-197 原始 ",
+        "type": "delta"
+      },
+      "seq": 215
+    },
+    {
+      "event": {
+        "text": " raw-198 原始 ",
+        "type": "delta"
+      },
+      "seq": 216
+    },
+    {
+      "event": {
+        "text": " raw-199 原始 ",
+        "type": "delta"
+      },
+      "seq": 217
+    },
+    {
+      "event": {
+        "text": " raw-200 原始 ",
+        "type": "delta"
+      },
+      "seq": 218
+    },
+    {
+      "event": {
+        "text": " raw-201 原始 ",
+        "type": "delta"
+      },
+      "seq": 219
+    },
+    {
+      "event": {
+        "text": " raw-202 原始 ",
+        "type": "delta"
+      },
+      "seq": 220
+    },
+    {
+      "event": {
+        "text": " raw-203 原始 ",
+        "type": "delta"
+      },
+      "seq": 221
+    },
+    {
+      "event": {
+        "text": " raw-204 原始 ",
+        "type": "delta"
+      },
+      "seq": 222
+    },
+    {
+      "event": {
+        "text": " raw-205 原始 ",
+        "type": "delta"
+      },
+      "seq": 223
+    },
+    {
+      "event": {
+        "text": " raw-206 原始 ",
+        "type": "delta"
+      },
+      "seq": 224
+    },
+    {
+      "event": {
+        "text": " raw-207 原始 ",
+        "type": "delta"
+      },
+      "seq": 225
+    },
+    {
+      "event": {
+        "text": " raw-208 原始 ",
+        "type": "delta"
+      },
+      "seq": 226
+    },
+    {
+      "event": {
+        "text": " raw-209 原始 ",
+        "type": "delta"
+      },
+      "seq": 227
+    },
+    {
+      "event": {
+        "text": " raw-210 原始 ",
+        "type": "delta"
+      },
+      "seq": 228
+    },
+    {
+      "event": {
+        "text": " raw-211 原始 ",
+        "type": "delta"
+      },
+      "seq": 229
+    },
+    {
+      "event": {
+        "text": " raw-212 原始 ",
+        "type": "delta"
+      },
+      "seq": 230
+    },
+    {
+      "event": {
+        "text": " raw-213 原始 ",
+        "type": "delta"
+      },
+      "seq": 231
+    },
+    {
+      "event": {
+        "text": " raw-214 原始 ",
+        "type": "delta"
+      },
+      "seq": 232
+    },
+    {
+      "event": {
+        "text": " raw-215 原始 ",
+        "type": "delta"
+      },
+      "seq": 233
+    },
+    {
+      "event": {
+        "text": " raw-216 原始 ",
+        "type": "delta"
+      },
+      "seq": 234
+    },
+    {
+      "event": {
+        "text": " raw-217 原始 ",
+        "type": "delta"
+      },
+      "seq": 235
+    },
+    {
+      "event": {
+        "text": " raw-218 原始 ",
+        "type": "delta"
+      },
+      "seq": 236
+    },
+    {
+      "event": {
+        "text": " raw-219 原始 ",
+        "type": "delta"
+      },
+      "seq": 237
+    },
+    {
+      "event": {
+        "text": " raw-220 原始 ",
+        "type": "delta"
+      },
+      "seq": 238
+    },
+    {
+      "event": {
+        "text": " raw-221 原始 ",
+        "type": "delta"
+      },
+      "seq": 239
+    },
+    {
+      "event": {
+        "text": " raw-222 原始 ",
+        "type": "delta"
+      },
+      "seq": 240
+    },
+    {
+      "event": {
+        "text": " raw-223 原始 ",
+        "type": "delta"
+      },
+      "seq": 241
+    },
+    {
+      "event": {
+        "text": " raw-224 原始 ",
+        "type": "delta"
+      },
+      "seq": 242
+    },
+    {
+      "event": {
+        "text": " raw-225 原始 ",
+        "type": "delta"
+      },
+      "seq": 243
+    },
+    {
+      "event": {
+        "text": " raw-226 原始 ",
+        "type": "delta"
+      },
+      "seq": 244
+    },
+    {
+      "event": {
+        "text": " raw-227 原始 ",
+        "type": "delta"
+      },
+      "seq": 245
+    },
+    {
+      "event": {
+        "text": " raw-228 原始 ",
+        "type": "delta"
+      },
+      "seq": 246
+    },
+    {
+      "event": {
+        "text": " raw-229 原始 ",
+        "type": "delta"
+      },
+      "seq": 247
+    },
+    {
+      "event": {
+        "text": " raw-230 原始 ",
+        "type": "delta"
+      },
+      "seq": 248
+    },
+    {
+      "event": {
+        "text": " raw-231 原始 ",
+        "type": "delta"
+      },
+      "seq": 249
+    },
+    {
+      "event": {
+        "text": " raw-232 原始 ",
+        "type": "delta"
+      },
+      "seq": 250
+    },
+    {
+      "event": {
+        "text": " raw-233 原始 ",
+        "type": "delta"
+      },
+      "seq": 251
+    },
+    {
+      "event": {
+        "text": " raw-234 原始 ",
+        "type": "delta"
+      },
+      "seq": 252
+    },
+    {
+      "event": {
+        "text": " raw-235 原始 ",
+        "type": "delta"
+      },
+      "seq": 253
+    },
+    {
+      "event": {
+        "text": " raw-236 原始 ",
+        "type": "delta"
+      },
+      "seq": 254
+    },
+    {
+      "event": {
+        "text": " raw-237 原始 ",
+        "type": "delta"
+      },
+      "seq": 255
+    },
+    {
+      "event": {
+        "text": " raw-238 原始 ",
+        "type": "delta"
+      },
+      "seq": 256
+    },
+    {
+      "event": {
+        "text": " raw-239 原始 ",
+        "type": "delta"
+      },
+      "seq": 257
+    },
+    {
+      "event": {
+        "text": " raw-240 原始 ",
+        "type": "delta"
+      },
+      "seq": 258
+    },
+    {
+      "event": {
+        "text": " raw-241 原始 ",
+        "type": "delta"
+      },
+      "seq": 259
+    },
+    {
+      "event": {
+        "text": " raw-242 原始 ",
+        "type": "delta"
+      },
+      "seq": 260
+    },
+    {
+      "event": {
+        "text": " raw-243 原始 ",
+        "type": "delta"
+      },
+      "seq": 261
+    },
+    {
+      "event": {
+        "text": " raw-244 原始 ",
+        "type": "delta"
+      },
+      "seq": 262
+    },
+    {
+      "event": {
+        "text": " raw-245 原始 ",
+        "type": "delta"
+      },
+      "seq": 263
+    },
+    {
+      "event": {
+        "text": " raw-246 原始 ",
+        "type": "delta"
+      },
+      "seq": 264
+    },
+    {
+      "event": {
+        "text": " raw-247 原始 ",
+        "type": "delta"
+      },
+      "seq": 265
+    },
+    {
+      "event": {
+        "text": " raw-248 原始 ",
+        "type": "delta"
+      },
+      "seq": 266
+    },
+    {
+      "event": {
+        "text": " raw-249 原始 ",
+        "type": "delta"
+      },
+      "seq": 267
+    },
+    {
+      "event": {
+        "text": " raw-250 原始 ",
+        "type": "delta"
+      },
+      "seq": 268
+    },
+    {
+      "event": {
+        "text": " raw-251 原始 ",
+        "type": "delta"
+      },
+      "seq": 269
+    },
+    {
+      "event": {
+        "text": " raw-252 原始 ",
+        "type": "delta"
+      },
+      "seq": 270
+    },
+    {
+      "event": {
+        "text": " raw-253 原始 ",
+        "type": "delta"
+      },
+      "seq": 271
+    },
+    {
+      "event": {
+        "text": " raw-254 原始 ",
+        "type": "delta"
+      },
+      "seq": 272
+    },
+    {
+      "event": {
+        "text": " raw-255 原始 ",
+        "type": "delta"
+      },
+      "seq": 273
+    },
+    {
+      "event": {
+        "text": " raw-256 原始 ",
+        "type": "delta"
+      },
+      "seq": 274
+    },
+    {
+      "event": {
+        "text": " raw-257 原始 ",
+        "type": "delta"
+      },
+      "seq": 275
+    },
+    {
+      "event": {
+        "text": " raw-258 原始 ",
+        "type": "delta"
+      },
+      "seq": 276
+    },
+    {
+      "event": {
+        "text": " raw-259 原始 ",
+        "type": "delta"
+      },
+      "seq": 277
+    },
+    {
+      "event": {
+        "text": " raw-260 原始 ",
+        "type": "delta"
+      },
+      "seq": 278
+    },
+    {
+      "event": {
+        "text": " raw-261 原始 ",
+        "type": "delta"
+      },
+      "seq": 279
+    },
+    {
+      "event": {
+        "text": " raw-262 原始 ",
+        "type": "delta"
+      },
+      "seq": 280
+    },
+    {
+      "event": {
+        "text": " raw-263 原始 ",
+        "type": "delta"
+      },
+      "seq": 281
+    },
+    {
+      "event": {
+        "text": " raw-264 原始 ",
+        "type": "delta"
+      },
+      "seq": 282
+    },
+    {
+      "event": {
+        "text": " raw-265 原始 ",
+        "type": "delta"
+      },
+      "seq": 283
+    },
+    {
+      "event": {
+        "text": " raw-266 原始 ",
+        "type": "delta"
+      },
+      "seq": 284
+    },
+    {
+      "event": {
+        "text": " raw-267 原始 ",
+        "type": "delta"
+      },
+      "seq": 285
+    },
+    {
+      "event": {
+        "text": " raw-268 原始 ",
+        "type": "delta"
+      },
+      "seq": 286
+    },
+    {
+      "event": {
+        "text": " raw-269 原始 ",
+        "type": "delta"
+      },
+      "seq": 287
+    },
+    {
+      "event": {
+        "text": " raw-270 原始 ",
+        "type": "delta"
+      },
+      "seq": 288
+    },
+    {
+      "event": {
+        "text": " raw-271 原始 ",
+        "type": "delta"
+      },
+      "seq": 289
+    },
+    {
+      "event": {
+        "text": " raw-272 原始 ",
+        "type": "delta"
+      },
+      "seq": 290
+    },
+    {
+      "event": {
+        "text": " raw-273 原始 ",
+        "type": "delta"
+      },
+      "seq": 291
+    },
+    {
+      "event": {
+        "text": " raw-274 原始 ",
+        "type": "delta"
+      },
+      "seq": 292
+    },
+    {
+      "event": {
+        "text": " raw-275 原始 ",
+        "type": "delta"
+      },
+      "seq": 293
+    },
+    {
+      "event": {
+        "text": " raw-276 原始 ",
+        "type": "delta"
+      },
+      "seq": 294
+    },
+    {
+      "event": {
+        "text": " raw-277 原始 ",
+        "type": "delta"
+      },
+      "seq": 295
+    },
+    {
+      "event": {
+        "text": " raw-278 原始 ",
+        "type": "delta"
+      },
+      "seq": 296
+    },
+    {
+      "event": {
+        "text": " raw-279 原始 ",
+        "type": "delta"
+      },
+      "seq": 297
+    },
+    {
+      "event": {
+        "text": " raw-280 原始 ",
+        "type": "delta"
+      },
+      "seq": 298
+    },
+    {
+      "event": {
+        "text": " raw-281 原始 ",
+        "type": "delta"
+      },
+      "seq": 299
+    },
+    {
+      "event": {
+        "text": " raw-282 原始 ",
+        "type": "delta"
+      },
+      "seq": 300
+    },
+    {
+      "event": {
+        "text": " raw-283 原始 ",
+        "type": "delta"
+      },
+      "seq": 301
+    },
+    {
+      "event": {
+        "text": " raw-284 原始 ",
+        "type": "delta"
+      },
+      "seq": 302
+    },
+    {
+      "event": {
+        "text": " raw-285 原始 ",
+        "type": "delta"
+      },
+      "seq": 303
+    },
+    {
+      "event": {
+        "text": " raw-286 原始 ",
+        "type": "delta"
+      },
+      "seq": 304
+    },
+    {
+      "event": {
+        "text": " raw-287 原始 ",
+        "type": "delta"
+      },
+      "seq": 305
+    },
+    {
+      "event": {
+        "text": " raw-288 原始 ",
+        "type": "delta"
+      },
+      "seq": 306
+    },
+    {
+      "event": {
+        "text": " raw-289 原始 ",
+        "type": "delta"
+      },
+      "seq": 307
+    },
+    {
+      "event": {
+        "text": " raw-290 原始 ",
+        "type": "delta"
+      },
+      "seq": 308
+    },
+    {
+      "event": {
+        "text": " raw-291 原始 ",
+        "type": "delta"
+      },
+      "seq": 309
+    },
+    {
+      "event": {
+        "text": " raw-292 原始 ",
+        "type": "delta"
+      },
+      "seq": 310
+    },
+    {
+      "event": {
+        "text": " raw-293 原始 ",
+        "type": "delta"
+      },
+      "seq": 311
+    },
+    {
+      "event": {
+        "text": " raw-294 原始 ",
+        "type": "delta"
+      },
+      "seq": 312
+    },
+    {
+      "event": {
+        "text": " raw-295 原始 ",
+        "type": "delta"
+      },
+      "seq": 313
+    },
+    {
+      "event": {
+        "text": " raw-296 原始 ",
+        "type": "delta"
+      },
+      "seq": 314
+    },
+    {
+      "event": {
+        "text": " raw-297 原始 ",
+        "type": "delta"
+      },
+      "seq": 315
+    },
+    {
+      "event": {
+        "text": " raw-298 原始 ",
+        "type": "delta"
+      },
+      "seq": 316
+    },
+    {
+      "event": {
+        "text": " raw-299 原始 ",
+        "type": "delta"
+      },
+      "seq": 317
+    }
+  ],
+  "layout": [
+    {
+      "top": 60.46875,
+      "bottom": 425.234375,
+      "left": 255,
+      "right": 565,
+      "header": 41,
+      "contained": true,
+      "actions": true
+    },
+    {
+      "top": 60.46875,
+      "bottom": 425.234375,
+      "left": 570,
+      "right": 880,
+      "header": 41,
+      "contained": true,
+      "actions": true
+    },
+    {
+      "top": 60.46875,
+      "bottom": 425.234375,
+      "left": 885,
+      "right": 1195,
+      "header": 41,
+      "contained": true,
+      "actions": true
+    },
+    {
+      "top": 430.234375,
+      "bottom": 795,
+      "left": 255,
+      "right": 565,
+      "header": 41,
+      "contained": true,
+      "actions": true
+    },
+    {
+      "top": 430.234375,
+      "bottom": 795,
+      "left": 570,
+      "right": 880,
+      "header": 41,
+      "contained": true,
+      "actions": true
+    },
+    {
+      "top": 430.234375,
+      "bottom": 795,
+      "left": 885,
+      "right": 1195,
+      "header": 41,
+      "contained": true,
+      "actions": true
+    }
+  ],
+  "scroll": {
+    "saved": {
+      "top": 363,
+      "following": false,
+      "key": "native:26b453ac-ce3e-4413-820b-8d1c845a5cc5:event:17:segment:4",
+      "offset": -49.96875,
+      "attempt": "26b453ac-ce3e-4413-820b-8d1c845a5cc5",
+      "channel": "delta",
+      "folded": [
+        [
+          "4bbebe2f-5e44-42a9-acf8-e9fbb75220b1",
+          false,
+          false,
+          [],
+          null,
+          null
+        ],
+        [
+          "25d8263d-de95-4df1-be68-d255677264e7",
+          false,
+          false,
+          [
+            0,
+            0,
+            0,
+            0
+          ],
+          null,
+          null
+        ],
+        [
+          "25d8263d-de95-4df1-be68-d255677264e7:segment:0",
+          false,
+          false,
+          [
+            0
+          ],
+          null,
+          null
+        ],
+        [
+          "326650a9-52d6-4e46-8feb-38b3b4e59157:segment:1",
+          false,
+          false,
+          [
+            0
+          ],
+          null,
+          null
+        ],
+        [
+          "326650a9-52d6-4e46-8feb-38b3b4e59157:segment:2",
+          false,
+          false,
+          [
+            0
+          ],
+          null,
+          null
+        ],
+        [
+          "native:26b453ac-ce3e-4413-820b-8d1c845a5cc5:event:16:segment:3",
+          true,
+          false,
+          [
+            0
+          ],
+          "26b453ac-ce3e-4413-820b-8d1c845a5cc5",
+          "reasoning"
+        ],
+        [
+          "native:26b453ac-ce3e-4413-820b-8d1c845a5cc5:event:17:segment:4",
+          false,
+          false,
+          [],
+          "26b453ac-ce3e-4413-820b-8d1c845a5cc5",
+          "delta"
+        ]
+      ]
+    },
+    "anchored": {
+      "place": {
+        "top": 653,
+        "following": false,
+        "key": "native:26b453ac-ce3e-4413-820b-8d1c845a5cc5:event:17:segment:4",
+        "offset": -49.5625,
+        "attempt": "26b453ac-ce3e-4413-820b-8d1c845a5cc5",
+        "channel": "delta",
+        "folded": [
+          [
+            "4bbebe2f-5e44-42a9-acf8-e9fbb75220b1",
+            false,
+            false,
+            [],
+            null,
+            null
+          ],
+          [
+            "25d8263d-de95-4df1-be68-d255677264e7",
+            false,
+            false,
+            [
+              0,
+              0,
+              0,
+              0
+            ],
+            null,
+            null
+          ],
+          [
+            "25d8263d-de95-4df1-be68-d255677264e7:segment:0",
+            false,
+            false,
+            [
+              0
+            ],
+            null,
+            null
+          ],
+          [
+            "326650a9-52d6-4e46-8feb-38b3b4e59157:segment:1",
+            false,
+            false,
+            [
+              0
+            ],
+            null,
+            null
+          ],
+          [
+            "326650a9-52d6-4e46-8feb-38b3b4e59157:segment:2",
+            false,
+            false,
+            [
+              0
+            ],
+            null,
+            null
+          ],
+          [
+            "native:26b453ac-ce3e-4413-820b-8d1c845a5cc5:event:16:segment:3",
+            true,
+            false,
+            [
+              0
+            ],
+            "26b453ac-ce3e-4413-820b-8d1c845a5cc5",
+            "reasoning"
+          ],
+          [
+            "native:26b453ac-ce3e-4413-820b-8d1c845a5cc5:event:17:segment:4",
+            false,
+            false,
+            [],
+            "26b453ac-ce3e-4413-820b-8d1c845a5cc5",
+            "delta"
+          ]
+        ]
+      },
+      "draft": "NATIVE-DRAFT",
+      "fold": false
+    }
+  },
+  "passed": true,
+  "cleanup": {
+    "ownedPids": [
+      {
+        "pid": 7184,
+        "exited": true,
+        "job": {
+          "drained": true,
+          "native_exit": 0,
+          "native_pid": 19372,
+          "phase": "exited",
+          "creation_proven": true,
+          "schema": 1,
+          "limit_flags": 8192,
+          "in_job": true,
+          "no_breakaway": true,
+          "kill_on_close": true,
+          "stop_requested": true,
+          "accounting": {
+            "terminated_processes": 0,
+            "active_processes": 0,
+            "total_processes": 4
+          },
+          "assigned": true
+        }
+      },
+      {
+        "pid": 28712,
+        "exited": true,
+        "job": {
+          "drained": true,
+          "native_exit": 0,
+          "native_pid": 22288,
+          "phase": "exited",
+          "creation_proven": true,
+          "schema": 1,
+          "limit_flags": 8192,
+          "in_job": true,
+          "no_breakaway": true,
+          "kill_on_close": true,
+          "stop_requested": true,
+          "accounting": {
+            "terminated_processes": 0,
+            "active_processes": 0,
+            "total_processes": 62
+          },
+          "assigned": true
+        }
+      },
+      {
+        "pid": 14032,
+        "exited": true,
+        "job": {
+          "drained": true,
+          "native_exit": 0,
+          "native_pid": 3624,
+          "phase": "exited",
+          "creation_proven": true,
+          "schema": 1,
+          "limit_flags": 8192,
+          "in_job": true,
+          "no_breakaway": true,
+          "kill_on_close": true,
+          "stop_requested": true,
+          "accounting": {
+            "terminated_processes": 0,
+            "active_processes": 0,
+            "total_processes": 4
+          },
+          "assigned": true
+        }
+      }
+    ],
+    "browserClosed": true,
+    "fixture_home_removed": true
+  },
+  "evidence": "C:\\Users\\Victor\\orca\\projects\\wasm-agent\\.git\\wa-recovery-evidence\\wa-native-browser-D1t1J7"
+}

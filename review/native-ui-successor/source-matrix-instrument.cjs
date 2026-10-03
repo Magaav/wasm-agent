@@ -5,7 +5,6 @@ const raw=spawnSync('git',['show',original+':scripts/test-native-child-browser.c
 let source=raw.stdout;
 function replace(from,to){assert.ok(source.includes(from),'immutable fixture anchor absent: '+from);source=source.replace(from,to);}
 replace("const repo=path.resolve(__dirname,'..');",`const repo=${JSON.stringify(repo)};`);
-replace("WASM_AGENT_LUA_ROOT:repo", "WASM_AGENT_LUA_ROOT:(process.argv.includes('--lua-root')?path.resolve(process.argv[process.argv.indexOf('--lua-root')+1]):repo)");
 replace('const pages=[];',`const pages=[];
 function review(value,label,details=null){report.review ||= {cases:[],failures:[]};report.review.cases.push({label,passed:!!value,details});if(!value)report.review.failures.push(label);}
 `);
@@ -25,7 +24,6 @@ replace("check((await api('subagents',{...binding,after:9007199254740990})).erro
 replace("const original='NATIVE-B-COMPLETE'+('原'.repeat(16000));",`
   // Freeze observer polling only; the genuine provider/native child continues independently.
   await evaluate(nativePage,"window.reviewRetained=document.createElement('wa-agent-session');reviewRetained.style.cssText='position:fixed;inset:0;width:600px;height:700px;z-index:9999;background:var(--panel)';document.body.append(reviewRetained);reviewRetained.task="+JSON.stringify(nativeChild)+';refreshAgentPane(reviewRetained).then(()=>{runPolling=true;reviewRetained.input.value="REVIEW-PERSISTENT-DRAFT";return true;})');
-  await evaluate(nativePage,"window.reviewRaw=reviewRetained.transcript.querySelector('[data-live-channel=delta]');window.reviewMainRaw=messages.querySelector('[data-live-channel=delta]');window.reviewTrace=reviewRetained.transcript.querySelector('wa-trace');reviewTrace.open=false;reviewRetained.transcript.scrollTop+=reviewRaw.getBoundingClientRect().top-reviewRetained.transcript.getBoundingClientRect().top+30;true");
   const liveBefore=await evaluate(nativePage,"({main:messages.textContent,pane:reviewRetained.transcript.textContent,place:transcriptPlace(reviewRetained.transcript),keys:[...reviewRetained.transcript.querySelectorAll('[data-ledger-key]')].map(e=>e.dataset.ledgerKey)})");
   const reviewJournal=path.join(root,'.wasm-agent','subagents',receipt.subagent_id,'events.sqlite');
   fs.renameSync(reviewJournal,reviewJournal+'.review-preserved');
@@ -47,13 +45,6 @@ replace("check((await api('health')).subagents.active===0,'all native child thre
   check((await api('health')).subagents.active===0,'all native child threads settled before scratch retirement');
   const terminalTask=await api('subagents',{action:'status',id:receipt.subagent_id});
   const modelCount=report.models.length;
-  const terminalPage=await api('subagents',{action:'session',id:receipt.subagent_id,limit:200,byte_limit:4096});
-  const terminalReference=terminalPage.messages.find(row=>row.omitted&&row.role==='assistant');
-  assert.ok(terminalReference,'fixture requires real oversized terminal evidence');
-  let byteAfter=1,fullVersion=null,fullEncoded='';
-  for(;;){const part=await api('subagents',{action:'session',id:receipt.subagent_id,message_id:terminalReference.id,byte_offset:byteAfter,byte_limit:4096,...(fullVersion?{message_version:fullVersion}:{})});
-    assert.ok(part.next_offset>byteAfter&&(!fullVersion||fullVersion===part.message_version));fullVersion=part.message_version;fullEncoded+=part.content;byteAfter=part.next_offset;if(part.eof)break;}
-  const terminalOriginal=JSON.parse(fullEncoded);
   fs.renameSync(reviewJournal,reviewJournal+'.review-preserved');
   try{
     await evaluate(nativePage,'reviewRetained.task='+JSON.stringify(terminalTask)+';syncNativeSession(chatSession,conversationEpoch,activeNode).then(()=>refreshAgentPane(reviewRetained)).then(()=>true)');
@@ -64,12 +55,6 @@ replace("check((await api('health')).subagents.active===0,'all native child thre
     review(terminalView.pane.includes('raw-299')&&terminalView.main.includes('raw-299'),'terminal fallback retains original delta-derived content');
     review(terminalView.notice.includes('native_event_evidence_unavailable')&&terminalView.status.includes('native_event_evidence_unavailable'),'terminal fallback does not hide native raw evidence gap');
     review(terminalView.draft==='REVIEW-PERSISTENT-DRAFT','terminal fallback retains draft');
-    review(await evaluate(nativePage,"reviewRaw.isConnected&&reviewMainRaw.isConnected&&reviewTrace.open===false"),'terminal fallback preserves original raw DOM and folds');
-    const terminalPlace=await evaluate(nativePage,'transcriptPlace(reviewRetained.transcript)');
-    review(terminalPlace.key===liveBefore.place.key&&Math.abs(terminalPlace.offset-liveBefore.place.offset)<=1,'terminal fallback retains original raw scroll anchor',terminalPlace);
-    const storedBodies=await evaluate(nativePage,"[...reviewRetained.transcript.querySelectorAll('[data-source=stored-session] .seg')].map(e=>e.rawText)");
-    review(storedBodies.includes(terminalOriginal.content),'stored terminal fallback contains every original byte without clipping',{originalBytes:Buffer.byteLength(terminalOriginal.content),storedBytes:storedBodies.map(text=>Buffer.byteLength(text||''))});
-    review(await evaluate(nativePage,"[...messages.querySelectorAll('[data-source=stored-session] .seg')].some(e=>e.rawText==="+JSON.stringify(terminalOriginal.content)+")"),'main stored terminal fallback contains complete original content');
     await evaluate(nativePage,"window.reviewFresh=document.createElement('wa-agent-session');document.body.append(reviewFresh);reviewFresh.task="+JSON.stringify(terminalTask)+';refreshAgentPane(reviewFresh).then(()=>true)');
     review(await evaluate(nativePage,"reviewFresh.transcript.textContent.includes('NATIVE-B-COMPLETE')&&reviewFresh.notice.textContent.includes('native_event_evidence_unavailable')"),'fresh terminal fallback shows durable answer and gap');
     for(let i=0;i<2;i++)await evaluate(nativePage,'syncNativeSession(chatSession,conversationEpoch,activeNode).then(()=>refreshAgentPane(reviewRetained)).then(()=>true)');

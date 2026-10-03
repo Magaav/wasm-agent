@@ -1,0 +1,63 @@
+[
+  {
+    "name": "disable-main-terminal",
+    "exit": 1,
+    "expected": "unavailable terminal journal existing main and pane show durable answer",
+    "intended": true,
+    "failures": [
+      "unavailable terminal journal existing main and pane show durable answer",
+      "unavailable terminal journal answer exactly once",
+      "main stored terminal fallback contains complete original content",
+      "repeated unavailable terminal fallback is idempotent"
+    ],
+    "error": "review matrix failures: unavailable terminal journal existing main and pane show durable answer; unavailable terminal journal answer exactly once; main stored terminal fallback contains complete original content; repeated unavailable terminal fallback is idempotent",
+    "receipt": "C:\\Users\\Victor\\orca\\projects\\wasm-agent\\.git\\wa-recovery-evidence\\wa-native-browser-CQH0Kn\\report.json",
+    "mutantHash": "3e5b5940057a9ed2e1a24f8ff752e79f25ff117d4944af74dc55a554cbd795a2"
+  },
+  {
+    "name": "disable-pane-terminal",
+    "exit": 1,
+    "expected": "unavailable terminal journal existing main and pane show durable answer",
+    "intended": true,
+    "failures": [
+      "unavailable terminal journal existing main and pane show durable answer",
+      "unavailable terminal journal answer exactly once",
+      "stored terminal fallback contains every original byte without clipping",
+      "repeated unavailable terminal fallback is idempotent"
+    ],
+    "error": "review matrix failures: unavailable terminal journal existing main and pane show durable answer; unavailable terminal journal answer exactly once; stored terminal fallback contains every original byte without clipping; repeated unavailable terminal fallback is idempotent",
+    "receipt": "C:\\Users\\Victor\\orca\\projects\\wasm-agent\\.git\\wa-recovery-evidence\\wa-native-browser-EEmGYm\\report.json",
+    "mutantHash": "ccce8c28f6a81e41af8e6e64d042c1cec3cef93cd0d6b16ba16b5d1f007401ea"
+  },
+  {
+    "name": "replace-known-raw",
+    "exit": 1,
+    "expected": "terminal fallback preserves original raw DOM and folds",
+    "intended": true,
+    "failures": [
+      "terminal fallback preserves original raw DOM and folds",
+      "terminal fallback retains original raw scroll anchor"
+    ],
+    "error": "review matrix failures: terminal fallback preserves original raw DOM and folds; terminal fallback retains original raw scroll anchor",
+    "receipt": "C:\\Users\\Victor\\orca\\projects\\wasm-agent\\.git\\wa-recovery-evidence\\wa-native-browser-Wp7Veo\\report.json",
+    "mutantHash": "4a759557b79633b3d9ea9d392937769cdbcf720ef92ba4bf4a2ab272fdd510b9"
+  },
+  {
+    "name": "malformed-to-zero",
+    "exit": 1,
+    "expected": "malformed cursor named refusal \"garbage\"",
+    "intended": true,
+    "failures": [
+      "malformed cursor named refusal \"garbage\"",
+      "malformed cursor named refusal {}",
+      "malformed cursor named refusal []",
+      "malformed cursor named refusal true",
+      "malformed cursor named refusal false",
+      "malformed cursor named refusal \"NaN\"",
+      "malformed cursor named refusal \"Infinity\""
+    ],
+    "error": "review matrix failures: malformed cursor named refusal \"garbage\"; malformed cursor named refusal {}; malformed cursor named refusal []; malformed cursor named refusal true; malformed cursor named refusal false; malformed cursor named refusal \"NaN\"; malformed cursor named refusal \"Infinity\"",
+    "receipt": "C:\\Users\\Victor\\orca\\projects\\wasm-agent\\.git\\wa-recovery-evidence\\wa-native-browser-3CZ8vA\\report.json",
+    "mutantHash": "89f55b41b8135e0cc1dbc3648ce8eeb5ca9b68b5082b429352301ed3a753b54b"
+  }
+]
