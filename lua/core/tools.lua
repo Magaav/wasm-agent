@@ -545,15 +545,23 @@ local function required_workspace_error(memory, ctx, name, args)
   end
   if name == "write" or name == "edit" then
     local target = resolve_path(memory, ctx, args.path)
+    local scratch = workspaces.scratch_root(ctx.session_id)
+    if target and scratch and inside_workspace(scratch, target) then return nil end
     if target and not inside_workspace(workspace.worktree, target) then
-      return {error="workspace_path_outside_binding",path=target}
+      return {error="workspace_path_outside_binding",path=target,
+        allowed_writes={workspace.worktree,scratch}}
     end
   elseif name == "bash" and args.cwd and args.cwd ~= "" then
     local cwd = args.cwd
     if cwd:sub(1,1) ~= "/" and not cwd:match("^%a:[/\\]") and cwd:sub(1,2) ~= "\\\\" then
       cwd = workspace.worktree:gsub("[/\\]+$", "") .. "/" .. cwd
     end
-    if not inside_workspace(workspace.worktree, cwd) then return {error="workspace_cwd_outside_binding",cwd=args.cwd} end
+    local scratch = workspaces.scratch_root(ctx.session_id)
+    if not inside_workspace(workspace.worktree, cwd)
+        and not (scratch and inside_workspace(scratch, cwd)) then
+      return {error="workspace_cwd_outside_binding",cwd=args.cwd,
+        allowed_writes={workspace.worktree,scratch}}
+    end
     args.cwd = cwd
   end
   return nil
@@ -1143,6 +1151,11 @@ function M.await_parallel_bash(operation_id, role, ctx)
     stdout = type(stdout) == "table" and stdout.content or "",
     stderr = type(stderr) == "table" and stderr.content or "",
     output_complete = state.output_complete == true,
+    stdout_bytes = type(stdout) == "table" and stdout.available_bytes or nil,
+    stderr_bytes = type(stderr) == "table" and stderr.available_bytes or nil,
+    stdout_path = state.stdout_path, stderr_path = state.stderr_path,
+    stderr_truncated = type(stderr) == "table" and
+      (tonumber(stderr.available_bytes) or 0) > 8192 or false,
     stdout_truncated = type(stdout) == "table" and
       (tonumber(stdout.available_bytes) or 0) > 24576 or false,
     error = state.error, timing = state.timing, parallel = true }

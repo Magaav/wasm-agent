@@ -12,6 +12,9 @@ fn command_result(manager: &Manager, id: &str, mut state: Value) -> Value {
     }
     if let Ok(page) = manager.read(id, "stderr", 0, 8 * 1024) {
         state["stderr"] = page["content"].clone();
+        let available = page["available_bytes"].as_u64().unwrap_or(0);
+        state["stderr_bytes"] = json!(available);
+        state["stderr_truncated"] = json!(available > 8 * 1024);
     }
     state["command_completed"] = json!(true);
     state["command_code"] = json!(code);
