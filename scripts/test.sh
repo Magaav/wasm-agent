@@ -183,10 +183,16 @@ run_proof_fixture() {
 }
 
 # BEGIN sentinel-intake required proofs
+CARGO_BUILD_JOBS=2 gate_run cargo test --offline --manifest-path rust/wa-sentinel/Cargo.toml -- --test-threads=2
+if [ "${OS:-}" = "Windows_NT" ]; then
 CARGO_BUILD_JOBS=2 gate_run cargo build --offline --manifest-path rust/wa-sentinel/Cargo.toml
 INTAKE_PROOF="$(git rev-parse --git-path "intake-gate-$(date +%s)-$$")"
 run_proof_fixture sentinelIntake 10 python scripts/test-sentinel-intake-cli.py --sentinel "$PWD/rust/wa-sentinel/target/debug/wa-sentinel.exe" --evidence "$INTAKE_PROOF/cli"
 run_proof_fixture sentinelIntakeMutants 2 python scripts/test-sentinel-intake-mutants.py --repo "$PWD" --evidence "$INTAKE_PROOF/mutants"
+else
+  echo "SKIP: Windows Job CLI proof (portable native intake tests above are required)"
+  SKIPPED=$((SKIPPED + 1))
+fi
 # END sentinel-intake required proofs
 
 gate_phase_begin build

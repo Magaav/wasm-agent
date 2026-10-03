@@ -22,6 +22,11 @@ fn busy_protocol_ack_is_persistent_but_never_completion() {
     assert_eq!(state["phase"],"held");
     assert!(!dir.join("result.json").exists());
     assert!(deploy_protocol::validate(&request,"wrong-id").is_err());
+    for field in ["expected_sha","session","verb","owner"] {
+        let mut removed=request.clone();removed.as_object_mut().unwrap().remove(field);
+        if removed != request { assert!(deploy_protocol::intake(&removed,"private-1").is_err()); }
+    }
+    for value in [Value::Null,json!(42),json!(false)] {let mut changed=request.clone();changed["expected_sha"]=value;assert!(deploy_protocol::intake(&changed,"private-1").is_err());}
     let mut missing=request.clone();missing.as_object_mut().unwrap().remove("queued_at");
     assert!(deploy_protocol::validate(&missing,"private-1").is_err());
     match previous {Some(v)=>std::env::set_var("WASM_AGENT_HOME",v),None=>std::env::remove_var("WASM_AGENT_HOME")};

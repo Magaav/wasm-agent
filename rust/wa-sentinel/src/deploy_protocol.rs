@@ -1,7 +1,18 @@
 //! Durable acknowledgement is not an installation result. Legacy requests retain legacy behavior.
 use super::*;
 
+pub(crate) fn reserved(id: &str) -> bool {
+    !id.is_empty() && id.bytes().all(|b|b.is_ascii_alphanumeric() || b==b'-') && sentinel_dir().join("deploy-protocol").join(id).join("intent.json").exists()
+}
+pub(crate) fn fence(request: &Value,id: &str) -> Result<()> {
+    if reserved(id) {
+        let original:Value=serde_json::from_slice(&std::fs::read(sentinel_dir().join("deploy-protocol").join(id).join("intent.json"))?)?;
+        if original != *request { bail!("immutable_intent_mismatch"); }
+    }
+    Ok(())
+}
 pub(crate) fn validate(request: &Value, id: &str) -> Result<()> {
+    fence(request,id)?;
     if request.get("expected_sha").is_none() { return Ok(()); }
     let sha = request["expected_sha"].as_str().unwrap_or("");
     if request["verb"] != "deploy" || sha.len() != 40 || !sha.bytes().all(|b| b.is_ascii_hexdigit()) {
@@ -46,7 +57,7 @@ pub(crate) fn record(request: &Value, id: &str, phase: &str, detail: &str) -> Re
 
 /// Cheap durable observation. No health, source lookup or effect admission.
 pub(crate) fn intake(request: &Value, id: &str) -> Result<()> {
-    if request.get("expected_sha").is_none() { return Ok(()); }
+    if request.get("expected_sha").is_none() && !reserved(id) { return Ok(()); }
     let result=validate(request,id).and_then(|_|record(request,id,"held","parent_owner_not_ready; deploy_effect_quarantined"));
     if let Err(error)=result {
         let safe=id.bytes().map(|b|format!("{b:02x}")).collect::<String>();

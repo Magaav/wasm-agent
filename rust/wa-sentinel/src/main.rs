@@ -1540,6 +1540,12 @@ static REQUEST_ACTIVE: std::sync::atomic::AtomicUsize = std::sync::atomic::Atomi
 static MAINTENANCE_ACTIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 fn finish_request(claim: &Path, request: &Value) {
+    let id=claim.file_stem().and_then(|s|s.to_str()).unwrap_or("");
+    if deploy_protocol::reserved(id) {
+        let _=deploy_protocol::intake(request,id);
+        audit("reserved-effect-held",id,"identity fenced immediately before perform; evidence retained");
+        return;
+    }
     let outcome=std::panic::catch_unwind(std::panic::AssertUnwindSafe(||perform(request)));
     let (folder,ok,detail)=match outcome {
         Ok(Ok(detail))=>("done",true,detail),
@@ -1652,6 +1658,11 @@ fn process_requests(background: bool, held: &mut Held) -> Result<u32> {
     for path in entries {
         use std::sync::atomic::Ordering;
         let preview:Value=std::fs::read(&path).ok().and_then(|b|serde_json::from_slice(&b).ok()).unwrap_or(Value::Null);
+        let reserved_id=path.file_stem().and_then(|s|s.to_str()).unwrap_or("");
+        if deploy_protocol::reserved(reserved_id) {
+            let _=deploy_protocol::intake(&preview,reserved_id);
+            continue; // reserved identity cannot downgrade into any legacy verb
+        }
         // Only the newest upgrade matters. An upgrade installs one binary, so an older request for an
         // older build is superseded, not queued behind it: without this, several agents' upgrades ran
         // in turn - each stopping and starting the node, each able to fail and be retried while a long
@@ -1729,7 +1740,7 @@ fn process_requests(background: bool, held: &mut Held) -> Result<u32> {
                 continue;
             }
         };
-        if request.get("expected_sha").is_some() {
+        if request.get("expected_sha").is_some() || deploy_protocol::reserved(claim.file_stem().and_then(|s|s.to_str()).unwrap_or("")) {
             let id=claim.file_stem().and_then(|s|s.to_str()).unwrap_or("");
             let _=deploy_protocol::intake(&request,id);
             audit("claimed-protocol-held",id,"effect quarantined; claimed evidence preserved");
