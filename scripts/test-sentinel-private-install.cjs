@@ -1,6 +1,7 @@
 // Actual private installer, native watcher and source-root Lua. Only inference is a labelled local mock.
 const fs=require('fs'),path=require('path'),os=require('os'),http=require('http'),net=require('net'),assert=require('assert/strict');
 const {spawn,spawnSync}=require('child_process');
+const {pathToFileURL}=require('url');
 const repo=path.resolve(__dirname,'..');
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 const args=process.argv.slice(2);
@@ -30,7 +31,7 @@ function cli(...argv){const r=spawnSync(path.join(install,'wa-sentinel.exe'),arg
 async function gone(pid){await until(()=>{try{process.kill(pid,0);return false;}catch{return true;}},'owned pid did not exit '+pid,15000);}
 (async()=>{try{
  // Source is a full clone with an actual private remote main, never fake upstream on a live checkout.
- const proof=await import(path.join(source,'scripts/sentinel-install-proof.mjs'));
+ const proof=await import(pathToFileURL(path.join(source,'scripts/sentinel-install-proof.mjs')).href);
  assert.equal(proof.sourceIdentity(source,packet.head).tree,packet.tree);
  await run('cargo',['build','--release','--offline','--manifest-path','rust/Cargo.toml','-p','wa-host'],'source-host-build');
  await run('cargo',['build','--release','--offline','--manifest-path','rust/wa-sentinel/Cargo.toml'],'source-sentinel-build');
@@ -88,7 +89,7 @@ async function gone(pid){await until(()=>{try{process.kill(pid,0);return false;}
  const mutantFile=path.join(base,'causal-check-removed.mjs');
  assert(originalHelper.includes('result?.request_id!==intent.id||'));
  fs.writeFileSync(mutantFile,originalHelper.replace('result?.request_id!==intent.id||',''));
- const mutant=await import(mutantFile);
+ const mutant=await import(pathToFileURL(mutantFile).href);
  try{fs.writeFileSync(resultFile,JSON.stringify({...result,request_id:'wrong-request'}));assert.equal(mutant.verifyActual(source,install,request,binding,dir).ok,true,'removed causal check must admit the actual wrong request');negativeCount++;save('causal-removal.json',{red:true,actual_wrong_request:'wrong-request',original_refused:true,mutant_admitted:true});}finally{fs.writeFileSync(resultFile,resultBytes);}
  const clean=proof.verifyActual(source,install,request,JSON.parse(fs.readFileSync(path.join(dir,'binding.json'))),dir);assert.equal(clean.ok,true);
  save('result.json',{ok:true,request_id:request.id,head:packet.head,tree:packet.tree,ack_ms:ackMs,checks:8+negativeCount,skipped:0,paid_calls:0,actual_installer:true,actual_verifier:true,private_source:source,notices:terminal.length});
@@ -96,7 +97,7 @@ async function gone(pid){await until(()=>{try{process.kill(pid,0);return false;}
  }finally{
   if(releaseBusy)releaseBusy();
   if(fs.existsSync(path.join(box,'sentinel.pid'))){const pid=Number(fs.readFileSync(path.join(box,'sentinel.pid')));fs.writeFileSync(path.join(box,'stop'),'owned private fixture cleanup');await gone(pid);}
-  if(fs.existsSync(path.join(install,'serve.pid'))){const pid=Number(fs.readFileSync(path.join(install,'serve.pid')));const {processIdentity}=await import(path.join(source,'scripts/sentinel-install-proof.mjs'));try{const identity=processIdentity(pid);assert.equal(fs.realpathSync(identity.image).toLowerCase(),fs.realpathSync(path.join(install,'wa.exe')).toLowerCase());process.kill(pid);await gone(pid);}catch(e){if(e.code!=='ESRCH'&&!String(e).includes('Cannot find a process'))throw e;}}
+  if(fs.existsSync(path.join(install,'serve.pid'))){const pid=Number(fs.readFileSync(path.join(install,'serve.pid')));const {processIdentity}=await import(pathToFileURL(path.join(source,'scripts/sentinel-install-proof.mjs')).href);try{const identity=processIdentity(pid);assert.equal(fs.realpathSync(identity.image).toLowerCase(),fs.realpathSync(path.join(install,'wa.exe')).toLowerCase());process.kill(pid);await gone(pid);}catch(e){if(e.code!=='ESRCH'&&!String(e).includes('Cannot find a process'))throw e;}}
   if(node&&node.exitCode===null){node.kill();await gone(node.pid);}if(watch&&watch.exitCode===null){watch.kill();await gone(watch.pid);}
   if(mock){mock.closeAllConnections();await new Promise(r=>mock.close(r));}
   console.log('immutable private evidence: '+base);
