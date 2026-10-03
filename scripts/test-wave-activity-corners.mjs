@@ -22,6 +22,8 @@ import {create, advance, list} from './wave-lifecycle.mjs';
 import {activityInventory, POSITIVE_CLAIM} from './lib/wave-activity.mjs';
 import {observe, resolve} from './wave-activity.mjs';
 
+// Normal reachable regression: validates recovery through actual entry and guard.
+await import('./test-wave-recovery.mjs');
 const source = path.resolve('.');
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'wa-wave-corners-'));
 let checks = 0, passed = false;
