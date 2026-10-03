@@ -259,7 +259,7 @@ try {
   fs.mkdirSync(path.join(spliced, 'lib'), {recursive: true});
   const source = fs.readFileSync(ADMISSION, 'utf8');
   fs.copyFileSync(path.join(HERE, 'lib', 'delivery-store.mjs'), path.join(spliced, 'lib', 'delivery-store.mjs'));
-  for(const file of ['producer-admission.mjs','gate-check.mjs','gate-checks.mjs','lib/test-verdict.cjs','lib/wave-guard.mjs','lib/delivery-local.mjs','lib/delivery-producer-proof.mjs'])
+  for(const file of ['producer-admission.mjs','gate-check.mjs','gate-checks.mjs','lib/test-verdict.cjs','lib/wave-guard.mjs','lib/delivery-local.mjs','lib/delivery-producer-proof.mjs','lib/full-gate-proof.mjs'])
     fs.copyFileSync(path.join(HERE,file),path.join(spliced,file));
   const binding = [
     '    const sameTree = Boolean(observations.tree) && review.tree === observations.tree;',

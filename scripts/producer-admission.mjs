@@ -4,6 +4,7 @@ import path from 'node:path';
 import {spawnSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 import {deliveryFiles,runDeliveryProof,verifyDeliveryProof} from './lib/delivery-producer-proof.mjs';
+import {fullProof} from './lib/full-gate-proof.mjs';
 import {catalog} from './gate-checks.mjs';
 import {executeChecks,hash,checkVerdict} from './gate-check.mjs';
 function git(repo,...args) {
@@ -43,6 +44,20 @@ export function verifyFocused(repo,receipt,tip='HEAD') {
     }
     return {admission_verified:true,gate_verified:false,requires_combined_gate:true,tree:current.tree,checks:current.checks};
   } catch(error){return {admission_verified:false,gate_verified:false,requires_combined_gate:true,error:error.message};}
+}
+// Ordinary broad-source admission consumes genuine full proof; it never runs a release gate.
+export function verifyProducer(repo,receipt,tip='HEAD') {
+  const selection=plan(repo,tip);
+  if(!selection.full_required)return verifyFocused(repo,receipt,tip);
+  try {
+    const proof=fullProof(receipt,selection.tree,{ownerRepo:repo});
+    if(!proof.verified)throw Error(proof.reason);
+    if(proof.head!==selection.head)throw Error('full proof names another commit');
+    const common=p=>fs.realpathSync(git(p,'rev-parse','--path-format=absolute','--git-common-dir'));
+    if(common(proof.owner_repo)!==common(repo))throw Error('full proof belongs to another repository');
+    if(git(repo,'rev-parse','HEAD')!==selection.head||git(repo,'status','--porcelain'))throw Error('producer source moved or dirty');
+    return {admission_verified:true,gate_verified:true,requires_combined_gate:true,head:selection.head,tree:selection.tree,full_proof:proof};
+  }catch(error){return {admission_verified:false,gate_verified:false,requires_combined_gate:true,error:error.message};}
 }
 export async function runFocused(repo,{jobs=1,output=null}={}) {
   const selection=plan(repo);

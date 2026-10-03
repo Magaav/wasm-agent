@@ -37,7 +37,7 @@ import {pathToFileURL} from 'node:url';
 import {nowIso, readRecord, storeDir, writeRecord} from './lib/delivery-store.mjs';
 
 import {checkWaveAdmission} from './lib/wave-guard.mjs';
-import {verifyFocused} from './producer-admission.mjs';
+import {verifyProducer} from './producer-admission.mjs';
 import {mainOnly, managedLocal} from './lib/delivery-local.mjs';
 const SCHEMA = 1;
 
@@ -133,7 +133,7 @@ export function evaluate({repo, record, tipRef = null,phase='admit', sessionDb=n
       add('record_repository_matches',fs.realpathSync(git(repo,['rev-parse','--path-format=absolute','--git-common-dir']))===fs.realpathSync(git(record.repository,['rev-parse','--path-format=absolute','--git-common-dir'])),'same shared repository');
     } catch(error){add('local_producer_binding',false,error.message);}
     add('producer_receipt_required',Boolean(record.producer_checks),'main-only requires source-bound producer checks');
-    add('producer_receipt_exact_tip',record.producer_checks?.head===record.tip,'receipt must name the exact commit');
+    add('producer_receipt_exact_tip',(record.producer_checks?.head===record.tip || (record.producer_checks?.kind==='retained-full' && record.producer_checks?.candidate_head===record.tip)),'receipt must name the exact commit');
   }
   // -- the review ---------------------------------------------------------------------------------
   add('review_missing', Boolean(review),
@@ -201,7 +201,7 @@ export function evaluate({repo, record, tipRef = null,phase='admit', sessionDb=n
   // never combined-tree verification; old reviewed records remain compatible.
   let producerProof = null;
   if (record.producer_checks) {
-    producerProof = verifyFocused(observations.producer_local?.worktree || repo, record.producer_checks, refTip || record.tip);
+    producerProof = verifyProducer(observations.producer_local?.worktree || repo, record.producer_checks, refTip || record.tip);
     add('producer_checks_verified', producerProof.admission_verified === true,
       producerProof.error || `focused checks verified for tree ${producerProof.tree}`);
   }
