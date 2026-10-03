@@ -19,7 +19,20 @@ export function recoveryAdmission(repo,store,{phase,recovery,original_refusal,na
  const common=fs.realpathSync(git(canonical,'rev-parse','--path-format=absolute','--git-common-dir'));
  need(fs.realpathSync(path.dirname(store))===common,'shared_store_mismatch');
  const snap=recoverySnapshot(store,ticket.wave);
- need(ticket.owner===registration.owner&&ticket.owner===snap.row.owner&&session(repo,envelope.commit)===ticket.owner,'owner_authority_mismatch');
+ need(ticket.owner===registration.owner&&ticket.owner===snap.row.owner,'owner_authority_mismatch');
+ const issuer=session(repo,envelope.commit);
+ if(issuer!==ticket.owner){
+  need(ticket.issuer_binding,'issuer_descriptor_required');
+  const ref=ticket.issuer_binding,descriptor=JSON.parse(git(repo,'show',`${ref.commit}:${ref.path}`));
+  need(descriptor.schema===1&&descriptor.kind==='wave-issuer-binding'&&descriptor.wave===ticket.wave&&descriptor.owner_label===ticket.owner&&descriptor.issuer_session===issuer&&descriptor.registration_sha256===snap.registration,'issuer_descriptor_mismatch');
+  need(session(repo,ref.commit)===issuer,'issuer_descriptor_provenance');
+  need(registration.attestation&&digest(fs.readFileSync(registration.attestation))===descriptor.attestation_sha256&&descriptor.attestation_sha256===registration.attestation_sha256,'issuer_attestation_moved');
+  need(Array.isArray(descriptor.original_evidence)&&descriptor.original_evidence.length>=2&&descriptor.original_evidence.every(x=>x.message_id&&/^[a-f0-9]{64}$/.test(x.sha256)),'issuer_original_evidence_required');
+  const acceptance=JSON.parse(git(repo,'show',`${ref.review_commit}:${ref.review_path}`));
+  need(acceptance.kind==='wave-issuer-binding-review'&&acceptance.descriptor_commit===ref.commit&&acceptance.descriptor_path===ref.path&&acceptance.descriptor_sha256===digest(git(repo,'show',`${ref.commit}:${ref.path}`))&&acceptance.verdict==='passed'&&acceptance.reviewer!==issuer&&session(repo,ref.review_commit)===acceptance.reviewer,'issuer_descriptor_independent_review_required');
+  // Operator-local issuance, not cryptographic human approval. Old attestation
+  // reviewer labels are retained, never promoted to authenticated approval.
+ }
  need(ticket.snapshot===snap.snapshot&&ticket.registration===snap.registration&&ticket.manifest===snap.row.manifest_hash&&ticket.legacy===digest(snap.row.legacy||''),'snapshot_moved');
  need(ticket.expected_main===git(canonical,'rev-parse','refs/heads/main')&&ticket.expected_main===git(canonical,'rev-parse','refs/remotes/origin/main'),'main_moved');
  need(Number.isSafeInteger(ticket.expires)&&ticket.expires>Date.now()&&ticket.expires<=Date.now()+86400000,'expired_or_unbounded');
