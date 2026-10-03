@@ -1,0 +1,30 @@
+stage C:\Users\Victor\AppData\Local\Temp\wa-probe-obAwmx  browser msedge.exe  exit 0  dom 43205 bytes
+---- probe result ----
+[
+  {
+    "case": "assistant-grow-prepend",
+    "id": "a3",
+    "ledgerKey": null,
+    "delta": 151
+  },
+  {
+    "case": "duplicate-user-prepend",
+    "id": "u3",
+    "delta": 0
+  },
+  {
+    "case": "fold-repaint",
+    "open": false
+  },
+  {
+    "case": "resize-repaint-user",
+    "id": "u3",
+    "delta": 0
+  }
+]
+---- browser stderr (first 800 chars) ----
+[7444:16316:1002/220712.627:ERROR:components\edge_ess\vbs_encoder.cc:100] LoadEnclaveImageW failed, error code 577
+[7444:16316:1002/220712.965:ERROR:components\edge_auth\edge_auth_errors.cc:553] EDGE_IDENTITY: Image Fetch FAILED: Error: Primary Error: kAccountImageFetchFailure, Secondary Error: kUnspecified, Platform error: 0, Error string: [empty]
+
+40385 bytes written to file C:\Users\Victor\.wasm-agent\wa-worktree-childdispatch366a7144-3381-43ea-b7dd-d5ad7ac3adbd\review\ui-repair-c233592\scroll.png
+

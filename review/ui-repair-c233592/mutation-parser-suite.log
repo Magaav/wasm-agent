@@ -1,0 +1,28 @@
+check js:one.js: PASS exit=0 ms=204.8 log=C:\Users\Victor\AppData\Local\Temp\wa-check-runner-IBfAmB\pass\js_one.js.log
+ALL PASS
+check js:two.js: PASS exit=0 ms=205.8 log=C:\Users\Victor\AppData\Local\Temp\wa-check-runner-IBfAmB\pass\js_two.js.log
+ALL PASS
+check js:three.js: PASS exit=0 ms=202.4 log=C:\Users\Victor\AppData\Local\Temp\wa-check-runner-IBfAmB\pass\js_three.js.log
+ALL PASS
+check js:failure.js: FAIL exit=7 ms=37.7 log=C:\Users\Victor\AppData\Local\Temp\wa-check-runner-IBfAmB\fail\js_failure.js.log
+ALL PASS
+check js:silent.js: FAIL exit=0 ms=38.0 log=C:\Users\Victor\AppData\Local\Temp\wa-check-runner-IBfAmB\fail\js_silent.js.log
+
+check js:one.js: PASS exit=0 ms=195.7 log=C:\Users\Victor\AppData\Local\Temp\wa-check-runner-IBfAmB\fail\js_one.js.log
+ALL PASS
+node:internal/modules/run_main:107
+    triggerUncaughtException(
+    ^
+
+AssertionError [ERR_ASSERTION]: ambiguous stage contract refused
+    at file:///C:/Users/Victor/.wasm-agent/wa-worktree-childdispatch366a7144-3381-43ea-b7dd-d5ad7ac3adbd/review-snapshot/scripts/test-gate-check.mjs:26:161
+    at process.processTicksAndRejections (node:internal/process/task_queues:104:5) {
+  generatedMessage: false,
+  code: 'ERR_ASSERTION',
+  actual: false,
+  expected: true,
+  operator: '==',
+  diff: 'simple'
+}
+
+Node.js v24.19.0

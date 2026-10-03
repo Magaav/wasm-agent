@@ -1,0 +1,45 @@
+{
+  "ok": true,
+  "action": "get",
+  "store": "C:\\Users\\Victor\\.wasm-agent\\sentinel\\deliveries",
+  "record": {
+    "schema": 1,
+    "delivery": "change/wa-session-childdispatch4c6f5927-a536-4018-8c04-ceccdcec00b4",
+    "branch": "change/wa-session-childdispatch4c6f5927-a536-4018-8c04-ceccdcec00b4",
+    "repository": "C:\\Users\\Victor\\.wasm-agent\\wa-worktree-childdispatch4c6f5927-a536-4018-8c04-ceccdcec00b4",
+    "tip": "cf22b0be2f3e432abb5ee14b6e73496f261c3df7",
+    "tree": "05ea236f9fb6aeb283d794fded573245f2f39384",
+    "producer": "child:dispatch:4c6f5927-a536-4018-8c04-ceccdcec00b4",
+    "review": {
+      "reviewer": "child:dispatch:366a7144-3381-43ea-b7dd-d5ad7ac3adbd",
+      "commit": "2cda1a21fc9afca0dc3bc3a5f8220da9b98fe9eb",
+      "tip": "cf22b0be2f3e432abb5ee14b6e73496f261c3df7",
+      "tree": "05ea236f9fb6aeb283d794fded573245f2f39384",
+      "verdict": "refused",
+      "findings": [
+        {
+          "class": "liveness",
+          "status": "unresolved",
+          "text": "Unknown health aborts held stream; independent browser reproduction"
+        },
+        {
+          "class": "scroll",
+          "status": "unresolved",
+          "text": "Prepend shifts visible anchor 241px; append-only preservation passed"
+        },
+        {
+          "class": "stage-proof",
+          "status": "unresolved",
+          "text": "Ambiguous double field and false suffix accepted"
+        }
+      ],
+      "at": "2026-10-03T00:54:39.207Z"
+    },
+    "admission": null,
+    "lane": null,
+    "landing": null,
+    "created_at": "2026-10-03T00:43:50.323Z",
+    "revision": 2,
+    "updated_at": "2026-10-03T00:54:39.208Z"
+  }
+}
