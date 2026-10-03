@@ -86,10 +86,16 @@ pub(crate) fn observe(id:&str) -> Result<()> {
     let revision=job["revision"].as_i64().context("return_hook_revision_missing")?;
     let prior=source.event_receipt("onSentinelReturn",revision,&key,&payload).map_err(|e|anyhow::anyhow!(e.to_string()))?;
     let acknowledged=prior["receipt"]["acknowledged"]==true;
+    let completed=prior["receipt"]["state"]=="completed";
+    // Completion is authoritative across definition revisions via the wake ledger, not enqueue count.
+    let ledger:Value=std::fs::read(sentinel_dir().join("wake-dedupe-onSentinelReturn.json")).ok().and_then(|b|serde_json::from_slice(&b).ok()).unwrap_or(Value::Null);
     let emitted=jobs::store().emit("sentinel.return",&key,&json!({"id":id,"event_key":key}),now as i64).map_err(|e|anyhow::anyhow!("return_emit_failed:{e}"))?;
-    if emitted>0 || acknowledged {
+    if completed || ledger["keys"].get(&key).is_some() {
         cursor=json!({"slot":slot+1,"next_at":if terminal {u64::MAX} else {now+10},"last_event":key});
         wa_operation::atomic_json(&dir.join("observation.json"),&cursor)?;
+    } else if emitted>0 || acknowledged {
+        // Same immutable slot stays pending until attributed terminal delivery, including busy parent.
+        wa_operation::atomic_json(&dir.join("pending-return.json"),&json!({"event_key":key,"revision":revision,"at":now}))?;
     }
     Ok(())
 }
