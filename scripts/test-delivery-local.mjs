@@ -47,6 +47,17 @@ try {
  const {writeRecord:save}=await import('./lib/delivery-store.mjs');const broadStore=path.join(root,'broad-records');delete broad.revision;save(broadStore,broad);
  const admission=spawnSync(process.execPath,[path.resolve('scripts/delivery-admission.mjs'),'admit',broad.branch,'--repo',repo,'--store',broadStore,'--session-db',dbFile,'--by','integrator'],{encoding:'utf8'});assert.equal(admission.status,0,admission.stderr);
  const merged=spawnSync(process.execPath,[path.resolve('scripts/merge-lane.mjs'),'--repo',repo,broad.branch,'--delivery-store',broadStore,'--delivery-session-db',dbFile,'--no-reuse-tree','--no-hooks','--gate-mode','none'],{encoding:'utf8'});assert.equal(merged.status,0,merged.stdout+merged.stderr);
+ // Retain independently frozen tested source into the managed producer's rightful custody.
+ const {retainFullProof}=await import('./lib/full-gate-proof.mjs');const frozen=path.join(root,'frozen');git(root,'clone','-q','--no-hardlinks',producer,frozen);git(frozen,'checkout','--detach','-q',broadTip);
+ const frozenGate=spawnSync('bash',['scripts/test.sh'],{cwd:frozen,encoding:'utf8'});assert.equal(frozenGate.status,0);const frozenLog=path.join(root,'frozen.log');fs.writeFileSync(frozenLog,frozenGate.stdout);
+ const frozenReceipt={...full,repo:frozen,log:frozenLog,log_sha256:digest(fs.readFileSync(frozenLog)),runner:{...full.runner,path:path.join(frozen,'skills/parallel-evolution/scripts/finish.mjs')}};
+ const rawPath=path.join(root,'frozen-receipt.json');fs.writeFileSync(rawPath,JSON.stringify(frozenReceipt));const retained=retainFullProof(rawPath,producer,{candidateHead:broadTip});
+ assert.equal(verifyProducer(producer,retained,broadTip).admission_verified,true);assert.equal(check({...broad,producer_checks:retained}).decision,'admitted');
+ const {readRecord}=await import('./lib/delivery-store.mjs');const retainedRecord=readRecord(broadStore,broad.branch);retainedRecord.producer_checks=retained;save(broadStore,retainedRecord);
+ const retainedCli=spawnSync(process.execPath,[path.resolve('scripts/delivery-admission.mjs'),'admit',broad.branch,'--repo',repo,'--store',broadStore,'--session-db',dbFile,'--by','integrator'],{encoding:'utf8'});assert.equal(retainedCli.status,0,retainedCli.stderr);
+ const retainedMerge=spawnSync(process.execPath,[path.resolve('scripts/merge-lane.mjs'),'--repo',repo,broad.branch,'--delivery-store',broadStore,'--delivery-session-db',dbFile,'--no-reuse-tree','--no-hooks','--gate-mode','none'],{encoding:'utf8'});assert.equal(retainedMerge.status,0,retainedMerge.stdout+retainedMerge.stderr);
+ for(const patch of [{candidate_head:tip},{owner_repo:frozen},{source_receipt:{...retained.source_receipt,sha256:'0'.repeat(64)}},{scope:{...retained.scope,sha256:'0'.repeat(64)}},{runner:full.runner}])assert.equal(check({...broad,producer_checks:{...retained,...patch}}).decision,'refused');
+ git(producer,'commit','--allow-empty','-qm','same tree alias\n\nAgent: fixture session=producer');const alias=git(producer,'rev-parse','HEAD');assert.equal(verifyProducer(producer,{...retained,candidate_head:alias},alias).admission_verified,false);
  git(producer,'reset','--hard',tip);
  assert.equal(check(record).decision,'admitted');assert.equal(check(record).observed.source,'managed_local_unpublished');
  for(const change of [{review:null},{producer_checks:null},{tree:'0'.repeat(40)},{review:{...record.review,verdict:'refused'}},{review:{...record.review,reviewer:'producer'}},{review:{...record.review,tip:anchor}}])assert.equal(check({...record,...change}).decision,'refused');
