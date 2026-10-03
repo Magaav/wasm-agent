@@ -1023,6 +1023,18 @@ pub fn control(action: &str, args: &Value) -> Result<Value, String> {
             if action=="status" { value.as_object_mut().unwrap().remove("result"); }
             Ok(value)
         }
+        "events" => {
+            let id=args["id"].as_str().unwrap_or_default();
+            let owner=args["owner_user"].as_str().unwrap_or_default();
+            let task=manager.find(id,owner)?;
+            let file=manager.inner.root.join(id).join("events.jsonl");
+            let raw=std::fs::read_to_string(file).map_err(|_|"native_event_evidence_unavailable".to_string())?;
+            let after=args["after"].as_u64().unwrap_or(0);
+            let all=raw.lines().map(serde_json::from_str::<Value>).collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
+            let events:Vec<Value>=all.iter().filter(|row|row["seq"].as_u64().unwrap_or(0)>after).take(256).cloned().collect();
+            let next=events.last().and_then(|row|row["seq"].as_u64()).unwrap_or(after);
+            Ok(json!({"ok":true,"transport":"native","task_id":id,"session_id":task["session_id"],"state":task["state"],"events":events,"next_seq":next,"has_more":all.last().and_then(|r|r["seq"].as_u64()).unwrap_or(0)>next}))
+        }
         "list" => {
             let owner = args["owner_user"].as_str().unwrap_or_default();
             Ok(manager.list(owner))
@@ -1069,6 +1081,15 @@ pub fn capture_event(payload: &str) -> bool {
     let Ok(event) = serde_json::from_str::<Value>(payload) else { return true };
     let mut tasks = manager().inner.tasks.lock().expect("subagents tasks");
     if let Some(task) = tasks.values_mut().find(|task| task.session_id == session && task.state == "running" && !task.settled) {
+        // Append original event before presentation. Retained per task; no automatic deletion.
+        let path=manager().inner.root.join(&task.id).join("events.jsonl");
+        let previous=std::fs::read_to_string(&path).unwrap_or_default();
+        let seq=previous.lines().count() as u64+1;
+        let row=json!({"seq":seq,"task_id":task.id,"session_id":session,"event":event});
+        if let Ok(mut file)=std::fs::OpenOptions::new().create(true).append(true).open(path) {
+            use std::io::Write;
+            if writeln!(file,"{}",row).and_then(|_|file.sync_data()).is_err(){task.error=Some("native_event_journal_write_failed".into());}
+        } else {task.error=Some("native_event_journal_unavailable".into());}
         if !task.preview.is_object() { task.preview = json!({"text":""}); }
         match event["type"].as_str().unwrap_or_default() {
             "delta" => {

@@ -755,6 +755,7 @@ function M.control(args, ctx)
   -- fields; a caller may use either name.
   local target = args.id or args.subagent_id
   if target then call.id = tostring(target) end
+  if action=='events' then call.after=tonumber(args.after) or 0 end
   if action == "await" then call.wait_ms = tonumber(args.wait_ms) or tonumber(args.timeout_ms) or 60000 end
   if action == "list" then
     return json.decode(host.subagent("list", json.encode({ owner_user = ctx.user_id })))

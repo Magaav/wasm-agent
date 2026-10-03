@@ -4755,7 +4755,11 @@ async function refreshAgentPane(pane) {
     const target=pane.task.session_id,node=activeNode;
     const result=await paneMessages(pane);
     let attached=null;
-    try {attached=await attachSessionJournal(pane.task.session_id,async()=> (await paneMessages(pane)).rows);}catch(error){pane.notice.textContent='Live journal unavailable: '+error.message;}
+    try {
+      const native=await orchestratorRequest({action:'events',id:pane.task.subagent_id,after:0});
+      if(native.transport==='native'&&native.session_id===target)attached={rows:result.rows,events:(native.events||[]).map(row=>row.event),state:native.state};
+      else attached=await attachSessionJournal(pane.task.session_id,async()=> (await paneMessages(pane)).rows);
+    }catch(error){pane.notice.textContent='Live journal unavailable: '+error.message;}
     if(attached){
       result.rows=attached.rows;result.events=attached.events;
       if(/^(completed|cancelled|failed)$/.test(attached.state))pane.task={...pane.task,state:attached.state,settled:true};
