@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import assert from 'node:assert/strict';
+import {spawnSync} from 'node:child_process';
 import {executeChecks,checkVerdict} from './gate-check.mjs';
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'wa-check-runner-'));
 try {
@@ -28,5 +29,10 @@ try {
     [0,'  ok   UI structure, but startup recovery was skipped and the mid-run reload never ran\n'],
     [0,'  ok   UI structure [stages: reload,startup-recovery]\n'],
     [0,real+'fail: missing inspector\n'],[0,real+'dependency_missing: browser\n']])assert(!checkVerdict(browser,exit,text).ok);
-  console.log('gate check runner ok (focused isolation and browser stage contract, 0 skipped)');
+  if(process.platform==='win32' && fs.existsSync('rust/target/debug/wa.exe')) {
+    const http=spawnSync(process.execPath,['scripts/test-run-key-http.cjs'],{encoding:'utf8',windowsHide:true});
+    process.stdout.write(http.stdout||'');process.stderr.write(http.stderr||'');
+    assert.equal(http.status,0,'real high-ID HTTP regression');
+  } else console.log('SKIP: high-ID HTTP requires Windows candidate rust/target/debug/wa.exe');
+  console.log('gate check runner ok (focused isolation and browser stage contract; HTTP skip separately reported)');
 } finally {fs.rmSync(root,{recursive:true,force:true});}
