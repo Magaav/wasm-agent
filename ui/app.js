@@ -4712,15 +4712,20 @@ async function attachSessionJournalOnce(thread, readHistory) {
   const status=await response.json();
   if(!response.ok || status.ok!==true || status.conversation!==thread)throw Error('session_run_status_unavailable');
   const runs=(status.runs||[]).filter(row=>runKey(row)!==null);
-  const current=runs.at(-1);
+  const live=runs.filter(run=>/^(running|queued|not_started)$/.test(run.state));
+  const current=(live.length?live:runs).sort((a,b)=>BigInt(runKey(a))<BigInt(runKey(b))?-1:1).at(-1);
   if(!current)return {rows,events:[],state:'unknown'};
   const events=[];let after=0,checkpoint=null,seen=new Set();
   for(;;){
     const replayResponse=await sessionEventPage(thread,runKey(current),after);
     const replay=await replayResponse.json();
     if(!replayResponse.ok || runKey(replay)!==runKey(current))throw Error('session_replay_identity_mismatch');
-    if(checkpoint===null){checkpoint=replay.checkpoint_seq;rows=await readHistory();}
-    else if(checkpoint!==replay.checkpoint_seq)throw Error('session_checkpoint_changed_retry');
+    if(checkpoint===null || checkpoint!==replay.checkpoint_seq){
+      checkpoint=replay.checkpoint_seq;rows=await readHistory();
+      const loaded=rows.reduce((max,row)=>Math.max(max,Number(row.seq)||0),0);
+      if(Number(replay.checkpoint_message_seq)>loaded)throw Error('session_checkpoint_not_loaded');
+      events.length=0;seen.clear();
+    }
     for(const item of replay.events||[])if(!seen.has(item.seq)){seen.add(item.seq);events.push(item.event);}
     if(!replay.has_more)break;
     if(replay.next_seq<=after)throw Error('session_event_cursor_did_not_advance');
@@ -4751,7 +4756,10 @@ async function refreshAgentPane(pane) {
     const result=await paneMessages(pane);
     let attached=null;
     try {attached=await attachSessionJournal(pane.task.session_id,async()=> (await paneMessages(pane)).rows);}catch(error){pane.notice.textContent='Live journal unavailable: '+error.message;}
-    if(attached){result.rows=attached.rows;result.events=attached.events;}
+    if(attached){
+      result.rows=attached.rows;result.events=attached.events;
+      if(/^(completed|cancelled|failed)$/.test(attached.state))pane.task={...pane.task,state:attached.state,settled:true};
+    }
     if(!pane.isConnected || pane.task.session_id!==target || activeNode!==node)return;
     if(result.task)pane.task={...pane.task,...result.task};
     const rows=result.rows;
