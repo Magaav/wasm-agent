@@ -1,0 +1,2 @@
+wave recovery source ok (7 checks; exact LF bytes, closure and token anchors; 0 skipped)
+wave recovery validation ok (53 checks; valid private actual runner/entry/guard, 0 skipped; reviewed-source CLI and consumption CAS; caller identity denied, real native publication tested separately)

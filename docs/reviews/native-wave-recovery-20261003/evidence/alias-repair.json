@@ -1,0 +1,347 @@
+{
+  "kind": "actual-native-common-directory-alias-test",
+  "expect_bypass": false,
+  "root": "C:\\Users\\Victor\\AppData\\Local\\Temp\\wa-target-alias-rvRyMU",
+  "binary_sha256": "d2b671d68db55f19a51a36739b849491698c7d0d7864374e6e01087940c4c43d",
+  "actual_symbolic_alias": true,
+  "actual_windows_case_alias": true,
+  "first": {
+    "hold": {
+      "inventory": {
+        "admissible": true,
+        "claims": [
+          {
+            "boot": "07a10178-01f7-437c-973d-ae056ef92daa",
+            "identity": {
+              "claim_id": "2dd40fb1-1da0-4878-85ae-7b40dc72804d",
+              "creation_stamp": "windows-filetime:134355202232145364",
+              "kind": "session",
+              "process_id": 26708
+            },
+            "identity_complete": true,
+            "key": "session:upper",
+            "liveness": "held",
+            "principal": "upper",
+            "run": "upper",
+            "session": "upper",
+            "uncertain": false
+          }
+        ],
+        "complete": true,
+        "conflicts": [],
+        "identities_complete": true,
+        "kind": "target-resource-inventory",
+        "ok": true,
+        "schema": 1,
+        "scope": {
+          "git_common_dir": "//?/c:/users/victor/appdata/local/temp/wa-target-alias-rvrymu/git",
+          "ref": "refs/heads/Main"
+        }
+      },
+      "ok": true,
+      "receipt": {
+        "boot": "07a10178-01f7-437c-973d-ae056ef92daa",
+        "creation_stamp": "windows-filetime:134355202232145364",
+        "exclusion_scope": "git-common-directory",
+        "key": "target:4f0185bf95181e1e48e3959c7614e1162c9e989a2416540613b278572b3646ed",
+        "kind": "held-target-resource",
+        "principal": "upper",
+        "process_id": 26708,
+        "receipt_id": "3eb1a0a0-5928-49b2-adf3-34799706a890",
+        "run": "upper",
+        "schema": 1,
+        "scope": {
+          "git_common_dir": "//?/c:/users/victor/appdata/local/temp/wa-target-alias-rvrymu/git",
+          "ref": "refs/heads/Main"
+        },
+        "session": "upper",
+        "session_claim_id": "2dd40fb1-1da0-4878-85ae-7b40dc72804d"
+      }
+    },
+    "inspection": {
+      "admissible": true,
+      "claims": [
+        {
+          "boot": "07a10178-01f7-437c-973d-ae056ef92daa",
+          "identity": {
+            "claim_id": "2dd40fb1-1da0-4878-85ae-7b40dc72804d",
+            "creation_stamp": "windows-filetime:134355202232145364",
+            "kind": "session",
+            "process_id": 26708
+          },
+          "identity_complete": true,
+          "key": "session:upper",
+          "liveness": "held",
+          "principal": "upper",
+          "run": "upper",
+          "session": "upper",
+          "uncertain": false
+        },
+        {
+          "boot": "07a10178-01f7-437c-973d-ae056ef92daa",
+          "identity": {
+            "boot": "07a10178-01f7-437c-973d-ae056ef92daa",
+            "creation_stamp": "windows-filetime:134355202232145364",
+            "exclusion_scope": "git-common-directory",
+            "key": "target:4f0185bf95181e1e48e3959c7614e1162c9e989a2416540613b278572b3646ed",
+            "kind": "target",
+            "principal": "upper",
+            "process_id": 26708,
+            "receipt_id": "3eb1a0a0-5928-49b2-adf3-34799706a890",
+            "run": "upper",
+            "schema": 1,
+            "scope": {
+              "git_common_dir": "//?/c:/users/victor/appdata/local/temp/wa-target-alias-rvrymu/git",
+              "ref": "refs/heads/Main"
+            },
+            "session": "upper",
+            "session_claim_id": "2dd40fb1-1da0-4878-85ae-7b40dc72804d"
+          },
+          "identity_complete": true,
+          "key": "target:4f0185bf95181e1e48e3959c7614e1162c9e989a2416540613b278572b3646ed",
+          "liveness": "held",
+          "principal": "upper",
+          "run": "upper",
+          "session": "upper",
+          "uncertain": false
+        }
+      ],
+      "complete": true,
+      "conflicts": [],
+      "identities_complete": true,
+      "kind": "target-resource-inventory",
+      "ok": true,
+      "schema": 1,
+      "scope": {
+        "git_common_dir": "//?/c:/users/victor/appdata/local/temp/wa-target-alias-rvrymu/git",
+        "ref": "refs/heads/Main"
+      }
+    }
+  },
+  "second": {
+    "hold": {
+      "error": "target_lease_held_or_unavailable",
+      "ok": false
+    },
+    "inspection": {
+      "admissible": false,
+      "claims": [
+        {
+          "boot": "7a31ac15-1f2d-4e2e-9f1c-6d309e866c59",
+          "identity": {
+            "claim_id": "327156ec-da18-489c-a21b-1d736429a277",
+            "creation_stamp": "windows-filetime:134355202232709255",
+            "kind": "session",
+            "process_id": 19292
+          },
+          "identity_complete": true,
+          "key": "session:lower",
+          "liveness": "held",
+          "principal": "lower",
+          "run": "lower",
+          "session": "lower",
+          "uncertain": false
+        },
+        {
+          "boot": "07a10178-01f7-437c-973d-ae056ef92daa",
+          "identity": {
+            "claim_id": "2dd40fb1-1da0-4878-85ae-7b40dc72804d",
+            "creation_stamp": "windows-filetime:134355202232145364",
+            "kind": "session",
+            "process_id": 26708
+          },
+          "identity_complete": true,
+          "key": "session:upper",
+          "liveness": "held_or_unavailable",
+          "principal": "upper",
+          "run": "upper",
+          "session": "upper",
+          "uncertain": false
+        },
+        {
+          "boot": "07a10178-01f7-437c-973d-ae056ef92daa",
+          "identity": {
+            "boot": "07a10178-01f7-437c-973d-ae056ef92daa",
+            "creation_stamp": "windows-filetime:134355202232145364",
+            "exclusion_scope": "git-common-directory",
+            "key": "target:4f0185bf95181e1e48e3959c7614e1162c9e989a2416540613b278572b3646ed",
+            "kind": "target",
+            "principal": "upper",
+            "process_id": 26708,
+            "receipt_id": "3eb1a0a0-5928-49b2-adf3-34799706a890",
+            "run": "upper",
+            "schema": 1,
+            "scope": {
+              "git_common_dir": "//?/c:/users/victor/appdata/local/temp/wa-target-alias-rvrymu/git",
+              "ref": "refs/heads/Main"
+            },
+            "session": "upper",
+            "session_claim_id": "2dd40fb1-1da0-4878-85ae-7b40dc72804d"
+          },
+          "identity_complete": true,
+          "key": "target:4f0185bf95181e1e48e3959c7614e1162c9e989a2416540613b278572b3646ed",
+          "liveness": "held_or_unavailable",
+          "principal": "upper",
+          "run": "upper",
+          "session": "upper",
+          "uncertain": false
+        }
+      ],
+      "complete": true,
+      "conflicts": [
+        {
+          "claim": {
+            "boot": "07a10178-01f7-437c-973d-ae056ef92daa",
+            "identity": {
+              "boot": "07a10178-01f7-437c-973d-ae056ef92daa",
+              "creation_stamp": "windows-filetime:134355202232145364",
+              "exclusion_scope": "git-common-directory",
+              "key": "target:4f0185bf95181e1e48e3959c7614e1162c9e989a2416540613b278572b3646ed",
+              "kind": "target",
+              "principal": "upper",
+              "process_id": 26708,
+              "receipt_id": "3eb1a0a0-5928-49b2-adf3-34799706a890",
+              "run": "upper",
+              "schema": 1,
+              "scope": {
+                "git_common_dir": "//?/c:/users/victor/appdata/local/temp/wa-target-alias-rvrymu/git",
+                "ref": "refs/heads/Main"
+              },
+              "session": "upper",
+              "session_claim_id": "2dd40fb1-1da0-4878-85ae-7b40dc72804d"
+            },
+            "identity_complete": true,
+            "key": "target:4f0185bf95181e1e48e3959c7614e1162c9e989a2416540613b278572b3646ed",
+            "liveness": "held_or_unavailable",
+            "principal": "upper",
+            "run": "upper",
+            "session": "upper",
+            "uncertain": false
+          },
+          "reason": "target_owned"
+        }
+      ],
+      "identities_complete": true,
+      "kind": "target-resource-inventory",
+      "ok": true,
+      "schema": 1,
+      "scope": {
+        "git_common_dir": "//?/c:/users/victor/appdata/local/temp/wa-target-alias-rvrymu/git",
+        "ref": "refs/heads/main"
+      }
+    }
+  },
+  "symbolic": {
+    "hold": {
+      "error": "target_lease_held_or_unavailable",
+      "ok": false
+    },
+    "inspection": {
+      "admissible": false,
+      "claims": [
+        {
+          "boot": "4ee424bb-f9a7-4827-a81a-9472d471feff",
+          "identity": {
+            "claim_id": "a1f55434-8397-4338-a5d1-1ca836732ccb",
+            "creation_stamp": "windows-filetime:134355202233852944",
+            "kind": "session",
+            "process_id": 25356
+          },
+          "identity_complete": true,
+          "key": "session:symbolic",
+          "liveness": "held",
+          "principal": "symbolic",
+          "run": "symbolic",
+          "session": "symbolic",
+          "uncertain": false
+        },
+        {
+          "boot": "07a10178-01f7-437c-973d-ae056ef92daa",
+          "identity": {
+            "claim_id": "2dd40fb1-1da0-4878-85ae-7b40dc72804d",
+            "creation_stamp": "windows-filetime:134355202232145364",
+            "kind": "session",
+            "process_id": 26708
+          },
+          "identity_complete": true,
+          "key": "session:upper",
+          "liveness": "held_or_unavailable",
+          "principal": "upper",
+          "run": "upper",
+          "session": "upper",
+          "uncertain": false
+        },
+        {
+          "boot": "07a10178-01f7-437c-973d-ae056ef92daa",
+          "identity": {
+            "boot": "07a10178-01f7-437c-973d-ae056ef92daa",
+            "creation_stamp": "windows-filetime:134355202232145364",
+            "exclusion_scope": "git-common-directory",
+            "key": "target:4f0185bf95181e1e48e3959c7614e1162c9e989a2416540613b278572b3646ed",
+            "kind": "target",
+            "principal": "upper",
+            "process_id": 26708,
+            "receipt_id": "3eb1a0a0-5928-49b2-adf3-34799706a890",
+            "run": "upper",
+            "schema": 1,
+            "scope": {
+              "git_common_dir": "//?/c:/users/victor/appdata/local/temp/wa-target-alias-rvrymu/git",
+              "ref": "refs/heads/Main"
+            },
+            "session": "upper",
+            "session_claim_id": "2dd40fb1-1da0-4878-85ae-7b40dc72804d"
+          },
+          "identity_complete": true,
+          "key": "target:4f0185bf95181e1e48e3959c7614e1162c9e989a2416540613b278572b3646ed",
+          "liveness": "held_or_unavailable",
+          "principal": "upper",
+          "run": "upper",
+          "session": "upper",
+          "uncertain": false
+        }
+      ],
+      "complete": true,
+      "conflicts": [
+        {
+          "claim": {
+            "boot": "07a10178-01f7-437c-973d-ae056ef92daa",
+            "identity": {
+              "boot": "07a10178-01f7-437c-973d-ae056ef92daa",
+              "creation_stamp": "windows-filetime:134355202232145364",
+              "exclusion_scope": "git-common-directory",
+              "key": "target:4f0185bf95181e1e48e3959c7614e1162c9e989a2416540613b278572b3646ed",
+              "kind": "target",
+              "principal": "upper",
+              "process_id": 26708,
+              "receipt_id": "3eb1a0a0-5928-49b2-adf3-34799706a890",
+              "run": "upper",
+              "schema": 1,
+              "scope": {
+                "git_common_dir": "//?/c:/users/victor/appdata/local/temp/wa-target-alias-rvrymu/git",
+                "ref": "refs/heads/Main"
+              },
+              "session": "upper",
+              "session_claim_id": "2dd40fb1-1da0-4878-85ae-7b40dc72804d"
+            },
+            "identity_complete": true,
+            "key": "target:4f0185bf95181e1e48e3959c7614e1162c9e989a2416540613b278572b3646ed",
+            "liveness": "held_or_unavailable",
+            "principal": "upper",
+            "run": "upper",
+            "session": "upper",
+            "uncertain": false
+          },
+          "reason": "target_owned"
+        }
+      ],
+      "identities_complete": true,
+      "kind": "target-resource-inventory",
+      "ok": true,
+      "schema": 1,
+      "scope": {
+        "git_common_dir": "//?/c:/users/victor/appdata/local/temp/wa-target-alias-rvrymu/git",
+        "ref": "refs/heads/alias"
+      }
+    }
+  }
+}

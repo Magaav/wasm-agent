@@ -1,0 +1,279 @@
+{
+    "schema":  1,
+    "kind":  "native-wave-recovery-source-delivery",
+    "source_commit":  "54e5824824c723ad19b4d8e7ac27d937e0b48897",
+    "source_tree":  "35f341077a6496a650fc4ee1e67d1e89ab4e4536",
+    "session":  "01a101f1-f9f8-7690-9296-8a7386659d38",
+    "branch":  "change/codex-native-target-resource",
+    "preserved_parents":  [
+                              "0d7d64bef58d10d7d765fa649edbd82dc6c15973",
+                              "b3ed584cc8c6e188e3a550d98b7c91c0a6124d73",
+                              "e3aa40026f40c24363327d6250bd50953e646e36",
+                              "efc85b784e0cfcfe5c2d0f89fdde6110cf9a4ee9"
+                          ],
+    "implemented":  true,
+    "full_gate_verified":  false,
+    "independent_review_required":  true,
+    "production_admission":  false,
+    "production_mutation":  false,
+    "remote_publication":  false,
+    "driver_shape":  "verified external script, not embedded",
+    "binary":  {
+                   "sha256":  "d2b671d68db55f19a51a36739b849491698c7d0d7864374e6e01087940c4c43d",
+                   "path":  "C:/Users/Victor/AppData/Local/Temp/wa-native-target-cc4160-build/debug/wa.exe"
+               },
+    "tests":  [
+                  {
+                      "exit":  0,
+                      "name":  "Rust resources",
+                      "skipped":  0,
+                      "log":  "evidence/unit.log",
+                      "passed":  5
+                  },
+                  {
+                      "log":  "evidence/target29.log",
+                      "name":  "Native target capability",
+                      "skipped":  0,
+                      "checks":  29,
+                      "exit":  0
+                  },
+                  {
+                      "log":  "evidence/resource47.log",
+                      "name":  "Existing resource regression",
+                      "skipped":  0,
+                      "checks":  47,
+                      "exit":  0
+                  },
+                  {
+                      "log":  "evidence/alias12.log",
+                      "name":  "Real Windows/Git aliases",
+                      "skipped":  0,
+                      "checks":  12,
+                      "exit":  0
+                  },
+                  {
+                      "name":  "Original recovery/source",
+                      "checks":  53,
+                      "exit":  0,
+                      "skipped":  0,
+                      "source_checks":  7,
+                      "log":  "evidence/recovery53-source7.log"
+                  },
+                  {
+                      "log":  "evidence/native66.log",
+                      "name":  "Actual native full consumer with external custody",
+                      "skipped":  0,
+                      "checks":  66,
+                      "exit":  0
+                  },
+                  {
+                      "log":  "evidence/exact-source-positive.log",
+                      "name":  "Exact committed source positive closure",
+                      "skipped":  0,
+                      "checks":  7,
+                      "exit":  0
+                  },
+                  {
+                      "name":  "Removed production owner-check causal mutant",
+                      "expected_failure":  true,
+                      "log":  "evidence/owner-check-mutant.log",
+                      "exit":  1
+                  },
+                  {
+                      "report":  "evidence/proposed-ref-transaction.json",
+                      "name":  "Proposed current-ref exclusion only",
+                      "skipped":  0,
+                      "checks":  10,
+                      "exit":  0
+                  }
+              ],
+    "registered_prerequisite":  {
+                                    "resource_root":  "C:/Users/Victor/.wasm-agent/resources",
+                                    "uncertain":  49,
+                                    "historical_33b4":  {
+                                                            "boot":  "0ac950f2-aa1f-44f3-9c9e-538d616c8a05",
+                                                            "identity":  null,
+                                                            "identity_complete":  false,
+                                                            "key":  "session:33b4e818-0278-47a1-823a-b756517ec787",
+                                                            "liveness":  "lease_released",
+                                                            "principal":  "master",
+                                                            "run":  "3366b0cc-1c7c-4ed6-9667-5add59546ada",
+                                                            "session":  "33b4e818-0278-47a1-823a-b756517ec787",
+                                                            "uncertain":  true
+                                                        },
+                                    "effect_authorized":  false,
+                                    "read_only":  true,
+                                    "claims":  52,
+                                    "missing_facts":  "Actual historical owner creation/generation/target/effect/drain remain unavailable; global native admission is truthfully refused",
+                                    "complete_query":  true,
+                                    "missing_identity":  52,
+                                    "admissible":  false
+                                },
+    "proposed_alternative":  {
+                                 "proof":  "evidence/proposed-ref-transaction.json",
+                                 "boundary":  "Prepared Git ref transaction plus shared common-directory publication lease excludes ordinary Git aliases/writers; global historical safety remains false and arbitrary filesystem/SQL writers are outside contract",
+                                 "required_decision":  "Independent exact source review and genuine current operator scope/executor/custody/legacy-snapshot packet before any opt-in implementation or activation",
+                                 "contract":  "docs/WAVE-NATIVE-RECOVERY.md",
+                                 "activated":  false,
+                                 "production_authority":  false,
+                                 "native_admission":  false
+                             },
+    "graph":  {
+                  "assessment":  "Returned caller leads were inspected: default checkAdmission callers retain null optional native/source inputs; wave corners and old refusal/mutation/derived/fix checks executed. Graph lacks complete dynamic and top-level coverage and is not a correctness certificate.",
+                  "verdict":  "incomplete",
+                  "truncated":  true,
+                  "lead_count":  50,
+                  "gap_count":  52
+              },
+    "first_failures":  [
+                           "Exact blob closure rejected CRLF filtered ps1 checkout; private roots now materialize immutable blobs and verify tree unchanged",
+                           "Device-prefix scope required native Windows normalization before realpath",
+                           "Reserved row differs from returned uncertainty wrapper; now exact persisted reservation_binding is retained",
+                           "Windows replacement rename collided with parent readers; request/reply files are immutable per sequence",
+                           "53 fixture finally initially masked failed assertion with held SQLite EPERM; first failure now preserved and normal cleanup passes"
+                       ],
+    "files":  [
+                  {
+                      "sha256":  "977ba54e95db793860a4346683439ebc53dab41fe07595edce10586be9394a28",
+                      "path":  "docs/NATIVE-TARGET-RESOURCE.md"
+                  },
+                  {
+                      "sha256":  "d8ff4ecf589762ceedf146c5bacc65a3976dd84749f3df03f52bbafc7ae0a0e7",
+                      "path":  "docs/WAVE-NATIVE-RECOVERY.md"
+                  },
+                  {
+                      "sha256":  "cdeba14930333166ee4db0033abf8a32753f36bd6309a6c073eae94e6fad9d55",
+                      "path":  "rust/wa-host/src/resources.rs"
+                  },
+                  {
+                      "sha256":  "7c64720dc58bb2d9b00de4640ee99813b65550cbc158f42c41e66c4d1ad2bfae",
+                      "path":  "scripts/lib/wave-recovery-custody.mjs"
+                  },
+                  {
+                      "sha256":  "4c90a4c6be2a1e7d1881abe08bd71694edf2677144653a2fbf26e2feca35e5e3",
+                      "path":  "scripts/lib/wave-recovery-native.mjs"
+                  },
+                  {
+                      "sha256":  "b1ea5660e6f6d18c1280e06494b24202b8f82cdddcb1adb6adf91b9323b77ae0",
+                      "path":  "scripts/lib/wave-recovery-source.mjs"
+                  },
+                  {
+                      "sha256":  "4f3fbd25cc7fa0dc1e81d8c3d8dca98c9f2b0fac362d1a939a44a5f0dbcee9c9",
+                      "path":  "scripts/lib/wave-recovery.mjs"
+                  },
+                  {
+                      "sha256":  "44bcf4c2c4c4ab3fa34a9ad42979f8a971e9c6364a3b52d70e048f078ce4fd40",
+                      "path":  "scripts/test-native-target-alias.cjs"
+                  },
+                  {
+                      "sha256":  "85f9357ea5701860e05cfb3ac0daf57fcd2c083f13867f5d713d70ab4b5fcc62",
+                      "path":  "scripts/test-native-target-alias.lua"
+                  },
+                  {
+                      "sha256":  "3cf75de01999d8e1891ad23dde9603bbc1fd1e100deaee7664645dc2411172f5",
+                      "path":  "scripts/test-wave-current-ref-transaction.mjs"
+                  },
+                  {
+                      "sha256":  "6f30eb858123fde653ac23528046317e0130f2364c36a693ce950f29de70b893",
+                      "path":  "scripts/test-wave-native-recovery.lua"
+                  },
+                  {
+                      "sha256":  "29bec37d218d178329b38b075d36b4079a668d003165511244a1951040c8e996",
+                      "path":  "scripts/test-wave-native-recovery.mjs"
+                  },
+                  {
+                      "sha256":  "7a664d59c606f2f4fbcfd0eb60951cd14a277a2346b3f3735e400b063e5d9788",
+                      "path":  "scripts/test-wave-recovery.mjs"
+                  },
+                  {
+                      "sha256":  "92a8930f466088500327d4c6c5d10bfad45f8ec3d002c7fbae2877171ca3d51b",
+                      "path":  "scripts/wave-entry.mjs"
+                  },
+                  {
+                      "sha256":  "44f341934c36a8fc3c401111bddcfdc5d079cfcf2b4870176ec36dbc03faba73",
+                      "path":  "scripts/wave-recovery-bootstrap.mjs"
+                  },
+                  {
+                      "sha256":  "c39409ccad14cb6eaa5738e5e77c399f3c14bc43dda1eb14ff475fdd2d29aa02",
+                      "path":  "scripts/wave-recovery-driver.lua"
+                  },
+                  {
+                      "sha256":  "5a6603356647bc1a9c8415cbff8157fee1ccf42e9d24ecd7949667f4690f4764",
+                      "path":  "scripts/wave-recovery-land.mjs"
+                  }
+              ],
+    "evidence":  [
+                     {
+                         "sha256":  "4b24d11dba384944c5da92697e6d439a45e012a65602e196b3201fa0438e2198",
+                         "path":  "evidence/alias-repair.json"
+                     },
+                     {
+                         "sha256":  "f1907e6af4218a6992934ee7523f5bd02e85e3862c06181846f7566d1907b72c",
+                         "path":  "evidence/alias12.log"
+                     },
+                     {
+                         "sha256":  "c16e668d347366078272ecf2f6e20285e0193627d52603d5811d910b4848948d",
+                         "path":  "evidence/build.log"
+                     },
+                     {
+                         "sha256":  "f7ad5a9a0b2fcc427749586dcc90f0fb3a3aee8e2cbe5130e28648e4953fdef1",
+                         "path":  "evidence/exact-source-positive.json"
+                     },
+                     {
+                         "sha256":  "e07217fc946ea252fa6dab38c3fbbb191458b1445dd263d814abafeefdc717e4",
+                         "path":  "evidence/exact-source-positive.log"
+                     },
+                     {
+                         "sha256":  "a652a53fbe4cd65a49069678752f01c620615c5f9dd7567b1670f5fb44c7a541",
+                         "path":  "evidence/exact-source-report.json"
+                     },
+                     {
+                         "sha256":  "7d9794a92714be9614b395314692e1d04a82dbc26f38084255bf601322704502",
+                         "path":  "evidence/graph-audit.json"
+                     },
+                     {
+                         "sha256":  "f637c5a877ee1489657260ba100a542d2db7a007cba1b0429f51bfbfbfdf6d34",
+                         "path":  "evidence/native66-positive.json"
+                     },
+                     {
+                         "sha256":  "9360415fb59194e2a441cc84abf4c95dbacb3fdd418e91b4ca6385b947745f85",
+                         "path":  "evidence/native66-report.json"
+                     },
+                     {
+                         "sha256":  "af60226cb3dcb7d4ed58a5bcb01880be6e24cbde439604ed272af0ef800c19b1",
+                         "path":  "evidence/native66.log"
+                     },
+                     {
+                         "sha256":  "f75f8e2be8be343605d9ae951df10608618a6fb2d39fc80850d4b4bd9d1000e4",
+                         "path":  "evidence/owner-check-mutant.log"
+                     },
+                     {
+                         "sha256":  "a4497aefb76662221cdee5ccb37b303ebe1e96188ee31f35263e247801b00aeb",
+                         "path":  "evidence/proposed-ref-transaction.json"
+                     },
+                     {
+                         "sha256":  "456194ee8b97b943170bd8b4cf2cd1450fbe289a4040eda45e90dec75a567a36",
+                         "path":  "evidence/recovery53-source7.log"
+                     },
+                     {
+                         "sha256":  "58f21ded4d6a6b6e158474d51aca937c5faaf9fce9c7420f5df30efd88eaed51",
+                         "path":  "evidence/registered-read-only.json"
+                     },
+                     {
+                         "sha256":  "e7924bc6be63558cd988483949fa219908e0fbb01dfa37fec0d5b208b798de4c",
+                         "path":  "evidence/resource47.log"
+                     },
+                     {
+                         "sha256":  "957d9cae9aa0207c76cd1d12b7c9ae212acd8d6a3364c0bbba1d1facbc64e2c1",
+                         "path":  "evidence/target29.log"
+                     },
+                     {
+                         "sha256":  "9847846fae90b275208dea23e8eb060defe824458e18b41d9f400c85f0e622be",
+                         "path":  "evidence/unit.log"
+                     },
+                     {
+                         "sha256":  "f1ae0b5d11d3bd337bd21042003c19e1a71bde20a23f83deabc79a749ee30fa0",
+                         "path":  "evidence/unsafe0d7-baseline.json"
+                     }
+                 ]
+}
