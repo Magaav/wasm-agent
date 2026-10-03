@@ -1,0 +1,5 @@
+AssertionError [ERR_ASSERTION]: REMOVED PRODUCTION OWNER CHECK MUST STILL REJECT: true
+    at check (file:///C:/Users/Victor/orca/workspaces/wasm-agent/Codex-3/scripts/test-wave-native-recovery.mjs:10:36)
+    at file:///C:/Users/Victor/orca/workspaces/wasm-agent/Codex-3/scripts/test-wave-native-recovery.mjs:91:96
+    at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+evidence: C:\Users\Victor\AppData\Local\Temp\wa-native-wave-MoVk6z

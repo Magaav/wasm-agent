@@ -1,0 +1,10 @@
+{
+  "kind": "private-actual-native-recovery-consumer",
+  "checks": 66,
+  "skipped": 0,
+  "binary_sha256": "d2b671d68db55f19a51a36739b849491698c7d0d7864374e6e01087940c4c43d",
+  "source": "C:\\Users\\Victor\\orca\\workspaces\\wasm-agent\\Codex-3",
+  "positive": "C:\\Users\\Victor\\AppData\\Local\\Temp\\wa-native-wave-06p3Zj\\positive",
+  "production_authority": false,
+  "remote_publication": false
+}
