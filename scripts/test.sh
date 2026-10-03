@@ -191,7 +191,9 @@ run_proof_fixture waveActivityFix 62 node scripts/test-wave-activity-fix.mjs
 # END wave-owner safety proofs
 
 gate_phase_begin build
-gate_run cargo build --release --offline --manifest-path rust/Cargo.toml >/dev/null
+ACTUAL_RELEASE_BUILD_LOG="$(git rev-parse --git-path "wa-release-build-${GATE_HOME##*/}.log")"
+gate_run cargo build --release --offline --manifest-path rust/Cargo.toml >"$ACTUAL_RELEASE_BUILD_LOG" 2>&1
+echo "actual release build retained: $ACTUAL_RELEASE_BUILD_LOG"
 
 # BEGIN sentinel-intake required proofs
 CARGO_BUILD_JOBS=2 gate_run cargo test --offline --manifest-path rust/wa-sentinel/Cargo.toml -- --test-threads=2
@@ -263,6 +265,14 @@ SKIPPED=$((SKIPPED + INSTANCE_SKIPPED))
 rm -f "$INSTANCE_VERDICT"
 gate_phase_begin self-update
 BIN=rust/target/release/wa
+[ ! -f "$BIN.exe" ] || BIN="$BIN.exe"
+# BEGIN native-target recovery required proofs
+gate_run cargo test --offline --manifest-path rust/Cargo.toml -p wa-host resources::tests
+run_proof_fixture nativeTarget 29 node scripts/test-native-target-resource.cjs "$BIN"
+run_proof_fixture resourceClaims 47 node scripts/test-resource-claims.cjs "$BIN"
+run_proof_fixture nativeAlias 12 node scripts/test-native-target-alias.cjs "$BIN"
+run_proof_fixture nativeRecovery 66 node scripts/test-wave-native-recovery.mjs "$BIN" "$ACTUAL_RELEASE_BUILD_LOG" '--build-command=cargo build --release --offline --manifest-path rust/Cargo.toml'
+# END native-target recovery required proofs
 # Combined-tree wave fixtures are required when shipped; absence is explicit intermediate coverage.
 for wave_spec in 'lifecycle mjs waveLifecycle 40 no' 'retire mjs waveRetire 20 no' 'executor cjs waveExecutor 11 yes' 'proof mjs waveProof 18 no' 'restart mjs waveRestart 9 no' 'public mjs wavePublic 20 yes'; do
   set -- $wave_spec
