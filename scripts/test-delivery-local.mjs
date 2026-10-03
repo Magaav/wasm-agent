@@ -4,11 +4,14 @@ import path from 'node:path';
 import assert from 'node:assert/strict';
 import {spawnSync} from 'node:child_process';
 import {DatabaseSync} from 'node:sqlite';
+import {terminal,skipped} from './lib/delivery-producer-proof.mjs';
 import {evaluate} from './delivery-admission.mjs';
 import {runFocused,plan,verifyFocused} from './producer-admission.mjs';
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'wa-local-admission-')),repo=path.join(root,'repo');fs.mkdirSync(repo);
 function git(cwd,...args){const r=spawnSync('git',['-c','user.name=fixture','-c','user.email=fixture@local',...args],{cwd,encoding:'utf8'});assert.equal(r.status,0,r.stderr);return r.stdout.trim();}
 try {
+ for(const marker of ['  SKIP coverage','\tSkipped: coverage',' # skip coverage','2 tests skipped']){assert.ok(skipped(marker)>0);assert.equal(terminal('test-delivery-admission.mjs',marker+'\ndelivery admission ok (58 checks)'),false);}
+ for(const bad of ['','delivery admission ok (1 checks)','delivery admission ok (58 checks)\ndelivery admission ok (58 checks)','FAIL\ndelivery admission ok (58 checks)'])assert.equal(terminal('test-delivery-admission.mjs',bad),false);
  git(repo,'init','-q','--initial-branch=main');fs.mkdirSync(path.join(repo,'scripts'));fs.mkdirSync(path.join(repo,'tests'));
  for(const f of ['gate-checks.mjs','gate-check.mjs'])fs.copyFileSync(path.resolve('scripts',f),path.join(repo,'scripts',f));
  fs.mkdirSync(path.join(repo,'scripts/lib'));fs.copyFileSync(path.resolve('scripts/lib/test-verdict.cjs'),path.join(repo,'scripts/lib/test-verdict.cjs'));
