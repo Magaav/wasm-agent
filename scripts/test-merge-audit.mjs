@@ -70,7 +70,7 @@ try {
   git('push','origin','--delete','astra');
   const mainOnly=audit(repo,options);
   check(mainOnly.integration_complete&&mainOnly.origin_main_matches_target,'main-only remote plus integrated tips is distinguished from source-gate verification');
-  check(!mainOnly.verification_complete&&mainOnly.gate_proof.status!=='verified','main-only refs without exact-tree gate proof do not pass verification');
+  check(mainOnly.verification_complete&&mainOnly.release_verified===false&&mainOnly.source_gate_verified===false&&mainOnly.gate_proof.status!=='verified','integration verification is independent of release proof under gate.on=release');
   check(mainOnly.counts.dirty_worktrees===1,'verification audit preserves and reports dirty worktree');
   writeGateReceipt();
   const proofCurrent=audit(repo,{listPRs:()=>[]});
@@ -79,12 +79,12 @@ try {
   git('switch','main');const advancedMain=commit('advanced-main.txt');git('push','origin','main');git('fetch','origin');git('switch','stale-source');
   check(git('rev-parse','HEAD')===staleHead&&git('rev-parse','HEAD^{tree}')!==git('rev-parse','origin/main^{tree}'),'fixture has stale HEAD while main advances to a different tree');
   const staleProof=audit(repo,{listPRs:()=>[]});
-  check(staleProof.target_sha===advancedMain&&staleProof.gate_proof.status==='stale_or_invalid'&&!staleProof.verification_complete,
-    'verify refuses old HEAD-bound proof after target main advances to a different tree');
+  check(staleProof.target_sha===advancedMain&&staleProof.gate_proof.status==='stale_or_invalid'&&staleProof.verification_complete&&staleProof.release_verified===false&&staleProof.source_gate_verified===false,
+    'stale release proof does not refuse otherwise valid integrated main-only target');
   const verified=spawnSync(process.execPath,[path.resolve('skills/git-orchestrator/scripts/audit.mjs'),'verify',repo,'origin/main','--all'],{cwd:process.cwd(),encoding:'utf8',windowsHide:true});
   const verifyResult=JSON.parse(verified.stdout);
-  check(verified.status===1&&verifyResult.target_sha===advancedMain&&verifyResult.gate_proof.status==='stale_or_invalid'&&verifyResult.verification_complete===false,
-    'verify refuses stale receipt after target main advances to a different tree');
+  check(verified.status===1&&verifyResult.discovery_complete===false&&verifyResult.errors.some(e=>e.includes('PR discovery incomplete'))&&verifyResult.target_sha===advancedMain&&verifyResult.gate_proof.status==='stale_or_invalid'&&verifyResult.verification_complete===false&&verifyResult.release_verified===false&&verifyResult.source_gate_verified===false,
+    'CLI refuses unavailable real PR discovery, not stale release proof, and reports releasefalse');
   check(gitAt(lane,'rev-parse','HEAD')===local,'worktree remains on original branch and tip');
   check(fs.readFileSync(path.join(lane,'unfinished.txt'),'utf8')==='keep this uncommitted\n','merging committed tips preserves uncommitted work');
   const unavailable=audit(repo,{listPRs:()=>{throw Error('fixture GitHub unavailable');}});
