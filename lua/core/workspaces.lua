@@ -393,6 +393,15 @@ function M.recovery_hint(memory,session_id)
   return nil
 end
 
+-- Evidence staging is session-owned, not a general temp-directory grant.
+function M.scratch_root(session_id)
+  local id = tostring(session_id or '')
+  if id == '' then return nil end
+  -- Hex encoding is injective: punctuation must not collapse distinct sessions.
+  local encoded = id:gsub('.', function(c) return string.format('%02x', c:byte()) end)
+  return paths.data() .. '/session-scratch/' .. encoded
+end
+
 function M.requires_write_tools(allowed)
   for _, name in ipairs(allowed or {}) do
     if name == "write" or name == "edit" or name == "bash" or name == "shell"

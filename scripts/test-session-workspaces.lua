@@ -40,6 +40,27 @@ ok(write_a.ok and write_b.ok,"both sessions write through their bound worktrees"
 ok(host.read_file(wa.worktree.."/same.txt")=="from-a" and host.read_file(wb.worktree.."/same.txt")=="from-b","same relative path resolves to distinct contents")
 local escaped=tools.dispatch(memory,"write",{path=source_path.."/not-allowed.txt",content="bad"},"master",ca)
 ok(escaped.error=="workspace_path_outside_binding","absolute write outside the binding is refused")
+local scratch=workspaces.scratch_root(a)
+ok(scratch~=workspaces.scratch_root('workspace:a'), 'scratch identities do not collide')
+local staged=tools.dispatch(memory,'write',{path=scratch..'/evidence.txt',content='before'},'master',ca)
+ok(staged.ok and host.read_file(scratch..'/evidence.txt')=='before','own scratch write')
+local edited=tools.dispatch(memory,'edit',{path=scratch..'/evidence.txt',edits={{old_text='before',new_text='after'}}},'master',ca)
+ok(edited.ok and host.read_file(scratch..'/evidence.txt')=='after','own scratch edit')
+for _,target in ipairs({workspaces.scratch_root(b)..'/bad.txt',scratch..'/../bad.txt',wb.worktree..'/bad.txt'}) do
+ ok(tools.dispatch(memory,'write',{path=target,content='bad'},'master',ca).error=='workspace_path_outside_binding','scratch escape refuses '..target)
+end
+-- Adapted from independent reviewer c50fecea instrument at review259707b4.
+local windows=dofile('lua/core/platform.lua').os()=='windows'
+local linkCommand=windows and ('MSYS2_ARG_CONV_EXCL="*" cmd.exe /c mklink /J "'..(scratch..'/junction'):gsub('/','\\')..'" "'..source_path:gsub('/','\\')..'"')
+  or ("ln -s '"..source_path.."' '"..scratch.."/junction'")
+local linked=json.decode(host.exec(linkCommand))
+assert(linked.code==0,'real private link creation: '..json.encode(linked))
+ok(tools.dispatch(memory,'write',{path=scratch..'/junction/bad.txt',content='bad'},'master',ca).error=='workspace_path_outside_binding','real link outside scratch refuses')
+assert(not host.read_file(source_path..'/bad.txt'),'link escaped write absent')
+local cleanup=windows and ('MSYS2_ARG_CONV_EXCL="*" cmd.exe /c rmdir "'..(scratch..'/junction'):gsub('/','\\')..'"') or ("rm '"..scratch.."/junction'")
+assert(json.decode(host.exec(cleanup)).code==0,'private link cleanup')
+local staged_shell=tools.dispatch(memory,'bash',{command='echo staged',cwd=scratch},'master',ca)
+ok(staged_shell.code==0,'scratch shell cwd')
 local cwd_escape=tools.dispatch(memory,"bash",{command="echo bad",cwd=source_path},"master",ca)
 ok(cwd_escape.error=="workspace_cwd_outside_binding","explicit shell cwd outside the binding is refused")
 local unsupported=tools.dispatch(memory,"shell",{command="echo bad"},"master",ca)

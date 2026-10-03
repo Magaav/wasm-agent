@@ -1,0 +1,27 @@
+// Real supported-driver parser contract, NOT an application release gate.
+import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import assert from 'node:assert/strict';import {spawnSync} from 'node:child_process';import {createHash} from 'node:crypto';
+// temp-retention: immutable private driver/parser execution evidence, not application release authority.
+const source=path.resolve(new URL('..',import.meta.url).pathname.replace(/^\/([A-Za-z]:)/,'$1'));
+const root=fs.mkdtempSync(path.join(os.tmpdir(),'wa-audit-driver-')),repo=path.join(root,'source'),remote=path.join(root,'origin.git');fs.mkdirSync(repo);
+function run(program,args,cwd=repo){const r=spawnSync(program,args,{cwd,encoding:'utf8',timeout:300000});fs.writeFileSync(path.join(root,`${Date.now()}-${Math.random()}.json`),JSON.stringify(r));return r;}
+function git(...args){const r=run('git',args);assert.equal(r.status,0,r.stderr);return r.stdout.trim();}
+const archive=spawnSync('git',['archive','HEAD'],{cwd:source,maxBuffer:64*1024*1024});assert.equal(archive.status,0);const unpack=spawnSync('tar',['-x','-C',repo],{input:archive.stdout});assert.equal(unpack.status,0);
+fs.writeFileSync(path.join(repo,'scripts/test.sh'),'#!/usr/bin/env bash\nset -eu\nprintf "smoke ok\\n"\n');
+git('init','-b','main');git('config','user.name','private-driver');git('config','user.email','fixture@invalid');git('config','core.hooksPath',path.join(root,'no-hooks'));git('add','.');git('commit','-m','private supported-driver contract, not application proof');
+assert.equal(run('git',['init','--bare',remote]).status,0);git('remote','add','origin',remote);git('push','-u','origin','main');git('switch','-c','change/private-driver');git('push','-u','origin','HEAD');const head=git('rev-parse','HEAD');
+const driver=path.join(repo,'skills/parallel-evolution/scripts/finish.mjs');const gated=run(process.execPath,[driver,'gate',repo,head]);assert.equal(gated.status,0,gated.stderr);assert(JSON.parse(gated.stdout).gate_verified,'supported tiny driver must produce genuine receipt');
+git('switch','main');git('push','origin','--delete','change/private-driver');git('branch','-D','change/private-driver');
+// Private gh discovery adapter only; actual audit CLI and proof reader are production source.
+const bin=path.join(root,'bin');fs.mkdirSync(bin);const gh=process.platform==='win32'?'gh.cmd':'gh';fs.writeFileSync(path.join(bin,gh),process.platform==='win32'?'@echo off\nif "%1"=="repo" (echo {"nameWithOwner":"fixture/private"}) else (echo [[]])\n':'#!/bin/sh\nif [ "$1" = repo ]; then echo \'{"nameWithOwner":"fixture/private"}\'; else echo \'[[]]\'; fi\n');if(process.platform!=='win32')fs.chmodSync(path.join(bin,gh),0o755);
+if(process.platform==='win32'){
+ const rust=path.join(bin,'gh.rs');fs.writeFileSync(rust,'fn main(){let a:Vec<String>=std::env::args().collect();if a.get(1).map(String::as_str)==Some("repo"){println!("{{\\\"nameWithOwner\\\":\\\"fixture/private\\\"}}");}else{println!("[[]]");}}');
+ const compiled=run('rustc',[rust,'-o',path.join(bin,'gh.exe')]);assert.equal(compiled.status,0,compiled.stderr);
+ fs.writeFileSync(path.join(root,'discovery-adapter-identity.json'),JSON.stringify({fixture:'private no-PR discovery only; never GitHub authority',source_sha256:createHash('sha256').update(fs.readFileSync(rust)).digest('hex'),binary_sha256:createHash('sha256').update(fs.readFileSync(path.join(bin,'gh.exe'))).digest('hex')},null,2));
+}
+const cli=path.join(source,'skills/git-orchestrator/scripts/audit.mjs');function audit(){const r=spawnSync(process.execPath,[cli,'verify',repo,'origin/main','--all'],{encoding:'utf8',env:{...process.env,PATH:bin+path.delimiter+process.env.PATH}});fs.writeFileSync(path.join(root,`${Date.now()}-audit.json`),r.stdout);return {r,v:JSON.parse(r.stdout)};}
+const receiptPath=path.resolve(repo,git('rev-parse','--git-path','wa-finish-gate.json')),raw=fs.readFileSync(receiptPath),original=JSON.parse(raw),log=fs.readFileSync(original.log);
+let checks=0;const positive=audit();assert.equal(positive.r.status,0,JSON.stringify(positive.v));assert(positive.v.verification_complete&&positive.v.release_verified&&positive.v.source_gate_verified);checks++;
+for(const attack of ['non-smoke','head','runner','platform','skips','hash','crossrepo','moved-log','source']){const r=JSON.parse(raw);if(attack==='non-smoke')fs.writeFileSync(r.log,'not smoke\n');if(attack==='head')delete r.head;if(attack==='runner')delete r.runner;if(attack==='platform')r.runner.platform='unknown';if(attack==='skips')delete r.skipped;if(attack==='hash')r.log_sha256='0'.repeat(64);if(attack==='crossrepo')r.repo=remote;if(attack==='moved-log')r.log=path.join(root,'missing.log');if(attack==='source')r.runner.sha256='0'.repeat(64);fs.writeFileSync(receiptPath,JSON.stringify(r));const bad=audit();assert.equal(bad.r.status,0);assert(bad.v.verification_complete&&!bad.v.release_verified&&!bad.v.source_gate_verified,attack);checks++;fs.writeFileSync(original.log,log);}
+fs.writeFileSync(receiptPath,raw);
+fs.writeFileSync(path.join(repo,'advance.txt'),'new source');git('add','.');git('commit','-m','advance private source');git('push','origin','main');const stale=audit();assert.equal(stale.r.status,0);assert(stale.v.verification_complete&&!stale.v.release_verified&&stale.v.gate_proof.status==='stale_or_invalid');checks++;
+console.log(`audit supported driver ok (${checks} checks; private parser fixture, not application gate)`);console.log('raw evidence: '+root);

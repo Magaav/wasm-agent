@@ -49,9 +49,15 @@ function runAsync(script, extras={}) {
     git(['add','seed.txt']);git(['commit','-m','baseline']);
     git(['update-ref','refs/remotes/origin/main','HEAD']); // private integrated baseline for release reconciliation
     fs.writeFileSync(path.join(install,'runtime-worktree.txt'),`${source.replaceAll('/', '\\')}\n`);
+    // Normal gate reaches this runner. No embedded modules or shared operation store.
+    require('./test-long-command-contract.cjs');
+    const longCount=require('./long-command-contract.cjs')(run);
+    check(longCount>=10,'actual long-command verdict');
+    check(true,'parent contract completed');
+    require('./test-harness-feedback.cjs');
     const seeded=run('test-session-workspaces.lua',{WASM_AGENT_TEST_SOURCE:source});
     check(seeded.status===0,`allocator/fail-closed fixture exit ${seeded.status}: ${seeded.stderr}\n${seeded.stdout}`);
-    check(seeded.stdout.includes('session workspaces ok (23 checks)'),`missing 23-check verdict: ${seeded.stdout}`);
+    check(seeded.stdout.includes('session workspaces ok (31 checks)'),`missing 31-check verdict: ${seeded.stdout}`);
 
     const [a,b]=await Promise.all([
       runAsync('test-session-workspace-worker.lua',{WASM_AGENT_TEST_SESSION:'workspace-a',WASM_AGENT_TEST_CONTENT:'concurrent-a'}),
