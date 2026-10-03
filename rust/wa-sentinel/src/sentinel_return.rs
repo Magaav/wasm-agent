@@ -147,7 +147,6 @@ pub(crate) fn observe(id:&str) -> Result<()> {
     let key=format!("{id}-{slot}");
     let file=dir.join("returns").join(format!("{key}.json"));
     let state:Value=std::fs::read(dir.join("state.json")).ok().and_then(|b|serde_json::from_slice(&b).ok()).unwrap_or(Value::Null);
-    if !state.is_null() && (state["id"]!=id || state["expected_sha"]!=binding["intent"]["expected_sha"]) {bail!("return_state_identity_mismatch");}
     let (phase,detail)=if file.exists(){("pending".into(),String::new())}else{observed_phase(&binding,&state,now)};
     let mut journal=json!({"id":id,"event_key":key,"expected_sha":binding["intent"]["expected_sha"],"parent":binding["parent"],"owner":binding["owner"],"phase":phase,"at":now,"detail":detail});
     std::fs::create_dir_all(dir.join("returns"))?;
