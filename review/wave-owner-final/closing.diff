@@ -1,0 +1,140 @@
+diff --git a/docs/WAVE-CONVERGENCE.md b/docs/WAVE-CONVERGENCE.md
+index 635dd38..58704fb 100644
+--- a/docs/WAVE-CONVERGENCE.md
++++ b/docs/WAVE-CONVERGENCE.md
+@@ -54,7 +54,7 @@ completion). Every way it fails to be *positive* has a name, and none of them re
+ | `child_completion_claim_without_a_live_turn_or_process` | only a `child_completions` row claims it, and no local process names the tree |
+ 
+ An unresolved claim makes the activity answer `unverifiable` (`runtime_state: unknown`), which
+-**never** admits the next wave, and it is reported with a ready-made resolution command:
++**never** admits the next wave, and it reports the named unsupported-settlement refusal:
+ `node scripts/wave-activity.mjs observe CONFIG` is read-only and reports exact
+ claim identities, positive/corroborated status and `resolvable:false`.
+ `resolve` now refuses unsupported legacy/prose settlement by name:
+diff --git a/docs/WAVE-OWNER-COORDINATOR-PACKET.md b/docs/WAVE-OWNER-COORDINATOR-PACKET.md
+new file mode 100644
+index 0000000..2ed633b
+--- /dev/null
++++ b/docs/WAVE-OWNER-COORDINATOR-PACKET.md
+@@ -0,0 +1,16 @@
++# Read-only coordinator recovery packet
++
++No owner is adjudicated dead by this delivery. ON means the runtime store records a current turn/child on a registered allocated binding, not independently authenticated process-tree liveness. `corroborated:false/null` is negative/unknown visibility, never settlement. Unregistered/transition/unsupported child claims are named `unverifiable`, never OFF. Automatic stale-owner recovery is UNSUPPORTED; operator adjudication remains blocked until exact ownership and descendant/effect evidence exist.
++
++Preserved source references: refused original e15bdc1, independent refusal 4d2257df5e42bd0a8dea5507f83d601eec4627ed and evidence d7bc37088d32f7007b3338e8f11e0adfe8791b2c; WIP 2d8cde5; reviewed safety candidate 288cdd5; owner-reported held review 80a46617. No review is erased or represented as admission.
++
++Original recorded evidence (historical, NOT a current inventory):
++- child:dispatch:6204126f-93d1-4249-96a5-514acff56693, run 6eb6edfd-8d2d-46ab-8176-9e8c4a7d781d, boot b65133b9-06f5-4f96-9b4d-e6acb31e5350, registered tree wa-worktree-childdispatch6204126f-93d1-4249-96a5-514acff56693, corroborated false.
++- historical legacy turn session 33b4e818-0278-47a1-823a-b756517ec787, run 4cb9cea0-b387-43dd-92eb-23513fd975ec, boot 578f10e1-b8e0-4641-acae-d5bc34b652c6, unregistered activity claim.
++- shared wave wave-2026-10-02-subagent-chat-and-enforcement was reported legacy-unverified by prior read-only finish check. Convergence is separate from node activity.
++
++Current exact principal/resource/operation identities are NOT established by that historical evidence. This producer has not queried current live memory/resource/operation indices or inspected their effects. No claim of current zero agents or completed cleanup is made. Coordinator must obtain read-only current inventory through owning-runtime APIs, record exact session/run/boot/child/principal/process creation keys and native cwd, capture operation status/original receipt artifacts and retained resource claim audit history, and inspect unknown effects before adjudication. Await full owned descendant settlement, not shell command exit; preserve dirty worktrees, drafts, ledgers and legacy receipt bytes/hashes. Missing identities/evidence must remain explicitly blocked. Do not directly rewrite steering/memory/resource/operation stores or use negative scans as death proof.
++
++Gate prevention is now normal scripts/test.sh execution: five mandatory proof calls with floors 53/3/24/55/62, proof-verdict rejects silent/duplicate/under-floor/nonzero results. Reachable contract executes the actual normal function and section in private gate_run harness and detects removal of a required call via recorded execution. Cleanup removed unreachable replay-success branches; findResolution stays unsupported/null for API compatibility. No future legitimate stale drain success is claimed.
++
++Final focused verification: normal-section harness exit 0, five suites 53+3+24+55+62 checks, zero skips; unsafe creation/replay/M5 each red exit 1. Proof-verdict 83 mutation checks exit 0. Prior lifecycle44/retire20/public23 evidence and source-correct binary SHA256 remain in WAVE-OWNER-REPAIR-CHECKPOINT.md; Rust/Lua source unchanged since those runs. Full release gate intentionally not run. No push/main/live store write/restart/deploy.
+diff --git a/scripts/lib/proof-verdict.cjs b/scripts/lib/proof-verdict.cjs
+index 1bf804a..92224a1 100644
+--- a/scripts/lib/proof-verdict.cjs
++++ b/scripts/lib/proof-verdict.cjs
+@@ -1,5 +1,5 @@
+ // Required integration proofs need process success, one terminal verdict, and non-dropped counts.
+-const prefixes={waveLifecycle:'wave lifecycle ok',waveRetire:'wave retirement ok',waveExecutor:'wave executor ok',waveProof:'wave proof adapters ok',waveRestart:'wave public restart ok',wavePublic:'wave public adapters ok',fleet:'node orchestration ok',sqlite:'sqlite worker isolation ok',peer:'peer run admission ok',foreground:'foreground cancel ok',orchestration:'orchestration integrated ok',whatsapp:'whatsapp subagent e2e ok',cursor:'whatsapp cursor ok',pipeline:'pipeline seam ok',children:'subagents integration ok',jobs:'subagent integration ok',subagentReturn:'subagent return ok',deployShipped:'deploy shipped ok',policy:'isolated policy ok',producer:'producer admission ok',selection:'selection state ok',recoveryWindows:'two-window recovery ok'};
++const prefixes={waveOwner:'owner refusal ok',waveOwnerMutations:'owner mutations ok',waveCorners:'wave activity corners ok',waveDerived:'wave derived state ok',waveActivityFix:'wave activity fix ok',waveLifecycle:'wave lifecycle ok',waveRetire:'wave retirement ok',waveExecutor:'wave executor ok',waveProof:'wave proof adapters ok',waveRestart:'wave public restart ok',wavePublic:'wave public adapters ok',fleet:'node orchestration ok',sqlite:'sqlite worker isolation ok',peer:'peer run admission ok',foreground:'foreground cancel ok',orchestration:'orchestration integrated ok',whatsapp:'whatsapp subagent e2e ok',cursor:'whatsapp cursor ok',pipeline:'pipeline seam ok',children:'subagents integration ok',jobs:'subagent integration ok',subagentReturn:'subagent return ok',deployShipped:'deploy shipped ok',policy:'isolated policy ok',producer:'producer admission ok',selection:'selection state ok',recoveryWindows:'two-window recovery ok'};
+ function validate(kind,status,output,minimum){
+  if(!Object.hasOwn(prefixes,kind))throw Error('unknown proof');
+  if(status!==0)throw Error('proof exit '+status);
+diff --git a/scripts/lib/wave-activity.mjs b/scripts/lib/wave-activity.mjs
+index 7265ca6..ae9c304 100644
+--- a/scripts/lib/wave-activity.mjs
++++ b/scripts/lib/wave-activity.mjs
+@@ -337,15 +337,11 @@ export function activityInventory(source) {
+     bindings.push(record);
+     if (treePath && managed) held.push(record);
+     if (record.in_flight) {
+-      // Revalidate receipt application; unsupported settlement is never replayed.
+-      const cleared = findResolution(resolutions.resolutions, claimIdentity(record, POSITIVE_CLAIM), {corroborated});
+-      if (cleared) { record.resolved = {by: cleared.by || '', at: cleared.at || 0, evidence: cleared.evidence || '', claim: POSITIVE_CLAIM}; resolved_claims.push(record); continue; }
++      // Unsupported legacy receipts are read for audit only, never settlement.
+       agents.push(record);
+       continue;
+     }
+     if (claim) {
+-      const resolution = findResolution(resolutions.resolutions, claimIdentity(record, record.claim), {corroborated});
+-      if (resolution) { record.resolved = {by: resolution.by || '', at: resolution.at || 0, evidence: resolution.evidence || ''}; resolved_claims.push(record); continue; }
+       claims.push(record);
+       unresolved.push({session: id, reason: record.claim, worktree: record.worktree, child_id: record.child?.child_id || '', run_id: record.turn?.run_id || '', boot: record.turn?.boot || '', resolution: 'refused: exact_owner_settlement_and_drain_unavailable; inspect owning runtime operations and resource claims'});
+       continue;
+diff --git a/scripts/test-proof-verdict.cjs b/scripts/test-proof-verdict.cjs
+index a3c8b51..a88960d 100644
+--- a/scripts/test-proof-verdict.cjs
++++ b/scripts/test-proof-verdict.cjs
+@@ -16,7 +16,7 @@ for(const [status,text,min] of [
+ assert.deepEqual(validate('peer',0,'SKIP: unavailable API\n'+valid.replace('0 skipped','1 skipped'),43),{checks:43,skipped:1});checks++;
+ assert.throws(()=>validate('unknown',0,valid,43));checks++;
+ assert.deepEqual(validate('children',0,'subagents integration ok (17 checks; local mock model, no paid inference)',17),{checks:17,skipped:0});checks++;
+-for(const [kind,text,min] of [['waveLifecycle','wave lifecycle ok (40 checks; private fixtures)',40],['waveRetire','wave retirement ok (20 checks; private fixtures)',20],['waveExecutor','wave executor ok (11 checks; native fixture)',11],['waveProof','wave proof adapters ok (18 checks; private Git)',18],['waveRestart','wave public restart ok (9 checks; native fixture)',9],['wavePublic','wave public adapters ok (20 checks; private resources)',20],['selection','selection state ok (9 checks, 0 skipped; real concurrent processes)',9],['recoveryWindows','two-window recovery ok (13 checks, 0 skipped; real browser/node)',13]]) {
++for(const [kind,text,min] of [['waveOwner','owner refusal ok (53 checks; 0 skipped)',53],['waveOwnerMutations','owner mutations ok (3 checks; 3 mutants killed; 0 skipped)',3],['waveCorners','wave activity corners ok (24 checks; private)',24],['waveDerived','wave derived state ok (55 checks; private)',55],['waveActivityFix','wave activity fix ok (62 checks; private)',62],['waveLifecycle','wave lifecycle ok (40 checks; private fixtures)',40],['waveRetire','wave retirement ok (20 checks; private fixtures)',20],['waveExecutor','wave executor ok (11 checks; native fixture)',11],['waveProof','wave proof adapters ok (18 checks; private Git)',18],['waveRestart','wave public restart ok (9 checks; native fixture)',9],['wavePublic','wave public adapters ok (20 checks; private resources)',20],['selection','selection state ok (9 checks, 0 skipped; real concurrent processes)',9],['recoveryWindows','two-window recovery ok (13 checks, 0 skipped; real browser/node)',13]]) {
+  assert.deepEqual(validate(kind,0,text,min),{checks:min,skipped:0});checks++;
+  for(const [status,output] of [[7,text],[0,text.replace(`${min} checks`,`${min-1} checks`)],[0,text+'\n'+text],[0,'silent']]){assert.throws(()=>validate(kind,status,output,min));checks++;}
+ }
+diff --git a/scripts/test-wave-gate-wiring.mjs b/scripts/test-wave-gate-wiring.mjs
+new file mode 100644
+index 0000000..2e24b0a
+--- /dev/null
++++ b/scripts/test-wave-gate-wiring.mjs
+@@ -0,0 +1,13 @@
++// Execute exact normal-gate function/block bytes with a private gate_run recorder.
++import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import assert from 'node:assert/strict';import {spawnSync} from 'node:child_process';
++const root=fs.mkdtempSync(path.join(os.tmpdir(),'wa-wave-wiring-'));
++const text=fs.readFileSync('scripts/test.sh','utf8');
++const fn=text.slice(text.indexOf('run_proof_fixture() {'),text.indexOf('\ngate_phase_begin build'));
++const expected=['test-wave-owner-refusal.mjs','test-wave-owner-mutations.mjs','test-wave-activity-corners.mjs','test-wave-derived-state.mjs','test-wave-activity-fix.mjs'];
++function run(body,name){const record=path.join(root,name);const script=`set -eu\nSKIPPED=0\nDB='${root.replaceAll('\\','/')}/proof'\ngate_run(){ printf '%s\\n' "$*" >> '${record.replaceAll('\\','/')}'; "$@"; }\n${body}\n[ "$SKIPPED" = 0 ]\n`;
++const r=spawnSync('bash',['-c',script],{encoding:'utf8',timeout:180000});const calls=fs.existsSync(record)?fs.readFileSync(record,'utf8'):'';return {r,calls};}
++try{const baseline=run(fn,'baseline');assert.equal(baseline.r.status,0,baseline.r.stderr);for(const file of expected)assert.ok(baseline.calls.includes(file),`normal gate did not execute ${file}`);console.log(baseline.r.stdout);
++// Removal is detected by actual recorded execution, not a coverage glob or source grep.
++const line='run_proof_fixture waveOwner 53 node scripts/test-wave-owner-refusal.mjs';
++const mutant=run(fn.replace(line,''),'removed');assert.equal(mutant.r.status,0,mutant.r.stderr);assert.throws(()=>assert.ok(mutant.calls.includes(expected[0])));console.log('wave gate wiring ok (5 required executions; removed callsite contract goes red; 0 skipped)');
++}finally{fs.rmSync(root,{recursive:true,force:true});}
+diff --git a/scripts/test-wave-owner-mutations.mjs b/scripts/test-wave-owner-mutations.mjs
+index b123e22..ceb7569 100644
+--- a/scripts/test-wave-owner-mutations.mjs
++++ b/scripts/test-wave-owner-mutations.mjs
+@@ -3,7 +3,7 @@ import fs from 'node:fs';import os from 'node:os';import path from 'node:path';i
+ const root=fs.mkdtempSync(path.join(os.tmpdir(),'wa-owner-mutants-'));
+ const mutations=[
+  ['creation','scripts/wave-activity.mjs',"  fail(`${REFUSAL}:${session}:${recovery}`);","  const record = inventory.agents.find(x=>x.session===session); const file = activityStore(sourceOfConfig(JSON.parse(fs.readFileSync(configFile,'utf8')))).resolutions; fs.mkdirSync(path.dirname(file),{recursive:true}); fs.writeFileSync(file,JSON.stringify({schema:1,kind:'wave-activity-resolutions',resolutions:[{session,claim:POSITIVE_CLAIM,worktree:record.worktree,child_id:'',run_id:record.turn.run_id,boot:record.turn.boot,evidence}]})); return {ok:true};"],
+- ['replay','scripts/lib/wave-activity.mjs','  return null;\n}\n\n// THE INVENTORY.','  return resolutions.find(entry => resolutionMatches(entry, identity)) || null;\n}\n\n// THE INVENTORY.'],
++ ['replay','scripts/lib/wave-activity.mjs','      // Unsupported legacy receipts are read for audit only, never settlement.','      const cleared = resolutions.resolutions.find(x => resolutionMatches(x, claimIdentity(record, POSITIVE_CLAIM))); if (cleared) { resolved_claims.push(record); continue; }'],
+  ['M5-observe','scripts/wave-activity.mjs','resolvable: false','resolvable: true']
+ ];
+-try{for(const [name,file,old,replacement] of mutations){const dir=path.join(root,name);fs.mkdirSync(dir);fs.cpSync('scripts',path.join(dir,'scripts'),{recursive:true});const target=path.join(dir,file),text=fs.readFileSync(target,'utf8');assert.equal(text.split(old).length,2,`${name} exact mutation address`);fs.writeFileSync(target,text.replace(old,replacement));const r=spawnSync(process.execPath,['scripts/test-wave-owner-refusal.mjs',dir],{encoding:'utf8',timeout:60000});assert.notEqual(r.status,0,`${name} survived`);assert.ok(!r.error,`${name} did not merely time out`);console.log(`${name}: killed exit=${r.status}\n${r.stderr.split('\n').slice(0,12).join('\n')}`);}console.log('owner mutations ok (3 killed; 0 skipped)');}finally{fs.rmSync(root,{recursive:true,force:true});}
++try{for(const [name,file,old,replacement] of mutations){const dir=path.join(root,name);fs.mkdirSync(dir);fs.cpSync('scripts',path.join(dir,'scripts'),{recursive:true});const target=path.join(dir,file),text=fs.readFileSync(target,'utf8');assert.equal(text.split(old).length,2,`${name} exact mutation address`);fs.writeFileSync(target,text.replace(old,replacement));const r=spawnSync(process.execPath,['scripts/test-wave-owner-refusal.mjs',dir],{encoding:'utf8',timeout:60000});assert.notEqual(r.status,0,`${name} survived`);assert.ok(!r.error,`${name} did not merely time out`);console.log(`${name}: killed exit=${r.status}\n${r.stderr.split('\n').slice(0,12).join('\n')}`);}console.log('owner mutations ok (3 checks; 3 mutants killed; 0 skipped)');}finally{fs.rmSync(root,{recursive:true,force:true});}
+diff --git a/scripts/test.sh b/scripts/test.sh
+index 46cfec2..2807e36 100644
+--- a/scripts/test.sh
++++ b/scripts/test.sh
+@@ -182,6 +182,14 @@ run_proof_fixture() {
+   tail -4 "$log"
+ }
+ 
++# BEGIN wave-owner safety proofs (required, not coverage discovery)
++run_proof_fixture waveOwner 53 node scripts/test-wave-owner-refusal.mjs
++run_proof_fixture waveOwnerMutations 3 node scripts/test-wave-owner-mutations.mjs
++run_proof_fixture waveCorners 24 node scripts/test-wave-activity-corners.mjs
++run_proof_fixture waveDerived 55 node scripts/test-wave-derived-state.mjs
++run_proof_fixture waveActivityFix 62 node scripts/test-wave-activity-fix.mjs
++# END wave-owner safety proofs
++
+ gate_phase_begin build
+ gate_run cargo build --release --offline --manifest-path rust/Cargo.toml >/dev/null
+ gate_run node scripts/test-install-isolation.mjs
+@@ -1826,6 +1834,7 @@ gate_run node scripts/test-auth-sessions.cjs "$BIN"
+ gate_run node scripts/test-fixture-verdict.cjs
+ gate_run node scripts/test-suite-verdict.cjs
+ gate_run node scripts/test-proof-verdict.cjs
++gate_run node scripts/test-wave-gate-wiring.mjs
+ 
+ # The image-attachment tests, plus the helper tests that came with them. They were
+ # written, they passed when run by hand, and nothing ran them - which is how a test

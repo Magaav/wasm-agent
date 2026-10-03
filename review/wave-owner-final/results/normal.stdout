@@ -1,0 +1,8 @@
+owner refusal ok (53 checks; real false/null heartbeat, creation/replay/restart/identity/visible/observe/store; 0 skipped)
+  code: 'ERR_ASSERTION',
+  actual: false,
+  expected: true,
+owner mutations ok (3 checks; 3 mutants killed; 0 skipped)
+wave activity corners ok (24 checks; the stale steering claim is visible and unsupported clearing is refused and a live process cannot be cleared, a completed newest wave no longer fences producing or allocating, and its refusal names the older unfinished row)
+wave derived state ok (55 checks; real private Git and node store, on/off derived from children, named unverifiable convergence, reversible migration)
+wave activity fix ok (62 checks; land/admit refused in both unverified corners, a false OFF never admits, unsupported stale clearing is named and refused, the migration is idempotent and refuses early, every unfinished row is read, and the index reversal is transient)
