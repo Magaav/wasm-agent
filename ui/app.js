@@ -3895,19 +3895,7 @@ async function followRun() {
   if (!mine) return;
   const seq = Number(mine.last_seq) || 0;
   if (seq === followedSeq) return;
-  // The same authenticated attach operation child hosts use; main keeps its live renderer state.
-  if(transcriptRetryAt>Date.now())return;
-  try {
-    const attached=await attachSessionJournal(target,async()=>{
-      const response=await apiFetch('session?id='+encodeURIComponent(target),{headers:apiHeaders()});
-      const page=await response.json();if(!response.ok)throw Error('session_history_unavailable');return page.messages||[];
-    });
-    if(chatSession!==target || conversationEpoch!==epoch || activeNode!==node)return;
-    repaintMessages(attached.rows,{active:/^(running|queued)$/.test(attached.state),notify:false});
-    for(const event of attached.events)handleEvent(event);
-    followedSeq=seq;
-    return;
-  } catch(error) { transcriptRetryAt=Date.now()+3000;return; }
+  // Preserve the established epoch/dedupe/backoff and loaded-row cursor contract.
   rememberPlace();
   if (await restoreSession(target, true)) {
     if (chatSession !== target || conversationEpoch !== epoch || activeNode !== node) return;
@@ -3936,11 +3924,7 @@ async function syncLiveRun(current) {
     liveCheckpointSeq = null;
   }
   try {
-    const response = await apiFetch("run-events", {
-      method: "POST",
-      headers: apiHeaders({ "Content-Type": "application/json" }),
-      body: JSON.stringify({ thread: target, run_id: id, after: liveEventSeq }),
-    });
+    const response = await sessionEventPage(target,id,liveEventSeq);
     const payload = await response.json();
     if (!viewing()) return;
     if (!response.ok) {
@@ -4711,7 +4695,18 @@ async function collectSessionHistory(readPage) {
   return rows;
 }
 // Owner-authenticated journal attachment shared by any session host. Ledger checkpoint precedes tail.
-async function attachSessionJournal(thread, readHistory) {
+function sessionEventPage(thread,key,after) {
+  return apiFetch('run-events',{method:'POST',headers:apiHeaders({'Content-Type':'application/json'}),body:JSON.stringify({thread,run_id:runKey(key),after})});
+}
+const sessionAttachPending=new Map();
+async function attachSessionJournal(thread,readHistory) {
+  const key=activeNode+'|'+thread;
+  if(sessionAttachPending.has(key))return sessionAttachPending.get(key);
+  const pending=attachSessionJournalOnce(thread,readHistory);
+  sessionAttachPending.set(key,pending);
+  try{return await pending;}finally{if(sessionAttachPending.get(key)===pending)sessionAttachPending.delete(key);}
+}
+async function attachSessionJournalOnce(thread, readHistory) {
   let rows=await readHistory();
   const response=await apiFetch('runs',{method:'POST',headers:apiHeaders({'Content-Type':'application/json'}),body:JSON.stringify({action:'status',thread})});
   const status=await response.json();
@@ -4721,7 +4716,7 @@ async function attachSessionJournal(thread, readHistory) {
   if(!current)return {rows,events:[],state:'unknown'};
   const events=[];let after=0,checkpoint=null,seen=new Set();
   for(;;){
-    const replayResponse=await apiFetch('run-events',{method:'POST',headers:apiHeaders({'Content-Type':'application/json'}),body:JSON.stringify({thread,run_id:runKey(current),after})});
+    const replayResponse=await sessionEventPage(thread,runKey(current),after);
     const replay=await replayResponse.json();
     if(!replayResponse.ok || runKey(replay)!==runKey(current))throw Error('session_replay_identity_mismatch');
     if(checkpoint===null){checkpoint=replay.checkpoint_seq;rows=await readHistory();}
@@ -4752,11 +4747,12 @@ async function paneMessages(pane) {
 async function refreshAgentPane(pane) {
   if(!pane.task.session_id) { pane.notice.textContent=pane.task.error || 'Waiting for placement…'; return; }
   try {
+    const target=pane.task.session_id,node=activeNode;
     const result=await paneMessages(pane);
     let attached=null;
     try {attached=await attachSessionJournal(pane.task.session_id,async()=> (await paneMessages(pane)).rows);}catch(error){pane.notice.textContent='Live journal unavailable: '+error.message;}
     if(attached){result.rows=attached.rows;result.events=attached.events;}
-    if(!pane.isConnected)return;
+    if(!pane.isConnected || pane.task.session_id!==target || activeNode!==node)return;
     if(result.task)pane.task={...pane.task,...result.task};
     const rows=result.rows;
     // A repaint throws away the transcript's scroll position and its folded topics, so a poll that
