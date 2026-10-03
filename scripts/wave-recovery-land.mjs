@@ -14,9 +14,12 @@ export function landRecovery(repo,context,identity){
   const merged=git('merge-tree','--write-tree',expected,context.recovery.tip);
   const reservation=consumeRecovery(repo,store,{...context,original_refusal:before.original_refusal,named:{activity:before.activity,convergence:before.convergence}});
   if(git('rev-parse','HEAD')!==expected||git('rev-parse',`refs/heads/${context.recovery.delivery}`)!==context.recovery.tip)throw Error('recovery_landing_generation_moved_uncertain');
-  const result=git('commit-tree',merged,'-p',expected,'-p',context.recovery.tip,'-m',`recovery landing\n\nAgent: wasm-agent session=${identity.session}`);
+  const result=git('commit-tree',merged,'-p',expected,'-p',context.recovery.tip,'-m',`recovery landing ${context.recovery.delivery}\n\nAgent: wasm-agent session=${identity.session}`);
   git('update-ref','refs/heads/main',result,expected);
-  git('reset','--hard',result);
+  // Never overwrite concurrently edited canonical files. Ref publication and
+  // worktree synchronization are distinct; a moved/dirty tree stays visible.
+  if(git('diff','--name-only',expected)||git('ls-files','--others','--exclude-standard'))throw Error('recovery_landing_worktree_changed_after_ref_uncertain');
+  git('read-tree','-u','-m',expected,result);
   return {ok:true,landing:result,consumption:reservation.consumption,convergence:before.convergence,original_refusal:before.original_refusal};
  });
 }
