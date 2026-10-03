@@ -40,7 +40,20 @@ try {
   check(Number.isFinite(passed.gate_ms) && passed.gate_ms>=0 && passed.gate_runs===1 && passed.gate_run_count===1,'the gate reports measured duration and one actual run');
   const auditScript=path.resolve('skills/git-orchestrator/scripts/audit.mjs');
   const auditSource=fs.readFileSync(auditScript,'utf8').replace('listPRs=githubPRs','listPRs=()=>[]');
-  const fixtureAudit=path.join(root,'audit-fixture.mjs');fs.writeFileSync(fixtureAudit,auditSource);
+  // Preserve shipped dependency layout; a relocated standalone copy must fail closed.
+  const brokenAudit=path.join(root,'audit-fixture.mjs');fs.writeFileSync(brokenAudit,auditSource);
+  const missingHelper=JSON.parse(run(process.execPath,[brokenAudit,'audit',repo,'origin/main']));
+  check(missingHelper.gate_proof.status==='stale_or_invalid'&&missingHelper.source_gate_verified===false&&missingHelper.gate_proof.reason==='trusted shipped proof validator unavailable','standalone relocation cannot grant proof without trusted sibling helper');
+  const fixtureAudit=path.join(root,'shipped/skills/git-orchestrator/scripts/audit.mjs');
+  const fixtureHelper=path.join(root,'shipped/scripts/lib/full-gate-proof.mjs');
+  fs.mkdirSync(path.dirname(fixtureAudit),{recursive:true});fs.mkdirSync(path.dirname(fixtureHelper),{recursive:true});
+  fs.writeFileSync(fixtureAudit,auditSource);fs.copyFileSync('scripts/lib/full-gate-proof.mjs',fixtureHelper);
+  // External accepted runner is genuine source: annotate its committed origin, never pretend it lives in the tiny target.
+  const originalReceiptPath=path.join(repo,'.git/wa-finish-gate.json');
+  const originalReceipt=JSON.parse(fs.readFileSync(originalReceiptPath));
+  originalReceipt.runner.source_repo=path.resolve('.');
+  originalReceipt.runner.source_head=run('git',['rev-parse','HEAD'],path.resolve('.'));
+  fs.writeFileSync(originalReceiptPath,JSON.stringify(originalReceipt));
   const audited=JSON.parse(run(process.execPath,[fixtureAudit,'audit',repo,'origin/main']));
   check(audited.gate_proof.status==='verified'&&audited.gate_proof.gate_ms===passed.gate_ms&&audited.counts.gate_run_count===0,'integration audit exposes reusable source-bound gate proof');
   const auditVerified=spawnSync(process.execPath,[fixtureAudit,'verify',repo,'origin/main'],{cwd:process.cwd(),encoding:'utf8',windowsHide:true});
