@@ -55,6 +55,21 @@ function finish(res,text){event(res,{choices:[{delta:{content:text},finish_reaso
   await until(()=>fs.existsSync(path.join(profile,'DevToolsActivePort')),'DevTools ready');const [debugPort,endpoint]=fs.readFileSync(path.join(profile,'DevToolsActivePort'),'utf8').trim().split(/\r?\n/);
   ws=new WebSocket('ws://127.0.0.1:'+debugPort+endpoint);await once(ws,'open');ws.addEventListener('message',e=>{const data=JSON.parse(e.data);const item=waiting.get(data.id);if(item){waiting.delete(data.id);clearTimeout(item.timer);data.error?item.reject(new Error(JSON.stringify(data.error))):item.resolve(data.result);}});
   const url='http://127.0.0.1:'+browserPort+'/';const a=await page(url,'thread-A'),b=await page(url,'thread-B');
+  // Native read-only child: no writable profile/allocation in the shared project.
+  const receipt=await api('subagents',{action:'start',profile:'explore',prompt:'RECOVERY-B native child held',idempotency_key:'native-browser-child'});
+  check(!!receipt.subagent_id,'native child admitted');
+  const nativeChild=await until(async()=>{const r=await api('subagents',{action:'status',id:receipt.subagent_id});return r.session_id&&r;},'native child session');
+  const nativePage=await page(url,nativeChild.session_id);
+  await until(()=>held.has('B'),'native child held provider');
+  await evaluate(nativePage,`window.nativePane=document.createElement('wa-agent-session');document.body.append(nativePane);nativePane.task=${JSON.stringify(nativeChild)};refreshAgentPane(nativePane).then(()=>true)`);
+  await until(()=>evaluate(nativePage,"nativePane.transcript.textContent.includes('LIVE-B')"),'native authenticated session pane live tail');
+  const nativeLedger=await api('subagents',{action:'session',id:receipt.subagent_id,limit:1,byte_limit:4096});
+  check(nativeLedger.messages.length===1&&nativeLedger.messages[0].id,'native bounded session page identity');
+  await cdp('Page.reload',{},nativePage);
+  await until(()=>evaluate(nativePage,"transcriptReady && document.getElementById('messages').textContent.includes('LIVE-B')").catch(()=>false),'native child main host actual reload reconnect');
+  finish(held.get('B'),'NATIVE-B-COMPLETE');
+  await until(async()=>{const r=await api('subagents',{action:'status',id:receipt.subagent_id});return r.settled;},'native child terminal');
+  held.delete('B');
   await evaluate(a,"void send('RECOVERY-A'); 'started'");await until(()=>held.has('A'),'tool result and held A');
   const bRun=fetch('http://127.0.0.1:'+port+'/chat',{method:'POST',headers:{'content-type':'application/json','accept':'text/event-stream'},body:JSON.stringify({thread:'thread-B',text:'RECOVERY-B'})}).then(r=>r.text());await until(()=>held.has('B'),'held B');
   check((await api('health')).runs.length===2,'two actual long runs active');
