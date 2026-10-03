@@ -86,8 +86,12 @@ try:
     member=w.BOOL();assert k.IsProcessInJob(handle,job,ctypes.byref(member));assert member.value
     created,exited,kernel,user=w.FILETIME(),w.FILETIME(),w.FILETIME(),w.FILETIME()
     assert k.GetProcessTimes(handle,ctypes.byref(created),ctypes.byref(exited),ctypes.byref(kernel),ctypes.byref(user))
-    image=ctypes.create_unicode_buffer(32768);size=w.DWORD(32768);assert k.QueryFullProcessImageNameW(handle,0,image,ctypes.byref(size))
-    seen[pid]={'pid':pid,'in_exact_job':True,'created_filetime':(created.dwHighDateTime<<32)|created.dwLowDateTime,'image':image.value};k.CloseHandle(handle)
+    image=ctypes.create_unicode_buffer(32768);size=w.DWORD(32768)
+    if not k.QueryFullProcessImageNameW(handle,0,image,ctypes.byref(size)):
+     ended=w.DWORD();assert k.GetExitCodeProcess(handle,ctypes.byref(ended));assert ended.value!=259,'live process image unavailable'
+     seen[pid]={'pid':pid,'in_exact_job':True,'created_filetime':(created.dwHighDateTime<<32)|created.dwLowDateTime,'exited_before_image_query':ended.value}
+    else:seen[pid]={'pid':pid,'in_exact_job':True,'created_filetime':(created.dwHighDateTime<<32)|created.dwLowDateTime,'image':image.value}
+    k.CloseHandle(handle)
    if time.monotonic()-started>a.deadline:break
   facts['native_members']=list(seen.values())
   wait=k.WaitForSingleObject(process.process,0)
