@@ -37,7 +37,7 @@ import {pathToFileURL} from 'node:url';
 import {nowIso, readRecord, storeDir, writeRecord} from './lib/delivery-store.mjs';
 
 import {checkWaveAdmission} from './lib/wave-guard.mjs';
-import {verifyFocused} from './producer-admission.mjs';
+import {verifyProducer,verifyReviewedFocused} from './producer-admission.mjs';
 import {mainOnly, managedLocal} from './lib/delivery-local.mjs';
 const SCHEMA = 1;
 
@@ -95,7 +95,7 @@ export function evaluate({repo, record, tipRef = null,phase='admit', sessionDb=n
   if (!repo) throw Error('record names no repository: a record written before that field existed cannot be read');
   if(!['admit','observe'].includes(phase))throw Error('unsupported_delivery_evaluation_phase');
   const wave=checkWaveAdmission(repo,{phase,recovery});
-  if(!wave.ok)return {schema:SCHEMA,delivery:record.delivery,decision:'refused',condition:'wave_admission_refused',refusal:wave.reason,wave,conditions:[],caveats:[],requires_combined_gate:true};
+  if(!wave.ok)return {schema:SCHEMA,delivery:record.delivery,decision:'refused',condition:'wave_admission_refused',refusal:wave.reason,wave,conditions:[],caveats:[],requires_combined_gate:false,gate_verified:false,release_verified:false};
   const branch = record.branch || record.delivery;
   const pushedRef = `refs/remotes/origin/${branch}`;
   const local=mainOnly(repo) && !tipRef;
@@ -133,7 +133,7 @@ export function evaluate({repo, record, tipRef = null,phase='admit', sessionDb=n
       add('record_repository_matches',fs.realpathSync(git(repo,['rev-parse','--path-format=absolute','--git-common-dir']))===fs.realpathSync(git(record.repository,['rev-parse','--path-format=absolute','--git-common-dir'])),'same shared repository');
     } catch(error){add('local_producer_binding',false,error.message);}
     add('producer_receipt_required',Boolean(record.producer_checks),'main-only requires source-bound producer checks');
-    add('producer_receipt_exact_tip',record.producer_checks?.head===record.tip,'receipt must name the exact commit');
+    add('producer_receipt_exact_tip',(record.producer_checks?.head===record.tip || (record.producer_checks?.kind==='retained-full' && record.producer_checks?.candidate_head===record.tip)),'receipt must name the exact commit');
   }
   // -- the review ---------------------------------------------------------------------------------
   add('review_missing', Boolean(review),
@@ -201,7 +201,9 @@ export function evaluate({repo, record, tipRef = null,phase='admit', sessionDb=n
   // never combined-tree verification; old reviewed records remain compatible.
   let producerProof = null;
   if (record.producer_checks) {
-    producerProof = verifyFocused(observations.producer_local?.worktree || repo, record.producer_checks, refTip || record.tip);
+    if(record.producer_checks.focused_scope)add('focused_scope_independently_reviewed',JSON.stringify(review?.focused_scope)===JSON.stringify(record.producer_checks.focused_scope),'independent exact-source review must name the executed focused scope');
+    producerProof = verifyProducer(observations.producer_local?.worktree || repo, record.producer_checks, refTip || record.tip);
+    if(record.producer_checks.focused_scope&&producerProof.admission_verified)producerProof=verifyReviewedFocused(observations.producer_local?.worktree||repo,record.producer_checks,review,refTip||record.tip,record.producer);
     add('producer_checks_verified', producerProof.admission_verified === true,
       producerProof.error || `focused checks verified for tree ${producerProof.tree}`);
   }
@@ -219,7 +221,9 @@ export function evaluate({repo, record, tipRef = null,phase='admit', sessionDb=n
     authority: observations.producer_local?.source?.kind==='private-fixture' ? 'private-fixture-only' : local ? 'runtime-managed-local' : tipRef ? 'rehearsal' : 'published',
     wave,
     producer_checks: producerProof,
-    requires_combined_gate: true,
+    requires_combined_gate: false,
+    gate_verified: false,
+    release_verified: false,
     conditions,
     decision,
     condition: failed ? failed.name : 'admitted',

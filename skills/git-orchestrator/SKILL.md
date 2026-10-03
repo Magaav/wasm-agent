@@ -4,7 +4,7 @@ description: >-
   The merge lane's runbook and the one home of the integration protocol: who may
   move main, the lifecycle (produce -> verify -> accept -> land -> deploy -> converge), the lanes
   and their reservations, and the landing steps. It runs continuously - a delivery an
-  independent reviewer verified, whose own tree passed the gate and whose branch is
+  independent reviewer verified, whose own tree carries focused source checks and whose branch is
   current with origin/main, is landed without asking - and /merge and /merge all are
   manual entry points into the same procedure that widen its input scope, /merge all
   explicitly including open PRs and outside contributions. Discover exact tips,
@@ -29,7 +29,7 @@ not a person and not a session - the run the owner is talking to when it lands, 
 `/merge`, and any run opened for integration all take the same lane, and taking it is what
 authorises reviewed merges and the push to `main`. **Merging a delivery is authorised without
 asking each time**: a delivery an independent reviewer verified, whose branch is current with
-`origin/main`, and whose own tree carries the producer proof required by admission, is admitted by the lane on its own. Narrow changes may carry a focused receipt plus independent review; unknown/shared runtime changes require the full gate. The actual combined integration candidate always carries a complete exact-tree gate before publication and deployment.
+`origin/main`, and whose own tree carries the producer proof required by admission, is admitted by the lane on its own. Routine shared runtime changes may carry actual focused checks with an independently anchored scope declaration. Only the user selects pre-release gating: source paths never infer a full or combined gate, and routine publication/deployment does not require one (`lane-policy.json`). Routine admission reports `gate_verified:false`, `release_verified:false`, and `requires_combined_gate:false`; an explicit pre-release claim still requires valid exact-tree full proof.
 A coordinator merging each delivery by hand is the bottleneck this lane removes.
 
 - **A producer or reviewer lane never moves `main`.** Its branch is its deliverable, and handoff is
@@ -226,7 +226,11 @@ required PR approval by merging its branch SHA through a different PR or direct
 push. If protection requires individual PR merges, honor that sequence and
 rebuild/gate the final combined candidate after any source-tree change.
 
-### 3. Gate the merged tree, then push under the sole lock
+### 3. Push under the sole lock; gate only for user-selected pre-release
+
+For routine landings, keep the default `--gate-mode none`, source review, LF checks,
+current bindings and exact ref readback. The full-gate instructions below apply only
+when the user explicitly requests pre-release gating, never as a routine prerequisite.
 
 Re-run the audit against the merged HEAD with the same scope. Integrate new
 or advanced tips until no in-scope pending tip remains. **The branch's receipt does not cover the

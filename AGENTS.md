@@ -23,7 +23,7 @@ name.
 branch that carries its name, and a producer's branch is its deliverable - the mistake this
 replaced was an agent committing to `main` from the wrong tree (`docs/ORCHESTRATION.md`).
 Integration is a lane of its own and runs without a human step: a delivery an independent reviewer
-verified, whose own tree passed the gate, is merged and pushed by the merge lane, which is
+verified, whose own tree carries appropriate focused source checks, is merged and pushed by the merge lane, which is
 authorised to land deliveries without asking each time. Who may move `main`, what a landing must
 carry, the lifecycle (produce -> verify -> accept -> land -> deploy), the lanes and their
 reservations are one rule set in `skills/git-orchestrator/SKILL.md`
@@ -39,6 +39,10 @@ convergence/escalation protocol. In one line: one `change/<name>` per delivery f
 you do not own, end every commit with its provenance trailer, and prove the merge with
 `git merge-tree --write-tree origin/main HEAD`. Your branch is your deliverable; the merge lane
 lands it.
+
+**Routine merges do not request a full gate.** The user alone selects pre-release gating;
+shared runtime paths do not infer it. Preserve focused checks and independent source review,
+and report routine `gate_verified:false` and `release_verified:false` (`lane-policy.json`).
 
 ### Never touch the old plugin
 
