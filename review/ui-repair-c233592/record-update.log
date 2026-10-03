@@ -1,0 +1,36 @@
+change/wa-session-childdispatch4c6f5927-a536-4018-8c04-ceccdcec00b4: review recorded - reviewer child:dispatch:366a7144-3381-43ea-b7dd-d5ad7ac3adbd, tip c233592, tree 2f7b293e, verdict refused, 4 finding(s)
+{
+  "ok": true,
+  "action": "review",
+  "store": "C:\\Users\\Victor\\.wasm-agent\\sentinel\\deliveries",
+  "review": {
+    "reviewer": "child:dispatch:366a7144-3381-43ea-b7dd-d5ad7ac3adbd",
+    "commit": "b3028cd761c445cb153a09dddd1af6a8f0f8dd61",
+    "tip": "c2335923806a1f38bf1c7bacf79d14e8975efbee",
+    "tree": "2f7b293e25b1807ebed682ab051e6d55bb6a99bc",
+    "verdict": "refused",
+    "findings": [
+      {
+        "class": "narrow-repair",
+        "status": "resolved",
+        "text": "Unknown stream protection strict field parser and user anchors verified"
+      },
+      {
+        "class": "settlement",
+        "status": "unresolved",
+        "text": "No authenticated durable status fallback when health identity expires"
+      },
+      {
+        "class": "continuity",
+        "status": "unresolved",
+        "text": "Growing assistant prepend shifts151px and reasoning fold lost"
+      },
+      {
+        "class": "mutation-coverage",
+        "status": "unresolved",
+        "text": "Anchor rollback survives ui-browser; parser rollback caught only separate suite"
+      }
+    ],
+    "at": "2026-10-03T01:10:18.133Z"
+  }
+}
