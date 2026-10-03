@@ -192,8 +192,9 @@ run_proof_fixture waveActivityFix 62 node scripts/test-wave-activity-fix.mjs
 
 gate_phase_begin build
 ACTUAL_RELEASE_BUILD_LOG="$(git rev-parse --git-path "wa-release-build-${GATE_HOME##*/}.log")"
-gate_run cargo build --release --offline --manifest-path rust/Cargo.toml >"$ACTUAL_RELEASE_BUILD_LOG" 2>&1
 echo "actual release build retained: $ACTUAL_RELEASE_BUILD_LOG"
+gate_run cargo build --release --offline --manifest-path rust/Cargo.toml >"$ACTUAL_RELEASE_BUILD_LOG" 2>&1 \
+  || { build_status=$?; cat "$ACTUAL_RELEASE_BUILD_LOG" >&2; exit "$build_status"; }
 
 # BEGIN sentinel-intake required proofs
 CARGO_BUILD_JOBS=2 gate_run cargo test --offline --manifest-path rust/wa-sentinel/Cargo.toml -- --test-threads=2
@@ -1911,7 +1912,7 @@ run_proof_fixture subagentReturn 206 node scripts/test-subagent-return-hook.cjs
 # names a path that is neither in the tree nor built by that installer, or when the derivation itself
 # stops seeing a copy form it used to see. A proof fixture rather than a bare gate_run, so its 76 checks
 # have a floor: a guard nobody counts is a guard that can lose checks silently.
-run_proof_fixture deployShipped 87 node scripts/check-deploy-shipped.mjs
+run_proof_fixture deployShipped 92 node scripts/check-deploy-shipped.mjs
 node scripts/test-sentinel-quarantine.mjs || exit 1
 run_proof_fixture orchestration 33 node scripts/test-orchestration-e2e.cjs "$BIN"
 run_proof_fixture whatsapp 40 node scripts/test-whatsapp-subagent-e2e.cjs
