@@ -207,7 +207,7 @@ function apiHeaders(extra) {
 // `current`, so the match is exact. With no session known yet the window claims no run, which is the
 // safe default - it has no transcript to reconcile.
 function activeRun(health, session = chatSession) {
-  const isChat = (entry) => /^POST \/chat(?:\?|$)/.test(entry?.label || "");
+  const isChat = (entry) => /^POST \/(?:node\/)?chat(?:\?|$)/.test(entry?.label || "");
   const mine = (entry) => isChat(entry) && !!session && entry.session === session;
   return (health?.node_threads || []).find(mine) || (mine(health?.current) ? health.current : null);
 }
@@ -1639,7 +1639,8 @@ function repaintMessages(rows, options = {}) {
         runStartedAt = Number(message.created_at) > 0 ? Number(message.created_at) * 1000 : 0;
         replayMessageEndedAt = 0;
         replayRunLastMessage = null;
-        add("user", message.content || "");
+        const userBody=add("user", message.content || "");
+        userBody.closest('wa-message').dataset.ledgerKey=String(message.id || message.seq);
       } else if (message.role === "assistant") {
         replayRunLastMessage = message;
         if (Number(message.created_at) > 0) replayMessageEndedAt = Number(message.created_at) * 1000;
@@ -2193,15 +2194,17 @@ function runStanding(health, view = {}) {
   const thread = activeRun(health, view.session);
   if (thread) return "running";
   const accepted = view.runId === null || view.runId === undefined ? null : view.runId;
-  if (accepted !== null && threadOfRun(health, accepted)) return "running";
+  if (accepted !== null && threadOfRun(health, accepted, view.session)) return "running";
   const ids = Array.isArray(health?.run_ids) ? health.run_ids : null;
   if (ids) {
     // The run the node accepted for this conversation is the node's own record of it, and it outranks the
     // thread list: a thread is an implementation detail that a respawn or a re-queue may change.
     if (accepted !== null) {
-      const mine = ids.find((run) => run && Number(run.run_id) === Number(accepted)
-        && (!run.conversation || run.conversation === view.session));
-      if (mine) return /^(queued|running|not_started)$/.test(String(mine.state || "")) ? "running" : "over";
+      const mine = ids.find((run) => run && Number.isSafeInteger(run.run_id)
+        && Number.isSafeInteger(accepted) && run.run_id === accepted
+        && run.conversation === view.session);
+      if (mine && /^(queued|running|not_started)$/.test(mine.state)) return "running";
+      if (mine && /^(completed|cancelled|failed)$/.test(mine.state)) return "over";
     }
     // Not identified yet: a live run of this conversation that this window did not submit before is the
     // node's own answer that its newest run belongs here (`identifySubmittedRun` makes that exact match).
@@ -2212,16 +2215,17 @@ function runStanding(health, view = {}) {
   // identify it" is keep waiting - never "over". The node is not idle, so the run has not been observed
   // to end, and a page may not end a stream it cannot contradict.
   const worker = String(health?.worker || "");
-  const isChatThread = (entry) => /^POST \/chat(?:\?|$)/.test(entry?.label || "");
+  const isChatThread = (entry) => /^POST \/(?:node\/)?chat(?:\?|$)/.test(entry?.label || "");
   const chatWorking = (health?.node_threads || []).some(isChatThread) || isChatThread(health?.current);
   if (chatWorking || worker === "busy" || worker === "stalled") return "busy-unknown";
-  return "over";
+  return "busy-unknown";
 }
 
 // The node-thread carrying one run id, when the node names it there (`/health` puts `run_id` on both
 // `current` and each `node_threads` entry). Absent on an older node, and then this is simply no evidence.
-function threadOfRun(health, runId) {
-  const carries = (entry) => entry && entry.run_id != null && Number(entry.run_id) === Number(runId);
+function threadOfRun(health, runId, session = chatSession) {
+  const carries = (entry) => entry && entry.session === session
+    && Number.isSafeInteger(entry.run_id) && Number.isSafeInteger(runId) && entry.run_id === runId;
   return (health?.node_threads || []).find(carries) || (carries(health?.current) ? health.current : null);
 }
 
@@ -2340,11 +2344,9 @@ async function send(text, options = {}) {
         runController.abort();
       } catch (error) {
         // Unreachable: the node is gone, which is a different message and the one that fits.
-        clearInterval(watchdog);
-        streamNotice = add("assistant", connectionMessage());
-        watchNode();
-        lostRun = true;
-        runController.abort();
+        // A failed observation is not a failed stream. Its own read/error/done settles it.
+        if (!turnFinished && stillViewingRun()) setStatus("run status unavailable; still listening");
+        lastEvent = Date.now();
       }
       asking = false;
     };
@@ -4680,9 +4682,15 @@ async function refreshAgentPane(pane) {
       // Preserve the reader's place while the shared ledger renderer appends/repaints.
       const top=pane.transcript.scrollTop;
       const following=pane.transcript.scrollHeight-top-pane.transcript.clientHeight<40;
+      const visible=Array.from(pane.transcript.querySelectorAll('wa-message')).find(el=>el.getBoundingClientRect().bottom>pane.transcript.getBoundingClientRect().top);
+      const anchorKey=visible?.dataset.ledgerKey;
+      const anchorText=visible?.textContent;
+      const anchorOffset=visible ? visible.getBoundingClientRect().top-pane.transcript.getBoundingClientRect().top : 0;
       paintChildTranscript(pane.transcript,rows,{state:childRunState(pane.task),
         stateAt:pane.task.settled_at,active:!pane.task.settled,liveTool:pane.task.preview?.tool});
+      const anchor=Array.from(pane.transcript.querySelectorAll('wa-message')).find(el=>anchorKey ? el.dataset.ledgerKey===anchorKey : el.textContent===anchorText);
       pane.transcript.scrollTop=following ? pane.transcript.scrollHeight : top;
+      if(!following && anchor) pane.transcript.scrollTop+=anchor.getBoundingClientRect().top-pane.transcript.getBoundingClientRect().top-anchorOffset;
     }
     // What is left for the pane's own notice is what the shared transcript cannot say: a failure the
     // child reported, a page size this node refused, or nothing. `Ready for your next message.` used to

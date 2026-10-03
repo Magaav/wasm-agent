@@ -21,9 +21,10 @@ export function checkVerdict(check, exit, output) {
     const prefix=/^\s*ok   UI structure\b/;
     const subjects=check.subjects || ['reload','startup-recovery','inspect-window','view-window'];
     const markers=text.split(/\r?\n/).filter(line=>{
-      const field=line.match(/\[stages:\s*([^\]]*)\]/);
-      const stages=field ? field[1].split(',').map(token=>token.trim()) : [];
-      return prefix.test(line)&&subjects.every(subject=>stages.includes(subject));
+      const field=line.match(/^\s*ok   UI structure[^\[\]\r\n]*\[stages: ([a-z,-]+)\]\s*$/);
+      const stages=field ? field[1].split(',') : [];
+      return prefix.test(line)&&stages.length===subjects.length
+        && new Set(stages).size===stages.length && subjects.every(subject=>stages.includes(subject));
     });
     return {ok:exit===0&&markers.length===1&&!/^\s*(?:FAIL(?:[:\s]|$)|ALL FAIL(?:[:\s]|$)|DEPENDENCY_MISSING)/im.test(text),reason:'browser_terminal_verdict_required'};
   }

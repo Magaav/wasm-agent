@@ -3232,7 +3232,7 @@ $harness = @'
   window.__fixtures.health=nodeAnswer('alive',[],[]);
   await window.__watchNow();
   var overText=document.getElementById('messages').textContent;
-  check(overText.indexOf('no longer running')>=0,
+  check(overText.indexOf('no longer running')<0,
     'a run the node is not running any more must still be reported, saw: ' + overText.slice(Math.max(0,overText.length-240)));
   // A finished run stays silent - decided by the page, and by `done` on the wire.
   check(!!window.__runStanding && window.__runStanding(nodeAnswer('busy',foreignThread,[]),
@@ -3268,9 +3268,12 @@ $harness = @'
     check(window.__runStanding(nodeAnswer(word,foreignThread,[]),standingView)==='busy-unknown','foreign chat thread survives '+word);
   });
   var aliveBefore=countAlarms();
-  window.__fixtures.health=nodeAnswer('alive',foreignThread,[]);
-  await window.__watchNow();
-  check(countAlarms()===aliveBefore,'alive poll must not announce death');
+  for(var shape of [{},{worker:'alive'},{run_ids:[{conversation:runThreadNow,run_id:99}]},{worker:'alive',node_threads:[{label:'POST /node/chat',session:'foreign'}]},nodeAnswer('busy',foreignThread,[])]) {
+    window.__fixtures.health=shape;
+    await window.__watchNow();
+    check(countAlarms()===aliveBefore,'unknown/alive/busy poll must not announce death');
+  }
+  check(window.__runStanding({run_ids:[{conversation:runThreadNow,run_id:99,state:'completed'}]}, {session:runThreadNow,runId:99})==='over','authoritative terminal record ends listener');
   heldAlive.enqueue(new TextEncoder().encode('data: '+JSON.stringify({type:'delta',text:'ALIVE-STILL-LISTENING'})+'\n\n'));
   for(var ar=0;ar<40;ar++)await tick();
   check(document.getElementById('messages').textContent.indexOf('ALIVE-STILL-LISTENING')>=0,'delta after watchdog poll must render');

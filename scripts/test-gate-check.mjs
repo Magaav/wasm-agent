@@ -23,6 +23,7 @@ try {
   const browser={verdict:'browser',subjects:['reload','startup-recovery','inspect-window','view-window']};
   const real='  ok   UI structure [stages: reload,startup-recovery,inspect-window,view-window]\n';
   assert(checkVerdict(browser,0,real).ok);
+  for(const text of [real.trim()+' false',real.trim()+' [stages: false]',real.replace('reload,','reload,reload,'),real.replace('reload,','unexpected,reload,')])assert(!checkVerdict(browser,0,text).ok,'ambiguous stage contract refused');
   for(const [exit,text] of [[0,'silent'],[7,real],[0,real+'FAIL evidence'],[0,real+real],
     [0,'  ok   UI structure, but startup recovery was skipped and the mid-run reload never ran\n'],
     [0,'  ok   UI structure [stages: reload,startup-recovery]\n'],
