@@ -3,7 +3,16 @@
 import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import assert from 'node:assert/strict';
 import {spawn,spawnSync} from 'node:child_process';import {once} from 'node:events';import {DatabaseSync} from 'node:sqlite';
 import {runFocused} from './producer-admission.mjs';import {digest,recoverySnapshot} from './lib/wave-recovery.mjs';import {landRecovery} from './wave-recovery-land.mjs';import {connectNativeRecovery} from './lib/wave-recovery-native.mjs';
-const actual=path.resolve(import.meta.dirname,'..'),binary=path.resolve(process.argv[2]),root=fs.mkdtempSync(path.join(os.tmpdir(),'wa-native-wave-'));
+const actual=path.resolve(import.meta.dirname,'..'),suppliedBinary=fs.realpathSync(path.resolve(process.argv[2])),root=fs.mkdtempSync(path.join(os.tmpdir(),'wa-native-wave-'));
+// Normal gates build outside Temp. Execute an exact private copy so the fixture
+// stays inside its existing private-root fence without changing build provenance.
+const binary=path.join(root,'native-artifact',path.basename(suppliedBinary));
+fs.mkdirSync(path.dirname(binary));
+const suppliedBinarySha256=digest(fs.readFileSync(suppliedBinary));
+fs.copyFileSync(suppliedBinary,binary,fs.constants.COPYFILE_EXCL);
+fs.chmodSync(binary,fs.statSync(suppliedBinary).mode);
+assert.equal(digest(fs.readFileSync(binary)),suppliedBinarySha256,'private artifact must match the supplied source-built binary');
+fs.writeFileSync(path.join(root,'binary-staging.json'),JSON.stringify({kind:'private-source-built-artifact-copy',source_path:suppliedBinary,source_sha256:suppliedBinarySha256,path:binary,sha256:suppliedBinarySha256},null,2)+'\n');
 const suppliedBuildLog=path.resolve(process.argv[3]||path.join(os.tmpdir(),'wa-native-recovery-build.log'));
 const buildLog=path.join(root,'actual-build.log');fs.copyFileSync(suppliedBuildLog,buildLog);
 const buildCommand=process.argv.find(a=>a.startsWith('--build-command='))?.slice('--build-command='.length)||'cargo build --offline --manifest-path rust/Cargo.toml -p wa-host';let checks=0;const children=[];
@@ -46,7 +55,7 @@ async function fixture(label,{foreign=false,used=false,dirty=false,snapshot=fals
  const snap=recoverySnapshot(store,'wave'),files=git(repo,'ls-tree','-r','--name-only',tip).split('\n').filter(Boolean).sort().map(p=>({path:p,sha256:digest(fs.readFileSync(path.join(source,p)))}));
  const nativeInputs=files.filter(f=>f.path.startsWith('rust/')||f.path.startsWith('lua/'));
  for(const f of nativeInputs)assert.equal(digest(fs.readFileSync(path.join(actual,f.path))),f.sha256,'actual source-built native inputs match fixture');
- write(path.join(meta,'native-build.json'),{kind:'wave-native-build',authority:'private-fixture',source_tip:tip,source_tree:tree,binary_sha256:digest(fs.readFileSync(binary)),native_inputs:nativeInputs,exit:0,command:buildCommand,log:{path:buildLog,sha256:digest(fs.readFileSync(buildLog))},actual_builder_root:actual});
+ write(path.join(meta,'native-build.json'),{kind:'wave-native-build',authority:'private-fixture',source_tip:tip,source_tree:tree,binary_sha256:digest(fs.readFileSync(binary)),native_inputs:nativeInputs,exit:0,command:buildCommand,log:{path:buildLog,sha256:digest(fs.readFileSync(buildLog))},actual_builder_root:actual,actual_builder_binary:{path:suppliedBinary,sha256:suppliedBinarySha256}});
  const buildCommit=commit(meta,'fixture-builder');
  const runtime={native:{path:binary,sha256:digest(fs.readFileSync(binary)),build_commit:buildCommit,build_path:'native-build.json'},node:{path:tool('node'),sha256:digest(fs.readFileSync(tool('node')))},git:{path:tool('git'),sha256:digest(fs.readFileSync(tool('git')))},driver:'scripts/wave-recovery-driver.lua',consumer:'scripts/wave-recovery-bootstrap.mjs',effects:['canonical-local-main-cas']};
  if(process.platform==='win32')runtime.observer={path:tool('powershell.exe'),sha256:digest(fs.readFileSync(tool('powershell.exe')))};
@@ -133,6 +142,6 @@ try{
   const after=new DatabaseSync(path.join(crash.home,'.wasm-agent/resources/claims.sqlite'),{readOnly:true});assert.deepEqual(after.prepare('SELECT * FROM claims WHERE key=?').get(crashFacts.receipt.key),original);after.close();checks++;
   const marker=new DatabaseSync(path.join(crash.store,'recovery-consumption.sqlite'),{readOnly:true});check(marker.prepare('SELECT state FROM consumed WHERE nonce=?').get(crash.entry.nonce).state==='uncertain','crash and restart never replay uncertain nonce');marker.close();
  }
- const report={kind:'private-actual-native-recovery-consumer',checks,skipped:0,binary_sha256:digest(fs.readFileSync(binary)),source:actual,positive:positive.home,production_authority:false,remote_publication:false};write(path.join(root,'report.json'),report);
+ const report={kind:'private-actual-native-recovery-consumer',checks,skipped:0,binary_sha256:digest(fs.readFileSync(binary)),supplied_binary:{path:suppliedBinary,sha256:suppliedBinarySha256},staged_binary:binary,source:actual,positive:positive.home,production_authority:false,remote_publication:false};write(path.join(root,'report.json'),report);
  console.log(`native wave recovery ok (${checks} checks, 0 skipped; source-root native parent, actual private canonical Git/store/effect)`);
 }catch(error){console.error(error.stack);process.exitCode=1;}finally{for(const child of children)if(child.exitCode===null&&child.signalCode===null){const exit=once(child,'exit');child.kill();await exit;}console.log('evidence: '+root);}
