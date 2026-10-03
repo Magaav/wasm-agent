@@ -3,7 +3,7 @@ import pathlib,subprocess,argparse
 p=argparse.ArgumentParser();p.add_argument('--repo',required=True);a=p.parse_args();repo=pathlib.Path(a.repo).resolve()
 source=(repo/'scripts/test.sh').read_text()
 section=source.split('# BEGIN sentinel-intake required proofs\n',1)[1].split('# END sentinel-intake required proofs',1)[0]
-helper=source[source.index('run_proof_fixture() {'):source.index('# BEGIN sentinel-intake required proofs')]
+helper=source[source.index('run_proof_fixture() {'):].split('\n}\n',1)[0]+'\n}\n'
 preamble='set -e\nGATE_HOME="$(git rev-parse --git-path intake-section)"\nmkdir -p "$GATE_HOME"\nSKIPPED=0\ngate_run(){ "$@"; }\n'
 # Enforce required execution, not filenames or source grep.
 post='test -f "$INTAKE_PROOF/cli/result.json"\ntest -f "$INTAKE_PROOF/mutants/results.json"\ntest "$SKIPPED" = 0\n'

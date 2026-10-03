@@ -120,4 +120,4 @@ finally:
  k.CloseHandle(process.thread);k.CloseHandle(process.process);k.CloseHandle(job)
  stdout.close();stderr.close();stdin.close()
 print((root/'stdout.log').read_text(encoding='utf8',errors='replace'))
-print('owned return Job ok (1 check, 0 skipped): '+json.dumps(facts))
+print('owned return Job ok (1 check, 0 skipped): '+json.dumps({**{k:v for k,v in facts.items() if k!='native_members'},'sampled_members':len(facts.get('native_members',[]))}))

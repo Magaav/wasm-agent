@@ -182,6 +182,17 @@ run_proof_fixture() {
   tail -4 "$log"
 }
 
+# BEGIN wave-owner safety proofs (required, not coverage discovery)
+run_proof_fixture waveOwner 53 node scripts/test-wave-owner-refusal.mjs
+run_proof_fixture waveOwnerMutations 3 node scripts/test-wave-owner-mutations.mjs
+run_proof_fixture waveCorners 24 node scripts/test-wave-activity-corners.mjs
+run_proof_fixture waveDerived 55 node scripts/test-wave-derived-state.mjs
+run_proof_fixture waveActivityFix 62 node scripts/test-wave-activity-fix.mjs
+# END wave-owner safety proofs
+
+gate_phase_begin build
+gate_run cargo build --release --offline --manifest-path rust/Cargo.toml >/dev/null
+
 # BEGIN sentinel-intake required proofs
 CARGO_BUILD_JOBS=2 gate_run cargo test --offline --manifest-path rust/wa-sentinel/Cargo.toml -- --test-threads=2
 if [ "${OS:-}" = "Windows_NT" ]; then
@@ -194,16 +205,6 @@ else
   SKIPPED=$((SKIPPED + 1))
 fi
 # END sentinel-intake required proofs
-# BEGIN wave-owner safety proofs (required, not coverage discovery)
-run_proof_fixture waveOwner 53 node scripts/test-wave-owner-refusal.mjs
-run_proof_fixture waveOwnerMutations 3 node scripts/test-wave-owner-mutations.mjs
-run_proof_fixture waveCorners 24 node scripts/test-wave-activity-corners.mjs
-run_proof_fixture waveDerived 55 node scripts/test-wave-derived-state.mjs
-run_proof_fixture waveActivityFix 62 node scripts/test-wave-activity-fix.mjs
-# END wave-owner safety proofs
-
-gate_phase_begin build
-gate_run cargo build --release --offline --manifest-path rust/Cargo.toml >/dev/null
 gate_run node scripts/test-install-isolation.mjs
 gate_run node scripts/test-gate-check.mjs
 run_proof_fixture producer 16 node scripts/test-producer-admission.mjs
@@ -1877,7 +1878,7 @@ run_proof_fixture fleet 20 node scripts/test-orchestrator.cjs "$BIN"
 gate_run node scripts/test-completion-wake.cjs "$BIN"
 if [ "${OS:-}" = "Windows_NT" ]; then
   gate_run python scripts/test-sentinel-owned-job.py --repo "$PWD" --evidence "$(git rev-parse --git-path owned-return-gate-$$)"
-  run_proof_fixture sentinelInstall 18 python scripts/test-sentinel-owned-job.py --repo "$PWD" --evidence "$(git rev-parse --git-path private-install-gate-$$)" --script "$PWD/scripts/test-sentinel-private-install.cjs" --deadline 1800
+  run_proof_fixture sentinelInstall 22 python scripts/test-sentinel-owned-job.py --repo "$PWD" --evidence "$(git rev-parse --git-path private-install-gate-$$)" --script "$PWD/scripts/test-sentinel-private-install.cjs" --deadline 1800
 else
   echo "SKIP: Windows owned return Job proof"
   SKIPPED=$((SKIPPED + 1))
@@ -1900,7 +1901,7 @@ run_proof_fixture subagentReturn 206 node scripts/test-subagent-return-hook.cjs
 # names a path that is neither in the tree nor built by that installer, or when the derivation itself
 # stops seeing a copy form it used to see. A proof fixture rather than a bare gate_run, so its 76 checks
 # have a floor: a guard nobody counts is a guard that can lose checks silently.
-run_proof_fixture deployShipped 82 node scripts/check-deploy-shipped.mjs
+run_proof_fixture deployShipped 87 node scripts/check-deploy-shipped.mjs
 node scripts/test-sentinel-quarantine.mjs || exit 1
 run_proof_fixture orchestration 33 node scripts/test-orchestration-e2e.cjs "$BIN"
 run_proof_fixture whatsapp 40 node scripts/test-whatsapp-subagent-e2e.cjs

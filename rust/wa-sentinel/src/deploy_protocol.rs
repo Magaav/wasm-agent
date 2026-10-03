@@ -96,6 +96,13 @@ pub(crate) fn admit(request:&Value) -> Result<PathBuf> {
     let script=canonical_script(request["expected_sha"].as_str().context("protocol_sha_missing")?)?;
     let target=verify_target(node_port(),true).context("protocol_native_target_not_owned")?;
     let dir=sentinel_dir().join("deploy-protocol").join(id);
+    let install_lock=std::fs::OpenOptions::new().create(true).truncate(false).read(true).write(true).open(sentinel_dir().join("protocol-effect.lock"))?;
+    install_lock.lock()?;
+    let active_file=sentinel_dir().join("protocol-effect.json");
+    if active_file.exists() {
+        let active:Value=serde_json::from_slice(&std::fs::read(&active_file)?)?;
+        if active["phase"]!="verified" {bail!("prior_protocol_effect_unsettled:{}; reconcile, never replay",active["id"]);}
+    }
     let lock=std::fs::OpenOptions::new().create(true).truncate(false).read(true).write(true).open(dir.join("effect.lock"))?;
     lock.lock()?;
     if dir.join("effect.json").exists() {bail!("effect_already_reserved; reconcile, never replay");}
@@ -106,6 +113,7 @@ pub(crate) fn admit(request:&Value) -> Result<PathBuf> {
         "parent":binding["parent"],"owner":binding["owner"],"source":source,"script":script,"script_sha256":digest,
         "target_pid":target,"target_created":instance::process_start(target),"watcher_pid":std::process::id(),"at":now_epoch(),"phase":"admitted"});
     wa_operation::atomic_json(&dir.join("effect.json"),&facts)?;
+    wa_operation::atomic_json(&active_file,&facts)?;
     record(request,id,"spawned","effect reserved before spawn; outcome requires fresh actual installer verification")?;
     Ok(script)
 }
@@ -130,6 +138,16 @@ pub(crate) fn verify_install(id:&str) -> Result<Value> {
     if proof["ok"]!=true || proof["request_id"]!=id || proof["expected_sha"]!=intent["expected_sha"]
         || proof["owner"]!=binding["owner"] || proof["parent"]!=binding["parent"] {bail!("actual_verification_identity_mismatch");}
     wa_operation::atomic_json(&dir.join("verification.json"),&proof)?;
+    let install_lock=std::fs::OpenOptions::new().create(true).truncate(false).read(true).write(true).open(sentinel_dir().join("protocol-effect.lock"))?;
+    install_lock.lock()?;
+    let active_file=sentinel_dir().join("protocol-effect.json");
+    if active_file.exists() {
+        let mut active:Value=serde_json::from_slice(&std::fs::read(&active_file)?)?;
+        if active["id"]==id && active["expected_sha"]==intent["expected_sha"] {
+            active["phase"]=json!("verified");active["verified_at"]=proof["at"].clone();
+            wa_operation::atomic_json(&active_file,&active)?;
+        }
+    }
     Ok(proof)
 }
 

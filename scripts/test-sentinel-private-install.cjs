@@ -59,6 +59,15 @@ async function gone(pid){await until(()=>{try{process.kill(pid,0);return false;}
  await until(()=>fs.existsSync(path.join(dir,'ack.json')),'five-second durable watcher acknowledgement',5000);
  const ackMs=Date.now()-began;assert(ackMs<5000);assert.equal(notices.length,0,'busy parent cannot consume');assert(!fs.existsSync(path.join(dir,'effect.json')),'busy parent no effect');
  releaseBusy();releaseBusy=null;await busy;
+ await until(()=>fs.existsSync(path.join(dir,'effect.json')),'actual effect admission');
+ const busyDuringUpdate=api('/chat',{text:'hold private parent',thread:session.id});await until(()=>!!releaseBusy,'actual parent busy during installation');
+ const noticesBefore=notices.length;
+ await sleep(12000);
+ assert.equal(notices.length,noticesBefore,'updating return coalesced while real parent busy');
+ const check=JSON.parse(fs.readFileSync(path.join(dir,'check.json')));
+ assert(check.at>=check.due_at&&check.due_at>=request.queued_at+10,'actual ten-second check observed while busy');
+ save('actual-updating-busy-check.json',check);
+ releaseBusy();releaseBusy=null;await busyDuringUpdate;
  await until(()=>fs.existsSync(path.join(dir,'result.json')),'actual installer terminal result',600000);
  const result=JSON.parse(fs.readFileSync(path.join(dir,'result.json')));assert.equal(result.ok,true,JSON.stringify(result));assert.equal(result.request_id,request.id);
  const actual=proof.verifyActual(source,install,request,JSON.parse(fs.readFileSync(path.join(dir,'binding.json'))),dir);
@@ -69,6 +78,19 @@ async function gone(pid){await until(()=>{try{process.kill(pid,0);return false;}
  const listener=proof.processIdentity(Number(fs.readFileSync(path.join(install,'serve.pid')))),watcher=proof.processIdentity(Number(fs.readFileSync(path.join(box,'sentinel.pid'))));
  assert.notEqual(listener.created,originalNode.created);assert.notEqual(watcher.created,originalWatcher.created);save('native-after.json',{listener,watcher,health:await api('/health')});
  const transcript=await api('/session?id='+session.id);save('actual-parent-transcript.json',transcript);assert(JSON.stringify(transcript.messages).includes('I am updated'));
+ let admissionNegatives=0;
+ for(const [name,owner,sha,problem] of [['owner','wrong-owner',packet.head,'parent_owner_mismatch'],['source',session.user_id,'b'.repeat(40),'canonical source']]) {
+  const prior=new Set(fs.readdirSync(path.join(box,'deploy-protocol')));
+  cli('request','deploy','--expected-sha',sha,'--owner',owner,'--session',session.id,'--reason','private admission negative '+name);
+  let negative;
+  await until(()=>{negative=fs.readdirSync(path.join(box,'deploy-protocol')).find(id=>!prior.has(id));return !!negative;},'negative request identity');
+  const evidence=path.join(box,'deploy-protocol',negative);
+  await until(()=>fs.existsSync(path.join(evidence,'ack.json')),'negative acknowledgement',5000);
+  await until(()=>fs.existsSync(path.join(box,'failed',negative+'.json')),'named admission failure');
+  const failure=JSON.parse(fs.readFileSync(path.join(box,'failed',negative+'.json')));
+  assert(failure.detail.includes(problem),failure.detail);assert(!fs.existsSync(path.join(evidence,'effect.json')),'negative did not reserve an effect');
+  save('admission-negative-'+name+'.json',{id:negative,failure,actual_effect_reserved:false});admissionNegatives++;
+ }
  // Actual verifier negatives preserve each failing raw receipt; every altered file is restored exactly.
  const installedFile=path.join(install,'installed.txt'),installedBytes=fs.readFileSync(installedFile),resultFile=path.join(dir,'result.json'),resultBytes=fs.readFileSync(resultFile);
  let negativeCount=0;
@@ -92,8 +114,8 @@ async function gone(pid){await until(()=>{try{process.kill(pid,0);return false;}
  const mutant=await import(pathToFileURL(mutantFile).href);
  try{fs.writeFileSync(resultFile,JSON.stringify({...result,request_id:'wrong-request'}));assert.equal(mutant.verifyActual(source,install,request,binding,dir).ok,true,'removed causal check must admit the actual wrong request');negativeCount++;save('causal-removal.json',{red:true,actual_wrong_request:'wrong-request',original_refused:true,mutant_admitted:true});}finally{fs.writeFileSync(resultFile,resultBytes);}
  const clean=proof.verifyActual(source,install,request,JSON.parse(fs.readFileSync(path.join(dir,'binding.json'))),dir);assert.equal(clean.ok,true);
- save('result.json',{ok:true,request_id:request.id,head:packet.head,tree:packet.tree,ack_ms:ackMs,checks:8+negativeCount,skipped:0,paid_calls:0,actual_installer:true,actual_verifier:true,private_source:source,notices:terminal.length});
- console.log(`sentinel private install ok (${8+negativeCount} checks, 0 skipped)`);
+ save('result.json',{ok:true,request_id:request.id,head:packet.head,tree:packet.tree,ack_ms:ackMs,checks:10+negativeCount+admissionNegatives,skipped:0,paid_calls:0,actual_installer:true,actual_verifier:true,private_source:source,notices:terminal.length});
+ console.log(`sentinel private install ok (${10+negativeCount+admissionNegatives} checks, 0 skipped)`);
  }finally{
   if(releaseBusy)releaseBusy();
   if(fs.existsSync(path.join(box,'sentinel.pid'))){const pid=Number(fs.readFileSync(path.join(box,'sentinel.pid')));fs.writeFileSync(path.join(box,'stop'),'owned private fixture cleanup');await gone(pid);}
