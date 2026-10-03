@@ -10,7 +10,8 @@
 param(
   [int]$Port = 8899,
   [int]$ClientPort = 8801,
-  [string]$WaExe = ""
+  [string]$WaExe = "",
+  [string]$UiDirectory = ""
 )
 $ErrorActionPreference = "Stop"
 $root = Split-Path $PSScriptRoot -Parent
@@ -18,7 +19,7 @@ if (-not $WaExe) {
   $candidate = Join-Path $root 'rust/target/release/wa.exe'
   $WaExe = if (Test-Path -LiteralPath $candidate) { $candidate } else { Join-Path $env:LOCALAPPDATA 'wasm-agent/wa.exe' }
 }
-$ui = Join-Path $root "ui"
+$ui = if ($UiDirectory) { [IO.Path]::GetFullPath($UiDirectory) } else { Join-Path $root "ui" }
 if (-not (Test-Path (Join-Path $ui "index.html"))) { Write-Host "  !  no ui/ in $root"; exit 1 }
 
 $tmp = Join-Path ([IO.Path]::GetTempPath()) ("wa-ui-test-" + [Guid]::NewGuid().ToString("N").Substring(0, 8))
@@ -3068,6 +3069,18 @@ $harness = @'
     'actual answer deltas retain original raw text and never infer reasoning from literal markers');
   window.handleEvent({type:'reply',text:literalAnswer});
   check(document.querySelector('wa-message .seg').rawText===literalAnswer,'settled answer retains exact source bytes beside the presentation');
+  window.__repaintMessages([]);window.__setBusy(true);
+  window.handleEvent({type:'reasoning',text:'MAIN-BEGIN'});
+  var ownerReasoning=document.getElementById('messages').querySelector('.reasoning-body');
+  var ownerStatus=document.getElementById('messages').querySelector('.status');
+  window.handleEvent({type:'tool',name:'read',call_id:'owner-tool',arguments:{path:'main-context'}});
+  var foreignSurface=document.createElement('div');document.body.append(foreignSurface);
+  window.__paintChildTranscript(foreignSurface,[{id:'foreign-user',seq:1,role:'user',content:'child'},
+    {id:'foreign-reply',seq:2,role:'assistant',content:'child answer',reasoning:'FOREIGN-CHILD'}],{state:'answered'});
+  check(ownerStatus.isConnected&&window.__toolTickerActive(),'shared child renderer must preserve parent status DOM and live timer');
+  window.handleEvent({type:'reasoning',text:'-END'});
+  check(ownerReasoning.textContent==='MAIN-BEGIN-END','shared renderer keeps parent reasoning buffer isolated from child content');
+  foreignSurface.remove();window.__setBusy(false);window.handleEvent({type:'done'});
   window.__repaintMessages([]);
   window.handleEvent({type:'round',n:1});
   window.handleEvent({type:'pending_delta',pending_id:'fixture-commentary',text:'Checking '});
