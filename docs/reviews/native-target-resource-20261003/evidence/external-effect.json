@@ -1,0 +1,25 @@
+{
+  "kind": "private-source-pinned-publication",
+  "source_sha256": "150ede9236b307602353355b61adf197b3b1e7ad247a990f7f6a4ed8560c26b0",
+  "receipt": {
+    "boot": "ab3e27c9-7c51-4774-a1eb-0068e00ba02f",
+    "creation_stamp": "windows-filetime:134355093135916687",
+    "key": "target:ab1b6e4c8453f4783cd4d8a71c112e4a289db9587197b95d23d8c192a79e04e2",
+    "kind": "held-target-resource",
+    "principal": "alice",
+    "process_id": 4456,
+    "receipt_id": "cf2e439f-3d9b-438a-807d-8924efed70bc",
+    "run": "resource-run-a",
+    "schema": 1,
+    "scope": {
+      "git_common_dir": "//?/c:/users/victor/appdata/local/temp/wa-native-target-evidence-gqsp5v/positive/git",
+      "ref": "refs/heads/fixture"
+    },
+    "session": "session-a",
+    "session_claim_id": "0b229136-25e5-4481-96ce-2e9128d3e4ee"
+  },
+  "commit": "210f49e195dd74b59f3e034a43de9beb8fb40baf",
+  "competing_checks": 6,
+  "creation_stamp_observed": true,
+  "exclusion_before_and_after": true
+}

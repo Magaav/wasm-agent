@@ -1,0 +1,109 @@
+{
+    "schema":  1,
+    "kind":  "native-target-resource-local-delivery",
+    "session":  "01a101f1-f9f8-7690-9296-8a7386659d38",
+    "branch":  "change/codex-native-target-resource",
+    "base":  "898a9a238c89c5f64b83cfa219f8c17840b441f9",
+    "preserved_wave_producer":  "b3ed584cc8c6e188e3a550d98b7c91c0a6124d73",
+    "outcome":  "implemented-and-executed",
+    "full_gate_verified":  false,
+    "requires_independent_review":  true,
+    "publication":  "none; local producer delivery under main-only policy",
+    "production_touched":  false,
+    "tests":  [
+                  {
+                      "command":  "CARGO_BUILD_JOBS=2 RUST_TEST_THREADS=2 cargo test --offline --manifest-path rust/Cargo.toml -p wa-host resources::tests -- --nocapture",
+                      "exit":  0,
+                      "passed":  4,
+                      "skipped":  0,
+                      "log":  "evidence/unit.log"
+                  },
+                  {
+                      "command":  "CARGO_BUILD_JOBS=2 cargo build --offline --manifest-path rust/Cargo.toml -p wa-host",
+                      "exit":  0,
+                      "log":  "evidence/build.log"
+                  },
+                  {
+                      "command":  "node scripts/test-native-target-resource.cjs C:/Users/Victor/AppData/Local/Temp/wa-native-target-cc4160-build/debug/wa.exe",
+                      "exit":  0,
+                      "checks":  29,
+                      "skipped":  0,
+                      "log":  "evidence/native.log",
+                      "receipt":  "evidence/native-report.json"
+                  },
+                  {
+                      "command":  "node scripts/test-resource-claims.cjs C:/Users/Victor/AppData/Local/Temp/wa-native-target-cc4160-build/debug/wa.exe",
+                      "exit":  0,
+                      "checks":  47,
+                      "skipped":  0,
+                      "log":  "evidence/regression.log"
+                  }
+              ],
+    "graph":  {
+                  "verdict":  "incomplete",
+                  "lead_count":  0,
+                  "gap_count":  60,
+                  "relevant_unresolved":  1,
+                  "assessment":  "No unread resolved caller leads; the graph still reports 60 coverage gaps with a truncated list (returned examples are Lua top-level lines) and one Lua string gsub call, which was manually inspected; native adapter, registration, Lua resources, and two-process suite inspected and executed as applicable",
+                  "raw":  "evidence/graph-audit.json"
+              },
+    "risks":  [
+                  "Cooperative trusted Lua/Node and same resource home; arbitrary SQL/Git/OS writers are outside the boundary",
+                  "Existing historical unknown-scope or missing-identity claims remain blockers; no production admission claimed",
+                  "Creation observation supports Windows and Linux; other platforms refuse held-target acquisition",
+                  "Focused tests do not replace the independent review and combined full gate"
+              ],
+    "files":  [
+                  {
+                      "sha256":  "80e2ef56c9becbf44fa3d0efd90eb8178638137139d5cc9d3a6358ecf05ad817",
+                      "path":  "rust/wa-host/src/resources.rs"
+                  },
+                  {
+                      "sha256":  "150ede9236b307602353355b61adf197b3b1e7ad247a990f7f6a4ed8560c26b0",
+                      "path":  "scripts/test-native-target-resource.cjs"
+                  },
+                  {
+                      "sha256":  "35fc9422c0e6f55d6014034c6867e1091e9d199c2cf3203beb35b40b38dbcd52",
+                      "path":  "scripts/test-native-target-resource.lua"
+                  },
+                  {
+                      "sha256":  "7ba896498d70eabc64dce953c9884a876ba339e2032952f9873e9772574fa6c2",
+                      "path":  "docs/HOST.md"
+                  },
+                  {
+                      "sha256":  "958e23eb3eb11d7e9a19872e9c73480634b13fcab704ca633f3fcd367b6b5ec1",
+                      "path":  "docs/NATIVE-TARGET-RESOURCE.md"
+                  }
+              ],
+    "evidence":  [
+                     {
+                         "sha256":  "9ba45702f37168dcdf5b2d7eeac14e14f1729c0e2dea92ee199f28cc9723abe6",
+                         "path":  "evidence/build.log"
+                     },
+                     {
+                         "sha256":  "137685a16a43cc5a173eddfde1ce93bf0ce1e4b545c5c4e9c863ba3929a3b0bc",
+                         "path":  "evidence/external-effect.json"
+                     },
+                     {
+                         "sha256":  "3eb3e1d17f96d10223e58b73dccafa1e938de0c80ccb3682a0f4f2898ccf658f",
+                         "path":  "evidence/graph-audit.json"
+                     },
+                     {
+                         "sha256":  "9c514b0d91853ec436b028e040f75835003dbd18a180c32d3d0d20d76c54fb97",
+                         "path":  "evidence/native-report.json"
+                     },
+                     {
+                         "sha256":  "d757767569761c6c3b96edbb4f08dec08ff39b78065b4a48dc7d32d86b7487ee",
+                         "path":  "evidence/native.log"
+                     },
+                     {
+                         "sha256":  "00277bfc3ee1dcda54c4462e16b48624302484e8be9be1bd612716ddb6d333b1",
+                         "path":  "evidence/regression.log"
+                     },
+                     {
+                         "sha256":  "8fb9f0d155eb501460a90693b1e22e951a2cf673837614a738e784ad3799035b",
+                         "path":  "evidence/unit.log"
+                     }
+                 ],
+    "log_normalization":  "Logs store LF and one final newline; substantive stdout/stderr preserved."
+}

@@ -427,6 +427,15 @@ retains them. `list` returns durable ownership. `reconcile` requires the exact
 OS-held SQLite lease proves process liveness; elapsed time is never that proof.
 Every operation returns a JSON value, including visible storage/refusal errors.
 
+The additive held-target contract is specified in
+[NATIVE-TARGET-RESOURCE.md](NATIVE-TARGET-RESOURCE.md). `claim` also returns the
+actual granted `claims`; `list` retains its existing `claims` fields and adds
+`schema:1`, `kind:"resource-inventory"`, `complete`, `identities_complete`, and per-claim typed identity
+and OS-lease observations. Missing identity is JSON `null`, never fabricated.
+No historical claim is backfilled or cleared. `target_inspect`, `target_hold`,
+`target_check` and `target_release` bind to the current thread's existing
+successful session claim, not a second operation manager boot or supplied owner.
+
 `host.monotonic_ms()` measures elapsed time within a process. Use `host.now()` only
 for cross-process event timestamps. `host.runtime_info()` returns version, OS,
 architecture, PID, a process-unique `boot_id`, and the SHA-256 of the executable
