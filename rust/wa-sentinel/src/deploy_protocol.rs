@@ -3,6 +3,8 @@ use super::*;
 
 pub(crate) fn validate(request: &Value, id: &str) -> Result<()> {
     if request.get("expected_sha").is_none() { return Ok(()); }
+    bail!("protocol_quarantined: exact-source deploy disabled after independent refusal; no effect admitted");
+    #[allow(unreachable_code)]
     let sha = request["expected_sha"].as_str().unwrap_or("");
     if request["verb"] != "deploy" || sha.len() != 40 || !sha.bytes().all(|b| b.is_ascii_hexdigit()) {
         bail!("expected_sha requires deploy and a full 40-character source SHA");

@@ -6,7 +6,8 @@ fn busy_protocol_ack_is_persistent_but_never_completion() {
     let previous=std::env::var_os("WASM_AGENT_HOME");
     std::env::set_var("WASM_AGENT_HOME",&home);
     let request=json!({"verb":"deploy","id":"private-1","expected_sha":"a".repeat(40),"queued_at":now_epoch(),"session":"parent","prompt":"verify"});
-    deploy_protocol::validate(&request,"private-1").unwrap();
+    assert!(deploy_protocol::validate(&request,"private-1").unwrap_err().to_string().contains("protocol_quarantined"));
+    assert!(perform(&request).unwrap_err().to_string().contains("protocol_quarantined"));
     let started=Instant::now();
     deploy_protocol::record(&request,"private-1","accepted","not complete").unwrap();
     deploy_protocol::record(&request,"private-1","held","busy").unwrap();

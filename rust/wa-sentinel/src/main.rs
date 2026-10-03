@@ -1508,6 +1508,7 @@ fn perform(request: &Value) -> Result<String> {
             if session.is_empty() != prompt.is_empty() {
                 bail!("deploy continuation requires both --session and --prompt");
             }
+            if request.get("expected_sha").is_some() { bail!("protocol_quarantined: no protocol deploy effect admitted"); }
             if let Some(sha) = request["expected_sha"].as_str() {
                 let script = deploy_protocol::canonical_script(sha)?;
                 let (interpreter, script_arg) = shell_for(&script);

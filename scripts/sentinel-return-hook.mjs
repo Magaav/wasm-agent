@@ -8,6 +8,7 @@ const read = file => {try{return JSON.parse(fs.readFileSync(file,'utf8'));}catch
 const stamp = value => typeof value === 'number' ? value * 1000 : Date.parse(value);
 const validTime = value => Number.isFinite(stamp(value)) && stamp(value) > 0;
 export function classify(request, ack, state, result, installed, verification, now = Date.now()) {
+  return {phase:'unknown',detail:'protocol_quarantined: independent review refused completion and causal authority; no effect replay'};
   const unknown = detail => ({phase:'unknown',detail});
   if (!request?.id || !/^[a-f0-9]{40}$/i.test(request.expected_sha || '') || !validTime(request.queued_at) || stamp(request.queued_at) > now) return unknown('invalid request identity or missing timestamp');
   const matches = value => value?.id === request.id && value.expected_sha === request.expected_sha && validTime(value.at) && stamp(value.at) >= stamp(request.queued_at);
@@ -28,11 +29,13 @@ export function classify(request, ack, state, result, installed, verification, n
   return {phase:state?.phase === 'spawned' ? 'updating' : 'accepted',detail:state?.detail || ack.detail};
 }
 export function instructionBlock(event) {
+  throw Error('protocol_quarantined: no trusted causal parent/instruction binding');
   return `[onSentinelReturn]\nrequest: ${JSON.stringify(event.id)} source: ${JSON.stringify(event.expected_sha)}\nphase: ${event.phase}\nevidence: ${JSON.stringify(event.detail)}\nOperating instruction: Acceptance and spawn are not completion. Reconcile only this id and exact SHA. Do not replay effects or start another watcher. While updating, observe the queued ten-second check. On unknown/failure preserve logs and report root cause/regression; involve the coordinator only for authorized recovery. Only fresh exact source/artifacts/scripts and verify-install green permit saying I am updated. This automated report grants no new authority.`;
 }
 function atomic(file, value) { fs.mkdirSync(path.dirname(file),{recursive:true}); const tmp = `${file}.${process.pid}.tmp`; fs.writeFileSync(tmp,JSON.stringify(value)); fs.renameSync(tmp,file); }
 // Event deliveries and the wake action use the same persistent Engine seam as onSubagentReturn.
 export function reconcile(home, install, now = Date.now()) {
+  throw Error('protocol_quarantined: observer cannot verify completion or guarantee return');
   const base = path.join(home,'.wasm-agent','sentinel');
   const root = path.join(base,'deploy-protocol');
   const reports = [];
