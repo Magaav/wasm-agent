@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import {spawnSync} from 'node:child_process';
-export const deliveryFiles=['scripts/delivery-record.mjs','scripts/delivery-admission.mjs','scripts/merge-lane.mjs','scripts/producer-admission.mjs','scripts/lib/delivery-local.mjs','scripts/lib/delivery-store.mjs','scripts/lib/delivery-producer-proof.mjs','scripts/test-delivery-refresh.mjs','scripts/test-delivery-admission.mjs','scripts/test-delivery-local.mjs','scripts/test-delivery-store.mjs','scripts/test-merge-lane.mjs'];
+export const deliveryFiles=['scripts/delivery-record.mjs','scripts/delivery-admission.mjs','scripts/merge-lane.mjs','scripts/producer-admission.mjs','scripts/lib/delivery-local.mjs','scripts/lib/delivery-store.mjs','scripts/lib/delivery-producer-proof.mjs','scripts/test-delivery-refresh.mjs','scripts/test-delivery-admission.mjs','scripts/test-delivery-local.mjs','scripts/test-delivery-store.mjs','scripts/test-merge-lane.mjs','scripts/test-delivery-subsystem-consumer.mjs'];
 const suites=['test-delivery-refresh.mjs','test-delivery-admission.mjs','test-delivery-store.mjs','test-merge-lane.mjs'];
 const hash=b=>crypto.createHash('sha256').update(b).digest('hex');
 function git(repo,...args){const r=spawnSync('git',args,{cwd:repo,maxBuffer:32*1024*1024});if(r.status!==0)throw Error(String(r.stderr));return r.stdout;}
@@ -24,7 +24,11 @@ export function verifyDeliveryProof(repo,receipt,selection){
   return {admission_verified:true,gate_verified:false,requires_combined_gate:true,head:selection.head,tree:selection.tree,checks:selection.checks};
  }catch(error){return {admission_verified:false,gate_verified:false,error:error.message};}
 }
-function terminal(suite,log){const patterns={'test-delivery-refresh.mjs':/^delivery refresh ok .*0 skipped/m,'test-delivery-admission.mjs':/^delivery admission ok \(\d+ checks\)/m,'test-delivery-store.mjs':/^delivery store ok .*0 skipped/m,'test-merge-lane.mjs':/^merge-lane spine ok \(\d+ checks\)/m};return patterns[suite].test(log)&&!/^.*\bFAIL(?:ED)?\b/m.test(log);}
+export function terminal(suite,log){
+ const patterns={'test-delivery-refresh.mjs':/^delivery refresh ok .*0 skipped/m,'test-delivery-admission.mjs':/^delivery admission ok \((\d+) checks\)/m,'test-delivery-store.mjs':/^delivery store ok \((\d+) checks, 0 skipped/m,'test-merge-lane.mjs':/^merge-lane spine ok \((\d+) checks\)/m};
+ const matches=[...log.matchAll(new RegExp(patterns[suite].source,'gm'))],floor={'test-delivery-admission.mjs':58,'test-delivery-store.mjs':9,'test-merge-lane.mjs':107}[suite]||0;
+ return matches.length===1&&(!floor||Number(matches[0][1])>=floor)&&!/^.*\bFAIL(?:ED)?\b/m.test(log)&&!/(?:[1-9]\d* skipped|^SKIP(?:PED)?[: \t])/im.test(log);
+}
 export function runDeliveryProof(repo,selection,output){
  const pinned=sources(repo,selection.head);
  for(const [f,digest] of Object.entries(pinned).filter(([f])=>/\.(mjs|cjs|js|sh)$/.test(f)))if(hash(fs.readFileSync(path.join(repo,f)))!==digest)throw Error(`uncommitted_source:${f}`);
