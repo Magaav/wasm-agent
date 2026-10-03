@@ -27,6 +27,10 @@ fn busy_protocol_ack_is_persistent_but_never_completion() {
         if removed != request { assert!(deploy_protocol::intake(&removed,"private-1").is_err()); }
     }
     for value in [Value::Null,json!(42),json!(false)] {let mut changed=request.clone();changed["expected_sha"]=value;assert!(deploy_protocol::intake(&changed,"private-1").is_err());}
+    for value in [Value::Null,json!(42),json!(false),json!({}),json!([])] {
+        let malformed=json!({"id":"unreserved","verb":"deploy","expected_sha":value,"session":"parent"});
+        assert!(perform(&malformed).unwrap_err().to_string().contains("full 40-character"));
+    }
     let mut missing=request.clone();missing.as_object_mut().unwrap().remove("queued_at");
     assert!(deploy_protocol::validate(&missing,"private-1").is_err());
     match previous {Some(v)=>std::env::set_var("WASM_AGENT_HOME",v),None=>std::env::remove_var("WASM_AGENT_HOME")};

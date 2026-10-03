@@ -1479,6 +1479,9 @@ fn verb_recover(reason:&str)->Result<String> {
 }
 
 fn perform(request: &Value) -> Result<String> {
+    if request.get("expected_sha").is_some() {
+        deploy_protocol::validate(request,request["id"].as_str().unwrap_or(""))?;
+    }
     let verb = request.get("verb").and_then(Value::as_str).unwrap_or("");
     let reason = request.get("reason").and_then(Value::as_str).unwrap_or("(no reason given)");
     match verb {
