@@ -182,6 +182,14 @@ run_proof_fixture() {
   tail -4 "$log"
 }
 
+# BEGIN wave-owner safety proofs (required, not coverage discovery)
+run_proof_fixture waveOwner 53 node scripts/test-wave-owner-refusal.mjs
+run_proof_fixture waveOwnerMutations 3 node scripts/test-wave-owner-mutations.mjs
+run_proof_fixture waveCorners 24 node scripts/test-wave-activity-corners.mjs
+run_proof_fixture waveDerived 55 node scripts/test-wave-derived-state.mjs
+run_proof_fixture waveActivityFix 62 node scripts/test-wave-activity-fix.mjs
+# END wave-owner safety proofs
+
 gate_phase_begin build
 gate_run cargo build --release --offline --manifest-path rust/Cargo.toml >/dev/null
 gate_run node scripts/test-install-isolation.mjs
@@ -1826,6 +1834,7 @@ gate_run node scripts/test-auth-sessions.cjs "$BIN"
 gate_run node scripts/test-fixture-verdict.cjs
 gate_run node scripts/test-suite-verdict.cjs
 gate_run node scripts/test-proof-verdict.cjs
+gate_run node scripts/test-wave-gate-wiring.mjs
 
 # The image-attachment tests, plus the helper tests that came with them. They were
 # written, they passed when run by hand, and nothing ran them - which is how a test
