@@ -113,7 +113,7 @@ server.listen(0, "127.0.0.1", () => { console.log("PORT=" + server.address().por
 `;
 
 function run(command, args, env = {}) {
-  const result = spawnSync(command, args, { encoding: "utf8", timeout: 120000, windowsHide: true,
+  const result = require('./lib/fixture-operation.cjs')(root,command, args, { encoding: "utf8", timeout: 120000, windowsHide: true,
     env: { ...process.env, ...env } });
   fs.writeFileSync(path.join(root,`run-${Date.now()}-${Math.random()}.json`),JSON.stringify(result));
   assert(!result.error && result.status!==null,'uncertain child: preserve evidence');

@@ -71,7 +71,7 @@ function setStore(messages) {
     newest: Math.max(...messages.map((m) => m.sent_at)) }));
 }
 function pass(extra = {}) {
-  const run = spawnSync(wa, ["--db", db], { encoding: "utf8", timeout: 220000, windowsHide: true,
+  const run = require('./lib/fixture-operation.cjs')(root,wa, ["--db", db], { encoding: "utf8", timeout: 220000, windowsHide: true,
     env: { ...process.env, WASM_AGENT_HOME: root, WASM_AGENT_LUA_ROOT: repo,
       WASM_AGENT_PLUGINS: plugins, WA_SCRIPT: path.join(scripts, "whatsapp-transcribe.lua"),
       WA_TEST_STORE: store, WA_TEST_SEND_LOG: sends, WA_WHATSAPP_NODE: process.execPath,
