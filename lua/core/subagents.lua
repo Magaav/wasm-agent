@@ -677,7 +677,11 @@ function M.control(args, ctx)
   if action == "session" or action == "message" or action=='steer' or action=='steering_status' then
     local receipt = json.decode(host.subagent("status", json.encode({
       owner_user = ctx.user_id, id = tostring(args.id or args.subagent_id or "") })))
-    if not receipt or receipt.error then return receipt or { error = "subagent_runtime_error" } end
+    -- An owned task view carries its terminal failure in `error`. It is still
+    -- inspectable/continuable; native lookup refusals have no task/session identity.
+    if not receipt or (receipt.error and not (receipt.subagent_id and receipt.session_id)) then
+      return receipt or { error = "subagent_runtime_error" }
+    end
     if action=='steer' or action=='steering_status' then
       local request={}
       for k,v in pairs(args) do request[k]=v end

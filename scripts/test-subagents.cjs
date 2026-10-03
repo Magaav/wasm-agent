@@ -69,6 +69,7 @@ function check(value, label) { assert.ok(value, label); checks++; }
           }
         };
         if (isChild) {
+          if (text.includes('RECOVER-FAILED-CHILD')) { replyFinal('child-answer-42'); return; }
           if (text.includes('RUNAWAY-CHILD')) {
             sendToolCall({ index: 0, id: 'runaway-' + messages.length, type: 'function', function: { name: 'ls', arguments: JSON.stringify({ path: '.' }) } }, true);
             return;
@@ -184,6 +185,7 @@ function check(value, label) { assert.ok(value, label); checks++; }
     const out = fs.readFileSync(path.join(root, 'wa.log'), 'utf8');
     check(code === 0, 'the integration script must exit 0, got ' + code + '\n' + out);
     check(out.includes('SUBAGENTS_INTEGRATION_OK'), 'the script must print its verdict\n' + out);
+    check(out.includes('MARK ok-failed-child-recovery'), 'failed-child inspection, ownership refusal and continuation must execute\n' + out);
     for (const marker of ['ok-success', 'ok-idempotency', 'ok-isolation', 'ok-cancel', 'ok-overflow', 'ok-result', 'ok-tool-denial', 'ok-restart-unknown', 'ok-parent-run', 'ok-silent-cancel', 'ok-delayed-ttft', 'ok-coding-workspaces', 'ok-budget-zero-calls', 'ok-missing-usage-bounded']) {
       check(out.includes('MARK ' + marker), 'missing marker ' + marker + '\n' + out);
     }

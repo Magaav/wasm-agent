@@ -51,6 +51,19 @@ assert(repeated_runaway.state == "failed" and tostring(repeated_runaway.error):f
   "failed outcome remains durable on retrieval")
 print("MARK ok-runaway-guard")
 
+-- A terminal failure is task data, not a refusal to inspect or continue the owned child.
+local failed_view = control({action="session",id=runaway.subagent_id},ctx("alice"))
+assert(not failed_view.error, "failed child remains inspectable: " .. json.encode(failed_view))
+local forbidden_follow = control({action="message",id=runaway.subagent_id,text="basic task",idempotency_key="failed-forbidden"},ctx("bob"))
+assert(forbidden_follow.error=="forbidden_subagent", "failed-child recovery preserves ownership")
+local failed_follow = control({action="message",id=runaway.subagent_id,text="RECOVER-FAILED-CHILD",idempotency_key="failed-follow"},ctx("alice"))
+assert(not failed_follow.error and failed_follow.subagent_id~=runaway.subagent_id,
+  "failed child can be continued directly: " .. json.encode(failed_follow))
+local failed_follow_result = control({action="await",id=failed_follow.subagent_id,wait_ms=60000},ctx("alice"))
+assert(failed_follow_result.state=="completed" and failed_follow_result.result.reply=="child-answer-42",
+  "real failed-child continuation settles: " .. json.encode(failed_follow_result))
+print("MARK ok-failed-child-recovery")
+
 -- Coding profiles get a durable isolated git worktree before their child is admitted.
 local paths=dofile("lua/core/paths.lua")
 local profile_path=paths.config() .. "/subagent-profiles/coding-workspace.json"
