@@ -34,6 +34,14 @@ async function gone(pid){await until(()=>{try{process.kill(pid,0);return false;}
  const proof=await import(pathToFileURL(path.join(source,'scripts/sentinel-install-proof.mjs')).href);
  const verifyActual=(...a)=>proof.verifyActual(...a,privateEnv);
  assert.equal(proof.sourceIdentity(source,packet.head).tree,packet.tree);
+ if(args.includes('--build-cache')) {
+  const cache=fs.realpathSync(args[args.indexOf('--build-cache')+1]);
+  assert(cache.startsWith(fs.realpathSync(os.tmpdir())+path.sep)&&path.basename(cache)==='source','explicit prior private source cache only');
+  const prior=path.dirname(cache);
+  for(const name of ['source-host-build','source-sentinel-build'])assert.equal(JSON.parse(fs.readFileSync(path.join(prior,name+'.receipt.json'))).code,0,'prior actual source build required');
+  for(const relative of ['rust/target','rust/wa-sentinel/target'])fs.cpSync(path.join(cache,relative),path.join(source,relative),{recursive:true,preserveTimestamps:true,errorOnExist:true,force:false});
+  save('build-cache.json',{source:cache,read_only:true,cargo_builds_still_required:true,installation_proof_reused:false});
+ }
  await run('cargo',['build','--release','--offline','--manifest-path','rust/Cargo.toml','-p','wa-host'],'source-host-build');
  await run('cargo',['build','--release','--offline','--manifest-path','rust/wa-sentinel/Cargo.toml'],'source-sentinel-build');
  fs.copyFileSync(binary,path.join(install,'wa.exe'));fs.copyFileSync(sentinel,path.join(install,'wa-sentinel.exe'));
