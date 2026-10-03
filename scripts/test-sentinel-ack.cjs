@@ -12,6 +12,34 @@ try {
  if(expected!=='held'){const hook=path.resolve(__dirname,'../jobs/on-sentinel-return.json');assert.equal((await run(['job','put',hook])).code,0);assert.equal((await run(['job','enable','onSentinelReturn'])).code,0);}
  const box=path.join(home,'.wasm-agent/sentinel/deploy-protocol');
  const fixture=id=>{const dir=path.join(box,id);fs.mkdirSync(dir,{recursive:true});const intent={id,verb:'deploy',expected_sha:'a'.repeat(40),session:'parent',owner:'owner',queued_at:Math.floor(Date.now()/1000)-20};write(dir,'intent',intent);return {dir,intent};};
+ if(expected.startsWith('binding')) {
+  const results=[];
+  const cases=[['wrong-id',{id:'wrong'}],['wrong-source',{expected_sha:'b'.repeat(40)}],['wrong-parent',{parent:'wrong'}],['negative',{next_at:-1}],['fraction',{next_at:1.5}],['overflow',{next_at:1e30}],['string',{next_at:'unsupported'}],['missing-next',{next_at:undefined}],['early-due',{next_at:0}],['off-grid',{offset:11}],['ack-hash',{ackChange:true}],['revision',{ackRevision:true}],['missing-check',{remove:true}],['corrupt-check',{corrupt:true}],['null-check',{nullCheck:true}],['future-check',{at:Math.floor(Date.now()/1000)+100}],['bad-due',{due_at:0,coalesced:0}],['valid',{}]];
+  cases.splice(cases.length-1,0,['saved-revision',{revision:2}],['later-grid',{offset:20}],['due-fraction',{due_at:1.5,coalesced:0}],['valid-coalesced',{ackAge:15}]);
+  for(const [name,change] of cases){
+   assert.equal((await run(['job','disable','onSentinelReturn'])).code,0);assert.equal((await run(['job','enable','onSentinelReturn'])).code,0);
+   const f=fixture('bound-'+name),at=Math.floor(Date.now()/1000)-(change.ackAge||0),ack={schema:1,id:f.intent.id,expected_sha:f.intent.expected_sha,session:'parent',owner:'owner',queued_at:f.intent.queued_at,phase:'held',detail:'private current ack',at};write(f.dir,'ack',ack);
+   assert.equal((await run()).code,0);const checkPath=path.join(f.dir,'check.json');let check=JSON.parse(fs.readFileSync(checkPath));
+   const {offset,ackChange,ackRevision,remove,corrupt,nullCheck,ackAge,...fields}=change;check={...check,...fields};if(offset)check.next_at=at+offset;if(ackChange)check.ack={...ack,detail:'wrong saved ack hash'};if(ackRevision)write(f.dir,'ack',{...ack,detail:'revised current ack'});
+   if(remove)fs.unlinkSync(checkPath);else if(corrupt)fs.writeFileSync(checkPath,'{');else write(f.dir,'check',nullCheck?null:check);
+   const before=fs.existsSync(checkPath)?fs.readFileSync(checkPath):null;
+   const eventFile=path.join(home,'event.json');fs.writeFileSync(eventFile,JSON.stringify({id:ack.id,event_key:ack.id+'-0'}));
+   const composed=await run(['protocol','compose',eventFile]);const observed=await run();results.push({name,composed,observed});write(home,'binding-results',results);
+   if(expected==='binding-prepatch'){if(['wrong-id','string'].includes(name)){assert.equal(composed.code,0);assert.equal(observed.code,1);assert.match(observed.stderr,/check_ack_binding_unknown/);}}
+   else if(name.startsWith('valid')){assert.equal(composed.code,0);assert.equal(observed.code,0);assert.match(composed.stdout,/phase "held"/);}
+   else {assert.equal(composed.code,1,name+' compose must refuse');assert.equal(composed.stdout,'');assert.match(composed.stderr,/check_ack_binding/);assert.equal(observed.code,1,name+' observe');if(remove)assert(!fs.existsSync(checkPath),'established missing check cannot be reset');else assert.deepEqual(fs.readFileSync(checkPath),before,'invalid check cannot be rewritten');}
+   assert(!fs.readdirSync(f.dir).some(n=>/^delivery-/.test(n)),'no wake submission');fs.renameSync(f.dir,path.join(home,f.intent.id+'-evidence'));
+  }
+  let delayedInitial=0;
+  if(expected!=='binding-prepatch'){
+   await run(['job','disable','onSentinelReturn']);await run(['job','enable','onSentinelReturn']);
+   const f=fixture('initial-delayed'),first=await run();assert.equal(first.code,1);assert.match(first.stderr,/ack_missing/);
+   const journalPath=path.join(f.dir,'returns/initial-delayed-0.json'),original=fs.readFileSync(journalPath);assert.equal(JSON.parse(original).phase,'unknown');assert(!fs.existsSync(path.join(f.dir,'check.json')));
+   const at=Math.floor(Date.now()/1000),ack={schema:1,id:f.intent.id,expected_sha:f.intent.expected_sha,session:'parent',owner:'owner',queued_at:f.intent.queued_at,phase:'held',detail:'genuine later private ack',at};write(f.dir,'ack',ack);assert.equal((await run()).code,0);
+   assert.deepEqual(fs.readFileSync(journalPath),original,'first missing-ack UNKNOWN evidence preserved');assert.equal(JSON.parse(fs.readFileSync(path.join(f.dir,'check.json'))).next_at,at+10);assert(!fs.readdirSync(f.dir).some(n=>/^check-\d+\.json$/.test(n)));delayedInitial=1;
+  }
+  assert.equal(posts,0);console.log(JSON.stringify({ok:true,mode:expected,checks:cases.length+delayedInitial,skipped:0,posts,home}));return;
+ }
  const missing=fixture('missing-ack');await run();await run();let journal=JSON.parse(fs.readFileSync(path.join(missing.dir,'returns/missing-ack-0.json')));assert.equal(journal.phase,expected);assert(!fs.existsSync(path.join(missing.dir,'ack.json')));assert.equal(posts,0);
  if(expected==='held'){console.log('prepatch missing ack reproduced: held; 2 checks, 0 skipped');return;}
  assert(!fs.existsSync(path.join(missing.dir,'check.json')));

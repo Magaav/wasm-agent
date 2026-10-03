@@ -66,6 +66,15 @@ Missing, corrupt, mismatched or unsupported acknowledgements are unknown: they
 create no check, wake or effect authority. Check records retain the exact ack;
 changed acknowledgements and legacy checks without that binding require explicit
 reconciliation, with no fabricated queue-time fallback or automatic replay.
+Observation, return resolution and instruction composition use the same native
+current-check validator: exact request/source/parent and saved ack, supported
+integer observation/deadline timestamps, ten-second cadence and attributable
+due/coalescing revision. Missing established checks, corrupt or unsupported
+checks revoke pending return authority and are never silently reset. Only an
+initial observation may create a check after a genuine ack; earlier missing-ack
+UNKNOWN evidence can remain intact while that first clock starts. Composition
+requires the current check and cannot turn an invalid check's held journal into
+an instruction. This does not add effect or replay authority.
 Busy parents keep one pending event; due observations coalesce on disk rather
 than spawning extra wakes. Revision cancellation before submission can emit the
 same immutable key against the new revision. Before HTTP submission the watcher
