@@ -74,6 +74,7 @@ pub struct Process {
     auxiliary_cleanup: Vec<String>,
 }
 impl Process {
+    pub fn owned_id(&self)->Option<u32>{let id=unsafe{GetProcessId(self.process.0)};if id==0{None}else{Some(id)}}
     pub fn spawn(spec: &Spec) -> io::Result<Self> {
         if spec.program.contains('\0')
             || spec.args.iter().any(|a| a.contains('\0'))

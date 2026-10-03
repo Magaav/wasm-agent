@@ -436,6 +436,16 @@ No historical claim is backfilled or cleared. `target_inspect`, `target_hold`,
 `target_check` and `target_release` bind to the current thread's existing
 successful session claim, not a second operation manager boot or supplied owner.
 
+`current_executor_observe` is a separate read-only observation of this thread's
+successful session claim and actual native creation identity. Its only optional
+arguments are `child_process_id` and `operation_id`, selectors whose live direct-parent relationship
+and creation generations are observed by the OS and tied to the exact owned
+in-memory launch and current run. It validates the retained
+current owner/boot/run/claim generation; supplied owner or receipt fields refuse.
+It writes no target claim/history and always returns `global_identity_safety:false`,
+`production_registry_admission:false`, and `effect_authorized:false`. It cannot
+resolve a production legacy inventory or authorize an effect by itself.
+
 `host.monotonic_ms()` measures elapsed time within a process. Use `host.now()` only
 for cross-process event timestamps. `host.runtime_info()` returns version, OS,
 architecture, PID, a process-unique `boot_id`, and the SHA-256 of the executable

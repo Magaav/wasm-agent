@@ -339,6 +339,41 @@ impl Store {
 
     fn control(&self, action: &str, args: &Value) -> Result<Value> {
         let mut state = self.state.lock().map_err(err)?;
+        if action == "current_executor_observe" {
+            // The shared Lua encoder represents an empty table as []; both
+            // empty encodings mean no arguments, never caller identity.
+            let empty=serde_json::Map::new();
+            let fields=if args.as_array().is_some_and(|items|items.is_empty()){&empty}
+                else{args.as_object().ok_or("current_executor_arguments_required")?};
+            if fields.keys().any(|key| !matches!(key.as_str(),"child_process_id"|"operation_id")) {
+                return Err("current_executor_identity_arguments_forbidden".into());
+            }
+            if args.get("operation_id").is_some()!=args.get("child_process_id").is_some(){
+                return Err("current_executor_partial_child_query".into());
+            }
+            // Observation only: the successful session claim on THIS native thread
+            // is authority for its context, never for unknown historical effects.
+            let owner = self.owner(&state)?;
+            let identity:String=state.db.query_row("SELECT identity FROM claim_identity WHERE key=? AND boot=?",
+                params![format!("session:{}",field(&owner,"session")?),self.boot],|r|r.get(0)).map_err(err)?;
+            let identity:Value=serde_json::from_str(&identity).map_err(err)?;
+            if identity["kind"]!="session" || identity["process_id"]!=std::process::id() || identity["creation_stamp"]!=creation_stamp()? {
+                return Err("current_executor_generation_changed".into());
+            }
+            let child = if let Some(value) = args.get("child_process_id") {
+                let pid = value.as_u64().and_then(|v| u32::try_from(v).ok())
+                    .ok_or("child_process_id_required")?;
+                let operation_id=field(args,"operation_id")?;
+                let operation=crate::operations::manager().observe_owned_child(operation_id,pid,field(&owner,"run")?).map_err(err)?;
+                let mut child=child_observation(pid)?;
+                if child["creation_stamp"]!=operation["child"]["creation_stamp"] {return Err("current_executor_operation_generation_changed".into());}
+                child["operation_id"]=json!(operation_id);Some(child)
+            } else { None };
+            return Ok(json!({"ok":true,"schema":1,"kind":"current-native-executor-observation","read_only":true,
+                "context":owner,"process_id":std::process::id(),"creation_stamp":creation_stamp()?,
+                "resource_root":std::fs::canonicalize(&self.root).map_err(err)?,"child":child,
+                "global_identity_safety":false,"production_registry_admission":false,"effect_authorized":false}));
+        }
         if action.starts_with("target_") {
             return self.target_control(&mut state, action, args);
         }
@@ -575,6 +610,9 @@ pub fn control(action: &str, args: &Value) -> Result<Value> {
         return registered_inspect(args);
     }
     static STORE: OnceLock<Result<Store>> = OnceLock::new();
+    if action=="current_executor_observe" {
+        return STORE.get().ok_or("resource_context_required")?.as_ref().map_err(Clone::clone)?.control(action,args);
+    }
     let store = STORE.get_or_init(|| {
         Store::open(&PathBuf::from(crate::resolve_home()).join(".wasm-agent/resources"))
     });
@@ -619,6 +657,25 @@ fn registered_inspect(args: &Value) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn current_executor_is_read_only_and_requires_current_generation() {
+        let root=std::env::temp_dir().join(format!("wa-current-executor-{}",crate::host::new_uuid()));
+        let store=Store::open(&root).unwrap();OWNER.with(|slot|*slot.borrow_mut()=None);
+        assert_eq!(store.control("current_executor_observe",&json!({})).unwrap_err(),"resource_context_required");
+        let session=crate::host::new_uuid();let run=crate::host::new_uuid();
+        store.control("claim",&json!({"principal":"private-executor","session":session,"run":run,"keys":[format!("session:{session}")]})).unwrap();
+        let before=store.control("list",&json!({})).unwrap();
+        let observed=store.control("current_executor_observe",&json!([])).unwrap();
+        assert_eq!(observed["process_id"],std::process::id());assert_eq!(observed["creation_stamp"],creation_stamp().unwrap());
+        assert_eq!(observed["production_registry_admission"],false);assert_eq!(observed["global_identity_safety"],false);
+        assert_eq!(store.control("list",&json!({})).unwrap(),before);
+        assert!(store.control("current_executor_observe",&json!({"principal":"copied"})).is_err());
+        assert!(store.control("current_executor_observe",&json!({"operation_id":"copied"})).is_err());
+        assert!(store.control("current_executor_observe",&json!({"operation_id":"copied","child_process_id":std::process::id()})).is_err());
+        store.control("uncertain",&json!({"principal":"private-executor","run":run})).unwrap();
+        assert_eq!(store.control("current_executor_observe",&json!({})).unwrap_err(),"resource_owner_uncertain_or_inactive");
+        OWNER.with(|slot|*slot.borrow_mut()=None);drop(store);std::fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn registered_observation_reads_unknown_claims_without_backfilling() {
         let root = std::env::temp_dir().join(format!("wa-resource-observe-{}",crate::host::new_uuid()));

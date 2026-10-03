@@ -17,6 +17,7 @@ pub struct Process {
 }
 #[cfg(unix)]
 impl Process {
+    pub fn owned_id(&self)->Option<u32>{Some(self.child.id())}
     pub fn spawn(spec: &Spec) -> io::Result<Self> {
         use std::os::unix::{io::AsRawFd, process::CommandExt};
         use std::process::{Command, Stdio};
