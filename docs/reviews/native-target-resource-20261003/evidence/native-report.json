@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "kind": "private-native-target-capability-tests",
+  "binary": "C:\\Users\\Victor\\AppData\\Local\\Temp\\wa-native-target-cc4160-build\\debug\\wa.exe",
+  "binary_sha256": "a954acbf31faf389997620a2b3494e34b57de51ff33799ab008b1b714f2a50d8",
+  "source_sha256": "150ede9236b307602353355b61adf197b3b1e7ad247a990f7f6a4ed8560c26b0",
+  "resources_sha256": "80e2ef56c9becbf44fa3d0efd90eb8178638137139d5cc9d3a6358ecf05ad817",
+  "lua_source_sha256": "35fc9422c0e6f55d6014034c6867e1091e9d199c2cf3203beb35b40b38dbcd52",
+  "checks": 29,
+  "skipped": 0,
+  "positive": "C:\\Users\\Victor\\AppData\\Local\\Temp\\wa-native-target-evidence-GQsP5v\\positive",
+  "crash": "C:\\Users\\Victor\\AppData\\Local\\Temp\\wa-native-target-evidence-GQsP5v\\crash",
+  "production_touched": false,
+  "independent_review": "required after delivery"
+}

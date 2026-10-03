@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import {spawnSync} from 'node:child_process';
 import {evaluate} from './delivery-admission.mjs';
 import {hash} from './gate-check.mjs';
-import {plan,runFocused,verifyFocused} from './producer-admission.mjs';
+import {plan,runFocused,verifyFocused,verifyProducer,verifyReviewedFocused} from './producer-admission.mjs';
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'wa-focused-proof-'));
 function git(...args){const r=spawnSync('git',args,{cwd:root,encoding:'utf8',windowsHide:true});assert.equal(r.status,0,r.stderr);return r.stdout.trim();}
 try {
@@ -17,14 +17,14 @@ try {
   git('init','-q','--initial-branch','main');git('config','user.name','fixture');git('config','user.email','fixture@local');git('add','.');git('commit','-qm','base');git('update-ref','refs/remotes/origin/main','HEAD');git('switch','-qc','change/fixture');
   fs.appendFileSync(path.join(root,'tests','one.js'),'// narrow change\n');git('add','.');git('commit','-qm','narrow');
   assert.deepEqual(plan(root).checks,['js:one.js']);
-  const result=await runFocused(root,{output:path.join(root,'.git','checks')});assert(result.admission_verified&&!result.gate_verified&&result.requires_combined_gate);
+  const result=await runFocused(root,{output:path.join(root,'.git','checks')});assert(result.admission_verified&&!result.gate_verified&&!result.requires_combined_gate);
   const proof=JSON.parse(fs.readFileSync(result.receipt));assert(verifyFocused(root,proof).admission_verified);
   const tip=git('rev-parse','HEAD'),tree=git('rev-parse','HEAD^{tree}');
   const anchor=git('commit-tree',tree,'-p',tip,'-m','independent review\n\nAgent: codex session=reviewer');
   git('update-ref','refs/remotes/origin/review',anchor);git('update-ref','refs/remotes/origin/change/fixture',tip);
   const record={delivery:'change/fixture',branch:'change/fixture',producer:'producer',tip,tree,producer_checks:proof,
     review:{reviewer:'reviewer',commit:anchor,tip,tree,verdict:'passed',findings:[]}};
-  const admitted=evaluate({repo:root,record});assert.equal(admitted.decision,'admitted');assert(admitted.requires_combined_gate&&!admitted.producer_checks.gate_verified);
+  const admitted=evaluate({repo:root,record});assert.equal(admitted.decision,'admitted');assert(!admitted.requires_combined_gate&&!admitted.gate_verified&&!admitted.release_verified&&!admitted.producer_checks.gate_verified);
   assert.equal(evaluate({repo:root,record:{...record,producer_checks:{...proof,passed:false}}}).condition,'producer_checks_verified');
   assert(!verifyFocused(root,{...proof,kind:'full'}).admission_verified);
   assert(!verifyFocused(root,{...proof,results:[]}).admission_verified);
@@ -35,8 +35,43 @@ try {
   fs.writeFileSync(proof.results[0].log,originalLog);
   fs.appendFileSync(proof.results[0].log,'changed');assert(!verifyFocused(root,proof).admission_verified);
   fs.writeFileSync(path.join(root,'shared-runtime.rs'),'change');git('add','.');git('commit','-qm','shared runtime');
-  assert(plan(root).full_required);assert(!(await runFocused(root)).admission_verified);
+  assert(!plan(root).full_required);assert(plan(root).focused_scope_required);assert(!(await runFocused(root)).admission_verified);
   assert(!verifyFocused(root,proof).admission_verified);
+  const scope={files:plan(root).files,checks:['js:one.js'],reason:'independent reviewer approves this bounded fixture coverage of shared source'};
+  const broad=await runFocused(root,{focusedScope:scope,output:path.join(root,'.git','broad-checks')});assert(broad.admission_verified&&!broad.gate_verified&&!broad.release_verified&&!broad.requires_combined_gate);
+  const broadProof=JSON.parse(fs.readFileSync(broad.receipt)),broadTip=git('rev-parse','HEAD'),broadTree=git('rev-parse','HEAD^{tree}');
+  const broadAnchor=git('commit-tree',broadTree,'-p',broadTip,'-m',`review scoped shared source\n\nFocused-Scope-SHA256: ${hash(JSON.stringify(scope))}\n\nAgent: codex session=reviewer`);git('update-ref','refs/remotes/origin/old-review',anchor);git('update-ref','refs/remotes/origin/review',broadAnchor);git('update-ref','refs/remotes/origin/change/fixture',broadTip);
+  const broadRecord={...record,tip:broadTip,tree:broadTree,producer_checks:broadProof,review:{...record.review,commit:broadAnchor,tip:broadTip,tree:broadTree,focused_scope:scope}};
+  assert.equal(evaluate({repo:root,record:broadRecord}).decision,'admitted');
+  assert.equal(evaluate({repo:root,record:{...broadRecord,review:{...broadRecord.review,commit:anchor}}}).condition,'producer_checks_verified','mutable matching scope fields cannot replace the reviewer Git artifact');
+  assert.equal(evaluate({repo:root,record:{...broadRecord,review:{...broadRecord.review,focused_scope:null}}}).condition,'focused_scope_independently_reviewed');
+  for(const patch of [{head:proof.head},{base:'0'.repeat(40)},{tree:proof.tree},{runner_identity:'wrong'},{results:[]},{focused_scope:{...scope,files:[]}}])assert(!verifyProducer(root,{...broadProof,...patch}).admission_verified);
+  assert(plan(root,'HEAD','origin/main',{mode:'pre-release'}).full_required);
+  assert(!verifyProducer(root,broadProof,'HEAD',{mode:'pre-release'}).admission_verified,'focused proof cannot settle a requested full gate');
+  assert(!verifyProducer(root,null,'HEAD',{mode:'pre-release'}).admission_verified);
+  fs.writeFileSync(path.join(root,'scripts/test-declared.mjs'),"import fs from 'node:fs';import assert from 'node:assert/strict';let checks=0;assert.equal(fs.readFileSync('shared-runtime.rs','utf8'),'change');checks++;assert.match(fs.readFileSync('tests/one.js','utf8'),/ALL PASS/);checks++;console.log(`declared source ok (${checks} checks, 0 skipped)`);\n");git('add','.');git('commit','-qm','tracked declared case');
+  const localScope={files:plan(root).files,checks:['case:scripts/test-declared.mjs'],cases:[{id:'case:scripts/test-declared.mjs',path:'scripts/test-declared.mjs',verdict:'counted',terminal_prefix:'declared source ok',minimum:2}],reason:'reviewed local case for broad fixture'};
+  const local=await runFocused(root,{focusedScope:localScope,output:path.join(root,'.git','case-checks')});assert(local.admission_verified);
+  const localProof=JSON.parse(fs.readFileSync(local.receipt));assert.equal(localProof.results[0].exit,0);assert.equal(localProof.results[0].skipped,0);assert.match(fs.readFileSync(localProof.results[0].log,'utf8'),/declared source ok \(2 checks, 0 skipped\)/);
+  assert(!verifyFocused(root,{...localProof,focused_scope:{...localScope,cases:localScope.cases.map(c=>({...c,minimum:3}))}}).admission_verified,'counted floor cannot outrun actual log');
+  const observedHead=localProof.head,observedTree=localProof.tree,observedLog=localProof.results[0].log;
+  const report=path.join(root,'.git','independent-review.txt');fs.writeFileSync(report,'Private fixture reviewer selects this actual scoped source observation; no current whole-tree execution claim.\n');
+  const observedPacket={schema:1,kind:'independent-focused-review-references',not_producer_execution_receipt:true,entries:[{tip:observedHead,tree:observedTree,reviewer:'reviewer',verdict:'bounded source accepted',review_report:{path:report,sha256:hash(fs.readFileSync(report))},gate_verified:false,release_verified:false,routine_requires_combined_gate:false,checks:[{id:localScope.checks[0],path:localScope.cases[0].path,tested_head:observedHead,script_sha256:hash(fs.readFileSync(path.join(root,localScope.cases[0].path))),exit:localProof.results[0].exit,skipped:localProof.results[0].skipped,ms:null,original_log:{path:observedLog,sha256:hash(fs.readFileSync(observedLog))}}]}]};
+  const packetFile=path.join(root,'.git','observations.json');fs.writeFileSync(packetFile,JSON.stringify(observedPacket));
+  fs.writeFileSync(path.join(root,'candidate-source.txt'),'candidate independently reviewed after original check\n');git('add','.');git('commit','-qm','current candidate differs from original tested source');
+  const importedScope={...localScope,files:plan(root).files,evidence:{path:packetFile,sha256:hash(fs.readFileSync(packetFile)),entry_tip:observedHead}};
+  const candidate=plan(root,'HEAD','origin/main',{focusedScope:importedScope}),imported={schema:1,kind:'reviewed-focused',head:candidate.head,tree:candidate.tree,base:candidate.base,checks:candidate.checks,focused_scope:importedScope};
+  const importAnchor=git('commit-tree',candidate.tree,'-p',candidate.head,'-m',`fixture review of candidate with original source observations\n\nFocused-Scope-SHA256: ${hash(JSON.stringify(importedScope))}\n\nAgent: codex session=reviewer`);
+  const importReview={reviewer:'reviewer',commit:importAnchor,tip:candidate.head,tree:candidate.tree,verdict:'passed',focused_scope:importedScope};
+  const importedProof=verifyReviewedFocused(root,imported,importReview,candidate.head,'producer');assert(importedProof.admission_verified&&!importedProof.gate_verified&&!importedProof.release_verified&&!importedProof.requires_combined_gate);
+  assert.equal(importedProof.original_evidence.observations[0].tested_head,observedHead);assert.equal(importedProof.original_evidence.observations[0].tested_tree,observedTree);assert.equal(importedProof.original_evidence.observations[0].ms,null);assert.notEqual(importedProof.tree,observedTree);assert(!Object.hasOwn(imported,'passed'));
+  assert(!verifyReviewedFocused(root,imported,{...importReview,reviewer:'producer'},candidate.head,'producer').admission_verified);
+  assert(!verifyReviewedFocused(root,imported,{...importReview,commit:anchor},candidate.head,'producer').admission_verified);
+  fs.appendFileSync(report,'tampered review');assert(!verifyFocused(root,imported).admission_verified);fs.writeFileSync(report,'Private fixture reviewer selects this actual scoped source observation; no current whole-tree execution claim.\n');
+  const savedPacket=fs.readFileSync(packetFile);observedPacket.entries[0].checks[0].script_sha256='0'.repeat(64);fs.writeFileSync(packetFile,JSON.stringify(observedPacket));assert(!verifyFocused(root,{...imported,focused_scope:{...importedScope,evidence:{...importedScope.evidence,sha256:hash(fs.readFileSync(packetFile))}}}).admission_verified);fs.writeFileSync(packetFile,savedPacket);
+  assert(!verifyProducer(root,imported,candidate.head,{mode:'pre-release'}).admission_verified);
+  fs.appendFileSync(localProof.results[0].log,'1 skipped\n');localProof.results[0].log_sha256=hash(fs.readFileSync(localProof.results[0].log));assert(!verifyFocused(root,localProof).admission_verified);
+  assert(!verifyFocused(root,imported).admission_verified,'original log tampering refuses imported observations');
   fs.writeFileSync(path.join(root,'dirty'),'pending');await assert.rejects(runFocused(root),/clean/);
   fs.unlinkSync(path.join(root,'dirty'));
   git('switch','-qc','change/failure','origin/main');
@@ -53,12 +88,12 @@ try {
       const text=c.verdict==='js'?'ALL PASS\n':c.verdict==='browser'?'  ok   UI structure, mid-run reload, and startup recovery\n':c.proof_kind==='selection'?'selection state ok (9 checks, 0 skipped; fixture)\n':'two-window recovery ok (13 checks, 0 skipped; fixture)\n';
       fs.writeFileSync(log,text);return {id,log,log_sha256:hash(text),passed:true,exit:0,skipped:0,ms:0};
     });
-    const synthetic={schema:1,kind:'producer-focused',tree:selected.tree,checks:selected.checks,passed:true,results,
+    const synthetic={schema:1,kind:'producer-focused',head:selected.head,base:selected.base,tree:selected.tree,checks:selected.checks,passed:true,results,
       runner_identity:hash(fs.readFileSync('scripts/producer-admission.mjs'))+hash(fs.readFileSync(path.join(root,'scripts','gate-checks.mjs')))+hash(fs.readFileSync(path.join(root,'scripts','gate-check.mjs')))};
     assert(verifyFocused(root,synthetic).admission_verified,'synthetic valid per-kind log contract');
     const browser=synthetic.results.find(r=>r.id==='ui-browser');fs.writeFileSync(browser.log,'matching hash without browser terminal proof\n');browser.log_sha256=hash(fs.readFileSync(browser.log));
     assert(!verifyFocused(root,synthetic).admission_verified,'matching-hash browser log must independently carry terminal proof');
   }
   if(process.platform!=='win32')console.log('SKIP: browser receipt log contract requires Windows focused plan');
-  console.log(`producer admission ok (${process.platform==='win32'?19:16} checks, ${process.platform==='win32'?0:1} skipped; synthetic per-kind log validation, not browser execution)`);
+  console.log(`producer admission ok (routine shared source and declared local case executed; independent scope review and strict pre-release refusal; ${process.platform==='win32'?0:1} skipped; browser logs validate contract only)`);
 } finally {fs.rmSync(root,{recursive:true,force:true});}

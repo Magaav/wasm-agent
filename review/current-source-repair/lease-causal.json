@@ -1,0 +1,18 @@
+{
+  "kind": "private-current-source-implementation-test",
+  "production_authority": false,
+  "global_identity_safety": false,
+  "production_registry_admission": false,
+  "checks": [
+    "genuine narrow private producer check, not full application proof",
+    "actual prepared exclusion refs/heads/main",
+    "actual prepared exclusion refs/heads/private-alias",
+    "actual prepared exclusion refs/heads/Main"
+  ],
+  "attempts": [],
+  "passed": false,
+  "error": "AssertionError [ERR_ASSERTION]: Missing expected exception: actual publication SQLite lease excludes competitor\n    at Object.action (file:///C:/Users/Victor/orca/workspaces/wasm-agent/review-original-native-ui/scripts/test-wave-current-source.mjs:72:109)\n    at attempt (file:///C:/Users/Victor/orca/workspaces/wasm-agent/review-original-native-ui/scripts/test-wave-current-source.mjs:56:86)\n    at async file:///C:/Users/Victor/orca/workspaces/wasm-agent/review-original-native-ui/scripts/test-wave-current-source.mjs:70:14",
+  "checks_count": 4,
+  "skipped": 0,
+  "root": "C:\\Users\\Victor\\AppData\\Local\\Temp\\wa-current-source-fixture-SFgglA"
+}

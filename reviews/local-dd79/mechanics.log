@@ -1,0 +1,22 @@
+node:internal/modules/run_main:107
+    triggerUncaughtException(
+    ^
+
+AssertionError [ERR_ASSERTION]: Expected values to be strictly deep-equal:
++ actual - expected
+
+  [
++   'full'
+-   'delivery-subsystem'
+  ]
+
+    at file:///C:/Users/Victor/AppData/Local/Temp/wa-review-driver-gPU3zR/driver.mjs:26:108 {
+  generatedMessage: true,
+  code: 'ERR_ASSERTION',
+  actual: [ 'full' ],
+  expected: [ 'delivery-subsystem' ],
+  operator: 'deepStrictEqual',
+  diff: 'simple'
+}
+
+Node.js v24.19.0

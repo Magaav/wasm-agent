@@ -11,6 +11,12 @@ description: >-
 
 # Evolving code in parallel
 
+**wasm-agent policy:** routine merges use appropriate focused source checks and independent
+exact-source review, including shared runtime changes. Only the user selects pre-release
+gating (`lane-policy.json`); never infer a full/combined gate from paths. Gate/closing-spell
+instructions below apply to explicitly requested pre-release verification. Routine work
+reports `gate_verified:false`, `release_verified:false`, and no combined gate requirement.
+
 You are one writer among several, and another branch may be editing the same file right
 now. The integration branch (call it `main`) is the only shared truth; **your branch is a
 proposal, not a copy of the project.** The goal is never "my branch works" — it is **"my
@@ -61,7 +67,7 @@ git merge-tree --write-tree origin/main HEAD     # exit 0 = clean
 ```
 Fix a conflict now, while the change is small and fresh in your head, not later.
 
-**4. Run the gate.**
+**4. Run appropriate source checks; full gate only on explicit pre-release request.**
 Whatever the repository uses as its test entry point, run it on the merged result. A
 change is not done because it compiles; it is done when the repository's own check passes
 with your change in it. If there is no gate, say so in your report.
@@ -80,7 +86,7 @@ cannot be attributed later.
 - Branch current with `main`.
 - A one-line status: what changed, ahead/behind, does it merge, does the gate pass.
 
-### The wasm-agent closing spell
+### The wasm-agent pre-release closing spell
 
 In wasm-agent, use [scripts/finish.mjs](scripts/finish.mjs) for the mechanical
 closing sequence. Commit and push your concern first, then:
@@ -249,13 +255,16 @@ receipt covers only your branch.
 
 ## Focused producer admission after bootstrap
 
-The recovery throughput implementation must first pass the complete smoke gate.
-After that, `finish.mjs admit <own-repo> <exact-head>` can produce source-bound
-focused evidence for supported narrow paths. Unknown/shared changes still use
-`gate`. Carry `wa-producer-check.json` to the independent admission lane with
+`finish.mjs admit <own-repo> <exact-head>` can produce source-bound focused evidence
+for supported paths. For shared/unknown paths, `producer-admission.mjs` accepts an
+explicit focused scope of actual catalog checks or tracked local test cases, bound
+by `Focused-Scope-SHA256` in the independent review commit. Actual independent
+observation packets may be imported without relabelling their original source,
+runner, raw logs, counts or unknown timing as a new execution. Carry the receipt with
 `delivery-admission.mjs ... --producer-proof <receipt>`; it never authorizes self
 review or publication. A focused result has `admission_verified:true` but
-`gate_verified:false` and `requires_combined_gate:true`. The merge lane verifies
-actual records with `--delivery-store`, then completely gates the combined tree
-before publication. Only identical-tree full proof can avoid another full run.
+`gate_verified:false`, `release_verified:false` and `requires_combined_gate:false`.
+The merge lane verifies actual records with `--delivery-store`; it does not infer
+a full gate before publication. Explicit user-selected pre-release verification
+still requires valid exact-tree full proof, including preserved raw/retained identity.
 See `docs/RECOVERY-THROUGHPUT.md` for commands, coverage and measured limits.

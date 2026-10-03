@@ -1,0 +1,6 @@
+{"label":"matched actual CLI private authority","exit":0,"condition":"admitted","authority":"private-fixture-only","stderr":"change/wa-session-producer: admitted"}
+{"label":"revoked reviewer refuses","exit":2,"condition":"local_reviewer_binding","authority":"private-fixture-only","stderr":"change/wa-session-producer: refused - local_reviewer_binding. local_workspace_binding_mismatch."}
+{"label":"same tree different review tip refuses","exit":2,"condition":"review_tip_is_the_tip","authority":"private-fixture-only","stderr":"change/wa-session-producer: refused - review_tip_is_the_tip. the review is of commit 3d99822006c8994935b00f14269d4e76e33d0ad6, the pushed tip is 70a46734c996b32a75336d7b9193aa56f92d94d8 (same tree: true)."}
+{"label":"dirty caller policy override refuses","exit":4,"stderr":"change/wa-session-producer: local_policy_differs_from_accepted_main"}
+{"label":"restored accepted policy admits","exit":0,"condition":"admitted","authority":"private-fixture-only","stderr":"change/wa-session-producer: admitted"}
+local delivery admission ok (canonical consumer, exact tip/tree, real focused receipt, missing/refused/self review, moved anchor, provenance; 0 skipped)

@@ -53,6 +53,7 @@ impl Spec {
     }
 }
 struct Entry {
+    owned_child: Mutex<Option<Value>>,
     index: Arc<index::Index>,
     cancel: AtomicBool,
     state: Mutex<Value>,
@@ -374,6 +375,7 @@ impl Manager {
             state["cwd_note"] = json!(substitution_note(substitution));
         }
         let entry = Arc::new(Entry {
+            owned_child: Mutex::new(None),
             index,
             cancel: AtomicBool::new(false),
             state: Mutex::new(state),
@@ -463,6 +465,18 @@ impl Manager {
     pub fn adjudicate_legacy(&self,args:&Value)->io::Result<Value>{self.index()?.adjudicate_legacy(args)}
     pub fn allocation_safety(&self,args:&Value)->io::Result<Value>{self.index()?.allocation_safety(args)}
     pub fn identity(&self)->io::Result<Value>{Ok(json!({"owner_boot":self.index()?.boot,"process_id":std::process::id(),"creation_stamp":legacy::creation(std::process::id())?,"cwd":std::env::current_dir()?.to_string_lossy()}))}
+    /// Live in-memory launch linkage; durable PID annotations never authorize this.
+    pub fn observe_owned_child(&self,id:&str,pid:u32,owner:&str)->io::Result<Value>{
+        let entry=self.entries.lock().map_err(error)?.get(id).cloned().ok_or_else(||error("operation_not_owned_live"))?;
+        let observed=entry.owned_child.lock().map_err(error)?.clone().ok_or_else(||error("operation_child_generation_unavailable"))?;
+        let state=entry.state.lock().map_err(error)?;
+        if state["settled"]==true || entry.cancel.load(Ordering::SeqCst) || state["owner"]!=owner || observed["process_id"]!=pid {
+            return Err(error("operation_child_or_owner_mismatch"));
+        }
+        let creation=legacy::creation(pid)?.ok_or_else(||error("operation_child_exited"))?;
+        if observed["creation_stamp"]!=creation {return Err(error("operation_child_generation_changed"));}
+        Ok(json!({"operation_id":id,"owner":owner,"child":observed}))
+    }
     pub fn snapshot(&self, id: &str) -> io::Result<Value> {
         validate_id(id)?;
         if let Some(entry) = self.entries.lock().map_err(error)?.get(id).cloned() {
@@ -603,6 +617,13 @@ fn execute(spec: &Spec, dir: &Path, entry: &Entry, secrets: &[Vec<u8>]) -> io::R
     let process_result = Process::spawn(spec);
     phase(entry, "spawn_ms", spawn_started.elapsed());
     let mut process = process_result?;
+    // Missing observations narrow the new read-only accessor; they never change
+    // ordinary launch/settlement behavior (a short command can already have exited).
+    if let Some(pid)=process.owned_id() {
+        if let Ok(Some(stamp))=legacy::creation(pid) {
+            *entry.owned_child.lock().unwrap()=Some(json!({"process_id":pid,"creation_stamp":stamp}));
+        }
+    }
     let execution_started = Instant::now();
     entry.state.lock().unwrap()["state"] = json!("running");
     let mut views = [Vec::new(), Vec::new()];

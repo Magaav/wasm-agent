@@ -1,0 +1,599 @@
+{
+  "kind": "actual-native-common-directory-alias-test",
+  "expect_bypass": true,
+  "root": "C:\\Users\\Victor\\AppData\\Local\\Temp\\wa-target-alias-YZlJwg",
+  "binary_sha256": "5a522e828d9a3d87bc08473e09a809631fbefb1cb7635ad4c377e50aa610552e",
+  "actual_symbolic_alias": true,
+  "actual_windows_case_alias": true,
+  "first": {
+    "hold": {
+      "inventory": {
+        "admissible": true,
+        "claims": [
+          {
+            "boot": "95e2eb54-d3cf-43aa-962a-dfc2a13b735b",
+            "identity": {
+              "claim_id": "a79a2839-f677-4a28-be83-1358d0eccfdf",
+              "creation_stamp": "windows-filetime:134355142029258838",
+              "kind": "session",
+              "process_id": 19320
+            },
+            "identity_complete": true,
+            "key": "session:upper",
+            "liveness": "held",
+            "principal": "upper",
+            "run": "upper",
+            "session": "upper",
+            "uncertain": false
+          }
+        ],
+        "complete": true,
+        "conflicts": [],
+        "identities_complete": true,
+        "kind": "target-resource-inventory",
+        "ok": true,
+        "schema": 1,
+        "scope": {
+          "git_common_dir": "//?/c:/users/victor/appdata/local/temp/wa-target-alias-yzljwg/git",
+          "ref": "refs/heads/Main"
+        }
+      },
+      "ok": true,
+      "receipt": {
+        "boot": "95e2eb54-d3cf-43aa-962a-dfc2a13b735b",
+        "creation_stamp": "windows-filetime:134355142029258838",
+        "key": "target:712343f9232c57b73665de0587050628657ef5755adeb17706a7b4467dae2387",
+        "kind": "held-target-resource",
+        "principal": "upper",
+        "process_id": 19320,
+        "receipt_id": "28b2a7f0-847b-421c-bb3c-e233405f5855",
+        "run": "upper",
+        "schema": 1,
+        "scope": {
+          "git_common_dir": "//?/c:/users/victor/appdata/local/temp/wa-target-alias-yzljwg/git",
+          "ref": "refs/heads/Main"
+        },
+        "session": "upper",
+        "session_claim_id": "a79a2839-f677-4a28-be83-1358d0eccfdf"
+      }
+    },
+    "inspection": {
+      "admissible": true,
+      "claims": [
+        {
+          "boot": "95e2eb54-d3cf-43aa-962a-dfc2a13b735b",
+          "identity": {
+            "claim_id": "a79a2839-f677-4a28-be83-1358d0eccfdf",
+            "creation_stamp": "windows-filetime:134355142029258838",
+            "kind": "session",
+            "process_id": 19320
+          },
+          "identity_complete": true,
+          "key": "session:upper",
+          "liveness": "held",
+          "principal": "upper",
+          "run": "upper",
+          "session": "upper",
+          "uncertain": false
+        },
+        {
+          "boot": "95e2eb54-d3cf-43aa-962a-dfc2a13b735b",
+          "identity": {
+            "boot": "95e2eb54-d3cf-43aa-962a-dfc2a13b735b",
+            "creation_stamp": "windows-filetime:134355142029258838",
+            "key": "target:712343f9232c57b73665de0587050628657ef5755adeb17706a7b4467dae2387",
+            "kind": "target",
+            "principal": "upper",
+            "process_id": 19320,
+            "receipt_id": "28b2a7f0-847b-421c-bb3c-e233405f5855",
+            "run": "upper",
+            "schema": 1,
+            "scope": {
+              "git_common_dir": "//?/c:/users/victor/appdata/local/temp/wa-target-alias-yzljwg/git",
+              "ref": "refs/heads/Main"
+            },
+            "session": "upper",
+            "session_claim_id": "a79a2839-f677-4a28-be83-1358d0eccfdf"
+          },
+          "identity_complete": true,
+          "key": "target:712343f9232c57b73665de0587050628657ef5755adeb17706a7b4467dae2387",
+          "liveness": "held",
+          "principal": "upper",
+          "run": "upper",
+          "session": "upper",
+          "uncertain": false
+        }
+      ],
+      "complete": true,
+      "conflicts": [],
+      "identities_complete": true,
+      "kind": "target-resource-inventory",
+      "ok": true,
+      "schema": 1,
+      "scope": {
+        "git_common_dir": "//?/c:/users/victor/appdata/local/temp/wa-target-alias-yzljwg/git",
+        "ref": "refs/heads/Main"
+      }
+    }
+  },
+  "second": {
+    "hold": {
+      "inventory": {
+        "admissible": true,
+        "claims": [
+          {
+            "boot": "8e5fe8a9-861d-444a-9eaf-a01db0518ae7",
+            "identity": {
+              "claim_id": "c19141a6-5893-4f20-97f6-8ec37dd22669",
+              "creation_stamp": "windows-filetime:134355142029885431",
+              "kind": "session",
+              "process_id": 2072
+            },
+            "identity_complete": true,
+            "key": "session:lower",
+            "liveness": "held",
+            "principal": "lower",
+            "run": "lower",
+            "session": "lower",
+            "uncertain": false
+          },
+          {
+            "boot": "95e2eb54-d3cf-43aa-962a-dfc2a13b735b",
+            "identity": {
+              "claim_id": "a79a2839-f677-4a28-be83-1358d0eccfdf",
+              "creation_stamp": "windows-filetime:134355142029258838",
+              "kind": "session",
+              "process_id": 19320
+            },
+            "identity_complete": true,
+            "key": "session:upper",
+            "liveness": "held_or_unavailable",
+            "principal": "upper",
+            "run": "upper",
+            "session": "upper",
+            "uncertain": false
+          },
+          {
+            "boot": "95e2eb54-d3cf-43aa-962a-dfc2a13b735b",
+            "identity": {
+              "boot": "95e2eb54-d3cf-43aa-962a-dfc2a13b735b",
+              "creation_stamp": "windows-filetime:134355142029258838",
+              "key": "target:712343f9232c57b73665de0587050628657ef5755adeb17706a7b4467dae2387",
+              "kind": "target",
+              "principal": "upper",
+              "process_id": 19320,
+              "receipt_id": "28b2a7f0-847b-421c-bb3c-e233405f5855",
+              "run": "upper",
+              "schema": 1,
+              "scope": {
+                "git_common_dir": "//?/c:/users/victor/appdata/local/temp/wa-target-alias-yzljwg/git",
+                "ref": "refs/heads/Main"
+              },
+              "session": "upper",
+              "session_claim_id": "a79a2839-f677-4a28-be83-1358d0eccfdf"
+            },
+            "identity_complete": true,
+            "key": "target:712343f9232c57b73665de0587050628657ef5755adeb17706a7b4467dae2387",
+            "liveness": "held_or_unavailable",
+            "principal": "upper",
+            "run": "upper",
+            "session": "upper",
+            "uncertain": false
+          }
+        ],
+        "complete": true,
+        "conflicts": [],
+        "identities_complete": true,
+        "kind": "target-resource-inventory",
+        "ok": true,
+        "schema": 1,
+        "scope": {
+          "git_common_dir": "//?/c:/users/victor/appdata/local/temp/wa-target-alias-yzljwg/git",
+          "ref": "refs/heads/main"
+        }
+      },
+      "ok": true,
+      "receipt": {
+        "boot": "8e5fe8a9-861d-444a-9eaf-a01db0518ae7",
+        "creation_stamp": "windows-filetime:134355142029885431",
+        "key": "target:57951e832ce58bf6139614ac346ffef8a763207ff23d5668757ad16df2fd665c",
+        "kind": "held-target-resource",
+        "principal": "lower",
+        "process_id": 2072,
+        "receipt_id": "40976b95-c6aa-4c44-89d9-8c9d90578376",
+        "run": "lower",
+        "schema": 1,
+        "scope": {
+          "git_common_dir": "//?/c:/users/victor/appdata/local/temp/wa-target-alias-yzljwg/git",
+          "ref": "refs/heads/main"
+        },
+        "session": "lower",
+        "session_claim_id": "c19141a6-5893-4f20-97f6-8ec37dd22669"
+      }
+    },
+    "inspection": {
+      "admissible": true,
+      "claims": [
+        {
+          "boot": "8e5fe8a9-861d-444a-9eaf-a01db0518ae7",
+          "identity": {
+            "claim_id": "c19141a6-5893-4f20-97f6-8ec37dd22669",
+            "creation_stamp": "windows-filetime:134355142029885431",
+            "kind": "session",
+            "process_id": 2072
+          },
+          "identity_complete": true,
+          "key": "session:lower",
+          "liveness": "held",
+          "principal": "lower",
+          "run": "lower",
+          "session": "lower",
+          "uncertain": false
+        },
+        {
+          "boot": "95e2eb54-d3cf-43aa-962a-dfc2a13b735b",
+          "identity": {
+            "claim_id": "a79a2839-f677-4a28-be83-1358d0eccfdf",
+            "creation_stamp": "windows-filetime:134355142029258838",
+            "kind": "session",
+            "process_id": 19320
+          },
+          "identity_complete": true,
+          "key": "session:upper",
+          "liveness": "held_or_unavailable",
+          "principal": "upper",
+          "run": "upper",
+          "session": "upper",
+          "uncertain": false
+        },
+        {
+          "boot": "8e5fe8a9-861d-444a-9eaf-a01db0518ae7",
+          "identity": {
+            "boot": "8e5fe8a9-861d-444a-9eaf-a01db0518ae7",
+            "creation_stamp": "windows-filetime:134355142029885431",
+            "key": "target:57951e832ce58bf6139614ac346ffef8a763207ff23d5668757ad16df2fd665c",
+            "kind": "target",
+            "principal": "lower",
+            "process_id": 2072,
+            "receipt_id": "40976b95-c6aa-4c44-89d9-8c9d90578376",
+            "run": "lower",
+            "schema": 1,
+            "scope": {
+              "git_common_dir": "//?/c:/users/victor/appdata/local/temp/wa-target-alias-yzljwg/git",
+              "ref": "refs/heads/main"
+            },
+            "session": "lower",
+            "session_claim_id": "c19141a6-5893-4f20-97f6-8ec37dd22669"
+          },
+          "identity_complete": true,
+          "key": "target:57951e832ce58bf6139614ac346ffef8a763207ff23d5668757ad16df2fd665c",
+          "liveness": "held",
+          "principal": "lower",
+          "run": "lower",
+          "session": "lower",
+          "uncertain": false
+        },
+        {
+          "boot": "95e2eb54-d3cf-43aa-962a-dfc2a13b735b",
+          "identity": {
+            "boot": "95e2eb54-d3cf-43aa-962a-dfc2a13b735b",
+            "creation_stamp": "windows-filetime:134355142029258838",
+            "key": "target:712343f9232c57b73665de0587050628657ef5755adeb17706a7b4467dae2387",
+            "kind": "target",
+            "principal": "upper",
+            "process_id": 19320,
+            "receipt_id": "28b2a7f0-847b-421c-bb3c-e233405f5855",
+            "run": "upper",
+            "schema": 1,
+            "scope": {
+              "git_common_dir": "//?/c:/users/victor/appdata/local/temp/wa-target-alias-yzljwg/git",
+              "ref": "refs/heads/Main"
+            },
+            "session": "upper",
+            "session_claim_id": "a79a2839-f677-4a28-be83-1358d0eccfdf"
+          },
+          "identity_complete": true,
+          "key": "target:712343f9232c57b73665de0587050628657ef5755adeb17706a7b4467dae2387",
+          "liveness": "held_or_unavailable",
+          "principal": "upper",
+          "run": "upper",
+          "session": "upper",
+          "uncertain": false
+        }
+      ],
+      "complete": true,
+      "conflicts": [],
+      "identities_complete": true,
+      "kind": "target-resource-inventory",
+      "ok": true,
+      "schema": 1,
+      "scope": {
+        "git_common_dir": "//?/c:/users/victor/appdata/local/temp/wa-target-alias-yzljwg/git",
+        "ref": "refs/heads/main"
+      }
+    }
+  },
+  "symbolic": {
+    "hold": {
+      "inventory": {
+        "admissible": true,
+        "claims": [
+          {
+            "boot": "8e5fe8a9-861d-444a-9eaf-a01db0518ae7",
+            "identity": {
+              "claim_id": "c19141a6-5893-4f20-97f6-8ec37dd22669",
+              "creation_stamp": "windows-filetime:134355142029885431",
+              "kind": "session",
+              "process_id": 2072
+            },
+            "identity_complete": true,
+            "key": "session:lower",
+            "liveness": "held_or_unavailable",
+            "principal": "lower",
+            "run": "lower",
+            "session": "lower",
+            "uncertain": false
+          },
+          {
+            "boot": "370d0b62-8032-4175-9abf-529d7355b8e6",
+            "identity": {
+              "claim_id": "2a22d1ba-2adf-4e54-b846-463b424273cf",
+              "creation_stamp": "windows-filetime:134355142031762502",
+              "kind": "session",
+              "process_id": 15936
+            },
+            "identity_complete": true,
+            "key": "session:symbolic",
+            "liveness": "held",
+            "principal": "symbolic",
+            "run": "symbolic",
+            "session": "symbolic",
+            "uncertain": false
+          },
+          {
+            "boot": "95e2eb54-d3cf-43aa-962a-dfc2a13b735b",
+            "identity": {
+              "claim_id": "a79a2839-f677-4a28-be83-1358d0eccfdf",
+              "creation_stamp": "windows-filetime:134355142029258838",
+              "kind": "session",
+              "process_id": 19320
+            },
+            "identity_complete": true,
+            "key": "session:upper",
+            "liveness": "held_or_unavailable",
+            "principal": "upper",
+            "run": "upper",
+            "session": "upper",
+            "uncertain": false
+          },
+          {
+            "boot": "8e5fe8a9-861d-444a-9eaf-a01db0518ae7",
+            "identity": {
+              "boot": "8e5fe8a9-861d-444a-9eaf-a01db0518ae7",
+              "creation_stamp": "windows-filetime:134355142029885431",
+              "key": "target:57951e832ce58bf6139614ac346ffef8a763207ff23d5668757ad16df2fd665c",
+              "kind": "target",
+              "principal": "lower",
+              "process_id": 2072,
+              "receipt_id": "40976b95-c6aa-4c44-89d9-8c9d90578376",
+              "run": "lower",
+              "schema": 1,
+              "scope": {
+                "git_common_dir": "//?/c:/users/victor/appdata/local/temp/wa-target-alias-yzljwg/git",
+                "ref": "refs/heads/main"
+              },
+              "session": "lower",
+              "session_claim_id": "c19141a6-5893-4f20-97f6-8ec37dd22669"
+            },
+            "identity_complete": true,
+            "key": "target:57951e832ce58bf6139614ac346ffef8a763207ff23d5668757ad16df2fd665c",
+            "liveness": "held_or_unavailable",
+            "principal": "lower",
+            "run": "lower",
+            "session": "lower",
+            "uncertain": false
+          },
+          {
+            "boot": "95e2eb54-d3cf-43aa-962a-dfc2a13b735b",
+            "identity": {
+              "boot": "95e2eb54-d3cf-43aa-962a-dfc2a13b735b",
+              "creation_stamp": "windows-filetime:134355142029258838",
+              "key": "target:712343f9232c57b73665de0587050628657ef5755adeb17706a7b4467dae2387",
+              "kind": "target",
+              "principal": "upper",
+              "process_id": 19320,
+              "receipt_id": "28b2a7f0-847b-421c-bb3c-e233405f5855",
+              "run": "upper",
+              "schema": 1,
+              "scope": {
+                "git_common_dir": "//?/c:/users/victor/appdata/local/temp/wa-target-alias-yzljwg/git",
+                "ref": "refs/heads/Main"
+              },
+              "session": "upper",
+              "session_claim_id": "a79a2839-f677-4a28-be83-1358d0eccfdf"
+            },
+            "identity_complete": true,
+            "key": "target:712343f9232c57b73665de0587050628657ef5755adeb17706a7b4467dae2387",
+            "liveness": "held_or_unavailable",
+            "principal": "upper",
+            "run": "upper",
+            "session": "upper",
+            "uncertain": false
+          }
+        ],
+        "complete": true,
+        "conflicts": [],
+        "identities_complete": true,
+        "kind": "target-resource-inventory",
+        "ok": true,
+        "schema": 1,
+        "scope": {
+          "git_common_dir": "//?/c:/users/victor/appdata/local/temp/wa-target-alias-yzljwg/git",
+          "ref": "refs/heads/alias"
+        }
+      },
+      "ok": true,
+      "receipt": {
+        "boot": "370d0b62-8032-4175-9abf-529d7355b8e6",
+        "creation_stamp": "windows-filetime:134355142031762502",
+        "key": "target:df2caa2c678cc8861a5a08ba95d89c3391318231b32e5d18eb6b2ead18dcb743",
+        "kind": "held-target-resource",
+        "principal": "symbolic",
+        "process_id": 15936,
+        "receipt_id": "153f60c1-50b4-4575-8b1e-d7c94971c209",
+        "run": "symbolic",
+        "schema": 1,
+        "scope": {
+          "git_common_dir": "//?/c:/users/victor/appdata/local/temp/wa-target-alias-yzljwg/git",
+          "ref": "refs/heads/alias"
+        },
+        "session": "symbolic",
+        "session_claim_id": "2a22d1ba-2adf-4e54-b846-463b424273cf"
+      }
+    },
+    "inspection": {
+      "admissible": true,
+      "claims": [
+        {
+          "boot": "8e5fe8a9-861d-444a-9eaf-a01db0518ae7",
+          "identity": {
+            "claim_id": "c19141a6-5893-4f20-97f6-8ec37dd22669",
+            "creation_stamp": "windows-filetime:134355142029885431",
+            "kind": "session",
+            "process_id": 2072
+          },
+          "identity_complete": true,
+          "key": "session:lower",
+          "liveness": "held_or_unavailable",
+          "principal": "lower",
+          "run": "lower",
+          "session": "lower",
+          "uncertain": false
+        },
+        {
+          "boot": "370d0b62-8032-4175-9abf-529d7355b8e6",
+          "identity": {
+            "claim_id": "2a22d1ba-2adf-4e54-b846-463b424273cf",
+            "creation_stamp": "windows-filetime:134355142031762502",
+            "kind": "session",
+            "process_id": 15936
+          },
+          "identity_complete": true,
+          "key": "session:symbolic",
+          "liveness": "held",
+          "principal": "symbolic",
+          "run": "symbolic",
+          "session": "symbolic",
+          "uncertain": false
+        },
+        {
+          "boot": "95e2eb54-d3cf-43aa-962a-dfc2a13b735b",
+          "identity": {
+            "claim_id": "a79a2839-f677-4a28-be83-1358d0eccfdf",
+            "creation_stamp": "windows-filetime:134355142029258838",
+            "kind": "session",
+            "process_id": 19320
+          },
+          "identity_complete": true,
+          "key": "session:upper",
+          "liveness": "held_or_unavailable",
+          "principal": "upper",
+          "run": "upper",
+          "session": "upper",
+          "uncertain": false
+        },
+        {
+          "boot": "8e5fe8a9-861d-444a-9eaf-a01db0518ae7",
+          "identity": {
+            "boot": "8e5fe8a9-861d-444a-9eaf-a01db0518ae7",
+            "creation_stamp": "windows-filetime:134355142029885431",
+            "key": "target:57951e832ce58bf6139614ac346ffef8a763207ff23d5668757ad16df2fd665c",
+            "kind": "target",
+            "principal": "lower",
+            "process_id": 2072,
+            "receipt_id": "40976b95-c6aa-4c44-89d9-8c9d90578376",
+            "run": "lower",
+            "schema": 1,
+            "scope": {
+              "git_common_dir": "//?/c:/users/victor/appdata/local/temp/wa-target-alias-yzljwg/git",
+              "ref": "refs/heads/main"
+            },
+            "session": "lower",
+            "session_claim_id": "c19141a6-5893-4f20-97f6-8ec37dd22669"
+          },
+          "identity_complete": true,
+          "key": "target:57951e832ce58bf6139614ac346ffef8a763207ff23d5668757ad16df2fd665c",
+          "liveness": "held_or_unavailable",
+          "principal": "lower",
+          "run": "lower",
+          "session": "lower",
+          "uncertain": false
+        },
+        {
+          "boot": "95e2eb54-d3cf-43aa-962a-dfc2a13b735b",
+          "identity": {
+            "boot": "95e2eb54-d3cf-43aa-962a-dfc2a13b735b",
+            "creation_stamp": "windows-filetime:134355142029258838",
+            "key": "target:712343f9232c57b73665de0587050628657ef5755adeb17706a7b4467dae2387",
+            "kind": "target",
+            "principal": "upper",
+            "process_id": 19320,
+            "receipt_id": "28b2a7f0-847b-421c-bb3c-e233405f5855",
+            "run": "upper",
+            "schema": 1,
+            "scope": {
+              "git_common_dir": "//?/c:/users/victor/appdata/local/temp/wa-target-alias-yzljwg/git",
+              "ref": "refs/heads/Main"
+            },
+            "session": "upper",
+            "session_claim_id": "a79a2839-f677-4a28-be83-1358d0eccfdf"
+          },
+          "identity_complete": true,
+          "key": "target:712343f9232c57b73665de0587050628657ef5755adeb17706a7b4467dae2387",
+          "liveness": "held_or_unavailable",
+          "principal": "upper",
+          "run": "upper",
+          "session": "upper",
+          "uncertain": false
+        },
+        {
+          "boot": "370d0b62-8032-4175-9abf-529d7355b8e6",
+          "identity": {
+            "boot": "370d0b62-8032-4175-9abf-529d7355b8e6",
+            "creation_stamp": "windows-filetime:134355142031762502",
+            "key": "target:df2caa2c678cc8861a5a08ba95d89c3391318231b32e5d18eb6b2ead18dcb743",
+            "kind": "target",
+            "principal": "symbolic",
+            "process_id": 15936,
+            "receipt_id": "153f60c1-50b4-4575-8b1e-d7c94971c209",
+            "run": "symbolic",
+            "schema": 1,
+            "scope": {
+              "git_common_dir": "//?/c:/users/victor/appdata/local/temp/wa-target-alias-yzljwg/git",
+              "ref": "refs/heads/alias"
+            },
+            "session": "symbolic",
+            "session_claim_id": "2a22d1ba-2adf-4e54-b846-463b424273cf"
+          },
+          "identity_complete": true,
+          "key": "target:df2caa2c678cc8861a5a08ba95d89c3391318231b32e5d18eb6b2ead18dcb743",
+          "liveness": "held",
+          "principal": "symbolic",
+          "run": "symbolic",
+          "session": "symbolic",
+          "uncertain": false
+        }
+      ],
+      "complete": true,
+      "conflicts": [],
+      "identities_complete": true,
+      "kind": "target-resource-inventory",
+      "ok": true,
+      "schema": 1,
+      "scope": {
+        "git_common_dir": "//?/c:/users/victor/appdata/local/temp/wa-target-alias-yzljwg/git",
+        "ref": "refs/heads/alias"
+      }
+    }
+  }
+}

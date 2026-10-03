@@ -211,11 +211,8 @@ export function orcaView(source, {enabled = false} = {}) {
   } catch { return {used: false, reason: 'optional_viewer_unreadable'}; }
 }
 
-// NAMED RESOLUTIONS OF ACTIVITY CLAIMS. A claim of current work that cannot be resolved
-// POSITIVELY is never silently treated as OFF and never permanently ON: it is reported with a
-// name, and an operator can resolve that exact claim, with evidence, in the wave store. A
-// resolution binds the claim's identity, so a NEW claim (a different run, child, boot or tree)
-// can never borrow an old one.
+// Legacy receipt storage is preserved for audit. No trusted exact-owner drain
+// adapter is exposed here: prose creation/replay is unsupported and held.
 export const CLAIM_RESOLUTIONS = {schema: 1, kind: 'wave-activity-resolutions'};
 export function resolutionsPath(source, commonDir) {
   return source?.resolutions ? path.resolve(source.resolutions) : path.join(commonDir, 'wa-waves', 'activity-resolutions.json');
@@ -250,6 +247,20 @@ export function resolutionMatches(resolution, claim) {
   if (String(resolution.worktree || '') !== String(claim.worktree || '')) return false;
   for (const field of ['child_id', 'run_id', 'boot']) if (String(resolution[field] || '') !== String(claim[field] || '')) return false;
   return true;
+}
+
+// Legacy positive receipt identity is preserved for audit, not settlement proof.
+// Unsupported exact-owner drain remains held even after a negative process scan.
+export const POSITIVE_CLAIM = 'positive_claim_resolved_by_observation';
+export function claimIdentity(record, claim) {
+  return {session: record.session, claim, worktree: record.worktree, child_id: record.child?.child_id || '', run_id: record.turn?.run_id || record.child?.run_id || '', boot: record.turn?.boot || ''};
+}
+// A process holding the tree is stronger evidence than an old resolution: it can never be cleared.
+export function findResolution(resolutions, identity, {corroborated = null} = {}) {
+  // This inventory has no authenticated exact-owner terminal + descendant/effect
+  // drain adapter. Neither prose receipts nor absence in a process scan prove it.
+  // Preserve legacy receipts, but do not replay them as settlement.
+  return null;
 }
 
 // THE INVENTORY. Everything the wave proofs and the ownership proofs need, from our own records.
@@ -314,7 +325,7 @@ export function activityInventory(source) {
     };
     // EVERY WAY A CLAIM FAILS TO BE POSITIVE HAS A NAME. An unresolved claim is never counted as
     // activity and never read as OFF: it makes the activity answer UNVERIFIABLE until the claim is
-    // settled by observation or by a named resolution of that exact claim.
+    // settled by the owning runtime; unsupported prose receipts cannot settle it.
     if (claim) {
       if (!treePath || !exists || !tree) record.claim = 'activity_claim_without_a_registered_worktree';
       else if (RESOLVED_STATES.includes(state)) record.claim = `activity_claim_on_a_resolved_binding_${state}`;
@@ -325,12 +336,14 @@ export function activityInventory(source) {
     }
     bindings.push(record);
     if (treePath && managed) held.push(record);
-    if (record.in_flight) { agents.push(record); continue; }
+    if (record.in_flight) {
+      // Unsupported legacy receipts are read for audit only, never settlement.
+      agents.push(record);
+      continue;
+    }
     if (claim) {
-      const resolution = resolutions.resolutions.find(entry => resolutionMatches(entry, {session: id, claim: record.claim, worktree: record.worktree, child_id: record.child?.child_id || '', run_id: record.turn?.run_id || record.child?.run_id || '', boot: record.turn?.boot || ''}));
-      if (resolution) { record.resolved = {by: resolution.by || '', at: resolution.at || 0, evidence: resolution.evidence || ''}; resolved_claims.push(record); continue; }
       claims.push(record);
-      unresolved.push({session: id, reason: record.claim, worktree: record.worktree, child_id: record.child?.child_id || '', run_id: record.turn?.run_id || '', boot: record.turn?.boot || '', resolution: `node scripts/wave-activity.mjs resolve <config.json> ${id} \"<observed evidence>\"`});
+      unresolved.push({session: id, reason: record.claim, worktree: record.worktree, child_id: record.child?.child_id || '', run_id: record.turn?.run_id || '', boot: record.turn?.boot || '', resolution: 'refused: exact_owner_settlement_and_drain_unavailable; inspect owning runtime operations and resource claims'});
       continue;
     }
     if (RESOLVED_STATES.includes(state)) {

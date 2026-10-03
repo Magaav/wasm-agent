@@ -33,6 +33,7 @@ import {spawnSync} from 'node:child_process';
 import {checkWaveAdmission} from './lib/wave-guard.mjs';
 import {listRecords, nowIso, readRecord, recordPath, storeDir, writeRecord} from './lib/delivery-store.mjs';
 
+import {mainOnly, localProducer} from './lib/delivery-local.mjs';
 const SCHEMA = 1;
 
 function note(text) { process.stderr.write(`${text}\n`); }
@@ -62,7 +63,7 @@ function parse(argv) {
     ['--repo', 'repo'], ['--store', 'store'], ['--json', 'json'], ['--tip', 'tip'],
     ['--producer', 'producer'], ['--reviewer', 'reviewer'], ['--commit', 'commit'],
     ['--verdict', 'verdict'], ['--tree', 'tree'], ['--exit', 'exit'], ['--report', 'report'],
-    ['--sha', 'sha'], ['--at', 'at'], ['--expected-tip','expectedTip'],
+    ['--sha', 'sha'], ['--at', 'at'], ['--expected-tip','expectedTip'], ['--session-db','sessionDb'], ['--expected-revision','expectedRevision'],
   ]);
   for (let index = 0; index < argv.length; index += 1) {
     const token = argv[index];
@@ -157,15 +158,27 @@ switch (verb) {
     if(fs.realpathSync(common)!==fs.realpathSync(original))fail(2,'repository_mismatch','refresh cannot move a delivery to another shared repository');
     const wave=checkWaveAdmission(directory,{phase:'produce'});if(!wave.ok)fail(2,'wave_admission_refused',wave.reason);
     const tip=git(directory,['rev-parse','--verify',`${options.tip}^{commit}`],'new tip');
-    git(directory,['fetch','--quiet','origin'],'refresh published tip');
-    const published=git(directory,['rev-parse',`refs/remotes/origin/${record.branch||delivery}`],'published branch');
-    if(published!==tip)fail(2,'branch_not_pushed','new tip must be the exact published delivery branch tip');
+    let localEvidence=null;
+    if(mainOnly(directory)) {
+      if(options.expectedRevision===undefined || String(record.revision)!==options.expectedRevision)fail(2,'revision_compare_mismatch','main-only refresh requires the exact recorded --expected-revision');
+      try{localEvidence=localProducer(directory,record.branch||delivery,record.producer,options.tip,options.sessionDb);}
+      catch(error){fail(2,'local_producer_refused',error.message);}
+    } else {
+      git(directory,['fetch','--quiet','origin'],'refresh published tip');
+      const published=git(directory,['rev-parse',`refs/remotes/origin/${record.branch||delivery}`],'published branch');
+      if(published!==tip)fail(2,'branch_not_pushed','new tip must be the exact published delivery branch tip');
+    }
     try{git(directory,['merge-base','--is-ancestor',record.tip,tip],'preserve old intent');}
     catch{fail(2,'tip_not_descendant','old delivery tip is not contained; reconcile intent before refresh');}
     if(tip===record.tip)emit({ok:true,action:'refresh_unchanged',record},options);
-    record.tip_history=[...(record.tip_history||[]),{tip:record.tip,tree:record.tree,review:record.review,admission:record.admission,lane:record.lane,producer_checks:record.producer_checks||null,revision:record.revision,at:nowIso()}];
+    record.tip_history=[...(record.tip_history||[]),{tip:record.tip,tree:record.tree,review:record.review,admission:record.admission,lane:record.lane,producer_checks:record.producer_checks||null,producer_local_evidence:record.producer_local_evidence||null,revision:record.revision,at:nowIso()}];
+    if(localEvidence)record.producer_local_evidence=localEvidence;
     record.tip=tip;record.tree=git(directory,['rev-parse',`${tip}^{tree}`],'new tree');
     record.review=null;record.admission=null;record.lane=null;delete record.producer_checks;
+    if(localEvidence) {
+      try{localProducer(directory,record.branch||delivery,record.producer,tip,options.sessionDb);}
+      catch(error){fail(2,'local_producer_refused',error.message);}
+    }
     try{writeRecord(store,record);}catch(error){fail(2,'record_compare_conflict',error.message);}
     emit({ok:true,action:'refresh',record,requires_independent_review:true,requires_combined_gate:true},options);
     break;
@@ -186,6 +199,9 @@ switch (verb) {
     }
     const record = readRecord(store, delivery);
     if (!record) fail(2, 'record_missing', `no record for ${delivery} in ${store}`);
+    if(record.landing)fail(2,'landing_immutable','cannot revise a landed review');
+    if(record.review)record.review_history=[...(record.review_history||[]),record.review];
+    if(record.admission)record.admission_history=[...(record.admission_history||[]),record.admission];
     record.review = {
       reviewer: options.reviewer,
       commit,

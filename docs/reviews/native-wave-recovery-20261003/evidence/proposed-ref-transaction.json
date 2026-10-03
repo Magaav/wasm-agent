@@ -1,0 +1,16 @@
+{
+  "kind": "private-proposed-current-ref-exclusion",
+  "before": "f54c22827b7ab2d90ba2ae6b6a8efdcd8bc0b463",
+  "next": "029becfc5980052aee4f76eecd7151955dfa4ebc",
+  "tree": "a89eb8355356bbb57db4da6de98bcc5ed5dddc45",
+  "checks": 10,
+  "skipped": 0,
+  "git_prepared_exclusion": true,
+  "publication_lease_held": true,
+  "legacy_originals_preserved": true,
+  "global_identity_safety": false,
+  "native_target_admission": false,
+  "production_authority": false,
+  "activation": false,
+  "limit": "ordinary Git lock protocol only; arbitrary filesystem/SQL writers and historical effects are not adjudicated"
+}
