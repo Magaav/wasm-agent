@@ -25,7 +25,9 @@ The only scope arguments are `{git_common_dir, ref}`. Lua/Node supplies the Git
 common directory obtained from its verified repository and a full exact ref such
 as `refs/heads/main`. Rust resolves the existing native directory through
 symlinks/junctions, uses `/` separators, folds Windows path case conservatively,
-validates the full ref, and hashes the scope to a resource key. This does not prove
+validates the full ref, and hashes the common directory to a resource key. Exclusion
+conservatively covers all refs there, including case and symbolic aliases; the
+receipt retains the exact requested ref. This does not prove
 that the directory is Git metadata or that the caller selected the intended
 repository: the reviewed consumer verifies those facts. Ref expressions,
 wildcards, pagination, filtering and unknown argument fields are refused.
@@ -59,7 +61,7 @@ Each claim retains `key/principal/session/run/boot/uncertain` and adds `identity
 identity and a type: `session`, `named`, or `target`. Session claims serialize
 conversation execution and alone are not publication claims. Named claims have
 unknown target scope and conservatively conflict. Typed target claims conflict
-on the exact scope; only the actual native-held owner's exact receipt is excluded
+on the common directory; only the actual native-held owner's exact receipt is excluded
 from that conflict. Missing identity, unverifiable liveness and any uncertain
 claim refuse admission. This is deliberately conservative across the resource
 store: an unrelated legacy/named/uncertain claim can block target admission.
