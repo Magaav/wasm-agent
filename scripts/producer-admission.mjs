@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {spawnSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
+import {deliveryFiles,runDeliveryProof,verifyDeliveryProof} from './lib/delivery-producer-proof.mjs';
 import {catalog} from './gate-checks.mjs';
 import {executeChecks,hash,checkVerdict} from './gate-check.mjs';
 function git(repo,...args) {
@@ -12,6 +13,7 @@ function git(repo,...args) {
 export function plan(repo,tip='HEAD',base='origin/main') {
   const head=git(repo,'rev-parse',`${tip}^{commit}`),tree=git(repo,'rev-parse',`${tip}^{tree}`),baseHead=git(repo,'rev-parse',`${base}^{commit}`);
   const files=git(repo,'diff','--name-only',baseHead,head).split('\n').filter(Boolean),checks=new Set();
+  if(files.length && files.every(f=>deliveryFiles.includes(f)))return {head,tree,base:baseHead,files,checks:['delivery-subsystem'],full_required:false,requires_combined_gate:true};
   let full=false;
   for(const file of files) {
     if(/^tests\/[^/]+\.js$/.test(file))checks.add(`js:${path.basename(file)}`);
@@ -28,6 +30,7 @@ export function plan(repo,tip='HEAD',base='origin/main') {
 export function verifyFocused(repo,receipt,tip='HEAD') {
   try {
     const current=plan(repo,tip),identity=hash(fs.readFileSync(fileURLToPath(import.meta.url)))+hash(fs.readFileSync(path.join(repo,'scripts/gate-checks.mjs')))+hash(fs.readFileSync(path.join(repo,'scripts/gate-check.mjs')));
+    if(current.checks[0]==='delivery-subsystem')return verifyDeliveryProof(repo,receipt,current);
     if(receipt.schema!==1||receipt.kind!=='producer-focused'||receipt.tree!==current.tree||receipt.passed!==true||receipt.runner_identity!==identity)throw Error('missing, stale or untrusted focused evidence');
     if(current.full_required||JSON.stringify(receipt.checks)!==JSON.stringify(current.checks))throw Error('coverage changed or full gate required');
     if(!Array.isArray(receipt.results)||receipt.results.length!==current.checks.length)throw Error('missing check results');
@@ -45,6 +48,10 @@ export async function runFocused(repo,{jobs=1,output=null}={}) {
   const selection=plan(repo);
   if(git(repo,'status','--porcelain'))throw Error('focused admission requires a clean committed tree');
   if(selection.full_required)return {...selection,admission_verified:false,gate_verified:false,error:'unknown/shared paths require finish.mjs gate'};
+  if(selection.checks[0]==='delivery-subsystem') {
+    const receipt=runDeliveryProof(repo,selection,output),target=path.resolve(repo,git(repo,'rev-parse','--git-path','wa-producer-check.json'));
+    fs.writeFileSync(target,JSON.stringify(receipt,null,2)+'\n');return {...verifyFocused(repo,receipt),receipt:target};
+  }
   const result=await executeChecks(repo,selection.checks,{jobs,output,emit:false});
   if(git(repo,'rev-parse','HEAD^{tree}')!==selection.tree||git(repo,'status','--porcelain'))throw Error('source moved while checking');
   const receipt={...result,...selection,kind:'producer-focused',runner_identity:hash(fs.readFileSync(fileURLToPath(import.meta.url)))+hash(fs.readFileSync(path.join(repo,'scripts/gate-checks.mjs')))+hash(fs.readFileSync(path.join(repo,'scripts/gate-check.mjs')))};
