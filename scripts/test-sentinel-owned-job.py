@@ -52,10 +52,15 @@ try:
    info=json.loads(childinfo.read_text());facts['breakaway_attempt']=info
    if info['created']:
     k.OpenProcess.argtypes=[w.DWORD,w.BOOL,w.DWORD];k.OpenProcess.restype=w.HANDLE
-    childhandle=k.OpenProcess(0x1000|0x100000,False,info['pid']);assert childhandle,ctypes.get_last_error()
+    childhandle=k.OpenProcess(0x1000|0x100000|1,False,info['pid']);assert childhandle,ctypes.get_last_error()
     member=w.BOOL();assert k.IsProcessInJob(childhandle,job,ctypes.byref(member)),ctypes.get_last_error()
     facts['attempted_child_in_exact_job']=bool(member.value)
-    assert member.value,'attempted child escaped exact owned Job'
+    if not member.value:
+     assert k.TerminateProcess(childhandle,94);assert k.WaitForSingleObject(childhandle,10000)==0
+     facts['escaped_child_killed_waited']=True
+     k.CloseHandle(childhandle)
+     k.TerminateJobObject(job,95);k.WaitForSingleObject(process.process,10000)
+     raise AssertionError('attempted child escaped exact owned Job')
     k.CloseHandle(childhandle)
   wait=k.WaitForSingleObject(process.process,100000)
   if wait!=0:
@@ -71,6 +76,14 @@ try:
   assert acc.total>=(2 if a.escape_attempt else 3),'owned process creation not observed'
   assert code.value==0,'real-parent child failed'
 finally:
+ code=w.DWORD();k.GetExitCodeProcess(process.process,ctypes.byref(code))
+ if code.value==259:
+  k.TerminateJobObject(job,96);k.TerminateProcess(process.process,96);assert k.WaitForSingleObject(process.process,10000)==0
+ acc=ACCOUNT();assert k.QueryInformationJobObject(job,1,ctypes.byref(acc),ctypes.sizeof(acc),None)
+ deadline=time.monotonic()+10
+ while acc.active and time.monotonic()<deadline:
+  time.sleep(.02);assert k.QueryInformationJobObject(job,1,ctypes.byref(acc),ctypes.sizeof(acc),None)
+ facts['final_active']=acc.active;assert acc.active==0,'cleanup active processes unknown'
  (root/'job-receipt.json').write_text(json.dumps(facts,indent=2))
  k.CloseHandle(process.thread);k.CloseHandle(process.process);k.CloseHandle(job)
 print('owned return Job ok (1 check, 0 skipped): '+json.dumps(facts))
