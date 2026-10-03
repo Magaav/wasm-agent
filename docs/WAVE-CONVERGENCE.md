@@ -40,7 +40,7 @@ A wave whose convergence genuinely could not be verified is a **named** state (`
 durably, `unverified` in the derived report, with its exact reason - an unknown effect, an
 unresolved claim, a missing full-gate receipt). It is never silently treated as complete.
 
-### An activity claim that cannot be resolved positively is NAMED, and can be resolved
+### Unsupported activity settlement is NAMED and held
 
 A claim of current work is an open session with a running turn (or an unsettled child
 completion). Every way it fails to be *positive* has a name, and none of them reads as OFF:
@@ -54,20 +54,29 @@ completion). Every way it fails to be *positive* has a name, and none of them re
 | `child_completion_claim_without_a_live_turn_or_process` | only a `child_completions` row claims it, and no local process names the tree |
 
 An unresolved claim makes the activity answer `unverifiable` (`runtime_state: unknown`), which
-**never** admits the next wave, and it is reported with a ready-made resolution command:
+**never** admits the next wave, and it reports the named unsupported-settlement refusal:
+`node scripts/wave-activity.mjs observe CONFIG` is read-only and reports exact
+claim identities, positive/corroborated status and `resolvable:false`.
+`resolve` now refuses unsupported legacy/prose settlement by name:
+`exact_owner_settlement_and_drain_unavailable`. No receipt is written.
+Existing receipt bytes remain intact, but unsupported receipts cannot clear
+ownership during replay. Negative or unavailable process scans, caller prose,
+missing PIDs, ages and terminal transcripts do not establish descendant/effect drain.
 
-```text
-node scripts/wave-activity.mjs observe <config.json>            # read-only: every claim, its identity and its resolution
-node scripts/wave-activity.mjs resolve <config.json> <session> "<what you observed>" [--child|--run|--boot VALUE]
-```
+### Owning-runtime recovery (not a wave CLI escape)
 
-`resolve` refuses without evidence, refuses without the identity that distinguishes this claim
-from a later one, and writes only the wave store's `activity-resolutions.json`. The resolution
-binds the claim's exact identity, so a **new** claim (a different run, child, boot or tree) can
-never borrow it, and a process that appears later makes the claim positive again by itself. This
-is what closes the "false ON that never clears": a stale completion is not a permanent fence, it
-is a named claim with a one-line resolution - and the same claim read as OFF would have admitted
-a second wave over live work.
+Inspect exact session/run/boot/child ownership in the owning runtime. Use operation
+status and await **full settlement**, not shell exit, for every owned process tree.
+Inspect retained resource claims and unknown effects; use the sanctioned operator
+resource reconciliation path with exact owner/run evidence (docs/CONCURRENCY.md).
+Preserve transcripts, claims and receipts; never delete them to force OFF.
+The wave inventory exposes no authenticated exact-owner settlement/drain adapter.
+Legacy stale cleanup therefore remains unsupported and held, deliberately trading
+availability for safety. A future adapter must validate terminal ownership and
+descendant/effect drain at both creation and replay.
+This reduction in stale-clearing capability is separate from completed-newest
+production/allocation admission. Closing freeze and named land/admit convergence
+fences remain unchanged. Node activity and wave convergence are separate facts.
 
 ### What each boundary does with it
 
@@ -77,13 +86,16 @@ a second wave over live work.
   An idle wave never blocks starting the next one, whatever its bookkeeping says; the verdict of
   the newest row is returned as `previous` and **every** unfinished row as `unfinished`.
 * `checkAdmission()` consults **every unfinished row** and reports the whole set. Producing and
-  allocating are admitted while the wave is ON (that is how lanes work under an umbrella) and
-  while it is OFF or unobservable (so an idle row cannot fence live lanes). A closing freeze and
-  a `complete` row still refuse as before. The repository-level acts - `land` (the merge lane)
-  and `admit` (independent delivery admission) - are refused whenever **any** unfinished row's
-  convergence is not `verified`/`open`, i.e. `unverified` or `legacy-unverified`, with the named
-  reason `wave_convergence_unverified:<wave-id>:<state>:<reason>`. That holds **whether or not
-  agents are working**: a live umbrella does not make an unverified convergence verified.
+  allocating are admitted while the wave is ON (that is how lanes work under an umbrella), while
+  it is OFF or unobservable, and when the newest row is **`complete`**: a completed umbrella ends
+  the wave, it does not fence a repository that is producing. A closing freeze still fences
+  producing and allocating, by name. The repository-level acts - `land` (the merge lane) and
+  `admit` (independent delivery admission) - are refused whenever **any** unfinished row's
+  convergence is not `verified`/`open` (`wave_convergence_unverified:<wave-id>:<state>:<reason>`),
+  and when the newest row is `complete` (`next_wave_requires_fresh_public_start:<id>` plus
+  `:unfinished:<older ids>` when older unfinished rows exist, so a mixed store is visible in the
+  refusal itself). That holds **whether or not agents are working**: a live umbrella does not make
+  an unverified convergence verified.
 * `monitor()` drives the **oldest** unfinished wave (deterministic, one at a time, each row with
   its own budget) and reports the whole unfinished set; `list` prints every row with its derived
   verdict, and `inspect(id)` reports the store's other unfinished rows as `unfinished`. A second
@@ -132,8 +144,8 @@ the reversal is exact by construction.
 the umbrella, `checkAdmission` refuses `land` and `admit` by name (produce/allocate keep being
 admitted). Landing resumes when that row's convergence is verified, when it is reverted, or when
 a **fresh** wave is started - and a fresh wave can only be started while the activity answer is
-`off`: no agents working, and no unresolved activity claim (a stale claim is resolvable in one
-command, printed with its own reason).
+`off`: no agents working, and no unresolved activity claim (unsupported stale settlement remains held,
+printed with its exact refusal and owning-runtime recovery path).
 
 ## Sanctioned entry and repaired proof boundaries
 

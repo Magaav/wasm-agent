@@ -3,7 +3,7 @@
 //   1. land/admit are refused while the convergence is unverified - in BOTH corners (a blocked wave
 //      with activity ON, and a migrated legacy-unverified row while idle);
 //   2. a false OFF never admits the next wave (an unresolvable activity claim is unverifiable);
-//   3. a false ON is NAMED and has an explicit resolution, so it can always clear;
+//   3. unsupported stale ownership is NAMED and held; prose no longer clears it;
 //   4. wave-migrate's second apply is idempotent, and a leftover record is refused BEFORE the
 //      transaction;
 //   5. every unfinished row is read (create/checkAdmission/monitor/inspect/list), so an older
@@ -162,7 +162,7 @@ try {
   assert.throws(()=>create(off.store,{...off.manifest,id:'on-next',bootstrap:false}),/previous_wave_active/);checks++;
   check(fs.existsSync(registered),'the tree that turned the claim positive is real');
 
-  // ------------------------------------------------------------ 3. a false ON is named and clears
+  // ------------------------------------------------------------ 3. unsupported stale clearing refused
   const stale=fixture('falseon');
   stale.startWave('falseon');
   // A stale child completion: parent open and allocated, a real tree, NO turn and no process.
@@ -174,14 +174,13 @@ try {
   check(claimed.activity==='unverifiable'&&claimed.claims.some(claim=>claim.claim==='child_completion_claim_without_a_live_turn_or_process'),'a stale child completion is a NAMED unresolved claim, not a positive agent');
   assert.throws(()=>create(stale.store,{...stale.manifest,id:'stale-next',bootstrap:false}),/previous_wave_activity_unverifiable:falseon:.*child_completion_claim_without_a_live_turn_or_process:child-stale/);checks++;
   const observation=observeActivity(stale.configFile);
-  check(observation.unresolved_activity_claims.length===1&&observation.unresolved_activity_claims[0].session==='child-stale','the observation names the claim and its exact identity');
-  assert.throws(()=>resolveActivity(stale.configFile,'child-stale','',{child:'child-stale'}),/observed_resolution_evidence_required/);checks++;
-  assert.throws(()=>resolveActivity(stale.configFile,'child-stale','observed',{}),/claim_identity_required/);checks++;
-  assert.throws(()=>resolveActivity(stale.configFile,'child-stale','observed',{child:'a-different-child'}),/claim_identity_required/);checks++;
-  const resolved=resolveActivity(stale.configFile,'child-stale','The parent turn is settled and no process names the tree; the completion was observed as abandoned',{child:'child-stale',actor:'lane-d'});
-  check(resolved.ok===true&&resolved.activity_after==='off','the named resolution clears the claim and the activity is provably OFF again');
-  check(fs.existsSync(path.join(stale.repo,'.git','wa-waves','activity-resolutions.json')),'the resolution is durable in the wave store');
-  check(create(stale.store,{...stale.manifest,id:'stale-next',bootstrap:false}).ok===true,'with the claim resolved, the next wave is admitted');
+  for (const flags of [{},{child:'a-different-child'},{child:'child-stale'}]) {
+    assert.throws(()=>resolveActivity(stale.configFile,'child-stale','observed',flags),/exact_owner_settlement_and_drain_unavailable/);checks++;
+  }
+  check(!fs.existsSync(path.join(stale.store,'activity-resolutions.json')),'unsupported prose clearing writes nothing');
+  check(activityInventory(sourceOf(stale)).activity==='unverifiable','unsupported stale claim remains unverifiable');
+  assert.throws(()=>create(stale.store,{...stale.manifest,id:'stale-next',bootstrap:false}),/previous_wave_activity_unverifiable/);checks++;
+  check(observation.unresolved_activity_claims[0].resolvable===false,'observe accurately refuses unsupported stale recovery');
   // A NEW claim (a different child) cannot borrow the old resolution.
   const db4=nodeDB(stale);
   db4.prepare("UPDATE child_completions SET child_id='child-new' WHERE parent_session='child-stale'").run();
@@ -243,7 +242,7 @@ try {
   check(admitted.ok===true,'with the lane off, the next wave is admitted beside two unfinished rows');
   check(admitted.unfinished.length===2&&admitted.unfinished.some(entry=>entry.id==='multi')&&admitted.unfinished.some(entry=>entry.id==='younger'),'and it reports EVERY unfinished row, not only the newest');
   passed=true;
-  console.log(`wave activity fix ok (${checks} checks; land/admit refused in both unverified corners, a false OFF never admits, a false ON is named and clears, the migration is idempotent and refuses early, every unfinished row is read, and the index reversal is transient)`);
+  console.log(`wave activity fix ok (${checks} checks; land/admit refused in both unverified corners, a false OFF never admits, unsupported stale clearing is named and refused, the migration is idempotent and refuses early, every unfinished row is read, and the index reversal is transient)`);
 } finally {
   if(passed) fs.rmSync(root,{recursive:true,force:true}); else console.error(`wave activity-fix fixtures retained: ${root}`);
 }
