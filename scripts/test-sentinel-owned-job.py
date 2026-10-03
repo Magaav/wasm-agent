@@ -10,6 +10,10 @@ k=ctypes.WinDLL('kernel32',use_last_error=True)
 class STARTUP(ctypes.Structure):
  _fields_=[('cb',w.DWORD),('reserved',w.LPWSTR),('desktop',w.LPWSTR),('title',w.LPWSTR),('x',w.DWORD),('y',w.DWORD),('xs',w.DWORD),('ys',w.DWORD),('xc',w.DWORD),('yc',w.DWORD),('fill',w.DWORD),('flags',w.DWORD),('show',w.WORD),('reserved2size',w.WORD),('reserved2',ctypes.c_void_p),('stdin',w.HANDLE),('stdout',w.HANDLE),('stderr',w.HANDLE)]
 class PROCESS(ctypes.Structure):_fields_=[('process',w.HANDLE),('thread',w.HANDLE),('pid',w.DWORD),('tid',w.DWORD)]
+class BASICLIMIT(ctypes.Structure):
+ _fields_=[('perprocess',ctypes.c_longlong),('perjob',ctypes.c_longlong),('flags',w.DWORD),('minimum',ctypes.c_size_t),('maximum',ctypes.c_size_t),('active_limit',w.DWORD),('affinity',ctypes.c_size_t),('priority',w.DWORD),('scheduling',w.DWORD)]
+class IO(ctypes.Structure):_fields_=[(name,ctypes.c_ulonglong) for name in ['readops','writeops','otherops','readbytes','writebytes','otherbytes']]
+class EXTENDED(ctypes.Structure):_fields_=[('basic',BASICLIMIT),('io',IO),('processmem',ctypes.c_size_t),('jobmem',ctypes.c_size_t),('peakprocess',ctypes.c_size_t),('peakjob',ctypes.c_size_t)]
 class ACCOUNT(ctypes.Structure):_fields_=[('user',ctypes.c_longlong),('kernel',ctypes.c_longlong),('pu',ctypes.c_longlong),('pk',ctypes.c_longlong),('faults',w.DWORD),('total',w.DWORD),('active',w.DWORD),('terminated',w.DWORD)]
 k.CreateJobObjectW.argtypes=[ctypes.c_void_p,w.LPCWSTR];k.CreateJobObjectW.restype=w.HANDLE
 k.CreateProcessW.argtypes=[w.LPCWSTR,w.LPWSTR,ctypes.c_void_p,ctypes.c_void_p,w.BOOL,w.DWORD,ctypes.c_void_p,w.LPCWSTR,ctypes.POINTER(STARTUP),ctypes.POINTER(PROCESS)];k.CreateProcessW.restype=w.BOOL
@@ -18,10 +22,18 @@ repo=pathlib.Path(a.repo).resolve();script=repo/'scripts/test-sentinel-real-pare
 node=subprocess.check_output(['where','node'],text=True).splitlines()[0]
 if a.escape_attempt:
  probe=root/'escape.cjs'
- probe.write_text("const {spawnSync}=require('child_process');const r=spawnSync('python',['-c',\"import subprocess,sys; p=subprocess.run([sys.executable,'-c','pass'],creationflags=0x01000000)\"]);process.exit(r.status===0?5:0);")
+ childinfo=root/'attempt-child.json'
+ py="import subprocess,sys,json,time; f=sys.argv[1];\ntry:\n p=subprocess.Popen([sys.executable,'-c','import time;time.sleep(10)'],creationflags=0x01000000);open(f,'w').write(json.dumps({'pid':p.pid,'created':True}));p.wait()\nexcept OSError as e:\n open(f,'w').write(json.dumps({'created':False,'error':str(e)}))"
+ probe.write_text("const {spawnSync}=require('child_process');const r=spawnSync('python',['-c',"+json.dumps(py)+","+json.dumps(str(childinfo))+"]);process.exit(r.status||0);")
  script=probe
 command=subprocess.list2cmdline([node,str(script)])
 startup=STARTUP();startup.cb=ctypes.sizeof(startup);process=PROCESS();job=k.CreateJobObjectW(None,None);assert job
+k.SetInformationJobObject.argtypes=[w.HANDLE,ctypes.c_int,ctypes.c_void_p,w.DWORD];k.SetInformationJobObject.restype=w.BOOL
+k.IsProcessInJob.argtypes=[w.HANDLE,w.HANDLE,ctypes.POINTER(w.BOOL)];k.IsProcessInJob.restype=w.BOOL
+limits=EXTENDED();limits.basic.flags=0x2000 # KILL_ON_JOB_CLOSE, neither breakaway flag
+assert k.SetInformationJobObject(job,9,ctypes.byref(limits),ctypes.sizeof(limits)),ctypes.get_last_error()
+applied=EXTENDED();assert k.QueryInformationJobObject(job,9,ctypes.byref(applied),ctypes.sizeof(applied),None)
+assert applied.basic.flags==0x2000,'owned limits not applied'
 # inherited environment is consumed only by harness's explicit private environment allowlist.
 assert k.CreateProcessW(node,ctypes.create_unicode_buffer(command),None,None,False,4,None,str(repo),ctypes.byref(startup),ctypes.byref(process)),ctypes.get_last_error()
 facts={'pid':process.pid,'created_suspended':True,'resumed':False,'assignment_injected_failure':a.assign_failure}
@@ -33,6 +45,18 @@ try:
   assert code.value==91,'suspended assignment failure cleanup wrong exit'
  else:
   assert k.ResumeThread(process.thread)!=0xffffffff;facts['resumed']=True
+  if a.escape_attempt:
+   deadline=time.monotonic()+8
+   while not childinfo.exists() and time.monotonic()<deadline:time.sleep(.01)
+   assert childinfo.exists(),'attempt child receipt missing'
+   info=json.loads(childinfo.read_text());facts['breakaway_attempt']=info
+   if info['created']:
+    k.OpenProcess.argtypes=[w.DWORD,w.BOOL,w.DWORD];k.OpenProcess.restype=w.HANDLE
+    childhandle=k.OpenProcess(0x1000|0x100000,False,info['pid']);assert childhandle,ctypes.get_last_error()
+    member=w.BOOL();assert k.IsProcessInJob(childhandle,job,ctypes.byref(member)),ctypes.get_last_error()
+    facts['attempted_child_in_exact_job']=bool(member.value)
+    assert member.value,'attempted child escaped exact owned Job'
+    k.CloseHandle(childhandle)
   wait=k.WaitForSingleObject(process.process,100000)
   if wait!=0:
    k.TerminateJobObject(job,92);k.WaitForSingleObject(process.process,10000);raise AssertionError('private harness deadline; tree terminated')
