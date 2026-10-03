@@ -1749,6 +1749,48 @@ $harness = @'
     "a UI read must not be mistaken for a running agent turn");
   window.__fixtures.health.current = null;
 
+  var ownControlThread=window.__chatThread();
+  var backgroundHealth={node_threads:[{role:'runs',label:'child completion',session:ownControlThread,run_id:'9007199254740993'}]};
+  check(window.__activeRunForTest(backgroundHealth,ownControlThread)?.run_id==='9007199254740993',
+    'background completion must be recognized as the exact own run without losing its decimal id');
+  check(window.__runningSessionsForTest(backgroundHealth).has(ownControlThread),
+    'background completion activity and composer controls must agree');
+  check(!window.__activeRunForTest(backgroundHealth,'another-conversation'),
+    'background completion never takes controls from another conversation');
+  window.__fixtures.health.node_threads=backgroundHealth.node_threads;
+  await window.__restoreSession();
+  check(!document.getElementById('steer').hidden && !document.getElementById('send').disabled
+    && !document.querySelector('.unfinished-notice button'),
+    'background completion exposes Stop and Steer rather than leaving the composer stranded');
+  document.getElementById('send').click();
+  for(var backgroundStopTick=0;backgroundStopTick<10;backgroundStopTick++)await tick();
+  var backgroundStop=window.__calls.filter(call=>call.url==='runs' && call.method==='POST').at(-1);
+  check(JSON.parse(backgroundStop?.body || '{}').run_id==='9007199254740993'
+    && JSON.parse(backgroundStop?.body || '{}').thread===ownControlThread,
+    'background Stop reaches the authenticated control route with its exact run and conversation');
+  var unavailableHealthFetch=window.fetch;
+  window.fetch=async function(url,options) {
+    if(String(url).replace(/^.*\//,'')==='health')return new Response(JSON.stringify({error:'temporarily_unavailable'}),{status:503});
+    return unavailableHealthFetch(url,options);
+  };
+  await window.__restoreSession();
+  check(!document.getElementById('steer').hidden && document.getElementById('send').title==='Stop'
+    && !document.querySelector('.unfinished-notice button'),
+    'failed health observation does not falsely free known background ownership or duplicate Continue');
+  window.fetch=unavailableHealthFetch;
+  var readOnlyHealth={node_threads:[{role:'reads',label:'GET /models',session:ownControlThread,run_id:null}]};
+  check(!window.__activeRunForTest(readOnlyHealth,ownControlThread)
+    && !window.__runningSessionsForTest(readOnlyHealth).has(ownControlThread),
+    'a read for the same session must not hide idle recovery controls');
+  window.__fixtures.health.node_threads=readOnlyHealth.node_threads;
+  await window.__restoreSession();
+  check(!!document.querySelector('.unfinished-notice button') && !document.getElementById('send').disabled,
+    'idle unfinished session keeps Continue and Send while ordinary reads run');
+  check(window.__activeRunForTest({runs:[{conversation:ownControlThread,run_id:'42',state:'queued'}]},ownControlThread)?.run_id==='42'
+    && !window.__activeRunForTest({runs:[{conversation:ownControlThread,run_id:'42',state:'completed'}]},ownControlThread),
+    'queued ownership is recognized but a terminal scheduler row does not lock the composer');
+  window.__fixtures.health.node_threads=[];
+
   // A chat run for a *different* conversation is not this window's run. Before `activeRun` was
   // scoped to the conversation, it returned the first chat run on the node, so a window watching
   // conversation B disabled its own composer and deferred its reconcile for conversation A's run.
@@ -1803,6 +1845,75 @@ $harness = @'
   for(var st=0;st<10;st++)await tick();
   check(window.__calls.some(call=>call.url==='subagents' && String(call.body).includes('steer_session')) && busyInput.value==='', 'steering sends durably and clears only accepted draft');
   check(window.__calls.filter(call=>call.url==='runs' && call.method==='POST').length===cancelCalls,'steering never cancels the run');
+
+  var steeringFetch=window.fetch, steeringBodies=[], steeringBusy=true;
+  window.fetch=async function(url,options) {
+    if(String(url).replace(/^.*\//,'')==='subagents' && String(options?.body).includes('steer_session')) {
+      steeringBodies.push(options.body);
+      if(steeringBusy)return new Response(JSON.stringify({error:'read_capacity_busy'}),{status:503});
+    }
+    return steeringFetch(url,options);
+  };
+  busyInput.value='keep this steering draft';
+  await window.__steerForTest();
+  check(steeringBodies.length===2 && steeringBodies[0]===steeringBodies[1]
+    && busyInput.value==='keep this steering draft' && !document.getElementById('send').disabled,
+    'busy control capacity retries once with the same key and preserves draft plus Stop');
+  steeringBusy=false;
+  await window.__steerForTest();
+  check(steeringBodies.length===3 && steeringBodies[2]===steeringBodies[0] && busyInput.value==='',
+    'manual retry after busy refusal reuses the durable key and clears only an accepted draft');
+  window.fetch=async function(url,options) {
+    if(String(url).replace(/^.*\//,'')==='subagents' && String(options?.body).includes('steer_session')) {
+      steeringBodies.push(options.body);throw new Error('connection lost after dispatch');
+    }
+    return steeringFetch(url,options);
+  };
+  busyInput.value='unknown outcome draft';
+  await window.__steerForTest();
+  check(steeringBodies.length===4 && busyInput.value==='unknown outcome draft',
+    'unknown steering outcomes are not automatically replayed and retain the draft');
+  window.fetch=steeringFetch;
+
+  var steeringTarget=window.__controlIdentityForTest(), targetSteers=[];
+  window.__setBusy(true);
+  busyInput.value='original node steering';
+  window.fetch=async function(url,options) {
+    if(String(url)==='subagents' && String(options?.body).includes('steer_session')) {
+      targetSteers.push({body:options.body,node:options.headers['X-WA-Node'] || ''});
+      return new Response(JSON.stringify({error:'read_capacity_busy'}),{status:503});
+    }
+    if(String(url)==='health') {
+      window.__rememberNodeForTest('steering-other-node');
+      busyInput.value='new node draft';
+    }
+    return steeringFetch(url,options);
+  };
+  await window.__steerForTest();
+  check(targetSteers.length===1 && targetSteers[0].node===steeringTarget.node
+    && busyInput.value==='new node draft',
+    'node switch during busy retry never posts the old steering to the new node or clears its draft');
+  window.__rememberNodeForTest(steeringTarget.node);
+  window.__setBusy(true);
+  busyInput.value='old epoch steering';
+  window.fetch=async function(url,options) {
+    if(String(url)==='subagents' && String(options?.body).includes('steer_session')) {
+      targetSteers.push({body:options.body,node:options.headers['X-WA-Node'] || ''});
+      return {ok:true,status:200,json:async function(){
+        window.__rememberNodeForTest('steering-epoch-away');
+        window.__rememberNodeForTest(steeringTarget.node);
+        busyInput.value='new epoch draft';
+        return {id:'old-epoch-accepted',state:'queued'};
+      }};
+    }
+    return steeringFetch(url,options);
+  };
+  await window.__steerForTest();
+  check(targetSteers.length===2 && busyInput.value==='new epoch draft'
+    && JSON.parse(targetSteers[0].body).idempotency_key!==JSON.parse(targetSteers[1].body).idempotency_key,
+    'accepted response from an old epoch keeps the new draft and request keys bind the target epoch');
+  window.fetch=steeringFetch;
+  window.__setBusy(true);
 
   // Stop must tell the node, not only stop reading the stream: a client-side abort leaves the model
   // call running. It must wait for the node's acknowledgment and surface a refusal.
@@ -3427,6 +3538,8 @@ Add-Content -Path $app -Value "`nwindow.__safeLinks=safeLinks; window.__refreshT
 Add-Content -Path $app -Value "`nwindow.__refreshSessionsForRelease=refreshSessions;"
 Add-Content -Path $app -Value "`nwindow.handleEvent = handleEvent; window.isConnectionLoss = isConnectionLoss; window.connectionMessage = connectionMessage; window.rendererReady = () => !!renderer; window.renderContext = renderContext; window.__applyUiVersion = applyUiVersion; window.__native = native; window.__openControl = openControl; window.__renameNode = saveNodeName; window.__setReload = (fn) => { reload = fn; }; window.__uiVersion = () => version; window.__setBusy = setBusy; window.__setLiveness = setLiveness; window.__stopLiveness = stopLiveness; window.__setShell = (shell) => { native = shell; }; window.__rememberPlace = rememberPlace; window.__restorePlace = restorePlace; window.__restoreSession = restoreSession; window.__watchTurn = watchTurn; window.__loadTopic = loadTopic; window.__reloadTopics = reloadTopics; window.__reconcile = reconcile; window.__clearStreamNotice = clearStreamNotice; window.__attachMany = (n) => { attachments.length = 0; for (let i = 0; i < n; i += 1) attachments.push({ kind: 'image', name: 'shot-' + i + '.png', mime: 'image/png', data: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==' }); renderAttachments(); }; window.__commandInput = () => input; window.__commandMenu = () => commandMenu; window.__typeCommand = (value) => { input.value = value; input.dispatchEvent(new Event('input')); }; window.__chatThread = () => chatSession; window.__composed = (text) => composedBody(text); window.__cancelActiveRun = cancelActiveRun; window.__setToolAge = (s, b) => { if (trace) trace.setAge(s, b); }; window.__toolTickerActive = () => !!toolTicker; window.__updateNotice = updateNotice; window.__refreshOperationProgress = refreshOperationProgress; window.__watch = watch;"
 Add-Content -Path $app -Value "`nwindow.__cancelRunForTest = cancelRun;"
+Add-Content -Path $app -Value "`nwindow.__activeRunForTest = activeRun; window.__runningSessionsForTest = runningSessions; window.__steerForTest = steerActiveRun;"
+Add-Content -Path $app -Value "`nwindow.__rememberNodeForTest = rememberNode; window.__controlIdentityForTest = () => ({node:activeNode,thread:chatSession,epoch:conversationEpoch});"
 
 Add-Content -Path $app -Value "`nwindow.__resetFollow = () => { followedSeq = 0; lastFollowAt = 0; }; window.__followRun = followRun; window.__repaintMessages = repaintMessages; window.__ensureMeta = ensureMeta; window.__expireRecoveryBackoff = () => { transcriptRetryAt=0; metadataRetryAt=0; }; window.__followedSeq = () => followedSeq;"
 

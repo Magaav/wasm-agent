@@ -84,6 +84,8 @@ const controlText = document.getElementById("control-text");
 let renderer = null;
 let version = null;
 let busy = false;
+let observedRun = null;
+const composerBusy = () => busy || observedRun?.session === chatSession;
 // Stop belongs to the request this window submitted. A conversation may have an older run
 // executing while this request waits behind it, so cancellation must carry this request's id.
 let activeRunId = null;
@@ -206,10 +208,22 @@ function apiHeaders(extra) {
 // a stranger's run finished. `/health` carries the conversation (`session`) on every node-thread and on
 // `current`, so the match is exact. With no session known yet the window claims no run, which is the
 // safe default - it has no transcript to reconcile.
+function sessionRunEntry(entry) {
+  if (!entry?.session || entry.role === "reads") return false;
+  return /^POST \/(?:node\/)?chat(?:\?|$)/.test(entry.label || "")
+    || entry.label === "child completion"
+    || (entry.role === "runs" && runKey(entry) !== null);
+}
+
 function activeRun(health, session = chatSession) {
-  const isChat = (entry) => /^POST \/(?:node\/)?chat(?:\?|$)/.test(entry?.label || "");
-  const mine = (entry) => isChat(entry) && !!session && entry.session === session;
-  return (health?.node_threads || []).find(mine) || (mine(health?.current) ? health.current : null);
+  if (!session) return null;
+  const mine = (entry) => sessionRunEntry(entry) && entry.session === session;
+  const thread = (health?.node_threads || []).find(mine) || (mine(health?.current) ? health.current : null);
+  if (thread) return thread;
+  // Queued/background admissions also own the conversation before a thread reports its label.
+  const run = (health?.runs || []).find((entry) => entry.conversation === session
+    && (!entry.state || ["accepted", "queued", "running", "admitted", "behind"].includes(entry.state)));
+  return run ? { ...run, session } : null;
 }
 
 function nodeQuery() {
@@ -1873,6 +1887,8 @@ async function restoreSessionOnce(target, epoch, node = activeNode) {
       nativeSessionTask(wanted.id),
     ]);
     if (!viewing()) return false;
+    if (health) observedRun = activeRun(health, wanted.id);
+    applyRunControls();
     if (!full || full.error || !Array.isArray(full.messages)) {
       throw new Error(full?.error || "invalid session response");
     }
@@ -1960,22 +1976,25 @@ async function restoreSessionOnce(target, epoch, node = activeNode) {
 
 function setBusy(value) {
   busy = value;
-  // A reload that was deferred for a running run lands the moment it ends, so an update
-  // never sits invisible behind a finished run.
-  if (!value && pendingReload) {
-    pendingReload = false;
-    reload();
-  }
   // A run ending is what frees the node for everything the engine asked for while it ran.
   if (!value && document.body.classList.contains("engine")) reloadTopics();
+  applyRunControls();
+  if (value) startLiveness(); else stopLiveness();
+}
+
+function applyRunControls() {
+  // A durable follower owns controls too, but it must not pretend to own the
+  // original stream: `busy` still prevents repaint only for our own socket.
+  const value = composerBusy();
   document.getElementById('steer').hidden=!value;
   sendButton.classList.toggle("busy", value);
   sendButton.title = value ? "Stop" : "Send";
   sendButton.setAttribute("aria-label", sendButton.title);
   // The shell owns the button; telling it keeps Enter and the send path in step with the run.
   chatShell.busy = value;
-  if (value) startLiveness(); else stopLiveness();
   applySettingsSovereignty();
+  // Both a followed run and our own stream defer an update until ownership ends.
+  if (!value && pendingReload) { pendingReload = false; reload(); }
 }
 
 // Turn sovereignty for the model controls: a switch is seen by the next run, never by the one
@@ -1983,7 +2002,7 @@ function setBusy(value) {
 // mid-run cannot reach the streaming turn - and a control that moves under it misreports what
 // that turn actually used. Locked while a run streams, with the delay stated rather than silent.
 function applySettingsSovereignty() {
-  const locked = busy;
+  const locked = composerBusy();
   providerSelect.disabled = locked;
   modelSelect.disabled = locked;
   reasoningSelect.disabled = locked || !(settings.reasoning || {}).supported || me.role !== "master";
@@ -2710,7 +2729,7 @@ async function post(path, body) {
   // reasoning when a run starts - so a change now would be seen by the next turn at the
   // earliest, and sending it mid-run only makes the controls disagree with the run they are
   // describing. Refuse it, say when it will apply, and draw the controls from the node's answer.
-  if (busy) {
+  if (composerBusy()) {
     await reconcileControls("not applied \u2014 a run is in flight, so this change applies at the next turn");
     return;
   }
@@ -2908,6 +2927,7 @@ function syncUndoButtons() {}
 // eventual cancelled result, making Stop look inert even when the request failed.
 function cancelActiveRun() {
   const thread = chatSession;
+  if (!busy && observedRun?.session === thread) { cancelRun(runKey(observedRun)); return; }
   if (thread && activeRunId === null && submittedRunIds) {
     // Admission and the next health poll can cross. Resolve the new id once more instead of
     // falling back to the route's default, which would cancel the older running turn.
@@ -2944,25 +2964,41 @@ async function cancelRun(runId) {
 let steeringSubmission=null;
 let steeringPending=false;
 async function steerActiveRun() {
-  const text=input.value.trim(), thread=chatSession;
-  if(!busy || !thread || !text || steeringPending)return;
+  const text=input.value.trim(), thread=chatSession, node=activeNode, epoch=conversationEpoch;
+  const viewing=()=>chatSession===thread && activeNode===node && conversationEpoch===epoch;
+  if(!composerBusy() || !thread || !text || steeringPending)return;
   if(attachments.length) {setStatus('Steering accepts text only; attachments and draft kept.');return;}
-  if(!steeringSubmission || steeringSubmission.text!==text || steeringSubmission.thread!==thread)
-    steeringSubmission={text,thread,key:crypto.randomUUID()};
+  if(!steeringSubmission || steeringSubmission.text!==text || steeringSubmission.thread!==thread
+    || steeringSubmission.node!==node || steeringSubmission.epoch!==epoch)
+    steeringSubmission={text,thread,node,epoch,key:crypto.randomUUID()};
   const submission=steeringSubmission;
   steeringPending=true;
   document.getElementById('steer').disabled=true;
   try {
-    const response=await apiFetch('subagents',{method:'POST',headers:apiHeaders({'Content-Type':'application/json'}),
-      body:JSON.stringify({action:'steer_session',session_id:thread,text,idempotency_key:submission.key})});
-    const receipt=await response.json();
-    if(!response.ok || receipt.error || !receipt.id)throw new Error(receipt.error || 'missing steering receipt');
-    if(chatSession===thread && input.value.trim()===text) {
+    let receipt;
+    for(let attempt=0;attempt<2;attempt++) {
+      if(!viewing())return;
+      const response=await apiFetch('subagents',{method:'POST',headers:apiHeaders({'Content-Type':'application/json'}),
+        body:JSON.stringify({action:'steer_session',session_id:thread,text,idempotency_key:submission.key})});
+      if(!viewing())return;
+      receipt=await response.json();
+      if(!viewing())return;
+      // This explicit refusal occurs before dispatch. Unknown outcomes are never auto-retried.
+      if(response.status===503 && receipt.error==='read_capacity_busy' && attempt===0) {
+        setStatus('Control lane busy; retrying steering once. Draft kept; Stop remains available.');
+        await nodeHealth();
+        if(!viewing())return;
+        continue;
+      }
+      if(!response.ok || receipt.error || !receipt.id)throw new Error(receipt.error || 'missing steering receipt');
+      break;
+    }
+    if(viewing() && input.value.trim()===text) {
       input.value='';draftGeneration++;draftUndo=[];draftRedo=[];autosize();saveDraft();
     }
     steeringSubmission=null;
     setStatus('Steering '+receipt.state+' — applies at the next safe boundary; in-flight effects are not undone.');
-  } catch(error) {setStatus('Steering not confirmed; draft kept: '+error.message);}
+  } catch(error) {if(viewing())setStatus('Steering not confirmed; draft kept: '+error.message);}
   finally {steeringPending=false;document.getElementById('steer').disabled=false;}
 }
 document.getElementById('steer').addEventListener('click',steerActiveRun);
@@ -3001,7 +3037,7 @@ input.addEventListener("keydown", (event) => {
       if (commandMenu.activate()) { event.preventDefault(); return; }
     }
   }
-  if(accel && event.key==='Enter' && busy) {event.preventDefault();steerActiveRun();return;}
+  if(accel && event.key==='Enter' && composerBusy()) {event.preventDefault();steerActiveRun();return;}
   // Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y, the three spellings people actually use.
   // Only while the composer has focus, so we never shadow an undo a browser
   // context (a dialog, a native field) is entitled to handle itself.
@@ -3021,7 +3057,7 @@ input.addEventListener("keydown", (event) => {
     // says so by consuming the event. This branch is what a run in flight does with that key.
     if (event.defaultPrevented) return;
     event.preventDefault();
-    if (busy) {
+    if (composerBusy()) {
       // Typing ahead is not a stop gesture. The red button remains the explicit stop control; Enter
       // keeps the next prompt in the composer so one keystroke cannot cancel a healthy provider call.
       saveDraft();
@@ -3701,7 +3737,7 @@ function applyUiVersion(next) {
   if (next === version) return "same";
   version = next;
   hotSwapStyles();
-  if (busy) {
+  if (composerBusy()) {
     pendingReload = true;
     setStatus("update ready - reloading when this run finishes");
     updateLock("New UI is ready. Reloading waits for this run to finish; your place and draft are kept.", false);
@@ -3749,7 +3785,8 @@ function setConnecting(label) {
 /// routes do not, which is while a run is running. Null means the node really is not answering.
 async function nodeHealth() {
   try {
-    return await (await apiFetch("health", { headers: apiHeaders() })).json();
+    const response = await apiFetch("health", { headers: apiHeaders() });
+    return response.ok ? await response.json() : null;
   } catch (error) {
     return null;
   }
@@ -3884,6 +3921,8 @@ let liveSyncFailed = false;
 let nativeSessionPainted = null;
 
 function resetConversationFollowState() {
+  observedRun = null;
+  applyRunControls();
   transcriptReady = false;
   transcriptRetryAt = 0;
   transcriptFailures = 0;
@@ -3903,6 +3942,8 @@ function resetConversationFollowState() {
 // The local reader continues to drain it; its epoch prevents late events and cleanup from touching
 // the newly selected conversation.
 function detachConversationView() {
+  observedRun = null;
+  applyRunControls();
   if (busy) setBusy(false);
   controller = null;
   clearStreamNotice();
@@ -4015,12 +4056,15 @@ async function watchTurn() {
   const viewing=()=>node===activeNode && target===chatSession && epoch===conversationEpoch;
   try {
     const response = await apiFetch("health");
+    if (!response.ok) throw new Error("health unavailable");
     const health = await response.json();
     if (!viewing()) return;
     // Keep the session list's live badges in step with the run this loop is already watching, with
     // no extra request: a thread turns "running" the moment a run is admitted and back when it ends.
     if (document.body.classList.contains("engine")) applySessionHealth(health);
     const current = activeRun(health);
+    observedRun = current;
+    applyRunControls();
     if (current) {
       sawTurnInFlight = true;
       // Only when this window is not streaming the run itself: `busy` means its own stream is
@@ -5390,9 +5434,9 @@ function sessionMatches(session, query) {
 // three means the thread is live, and reading it needs no node-thread of its own.
 function runningSessions(health) {
   const ids = new Set();
-  for (const run of health?.runs || []) if (run.conversation) ids.add(run.conversation);
-  for (const nodeThread of health?.node_threads || []) if (nodeThread.session) ids.add(nodeThread.session);
-  if (health?.current?.session) ids.add(health.current.session);
+  for (const run of health?.runs || []) if (run.conversation && activeRun(health, run.conversation)) ids.add(run.conversation);
+  for (const nodeThread of health?.node_threads || []) if (sessionRunEntry(nodeThread)) ids.add(nodeThread.session);
+  if (sessionRunEntry(health?.current)) ids.add(health.current.session);
   return ids;
 }
 
