@@ -51,7 +51,7 @@ pub(crate) fn resolve_event(event:&Value) -> Result<Value> {
     deploy_protocol::fence(&intent,id)?;
     let parent=binding["parent"].as_str().context("return_parent_missing")?;
     if parent_owner(parent)?!=binding["owner"].as_str().unwrap_or("") { bail!("return_parent_owner_changed"); }
-    validated_ack(&binding,now_epoch())?;
+    if validated_ack(&binding,now_epoch())?.2.is_none() {bail!("check_ack_binding_missing; unknown, never replay");}
     let journal:Value=serde_json::from_slice(&std::fs::read(dir.join("returns").join(format!("{key}.json"))).context("return_journal_missing")?)?;
     if journal["id"]!=id || journal["event_key"]!=key || journal["expected_sha"]!=intent["expected_sha"] || journal["parent"]!=binding["parent"] || journal["owner"]!=binding["owner"] { bail!("return_journal_identity_mismatch"); }
     let at=journal["at"].as_u64().context("return_timestamp_missing")?;
@@ -70,7 +70,7 @@ pub(crate) fn resolve_event(event:&Value) -> Result<Value> {
 }
 
 /// Intake's immutable acknowledgement, never a queue receipt or a guessed clock.
-fn validated_ack(binding:&Value,now:u64) -> Result<(Value,u64)> {
+fn validated_ack(binding:&Value,now:u64) -> Result<(Value,u64,Option<Value>)> {
     let intent=&binding["intent"];
     let dir=sentinel_dir().join("deploy-protocol").join(binding["id"].as_str().context("ack_id_missing")?);
     let ack:Value=serde_json::from_slice(&std::fs::read(dir.join("ack.json")).context("ack_missing; unknown, never replay")?)
@@ -86,13 +86,58 @@ fn validated_ack(binding:&Value,now:u64) -> Result<(Value,u64)> {
     }
     let at=ack["at"].as_u64().context("ack_timestamp_unsupported; unknown, never replay")?;
     if at<intent["queued_at"].as_u64().unwrap_or(u64::MAX) || at>now {bail!("ack_timestamp_invalid; unknown, never replay");}
-    let check=dir.join("check.json");
-    if check.exists() {
-        let saved:Value=serde_json::from_slice(&std::fs::read(check)?)
-            .context("check_ack_binding_corrupt; unknown, never replay")?;
-        if saved["ack"]!=ack {bail!("check_ack_binding_changed_or_legacy; unknown, never replay");}
+    let check=match std::fs::read(dir.join("check.json")) {
+        Ok(bytes)=>{
+            let saved:Value=serde_json::from_slice(&bytes).context("check_ack_binding_corrupt; unknown, never replay")?;
+            bound_check(&saved,binding,&ack,at,now)?;
+            Some(saved)
+        },
+        Err(error) if error.kind()==std::io::ErrorKind::NotFound=>{
+            // Initial missing-ack UNKNOWN evidence may precede genuine intake. An established
+            // check cannot be reset by deleting it, even while its first return is still pending.
+            if dir.join("pending-return.json").exists() || dir.join("observation.json").exists() {
+                bail!("check_ack_binding_missing; unknown, never replay");
+            }
+            if dir.join("returns").exists() {
+                for entry in std::fs::read_dir(dir.join("returns"))? {
+                    let bytes=std::fs::read(entry?.path()).context("check_ack_binding_missing; prior return unreadable")?;
+                    let journal:Value=serde_json::from_slice(&bytes).context("check_ack_binding_missing; prior return corrupt")?;
+                    if journal["phase"]!="unknown" || !journal["detail"].as_str().unwrap_or("").starts_with("ack_") {
+                        bail!("check_ack_binding_missing; unknown, never replay");
+                    }
+                }
+            }
+            None
+        },
+        Err(error)=>return Err(error).context("check_ack_binding_unreadable; unknown, never replay"),
+    };
+    Ok((ack,at,check))
+}
+
+/// One current-check contract for observation, resolution and composed wake instructions.
+/// A missing check may be initialized by observation only; malformed state is never replaced.
+fn bound_check(saved:&Value,binding:&Value,ack:&Value,ack_at:u64,now:u64) -> Result<()> {
+    if saved.as_object().map(|o|o.keys().any(|k|!["id","expected_sha","parent","ack","at","next_at","due_at","coalesced"].contains(&k.as_str()))).unwrap_or(true) {
+        bail!("check_ack_binding_unknown; unsupported check revision");
     }
-    Ok((ack,at))
+    if saved["ack"]!=*ack {bail!("check_ack_binding_changed_or_legacy; unknown, never replay");}
+    let first=ack_at.checked_add(10).context("check_ack_binding_unknown; timestamp overflow")?;
+    let at=saved["at"].as_u64();
+    let next=saved["next_at"].as_u64();
+    if saved["id"]!=binding["id"] || saved["expected_sha"]!=binding["intent"]["expected_sha"] || saved["parent"]!=binding["parent"]
+        || at.map(|t|t<ack_at||t>now).unwrap_or(true)
+        || next.map(|t|t<first||(t-ack_at)%10!=0).unwrap_or(true) {
+        bail!("check_ack_binding_unknown; no queue-time fallback or replay");
+    }
+    if saved.get("due_at").is_some() || saved.get("coalesced").is_some() {
+        let due=saved["due_at"].as_u64().context("check_ack_binding_unknown; due timestamp unsupported")?;
+        let at=at.unwrap();
+        if due<first || (due-ack_at)%10!=0 || due>at {bail!("check_ack_binding_unknown; due timestamp invalid");}
+        let missed=(at-due)/10;
+        let expected=missed.checked_add(1).and_then(|n|n.checked_mul(10)).and_then(|n|due.checked_add(n));
+        if saved["coalesced"].as_u64()!=Some(missed) || next!=expected {bail!("check_ack_binding_unknown; due revision mismatch");}
+    } else if next!=Some(first) {bail!("check_ack_binding_unknown; initial deadline mismatch");}
+    Ok(())
 }
 
 fn observed_phase(binding:&Value,state:&Value,now:u64) -> (String,String) {
@@ -169,16 +214,11 @@ pub(crate) fn observe(id:&str) -> Result<()> {
         wa_operation::atomic_json(&dir.join("ack-problem.json"),&problem)?;
         bail!("{error}");
     }
-    let (ack,ack_at)=ack?;
+    let (ack,ack_at,checks)=ack?;
     if cursor["next_at"].as_u64().unwrap_or(0)>now {return Ok(());}
     // Check deadlines exist independently of parent delivery. A busy parent owns one pending event;
     // missed ten-second checks coalesce into the latest durable observation, without extra wakes.
-    let checks:Value=std::fs::read(dir.join("check.json")).ok().and_then(|b|serde_json::from_slice(&b).ok()).unwrap_or(Value::Null);
-    if !checks.is_null() && (checks["ack"]!=ack || checks["id"]!=id || checks["expected_sha"]!=binding["intent"]["expected_sha"] || checks["parent"]!=binding["parent"]
-        || checks["next_at"].as_u64().map(|t|t<ack_at+10 || (t-ack_at)%10!=0).unwrap_or(true)) {
-        wa_operation::atomic_json(&dir.join("ack-problem.json"),&json!({"id":id,"phase":"unknown","detail":"check_ack_binding_unknown; no queue-time fallback or replay","at":now}))?;
-        bail!("check_ack_binding_unknown; no queue-time fallback or replay");
-    }
+    let checks=checks.unwrap_or(Value::Null);
     let due=checks["next_at"].as_u64().unwrap_or(ack_at+10);
     if checks.is_null(){wa_operation::atomic_json(&dir.join("check.json"),&json!({"id":id,"expected_sha":binding["intent"]["expected_sha"],"ack":ack,"next_at":due,"parent":binding["parent"],"at":now}))?;}
     if now>=due {

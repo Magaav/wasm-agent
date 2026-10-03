@@ -15,6 +15,8 @@ fn returns_bind_runtime_owner_and_refuse_event_session_authority(){
  let dir=sentinel_dir().join("deploy-protocol/private-1/returns");std::fs::create_dir_all(&dir).unwrap();
  let journal=json!({"id":"private-1","event_key":"private-1-0","parent":"parent","owner":"owner","expected_sha":"a".repeat(40),"at":now_epoch(),"phase":"held","detail":"private causal event"});
  wa_operation::atomic_json(&dir.join("private-1-0.json"),&journal).unwrap();
+ let ack:Value=serde_json::from_slice(&std::fs::read(dir.parent().unwrap().join("ack.json")).unwrap()).unwrap();
+ wa_operation::atomic_json(&dir.parent().unwrap().join("check.json"),&json!({"id":"private-1","expected_sha":intent["expected_sha"],"parent":"parent","ack":ack,"at":now_epoch(),"next_at":ack["at"].as_u64().unwrap()+10})).unwrap();
  assert_eq!(sentinel_return::resolve_event(&json!({"id":"private-1","event_key":"private-1-0"})).unwrap(),journal);
  let mut wrong=journal.clone();wrong["parent"]=json!("victim");wa_operation::atomic_json(&dir.join("private-1-0.json"),&wrong).unwrap();
  assert!(sentinel_return::resolve_event(&json!({"id":"private-1","event_key":"private-1-0"})).is_err());
