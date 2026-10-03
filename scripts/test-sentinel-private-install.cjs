@@ -32,6 +32,7 @@ async function gone(pid){await until(()=>{try{process.kill(pid,0);return false;}
 (async()=>{try{
  // Source is a full clone with an actual private remote main, never fake upstream on a live checkout.
  const proof=await import(pathToFileURL(path.join(source,'scripts/sentinel-install-proof.mjs')).href);
+ const verifyActual=(...a)=>proof.verifyActual(...a,privateEnv);
  assert.equal(proof.sourceIdentity(source,packet.head).tree,packet.tree);
  await run('cargo',['build','--release','--offline','--manifest-path','rust/Cargo.toml','-p','wa-host'],'source-host-build');
  await run('cargo',['build','--release','--offline','--manifest-path','rust/wa-sentinel/Cargo.toml'],'source-sentinel-build');
@@ -70,7 +71,7 @@ async function gone(pid){await until(()=>{try{process.kill(pid,0);return false;}
  releaseBusy();releaseBusy=null;await busyDuringUpdate;
  await until(()=>fs.existsSync(path.join(dir,'result.json')),'actual installer terminal result',600000);
  const result=JSON.parse(fs.readFileSync(path.join(dir,'result.json')));assert.equal(result.ok,true,JSON.stringify(result));assert.equal(result.request_id,request.id);
- const actual=proof.verifyActual(source,install,request,JSON.parse(fs.readFileSync(path.join(dir,'binding.json'))),dir);
+ const actual=verifyActual(source,install,request,JSON.parse(fs.readFileSync(path.join(dir,'binding.json'))),dir);
  assert.equal(actual.failed,0);assert.equal(actual.skipped,0);
  await until(()=>notices.some(n=>n.includes('phase "verified"')),'actual Lua verified terminal return',180000);
  const terminal=notices.filter(n=>n.includes('phase "verified"'));assert.equal(terminal.length,1);
@@ -101,19 +102,19 @@ async function gone(pid){await until(()=>{try{process.kill(pid,0);return false;}
   ['missing',()=>fs.writeFileSync(resultFile,JSON.stringify({...result,at:undefined})),()=>fs.writeFileSync(resultFile,resultBytes)],
   ['partial',()=>fs.writeFileSync(installedFile,installedBytes.toString().replace('record_role=final','record_role=interim')),()=>fs.writeFileSync(installedFile,installedBytes)],
   ['source',()=>fs.writeFileSync(installedFile,installedBytes.toString().replace('resolved_commit='+packet.head,'resolved_commit='+'b'.repeat(40))),()=>fs.writeFileSync(installedFile,installedBytes)],
- ]) {try{mutate();assert.throws(()=>proof.verifyActual(source,install,request,JSON.parse(fs.readFileSync(path.join(dir,'binding.json'))),dir),undefined,name);negativeCount++;}finally{restore();}}
- const uiFile=path.join(install,'ui/index.html'),uiBytes=fs.readFileSync(uiFile);try{fs.appendFileSync(uiFile,'\nprivate hash negative');assert.throws(()=>proof.verifyActual(source,install,request,JSON.parse(fs.readFileSync(path.join(dir,'binding.json'))),dir),/ui_mismatch/);negativeCount++;}finally{fs.writeFileSync(uiFile,uiBytes);}
+ ]) {try{mutate();assert.throws(()=>verifyActual(source,install,request,JSON.parse(fs.readFileSync(path.join(dir,'binding.json'))),dir),undefined,name);negativeCount++;}finally{restore();}}
+ const uiFile=path.join(install,'ui/index.html'),uiBytes=fs.readFileSync(uiFile);try{fs.appendFileSync(uiFile,'\nprivate hash negative');assert.throws(()=>verifyActual(source,install,request,JSON.parse(fs.readFileSync(path.join(dir,'binding.json'))),dir),/ui_mismatch/);negativeCount++;}finally{fs.writeFileSync(uiFile,uiBytes);}
  const binding=JSON.parse(fs.readFileSync(path.join(dir,'binding.json')));
- assert.throws(()=>proof.verifyActual(source,install,request,{...binding,owner:'wrong-owner'},dir),/binding_mismatch/);negativeCount++;
- const artifactBytes=fs.readFileSync(binary);try{fs.appendFileSync(binary,'private source artifact hash negative');assert.throws(()=>proof.verifyActual(source,install,request,binding,dir),/built_artifact_mismatch/);negativeCount++;}finally{fs.writeFileSync(binary,artifactBytes);}
+ assert.throws(()=>verifyActual(source,install,request,{...binding,owner:'wrong-owner'},dir),/binding_mismatch/);negativeCount++;
+ const artifactBytes=fs.readFileSync(binary);try{fs.appendFileSync(binary,'private source artifact hash negative');assert.throws(()=>verifyActual(source,install,request,binding,dir),/built_artifact_mismatch/);negativeCount++;}finally{fs.writeFileSync(binary,artifactBytes);}
  // Remove only the causal request comparison in a private copy; the actual bad outcome now passes.
  const originalHelper=fs.readFileSync(path.join(source,'scripts/sentinel-install-proof.mjs'),'utf8');
  const mutantFile=path.join(base,'causal-check-removed.mjs');
  assert(originalHelper.includes('result?.request_id!==intent.id||'));
  fs.writeFileSync(mutantFile,originalHelper.replace('result?.request_id!==intent.id||',''));
  const mutant=await import(pathToFileURL(mutantFile).href);
- try{fs.writeFileSync(resultFile,JSON.stringify({...result,request_id:'wrong-request'}));assert.equal(mutant.verifyActual(source,install,request,binding,dir).ok,true,'removed causal check must admit the actual wrong request');negativeCount++;save('causal-removal.json',{red:true,actual_wrong_request:'wrong-request',original_refused:true,mutant_admitted:true});}finally{fs.writeFileSync(resultFile,resultBytes);}
- const clean=proof.verifyActual(source,install,request,JSON.parse(fs.readFileSync(path.join(dir,'binding.json'))),dir);assert.equal(clean.ok,true);
+ try{fs.writeFileSync(resultFile,JSON.stringify({...result,request_id:'wrong-request'}));assert.equal(mutant.verifyActual(source,install,request,binding,dir,privateEnv).ok,true,'removed causal check must admit the actual wrong request');negativeCount++;save('causal-removal.json',{red:true,actual_wrong_request:'wrong-request',original_refused:true,mutant_admitted:true});}finally{fs.writeFileSync(resultFile,resultBytes);}
+ const clean=verifyActual(source,install,request,JSON.parse(fs.readFileSync(path.join(dir,'binding.json'))),dir);assert.equal(clean.ok,true);
  save('result.json',{ok:true,request_id:request.id,head:packet.head,tree:packet.tree,ack_ms:ackMs,checks:10+negativeCount+admissionNegatives,skipped:0,paid_calls:0,actual_installer:true,actual_verifier:true,private_source:source,notices:terminal.length});
  console.log(`sentinel private install ok (${10+negativeCount+admissionNegatives} checks, 0 skipped)`);
  }finally{

@@ -47,7 +47,7 @@ export function processIdentity(pid) {
  const stat=fs.readFileSync(`/proc/${pid}/stat`,'utf8').split(') ').at(-1).split(' ');
  return {pid,image:fs.readlinkSync(`/proc/${pid}/exe`),created:stat[19]};
 }
-export function snapshot(root,install,manifest) {
+export function snapshot(root,install,manifest,environment=process.env) {
  const identity=sourceIdentity(root);
  const suffix=process.platform==='win32'?'.exe':'';
  const nodeFile=path.join(install,'wa'+suffix),sentFile=path.join(install,'wa-sentinel'+suffix);
@@ -61,7 +61,8 @@ export function snapshot(root,install,manifest) {
  const scriptFiles=manifest || files(path.join(install,'scripts')).filter(n=>fs.existsSync(path.join(root,'scripts',n))&&fs.statSync(path.join(root,'scripts',n)).isFile());
  for(const name of ['deploy.sh','upgrade.sh','verify-install.sh','lib/service-target.sh','sentinel-install-proof.mjs','sentinel-return-prepare.sh'])if(!scriptFiles.includes(name))throw Error('required_script_missing:'+name);
  for(const name of scriptFiles)if(hash(path.join(root,'scripts',name))!==hash(path.join(install,'scripts',name)))throw Error('script_mismatch:'+name);
- const config=path.join(process.env.WASM_AGENT_HOME,'.wasm-agent');
+ if(!environment.WASM_AGENT_HOME)throw Error('explicit_runtime_home_required');
+ const config=path.join(environment.WASM_AGENT_HOME,'.wasm-agent');
  const listener_pid=Number(fs.readFileSync(path.join(install,'serve.pid'),'utf8').trim());
  const watcher_pid=Number(fs.readFileSync(path.join(config,'sentinel/sentinel.pid'),'utf8').trim());
  const listener=processIdentity(listener_pid),watcher=processIdentity(watcher_pid);
@@ -76,28 +77,28 @@ export function finalizeRecord(root,install) {
  fs.writeFileSync(file+'.proof.tmp',Object.entries(merged).map(([k,v])=>`${k}=${v}`).join('\n')+'\n');fs.renameSync(file+'.proof.tmp',file);
  return facts;
 }
-export function verifyActual(root,install,intent,binding,evidence) {
+export function verifyActual(root,install,intent,binding,evidence,environment=process.env) {
  if(binding.id!==intent.id||JSON.stringify(binding.intent)!==JSON.stringify(intent)||binding.owner!==intent.owner||binding.parent!==intent.session)throw Error('binding_mismatch');
  sourceIdentity(root,intent.expected_sha);
  const effect=read(path.join(evidence,'effect.json'));
  if(effect.id!==intent.id||effect.expected_sha!==intent.expected_sha||effect.owner!==binding.owner||effect.parent!==binding.parent||effect.tree!==sourceIdentity(root,intent.expected_sha).tree||effect.script_sha256!==hash(path.join(root,'scripts/deploy.sh')))throw Error('effect_generation_mismatch');
  const installed=record(path.join(install,'installed.txt'));
  for(const k of ['listener_pid','watcher_pid'])installed[k]=Number(installed[k]);
- const actual=snapshot(root,install,JSON.parse(installed.script_files));
+ const actual=snapshot(root,install,JSON.parse(installed.script_files),environment);
  if(actual.listener_created!==installed.listener_created||actual.watcher_created!==installed.watcher_created)throw Error('process_creation_mismatch');
  const result=read(path.join(evidence,'result.json'));
  const script=path.join(root,'scripts/verify-install.sh');
  const bash=process.platform==='win32'?'C:/Program Files/Git/bin/bash.exe':'bash';
- const r=spawnSync(bash,[script.replaceAll('\\','/'),'--json'],{encoding:'utf8',windowsHide:true,timeout:120000,env:{...process.env,WA_DEPLOY_ROOT:root,WA_INSTALL_DIR:install}});
+ const r=spawnSync(bash,[script.replaceAll('\\','/'),'--json'],{encoding:'utf8',windowsHide:true,timeout:120000,env:{...environment,WA_DEPLOY_ROOT:root,WA_INSTALL_DIR:install}});
  fs.mkdirSync(evidence,{recursive:true});
  const nonce=Date.now()+'-'+process.pid;
  fs.writeFileSync(path.join(evidence,`verify-${nonce}.stdout`),r.stdout||'');fs.writeFileSync(path.join(evidence,`verify-${nonce}.stderr`),r.stderr||'');
  const raw=JSON.parse(r.stdout);
- const health=JSON.parse(run('curl',['-s','--fail','-m','6',`http://127.0.0.1:${process.env.WA_PORT||process.env.WASM_AGENT_PORT}/health`]));
+ const health=JSON.parse(run('curl',['-s','--fail','-m','6',`http://127.0.0.1:${environment.WA_PORT||environment.WASM_AGENT_PORT}/health`],{env:environment}));
  if(health.ok!==true)throw Error('health_not_ok');
  const proof={...actual,...raw,exit:r.status,request_id:intent.id,expected_sha:intent.expected_sha,owner:binding.owner,parent:binding.parent,at:new Date().toISOString(),raw_stdout:`verify-${nonce}.stdout`,raw_stderr:`verify-${nonce}.stderr`};
  // Fresh native identities are sampled after the verifier, never normalized from expected values.
- Object.assign(proof,snapshot(root,install,JSON.parse(installed.script_files)));
+ Object.assign(proof,snapshot(root,install,JSON.parse(installed.script_files),environment));
  if(proof.listener_created!==installed.listener_created||proof.watcher_created!==installed.watcher_created)throw Error('process_creation_mismatch');
  proof.at=new Date().toISOString();
  const verdict=installVerdict(intent,result,installed,proof);
