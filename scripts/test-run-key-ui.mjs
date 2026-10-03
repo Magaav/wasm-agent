@@ -1,0 +1,10 @@
+import fs from 'node:fs';
+import vm from 'node:vm';
+import assert from 'node:assert/strict';
+const source=fs.readFileSync('ui/app.js','utf8');
+const start=source.indexOf('function runKey('),end=source.indexOf('\nfunction identifySubmittedRun',start);
+const context={};vm.createContext(context);vm.runInContext(source.slice(start,end),context);
+for(const key of ['1','9007199254740993','9223372036854775807'])assert.equal(context.runKey({run_key:key,run_id:Number(key)}),key);
+for(const key of ['0','01','-1','1.5','9223372036854775808',9007199254740992])assert.equal(context.runKey(key),null);
+assert.equal(context.runKey(99),'99');
+console.log('run key UI ok (10 checks, 0 skipped; exact helper contract only)');

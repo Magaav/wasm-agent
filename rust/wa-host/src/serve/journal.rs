@@ -132,6 +132,26 @@ impl Journal {
 mod tests {
     use super::*;
     #[test]
+    fn high_identity_is_exact_and_owner_scoped() {
+        let root=std::env::temp_dir().join(format!("wa-high-run-{}-{}",std::process::id(),crate::serve::now_ms()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path=root.join("memory.db");
+        let journal=Journal::open(&path).unwrap();
+        let id=9_007_199_254_740_993u64;
+        journal.db.lock().unwrap().execute("INSERT INTO admissions(id,owner,conversation,state,created_at,updated_at) VALUES(?, 'alice','thread','completed',0,0)",[id]).unwrap();
+        assert_eq!(journal.inspect("alice","thread",id).unwrap().unwrap()["run_key"],id.to_string());
+        assert!(journal.inspect("bob","thread",id).unwrap().is_none());
+        assert!(journal.inspect("alice","foreign",id).unwrap().is_none());
+        assert!(journal.inspect("alice","thread",id+1).unwrap().is_none());
+        journal.event(id,r#"{"type":"delta","text":"exact high id"}"#).unwrap();
+        assert_eq!(journal.replay("alice","thread",id,0,true).unwrap().unwrap()["run_key"],id.to_string());
+        assert!(journal.replay("bob","thread",id,0,true).unwrap().is_none());
+        drop(journal);
+        let journal=Journal::open(&path).unwrap();
+        assert_eq!(journal.views("alice","thread").unwrap()[0]["run_key"],id.to_string());
+        drop(journal);std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
     fn restart_preserves_evidence_scopes_owners_and_never_replays_work() {
         let root = std::env::temp_dir().join(format!("wa-run-journal-{}-{}",std::process::id(),crate::serve::now_ms()));
         std::fs::create_dir_all(&root).unwrap();

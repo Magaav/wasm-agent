@@ -735,6 +735,7 @@ fn health_body() -> Vec<u8> {
                 "ms": now_ms().saturating_sub(*started),
                 "session": node_thread_session(0),
                 "run_id": node_thread_run_id(0),
+                "run_key": node_thread_run_id(0).map(|id|id.to_string()),
             })
         })
     });
@@ -756,7 +757,7 @@ fn health_body() -> Vec<u8> {
                 let run = busy.as_ref().is_some_and(|(label, _)| label.starts_with("POST /chat"));
                 if current.is_none() && run {
                     if let Some((label, started)) = &busy {
-                        current = Some(serde_json::json!({"label":label,"ms":now_ms().saturating_sub(*started),"node_thread_id":index,"session":node_thread_session(index),"run_id":node_thread_run_id(index)}));
+                        current = Some(serde_json::json!({"label":label,"ms":now_ms().saturating_sub(*started),"node_thread_id":index,"session":node_thread_session(index),"run_id":node_thread_run_id(index),"run_key":node_thread_run_id(index).map(|id|id.to_string())}));
                     }
                 }
                 node_threads.push(serde_json::json!({
@@ -764,6 +765,7 @@ fn health_body() -> Vec<u8> {
                     "role": if index < control_floor() { "runs" } else { "reads" },
                     "session": node_thread_session(index),
                     "run_id": node_thread_run_id(index),
+                    "run_key": node_thread_run_id(index).map(|id|id.to_string()),
                     "state": if age >= stall_seconds() * 1000 { "stalled" } else if age < 1000 { "alive" } else { "busy" },
                     "age_ms": age,
                     "busy_ms": busy.as_ref().map(|(_, started)| now_ms().saturating_sub(*started)),
@@ -1270,6 +1272,7 @@ fn handle_run_events(request: &Request, resolve_tx: &std::sync::mpsc::SyncSender
     let body = serde_json::json!({
         "ok": true,
         "run_id": run_id,
+        "run_key": run_id.to_string(),
         "checkpoint_seq": log.checkpoint_seq,
         "checkpoint_message_seq": log.checkpoint_message_seq,
         "next_seq": log.next_seq,
@@ -2194,7 +2197,7 @@ pub(crate) fn enqueue_completion(body: &str) -> serde_json::Value {
             let sender=POOL.get().and_then(|pool| pool.slots.lock().ok().and_then(|slots| slots.get(node_thread).cloned().flatten()));
             QUEUED.fetch_add(1,Ordering::Relaxed);
             if sender.is_some_and(|s| s.try_send(Work::Completion {body:body.to_string(),run_id,cancel,sockets}).is_ok()) {
-                serde_json::json!({"accepted":true,"run_id":run_id})
+                serde_json::json!({"accepted":true,"run_id":run_id,"run_key":run_id.to_string()})
             } else {
                 QUEUED.fetch_sub(1,Ordering::Relaxed);scheduler::complete_run(run_id);
                 serde_json::json!({"error":"completion_queue_full","not_started":true})

@@ -2032,7 +2032,7 @@ function startLiveness() {
     lastStalled = stalled;
     const working = stalled < 5000 || !climbingSince;
     const busyFor = running.busy_ms || running.ms || Date.now() - (runStartedAt || Date.now());
-    const ownState = (health.run_ids || []).find((run) => Number(run.run_id) === activeRunId)?.state;
+    const ownState = (health.run_ids || []).find((run) => run.conversation===chatSession && runKey(run)===runKey(activeRunId))?.state;
     setLiveness({
       working,
       stalled,
@@ -2083,12 +2083,19 @@ function setLiveness(info) {
   pin();
 }
 
+// Canonical decimal identity. Never stringify a rounded legacy JSON number.
+function runKey(value) {
+  const raw=value && typeof value==='object' ? (value.run_key ?? value.run_id) : value;
+  if(typeof raw==='number')return Number.isSafeInteger(raw)&&raw>0 ? String(raw) : null;
+  if(typeof raw!=='string'||! /^[1-9][0-9]*$/.test(raw))return null;
+  return BigInt(raw)<=9223372036854775807n ? raw : null;
+}
 function identifySubmittedRun(health) {
   if (activeRunId !== null || !submittedRunIds || !chatSession) return;
   const candidates = (health?.run_ids || [])
-    .filter((run) => run.conversation === chatSession && Number.isSafeInteger(run.run_id) && !submittedRunIds.has(run.run_id))
-    .sort((a, b) => Number(a.run_id) - Number(b.run_id));
-  if (candidates.length) activeRunId = Number(candidates[candidates.length - 1].run_id);
+    .filter((run) => run.conversation === chatSession && runKey(run)!==null && !submittedRunIds.has(runKey(run)))
+    .sort((a, b) => BigInt(runKey(a))<BigInt(runKey(b)) ? -1 : 1);
+  if (candidates.length) activeRunId = runKey(candidates[candidates.length - 1]);
 }
 
 // The inlining rule for text attachments is the shell's (§11), shared with the child panes.
@@ -2202,8 +2209,7 @@ function runStanding(health, view = {}) {
     // The run the node accepted for this conversation is the node's own record of it, and it outranks the
     // thread list: a thread is an implementation detail that a respawn or a re-queue may change.
     if (accepted !== null) {
-      const mine = ids.find((run) => run && Number.isSafeInteger(run.run_id)
-        && Number.isSafeInteger(accepted) && run.run_id === accepted
+      const mine = ids.find((run) => run && runKey(run)!==null && runKey(run)===runKey(accepted)
         && run.conversation === view.session);
       if (mine && /^(queued|running|not_started)$/.test(mine.state)) return "running";
       if (mine && /^(completed|cancelled|failed)$/.test(mine.state)) return "over";
@@ -2228,12 +2234,12 @@ function runStanding(health, view = {}) {
 // Authenticated durable journal status, scoped by conversation. Numeric IDs beyond the safe
 // integer range cannot be recovered from this server's numeric JSON contract; never guess them.
 async function durableRunStanding(thread,runId) {
-  if(!Number.isSafeInteger(runId))return 'busy-unknown';
+  if(runKey(runId)===null)return 'busy-unknown';
   try {
     const response=await apiFetch('runs',{method:'POST',headers:apiHeaders({'Content-Type':'application/json'}),body:JSON.stringify({action:'status',thread})});
     const payload=await response.json();
     if(!response.ok || payload.ok!==true || payload.conversation!==thread)return 'busy-unknown';
-    const row=(payload.runs||[]).find(row=>Number.isSafeInteger(row.run_id)&&row.run_id===runId);
+    const row=(payload.runs||[]).find(row=>runKey(row)!==null&&runKey(row)===runKey(runId));
     if(/^(completed|cancelled|failed)$/.test(row?.state))return 'over';
     if(/^(queued|running|not_started)$/.test(row?.state))return 'running';
   } catch(error) { /* observation unavailable; stream remains authoritative */ }
@@ -2242,7 +2248,7 @@ async function durableRunStanding(thread,runId) {
 
 function threadOfRun(health, runId, session = chatSession) {
   const carries = (entry) => entry && entry.session === session
-    && Number.isSafeInteger(entry.run_id) && Number.isSafeInteger(runId) && entry.run_id === runId;
+    && runKey(entry)!==null && runKey(entry)===runKey(runId);
   return (health?.node_threads || []).find(carries) || (carries(health?.current) ? health.current : null);
 }
 
@@ -2287,7 +2293,7 @@ async function send(text, options = {}) {
     const before = await (await apiFetch("health", { headers: apiHeaders() })).json();
     submittedRunIds = new Set((before.run_ids || [])
       .filter((run) => run.conversation === runThread)
-      .map((run) => Number(run.run_id)));
+      .map(runKey).filter(key=>key!==null));
   } catch (error) {
     submittedRunIds = new Set();
   }
@@ -2339,7 +2345,7 @@ async function send(text, options = {}) {
         if (turnFinished) { clearInterval(watchdog); asking = false; return; }
         let standing = runStanding(health, { session: runThread, runId: activeRunId,
           submitted: submittedRunIds, finished: turnFinished });
-        if (standing === 'busy-unknown' && Number.isSafeInteger(activeRunId)) {
+        if (standing === 'busy-unknown' && runKey(activeRunId)!==null) {
           const durable=await durableRunStanding(runThread,activeRunId);
           if(turnFinished || !stillViewingRun()) return;
           if(durable==='over') standing='over';
@@ -3905,8 +3911,8 @@ async function syncLiveRun(current) {
   if (current.session && current.session !== target) return;
   const poll = { target, epoch, node };
   liveRunPolling = poll;
-  if(!Number.isSafeInteger(current.run_id)) {liveRunPolling=null;setStatus('exact run identity unavailable; saved transcript only');return;}
-  const id = current.run_id;
+  const id=runKey(current);
+  if(id===null) {liveRunPolling=null;setStatus('exact run identity unavailable; saved transcript only');return;}
   const viewing = () => chatSession === target && conversationEpoch === epoch && activeNode === node
     && liveRunId === id && liveRunPolling === poll && !busy;
   if (liveRunId !== id) {
@@ -4674,12 +4680,27 @@ async function panePage(pane, options) {
 // on a `tool` row whose call sits just above it. In this renderer a result belongs to the call above
 // it, so a page cut between them would draw nothing for evidence the reader came to see. The loop is
 // bounded and normally never runs: one page is the whole conversation.
+// Shared ordered ledger collector: callers supply their authenticated session page transport.
+// It preserves original rows and identities and refuses cyclic paging rather than inventing history.
+async function collectSessionHistory(readPage) {
+  let page=await readPage({}),rows=page.messages||[],seen=new Set();
+  while(page.has_more_before) {
+    const cursor=page.next_before_seq ?? rows[0]?.seq;
+    if(cursor==null || seen.has(cursor))throw Error('session_cursor_did_not_advance');
+    seen.add(cursor);
+    page=await readPage({before_seq:cursor});
+    const earlier=(page.messages||[]).filter(row=>row.seq<cursor);
+    if(!earlier.length)throw Error('session_history_incomplete');
+    rows=earlier.concat(rows);
+  }
+  return rows;
+}
 async function paneMessages(pane) {
   // More than the node's default page of eight rows, so a child's transcript is the conversation and
   // not just its tail. The node still bounds the page - by bytes, by its own budget - and answers with
   // an address for a row too large to send; the rows are then drawn by the window's own renderer.
   const page=await panePage(pane,{});
-  let rows=page.messages || [];
+  let rows=page.has_more_before ? await collectSessionHistory(args=>panePage(pane,args)) : (page.messages || []);
   for(let older=0; older<3 && rows[0]?.role==='tool'; older++) {
     const first=Number(rows[0].seq);
     if(!Number.isFinite(first) || first<=1) break;
