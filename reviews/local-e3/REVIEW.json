@@ -1,0 +1,17 @@
+{
+ "schema":1,
+ "scope":"full-delivery",
+ "producer":"child:dispatch:1f044075-6b4b-4bce-b359-40c131d73533",
+ "reviewer":"child:dispatch:f5f425af-bb34-4f2b-84d2-ecadaf4df855",
+ "tip":"e3aa40026f40c24363327d6250bd50953e646e36",
+ "tree":"b954c3120243f6114adf8e715fd708f0cdbc3a2a",
+ "verdict":"passed",
+ "published":false,
+ "admission_verified":false,
+ "gate_verified":false,
+ "findings":[{"class":"boundary","status":"documented","text":"Acceptance covers cooperative local full-delivery protocol, not atomic Git/session locking, malicious evidence-store writers, production wave acceptance or release verification. Mutations after last observation remain outside supported atomicity."}],
+ "evidence":["reviews/local-e3/run.log","reviews/local-e3/proof.json","reviews/local-e3/consumer.log","reviews/local-e3/independent.log","reviews/local-e3/test-delivery-refresh.mjs.log","reviews/local-e3/test-delivery-admission.mjs.log","reviews/local-e3/test-delivery-store.mjs.log","reviews/local-e3/test-merge-lane.mjs.log","reviews/local-e3/wave.log"],
+ "checks":{"exact_source_generated_proof":0,"canonical_consumer":0,"independent_extended_consumer":0,"normal_wave_refusal":2},
+ "source":"exact immutable candidate clone, private linked Git worktrees and OS-temp session SQLite; authentic source-generated receipt, not reviewer merged HEAD",
+ "limitations":"No production acceptance, publication, release gate or atomic cross-store lock asserted. Source result is immutable once committed; review commit is the independent anchor, not fabricated production admission. Existing historical held reviews retained."
+}

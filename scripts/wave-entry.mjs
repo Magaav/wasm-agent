@@ -24,7 +24,7 @@ function registration(repo) {
   if(row.schema!==1 || key(location(row.repo))!==key(store) || !row.owner || !row.config || !row.source_root)throw Error('wave_registration_unverifiable');
   return {...row,store};
 }
-export function checkAdmission(repo,{phase='produce',recovery=null}={}) {
+export function checkAdmission(repo,{phase='produce',recovery=null,native=null,source=null}={}) {
   try {
     if(!['produce','admit','land','allocate','observe'].includes(phase))throw Error('unknown_wave_admission_phase');
     const file=path.join(location(repo),'registration.json');
@@ -63,7 +63,7 @@ export function checkAdmission(repo,{phase='produce',recovery=null}={}) {
     const unverified=unfinished.find(entry=>!['verified','open'].includes(entry.verdict.convergence));
     if(['land','admit'].includes(phase) && unverified){
       const original_refusal=`wave_convergence_unverified:${unverified.row.id}:${unverified.row.state}:${unverified.verdict.reason}`;
-      if(recovery){if(unfinished.length!==1)throw Error('recovery_multiple_unfinished_waves');return recoveryAdmission(repo,row.store,{phase,recovery,original_refusal,named});}
+      if(recovery){if(unfinished.length!==1)throw Error('recovery_multiple_unfinished_waves');return recoveryAdmission(repo,row.store,{phase,recovery,original_refusal,named},{native,source});}
       throw Error(original_refusal);
     }
     // PRODUCING AND ALLOCATING. An ON umbrella admits them, and so does an OFF or unobservable one:

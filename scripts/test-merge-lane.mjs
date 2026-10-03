@@ -407,6 +407,18 @@ export function audit(repo,{target='main'}={}) {
   const receipt=JSON.parse(fs.readFileSync(actual.json.gate.full_receipt));
   const proof=fullProof(receipt,actual.json.candidate.tree,{ownerRepo:repo});
   ok(receipt.schema===2&&proof.verified,'retained proof verifies after actual clone removal',proof.reason);
+  const driver=proof.runner;
+  const driverRelative=path.relative(driver.source_repo,driver.path).split(path.sep).join('/');
+  const committedDriver=spawnSync('git',['show',`${driver.source_head}:${driverRelative}`],{cwd:driver.source_repo});
+  ok(committedDriver.status===0 && crypto.createHash('sha256').update(committedDriver.stdout).digest('hex')===driver.sha256,
+    'runner hash equals immutable committed original driver bytes, not candidate filename or HEAD hint');
+  const original=JSON.parse(fs.readFileSync(receipt.source_receipt.path));
+  const altered={...original,runner:{...original.runner,sha256:'0'.repeat(64)}};
+  // Original disposable repo is gone: use its immutable retained scope for the positive
+  // check above; independently reject an altered retained identity annotation here.
+  const alteredRetained={...receipt,runner:altered.runner};
+  ok(fullProof(alteredRetained,actual.json.candidate.tree,{ownerRepo:repo}).verified!==true,
+    'altered recorded driver hash is rejected rather than relabelled');
   ok(proof.tested_repo!==repo&&!fs.existsSync(proof.tested_repo),'original disposable tested repo preserved and actually retired');
   ok(proof.head===actual.json.candidate.head,'actual tested HEAD remains immutable');
   const again=lane(repo,['--base','main','change/one','--no-reuse-tree'],env);

@@ -1,0 +1,12 @@
+{"cwd":"C:\\Users\\Victor\\AppData\\Local\\Temp\\wa-independent-e3-Ko0hu2\\source","status":0}
+{
+  "admission_verified": true,
+  "gate_verified": false,
+  "requires_combined_gate": true,
+  "head": "e3aa40026f40c24363327d6250bd50953e646e36",
+  "tree": "b954c3120243f6114adf8e715fd708f0cdbc3a2a",
+  "checks": [
+    "delivery-subsystem"
+  ],
+  "receipt": "C:\\Users\\Victor\\AppData\\Local\\Temp\\wa-independent-e3-Ko0hu2\\source\\.git\\wa-producer-check.json"
+}
