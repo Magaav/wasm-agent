@@ -63,6 +63,14 @@ function finish(res,text){event(res,{choices:[{delta:{content:text},finish_reaso
   await until(()=>evaluate(a,"transcriptReady && document.getElementById('messages').textContent.includes('RECOVERY-A')").catch(()=>false),'reload durable transcript during run');
   await until(()=>evaluate(a,"document.getElementById('messages').textContent.includes('LIVE-A')").catch(()=>false),'checkpoint/live cursor reconciliation');
   check(await evaluate(a,"input.value==='PRESERVED-DRAFT'"),'draft survives real navigation');
+  // An actual child host on the same page uses the production renderer and journal attachment.
+  await evaluate(a,`window.recoveryPane=document.createElement('wa-agent-session');document.body.append(recoveryPane);recoveryPane.task={session_id:'thread-A',subagent_id:'fixture-read-host',state:'running',settled:false};window.originalPaneMessages=paneMessages;paneMessages=async()=>{const r=await apiFetch('session?id=thread-A',{headers:apiHeaders()});return {rows:(await r.json()).messages};};refreshAgentPane(recoveryPane).then(()=>true)`);
+  await until(()=>evaluate(a,"recoveryPane.transcript.textContent.includes('LIVE-A')"),'child journal tail after actual main reload');
+  const ledgerBefore=await api('session?id=thread-A');
+  report.savedIdentity=ledgerBefore.messages.map(m=>({id:m.id,seq:m.seq,role:m.role,content:m.content}));
+  check(await evaluate(a,"recoveryPane.transcript.textContent.split('LIVE-A').length===2"),'child tail exactly once');
+  await evaluate(a,'refreshAgentPane(recoveryPane).then(()=>true)');
+  check(await evaluate(a,"recoveryPane.transcript.textContent.split('LIVE-A').length===2"),'repeated child reconnect does not duplicate tail');
   check((await api('health')).runs.length===2,'recovery did not require run settlement');
   await evaluate(b,'apiTimeout=80; true');delayedWrite=true;
   await evaluate(b,"setProvider('gpt').then(()=>true)");
@@ -78,6 +86,7 @@ function finish(res,text){event(res,{choices:[{delta:{content:text},finish_reaso
   check((await api('health')).runs.some(r=>r.conversation==='thread-B'),'second long run remains active during error recovery');
   const recovered=await api('session?id=thread-A');check(recovered.messages.every((m,i,all)=>i===0||m.seq>all[i-1].seq),'durable message order intact');
   check(fs.readFileSync(path.join(root,'effects'),'utf8').trim().split(/\r?\n/).length===1,'reconnect/reload never replays tool effect');
+  check(report.savedIdentity.every(m=>recovered.messages.some(r=>r.id===m.id&&r.seq===m.seq&&r.role===m.role&&r.content===m.content)),'real reload/drop preserves exact saved message identity and bytes');
   finish(held.get('B'),'B-COMPLETE');await bRun;
   await until(async()=>!(await api('health')).runs.length,'both runs settled');
   await evaluate(b,"send('NEXT-RUN').then(()=>true)");
