@@ -1875,6 +1875,46 @@ $harness = @'
     'unknown steering outcomes are not automatically replayed and retain the draft');
   window.fetch=steeringFetch;
 
+  var steeringTarget=window.__controlIdentityForTest(), targetSteers=[];
+  window.__setBusy(true);
+  busyInput.value='original node steering';
+  window.fetch=async function(url,options) {
+    if(String(url)==='subagents' && String(options?.body).includes('steer_session')) {
+      targetSteers.push({body:options.body,node:options.headers['X-WA-Node'] || ''});
+      return new Response(JSON.stringify({error:'read_capacity_busy'}),{status:503});
+    }
+    if(String(url)==='health') {
+      window.__rememberNodeForTest('steering-other-node');
+      busyInput.value='new node draft';
+    }
+    return steeringFetch(url,options);
+  };
+  await window.__steerForTest();
+  check(targetSteers.length===1 && targetSteers[0].node===steeringTarget.node
+    && busyInput.value==='new node draft',
+    'node switch during busy retry never posts the old steering to the new node or clears its draft');
+  window.__rememberNodeForTest(steeringTarget.node);
+  window.__setBusy(true);
+  busyInput.value='old epoch steering';
+  window.fetch=async function(url,options) {
+    if(String(url)==='subagents' && String(options?.body).includes('steer_session')) {
+      targetSteers.push({body:options.body,node:options.headers['X-WA-Node'] || ''});
+      return {ok:true,status:200,json:async function(){
+        window.__rememberNodeForTest('steering-epoch-away');
+        window.__rememberNodeForTest(steeringTarget.node);
+        busyInput.value='new epoch draft';
+        return {id:'old-epoch-accepted',state:'queued'};
+      }};
+    }
+    return steeringFetch(url,options);
+  };
+  await window.__steerForTest();
+  check(targetSteers.length===2 && busyInput.value==='new epoch draft'
+    && JSON.parse(targetSteers[0].body).idempotency_key!==JSON.parse(targetSteers[1].body).idempotency_key,
+    'accepted response from an old epoch keeps the new draft and request keys bind the target epoch');
+  window.fetch=steeringFetch;
+  window.__setBusy(true);
+
   // Stop must tell the node, not only stop reading the stream: a client-side abort leaves the model
   // call running. It must wait for the node's acknowledgment and surface a refusal.
   document.getElementById("send").click();
@@ -3499,6 +3539,7 @@ Add-Content -Path $app -Value "`nwindow.__refreshSessionsForRelease=refreshSessi
 Add-Content -Path $app -Value "`nwindow.handleEvent = handleEvent; window.isConnectionLoss = isConnectionLoss; window.connectionMessage = connectionMessage; window.rendererReady = () => !!renderer; window.renderContext = renderContext; window.__applyUiVersion = applyUiVersion; window.__native = native; window.__openControl = openControl; window.__renameNode = saveNodeName; window.__setReload = (fn) => { reload = fn; }; window.__uiVersion = () => version; window.__setBusy = setBusy; window.__setLiveness = setLiveness; window.__stopLiveness = stopLiveness; window.__setShell = (shell) => { native = shell; }; window.__rememberPlace = rememberPlace; window.__restorePlace = restorePlace; window.__restoreSession = restoreSession; window.__watchTurn = watchTurn; window.__loadTopic = loadTopic; window.__reloadTopics = reloadTopics; window.__reconcile = reconcile; window.__clearStreamNotice = clearStreamNotice; window.__attachMany = (n) => { attachments.length = 0; for (let i = 0; i < n; i += 1) attachments.push({ kind: 'image', name: 'shot-' + i + '.png', mime: 'image/png', data: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==' }); renderAttachments(); }; window.__commandInput = () => input; window.__commandMenu = () => commandMenu; window.__typeCommand = (value) => { input.value = value; input.dispatchEvent(new Event('input')); }; window.__chatThread = () => chatSession; window.__composed = (text) => composedBody(text); window.__cancelActiveRun = cancelActiveRun; window.__setToolAge = (s, b) => { if (trace) trace.setAge(s, b); }; window.__toolTickerActive = () => !!toolTicker; window.__updateNotice = updateNotice; window.__refreshOperationProgress = refreshOperationProgress; window.__watch = watch;"
 Add-Content -Path $app -Value "`nwindow.__cancelRunForTest = cancelRun;"
 Add-Content -Path $app -Value "`nwindow.__activeRunForTest = activeRun; window.__runningSessionsForTest = runningSessions; window.__steerForTest = steerActiveRun;"
+Add-Content -Path $app -Value "`nwindow.__rememberNodeForTest = rememberNode; window.__controlIdentityForTest = () => ({node:activeNode,thread:chatSession,epoch:conversationEpoch});"
 
 Add-Content -Path $app -Value "`nwindow.__resetFollow = () => { followedSeq = 0; lastFollowAt = 0; }; window.__followRun = followRun; window.__repaintMessages = repaintMessages; window.__ensureMeta = ensureMeta; window.__expireRecoveryBackoff = () => { transcriptRetryAt=0; metadataRetryAt=0; }; window.__followedSeq = () => followedSeq;"
 

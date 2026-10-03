@@ -2964,36 +2964,41 @@ async function cancelRun(runId) {
 let steeringSubmission=null;
 let steeringPending=false;
 async function steerActiveRun() {
-  const text=input.value.trim(), thread=chatSession;
+  const text=input.value.trim(), thread=chatSession, node=activeNode, epoch=conversationEpoch;
+  const viewing=()=>chatSession===thread && activeNode===node && conversationEpoch===epoch;
   if(!composerBusy() || !thread || !text || steeringPending)return;
   if(attachments.length) {setStatus('Steering accepts text only; attachments and draft kept.');return;}
-  if(!steeringSubmission || steeringSubmission.text!==text || steeringSubmission.thread!==thread)
-    steeringSubmission={text,thread,key:crypto.randomUUID()};
+  if(!steeringSubmission || steeringSubmission.text!==text || steeringSubmission.thread!==thread
+    || steeringSubmission.node!==node || steeringSubmission.epoch!==epoch)
+    steeringSubmission={text,thread,node,epoch,key:crypto.randomUUID()};
   const submission=steeringSubmission;
   steeringPending=true;
   document.getElementById('steer').disabled=true;
   try {
     let receipt;
     for(let attempt=0;attempt<2;attempt++) {
+      if(!viewing())return;
       const response=await apiFetch('subagents',{method:'POST',headers:apiHeaders({'Content-Type':'application/json'}),
         body:JSON.stringify({action:'steer_session',session_id:thread,text,idempotency_key:submission.key})});
+      if(!viewing())return;
       receipt=await response.json();
+      if(!viewing())return;
       // This explicit refusal occurs before dispatch. Unknown outcomes are never auto-retried.
       if(response.status===503 && receipt.error==='read_capacity_busy' && attempt===0) {
         setStatus('Control lane busy; retrying steering once. Draft kept; Stop remains available.');
         await nodeHealth();
-        if(chatSession!==thread)throw new Error('conversation changed');
+        if(!viewing())return;
         continue;
       }
       if(!response.ok || receipt.error || !receipt.id)throw new Error(receipt.error || 'missing steering receipt');
       break;
     }
-    if(chatSession===thread && input.value.trim()===text) {
+    if(viewing() && input.value.trim()===text) {
       input.value='';draftGeneration++;draftUndo=[];draftRedo=[];autosize();saveDraft();
     }
     steeringSubmission=null;
     setStatus('Steering '+receipt.state+' — applies at the next safe boundary; in-flight effects are not undone.');
-  } catch(error) {setStatus('Steering not confirmed; draft kept: '+error.message);}
+  } catch(error) {if(viewing())setStatus('Steering not confirmed; draft kept: '+error.message);}
   finally {steeringPending=false;document.getElementById('steer').disabled=false;}
 }
 document.getElementById('steer').addEventListener('click',steerActiveRun);
