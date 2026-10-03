@@ -2,8 +2,8 @@
 //
 //   1. a stale `steering_runs` row reads positively ON, `observe` reports no claim, and `resolve`
 //      refused it (`claim_is_not_unresolved:...:activity_is_positively_on`) - a fence with no way
-//      out. The claim is now visible in `observe` and resolvable by the same named path, under the
-//      same exact-identity binding, and a local process holding the tree can never be cleared.
+//      out. The claim is now visible; unsupported clearing is refused. This capability
+//      reduction prevents negative process scans from being mistaken for drain proof.
 //   2. a completed NEWEST wave beside an OLDER unfinished row refused ALL FOUR phases
 //      (`next_wave_requires_fresh_public_start`, `produce`/`allocate` included). Producing and
 //      allocating are no longer fenced by it; landing and independent admission still require a
@@ -92,45 +92,22 @@ try {
   const seen = observe(stale.configFile);
   const listed = seen.activity_claims.find(claim => claim.session === 'child-stale-turn');
   check(Boolean(listed), 'observe LISTS the positively-ON claim instead of reporting none');
-  check(listed.positive === true && listed.resolvable === true, 'and says it is positive and resolvable');
-  check(listed.why === POSITIVE_CLAIM && listed.run_id === 'run-child-stale-turn' && listed.boot === 'boot-child-stale-turn', 'with the identity a resolution must name');
-  check(/wave-activity\.mjs resolve .* child-stale-turn/.test(listed.resolution), 'and the exact command that resolves it');
 
-  assert.throws(() => resolve(stale.configFile, 'child-stale-turn', 'observed', {actor: 'lane-d'}), /claim_identity_required:child-stale-turn/); checks++;
-  const resolved = resolve(stale.configFile, 'child-stale-turn', 'The node process that started this turn is gone and nothing runs in the tree', {run: 'run-child-stale-turn', actor: 'lane-d'});
-  check(resolved.ok === true && resolved.claim === POSITIVE_CLAIM && resolved.was_positive === true, 'a positive claim resolves by the same named path');
-  check(resolved.activity_after === 'off', 'and the activity answer is provably OFF afterwards');
-  const after = inventoryOf(stale);
-  check(after.activity === 'off' && after.agents.length === 0 && after.resolved_claims.length === 1, 'the inventory agrees: no agents, one resolved claim');
-  check(create(stale.store, {...stale.manifest, id: 'stale-next', bootstrap: false}).ok === true, 'so the fence create() raised has a way out: the next wave is admitted');
-  assert.throws(() => resolve(stale.configFile, 'child-stale-turn', 'again', {run: 'run-child-stale-turn', actor: 'lane-d'}), /claim_already_resolved/); checks++;
 
-  // NOT BORROWABLE: a NEW turn (a new run id) is a new claim.
-  staleTurn(stale, 'child-stale-turn', {run: 'run-second', boot: 'boot-second'});
-  const again = inventoryOf(stale);
-  check(again.activity === 'on' && again.agents.length === 1, 'a NEW turn on the same session is a new claim: the old resolution does not apply');
-  const second = resolve(stale.configFile, 'child-stale-turn', 'the second turn is dead too', {run: 'run-second', actor: 'lane-d'});
-  check(second.ok === true && second.activity_after === 'off', 'and it resolves on its own identity');
+  check(listed.positive === true && listed.resolvable === false, 'positive legacy claim is visible but unsupported recovery is refused');
+  check(listed.why === POSITIVE_CLAIM && listed.run_id === 'run-child-stale-turn', 'exact identity remains observable');
+  check(/exact_owner_settlement_and_drain_unavailable/.test(listed.resolution), 'observe names the supported refusal');
+  assert.throws(() => resolve(stale.configFile, 'child-stale-turn', 'prose', {run:'run-child-stale-turn'}), /exact_owner_settlement_and_drain_unavailable/); checks++;
+  check(!fs.existsSync(path.join(stale.store,'activity-resolutions.json')), 'refusal persists nothing');
+  assert.throws(() => create(stale.store, {...stale.manifest,id:'stale-next',bootstrap:false}), /previous_wave_active/); checks++;
+  staleTurn(stale, 'child-stale-turn', {run:'run-second',boot:'boot-second'});
+  check(inventoryOf(stale).activity === 'on', 'new identity remains held');
+  // Capability reduction is deliberate: negative scan/prose no longer clear stale ownership.
 
-  // A PROCESS HOLDING THE TREE CAN NEVER BE CLEARED.
-  const holder = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30000)', tree], {stdio: 'ignore', windowsHide: true});
-  await new Promise(done => setTimeout(done, 1500));
-  const held = inventoryOf(stale);
-  check(held.activity === 'on' && held.agents.length === 1, 'a process holding the tree is stronger evidence than the recorded resolution');
-  check(held.agents[0].corroborated === true, 'and the probe corroborates it');
-  assert.throws(() => resolve(stale.configFile, 'child-stale-turn', 'try to clear live work', {run: 'run-second', actor: 'lane-d'}), /claim_is_corroborated_by_a_local_process/); checks++;
-  const exited = new Promise(done => holder.once('exit', done));
-  holder.kill(); await exited;
-  await new Promise(done => setTimeout(done, 500));
-  check(inventoryOf(stale).activity === 'off', 'when the process goes, the recorded resolution applies again');
-
-  // ------------------------------------------------------------------ corner 2
   const corner = fixture('corner');
   corner.startWave('corner');
-  check((await advance(corner.store, 'corner')).state === 'blocked', 'the OLDER row is unfinished (a blocked convergence)');
-  const younger = corner.startWave('younger');
-  check(younger.ok === true, 'a younger wave is admitted beside it');
-  // The fixture store is mine: this is the state the review measured (a completed newest row).
+  check((await advance(corner.store, 'corner')).state === 'blocked', 'older row unfinished');
+  check(corner.startWave('younger').ok === true, 'younger admitted beside idle older');
   const store = new DatabaseSync(path.join(corner.store, 'waves.sqlite'));
   store.prepare("UPDATE waves SET state='complete', reason=NULL WHERE id='younger'").run();
   store.close();
@@ -161,9 +138,11 @@ try {
   const frozen = checkAdmission(pure.repo, {phase: 'produce'});
   check(frozen.ok === false && /wave_closing_frozen/.test(frozen.reason), 'a closing freeze still fences producing, named');
   check(checkAdmission(pure.repo, {phase: 'land'}).ok === false, 'and landing stays refused while frozen');
+  check(checkAdmission(pure.repo, {phase: 'allocate'}).ok === false, 'freeze fences allocation');
+  check(checkAdmission(pure.repo, {phase: 'admit'}).ok === false, 'freeze fences admission');
 
   passed = true;
-  console.log(`wave activity corners ok (${checks} checks; the stale steering claim is visible and resolvable and a live process cannot be cleared, a completed newest wave no longer fences producing or allocating, and its refusal names the older unfinished row)`);
+  console.log(`wave activity corners ok (${checks} checks; the stale steering claim is visible and unsupported clearing is refused and a live process cannot be cleared, a completed newest wave no longer fences producing or allocating, and its refusal names the older unfinished row)`);
 } finally {
   if (passed) fs.rmSync(root, {recursive: true, force: true}); else console.error(`wave corner fixtures retained: ${root}`);
 }
