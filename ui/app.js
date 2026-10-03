@@ -1670,6 +1670,8 @@ function repaintMessages(rows, options = {}) {
             handleEvent({ type: "tool", call_id: raw.id, name: fn.name, arguments: args || {} });
           }
         }
+        if(runBubble)runBubble.dataset.ledgerKey=String(message.id || message.seq);
+        for(const [index,segment] of Array.from(runBubble?.querySelectorAll('wa-run,wa-trace,.reasoning,.seg')||[]).entries())segment.dataset.ledgerKey=String(message.id || message.seq)+':segment:'+index;
         if (message.id) renderedMessageIds.add(String(message.id));
       } else if (message.role === "tool") {
         replayRunLastMessage = message;
@@ -2084,7 +2086,7 @@ function setLiveness(info) {
 function identifySubmittedRun(health) {
   if (activeRunId !== null || !submittedRunIds || !chatSession) return;
   const candidates = (health?.run_ids || [])
-    .filter((run) => run.conversation === chatSession && !submittedRunIds.has(Number(run.run_id)))
+    .filter((run) => run.conversation === chatSession && Number.isSafeInteger(run.run_id) && !submittedRunIds.has(run.run_id))
     .sort((a, b) => Number(a.run_id) - Number(b.run_id));
   if (candidates.length) activeRunId = Number(candidates[candidates.length - 1].run_id);
 }
@@ -2223,6 +2225,21 @@ function runStanding(health, view = {}) {
 
 // The node-thread carrying one run id, when the node names it there (`/health` puts `run_id` on both
 // `current` and each `node_threads` entry). Absent on an older node, and then this is simply no evidence.
+// Authenticated durable journal status, scoped by conversation. Numeric IDs beyond the safe
+// integer range cannot be recovered from this server's numeric JSON contract; never guess them.
+async function durableRunStanding(thread,runId) {
+  if(!Number.isSafeInteger(runId))return 'busy-unknown';
+  try {
+    const response=await apiFetch('runs',{method:'POST',headers:apiHeaders({'Content-Type':'application/json'}),body:JSON.stringify({action:'status',thread})});
+    const payload=await response.json();
+    if(!response.ok || payload.ok!==true || payload.conversation!==thread)return 'busy-unknown';
+    const row=(payload.runs||[]).find(row=>Number.isSafeInteger(row.run_id)&&row.run_id===runId);
+    if(/^(completed|cancelled|failed)$/.test(row?.state))return 'over';
+    if(/^(queued|running|not_started)$/.test(row?.state))return 'running';
+  } catch(error) { /* observation unavailable; stream remains authoritative */ }
+  return 'busy-unknown';
+}
+
 function threadOfRun(health, runId, session = chatSession) {
   const carries = (entry) => entry && entry.session === session
     && Number.isSafeInteger(entry.run_id) && Number.isSafeInteger(runId) && entry.run_id === runId;
@@ -2320,8 +2337,14 @@ async function send(text, options = {}) {
         // Asked and answered while the run was ending: say nothing. The run finished; there is
         // nothing to report and nothing to continue.
         if (turnFinished) { clearInterval(watchdog); asking = false; return; }
-        const standing = runStanding(health, { session: runThread, runId: activeRunId,
+        let standing = runStanding(health, { session: runThread, runId: activeRunId,
           submitted: submittedRunIds, finished: turnFinished });
+        if (standing === 'busy-unknown' && Number.isSafeInteger(activeRunId)) {
+          const durable=await durableRunStanding(runThread,activeRunId);
+          if(turnFinished || !stillViewingRun()) return;
+          if(durable==='over') standing='over';
+          else if(durable==='running') standing='running';
+        }
         if (standing === "running" || standing === "busy-unknown") {
           // Working, and quiet because the work is quiet. Keep waiting, and start counting again. For
           // `busy-unknown` the page says the one thing it actually knows, and keeps the stream: it cannot
@@ -3882,7 +3905,8 @@ async function syncLiveRun(current) {
   if (current.session && current.session !== target) return;
   const poll = { target, epoch, node };
   liveRunPolling = poll;
-  const id = Number(current.run_id);
+  if(!Number.isSafeInteger(current.run_id)) {liveRunPolling=null;setStatus('exact run identity unavailable; saved transcript only');return;}
+  const id = current.run_id;
   const viewing = () => chatSession === target && conversationEpoch === epoch && activeNode === node
     && liveRunId === id && liveRunPolling === poll && !busy;
   if (liveRunId !== id) {
@@ -4675,7 +4699,7 @@ async function refreshAgentPane(pane) {
     const rows=result.rows;
     // A repaint throws away the transcript's scroll position and its folded topics, so a poll that
     // found the same rows, the same state and the same in-flight call leaves the pane it found alone.
-    const painted=JSON.stringify([rows.map(row=>row.seq),pane.task.state,pane.task.settled,
+    const painted=JSON.stringify([rows,pane.task.state,pane.task.settled,
       pane.task.preview?.tool?.call_id]);
     if(painted!==pane.painted) {
       pane.painted=painted;
@@ -4685,9 +4709,14 @@ async function refreshAgentPane(pane) {
       const visible=Array.from(pane.transcript.querySelectorAll('wa-message')).find(el=>el.getBoundingClientRect().bottom>pane.transcript.getBoundingClientRect().top);
       const anchorKey=visible?.dataset.ledgerKey;
       const anchorText=visible?.textContent;
+      const folded=Array.from(pane.transcript.querySelectorAll('[data-ledger-key]')).map(el=>[el.dataset.ledgerKey,el.hasAttribute('open'),el.classList.contains('open')]);
       const anchorOffset=visible ? visible.getBoundingClientRect().top-pane.transcript.getBoundingClientRect().top : 0;
       paintChildTranscript(pane.transcript,rows,{state:childRunState(pane.task),
         stateAt:pane.task.settled_at,active:!pane.task.settled,liveTool:pane.task.preview?.tool});
+      for(const [key,attr,cls] of folded) {
+        const element=Array.from(pane.transcript.querySelectorAll('[data-ledger-key]')).find(el=>el.dataset.ledgerKey===key);
+        if(element){element.toggleAttribute('open',attr);element.classList.toggle('open',cls);}
+      }
       const anchor=Array.from(pane.transcript.querySelectorAll('wa-message')).find(el=>anchorKey ? el.dataset.ledgerKey===anchorKey : el.textContent===anchorText);
       pane.transcript.scrollTop=following ? pane.transcript.scrollHeight : top;
       if(!following && anchor) pane.transcript.scrollTop+=anchor.getBoundingClientRect().top-pane.transcript.getBoundingClientRect().top-anchorOffset;
