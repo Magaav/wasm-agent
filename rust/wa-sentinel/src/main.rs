@@ -60,6 +60,8 @@ mod winproc;
 mod deploy_protocol;
 #[cfg(test)]
 mod deploy_protocol_tests;
+#[cfg(test)]
+mod intake_tests;
 
 // ---------------------------------------------------------------- paths
 
@@ -1633,6 +1635,17 @@ fn process_requests(background: bool, held: &mut Held) -> Result<u32> {
         .collect();
     // Oldest first: a queue that runs backwards is a queue nobody can reason about.
     entries.sort();
+    // Intake ALL identities before any dispatch health call. No effect is admitted here.
+    for path in &entries {
+        let id=path.file_stem().and_then(|s|s.to_str()).unwrap_or("");
+        match std::fs::read(path).and_then(|b|serde_json::from_slice::<Value>(&b).map_err(std::io::Error::other)) {
+            Ok(request) => { if let Err(error)=deploy_protocol::intake(&request,id) { audit("intake-problem",id,&error.to_string()); } },
+            Err(error) => { audit("intake-malformed",id,&error.to_string());
+                let target=sentinel_dir().join("intake-problems");std::fs::create_dir_all(&target)?;
+                wa_operation::atomic_json(&target.join(format!("malformed-{}.json",now_epoch())),&json!({"path":path,"detail":error.to_string(),"at":now_epoch()}))?;
+            }
+        }
+    }
     // The newest upgrade in the box, if any. Only it is performed; every older one is superseded.
     let newest_upgrade = newest_upgrade_in(&entries);
     for path in entries {
@@ -1662,6 +1675,11 @@ fn process_requests(background: bool, held: &mut Held) -> Result<u32> {
         let key=path.file_name().unwrap_or_default().to_string_lossy().to_string();
         let asked=preview["reason"].as_str().unwrap_or("(no reason given)");
         let protocol_id = key.trim_end_matches(".json");
+        if preview.get("expected_sha").is_some() {
+            if let Err(error)=deploy_protocol::intake(&preview,protocol_id) { audit("intake-problem",protocol_id,&error.to_string()); }
+            // Reserved only: parent ownership and effect path are deliberately not ready.
+            continue;
+        }
         if let Err(error) = deploy_protocol::validate(&preview, protocol_id) {
             deploy_protocol::record(&preview, protocol_id, "rejected", &error.to_string())?;
             let claim = sentinel_dir().join("claimed").join(&key);
@@ -1710,6 +1728,12 @@ fn process_requests(background: bool, held: &mut Held) -> Result<u32> {
                 continue;
             }
         };
+        if request.get("expected_sha").is_some() {
+            let id=claim.file_stem().and_then(|s|s.to_str()).unwrap_or("");
+            let _=deploy_protocol::intake(&request,id);
+            audit("claimed-protocol-held",id,"effect quarantined; claimed evidence preserved");
+            continue;
+        }
         if background {
             REQUEST_ACTIVE.fetch_add(1,Ordering::AcqRel);
             if management {MAINTENANCE_ACTIVE.store(true,Ordering::Release);}

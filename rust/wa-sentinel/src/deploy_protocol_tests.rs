@@ -6,7 +6,10 @@ fn busy_protocol_ack_is_persistent_but_never_completion() {
     let previous=std::env::var_os("WASM_AGENT_HOME");
     std::env::set_var("WASM_AGENT_HOME",&home);
     let request=json!({"verb":"deploy","id":"private-1","expected_sha":"a".repeat(40),"queued_at":now_epoch(),"session":"parent","prompt":"verify"});
-    assert!(deploy_protocol::validate(&request,"private-1").unwrap_err().to_string().contains("protocol_quarantined"));
+    deploy_protocol::validate(&request,"private-1").unwrap();
+    deploy_protocol::intake(&request,"private-1").unwrap();
+    let mut changed=request.clone();changed["session"]=json!("victim");
+    assert!(deploy_protocol::intake(&changed,"private-1").unwrap_err().to_string().contains("immutable_intent_mismatch"));
     assert!(perform(&request).unwrap_err().to_string().contains("protocol_quarantined"));
     let started=Instant::now();
     deploy_protocol::record(&request,"private-1","accepted","not complete").unwrap();
@@ -14,7 +17,7 @@ fn busy_protocol_ack_is_persistent_but_never_completion() {
     assert!(started.elapsed()<Duration::from_secs(5));
     let dir=sentinel_dir().join("deploy-protocol/private-1");
     let ack:Value=serde_json::from_slice(&std::fs::read(dir.join("ack.json")).unwrap()).unwrap();
-    assert_eq!(ack["phase"],"accepted");
+    assert_eq!(ack["phase"],"held");
     let state:Value=serde_json::from_slice(&std::fs::read(dir.join("state.json")).unwrap()).unwrap();
     assert_eq!(state["phase"],"held");
     assert!(!dir.join("result.json").exists());
