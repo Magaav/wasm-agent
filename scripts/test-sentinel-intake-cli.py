@@ -45,6 +45,9 @@ try:
   assert k.AssignProcessToJobObject(job,wintypes.HANDLE(child._handle)),ctypes.get_last_error()
   start=time.monotonic();durations=[]
   try:
+   deadline=time.monotonic()+5
+   while not (box/'sentinel.pid').exists() and time.monotonic()<deadline:time.sleep(.01)
+   assert (box/'sentinel.pid').exists(),'private watcher did not establish lifetime'
    for req in requests:
     ack=box/'deploy-protocol'/req['id']/'ack.json'
     while not ack.exists() and time.monotonic()-start<5:time.sleep(.005)
@@ -53,6 +56,15 @@ try:
    if passno==0:
     originals={req['id']:(box/'deploy-protocol'/req['id']/'intent.json').read_bytes() for req in requests}
     acks={req['id']:(box/'deploy-protocol'/req['id']/'ack.json').read_bytes() for req in requests}
+    # Concurrent prepass-to-dispatch read mutation while legacy health blocks.
+    changed=dict(requests[3]);changed['session']='victim';changed['expected_sha']='b'*40
+    (box/'requests/private-3.json').write_text(json.dumps(changed))
+    deadline=time.monotonic()+12
+    while not list((box/'intake-problems').glob('*/latest.json')) and time.monotonic()<deadline:time.sleep(.02)
+    problems=[json.loads(f.read_text()) for f in (box/'intake-problems').glob('*/latest.json')]
+    assert any('immutable_intent_mismatch' in item['detail'] for item in problems),'concurrent preview mutation not refused'
+    assert (box/'deploy-protocol/private-3/intent.json').read_bytes()==originals['private-3']
+    assert (box/'deploy-protocol/private-3/ack.json').read_bytes()==acks['private-3']
    else:
     deadline=time.monotonic()+12
     while not list((box/'intake-problems').glob('*/latest.json')) and time.monotonic()<deadline:time.sleep(.02)
@@ -83,4 +95,5 @@ try:
  assert list(b'{broken one') in raw and list(b'{broken two') in raw,raw
  (root/'result.json').write_text(json.dumps({'ok':True,'passes':results,'owned_tree_drained':True,'provider_calls':0,'skips':0},indent=2))
  print(json.dumps({'ok':True,'evidence':str(root),'passes':results}))
+ print('sentinel intake ok (10 checks, 0 skipped)')
 finally:s.shutdown();t.join();s.server_close()

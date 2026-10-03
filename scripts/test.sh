@@ -182,6 +182,13 @@ run_proof_fixture() {
   tail -4 "$log"
 }
 
+# BEGIN sentinel-intake required proofs
+CARGO_BUILD_JOBS=2 gate_run cargo build --offline --manifest-path rust/wa-sentinel/Cargo.toml
+INTAKE_PROOF="$(git rev-parse --git-path "intake-gate-$(date +%s)-$$")"
+run_proof_fixture sentinelIntake 10 python scripts/test-sentinel-intake-cli.py --sentinel "$PWD/rust/wa-sentinel/target/debug/wa-sentinel.exe" --evidence "$INTAKE_PROOF/cli"
+run_proof_fixture sentinelIntakeMutants 2 python scripts/test-sentinel-intake-mutants.py --repo "$PWD" --evidence "$INTAKE_PROOF/mutants"
+# END sentinel-intake required proofs
+
 gate_phase_begin build
 gate_run cargo build --release --offline --manifest-path rust/Cargo.toml >/dev/null
 gate_run node scripts/test-install-isolation.mjs
