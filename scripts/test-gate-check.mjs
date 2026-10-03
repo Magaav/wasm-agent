@@ -32,6 +32,10 @@ try {
   if(process.platform==='win32') {
     const candidate=process.env.WA_RUN_KEY_BIN || (fs.existsSync('rust/target/release/wa.exe')?'rust/target/release/wa.exe':'rust/target/debug/wa.exe');
     assert(fs.existsSync(candidate),'required run-key HTTP candidate missing; build current source or set WA_RUN_KEY_BIN');
+    if(process.env.WA_RUN_KEY_RECEIPT) {
+      const binding=spawnSync(process.execPath,['scripts/run-key-build-proof.cjs','verify',process.cwd(),candidate,process.env.WA_RUN_KEY_RECEIPT],{encoding:'utf8'});
+      assert.equal(binding.status,0,binding.stderr||'source/binary binding rejected');
+    }
     const http=spawnSync(process.execPath,['scripts/test-run-key-http.cjs',candidate],{encoding:'utf8',windowsHide:true});
     process.stdout.write(http.stdout||'');process.stderr.write(http.stderr||'');
     assert.equal(http.status,0,'real high-ID HTTP regression');
