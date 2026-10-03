@@ -1,0 +1,64 @@
+[
+  {
+    "field": "session",
+    "details": [
+      "immutable_intent_mismatch"
+    ]
+  },
+  {
+    "field": "owner",
+    "details": [
+      "immutable_intent_mismatch"
+    ]
+  },
+  {
+    "field": "expected_sha",
+    "details": [
+      "immutable_intent_mismatch"
+    ]
+  },
+  {
+    "field": "prompt",
+    "details": [
+      "immutable_intent_mismatch"
+    ]
+  },
+  {
+    "field": "reason",
+    "details": [
+      "immutable_intent_mismatch"
+    ]
+  },
+  {
+    "field": "queued_at",
+    "details": [
+      "immutable_intent_mismatch"
+    ]
+  },
+  {
+    "field": "verb",
+    "details": [
+      "expected_sha requires deploy and a full 40-character source SHA"
+    ]
+  },
+  {
+    "field": "removed_expected_sha",
+    "pending": false,
+    "failed_record": {
+      "at": 1791023780,
+      "detail": "WA_SENTINEL_DEPLOY points at C:\\Users\\Victor\\.wasm-agent\\wa-worktree-childdispatch8e9c7a55-7e1c-4c1a-a4cb-46df905929be\\intake-review-probes\\absent.sh, which does not exist",
+      "ok": false,
+      "phase": "failed",
+      "request": {
+        "id": "reserved",
+        "owner": "original-owner",
+        "prompt": "verify",
+        "queued_at": 1791023776,
+        "reason": "private",
+        "session": "parent",
+        "verb": "deploy"
+      }
+    },
+    "stdout": "  failed: WA_SENTINEL_DEPLOY points at C:\\Users\\Victor\\.wasm-agent\\wa-worktree-childdispatch8e9c7a55-7e1c-4c1a-a4cb-46df905929be\\intake-review-probes\\absent.sh, which does not exist\n  1 request(s) handled\n"
+  }
+]
