@@ -10,7 +10,7 @@
   "priorReviewBranch": "change/review-original-native-ui",
   "priorReviewHead": "a8214ec6776ecd930abe68b98a710f41249c82a0",
   "originMain": "898a9a238c89c5f64b83cfa219f8c17840b441f9",
-  "mergeTree": "cdf6fb089981b59dd4cd89fb41bd33210af445b4",
+  "mergeTree": "3bb1f2fd350341a9707e94d4f338b741718bc615",
   "sourceBindings": [
     {
       "path": "rust/wa-host/src/resources.rs",
@@ -4904,7 +4904,7 @@
     "A local canonical effect does not authorize ordinary blocked remote publication; sole Code2 must independently review any current grant/writer handoff.",
     "Arbitrary filesystem/SQL writers and unclassified historical effects remain outside ordinary Git-lock exclusion; global identity safety stays false.",
     "No completed graph audit certificate is claimed; connected source was manually read and native accessor/driver/custody/source/proof callers inspected.",
-    "Independent Code2 found real gate JSONL hashes include line terminators; the later pure JS repair is verified by tiny actual-user/line-ending12 checks, not falsely folded into earlier native7/104 source identities."
+    "Independent Code2 found real gate JSONL hashes include line terminators; the later pure JS repair is verified by tiny actual-user/line-ending13 checks, not falsely folded into earlier native7/104 source identities."
   ],
   "global_identity_safety": false,
   "production_registry_admission": false,
@@ -4914,17 +4914,17 @@
   "production_authority": false,
   "activation": false,
   "raw_record_correction": {
-    "checks": 12,
+    "checks": 13,
     "skipped": 0,
     "log": {
       "path": "C:\\Users\\Victor\\AppData\\Local\\Temp\\wa-current-source-raw-record-test.log",
-      "sha256": "edd3ff60347d6bb321f39ebaae38ea16eedec30f9824b02d95a5dd841dda7352",
+      "sha256": "505fa6d1f580b9222e49730efde3d7eefa6721a3f1dafac83aca704ffc1a03af",
       "bytes": 166
     },
     "source": {
       "path": "C:\\Users\\Victor\\orca\\workspaces\\wasm-agent\\review-original-native-ui\\scripts\\test-wave-current-user-record.mjs",
-      "sha256": "87f733b62c8d42c2f68e75987def27f9162526dde27613d4196b0092ac4532a6",
-      "bytes": 1693
+      "sha256": "c74364dc1f627781d94e6b7cdca117ef36c4fe6b27c476a43c56a3893dc9e9ed",
+      "bytes": 1930
     },
     "changed_module": {
       "path": "C:\\Users\\Victor\\orca\\workspaces\\wasm-agent\\review-original-native-ui\\scripts\\lib\\wave-current-source.mjs",
