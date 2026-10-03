@@ -1,5 +1,6 @@
 // Real private producer runner, committed review artifact, registered SQLite.
 import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import assert from 'node:assert/strict';import {spawnSync,spawn} from 'node:child_process';import {DatabaseSync} from 'node:sqlite';
+import {landRecovery} from './wave-recovery-land.mjs';
 import {runFocused} from './producer-admission.mjs';import {checkAdmission} from './wave-entry.mjs';import {checkWaveAdmission} from './lib/wave-guard.mjs';import {consumeRecovery,digest,recoverySnapshot} from './lib/wave-recovery.mjs';
 await import('./test-wave-recovery-source.mjs');
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'wa-recovery-')),repo=path.join(root,'repo');let checks=0;
@@ -35,5 +36,11 @@ used; // exact private used marker is retained; create a new immutable ticket no
 publish({...ticket,entries:[{...entry,nonce:'b'.repeat(32)}]});
 const program=`import {consumeRecovery} from ${JSON.stringify(new URL('./lib/wave-recovery.mjs',import.meta.url).href)};try{console.log(JSON.stringify(consumeRecovery(process.argv[1],process.argv[2],JSON.parse(process.argv[3]))));}catch(e){console.log(JSON.stringify({ok:false,reason:e.message}));}`;
 const launch=()=>new Promise((resolve,reject)=>{const p=spawn(process.execPath,['--input-type=module','-e',program,repo,store,JSON.stringify({phase:'land',recovery})]);let out='';p.stdout.on('data',b=>out+=b);p.on('error',reject);p.on('exit',()=>resolve(JSON.parse(out)));});
-const race=await Promise.all([launch(),launch()]);check(race.filter(x=>x.ok).length===1,'one CAS reservation winner '+JSON.stringify(race));check(race.find(x=>x.ok).consumption==='uncertain'&&race.find(x=>x.ok).effect_authorized===false,'reservation not effect authority');check(!checkAdmission(repo,options).ok,'uncertain reservation cannot replay');check(recoverySnapshot(store,'wave').snapshot===mappedSnap.snapshot,'original mapped SQLite snapshot preserved');console.log(`wave recovery validation ok (${checks} checks; valid private actual runner/entry/guard, 0 skipped; bootstrap/effect authority unsupported; consumption reservation CAS tested)`);
+const race=await Promise.all([launch(),launch()]);check(race.filter(x=>x.ok).length===1,'one CAS reservation winner '+JSON.stringify(race));check(race.find(x=>x.ok).consumption==='uncertain'&&race.find(x=>x.ok).effect_authorized===false,'reservation not effect authority');check(!checkAdmission(repo,options).ok,'uncertain reservation cannot replay');check(recoverySnapshot(store,'wave').snapshot===mappedSnap.snapshot,'original mapped SQLite snapshot preserved');
+// Real private canonical Git effect under OS-held transaction; independent
+// node resource claims remain a separate production prerequisite.
+publish({...ticket,entries:[{...entry,nonce:'c'.repeat(32)}]});git('checkout','main');
+const held=new DatabaseSync(path.join(store,'recovery-target-lease.sqlite'));held.exec('CREATE TABLE lease(id INTEGER PRIMARY KEY,identity TEXT); BEGIN IMMEDIATE');
+assert.throws(()=>landRecovery(repo,options,{session:'merger',run:'run',boot:'boot'}),/lease_held/);checks++;held.exec('ROLLBACK');held.close();
+const landed=landRecovery(repo,options,{session:'merger',run:'run',boot:'boot'});check(landed.ok&&git('merge-base','--is-ancestor',tip,'main')==='','actual reviewed private Git landing');assert.throws(()=>landRecovery(repo,options,{session:'merger',run:'restart',boot:'new'}),/main_moved/);checks++;console.log(`wave recovery validation ok (${checks} checks; valid private actual runner/entry/guard, 0 skipped; bootstrap/effect authority unsupported; consumption reservation CAS tested)`);
 }finally{fs.rmSync(root,{recursive:true,force:true});}
