@@ -27,7 +27,7 @@ export function recoveryAdmission(repo,store,{phase,recovery,original_refusal,na
   need(descriptor.schema===1&&descriptor.kind==='wave-issuer-binding'&&descriptor.wave===ticket.wave&&descriptor.owner_label===ticket.owner&&descriptor.issuer_session===issuer&&descriptor.registration_sha256===snap.registration,'issuer_descriptor_mismatch');
   need(session(repo,ref.commit)===issuer,'issuer_descriptor_provenance');
   need(registration.attestation&&digest(fs.readFileSync(registration.attestation))===descriptor.attestation_sha256&&descriptor.attestation_sha256===registration.attestation_sha256,'issuer_attestation_moved');
-  need(Array.isArray(descriptor.original_evidence)&&descriptor.original_evidence.length>=2&&descriptor.original_evidence.every(x=>x.message_id&&/^[a-f0-9]{64}$/.test(x.sha256)),'issuer_original_evidence_required');
+  need(Array.isArray(descriptor.original_evidence)&&descriptor.original_evidence.length>=2&&descriptor.original_evidence.every(x=>x.message_id&&x.path&&/^[a-f0-9]{64}$/.test(x.sha256)&&digest(fs.readFileSync(x.path))===x.sha256),'issuer_original_evidence_required');
   const acceptance=JSON.parse(git(repo,'show',`${ref.review_commit}:${ref.review_path}`));
   need(acceptance.kind==='wave-issuer-binding-review'&&acceptance.descriptor_commit===ref.commit&&acceptance.descriptor_path===ref.path&&acceptance.descriptor_sha256===digest(git(repo,'show',`${ref.commit}:${ref.path}`))&&acceptance.verdict==='passed'&&acceptance.reviewer!==issuer&&session(repo,ref.review_commit)===acceptance.reviewer,'issuer_descriptor_independent_review_required');
   // Operator-local issuance, not cryptographic human approval. Old attestation

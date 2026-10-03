@@ -1,6 +1,7 @@
 // Real private producer runner, committed review artifact, registered SQLite.
 import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import assert from 'node:assert/strict';import {spawnSync,spawn} from 'node:child_process';import {DatabaseSync} from 'node:sqlite';
 import {runFocused} from './producer-admission.mjs';import {checkAdmission} from './wave-entry.mjs';import {checkWaveAdmission} from './lib/wave-guard.mjs';import {consumeRecovery,digest,recoverySnapshot} from './lib/wave-recovery.mjs';
+await import('./test-wave-recovery-source.mjs');
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'wa-recovery-')),repo=path.join(root,'repo');let checks=0;
 const git=(...a)=>{const r=spawnSync('git',['-C',repo,...a],{encoding:'utf8'});assert.equal(r.status,0,r.stderr);return r.stdout.trim();};const check=(x,s)=>{assert.ok(x,s);checks++;};
 function commit(who){git('add','.');git('commit','-qm',`fixture\n\nAgent: wasm-agent session=${who}`);return git('rev-parse','HEAD');}
