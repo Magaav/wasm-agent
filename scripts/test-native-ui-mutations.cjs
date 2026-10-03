@@ -15,6 +15,37 @@ function mutateRust(name,file,from,to,command,args,assertion){const absolute=pat
  const mutant=Buffer.from(text.replace(from,to));fs.writeFileSync(absolute,mutant);
  try{build();run(name,command,args,assertion);}finally{assert.equal(hash(fs.readFileSync(absolute)),hash(mutant),'foreign edit during owned mutant');fs.writeFileSync(absolute,original);}
 }
+// Narrow review follow-up: exercise only the original terminal/cursor regressions,
+// using staged UI and one restored source-Lua mutant. No Rust build or old mutants.
+if(process.argv.includes('--terminal-fallback-only')) {
+ const uiOriginal=fs.readFileSync(path.join(repo,'ui/app.js')),luaFile=path.join(repo,'lua/core/subagents.lua'),luaOriginal=fs.readFileSync(luaFile);
+ try {
+  for(const [name,from,to,label] of [
+   ['main-terminal-fallback','if(nativeJournalUnavailable(error))try','if(false && nativeJournalUnavailable(error))try','native main unavailable journal shows stored terminal with visible gap'],
+   ['pane-terminal-fallback',"if(nativeJournalUnavailable({message:journalError.replace('Live journal unavailable: ','')}) && terminal.settled)","if(false && nativeJournalUnavailable({message:journalError.replace('Live journal unavailable: ','')}) && terminal.settled)",'native attached pane unavailable journal shows stored terminal with visible source and gap'],
+   ['retain-raw-dom','container.append(...staged.childNodes);','container.replaceChildren(...staged.childNodes);','native terminal fallback preserves already seen raw DOM and folds'],
+  ]) {
+   const stage=fs.mkdtempSync(path.join(os.tmpdir(),'wa-native-mutant-'));fs.cpSync(path.join(repo,'ui'),stage,{recursive:true});
+   assert.ok(uiOriginal.toString().includes(from),name+' anchor');fs.writeFileSync(path.join(stage,'app.js'),uiOriginal.toString().replace(from,to));
+   try {
+    const output=run(name,process.execPath,['scripts/test-native-child-browser.cjs',binary,'--ui-root',stage],label);
+    const receipt=output.match(/evidence: ([^\r\n]+)/);assert.ok(receipt);const proof=JSON.parse(fs.readFileSync(receipt[1]));
+    assert.ok(proof.cleanup.fixture_home_removed&&proof.cleanup.ownedPids.every(p=>p.exited&&p.job?.drained&&p.job.accounting.active_processes===0),'mutant process drain');
+    report.mutations.at(-1).receipt=receipt[1];
+   }finally{assert.ok(path.resolve(stage).startsWith(path.resolve(os.tmpdir())+path.sep)&&path.basename(stage).startsWith('wa-native-mutant-'));fs.rmSync(stage,{recursive:true,force:true});}
+  }
+  const anchor='local value=args.after';assert.ok(luaOriginal.toString().includes(anchor));
+  fs.writeFileSync(luaFile,luaOriginal.toString().replace(anchor,'local value=tonumber(args.after) or 0'));
+  try {
+   const output=run('lua-malformed-to-zero',process.execPath,['scripts/test-native-child-browser.cjs',binary],'native refuses malformed supplied cursor "garbage"');
+   const receipt=output.match(/evidence: ([^\r\n]+)/);assert.ok(receipt);const proof=JSON.parse(fs.readFileSync(receipt[1]));
+   assert.ok(proof.cleanup.fixture_home_removed&&proof.cleanup.ownedPids.every(p=>p.exited&&p.job?.drained&&p.job.accounting.active_processes===0),'Lua mutant process drain');
+   report.mutations.at(-1).receipt=receipt[1];
+  }finally{fs.writeFileSync(luaFile,luaOriginal);}
+  assert.ok(fs.readFileSync(luaFile).equals(luaOriginal)&&fs.readFileSync(path.join(repo,'ui/app.js')).equals(uiOriginal));report.restored=true;
+ }finally{fs.writeFileSync(path.join(evidence,'report.json'),JSON.stringify(report,null,2)+'\n');console.log('mutation evidence: '+path.join(evidence,'report.json'));}
+ assert.equal(report.mutations.length,4);assert.ok(report.restored);console.log('terminal fallback mutations ok (4 intended assertion failures; source restored)');process.exit(0);
+}
 try{
  for(const name of ['native-tail-page-only','six-pane-overflow','renderer-parent-buffer']) {
   const stage=fs.mkdtempSync(path.join(os.tmpdir(),'wa-native-mutant-'));fs.cpSync(path.join(repo,'ui'),stage,{recursive:true});

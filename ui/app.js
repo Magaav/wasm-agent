@@ -4689,9 +4689,14 @@ let panePageBytes=40960;
 let panePageNote='';
 let panePageNoteDetail='';
 async function panePage(pane, options) {
+  const target=pane.task.session_id;
+  const validate=page=>{
+    if(!options.message_id && page.session_id!==target)throw Error('native_session_identity_mismatch');
+    return page;
+  };
   const request={action:'session',id:pane.task.subagent_id,limit:200,...options};
   if(panePageBytes)request.byte_limit=panePageBytes;
-  try { return await orchestratorRequest(request); }
+  try { return validate(await orchestratorRequest(request)); }
   catch(error) {
     if(!panePageBytes || !/invalid_session_byte_limit/.test(String(error.message))) throw error;
     // The note is one line on purpose: it sits in the pane's status row, and a paragraph there would
@@ -4704,7 +4709,7 @@ async function panePage(pane, options) {
       'shows fewer rows here than it would on the default budget.';
     panePageBytes=0;
     delete request.byte_limit;
-    return await orchestratorRequest(request);
+    return validate(await orchestratorRequest(request));
   }
 }
 // The rows to draw for one child: the node's newest page, extended backwards while that page opens
@@ -4820,6 +4825,11 @@ async function syncNativeSession(target,epoch,node) {
     const pane={task};
     const attached=await attachNativeJournal(task,async()=>(await paneMessages(pane)).rows,viewing);
     if(!viewing())return true;
+    if(retainNativeTerminal(transcript,task,attached.rows)) {
+      setStatus('Native journal restored; stored messages and previously seen output retained.');
+      transcriptReady=true;
+      return true;
+    }
     const painted=JSON.stringify([attached.identity,attached.rows,attached.raw,attached.state]);
     if(painted!==nativeSessionPainted) {
       rememberPlace();
@@ -4827,10 +4837,75 @@ async function syncNativeSession(target,epoch,node) {
       renderJournalEvents(attached.events,attached.raw,attached.identity);
       followedSeq=attached.rows.reduce((max,row)=>Math.max(max,Number(row.seq)||0),0);
       restorePlace();nativeSessionPainted=painted;
+      rememberNativeRows(transcript,task,attached.rows,attached.raw);
     }
     liveEventSeq=attached.nextSeq;liveCheckpointSeq=attached.checkpointSeq;
     transcriptReady=true;
-  }catch(error){if(viewing())setStatus('Native live journal unavailable: '+error.message);}
+  }catch(error){
+    if(viewing()) {
+      let note='Native live journal unavailable: '+error.message;
+      // Only storage unavailability permits a ledger fallback; identity/cursor refusals do not.
+      if(nativeJournalUnavailable(error))try {
+        const result=await paneMessages({task});
+        if(!viewing())return true;
+        const terminal={...task,...result.task};
+        if(terminal.settled) {
+          retainNativeTerminal(transcript,task,result.rows,true,terminal);
+          followedSeq=result.rows.reduce((max,row)=>Math.max(max,Number(row.seq)||0),0);
+          transcriptReady=true;
+          note+='; showing stored terminal messages. Previously seen output retained; raw history gap remains.';
+        }
+      }catch(fallback){note+='; stored messages unavailable: '+fallback.message;}
+      if(viewing())setStatus(note);
+    }
+  }
+  return true;
+}
+const nativeRetainedViews=new WeakMap();
+function nativeViewKey(task) {
+  return JSON.stringify([session,activeNode,conversationEpoch,task.task_id,task.subagent_id,task.session_id,
+    task.attempt_id,task.node_id,task.event_node_id,task.event_epoch]);
+}
+function nativeJournalUnavailable(error) {
+  return /^(native_event_evidence_unavailable|native_event_journal_(read|write)_failed)(:|$)/.test(error.message);
+}
+function rememberNativeRows(container,task,rows,raw=[]) {
+  const ids=new Set(rows.map(row=>String(row.id||row.seq)));
+  for(const item of raw)if(item.event?.message_id)ids.add(String(item.event.message_id));
+  nativeRetainedViews.set(container,{key:nativeViewKey(task),ids,terminal:false});
+}
+// During a terminal journal gap, append authenticated ledger messages through the shared
+// renderer. Keep the existing DOM (raw identities, folds and scroll anchors) intact. Once
+// the journal returns, retain this explicitly mixed-source view rather than replaying it.
+function retainNativeTerminal(container,task,rows,gap=false,terminal=task) {
+  const key=nativeViewKey(task);
+  let retained=nativeRetainedViews.get(container);
+  if(retained?.key!==key)retained=null;
+  if(!gap && !retained?.terminal)return false;
+  if(!retained) {
+    retained={key,ids:new Set(),terminal:false};
+    const keys=Array.from(container.querySelectorAll('[data-ledger-key]'),element=>element.dataset.ledgerKey);
+    for(const row of rows) {
+      const id=String(row.id||row.seq);
+      if(keys.some(key=>key===id||key.startsWith(id+':segment:')))retained.ids.add(id);
+    }
+    nativeRetainedViews.set(container,retained);
+  }
+  const missing=rows.filter(row=>!retained.ids.has(String(row.id||row.seq)));
+  if(missing.length) {
+    const place=transcriptPlace(container),staged=document.createElement('div');
+    // Tool topics initialise when connected, including on a fresh ledger-only pane.
+    staged.hidden=true;document.body.append(staged);
+    try {
+      const painted=paintChildTranscript(staged,missing,{state:childRunState(terminal),active:false});
+      if(painted.failed)throw Error('native_terminal_messages_render_failed: '+painted.firstFailure);
+      for(const element of staged.children)element.dataset.source='stored-session';
+      container.append(...staged.childNodes);
+    }finally{staged.remove();}
+    restoreTranscriptPlace(container,place);
+    for(const row of missing)retained.ids.add(String(row.id||row.seq));
+  }
+  retained.terminal=true;
   return true;
 }
 // Projection addresses cite genuine native event IDs until a reply supplies its durable message ID.
@@ -4866,6 +4941,7 @@ async function paneMessages(pane) {
     rows=earlier.concat(rows);
   }
   rows=await Promise.all(rows.map(row=>row.omitted&&row.id&&row.evidence ? exactSessionRow(row,options=>panePage(pane,options)) : row));
+  if(rows.some(row=>row.session_id && row.session_id!==pane.task.session_id))throw Error('native_session_identity_mismatch');
   return {rows,task:page.task};
 }
 async function exactSessionRow(reference,readPage) {
@@ -4905,11 +4981,27 @@ async function refreshAgentPane(pane) {
       else attached=await attachSessionJournal(pane.task.session_id,async()=> (await paneMessages(pane)).rows);
     }catch(error){journalError='Live journal unavailable: '+error.message;}
     if(!viewing())return;
+    if(!attached && pane.task.transport==='native' && journalError) {
+      const terminal={...pane.task,...result.task};
+      if(nativeJournalUnavailable({message:journalError.replace('Live journal unavailable: ','')}) && terminal.settled) {
+        retainNativeTerminal(pane.transcript,pane.task,result.rows,true,terminal);
+        pane.task=terminal;
+        pane.notice.textContent=journalError+'; showing stored terminal messages. Previously seen output retained; raw history gap remains.';
+        return;
+      }else if(pane.liveJournalAttached || !nativeJournalUnavailable({message:journalError.replace('Live journal unavailable: ','')})) {
+        pane.notice.textContent=journalError;
+        return;
+      }
+    }
     if(!attached && pane.liveJournalAttached && pane.painted && journalError) {
       pane.notice.textContent=journalError;
       return;
     }
     if(attached){
+      if(attached.identity && retainNativeTerminal(pane.transcript,pane.task,attached.rows)) {
+        pane.notice.textContent='Native journal restored; stored messages and previously seen output retained.';
+        return;
+      }
       pane.liveJournalAttached=!!(attached.identity||attached.runKey);
       pane.toggleAttribute('journal-attached',pane.liveJournalAttached);
       result.rows=attached.rows;result.events=attached.events;result.raw=attached.raw;result.identity=attached.identity;
@@ -4930,6 +5022,7 @@ async function refreshAgentPane(pane) {
       paintChildTranscript(pane.transcript,rows,{state:childRunState(pane.task),
         stateAt:pane.task.settled_at,active:!pane.task.settled,liveTool:pane.task.preview?.tool,events:result.events,raw:result.raw,identity:result.identity});
       restoreTranscriptPlace(pane.transcript,position);
+      if(result.identity)rememberNativeRows(pane.transcript,pane.task,rows,result.raw);
     }
     // What is left for the pane's own notice is what the shared transcript cannot say: a failure the
     // child reported, a page size this node refused, or nothing. `Ready for your next message.` used to
