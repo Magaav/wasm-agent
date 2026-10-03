@@ -286,7 +286,10 @@ local function serving_binding(provider)
   -- Profile is an operator-declared non-secret account label; keys never enter
   -- this binding. Rotation cannot evade a recorded block. Unlabelled accounts
   -- conservatively share the configured route's default profile.
-  return host.sha256(json.encode({state.dir(), provider.id, provider.base_url,
+  -- Account/profile is the authority, not an endpoint spelling. Equivalent
+  -- hosts, default ports, path normalization and trailing slashes cannot reset
+  -- account exhaustion. Changing endpoints is not verified account recovery.
+  return host.sha256(json.encode({state.dir(), provider.id,
     env('WASM_AGENT_PROVIDER_ACCOUNT_PROFILE') or 'default'}))
 end
 local function serving_setup()

@@ -26,6 +26,15 @@ else
   local ok=pcall(p.complete_with,'fixture',{{role='user',content='test'}},nil,false,{})
   check(not ok and calls==1,'authentic monthly HTTP outcome recorded')
 end
+local saved_env=host.getenv
+local binding=p.serving_binding()
+for _,endpoint in ipairs({'http://127.0.0.1:1/private-mock/','HTTP://127.0.0.1:1/private-mock','http://127.0.0.1:1/private-mock/./','http://127.0.0.1/private-mock','http://127.0.0.1:80/private-mock'}) do
+  host.getenv=function(k) if k=='WASM_AGENT_LLM_BASE_URL' then return endpoint end return saved_env(k) end
+  check(p.serving_binding()==binding and p.serving('fixture').state=='blocked','endpoint spelling cannot reset account block')
+end
+host.getenv=saved_env
+local alternate=p.active();alternate.id='different-provider'
+check(p.serving('fixture',alternate).state=='unknown','different provider isolated')
 local before=calls
 check(not pcall(p.complete_with,'fixture',{{role='user',content='test'}},nil,true,{}),'blocked streaming refused')
 check(calls==before,'responsive blocked route zero HTTP calls')
