@@ -1,0 +1,1 @@
+Observed cargo test --offline --manifest-path rust/Cargo.toml -p wa-host serve::journal with CARGO_BUILD_JOBS=2 RUST_TEST_THREADS=2: exit 0, 1 passed, 0 failed, 80 filtered. Original --lib invocation exit101 (package has no library target); corrected binary-target invocation above. This tests existing journal regression and compilation, NOT complete new run-key contract.

@@ -49,7 +49,8 @@ const app = fs.readFileSync(path.join(stage, 'app.js'), 'utf8');
 fs.writeFileSync(path.join(stage, 'app.js'), app
   + `\nwindow.__watchNow = () => checkWatchedRun && checkWatchedRun(); window.__runStanding = runStanding;`
   + `\nwindow.__chatThread = () => chatSession; window.__send = send; window.__handleEvent = handleEvent; window.__stopLiveness = stopLiveness;`
-  + `\nwindow.__setNodeHealth = (body) => { window.__fixtures.health = body; };`);
+  + `\nwindow.__setNodeHealth = (body) => { window.__fixtures.health = body; };`
+  + `\nwindow.__refreshPane = refreshAgentPane; window.__setPaneRows = rows => { paneMessages = async () => ({rows}); };`);
 let html = fs.readFileSync(path.join(stage, 'index.html'), 'utf8');
 if (!html.includes('<script src="app.js"></script>')) throw Error('index.html does not load app.js the way this staging expects');
 html = html.replace('<script src="app.js"></script>',
@@ -124,4 +125,4 @@ if (!keep) fs.rmSync(stage, {recursive: true, force: true});
 else console.log(`kept: ${stage}`);
 // The listening server is the last thing holding the event loop; close it and go, so a finished probe exits.
 server.close();
-process.exit(pre ? 0 : 1);
+process.exit(exit===0 && pre && /id="wa-probe"[^>]*data-status="pass"/.test(out) ? 0 : 1);

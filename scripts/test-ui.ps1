@@ -10,10 +10,14 @@
 param(
   [int]$Port = 8899,
   [int]$ClientPort = 8801,
-  [string]$WaExe = (Join-Path $env:LOCALAPPDATA "wasm-agent\wa.exe")
+  [string]$WaExe = ""
 )
 $ErrorActionPreference = "Stop"
 $root = Split-Path $PSScriptRoot -Parent
+if (-not $WaExe) {
+  $candidate = Join-Path $root 'rust/target/release/wa.exe'
+  $WaExe = if (Test-Path -LiteralPath $candidate) { $candidate } else { Join-Path $env:LOCALAPPDATA 'wasm-agent/wa.exe' }
+}
 $ui = Join-Path $root "ui"
 if (-not (Test-Path (Join-Path $ui "index.html"))) { Write-Host "  !  no ui/ in $root"; exit 1 }
 
@@ -1307,6 +1311,10 @@ $harness = @'
   var carriesBox=function(prop){ return prop==='height'||prop==='min-width'||prop==='border-radius'||prop.indexOf('border')===0; };
   var carriesPaint=function(prop){ return prop==='color'||prop.indexOf('background')===0||prop.indexOf('font')===0; };
   var declaredProperties=function(rule){ var props=[]; for (var i=0;i<rule.style.length;i++) props.push(rule.style[i]); return props; };
+  var restingSelector=function(selector){
+    return String(selector).replace(/::[a-z-]+(\([^)]*\))?/gi,'')
+      .replace(/:(focus-visible|focus-within|hover|active|focus|target)\b/gi,'');
+  };
   var collectRules=function(el,rules,out){
     for (var i=0;i<rules.length;i++) {
       var rule=rules[i];
@@ -1314,12 +1322,12 @@ $harness = @'
       // `cssRules`, so the selector - not `cssRules` - is what tells a style rule from a group one; a
       // group rule (media, supports, layer) is entered when its condition holds.
       if (!rule.selectorText) {
-        if (rule.cssRules && (!rule.conditionText || window.matchMedia(rule.conditionText).matches)) collectRules(el,rule.cssRules,out);
+        if (rule.cssRules) collectRules(el,rule.cssRules,out);
         continue;
       }
       if (!rule.style) continue;
       var matches=false;
-      try { matches=el.matches(rule.selectorText); } catch (error) { matches=false; }
+      try { matches=el.matches(restingSelector(rule.selectorText)); } catch (error) { matches=false; }
       if (matches) out.push({selector:rule.selectorText,props:declaredProperties(rule)});
     }
     return out;
@@ -1335,12 +1343,12 @@ $harness = @'
     return found.filter(function(rule){ if (seen.indexOf(rule.selector)>=0) return false; seen.push(rule.selector); return true; });
   };
   var statingRules=function(el,isCarried){
-    return rulesMatching(el).filter(function(rule){ return rule.props.some(isCarried); }).map(function(rule){ return rule.selector; });
+    return rulesMatching(el).filter(function(rule){ return restingSelector(rule.selector)===rule.selector && rule.props.some(isCarried); }).map(function(rule){ return rule.selector; });
   };
   // The shared implementation, and the page's own globals: `* { box-sizing }` and `[hidden] { display }` are
   // about every element on the page rather than about a footer control, so the two are named here instead of
   // the property list being loosened to accommodate them.
-  var SHARED_RULES=['.chat-control','.chat-control[data-label]'];
+  var SHARED_RULES=['.chat-control','.chat-control[data-label]','.chat-control:hover','.chat-control:disabled','.chat-control:disabled:hover'];
   var GLOBAL_RULES=['*','[hidden]'];
   var GLOBAL_PROPERTIES=['box-sizing','display'];
   var strayRules=function(el){
@@ -3041,6 +3049,25 @@ $harness = @'
 
   // Phase resolution replaces provisional text: commentary becomes one commentary
   // topic, while final-answer text becomes one answer segment with no lost prefix.
+  var sixSurface=document.createElement('wa-orchestrator');
+  sixSurface.style.cssText='position:fixed;inset:0;width:1200px;height:800px;background:var(--panel);z-index:99999';
+  document.body.append(sixSurface);
+  var sixTasks=Array.from({length:6},function(_,i){return {subagent_id:'six-contract-'+i,session_id:'six-session-'+i,title:'Long native task title '+i,state:'running',settled:false,model:'fixture'};});
+  sixSurface.data=sixTasks;sixTasks.forEach(function(task){sixSurface.pin(task);});
+  var sixCanvas=sixSurface.canvas.getBoundingClientRect();
+  check([...sixSurface.panes.values()].every(function(p){var r=p.getBoundingClientRect();return r.top>=sixCanvas.top&&r.bottom<=sixCanvas.bottom&&r.left>=sixCanvas.left&&r.right<=sixCanvas.right;}),
+    'six panes must fit the viewport canvas without a third overflowing row');
+  check([...sixSurface.panes.values()].every(function(p){return p.querySelector('.agent-pane-head').getBoundingClientRect().height<=44;}),
+    'all six pane headers remain at most44 pixels');
+  sixSurface.remove();
+  window.__repaintMessages([]);
+  var literalAnswer='  <think>literal answer markup</think> raw wording  '+String.fromCharCode(10);
+  window.handleEvent({type:'delta',text:literalAnswer});
+  var literalSegment=document.querySelector('wa-message .seg');
+  check(literalSegment.rawText===literalAnswer&&literalSegment.textContent.includes('<think>literal answer markup</think>'),
+    'actual answer deltas retain original raw text and never infer reasoning from literal markers');
+  window.handleEvent({type:'reply',text:literalAnswer});
+  check(document.querySelector('wa-message .seg').rawText===literalAnswer,'settled answer retains exact source bytes beside the presentation');
   window.__repaintMessages([]);
   window.handleEvent({type:'round',n:1});
   window.handleEvent({type:'pending_delta',pending_id:'fixture-commentary',text:'Checking '});
@@ -3228,7 +3255,7 @@ $harness = @'
   window.__fixtures.health=nodeAnswer('alive',[],[]);
   await window.__watchNow();
   var overText=document.getElementById('messages').textContent;
-  check(overText.indexOf('no longer running')>=0,
+  check(overText.indexOf('no longer running')<0,
     'a run the node is not running any more must still be reported, saw: ' + overText.slice(Math.max(0,overText.length-240)));
   // A finished run stays silent - decided by the page, and by `done` on the wire.
   check(!!window.__runStanding && window.__runStanding(nodeAnswer('busy',foreignThread,[]),
@@ -3246,8 +3273,75 @@ $harness = @'
   check(countAlarms()===alarmsBefore && (!statusAfterDone || statusAfterDone.textContent.indexOf('cannot identify')<0),
     'a run that finished must stay silent: no watchdog notice and no "cannot identify" line after `done`, saw alarms '
       + alarmsBefore + '->' + countAlarms() + ' status: ' + (statusAfterDone ? statusAfterDone.textContent : 'none'));
+  // Recovered alive/busy regression: the watchdog must keep a held stream listening.
+  var heldAlive=null;
+  var aliveStream=new ReadableStream({start:function(c){heldAlive=c;}});
+  window.fetch=function(input,init){
+    var path=new URL(String(input),location.href).pathname.replace(/^\/+|\/+$/g,'');
+    if(path==='chat'&&init&&init.method==='POST')return Promise.resolve({ok:true,status:200,body:aliveStream});
+    return streamFetch.apply(window,arguments);
+  };
+  if(document.getElementById('send').classList.contains('busy'))window.__setBusy(false);
+  document.getElementById('input').value='alive held stream';
+  document.getElementById('input').dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true,cancelable:true}));
+  for(var at=0;at<60;at++)await tick();
+  var standingView={session:runThreadNow,runId:null,submitted:new Set([99]),finished:false};
+  ['alive','busy'].forEach(function(word){
+    check(window.__runStanding(nodeAnswer(word,[],[{conversation:runThreadNow,run_id:99,state:'running'}]),standingView)==='running','pre-submit live row survives '+word);
+    check(window.__runStanding(nodeAnswer(word,foreignThread,[]),standingView)==='busy-unknown','foreign chat thread survives '+word);
+  });
+  var aliveBefore=countAlarms();
+  for(var shape of [{},{worker:'alive'},{run_ids:[{conversation:runThreadNow,run_id:99}]},{worker:'alive',node_threads:[{label:'POST /node/chat',session:'foreign'}]},nodeAnswer('busy',foreignThread,[])]) {
+    window.__fixtures.health=shape;
+    await window.__watchNow();
+    check(countAlarms()===aliveBefore,'unknown/alive/busy poll must not announce death');
+  }
+  check(window.__runStanding({run_ids:[{conversation:runThreadNow,run_id:99,state:'completed'}]}, {session:runThreadNow,runId:99})==='over','authoritative terminal record ends listener');
+  heldAlive.enqueue(new TextEncoder().encode('data: '+JSON.stringify({type:'delta',text:'ALIVE-STILL-LISTENING'})+'\n\n'));
+  for(var ar=0;ar<40;ar++)await tick();
+  check(document.getElementById('messages').textContent.indexOf('ALIVE-STILL-LISTENING')>=0,'delta after watchdog poll must render');
+  heldAlive.enqueue(new TextEncoder().encode('data: '+JSON.stringify({type:'done',text:'finished'})+'\n\n'));
+  for(var ad=0;ad<40;ad++)await tick();
   window.fetch=streamFetch;
   window.__fixtures.health=nodeAnswer('alive',[],[]);
+
+  // Exact high-ID durable attachment through the production pane refresh and main reconnect.
+  var attachFetch=window.fetch, attachThread=window.__chatThread(), attachKey='9007199254740993';
+  var attachRows=[{id:'attach-u',seq:1,role:'user',content:'ATTACH-SAVED-QUESTION',created_at:1},{id:'attach-a',seq:2,role:'assistant',content:'ATTACH-SAVED-ANSWER',created_at:2}];
+  var attachRequests=[],attachPhase=0,attachTerminal=false,attachCheckpoint=0;
+  window.fetch=function(input,init){
+    var path=new URL(String(input),location.href).pathname.replace(/^\/+|\/+$/g,'');
+    if(path==='runs'||path==='run-events'){
+      var body=JSON.parse(init.body);attachRequests.push({path:path,body:body});
+      var payload=path==='runs'?{ok:true,conversation:attachThread,runs:[{run_key:attachKey,run_id:9007199254740992,state:attachTerminal?'completed':'running'}]}:{ok:true,run_key:attachKey,checkpoint_seq:attachCheckpoint,checkpoint_message_seq:attachCheckpoint?2:0,next_seq:3,has_more:false,events:[{seq:1,event:{type:'reasoning',text:'ATTACH-THINKING'}},{seq:2,event:{type:'delta',text:'ATTACH-LIVE-DELTA'}},{seq:3,event:{type:'tool',call_id:'attach-tool',name:'read',arguments:{path:'fixture'}}}]};
+      return Promise.resolve({ok:true,status:200,json:function(){return Promise.resolve(payload);}});
+    }
+    return attachFetch.apply(window,arguments);
+  };
+  var attachPane=document.createElement('wa-agent-session');document.body.append(attachPane);
+  attachPane.task={session_id:attachThread,subagent_id:'attach-fixture',state:'running',settled:false};
+  window.__setPaneReaderForAttach(async function(){return {rows:attachRows};});
+  await window.__refreshAgentPane(attachPane);
+  check(attachPane.transcript.textContent.indexOf('ATTACH-LIVE-DELTA')>=0,'shared attach: child must render durable high-ID live tail');
+  check(attachPane.transcript.textContent.indexOf('ATTACH-SAVED-ANSWER')>=0,'shared attach: child retains saved history');
+  window.__repaintMessages(attachRows,{active:true});window.__setBusy(false);
+  await window.__syncLiveForAttach({session:attachThread,run_key:attachKey,run_id:9007199254740992});
+  check(document.getElementById('messages').textContent.indexOf('ATTACH-LIVE-DELTA')>=0,'shared attach: main must render same durable high-ID live tail');
+  check(attachRequests.filter(function(r){return r.path==='run-events';}).every(function(r){return r.body.thread===attachThread&&r.body.run_id===attachKey;}),'shared attach requests must preserve exact conversation and key');
+  await window.__refreshAgentPane(attachPane);
+  check(attachPane.transcript.textContent.split('ATTACH-LIVE-DELTA').length===2,'reconnect must render child delta exactly once');
+  attachCheckpoint=1;
+  await window.__refreshAgentPane(attachPane);
+  check(attachPane.transcript.textContent.split('ATTACH-SAVED-ANSWER').length===2,'moving checkpoint keeps saved assistant exactly once');
+  check(attachPane.transcript.textContent.split('ATTACH-LIVE-DELTA').length===2,'moving checkpoint keeps tail exactly once');
+  attachTerminal=true;
+  await window.__refreshAgentPane(attachPane);
+  check(attachPane.task.settled===true&&attachPane.task.state==='completed','durable terminal fallback settles child without health proof');
+  var reloadedPane=document.createElement('wa-agent-session');document.body.append(reloadedPane);
+  reloadedPane.task={session_id:attachThread,subagent_id:'attach-reload',state:'running',settled:false};
+  await window.__refreshAgentPane(reloadedPane);
+  check(reloadedPane.transcript.textContent===attachPane.transcript.textContent,'newly mounted pane converges saved rows and tail after terminal');
+  reloadedPane.remove();attachPane.remove();window.__restorePaneReaderForAttach();window.fetch=attachFetch;
 
   // THE `inspect` MENU ITEM. The main window draws its own right-click menu, and the inspector is asked for
   // immediately after `Reload window`. Its action asks the shell for ONE named view: the name is what the
@@ -3325,7 +3419,7 @@ Add-Content -Path $app -Value "`nwindow.__resetFollow = () => { followedSeq = 0;
 
 Add-Content -Path $app -Value "`nwindow.__watchNow = () => checkWatchedRun && checkWatchedRun(); window.__runStanding = runStanding;"
 
-Add-Content -Path $app -Value "`nwindow.__liveChildRows = liveChildRows; window.__refreshOrchestrator = refreshOrchestrator; window.__setOrchestratorPanel = (panel) => { orchestratorPanel = panel; }; window.__paintChildTranscript = paintChildTranscript; window.__refreshAgentPane = refreshAgentPane;"
+Add-Content -Path $app -Value "`nwindow.__liveChildRows = liveChildRows; window.__refreshOrchestrator = refreshOrchestrator; window.__setOrchestratorPanel = (panel) => { orchestratorPanel = panel; }; window.__paintChildTranscript = paintChildTranscript; window.__refreshAgentPane = refreshAgentPane; window.__syncLiveForAttach=syncLiveRun; window.__savedPaneReader=paneMessages; window.__setPaneReaderForAttach=fn=>{paneMessages=fn;}; window.__restorePaneReaderForAttach=()=>{paneMessages=window.__savedPaneReader;};"
 
 $server = $null
 $edge = @(
@@ -3354,6 +3448,7 @@ foreach ($entry in @(Get-ChildItem Env: | Where-Object { $_.Name -like 'WASM_AGE
   [Environment]::SetEnvironmentVariable($entry.Name, $null, 'Process')
 }
 $env:WASM_AGENT_HOME = Join-Path $tmp 'home'
+$env:WASM_AGENT_LUA_ROOT = $root
 try {
   $server = Start-Process -FilePath $WaExe -ArgumentList @("serve", "--db", $db, "--port", "$Port", "--client-port", "$ClientPort", "--ui", $tmp) -WindowStyle Hidden -PassThru
   for ($i = 0; $i -lt 40; $i++) {
@@ -3432,10 +3527,11 @@ try {
     Write-Host "  FAIL $viewResult" -ForegroundColor Red
     exit 1
   }
-  Write-Host "  ok   UI structure, mid-run reload, startup recovery, the inspect window, and a view window" -ForegroundColor Green
+  Write-Host "  ok   UI structure, mid-run reload, startup recovery, the inspect window, and a view window [stages: reload,startup-recovery,inspect-window,view-window]" -ForegroundColor Green
 } finally {
   if ($server) { Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue }
   Remove-Item Env:WASM_AGENT_HOME -ErrorAction SilentlyContinue
+  Remove-Item Env:WASM_AGENT_LUA_ROOT -ErrorAction SilentlyContinue
   foreach ($key in $runtimeEnvironment.Keys) { [Environment]::SetEnvironmentVariable($key, $runtimeEnvironment[$key], 'Process') }
   $resolvedTmp = [IO.Path]::GetFullPath($tmp)
   $resolvedTemp = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())

@@ -84,6 +84,7 @@ button.live-child:hover, button.live-child:focus-visible { background:var(--pane
 .orchestrator-canvas { flex:1; min-width:0; display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); grid-auto-rows:minmax(360px,1fr); gap:var(--gap); padding:var(--space); overflow:auto; }
 .orchestrator-canvas[data-count="0"], .orchestrator-canvas[data-count="1"] { grid-template-columns:minmax(0,1fr); }
 .orchestrator-canvas[data-count="3"] { grid-template-columns:repeat(3,minmax(0,1fr)); }
+.orchestrator-canvas[data-count="5"], .orchestrator-canvas[data-count="6"] { grid-template-columns:repeat(3,minmax(0,1fr)); grid-template-rows:repeat(2,minmax(0,1fr)); grid-auto-rows:minmax(0,1fr); }
 /* The chat shell: one element the main conversation and every child pane both host. It is the flex
    child of `.panel` (or of a pane), so the transcript region keeps its own scroll and the composer
    stays at the bottom, exactly as when they were written out by hand. See DESIGN.md §10. */
@@ -112,6 +113,7 @@ wa-agent-session { min-width:0; min-height:0; display:flex; flex-direction:colum
    `.chat-control` live in the composer section, beside the append-file control they must follow. */
 .agent-notice { padding:0 var(--space); color:var(--muted); font-size:12px; overflow-wrap:anywhere; }
 .agent-preview { padding:var(--pad); white-space:pre-wrap; overflow:auto; max-height:40%; overflow-wrap:anywhere; }
+wa-agent-session[journal-attached] .agent-preview { display:none; }
 /* The orchestrator's own buttons (sidebar cards, live children, lanes). `.chat-control` is excluded rather
    than out-specified: a composer-footer control's box is the shared factory's (`.chat-control` beside the
    append-file control), and a rule here that stated that box for the same element a second time would be a
@@ -699,13 +701,13 @@ wa-chat-shell.dropping .composer { border-color: var(--accent); }
 .send.busy .icon-stop { display: block; }
 .send:disabled { opacity: .45; cursor: default; }
 
-.composer-footer { display: flex; align-items: center; justify-content: space-between; gap: var(--gap); min-height: 30px; }
+.composer-footer { display: flex; flex-wrap:wrap; align-items: center; justify-content: space-between; gap: var(--gap); min-height: 30px; }
 .footer-left, .footer-right { display: flex; align-items: center; gap: var(--gap); min-width: 0; }
-.footer-right { justify-content: flex-end; margin-left: auto; }
+.footer-right { justify-content: flex-end; margin-left: auto; flex-wrap:wrap; max-width:100%; }
 
 /* The row of per-message actions (`<wa-chat-actions>`): the main chat's Steer, and a child pane's Steer
    and Cancel task. One row element on both surfaces. */
-.chat-actions { display: flex; align-items: center; gap: var(--gap); }
+.chat-actions { display: flex; flex:none; align-items: center; gap: var(--gap); }
 
 /* The footer's controls, and the only place one of them is sized: the append-file button and every
    action in the row are `.chat-control`, stamped by `chatControl()` in components.js - one factory, so
