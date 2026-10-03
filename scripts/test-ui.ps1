@@ -3282,6 +3282,31 @@ $harness = @'
   window.fetch=streamFetch;
   window.__fixtures.health=nodeAnswer('alive',[],[]);
 
+  // Exact high-ID durable attachment through the production pane refresh and main reconnect.
+  var attachFetch=window.fetch, attachThread=window.__chatThread(), attachKey='9007199254740993';
+  var attachRows=[{id:'attach-u',seq:1,role:'user',content:'ATTACH-SAVED-QUESTION',created_at:1},{id:'attach-a',seq:2,role:'assistant',content:'ATTACH-SAVED-ANSWER',created_at:2}];
+  var attachRequests=[];
+  window.fetch=function(input,init){
+    var path=new URL(String(input),location.href).pathname.replace(/^\/+|\/+$/g,'');
+    if(path==='runs'||path==='run-events'){
+      var body=JSON.parse(init.body);attachRequests.push({path:path,body:body});
+      var payload=path==='runs'?{ok:true,conversation:attachThread,runs:[{run_key:attachKey,run_id:9007199254740992,state:'running'}]}:{ok:true,run_key:attachKey,checkpoint_seq:0,checkpoint_message_seq:0,next_seq:3,has_more:false,events:[{seq:1,event:{type:'reasoning',text:'ATTACH-THINKING'}},{seq:2,event:{type:'delta',text:'ATTACH-LIVE-DELTA'}},{seq:3,event:{type:'tool',call_id:'attach-tool',name:'read',arguments:{path:'fixture'}}}]};
+      return Promise.resolve({ok:true,status:200,json:function(){return Promise.resolve(payload);}});
+    }
+    return attachFetch.apply(window,arguments);
+  };
+  var attachPane=document.createElement('wa-agent-session');document.body.append(attachPane);
+  attachPane.task={session_id:attachThread,subagent_id:'attach-fixture',state:'running',settled:false};
+  window.__setPaneReaderForAttach(async function(){return {rows:attachRows};});
+  await window.__refreshAgentPane(attachPane);
+  check(attachPane.transcript.textContent.indexOf('ATTACH-LIVE-DELTA')>=0,'shared attach: child must render durable high-ID live tail');
+  check(attachPane.transcript.textContent.indexOf('ATTACH-SAVED-ANSWER')>=0,'shared attach: child retains saved history');
+  window.__repaintMessages(attachRows,{active:true});window.__setBusy(false);
+  await window.__syncLiveForAttach({session:attachThread,run_key:attachKey,run_id:9007199254740992});
+  check(document.getElementById('messages').textContent.indexOf('ATTACH-LIVE-DELTA')>=0,'shared attach: main must render same durable high-ID live tail');
+  check(attachRequests.filter(function(r){return r.path==='run-events';}).every(function(r){return r.body.thread===attachThread&&r.body.run_id===attachKey;}),'shared attach requests must preserve exact conversation and key');
+  attachPane.remove();window.__restorePaneReaderForAttach();window.fetch=attachFetch;
+
   // THE `inspect` MENU ITEM. The main window draws its own right-click menu, and the inspector is asked for
   // immediately after `Reload window`. Its action asks the shell for ONE named view: the name is what the
   // shell keys a view by, so a second invocation reuses the window that is already open instead of stacking
@@ -3358,7 +3383,7 @@ Add-Content -Path $app -Value "`nwindow.__resetFollow = () => { followedSeq = 0;
 
 Add-Content -Path $app -Value "`nwindow.__watchNow = () => checkWatchedRun && checkWatchedRun(); window.__runStanding = runStanding;"
 
-Add-Content -Path $app -Value "`nwindow.__liveChildRows = liveChildRows; window.__refreshOrchestrator = refreshOrchestrator; window.__setOrchestratorPanel = (panel) => { orchestratorPanel = panel; }; window.__paintChildTranscript = paintChildTranscript; window.__refreshAgentPane = refreshAgentPane;"
+Add-Content -Path $app -Value "`nwindow.__liveChildRows = liveChildRows; window.__refreshOrchestrator = refreshOrchestrator; window.__setOrchestratorPanel = (panel) => { orchestratorPanel = panel; }; window.__paintChildTranscript = paintChildTranscript; window.__refreshAgentPane = refreshAgentPane; window.__syncLiveForAttach=syncLiveRun; window.__savedPaneReader=paneMessages; window.__setPaneReaderForAttach=fn=>{paneMessages=fn;}; window.__restorePaneReaderForAttach=()=>{paneMessages=window.__savedPaneReader;};"
 
 $server = $null
 $edge = @(
