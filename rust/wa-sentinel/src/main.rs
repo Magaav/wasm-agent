@@ -1512,12 +1512,11 @@ fn perform(request: &Value) -> Result<String> {
         "deploy" => {
             let session = request.get("session").and_then(Value::as_str).unwrap_or("");
             let prompt = request.get("prompt").and_then(Value::as_str).unwrap_or("");
-            if session.is_empty() != prompt.is_empty() {
+            if request.get("expected_sha").is_none() && session.is_empty() != prompt.is_empty() {
                 bail!("deploy continuation requires both --session and --prompt");
             }
-            if request.get("expected_sha").is_some() { bail!("protocol_quarantined: no protocol deploy effect admitted"); }
             if let Some(sha) = request["expected_sha"].as_str() {
-                let script = deploy_protocol::canonical_script(sha)?;
+                let script = deploy_protocol::admit(request)?;
                 let (interpreter, script_arg) = shell_for(&script);
                 let args = vec![script_arg, "--request-id".into(), request["id"].as_str().unwrap_or("").into(),
                     "--expected-sha".into(), sha.into(), "--reason".into(), reason.into()];
@@ -1547,9 +1546,11 @@ static MAINTENANCE_ACTIVE: std::sync::atomic::AtomicBool = std::sync::atomic::At
 fn finish_request(claim: &Path, request: &Value) {
     let id=claim.file_stem().and_then(|s|s.to_str()).unwrap_or("");
     if deploy_protocol::reserved(id) {
-        let _=deploy_protocol::intake(request,id);
-        audit("reserved-effect-held",id,"identity fenced immediately before perform; evidence retained");
-        return;
+        if let Err(error)=deploy_protocol::validate(request,id) {
+            let _=deploy_protocol::intake(request,id);
+            audit("reserved-effect-held",id,&error.to_string());
+            return;
+        }
     }
     let outcome=std::panic::catch_unwind(std::panic::AssertUnwindSafe(||perform(request)));
     let (folder,ok,detail)=match outcome {
@@ -1665,8 +1666,9 @@ fn process_requests(background: bool, held: &mut Held) -> Result<u32> {
         let preview:Value=std::fs::read(&path).ok().and_then(|b|serde_json::from_slice(&b).ok()).unwrap_or(Value::Null);
         let reserved_id=path.file_stem().and_then(|s|s.to_str()).unwrap_or("");
         if deploy_protocol::reserved(reserved_id) {
-            let _=deploy_protocol::intake(&preview,reserved_id);
-            continue; // reserved identity cannot downgrade into any legacy verb
+            if deploy_protocol::intake(&preview,reserved_id).is_err() {
+                continue; // reserved identity cannot downgrade into any legacy verb
+            }
         }
         // Only the newest upgrade matters. An upgrade installs one binary, so an older request for an
         // older build is superseded, not queued behind it: without this, several agents' upgrades ran
@@ -1693,9 +1695,8 @@ fn process_requests(background: bool, held: &mut Held) -> Result<u32> {
         let asked=preview["reason"].as_str().unwrap_or("(no reason given)");
         let protocol_id = key.trim_end_matches(".json");
         if preview.get("expected_sha").is_some() {
-            if let Err(error)=deploy_protocol::intake(&preview,protocol_id) { audit("intake-problem",protocol_id,&error.to_string()); }
-            // Reserved only: parent ownership and effect path are deliberately not ready.
-            continue;
+            if let Err(error)=deploy_protocol::intake(&preview,protocol_id) { audit("intake-problem",protocol_id,&error.to_string());continue; }
+            if !deploy_protocol::ready() {continue;}
         }
         if let Err(error) = deploy_protocol::validate(&preview, protocol_id) {
             deploy_protocol::record(&preview, protocol_id, "rejected", &error.to_string())?;
@@ -1747,9 +1748,11 @@ fn process_requests(background: bool, held: &mut Held) -> Result<u32> {
         };
         if request.get("expected_sha").is_some() || deploy_protocol::reserved(claim.file_stem().and_then(|s|s.to_str()).unwrap_or("")) {
             let id=claim.file_stem().and_then(|s|s.to_str()).unwrap_or("");
-            let _=deploy_protocol::intake(&request,id);
-            audit("claimed-protocol-held",id,"effect quarantined; claimed evidence preserved");
-            continue;
+            if let Err(error)=deploy_protocol::validate(&request,id) {
+                let _=deploy_protocol::intake(&request,id);
+                audit("claimed-protocol-held",id,&error.to_string());
+                continue;
+            }
         }
         if background {
             REQUEST_ACTIVE.fetch_add(1,Ordering::AcqRel);
@@ -1833,7 +1836,7 @@ fn request(args: &[String]) -> Result<()> {
         if args[index]=="--if-no-pending" {dedupe_deploy=true;index+=1;continue;}
         if !args[index].starts_with("--") { bail!("request option must start with --; no request written"); }
         let key = args[index].trim_start_matches("--").to_string();
-        if !["reason","session","prompt","binary","script","file","expected-sha"].contains(&key.as_str()) {
+        if !["reason","session","owner","prompt","binary","script","file","expected-sha"].contains(&key.as_str()) {
             bail!("unknown request option {}; no request written",args[index]);
         }
         if fields.contains_key(&key) { bail!("duplicate request option; no request written"); }
@@ -2063,6 +2066,14 @@ fn watch() -> Result<()> {
     let _runner_lock=jobs::lock()?;
     jobs::store().recover(now_epoch() as i64).map_err(|e|anyhow::anyhow!(e.to_string()))?;
     let mut automations=jobs::Runner::new();
+    let intake_stop=std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let intake_signal=intake_stop.clone();
+    let intake_thread=std::thread::spawn(move||{
+        while !intake_signal.load(std::sync::atomic::Ordering::Acquire) {
+            if let Err(error)=deploy_protocol::scan_intake(){audit("intake-lane-error","requests",&error.to_string());}
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    });
     std::fs::write(pid_path(), std::process::id().to_string())?;
     // Who owns this watcher, written down by the watcher itself: the fact a `stop` from an operator's shell
     // needs, and the only one that survives this process dying under `Restart=always`.
@@ -2095,6 +2106,8 @@ fn watch() -> Result<()> {
     }
     loop {
         if stop_path().exists() {
+            intake_stop.store(true,std::sync::atomic::Ordering::Release);
+            let _=intake_thread.join();
             audit("watch", "stop file", "sentinel stopping on request");
             say("stop file found - stopping");
             let _ = std::fs::remove_file(pid_path());
@@ -2418,6 +2431,21 @@ fn main() -> Result<()> {
     let outcome = match verb {
         "request" => request(rest),
         "job" => jobs::cli(rest),
+        "protocol" => match rest.first().map(String::as_str) {
+            Some("observe") if rest.len()==1 => {
+                let root=sentinel_dir().join("deploy-protocol");
+                if root.exists(){for entry in std::fs::read_dir(root)?.flatten(){if entry.path().is_dir(){
+                    sentinel_return::observe(entry.file_name().to_str().context("protocol id encoding")?)?;
+                }}}
+                Ok(())
+            },
+            Some("compose") if rest.len()==2 => {
+                let event:Value=serde_json::from_slice(&std::fs::read(&rest[1])?)?;
+                println!("{}",sentinel_return::instruction(&sentinel_return::resolve_event(&event)?));
+                Ok(())
+            },
+            _=>bail!("protocol requires observe or compose <key-only-event-file>"),
+        },
         "instance" => instance::cli(rest),
         "recover" => verb_recover(rest.first().map(String::as_str).unwrap_or("explicit operator recovery")).map(|s|say(&s)),
         "watch" => watch(),

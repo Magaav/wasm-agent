@@ -3,6 +3,7 @@ import argparse,pathlib,subprocess,json,hashlib
 p=argparse.ArgumentParser();p.add_argument('--repo',required=True);p.add_argument('--evidence',required=True);a=p.parse_args();repo=pathlib.Path(a.repo).resolve();root=pathlib.Path(a.evidence).resolve();root.mkdir(parents=True,exist_ok=False)
 source=(repo/'scripts/test-sentinel-owned-job.py').read_bytes();text=source.decode();old='bool(k.AssignProcessToJobObject(job,process.process))';assert old in text
 mutant=text.replace(old,'True # MUTANT: root not assigned')
+mutant=mutant.replace("assert member.value,'root not in exact owned job'","pass # inspect actual attempted child membership below")
 f=root/'helper-mutant.py';f.write_bytes(mutant.encode())
 r=subprocess.run(['python',str(f),'--repo',str(repo),'--evidence',str(root/'fixture'),'--escape-attempt'],capture_output=True,timeout=30)
 (root/'stdout').write_bytes(r.stdout);(root/'stderr').write_bytes(r.stderr)

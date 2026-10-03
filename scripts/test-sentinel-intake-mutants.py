@@ -12,6 +12,7 @@ for label in ['serial','mutable']:
   source=main.read_text();start=source.index('    // Intake ALL identities');end=source.index('    // The newest upgrade',start)
   # Restore serial dependency: each protocol intake waits behind slow health too.
   source=source[:start]+source[end:];source=source.replace('if preview.get("expected_sha").is_some() {','if preview.get("expected_sha").is_some() {\n            let _=node_activity();')
+  source=source.replace('deploy_protocol::scan_intake()','Ok::<(),anyhow::Error>(())')
   main.write_text(source)
  else:
   source=protocol.read_text();assert 'if original != *request' in source

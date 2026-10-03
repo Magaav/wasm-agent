@@ -46,7 +46,7 @@ pub(crate) fn record(request: &Value, id: &str, phase: &str, detail: &str) -> Re
     let ack = dir.join("ack.json");
     if !ack.exists() {
         wa_operation::atomic_json(&ack, &json!({"schema":1,"id":id,"expected_sha":request["expected_sha"],
-            "session":request["session"],"queued_at":request["queued_at"],"phase":phase,
+            "session":request["session"],"owner":request["owner"],"queued_at":request["queued_at"],"phase":phase,
             "detail":detail,"at":now_epoch()}))?;
     }
     if phase=="held" && dir.join("state.json").exists() {
@@ -62,7 +62,7 @@ pub(crate) fn record(request: &Value, id: &str, phase: &str, detail: &str) -> Re
 /// Cheap durable observation. No health, source lookup or effect admission.
 pub(crate) fn intake(request: &Value, id: &str) -> Result<()> {
     if request.get("expected_sha").is_none() && !reserved(id) { return Ok(()); }
-    let result=validate(request,id).and_then(|_|record(request,id,"held","parent_owner_not_ready; deploy_effect_quarantined"));
+    let result=validate(request,id).and_then(|_|record(request,id,"held","acknowledged; effect awaits owner/source/target/hook admission"));
     if let Err(error)=result {
         let safe=id.bytes().map(|b|format!("{b:02x}")).collect::<String>();
         let dir=sentinel_dir().join("intake-problems").join(safe);
@@ -73,6 +73,81 @@ pub(crate) fn intake(request: &Value, id: &str) -> Result<()> {
         // Preserve original ack/intent. Latest problem is separately discoverable.
         wa_operation::atomic_json(&dir.join("latest.json"),&evidence)?;
         bail!("{error}");
+    }
+    Ok(())
+}
+
+pub(crate) fn ready() -> bool {
+    installed_binary().parent().map(|p|p.join("runtime-worktree.txt").is_file()).unwrap_or(false)
+        && jobs::store().get("onSentinelReturn").map(|j|j["enabled"]==true).unwrap_or(false)
+}
+
+/// Validate every privileged input again in the effect worker. Reservations survive replacement;
+/// even a spawn error is uncertain and never an automatic second effect.
+pub(crate) fn admit(request:&Value) -> Result<PathBuf> {
+    let id=request["id"].as_str().context("protocol_id_missing")?;
+    validate(request,id)?;
+    let owner=request["owner"].as_str().filter(|s|!s.is_empty()).context("protocol_owner_required")?;
+    let binding=sentinel_return::bind_parent(id)?;
+    if binding["owner"]!=owner {bail!("protocol_owner_mismatch");}
+    let job=jobs::store().get("onSentinelReturn").map_err(|e|anyhow::anyhow!(e.to_string()))?;
+    if job["enabled"]!=true || job["trigger"]["topic"]!="sentinel.return"
+        || job["action"]["kind"]!="wake" || job["action"]["dedupe_key"]!="event_key" {bail!("return_hook_not_ready");}
+    let script=canonical_script(request["expected_sha"].as_str().context("protocol_sha_missing")?)?;
+    let target=verify_target(node_port(),true).context("protocol_native_target_not_owned")?;
+    let dir=sentinel_dir().join("deploy-protocol").join(id);
+    let lock=std::fs::OpenOptions::new().create(true).truncate(false).read(true).write(true).open(dir.join("effect.lock"))?;
+    lock.lock()?;
+    if dir.join("effect.json").exists() {bail!("effect_already_reserved; reconcile, never replay");}
+    fence(request,id)?;
+    let source=script.parent().and_then(Path::parent).context("source_parent_missing")?;
+    let digest=ring::digest::digest(&ring::digest::SHA256,&std::fs::read(&script)?).as_ref().iter().map(|b|format!("{b:02x}")).collect::<String>();
+    let facts=json!({"id":id,"expected_sha":request["expected_sha"],"tree":git(source,&["rev-parse","HEAD^{tree}"])?,
+        "parent":binding["parent"],"owner":binding["owner"],"source":source,"script":script,"script_sha256":digest,
+        "target_pid":target,"target_created":instance::process_start(target),"watcher_pid":std::process::id(),"at":now_epoch(),"phase":"admitted"});
+    wa_operation::atomic_json(&dir.join("effect.json"),&facts)?;
+    record(request,id,"spawned","effect reserved before spawn; outcome requires fresh actual installer verification")?;
+    Ok(script)
+}
+
+pub(crate) fn verify_install(id:&str) -> Result<Value> {
+    let dir=sentinel_dir().join("deploy-protocol").join(id);
+    let intent:Value=serde_json::from_slice(&std::fs::read(dir.join("intent.json"))?)?;
+    validate(&intent,id)?;
+    let binding=sentinel_return::bind_parent(id)?;
+    if binding["owner"]!=intent["owner"] {bail!("verification_owner_mismatch");}
+    let script=canonical_script(intent["expected_sha"].as_str().context("expected_sha_missing")?)?;
+    let root=script.parent().and_then(Path::parent).context("verification_root_missing")?;
+    let install=installed_binary().parent().context("install_parent_missing")?.to_path_buf();
+    let output=std::process::Command::new("node").arg(root.join("scripts/sentinel-install-proof.mjs"))
+        .arg("verify").arg(root).arg(&install).arg(dir.join("intent.json")).arg(dir.join("binding.json")).arg(&dir)
+        .env("WA_PORT",node_port().to_string()).env("WA_DEPLOY_ROOT",root).output()?;
+    let nonce=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos();
+    std::fs::write(dir.join(format!("proof-{nonce}.stdout")),&output.stdout)?;
+    std::fs::write(dir.join(format!("proof-{nonce}.stderr")),&output.stderr)?;
+    if !output.status.success() {bail!("actual_verification_failed:{}",String::from_utf8_lossy(&output.stderr));}
+    let proof:Value=serde_json::from_slice(&output.stdout)?;
+    if proof["ok"]!=true || proof["request_id"]!=id || proof["expected_sha"]!=intent["expected_sha"]
+        || proof["owner"]!=binding["owner"] || proof["parent"]!=binding["parent"] {bail!("actual_verification_identity_mismatch");}
+    wa_operation::atomic_json(&dir.join("verification.json"),&proof)?;
+    Ok(proof)
+}
+
+/// Intake has its own read-only lane, so slow health/git/verifier work cannot delay new acknowledgements.
+pub(crate) fn scan_intake() -> Result<()> {
+    for entry in std::fs::read_dir(sentinel_dir().join("requests"))?.flatten() {
+        let path=entry.path();if path.extension().and_then(|v|v.to_str())!=Some("json") {continue;}
+        let id=path.file_stem().and_then(|s|s.to_str()).unwrap_or("");
+        if let Ok(bytes)=std::fs::read(&path) {
+            match serde_json::from_slice::<Value>(&bytes) {
+                Ok(v)=>{if let Err(e)=intake(&v,id){audit("intake-problem",id,&e.to_string());}},
+                Err(e)=>{let problems=sentinel_dir().join("intake-problems");std::fs::create_dir_all(&problems)?;
+                    let safe=id.bytes().map(|b|format!("{b:02x}")).collect::<String>();
+                    let hash=ring::digest::digest(&ring::digest::SHA256,&bytes).as_ref().iter().map(|b|format!("{b:02x}")).collect::<String>();
+                    let file=problems.join(format!("malformed-{safe}-{hash}.json"));
+                    if !file.exists(){wa_operation::atomic_json(&file,&json!({"id":id,"raw_bytes":bytes,"detail":e.to_string(),"at":now_epoch()}))?;}}
+            }
+        }
     }
     Ok(())
 }

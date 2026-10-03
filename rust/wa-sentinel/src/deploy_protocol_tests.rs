@@ -10,7 +10,7 @@ fn busy_protocol_ack_is_persistent_but_never_completion() {
     deploy_protocol::intake(&request,"private-1").unwrap();
     let mut changed=request.clone();changed["session"]=json!("victim");
     assert!(deploy_protocol::intake(&changed,"private-1").unwrap_err().to_string().contains("immutable_intent_mismatch"));
-    assert!(perform(&request).unwrap_err().to_string().contains("protocol_quarantined"));
+    assert!(perform(&request).unwrap_err().to_string().contains("protocol_owner_required"));
     let started=Instant::now();
     deploy_protocol::record(&request,"private-1","accepted","not complete").unwrap();
     deploy_protocol::record(&request,"private-1","held","busy").unwrap();

@@ -13,7 +13,9 @@
     "scripts/deploy.sh",
     "scripts/upgrade.sh",
     "scripts/lib/service-target.sh",
-    "scripts/deploy-shipped.json"
+    "scripts/deploy-shipped.json",
+    "scripts/verify-install.sh",
+    "scripts/sentinel-install-proof.mjs"
   ],
   "globs": [
     "scripts/whatsapp-*",

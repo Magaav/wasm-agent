@@ -3,7 +3,7 @@ Runs real-parent harness inside owned tree. No global process control.
 """
 import argparse,ctypes,json,os,pathlib,subprocess,time
 from ctypes import wintypes as w
-p=argparse.ArgumentParser();p.add_argument('--repo',required=True);p.add_argument('--evidence',required=True);p.add_argument('--assign-failure',action='store_true');p.add_argument('--escape-attempt',action='store_true');a=p.parse_args()
+p=argparse.ArgumentParser();p.add_argument('--repo',required=True);p.add_argument('--evidence',required=True);p.add_argument('--assign-failure',action='store_true');p.add_argument('--escape-attempt',action='store_true');p.add_argument('--script');p.add_argument('--argument',action='append',default=[]);p.add_argument('--deadline',type=int,default=100);a=p.parse_args()
 root=pathlib.Path(a.evidence).resolve();root.mkdir(parents=True,exist_ok=False)
 if os.name!='nt':print('SKIP: owned Windows Job proof (1 skipped)');raise SystemExit(0)
 k=ctypes.WinDLL('kernel32',use_last_error=True)
@@ -19,6 +19,8 @@ k.CreateJobObjectW.argtypes=[ctypes.c_void_p,w.LPCWSTR];k.CreateJobObjectW.resty
 k.CreateProcessW.argtypes=[w.LPCWSTR,w.LPWSTR,ctypes.c_void_p,ctypes.c_void_p,w.BOOL,w.DWORD,ctypes.c_void_p,w.LPCWSTR,ctypes.POINTER(STARTUP),ctypes.POINTER(PROCESS)];k.CreateProcessW.restype=w.BOOL
 for name,args in [('AssignProcessToJobObject',[w.HANDLE,w.HANDLE]),('TerminateProcess',[w.HANDLE,w.UINT]),('TerminateJobObject',[w.HANDLE,w.UINT]),('WaitForSingleObject',[w.HANDLE,w.DWORD]),('ResumeThread',[w.HANDLE]),('CloseHandle',[w.HANDLE]),('GetExitCodeProcess',[w.HANDLE,ctypes.POINTER(w.DWORD)]),('QueryInformationJobObject',[w.HANDLE,ctypes.c_int,ctypes.c_void_p,w.DWORD,ctypes.c_void_p])]:getattr(k,name).argtypes=args
 repo=pathlib.Path(a.repo).resolve();script=repo/'scripts/test-sentinel-real-parent.cjs'
+if a.script:
+ script=pathlib.Path(a.script).resolve();assert script.is_relative_to(repo) and script.is_file(),'private owned script outside source'
 node=subprocess.check_output(['where','node'],text=True).splitlines()[0]
 if a.escape_attempt:
  probe=root/'escape.cjs'
@@ -26,8 +28,12 @@ if a.escape_attempt:
  py="import subprocess,sys,json,time; f=sys.argv[1];\ntry:\n p=subprocess.Popen([sys.executable,'-c','import time;time.sleep(10)'],creationflags=0x01000000);open(f,'w').write(json.dumps({'pid':p.pid,'created':True}));p.wait()\nexcept OSError as e:\n open(f,'w').write(json.dumps({'created':False,'error':str(e)}))"
  probe.write_text("const {spawnSync}=require('child_process');const r=spawnSync('python',['-c',"+json.dumps(py)+","+json.dumps(str(childinfo))+"]);process.exit(r.status||0);")
  script=probe
-command=subprocess.list2cmdline([node,str(script)])
+command=subprocess.list2cmdline([node,str(script),*a.argument])
 startup=STARTUP();startup.cb=ctypes.sizeof(startup);process=PROCESS();job=k.CreateJobObjectW(None,None);assert job
+import msvcrt
+stdout=(root/'stdout.log').open('wb');stderr=(root/'stderr.log').open('wb');stdin=open(os.devnull,'rb')
+for stream in [stdout,stderr,stdin]:os.set_handle_inheritable(msvcrt.get_osfhandle(stream.fileno()),True)
+startup.flags=0x100;startup.stdout=msvcrt.get_osfhandle(stdout.fileno());startup.stderr=msvcrt.get_osfhandle(stderr.fileno());startup.stdin=msvcrt.get_osfhandle(stdin.fileno())
 k.SetInformationJobObject.argtypes=[w.HANDLE,ctypes.c_int,ctypes.c_void_p,w.DWORD];k.SetInformationJobObject.restype=w.BOOL
 k.IsProcessInJob.argtypes=[w.HANDLE,w.HANDLE,ctypes.POINTER(w.BOOL)];k.IsProcessInJob.restype=w.BOOL
 limits=EXTENDED();limits.basic.flags=0x2000 # KILL_ON_JOB_CLOSE, neither breakaway flag
@@ -35,7 +41,7 @@ assert k.SetInformationJobObject(job,9,ctypes.byref(limits),ctypes.sizeof(limits
 applied=EXTENDED();assert k.QueryInformationJobObject(job,9,ctypes.byref(applied),ctypes.sizeof(applied),None)
 assert applied.basic.flags==0x2000,'owned limits not applied'
 # inherited environment is consumed only by harness's explicit private environment allowlist.
-assert k.CreateProcessW(node,ctypes.create_unicode_buffer(command),None,None,False,4,None,str(repo),ctypes.byref(startup),ctypes.byref(process)),ctypes.get_last_error()
+assert k.CreateProcessW(node,ctypes.create_unicode_buffer(command),None,None,True,4,None,str(repo),ctypes.byref(startup),ctypes.byref(process)),ctypes.get_last_error()
 facts={'pid':process.pid,'created_suspended':True,'resumed':False,'assignment_injected_failure':a.assign_failure}
 try:
  assigned=False if a.assign_failure else bool(k.AssignProcessToJobObject(job,process.process))
@@ -44,6 +50,8 @@ try:
   code=w.DWORD();assert k.GetExitCodeProcess(process.process,ctypes.byref(code));facts.update(exit=code.value,active=0,negative=True)
   assert code.value==91,'suspended assignment failure cleanup wrong exit'
  else:
+  member=w.BOOL();assert k.IsProcessInJob(process.process,job,ctypes.byref(member));assert member.value,'root not in exact owned job'
+  facts['root_in_exact_job']=True
   assert k.ResumeThread(process.thread)!=0xffffffff;facts['resumed']=True
   if a.escape_attempt:
    deadline=time.monotonic()+8
@@ -62,7 +70,27 @@ try:
      k.TerminateJobObject(job,95);k.WaitForSingleObject(process.process,10000)
      raise AssertionError('attempted child escaped exact owned Job')
     k.CloseHandle(childhandle)
-  wait=k.WaitForSingleObject(process.process,100000)
+  seen={}
+  k.OpenProcess.argtypes=[w.DWORD,w.BOOL,w.DWORD];k.OpenProcess.restype=w.HANDLE
+  k.GetProcessTimes.argtypes=[w.HANDLE,ctypes.POINTER(w.FILETIME),ctypes.POINTER(w.FILETIME),ctypes.POINTER(w.FILETIME),ctypes.POINTER(w.FILETIME)]
+  k.QueryFullProcessImageNameW.argtypes=[w.HANDLE,w.DWORD,w.LPWSTR,ctypes.POINTER(w.DWORD)]
+  started=time.monotonic()
+  while k.WaitForSingleObject(process.process,100)==258:
+   ids=(ctypes.c_size_t*1026)();assert k.QueryInformationJobObject(job,3,ctypes.byref(ids),ctypes.sizeof(ids),None)
+   # JOBOBJECT_BASIC_PROCESS_ID_LIST begins with two DWORDs, followed by ULONG_PTR entries.
+   count=ctypes.cast(ids,ctypes.POINTER(w.DWORD))[1]
+   for pid in list(ids)[1:1+count]:
+    if pid in seen:continue
+    handle=k.OpenProcess(0x1000,False,pid)
+    if not handle:continue # process exited between list and exact handle acquisition
+    member=w.BOOL();assert k.IsProcessInJob(handle,job,ctypes.byref(member));assert member.value
+    created,exited,kernel,user=w.FILETIME(),w.FILETIME(),w.FILETIME(),w.FILETIME()
+    assert k.GetProcessTimes(handle,ctypes.byref(created),ctypes.byref(exited),ctypes.byref(kernel),ctypes.byref(user))
+    image=ctypes.create_unicode_buffer(32768);size=w.DWORD(32768);assert k.QueryFullProcessImageNameW(handle,0,image,ctypes.byref(size))
+    seen[pid]={'pid':pid,'in_exact_job':True,'created_filetime':(created.dwHighDateTime<<32)|created.dwLowDateTime,'image':image.value};k.CloseHandle(handle)
+   if time.monotonic()-started>a.deadline:break
+  facts['native_members']=list(seen.values())
+  wait=k.WaitForSingleObject(process.process,0)
   if wait!=0:
    k.TerminateJobObject(job,92);k.WaitForSingleObject(process.process,10000);raise AssertionError('private harness deadline; tree terminated')
   code=w.DWORD();assert k.GetExitCodeProcess(process.process,ctypes.byref(code));facts['exit']=code.value
@@ -86,4 +114,5 @@ finally:
  facts['final_active']=acc.active;assert acc.active==0,'cleanup active processes unknown'
  (root/'job-receipt.json').write_text(json.dumps(facts,indent=2))
  k.CloseHandle(process.thread);k.CloseHandle(process.process);k.CloseHandle(job)
+ stdout.close();stderr.close();stdin.close()
 print('owned return Job ok (1 check, 0 skipped): '+json.dumps(facts))

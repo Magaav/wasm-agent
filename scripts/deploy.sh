@@ -761,6 +761,9 @@ if [ -f "$LIB_SRC" ]; then
   ship_file "$LIB_SRC" "$INSTALL_DIR/scripts/lib/service-target.sh" "scripts/lib/service-target.sh beside deploy.sh"
 fi
 
+ship_file "$ROOT/scripts/verify-install.sh" "$INSTALL_DIR/scripts/verify-install.sh" "installation verifier"
+ship_file "$ROOT/scripts/sentinel-install-proof.mjs" "$INSTALL_DIR/scripts/sentinel-install-proof.mjs" "request-bound installation proof"
+
 # Ship the WhatsApp pipeline with the node it belongs to. `upgrade.sh` installs the binary, the UI and the
 # self-update skill, and has never carried these: the scripts that read the inbox, the job files that
 # schedule and trigger them, and the entry point that says "emit" were placed in <install>/scripts by hand.
@@ -877,6 +880,19 @@ record_installed
 echo "deploy: installed $COMMIT ($HASH)"
 echo "deploy: recorded in $INSTALL_DIR/installed.txt"
 echo "deploy: /health -> $(curl -s -m 5 "http://127.0.0.1:$PORT/health" | head -c 260)"
+if [ -n "$EXPECTED_SHA" ]; then
+  [ "$(git rev-parse HEAD)" = "$EXPECTED_SHA" ] && [ -z "$(git status --porcelain)" ] \
+    && [ "$(git ls-remote origin refs/heads/main | awk '{print $1}')" = "$EXPECTED_SHA" ] \
+    || fail "source changed before final installation record"
+fi
+PROOF_NODE_SCRIPT="$ROOT/scripts/sentinel-install-proof.mjs"; PROOF_NODE_ROOT="$ROOT"; PROOF_NODE_INSTALL="$INSTALL_DIR"
+if command -v cygpath >/dev/null 2>&1; then
+  PROOF_NODE_SCRIPT="$(cygpath -w "$PROOF_NODE_SCRIPT")"; PROOF_NODE_ROOT="$(cygpath -w "$PROOF_NODE_ROOT")"; PROOF_NODE_INSTALL="$(cygpath -w "$PROOF_NODE_INSTALL")"
+fi
+if [ -n "$EXPECTED_SHA" ]; then
+  node "$PROOF_NODE_SCRIPT" record "$PROOF_NODE_ROOT" "$PROOF_NODE_INSTALL" \
+    || fail "final source/artifact/script/UI/process identity recording failed"
+fi
 write_result true "installed $COMMIT; watcher ${SENTINEL_NEW_PID:-${SENTINEL_WATCH_PID:-none}}"
 VERDICT="[deploy result] ok commit=$COMMIT node_sha=$HASH sentinel_sha=$SENTINEL_HASH watcher=${SENTINEL_WATCH_PID:-none}->${SENTINEL_NEW_PID:-none}. Evidence: $INSTALL_DIR/deploy-result.json and installed.txt; run scripts/verify-install.sh for the checks."
 

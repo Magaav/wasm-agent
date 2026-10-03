@@ -1,7 +1,7 @@
 // Real source-root Lua/SQLite parent; local mock inference only. Exact private children awaited.
 const fs=require('fs'),os=require('os'),path=require('path'),http=require('http'),net=require('net'),assert=require('assert/strict'),{spawn,spawnSync}=require('child_process');
 const root=path.resolve(__dirname,'..'),home=fs.mkdtempSync(path.join(os.tmpdir(),'wa-sr-real-'));
-const wa=path.resolve(process.argv[2]||'rust/target/debug/wa.exe'),sentinel=path.resolve(process.argv[3]||'rust/wa-sentinel/target/debug/wa-sentinel.exe');
+const wa=path.resolve(process.argv[2]||'rust/target/release/wa.exe'),sentinel=path.resolve(process.argv[3]||'rust/wa-sentinel/target/debug/wa-sentinel.exe');
 assert(fs.existsSync(wa)&&fs.existsSync(sentinel),'source-built binaries required');
 const env=Object.fromEntries(Object.entries(process.env).filter(([k])=>['PATH','SYSTEMROOT','WINDIR','COMSPEC','TEMP','TMP','PATHEXT','SYSTEMDRIVE','LOCALAPPDATA'].includes(k.toUpperCase())));
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));async function until(f,label){for(let i=0;i<400;i++){if(await f())return;await sleep(100);}throw Error(label);}

@@ -57,27 +57,75 @@ pub(crate) fn resolve_event(event:&Value) -> Result<Value> {
     if at>now_epoch() || at<intent["queued_at"].as_u64().unwrap_or(u64::MAX) { bail!("return_timestamp_invalid"); }
     if !["accepted","held","updating","failed","unknown","verified"].contains(&journal["phase"].as_str().unwrap_or("")) { bail!("return_phase_invalid"); }
     // Positive installation authority requires a separate verified proof; no journal text can mint it.
-    if journal["phase"]=="verified" { bail!("return_verified_proof_not_ready"); }
+    if journal["phase"]=="verified" {
+        // A stored green packet is never completion authority. Re-run the actual verifier at delivery.
+        if let Err(error)=deploy_protocol::verify_install(id) {
+            let mut failed=journal.clone();failed["phase"]=json!("failed");
+            failed["detail"]=json!(format!("installation_verification_regressed:{error}; no replay"));
+            return Ok(failed);
+        }
+    }
     Ok(journal)
+}
+
+fn observed_phase(binding:&Value,state:&Value,now:u64) -> (String,String) {
+    let id=binding["id"].as_str().unwrap_or("");
+    let intent=&binding["intent"];
+    let queued=intent["queued_at"].as_u64().unwrap_or(u64::MAX);
+    if !state.is_null() && (state["id"]!=id || state["expected_sha"]!=intent["expected_sha"]
+        || state["at"].as_u64().map(|at|at<queued||at>now).unwrap_or(true)) {
+        return ("unknown".into(),"state_identity_or_timestamp_mismatch; reconcile, never replay".into());
+    }
+    if state["phase"]=="failed" {return ("failed".into(),state["detail"].as_str().unwrap_or("effect failed").into());}
+    let dir=sentinel_dir().join("deploy-protocol").join(id);
+    if dir.join("result.json").exists() {
+        let result:Value=std::fs::read(dir.join("result.json")).ok().and_then(|b|serde_json::from_slice(&b).ok()).unwrap_or(Value::Null);
+        let at=result["at"].as_str().unwrap_or("");
+        // JS verifier validates ISO timestamps causally, including future and stale outcomes.
+        if result["request_id"]!=id || result["expected_sha"]!=intent["expected_sha"] || at.is_empty() {
+            return ("unknown".into(),"outcome_identity_or_timestamp_mismatch; no replay".into());
+        }
+        if result["ok"]!=true {return ("failed".into(),result["detail"].as_str().unwrap_or("installer failed").into());}
+        return match deploy_protocol::verify_install(id) {
+            Ok(_)=>("verified".into(),"fresh actual request-bound verify-install, source/artifacts/scripts/UI/listener/watcher green; I am updated".into()),
+            Err(e)=>("failed".into(),format!("actual_installation_verification_failed:{e}; retain raw evidence; no replay")),
+        };
+    }
+    if now.saturating_sub(queued)>=600 {return ("unknown".into(),"bounded observation elapsed without attributable outcome; reconcile, never replay".into());}
+    if state["phase"]=="spawned" {("updating".into(),"effect reserved/spawned; actual installation result pending; ten-second observation".into())}
+    else {("held".into(),state["detail"].as_str().unwrap_or("owner/source/target prerequisites not ready").into())}
+}
+
+/// Durable before HTTP. An interrupted or failed attempt remains unknown, across job revisions.
+pub(crate) fn begin_delivery(journal:&Value) -> Result<PathBuf> {
+    let dir=sentinel_dir().join("deploy-protocol").join(journal["id"].as_str().context("delivery_id_missing")?);
+    let key=journal["event_key"].as_str().context("delivery_key_missing")?;
+    let file=dir.join(format!("delivery-{key}.json"));
+    let lock=std::fs::OpenOptions::new().create(true).truncate(false).read(true).write(true).open(dir.join("delivery.lock"))?;
+    lock.lock()?;
+    if file.exists(){bail!("sentinel return outcome unknown or already submitted; reconcile, never replay");}
+    wa_operation::atomic_json(&file,&json!({"id":journal["id"],"event_key":key,"phase":"submitting","at":now_epoch()}))?;
+    Ok(file)
 }
 
 pub(crate) fn observe(id:&str) -> Result<()> {
     let binding=bind_parent(id)?;
     let dir=sentinel_dir().join("deploy-protocol").join(id);
+    let observation_lock=std::fs::OpenOptions::new().create(true).truncate(false).read(true).write(true).open(dir.join("observation.lock"))?;
+    observation_lock.lock()?;
     let mut cursor:Value=std::fs::read(dir.join("observation.json")).ok().and_then(|b|serde_json::from_slice(&b).ok()).unwrap_or(json!({"slot":0,"next_at":0}));
     let now=now_epoch();
     if cursor["next_at"].as_u64().unwrap_or(0)>now {return Ok(());}
-    let queued=binding["intent"]["queued_at"].as_u64().context("queued_timestamp_missing")?;
     let slot=cursor["slot"].as_u64().unwrap_or(0);
+    let key=format!("{id}-{slot}");
+    let file=dir.join("returns").join(format!("{key}.json"));
     let state:Value=std::fs::read(dir.join("state.json")).ok().and_then(|b|serde_json::from_slice(&b).ok()).unwrap_or(Value::Null);
     if !state.is_null() && (state["id"]!=id || state["expected_sha"]!=binding["intent"]["expected_sha"]) {bail!("return_state_identity_mismatch");}
-    let terminal=now.saturating_sub(queued)>=600 || state["phase"]=="failed";
-    let phase=if state["phase"]=="failed" {"failed"} else if terminal {"unknown"} else if state["phase"]=="spawned" {"updating"} else {"held"};
-    let key=format!("{id}-{slot}");
-    let journal=json!({"id":id,"event_key":key,"expected_sha":binding["intent"]["expected_sha"],"parent":binding["parent"],"owner":binding["owner"],"phase":phase,"at":now,"detail":if terminal {"bounded_deadline_no_effect; reconcile, never replay"} else {"effect_quarantined; ownership observed; ten-second check queued"}});
+    let (phase,detail)=if file.exists(){("pending".into(),String::new())}else{observed_phase(&binding,&state,now)};
+    let mut journal=json!({"id":id,"event_key":key,"expected_sha":binding["intent"]["expected_sha"],"parent":binding["parent"],"owner":binding["owner"],"phase":phase,"at":now,"detail":detail});
     std::fs::create_dir_all(dir.join("returns"))?;
-    let file=dir.join("returns").join(format!("{key}.json"));
-    if !file.exists(){wa_operation::atomic_json(&file,&journal)?;}
+    if !file.exists(){wa_operation::atomic_json(&file,&journal)?;} else {journal=serde_json::from_slice(&std::fs::read(&file)?)?;}
+    let terminal=["failed","unknown","verified"].contains(&journal["phase"].as_str().unwrap_or(""));
     // Engine durable queue, not model polling. Disabled hook does not consume the slot.
     let source=jobs::store();
     let job=source.get("onSentinelReturn").map_err(|e|anyhow::anyhow!("return_hook_unavailable:{e}"))?;
@@ -89,8 +137,13 @@ pub(crate) fn observe(id:&str) -> Result<()> {
     let completed=prior["receipt"]["state"]=="completed";
     // Completion is authoritative across definition revisions via the wake ledger, not enqueue count.
     let ledger:Value=std::fs::read(sentinel_dir().join("wake-dedupe-onSentinelReturn.json")).ok().and_then(|b|serde_json::from_slice(&b).ok()).unwrap_or(Value::Null);
+    let delivery:Value=std::fs::read(dir.join(format!("delivery-{key}.json"))).ok().and_then(|b|serde_json::from_slice(&b).ok()).unwrap_or(Value::Null);
+    if prior["receipt"]["state"]=="unknown" || (!delivery.is_null() && delivery["phase"]!="completed" && !completed && ledger["keys"].get(&key).is_none()) {
+        wa_operation::atomic_json(&dir.join("return-status.json"),&json!({"id":id,"event_key":key,"phase":if prior["receipt"]["state"]=="unknown"||delivery["phase"]=="unknown"{"unknown"}else{"awaiting_terminal_completion"},"detail":"HTTP submission boundary crossed; terminal completion unconfirmed; no replay","at":now}))?;
+        return Ok(());
+    }
     let emitted=jobs::store().emit("sentinel.return",&key,&json!({"id":id,"event_key":key}),now as i64).map_err(|e|anyhow::anyhow!("return_emit_failed:{e}"))?;
-    if completed || ledger["keys"].get(&key).is_some() {
+    if completed || delivery["phase"]=="completed" || ledger["keys"].get(&key).is_some() {
         cursor=json!({"slot":slot+1,"next_at":if terminal {u64::MAX} else {now+10},"last_event":key});
         wa_operation::atomic_json(&dir.join("observation.json"),&cursor)?;
     } else if emitted>0 || acknowledged {

@@ -1,9 +1,12 @@
 """Prepare source-exact isolated install packet. NEVER executes deploy; outside root owns execution.
 No inherited WA marker is removed. Refuse reuse and remote/public source.
 """
-import argparse,pathlib,subprocess,json,hashlib,socket,os
+import argparse,pathlib,subprocess,json,hashlib,socket,os,tempfile
 p=argparse.ArgumentParser();p.add_argument('--repo',required=True);p.add_argument('--head',required=True);p.add_argument('--packet',required=True);a=p.parse_args()
-repo=pathlib.Path(a.repo).resolve();packet=pathlib.Path(a.packet).resolve();packet.mkdir(parents=True,exist_ok=False)
+repo=pathlib.Path(a.repo).resolve();packet=pathlib.Path(a.packet).resolve()
+assert packet.is_relative_to(pathlib.Path(tempfile.gettempdir()).resolve()),'packet must stay in the explicitly private temp boundary'
+assert os.environ.get('WASM_AGENT_IN_TURN')!='1','outside WA execution required; marker must never be removed'
+packet.mkdir(parents=True,exist_ok=False)
 def git(*args):return subprocess.check_output(['git','-C',str(repo),*args],text=True).strip()
 assert git('rev-parse','HEAD')==a.head and not git('status','--porcelain'),'source must be committed exact clean tip'
 source=packet/'source';subprocess.run(['git','clone','--no-hardlinks','--no-checkout',str(repo),str(source)],check=True)
