@@ -1,0 +1,11 @@
+{"cwd":"C:\\Users\\Victor\\AppData\\Local\\Temp\\wa-independent-dd79-48sg9e\\source","args":["scripts/producer-admission.mjs","verify",".","dd79c86a8dbcae80284fe83206e249256b24eef0"],"status":0,"signal":null}
+{
+  "admission_verified": true,
+  "gate_verified": false,
+  "requires_combined_gate": true,
+  "head": "dd79c86a8dbcae80284fe83206e249256b24eef0",
+  "tree": "9073d1e2f816ccf31f945b62dc0df3bad2dbe90c",
+  "checks": [
+    "delivery-subsystem"
+  ]
+}

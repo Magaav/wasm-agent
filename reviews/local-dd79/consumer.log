@@ -1,0 +1,2 @@
+{"cwd":"C:\\Users\\Victor\\AppData\\Local\\Temp\\wa-independent-dd79-48sg9e\\source","args":["scripts/test-delivery-subsystem-consumer.mjs"],"status":0,"signal":null}
+delivery script consumer ok (generated real subsystem receipt; evaluator/admission CLI/merge consumer; identity/source/log/coverage/ref/binding negatives; private rehearsal; 0 skipped)
