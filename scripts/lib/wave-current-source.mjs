@@ -8,6 +8,18 @@ function git(repo,...args){const r=spawnSync('git',['-C',repo,...args],{encoding
 function raw(repo,ref){need(ref&&hex(ref.commit)&&/^[a-zA-Z0-9._/-]+$/.test(ref.path||'')&&!ref.path.split('/').includes('..'),'immutable_anchor');const r=spawnSync('git',['-C',repo,'show',ref.commit+':'+ref.path],{windowsHide:true,maxBuffer:128*1024*1024});need(r.status===0,'anchor_missing');return r.stdout;}
 function actor(repo,commit){const last=git(repo,'show','-s','--format=%B',commit).split(/\r?\n/).pop(),matches=[...last.matchAll(/(?:^|\s)session=([^\s]+)/g)];need(last.startsWith('Agent:')&&matches.length===1,'actor_anchor');return matches[0][1];}
 function artifact(a){need(a?.path&&/^[a-f0-9]{64}$/.test(a.sha256||''),'artifact_required');const bytes=fs.readFileSync(a.path);need(digest(bytes)===a.sha256,'artifact_changed');return bytes;}
+export function readCurrentUserRecord(file,line,expected){
+ need(Number.isSafeInteger(line)&&line>0&&/^[a-f0-9]{64}$/.test(expected||''),'user_record_reference');
+ const fileBytes=fs.readFileSync(file);let start=0;
+ for(let n=1;n<line;n++){const end=fileBytes.indexOf(10,start);need(end>=0,'user_record_line_missing');start=end+1;}
+ need(start<fileBytes.length,'user_record_line_missing');const newline=fileBytes.indexOf(10,start),end=newline<0?fileBytes.length:newline+1,raw=fileBytes.subarray(start,end);
+ let content=raw;if(content.at(-1)===10){content=content.subarray(0,-1);if(content.at(-1)===13)content=content.subarray(0,-1);}
+ // Both historical capture conventions are explicit original byte slices;
+ // never rehash/rewrite an artifact to substitute our preferred convention.
+ const matched=digest(raw)===expected?raw:digest(content)===expected?content:null;
+ need(matched,'user_record_raw_bytes_mismatch');
+ return {record:JSON.parse(content.toString('utf8')),bytes:matched,terminator_included:matched.length===raw.length&&raw.length!==content.length};
+}
 export function validateCurrentGrant(repo,descriptor,envelope,native){
  // Shared ordinary proof readers resolve `git`; reject a shadow runner rather
  // than letting PATH/cwd substitute unreviewed executable bytes.
@@ -23,12 +35,11 @@ export function validateCurrentGrant(repo,descriptor,envelope,native){
  need(grant.child_policy==='owned-direct-native-child'&&native.child?.process_id===process.pid&&native.child.parent_process_id===native.process_id,'native_child_binding');
  const user=JSON.parse(artifact(grant.user_task));need(user.kind==='current-user-task-source-evidence'&&user.role==='user'&&user.source_session===grant.actor.source_user_session&&Number.isSafeInteger(user.source_line)&&user.source_line>0,'current_user_source');
  need(equal(source.runtime.current_user_task,{source_session:user.source_session,source_record_sha256:user.source_record_sha256})&&grant.task_contract==='original-deliveries-then-root-chatfix-then-clean-deploy','reviewed_current_task_contract');
- const record=fs.readFileSync(user.source_path,'utf8').split(/\r?\n/)[user.source_line-1];need(record&&digest(Buffer.from(record))===user.source_record_sha256&&user.source_record_sha256===grant.user_record_sha256,'current_user_raw_record');
- const event=JSON.parse(record);need(event.type==='response_item'&&event.payload?.type==='message'&&event.payload.role==='user'&&event.payload.content.filter(c=>c.type==='input_text').map(c=>c.text).join('\n')===user.text,'current_user_record_identity');
+ need(user.source_record_sha256===grant.user_record_sha256,'current_user_raw_record');const event=readCurrentUserRecord(user.source_path,user.source_line,user.source_record_sha256).record;need(event.type==='response_item'&&event.payload?.type==='message'&&event.payload.role==='user'&&event.payload.content.filter(c=>c.type==='input_text').map(c=>c.text).join('\n')===user.text,'current_user_record_identity');
  const gate=JSON.parse(artifact(grant.user_gate_decision));
  need(gate.schema===1&&gate.kind==='current-user-gate-decision-source'&&gate.source_session===user.source_session&&gate.gate_policy==='pre-release-only'&&Array.isArray(gate.records)&&gate.records.length>0,'current_user_gate_decision');
  need(equal(source.runtime.current_user_gate_decision,{source_session:gate.source_session,records:gate.records.map(r=>({source_line:r.source_line,source_record_sha256:r.source_record_sha256})),gate_policy:gate.gate_policy}),'reviewed_gate_decision_binding');
- for(const statement of gate.records){const bytes=fs.readFileSync(statement.source_path,'utf8').split(/\r?\n/)[statement.source_line-1];need(statement.role==='user'&&bytes&&digest(Buffer.from(bytes))===statement.source_record_sha256,'gate_user_raw_record');const parsed=JSON.parse(bytes);need(parsed.type==='response_item'&&parsed.payload?.type==='message'&&parsed.payload.role==='user'&&parsed.payload.content.filter(c=>c.type==='input_text').map(c=>c.text).join('\n')===statement.text,'gate_user_record_identity');}
+ for(const statement of gate.records){need(statement.role==='user','gate_user_raw_record');const parsed=readCurrentUserRecord(statement.source_path,statement.source_line,statement.source_record_sha256).record;need(parsed.type==='response_item'&&parsed.payload?.type==='message'&&parsed.payload.role==='user'&&parsed.payload.content.filter(c=>c.type==='input_text').map(c=>c.text).join('\n')===statement.text,'gate_user_record_identity');}
  if(grant.authority==='private-fixture'){const temp=norm(os.tmpdir());need([repo,user.source_path,grant.user_task.path,grant.legacy_snapshot.path].every(p=>norm(p).startsWith(temp+'/'))&&grant.fixture_label==='private-current-source-grant','private_fixture_scope');}
  const legacy=JSON.parse(artifact(grant.legacy_snapshot));need(legacy.kind==='registered-target-observation'&&legacy.read_only===true&&legacy.complete===true&&legacy.admissible===false&&legacy.effect_authorized===false&&Array.isArray(legacy.claims)&&legacy.scope.ref==='refs/heads/main'&&norm(legacy.scope.git_common_dir)===norm(grant.git_common_dir),'complete_legacy_raw_snapshot');
  need(norm(repo)===norm(grant.repo)&&norm(git(repo,'rev-parse','--path-format=absolute','--git-common-dir'))===norm(grant.git_common_dir)&&grant.ref==='refs/heads/main','canonical_scope');
