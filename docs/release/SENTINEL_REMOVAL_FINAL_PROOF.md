@@ -1,0 +1,13 @@
+# Bounded repair final execution evidence
+
+Fresh current native binary: actual private watcher expected_sha REMOVAL after immutable reservation is held/rejected, not routed legacy; restart retained original intent/ack exactly. Explicitly assert no private-id claimed/done/failed receipts. Four acks<=0.125seconds behind2.2second health; Job active0 and exit0 each pass. Raw own Git metadata removal-proof.
+
+Assignment exception cleanup now surrounds assignment itself: exact child terminate+wait, close job/files, outer shutdown/join/serverclose. Injected exception AFTER actual Job assignment exits1 intentionally; assignment-negative/assignment-cleanup.json proves waited pid and active0. This tests assigned-child exception cleanup, NOT OS-denied assignment with preexisting descendants; actual unassigned path waits exact child but no tree-query authority. No broader guarantee claimed.
+
+Exact NORMAL repaired section executed actual40Rust tests, Windows CLI floor10 and native serial/reservation-comparison mutants floor2. Mutant removes reservation fences plus comparison: removal fixture red at intended missing immutable mismatch; absent resolver cannot create successful effect. All owned fixture watcher trees drained. Removed invocation consumer red. Deterministic unset-OS branch runs actual current native40 first, no Python invocation, named counted Windows-extra skip1. Actual Linux runtime unrun. Logs own Git metadata intake-section-normal.log, intake-section-portable.log, intake-section-removed.log, intake-gate-* raw nested mutant builds/results. Final consumer operation settled exit0 after123.865sec. Earlier syntax consumer failure retained, not borrowed as success.
+
+Read-only merge-tree HEAD vs wave b3e9403 exits1 with mechanical conflicts ONLY scripts/test.sh and scripts/lib/proof-verdict.cjs; raw wave-intake-merge.txt. Coordinator exact resolution: retain wave BEGIN/END block with waveOwner53,waveOwnerMutations3,waveCorners24,waveDerived55,waveActivityFix62 AND sentinel BEGIN/END block with required native test + Windows10/2 + nonWindows skip1; union prefix map sentinelIntake/sentinelIntakeMutants AND waveOwner/waveOwnerMutations/waveCorners/waveDerived/waveActivityFix, preserving all prior prefixes. Keep wave test-wave-gate-wiring invocation; keep sentinel quarantine/shipping82 changes. No wave branch edited/copied; combined full gate still coordinator step.
+
+Effects/hook quarantined; narrow intake proof only. No live effects/store/install/main/push. Original120sec partial returns, refusals and failure logs preserved.
+
+Agent: wasm-agent node=wasm_the_first session=child:dispatch:40f63603-1bc4-4a48-9812-12a1055151be

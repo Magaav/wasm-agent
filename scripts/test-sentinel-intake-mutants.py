@@ -15,7 +15,12 @@ for label in ['serial','mutable']:
   main.write_text(source)
  else:
   source=protocol.read_text();assert 'if original != *request' in source
-  protocol.write_text(source.replace('if original != *request','if false'))
+  source=source.replace('if original != *request','if false')
+  source=source.replace('if reserved(id) {','if false {')
+  protocol.write_text(source)
+  text=main.read_text().replace('if deploy_protocol::reserved(reserved_id) {','if false {').replace('if deploy_protocol::reserved(id) {','if false {')
+  text=text.replace(' || deploy_protocol::reserved(claim.file_stem().and_then(|s|s.to_str()).unwrap_or(""))','')
+  main.write_text(text)
  env=os.environ.copy();env['CARGO_BUILD_JOBS']='2'
  target=pathlib.Path(tempfile.mkdtemp(prefix='wa-im-'));env['CARGO_TARGET_DIR']=str(target)
  (tree/'target-path.txt').write_text(str(target))

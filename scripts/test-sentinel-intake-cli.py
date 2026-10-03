@@ -3,7 +3,7 @@ No effects: protocol held, legacy resolver explicitly absent, no jobs enabled.
 """
 import argparse, ctypes, http.server, json, os, pathlib, subprocess, threading, time
 from ctypes import wintypes
-p=argparse.ArgumentParser();p.add_argument('--sentinel',required=True);p.add_argument('--evidence',required=True);a=p.parse_args()
+p=argparse.ArgumentParser();p.add_argument('--sentinel',required=True);p.add_argument('--evidence',required=True);p.add_argument('--assign-failure',action='store_true');a=p.parse_args()
 root=pathlib.Path(a.evidence).resolve();root.mkdir(parents=True,exist_ok=False)
 assert os.name=='nt','explicit Windows tree supervisor required'
 k=ctypes.WinDLL('kernel32',use_last_error=True)
@@ -42,7 +42,21 @@ try:
   stdout=open(root/f'watch-{passno}.stdout','wb');stderr=open(root/f'watch-{passno}.stderr','wb')
   job=k.CreateJobObjectW(None,None);assert job,ctypes.get_last_error()
   child=subprocess.Popen([a.sentinel,'watch'],cwd=root,env=env,stdout=stdout,stderr=stderr)
-  assert k.AssignProcessToJobObject(job,wintypes.HANDLE(child._handle)),ctypes.get_last_error()
+  assigned=False
+  try:
+   assigned=bool(k.AssignProcessToJobObject(job,wintypes.HANDLE(child._handle)))
+   assert assigned,ctypes.get_last_error()
+   if a.assign_failure:raise AssertionError('injected assignment failure after containment')
+  except BaseException:
+   (box/'stop').write_text('assignment failure cleanup')
+   child.terminate();child.wait(timeout=10)
+   if assigned:
+    accounting=Accounting();assert k.QueryInformationJobObject(job,1,ctypes.byref(accounting),ctypes.sizeof(accounting),None)
+    assert accounting.active==0,'assignment failure leaked owned tree'
+   k.CloseHandle(job);stdout.close();stderr.close()
+   if a.assign_failure:
+    (root/'assignment-cleanup.json').write_text(json.dumps({'pid':child.pid,'waited':True,'active':0}))
+   raise
   start=time.monotonic();durations=[]
   try:
    deadline=time.monotonic()+5
@@ -57,7 +71,7 @@ try:
     originals={req['id']:(box/'deploy-protocol'/req['id']/'intent.json').read_bytes() for req in requests}
     acks={req['id']:(box/'deploy-protocol'/req['id']/'ack.json').read_bytes() for req in requests}
     # Concurrent prepass-to-dispatch read mutation while legacy health blocks.
-    changed=dict(requests[3]);changed['session']='victim';changed['expected_sha']='b'*40
+    changed=dict(requests[3]);changed.pop('expected_sha')
     (box/'requests/private-3.json').write_text(json.dumps(changed))
     deadline=time.monotonic()+12
     while not list((box/'intake-problems').glob('*/latest.json')) and time.monotonic()<deadline:time.sleep(.02)
@@ -85,8 +99,10 @@ try:
    assert code==0,code
    k.CloseHandle(job);stdout.close();stderr.close()
   if passno==0:
-   changed=dict(requests[3]);changed['session']='victim';changed['expected_sha']='b'*40
+   changed=dict(requests[3]);changed.pop('expected_sha')
    (box/'requests/private-3.json').write_text(json.dumps(changed))
+ for folder in ['claimed','done','failed']:
+  assert not list((box/folder).glob('private-*.json')),'reserved removal admitted legacy route'
  assert not list((box/'claimed').glob('*.json')),'no effect claims permitted'
  assert not list((box/'deploy-protocol').glob('*/result.json')),'no install result permitted'
  malformed=list((box/'intake-problems').glob('malformed-*.json'))
