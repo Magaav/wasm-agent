@@ -50,7 +50,7 @@ try {
     const selected=plan(root),definitions=(await import('./gate-checks.mjs')).catalog(root);assert(!selected.full_required);
     const results=selected.checks.map(id=>{
       const c=definitions.find(c=>c.id===id),log=path.join(root,'.git',id.replaceAll(/[^a-z0-9.-]/gi,'_')+'.log');
-      const text=c.verdict==='js'?'ALL PASS\n':c.verdict==='browser'?'  ok   UI structure, mid-run reload, and startup recovery\n':c.proof_kind==='selection'?'selection state ok (9 checks, 0 skipped; fixture)\n':'two-window recovery ok (13 checks, 0 skipped; fixture)\n';
+      const text=c.verdict==='js'?'ALL PASS\n':c.verdict==='browser'?'  ok   UI structure, mid-run reload, startup recovery [stages: reload,startup-recovery,inspect-window,view-window]\n':c.proof_kind==='selection'?'selection state ok (9 checks, 0 skipped; fixture)\n':'two-window recovery ok (13 checks, 0 skipped; fixture)\n';
       fs.writeFileSync(log,text);return {id,log,log_sha256:hash(text),passed:true,exit:0,skipped:0,ms:0};
     });
     const synthetic={schema:1,kind:'producer-focused',tree:selected.tree,checks:selected.checks,passed:true,results,
