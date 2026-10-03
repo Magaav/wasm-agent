@@ -58,6 +58,9 @@ mod role;
 mod winproc;
 
 mod deploy_protocol;
+mod sentinel_return;
+#[cfg(test)]
+mod sentinel_return_tests;
 #[cfg(test)]
 mod deploy_protocol_tests;
 #[cfg(test)]
