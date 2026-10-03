@@ -1,0 +1,70 @@
+{
+  "root": "C:\\Users\\Victor\\AppData\\Local\\Temp\\review976-YEUxNX",
+  "results": [
+    {
+      "size": 7500,
+      "mode": "command",
+      "status": 0,
+      "stdout": "HEREDOC-TAIL\n",
+      "stderr": "",
+      "payload": "EXACT-é-\\-\"\n"
+    },
+    {
+      "size": 7500,
+      "mode": "file",
+      "status": 0,
+      "stdout": "HEREDOC-TAIL\n",
+      "stderr": "",
+      "payload": "EXACT-é-\\-\"\n"
+    },
+    {
+      "size": 7900,
+      "mode": "command",
+      "status": 0,
+      "stdout": "HEREDOC-TAIL\n",
+      "stderr": "",
+      "payload": "EXACT-é-\\-\"\n"
+    },
+    {
+      "size": 7900,
+      "mode": "file",
+      "status": 0,
+      "stdout": "HEREDOC-TAIL\n",
+      "stderr": "",
+      "payload": "EXACT-é-\\-\"\n"
+    },
+    {
+      "size": 8200,
+      "mode": "command",
+      "status": 0,
+      "stdout": "\n",
+      "stderr": "",
+      "payload": "EXACT-é-\\-\"\n"
+    },
+    {
+      "size": 8200,
+      "mode": "file",
+      "status": 0,
+      "stdout": "HEREDOC-TAIL\n",
+      "stderr": "",
+      "payload": "EXACT-é-\\-\"\n"
+    },
+    {
+      "size": 10000,
+      "mode": "command",
+      "status": 0,
+      "stdout": "",
+      "stderr": "",
+      "payload": null
+    },
+    {
+      "size": 10000,
+      "mode": "file",
+      "status": 0,
+      "stdout": "HEREDOC-TAIL\n",
+      "stderr": "",
+      "payload": "EXACT-é-\\-\"\n"
+    }
+  ],
+  "missing": []
+}

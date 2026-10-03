@@ -1,0 +1,61 @@
+[
+  {
+    "label": "exit0 nine checks",
+    "status": 1,
+    "stdout": "",
+    "stderr": "session workspaces failed; retained fixture: C:\\Users\\Victor\\AppData\\Local\\Temp\\wa-session-workspaces-OCd6fj\nAssertionError [ERR_ASSERTION]: long-command count floor 10: bash long command ok (9 checks)\r\n\n    at check (C:\\Users\\Victor\\.wasm-agent\\wa-worktree-childdispatchc50fecea-e757-456a-8afd-c2390781a4ed\\review-private\\candidate\\scripts\\test-session-workspaces.cjs:18:41)\n    at C:\\Users\\Victor\\.wasm-agent\\wa-worktree-childdispatchc50fecea-e757-456a-8afd-c2390781a4ed\\review-private\\candidate\\scripts\\test-session-workspaces.cjs:56:5\n    at Object.<anonymous> (C:\\Users\\Victor\\.wasm-agent\\wa-worktree-childdispatchc50fecea-e757-456a-8afd-c2390781a4ed\\review-private\\candidate\\scripts\\test-session-workspaces.cjs:83:3)\n    at Module._compile (node:internal/modules/cjs/loader:1872:14)\n    at Object..js (node:internal/modules/cjs/loader:2003:10)\n    at Module.load (node:internal/modules/cjs/loader:1594:32)\n    at Module._load (node:internal/modules/cjs/loader:1396:12)\n    at wrapModuleLoad (node:internal/modules/cjs/loader:255:19)\n    at Module.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:154:5)\n    at node:internal/main/run_main_module:33:47\n"
+  },
+  {
+    "label": "missing invocation without static grep",
+    "status": 1,
+    "stdout": "",
+    "stderr": "session workspaces failed; retained fixture: C:\\Users\\Victor\\AppData\\Local\\Temp\\wa-session-workspaces-ZFihT5\nAssertionError [ERR_ASSERTION]: long-command count floor 10: \n    at check (C:\\Users\\Victor\\.wasm-agent\\wa-worktree-childdispatchc50fecea-e757-456a-8afd-c2390781a4ed\\review-private\\candidate\\scripts\\test-session-workspaces.cjs:18:41)\n    at C:\\Users\\Victor\\.wasm-agent\\wa-worktree-childdispatchc50fecea-e757-456a-8afd-c2390781a4ed\\review-private\\candidate\\scripts\\test-session-workspaces.cjs:56:5\n    at Object.<anonymous> (C:\\Users\\Victor\\.wasm-agent\\wa-worktree-childdispatchc50fecea-e757-456a-8afd-c2390781a4ed\\review-private\\candidate\\scripts\\test-session-workspaces.cjs:83:3)\n    at Module._compile (node:internal/modules/cjs/loader:1872:14)\n    at Object..js (node:internal/modules/cjs/loader:2003:10)\n    at Module.load (node:internal/modules/cjs/loader:1594:32)\n    at Module._load (node:internal/modules/cjs/loader:1396:12)\n    at wrapModuleLoad (node:internal/modules/cjs/loader:255:19)\n    at Module.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:154:5)\n    at node:internal/main/run_main_module:33:47\n"
+  },
+  {
+    "label": "neutered floor without static grep",
+    "status": 0,
+    "stdout": "portable harness feedback ok (119 report identifiers; 3 intentional exclusions)\nworkspace release ok (37 checks)\nsession workspaces integration ok (13 checks; real git worktrees, two concurrent processes, restart, no inference)\n",
+    "stderr": ""
+  },
+  {
+    "label": "empty excerpt",
+    "status": 1,
+    "stdout": "",
+    "stderr": "node:internal/assert/utils:77\r\n    throw err;\r\n    ^\r\n\r\nAssertionError [ERR_ASSERTION]: missing report evidence E1\r\n    at Object.<anonymous> (C:\\Users\\Victor\\.wasm-agent\\wa-worktree-childdispatchc50fecea-e757-456a-8afd-c2390781a4ed\\review-private\\candidate\\scripts\\test-harness-feedback.cjs:4:151)\r\n    at Module._compile (node:internal/modules/cjs/loader:1872:14)\r\n    at Object..js (node:internal/modules/cjs/loader:2003:10)\r\n    at Module.load (node:internal/modules/cjs/loader:1594:32)\r\n    at Module._load (node:internal/modules/cjs/loader:1396:12)\r\n    at wrapModuleLoad (node:internal/modules/cjs/loader:255:19)\r\n    at Module.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:154:5)\r\n    at node:internal/main/run_main_module:33:47 {\r\n  generatedMessage: false,\r\n  code: 'ERR_ASSERTION',\r\n  actual: '',\r\n  expected: true,\r\n  operator: '==',\r\n  diff: 'simple'\r\n}\r\n\r\nNode.js v24.19.0\r\n"
+  },
+  {
+    "label": "corrupt nonempty excerpt",
+    "status": 0,
+    "stdout": "portable harness feedback ok (119 report identifiers; 3 intentional exclusions)\n",
+    "stderr": ""
+  },
+  {
+    "label": "missing reporter",
+    "status": 1,
+    "stdout": "",
+    "stderr": "node:internal/assert/utils:77\r\n    throw err;\r\n    ^\r\n\r\nAssertionError [ERR_ASSERTION]: missing report evidence E1\r\n    at Object.<anonymous> (C:\\Users\\Victor\\.wasm-agent\\wa-worktree-childdispatchc50fecea-e757-456a-8afd-c2390781a4ed\\review-private\\candidate\\scripts\\test-harness-feedback.cjs:4:151)\r\n    at Module._compile (node:internal/modules/cjs/loader:1872:14)\r\n    at Object..js (node:internal/modules/cjs/loader:2003:10)\r\n    at Module.load (node:internal/modules/cjs/loader:1594:32)\r\n    at Module._load (node:internal/modules/cjs/loader:1396:12)\r\n    at wrapModuleLoad (node:internal/modules/cjs/loader:255:19)\r\n    at Module.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:154:5)\r\n    at node:internal/main/run_main_module:33:47 {\r\n  generatedMessage: false,\r\n  code: 'ERR_ASSERTION',\r\n  actual: undefined,\r\n  expected: true,\r\n  operator: '==',\r\n  diff: 'simple'\r\n}\r\n\r\nNode.js v24.19.0\r\n"
+  },
+  {
+    "label": "missing E3",
+    "status": 1,
+    "stdout": "",
+    "stderr": "node:internal/assert/utils:77\r\n    throw err;\r\n    ^\r\n\r\nAssertionError [ERR_ASSERTION]: missing portable excerpt E3\r\n    at Object.<anonymous> (C:\\Users\\Victor\\.wasm-agent\\wa-worktree-childdispatchc50fecea-e757-456a-8afd-c2390781a4ed\\review-private\\candidate\\scripts\\test-harness-feedback.cjs:6:228)\r\n    at Module._compile (node:internal/modules/cjs/loader:1872:14)\r\n    at Object..js (node:internal/modules/cjs/loader:2003:10)\r\n    at Module.load (node:internal/modules/cjs/loader:1594:32)\r\n    at Module._load (node:internal/modules/cjs/loader:1396:12)\r\n    at wrapModuleLoad (node:internal/modules/cjs/loader:255:19)\r\n    at Module.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:154:5)\r\n    at node:internal/main/run_main_module:33:47 {\r\n  generatedMessage: false,\r\n  code: 'ERR_ASSERTION',\r\n  actual: false,\r\n  expected: true,\r\n  operator: '==',\r\n  diff: 'simple'\r\n}\r\n\r\nNode.js v24.19.0\r\n"
+  },
+  {
+    "label": "missing exclusion E57",
+    "status": 1,
+    "stdout": "",
+    "stderr": "node:internal/assert/utils:77\r\n    throw err;\r\n    ^\r\n\r\nAssertionError [ERR_ASSERTION]: unmatched report E57\r\n    at Object.<anonymous> (C:\\Users\\Victor\\.wasm-agent\\wa-worktree-childdispatchc50fecea-e757-456a-8afd-c2390781a4ed\\review-private\\candidate\\scripts\\test-harness-feedback.cjs:8:106)\r\n    at Module._compile (node:internal/modules/cjs/loader:1872:14)\r\n    at Object..js (node:internal/modules/cjs/loader:2003:10)\r\n    at Module.load (node:internal/modules/cjs/loader:1594:32)\r\n    at Module._load (node:internal/modules/cjs/loader:1396:12)\r\n    at wrapModuleLoad (node:internal/modules/cjs/loader:255:19)\r\n    at Module.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:154:5)\r\n    at node:internal/main/run_main_module:33:47 {\r\n  generatedMessage: false,\r\n  code: 'ERR_ASSERTION',\r\n  actual: false,\r\n  expected: true,\r\n  operator: '==',\r\n  diff: 'simple'\r\n}\r\n\r\nNode.js v24.19.0\r\n"
+  },
+  {
+    "label": "unmatched E120",
+    "status": 1,
+    "stdout": "",
+    "stderr": "node:assert:152\r\n  throw new AssertionError(obj);\r\n  ^\r\n\r\nAssertionError [ERR_ASSERTION]: report inventory count, not defect count\r\n\r\n120 !== 119\r\n\r\n    at Object.<anonymous> (C:\\Users\\Victor\\.wasm-agent\\wa-worktree-childdispatchc50fecea-e757-456a-8afd-c2390781a4ed\\review-private\\candidate\\scripts\\test-harness-feedback.cjs:8:8)\r\n    at Module._compile (node:internal/modules/cjs/loader:1872:14)\r\n    at Object..js (node:internal/modules/cjs/loader:2003:10)\r\n    at Module.load (node:internal/modules/cjs/loader:1594:32)\r\n    at Module._load (node:internal/modules/cjs/loader:1396:12)\r\n    at wrapModuleLoad (node:internal/modules/cjs/loader:255:19)\r\n    at Module.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:154:5)\r\n    at node:internal/main/run_main_module:33:47 {\r\n  generatedMessage: false,\r\n  code: 'ERR_ASSERTION',\r\n  actual: 120,\r\n  expected: 119,\r\n  operator: 'strictEqual',\r\n  diff: 'simple'\r\n}\r\n\r\nNode.js v24.19.0\r\n"
+  },
+  {
+    "label": "raw substring and reporter audit",
+    "rows": 119,
+    "mismatches": []
+  }
+]
