@@ -74,7 +74,23 @@ try {
   check(mainOnly.counts.dirty_worktrees===1,'verification audit preserves and reports dirty worktree');
   writeGateReceipt();
   const proofCurrent=audit(repo,{listPRs:()=>[]});
-  check(proofCurrent.verification_complete&&proofCurrent.gate_proof.status==='verified','exact target-tree gate receipt permits verification');
+  check(proofCurrent.verification_complete&&proofCurrent.gate_proof.status==='stale_or_invalid'&&proofCurrent.release_verified===false&&!!proofCurrent.gate_proof.reason,'synthetic partial receipt is not production release proof');
+  const receiptPath=path.resolve(repo,git('rev-parse','--git-path','wa-finish-gate.json'));
+  const originalReceipt=JSON.parse(fs.readFileSync(receiptPath));
+  for(const attack of ['non-smoke','head','runner','platform','skips','crossrepo','log']) {
+    const receipt={...originalReceipt};
+    if(attack==='non-smoke'){const bytes=Buffer.from('NOT A SMOKE VERDICT\n');fs.writeFileSync(receipt.log,bytes);receipt.log_sha256=createHash('sha256').update(bytes).digest('hex');}
+    if(attack==='head')receipt.head='0000000000000000000000000000000000000000';
+    if(attack==='runner')receipt.runner={path:'arbitrary-helper',sha256:'0'.repeat(64),platform:process.platform};
+    if(attack==='platform')receipt.runner={platform:'unknown'};
+    if(attack==='skips')receipt.skipped=999;
+    if(attack==='crossrepo')receipt.repo=remote;
+    if(attack==='log')receipt.log_sha256='0'.repeat(64);
+    fs.writeFileSync(receiptPath,JSON.stringify(receipt));
+    const hostile=audit(repo,{listPRs:()=>[]});
+    check(hostile.verification_complete&&!hostile.release_verified&&!hostile.source_gate_verified&&hostile.gate_proof.status==='stale_or_invalid',`hostile ${attack} cannot certify release or block integration`);
+  }
+  fs.writeFileSync(receiptPath,JSON.stringify(originalReceipt));
   git('switch','-c','stale-source');const staleHead=git('rev-parse','HEAD');
   git('switch','main');const advancedMain=commit('advanced-main.txt');git('push','origin','main');git('fetch','origin');git('switch','stale-source');
   check(git('rev-parse','HEAD')===staleHead&&git('rev-parse','HEAD^{tree}')!==git('rev-parse','origin/main^{tree}'),'fixture has stale HEAD while main advances to a different tree');

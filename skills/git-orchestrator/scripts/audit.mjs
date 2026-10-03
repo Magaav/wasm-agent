@@ -4,6 +4,9 @@ import fs from 'node:fs';
 import {createHash} from 'node:crypto';
 import {resolve} from 'node:path';
 import {pathToFileURL} from 'node:url';
+// Trusted shipped sibling validator, never a helper selected from the audited target.
+// Portable skill installations lacking this sibling report unavailable proof, fail closed.
+const proofValidator=await import('../../../scripts/lib/full-gate-proof.mjs').catch(()=>null);
 
 const nowMs=()=>Number(process.hrtime.bigint())/1e6;
 const elapsedMs=start=>Number((nowMs()-start).toFixed(3));
@@ -148,15 +151,13 @@ export function audit(repo,{target='origin/main',includePRs=false,listPRs=github
       const receipt=JSON.parse(fs.readFileSync(receiptPath,'utf8'));
       const tree=requireResult(git('rev-parse',`${targetSha}^{tree}`),'Target tree');
       const gateRepo=command(repo,'git',['rev-parse','--show-toplevel']);
-      const logPath=resolve(gateRepo.stdout.trim(),receipt.log);
-      const log=fs.readFileSync(logPath);
-      const hash=createHash('sha256').update(log).digest('hex');
-      const recordRepo=String(receipt.repo || '').replaceAll('\\','/').toLowerCase();
-      const actualRepo=repo.replaceAll('\\','/').toLowerCase();
-      if(receipt.schema===1 && recordRepo===actualRepo && receipt.tree===tree && receipt.passed===true && receipt.log_sha256===hash &&
-        Number.isFinite(receipt.gate_ms) && receipt.gate_ms>=0 && receipt.gate_runs===1 && receipt.gate_exit===0) {
-        gateProof={status:'verified',run_count:0,source_tree:tree,gate_ms:receipt.gate_ms,skipped:receipt.skipped};
-      } else gateProof.status='stale_or_invalid';
+      const owner=receipt.schema===2?receipt.owner_repo:receipt.repo;
+      const proof=owner && resolve(owner)===resolve(repo) && proofValidator
+        ? proofValidator.fullProof(receipt,tree,{ownerRepo:repo})
+        : {verified:false,reason:proofValidator?'receipt repository mismatch':'trusted shipped proof validator unavailable'};
+      if(proof.verified) {
+        gateProof={status:'verified',run_count:0,source_tree:tree,gate_ms:proof.gate_ms,skipped:proof.skipped};
+      } else {gateProof.status='stale_or_invalid';gateProof.reason=proof.reason;}
     } catch { gateProof.status='stale_or_invalid'; }
   }
   timings.gate_proof_lookup_ms=elapsedMs(phaseStarted);
