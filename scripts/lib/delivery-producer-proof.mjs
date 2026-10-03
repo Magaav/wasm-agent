@@ -25,6 +25,7 @@ export function verifyDeliveryProof(repo,receipt,selection){
   if(JSON.stringify(receipt.sources)!==JSON.stringify(expected))throw Error('delivery_source_closure_mismatch');
   if(JSON.stringify(receipt.runner)!==JSON.stringify(runner()))throw Error('delivery_runner_identity_mismatch');
   const executing=Object.fromEntries(Object.entries(expected).filter(([f])=>/\.(mjs|cjs|js|sh)$/.test(f)));
+  if(JSON.stringify(executionSources(repo,expected))!==JSON.stringify(executing))throw Error('delivery_live_source_changed');
   if(JSON.stringify(receipt.execution_before)!==JSON.stringify(executing)||JSON.stringify(receipt.execution_after)!==JSON.stringify(executing))throw Error('delivery_execution_source_mismatch');
   if(receipt.results?.length!==suites.length)throw Error('delivery_required_suites_missing');
   for(const suite of suites){const r=receipt.results.find(x=>x.suite===suite);const log=r&&fs.readFileSync(r.log);if(!r||r.exit!==0||r.skipped!==skipped(String(log))||skipped(String(log))!==0||hash(log)!==r.log_sha256||!terminal(suite,String(log)))throw Error(`delivery_suite_unverified:${suite}`);}
