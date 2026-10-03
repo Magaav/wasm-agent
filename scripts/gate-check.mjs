@@ -36,7 +36,7 @@ export function checkVerdict(check, exit, output) {
   }
   return {ok:exit===0};
 }
-export async function executeChecks(repo, ids, {jobs=1, output=null, emit=true, memoryMb=Math.floor(os.freemem()/1048576)}={}) {
+export async function executeChecks(repo, ids, {jobs=1, output=null, emit=true, binary=null, memoryMb=Math.floor(os.freemem()/1048576)}={}) {
   if(!Number.isInteger(jobs)||jobs<1||jobs>4) throw Error('jobs must be 1..4; default 1 until measured');
   const all=catalog(repo), selected=ids.map(id=>{const c=all.find(c=>c.id===id);if(c&&c.available===false)throw Error(`check ${id} fixture unavailable in this source tree`);if(c&&c.platform&&c.platform!==process.platform)throw Error(`check ${id} requires ${c.platform}`);if(!c||id==='full')throw Error(`unsupported focused check ${id}; full needs finish.mjs gate and reservation`);return c;});
   if(!Number.isInteger(memoryMb)||memoryMb<1||selected.some(c=>c.resources.memory_mb>memoryMb))throw Error('insufficient declared check memory budget');
@@ -52,11 +52,11 @@ export async function executeChecks(repo, ids, {jobs=1, output=null, emit=true, 
       WASM_AGENT_LLM_BASE_URL:'http://127.0.0.1:1',WASM_AGENT_LLM_API_KEY:'fixture-only',HTTP_PROXY:'',HTTPS_PROXY:'',ALL_PROXY:'',NO_PROXY:'127.0.0.1,localhost,::1'});
     const log=path.join(root,`${check.id.replaceAll(/[^a-z0-9.-]/gi,'_')}.log`),fd=fs.openSync(log,'w'),begin=performance.now();
     const command=[...check.command];
-    if(check.binary)command.splice(2,0,path.join(repo,'rust','target','release',process.platform==='win32'?'wa.exe':'wa'));
+    if(check.binary)command.splice(2,0,binary||path.join(repo,'rust','target','release',process.platform==='win32'?'wa.exe':'wa'));
     if(check.verdict==='browser') {
       const freePort=()=>new Promise((resolve,reject)=>{const server=net.createServer();server.once('error',reject);server.listen(0,'127.0.0.1',()=>{const port=server.address().port;server.close(()=>resolve(port));});});
       const candidate=path.join(repo,'rust','target','release',process.platform==='win32'?'wa.exe':'wa');
-      const runtime=fs.existsSync(candidate)?candidate:path.join(process.env.LOCALAPPDATA||'', 'wasm-agent','wa.exe');
+      const runtime=binary||(fs.existsSync(candidate)?candidate:path.join(process.env.LOCALAPPDATA||'', 'wasm-agent','wa.exe'));
       command.push('-WaExe',runtime);
       command.push('-Port',String(await freePort()),'-ClientPort',String(await freePort()));
     }
@@ -94,8 +94,9 @@ if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.ur
     else if(mode==='run') {
       const j=args.indexOf('--jobs'), jobs=j<0?1:Number(args.splice(j,2)[1]);
       const o=args.indexOf('--output'), output=o<0?null:path.resolve(args.splice(o,2)[1]);
+      const b=args.indexOf('--binary'), binary=b<0?null:path.resolve(args.splice(b,2)[1]);
       const ids=args.includes('ui-js')?catalog(repo).filter(c=>c.id.startsWith('js:')).map(c=>c.id):args;
-      const result=await executeChecks(repo,ids,{jobs,output});process.exitCode=result.passed?0:1;
+      const result=await executeChecks(repo,ids,{jobs,output,binary});process.exitCode=result.passed?0:1;
     } else throw Error('usage: gate-check.mjs list | run <check IDs|ui-js> [--jobs 1..4] [--output directory]');
   } catch(error){console.error(error.stack);process.exitCode=1;}
 }

@@ -2724,14 +2724,12 @@ mod stream_tests {
         // The count alone told the reader *how much* thinking happened but never what it was,
         // so a turn whose content was entirely reasoning rendered as a turn that only called
         // tools. The streamed event now carries the delta.
-        let result = std::cell::RefCell::new(Value::Null);
-        let events = crate::serve::capture_events(|| {
-            *result.borrow_mut() = fixture(concat!(
+        // Observe the fixture's own sink: an outer sink cannot see events captured by it.
+        let (result, events) = fixture_with_events(concat!(
                 "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"thinking\"}}]}\n\n",
                 "data: {\"choices\":[{\"delta\":{\"content\":\"answer\"},\"finish_reason\":\"stop\"}]}\n\n",
                 "data: [DONE]\n\n"));
-        });
-        assert_eq!(result.into_inner()["reasoning"], "thinking");
+        assert_eq!(result["reasoning"], "thinking");
         assert!(events.contains("\"type\":\"reasoning\""), "no reasoning event in: {events}");
         assert!(events.contains("\"text\":\"thinking\""), "the event must carry the delta: {events}");
         assert!(events.contains("\"chars\":8"), "the event must still carry the count: {events}");
@@ -2868,10 +2866,22 @@ mod heartbeat_tests {
             worst
         });
         let started = std::time::Instant::now();
-        let result = run_bounded("bash", "-c", "sleep 6", "", None);
+        // Use the host's resolved shell. Bare `bash` may resolve to the Windows WSL shim,
+        // while production uses Git Bash's native absolute executable when available.
+        let (program, flag) = shell_config();
+        let command = if cfg!(windows) && flag == "/C" {
+            "ping -n 7 127.0.0.1 >NUL && echo heartbeat-done"
+        } else {
+            "sleep 6; printf 'heartbeat-done\\n'"
+        };
+        let result = run_bounded(program, flag, command, "", None);
         let elapsed = started.elapsed();
         let worst = sampler.join().unwrap();
         assert!(result.is_ok(), "the command should run: {result:?}");
+        let output = result.unwrap();
+        assert_eq!(output["process_exit_code"], 0, "the resolved shell must actually succeed: {output}");
+        assert_eq!(output["settled"], true, "the measured command must settle: {output}");
+        assert_eq!(output["stdout"].as_str().unwrap_or("").trim(), "heartbeat-done", "the command must reach its final marker: {output}");
         assert!(elapsed.as_secs() >= 5, "it should have waited for the command, took {elapsed:?}");
         // Without the heartbeat the age would climb past 2s within the first seconds and stay there.
         assert!(

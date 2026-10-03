@@ -10,10 +10,14 @@
 param(
   [int]$Port = 8899,
   [int]$ClientPort = 8801,
-  [string]$WaExe = (Join-Path $env:LOCALAPPDATA "wasm-agent\wa.exe")
+  [string]$WaExe = ""
 )
 $ErrorActionPreference = "Stop"
 $root = Split-Path $PSScriptRoot -Parent
+if (-not $WaExe) {
+  $candidate = Join-Path $root 'rust/target/release/wa.exe'
+  $WaExe = if (Test-Path -LiteralPath $candidate) { $candidate } else { Join-Path $env:LOCALAPPDATA 'wasm-agent/wa.exe' }
+}
 $ui = Join-Path $root "ui"
 if (-not (Test-Path (Join-Path $ui "index.html"))) { Write-Host "  !  no ui/ in $root"; exit 1 }
 
@@ -3045,6 +3049,25 @@ $harness = @'
 
   // Phase resolution replaces provisional text: commentary becomes one commentary
   // topic, while final-answer text becomes one answer segment with no lost prefix.
+  var sixSurface=document.createElement('wa-orchestrator');
+  sixSurface.style.cssText='position:fixed;inset:0;width:1200px;height:800px;background:var(--panel);z-index:99999';
+  document.body.append(sixSurface);
+  var sixTasks=Array.from({length:6},function(_,i){return {subagent_id:'six-contract-'+i,session_id:'six-session-'+i,title:'Long native task title '+i,state:'running',settled:false,model:'fixture'};});
+  sixSurface.data=sixTasks;sixTasks.forEach(function(task){sixSurface.pin(task);});
+  var sixCanvas=sixSurface.canvas.getBoundingClientRect();
+  check([...sixSurface.panes.values()].every(function(p){var r=p.getBoundingClientRect();return r.top>=sixCanvas.top&&r.bottom<=sixCanvas.bottom&&r.left>=sixCanvas.left&&r.right<=sixCanvas.right;}),
+    'six panes must fit the viewport canvas without a third overflowing row');
+  check([...sixSurface.panes.values()].every(function(p){return p.querySelector('.agent-pane-head').getBoundingClientRect().height<=44;}),
+    'all six pane headers remain at most44 pixels');
+  sixSurface.remove();
+  window.__repaintMessages([]);
+  var literalAnswer='  <think>literal answer markup</think> raw wording  '+String.fromCharCode(10);
+  window.handleEvent({type:'delta',text:literalAnswer});
+  var literalSegment=document.querySelector('wa-message .seg');
+  check(literalSegment.rawText===literalAnswer&&literalSegment.textContent.includes('<think>literal answer markup</think>'),
+    'actual answer deltas retain original raw text and never infer reasoning from literal markers');
+  window.handleEvent({type:'reply',text:literalAnswer});
+  check(document.querySelector('wa-message .seg').rawText===literalAnswer,'settled answer retains exact source bytes beside the presentation');
   window.__repaintMessages([]);
   window.handleEvent({type:'round',n:1});
   window.handleEvent({type:'pending_delta',pending_id:'fixture-commentary',text:'Checking '});
@@ -3425,6 +3448,7 @@ foreach ($entry in @(Get-ChildItem Env: | Where-Object { $_.Name -like 'WASM_AGE
   [Environment]::SetEnvironmentVariable($entry.Name, $null, 'Process')
 }
 $env:WASM_AGENT_HOME = Join-Path $tmp 'home'
+$env:WASM_AGENT_LUA_ROOT = $root
 try {
   $server = Start-Process -FilePath $WaExe -ArgumentList @("serve", "--db", $db, "--port", "$Port", "--client-port", "$ClientPort", "--ui", $tmp) -WindowStyle Hidden -PassThru
   for ($i = 0; $i -lt 40; $i++) {
@@ -3507,6 +3531,7 @@ try {
 } finally {
   if ($server) { Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue }
   Remove-Item Env:WASM_AGENT_HOME -ErrorAction SilentlyContinue
+  Remove-Item Env:WASM_AGENT_LUA_ROOT -ErrorAction SilentlyContinue
   foreach ($key in $runtimeEnvironment.Keys) { [Environment]::SetEnvironmentVariable($key, $runtimeEnvironment[$key], 'Process') }
   $resolvedTmp = [IO.Path]::GetFullPath($tmp)
   $resolvedTemp = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())

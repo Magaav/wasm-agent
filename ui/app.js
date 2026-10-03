@@ -341,19 +341,10 @@ function renderMarkdown(text) {
   return safeLinks(escapeHtml(text).replace(/\n/g, "<br>"));
 }
 
-// Some models leak their reasoning into the message; drop it.
-//
-// Both ends are trimmed, and the tail matters as much as the head: these texts are rendered in
-// `white-space: pre-wrap` containers, so a trailing newline is a *blank line* on screen. A provider
-// ends a chunk with them, and three of them read as three paragraphs of nothing between the thinking
-// and the tool call that follows it. Interior breaks are content and are left alone.
+// Content is preserved verbatim. Only actual typed reasoning events belong in thinking;
+// inferring a channel from text markers erased legitimate answers and their evidence.
 function stripThinking(text) {
-  let out = String(text)
-    .replace(/[\s\S]*?<\/think>/gi, "")
-    .replace(/<\/?think\b[^>]*>/gi, "");
-  const open = out.search(/<think\b[^>]*>/i);
-  if (open >= 0) out = out.slice(0, open);
-  return out.replace(/^\s+/, "").replace(/\s+$/, "");
+  return String(text).trim();
 }
 
 function atBottom(slack = 40) {
@@ -423,7 +414,7 @@ function keepStatusLast() {
 
 function currentBubble() {
   if (!runBubble) {
-    document.getElementById("empty")?.remove();
+    transcript.querySelector('#empty')?.remove();
     runBubble = document.createElement("wa-message");
     runBubble.setAttribute("role", "assistant");
     transcript.append(runBubble);   // connecting is what builds .body
@@ -434,7 +425,7 @@ function currentBubble() {
 }
 
 function add(role, text, asHtml = false) {
-  document.getElementById("empty")?.remove();
+  transcript.querySelector('#empty')?.remove();
   const element = document.createElement("wa-message");
   element.setAttribute("role", role);
   transcript.append(element);
@@ -463,7 +454,7 @@ function appendMessageImages(body, images) {
 }
 
 function setStatus(text) {
-  document.getElementById("empty")?.remove();
+  transcript.querySelector('#empty')?.remove();
   if (!statusLine) {
     statusLine = document.createElement("div");
     statusLine.className = "status chat-content-run-status";
@@ -1318,6 +1309,7 @@ function handleEvent(event) {
       currentBubble().body.append(streamBody);
     }
     streamText += event.text || "";
+    streamBody.rawText=streamText;
     streamBody.textContent = stripThinking(streamText);
     pin();
   } else if (event.type === "reply") {
@@ -1336,11 +1328,13 @@ function handleEvent(event) {
     const finalText = stripThinking(event.text || streamText);
     if (streamBody) {
       streamBody.innerHTML = renderMarkdown(finalText);
+      streamBody.rawText=event.text || streamText;
       streamBody.style.whiteSpace = "normal";
     } else {
       const segment = document.createElement("div");
       segment.className = "seg";
       segment.innerHTML = renderMarkdown(finalText);
+      segment.rawText=event.text || streamText;
       currentBubble().body.append(segment);
       streamBody = segment;
     }
@@ -1670,8 +1664,9 @@ function repaintMessages(rows, options = {}) {
             handleEvent({ type: "tool", call_id: raw.id, name: fn.name, arguments: args || {} });
           }
         }
-        if(runBubble)runBubble.dataset.ledgerKey=String(message.id || message.seq);
-        for(const [index,segment] of Array.from(runBubble?.querySelectorAll('wa-run,wa-trace,.reasoning,.seg')||[]).entries())segment.dataset.ledgerKey=String(message.id || message.seq)+':segment:'+index;
+        if(runBubble && !runBubble.dataset.ledgerKey)runBubble.dataset.ledgerKey=String(message.id || message.seq);
+        for(const [index,segment] of Array.from(runBubble?.querySelectorAll('wa-run,wa-trace,wa-reasoning,wa-commentary,.seg')||[]).entries())
+          if(!segment.dataset.ledgerKey)segment.dataset.ledgerKey=String(message.id || message.seq)+':segment:'+index;
         if (message.id) renderedMessageIds.add(String(message.id));
       } else if (message.role === "tool") {
         replayRunLastMessage = message;
@@ -1753,18 +1748,22 @@ function repaintMessages(rows, options = {}) {
 function paintChildTranscript(container, rows, options = {}) {
   if (!container) return null;
   const saved = { transcript, runBubble, statusLine, statusLabel, statusElapsed, statusSpinner,
-    lastAssistantBody, runStatusTicker, streamBody, streamText, phasePendingText, trace, lastTool,
-    reasoningBlock, streamedCommentaryBlock, streamedCommentaryText, runStartedAt, replayingMessages,
+    lastAssistantBody, runStatusTicker, toolTicker, streamBody, streamText, phasePendingText, trace, lastTool,
+    reasoningBlock, reasoningText, streamedCommentaryBlock, streamedCommentaryText, runStartedAt, replayingMessages,
     replayMessageEndedAt, replayRunLastMessage, renderedMessageIds };
   transcript = container;
+  // Child teardown must never remove the main status DOM, clear its timers or share its text buffer.
+  statusLine=null;statusLabel=null;statusElapsed=null;statusSpinner=null;runStatusTicker=null;toolTicker=null;
   try {
     const result=repaintMessages(rows || [], { ...options, notify: false });
-    for(const event of options.events || [])handleEvent(event);
+    renderJournalEvents(options.events||[],options.raw,options.identity);
     return result;
   } finally {
+    stopToolTicker();
+    if(runStatusTicker)clearInterval(runStatusTicker);
     ({ transcript, runBubble, statusLine, statusLabel, statusElapsed, statusSpinner, lastAssistantBody,
-      runStatusTicker, streamBody, streamText, phasePendingText, trace, lastTool, reasoningBlock,
-      streamedCommentaryBlock, streamedCommentaryText, runStartedAt, replayingMessages,
+      runStatusTicker, toolTicker, streamBody, streamText, phasePendingText, trace, lastTool, reasoningBlock,
+      reasoningText, streamedCommentaryBlock, streamedCommentaryText, runStartedAt, replayingMessages,
       replayMessageEndedAt, replayRunLastMessage, renderedMessageIds } = saved);
   }
 }
@@ -1868,9 +1867,10 @@ async function restoreSessionOnce(target, epoch, node = activeNode) {
     if (blankSession === wanted.id) rememberBlankSession("");
     const route = "session?id=" + encodeURIComponent(wanted.id);
     phase = route;
-    let [full, health] = await Promise.all([
+    let [full, health, child] = await Promise.all([
       apiFetch(route, { headers: apiHeaders() }).then((response) => response.json()),
       nodeHealth(),
+      nativeSessionTask(wanted.id),
     ]);
     if (!viewing()) return false;
     if (!full || full.error || !Array.isArray(full.messages)) {
@@ -1899,7 +1899,7 @@ async function restoreSessionOnce(target, epoch, node = activeNode) {
     const autoResumeSeq = state && typeof state === "object" && state.state === "unfinished"
       && state.role === "tool" && Array.isArray(state.pending) && state.pending.length === 0
       && Number.isInteger(Number(state.seq)) && completeToolBatch(full.messages)
-      && health && !runningSessions(health).has(wanted.id) && !busy
+      && !child && health && !runningSessions(health).has(wanted.id) && !busy
       ? Number(state.seq) : null;
     const unresolved = outcome.name === "failed" || outcome.name === "unfinished";
     if (unresolved) {
@@ -3629,11 +3629,13 @@ function rememberPlace() {
     for (const box of document.querySelectorAll(".engine-content")) {
       if (!box.hidden && box.id) topics.push(box.id);
     }
+    const position=transcriptPlace(messages);
     sessionStorage.setItem(PLACE_KEY, JSON.stringify({
       session: chatSession,
       top: messages.scrollTop,
       following: follow,
       topics: topics,
+      position,
     }));
   } catch (error) { /* private mode: the reload still happens */ }
 }
@@ -3651,6 +3653,32 @@ function restorePlace() {
   // needs the offset put back.
   if (place.following) { setFollow(true); pin(true); }
   else if (typeof place.top === "number") { setFollow(false); messages.scrollTop = place.top; }
+  if(place.session===chatSession && place.position)restoreTranscriptPlace(messages,place.position);
+}
+// Stable row/segment anchors survive growing assistant bodies, prepends and header resizing.
+function transcriptPlace(container) {
+  const box=container.getBoundingClientRect();
+  const visible=Array.from(container.querySelectorAll('[data-ledger-key]')).filter(el=>{const r=el.getBoundingClientRect();return r.bottom>box.top&&r.top<box.bottom;});
+  const leaves=visible.filter(el=>!visible.some(other=>other!==el&&el.contains(other)));
+  const anchor=leaves.find(el=>el.getBoundingClientRect().top<=box.top)||leaves[0]||visible[0];
+  return {top:container.scrollTop,following:container.scrollHeight-container.scrollTop-container.clientHeight<40,
+    key:anchor?.dataset.ledgerKey,offset:anchor?anchor.getBoundingClientRect().top-box.top:0,
+    attempt:anchor?.dataset.liveAttempt,channel:anchor?.dataset.liveChannel,
+    folded:Array.from(container.querySelectorAll('[data-ledger-key]')).map(el=>[el.dataset.ledgerKey,el.hasAttribute('open'),el.classList.contains('open'),
+      Array.from(el.querySelectorAll('.reasoning-body,.commentary-body,.tool-output,pre')).map(body=>body.scrollTop),el.dataset.liveAttempt,el.dataset.liveChannel])};
+}
+function restoreTranscriptPlace(container,place) {
+  const elements=Array.from(container.querySelectorAll('[data-ledger-key]'));
+  for(const [key,attr,cls,scroll,attempt,channel] of place.folded||[]) {
+    const el=elements.find(el=>el.dataset.ledgerKey===key)||
+      (attempt&&elements.find(el=>el.dataset.liveAttempt===attempt&&el.dataset.liveChannel===channel));
+    if(el){el.toggleAttribute('open',attr);el.classList.toggle('open',cls);
+      Array.from(el.querySelectorAll('.reasoning-body,.commentary-body,.tool-output,pre')).forEach((body,i)=>{if(scroll?.[i])body.scrollTop=scroll[i];});}
+  }
+  container.scrollTop=place.following?container.scrollHeight:place.top;
+  const anchor=elements.find(el=>el.dataset.ledgerKey===place.key)||
+    (place.attempt&&elements.find(el=>el.dataset.liveAttempt===place.attempt&&el.dataset.liveChannel===place.channel));
+  if(!place.following&&anchor)container.scrollTop+=anchor.getBoundingClientRect().top-container.getBoundingClientRect().top-place.offset;
 }
 
 function hotSwapStyles() {
@@ -3853,6 +3881,7 @@ let liveEventSeq = 0;
 let liveCheckpointSeq = null;
 let liveRunPolling = null;
 let liveSyncFailed = false;
+let nativeSessionPainted = null;
 
 function resetConversationFollowState() {
   transcriptReady = false;
@@ -3867,6 +3896,7 @@ function resetConversationFollowState() {
   liveCheckpointSeq = null;
   liveRunPolling = null;
   liveSyncFailed = false;
+  nativeSessionPainted = null;
 }
 
 // Leave the old request running on the node, but stop treating its stream as the view we are in.
@@ -4003,6 +4033,8 @@ async function watchTurn() {
         }
         await syncLiveRun(current);
       }
+    } else if (!busy && await syncNativeSession(target, epoch, node)) {
+      // Native children have opaque attempts and never enter HTTP run admission.
     } else if (sawTurnInFlight) {
       sawTurnInFlight = false;
       liveRunId = null;
@@ -4733,6 +4765,92 @@ async function attachSessionJournalOnce(thread, readHistory) {
   }
   return {rows,events,state:current.state,runKey:runKey(current)};
 }
+async function nativeSessionTask(thread) {
+  if(!thread)return null;
+  const response=await apiFetch('subagents',{headers:apiHeaders()});
+  const result=await response.json();
+  if(!response.ok || result.error)throw Error(result.error||'native_session_discovery_unavailable');
+  const tasks=(result.subagents||result.tasks||[]).filter(task=>task.session_id===thread && task.transport==='native');
+  return tasks.sort((a,b)=>(a.created_at||0)-(b.created_at||0)).at(-1)||null;
+}
+// Native identity is intentionally opaque; never feed it to runKey or /run-events.
+async function attachNativeJournal(task, readHistory, viewing=()=>true) {
+  const identity={id:task.subagent_id,attempt_id:task.attempt_id,session_id:task.session_id,
+    node_id:task.node_id,event_node_id:task.event_node_id,event_epoch:task.event_epoch};
+  if(!identity.id || !identity.attempt_id || !identity.event_node_id || !identity.event_epoch)throw Error('native_event_identity_unavailable');
+  let rows=await readHistory(),after=0,checkpoint=null,events=[],raw=[],seen=new Set(),last;
+  if(!viewing())throw Error('native_session_view_changed');
+  for(;;) {
+    const page=await orchestratorRequest({action:'events',...identity,after});
+    if(!viewing())throw Error('native_session_view_changed');
+    if(page.transport!=='native' || page.task_id!==task.task_id || page.attempt_id!==identity.attempt_id ||
+      page.session_id!==identity.session_id || page.node_id!==identity.node_id || page.event_node_id!==identity.event_node_id || page.event_epoch!==identity.event_epoch)
+      throw Error('native_event_identity_mismatch');
+    if(page.durable!==true)throw Error('native_event_evidence_unavailable');
+    if(checkpoint!==page.checkpoint_seq) {
+      rows=await readHistory();
+      if(!viewing())throw Error('native_session_view_changed');
+      const loaded=rows.reduce((max,row)=>Math.max(max,Number(row.seq)||0),0);
+      if(Number(page.checkpoint_message_seq)>loaded)throw Error('native_session_checkpoint_not_loaded');
+      checkpoint=page.checkpoint_seq;events=[];raw=[];seen.clear();after=Number(checkpoint)||0;
+    }
+    for(const item of page.events||[]) {
+      if(!Number.isSafeInteger(item.seq) || item.seq<=Number(checkpoint))throw Error('native_event_sequence_invalid');
+      if(seen.has(item.seq)) {
+        if(JSON.stringify(raw.find(row=>row.seq===item.seq))!==JSON.stringify(item))throw Error('native_event_identity_changed');
+      }else {
+        if(item.seq!==(raw.at(-1)?.seq||Number(checkpoint))+1)throw Error('native_event_sequence_gap');
+        seen.add(item.seq);events.push(item.event);raw.push(item);
+      }
+    }
+    if(page.next_seq!==(raw.at(-1)?.seq||Number(checkpoint)))throw Error('native_event_cursor_incomplete');
+    last=page;
+    if(!page.has_more)break;
+    if(!Number.isSafeInteger(page.next_seq) || page.next_seq<=after)throw Error('native_event_cursor_did_not_advance');
+    after=page.next_seq;
+  }
+  return {rows,events,raw,state:last.state,settled:last.settled,identity,checkpointSeq:checkpoint,nextSeq:last.next_seq};
+}
+async function syncNativeSession(target,epoch,node) {
+  const credential=session;
+  const viewing=()=>target===chatSession && epoch===conversationEpoch && node===activeNode && credential===session && !busy;
+  const task=await nativeSessionTask(target);
+  if(!viewing() || !task)return false;
+  try {
+    const pane={task};
+    const attached=await attachNativeJournal(task,async()=>(await paneMessages(pane)).rows,viewing);
+    if(!viewing())return true;
+    const painted=JSON.stringify([attached.identity,attached.rows,attached.raw,attached.state]);
+    if(painted!==nativeSessionPainted) {
+      rememberPlace();
+      repaintMessages(attached.rows,{state:childRunState({...task,state:attached.state}),active:!attached.settled});
+      renderJournalEvents(attached.events,attached.raw,attached.identity);
+      followedSeq=attached.rows.reduce((max,row)=>Math.max(max,Number(row.seq)||0),0);
+      restorePlace();nativeSessionPainted=painted;
+    }
+    liveEventSeq=attached.nextSeq;liveCheckpointSeq=attached.checkpointSeq;
+    transcriptReady=true;
+  }catch(error){if(viewing())setStatus('Native live journal unavailable: '+error.message);}
+  return true;
+}
+// Projection addresses cite genuine native event IDs until a reply supplies its durable message ID.
+function renderJournalEvents(events,raw,identity) {
+  for(const [i,event] of events.entries()) {
+    handleEvent(event);
+    if(!identity||!raw?.[i])continue;
+    const prefix='native:'+identity.attempt_id+':event:'+raw[i].seq;
+    if(runBubble) {
+      if(!runBubble.dataset.ledgerKey)runBubble.dataset.ledgerKey=prefix;
+      for(const [n,el] of Array.from(runBubble.querySelectorAll('wa-run,wa-trace,wa-reasoning,wa-commentary,.seg')).entries())if(!el.dataset.ledgerKey){
+        el.dataset.ledgerKey=prefix+':segment:'+n;el.dataset.liveAttempt=identity.attempt_id;el.dataset.liveChannel=event.type;
+      }
+    }
+    if(event.type==='reply'&&event.message_id)for(const el of transcript.querySelectorAll('.seg[data-ledger-key],wa-reasoning[data-ledger-key]'))
+      if(el.dataset.ledgerKey.startsWith(String(event.message_id)+':segment:')){
+        el.dataset.liveAttempt=identity.attempt_id;el.dataset.liveChannel=el.tagName==='WA-REASONING'?'reasoning':'delta';
+      }
+  }
+}
 async function paneMessages(pane) {
   // More than the node's default page of eight rows, so a child's transcript is the conversation and
   // not just its tail. The node still bounds the page - by bytes, by its own budget - and answers with
@@ -4747,25 +4865,59 @@ async function paneMessages(pane) {
     if(!earlier.length) break;
     rows=earlier.concat(rows);
   }
+  rows=await Promise.all(rows.map(row=>row.omitted&&row.id&&row.evidence ? exactSessionRow(row,options=>panePage(pane,options)) : row));
   return {rows,task:page.task};
+}
+async function exactSessionRow(reference,readPage) {
+  let offset=1,version=null,text='',bytes=null;
+  for(;;) {
+    const page=await readPage({message_id:reference.id,byte_offset:offset,...(version?{message_version:version}:{})});
+    if(page.encoding!=='exact_message_json' || page.message_id!==reference.id || !page.message_version ||
+      (version&&page.message_version!==version))throw Error('exact_message_identity_mismatch');
+    version=page.message_version;
+    if(bytes!==null&&bytes!==page.bytes)throw Error('exact_message_size_changed');
+    bytes=page.bytes;text+=page.content;
+    if(!Number.isSafeInteger(page.next_offset)||page.next_offset<=offset)throw Error('exact_message_cursor_did_not_advance');
+    offset=page.next_offset;
+    if(page.eof)break;
+  }
+  if(new TextEncoder().encode(text).length!==bytes || offset!==bytes+1)throw Error('exact_message_bytes_incomplete');
+  const row=JSON.parse(text);
+  if(row.id!==reference.id || row.seq!==reference.seq)throw Error('exact_message_identity_mismatch');
+  return row;
 }
 async function refreshAgentPane(pane) {
   if(!pane.task.session_id) { pane.notice.textContent=pane.task.error || 'Waiting for placement…'; return; }
+  const target=pane.task.session_id,node=activeNode,attempt=pane.task.subagent_id,nativeAttempt=pane.task.attempt_id,credential=session;
+  const viewing=()=>pane.isConnected && pane.task.session_id===target && pane.task.subagent_id===attempt && pane.task.attempt_id===nativeAttempt && activeNode===node && credential===session;
   try {
-    const target=pane.task.session_id,node=activeNode;
     const result=await paneMessages(pane);
+    if(!viewing())return;
     let attached=null;
+    let journalError='';
     try {
-      const native=await orchestratorRequest({action:'events',id:pane.task.subagent_id,after:0});
-      if(native.transport==='native'&&native.session_id===target)attached={rows:result.rows,events:(native.events||[]).map(row=>row.event),state:native.state};
+      const native=pane.task.transport==='native' ? pane.task : await orchestratorRequest({action:'status',id:attempt}).catch(error=>{
+        if(/unknown_subagent/.test(error.message))return {};
+        throw error;
+      });
+      if(!viewing())return;
+      if(native.transport==='native'&&native.session_id===target)attached=await attachNativeJournal(native,async()=>(await paneMessages(pane)).rows,viewing);
       else attached=await attachSessionJournal(pane.task.session_id,async()=> (await paneMessages(pane)).rows);
-    }catch(error){pane.notice.textContent='Live journal unavailable: '+error.message;}
+    }catch(error){journalError='Live journal unavailable: '+error.message;}
+    if(!viewing())return;
+    if(!attached && pane.liveJournalAttached && pane.painted && journalError) {
+      pane.notice.textContent=journalError;
+      return;
+    }
     if(attached){
-      result.rows=attached.rows;result.events=attached.events;
+      pane.liveJournalAttached=!!(attached.identity||attached.runKey);
+      pane.toggleAttribute('journal-attached',pane.liveJournalAttached);
+      result.rows=attached.rows;result.events=attached.events;result.raw=attached.raw;result.identity=attached.identity;
       if(/^(completed|cancelled|failed)$/.test(attached.state))pane.task={...pane.task,state:attached.state,settled:true};
     }
-    if(!pane.isConnected || pane.task.session_id!==target || activeNode!==node)return;
-    if(result.task)pane.task={...pane.task,...result.task};
+    if(!pane.isConnected || pane.task.session_id!==target || pane.task.subagent_id!==attempt || activeNode!==node)return;
+    // A placed task's control address is logical; a session echo may name its native attempt.
+    if(result.task)pane.task={...pane.task,...result.task,subagent_id:attempt};
     const rows=result.rows;
     // A repaint throws away the transcript's scroll position and its folded topics, so a poll that
     // found the same rows, the same state and the same in-flight call leaves the pane it found alone.
@@ -4774,31 +4926,19 @@ async function refreshAgentPane(pane) {
     if(painted!==pane.painted) {
       pane.painted=painted;
       // Preserve the reader's place while the shared ledger renderer appends/repaints.
-      const top=pane.transcript.scrollTop;
-      const following=pane.transcript.scrollHeight-top-pane.transcript.clientHeight<40;
-      const visible=Array.from(pane.transcript.querySelectorAll('wa-message')).find(el=>el.getBoundingClientRect().bottom>pane.transcript.getBoundingClientRect().top);
-      const anchorKey=visible?.dataset.ledgerKey;
-      const anchorText=visible?.textContent;
-      const folded=Array.from(pane.transcript.querySelectorAll('[data-ledger-key]')).map(el=>[el.dataset.ledgerKey,el.hasAttribute('open'),el.classList.contains('open')]);
-      const anchorOffset=visible ? visible.getBoundingClientRect().top-pane.transcript.getBoundingClientRect().top : 0;
+      const position=transcriptPlace(pane.transcript);
       paintChildTranscript(pane.transcript,rows,{state:childRunState(pane.task),
-        stateAt:pane.task.settled_at,active:!pane.task.settled,liveTool:pane.task.preview?.tool,events:result.events});
-      for(const [key,attr,cls] of folded) {
-        const element=Array.from(pane.transcript.querySelectorAll('[data-ledger-key]')).find(el=>el.dataset.ledgerKey===key);
-        if(element){element.toggleAttribute('open',attr);element.classList.toggle('open',cls);}
-      }
-      const anchor=Array.from(pane.transcript.querySelectorAll('wa-message')).find(el=>anchorKey ? el.dataset.ledgerKey===anchorKey : el.textContent===anchorText);
-      pane.transcript.scrollTop=following ? pane.transcript.scrollHeight : top;
-      if(!following && anchor) pane.transcript.scrollTop+=anchor.getBoundingClientRect().top-pane.transcript.getBoundingClientRect().top-anchorOffset;
+        stateAt:pane.task.settled_at,active:!pane.task.settled,liveTool:pane.task.preview?.tool,events:result.events,raw:result.raw,identity:result.identity});
+      restoreTranscriptPlace(pane.transcript,position);
     }
     // What is left for the pane's own notice is what the shared transcript cannot say: a failure the
     // child reported, a page size this node refused, or nothing. `Ready for your next message.` used to
     // sit here, restating the `completed`/duration footer the run already draws in its own bubble.
-    pane.notice.textContent=[panePageNote,pane.task.error ||
+    pane.notice.textContent=[panePageNote,journalError,pane.task.error ||
       (pane.task.settled ? '' : 'Working. Steer updates the active run; Send queues a follow-up.')]
       .filter(Boolean).join(' ');
     if(panePageNote)pane.notice.title=panePageNoteDetail;
-  } catch(error) { pane.notice.textContent='Conversation unavailable: '+error.message; }
+  } catch(error) { if(viewing())pane.notice.textContent='Conversation unavailable: '+error.message; }
 }
 function mountOrchestrator() {
   rememberNode(''); // This node owns the dispatcher; each task carries its destination.

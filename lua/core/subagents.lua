@@ -606,6 +606,7 @@ function M.start(args, ctx)
     -- name the run a child is filed under.
     parent_run_id = ctx.run_id,
     node_id = ctx.node_id,
+    event_node_id = (nodes.identity() or {}).node_id,
     role = ctx.role,
     depth = ctx.depth,
     timeout_seconds = limits.timeout_seconds,
@@ -755,7 +756,14 @@ function M.control(args, ctx)
   -- fields; a caller may use either name.
   local target = args.id or args.subagent_id
   if target then call.id = tostring(target) end
-  if action=='events' then call.after=tonumber(args.after) or 0 end
+  if action=='events' then
+    local after=tonumber(args.after) or 0
+    if after<0 or after%1~=0 or after>9007199254740991 then return {error='invalid_native_event_cursor'} end
+    -- Preserve exact safe integer cursors across the JSON encoder's %.14g numbers.
+    call.after=string.format('%.0f',after)
+    call.archive=args.archive==true
+    for _,key in ipairs({'session_id','attempt_id','node_id','event_node_id','event_epoch'}) do call[key]=args[key] end
+  end
   if action == "await" then call.wait_ms = tonumber(args.wait_ms) or tonumber(args.timeout_ms) or 60000 end
   if action == "list" then
     return json.decode(host.subagent("list", json.encode({ owner_user = ctx.user_id })))

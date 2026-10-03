@@ -18,6 +18,7 @@
 //! consumes a reserved interactive HTTP node-thread.
 
 use serde_json::{json, Value};
+mod journal;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -224,6 +225,7 @@ struct Task {
     /// nothing, which `accounting_block` states plainly rather than as a zero.
     accounting: Value,
     error: Option<String>,
+    event_error: Option<String>,
     created_at: f64,
     started_at: Option<f64>,
     settled_at: Option<f64>,
@@ -239,6 +241,12 @@ impl Task {
     fn view(&self, include_result: bool) -> Value {
         let mut value = json!({
             "subagent_id": self.id,
+            "transport": "native",
+            "task_id": self.id,
+            "attempt_id": self.id,
+            "event_epoch": self.boot,
+            "event_node_id": self.spec["event_node_id"],
+            "event_error": self.event_error,
             "state": self.state,
             "settled": self.settled,
             "session_id": self.session_id,
@@ -422,6 +430,7 @@ impl Manager {
                 result: value["result"].clone(),
                 accounting: value.get("accounting").cloned().unwrap_or(Value::Null),
                 error: value["error"].as_str().map(str::to_string),
+                event_error: value["event_error"].as_str().map(str::to_string),
                 created_at: value["created_at"].as_f64().unwrap_or(0.0),
                 started_at: value["started_at"].as_f64(),
                 settled_at: value["settled_at"].as_f64(),
@@ -571,6 +580,7 @@ impl Manager {
             result: Value::Null,
             accounting: Value::Null,
             error: None,
+            event_error: None,
             created_at: now_secs(),
             started_at: None,
             settled_at: None,
@@ -581,6 +591,9 @@ impl Manager {
             pid: std::process::id(),
             preview: Value::Null,
         };
+        std::fs::create_dir_all(self.inner.root.join(id)).map_err(|error|format!("record_write_failed:{error}"))?;
+        journal::create(&self.inner.root.join(id).join("events.sqlite"))
+            .map_err(|error| format!("native_event_journal_create_failed:{error}"))?;
         persist_task(&self.inner.root, &task).map_err(|error| format!("record_write_failed:{error}"))?;
         if !idempotency.is_empty() {
             if let Ok(mut idem) = self.inner.idem.lock() {
@@ -794,6 +807,7 @@ fn persist_task(root: &Path, task: &Task) -> Result<(), String> {
         "result": task.result,
         "accounting": task.accounting,
         "error": task.error,
+        "event_error": task.event_error,
         "created_at": task.created_at,
         "started_at": task.started_at,
         "settled_at": task.settled_at,
@@ -821,7 +835,7 @@ fn persist_view(root: &Path, view: &Value) -> Result<(), String> {
         .filter(Value::is_object)
         .unwrap_or_else(|| json!({}));
     if let (Some(target), Some(source)) = (record.as_object_mut(), view.as_object()) {
-        for key in ["state", "settled", "result", "accounting", "error", "settled_at", "started_at"] {
+        for key in ["state", "settled", "result", "accounting", "error", "event_error", "settled_at", "started_at"] {
             if let Some(value) = source.get(key) {
                 target.insert(key.to_string(), value.clone());
             }
@@ -965,13 +979,13 @@ fn settle_view(inner: &Arc<Inner>, id: &str, state: &str, result: Value, error: 
     // A cancel request wins the terminal label: the child may have failed with a
     // provider error caused by the cancellation, and reporting that as `failed`
     // would blame the provider for a decision the caller made.
-    task.state = if cancelled { "cancelled".to_string() } else { state.to_string() };
+    task.state = if task.event_error.is_some() { "failed".into() } else if cancelled { "cancelled".to_string() } else { state.to_string() };
     task.settled = true;
     task.result = result;
     // The child's report of what served it and what it cost, kept with the result
     // so a receipt read after a restart still answers the same question.
     task.accounting = accounting;
-    task.error = error;
+    task.error = task.event_error.clone().or(error);
     task.settled_at = Some(now_secs());
     let view = task.view(true);
     // A terminal record that cannot be written is not success. Say `unknown` with
@@ -1027,13 +1041,23 @@ pub fn control(action: &str, args: &Value) -> Result<Value, String> {
             let id=args["id"].as_str().unwrap_or_default();
             let owner=args["owner_user"].as_str().unwrap_or_default();
             let task=manager.find(id,owner)?;
-            let file=manager.inner.root.join(id).join("events.jsonl");
-            let raw=std::fs::read_to_string(file).map_err(|_|"native_event_evidence_unavailable".to_string())?;
-            let after=args["after"].as_u64().unwrap_or(0);
-            let all=raw.lines().map(serde_json::from_str::<Value>).collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
-            let events:Vec<Value>=all.iter().filter(|row|row["seq"].as_u64().unwrap_or(0)>after).take(256).cloned().collect();
-            let next=events.last().and_then(|row|row["seq"].as_u64()).unwrap_or(after);
-            Ok(json!({"ok":true,"transport":"native","task_id":id,"session_id":task["session_id"],"state":task["state"],"events":events,"next_seq":next,"has_more":all.last().and_then(|r|r["seq"].as_u64()).unwrap_or(0)>next}))
+            for key in ["session_id", "attempt_id", "node_id", "event_node_id", "event_epoch"] {
+                if let Some(expected)=args.get(key) {
+                    if expected != &task[key] { return Err(format!("native_event_identity_mismatch:{key}")); }
+                }
+            }
+            if let Some(error)=task["event_error"].as_str() { return Err(error.into()); }
+            let after=match args.get("after") {
+                None => 0,
+                Some(Value::String(value)) => value.parse::<u64>().map_err(|_|"invalid_native_event_cursor")?,
+                Some(value) => value.as_u64().ok_or("invalid_native_event_cursor")?,
+            };
+            let mut page=journal::page(&manager.inner.root.join(id).join("events.sqlite"),after,args["archive"].as_bool().unwrap_or(false))?;
+            for key in ["transport","task_id","attempt_id","session_id","node_id","event_node_id","event_epoch","state","settled"] {
+                page[key]=task[key].clone();
+            }
+            page["ok"]=json!(true);
+            Ok(page)
         }
         "list" => {
             let owner = args["owner_user"].as_str().unwrap_or_default();
@@ -1073,23 +1097,26 @@ pub fn health() -> Value {
     manager().summary()
 }
 
-/// Live rendering only. Original messages remain in the transcript; an
-/// interrupted preview is never presented as durable evidence or completion.
+/// Commit exact native events before presentation; preview is a separate bounded view.
 pub fn capture_event(payload: &str) -> bool {
     let Some(owner) = current_owner() else { return false };
     let Some(session) = owner.strip_prefix("subagent:") else { return false };
-    let Ok(event) = serde_json::from_str::<Value>(payload) else { return true };
+    let event = serde_json::from_str::<Value>(payload).unwrap_or(Value::Null);
     let mut tasks = manager().inner.tasks.lock().expect("subagents tasks");
     if let Some(task) = tasks.values_mut().find(|task| task.session_id == session && task.state == "running" && !task.settled) {
         // Append original event before presentation. Retained per task; no automatic deletion.
-        let path=manager().inner.root.join(&task.id).join("events.jsonl");
-        let previous=std::fs::read_to_string(&path).unwrap_or_default();
-        let seq=previous.lines().count() as u64+1;
-        let row=json!({"seq":seq,"task_id":task.id,"session_id":session,"event":event});
-        if let Ok(mut file)=std::fs::OpenOptions::new().create(true).append(true).open(path) {
-            use std::io::Write;
-            if writeln!(file,"{}",row).and_then(|_|file.sync_data()).is_err(){task.error=Some("native_event_journal_write_failed".into());}
-        } else {task.error=Some("native_event_journal_unavailable".into());}
+        let path=manager().inner.root.join(&task.id).join("events.sqlite");
+        if let Err(error)=journal::append(&path,payload) {
+            let failure=format!("native_event_journal_write_failed:{error}");
+            eprintln!("[subagents] {}: {failure}",task.id);
+            task.event_error=Some(failure);
+            task.cancel.store(true,Ordering::SeqCst);
+            shutdown_sockets(&task.sockets);
+            if let Err(error)=persist_task(&manager().inner.root,task) {
+                eprintln!("[subagents] journal failure record write failed: {error}");
+            }
+            return true;
+        }
         if !task.preview.is_object() { task.preview = json!({"text":""}); }
         match event["type"].as_str().unwrap_or_default() {
             "delta" => {
