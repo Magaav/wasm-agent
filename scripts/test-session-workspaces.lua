@@ -50,12 +50,13 @@ for _,target in ipairs({workspaces.scratch_root(b)..'/bad.txt',scratch..'/../bad
  ok(tools.dispatch(memory,'write',{path=target,content='bad'},'master',ca).error=='workspace_path_outside_binding','scratch escape refuses '..target)
 end
 local original_canonical=host.canonical_path
-host.canonical_path=function(p)
- if norm(p)==norm(scratch..'/junction') then return source_path end
- return original_canonical(p)
-end
-ok(tools.dispatch(memory,'write',{path=scratch..'/junction/bad.txt',content='bad'},'master',ca).error=='workspace_path_outside_binding','junction target outside scratch refuses')
+local junction=json.decode(host.exec('MSYS2_ARG_CONV_EXCL="*" cmd.exe /c mklink /J "'..(scratch..'/junction'):gsub('/','\\')..'" "'..source_path:gsub('/','\\')..'"'))
+assert(junction.code==0, 'real junction creation: '..json.encode(junction))
+local actual=tools.dispatch(memory,'write',{path=scratch..'/junction/bad.txt',content='bad'},'master',ca)
+ok(actual.error=='workspace_path_outside_binding','junction target outside scratch refuses: '..json.encode({result=actual,junction=junction,scratch=scratch,canonical=host.canonical_path(scratch..'/junction')}))
 host.canonical_path=original_canonical
+assert(not host.read_file(source_path..'/bad.txt'), 'real junction escaped write absent')
+host.exec('MSYS2_ARG_CONV_EXCL="*" cmd.exe /c rmdir "'..(scratch..'/junction'):gsub('/','\\')..'"')
 local staged_shell=tools.dispatch(memory,'bash',{command='echo staged',cwd=scratch},'master',ca)
 ok(staged_shell.code==0,'scratch shell cwd')
 local cwd_escape=tools.dispatch(memory,"bash",{command="echo bad",cwd=source_path},"master",ca)
