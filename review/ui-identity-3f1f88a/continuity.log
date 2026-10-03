@@ -1,0 +1,29 @@
+stage C:\Users\Victor\AppData\Local\Temp\wa-probe-pMex2y  browser msedge.exe  exit 0  dom 44201 bytes
+---- probe result ----
+[
+  {
+    "case": "assistant-grow-prepend",
+    "id": "a3",
+    "ledgerKey": "a3",
+    "delta": 0
+  },
+  {
+    "case": "duplicate-user-prepend",
+    "id": "u3",
+    "delta": 0
+  },
+  {
+    "case": "fold-repaint",
+    "open": true
+  },
+  {
+    "case": "resize-repaint-user",
+    "id": "u3",
+    "delta": 0
+  }
+]
+---- browser stderr (first 800 chars) ----
+[14980:14052:1003/080640.141:ERROR:components\edge_ess\vbs_encoder.cc:100] LoadEnclaveImageW failed, error code 577
+[14980:14052:1003/080640.439:ERROR:components\edge_auth\edge_auth_errors.cc:553] EDGE_IDENTITY: Image Fetch FAILED: Error: Primary Error: kAccountImageFetchFailure, Secondary Error: kUnspecified, Platform error: 0, Error string: [empty]
+
+

@@ -1,0 +1,20 @@
+stage C:\Users\Victor\AppData\Local\Temp\wa-probe-ysQ1Lb  browser msedge.exe  exit 0  dom 23260 bytes
+---- probe result ----
+[
+  {
+    "event": "inspect-run",
+    "session": "high-thread",
+    "id": "9007199254740993"
+  },
+  {
+    "event": "cancel-run",
+    "session": "high-thread",
+    "id": "9007199254740993"
+  }
+]
+---- browser stderr (first 800 chars) ----
+[4120:14356:1003/080715.474:ERROR:components\edge_ess\vbs_encoder.cc:100] LoadEnclaveImageW failed, error code 577
+[4120:14356:1003/080715.744:ERROR:components\edge_auth\edge_auth_errors.cc:553] EDGE_IDENTITY: Image Fetch FAILED: Error: Primary Error: kAccountImageFetchFailure, Secondary Error: kUnspecified, Platform error: 0, Error string: [empty]
+
+8925 bytes written to file C:\Users\Victor\.wasm-agent\wa-worktree-childdispatch366a7144-3381-43ea-b7dd-d5ad7ac3adbd\review\ui-identity-3f1f88a\engine.png
+

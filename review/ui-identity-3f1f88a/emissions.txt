@@ -1,0 +1,15 @@
+737:                "run_id": node_thread_run_id(0),
+738:                "run_key": node_thread_run_id(0).map(|id|id.to_string()),
+760:                        current = Some(serde_json::json!({"label":label,"ms":now_ms().saturating_sub(*started),"node_thread_id":index,"session":node_thread_session(index),"run_id":node_thread_run_id(index),"run_key":node_thread_run_id(index).map(|id|id.to_string())}));
+767:                    "run_id": node_thread_run_id(index),
+768:                    "run_key": node_thread_run_id(index).map(|id|id.to_string()),
+852:                serde_json::json!({"conversation": conversation, "run_id": run_id, "run_key": run_id.to_string(), "state": state.as_str()})
+1158:    let run_id = match parse_run_id(parsed.get("run_id")) {
+1172:                        "run_id": view.run_id,
+1173:                        "run_key": view.run_id.to_string(),
+1205:                    "run_id": run_id,
+1206:                    "run_key": run_id.to_string(),
+1229:    let run_id = match parse_run_id(parsed.get("run_id")) {
+1274:        "run_id": run_id,
+1275:        "run_key": run_id.to_string(),
+2200:                serde_json::json!({"accepted":true,"run_id":run_id,"run_key":run_id.to_string()})

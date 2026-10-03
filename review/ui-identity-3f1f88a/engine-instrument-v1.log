@@ -1,0 +1,11 @@
+stage C:\Users\Victor\AppData\Local\Temp\wa-probe-H2QaOk  browser msedge.exe  exit 0  dom 23266 bytes
+---- probe result ----
+Error: Engine exact event preference failed []
+    at http://127.0.0.1:62506/:296:755
+    at http://127.0.0.1:62506/:296:941
+---- browser stderr (first 800 chars) ----
+[4676:19448:1003/080639.125:ERROR:components\edge_ess\vbs_encoder.cc:100] LoadEnclaveImageW failed, error code 577
+[4676:19448:1003/080639.458:ERROR:components\edge_auth\edge_auth_errors.cc:553] EDGE_IDENTITY: Image Fetch FAILED: Error: Primary Error: kAccountImageFetchFailure, Secondary Error: kUnspecified, Platform error: 0, Error string: [empty]
+
+49798 bytes written to file C:\Users\Victor\.wasm-agent\wa-worktree-childdispatch366a7144-3381-43ea-b7dd-d5ad7ac3adbd\review\ui-identity-3f1f88a\engine.png
+

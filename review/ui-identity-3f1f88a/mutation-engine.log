@@ -1,0 +1,10 @@
+stage C:\Users\Victor\AppData\Local\Temp\wa-probe-uWLu3e  browser msedge.exe  exit 0  dom 23380 bytes
+---- probe result ----
+Error: Engine exact event preference failed [{"event":"inspect-run","session":"high-thread","id":9007199254740992},{"event":"cancel-run","session":"high-thread","id":9007199254740992}]
+    at http://127.0.0.1:59682/:296:731
+    at http://127.0.0.1:59682/:296:917
+---- browser stderr (first 800 chars) ----
+[16360:9388:1003/080729.403:ERROR:components\edge_ess\vbs_encoder.cc:100] LoadEnclaveImageW failed, error code 577
+[16360:9388:1003/080729.691:ERROR:components\edge_auth\edge_auth_errors.cc:553] EDGE_IDENTITY: Image Fetch FAILED: Error: Primary Error: kAccountImageFetchFailure, Secondary Error: kUnspecified, Platform error: 0, Error string: [empty]
+
+

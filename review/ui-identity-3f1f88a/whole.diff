@@ -1,0 +1,829 @@
+diff --git a/review/ui-repair/RUN-IDENTITY.md b/review/ui-repair/RUN-IDENTITY.md
+new file mode 100644
+index 0000000..d5f0cdd
+--- /dev/null
++++ b/review/ui-repair/RUN-IDENTITY.md
+@@ -0,0 +1,5 @@
++# Run identity contract work in progress
++
++`run_key` is canonical positive decimal text. Existing numeric run_id remains compatibility output only. Requests accept decimal-string run_id or legacy safe numeric run_id. Invalid/noncanonical returns invalid_run_id; unsafe legacy numeric returns unsafe_numeric_run_id; overflow or values outside signed SQLite journal range returns run_id_out_of_range. Persistence supports 1..9223372036854775807, not full u64. Owner/conversation auth remains unchanged.
++
++Implementation is incomplete: remaining thread/event/admission emission sites and UI callers still require conversion and route fixture proof. Do not use this note as acceptance evidence.
+diff --git a/review/ui-repair/final-journal.log b/review/ui-repair/final-journal.log
+new file mode 100644
+index 0000000..24b7f22
+--- /dev/null
++++ b/review/ui-repair/final-journal.log
+@@ -0,0 +1,159 @@
++warning: profiles for the non root package will be ignored, specify profiles at the workspace root:
++package:   C:\Users\Victor\.wasm-agent\wa-worktree-childdispatch4c6f5927-a536-4018-8c04-ceccdcec00b4\rust\wa-graph\Cargo.toml
++workspace: C:\Users\Victor\.wasm-agent\wa-worktree-childdispatch4c6f5927-a536-4018-8c04-ceccdcec00b4\rust\Cargo.toml
++warning: function `rowed` is never used
++    --> wa-host\src\host.rs:1602:8
++     |
++1602 |     fn rowed(line: &str, row: u16) -> TickerSpec {
++     |        ^^^^^
++     |
++     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
++
++warning: constant `LUA_TBOOLEAN` is never used
++  --> wa-host\src\lua.rs:19:11
++   |
++19 | pub const LUA_TBOOLEAN: c_int = 1;
++   |           ^^^^^^^^^^^^
++
++warning: constant `LUA_TNUMBER` is never used
++  --> wa-host\src\lua.rs:20:11
++   |
++20 | pub const LUA_TNUMBER: c_int = 3;
++   |           ^^^^^^^^^^^
++
++warning: constant `LUA_TSTRING` is never used
++  --> wa-host\src\lua.rs:21:11
++   |
++21 | pub const LUA_TSTRING: c_int = 4;
++   |           ^^^^^^^^^^^
++
++warning: constant `LUA_TTABLE` is never used
++  --> wa-host\src\lua.rs:22:11
++   |
++22 | pub const LUA_TTABLE: c_int = 5;
++   |           ^^^^^^^^^^
++
++warning: methods `pop`, `push_number`, and `push_bool` are never used
++   --> wa-host\src\lua.rs:186:12
++    |
++103 | impl Lua {
++    | -------- methods in this implementation
++...
++186 |     pub fn pop(&self, n: c_int) {
++    |            ^^^
++...
++217 |     pub fn push_number(&self, n: f64) {
++    |            ^^^^^^^^^^^
++...
++227 |     pub fn push_bool(&self, b: bool) {
++    |            ^^^^^^^^^
++
++warning: function `lua_pushinteger` is never used
++  --> wa-host\src\lua.rs:55:12
++   |
++55 |     pub fn lua_pushinteger(l: *mut LuaState, n: LuaInteger);
++   |            ^^^^^^^^^^^^^^^
++
++warning: function `lua_getfield` is never used
++  --> wa-host\src\lua.rs:63:12
++   |
++63 |     pub fn lua_getfield(l: *mut LuaState, idx: c_int, k: *const c_char);
++   |            ^^^^^^^^^^^^
++
++warning: function `lua_rawgeti` is never used
++  --> wa-host\src\lua.rs:65:12
++   |
++65 |     pub fn lua_rawgeti(l: *mut LuaState, idx: c_int, n: LuaInteger) -> c_int;
++   |            ^^^^^^^^^^^
++
++warning: function `lua_rawlen` is never used
++  --> wa-host\src\lua.rs:66:12
++   |
++66 |     pub fn lua_rawlen(l: *mut LuaState, idx: c_int) -> usize;
++   |            ^^^^^^^^^^
++
++warning: function `lua_next` is never used
++  --> wa-host\src\lua.rs:67:12
++   |
++67 |     pub fn lua_next(l: *mut LuaState, idx: c_int) -> c_int;
++   |            ^^^^^^^^
++
++warning: function `lua_remove` is never used
++  --> wa-host\src\lua.rs:68:12
++   |
++68 |     pub fn lua_remove(l: *mut LuaState, idx: c_int);
++   |            ^^^^^^^^^^
++
++warning: function `lua_tonumberx` is never used
++  --> wa-host\src\lua.rs:74:12
++   |
++74 |     pub fn lua_tonumberx(l: *mut LuaState, idx: c_int, isnum: *mut c_int) -> LuaNumber;
++   |            ^^^^^^^^^^^^^
++
++warning: function `lua_toboolean` is never used
++  --> wa-host\src\lua.rs:75:12
++   |
++75 |     pub fn lua_toboolean(l: *mut LuaState, idx: c_int) -> c_int;
++   |            ^^^^^^^^^^^^^
++
++warning: function `lua_error` is never used
++  --> wa-host\src\lua.rs:78:12
++   |
++78 |     pub fn lua_error(l: *mut LuaState) -> c_int;
++   |            ^^^^^^^^^
++
++warning: field `engine` is never read
++  --> wa-host\src\plugins.rs:34:5
++   |
++33 | pub struct PluginRegistry {
++   |            -------------- field in this struct
++34 |     engine: Engine,
++   |     ^^^^^^
++
++warning: method `has` is never used
++   --> wa-host\src\plugins.rs:145:12
++    |
++ 54 | impl PluginRegistry {
++    | ------------------- method in this implementation
++...
++145 |     pub fn has(&self, name: &str) -> bool {
++    |            ^^^
++
++warning: function `turn_node_thread_is_idle` is never used
++   --> wa-host\src\serve.rs:482:4
++    |
++482 | fn turn_node_thread_is_idle() -> bool {
++    |    ^^^^^^^^^^^^^^^^^^^^^^^^
++
++warning: field `run_id` is never read
++   --> wa-host\src\serve.rs:890:33
++    |
++890 |     Socket { stream: TcpStream, run_id: u64 },
++    |     ------                      ^^^^^^
++    |     |
++    |     field in this variant
++
++warning: function `ok_json` is never used
++   --> wa-host\src\serve.rs:969:4
++    |
++969 | fn ok_json(body: String) -> Reply {
++    |    ^^^^^^^
++
++warning: field `class` is never read
++   --> wa-host\src\serve\scheduler.rs:183:5
++    |
++180 | struct RunRecord {
++    |        --------- field in this struct
++...
++183 |     class: RunClass,
++    |     ^^^^^
++
++warning: `wa-host` (bin "wa" test) generated 21 warnings
++    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.17s
++     Running unittests src\main.rs (rust\target\debug\deps\wa-c562c6134715949e.exe)
++
++running 2 tests
++test serve::journal::tests::high_identity_is_exact_and_owner_scoped ... ok
++test serve::journal::tests::restart_preserves_evidence_scopes_owners_and_never_replays_work ... ok
++
++test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 80 filtered out; finished in 0.31s
+diff --git a/review/ui-repair/identity-audit.md b/review/ui-repair/identity-audit.md
+new file mode 100644
+index 0000000..1828162
+--- /dev/null
++++ b/review/ui-repair/identity-audit.md
+@@ -0,0 +1,9 @@
++# Identity audit / caller-attested build proof
++
++serve.rs: health current/node_threads and run_ids emit numeric compatibility run_id plus decimal run_key; status fallback, cancel receipt, run-events fallback and completion admission emit both. /runs inspect/cancel and /run-events parse canonical string request run_id via parse_run_id; numeric inputs restricted JS-safe, signed SQLite range explicitly enforced. Journal inspect/views/replay emit run_key from u64 without JS conversion; scheduler stays internal u64 and delegates durable views to journal.
++
++UI app.js: runKey canonicalizes exact text or safe legacy numeric; baseline, identifySubmittedRun sorting (BigInt), standing/thread match, durable lookup, live reconnect and cancel preserve keys. Diagnostic owner/current ID now uses runKey. Engine component Inspect/Cancel event previously used numeric run_id: fixed to prefer run_key. Event cursors remain separate sequence numbers, not run identities. Legacy numeric outputs retained compatibility only. Steer targets conversation, not rounded run ID.
++
++Executed isolated git archive + working scripts snapshot build (operation op-1791024158953567-13548-2195), cargo jobs2; source hashes frozen before build, equal afterward; binary hash receipt captured AFTER successful build. Normal test-gate-check in archive with rust/target/debug/wa.exe ABSENT used explicit candidate/debug/wa.exe + frozen receipt. exit0, HTTP36/0 skips. Candidate SHA256 569f30855ee26e53e736d8424d284ebe813beed5b7695b43d083ed79346dd8da. Wrong frozen binary binding exit1 (op-1791024345225790-13548-2315). Verification never regenerates expected binding. Caller-attested provenance, not binary introspection/security. Logs no-debug.log and wrong-binding.log retained; private candidate/archive relocated intact to own worktree Git metadata identity-evidence/private-identity (3485 files, hash readback all matched). Original wrong-binding.raw SHA256 9c55272e1c8f930d56573ad478bc80cdc7247f15b5a5187b7a92fdc154cd572f; manifest.json SHA256 2057769c5eafbdb17fcf05e0980d74cb2720651a3fbab3c843fa4d3ef835cacf. Repo text log differs only by removing carriage-return bytes; original absolute paths remain historical evidence. Frozen build receipt remains valid after relocation because hashes are relative and no expected input was recomputed.
++
++This completes narrow HTTP identity evidence, not shared attach/history/folds/oversized/viewport acceptance. Full continuity remains separate next phase.
+diff --git a/review/ui-repair/identity-build-receipt.json b/review/ui-repair/identity-build-receipt.json
+new file mode 100644
+index 0000000..00960ec
+--- /dev/null
++++ b/review/ui-repair/identity-build-receipt.json
+@@ -0,0 +1,62 @@
++{
++  "kind": "caller-attested-cargo-build",
++  "sources": {
++    "rust/wa-host/src/serve.rs": "48c20bf278bc96e16e2b6a53cb9cc744d3d573f940dce4430ad5ceeebd0d4617",
++    "rust/wa-host/src/serve/journal.rs": "8d0ed65887c20c1179d7d1d183082e285f83332d0d4df5b4a5854fd415ff0ac4",
++    "rust/wa-host/src/serve/scheduler.rs": "196ecb4322c417f739302cb81df5d38808ff4cd4a8841349f39e7f0fc4909a58",
++    "rust/Cargo.lock": "aa0da8978b2fa9a4974b607327528075d11e9ad15b34597af374ba2b21e42843",
++    "lua/core/agent.lua": "22e0e2c7f9a46dfe630eb3dfe37829180b631cdc01f1a90548e324fc1de6f491",
++    "lua/core/changeset.lua": "0441791a93640de6868b2cc4378a42e4ac6ef6cb83c964c8911126ca7b55241f",
++    "lua/core/chat.lua": "5cf789311f5c0d674807b89416279c0c17d84cfbe43876549dca4aa205cb62ce",
++    "lua/core/cli_input.lua": "2f43f09ab802d66da06d880efee255f64936950c2a5cb298f2e7fb19d50e882f",
++    "lua/core/cli_view.lua": "e4d4787a84f5c9864872e46feaca8a097517f5c96a5a972c9ca7ba81800c16d3",
++    "lua/core/commands.lua": "a53bd69cfaadf69ec75728c3169c1273daa567abf0512dbed8aa0d5c78940a33",
++    "lua/core/completions.lua": "d3a8be2ec5fb0e5a469f5793b56fc10be2f4b9da908a728b02424ca428c514a1",
++    "lua/core/diagnose.lua": "a64c940164bbbdc773205eba3883214e0f04cc7a03a055655d1bb0ad152f8779",
++    "lua/core/effects.lua": "9dafa483a63a09ef69e6526a22707f8b5ed5b18ed3860f0dd62d309baba92f00",
++    "lua/core/efficiency.lua": "a928c9777fe00eaa03ef02ebacfacbb25062e2efc577715740029e24d03b08bc",
++    "lua/core/enrollment.lua": "d0d346d99148b350457cfa3390279e2d065578aec2d350bde91aba1658b9806f",
++    "lua/core/evidence_view.lua": "29280807ce06ea78c6c5945229de49c468b4b8fa5cbf45f28e6cba76a5029e25",
++    "lua/core/file_tools.lua": "7695d5dc70bdeb387012253a290fe6eb4264839777324cc2e11d02a97a1be658",
++    "lua/core/graph.lua": "eda35e3c723b132fb8f1c9a587706ed9b899b0d7f6f44b43a5b814fe3de299bb",
++    "lua/core/init.lua": "d0b78c7deb03acaad27036ad7e58caddf40eb7ce81581796aaa9ba14f82558be",
++    "lua/core/markdown.lua": "66f2d0cefb8d72a1ab5c830ba54bd3244a74044c730a44d39561fca3669b0fc2",
++    "lua/core/memory.lua": "fb5709756fc63f39bf555448a705fb68fa9c3bbe3ee8828200da23dcabe35dbe",
++    "lua/core/merge.lua": "0932993775a698d07f513343d5e1a7855e3370ae19327db757afac8b1d25da9b",
++    "lua/core/model_window.lua": "51e392a6a9edaa274ecb7235a4c45b4cb5ee91e377aa79b506dab9eda0f45bc9",
++    "lua/core/modules.lua": "281508dd0bf3bce6171cd1ddcc52ddf94d3ef4a2f8f255a3a842152f0e104967",
++    "lua/core/nodes.lua": "f859d3a56d7c5d49caec90a8c190e8aa7635dbac36d94e180ee2bb405d79454c",
++    "lua/core/openai_sub.lua": "8455bdc7012a20593b0d105ee566e3a7807ac48617be9e3f55b0f910f308e39c",
++    "lua/core/openai_sub_auth.lua": "7949dc6f548f3ee03f4fe3da4386d86e991c9d03b33da3c3275685202d09daa9",
++    "lua/core/openai_sub_bridge.lua": "863727073ec14c904b756edb9e7cbd5946bf08fad21449b5446b8c304e5b9399",
++    "lua/core/openai_sub_catalogue.lua": "3ddb0859b6997b5c79ac78082fe4c4088407932d0faa3e0ea3deef003b311be5",
++    "lua/core/openai_sub_login.lua": "cd60453da346fbd96cf8a87b5ad9f8f57329121143c645c8d169f88a1b02649b",
++    "lua/core/orchestrator.lua": "77d7dc6899de05d729b3e032c95e8e3e7be058fa32d3a22a85b18f5aa9092f7f",
++    "lua/core/patch_audit.lua": "e2b5415390a5f535fc2474dec4c50140b7511b4a0d5607afd949a1d1c7793283",
++    "lua/core/paths.lua": "dd4f708877607f1be1b150fcdd984332e79b738aaa0bb6df1d01fa4a80535db9",
++    "lua/core/platform.lua": "77adcec4d674879ff8fc8cdce5caff4028b6ae811d698aaa188e1b91ecd1a07d",
++    "lua/core/prefix_audit.lua": "a7267d42d23900829ec8747deb77099e9d590559b0d9834d6e76d622f3cfdb71",
++    "lua/core/provider.lua": "5879a812f3e0f1ef996a770174ab196ee980d613d4de609015175b8f39ec4ec4",
++    "lua/core/redact.lua": "58d4a67edaf19548c8ea4c9297a01bcccb99596653341a446f30898b3e809778",
++    "lua/core/resources.lua": "f99b8737407401480c209583af52030893ec70e4cb8348bf5ff14acd6b1f8d9b",
++    "lua/core/server.lua": "7ec380d20f200989fb317db59be493790da9abe2d7511a5a3b4b7755a9ea823f",
++    "lua/core/session_view.lua": "da709fe9245a0cd3308e6922ae8433edbc385684ee3a62ef20de3189231461c5",
++    "lua/core/skills.lua": "d780d7e6f2149214492e99984d565299523a67c16f62da93b681dd6f4b718a39",
++    "lua/core/spells.lua": "455cc0492a6706bb9bb89e5a111ea7878e87696f82feb4f087e565aa04bc9ef2",
++    "lua/core/state.lua": "6613c2602ab2443d7a37c181c4fcc5a1f8f4215453f8a5e56bbf34bb544c4fda",
++    "lua/core/status.lua": "19d2bb9d74f81db1e8adacf817d09c2f4c529cc56512763aad155b92060b5adf",
++    "lua/core/steering.lua": "cb44e67c4427695d9ba604f44d744f92663747cd35de5f62f0956ee29767ef5a",
++    "lua/core/subagents.lua": "a0bb917511311c4f830c0e1685e05601d6b3eb072ab99c10e17edf91f1f0dbe3",
++    "lua/core/subscription_wire.lua": "480a2d6133f09257299ab97fd3c73b2fffb31b7415de282b1422b54253b79cfa",
++    "lua/core/telemetry.lua": "4dad39485c5171e1d1867706dec6cdbb8bb582d8e8e72976a0cb8316cf2732b8",
++    "lua/core/toolchain.lua": "fcd48aa643850ffd965e579235de5d9b97f216e52bc8cd624d7be9b70267cae1",
++    "lua/core/tools.lua": "d123c6270f5eeb9130eb7289921c6b2c0642f5c5e11b1f558df441316fe6e117",
++    "lua/core/tool_output.lua": "459f61db7017db119013f2f1f6517740da252976a3f068dd31258c6496735549",
++    "lua/core/update.lua": "6a1219414392d6fc91d4e87150df000e3da2db4b2da3f9a67d3de727c239675f",
++    "lua/core/users.lua": "49a2512f1d41515e77d84d0214f8f75a65607629d67db83962da5777e31387c9",
++    "lua/core/whatsapp.lua": "bef15a795784427eedbe0f74c9d9dd9a551c384315f469dfe029dd2599f3f1ce",
++    "lua/core/workspaces.lua": "f9f2bd9553c746b3a6795f44b039da7717c3554ec02aaa5b9479bea4cfb12ebf",
++    "lua/vendor/json.lua": "264ad546166bd3de19b4382bf0cc14d26dfeffff55c7682b72a475cd99dfd1b5"
++  },
++  "binary_sha256": "569f30855ee26e53e736d8424d284ebe813beed5b7695b43d083ed79346dd8da"
++}
+\ No newline at end of file
+diff --git a/review/ui-repair/no-debug.log b/review/ui-repair/no-debug.log
+new file mode 100644
+index 0000000..63f0925
+--- /dev/null
++++ b/review/ui-repair/no-debug.log
+@@ -0,0 +1,15 @@
++check js:two.js: PASS exit=0 ms=199.3 log=C:\Users\Victor\AppData\Local\Temp\wa-check-runner-E2YIxp\pass\js_two.js.log
++ALL PASS
++check js:one.js: PASS exit=0 ms=206.9 log=C:\Users\Victor\AppData\Local\Temp\wa-check-runner-E2YIxp\pass\js_one.js.log
++ALL PASS
++check js:three.js: PASS exit=0 ms=200.2 log=C:\Users\Victor\AppData\Local\Temp\wa-check-runner-E2YIxp\pass\js_three.js.log
++ALL PASS
++check js:silent.js: FAIL exit=0 ms=33.0 log=C:\Users\Victor\AppData\Local\Temp\wa-check-runner-E2YIxp\fail\js_silent.js.log
++
++check js:failure.js: FAIL exit=7 ms=40.6 log=C:\Users\Victor\AppData\Local\Temp\wa-check-runner-E2YIxp\fail\js_failure.js.log
++ALL PASS
++check js:one.js: PASS exit=0 ms=194.7 log=C:\Users\Victor\AppData\Local\Temp\wa-check-runner-E2YIxp\fail\js_one.js.log
++ALL PASS
++candidate C:\Users\Victor\.wasm-agent\wa-worktree-childdispatch4c6f5927-a536-4018-8c04-ceccdcec00b4\review\ui-repair\private-identity\candidate\debug\wa.exe sha256=569f30855ee26e53e736d8424d284ebe813beed5b7695b43d083ed79346dd8da sourceLua=C:\Users\Victor\.wasm-agent\wa-worktree-childdispatch4c6f5927-a536-4018-8c04-ceccdcec00b4\review\ui-repair\private-identity
++run key HTTP ok (36 checks, 0 skipped; real listener, source Lua, restart, no inference)
++gate check runner ok (focused isolation and browser stage contract; HTTP skip separately reported)
+diff --git a/review/ui-repair/run-id-tests.txt b/review/ui-repair/run-id-tests.txt
+new file mode 100644
+index 0000000..17f5201
+--- /dev/null
++++ b/review/ui-repair/run-id-tests.txt
+@@ -0,0 +1 @@
++Observed cargo test --offline --manifest-path rust/Cargo.toml -p wa-host serve::journal with CARGO_BUILD_JOBS=2 RUST_TEST_THREADS=2: exit 0, 1 passed, 0 failed, 80 filtered. Original --lib invocation exit101 (package has no library target); corrected binary-target invocation above. This tests existing journal regression and compilation, NOT complete new run-key contract.
+diff --git a/review/ui-repair/wrong-binding.log b/review/ui-repair/wrong-binding.log
+new file mode 100644
+index 0000000..cc6147b
+--- /dev/null
++++ b/review/ui-repair/wrong-binding.log
+@@ -0,0 +1,47 @@
++check js:one.js: PASS exit=0 ms=207.7 log=C:\Users\Victor\AppData\Local\Temp\wa-check-runner-uVl3as\pass\js_one.js.log
++ALL PASS
++check js:two.js: PASS exit=0 ms=207.7 log=C:\Users\Victor\AppData\Local\Temp\wa-check-runner-uVl3as\pass\js_two.js.log
++ALL PASS
++check js:three.js: PASS exit=0 ms=199.4 log=C:\Users\Victor\AppData\Local\Temp\wa-check-runner-uVl3as\pass\js_three.js.log
++ALL PASS
++check js:silent.js: FAIL exit=0 ms=33.0 log=C:\Users\Victor\AppData\Local\Temp\wa-check-runner-uVl3as\fail\js_silent.js.log
++
++check js:failure.js: FAIL exit=7 ms=38.6 log=C:\Users\Victor\AppData\Local\Temp\wa-check-runner-uVl3as\fail\js_failure.js.log
++ALL PASS
++check js:one.js: PASS exit=0 ms=194.3 log=C:\Users\Victor\AppData\Local\Temp\wa-check-runner-uVl3as\fail\js_one.js.log
++ALL PASS
++node:internal/modules/run_main:107
++    triggerUncaughtException(
++    ^
++
++AssertionError [ERR_ASSERTION]: C:\Users\Victor\.wasm-agent\wa-worktree-childdispatch4c6f5927-a536-4018-8c04-ceccdcec00b4\review\ui-repair\private-identity\scripts\run-key-build-proof.cjs:5
++function verify(repo,binary,receipt){const saved=JSON.parse(fs.readFileSync(receipt));if(JSON.stringify(saved.sources)!==JSON.stringify(sources(repo))||saved.binary_sha256!==hash(binary))throw Error('run_key_build_binding_mismatch');return saved;}
++                                                                                                                                                                                           ^
++
++Error: run_key_build_binding_mismatch
++    at verify (C:\Users\Victor\.wasm-agent\wa-worktree-childdispatch4c6f5927-a536-4018-8c04-ceccdcec00b4\review\ui-repair\private-identity\scripts\run-key-build-proof.cjs:5:194)
++    at Object.<anonymous> (C:\Users\Victor\.wasm-agent\wa-worktree-childdispatch4c6f5927-a536-4018-8c04-ceccdcec00b4\review\ui-repair\private-identity\scripts\run-key-build-proof.cjs:7:102)
++    at Module._compile (node:internal/modules/cjs/loader:1872:14)
++    at Object..js (node:internal/modules/cjs/loader:2003:10)
++    at Module.load (node:internal/modules/cjs/loader:1594:32)
++    at Module._load (node:internal/modules/cjs/loader:1396:12)
++    at wrapModuleLoad (node:internal/modules/cjs/loader:255:19)
++    at Module.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:154:5)
++    at node:internal/main/run_main_module:33:47
++
++Node.js v24.19.0
++
++
++1 !== 0
++
++    at file:///C:/Users/Victor/.wasm-agent/wa-worktree-childdispatch4c6f5927-a536-4018-8c04-ceccdcec00b4/review/ui-repair/private-identity/scripts/test-gate-check.mjs:37:14
++    at process.processTicksAndRejections (node:internal/process/task_queues:104:5) {
++  generatedMessage: false,
++  code: 'ERR_ASSERTION',
++  actual: 1,
++  expected: 0,
++  operator: 'strictEqual',
++  diff: 'simple'
++}
++
++Node.js v24.19.0
+diff --git a/rust/wa-host/src/serve.rs b/rust/wa-host/src/serve.rs
+index 6ff5b8b..ddcb165 100644
+--- a/rust/wa-host/src/serve.rs
++++ b/rust/wa-host/src/serve.rs
+@@ -735,6 +735,7 @@ fn health_body() -> Vec<u8> {
+                 "ms": now_ms().saturating_sub(*started),
+                 "session": node_thread_session(0),
+                 "run_id": node_thread_run_id(0),
++                "run_key": node_thread_run_id(0).map(|id|id.to_string()),
+             })
+         })
+     });
+@@ -756,7 +757,7 @@ fn health_body() -> Vec<u8> {
+                 let run = busy.as_ref().is_some_and(|(label, _)| label.starts_with("POST /chat"));
+                 if current.is_none() && run {
+                     if let Some((label, started)) = &busy {
+-                        current = Some(serde_json::json!({"label":label,"ms":now_ms().saturating_sub(*started),"node_thread_id":index,"session":node_thread_session(index),"run_id":node_thread_run_id(index)}));
++                        current = Some(serde_json::json!({"label":label,"ms":now_ms().saturating_sub(*started),"node_thread_id":index,"session":node_thread_session(index),"run_id":node_thread_run_id(index),"run_key":node_thread_run_id(index).map(|id|id.to_string())}));
+                     }
+                 }
+                 node_threads.push(serde_json::json!({
+@@ -764,6 +765,7 @@ fn health_body() -> Vec<u8> {
+                     "role": if index < control_floor() { "runs" } else { "reads" },
+                     "session": node_thread_session(index),
+                     "run_id": node_thread_run_id(index),
++                    "run_key": node_thread_run_id(index).map(|id|id.to_string()),
+                     "state": if age >= stall_seconds() * 1000 { "stalled" } else if age < 1000 { "alive" } else { "busy" },
+                     "age_ms": age,
+                     "busy_ms": busy.as_ref().map(|(_, started)| now_ms().saturating_sub(*started)),
+@@ -847,7 +849,7 @@ fn health_body() -> Vec<u8> {
+         // cancelling without guessing. No prompts and no credentials.
+         "run_ids": scheduler::global().map(|scheduler| {
+             scheduler.run_ids().into_iter().map(|(conversation, run_id, state)| {
+-                serde_json::json!({"conversation": conversation, "run_id": run_id, "state": state.as_str()})
++                serde_json::json!({"conversation": conversation, "run_id": run_id, "run_key": run_id.to_string(), "state": state.as_str()})
+             }).collect::<Vec<_>>()
+         }),
+         // Local subagent runtime. `subagents` is the strict, versioned shape `{queued,running,active}`
+@@ -1116,6 +1118,24 @@ fn peer_conversation(request: &Request, verified_node_id: &str) -> String {
+ /// The response never claims a run stopped: `cancel` sets a request and
+ /// reports the state it was in, and the caller polls `status` until the run settles as `cancelled`
+ /// or `completed`.
++// Exact wire identity: canonical positive decimal strings, or legacy JS-safe integers.
++// Durable SQLite journal IDs are signed 64-bit; reject unsupported values before dispatch.
++fn parse_run_id(value: Option<&serde_json::Value>) -> Result<Option<u64>, &'static str> {
++    let Some(value) = value else { return Ok(None) };
++    let id = if let Some(text) = value.as_str() {
++        if text.is_empty() || text.starts_with('0') || !text.bytes().all(|b| b.is_ascii_digit()) {
++            return Err("invalid_run_id");
++        }
++        text.parse::<u64>().map_err(|_| "run_id_out_of_range")?
++    } else {
++        let id = value.as_u64().ok_or("invalid_run_id")?;
++        if id > 9_007_199_254_740_991 { return Err("unsafe_numeric_run_id"); }
++        id
++    };
++    if id == 0 || id > i64::MAX as u64 { return Err("run_id_out_of_range"); }
++    Ok(Some(id))
++}
++
+ fn handle_runs(request: &Request, resolve_tx: &std::sync::mpsc::SyncSender<ResolveRequest>, deadline: std::time::Instant) -> Reply {
+     let owner = match resolve_identity(resolve_tx, &request.session, deadline) {
+         Ok(owner) => owner,
+@@ -1135,7 +1155,10 @@ fn handle_runs(request: &Request, resolve_tx: &std::sync::mpsc::SyncSender<Resol
+     if conversation.is_empty() {
+         return (400, "application/json", b"{\"error\":\"conversation_required\"}".to_vec());
+     }
+-    let run_id = parsed.get("run_id").and_then(|value| value.as_u64());
++    let run_id = match parse_run_id(parsed.get("run_id")) {
++        Ok(id) => id,
++        Err(error) => return (400,"application/json",serde_json::json!({"error":error}).to_string().into_bytes()),
++    };
+     let Some(scheduler) = scheduler::global() else {
+         return (503, "application/json", b"{\"error\":\"admission_unavailable\"}".to_vec());
+     };
+@@ -1147,6 +1170,7 @@ fn handle_runs(request: &Request, resolve_tx: &std::sync::mpsc::SyncSender<Resol
+                 .map(|view| {
+                     serde_json::json!({
+                         "run_id": view.run_id,
++                        "run_key": view.run_id.to_string(),
+                         "state": view.state.as_str(),
+                         "cancel_requested": view.cancel_requested,
+                     })
+@@ -1179,6 +1203,7 @@ fn handle_runs(request: &Request, resolve_tx: &std::sync::mpsc::SyncSender<Resol
+                 let body = serde_json::json!({
+                     "ok": true,
+                     "run_id": run_id,
++                    "run_key": run_id.to_string(),
+                     "cancel_requested": true,
+                     "state": state.as_str(),
+                 })
+@@ -1201,7 +1226,11 @@ fn handle_runs(request: &Request, resolve_tx: &std::sync::mpsc::SyncSender<Resol
+ fn handle_run_events(request: &Request, resolve_tx: &std::sync::mpsc::SyncSender<ResolveRequest>, deadline: std::time::Instant) -> Reply {
+     let parsed: serde_json::Value = serde_json::from_slice(&request.body).unwrap_or(serde_json::Value::Null);
+     let conversation = parsed.get("thread").and_then(|value| value.as_str()).unwrap_or_default();
+-    let Some(run_id) = parsed.get("run_id").and_then(|value| value.as_u64()) else {
++    let run_id = match parse_run_id(parsed.get("run_id")) {
++        Ok(id) => id,
++        Err(error) => return (400,"application/json",serde_json::json!({"error":error}).to_string().into_bytes()),
++    };
++    let Some(run_id) = run_id else {
+         return (400, "application/json", b"{\"error\":\"run_id_required\"}".to_vec());
+     };
+     if conversation.is_empty() {
+@@ -1243,6 +1272,7 @@ fn handle_run_events(request: &Request, resolve_tx: &std::sync::mpsc::SyncSender
+     let body = serde_json::json!({
+         "ok": true,
+         "run_id": run_id,
++        "run_key": run_id.to_string(),
+         "checkpoint_seq": log.checkpoint_seq,
+         "checkpoint_message_seq": log.checkpoint_message_seq,
+         "next_seq": log.next_seq,
+@@ -2167,7 +2197,7 @@ pub(crate) fn enqueue_completion(body: &str) -> serde_json::Value {
+             let sender=POOL.get().and_then(|pool| pool.slots.lock().ok().and_then(|slots| slots.get(node_thread).cloned().flatten()));
+             QUEUED.fetch_add(1,Ordering::Relaxed);
+             if sender.is_some_and(|s| s.try_send(Work::Completion {body:body.to_string(),run_id,cancel,sockets}).is_ok()) {
+-                serde_json::json!({"accepted":true,"run_id":run_id})
++                serde_json::json!({"accepted":true,"run_id":run_id,"run_key":run_id.to_string()})
+             } else {
+                 QUEUED.fetch_sub(1,Ordering::Relaxed);scheduler::complete_run(run_id);
+                 serde_json::json!({"error":"completion_queue_full","not_started":true})
+diff --git a/rust/wa-host/src/serve/journal.rs b/rust/wa-host/src/serve/journal.rs
+index dc517fd..0fdfde0 100644
+--- a/rust/wa-host/src/serve/journal.rs
++++ b/rust/wa-host/src/serve/journal.rs
+@@ -51,7 +51,7 @@ impl Journal {
+         use rusqlite::OptionalExtension;
+         let db = self.db.lock().map_err(|e|e.to_string())?;
+         db.query_row("SELECT state,request,created_at,updated_at FROM admissions WHERE id=? AND owner=? AND conversation=?",
+-            params![id,owner,conversation], |row| Ok(json!({"ok":true,"run_id":id,
++            params![id,owner,conversation], |row| Ok(json!({"ok":true,"run_id":id,"run_key":id.to_string(),
+                 "state":row.get::<_,String>(0)?,"request":row.get::<_,String>(1)?,
+                 "created_at":row.get::<_,u64>(2)?,"updated_at":row.get::<_,u64>(3)?,
+                 "recovery":"Inspect transcript, operations and external effects before submitting a continuation; this request is never replayed automatically."})))
+@@ -72,7 +72,7 @@ impl Journal {
+         let mut stmt = db.prepare("SELECT id,state,cancel_requested FROM admissions
+             WHERE owner=? AND conversation=? ORDER BY id DESC LIMIT 100").map_err(|e| e.to_string())?;
+         let rows = stmt.query_map(params![owner, conversation], |row| {
+-            Ok(json!({"run_id":row.get::<_,u64>(0)?, "state":row.get::<_,String>(1)?,
++            Ok(json!({"run_id":row.get::<_,u64>(0)?, "run_key":row.get::<_,u64>(0)?.to_string(), "state":row.get::<_,String>(1)?,
+                 "cancel_requested":row.get::<_,bool>(2)?}))
+         }).map_err(|e| e.to_string())?;
+         let mut result = rows.collect::<Result<Vec<_>,_>>().map_err(|e| e.to_string())?;
+@@ -122,7 +122,7 @@ impl Journal {
+             next = seq;
+         }
+         let latest: u64 = db.query_row("SELECT COALESCE(MAX(seq),0) FROM events WHERE run_id=?", [id], |row|row.get(0)).map_err(|e|e.to_string())?;
+-        Ok(Some(json!({"ok":true,"run_id":id,"state":state,"durable":true,"archive":archive,
++        Ok(Some(json!({"ok":true,"run_id":id,"run_key":id.to_string(),"state":state,"durable":true,"archive":archive,
+             "checkpoint_seq":checkpoint_seq,"checkpoint_message_seq":checkpoint_message_seq,
+             "next_seq":next,"latest_seq":latest,"has_more":next<latest,"overflow":false,"events":events})))
+     }
+@@ -132,6 +132,26 @@ impl Journal {
+ mod tests {
+     use super::*;
+     #[test]
++    fn high_identity_is_exact_and_owner_scoped() {
++        let root=std::env::temp_dir().join(format!("wa-high-run-{}-{}",std::process::id(),crate::serve::now_ms()));
++        std::fs::create_dir_all(&root).unwrap();
++        let path=root.join("memory.db");
++        let journal=Journal::open(&path).unwrap();
++        let id=9_007_199_254_740_993u64;
++        journal.db.lock().unwrap().execute("INSERT INTO admissions(id,owner,conversation,state,created_at,updated_at) VALUES(?, 'alice','thread','completed',0,0)",[id]).unwrap();
++        assert_eq!(journal.inspect("alice","thread",id).unwrap().unwrap()["run_key"],id.to_string());
++        assert!(journal.inspect("bob","thread",id).unwrap().is_none());
++        assert!(journal.inspect("alice","foreign",id).unwrap().is_none());
++        assert!(journal.inspect("alice","thread",id+1).unwrap().is_none());
++        journal.event(id,r#"{"type":"delta","text":"exact high id"}"#).unwrap();
++        assert_eq!(journal.replay("alice","thread",id,0,true).unwrap().unwrap()["run_key"],id.to_string());
++        assert!(journal.replay("bob","thread",id,0,true).unwrap().is_none());
++        drop(journal);
++        let journal=Journal::open(&path).unwrap();
++        assert_eq!(journal.views("alice","thread").unwrap()[0]["run_key"],id.to_string());
++        drop(journal);std::fs::remove_dir_all(root).unwrap();
++    }
++    #[test]
+     fn restart_preserves_evidence_scopes_owners_and_never_replays_work() {
+         let root = std::env::temp_dir().join(format!("wa-run-journal-{}-{}",std::process::id(),crate::serve::now_ms()));
+         std::fs::create_dir_all(&root).unwrap();
+diff --git a/scripts/gate-check.mjs b/scripts/gate-check.mjs
+index 19b902d..77c84cb 100644
+--- a/scripts/gate-check.mjs
++++ b/scripts/gate-check.mjs
+@@ -20,13 +20,15 @@ export function checkVerdict(check, exit, output) {
+     // Wording may change without changing that contract.
+     const prefix=/^\s*ok   UI structure\b/;
+     const subjects=check.subjects || ['reload','startup-recovery','inspect-window','view-window'];
+-    const markers=text.split(/\r?\n/).filter(line=>{
++    const lines=text.split(/\r?\n/);
++    const markerLines=lines.filter(line=>prefix.test(line));
++    const markers=markerLines.filter(line=>{
+       const field=line.match(/^\s*ok   UI structure[^\[\]\r\n]*\[stages: ([a-z,-]+)\]\s*$/);
+       const stages=field ? field[1].split(',') : [];
+       return prefix.test(line)&&stages.length===subjects.length
+         && new Set(stages).size===stages.length && subjects.every(subject=>stages.includes(subject));
+     });
+-    return {ok:exit===0&&markers.length===1&&!/^\s*(?:FAIL(?:[:\s]|$)|ALL FAIL(?:[:\s]|$)|DEPENDENCY_MISSING)/im.test(text),reason:'browser_terminal_verdict_required'};
++    return {ok:exit===0&&markerLines.length===1&&markers.length===1&&!/\b(?:did not run|was skipped|never ran)\b/i.test(markerLines[0])&&!/^\s*(?:FAIL(?:[:\s]|$)|ALL FAIL(?:[:\s]|$)|DEPENDENCY_MISSING)/im.test(text),reason:'browser_terminal_verdict_required'};
+   }
+   if(check.verdict==='proof') {
+     try {const counts=require('./lib/proof-verdict.cjs').validate(check.proof_kind,exit,text,check.minimum);return {ok:true,...counts};}
+diff --git a/scripts/run-key-build-proof.cjs b/scripts/run-key-build-proof.cjs
+new file mode 100644
+index 0000000..05012ff
+--- /dev/null
++++ b/scripts/run-key-build-proof.cjs
+@@ -0,0 +1,7 @@
++// Caller-attested source/build binding. Not binary introspection or a security boundary.
++const fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto'),{spawnSync}=require('node:child_process');
++const hash=p=>crypto.createHash('sha256').update(fs.readFileSync(p)).digest('hex');
++function sources(repo){const out={};for(const file of ['rust/wa-host/src/serve.rs','rust/wa-host/src/serve/journal.rs','rust/wa-host/src/serve/scheduler.rs','rust/Cargo.lock'])if(fs.existsSync(path.join(repo,file)))out[file]=hash(path.join(repo,file));function walk(dir){for(const e of fs.readdirSync(dir,{withFileTypes:true})){const p=path.join(dir,e.name);if(e.isDirectory())walk(p);else if(e.name.endsWith('.lua'))out[path.relative(repo,p).replaceAll('\\','/')]=hash(p);}}walk(path.join(repo,'lua'));return out;}
++function verify(repo,binary,receipt){const saved=JSON.parse(fs.readFileSync(receipt));if(JSON.stringify(saved.sources)!==JSON.stringify(sources(repo))||saved.binary_sha256!==hash(binary))throw Error('run_key_build_binding_mismatch');return saved;}
++module.exports={verify,sources};
++if(require.main===module){const [mode,repo,binary,receipt]=process.argv.slice(2);if(mode==='verify'){verify(repo,binary,receipt);console.log('binding verified');}else if(mode==='build'){const before=sources(repo);const r=spawnSync('cargo',['build','--offline','--manifest-path',path.join(repo,'rust/Cargo.toml'),'-p','wa-host','--target-dir',path.dirname(path.dirname(binary))],{cwd:repo,env:{...process.env,CARGO_BUILD_JOBS:'2'},stdio:'inherit'});if(r.status!==0)process.exit(r.status||1);if(JSON.stringify(before)!==JSON.stringify(sources(repo)))throw Error('source_changed_during_build');fs.writeFileSync(receipt,JSON.stringify({kind:'caller-attested-cargo-build',sources:before,binary_sha256:hash(binary)},null,2));}else throw Error('usage build|verify repo binary receipt');}
+diff --git a/scripts/test-gate-check.mjs b/scripts/test-gate-check.mjs
+index 1cb9628..3cbf3c8 100644
+--- a/scripts/test-gate-check.mjs
++++ b/scripts/test-gate-check.mjs
+@@ -2,6 +2,7 @@ import fs from 'node:fs';
+ import os from 'node:os';
+ import path from 'node:path';
+ import assert from 'node:assert/strict';
++import {spawnSync} from 'node:child_process';
+ import {executeChecks,checkVerdict} from './gate-check.mjs';
+ const root=fs.mkdtempSync(path.join(os.tmpdir(),'wa-check-runner-'));
+ try {
+@@ -28,5 +29,16 @@ try {
+     [0,'  ok   UI structure, but startup recovery was skipped and the mid-run reload never ran\n'],
+     [0,'  ok   UI structure [stages: reload,startup-recovery]\n'],
+     [0,real+'fail: missing inspector\n'],[0,real+'dependency_missing: browser\n']])assert(!checkVerdict(browser,exit,text).ok);
+-  console.log('gate check runner ok (focused isolation and browser stage contract, 0 skipped)');
++  if(process.platform==='win32') {
++    const candidate=process.env.WA_RUN_KEY_BIN || (fs.existsSync('rust/target/release/wa.exe')?'rust/target/release/wa.exe':'rust/target/debug/wa.exe');
++    assert(fs.existsSync(candidate),'required run-key HTTP candidate missing; build current source or set WA_RUN_KEY_BIN');
++    if(process.env.WA_RUN_KEY_RECEIPT) {
++      const binding=spawnSync(process.execPath,['scripts/run-key-build-proof.cjs','verify',process.cwd(),candidate,process.env.WA_RUN_KEY_RECEIPT],{encoding:'utf8'});
++      assert.equal(binding.status,0,binding.stderr||'source/binary binding rejected');
++    }
++    const http=spawnSync(process.execPath,['scripts/test-run-key-http.cjs',candidate],{encoding:'utf8',windowsHide:true});
++    process.stdout.write(http.stdout||'');process.stderr.write(http.stderr||'');
++    assert.equal(http.status,0,'real high-ID HTTP regression');
++  } else console.log('SKIP: high-ID HTTP requires Windows');
++  console.log('gate check runner ok (focused isolation and browser stage contract; HTTP skip separately reported)');
+ } finally {fs.rmSync(root,{recursive:true,force:true});}
+diff --git a/scripts/test-run-key-http.cjs b/scripts/test-run-key-http.cjs
+new file mode 100644
+index 0000000..b2c398f
+--- /dev/null
++++ b/scripts/test-run-key-http.cjs
+@@ -0,0 +1,16 @@
++// Production listener, source Lua, private DB/home; no inference or live node requests.
++const fs=require('node:fs'),os=require('node:os'),path=require('node:path'),net=require('node:net');
++const {spawn}=require('node:child_process'),{once}=require('node:events'),assert=require('node:assert/strict');
++const {DatabaseSync}=require('node:sqlite');
++const repo=path.resolve(__dirname,'..'),binary=path.resolve(process.argv[2]||'rust/target/debug/wa.exe');
++const crypto=require('node:crypto');
++console.log('candidate '+binary+' sha256='+crypto.createHash('sha256').update(fs.readFileSync(binary)).digest('hex')+' sourceLua='+repo);
++const root=fs.mkdtempSync(path.join(os.tmpdir(),'wa-key-http-')),db=path.join(root,'memory.db');
++let child,port,checks=0,foreign;const key='9007199254740993';
++const delay=ms=>new Promise(r=>setTimeout(r,ms));
++async function free(){const s=net.createServer();s.listen(0,'127.0.0.1');await once(s,'listening');const p=s.address().port;await new Promise(r=>s.close(r));return p;}
++async function api(route,body,token){const r=await fetch(`http://127.0.0.1:${port}/${route}`,{method:body?'POST':'GET',headers:{'content-type':'application/json',...(token?{'x-wa-session':token}:{})},body:body?JSON.stringify(body):undefined,signal:AbortSignal.timeout(3000)});return {status:r.status,...await r.json()};}
++async function stop(){if(child&&child.exitCode===null){const done=once(child,'exit');child.kill();await done;}}
++async function start(n){port=await free();const env={...process.env};for(const k of Object.keys(env))if(/^(WA_|WASM_AGENT_|OPENAI_|OPENCODE_)/.test(k))delete env[k];Object.assign(env,{WASM_AGENT_HOME:root,WASM_AGENT_LUA_ROOT:repo,WASM_AGENT_MANAGED:'0',WASM_AGENT_RENDEZVOUS:'',WASM_AGENT_RELAY:'',WASM_AGENT_LLM_BASE_URL:'http://127.0.0.1:1',WASM_AGENT_LLM_API_KEY:'fixture-only'});const fd=fs.openSync(path.join(root,`server-${n}.log`),'w');child=spawn(binary,['--db',db,'serve','--port',String(port),'--client-port',String(await free()),'--ui',path.join(repo,'ui')],{cwd:repo,env,windowsHide:true,stdio:['ignore',fd,fd]});fs.closeSync(fd);for(let i=0;i<150;i++){try{if((await api('health')).status===200)return;}catch{}await delay(50);}throw Error('private listener failed: '+root);}
++function check(v,label){assert(v,label);checks++;}
++(async()=>{try{await start(1);const identity=await api('me');const owner=identity.user?.id;assert(owner,'authenticated master identity returned');await api('runs',{thread:'high-thread'});await stop();const journal=new DatabaseSync(db+'.run-journal.sqlite');journal.prepare("INSERT INTO admissions(id,owner,conversation,state) VALUES(?,?,?,'completed')").run(BigInt(key),owner,'high-thread');journal.prepare('INSERT INTO events(run_id,seq,payload) VALUES(?,1,?)').run(BigInt(key),JSON.stringify({type:'delta',text:'EXACT-HIGH-HTTP'}));journal.close();await start(2);const login=await fetch(`http://127.0.0.1:${port}/login`,{method:'POST',body:'guest'});foreign=(await login.json()).session;assert(foreign,'valid guest token');for(let cycle=0;cycle<2;cycle++){const foreignMe=await api('me',undefined,foreign);check(foreignMe.status===200&&foreignMe.user.id!==owner,'valid foreign owner authenticated');for(const [route,body] of [['runs',{action:'inspect',thread:'high-thread',run_id:key}],['runs',{action:'status',thread:'high-thread'}],['run-events',{thread:'high-thread',run_id:key,archive:true}]]){const denied=await api(route,body,foreign);check((denied.status===404||denied.status===403||(route==='runs'&&body.action==='status'&&denied.status===200&&denied.runs.length===0))&&!JSON.stringify(denied).includes('EXACT-HIGH-HTTP')&&!JSON.stringify(denied).includes(key),'foreign owner no disclosure '+route);}const inspected=await api('runs',{action:'inspect',thread:'high-thread',run_id:key});check(inspected.status===200&&inspected.run_key===key&&inspected.state==='completed','exact durable inspect');const status=await api('runs',{action:'status',thread:'high-thread'});check(status.runs.some(r=>r.run_key===key),'exact status');const replay=await api('run-events',{thread:'high-thread',run_id:key,archive:true});check(replay.status===200&&replay.run_key===key&&replay.events[0].event.text==='EXACT-HIGH-HTTP','exact event archive');check((await api('runs',{action:'inspect',thread:'foreign',run_id:key})).status===404,'foreign conversation inspect');check((await api('run-events',{thread:'foreign',run_id:key})).status===404,'foreign conversation events');check((await api('runs',{action:'inspect',thread:'high-thread',run_id:'9007199254740994'})).status===404,'unknown run');check((await api('run-events',{thread:'high-thread',run_id:key},'invalid')).status===401,'unauthenticated replay refused');check((await api('runs',{action:'inspect',thread:'high-thread',run_id:Number(key)})).error==='unsafe_numeric_run_id','rounded numeric rejected');for(const invalid of ['0','01','-1','1.5','9223372036854775808'])check((await api('runs',{action:'inspect',thread:'high-thread',run_id:invalid})).status===400,'invalid identity '+invalid);check((await api('runs',{action:'inspect',thread:'high-thread',run_id:'9223372036854775807'})).status===404,'maximum signed accepted without rounding');await stop();if(cycle===0)await start(3);}console.log(`run key HTTP ok (${checks} checks, 0 skipped; real listener, source Lua, restart, no inference)`);}catch(e){console.error(e.stack);process.exitCode=1;}finally{await stop();console.log('evidence: '+root);}})();
+diff --git a/scripts/test-run-key-ui.mjs b/scripts/test-run-key-ui.mjs
+new file mode 100644
+index 0000000..41874c0
+--- /dev/null
++++ b/scripts/test-run-key-ui.mjs
+@@ -0,0 +1,10 @@
++import fs from 'node:fs';
++import vm from 'node:vm';
++import assert from 'node:assert/strict';
++const source=fs.readFileSync('ui/app.js','utf8');
++const start=source.indexOf('function runKey('),end=source.indexOf('\nfunction identifySubmittedRun',start);
++const context={};vm.createContext(context);vm.runInContext(source.slice(start,end),context);
++for(const key of ['1','9007199254740993','9223372036854775807'])assert.equal(context.runKey({run_key:key,run_id:Number(key)}),key);
++for(const key of ['0','01','-1','1.5','9223372036854775808',9007199254740992])assert.equal(context.runKey(key),null);
++assert.equal(context.runKey(99),'99');
++console.log('run key UI ok (10 checks, 0 skipped; exact helper contract only)');
+diff --git a/ui/app.js b/ui/app.js
+index d88583d..b8e254a 100644
+--- a/ui/app.js
++++ b/ui/app.js
+@@ -1130,7 +1130,7 @@ async function refreshOperationProgress(health, running) {
+   // whichever node it is attached to. The `worker:` *prefix* is the operation record's own durable
+   // value (rust/wa-operation), not a health field, so it keeps its name too.
+   const owners = [];
+-  if (running.run_id != null) owners.push("run:" + running.run_id);
++  if (running.run_id != null) owners.push("run:" + runKey(running));
+   const nodeThreadId = running.node_thread_id != null
+     ? running.node_thread_id
+     : (running.worker_id != null ? running.worker_id : running.id);
+@@ -1670,6 +1670,8 @@ function repaintMessages(rows, options = {}) {
+             handleEvent({ type: "tool", call_id: raw.id, name: fn.name, arguments: args || {} });
+           }
+         }
++        if(runBubble)runBubble.dataset.ledgerKey=String(message.id || message.seq);
++        for(const [index,segment] of Array.from(runBubble?.querySelectorAll('wa-run,wa-trace,.reasoning,.seg')||[]).entries())segment.dataset.ledgerKey=String(message.id || message.seq)+':segment:'+index;
+         if (message.id) renderedMessageIds.add(String(message.id));
+       } else if (message.role === "tool") {
+         replayRunLastMessage = message;
+@@ -2030,7 +2032,7 @@ function startLiveness() {
+     lastStalled = stalled;
+     const working = stalled < 5000 || !climbingSince;
+     const busyFor = running.busy_ms || running.ms || Date.now() - (runStartedAt || Date.now());
+-    const ownState = (health.run_ids || []).find((run) => Number(run.run_id) === activeRunId)?.state;
++    const ownState = (health.run_ids || []).find((run) => run.conversation===chatSession && runKey(run)===runKey(activeRunId))?.state;
+     setLiveness({
+       working,
+       stalled,
+@@ -2041,7 +2043,7 @@ function startLiveness() {
+       node_thread_state: health.worker || "alive",
+       queue: health.queue || 0,
+       run_state: ownState,
+-      current_run_id: running.run_id,
++      current_run_id: runKey(running),
+     });
+   }, 1000);
+ }
+@@ -2081,12 +2083,19 @@ function setLiveness(info) {
+   pin();
+ }
+ 
++// Canonical decimal identity. Never stringify a rounded legacy JSON number.
++function runKey(value) {
++  const raw=value && typeof value==='object' ? (value.run_key ?? value.run_id) : value;
++  if(typeof raw==='number')return Number.isSafeInteger(raw)&&raw>0 ? String(raw) : null;
++  if(typeof raw!=='string'||! /^[1-9][0-9]*$/.test(raw))return null;
++  return BigInt(raw)<=9223372036854775807n ? raw : null;
++}
+ function identifySubmittedRun(health) {
+   if (activeRunId !== null || !submittedRunIds || !chatSession) return;
+   const candidates = (health?.run_ids || [])
+-    .filter((run) => run.conversation === chatSession && !submittedRunIds.has(Number(run.run_id)))
+-    .sort((a, b) => Number(a.run_id) - Number(b.run_id));
+-  if (candidates.length) activeRunId = Number(candidates[candidates.length - 1].run_id);
++    .filter((run) => run.conversation === chatSession && runKey(run)!==null && !submittedRunIds.has(runKey(run)))
++    .sort((a, b) => BigInt(runKey(a))<BigInt(runKey(b)) ? -1 : 1);
++  if (candidates.length) activeRunId = runKey(candidates[candidates.length - 1]);
+ }
+ 
+ // The inlining rule for text attachments is the shell's (§11), shared with the child panes.
+@@ -2200,8 +2209,7 @@ function runStanding(health, view = {}) {
+     // The run the node accepted for this conversation is the node's own record of it, and it outranks the
+     // thread list: a thread is an implementation detail that a respawn or a re-queue may change.
+     if (accepted !== null) {
+-      const mine = ids.find((run) => run && Number.isSafeInteger(run.run_id)
+-        && Number.isSafeInteger(accepted) && run.run_id === accepted
++      const mine = ids.find((run) => run && runKey(run)!==null && runKey(run)===runKey(accepted)
+         && run.conversation === view.session);
+       if (mine && /^(queued|running|not_started)$/.test(mine.state)) return "running";
+       if (mine && /^(completed|cancelled|failed)$/.test(mine.state)) return "over";
+@@ -2223,9 +2231,24 @@ function runStanding(health, view = {}) {
+ 
+ // The node-thread carrying one run id, when the node names it there (`/health` puts `run_id` on both
+ // `current` and each `node_threads` entry). Absent on an older node, and then this is simply no evidence.
++// Authenticated durable journal status, scoped by conversation. Numeric IDs beyond the safe
++// integer range cannot be recovered from this server's numeric JSON contract; never guess them.
++async function durableRunStanding(thread,runId) {
++  if(runKey(runId)===null)return 'busy-unknown';
++  try {
++    const response=await apiFetch('runs',{method:'POST',headers:apiHeaders({'Content-Type':'application/json'}),body:JSON.stringify({action:'status',thread})});
++    const payload=await response.json();
++    if(!response.ok || payload.ok!==true || payload.conversation!==thread)return 'busy-unknown';
++    const row=(payload.runs||[]).find(row=>runKey(row)!==null&&runKey(row)===runKey(runId));
++    if(/^(completed|cancelled|failed)$/.test(row?.state))return 'over';
++    if(/^(queued|running|not_started)$/.test(row?.state))return 'running';
++  } catch(error) { /* observation unavailable; stream remains authoritative */ }
++  return 'busy-unknown';
++}
++
+ function threadOfRun(health, runId, session = chatSession) {
+   const carries = (entry) => entry && entry.session === session
+-    && Number.isSafeInteger(entry.run_id) && Number.isSafeInteger(runId) && entry.run_id === runId;
++    && runKey(entry)!==null && runKey(entry)===runKey(runId);
+   return (health?.node_threads || []).find(carries) || (carries(health?.current) ? health.current : null);
+ }
+ 
+@@ -2270,7 +2293,7 @@ async function send(text, options = {}) {
+     const before = await (await apiFetch("health", { headers: apiHeaders() })).json();
+     submittedRunIds = new Set((before.run_ids || [])
+       .filter((run) => run.conversation === runThread)
+-      .map((run) => Number(run.run_id)));
++      .map(runKey).filter(key=>key!==null));
+   } catch (error) {
+     submittedRunIds = new Set();
+   }
+@@ -2320,8 +2343,14 @@ async function send(text, options = {}) {
+         // Asked and answered while the run was ending: say nothing. The run finished; there is
+         // nothing to report and nothing to continue.
+         if (turnFinished) { clearInterval(watchdog); asking = false; return; }
+-        const standing = runStanding(health, { session: runThread, runId: activeRunId,
++        let standing = runStanding(health, { session: runThread, runId: activeRunId,
+           submitted: submittedRunIds, finished: turnFinished });
++        if (standing === 'busy-unknown' && runKey(activeRunId)!==null) {
++          const durable=await durableRunStanding(runThread,activeRunId);
++          if(turnFinished || !stillViewingRun()) return;
++          if(durable==='over') standing='over';
++          else if(durable==='running') standing='running';
++        }
+         if (standing === "running" || standing === "busy-unknown") {
+           // Working, and quiet because the work is quiet. Keep waiting, and start counting again. For
+           // `busy-unknown` the page says the one thing it actually knows, and keeps the stream: it cannot
+@@ -3882,7 +3911,8 @@ async function syncLiveRun(current) {
+   if (current.session && current.session !== target) return;
+   const poll = { target, epoch, node };
+   liveRunPolling = poll;
+-  const id = Number(current.run_id);
++  const id=runKey(current);
++  if(id===null) {liveRunPolling=null;setStatus('exact run identity unavailable; saved transcript only');return;}
+   const viewing = () => chatSession === target && conversationEpoch === epoch && activeNode === node
+     && liveRunId === id && liveRunPolling === poll && !busy;
+   if (liveRunId !== id) {
+@@ -4650,12 +4680,27 @@ async function panePage(pane, options) {
+ // on a `tool` row whose call sits just above it. In this renderer a result belongs to the call above
+ // it, so a page cut between them would draw nothing for evidence the reader came to see. The loop is
+ // bounded and normally never runs: one page is the whole conversation.
++// Shared ordered ledger collector: callers supply their authenticated session page transport.
++// It preserves original rows and identities and refuses cyclic paging rather than inventing history.
++async function collectSessionHistory(readPage) {
++  let page=await readPage({}),rows=page.messages||[],seen=new Set();
++  while(page.has_more_before) {
++    const cursor=page.next_before_seq ?? rows[0]?.seq;
++    if(cursor==null || seen.has(cursor))throw Error('session_cursor_did_not_advance');
++    seen.add(cursor);
++    page=await readPage({before_seq:cursor});
++    const earlier=(page.messages||[]).filter(row=>row.seq<cursor);
++    if(!earlier.length)throw Error('session_history_incomplete');
++    rows=earlier.concat(rows);
++  }
++  return rows;
++}
+ async function paneMessages(pane) {
+   // More than the node's default page of eight rows, so a child's transcript is the conversation and
+   // not just its tail. The node still bounds the page - by bytes, by its own budget - and answers with
+   // an address for a row too large to send; the rows are then drawn by the window's own renderer.
+   const page=await panePage(pane,{});
+-  let rows=page.messages || [];
++  let rows=page.has_more_before ? await collectSessionHistory(args=>panePage(pane,args)) : (page.messages || []);
+   for(let older=0; older<3 && rows[0]?.role==='tool'; older++) {
+     const first=Number(rows[0].seq);
+     if(!Number.isFinite(first) || first<=1) break;
+@@ -4675,7 +4720,7 @@ async function refreshAgentPane(pane) {
+     const rows=result.rows;
+     // A repaint throws away the transcript's scroll position and its folded topics, so a poll that
+     // found the same rows, the same state and the same in-flight call leaves the pane it found alone.
+-    const painted=JSON.stringify([rows.map(row=>row.seq),pane.task.state,pane.task.settled,
++    const painted=JSON.stringify([rows,pane.task.state,pane.task.settled,
+       pane.task.preview?.tool?.call_id]);
+     if(painted!==pane.painted) {
+       pane.painted=painted;
+@@ -4685,9 +4730,14 @@ async function refreshAgentPane(pane) {
+       const visible=Array.from(pane.transcript.querySelectorAll('wa-message')).find(el=>el.getBoundingClientRect().bottom>pane.transcript.getBoundingClientRect().top);
+       const anchorKey=visible?.dataset.ledgerKey;
+       const anchorText=visible?.textContent;
++      const folded=Array.from(pane.transcript.querySelectorAll('[data-ledger-key]')).map(el=>[el.dataset.ledgerKey,el.hasAttribute('open'),el.classList.contains('open')]);
+       const anchorOffset=visible ? visible.getBoundingClientRect().top-pane.transcript.getBoundingClientRect().top : 0;
+       paintChildTranscript(pane.transcript,rows,{state:childRunState(pane.task),
+         stateAt:pane.task.settled_at,active:!pane.task.settled,liveTool:pane.task.preview?.tool});
++      for(const [key,attr,cls] of folded) {
++        const element=Array.from(pane.transcript.querySelectorAll('[data-ledger-key]')).find(el=>el.dataset.ledgerKey===key);
++        if(element){element.toggleAttribute('open',attr);element.classList.toggle('open',cls);}
++      }
+       const anchor=Array.from(pane.transcript.querySelectorAll('wa-message')).find(el=>anchorKey ? el.dataset.ledgerKey===anchorKey : el.textContent===anchorText);
+       pane.transcript.scrollTop=following ? pane.transcript.scrollHeight : top;
+       if(!following && anchor) pane.transcript.scrollTop+=anchor.getBoundingClientRect().top-pane.transcript.getBoundingClientRect().top-anchorOffset;
+diff --git a/ui/components.js b/ui/components.js
+index f542743..1826c4f 100644
+--- a/ui/components.js
++++ b/ui/components.js
+@@ -1393,12 +1393,12 @@ class WaTasks extends HTMLElement {
+     for (const conversation of sessions) {
+       const records=runs[conversation.id] || [];
+       for (const run of records.filter(r=>['running','queued','unknown','not_started','failed'].includes(r.state))) {
+-        const detail={session:conversation.id,runId:run.run_id};
++        const detail={session:conversation.id,runId:run.run_key ?? run.run_id};
+         const controls=[['Open conversation','open',detail],['Inspect run','inspect-run',detail]];
+         if (['running','queued'].includes(run.state)) controls.push(['Cancel run','cancel-run',detail]);
+         add(conversation.title || conversation.id,run.state,
+           run.state==='unknown' ? 'Execution was interrupted. Inspect effects before continuing.' :
+-          run.state==='not_started' ? 'This request did not start. Inspect it before submitting again.' : `Run ${run.run_id}`,controls);
++          run.state==='not_started' ? 'This request did not start. Inspect it before submitting again.' : `Run ${run.run_key ?? run.run_id}`,controls);
+       }
+     }
+     const rank={running:0,accepted:0,queued:1,unknown:2,not_started:2,failed:3};
