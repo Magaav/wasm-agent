@@ -6,7 +6,7 @@ function need(x,s){if(!x)throw Error(`recovery_${s}`);}
 function git(repo,...a){const r=spawnSync('git',['-C',repo,...a],{encoding:'utf8',windowsHide:true});need(r.status===0,'git_identity_unavailable');return r.stdout.trim();}
 function session(repo,commit){const last=git(repo,'show','-s','--format=%B',commit).split(/\r?\n/).pop();need(last.startsWith('Agent:'),'agent_anchor_required');const m=[...last.matchAll(/(?:^|\s)session=([^\s]+)/g)];need(m.length===1,'agent_session_required');return m[0][1];}
 export function recoverySnapshot(store,wave){const db=new DatabaseSync(path.join(store,'waves.sqlite'),{readOnly:true});try{const row=db.prepare('SELECT * FROM waves WHERE id=?').get(wave);need(row,'wave_missing');return {row,snapshot:digest(JSON.stringify({row,steps:db.prepare('SELECT * FROM steps WHERE wave=? ORDER BY position').all(wave),events:db.prepare('SELECT * FROM events WHERE wave=? ORDER BY sequence').all(wave)})),registration:digest(fs.readFileSync(path.join(store,'registration.json')))};}finally{db.close();}}
-export function recoveryAdmission(repo,store,{phase,recovery,original_refusal,named}){
+export function recoveryAdmission(repo,store,{phase,recovery,original_refusal,named}, {reservation=null}={}){
  need(['admit','land'].includes(phase),'action_forbidden');
  need(recovery&&typeof recovery.receipt_file==='string','receipt_file_required');
  const envelope=JSON.parse(fs.readFileSync(recovery.receipt_file,'utf8'));
@@ -41,9 +41,24 @@ export function recoveryAdmission(repo,store,{phase,recovery,original_refusal,na
  for(const a of target.artifacts){need(a.path&&/^[a-f0-9]{64}$/.test(a.sha256)&&digest(fs.readFileSync(a.path))===a.sha256,'target_evidence_moved');}
  need(!fs.existsSync(path.join(store,'freeze.json')),'closing_frozen');
  const consumption=path.join(store,'recovery-consumption.sqlite');
- if(fs.existsSync(consumption)){const db=new DatabaseSync(consumption,{readOnly:true});try{need(!db.prepare('SELECT 1 FROM consumed WHERE nonce=?').get(entry.nonce),'already_consumed_or_uncertain');}finally{db.close();}}
+ if(reservation)need(!reservation.prepare('SELECT 1 FROM consumed WHERE nonce=?').get(entry.nonce),'already_consumed_or_uncertain');
+ else if(fs.existsSync(consumption)){const db=new DatabaseSync(consumption,{readOnly:true});try{need(!db.prepare('SELECT 1 FROM consumed WHERE nonce=?').get(entry.nonce),'already_consumed_or_uncertain');}finally{db.close();}}
  // Check never creates a consumption database or mutates the wave.
- return {ok:true,recovery_admitted:true,wave_verified:false,wave_id:ticket.wave,phase,...named,original_refusal,consumption:'not_consumed',nonce:entry.nonce,note:'read-only remediation check; landing consumer must reserve separately'};
+ return {ok:true,recovery_admitted:true,wave_verified:false,wave_id:ticket.wave,phase,...named,original_refusal,consumption:'not_consumed',nonce:entry.nonce,ticket_hash:digest(raw),ticket_commit:envelope.commit,delivery:entry.branch,tip:entry.tip,tree:entry.tree,review_commit:entry.review_commit,reviewer:entry.reviewer,expected_main:ticket.expected_main,snapshot:snap.snapshot,note:'read-only remediation check; landing consumer must reserve separately'};
 }
-// Quarantined until freshly validated ticket/CAS ownership is implemented.
-export function consumeRecovery() { throw Error('recovery_consumption_not_implemented'); }
+// Reservation is not effect success. Lost response remains uncertain forever;
+// no prose settlement/retry endpoint exists.
+export function consumeRecovery(repo,store,context) {
+ recoveryAdmission(repo,store,context); // full fresh validation before any write
+ const db=new DatabaseSync(path.join(store,'recovery-consumption.sqlite'));
+ try {
+  db.exec('PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000; CREATE TABLE IF NOT EXISTS consumed(nonce TEXT PRIMARY KEY, binding TEXT NOT NULL, state TEXT NOT NULL)');
+  db.exec('BEGIN IMMEDIATE');
+  try {
+   const checked=recoveryAdmission(repo,store,context,{reservation:db});
+   db.prepare('INSERT INTO consumed VALUES(?,?,?)').run(checked.nonce,JSON.stringify(checked),'uncertain');
+   db.exec('COMMIT');
+   return {...checked,consumption:'uncertain',effect_authorized:false,note:'reservation only; consumer must hold target resource/CAS and revalidate before effect'};
+  } catch(error){db.exec('ROLLBACK');throw error;}
+ } finally {db.close();}
+}
