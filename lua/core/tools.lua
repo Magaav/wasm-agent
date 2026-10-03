@@ -535,7 +535,9 @@ local function inside_scratch(root, target)
       local lexical_data = normalized_path(paths.data())
       if not inside_workspace(lexical_data, expected) then return false end
       local suffix = expected:sub(#lexical_data + 1)
-      return normalized_path(real):lower() == normalized_path(data .. suffix):lower()
+      local actual, expected_real = normalized_path(real), normalized_path(data .. suffix)
+      if platform.os() == 'windows' then actual, expected_real = actual:lower(), expected_real:lower() end
+      return actual == expected_real
     end
     local parent = probe:match('^(.*)/[^/]+$')
     if not parent or parent == probe then return false end

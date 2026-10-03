@@ -49,13 +49,16 @@ ok(edited.ok and host.read_file(scratch..'/evidence.txt')=='after','own scratch 
 for _,target in ipairs({workspaces.scratch_root(b)..'/bad.txt',scratch..'/../bad.txt',wb.worktree..'/bad.txt'}) do
  ok(tools.dispatch(memory,'write',{path=target,content='bad'},'master',ca).error=='workspace_path_outside_binding','scratch escape refuses '..target)
 end
-local original_canonical=host.canonical_path
-host.canonical_path=function(p)
- if norm(p)==norm(scratch..'/junction') then return source_path end
- return original_canonical(p)
-end
-ok(tools.dispatch(memory,'write',{path=scratch..'/junction/bad.txt',content='bad'},'master',ca).error=='workspace_path_outside_binding','junction target outside scratch refuses')
-host.canonical_path=original_canonical
+-- Adapted from independent reviewer c50fecea instrument at review259707b4.
+local windows=dofile('lua/core/platform.lua').os()=='windows'
+local linkCommand=windows and ('MSYS2_ARG_CONV_EXCL="*" cmd.exe /c mklink /J "'..(scratch..'/junction'):gsub('/','\\')..'" "'..source_path:gsub('/','\\')..'"')
+  or ("ln -s '"..source_path.."' '"..scratch.."/junction'")
+local linked=json.decode(host.exec(linkCommand))
+assert(linked.code==0,'real private link creation: '..json.encode(linked))
+ok(tools.dispatch(memory,'write',{path=scratch..'/junction/bad.txt',content='bad'},'master',ca).error=='workspace_path_outside_binding','real link outside scratch refuses')
+assert(not host.read_file(source_path..'/bad.txt'),'link escaped write absent')
+local cleanup=windows and ('MSYS2_ARG_CONV_EXCL="*" cmd.exe /c rmdir "'..(scratch..'/junction'):gsub('/','\\')..'"') or ("rm '"..scratch.."/junction'")
+assert(json.decode(host.exec(cleanup)).code==0,'private link cleanup')
 local staged_shell=tools.dispatch(memory,'bash',{command='echo staged',cwd=scratch},'master',ca)
 ok(staged_shell.code==0,'scratch shell cwd')
 local cwd_escape=tools.dispatch(memory,"bash",{command="echo bad",cwd=source_path},"master",ca)
