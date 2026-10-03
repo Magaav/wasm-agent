@@ -52,8 +52,12 @@ export function snapshot(root,install,manifest) {
  const suffix=process.platform==='win32'?'.exe':'';
  const nodeFile=path.join(install,'wa'+suffix),sentFile=path.join(install,'wa-sentinel'+suffix);
  if(hash(nodeFile)!==hash(path.join(root,'rust/target/release/wa'+suffix))||hash(sentFile)!==hash(path.join(root,'rust/wa-sentinel/target/release/wa-sentinel'+suffix)))throw Error('built_artifact_mismatch');
- const uiFiles=files(path.join(root,'ui'));
- if(JSON.stringify(files(path.join(install,'ui')))!==JSON.stringify(uiFiles)||digest(path.join(root,'ui'),uiFiles)!==digest(path.join(install,'ui'),uiFiles))throw Error('ui_mismatch');
+ // The installer deliberately excludes ui/test-fixtures.js. Derive the served asset set from
+ // its actual declaration, and allow only its named recovery backups as additional installed files.
+ const declared=/^UI_FILES="([^"]+)"$/m.exec(fs.readFileSync(path.join(root,'scripts/upgrade.sh'),'utf8'));
+ if(!declared)throw Error('ui_asset_declaration_missing');
+ const uiFiles=declared[1].split(/\s+/).sort();
+ if(uiFiles.some(n=>!/^[-A-Za-z0-9._]+$/.test(n))||!uiFiles.includes('index.html')||files(path.join(install,'ui')).some(n=>!uiFiles.includes(n)&&!uiFiles.some(asset=>n===asset+'.pre-upgrade'))||digest(path.join(root,'ui'),uiFiles)!==digest(path.join(install,'ui'),uiFiles))throw Error('ui_mismatch');
  const scriptFiles=manifest || files(path.join(install,'scripts')).filter(n=>fs.existsSync(path.join(root,'scripts',n))&&fs.statSync(path.join(root,'scripts',n)).isFile());
  for(const name of ['deploy.sh','upgrade.sh','verify-install.sh','lib/service-target.sh','sentinel-install-proof.mjs','sentinel-return-prepare.sh'])if(!scriptFiles.includes(name))throw Error('required_script_missing:'+name);
  for(const name of scriptFiles)if(hash(path.join(root,'scripts',name))!==hash(path.join(install,'scripts',name)))throw Error('script_mismatch:'+name);

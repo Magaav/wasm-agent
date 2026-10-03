@@ -1877,8 +1877,11 @@ run_proof_fixture fleet 20 node scripts/test-orchestrator.cjs "$BIN"
 gate_run node scripts/test-completion-wake.cjs "$BIN"
 if [ "${OS:-}" = "Windows_NT" ]; then
   gate_run python scripts/test-sentinel-owned-job.py --repo "$PWD" --evidence "$(git rev-parse --git-path owned-return-gate-$$)"
+  run_proof_fixture sentinelInstall 18 python scripts/test-sentinel-owned-job.py --repo "$PWD" --evidence "$(git rev-parse --git-path private-install-gate-$$)" --script "$PWD/scripts/test-sentinel-private-install.cjs" --deadline 1800
 else
   echo "SKIP: Windows owned return Job proof"
+  SKIPPED=$((SKIPPED + 1))
+  echo "SKIP: Windows actual private installation proof"
   SKIPPED=$((SKIPPED + 1))
 fi
 for fixture in session-view durable-steering child-compaction child-budget-refusal completion-outbox orchestrator-defaults; do
@@ -1969,6 +1972,8 @@ case "$(uname -s)" in
     if [ -f scripts/test-recovery-two-window.cjs ]; then
       run_proof_fixture recoveryWindows 13 node scripts/test-recovery-two-window.cjs "$BIN"
       run_proof_fixture recoveryWindows 13 node scripts/test-recovery-two-window.cjs "$BIN" --embedded
+      run_proof_fixture nativeChildBrowser 63 node scripts/test-native-child-browser.cjs "$BIN"
+      run_proof_fixture nativeChildBrowser 63 node scripts/test-native-child-browser.cjs "$BIN" --embedded
     else
       echo "two-window recovery proof SKIPPED - primary recovery fixture absent from this producer tree"
       SKIPPED=$((SKIPPED + 1))
