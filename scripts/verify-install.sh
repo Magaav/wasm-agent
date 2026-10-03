@@ -140,7 +140,11 @@ if [ -f "$INSTALL_DIR/installed.txt" ]; then
       if [ "$RESULT_OK" != "true" ]; then
         record fail "the deploy's verdict matches the record" \
           "the deploy's last verdict is ok=$RESULT_OK (at=$RESULT_AT, \"$RESULT_DETAIL\"): the record names a deploy that did not succeed"
-      elif [ -n "$RESULT_AT" ] && [ -n "$RECORD_AT" ] && [ "$RESULT_AT" \< "$RECORD_AT" ]; then
+      elif [ -z "$RESULT_AT" ] || [ -z "$RECORD_AT" ]; then
+        record fail "the deploy's verdict matches the record" "missing outcome or installed timestamp"
+      elif [ "$RESULT_AT" \> "$(date -u +%Y-%m-%dT%H:%M:%SZ)" ] || [ "$RECORD_AT" \> "$(date -u +%Y-%m-%dT%H:%M:%SZ)" ]; then
+        record fail "the deploy's verdict matches the record" "future outcome or installed timestamp"
+      elif [ "$RESULT_AT" \< "$RECORD_AT" ]; then
         record fail "the deploy's verdict matches the record" \
           "the record was written at $RECORD_AT and the newest verdict at $RESULT_AT: the verdict is OLDER than the record, so it belongs to an earlier deploy and this one did not finish"
       else

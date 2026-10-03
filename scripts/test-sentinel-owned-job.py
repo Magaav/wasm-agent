@@ -3,7 +3,7 @@ Runs real-parent harness inside owned tree. No global process control.
 """
 import argparse,ctypes,json,os,pathlib,subprocess,time
 from ctypes import wintypes as w
-p=argparse.ArgumentParser();p.add_argument('--repo',required=True);p.add_argument('--evidence',required=True);p.add_argument('--assign-failure',action='store_true');a=p.parse_args()
+p=argparse.ArgumentParser();p.add_argument('--repo',required=True);p.add_argument('--evidence',required=True);p.add_argument('--assign-failure',action='store_true');p.add_argument('--escape-attempt',action='store_true');a=p.parse_args()
 root=pathlib.Path(a.evidence).resolve();root.mkdir(parents=True,exist_ok=False)
 if os.name!='nt':print('SKIP: owned Windows Job proof (1 skipped)');raise SystemExit(0)
 k=ctypes.WinDLL('kernel32',use_last_error=True)
@@ -16,6 +16,10 @@ k.CreateProcessW.argtypes=[w.LPCWSTR,w.LPWSTR,ctypes.c_void_p,ctypes.c_void_p,w.
 for name,args in [('AssignProcessToJobObject',[w.HANDLE,w.HANDLE]),('TerminateProcess',[w.HANDLE,w.UINT]),('TerminateJobObject',[w.HANDLE,w.UINT]),('WaitForSingleObject',[w.HANDLE,w.DWORD]),('ResumeThread',[w.HANDLE]),('CloseHandle',[w.HANDLE]),('GetExitCodeProcess',[w.HANDLE,ctypes.POINTER(w.DWORD)]),('QueryInformationJobObject',[w.HANDLE,ctypes.c_int,ctypes.c_void_p,w.DWORD,ctypes.c_void_p])]:getattr(k,name).argtypes=args
 repo=pathlib.Path(a.repo).resolve();script=repo/'scripts/test-sentinel-real-parent.cjs'
 node=subprocess.check_output(['where','node'],text=True).splitlines()[0]
+if a.escape_attempt:
+ probe=root/'escape.cjs'
+ probe.write_text("const {spawnSync}=require('child_process');const r=spawnSync('python',['-c',\"import subprocess,sys; p=subprocess.run([sys.executable,'-c','pass'],creationflags=0x01000000)\"]);process.exit(r.status===0?5:0);")
+ script=probe
 command=subprocess.list2cmdline([node,str(script)])
 startup=STARTUP();startup.cb=ctypes.sizeof(startup);process=PROCESS();job=k.CreateJobObjectW(None,None);assert job
 # inherited environment is consumed only by harness's explicit private environment allowlist.
@@ -40,7 +44,7 @@ try:
    if time.monotonic()>deadline:k.TerminateJobObject(job,93);raise AssertionError('owned descendants remain after root exit')
    time.sleep(.05)
   facts.update(active=acc.active,total_created=acc.total,terminated=acc.terminated)
-  assert acc.total>=3,'real node and sentinel creation not observed'
+  assert acc.total>=(2 if a.escape_attempt else 3),'owned process creation not observed'
   assert code.value==0,'real-parent child failed'
 finally:
  (root/'job-receipt.json').write_text(json.dumps(facts,indent=2))
