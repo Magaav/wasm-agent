@@ -1,0 +1,237 @@
+{
+  "schema": 1,
+  "kind": "independent-source-review-not-admission",
+  "verdict": "request_changes",
+  "producer": {
+    "head": "18bc6bf05be9cdbd01a1e50a6a520e0e9e9a499b",
+    "tree": "8bd76bc322d2aebed1ffa4045f4945ea144ab9de",
+    "prototype": "98e14c5ccd87a37865de7fb6ce6673d60c90ded7",
+    "report": "C:\\Users\\Victor\\orca\\projects\\wasm-agent\\.git\\wa-ui-native-delivery\\18bc6bf05be9cdbd01a1e50a6a520e0e9e9a499b\\report.json",
+    "report_sha256": "e8569ab66da08fd2b6d87a6a46debe81ce70a6f13a9ee2ed433286f5d5df403b"
+  },
+  "review": {
+    "branch": "change/review-original-native-ui",
+    "custodyMerge": "eedfc8dd66e1f0f00e600f86803202aa65e505a5",
+    "custodyTree": "8bd76bc322d2aebed1ffa4045f4945ea144ab9de",
+    "session": "01a102af-b8f7-7fc3-9d50-5fc5f319f8f0",
+    "terminal": "term_3f65c45a-b412-41ed-b814-5b3ca0f95894",
+    "task": "task_fe9bf9750138",
+    "dispatch": "ctx_92bc7933bf52",
+    "sourceChanged": false,
+    "originMain": "898a9a238c89c5f64b83cfa219f8c17840b441f9",
+    "behind": 0,
+    "mergeTree": "8bd76bc322d2aebed1ffa4045f4945ea144ab9de"
+  },
+  "build": {
+    "binary": "C:\\Users\\Victor\\AppData\\Local\\Temp\\wa-review-original-ui-target\\debug\\wa.exe",
+    "sha256": "cd2b3f43c73d013dfa407e8f2b7246b316a6346ea426c5b45950b972519c50c6",
+    "receipt": "build.json",
+    "jobs": 2
+  },
+  "checks": [
+    {
+      "name": "native-source",
+      "passed": true,
+      "checks": 76,
+      "skipped": 0,
+      "raw": "C:\\Users\\Victor\\orca\\projects\\wasm-agent\\.git\\wa-recovery-evidence\\wa-native-browser-i1Nstv\\report.json",
+      "raw_sha256": "03b6099e5ae5b597db7e95e4c614a1c875cd43845d2d7077b91e7a18e550a7aa",
+      "error": null,
+      "cleanupVerified": true
+    },
+    {
+      "name": "native-embedded",
+      "passed": true,
+      "checks": 76,
+      "skipped": 0,
+      "raw": "C:\\Users\\Victor\\orca\\projects\\wasm-agent\\.git\\wa-recovery-evidence\\wa-native-browser-eN3Moi\\report.json",
+      "raw_sha256": "b68d0daf850b35489b5512a706003b786b361629093bab8f3c71564ea25744b8",
+      "error": null,
+      "cleanupVerified": true
+    },
+    {
+      "name": "adversarial",
+      "passed": true,
+      "checks": 78,
+      "skipped": 0,
+      "raw": "C:\\Users\\Victor\\orca\\projects\\wasm-agent\\.git\\wa-recovery-evidence\\wa-native-browser-9PJd9j\\report.json",
+      "raw_sha256": "9ddc220b4a535dafacf62a7742d190ccab12ba4338611f5897d1c95c12736f5e",
+      "error": null,
+      "cleanupVerified": true
+    },
+    {
+      "name": "recovery-initial",
+      "passed": false,
+      "checks": 4,
+      "skipped": 0,
+      "raw": "C:\\Users\\Victor\\orca\\projects\\wasm-agent\\.git\\wa-recovery-evidence\\wa-two-window-XtL4kt\\report.json",
+      "raw_sha256": "96bf64eedc3da84739d36a6dac763078119004e7c8f61052d5d006a88a406d84",
+      "error": "Error: deadline: native authenticated session pane live tail\n    at until (C:\\Users\\Victor\\orca\\workspaces\\wasm-agent\\review-original-native-ui\\scripts\\test-recovery-two-window.cjs:32:161)\n    at async C:\\Users\\Victor\\orca\\workspaces\\wasm-agent\\review-original-native-ui\\scripts\\test-recovery-two-window.cjs:80:3",
+      "cleanupVerified": true
+    },
+    {
+      "name": "recovery-rerun",
+      "passed": true,
+      "checks": 22,
+      "skipped": 0,
+      "raw": "C:\\Users\\Victor\\orca\\projects\\wasm-agent\\.git\\wa-recovery-evidence\\wa-two-window-Dft7Ev\\report.json",
+      "raw_sha256": "20835b5b05f1b77851663bbceb95c8105098ed907c1f57ce524246519a678cff",
+      "error": null,
+      "cleanupVerified": true
+    },
+    {
+      "name": "fallback-causality",
+      "passed": true,
+      "checks": 78,
+      "skipped": 0,
+      "raw": "C:\\Users\\Victor\\orca\\projects\\wasm-agent\\.git\\wa-recovery-evidence\\wa-native-browser-GLFho8\\report.json",
+      "raw_sha256": "f8c2994cdd1f7bd18627157fbe21b0ddc434853831c4b61f5f46775ecb2cd08a",
+      "error": null,
+      "cleanupVerified": true
+    }
+  ],
+  "findings": [
+    {
+      "priority": "P2",
+      "location": "ui/app.js:4833 and 4908",
+      "title": "An unavailable native journal blocks durable terminal fallback on existing views",
+      "proof": "adversarial.receipt.json review.fallback",
+      "causality": "fallback-causality.json",
+      "effect": "Completed answer stays absent on main chat and previously attached pane despite available complete session rows; fresh mount shows answer. Subsequent native poll failures return true and do not reach normal ledger follow."
+    },
+    {
+      "priority": "P3",
+      "location": "lua/core/subagents.lua:760",
+      "title": "Malformed supplied native cursors silently become zero",
+      "proof": "adversarial.receipt.json review.cursor",
+      "effect": "garbage, object and true cursors return ok=true rather than invalid_native_event_cursor; negative, fractional and unsafe numeric string do refuse. Ownership is still enforced; no foreign disclosure was observed."
+    }
+  ],
+  "selectedRust": {
+    "native": {
+      "passed": 20,
+      "failed": 0,
+      "ignored": 0,
+      "filtered": 63,
+      "log": "rust-native.log"
+    },
+    "httpJournal": {
+      "passed": 2,
+      "failed": 0,
+      "ignored": 0,
+      "filtered": 81,
+      "log": "rust-http-journal.log"
+    }
+  },
+  "highHttp": {
+    "passed": 36,
+    "skipped": 0,
+    "log": "high-http.log"
+  },
+  "runKeyUi": {
+    "passed": 10,
+    "skipped": 0,
+    "scope": "exact helper contract only"
+  },
+  "directUi": {
+    "passed": true,
+    "stages": [
+      "reload",
+      "startup-recovery",
+      "inspect-window",
+      "view-window"
+    ],
+    "log": "ui.log",
+    "job": "ui-job.json"
+  },
+  "producerMutations": {
+    "schema": 1,
+    "evidence": "C:\\Users\\Victor\\orca\\projects\\wasm-agent\\.git\\wa-native-mutations\\5f885df5-2ecb-432e-8b24-00928ef433de",
+    "mutations": [
+      {
+        "name": "native-tail-page-only",
+        "exit": 1,
+        "assertion": "native pane consumes all journal pages exactly once",
+        "log": "C:\\Users\\Victor\\orca\\projects\\wasm-agent\\.git\\wa-native-mutations\\5f885df5-2ecb-432e-8b24-00928ef433de\\native-tail-page-only.log",
+        "log_sha256": "9aa2573f3684d71d44ae3e4cb15ef6ef8e15cb2569d7241c09a7dfca403fc78c"
+      },
+      {
+        "name": "six-pane-overflow",
+        "exit": 1,
+        "assertion": "six genuine native panes contained in viewport grid",
+        "log": "C:\\Users\\Victor\\orca\\projects\\wasm-agent\\.git\\wa-native-mutations\\5f885df5-2ecb-432e-8b24-00928ef433de\\six-pane-overflow.log",
+        "log_sha256": "240c6af75ab06f4971b40a026e7a33dc5cb15167798705e7c7704b37c321c75e"
+      },
+      {
+        "name": "renderer-parent-buffer",
+        "exit": 1,
+        "assertion": "shared renderer keeps parent reasoning buffer isolated from child content",
+        "log": "C:\\Users\\Victor\\orca\\projects\\wasm-agent\\.git\\wa-native-mutations\\5f885df5-2ecb-432e-8b24-00928ef433de\\renderer-parent-buffer.log",
+        "log_sha256": "72fd462fea6e5adfcff3f2e0660455609f131dc42b55f6ba400c8885f4f502e2"
+      },
+      {
+        "name": "native-owner-bypass",
+        "exit": 1,
+        "assertion": "native refuses foreign owner before evidence",
+        "log": "C:\\Users\\Victor\\orca\\projects\\wasm-agent\\.git\\wa-native-mutations\\5f885df5-2ecb-432e-8b24-00928ef433de\\native-owner-bypass.log",
+        "log_sha256": "c56ab87cdc80e3790d708d40be8d64488f5c253474ab830d2090d810dc71dcea"
+      },
+      {
+        "name": "native-checkpoint-replay",
+        "exit": 101,
+        "assertion": "indexed_pages_preserve_raw_content_and_checkpoint_after_reopen ... FAILED",
+        "log": "C:\\Users\\Victor\\orca\\projects\\wasm-agent\\.git\\wa-native-mutations\\5f885df5-2ecb-432e-8b24-00928ef433de\\native-checkpoint-replay.log",
+        "log_sha256": "65d482704e4638164940de9aac9b999ab9e6670f47150ec7f7045669eb21960f"
+      }
+    ],
+    "restored": true
+  },
+  "independentGuardMutations": [
+    {
+      "name": "main-epoch",
+      "exit": 1,
+      "expected": "late native main response cannot cross conversation epoch",
+      "actualError": "AssertionError [ERR_ASSERTION]: late native main response cannot cross conversation epoch\n    at check (C:\\Users\\Victor\\orca\\workspaces\\wasm-agent\\review-original-native-ui\\scripts\\test-native-child-browser.cjs:31:36)\n    at C:\\Users\\Victor\\orca\\workspaces\\wasm-agent\\review-original-native-ui\\scripts\\test-native-child-browser.cjs:148:3",
+      "assertionFailed": true,
+      "receipt": "C:\\Users\\Victor\\orca\\projects\\wasm-agent\\.git\\wa-recovery-evidence\\wa-native-browser-uJiHM7\\report.json",
+      "stagedSha256": "4405b68b5767e0cf3d2f367171c50c868f9a4e78baad2dcb24939832866ff919"
+    },
+    {
+      "name": "main-owner",
+      "exit": 1,
+      "expected": "late native main response cannot cross owner credential",
+      "actualError": "AssertionError [ERR_ASSERTION]: late native main response cannot cross owner credential\n    at check (C:\\Users\\Victor\\orca\\workspaces\\wasm-agent\\review-original-native-ui\\scripts\\test-native-child-browser.cjs:31:36)\n    at C:\\Users\\Victor\\orca\\workspaces\\wasm-agent\\review-original-native-ui\\scripts\\test-native-child-browser.cjs:149:3",
+      "assertionFailed": true,
+      "receipt": "C:\\Users\\Victor\\orca\\projects\\wasm-agent\\.git\\wa-recovery-evidence\\wa-native-browser-KFn7on\\report.json",
+      "stagedSha256": "ca5d6562b616862a4fc52be7271eb27bd64546ee8d5895b02f54784399169501"
+    },
+    {
+      "name": "main-node",
+      "exit": 1,
+      "expected": "late native main response cannot cross active node",
+      "actualError": "AssertionError [ERR_ASSERTION]: late native main response cannot cross active node\n    at check (C:\\Users\\Victor\\orca\\workspaces\\wasm-agent\\review-original-native-ui\\scripts\\test-native-child-browser.cjs:31:36)\n    at C:\\Users\\Victor\\orca\\workspaces\\wasm-agent\\review-original-native-ui\\scripts\\test-native-child-browser.cjs:150:3",
+      "assertionFailed": true,
+      "receipt": "C:\\Users\\Victor\\orca\\projects\\wasm-agent\\.git\\wa-recovery-evidence\\wa-native-browser-mzH4Hw\\report.json",
+      "stagedSha256": "be13ef59a7b24caeeed294b1f2d3c25d3483a78c9df76764d1b77682b897a642"
+    }
+  ],
+  "historyCorrection": {
+    "identicalTreeAndParents": true,
+    "originalPrototypePreserved": true
+  },
+  "limits": [
+    "No full application gate or source acceptance/admission was authored; sole acceptance/merge lane ctx50 determines current admission-required proof.",
+    "Old recovery initial native-pane timeout was read_capacity_busy; rerun passed22. Reserved later background completion/read-control and failed-task continuation changes were not implemented.",
+    "Native restart checks compare a first256 archived-event page and recover the full terminal answer in the browser; no all-archive-throughout-restart equivalence or production crash-power-loss proof is claimed.",
+    "Direct UI preserves original assertions and page inspect/profile/reuse behavior; no real wa-window lifecycle/install/deploy was exercised.",
+    "Fixture homes/DBs/repos/provider endpoints/ports/browser profiles were private. Windows Job receipts prove creation, queried kill-on-close/no-breakaway, membership and active0 drain; they are not an administrator-proof sandbox.",
+    "FULL synchronous per-event SQLite and global native task mutex can serialize writes; storage/history rendering grows without pruning. No performance default or throughput gain is inferred.",
+    "Raw content persists in journal/ledger; UI stripThinking still trims display-edge whitespace.",
+    "No production resources, account/provider config, node/window or paid inference were used."
+  ],
+  "gate_verified": false,
+  "admission_verified": false,
+  "source_acceptance_authored": false,
+  "main_moved": false,
+  "deployed": false
+}

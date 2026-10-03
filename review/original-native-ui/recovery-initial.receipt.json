@@ -1,0 +1,295 @@
+{
+  "schema": 1,
+  "root": "C:\\Users\\Victor\\AppData\\Local\\Temp\\wa-two-window-XtL4kt",
+  "checks": [
+    "private recovery repository created",
+    "owned wrapper process creation positively observed",
+    "owned wrapper process creation positively observed",
+    "native child admitted"
+  ],
+  "requests": [
+    {
+      "route": "health",
+      "status": 200,
+      "ms": 496
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 84
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 30
+    },
+    {
+      "route": "health",
+      "status": 200,
+      "ms": 3
+    },
+    {
+      "route": "run-events",
+      "status": 400,
+      "ms": 3
+    }
+  ],
+  "models": [
+    {
+      "name": "B",
+      "model": "fixture-model",
+      "toolResults": 0
+    }
+  ],
+  "lua": "explicit source Lua root",
+  "binary": {
+    "path": "C:\\Users\\Victor\\AppData\\Local\\Temp\\wa-review-original-ui-target\\debug\\wa.exe",
+    "sha256": "cd2b3f43c73d013dfa407e8f2b7246b316a6346ea426c5b45950b972519c50c6"
+  },
+  "passed": false,
+  "error": "Error: deadline: native authenticated session pane live tail\n    at until (C:\\Users\\Victor\\orca\\workspaces\\wasm-agent\\review-original-native-ui\\scripts\\test-recovery-two-window.cjs:32:161)\n    at async C:\\Users\\Victor\\orca\\workspaces\\wasm-agent\\review-original-native-ui\\scripts\\test-recovery-two-window.cjs:80:3",
+  "pages": [
+    {
+      "thread": "thread-A",
+      "value": {
+        "url": "http://127.0.0.1:55617/",
+        "chatSession": "thread-A",
+        "conversationEpoch": 0,
+        "synced": true,
+        "metaReady": true,
+        "transcriptReady": false,
+        "busy": false,
+        "followedSeq": null,
+        "liveRunId": null,
+        "liveEventSeq": 0,
+        "liveCheckpointSeq": null,
+        "liveSyncFailed": false,
+        "text": "wasm-agent\nlocal · opencode-go · fixture-model\ntranscript not loaded - retrying in 8s (session?id=thread-A: unknown_session)\nMA\nfixture-model\nfixture-model"
+      }
+    },
+    {
+      "thread": "thread-B",
+      "value": {
+        "url": "http://127.0.0.1:55617/",
+        "chatSession": "thread-B",
+        "conversationEpoch": 0,
+        "synced": true,
+        "metaReady": true,
+        "transcriptReady": false,
+        "busy": false,
+        "followedSeq": null,
+        "liveRunId": null,
+        "liveEventSeq": 0,
+        "liveCheckpointSeq": null,
+        "liveSyncFailed": false,
+        "text": "wasm-agent\nlocal · opencode-go · fixture-model\ntranscript not loaded - retrying in 8s (session?id=thread-B: unknown_session)\nMA\nfixture-model\nfixture-model"
+      }
+    },
+    {
+      "thread": "child:native-browser-child",
+      "value": {
+        "url": "http://127.0.0.1:55617/",
+        "chatSession": "child:native-browser-child",
+        "conversationEpoch": 0,
+        "synced": true,
+        "metaReady": true,
+        "transcriptReady": true,
+        "busy": false,
+        "followedSeq": 1,
+        "liveRunId": null,
+        "liveEventSeq": 5,
+        "liveCheckpointSeq": 2,
+        "liveSyncFailed": false,
+        "text": "wasm-agent\nlocal · opencode-go · fixture-model\nYOU\nRECOVERY-B native child held\nWASM-AGENT\nLIVE-B\nresponding…\nMA\nfixture-model\nfixture-model\nRECOVERY-B native child held\nexplore · fixture-model · reasoning unknown · local · running\nrunning\n0:12\nConversation unavailable: read_capacity_busy\nfixture-model\nSteer\nCancel task\nfixture-model · reasoning unknown"
+      }
+    }
+  ],
+  "health": {
+    "status": 200,
+    "client": {
+      "bridge": {
+        "connections": 0,
+        "health": "ok",
+        "port": 50162,
+        "self_probe_age_ms": 275,
+        "self_probe_failures": 0,
+        "self_probe_ms": 0,
+        "self_probe_ok": true
+      },
+      "busy": null,
+      "client": null,
+      "connected": false,
+      "last_seen_secs": null,
+      "queued": 0,
+      "results_kept": 0
+    },
+    "current": null,
+    "exec_timeout_seconds": 300,
+    "execution_schema": 1,
+    "node_threads": [
+      {
+        "age_ms": 101,
+        "busy_ms": null,
+        "id": 0,
+        "label": null,
+        "role": "runs",
+        "run_id": null,
+        "run_key": null,
+        "session": null,
+        "state": "alive"
+      },
+      {
+        "age_ms": 38,
+        "busy_ms": null,
+        "id": 3,
+        "label": null,
+        "role": "reads",
+        "run_id": null,
+        "run_key": null,
+        "session": null,
+        "state": "alive"
+      },
+      {
+        "age_ms": 6,
+        "busy_ms": null,
+        "id": 4,
+        "label": null,
+        "role": "reads",
+        "run_id": null,
+        "run_key": null,
+        "session": null,
+        "state": "alive"
+      }
+    ],
+    "node_threads_count": 3,
+    "node_threads_retired": 0,
+    "node_threads_spawned": 2,
+    "ok": true,
+    "operation_overdue": false,
+    "operations": [],
+    "queue": 0,
+    "run_ids": [],
+    "run_limits": {
+      "background_backlog": 8,
+      "background_max": 3,
+      "control_node_threads": 2,
+      "interactive_reserve": 2,
+      "session_queue_depth": 4
+    },
+    "runs": [],
+    "stalled_ms": 101,
+    "subagents": {
+      "active": 1,
+      "queued": 0,
+      "running": 1
+    },
+    "subagents_detail": {
+      "active": 1,
+      "queued": 0,
+      "recovery_error": null,
+      "running": 1,
+      "settled": {
+        "cancelled": 0,
+        "completed": 0,
+        "failed": 0,
+        "unknown": 0
+      }
+    },
+    "ui_error": null,
+    "ui_error_age_ms": null,
+    "ui_page_age_ms": 36,
+    "worker": "alive",
+    "workers": [
+      {
+        "age_ms": 101,
+        "busy_ms": null,
+        "id": 0,
+        "label": null,
+        "role": "runs",
+        "run_id": null,
+        "run_key": null,
+        "session": null,
+        "state": "alive"
+      },
+      {
+        "age_ms": 38,
+        "busy_ms": null,
+        "id": 3,
+        "label": null,
+        "role": "reads",
+        "run_id": null,
+        "run_key": null,
+        "session": null,
+        "state": "alive"
+      },
+      {
+        "age_ms": 6,
+        "busy_ms": null,
+        "id": 4,
+        "label": null,
+        "role": "reads",
+        "run_id": null,
+        "run_key": null,
+        "session": null,
+        "state": "alive"
+      }
+    ]
+  },
+  "replay": {
+    "status": 400,
+    "error": "run_id_required"
+  },
+  "cleanup": {
+    "ownedPids": [
+      {
+        "pid": 22544,
+        "exited": true,
+        "job": {
+          "drained": true,
+          "native_exit": 0,
+          "native_pid": 28940,
+          "phase": "exited",
+          "creation_proven": true,
+          "schema": 1,
+          "limit_flags": 8192,
+          "in_job": true,
+          "no_breakaway": true,
+          "kill_on_close": true,
+          "stop_requested": true,
+          "accounting": {
+            "terminated_processes": 0,
+            "active_processes": 0,
+            "total_processes": 4
+          },
+          "assigned": true
+        }
+      },
+      {
+        "pid": 27544,
+        "exited": true,
+        "job": {
+          "drained": true,
+          "native_exit": 0,
+          "native_pid": 28260,
+          "phase": "exited",
+          "creation_proven": true,
+          "schema": 1,
+          "limit_flags": 8192,
+          "in_job": true,
+          "no_breakaway": true,
+          "kill_on_close": true,
+          "stop_requested": true,
+          "accounting": {
+            "terminated_processes": 0,
+            "active_processes": 0,
+            "total_processes": 59
+          },
+          "assigned": true
+        }
+      }
+    ],
+    "browserClosed": true,
+    "fixture_home_removed": true
+  },
+  "evidence": "C:\\Users\\Victor\\orca\\projects\\wasm-agent\\.git\\wa-recovery-evidence\\wa-two-window-XtL4kt"
+}

@@ -1,0 +1,226 @@
+{
+  "schema": 1,
+  "root": "C:\\Users\\Victor\\AppData\\Local\\Temp\\wa-two-window-Dft7Ev",
+  "checks": [
+    "private recovery repository created",
+    "owned wrapper process creation positively observed",
+    "owned wrapper process creation positively observed",
+    "native child admitted",
+    "native bounded session page identity",
+    "genuine native main reload tail exact once",
+    "two actual long runs active",
+    "transcript responds while two runs active",
+    "transcript responds while two runs active",
+    "transcript responds while two runs active",
+    "draft survives real navigation",
+    "child tail exactly once",
+    "repeated child reconnect does not duplicate tail",
+    "recovery did not require run settlement",
+    "delayed write acknowledgement is reconciled from the actually applied node state",
+    "stale cross-window selection refuses",
+    "second long run remains active during error recovery",
+    "durable message order intact",
+    "reconnect/reload never replays tool effect",
+    "real reload/drop preserves exact saved message identity and bytes",
+    "in-flight runs retain immutable model snapshot",
+    "next run uses confirmed settings"
+  ],
+  "requests": [
+    {
+      "route": "health",
+      "status": 200,
+      "ms": 429
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 91
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 38
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 25
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 53
+    },
+    {
+      "route": "subagents",
+      "status": 200,
+      "ms": 36
+    },
+    {
+      "route": "health",
+      "status": 200,
+      "ms": 4
+    },
+    {
+      "route": "session?id=thread-A",
+      "status": 200,
+      "ms": 5
+    },
+    {
+      "route": "session?id=thread-A",
+      "status": 200,
+      "ms": 5
+    },
+    {
+      "route": "session?id=thread-A",
+      "status": 200,
+      "ms": 5
+    },
+    {
+      "route": "session?id=thread-A",
+      "status": 200,
+      "ms": 4
+    },
+    {
+      "route": "health",
+      "status": 200,
+      "ms": 2
+    },
+    {
+      "route": "models",
+      "status": 200,
+      "ms": 35
+    },
+    {
+      "route": "model",
+      "status": 200,
+      "ms": 4
+    },
+    {
+      "route": "session?id=thread-A",
+      "status": 200,
+      "ms": 8
+    },
+    {
+      "route": "health",
+      "status": 200,
+      "ms": 3
+    },
+    {
+      "route": "session?id=thread-A",
+      "status": 200,
+      "ms": 8
+    },
+    {
+      "route": "health",
+      "status": 200,
+      "ms": 3
+    }
+  ],
+  "models": [
+    {
+      "name": "B",
+      "model": "fixture-model",
+      "toolResults": 0
+    },
+    {
+      "name": "A",
+      "model": "fixture-model",
+      "toolResults": 0
+    },
+    {
+      "name": "A",
+      "model": "fixture-model",
+      "toolResults": 1
+    },
+    {
+      "name": "B",
+      "model": "fixture-model",
+      "toolResults": 0
+    },
+    {
+      "name": "NEXT",
+      "model": "fixture-next",
+      "toolResults": 0
+    }
+  ],
+  "lua": "explicit source Lua root",
+  "binary": {
+    "path": "C:\\Users\\Victor\\AppData\\Local\\Temp\\wa-review-original-ui-target\\debug\\wa.exe",
+    "sha256": "cd2b3f43c73d013dfa407e8f2b7246b316a6346ea426c5b45950b972519c50c6"
+  },
+  "savedIdentity": [
+    {
+      "id": "c96d4f46-1056-44f7-ba39-da42eb6f95b0",
+      "seq": 1,
+      "role": "user",
+      "content": "RECOVERY-A"
+    },
+    {
+      "id": "683484b9-fcb7-4c21-8f51-53970f395678",
+      "seq": 2,
+      "role": "assistant",
+      "content": ""
+    },
+    {
+      "id": "91c6e4ea-9f64-4c8c-9375-7b62e9089bb7",
+      "seq": 3,
+      "role": "tool",
+      "content": "{\"cleanup\":\"terminated\",\"cleanup_budget_ms\":1000,\"code\":0,\"containment\":\"windows_job_object\",\"cwd\":\"\",\"cwd_requested\":\"\",\"effective_cwd\":\"//?/C:/Users/Victor/AppData/Local/Temp/wa-two-window-Dft7Ev/repo\",\"elapsed_ms\":62,\"ok\":true,\"operation_id\":\"op-1791046919399307-19500-1\",\"output_bytes\":0,\"output_complete\":true,\"output_streams_closed\":true,\"output_truncated\":false,\"overdue\":false,\"owner\":\"run:1\",\"owner_boot\":\"boot-19500-1791046919358189000-0\",\"owner_process_id\":19500,\"process_exit_code\":0,\"process_exit_elapsed_ms\":60,\"promoted\":false,\"settled\":true,\"state\":\"completed\",\"stderr\":\"\",\"stderr_path\":\"C:\\\\Users\\\\Victor\\\\AppData\\\\Local\\\\Temp\\\\wa-two-window-Dft7Ev\\\\.wasm-agent/operations\\\\op-1791046919399307-19500-1\\\\stderr\",\"stdout\":\"\",\"stdout_path\":\"C:\\\\Users\\\\Victor\\\\AppData\\\\Local\\\\Temp\\\\wa-two-window-Dft7Ev\\\\.wasm-agent/operations\\\\op-1791046919399307-19500-1\\\\stdout\",\"timeout_ms\":5000}"
+    }
+  ],
+  "passed": true,
+  "cleanup": {
+    "ownedPids": [
+      {
+        "pid": 25728,
+        "exited": true,
+        "job": {
+          "drained": true,
+          "native_exit": 0,
+          "native_pid": 19500,
+          "phase": "exited",
+          "creation_proven": true,
+          "schema": 1,
+          "limit_flags": 8192,
+          "in_job": true,
+          "no_breakaway": true,
+          "kill_on_close": true,
+          "stop_requested": true,
+          "accounting": {
+            "terminated_processes": 0,
+            "active_processes": 0,
+            "total_processes": 7
+          },
+          "assigned": true
+        }
+      },
+      {
+        "pid": 17848,
+        "exited": true,
+        "job": {
+          "drained": true,
+          "native_exit": 0,
+          "native_pid": 28776,
+          "phase": "exited",
+          "creation_proven": true,
+          "schema": 1,
+          "limit_flags": 8192,
+          "in_job": true,
+          "no_breakaway": true,
+          "kill_on_close": true,
+          "stop_requested": true,
+          "accounting": {
+            "terminated_processes": 0,
+            "active_processes": 0,
+            "total_processes": 48
+          },
+          "assigned": true
+        }
+      }
+    ],
+    "browserClosed": true,
+    "fixture_home_removed": true
+  },
+  "evidence": "C:\\Users\\Victor\\orca\\projects\\wasm-agent\\.git\\wa-recovery-evidence\\wa-two-window-Dft7Ev"
+}

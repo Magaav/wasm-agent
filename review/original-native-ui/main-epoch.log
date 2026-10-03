@@ -1,0 +1,4 @@
+evidence: C:\Users\Victor\orca\projects\wasm-agent\.git\wa-recovery-evidence\wa-native-browser-uJiHM7\report.json
+AssertionError [ERR_ASSERTION]: late native main response cannot cross conversation epoch
+    at check (C:\Users\Victor\orca\workspaces\wasm-agent\review-original-native-ui\scripts\test-native-child-browser.cjs:31:36)
+    at C:\Users\Victor\orca\workspaces\wasm-agent\review-original-native-ui\scripts\test-native-child-browser.cjs:148:3

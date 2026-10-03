@@ -1,0 +1,42 @@
+{
+  "schema": 1,
+  "evidence": "C:\\Users\\Victor\\orca\\projects\\wasm-agent\\.git\\wa-native-mutations\\5f885df5-2ecb-432e-8b24-00928ef433de",
+  "mutations": [
+    {
+      "name": "native-tail-page-only",
+      "exit": 1,
+      "assertion": "native pane consumes all journal pages exactly once",
+      "log": "C:\\Users\\Victor\\orca\\projects\\wasm-agent\\.git\\wa-native-mutations\\5f885df5-2ecb-432e-8b24-00928ef433de\\native-tail-page-only.log",
+      "log_sha256": "9aa2573f3684d71d44ae3e4cb15ef6ef8e15cb2569d7241c09a7dfca403fc78c"
+    },
+    {
+      "name": "six-pane-overflow",
+      "exit": 1,
+      "assertion": "six genuine native panes contained in viewport grid",
+      "log": "C:\\Users\\Victor\\orca\\projects\\wasm-agent\\.git\\wa-native-mutations\\5f885df5-2ecb-432e-8b24-00928ef433de\\six-pane-overflow.log",
+      "log_sha256": "240c6af75ab06f4971b40a026e7a33dc5cb15167798705e7c7704b37c321c75e"
+    },
+    {
+      "name": "renderer-parent-buffer",
+      "exit": 1,
+      "assertion": "shared renderer keeps parent reasoning buffer isolated from child content",
+      "log": "C:\\Users\\Victor\\orca\\projects\\wasm-agent\\.git\\wa-native-mutations\\5f885df5-2ecb-432e-8b24-00928ef433de\\renderer-parent-buffer.log",
+      "log_sha256": "72fd462fea6e5adfcff3f2e0660455609f131dc42b55f6ba400c8885f4f502e2"
+    },
+    {
+      "name": "native-owner-bypass",
+      "exit": 1,
+      "assertion": "native refuses foreign owner before evidence",
+      "log": "C:\\Users\\Victor\\orca\\projects\\wasm-agent\\.git\\wa-native-mutations\\5f885df5-2ecb-432e-8b24-00928ef433de\\native-owner-bypass.log",
+      "log_sha256": "c56ab87cdc80e3790d708d40be8d64488f5c253474ab830d2090d810dc71dcea"
+    },
+    {
+      "name": "native-checkpoint-replay",
+      "exit": 101,
+      "assertion": "indexed_pages_preserve_raw_content_and_checkpoint_after_reopen ... FAILED",
+      "log": "C:\\Users\\Victor\\orca\\projects\\wasm-agent\\.git\\wa-native-mutations\\5f885df5-2ecb-432e-8b24-00928ef433de\\native-checkpoint-replay.log",
+      "log_sha256": "65d482704e4638164940de9aac9b999ab9e6670f47150ec7f7045669eb21960f"
+    }
+  ],
+  "restored": true
+}

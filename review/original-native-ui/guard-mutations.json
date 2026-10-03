@@ -1,0 +1,29 @@
+[
+  {
+    "name": "main-epoch",
+    "exit": 1,
+    "expected": "late native main response cannot cross conversation epoch",
+    "actualError": "AssertionError [ERR_ASSERTION]: late native main response cannot cross conversation epoch\n    at check (C:\\Users\\Victor\\orca\\workspaces\\wasm-agent\\review-original-native-ui\\scripts\\test-native-child-browser.cjs:31:36)\n    at C:\\Users\\Victor\\orca\\workspaces\\wasm-agent\\review-original-native-ui\\scripts\\test-native-child-browser.cjs:148:3",
+    "assertionFailed": true,
+    "receipt": "C:\\Users\\Victor\\orca\\projects\\wasm-agent\\.git\\wa-recovery-evidence\\wa-native-browser-uJiHM7\\report.json",
+    "stagedSha256": "4405b68b5767e0cf3d2f367171c50c868f9a4e78baad2dcb24939832866ff919"
+  },
+  {
+    "name": "main-owner",
+    "exit": 1,
+    "expected": "late native main response cannot cross owner credential",
+    "actualError": "AssertionError [ERR_ASSERTION]: late native main response cannot cross owner credential\n    at check (C:\\Users\\Victor\\orca\\workspaces\\wasm-agent\\review-original-native-ui\\scripts\\test-native-child-browser.cjs:31:36)\n    at C:\\Users\\Victor\\orca\\workspaces\\wasm-agent\\review-original-native-ui\\scripts\\test-native-child-browser.cjs:149:3",
+    "assertionFailed": true,
+    "receipt": "C:\\Users\\Victor\\orca\\projects\\wasm-agent\\.git\\wa-recovery-evidence\\wa-native-browser-KFn7on\\report.json",
+    "stagedSha256": "ca5d6562b616862a4fc52be7271eb27bd64546ee8d5895b02f54784399169501"
+  },
+  {
+    "name": "main-node",
+    "exit": 1,
+    "expected": "late native main response cannot cross active node",
+    "actualError": "AssertionError [ERR_ASSERTION]: late native main response cannot cross active node\n    at check (C:\\Users\\Victor\\orca\\workspaces\\wasm-agent\\review-original-native-ui\\scripts\\test-native-child-browser.cjs:31:36)\n    at C:\\Users\\Victor\\orca\\workspaces\\wasm-agent\\review-original-native-ui\\scripts\\test-native-child-browser.cjs:150:3",
+    "assertionFailed": true,
+    "receipt": "C:\\Users\\Victor\\orca\\projects\\wasm-agent\\.git\\wa-recovery-evidence\\wa-native-browser-mzH4Hw\\report.json",
+    "stagedSha256": "be13ef59a7b24caeeed294b1f2d3c25d3483a78c9df76764d1b77682b897a642"
+  }
+]

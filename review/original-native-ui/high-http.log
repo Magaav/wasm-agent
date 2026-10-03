@@ -1,0 +1,2 @@
+candidate C:\Users\Victor\AppData\Local\Temp\wa-review-original-ui-target\debug\wa.exe sha256=cd2b3f43c73d013dfa407e8f2b7246b316a6346ea426c5b45950b972519c50c6 sourceLua=C:\Users\Victor\orca\workspaces\wasm-agent\review-original-native-ui
+run key HTTP ok (36 checks, 0 skipped; real listener, source Lua, restart, no inference)
