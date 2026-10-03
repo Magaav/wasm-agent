@@ -38,6 +38,7 @@ import {nowIso, readRecord, storeDir, writeRecord} from './lib/delivery-store.mj
 
 import {checkWaveAdmission} from './lib/wave-guard.mjs';
 import {verifyFocused} from './producer-admission.mjs';
+import {mainOnly, managedLocal} from './lib/delivery-local.mjs';
 const SCHEMA = 1;
 
 /// The one finding class that blocks. It is the class the operator named: a summary that claims more
@@ -90,15 +91,16 @@ function refusal(delivery, condition, detail, remedy) {
 }
 
 /// Read what the repository says, then decide. `tipRef` is the seam above.
-export function evaluate({repo, record, tipRef = null,phase='admit'}) {
+export function evaluate({repo, record, tipRef = null,phase='admit', sessionDb=null, recovery=null}) {
   if (!repo) throw Error('record names no repository: a record written before that field existed cannot be read');
   if(!['admit','observe'].includes(phase))throw Error('unsupported_delivery_evaluation_phase');
-  const wave=checkWaveAdmission(repo,{phase});
+  const wave=checkWaveAdmission(repo,{phase,recovery});
   if(!wave.ok)return {schema:SCHEMA,delivery:record.delivery,decision:'refused',condition:'wave_admission_refused',refusal:wave.reason,wave,conditions:[],caveats:[],requires_combined_gate:true};
   const branch = record.branch || record.delivery;
   const pushedRef = `refs/remotes/origin/${branch}`;
-  const refName = tipRef || pushedRef;
-  const observations = {ref: refName, source: tipRef ? `seam:${tipRef}` : 'pushed', fetched: false,
+  const local=mainOnly(repo) && !tipRef;
+  const refName = tipRef || (local ? `refs/heads/${branch}` : pushedRef);
+  const observations = {ref: refName, source: tipRef ? `seam:${tipRef}` : local ? 'managed_local_unpublished' : 'pushed', fetched: false,
     tip: null, tree: null, local_ref: null, review_commit_contains_tip: null};
   const conditions = [];
   const add = (name, ok, detail, blocking = true) => {
@@ -124,6 +126,15 @@ export function evaluate({repo, record, tipRef = null,phase='admit'}) {
         : `${refName} is ${refTip}, the record names ${record.tip}: the branch moved after the record was written`);
   }
 
+  if(local) {
+    try {
+      observations.producer_local=managedLocal(repo,record.producer,record.tip,sessionDb,branch);
+      add('record_tree_matches_tip',record.tree===observations.producer_local.tree,'exact recorded tree');
+      add('record_repository_matches',fs.realpathSync(git(repo,['rev-parse','--path-format=absolute','--git-common-dir']))===fs.realpathSync(git(record.repository,['rev-parse','--path-format=absolute','--git-common-dir'])),'same shared repository');
+    } catch(error){add('local_producer_binding',false,error.message);}
+    add('producer_receipt_required',Boolean(record.producer_checks),'main-only requires source-bound producer checks');
+    add('producer_receipt_exact_tip',record.producer_checks?.head===record.tip,'receipt must name the exact commit');
+  }
   // -- the review ---------------------------------------------------------------------------------
   add('review_missing', Boolean(review),
     review ? `review by ${review.reviewer} of tip ${review.tip} (tree ${review.tree})`
@@ -138,7 +149,11 @@ export function evaluate({repo, record, tipRef = null,phase='admit'}) {
       : null;
     if (add('review_not_in_repository', Boolean(commit), commit ? `review commit ${commit}` : `review commit ${review.commit || '(none)'} is not in ${repo}`)) {
       const contained = git(repo, ['branch', '-r', '--contains', commit], 'review publication', true);
-      add('review_not_published', Boolean(contained && contained.trim()),
+      if(local) {
+        try{observations.reviewer_local=managedLocal(repo,review.reviewer,review.commit,sessionDb);}
+        catch(error){add('local_reviewer_binding',false,error.message);}
+      }
+      add('review_not_published', local || Boolean(contained && contained.trim()),
         contained && contained.trim() ? `contained in ${contained.split('\n').map(line => line.trim()).join(', ')}`
           : `review commit ${commit} is in no pushed ref`);
       const session = anchorSession(repo, commit);
@@ -157,7 +172,7 @@ export function evaluate({repo, record, tipRef = null,phase='admit'}) {
     // Informational, deliberately NOT blocking: a review of a different commit with the same tree is a
     // review of the same content - that is what binding to a tree means.
     add('review_tip_is_the_tip', review.tip === refTip,
-      `the review is of commit ${review.tip}, the pushed tip is ${refTip} (same tree: ${sameTree})`, false);
+      `the review is of commit ${review.tip}, the pushed tip is ${refTip} (same tree: ${sameTree})`, local);
   }
 
   // -- findings: one blocking class, everything else carried --------------------------------------
@@ -186,7 +201,7 @@ export function evaluate({repo, record, tipRef = null,phase='admit'}) {
   // never combined-tree verification; old reviewed records remain compatible.
   let producerProof = null;
   if (record.producer_checks) {
-    producerProof = verifyFocused(repo, record.producer_checks, refTip || record.tip);
+    producerProof = verifyFocused(observations.producer_local?.worktree || repo, record.producer_checks, refTip || record.tip);
     add('producer_checks_verified', producerProof.admission_verified === true,
       producerProof.error || `focused checks verified for tree ${producerProof.tree}`);
   }
@@ -201,6 +216,7 @@ export function evaluate({repo, record, tipRef = null,phase='admit'}) {
     review: review ? {reviewer: review.reviewer, commit: review.commit, tip: review.tip, tree: review.tree,
       verdict: review.verdict, findings: findings.length} : null,
     observed: observations,
+    authority: observations.producer_local?.source?.kind==='private-fixture' ? 'private-fixture-only' : local ? 'runtime-managed-local' : tipRef ? 'rehearsal' : 'published',
     wave,
     producer_checks: producerProof,
     requires_combined_gate: true,
@@ -217,7 +233,7 @@ export function evaluate({repo, record, tipRef = null,phase='admit'}) {
 function parse(argv) {
   const options = {positional: [], store: null, repo: null, tipRef: null, json: null, by: null, producerProof: null};
   const flags = new Map([['--repo', 'repo'], ['--store', 'store'], ['--tip-ref', 'tipRef'],
-    ['--json', 'json'], ['--by', 'by'], ['--producer-proof','producerProof']]);
+    ['--json', 'json'], ['--by', 'by'], ['--producer-proof','producerProof'], ['--session-db','sessionDb'], ['--recovery-receipt','recoveryReceipt']]);
   for (let index = 0; index < argv.length; index += 1) {
     const token = argv[index];
     if (flags.has(token)) { options[flags.get(token)] = argv[index + 1] ?? ''; index += 1; continue; }
@@ -253,7 +269,7 @@ function main() {
   let result;
   try {
     if (options.producerProof) record.producer_checks=JSON.parse(fs.readFileSync(path.resolve(options.producerProof),'utf8'));
-    result = evaluate({repo, record, tipRef: options.tipRef});
+    result = evaluate({repo, record, tipRef: options.tipRef, sessionDb:options.sessionDb, recovery:options.recoveryReceipt ? {receipt_file:options.recoveryReceipt,delivery:record.delivery,tip:record.tip,tree:record.tree,review_commit:record.review?.commit,reviewer:record.review?.reviewer,expected_main:git(repo,['rev-parse','origin/main'])} : null});
   }
   catch (error) { note(`${delivery}: ${error.message}`); process.exit(4); }
 
@@ -267,12 +283,16 @@ function main() {
         `the producer ${record.producer} is the one asking`, REMEDY.self_admission_refused);
     }
     if (result.decision === 'refused') {
+      record.admission_history=[...(record.admission_history||[]),{...result,revision:record.revision,at:nowIso()}];
+      writeRecord(store,record);
       note(result.refusal);
     } else {
-      const replaced = record.admission && record.admission.state !== result.decision;
+      const fresh=evaluate({repo,record,tipRef:options.tipRef,sessionDb:options.sessionDb,recovery:options.recoveryReceipt ? {receipt_file:options.recoveryReceipt,delivery:record.delivery,tip:record.tip,tree:record.tree,review_commit:record.review?.commit,reviewer:record.review?.reviewer,expected_main:git(repo,['rev-parse','origin/main'])} : null});
+      if(fresh.decision==='refused')throw Error(fresh.refusal);
+      if(record.admission)record.admission_history=[...(record.admission_history||[]),record.admission];
       record.admission = {state: result.decision, condition: 'admitted', by: options.by,
         tip: result.observed.tip, tree: result.observed.tree, caveats: result.caveats, event: null, at: nowIso()};
-      if (replaced) record.admission_history = [...(record.admission_history || []), record.admission].slice(-5);
+
       writeRecord(store, record);
       result.admitted = {state: result.decision, by: options.by, tip: result.observed.tip, tree: result.observed.tree};
       note(`${delivery}: ${result.decision} by ${options.by} (tip ${(result.observed.tip || '').slice(0, 7)}, tree ${(result.observed.tree || '').slice(0, 8)}${result.caveats.length ? `, ${result.caveats.length} named caveat(s)` : ''})`);

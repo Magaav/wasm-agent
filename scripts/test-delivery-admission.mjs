@@ -23,6 +23,7 @@ import crypto from 'node:crypto';
 import {spawnSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 
+import './test-delivery-local.mjs';
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ADMISSION = path.join(HERE, 'delivery-admission.mjs');
 const RECORD = path.join(HERE, 'delivery-record.mjs');
@@ -258,7 +259,7 @@ try {
   fs.mkdirSync(path.join(spliced, 'lib'), {recursive: true});
   const source = fs.readFileSync(ADMISSION, 'utf8');
   fs.copyFileSync(path.join(HERE, 'lib', 'delivery-store.mjs'), path.join(spliced, 'lib', 'delivery-store.mjs'));
-  for(const file of ['producer-admission.mjs','gate-check.mjs','gate-checks.mjs','lib/test-verdict.cjs','lib/wave-guard.mjs'])
+  for(const file of ['producer-admission.mjs','gate-check.mjs','gate-checks.mjs','lib/test-verdict.cjs','lib/wave-guard.mjs','lib/delivery-local.mjs'])
     fs.copyFileSync(path.join(HERE,file),path.join(spliced,file));
   const binding = [
     '    const sameTree = Boolean(observations.tree) && review.tree === observations.tree;',

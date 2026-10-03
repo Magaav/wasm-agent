@@ -297,7 +297,7 @@ export function parseArgs(argv) {
     // back on the landing for a run - the restore knob, never selected by accident.
     gateMode: String(process.env.WA_MERGE_LANE_GATE_MODE || '').trim() || 'none'};
   if (String(process.env.WA_MERGE_LANE_TREE || '').trim()) options.reuseTreeNamed = true;
-  const needs = new Set(['--repo', '--base', '--jobs', '--gate-command', '--gate-mode', '--timeout-seconds', '--clone', '--json', '--reuse-tree', '--delivery-store']);
+  const needs = new Set(['--repo', '--base', '--jobs', '--gate-command', '--gate-mode', '--timeout-seconds', '--clone', '--json', '--reuse-tree', '--delivery-store', '--delivery-session-db', '--recovery-receipt']);
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     if (needs.has(arg)) {
@@ -305,6 +305,8 @@ export function parseArgs(argv) {
       if (value === undefined) throw Error(`${arg} needs a value`);
       index += 1;
       if (arg === '--delivery-store') options.deliveryStore=value;
+      else if (arg === '--delivery-session-db') options.deliverySessionDb=value;
+      else if (arg === '--recovery-receipt') options.recoveryReceipt=value;
       else if (arg === '--repo') options.repo = value;
       else if (arg === '--base') options.base = value;
       else if (arg === '--jobs') options.jobs = value;
@@ -853,7 +855,7 @@ async function main() {
   const top = run('git', ['-C', repo, 'rev-parse', '--show-toplevel']);
   if (top.status !== 0) throw Object.assign(Error(`not a git repository: ${repo}`), {exit: 4});
   const gitDir = top.stdout.trim();
-  const wave=checkWaveAdmission(gitDir,{phase:'land'});
+  const wave=checkWaveAdmission(gitDir,{phase:'land',recovery:options.recoveryReceipt ? JSON.parse(fs.readFileSync(options.recoveryReceipt,'utf8')) : null});
   if(!wave.ok)throw Object.assign(Error(wave.reason),{exit:2});
 
   // 1. Discovery: the skill's audit, not a second one. It fetches, lists every tip, proves each
@@ -899,7 +901,7 @@ async function main() {
     if (options.deliveryStore) {
       const delivery=readRecord(options.deliveryStore,input.name.replace(/^origin\//,''));
       if (!delivery) { record.state='blocked';record.reason='delivery admission record missing';blocked.push(record);inputs.push(record);continue; }
-      record.admission=evaluate({repo:gitDir,record:delivery});
+      record.admission=evaluate({repo:gitDir,record:delivery,sessionDb:options.deliverySessionDb,recovery:options.recoveryReceipt ? {receipt_file:options.recoveryReceipt,delivery:delivery.delivery,tip:delivery.tip,tree:delivery.tree,review_commit:delivery.review?.commit,reviewer:delivery.review?.reviewer,expected_main:requireGit(gitDir,['rev-parse','origin/main'],'main')} : null});
       if(record.admission.decision==='refused'||record.admission.observed.tip!==input.sha) {
         record.state='blocked';record.reason=record.admission.refusal||'admitted tip moved';blocked.push(record);inputs.push(record);continue;
       }

@@ -199,6 +199,9 @@ switch (verb) {
     }
     const record = readRecord(store, delivery);
     if (!record) fail(2, 'record_missing', `no record for ${delivery} in ${store}`);
+    if(record.landing)fail(2,'landing_immutable','cannot revise a landed review');
+    if(record.review)record.review_history=[...(record.review_history||[]),record.review];
+    if(record.admission)record.admission_history=[...(record.admission_history||[]),record.admission];
     record.review = {
       reviewer: options.reviewer,
       commit,
