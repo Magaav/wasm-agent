@@ -10,51 +10,73 @@
   "priorReviewBranch": "change/review-original-native-ui",
   "priorReviewHead": "a8214ec6776ecd930abe68b98a710f41249c82a0",
   "originMain": "898a9a238c89c5f64b83cfa219f8c17840b441f9",
-  "mergeTree": "3be9818595b648328c584cd61eba9f7add040cb0",
+  "mergeTree": "cdf6fb089981b59dd4cd89fb41bd33210af445b4",
   "sourceBindings": [
     {
       "path": "rust/wa-host/src/resources.rs",
-      "sha256": "dd78b6c9f49e448034b17f0494cc33e4ca14b984dcfa15eb140c57f38cd5ba3e"
+      "sha256": "dd78b6c9f49e448034b17f0494cc33e4ca14b984dcfa15eb140c57f38cd5ba3e",
+      "native_positive_tested_sha256": "dd78b6c9f49e448034b17f0494cc33e4ca14b984dcfa15eb140c57f38cd5ba3e",
+      "identical_to_native_positive": true
     },
     {
       "path": "rust/wa-operation/src/lib.rs",
-      "sha256": "da785fff4228d5b92ebe2e998bba807be6077dbc9b4d72ece3bafe1a45fb8953"
+      "sha256": "da785fff4228d5b92ebe2e998bba807be6077dbc9b4d72ece3bafe1a45fb8953",
+      "native_positive_tested_sha256": "da785fff4228d5b92ebe2e998bba807be6077dbc9b4d72ece3bafe1a45fb8953",
+      "identical_to_native_positive": true
     },
     {
       "path": "rust/wa-operation/src/process.rs",
-      "sha256": "fde8b24d315919eed24e216071464fbaea3cf3cbfaa5146d6563cb0920f43b58"
+      "sha256": "fde8b24d315919eed24e216071464fbaea3cf3cbfaa5146d6563cb0920f43b58",
+      "native_positive_tested_sha256": "fde8b24d315919eed24e216071464fbaea3cf3cbfaa5146d6563cb0920f43b58",
+      "identical_to_native_positive": true
     },
     {
       "path": "rust/wa-operation/src/windows.rs",
-      "sha256": "e71750195bcd72043ac794c1eede07ef16992f27d5ff7fc13ff4f6dc452e82b4"
+      "sha256": "e71750195bcd72043ac794c1eede07ef16992f27d5ff7fc13ff4f6dc452e82b4",
+      "native_positive_tested_sha256": "e71750195bcd72043ac794c1eede07ef16992f27d5ff7fc13ff4f6dc452e82b4",
+      "identical_to_native_positive": true
     },
     {
       "path": "scripts/wave-current-ref-driver.lua",
-      "sha256": "7cc2d8d6190c541c9dd4ecbb9c6107d8df32edb1bf85d5e8316efb9a2b3efcfb"
+      "sha256": "7cc2d8d6190c541c9dd4ecbb9c6107d8df32edb1bf85d5e8316efb9a2b3efcfb",
+      "native_positive_tested_sha256": "7cc2d8d6190c541c9dd4ecbb9c6107d8df32edb1bf85d5e8316efb9a2b3efcfb",
+      "identical_to_native_positive": true
     },
     {
       "path": "scripts/wave-current-ref-bootstrap.mjs",
-      "sha256": "33d7c129443f43cc4c2319cf7ce56d2277a2a7c35d8bce60d3f64050ec7411e0"
+      "sha256": "33d7c129443f43cc4c2319cf7ce56d2277a2a7c35d8bce60d3f64050ec7411e0",
+      "native_positive_tested_sha256": "33d7c129443f43cc4c2319cf7ce56d2277a2a7c35d8bce60d3f64050ec7411e0",
+      "identical_to_native_positive": true
     },
     {
       "path": "scripts/lib/wave-current-source.mjs",
-      "sha256": "795abe58679143fd4e15c87fde67752d57d860a3a9ff93926f020cc397ef7f07"
+      "sha256": "78b030af08987686f71e1aea497180d24da63b58be87211bffdcba11e032ee94",
+      "native_positive_tested_sha256": "795abe58679143fd4e15c87fde67752d57d860a3a9ff93926f020cc397ef7f07",
+      "identical_to_native_positive": false
     },
     {
       "path": "scripts/lib/wave-current-source-native.mjs",
-      "sha256": "732df3799c352ffdb74bac38806257f5d7894ec23892bc1b26ea59de09e8fef6"
+      "sha256": "732df3799c352ffdb74bac38806257f5d7894ec23892bc1b26ea59de09e8fef6",
+      "native_positive_tested_sha256": "732df3799c352ffdb74bac38806257f5d7894ec23892bc1b26ea59de09e8fef6",
+      "identical_to_native_positive": true
     },
     {
       "path": "scripts/test-wave-current-source.mjs",
-      "sha256": "8ba02620919ec15d50aad9b1ce99b16ed344d75fcedd40694d8aff7ffee75b7b"
+      "sha256": "8ba02620919ec15d50aad9b1ce99b16ed344d75fcedd40694d8aff7ffee75b7b",
+      "native_positive_tested_sha256": "8ba02620919ec15d50aad9b1ce99b16ed344d75fcedd40694d8aff7ffee75b7b",
+      "identical_to_native_positive": true
     },
     {
       "path": "scripts/test-wave-current-source.lua",
-      "sha256": "85d029a071a47eff357fcf3e827126593b359c9f18e7e22054011a5b61d41c79"
+      "sha256": "85d029a071a47eff357fcf3e827126593b359c9f18e7e22054011a5b61d41c79",
+      "native_positive_tested_sha256": "85d029a071a47eff357fcf3e827126593b359c9f18e7e22054011a5b61d41c79",
+      "identical_to_native_positive": true
     },
     {
       "path": "scripts/fixture-current-source-job.ps1",
-      "sha256": "4febf898dbcb99707e86c1b0f405b3f803ef2467136851991b7480ecad044d97"
+      "sha256": "4febf898dbcb99707e86c1b0f405b3f803ef2467136851991b7480ecad044d97",
+      "native_positive_tested_sha256": "4febf898dbcb99707e86c1b0f405b3f803ef2467136851991b7480ecad044d97",
+      "identical_to_native_positive": true
     }
   ],
   "evidence": [
@@ -4881,7 +4903,8 @@
     "Exact imported broad routine proof depends on the separately owned shared reader; older readers fail closed rather than invent source evidence.",
     "A local canonical effect does not authorize ordinary blocked remote publication; sole Code2 must independently review any current grant/writer handoff.",
     "Arbitrary filesystem/SQL writers and unclassified historical effects remain outside ordinary Git-lock exclusion; global identity safety stays false.",
-    "No completed graph audit certificate is claimed; connected source was manually read and native accessor/driver/custody/source/proof callers inspected."
+    "No completed graph audit certificate is claimed; connected source was manually read and native accessor/driver/custody/source/proof callers inspected.",
+    "Independent Code2 found real gate JSONL hashes include line terminators; the later pure JS repair is verified by tiny actual-user/line-ending12 checks, not falsely folded into earlier native7/104 source identities."
   ],
   "global_identity_safety": false,
   "production_registry_admission": false,
@@ -4889,5 +4912,31 @@
   "gate_verified": false,
   "release_verified": false,
   "production_authority": false,
-  "activation": false
+  "activation": false,
+  "raw_record_correction": {
+    "checks": 12,
+    "skipped": 0,
+    "log": {
+      "path": "C:\\Users\\Victor\\AppData\\Local\\Temp\\wa-current-source-raw-record-test.log",
+      "sha256": "edd3ff60347d6bb321f39ebaae38ea16eedec30f9824b02d95a5dd841dda7352",
+      "bytes": 166
+    },
+    "source": {
+      "path": "C:\\Users\\Victor\\orca\\workspaces\\wasm-agent\\review-original-native-ui\\scripts\\test-wave-current-user-record.mjs",
+      "sha256": "87f733b62c8d42c2f68e75987def27f9162526dde27613d4196b0092ac4532a6",
+      "bytes": 1693
+    },
+    "changed_module": {
+      "path": "C:\\Users\\Victor\\orca\\workspaces\\wasm-agent\\review-original-native-ui\\scripts\\lib\\wave-current-source.mjs",
+      "sha256": "78b030af08987686f71e1aea497180d24da63b58be87211bffdcba11e032ee94",
+      "bytes": 16035
+    },
+    "actual_user_lines": [
+      207,
+      4074,
+      4093
+    ],
+    "original_hashes_preserved": true,
+    "native_inputs_changed": false
+  }
 }
