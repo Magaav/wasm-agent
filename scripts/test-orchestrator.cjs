@@ -19,7 +19,7 @@ function launch(name,args,env) {
 }
 function fixture(name) {
   const home=path.join(work,name);fs.mkdirSync(home,{recursive:true});
-  const env={...clean,WASM_AGENT_HOME:home,WA_GRAPH_WATCH:'0',WASM_AGENT_LUA_ROOT:root};
+  const env={...clean,WASM_AGENT_HOME:home,WA_GRAPH_WATCH:'0',WASM_AGENT_LUA_ROOT:process.env.ORCHESTRATOR_TEST_LUA_ROOT || (process.env.ORCHESTRATOR_TEST_EMBEDDED ? undefined : root)};
   const result=spawnSync(binary,['node'],{cwd:work,env,encoding:'utf8',windowsHide:true});
   assert.equal(result.status,0,result.stderr);
   return {name,env,home,...JSON.parse(result.stdout)};
@@ -69,6 +69,18 @@ print("cancel race ok")
   check(race.status===0 && race.stdout.includes('cancel race ok'),'cancellation wins before admission: '+(race.stderr||''));
   mock=http.createServer((req,res)=>{
     let body='';req.on('data',chunk=>body+=chunk);req.on('end',()=>{
+      // Signed peer status calls wa_model, which reads provider catalogue/usage.
+      // Those are GET control reads with no JSON request body, not inference.
+      fs.appendFileSync(path.join(work,'mock-requests.jsonl'),JSON.stringify({method:req.method,path:req.url,body})+'\n');
+      if(req.method==='GET' && req.url==='/models') {
+        res.writeHead(200,{'content-type':'application/json'});res.end(JSON.stringify({data:[{id:'fixture'}]}));return;
+      }
+      if(req.method==='GET' && req.url==='/usage') {
+        res.writeHead(200,{'content-type':'application/json'});res.end('{}');return;
+      }
+      if(req.method!=='POST' || req.url!=='/chat/completions') {
+        res.writeHead(404,{'content-type':'application/json'});res.end(JSON.stringify({error:'unexpected_mock_route'}));return;
+      }
       const request=JSON.parse(body);seen.push(request);
       const last=request.messages.filter(m=>m.role==='user').at(-1)?.content || '';
       const answer=()=>{if(!res.headersSent)res.writeHead(200,{'content-type':'text/event-stream'});res.end('data: '+JSON.stringify({choices:[{delta:{content:'verified '+last},finish_reason:'stop'}],usage:{prompt_tokens:10,completion_tokens:4,total_tokens:14}})+'\n\ndata: [DONE]\n\n');};
@@ -104,8 +116,17 @@ print("cancel race ok")
   const b=await until(async()=>{const b=await status(second.subagent_id);return b.session_id && b;},'overflow placement');
   check(b.execution_node==='local' && b.session_id!==a.session_id,'overflow uses next node with a separate session');
   const third=await call({action:'start',prompt:'third',idempotency_key:'third'});
-  await sleep(2500);
-  check((await status(third.subagent_id)).state==='queued','all-full work remains durably queued');
+  // Reservation is visible as placing while the signed admission request is
+  // outstanding. Observe the proven capacity refusal, rather than sampling
+  // that transient state at an arbitrary timer boundary.
+  const queueSamples=[];
+  const full=await until(async()=>{
+    const value=await status(third.subagent_id);queueSamples.push(value);
+    fs.writeFileSync(path.join(work,'all-full-status.json'),JSON.stringify(queueSamples,null,2));
+    assert.ok(!value.session_id && ['queued','placing'].includes(value.state),'all-full task must never be admitted');
+    return value.state==='queued' && value.error==='node_full' && value.attempts>0 && value;
+  },'all-full capacity refusal');
+  check(full.state==='queued','all-full work remains durably queued');
   const steering=await call({action:'steer',id:first.subagent_id,text:'remote corrected requirement',idempotency_key:'remote-steer'});
   assert.equal(steering.state,'queued','signed peer path accepts live steering');
   const turn=await call({action:'message',id:first.subagent_id,text:'follow up',idempotency_key:'follow'});

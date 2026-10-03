@@ -134,6 +134,39 @@ local function parked(memory_row)
   return memory_row.state == "unknown" or memory_row.state == "placing"
 end
 
+-- Status is a signed control read, never a model probe. Old peers and absent
+-- serving state remain unknown/compatible; responsiveness is not quota evidence.
+function M.serving_eligible(destination, model, requested_provider)
+  if destination=='local' then
+    if not provider.serving then return true,'unknown' end
+    if requested_provider and provider.active and provider.active().id~=requested_provider then return true,'provider_route_unavailable' end
+    local value=provider.serving(model)
+    return value.state~='blocked',value.reason or value.state
+  end
+  local target=nodes.find(destination)
+  local node_id=target and target.node_id
+  if not node_id or type(model)~='string' or model=='' then return true,'serving_identity_unknown' end
+  local ok,value=pcall(nodes.remote_call,destination,'status',{model=model,provider=requested_provider,serving_identity_only=true})
+  local identity=ok and type(value)=='table' and value.serving_identity
+  if type(identity)~='table' or identity.node_id~=node_id or identity.model~=model or
+      type(identity.provider)~='string' or identity.provider=='' or
+      (requested_provider and identity.provider~=requested_provider) or
+      type(identity.account_profile)~='string' or identity.account_profile=='' or
+      type(identity.binding)~='string' or not identity.binding:match('^%x+$') or #identity.binding~=64 or
+      type(identity.generation)~='number' or identity.generation<0 or identity.generation%1~=0 then
+    return true,'serving_identity_unknown'
+  end
+  ok,value=pcall(nodes.remote_call,destination,'status',{model=model,provider=requested_provider,serving_identity=identity})
+  local observed=ok and type(value)=='table' and value.serving
+  if type(observed)~='table' then return true,'serving_metadata_unknown' end
+  for _,key in ipairs({'node_id','model','provider','account_profile','binding','generation'}) do
+    if observed[key]~=identity[key] then return true,'serving_identity_changed' end
+  end
+  if observed.state=='blocked' and (observed.reason=='provider_monthly_quota' or observed.reason=='provider_eligibility_corrupt') then
+    return false,observed.reason
+  end
+  return true,'unknown'
+end
 function M.tick(api)
   for _, row in ipairs(query("SELECT * FROM orchestration_tasks WHERE state IN ('queued','placing') ORDER BY created_at LIMIT 32")) do
     local user = users.find(row.owner)
@@ -143,6 +176,11 @@ function M.tick(api)
       local policy = M.policy(row.owner)
       local args, ctx = json.decode(row.args), json.decode(row.context)
       local choices = policy.enabled and policy.nodes or {}
+      local has_capacity=false
+      for _,candidate in ipairs(choices) do if candidate.max_tasks>0 then has_capacity=true end end
+      if row.destination=='' and not has_capacity then
+        exec("UPDATE orchestration_tasks SET detail='waiting_approved_capacity' WHERE id=? AND state='queued'",{row.id})
+      end
       -- Once delivery might have happened, only resolve/retry the pinned target.
       if row.destination ~= "" then choices={{node=row.destination, max_tasks=tonumber(args.admission_limit) or 1}} end
       for _, item in ipairs(choices) do
@@ -150,6 +188,11 @@ function M.tick(api)
           local target = item.node == "local" and {local_node=true,online=true} or nodes.find(item.node)
           if target and (target.online ~= false or row.destination ~= "") then
             local destination = target.local_node and "local" or item.node
+            local eligible, reason=M.serving_eligible(destination,args.model,args.provider)
+            if not eligible and row.destination=='' then
+              exec("UPDATE orchestration_tasks SET detail=? WHERE id=? AND state='queued'",
+                {'waiting_provider_serving:'..reason,row.id})
+            else
             if row.destination == "" then
               args.admission_limit=item.max_tasks
               -- Counted where an operator can read it (`attempts` on the receipt): a task that keeps
@@ -189,6 +232,7 @@ function M.tick(api)
               exec("UPDATE orchestration_tasks SET state='unknown',detail=? WHERE id=?", {json.encode(result),row.id})
               break
             end
+            end -- serving eligibility; uncertain deliveries retain reconciliation rules
           end
         end
       end
