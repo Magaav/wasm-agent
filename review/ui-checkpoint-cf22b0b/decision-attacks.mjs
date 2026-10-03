@@ -1,0 +1,10 @@
+import fs from 'node:fs';
+import vm from 'node:vm';
+import {checkVerdict} from '../../review-snapshot/scripts/gate-check.mjs';
+const source=fs.readFileSync('review-snapshot/ui/app.js','utf8');
+const start=source.indexOf('function runStanding('), end=source.indexOf('\nasync function send(',start);
+const context={activeRun:()=>null}; vm.createContext(context); vm.runInContext(source.slice(start,end),context);
+const view={session:'mine',runId:7};
+for(const [name,health] of Object.entries({empty:{},alive:{worker:'alive'},nodechat:{worker:'alive',node_threads:[{label:'POST /node/chat',session:'foreign'}]},runs:{worker:'alive',node_threads:[{label:'POST /runs',session:'foreign'}]},queued:{run_ids:[{conversation:'mine',run_id:7,state:'queued'}]},unknownstate:{run_ids:[{conversation:'mine',run_id:7}]},foreignreuse:{node_threads:[{session:'foreign',run_id:7}]},scheduler:{run_ids:[{conversation:'mine',run_id:7,state:'running'}]}})) console.log(name,JSON.stringify(health),'=>',context.runStanding(health,view));
+const marker='ok   UI structure [stages: reload,startup-recovery,inspect-window,view-window]';
+for(const [name,text] of Object.entries({valid:marker,absent:'ok   UI structure',duplicate:marker+'\n'+marker,false:marker+' false',doublefield:marker+' [stages: false]',duplicateToken:'ok   UI structure [stages: reload,reload,startup-recovery,inspect-window,view-window]',denied:'FAIL stage did not run\n'+marker})) console.log('stage',name,checkVerdict({verdict:'browser'},0,text));

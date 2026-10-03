@@ -1,0 +1,21 @@
+{
+  "ok": true,
+  "action": "get",
+  "store": "C:\\Users\\Victor\\.wasm-agent\\sentinel\\deliveries",
+  "record": {
+    "schema": 1,
+    "delivery": "change/wa-session-childdispatch4c6f5927-a536-4018-8c04-ceccdcec00b4",
+    "branch": "change/wa-session-childdispatch4c6f5927-a536-4018-8c04-ceccdcec00b4",
+    "repository": "C:\\Users\\Victor\\.wasm-agent\\wa-worktree-childdispatch4c6f5927-a536-4018-8c04-ceccdcec00b4",
+    "tip": "cf22b0be2f3e432abb5ee14b6e73496f261c3df7",
+    "tree": "05ea236f9fb6aeb283d794fded573245f2f39384",
+    "producer": "child:dispatch:4c6f5927-a536-4018-8c04-ceccdcec00b4",
+    "review": null,
+    "admission": null,
+    "lane": null,
+    "landing": null,
+    "created_at": "2026-10-03T00:43:50.323Z",
+    "revision": 1,
+    "updated_at": "2026-10-03T00:43:50.325Z"
+  }
+}

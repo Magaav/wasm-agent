@@ -1,0 +1,13 @@
+check js:two.js: PASS exit=0 ms=197.9 log=C:\Users\Victor\AppData\Local\Temp\wa-check-runner-RVLGO9\pass\js_two.js.log
+ALL PASS
+check js:one.js: PASS exit=0 ms=207.5 log=C:\Users\Victor\AppData\Local\Temp\wa-check-runner-RVLGO9\pass\js_one.js.log
+ALL PASS
+check js:three.js: PASS exit=0 ms=200.9 log=C:\Users\Victor\AppData\Local\Temp\wa-check-runner-RVLGO9\pass\js_three.js.log
+ALL PASS
+check js:silent.js: FAIL exit=0 ms=34.2 log=C:\Users\Victor\AppData\Local\Temp\wa-check-runner-RVLGO9\fail\js_silent.js.log
+
+check js:failure.js: FAIL exit=7 ms=40.6 log=C:\Users\Victor\AppData\Local\Temp\wa-check-runner-RVLGO9\fail\js_failure.js.log
+ALL PASS
+check js:one.js: PASS exit=0 ms=193.0 log=C:\Users\Victor\AppData\Local\Temp\wa-check-runner-RVLGO9\fail\js_one.js.log
+ALL PASS
+gate check runner ok (focused isolation and browser stage contract, 0 skipped)

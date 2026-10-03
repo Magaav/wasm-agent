@@ -1,0 +1,2 @@
+check ui-browser: FAIL exit=1 ms=5247.9 log=C:\Users\Victor\AppData\Local\Temp\wa-checks-fwnhO8\ui-browser.log
+  FAIL UI FAIL: alive poll must not announce death
