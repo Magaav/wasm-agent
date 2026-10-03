@@ -337,15 +337,11 @@ export function activityInventory(source) {
     bindings.push(record);
     if (treePath && managed) held.push(record);
     if (record.in_flight) {
-      // Revalidate receipt application; unsupported settlement is never replayed.
-      const cleared = findResolution(resolutions.resolutions, claimIdentity(record, POSITIVE_CLAIM), {corroborated});
-      if (cleared) { record.resolved = {by: cleared.by || '', at: cleared.at || 0, evidence: cleared.evidence || '', claim: POSITIVE_CLAIM}; resolved_claims.push(record); continue; }
+      // Unsupported legacy receipts are read for audit only, never settlement.
       agents.push(record);
       continue;
     }
     if (claim) {
-      const resolution = findResolution(resolutions.resolutions, claimIdentity(record, record.claim), {corroborated});
-      if (resolution) { record.resolved = {by: resolution.by || '', at: resolution.at || 0, evidence: resolution.evidence || ''}; resolved_claims.push(record); continue; }
       claims.push(record);
       unresolved.push({session: id, reason: record.claim, worktree: record.worktree, child_id: record.child?.child_id || '', run_id: record.turn?.run_id || '', boot: record.turn?.boot || '', resolution: 'refused: exact_owner_settlement_and_drain_unavailable; inspect owning runtime operations and resource claims'});
       continue;

@@ -54,7 +54,7 @@ completion). Every way it fails to be *positive* has a name, and none of them re
 | `child_completion_claim_without_a_live_turn_or_process` | only a `child_completions` row claims it, and no local process names the tree |
 
 An unresolved claim makes the activity answer `unverifiable` (`runtime_state: unknown`), which
-**never** admits the next wave, and it is reported with a ready-made resolution command:
+**never** admits the next wave, and it reports the named unsupported-settlement refusal:
 `node scripts/wave-activity.mjs observe CONFIG` is read-only and reports exact
 claim identities, positive/corroborated status and `resolvable:false`.
 `resolve` now refuses unsupported legacy/prose settlement by name:
