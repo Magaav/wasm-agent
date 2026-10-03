@@ -1,0 +1,125 @@
+0. the fixture
+  ok   change/crlf stores a real CRLF blob
+  ok   change/diverge conflicts with the target
+1. two clean tips
+  ok   exit 0
+  ok   verdict pass
+  ok   both tips accepted
+  ok   two merge commits in the candidate
+  ok   the candidate tree is not the base tree
+  ok   the gate ran on the merged tree and its skip count was read
+  ok   the merged tree is LF-only
+  ok   nothing was pushed and the target ref did not move
+  ok   the push precondition is reported for the merger
+  ok   the clone checks out bytes the way the source tree does
+  ok   the clone is retained when asked
+  ok   the reported candidate tree is the clone HEAD tree
+  ok   the merged tip is an ancestor of the candidate
+  ok   the merge subject names the branch it merged
+  ok   the candidate commit is a real merge (two parents)
+  ok   origin/main inside the clone is pinned to the proved base
+  ok   the candidate tree's own commit-msg hook judged the merges
+  ok   the retained gate log matches its recorded hash
+  ok   the JSON object was written to --json
+2. the merged-tree gate fails
+  ok   exit 3 (a gate failure is not a pass)
+  ok   verdict gate_failed
+  ok   the gate exit is reported as it was
+  ok   the candidate is reported even though the gate failed
+  ok   the gate log is streamed to a file, so a holder that dies mid-gate still leaves evidence
+3. a gate that exits 0 without a verdict
+  ok   exit 3: an unproven pass is not a pass
+  ok   exit 0 with no verdict line is recorded as exactly that
+3b. a gate that is killed at its timeout
+  ok   a gate that did not exit is not a pass
+  ok   and its partial output survived the kill
+  ok   timeout retains its reservation until owned descendant drain is proved
+  ok   owned child recorded its native PID before the timeout
+  ok   reservation reconciles only after explicit native child drain proof
+3c. the lane does not leak its own switches into the gate
+  ok   the run itself still passes
+  ok   MSYS_NO_PATHCONV does not reach the gate: it inverts path conversion for the gate's own native calls
+  ok   and what was dropped is recorded
+4. a tip that does not merge with the target
+  ok   exit 2 (a blocked input is not a success)
+  ok   verdict blocked
+  ok   the blocked input is named
+  ok   the conflicted path is reported
+  ok   the state comes from the proof against the target
+  ok   no clone was made for a batch that cannot contain its input
+  ok   an accepted tip that was not merged says so
+  ok   no gate was spent and no merged tree was claimed
+5. a tip that does not merge with another input
+  ok   exit 2, blocked
+  ok   only the tip that lost the merge is blocked
+  ok   the conflicted path is named from the merge itself
+  ok   the input merged before it is still counted as merged
+  ok   the candidate stops at the conflict and is not gated
+6. a tip ancestry already contains
+  ok   a contained tip is not an error and nothing is gated
+  ok   it is counted as a skip, with its reason
+  ok   no gate was spent on a candidate with no new merge
+7. a candidate that would store CRLF
+  ok   CRLF in the merged tree blocks before the gate
+  ok   the offending file is named
+  ok   the gate is not spent on a tree that violates an invariant
+8. --all-pending
+  ok   one unmergeable tip stops the batch
+  ok   every pending tip discovery named is an input
+  ok   each input is one of the five pending tips, by exact SHA
+  ok   exactly the tip that conflicts with the target is blocked
+  ok   the default is to stop rather than gate a candidate missing an input
+9. --partial
+  ok   a gated subset with a blocked input is still not a success
+  ok   the accepted subset was gated on the merged tree
+  ok   the two independent tips are in the candidate
+  ok   and the push precondition refuses it
+9b. the persistent tree
+  ok   a repository under the temp directory never gets the default tree, and says why
+  ok   a named tree is created on the first run, and that run gates normally
+  ok   the second run reuses that tree
+  ok   and the verdict and the skip count are the same as the first run produced
+  ok   the reused tree ends clean, as a merge of the integration target
+  ok   the reuse lock was released
+  ok   a dirty tree is reset, and what it discarded is named
+  ok   and the run gates the same candidate, with the tree clean afterwards
+  ok   a tree another process holds is refused by name, with the holder named
+  ok   and the run gates in a disposable clone, leaving the refused tree and its lock alone
+  ok   a directory that is not a checkout is refused by name
+  ok   and the candidate is still gated, so a refusal never blocks a landing
+  ok   and nothing in the refused directory was touched
+  ok   a tree inside the temp root named like the sweepable family is refused by name
+  ok   and that run clones instead, leaving no tree for a sweep to find
+10. no repository named
+  ok   exit 4: the lane refuses to guess which repository it is landing into
+  ok   and says so in its JSON
+11. the source repository is intact
+  ok   main still points where the fixture left it
+  ok   every input branch kept its exact tip
+  ok   and so did the CRLF, contained and diverged tips
+  ok   the fixture target really moved after the fork
+  ok   the source worktree is clean
+  ok   no branch was created in the source repository
+  ok   nothing was stashed
+12. default-command proof persists actual disposable-source identity
+  ok   real fixture test.sh default command passes
+  ok   retained proof verifies after actual clone removal
+  ok   runner hash equals immutable committed original driver bytes, not candidate filename or HEAD hint
+  ok   altered recorded driver hash is rejected rather than relabelled
+  ok   original disposable tested repo preserved and actually retired
+  ok   actual tested HEAD remains immutable
+  ok   identical tree reuses original retained proof with zero new gate runs
+  ok   derived receipt preserves untouched original identity
+13. the evolution default and its restore knob
+  ok   the evolution default exits 0
+  ok   an ungated landing is still a publishable pass
+  ok   the default gate mode is none
+  ok   the gate did not run
+  ok   an ungated landing is NOT release_verified
+  ok   the candidate records zero gate runs
+  ok   the publisher precondition is available without a gate
+  ok   the run says on its own output that the gate did not run by policy
+  ok   WA_MERGE_LANE_GATE_MODE=full puts the gate back on a landing
+  ok   a custom gate command is never release evidence, even in full mode
+  ok   an unknown gate mode is refused by name
+merge-lane spine ok (107 checks)
