@@ -1,0 +1,13 @@
+{
+  "stage": "RUN-IDENTITY",
+  "tip": "3f1f88a65b9216782f95644e4a45dc069a61a95b",
+  "tree": "ea9a7d937ddbd10cfbec07988407e3e6b1a87805",
+  "reviewer": "child:dispatch:366a7144-3381-43ea-b7dd-d5ad7ac3adbd",
+  "review_commit": "11b2c1c50c1562d8af525e80fafbd82ecf460ac4",
+  "verdict": "narrowed",
+  "scope": "decimal identity, authenticated high-ID inspect/status/archive restart, Engine events and relevant-source caller binding",
+  "full_ui_verdict": "held; original refusals preserved",
+  "private_artifacts": "own git metadata identity-review-3f1f88a/source",
+  "raw_evidence": "Own CR-bearing negative logs preserved as .raw in same metadata before LF-only repository conversion; producer originals readonly verified",
+  "publication": "local only, intentionally no push; no full release gate"
+}
