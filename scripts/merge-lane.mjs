@@ -901,6 +901,7 @@ async function main() {
     if (options.deliveryStore) {
       const delivery=readRecord(options.deliveryStore,input.name.replace(/^origin\//,''));
       if (!delivery) { record.state='blocked';record.reason='delivery admission record missing';blocked.push(record);inputs.push(record);continue; }
+      record.delivery_revision=delivery.revision;
       record.admission=evaluate({repo:gitDir,record:delivery,sessionDb:options.deliverySessionDb,recovery:options.recoveryReceipt ? {receipt_file:options.recoveryReceipt,delivery:delivery.delivery,tip:delivery.tip,tree:delivery.tree,review_commit:delivery.review?.commit,reviewer:delivery.review?.reviewer,expected_main:requireGit(gitDir,['rev-parse','origin/main'],'main')} : null});
       if(record.admission.decision==='refused'||record.admission.observed.tip!==input.sha) {
         record.state='blocked';record.reason=record.admission.refusal||'admitted tip moved';blocked.push(record);inputs.push(record);continue;
@@ -953,6 +954,11 @@ async function main() {
       current: options.clone ? path.resolve(options.clone) : null}));
     clone = openIntegrationTree(gitDir, baseSha, options, laneBranch);
     for (const record of accepted) {
+      if(options.deliveryStore){
+        const current=readRecord(options.deliveryStore,record.name.replace(/^origin\//,''));
+        const fresh=current&&evaluate({repo:gitDir,record:current,sessionDb:options.deliverySessionDb});
+        if(!fresh||fresh.decision==='refused'||fresh.observed.tip!==record.sha||current.revision!==record.delivery_revision)throw Object.assign(Error('delivery_changed_before_candidate_merge'),{exit:2});
+      }
       const stepStarted = nowMs();
       const step = {name: record.name, sha: record.sha, state: 'merged', ms: null, conflicts: [], detail: null};
       // Identity proof: the object merged here is the exact commit that was proven, not a ref that

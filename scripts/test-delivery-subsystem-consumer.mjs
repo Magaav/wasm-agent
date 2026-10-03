@@ -26,7 +26,7 @@ try{
  }
  // Private source splice at the pre-write boundary, no production switch/callback.
  // A child blocks on a file barrier; parent mutates real private refs/DB/record/source.
- const instrument=path.join(root,'instrument');fs.mkdirSync(instrument);fs.cpSync(path.join(source,'scripts'),instrument,{recursive:true});
+ const instrument=path.join(root,'instrument');fs.mkdirSync(instrument);fs.cpSync(path.join(source,'scripts'),instrument,{recursive:true});fs.cpSync(path.join(source,'skills'),path.join(root,'skills'),{recursive:true});
  const original=fs.readFileSync(path.join(source,'scripts/delivery-admission.mjs'),'utf8'),needle='      const fresh=evaluate(';
  assert.equal(original.split(needle).length,2);
  const barrier=`fs.writeFileSync(${JSON.stringify(path.join(root,'ready'))},'ready'); while(!fs.existsSync(${JSON.stringify(path.join(root,'release'))}))Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,10);`;
@@ -47,6 +47,15 @@ try{
   fs.writeFileSync(helper,bytes);const d=new DatabaseSync(dbFile);d.prepare('UPDATE sessions SET worktree=? WHERE id=?').run(producer,owner);d.close();
  }
  for(const kind of ['ref','source','binding','record'])await race(kind);await race('binding',true);
+ const mergeOriginal=fs.readFileSync(path.join(source,'scripts/merge-lane.mjs'),'utf8');const mergeNeedle='      if(options.deliveryStore){';assert.equal(mergeOriginal.split(mergeNeedle).length,2);
+ for(const kind of ['binding','record']){
+  for(const f of ['ready','release'])fs.rmSync(path.join(root,f),{force:true});
+  fs.writeFileSync(path.join(instrument,'merge-lane.mjs'),mergeOriginal.replace(mergeNeedle,barrier+'\n'+mergeNeedle));
+  const child=spawn(process.execPath,[path.join(instrument,'merge-lane.mjs'),'--repo',repo,branch,'--delivery-store',store,'--delivery-session-db',dbFile,'--gate-mode','none','--no-hooks','--no-reuse-tree'],{stdio:['ignore','pipe','pipe']});let output='';child.stdout.on('data',b=>output+=b);child.stderr.on('data',b=>output+=b);const done=new Promise(r=>child.on('close',r));const deadline=Date.now()+30000;
+  while(!fs.existsSync(path.join(root,'ready'))){if(Date.now()>deadline){child.kill();throw Error('merge barrier timeout '+output);}await new Promise(r=>setTimeout(r,20));}
+  if(kind==='binding'){const d=new DatabaseSync(dbFile);d.prepare('UPDATE sessions SET worktree=? WHERE id=?').run(reviewer,owner);d.close();}else{const newer=readRecord(store,branch);newer.race_preserved='merge-newer';writeRecord(store,newer);}
+  fs.writeFileSync(path.join(root,'release'),'go');assert.notEqual(await done,0,output);assert.equal(git(repo,'rev-parse','HEAD'),receipt.base);const d=new DatabaseSync(dbFile);d.prepare('UPDATE sessions SET worktree=? WHERE id=?').run(producer,owner);d.close();
+ }
  git(producer,'commit','--allow-empty','-qm',`moved\n\nAgent: fixture session=${owner}`);assert.equal(check(record).decision,'refused');git(producer,'checkout','--detach','-q',receipt.head);
  const binding=new DatabaseSync(dbFile);binding.prepare('UPDATE sessions SET worktree=? WHERE id=?').run(reviewer,owner);assert.equal(check(record).decision,'refused');binding.close();
  for(const [suite,count]of [['test-delivery-admission.mjs',58],['test-delivery-store.mjs',9],['test-merge-lane.mjs',107]]){const line=suite.includes('merge')?`merge-lane spine ok (${count} checks)`:suite.includes('store')?`delivery store ok (${count} checks, 0 skipped)`:`delivery admission ok (${count} checks)`;assert.equal(terminal(suite,line),true);for(const bad of ['',line+'\n'+line,line+'\n1 skipped',line.replace(String(count),'1'),line+'\nFAIL bad'])assert.equal(terminal(suite,bad),false);}
