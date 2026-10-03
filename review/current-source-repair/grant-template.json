@@ -1,0 +1,35 @@
+{
+  "schema": 1,
+  "kind": "wave-current-ref-source-grant",
+  "authority": "operator-delegated",
+  "actor": {"role": "delegated-operator", "session": null, "source_user_session": "01a10197-514c-7283-a700-de9ccb223e22"},
+  "effect": "canonical-current-ref-source-cas",
+  "publication": "canonical-local-only",
+  "task_contract": "original-deliveries-then-root-chatfix-then-clean-deploy",
+  "global_identity_safety": false,
+  "production_registry_admission": false,
+  "historical_effects": "unknown-preserved",
+  "risk_contract": "current-ref-only-unclassified-effects-remain-possible",
+  "source_tip": null, "source_tree": null,
+  "source_review_commit": null, "source_review_path": null,
+  "executor": {"context": null, "process_id": null, "creation_stamp": null, "resource_root": null},
+  "child_policy": "owned-direct-native-child",
+  "user_task": {"path": null, "sha256": null},
+  "user_record_sha256": "7207db07c60096dff6a11f3f4200cdfd86adf29013406d9e1f975326b1a80866",
+  "user_gate_decision": {"path": null, "sha256": null},
+  "legacy_snapshot": {"path": null, "sha256": null},
+  "repo": null, "git_common_dir": null, "ref": "refs/heads/main",
+  "origin_url": null, "expected_main": null,
+  "candidate_head": null, "candidate_tree": null,
+  "expires": null, "nonce": null,
+  "delivery": {
+    "branch": null, "tip": null, "tree": null, "producer": null, "reviewer": null,
+    "review": {"commit": null, "path": null}, "evidence": {"commit": null, "path": null}
+  },
+  "custody": {
+    "kind": "current-operator-external-custody",
+    "producer": {"session": null, "worktree": null, "branch": null, "tip": null, "tree": null},
+    "reviewer": {"session": null, "worktree": null, "branch": null, "tip": null, "tree": null},
+    "evidence": [{"path": null, "sha256": null}]
+  }
+}

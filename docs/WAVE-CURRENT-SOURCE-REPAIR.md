@@ -107,6 +107,60 @@ preservation. A containing suspended no-breakaway/kill-on-close Windows Job help
 records queried flags, membership, actual exit and active-process count zero.
 Fixture labels never represent human production approval or full application proof.
 
+## Capture and exact invocation, after independent code review
+
+`review/current-source-repair/grant-template.json` is a non-authorizing template;
+its nulls refuse. Root must fill source/custody/current-grant and review objects
+from actual immutable descriptors, and use the original raw user evidence paths.
+Do not copy fixture IDs, an old receipt, or the external Orca handle into native
+executor fields. The ordinary source descriptor is prepared/reviewed first.
+
+Within trusted native Lua whose `ctx` already came from actual current admission,
+invoke the fixed external driver with a trusted parked capture callback:
+
+```lua
+-- ctx is the actual admitted current context, never reconstructed from JSON.
+local resources=dofile('lua/core/resources.lua')
+assert(resources.begin(ctx).ok) -- or use the current successful held admission
+local driver=dofile('scripts/wave-current-ref-driver.lua')
+local packet={repo=canonical_repo,source_file=reviewed_source_descriptor,
+  grant_file=immutable_grant_envelope}
+packet.observe=function(phase,observation)
+  if phase=='context' then
+    assert(host.write_file(current_observation_file,json.encode(observation)))
+    while not host.read_file(current_release_file) do host.sleep(10) end
+  end
+end
+local result=driver.run(packet)
+-- Keep failures/uncertainty and the fresh nonce; never auto-replay or retire old records.
+```
+
+The callback's `observation.context` and actual process/creation/resource_root
+populate the grant executor while that same native run remains parked. Source
+descriptor runtime tuples pin user record207 and gate records4074/4093. The
+delegated issuer commits the exact descriptor; Code2 independently reviews it
+and commits the review. Grant envelope:
+
+```json
+{"commit":"<grant commit>","path":"<tracked grant path>","sha256":"<exact raw grant blob SHA256>",
+ "review":{"commit":"<independent review commit>","path":"<tracked review path>"}}
+```
+
+The review object has `kind:"wave-current-ref-source-grant-review"`,
+`verdict:"passed"`, `descriptor_commit`, `descriptor_path`,
+`descriptor_sha256`, and distinct `reviewer`; each commit ends with its actual
+actor provenance trailer. Write the reviewed envelope and only then release the
+parked callback. The driver itself starts the one fixed CLI:
+
+```text
+<pinned Node executable> <sealed root>/scripts/wave-current-ref-bootstrap.mjs <canonical repo> <source descriptor file> <grant envelope file> <fresh driver-generated channel>
+```
+
+That CLI cannot be invoked independently with supplied JSON authority: its native
+parent, exact owned operation/child, channel nonce and source/runtime closure must
+all be retained and live. This document/template does not create the admitted
+context, authorize Root's grant, or activate production.
+
 Risk: readonly process identity capture adds a bounded OS observation to ordinary
 operation launch. Missing observations only narrow the new accessor; ordinary
 launch/stop/settlement behavior and serialized operation records remain unchanged.
