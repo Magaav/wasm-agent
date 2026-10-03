@@ -1,5 +1,14 @@
 use super::*;
 #[test]
+fn effect_admission_requires_an_enabled_matching_event_wake_definition() {
+    let mut job:Value=serde_json::from_str(include_str!("../../../jobs/on-sentinel-return.json")).unwrap();
+    assert!(!deploy_protocol::hook_ready(&job));job["enabled"]=json!(true);
+    assert!(deploy_protocol::hook_ready(&job));
+    for (section,key,value) in [("trigger","kind","schedule"),("trigger","topic","other"),("action","kind","run"),("action","dedupe_key","other")] {
+        let mut changed=job.clone();changed[section][key]=json!(value);assert!(!deploy_protocol::hook_ready(&changed));
+    }
+}
+#[test]
 fn busy_protocol_ack_is_persistent_but_never_completion() {
     let _lock=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
     let home=std::env::temp_dir().join(format!("wa-protocol-{}",std::process::id()));

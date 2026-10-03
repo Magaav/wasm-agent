@@ -79,7 +79,13 @@ pub(crate) fn intake(request: &Value, id: &str) -> Result<()> {
 
 pub(crate) fn ready() -> bool {
     installed_binary().parent().map(|p|p.join("runtime-worktree.txt").is_file()).unwrap_or(false)
-        && jobs::store().get("onSentinelReturn").map(|j|j["enabled"]==true).unwrap_or(false)
+        && jobs::store().get("onSentinelReturn").map(|j|hook_ready(&j)).unwrap_or(false)
+}
+
+pub(crate) fn hook_ready(job:&Value) -> bool {
+    job["enabled"]==true && job["trigger"]["kind"]=="event"
+        && job["trigger"]["topic"]=="sentinel.return" && job["action"]["kind"]=="wake"
+        && job["action"]["dedupe_key"]=="event_key"
 }
 
 /// Validate every privileged input again in the effect worker. Reservations survive replacement;
@@ -91,8 +97,7 @@ pub(crate) fn admit(request:&Value) -> Result<PathBuf> {
     let binding=sentinel_return::bind_parent(id)?;
     if binding["owner"]!=owner {bail!("protocol_owner_mismatch");}
     let job=jobs::store().get("onSentinelReturn").map_err(|e|anyhow::anyhow!(e.to_string()))?;
-    if job["enabled"]!=true || job["trigger"]["topic"]!="sentinel.return"
-        || job["action"]["kind"]!="wake" || job["action"]["dedupe_key"]!="event_key" {bail!("return_hook_not_ready");}
+    if !hook_ready(&job) {bail!("return_hook_not_ready");}
     let script=canonical_script(request["expected_sha"].as_str().context("protocol_sha_missing")?)?;
     let target=verify_target(node_port(),true).context("protocol_native_target_not_owned")?;
     let dir=sentinel_dir().join("deploy-protocol").join(id);
