@@ -1666,6 +1666,7 @@ fn process_requests(background: bool, held: &mut Held) -> Result<u32> {
     let newest_upgrade = newest_upgrade_in(&entries);
     for path in entries {
         use std::sync::atomic::Ordering;
+        if background && stop_path().exists() {break;}
         let preview:Value=std::fs::read(&path).ok().and_then(|b|serde_json::from_slice(&b).ok()).unwrap_or(Value::Null);
         let reserved_id=path.file_stem().and_then(|s|s.to_str()).unwrap_or("");
         if deploy_protocol::reserved(reserved_id) {
@@ -2119,8 +2120,10 @@ fn watch() -> Result<()> {
         if let Err(error) = process_requests(true, &mut held) {
             audit("box-error", "requests", &error.to_string());
         }
+        if stop_path().exists(){continue;}
         if let Ok(entries)=std::fs::read_dir(sentinel_dir().join("deploy-protocol")) {
             for entry in entries.flatten() {
+                if stop_path().exists(){break;}
                 if entry.path().is_dir() {
                     if let Some(id)=entry.file_name().to_str() {
                         if let Err(error)=sentinel_return::observe(id) {audit("return-observation-problem",id,&error.to_string());}
@@ -2128,8 +2131,10 @@ fn watch() -> Result<()> {
                 }
             }
         }
+        if stop_path().exists(){continue;}
         check_triggers(&mut triggers);
         if let Err(error)=automations.tick() {audit("jobs-error","tick",&error.to_string());}
+        if stop_path().exists(){continue;}
         // Watching the node, not restarting it: an auto-restart that nobody asked for would fight the
         // operator every time they stop a node on purpose. The outage is reported; restarting is a
         // request.
