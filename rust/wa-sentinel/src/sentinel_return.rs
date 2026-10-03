@@ -51,6 +51,7 @@ pub(crate) fn resolve_event(event:&Value) -> Result<Value> {
     deploy_protocol::fence(&intent,id)?;
     let parent=binding["parent"].as_str().context("return_parent_missing")?;
     if parent_owner(parent)?!=binding["owner"].as_str().unwrap_or("") { bail!("return_parent_owner_changed"); }
+    validated_ack(&binding,now_epoch())?;
     let journal:Value=serde_json::from_slice(&std::fs::read(dir.join("returns").join(format!("{key}.json"))).context("return_journal_missing")?)?;
     if journal["id"]!=id || journal["event_key"]!=key || journal["expected_sha"]!=intent["expected_sha"] || journal["parent"]!=binding["parent"] || journal["owner"]!=binding["owner"] { bail!("return_journal_identity_mismatch"); }
     let at=journal["at"].as_u64().context("return_timestamp_missing")?;
@@ -68,7 +69,34 @@ pub(crate) fn resolve_event(event:&Value) -> Result<Value> {
     Ok(journal)
 }
 
+/// Intake's immutable acknowledgement, never a queue receipt or a guessed clock.
+fn validated_ack(binding:&Value,now:u64) -> Result<(Value,u64)> {
+    let intent=&binding["intent"];
+    let dir=sentinel_dir().join("deploy-protocol").join(binding["id"].as_str().context("ack_id_missing")?);
+    let ack:Value=serde_json::from_slice(&std::fs::read(dir.join("ack.json")).context("ack_missing; unknown, never replay")?)
+        .context("ack_corrupt; unknown, never replay")?;
+    let object=ack.as_object().context("ack_not_object; unknown, never replay")?;
+    if object.len()!=9 || object.keys().any(|k| !["schema","id","expected_sha","session","owner","queued_at","phase","detail","at"].contains(&k.as_str()))
+        || ack["schema"]!=1 || ack["id"]!=binding["id"] || ack["expected_sha"]!=intent["expected_sha"]
+        || ack["session"]!=intent["session"] || ack["session"]!=binding["parent"]
+        || ack["owner"]!=intent["owner"] || (intent.get("owner").is_some() && ack["owner"]!=binding["owner"])
+        || ack["queued_at"]!=intent["queued_at"] || !ack["detail"].is_string()
+        || !["held","spawned","failed","unknown","verified"].contains(&ack["phase"].as_str().unwrap_or("")) {
+        bail!("ack_identity_or_revision_mismatch; unknown, never replay");
+    }
+    let at=ack["at"].as_u64().context("ack_timestamp_unsupported; unknown, never replay")?;
+    if at<intent["queued_at"].as_u64().unwrap_or(u64::MAX) || at>now {bail!("ack_timestamp_invalid; unknown, never replay");}
+    let check=dir.join("check.json");
+    if check.exists() {
+        let saved:Value=serde_json::from_slice(&std::fs::read(check)?)
+            .context("check_ack_binding_corrupt; unknown, never replay")?;
+        if saved["ack"]!=ack {bail!("check_ack_binding_changed_or_legacy; unknown, never replay");}
+    }
+    Ok((ack,at))
+}
+
 fn observed_phase(binding:&Value,state:&Value,now:u64) -> (String,String) {
+    if let Err(error)=validated_ack(binding,now) {return ("unknown".into(),error.to_string());}
     let id=binding["id"].as_str().unwrap_or("");
     let intent=&binding["intent"];
     let queued=intent["queued_at"].as_u64().unwrap_or(u64::MAX);
@@ -130,16 +158,32 @@ pub(crate) fn observe(id:&str) -> Result<()> {
     observation_lock.lock()?;
     let mut cursor:Value=std::fs::read(dir.join("observation.json")).ok().and_then(|b|serde_json::from_slice(&b).ok()).unwrap_or(json!({"slot":0,"next_at":0}));
     let now=now_epoch();
+    let ack=validated_ack(&binding,now);
+    if let Err(error)=&ack {
+        // Preserve any prior immutable return, but revoke its delivery authority.
+        let key=format!("{id}-{}",cursor["slot"].as_u64().unwrap_or(0));
+        let problem=json!({"id":id,"event_key":key,"expected_sha":binding["intent"]["expected_sha"],"parent":binding["parent"],"owner":binding["owner"],"phase":"unknown","at":now,"detail":error.to_string()});
+        std::fs::create_dir_all(dir.join("returns"))?;
+        let file=dir.join("returns").join(format!("{key}.json"));
+        if !file.exists(){wa_operation::atomic_json(&file,&problem)?;}
+        wa_operation::atomic_json(&dir.join("ack-problem.json"),&problem)?;
+        bail!("{error}");
+    }
+    let (ack,ack_at)=ack?;
     if cursor["next_at"].as_u64().unwrap_or(0)>now {return Ok(());}
     // Check deadlines exist independently of parent delivery. A busy parent owns one pending event;
     // missed ten-second checks coalesce into the latest durable observation, without extra wakes.
-    let queued=binding["intent"]["queued_at"].as_u64().context("queued_timestamp_missing")?;
     let checks:Value=std::fs::read(dir.join("check.json")).ok().and_then(|b|serde_json::from_slice(&b).ok()).unwrap_or(Value::Null);
-    let due=checks["next_at"].as_u64().unwrap_or(queued+10);
-    if checks.is_null(){wa_operation::atomic_json(&dir.join("check.json"),&json!({"id":id,"expected_sha":binding["intent"]["expected_sha"],"next_at":due,"parent":binding["parent"],"at":now}))?;}
+    if !checks.is_null() && (checks["ack"]!=ack || checks["id"]!=id || checks["expected_sha"]!=binding["intent"]["expected_sha"] || checks["parent"]!=binding["parent"]
+        || checks["next_at"].as_u64().map(|t|t<ack_at+10 || (t-ack_at)%10!=0).unwrap_or(true)) {
+        wa_operation::atomic_json(&dir.join("ack-problem.json"),&json!({"id":id,"phase":"unknown","detail":"check_ack_binding_unknown; no queue-time fallback or replay","at":now}))?;
+        bail!("check_ack_binding_unknown; no queue-time fallback or replay");
+    }
+    let due=checks["next_at"].as_u64().unwrap_or(ack_at+10);
+    if checks.is_null(){wa_operation::atomic_json(&dir.join("check.json"),&json!({"id":id,"expected_sha":binding["intent"]["expected_sha"],"ack":ack,"next_at":due,"parent":binding["parent"],"at":now}))?;}
     if now>=due {
         let missed=(now-due)/10;
-        let check=json!({"id":id,"expected_sha":binding["intent"]["expected_sha"],"due_at":due,"at":now,"coalesced":missed,"next_at":due+(missed+1)*10,"parent":binding["parent"]});
+        let check=json!({"id":id,"expected_sha":binding["intent"]["expected_sha"],"ack":ack,"due_at":due,"at":now,"coalesced":missed,"next_at":due+(missed+1)*10,"parent":binding["parent"]});
         wa_operation::atomic_json(&dir.join(format!("check-{due}.json")),&check)?;
         wa_operation::atomic_json(&dir.join("check.json"),&check)?;
     }
@@ -188,14 +232,22 @@ mod completion_boundary_tests {
     use super::*;
     #[test]
     fn utc_outcomes_refuse_partial_locale_future_and_invalid_calendar_values() {
+        let _lock=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
         assert_eq!(parse_iso("1970-01-01T00:00:00Z"),Some(0));
         assert_eq!(parse_iso("2026-10-03T00:00:00Z"),Some(1790985600));
         for at in ["", "2026-02-30T00:00:00Z", "2026-10-03T-1:00:00Z", "2026-10-03T00:00:00", "2026-10-03T00:00:00+00:00"] {assert_eq!(parse_iso(at),None,"{at}");}
-        let binding=json!({"id":"private","intent":{"queued_at":now_epoch(),"expected_sha":"a".repeat(40)}});
+        let previous=std::env::var_os("WASM_AGENT_HOME");
+        let home=std::env::temp_dir().join(format!("wa-return-time-{}-{}",std::process::id(),now_epoch()));
+        std::env::set_var("WASM_AGENT_HOME",&home);
+        let intent=json!({"id":"private","verb":"deploy","session":"parent","owner":"owner","queued_at":now_epoch(),"expected_sha":"a".repeat(40)});
+        deploy_protocol::intake(&intent,"private").unwrap();
+        let binding=json!({"id":"private","intent":intent,"parent":"parent","owner":"owner"});
+        assert!(validated_ack(&binding,now_epoch()).is_ok());
         let future=json!({"id":"private","expected_sha":"a".repeat(40),"phase":"spawned","at":now_epoch()+1});
         assert_eq!(observed_phase(&binding,&future,now_epoch()).0,"unknown");
         let missing=json!({"id":"private","expected_sha":"a".repeat(40),"phase":"spawned"});
         assert_eq!(observed_phase(&binding,&missing,now_epoch()).0,"unknown");
+        match previous{Some(v)=>std::env::set_var("WASM_AGENT_HOME",v),None=>std::env::remove_var("WASM_AGENT_HOME")};
     }
     #[test]
     fn interrupted_submission_never_earns_a_second_http_attempt() {

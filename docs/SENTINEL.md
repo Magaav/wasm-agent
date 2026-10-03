@@ -60,6 +60,12 @@ The deterministic hook constructs instructions without a provider call; the
 approved Engine wake then runs the ordinary parent conversation.
 
 A check is due ten seconds after acknowledgement and recurs while updating.
+The native observer validates the immutable ack's full source, request, parent,
+owner, queue identity and integer timestamp (never future dated) before delivery.
+Missing, corrupt, mismatched or unsupported acknowledgements are unknown: they
+create no check, wake or effect authority. Check records retain the exact ack;
+changed acknowledgements and legacy checks without that binding require explicit
+reconciliation, with no fabricated queue-time fallback or automatic replay.
 Busy parents keep one pending event; due observations coalesce on disk rather
 than spawning extra wakes. Revision cancellation before submission can emit the
 same immutable key against the new revision. Before HTTP submission the watcher
