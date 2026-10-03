@@ -1867,7 +1867,12 @@ run_proof_fixture policy 62 node scripts/test-subagents-policy.cjs "$BIN"
 run_proof_fixture children 18 node scripts/test-subagents.cjs "$BIN"
 run_proof_fixture fleet 20 node scripts/test-orchestrator.cjs "$BIN"
 gate_run node scripts/test-completion-wake.cjs "$BIN"
-gate_run node scripts/test-sentinel-real-parent.cjs "$BIN" "$PWD/rust/wa-sentinel/target/debug/wa-sentinel$( [ "${OS:-}" = "Windows_NT" ] && printf '.exe' )"
+if [ "${OS:-}" = "Windows_NT" ]; then
+  gate_run python scripts/test-sentinel-owned-job.py --repo "$PWD" --evidence "$(git rev-parse --git-path owned-return-gate-$$)"
+else
+  echo "SKIP: Windows owned return Job proof"
+  SKIPPED=$((SKIPPED + 1))
+fi
 for fixture in session-view durable-steering child-compaction child-budget-refusal completion-outbox orchestrator-defaults; do
   WA_SCRIPT="scripts/test-$fixture.lua" "$BIN" --db "$DB.$fixture"
 done
