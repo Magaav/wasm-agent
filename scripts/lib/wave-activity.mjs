@@ -263,8 +263,10 @@ export function claimIdentity(record, claim) {
 }
 // A process holding the tree is stronger evidence than an old resolution: it can never be cleared.
 export function findResolution(resolutions, identity, {corroborated = null} = {}) {
-  if (corroborated === true) return null;
-  return resolutions.find(entry => resolutionMatches(entry, identity)) || null;
+  // This inventory has no authenticated exact-owner terminal + descendant/effect
+  // drain adapter. Neither prose receipts nor absence in a process scan prove it.
+  // Preserve legacy receipts, but do not replay them as settlement.
+  return null;
 }
 
 // THE INVENTORY. Everything the wave proofs and the ownership proofs need, from our own records.

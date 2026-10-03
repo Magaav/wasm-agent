@@ -43,8 +43,8 @@ export function observe(configFile) {
   const resolutions = readResolutions(store.resolutions);
   const command = session => `node scripts/wave-activity.mjs resolve ${configFile} ${session} "<what you observed>"`;
   const activity_claims = [
-    ...inventory.agents.map(agent => claimSummary(agent, POSITIVE_CLAIM, {positive: true, resolvable: agent.corroborated !== true, resolution: agent.corroborated === true ? 'refused: a local process is holding this tree' : command(agent.session)})),
-    ...inventory.claims.map(claim => claimSummary(claim, claim.claim, {positive: false, resolvable: true, resolution: command(claim.session)})),
+    ...inventory.agents.map(agent => claimSummary(agent, POSITIVE_CLAIM, {positive: true, resolvable: false, resolution: 'refused: exact_owner_settlement_and_drain_unavailable' })),
+    ...inventory.claims.map(claim => claimSummary(claim, claim.claim, {positive: false, resolvable: false, resolution: 'refused: exact_owner_settlement_and_drain_unavailable'})),
     ...inventory.resolved_claims.map(claim => claimSummary(claim, claim.resolved?.claim || claim.claim, {positive: false, resolvable: false, resolved: claim.resolved}))
   ];
   return {
@@ -79,6 +79,10 @@ export function resolve(configFile, session, evidence, flags = {}) {
     if (inventory.resolved_claims.some(entry => entry.session === session)) fail(`claim_already_resolved:${session}`);
     fail(`claim_not_found:${session}`);
   }
+  // No trusted runtime adapter currently exposes exact terminal ownership plus
+  // descendant/effect drain to this CLI. Fail before even an idempotent receipt
+  // lookup: legacy prose cannot be upgraded to proof by being replayed.
+  fail(`exact_owner_settlement_and_drain_unavailable:${session}:inspect operation settlement and retained resource claims through the owning runtime; do not delete the claim or receipt`);
   const identity = claimIdentity(record, claimName);
   // The operator must name the identity that distinguishes this claim from a later one.
   const named = identity.child_id || identity.run_id || identity.boot;
