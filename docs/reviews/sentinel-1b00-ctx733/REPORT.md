@@ -1,0 +1,29 @@
+# Exact 1b00 bounded independent review — PASS
+
+Reviewed immutable source `1b00a5027d8c9f4606dc788add1271746571e813`, tree `ca5ddaeb0d31ce77c3603b8e5a23689d29e0d003`, retaining d91 and 82 ancestry. Reviewer dispatch `ctx_7338cebf645c` / task `task_2915535ddddb` is independent of producer `ctx_317692c0e8fc`. **PASS for the bounded acknowledgement/timer/saved-check correction:** no current blocker reproduced in the requested source cases. This is not application/release proof, installation authority, publication, a current-source grant, or global historical certainty; Code2 `ctx_50a3da02dcf1` retains admission and main publication.
+
+The tiny five-file diff puts saved-check validation in `validated_ack` through shared `bound_check`, used by both observer and `resolve_event`/compose and therefore jobs' instruction-before-submission path. Supported identity, ack binding, integer observation/deadline stamps and attributable due/coalescing progression are checked together. Resolution requires a current check; missing established checks refuse rather than reset. Initial missing-ack unknown evidence can survive genuine later intake. Actual callers, changed owner-binding unit fixture, documentation and bounded runner/control changes were inspected; no product repair or unreviewed current-ref/policy changes were imported.
+
+## Own focused execution
+
+New full private clone, private bare origin/main, homes/ports and new native CLI request IDs: `C:/Users/Victor/AppData/Local/Temp/wa-1b-review` and `wa-1b-cases`. Raw review evidence is under `C:/Users/Victor/orca/projects/wasm-agent/.git/worktrees/review-original-sentinel/review-1b00`.
+
+- Actual source-matching offline sentinel build, jobs 2. The copied frozen cache initially lacked generated SQLite `bindgen.rs` and exited 101; that first log remains. Cleaning only that package in the new private copied cache and rebuilding succeeded. No prior binary/log was substituted for the new build.
+- One changed owner-binding Rust test passed; zero failed/ignored, 44 tests explicitly filtered out. This is not a new native45 run.
+- Ten grouped genuine-intake cases passed, zero contract counterexamples, POSTs or effects. The prior wrong-ID/full-SHA/parent/string/early-time cases, missing `next_at`, changed saved ack, and deleted established check all refuse both actual native observe and compose with empty instruction output and preserved invalid/missing state. `resolve_event` is reached through actual compose, not a JavaScript classifier.
+- The missing-then-late case obtains intent through the real native request CLI and ack through actual `once` intake, preserves the original unknown journal, and establishes its first check without replay. The delayed case waits twelve seconds before real intake, confirms no early check and ACK+10, then waits eleven seconds and confirms a valid due/coalesced check on both routes. Private hook queues are approved fixture state; no job runner/watcher submits a POST. Parent GET responses are explicitly mocked; actual Lua ownership is not newly claimed.
+- One private source-built causal mutant removes exactly the shared `bound_check` call. Its binary is sealed before execution. The committed bounded native runner fails at `wrong-id compose must refuse`, actual exit 0 versus expected 1; child/Job exit is 1, active 0. A new genuine-intake wrong-ID control subsequently passes with the unchanged original built binary, including valid compose before mutation and refusal after mutation. No extra matrices were run to obtain that restored green result.
+
+Every CLI root uses the existing native owned Job wrapper: created suspended, assigned and queried in the exact Job before resume, queried flags 8192 (kill-on-close, neither breakaway flag), previous suspend count 1, actual native generation samples, explicit exit and final active 0. Exact receipts, argv, source/binary/runner/log hashes and case outputs are retained. This proves those private children, not an OS security sandbox or unrelated historical drain.
+
+## Scope and preserved limits
+
+F1/F2 and d91's inconsistent saved-check observation/composition finding are resolved for this bounded source review. F3 long-Windows structured problem-journal publication remains **UNRESOLVED**, with its named audit error and prior report preserved. Privileged filesystem races, observational owner compatibility, unsupported/legacy check reconciliation, and existing trust boundaries remain unchanged. No old nonce, intent, pending submission, effect or timestamp is cleared or guessed.
+
+Old 82/d91 reports and evidence were not rewritten or rehashed wholesale, per the explicit speed instruction. Producer23/19/Lua8 logs and older private installer22/verifier61 remain their own evidence; none is relabeled as this review's execution. No new full application/combined gate, native45/full normal66/UI101, Lua8, installer, verifier61, Linux/two-node or embedded test was run. No release was selected.
+
+The failed inline PowerShell invocation for the restored control was a quoting/parser failure before execution; its tool output remains in this dispatched transcript. A durable Python runner performed the actual restored check. This and the initial cache failure are not suppressed or counted as successful tests.
+
+Fetched origin/main and source/reviewer merge-tree proofs are recorded in the review metadata. The own review branch preserves immutable producer and prior review parents; the new review commit adds only this report with actual provenance. No producer push, main/ref publication, real runtime/home/database/claim/config/service/window/account/provider/model/permission mutation, deployment, or production effect occurred. The next action belongs to Code2's routine focused admission and source-grant disposition.
+
+Agent: codex session=ctx_7338cebf645c
