@@ -79,7 +79,7 @@ const VERDICT = {
 // instruction is approved policy, and the two are joined here rather than being improvised per wake.
 const OPERATING_INSTRUCTION = {
   [VERDICT.required]:
-    "This child touched something a deploy ships, so the wave owes exactly ONE deploy at its end - not one per child, and never from this child's branch. Evaluate the child's work first (read its session evidence and the diff above): a child's branch is a proposal, not a release. Deploy only after the wave's work is reviewed and integrated as one delivery, by the lane that owns that act, and only when the tree to deploy is the tree that was gated. Do not restart the node or hand-run a deploy from here on this notification alone.",
+    "This child touched something a deploy ships, so the wave owes exactly ONE deploy at its end - not one per child, and never from this child's branch. Evaluate the child's work first (read its session evidence and the diff above): a child's branch is a proposal, not a release. Deploy from clean main only after the wave's work is reviewed, integrated and pushed as one delivery, by the lane that owns that act. A full gate is required only when the user selects pre-release verification. Do not restart the node or hand-run a deploy from here on this notification alone.",
   [VERDICT.none]:
     'Nothing this child changed is copied by a deploy, so no deploy is owed for it and there is nothing to install. Evaluate the child\'s work on its own terms; do not spend the wave\'s single deploy on documentation or tests, and do not treat "no install impact" as "no review needed".',
   [VERDICT.unknown]:

@@ -365,6 +365,9 @@ async function main() {
     "an unreadable checkout never reports 'no install impact'");
   const verdicts = (name) => wakes.filter((wake) => wake.text.includes(`DEPLOY VERDICT: ${name}`)).length;
   check(verdicts("deploy required at the wave's end") === 5, "every deploy-shipping child was reported as deploy-required");
+  check(blockFor(CHILDREN[0].id).includes("only when the user selects pre-release verification")
+    && !blockFor(CHILDREN[0].id).includes("tree that was gated"),
+    "both the computed instruction and fixed prompt leave pre-release gate selection to the user");
   check(verdicts("no install impact") === 2, "both non-shipping children were reported as having no install impact");
   check(verdicts("cannot be computed") === 3, "all three unmeasurable children read cannot be computed");
   process.stdout.write(`--- the injected block for ${CHILDREN[0].id} ---\n${blockFor(CHILDREN[0].id)}\n`
@@ -429,7 +432,14 @@ async function main() {
   const pluginBuild = 'cargo build --manifest-path "$ROOT/rust/plugins/whatsapp-transcript/Cargo.toml"';
   const deployText = fs.readFileSync(path.join(noBuildDir, "deploy.sh"), "utf8");
   check(deployText.includes(pluginBuild), "the plugin build line is where this mutation expects it");
-  fs.writeFileSync(path.join(noBuildDir, "deploy.sh"), deployText.replace(pluginBuild, `true # was: ${pluginBuild}`));
+  // Use a synthetic absent output so an already-built ignored artifact cannot
+  // make this negative case pass by the checker's legitimate exists-in-tree path.
+  const absentOutput='rust/plugins/whatsapp-transcript/target/wasm32-unknown-unknown/release/fixture-unbuilt-output.wasm';
+  check(!fs.existsSync(path.join(repo,absentOutput)), "synthetic copied output is actually absent");
+  const copiedOutput=`\ncp -f "$ROOT/${absentOutput}" "$INSTALL_DIR/plugins/"\n`;
+  fs.writeFileSync(path.join(noBuildDir, "deploy.sh"),deployText+copiedOutput);
+  check(runChecker(["--installers",noBuildDir]).status===0,"the declared crate build covers its synthetic output before removal");
+  fs.writeFileSync(path.join(noBuildDir, "deploy.sh"), deployText.replace(pluginBuild, `true # build intentionally removed`)+copiedOutput);
   const noBuild = runChecker(["--installers", noBuildDir]);
   check(noBuild.status !== 0, "removing the build that produces a copied output makes the guard go red");
   check(/FAIL copies rust\/plugins\/whatsapp-transcript\/target\/.*not in the tree and this installer does not build it/.test(noBuild.stderr || ""),
