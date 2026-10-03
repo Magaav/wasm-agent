@@ -1,0 +1,24 @@
+// Run AFTER producer-admission run; never invoked inside the four proof suites.
+import fs from 'node:fs';import path from 'node:path';import os from 'node:os';import assert from 'node:assert/strict';import {spawnSync} from 'node:child_process';import {DatabaseSync} from 'node:sqlite';
+import {evaluate} from './delivery-admission.mjs';import {verifyFocused} from './producer-admission.mjs';import {terminal} from './lib/delivery-producer-proof.mjs';import {writeRecord} from './lib/delivery-store.mjs';
+const source=path.resolve('.');
+function git(repo,...args){const r=spawnSync('git',['-c','user.name=fixture','-c','user.email=fixture@local',...args],{cwd:repo,encoding:'utf8',maxBuffer:32*1024*1024});assert.equal(r.status,0,r.stderr);return r.stdout.trim();}
+const receipt=JSON.parse(fs.readFileSync(path.resolve(source,git(source,'rev-parse','--git-path','wa-producer-check.json'))));assert.equal(verifyFocused(source,receipt).admission_verified,true);
+const root=fs.mkdtempSync(path.join(os.tmpdir(),'wa-script-consumer-')),repo=path.join(root,'repo'),producer=path.join(root,'producer'),reviewer=path.join(root,'reviewer'),dbFile=path.join(root,'memory.db'),store=path.join(root,'records');
+try{
+ git(root,'clone','-q','--no-hardlinks',source,repo);git(repo,'update-ref','refs/remotes/origin/main',receipt.base);
+ const owner=process.env.WASM_AGENT_SESSION||'child:dispatch:1f044075-6b4b-4bce-b359-40c131d73533',branch=`change/wa-session-${owner.replace(/[^A-Za-z0-9_-]/g,'')}`;
+ // Clone checks out original branch: detach before binding its exact immutable tip.
+ git(repo,'checkout','--detach','-q',receipt.base);git(repo,'branch','-D',branch);git(repo,'worktree','add','-qb',branch,producer,receipt.head);
+ git(repo,'worktree','add','-qb','change/wa-session-reviewer',reviewer,receipt.base);git(reviewer,'commit','--allow-empty','-qm','independent fixture review\n\nAgent: fixture session=reviewer');const anchor=git(reviewer,'rev-parse','HEAD');
+ const db=new DatabaseSync(dbFile);db.exec('CREATE TABLE sessions(id TEXT,worktree TEXT,workspace_required INTEGER,workspace_state TEXT,workspace_branch TEXT)');for(const [id,dir,b]of [[owner,producer,branch],['reviewer',reviewer,'change/wa-session-reviewer']])db.prepare('INSERT INTO sessions VALUES(?,?,?,?,?)').run(id,dir,1,'allocated',b);db.close();
+ const record={delivery:branch,branch,repository:producer,producer:owner,tip:receipt.head,tree:receipt.tree,producer_checks:receipt,review:{reviewer:'reviewer',commit:anchor,tip:receipt.head,tree:receipt.tree,verdict:'passed',findings:[]}};
+ const check=r=>evaluate({repo,record:r,sessionDb:dbFile});assert.equal(check(record).decision,'admitted');writeRecord(store,record);
+ const cli=spawnSync(process.execPath,[path.join(source,'scripts/delivery-admission.mjs'),'admit',branch,'--repo',repo,'--store',store,'--session-db',dbFile,'--by','integrator'],{encoding:'utf8'});assert.equal(cli.status,0,cli.stderr);
+ const lane=spawnSync(process.execPath,[path.join(source,'scripts/merge-lane.mjs'),'--repo',repo,branch,'--delivery-store',store,'--delivery-session-db',dbFile,'--gate-mode','none','--no-hooks','--no-reuse-tree'],{encoding:'utf8',maxBuffer:32*1024*1024});assert.equal(lane.status,0,lane.stderr+lane.stdout);
+ for(const patch of [{head:'0'.repeat(40)},{base:'0'.repeat(40)},{results:receipt.results.slice(1)},{sources:{}},{results:receipt.results.map((r,i)=>i? r:{...r,log:path.join(root,'missing')})}])assert.equal(check({...record,producer_checks:{...receipt,...patch}}).decision,'refused');
+ git(producer,'commit','--allow-empty','-qm',`moved\n\nAgent: fixture session=${owner}`);assert.equal(check(record).decision,'refused');git(producer,'checkout','--detach','-q',receipt.head);
+ const binding=new DatabaseSync(dbFile);binding.prepare('UPDATE sessions SET worktree=? WHERE id=?').run(reviewer,owner);assert.equal(check(record).decision,'refused');binding.close();
+ for(const [suite,count]of [['test-delivery-admission.mjs',58],['test-delivery-store.mjs',9],['test-merge-lane.mjs',107]]){const line=suite.includes('merge')?`merge-lane spine ok (${count} checks)`:suite.includes('store')?`delivery store ok (${count} checks, 0 skipped)`:`delivery admission ok (${count} checks)`;assert.equal(terminal(suite,line),true);for(const bad of ['',line+'\n'+line,line+'\n1 skipped',line.replace(String(count),'1'),line+'\nFAIL bad'])assert.equal(terminal(suite,bad),false);}
+ console.log('delivery script consumer ok (generated real subsystem receipt; evaluator/admission CLI/merge consumer; identity/source/log/coverage/ref/binding negatives; private rehearsal; 0 skipped)');
+}finally{fs.rmSync(root,{recursive:true,force:true});}

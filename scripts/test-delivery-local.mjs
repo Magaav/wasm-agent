@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import {spawnSync} from 'node:child_process';
 import {DatabaseSync} from 'node:sqlite';
 import {evaluate} from './delivery-admission.mjs';
-import {runFocused} from './producer-admission.mjs';
+import {runFocused,plan,verifyFocused} from './producer-admission.mjs';
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'wa-local-admission-')),repo=path.join(root,'repo');fs.mkdirSync(repo);
 function git(cwd,...args){const r=spawnSync('git',['-c','user.name=fixture','-c','user.email=fixture@local',...args],{cwd,encoding:'utf8'});assert.equal(r.status,0,r.stderr);return r.stdout.trim();}
 try {
@@ -22,6 +22,8 @@ try {
  git(reviewer,'commit','--allow-empty','-qm','review exact delivery\n\nAgent: fixture session=reviewer');const anchor=git(reviewer,'rev-parse','HEAD');
  const dbFile=path.join(root,'memory.db'),db=new DatabaseSync(dbFile);db.exec('CREATE TABLE sessions(id TEXT,worktree TEXT,workspace_required INTEGER,workspace_state TEXT,workspace_branch TEXT)');
  for(const [id,dir] of [['producer',producer],['reviewer',reviewer]])db.prepare('INSERT INTO sessions VALUES(?,?,?,?,?)').run(id,dir,1,'allocated',`change/wa-session-${id}`);db.close();
+ // Source-level applicability: the real delivery script diff must select its four suites.
+ const actual=plan(path.resolve('.'));if(actual.files.some(f=>f==='scripts/delivery-admission.mjs'))assert.deepEqual(actual.checks,['delivery-subsystem']);
  const focused=await runFocused(producer);assert.equal(focused.admission_verified,true,JSON.stringify(focused));
  const record={delivery:'change/wa-session-producer',branch:'change/wa-session-producer',repository:producer,producer:'producer',tip,tree,producer_checks:JSON.parse(fs.readFileSync(focused.receipt)),review:{reviewer:'reviewer',commit:anchor,tip,tree,verdict:'passed',findings:[]}};
  const check=r=>evaluate({repo,record:r,sessionDb:dbFile});
