@@ -645,6 +645,18 @@ end
 -- The single control facade. `ctx` is server-built for every caller.
 function M.control(args, ctx)
   args = args or {}
+  local native_after
+  if args.action=='events' then
+    local value=args.after
+    if value==nil then native_after=0
+    elseif type(value)=='number' then native_after=value
+    elseif type(value)=='string' and value:match('^%d+$') then native_after=tonumber(value)
+    end
+    if not native_after or native_after~=native_after or native_after<0 or
+       native_after%1~=0 or native_after>9007199254740991 then
+      return {error='invalid_native_event_cursor'}
+    end
+  end
   ctx = derive_ctx(ctx)
   local action = tostring(args.action or "list")
   if ctx.subagent then
@@ -757,10 +769,8 @@ function M.control(args, ctx)
   local target = args.id or args.subagent_id
   if target then call.id = tostring(target) end
   if action=='events' then
-    local after=tonumber(args.after) or 0
-    if after<0 or after%1~=0 or after>9007199254740991 then return {error='invalid_native_event_cursor'} end
     -- Preserve exact safe integer cursors across the JSON encoder's %.14g numbers.
-    call.after=string.format('%.0f',after)
+    call.after=string.format('%.0f',native_after)
     call.archive=args.archive==true
     for _,key in ipairs({'session_id','attempt_id','node_id','event_node_id','event_epoch'}) do call[key]=args[key] end
   end

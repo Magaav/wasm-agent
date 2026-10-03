@@ -107,6 +107,13 @@ function finish(res,text){event(res,{choices:[{delta:{content:text},finish_reaso
   check(!!login.session,'isolated foreign owner credential exists');
   check((await api('subagents',binding,login.session)).error==='forbidden_subagent','native refuses foreign owner before evidence');
   check((await api('subagents',{...binding,after:9007199254740990})).error==='native_event_cursor_out_of_range','native refuses future cursor');
+  for(const after of ['garbage',true,false,{},[],-1,0.5,'9007199254740993','1.5','-1',''])
+    check((await api('subagents',{...binding,after})).error==='invalid_native_event_cursor','native refuses malformed supplied cursor '+JSON.stringify(after));
+  for(const after of [0,'0',String(live.next_seq)]) {
+    const page=await api('subagents',{...binding,after});
+    check(page.ok===true&&page.next_seq>=Number(after),'native valid initial/exact decimal cursor '+JSON.stringify(after));
+  }
+  check((await api('subagents',{...binding,after:{},session_id:'foreign-session'})).error==='invalid_native_event_cursor','malformed native cursor refuses before identity lookup');
   await evaluate(nativePage,`window.nativePane=document.createElement('wa-agent-session');document.body.append(nativePane);nativePane.task=${JSON.stringify(nativeChild)};refreshAgentPane(nativePane).then(()=>true)`);
   await until(()=>evaluate(nativePage,"nativePane.transcript.textContent.includes('LIVE-B')"),'native authenticated session pane live tail');
   check(await evaluate(nativePage,"nativePane.transcript.textContent.split('LIVE-B').length===2 && nativePane.transcript.textContent.includes('raw-299')"),'native pane consumes all journal pages exactly once');
@@ -160,11 +167,35 @@ function finish(res,text){event(res,{choices:[{delta:{content:text},finish_reaso
   await cdp('Network.emulateNetworkConditions',{offline:false,latency:0,downloadThroughput:-1,uploadThroughput:-1},nativePage);
   await until(()=>evaluate(nativePage,"messages.textContent.includes('DROP-RAW')"),'native actual network drop reconnect');
   check(await evaluate(nativePage,"messages.textContent.split('DROP-RAW').length===2"),'native reconnect exact once new event');
+  await evaluate(nativePage,`window.retainedPane=document.createElement('wa-agent-session');document.body.append(retainedPane);retainedPane.task=${JSON.stringify(nativeChild)};refreshAgentPane(retainedPane).then(()=>{runPolling=true;return true;})`);
+  const retainedBefore=await evaluate(nativePage,`(()=>{const trace=retainedPane.transcript.querySelector('wa-trace');trace.open=false;window.retainedRaw=retainedPane.transcript.querySelector('[data-live-channel="delta"]');retainedPane.transcript.scrollTop+=retainedRaw.getBoundingClientRect().top-retainedPane.transcript.getBoundingClientRect().top+30;window.retainedPlace=transcriptPlace(retainedPane.transcript);window.mainRaw=messages.querySelector('[data-live-channel="delta"]');return {key:retainedRaw.dataset.ledgerKey,place:retainedPlace};})()`);
   const original='NATIVE-B-COMPLETE'+('原'.repeat(16000));
   finish(held.get('B'),original);
   await until(async()=>{const r=await api('subagents',{action:'status',id:receipt.subagent_id});return r.settled;},'native child terminal');
   held.delete('B');
   check((await api('health')).subagents.active===0,'all native child threads settled before scratch retirement');
+  const terminalTask=await api('subagents',{action:'status',id:receipt.subagent_id});
+  const terminalJournal=path.join(root,'.wasm-agent','subagents',receipt.subagent_id,'events.sqlite');
+  fs.renameSync(terminalJournal,terminalJournal+'.fallback-preserved');
+  const modelsBeforeFallback=report.models.length;
+  try {
+    await evaluate(nativePage,'syncNativeSession(chatSession,conversationEpoch,activeNode).then(()=>true)');
+    check(await evaluate(nativePage,"messages.textContent.includes('NATIVE-B-COMPLETE')&&document.body.innerText.includes('raw history gap remains')"),'native main unavailable journal shows stored terminal with visible gap');
+    await evaluate(nativePage,'retainedPane.task='+JSON.stringify(terminalTask)+';refreshAgentPane(retainedPane).then(()=>true)');
+    check(await evaluate(nativePage,"retainedPane.transcript.textContent.includes('NATIVE-B-COMPLETE')&&retainedPane.notice.textContent.includes('showing stored terminal messages')&&retainedPane.notice.textContent.includes('raw history gap remains')"),'native attached pane unavailable journal shows stored terminal with visible source and gap');
+    check(await evaluate(nativePage,"retainedRaw.isConnected&&mainRaw.isConnected&&retainedPane.transcript.querySelector('wa-trace').open===false"),'native terminal fallback preserves already seen raw DOM and folds');
+    check(await evaluate(nativePage,`(()=>{const place=transcriptPlace(retainedPane.transcript);return place.key===${JSON.stringify(retainedBefore.place.key)}&&Math.abs(place.offset-(${retainedBefore.place.offset}))<=1;})()`),'native terminal fallback preserves raw scroll anchor');
+    await evaluate(nativePage,'syncNativeSession(chatSession,conversationEpoch,activeNode).then(()=>refreshAgentPane(retainedPane)).then(()=>true)');
+    check(await evaluate(nativePage,"messages.textContent.split('NATIVE-B-COMPLETE').length===2&&retainedPane.transcript.textContent.split('NATIVE-B-COMPLETE').length===2"),'native repeated terminal fallback stored answer exactly once');
+    await evaluate(nativePage,`window.freshFallbackPane=document.createElement('wa-agent-session');document.body.append(freshFallbackPane);freshFallbackPane.task=${JSON.stringify(terminalTask)};refreshAgentPane(freshFallbackPane).then(()=>true)`);
+    check(await evaluate(nativePage,"freshFallbackPane.transcript.textContent.includes('NATIVE-B-COMPLETE')&&freshFallbackPane.notice.textContent.includes('native_event_evidence_unavailable')"),'native fresh pane same stored terminal despite unavailable journal');
+    check(await evaluate(nativePage,`retainedPane.transcript.querySelector('[data-source="stored-session"]')!==null`),'native terminal fallback labels stored message source');
+  }finally{fs.renameSync(terminalJournal+'.fallback-preserved',terminalJournal);}
+  await evaluate(nativePage,'syncNativeSession(chatSession,conversationEpoch,activeNode).then(()=>refreshAgentPane(retainedPane)).then(()=>true)');
+  check(await evaluate(nativePage,"messages.textContent.split('NATIVE-B-COMPLETE').length===2&&retainedPane.transcript.textContent.split('NATIVE-B-COMPLETE').length===2&&retainedPane.notice.textContent.includes('journal restored')"),'native restored journal never duplicates known terminal answer');
+  check(await evaluate(nativePage,"retainedRaw.isConnected&&mainRaw.isConnected"),'native restored journal retains previously seen raw anchors');
+  check(report.models.length===modelsBeforeFallback,'native terminal fallback and restore never replay inference or effects');
+  await evaluate(nativePage,'freshFallbackPane.remove();retainedPane.remove();runPolling=false;true');
   await until(()=>evaluate(nativePage,"messages.textContent.includes('NATIVE-B-COMPLETE')"),'native terminal ledger fallback');
   const complete=await api('subagents',{action:'session',id:receipt.subagent_id,limit:200,byte_limit:4096});
   const reference=complete.messages.find(r=>r.omitted&&r.role==='assistant');
