@@ -1,0 +1,47 @@
+check js:one.js: PASS exit=0 ms=207.7 log=C:\Users\Victor\AppData\Local\Temp\wa-check-runner-uVl3as\pass\js_one.js.log
+ALL PASS
+check js:two.js: PASS exit=0 ms=207.7 log=C:\Users\Victor\AppData\Local\Temp\wa-check-runner-uVl3as\pass\js_two.js.log
+ALL PASS
+check js:three.js: PASS exit=0 ms=199.4 log=C:\Users\Victor\AppData\Local\Temp\wa-check-runner-uVl3as\pass\js_three.js.log
+ALL PASS
+check js:silent.js: FAIL exit=0 ms=33.0 log=C:\Users\Victor\AppData\Local\Temp\wa-check-runner-uVl3as\fail\js_silent.js.log
+
+check js:failure.js: FAIL exit=7 ms=38.6 log=C:\Users\Victor\AppData\Local\Temp\wa-check-runner-uVl3as\fail\js_failure.js.log
+ALL PASS
+check js:one.js: PASS exit=0 ms=194.3 log=C:\Users\Victor\AppData\Local\Temp\wa-check-runner-uVl3as\fail\js_one.js.log
+ALL PASS
+node:internal/modules/run_main:107
+    triggerUncaughtException(
+    ^
+
+AssertionError [ERR_ASSERTION]: C:\Users\Victor\.wasm-agent\wa-worktree-childdispatch4c6f5927-a536-4018-8c04-ceccdcec00b4\review\ui-repair\private-identity\scripts\run-key-build-proof.cjs:5
+function verify(repo,binary,receipt){const saved=JSON.parse(fs.readFileSync(receipt));if(JSON.stringify(saved.sources)!==JSON.stringify(sources(repo))||saved.binary_sha256!==hash(binary))throw Error('run_key_build_binding_mismatch');return saved;}
+                                                                                                                                                                                           ^
+
+Error: run_key_build_binding_mismatch
+    at verify (C:\Users\Victor\.wasm-agent\wa-worktree-childdispatch4c6f5927-a536-4018-8c04-ceccdcec00b4\review\ui-repair\private-identity\scripts\run-key-build-proof.cjs:5:194)
+    at Object.<anonymous> (C:\Users\Victor\.wasm-agent\wa-worktree-childdispatch4c6f5927-a536-4018-8c04-ceccdcec00b4\review\ui-repair\private-identity\scripts\run-key-build-proof.cjs:7:102)
+    at Module._compile (node:internal/modules/cjs/loader:1872:14)
+    at Object..js (node:internal/modules/cjs/loader:2003:10)
+    at Module.load (node:internal/modules/cjs/loader:1594:32)
+    at Module._load (node:internal/modules/cjs/loader:1396:12)
+    at wrapModuleLoad (node:internal/modules/cjs/loader:255:19)
+    at Module.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:154:5)
+    at node:internal/main/run_main_module:33:47
+
+Node.js v24.19.0
+
+
+1 !== 0
+
+    at file:///C:/Users/Victor/.wasm-agent/wa-worktree-childdispatch4c6f5927-a536-4018-8c04-ceccdcec00b4/review/ui-repair/private-identity/scripts/test-gate-check.mjs:37:14
+    at process.processTicksAndRejections (node:internal/process/task_queues:104:5) {
+  generatedMessage: false,
+  code: 'ERR_ASSERTION',
+  actual: 1,
+  expected: 0,
+  operator: 'strictEqual',
+  diff: 'simple'
+}
+
+Node.js v24.19.0

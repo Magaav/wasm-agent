@@ -11,6 +11,7 @@ export function catalog(repo) {
     {id:'recovery-windows',command:[process.execPath,'scripts/test-recovery-two-window.cjs','--embedded'],binary:true,verdict:'proof',proof_kind:'recoveryWindows',minimum:13,platform:'win32',
       available:fs.existsSync(`${repo}/scripts/test-recovery-two-window.cjs`),resources:{cpu:1,memory_mb:1024,exclusive:['browser']},coverage:['ui/*','rust/wa-host/src/serve.rs'],isolation:'two real Chromium contexts; private node/home/DB/ports; mock inference'},
     {id:'ui-browser',command:['powershell','-NoProfile','-ExecutionPolicy','Bypass','-File','scripts/test-ui.ps1'],verdict:'browser',
+      subjects:['reload','startup-recovery','inspect-window','view-window'],
       resources:{cpu:1,memory_mb:1024,exclusive:['browser']},coverage:['ui/*'],isolation:'private DB, home, browser profile and dynamically allocated ports'},
     {id:'install-isolation',command:[process.execPath,'scripts/test-install-isolation.mjs'],verdict:'js',
       resources:{cpu:1,memory_mb:128,exclusive:[]},coverage:['scripts/upgrade.sh','scripts/verify-install.sh'],isolation:'private home/install; extracted real shipping block'},

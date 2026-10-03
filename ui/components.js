@@ -1393,12 +1393,12 @@ class WaTasks extends HTMLElement {
     for (const conversation of sessions) {
       const records=runs[conversation.id] || [];
       for (const run of records.filter(r=>['running','queued','unknown','not_started','failed'].includes(r.state))) {
-        const detail={session:conversation.id,runId:run.run_id};
+        const detail={session:conversation.id,runId:run.run_key ?? run.run_id};
         const controls=[['Open conversation','open',detail],['Inspect run','inspect-run',detail]];
         if (['running','queued'].includes(run.state)) controls.push(['Cancel run','cancel-run',detail]);
         add(conversation.title || conversation.id,run.state,
           run.state==='unknown' ? 'Execution was interrupted. Inspect effects before continuing.' :
-          run.state==='not_started' ? 'This request did not start. Inspect it before submitting again.' : `Run ${run.run_id}`,controls);
+          run.state==='not_started' ? 'This request did not start. Inspect it before submitting again.' : `Run ${run.run_key ?? run.run_id}`,controls);
       }
     }
     const rank={running:0,accepted:0,queued:1,unknown:2,not_started:2,failed:3};

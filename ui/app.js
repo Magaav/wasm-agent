@@ -207,7 +207,7 @@ function apiHeaders(extra) {
 // `current`, so the match is exact. With no session known yet the window claims no run, which is the
 // safe default - it has no transcript to reconcile.
 function activeRun(health, session = chatSession) {
-  const isChat = (entry) => /^POST \/chat(?:\?|$)/.test(entry?.label || "");
+  const isChat = (entry) => /^POST \/(?:node\/)?chat(?:\?|$)/.test(entry?.label || "");
   const mine = (entry) => isChat(entry) && !!session && entry.session === session;
   return (health?.node_threads || []).find(mine) || (mine(health?.current) ? health.current : null);
 }
@@ -1130,7 +1130,7 @@ async function refreshOperationProgress(health, running) {
   // whichever node it is attached to. The `worker:` *prefix* is the operation record's own durable
   // value (rust/wa-operation), not a health field, so it keeps its name too.
   const owners = [];
-  if (running.run_id != null) owners.push("run:" + running.run_id);
+  if (running.run_id != null) owners.push("run:" + runKey(running));
   const nodeThreadId = running.node_thread_id != null
     ? running.node_thread_id
     : (running.worker_id != null ? running.worker_id : running.id);
@@ -1639,7 +1639,8 @@ function repaintMessages(rows, options = {}) {
         runStartedAt = Number(message.created_at) > 0 ? Number(message.created_at) * 1000 : 0;
         replayMessageEndedAt = 0;
         replayRunLastMessage = null;
-        add("user", message.content || "");
+        const userBody=add("user", message.content || "");
+        userBody.closest('wa-message').dataset.ledgerKey=String(message.id || message.seq);
       } else if (message.role === "assistant") {
         replayRunLastMessage = message;
         if (Number(message.created_at) > 0) replayMessageEndedAt = Number(message.created_at) * 1000;
@@ -1669,6 +1670,8 @@ function repaintMessages(rows, options = {}) {
             handleEvent({ type: "tool", call_id: raw.id, name: fn.name, arguments: args || {} });
           }
         }
+        if(runBubble)runBubble.dataset.ledgerKey=String(message.id || message.seq);
+        for(const [index,segment] of Array.from(runBubble?.querySelectorAll('wa-run,wa-trace,.reasoning,.seg')||[]).entries())segment.dataset.ledgerKey=String(message.id || message.seq)+':segment:'+index;
         if (message.id) renderedMessageIds.add(String(message.id));
       } else if (message.role === "tool") {
         replayRunLastMessage = message;
@@ -1755,7 +1758,9 @@ function paintChildTranscript(container, rows, options = {}) {
     replayMessageEndedAt, replayRunLastMessage, renderedMessageIds };
   transcript = container;
   try {
-    return repaintMessages(rows || [], { ...options, notify: false });
+    const result=repaintMessages(rows || [], { ...options, notify: false });
+    for(const event of options.events || [])handleEvent(event);
+    return result;
   } finally {
     ({ transcript, runBubble, statusLine, statusLabel, statusElapsed, statusSpinner, lastAssistantBody,
       runStatusTicker, streamBody, streamText, phasePendingText, trace, lastTool, reasoningBlock,
@@ -2029,7 +2034,7 @@ function startLiveness() {
     lastStalled = stalled;
     const working = stalled < 5000 || !climbingSince;
     const busyFor = running.busy_ms || running.ms || Date.now() - (runStartedAt || Date.now());
-    const ownState = (health.run_ids || []).find((run) => Number(run.run_id) === activeRunId)?.state;
+    const ownState = (health.run_ids || []).find((run) => run.conversation===chatSession && runKey(run)===runKey(activeRunId))?.state;
     setLiveness({
       working,
       stalled,
@@ -2040,7 +2045,7 @@ function startLiveness() {
       node_thread_state: health.worker || "alive",
       queue: health.queue || 0,
       run_state: ownState,
-      current_run_id: running.run_id,
+      current_run_id: runKey(running),
     });
   }, 1000);
 }
@@ -2080,12 +2085,19 @@ function setLiveness(info) {
   pin();
 }
 
+// Canonical decimal identity. Never stringify a rounded legacy JSON number.
+function runKey(value) {
+  const raw=value && typeof value==='object' ? (value.run_key ?? value.run_id) : value;
+  if(typeof raw==='number')return Number.isSafeInteger(raw)&&raw>0 ? String(raw) : null;
+  if(typeof raw!=='string'||! /^[1-9][0-9]*$/.test(raw))return null;
+  return BigInt(raw)<=9223372036854775807n ? raw : null;
+}
 function identifySubmittedRun(health) {
   if (activeRunId !== null || !submittedRunIds || !chatSession) return;
   const candidates = (health?.run_ids || [])
-    .filter((run) => run.conversation === chatSession && !submittedRunIds.has(Number(run.run_id)))
-    .sort((a, b) => Number(a.run_id) - Number(b.run_id));
-  if (candidates.length) activeRunId = Number(candidates[candidates.length - 1].run_id);
+    .filter((run) => run.conversation === chatSession && runKey(run)!==null && !submittedRunIds.has(runKey(run)))
+    .sort((a, b) => BigInt(runKey(a))<BigInt(runKey(b)) ? -1 : 1);
+  if (candidates.length) activeRunId = runKey(candidates[candidates.length - 1]);
 }
 
 // The inlining rule for text attachments is the shell's (§11), shared with the child panes.
@@ -2191,35 +2203,54 @@ function runStanding(health, view = {}) {
   if (view.finished) return "finished";
   // A node-thread on this conversation, or one carrying the run id the node accepted for it: this run.
   const thread = activeRun(health, view.session);
-  if (thread && health?.worker !== "stalled") return "running";
+  if (thread) return "running";
   const accepted = view.runId === null || view.runId === undefined ? null : view.runId;
-  if (accepted !== null && threadOfRun(health, accepted)) return "running";
+  if (accepted !== null && threadOfRun(health, accepted, view.session)) return "running";
   const ids = Array.isArray(health?.run_ids) ? health.run_ids : null;
   if (ids) {
     // The run the node accepted for this conversation is the node's own record of it, and it outranks the
     // thread list: a thread is an implementation detail that a respawn or a re-queue may change.
     if (accepted !== null) {
-      const mine = ids.find((run) => run && Number(run.run_id) === Number(accepted));
-      if (mine) return /^(queued|running|not_started)$/.test(String(mine.state || "")) ? "running" : "over";
+      const mine = ids.find((run) => run && runKey(run)!==null && runKey(run)===runKey(accepted)
+        && run.conversation === view.session);
+      if (mine && /^(queued|running|not_started)$/.test(mine.state)) return "running";
+      if (mine && /^(completed|cancelled|failed)$/.test(mine.state)) return "over";
     }
     // Not identified yet: a live run of this conversation that this window did not submit before is the
     // node's own answer that its newest run belongs here (`identifySubmittedRun` makes that exact match).
-    const fresh = ids.filter((run) => run && run.conversation === view.session
-      && !(view.submitted && view.submitted.has(Number(run.run_id))));
+    const fresh = ids.filter((run) => run && run.conversation === view.session);
     if (fresh.some((run) => /^(queued|running|not_started)$/.test(String(run.state || "")))) return "running";
   }
   // The node says something is running that this window cannot name as its own run. "Busy but I cannot
   // identify it" is keep waiting - never "over". The node is not idle, so the run has not been observed
   // to end, and a page may not end a stream it cannot contradict.
   const worker = String(health?.worker || "");
-  if (worker && worker !== "alive") return "busy-unknown";
-  return "over";
+  const isChatThread = (entry) => /^POST \/(?:node\/)?chat(?:\?|$)/.test(entry?.label || "");
+  const chatWorking = (health?.node_threads || []).some(isChatThread) || isChatThread(health?.current);
+  if (chatWorking || worker === "busy" || worker === "stalled") return "busy-unknown";
+  return "busy-unknown";
 }
 
 // The node-thread carrying one run id, when the node names it there (`/health` puts `run_id` on both
 // `current` and each `node_threads` entry). Absent on an older node, and then this is simply no evidence.
-function threadOfRun(health, runId) {
-  const carries = (entry) => entry && entry.run_id != null && Number(entry.run_id) === Number(runId);
+// Authenticated durable journal status, scoped by conversation. Numeric IDs beyond the safe
+// integer range cannot be recovered from this server's numeric JSON contract; never guess them.
+async function durableRunStanding(thread,runId) {
+  if(runKey(runId)===null)return 'busy-unknown';
+  try {
+    const response=await apiFetch('runs',{method:'POST',headers:apiHeaders({'Content-Type':'application/json'}),body:JSON.stringify({action:'status',thread})});
+    const payload=await response.json();
+    if(!response.ok || payload.ok!==true || payload.conversation!==thread)return 'busy-unknown';
+    const row=(payload.runs||[]).find(row=>runKey(row)!==null&&runKey(row)===runKey(runId));
+    if(/^(completed|cancelled|failed)$/.test(row?.state))return 'over';
+    if(/^(queued|running|not_started)$/.test(row?.state))return 'running';
+  } catch(error) { /* observation unavailable; stream remains authoritative */ }
+  return 'busy-unknown';
+}
+
+function threadOfRun(health, runId, session = chatSession) {
+  const carries = (entry) => entry && entry.session === session
+    && runKey(entry)!==null && runKey(entry)===runKey(runId);
   return (health?.node_threads || []).find(carries) || (carries(health?.current) ? health.current : null);
 }
 
@@ -2264,7 +2295,7 @@ async function send(text, options = {}) {
     const before = await (await apiFetch("health", { headers: apiHeaders() })).json();
     submittedRunIds = new Set((before.run_ids || [])
       .filter((run) => run.conversation === runThread)
-      .map((run) => Number(run.run_id)));
+      .map(runKey).filter(key=>key!==null));
   } catch (error) {
     submittedRunIds = new Set();
   }
@@ -2314,8 +2345,14 @@ async function send(text, options = {}) {
         // Asked and answered while the run was ending: say nothing. The run finished; there is
         // nothing to report and nothing to continue.
         if (turnFinished) { clearInterval(watchdog); asking = false; return; }
-        const standing = runStanding(health, { session: runThread, runId: activeRunId,
+        let standing = runStanding(health, { session: runThread, runId: activeRunId,
           submitted: submittedRunIds, finished: turnFinished });
+        if (standing === 'busy-unknown' && runKey(activeRunId)!==null) {
+          const durable=await durableRunStanding(runThread,activeRunId);
+          if(turnFinished || !stillViewingRun()) return;
+          if(durable==='over') standing='over';
+          else if(durable==='running') standing='running';
+        }
         if (standing === "running" || standing === "busy-unknown") {
           // Working, and quiet because the work is quiet. Keep waiting, and start counting again. For
           // `busy-unknown` the page says the one thing it actually knows, and keeps the stream: it cannot
@@ -2338,11 +2375,9 @@ async function send(text, options = {}) {
         runController.abort();
       } catch (error) {
         // Unreachable: the node is gone, which is a different message and the one that fits.
-        clearInterval(watchdog);
-        streamNotice = add("assistant", connectionMessage());
-        watchNode();
-        lostRun = true;
-        runController.abort();
+        // A failed observation is not a failed stream. Its own read/error/done settles it.
+        if (!turnFinished && stillViewingRun()) setStatus("run status unavailable; still listening");
+        lastEvent = Date.now();
       }
       asking = false;
     };
@@ -3860,6 +3895,7 @@ async function followRun() {
   if (!mine) return;
   const seq = Number(mine.last_seq) || 0;
   if (seq === followedSeq) return;
+  // Preserve the established epoch/dedupe/backoff and loaded-row cursor contract.
   rememberPlace();
   if (await restoreSession(target, true)) {
     if (chatSession !== target || conversationEpoch !== epoch || activeNode !== node) return;
@@ -3878,7 +3914,8 @@ async function syncLiveRun(current) {
   if (current.session && current.session !== target) return;
   const poll = { target, epoch, node };
   liveRunPolling = poll;
-  const id = Number(current.run_id);
+  const id=runKey(current);
+  if(id===null) {liveRunPolling=null;setStatus('exact run identity unavailable; saved transcript only');return;}
   const viewing = () => chatSession === target && conversationEpoch === epoch && activeNode === node
     && liveRunId === id && liveRunPolling === poll && !busy;
   if (liveRunId !== id) {
@@ -3887,11 +3924,7 @@ async function syncLiveRun(current) {
     liveCheckpointSeq = null;
   }
   try {
-    const response = await apiFetch("run-events", {
-      method: "POST",
-      headers: apiHeaders({ "Content-Type": "application/json" }),
-      body: JSON.stringify({ thread: target, run_id: id, after: liveEventSeq }),
-    });
+    const response = await sessionEventPage(target,id,liveEventSeq);
     const payload = await response.json();
     if (!viewing()) return;
     if (!response.ok) {
@@ -4646,12 +4679,66 @@ async function panePage(pane, options) {
 // on a `tool` row whose call sits just above it. In this renderer a result belongs to the call above
 // it, so a page cut between them would draw nothing for evidence the reader came to see. The loop is
 // bounded and normally never runs: one page is the whole conversation.
+// Shared ordered ledger collector: callers supply their authenticated session page transport.
+// It preserves original rows and identities and refuses cyclic paging rather than inventing history.
+async function collectSessionHistory(readPage) {
+  let page=await readPage({}),rows=page.messages||[],seen=new Set();
+  while(page.has_more_before) {
+    const cursor=page.next_before_seq ?? rows[0]?.seq;
+    if(cursor==null || seen.has(cursor))throw Error('session_cursor_did_not_advance');
+    seen.add(cursor);
+    page=await readPage({before_seq:cursor});
+    const earlier=(page.messages||[]).filter(row=>row.seq<cursor);
+    if(!earlier.length)throw Error('session_history_incomplete');
+    rows=earlier.concat(rows);
+  }
+  return rows;
+}
+// Owner-authenticated journal attachment shared by any session host. Ledger checkpoint precedes tail.
+function sessionEventPage(thread,key,after) {
+  return apiFetch('run-events',{method:'POST',headers:apiHeaders({'Content-Type':'application/json'}),body:JSON.stringify({thread,run_id:runKey(key),after})});
+}
+const sessionAttachPending=new Map();
+async function attachSessionJournal(thread,readHistory) {
+  const key=activeNode+'|'+thread;
+  if(sessionAttachPending.has(key))return sessionAttachPending.get(key);
+  const pending=attachSessionJournalOnce(thread,readHistory);
+  sessionAttachPending.set(key,pending);
+  try{return await pending;}finally{if(sessionAttachPending.get(key)===pending)sessionAttachPending.delete(key);}
+}
+async function attachSessionJournalOnce(thread, readHistory) {
+  let rows=await readHistory();
+  const response=await apiFetch('runs',{method:'POST',headers:apiHeaders({'Content-Type':'application/json'}),body:JSON.stringify({action:'status',thread})});
+  const status=await response.json();
+  if(!response.ok || status.ok!==true || status.conversation!==thread)throw Error('session_run_status_unavailable');
+  const runs=(status.runs||[]).filter(row=>runKey(row)!==null);
+  const live=runs.filter(run=>/^(running|queued|not_started)$/.test(run.state));
+  const current=(live.length?live:runs).sort((a,b)=>BigInt(runKey(a))<BigInt(runKey(b))?-1:1).at(-1);
+  if(!current)return {rows,events:[],state:'unknown'};
+  const events=[];let after=0,checkpoint=null,seen=new Set();
+  for(;;){
+    const replayResponse=await sessionEventPage(thread,runKey(current),after);
+    const replay=await replayResponse.json();
+    if(!replayResponse.ok || runKey(replay)!==runKey(current))throw Error('session_replay_identity_mismatch');
+    if(checkpoint===null || checkpoint!==replay.checkpoint_seq){
+      checkpoint=replay.checkpoint_seq;rows=await readHistory();
+      const loaded=rows.reduce((max,row)=>Math.max(max,Number(row.seq)||0),0);
+      if(Number(replay.checkpoint_message_seq)>loaded)throw Error('session_checkpoint_not_loaded');
+      events.length=0;seen.clear();
+    }
+    for(const item of replay.events||[])if(!seen.has(item.seq)){seen.add(item.seq);events.push(item.event);}
+    if(!replay.has_more)break;
+    if(replay.next_seq<=after)throw Error('session_event_cursor_did_not_advance');
+    after=replay.next_seq;
+  }
+  return {rows,events,state:current.state,runKey:runKey(current)};
+}
 async function paneMessages(pane) {
   // More than the node's default page of eight rows, so a child's transcript is the conversation and
   // not just its tail. The node still bounds the page - by bytes, by its own budget - and answers with
   // an address for a row too large to send; the rows are then drawn by the window's own renderer.
   const page=await panePage(pane,{});
-  let rows=page.messages || [];
+  let rows=page.has_more_before ? await collectSessionHistory(args=>panePage(pane,args)) : (page.messages || []);
   for(let older=0; older<3 && rows[0]?.role==='tool'; older++) {
     const first=Number(rows[0].seq);
     if(!Number.isFinite(first) || first<=1) break;
@@ -4665,18 +4752,44 @@ async function paneMessages(pane) {
 async function refreshAgentPane(pane) {
   if(!pane.task.session_id) { pane.notice.textContent=pane.task.error || 'Waiting for placement…'; return; }
   try {
+    const target=pane.task.session_id,node=activeNode;
     const result=await paneMessages(pane);
-    if(!pane.isConnected)return;
+    let attached=null;
+    try {
+      const native=await orchestratorRequest({action:'events',id:pane.task.subagent_id,after:0});
+      if(native.transport==='native'&&native.session_id===target)attached={rows:result.rows,events:(native.events||[]).map(row=>row.event),state:native.state};
+      else attached=await attachSessionJournal(pane.task.session_id,async()=> (await paneMessages(pane)).rows);
+    }catch(error){pane.notice.textContent='Live journal unavailable: '+error.message;}
+    if(attached){
+      result.rows=attached.rows;result.events=attached.events;
+      if(/^(completed|cancelled|failed)$/.test(attached.state))pane.task={...pane.task,state:attached.state,settled:true};
+    }
+    if(!pane.isConnected || pane.task.session_id!==target || activeNode!==node)return;
     if(result.task)pane.task={...pane.task,...result.task};
     const rows=result.rows;
     // A repaint throws away the transcript's scroll position and its folded topics, so a poll that
     // found the same rows, the same state and the same in-flight call leaves the pane it found alone.
-    const painted=JSON.stringify([rows.map(row=>row.seq),pane.task.state,pane.task.settled,
+    const painted=JSON.stringify([rows,result.events,pane.task.state,pane.task.settled,
       pane.task.preview?.tool?.call_id]);
     if(painted!==pane.painted) {
       pane.painted=painted;
+      // Preserve the reader's place while the shared ledger renderer appends/repaints.
+      const top=pane.transcript.scrollTop;
+      const following=pane.transcript.scrollHeight-top-pane.transcript.clientHeight<40;
+      const visible=Array.from(pane.transcript.querySelectorAll('wa-message')).find(el=>el.getBoundingClientRect().bottom>pane.transcript.getBoundingClientRect().top);
+      const anchorKey=visible?.dataset.ledgerKey;
+      const anchorText=visible?.textContent;
+      const folded=Array.from(pane.transcript.querySelectorAll('[data-ledger-key]')).map(el=>[el.dataset.ledgerKey,el.hasAttribute('open'),el.classList.contains('open')]);
+      const anchorOffset=visible ? visible.getBoundingClientRect().top-pane.transcript.getBoundingClientRect().top : 0;
       paintChildTranscript(pane.transcript,rows,{state:childRunState(pane.task),
-        stateAt:pane.task.settled_at,active:!pane.task.settled,liveTool:pane.task.preview?.tool});
+        stateAt:pane.task.settled_at,active:!pane.task.settled,liveTool:pane.task.preview?.tool,events:result.events});
+      for(const [key,attr,cls] of folded) {
+        const element=Array.from(pane.transcript.querySelectorAll('[data-ledger-key]')).find(el=>el.dataset.ledgerKey===key);
+        if(element){element.toggleAttribute('open',attr);element.classList.toggle('open',cls);}
+      }
+      const anchor=Array.from(pane.transcript.querySelectorAll('wa-message')).find(el=>anchorKey ? el.dataset.ledgerKey===anchorKey : el.textContent===anchorText);
+      pane.transcript.scrollTop=following ? pane.transcript.scrollHeight : top;
+      if(!following && anchor) pane.transcript.scrollTop+=anchor.getBoundingClientRect().top-pane.transcript.getBoundingClientRect().top-anchorOffset;
     }
     // What is left for the pane's own notice is what the shared transcript cannot say: a failure the
     // child reported, a page size this node refused, or nothing. `Ready for your next message.` used to

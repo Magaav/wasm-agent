@@ -1,0 +1,15 @@
+check js:two.js: PASS exit=0 ms=199.3 log=C:\Users\Victor\AppData\Local\Temp\wa-check-runner-E2YIxp\pass\js_two.js.log
+ALL PASS
+check js:one.js: PASS exit=0 ms=206.9 log=C:\Users\Victor\AppData\Local\Temp\wa-check-runner-E2YIxp\pass\js_one.js.log
+ALL PASS
+check js:three.js: PASS exit=0 ms=200.2 log=C:\Users\Victor\AppData\Local\Temp\wa-check-runner-E2YIxp\pass\js_three.js.log
+ALL PASS
+check js:silent.js: FAIL exit=0 ms=33.0 log=C:\Users\Victor\AppData\Local\Temp\wa-check-runner-E2YIxp\fail\js_silent.js.log
+
+check js:failure.js: FAIL exit=7 ms=40.6 log=C:\Users\Victor\AppData\Local\Temp\wa-check-runner-E2YIxp\fail\js_failure.js.log
+ALL PASS
+check js:one.js: PASS exit=0 ms=194.7 log=C:\Users\Victor\AppData\Local\Temp\wa-check-runner-E2YIxp\fail\js_one.js.log
+ALL PASS
+candidate C:\Users\Victor\.wasm-agent\wa-worktree-childdispatch4c6f5927-a536-4018-8c04-ceccdcec00b4\review\ui-repair\private-identity\candidate\debug\wa.exe sha256=569f30855ee26e53e736d8424d284ebe813beed5b7695b43d083ed79346dd8da sourceLua=C:\Users\Victor\.wasm-agent\wa-worktree-childdispatch4c6f5927-a536-4018-8c04-ceccdcec00b4\review\ui-repair\private-identity
+run key HTTP ok (36 checks, 0 skipped; real listener, source Lua, restart, no inference)
+gate check runner ok (focused isolation and browser stage contract; HTTP skip separately reported)
