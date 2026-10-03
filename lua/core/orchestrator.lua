@@ -134,6 +134,20 @@ local function parked(memory_row)
   return memory_row.state == "unknown" or memory_row.state == "placing"
 end
 
+-- Status is a signed control read, never a model probe. Old peers and absent
+-- serving state remain unknown/compatible; responsiveness is not quota evidence.
+function M.serving_eligible(destination, model)
+  if destination=='local' then
+    if not provider.serving then return true,'unknown' end
+    local value=provider.serving(model)
+    return value.state~='blocked',value.reason or value.state
+  end
+  local ok,value=pcall(nodes.remote_call,destination,'status',{model=model})
+  if ok and type(value)=='table' and ((type(value.serving)=='table' and value.serving.state=='blocked') or value.model_error=='provider_monthly_quota') then
+    return false,'provider_monthly_quota'
+  end
+  return true,'unknown'
+end
 function M.tick(api)
   for _, row in ipairs(query("SELECT * FROM orchestration_tasks WHERE state IN ('queued','placing') ORDER BY created_at LIMIT 32")) do
     local user = users.find(row.owner)
@@ -143,6 +157,11 @@ function M.tick(api)
       local policy = M.policy(row.owner)
       local args, ctx = json.decode(row.args), json.decode(row.context)
       local choices = policy.enabled and policy.nodes or {}
+      local has_capacity=false
+      for _,candidate in ipairs(choices) do if candidate.max_tasks>0 then has_capacity=true end end
+      if row.destination=='' and not has_capacity then
+        exec("UPDATE orchestration_tasks SET detail='waiting_approved_capacity' WHERE id=? AND state='queued'",{row.id})
+      end
       -- Once delivery might have happened, only resolve/retry the pinned target.
       if row.destination ~= "" then choices={{node=row.destination, max_tasks=tonumber(args.admission_limit) or 1}} end
       for _, item in ipairs(choices) do
@@ -150,6 +169,11 @@ function M.tick(api)
           local target = item.node == "local" and {local_node=true,online=true} or nodes.find(item.node)
           if target and (target.online ~= false or row.destination ~= "") then
             local destination = target.local_node and "local" or item.node
+            local eligible, reason=M.serving_eligible(destination,args.model)
+            if not eligible and row.destination=='' then
+              exec("UPDATE orchestration_tasks SET detail=? WHERE id=? AND state='queued'",
+                {'waiting_provider_serving:'..reason,row.id})
+            else
             if row.destination == "" then
               args.admission_limit=item.max_tasks
               -- Counted where an operator can read it (`attempts` on the receipt): a task that keeps
@@ -189,6 +213,7 @@ function M.tick(api)
               exec("UPDATE orchestration_tasks SET state='unknown',detail=? WHERE id=?", {json.encode(result),row.id})
               break
             end
+            end -- serving eligibility; uncertain deliveries retain reconciliation rules
           end
         end
       end

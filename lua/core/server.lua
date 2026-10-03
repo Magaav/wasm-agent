@@ -525,8 +525,14 @@ local function node_capability(capability, args, caller)
     if not enrollment.managed() then return { error = "not_managed" } end
     return enrollment.set_role(args.role)
   elseif capability == "status" then
-    if enrollment.managed() then return enrollment.status() end
-    return json.decode(wa_model("", ""))
+    if enrollment.managed() then
+      local result=enrollment.status()
+      result.serving=provider.serving(args.model)
+      return result
+    end
+    local result=json.decode(wa_model("", ""))
+    result.serving=provider.serving(args.model)
+    return result
   elseif capability == "set_provider" then
     local ok, problem = provider.set_provider(args.id or "", args.revision)
     if not ok then return {error=problem} end

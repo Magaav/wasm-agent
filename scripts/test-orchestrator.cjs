@@ -69,6 +69,18 @@ print("cancel race ok")
   check(race.status===0 && race.stdout.includes('cancel race ok'),'cancellation wins before admission: '+(race.stderr||''));
   mock=http.createServer((req,res)=>{
     let body='';req.on('data',chunk=>body+=chunk);req.on('end',()=>{
+      // Signed peer status calls wa_model, which reads provider catalogue/usage.
+      // Those are GET control reads with no JSON request body, not inference.
+      fs.appendFileSync(path.join(work,'mock-requests.jsonl'),JSON.stringify({method:req.method,path:req.url,body})+'\n');
+      if(req.method==='GET' && req.url==='/models') {
+        res.writeHead(200,{'content-type':'application/json'});res.end(JSON.stringify({data:[{id:'fixture'}]}));return;
+      }
+      if(req.method==='GET' && req.url==='/usage') {
+        res.writeHead(200,{'content-type':'application/json'});res.end('{}');return;
+      }
+      if(req.method!=='POST' || req.url!=='/chat/completions') {
+        res.writeHead(404,{'content-type':'application/json'});res.end(JSON.stringify({error:'unexpected_mock_route'}));return;
+      }
       const request=JSON.parse(body);seen.push(request);
       const last=request.messages.filter(m=>m.role==='user').at(-1)?.content || '';
       const answer=()=>{if(!res.headersSent)res.writeHead(200,{'content-type':'text/event-stream'});res.end('data: '+JSON.stringify({choices:[{delta:{content:'verified '+last},finish_reason:'stop'}],usage:{prompt_tokens:10,completion_tokens:4,total_tokens:14}})+'\n\ndata: [DONE]\n\n');};

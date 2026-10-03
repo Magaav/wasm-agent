@@ -274,7 +274,69 @@ end
 -- text is stable - a fixed prefix, then `provider=<id>` and `model=<id>` - because it is what a
 -- refused run or child reports, and a reader has to be able to match it. It states the real
 -- reason: which protocol the id is served over, and which one this route speaks.
+-- Serving observations live in SQLite, not selection files or prompts. This small
+-- availability component is contained here so existing embedded hosts include it.
+local function serving_sql(verb, statement, params)
+  local value = host[verb](statement, json.encode(params or {}))
+  if type(value)=='string' then value=json.decode(value) end
+  if not value or value.error then error('provider_availability_store') end
+  return value
+end
+local function serving_binding(provider)
+  -- Profile is an operator-declared non-secret account label; keys never enter
+  -- this binding. Rotation cannot evade a recorded block. Unlabelled accounts
+  -- conservatively share the configured route's default profile.
+  -- Account/profile is the authority, not an endpoint spelling. Equivalent
+  -- hosts, default ports, path normalization and trailing slashes cannot reset
+  -- account exhaustion. Changing endpoints is not verified account recovery.
+  return host.sha256(json.encode({state.dir(), provider.id,
+    env('WASM_AGENT_PROVIDER_ACCOUNT_PROFILE') or 'default'}))
+end
+local function serving_setup()
+  serving_sql('sql_exec', 'CREATE TABLE IF NOT EXISTS provider_serving(binding TEXT PRIMARY KEY,state TEXT NOT NULL,reason TEXT NOT NULL,model TEXT NOT NULL)')
+end
+function M.serving(model, provider)
+  provider=provider or M.active()
+  if not host.sql_query then return {state='unknown'} end
+  serving_setup()
+  local row=serving_sql('sql_query','SELECT state,reason,model FROM provider_serving WHERE binding=?',{serving_binding(provider)})[1]
+  return row or {state='unknown'}
+end
+-- Only call at the real authenticated HTTP result seam; never with transcript
+-- prose, tool output, catalogue responses or a stringified exception.
+local function record_serving_http(provider, model, response)
+  if not host.sql_query or provider.api_key=='' or response.error then return end
+  if provider.id~='opencode-go' or tonumber(response.status)~=429 then return end
+  local ok,payload=pcall(json.decode,response.body or '')
+  local problem=ok and type(payload)=='table' and payload.error
+  if type(problem)~='table' or problem.type~='GoUsageLimitError' or
+      type(problem.metadata)~='table' or problem.metadata.limitName~='monthly' then return end
+  serving_setup()
+  serving_sql('sql_exec',"INSERT INTO provider_serving(binding,state,reason,model) VALUES(?,'blocked','provider_monthly_quota',?) ON CONFLICT(binding) DO UPDATE SET state=excluded.state,reason=excluded.reason,model=excluded.model",
+    {serving_binding(provider),model})
+end
+-- Internal operator recovery seam, not a model tool. The caller must verify
+-- recovery independently and supply the exact binding returned by this function.
+function M.serving_binding() return serving_binding(M.active()) end
+function M.recover_serving(binding, evidence, operator_verified)
+  if operator_verified~=true or binding~=M.serving_binding() or type(evidence)~='string' or evidence=='' then
+    return {error='provider_recovery_not_verified'}
+  end
+  serving_setup()
+  serving_sql('sql_exec','DELETE FROM provider_serving WHERE binding=?',{binding})
+  return {ok=true,state='unknown'}
+end
+local function record_serving_success(provider, model)
+  if not host.sql_query then return end
+  serving_setup()
+  -- Monthly quota is account-route wide. A real authenticated success on that
+  -- route is evidence; time, key changes and catalogue success are not.
+  serving_sql('sql_exec',"INSERT INTO provider_serving(binding,state,reason,model) VALUES(?,'observed_serving','authenticated_success',?) ON CONFLICT(binding) DO UPDATE SET state=excluded.state,reason=excluded.reason,model=excluded.model",
+    {serving_binding(provider),model})
+end
 function M.unservable(model, provider)
+  local availability=M.serving(model,provider)
+  if availability.state=='blocked' then return availability.reason end
   provider = provider or M.active()
   model = trim(model or "")
   if model == "" or M.serves(model, provider) ~= false then return nil end
@@ -845,6 +907,7 @@ function M.complete_with(model, messages, tools, stream, opts)
   end
   if stream then
     local result = json.decode(host.http_stream("POST", url, json.encode(headers), serialized))
+    record_serving_http(provider,body.model,result)
     if result.error then error(redact.text("provider_error: " .. tostring(result.error))) end
     if result.status ~= 200 then
       error(redact.text("provider_http_" .. tostring(result.status) .. ": " .. tostring(result.body):sub(1, 240)))
@@ -879,6 +942,7 @@ function M.complete_with(model, messages, tools, stream, opts)
   end
 
   local response = json.decode(host.http("POST", url, json.encode(headers), serialized))
+  record_serving_http(provider,body.model,response)
   if response.error then error(redact.text("provider_error: " .. tostring(response.error))) end
   if response.status ~= 200 then
     error(redact.text("provider_http_" .. tostring(response.status) .. ": " .. tostring(response.body):sub(1, 240)))
@@ -907,6 +971,7 @@ function M.complete_with(model, messages, tools, stream, opts)
   local has_tools=#(result.tool_calls or {})>0
   local meaningful=has_tools or visible~=""
   local complete=result.finish_reason~="length" and result.stream_complete~=false and meaningful
+  if complete and (provider.auth=='subscription' or provider.api_key~='') then record_serving_success(provider,body.model) end
   local observation=telemetry.finish(span,{ok=complete,model=result.model,
     provider=provider.id,request_id=result.request_id,finish_reason=result.finish_reason,
     usage=result.usage,normalized=telemetry.normalize(result.usage,M.rates(result.model)),
