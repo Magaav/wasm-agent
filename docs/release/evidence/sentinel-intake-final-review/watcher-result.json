@@ -1,0 +1,28 @@
+{
+  "ok": true,
+  "passes": [
+    {
+      "pass": 0,
+      "pid": 16448,
+      "ack_monotonic_seconds": [
+        0.14100000000053114,
+        0.14100000000053114,
+        0.1570000000001528,
+        0.1570000000001528
+      ]
+    },
+    {
+      "pass": 1,
+      "pid": 19452,
+      "ack_monotonic_seconds": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ]
+    }
+  ],
+  "owned_tree_drained": true,
+  "provider_calls": 0,
+  "skips": 0
+}

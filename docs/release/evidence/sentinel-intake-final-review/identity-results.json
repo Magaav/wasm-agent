@@ -1,0 +1,56 @@
+{
+  "held_cases": [
+    {
+      "case": "removal",
+      "detail": "immutable_intent_mismatch",
+      "original_bytes_preserved": true,
+      "pending": true
+    },
+    {
+      "case": "null",
+      "detail": "immutable_intent_mismatch",
+      "original_bytes_preserved": true,
+      "pending": true
+    },
+    {
+      "case": "number",
+      "detail": "immutable_intent_mismatch",
+      "original_bytes_preserved": true,
+      "pending": true
+    },
+    {
+      "case": "false",
+      "detail": "immutable_intent_mismatch",
+      "original_bytes_preserved": true,
+      "pending": true
+    },
+    {
+      "case": "verb",
+      "detail": "immutable_intent_mismatch",
+      "original_bytes_preserved": true,
+      "pending": true
+    },
+    {
+      "case": "owner",
+      "detail": "immutable_intent_mismatch",
+      "original_bytes_preserved": true,
+      "pending": true
+    },
+    {
+      "case": "parent",
+      "detail": "immutable_intent_mismatch",
+      "original_bytes_preserved": true,
+      "pending": true
+    }
+  ],
+  "unreserved_legacy": {
+    "at": 1791025643,
+    "detail": "WA_SENTINEL_DEPLOY points at C:\\Users\\Victor\\.wasm-agent\\wa-worktree-childdispatch8e9c7a55-7e1c-4c1a-a4cb-46df905929be\\intake-final-probes\\absent.sh, which does not exist",
+    "ok": false,
+    "phase": "failed",
+    "request": {
+      "reason": "unreserved private",
+      "verb": "deploy"
+    }
+  }
+}

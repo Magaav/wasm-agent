@@ -1,0 +1,12 @@
+[
+  {
+    "mutation": "serial",
+    "exit": 1,
+    "red": true
+  },
+  {
+    "mutation": "mutable",
+    "exit": 1,
+    "red": true
+  }
+]

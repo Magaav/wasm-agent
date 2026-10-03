@@ -1,0 +1,59 @@
+
+running 40 tests
+test deploy_protocol_tests::busy_protocol_ack_is_persistent_but_never_completion ... ok
+test deploy_protocol_tests::canonical_selection_revalidates_exact_remote_main_without_spawning ... ok
+test deploy_visibility_tests::a_busy_or_undecidable_node_is_announced_and_nothing_is_dispatched ... ok
+test deploy_visibility_tests::a_failing_deploy_leaves_its_message_in_the_capture ... ok
+test instance::tests::a_corrupt_registry_is_an_error_and_is_not_overwritten ... ok
+test instance::tests::a_guest_must_name_a_real_master_node_id ... ok
+test instance::tests::a_named_home_cannot_be_the_operator_home_or_overlap_another ... ok
+test instance::tests::a_nonempty_foreign_home_is_never_overwritten ... ok
+test instance::tests::a_purge_target_must_be_an_owned_home_and_not_the_operator ... ok
+test instance::tests::a_second_instance_cannot_claim_any_port_in_use ... ok
+test instance::tests::an_invalid_schema_or_entry_is_an_error ... ok
+test instance::tests::guest_env_shares_nothing_but_the_allowlist_and_explicit_values ... ok
+test instance::tests::lifecycle_records_must_be_complete_and_a_corrupt_one_is_an_error ... ok
+test instance::tests::protected_and_malformed_shares_are_refused ... ok
+test instance::tests::shared_values_cross_only_when_declared_and_cannot_override_the_boundary ... ok
+test intake_tests::all_intake_precedes_slow_health_and_mutation_is_preserved ... ok
+test request_verb_tests::a_help_or_unknown_request_verb_writes_no_durable_state ... ok
+test role_tests::a_deploy_is_never_placed_inside_the_group_it_must_restart ... ok
+test request_verb_tests::a_trigger_with_an_unknown_verb_writes_no_durable_state ... ok
+test role_tests::a_deploys_unit_leaves_the_control_group_and_is_told_what_to_restart ... ok
+test role_tests::a_shell_outside_the_unit_still_reaches_the_manager ... ok
+test role_tests::a_start_against_a_unit_restarts_the_installed_image ... ok
+test role_tests::a_stated_supervisor_beats_inference_in_both_directions ... ok
+test role_tests::the_recorded_identity_decides_after_the_watcher_died ... ok
+test role_tests::the_unit_is_matched_by_what_it_is_and_not_by_its_name ... ok
+test role_tests::the_watcher_pid_is_believed_by_name_and_verb_not_by_path ... ok
+test role_tests::a_deploy_under_a_supervisor_is_refused_rather_than_become_our_child ... ok
+test role_tests::the_watcher_records_its_own_owner_where_a_later_stop_reads_it ... ok
+test self_update_tests::continuation_requires_both_fields_before_any_upgrade ... ok
+test self_update_tests::deploy_dedupe_lists_only_deploys_and_preserves_pending_files ... ok
+test self_update_tests::idle_requires_positive_proof_and_unknown_health_is_not_idle ... ok
+test self_update_tests::only_the_newest_upgrade_survives_the_queue ... ok
+test self_update_tests::recorded_and_running_paths_compare_as_files ... ok
+test self_update_tests::verbs_that_replace_the_node_wait_for_idle_and_are_serialised ... ok
+test self_update_tests::wake_requires_a_real_terminal_event_and_bounds_capture ... ok
+test self_update_tests::watcher_probe_fails_closed_for_running_legacy_pid_and_distinguishes_stopped ... ok
+test self_update_tests::windows_recorded_and_running_paths_ignore_spelling_differences ... ok
+test watcher_ownership_tests::deploy_scan_preserves_pending_and_claimed_evidence ... ok
+test watcher_ownership_tests::watcher_identity_never_promotes_a_recycled_pid ... ok
+test self_update_tests::a_deploy_request_spawns_the_script_and_returns ... ok
+
+test result: ok. 40 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.00s
+
+SKIP: Windows Job CLI proof (portable native intake tests above are required)
+
+STDERR
+warning: function `inference_action` is never used
+  --> src\jobs.rs:18:4
+   |
+18 | fn inference_action(kind: &str) -> bool {
+   |    ^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `wa-sentinel` (bin "wa-sentinel" test) generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.08s
+     Running unittests src\main.rs (rust\wa-sentinel\target\debug\deps\wa_sentinel-051a4597e03cb80d.exe)
