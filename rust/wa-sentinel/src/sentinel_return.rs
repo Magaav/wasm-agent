@@ -61,7 +61,6 @@ pub(crate) fn resolve_event(event:&Value) -> Result<Value> {
     Ok(journal)
 }
 
-#[allow(dead_code)] // Not connected to deployment until verified installer/settlement stages pass.
 pub(crate) fn observe(id:&str) -> Result<()> {
     let binding=bind_parent(id)?;
     let dir=sentinel_dir().join("deploy-protocol").join(id);
@@ -70,16 +69,25 @@ pub(crate) fn observe(id:&str) -> Result<()> {
     if cursor["next_at"].as_u64().unwrap_or(0)>now {return Ok(());}
     let queued=binding["intent"]["queued_at"].as_u64().context("queued_timestamp_missing")?;
     let slot=cursor["slot"].as_u64().unwrap_or(0);
-    let terminal=now.saturating_sub(queued)>=600;
-    let phase=if terminal {"unknown"} else {"held"};
+    let state:Value=std::fs::read(dir.join("state.json")).ok().and_then(|b|serde_json::from_slice(&b).ok()).unwrap_or(Value::Null);
+    if !state.is_null() && (state["id"]!=id || state["expected_sha"]!=binding["intent"]["expected_sha"]) {bail!("return_state_identity_mismatch");}
+    let terminal=now.saturating_sub(queued)>=600 || state["phase"]=="failed";
+    let phase=if state["phase"]=="failed" {"failed"} else if terminal {"unknown"} else if state["phase"]=="spawned" {"updating"} else {"held"};
     let key=format!("{id}-{slot}");
     let journal=json!({"id":id,"event_key":key,"expected_sha":binding["intent"]["expected_sha"],"parent":binding["parent"],"owner":binding["owner"],"phase":phase,"at":now,"detail":if terminal {"bounded_deadline_no_effect; reconcile, never replay"} else {"effect_quarantined; ownership observed; ten-second check queued"}});
     std::fs::create_dir_all(dir.join("returns"))?;
     let file=dir.join("returns").join(format!("{key}.json"));
     if !file.exists(){wa_operation::atomic_json(&file,&journal)?;}
     // Engine durable queue, not model polling. Disabled hook does not consume the slot.
+    let source=jobs::store();
+    let job=source.get("onSentinelReturn").map_err(|e|anyhow::anyhow!("return_hook_unavailable:{e}"))?;
+    if job["enabled"]!=true {bail!("return_hook_disabled; observation retained");}
+    let payload=json!({"id":id,"event_key":key});
+    let revision=job["revision"].as_i64().context("return_hook_revision_missing")?;
+    let prior=source.event_receipt("onSentinelReturn",revision,&key,&payload).map_err(|e|anyhow::anyhow!(e.to_string()))?;
+    let acknowledged=prior["receipt"]["acknowledged"]==true;
     let emitted=jobs::store().emit("sentinel.return",&key,&json!({"id":id,"event_key":key}),now as i64).map_err(|e|anyhow::anyhow!("return_emit_failed:{e}"))?;
-    if emitted>0 {
+    if emitted>0 || acknowledged {
         cursor=json!({"slot":slot+1,"next_at":if terminal {u64::MAX} else {now+10},"last_event":key});
         wa_operation::atomic_json(&dir.join("observation.json"),&cursor)?;
     }

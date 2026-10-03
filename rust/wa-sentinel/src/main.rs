@@ -62,6 +62,8 @@ mod sentinel_return;
 #[cfg(test)]
 mod sentinel_return_tests;
 #[cfg(test)]
+mod return_engine_tests;
+#[cfg(test)]
 mod deploy_protocol_tests;
 #[cfg(test)]
 mod intake_tests;
@@ -2100,6 +2102,15 @@ fn watch() -> Result<()> {
         }
         if let Err(error) = process_requests(true, &mut held) {
             audit("box-error", "requests", &error.to_string());
+        }
+        if let Ok(entries)=std::fs::read_dir(sentinel_dir().join("deploy-protocol")) {
+            for entry in entries.flatten() {
+                if entry.path().is_dir() {
+                    if let Some(id)=entry.file_name().to_str() {
+                        if let Err(error)=sentinel_return::observe(id) {audit("return-observation-problem",id,&error.to_string());}
+                    }
+                }
+            }
         }
         check_triggers(&mut triggers);
         if let Err(error)=automations.tick() {audit("jobs-error","tick",&error.to_string());}

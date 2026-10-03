@@ -443,7 +443,7 @@ fn spawn_delivery(source: wa_jobs::Store, delivery: Value) {
         counter.fetch_sub(1, Ordering::AcqRel);
     });
 }
-fn execute(store: &wa_jobs::Store, delivery: &Value) -> Result<String> {
+pub(crate) fn execute(store: &wa_jobs::Store, delivery: &Value) -> Result<String> {
     let id = delivery["job_id"].as_str().unwrap();
     let rev = delivery["revision"].as_i64().unwrap();
     if !store
