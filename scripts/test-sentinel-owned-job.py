@@ -42,7 +42,7 @@ applied=EXTENDED();assert k.QueryInformationJobObject(job,9,ctypes.byref(applied
 assert applied.basic.flags==0x2000,'owned limits not applied'
 # inherited environment is consumed only by harness's explicit private environment allowlist.
 assert k.CreateProcessW(node,ctypes.create_unicode_buffer(command),None,None,True,4,None,str(repo),ctypes.byref(startup),ctypes.byref(process)),ctypes.get_last_error()
-facts={'pid':process.pid,'created_suspended':True,'resumed':False,'assignment_injected_failure':a.assign_failure}
+facts={'pid':process.pid,'created_suspended':True,'resumed':False,'assignment_injected_failure':a.assign_failure,'requested_limits':limits.basic.flags,'queried_limits':applied.basic.flags}
 try:
  assigned=False if a.assign_failure else bool(k.AssignProcessToJobObject(job,process.process))
  if not assigned:
@@ -52,7 +52,9 @@ try:
  else:
   member=w.BOOL();assert k.IsProcessInJob(process.process,job,ctypes.byref(member));assert member.value,'root not in exact owned job'
   facts['root_in_exact_job']=True
-  assert k.ResumeThread(process.thread)!=0xffffffff;facts['resumed']=True
+  previous_suspend_count=k.ResumeThread(process.thread);facts['resume_previous_suspend_count']=previous_suspend_count
+  assert previous_suspend_count==1,'root was not suspended exactly once before owned assignment'
+  facts['resumed']=True
   if a.escape_attempt:
    deadline=time.monotonic()+8
    while not childinfo.exists() and time.monotonic()<deadline:time.sleep(.01)
@@ -80,17 +82,19 @@ try:
    # JOBOBJECT_BASIC_PROCESS_ID_LIST begins with two DWORDs, followed by ULONG_PTR entries.
    count=ctypes.cast(ids,ctypes.POINTER(w.DWORD))[1]
    for pid in list(ids)[1:1+count]:
-    if pid in seen:continue
     handle=k.OpenProcess(0x1000,False,pid)
     if not handle:continue # process exited between list and exact handle acquisition
     member=w.BOOL();assert k.IsProcessInJob(handle,job,ctypes.byref(member));assert member.value
     created,exited,kernel,user=w.FILETIME(),w.FILETIME(),w.FILETIME(),w.FILETIME()
     assert k.GetProcessTimes(handle,ctypes.byref(created),ctypes.byref(exited),ctypes.byref(kernel),ctypes.byref(user))
+    creation=(created.dwHighDateTime<<32)|created.dwLowDateTime
+    generation=(pid,creation)
+    if generation in seen:k.CloseHandle(handle);continue
     image=ctypes.create_unicode_buffer(32768);size=w.DWORD(32768)
     if not k.QueryFullProcessImageNameW(handle,0,image,ctypes.byref(size)):
      ended=w.DWORD();assert k.GetExitCodeProcess(handle,ctypes.byref(ended));assert ended.value!=259,'live process image unavailable'
-     seen[pid]={'pid':pid,'in_exact_job':True,'created_filetime':(created.dwHighDateTime<<32)|created.dwLowDateTime,'exited_before_image_query':ended.value}
-    else:seen[pid]={'pid':pid,'in_exact_job':True,'created_filetime':(created.dwHighDateTime<<32)|created.dwLowDateTime,'image':image.value}
+     seen[generation]={'pid':pid,'in_exact_job':True,'created_filetime':str(creation),'exited_before_image_query':ended.value}
+    else:seen[generation]={'pid':pid,'in_exact_job':True,'created_filetime':str(creation),'image':image.value}
     k.CloseHandle(handle)
    if time.monotonic()-started>a.deadline:break
   facts['native_members']=list(seen.values())

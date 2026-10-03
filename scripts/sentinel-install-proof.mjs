@@ -42,7 +42,7 @@ export function sourceIdentity(root,expected) {
 export function processIdentity(pid) {
  if(!Number.isInteger(pid)||pid<=0)throw Error('invalid process pid');
  if(process.platform==='win32') {
-  return JSON.parse(run('powershell.exe',['-NoProfile','-Command',`$p=Get-Process -Id ${pid} -ErrorAction Stop; @{pid=$p.Id; image=$p.Path; created=$p.StartTime.ToUniversalTime().Ticks.ToString()} | ConvertTo-Json -Compress`]));
+  return JSON.parse(run('powershell.exe',['-NoProfile','-Command',`$p=Get-Process -Id ${pid} -ErrorAction Stop; @{pid=$p.Id; image=$p.Path; created=$p.StartTime.ToUniversalTime().ToFileTimeUtc().ToString()} | ConvertTo-Json -Compress`]));
  }
  const stat=fs.readFileSync(`/proc/${pid}/stat`,'utf8').split(') ').at(-1).split(' ');
  return {pid,image:fs.readlinkSync(`/proc/${pid}/exe`),created:stat[19]};
