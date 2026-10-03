@@ -115,6 +115,8 @@ server.listen(0, "127.0.0.1", () => { console.log("PORT=" + server.address().por
 function run(command, args, env = {}) {
   const result = spawnSync(command, args, { encoding: "utf8", timeout: 120000, windowsHide: true,
     env: { ...process.env, ...env } });
+  fs.writeFileSync(path.join(root,`run-${Date.now()}-${Math.random()}.json`),JSON.stringify(result));
+  assert(!result.error && result.status!==null,'uncertain child: preserve evidence');
   const lines = String(result.stdout || "").trim().split(/\r?\n/).filter(Boolean);
   return { code: result.status, lines, stdout: result.stdout || "", stderr: result.stderr || "" };
 }
@@ -237,9 +239,18 @@ async function main() {
   check(fs.existsSync(written), `the job file was written even so: ${written}`);
   check(JSON.parse(fs.readFileSync(written, "utf8")).trigger.websocket_url.includes(LIVE_TARGET),
     "and it names the live target, so the next repair (or a human) installs the right one");
+  const closed=new Promise((resolve,reject)=>{child.once('close',resolve);child.once('error',reject);});
   child.kill();
+  await closed;
+  assert(child.exitCode!==null || child.signalCode!==null,'fake server settled');
   console.log(`whatsapp hook rebind ok (${checks} checks, 0 failed, ${skipped} skipped; fake DevTools endpoint, real adapter/trigger/preflight, real sentinel CLI)`);
   console.log("evidence: " + root);
+  assert.equal(fs.realpathSync(root),path.resolve(root));assert.equal(path.dirname(root),fs.realpathSync(os.tmpdir()));
+  const git=spawnSync('git',['rev-parse','--git-common-dir'],{cwd:repo,encoding:'utf8'});assert.equal(git.status,0);
+  const retained=path.resolve(repo,git.stdout.trim(),'fixture-evidence',path.basename(root)),mapping=[];
+  function preserve(dir){for(const e of fs.readdirSync(dir,{withFileTypes:true})){const p=path.join(dir,e.name);assert(!fs.lstatSync(p).isSymbolicLink());assert.equal(fs.realpathSync(p),p,'no junction');if(e.isDirectory())preserve(p);else{const bytes=fs.readFileSync(p),target=path.join(retained,path.relative(root,p));fs.mkdirSync(path.dirname(target),{recursive:true});fs.writeFileSync(target,bytes,{flag:'wx'});assert(fs.readFileSync(target).equals(bytes));mapping.push({original:p,retained:target,sha256:require('node:crypto').createHash('sha256').update(bytes).digest('hex')});}}}
+  preserve(root);fs.writeFileSync(path.join(retained,'retention-map.json'),JSON.stringify(mapping,null,2),{flag:'wx'});
+  console.log('retained evidence: '+retained);fs.rmSync(root,{recursive:true});
 }
 
 main().then(() => process.exit(0)).catch((error) => {

@@ -81,6 +81,8 @@ function pass(extra = {}) {
       WA_WHATSAPP_ACCOUNT: "5511999999999@c.us",
       WA_WHATSAPP_BROWSER_ENDPOINT: "ws://127.0.0.1:9222/devtools/page/fixture",
       ...extra } });
+  fs.writeFileSync(path.join(root,`pass-${Date.now()}-${Math.random()}.json`),JSON.stringify(run));
+  assert(!run.error && run.status!==null,'uncertain child outcome: retain fixture');
   const line = String(run.stdout || "").trim().split(/\r?\n/).pop();
   let value;
   try { value = JSON.parse(line); } catch { throw new Error(`not JSON: ${run.stdout}\n${run.stderr}`); }
@@ -149,3 +151,13 @@ check(!Object.keys(pendingRows()).includes("voice2"), "the refused note is out o
 
 console.log(`whatsapp audio loss ok (${checks} checks, 0 failed, 0 skipped; fake media/STT/send, no browser, no model)`);
 console.log("evidence: " + root);
+// Success-only retention: preserve exact fixture bytes before deleting only this minted root.
+const crypto=require('node:crypto');
+assert.equal(fs.realpathSync(root),path.resolve(root));
+assert.equal(path.dirname(root),fs.realpathSync(os.tmpdir()));
+const git=spawnSync('git',['rev-parse','--git-common-dir'],{cwd:repo,encoding:'utf8'});assert.equal(git.status,0);
+const retained=path.resolve(repo,git.stdout.trim(),'fixture-evidence',path.basename(root));
+const mapping=[];
+function preserve(dir){for(const e of fs.readdirSync(dir,{withFileTypes:true})){const p=path.join(dir,e.name);assert(!fs.lstatSync(p).isSymbolicLink());assert.equal(fs.realpathSync(p),p,'no junction');if(e.isDirectory())preserve(p);else{const bytes=fs.readFileSync(p),target=path.join(retained,path.relative(root,p));fs.mkdirSync(path.dirname(target),{recursive:true});fs.writeFileSync(target,bytes,{flag:'wx'});assert(fs.readFileSync(target).equals(bytes));mapping.push({original:p,retained:target,sha256:crypto.createHash('sha256').update(bytes).digest('hex')});}}}
+preserve(root);fs.writeFileSync(path.join(retained,'retention-map.json'),JSON.stringify(mapping,null,2),{flag:'wx'});
+console.log('retained evidence: '+retained);fs.rmSync(root,{recursive:true});
