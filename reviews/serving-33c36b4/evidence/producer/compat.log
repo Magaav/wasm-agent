@@ -1,0 +1,15 @@
+ok   cancellation wins before admission: 
+ok   ordered placement persists
+ok   invalid capacity is refused
+ok   queued submission is idempotent
+<anonymous_script>:1
+
+
+SyntaxError: Unexpected end of JSON input
+    at JSON.parse (<anonymous>)
+    at IncomingMessage.<anonymous> (C:\Users\Victor\.wasm-agent\wa-worktree-childdispatcha5eeda08-7b52-476c-833a-8fbf94ae2c53\scripts\test-orchestrator.cjs:72:26)
+    at IncomingMessage.emit (node:events:509:28)
+    at endReadableNT (node:internal/streams/readable:1736:12)
+    at process.processTicksAndRejections (node:internal/process/task_queues:90:21)
+
+Node.js v24.19.0

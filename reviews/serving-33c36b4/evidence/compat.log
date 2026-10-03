@@ -1,0 +1,12 @@
+ok   cancellation wins before admission: 
+ok   ordered placement persists
+ok   invalid capacity is refused
+ok   queued submission is idempotent
+ok   first task fills preferred cloud node
+ok   in-flight child text is visible before settlement
+ok   overflow uses next node with a separate session
+AssertionError [ERR_ASSERTION]: all-full work remains durably queued
+    at check (C:\Users\Victor\orca\projects\wasm-agent\.git\worktrees\wa-worktree-childdispatch78f44308-a301-4811-b6fc-063f77a4e95d\review-evidence\source\scripts\test-orchestrator.cjs:12:38)
+    at C:\Users\Victor\orca\projects\wasm-agent\.git\worktrees\wa-worktree-childdispatch78f44308-a301-4811-b6fc-063f77a4e95d\review-evidence\source\scripts\test-orchestrator.cjs:120:3
+    at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+FAIL; evidence C:\Users\Victor\AppData\Local\Temp\wa-orchestrator-GWx5zE

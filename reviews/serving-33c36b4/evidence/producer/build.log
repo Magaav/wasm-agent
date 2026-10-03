@@ -1,0 +1,153 @@
+warning: profiles for the non root package will be ignored, specify profiles at the workspace root:
+package:   C:\Users\Victor\.wasm-agent\wa-worktree-childdispatcha5eeda08-7b52-476c-833a-8fbf94ae2c53\rust\wa-graph\Cargo.toml
+workspace: C:\Users\Victor\.wasm-agent\wa-worktree-childdispatcha5eeda08-7b52-476c-833a-8fbf94ae2c53\rust\Cargo.toml
+   Compiling wa-host v0.1.0 (C:\Users\Victor\.wasm-agent\wa-worktree-childdispatcha5eeda08-7b52-476c-833a-8fbf94ae2c53\rust\wa-host)
+warning: constant `LUA_TBOOLEAN` is never used
+  --> wa-host\src\lua.rs:19:11
+   |
+19 | pub const LUA_TBOOLEAN: c_int = 1;
+   |           ^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: constant `LUA_TNUMBER` is never used
+  --> wa-host\src\lua.rs:20:11
+   |
+20 | pub const LUA_TNUMBER: c_int = 3;
+   |           ^^^^^^^^^^^
+
+warning: constant `LUA_TSTRING` is never used
+  --> wa-host\src\lua.rs:21:11
+   |
+21 | pub const LUA_TSTRING: c_int = 4;
+   |           ^^^^^^^^^^^
+
+warning: constant `LUA_TTABLE` is never used
+  --> wa-host\src\lua.rs:22:11
+   |
+22 | pub const LUA_TTABLE: c_int = 5;
+   |           ^^^^^^^^^^
+
+warning: methods `pop`, `push_number`, and `push_bool` are never used
+   --> wa-host\src\lua.rs:186:12
+    |
+103 | impl Lua {
+    | -------- methods in this implementation
+...
+186 |     pub fn pop(&self, n: c_int) {
+    |            ^^^
+...
+217 |     pub fn push_number(&self, n: f64) {
+    |            ^^^^^^^^^^^
+...
+227 |     pub fn push_bool(&self, b: bool) {
+    |            ^^^^^^^^^
+
+warning: function `lua_pushinteger` is never used
+  --> wa-host\src\lua.rs:55:12
+   |
+55 |     pub fn lua_pushinteger(l: *mut LuaState, n: LuaInteger);
+   |            ^^^^^^^^^^^^^^^
+
+warning: function `lua_getfield` is never used
+  --> wa-host\src\lua.rs:63:12
+   |
+63 |     pub fn lua_getfield(l: *mut LuaState, idx: c_int, k: *const c_char);
+   |            ^^^^^^^^^^^^
+
+warning: function `lua_rawgeti` is never used
+  --> wa-host\src\lua.rs:65:12
+   |
+65 |     pub fn lua_rawgeti(l: *mut LuaState, idx: c_int, n: LuaInteger) -> c_int;
+   |            ^^^^^^^^^^^
+
+warning: function `lua_rawlen` is never used
+  --> wa-host\src\lua.rs:66:12
+   |
+66 |     pub fn lua_rawlen(l: *mut LuaState, idx: c_int) -> usize;
+   |            ^^^^^^^^^^
+
+warning: function `lua_next` is never used
+  --> wa-host\src\lua.rs:67:12
+   |
+67 |     pub fn lua_next(l: *mut LuaState, idx: c_int) -> c_int;
+   |            ^^^^^^^^
+
+warning: function `lua_remove` is never used
+  --> wa-host\src\lua.rs:68:12
+   |
+68 |     pub fn lua_remove(l: *mut LuaState, idx: c_int);
+   |            ^^^^^^^^^^
+
+warning: function `lua_tonumberx` is never used
+  --> wa-host\src\lua.rs:74:12
+   |
+74 |     pub fn lua_tonumberx(l: *mut LuaState, idx: c_int, isnum: *mut c_int) -> LuaNumber;
+   |            ^^^^^^^^^^^^^
+
+warning: function `lua_toboolean` is never used
+  --> wa-host\src\lua.rs:75:12
+   |
+75 |     pub fn lua_toboolean(l: *mut LuaState, idx: c_int) -> c_int;
+   |            ^^^^^^^^^^^^^
+
+warning: function `lua_error` is never used
+  --> wa-host\src\lua.rs:78:12
+   |
+78 |     pub fn lua_error(l: *mut LuaState) -> c_int;
+   |            ^^^^^^^^^
+
+warning: field `engine` is never read
+  --> wa-host\src\plugins.rs:34:5
+   |
+33 | pub struct PluginRegistry {
+   |            -------------- field in this struct
+34 |     engine: Engine,
+   |     ^^^^^^
+
+warning: method `has` is never used
+   --> wa-host\src\plugins.rs:145:12
+    |
+ 54 | impl PluginRegistry {
+    | ------------------- method in this implementation
+...
+145 |     pub fn has(&self, name: &str) -> bool {
+    |            ^^^
+
+warning: function `turn_node_thread_is_idle` is never used
+   --> wa-host\src\serve.rs:482:4
+    |
+482 | fn turn_node_thread_is_idle() -> bool {
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `beat_age_ms` is never used
+   --> wa-host\src\serve.rs:689:15
+    |
+689 | pub(crate) fn beat_age_ms() -> u64 {
+    |               ^^^^^^^^^^^
+
+warning: field `run_id` is never read
+   --> wa-host\src\serve.rs:888:33
+    |
+888 |     Socket { stream: TcpStream, run_id: u64 },
+    |     ------                      ^^^^^^
+    |     |
+    |     field in this variant
+
+warning: function `ok_json` is never used
+   --> wa-host\src\serve.rs:967:4
+    |
+967 | fn ok_json(body: String) -> Reply {
+    |    ^^^^^^^
+
+warning: field `class` is never read
+   --> wa-host\src\serve\scheduler.rs:183:5
+    |
+180 | struct RunRecord {
+    |        --------- field in this struct
+...
+183 |     class: RunClass,
+    |     ^^^^^
+
+warning: `wa-host` (bin "wa") generated 21 warnings
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 5.43s

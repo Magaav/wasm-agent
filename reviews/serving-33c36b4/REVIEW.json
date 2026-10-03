@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "verdict": "hold",
+  "producer": "child:dispatch:a5eeda08-7b52-476c-833a-8fbf94ae2c53",
+  "reviewer": "child:dispatch:78f44308-a301-4811-b6fc-063f77a4e95d",
+  "delivery_tip": "33c36b48687a3479effbcd587a76e32fdac930e8",
+  "delivery_tree": "9eef878791fbbc6ca11100e5556a5af75b3876c9",
+  "review_base": "898a9a238c89c5f64b83cfa219f8c17840b441f9",
+  "source_scope": "Entire two-commit delivery diff against origin/main inspected: provider, orchestrator, server, provider-serving docs and both test suites. Immutable git archive built offline in reviewer Git metadata, separate target directory. No product edits; review fixture and evidence only.",
+  "binary_sha256": "951cd417e3572beba232f5e1e473c35e0f4fe362e8444bb5e2b8dad9b38e2ad6",
+  "mergeproof": {"command": "git merge-tree --write-tree origin/main 33c36b4", "exit": 0, "tree": "9eef878791fbbc6ca11100e5556a5af75b3876c9"},
+  "findings": [
+    {"id":"F1","severity":"blocking","source":"lua/core/provider.lua:289","finding":"Stable account profile includes raw base_url. Adding a trailing slash to the identical normalized inference endpoint changes binding and loses the persisted monthly block.","reproduction":"attacks-source.log and attacks-embedded.log: equivalent normalized endpoint becomes unknown"},
+    {"id":"F2","severity":"blocking","source":"lua/core/orchestrator.lua:146","finding":"Signed peer response alone does not bind serving metadata to requested node/model/account. Arbitrary unrelated binding/model/node fields are ignored and a blocked value or bare model_error blocks placement.","reproduction":"Both attack logs: unrelated peer account/model/node metadata blocks requested placement"},
+    {"id":"F3","severity":"blocking","source":"lua/core/provider.lua:971","finding":"HTTP 200 meaningful response reporting wrong model is accepted as bound serving success. Fixture injects a concurrent bound block at the HTTP seam; wrong-model success overwrites that block as observed_serving.","reproduction":"Both attack logs: wrong response model recorded as bound serving success"},
+    {"id":"F4","severity":"blocking","source":"lua/core/provider.lua:333","finding":"Corrupted persisted state is trusted and passes unservable guard rather than being validated. Mutating blocked state to corrupted permits inference.","reproduction":"Both attack logs: corrupted persisted state eligibility nil"},
+    {"id":"F5","severity":"hold","source":"scripts/test-orchestrator.cjs:120","finding":"Independent real private two-node compatibility rerun fails all-full work remains durably queued after seven passing checks. Did not attribute this failure to product causally; cannot claim old compatibility20 passed.","reproduction":"evidence/compat.log; retained private node logs in reviewer Git metadata review-evidence/compat-private"}
+  ],
+  "checks": {
+    "offline_exact_export_build": "pass",
+    "source_and_embedded_restart_suite": {"exit":0,"checks":68,"skips":0,"paid_calls":0,"counts":[16,18,16,18]},
+    "old_compatibility20": {"exit":1,"passed":7,"remaining_not_reached":13,"requests":{"GET /models":1,"GET /usage":1,"POST /chat/completions":2}},
+    "semantic_attacks": "source and compiled embedded both exit0 reproducing four findings; absent peer metadata compatible unknown",
+    "causal_outcome_guard_removal": "exit1 at responsive blocked route zero HTTP calls",
+    "causal_eligibility_guard_removal": "exit1 at monthly blocked healthy peer skipped approved local chosen",
+    "producer_previous_failure": "preserved verbatim producer/compat.log empty GET JSON parsing failure plus all supplied serving-evidence files",
+    "diff_check": "pass"
+  },
+  "limits": [
+    "HTTP outcome attack boundaries are deterministic mocks, not actual provider HTTP. Real private compatibility endpoints separately observed empty GET/models and GET/usage versus POST inference.",
+    "No independent actual wrong-provider endpoint attack, corrupted restart attack, or time/catalogue-change matrix completed. Original restart68 does cover persisted valid block, key rotation, unsupported outcome text, recovery, local4 bounds and cloud0.",
+    "No full release gate: explicitly prohibited serial resource. finish check/verify cannot certify readiness without forbidden branch publication/upstream or full gate; no fake upstream created.",
+    "No main movement, push, install, deploy, production endpoints, live configuration/stores/claims/messages, paid probes, settings changes or memory injection. Root must route repair; reviewer implemented no product fix."
+  ],
+  "evidence_directory": "reviews/serving-33c36b4/evidence",
+  "reproduction_fixture": "scripts/review-serving-exact-tip.cjs",
+  "provenance": "Review artifact commit carries reviewer session trailer; source producer commits retained unchanged, reviewer started from current origin/main in mandatory managed review checkout."
+}

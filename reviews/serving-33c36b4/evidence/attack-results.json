@@ -1,0 +1,25 @@
+{
+  "work": "C:\\Users\\Victor\\AppData\\Local\\Temp\\wa-review-serving-BSmH91",
+  "results": [
+    {
+      "name": "attacks-source",
+      "status": 0,
+      "signal": null
+    },
+    {
+      "name": "attacks-embedded",
+      "status": 0,
+      "signal": null
+    },
+    {
+      "name": "causal-outcome-removal",
+      "status": 1,
+      "signal": null
+    },
+    {
+      "name": "causal-eligibility-removal",
+      "status": 1,
+      "signal": null
+    }
+  ]
+}
