@@ -1,0 +1,15 @@
+ok   cancellation wins before admission: 
+ok   ordered placement persists
+ok   invalid capacity is refused
+ok   queued submission is idempotent
+ok   first task fills preferred cloud node
+ok   in-flight child text is visible before settlement
+ok   overflow uses next node with a separate session
+timed sample {"attempts":1,"created_at":1791046128.7512,"dispatch_state":"placing","execution_node":"198454154c79db76411a11877b911b1d","model":"fixture","parent_session_id":"","profile":"explore","prompt":"third","settled":false,"state":"placing","subagent_id":"dispatch:baead843-66ce-4e4d-a090-b3ec7b7f3537"}
+
+STDERR
+AssertionError [ERR_ASSERTION]: all-full work remains durably queued
+    at check (C:\Users\Victor\orca\projects\wasm-agent\.git\worktrees\wa-worktree-childdispatch78f44308-a301-4811-b6fc-063f77a4e95d\repair-review-evidence\orchestrator-queue-race\timed-sample.cjs:12:38)
+    at C:\Users\Victor\orca\projects\wasm-agent\.git\worktrees\wa-worktree-childdispatch78f44308-a301-4811-b6fc-063f77a4e95d\repair-review-evidence\orchestrator-queue-race\timed-sample.cjs:121:3
+    at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+FAIL; evidence C:\Users\Victor\AppData\Local\Temp\wa-orchestrator-F8PfQx

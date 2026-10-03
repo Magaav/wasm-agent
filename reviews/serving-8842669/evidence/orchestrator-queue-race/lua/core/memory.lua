@@ -1,0 +1,1407 @@
+-- Memory: explicit memories + append-only ledger, all in Lua over host.sqlite.
+-- The ledger is source of truth; *_fts is an index; the model never rewrites it.
+local json = dofile("lua/vendor/json.lua")
+local paths = dofile("lua/core/paths.lua")
+local M = {}
+local in_transaction
+
+local function decode(raw)
+  if type(raw) == "string" then
+    local ok, value = pcall(json.decode, raw)
+    if ok then raw = value end
+  end
+  return raw
+end
+
+local function check(result)
+  if type(result) == "table" and result.error then
+    error(result.error, 2)
+  end
+  return result
+end
+
+local function query(sql, params)
+  return check(decode(host.sql_query(sql, json.encode(params or {}))))
+end
+
+local function exec(sql, params)
+  return check(decode(host.sql_exec(sql, json.encode(params or {}))))
+end
+
+-- Turn free text into a safe FTS5 AND-of-quoted-terms query.
+-- Terms for an FTS5 MATCH expression, each quoted so that arbitrary user text
+-- cannot be read as FTS syntax, and deduplicated so a repeated word does not
+-- skew the ranking.
+local function fts_terms(text)
+  local terms, seen = {}, {}
+  for term in tostring(text or ""):gmatch("[%w_]+") do
+    local key = term:lower()
+    if not seen[key] then
+      seen[key] = true
+      terms[#terms + 1] = '"' .. term .. '"'
+    end
+  end
+  return terms
+end
+
+function M.fts_query(text)
+  return table.concat(fts_terms(text), " AND ")
+end
+
+local function has_column(table, column)
+  for _, row in ipairs(query("PRAGMA table_info(" .. table .. ")")) do
+    if row.name == column then return true end
+  end
+  return false
+end
+
+local function add_column(table, column, declaration)
+  if not has_column(table, column) then
+    exec("ALTER TABLE " .. table .. " ADD COLUMN " .. column .. " " .. declaration)
+  end
+end
+
+-- Interruption classification. Declared here because `list_sessions` reports a
+-- session's state and is defined earlier in the file than the section those
+-- helpers belong to; an earlier function body cannot see a `local` declared
+-- below it, it would resolve to a global and be nil at call time.
+local decode_calls, classify, ago, detail_of
+
+-- ---------------------------------------------------------------- the naming migration
+--
+-- ARCHITECTURE.md section 6 settles what these words mean, and three different things used to share
+-- two of them: `session_messages()` returned *messages*, and one id name meant a *run* in one place and a
+-- *message* in another, and the UI said "this turn" meaning the run. The names move once, here.
+--
+-- Two properties this has to have, both of them paid for elsewhere in this project:
+--
+--   * **It runs before the schema, not after.** `schema.sql` creates `messages`, so a rename that
+--     arrived afterwards would find the name taken, skip, and strand every old row in a table nothing
+--     reads any more - silent data loss, on the one database that matters. Renaming first means the
+--     rows move, and the schema then fills in whatever a fresh database is missing.
+--   * **It is identified by shape, not by the presence of another table.** The ledger is recognised
+--     by its own `conversation_id` column, so a database that has the ledger but never had a
+--     transcript still frees the name instead of colliding with it.
+--
+-- Every step is guarded by the old name *and* the absence of the new one, so a database already
+-- migrated is left exactly as it is and a fresh one is not touched at all. Re-running changes
+-- nothing, which is asserted by tests/naming-migration.lua against a database built the old way.
+local function table_exists(name)
+  return #query("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", {name}) > 0
+end
+
+local function index_exists(name)
+  return #query("SELECT 1 FROM sqlite_master WHERE type='index' AND name=?", {name}) > 0
+end
+
+-- `meta` is a key/value table for facts about the database itself. The one it holds today is the
+-- journal's vocabulary boundary: which word an entry was written with, and since when. It is written
+-- once, by the migration, and read by anyone who has to interpret a durable log.
+local function meta_get(key)
+  local rows = query("SELECT value FROM meta WHERE key=?", {key})
+  return rows[1] and rows[1].value or nil
+end
+
+local function meta_set(key, value)
+  exec("INSERT OR REPLACE INTO meta(key,value) VALUES(?,?)", {key, tostring(value)})
+end
+
+-- SQLite has no `ALTER INDEX ... RENAME`: an index follows its table's rename and keeps its own name,
+-- so a moved table would leave behind an index called after the old one. Dropped and recreated, which
+-- is what `schema.sql` does for a fresh database anyway.
+local function rename_index(from, to, definition)
+  if index_exists(from) and not index_exists(to) then
+    exec("DROP INDEX " .. from)
+    exec("CREATE INDEX " .. to .. " ON " .. definition)
+  end
+end
+
+local function migrate_shape()
+  -- 1. The external inbox/ledger frees the word first: it holds `messages`, and the transcript needs
+  --    it. Recognised by its own column, so this cannot fire on an already-migrated database, where
+  --    `messages` is the transcript and has no `conversation_id`.
+  if table_exists("messages") and not table_exists("ledger_messages")
+     and has_column("messages", "conversation_id") then
+    exec("ALTER TABLE messages RENAME TO ledger_messages")
+  end
+  if table_exists("messages_fts") and not table_exists("ledger_messages_fts")
+     and (has_column("messages_fts", "conversation_id") or table_exists("turns")) then
+    exec("ALTER TABLE messages_fts RENAME TO ledger_messages_fts")
+  end
+  rename_index("messages_conversation_idx", "ledger_messages_conversation_idx",
+               "ledger_messages(conversation_id, observed_at)")
+  rename_index("messages_time_idx", "ledger_messages_time_idx", "ledger_messages(observed_at)")
+
+  -- 2. The transcript is `messages`: one stored row per message (user turn, assistant turn, tool
+  --    result, summary).
+  if table_exists("turns") and not table_exists("messages") then
+    exec("ALTER TABLE turns RENAME TO messages")
+  end
+  -- Its full-text index is rebuilt rather than renamed. SQLite renames an fts5 table happily, but refuses
+  -- `ALTER TABLE ... RENAME COLUMN` on a virtual table ("cannot rename columns of virtual table") - and
+  -- the column here is `turn_id`, where the row it points at is a message. Measured against this node's -- naming-check: allow (a migration, or a wire key for a peer that has not migrated)
+  -- own SQLite, not assumed: the rebuild below is the path it accepted.
+  if table_exists("turns_fts") and not table_exists("messages_fts") then
+    exec([[CREATE VIRTUAL TABLE messages_fts USING fts5(
+  content, session_id UNINDEXED, message_id UNINDEXED,
+  tokenize = 'unicode61 remove_diacritics 2')]])
+    exec("INSERT INTO messages_fts(content,session_id,message_id) SELECT content,session_id,turn_id FROM turns_fts") -- naming-check: allow (a migration, or a wire key for a peer that has not migrated)
+    exec("DROP TABLE turns_fts")
+  end
+  rename_index("turns_session_idx", "messages_session_idx", "messages(session_id, seq)")
+  rename_index("turns_time_idx", "messages_time_idx", "messages(created_at)")
+
+  -- 3. The stored span kinds move with the readers: a `turn` span is the step (one model call and the
+  --    tools it asked for), a `turn_span` is the run, and an `llm` span is a model call.
+  if table_exists("harness_events") then
+    exec("UPDATE harness_events SET kind='step' WHERE kind='turn'")
+    exec("UPDATE harness_events SET kind='run' WHERE kind='turn_span'")
+    exec("UPDATE harness_events SET kind='model_call' WHERE kind='llm'")
+  end
+
+  -- 4. `turn_id` held a *run* in `runs` and `harness_events` (both are given the run's own id), and a -- naming-check: allow (a migration, or a wire key for a peer that has not migrated)
+  --    *message* in the full-text index above - which is why this is three renames and not one.
+  if table_exists("runs") and has_column("runs", "turn_id") and not has_column("runs", "run_id") then -- naming-check: allow (a migration, or a wire key for a peer that has not migrated)
+    exec("ALTER TABLE runs RENAME COLUMN turn_id TO run_id") -- naming-check: allow (a migration, or a wire key for a peer that has not migrated)
+  end
+  if table_exists("harness_events") and has_column("harness_events", "turn_id") -- naming-check: allow (a migration, or a wire key for a peer that has not migrated)
+     and not has_column("harness_events", "run_id") then
+    exec("ALTER TABLE harness_events RENAME COLUMN turn_id TO run_id") -- naming-check: allow (a migration, or a wire key for a peer that has not migrated)
+  end
+end
+
+-- Sessions become resumable threads: who, where, how verbose, and the
+-- compaction watermark.
+local function migrate()
+  add_column("sessions", "user_id", "TEXT NOT NULL DEFAULT 'master'")
+  add_column("sessions", "node_id", "TEXT NOT NULL DEFAULT ''")
+  -- The checkout this session's tools work in, or '' for "the node's own working directory".
+  -- The default is '' on purpose: a session that was never given a worktree keeps behaving
+  -- exactly as it did before sessions could own one, so this column changes nothing until a
+  -- session opts in. See docs/SESSION-FIRST.md.
+  add_column("sessions", "worktree", "TEXT NOT NULL DEFAULT ''")
+  add_column("sessions", "workspace_required", "INTEGER NOT NULL DEFAULT 0")
+  add_column("sessions", "workspace_state", "TEXT NOT NULL DEFAULT 'unbound'")
+  add_column("sessions", "workspace_branch", "TEXT NOT NULL DEFAULT ''")
+  add_column("sessions", "workspace_base_commit", "TEXT NOT NULL DEFAULT ''")
+  add_column("sessions", "workspace_source_path", "TEXT NOT NULL DEFAULT ''")
+  add_column("sessions", "workspace_start_state", "TEXT NOT NULL DEFAULT '{}'")
+  add_column("sessions", "workspace_error", "TEXT NOT NULL DEFAULT ''")
+  add_column("sessions", "fork_parent_id", "TEXT")
+  add_column("sessions", "fork_parent_seq", "INTEGER")
+  add_column("sessions", "title", "TEXT NOT NULL DEFAULT ''")
+  add_column("sessions", "mode", "TEXT NOT NULL DEFAULT 'default'")
+  add_column("sessions", "summary", "TEXT NOT NULL DEFAULT ''")
+  add_column("sessions", "summarized_until", "INTEGER NOT NULL DEFAULT 0")
+  add_column("sessions", "updated_at", "REAL NOT NULL DEFAULT 0")
+  exec("UPDATE sessions SET updated_at=started_at WHERE updated_at=0")
+  -- Interruptions: a thread that was cut off mid-answer (see the section on
+  -- derived state below). A hard kill cannot write these - that is the point of
+  -- deriving the *current* state from the ledger - but the *history* has to be
+  -- written down somewhere, or resuming the thread would erase the only trace
+  -- that anything went wrong.
+  add_column("sessions", "interrupted_at", "REAL")
+  add_column("sessions", "interrupted_seq", "INTEGER NOT NULL DEFAULT 0")
+  add_column("sessions", "interrupted_reason", "TEXT NOT NULL DEFAULT ''")
+  add_column("sessions", "interrupted_count", "INTEGER NOT NULL DEFAULT 0")
+  -- Images attached to a user turn. A JSON array of
+  -- {mime, sha256, name, bytes}; the bytes live on disk as base64 under
+  -- attachments/ (content-addressed by sha256), never in `content`. Content is
+  -- FTS-indexed, so putting base64 there would poison every text search and
+  -- bloat the index by three orders of magnitude.
+  add_column("messages", "images", "TEXT NOT NULL DEFAULT '[]'")
+  -- What the turn changed on disk: a JSON summary of {files:[{path,added,removed,...}],
+  -- added, removed}, so the diff topic can be rebuilt from the ledger alone. The *bodies*
+  -- (the previous text undo restores) are not here and must not be: this column is read
+  -- into every transcript view, and a file's contents do not belong in a transcript any
+  -- more than base64 images do. An older turn's `{}` means "nothing recorded", which
+  -- reads as no topic rather than an empty one.
+  add_column("messages", "changes", "TEXT NOT NULL DEFAULT '{}'")
+  add_column("messages", "reasoning", "TEXT NOT NULL DEFAULT ''")
+  -- Assistant message phases are part of the provider transcript contract. In
+  -- particular, OpenAI Responses commentary must replay as commentary rather
+  -- than being mistaken for a completed answer on the next request.
+  add_column("messages", "phase", "TEXT NOT NULL DEFAULT ''")
+  -- The settlement evaluation packet (lua/core/completions.lua) travels with the row that carries
+  -- its wake. It is written once, when the child settles and before any model turn, and read back
+  -- verbatim, so a wake delivered after a restart still starts from the evidence the child left.
+  add_column("child_completions", "packet", "TEXT NOT NULL DEFAULT ''")
+  -- Rows written before the state was renamed kept the wording of the claim we used to
+  -- make: "died after a tool result", "died right after a compaction". Nobody observed
+  -- those deaths - a live run was reported as interrupted fourteen times in a row - so
+  -- the stored detail is corrected rather than preserved. The facts (seq, time, count)
+  -- are in their own columns and are untouched. Idempotent: a second run matches nothing.
+  exec("UPDATE sessions SET interrupted_reason = replace(interrupted_reason, 'died after a tool result', 'stopped after a tool result') WHERE interrupted_reason LIKE '%died after a tool result%'")
+  exec("UPDATE sessions SET interrupted_reason = replace(interrupted_reason, 'died right after a compaction', 'stopped right after a compaction') WHERE interrupted_reason LIKE '%died right after a compaction%'")
+  exec("UPDATE sessions SET interrupted_reason = replace(interrupted_reason, 'died after a decision', 'stopped after a step') WHERE interrupted_reason LIKE '%died after a decision%'")
+end
+
+function M.setup()
+  -- Migrations are idempotent but they WRITE. Every interpreter opens its own
+  -- connection now, so a second interpreter booting while another holds a write
+  -- transaction would block on the write lock (and fail with "database is
+  -- locked") merely to re-run DDL that is already applied. The first interpreter
+  -- in the process migrates; the rest trust the schema and use their connection.
+  if host.db_ready and host.db_ready() then return end
+  -- The shape migration runs *before* the schema. `schema.sql` creates `messages`, so a rename that
+  -- arrived after it would find the name taken, skip, and strand the old rows in a table nothing reads
+  -- any more. Renaming first moves the rows; the schema then fills in whatever a fresh database lacks.
+  migrate_shape()
+  local schema = (EMBEDDED and EMBEDDED["lua/core/schema.sql"]) or host.read_file("lua/core/schema.sql")
+  if not schema then error("schema_missing") end
+  exec(schema)
+
+  -- The journal's vocabulary changed with the rename, and the old log is kept exactly as it was.
+  -- Rewriting it would erase which word each entry was written with, and the log is the record of what
+  -- happened - so entries written before this moment say `turn`, entries after say `message`, and a
+  -- reader accepts both. The boundary is *recorded* rather than inferred, so a later reader splits the
+  -- log by era instead of guessing from the commit graph. Nothing is pruned: the journal is read only
+  -- by the sync loop and never enters a prompt, so its old words cannot mislead an agent, while the
+  -- entries themselves are the evidence this project exists to keep.
+  --
+  -- Recorded here rather than in `migrate_shape()`, which deliberately runs *before* the schema: `meta`
+  -- does not exist yet at that point, and creating it in two places is how the two definitions drift.
+  if not meta_get("journal_kind") then
+    meta_set("journal_kind", "message")
+    meta_set("journal_kind_legacy", "turn")
+    meta_set("journal_kind_changed_at", host.now())
+  end
+
+  migrate()
+  dofile("lua/core/telemetry.lua").setup()
+  -- Threads that predate naming are all called "chat", which tells the reader nothing and makes a
+  -- list of them unusable. Name them from their first user message, once: after this the name
+  -- belongs to the thread, and only a thread without one gets named again.
+  for _, row in ipairs(query("SELECT id FROM sessions WHERE title='' OR title='chat'")) do
+    local first = query("SELECT content FROM messages WHERE session_id=? AND role='user' ORDER BY seq ASC LIMIT 1", {row.id})
+    if first[1] then M.name_session(row.id, first[1].content or "") end
+  end
+  -- The schema is now present on this connection; later interpreters skip the DDL.
+  if host.mark_db_ready then host.mark_db_ready() end
+end
+
+-- ---------------------------------------------------------------- memories
+
+function M.remember(content, scope, tags)
+  content = tostring(content or "")
+  if content == "" then error("memory_empty") end
+  if #content > 8000 then error("memory_too_large") end
+  scope = scope or "global"
+  tags = tags or {}
+  local hash = host.sha256(content)
+  local existing = query(
+    "SELECT id FROM memories WHERE scope=? AND content_sha256=? AND deleted_at IS NULL LIMIT 1",
+    {scope, hash})
+  if #existing > 0 then return existing[1].id end
+  local id = host.uuid()
+  local now = host.now()
+  exec("INSERT INTO memories(id,scope,content,tags,source,session_id,created_at,updated_at,content_sha256) " ..
+       "VALUES(?,?,?,?,?,?,?,?,?)",
+       {id, scope, content, json.encode(tags), "user", "", now, now, hash})
+  exec("INSERT INTO memories_fts(content,tags,memory_id) VALUES(?,?,?)",
+       {content, table.concat(tags, " "), id})
+  M.journal("memory", id, {
+    id = id, scope = scope, content = content, tags = tags, source = "user",
+    created_at = now, updated_at = now, content_sha256 = hash,
+  })
+  return id
+end
+
+local function query_memories(match, limit, scope)
+  local sql = "SELECT m.id,m.scope,m.content,m.tags,m.source,m.created_at,m.updated_at," ..
+              "bm25(memories_fts) AS rank FROM memories_fts " ..
+              "JOIN memories m ON m.id=memories_fts.memory_id " ..
+              "WHERE memories_fts MATCH ? AND m.deleted_at IS NULL"
+  local params = {match}
+  if scope then
+    sql = sql .. " AND (m.scope=? OR m.scope='global')"
+    params[#params + 1] = scope
+  end
+  sql = sql .. " ORDER BY rank LIMIT ?"
+  params[#params + 1] = limit
+  local rows = query(sql, params)
+  for _, row in ipairs(rows) do row.tags = json.decode(row.tags) end
+  return rows
+end
+
+-- Recall is searched twice on purpose. All terms present is the precise case
+-- (a query naming a fact), so it is tried first. A conversational question -
+-- "what did I ask you to remember?" - shares no complete term set with the note
+-- it is about, so requiring every term returns nothing, and returning nothing
+-- here is what made the agent tell the user the memory store was empty while the
+-- fact was sitting in it. The second pass matches any term and lets bm25 rank.
+function M.recall(text, limit, scope)
+  limit = limit or 10
+  local terms = fts_terms(text)
+  if #terms == 0 then return {} end
+  local rows = query_memories(table.concat(terms, " AND "), limit, scope)
+  if #rows == 0 and #terms > 1 then
+    rows = query_memories(table.concat(terms, " OR "), limit, scope)
+  end
+  return rows
+end
+
+function M.memories(scope, limit)
+  limit = limit or 50
+  local sql = "SELECT id,scope,content,tags,source,created_at,updated_at FROM memories WHERE deleted_at IS NULL"
+  local params = {}
+  if scope then sql = sql .. " AND scope=?"; params[#params + 1] = scope end
+  sql = sql .. " ORDER BY updated_at DESC LIMIT ?"
+  params[#params + 1] = limit
+  local rows = query(sql, params)
+  for _, row in ipairs(rows) do row.tags = json.decode(row.tags) end
+  return rows
+end
+
+function M.forget(memory_id)
+  local result = exec("UPDATE memories SET deleted_at=?, updated_at=? WHERE id=? AND deleted_at IS NULL",
+                      {host.now(), host.now(), memory_id})
+  if (result.changes or 0) > 0 then
+    exec("DELETE FROM memories_fts WHERE memory_id=?", {memory_id})
+  end
+  return (result.changes or 0) > 0
+end
+
+-- ------------------------------------------------------------------ ledger
+
+function M.ingest_observation(source, payload, device_id)
+  local raw = type(payload) == "string" and payload or json.encode(payload)
+  local hash = host.sha256(raw)
+  exec("INSERT OR IGNORE INTO observations(id,source,device_id,observed_at,payload_sha256,payload,ingested_at) " ..
+       "VALUES(?,?,?,?,?,?,?)",
+       {hash, source or "unknown", device_id or "", host.now(), hash, raw, host.now()})
+  return hash
+end
+
+function M.record_conversation(conversation)
+  local id = tostring(conversation.id or "")
+  if id == "" then error("conversation_identity_required") end
+  local now = conversation.updated_at or host.now()
+  -- A conversation is known even when none of its messages are new, which is why this exists
+  -- separately from `record_message`: an inbox that only knows about chats that just spoke is an
+  -- inbox that forgets everyone else.
+  exec("INSERT INTO conversations(id,kind,title,created_at,updated_at) VALUES(?,?,?,?,?) " ..
+       "ON CONFLICT(id) DO UPDATE SET kind=excluded.kind, title=excluded.title, updated_at=excluded.updated_at",
+       {id, conversation.kind or "unknown", conversation.title or "", now, now})
+end
+
+-- `meta` is the key/value table beside the ledger, and a cursor belongs there: it is the position
+-- this database has read to in an external source, so it has to move in the same transaction as the
+-- rows it describes. A cursor in a separate file drifts from the ledger the first time one write
+-- succeeds and the other does not.
+function M.meta_get(key)
+  return meta_get(key)
+end
+
+function M.meta_set(key, value)
+  return meta_set(key, value)
+end
+
+function M.record_message(message)
+  local conversation_id = tostring(message.conversation_id or "")
+  local message_id = tostring(message.message_id or "")
+  if conversation_id == "" or message_id == "" then error("message_identity_required") end
+  local body = tostring(message.body or "")
+  local now = message.observed_at or host.now()
+  exec("INSERT INTO conversations(id,kind,title,created_at,updated_at) VALUES(?,?,?,?,?) " ..
+       "ON CONFLICT(id) DO UPDATE SET updated_at=excluded.updated_at",
+       {conversation_id, message.kind or "unknown", message.title or "", now, now})
+  local existing = query("SELECT body_sha256, sent_at, reply_to FROM ledger_messages " ..
+                         "WHERE conversation_id=? AND message_id=?",
+                         {conversation_id, message_id})
+  local hash = host.sha256(body)
+  -- A SQL parameter list cannot carry NULL here: the JSON encoder refuses a table with holes, so a nil
+  -- parameter is a hard error ("invalid table: sparse array") rather than a NULL - which is how a
+  -- message with no reply target crashed the first WhatsApp ingest, and how the *update* branch kept
+  -- crashing after the insert branch was fixed. Every nullable column therefore gets a concrete value:
+  -- an unknown send time becomes the observation time on insert and stays what it was on update, and
+  -- "no reply target" is the empty string.
+  if #existing == 0 then
+    local sent_at = message.sent_at or now
+    local reply_to = message.reply_to or ""
+    exec("INSERT INTO ledger_messages(conversation_id,message_id,sender_id,direction,sent_at,observed_at," ..
+         "body,reply_to,media,source,body_sha256) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+         {conversation_id, message_id, message.sender_id or "", message.direction or "incoming",
+          sent_at, now, body, reply_to, json.encode(message.media or {}),
+          message.source or "observer", hash})
+    exec("INSERT INTO ledger_messages_fts(body,conversation_id,message_id) VALUES(?,?,?)",
+         {body, conversation_id, message_id})
+  elseif existing[1].body_sha256 ~= hash then
+    -- "Keep whatever is there" is read and passed rather than expressed as COALESCE(?, column): a nil
+    -- parameter is impossible in this list, so the value it would have protected has to come from here.
+    local sent_at = message.sent_at or existing[1].sent_at or now
+    local reply_to = message.reply_to or existing[1].reply_to or ""
+    exec("UPDATE ledger_messages SET body=?, body_sha256=?, sender_id=?, direction=?, " ..
+         "sent_at=?, observed_at=?, reply_to=?, media=?, source=? " ..
+         "WHERE conversation_id=? AND message_id=?",
+         {body, hash, message.sender_id or "", message.direction or "incoming", sent_at, now,
+          reply_to, json.encode(message.media or {}), message.source or "observer",
+          conversation_id, message_id})
+    exec("DELETE FROM ledger_messages_fts WHERE conversation_id=? AND message_id=?",
+         {conversation_id, message_id})
+    exec("INSERT INTO ledger_messages_fts(body,conversation_id,message_id) VALUES(?,?,?)",
+         {body, conversation_id, message_id})
+  end
+end
+
+function M.search_ledger(text, conversation_id, limit)
+  limit = limit or 20
+  local match = M.fts_query(text)
+  if match == "" then return {} end
+  local sql = "SELECT msg.*, bm25(ledger_messages_fts) AS rank FROM ledger_messages_fts " ..
+              "JOIN ledger_messages msg ON msg.conversation_id=ledger_messages_fts.conversation_id " ..
+              "AND msg.message_id=ledger_messages_fts.message_id WHERE ledger_messages_fts MATCH ?"
+  local params = {match}
+  if conversation_id then sql = sql .. " AND msg.conversation_id=?"; params[#params + 1] = conversation_id end
+  sql = sql .. " ORDER BY rank LIMIT ?"
+  params[#params + 1] = limit
+  return query(sql, params)
+end
+
+function M.conversation(conversation_id, limit)
+  limit = limit or 50
+  local rows = query("SELECT * FROM ledger_messages WHERE conversation_id=? " ..
+                     "ORDER BY COALESCE(sent_at,observed_at) DESC LIMIT ?", {conversation_id, limit})
+  local out = {}
+  for index = #rows, 1, -1 do out[#out + 1] = rows[index] end
+  return out
+end
+
+function M.conversations(limit)
+  limit = limit or 50
+  return query("SELECT c.*, (SELECT COUNT(*) FROM ledger_messages m WHERE m.conversation_id=c.id) AS message_count " ..
+               "FROM conversations c ORDER BY c.updated_at DESC LIMIT ?", {limit})
+end
+
+-- The newest message the operator sent in one conversation *after* a given moment, or nil.
+--
+-- It exists so a responder can ask the one question the ledger alone can answer: "has the operator already
+-- taken this conversation over?" - asked all the way through the run, not only at the moment the message was
+-- picked up. Bounded to one row and one index seek, so asking it again before an external effect costs
+-- nothing next to the effect itself. An unreadable ledger answers nil exactly like an unanswered
+-- conversation does, which is why the caller must treat "no proof" and "no answer" together (fail closed)
+-- rather than reading nil as permission.
+function M.newest_outgoing_after(conversation_id, since)
+  local id = tostring(conversation_id or "")
+  local at = tonumber(since)
+  if id == "" or not at or at <= 0 then return nil end
+  local rows = query("SELECT message_id, body, sent_at, observed_at FROM ledger_messages " ..
+                     "WHERE conversation_id=? AND direction='outgoing' AND COALESCE(sent_at,observed_at) > ? " ..
+                     "ORDER BY COALESCE(sent_at,observed_at) DESC LIMIT 1", {id, at})
+  return rows[1]
+end
+
+-- One conversation record - its kind and its title - for a scoped tool that must name the
+-- conversation it is bound to instead of guessing a label from message content. A responder child
+-- that could only see message bodies reported a group as "futebol/bet" when its title was
+-- "A Casa Lar | 🏠", because nothing it was given carried the name.
+function M.conversation_record(conversation_id)
+  local id = tostring(conversation_id or "")
+  if id == "" then return nil end
+  local rows = query("SELECT * FROM conversations WHERE id=? LIMIT 1", {id})
+  return rows[1]
+end
+
+-- One ledger row by its message id, for resolving a trusted event. Returns nil
+-- when the id is absent OR names more than one conversation: an ambiguous id is
+-- not an identity, and picking one would let an event choose its own scope.
+function M.ledger_message(message_id)
+  message_id = tostring(message_id or "")
+  if message_id == "" then return nil end
+  local rows = query("SELECT * FROM ledger_messages WHERE message_id=? LIMIT 2", {message_id})
+  if #rows ~= 1 then return nil end
+  return rows[1]
+end
+
+function M.stats()
+  local function count(sql)
+    local rows = query(sql)
+    return rows[1] and rows[1]["COUNT(*)"] or 0
+  end
+  return {
+    memories = count("SELECT COUNT(*) FROM memories WHERE deleted_at IS NULL"),
+    conversations = count("SELECT COUNT(*) FROM conversations"),
+    ledger_messages = count("SELECT COUNT(*) FROM ledger_messages"),
+    observations = count("SELECT COUNT(*) FROM observations"),
+    sessions = count("SELECT COUNT(*) FROM sessions"),
+    messages = count("SELECT COUNT(*) FROM messages"),
+    runs = count("SELECT COUNT(*) FROM runs"),
+  }
+end
+
+-- ---------------------------------------------------------------- sessions
+-- A session is a resumable thread. `mode` is 'default' (compacted: user,
+-- assistant and one-line tool traces, pruned after N days) or 'debug' (everything
+-- verbatim, kept forever) so a failing task can be reproduced and turned into a
+-- fixture.
+
+-- `opts.id` starts the session under a name the caller already chose. A client that
+-- wants a *new* thread says so by naming one it knows is unused; letting it pick the
+-- name means the id it is holding and the id the node stored are the same thing, with
+-- no round trip in which the node could answer "started" and hand back something else.
+function M.start_session(route_id, objective, opts)
+  opts = opts or {}
+  local id = opts.id or host.uuid()
+  local now = host.now()
+  -- `parent_session_id` links a subagent's transcript to its parent without
+  -- writing the parent's. A normal session stores NULL, which is what lets
+  -- `ensure_session` reuse it; a subagent session always stores a value (possibly
+  -- empty when it has no conversation), which keeps normal routing out of it.
+  -- Written as two inserts rather than one with a nil parameter: a nil in the
+  -- parameter array makes it sparse, the JSON encoder drops the tail, and the
+  -- insert fails "got 9, needed 10" (the bug that cost an afternoon in apply_entry).
+  local parent = opts.parent_session_id
+  if parent == nil and route_id == "subagent" then parent = "" end
+  local base = {id, route_id or "", objective or "", now, opts.user_id or "master",
+                opts.node_id or "", opts.title or objective or "", opts.mode or "default", now}
+  local required = opts.workspace_required == true
+  if parent ~= nil then
+    exec("INSERT INTO sessions(id,route_id,objective,started_at,user_id,node_id,title,mode,updated_at,parent_session_id,workspace_required,workspace_state) " ..
+         "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+         {base[1], base[2], base[3], base[4], base[5], base[6], base[7], base[8], base[9], parent,
+          required and 1 or 0, required and "pending" or "unbound"})
+  else
+    exec("INSERT INTO sessions(id,route_id,objective,started_at,user_id,node_id,title,mode,updated_at,workspace_required,workspace_state) " ..
+         "VALUES(?,?,?,?,?,?,?,?,?,?,?)", {base[1],base[2],base[3],base[4],base[5],base[6],base[7],base[8],base[9],
+           required and 1 or 0, required and "pending" or "unbound"})
+  end
+  M.journal("session", id, M.session(id))
+  return id
+end
+
+-- Reuse the newest open session for this (user, node) pair, or start one.
+-- Child (subagent) sessions are excluded: a normal turn must never land in a
+-- child's transcript just because it is the newest open row for the pair.
+function M.ensure_session(user_id, node_id, title)
+  user_id = user_id or "master"
+  node_id = node_id or ""
+  local rows = query(
+    "SELECT id FROM sessions WHERE user_id=? AND node_id=? AND ended_at IS NULL " ..
+    "AND parent_session_id IS NULL AND (objective IS NULL OR objective<>'subagent') " ..
+    "ORDER BY started_at DESC LIMIT 1", {user_id, node_id})
+  if #rows > 0 then return rows[1].id end
+  return M.start_session(node_id, title or "chat", { user_id = user_id, node_id = node_id, title = title or "chat" })
+end
+
+function M.session(session_id)
+  local rows = query("SELECT * FROM sessions WHERE id=?", {session_id})
+  return rows[1]
+end
+
+-- Fork an immutable transcript prefix into a new, independently writable conversation.
+-- A boundary must be an existing non-summary message and may not leave a tool call
+-- unresolved. Copied rows get new identities and local sequence numbers; the source
+-- remains untouched and the new session starts without its parent's lossy summary or cwd.
+function M.fork_session(source_id, boundary_seq, user_id)
+  local source = M.session(source_id)
+  if not source then return nil, "unknown_session" end
+  if source.user_id ~= user_id then return nil, "forbidden" end
+  boundary_seq = tonumber(boundary_seq)
+  if not boundary_seq or boundary_seq < 1 or boundary_seq % 1 ~= 0 then return nil, "invalid_boundary" end
+  local rows = query("SELECT * FROM messages WHERE session_id=? AND seq<=? ORDER BY seq", {source_id, boundary_seq})
+  if #rows == 0 or rows[#rows].seq ~= boundary_seq or rows[#rows].role == "summary" then
+    return nil, "invalid_boundary"
+  end
+  local pending, prefix = {}, {}
+  for _, row in ipairs(rows) do
+    if row.role ~= "summary" then
+      local calls = decode(row.tool_calls or "[]") or {}
+      for _, call in ipairs(calls) do
+        local id = call.id or (call["function"] and call["function"].id)
+        if not id or id == "" or pending[id] then return nil, "invalid_tool_history" end
+        pending[id] = true
+      end
+      if row.role == "tool" then
+        if not row.tool_call_id or not pending[row.tool_call_id] then return nil, "invalid_tool_history" end
+        pending[row.tool_call_id] = nil
+      end
+      prefix[#prefix + 1] = row
+    end
+  end
+  if next(pending) then return nil, "incomplete_tool_exchange" end
+
+  local id = host.uuid()
+  local now = host.now()
+  local title = "Fork: " .. tostring(source.title or source_id)
+  in_transaction(function()
+    exec("INSERT INTO sessions(id,route_id,objective,parent_session_id,fork_parent_id,fork_parent_seq,started_at,ended_at,user_id,node_id,title,mode,summary,summarized_until,updated_at,worktree,workspace_required,workspace_state) VALUES(?,?,?,NULL,?,?,?,NULL,?,?,?,?,'',0,?,'',1,'pending')",
+      {id, source.route_id or "", "fork", source_id, boundary_seq, now,
+       source.user_id, source.node_id, title, source.mode or "default", now})
+    for seq, row in ipairs(prefix) do
+      local new_id = host.uuid()
+      exec("INSERT INTO messages(id,session_id,seq,role,content,images,tool_calls,tool_call_id,tool_name,tokens,ms,ok,debug,trace,changes,created_at,reasoning,phase) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        {new_id,id,seq,row.role,row.content or "",row.images or "[]",row.tool_calls or "[]",row.tool_call_id or "",row.tool_name or "",row.tokens or 0,row.ms or 0,row.ok or 1,row.debug or 0,row.trace or "[]",row.changes or "{}",row.created_at or now,row.reasoning or "",row.phase or ""})
+      exec("INSERT INTO messages_fts(content,session_id,message_id) VALUES(?,?,?)", {row.content or "",id,new_id})
+      M.journal("message", new_id, {id=new_id,session_id=id,seq=seq,role=row.role,content=row.content or "",images=decode(row.images or "[]") or {},tool_calls=decode(row.tool_calls or "[]") or {},tool_call_id=row.tool_call_id or "",tool_name=row.tool_name or "",tokens=row.tokens or 0,ms=row.ms or 0,ok=row.ok or 1,debug=row.debug or 0,trace=decode(row.trace or "[]") or {},changes=decode(row.changes or "{}") or {},reasoning=row.reasoning or "",phase=row.phase or "",created_at=row.created_at or now})
+    end
+    M.journal("session", id, M.session(id))
+  end)
+  return id
+end
+
+-- The most recently used session for this (user, node) pair, open or finished.
+-- `wa chat --continue` resumes the thread the user was last in: a session ends
+-- when its process exits, so filtering to open ones would never find anything.
+function M.latest_session(user_id, node_id)
+  local rows = query(
+    "SELECT * FROM sessions WHERE user_id=? AND node_id=? " ..
+    "ORDER BY updated_at DESC, started_at DESC LIMIT 1",
+    { user_id or "master", node_id or "" })
+  return rows[1]
+end
+
+-- `opts.states` adds each session's derived state (see "interruptions" below) to
+-- the row: the engine view lists threads, and a thread that died mid-answer must
+-- be distinguishable from a settled one without opening it.
+function M.list_sessions(user_id, limit, opts)
+  opts = opts or {}
+  limit = limit or 30
+  local sql = "SELECT s.*, (SELECT COUNT(*) FROM messages t WHERE t.session_id=s.id) AS message_count"
+  if opts.states then
+    -- The last turn per session, in the same query: one row per thread, no N+1.
+    sql = sql .. ", l.role AS last_role, l.ok AS last_ok, l.phase AS last_phase, l.tool_calls AS last_tool_calls, " ..
+                "l.created_at AS last_at, l.seq AS last_seq"
+  end
+  sql = sql .. " FROM sessions s"
+  if opts.states then
+    sql = sql .. " LEFT JOIN messages l ON l.session_id=s.id " ..
+                 "AND l.seq=(SELECT MAX(seq) FROM messages WHERE session_id=s.id)"
+  end
+  local params = {}
+  if user_id and user_id ~= "" then sql = sql .. " WHERE s.user_id=?"; params[#params + 1] = user_id end
+  sql = sql .. " ORDER BY s.updated_at DESC LIMIT ?"
+  params[#params + 1] = limit
+  local rows = query(sql, params)
+  if opts.states then
+    for _, row in ipairs(rows) do
+      local last = row.last_seq and { role = row.last_role, ok = row.last_ok, phase = row.last_phase,
+        tool_calls = row.last_tool_calls, created_at = row.last_at } or nil
+      row.state = classify(last)
+      row.state_detail = detail_of(row.state, last, nil)
+    end
+  end
+  return rows
+end
+
+-- The directory this session's tools run in. '' means the node's own cwd.
+function M.session_workspace(session_id)
+  if type(session_id) ~= "string" or session_id == "" then return nil end
+  local rows = query("SELECT worktree,workspace_required,workspace_state,workspace_branch,workspace_base_commit,workspace_source_path,workspace_start_state,workspace_error FROM sessions WHERE id=?", {session_id})
+  local row = rows[1]
+  if not row then return nil end
+  row.required = row.workspace_required == 1
+  row.state = row.workspace_state
+  row.branch = row.workspace_branch
+  row.base_commit = row.workspace_base_commit
+  row.source_path = row.workspace_source_path
+  row.error = row.workspace_error
+  row.start_state = decode(row.workspace_start_state or "{}") or {}
+  return row
+end
+
+function M.session_worktree(session_id)
+  local workspace = M.session_workspace(session_id)
+  return workspace and workspace.worktree or ""
+end
+
+-- Durable binding and allocation evidence are one session record. A required workspace that
+-- is pending/failed is intentionally distinct from an old unbound session (which may use cwd).
+function M.set_session_workspace(session_id, workspace)
+  workspace = workspace or {}
+  exec("UPDATE sessions SET worktree=?,workspace_required=?,workspace_state=?,workspace_branch=?,workspace_base_commit=?,workspace_source_path=?,workspace_start_state=?,workspace_error=? WHERE id=?",
+    {workspace.worktree or "", workspace.required and 1 or 0, workspace.state or "unbound",
+     workspace.branch or "", workspace.base_commit or "", workspace.source_path or "",
+     json.encode(workspace.start_state or {}), workspace.error or "", session_id})
+  M.journal("session", session_id, M.session(session_id))
+  return M.session_workspace(session_id)
+end
+
+function M.require_session_workspace(session_id)
+  local current = M.session_workspace(session_id)
+  if not current then return nil, "unknown_session" end
+  if current.required then return current end
+  current.required, current.state = true, "pending"
+  return M.set_session_workspace(session_id, current)
+end
+
+-- Point a session at a checkout. Not a usage event, so `updated_at` is left alone: the session
+-- list is ordered by last use, and changing where the work happens is not using the thread.
+function M.set_session_worktree(session_id, path)
+  path = tostring(path or "")
+  exec("UPDATE sessions SET worktree=? WHERE id=?", {path, session_id})
+  M.journal("session", session_id, M.session(session_id))
+  return path
+end
+
+function M.set_session_mode(session_id, mode)
+  mode = (mode == "debug") and "debug" or "default"
+  exec("UPDATE sessions SET mode=?, updated_at=? WHERE id=?", {mode, host.now(), session_id})
+  M.journal("session", session_id, M.session(session_id))
+  return mode
+end
+
+function M.set_session_summary(session_id, until_seq, summary)
+  exec("UPDATE sessions SET summarized_until=?, summary=?, updated_at=? WHERE id=?",
+       {until_seq, summary or "", host.now(), session_id})
+  M.journal("session", session_id, M.session(session_id))
+end
+
+function M.finish_session(session_id)
+  exec("UPDATE sessions SET ended_at=?, updated_at=? WHERE id=? AND ended_at IS NULL",
+       {host.now(), host.now(), session_id})
+  M.journal("session", session_id, M.session(session_id))
+end
+
+-- ---------------------------------------------------------------- messages
+
+local cached_origin = nil
+local function origin()
+  if cached_origin == nil then
+    local ok, raw = pcall(host.node_identity)
+    local identity = ok and raw and json.decode(raw) or nil
+    cached_origin = (identity and identity.node_id) or ""
+  end
+  return cached_origin
+end
+
+-- Append a mutation to the replication journal. Every write that should reach
+-- peers goes through here; applying a remote entry does NOT journal it again.
+function M.journal(kind, entity_id, payload)
+  exec("INSERT INTO journal(kind,entity_id,op,origin,payload,created_at) VALUES(?,?,?,?,?,?)",
+       {kind, entity_id, "upsert", origin(), json.encode(payload), host.now()})
+end
+
+-- -------------------------------------------------------------------- images
+-- User attachments and images returned by `read` live on disk, content-addressed
+-- by sha256, and are referenced from a turn by identity. Three reasons it is a file and not a column:
+--   1. `messages.content` is FTS-indexed; base64 there would poison every search.
+--   2. The same screenshot pasted twice is stored once.
+--   3. The path is stable, so replays and fixtures can resolve it.
+--
+-- The bytes are stored base64 *as text*, because the host's read_file/write_file
+-- are UTF-8 text only (rust/wa-host/src/host.rs). Encoding is therefore part of
+-- the on-disk format, not an implementation detail to change casually.
+
+local BASE64_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+
+function M.base64_decode(text)
+  if type(text) ~= "string" or text == "" then return "" end
+  text = text:gsub("%s", ""):gsub("=+$", "")
+  local out, buffer, bits = {}, 0, 0
+  for i = 1, #text do
+    local char = text:sub(i, i)
+    local value = BASE64_ALPHABET:find(char, 1, true)
+    if value then
+      buffer = buffer * 64 + (value - 1)
+      bits = bits + 6
+      if bits >= 8 then
+        bits = bits - 8
+        -- Take the top byte and *discard* the bits it used. Keeping them would
+        -- let `buffer` grow without bound: past ~13 symbols it exceeds the
+        -- exact-integer range, and every later byte is silently wrong (the
+        -- length stays correct, so only a byte comparison catches it).
+        out[#out + 1] = string.char(math.floor(buffer / (2 ^ bits)) % 256)
+        buffer = buffer % (2 ^ bits)
+      end
+    end
+  end
+  return table.concat(out)
+end
+
+function M.base64_encode(bytes)
+  if type(bytes) ~= "string" or bytes == "" then return "" end
+  local out = {}
+  local function symbol(index) return BASE64_ALPHABET:sub(index + 1, index + 1) end
+  for i = 1, #bytes, 3 do
+    local remaining = #bytes - i + 1
+    local a, b, c = bytes:byte(i), bytes:byte(i + 1), bytes:byte(i + 2)
+    -- Pad the group to three bytes of bits, then take four 6-bit symbols. The
+    -- final group's spare symbols become '='; taking them from a zeroed byte
+    -- would emit a real character and corrupt the output by length alone.
+    out[#out + 1] = symbol(math.floor(a / 4))
+    out[#out + 1] = symbol((a % 4) * 16 + math.floor((b or 0) / 16))
+    out[#out + 1] = remaining > 1 and symbol((b % 16) * 4 + math.floor((c or 0) / 64)) or "="
+    out[#out + 1] = remaining > 2 and symbol(c % 64) or "="
+  end
+  return table.concat(out)
+end
+
+-- Extensions we accept, mapped to the mime types the provider will echo back.
+-- The gateway itself accepts webp/png/jpeg/gif and rejects anything else, so the
+-- check happens here rather than being discovered as a 400 mid-turn.
+local IMAGE_TYPES = {
+  ["image/png"] = "png", ["image/jpeg"] = "jpg", ["image/webp"] = "webp",
+  ["image/gif"] = "gif",
+}
+
+function M.image_mime_supported(mime)
+  return IMAGE_TYPES[tostring(mime or ""):lower()] ~= nil
+end
+
+-- Store an image and return the reference recorded on the turn.
+-- A data URL or bare base64 is accepted. Decode/re-encode canonicalises equivalent
+-- inputs; the digest is then taken over that canonical base64 because host.sha256's
+-- current Lua argument reader is not binary-safe.
+function M.store_image(entry)
+  local raw = tostring(entry.data or entry.b64 or "")
+  local mime = tostring(entry.mime or ""):lower()
+  -- Strip a data URL envelope if one was supplied.
+  local header, payload = raw:match("^data:([^;,]+);base64,(.*)$")
+  if header then
+    mime = header:lower()
+    raw = payload
+  end
+  if not M.image_mime_supported(mime) then
+    return nil, "unsupported_image_type: " .. (mime ~= "" and mime or "unknown")
+  end
+  local bytes = M.base64_decode(raw)
+  if bytes == "" then return nil, "empty_image" end
+  -- Hash the *base64 text*, never the decoded bytes.
+  --
+  -- host.sha256() reaches Lua through `CStr::from_ptr` (rust/wa-host/src/lua.rs),
+  -- which stops at the first NUL. A PNG has a NUL at byte 9 of 70, so hashing
+  -- the decoded binary hashed an 8-byte prefix: a silent, truncated content
+  -- address, where two different images sharing a head would collide. The
+  -- encoded form is ASCII by construction, so it hashes in full, and it is also
+  -- exactly what we write to disk - so identity and stored bytes agree.
+  local encoded_bytes = M.base64_encode(bytes)
+  local digest = host.sha256(encoded_bytes)
+  local extension = IMAGE_TYPES[mime]
+  local directory = paths.data() .. "/attachments/" .. digest:sub(1, 2)
+  local path = directory .. "/" .. digest .. "." .. extension
+  -- Content-addressed: identical bytes already on disk are already correct.
+  if not (host.read_file and host.read_file(path)) then
+    local ok = host.write_file and host.write_file(path, encoded_bytes)
+    if not ok then return nil, "attachment_write_failed: " .. path end
+  end
+  return {
+    mime = mime,
+    sha256 = digest,
+    path = path,
+    name = tostring(entry.name or (digest:sub(1, 8) .. "." .. extension)),
+    bytes = #bytes,
+  }
+end
+
+-- Read an image back for a provider request: {mime, b64, path, missing}.
+function M.load_image(reference)
+  local mime = tostring(reference.mime or "image/png")
+  local path = tostring(reference.path or "")
+  if path == "" and reference.sha256 then
+    local extension = IMAGE_TYPES[mime] or "png"
+    path = paths.data() .. "/attachments/" .. reference.sha256:sub(1, 2)
+      .. "/" .. reference.sha256 .. "." .. extension
+  end
+  local text = host.read_file and host.read_file(path)
+  if not text or text == "" then
+    return { mime = mime, path = path, missing = true }
+  end
+  -- Stored already base64; hand it back as-is so a replay does not re-encode.
+  return { mime = mime, path = path, b64 = text }
+end
+
+function M.next_seq(session_id)
+  local rows = query("SELECT COALESCE(MAX(seq),0)+1 AS seq FROM messages WHERE session_id=?", {session_id})
+  return rows[1] and rows[1].seq or 1
+end
+
+-- One write unit. `seq` is the transcript's order, and it used to be `MAX(seq)+1` read and then inserted
+-- as two statements with no transaction: two writers - the node being replaced and the node that replaced
+-- it, or two workers - could read the same MAX, so two messages could share a seq or come out ordered
+-- against the turn that produced them. `BEGIN IMMEDIATE` takes the write lock for the whole append, so the
+-- read-modify-write is atomic, writers are serialised, and the three writes (message, search row, session
+-- touch) are one unit a kill cannot tear in half.
+in_transaction = function(fn)
+  exec("BEGIN IMMEDIATE")
+  local ok, result = pcall(fn)
+  if not ok then
+    pcall(exec, "ROLLBACK")
+    error(result)
+  end
+  exec("COMMIT")
+  return result
+end
+
+local function append_turn(session_id, turn)
+    local seq = turn.seq or M.next_seq(session_id)
+    local id = turn.id or host.uuid()
+    exec("INSERT INTO messages(id,session_id,seq,role,content,images,tool_calls,tool_call_id,tool_name," ..
+         "tokens,ms,ok,debug,trace,changes,created_at,reasoning,phase) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+         {id, session_id, seq, turn.role or "user", turn.content or "",
+          json.encode(turn.images or {}),
+          json.encode(turn.tool_calls or {}), turn.tool_call_id or "", turn.tool_name or "",
+          turn.tokens or 0, turn.ms or 0, turn.ok == false and 0 or 1,
+          turn.debug and 1 or 0, json.encode(turn.trace or {}),
+          json.encode(turn.changes or {}), host.now(), turn.reasoning or "", turn.phase or ""})
+    exec("INSERT INTO messages_fts(content,session_id,message_id) VALUES(?,?,?)",
+         {turn.content or "", session_id, id})
+    exec("UPDATE sessions SET updated_at=? WHERE id=?", {host.now(), session_id})
+    M.journal("message", id, {
+      id = id, session_id = session_id, seq = seq, role = turn.role or "user",
+      content = turn.content or "", images = turn.images or {}, tool_calls = turn.tool_calls or {},
+      tool_call_id = turn.tool_call_id or "", tool_name = turn.tool_name or "",
+      tokens = turn.tokens or 0, ms = turn.ms or 0,
+      ok = turn.ok == false and 0 or 1, debug = turn.debug and 1 or 0,
+      trace = turn.trace or {}, created_at = host.now(), reasoning=turn.reasoning or "",
+      changes=turn.changes or {}, phase=turn.phase or "",
+    })
+    -- A thread is named after the first thing asked in it, the way a chat is named after its opening
+    -- message. Set once and never rewritten: a name that drifts as the conversation moves is worse
+    -- than no name, because the reader cannot use it to find the thread they remember.
+    if (turn.role or "user") == "user" then M.name_session(session_id, turn.content or "") end
+    return seq
+end
+
+function M.append_turn(session_id, turn)
+  return in_transaction(function() return append_turn(session_id,turn) end)
+end
+M.transaction = function(fn) return in_transaction(fn) end
+M.append_turn_in_transaction = append_turn
+
+-- A name has to survive being read in a list and typed into a search box: one line, no markdown
+-- furniture, and short. The first line, not the first sentence: a name that ends mid-thought reads
+-- as a different name, and picking a sentence boundary needs punctuation rules nobody agrees on.
+local function title_from(text)
+  local first = tostring(text or ""):gsub("\r", ""):match("^[^\n]*") or ""
+  local line = first:gsub("```[%s%S]-```", " ")
+  line = line:gsub("[#*_`>|]+", " ")
+  line = line:gsub("%s+", " "):gsub("^%s+", ""):gsub("%s+$", "")
+  -- Removing a backtick leaves a space where it was, and "chat ?" is not how anyone writes it.
+  line = line:gsub("%s+([%?%.,:;!%%%)%]}])", "%1"):gsub("%s+$", "")
+  if line == "" then return "" end
+  if #line > 60 then
+    local cut = line:sub(1, 60)
+    local space = cut:match("^.*()%s")
+    if space and space > 30 then cut = cut:sub(1, space - 1) end
+    line = cut .. "\u{2026}"
+  end
+  return line
+end
+
+-- Name a session from its first user message, unless it already has a name. "chat" is the
+-- placeholder every session starts with, so it does not count as one.
+function M.name_session(session_id, text)
+  local rows = query("SELECT title FROM sessions WHERE id=?", {session_id})
+  local current = tostring((rows[1] or {}).title or "")
+  if current ~= "" and current ~= "chat" then return current end
+  local title = title_from(text)
+  if title == "" then return nil end
+  exec("UPDATE sessions SET title=? WHERE id=?", {title, session_id})
+  return title
+end
+
+-- Turns are read as a *window*, and the window is the newest ones. The old shape -
+-- ORDER BY seq ASC LIMIT ? - returned the oldest 200 of a 367-turn thread and said
+-- nothing about it, so a reader looking for the end of a run got its opening moves,
+-- and a model asking about a long session's state got its ancient history as if it
+-- were current. Nobody wants the head of a window; they want the tail.
+--
+-- `limit` bounds the window and `after_seq` moves its start. To know whether rows
+-- were dropped, compare with M.message_count(session_id) - the tool that shows a session
+-- to the model says so in words, because a silent truncation is a memory bug.
+function M.session_messages(session_id, opts)
+  opts = opts or {}
+  local limit = opts.limit or 200
+  local sql, params
+  if opts.all then
+    sql="SELECT * FROM messages WHERE session_id=? AND seq>? "..(opts.exclude_summaries and "AND role<>'summary' " or "").."ORDER BY seq ASC"
+    params={session_id,opts.after_seq or 0}
+  elseif opts.before_seq then
+    sql="SELECT * FROM (SELECT * FROM messages WHERE session_id=? AND seq<? ORDER BY seq DESC LIMIT ?) ORDER BY seq ASC"
+    params={session_id,opts.before_seq,limit}
+  elseif opts.forward_after_seq then
+    sql = "SELECT * FROM messages WHERE session_id=? AND seq>? ORDER BY seq ASC LIMIT ?"
+    params = {session_id, opts.after_seq or 0, limit}
+  elseif opts.after_seq then
+    sql = "SELECT * FROM (SELECT * FROM messages WHERE session_id=? AND seq>? " ..
+      "ORDER BY seq DESC LIMIT ?) ORDER BY seq ASC"
+    params = {session_id, opts.after_seq, limit}
+  else
+    sql = "SELECT * FROM (SELECT * FROM messages WHERE session_id=? " ..
+      "ORDER BY seq DESC LIMIT ?) ORDER BY seq ASC"
+    params = {session_id, limit}
+  end
+  local rows = query(sql, params)
+  for _, row in ipairs(rows) do
+    row.tool_calls = json.decode(row.tool_calls)
+    row.trace = json.decode(row.trace)
+    if row.images then row.images = decode(row.images) end
+    -- An older row has `{}` rather than a summary, and `{}` decodes to an empty table
+    -- that is truthy in Lua - so turn it into nil here. Otherwise every turn written
+    -- before this column existed would claim a diff topic and render an empty one.
+    row.changes = decode(row.changes)
+    if type(row.changes) ~= "table" or row.changes.files == nil then row.changes = nil end
+  end
+  return rows
+end
+
+function M.session_message_bounds(session_id)
+  return query("SELECT MIN(seq) AS first_seq,MAX(seq) AS last_seq FROM messages WHERE session_id=?",{session_id})[1] or {}
+end
+
+-- One turn, by id, with its `changes` decoded the same way session_messages decodes it.
+--
+-- Undo works from a turn id rather than from a position: the reader clicks a topic in the
+-- transcript, and what identifies that topic has to survive a reload, a compaction and a
+-- second reader. A sequence number would not - the window moves - and the id is what the
+-- journal already replicates, so a peer's turn resolves here too.
+function M.message(message_id)
+  if not message_id or message_id == "" then return nil end
+  local rows = query("SELECT * FROM messages WHERE id=?", {message_id})
+  local row = rows[1]
+  if not row then return nil end
+  row.tool_calls = json.decode(row.tool_calls)
+  row.trace = json.decode(row.trace)
+  if row.images then row.images = decode(row.images) end
+  row.changes = decode(row.changes)
+  if type(row.changes) ~= "table" or row.changes.files == nil then row.changes = nil end
+  return row
+end
+
+function M.search_messages(text, user_id, limit)
+  limit = limit or 20
+  local match = M.fts_query(text)
+  if match == "" then return {} end
+  local sql = "SELECT t.*, s.user_id, s.title, bm25(messages_fts) AS rank FROM messages_fts " ..
+              "JOIN messages t ON t.id=messages_fts.message_id JOIN sessions s ON s.id=t.session_id " ..
+              "WHERE messages_fts MATCH ?"
+  local params = {match}
+  if user_id and user_id ~= "" then sql = sql .. " AND s.user_id=?"; params[#params + 1] = user_id end
+  sql = sql .. " ORDER BY rank LIMIT ?"
+  params[#params + 1] = limit
+  return query(sql, params)
+end
+
+-- ------------------------------------------------------------- interruptions
+-- A thread that was cut off mid-answer looks exactly like a thread whose answer
+-- is still coming: the transcript just ends. A killed process cannot write a flag
+-- saying it died - the exit path that would set one does not run - so the state is
+-- *derived* from the ledger instead, which is appended to as the turn proceeds.
+-- The last turn is therefore an exact record of how far the process got:
+--
+--   empty        nothing was said yet
+--   answered     last turn is a reply: the thread is settled
+--   failed       last turn is an assistant turn with ok=0, i.e. the model call
+--                errored. That is a landed outcome, not an interruption, and
+--                conflating the two would send a reader looking for lost work
+--                that was never started.
+--   unfinished   last message is a question, commentary, a tool result, or a step whose tools
+--                have no recorded result. The process that was working on it may
+--                have stopped, or it may still be working - the ledger cannot tell
+--                those apart, so nothing here claims a death.
+--
+-- This state was called `interrupted`, and the word cost real credibility: a live
+-- 426-turn run was reported as interrupted on every poll while it was demonstrably
+-- writing messages. A name that asserts something we cannot observe is a claim the code
+-- should not make. The durable history (`mark_unfinished`) is the part that *is*
+-- observable: a thread was picked up again after being left unfinished.
+--
+-- Derivations are cheap and always current, but they forget: once the thread is
+-- resumed the tail is an answer again and nothing says the answer came after a stop.
+-- So the first time an unfinished tail is *observed* it is also recorded on the
+-- session - the interrupted_* columns keep their old names to avoid a migration,
+-- and hold the count and reason of those observations.
+
+function decode_calls(raw)
+  if type(raw) == "string" then
+    local ok, value = pcall(json.decode, raw)
+    raw = ok and value or {}
+  end
+  return (type(raw) == "table") and raw or {}
+end
+
+function classify(last)
+  if not last then return "empty" end
+  if last.role == "assistant" then
+    if last.ok == 0 or last.ok == false then return "failed" end
+    if last.phase == "commentary" then return "unfinished" end
+    if #decode_calls(last.tool_calls) > 0 then return "unfinished" end
+    return "answered"
+  end
+  return "unfinished"
+end
+
+function ago(at)
+  if not at then return "at an unknown time" end
+  local seconds = math.floor(host.now() - at)
+  if seconds < 0 then seconds = 0 end
+  if seconds < 60 then return seconds .. "s ago" end
+  if seconds < 3600 then return math.floor(seconds / 60) .. "min ago" end
+  if seconds < 86400 then return math.floor(seconds / 3600) .. "h ago" end
+  return math.floor(seconds / 86400) .. "d ago"
+end
+
+-- `pending` is the names of the tool calls with no recorded result. When it is
+-- not known (the listing, where checking every call would be one query per
+-- session) all of the last turn's calls are named, and the wording says "tool
+-- call(s) never reported" rather than claiming they never ran.
+function detail_of(state, last, pending)
+  if state == "empty" then return "no messages yet" end
+  if state == "answered" then return "settled - the last message is a reply" end
+  if state == "failed" then return "the last run failed (inspect its error and transcript)" end
+  if not last then return "nothing is recorded after the last turn" end
+  if last.role == "user" then return "an unanswered question, " .. ago(last.created_at) end
+  if last.role == "summary" then return "stopped after a compaction, " .. ago(last.created_at) end
+  if last.role == "assistant" then
+    if last.phase == "commentary" then
+      return "the assistant sent commentary but no completed answer is recorded, " .. ago(last.created_at)
+    end
+    local names = pending
+    if names == nil then
+      names = {}
+      for _, call in ipairs(decode_calls(last.tool_calls)) do
+        names[#names + 1] = ((call["function"] or {}).name or "?")
+      end
+    end
+    return string.format("%d tool call(s) with no recorded result: %s, %s",
+      #names, #names > 0 and table.concat(names, ", ") or "unnamed", ago(last.created_at))
+  end
+  -- The tail is a tool result: something did report, so the interesting fact is
+  -- which calls of that same step did not.
+  if pending and #pending > 0 then
+    return string.format("stopped after a tool result; %d call(s) of that batch have no recorded result: %s, %s",
+      #pending, table.concat(pending, ", "), ago(last.created_at))
+  end
+  return "stopped after a tool result with no next step, " .. ago(last.created_at)
+end
+
+-- Which calls of the tail's own step never reported a result. Returns the
+-- pending names and how many calls the step had (nil when there is no such
+-- step), because "1 of 2 never reported" and "1 of 1 never reported" are
+-- different facts about the same tail.
+--
+-- The tail is not always the step: a batched step writes one turn per
+-- call, so a process killed between two calls leaves a *tool* turn on top with
+-- its sibling never run. That is the sharpest thing recovery can tell a reader -
+-- which of the batch is missing - and it is only visible by looking the step
+-- up, not at the tail.
+function M.pending_calls(session_id)
+  local rows = query("SELECT tool_calls FROM messages WHERE session_id=? AND role='assistant' " ..
+                     "AND tool_calls <> '[]' ORDER BY seq DESC LIMIT 1", {session_id})
+  local step = rows[1]
+  if not step then return nil, nil end
+  local answered = {}
+  for _, row in ipairs(query("SELECT tool_call_id FROM messages WHERE session_id=? AND role='tool'",
+                             {session_id})) do
+    answered[row.tool_call_id] = true
+  end
+  local calls, pending = decode_calls(step.tool_calls), {}
+  for _, call in ipairs(calls) do
+    if not answered[call.id or ""] then
+      pending[#pending + 1] = ((call["function"] or {}).name or "?")
+    end
+  end
+  return pending, #calls
+end
+
+-- Facts about one thread's last turn: the state, where it stopped, and what was
+-- left unfinished. Read-only - nothing here writes, so a report can never be the
+-- thing that "fixes" what it reports.
+function M.session_state(session_id)
+  local session = M.session(session_id)
+  if not session then return nil end
+  local rows = query("SELECT * FROM messages WHERE session_id=? ORDER BY seq DESC LIMIT 1", {session_id})
+  local last = rows[1]
+  local state = classify(last)
+  local pending = nil
+  if state == "unfinished" and last and (last.role == "assistant" or last.role == "tool") then
+    local total
+    pending, total = M.pending_calls(session_id)
+    -- A tool tail whose result matches none of the step's calls: the ledger
+    -- says a result arrived but not which call it answered, so the batch's state
+    -- is unknown. Claiming "2 of 2 never reported" there would be a lie.
+    if last.role == "tool" and pending and total and #pending == total then pending = nil end
+  end
+  return {
+    session_id = session_id,
+    title = session.title or "",
+    state = state,
+    seq = last and tonumber(last.seq) or 0,
+    role = last and last.role or "",
+    at = last and last.created_at or nil,
+    pending = pending or {},
+    question = (state == "unfinished" and last and last.role == "user") and (last.content or "") or "",
+    detail = detail_of(state, last, pending),
+    recorded_at = session.interrupted_at,
+    recorded_seq = tonumber(session.interrupted_seq) or 0,
+    recorded_reason = session.interrupted_reason or "",
+    interruptions = tonumber(session.interrupted_count) or 0,
+  }
+end
+
+function M.message_count(session_id)
+  local rows = query("SELECT COUNT(*) AS n FROM messages WHERE session_id=?", {session_id})
+  return tonumber(rows[1] and rows[1].n) or 0
+end
+
+-- Write down that a thread was picked up while unfinished, once per point where
+-- that happened. Re-running the detection for the same tail must not inflate the
+-- count: an agent that resumes a thread three times picked it up once at that tail.
+function M.mark_unfinished(session_id, opts)
+  opts = opts or {}
+  local session = M.session(session_id)
+  if not session then return nil end
+  local state = M.session_state(session_id)
+  local seq = opts.seq or (state and state.seq) or 0
+  if (tonumber(session.interrupted_seq) or 0) == seq and (session.interrupted_at or 0) > 0 then
+    return nil
+  end
+  local reason = opts.reason or (state and state.detail) or "unfinished"
+  exec("UPDATE sessions SET interrupted_at=?, interrupted_seq=?, interrupted_reason=?, " ..
+       "interrupted_count=COALESCE(interrupted_count,0)+1 WHERE id=?",
+       {host.now(), seq, reason, session_id})
+  M.journal("session", session_id, M.session(session_id))
+  return reason
+end
+
+-- Threads with no recorded answer, most recent first. This is what a user (or the
+-- resumed agent) needs to see, and it is derived, so a process that stops without a
+-- chance to say so shows up here without anyone running a command that could notice.
+function M.unfinished(user_id, limit)
+  local found = {}
+  for _, row in ipairs(M.list_sessions(user_id, limit or 40, { states = true })) do
+    if row.state == "unfinished" then
+      local state = M.session_state(row.id)
+      if state then
+        state.messages = tonumber(row.message_count) or 0
+        found[#found + 1] = state
+      end
+    end
+  end
+  return found
+end
+
+-- Retention: default sessions keep 100% of traces for 7 days; debug sessions
+-- are kept forever (they are the fixtures we evolve from).
+function M.prune(days)
+  days = days or 7
+  local cutoff = host.now() - (days * 86400)
+  local result = exec(
+    "DELETE FROM messages WHERE created_at < ? AND session_id IN " ..
+    "(SELECT id FROM sessions WHERE mode <> 'debug')", {cutoff})
+  exec("DELETE FROM messages_fts WHERE message_id NOT IN (SELECT id FROM messages)")
+  return result.changes or 0
+end
+
+-- A fixture: everything needed to reproduce a session, for regression tests.
+function M.session_fixture(session_id)
+  local session = M.session(session_id)
+  if not session then return nil end
+  return {
+    schema = "wasm-agent.session_fixture.v1",
+    session = session,
+    turns = M.session_messages(session_id, { all = true }),
+  }
+end
+
+function M.record_run(run_id, session_id, status, outcome, reply)
+  exec("INSERT INTO runs(id,session_id,run_id,status,outcome,reply,started_at) VALUES(?,?,?,?,?,?,?) " ..
+       "ON CONFLICT(id) DO UPDATE SET status=excluded.status, outcome=excluded.outcome, reply=excluded.reply",
+       {run_id, session_id, run_id, status or "", outcome or "", reply or "", host.now()})
+  M.journal("run", run_id, {
+    -- Old peers still read turn_id. Keep the alias in the wire payload until -- naming-check: allow (a migration, or a wire key for a peer that has not migrated)
+    -- every peer has migrated; the local table has only run_id.
+    -- Old peers still read `turn_id`; the local table has only run_id. Kept until every peer has -- naming-check: allow (a migration, or a wire key for a peer that has not migrated)
+    -- migrated, and marked because the old name is a wire key here, not a second word for a run.
+    id = run_id, session_id = session_id, run_id = run_id, turn_id = run_id, status = status or "", -- naming-check: allow (wire alias for unmigrated peers)
+    outcome = outcome or "", reply = reply or "", started_at = host.now(),
+  })
+end
+
+-- ---------------------------------------------------------------- replication
+
+function M.journal_head()
+  local rows = query("SELECT COALESCE(MAX(id),0) AS head FROM journal")
+  return rows[1] and rows[1].head or 0
+end
+
+function M.journal_since(cursor, limit)
+  local rows = query("SELECT * FROM journal WHERE id>? ORDER BY id ASC LIMIT ?",
+                     {cursor or 0, limit or 200})
+  for _, row in ipairs(rows) do row.payload = json.decode(row.payload) end
+  return rows
+end
+
+function M.cursor(peer_id)
+  local rows = query("SELECT cursor FROM sync_cursors WHERE peer_id=?", {peer_id})
+  return rows[1] and rows[1].cursor or 0
+end
+
+function M.set_cursor(peer_id, cursor)
+  exec("INSERT INTO sync_cursors(peer_id,cursor,updated_at) VALUES(?,?,?) " ..
+       "ON CONFLICT(peer_id) DO UPDATE SET cursor=excluded.cursor, updated_at=excluded.updated_at",
+       {peer_id, cursor, host.now()})
+end
+
+function M.sync_peers()
+  return query("SELECT peer_id, cursor, updated_at FROM sync_cursors ORDER BY updated_at DESC")
+end
+
+-- Idempotent: safe to apply the same entry twice. Never journals what it applies.
+function M.apply_entry(entry)
+  local payload = entry.payload
+  if type(payload) == "string" then
+    local ok, decoded = pcall(json.decode, payload)
+    if not ok then return false end
+    payload = decoded
+  end
+  if type(payload) ~= "table" then return false end
+
+  -- `turn` is the name this kind carried before the rename. The journal is durable and is never
+  -- rewritten, so an entry written then still has to replay now: the old name is the matcher for an
+  -- era, not a second vocabulary. See `meta.journal_kind_legacy` for the boundary the migration records.
+  if entry.kind == "message" or entry.kind == "turn" then -- naming-check: allow (a pre-rename journal entry)
+    exec("INSERT OR REPLACE INTO messages(id,session_id,seq,role,content,tool_calls,tool_call_id," ..
+         "tool_name,tokens,ms,ok,debug,trace,created_at,reasoning,images,changes,phase) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+         {payload.id, payload.session_id, payload.seq, payload.role, payload.content or "",
+          json.encode(payload.tool_calls or {}), payload.tool_call_id or "", payload.tool_name or "",
+          payload.tokens or 0, payload.ms or 0, payload.ok or 1, payload.debug or 0,
+          json.encode(payload.trace or {}), payload.created_at or host.now(),payload.reasoning or "",
+          json.encode(payload.images or {}),json.encode(payload.changes or {}),payload.phase or ""})
+    exec("DELETE FROM messages_fts WHERE message_id=?", {payload.id})
+    exec("INSERT INTO messages_fts(content,session_id,message_id) VALUES(?,?,?)",
+         {payload.content or "", payload.session_id, payload.id})
+  elseif entry.kind == "session" then
+    local local_rows = query("SELECT updated_at FROM sessions WHERE id=?", {payload.id})
+    if #local_rows == 0 or (payload.updated_at or 0) >= (local_rows[1].updated_at or 0) then
+      -- Every position needs a concrete value: a nil would leave a hole in the
+      -- params array and the JSON encoder rejects sparse arrays.
+      exec("INSERT OR REPLACE INTO sessions(id,route_id,objective,parent_session_id,started_at," ..
+           "ended_at,user_id,node_id,title,mode,summary,summarized_until,updated_at,worktree," ..
+           "fork_parent_id,fork_parent_seq,workspace_required,workspace_state,workspace_branch," ..
+           "workspace_base_commit,workspace_source_path,workspace_start_state,workspace_error) " ..
+           "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+           {payload.id, payload.route_id or "", payload.objective or "",
+            payload.parent_session_id or "", payload.started_at or host.now(),
+            payload.ended_at or 0, payload.user_id or "master",
+            payload.node_id or "", payload.title or "", payload.mode or "default",
+            payload.summary or "", payload.summarized_until or 0, payload.updated_at or host.now(),
+            payload.worktree or "", payload.fork_parent_id or "", payload.fork_parent_seq or 0,
+            payload.workspace_required or 0, payload.workspace_state or "unbound",
+            payload.workspace_branch or "", payload.workspace_base_commit or "",
+            payload.workspace_source_path or "", payload.workspace_start_state or "{}",
+            payload.workspace_error or ""})
+    end
+  elseif entry.kind == "memory" then
+    exec("INSERT OR IGNORE INTO memories(id,scope,content,tags,source,session_id,created_at," ..
+         "updated_at,content_sha256) VALUES(?,?,?,?,?,?,?,?,?)",
+         {payload.id, payload.scope or "global", payload.content or "",
+          type(payload.tags) == "table" and json.encode(payload.tags) or (payload.tags or "[]"),
+          payload.source or "replica", payload.session_id or "", payload.created_at or host.now(),
+          payload.updated_at or host.now(), payload.content_sha256 or ""})
+    exec("DELETE FROM memories_fts WHERE memory_id=?", {payload.id})
+    exec("INSERT INTO memories_fts(content,tags,memory_id) VALUES(?,?,?)",
+         {payload.content or "", payload.tags or "", payload.id})
+  elseif entry.kind == "run" then
+    exec("INSERT OR REPLACE INTO runs(id,session_id,run_id,status,outcome,reply,started_at,ended_at) " ..
+         "VALUES(?,?,?,?,?,?,?,?)",
+         {payload.id, payload.session_id or "", payload.run_id or payload.turn_id or "", payload.status or "", -- naming-check: allow (old journal entry)
+          payload.outcome or "", payload.reply or "", payload.started_at or host.now(),
+          payload.ended_at or 0})
+  else
+    return false
+  end
+  return true
+end
+
+return M

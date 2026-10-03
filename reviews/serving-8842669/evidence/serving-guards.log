@@ -1,0 +1,13 @@
+source-outcome rejected at real structured monthly seam block
+source-validation rejected at invalid persisted eligibility fails closed
+source-response-model rejected at wrong model cannot certify serving
+source-cas rejected at stale correctly modeled success cannot clear newer block
+source-tuple rejected at foreign second-phase node_id cannot block requested route
+source-placement rejected at monthly blocked healthy peer skipped
+embedded-outcome rejected at real structured monthly seam block
+embedded-validation rejected at invalid persisted eligibility fails closed
+embedded-response-model rejected at wrong model cannot certify serving
+embedded-cas rejected at stale correctly modeled success cannot clear newer block
+embedded-tuple rejected at foreign second-phase node_id cannot block requested route
+embedded-placement rejected at monthly blocked healthy peer skipped
+12 causal guard removals rejected in source and embedded; 0 skips, 0 paid calls; C:\Users\Victor\orca\projects\wasm-agent\.git\worktrees\wa-worktree-childdispatch78f44308-a301-4811-b6fc-063f77a4e95d\repair-review-evidence\serving-guards

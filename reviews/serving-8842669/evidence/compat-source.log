@@ -1,0 +1,22 @@
+ok   cancellation wins before admission: 
+ok   ordered placement persists
+ok   invalid capacity is refused
+ok   queued submission is idempotent
+ok   first task fills preferred cloud node
+ok   in-flight child text is visible before settlement
+ok   overflow uses next node with a separate session
+ok   all-full work remains durably queued
+ok   direct conversation keeps session and serializes its next run
+ok   repeated direct message does not create a second run
+ok   ordinary chat cannot broaden child authority
+ok   queued work cancels without execution
+ok   remote follow-up settles
+ok   original prompts and steering survive in one child transcript
+ok   children receive only their execution-role instructions
+ok   continuation preserves the read-only profile
+ok   node hierarchy survives coordinator restart
+ok   remote session identity survives coordinator restart
+ok   zero limits exclude every device from execution
+ok   excluded-node work can be cancelled without a worker
+node orchestration ok (20 checks, 0 skipped)
+evidence: C:\Users\Victor\AppData\Local\Temp\wa-orchestrator-ps7R6o

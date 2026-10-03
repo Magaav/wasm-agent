@@ -1,0 +1,87 @@
+{
+  "kind": "focused-serving-eligibility",
+  "full_gate": false,
+  "head": "884266956df3ea26374bce9da7943d5ba4ee10c7",
+  "tree": "47505b2c55cc01cff3981ffe8e7ae4f9753bf885",
+  "base": "898a9a238c89c5f64b83cfa219f8c17840b441f9",
+  "binary": "C:\\Users\\Victor\\orca\\workspaces\\wasm-agent\\finish-serving-eligibility\\rust\\target\\debug\\wa.exe",
+  "binary_sha256": "526022e9312ccb5a34761b0a7d19234eef3541fc76eaaf7af5e7e99a21e77763",
+  "runner_sha256": "101a90d1dee7361c82da9bc79387c2834f51d2d18317bcd842ec69b2c8aa7c1b",
+  "zero_paid_probes": true,
+  "skips": 0,
+  "checks": [
+    {
+      "name": "serving",
+      "exit": 0,
+      "signal": null,
+      "ms": 1068,
+      "runner_sha256": "b2172aa4c8507b2cd37cf04cf5127e714b9975298e3d35aef7f2e14da28fbff9",
+      "log": "C:\\Users\\Victor\\orca\\projects\\wasm-agent\\.git\\worktrees\\finish-serving-eligibility\\finish-serving-evidence\\exact-tip\\serving.log",
+      "log_sha256": "440a8bc329d24dc38b5fa9e8265d09fcf79f59e2829e0c681cbe90114d13e36a"
+    },
+    {
+      "name": "contract",
+      "exit": 0,
+      "signal": null,
+      "ms": 1402,
+      "runner_sha256": "78833db529f1281de596ac1efab7148318b60c03bff22443201e9605a31bf5c4",
+      "log": "C:\\Users\\Victor\\orca\\projects\\wasm-agent\\.git\\worktrees\\finish-serving-eligibility\\finish-serving-evidence\\exact-tip\\contract.log",
+      "log_sha256": "bd62afe21234b454128f20e408a441049202552cf98907d8eab8bb3b77d53265"
+    },
+    {
+      "name": "http",
+      "exit": 0,
+      "signal": null,
+      "ms": 5519,
+      "runner_sha256": "9b14888f208acb82bd9543f3323cfe04a34a14d7c46adafdcddd9f42ec33d4b8",
+      "log": "C:\\Users\\Victor\\orca\\projects\\wasm-agent\\.git\\worktrees\\finish-serving-eligibility\\finish-serving-evidence\\exact-tip\\http.log",
+      "log_sha256": "dce4431824e966ef15c98b815bc6c72cd5e989f8f93c0cec2dc980efb9af72e3"
+    },
+    {
+      "name": "guards",
+      "exit": 0,
+      "signal": null,
+      "ms": 3137,
+      "runner_sha256": "0a1c76d355af45c06983bf4edf768b0b249dfdbc9c58b18a1ccefa40eb6feedb",
+      "log": "C:\\Users\\Victor\\orca\\projects\\wasm-agent\\.git\\worktrees\\finish-serving-eligibility\\finish-serving-evidence\\exact-tip\\guards.log",
+      "log_sha256": "26a2cfc2f6a74ed67fdf6dc49ebf264f0052812afc5633ef264af9e60a9301e0"
+    },
+    {
+      "name": "binding-negative",
+      "exit": 0,
+      "signal": null,
+      "ms": 298,
+      "runner_sha256": "f5ffd9f9abad9d63eda06d284a1c1b76ec849ff0dae60950e220fa6ac1958751",
+      "log": "C:\\Users\\Victor\\orca\\projects\\wasm-agent\\.git\\worktrees\\finish-serving-eligibility\\finish-serving-evidence\\exact-tip\\binding-negative.log",
+      "log_sha256": "e052737473c65795b3d8cf3703e6ac2018f0f42d55216263c348c9597c9328cb"
+    },
+    {
+      "name": "compat-source",
+      "exit": 0,
+      "signal": null,
+      "ms": 17468,
+      "runner_sha256": "eb3a20af4536b40bd8e3305773cb6d0081ff53fe9fbfc1d88642698f329595d6",
+      "log": "C:\\Users\\Victor\\orca\\projects\\wasm-agent\\.git\\worktrees\\finish-serving-eligibility\\finish-serving-evidence\\exact-tip\\compat-source.log",
+      "log_sha256": "4c7fef31c236a04bfd719e3c8a96e4f6cbf5581aa1a102069c5f7d50bd1a3eb1"
+    },
+    {
+      "name": "compat-embedded",
+      "exit": 0,
+      "signal": null,
+      "ms": 16992,
+      "runner_sha256": "eb3a20af4536b40bd8e3305773cb6d0081ff53fe9fbfc1d88642698f329595d6",
+      "log": "C:\\Users\\Victor\\orca\\projects\\wasm-agent\\.git\\worktrees\\finish-serving-eligibility\\finish-serving-evidence\\exact-tip\\compat-embedded.log",
+      "log_sha256": "774b73964903baffdd746b41e97b713a4e2ee61ac41910c5003dd87cd3104249"
+    },
+    {
+      "name": "queue-race",
+      "exit": 0,
+      "signal": null,
+      "ms": 36169,
+      "runner_sha256": "2a9a39cdd81b435c0168d9b80fed96cf5a7fa36c509997cfd1f3272e57a1e47a",
+      "log": "C:\\Users\\Victor\\orca\\projects\\wasm-agent\\.git\\worktrees\\finish-serving-eligibility\\finish-serving-evidence\\exact-tip\\queue-race.log",
+      "log_sha256": "5d4f0974494c99a4ae9983e6627e80729b4f19cf198599ea7dfe6c49e69d690a"
+    }
+  ],
+  "complete": true
+}

@@ -1,0 +1,61 @@
+ok compiled availability embedded
+ok corrupt state survives restart fail closed
+ok corrupt restart refuses inference
+ok corrupt restart zero paid or HTTP calls
+ok explicit bound recovery
+ok explicit bound recovery
+ok invalid persisted eligibility fails closed: state='corrupted'
+ok invalid state zero HTTP calls: state='corrupted'
+ok explicit bound recovery
+ok invalid persisted eligibility fails closed: reason='other_reason'
+ok invalid state zero HTTP calls: reason='other_reason'
+ok explicit bound recovery
+ok invalid persisted eligibility fails closed: model=''
+ok invalid state zero HTTP calls: model=''
+ok explicit bound recovery
+ok invalid persisted eligibility fails closed: generation=-1
+ok invalid state zero HTTP calls: generation=-1
+ok explicit bound recovery
+ok invalid persisted eligibility fails closed: generation='invalid'
+ok invalid state zero HTTP calls: generation='invalid'
+ok explicit bound recovery
+ok foreign response returned without recovery evidence
+ok wrong model cannot certify serving
+ok missing response model cannot certify serving
+ok missing completion marker cannot certify serving
+ok stale correctly modeled success cannot clear newer block
+ok explicit bound recovery
+ok unknown recovery ABA cannot be overwritten by stale success
+ok genuine exact request response certifies serving
+ok explicit bound recovery
+ok inflight account drift cannot certify different account
+ok inflight account drift cannot recover original account
+ok independent route identity names requested model
+ok unsupported explicit provider override stays unavailable
+ok active account change between status phases stays unknown
+ok second read carries independently requested tuple
+ok exact bound signed metadata blocks placement
+ok second read carries independently requested tuple
+ok foreign second-phase node_id cannot block requested route
+ok second read carries independently requested tuple
+ok foreign second-phase model cannot block requested route
+ok second read carries independently requested tuple
+ok foreign second-phase provider cannot block requested route
+ok second read carries independently requested tuple
+ok foreign second-phase account_profile cannot block requested route
+ok second read carries independently requested tuple
+ok foreign second-phase binding cannot block requested route
+ok second read carries independently requested tuple
+ok foreign second-phase generation cannot block requested route
+ok hostile first-phase node_id cannot replace caller intent
+ok hostile first-phase model cannot replace caller intent
+ok hostile first-phase provider cannot replace caller intent
+ok bare model error remains unknown
+ok second read carries independently requested tuple
+ok bare second-phase model error remains unknown
+ok second read carries independently requested tuple
+ok old peer absent metadata remains unknown
+serving-contract: 57 checks, 0 skips, 0 paid calls
+
+STDERR
+lua root unset: using embedded modules; edits under lua/ are NOT under test

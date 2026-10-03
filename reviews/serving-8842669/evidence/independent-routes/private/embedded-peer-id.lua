@@ -1,0 +1,1 @@
+print(host.node_identity())

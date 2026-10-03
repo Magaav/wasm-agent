@@ -1,0 +1,1171 @@
+-- Tools exposed to the head model. Access is gated by the caller's role:
+-- masters get everything; guests get on-demand memory plus a way to list
+-- what they may do. "spells" means deterministic, verified executions only (spells.lua).
+local json = dofile("lua/vendor/json.lua")
+local platform = dofile("lua/core/platform.lua")
+local spellslib = dofile("lua/core/spells.lua")
+local nodeslib = dofile("lua/core/nodes.lua")
+local changeset = dofile("lua/core/changeset.lua")
+local patch_audit = dofile("lua/core/patch_audit.lua")
+local tool_output = dofile("lua/core/tool_output.lua")
+local file_tools = dofile("lua/core/file_tools.lua")
+local evidence_view = dofile("lua/core/evidence_view.lua")
+local diagnose = dofile("lua/core/diagnose.lua")
+local workspaces = dofile("lua/core/workspaces.lua")
+local resources = dofile("lua/core/resources.lua")
+local M = {}
+
+local function is_master(role)
+  return role == "master" or role == "admin"
+end
+
+-- Image references name files in this node's content-addressed store. Returning
+-- one through `remote` would look successful but point at the wrong machine; fail
+-- visibly until the node protocol has a bounded binary transfer.
+local function carries_local_images(result)
+  if type(result) ~= "table" then return false end
+  if type(result._images) == "table" and #result._images > 0 then return true end
+  for _, item in ipairs(result.results or {}) do
+    if type(item) == "table" and type(item._images) == "table" and #item._images > 0 then return true end
+  end
+  return false
+end
+
+local function schema(name, description, properties, required)
+  -- An empty Lua table encodes as `[]`, which providers reject as a schema, so
+  -- only emit `properties`/`required` when they actually have entries.
+  local parameters = { type = "object" }
+  if properties and next(properties) ~= nil then parameters.properties = properties end
+  if required and #required > 0 then parameters.required = required end
+  return { type = "function", ["function"] = {
+    name = name, description = description, parameters = parameters } }
+end
+
+-- The foreground shell deadline, read from the host that enforces it
+-- (`host.exec_timeout`). Naming the number in the description is what lets a model
+-- plan a long command as an operation: the audit found `bash` calls that spent the
+-- whole 300s inside one command and lost it to a deadline they did not know about.
+local function exec_deadline_seconds()
+  if host and host.exec_timeout then
+    local ok, seconds = pcall(host.exec_timeout)
+    if ok and tonumber(seconds) then return math.floor(tonumber(seconds)) end
+  end
+  return 300
+end
+
+-- Available to everyone.
+M.shared = {
+  schema("remember", "Store a fact the user asked you to remember, so it can be recalled later. Confirm in one short sentence; do not store your own reasoning. If a stored fact turns out to be wrong, call `forget` on it and then store the corrected version once - never append a correction entry, or the store accumulates contradictions that you will later have to guess between.", {
+    content = { type = "string", description = "The fact to remember, in full." },
+    scope = { type = "string", description = "Optional scope, e.g. global or a conversation id." },
+    tags = { type = "array", items = { type = "string" } } }, { "content" }),
+  schema("recall", "Look up facts the user previously asked you to remember. Call this before answering any question about the user, their preferences, names, codewords, settings, accounts, or earlier steps - and before saying you do not know. The store is small and lookup is cheap; guessing is not.", {
+    query = { type = "string", description = "What to look for, in the user's own words." },
+    scope = { type = "string" },
+    limit = { type = "integer", minimum = 1, maximum = 50 } }, { "query" }),
+  schema("memories", "List what is stored, most recent first, with each entry's id. Use it when the user asks what you remember or wants the store tidied: reading the ids is how you find what `forget` should remove.", {
+    scope = { type = "string" },
+    limit = { type = "integer", minimum = 1, maximum = 200 } }),
+  schema("skill", "Load a skill: the full instructions for a specialized task listed in your context. Read the one that matches before starting that kind of work.", {
+    name = { type = "string", description = "The skill's name, as listed in <available_skills>." } }, { "name" }),
+  schema("capabilities", "List the tools available to this account (its capabilities).", {}),
+  schema("subagent", "Start and supervise a child agent (a subagent), using configured node placement, that works on a bounded task with its own fresh context, its own transcript and a restricted tool profile. `start` returns a durable receipt, not a result: the child runs in the background. Use `await` (one bounded wait, never repeated model polling) or `status`/`result` to collect it, and `cancel` to stop it. A placed task's own `state` says what the placement proved: `refused` means the destination answered that it started nothing, so the task will not run and `cancel` retracts it; `unknown` means a delivery may or may not have arrived, and only `reconcile` - which asks the destination whether it holds a run for that key - may then retry or cancel it. `attempts` counts how many times a destination was asked. You may only inspect or cancel the subagents you started. A profile's tools can only narrow your own; they can never grant more than you have. Use `list` to see your subagents and `profiles` to see what is approved. `session` reads the original child conversation; `message` queues its next turn with the same profile and model.", {
+    action = { type = "string", enum = { "start", "status", "list", "result", "await", "cancel", "reconcile", "profiles", "message", "steer", "steer_session", "steering_status", "session", "fleet" } },
+    text = { type = "string", description = "message: queue a follow-up; steer: amend active child; steer_session: amend active main session. Steering fences calls not yet admitted, never undoes in-flight effects." },
+    session_id = { type = "string", description = "steer_session / steering_status: owned main session." },
+    run_id = { type = "string", description = "Optional expected steering target; stale targets are refused." },
+    before_seq = { type = "integer", description = "session: read original messages before this sequence." },
+    after_seq = { type = "integer", minimum = 0 },
+    offset = { type = "integer", minimum = 0, description = "list: next_offset from previous page." },
+    limit = { type = "integer", minimum = 1, maximum = 1000 },
+    byte_limit = { type = "integer", minimum = 4, maximum = 20000 },
+    view = { type = "string", enum = { "full", "compact" } },
+    message_id = { type = "string" },
+    byte_offset = { type = "integer", minimum = 1 },
+    message_version = { type = "string" },
+    profile = { type = "string", description = "Approved profile id, e.g. explore. Defaults to explore (read-only)." },
+    title = { type = "string", description = "Short task-specific heading for the child conversation, not its profile name." },
+    prompt = { type = "string", description = "The bounded task for the child. Required for start." },
+    context = { type = "string", description = "Optional extra context; the parent transcript is never sent." },
+    id = { type = "string", description = "Subagent id, for status/result/await/cancel." },
+    wait_ms = { type = "integer", minimum = 1, maximum = 600000, description = "await: bounded wait in milliseconds." },
+    model = { type = "string", description = "Approved model override; inherits the caller's model when absent." },
+    reasoning = { type = "string", description = "Approved reasoning level override; inherits the caller's when absent." },
+    parent_run_id = { type = "string", description = "Run that owns this child; defaults to the current run." },
+    delivery_id = { type = "string", description = "Job delivery this child belongs to, when a job starts it." },
+    idempotency_key = { type = "string", description = "Repeat start with the same key collects the existing child instead of starting a second one." },
+  }, { "action" }),
+  schema("sessions", "List your own past sessions (resumable threads), most recent first.", {
+    limit = { type = "integer", minimum = 1, maximum = 100 } }),
+  schema("session", "Read a session. Defaults to newest messages; pass next_before_seq back as before_seq to retrieve earlier evidence.", {
+    session_id = { type = "string" },
+    before_seq = { type = "integer", minimum = 1 },
+    message_id = { type = "string", description = "Exact row, with ownership checked against this session." },
+    byte_offset = { type = "integer", minimum = 1, description = "With message_id, page exact row JSON without requiring operator artifact access." },
+    byte_limit = { type = "integer", minimum = 4, maximum = 20000 }, message_version = {type="string"},
+    view = { type = "string", enum = {"full", "compact"}, description = "Full is default; compact omits diagnostic details, not content, with exact-row references." },
+    limit = { type = "integer", minimum = 1, maximum = 1000 } }, { "session_id" }),
+  schema("search_messages", "Search your own past sessions for text (what did we decide about X?).", {
+    query = { type = "string" },
+    view = { type = "string", enum = {"full", "compact"} },
+    limit = { type = "integer", minimum = 1, maximum = 50 } }, { "query" }),
+  schema("resume_session", "Fold a past session into this one: its summary and recent messages become context.", {
+    session_id = { type = "string" },
+    limit = { type = "integer", minimum = 1, maximum = 100 } }, { "session_id" }),
+}
+
+-- Admin only: the ledger and the pi-style environment tools.
+M.admin = {
+  schema("search_ledger", "Search the message ledger (WhatsApp/chat history) for literal text.", {
+    query = { type = "string" },
+    conversation_id = { type = "string" },
+    limit = { type = "integer", minimum = 1, maximum = 50 } }, { "query" }),
+  schema("conversation", "Read the most recent messages of one conversation, oldest first.", {
+    conversation_id = { type = "string" },
+    limit = { type = "integer", minimum = 1, maximum = 200 } }, { "conversation_id" }),
+  schema("list_conversations", "List conversations known to the ledger, most recently active first.", {
+    limit = { type = "integer", minimum = 1, maximum = 200 } }),
+  -- Master only: deleting is destructive, and memory is shared across roles, so a
+  -- guest must not be able to erase the operator's stored facts. Without this
+  -- tool the agent could only ever accumulate - it said so itself, and left a
+  -- wrong date in the store because it had nothing to delete it with.
+  schema("forget", "Delete a stored memory by id (from `recall` or `memories`). Use it for something wrong, outdated or stored by mistake: an append-only store fills with junk and then misleads you later.", {
+    id = { type = "string" } }, { "id" }),
+  -- The dialect is in the description because the model otherwise assumes POSIX
+  -- and wastes its tool budget on commands this machine does not have.
+  schema("bash", "Run a foreground command on this machine using " .. platform.shell() .. ". It is killed at " .. exec_deadline_seconds() .. "s unless timeout_seconds says otherwise (1-86400); pass a larger timeout_seconds for anything that may outlast that - a build, the full test gate. The shell command result returns when the shell exits and captured output ends or is idle for 100ms. If descendants remain, they stay supervised as an operation under the original timeout; the result names the operation and says output may continue. The command exit code is its result, not proof that descendant work is done. Do not await just to confirm shell exit; observe or await the operation only when the task depends on background work. For deliberate long-lived work, use operation start with an explicit timeout and collect its full settlement.", {
+    command = { type = "string" }, cwd = { type = "string" },
+    timeout_seconds = { type = "integer", minimum = 1, maximum = 86400, description = "Kill the command after this many seconds. Defaults to the node's foreground deadline (" .. exec_deadline_seconds() .. "s); raise it for a build or a full test gate, lower it to fail fast." } }, { "command" }),
+  schema("operation", "Start, observe, read streamed output, wait briefly for, or cancel a supervised external operation. A launch receipt is not completion. Output read uses byte cursors; when text_lossy is true, decode content_base64 for exact bytes instead of concatenating content. `await` on work adopted by foreground bash defaults to the shell command result after output reaches EOF or is idle for 100ms; descendants remain supervised and may still produce output. Set wait_for=`settled` to await their full operation. Explicitly started operations always await full settlement. Jobs are automation rules, not operations. No automatic replay after an unknown outcome.", {
+    action = { type = "string", enum = {"start", "list", "status", "read", "wait", "await", "cancel"} },
+    id = { type = "string" }, command = { type = "string" }, cwd = { type = "string" },
+    timeout_seconds = { type = "integer", minimum = 1, maximum = 86400 },
+    stream = { type = "string", enum = {"stdout", "stderr"} }, offset = { type = "integer", minimum = 0 },
+    limit = { type = "integer", minimum = 1, maximum = 24576 }, wait_ms = { type = "integer", minimum = 0, maximum = 10000 },
+    wait_for = { type = "string", enum = {"command", "settled"}, description = "await only: foreground adoption defaults to command completion; settled waits for the complete owned process tree." }
+  }, {"action"}),
+  schema("read", "Read a PNG, JPEG, WebP or GIF up to 4 MB as visual input, or read exact text with versioned line/byte-column continuation. Image type is detected from its bytes; ranges apply only to text. For text, ask for the range you need rather than a whole file, and follow next_offset/next_column with version until eof. A whole-line page also carries `selection`, its opaque edit address, and `edit_lines`, the inclusive line frame an edit inside it may name - so a line range is copied rather than counted.", {
+    path = { type = "string" },
+    offset = { type = "integer", minimum = 1 },
+    column = { type = "integer", minimum = 1 }, version = { type = "string" },
+    limit = { type = "integer", minimum = 1, maximum = 2000 } }, { "path" }),
+  schema("read_many", "Read several independent text ranges or images up to 4 MB each in one step. Prefer a line range for text; images are detected from their bytes and returned as visual input. Results match individual read calls in request order; each item reports its own error.", {
+    requests = { type = "array", minItems = 1, maxItems = 8, items = { type = "object",
+      properties = { path = { type = "string" }, offset = { type = "integer", minimum = 1 },
+        column = { type = "integer", minimum = 1 }, version = { type = "string" },
+        limit = { type = "integer", minimum = 1, maximum = 2000 } }, required = { "path" } } }
+  }, { "requests" }),
+  schema("write", "Create or overwrite a text file with the given content.", {
+    path = { type = "string" }, content = { type = "string" } }, { "path", "content" }),
+  schema("edit", "Replace text in one file, in one of two addressing forms, never both. `edits` quotes the exact bytes you can see (old_text/new_text): it must occur exactly once, a miss is refused with the nearest region rather than guessed, and it needs no receipt - this is the form that cannot hit the wrong place. `range_edits` copies a read receipt (selection, unchanged) with replacement_lines and is for replacing structure whose line endings matter, or text that is not quotable; its optional start_line/end_line are inclusive lines inside the receipt's edit_lines frame. Every range is validated against one snapshot and applied atomically, and the result names what each range actually replaced (first_line, last_line, lines, bytes, sha256, first, last) - read that echo, because a slice that stays inside its receipt is never diagnosed for you. No multi-file transaction.", {
+    path = { type = "string" },
+    edits = { type = "array", minItems = 1, maxItems = 64, items = { type = "object",
+      properties = {
+        old_text = { type = "string", description = "Exact bytes to replace, copied from a read; must occur exactly once in the file." },
+        new_text = { type = "string", description = "Replacement bytes; empty deletes the quoted text." }
+      }, required = {"old_text","new_text"} } },
+    range_edits = { type = "array", minItems = 1, maxItems = 64, items = { type = "object",
+      properties = {
+        selection = { type = "string", description = "Opaque receipt returned by read.selection. Copy it unchanged." },
+        start_line = {type="integer",minimum=1,description="Optional inclusive source line inside the receipt's edit_lines frame; provide together with end_line."},
+        end_line = {type="integer",minimum=1,description="Optional inclusive source line inside the receipt's edit_lines frame; provide together with start_line."},
+        replacement_lines = {type="array",maxItems=2000,items={type="string"}}
+      }, required = {"selection","replacement_lines"} } }
+  }, { "path" }),
+  schema("ls", "List a directory (portable: works the same on every platform).", { path = { type = "string" } }),
+  schema("grep", "Literal substring search, not regex. Reports omitted files and clipped lines. Use a path to narrow the search, and read the matched range afterwards rather than whole files. Results use the supplied root; extensions are exact suffixes without dots.", {
+    pattern = { type = "string" }, path = { type = "string" },
+    ignore_case = {type="boolean"}, limit={type="integer",minimum=1,maximum=500},
+    max_depth={type="integer",minimum=0,maximum=64}, extensions={type="array",items={type="string"}}
+  }, { "pattern" }),
+  -- Retrieval returns selected implementation text; relationship and audit actions remain
+  -- explicitly separate so their evidence can be evaluated independently.
+  schema("graph", "Retrieve implementation source, get a bounded architecture overview, or map the current patch to resolved callers, dependencies and tests. search_symbols/symbol_source handle discovery; inspect unmatched_definition_terms and use bounded grep for partial or absent evidence. overview handles orientation; impact handles factual patch reachability without claiming risk.", {
+    action = { type = "string", enum = { "search_symbols", "symbol_source", "overview", "impact", "explain", "query", "path", "caps", "stats", "index", "audit", "audit_assess", "audit_report", "audit_feedback" } },
+    name = { type = "string", description = "search_symbols: concept or identifier; symbol_source/explain/query: exact selected name." },
+    prefer_implementations = { type = "boolean", description = "search_symbols: opt-in ranking that demotes partial local-variable matches; useful when looking for a component/function implementation, not a state binding." },
+    path = { type = "string", description = "symbol_source: path from a search_symbols result." },
+    line = { type = "integer", minimum = 1, description = "symbol_source: definition line from a search_symbols result." },
+    kind = { type = "string", description = "symbol_source: optional definition kind from the selected result." },
+    byte_offset = { type = "integer", minimum = 0, description = "symbol_source: continue a large definition at this returned byte offset." },
+    max_bytes = { type = "integer", minimum = 256, maximum = 200000, description = "symbol_source: source bytes/page (clamped to 20000); overview/impact: whole-response budget (default 24000)." },
+    aspects = { type = "array", maxItems = 8, items = {type="string", enum={"overview","languages","modules","entry_points","routes","capabilities","hotspots","boundaries","resolution"}}, description = "overview: optional sections; omitted returns the bounded overview." },
+    direction = { type = "string", enum = {"inbound","outbound","both"}, description = "impact: callers, dependencies, or both; default both." },
+    depth = { type = "integer", minimum = 1, maximum = 4, description = "impact: resolved edge depth; default 2." },
+    offset = { type = "integer", minimum = 0, description = "impact: initial live offset; prefer the returned cursor for continuation." },
+    cursor = { type = "string", description = "impact: snapshot-bound continuation token; keep direction/depth unchanged." },
+    from = { type = "string", description = "path: start identifier." },
+    to = { type = "string", description = "path: end identifier." },
+    limit = { type = "integer", minimum = 1, maximum = 200 },
+    force = { type = "boolean", description = "index: reparse every file, even unchanged ones." },
+    hours = { type = "integer", minimum = 1, maximum = 720, description = "audit_report: telemetry window, default 48 hours." },
+    grade = { type = "integer", minimum = 0, maximum = 3, description = "audit_assess: 0 irrelevant/noisy; 1 related but no new information; 2 useful check/confirmation; 3 prompted a patch or test revision. This is your opinion, not a confirmed catch." },
+    reason = { type = "string", description = "audit_assess: concrete reason tied to what you inspected." },
+    critique = { type = "string", description = "audit_assess: specific graph limitation/noise, or say none observed." },
+    evidence = { type = "string", description = "audit_assess: optional path:line or test/patch evidence; never paste secrets." },
+    run_id = { type = "string", description = "audit_feedback: run with an audit lead." },
+    outcome = { type = "string", enum = { "confirmed_catch", "false_positive", "unresolved" }, description = "audit_feedback: operator-reviewed outcome; never self-certify a catch." },
+    commit = { type = "string", description = "audit_feedback: optional commit hash for evidence." },
+    source = { type = "string", enum = { "native", "git" }, description = "audit/impact: native changeset or current Git working-tree patch; impact defaults to git." },
+    cwd = { type = "string", description = "audit/impact source=git: repository working directory; defaults to the session cwd." },
+  }, { "action" }),
+  schema("diagnose", "Execute up to eight predetermined read/grep steps once, in order. Stop on failure, incomplete evidence or an unmet expectation. No shell, repair, retry or effects.", {
+    steps={type="array",minItems=1,maxItems=8,items={type="object",properties={
+      tool={type="string",enum={"read","grep"}},args={type="object"},
+      expect={type="object",properties={contains={type="string",description="Literal text assertion for read steps only."},min_matches={type="integer",minimum=0,description="Minimum match count for grep steps only."},max_matches={type="integer",minimum=0,description="Maximum match count for grep steps only."}}}
+    },required={"tool","args"}}}
+  }, {"steps"}),
+  -- Scoped deliberately. It used to read as "here is how you look at a web page",
+  -- and an agent verifying its own UI spent 28 calls driving Chrome through CDP:
+  -- fighting the debug endpoint, falling back to PowerShell one-liners mangled by
+  -- the shell, and briefly overwriting the installed app.js to instrument it.
+  -- None of that was needed - the UI is a page this node serves.
+  schema("client", "Act on the user's machine at their request: screenshot, mouse, keyboard, a shell on their machine, and a browser (Chrome DevTools). When a call has failed, ask `status` first - it says whether the window is polling, what its browser is doing and on which port. Use `browser` to browse (target: open/read/list/eval/close/activate/quit) and `cdp` only as the low-level escape hatch. This is not how to inspect the wasm-agent UI - that is a page this node serves, so fetch it or load it in a headless browser.", {
+    action = { type = "string", enum = { "screenshot", "frame", "click", "move", "type", "key", "shell", "status", "browser", "cdp" } },
+    x = { type = "integer" }, y = { type = "integer" },
+    text = { type = "string" }, key = { type = "string" },
+    button = { type = "string", enum = { "left", "right" }, description = "click: default left" },
+    target = { type = "string", description = "browser: list | open | read | eval | close | activate | quit. cdp: launch | list | open | close | activate | navigate | evaluate" },
+    script = { type = "string", description = "JavaScript expression to evaluate" },
+    id = { type = "string", description = "CDP target id, for close/activate/read/eval" },
+    url = { type = "string", description = "browser open/navigate" },
+    reuse = { type = "boolean", description = "browser open: reuse a tab already on that URL (default true, so repeats are safe)" },
+    max_chars = { type = "integer", description = "browser read: page text to return (default 2000)" },
+    timeout_ms = { type = "integer", description = "How long the node waits for the client, default 75000. The client bounds its own work by the same number, so a timeout means the work stopped - collect it with action:'result'" },
+    port = { type = "integer", description = "CDP port of a browser you already know about. Normally omit: the port is discovered and reported back" },
+    profile = { type = "string", description = "Chrome user-data-dir (defaults to the wasm-agent account)" } },
+    { "action" }),
+  schema("shell", "Run a shell command on the wasm-agent client machine (this is the machine running the desktop UI, which must be open). Prefer `bash` for commands on the node itself.", {
+    command = { type = "string" },
+    shell = { type = "string", enum = { "cmd", "powershell" }, description = "Default cmd." },
+    cwd = { type = "string" } }, { "command" }),
+  schema("spell_save", "Crystallize a deterministic, verified execution into a named, parameterised spell: a shell command or script, a client action, a wait, an assertion, or a supervisor verb. No model in the loop. Requires at least one post assertion: a spell must settle its effect, so it can never report success while doing nothing.", {
+    name = { type = "string" },
+    description = { type = "string" },
+    target = { type = "object", description = "{node, app, profile} the spell was recorded against." },
+    params = { type = "object", description = "parameter -> {type: string|number|boolean, default}. Reference them as {{name}}." },
+    pre = { type = "array", items = { type = "object" }, description = "Assertions checked before the first step." },
+    steps = { type = "array", items = { type = "object" }, description = "Steps: {kind=client|run|wait|assert|sentinel}. Run: {script, expect?, timeout_seconds?} - the script must print ONE JSON object on stdout (exit 0), and expect is an object naming fields of it, compared by equality; a string expect is refused, and 'stdout contains' is not a thing here. Retries allowed only with idempotent=true." },
+    post = { type = "array", items = { type = "object" }, description = "REQUIRED. The assertions that settle the effect. Browser form {script, <operator>} evaluated by CDP. Node form {kind='run', script, expect={field=value}}: the command must print ONE JSON object on stdout and every named field must equal its value - a string expect is refused, an empty expect is refused, and a run check with no expect is refused. Use this for any effect a browser cannot see." } }, { "name", "steps", "post" }),
+  schema("spell_compose", "Snapshot an already verified sequence into one spell. Preserves source pre/post checks and step retries, records source versions in its trace. No intervening inference; inspect and reconcile failures with inference before repairing or retiring a spell.", {
+    name = { type = "string" }, description = { type = "string" },
+    parts = { type = "array", items = { type = "object" }, description = "Ordered {name,params?} source spells. Parameters are exposed as p1_name, p2_name, etc.; provided values become defaults. Node spells with the same target only." } }, { "name", "parts" }),
+  schema("spell_run", "Replay a saved spell; fails loudly at the first failing step or assertion.", {
+    name = { type = "string" },
+    params = { type = "object", description = "Values for the spell's declared parameters." } }, { "name" }),
+  schema("spell_list", "List saved spells with version and parameter names.", {}),
+  schema("spell_get", "Read one saved spell in full.", { name = { type = "string" } }, { "name" }),
+  schema("spell_forget", "Delete a saved spell.", { name = { type = "string" } }, { "name" }),
+  schema("spell_export", "Write a spell out as a portable JSON plan for the sentinel to run outside this node. Use it for a spell containing a `sentinel` step (one that restarts or upgrades this node): such a plan cannot run here, because the run doing the work dies with the node it changes and its postconditions could never be observed. Returns the file path; run it with: wa-sentinel request spell --file <path> --reason \"...\".", {
+    name = { type = "string" },
+    params = { type = "object", description = "Values for the spell's declared parameters." },
+    binary = { type = "string", description = "For an `upgrade` step: the wa binary to install. Defaults to the step's own value." },
+    path = { type = "string", description = "Where to write the plan. Defaults to <state>/spell-plans/<name>.json." } }, { "name" }),
+  schema("remote", "Run a capability on another wasm-agent node (peer). Nodes are discovered by ed25519 key through the rendezvous, so the name or node_id is enough. Text reads work; image results are refused until the node protocol has bounded binary transfer.", {
+    node = { type = "string", description = "Peer name or node_id (use the nodes panel for the list)." },
+    capability = { type = "string", description = "Tool to run on that node, e.g. bash, read, client, shell." },
+    args = { type = "object", description = "Arguments for that tool." } }, { "node", "capability" }),
+  schema("nodes", "List this node and every peer known to the rendezvous.", {}),
+  schema("session_debug", "Set a session's recording mode. debug keeps every turn verbatim and forever, so a failing task can be reproduced and exported as a fixture.", {
+    session_id = { type = "string", description = "Defaults to the current session." },
+    mode = { type = "string", enum = { "default", "debug" } } }, { "mode" }),
+  schema("session_fixture", "Export a session (messages, tool calls, traces) as a reproducible fixture for regression tests.", {
+    session_id = { type = "string", description = "Defaults to the current session." } }),
+  -- Master only: it changes where a session's shell and file tools point, so it can move a
+  -- guest's tools outside the tree a guest was scoped to.
+  schema("session_worktree", "Inspect or allocate a session-owned git worktree. `allocate`/`recover` creates or reconciles a clean worktree from its fork/parent session; dirty source trees fail visibly. `release` removes only a clean, inactive, merged managed worktree, retaining its branch and transcript; use the Engine or another conversation, never the run being removed. Required workspaces cannot be manually redirected or fall back to the node checkout.", {
+    action = { type = "string", enum = { "status", "allocate", "recover", "release", "set", "clear" } },
+    path = { type = "string", description = "set: an existing directory for a legacy non-managed session." },
+    session_id = { type = "string", description = "Defaults to the current session." } }, { "action" }),
+  schema("resource", "Inspect durable resource claims. Reconcile only after checking the recorded owner's effects; name the exact key, run, principal and evidence. Live owners cannot be released. No automatic timeout or effect replay.", {
+    action={type="string",enum={"list","reconcile"}},key={type="string"},run={type="string"},
+    principal={type="string"},evidence={type="string"} }, {"action"}),
+}
+
+-- Which capability tier each tool belongs to (DESIGN.md §8). Anything not
+-- listed here is a WASM plugin.
+M.tier_of = {
+  remember = "memory", recall = "memory", memories = "memory", forget = "memory",
+  skill = "skills",
+  capabilities = "capabilities",
+  subagent = "subagents",
+  sessions = "sessions", session = "sessions", search_messages = "sessions",
+  resume_session = "sessions", session_debug = "sessions", session_fixture = "sessions",
+  session_worktree = "sessions",
+  resource = "sessions",
+  bash = "environment", read = "environment", read_many = "environment", write = "environment",
+  diagnose = "environment", operation = "environment",
+  edit = "environment", ls = "environment", grep = "environment", graph = "environment",
+  shell = "shell",
+  search_ledger = "ledger", conversation = "ledger", list_conversations = "ledger",
+  client = "client",
+  spell_save = "spells", spell_run = "spells", spell_list = "spells",
+  spell_get = "spells", spell_forget = "spells", spell_export = "spells", spell_compose = "spells",
+  whatsapp_read = "whatsapp", whatsapp_conversation = "whatsapp", whatsapp_decide = "whatsapp", whatsapp_send = "whatsapp",
+  nodes = "nodes", remote = "nodes",
+}
+
+local TIER_ORDER = {
+  "memory", "sessions", "capabilities", "subagents", "environment", "shell", "ledger",
+  "client", "spells", "nodes", "whatsapp", "plugins",
+}
+
+-- The advertised tool surface, grouped by tier (not a complete model request).
+function M.tiers(role)
+  local groups = {}
+  for _, item in ipairs(M.all(role)) do
+    local name = item["function"].name
+    local tier = M.tier_of[name] or "plugins"
+    groups[tier] = groups[tier] or {}
+    table.insert(groups[tier], {
+      name = name,
+      description = item["function"].description or "",
+      parameters = item["function"].parameters or {},
+    })
+  end
+  local out = {}
+  for _, tier in ipairs(TIER_ORDER) do
+    if groups[tier] then out[#out + 1] = { tier = tier, tools = groups[tier] } end
+  end
+  return out
+end
+
+local function wasm_plugins()
+  local ok, raw = pcall(host.plugins)
+  if not ok or not raw then return {} end
+  return json.decode(raw) or {}
+end
+
+-- The scoped WhatsApp responder tools. Their schemas live in
+-- lua/core/whatsapp.lua; they are offered only to a master turn, and dispatch
+-- re-checks the profile ceiling before calling the module. A missing module (an
+-- older deployment) yields no schemas rather than a broken tool list.
+local WHATSAPP_TOOLS = { whatsapp_read = true, whatsapp_conversation = true, whatsapp_decide = true, whatsapp_send = true }
+
+local function whatsapp_schemas()
+  local ok, module = pcall(dofile, "lua/core/whatsapp.lua")
+  if not ok or type(module) ~= "table" or type(module.schemas) ~= "function" then return {} end
+  local listed, list = pcall(module.schemas)
+  if not listed or type(list) ~= "table" then return {} end
+  return list
+end
+
+local function admin_names()
+  local names = {}
+  for _, item in ipairs(M.admin) do names[item["function"].name] = true end
+  return names
+end
+
+-- The prompt index's per-tool line: a short, authored *discovery cue*, never a slice of the
+-- schema description. The two answer different questions - "is there a capability for
+-- this?" against "how do I call it, and within what limits?" - so they are separate
+-- artifacts. Deriving the cue with `description:match("^[^.]*")` duplicated the same text
+-- in the index and the schema, and the description's opening sentence (written to start an
+-- explanation) is a poor cue. A tool with no cue here (a plugin) is listed by name alone.
+-- scripts/test-tool-cues.lua guards that every built-in has one and that none is stale.
+local CUES = {
+  remember = "Store a fact the user asked you to keep",
+  recall = "Look up stored facts before answering about the user",
+  memories = "List stored facts, with their ids",
+  forget = "Delete a stored fact by id",
+  skill = "Load a skill's full instructions by name",
+  capabilities = "List the tools this account may use",
+  subagent = "Start and collect a child agent on a bounded task",
+  sessions = "List your past sessions",
+  session = "Read a session, paging earlier evidence",
+  search_messages = "Search your own past sessions for text",
+  resume_session = "Fold a past session into this one as context",
+  session_debug = "Set a session's recording mode (debug or default)",
+  session_fixture = "Export a session as a reproducible fixture",
+  session_worktree = "Point this session's tools at their own checkout",
+  resource = "Inspect resource ownership and reconcile interrupted effects",
+  search_ledger = "Search the message ledger (WhatsApp/chat)",
+  conversation = "Read one conversation's recent messages",
+  list_conversations = "List conversations in the ledger",
+  bash = "Run a shell command on this machine",
+  operation = "Run or collect a supervised long command",
+  read = "Read a file (text or image), paged",
+  read_many = "Read several files or ranges in one call",
+  write = "Create or overwrite a file",
+  edit = "Replace a versioned range returned by read",
+  ls = "List a directory",
+  grep = "Find lines matching literal text",
+  graph = "Retrieve symbol source, trace relationships, or audit patch impact",
+  diagnose = "Run a fixed read/grep check sequence once",
+  client = "Act on the user's machine: screen, mouse, keyboard, browser",
+  shell = "Run a shell command on the client machine",
+  spell_save = "Save a verified command sequence as a reusable spell",
+  spell_run = "Replay a saved spell",
+  spell_compose = "Combine a verified spell sequence with its checks intact",
+  spell_list = "List saved spells",
+  spell_get = "Read one saved spell in full",
+  spell_forget = "Delete a saved spell",
+  spell_export = "Export a spell for the sentinel to run",
+  remote = "Run a capability on another node",
+  nodes = "List this node and its peers",
+  tool_result = "Read an exact byte range of a truncated tool result",
+  whatsapp_read = "Read the incoming conversation for this run",
+  whatsapp_decide = "Record reply/no_reply for this message",
+  whatsapp_send = "Send the verified reply in this conversation",
+}
+
+function M.snippet(name) return CUES[name] end
+
+function M.cue_names()
+  local names = {}
+  for name in pairs(CUES) do names[#names + 1] = name end
+  table.sort(names)
+  return names
+end
+
+-- Every schema a role may load or delegate, before prompt visibility. This is the
+-- *catalog*: what the principal can execute or hand to a child. Prompt visibility is a
+-- separate projection (`M.all`), because advertising a tool the principal cannot execute
+-- is not the same as authorizing it - and hiding one from the prompt must not revoke the
+-- authority to delegate it.
+function M.catalog(role)
+
+  role = role or "admin"
+  local list = {}
+  for _, item in ipairs(M.shared) do list[#list + 1] = item end
+  if is_master(role) then
+    list[#list+1]=schema("tool_result","Retrieve an exact byte range of a full tool result saved after output truncation. Use the full_result.sha256 from the result, then follow next_offset until eof.",{
+      sha256={type="string"},offset={type="integer",minimum=1},limit={type="integer",minimum=1,maximum=51200}
+    },{"sha256"})
+    for _, item in ipairs(M.admin) do list[#list + 1] = item end
+    for _, item in ipairs(whatsapp_schemas()) do list[#list + 1] = item end
+    local plugins=wasm_plugins()
+    table.sort(plugins,function(a,b)return tostring(a.name)<tostring(b.name) end)
+    for _, plugin in ipairs(plugins) do
+      list[#list + 1] = schema(plugin.name, plugin.description or "", plugin.parameters and plugin.parameters.properties, plugin.parameters and plugin.parameters.required)
+    end
+  end
+  return list
+end
+
+-- Tools the prompt must not offer, though the catalog keeps them executable. The scoped
+-- WhatsApp responder tools run only from an approved child: `dispatch` refuses them
+-- without `ctx.subagent`, so a parent that sees them can only ever get
+-- `whatsapp_requires_subagent`. Hiding them removes a dead choice and the schemas it
+-- costs; the child still receives them through `all_for`, which reads the catalog.
+local PROMPT_HIDDEN = WHATSAPP_TOOLS
+
+-- The schemas a role's prompt shows, and what `capabilities` reports.
+function M.all(role)
+  local shown = {}
+  for _, item in ipairs(M.catalog(role)) do
+    if not PROMPT_HIDDEN[item["function"].name] then shown[#shown + 1] = item end
+  end
+  return shown
+end
+
+-- Tool schemas restricted to an exact allowed set (a subagent profile). The
+-- schema list is one half of the boundary; `dispatch` re-checks the same set. It reads the
+-- catalog, not the prompt projection, so a tool hidden from a parent can still be
+-- delegated to the child whose profile names it.
+function M.all_for(allowed, role)
+  local out = {}
+  for _, item in ipairs(M.catalog(role or "master")) do
+    local name = item["function"].name
+    if allowed and allowed[name] then out[#out + 1] = item end
+  end
+  table.sort(out, function(a, b) return tostring(a["function"].name) < tostring(b["function"].name) end)
+  return out
+end
+
+local function shell_quote(value)
+  return "'" .. tostring(value or ""):gsub("'", "'\\''") .. "'"
+end
+
+-- The directory this session's tools operate in. "" is the node's own working directory - the
+-- behavior every session had before a session could own a worktree - so an untouched session is
+-- unchanged. `memory` may be nil (a schema-only dispatch), which is why this is guarded.
+local function session_cwd(memory, ctx)
+  if not memory or not ctx or not ctx.session_id or not memory.session_worktree then return "" end
+  local ok, path = pcall(memory.session_worktree, ctx.session_id)
+  if not ok or type(path) ~= "string" then return "" end
+  return path
+end
+
+-- Resolve a tool path against the session's directory. An absolute path is left alone; a relative
+-- path joins the session's worktree, so `read foo.lua` reads the session's copy, not the node's.
+-- With no session worktree the path is unchanged and the host resolves it against the node cwd.
+local function resolve_path(memory, ctx, path)
+  if type(path) ~= "string" or path == "" then return path end
+  local first = path:sub(1, 1)
+  if first == "/" or first == "~" or path:match("^%a:[/\\]") or path:sub(1, 2) == "\\\\" then
+    return path
+  end
+  local base = session_cwd(memory, ctx)
+  if base == "" then return path end
+  return (base:gsub("[/\\]+$", "")) .. "/" .. path
+end
+
+local function normalized_path(path)
+  path = tostring(path or ""):gsub("\\", "/")
+  local drive = path:match("^(%a:)") or ""
+  path = path:gsub("^%a:", "")
+  local parts = {}
+  for part in path:gmatch("[^/]+") do
+    if part == ".." then
+      if #parts > 0 then table.remove(parts) else parts[#parts + 1] = part end
+    elseif part ~= "." then parts[#parts + 1] = part end
+  end
+  return drive .. "/" .. table.concat(parts, "/")
+end
+
+local function inside_workspace(root, path)
+  local base, candidate = normalized_path(root), normalized_path(path)
+  if platform.os() == "windows" then base, candidate = base:lower(), candidate:lower() end
+  return candidate == base or candidate:sub(1, #base + 1) == base .. "/"
+end
+
+local function required_workspace_error(memory, ctx, name, args)
+  local writes_files = name == "write" or name == "edit" or name == "bash"
+    or name == "operation" and (args.action or "") == "start"
+    or name == "shell" or name == "client" or name == "remote" or name == "spell_run"
+  if not writes_files or not memory or not ctx.session_id or not memory.session_workspace then return nil end
+  local workspace = memory.session_workspace(ctx.session_id)
+  if not workspace or not workspace.required then return nil end
+  if workspace.state ~= "allocated" or not workspace.worktree or workspace.worktree == "" then
+    return {error="session_workspace_unavailable",state=workspace.state or "unknown",
+      detail=workspace.error or "required workspace has no durable binding"}
+  end
+  if name == "shell" or name == "client" or name == "remote" or name == "spell_run" then
+    return {error="workspace_execution_context_unsupported",tool=name,
+      detail="this capability does not yet accept an enforced session worktree binding"}
+  end
+  if host.list_dir then
+    local ok, raw = pcall(host.list_dir, workspace.worktree)
+    local good, result = ok and pcall(json.decode, raw) or false, nil
+    if good then result = json.decode(raw) end
+    if not good or type(result) ~= "table" or result.error then
+      return {error="session_workspace_unavailable",state="binding_missing",detail="bound workspace directory is unavailable"}
+    end
+  end
+  if name == "write" or name == "edit" then
+    local target = resolve_path(memory, ctx, args.path)
+    if target and not inside_workspace(workspace.worktree, target) then
+      return {error="workspace_path_outside_binding",path=target}
+    end
+  elseif name == "bash" and args.cwd and args.cwd ~= "" then
+    local cwd = args.cwd
+    if cwd:sub(1,1) ~= "/" and not cwd:match("^%a:[/\\]") and cwd:sub(1,2) ~= "\\\\" then
+      cwd = workspace.worktree:gsub("[/\\]+$", "") .. "/" .. cwd
+    end
+    if not inside_workspace(workspace.worktree, cwd) then return {error="workspace_cwd_outside_binding",cwd=args.cwd} end
+    args.cwd = cwd
+  end
+  return nil
+end
+
+local function run(command, timeout_seconds, cwd)
+  -- `cwd` is applied in the shell rather than through host.exec's second argument, because that is
+  -- how a caller-supplied `args.cwd` already worked: one code path, so a session cwd and an explicit
+  -- one cannot behave differently.
+  if cwd and cwd ~= "" then
+    command = "cd " .. shell_quote(cwd) .. " && " .. command
+  end
+  local ok, raw = pcall(host.exec, command, "", timeout_seconds)
+  if not ok then return { error = tostring(raw) } end
+  local decoded = json.decode(raw)
+  if type(decoded) ~= "table" then return { error = tostring(raw) } end
+  return decoded
+end
+
+-- The one client action that only reports and holds no state on the client. It takes no
+-- claim, because a held or uncertain effect claim must never stop a caller from asking
+-- the client what it is doing - that answer is how a refusal is diagnosed and how an
+-- uncertain effect gets inspected. `screenshot` and `frame` deliberately keep the
+-- claim: the client writes one screenshot file per client and the frame action keeps a
+-- diff cache, so both are stateful even though they only look.
+local OBSERVING_CLIENT_ACTIONS={status=true}
+
+-- The run that owns an uncertain `client:local` claim may use the client again once
+-- it has looked at the thing it owns. Two limits keep this from being a blind retry:
+-- only the owning run in the granting process may do it, and the evidence must be the
+-- client's own answer - a disconnected or still-busy client is a real answer, and it
+-- refuses. The actions that were lost are never replayed; only a new request proceeds.
+local function reuse_own_client_claim(ctx,refused)
+  local prior=type(refused)=="table" and refused.claim
+  if type(prior)~="table" or prior.key~="client:local" or prior.uncertain~=true
+      or prior.run~=ctx.run_id or prior.principal~=ctx.user_id then
+    refused.observed=refused.observed or
+      "client:local is held by someone else, and only an owner may clear its own uncertainty"
+    refused.next=refused.next or
+      "read it with client{action:'status'} or resource{action:'list'}; another owner's claim needs an operator's reconcile"
+    return refused
+  end
+  local ok,raw=pcall(host.client,"status",json.encode({action="status"}))
+  local seen=ok and json.decode(raw) or nil
+  local busy=type(seen)=="table" and type(seen.busy)=="table" and (seen.busy.action or seen.busy.id) or nil
+  if type(seen)~="table" or seen.connected~=true or busy then
+    local because="the client did not answer"
+    if type(seen)=="table" and seen.connected~=true then because="the client is not connected" end
+    if busy then because="the client is still running "..tostring(busy) end
+    refused.observed="this run owns client:local as an uncertain effect, and "..because
+    refused.next="inspect it with client{action:'status'} or client{action:'screenshot'}, "..
+      "then decide: no operator action is needed for your own claim once the client is idle"
+    return refused
+  end
+  local recovered=resources.recover(ctx,"client:local",
+    "this run's client call failed without a receipt; the client answered status as connected and idle, "..
+    "the lost action was not replayed")
+  if not recovered.ok then
+    refused.observed="the client answered status, but this run could not clear its own uncertain claim"
+    refused.detail=recovered
+    return refused
+  end
+  return resources.claim(ctx,{"client:local"})
+end
+
+function M.dispatch(memory, name, args, role, ctx)
+  args = args or {}
+  role = role or "master"
+  ctx = ctx or {}
+  local user_id = ctx.user_id or "master"
+  -- A subagent runs only the exact tools its profile named. Checked here as well
+  -- as in the schema list it was offered: a model can ask for a tool it was not
+  -- offered, and a schema filter that is not re-checked is not a boundary.
+  if ctx.subagent then
+    local allowed = ctx.subagent.allowed or {}
+    if not allowed[name] then return { error = "capability_not_in_profile:" .. tostring(name) } end
+    if name == "subagent" then return { error = "subagent_recursion_forbidden" } end
+  end
+  if not is_master(role) and admin_names()[name] then return { error = "forbidden_for_role:" .. role } end
+  local workspace_error = required_workspace_error(memory, ctx, name, args)
+  if workspace_error then return workspace_error end
+  if name=="resource" then
+    if args.action=="list" then return resources.inspect() end
+    if args.action=="reconcile" then return resources.reconcile(args) end
+    return {error="unknown_resource_action"}
+  end
+  local observing=name=="client" and OBSERVING_CLIENT_ACTIONS[args.action or ""]
+  local client_bound_spell=name=="spell_run" and spellslib.needs_client(args.name)
+  if ctx.run_id and not observing and (name=="client" or name=="shell" or client_bound_spell) then
+    local claimed=resources.claim(ctx,{"client:local"})
+    if not claimed.ok then claimed=reuse_own_client_claim(ctx,claimed) end
+    if not claimed.ok then return claimed end
+    ctx.resource_effect_generation=(ctx.resource_effect_generation or 0)+1
+  end
+  if name == "operation" then
+    if not is_master(role) then return {error="forbidden_for_role:" .. role} end
+    args.owner = ctx.session_id or user_id
+    local ok, raw = pcall(host.operation, args.action or "status", json.encode(args))
+    if not ok then return {error=tostring(raw)} end
+    return json.decode(raw)
+  end
+  if name=="tool_result" then
+    if not is_master(role) then return {error="forbidden_for_role:"..role} end
+    return tool_output.read(args.sha256,args.offset,args.limit)
+  end
+
+  if name == "remember" then
+    if not args.content or args.content == "" then return { error = "content_required" } end
+    return { ok = true, id = memory.remember(args.content, args.scope or "global", args.tags or {}) }
+  elseif name == "recall" then
+    return memory.recall(args.query or "", args.limit or 10, args.scope)
+  elseif name == "skill" then
+    local skills = dofile("lua/core/skills.lua")
+    local wanted = args.name or ""
+    if wanted == "" then
+      local names = {}
+      for _, entry in ipairs(skills.list()) do names[#names + 1] = entry.name end
+      return { error = "name_required", available = names }
+    end
+    local found = skills.find(wanted)
+    if not found then
+      local names = {}
+      for _, entry in ipairs(skills.list()) do names[#names + 1] = entry.name end
+      return { error = "unknown_skill", requested = wanted, available = names }
+    end
+    return { name = found.name, path = found.path, dir = found.dir, content = skills.content(found) }
+  elseif name == "memories" then
+    return memory.memories(args.scope, args.limit or 50)
+  elseif name == "forget" then
+    if not args.id or args.id == "" then return { error = "id_required" } end
+    return { id = args.id, forgotten = memory.forget(args.id) and true or false }
+  elseif name == "capabilities" then
+    local list = {}
+    for _,item in ipairs(M.all(role)) do list[#list+1]=item['function'].name end
+    return { role = role, capabilities = list, note = "ask a master to unlock more" }
+  elseif name == "subagent" then
+    -- One Lua facade for the model and for the HTTP control route; the owner is
+    -- derived from `ctx` (server side), never from the arguments the model sent.
+    local result=dofile("lua/core/subagents.lua").control(args, ctx)
+    if args.action=='list' and type(result.subagents)=='table' then
+      local source=result.subagents
+      local offset=math.max(0,math.floor(tonumber(args.offset) or 0))
+      local limit=math.min(50,math.max(1,math.floor(tonumber(args.limit) or 12)))
+      local page={subagents={},total=#source,offset=offset}
+      for i=offset+1,math.min(#source,offset+limit) do
+        local task=source[i]
+        page.subagents[#page.subagents+1]={subagent_id=task.subagent_id,session_id=task.session_id,
+          parent_session_id=task.parent_session_id,profile=task.profile,model=task.model,reasoning=task.reasoning,
+          state=task.state,settled=task.settled,execution_node=task.execution_node,
+          error=task.error and tool_output.slice(tostring(task.error),1,512),
+          prompt=tool_output.slice(tostring(task.prompt or ''),1,512),
+          evidence={action='status',id=task.subagent_id}}
+      end
+      page.next_offset=offset+#page.subagents<#source and offset+#page.subagents or nil
+      page.note='Bounded list; status/result and exact session pages retain original evidence.'
+      return page
+    end
+    return result
+  elseif WHATSAPP_TOOLS[name] then
+    -- The scoped responder tools. They are only reachable from a subagent whose
+    -- approved profile names them, and the trusted profile/event/effects snapshot
+    -- arrives on ctx, never from the arguments.
+    if not ctx.subagent then return { error = "whatsapp_requires_subagent" } end
+    local module = dofile("lua/core/whatsapp.lua")
+    if type(module) ~= "table" or type(module.dispatch) ~= "function" then
+      return { error = "whatsapp_module_unavailable" }
+    end
+    return module.dispatch(memory, name, args, {
+      profile = ctx.subagent.profile,
+      event = ctx.subagent.event,
+      effects = ctx.subagent.effects,
+      sends = ctx.subagent.sends,
+      -- The ledger handle, so a send can ask the one question only the ledger can answer: has the operator
+      -- replied in this conversation since the message this run was woken for? It is passed here
+      -- deliberately - the child's own tools cannot reach the ledger, and this is not the ledger, it is one
+      -- yes/no question asked at the moment of the effect.
+      memory = memory,
+    })
+  elseif name == "search_ledger" then
+    return memory.search_ledger(args.query or "", args.conversation_id, args.limit or 20)
+  elseif name == "conversation" then
+    return memory.conversation(args.conversation_id or "", args.limit or 50)
+  elseif name == "list_conversations" then
+    return memory.conversations(args.limit or 50)
+  elseif name == "bash" then
+    if not args.command or args.command == "" then return { error = "command_required" } end
+    local timeout = args.timeout_seconds
+    if timeout ~= nil and (type(timeout) ~= "number" or timeout % 1 ~= 0 or timeout < 1 or timeout > 86400) then
+      return { error = "invalid_timeout_seconds" }
+    end
+    -- An explicit `args.cwd` still wins; a session's worktree is the default, and "" keeps the
+    -- node's own cwd.
+    local cwd = args.cwd
+    if cwd == nil or cwd == "" then cwd = session_cwd(memory, ctx) end
+    -- A common `git commit` path gets a bounded, opt-in pre-commit review. The first
+    -- attempt with unread leads returns them without executing the command. A repeated
+    -- attempt on the same patch is allowed so a false positive cannot trap the agent;
+    -- the final answer still reports unresolved leads. This is not a universal hook:
+    -- commits hidden inside scripts or other tools are outside this interception.
+    if patch_audit.enabled() and not ctx.subagent and ctx.commit_audits
+        and args.command:match("%f[%w]git%s+commit%f[%W]") then
+      local audit=patch_audit.git_audit(cwd,ctx.reviewed_paths,
+        {session_id=ctx.session_id,run_id=ctx.run_id})
+      if audit.error then return {error="graph_patch_audit_failed",audit=audit} end
+      if (audit.lead_count or 0)>0 then
+        local fingerprint=audit.patch_fingerprint or "unknown_patch"
+        if not ctx.commit_audits[fingerprint] then
+          ctx.commit_audits[fingerprint]=true
+          return {error="graph_patch_review_required",audit=audit,
+            note="commit not executed; inspect the cited callers or retry to acknowledge a false positive"}
+        end
+      end
+    end
+    if ctx.parallel_start then
+      -- Start independent shell calls through the existing supervised operation manager. The
+      -- model chose this call group; policy, session cwd and the commit review still run here.
+      return M.dispatch(memory, "operation", { action = "start", command = args.command,
+        cwd = cwd, timeout_seconds = timeout }, role, ctx)
+    end
+    local result = run(args.command, timeout, cwd)
+    -- The adopted-tree guidance is *policy*, and policy depends on what this caller may use:
+    -- a profile with `bash` but not `operation` cannot read or cancel the operation it has just
+    -- been handed, so telling it to would be the same dead end the old refusal was. The host
+    -- returns the facts; this decides what to say about them.
+    if type(result) == "table" and result.promoted == true then
+      local allowed = ctx.subagent and ctx.subagent.allowed or nil
+      local id = tostring(result.operation_id or "")
+      if allowed == nil or allowed["operation"] == true then
+        result.note = "The shell command completed with exit code " .. tostring(result.command_code or result.process_exit_code) ..
+          ". Its command result is complete; descendants remain supervised as operation " .. id ..
+          " under the original timeout and may produce more output. Do not await just to confirm shell exit. " ..
+          "Read or await wait_for=settled only if the task depends on background work. Cancel only when you intend to terminate it. Do not rerun the command."
+      else
+        result.note = "The shell command completed with exit code " .. tostring(result.command_code or result.process_exit_code) ..
+          ". Descendants remain supervised as operation " .. id .. " under the original timeout and may produce more output. " ..
+          "This profile does not allow the `operation` tool, so background work cannot be inspected or canceled here. " ..
+          "The shell result is complete; do not rerun it."
+      end
+    end
+    return result
+  elseif name == "read" then
+    args.path = resolve_path(memory, ctx, args.path)
+    return file_tools.read(args,function(entry) return memory.store_image(entry) end)
+  elseif name == "diagnose" then
+    return diagnose.run(args.steps,function(tool,options)
+      return M.dispatch(memory,tool,options,role,ctx)
+    end)
+  elseif name == "read_many" then
+    if type(args.requests) ~= "table" or #args.requests < 1 or #args.requests > 8 then
+      return { error = "requests_required_1_to_8" }
+    end
+    local results, failed = {}, 0
+    for index, request in ipairs(args.requests) do
+      if type(request) ~= "table" or type(request.path) ~= "string" or request.path == "" then
+        results[index] = { error = "path_required" }
+      else
+        request.path = resolve_path(memory, ctx, request.path)
+        results[index] = file_tools.read(request,function(entry) return memory.store_image(entry) end)
+      end
+      if results[index].error then failed = failed + 1 end
+    end
+    return { ok = failed == 0, results = results, failed = failed }
+  elseif name == "write" then
+    if not args.path then return { error = "path_required" } end
+    if type(args.content)~="string" then return {error="content_required"} end
+    local path = resolve_path(memory, ctx, args.path)
+    local before = (host.read_file and host.read_file(path)) or ""
+    local ok = host.write_file and host.write_file(path, args.content or "")
+    -- Record what changed while the previous text is still in hand: this is what the diff
+    -- topic shows and what its undo replays. A failed write records nothing.
+    if ok and ctx and ctx.changes then
+      changeset.record(ctx.changes, path, before, args.content or "")
+    end
+    return { ok = ok and true or false, path = path, error=not ok and "write_failed" or nil }
+  elseif name == "edit" then
+    args.path = resolve_path(memory, ctx, args.path)
+    return file_tools.edit(args,ctx.changes and function(path,before,after)
+      changeset.record(ctx.changes,path,before,after)
+    end or nil)
+  elseif name == "ls" then
+    -- Native listing: `ls -la` does not exist on Windows, and the description
+    -- promises portability.
+    local listed = resolve_path(memory, ctx, args.path) or "."
+    if host.list_dir then
+      local ok, result = pcall(host.list_dir, listed)
+      if ok and result then return json.decode(result) end
+    end
+    if platform.os() == "windows" then
+      return run("dir /b " .. shell_quote(listed))
+    end
+    return run("ls -la -- " .. shell_quote(listed))
+  elseif name == "grep" then
+    local allowed={pattern=true,path=true,ignore_case=true,limit=true,max_depth=true,extensions=true}
+    for key in pairs(args) do if not allowed[key] then return {error='unsupported_search_option',option=key} end end
+    if type(args.pattern)~='string' then return {error='pattern_required'} end
+    if args.path~=nil and type(args.path)~='string' then return {error='invalid_search_path'} end
+    if args.ignore_case~=nil and type(args.ignore_case)~='boolean' then return {error='invalid_ignore_case'} end
+    for key,bounds in pairs({limit={1,500},max_depth={0,64}}) do
+      local n=args[key]
+      if n~=nil and (type(n)~='number' or n%1~=0 or n<bounds[1] or n>bounds[2]) then return {error='invalid_search_range',option=key} end
+    end
+    if args.extensions~=nil then
+      if type(args.extensions)~='table' then return {error='invalid_extensions'} end
+      for key,ext in pairs(args.extensions) do
+        if type(key)~='number' or key%1~=0 or key<1 or key>#args.extensions or type(ext)~='string' then return {error='invalid_extensions'} end
+      end
+    end
+    if not host.grep then return {error='native_search_unavailable'} end
+    local ok,result=pcall(host.grep,args.pattern,resolve_path(memory,ctx,args.path) or '.',json.encode(args))
+    if not ok then return {error=tostring(result)} end
+    return json.decode(result)
+  elseif name == "graph" then
+    local graph = dofile("lua/core/graph.lua")
+    local action = args.action or "explain"
+    if action == "audit" then
+      if args.source=="git" then
+        if ctx.subagent then return {error="git_audit_forbidden_for_subagent"} end
+        return patch_audit.git_audit(args.cwd or session_cwd(memory,ctx),ctx.reviewed_paths,
+          {session_id=ctx.session_id,run_id=ctx.run_id})
+      end
+      return patch_audit.run(ctx.changes, ctx.reviewed_paths,
+        {session_id=ctx.session_id,run_id=ctx.run_id})
+    elseif action == "audit_report" then
+      return patch_audit.report(args.hours)
+    elseif action == "audit_assess" then
+      return patch_audit.assess(args,ctx)
+    elseif action == "audit_feedback" then
+      return patch_audit.feedback(args.run_id,args.outcome,args.commit,ctx)
+    end
+    if not graph.available() then return { error = "graph_unavailable" } end
+    local result, err
+    if action == "search_symbols" then result, err = graph.search_symbols(args.name,
+      { limit = args.limit, prefer_implementations = args.prefer_implementations })
+    elseif action == "symbol_source" then result, err = graph.symbol_source({
+      path=args.path,name=args.name,line=args.line,kind=args.kind},
+      {byte_offset=args.byte_offset,max_bytes=args.max_bytes})
+    elseif action == "overview" then result, err = graph.overview({aspects=args.aspects,limit=args.limit,max_bytes=args.max_bytes})
+    elseif action == "impact" then
+      local patch, patch_err
+      local source=args.source or "git"
+      if source=="native" then patch,patch_err=patch_audit.native_changes(ctx.changes)
+      else patch,patch_err=patch_audit.git_changes(args.cwd or session_cwd(memory,ctx)) end
+      if not patch then return {error=patch_err or "impact_patch_unavailable",source=source} end
+      result,err=graph.impact(patch,{direction=args.direction,depth=args.depth,limit=args.limit,
+        offset=args.offset,cursor=args.cursor,max_bytes=args.max_bytes})
+      if result then result.source=source; result.patch_fingerprint=patch.fingerprint end
+    elseif action == "explain" then result, err = graph.explain(args.name)
+    elseif action == "query" then result, err = graph.query(args.name, { limit = args.limit })
+    elseif action == "path" then result, err = graph.path(args.from, args.to)
+    elseif action == "caps" then result, err = graph.caps()
+    elseif action == "stats" then result, err = graph.stats()
+    elseif action == "index" then result, err = graph.index({ force = args.force })
+    else return { error = "unknown_graph_action:" .. tostring(action) } end
+    if not result then return { error = err or "graph_error" } end
+    return result
+  elseif name == "client" then
+    local ok, raw = pcall(host.client, args.action or "", json.encode(args))
+    if not ok then return { error = tostring(raw) } end
+    local decoded = json.decode(raw)
+    if type(decoded) ~= "table" then return { result = raw } end
+    return decoded
+  elseif name == "shell" then
+    -- Nothing was dispatched, so nothing can be uncertain: the run must not lose its
+    -- client to a mistyped call. Lua marks its own pre-dispatch refusals the same way
+    -- the node marks `client_not_connected`.
+    if not args.command or args.command == "" then return { error = "command_required", effect = "none" } end
+    local ok, raw = pcall(host.client, "shell", json.encode(args))
+    if not ok then return { error = tostring(raw) } end
+    local decoded = json.decode(raw)
+    if type(decoded) ~= "table" then return { result = raw } end
+    return decoded
+  elseif name == "spell_save" then
+    return spellslib.save(args)
+  elseif name == "spell_run" then
+    return spellslib.run(args.name, args.params)
+  elseif name == "spell_compose" then
+    return spellslib.compose(args)
+  elseif name == "spell_list" then
+    return spellslib.list()
+  elseif name == "spell_get" then
+    return spellslib.get(args.name) or { error = "unknown_spell" }
+  elseif name == "spell_forget" then
+    return spellslib.remove(args.name)
+  elseif name == "spell_export" then
+    return spellslib.export_to_file(args.name, args.params, args.binary, args.path)
+  elseif name == "sessions" then
+    return { sessions = memory.list_sessions(user_id, args.limit or 30) }
+  elseif name == "session" then
+    local session = memory.session(args.session_id)
+    if not session then return { error = "unknown_session" } end
+    if session.user_id ~= user_id and not is_master(role) then return { error = "forbidden" } end
+    return dofile('lua/core/session_view.lua').get(memory,args.session_id,args)
+  elseif name == "search_messages" then
+    if args.view~=nil and args.view~='full' and args.view~='compact' then return {error='invalid_view'} end
+    local matches=memory.search_messages(args.query or '',is_master(role) and nil or user_id,math.min(50,math.max(1,tonumber(args.limit) or 20)))
+    if args.view=='compact' then matches=evidence_view.messages(matches) end
+    return {matches=matches,limit_reached=#matches==math.min(50,math.max(1,tonumber(args.limit) or 20))}
+  elseif name == "resume_session" then
+    local target = memory.session(args.session_id)
+    if not target then return { error = "unknown_session" } end
+    if target.user_id ~= user_id and not is_master(role) then return { error = "forbidden" } end
+    local messages = memory.session_messages(args.session_id, { limit = args.limit or 30 })
+    local lines = { "Resumed session " .. args.session_id .. " (" .. (target.title or "") .. "):" }
+    local total = memory.message_count(args.session_id)
+    if total > #messages then
+      lines[#lines + 1] = string.format("(%d earlier turns omitted; showing the newest %d)",
+        total - #messages, #messages)
+    end
+    if target.summary and target.summary ~= "" then lines[#lines + 1] = target.summary end
+    for _, message in ipairs(messages) do
+      if message.role == "user" or message.role == "assistant" then
+        lines[#lines + 1] = message.role .. ": " .. (message.content or ""):sub(1, 400)
+      end
+    end
+    if ctx.session_id then
+      local current = memory.session(ctx.session_id) or {}
+      local merged = current.summary or ""
+      if merged ~= "" then merged = merged .. "\n" end
+      memory.set_session_summary(ctx.session_id, current.summarized_until or 0, merged .. table.concat(lines, "\n"))
+    end
+    return { resumed = args.session_id, messages = #messages }
+  elseif name == "session_debug" then
+    local id = args.session_id or ctx.session_id
+    if not id then return { error = "session_id_required" } end
+    return { session_id = id, mode = memory.set_session_mode(id, args.mode) }
+  elseif name == "session_fixture" then
+    local fixture = memory.session_fixture(args.session_id or ctx.session_id)
+    if not fixture then return { error = "unknown_session" } end
+    return fixture
+  elseif name == "session_worktree" then
+    local id = args.session_id or ctx.session_id
+    if not id or id == "" then return { error = "session_id_required" } end
+    local record = memory.session(id)
+    if not record then return {error="unknown_session"} end
+    if record.user_id ~= user_id then return {error="forbidden"} end
+    local workspace = memory.session_workspace(id)
+    local action = args.action or "status"
+    if action == "status" then
+      return { session_id = id, worktree = memory.session_worktree(id), workspace = workspace,
+        recovery = workspaces.recovery_hint(memory, id) }
+    elseif action=='release' then
+      local released,why,detail=workspaces.release(memory,id,user_id)
+      if not released then return {error=why,detail=detail,session_id=id} end
+      return {ok=true,session_id=id,workspace=released,branch_retained=true}
+    elseif action == "allocate" or action == "recover" then
+      local source_id = record.fork_parent_id
+      if not source_id or source_id == "" then source_id = record.parent_session_id end
+      if not source_id or source_id == "" then source_id = id end
+      local allocated, detail = workspaces.ensure(memory, id, source_id, {root_recovery=source_id==id})
+      if not allocated then return {error=workspaces.refusal_code(detail),detail=detail,
+        workspace=memory.session_workspace(id),recovery=workspaces.recovery_hint(memory,id)} end
+      return {ok=true,session_id=id,workspace=allocated}
+    elseif action == "set" then
+      if workspace and workspace.required then return {error="workspace_managed",state=workspace.state} end
+      if type(args.path) ~= "string" or args.path == "" then return { error = "path_required" } end
+      -- The directory must exist: a typo that silently pointed every tool at a missing tree
+      -- would look like the whole project vanished, which is worse than a refusal. `host.list_dir`
+      -- reports failure as `{error=...}`, not nil, so the JSON has to be read rather than trusted
+      -- for truthiness - a bare pcall check accepted every path.
+      if host.list_dir then
+        local ok, raw = pcall(host.list_dir, args.path)
+        local decoded = ok and json.decode(raw) or nil
+        if type(decoded) ~= "table" or decoded.error then
+          return { error = "worktree_not_a_directory", path = args.path }
+        end
+      end
+      return { ok = true, session_id = id, worktree = memory.set_session_worktree(id, args.path) }
+    elseif action == "clear" then
+      if workspace and workspace.required then return {error="workspace_managed",state=workspace.state} end
+      return { ok = true, session_id = id, worktree = memory.set_session_worktree(id, "") }
+    end
+    return { error = "unknown_action", action = action }
+  elseif name == "nodes" then
+    local list = {}
+    for _, node in ipairs(nodeslib.list()) do
+      list[#list + 1] = {
+        name = node.name, role = node.role, online = node.online,
+        local_node = node.local_node, capabilities = node.capabilities,
+        endpoints = node.endpoints, node_id = node.node_id,
+      }
+    end
+    return { nodes = list }
+  elseif name == "remote" then
+    if args.capability == "remote" then return { error = "remote_cannot_recurse" } end
+    local node = nodeslib.find(args.node)
+    if not node then return { error = "unknown_node:" .. tostring(args.node) } end
+    local result
+    if node.local_node then
+      result=M.dispatch(memory, args.capability, args.args or {}, role)
+    else
+      result=nodeslib.remote_call(args.node, args.capability, args.args or {})
+    end
+    if carries_local_images(result) then
+      return {error="remote_image_transport_unsupported",capability=args.capability,
+        note="The image was not returned as text or as a path on the wrong machine."}
+    end
+    return result
+  end
+
+  -- Fall back to a WASM plugin (admin only; guests never see their schemas).
+  if not is_master(role) then return { error = "unknown_tool:" .. tostring(name) } end
+  local ok, result = pcall(host.invoke, name, json.encode(args))
+  if not ok then return { error = tostring(result) } end
+  local decoded = json.decode(result)
+  if type(decoded) ~= "table" then return { result = result } end
+  return decoded
+end
+
+-- Launch only shell calls the model returned in the same assistant response. The system
+-- guideline tells it to group independent actions; writes and commands with dependencies must
+-- remain in separate responses. Every command still passes through normal bash validation and
+-- patch review before the operation manager starts it. At most eight can be active in one batch.
+-- Does dispatching `name` change something outside this run?
+--
+-- The steering fence exists because steering cannot undo an effect that has already happened, so
+-- a call needs stopping only when it has one. A read-only allowlist, not an effectful one: a tool
+-- this file has never heard of (a plugin's) keeps the fence, which is the safe direction.
+local READ_ONLY = {
+  read = true, read_many = true, grep = true, ls = true, tool_result = true, skill = true,
+  graph = true, diagnose = true, capabilities = true, nodes = true,
+  recall = true, memories = true, sessions = true, session = true,
+  search_messages = true, search_ledger = true, conversation = true, list_conversations = true,
+  spell_list = true, spell_get = true,
+}
+
+function M.has_effect(name) return READ_ONLY[name] ~= true end
+
+function M.start_parallel_bash(calls, memory, role, ctx)
+  if not is_master(role) or (ctx and ctx.subagent
+      and (not ctx.subagent.allowed or not ctx.subagent.allowed.operation))
+      or type(calls) ~= "table" or #calls < 2 then return nil end
+  local pending, count = {}, 0
+  for _, call in ipairs(calls) do
+    local fn = type(call) == "table" and call["function"] or nil
+    if type(fn) ~= "table" or (fn.name ~= "bash" and M.has_effect(fn.name)) then return nil end
+    if fn.name == "bash" and type(call.id) == "string" and call.id ~= "" then
+      local ok, args = pcall(json.decode, fn.arguments or "")
+      if ok and type(args) == "table" and type(args.command) == "string" and args.command ~= "" then
+        pending[#pending + 1] = { id = call.id, args = args }
+        count = count + 1
+      end
+    end
+  end
+  if count == 0 or count > 8 then return nil end
+
+  local started = {}
+  for _, item in ipairs(pending) do
+    local parallel_ctx = {}
+    for key, value in pairs(ctx or {}) do parallel_ctx[key] = value end
+    parallel_ctx.parallel_start = true
+    local result
+    if ctx and ctx.steering_admit and not ctx.steering_admit() then
+      result={error='superseded_by_steering',executed=false,effect='none'}
+    else
+      result = M.dispatch(memory, "bash", item.args, role, parallel_ctx)
+    end
+    if type(result) == "table" and type(result.operation_id) == "string" then
+      started[item.id] = { operation_id = result.operation_id }
+    else
+      -- A refusal is a result, not permission to execute the call a second time.
+      started[item.id] = { result = result }
+    end
+  end
+  return started
+end
+
+function M.await_parallel_bash(operation_id, role, ctx)
+  local state = M.dispatch(nil, "operation", { action = "await", id = operation_id }, role, ctx)
+  if type(state) ~= "table" then return { error = "parallel_operation_await_failed" } end
+  if state.error == "await_interrupted" then
+    M.dispatch(nil, "operation", { action = "cancel", id = operation_id }, role, ctx)
+    for _ = 1, 10 do
+      state = M.dispatch(nil, "operation", { action = "wait", id = operation_id, wait_ms = 500 }, role, ctx)
+      if type(state) == "table" and state.settled == true then break end
+    end
+    if type(state) ~= "table" or state.settled ~= true then
+      return {operation_id=operation_id,error="run_cancelled",cleanup="unknown",output_complete=false}
+    end
+    state.error = state.error or "run_cancelled"
+  end
+  local stdout = M.dispatch(nil, "operation", { action = "read", id = operation_id,
+    stream = "stdout", offset = 0, limit = 24576 }, role, ctx)
+  local stderr = M.dispatch(nil, "operation", { action = "read", id = operation_id,
+    stream = "stderr", offset = 0, limit = 8192 }, role, ctx)
+  local code = tonumber(state.process_exit_code) or -1
+  return { operation_id = operation_id, code = code, ok = code == 0,
+    stdout = type(stdout) == "table" and stdout.content or "",
+    stderr = type(stderr) == "table" and stderr.content or "",
+    output_complete = state.output_complete == true,
+    stdout_truncated = type(stdout) == "table" and
+      (tonumber(stdout.available_bytes) or 0) > 24576 or false,
+    error = state.error, timing = state.timing, parallel = true }
+end
+
+local dispatch = M.dispatch
+function M.dispatch(memory,name,args,role,ctx)
+  ctx=ctx or {}
+  local generation=ctx.resource_effect_generation or 0
+  local ok,result=pcall(dispatch,memory,name,args,role,ctx)
+  -- Uncertainty is for unknown *effects*, not for refusals. A result the node marked
+  -- `effect:"none"` never reached the client, so it cannot have changed anything, and
+  -- branding the run's claims for it would take the client away from the run that had
+  -- simply mistyped something.
+  local no_effect = type(result)=="table" and result.effect=="none"
+  if (ctx.resource_effect_generation or 0)>generation and not no_effect and (not ok or type(result)~="table" or result.error
+      or result.ok==false or result.cancelled or result.cleanup=="unknown"
+      or (result.code and result.code~=0) or result.state=="running" or result.state=="unknown") then
+    local marked=resources.uncertain(ctx)
+    if not marked.ok then error("resource_uncertainty_record_failed: "..json.encode(marked)) end
+  end
+  if not ok then error(result) end
+  return result
+end
+
+return M

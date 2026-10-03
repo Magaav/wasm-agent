@@ -1,0 +1,29 @@
+lua root unset: using embedded modules; edits under lua/ are NOT under test
+ok absent legacy state unknown
+RAW_HTTP {"body":"{\"error\":{\"type\":\"GoUsageLimitError\",\"metadata\":{\"limitName\":\"monthly\"}}}","status":429}
+ok actual HTTP monthly429 establishes durable account block
+ok rotated key and healthy node do not probe quota
+ok other account route isolated
+RAW_HTTP {"body":"{\"error\":{\"type\":\"OtherError\",\"metadata\":{\"limitName\":\"monthly\"}}}","status":429}
+ok real HTTP unsupported other429 not quota
+RAW_HTTP {"body":"GoUsageLimitError monthly","status":500}
+ok real HTTP unsupported prose not quota
+RAW_HTTP {"error":"io: Peer disconnected"}
+ok real HTTP unsupported transport not quota
+RAW_HTTP {"body":"{\"id\":\"owned-response\",\"model\":\"different-model\",\"choices\":[{\"message\":{\"content\":\"actual mock inference\"},\"finish_reason\":\"stop\"}]}","status":200}
+ok HTTP200 wrong model not serving evidence
+RAW_HTTP {"body":"{\"id\":\"owned-response\",\"choices\":[{\"message\":{\"content\":\"actual mock inference\"},\"finish_reason\":\"stop\"}]}","status":200}
+ok HTTP200 missing response model not serving evidence
+RAW_HTTP {"body":"{\"id\":\"owned-response\",\"model\":\"fixture\",\"choices\":[{\"message\":{\"content\":\"actual mock inference\"},\"finish_reason\":\"stop\"}]}","status":200}
+ok actual correctly bound HTTP success certifies serving
+RAW_HTTP {"body":"{\"id\":\"owned-response\",\"model\":\"fixture\",\"choices\":[{\"message\":{\"content\":\"actual mock inference\"},\"finish_reason\":\"stop\"}]}","status":200}
+ok newer concurrent block wins real successful HTTP CAS
+RAW_HTTP {"body":"{\"id\":\"owned-response\",\"model\":\"fixture\",\"choices\":[{\"message\":{\"content\":\"actual mock inference\"},\"finish_reason\":\"stop\"}]}","status":200}
+ok actual inflight account drift cannot recover foreign account
+ok actual inflight account drift retains original unknown
+RAW_HTTP {"body":"{\"id\":\"owned-response\",\"model\":\"fixture\",\"choices\":[{\"message\":{\"content\":\"actual mock inference\"},\"finish_reason\":\"stop\"}]}","status":200}
+ok changed provider endpoint cannot certify old request route
+RAW_HTTP {"body":"{\"id\":\"owned-response\",\"model\":\"fixture\",\"choices\":[{\"message\":{\"content\":\"actual mock inference\"},\"finish_reason\":\"stop\"}]}","status":200}
+ok create private corrupted fixture
+ok corrupted durable row refuses all actual HTTP
+real serving HTTP: 16 checks, 0 skips, 0 paid calls; loopback HTTP=11

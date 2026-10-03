@@ -1,0 +1,8 @@
+SIGNED_IDENTITY {"node":"serving-http","serving_identity":{"account_profile":"account-a","binding":"860d699371b1ff69c0b155dc8fe02792eb279f7c1e8e1e60bc31e8c72419e7e3","generation":1,"model":"fixture","node_id":"d6d1a69b1d24b46d11e5462823e2a0cc","provider":"opencode-go"}}
+ok actual authenticated peer establishes requested identity
+SIGNED_STATUS {"node":"serving-http","serving":{"account_profile":"account-a","binding":"860d699371b1ff69c0b155dc8fe02792eb279f7c1e8e1e60bc31e8c72419e7e3","generation":1,"model":"fixture","node_id":"d6d1a69b1d24b46d11e5462823e2a0cc","observed_model":"fixture","provider":"opencode-go","reason":"provider_monthly_quota","state":"blocked"}}
+ok signed status reads durable monthly account block
+ok actual signed exact tuple skips blocked peer
+ok explicit unsupported provider override remains unknown
+ok foreign requested account cannot inherit default account block
+signed two-node serving: 5 checks, 0 skips, 0 paid calls
