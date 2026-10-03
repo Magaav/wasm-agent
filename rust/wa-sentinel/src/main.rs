@@ -1642,7 +1642,8 @@ fn process_requests(background: bool, held: &mut Held) -> Result<u32> {
             Ok(request) => { if let Err(error)=deploy_protocol::intake(&request,id) { audit("intake-problem",id,&error.to_string()); } },
             Err(error) => { audit("intake-malformed",id,&error.to_string());
                 let target=sentinel_dir().join("intake-problems");std::fs::create_dir_all(&target)?;
-                wa_operation::atomic_json(&target.join(format!("malformed-{}.json",now_epoch())),&json!({"path":path,"detail":error.to_string(),"at":now_epoch()}))?;
+                let nonce=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos();
+                wa_operation::atomic_json(&target.join(format!("malformed-{}-{nonce}.json",std::process::id())),&json!({"path":path,"raw_bytes":std::fs::read(path).ok(),"detail":error.to_string(),"at":now_epoch()}))?;
             }
         }
     }
