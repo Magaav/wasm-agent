@@ -1307,6 +1307,10 @@ $harness = @'
   var carriesBox=function(prop){ return prop==='height'||prop==='min-width'||prop==='border-radius'||prop.indexOf('border')===0; };
   var carriesPaint=function(prop){ return prop==='color'||prop.indexOf('background')===0||prop.indexOf('font')===0; };
   var declaredProperties=function(rule){ var props=[]; for (var i=0;i<rule.style.length;i++) props.push(rule.style[i]); return props; };
+  var restingSelector=function(selector){
+    return String(selector).replace(/::[a-z-]+(\([^)]*\))?/gi,'')
+      .replace(/:(focus-visible|focus-within|hover|active|focus|target)\b/gi,'');
+  };
   var collectRules=function(el,rules,out){
     for (var i=0;i<rules.length;i++) {
       var rule=rules[i];
@@ -1314,12 +1318,12 @@ $harness = @'
       // `cssRules`, so the selector - not `cssRules` - is what tells a style rule from a group one; a
       // group rule (media, supports, layer) is entered when its condition holds.
       if (!rule.selectorText) {
-        if (rule.cssRules && (!rule.conditionText || window.matchMedia(rule.conditionText).matches)) collectRules(el,rule.cssRules,out);
+        if (rule.cssRules) collectRules(el,rule.cssRules,out);
         continue;
       }
       if (!rule.style) continue;
       var matches=false;
-      try { matches=el.matches(rule.selectorText); } catch (error) { matches=false; }
+      try { matches=el.matches(restingSelector(rule.selectorText)); } catch (error) { matches=false; }
       if (matches) out.push({selector:rule.selectorText,props:declaredProperties(rule)});
     }
     return out;
@@ -1335,12 +1339,12 @@ $harness = @'
     return found.filter(function(rule){ if (seen.indexOf(rule.selector)>=0) return false; seen.push(rule.selector); return true; });
   };
   var statingRules=function(el,isCarried){
-    return rulesMatching(el).filter(function(rule){ return rule.props.some(isCarried); }).map(function(rule){ return rule.selector; });
+    return rulesMatching(el).filter(function(rule){ return restingSelector(rule.selector)===rule.selector && rule.props.some(isCarried); }).map(function(rule){ return rule.selector; });
   };
   // The shared implementation, and the page's own globals: `* { box-sizing }` and `[hidden] { display }` are
   // about every element on the page rather than about a footer control, so the two are named here instead of
   // the property list being loosened to accommodate them.
-  var SHARED_RULES=['.chat-control','.chat-control[data-label]'];
+  var SHARED_RULES=['.chat-control','.chat-control[data-label]','.chat-control:hover','.chat-control:disabled','.chat-control:disabled:hover'];
   var GLOBAL_RULES=['*','[hidden]'];
   var GLOBAL_PROPERTIES=['box-sizing','display'];
   var strayRules=function(el){
@@ -3246,6 +3250,32 @@ $harness = @'
   check(countAlarms()===alarmsBefore && (!statusAfterDone || statusAfterDone.textContent.indexOf('cannot identify')<0),
     'a run that finished must stay silent: no watchdog notice and no "cannot identify" line after `done`, saw alarms '
       + alarmsBefore + '->' + countAlarms() + ' status: ' + (statusAfterDone ? statusAfterDone.textContent : 'none'));
+  // Recovered alive/busy regression: the watchdog must keep a held stream listening.
+  var heldAlive=null;
+  var aliveStream=new ReadableStream({start:function(c){heldAlive=c;}});
+  window.fetch=function(input,init){
+    var path=new URL(String(input),location.href).pathname.replace(/^\/+|\/+$/g,'');
+    if(path==='chat'&&init&&init.method==='POST')return Promise.resolve({ok:true,status:200,body:aliveStream});
+    return streamFetch.apply(window,arguments);
+  };
+  if(document.getElementById('send').classList.contains('busy'))window.__setBusy(false);
+  document.getElementById('input').value='alive held stream';
+  document.getElementById('input').dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true,cancelable:true}));
+  for(var at=0;at<60;at++)await tick();
+  var standingView={session:runThreadNow,runId:null,submitted:new Set([99]),finished:false};
+  ['alive','busy'].forEach(function(word){
+    check(window.__runStanding(nodeAnswer(word,[],[{conversation:runThreadNow,run_id:99,state:'running'}]),standingView)==='running','pre-submit live row survives '+word);
+    check(window.__runStanding(nodeAnswer(word,foreignThread,[]),standingView)==='busy-unknown','foreign chat thread survives '+word);
+  });
+  var aliveBefore=countAlarms();
+  window.__fixtures.health=nodeAnswer('alive',foreignThread,[]);
+  await window.__watchNow();
+  check(countAlarms()===aliveBefore,'alive poll must not announce death');
+  heldAlive.enqueue(new TextEncoder().encode('data: '+JSON.stringify({type:'delta',text:'ALIVE-STILL-LISTENING'})+'\n\n'));
+  for(var ar=0;ar<40;ar++)await tick();
+  check(document.getElementById('messages').textContent.indexOf('ALIVE-STILL-LISTENING')>=0,'delta after watchdog poll must render');
+  heldAlive.enqueue(new TextEncoder().encode('data: '+JSON.stringify({type:'done',text:'finished'})+'\n\n'));
+  for(var ad=0;ad<40;ad++)await tick();
   window.fetch=streamFetch;
   window.__fixtures.health=nodeAnswer('alive',[],[]);
 
@@ -3432,7 +3462,7 @@ try {
     Write-Host "  FAIL $viewResult" -ForegroundColor Red
     exit 1
   }
-  Write-Host "  ok   UI structure, mid-run reload, startup recovery, the inspect window, and a view window" -ForegroundColor Green
+  Write-Host "  ok   UI structure, mid-run reload, startup recovery, the inspect window, and a view window [stages: reload,startup-recovery,inspect-window,view-window]" -ForegroundColor Green
 } finally {
   if ($server) { Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue }
   Remove-Item Env:WASM_AGENT_HOME -ErrorAction SilentlyContinue

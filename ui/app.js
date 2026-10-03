@@ -2191,7 +2191,7 @@ function runStanding(health, view = {}) {
   if (view.finished) return "finished";
   // A node-thread on this conversation, or one carrying the run id the node accepted for it: this run.
   const thread = activeRun(health, view.session);
-  if (thread && health?.worker !== "stalled") return "running";
+  if (thread) return "running";
   const accepted = view.runId === null || view.runId === undefined ? null : view.runId;
   if (accepted !== null && threadOfRun(health, accepted)) return "running";
   const ids = Array.isArray(health?.run_ids) ? health.run_ids : null;
@@ -2199,20 +2199,22 @@ function runStanding(health, view = {}) {
     // The run the node accepted for this conversation is the node's own record of it, and it outranks the
     // thread list: a thread is an implementation detail that a respawn or a re-queue may change.
     if (accepted !== null) {
-      const mine = ids.find((run) => run && Number(run.run_id) === Number(accepted));
+      const mine = ids.find((run) => run && Number(run.run_id) === Number(accepted)
+        && (!run.conversation || run.conversation === view.session));
       if (mine) return /^(queued|running|not_started)$/.test(String(mine.state || "")) ? "running" : "over";
     }
     // Not identified yet: a live run of this conversation that this window did not submit before is the
     // node's own answer that its newest run belongs here (`identifySubmittedRun` makes that exact match).
-    const fresh = ids.filter((run) => run && run.conversation === view.session
-      && !(view.submitted && view.submitted.has(Number(run.run_id))));
+    const fresh = ids.filter((run) => run && run.conversation === view.session);
     if (fresh.some((run) => /^(queued|running|not_started)$/.test(String(run.state || "")))) return "running";
   }
   // The node says something is running that this window cannot name as its own run. "Busy but I cannot
   // identify it" is keep waiting - never "over". The node is not idle, so the run has not been observed
   // to end, and a page may not end a stream it cannot contradict.
   const worker = String(health?.worker || "");
-  if (worker && worker !== "alive") return "busy-unknown";
+  const isChatThread = (entry) => /^POST \/chat(?:\?|$)/.test(entry?.label || "");
+  const chatWorking = (health?.node_threads || []).some(isChatThread) || isChatThread(health?.current);
+  if (chatWorking || worker === "busy" || worker === "stalled") return "busy-unknown";
   return "over";
 }
 
@@ -4675,8 +4677,12 @@ async function refreshAgentPane(pane) {
       pane.task.preview?.tool?.call_id]);
     if(painted!==pane.painted) {
       pane.painted=painted;
+      // Preserve the reader's place while the shared ledger renderer appends/repaints.
+      const top=pane.transcript.scrollTop;
+      const following=pane.transcript.scrollHeight-top-pane.transcript.clientHeight<40;
       paintChildTranscript(pane.transcript,rows,{state:childRunState(pane.task),
         stateAt:pane.task.settled_at,active:!pane.task.settled,liveTool:pane.task.preview?.tool});
+      pane.transcript.scrollTop=following ? pane.transcript.scrollHeight : top;
     }
     // What is left for the pane's own notice is what the shared transcript cannot say: a failure the
     // child reported, a page size this node refused, or nothing. `Ready for your next message.` used to

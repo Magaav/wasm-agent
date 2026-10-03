@@ -15,16 +15,17 @@ export function checkVerdict(check, exit, output) {
   if(check.verdict==='js')return verdict('js',exit,text);
   if(check.verdict==='browser') {
     // The browser check's terminal verdict line, in two parts: the prefix that identifies *which* check this
-    // is ("ok   UI structure"), and a subject this stage owns - the mid-run reload or the startup recovery
-    // it is the verdict for. Deliberately not the whole sentence: the sentence names the stages test-ui.ps1
-    // covers, those grow, and an anchored end-of-line match turned an honest added stage (the inspector
-    // window) into a gate FAIL only the full gate could see. Nor is the prefix alone enough - `ok   UI
-    // structure, and then something else entirely` named no stage at all and was accepted. `markers.length===1`
-    // and the FAIL guard below are what reject a mangled or repeated report.
+    // is ("ok   UI structure"), and explicit stage tokens. Prose mentioning startup recovery
+    // can also deny it; only the field emitted after successful stages is terminal proof.
+    // Wording may change without changing that contract.
     const prefix=/^\s*ok   UI structure\b/;
-    const subjects=[/mid-run reload/i,/startup recovery/i];
-    const markers=text.split(/\r?\n/).filter(line=>prefix.test(line)&&subjects.some(subject=>subject.test(line)));
-    return {ok:exit===0&&markers.length===1&&!/^\s*(?:FAIL(?:[:\s]|$)|ALL FAIL(?:[:\s]|$)|DEPENDENCY_MISSING)/m.test(text),reason:'browser_terminal_verdict_required'};
+    const subjects=check.subjects || ['reload','startup-recovery','inspect-window','view-window'];
+    const markers=text.split(/\r?\n/).filter(line=>{
+      const field=line.match(/\[stages:\s*([^\]]*)\]/);
+      const stages=field ? field[1].split(',').map(token=>token.trim()) : [];
+      return prefix.test(line)&&subjects.every(subject=>stages.includes(subject));
+    });
+    return {ok:exit===0&&markers.length===1&&!/^\s*(?:FAIL(?:[:\s]|$)|ALL FAIL(?:[:\s]|$)|DEPENDENCY_MISSING)/im.test(text),reason:'browser_terminal_verdict_required'};
   }
   if(check.verdict==='proof') {
     try {const counts=require('./lib/proof-verdict.cjs').validate(check.proof_kind,exit,text,check.minimum);return {ok:true,...counts};}
