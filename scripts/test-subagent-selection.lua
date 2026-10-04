@@ -135,6 +135,24 @@ end
 assert(host.sql_exec("UPDATE orchestration_tasks SET detail='' WHERE id=?",json.encode({receipt.subagent_id})))
 local _,empty=fleet.control({action='list'},ctx,{control=function() return {subagents={}} end})
 for _,item in ipairs(empty.subagents) do if item.subagent_id==receipt.subagent_id then check(item.error==nil,'empty detail not error') end end
+assert(host.sql_exec("UPDATE orchestration_tasks SET state='admitted' WHERE id=?",json.encode({receipt.subagent_id})))
+local remote_original=json.decode(host.sql_query('SELECT receipt FROM orchestration_tasks WHERE id=?',json.encode({receipt.subagent_id})))[1].receipt
+mock_nodes.remote_call=function(_,_,a) return {subagent_id='remote-child',session_id='remote-session',state='completed',settled=true} end
+fleet.control({action='status',id=receipt.subagent_id},ctx,discovery_api)
+fleet=dofile('lua/core/orchestrator.lua')
+local _,terminal=fleet.control({action='lookup_session',conversation_id='remote-session'},ctx,{control=function() return {found=false} end})
+check(terminal.task.state=='completed' and terminal.task.settled and terminal.task.stale,'remote terminal observation survives reload')
+check(json.decode(host.sql_query('SELECT receipt FROM orchestration_tasks WHERE id=?',json.encode({receipt.subagent_id})))[1].receipt==remote_original,'remote observation preserves original receipt')
+for _,bad in ipairs({{subagent_id='foreign',session_id='remote-session',state='completed',settled=true},{subagent_id='remote-child',session_id='remote-session',state='running',settled=false}}) do
+ mock_nodes.remote_call=function() return bad end
+ local _,failure=fleet.control({action='status',id=receipt.subagent_id},ctx,discovery_api)
+ check(failure.error~=nil,'identity/regressive observations refused')
+end
+for _,detail in ipairs({json.encode({error=string.rep('e',400)}),json.encode({reason=string.rep('r',400)}),string.rep('d',400),json.encode(string.rep('s',400))}) do
+ assert(host.sql_exec('UPDATE orchestration_tasks SET detail=? WHERE id=?',json.encode({detail,receipt.subagent_id})))
+ local _,bounded=fleet.control({action='lookup_session',conversation_id='remote-session'},ctx,{control=function() return {found=false} end})
+ check(#bounded.task.error==256,'decoded/fallback named errors bounded')
+end
 mock_nodes.remote_call=saved_remote
 dofile=original_dofile
 print('subagent selection ok ('..checks..' checks, 0 skipped)')

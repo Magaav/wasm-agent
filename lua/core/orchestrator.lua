@@ -38,8 +38,22 @@ end
 local function discovery_error(row)
   if not row.detail or row.detail=='' then return nil end
   local ok,value=pcall(json.decode,row.detail)
-  if ok and type(value)=='table' then return value.error or value.reason end
+  if ok and type(value)=='table' then
+    local named=value.error or value.reason
+    return type(named)=='string' and named~='' and named:sub(1,256) or nil
+  end
+  if ok then return type(value)=='string' and value~='' and value:sub(1,256) or nil end
   return row.detail:sub(1,256)
+end
+
+local function observations()
+  exec("CREATE TABLE IF NOT EXISTS orchestration_observations (dispatch_id TEXT PRIMARY KEY, source_receipt TEXT NOT NULL, observation TEXT NOT NULL)")
+end
+local function recorded(row)
+  if row.destination=='local' then return json.decode(row.receipt) end
+  observations()
+  local item=query('SELECT observation FROM orchestration_observations WHERE dispatch_id=? AND source_receipt=?',{row.id,row.receipt})[1]
+  return json.decode(item and item.observation or row.receipt)
 end
 
 local function view(row)
@@ -336,8 +350,22 @@ function M.control(args, ctx, api)
     local result=invoke(row.destination,forwarded,json.decode(row.context),api)
     if action == "status" or action == "result" or action == "await" or action == "cancel" then
       if result.subagent_id then
-        -- Control observations must not replace the durable full receipt with
-        -- a status summary or erase predecessor accounting/result evidence.
+        if row.destination~='local' then
+          if result.subagent_id~=receipt.subagent_id or result.session_id~=receipt.session_id or
+              (result.attempt_id and receipt.attempt_id and result.attempt_id~=receipt.attempt_id) or
+              type(result.state)~='string' or type(result.settled)~='boolean' then
+            return true,{error='remote_observation_identity_invalid'}
+          end
+          local previous=recorded(row)
+          if (previous.settled==true or previous.state=='unknown') and result.settled~=true and result.state~='unknown' then
+            return true,{error='remote_observation_regression'}
+          end
+          observations()
+          -- Bind to the exact admitted receipt; a concurrent message continuation
+          -- changes that receipt and prevents this predecessor observation being reused.
+          exec('INSERT INTO orchestration_observations(dispatch_id,source_receipt,observation) SELECT id,receipt,? FROM orchestration_tasks WHERE id=? AND owner=? AND destination=? AND receipt=? ON CONFLICT(dispatch_id) DO UPDATE SET source_receipt=excluded.source_receipt,observation=excluded.observation',
+            {json.encode(result),id,ctx.user_id,row.destination,row.receipt})
+        end
         row.receipt=json.encode(result)
         return true,view(row)
       end
@@ -380,7 +408,7 @@ function M.control(args, ctx, api)
       rows=query("SELECT * FROM orchestration_tasks WHERE owner=? ORDER BY created_at DESC",{ctx.user_id})
     end
     for _, row in ipairs(rows) do
-      local receipt=json.decode(row.receipt)
+      local receipt=recorded(row)
       if row.destination=='local' and by_session[receipt.session_id] then
         receipt=by_session[receipt.session_id]
         remote_ids[receipt.session_id]=true
@@ -400,7 +428,7 @@ function M.control(args, ctx, api)
           parent_run_id=receipt.parent_run_id or parent.run_id, after_id=receipt.after_id,
           model=receipt.model or request.model,reasoning=receipt.reasoning or request.reasoning,
           created_at=receipt.created_at or row.created_at,started_at=receipt.started_at,settled_at=receipt.settled_at,
-          error=receipt.error or discovery_error(row), freshness=row.destination=='local' and by_session[receipt.session_id] and
+          error=(type(receipt.error)=='string' and receipt.error~='' and receipt.error:sub(1,256) or nil) or discovery_error(row), freshness=row.destination=='local' and by_session[receipt.session_id] and
             'native_snapshot' or 'recorded_observation', stale=row.destination~='local'}
         tasks[#tasks+1]=summary
       end

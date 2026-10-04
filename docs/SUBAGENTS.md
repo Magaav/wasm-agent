@@ -278,7 +278,14 @@ settled history. Summaries retain parent/run/continuation mapping and a short
 `title` (legacy prompts supply at most 100 characters).
 `freshness: "native_snapshot"` names local runtime observation; remote rows use
 `freshness: "recorded_observation", stale: true`, including recorded terminal
-outcomes. Explicit `status`, `result`, `session` and `events` retain detailed
+outcomes. Remote status/result/await/cancel observations are recorded separately
+in `orchestration_observations`, bound to the exact admitted receipt and dispatch.
+Discovery uses these durable source facts without replacing original receipts;
+a continuation changes the source receipt and invalidates predecessor observations.
+Completion supervision uses the same status control path. Regressive or mismatched
+attempt/session observations refuse rather than reopening settled/unknown tasks.
+Named discovery errors are bounded to 256 bytes, never decoded raw packets.
+Explicit `status`, `result`, `session` and `events` retain detailed
 access and ownership checks. Runtime errors remain visible.
 
 `POST /subagents` with `{ "action": "lookup_session", "conversation_id": "..." }`
