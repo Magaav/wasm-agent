@@ -1003,6 +1003,7 @@ fn resolve_sync(
     if let Some(error) = value.get("error").and_then(|error| error.as_str()) {
         let status = match error {
             "invalid_session" | "unknown_user" | "bad_signature" | "stale_request" => 401,
+            "unknown_session" => 404,
             "forbidden_thread" | "unknown_caller" | "forbidden_role" | "replayed_request" => 403,
             _ => 400,
         };
@@ -1494,7 +1495,8 @@ pub fn run(first: Lua, factory: Box<dyn Fn() -> Lua + Send + Sync>, port: u16, u
         // Only resolver-dependent requests enter this bounded FIFO. The accept thread keeps
         // serving unrelated reads and static replies while authentication waits on Lua/SQLite.
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(admission_timeout_ms());
-        if is_run_route(&request) || (request.method == "POST"
+        if (request.method == "GET" && split_path(&request.path).0 == "/session/owner")
+            || is_run_route(&request) || (request.method == "POST"
             && matches!(split_path(&request.path).0.as_str(), "/runs" | "/run-events")) {
             match admission_tx.try_send((stream, request, deadline)) {
                 Ok(()) => {},
@@ -1530,6 +1532,18 @@ fn dispatch_http(
     if split_path(&request.path).0 == "/run-events" && request.method == "POST" {
         let (status, content_type, body) = handle_run_events(&request, resolve_tx, deadline);
         let _ = respond(&mut stream, status, content_type, &body);
+        return;
+    }
+    if split_path(&request.path).0 == "/session/owner" && request.method == "GET" {
+        let (_, query) = split_path(&request.path);
+        let reply = resolve_with(resolve_tx, "wa_session_owner",
+            vec![query_value(&query, "id"), request.session.clone()], deadline);
+        let (status, body) = match reply {
+            Ok(value) => (200, value.to_string()),
+            Err((status, error, hint)) => (status,
+                serde_json::json!({"error":error,"hint":hint}).to_string()),
+        };
+        let _ = respond(&mut stream, status, "application/json", body.as_bytes());
         return;
     }
     // Admission. A run goes through the scheduler, which owns its conversation from admission

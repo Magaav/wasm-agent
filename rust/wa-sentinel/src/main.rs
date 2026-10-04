@@ -2126,7 +2126,7 @@ fn watch() -> Result<()> {
                 if stop_path().exists(){break;}
                 if entry.path().is_dir() {
                     if let Some(id)=entry.file_name().to_str() {
-                        if let Err(error)=sentinel_return::observe(id) {audit("return-observation-problem",id,&error.to_string());}
+                        if let Err(error)=sentinel_return::observe_backoff(id) {audit("return-observation-problem",id,&error.to_string());}
                     }
                 }
             }

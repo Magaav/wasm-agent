@@ -743,6 +743,19 @@ function wa_sessions(session)
   return json.encode({ sessions = memory.list_sessions(user.id, 50, { states = true }) })
 end
 
+-- Compact control read on the admission resolver: no transcript, run, or session creation.
+function wa_session_owner(session_id, session)
+  if not session or session == "" then return json.encode({ error = "invalid_session" }) end
+  local user, problem = users.resolve(session)
+  if not user then return json.encode({ error = problem or "invalid_session" }) end
+  local record = memory.session(session_id or "")
+  if not record then return json.encode({ error = "unknown_session" }) end
+  if record.user_id ~= user.id and not users.is_master(effective_role(user)) then
+    return json.encode({ error = "forbidden_thread" })
+  end
+  return json.encode({ session = { id = record.id, user_id = record.user_id } })
+end
+
 function wa_session(session_id, session)
   local user = users.current(session)
   local record = memory.session(session_id or "")

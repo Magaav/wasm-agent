@@ -8,9 +8,12 @@ fn identity_text(value: &str) -> bool {
 pub(crate) fn parent_owner(parent: &str) -> Result<String> {
     if !identity_text(parent) { bail!("parent_identity_invalid"); }
     let agent:ureq::Agent=ureq::Agent::config_builder().timeout_global(Some(Duration::from_secs(3))).build().into();
-    let body=agent.get(&format!("http://127.0.0.1:{}/session?id={parent}",node_port()))
-        .header("X-WA-Session",&std::env::var("WA_SENTINEL_AUTH_SESSION").unwrap_or_default())
-        .call().context("parent_owner_unavailable")?.into_body().read_to_string()?;
+    let credential=std::env::var("WA_SENTINEL_AUTH_SESSION").unwrap_or_default();
+    if credential.is_empty() { bail!("parent_owner_invalid_session"); }
+    let response=agent.get(&format!("http://127.0.0.1:{}/session/owner?id={parent}",node_port()))
+        .header("X-WA-Session",&credential)
+        .call().map_err(|error|anyhow::anyhow!("parent_owner_upstream:{error}"))?;
+    let body=response.into_body().read_to_string().context("parent_owner_body_unavailable")?;
     let value:Value=serde_json::from_str(&body)?;
     if value["session"]["id"].as_str()!=Some(parent) { bail!("parent_identity_not_confirmed"); }
     let owner=value["session"]["user_id"].as_str().filter(|s|identity_text(s)).context("parent_owner_not_confirmed")?;
@@ -194,6 +197,48 @@ pub(crate) fn begin_delivery(journal:&Value) -> Result<PathBuf> {
     if file.exists(){bail!("sentinel return outcome unknown or already submitted; reconcile, never replay");}
     wa_operation::atomic_json(&file,&json!({"id":journal["id"],"event_key":key,"phase":"submitting","at":now_epoch()}))?;
     Ok(file)
+}
+
+/// Watch-loop retry metadata is separate from authority/effect evidence. Persist before reporting
+/// an error so restarting cannot turn an unavailable owner route into a one-second request storm.
+pub(crate) fn observe_backoff(id:&str) -> Result<()> {
+    if !identity_text(id) { bail!("return_request_id_invalid"); }
+    let dir=sentinel_dir().join("deploy-protocol").join(id);
+    let lock=std::fs::OpenOptions::new().create(true).truncate(false).read(true).write(true)
+        .open(dir.join("observer-retry.lock"))?;
+    lock.lock()?;
+    let file=dir.join("observer-retry.json");
+    let saved=match std::fs::read(&file) {
+        Ok(bytes)=>Some(serde_json::from_slice::<Value>(&bytes).context("observer_retry_corrupt; no replay")?),
+        Err(error) if error.kind()==std::io::ErrorKind::NotFound=>None,
+        Err(error)=>return Err(error).context("observer_retry_unreadable; no replay"),
+    };
+    let now=now_epoch();
+    let mut failures=0;
+    if let Some(saved)=saved {
+        failures=saved["failures"].as_u64().filter(|n|*n>0 && *n<=6).context("observer_retry_invalid")?;
+        let at=saved["at"].as_u64().context("observer_retry_timestamp_invalid")?;
+        let next=saved["next_at"].as_u64().context("observer_retry_deadline_invalid")?;
+        if saved["id"]!=id || next<at || next-at>300 {bail!("observer_retry_identity_or_deadline_invalid");}
+        // Clock rollback cannot impose an unbounded wait: rebase only retry metadata.
+        if at>now {
+            wa_operation::atomic_json(&file,&json!({"id":id,"failures":failures,"at":now,"next_at":now.saturating_add(300)}))?;
+            return Ok(());
+        }
+        if next>now {return Ok(());}
+    }
+    match observe(id) {
+        Ok(())=>{
+            if file.exists(){std::fs::remove_file(&file).context("observer_retry_reset_failed")?;}
+            Ok(())
+        },
+        Err(error)=>{
+            failures=(failures+1).min(6);
+            let delay=(10u64 << (failures-1)).min(300);
+            wa_operation::atomic_json(&file,&json!({"id":id,"failures":failures,"at":now,"next_at":now.saturating_add(delay)}))?;
+            Err(error)
+        },
+    }
 }
 
 pub(crate) fn observe(id:&str) -> Result<()> {
