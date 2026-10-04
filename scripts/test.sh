@@ -1998,6 +1998,7 @@ if [ "${WASM_AGENT_SKIP_UI_BROWSER:-}" = "1" ]; then
 elif command -v powershell >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
   if ui_out=$(powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-ui.ps1 2>&1); then
     printf '%s\n' "$ui_out" | tail -1
+    node scripts/test-coordinator-steps.cjs
   elif printf '%s' "$ui_out" | grep -q "no Edge or Chrome found"; then
     echo "ui browser harness SKIPPED - no Edge or Chrome on this machine"
     SKIPPED=$((SKIPPED + 1))

@@ -318,6 +318,12 @@ wa-diff { display: block; align-self: flex-start; max-width: 760px; width: 100%;
 }
 .chat-content-run-label { min-width: 0; }
 .chat-content-run-elapsed { margin-left: auto; flex: 0 0 auto; font-variant-numeric: tabular-nums; }
+wa-step.run-step { display: flex; align-items: center; gap: var(--gap); padding: var(--space); color: var(--muted); font-size: 13px; }
+.run-step-label { flex: 1; min-width: 0; }
+.run-step-age { flex: none; font-variant-numeric: tabular-nums; }
+.run-step-glyph { width: 10px; text-align: center; }
+wa-step[data-state="running"] .run-step-label { color: var(--text); }
+wa-step[data-state="failed"] { color: #f85149; }
 .chat-content-run-status.finished {
   position: static; z-index: auto; width: 100%; margin-top: var(--space); padding: var(--space) 0 0;
   border: 0; border-top: 1px solid var(--line); border-radius: 0; background: none; font-size: 11px;
