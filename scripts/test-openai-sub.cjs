@@ -84,7 +84,7 @@ try {
           return {
             async *[Symbol.asyncIterator]() {
               yield {type:'thinking_delta',delta:'thinking'};
-              yield {type:'text_delta',contentIndex:0,delta:'Checking '};
+              yield {type:'text_delta',contentIndex:0,delta:'Checking ',partial:{stopReason:'stop',content:[]}};
               yield {type:'text_delta',contentIndex:0,delta:'the result',
                 partial:{content:[{type:'text',text:'Checking the result'}]}};
               yield {type:'text_end',contentIndex:0,content:'Checking the result',
@@ -132,7 +132,11 @@ try {
   const resolutions=success.events.filter(event=>event.type==='commentary' || event.type==='delta');
   assert.deepEqual(success.events.map(event=>event.type),[
     'reasoning','pending_delta','pending_delta','commentary',
-    'pending_delta','pending_delta','delta','result']);
+    'pending_delta','pending_delta','final_answer_begin','delta','result']);
+  const begin=success.events.find(event=>event.type==='final_answer_begin');
+  assert.equal(begin.source,'pi.text_end.signature');
+  assert.equal(begin.timing,'late');
+  assert.equal(success.events.filter(event=>event.type==='final_answer_begin').length,1);
   for (const pendingId of new Set(pending.map(event=>event.pending_id))) {
     const provisional=pending.filter(event=>event.pending_id===pendingId).map(event=>event.text).join('');
     const resolved=resolutions.filter(event=>event.pending_id===pendingId);

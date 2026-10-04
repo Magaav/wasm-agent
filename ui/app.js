@@ -374,12 +374,22 @@ let follow = true;
 let pinning = false;
 // Anchors belong to containers, including independently painted child chats.
 const answerAnchors = new WeakMap();
+const childScrollStates = new WeakMap();
+function scrollState(container) {
+  let state=childScrollStates.get(container);
+  if (!state) {state={follow:true,pinning:false};childScrollStates.set(container,state);}
+  return state;
+}
 const answerSeen = new WeakMap();
 const answerReleased = new WeakSet();
 const answerScrollPositions = new WeakMap();
 function releaseAnswerAnchor(container = transcript, manual = true) {
   answerAnchors.delete(container);
-  if (manual) answerReleased.add(container);
+  if (manual) {
+    answerReleased.add(container);
+    if (container===messages) setFollow(false);
+    else scrollState(container).follow=false;
+  }
 }
 function anchorAnswer(node) {
   if (replayingMessages) return;
@@ -396,24 +406,28 @@ function anchorAnswer(node) {
     const expected=answerScrollPositions.get(container);
     if (expected != null && Math.abs(container.scrollTop-expected)<1) return;
     releaseAnswerAnchor(container);
+    if (container!==messages) scrollState(container).follow=container.scrollHeight-container.scrollTop-container.clientHeight<40;
   }, {passive:true});
   pin();
 }
 
 function pin(force = false) {
+  const container=transcript;
+  const state=container===messages ? null : scrollState(container);
   const answer = answerAnchors.get(transcript);
   if (answer?.isConnected && !force) {
-    pinning = true;
+    if (state) state.pinning=true; else pinning = true;
     transcript.scrollTop += answer.getBoundingClientRect().top - transcript.getBoundingClientRect().top;
     answerScrollPositions.set(transcript, transcript.scrollTop);
-    requestAnimationFrame(() => { pinning = false; });
+    requestAnimationFrame(() => { if(state)state.pinning=false;else pinning = false; });
     return;
   }
-  if (!follow && !force) return;
-  pinning = true;
+  if (!(state ? state.follow : follow) && !force) return;
+  if(state)state.pinning=true;else pinning = true;
   transcript.scrollTop = transcript.scrollHeight;
+  answerScrollPositions.set(container,container.scrollTop);
   // Release on the next frame: the scroll event fires asynchronously.
-  requestAnimationFrame(() => { pinning = false; });
+  requestAnimationFrame(() => { if(state)state.pinning=false;else pinning = false; });
 }
 
 function setFollow(value) {
