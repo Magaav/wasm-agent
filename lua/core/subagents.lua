@@ -301,6 +301,7 @@ function M.resolve(id, ctx)
     limits = resolved_limits,
     model = profile.model,
     reasoning = profile.reasoning,
+    provider = profile.provider,
     approved_models = profile.approved_models,
     operator_authorized = profile.operator_authorized == true,
     builtin = profile.builtin == true,
@@ -341,6 +342,31 @@ local function approved_reasoning(model, requested)
     if level == requested then return true, nil end
   end
   return false, "reasoning_not_approved:" .. tostring(requested)
+end
+
+-- Resolve omissions before placement serializes the request. This is also the
+-- local admission rule; placement must never turn parent inheritance into an override.
+function M.selection(args, ctx, profile)
+  local caller_model = ctx.model
+  if caller_model == nil or caller_model == "" then caller_model = provider.settings().model end
+  local function choose(value, default, fallback)
+    if value == nil or value == "" then value = default end
+    if value == nil or value == "" then value = fallback end
+    return value
+  end
+  local model = choose(args.model, profile.model, caller_model)
+  local ok, problem = approved_model(profile, model, caller_model)
+  if not ok then return nil, problem end
+  local route = choose(args.provider, profile.provider, provider.active().id)
+  -- Providers are configured routes, not delegable capabilities. Never change
+  -- the node's route or silently substitute one to satisfy a child request.
+  if route ~= provider.active().id then return nil, "provider_route_unavailable:" .. tostring(route) end
+  problem = provider.unservable(model)
+  if problem then return nil, problem end
+  local reasoning = choose(args.reasoning, profile.reasoning, ctx.reasoning)
+  ok, problem = approved_reasoning(model, reasoning)
+  if not ok then return nil, problem end
+  return {model=model, reasoning=reasoning, provider=route}
 end
 
 local function derive_ctx(ctx)
@@ -468,13 +494,9 @@ function M.start(args, ctx)
     return out
   end
 
-  local caller_model = ctx.model
-  if caller_model == nil or caller_model == "" then caller_model = provider.settings().model end
-  local model = args.model
-  if model == nil or model == "" then model = profile.model end
-  local model_ok, model_error = approved_model(profile, model, caller_model)
-  if not model_ok then return { error = model_error } end
-  local effective_model = model or caller_model
+  local selected, selection_error = M.selection(args, ctx, profile)
+  if not selected then return { error = selection_error } end
+  local effective_model = selected.model
   -- Policy says whether this model may be delegated; the provider says whether this route can
   -- run it at all, and that has to be asked before a session and a worktree exist for a pair
   -- that cannot run. The request path refuses the same pair at the first call, but by then the
@@ -483,11 +505,7 @@ function M.start(args, ctx)
   -- earlier place, so there is one rule and two gates rather than two rules.
   local unservable = provider.unservable(effective_model)
   if unservable then return { error = unservable, model = effective_model } end
-  local reasoning = args.reasoning
-  if reasoning == nil or reasoning == "" then reasoning = profile.reasoning end
-  if reasoning == nil or reasoning == "" then reasoning = ctx.reasoning end
-  local reasoning_ok, reasoning_error = approved_reasoning(effective_model, reasoning)
-  if not reasoning_ok then return { error = reasoning_error } end
+  local reasoning = selected.reasoning
   local limits = truthy_limits(profile)
   -- Bound the task and its context before a child session or a native thread is
   -- created, so an oversized payload is refused rather than queued.
@@ -600,6 +618,7 @@ function M.start(args, ctx)
     limits = limits,
     model = effective_model,
     reasoning = reasoning,
+    provider = selected.provider,
     owner_user = ctx.user_id,
     parent_session_id = ctx.session_id,
     -- Derived from the authenticated context, not from the body: a caller cannot
@@ -668,6 +687,11 @@ function M.control(args, ctx)
     local fleet = dofile("lua/core/orchestrator.lua")
     local handled, result = fleet.control(args, ctx, M)
     if handled then return result end
+  end
+
+  if action == 'lookup_session' then
+    return json.decode(host.subagent('lookup_session', json.encode({
+      owner_user=ctx.user_id, conversation_id=tostring(args.conversation_id or '') })))
   end
 
   if action=='steer_session' or (action=='steering_status' and not args.id and not args.subagent_id) then

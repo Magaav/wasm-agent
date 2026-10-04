@@ -370,4 +370,5 @@ local cost_start = subagents.control({ action = "start", profile = "cost-cap", p
 check(cost_start.error == "cost_budget_requires_rates",
   "a dollar cap without known rates must fail closed: " .. json.encode(cost_start))
 
+dofile('scripts/test-subagent-selection.lua')
 print(string.format("subagents profiles ok (%d checks)", checks))

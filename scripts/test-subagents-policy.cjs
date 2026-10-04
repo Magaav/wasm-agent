@@ -33,6 +33,8 @@ try{
  assert.equal(result.status,0,result.stderr||String(result.error));
  const count=Number(result.stdout.match(/^subagents profiles ok \((\d+) checks\)$/m)?.[1]);
  assert.ok(count>=59,'missing or dropped policy verdict');checks+=count;
+ const selection=Number(result.stdout.match(/^subagent selection ok \((\d+) checks, 0 skipped\)$/m)?.[1]);
+ assert.ok(selection>=21,'missing selection/discovery verdict');checks+=selection;
  const tasks=path.join(config,'subagents');
  assert.ok(!fs.existsSync(tasks)||fs.readdirSync(tasks).length===0,'model-free policy must not admit a native child');checks++;
  fs.writeFileSync(path.join(root,'verdict.json'),JSON.stringify({suite:'test-subagents-policy',checks,failed:0,skipped:0,ok:true},null,2));
