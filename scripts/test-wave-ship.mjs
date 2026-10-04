@@ -11,5 +11,11 @@ try{
  const run=()=>spawnSync(process.execPath,['scripts/ship-wave.mjs',source,install],{encoding:'utf8',windowsHide:true});
  assert.equal(run().status,0);assert(fs.existsSync(path.join(install,'scripts','lib','wave-two.mjs')));assert(fs.existsSync(path.join(install,'scripts','wave-observe.lua')));
  fs.unlinkSync(path.join(source,'scripts','lib','wave-two.mjs'));const failed=run();assert.notEqual(failed.status,0);assert(/dependency missing/.test(failed.stderr));
- console.log('wave shipping ok (5 checks, 0 skipped; private transitive literal import fixture)');
+ // This is the normal test.sh entry: consumer closure must be tested here,
+ // not only by an optional standalone invocation. Never emit PASS on child failure.
+ const consumer=spawnSync(process.execPath,['scripts/test-ship-wave.mjs'],{encoding:'utf8',windowsHide:true});
+ process.stdout.write(consumer.stdout||'');process.stderr.write(consumer.stderr||'');
+ assert.equal(consumer.status,0,'staged normal admission/proof consumer suite failed');
+ assert.match(consumer.stdout,/^ship wave ok \(14 checks, 0 skipped;/m);
+ console.log('wave shipping ok (21 checks, 0 skipped; 5 import assertions, 14 consumer assertions, 2 wrapper assertions)');
 }finally{fs.rmSync(root,{recursive:true,force:true});}
