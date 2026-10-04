@@ -1,0 +1,85 @@
+{
+  "schema": 1,
+  "kind": "independent-json-parser-review",
+  "reviewer": "json-review-20261004",
+  "producer": "json-linear-20261004",
+  "tip": "1887a6a166c40c9bfcbd12d4a9bf8d754dc221ea",
+  "tree": "529dc232c62beb05e636ae6fc0c2601ba6e9f6b2",
+  "verdict": "passed",
+  "focused_scope": {
+    "files": [
+      "lua/vendor/json.lua",
+      "scripts/test-json-parsing.cjs",
+      "scripts/test-json-parsing.lua",
+      "scripts/test.sh"
+    ],
+    "reason": "Replace quadratic escaped-string decoding without changing JSON semantics; test large nested SQL envelopes, escapes, Unicode, malformed strings and exact loaded source; wire the focused check into the existing smoke entrypoint.",
+    "checks": [
+      "case:scripts/test-json-parsing.cjs"
+    ],
+    "cases": [
+      {
+        "id": "case:scripts/test-json-parsing.cjs",
+        "path": "scripts/test-json-parsing.cjs",
+        "verdict": "counted",
+        "terminal_prefix": "json parsing ok",
+        "minimum": 18
+      }
+    ]
+  },
+  "focused_scope_sha256": "e9cb6d919f45335aa4945ce37de127a1b508306b85f58c3d7df4f36e59c6b8db",
+  "summary": "The escaped-string accumulator preserves segments, escape mappings, Unicode conversion, parser indices, byte values and errors while avoiding repeated prefix copies. Exact-source and embedded focused checks passed; independent baseline parity and size scaling checks passed.",
+  "source_sha256": "fd491ce9125598e9ebc7d473ec56fd20418c171fb36079e16a07c0fbe063eeb0",
+  "binary_path": "C:/Users/Victor/orca/projects/wasm-agent/rust/target/release/wa.exe",
+  "binary_sha256": "406e053a4fff1936a15d6de81dd3e6a65d760e397c945414d296fd1e7c488b8e",
+  "findings": [],
+  "resolved_findings": [
+    {
+      "severity": "blocking",
+      "path": "scripts/test-json-parsing.cjs",
+      "problem": "Extensionless WA_BIN set by scripts/test.sh failed fs.existsSync on Windows despite a valid wa.exe.",
+      "resolution": "Commit 1887a6a adds the existing wrapper's .exe fallback; independent extensionless embedded run passes 18 checks with 0 skipped."
+    }
+  ],
+  "limits": [
+    "Focused routine review only; full release gate was not requested or run.",
+    "Baseline Unicode behavior, including acceptance of malformed surrogate pairs, is preserved; this patch is a performance correction, not a strict-Unicode change.",
+    "Measurements cover synthetic nested SQL envelopes on this machine. Production memory overhead and every caller's end-to-end behavior were not measured.",
+    "Chunk accumulation uses temporary table entries per escaped segment; larger transient table memory replaces repeated immutable prefix copies."
+  ],
+  "gate_verified": false,
+  "release_verified": false,
+  "requires_combined_gate": false,
+  "checks": [
+    {
+      "name": "source-root",
+      "command": "$env:WA_BIN='C:\\Users\\Victor\\orca\\projects\\wasm-agent\\rust\\target\\release\\wa.exe'; node scripts/test-json-parsing.cjs",
+      "exit": 0,
+      "output": "{\"bytes\":3750083,\"checks\":18,\"cpu_seconds\":0.575,\"skipped\":0,\"source\":\"fd491ce9125598e9ebc7d473ec56fd20418c171fb36079e16a07c0fbe063eeb0\",\"embedded\":false}\njson parsing ok (18 checks, 0 skipped)\n"
+    },
+    {
+      "name": "embedded",
+      "command": "$env:WA_BIN='C:\\Users\\Victor\\orca\\projects\\wasm-agent\\rust\\target\\release\\wa.exe'; node scripts/test-json-parsing.cjs --embedded",
+      "exit": 0,
+      "output": "{\"bytes\":3750083,\"checks\":18,\"cpu_seconds\":0.609,\"skipped\":0,\"source\":\"fd491ce9125598e9ebc7d473ec56fd20418c171fb36079e16a07c0fbe063eeb0\",\"embedded\":true}\njson parsing ok (18 checks, 0 skipped)\n"
+    },
+    {
+      "name": "extensionless-embedded",
+      "command": "$env:WA_BIN='C:\\Users\\Victor\\orca\\projects\\wasm-agent\\rust\\target\\release\\wa'; node scripts/test-json-parsing.cjs --embedded",
+      "exit": 0,
+      "output": "{\"bytes\":3750083,\"checks\":18,\"cpu_seconds\":0.7,\"skipped\":0,\"source\":\"fd491ce9125598e9ebc7d473ec56fd20418c171fb36079e16a07c0fbe063eeb0\",\"embedded\":true}\njson parsing ok (18 checks, 0 skipped)\n"
+    },
+    {
+      "name": "independent-attack",
+      "command": "node reviews/json-parsing-attack.cjs C:\\Users\\Victor\\.wasm-agent\\wa-worktree-json-review-20261004 1887a6a166c40c9bfcbd12d4a9bf8d754dc221ea C:\\Users\\Victor\\orca\\projects\\wasm-agent\\rust\\target\\release\\wa.exe 3f54a90d9d23b105df93002a683135d62cde81e0",
+      "exit": 0,
+      "output": "{\"baseline\":\"264ad546166bd3de19b4382bf0cc14d26dfeffff55c7682b72a475cd99dfd1b5\",\"checks\":4038,\"skipped\":0,\"source\":\"fd491ce9125598e9ebc7d473ec56fd20418c171fb36079e16a07c0fbe063eeb0\",\"timings\":[{\"bytes\":937583,\"cpu_seconds\":0.183},{\"bytes\":1875083,\"cpu_seconds\":0.376},{\"bytes\":3750083,\"cpu_seconds\":0.733}],\"tested_tip\":\"1887a6a166c40c9bfcbd12d4a9bf8d754dc221ea\",\"baseline_ref\":\"3f54a90d9d23b105df93002a683135d62cde81e0\",\"binary_sha256\":\"406e053a4fff1936a15d6de81dd3e6a65d760e397c945414d296fd1e7c488b8e\"}\n"
+    },
+    {
+      "name": "syntax-and-whitespace",
+      "command": "node --check scripts/test-json-parsing.cjs; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; & 'C:\\Program Files\\Git\\bin\\bash.exe' -n scripts/test.sh; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; git diff 3f54a90d9d23b105df93002a683135d62cde81e0 HEAD --check",
+      "exit": 0,
+      "output": ""
+    }
+  ]
+}
