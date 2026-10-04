@@ -1132,6 +1132,7 @@ function addTool(name, args, options) {
   const boundMs = options && options.timeoutMs;
   const callId = options && options.callId != null ? String(options.callId) : "";
   showRunStep("tools", "Executing tools");
+  if (!replayingMessages && trace && runStepState?.active) trace.parentNode.insertBefore(runStepState.active.node, trace);
   anchorRunSteps(callId);
   if (callId && trace?.hasPendingCall(callId)) {
     if (!replayingMessages) startToolTicker();

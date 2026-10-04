@@ -1331,6 +1331,7 @@ rm -f "$DB.embedded.lua"
 # number in a message. Real processes - the same fixture twice, and two unusable roots that must fail
 # loudly instead of falling back.
 WA_BIN="$BIN" node scripts/test-lua-root-notice.cjs
+WA_BIN="$BIN" node scripts/test-json-parsing.cjs --embedded
 WA_SCRIPT=scripts/test-recovery.lua "$BIN" --db "$DB" | grep "recovery ok"
 cat > "$DB.seed.lua" <<'LUA'
 -- Seed a thread cut off the way a killed process leaves it: a question, a decision

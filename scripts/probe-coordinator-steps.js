@@ -40,6 +40,7 @@
     handleEvent({type:'tool',call_id:'inspect-one',name:'read_many',arguments:{requests:[{path:'worker-result.json'}]}});
     check(bubble.textContent.includes('Selecting tools') && bubble.textContent.includes('Executing tools'), 'tool selection and execution are shown as phases');
     check(bubble.querySelectorAll('.tool-line[data-call-id="inspect-one"]').length === 1, 'the actual inspection tool is shown once');
+    check(runStepState.active.node.nextElementSibling?.tagName === 'WA-TRACE', 'execution phase precedes a promoted streamed decision trace');
     handleEvent({type:'tool_result',name:'read_many',result:{ok:true,results:[]}});
     handleEvent({type:'round',n:2});
     handleEvent({type:'status',text:'model'});

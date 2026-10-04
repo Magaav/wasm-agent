@@ -17,7 +17,7 @@ try {
   const observed=JSON.parse(run.stdout.trim());
   assert.equal(observed.probeStatus,'pass');
   const proof=JSON.parse(observed.probeText);
-  assert.ok(proof.checks>=37);
+  assert.ok(proof.checks>=38);
   assert.equal(proof.skipped,0);
   console.log(JSON.stringify({checks:proof.checks,skipped:0,evidence:proof.evidence}));
   console.log('coordinator steps ok ('+proof.checks+' checks, 0 skipped)');
