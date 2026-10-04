@@ -281,6 +281,21 @@ impl Task {
         value
     }
 
+    fn discovery_view(&self) -> Value {
+        json!({
+            "subagent_id": self.id, "task_id": self.id, "attempt_id": self.id,
+            "transport": "native", "session_id": self.session_id,
+            "event_epoch": self.boot, "event_node_id": self.spec["event_node_id"],
+            "node_id": self.node_id, "state": self.state, "settled": self.settled,
+            "profile": self.profile, "title": self.spec["title"],
+            "model": self.spec["model"], "reasoning": self.spec["reasoning"],
+            "parent_session_id": self.parent_session_id, "parent_run_id": self.parent_run_id,
+            "created_at": self.created_at, "started_at": self.started_at,
+            "settled_at": self.settled_at, "after_id": self.spec["after_id"],
+            "error": self.error, "freshness": "native_snapshot"
+        })
+    }
+
     fn accounting_block(&self) -> Value {
         if self.accounting.get("usage").map(Value::is_object).unwrap_or(false) {
             return self.accounting.clone();
@@ -676,12 +691,29 @@ impl Manager {
         let mut items: Vec<Value> = tasks
             .values()
             .filter(|task| task.owner_user == owner)
-            .map(|task| task.view(false))
+            .map(|task| task.discovery_view())
             .collect();
         items.sort_by(|a, b| {
             b["created_at"].as_f64().partial_cmp(&a["created_at"].as_f64()).unwrap_or(std::cmp::Ordering::Equal)
         });
         json!({ "subagents": items, "count": items.len() })
+    }
+
+    fn lookup_session(&self, owner: &str, session: &str) -> Result<Value, String> {
+        if session.is_empty() { return Err("conversation_id_required".into()); }
+        let tasks = self.inner.tasks.lock().map_err(|_| "subagent_state_poisoned")?;
+        // Owner filtering happens before selection: a foreign session is indistinguishable
+        // from an absent one. Select the chain tail, including queued continuations.
+        let owned: Vec<&Task> = tasks.values()
+            .filter(|task| task.owner_user == owner && task.session_id == session).collect();
+        let latest = owned.iter().filter(|task| !owned.iter().any(|next|
+            next.spec["after_id"].as_str() == Some(task.id.as_str())))
+            .max_by(|a,b| a.created_at.partial_cmp(&b.created_at)
+                .unwrap_or(std::cmp::Ordering::Equal).then_with(|| a.id.cmp(&b.id)));
+        Ok(match latest {
+            Some(task) => json!({"found":true,"task":task.discovery_view()}),
+            None => json!({"found":false}),
+        })
     }
 
     fn await_task(&self, id: &str, owner: &str, wait_ms: u64) -> Result<Value, String> {
@@ -1059,6 +1091,9 @@ pub fn control(action: &str, args: &Value) -> Result<Value, String> {
             page["ok"]=json!(true);
             Ok(page)
         }
+        "lookup_session" => manager.lookup_session(
+            args["owner_user"].as_str().unwrap_or_default(),
+            args["conversation_id"].as_str().unwrap_or_default()),
         "list" => {
             let owner = args["owner_user"].as_str().unwrap_or_default();
             Ok(manager.list(owner))
@@ -1247,6 +1282,8 @@ mod tests {
         let mut original = spec("original", "alice", "");
         original["allowed_tools"] = json!(["read"]);
         original["model"] = json!("approved-model");
+        original["reasoning"] = json!("low");
+        original["provider"] = json!("openai-sub");
         manager.start(&original).unwrap();
         manager.await_task("original", "alice", 5000).unwrap();
         let mut request = json!({"id":"original","owner_user":"mallory","new_id":"continued",
@@ -1259,6 +1296,18 @@ mod tests {
         let record: Value = serde_json::from_str(&std::fs::read_to_string(manager.inner.root.join("continued/record.json")).unwrap()).unwrap();
         assert_eq!(record["spec"]["allowed_tools"], json!(["read"]));
         assert_eq!(record["spec"]["model"], "approved-model");
+        assert_eq!(record["spec"]["reasoning"], "low");
+        assert_eq!(record["spec"]["provider"], "openai-sub");
+        let lookup = manager.lookup_session("alice", original["session_id"].as_str().unwrap()).unwrap();
+        assert_eq!(lookup["task"]["subagent_id"], "continued");
+        assert_eq!(lookup["task"]["freshness"], "native_snapshot");
+        assert_eq!(manager.lookup_session("mallory", original["session_id"].as_str().unwrap()).unwrap(), json!({"found":false}));
+        assert!(manager.lookup_session("alice", "").is_err());
+        for task in manager.list("alice")["subagents"].as_array().unwrap() {
+            for key in ["prompt", "result", "preview", "accounting", "completion", "instructions", "context"] {
+                assert!(task.get(key).is_none(), "discovery leaked {key}");
+            }
+        }
         assert_eq!(manager.continue_session(&request).unwrap()["subagent_id"], "continued");
     }
 

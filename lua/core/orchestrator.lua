@@ -35,6 +35,27 @@ function M.validate(policy)
   return clean
 end
 
+local function discovery_error(row)
+  if not row.detail or row.detail=='' then return nil end
+  local ok,value=pcall(json.decode,row.detail)
+  if ok and type(value)=='table' then
+    local named=value.error or value.reason
+    return type(named)=='string' and named~='' and named:sub(1,256) or nil
+  end
+  if ok then return type(value)=='string' and value~='' and value:sub(1,256) or nil end
+  return row.detail:sub(1,256)
+end
+
+local function observations()
+  exec("CREATE TABLE IF NOT EXISTS orchestration_observations (dispatch_id TEXT PRIMARY KEY, source_receipt TEXT NOT NULL, observation TEXT NOT NULL)")
+end
+local function recorded(row)
+  if row.destination=='local' then return json.decode(row.receipt) end
+  observations()
+  local item=query('SELECT observation FROM orchestration_observations WHERE dispatch_id=? AND source_receipt=?',{row.id,row.receipt})[1]
+  return json.decode(item and item.observation or row.receipt)
+end
+
 local function view(row)
   local receipt = json.decode(row.receipt)
   receipt.remote_subagent_id = receipt.subagent_id
@@ -67,11 +88,16 @@ function M.enqueue(args, ctx)
   if #json.encode(args) > 524288 then return {error="prompt_too_large"} end
   local key = tostring(args.idempotency_key or args.delivery_id or host.uuid())
   local copy = json.decode(json.encode(args))
-  copy.model = copy.model or ctx.model or provider.settings().model
-  copy.reasoning = copy.reasoning or ctx.reasoning
+  local api = dofile("lua/core/subagents.lua")
+  local profile, problem = api.resolve(tostring(copy.profile or "explore"), ctx)
+  if not profile then return {error=problem} end
+  local selected
+  selected, problem = api.selection(copy, ctx, profile)
+  if not selected then return {error=problem} end
+  copy.model, copy.reasoning, copy.provider = selected.model, selected.reasoning, selected.provider
   copy.parent_session_id = ctx.session_id
   local context = { user_id=ctx.user_id, role=ctx.role, session_id=ctx.session_id,
-    run_id=ctx.run_id, node_id=ctx.node_id, model=copy.model, reasoning=copy.reasoning }
+    run_id=ctx.run_id, node_id=ctx.node_id, model=ctx.model, reasoning=ctx.reasoning }
   exec("INSERT OR IGNORE INTO orchestration_tasks(id,owner,request_key,args,context,created_at) " ..
     "SELECT ?,?,?,?,?,? WHERE (SELECT COUNT(*) FROM orchestration_tasks WHERE owner=? AND state IN ('queued','placing'))<128",
     {"dispatch:"..host.uuid(), ctx.user_id, key, json.encode(copy), json.encode(context), host.now(),ctx.user_id})
@@ -310,10 +336,37 @@ function M.control(args, ctx, api)
     local forwarded = json.decode(json.encode(args))
     forwarded.id=receipt.subagent_id
     forwarded.subagent_id=nil
+    if row.destination=='local' then
+      local latest=invoke('local',{action='lookup_session',conversation_id=receipt.session_id},json.decode(row.context),api)
+      if type(latest)~='table' then return true,{error='native_session_lookup_invalid'} end
+      if latest.error then return true,latest end
+      if latest.found~=true or type(latest.task)~='table' or
+          latest.task.session_id~=receipt.session_id or type(latest.task.subagent_id)~='string' or
+          latest.task.subagent_id=='' then return true,{error='native_session_lookup_invalid'} end
+      forwarded.id=latest.task.subagent_id
+      -- Expected attempt/run identity remains on the forwarded request. Exact
+      -- historical access uses the native id, not the conversation's dispatch alias.
+    end
     local result=invoke(row.destination,forwarded,json.decode(row.context),api)
     if action == "status" or action == "result" or action == "await" or action == "cancel" then
       if result.subagent_id then
-        exec("UPDATE orchestration_tasks SET receipt=? WHERE id=?",{json.encode(result),id})
+        if row.destination~='local' then
+          if result.subagent_id~=receipt.subagent_id or result.session_id~=receipt.session_id or
+              (result.attempt_id and receipt.attempt_id and result.attempt_id~=receipt.attempt_id) or
+              type(result.state)~='string' or type(result.settled)~='boolean' then
+            return true,{error='remote_observation_identity_invalid'}
+          end
+          local previous=recorded(row)
+          if (previous.settled==true or previous.state=='unknown') and result.settled~=true and result.state~='unknown' then
+            return true,{error='remote_observation_regression'}
+          end
+          observations()
+          -- Bind to the exact admitted receipt; a concurrent message continuation
+          -- changes that receipt and prevents this predecessor observation being reused.
+          local saved=exec('INSERT INTO orchestration_observations(dispatch_id,source_receipt,observation) SELECT id,receipt,? FROM orchestration_tasks WHERE id=? AND owner=? AND destination=? AND receipt=? ON CONFLICT(dispatch_id) DO UPDATE SET source_receipt=excluded.source_receipt,observation=excluded.observation WHERE orchestration_observations.source_receipt<>excluded.source_receipt OR (COALESCE(json_extract(orchestration_observations.observation,\'$.settled\'),0)=0 AND COALESCE(json_extract(orchestration_observations.observation,\'$.state\'),\'\')<>\'unknown\') OR (json_extract(orchestration_observations.observation,\'$.state\')=json_extract(excluded.observation,\'$.state\') AND json_extract(orchestration_observations.observation,\'$.settled\')=json_extract(excluded.observation,\'$.settled\'))',
+            {json.encode(result),id,ctx.user_id,row.destination,row.receipt})
+          if saved.changes~=1 then return true,{error='remote_observation_superseded'} end
+        end
         row.receipt=json.encode(result)
         return true,view(row)
       end
@@ -331,25 +384,62 @@ function M.control(args, ctx, api)
     end
     return true,result
   end
-  if action == "list" then
+  if action == "list" or action == "lookup_session" then
     if ctx.role ~= "master" or not nodes.is_master() then return false end
     local local_ctx = {}
     for k,v in pairs(ctx) do local_ctx[k]=v end
     local_ctx.remote=true
-    local list=api.control({action="list"},local_ctx)
-    local tasks, remote_ids = {}, {}
-    for _, row in ipairs(query("SELECT * FROM orchestration_tasks WHERE owner=? ORDER BY created_at DESC",{ctx.user_id})) do
-      if row.state=="admitted" then
-        local receipt=json.decode(row.receipt)
-        local result=invoke(row.destination,{action="status",id=receipt.subagent_id},json.decode(row.context),api)
-        if result.subagent_id then row.receipt=json.encode(result)
-        else row.detail="Node status unavailable: "..json.encode(result) end
-        if row.destination=="local" then remote_ids[receipt.session_id]=true end
+    local list=api.control(action=='lookup_session' and
+      {action='lookup_session',conversation_id=args.conversation_id} or {action="list"},local_ctx)
+    if list.error then return true,list end
+    local native = action=='lookup_session' and (list.found and {list.task} or {}) or (list.subagents or {})
+    local by_session={}
+    for _,task in ipairs(native) do
+      local old=by_session[task.session_id]
+      if not old or (tonumber(task.created_at) or 0)>(tonumber(old.created_at) or 0) or task.after_id==old.subagent_id then
+        by_session[task.session_id]=task
       end
-      tasks[#tasks+1]=view(row)
     end
-    for _, task in ipairs(list.subagents or {}) do
+    local tasks, remote_ids = {}, {}
+    local rows
+    if action=='lookup_session' then
+      rows=query("SELECT * FROM orchestration_tasks WHERE owner=? AND json_extract(receipt,'$.session_id')=? ORDER BY created_at DESC",
+        {ctx.user_id,tostring(args.conversation_id or '')})
+    else
+      rows=query("SELECT * FROM orchestration_tasks WHERE owner=? ORDER BY created_at DESC",{ctx.user_id})
+    end
+    for _, row in ipairs(rows) do
+      local receipt=recorded(row)
+      if row.destination=='local' and by_session[receipt.session_id] then
+        receipt=by_session[receipt.session_id]
+        remote_ids[receipt.session_id]=true
+      end
+      if action=='list' or receipt.session_id==args.conversation_id then
+        local request=json.decode(row.args)
+        local parent=json.decode(row.context)
+        local summary={subagent_id=row.id, remote_subagent_id=receipt.subagent_id,
+          transport=receipt.transport or 'native',task_id=receipt.task_id or receipt.subagent_id,
+          attempt_id=receipt.attempt_id or receipt.subagent_id,event_epoch=receipt.event_epoch,
+          event_node_id=receipt.event_node_id,node_id=receipt.node_id,session_id=receipt.session_id,
+          execution_node=row.destination,dispatch_state=row.state,state=receipt.state or row.state,
+          settled=receipt.settled==true or row.state=='cancelled' or row.state=='failed' or row.state=='refused',
+          profile=receipt.profile or request.profile,
+          title=receipt.title or request.title or tostring(request.prompt or ''):gsub('%s+',' '):sub(1,100),
+          parent_session_id=receipt.parent_session_id or parent.session_id,
+          parent_run_id=receipt.parent_run_id or parent.run_id, after_id=receipt.after_id,
+          model=receipt.model or request.model,reasoning=receipt.reasoning or request.reasoning,
+          created_at=receipt.created_at or row.created_at,started_at=receipt.started_at,settled_at=receipt.settled_at,
+          error=(type(receipt.error)=='string' and receipt.error~='' and receipt.error:sub(1,256) or nil) or discovery_error(row), freshness=row.destination=='local' and by_session[receipt.session_id] and
+            'native_snapshot' or 'recorded_observation', stale=row.destination~='local'}
+        tasks[#tasks+1]=summary
+      end
+    end
+    for _, task in ipairs(native) do
       if not remote_ids[task.session_id] then task.execution_node="local"; tasks[#tasks+1]=task end
+    end
+    if action=='lookup_session' then
+      table.sort(tasks,function(a,b) return (tonumber(a.created_at) or 0)>(tonumber(b.created_at) or 0) end)
+      return true,{found=tasks[1]~=nil,task=tasks[1]}
     end
     return true,{subagents=tasks}
   end
