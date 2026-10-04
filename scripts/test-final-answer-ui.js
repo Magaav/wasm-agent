@@ -2,6 +2,14 @@
   const problems = [];
   const check = (ok, label) => { if (!ok) problems.push(label); };
   await window.rendererLoaded;
+  if (window.__productionFinalEvents) {
+    for (const scenario of window.__productionFinalEvents) {
+      messages.replaceChildren();runBubble=null;streamBody=null;streamText='';
+      for (const event of scenario.events) handleEvent(event);
+      if (['tool','steer','followup'].includes(scenario.scenario)) check(messages.textContent.includes('Settled '+scenario.scenario),'production continuation rendered '+scenario.scenario);
+      if (['cancel','failure'].includes(scenario.scenario)) check(messages.textContent.includes('Candidate '+scenario.scenario),'production interrupted text retained');
+    }
+  }
   const originalFetch=window.fetch;
   const lookups=[];
   let lookupReply={found:false};
@@ -87,6 +95,35 @@
   const manual=messages.scrollTop;
   handleEvent({type:'delta',text:'\n\n```js\nconst fixture = true;\n```\n\n| a | b |\n|---|---|\n|1|2|'});
   check(messages.scrollTop===manual && !answerAnchors.has(messages),'manual scroll remains released during code/table growth');
+  // Use actual shared child chat hosts, not substitute transcript DOM.
+  const childA=document.createElement('wa-agent-session');
+  const childB=document.createElement('wa-agent-session');
+  document.body.append(childA,childB);
+  const savedTranscript=transcript;
+  const mainPosition=messages.scrollTop;
+  const otherPosition=childB.transcript.scrollTop;
+  transcript=childA.transcript;runBubble=null;streamBody=null;streamText='';
+  handleEvent({type:'final_answer_begin',message_id:'child-a'});
+  handleEvent({type:'delta',text:'# Child answer\n\n'+('child evidence\n\n'.repeat(100))});
+  pin();
+  check(answerAnchors.has(childA.transcript),'child has independent anchor');
+  check(messages.scrollTop===mainPosition && childB.transcript.scrollTop===otherPosition,'child growth does not move main or sibling');
+  childA.transcript.dispatchEvent(new WheelEvent('wheel',{deltaY:1}));
+  check(!answerAnchors.has(childA.transcript),'child wheel releases only child');
+  transcript=savedTranscript;runBubble=null;streamBody=null;streamText='';
+  // Race a manual gesture against the pending real pin frame; test after real browser timer turn.
+  handleEvent({type:'final_answer_begin',message_id:'race'});
+  handleEvent({type:'delta',text:'# Race\n\n'+('race evidence\n\n'.repeat(100))});
+  pin();
+  messages.dispatchEvent(new WheelEvent('wheel',{deltaY:-1}));
+  messages.scrollTop=Math.max(0,messages.scrollTop-40);
+  messages.dispatchEvent(new Event('scroll'));
+  const racePosition=messages.scrollTop;
+  await new Promise(resolve=>setTimeout(resolve,50));
+  handleEvent({type:'delta',text:'more evidence'});
+  handleEvent({type:'reply',text:streamText+' race retained'});
+  check(!answerAnchors.has(messages) && messages.scrollTop===racePosition,'pending pin frame cannot overwrite manual intent');
+  childA.remove();childB.remove();
   const log=document.createElement('pre'); log.id='wa-probe';
   log.dataset.status=problems.length?'fail':'pass';
   log.textContent=problems.length?problems.join(' ;; '):'final-answer UI causal checks pass';

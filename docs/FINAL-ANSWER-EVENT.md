@@ -14,4 +14,14 @@ Focused entrypoints: scripts/test-final-answer.lua (WA_SCRIPT with WASM_AGENT_LU
 
 Observed: synthetic wire causal checks pass; dedicated headless UI probe passes; test-ui.ps1 passes all four stages. Private assertion mutation failed and was restored. Screenshot inspected: collapsed run above readable Markdown, composer unaffected. Raw artifacts retained under final-answer-evidence/, final-answer-mutation/ and lookup-evidence/ in the owned worktree Git metadata (not delivery source). Targeted discovery contract checked against backend commit 84ba10e7; backend not merged or executed here.
 
-Limitations: no paid model or live deployment; native early timing is synthetic protocol evidence, not a new measured live final-phase fixture. Dedicated cancellation/failure/steer/followup and pixel scroll-growth tests, complete shared replay causal additions, per-message multiple-final candidates, and event-contract completeness still need independent review/additional work. No full gate: gate_verified:false, release_verified:false.
+## Source acceptance matrix
+
+- Production `wire.complete` -> `host.http_sse` fake bytes -> `host.stream` -> actual unmodified `agent.run`: 55 checks, zero skips. Text then tools, explicit candidate followed by durable steering/queued followup, unknown/commentary, cancellation and failure are exercised. Interrupted/commentary-only results do not manufacture replies.
+- Captured production events are fed to the real shared UI handler by `scripts/test-final-answer-browser.mjs`; corrected continuation text and interrupted candidate text survive.
+- Shared `wa-agent-session` containers: child growth leaves main/sibling positions unchanged; child gesture releases that container. No substitute transcript element.
+- Real headless browser timer turn races pending pin frame with wheel/manual scroll, then growth/reply: reader position retained. Large-answer pixel start, code/table growth, multiple candidates and source duplicate checks pass. Deterministic image decoding is not covered.
+- Private scroll assertion mutation produced fail; restored probe passes. Existing test-ui.ps1 passes all four stages, including shared replay/reload/high-ID contracts.
+
+Entrypoints: source-root WA_SCRIPT scripts/test-final-answer-loop.lua with private WASM_AGENT_HOME, --db and WA_FINAL_EVENTS; then `node scripts/test-final-answer-browser.mjs <events.json> <private-output>`. Logs/events/screenshots and mutation evidence retained in owned Git metadata loop-evidence/. No network/inference/bootstrap registry is launched.
+
+Limitations: source fixture evidence, not paid/live provider timing, deployed integration or correctness certification. Followup here is queued continuation through existing steering/CLI seam, not a newly invented provider control. Independent exact-source review and combined backend discovery wiring remain coordinator scope. No full gate: gate_verified:false, release_verified:false.
