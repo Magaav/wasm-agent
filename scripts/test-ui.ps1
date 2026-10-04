@@ -65,7 +65,11 @@ $harness = @'
     // conversation, which is the opposite of "look at it without disturbing it". The read count is
     // asserted first, so an instrument that recorded nothing cannot pass this by being empty.
     var inspectCalls = window.__calls || [];
-    var inspectPosts = inspectCalls.filter(function (call) { return call.method === "POST"; });
+    var inspectPosts = inspectCalls.filter(function (call) {
+      if (call.method !== "POST") return false;
+      // Owner-scoped discovery is a read even though its transport is POST.
+      return !(call.url === 'subagents' && JSON.parse(call.body || '{}').action === 'lookup_session');
+    });
     check(inspectCalls.length > 0,
       "the inspector must have read from the node, saw " + inspectCalls.length + " call(s)");
     check(inspectPosts.length === 0,

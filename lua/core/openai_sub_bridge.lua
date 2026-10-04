@@ -160,10 +160,8 @@ try {
   for await (const event of stream) {
     if (event.type === 'text_delta' || event.type === 'thinking_delta') {
       ttft ??= Date.now() - started;
-      if (event.type === 'text_delta' && event.partial?.stopReason === 'stop') {
-        send({type:'delta', text:event.delta});
-        streamedFinalText.add(event.contentIndex);
-      } else if (event.type === 'text_delta') {
+      // A response-global mutable stopReason is not a per-item phase.
+      if (event.type === 'text_delta') {
         send({type:'pending_delta', pending_id:`${request.stream_id || 'stream'}:${event.contentIndex}`, text:event.delta});
       } else if (event.type === 'thinking_delta') {
         reasoningText += event.delta;
@@ -181,6 +179,8 @@ try {
       // on the completed text block's signature. Keep unclassified text visibly
       // provisional, then resolve it to commentary or the completed answer here.
       const pendingId = `${request.stream_id || 'stream'}:${event.contentIndex}`;
+      if (phase === 'final_answer') send({type:'final_answer_begin', message_id:pendingId,
+        pending_id:pendingId, source:'pi.text_end.signature', timing:'late'});
       if (phase === 'commentary') send({type:'commentary', pending_id:pendingId, text:event.content || block.text || ''});
       else if (!streamedFinalText.has(event.contentIndex)) send({type:'delta', pending_id:pendingId, text:event.content || block.text || ''});
       streamedFinalText.delete(event.contentIndex);

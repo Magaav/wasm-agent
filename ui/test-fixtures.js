@@ -303,6 +303,7 @@ window.fetch = function (input, init) {
     if (window.__taskFailure) return Promise.resolve({ok:false,status:503,json:()=>Promise.resolve({error:'fixture task service unavailable'})});
     if (request.action==='start' && window.__holdTaskStart) return new Promise(resolve=>{window.__releaseTaskStart=()=>resolve({ok:true,status:200,json:()=>Promise.resolve({subagent_id:'new-child',state:'queued'})});});
     const value=request.action==='steer_session' || request.action==='steer' ? {id:'steering-fixture',state:'queued'} : request.action==='profiles' ? window.__fixtures.taskProfiles :
+      request.action==='lookup_session' ? {task:(window.__fixtures.subagents.subagents||[]).filter(task=>task.session_id===request.conversation_id && task.transport==='native').at(-1)||null} :
       request.action==='list' ? window.__fixtures.subagents :
       request.action==='fleet' ? window.__fixtures.fleet :
       request.action==='result' ? {subagent_id:request.subagent_id,state:'completed',settled:true,result:{text:'verified fixture result'}} :

@@ -372,8 +372,29 @@ function atBottom(slack = 40) {
 // event they cause cannot be mistaken for intent.
 let follow = true;
 let pinning = false;
+// Anchors belong to containers, including independently painted child chats.
+const answerAnchors = new WeakMap();
+function releaseAnswerAnchor(container = transcript) {
+  answerAnchors.delete(container);
+}
+function anchorAnswer(node) {
+  if (replayingMessages) return;
+  const container = transcript;
+  answerAnchors.set(container, node);
+  for (const gesture of ['wheel', 'touchstart', 'keydown']) {
+    container.addEventListener(gesture, () => releaseAnswerAnchor(container), {passive:true, once:true});
+  }
+  pin();
+}
 
 function pin(force = false) {
+  const answer = answerAnchors.get(transcript);
+  if (answer?.isConnected && !force) {
+    pinning = true;
+    transcript.scrollTop += answer.getBoundingClientRect().top - transcript.getBoundingClientRect().top;
+    requestAnimationFrame(() => { pinning = false; });
+    return;
+  }
   if (!follow && !force) return;
   pinning = true;
   transcript.scrollTop = transcript.scrollHeight;
@@ -388,6 +409,7 @@ function setFollow(value) {
 
 messages.addEventListener("scroll", () => {
   if (pinning) return;
+  releaseAnswerAnchor();
   setFollow(atBottom());
 }, { passive: true });
 
@@ -397,6 +419,7 @@ for (const event of ["wheel", "touchstart"]) {
   messages.addEventListener(event, () => setFollow(atBottom(4)), { passive: true });
 }
 messages.addEventListener("keydown", (event) => {
+  if (["PageUp", "PageDown", "ArrowUp", "ArrowDown", "Home", "End", " "].includes(event.key)) releaseAnswerAnchor();
   if (["PageUp", "ArrowUp", "Home"].includes(event.key)) setFollow(false);
   if (["PageDown", "ArrowDown", "End"].includes(event.key)) setFollow(atBottom());
 });
@@ -1170,7 +1193,7 @@ async function refreshOperationProgress(health, running) {
 // The answer is the point; the route is reference. On reply, everything the run
 // did before the answer moves into one collapsed run topic at the top of the
 // bubble, and the answer sits below it.
-function collapseRun() {
+function collapseRun(finalStart = false) {
   const bubble = runBubble;
   if (!bubble) return;
   const body = bubble.body;
@@ -1187,7 +1210,7 @@ function collapseRun() {
   // it even when that batch added no tool call: the guard is about *creating* the topic, not about
   // folding into one that is already there. Getting this wrong left the preamble sitting outside as
   // its own text segment, so the bubble read run,text,text instead of one run and one answer.
-  if (!existing && traces.length === 0) return;
+  if (!existing && traces.length === 0 && !finalStart) return;
   if (moves.length === 0) return;
   const run = existing || document.createElement("wa-run");
   if (!existing) {
@@ -1211,6 +1234,7 @@ function collapseRun() {
     if (child.tagName === "WA-TRACE") calls += child.count || 0;
     else if (child.classList && child.classList.contains("seg")) steps += 1;
   }
+  if (finalStart) run.open = false;
   const endedAt = replayingMessages ? replayMessageEndedAt : Date.now();
   run.setSummary(steps, calls, Math.max(0, endedAt - (runStartedAt || endedAt)));
 }
@@ -1261,7 +1285,20 @@ function handleEvent(event) {
   if (["round", "reasoning", "commentary", "commentary_delta", "commentary_end", "pending_delta", "decision", "tool", "tool_result", "delta", "reply", "error", "done"].includes(event.type)) {
     clearActiveRunNotice();
   }
-  if (event.type === "round") {
+  if (event.type === "final_answer_begin") {
+    const bubble = currentBubble();
+    const key = String(event.message_id || event.pending_id || '');
+    if (!key || bubble.dataset.finalMessage === key) return;
+    bubble.dataset.finalMessage = key;
+    if (!streamBody) {
+      streamBody = document.createElement('div');
+      streamBody.className = 'seg final-answer';
+      bubble.body.append(streamBody);
+    }
+    collapseRun(true);
+    anchorAnswer(streamBody);
+  } else if (event.type === "round") {
+    releaseAnswerAnchor();
     // A new step begins: close the previous one (its text and its tool topic).
     if (!runStartedAt) runStartedAt = Date.now();
     markStreamedCommentaryIncomplete();
@@ -1291,6 +1328,12 @@ function handleEvent(event) {
   } else if (event.type === "decision") {
     addDecision(event);
   } else if (event.type === "tool") {
+    releaseAnswerAnchor();
+    if (streamBody?.classList.contains('final-answer')) {
+      streamBody.classList.remove('final-answer');
+      flushDecision();
+      collapseRun();
+    }
     // The bound travels with the tool event when the host enforces one (bash/shell); /health is the
     // fallback so an in-flight line still says "of 300s" instead of only "42s".
     const boundMs = event.timeout_ms != null ? event.timeout_ms
@@ -1324,7 +1367,10 @@ function handleEvent(event) {
     }
     streamText += event.text || "";
     streamBody.rawText=streamText;
-    streamBody.textContent = stripThinking(streamText);
+    if (streamBody.classList.contains('final-answer')) {
+      streamBody.innerHTML = renderMarkdown(stripThinking(streamText));
+      streamBody.style.whiteSpace = 'normal';
+    } else streamBody.textContent = stripThinking(streamText);
     pin();
   } else if (event.type === "reply") {
     discardPendingText();
@@ -1340,6 +1386,7 @@ function handleEvent(event) {
       return;
     }
     const finalText = stripThinking(event.text || streamText);
+    const newlyConfirmed = !streamBody?.classList.contains('final-answer');
     if (streamBody) {
       streamBody.innerHTML = renderMarkdown(finalText);
       streamBody.rawText=event.text || streamText;
@@ -1360,6 +1407,7 @@ function handleEvent(event) {
     // created after the run is collapsed, and collapseRun() also refuses to swallow a WA-DIFF,
     // so the two cannot get back into that order.
     collapseRun();
+    if (newlyConfirmed) anchorAnswer(streamBody);
     sealReasoning();
     const diff = renderDiff(currentBubble(), event.changes);
     if (diff) {
@@ -4816,11 +4864,14 @@ async function attachSessionJournalOnce(thread, readHistory) {
 }
 async function nativeSessionTask(thread) {
   if(!thread)return null;
-  const response=await apiFetch('subagents',{headers:apiHeaders()});
+  const response=await apiFetch('subagents',{method:'POST',headers:apiHeaders(),
+    body:JSON.stringify({action:'lookup_session',conversation_id:thread})});
   const result=await response.json();
   if(!response.ok || result.error)throw Error(result.error||'native_session_discovery_unavailable');
-  const tasks=(result.subagents||result.tasks||[]).filter(task=>task.session_id===thread && task.transport==='native');
-  return tasks.sort((a,b)=>(a.created_at||0)-(b.created_at||0)).at(-1)||null;
+  if (!Object.prototype.hasOwnProperty.call(result, 'task')) throw Error('native_session_lookup_contract_invalid');
+  const task=result.task;
+  if(task && (task.session_id!==thread || task.transport!=='native')) throw Error('native_session_lookup_identity_mismatch');
+  return task || null;
 }
 // Native identity is intentionally opaque; never feed it to runKey or /run-events.
 async function attachNativeJournal(task, readHistory, viewing=()=>true) {

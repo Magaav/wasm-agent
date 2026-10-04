@@ -505,6 +505,8 @@ function M.session(opts)
     blocks = {},
     decisions = {},
     streamed_final = {},
+    final_started = {},
+    completed_items = {},
     commentary = {},
     commentary_ids = {},
     reasoning = {},
@@ -546,13 +548,15 @@ function M.session(opts)
 
   local function create_slot(output_index, item)
     if type(item) ~= 'table' then return nil end
+    if state.completed_items[output_index] then return nil end
+    if state.slots[output_index] then return state.slots[output_index] end
     local slot
     if item.type == 'reasoning' then
       slot = {kind = 'thinking', text = ''}
       state.blocks[#state.blocks + 1] = {kind = 'thinking', text = ''}
     elseif item.type == 'message' then
       apply_phase(item)
-      slot = {kind = 'text', text = '', phase = nil}
+      slot = {kind = 'text', text = '', phase = item.phase, item_id = item.id}
       state.blocks[#state.blocks + 1] = {kind = 'text', text = '', phase = nil}
     elseif item.type == 'function_call' or item.type == 'custom_tool_call' then
       local id = item.call_id and (tostring(item.call_id) .. '|' .. tostring(item.id or '')) or nil
@@ -564,6 +568,12 @@ function M.session(opts)
     slot.index = #state.blocks
     slot.block = state.blocks[#state.blocks]
     state.slots[output_index] = slot
+    if slot.phase == 'final_answer' and not state.final_started[output_index] then
+      state.final_started[output_index] = true
+      emit({type = 'final_answer_begin', run_id = opts.run_id, response_id = state.request_id,
+        message_id = slot.item_id or (stream_id .. ':' .. slot.index),
+        pending_id = stream_id .. ':' .. slot.index, source = 'responses.output_item.added'})
+    end
     return slot
   end
 
@@ -576,8 +586,8 @@ function M.session(opts)
 
   local function text_delta(slot, delta)
     state.blocks[slot.index].text = state.blocks[slot.index].text .. delta
-    if state.stop_reason == 'stop' then
-      emit({type = 'delta', text = delta})
+    if slot.phase == 'final_answer' then
+      emit({type = 'delta', text = delta, message_id = slot.item_id})
       state.streamed_final[slot.index] = true
     else
       emit({type = 'pending_delta', pending_id = stream_id .. ':' .. slot.index, text = delta})
@@ -714,7 +724,15 @@ function M.session(opts)
       local item = event.item
       if type(item) ~= 'table' then return end
       apply_phase(item)
+      if state.completed_items[event.output_index] then return end
       local slot = state.slots[event.output_index] or create_slot(event.output_index, item)
+      if slot and item.phase == 'final_answer' and not state.final_started[event.output_index] then
+        state.final_started[event.output_index] = true
+        emit({type='final_answer_begin', run_id=opts.run_id, response_id=state.request_id,
+          message_id=item.id or (stream_id .. ':' .. slot.index),
+          pending_id=stream_id .. ':' .. slot.index, source='responses.output_item.done', timing='late'})
+      end
+      state.completed_items[event.output_index] = true
       if not slot then return end
       if item.type == 'reasoning' and slot.kind == 'thinking' then
         local summary = {}
@@ -920,7 +938,7 @@ function M.complete(model, messages, tools, stream, opts, reasoning)
     if stream then host.stream(json.encode(event)) end
   end
   local started = host.monotonic_ms and host.monotonic_ms() or 0
-  local session = M.session({stream_id = stream_id, emit = emit, started_ms = started,
+  local session = M.session({stream_id = stream_id, run_id = opts.run_id, emit = emit, started_ms = started,
     new_id = host.uuid})
   local line = session.line
   local counted = 0
