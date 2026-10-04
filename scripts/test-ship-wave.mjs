@@ -11,8 +11,8 @@ const admission=install=>run([path.join(install,'scripts/wave-entry.mjs'),'check
 const fixture=path.join(scratch,'git');
 try {
  fs.mkdirSync(fixture);check(spawnSync('git',['init',fixture],{encoding:'utf8'}).status===0,'private Git fixture');
- const old=spawnSync('git',['show','3f54a90d9d23b105df93002a683135d62cde81e0:scripts/ship-wave.mjs'],{encoding:'utf8'});
- check(old.status===0,'preserved causal baseline');const oldScript=path.join(scratch,'old.mjs');fs.writeFileSync(oldScript,old.stdout);
+ const oldScript=path.join(repo,'scripts/fixtures/ship-wave-baseline.mjs');
+ check(fs.existsSync(oldScript),'tracked causal baseline available without Git history');
  const baseline=path.join(scratch,'baseline');check(ship(repo,baseline,oldScript).status===0,'baseline stages');
  const broken=admission(baseline);check(broken.status!==0&&broken.stderr.includes('test-verdict.cjs')&&broken.stderr.includes('Cannot find module'),'baseline normal admission fails missing module');
  const install=path.join(scratch,'patched');check(ship(repo,install).status===0,'patched stages');
