@@ -25,4 +25,6 @@ assert(events[#events].type=='commentary','commentary resolves')
 local n=#events
 send({type='response.output_item.done',output_index=2,item={type='message',id='commentary',phase='commentary',content={{type='output_text',text='checking'}}}})
 assert(#events==n,'duplicate done ignored')
-print('final-answer wire causal checks pass (8 checks; synthetic; no inference)')
+send({type='response.output_item.done',output_index=3,item={type='message',id='done-only',phase='final_answer',content={{type='output_text',text='late'}}}})
+assert(events[#events-1].type=='final_answer_begin' and events[#events-1].source=='responses.output_item.done' and events[#events-1].timing=='late','done-only cannot claim early source')
+print('final-answer wire causal checks pass (9 checks; synthetic; no inference)')

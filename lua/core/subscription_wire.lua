@@ -546,7 +546,7 @@ function M.session(opts)
     end
   end
 
-  local function create_slot(output_index, item)
+  local function create_slot(output_index, item, late)
     if type(item) ~= 'table' then return nil end
     if state.completed_items[output_index] then return nil end
     if state.slots[output_index] then return state.slots[output_index] end
@@ -572,7 +572,9 @@ function M.session(opts)
       state.final_started[output_index] = true
       emit({type = 'final_answer_begin', run_id = opts.run_id, response_id = state.request_id,
         message_id = slot.item_id or (stream_id .. ':' .. slot.index),
-        pending_id = stream_id .. ':' .. slot.index, source = 'responses.output_item.added'})
+        pending_id = stream_id .. ':' .. slot.index,
+        source = late and 'responses.output_item.done' or 'responses.output_item.added',
+        timing = late and 'late' or nil})
     end
     return slot
   end
@@ -725,7 +727,7 @@ function M.session(opts)
       if type(item) ~= 'table' then return end
       apply_phase(item)
       if state.completed_items[event.output_index] then return end
-      local slot = state.slots[event.output_index] or create_slot(event.output_index, item)
+      local slot = state.slots[event.output_index] or create_slot(event.output_index, item, true)
       if slot and item.phase == 'final_answer' and not state.final_started[event.output_index] then
         state.final_started[event.output_index] = true
         emit({type='final_answer_begin', run_id=opts.run_id, response_id=state.request_id,

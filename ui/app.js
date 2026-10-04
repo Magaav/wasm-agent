@@ -374,16 +374,29 @@ let follow = true;
 let pinning = false;
 // Anchors belong to containers, including independently painted child chats.
 const answerAnchors = new WeakMap();
-function releaseAnswerAnchor(container = transcript) {
+const answerSeen = new WeakMap();
+const answerReleased = new WeakSet();
+const answerScrollPositions = new WeakMap();
+function releaseAnswerAnchor(container = transcript, manual = true) {
   answerAnchors.delete(container);
+  if (manual) answerReleased.add(container);
 }
 function anchorAnswer(node) {
   if (replayingMessages) return;
   const container = transcript;
   answerAnchors.set(container, node);
-  for (const gesture of ['wheel', 'touchstart', 'keydown']) {
-    container.addEventListener(gesture, () => releaseAnswerAnchor(container), {passive:true, once:true});
+  for (const gesture of ['wheel', 'touchstart']) {
+    container.addEventListener(gesture, () => { releaseAnswerAnchor(container); if(container===messages)setFollow(false); }, {passive:true, once:true});
   }
+  container.addEventListener('keydown', event => {
+    if (['PageUp','PageDown','ArrowUp','ArrowDown','Home','End',' '].includes(event.key) &&
+      !event.target.closest('input,textarea,[contenteditable]')) releaseAnswerAnchor(container);
+  });
+  container.addEventListener('scroll', () => {
+    const expected=answerScrollPositions.get(container);
+    if (expected != null && Math.abs(container.scrollTop-expected)<1) return;
+    releaseAnswerAnchor(container);
+  }, {passive:true});
   pin();
 }
 
@@ -392,6 +405,7 @@ function pin(force = false) {
   if (answer?.isConnected && !force) {
     pinning = true;
     transcript.scrollTop += answer.getBoundingClientRect().top - transcript.getBoundingClientRect().top;
+    answerScrollPositions.set(transcript, transcript.scrollTop);
     requestAnimationFrame(() => { pinning = false; });
     return;
   }
@@ -452,6 +466,7 @@ function keepStatusLast() {
 function currentBubble() {
   if (!runBubble) {
     transcript.querySelector('#empty')?.remove();
+    answerReleased.delete(transcript);
     runBubble = document.createElement("wa-message");
     runBubble.setAttribute("role", "assistant");
     transcript.append(runBubble);   // connecting is what builds .body
@@ -1287,8 +1302,13 @@ function handleEvent(event) {
   }
   if (event.type === "final_answer_begin") {
     const bubble = currentBubble();
-    const key = String(event.message_id || event.pending_id || '');
-    if (!key || bubble.dataset.finalMessage === key) return;
+    const key = [event.run_id || '', event.response_id || '', event.message_id || event.pending_id || ''].join('|');
+    if (!event.message_id && !event.pending_id) return;
+    let seen=answerSeen.get(bubble);
+    if (!seen) {seen=new Set();answerSeen.set(bubble,seen);}
+    if (seen.has(key)) return;
+    seen.add(key);
+    if (streamBody) flushDecision();
     bubble.dataset.finalMessage = key;
     if (!streamBody) {
       streamBody = document.createElement('div');
@@ -1296,9 +1316,9 @@ function handleEvent(event) {
       bubble.body.append(streamBody);
     }
     collapseRun(true);
-    anchorAnswer(streamBody);
+    if (!answerReleased.has(transcript)) anchorAnswer(streamBody);
   } else if (event.type === "round") {
-    releaseAnswerAnchor();
+    releaseAnswerAnchor(transcript, false);
     // A new step begins: close the previous one (its text and its tool topic).
     if (!runStartedAt) runStartedAt = Date.now();
     markStreamedCommentaryIncomplete();
@@ -1328,7 +1348,7 @@ function handleEvent(event) {
   } else if (event.type === "decision") {
     addDecision(event);
   } else if (event.type === "tool") {
-    releaseAnswerAnchor();
+    releaseAnswerAnchor(transcript, false);
     if (streamBody?.classList.contains('final-answer')) {
       streamBody.classList.remove('final-answer');
       flushDecision();
@@ -1407,7 +1427,7 @@ function handleEvent(event) {
     // created after the run is collapsed, and collapseRun() also refuses to swallow a WA-DIFF,
     // so the two cannot get back into that order.
     collapseRun();
-    if (newlyConfirmed) anchorAnswer(streamBody);
+    if (newlyConfirmed && !answerReleased.has(transcript)) anchorAnswer(streamBody);
     sealReasoning();
     const diff = renderDiff(currentBubble(), event.changes);
     if (diff) {
@@ -1430,6 +1450,7 @@ function handleEvent(event) {
     updateChip();
     if (balloon.open) { renderUsage(); renderControls(); }
   } else if (event.type === "error") {
+    releaseAnswerAnchor();
     markPendingTextIncomplete();
     markStreamedCommentaryIncomplete();
     add("assistant", "error: " + (event.error || "unknown"));
@@ -1437,6 +1458,7 @@ function handleEvent(event) {
     finishTrace();
     runBubble = null;
   } else if (event.type === "done") {
+    releaseAnswerAnchor();
     markPendingTextIncomplete();
     markStreamedCommentaryIncomplete();
     finishRunStatus();
