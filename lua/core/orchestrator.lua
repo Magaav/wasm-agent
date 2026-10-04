@@ -363,8 +363,9 @@ function M.control(args, ctx, api)
           observations()
           -- Bind to the exact admitted receipt; a concurrent message continuation
           -- changes that receipt and prevents this predecessor observation being reused.
-          exec('INSERT INTO orchestration_observations(dispatch_id,source_receipt,observation) SELECT id,receipt,? FROM orchestration_tasks WHERE id=? AND owner=? AND destination=? AND receipt=? ON CONFLICT(dispatch_id) DO UPDATE SET source_receipt=excluded.source_receipt,observation=excluded.observation',
+          local saved=exec('INSERT INTO orchestration_observations(dispatch_id,source_receipt,observation) SELECT id,receipt,? FROM orchestration_tasks WHERE id=? AND owner=? AND destination=? AND receipt=? ON CONFLICT(dispatch_id) DO UPDATE SET source_receipt=excluded.source_receipt,observation=excluded.observation WHERE orchestration_observations.source_receipt<>excluded.source_receipt OR (COALESCE(json_extract(orchestration_observations.observation,\'$.settled\'),0)=0 AND COALESCE(json_extract(orchestration_observations.observation,\'$.state\'),\'\')<>\'unknown\') OR (json_extract(orchestration_observations.observation,\'$.state\')=json_extract(excluded.observation,\'$.state\') AND json_extract(orchestration_observations.observation,\'$.settled\')=json_extract(excluded.observation,\'$.settled\'))',
             {json.encode(result),id,ctx.user_id,row.destination,row.receipt})
+          if saved.changes~=1 then return true,{error='remote_observation_superseded'} end
         end
         row.receipt=json.encode(result)
         return true,view(row)

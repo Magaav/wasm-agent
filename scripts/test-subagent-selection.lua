@@ -153,6 +153,37 @@ for _,detail in ipairs({json.encode({error=string.rep('e',400)}),json.encode({re
  local _,bounded=fleet.control({action='lookup_session',conversation_id='remote-session'},ctx,{control=function() return {found=false} end})
  check(#bounded.task.error==256,'decoded/fallback named errors bounded')
 end
+local real_exec=host.sql_exec
+for _,state in ipairs({'completed','failed','cancelled','unknown'}) do
+ real_exec('DELETE FROM orchestration_observations WHERE dispatch_id=?',json.encode({receipt.subagent_id}))
+ mock_nodes.remote_call=function() return {subagent_id='remote-child',session_id='remote-session',state='running',settled=false} end
+ local injected=false
+ host.sql_exec=function(statement,values)
+  if not injected and statement:find('INSERT INTO orchestration_observations',1,true) then
+   injected=true
+   real_exec('INSERT INTO orchestration_observations(dispatch_id,source_receipt,observation) VALUES(?,?,?)',json.encode({receipt.subagent_id,remote_original,json.encode({subagent_id='remote-child',session_id='remote-session',state=state,settled=state~='unknown'})}))
+  end
+  return real_exec(statement,values)
+ end
+ local _,stale=fleet.control({action='status',id=receipt.subagent_id},ctx,discovery_api)
+ host.sql_exec=real_exec
+ check(injected and stale.error=='remote_observation_superseded','atomic stale writer refuses: '..state)
+ local _,current=fleet.control({action='lookup_session',conversation_id='remote-session'},ctx,{control=function() return {found=false} end})
+ check(current.task.state==state,'competing terminal remains recorded: '..state)
+end
+real_exec('DELETE FROM orchestration_observations WHERE dispatch_id=?',json.encode({receipt.subagent_id}))
+local injected=false
+host.sql_exec=function(statement,values)
+ if not injected and statement:find('INSERT INTO orchestration_observations',1,true) then
+  injected=true
+  real_exec('UPDATE orchestration_tasks SET receipt=? WHERE id=?',json.encode({json.encode({subagent_id='remote-successor',session_id='remote-session',state='running',settled=false}),receipt.subagent_id}))
+ end
+ return real_exec(statement,values)
+end
+local _,superseded=fleet.control({action='status',id=receipt.subagent_id},ctx,discovery_api)
+host.sql_exec=real_exec
+check(injected and superseded.error=='remote_observation_superseded','continuation source changes atomically reject predecessor')
+check(#json.decode(host.sql_query('SELECT * FROM orchestration_observations WHERE dispatch_id=?',json.encode({receipt.subagent_id})))==0,'no predecessor observation persisted after continuation')
 mock_nodes.remote_call=saved_remote
 dofile=original_dofile
 print('subagent selection ok ('..checks..' checks, 0 skipped)')
