@@ -3657,6 +3657,11 @@ try {
     Write-Host "  FAIL $viewResult" -ForegroundColor Red
     exit 1
   }
+  Push-Location $root
+  try {
+    & node scripts/test-final-answer-suite.mjs $WaExe (Join-Path $tmp 'final-answer')
+    if ($LASTEXITCODE -ne 0) { throw 'final-answer focused suite failed' }
+  } finally { Pop-Location }
   Write-Host "  ok   UI structure, mid-run reload, startup recovery, the inspect window, and a view window [stages: reload,startup-recovery,inspect-window,view-window]" -ForegroundColor Green
 } finally {
   if ($server) { Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue }

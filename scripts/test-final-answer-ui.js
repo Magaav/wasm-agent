@@ -110,6 +110,13 @@
   check(messages.scrollTop===mainPosition && childB.transcript.scrollTop===otherPosition,'child growth does not move main or sibling');
   childA.transcript.dispatchEvent(new WheelEvent('wheel',{deltaY:1}));
   check(!answerAnchors.has(childA.transcript),'child wheel releases only child');
+  childA.transcript.scrollTop=0;
+  const childPosition=childA.transcript.scrollTop;
+  handleEvent({type:'delta',text:'more\n\n'.repeat(50)});
+  handleEvent({type:'reply',text:streamText});
+  await new Promise(resolve=>setTimeout(resolve,50));
+  check(childA.transcript.scrollTop===childPosition,'reviewer regression child stays at zero after delta/reply/frame');
+  check(messages.scrollTop===mainPosition && childB.transcript.scrollTop===otherPosition,'child release leaves main/sibling position unchanged');
   transcript=savedTranscript;runBubble=null;streamBody=null;streamText='';
   // Race a manual gesture against the pending real pin frame; test after real browser timer turn.
   handleEvent({type:'final_answer_begin',message_id:'race'});
