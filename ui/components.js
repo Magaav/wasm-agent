@@ -223,6 +223,29 @@ class WaMessage extends HTMLElement {
 }
 customElements.define("wa-message", WaMessage);
 
+// A measured phase of a turn, alongside its existing tool and commentary topics.
+class WaStep extends HTMLElement {
+  connectedCallback() {
+    if (this._label) return;
+    this.classList.add("run-step");
+    this._glyph = document.createElement("span");
+    this._label = document.createElement("span");
+    this._label.className = "run-step-label";
+    this._age = document.createElement("span");
+    this._age.className = "run-step-age";
+    this.append(this._glyph, this._label, this._age);
+  }
+  setStep(label, state, ms) {
+    this.connectedCallback();
+    this.dataset.state = state;
+    this._label.textContent = label;
+    this._glyph.className = state === "running" ? "spinner" : "run-step-glyph";
+    this._glyph.textContent = state === "running" ? "" : state === "failed" ? "!" : state === "unfinished" ? "?" : "✓";
+    this._age.textContent = ms == null ? "duration unknown" : Math.max(0, Math.floor(ms / 1000)) + "s";
+  }
+}
+customElements.define("wa-step", WaStep);
+
 // <wa-trace> — one step's tool activity, collapsed into a topic.
 //
 // The transcript should read as steps, not as a wall of tool payloads: the
@@ -363,6 +386,7 @@ class WaTrace extends HTMLElement {
     decision.outcome.textContent = complete ? "selected" : "forming call";
     decision.line.classList.toggle("decision-complete", complete === true);
     this._decisions.set(id, decision);
+    decision.line.dataset.callId = id;
     this._lines.set(name || "tool", decision.line);
     this._refresh();
   }
@@ -381,6 +405,7 @@ class WaTrace extends HTMLElement {
       decision.output.textContent = "";
       decision.line.classList.remove("decision", "decision-complete");
       decision.line.classList.add("pending");
+      decision.line.dataset.callId = String(callId);
       decision.outcome.textContent = "";
       this._lines.set(name, decision.line);
       this._pending.push({ line: decision.line, output: decision.output, progress: decision.progress,
@@ -394,6 +419,7 @@ class WaTrace extends HTMLElement {
     this._count += 1;
     const line = document.createElement("li");
     line.className = "tool-line pending";
+    if (callId) line.dataset.callId = String(callId);
     const head = document.createElement("div");
     head.className = "tool-head";
     const label = document.createElement("span");
@@ -554,7 +580,10 @@ class WaRun extends HTMLElement {
 
   toggle() { this.open = !this.open; }
 
+  get summary() { return this._summary; }
+
   setSummary(steps, calls, ms) {
+    this._summary = {steps,calls,ms};
     this._build();
     const seconds = ms == null ? null : (ms >= 1000 ? (ms / 1000).toFixed(1) + "s" : ms + "ms");
     const parts = [];

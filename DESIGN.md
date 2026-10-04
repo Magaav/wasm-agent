@@ -168,6 +168,7 @@ same shape, and the same rule: the row says which device the choice belongs to.
 | `<wa-balloon>` | Anchored floating panel. | `open` (attr/bool), `anchor` (id) | `open`, `close` |
 | `<wa-menu>` | A list of choices at a point or above its anchor. | `.items` (`{label, action, danger?, separator?, element?}`), `.selected`, `.openAt(x, y, {above, inset})`, `.move(±1)`, `.activate()` | `open`, `close` |
 | `<wa-message>` | A chat message bubble. | `role` (`user`/`assistant`), `.body` | — |
+| `<wa-step>` | A turn's observed phase inside its message bubble, with running/finished state and measured elapsed time. | `.setStep(label, state, ms)` | — |
 | `<wa-tool>` | A tool-activity chip. | `name`, `.detail`, status class | — |
 | `<wa-trace>` | A step's tool trace inside a reply bubble. `.body`, and `.setAge(seconds, bound)` on the in-flight line so `bash` reads `42s of 300s`, not just `bash`. | — |
 | `<wa-run>` | The collapsible topic a run's tool lines live in. | — | — |

@@ -255,7 +255,10 @@ $harness = @'
     window.__typeCommand("saved draft");
     window.__attachMany(1);
     await window.__restoreSession();
-    var stopped = Array.from(restored.querySelectorAll("wa-message.assistant")).slice(-1)[0];
+    // Automatic continuation now has its own immediate progress balloon. Inspect
+    // the last recorded tool turn, rather than mistaking that new balloon for it.
+    var stopped = Array.from(restored.querySelectorAll("wa-message.assistant")).reverse()
+      .find(function (bubble) { return !!bubble.querySelector('wa-trace'); });
     var stoppedFooter = stopped?.body.querySelector(":scope > .chat-content-run-status.finished");
     check(!!stoppedFooter && /unfinished/.test(stoppedFooter.textContent) &&
       stoppedFooter.textContent.includes("0:03") && !/completed/.test(stoppedFooter.textContent),
@@ -556,14 +559,15 @@ $harness = @'
     check(innerTraces[t2].hasAttribute('open'), 'tools inside a finished run should be visible in one click');
   }
   var inner = runBody ? Array.prototype.map.call(runBody.children, function (c) {
-    return c.tagName === "WA-TRACE" ? "trace" : "text";
-  }).join(",") : "";
+    return c.tagName === "WA-TRACE" ? "trace" : (c.tagName === "WA-STEP" ? "phase" : "text");
+  }).filter(function (item) { return item !== "phase"; }).join(",") : "";
   check(inner === "text,trace,text,trace", "expected text,trace,text,trace inside the run, saw " + inner);
 
   var runMeta = run ? run.querySelector(".trace-meta") : null;
   var runText = runMeta ? runMeta.textContent : "";
   check(runText.indexOf("2 tool calls") >= 0, "the run topic should total its tool calls, saw: " + runText);
-  check(runText.indexOf("2 steps") >= 0, "the run topic should count its steps, saw: " + runText);
+  check(runText.indexOf("7 steps") >= 0 && runBody.querySelectorAll('wa-step').length === 5,
+    "the run topic should count its text and observed phase steps, saw: " + runText);
 
   // Tool topics belong to the reply, not to the transcript.
   check(messages.querySelectorAll(":scope > wa-trace").length === 0,
@@ -2875,8 +2879,8 @@ $harness = @'
     var placed = live[live.length - 1];
     check(!!placed, "the placement check needs a live status line");
     var tail = messages.children[messages.children.length - 1];
-    check(tail === placed,
-      "mid-run the status line must be the last thing in the transcript, saw: "
+    check(tail?.body?.lastElementChild === placed,
+      "mid-run the status line must be the balloon's last child, saw: "
       + (tail ? tail.tagName + "." + tail.className : "nothing"));
     // "Sticked" is half the behaviour and it is invisible to a structure check: the line is pinned
     // to the bottom of the transcript while the run is in flight, and only becomes the bubble's
@@ -2885,14 +2889,13 @@ $harness = @'
     var livePosition = getComputedStyle(placed).position;
     check(livePosition === "sticky",
       "mid-run the status line must be sticky at the bottom of the transcript, saw position: " + livePosition);
-    check(placed.parentNode === messages,
-      "mid-run the status line must live in the transcript, not inside the bubble, saw parent: "
+    check(placed.closest('wa-message.assistant') === tail,
+      "mid-run the status line must live inside the assistant balloon, saw parent: "
       + (placed.parentNode ? placed.parentNode.tagName : "none"));
     var bubbles = messages.querySelectorAll("wa-message.assistant");
     var bubble = bubbles[bubbles.length - 1];
-    check(Array.prototype.indexOf.call(messages.children, bubble)
-      < Array.prototype.indexOf.call(messages.children, placed),
-      "the status line must sit below the run's bubble, not above it");
+    check(placed.parentNode === bubble.body,
+      "the status line must share the balloon with the run's steps");
     window.handleEvent({ type: "reply", text: "the answer." });
     window.handleEvent({ type: "done" });
     var body = bubble ? bubble.body : null;

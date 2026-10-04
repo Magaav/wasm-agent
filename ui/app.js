@@ -468,6 +468,91 @@ jump.addEventListener("click", () => { setFollow(true); pin(true); });
 // whole path collapses into a single run topic at the top of the bubble.
 let runBubble = null;
 let runStartedAt = 0;
+let runStepState = null;
+
+function turnIsActive() { return busy || observedRun?.session === chatSession; }
+function runStepScope() { return activeNode + ":" + chatSession + ":" + conversationEpoch; }
+function runStepId() { return busy ? runKey(activeRunId) : runKey(observedRun); }
+function finishRunStep(state = "completed") {
+  const step = runStepState?.active;
+  if (!step) return;
+  step.state = state;
+  step.ms = Date.now() - step.started;
+  step.node.setStep(step.label, state, step.ms);
+  runStepState.active = null;
+}
+function showRunStep(key, label) {
+  if (replayingMessages) return;
+  const scope = runStepScope(), id = runStepId();
+  if (!runStepState || runStepState.scope !== scope ||
+      (id && runStepState.id && id !== runStepState.id)) {
+    runStepState = { scope, id, userSeq: null, steps: [], active: null };
+  }
+  if (id) runStepState.id = id;
+  if (!runStepState.userSeq) {
+    const users = transcript.querySelectorAll('wa-message[role="user"]');
+    runStepState.userSeq = Number(users[users.length - 1]?.dataset.messageSeq) || null;
+  }
+  if (runStepState.active?.key === key) return;
+  finishRunStep();
+  const node = document.createElement("wa-step");
+  const step = { node, key, label, started: Date.now(), state: "running", ms: 0, beforeCall: null, beforeContent: null };
+  runStepState.steps.push(step);
+  runStepState.active = step;
+  currentBubble().body.append(node);
+  node.setStep(label, "running", 0);
+  if (!runStartedAt) runStartedAt = Date.now();
+  keepStatusLast();
+  pin();
+}
+function anchorRunSteps(callId) {
+  if (replayingMessages || !callId) return;
+  for (const step of runStepState?.steps || []) if (!step.beforeCall && !step.beforeContent) step.beforeCall = String(callId);
+}
+function anchorRunStepContent(node) {
+  if (replayingMessages || !node) return;
+  const position = Array.from(currentBubble().querySelectorAll(node.tagName)).indexOf(node);
+  for (const step of runStepState?.steps || []) if (!step.beforeCall && !step.beforeContent) {
+    step.beforeContent = {node,position};
+  }
+}
+function restoreRunSteps(state, bubble) {
+  if (!state || !bubble) return;
+  for (const step of state.steps) {
+    const line = Array.from(bubble.querySelectorAll('.tool-line[data-call-id]'))
+      .find(node => node.dataset.callId === step.beforeCall);
+    const trace = line?.closest("wa-trace");
+    const anchor = step.beforeContent;
+    const candidates = anchor ? Array.from(bubble.querySelectorAll(anchor.node.tagName)) : [];
+    const messageId = anchor?.node.dataset.messageId;
+    const content = !anchor ? null : messageId ? candidates.find(node => node.dataset.messageId === messageId)
+      : candidates[anchor?.position]?.textContent === anchor?.node.textContent ? candidates[anchor.position] : null;
+    if (content) content.parentNode.insertBefore(step.node, content);
+    else if (trace) trace.parentNode.insertBefore(step.node, trace);
+    else {
+      const topic = bubble.body.querySelector(":scope > wa-run");
+      if (topic) topic.body.append(step.node);
+      else bubble.body.insertBefore(step.node, bubble.body.querySelector(":scope > .seg, :scope > .chat-content-run-status"));
+    }
+  }
+  const topic = bubble.body.querySelector(":scope > wa-run");
+  if (topic) {
+    const children = Array.from(topic.body.children);
+    const steps = children.filter(node => node.tagName === "WA-STEP" || node.classList.contains("seg")).length;
+    const calls = children.filter(node => node.tagName === "WA-TRACE").reduce((sum,node) => sum + node.count, 0);
+    topic.setSummary(steps, calls, topic.summary?.ms ?? null);
+  }
+}
+function ensureObservedRunStep(current) {
+  if (!current || !runBubble) return;
+  if (runStepState?.settled && runStepState.scope === runStepScope() && runStepState.id === runKey(current)) return;
+  if (!runStartedAt && Number.isFinite(Number(current.ms))) runStartedAt = Date.now() - Number(current.ms);
+  if (!runStepState?.active || runStepState.scope !== runStepScope() ||
+      (runStepId() && runStepState.id && runStepId() !== runStepState.id)) {
+    showRunStep("working", "Working — waiting for the next step");
+  }
+  setStatus(runStepState.active.label);
+}
 
 // The status line belongs to the run in flight and must stay the *last* thing in the
 // transcript while that run is happening. Created before the run's bubble exists, it was
@@ -476,7 +561,7 @@ let runStartedAt = 0;
 // Re-appending after anything new lands keeps it below; appending an existing child moves
 // it, so this is the whole of it.
 function keepStatusLast() {
-  if (statusLine) transcript.append(statusLine);
+  if (statusLine) (runBubble?.body || transcript).append(statusLine);
 }
 
 function currentBubble() {
@@ -533,11 +618,16 @@ function setStatus(text) {
     statusElapsed = document.createElement("span");
     statusElapsed.className = "chat-content-run-elapsed";
     statusLine.append(statusSpinner, statusLabel, statusElapsed);
-    if (busy && !replayingMessages) startRunStatusTicker();
+    if (turnIsActive() && !replayingMessages) startRunStatusTicker();
   }
   statusLabel.textContent = text;
-  if (statusLine.parentNode !== transcript) transcript.append(statusLine);
-  if (busy) updateRunElapsed();
+  if (turnIsActive()) currentBubble();
+  const container = runBubble?.body || transcript;
+  if (statusLine.parentNode !== container) container.append(statusLine);
+  if (turnIsActive()) {
+    if (!replayingMessages) startRunStatusTicker();
+    updateRunElapsed();
+  }
   else statusElapsed.textContent = "";
   pin();
 }
@@ -551,6 +641,8 @@ function runDuration(ms) {
 }
 
 function updateRunElapsed() {
+  const step = runStepState?.active;
+  if (step) step.node.setStep(step.label, "running", Date.now() - step.started);
   if (!statusElapsed) return;
   if (replayingMessages && (!runStartedAt || !replayMessageEndedAt)) {
     statusElapsed.textContent = "duration unknown";
@@ -569,6 +661,10 @@ function startRunStatusTicker() {
 }
 
 function finishRunStatus(label = "completed") {
+  if (!replayingMessages) {
+    finishRunStep(label === "failed" ? "failed" : label === "unfinished" ? "unfinished" : "completed");
+    if (runStepState) runStepState.settled = true;
+  }
   if (!statusLine) return;
   // The footer goes *inside the bubble's body*, after the answer, not on the custom element:
   // the element's children are its body and nothing else, so appending to it left the line
@@ -614,6 +710,7 @@ function appendReasoning(text, complete = false) {
     reasoningBlock = document.createElement("wa-reasoning");
     reasoningBlock.open = !replayingMessages;
     bubble.body.append(reasoningBlock);
+    anchorRunStepContent(reasoningBlock);
     reasoningText = "";
   }
   reasoningText = complete ? text : reasoningText + text;
@@ -632,6 +729,7 @@ function appendCommentary(text, messageId) {
     renderedMessageIds.add(String(messageId));
   }
   currentBubble().body.append(block);
+  anchorRunStepContent(block);
   pin();
 }
 
@@ -643,6 +741,7 @@ function appendStreamedCommentary(text) {
     streamedCommentaryBlock.classList.add("phase-pending");
     streamedCommentaryBlock.open = !replayingMessages;
     bubble.body.append(streamedCommentaryBlock);
+    anchorRunStepContent(streamedCommentaryBlock);
     streamedCommentaryText = "";
   }
   streamedCommentaryText += text;
@@ -1086,6 +1185,9 @@ function currentTrace() {
 function addTool(name, args, options) {
   const boundMs = options && options.timeoutMs;
   const callId = options && options.callId != null ? String(options.callId) : "";
+  showRunStep("tools", "Executing tools");
+  if (!replayingMessages && trace && runStepState?.active) trace.parentNode.insertBefore(runStepState.active.node, trace);
+  anchorRunSteps(callId);
   if (callId && trace?.hasPendingCall(callId)) {
     if (!replayingMessages) startToolTicker();
     return;
@@ -1097,6 +1199,7 @@ function addTool(name, args, options) {
 }
 
 function addDecision(event) {
+  showRunStep("decision", "Selecting tools");
   currentTrace().addDecision(event.call_id, event.name, event.arguments_text || "",
     event.complete === true, event.previous_call_id);
   pin();
@@ -1234,7 +1337,7 @@ function collapseRun(finalStart = false) {
   // reader then opens topics to reach topics.
   const existing = Array.prototype.find.call(body.children, (c) => c.tagName === "WA-RUN");
   const moves = Array.prototype.filter.call(body.children,
-    (c) => c !== answer && c !== existing && c.tagName !== "WA-DIFF");
+    (c) => c !== answer && c !== existing && c.tagName !== "WA-DIFF" && c !== statusLine);
   const traces = moves.filter((c) => c.tagName === "WA-TRACE");
   // A run topic is only created once something actually ran - a run that never called a tool keeps
   // its plain answer. But once a topic exists, a later reply must still fold the previous answer into
@@ -1263,7 +1366,7 @@ function collapseRun(finalStart = false) {
   let steps = 0;
   for (const child of run.body.children) {
     if (child.tagName === "WA-TRACE") calls += child.count || 0;
-    else if (child.classList && child.classList.contains("seg")) steps += 1;
+    else if (child.tagName === "WA-STEP" || child.classList?.contains("seg")) steps += 1;
   }
   if (finalStart) run.open = false;
   const endedAt = replayingMessages ? replayMessageEndedAt : Date.now();
@@ -1339,6 +1442,8 @@ function handleEvent(event) {
     if (!runStartedAt) runStartedAt = Date.now();
     markStreamedCommentaryIncomplete();
     flushDecision();
+  } else if (event.type === "checkpoint") {
+    if (runStepState && !runStepState.userSeq && !trace) runStepState.userSeq = Number(event.seq) || null;
   } else if (event.type === "node") {
     // Another window renamed this node, or this one did: either way the name is the node's,
     // so take it from the event and let the list catch up.
@@ -1346,15 +1451,20 @@ function handleEvent(event) {
     refreshNodes();
   } else if (event.type === "status") {
     const note = event.text || "working";
+    showRunStep(note === "model" ? "model" : note === "thinking" ? "preparing" : "status:" + note,
+      note === "model" ? "Waiting for model response" : note === "thinking" ? "Preparing turn" : note);
     setStatus(note === "model" ? "thinking…" : "wasm-agent is " + note + "…");
   } else if (event.type === "commentary") {
+    showRunStep("commentary", "Receiving progress update");
     removePendingText(event.pending_id);
     appendCommentary(event.text || "", event.message_id);
   } else if (event.type === "commentary_delta") {
+    showRunStep("commentary", "Receiving progress update");
     appendStreamedCommentary(event.text || "");
   } else if (event.type === "commentary_end") {
     finishStreamedCommentary(event.message_id);
   } else if (event.type === "reasoning") {
+    showRunStep("reasoning", "Model is reasoning");
     // A reasoning model can think for a long time before it says anything, and a
     // silent panel is indistinguishable from a hung one. The text becomes a thinking
     // block; the count still drives the status line, the live "not hung" signal.
@@ -1378,6 +1488,7 @@ function handleEvent(event) {
   } else if (event.type === "tool_result") {
     settleTool(event.result, event.name, event.failed);
   } else if (event.type === "pending_delta") {
+    showRunStep("output", "Receiving model output");
     const key = String(event.pending_id || "");
     if (!key) return;
     if (statusLabel) statusLabel.textContent = "responding…";
@@ -1386,6 +1497,7 @@ function handleEvent(event) {
       const node = document.createElement("div");
       node.className = "seg phase-pending";
       currentBubble().body.append(node);
+      anchorRunStepContent(node);
       pending = { node, text: "" };
       phasePendingText.set(key, pending);
     }
@@ -1393,6 +1505,7 @@ function handleEvent(event) {
     pending.node.textContent = pending.text;
     pin();
   } else if (event.type === "delta") {
+    showRunStep("answer", "Writing response");
     removePendingText(event.pending_id);
     if (statusLabel) statusLabel.textContent = "responding…";
     // A new segment per step, inside the same bubble.
@@ -1400,6 +1513,7 @@ function handleEvent(event) {
       streamBody = document.createElement("div");
       streamBody.className = "seg";
       currentBubble().body.append(streamBody);
+      anchorRunStepContent(streamBody);
     }
     streamText += event.text || "";
     streamBody.rawText=streamText;
@@ -1409,6 +1523,7 @@ function handleEvent(event) {
     } else streamBody.textContent = stripThinking(streamText);
     pin();
   } else if (event.type === "reply") {
+    if (!replayingMessages) finishRunStep();
     discardPendingText();
     markStreamedCommentaryIncomplete();
     if (statusLabel) statusLabel.textContent = "finishing…";
@@ -1424,6 +1539,7 @@ function handleEvent(event) {
     const finalText = stripThinking(event.text || streamText);
     const newlyConfirmed = !streamBody?.classList.contains('final-answer');
     if (streamBody) {
+      if (event.message_id) streamBody.dataset.messageId = event.message_id;
       streamBody.innerHTML = renderMarkdown(finalText);
       streamBody.rawText=event.text || streamText;
       streamBody.style.whiteSpace = "normal";
@@ -1432,7 +1548,9 @@ function handleEvent(event) {
       segment.className = "seg";
       segment.innerHTML = renderMarkdown(finalText);
       segment.rawText=event.text || streamText;
+      if (event.message_id) segment.dataset.messageId = event.message_id;
       currentBubble().body.append(segment);
+      anchorRunStepContent(segment);
       streamBody = segment;
     }
     finishTrace();
@@ -1480,6 +1598,7 @@ function handleEvent(event) {
     finishRunStatus();
     flushDecision(true);
   }
+  keepStatusLast();
 }
 
 function restoreDraft() {
@@ -1512,6 +1631,7 @@ function finishReplayedRun(isLast = false, options = {}) {
   // a final assistant answer (content and no tool calls) supports "completed" for them.
   if (!runBubble || (isLast && options.active)) { clearStatus(); return; }
   const finalAnswer = replayRunLastMessage?.role === "assistant" &&
+    replayRunLastMessage.phase !== "commentary" &&
     !!replayRunLastMessage.content && !(replayRunLastMessage.tool_calls || []).length;
   let label = finalAnswer ? "completed" : "unfinished";
   if (isLast && options.state === "failed") label = "failed";
@@ -1700,6 +1820,26 @@ async function refreshNotifySupport() {
 }
 
 function repaintMessages(rows, options = {}) {
+  const savedSteps = runStepState?.scope === runStepScope() ? runStepState : null;
+  const changedRun = savedSteps?.id && runStepId() && savedSteps.id !== runStepId();
+  if (changedRun && savedSteps.active) {
+    const first = rows.findIndex(row => row.role === "user" && Number(row.seq) === savedSteps.userSeq);
+    let last = null;
+    if (first >= 0) for (const row of rows.slice(first + 1)) {
+      if (row.role === "user") break;
+      last = row;
+    }
+    const step = savedSteps.active;
+    step.state = last?.ok === 0 ? "failed" : last?.role === "assistant" && last.phase !== "commentary" && last.content &&
+      !(last.tool_calls || []).length ? "completed" : "unfinished";
+    const at = Number(last?.created_at) * 1000;
+    step.ms = at >= step.started ? at - step.started : null;
+    step.node.setStep(step.label, step.state, step.ms);
+    savedSteps.active = null;
+    savedSteps.settled = true;
+  }
+  const replayedBubbles = new Map();
+  let replayUserSeq = null;
   // A repaint is a view of durable rows, not a resumed event stream. In particular, an
   // assistant tool call without a result must never inherit a live timer from this page.
   stopToolTicker();
@@ -1735,6 +1875,8 @@ function repaintMessages(rows, options = {}) {
         replayRunLastMessage = null;
         const userBody=add("user", message.content || "");
         userBody.closest('wa-message').dataset.ledgerKey=String(message.id || message.seq);
+        userBody.closest('wa-message').dataset.messageSeq=String(message.seq || "");
+        replayUserSeq = Number(message.seq) || null;
       } else if (message.role === "assistant") {
         replayRunLastMessage = message;
         if (Number(message.created_at) > 0) replayMessageEndedAt = Number(message.created_at) * 1000;
@@ -1746,6 +1888,7 @@ function repaintMessages(rows, options = {}) {
         // path the live stream used, so a reloaded transcript shows it too.
         if (message.reasoning) {
           handleEvent({ type: "reasoning", text: message.reasoning, chars: message.reasoning.length });
+          if (reasoningBlock && message.id) reasoningBlock.dataset.messageId = message.id;
         }
         if (message.phase === "commentary") {
           handleEvent({ type: "commentary", text: message.content, message_id: message.id });
@@ -1778,6 +1921,7 @@ function repaintMessages(rows, options = {}) {
           failed: message.ok === 0 ? true : undefined, result: { content: message.content } });
       }
       rendered += 1;
+      if (replayUserSeq && runBubble) replayedBubbles.set(replayUserSeq, runBubble);
     } catch (error) {
       failed += 1;
       if (!firstFailure) {
@@ -1817,7 +1961,23 @@ function repaintMessages(rows, options = {}) {
   // user turn starts cleanly.
   if (options.active) {
     if (!runBubble) currentBubble();
+    if (replayUserSeq) replayedBubbles.set(replayUserSeq, runBubble);
   } else runBubble = null;
+  const savedBubble = savedSteps?.userSeq && replayedBubbles.get(savedSteps.userSeq);
+  if (savedBubble) {
+    runStepState = changedRun && options.active ? null : savedSteps;
+    if (!options.active && savedSteps.active) {
+      const step = savedSteps.active;
+      step.state = options.state === "answered" ? "completed" : options.state === "failed" ? "failed" : "unfinished";
+      const at = Number(options.stateAt);
+      step.ms = at > 0 ? Math.max(0, at * 1000 - step.started) : null;
+      step.node.setStep(step.label, step.state, step.ms);
+      savedSteps.active = null;
+      savedSteps.settled = true;
+    }
+    restoreRunSteps(savedSteps, savedBubble);
+  } else runStepState = null;
+  if (options.active && observedRun?.session === chatSession) ensureObservedRunStep(observedRun);
   pin(true);
   if (failed) {
     add("assistant", `repaint: ${rendered} of ${rows.length} messages drawn, ${failed} failed — first: ${firstFailure}`);
@@ -1848,10 +2008,12 @@ function repaintMessages(rows, options = {}) {
 function paintChildTranscript(container, rows, options = {}) {
   if (!container) return null;
   const saved = { transcript, runBubble, statusLine, statusLabel, statusElapsed, statusSpinner,
+    runStepState,
     lastAssistantBody, runStatusTicker, toolTicker, streamBody, streamText, phasePendingText, trace, lastTool,
     reasoningBlock, reasoningText, streamedCommentaryBlock, streamedCommentaryText, runStartedAt, replayingMessages,
     replayMessageEndedAt, replayRunLastMessage, renderedMessageIds };
   transcript = container;
+  runStepState = null;
   // Child teardown must never remove the main status DOM, clear its timers or share its text buffer.
   statusLine=null;statusLabel=null;statusElapsed=null;statusSpinner=null;runStatusTicker=null;toolTicker=null;
   try {
@@ -1862,6 +2024,7 @@ function paintChildTranscript(container, rows, options = {}) {
     stopToolTicker();
     if(runStatusTicker)clearInterval(runStatusTicker);
     ({ transcript, runBubble, statusLine, statusLabel, statusElapsed, statusSpinner, lastAssistantBody,
+      runStepState,
       runStatusTicker, toolTicker, streamBody, streamText, phasePendingText, trace, lastTool, reasoningBlock,
       reasoningText, streamedCommentaryBlock, streamedCommentaryText, runStartedAt, replayingMessages,
       replayMessageEndedAt, replayRunLastMessage, renderedMessageIds } = saved);
@@ -2163,14 +2326,22 @@ function stopLiveness() {
 function setLiveness(info) {
   let node = document.getElementById("liveness");
   if (!info) { if (node) node.remove(); return; }
+  if (info.run_state === "queued") {
+    showRunStep("queued", "Queued — waiting for the current turn");
+    setStatus("Queued — waiting for the current turn");
+  } else if (info.run_state === "running" && runStepState?.active?.key === "queued") {
+    showRunStep("working", "Starting turn");
+    setStatus("Starting turn");
+  }
   if (!node) {
     node = document.createElement("div");
     node.id = "liveness";
     node.className = "liveness";
     // Inside the message list, so it lives with the run it describes and disappears with it - a
     // status bar elsewhere would keep reporting a run that has already been answered.
-    messages.append(node);
+    currentBubble().body.append(node);
   }
+  keepStatusLast();
   const seconds = (ms) => (ms / 1000).toFixed(0);
   if (info.working) {
     node.classList.remove("stuck");
@@ -2374,6 +2545,7 @@ async function send(text, options = {}) {
   setFollow(true);
   pin(true);
   runBubble = null;   // the reply gets its own bubble
+  runStepState = null;
   runStartedAt = Date.now();
   const runController = new AbortController();
   controller = runController;
@@ -2393,7 +2565,8 @@ async function send(text, options = {}) {
     chatShell.clearAttachments();
     draftNow = snapshotDraft();
   }
-  setStatus("wasm-agent is thinking…");
+  showRunStep("submitting", "Sending message");
+  setStatus("Sending message…");
   // /health is answered without waiting for a node-thread. Take the baseline before admitting this run
   // so later polls can tell its queued id from an older run in the same conversation.
   try {
@@ -4111,7 +4284,7 @@ async function syncLiveRun(current) {
       liveCheckpointSeq = payload.checkpoint_seq;
       liveEventSeq = Number(payload.checkpoint_seq) || 0;
       if (payload.overflow) setStatus("live output exceeded the replay buffer; saved transcript is still syncing");
-      else clearStatus();
+      else ensureObservedRunStep(current);
     }
     if (payload.overflow) {
       liveEventSeq = Number(payload.next_seq) || liveEventSeq;
@@ -4162,6 +4335,7 @@ async function watchTurn() {
           if (!viewing()) return;
         }
         await syncLiveRun(current);
+        if (viewing()) ensureObservedRunStep(current);
       }
     } else if (!busy && await syncNativeSession(target, epoch, node)) {
       // Native children have opaque attempts and never enter HTTP run admission.
