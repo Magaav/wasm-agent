@@ -4864,14 +4864,17 @@ async function attachSessionJournalOnce(thread, readHistory) {
 }
 async function nativeSessionTask(thread) {
   if(!thread)return null;
-  const response=await apiFetch('subagents',{method:'POST',headers:apiHeaders(),
+  const response=await apiFetch('subagents',{method:'POST',headers:apiHeaders({'Content-Type':'application/json'}),
     body:JSON.stringify({action:'lookup_session',conversation_id:thread})});
   const result=await response.json();
   if(!response.ok || result.error)throw Error(result.error||'native_session_discovery_unavailable');
-  if (!Object.prototype.hasOwnProperty.call(result, 'task')) throw Error('native_session_lookup_contract_invalid');
+  if (result.found === false && result.task == null) return null;
+  if (result.found !== true || !result.task || typeof result.task !== 'object') throw Error('native_session_lookup_contract_invalid');
   const task=result.task;
-  if(task && (task.session_id!==thread || task.transport!=='native')) throw Error('native_session_lookup_identity_mismatch');
-  return task || null;
+  if(task.session_id!==thread || task.transport!=='native') throw Error('native_session_lookup_identity_mismatch');
+  if (![task.subagent_id, task.task_id, task.attempt_id, task.node_id, task.event_node_id, task.event_epoch]
+    .every(value => typeof value === 'string' && value.length > 0)) throw Error('native_event_identity_unavailable');
+  return task;
 }
 // Native identity is intentionally opaque; never feed it to runKey or /run-events.
 async function attachNativeJournal(task, readHistory, viewing=()=>true) {

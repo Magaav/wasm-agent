@@ -4,16 +4,27 @@
   await window.rendererLoaded;
   const originalFetch=window.fetch;
   const lookups=[];
-  let lookupReply={task:null};
+  let lookupReply={found:false};
   window.fetch=async (url,init)=>{lookups.push({url:String(url),init});return {ok:!lookupReply.error,json:async()=>lookupReply};};
   check(await nativeSessionTask('normal-chat')===null, 'normal chat targeted null');
-  const task={transport:'native',session_id:'child',attempt_id:'latest',event_epoch:'epoch'};
-  lookupReply={task};
+  const task={transport:'native',session_id:'child',subagent_id:'dispatch-alias',task_id:'native-task',
+    attempt_id:'latest',node_id:'worker',event_node_id:'worker',event_epoch:'epoch'};
+  lookupReply={found:true,task};
   check(await nativeSessionTask('child')===task, 'latest native summary preserved');
   lookupReply={error:'forbidden'};
   let refused=false;try {await nativeSessionTask('child');}catch(e){refused=e.message==='forbidden';}
   check(refused, 'auth error visible');
-  check(lookups.length===3 && lookups.every(call=>call.init.method==='POST' && JSON.parse(call.init.body).action==='lookup_session'), 'no full-list fallback');
+  for (const malformed of [{}, {found:true}, {found:false,task}, {found:'false'},
+    {found:true,task:{...task,session_id:'other'}}, {found:true,task:{...task,event_epoch:''}}]) {
+    lookupReply=malformed;
+    let rejected=false;try {await nativeSessionTask('child');}catch {rejected=true;}
+    check(rejected, 'malformed/identity contract refused: '+JSON.stringify(malformed));
+  }
+  lookupReply={error:'native_session_unavailable'};
+  refused=false;try {await nativeSessionTask('child');}catch(e){refused=e.message==='native_session_unavailable';}
+  check(refused, 'native error visible');
+  check(lookups.length===10 && lookups.every(call=>call.init.method==='POST' &&
+    call.init.headers['Content-Type']==='application/json' && JSON.parse(call.init.body).action==='lookup_session'), 'no full-list fallback; JSON content type');
   window.fetch=originalFetch;
   document.body.classList.add('expanded');
   messages.replaceChildren(); runBubble=null; streamBody=null; streamText='';
