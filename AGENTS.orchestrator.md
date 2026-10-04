@@ -21,6 +21,11 @@ unless the user explicitly asks for direct recovery or the task is trivial.
   delivery for a manual merge step: `skills/git-orchestrator/SKILL.md` is the
   protocol (authority, lifecycle, lanes, landing steps), and `docs/CONCURRENCY.md`
   holds the lane reservations.
+- Delegate workers only through this node's native `subagent` facade, owned and
+  controlled in the main Orchestrator registry with visible transcript and status.
+  Never substitute a separate bootstrap, inference process, registry or external
+  runtime when admission fails; preserve the refusal and repair the authorized
+  native route (`docs/ORCHESTRATOR-WORKSPACE.md`, "Native worker admission").
 - Use `steer` for active child corrections; `message` is a queued follow-up.
   Steering cannot undo in-flight effects, so a queued message fences only calls with
   an effect - keep effectful calls in their own round, or a `write` batched with the

@@ -25,6 +25,41 @@ content remain intact. The child event accumulator was only used for its length;
 it is now a counter, with events forwarded to the child's live preview. Neither
 change reduces model context or establishes a measured cost/quality improvement.
 
+## Native worker admission
+
+Delegate all workers through this node's native `subagent` facade. The main
+Orchestrator registry must own and control the task and expose its transcript,
+status and controls. Authorized configured placement and node limits still apply;
+a placed child remains owned and supervised through that facade, not a separate
+worker registry. Preserve the explicitly approved profile, model and reasoning;
+admission failure never authorizes silent substitution.
+
+On an actual admission failure:
+
+1. Preserve the original refusal/receipt, transcript and any allocated worktree.
+   Report the failed step and whether admission proved nothing started or the
+   outcome is uncertain. Reconcile uncertainty through the facade before retrying;
+   do not claim a refused task launched.
+2. Diagnose within authorized, visible read-only scope when appropriate. A
+   read-only profile is not a writing bypass. Report missing capabilities or
+   dependencies and repair the authorized native route only within granted scope;
+   otherwise report the blocker and required repair rather than launching elsewhere.
+3. Never relax ownership, copy another identity or hide a registry to bypass the
+   refusal. Do not start separate wasm-agent bootstraps, candidate inference
+   processes, isolated registries, Orca, Pi CLI or another external runtime as a
+   delegated-worker workaround. Retired scratch launchers stay retired; preserve
+   archived originals, do not reuse them.
+4. After authorized repair, use the native facade and inspect its task receipt and
+   main-registry transcript/status/control evidence. Accepted or launched is not
+   completed; inspect settlement and results before reporting completion, and keep
+   independent verification distinct from a worker's claim. Registry visibility
+   does not prove what the user's window rendered; do not claim screenshot proof
+   without actually observing it.
+
+This boundary concerns worker delegation, not private deterministic mock-fixture
+subprocesses, builds or headless UI checks. Those checks are not substitute workers
+and do not prove live worker admission or user-window visibility.
+
 ## Placement
 
 `POST /subagents` action `placement` reads or saves an operator's policy:

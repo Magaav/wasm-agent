@@ -68,6 +68,19 @@ try {
                 usage:{input:0,cacheRead:0,cacheWrite:0,output:0,totalTokens:0,reasoning:0}};}
             };
           }
+          if (context.tools[0].name === 'phase_adversarial') {
+            const mode=context.messages.at(-1).content[0].text;
+            return {
+              async *[Symbol.asyncIterator]() {
+                yield {type:'text_delta',contentIndex:0,delta:'provisional',partial:{stopReason:'stop',content:[{type:'text',text:'provisional'}]}};
+                if(mode==='error' || mode==='cancel') throw Error(mode==='cancel'?'fixture cancellation':'fixture provider error');
+                yield {type:'text_end',contentIndex:0,content:'provisional',partial:{content:[{type:'text',text:'provisional',textSignature:mode==='malformed'?'broken':JSON.stringify({phase:'commentary'})}]}};
+                yield {type:'text_delta',contentIndex:1,delta:'answer',partial:{stopReason:'stop',content:[null,{type:'text',text:'answer'}]}};
+                yield {type:'text_end',contentIndex:1,content:'answer',partial:{content:[null,{type:'text',text:'answer',textSignature:JSON.stringify({phase:'final_answer'})}]}};
+              },
+              async result(){return {stopReason:'stop',content:[{type:'text',text:'answer'}],usage:{input:0,output:0,totalTokens:0}};}
+            };
+          }
           assert.equal(options.reasoningEffort,'none');
           assert.equal(options.transport,'sse');
           assert.equal(context.systemPrompt,'fixture system');
@@ -84,7 +97,7 @@ try {
           return {
             async *[Symbol.asyncIterator]() {
               yield {type:'thinking_delta',delta:'thinking'};
-              yield {type:'text_delta',contentIndex:0,delta:'Checking '};
+              yield {type:'text_delta',contentIndex:0,delta:'Checking ',partial:{stopReason:'stop',content:[]}};
               yield {type:'text_delta',contentIndex:0,delta:'the result',
                 partial:{content:[{type:'text',text:'Checking the result'}]}};
               yield {type:'text_end',contentIndex:0,content:'Checking the result',
@@ -132,7 +145,11 @@ try {
   const resolutions=success.events.filter(event=>event.type==='commentary' || event.type==='delta');
   assert.deepEqual(success.events.map(event=>event.type),[
     'reasoning','pending_delta','pending_delta','commentary',
-    'pending_delta','pending_delta','delta','result']);
+    'pending_delta','pending_delta','final_answer_begin','delta','result']);
+  const begin=success.events.find(event=>event.type==='final_answer_begin');
+  assert.equal(begin.source,'pi.text_end.signature');
+  assert.equal(begin.timing,'late');
+  assert.equal(success.events.filter(event=>event.type==='final_answer_begin').length,1);
   for (const pendingId of new Set(pending.map(event=>event.pending_id))) {
     const provisional=pending.filter(event=>event.pending_id===pendingId).map(event=>event.text).join('');
     const resolved=resolutions.filter(event=>event.pending_id===pendingId);
@@ -150,6 +167,21 @@ try {
   assert.equal(result.usage.prompt_tokens,30);
   assert.equal(result.usage.prompt_tokens_details.cached_tokens,20);
   assert.equal(result.finish_reason,'tool_calls');
+  for(const mode of ['mixed','malformed','error','cancel']) {
+    const adversarial=run({...request,tools:[{function:{name:'phase_adversarial',parameters:{type:'object'}}}],messages:[{role:'user',content:mode}]});
+    assert.equal(adversarial.events[0].type,'pending_delta','mutable stopReason never classifies early');
+    assert.equal(adversarial.events[0].text,'provisional','error retains prior provisional text');
+    if(mode==='error'||mode==='cancel') {
+      assert.equal(adversarial.status,1);
+      assert.equal(adversarial.events.at(-1).type,'error');
+      assert.equal(adversarial.events.filter(e=>e.type==='final_answer_begin').length,0);
+    } else {
+      assert.equal(adversarial.status,0);
+      assert.equal(adversarial.events.filter(e=>e.type==='final_answer_begin').length,1);
+      assert.equal(adversarial.events.find(e=>e.type==='final_answer_begin').timing,'late');
+      assert.equal(adversarial.events[1].type,mode==='malformed'?'delta':'commentary');
+    }
+  }
   const missing=run({...request,model:'missing'});
   assert.equal(missing.status,1);
   assert.match(missing.events[0].error,/absent from Pi catalog/);

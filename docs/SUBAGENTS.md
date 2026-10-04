@@ -122,10 +122,20 @@ Rules, each enforced in `lua/core/subagents.lua`:
 - **Cost fails closed.** `max_cost_usd` requires known model rates; an unpriceable
   model refuses the start (`cost_budget_requires_rates`) rather than pretending a
   dollar bound.
-- **Model/reasoning inherit by default.** An override must already equal the
-  caller's model, be listed in the profile's `approved_models`, or appear in
-  `WASM_AGENT_SUBAGENT_MODELS`; a reasoning level must be one the model supports.
-  The override applies to the child interpreter only and is never persisted.
+- **Selection is per field: explicit request, approved profile default, legacy
+  fallback.** Omitted or empty `model` and `reasoning` use the profile's values;
+  profiles without those values inherit the caller's actual model/reasoning
+  (model falls back to node settings when the caller has none). `provider` uses
+  the profile's value, else the active configured route. A requested/default
+  model must equal the caller's model, be in `approved_models`, or appear in
+  `WASM_AGENT_SUBAGENT_MODELS`; reasoning must be supported by that model.
+  Provider selection is a compatibility assertion, not a route switch: a route
+  other than the node's active route refuses with `provider_route_unavailable:<id>`.
+  Unsupported model/route pairs refuse, never substitute. Ordered placement
+  resolves these fields before serializing them; both local and remote admission
+  revalidate them against approved destination policy. Parent settings remain
+  unchanged. Message continuations copy the admitted native snapshot; steering
+  and reconciliation do not reselect model or reasoning.
 
 General operator profiles have no implicit cumulative token/cost cap. Omit
 `max_tokens` / `max_cost_usd` for unlimited; explicit numeric limits (including
@@ -249,13 +259,45 @@ and never as an automatic retry.
   validation (including empty `allowed_tools` and malformed/negative limits),
   caller clamping, the empty-ceiling rule, operator authorization, schema/dispatch
   parity, the durable effect adapter, the WhatsApp dispatch shapes, trusted-event
-  resolution and the lean prompt. Model-free.
+  resolution and the lean prompt. Includes `scripts/test-subagent-selection.lua`
+  for omitted/explicit/partial selection, legacy fallback, compatibility refusals,
+  durable local/remote placement fields and follow-up routing. Model-free.
 - `node scripts/test-subagents.cjs <wa>` — mock-inference integration: start,
   await, idempotency, per-user isolation, cancellation on provider I/O,
   **silent-provider cancellation** and delayed first token, queue overflow, tool
   denial, restart-unknown, independent transcripts, the ordinary-run parent tool
   path, an over-budget prompt making zero provider calls, and a provider that
   reports no usage being stopped by its reservation. Zero paid inference.
+
+## Lightweight discovery
+
+`list` returns owner-scoped identity/state summaries, not full prompts, results,
+previews, accounting or completion packets. Local dispatches map to one bulk
+native snapshot; discovery never makes per-dispatch status calls or refreshes
+settled history. Summaries retain parent/run/continuation mapping and a short
+`title` (legacy prompts supply at most 100 characters).
+`freshness: "native_snapshot"` names local runtime observation; remote rows use
+`freshness: "recorded_observation", stale: true`, including recorded terminal
+outcomes. Remote status/result/await/cancel observations are recorded separately
+in `orchestration_observations`, bound to the exact admitted receipt and dispatch.
+Discovery uses these durable source facts without replacing original receipts;
+a continuation changes the source receipt and invalidates predecessor observations.
+Completion supervision uses the same status control path. Regressive or mismatched
+attempt/session observations refuse rather than reopening settled/unknown tasks.
+Named discovery errors are bounded to 256 bytes, never decoded raw packets.
+Explicit `status`, `result`, `session` and `events` retain detailed
+access and ownership checks. Runtime errors remain visible.
+
+`POST /subagents` with `{ "action": "lookup_session", "conversation_id": "..." }`
+returns `{ "found": true, "task": <summary> }` or `{ "found": false }`.
+An empty id refuses with `conversation_id_required`. Ownership comes only from
+server context; foreign sessions look absent. Native lookup selects the latest
+continuation chain tail, including queued continuations. The coordinator maps
+its dispatch id into `task.subagent_id`, retaining the actual native id in
+`remote_subagent_id`, `task_id` and `attempt_id`. Remote dispatch lookup is cached,
+not inference or a remote probe; explicit control refreshes its observation.
+Verified peer routing allows this same owner-scoped action. No global task array
+is returned by lookup; chat watch loops should use it instead of global discovery.
 
 ## Health
 
