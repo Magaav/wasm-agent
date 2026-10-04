@@ -130,6 +130,11 @@
   handleEvent({type:'delta',text:'more evidence'});
   handleEvent({type:'reply',text:streamText+' race retained'});
   check(!answerAnchors.has(messages) && messages.scrollTop===racePosition,'pending pin frame cannot overwrite manual intent');
+  messages.scrollTop=messages.scrollHeight;
+  messages.dispatchEvent(new Event('scroll'));
+  check(follow && !answerAnchors.has(messages),'async return bottom resumes main follow without rearming anchor');
+  handleEvent({type:'delta',text:'\n\n'+('resumed growth\n\n'.repeat(20))});
+  check(atBottom(),'return-bottom follows subsequent growth');
   childA.remove();childB.remove();
   const log=document.createElement('pre'); log.id='wa-probe';
   log.dataset.status=problems.length?'fail':'pass';

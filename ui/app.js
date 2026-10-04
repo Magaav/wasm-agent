@@ -406,7 +406,9 @@ function anchorAnswer(node) {
     const expected=answerScrollPositions.get(container);
     if (expected != null && Math.abs(container.scrollTop-expected)<1) return;
     releaseAnswerAnchor(container);
-    if (container!==messages) scrollState(container).follow=container.scrollHeight-container.scrollTop-container.clientHeight<40;
+    const bottom=container.scrollHeight-container.scrollTop-container.clientHeight<40;
+    if (container===messages) setFollow(bottom);
+    else scrollState(container).follow=bottom;
   }, {passive:true});
   pin();
 }
