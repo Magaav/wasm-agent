@@ -1,0 +1,35 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import assert from 'node:assert/strict';
+import {spawnSync} from 'node:child_process';
+const repo=process.cwd(),scratch=fs.mkdtempSync(path.join(repo,'.ship-wave-test-'));
+let checks=0;
+const check=(value,label)=>{assert(value,label);checks++;};
+const run=(args)=>spawnSync(process.execPath,args,{encoding:'utf8',windowsHide:true});
+const ship=(source,install,script=path.join(repo,'scripts/ship-wave.mjs'))=>run([script,source,install]);
+const admission=install=>run([path.join(install,'scripts/wave-entry.mjs'),'check',fixture,'allocate']);
+const fixture=path.join(scratch,'git');
+try {
+ fs.mkdirSync(fixture);check(spawnSync('git',['init',fixture],{encoding:'utf8'}).status===0,'private Git fixture');
+ const old=spawnSync('git',['show','3f54a90d9d23b105df93002a683135d62cde81e0:scripts/ship-wave.mjs'],{encoding:'utf8'});
+ check(old.status===0,'preserved causal baseline');const oldScript=path.join(scratch,'old.mjs');fs.writeFileSync(oldScript,old.stdout);
+ const baseline=path.join(scratch,'baseline');check(ship(repo,baseline,oldScript).status===0,'baseline stages');
+ const broken=admission(baseline);check(broken.status!==0&&broken.stderr.includes('test-verdict.cjs')&&broken.stderr.includes('Cannot find module'),'baseline normal admission fails missing module');
+ const install=path.join(scratch,'patched');check(ship(repo,install).status===0,'patched stages');
+ const ready=admission(install);check(ready.status===0&&JSON.parse(ready.stdout).ok===true&&JSON.parse(ready.stdout).mode==='isolated_local_fixture','normal staged allocate JSON success');
+ const refused=run([path.join(install,'scripts/wave-entry.mjs'),'check',path.join(scratch,'absent'),'allocate']);check(refused.status===1&&JSON.parse(refused.stdout).ok===false,'load success distinct from policy refusal');
+ const gate=path.join(install,'scripts/gate-check.mjs');
+ const probe=run(['--input-type=module','-e',`import {checkVerdict} from ${JSON.stringify(new URL('file:///'+gate.replaceAll('\\','/')).href)}; console.log(JSON.stringify(checkVerdict({verdict:'proof',proof_kind:'deployShipped',minimum:1},0,'deploy shipped ok (1 checks)')));`]);
+ check(probe.status===0&&JSON.parse(probe.stdout).ok===true,'conditional proof library loads');
+ fs.unlinkSync(path.join(install,'scripts/lib/proof-verdict.cjs'));
+ const missingProof=run(['--input-type=module','-e',`import {checkVerdict} from ${JSON.stringify(new URL('file:///'+gate.replaceAll('\\','/')).href)}; console.log(JSON.stringify(checkVerdict({verdict:'proof',proof_kind:'deployShipped',minimum:1},0,'deploy shipped ok (1 checks)')));`]);
+ check(missingProof.status===0&&JSON.parse(missingProof.stdout).ok===false&&JSON.parse(missingProof.stdout).reason.includes('Cannot find module'),'proof deletion negative control');
+ fs.unlinkSync(path.join(install,'scripts/lib/test-verdict.cjs'));check(admission(install).status!==0,'admission deletion negative control');
+ const source=path.join(scratch,'source'),lib=path.join(source,'scripts/lib');fs.mkdirSync(lib,{recursive:true});
+ fs.writeFileSync(path.join(source,'scripts/wave-entry.mjs'),`import './lib/a.cjs'; export {x} from './lib/b.js'; import('./lib/c.mjs');\n// require('./missing-comment.cjs')\nconst prose="require('./missing-string.cjs')"; const template=\`require('./missing-template.cjs')\`; const regex=/require('missing-regex')/;\n`);
+ fs.writeFileSync(path.join(lib,'a.cjs'),"require('./b.js'); module.exports={};");fs.writeFileSync(path.join(lib,'b.js'),"require('./a.cjs'); exports.x=1;");fs.writeFileSync(path.join(lib,'c.mjs'),"export * from './d.mjs';");fs.writeFileSync(path.join(lib,'d.mjs'),'export const x=1;');
+ const tiny=path.join(scratch,'tiny');check(ship(source,tiny).status===0,'CJS cycles, JS transitive, ESM forms, comment/string/template/regex controls');check(fs.existsSync(path.join(tiny,'scripts/lib/d.mjs')),'transitive export closure');
+ fs.writeFileSync(path.join(lib,'d.mjs'),"require('./missing.cjs');");const missing=ship(source,tiny);check(missing.status!==0&&missing.stderr.includes('dependency missing'),'missing literal refuses');
+ fs.writeFileSync(path.join(scratch,'outside.cjs'),'');fs.writeFileSync(path.join(lib,'d.mjs'),"require('../../../outside.cjs');");const escape=ship(source,tiny);check(escape.status!==0&&escape.stderr.includes('escapes scripts'),'path escape refuses');
+ console.log(`ship wave ok (${checks} checks, 0 skipped; baseline missing-module, staged allocate/proof, deletion controls)`);
+} finally {fs.rmSync(scratch,{recursive:true,force:true});}
