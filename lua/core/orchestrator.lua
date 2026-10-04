@@ -35,6 +35,13 @@ function M.validate(policy)
   return clean
 end
 
+local function discovery_error(row)
+  if not row.detail or row.detail=='' then return nil end
+  local ok,value=pcall(json.decode,row.detail)
+  if ok and type(value)=='table' then return value.error or value.reason end
+  return row.detail:sub(1,256)
+end
+
 local function view(row)
   local receipt = json.decode(row.receipt)
   receipt.remote_subagent_id = receipt.subagent_id
@@ -315,10 +322,22 @@ function M.control(args, ctx, api)
     local forwarded = json.decode(json.encode(args))
     forwarded.id=receipt.subagent_id
     forwarded.subagent_id=nil
+    if row.destination=='local' then
+      local latest=invoke('local',{action='lookup_session',conversation_id=receipt.session_id},json.decode(row.context),api)
+      if type(latest)~='table' then return true,{error='native_session_lookup_invalid'} end
+      if latest.error then return true,latest end
+      if latest.found~=true or type(latest.task)~='table' or
+          latest.task.session_id~=receipt.session_id or type(latest.task.subagent_id)~='string' or
+          latest.task.subagent_id=='' then return true,{error='native_session_lookup_invalid'} end
+      forwarded.id=latest.task.subagent_id
+      -- Expected attempt/run identity remains on the forwarded request. Exact
+      -- historical access uses the native id, not the conversation's dispatch alias.
+    end
     local result=invoke(row.destination,forwarded,json.decode(row.context),api)
     if action == "status" or action == "result" or action == "await" or action == "cancel" then
       if result.subagent_id then
-        exec("UPDATE orchestration_tasks SET receipt=? WHERE id=?",{json.encode(result),id})
+        -- Control observations must not replace the durable full receipt with
+        -- a status summary or erase predecessor accounting/result evidence.
         row.receipt=json.encode(result)
         return true,view(row)
       end
@@ -381,7 +400,7 @@ function M.control(args, ctx, api)
           parent_run_id=receipt.parent_run_id or parent.run_id, after_id=receipt.after_id,
           model=receipt.model or request.model,reasoning=receipt.reasoning or request.reasoning,
           created_at=receipt.created_at or row.created_at,started_at=receipt.started_at,settled_at=receipt.settled_at,
-          error=receipt.error, freshness=row.destination=='local' and by_session[receipt.session_id] and
+          error=receipt.error or discovery_error(row), freshness=row.destination=='local' and by_session[receipt.session_id] and
             'native_snapshot' or 'recorded_observation', stale=row.destination~='local'}
         tasks[#tasks+1]=summary
       end

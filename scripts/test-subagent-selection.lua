@@ -73,7 +73,9 @@ check(local_args.reasoning=='low' and local_args.model==profile.model and local_
 -- Follow-up/steer routing must not reselect from the parent's current settings.
 local message
 fleet.control({action='message',id=local_receipt.subagent_id,text='continue',idempotency_key='followup',reasoning='xhigh'},ctx,
- {control=function(a) message=a;return {subagent_id='next-child',session_id='local-session'} end})
+ {control=function(a)
+   if a.action=='lookup_session' then return {found=true,task={subagent_id='local-child',session_id='local-session'}} end
+   message=a;return {subagent_id='next-child',session_id='local-session'} end})
 check(message.id=='local-child' and message.action=='message','followup targets admitted child snapshot')
 local discovery_api={control=function(a)
   if a.action=='lookup_session' then return {found=true,task={subagent_id='next-child',session_id='local-session',created_at=99999999999,after_id='local-child',state='completed',settled=true}} end
@@ -99,6 +101,40 @@ local _,missing=fleet.control({action='lookup_session'},ctx,
   {control=function() return {error='conversation_id_required'} end})
 check(missing.error=='conversation_id_required','missing session id stays visible')
 check(lookup.task.parent_session_id=='parent' and lookup.task.parent_run_id=='parent-run' and lookup.task.after_id=='local-child','mapping fields retained')
+local stored=json.encode({subagent_id='next-child',session_id='local-session',result={raw='historical'},accounting={provider='openai-sub'},completion={packet='original'}})
+assert(host.sql_exec('UPDATE orchestration_tasks SET receipt=? WHERE id=?',json.encode({stored,local_receipt.subagent_id})))
+local tail_api={control=function(a)
+  if a.action=='lookup_session' then return {found=true,task={subagent_id='newer-tail',session_id='local-session',after_id='next-child',created_at=999999999999}} end
+  check(a.id=='newer-tail','advertised tail is controlled: '..a.action)
+  check(a.run_id=='expected-run' and a.attempt_id=='expected-attempt','identity fences preserved')
+  return {subagent_id=a.id,session_id='local-session',state='completed',settled=true,result={raw='new'}}
+end}
+local _,tail=fleet.control({action='lookup_session',conversation_id='local-session'},ctx,tail_api)
+check(tail.task.remote_subagent_id=='newer-tail','lookup advertises newest tail')
+for _,action in ipairs({'cancel','steer','status','result','events'}) do
+  fleet.control({action=action,id=local_receipt.subagent_id,run_id='expected-run',attempt_id='expected-attempt'},ctx,tail_api)
+end
+local unchanged=json.decode(host.sql_query('SELECT receipt FROM orchestration_tasks WHERE id=?',json.encode({local_receipt.subagent_id})))[1].receipt
+check(unchanged==stored,'control/discovery preserve full historical receipt')
+local _,foreign=fleet.control({action='cancel',id=local_receipt.subagent_id},{user_id='foreign',role='master'},tail_api)
+check(foreign.error=='unknown_subagent','foreign alias cannot control tail')
+for _,bad in ipairs({{error='native_fault'},{found=true,task={subagent_id='foreign',session_id='foreign-session'}},{found=true}}) do
+  local _,failure=fleet.control({action='cancel',id=local_receipt.subagent_id},ctx,{control=function(a)
+    check(a.action=='lookup_session','malformed lookup never admits control');return bad end})
+  check(failure.error~=nil,'malformed/runtime lookup is visible')
+end
+for _,state in ipairs({'queued','refused','unknown'}) do
+  local detail=state=='refused' and json.encode({error='named_refusal',prompt='must-not-leak',result='must-not-leak'}) or 'named_'..state
+  assert(host.sql_exec('UPDATE orchestration_tasks SET state=?,detail=? WHERE id=?',json.encode({state,detail,receipt.subagent_id})))
+  local _,page=fleet.control({action='list'},ctx,{control=function() return {subagents={}} end})
+  local item
+  for _,value in ipairs(page.subagents) do if value.subagent_id==receipt.subagent_id then item=value end end
+  check(item.title=='fixture' and item.error==(state=='refused' and 'named_refusal' or 'named_'..state),'state title/named detail retained')
+  check(item.stale and item.prompt==nil and item.result==nil,'remote stale detail is lightweight')
+end
+assert(host.sql_exec("UPDATE orchestration_tasks SET detail='' WHERE id=?",json.encode({receipt.subagent_id})))
+local _,empty=fleet.control({action='list'},ctx,{control=function() return {subagents={}} end})
+for _,item in ipairs(empty.subagents) do if item.subagent_id==receipt.subagent_id then check(item.error==nil,'empty detail not error') end end
 mock_nodes.remote_call=saved_remote
 dofile=original_dofile
 print('subagent selection ok ('..checks..' checks, 0 skipped)')
