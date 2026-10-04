@@ -372,13 +372,64 @@ function atBottom(slack = 40) {
 // event they cause cannot be mistaken for intent.
 let follow = true;
 let pinning = false;
+// Anchors belong to containers, including independently painted child chats.
+const answerAnchors = new WeakMap();
+const childScrollStates = new WeakMap();
+function scrollState(container) {
+  let state=childScrollStates.get(container);
+  if (!state) {state={follow:true,pinning:false};childScrollStates.set(container,state);}
+  return state;
+}
+const answerSeen = new WeakMap();
+const answerReleased = new WeakSet();
+const answerScrollPositions = new WeakMap();
+function releaseAnswerAnchor(container = transcript, manual = true) {
+  answerAnchors.delete(container);
+  if (manual) {
+    answerReleased.add(container);
+    if (container===messages) setFollow(false);
+    else scrollState(container).follow=false;
+  }
+}
+function anchorAnswer(node) {
+  if (replayingMessages) return;
+  const container = transcript;
+  answerAnchors.set(container, node);
+  for (const gesture of ['wheel', 'touchstart']) {
+    container.addEventListener(gesture, () => { releaseAnswerAnchor(container); if(container===messages)setFollow(false); }, {passive:true, once:true});
+  }
+  container.addEventListener('keydown', event => {
+    if (['PageUp','PageDown','ArrowUp','ArrowDown','Home','End',' '].includes(event.key) &&
+      !event.target.closest('input,textarea,[contenteditable]')) releaseAnswerAnchor(container);
+  });
+  container.addEventListener('scroll', () => {
+    const expected=answerScrollPositions.get(container);
+    if (expected != null && Math.abs(container.scrollTop-expected)<1) return;
+    releaseAnswerAnchor(container);
+    const bottom=container.scrollHeight-container.scrollTop-container.clientHeight<40;
+    if (container===messages) setFollow(bottom);
+    else scrollState(container).follow=bottom;
+  }, {passive:true});
+  pin();
+}
 
 function pin(force = false) {
-  if (!follow && !force) return;
-  pinning = true;
+  const container=transcript;
+  const state=container===messages ? null : scrollState(container);
+  const answer = answerAnchors.get(transcript);
+  if (answer?.isConnected && !force) {
+    if (state) state.pinning=true; else pinning = true;
+    transcript.scrollTop += answer.getBoundingClientRect().top - transcript.getBoundingClientRect().top;
+    answerScrollPositions.set(transcript, transcript.scrollTop);
+    requestAnimationFrame(() => { if(state)state.pinning=false;else pinning = false; });
+    return;
+  }
+  if (!(state ? state.follow : follow) && !force) return;
+  if(state)state.pinning=true;else pinning = true;
   transcript.scrollTop = transcript.scrollHeight;
+  answerScrollPositions.set(container,container.scrollTop);
   // Release on the next frame: the scroll event fires asynchronously.
-  requestAnimationFrame(() => { pinning = false; });
+  requestAnimationFrame(() => { if(state)state.pinning=false;else pinning = false; });
 }
 
 function setFollow(value) {
@@ -388,6 +439,7 @@ function setFollow(value) {
 
 messages.addEventListener("scroll", () => {
   if (pinning) return;
+  releaseAnswerAnchor();
   setFollow(atBottom());
 }, { passive: true });
 
@@ -397,6 +449,7 @@ for (const event of ["wheel", "touchstart"]) {
   messages.addEventListener(event, () => setFollow(atBottom(4)), { passive: true });
 }
 messages.addEventListener("keydown", (event) => {
+  if (["PageUp", "PageDown", "ArrowUp", "ArrowDown", "Home", "End", " "].includes(event.key)) releaseAnswerAnchor();
   if (["PageUp", "ArrowUp", "Home"].includes(event.key)) setFollow(false);
   if (["PageDown", "ArrowDown", "End"].includes(event.key)) setFollow(atBottom());
 });
@@ -429,6 +482,7 @@ function keepStatusLast() {
 function currentBubble() {
   if (!runBubble) {
     transcript.querySelector('#empty')?.remove();
+    answerReleased.delete(transcript);
     runBubble = document.createElement("wa-message");
     runBubble.setAttribute("role", "assistant");
     transcript.append(runBubble);   // connecting is what builds .body
@@ -1170,7 +1224,7 @@ async function refreshOperationProgress(health, running) {
 // The answer is the point; the route is reference. On reply, everything the run
 // did before the answer moves into one collapsed run topic at the top of the
 // bubble, and the answer sits below it.
-function collapseRun() {
+function collapseRun(finalStart = false) {
   const bubble = runBubble;
   if (!bubble) return;
   const body = bubble.body;
@@ -1187,7 +1241,7 @@ function collapseRun() {
   // it even when that batch added no tool call: the guard is about *creating* the topic, not about
   // folding into one that is already there. Getting this wrong left the preamble sitting outside as
   // its own text segment, so the bubble read run,text,text instead of one run and one answer.
-  if (!existing && traces.length === 0) return;
+  if (!existing && traces.length === 0 && !finalStart) return;
   if (moves.length === 0) return;
   const run = existing || document.createElement("wa-run");
   if (!existing) {
@@ -1211,6 +1265,7 @@ function collapseRun() {
     if (child.tagName === "WA-TRACE") calls += child.count || 0;
     else if (child.classList && child.classList.contains("seg")) steps += 1;
   }
+  if (finalStart) run.open = false;
   const endedAt = replayingMessages ? replayMessageEndedAt : Date.now();
   run.setSummary(steps, calls, Math.max(0, endedAt - (runStartedAt || endedAt)));
 }
@@ -1261,7 +1316,25 @@ function handleEvent(event) {
   if (["round", "reasoning", "commentary", "commentary_delta", "commentary_end", "pending_delta", "decision", "tool", "tool_result", "delta", "reply", "error", "done"].includes(event.type)) {
     clearActiveRunNotice();
   }
-  if (event.type === "round") {
+  if (event.type === "final_answer_begin") {
+    const bubble = currentBubble();
+    const key = [event.run_id || '', event.response_id || '', event.message_id || event.pending_id || ''].join('|');
+    if (!event.message_id && !event.pending_id) return;
+    let seen=answerSeen.get(bubble);
+    if (!seen) {seen=new Set();answerSeen.set(bubble,seen);}
+    if (seen.has(key)) return;
+    seen.add(key);
+    if (streamBody) flushDecision();
+    bubble.dataset.finalMessage = key;
+    if (!streamBody) {
+      streamBody = document.createElement('div');
+      streamBody.className = 'seg final-answer';
+      bubble.body.append(streamBody);
+    }
+    collapseRun(true);
+    if (!answerReleased.has(transcript)) anchorAnswer(streamBody);
+  } else if (event.type === "round") {
+    releaseAnswerAnchor(transcript, false);
     // A new step begins: close the previous one (its text and its tool topic).
     if (!runStartedAt) runStartedAt = Date.now();
     markStreamedCommentaryIncomplete();
@@ -1291,6 +1364,12 @@ function handleEvent(event) {
   } else if (event.type === "decision") {
     addDecision(event);
   } else if (event.type === "tool") {
+    releaseAnswerAnchor(transcript, false);
+    if (streamBody?.classList.contains('final-answer')) {
+      streamBody.classList.remove('final-answer');
+      flushDecision();
+      collapseRun();
+    }
     // The bound travels with the tool event when the host enforces one (bash/shell); /health is the
     // fallback so an in-flight line still says "of 300s" instead of only "42s".
     const boundMs = event.timeout_ms != null ? event.timeout_ms
@@ -1324,7 +1403,10 @@ function handleEvent(event) {
     }
     streamText += event.text || "";
     streamBody.rawText=streamText;
-    streamBody.textContent = stripThinking(streamText);
+    if (streamBody.classList.contains('final-answer')) {
+      streamBody.innerHTML = renderMarkdown(stripThinking(streamText));
+      streamBody.style.whiteSpace = 'normal';
+    } else streamBody.textContent = stripThinking(streamText);
     pin();
   } else if (event.type === "reply") {
     discardPendingText();
@@ -1340,6 +1422,7 @@ function handleEvent(event) {
       return;
     }
     const finalText = stripThinking(event.text || streamText);
+    const newlyConfirmed = !streamBody?.classList.contains('final-answer');
     if (streamBody) {
       streamBody.innerHTML = renderMarkdown(finalText);
       streamBody.rawText=event.text || streamText;
@@ -1360,6 +1443,7 @@ function handleEvent(event) {
     // created after the run is collapsed, and collapseRun() also refuses to swallow a WA-DIFF,
     // so the two cannot get back into that order.
     collapseRun();
+    if (newlyConfirmed && !answerReleased.has(transcript)) anchorAnswer(streamBody);
     sealReasoning();
     const diff = renderDiff(currentBubble(), event.changes);
     if (diff) {
@@ -1382,6 +1466,7 @@ function handleEvent(event) {
     updateChip();
     if (balloon.open) { renderUsage(); renderControls(); }
   } else if (event.type === "error") {
+    releaseAnswerAnchor();
     markPendingTextIncomplete();
     markStreamedCommentaryIncomplete();
     add("assistant", "error: " + (event.error || "unknown"));
@@ -1389,6 +1474,7 @@ function handleEvent(event) {
     finishTrace();
     runBubble = null;
   } else if (event.type === "done") {
+    releaseAnswerAnchor();
     markPendingTextIncomplete();
     markStreamedCommentaryIncomplete();
     finishRunStatus();
@@ -4816,11 +4902,17 @@ async function attachSessionJournalOnce(thread, readHistory) {
 }
 async function nativeSessionTask(thread) {
   if(!thread)return null;
-  const response=await apiFetch('subagents',{headers:apiHeaders()});
+  const response=await apiFetch('subagents',{method:'POST',headers:apiHeaders({'Content-Type':'application/json'}),
+    body:JSON.stringify({action:'lookup_session',conversation_id:thread})});
   const result=await response.json();
   if(!response.ok || result.error)throw Error(result.error||'native_session_discovery_unavailable');
-  const tasks=(result.subagents||result.tasks||[]).filter(task=>task.session_id===thread && task.transport==='native');
-  return tasks.sort((a,b)=>(a.created_at||0)-(b.created_at||0)).at(-1)||null;
+  if (result.found === false && result.task == null) return null;
+  if (result.found !== true || !result.task || typeof result.task !== 'object') throw Error('native_session_lookup_contract_invalid');
+  const task=result.task;
+  if(task.session_id!==thread || task.transport!=='native') throw Error('native_session_lookup_identity_mismatch');
+  if (![task.subagent_id, task.task_id, task.attempt_id, task.node_id, task.event_node_id, task.event_epoch]
+    .every(value => typeof value === 'string' && value.length > 0)) throw Error('native_event_identity_unavailable');
+  return task;
 }
 // Native identity is intentionally opaque; never feed it to runKey or /run-events.
 async function attachNativeJournal(task, readHistory, viewing=()=>true) {

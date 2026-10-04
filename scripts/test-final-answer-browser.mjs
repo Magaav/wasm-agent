@@ -1,0 +1,14 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import {spawnSync} from 'node:child_process';
+const [events,out]=process.argv.slice(2);
+if(!events||!out)throw Error('usage: node scripts/test-final-answer-browser.mjs events.json output-directory');
+const rows=JSON.parse(fs.readFileSync(events,'utf8'));
+if(rows.length!==7)throw Error('production scenarios missing');
+fs.mkdirSync(out,{recursive:true});
+const probe=path.resolve(out,'production-probe.js');
+fs.writeFileSync(probe,'window.__productionFinalEvents='+JSON.stringify(rows)+';\n'+fs.readFileSync('scripts/test-final-answer-ui.js','utf8'));
+const result=spawnSync(process.execPath,['scripts/agent-benchmark-ui-observe.mjs','--probe',probe,'--out',path.resolve(out,'observation')],{cwd:process.cwd(),encoding:'utf8'});
+fs.writeFileSync(path.resolve(out,'verdict.log'),result.stdout+result.stderr);
+process.stdout.write(result.stdout);process.stderr.write(result.stderr);
+process.exit(result.status??1);

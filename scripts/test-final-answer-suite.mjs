@@ -1,0 +1,31 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import {spawnSync} from 'node:child_process';
+const exe=process.argv[2];
+if(!exe)throw Error('wa executable required');
+const root=process.cwd();
+const out=path.resolve(process.argv[3]||'.final-answer-test');
+fs.mkdirSync(out,{recursive:true});
+const base={...process.env};
+for(const key of Object.keys(base))if(/^(WA_|WASM_AGENT_|PI_)/.test(key))delete base[key];
+function run(name,program,args,env={},terminal) {
+ const result=spawnSync(program,args,{cwd:root,env:{...base,...env},encoding:'utf8',timeout:120000});
+ const log=(result.stdout||'')+(result.stderr||'');
+ fs.writeFileSync(path.join(out,name+'.log'),log);
+ fs.writeFileSync(path.join(out,name+'.receipt.json'),JSON.stringify({status:result.status,signal:result.signal,error:result.error?.message||null}));
+ process.stdout.write(log);
+ if(result.status!==0||result.signal||result.error||/lua error:/.test(log))throw Error(name+' failed: '+result.status);
+ const lines=log.trim().split(/\r?\n/);
+ if(terminal && (lines.at(-1)!==terminal || lines.filter(line=>line===terminal).length!==1))throw Error(name+' own terminal verdict absent or duplicated');
+ return log;
+}
+run('verdict-contract',process.execPath,['scripts/test-final-answer-verdict.cjs'],{},'PASS final-answer verdict contract (8 checks, 0 skips)');
+const env={WASM_AGENT_HOME:path.join(out,'home'),WASM_AGENT_LUA_ROOT:root,WA_FINAL_EVENTS:path.join(out,'events.json'),WASM_AGENT_RELAY:'',WASM_AGENT_RENDEZVOUS:''};
+run('wire',exe,['--db',path.join(out,'wire-'+Date.now()+'.db')],{...env,WA_SCRIPT:path.join(root,'scripts/test-final-answer.lua')},'final-answer wire causal checks pass (9 checks; synthetic; no inference)');
+run('loop',exe,['--db',path.join(out,'loop-'+Date.now()+'.db')],{...env,WA_SCRIPT:path.join(root,'scripts/test-final-answer-loop.lua')},'final-answer production loop ok (55 checks, 0 skips; fake HTTP, no inference)');
+const pi=run('pi',process.execPath,['scripts/test-openai-sub.cjs',exe],{},'PASS OpenAI subscription bridge: messages, images, tools, stream, usage, limits and visible failures');
+if(pi.split(/\r?\n/).filter(line=>line==='native subscription operations ok (15 checks)').length!==1)throw Error('native Pi adapter own verdict absent or duplicated');
+const browser=run('browser',process.execPath,['scripts/test-final-answer-browser.mjs',path.join(out,'events.json'),path.join(out,'browser')]);
+const verdict=JSON.parse(browser.trim().split(/\r?\n/).at(-1));
+if(verdict.ok!==true||verdict.probeStatus!=='pass'||verdict.browserExit!==0||verdict.browserSignal||verdict.browserError)throw Error('browser own verdict invalid');
+console.log('PASS final-answer normal suite: wire9, loop55, nativePi15, shared browser; 0 skips');

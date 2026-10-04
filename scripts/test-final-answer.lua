@@ -1,0 +1,30 @@
+-- Synthetic causal provider events; no network or inference.
+local wire=dofile('lua/core/subscription_wire.lua')
+local json=dofile('lua/vendor/json.lua')
+local events={}
+local s=wire.session({stream_id='fixture',run_id='run-fixture',emit=function(e) events[#events+1]=e end})
+local function send(e) s.line('data: '..json.encode(e)); s.line('') end
+local function item(index,id,phase)
+  send({type='response.output_item.added',output_index=index,item={type='message',id=id,phase=phase}})
+end
+item(0,'final','final_answer')
+assert(#events==1 and events[1].type=='final_answer_begin','begin before first text')
+assert(events[1].run_id=='run-fixture' and events[1].message_id=='final','stable identity')
+item(0,'final','final_answer')
+assert(#events==1,'duplicate added does not restart')
+send({type='response.output_text.delta',output_index=0,delta='answer'})
+assert(events[#events].type=='delta','explicit phase streams')
+item(1,'unknown',nil)
+send({type='response.output_text.delta',output_index=1,delta='unknown'})
+assert(events[#events].type=='pending_delta','another item not contaminated by global stopReason')
+item(2,'commentary','commentary')
+send({type='response.output_text.delta',output_index=2,delta='checking'})
+assert(events[#events].type=='pending_delta','commentary remains provisional')
+send({type='response.output_item.done',output_index=2,item={type='message',id='commentary',phase='commentary',content={{type='output_text',text='checking'}}}})
+assert(events[#events].type=='commentary','commentary resolves')
+local n=#events
+send({type='response.output_item.done',output_index=2,item={type='message',id='commentary',phase='commentary',content={{type='output_text',text='checking'}}}})
+assert(#events==n,'duplicate done ignored')
+send({type='response.output_item.done',output_index=3,item={type='message',id='done-only',phase='final_answer',content={{type='output_text',text='late'}}}})
+assert(events[#events-1].type=='final_answer_begin' and events[#events-1].source=='responses.output_item.done' and events[#events-1].timing=='late','done-only cannot claim early source')
+print('final-answer wire causal checks pass (9 checks; synthetic; no inference)')
