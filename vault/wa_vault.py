@@ -16,6 +16,10 @@ Two listeners, two audiences:
          /openai-sub/codex/<path>       -> https://chatgpt.com/backend-api/codex/<path>  (OAuth)
          /openai-sub/wham/usage         -> https://chatgpt.com/backend-api/wham/usage    (OAuth)
          /status                        -> which providers are configured/enabled; no values
+         /login, /login/<provider>      -> the CLI's `/login` (pi-style): start the ChatGPT device
+                                           login, or store an opencode-go key. Write-only, like the
+                                           admin API: a login can be started and a key replaced, and
+                                           neither answer carries a stored value.
   admin  (WA_VAULT_ADMIN_PORT, default 8801) - the operator's side: the page and its API. Every API
          call needs the admin token (`X-Vault-Token`), which is given to this process only and lives
          on the host, outside anything the agent can mount.
@@ -24,7 +28,10 @@ Rules this file is built around:
 
   1. **No read path.** No endpoint on either listener returns a stored value - not the admin API, not
      the proxy, not an error message. The admin API is write/replace/delete/status only. A stolen admin
-     token can overwrite or delete a key; it cannot read one.
+     token can overwrite or delete a key; it cannot read one. The node-side `/login` routes need no
+     token - they are how a person signs in from `wa chat` - so the agent can reach them too: it can
+     start a device login (which only a human with the ChatGPT account can complete) or replace the
+     opencode-go key, and it still cannot read one. Removing a credential stays on the admin page.
   2. **The upstream is fixed per route.** The node chooses a path under a route, never a host. No Host
      header passthrough, no redirect following (a redirect would carry the credential to wherever it
      points), and a path allowlist for the subscription route, so the OAuth token reaches only the two
@@ -377,6 +384,28 @@ class VaultError(Exception):
         self.status, self.code, self.message = status, code, message
 
 
+def login_snapshot():
+    with _login_lock:
+        return dict(_login)
+
+
+def set_opencode_key(key):
+    if not isinstance(key, str) or not key.strip() or len(key) > 4096 or any(c.isspace() for c in key.strip()):
+        raise VaultError(400, "bad_key", "paste the key on its own, one line")
+
+    def put(store):
+        previous = entry(store, "opencode-go")
+        store["opencode-go"] = {"key": key.strip(), "set_at": now_ms(), "enabled": previous.get("enabled", True)}
+    update_store(put)
+    log("opencode-go key stored")
+
+
+def cancel_login():
+    with _login_lock:
+        _login.clear()
+        _login["state"] = "idle"
+
+
 # --- the proxy (the node's side) ---------------------------------------------------------------
 
 def route(path):
@@ -438,10 +467,40 @@ class ProxyHandler(Handler):
     def do_GET(self):
         if self.path == "/status":
             return self.send_json(200, {"providers": public_status(read_store())})
+        if self.path == "/login":
+            return self.send_json(200, {"providers": public_status(read_store()), "login": login_snapshot()})
         self.proxy()
 
     def do_POST(self):
+        if self.path.startswith("/login/"):
+            return self.login()
         self.proxy()
+
+    def do_DELETE(self):
+        if self.path == "/login/openai-sub":
+            self.read_body()
+            cancel_login()
+            return self.send_json(200, {"providers": public_status(read_store()), "login": login_snapshot()})
+        self.read_body()
+        self.send_error_json(404, "vault_no_route", "wa-vault has no route for " + self.path.split("?")[0])
+
+    def login(self):
+        """The CLI's door: start the device login, or store a key. Never answers with a value."""
+        body = self.read_body()
+        try:
+            if self.path == "/login/openai-sub":
+                login = start_device_login()
+                return self.send_json(200, {"providers": public_status(read_store()), "login": login})
+            if self.path == "/login/opencode-go":
+                try:
+                    payload = json.loads(body) if body else {}
+                except ValueError:
+                    raise VaultError(400, "bad_json", "the body is not JSON")
+                set_opencode_key(payload.get("key") if isinstance(payload, dict) else None)
+                return self.send_json(200, {"providers": public_status(read_store())})
+        except VaultError as error:
+            return self.send_error_json(error.status, error.code, error.message)
+        self.send_error_json(404, "vault_no_route", "wa-vault has no route for " + self.path.split("?")[0])
 
     def proxy(self):
         target = route(self.path)
@@ -546,9 +605,7 @@ class AdminHandler(Handler):
         if not self.authorized():
             return self.send_error_json(401, "vault_admin_token", "the admin token is missing or wrong")
         if path == "/api/status":
-            with _login_lock:
-                login = {k: v for k, v in _login.items()}
-            return self.send_json(200, {"providers": public_status(read_store()), "login": login})
+            return self.send_json(200, {"providers": public_status(read_store()), "login": login_snapshot()})
         return self.send_error_json(404, "not_found", path)
 
     def do_POST(self):
@@ -570,16 +627,7 @@ class AdminHandler(Handler):
             return self.send_error_json(400, "bad_json", "the body is not JSON")
         try:
             if path == "/api/opencode-go/key" and method == "POST":
-                key = payload.get("key")
-                if not isinstance(key, str) or not key.strip() or len(key) > 4096 or any(c.isspace() for c in key.strip()):
-                    return self.send_error_json(400, "bad_key", "paste the key on its own, one line")
-
-                def put(store):
-                    previous = entry(store, "opencode-go")
-                    store["opencode-go"] = {"key": key.strip(), "set_at": now_ms(),
-                                            "enabled": previous.get("enabled", True)}
-                update_store(put)
-                log("opencode-go key stored")
+                set_opencode_key(payload.get("key"))
             elif path == "/api/opencode-go/key" and method == "DELETE":
                 update_store(lambda store: store.pop("opencode-go", None))
                 log("opencode-go key removed")
@@ -587,9 +635,7 @@ class AdminHandler(Handler):
                 login = start_device_login()
                 return self.send_json(200, {"login": login, "providers": public_status(read_store())})
             elif path == "/api/openai-sub/login" and method == "DELETE":
-                with _login_lock:
-                    _login.clear()
-                    _login["state"] = "idle"
+                cancel_login()
             elif path == "/api/openai-sub" and method == "DELETE":
                 update_store(lambda store: store.pop("openai-sub", None))
                 log("openai-sub login removed")
@@ -610,9 +656,7 @@ class AdminHandler(Handler):
                 return self.send_error_json(404, "not_found", path)
         except VaultError as error:
             return self.send_error_json(error.status, error.code, error.message)
-        with _login_lock:
-            login = dict(_login)
-        self.send_json(200, {"providers": public_status(read_store()), "login": login})
+        self.send_json(200, {"providers": public_status(read_store()), "login": login_snapshot()})
 
 
 def test_provider(provider):

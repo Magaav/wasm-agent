@@ -302,12 +302,42 @@ try:
     status, _ = request(PROXY, "GET", "/openai-sub/codex/redirect")
     ok(status == 302, "an upstream redirect is passed back, not followed")
 
+    # --- the CLI's door (/login on the proxy side): no token, write-only, never a value
+    status, payload = request(PROXY, "POST", "/login/opencode-go", {"key": "sk-opencode-SECRET-cli-9999"},
+                              {"Content-Type": "application/json"})
+    SECRETS.append("sk-opencode-SECRET-cli-9999")
+    ok(status == 200 and json.loads(payload)["providers"]["opencode-go"]["configured"], "/login stores a key without a token")
+    no_secret(payload, "the /login store answer")
+    seen.clear()
+    request(PROXY, "GET", "/opencode-go/v1/models")
+    ok({k.lower(): v for k, v in seen[-1][1].items()}.get("authorization") == "Bearer sk-opencode-SECRET-cli-9999",
+       "a key replaced through /login is the one used")
+    status, payload = request(PROXY, "POST", "/login/opencode-go", {"key": ""}, {"Content-Type": "application/json"})
+    ok(status == 400, "/login refuses an empty key")
+    for method, path in (("GET", "/login"), ("GET", "/login/opencode-go"), ("GET", "/login/openai-sub")):
+        status, payload = request(PROXY, method, path)
+        no_secret(payload, "%s %s" % (method, path))
+    status, _ = request(PROXY, "DELETE", "/login/opencode-go")
+    ok(status == 404, "/login cannot delete a key (that stays on the admin page)")
+    device_polls.clear()
+    status, payload = request(PROXY, "POST", "/login/openai-sub")
+    ok(status == 200 and json.loads(payload)["login"]["user_code"] == "ABCD-1234", "/login starts the device login")
+    for _ in range(100):
+        state = json.loads(request(PROXY, "GET", "/login")[1])
+        if state["login"].get("state") != "pending":
+            break
+        time.sleep(0.1)
+    ok(state["login"].get("state") == "done", "the device login started from /login completes")
+    no_secret(json.dumps(state), "the /login state after login")
+    status, payload = request(PROXY, "DELETE", "/login/openai-sub")
+    ok(status == 200 and json.loads(payload)["login"]["state"] == "idle", "/login can cancel a pending login")
+
     # --- remove: gone, and refused again
     admin("DELETE", "/api/opencode-go/key")
     status, _ = request(PROXY, "GET", "/opencode-go/v1/models")
     ok(status == 401, "a removed key is refused")
     with open(os.path.join(data_dir, "vault.json")) as handle:
-        ok(OPENCODE_KEY not in handle.read(), "a removed key is gone from the store")
+        ok("sk-opencode-SECRET" not in handle.read(), "a removed key is gone from the store")
 
     log_file.seek(0)
     no_secret(log_file.read(), "the vault's own log")
