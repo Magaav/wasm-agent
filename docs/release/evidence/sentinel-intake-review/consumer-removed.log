@@ -1,0 +1,12 @@
+
+STDERR
+warning: function `inference_action` is never used
+  --> src\jobs.rs:18:4
+   |
+18 | fn inference_action(kind: &str) -> bool {
+   |    ^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `wa-sentinel` (bin "wa-sentinel") generated 1 warning
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.08s

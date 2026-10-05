@@ -1,0 +1,36 @@
+{
+  "tip": "bd1f3df5b684bb7feb2124870d74fa430994c8a1",
+  "tree": "5c3537169fe7a5a893256bb0b8a454562fe3de37",
+  "verdict": "BLOCKED: removed expected_sha bypasses reserved identity; normal Linux gate portability regression",
+  "reviewer": "child:dispatch:8e9c7a55-7e1c-4c1a-a4cb-46df905929be",
+  "cli": [
+    {
+      "ok": true,
+      "passes": [
+        {
+          "pass": 0,
+          "pid": 12104,
+          "ack_monotonic_seconds": [
+            0.125,
+            0.125,
+            0.125,
+            0.13999999999987267
+          ]
+        },
+        {
+          "pass": 1,
+          "pid": 18276,
+          "ack_monotonic_seconds": [
+            0.016000000000076398,
+            0.016000000000076398,
+            0.016000000000076398,
+            0.016000000000076398
+          ]
+        }
+      ],
+      "owned_tree_drained": true,
+      "provider_calls": 0,
+      "skips": 0
+    }
+  ]
+}

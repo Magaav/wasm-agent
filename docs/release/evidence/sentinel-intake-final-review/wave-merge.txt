@@ -1,0 +1,12 @@
+b0f9ea3060f3b2714c128ef8a558eae53571da78
+100644 1bf804a59d5cafc2350f5f8b65f83cc333fa0ea7 1	scripts/lib/proof-verdict.cjs
+100644 37dcf8ccda9c1cab042ea50ddbe3f7373366a2f7 2	scripts/lib/proof-verdict.cjs
+100644 92224a1eecb2e0c46aa50407f7cf38500a37a2cb 3	scripts/lib/proof-verdict.cjs
+100644 46cfec268d259e03bb801747bca7c530e06f14c9 1	scripts/test.sh
+100644 483d8341f8807ec5ebbad20b4cb183a2432e704a 2	scripts/test.sh
+100644 2807e363d742bcdab134756b88ad1f3c301f97e0 3	scripts/test.sh
+
+Auto-merging scripts/lib/proof-verdict.cjs
+CONFLICT (content): Merge conflict in scripts/lib/proof-verdict.cjs
+Auto-merging scripts/test.sh
+CONFLICT (content): Merge conflict in scripts/test.sh

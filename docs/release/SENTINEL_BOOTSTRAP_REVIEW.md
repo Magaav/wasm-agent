@@ -1,0 +1,37 @@
+# Independent bootstrap review — NARROWED, not landing permission
+
+Reviewed tip `4bc53f57ca6287c279835b0881dd3d1f6beacf55`, tree `690c4a7e4150747fd4acd5909cdd5bda8210c5cf`, base `898a9a238c89c5f64b83cfa219f8c17840b441f9`. Reviewer session `child:dispatch:8e9c7a55-7e1c-4c1a-a4cb-46df905929be`. Exact tip was fast-forwarded into the mandatory reviewer checkout; producer checkout was not edited. Producer delivery report and provenance trailer exist; no separate exact-tree acceptance record is present among the three delivery files. This review does not fabricate one.
+
+## Focused execution
+
+Both original private controls passed (exit 0, two cases). Installed executable SHA256 `fcd5525cd0e2d29a5bfa1c5d04b232fe7f6777ae1565a7aa13b44be73eceae01`; canonical script SHA256 `7336cf31bc3ebee3a06144a70ac0e57057c0791d0e1e7a573c9f0dcb1c337dcb`, matching producer evidence. Canonical receipt at epoch 1790988375 reported detached pid 8768, ok=true; private result at 2026-10-03T00:46:15Z reported ok=false and in-turn refusal. Negative selection pid 19828 printed STALE_SCRIPT_SELECTED despite identical build root. Its stub contains exit 7, but fixture does NOT observe that exit status.
+
+Falsification: replacing selected-script choice with stale unconditionally failed exit 1 at marker assertion; replacing canonical expected marker with REVIEW_NONEXISTENT_MARKER also failed exit 1. Each was a private copy under reviewer Git metadata, not a repository edit. Logs and JSON retained under `git rev-parse --git-path bootstrap-review`: original.json, original.log, selection-mutant.log, marker-mutant.log, results.json. Foreground operation `op-1790988375099137-9804-3333` settled exit 0 after 22.344s, including all three bounded tests. Subsequent read-only process inventory found only live sentinel pid 2004, no private sentinel or fixture-script child. This post-observation is not a fixture timeout-cleanup guarantee.
+
+Safety-first execution used an outer environment allowlist (PATH, SYSTEMROOT, WINDIR, COMSPEC, TEMP, TMP, PATHEXT, SYSTEMDRIVE, LOCALAPPDATA), removing inherited credential/plugin/service/WA state before running the unchanged fixture. It then set its private home/install/ports and retained WASM_AGENT_IN_TURN=1. No live CLI request was issued. No executable copied, marker removed, deployed file changed, restart, provider call or push performed.
+
+## Claims passed and claims refused
+
+Source main.rs 1369–1413 resolves script override, executable-adjacent scripts, cwd scripts, then cwd parent scripts (last fallback omitted in delivery prose). Request fields cannot alter watcher environment. WA_DEPLOY_ROOT resolves build root only. perform/finish_request report successful spawn as done/ok, not installation. Five-second durable acceptance is absent. No deploy completion is proved by queue, claim, detached receipt, or exit zero alone.
+
+Fixture is narrower than a general no-live-effects certificate:
+
+- os.environ.copy leaks arbitrary inherited state unless caller fences it. Private targets plus early refusal constrain this exact tree, but not an arbitrary modified repo/script/interpreter. The substring safety assertion is not a structural guard proof.
+- Canonical script sources adjacent service-target.sh and calls read-only target/service discovery before the guard (line 193). Thus live service reads may occur; no live source-root build or install is reached. Helper defines functions only when sourced. source/build-root resolution occurs after refusal.
+- Mock implements GET only, for any path, returning idle; POST is unsupported. No session/prompt is supplied, so refusal cannot queue a wake.
+- Only install/wa.exe absence is asserted, not all installation variants or a before/after live snapshot. Temporary capture originals are deleted; JSON preserves selected text, not complete stdout/stderr/exit history.
+- once can exit before watch_deploy_exit thread settles (source explicitly documents this). Marker polling is NOT process completion. subprocess timeout kills/waits the once process only, not necessarily detached children; there is no private process-tree cleanup in fixture. Do not treat this as safe for arbitrary slow/malicious overrides. Refuse that broader claim; producer should harden isolation/settlement separately.
+
+## Existing sanctioned bootstrap: conditional, not hand-only
+
+A REQUEST written inside a run can launch canonical deploy through an existing outside watcher IF that watcher already resolves canonical script (override or fallback), its build root/target are verified, and it is not itself contaminated by in-turn marker. No request-side override changes that. No live request was tested.
+
+Alternative inspected rather than dismissed: request run uses canonicalized WA_SENTINEL_SCRIPTS prefix allowlist and wa_operation supervision (302s). Current spell.rs ALLOWED_STEPS includes run and calls the SAME approved_script/verb_run, despite docs/SENTINEL.md and loaded self-update text saying run is excluded. It offers no deploy verb, no arbitrary environment or arguments. A canonical script already inside the watcher's allowlist can therefore be named, but directly running deploy that restarts its sentinel parent has unproved survival and a 302s bound. An existing approved outside-placement launcher could bridge that gap; none was established in this review. Do not create a wrapper, widen allowlist, strip marker, or rely on this as verified recovery.
+
+Read-only live selection evidence: pid 2004 runs installed wa-sentinel.exe watch; parent pid 18244 no longer appeared. Installed sentinel-task.cmd sets only installed scripts allowlist, home, wake budget and child capacity, NOT WA_SENTINEL_DEPLOY or WA_DEPLOY_ROOT. It proves launcher defaults, not pid 2004's actual inherited environment. Installed deploy.sh hash `db21a0c8354bbb308a1f0e893d3e0884792f1e1da62b1f18ebcaacfd01b15de4` differs from canonical. Effective live override/cwd/allowlist remains UNKNOWN. Thus existing-watcher canonical REQUEST bootstrap is blocked on verified environment/placement (or an already approved outside launcher); not on coordinator policy alone. Coordinator standing authority does not magically supply an outside-run executor. Sanctioned canonical direct deploy remains an outside-all-turns coordinator action if authorized; it is not something this reviewer may execute.
+
+## Live postconditions and remaining work
+
+Read-only installed.txt confirms unknown commit/branch/dirty, source hint e2a86bc, unverified-binary/final via upgrade at 23:02:02Z. Global deploy-result remains false at 20:33:12Z, predating it. Recorded sentinel hash `4660edee…` differs from actual `fcd5525c…`; final record alone cannot certify installed sentinel or clean deploy. Existing deploy.out shows node replacement and sentinel 2904→2004, then lines 572/574 errors; subsequent stub-success lines do not settle that deploy. Precise byte-write race remains unproved. No-op/unknown provenance must not be relabeled clean-built-by-deploy. Verification must require intended landed SHA, fresh attributable outcome, hashes/scripts and listener/watcher identity. onSentinelReturn remains deferred.
+
+Focused tests only; no full release gate requested or run. No main synchronization changing the reviewed tree, no merge, deploy or push. Finish readiness is recorded separately; an unpublished reviewer branch is intentionally not merge-ready. Original report needs the settlement/isolation limitations and conditional run/spell alternatives above before broad acceptance.

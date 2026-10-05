@@ -1,0 +1,8 @@
+{
+  "tip": "6bc1124da0e60c055e7b8e59e357798a5b842f0d",
+  "tree": "545dd3d36763cddf7a12293ad467015c1daa644a",
+  "verdict": "NARROWED PASS intake only; full functional acceptance remains REFUSED",
+  "artifacts": "C:\\Users\\Victor\\orca\\projects\\wasm-agent\\.git\\worktrees\\wa-worktree-childdispatch8e9c7a55-7e1c-4c1a-a4cb-46df905929be\\sentinel-intake-final-review",
+  "fixture": "C:\\Users\\Victor\\orca\\projects\\wasm-agent\\.git\\worktrees\\wa-worktree-childdispatch8e9c7a55-7e1c-4c1a-a4cb-46df905929be\\intake-gate-1791025498-2197",
+  "reviewer": "child:dispatch:8e9c7a55-7e1c-4c1a-a4cb-46df905929be"
+}
