@@ -97,6 +97,35 @@ recorded sentinel ~321 reads/s and ~1.15 MB/s; cached/network I/O is included an
 fan causation is unproven. Installation and a comparable post-install observation
 remain separate verification steps; historical cleanup unknowns are unchanged.
 
+Post-install follow-up, 2026-10-05: `a0c6994` is installed from clean published
+main with final `clean-built-by-deploy` provenance; installation verification
+passed 65 checks and the installed private real-parent test passed 12, zero skips.
+Scheduled jobs and their revisions remain unchanged/disabled; the event-only
+return hook remains enabled. The post-install OS counter samples were higher,
+not lower (~464–483 sentinel reads/s, ~1.75–1.82 MB/s), during the sentinel-owned
+continuation stream. These are not matched idle measurements: no total I/O
+improvement or fan-noise causation is claimed. Deferred transcript-fetch removal
+is established by the private native regression, not those aggregate counters.
+
+Cleanup resumed with bounded additional provenance leads, not another exhaustive
+fixture scan. Four alternate retained ledgers had no exact remaining-claim run;
+a fifth historical backup refused as malformed and remains untouched/unresolved.
+Git reflogs explain the ten unchanged branch mismatches; four missing original
+source roots now link to the canonical shared registry. Neither fact grants
+branch/source relabelling or bypasses original-operation fences. Inspected
+supported recovery refuses replacement of allocated bindings, and parking/release
+still require the recorded branch plus relevant-operation settlement. No further
+claim, operation or binding was released from these leads. The remaining boundary
+is **77 historical operations** (76 preserved legacy originals, 75 unattributed;
+one accepted modern admission), **three uncertain execution claims**, **46 held
+workspace targets** and the legacy-unverified wave. All 76 original hashes were
+rechecked unchanged. Git/install success is separate from runtime readiness.
+Local dated evidence: `RECOVERY-CURRENT-RESULT-v35.json` and
+`RECOVERY-NEW-LEADS-v35.json` in this cleanup session's scratch directory.
+Actual original run/identity/drain/effect provenance remains necessary; do not
+replay effects, overwrite unknowns, switch branches or delete evidence to clear
+these counts. No full release certification is claimed.
+
 ## Status vocabulary
 
 - **Implemented:** a mechanism exists in the repository; not a release certification.
