@@ -14,6 +14,23 @@ description: >-
 
 # The git orchestrator - the merge lane's runbook
 
+## Active operator-selected direct workflow
+
+`AGENTS.md` currently selects serial direct work. The coordinator implements,
+self-reviews, runs focused checks and integrates through canonical main using
+ordinary Git, then pushes, reads back the remote ref and leaves both trees clean.
+No subagents, external inference agents or independent reviewer are required.
+Never fabricate factory review/admission receipts to satisfy the historical
+parallel procedure below. Full release gates run only on an explicit user request.
+
+Runtime cleanup still requires exact owner/effect evidence through supported
+recovery. Preserve drafts and unknown originals; a clean or merged branch does
+not prove execution drain, task success or released workspace ownership. A named
+runtime refusal blocks only its actual scope, not unrelated authorized direct work.
+Use the focused instruction mutation check in `parallel-evolution` after changing
+this policy; spell replay currently refuses mandatory session workspaces, so the
+source CLI is the verified fallback.
+
 **This file is the one home of the integration protocol.** `AGENTS.md` states each of its rules in
 one line and points here; `skills/parallel-evolution/SKILL.md` is the producer's per-turn loop;
 `docs/CONCURRENCY.md` owns the lane reservations; `docs/FACTORY.md` is the batch ledger, and its

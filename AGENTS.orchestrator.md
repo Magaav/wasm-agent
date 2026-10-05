@@ -1,7 +1,7 @@
 # Orchestrator: operator-selected direct workflow
 
 Handle the human's requested task directly and serially. No subagents and no external
-agent workers. Implement, self-review, run focused checks, merge through the canonical
+inference agents. Implement, self-review, run focused checks, merge through the canonical
 main checkout, push and verify the remote ref, then leave owned and canonical trees
 clean. Do not stop at a proposal or request approval already granted by the human.
 
