@@ -149,7 +149,20 @@ impl Index {
         let required = |name: &str| args[name].as_str().filter(|s| !s.trim().is_empty()).ok_or_else(|| error(format!("{name}_required")));
         let id = required("id")?;
         validate_id(id)?;
-        let expected = args["expected_state"].as_object().ok_or_else(|| error("expected_state_required"))?;
+        // Lua's ordinary JSON decoder maps null to nil, so decoding/re-encoding
+        // a durable state loses fields (and can round large integers). Accept an
+        // explicit raw JSON string without weakening exact object comparison.
+        let raw_expected;
+        let expected = if args.get("expected_state_json").is_some() {
+            if args.get("expected_state").is_some() {
+                return Err(error("expected_state_forms_exclusive"));
+            }
+            raw_expected = serde_json::from_str::<Value>(required("expected_state_json")?)
+                .map_err(|_| error("expected_state_json_invalid"))?;
+            raw_expected.as_object().ok_or_else(|| error("expected_state_json_object_required"))?
+        } else {
+            args["expected_state"].as_object().ok_or_else(|| error("expected_state_required"))?
+        };
         required("evidence")?; required("drain_evidence")?; required("effect_evidence")?;
         let raw = fs::read(self.root.join(id).join("state.json"))?;
         let current: Value = serde_json::from_slice(&raw).map_err(error)?;
