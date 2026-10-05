@@ -1,0 +1,15 @@
+empty {} => over
+alive {"worker":"alive"} => over
+nodechat {"worker":"alive","node_threads":[{"label":"POST /node/chat","session":"foreign"}]} => over
+runs {"worker":"alive","node_threads":[{"label":"POST /runs","session":"foreign"}]} => over
+queued {"run_ids":[{"conversation":"mine","run_id":7,"state":"queued"}]} => running
+unknownstate {"run_ids":[{"conversation":"mine","run_id":7}]} => over
+foreignreuse {"node_threads":[{"session":"foreign","run_id":7}]} => running
+scheduler {"run_ids":[{"conversation":"mine","run_id":7,"state":"running"}]} => running
+stage valid { ok: true, reason: 'browser_terminal_verdict_required' }
+stage absent { ok: false, reason: 'browser_terminal_verdict_required' }
+stage duplicate { ok: false, reason: 'browser_terminal_verdict_required' }
+stage false { ok: true, reason: 'browser_terminal_verdict_required' }
+stage doublefield { ok: true, reason: 'browser_terminal_verdict_required' }
+stage duplicateToken { ok: true, reason: 'browser_terminal_verdict_required' }
+stage denied { ok: false, reason: 'browser_terminal_verdict_required' }

@@ -1,0 +1,1 @@
+const fs=require('fs'),assert=require('assert');const text=fs.readFileSync(process.argv[2],'utf8');assert(!text.includes('Engine exact event preference failed'),'browser Engine assertion failed');assert(text.includes('"id": "9007199254740993"')||text.includes('"id":"9007199254740993"'),'exact browser event evidence missing');console.log('Engine actual component events verified');

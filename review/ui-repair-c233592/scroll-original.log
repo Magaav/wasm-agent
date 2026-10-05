@@ -1,0 +1,25 @@
+stage C:\Users\Victor\AppData\Local\Temp\wa-probe-Ku8mZF  browser msedge.exe  exit 0  dom 38327 bytes
+---- probe result ----
+[
+  {
+    "case": "nonbottom-append",
+    "top": 200,
+    "anchor": true,
+    "delta": 0
+  },
+  {
+    "case": "bottom",
+    "distance": 0,
+    "overflow": "auto"
+  },
+  {
+    "case": "prepend",
+    "top": 441,
+    "anchorDelta": 0
+  }
+]
+---- browser stderr (first 800 chars) ----
+[4928:17572:1002/220613.663:ERROR:components\edge_ess\vbs_encoder.cc:100] LoadEnclaveImageW failed, error code 577
+[4928:17572:1002/220614.085:ERROR:components\edge_auth\edge_auth_errors.cc:553] EDGE_IDENTITY: Image Fetch FAILED: Error: Primary Error: kAccountImageFetchFailure, Secondary Error: kUnspecified, Platform error: 0, Error string: [empty]
+
+

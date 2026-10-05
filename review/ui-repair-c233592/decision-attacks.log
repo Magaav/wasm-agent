@@ -1,0 +1,32 @@
+empty {} => busy-unknown
+alive {"worker":"alive"} => busy-unknown
+nodechat {"worker":"alive","node_threads":[{"label":"POST /node/chat","session":"foreign"}]} => busy-unknown
+runs {"worker":"alive","node_threads":[{"label":"POST /runs","session":"foreign"}]} => busy-unknown
+queued {"run_ids":[{"conversation":"mine","run_id":7,"state":"queued"}]} => running
+unknownstate {"run_ids":[{"conversation":"mine","run_id":7}]} => busy-unknown
+foreignreuse {"node_threads":[{"session":"foreign","run_id":7}]} => busy-unknown
+scheduler {"run_ids":[{"conversation":"mine","run_id":7,"state":"running"}]} => running
+terminal/identity {
+  run_ids: [ { conversation: 'mine', run_id: 7, state: 'completed' } ]
+} over finished
+terminal/identity {
+  run_ids: [ { conversation: 'foreign', run_id: 7, state: 'completed' } ]
+} busy-unknown finished
+terminal/identity {
+  run_ids: [
+    {
+      conversation: 'mine',
+      run_id: 9007199254740992,
+      state: 'completed'
+    }
+  ]
+} busy-unknown finished
+stage valid { ok: true, reason: 'browser_terminal_verdict_required' }
+stage absent { ok: false, reason: 'browser_terminal_verdict_required' }
+stage duplicate { ok: false, reason: 'browser_terminal_verdict_required' }
+stage false { ok: false, reason: 'browser_terminal_verdict_required' }
+stage doublefield { ok: false, reason: 'browser_terminal_verdict_required' }
+stage duplicateToken { ok: false, reason: 'browser_terminal_verdict_required' }
+stage denied { ok: false, reason: 'browser_terminal_verdict_required' }
+stage prose { ok: true, reason: 'browser_terminal_verdict_required' }
+stage extraMarker { ok: true, reason: 'browser_terminal_verdict_required' }

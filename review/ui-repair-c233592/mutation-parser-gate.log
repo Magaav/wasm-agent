@@ -1,0 +1,2 @@
+check ui-browser: PASS exit=0 ms=6524.2 log=C:\Users\Victor\AppData\Local\Temp\wa-checks-90nEwy\ui-browser.log
+  ok   UI structure, mid-run reload, startup recovery, the inspect window, and a view window [stages: reload,startup-recovery,inspect-window,view-window]
