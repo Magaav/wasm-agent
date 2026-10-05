@@ -22,6 +22,48 @@ These are two entry paths into one runtime:
 The fleet console serves these journeys. It is not the product's required first
 screen, and 32 workers are not a prerequisite for helping one customer.
 
+## Maintenance baseline — 2026-10-05
+
+The operator-selected direct workflow in `AGENTS.md` is active: one human-requested
+change, no delegated workers, honest self-review, focused checks, canonical-main
+integration and remote readback. Full release gates remain an explicit user choice.
+The multi-lane delivery discipline below is historical guidance, not permission
+to restart parallel production.
+
+- Source baseline `4b07274` is published and installed. Transcript recovery and
+  exact-source recovery fixtures passed their focused checks; installation
+  verification reported 65 checks, zero failures and zero skips. No full release
+  certification is claimed.
+- The original seven pending tips/two conflicts and 22 dirty worktrees were
+  reconciled to zero, preserving rejected source and hash-verified draft backups.
+  Sixteen integrated, dependency-free local aliases were archived before retirement.
+- Operation-index import preserved historical originals. Safe execution-claim
+  recovery does **not** release workspace bindings or prove task completion.
+  Delivery records now carry additive source-disposition observations while
+  retaining original reviews, findings, admissions and landing records. The
+  scheduled WhatsApp copilot was paused via `job disable` (revision 21, queued
+  zero); it must not silently restart responder delegation during direct work.
+- Runtime closure remains **blocked**, not ready: 76 historical operation unknowns
+  lack sufficient identity/drain proof; two newer operation records also need
+  recovery. The 46 attempted workspace retirements remain held (36 operation
+  refusals, ten recorded/actual branch mismatches). Legacy wave convergence and
+  a stale exact-run activity claim remain unverified. Missing processes, age,
+  overwritten states and clean Git cannot settle those effects.
+
+Local evidence is retained under the cleanup session's scratch directory
+(`~/.wasm-agent/session-scratch/` for session
+`6cebcd88-986d-445a-bbdb-69a274cc9537`): `LIVE-INSTALL-VERIFIED.json`,
+`OPERATION-INDEX-IMPORT.json`, `RETIREMENT-AFTER-INDEX.json`,
+`BRANCH-BINDING-BLOCKERS-v1.json` and `DELIVERY-DISPOSITION-RESULT-v1.json`.
+These are dated observations, not portable release proof or a completed wave.
+Ordinary direct development may proceed under `AGENTS.md`; protected leftovers
+and original unknown outcomes must remain preserved.
+
+The legacy instruction checker still fails on both the untouched baseline and
+this documentation update: six existing failures (old child-steering requirements,
+injected-file size and vocabulary). The focused comparison found no new failures;
+this maintenance did not weaken the checker or claim a full green release.
+
 ## Status vocabulary
 
 - **Implemented:** a mechanism exists in the repository; not a release certification.
