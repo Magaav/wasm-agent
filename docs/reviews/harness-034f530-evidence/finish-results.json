@@ -1,0 +1,61 @@
+[
+  {
+    "label": "audited dataset unchanged",
+    "equal": true,
+    "sha256": "423684bd2095584608f075df74dcf73fe88bfeb176cbf80575c4c02e33eb8cf4"
+  },
+  {
+    "label": "clean archive checker",
+    "status": 0,
+    "stdout": "portable harness feedback ok (119 report identifiers; 3 intentional exclusions)\n",
+    "stderr": ""
+  },
+  {
+    "label": "excerpt",
+    "status": 1,
+    "stdout": "",
+    "stderr": "node:assert:152\r\n  throw new AssertionError(obj);\r\n  ^\r\n\r\nAssertionError [ERR_ASSERTION]: report snapshot integrity mismatch\r\n+ actual - expected\r\n\r\n+ 'de60503e8bcd853ce39ac93b01d9d1486e8100ba78663b288cecfb0274d5fd15'\r\n- '423684bd2095584608f075df74dcf73fe88bfeb176cbf80575c4c02e33eb8cf4'\r\n\r\n    at Object.<anonymous> (C:\\Users\\Victor\\.wasm-agent\\wa-worktree-childdispatchc50fecea-e757-456a-8afd-c2390781a4ed\\review-private\\candidate\\scripts\\test-harness-feedback.cjs:5:8)\r\n    at Module._compile (node:internal/modules/cjs/loader:1872:14)\r\n    at Object..js (node:internal/modules/cjs/loader:2003:10)\r\n    at Module.load (node:internal/modules/cjs/loader:1594:32)\r\n    at Module._load (node:internal/modules/cjs/loader:1396:12)\r\n    at wrapModuleLoad (node:internal/modules/cjs/loader:255:19)\r\n    at Module.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:154:5)\r\n    at node:internal/main/run_main_module:33:47 {\r\n  generatedMessage: false,\r\n  code: 'ERR_ASSERTION',\r\n  actual: 'de60503e8bcd853ce39ac93b01d9d1486e8100ba78663b288cecfb0274d5fd15',\r\n  expected: '423684bd2095584608f075df74dcf73fe88bfeb176cbf80575c4c02e33eb8cf4',\r\n  operator: 'strictEqual',\r\n  diff: 'simple'\r\n}\r\n\r\nNode.js v24.19.0\r\n"
+  },
+  {
+    "label": "reporter",
+    "status": 1,
+    "stdout": "",
+    "stderr": "node:assert:152\r\n  throw new AssertionError(obj);\r\n  ^\r\n\r\nAssertionError [ERR_ASSERTION]: report snapshot integrity mismatch\r\n+ actual - expected\r\n\r\n+ '9690a2b7a02343a87c472008fa7dc3c392dfaed0e0270cfa8139d3cee8ac9e2f'\r\n- '423684bd2095584608f075df74dcf73fe88bfeb176cbf80575c4c02e33eb8cf4'\r\n\r\n    at Object.<anonymous> (C:\\Users\\Victor\\.wasm-agent\\wa-worktree-childdispatchc50fecea-e757-456a-8afd-c2390781a4ed\\review-private\\candidate\\scripts\\test-harness-feedback.cjs:5:8)\r\n    at Module._compile (node:internal/modules/cjs/loader:1872:14)\r\n    at Object..js (node:internal/modules/cjs/loader:2003:10)\r\n    at Module.load (node:internal/modules/cjs/loader:1594:32)\r\n    at Module._load (node:internal/modules/cjs/loader:1396:12)\r\n    at wrapModuleLoad (node:internal/modules/cjs/loader:255:19)\r\n    at Module.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:154:5)\r\n    at node:internal/main/run_main_module:33:47 {\r\n  generatedMessage: false,\r\n  code: 'ERR_ASSERTION',\r\n  actual: '9690a2b7a02343a87c472008fa7dc3c392dfaed0e0270cfa8139d3cee8ac9e2f',\r\n  expected: '423684bd2095584608f075df74dcf73fe88bfeb176cbf80575c4c02e33eb8cf4',\r\n  operator: 'strictEqual',\r\n  diff: 'simple'\r\n}\r\n\r\nNode.js v24.19.0\r\n"
+  },
+  {
+    "label": "date",
+    "status": 1,
+    "stdout": "",
+    "stderr": "node:assert:152\r\n  throw new AssertionError(obj);\r\n  ^\r\n\r\nAssertionError [ERR_ASSERTION]: report snapshot integrity mismatch\r\n+ actual - expected\r\n\r\n+ 'a7165ea205e89eeb5098df585d91933a810f46d31364d75e666ef5f84fef6d98'\r\n- '423684bd2095584608f075df74dcf73fe88bfeb176cbf80575c4c02e33eb8cf4'\r\n\r\n    at Object.<anonymous> (C:\\Users\\Victor\\.wasm-agent\\wa-worktree-childdispatchc50fecea-e757-456a-8afd-c2390781a4ed\\review-private\\candidate\\scripts\\test-harness-feedback.cjs:5:8)\r\n    at Module._compile (node:internal/modules/cjs/loader:1872:14)\r\n    at Object..js (node:internal/modules/cjs/loader:2003:10)\r\n    at Module.load (node:internal/modules/cjs/loader:1594:32)\r\n    at Module._load (node:internal/modules/cjs/loader:1396:12)\r\n    at wrapModuleLoad (node:internal/modules/cjs/loader:255:19)\r\n    at Module.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:154:5)\r\n    at node:internal/main/run_main_module:33:47 {\r\n  generatedMessage: false,\r\n  code: 'ERR_ASSERTION',\r\n  actual: 'a7165ea205e89eeb5098df585d91933a810f46d31364d75e666ef5f84fef6d98',\r\n  expected: '423684bd2095584608f075df74dcf73fe88bfeb176cbf80575c4c02e33eb8cf4',\r\n  operator: 'strictEqual',\r\n  diff: 'simple'\r\n}\r\n\r\nNode.js v24.19.0\r\n"
+  },
+  {
+    "label": "entry removed",
+    "status": 1,
+    "stdout": "",
+    "stderr": "node:assert:152\r\n  throw new AssertionError(obj);\r\n  ^\r\n\r\nAssertionError [ERR_ASSERTION]: report snapshot integrity mismatch\r\n+ actual - expected\r\n\r\n+ '877665f4aeaa1805a108c8eac52d8981c3d65eacaba373baf99ea8fec5950c6e'\r\n- '423684bd2095584608f075df74dcf73fe88bfeb176cbf80575c4c02e33eb8cf4'\r\n\r\n    at Object.<anonymous> (C:\\Users\\Victor\\.wasm-agent\\wa-worktree-childdispatchc50fecea-e757-456a-8afd-c2390781a4ed\\review-private\\candidate\\scripts\\test-harness-feedback.cjs:5:8)\r\n    at Module._compile (node:internal/modules/cjs/loader:1872:14)\r\n    at Object..js (node:internal/modules/cjs/loader:2003:10)\r\n    at Module.load (node:internal/modules/cjs/loader:1594:32)\r\n    at Module._load (node:internal/modules/cjs/loader:1396:12)\r\n    at wrapModuleLoad (node:internal/modules/cjs/loader:255:19)\r\n    at Module.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:154:5)\r\n    at node:internal/main/run_main_module:33:47 {\r\n  generatedMessage: false,\r\n  code: 'ERR_ASSERTION',\r\n  actual: '877665f4aeaa1805a108c8eac52d8981c3d65eacaba373baf99ea8fec5950c6e',\r\n  expected: '423684bd2095584608f075df74dcf73fe88bfeb176cbf80575c4c02e33eb8cf4',\r\n  operator: 'strictEqual',\r\n  diff: 'simple'\r\n}\r\n\r\nNode.js v24.19.0\r\n"
+  },
+  {
+    "label": "exclusion removed",
+    "status": 1,
+    "stdout": "",
+    "stderr": "node:assert:152\r\n  throw new AssertionError(obj);\r\n  ^\r\n\r\nAssertionError [ERR_ASSERTION]: report snapshot integrity mismatch\r\n+ actual - expected\r\n\r\n+ 'd9551d0ec847fe446d3cb597df6626f5f5b123f026cff4a7560a6a23d8988246'\r\n- '423684bd2095584608f075df74dcf73fe88bfeb176cbf80575c4c02e33eb8cf4'\r\n\r\n    at Object.<anonymous> (C:\\Users\\Victor\\.wasm-agent\\wa-worktree-childdispatchc50fecea-e757-456a-8afd-c2390781a4ed\\review-private\\candidate\\scripts\\test-harness-feedback.cjs:5:8)\r\n    at Module._compile (node:internal/modules/cjs/loader:1872:14)\r\n    at Object..js (node:internal/modules/cjs/loader:2003:10)\r\n    at Module.load (node:internal/modules/cjs/loader:1594:32)\r\n    at Module._load (node:internal/modules/cjs/loader:1396:12)\r\n    at wrapModuleLoad (node:internal/modules/cjs/loader:255:19)\r\n    at Module.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:154:5)\r\n    at node:internal/main/run_main_module:33:47 {\r\n  generatedMessage: false,\r\n  code: 'ERR_ASSERTION',\r\n  actual: 'd9551d0ec847fe446d3cb597df6626f5f5b123f026cff4a7560a6a23d8988246',\r\n  expected: '423684bd2095584608f075df74dcf73fe88bfeb176cbf80575c4c02e33eb8cf4',\r\n  operator: 'strictEqual',\r\n  diff: 'simple'\r\n}\r\n\r\nNode.js v24.19.0\r\n"
+  },
+  {
+    "label": "weakened floor through normal runner",
+    "status": 1,
+    "stdout": "",
+    "stderr": "session workspaces failed; retained fixture: C:\\Users\\Victor\\AppData\\Local\\Temp\\wa-session-workspaces-gec4uf\nAssertionError [ERR_ASSERTION]: green9 refused\n\nfalse !== true\n\n    at Object.<anonymous> (C:\\Users\\Victor\\.wasm-agent\\wa-worktree-childdispatchc50fecea-e757-456a-8afd-c2390781a4ed\\review-private\\candidate\\scripts\\test-long-command-contract.cjs:5:8)\n    at Module._compile (node:internal/modules/cjs/loader:1872:14)\n    at Object..js (node:internal/modules/cjs/loader:2003:10)\n    at Module.load (node:internal/modules/cjs/loader:1594:32)\n    at Module._load (node:internal/modules/cjs/loader:1396:12)\n    at wrapModuleLoad (node:internal/modules/cjs/loader:255:19)\n    at Module.require (node:internal/modules/cjs/loader:1617:12)\n    at require (node:internal/modules/helpers:153:16)\n    at C:\\Users\\Victor\\.wasm-agent\\wa-worktree-childdispatchc50fecea-e757-456a-8afd-c2390781a4ed\\review-private\\candidate\\scripts\\test-session-workspaces.cjs:53:5\n    at Object.<anonymous> (C:\\Users\\Victor\\.wasm-agent\\wa-worktree-childdispatchc50fecea-e757-456a-8afd-c2390781a4ed\\review-private\\candidate\\scripts\\test-session-workspaces.cjs:83:3)\n"
+  },
+  {
+    "label": "removed actual invocation through normal runner",
+    "status": 1,
+    "stdout": "",
+    "stderr": "session workspaces failed; retained fixture: C:\\Users\\Victor\\AppData\\Local\\Temp\\wa-session-workspaces-RkVIKH\nAssertionError [ERR_ASSERTION]: orchestrator must actually invoke fixture\n\n0 !== 1\n\n    at subject (C:\\Users\\Victor\\.wasm-agent\\wa-worktree-childdispatchc50fecea-e757-456a-8afd-c2390781a4ed\\review-private\\candidate\\scripts\\test-long-command-contract.cjs:3:221)\n    at Object.<anonymous> (C:\\Users\\Victor\\.wasm-agent\\wa-worktree-childdispatchc50fecea-e757-456a-8afd-c2390781a4ed\\review-private\\candidate\\scripts\\test-long-command-contract.cjs:4:14)\n    at Module._compile (node:internal/modules/cjs/loader:1872:14)\n    at Object..js (node:internal/modules/cjs/loader:2003:10)\n    at Module.load (node:internal/modules/cjs/loader:1594:32)\n    at Module._load (node:internal/modules/cjs/loader:1396:12)\n    at wrapModuleLoad (node:internal/modules/cjs/loader:255:19)\n    at Module.require (node:internal/modules/cjs/loader:1617:12)\n    at require (node:internal/modules/helpers:153:16)\n    at C:\\Users\\Victor\\.wasm-agent\\wa-worktree-childdispatchc50fecea-e757-456a-8afd-c2390781a4ed\\review-private\\candidate\\scripts\\test-session-workspaces.cjs:53:5\n"
+  },
+  {
+    "label": "restored normal runner",
+    "status": 0,
+    "stdout": "long-command parent contract ok (4 cases)\nportable harness feedback ok (119 report identifiers; 3 intentional exclusions)\nworkspace release ok (37 checks)\nsession workspaces integration ok (13 checks; real git worktrees, two concurrent processes, restart, no inference)\n",
+    "stderr": ""
+  }
+]

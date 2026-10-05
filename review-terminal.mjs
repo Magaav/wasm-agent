@@ -1,0 +1,5 @@
+import fs from 'node:fs';import vm from 'node:vm';
+const s=fs.readFileSync('scripts/test-final-answer-suite.mjs','utf8');const fn=s.slice(s.indexOf('function run('),s.indexOf('const env='));const terminal='final-answer wire causal checks pass (9 checks; synthetic; no inference)';
+const cases={missing:{status:0,stdout:'other PASS\n'},duplicate:{status:0,stdout:terminal+'\n'+terminal+'\n'},malformed:{status:0,stdout:terminal+' extra\n'},nonzero:{status:1,stdout:terminal},signal:{status:null,signal:'SIGTERM',stdout:terminal},error:{status:0,error:{message:'fixture error'},stdout:terminal},nested:{status:0,stdout:'legitimate other PASS\n'+terminal}};
+const result=[];for(const [name,r] of Object.entries(cases)){const context={spawnSync:()=>r,root:'.',base:{},path:{join:()=>''},out:'',fs:{writeFileSync:()=>{}},process:{stdout:{write:()=>{}}}};vm.createContext(context);vm.runInContext(fn,context);try{context.run('wire','fixture',[],{},terminal);result.push(name+':accepted');}catch(e){result.push(name+':refused '+e.message);}}
+fs.writeFileSync('review-evidence/final-terminal.log',result.join('\n'));console.log(result.join('\n'));

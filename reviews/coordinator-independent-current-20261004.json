@@ -1,0 +1,27 @@
+{
+  "verdict":"PASSED",
+  "reviewed_tip":"7c25282e2c0d5cb4a4e08e394f56b3d1353d0577",
+  "reviewed_tree":"c93303203aeb8ada3da674ea15cafbbc2129c417",
+  "original_review":"87b57fbb80345fc7e844d0c6c567e2ec69334969:reviews/coordinator-steps-review-20261004.json",
+  "current_candidate":"7d3b5af7b867e14da4a9a40532a31578a5cf2f62",
+  "private_combined_tip":"6173ff00d06429900b6831608c5b81cfc4b9e321",
+  "compatible_merge_tree":"0fec7114966d7cf3207d8e6a5110d64f9f91e24b",
+  "merge_proof_exit":0,
+  "original_review_claim":{"focused":38,"independent":15,"skipped":0,"ui_stages":4,"note":"Saved claims inspected, not relabelled as this execution. Review file resides under reviews/, not supplied docs/reviews/."},
+  "observed_checks":[
+    {"name":"exact producer coordinator38 and required UI4","exit":0,"skips":0,"operation":"op-1791156648493567-17652-3389","stdout_sha256":"18992cb227051a4f0ad936524f5472b9ee04e530d2b0e9d66ba6fe5a523e66ff"},
+    {"name":"combined coordinator38 and required UI4 plus final-answer normal suite","exit":0,"skips":0,"operation":"op-1791156674936975-17652-3408","stdout_sha256":"6598883ca1da7e44ca664721bd58b7c8c85463e058c72ae28504618edb056897"},
+    {"name":"independent shared-browser lifecycle13 and retained final-answer suite","exit":0,"skips":0,"operation":"op-1791156730339249-17652-3453","stdout_sha256":"e41aba21c36cc8d9f6a5f73009bfec3abc24368d650f40ba9221d359ba98ee50","suite_counts":{"verdict":8,"wire":9,"production_loop":55,"native_adapter":15,"pi_bridge":"terminal pass, numeric count not reported","browser":"terminal pass, numeric count not reported"}},
+    {"name":"private assertion mutation","exit":1,"expected":true,"operation":"op-1791156750904408-17652-3471","stdout_sha256":"ec8a77f7e4ff9bfe110ab70acd4500a6d6445f4958263e1b15bee850d477424d","failure":"MUTATION done stops ticker"},
+    {"name":"restored independent13","exit":0,"skips":0,"operation":"op-1791156768188128-17652-3480"},
+    {"name":"app/components syntax and test.sh bash syntax","exit":0,"operation":"op-1791156783024074-17652-3489"}
+  ],
+  "source_review":"Observed phases are page-owned per node/chat/epoch/run; tool and content anchors restore chronology; terminal repaint settles missing-event spinners; child rendering saves/restores state. Component labels use textContent. Existing final_answer_begin/start-anchor/return-bottom controls and targeted lookup_session remain in combined source. No Lua agent loop change is introduced by coordinator. Current candidate lacks wa-step component and phase state; this is not a duplicate delivery.",
+  "test_wiring":"One added node scripts/test-coordinator-steps.cjs inside existing successful Windows browser block; no guard-policy changes or gate demand. Existing unavailable-browser/non-Windows skips remain existing policy, not exercised here. Routine focused review compliant.",
+  "source_root":"UI harness sets WASM_AGENT_LUA_ROOT to checkout root; final suite explicitly binds checkout root and private home/db, strips WA/WASM_AGENT/PI environment. Installed wa.exe is test host only, not candidate Rust attestation.",
+  "visual_inspection":"Three PNGs opened: coordinator phases and commentary stay inside balloons with footer below; independent terminal has settled phase and visible composer; final-answer growth screenshot preserves readable content and composer. The final growth screenshot does not itself prove collapsed-topic appearance; dedicated browser structural assertions do.",
+  "evidence":"Retained under own Git metadata coordinator-independent-evidence/private (normal/restored/mutation DOM, PNG, browser logs and final suite logs/receipts/events), exact-producer and combined-producer. No age deletion. Production tracked files were never instrumented; private assertion restored.",
+  "closing":"finish.mjs check observed current/merge proof true, readiness false for untracked evidence and unpublished/no-upstream private branch. Evidence subsequently moved into own Git metadata and source tree clean. No push per assigned main-only publication policy. No full gate or release verify run.",
+  "limitations":["No full gate, paid inference, live provider/account/window, bootstrap, deploy or installed-file writes.","No candidate Rust build or backend whole-suite review; accepted backend source was mechanically combined and normal native adapter fixtures passed.","test-ui.ps1 deletes its own successful temporary artifacts; retained independent rerun preserves detailed final-suite artifacts. Original UI stages have terminal raw log only.","No global next-wave cleanliness, legacy retirement or publication authorization is certified."],
+  "gate_verified":false,"release_verified":false,"requires_combined_gate":false,"ref_moved":false
+}

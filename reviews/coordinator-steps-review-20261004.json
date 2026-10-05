@@ -1,0 +1,119 @@
+{
+  "schema": 1,
+  "kind": "independent-coordinator-phase-review",
+  "reviewer": "coordinator-steps-review-20261004",
+  "producer": "coordinator-steps-20261004",
+  "tip": "7c25282e2c0d5cb4a4e08e394f56b3d1353d0577",
+  "tree": "c93303203aeb8ada3da674ea15cafbbc2129c417",
+  "verdict": "passed",
+  "focused_scope": {
+    "files": [
+      "DESIGN.md",
+      "scripts/probe-coordinator-steps.js",
+      "scripts/test-coordinator-steps.cjs",
+      "scripts/test-ui.ps1",
+      "scripts/test.sh",
+      "ui/app.js",
+      "ui/components.js",
+      "ui/style.css"
+    ],
+    "reason": "Keep all observed coordinator phases and elapsed time inside one turn balloon across queued submissions, checkpoint replay, terminal-event loss and child rendering; preserve chronology, privacy and recorded footer semantics. Validate real browser rendering and the existing UI recovery suite; wire the focused check into the browser smoke block.",
+    "checks": [
+      "case:scripts/test-coordinator-steps.cjs",
+      "ui-browser"
+    ],
+    "cases": [
+      {
+        "id": "case:scripts/test-coordinator-steps.cjs",
+        "path": "scripts/test-coordinator-steps.cjs",
+        "verdict": "counted",
+        "terminal_prefix": "coordinator steps ok",
+        "minimum": 37
+      }
+    ]
+  },
+  "focused_scope_sha256": "e6d66148eb46850a66777d068b5e9fa469a287e3dcb87714e8b924bbd23d4a08",
+  "summary": "Observed turn phases remain in the assistant balloon; same-run repaint preserves timers and content/tool chronology, historical phase caches settle on new run identity, child render state is isolated, and terminal ledger state clears missing-event spinners. Focused browser suite, independent lifecycle/privacy attacks and required UI recovery/inspection suite pass on the exact source.",
+  "source_files_sha256": {
+    "DESIGN.md": "62413bb056142516290e4b7a79479a83870dfcac7a5447145de38ff2e6261259",
+    "scripts/probe-coordinator-steps.js": "c6802f1c4afa9d71e4ba8e2be32809206dc622e0f1753a5ccb148a4540fee6f1",
+    "scripts/test-coordinator-steps.cjs": "afec6efb72aaf8ea934a7cc1c4e58244b40bcda07844d2acb52474333f77d913",
+    "scripts/test-ui.ps1": "0c5d7525de7f5d3c643ff4236ce89bfea96da3b1aadccbdb82b66337f140375d",
+    "scripts/test.sh": "9c5eb691136289449b3ada9a8243cbe311230288d89b08175e0668d2f2df1f12",
+    "ui/app.js": "5f9d713eed8ef8c537f89110150f7635d59563d9bfb9b8a2523438e937446b10",
+    "ui/components.js": "89f3c35b94492afe16697ceb7c825f3c683e3d5966f07aef698d5d3a5b46e60d",
+    "ui/style.css": "4933c8beea0f66c9a207bb87a987580d61d4183732eea1f0fa21f9aa599ba96b"
+  },
+  "ui_test_binary": {
+    "path": "C:/Users/Victor/AppData/Local/wasm-agent/wa.exe",
+    "sha256": "406e053a4fff1936a15d6de81dd3e6a65d760e397c945414d296fd1e7c488b8e"
+  },
+  "checks": [
+    {
+      "name": "focused",
+      "status": "fulfilled",
+      "exit": 0,
+      "output": "{\"checks\":38,\"skipped\":0,\"evidence\":[{\"case\":\"background coordinator\",\"steps\":[\"✓Working — waiting for the next step0s\",\"✓Preparing turn0s\",\"✓Waiting for model response0s\",\"✓Selecting tools0s\",\"✓Executing tools0s\",\"✓Waiting for model response0s\",\"✓Receiving model output0s\",\"✓Writing response0s\"],\"tools\":1},{\"case\":\"new conversation\",\"steps\":[\"Working — waiting for the next step0s\"]}]}\ncoordinator steps ok (38 checks, 0 skipped)\nevidence: C:\\Users\\Victor\\AppData\\Local\\Temp\\wa-coordinator-steps-TgiHpF\n"
+    },
+    {
+      "name": "independent",
+      "status": "fulfilled",
+      "exit": 0,
+      "output": "{\"ok\":true,\"browser\":\"C:\\\\Program Files\\\\Google\\\\Chrome\\\\Application\\\\chrome.exe\",\"ui\":\"C:\\\\Users\\\\Victor\\\\.wasm-agent\\\\wa-worktree-coordinator-steps-review-20261004\\\\ui\",\"browserExit\":0,\"browserSignal\":null,\"browserError\":null,\"probeStatus\":\"pass\",\"probeText\":\"{\\r\\n  \\\"checks\\\": 15,\\r\\n  \\\"skipped\\\": 0,\\r\\n  \\\"evidence\\\": [\\r\\n    {\\r\\n      \\\"ok\\\": true,\\r\\n      \\\"label\\\": \\\"new run with complete history must settle prior phase\\\"\\r\\n    },\\r\\n    {\\r\\n      \\\"ok\\\": true,\\r\\n      \\\"label\\\": \\\"post-sync health snapshot must not resurrect completed phase\\\"\\r\\n    },\\r\\n    {\\r\\n      \\\"ok\\\": true,\\r\\n      \\\"label\\\": \\\"post-sync done must keep elapsed ticker stopped\\\"\\r\\n    },\\r\\n    {\\r\\n      \\\"ok\\\": true,\\r\\n      \\\"label\\\": \\\"missing done settles phase from answered ledger\\\"\\r\\n    },\\r\\n    {\\r\\n      \\\"ok\\\": true,\\r\\n      \\\"label\\\": \\\"missing done keeps settled duration as last balloon child\\\"\\r\\n    },\\r\\n    {\\r\\n      \\\"ok\\\": true,\\r\\n      \\\"label\\\": \\\"missing done preserves phase before final answer\\\"\\r\\n    },\\r\\n    {\\r\\n      \\\"ok\\\": true,\\r\\n      \\\"label\\\": \\\"unknown admission state uses a neutral observed phase\\\"\\r\\n    },\\r\\n    {\\r\\n      \\\"ok\\\": true,\\r\\n      \\\"label\\\": \\\"same run phase changes when queued admission starts\\\"\\r\\n    },\\r\\n    {\\r\\n      \\\"ok\\\": true,\\r\\n      \\\"label\\\": \\\"commentary without final answer cannot complete previous phase\\\"\\r\\n    },\\r\\n    {\\r\\n      \\\"ok\\\": true,\\r\\n      \\\"label\\\": \\\"repaint keeps early phase before commentary payload\\\"\\r\\n    },\\r\\n    {\\r\\n      \\\"ok\\\": true,\\r\\n      \\\"label\\\": \\\"repaint preserves model waits on both sides of commentary\\\"\\r\\n    },\\r\\n    {\\r\\n      \\\"ok\\\": true,\\r\\n      \\\"label\\\": \\\"restored run summary counts displayed phase steps\\\"\\r\\n    },\\r\\n    {\\r\\n      \\\"ok\\\": true,\\r\\n      \\\"label\\\": \\\"phase labels render untrusted status as text\\\"\\r\\n    },\\r\\n    {\\r\\n      \\\"ok\\\": true,\\r\\n      \\\"label\\\": \\\"child rendering preserves parent phase and timer ownership\\\"\\r\\n    },\\r\\n    {\\r\\n      \\\"ok\\\": true,\\r\\n      \\\"label\\\": \\\"same sequence in another chat cannot expose prior phase label\\\"\\r\\n    }\\r\\n  ]\\r\\n}\",\"requiredMarkers\":[\"wasm-agent\"],\"missingMarkers\":[],\"renderError\":null,\"probeError\":null,\"dom\":\"C:\\\\Users\\\\Victor\\\\.wasm-agent\\\\scratch\\\\coordinator-independent-lifecycle-final-refreshed\\\\dom.html\",\"screenshot\":\"C:\\\\Users\\\\Victor\\\\.wasm-agent\\\\scratch\\\\coordinator-independent-lifecycle-final-refreshed\\\\screenshot.png\",\"browserLog\":\"C:\\\\Users\\\\Victor\\\\.wasm-agent\\\\scratch\\\\coordinator-independent-lifecycle-final-refreshed\\\\browser.log\"}\n"
+    },
+    {
+      "name": "ui-browser",
+      "status": "fulfilled",
+      "exit": 0,
+      "output": "  ok   UI structure, mid-run reload, startup recovery, the inspect window, and a view window [stages: reload,startup-recovery,inspect-window,view-window]\n"
+    }
+  ],
+  "findings": [],
+  "resolved_findings": [
+    {
+      "problem": "A full-history repaint for a new run reinserted the previous run's active phase as an orphaned spinner.",
+      "resolution": "Changed run identity settles cached prior phase from its own durable history before restoring it; new run receives a distinct phase state."
+    },
+    {
+      "problem": "No-tool terminal repaint placed cached phases after final answer and duration footer.",
+      "resolution": "Unanchored phases are placed before final segments/footer and terminal ledger settlement clears active state."
+    },
+    {
+      "problem": "Commentary checkpoint repaint moved both earlier and later model waits after the commentary payload.",
+      "resolution": "Content anchors preserve phase placement around the payload; independent before/after commentary attack passes."
+    },
+    {
+      "problem": "Restored topic header omitted the restored phase count.",
+      "resolution": "Restoration recounts displayed phase/text steps and tool calls while preserving saved summary duration."
+    },
+    {
+      "problem": "Commentary-only historical rows could imply a completed phase; queued label read an unavailable property.",
+      "resolution": "Historical final-answer inference excludes commentary; external unknown admissions use neutral wording and foreground queue state uses existing exact submitted run identity."
+    },
+    {
+      "problem": "A streamed decision trace was promoted before the Executing tools phase in the live DOM.",
+      "resolution": "The active execution phase is placed directly before its existing trace prior to promotion; the exact focused fixture asserts this chronology and passes 38 checks."
+    }
+  ],
+  "visual_inspection": {
+    "screenshot": "C:/Users/Victor/.wasm-agent/scratch/coordinator-independent-lifecycle-final-refreshed/screenshot.png",
+    "inspected": true,
+    "observation": "Phase row and ticking status remain visibly inside a single assistant balloon, with no unrelated phase text in the switched conversation."
+  },
+  "limits": [
+    "Routine focused source review; no full release gate was requested or run.",
+    "Phase timings measure what this page observed. Reloaded pages cannot reconstruct unrecorded earlier phase timings.",
+    "Browser fixtures exercise the lifecycle, timing ownership and privacy boundaries; this is not a claim of verified task success."
+  ],
+  "gate_verified": false,
+  "release_verified": false,
+  "requires_combined_gate": false,
+  "previous_review": {
+    "tip": "afcb6b81454e838c046bed45ee6693eab92eb1b8",
+    "tree": "d93b52563cafac2e0eb31578f3f3e5dc8c2e4314",
+    "commit": "ae37202d6ccaaafd4fa3c50b2c7f4f1ae930660a"
+  },
+  "tested_checkout_head": "6872736a7f9290b9f8d9b1fdebdc2dc682c92f10",
+  "tested_checkout_tree": "f2f5b8286d840dd7b43f348730e580d796542807",
+  "tested_source_note": "The review checkout preserves earlier independent review artifacts. Every focused source file SHA256 was verified equal to the exact reviewed producer commit. The UI test runner was materialized as the Git blob's LF bytes and re-executed; its source is otherwise unchanged."
+}
