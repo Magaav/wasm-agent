@@ -3,7 +3,7 @@
 The operator has disabled delegation for this repository. Work directly and serially
 on each human-requested task: implement, self-review, run appropriate focused checks,
 merge in the canonical main checkout, push and read back origin/main, and leave the
-owned and canonical worktrees clean. Do not start subagents or external agent workers.
+owned and canonical worktrees clean. Do not start subagents or external inference agents.
 Do not create new orchestration, watchers or gates to complete ordinary work. Full
 release gates run only when the human explicitly requests them.
 
@@ -46,34 +46,24 @@ side. Auth is the `github-wasm-agent` SSH host alias. Work happens on a short-li
 `change/<name>` branch cut from `origin/main` and merged when done; the node's own branch is its
 name.
 
-**A lane owns its tree; only the merge lane moves `main`.** Work happens in a worktree on the
-branch that carries its name, and a producer's branch is its deliverable - the mistake this
-replaced was an agent committing to `main` from the wrong tree (`docs/ORCHESTRATION.md`).
-Integration is a lane of its own and runs without a human step: a delivery an independent reviewer
-verified, whose own tree carries appropriate focused source checks, is merged and pushed by the merge lane, which is
-authorised to land deliveries without asking each time. Who may move `main`, what a landing must
-carry, the lifecycle (produce -> verify -> accept -> land -> deploy), the lanes and their
-reservations are one rule set in `skills/git-orchestrator/SKILL.md`
-("The integration protocol"); `docs/CONCURRENCY.md` holds the lane reservations. The
-`.githooks/pre-commit` guard is convenience; the boundary that cannot be skipped is remote-side.
+**A lane owns its tree; only the merge lane moves `main`.** Direct work uses the
+operator-selected workflow above. The historical parallel procedure is in
+`skills/git-orchestrator/SKILL.md` ("The integration protocol"), subject to that
+override; `docs/CONCURRENCY.md` owns lane reservations. Hooks are convenience;
+remote protection is the boundary that cannot be skipped.
 
-### Evolving code in parallel
+### The per-turn loop
 
-**Before the first edit of a code-writing turn, load the `parallel-evolution` skill** - the
-per-turn loop (sync → small change → prove it merges → gate → end clean), the branch rules and the
-convergence/escalation protocol. In one line: one `change/<name>` per delivery from current
-`origin/main` (adjacent work steers the warm session and may share the branch), never move a tree
-you do not own, end every commit with its provenance trailer, and prove the merge with
-`git merge-tree --write-tree origin/main HEAD`. Your branch is your deliverable; the merge lane
-lands it.
-
-**Routine merges do not request a full gate.** The user alone selects pre-release gating;
-shared runtime paths do not infer it. Preserve focused checks and independent source review,
-and report routine `gate_verified:false` and `release_verified:false` (`lane-policy.json`).
+Before editing code, load `parallel-evolution`, sync with `origin/main`, keep the
+patch scoped, self-review and run focused checks. Preserve the `Agent:` trailer
+and prove `git merge-tree --write-tree origin/main HEAD`. Integrate through the
+canonical main checkout and verify the remote ref; leave both trees clean.
+Only the user selects full pre-release gating. Routine work reports
+`gate_verified:false` and `release_verified:false` (`lane-policy.json`).
 
 ### Never touch the old plugin
 
-The v8 plugin is the reference, not the target. Read it; do not modify it.
+The v8 plugin is reference only. Read it; never modify it.
 
 ### Keep LF
 
@@ -86,15 +76,12 @@ The `pre-commit` hook enforces it - that hook is the contract, this line is the 
   are Rust `host.*`. Read `docs/HOST.md` before adding a capability: a host function
   returns `nil` for missing values (never zero values), and paths come from
   `host.paths()`, never `$HOME` or a Linux-only path.
-- **The Rust workspace manifest is `rust/Cargo.toml`; the repo root has none.** A bare
-  `cargo test -p wa-host` at the root fails with "could not find `Cargo.toml`", which reads like a
-  broken checkout and is not. Pass `--manifest-path rust/Cargo.toml` (what `scripts/test.sh`,
-  `scripts/deploy.sh` and `scripts/build-*.sh` do), or run the command from `rust/`.
-- **Use the graph to check impact, not to replace source inspection.** Grep/read are
-  normal navigation. Before finishing a code patch, the opt-in graph impact audit
-  (`WA_GRAPH_PATCH_AUDIT=1`) flags resolved callers not read in this run; a
-  standard `git commit` through `bash` gets a one-time review prompt first. It is a
-  review lead, never a correctness certificate; see `docs/GRAPH-PATCH-AUDIT.md`.
+- **The Rust workspace manifest is `rust/Cargo.toml`; the repo root has none.** Pass
+  `--manifest-path rust/Cargo.toml` to Cargo, or run it from `rust/`.
+- **Use the graph to check impact, not to replace source inspection.** Use grep/read
+  for navigation. The opt-in patch audit (`WA_GRAPH_PATCH_AUDIT=1`) prompts before
+  a standard `git commit` for unread resolved callers. It is a review lead, not a
+  correctness certificate; see `docs/GRAPH-PATCH-AUDIT.md`.
 - **A spell is deterministic, verified execution**, not a "macro". A step is a shell
   command or script, a client action, a wait, an assertion, or a supervisor verb, and
   every spell declares a `post` that settles the effect. The model surface is
@@ -147,11 +134,9 @@ The `pre-commit` hook enforces it - that hook is the contract, this line is the 
   settle a question (too few samples, one fixture, high variance), say so and do not let it
   pick a default.
 - **The gate's build/test parallelism is a knob you own.** `WA_GATE_JOBS=<n>` caps
-  `CARGO_BUILD_JOBS` and `RUST_TEST_THREADS` for `scripts/test.sh`; unset means cargo's own
-  default, one job per logical core, which two concurrent gate runs then fight over. The gate
-  prints what it ran with. `docs/EVOLUTION.md` ("Gate parallelism") has the measurement;
-  `docs/CONCURRENCY.md` ("Lane reservations and the serial gate") says how many gates may run at
-  once and why the gate is a reserved serial resource.
+  `CARGO_BUILD_JOBS` and `RUST_TEST_THREADS`; unset uses Cargo's default. The gate prints
+  its setting. Read `docs/EVOLUTION.md` ("Gate parallelism") for measurements and
+  `docs/CONCURRENCY.md` ("Lane reservations and the serial gate") for ownership.
 - Verify before claiming: run the smoke test, and prefer a real two-node check
   over a single-process one.
 - **A Lua test has only tested the tree when a Lua root is in use.** A `WA_SCRIPT` run with no

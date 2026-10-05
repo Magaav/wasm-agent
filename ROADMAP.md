@@ -59,10 +59,20 @@ These are dated observations, not portable release proof or a completed wave.
 Ordinary direct development may proceed under `AGENTS.md`; protected leftovers
 and original unknown outcomes must remain preserved.
 
-The legacy instruction checker still fails on both the untouched baseline and
-this documentation update: six existing failures (old child-steering requirements,
-injected-file size and vocabulary). The focused comparison found no new failures;
-this maintenance did not weaken the checker or claim a full green release.
+Follow-up, 2026-10-05: the six instruction-check failures were repaired without
+raising its original 10,418-byte budget or restoring delegation. The complete
+checker passes 74 checks; a private 19-check mutation suite rejects removal of the
+active direct-workflow, no-replay and watcher-off rules. The two repository skills
+now put the direct override before their historical parallel procedure.
+
+Three more execution claims were reconciled after examining original live
+provider/credential effects, terminal failure evidence and the exact-owned durable
+results missing from one interrupted transcript; no command, refresh, login or
+model request was replayed. The stale steering row was recovered through its
+supported status path as **unknown**, not falsely completed. A fresh activity
+observation has no unsupported activity claims and sees only the current operator
+run. Three uncertain execution claims, the original operation unknowns and the
+workspace retirement safety fences remain protected pending exact evidence.
 
 ## Status vocabulary
 

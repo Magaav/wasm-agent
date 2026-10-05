@@ -11,7 +11,25 @@ description: >-
 
 # Evolving code in parallel
 
-**wasm-agent policy:** routine merges use appropriate focused source checks and independent
+## Active operator-selected direct workflow
+
+When `AGENTS.md` selects direct work, handle the human request serially without
+subagents or external inference agents. Self-review is allowed and must be named
+honestly. Use focused checks, ordinary Git integration through canonical main,
+remote readback and clean trees. Do not create factory admission receipts or
+run a full release gate unless requested. Preserve original unknown effects;
+clean Git is not runtime settlement. The parallel procedure below applies only
+when the operator re-enables it.
+
+Verify this policy with
+`node <repo>/scripts/test-direct-workflow-instructions.mjs`. It runs the complete
+instruction checker plus private policy-removal mutations, not a full release gate.
+Spell replay currently refuses mandatory session workspaces
+(`workspace_execution_context_unsupported`); use the direct CLI without weakening
+that binding or the original instruction byte budget. A refusal needs inspection,
+not a blind retry or fabricated verification.
+
+**wasm-agent policy (parallel mode):** routine merges use appropriate focused source checks and independent
 exact-source review, including shared runtime changes. Only the user selects pre-release
 gating (`lane-policy.json`); never infer a full/combined gate from paths. Gate/closing-spell
 instructions below apply to explicitly requested pre-release verification. Routine work
