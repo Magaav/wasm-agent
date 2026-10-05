@@ -743,6 +743,18 @@ function wa_sessions(session)
   return json.encode({ sessions = memory.list_sessions(user.id, 50, { states = true }) })
 end
 
+-- Sentinel ownership lookup: identical account/ownership boundary, no transcript or state reads.
+function wa_session_owner(session_id, session)
+  local user, problem = users.resolve(session)
+  if not user then return json.encode({ error = problem }) end
+  local record = memory.session_owner(session_id or "")
+  if not record then return json.encode({ error = "unknown_session" }) end
+  if record.user_id ~= user.id and not users.is_master(user.role) then
+    return json.encode({ error = "forbidden" })
+  end
+  return json.encode({ session = { id = record.id, user_id = record.user_id } })
+end
+
 function wa_session(session_id, session)
   local user = users.current(session)
   local record = memory.session(session_id or "")

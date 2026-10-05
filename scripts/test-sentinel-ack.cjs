@@ -5,7 +5,8 @@ const home=fs.mkdtempSync(path.join(os.tmpdir(),'wa-ack-native-'));
 const env=Object.fromEntries(Object.entries(process.env).filter(([k])=>['PATH','SYSTEMROOT','WINDIR','COMSPEC','TEMP','TMP','PATHEXT','SYSTEMDRIVE'].includes(k.toUpperCase())));
 let posts=0;const server=http.createServer((q,r)=>{if(q.method==='POST')posts++;r.end(JSON.stringify({session:{id:'parent',user_id:'owner'}}));});
 const write=(dir,name,v)=>fs.writeFileSync(path.join(dir,name+'.json'),JSON.stringify(v));
-const run=(args=['protocol','observe'])=>new Promise((resolve,reject)=>{const c=spawn(sentinel,args,{env:privateEnv,cwd:home,windowsHide:true});let stdout='',stderr='';c.stdout.on('data',b=>stdout+=b);c.stderr.on('data',b=>stderr+=b);c.on('error',reject);c.on('exit',code=>{fs.appendFileSync(path.join(home,'cli.jsonl'),JSON.stringify({args,code,stdout,stderr})+'\n');resolve({code,stdout,stderr});});});
+// This suite tests immediate acknowledgement validation, not the separately tested poll cadence.
+const run=(args=['protocol','observe'])=>new Promise((resolve,reject)=>{if(args[0]==='protocol'&&args[1]==='observe'){const box=path.join(home,'.wasm-agent/sentinel/deploy-protocol');if(fs.existsSync(box))for(const id of fs.readdirSync(box))fs.rmSync(path.join(box,id,'observation-poll.json'),{force:true});}const c=spawn(sentinel,args,{env:privateEnv,cwd:home,windowsHide:true});let stdout='',stderr='';c.stdout.on('data',b=>stdout+=b);c.stderr.on('data',b=>stderr+=b);c.on('error',reject);c.on('exit',code=>{fs.appendFileSync(path.join(home,'cli.jsonl'),JSON.stringify({args,code,stdout,stderr})+'\n');resolve({code,stdout,stderr});});});
 let privateEnv;const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 (async()=>{await new Promise(r=>server.listen(0,'127.0.0.1',r));privateEnv={...env,WASM_AGENT_HOME:home,WASM_AGENT_PORT:String(server.address().port),WA_INSTALL_DIR:path.join(home,'install'),WA_SENTINEL_SUPERVISOR:'none'};
 try {

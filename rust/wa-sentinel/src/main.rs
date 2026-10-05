@@ -64,6 +64,8 @@ mod sentinel_return_tests;
 #[cfg(test)]
 mod return_engine_tests;
 #[cfg(test)]
+mod observation_io_tests;
+#[cfg(test)]
 mod deploy_protocol_tests;
 #[cfg(test)]
 mod intake_tests;

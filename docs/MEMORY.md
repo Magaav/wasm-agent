@@ -41,6 +41,12 @@ context**: `agent.lua` rebuilds the provider messages from it every turn
 (system + AGENTS.md + summary + messages after the watermark). There is no separate
 in-memory message list, which is what makes restarts resumable.
 
+The read-only `GET /session/owner?id=<id>` returns only `{session:{id,user_id}}`
+for native sentinel ownership checks. It uses the existing account resolution and
+owner/master permission boundary (including invalid/revoked credential refusal
+and trusted local default), not a transcript read or a derived-state lookup.
+It cannot mint deployment or return authority. See [SENTINEL.md](SENTINEL.md).
+
 ## Unfinished sessions (recovery)
 
 A session is unfinished when its transcript just *ends* — after a question, after a

@@ -2509,6 +2509,7 @@ fn dispatch(
         "/node/name" if method == "POST" => (200, "application/json", call("wa_set_node_name", &[body, session]).into_bytes()),
         "/sessions" => (200, "application/json", call("wa_sessions", &[session]).into_bytes()),
         "/session" => (200, "application/json", call("wa_session", &[query_value(&query, "id").as_str(), session]).into_bytes()),
+        "/session/owner" if method == "GET" => (200, "application/json", call("wa_session_owner", &[query_value(&query, "id").as_str(), session]).into_bytes()),
         // The window's `/efficiency_report`: the same deterministic report the CLI prints, read for one
         // session. No model call, so it is a plain read route. This line was dropped by a merge that
         // applied cleanly and recorded its branch as a parent while bringing none of its content - the

@@ -588,6 +588,12 @@ function M.session(session_id)
   return rows[1]
 end
 
+-- Ownership-only read: do not materialize a potentially large stored summary either.
+function M.session_owner(session_id)
+  local rows = query("SELECT id,user_id FROM sessions WHERE id=?", {session_id})
+  return rows[1]
+end
+
 -- Fork an immutable transcript prefix into a new, independently writable conversation.
 -- A boundary must be an existing non-summary message and may not leave a tool call
 -- unresolved. Copied rows get new identities and local sequence numbers; the source

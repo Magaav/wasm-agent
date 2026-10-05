@@ -8,7 +8,7 @@ fn identity_text(value: &str) -> bool {
 pub(crate) fn parent_owner(parent: &str) -> Result<String> {
     if !identity_text(parent) { bail!("parent_identity_invalid"); }
     let agent:ureq::Agent=ureq::Agent::config_builder().timeout_global(Some(Duration::from_secs(3))).build().into();
-    let body=agent.get(&format!("http://127.0.0.1:{}/session?id={parent}",node_port()))
+    let body=agent.get(&format!("http://127.0.0.1:{}/session/owner?id={parent}",node_port()))
         .header("X-WA-Session",&std::env::var("WA_SENTINEL_AUTH_SESSION").unwrap_or_default())
         .call().context("parent_owner_unavailable")?.into_body().read_to_string()?;
     let value:Value=serde_json::from_str(&body)?;
@@ -197,12 +197,40 @@ pub(crate) fn begin_delivery(journal:&Value) -> Result<PathBuf> {
 }
 
 pub(crate) fn observe(id:&str) -> Result<()> {
-    let binding=bind_parent(id)?;
+    observe_at(id,now_epoch())
+}
+
+pub(crate) fn observe_at(id:&str,now:u64) -> Result<()> {
+    if !identity_text(id) {bail!("return_request_id_invalid");}
     let dir=sentinel_dir().join("deploy-protocol").join(id);
     let observation_lock=std::fs::OpenOptions::new().create(true).truncate(false).read(true).write(true).open(dir.join("observation.lock"))?;
     observation_lock.lock()?;
-    let mut cursor:Value=std::fs::read(dir.join("observation.json")).ok().and_then(|b|serde_json::from_slice(&b).ok()).unwrap_or(json!({"slot":0,"next_at":0}));
-    let now=now_epoch();
+    let cursor=read_schedule(&dir.join("observation.json"))?.unwrap_or(json!({"slot":0,"next_at":0}));
+    // No owner HTTP, ack/intent reads, verifier, job store or return writes while deferred.
+    if cursor["next_at"].as_u64().context("observation_deadline_invalid")?>now {return Ok(());}
+    let poll_file=dir.join("observation-poll.json");
+    let poll=read_schedule(&poll_file)?.unwrap_or(json!({"id":id,"next_at":0,"failures":0}));
+    if poll["id"]!=id {bail!("observation_poll_identity_invalid");}
+    let failures=poll["failures"].as_u64().context("observation_failures_invalid")?;
+    if poll["next_at"].as_u64().context("observation_poll_deadline_invalid")?>now {return Ok(());}
+    let result=observe_due(id,&dir,cursor,now);
+    let failures=if result.is_err(){failures.saturating_add(1)}else{0};
+    let delay=if failures==0 {10} else {10u64.saturating_mul(1u64<<failures.saturating_sub(1).min(3)).min(60)};
+    // Scheduling is not delivery/effect authority. Preserve every immutable journal and unknown.
+    wa_operation::atomic_json(&poll_file,&json!({"id":id,"next_at":now.saturating_add(delay),"failures":failures,"at":now}))?;
+    result
+}
+
+fn read_schedule(file:&Path) -> Result<Option<Value>> {
+    match std::fs::read(file) {
+        Ok(bytes)=>Ok(Some(serde_json::from_slice(&bytes).context("observation_schedule_corrupt")?)),
+        Err(error) if error.kind()==std::io::ErrorKind::NotFound=>Ok(None),
+        Err(error)=>Err(error).context("observation_schedule_unreadable"),
+    }
+}
+
+fn observe_due(id:&str,dir:&Path,mut cursor:Value,now:u64) -> Result<()> {
+    let binding=bind_parent(id)?;
     let ack=validated_ack(&binding,now);
     if let Err(error)=&ack {
         // Preserve any prior immutable return, but revoke its delivery authority.
@@ -215,7 +243,6 @@ pub(crate) fn observe(id:&str) -> Result<()> {
         bail!("{error}");
     }
     let (ack,ack_at,checks)=ack?;
-    if cursor["next_at"].as_u64().unwrap_or(0)>now {return Ok(());}
     // Check deadlines exist independently of parent delivery. A busy parent owns one pending event;
     // missed ten-second checks coalesce into the latest durable observation, without extra wakes.
     let checks=checks.unwrap_or(Value::Null);

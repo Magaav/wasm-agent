@@ -83,6 +83,20 @@ Lua/native checks in two private processes; operation unit tests passed 41 with
 one explicitly ignored helper (exercised by its parent test). Self-review, not a
 full release gate or permission to reconcile unrelated historical effects.
 
+2026-10-05, sentinel observation I/O: ownership checks now use an authenticated
+id/owner-only SQL/HTTP projection, not 500 transcript messages or stored summaries.
+Due checks precede owner HTTP; successful pending polls recur after ten seconds and
+failed observations back off 10/20/40/60 seconds. The trade-off is up to sixty
+seconds before a failed observation notices repair; delivery/composition still
+revalidate ownership and acknowledgement independently, with no effect retry.
+Self-review and focused proof: 46 native sentinel tests, ten Lua/SQLite owner
+checks, 19 acknowledgement and 23 current-check binding checks, plus 12 real-node
+parent/HTTP checks passed with zero skips. The new regressions failed the old
+behavior. Full release gate not run. A pre-install eight-second OS counter sample
+recorded sentinel ~321 reads/s and ~1.15 MB/s; cached/network I/O is included and
+fan causation is unproven. Installation and a comparable post-install observation
+remain separate verification steps; historical cleanup unknowns are unchanged.
+
 ## Status vocabulary
 
 - **Implemented:** a mechanism exists in the repository; not a release certification.
