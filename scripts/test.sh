@@ -1450,6 +1450,10 @@ WA_SCRIPT=scripts/test-commentary-stream.lua "$BIN" --db "$DB.commentary-stream"
 # itself. The deadline is set short here so the check takes seconds, not minutes.
 WASM_AGENT_EXEC_TIMEOUT_SECONDS=2 WA_SCRIPT=scripts/test-exec-timeout.lua "$BIN" --db "$DB.exec" | grep "exec timeout ok"
 
+# Raw expected state survives Lua's JSON null-to-nil behavior; exact comparison,
+# live-owner refusal and original-byte preservation are tested in private processes.
+gate_run node scripts/test-operation-reconcile-json.cjs "$BIN"
+
 # A shell must not die on the way in because the directory it was told to start in is gone: a
 # released worktree is the ordinary way that happens, and on unix the shell then splits on
 # `shell-init: error retrieving current directory` with an empty stdout. This runs the real host,

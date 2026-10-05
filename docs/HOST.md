@@ -410,7 +410,11 @@ explicit legacy `index {evidence}` import, and exact-state `reconcile` with owne
 boot, drain and external-effect evidence. Admission is indexed before spawn;
 actual effective cwd and OS-held boot identity are durable. Import never trusts
 manual age/output-based settlement over unresolved saved originals, and a live
-or unknown owner refuses reconciliation. See [WAVE-CONVERGENCE.md](WAVE-CONVERGENCE.md)
+or unknown owner refuses reconciliation. Lua callers can set
+`expected_state_json=host.read_file(state_path)` instead of an `expected_state`
+object; the raw string survives ordinary `json.encode` with explicit nulls and
+numeric/container fidelity intact. Both forms at once refuse; all exact-state,
+owner and effect checks remain unchanged. See [WAVE-CONVERGENCE.md](WAVE-CONVERGENCE.md)
 for inputs, migration/quiescence and preservation boundaries.
 
 `host.canonical_path(path)` resolves an existing path through symlinks and junctions

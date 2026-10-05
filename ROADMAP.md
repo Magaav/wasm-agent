@@ -74,6 +74,15 @@ observation has no unsupported activity claims and sees only the current operato
 run. Three uncertain execution claims, the original operation unknowns and the
 workspace retirement safety fences remain protected pending exact evidence.
 
+2026-10-05, raw JSON recovery fix: `host.operation('reconcile', ...)` accepts an
+exclusive `expected_state_json` string so Lua can pass original state bytes through
+ordinary JSON encoding without dropping nulls or changing numbers/containers.
+Default Lua decoding and strict state/owner/evidence checks are unchanged.
+Focused proof: the regression failed against the prior binary, then passed 27
+Lua/native checks in two private processes; operation unit tests passed 41 with
+one explicitly ignored helper (exercised by its parent test). Self-review, not a
+full release gate or permission to reconcile unrelated historical effects.
+
 ## Status vocabulary
 
 - **Implemented:** a mechanism exists in the repository; not a release certification.

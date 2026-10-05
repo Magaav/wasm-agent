@@ -351,7 +351,18 @@ Host actions through `host.operation(action,json)`:
 | --- | --- | --- |
 | `relevant` | canonical/native `cwd`, optional lexical `after`, `limit` 1–256 | bounded unresolved rows, originals, `next` cursor and truncation flag |
 | `index` | nonempty legacy-writer quiescence `evidence` | explicit one-time historical import; no original is rewritten |
-| `reconcile` | `id`, exact raw durable `expected_state`, `owner_boot`, `evidence`, `drain_evidence`, `effect_evidence` | separate audited reconciliation; original execution outcome unchanged |
+| `reconcile` | `id`, exact durable `expected_state` object **or** `expected_state_json` raw JSON string, `owner_boot`, `evidence`, `drain_evidence`, `effect_evidence` | separate audited reconciliation; original execution outcome unchanged |
+
+For Lua callers, prefer `expected_state_json=host.read_file(state_path)` in the
+ordinary `json.encode(request)`. Do not decode/re-encode the state itself: the
+current Lua decoder maps JSON `null` to `nil`, dropping object fields and array
+positions; numbers/empty containers can also lose fidelity. Rust parses the raw
+string and compares the complete object with the durable state, including nulls,
+arrays, empty containers and integer values. Existing object callers remain
+supported. Supplying both forms (even a null object), malformed raw JSON or a
+non-object raw value is refused by name. A changed state still refuses
+`operation_state_moved`; owner leases and drain/effect evidence are not waived.
+The original state/output records are never rewritten by either input form.
 
 A fresh empty store is complete. An existing store refuses relevant lookup until
 explicit import. Quiesce all legacy writers before importing, then prohibit mixed

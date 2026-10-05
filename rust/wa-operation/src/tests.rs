@@ -128,6 +128,72 @@ fn reconciliation_requires_dead_owner_exact_state_and_effect_evidence() {
     assert!(other.relevant(args["expected_state"]["effective_cwd"].as_str().unwrap(), "", 1).unwrap()["operations"].as_array().unwrap().is_empty());
     drop(other); remove_fixture(root);
 }
+#[test]
+fn reconciliation_raw_json_preserves_nulls_and_exact_state_checks() {
+    let (m, root) = fixture();
+    let id = m.start(Spec::command("no-such-executable-raw-reconcile", vec![])).unwrap();
+    settled(&m, &id);
+    let file = root.join(&id).join("state.json");
+    let mut state: Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+    state["nullable_fixture"] = json!({"absent":null,"array":[null,{"nested":null},null],
+        "empty_object":{},"empty_array":[],"integer":9007199254740993u64});
+    atomic_json(&file, &state).unwrap();
+    m.index().unwrap().record(&state).unwrap();
+    let before = fs::read(&file).unwrap();
+    let raw = String::from_utf8(before.clone()).unwrap();
+    let other = Manager::new(&root);
+    let mut args = json!({"id":id,"owner_boot":state["owner_boot"],"expected_state_json":raw,
+        "evidence":"raw Lua boundary fixture","drain_evidence":"nonexistent executable never ran",
+        "effect_evidence":"fixture state preserved; no external command effect"});
+    // Correct raw input reaches the existing owner fence, not a false state mismatch.
+    assert!(other.reconcile(&args).unwrap_err().to_string().contains("owner_live"));
+    drop(m);
+    for bad in ["{", "null", "[]", "\"state\"", "false", "1"] {
+        args["expected_state_json"] = json!(bad);
+        assert!(other.reconcile(&args).is_err(), "invalid raw state accepted: {bad}");
+    }
+    args["expected_state_json"] = json!(7);
+    assert!(other.reconcile(&args).unwrap_err().to_string().contains("expected_state_json_required"));
+    args["expected_state_json"] = json!(raw);
+    args["expected_state"] = state.clone();
+    assert!(other.reconcile(&args).unwrap_err().to_string().contains("expected_state_forms_exclusive"));
+    args["expected_state"] = Value::Null;
+    assert!(other.reconcile(&args).unwrap_err().to_string().contains("expected_state_forms_exclusive"));
+    args.as_object_mut().unwrap().remove("expected_state");
+    let mut changed = state.clone();
+    changed["nullable_fixture"].as_object_mut().unwrap().remove("absent");
+    args["expected_state_json"] = json!(changed.to_string());
+    assert!(other.reconcile(&args).unwrap_err().to_string().contains("state_moved"));
+    changed = state.clone();
+    changed["nullable_fixture"]["integer"] = json!(9007199254740992u64);
+    args["expected_state_json"] = json!(changed.to_string());
+    assert!(other.reconcile(&args).unwrap_err().to_string().contains("state_moved"));
+    for fixture in [
+        json!({"absent":false,"array":[null,{"nested":null},null],"empty_object":{},"empty_array":[],"integer":9007199254740993u64}),
+        json!({"absent":null,"array":[{"nested":null},null],"empty_object":{},"empty_array":[],"integer":9007199254740993u64}),
+        json!({"absent":null,"array":[null,{"nested":null},null],"empty_object":[],"empty_array":[],"integer":9007199254740993u64}),
+    ] {
+        changed = state.clone();
+        changed["nullable_fixture"] = fixture;
+        args["expected_state_json"] = json!(changed.to_string());
+        assert!(other.reconcile(&args).unwrap_err().to_string().contains("state_moved"));
+    }
+    args["expected_state_json"] = json!(raw);
+    args["owner_boot"] = json!("boot-wrong");
+    assert!(other.reconcile(&args).unwrap_err().to_string().contains("owner_mismatch"));
+    args["owner_boot"] = state["owner_boot"].clone();
+    args["drain_evidence"] = json!("");
+    assert!(other.reconcile(&args).unwrap_err().to_string().contains("drain_evidence_required"));
+    args["drain_evidence"] = json!("nonexistent executable never ran");
+    args["effect_evidence"] = json!("");
+    assert!(other.reconcile(&args).unwrap_err().to_string().contains("effect_evidence_required"));
+    args["effect_evidence"] = json!("fixture state preserved; no external command effect");
+    assert_eq!(fs::read(&file).unwrap(), before);
+    assert_eq!(other.reconcile(&args).unwrap()["reconciled"], true);
+    assert_eq!(fs::read(&file).unwrap(), before);
+    assert!(other.relevant(state["effective_cwd"].as_str().unwrap(), "", 1).unwrap()["operations"].as_array().unwrap().is_empty());
+    drop(other); remove_fixture(root);
+}
 fn fixture() -> (Manager, PathBuf) {
     let root = std::env::temp_dir().join(format!(
         "wa-operation-test-{}-{}",
