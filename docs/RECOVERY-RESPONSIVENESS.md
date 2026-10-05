@@ -8,6 +8,16 @@ simultaneous diagnostic requests can now receive explicit overload rather than
 queueing; browser single-flight requests and bounded recovery backoff are required.
 This does not bound slow provider catalogue/network work or SQLite lock waiting.
 
+Startup reads the account and transcript before starting optional model metadata.
+Transcript recovery reads `/session` before native session lookup; `/health` may
+remain concurrent because it is listener-owned. This avoids self-inflicted
+`read_capacity_busy` when another window occupies one of the two read slots.
+Native lookup failures remain visible and must not authorize automatic continuation.
+The tradeoff is one sequential local read, not extra capacity or hidden overload.
+`scripts/test-ui.ps1` holds one simulated read slot in real Chromium and verifies
+zero overload refusals during recovery, plus metadata ordering after history.
+Other callers can still saturate both slots; that overload is not eliminated.
+
 Provider/model/reasoning selection is one node-local SQLite document with a
 monotonic revision. Validation and mutation share `BEGIN IMMEDIATE`; JSON settings
 requests carry `{value,revision}` and stale writes return `settings_conflict`.

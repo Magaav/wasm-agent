@@ -2130,17 +2130,22 @@ async function restoreSessionOnce(target, epoch, node = activeNode) {
     if (blankSession === wanted.id) rememberBlankSession("");
     const route = "session?id=" + encodeURIComponent(wanted.id);
     phase = route;
-    let [full, health, child] = await Promise.all([
+    // Health is listener-owned; native lookup shares the transcript's read
+    // capacity. Read history first so recovery cannot overload its own slot.
+    let [full, health] = await Promise.all([
       apiFetch(route, { headers: apiHeaders() }).then((response) => response.json()),
       nodeHealth(),
-      nativeSessionTask(wanted.id),
     ]);
     if (!viewing()) return false;
-    if (health) observedRun = activeRun(health, wanted.id);
-    applyRunControls();
     if (!full || full.error || !Array.isArray(full.messages)) {
       throw new Error(full?.error || "invalid session response");
     }
+    phase = "native session lookup";
+    const child = await nativeSessionTask(wanted.id);
+    if (!viewing()) return false;
+    if (health) observedRun = activeRun(health, wanted.id);
+    applyRunControls();
+    phase = route;
     let outcome = sessionOutcome(full);
     // A reply can land between the transcript read and /health. When the node is idle,
     // reread once before declaring a run unfinished; otherwise a completed answer could
@@ -4055,10 +4060,8 @@ async function sync(reason) {
   if (synced || syncRunning) return;
   syncRunning = true;
   syncAttempts += 1;
-  // Model metadata is useful, but it is not a prerequisite for reading this
-  // user's transcript. A failed /models request used to strand an idle window
-  // on "connecting" even while /me, /sessions and /session all worked.
-  void ensureMeta();
+  // Optional model diagnostics share read capacity with account/history
+  // recovery. The watch loop starts them only after the transcript is ready.
   const meOk = await refreshMe();
   syncRunning = false;
   if (!meOk) {
@@ -4089,7 +4092,10 @@ async function sync(reason) {
   // is put back on top of it, because "fresh" should not mean "moved". Whether a run is still
   // running is reconciled by `watch`, which keeps asking; one check here would only cover the first
   // reconnection.
-  restoreSession().then(restorePlace);
+  restoreSession().then((loaded) => {
+    restorePlace();
+    if (loaded) void ensureMeta();
+  });
 }
 
 // A window must never be more certain than the node.
