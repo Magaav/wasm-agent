@@ -1,0 +1,13 @@
+source-first passed
+source-restart passed
+source-peer-id passed
+source-caller-id passed
+source-signed-status passed
+embedded-first passed
+embedded-restart passed
+embedded-peer-id passed
+embedded-caller-id passed
+embedded-signed-status passed
+Actual source + embedded HTTP inference boundaries, restarts and signed two-node serving passed; 0 skips, 0 paid calls; C:\Users\Victor\orca\projects\wasm-agent\.git\worktrees\wa-worktree-childdispatch78f44308-a301-4811-b6fc-063f77a4e95d\repair-review-evidence\independent-routes\private
+
+STDERR

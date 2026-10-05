@@ -1,0 +1,5 @@
+[client] client-tools bridge on http://127.0.0.1:51820
+[rendezvous] registered 0d971187 at http://127.0.0.1:51813
+[serve] one run node-thread (reads: 0 warm, up to 4, spawned on demand)
+[serve] wasm-agent UI at http://127.0.0.1:51818  (ui: C:\Users\Victor\orca\projects\wasm-agent\.git\worktrees\wa-worktree-childdispatch78f44308-a301-4811-b6fc-063f77a4e95d\repair-review-evidence\source\ui)
+[relay] attached to http://127.0.0.1:51813 as 0d971187

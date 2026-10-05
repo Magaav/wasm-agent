@@ -1,0 +1,286 @@
+warning: profiles for the non root package will be ignored, specify profiles at the workspace root:
+package:   C:\Users\Victor\orca\projects\wasm-agent\.git\worktrees\wa-worktree-childdispatch78f44308-a301-4811-b6fc-063f77a4e95d\repair-review-evidence\source\rust\wa-graph\Cargo.toml
+workspace: C:\Users\Victor\orca\projects\wasm-agent\.git\worktrees\wa-worktree-childdispatch78f44308-a301-4811-b6fc-063f77a4e95d\repair-review-evidence\source\rust\Cargo.toml
+   Compiling shlex v2.0.1
+   Compiling find-msvc-tools v0.1.11
+   Compiling proc-macro2 v1.0.107
+   Compiling unicode-ident v1.0.24
+   Compiling quote v1.0.47
+   Compiling serde_core v1.0.229
+   Compiling serde v1.0.229
+   Compiling cfg-if v1.0.4
+   Compiling log v0.4.34
+   Compiling tree-sitter-language v0.1.8
+   Compiling memchr v2.8.3
+   Compiling cranelift-srcgen v0.124.3
+   Compiling windows-link v0.2.1
+   Compiling bitflags v2.13.1
+   Compiling foldhash v0.1.5
+   Compiling cranelift-isle v0.124.3
+   Compiling windows-sys v0.61.2
+   Compiling hashbrown v0.17.1
+   Compiling libm v0.2.16
+   Compiling cranelift-assembler-x64-meta v0.124.3
+   Compiling equivalent v1.0.2
+   Compiling cranelift-bitset v0.124.3
+   Compiling once_cell v1.21.4
+   Compiling hashbrown v0.15.5
+   Compiling target-lexicon v0.13.5
+   Compiling crc32fast v1.5.1
+   Compiling cranelift-codegen-shared v0.124.3
+   Compiling zerocopy v0.8.56
+   Compiling version_check v0.9.5
+   Compiling heck v0.5.0
+   Compiling cc v1.4.4
+   Compiling anyhow v1.0.104
+   Compiling ahash v0.8.12
+   Compiling allocator-api2 v0.2.21
+   Compiling windows_x86_64_msvc v0.53.1
+   Compiling bumpalo v3.20.3
+   Compiling zmij v1.0.23
+   Compiling itoa v1.0.18
+   Compiling rustc-hash v2.1.3
+   Compiling thiserror v2.0.20
+   Compiling syn v3.0.4
+   Compiling syn v2.0.119
+   Compiling arbitrary v1.4.2
+   Compiling vcpkg v0.2.15
+   Compiling pkg-config v0.3.34
+   Compiling aho-corasick v1.1.5
+   Compiling winapi-util v0.1.11
+   Compiling regex-syntax v0.8.11
+   Compiling serde_json v1.0.151
+   Compiling wasmtime-internal-math v37.0.3
+   Compiling wasmparser v0.239.0
+   Compiling object v0.37.3
+   Compiling cranelift-control v0.124.3
+   Compiling windows-targets v0.53.5
+   Compiling ring v0.17.14
+   Compiling tree-sitter v0.24.7
+   Compiling libsqlite3-sys v0.30.1
+   Compiling getrandom v0.2.17
+   Compiling untrusted v0.9.0
+   Compiling wasm-encoder v0.239.0
+   Compiling zeroize v1.9.0
+   Compiling semver v1.0.28
+   Compiling libc v0.2.189
+   Compiling rustls-pki-types v1.15.1
+   Compiling windows-sys v0.60.2
+   Compiling termcolor v1.4.1
+   Compiling indexmap v2.14.1
+   Compiling cranelift-assembler-x64 v0.124.3
+   Compiling fallible-streaming-iterator v0.1.9
+   Compiling leb128fmt v0.1.0
+   Compiling streaming-iterator v0.1.9
+   Compiling fallible-iterator v0.3.0
+   Compiling wasmtime-internal-unwinder v37.0.3
+   Compiling httparse v1.10.1
+   Compiling gimli v0.32.3
+   Compiling regex-automata v0.4.18
+   Compiling tree-sitter-lua v0.1.0
+   Compiling tree-sitter-bash v0.23.3
+   Compiling tree-sitter-powershell v0.24.5
+   Compiling tree-sitter-rust v0.23.3
+   Compiling tree-sitter-typescript v0.23.2
+   Compiling tree-sitter-javascript v0.23.1
+   Compiling same-file v1.0.6
+   Compiling base64 v0.23.1
+   Compiling bytes v1.12.1
+   Compiling adler2 v2.0.1
+   Compiling simd-adler32 v0.3.10
+   Compiling either v1.18.0
+   Compiling rustls v0.23.43
+   Compiling itertools v0.14.0
+   Compiling miniz_oxide v0.9.1
+   Compiling hashbrown v0.14.5
+   Compiling walkdir v2.5.0
+   Compiling http v1.5.0
+   Compiling pulley-macros v37.0.3
+   Compiling wasmtime-internal-versioned-export-macros v37.0.3
+   Compiling regex v1.13.1
+   Compiling hashlink v0.9.1
+   Compiling rustls-webpki v0.103.15
+   Compiling pulley-interpreter v37.0.3
+   Compiling serde_derive v1.0.229
+   Compiling thiserror-impl v2.0.20
+   Compiling wasmtime v37.0.3
+   Compiling notify-types v2.1.0
+   Compiling subtle v2.6.1
+   Compiling notify v8.2.0
+   Compiling ureq-proto v0.6.1
+   Compiling cobs v0.3.0
+   Compiling async-trait v0.1.92
+   Compiling flate2 v1.1.10
+   Compiling wasmtime-internal-jit-icache-coherence v37.0.3
+   Compiling webpki-roots v1.0.9
+   Compiling wa-host v0.1.0 (C:\Users\Victor\orca\projects\wasm-agent\.git\worktrees\wa-worktree-childdispatch78f44308-a301-4811-b6fc-063f77a4e95d\repair-review-evidence\source\rust\wa-host)
+   Compiling wasmtime-internal-asm-macros v37.0.3
+   Compiling utf8-zero v0.8.1
+   Compiling percent-encoding v2.3.2
+   Compiling wasmtime-internal-slab v37.0.3
+   Compiling cranelift-codegen-meta v0.124.3
+   Compiling smallvec v1.15.2
+   Compiling postcard v1.1.3
+   Compiling cranelift-entity v0.124.3
+   Compiling regalloc2 v0.13.5
+   Compiling rusqlite v0.32.1
+   Compiling cranelift-bforest v0.124.3
+   Compiling cranelift-codegen v0.124.3
+   Compiling wa-operation v0.1.0 (C:\Users\Victor\orca\projects\wasm-agent\.git\worktrees\wa-worktree-childdispatch78f44308-a301-4811-b6fc-063f77a4e95d\repair-review-evidence\source\rust\wa-operation)
+   Compiling wa-graph v0.1.0 (C:\Users\Victor\orca\projects\wasm-agent\.git\worktrees\wa-worktree-childdispatch78f44308-a301-4811-b6fc-063f77a4e95d\repair-review-evidence\source\rust\wa-graph)
+   Compiling wa-jobs v0.1.0 (C:\Users\Victor\orca\projects\wasm-agent\.git\worktrees\wa-worktree-childdispatch78f44308-a301-4811-b6fc-063f77a4e95d\repair-review-evidence\source\rust\wa-jobs)
+   Compiling ureq v3.4.0
+   Compiling wasmprinter v0.239.0
+   Compiling wasmtime-environ v37.0.3
+   Compiling cranelift-native v0.124.3
+   Compiling cranelift-frontend v0.124.3
+   Compiling wasmtime-internal-cranelift v37.0.3
+warning: constant `LUA_TBOOLEAN` is never used
+  --> wa-host\src\lua.rs:19:11
+   |
+19 | pub const LUA_TBOOLEAN: c_int = 1;
+   |           ^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: constant `LUA_TNUMBER` is never used
+  --> wa-host\src\lua.rs:20:11
+   |
+20 | pub const LUA_TNUMBER: c_int = 3;
+   |           ^^^^^^^^^^^
+
+warning: constant `LUA_TSTRING` is never used
+  --> wa-host\src\lua.rs:21:11
+   |
+21 | pub const LUA_TSTRING: c_int = 4;
+   |           ^^^^^^^^^^^
+
+warning: constant `LUA_TTABLE` is never used
+  --> wa-host\src\lua.rs:22:11
+   |
+22 | pub const LUA_TTABLE: c_int = 5;
+   |           ^^^^^^^^^^
+
+warning: methods `pop`, `push_number`, and `push_bool` are never used
+   --> wa-host\src\lua.rs:186:12
+    |
+103 | impl Lua {
+    | -------- methods in this implementation
+...
+186 |     pub fn pop(&self, n: c_int) {
+    |            ^^^
+...
+217 |     pub fn push_number(&self, n: f64) {
+    |            ^^^^^^^^^^^
+...
+227 |     pub fn push_bool(&self, b: bool) {
+    |            ^^^^^^^^^
+
+warning: function `lua_pushinteger` is never used
+  --> wa-host\src\lua.rs:55:12
+   |
+55 |     pub fn lua_pushinteger(l: *mut LuaState, n: LuaInteger);
+   |            ^^^^^^^^^^^^^^^
+
+warning: function `lua_getfield` is never used
+  --> wa-host\src\lua.rs:63:12
+   |
+63 |     pub fn lua_getfield(l: *mut LuaState, idx: c_int, k: *const c_char);
+   |            ^^^^^^^^^^^^
+
+warning: function `lua_rawgeti` is never used
+  --> wa-host\src\lua.rs:65:12
+   |
+65 |     pub fn lua_rawgeti(l: *mut LuaState, idx: c_int, n: LuaInteger) -> c_int;
+   |            ^^^^^^^^^^^
+
+warning: function `lua_rawlen` is never used
+  --> wa-host\src\lua.rs:66:12
+   |
+66 |     pub fn lua_rawlen(l: *mut LuaState, idx: c_int) -> usize;
+   |            ^^^^^^^^^^
+
+warning: function `lua_next` is never used
+  --> wa-host\src\lua.rs:67:12
+   |
+67 |     pub fn lua_next(l: *mut LuaState, idx: c_int) -> c_int;
+   |            ^^^^^^^^
+
+warning: function `lua_remove` is never used
+  --> wa-host\src\lua.rs:68:12
+   |
+68 |     pub fn lua_remove(l: *mut LuaState, idx: c_int);
+   |            ^^^^^^^^^^
+
+warning: function `lua_tonumberx` is never used
+  --> wa-host\src\lua.rs:74:12
+   |
+74 |     pub fn lua_tonumberx(l: *mut LuaState, idx: c_int, isnum: *mut c_int) -> LuaNumber;
+   |            ^^^^^^^^^^^^^
+
+warning: function `lua_toboolean` is never used
+  --> wa-host\src\lua.rs:75:12
+   |
+75 |     pub fn lua_toboolean(l: *mut LuaState, idx: c_int) -> c_int;
+   |            ^^^^^^^^^^^^^
+
+warning: function `lua_error` is never used
+  --> wa-host\src\lua.rs:78:12
+   |
+78 |     pub fn lua_error(l: *mut LuaState) -> c_int;
+   |            ^^^^^^^^^
+
+warning: field `engine` is never read
+  --> wa-host\src\plugins.rs:34:5
+   |
+33 | pub struct PluginRegistry {
+   |            -------------- field in this struct
+34 |     engine: Engine,
+   |     ^^^^^^
+
+warning: method `has` is never used
+   --> wa-host\src\plugins.rs:145:12
+    |
+ 54 | impl PluginRegistry {
+    | ------------------- method in this implementation
+...
+145 |     pub fn has(&self, name: &str) -> bool {
+    |            ^^^
+
+warning: function `turn_node_thread_is_idle` is never used
+   --> wa-host\src\serve.rs:482:4
+    |
+482 | fn turn_node_thread_is_idle() -> bool {
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `beat_age_ms` is never used
+   --> wa-host\src\serve.rs:689:15
+    |
+689 | pub(crate) fn beat_age_ms() -> u64 {
+    |               ^^^^^^^^^^^
+
+warning: field `run_id` is never read
+   --> wa-host\src\serve.rs:888:33
+    |
+888 |     Socket { stream: TcpStream, run_id: u64 },
+    |     ------                      ^^^^^^
+    |     |
+    |     field in this variant
+
+warning: function `ok_json` is never used
+   --> wa-host\src\serve.rs:967:4
+    |
+967 | fn ok_json(body: String) -> Reply {
+    |    ^^^^^^^
+
+warning: field `class` is never read
+   --> wa-host\src\serve\scheduler.rs:183:5
+    |
+180 | struct RunRecord {
+    |        --------- field in this struct
+...
+183 |     class: RunClass,
+    |     ^^^^^
+
+warning: `wa-host` (bin "wa") generated 21 warnings
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1m 28s

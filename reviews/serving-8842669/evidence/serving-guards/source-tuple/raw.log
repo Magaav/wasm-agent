@@ -1,0 +1,37 @@
+ok compiled availability embedded
+ok legacy absent state unknown
+ok real structured monthly seam block
+ok explicit bound recovery
+ok invalid persisted eligibility fails closed: state='corrupted'
+ok invalid state zero HTTP calls: state='corrupted'
+ok explicit bound recovery
+ok invalid persisted eligibility fails closed: reason='other_reason'
+ok invalid state zero HTTP calls: reason='other_reason'
+ok explicit bound recovery
+ok invalid persisted eligibility fails closed: model=''
+ok invalid state zero HTTP calls: model=''
+ok explicit bound recovery
+ok invalid persisted eligibility fails closed: generation=-1
+ok invalid state zero HTTP calls: generation=-1
+ok explicit bound recovery
+ok invalid persisted eligibility fails closed: generation='invalid'
+ok invalid state zero HTTP calls: generation='invalid'
+ok explicit bound recovery
+ok foreign response returned without recovery evidence
+ok wrong model cannot certify serving
+ok missing response model cannot certify serving
+ok missing completion marker cannot certify serving
+ok stale correctly modeled success cannot clear newer block
+ok explicit bound recovery
+ok unknown recovery ABA cannot be overwritten by stale success
+ok genuine exact request response certifies serving
+ok explicit bound recovery
+ok inflight account drift cannot certify different account
+ok inflight account drift cannot recover original account
+ok independent route identity names requested model
+ok unsupported explicit provider override stays unavailable
+ok active account change between status phases stays unknown
+ok exact bound signed metadata blocks placement
+
+STDERR
+lua error: [string "C:\Users\Victor\orca\projects\wasm-agent\.git..."]:4: foreign second-phase node_id cannot block requested route

@@ -1,0 +1,46 @@
+{
+ "schema_version":1,
+ "verdict":"pass_focused_source_review",
+ "production_admission":false,
+ "full_application_gate":false,
+ "producer":{"identity":"external Orca ctx_3328e24743e7","provenance":"Agent: Codex node=local session=ctx_3328e24743e7","native_producer_record_claimed":false},
+ "reviewer":"child:dispatch:78f44308-a301-4811-b6fc-063f77a4e95d",
+ "exact_tip":"884266956df3ea26374bce9da7943d5ba4ee10c7",
+ "exact_tree":"47505b2c55cc01cff3981ffe8e7ae4f9753bf885",
+ "original_hold":"4d34381ffa7c9850a501558c52051f9c5595cebd",
+ "review_merge":{"commit":"3e9709b826f61703250be8928009fe355ed03929","parents":["4d34381ffa7c9850a501558c52051f9c5595cebd","884266956df3ea26374bce9da7943d5ba4ee10c7"],"original_2f68_ancestor_verified":true},
+ "source_scope":"Full actual repair diff from original33c36b4 through8842669 inspected, including provider/orchestrator/server, docs and focused/compatibility runners. Immutable exact git archive compiled offline into separate reviewer metadata target. Loaded source and embedded provider/orchestrator/server SHA256 independently equal exact exported bytes. No product repair edits.",
+ "reviewer_binary_sha256":"424eefdb566a4bd657eec8447cdf1ed9b6d2b9c3cb5e0fcbaa61a60f6db08ca5",
+ "producer_binary_sha256_claim":"526022e9312ccb5a34761b0a7d19234eef3541fc76eaaf7af5e7e99a21e77763",
+ "runner_hashes_verified":{"original":"b2172aa4c8507b2cd37cf04cf5127e714b9975298e3d35aef7f2e14da28fbff9","contract":"78833db529f1281de596ac1efab7148318b60c03bff22443201e9605a31bf5c4","http":"9b14888f208acb82bd9543f3323cfe04a34a14d7c46adafdcddd9f42ec33d4b8","compat":"eb3a20af4536b40bd8e3305773cb6d0081ff53fe9fbfc1d88642698f329595d6"},
+ "original_findings":{
+  "F1":"closed: endpoint omitted from durable account binding; equivalent endpoint assertions and account/provider isolation pass; raw endpoint hash mutant fails expected assertion in source and embedded. Original2f68 ancestry preserved.",
+  "F2":"closed under approved two-phase design: selected node and requested model/provider validated first, discovered account/profile/binding/generation rechecked on exact tuple. Real signed two-node route independently attacked first node/model/provider, unrelated second binding, bare model_error, account metadata drift, post-signature body tampering, default-provider discovery, foreign target/provider tuple. All unknown or correctly blocked as appropriate; status caused zero inference requests.",
+  "F3":"closed: response model/completion marker and captured route required; generation/state/reason/model CAS preserves newer quota block and recovery ABA. Actual loopback inference confirms wrong/missing model never certifies serving and newer concurrent durable block wins. Unidentified stream/subscription success remains unknown.",
+  "F4":"closed: state/reason/model/integer-generation validation refuses before HTTP; corrupt restart and absent legacy distinction verified source and embedded. Valid predecessor schema migration retains block.",
+  "F5":"closed as test-observation race, not product capacity repair: independently retained original failure after7 checks remains preserved. Read-only original private DB inspection finds third task queued with node_full and only2 held inference requests. Delayed real admission independently reproduces original timer assertion with captured placing state, then same delayed seam settled-refusal test passes20. New test checks no session and only queued/placing throughout, not merely retrying20. Original instant sample was not retained and cannot be reconstructed exactly."
+ },
+ "new_findings":[],
+ "rerun_results":{
+  "original_source_embedded_restart":{"checks":92,"counts":[22,24,22,24],"exit":0},
+  "contract_source_embedded_corrupt_restart":{"checks":224,"counts":[55,57,55,57],"exit":0},
+  "real_http_source_embedded_restart":{"checks":42,"requests":24,"exit":0},
+  "producer_signed_two_node":{"checks":10,"inference_status_calls":0,"exit":0},
+  "independent_signed_route_matrix":{"checks":30,"additional_negative_checks":20,"inference_status_calls":0,"exit":0,"fixture":"scripts/review-serving-repair-routes.cjs"},
+  "compatibility":{"source":20,"embedded":20,"forced_delay_settled":20,"exit":0},
+  "causal_negatives":{"runtime_guard_mutants":12,"raw_binding_mutants":2,"all_failed_expected_assertion":true},
+  "supplementary_controls":{"checks":12,"exit":0},
+  "loaded_source_proof":{"source":true,"embedded":true,"fixture":"scripts/review-serving-source-proof.cjs"},
+  "skips":0,"paid_calls":0
+ },
+ "mergeproof":{"command":"git merge-tree --write-tree origin/main HEAD","exit":0,"pre_artifact_merge_tree":"0f4c6421fd0cbfd5455bff75acb96ec88aca4f7c"},
+ "evidence":"reviews/serving-8842669/evidence with EVIDENCE-MANIFEST.json; full private databases and node logs remain in reviewer Git metadata repair-review-evidence; original HOLD evidence remains unchanged",
+ "limitations":[
+  "Focused source review only: no full application gate, production admission, installation or live recovery claim. Codex2 determines admission proof independently.",
+  "Independent route spoofs mutate actual authenticated loopback response envelopes at host HTTP boundary. Account drift is actual private env drift in contract/inference fixture and metadata drift on signed route, not an externally changed live account.",
+  "Signed request body tampering is tested; no new signed-response protocol is asserted. Existing fabric authenticates caller requests; account identity is operator-declared stable non-secret profile, not external account discovery.",
+  "CAS race injects newer durable observation at actual inference return seam, not physical scheduler timing. Host stream aggregator/subscription omit explicit response model and cannot certify serving.",
+  "No main/push/deploy, paid probes, credentials, live home/config/resource DB/policy/account settings or memory changes. Local4/cloud0 and approved model settings unchanged. No fabricated native producer binding/upstream.",
+  "Raw originals remain in Git metadata; committed evidence follows repository LF normalization. Evidence manifest hashes committed-normalized text, not producer originals."
+ ]
+}

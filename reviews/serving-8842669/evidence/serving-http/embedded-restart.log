@@ -1,0 +1,8 @@
+lua root unset: using embedded modules; edits under lua/ are NOT under test
+ok real HTTP monthly block persisted across process restart
+ok persisted monthly block zero HTTP calls
+ok corrupt account persisted fail closed
+ok corrupt restart zero HTTP calls
+RAW_HTTP {"body":"{\"id\":\"owned-response\",\"model\":\"fixture\",\"choices\":[{\"message\":{\"content\":\"actual mock inference\"},\"finish_reason\":\"stop\"}]}","status":200}
+ok corrupt recovery followed by genuine bound inference
+real serving HTTP: 5 checks, 0 skips, 0 paid calls; loopback HTTP=1

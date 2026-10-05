@@ -1,0 +1,2 @@
+C:\Users\Victor\orca\projects\wasm-agent\.git\worktrees\wa-worktree-childdispatch78f44308-a301-4811-b6fc-063f77a4e95d\review-evidence\compat-private\coordinator\.wasm-agent\memory.db
+[('dispatch:24708d01-84a7-434b-a0c0-d8ab9c1fe1a0', 'admitted', '87ce8c3faf1ca4d58b44582ac0eb1a41', ''), ('dispatch:2e5cfa03-94c3-4f95-acaf-b473e1f71dfb', 'admitted', 'local', ''), ('dispatch:74b8a689-17da-423d-8d1a-ba70531b4083', 'queued', '', 'node_full')]

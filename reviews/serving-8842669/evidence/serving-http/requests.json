@@ -1,0 +1,146 @@
+[
+  {
+    "method": "POST",
+    "url": "/chat/completions",
+    "authorization": "Bearer fixture-key",
+    "body": "{\"messages\":[{\"content\":\"monthly\",\"role\":\"user\"}],\"model\":\"fixture\"}"
+  },
+  {
+    "method": "POST",
+    "url": "/chat/completions",
+    "authorization": "Bearer rotated-key",
+    "body": "{\"messages\":[{\"content\":\"other429\",\"role\":\"user\"}],\"model\":\"fixture\"}"
+  },
+  {
+    "method": "POST",
+    "url": "/chat/completions",
+    "authorization": "Bearer rotated-key",
+    "body": "{\"messages\":[{\"content\":\"prose\",\"role\":\"user\"}],\"model\":\"fixture\"}"
+  },
+  {
+    "method": "POST",
+    "url": "/chat/completions",
+    "authorization": "Bearer rotated-key",
+    "body": "{\"messages\":[{\"content\":\"transport\",\"role\":\"user\"}],\"model\":\"fixture\"}"
+  },
+  {
+    "method": "POST",
+    "url": "/chat/completions",
+    "authorization": "Bearer rotated-key",
+    "body": "{\"messages\":[{\"content\":\"wrong\",\"role\":\"user\"}],\"model\":\"fixture\"}"
+  },
+  {
+    "method": "POST",
+    "url": "/chat/completions",
+    "authorization": "Bearer rotated-key",
+    "body": "{\"messages\":[{\"content\":\"missing\",\"role\":\"user\"}],\"model\":\"fixture\"}"
+  },
+  {
+    "method": "POST",
+    "url": "/chat/completions",
+    "authorization": "Bearer rotated-key",
+    "body": "{\"messages\":[{\"content\":\"correct\",\"role\":\"user\"}],\"model\":\"fixture\"}"
+  },
+  {
+    "method": "POST",
+    "url": "/chat/completions",
+    "authorization": "Bearer rotated-key",
+    "body": "{\"messages\":[{\"content\":\"correct\",\"role\":\"user\"}],\"model\":\"fixture\"}"
+  },
+  {
+    "method": "POST",
+    "url": "/chat/completions",
+    "authorization": "Bearer rotated-key",
+    "body": "{\"messages\":[{\"content\":\"correct\",\"role\":\"user\"}],\"model\":\"fixture\"}"
+  },
+  {
+    "method": "POST",
+    "url": "/chat/completions",
+    "authorization": "Bearer rotated-key",
+    "body": "{\"messages\":[{\"content\":\"correct\",\"role\":\"user\"}],\"model\":\"fixture\"}"
+  },
+  {
+    "method": "POST",
+    "url": "/chat/completions",
+    "authorization": "Bearer rotated-key",
+    "body": "{\"messages\":[{\"content\":\"correct\",\"role\":\"user\"}],\"model\":\"fixture\"}"
+  },
+  {
+    "method": "POST",
+    "url": "/chat/completions",
+    "authorization": "Bearer fixture-key",
+    "body": "{\"messages\":[{\"content\":\"correct\",\"role\":\"user\"}],\"model\":\"fixture\"}"
+  },
+  {
+    "method": "POST",
+    "url": "/chat/completions",
+    "authorization": "Bearer fixture-key",
+    "body": "{\"messages\":[{\"content\":\"monthly\",\"role\":\"user\"}],\"model\":\"fixture\"}"
+  },
+  {
+    "method": "POST",
+    "url": "/chat/completions",
+    "authorization": "Bearer rotated-key",
+    "body": "{\"messages\":[{\"content\":\"other429\",\"role\":\"user\"}],\"model\":\"fixture\"}"
+  },
+  {
+    "method": "POST",
+    "url": "/chat/completions",
+    "authorization": "Bearer rotated-key",
+    "body": "{\"messages\":[{\"content\":\"prose\",\"role\":\"user\"}],\"model\":\"fixture\"}"
+  },
+  {
+    "method": "POST",
+    "url": "/chat/completions",
+    "authorization": "Bearer rotated-key",
+    "body": "{\"messages\":[{\"content\":\"transport\",\"role\":\"user\"}],\"model\":\"fixture\"}"
+  },
+  {
+    "method": "POST",
+    "url": "/chat/completions",
+    "authorization": "Bearer rotated-key",
+    "body": "{\"messages\":[{\"content\":\"wrong\",\"role\":\"user\"}],\"model\":\"fixture\"}"
+  },
+  {
+    "method": "POST",
+    "url": "/chat/completions",
+    "authorization": "Bearer rotated-key",
+    "body": "{\"messages\":[{\"content\":\"missing\",\"role\":\"user\"}],\"model\":\"fixture\"}"
+  },
+  {
+    "method": "POST",
+    "url": "/chat/completions",
+    "authorization": "Bearer rotated-key",
+    "body": "{\"messages\":[{\"content\":\"correct\",\"role\":\"user\"}],\"model\":\"fixture\"}"
+  },
+  {
+    "method": "POST",
+    "url": "/chat/completions",
+    "authorization": "Bearer rotated-key",
+    "body": "{\"messages\":[{\"content\":\"correct\",\"role\":\"user\"}],\"model\":\"fixture\"}"
+  },
+  {
+    "method": "POST",
+    "url": "/chat/completions",
+    "authorization": "Bearer rotated-key",
+    "body": "{\"messages\":[{\"content\":\"correct\",\"role\":\"user\"}],\"model\":\"fixture\"}"
+  },
+  {
+    "method": "POST",
+    "url": "/chat/completions",
+    "authorization": "Bearer rotated-key",
+    "body": "{\"messages\":[{\"content\":\"correct\",\"role\":\"user\"}],\"model\":\"fixture\"}"
+  },
+  {
+    "method": "POST",
+    "url": "/chat/completions",
+    "authorization": "Bearer rotated-key",
+    "body": "{\"messages\":[{\"content\":\"correct\",\"role\":\"user\"}],\"model\":\"fixture\"}"
+  },
+  {
+    "method": "POST",
+    "url": "/chat/completions",
+    "authorization": "Bearer fixture-key",
+    "body": "{\"messages\":[{\"content\":\"correct\",\"role\":\"user\"}],\"model\":\"fixture\"}"
+  }
+]

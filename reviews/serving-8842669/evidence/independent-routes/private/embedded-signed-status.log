@@ -1,0 +1,19 @@
+lua root unset: using embedded modules; edits under lua/ are NOT under test
+SIGNED_IDENTITY {"node":"private","serving_identity":{"account_profile":"account-a","binding":"d6a61a772fd6ded2a15a33709cbd4c5ec79f2a80953f2377bdb3b7230b5383c9","generation":1,"model":"fixture","node_id":"ddf5fc990987c9bf3902246e59fa72e7","provider":"opencode-go"}}
+ok actual authenticated peer establishes requested identity
+SIGNED_STATUS {"node":"private","serving":{"account_profile":"account-a","binding":"d6a61a772fd6ded2a15a33709cbd4c5ec79f2a80953f2377bdb3b7230b5383c9","generation":1,"model":"fixture","node_id":"ddf5fc990987c9bf3902246e59fa72e7","observed_model":"fixture","provider":"opencode-go","reason":"provider_monthly_quota","state":"blocked"}}
+ok signed status reads durable monthly account block
+ok actual signed exact tuple skips blocked peer
+ok explicit unsupported provider override remains unknown
+ok foreign requested account cannot inherit default account block
+ok real signed route rejects first-node_id as unknown: serving_identity_unknown
+ok real signed route rejects first-model as unknown: serving_identity_unknown
+ok real signed route rejects first-provider as unknown: serving_identity_unknown
+ok real signed route rejects second-binding as unknown: serving_identity_changed
+ok real signed route rejects bare-error as unknown: serving_metadata_unknown
+ok real signed route rejects drift as unknown: serving_identity_changed
+ok real signed route rejects tamper-request as unknown: serving_identity_unknown
+ok real default-provider discovery still blocks bound account
+ok signed foreign target tuple unknown
+ok signed foreign provider tuple unknown
+signed two-node serving: 15 checks, 0 skips, 0 paid calls

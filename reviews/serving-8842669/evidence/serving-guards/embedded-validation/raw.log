@@ -1,0 +1,8 @@
+ok compiled availability embedded
+ok legacy absent state unknown
+ok real structured monthly seam block
+ok explicit bound recovery
+
+STDERR
+lua root unset: using embedded modules; edits under lua/ are NOT under test
+lua error: [string "C:\Users\Victor\orca\projects\wasm-agent\.git..."]:4: invalid persisted eligibility fails closed: state='corrupted'

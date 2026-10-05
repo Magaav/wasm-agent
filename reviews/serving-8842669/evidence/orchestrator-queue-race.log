@@ -1,0 +1,3 @@
+timed-sample exit 1; evidence C:\Users\Victor\orca\projects\wasm-agent\.git\worktrees\wa-worktree-childdispatch78f44308-a301-4811-b6fc-063f77a4e95d\repair-review-evidence\orchestrator-queue-race
+settled-observation exit 0; evidence C:\Users\Victor\orca\projects\wasm-agent\.git\worktrees\wa-worktree-childdispatch78f44308-a301-4811-b6fc-063f77a4e95d\repair-review-evidence\orchestrator-queue-race
+F5 causal timer-sampling failure reproduced and settled-observation repair passed; 0 paid calls

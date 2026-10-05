@@ -1,0 +1,9 @@
+lua root unset: using embedded modules; edits under lua/ are NOT under test
+SIGNED_IDENTITY {"node":"serving-http","serving_identity":{"account_profile":"account-a","binding":"78f5c0c91b006297b9509e8d59c623cacb30c682ac328c98ab011edf91189ed9","generation":1,"model":"fixture","node_id":"d80aa0d48bf13fe771cb462b80b02023","provider":"opencode-go"}}
+ok actual authenticated peer establishes requested identity
+SIGNED_STATUS {"node":"serving-http","serving":{"account_profile":"account-a","binding":"78f5c0c91b006297b9509e8d59c623cacb30c682ac328c98ab011edf91189ed9","generation":1,"model":"fixture","node_id":"d80aa0d48bf13fe771cb462b80b02023","observed_model":"fixture","provider":"opencode-go","reason":"provider_monthly_quota","state":"blocked"}}
+ok signed status reads durable monthly account block
+ok actual signed exact tuple skips blocked peer
+ok explicit unsupported provider override remains unknown
+ok foreign requested account cannot inherit default account block
+signed two-node serving: 5 checks, 0 skips, 0 paid calls

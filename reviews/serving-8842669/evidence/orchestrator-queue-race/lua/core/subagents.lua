@@ -1,0 +1,967 @@
+-- Local subagents: the policy half of the runtime.
+--
+-- A subagent is a supervised child task with its own fresh context, its own
+-- session and bounded execution (docs/EXECUTION.md). Rust (`rust/wa-host/src/subagents.rs`)
+-- owns the OS thread, the durable record, capacity and the cancel flag; this file
+-- owns everything an agent is allowed to decide: which profile, which exact
+-- tools, which prompt, which budgets and how a caller's ownership is derived.
+--
+-- One public facade serves three callers: the model's `subagent` tool, the HTTP
+-- control route (`wa_subagents(body, session)`), and a job delivery starting a
+-- specialist child. All three pass a `ctx` that the *server* built; no owner,
+-- depth or allowed-tool list is ever read from the request body.
+local json = dofile("lua/vendor/json.lua")
+local memory = dofile("lua/core/memory.lua")
+local provider = dofile("lua/core/provider.lua")
+local tools = dofile("lua/core/tools.lua")
+local agentlib = dofile("lua/core/agent.lua")
+local users = dofile("lua/core/users.lua")
+local nodes = dofile("lua/core/nodes.lua")
+local paths = dofile("lua/core/paths.lua")
+local redact = dofile("lua/core/redact.lua")
+local telemetry = dofile("lua/core/telemetry.lua")
+local workspaces = dofile("lua/core/workspaces.lua")
+
+local M = {}
+
+-- Admission refusals that mean "come back later": the destination has room for the request in
+-- principle and only its current load says no, so the coordinator may try again - and the child
+-- session a refused attempt created stays for the retry to reuse (see `M.start`). Every other
+-- refusal is the destination's answer about the request itself. `orchestrator.unadmitted` is the
+-- other half of this rule (which of them permit moving to the next candidate), and
+-- `scripts/test-placed-child-workspace.lua` pins the two together so they cannot drift apart.
+M.RETRYABLE_ADMISSION = { node_full = true, queue_full = true, subagent_runtime_unavailable = true }
+
+-- Tools that reach outside a sandbox conversation. Any profile that names one
+-- must be explicitly operator-authorized; a built-in read-only profile never is.
+local BROAD = {
+  bash = true, shell = true, client = true, remote = true,
+  write = true, edit = true, spell_save = true, spell_run = true, spell_export = true,
+  resource = true,
+}
+
+-- Built-in profiles. `explore` is the default and is read-only; `guest` is the
+-- only profile a guest may start. Anything broader is a file under
+-- `<config>/subagent-profiles/` that an operator put there, and it must say
+-- `"operator_authorized": true`.
+local BUILTIN = {
+  explore = {
+    schema_version = 1,
+    id = "explore",
+    builtin = true,
+    description = "Read-only investigation: search, read, navigate the code graph and diagnose. Cannot write or run a shell.",
+    instructions = "Investigate the task read-only and report what you found with exact file paths and line references. For a navigation question - where is X defined, who calls it, how does A reach B - call `graph` first; use `grep`/`read` for the lines behind the answer. Do not modify anything.",
+    -- `graph` is read-only in effect: query/explain/path/caps/stats only read the index, and
+    -- `index` rebuilds the node's own local graph.db. It reaches no external state, so a
+    -- read-only investigator may use it. Without it, a child delegated code exploration is
+    -- blind to the navigation capability the parent already has.
+    allowed_tools = { "read", "read_many", "grep", "ls", "graph", "diagnose" },
+    resources = {},
+    limits = { max_depth = 0, timeout_seconds = 600, max_output_bytes = 65536 },
+  },
+  guest = {
+    schema_version = 1,
+    id = "guest",
+    builtin = true,
+    description = "A guest's own memory only. Cannot read files, run commands or reach the network.",
+    instructions = "Answer from the memory tools only. If the answer is not stored, say so plainly; do not guess.",
+    allowed_tools = { "remember", "recall", "memories", "skill", "capabilities" },
+    resources = {},
+    limits = { max_depth = 0, timeout_seconds = 300, max_output_bytes = 32768, max_tokens = 100000 },
+  },
+}
+
+local function profile_dir()
+  return paths.config() .. "/subagent-profiles"
+end
+
+local function split_list(value)
+  local out = {}
+  for part in tostring(value or ""):gmatch("[^,]+") do
+    part = part:gsub("^%s+", ""):gsub("%s+$", "")
+    if part ~= "" then out[#out + 1] = part end
+  end
+  return out
+end
+
+-- Read every approved profile file. A malformed or misnamed file is reported,
+-- never silently ignored: a profile that does not load is a capability that
+-- looks absent for no reason.
+local function file_profiles()
+  local out, errors = {}, {}
+  local dir = profile_dir()
+  if host.list_dir then
+    local ok, raw = pcall(host.list_dir, dir)
+    if ok and raw then
+      local listed = json.decode(raw)
+      for _, entry in ipairs((listed or {}).entries or {}) do
+        local name = tostring(entry.name or "")
+        if entry.kind == "file" and name:match("%.json$") then
+          local path = dir .. "/" .. name
+          local text = host.read_file and host.read_file(path)
+          local decoded_ok, decoded = false, nil
+          if text and text ~= "" then decoded_ok, decoded = pcall(json.decode, text) end
+          local stem = name:gsub("%.json$", "")
+          if not decoded_ok or type(decoded) ~= "table" then
+            errors[#errors + 1] = { path = path, error = "invalid_json" }
+          elseif decoded.schema_version ~= 1 then
+            errors[#errors + 1] = { path = path, error = "unsupported_schema_version" }
+          elseif tostring(decoded.id or "") ~= stem then
+            errors[#errors + 1] = { path = path, error = "id_must_match_filename", id = tostring(decoded.id or "") }
+          else
+            decoded.file = path
+            out[stem] = decoded
+          end
+        end
+      end
+    end
+  end
+  return out, errors
+end
+
+-- All profiles the caller may see: built-ins plus approved files. File profiles
+-- override a built-in with the same id only when they are authorized.
+function M.profiles()
+  local profiles = {}
+  for id, profile in pairs(BUILTIN) do profiles[id] = profile end
+  local files, errors = file_profiles()
+  for id, profile in pairs(files) do profiles[id] = profile end
+  return profiles, errors
+end
+
+-- What a profile says about evaluating its own settlement, for the completion outbox. `coordinator`
+-- (the default) means a settled child is evidence its caller has to judge, so its completion wakes
+-- that session. `self_reported` means the run recorded its own decision durably, so a *successful*
+-- completion has nothing left to judge and waking a model for it is paying for noise. A failure or a
+-- run whose evidence was lost is never covered by this: it still wakes its coordinator.
+--
+-- Declared in two places on purpose: the module that owns a specialist profile names it here, so the
+-- shipped template cannot drift from the code, and a profile file an operator wrote may say
+-- `"settlement": "self_reported"` for itself. An unrecognised or unreadable value is read as
+-- `coordinator`, because the conservative direction is to wake.
+local SELF_REPORTED_SETTLEMENT = "self_reported"
+local function self_reported_profiles()
+  local declared = {}
+  local ok, whatsapp = pcall(dofile, "lua/core/whatsapp.lua")
+  if ok and type(whatsapp) == "table" and tostring(whatsapp.PROFILE_ID or "") ~= "" then
+    -- It reads one conversation, records a decision per message and proves the send: the
+    -- coordinator has no judgement left to make about a completed run of it.
+    declared[tostring(whatsapp.PROFILE_ID)] = true
+  end
+  return declared
+end
+
+function M.settlement(profile_id)
+  local id = tostring(profile_id or "")
+  if id == "" then return "coordinator" end
+  local ok, profiles = pcall(M.profiles)
+  local profile = ok and type(profiles) == "table" and profiles[id] or nil
+  if type(profile) == "table" and tostring(profile.settlement or "") == SELF_REPORTED_SETTLEMENT then
+    return SELF_REPORTED_SETTLEMENT
+  end
+  if self_reported_profiles()[id] then return SELF_REPORTED_SETTLEMENT end
+  return "coordinator"
+end
+
+local function as_set(value)
+  -- Accepts either a list of names or a name->true map, because a caller may pass
+  -- a ceiling in either shape; `ipairs` alone silently emptied the map case.
+  local set = {}
+  if type(value) ~= "table" then return set end
+  for key, entry in pairs(value) do
+    if type(key) == "number" then
+      set[tostring(entry)] = true
+    else
+      set[tostring(key)] = true
+    end
+  end
+  return set
+end
+
+local function check_profile(profile, path)
+  local problems = {}
+  -- An empty `allowed_tools` is allowed: it means reasoning-only, with no tools
+  -- at all. A missing table is still refused, because that is a profile that
+  -- forgot the field rather than one that chose to have none.
+  if type(profile.allowed_tools) ~= "table" then
+    problems[#problems + 1] = "allowed_tools_required"
+  else
+    local seen = {}
+    for _, name in ipairs(profile.allowed_tools) do
+      if type(name) ~= "string" or name == "" then
+        problems[#problems + 1] = "allowed_tools_must_be_strings"
+      elseif seen[name] then
+        problems[#problems + 1] = "duplicate_tool:" .. name
+      end
+      seen[name] = true
+    end
+  end
+  if profile.limits ~= nil and type(profile.limits) ~= "table" then
+    problems[#problems + 1] = "limits_must_be_an_object"
+  end
+  return problems
+end
+
+-- Resolve a profile for a specific caller: validate it, reject anything that
+-- reaches beyond the caller's own authority, and never let a profile grant the
+-- `subagent` tool (a child does not spawn children).
+function M.resolve(id, ctx)
+  ctx = ctx or {}
+  local profiles, errors = M.profiles()
+  local profile = profiles[tostring(id or "explore")]
+  if not profile then
+    local available = {}
+    for key in pairs(profiles) do available[#available + 1] = key end
+    table.sort(available)
+    return nil, "unknown_profile:" .. tostring(id), { available = available }
+  end
+  local problems = check_profile(profile)
+  if #problems > 0 then return nil, "invalid_profile:" .. table.concat(problems, ",") end
+
+  local ceiling = ctx.ceiling
+  if ceiling == nil then
+    -- No server-built ceiling was supplied (a direct policy call): derive it from
+    -- the role's *catalog* - what the principal may execute or delegate, which is
+    -- wider than what its prompt shows. An explicitly empty ceiling is NOT re-derived
+    -- - "this principal has no tools" must mean none, not the role default.
+    ceiling = {}
+    for _, item in ipairs(tools.catalog(ctx.role or "master")) do
+      local name = item["function"] and item["function"].name
+      if name then ceiling[name] = true end
+    end
+  end
+  ceiling = as_set(ceiling)
+  local allowed_list, allowed_set = {}, {}
+  for _, name in ipairs(profile.allowed_tools) do
+    name = tostring(name)
+    if name == "subagent" then return nil, "subagent_recursion_forbidden" end
+    if not ceiling[name] then return nil, "profile_exceeds_caller:" .. name end
+    if BROAD[name] and profile.operator_authorized ~= true then
+      return nil, "profile_not_authorized:" .. name
+    end
+    if not allowed_set[name] then
+      allowed_set[name] = true
+      allowed_list[#allowed_list + 1] = name
+    end
+  end
+
+  local limits = profile.limits or {}
+  local exclusive
+  if type(profile.resources)=="table" then exclusive=profile.resources.exclusive end
+  if exclusive~=nil then
+    if type(exclusive)~="table" or #exclusive>63 then return nil,"invalid_exclusive_resources" end
+    for key,value in pairs(exclusive) do
+      if type(key)~="number" or key%1~=0 or key<1 or key>#exclusive or type(value)~="string" or value=="" or #value>500 then
+        return nil,"invalid_exclusive_resources"
+      end
+    end
+  end
+  local depth = tonumber(ctx.depth) or 1
+  local max_depth = tonumber(host.getenv("WASM_AGENT_SUBAGENT_MAX_DEPTH")) or 1
+  if depth > max_depth then return nil, "depth_exceeded" end
+  if depth > 1 and (tonumber(limits.max_depth) or 0) < depth then
+    return nil, "profile_depth_exceeded"
+  end
+
+  -- Pass every declared limit through so a specialist profile's own budget
+  -- names (context_messages, body_bytes, sends_per_run) survive to the child;
+  -- clamp only the fields this runtime owns. A malformed, negative or NaN budget
+  -- on a field this runtime enforces is refused, not silently coerced.
+  for _, key in ipairs({ "max_depth", "timeout_seconds", "max_output_bytes", "max_tokens",
+      "max_cost_usd", "max_children", "max_prompt_bytes" }) do
+    local raw_value = limits[key]
+    if raw_value ~= nil and (type(raw_value) ~= "number" or raw_value ~= raw_value) then
+      return nil, "invalid_limit:" .. key
+    end
+  end
+  local resolved_limits = {}
+  for key, value in pairs(limits) do resolved_limits[key] = value end
+  resolved_limits.max_depth = math.min(tonumber(limits.max_depth) or 0, max_depth)
+  resolved_limits.timeout_seconds = tonumber(limits.timeout_seconds) or 600
+  resolved_limits.max_output_bytes = tonumber(limits.max_output_bytes) or 65536
+  resolved_limits.max_tokens = tonumber(limits.max_tokens)
+  resolved_limits.max_cost_usd = tonumber(limits.max_cost_usd)
+  resolved_limits.max_children = tonumber(limits.max_children)
+  resolved_limits.max_prompt_bytes = tonumber(limits.max_prompt_bytes) or 262144
+  for _, key in ipairs({ "max_depth", "timeout_seconds", "max_output_bytes", "max_tokens",
+      "max_cost_usd", "max_children", "max_prompt_bytes" }) do
+    local value = resolved_limits[key]
+    if value ~= nil and (type(value) ~= "number" or value ~= value or value < 0) then
+      return nil, "invalid_limit:" .. key
+    end
+  end
+
+  return {
+    id = profile.id,
+    description = profile.description or "",
+    instructions = tostring(profile.instructions or ""),
+    allowed_tools = allowed_list,
+    allowed = allowed_set,
+    resources = profile.resources or {},
+    limits = resolved_limits,
+    model = profile.model,
+    reasoning = profile.reasoning,
+    approved_models = profile.approved_models,
+    operator_authorized = profile.operator_authorized == true,
+    builtin = profile.builtin == true,
+    file = profile.file,
+  }
+end
+
+-- The caller's authorized tool names, from its catalog - authority, not prompt visibility.
+-- A tool hidden from the parent's prompt is still delegable, so this must read the catalog.
+local function ceiling_for(role)
+  local set = {}
+  for _, item in ipairs(tools.catalog(role or "master")) do
+    local name = item["function"] and item["function"].name
+    if name then set[name] = true end
+  end
+  return set
+end
+
+local function approved_model(profile, requested, caller_model)
+  if not requested or requested == "" then return true, nil end
+  if requested == caller_model then return true, nil end
+  for _, name in ipairs(profile.approved_models or {}) do
+    if name == requested then return true, nil end
+  end
+  for _, name in ipairs(split_list(host.getenv("WASM_AGENT_SUBAGENT_MODELS"))) do
+    if name == requested then return true, nil end
+  end
+  return false, "model_not_approved:" .. tostring(requested)
+end
+
+local function approved_reasoning(model, requested)
+  if not requested or requested == "" or requested == "provider" then return true, nil end
+  local reasoning = provider.reasoning(model)
+  -- A model with no reasoning levels ignores the field; an explicit level for it
+  -- is a request the provider cannot honour, so it is refused rather than dropped.
+  if not reasoning.supported then return false, "reasoning_not_supported:" .. tostring(requested) end
+  for _, level in ipairs(reasoning.levels or {}) do
+    if level == requested then return true, nil end
+  end
+  return false, "reasoning_not_approved:" .. tostring(requested)
+end
+
+local function derive_ctx(ctx)
+  ctx = ctx or {}
+  local role = tostring(ctx.role or "master")
+  -- A child caller is detected by the profile snapshot the agent carries, never
+  -- by anything the request said; depth therefore cannot be spoofed upward.
+  local depth = 1
+  if ctx.subagent then
+    depth = (tonumber(ctx.subagent.depth) or 1) + 1
+  end
+  return {
+    user_id = tostring(ctx.user_id or "master"),
+    role = role,
+    session_id = tostring(ctx.session_id or ""),
+    run_id = tostring(ctx.run_id or ""),
+    node_id = tostring(ctx.node_id or ""),
+    subagent = ctx.subagent,
+    depth = depth,
+    ceiling = ctx.ceiling or ceiling_for(role),
+    -- The caller's *actual* model/reasoning, so inheritance means the model that
+    -- run is using and not merely whatever is configured globally.
+    model = ctx.model,
+    reasoning = ctx.reasoning,
+    remote = ctx.remote,
+    placement = ctx.placement,
+  }
+end
+
+local function truthy_limits(profile)
+  -- Copy every declared limit: the child loop enforces the generic budgets, and a
+  -- specialist module (whatsapp) reads its own. A dropped field is a budget that
+  -- silently does not apply.
+  local limits = {}
+  for key, value in pairs(profile.limits or {}) do limits[key] = value end
+  return limits
+end
+
+-- Bound a caller-supplied text or table. A table is JSON-encoded (never
+-- `tostring`, which yields "table: 0x..."), and both shapes are clipped inside
+-- the profile's prompt budget with an explicit marker.
+local function bounded_text(value, maximum)
+  maximum = tonumber(maximum) or 262144
+  local text
+  if value == nil then
+    text = ""
+  elseif type(value) == "table" then
+    local ok, encoded = pcall(json.encode, value)
+    text = ok and encoded or "{}"
+  else
+    text = tostring(value)
+  end
+  if #text > maximum then
+    local marker = "\n[truncated: input exceeded the profile's prompt budget]"
+    text = text:sub(1, math.max(0, maximum - #marker)) .. marker
+  end
+  return text
+end
+
+-- Is this conversation in the profile's approved scope?
+local function scope_has(profile, conversation_id)
+  local resources = profile.resources or {}
+  if type(resources.allowed_conversations) == "table" then
+    for _, value in ipairs(resources.allowed_conversations) do
+      if value == conversation_id then return true end
+    end
+  end
+  if resources.conversation == conversation_id then return true end
+  return resources.allowed_conversation == conversation_id
+end
+
+local function profile_is_scoped(profile)
+  local resources = profile.resources or {}
+  return resources.conversation ~= nil or resources.allowed_conversation ~= nil
+    or type(resources.allowed_conversations) == "table"
+end
+
+-- Resolve the trusted event from the ledger: the caller may name a message id,
+-- and nothing else. The conversation is read off the row, so an event cannot
+-- choose its own scope, and a scoped profile refuses a message outside it. A raw
+-- event field like a script, path or endpoint is ignored entirely.
+local function resolve_event(profile, args)
+  local requested = args.event
+  local scoped = profile_is_scoped(profile)
+  if type(requested) ~= "table" then
+    if scoped then return nil, "event_context_required" end
+    return nil, nil
+  end
+  local message_id = tostring(requested.message_id or "")
+  if message_id == "" then
+    if scoped then return nil, "event_context_required" end
+    return nil, nil
+  end
+  local row = memory.ledger_message(message_id)
+  if not row then return nil, "event_message_unknown_or_ambiguous" end
+  if scoped and not scope_has(profile, row.conversation_id) then
+    return nil, "event_conversation_not_in_profile"
+  end
+  -- The ledger's own two clocks for the trigger travel with the event. They are not decoration: a scoped
+  -- responder proves the operator has not answered the conversation since this message arrived before it
+  -- sends anything, and that proof needs the arrival as this node recorded it (`observed_at`) with the
+  -- sender's claim (`sent_at`) as the fallback. Both are copied from the row that was just resolved, so the
+  -- comparison is against the same ledger the reply is read from, never against a caller's argument.
+  return { conversation_id = row.conversation_id, message_id = row.message_id,
+    sent_at = tonumber(row.sent_at) or 0, observed_at = tonumber(row.observed_at) or 0 }, nil
+end
+
+-- Start one child. Ownership, depth and the allowed set are derived here; the
+-- caller supplies only the task, an optional profile, and approved overrides.
+function M.start(args, ctx)
+  args = args or {}
+  ctx = derive_ctx(ctx)
+  if ctx.subagent then return { error = "subagent_recursion_forbidden" } end
+  if not ctx.remote and not ctx.placement then
+    local fleet = dofile("lua/core/orchestrator.lua")
+    if fleet.enabled(ctx.user_id) then return fleet.enqueue(args, ctx) end
+  end
+  local raw_prompt = tostring(args.prompt or "")
+  if raw_prompt == "" then return { error = "prompt_required" } end
+  local profile_id = tostring(args.profile or "explore")
+  local profile, refusal, detail = M.resolve(profile_id, ctx)
+  if not profile then
+    local out = { error = refusal }
+    if detail then for key, value in pairs(detail) do out[key] = value end end
+    return out
+  end
+
+  local caller_model = ctx.model
+  if caller_model == nil or caller_model == "" then caller_model = provider.settings().model end
+  local model = args.model
+  if model == nil or model == "" then model = profile.model end
+  local model_ok, model_error = approved_model(profile, model, caller_model)
+  if not model_ok then return { error = model_error } end
+  local effective_model = model or caller_model
+  -- Policy says whether this model may be delegated; the provider says whether this route can
+  -- run it at all, and that has to be asked before a session and a worktree exist for a pair
+  -- that cannot run. The request path refuses the same pair at the first call, but by then the
+  -- child has a session, a workspace and a thread to retire - which is how `task-worker`'s
+  -- `gpt-6-luna` died on the opencode-go route in 0.67s with zero tool calls. Same predicate,
+  -- earlier place, so there is one rule and two gates rather than two rules.
+  local unservable = provider.unservable(effective_model)
+  if unservable then return { error = unservable, model = effective_model } end
+  local reasoning = args.reasoning
+  if reasoning == nil or reasoning == "" then reasoning = profile.reasoning end
+  if reasoning == nil or reasoning == "" then reasoning = ctx.reasoning end
+  local reasoning_ok, reasoning_error = approved_reasoning(effective_model, reasoning)
+  if not reasoning_ok then return { error = reasoning_error } end
+  local limits = truthy_limits(profile)
+  -- Bound the task and its context before a child session or a native thread is
+  -- created, so an oversized payload is refused rather than queued.
+  local prompt = bounded_text(raw_prompt, limits.max_prompt_bytes)
+  local context = bounded_text(args.context, limits.max_prompt_bytes)
+  local event, event_error = resolve_event(profile, args)
+  if event_error then return { error = event_error } end
+  -- A dollar cap is only meaningful when the model's rates are known. Fail
+  -- closed: an unpriceable model cannot promise a dollar bound.
+  if limits.max_cost_usd and not provider.rates(effective_model) then
+    return { error = "cost_budget_requires_rates", model = effective_model }
+  end
+
+  local idempotency = tostring(args.idempotency_key or "")
+  if idempotency == "" and args.delivery_id and tostring(args.delivery_id) ~= "" then
+    idempotency = "delivery:" .. tostring(args.delivery_id)
+  end
+  if idempotency ~= "" then
+    local existing = json.decode(host.subagent("resolve", json.encode({
+      owner_user = ctx.user_id, idempotency_key = idempotency })))
+    if type(existing) == "table" and existing.subagent_id then
+      existing.deduplicated = true
+      dofile('lua/core/completions.lua').watch(existing.subagent_id,{user_id=ctx.user_id,role=ctx.role,remote=ctx.remote,session_id=existing.parent_session_id})
+      return existing
+    end
+  end
+
+  local initial_text = prompt
+  if context ~= "" then initial_text = initial_text .. "\n\nContext:\n" .. context end
+  local estimated = agentlib.subagent_initial_tokens({
+    id = profile.id, allowed = profile.allowed, allowed_tools = profile.allowed_tools,
+    instructions = profile.instructions, limits = limits,
+  }, ctx.role, initial_text)
+  if limits.max_tokens and estimated >= limits.max_tokens then
+    return { error = "subagent_token_budget: initial prompt exceeds max_tokens before admission",
+      estimated_prompt_tokens = estimated, max_tokens = limits.max_tokens, model = effective_model,
+      note = "No child session or provider call was started; choose a larger approved budget or shorten the task/context." }
+  end
+
+  -- A destination that cannot fork a workspace refuses *before* it creates the child's session.
+  -- Measured: an empty, already-ended session row per refused attempt, one every ~2.5s, because the
+  -- attempt ended after the shell existed - the shell outlived the attempt on the node that refused
+  -- it. The preflight is the same decision `ensure` makes, taken where nothing has been written yet.
+  local needs_workspace = workspaces.requires_write_tools(profile.allowed_tools)
+  if needs_workspace then
+    local source, source_refusal = workspaces.preflight_source(memory, ctx.session_id, ctx.user_id, ctx.node_id)
+    if not source then
+      return { error = workspaces.refusal_code(source_refusal), detail = source_refusal, not_started = true }
+    end
+  end
+  local session_id
+  -- One shell per *request*, not one per attempt. The coordinator retries a dispatch with the same
+  -- idempotency key, and the runtime's own dedupe cannot help before admission: `resolve` answers
+  -- `found:false` for a key nothing was admitted for, so a destination that refuses at admission
+  -- (a full node, a runtime that is not up) would write a fresh child session and a fresh worktree on
+  -- every retry - measured: one empty, already-ended shell per attempt, ~840 in forty minutes, and a
+  -- git worktree to go with each. The derived id makes the next attempt find the shell the first one
+  -- wrote and reuse its checkout, so a retry has the same effect as the attempt before it.
+  local shell_id = idempotency ~= "" and ("child:" .. idempotency) or nil
+  local shell = shell_id and memory.session(shell_id) or nil
+  if shell then
+    -- A key is a name, not a capability: a reused shell must belong to the same caller, node and
+    -- parent, or the request is refused rather than run in someone else's thread.
+    if tostring(shell.user_id or "") ~= ctx.user_id or tostring(shell.node_id or "") ~= ctx.node_id
+        or tostring(shell.parent_session_id or "") ~= tostring(ctx.session_id or "") then
+      return { error = "idempotency_key_conflict", not_started = true,
+        detail = "this idempotency key names a child session of another caller, node or parent" }
+    end
+    if shell.ended_at then
+      -- A refusal that ended the request retired this session, so there is no live thread here to
+      -- run in: reopening it would be a child running under a session that says it is over.
+      return { error = "idempotency_key_retired", not_started = true,
+        detail = "the child session this key names was ended by a refusal; send the task under a new key" }
+    end
+    session_id = shell_id
+  else
+    session_id = memory.start_session(ctx.node_id, "subagent", {
+      id = shell_id,
+      user_id = ctx.user_id,
+      node_id = ctx.node_id,
+      title = tostring(args.title or prompt):gsub('%s+',' '):sub(1,100),
+      parent_session_id = ctx.session_id,
+      workspace_required = needs_workspace,
+    })
+  end
+  local workspace
+  if needs_workspace then
+    workspace, detail = workspaces.ensure(memory, session_id, ctx.session_id)
+    if not workspace then
+      pcall(memory.finish_session, session_id)
+      -- The refusal keeps its own code (and its sentence in `detail`) so a coordinator can act on
+      -- the reason instead of on "allocation failed": `workspace_source_dirty` and
+      -- `workspace_destination_source_missing` call for different next steps.
+      return { error = workspaces.refusal_code(detail), detail = detail, session_id = session_id,
+        not_started = true, workspace = memory.session_workspace(session_id) }
+    end
+  end
+  local spec = {
+    -- Generated here, never taken from the caller: the id is a path component and
+    -- a caller-supplied one would be a traversal and a collision with an existing
+    -- child. The acceptance contract accepts `subagent_id` as an *output* only.
+    id = host.uuid(),
+    session_id = session_id,
+    profile = profile.id,
+    prompt = prompt,
+    title = tostring(args.title or prompt):gsub('%s+',' '):sub(1,100),
+    context = context,
+    instructions = profile.instructions,
+    allowed_tools = profile.allowed_tools,
+    limits = limits,
+    model = effective_model,
+    reasoning = reasoning,
+    owner_user = ctx.user_id,
+    parent_session_id = ctx.session_id,
+    -- Derived from the authenticated context, not from the body: a caller cannot
+    -- name the run a child is filed under.
+    parent_run_id = ctx.run_id,
+    node_id = ctx.node_id,
+    role = ctx.role,
+    depth = ctx.depth,
+    timeout_seconds = limits.timeout_seconds,
+    idempotency_key = idempotency,
+    resources = profile.resources,
+    event = event,
+    admission_limit = ctx.placement and ctx.placement.max_tasks,
+  }
+  local receipt = json.decode(host.subagent("start", json.encode(spec)))
+  if type(receipt) ~= "table" then return { error = "subagent_runtime_error" } end
+  if receipt.error then
+    -- Admission failed. A refusal that means "come back later" keeps the shell: the coordinator
+    -- retries the same key, and the retry must find this session and this checkout rather than
+    -- write another pair. Every other refusal ends the request, and then the shell is retired - it
+    -- said why in `workspace_error` and nothing will reuse it.
+    if not M.RETRYABLE_ADMISSION[receipt.error] then pcall(memory.finish_session, session_id) end
+    return receipt
+  end
+  if receipt.deduplicated then
+    -- The key already owns a run. Only a session *this* attempt created is retired: with a reused
+    -- shell it is the admitted run's own session, and closing it would end a live child's thread.
+    if not shell then pcall(memory.finish_session, session_id) end
+    dofile('lua/core/completions.lua').watch(receipt.subagent_id,{user_id=ctx.user_id,role=ctx.role,remote=ctx.remote,session_id=receipt.parent_session_id})
+    return receipt
+  end
+  receipt.profile = profile.id
+  dofile('lua/core/completions.lua').watch(receipt.subagent_id,ctx)
+  return receipt
+end
+
+local function mark_unadmitted(result)
+  if type(result) == "table" and result.error and not result.subagent_id then result.not_started = true end
+  return result
+end
+
+-- The single control facade. `ctx` is server-built for every caller.
+function M.control(args, ctx)
+  args = args or {}
+  ctx = derive_ctx(ctx)
+  local action = tostring(args.action or "list")
+  if ctx.subagent then
+    -- A child has no subagents of its own and may not inspect or control any.
+    return { error = "subagent_recursion_forbidden" }
+  end
+
+  if not ctx.remote then
+    local fleet = dofile("lua/core/orchestrator.lua")
+    local handled, result = fleet.control(args, ctx, M)
+    if handled then return result end
+  end
+
+  if action=='steer_session' or (action=='steering_status' and not args.id and not args.subagent_id) then
+    if ctx.remote then return {error='explicit_child_target_required'} end
+    return dofile('lua/core/steering.lua').control(args,ctx)
+  end
+  if action == "session" or action == "message" or action=='steer' or action=='steering_status' then
+    local receipt = json.decode(host.subagent("status", json.encode({
+      owner_user = ctx.user_id, id = tostring(args.id or args.subagent_id or "") })))
+    if not receipt or receipt.error then return receipt or { error = "subagent_runtime_error" } end
+    if action=='steer' or action=='steering_status' then
+      local request={}
+      for k,v in pairs(args) do request[k]=v end
+      request.session_id=receipt.session_id
+      return dofile('lua/core/steering.lua').control(request,ctx,receipt.subagent_id,receipt.settled or receipt.state=='unknown')
+    end
+    if action == "session" then
+      return dofile('lua/core/session_view.lua').get(memory,receipt.session_id,args,receipt)
+    end
+    if tostring(args.idempotency_key or "") == "" then return { error = "idempotency_key_required" } end
+    for attempt = 1, 3 do
+      local result = json.decode(host.subagent("continue", json.encode({
+        owner_user = ctx.user_id, id = receipt.subagent_id, text = tostring(args.text or ""),
+        new_id = host.uuid(), idempotency_key = tostring(args.idempotency_key) })))
+      if result.error ~= "session_tail_changed" then
+        if result.subagent_id then
+          local parent_ctx={user_id=ctx.user_id,role=ctx.role,remote=ctx.remote,session_id=receipt.parent_session_id}
+          dofile('lua/core/completions.lua').watch(result.subagent_id,parent_ctx)
+        end
+        return result
+      end
+    end
+    return { error = "session_tail_changed", retryable = true }
+  end
+
+  if action == "capacity" then
+    return { resources = host.system_resources and json.decode(host.system_resources()) or {},
+      runtime = json.decode(host.subagent("capacity", "{}")) }
+  end
+
+  if action == "resolve" then
+    -- "Did you admit a run for this key?" - the question a coordinator has to ask before it may
+    -- retry a delivery whose answer it never received. The runtime answers from its durable records,
+    -- so `found:false` is proof that this destination never started the request, which is what makes
+    -- a retry safe rather than a possible second child.
+    local key = tostring(args.idempotency_key or "")
+    if key == "" then return { error = "idempotency_key_required", not_started = true } end
+    local answer = json.decode(host.subagent("resolve", json.encode({ owner_user = ctx.user_id, idempotency_key = key })))
+    if type(answer) ~= "table" or answer.error then
+      return { error = "resolve_unavailable", not_started = true, idempotency_key = key,
+        detail = tostring(type(answer) == "table" and answer.error or "the runtime did not answer") }
+    end
+    return { idempotency_key = key, found = answer.found == true,
+      unadmitted = answer.found ~= true, receipt = answer.found == true and answer or nil }
+  end
+
+  if action == "start" then return mark_unadmitted(M.start(args, ctx)) end
+  if action == "profiles" then
+    local profiles, errors = M.profiles()
+    local listed = {}
+    for id, profile in pairs(profiles) do
+      local resolved, refusal = M.resolve(id, ctx)
+      if resolved then
+        listed[#listed + 1] = {
+          id = resolved.id, description = resolved.description,
+          allowed_tools = resolved.allowed_tools, builtin = resolved.builtin,
+          operator_authorized = resolved.operator_authorized,
+          limits = resolved.limits, model = resolved.model, reasoning = resolved.reasoning,
+          approved_models = resolved.approved_models or {},
+          effective_models = {}, reasoning_choices = {},
+          default_model = resolved.model or ctx.model or provider.settings().model,
+          default_reasoning = resolved.reasoning or ctx.reasoning or 'provider',
+          token_budget = resolved.limits.max_tokens == nil and 'unlimited' or 'explicit',
+          cost_budget = resolved.limits.max_cost_usd == nil and 'unlimited' or 'explicit',
+        }
+        local item=listed[#listed]
+        local candidates={ctx.model or provider.settings().model}
+        for _,name in ipairs(resolved.approved_models or {}) do candidates[#candidates+1]=name end
+        for _,name in ipairs(split_list(host.getenv('WASM_AGENT_SUBAGENT_MODELS'))) do candidates[#candidates+1]=name end
+        local seen={}
+        for _,name in ipairs(candidates) do
+          if name and name~='' and not seen[name] then
+            seen[name]=true;item.effective_models[#item.effective_models+1]=name
+            local info=provider.reasoning(name)
+            item.reasoning_choices[name]={supported=info.supported,levels=info.levels or {},provider_default_allowed=true}
+          end
+        end
+      else
+        listed[#listed + 1] = { id = id, available = false, reason = refusal }
+      end
+    end
+    table.sort(listed, function(a, b) return tostring(a.id) < tostring(b.id) end)
+    return { profiles = listed, errors = errors or {} }
+  end
+
+  local call = { owner_user = ctx.user_id }
+  -- `subagent_id`/`timeout_ms` are the agreed acceptance aliases for the same
+  -- fields; a caller may use either name.
+  local target = args.id or args.subagent_id
+  if target then call.id = tostring(target) end
+  if action == "await" then call.wait_ms = tonumber(args.wait_ms) or tonumber(args.timeout_ms) or 60000 end
+  if action == "list" then
+    return json.decode(host.subagent("list", json.encode({ owner_user = ctx.user_id })))
+  end
+  local result = json.decode(host.subagent(action, json.encode(call)))
+  if type(result) ~= "table" then return { error = "subagent_runtime_error" } end
+  if result.subagent_id then result.completion=dofile('lua/core/completions.lua').status(result.subagent_id,ctx.user_id) end
+  return result
+end
+
+-- What served a child and what it cost, as the durable ledger recorded it. A
+-- settled receipt is the only view a caller has of a child that has already
+-- finished, so "which model was wasteful" must be answerable from the receipt
+-- and not by reconstructing the ledger by hand.
+--
+-- The provider's own numbers are the authority, and their absence stays absent:
+-- `usage.available` is false with a `reason` when nothing was measured, never a
+-- zero that reads like a measured free call. `telemetry.normalize` marks each
+-- call known or unknown, so a run whose calls were only partly reported says so
+-- (`partial`, `unmeasured_calls`) instead of presenting a subset as the total.
+-- This block is control data for a caller: nothing here is written into a model
+-- context, a transcript or a prompt.
+local function run_accounting(session_id)
+  local snapshot = telemetry.snapshot(session_id)
+  local total = snapshot.total or {}
+  local calls = tonumber(total.calls) or 0
+  local unmeasured = tonumber(total.missing_usage) or 0
+  -- The last call's own span carries the model the provider answered with - which
+  -- is not always the one the receipt asked for - and the provider that served it.
+  local last = snapshot.last or {}
+  local account = {
+    provider = type(last.provider) == "string" and last.provider ~= "" and last.provider or nil,
+    model = type(last.model) == "string" and last.model ~= "" and last.model or nil,
+  }
+  if calls == 0 then
+    account.usage = { available = false, reason = "no_model_call_measured", calls = 0,
+      source = "harness_events" }
+  elseif unmeasured >= calls then
+    account.usage = { available = false, reason = "provider_reported_no_usage", calls = calls,
+      unmeasured_calls = unmeasured, source = "harness_events" }
+  else
+    local prompt = tonumber(total.prompt) or 0
+    local completion = tonumber(total.output) or 0
+    local cache_known = total.cache_known == true
+    local cost_known = total.cost_known == true
+    account.usage = {
+      available = unmeasured == 0,
+      partial = unmeasured > 0,
+      reason = unmeasured > 0 and "some_calls_unmeasured" or nil,
+      source = "harness_events", calls = calls, unmeasured_calls = unmeasured,
+      prompt = prompt, completion = completion,
+      total_tokens = prompt + completion,
+      -- A split, a cache figure and a price the provider did not report stay
+      -- absent. Their place is taken by the `*_known` flag, so a reader sees
+      -- "not reported" where they would otherwise read a measured zero.
+      cache_known = cache_known,
+      cache_read = cache_known and (tonumber(total.cacheRead) or 0) or nil,
+      cache_write = cache_known and (tonumber(total.cacheWrite) or 0) or nil,
+      cost_known = cost_known,
+      cost_usd = cost_known and tonumber(total.cost) or nil,
+    }
+  end
+  return account
+end
+
+-- The child entrypoint. Rust calls this on a fresh interpreter, on its own
+-- thread, with the durable receipt. It never comes from the model and never
+-- reads the parent transcript, the operator instruction file or the parent's
+-- tool set.
+function wa_subagent_run(receipt_json)
+  local ok, receipt = pcall(json.decode, receipt_json or "")
+  if not ok or type(receipt) ~= "table" then
+    return json.encode({ state = "failed", error = "invalid_receipt" })
+  end
+  -- Every outcome carries what served the run and what it cost, a failure
+  -- included: a child that spent its budget and then died is exactly the run a
+  -- caller has to account for.
+  local function report(state, body)
+    body.state = state
+    body.accounting = run_accounting(receipt.session_id)
+    return json.encode(body)
+  end
+  local limits = receipt.limits or {}
+  local profile = {
+    id = tostring(receipt.profile or "explore"),
+    allowed_tools = receipt.allowed_tools or {},
+    instructions = tostring(receipt.instructions or ""),
+    limits = limits,
+    model = receipt.model,
+    reasoning = receipt.reasoning,
+    -- The resolved resource bindings (permitted conversation, action, account,
+    -- destination). They are the child's trusted snapshot, resolved once at
+    -- admission by an approved profile, and travel with the receipt so the child
+    -- cannot be handed a different set than the one that was approved.
+    resources = receipt.resources or {},
+  }
+  local allowed = as_set(profile.allowed_tools)
+  local child_role = tostring(receipt.role or "master")
+  local events = 0
+  -- The approved profile is snapshotted here, immutably: a specialist tool
+  -- (whatsapp) must see the resources and limits the operator approved, not a
+  -- re-derived or caller-supplied subset.
+  local profile_snapshot = {
+    schema_version = 1,
+    id = profile.id,
+    allowed_tools = profile.allowed_tools,
+    instructions = profile.instructions,
+    resources = profile.resources,
+    limits = profile.limits,
+  }
+  -- Durable effects and the persistent per-child send budget, bound to this
+  -- child's session.
+  local effects = dofile("lua/core/effects.lua").new(receipt.session_id)
+  local sends = { count = effects.count(), limit = tonumber(limits.sends_per_run) or 1 }
+  local child_ok, child = pcall(agentlib.new, receipt.session_id, function(event)
+    -- Events stay local: a child must never write into the parent's stream.
+    events = events + 1
+    host.stream(json.encode(event))
+  end, child_role, tostring(receipt.owner_user or "master"), tostring(receipt.node_id or ""), {
+    subagent = {
+      id = profile.id, run_id = receipt.subagent_id, allowed = allowed, allowed_tools = profile.allowed_tools,
+      instructions = profile.instructions, limits = limits,
+      model = profile.model, reasoning = profile.reasoning,
+      resources = profile.resources,
+      profile = profile_snapshot,
+      event = receipt.event,
+      effects = effects,
+      sends = sends,
+      depth = tonumber(receipt.depth) or 1,
+    },
+  })
+  if not child_ok then
+    return report("failed", { error = redact.text(tostring(child)), session_id = receipt.session_id })
+  end
+  local prompt = tostring(receipt.prompt or "")
+  if tostring(receipt.context or "") ~= "" then
+    prompt = prompt .. "\n\nContext:\n" .. tostring(receipt.context)
+  end
+  local ran, reply = pcall(child.run, child, prompt, {})
+  if not ran then
+    return report("failed", { error = redact.text(tostring(reply)), session_id = receipt.session_id })
+  end
+  reply = tostring(reply or "")
+  local truncated = false
+  if limits.max_output_bytes and #reply > limits.max_output_bytes then
+    -- The marker counts against the cap: the stored reply must not exceed the
+    -- budget it was given.
+    local marker = "\n[truncated at the child's output budget]"
+    reply = reply:sub(1, math.max(0, limits.max_output_bytes - #marker)) .. marker
+    truncated = true
+  end
+  -- The child's own `usage_total` is not the authority here: it counts what this
+  -- interpreter accumulated and says nothing about what the provider reported.
+  -- The ledger does, so the receipt carries that instead.
+  return report("completed", {
+    result = {
+      reply = reply,
+      session_id = receipt.session_id,
+      truncated = truncated,
+      events = events,
+    },
+  })
+end
+
+-- HTTP/Lua control entrypoint for `POST /subagents` (and a GET control route).
+-- The owner is resolved from the authenticated session, exactly as the model
+-- tool resolves it from `ctx`; the request body can never name an owner, a
+-- depth or a tool list.
+function wa_subagents(body, session)
+  local decoded = {}
+  if body and body ~= "" then
+    local ok, value = pcall(json.decode, body)
+    if ok and type(value) == "table" then decoded = value end
+  end
+  local user = users.current(session)
+  local role = user.role
+  if not nodes.is_master() then role = "guest" end
+  -- The conversation a child is filed under may be named in the body, but it must
+  -- belong to the caller: a session link is not a way to attach a child to someone
+  -- else's thread. Everything else (owner, depth, allowed tools) is derived, never
+  -- read from the body.
+  local parent = tostring(decoded.thread or "")
+  local requested = tostring(decoded.parent_session_id or "")
+  if requested ~= "" then parent=requested end
+  if parent ~= "" then
+    local existing = memory.session(parent)
+    if not existing or existing.user_id ~= user.id then return json.encode({error="forbidden_parent_session"}) end
+  end
+  local ctx = {
+    user_id = user.id,
+    role = role,
+    session_id = parent,
+    run_id = "",
+    node_id = "",
+  }
+  local ok, result = pcall(M.control, decoded, ctx)
+  if not ok then
+    return json.encode({ error = redact.text(tostring(result)) })
+  end
+  return json.encode(result)
+end
+
+local completions=dofile('lua/core/completions.lua')
+function wa_orchestrator_tick()
+  dofile("lua/core/orchestrator.lua").tick(M)
+  completions.tick(M)
+  return "ok"
+end
+
+return M

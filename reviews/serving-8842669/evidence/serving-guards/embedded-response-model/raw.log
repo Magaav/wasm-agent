@@ -1,0 +1,24 @@
+ok compiled availability embedded
+ok legacy absent state unknown
+ok real structured monthly seam block
+ok explicit bound recovery
+ok invalid persisted eligibility fails closed: state='corrupted'
+ok invalid state zero HTTP calls: state='corrupted'
+ok explicit bound recovery
+ok invalid persisted eligibility fails closed: reason='other_reason'
+ok invalid state zero HTTP calls: reason='other_reason'
+ok explicit bound recovery
+ok invalid persisted eligibility fails closed: model=''
+ok invalid state zero HTTP calls: model=''
+ok explicit bound recovery
+ok invalid persisted eligibility fails closed: generation=-1
+ok invalid state zero HTTP calls: generation=-1
+ok explicit bound recovery
+ok invalid persisted eligibility fails closed: generation='invalid'
+ok invalid state zero HTTP calls: generation='invalid'
+ok explicit bound recovery
+ok foreign response returned without recovery evidence
+
+STDERR
+lua root unset: using embedded modules; edits under lua/ are NOT under test
+lua error: [string "C:\Users\Victor\orca\projects\wasm-agent\.git..."]:4: wrong model cannot certify serving

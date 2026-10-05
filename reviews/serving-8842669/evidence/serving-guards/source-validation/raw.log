@@ -1,0 +1,7 @@
+ok compiled availability embedded
+ok legacy absent state unknown
+ok real structured monthly seam block
+ok explicit bound recovery
+
+STDERR
+lua error: [string "C:\Users\Victor\orca\projects\wasm-agent\.git..."]:4: invalid persisted eligibility fails closed: state='corrupted'

@@ -1,0 +1,136 @@
+{
+  "schema": 1,
+  "outcome": "producer_complete_for_independent_review",
+  "acceptance": "pending exact-tip independent review",
+  "full_gate": false,
+  "branch": "change/finish-serving-eligibility",
+  "head": "884266956df3ea26374bce9da7943d5ba4ee10c7",
+  "tree": "47505b2c55cc01cff3981ffe8e7ae4f9753bf885",
+  "origin_main": "898a9a238c89c5f64b83cfa219f8c17840b441f9",
+  "original_history": {
+    "required_tip": "2f68dc2d39f5783b8dbaf8b76cfc9e34670f671c",
+    "preserved": true,
+    "merge": "5ffd26bcd19d04b98fc1118b7a75161124473df8"
+  },
+  "merge_tree": {
+    "exit": 0,
+    "tree": "47505b2c55cc01cff3981ffe8e7ae4f9753bf885"
+  },
+  "behind": 0,
+  "clean": true,
+  "producer_push": false,
+  "packet": "C:\\Users\\Victor\\orca\\projects\\wasm-agent\\.git\\worktrees\\finish-serving-eligibility\\finish-serving-evidence\\exact-tip\\PACKET.json",
+  "packet_sha256": "0c31cbc6a5e3f0b7b843433a86c5f1bf75b1fa63c4ddf6ee392fbbe671d33266",
+  "binary": "C:\\Users\\Victor\\orca\\workspaces\\wasm-agent\\finish-serving-eligibility\\rust\\target\\debug\\wa.exe",
+  "binary_sha256": "526022e9312ccb5a34761b0a7d19234eef3541fc76eaaf7af5e7e99a21e77763",
+  "runner_sha256": "101a90d1dee7361c82da9bc79387c2834f51d2d18317bcd842ec69b2c8aa7c1b",
+  "findings": {
+    "F1": "Preserved original stable node/provider/account-profile binding, predecessor history and all 92 source/embedded original assertions, plus both raw-binding causal negatives.",
+    "F2": "Coordinator approved two signed status phases: caller-selected destination/model/provider validated before remote active account/profile/binding/generation discovery; second request and response must match every field. Foreign tuples, bare model_error, old metadata and active account drift remain unknown. Local4/cloud0/manual policy retained.",
+    "F3": "Immutable request route snapshot plus matching response model and completion marker; SQLite generation/state/reason/model CAS preserves newer block and recovery/unknown ABA. Captured endpoint/account cannot migrate while response is in flight. Explicitly unidentified stream/subscription responses cannot certify serving.",
+    "F4": "Validate persisted state/reason/model/integer generation, fail visibly closed before HTTP on corruption, preserve absent legacy unknown and valid old-schema quota rows. Independently verified exact-binding recovery advances generation rather than deletion.",
+    "F5": "Original reviewer raw failure and private DB retained: third row ended queued/node_full, two held inference requests only. Force actual signed admission delay after reservation: original fixed-time assertion fails after seven checks with captured placing receipt; settled-capacity-refusal assertion then passes all20 on same delayed seam. Ordinary source and embedded20 also pass. Original failing timed sample itself was not logged, so its exact observed state is unavailable."
+  },
+  "evidence": {
+    "original_serving": {
+      "checks": 92,
+      "process_runs": 4,
+      "source_and_embedded": true,
+      "skips": 0,
+      "paid_calls": 0
+    },
+    "contract_attacks": {
+      "checks": 224,
+      "process_runs": 4,
+      "source_and_embedded": true,
+      "corrupt_restart": true,
+      "skips": 0,
+      "paid_calls": 0
+    },
+    "real_host_http": {
+      "checks": 42,
+      "process_runs": 4,
+      "source_and_embedded": true,
+      "skips": 0,
+      "paid_calls": 0,
+      "requests": 24
+    },
+    "real_signed_two_node": {
+      "checks": 10,
+      "source_and_embedded": true,
+      "skips": 0,
+      "paid_calls": 0,
+      "status_inference_calls": 0
+    },
+    "compatibility": {
+      "source_checks": 20,
+      "embedded_checks": 20,
+      "forced_delay_repair_checks": 20,
+      "skips": 0,
+      "paid_calls": 0
+    },
+    "causal_negatives": {
+      "runtime_guard_removals": 12,
+      "raw_binding_removals": 2,
+      "source_and_embedded": true,
+      "each_failed_at_expected_assertion": true
+    },
+    "supplementary_control_matrix": {
+      "checks": 12,
+      "source_and_embedded": true,
+      "legacy_schema_migration": true,
+      "year_passage": true,
+      "catalogue_success": true,
+      "usage_monthly_ok": true,
+      "key_rotation": true,
+      "model_change": true,
+      "skips": 0,
+      "paid_calls": 0,
+      "driver": "C:\\Users\\Victor\\orca\\projects\\wasm-agent\\.git\\worktrees\\finish-serving-eligibility\\finish-serving-evidence\\control-matrix.cjs",
+      "driver_sha256": "81523b9010d4c38d6c5ef45f5669af80735a8c45b7155178d59ffe07c0f7a5f9",
+      "log": "C:\\Users\\Victor\\orca\\projects\\wasm-agent\\.git\\worktrees\\finish-serving-eligibility\\finish-serving-evidence\\control-matrix.log",
+      "log_sha256": "17bdfcf94595074c34ba0f755a7c982286570791248bce6b0cef4ea07e3e5f99"
+    }
+  },
+  "graph_audit": {
+    "log": "C:\\Users\\Victor\\orca\\projects\\wasm-agent\\.git\\worktrees\\finish-serving-eligibility\\finish-serving-evidence\\impact-audit-committed.log",
+    "verdict": "incomplete",
+    "leads": 7,
+    "gaps": 175,
+    "mapped_lines": 8,
+    "assessment": "Inspected all seven leads in producer-admission.mjs and test-producer-admission.mjs: their hash calls import gate-check.mjs, not the new CJS-local packet hash. All seven are name-resolution false positives. Graph remains incomplete (175 gaps, truncated unresolved/dynamic coverage); manually inspected provider callers in subagents and server and request/placement paths. First audit failed source_changed while the packet runner was added; second completed on the committed static source.",
+    "assessment_grade": 0,
+    "worthy": "unproven"
+  },
+  "limitations": [
+    "Focused evidence is not a producer admission/full release gate; coordinator explicitly reserved the serial full gate for independent review and later required source proof.",
+    "No live provider or account tested, paid probes, external secrets/config/account changes, publication, deployment, producer push or main movement.",
+    "Race attacks inject a newer durable observation at the actual HTTP return/SQL boundary; they prove CAS causally, not physical scheduler timing or live upstream account recovery.",
+    "Current host stream aggregator and subscription adapter omit independently reported response model, so their successes remain unidentified for serving certification while inference behavior stays compatible.",
+    "Graph impact report remains incomplete and is not a correctness certificate."
+  ],
+  "next_owner": {
+    "reviewer": "Codex-2 ctx_50a3da02dcf1",
+    "coordinator": "term_0022ce62-e486-479c-b7c0-c57c087b3d3f",
+    "remaining": "Independent exact-tip attack review, required source/full gate receipt, acceptance and sole landing; no deployment requested for this producer."
+  },
+  "files_modified": [
+    "docs/PROVIDER-SERVING.md",
+    "lua/core/orchestrator.lua",
+    "lua/core/provider.lua",
+    "lua/core/server.lua",
+    "scripts/test-orchestrator-queue-race.cjs",
+    "scripts/test-orchestrator.cjs",
+    "scripts/test-provider-binding-negative.cjs",
+    "scripts/test-provider-serving.cjs",
+    "scripts/test-provider-serving.lua",
+    "scripts/test-serving-contract.cjs",
+    "scripts/test-serving-contract.lua",
+    "scripts/test-serving-guards.cjs",
+    "scripts/test-serving-http.cjs",
+    "scripts/test-serving-packet.cjs"
+  ],
+  "provenance": "Agent: Codex node=local session=ctx_3328e24743e7",
+  "task_id": "task_96018403c1e2",
+  "dispatch_id": "ctx_3328e24743e7"
+}
