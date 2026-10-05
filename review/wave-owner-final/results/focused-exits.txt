@@ -1,0 +1,4 @@
+heartbeat=0
+proof-verdict=0
+public=0
+wave-proof=0

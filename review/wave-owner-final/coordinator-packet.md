@@ -1,0 +1,16 @@
+# Read-only coordinator recovery packet
+
+No owner is adjudicated dead by this delivery. ON means the runtime store records a current turn/child on a registered allocated binding, not independently authenticated process-tree liveness. `corroborated:false/null` is negative/unknown visibility, never settlement. Unregistered/transition/unsupported child claims are named `unverifiable`, never OFF. Automatic stale-owner recovery is UNSUPPORTED; operator adjudication remains blocked until exact ownership and descendant/effect evidence exist.
+
+Preserved source references: refused original e15bdc1, independent refusal 4d2257df5e42bd0a8dea5507f83d601eec4627ed and evidence d7bc37088d32f7007b3338e8f11e0adfe8791b2c; WIP 2d8cde5; reviewed safety candidate 288cdd5; owner-reported held review 80a46617. No review is erased or represented as admission.
+
+Original recorded evidence (historical, NOT a current inventory):
+- child:dispatch:6204126f-93d1-4249-96a5-514acff56693, run 6eb6edfd-8d2d-46ab-8176-9e8c4a7d781d, boot b65133b9-06f5-4f96-9b4d-e6acb31e5350, registered tree wa-worktree-childdispatch6204126f-93d1-4249-96a5-514acff56693, corroborated false.
+- historical legacy turn session 33b4e818-0278-47a1-823a-b756517ec787, run 4cb9cea0-b387-43dd-92eb-23513fd975ec, boot 578f10e1-b8e0-4641-acae-d5bc34b652c6, unregistered activity claim.
+- shared wave wave-2026-10-02-subagent-chat-and-enforcement was reported legacy-unverified by prior read-only finish check. Convergence is separate from node activity.
+
+Current exact principal/resource/operation identities are NOT established by that historical evidence. This producer has not queried current live memory/resource/operation indices or inspected their effects. No claim of current zero agents or completed cleanup is made. Coordinator must obtain read-only current inventory through owning-runtime APIs, record exact session/run/boot/child/principal/process creation keys and native cwd, capture operation status/original receipt artifacts and retained resource claim audit history, and inspect unknown effects before adjudication. Await full owned descendant settlement, not shell command exit; preserve dirty worktrees, drafts, ledgers and legacy receipt bytes/hashes. Missing identities/evidence must remain explicitly blocked. Do not directly rewrite steering/memory/resource/operation stores or use negative scans as death proof.
+
+Gate prevention is now normal scripts/test.sh execution: five mandatory proof calls with floors 53/3/24/55/62, proof-verdict rejects silent/duplicate/under-floor/nonzero results. Reachable contract executes the actual normal function and section in private gate_run harness and detects removal of a required call via recorded execution. Cleanup removed unreachable replay-success branches; findResolution stays unsupported/null for API compatibility. No future legitimate stale drain success is claimed.
+
+Final focused verification: normal-section harness exit 0, five suites 53+3+24+55+62 checks, zero skips; unsafe creation/replay/M5 each red exit 1. Proof-verdict 83 mutation checks exit 0. Prior lifecycle44/retire20/public23 evidence and source-correct binary SHA256 remain in WAVE-OWNER-REPAIR-CHECKPOINT.md; Rust/Lua source unchanged since those runs. Full release gate intentionally not run. No push/main/live store write/restart/deploy.

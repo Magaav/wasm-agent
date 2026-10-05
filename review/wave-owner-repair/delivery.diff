@@ -1,0 +1,625 @@
+diff --git a/docs/WAVE-CONVERGENCE.md b/docs/WAVE-CONVERGENCE.md
+index 5ceffac..635dd38 100644
+--- a/docs/WAVE-CONVERGENCE.md
++++ b/docs/WAVE-CONVERGENCE.md
+@@ -40,7 +40,7 @@ A wave whose convergence genuinely could not be verified is a **named** state (`
+ durably, `unverified` in the derived report, with its exact reason - an unknown effect, an
+ unresolved claim, a missing full-gate receipt). It is never silently treated as complete.
+ 
+-### An activity claim that cannot be resolved positively is NAMED, and can be resolved
++### Unsupported activity settlement is NAMED and held
+ 
+ A claim of current work is an open session with a running turn (or an unsettled child
+ completion). Every way it fails to be *positive* has a name, and none of them reads as OFF:
+@@ -55,19 +55,28 @@ completion). Every way it fails to be *positive* has a name, and none of them re
+ 
+ An unresolved claim makes the activity answer `unverifiable` (`runtime_state: unknown`), which
+ **never** admits the next wave, and it is reported with a ready-made resolution command:
+-
+-```text
+-node scripts/wave-activity.mjs observe <config.json>            # read-only: every claim, its identity and its resolution
+-node scripts/wave-activity.mjs resolve <config.json> <session> "<what you observed>" [--child|--run|--boot VALUE]
+-```
+-
+-`resolve` refuses without evidence, refuses without the identity that distinguishes this claim
+-from a later one, and writes only the wave store's `activity-resolutions.json`. The resolution
+-binds the claim's exact identity, so a **new** claim (a different run, child, boot or tree) can
+-never borrow it, and a process that appears later makes the claim positive again by itself. This
+-is what closes the "false ON that never clears": a stale completion is not a permanent fence, it
+-is a named claim with a one-line resolution - and the same claim read as OFF would have admitted
+-a second wave over live work.
++`node scripts/wave-activity.mjs observe CONFIG` is read-only and reports exact
++claim identities, positive/corroborated status and `resolvable:false`.
++`resolve` now refuses unsupported legacy/prose settlement by name:
++`exact_owner_settlement_and_drain_unavailable`. No receipt is written.
++Existing receipt bytes remain intact, but unsupported receipts cannot clear
++ownership during replay. Negative or unavailable process scans, caller prose,
++missing PIDs, ages and terminal transcripts do not establish descendant/effect drain.
++
++### Owning-runtime recovery (not a wave CLI escape)
++
++Inspect exact session/run/boot/child ownership in the owning runtime. Use operation
++status and await **full settlement**, not shell exit, for every owned process tree.
++Inspect retained resource claims and unknown effects; use the sanctioned operator
++resource reconciliation path with exact owner/run evidence (docs/CONCURRENCY.md).
++Preserve transcripts, claims and receipts; never delete them to force OFF.
++The wave inventory exposes no authenticated exact-owner settlement/drain adapter.
++Legacy stale cleanup therefore remains unsupported and held, deliberately trading
++availability for safety. A future adapter must validate terminal ownership and
++descendant/effect drain at both creation and replay.
++This reduction in stale-clearing capability is separate from completed-newest
++production/allocation admission. Closing freeze and named land/admit convergence
++fences remain unchanged. Node activity and wave convergence are separate facts.
+ 
+ ### What each boundary does with it
+ 
+@@ -77,13 +86,16 @@ a second wave over live work.
+   An idle wave never blocks starting the next one, whatever its bookkeeping says; the verdict of
+   the newest row is returned as `previous` and **every** unfinished row as `unfinished`.
+ * `checkAdmission()` consults **every unfinished row** and reports the whole set. Producing and
+-  allocating are admitted while the wave is ON (that is how lanes work under an umbrella) and
+-  while it is OFF or unobservable (so an idle row cannot fence live lanes). A closing freeze and
+-  a `complete` row still refuse as before. The repository-level acts - `land` (the merge lane)
+-  and `admit` (independent delivery admission) - are refused whenever **any** unfinished row's
+-  convergence is not `verified`/`open`, i.e. `unverified` or `legacy-unverified`, with the named
+-  reason `wave_convergence_unverified:<wave-id>:<state>:<reason>`. That holds **whether or not
+-  agents are working**: a live umbrella does not make an unverified convergence verified.
++  allocating are admitted while the wave is ON (that is how lanes work under an umbrella), while
++  it is OFF or unobservable, and when the newest row is **`complete`**: a completed umbrella ends
++  the wave, it does not fence a repository that is producing. A closing freeze still fences
++  producing and allocating, by name. The repository-level acts - `land` (the merge lane) and
++  `admit` (independent delivery admission) - are refused whenever **any** unfinished row's
++  convergence is not `verified`/`open` (`wave_convergence_unverified:<wave-id>:<state>:<reason>`),
++  and when the newest row is `complete` (`next_wave_requires_fresh_public_start:<id>` plus
++  `:unfinished:<older ids>` when older unfinished rows exist, so a mixed store is visible in the
++  refusal itself). That holds **whether or not agents are working**: a live umbrella does not make
++  an unverified convergence verified.
+ * `monitor()` drives the **oldest** unfinished wave (deterministic, one at a time, each row with
+   its own budget) and reports the whole unfinished set; `list` prints every row with its derived
+   verdict, and `inspect(id)` reports the store's other unfinished rows as `unfinished`. A second
+@@ -132,8 +144,8 @@ the reversal is exact by construction.
+ the umbrella, `checkAdmission` refuses `land` and `admit` by name (produce/allocate keep being
+ admitted). Landing resumes when that row's convergence is verified, when it is reverted, or when
+ a **fresh** wave is started - and a fresh wave can only be started while the activity answer is
+-`off`: no agents working, and no unresolved activity claim (a stale claim is resolvable in one
+-command, printed with its own reason).
++`off`: no agents working, and no unresolved activity claim (unsupported stale settlement remains held,
++printed with its exact refusal and owning-runtime recovery path).
+ 
+ ## Sanctioned entry and repaired proof boundaries
+ 
+diff --git a/docs/WAVE-OWNER-REPAIR-CHECKPOINT.md b/docs/WAVE-OWNER-REPAIR-CHECKPOINT.md
+new file mode 100644
+index 0000000..51640d8
+--- /dev/null
++++ b/docs/WAVE-OWNER-REPAIR-CHECKPOINT.md
+@@ -0,0 +1,25 @@
++# Wave owner-clearing safety repair
++
++Scope COMPLETE: unsupported prose/legacy settlement creation and replay are fail-closed. Stale-owner recovery adapter STILL UNSUPPORTED. No trusted exact-session/run/boot/child terminal ownership plus descendant/effect drain API is exposed by this activity inventory (sessions, steering_runs, child_completions, Git registry and corroborating process scan). Terminal transcript and absent process command lines are not drain proof. No new adapter/schema/adjudication was fabricated.
++
++Original refused delivery e15bdc1da3fad149da141a4ed0989c4b892478ff was cherry-picked unchanged as ae115a2. Producer/reviewer trees, transcripts and old refused record remain unchanged. WIP 2d8cde5 remains in history, superseded by the finished safety delta.
++
++Before edits: independent real-heartbeat probe rerun on private data, exit 0; false/null both cleared to OFF while helper heartbeat continued (operation op-1790988818226616-9804-4849). After edits: self-contained owner regression 53 checks covers false/null working helper, refusal/no mutation, valid legacy receipt replay and fresh process reads, changed run/boot, recreated visible holder, observe accuracy, terminal-looking stale claim and unavailable store. Helpers killed through their exact owned handles and exit awaited in finally.
++
++Focused commands (all exit 0):
++
++- node scripts/test-wave-owner-refusal.mjs: 53 checks, 0 skipped
++- node scripts/test-wave-owner-mutations.mjs: 3 mutants killed (each exit 1), 0 skipped; unsafe prose persistence, unsafe matching replay, M5 observe-resolvability
++- node scripts/test-wave-activity-corners.mjs: 24 checks, private public-entry completed-newest/older-unfinished produce/allocate allowance, named land/admit refusal and all four closing-freeze phases
++- node scripts/test-wave-derived-state.mjs: 55 checks
++- node scripts/test-wave-activity-fix.mjs: 62 checks; unsupported prose success assertions explicitly replaced by held/refused assertions, not skipped
++- node scripts/test-wave-lifecycle.mjs: 44 checks
++- node scripts/test-wave-retire.mjs: 20 checks
++- CARGO_BUILD_JOBS=2 RUST_TEST_THREADS=2 cargo build --offline --manifest-path rust/Cargo.toml -p wa-host --bin wa: exit 0
++- CARGO_BUILD_JOBS=2 RUST_TEST_THREADS=2 node scripts/test-wave-public.mjs rust/target/debug/wa.exe: 23 checks, exit 0, private home and source Lua root; missing application verification correctly blocked
++
++Source-correct candidate binary SHA256: 0094516f76dbe05af604ceb1c60c0d688d4fe730f9454bd9e4588e041cd96023. No installed old binary used. Focused tests: 281 assertions plus 3 mutation kills, no focused skips. Full release gate intentionally not run; independent review/admission/application deploy remain outside this delivery.
++
++Intermediate failures preserved privately: first mutation harness exit 1 because receipt fixture lacked kind and replay mutant survived; fixed fixture now validates readResolutions.ok and mutant goes red. Initial native launch exit 1 before build (wrong default cwd redirect); explicit own cwd build passed. Initial old six-assertion WIP test had wrong observe field; corrected and replaced by self-contained suite. Graph impact showed stale symbol/index evidence and is not a correctness certificate.
++
++Recovery procedure: inspect owning-runtime exact owner/run operation status and await full process-tree settlement, inspect retained resource claims/unknown effects and reconcile through sanctioned operator resource path (docs/CONCURRENCY.md and docs/EXECUTION.md). Preserve original claims and receipts. Missing/legacy identities remain held until a future trusted adapter validates ownership and descendant/effect drain at creation AND replay. No live store/resource/operation-index write, main edit, push, restart or deploy performed.
+diff --git a/scripts/lib/wave-activity.mjs b/scripts/lib/wave-activity.mjs
+index e5b9f2d..7265ca6 100644
+--- a/scripts/lib/wave-activity.mjs
++++ b/scripts/lib/wave-activity.mjs
+@@ -211,11 +211,8 @@ export function orcaView(source, {enabled = false} = {}) {
+   } catch { return {used: false, reason: 'optional_viewer_unreadable'}; }
+ }
+ 
+-// NAMED RESOLUTIONS OF ACTIVITY CLAIMS. A claim of current work that cannot be resolved
+-// POSITIVELY is never silently treated as OFF and never permanently ON: it is reported with a
+-// name, and an operator can resolve that exact claim, with evidence, in the wave store. A
+-// resolution binds the claim's identity, so a NEW claim (a different run, child, boot or tree)
+-// can never borrow an old one.
++// Legacy receipt storage is preserved for audit. No trusted exact-owner drain
++// adapter is exposed here: prose creation/replay is unsupported and held.
+ export const CLAIM_RESOLUTIONS = {schema: 1, kind: 'wave-activity-resolutions'};
+ export function resolutionsPath(source, commonDir) {
+   return source?.resolutions ? path.resolve(source.resolutions) : path.join(commonDir, 'wa-waves', 'activity-resolutions.json');
+@@ -252,6 +249,20 @@ export function resolutionMatches(resolution, claim) {
+   return true;
+ }
+ 
++// Legacy positive receipt identity is preserved for audit, not settlement proof.
++// Unsupported exact-owner drain remains held even after a negative process scan.
++export const POSITIVE_CLAIM = 'positive_claim_resolved_by_observation';
++export function claimIdentity(record, claim) {
++  return {session: record.session, claim, worktree: record.worktree, child_id: record.child?.child_id || '', run_id: record.turn?.run_id || record.child?.run_id || '', boot: record.turn?.boot || ''};
++}
++// A process holding the tree is stronger evidence than an old resolution: it can never be cleared.
++export function findResolution(resolutions, identity, {corroborated = null} = {}) {
++  // This inventory has no authenticated exact-owner terminal + descendant/effect
++  // drain adapter. Neither prose receipts nor absence in a process scan prove it.
++  // Preserve legacy receipts, but do not replay them as settlement.
++  return null;
++}
++
+ // THE INVENTORY. Everything the wave proofs and the ownership proofs need, from our own records.
+ export function activityInventory(source) {
+   const store = sessionInventory(source);
+@@ -314,7 +325,7 @@ export function activityInventory(source) {
+     };
+     // EVERY WAY A CLAIM FAILS TO BE POSITIVE HAS A NAME. An unresolved claim is never counted as
+     // activity and never read as OFF: it makes the activity answer UNVERIFIABLE until the claim is
+-    // settled by observation or by a named resolution of that exact claim.
++    // settled by the owning runtime; unsupported prose receipts cannot settle it.
+     if (claim) {
+       if (!treePath || !exists || !tree) record.claim = 'activity_claim_without_a_registered_worktree';
+       else if (RESOLVED_STATES.includes(state)) record.claim = `activity_claim_on_a_resolved_binding_${state}`;
+@@ -325,12 +336,18 @@ export function activityInventory(source) {
+     }
+     bindings.push(record);
+     if (treePath && managed) held.push(record);
+-    if (record.in_flight) { agents.push(record); continue; }
++    if (record.in_flight) {
++      // Revalidate receipt application; unsupported settlement is never replayed.
++      const cleared = findResolution(resolutions.resolutions, claimIdentity(record, POSITIVE_CLAIM), {corroborated});
++      if (cleared) { record.resolved = {by: cleared.by || '', at: cleared.at || 0, evidence: cleared.evidence || '', claim: POSITIVE_CLAIM}; resolved_claims.push(record); continue; }
++      agents.push(record);
++      continue;
++    }
+     if (claim) {
+-      const resolution = resolutions.resolutions.find(entry => resolutionMatches(entry, {session: id, claim: record.claim, worktree: record.worktree, child_id: record.child?.child_id || '', run_id: record.turn?.run_id || record.child?.run_id || '', boot: record.turn?.boot || ''}));
++      const resolution = findResolution(resolutions.resolutions, claimIdentity(record, record.claim), {corroborated});
+       if (resolution) { record.resolved = {by: resolution.by || '', at: resolution.at || 0, evidence: resolution.evidence || ''}; resolved_claims.push(record); continue; }
+       claims.push(record);
+-      unresolved.push({session: id, reason: record.claim, worktree: record.worktree, child_id: record.child?.child_id || '', run_id: record.turn?.run_id || '', boot: record.turn?.boot || '', resolution: `node scripts/wave-activity.mjs resolve <config.json> ${id} \"<observed evidence>\"`});
++      unresolved.push({session: id, reason: record.claim, worktree: record.worktree, child_id: record.child?.child_id || '', run_id: record.turn?.run_id || '', boot: record.turn?.boot || '', resolution: 'refused: exact_owner_settlement_and_drain_unavailable; inspect owning runtime operations and resource claims'});
+       continue;
+     }
+     if (RESOLVED_STATES.includes(state)) {
+diff --git a/scripts/test-wave-activity-corners.mjs b/scripts/test-wave-activity-corners.mjs
+new file mode 100644
+index 0000000..344933c
+--- /dev/null
++++ b/scripts/test-wave-activity-corners.mjs
+@@ -0,0 +1,148 @@
++// THE TWO RESIDUE CORNERS, MEASURED FIRST ON A COPY OF THE LIVE STORE AND THEN FIXED.
++//
++//   1. a stale `steering_runs` row reads positively ON, `observe` reports no claim, and `resolve`
++//      refused it (`claim_is_not_unresolved:...:activity_is_positively_on`) - a fence with no way
++//      out. The claim is now visible; unsupported clearing is refused. This capability
++//      reduction prevents negative process scans from being mistaken for drain proof.
++//   2. a completed NEWEST wave beside an OLDER unfinished row refused ALL FOUR phases
++//      (`next_wave_requires_fresh_public_start`, `produce`/`allocate` included). Producing and
++//      allocating are no longer fenced by it; landing and independent admission still require a
++//      fresh public start, and that refusal now names the older unfinished rows too.
++//
++// Private Git, a private node store and the real public entry; nothing here touches a live store.
++import fs from 'node:fs';
++import os from 'node:os';
++import path from 'node:path';
++import assert from 'node:assert/strict';
++import crypto from 'node:crypto';
++import {spawn, spawnSync} from 'node:child_process';
++import {DatabaseSync} from 'node:sqlite';
++import {register, start, checkAdmission} from './wave-entry.mjs';
++import {create, advance, list} from './wave-lifecycle.mjs';
++import {activityInventory, POSITIVE_CLAIM} from './lib/wave-activity.mjs';
++import {observe, resolve} from './wave-activity.mjs';
++
++const source = path.resolve('.');
++const root = fs.mkdtempSync(path.join(os.tmpdir(), 'wa-wave-corners-'));
++let checks = 0, passed = false;
++const check = (value, label) => { assert.ok(value, label); checks++; };
++const hash = x => crypto.createHash('sha256').update(x).digest('hex');
++const git = (repo, ...args) => { const r = spawnSync('git', ['-C', repo, ...args], {encoding: 'utf8', windowsHide: true}); assert.equal(r.status, 0, r.stderr); return r.stdout.trim(); };
++const NODE_SCHEMA = `
++  CREATE TABLE sessions(id TEXT PRIMARY KEY,worktree TEXT NOT NULL DEFAULT '',workspace_required INTEGER NOT NULL DEFAULT 0,
++    workspace_state TEXT NOT NULL DEFAULT 'unbound',workspace_branch TEXT NOT NULL DEFAULT '',workspace_base_commit TEXT NOT NULL DEFAULT '',
++    workspace_source_path TEXT NOT NULL DEFAULT '',workspace_start_state TEXT NOT NULL DEFAULT '{}',parent_session_id TEXT,
++    started_at REAL NOT NULL DEFAULT 0,ended_at REAL,updated_at REAL NOT NULL DEFAULT 0);
++  CREATE TABLE steering_runs(session_id TEXT PRIMARY KEY,owner TEXT NOT NULL DEFAULT '',run_id TEXT NOT NULL DEFAULT '',
++    boot TEXT NOT NULL DEFAULT '',state TEXT NOT NULL,updated_at REAL NOT NULL);
++  CREATE TABLE child_completions(child_id TEXT PRIMARY KEY,target_id TEXT NOT NULL DEFAULT '',parent_session TEXT NOT NULL DEFAULT '',
++    state TEXT NOT NULL,run_id TEXT NOT NULL DEFAULT '');`;
++
++function fixture(name) {
++  const dir = path.join(root, name), repo = path.join(dir, 'canonical'), executor = path.join(dir, 'executor'), data = path.join(dir, 'data');
++  fs.mkdirSync(executor, {recursive: true}); fs.mkdirSync(repo); fs.mkdirSync(data, {recursive: true});
++  git(repo, 'init', '-q', '-b', 'main'); git(repo, 'config', 'user.name', 'fixture'); git(repo, 'config', 'user.email', 'fixture@invalid');
++  fs.writeFileSync(path.join(repo, 'seed'), 'fixture\n'); git(repo, 'add', '.'); git(repo, 'commit', '-qm', 'baseline');
++  const db = new DatabaseSync(path.join(data, 'memory.db')); db.exec(NODE_SCHEMA); db.close();
++  const driver = path.join(executor, 'driver.cjs'), effects = path.join(executor, 'effects');
++  fs.writeFileSync(driver, `const fs=require('fs');const mode=process.argv[2];
++    if(mode==='step'){fs.appendFileSync(process.argv[3],process.env.WA_WAVE_OPERATION_ID+'\\n');console.log(JSON.stringify({ok:true,settled:true,cleanup:'self_exited',operation_id:process.env.WA_WAVE_OPERATION_ID}));}
++    if(mode==='post')console.log(JSON.stringify({ok:true}));
++    if(mode==='zero')console.log(JSON.stringify({ok:true,released:0}));`);
++  const manifest = {id: name, owner: 'fixture-owner', repo, executor_cwd: executor, bootstrap: true, activity: {data},
++    steps: [{name: 'land', argv: [process.execPath, driver, 'zero', effects], post: {argv: [process.execPath, driver, 'post']}},
++            {name: 'deploy', argv: [process.execPath, driver, 'step', effects], post: {argv: [process.execPath, driver, 'post']}},
++            {name: 'retire', argv: [process.execPath, driver, 'step', effects], post: {argv: [process.execPath, driver, 'post']}}],
++    verifiers: Object.fromEntries(['operations', 'claims', 'runtime', 'registries', 'deliveries', 'owners'].map(kind => [kind, {argv: [process.execPath, driver, 'post']}]))};
++  const config = {repo, data, source_root: source, monitor_mode: 'external-cli-test'};
++  const configFile = path.join(executor, 'config.json'); fs.writeFileSync(configFile, JSON.stringify(config));
++  const manifestFile = path.join(executor, 'manifest.json'); fs.writeFileSync(manifestFile, JSON.stringify(manifest));
++  const ticket = path.join(executor, 'bootstrap.json');
++  fs.writeFileSync(ticket, JSON.stringify({schema: 1, kind: 'wave-bootstrap-admission', repo, main: git(repo, 'rev-parse', 'HEAD'), refs_sha256: hash(git(repo, 'for-each-ref', '--format=%(objectname) %(refname)', 'refs/heads/')), issuer: 'fixture-coordinator', reviewer: 'fixture-independent'}));
++  register(repo, configFile, ticket);
++  return {dir, repo, executor, data, store: path.join(repo, '.git', 'wa-waves'), config, configFile, manifest, driver, effects,
++    startWave(id) { const file = path.join(executor, `manifest-${id}.json`); fs.writeFileSync(file, JSON.stringify({...manifest, id, bootstrap: id === name})); return start(repo, file); }};
++}
++const nodeDB = fx => new DatabaseSync(path.join(fx.data, 'memory.db'));
++const inventoryOf = fx => activityInventory({kind: 'node-runtime', repo: fx.repo, data: fx.data, memory_db: path.join(fx.data, 'memory.db')});
++
++// A STALE TURN: an open session with an allocated binding and a real registered managed worktree,
++// and a `steering_runs` row the node left behind in state `active`. Nothing is running in it.
++function staleTurn(fx, id, {run = `run-${id}`, boot = `boot-${id}`} = {}) {
++  const tree = path.join(fx.data, `wa-worktree-${id}`);
++  if (!fs.existsSync(tree)) git(fx.repo, 'worktree', 'add', '--detach', tree);
++  const db = nodeDB(fx);
++  db.prepare("INSERT INTO sessions(id,worktree,workspace_required,workspace_state,workspace_source_path,workspace_start_state,started_at,ended_at,updated_at) VALUES(?,?,1,'allocated',?,?,0,NULL,0) ON CONFLICT(id) DO UPDATE SET worktree=excluded.worktree,workspace_state='allocated',ended_at=NULL")
++    .run(id, tree.replaceAll('\\', '/'), fx.repo.replaceAll('\\', '/'), JSON.stringify({executor: {owner_boot: boot}}));
++  db.prepare("INSERT INTO steering_runs(session_id,owner,run_id,boot,state,updated_at) VALUES(?,'fixture',?,?,'active',1) ON CONFLICT(session_id) DO UPDATE SET run_id=excluded.run_id,boot=excluded.boot,state='active'")
++    .run(id, run, boot);
++  db.close();
++  return tree;
++}
++
++try {
++  // ------------------------------------------------------------------ corner 1
++  const stale = fixture('stale');
++  stale.startWave('stale');
++  const tree = staleTurn(stale, 'child-stale-turn');
++  const before = inventoryOf(stale);
++  check(before.activity === 'on' && before.agents.length === 1, 'a stale turn with a registered tree reads positively ON (the measured fact)');
++  check(before.agents[0].corroborated === false, 'and nothing is running in it: no local process names the tree');
++
++  const seen = observe(stale.configFile);
++  const listed = seen.activity_claims.find(claim => claim.session === 'child-stale-turn');
++  check(Boolean(listed), 'observe LISTS the positively-ON claim instead of reporting none');
++
++
++  check(listed.positive === true && listed.resolvable === false, 'positive legacy claim is visible but unsupported recovery is refused');
++  check(listed.why === POSITIVE_CLAIM && listed.run_id === 'run-child-stale-turn', 'exact identity remains observable');
++  check(/exact_owner_settlement_and_drain_unavailable/.test(listed.resolution), 'observe names the supported refusal');
++  assert.throws(() => resolve(stale.configFile, 'child-stale-turn', 'prose', {run:'run-child-stale-turn'}), /exact_owner_settlement_and_drain_unavailable/); checks++;
++  check(!fs.existsSync(path.join(stale.store,'activity-resolutions.json')), 'refusal persists nothing');
++  assert.throws(() => create(stale.store, {...stale.manifest,id:'stale-next',bootstrap:false}), /previous_wave_active/); checks++;
++  staleTurn(stale, 'child-stale-turn', {run:'run-second',boot:'boot-second'});
++  check(inventoryOf(stale).activity === 'on', 'new identity remains held');
++  // Capability reduction is deliberate: negative scan/prose no longer clear stale ownership.
++
++  const corner = fixture('corner');
++  corner.startWave('corner');
++  check((await advance(corner.store, 'corner')).state === 'blocked', 'older row unfinished');
++  check(corner.startWave('younger').ok === true, 'younger admitted beside idle older');
++  const store = new DatabaseSync(path.join(corner.store, 'waves.sqlite'));
++  store.prepare("UPDATE waves SET state='complete', reason=NULL WHERE id='younger'").run();
++  store.close();
++  check(list(corner.store).unfinished.length === 1, 'the store still holds one unfinished row (the older one)');
++
++  const produce = checkAdmission(corner.repo, {phase: 'produce'});
++  const allocate = checkAdmission(corner.repo, {phase: 'allocate'});
++  check(produce.ok === true && allocate.ok === true, 'a completed newest wave no longer fences producing and allocating');
++  check(produce.runtime_state === 'complete' && produce.unfinished.length === 1 && produce.unfinished[0].id === 'corner', 'and the answer still names the completed wave and the older unfinished row');
++  const land = checkAdmission(corner.repo, {phase: 'land'});
++  check(land.ok === false && /^next_wave_requires_fresh_public_start:younger:unfinished:corner$/.test(land.reason), 'landing still requires a fresh public start, and the refusal NAMES the older unfinished row');
++  const admit = checkAdmission(corner.repo, {phase: 'admit'});
++  check(admit.ok === false && /unfinished:corner/.test(admit.reason), 'and so does independent delivery admission');
++  check(checkAdmission(corner.repo, {phase: 'observe'}).ok === true, 'read-only observation is never fenced by it');
++
++  // The pure case (no unfinished row) keeps its old, narrower refusal.
++  const pure = fixture('pure');
++  pure.startWave('pure');
++  const pureStore = new DatabaseSync(path.join(pure.store, 'waves.sqlite'));
++  pureStore.prepare("UPDATE waves SET state='complete' WHERE id='pure'").run();
++  pureStore.close();
++  check(checkAdmission(pure.repo, {phase: 'produce'}).ok === true && checkAdmission(pure.repo, {phase: 'allocate'}).ok === true, 'with no unfinished row at all, producing and allocating are admitted too');
++  const pureLand = checkAdmission(pure.repo, {phase: 'land'});
++  check(pureLand.ok === false && /^next_wave_requires_fresh_public_start:pure$/.test(pureLand.reason), 'and landing is refused with just the completed wave named');
++
++  // The closing freeze is NOT weakened by that: it still fences producing and allocating.
++  fs.writeFileSync(path.join(pure.store, 'freeze.json'), JSON.stringify({wave_id: 'pure'}));
++  const frozen = checkAdmission(pure.repo, {phase: 'produce'});
++  check(frozen.ok === false && /wave_closing_frozen/.test(frozen.reason), 'a closing freeze still fences producing, named');
++  check(checkAdmission(pure.repo, {phase: 'land'}).ok === false, 'and landing stays refused while frozen');
++  check(checkAdmission(pure.repo, {phase: 'allocate'}).ok === false, 'freeze fences allocation');
++  check(checkAdmission(pure.repo, {phase: 'admit'}).ok === false, 'freeze fences admission');
++
++  passed = true;
++  console.log(`wave activity corners ok (${checks} checks; the stale steering claim is visible and unsupported clearing is refused and a live process cannot be cleared, a completed newest wave no longer fences producing or allocating, and its refusal names the older unfinished row)`);
++} finally {
++  if (passed) fs.rmSync(root, {recursive: true, force: true}); else console.error(`wave corner fixtures retained: ${root}`);
++}
+diff --git a/scripts/test-wave-activity-fix.mjs b/scripts/test-wave-activity-fix.mjs
+index fcf6848..afcd5b6 100644
+--- a/scripts/test-wave-activity-fix.mjs
++++ b/scripts/test-wave-activity-fix.mjs
+@@ -3,7 +3,7 @@
+ //   1. land/admit are refused while the convergence is unverified - in BOTH corners (a blocked wave
+ //      with activity ON, and a migrated legacy-unverified row while idle);
+ //   2. a false OFF never admits the next wave (an unresolvable activity claim is unverifiable);
+-//   3. a false ON is NAMED and has an explicit resolution, so it can always clear;
++//   3. unsupported stale ownership is NAMED and held; prose no longer clears it;
+ //   4. wave-migrate's second apply is idempotent, and a leftover record is refused BEFORE the
+ //      transaction;
+ //   5. every unfinished row is read (create/checkAdmission/monitor/inspect/list), so an older
+@@ -162,7 +162,7 @@ try {
+   assert.throws(()=>create(off.store,{...off.manifest,id:'on-next',bootstrap:false}),/previous_wave_active/);checks++;
+   check(fs.existsSync(registered),'the tree that turned the claim positive is real');
+ 
+-  // ------------------------------------------------------------ 3. a false ON is named and clears
++  // ------------------------------------------------------------ 3. unsupported stale clearing refused
+   const stale=fixture('falseon');
+   stale.startWave('falseon');
+   // A stale child completion: parent open and allocated, a real tree, NO turn and no process.
+@@ -174,14 +174,13 @@ try {
+   check(claimed.activity==='unverifiable'&&claimed.claims.some(claim=>claim.claim==='child_completion_claim_without_a_live_turn_or_process'),'a stale child completion is a NAMED unresolved claim, not a positive agent');
+   assert.throws(()=>create(stale.store,{...stale.manifest,id:'stale-next',bootstrap:false}),/previous_wave_activity_unverifiable:falseon:.*child_completion_claim_without_a_live_turn_or_process:child-stale/);checks++;
+   const observation=observeActivity(stale.configFile);
+-  check(observation.unresolved_activity_claims.length===1&&observation.unresolved_activity_claims[0].session==='child-stale','the observation names the claim and its exact identity');
+-  assert.throws(()=>resolveActivity(stale.configFile,'child-stale','',{child:'child-stale'}),/observed_resolution_evidence_required/);checks++;
+-  assert.throws(()=>resolveActivity(stale.configFile,'child-stale','observed',{}),/claim_identity_required/);checks++;
+-  assert.throws(()=>resolveActivity(stale.configFile,'child-stale','observed',{child:'a-different-child'}),/claim_identity_required/);checks++;
+-  const resolved=resolveActivity(stale.configFile,'child-stale','The parent turn is settled and no process names the tree; the completion was observed as abandoned',{child:'child-stale',actor:'lane-d'});
+-  check(resolved.ok===true&&resolved.activity_after==='off','the named resolution clears the claim and the activity is provably OFF again');
+-  check(fs.existsSync(path.join(stale.repo,'.git','wa-waves','activity-resolutions.json')),'the resolution is durable in the wave store');
+-  check(create(stale.store,{...stale.manifest,id:'stale-next',bootstrap:false}).ok===true,'with the claim resolved, the next wave is admitted');
++  for (const flags of [{},{child:'a-different-child'},{child:'child-stale'}]) {
++    assert.throws(()=>resolveActivity(stale.configFile,'child-stale','observed',flags),/exact_owner_settlement_and_drain_unavailable/);checks++;
++  }
++  check(!fs.existsSync(path.join(stale.store,'activity-resolutions.json')),'unsupported prose clearing writes nothing');
++  check(activityInventory(sourceOf(stale)).activity==='unverifiable','unsupported stale claim remains unverifiable');
++  assert.throws(()=>create(stale.store,{...stale.manifest,id:'stale-next',bootstrap:false}),/previous_wave_activity_unverifiable/);checks++;
++  check(observation.unresolved_activity_claims[0].resolvable===false,'observe accurately refuses unsupported stale recovery');
+   // A NEW claim (a different child) cannot borrow the old resolution.
+   const db4=nodeDB(stale);
+   db4.prepare("UPDATE child_completions SET child_id='child-new' WHERE parent_session='child-stale'").run();
+@@ -243,7 +242,7 @@ try {
+   check(admitted.ok===true,'with the lane off, the next wave is admitted beside two unfinished rows');
+   check(admitted.unfinished.length===2&&admitted.unfinished.some(entry=>entry.id==='multi')&&admitted.unfinished.some(entry=>entry.id==='younger'),'and it reports EVERY unfinished row, not only the newest');
+   passed=true;
+-  console.log(`wave activity fix ok (${checks} checks; land/admit refused in both unverified corners, a false OFF never admits, a false ON is named and clears, the migration is idempotent and refuses early, every unfinished row is read, and the index reversal is transient)`);
++  console.log(`wave activity fix ok (${checks} checks; land/admit refused in both unverified corners, a false OFF never admits, unsupported stale clearing is named and refused, the migration is idempotent and refuses early, every unfinished row is read, and the index reversal is transient)`);
+ } finally {
+   if(passed) fs.rmSync(root,{recursive:true,force:true}); else console.error(`wave activity-fix fixtures retained: ${root}`);
+ }
+diff --git a/scripts/test-wave-owner-mutations.mjs b/scripts/test-wave-owner-mutations.mjs
+new file mode 100644
+index 0000000..b123e22
+--- /dev/null
++++ b/scripts/test-wave-owner-mutations.mjs
+@@ -0,0 +1,9 @@
++// Private source copies only; each unsafe direction must independently go red.
++import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import assert from 'node:assert/strict';import {spawnSync} from 'node:child_process';
++const root=fs.mkdtempSync(path.join(os.tmpdir(),'wa-owner-mutants-'));
++const mutations=[
++ ['creation','scripts/wave-activity.mjs',"  fail(`${REFUSAL}:${session}:${recovery}`);","  const record = inventory.agents.find(x=>x.session===session); const file = activityStore(sourceOfConfig(JSON.parse(fs.readFileSync(configFile,'utf8')))).resolutions; fs.mkdirSync(path.dirname(file),{recursive:true}); fs.writeFileSync(file,JSON.stringify({schema:1,kind:'wave-activity-resolutions',resolutions:[{session,claim:POSITIVE_CLAIM,worktree:record.worktree,child_id:'',run_id:record.turn.run_id,boot:record.turn.boot,evidence}]})); return {ok:true};"],
++ ['replay','scripts/lib/wave-activity.mjs','  return null;\n}\n\n// THE INVENTORY.','  return resolutions.find(entry => resolutionMatches(entry, identity)) || null;\n}\n\n// THE INVENTORY.'],
++ ['M5-observe','scripts/wave-activity.mjs','resolvable: false','resolvable: true']
++];
++try{for(const [name,file,old,replacement] of mutations){const dir=path.join(root,name);fs.mkdirSync(dir);fs.cpSync('scripts',path.join(dir,'scripts'),{recursive:true});const target=path.join(dir,file),text=fs.readFileSync(target,'utf8');assert.equal(text.split(old).length,2,`${name} exact mutation address`);fs.writeFileSync(target,text.replace(old,replacement));const r=spawnSync(process.execPath,['scripts/test-wave-owner-refusal.mjs',dir],{encoding:'utf8',timeout:60000});assert.notEqual(r.status,0,`${name} survived`);assert.ok(!r.error,`${name} did not merely time out`);console.log(`${name}: killed exit=${r.status}\n${r.stderr.split('\n').slice(0,12).join('\n')}`);}console.log('owner mutations ok (3 killed; 0 skipped)');}finally{fs.rmSync(root,{recursive:true,force:true});}
+diff --git a/scripts/test-wave-owner-refusal.mjs b/scripts/test-wave-owner-refusal.mjs
+new file mode 100644
+index 0000000..972a654
+--- /dev/null
++++ b/scripts/test-wave-owner-refusal.mjs
+@@ -0,0 +1,55 @@
++// Self-contained private real-helper regression. Optional source root enables mutations.
++import assert from 'node:assert/strict';
++import fs from 'node:fs';
++import os from 'node:os';
++import path from 'node:path';
++import {spawn, spawnSync} from 'node:child_process';
++import {pathToFileURL} from 'node:url';
++import {DatabaseSync} from 'node:sqlite';
++const sourceRoot = path.resolve(process.argv[2] || '.');
++const lib = await import(pathToFileURL(path.join(sourceRoot,'scripts/lib/wave-activity.mjs')));
++const cli = await import(pathToFileURL(path.join(sourceRoot,'scripts/wave-activity.mjs')));
++const root = fs.mkdtempSync(path.join(os.tmpdir(),'wa-owner-refusal-'));
++const repo=path.join(root,'repo'),data=path.join(root,'data'),tree=path.join(root,'owned-tree'),beat=path.join(root,'heartbeat'),config=path.join(root,'config.json');
++let checks=0; const check=(x,label)=>{assert.ok(x,label);checks++;};
++const helpers=new Set();
++const sleep=ms=>new Promise(r=>setTimeout(r,ms));
++async function stop(p){if(p.exitCode!==null||p.signalCode!==null)return;const done=new Promise(r=>p.once('exit',r));p.kill();await done;helpers.delete(p);}
++function helper(args,cwd){const p=spawn(process.execPath,args,{cwd,stdio:'ignore'});helpers.add(p);return p;}
++function git(...args){const r=spawnSync('git',['-C',repo,...args],{encoding:'utf8'});assert.equal(r.status,0,r.stderr);return r.stdout.trim();}
++function configProbe(probe){fs.writeFileSync(config,JSON.stringify({repo,data,source_root:sourceRoot,process_probe:probe}));}
++function source(probe){return {kind:'node-runtime',repo,data,memory_db:path.join(data,'memory.db'),process_probe:probe};}
++const receipt=()=>path.join(repo,'.git','wa-waves','activity-resolutions.json');
++const bytes=()=>fs.existsSync(receipt())?fs.readFileSync(receipt(),'utf8'):null;
++function refuse(){const before=bytes();assert.throws(()=>cli.resolve(config,'working-child','mere prose',{run:'held-run'}),/exact_owner_settlement_and_drain_unavailable/);checks++;check(bytes()===before,'refusal preserves receipt bytes');}
++function state(probe,corroborated){const x=lib.activityInventory(source(probe));check(x.activity!=='off'&&x.agents.length===1&&x.resolved_claims.length===0,'owner retained, not OFF');check(x.agents[0].corroborated===corroborated,'scan accuracy');const o=cli.observe(config);check(o.activity_claims.length===1&&o.activity_claims[0].positive===true&&o.activity_claims[0].corroborated===corroborated&&o.activity_claims[0].resolvable===false,'observe positive/corroborated/resolvable accuracy');return x;}
++try {
++ fs.mkdirSync(repo);fs.mkdirSync(data);git('init','-q','-b','main');git('config','user.name','fixture');git('config','user.email','fixture@invalid');fs.writeFileSync(path.join(repo,'seed'),'private');git('add','.');git('commit','-qm','fixture');git('worktree','add','--detach',tree);
++ const db=new DatabaseSync(path.join(data,'memory.db'));
++ db.exec(`CREATE TABLE sessions(id TEXT PRIMARY KEY,worktree TEXT,workspace_required INTEGER,workspace_state TEXT,workspace_branch TEXT,workspace_base_commit TEXT,workspace_source_path TEXT,workspace_start_state TEXT,parent_session_id TEXT,started_at REAL,ended_at REAL,updated_at REAL); CREATE TABLE steering_runs(session_id TEXT PRIMARY KEY,owner TEXT,run_id TEXT,boot TEXT,state TEXT,updated_at REAL); CREATE TABLE child_completions(child_id TEXT PRIMARY KEY,target_id TEXT,parent_session TEXT,state TEXT,run_id TEXT);`);
++ db.prepare('INSERT INTO sessions VALUES(?,?,?,?,?,?,?,?,?,?,?,?)').run('working-child',tree,1,'allocated','',git('rev-parse','HEAD'),repo,'{}',null,1,null,1);
++ db.prepare('INSERT INTO steering_runs VALUES(?,?,?,?,?,?)').run('working-child','fixture','held-run','held-boot','active',1);db.close();
++ const hidden=helper(['-e',`setInterval(()=>require('fs').writeFileSync(${JSON.stringify(beat)},String(Date.now())),30)`],tree);
++ await sleep(1200);
++ for(const [probe,expected] of [[true,false],[false,null]]){
++  configProbe(probe);state(probe,expected);const b=fs.readFileSync(beat,'utf8');refuse();await sleep(120);check(fs.readFileSync(beat,'utf8')!==b,'heartbeat continues during refusal');
++ }
++ const identity=lib.claimIdentity(state(false,null).agents[0],lib.POSITIVE_CLAIM);
++ fs.mkdirSync(path.dirname(receipt()),{recursive:true});fs.writeFileSync(receipt(),JSON.stringify({schema:1,kind:'wave-activity-resolutions',resolutions:[{...identity,evidence:'legacy prose',at:1,by:'fixture'}]}));
++ check(lib.readResolutions(receipt()).ok,'legacy fixture is a valid readable receipt');
++ const original=bytes();
++ for(const [probe,expected] of [[true,false],[false,null]]){
++  configProbe(probe);state(probe,expected);refuse();
++  const fresh=spawnSync(process.execPath,[path.join(sourceRoot,'scripts/wave-activity.mjs'),'observe',config],{encoding:'utf8'});check(fresh.status===0,'restart/read succeeds');check(JSON.parse(fresh.stdout).activity!=='off','fresh process cannot replay prose');
++ }
++ const update=new DatabaseSync(path.join(data,'memory.db'));
++ for(const [run,boot] of [['new-run','held-boot'],['held-run','new-boot']]){update.prepare('UPDATE steering_runs SET run_id=?,boot=?').run(run,boot);configProbe(false);state(false,null);refuse();}
++ update.prepare('UPDATE steering_runs SET run_id=?,boot=?').run('held-run','held-boot');update.close();
++ await stop(hidden);
++ const visible=helper(['-e','setInterval(()=>{},1000)',tree],tree);await sleep(1200);configProbe(true);state(true,true);refuse();await stop(visible);
++ // Terminal-looking prose and no visible process remain unsupported, not drain proof.
++ configProbe(false);state(false,null);refuse();check(bytes()===original,'legacy receipt retained exactly');
++ const missing={...source(false),memory_db:path.join(root,'missing.db')};check(lib.activityInventory(missing).activity==='unverifiable','unavailable store distinct from null visibility');
++ fs.writeFileSync(config,JSON.stringify({repo,data:path.join(root,'absent'),process_probe:false}));assert.throws(()=>cli.observe(config),/activity_inventory_unavailable/);checks++;
++ console.log(`owner refusal ok (${checks} checks; real false/null heartbeat, creation/replay/restart/identity/visible/observe/store; 0 skipped)`);
++} finally {for(const p of helpers)await stop(p);fs.rmSync(root,{recursive:true,force:true});}
+diff --git a/scripts/wave-activity.mjs b/scripts/wave-activity.mjs
+index b8d5f7b..7d4723e 100644
+--- a/scripts/wave-activity.mjs
++++ b/scripts/wave-activity.mjs
+@@ -1,95 +1,50 @@
+ #!/usr/bin/env node
+-// THE WAVE'S OWN ACTIVITY, OBSERVED AND - WHEN IT CANNOT BE RESOLVED BY OBSERVATION - RESOLVED
+-// BY NAME.
+-//
+-// Why this exists. A claim of current work that cannot be resolved positively (a turn whose tree is
+-// gone, a binding mid-release, a child completion nobody corroborates) must never be read as OFF -
+-// that would admit a second wave over live work - and must never be permanently ON either. So it is
+-// reported with a name, and this CLI is the named way out: the operator records, with evidence,
+-// that this exact claim is settled. The resolution binds the claim's identity, so a NEW claim (a
+-// different run, child, boot or tree) can never borrow it.
+-//
+-//   node scripts/wave-activity.mjs observe <config.json>
+-//   node scripts/wave-activity.mjs resolve <config.json> <session> "<observed evidence>" [--child <child_id>] [--run <run_id>] [--actor <who>]
+-//
+-// `observe` is read-only. `resolve` writes only the wave store's `activity-resolutions.json`.
++// Read-only activity observation. Resolution is fail-closed: this source exposes
++// no authenticated exact-owner terminal settlement + descendant/effect drain.
++// Caller prose, terminal transcripts and negative/missing process scans are not proof.
+ import fs from 'node:fs';
+ import path from 'node:path';
+ import {fileURLToPath} from 'node:url';
+-import {activityInventory, activityStore, readResolutions, resolutionMatches, sourceOfConfig, writeResolution} from './lib/wave-activity.mjs';
+-
++import {activityInventory, activityStore, POSITIVE_CLAIM, readResolutions, sourceOfConfig} from './lib/wave-activity.mjs';
+ const fail = reason => { throw new Error(reason); };
+-
+-function options(argv) {
+-  const positional = [], flags = {};
+-  for (let i = 0; i < argv.length; i += 1) {
+-    const value = argv[i];
+-    if (value.startsWith('--')) { flags[value.slice(2)] = argv[i + 1]; i += 1; } else positional.push(value);
+-  }
+-  return {positional, flags};
++export const REFUSAL = 'exact_owner_settlement_and_drain_unavailable';
++const recovery = 'Owning runtime: inspect operation status and await full settlement (not shell exit); inspect retained resource claims and reconcile unknown effects with exact owner/run evidence through the sanctioned operator resource path. Preserve claims and receipts. See docs/CONCURRENCY.md and docs/EXECUTION.md.';
++function claimSummary(record, claim, positive = false) {
++  return {session: record.session, worktree: record.worktree, run_id: record.turn?.run_id || record.child?.run_id || '', child_id: record.child?.child_id || '', boot: record.turn?.boot || '', corroborated: record.corroborated ?? null, why: claim, positive, resolvable: false, resolution: `refused: ${REFUSAL}`, recovery};
+ }
+-
+-function claimIdentity(claim) {
+-  return {session: claim.session, claim: claim.claim, worktree: claim.worktree, child_id: claim.child?.child_id || '', run_id: claim.turn?.run_id || claim.child?.run_id || '', boot: claim.turn?.boot || ''};
+-}
+-
+-export function observe(configFile) {
++function inventoryOf(configFile) {
+   const source = sourceOfConfig(JSON.parse(fs.readFileSync(configFile, 'utf8')));
+   const inventory = activityInventory(source);
+   if (!inventory.ok) fail(`activity_inventory_unavailable:${inventory.reason}`);
+-  const store = activityStore(source);
+-  const resolutions = readResolutions(store.resolutions);
++  return {source, inventory};
++}
++export function observe(configFile) {
++  const {source, inventory} = inventoryOf(configFile);
++  const store = activityStore(source), resolutions = readResolutions(store.resolutions);
+   return {
+     ok: true, activity: inventory.activity, on: inventory.on, off: inventory.off,
+     agents: inventory.agents.map(agent => ({session: agent.session, worktree: agent.worktree, run_id: agent.turn?.run_id || '', child_id: agent.child?.child_id || '', corroborated: agent.corroborated})),
+-    unresolved_activity_claims: inventory.claims.map(claim => ({...claimIdentity(claim), why: claim.claim, resolution: `node scripts/wave-activity.mjs resolve ${configFile} ${claim.session} "<what you observed>"`})),
+-    resolved_activity_claims: inventory.resolved_claims.map(claim => ({...claimIdentity(claim), why: claim.claim, resolved: claim.resolved})),
+-    unresolved: inventory.unresolved, leftovers: inventory.leftovers.length, resolutions: {file: store.resolutions, ok: resolutions.ok, count: resolutions.resolutions.length},
++    activity_claims: [...inventory.agents.map(x => claimSummary(x, POSITIVE_CLAIM, true)), ...inventory.claims.map(x => claimSummary(x, x.claim))],
++    unresolved_activity_claims: inventory.claims.map(x => claimSummary(x, x.claim)),
++    resolved_activity_claims: [],
++    unresolved: inventory.unresolved, leftovers: inventory.leftovers.length,
++    resolutions: {file: store.resolutions, ok: resolutions.ok, count: resolutions.resolutions.length, replay: 'refused', reason: REFUSAL},
+     evidence: inventory.evidence
+   };
+ }
+-
+ export function resolve(configFile, session, evidence, flags = {}) {
+   if (!session) fail('session_required');
+   if (typeof evidence !== 'string' || !evidence.trim()) fail('observed_resolution_evidence_required');
+-  const source = sourceOfConfig(JSON.parse(fs.readFileSync(configFile, 'utf8')));
+-  const inventory = activityInventory(source);
+-  if (!inventory.ok) fail(`activity_inventory_unavailable:${inventory.reason}`);
+-  const claim = inventory.claims.find(entry => entry.session === session);
+-  if (!claim) {
+-    if (inventory.agents.some(entry => entry.session === session)) fail(`claim_is_not_unresolved:${session}:activity_is_positively_on`);
+-    if (inventory.resolved_claims.some(entry => entry.session === session)) fail(`claim_already_resolved:${session}`);
+-    fail(`claim_not_found:${session}`);
+-  }
+-  const identity = claimIdentity(claim);
+-  // The operator must name the identity that distinguishes this claim from a later one.
+-  const named = identity.child_id || identity.run_id || identity.boot;
+-  const given = flags.child || flags.run || flags.boot || '';
+-  if (named && given !== named) fail(`claim_identity_required:${session}:--child|--run|--boot ${named}`);
+-  if (!named && (flags.child || flags.run || flags.boot)) fail(`claim_identity_mismatch:${session}:this claim names no child, run or boot`);
+-  const store = activityStore(source);
+-  const existing = readResolutions(store.resolutions);
+-  if (!existing.ok && fs.existsSync(store.resolutions)) fail(existing.reason);
+-  if (existing.resolutions.some(entry => resolutionMatches(entry, identity))) return {ok: true, session, claim: identity.claim, already_resolved: true, file: store.resolutions};
+-  const resolution = {...identity, evidence, at: Date.now(), by: flags.actor || process.env.WA_WAVE_ACTOR || 'operator'};
+-  writeResolution(store.resolutions, resolution);
+-  // REPORT WHAT THE RESOLUTION ACTUALLY DID: the inventory is read again, not assumed.
+-  const after = activityInventory(source);
+-  return {ok: true, session, claim: identity.claim, resolution, file: store.resolutions, activity_after: after.ok ? after.activity : 'unverifiable', unresolved_activity_claims_after: after.ok ? after.claims.length : null};
++  const {inventory} = inventoryOf(configFile);
++  if (![...inventory.claims, ...inventory.agents].some(x => x.session === session)) fail(`claim_not_found:${session}`);
++  // SAFETY_CREATION: never persist an unsupported settlement, including idempotent prose.
++  fail(`${REFUSAL}:${session}:${recovery}`);
+ }
+-
+ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+-  const [action, ...rest] = process.argv.slice(2);
++  const [action, config, session, evidence] = process.argv.slice(2);
+   try {
+-    const {positional, flags} = options(rest);
+-    const [configFile, session, evidence] = positional;
+-    if (!configFile) fail('usage: observe CONFIG | resolve CONFIG SESSION EVIDENCE [--child|--run|--boot VALUE] [--actor WHO]');
+-    const result = action === 'observe' ? observe(configFile)
+-      : action === 'resolve' ? resolve(configFile, session, evidence, flags)
+-      : fail('usage: observe CONFIG | resolve CONFIG SESSION EVIDENCE [--child|--run|--boot VALUE] [--actor WHO]');
+-    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+-  } catch (e) {
+-    process.stdout.write(`${JSON.stringify({ok: false, error: e.message})}\n`);
+-    process.exitCode = 1;
+-  }
++    if (!config) fail('usage: observe CONFIG | resolve CONFIG SESSION EVIDENCE (unsupported settlement refuses)');
++    const result = action === 'observe' ? observe(config) : action === 'resolve' ? resolve(config, session, evidence) : fail('unknown_action');
++    console.log(JSON.stringify(result, null, 2));
++  } catch (e) { console.log(JSON.stringify({ok: false, error: e.message})); process.exitCode = 1; }
+ }
+diff --git a/scripts/wave-entry.mjs b/scripts/wave-entry.mjs
+index 22e8bcb..3863e9f 100644
+--- a/scripts/wave-entry.mjs
++++ b/scripts/wave-entry.mjs
+@@ -45,9 +45,17 @@ export function checkAdmission(repo,{phase='produce'}={}) {
+     const named={activity:newest.activity,convergence:newest.convergence,runtime_state:newest.runtime_state,reason:newest.reason||current.reason||'',
+       unfinished:unfinished.map(entry=>({id:entry.row.id,state:entry.row.state,activity:entry.verdict.activity,convergence:entry.verdict.convergence,runtime_state:entry.verdict.runtime_state,reason:entry.verdict.reason}))};
+     if(phase==='observe')return {ok:true,wave_verified:true,wave_id:current.id,store:row.store,phase,...named};
+-    if(current.state==='complete')throw Error('next_wave_requires_fresh_public_start');
+     const freeze=path.join(row.store,'freeze.json');
+     if(fs.existsSync(freeze) && phase!=='land')throw Error('wave_closing_frozen');
++    // A COMPLETE NEWEST WAVE IS NOT A FENCE ON PRODUCING. It ends the umbrella, so the
++    // repository-level acts still require a fresh public start - and that refusal now NAMES the
++    // older unfinished rows, because a completed wave beside an unfinished one is a mixed store
++    // and the operator has to see both. Producing and allocating are admitted: the wave is OFF
++    // (nothing is running), and an unrelated old row must not fence a repository that is working.
++    if(current.state==='complete') {
++      if(!['land','admit'].includes(phase))return {ok:true,wave_verified:true,wave_id:current.id,store:row.store,phase,...named,note:'the newest wave is complete; producing and allocating are not fenced by it'};
++      throw Error(`next_wave_requires_fresh_public_start:${current.id}${unfinished.length?`:unfinished:${unfinished.map(entry=>entry.row.id).join(',')}`:''}`);
++    }
+     // THE REPOSITORY-LEVEL ACTS. Landing and independent delivery admission are admitted only while
+     // no unfinished wave's convergence is unverified - and that holds whether or not agents are
+     // working right now: a live umbrella does not make an unverified convergence verified.

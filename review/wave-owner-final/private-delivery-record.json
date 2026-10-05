@@ -1,0 +1,105 @@
+{
+  "schema": 1,
+  "delivery": "change/wa-session-childdispatch009bbf4b-3957-461b-959e-23a22f58fa29",
+  "branch": "change/wa-session-childdispatch009bbf4b-3957-461b-959e-23a22f58fa29",
+  "repository": "C:\\Users\\Victor\\.wasm-agent\\wa-worktree-childdispatch009bbf4b-3957-461b-959e-23a22f58fa29",
+  "tip": "b3e940390ccf72736f134707eac22c2ac70f66b8",
+  "tree": "74b8005b8d2ac6c2b57bd867ee4d5adda6f2d2b5",
+  "producer": "child:dispatch:009bbf4b-3957-461b-959e-23a22f58fa29",
+  "review": {
+    "reviewer": "child:dispatch:98e77c9b-60c9-4a3f-8bf3-5eda1620f33c",
+    "commit": "6462f8970358a76b90177781ca2b704cf8723cf8",
+    "tip": "b3e940390ccf72736f134707eac22c2ac70f66b8",
+    "tree": "74b8005b8d2ac6c2b57bd867ee4d5adda6f2d2b5",
+    "verdict": "narrowed",
+    "findings": [
+      {
+        "class": "safety",
+        "status": "resolved",
+        "text": "false/null heartbeat owners retained; unsupported creation/replay refuse and legacy receipts unchanged"
+      },
+      {
+        "class": "prevention",
+        "status": "resolved",
+        "text": "normal test.sh five mandatory proof calls correct floors; actual section execution and three intended assertion mutation kills verified"
+      },
+      {
+        "class": "cleanup",
+        "status": "resolved",
+        "text": "dead replay-success branches and misleading command wording removed"
+      },
+      {
+        "class": "scope",
+        "status": "unresolved",
+        "text": "automatic stale recovery unsupported; no authenticated owner terminal plus descendant/effect drain adapter"
+      },
+      {
+        "class": "coverage",
+        "status": "unresolved",
+        "text": "full release gate not run; private focused zero skips only"
+      },
+      {
+        "class": "publication",
+        "status": "unresolved",
+        "text": "private record only default record remains refused288cdd5; no push or admission"
+      }
+    ],
+    "at": "2026-10-03T10:14:03.760Z"
+  },
+  "admission": null,
+  "lane": null,
+  "landing": null,
+  "created_at": "2026-10-03T01:15:45.895Z",
+  "revision": 3,
+  "updated_at": "2026-10-03T10:14:03.761Z",
+  "tip_history": [
+    {
+      "tip": "288cdd5ab7a260e775a0944dac011182fe476ede",
+      "tree": "0406348cf61abfbad914dd735e2841f19673b88f",
+      "review": {
+        "reviewer": "child:dispatch:98e77c9b-60c9-4a3f-8bf3-5eda1620f33c",
+        "commit": "80a46617284a7fb52bb96ec93d136ed126781252",
+        "tip": "288cdd5ab7a260e775a0944dac011182fe476ede",
+        "tree": "0406348cf61abfbad914dd735e2841f19673b88f",
+        "verdict": "refused",
+        "findings": [
+          {
+            "class": "prevention",
+            "status": "unresolved",
+            "text": "R1 normative test.sh/catalog do not reach owner refusal/mutations/corners/activity-fix; manual proof is not recurrence protection"
+          },
+          {
+            "class": "cleanup",
+            "status": "unresolved",
+            "text": "unreachable replay-success branches remain despite unconditional findResolution refusal"
+          },
+          {
+            "class": "safety",
+            "status": "resolved",
+            "text": "B1 B2 narrow fail-closed creation and legacy replay retain false/null heartbeat owner and receipt bytes"
+          },
+          {
+            "class": "coverage",
+            "status": "resolved",
+            "text": "281 focused checks plus three intended assertion mutation kills and private native public23; extra mixed freeze all-four matrix passed"
+          },
+          {
+            "class": "scope",
+            "status": "unresolved",
+            "text": "stale owner recovery unsupported without trusted exact-owner terminal plus descendant/effect drain adapter"
+          },
+          {
+            "class": "documentation",
+            "status": "unresolved",
+            "text": "leftover ready-made resolution command sentence contradicts supported refusal"
+          }
+        ],
+        "at": "2026-10-03T01:22:16.050Z"
+      },
+      "admission": null,
+      "revision": 2,
+      "reason": "private exact-tip review continuation; no publication/ref refresh"
+    }
+  ],
+  "private_only": true
+}

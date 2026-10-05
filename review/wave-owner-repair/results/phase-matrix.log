@@ -1,0 +1,5 @@
+MIXED_FREEZE produce {"ok":false,"wave_verified":false,"reason":"wave_closing_frozen"}
+MIXED_FREEZE allocate {"ok":false,"wave_verified":false,"reason":"wave_closing_frozen"}
+MIXED_FREEZE land {"ok":false,"wave_verified":false,"reason":"next_wave_requires_fresh_public_start:younger:unfinished:corner"}
+MIXED_FREEZE admit {"ok":false,"wave_verified":false,"reason":"wave_closing_frozen"}
+wave activity corners ok (28 checks; the stale steering claim is visible and unsupported clearing is refused and a live process cannot be cleared, a completed newest wave no longer fences producing or allocating, and its refusal names the older unfinished row)

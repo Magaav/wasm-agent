@@ -1,0 +1,18 @@
+normal actual section: five executed, floors 53/3/24/55/62, zero skips
+removed call contract RED: waveOwner
+lowered floor contract RED: waveOwner
+removed call contract RED: waveOwnerMutations
+lowered floor contract RED: waveOwnerMutations
+removed call contract RED: waveCorners
+lowered floor contract RED: waveCorners
+removed call contract RED: waveDerived
+lowered floor contract RED: waveDerived
+removed call contract RED: waveActivityFix
+lowered floor contract RED: waveActivityFix
+raised required floor consumer RED: waveOwner proof verdict refused: check count dropped: 53 < 54
+raised required floor consumer RED: waveOwnerMutations proof verdict refused: check count dropped: 3 < 4
+raised required floor consumer RED: waveCorners proof verdict refused: check count dropped: 24 < 25
+raised required floor consumer RED: waveDerived proof verdict refused: check count dropped: 55 < 56
+raised required floor consumer RED: waveActivityFix proof verdict refused: check count dropped: 62 < 63
+actual removed owner call execution contract RED (other four pass)
+independent normal consumer ok (zero focused skips; omission/floors refused by independent contract, undercounts refused by real consumer)

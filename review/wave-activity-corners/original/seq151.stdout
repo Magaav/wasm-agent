@@ -1,0 +1,22 @@
+exit=0
+--- the live store, on a copy, TIP code ---
+{
+ "activity": "on",
+ "on": true,
+ "off": false,
+ "agents": [
+  {
+   "session": "child:dispatch:6204126f-93d1-4249-96a5-514acff56693",
+live in-flight agent child:dispatch:6204126f-93d1-4249-96a5-514acff56693 run=6eb6edfd-8d2d-46ab-8176-9e8c4a7d781d boot=b65133b9-06f5-4f96-9b4d-e6acb31e5350 corroborated=false tree_exists=true registered=true
+live in-flight agent child:dispatch:6b8b6fcc-389d-4cc5-b5da-4a69e6410d7d run=ffd61bb8-bce9-4894-b91c-0eebe96fcd20 boot=b65133b9-06f5-4f96-9b4d-e6acb31e5350 corroborated=true tree_exists=true registered=true
+live in-flight agent child:dispatch:46c83946-b1d1-416f-a451-e643dc484dc8 run=b37161a5-1238-4938-8c2b-038fd865fdc2 boot=b65133b9-06f5-4f96-9b4d-e6acb31e5350 corroborated=false tree_exists=true registered=true
+live stale turn binding: {"session":"33b4e818-0278-47a1-823a-b756517ec787","claim":"activity_claim_without_a_registered_worktree","corroborated":false,"registered":false,"state":"allocated","turn":{"run_id":"4cb9cea0-b387-43dd-92eb-23513fd975ec","boot":"578f10e1-b8e0-4641-acae-d5bc34b652c6","state":
+tip claimIdentity(positive) = {"session":"child:dispatch:6204126f-93d1-4249-96a5-514acff56693","claim":"positive_claim_resolved_by_observation","worktree":"C:/Users/Victor/.wasm-agent/wa-worktree-childdispatch6204126f-93d1-4249-96a5-514acff56693","child_id":"","run_id":"6eb6edfd-8d2d-46ab-8176-9e8c4
+pre-delta module exports POSITIVE_CLAIM/claimIdentity/findResolution at all? {"claimIdentity":"undefined","findResolution":"undefined"}
+pre-delta module exports POSITIVE_CLAIM/claimIdentity/findResolution at all? {"claimIdentity":"undefined","findResolution":"undefined"}
+pre-delta module exports POSITIVE_CLAIM/claimIdentity/findResolution at all? {"claimIdentity":"undefined","findResolution":"undefined"}
+a POSITIVE_CLAIM resolution for a LIVE in-flight row the probe cannot see: child:dispatch:6204126f-93d1-4249-96a5-514acff56693 -> activity= on agents= 2 resolved= ["positive_claim_resolved_by_observation:child:dispatch:6204126f-93d1-4249-96a5-514acff56693"] (the row still says turn= active )
+findResolution(corroborated=true) applies? false
+borrowed by a NEW turn (new run_id/boot)? false
+applies to the SAME identity while the probe is blind? true | applies while the probe SEES the process (corroborated=true)? false
+live store before/after this script: {"before":{"waves":"f65b11dc9dc8263958a93ca97cf73bc4e6b541ef4238ad8e3dcf786edc670a48","resolutions_exists":false},"afterWrites":{"waves":"f65b11dc9dc8263958a93ca97cf73bc4e6b541ef4238ad8e3dcf786edc670a48","resolutions_exists":false}} UNCHANGED

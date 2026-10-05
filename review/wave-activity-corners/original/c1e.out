@@ -1,0 +1,64 @@
+=== fixture: a copy of the LIVE store + the LIVE node rows, path prefixes repointed ===
+wave row (copied from live) {"id":"wave-2026-10-02-subagent-chat-and-enforcement","state":"pending","legacy":true}
+session rows kept (live) ["33b4e818-0278-47a1-823a-b756517ec787 state=allocated ended=null","child:dispatch:6204126f-93d1-4249-96a5-514acff56693 state=allocated ended=null"]
+turn rows kept (live) ["33b4e818-0278-47a1-823a-b756517ec787 state=active run=4cb9cea0-b387-43dd-92eb-23513fd975ec boot=578f10e1-b8e0-4641-acae-d5bc34b652c6","child:dispatch:6204126f-93d1-4249-96a5-514acff56693 state=settled run=6eb6edfd-8d2d-46ab-8176-9e8c4a7d781d boot=b65133b9-06f5-4f96-9b4d-e6acb31e5350"]
+tip inventory of the copy {"activity":"on","agents":["33b4e818-0278-47a1-823a-b756517ec787:turn=active:corroborated=false"],"claims":[],"resolved":[]}
+
+=== 1. CORNER 1 BEFORE: the stale positive turn on the same store, PRE-DELTA code (e2a86bc) ===
+old observe {"activity":"on","agents":1,"unresolved_activity_claims":0,"keys":"ok,activity,on,off,agents,unresolved_activity_claims,resolved_activity_claims,unresolved,leftovers,resolutions,evidence"}
+old resolve(33b4e818-027…, --run 4cb9cea0…) REFUSED: claim_is_not_unresolved:33b4e818-0278-47a1-823a-b756517ec787:activity_is_positively_on
+
+=== 2. CORNER 1 CLOSED: the same store, TIP ===
+tip observe activity_claims[] {"session":"33b4e818-0278-47a1-823a-b756517ec787","why":"positive_claim_resolved_by_observation","positive":true,"resolvable":true,"corroborated":false,"run_id":"4cb9cea0-b387-43dd-92eb-23513fd975ec","boot":"578f10e1-b8e0-4641-acae-d5bc34b652c6","resolution":"node scripts/wave-activity.mjs resolve C:\\Users\\Victor\\.wasm-agent\\rvw-corners-6b8b6fcc\\b\\config.json 33b4e818-0278-47a1-823a-b756517ec787 \"<what you observed>\""}
+tip observe {"activity":"on","unresolved_activity_claims":0,"resolutions":{"file":"C:\\Users\\Victor\\.wasm-agent\\rvw-corners-6b8b6fcc\\b\\repo\\.git\\wa-waves\\activity-resolutions.json","ok":true,"count":0}}
+the real CLI prints it too ["33b4e818-0278-47a1-823a-b756517ec787:why=positive_claim_resolved_by_observation:positive=true:resolvable=true"]
+the command observe PRINTED (captured before anything was resolved) node scripts/wave-activity.mjs resolve C:\Users\Victor\.wasm-agent\rvw-corners-6b8b6fcc\b\config.json 33b4e818-0278-47a1-823a-b756517ec787 "<what you observed>"  <- no identity flag
+resolve with NO identity flag REFUSED: claim_identity_required:33b4e818-0278-47a1-823a-b756517ec787:--child|--run|--boot 4cb9cea0-b387-43dd-92eb-23513fd975ec
+resolve with the WRONG run id REFUSED: claim_identity_required:33b4e818-0278-47a1-823a-b756517ec787:--child|--run|--boot 4cb9cea0-b387-43dd-92eb-23513fd975ec
+the flag it needs is the entry's own identity field 4cb9cea0-b387-43dd-92eb-23513fd975ec
+resolve with the RIGHT run id + evidence {"ok":true,"session":"33b4e818-0278-47a1-823a-b756517ec787","claim":"positive_claim_resolved_by_observation","was_positive":true,"resolution":{"session":"33b4e818-0278-47a1-823a-b756517ec787","claim":"positive_claim_resolved_by_observation","worktree":"C:/Users/Victor/.wasm-agent/rvw-corners-6b8b6fcc/b/data/wa-worktree-33b4e818-0278-47a1-823a-b756517ec787","child_id":"","run_id":"4cb9cea0-b387-43dd-92eb-23513fd975ec","boot":"578f10e1-b8e0-4641-acae-d5bc34b652c6","evidence":"the node process that started it is gone; nothing runs in that tree","at":1790985396081,"by":"operator"},"file":"C:\\Users\\Victor\\.wasm-agent\\rvw-corners-6b8b6fcc\\b\\repo\\.git\\wa-waves\\activity-resolutions.json","activity_after":"off","unresolved_activity_claims_after":0}
+inventory after {"activity":"off","agents":[],"claims":[],"resolved":["positive_claim_resolved_by_observation:33b4e818-0278-47a1-823a-b756517ec787"]}
+resolve AGAIN (same identity) REFUSED: claim_already_resolved:33b4e818-0278-47a1-823a-b756517ec787
+
+=== 3. the fence create() raises has a way out (the copied LIVE row is the previous wave) ===
+create() while the stale positive turn is ON {"ok":false,"reason":"previous_wave_active:wave-2026-10-02-subagent-chat-and-enforcement"}
+resolve it (its own identity) {"ok":true,"session":"33b4e818-0278-47a1-823a-b756517ec787","claim":"positive_claim_resolved_by_observation","was_positive":true,"resolution":{"session":"33b4e818-0278-47a1-823a-b756517ec787","claim":"positive_claim_resolved_by_observation","worktree":"C:/Users/Victor/.wasm-agent/rvw-corners-6b8b6fcc/b/data/wa-worktree-33b4e818-0278-47a1-823a-b756517ec787","child_id":"","run_id":"4cb9cea0-b387-43dd-92eb-23513fd975ec","boot":"578f10e1-b8e0-4641-acae-d5bc34b652c6","evidence":"observed: nothing runs in that tree","at":1790985398198,"by":"operator"},"file":"C:\\Users\\Victor\\.wasm-agent\\rvw-corners-6b8b6fcc\\b\\repo\\.git\\wa-waves\\activity-resolutions.json","activity_after":"off","unresolved_activity_claims_after":0}
+create() after the resolution {"ok":true,"previous":{"id":"wave-2026-10-02-subagent-chat-and-enforcement","activity":"off"}}
+
+=== 4. NON-BORROWABILITY: a NEW turn on the same session is a new claim ===
+inventory after a NEW turn (run=review-new-run, boot=review-new-boot) {"activity":"on","agents":["33b4e818-0278-47a1-823a-b756517ec787:turn=active:corroborated=false"],"claims":[],"resolved":[]}
+observe entry (the old resolution must not apply) {"why":"positive_claim_resolved_by_observation","positive":true,"resolvable":true,"run_id":"review-new-run"}
+resolve the new turn on its own identity {"ok":true,"session":"33b4e818-0278-47a1-823a-b756517ec787","claim":"positive_claim_resolved_by_observation","was_positive":true,"resolution":{"session":"33b4e818-0278-47a1-823a-b756517ec787","claim":"positive_claim_resolved_by_observation","worktree":"C:/Users/Victor/.wasm-agent/rvw-corners-6b8b6fcc/b/data/wa-worktree-33b4e818-0278-47a1-823a-b756517ec787","child_id":"","run_id":"review-new-run","boot":"review-new-boot","evidence":"the second turn is dead too","at":1790985400255,"by":"operator"},"file":"C:\\Users\\Victor\\.wasm-agent\\rvw-corners-6b8b6fcc\\b\\repo\\.git\\wa-waves\\activity-resolutions.json","activity_after":"off","unresolved_activity_claims_after":0}
+
+=== 5. THE PROCESS-HELD CASE: a process that names the tree ===
+inventory while a process holds the tree {"activity":"on","corroborated":true,"agents":["33b4e818-0278-47a1-823a-b756517ec787"]}
+observe entry for the held claim {"positive":true,"resolvable":false,"corroborated":true,"resolution":"refused: a local process is holding this tree"}
+resolve the held claim REFUSED: claim_is_corroborated_by_a_local_process:33b4e818-0278-47a1-823a-b756517ec787:resolve cannot clear work a process is holding
+the corroborating process line: 9948 c:/users/victor/.wasm-agent/wa-worktree-childdispatch6b8b6fcc-389d-4cc5-b5da-4a69e6410d7d/"c:/program files/nodejs/node.exe" -e "settimeout(() => {}, 60000)" c:/users/victor/.wasm-agent/rvw-corners-6b8b6fcc/b/data/wa-worktree-33b4e818-0278-47a1-823a-b756517ec787 c:/program files/nodejs/node.exe
+
+=== 6. ATTACK: the SAME live-shaped turn with the probe blind ===
+inventory with the holder gone (the turn is STILL `active` in the node store) {"activity":"on","agents":["33b4e818-0278-47a1-823a-b756517ec787:turn=active:corroborated=false"],"claims":[],"resolved":[]}
+resolve the STILL-ACTIVE turn (no process names the tree) {"ok":true,"session":"33b4e818-0278-47a1-823a-b756517ec787","claim":"positive_claim_resolved_by_observation","was_positive":true,"resolution":{"session":"33b4e818-0278-47a1-823a-b756517ec787","claim":"positive_claim_resolved_by_observation","worktree":"C:/Users/Victor/.wasm-agent/rvw-corners-6b8b6fcc/b/data/wa-worktree-33b4e818-0278-47a1-823a-b756517ec787","child_id":"","run_id":"review-held-run","boot":"review-held-boot","evidence":"observed: no process names this tree","at":1790985406175,"by":"operator"},"file":"C:\\Users\\Victor\\.wasm-agent\\rvw-corners-6b8b6fcc\\b\\repo\\.git\\wa-waves\\activity-resolutions.json","activity_after":"off","unresolved_activity_claims_after":0}
+inventory after resolving an active turn {"activity":"off","agents":[],"claims":[],"resolved":["positive_claim_resolved_by_observation:33b4e818-0278-47a1-823a-b756517ec787"]}
+a process that appears LATER suspends the recorded resolution {"activity":"on","corroborated":true,"resolved":0}
+and when it goes the resolution applies again {"activity":"off","agents":[],"claims":[],"resolved":["positive_claim_resolved_by_observation:33b4e818-0278-47a1-823a-b756517ec787"]}
+resolve with NO evidence REFUSED: observed_resolution_evidence_required
+the flag it needs is the entry's own identity field (measured above) 
+
+=== 7. ATTACK: observe must not lie about resolvability ===
+observe with an UNREADABLE resolutions file {"session":"33b4e818-0278-47a1-823a-b756517ec787","why":"positive_claim_resolved_by_observation","resolvable":true,"resolution":"node scripts/wave-activity.mjs resolve C:\\Users\\Victor\\.wasm-agent\\rvw-corners-6b8b6fcc\\b\\config.json 33b4e818-0278-47a1-823a-b756517ec787 \"<what you observed>\""}
+observe resolutions field {"file":"C:\\Users\\Victor\\.wasm-agent\\rvw-corners-6b8b6fcc\\b\\repo\\.git\\wa-waves\\activity-resolutions.json","ok":false,"count":0}
+and what resolve really does then REFUSED: activity_resolutions_unreadable:Expected property name or '}' in JSON at position 2 (line 1 column 3)
+
+=== 8. ATTACK: a claim that names nothing, and whether the node can write one ===
+inventory with run_id="" and boot="" {"agents":["33b4e818-0278-47a1-823a-b756517ec787:corroborated=false"],"claims":0}
+resolve it with NO identity flag (it names nothing) {"ok":true,"session":"33b4e818-0278-47a1-823a-b756517ec787","claim":"positive_claim_resolved_by_observation","was_positive":true,"resolution":{"session":"33b4e818-0278-47a1-823a-b756517ec787","claim":"positive_claim_resolved_by_observation","worktree":"C:/Users/Victor/.wasm-agent/rvw-corners-6b8b6fcc/b/data/wa-worktree-33b4e818-0278-47a1-823a-b756517ec787","child_id":"","run_id":"","boot":"","evidence":"observed: nothing names this claim","at":1790985412520,"by":"operator"},"file":"C:\\Users\\Victor\\.wasm-agent\\rvw-corners-6b8b6fcc\\b\\repo\\.git\\wa-waves\\activity-resolutions.json","activity_after":"off","unresolved_activity_claims_after":0}
+an anonymous resolution matches a LATER anonymous turn of the same session? true
+is an anonymous turn reachable from the node writer? lua/core/steering.lua:25 passes rid + assert(host.runtime_info().boot_id), and lua/core/agent.lua:1029 mints host.uuid() per run - so no
+inventory after (the anonymous resolution applies) {"activity":"off","agents":[],"claims":[],"resolved":["positive_claim_resolved_by_observation:33b4e818-0278-47a1-823a-b756517ec787"]}
+
+=== 9. the gate on the live-shaped store: tip vs pre-delta ===
+tip checkAdmission produce=ok | allocate=ok | land=wave_convergence_unverified:wave-2026-10-02-subagent-chat-and-enforcement:pending:legacy row: its steps never ran and its convergence was never verified | admit=wave_convergence_unverified:wave-2026-10-02-subagent-chat-and-enforcement:pending:legacy row: its steps never ran and its convergence was never verified
+pre-delta checkAdmission produce=ok | allocate=ok | land=wave_convergence_unverified:wave-2026-10-02-subagent-chat-and-enforcement:pending:legacy row: its steps never ran and its convergence was never verified | admit=wave_convergence_unverified:wave-2026-10-02-subagent-chat-and-enforcement:pending:legacy row: its steps never ran and its convergence was never verified
+fixture retained at C:\Users\Victor\.wasm-agent\rvw-corners-6b8b6fcc\b
+live store untouched: sha256(waves.sqlite)=f65b11dc9dc8263958a93ca97cf73bc4e6b541ef4238ad8e3dcf786edc670a48 activity-resolutions.json exists=false

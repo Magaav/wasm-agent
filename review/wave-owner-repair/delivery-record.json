@@ -1,0 +1,55 @@
+{
+  "schema": 1,
+  "delivery": "change/wa-session-childdispatch009bbf4b-3957-461b-959e-23a22f58fa29",
+  "branch": "change/wa-session-childdispatch009bbf4b-3957-461b-959e-23a22f58fa29",
+  "repository": "C:\\Users\\Victor\\.wasm-agent\\wa-worktree-childdispatch009bbf4b-3957-461b-959e-23a22f58fa29",
+  "tip": "288cdd5ab7a260e775a0944dac011182fe476ede",
+  "tree": "0406348cf61abfbad914dd735e2841f19673b88f",
+  "producer": "child:dispatch:009bbf4b-3957-461b-959e-23a22f58fa29",
+  "review": {
+    "reviewer": "child:dispatch:98e77c9b-60c9-4a3f-8bf3-5eda1620f33c",
+    "commit": "80a46617284a7fb52bb96ec93d136ed126781252",
+    "tip": "288cdd5ab7a260e775a0944dac011182fe476ede",
+    "tree": "0406348cf61abfbad914dd735e2841f19673b88f",
+    "verdict": "refused",
+    "findings": [
+      {
+        "class": "prevention",
+        "status": "unresolved",
+        "text": "R1 normative test.sh/catalog do not reach owner refusal/mutations/corners/activity-fix; manual proof is not recurrence protection"
+      },
+      {
+        "class": "cleanup",
+        "status": "unresolved",
+        "text": "unreachable replay-success branches remain despite unconditional findResolution refusal"
+      },
+      {
+        "class": "safety",
+        "status": "resolved",
+        "text": "B1 B2 narrow fail-closed creation and legacy replay retain false/null heartbeat owner and receipt bytes"
+      },
+      {
+        "class": "coverage",
+        "status": "resolved",
+        "text": "281 focused checks plus three intended assertion mutation kills and private native public23; extra mixed freeze all-four matrix passed"
+      },
+      {
+        "class": "scope",
+        "status": "unresolved",
+        "text": "stale owner recovery unsupported without trusted exact-owner terminal plus descendant/effect drain adapter"
+      },
+      {
+        "class": "documentation",
+        "status": "unresolved",
+        "text": "leftover ready-made resolution command sentence contradicts supported refusal"
+      }
+    ],
+    "at": "2026-10-03T01:22:16.050Z"
+  },
+  "admission": null,
+  "lane": null,
+  "landing": null,
+  "created_at": "2026-10-03T01:15:45.895Z",
+  "revision": 2,
+  "updated_at": "2026-10-03T01:22:16.052Z"
+}

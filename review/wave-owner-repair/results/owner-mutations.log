@@ -1,0 +1,40 @@
+creation: killed exit=1
+node:internal/modules/run_main:107
+    triggerUncaughtException(
+    ^
+
+AssertionError [ERR_ASSERTION]: Missing expected exception.
+    at refuse (file:///C:/Users/Victor/.wasm-agent/wa-worktree-childdispatch98e77c9b-60c9-4a3f-8bf3-5eda1620f33c/.review-private/repair-tip/scripts/test-wave-owner-refusal.mjs:24:47)
+    at file:///C:/Users/Victor/.wasm-agent/wa-worktree-childdispatch98e77c9b-60c9-4a3f-8bf3-5eda1620f33c/.review-private/repair-tip/scripts/test-wave-owner-refusal.mjs:35:81 {
+  generatedMessage: false,
+  code: 'ERR_ASSERTION',
+  actual: undefined,
+  expected: /exact_owner_settlement_and_drain_unavailable/,
+  operator: 'throws',
+replay: killed exit=1
+node:internal/modules/run_main:107
+    triggerUncaughtException(
+    ^
+
+AssertionError [ERR_ASSERTION]: owner retained, not OFF
+    at check (file:///C:/Users/Victor/.wasm-agent/wa-worktree-childdispatch98e77c9b-60c9-4a3f-8bf3-5eda1620f33c/.review-private/repair-tip/scripts/test-wave-owner-refusal.mjs:14:46)
+    at state (file:///C:/Users/Victor/.wasm-agent/wa-worktree-childdispatch98e77c9b-60c9-4a3f-8bf3-5eda1620f33c/.review-private/repair-tip/scripts/test-wave-owner-refusal.mjs:25:81)
+    at file:///C:/Users/Victor/.wasm-agent/wa-worktree-childdispatch98e77c9b-60c9-4a3f-8bf3-5eda1620f33c/.review-private/repair-tip/scripts/test-wave-owner-refusal.mjs:42:22 {
+  generatedMessage: false,
+  code: 'ERR_ASSERTION',
+  actual: false,
+  expected: true,
+M5-observe: killed exit=1
+node:internal/modules/run_main:107
+    triggerUncaughtException(
+    ^
+
+AssertionError [ERR_ASSERTION]: observe positive/corroborated/resolvable accuracy
+    at check (file:///C:/Users/Victor/.wasm-agent/wa-worktree-childdispatch98e77c9b-60c9-4a3f-8bf3-5eda1620f33c/.review-private/repair-tip/scripts/test-wave-owner-refusal.mjs:14:46)
+    at state (file:///C:/Users/Victor/.wasm-agent/wa-worktree-childdispatch98e77c9b-60c9-4a3f-8bf3-5eda1620f33c/.review-private/repair-tip/scripts/test-wave-owner-refusal.mjs:25:275)
+    at file:///C:/Users/Victor/.wasm-agent/wa-worktree-childdispatch98e77c9b-60c9-4a3f-8bf3-5eda1620f33c/.review-private/repair-tip/scripts/test-wave-owner-refusal.mjs:35:22 {
+  generatedMessage: false,
+  code: 'ERR_ASSERTION',
+  actual: false,
+  expected: true,
+owner mutations ok (3 killed; 0 skipped)
