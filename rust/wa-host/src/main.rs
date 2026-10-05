@@ -78,6 +78,9 @@ const EMBEDDED: &[(&str, &str)] = &[
     ("lua/core/openai_sub_login.lua", include_str!("../../../lua/core/openai_sub_login.lua")),
     ("lua/core/openai_sub_catalogue.lua", include_str!("../../../lua/core/openai_sub_catalogue.lua")),
     ("lua/core/subscription_wire.lua", include_str!("../../../lua/core/subscription_wire.lua")),
+    // wa-vault's client and, when vaulted, the subscription wire's credential seam (docs/VAULT.md):
+    // the wire `dofile`s it by this exact name, like `openai_sub_auth.lua` above.
+    ("lua/core/vault.lua", include_str!("../../../lua/core/vault.lua")),
     ("lua/core/model_window.lua", include_str!("../../../lua/core/model_window.lua")),
     ("lua/core/changeset.lua", include_str!("../../../lua/core/changeset.lua")),
     ("lua/core/patch_audit.lua", include_str!("../../../lua/core/patch_audit.lua")),
