@@ -1,3 +1,30 @@
+## Operator-selected direct workflow (2026-10-05)
+
+The operator has disabled delegation for this repository. Work directly and serially
+on each human-requested task: implement, self-review, run appropriate focused checks,
+merge in the canonical main checkout, push and read back origin/main, and leave the
+owned and canonical worktrees clean. Do not start subagents or external agent workers.
+Do not create new orchestration, watchers or gates to complete ordinary work. Full
+release gates run only when the human explicitly requests them.
+
+The coordinator may review and merge its own changes; an independent reviewer is
+not required in this mode. This operator-selected rule overrides conflicting
+independent-review, mandatory-delegation and parallel-lane procedures in this file,
+AGENTS.orchestrator.md and repository skills/docs. Existing evidence remains evidence;
+self-review must be labelled self-review, never independent review. For direct work,
+use ordinary Git integration rather than a factory admission route that requires an
+independent reviewer. Do not fabricate a factory receipt or disable remote protection.
+
+For the authorized backlog cleanup, preserve recoverable backups of dirty drafts,
+rejected code and historical evidence before retiring verified obsolete work. Use
+supported runtime recovery for ownership/binding release. Unknown effects remain
+explicitly unresolved: do not manufacture settlement or replay them. Report Git
+cleanup and runtime readiness separately; an unresolved historical record does not
+prevent completing unrelated requested code changes. If a runtime boundary refuses
+cleanup, report its exact remaining scope and complete the other authorized work.
+
+This direct workflow remains active until the operator explicitly changes it.
+
 # AGENTS.md — working on wasm-agent
 
 Instructions for any agent (or human) editing this repo. This file is injected
