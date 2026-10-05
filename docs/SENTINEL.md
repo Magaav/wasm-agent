@@ -75,6 +75,16 @@ initial observation may create a check after a genuine ack; earlier missing-ack
 UNKNOWN evidence can remain intact while that first clock starts. Composition
 requires the current check and cannot turn an invalid check's held journal into
 an instruction. This does not add effect or replay authority.
+Observation eligibility is checked under the request lock before owner HTTP or
+ack/intent reads. Consumed terminal cursors do no further owner lookup. Pending
+observations poll at ten-second intervals; failed observations retry after 10,
+20, 40, then at most every 60 seconds, recorded separately in
+`observation-poll.json`. That schedule grants no delivery or effect authority;
+missing credentials/parents, changed owners and invalid acknowledgements still
+refuse when due, and delivery/composition always revalidate independently.
+`GET /session/owner?id=<parent>` resolves the ordinary authenticated/local account
+and session ownership boundary but returns only `session.id` and
+`session.user_id`, without loading messages or derived transcript state.
 Busy parents keep one pending event; due observations coalesce on disk rather
 than spawning extra wakes. Revision cancellation before submission can emit the
 same immutable key against the new revision. Before HTTP submission the watcher

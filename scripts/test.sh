@@ -963,6 +963,7 @@ WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-tool-cues.lua" "$BIN" --db "$DB.too
 # A session can own a checkout so parallel sessions on one node do not overwrite each other. The
 # default is the contract: a session with no worktree must resolve relative paths exactly as before,
 # or this feature would silently relocate every existing session's files.
+WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-session-owner.lua" "$BIN" --db "$DB.session-owner" | grep 'session owner ok'
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-session-worktree.lua" "$BIN" --db "$DB.session-worktree" | grep 'session worktree ok'
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-session-fork.lua" "$BIN" --db "$DB.session-fork" | grep 'session fork ok'
 gate_run node scripts/test-session-workspaces.cjs "$BIN"
