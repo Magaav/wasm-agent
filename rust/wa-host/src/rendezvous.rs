@@ -11,6 +11,7 @@
 //!
 //! Every call is signed by the node key: `action|node_id|ts`.
 use crate::node;
+mod bindings;
 use rusqlite::Connection;
 use serde_json::{json, Value};
 use std::collections::{HashMap, VecDeque};
@@ -77,6 +78,7 @@ pub fn run(bind: &str, port: u16, db_path: &str) {
                 eprintln!("[rendezvous] schema: {error}");
                 return;
             }
+            if let Err(error)=bindings::schema(&connection){eprintln!("[rendezvous] binding schema: {error}");return;}
             // SQLite has no `ADD COLUMN IF NOT EXISTS`. Existing registries need this once;
             // subsequent starts harmlessly report the duplicate column and continue.
             let _ = connection.execute("ALTER TABLE nodes ADD COLUMN resources TEXT", []);
@@ -190,9 +192,12 @@ fn handle(db_path: &str, stream: &mut TcpStream, relay: &Arc<Mutex<RelayState>>)
         let operators: Vec<Value> = admins.iter().filter_map(|id| lookup(&connection, id)).map(|n|
             json!({"node_id": n["node_id"], "public_key": n["public_key"], "name": n["name"]})
         ).collect();
-        return respond(stream, 200, &json!({"protocol": 1,
+        return respond(stream, 200, &json!({"protocol": 1, "binding_protocol":1,
             "enrollment_ready": !admins.is_empty() && operators.len() == admins.len(),
             "operators": operators}).to_string());
+    }
+    if path.starts_with("/bindings/") {
+        return bindings::route(&connection,stream,&path,&method,&query,&body,&header);
     }
     if path == "/role" && method == "POST" {
         return grant_role(&connection, stream, &payload, &body, &header);
@@ -217,6 +222,7 @@ fn handle(db_path: &str, stream: &mut TcpStream, relay: &Arc<Mutex<RelayState>>)
         }
         return match lookup(&connection, &node_id) {
             Some(mut node) => {
+                node["binding"] = bindings::current(&connection,&node_id);
                 node["relay_attached"] = json!(relay.lock().unwrap().last_poll.get(&node_id)
                     .map(|at| at.elapsed() < Duration::from_secs(40)).unwrap_or(false));
                 respond(stream, 200, &node.to_string())
@@ -239,8 +245,10 @@ fn handle(db_path: &str, stream: &mut TcpStream, relay: &Arc<Mutex<RelayState>>)
         if !verify(&connection, &node_id, "relay-poll", &header, None, stream) {
             return Ok(());
         }
+        if !bindings::permits(&connection,&node_id){return respond(stream,403,"{\"error\":\"binding_not_accepted\"}");}
         let deadline = Instant::now() + POLL_WAIT;
         loop {
+            if !bindings::permits(&connection,&node_id){return respond(stream,403,"{\"error\":\"binding_not_accepted\"}");}
             let next = {
                 let mut state = relay.lock().unwrap();
                 state.last_poll.insert(node_id.clone(), Instant::now());
@@ -293,6 +301,7 @@ fn handle(db_path: &str, stream: &mut TcpStream, relay: &Arc<Mutex<RelayState>>)
             return respond(stream, 403, "{\"error\":\"forbidden_role\"}");
         }
         let to = payload["to"].as_str().unwrap_or_default().to_string();
+        if !bindings::permits(&connection,&from)||!bindings::permits(&connection,&to){return respond(stream,403,"{\"error\":\"binding_not_accepted\"}");}
         if to.is_empty() {
             return respond(stream, 400, "{\"error\":\"to_required\"}");
         }
@@ -442,7 +451,7 @@ fn body_hash(bytes: &[u8]) -> String {
     node::hex(ring::digest::digest(&ring::digest::SHA256, bytes).as_ref())
 }
 fn is_master(connection: &Connection, id: &str) -> bool {
-    lookup(connection, id).map(|n| n["role"] == "master" || n["role"] == "admin").unwrap_or(false)
+    bindings::permits(connection,id) && lookup(connection, id).map(|n| n["role"] == "master" || n["role"] == "admin").unwrap_or(false)
 }
 fn grant_role(connection: &Connection, stream: &mut TcpStream, payload: &Value,
               body: &[u8], header: &dyn Fn(&str) -> String) -> std::io::Result<()> {
@@ -457,8 +466,18 @@ fn grant_role(connection: &Connection, stream: &mut TcpStream, payload: &Value,
         return respond(stream, 400, "{\"error\":\"invalid_role_target\"}");
     }
     if lookup(connection, id).is_none() { return respond(stream, 404, "{\"error\":\"unknown_node\"}"); }
+    if !bindings::permits(connection,id){return respond(stream,403,"{\"error\":\"binding_not_accepted\"}");}
+    if let Some(binding)=bindings::current(connection,id).as_object() {
+        if payload["binding_id"]!=binding["request"]["id"] || payload["binding_digest"]!=binding["digest"] || payload["binding_revision"]!=binding["revision"] || payload["public_key"]!=binding["request"]["public_key"] || payload["expected_role"]!=lookup(connection,id).unwrap_or(Value::Null)["role"] {
+            return respond(stream,409,"{\"error\":\"binding_generation_changed\"}");
+        }
+    }
     let result = (|| -> rusqlite::Result<()> {
         let tx = connection.unchecked_transaction()?;
+        if !bindings::permits(&tx,id){return Err(rusqlite::Error::ExecuteReturnedResults);}
+        if let Some(binding)=bindings::current(&tx,id).as_object() {
+            if payload["binding_id"]!=binding["request"]["id"]||payload["binding_digest"]!=binding["digest"]||payload["binding_revision"]!=binding["revision"]||payload["public_key"]!=binding["request"]["public_key"]||payload["expected_role"]!=lookup(&tx,id).unwrap_or(Value::Null)["role"] {return Err(rusqlite::Error::ExecuteReturnedResults);}
+        }
         tx.execute("DELETE FROM role_requests WHERE at < ?1", [now() - 240])?;
         tx.execute("INSERT INTO role_requests VALUES(?1,?2)", rusqlite::params![header("x-wa-sig"), now()])?;
         tx.execute("INSERT INTO network_roles VALUES(?1,?2,?3,?4) ON CONFLICT(node_id) DO UPDATE SET role=excluded.role,changed_by=excluded.changed_by,changed_at=excluded.changed_at",

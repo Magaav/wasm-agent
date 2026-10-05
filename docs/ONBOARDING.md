@@ -1,5 +1,13 @@
 # Managed guest onboarding (protocol 1)
 
+For an already-running personal CLI on Linux or Windows, use the two-sided
+[`/bind` flow](BINDING.md): preserve identity/session/local model, explicitly
+approve expiring remote account access, and have a configured administrator
+accept the exact pairing request before attachment. It requires
+`binding_protocol:1` from the service; an older service fails closed. The
+Windows fresh-install bootstrap below remains compatible and is not silently
+migrated or treated as approval for an existing personal node.
+
 Target: paste one PowerShell command, choose a name while a verified package is
 installed in the background, approve remote assistance, and connect outbound as
 a guest. No model key, Git checkout, compiler or inbound customer port is needed.

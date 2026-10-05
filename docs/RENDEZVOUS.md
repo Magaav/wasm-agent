@@ -95,6 +95,25 @@ wa serve --port 8799
 The node registers, heartbeats every 60s, and any master can resolve it by
 `node_id`.
 
+## Binding an existing personal CLI
+
+`/bind` uses an explicit signed pending request and administrator acceptance,
+separate from network-role promotion. The managed `/service` advertises
+`binding_protocol:1`; unavailable old services fail closed. Exact scope, pin,
+expiry, replay and local-versus-network role rules are in [BINDING.md](BINDING.md).
+No user device is accepted or promoted by installing that support.
+
+For a separately hosted Linux registry, the scoped supported installer is
+`scripts/deploy-rendezvous.sh <full-main-commit> <reason>`, queued via an
+allow-listed sentinel `request run` wrapper outside the node run. It binds the
+actual systemd registry PID/executable/database, refuses a shared node image,
+retains binary and SQLite backups, reruns focused private binding proofs,
+replaces the registry image atomically and restarts only `wa-rendezvous.service`.
+It verifies exact installed bytes, fresh PID and unchanged administrator pins;
+`rendezvous-installed.txt` and its per-commit evidence report the outcome.
+A refusal after the swap is unresolved/partial, never permission to replay.
+This is not the node/UI deployment or a full release gate.
+
 ## Guest nodes
 
 A node is a **guest** when `WASM_AGENT_NODE_ROLE=guest`, or when `<config>/node.role`

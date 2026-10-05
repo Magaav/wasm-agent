@@ -81,6 +81,9 @@ impl Identity {
 /// Role: the environment, then `<config>/node.role`, then master. Anything that is not `guest`
 /// is a master, so a typo cannot quietly demote a node that is in the middle of work.
 fn announced_role(config: &str) -> String {
+    if crate::binding_runtime::present(){
+        return crate::binding_runtime::read().ok().flatten().and_then(|p|p["network_role"].as_str().map(str::to_string)).unwrap_or_else(||"guest".into());
+    }
     if std::env::var("WASM_AGENT_MANAGED").as_deref() == Ok("1") {
         return managed_profile().and_then(|p| p["local_role"].as_str().map(str::to_string))
             .filter(|role| role == "master").unwrap_or_else(|| "guest".into());
@@ -163,6 +166,7 @@ fn managed_profile() -> Option<serde_json::Value> {
 
 /// Revocation/expiry also pauses outbound polling. In-flight jobs still face the Lua gate.
 pub fn network_active() -> bool {
+    if crate::binding_runtime::present(){return false;} // the leased bound transport owns announcement/polling
     std::env::var("WASM_AGENT_MANAGED").as_deref() != Ok("1") || managed_profile().is_some()
 }
 

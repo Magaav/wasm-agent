@@ -2,9 +2,11 @@
 local json = dofile('lua/vendor/json.lua')
 local paths = dofile('lua/core/paths.lua')
 local M = {}
-function M.managed() return host.getenv('WASM_AGENT_MANAGED') == '1' end
+local binding=dofile('lua/core/binding.lua')
+function M.managed() return binding.present() or host.getenv('WASM_AGENT_MANAGED') == '1' end
 function M.path() return paths.config() .. '/enrollment.json' end
 function M.profile(include_inactive)
+  if binding.present() then return binding.profile(include_inactive) end
   if not M.managed() then return nil, 'not_managed' end
   local raw = host.read_file(M.path())
   local ok, p = pcall(json.decode, raw or '')
@@ -18,6 +20,10 @@ function M.profile(include_inactive)
 end
 function M.role()
   -- Revoking assistance must not take an already promoted owner's local agency away.
+  if binding.present() then
+    local role=host.getenv('WASM_AGENT_NODE_ROLE') or host.read_file(paths.config()..'/node.role') or 'master'
+    return role:lower():gsub('%s','')=='guest' and 'guest' or 'master'
+  end
   local p = M.profile(true)
   return p and p.local_role == 'master' and 'master' or 'guest'
 end
@@ -30,6 +36,7 @@ local function get(url, headers)
   return decoded and type(value) == 'table' and value or nil
 end
 function M.caller(id, key)
+  if binding.present() then return binding.authorize(id,key) end
   local p = M.profile()
   if not p then return nil end
   local pinned = false
@@ -80,6 +87,7 @@ function M.target(request)
   return request.to_node_id == identity.node_id
 end
 function M.set_role(role)
+  if binding.present() then return binding.set_role(role) end
   if role ~= 'master' and role ~= 'guest' then return { error = 'invalid_role' } end
   local p, problem = M.profile()
   if not p then return { error = problem } end
@@ -98,6 +106,7 @@ function M.set_role(role)
   return { ok = true, role = role, node_id = identity.node_id }
 end
 function M.status()
+  if binding.present() then return binding.status() end
   local p, problem = M.profile()
   local registered, attached = false, false
   if p then

@@ -152,6 +152,20 @@ running. Reinstallation currently refuses an existing preview so it cannot
 overwrite a running or stateful installation silently. Agent state and credentials
 live under `~/.wasm-agent`, outside the replaceable runtime directory.
 
+### Bind an existing CLI to the fabric
+
+In `wa chat`, `/bind https://rendezvous.colmeio.com` inspects the managed service
+and requests explicit 24-hour current-user-account automation consent. Compare
+the pairing phrase on both consoles; an existing service administrator uses
+`/nodes pending` and `/accept <code>`. Acceptance joins as guest; `/promote <id>`
+and `/demote <id>` are separate confirmed network-role decisions, not fabric
+administrator grants. `/unbind` locally revokes remote access; `/revoke <id>` is
+the administrator's matching control. Identity, conversation and local provider
+settings remain unchanged. Commands make no model call. Keep the CLI open for
+outbound relay access; `wa bind run` is the explicit model-free foreground path.
+Both runtime and rendezvous need the binding protocol; unavailable versions
+refuse rather than falling back. See [binding/recovery limits](docs/BINDING.md).
+
 ### Model-free assisted onboarding
 
 `scripts/bootstrap-windows.ps1` installs a checksum-pinned package in the background

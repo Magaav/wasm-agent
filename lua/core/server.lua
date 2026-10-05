@@ -1,4 +1,6 @@
 -- Server entry for `wa serve`: one agent per user behind the web UI.
+local binding=dofile('lua/core/binding.lua')
+function wa_binding_tick() return dofile('lua/vendor/json.lua').encode(binding.tick()) end
 local json = dofile("lua/vendor/json.lua")
 local memory = dofile("lua/core/memory.lua")
 local changeset = dofile("lua/core/changeset.lua")
@@ -995,6 +997,7 @@ end
 
 -- Push everything after each peer's cursor. Called on a timer by the host.
 function wa_sync_tick()
+  if enrollment.managed() then return json.encode({error='managed_sync_disabled'}) end
   local configured = host.getenv("WASM_AGENT_SYNC_TO") or ""
   if configured == "" then return json.encode({ ok = true, peers = 0, pushed = 0 }) end
   local peers, pushed, failed, last_error = 0, 0, 0, nil

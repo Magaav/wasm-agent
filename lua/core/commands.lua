@@ -56,6 +56,13 @@ M.commands = {
   { name = "/update", usage = "/update", hint = "install the newest build in this node's tree (the sentinel does it, once idle)" },
   { name = "/merge", usage = "/merge", hint = "merge internal branches; leave open PR work for review" },
   { name = "/merge all", usage = "/merge all", hint = "include all open PRs after review and required checks" },
+  { name = "/bind", usage = "/bind [service]", hint = "two-sided fabric consent; status/renew/run are local controls" },
+  { name = "/unbind", usage = "/unbind", hint = "revoke remote access; retain local identity and history" },
+  { name = "/nodes", usage = "/nodes [pending]", hint = "peer inventory or administrator pairing requests" },
+  { name = "/accept", usage = "/accept <code>", hint = "confirm exact pairing request as network guest" },
+  { name = "/promote", usage = "/promote <node>", hint = "confirm network master, never administrator" },
+  { name = "/demote", usage = "/demote <node>", hint = "confirm network guest; preserve local CLI" },
+  { name = "/revoke", usage = "/revoke <node>", hint = "confirm exact binding revocation" },
   { name = "/help", usage = "/help", hint = "this help" },
   { name = "/exit", usage = "/exit", alias = { "/quit" }, hint = "quit" },
 }

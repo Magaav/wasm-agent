@@ -126,6 +126,29 @@ Actual original run/identity/drain/effect provenance remains necessary; do not
 replay effects, overwrite unknowns, switch branches or delete evidence to clear
 these counts. No full release certification is claimed.
 
+2026-10-05, existing-node fabric binding: `/bind`, `/bind status|renew`, `/unbind`,
+`/nodes pending`, `/accept`, `/promote`, `/demote` and `/revoke` now use shared
+non-model CLI controllers and a versioned two-sided managed binding protocol.
+Explicit 24-hour account-authority consent plus exact signed ten-minute pairing
+and administrator acceptance precede outbound attachment. Network promotion is
+separate from local CLI/model role and fabric administrator authority. Native
+private atomic CAS, original-request observation and a per-home OS-leased outbound
+capability runtime preserve identity, session, provider settings and unknown
+outcomes; existing servers refuse a duplicate CLI attachment. No inbound listener,
+new automation job, login service or real-device enrollment is part of the change.
+Self-review/focused proof: Windows43 and Linux44 native end-to-end checks,
+16 controller/recovery checks per platform, legacy managed-network40 per platform,
+command-parity62 and direct-workflow19 passed, zero skips. Linux includes private
+file mode0600 proof; package/bootstrap checks explicitly not run, no full release
+gate. The legacy protocol1 bootstrap remains compatible. The service and each
+participating CLI need updated binaries; installation is separate from source
+proof. A scoped sentinel-run Linux registry installer preserves actual binary
+and SQLite originals, verifies exact source/service/pins and reports crossed-but-
+unverified installation as unknown. Pin trust is explicit HTTPS/human first
+contact, not an OS sandbox or guaranteed cancellation of already-running effects.
+Prior cleanup unknowns remain unchanged. See `docs/BINDING.md` and
+`docs/RENDEZVOUS.md` for commands, verification and recovery boundaries.
+
 ## Status vocabulary
 
 - **Implemented:** a mechanism exists in the repository; not a release certification.

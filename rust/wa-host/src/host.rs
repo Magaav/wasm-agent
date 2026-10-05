@@ -872,6 +872,16 @@ pub extern "C" fn subagent(l: *mut LuaState) -> c_int {
 }
 
 /// Atomic named-resource claims. Resource choice and authorization stay in Lua.
+pub extern "C" fn binding_state(l:*mut LuaState)->c_int {
+    let action=arg_string(l,1).unwrap_or_default();
+    let args=arg_string(l,2).and_then(|s|serde_json::from_str::<Value>(&s).ok()).unwrap_or(Value::Null);
+    push_json(l,&crate::binding_runtime::state(&action,&args).unwrap_or_else(|error|json!({"ok":false,"error":error})));1
+}
+pub extern "C" fn binding_transport(l:*mut LuaState)->c_int {
+    let action=arg_string(l,1).unwrap_or_default();
+    push_json(l,&crate::binding_runtime::transport(&action).unwrap_or_else(|error|json!({"ok":false,"error":error})));1
+}
+
 pub extern "C" fn resource(l: *mut LuaState) -> c_int {
     let action=arg_string(l,1).unwrap_or_default();
     let args=arg_string(l,2).and_then(|raw|serde_json::from_str::<Value>(&raw).ok()).unwrap_or(Value::Null);
