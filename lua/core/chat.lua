@@ -93,6 +93,11 @@ end
 -- reader, and a chat in the wrong worktree is otherwise a mistake that costs an hour to
 -- notice. Both live in `cli_view` because both are what the banner prints.
 function M.run(argv)
+  local binding=dofile('lua/core/binding.lua')
+  if binding.present() then
+    local transport=host.binding_transport and json.decode(host.binding_transport('start'))
+    if not transport or not transport.ok then print('binding_transport_unavailable: '..tostring(transport and transport.error));return 2 end
+  end
   argv = argv or {}
   -- Session selection. A new thread is the default; `--continue` resumes the
   -- most recent one; `--session <id>` picks exactly that one. A bare word is the
@@ -264,6 +269,20 @@ function M.run(argv)
       break
     elseif line == "/help" then
       print(HELP)
+    elseif line == "/bind" or line:sub(1, 6) == "/bind " then
+      dofile('lua/core/binding_cli.lua').run('bind',line:sub(7),read_line,print)
+    elseif line == "/unbind" then
+      dofile('lua/core/binding_cli.lua').run('unbind','',read_line,print)
+    elseif line == "/nodes" or line:sub(1, 7) == "/nodes " then
+      dofile('lua/core/binding_cli.lua').run('nodes',line:sub(8),read_line,print)
+    elseif line == "/accept" or line:sub(1, 8) == "/accept " then
+      dofile('lua/core/binding_cli.lua').run('accept',line:sub(9),read_line,print)
+    elseif line == "/promote" or line:sub(1, 9) == "/promote " then
+      dofile('lua/core/binding_cli.lua').run('promote',line:sub(10),read_line,print)
+    elseif line == "/demote" or line:sub(1, 8) == "/demote " then
+      dofile('lua/core/binding_cli.lua').run('demote',line:sub(9),read_line,print)
+    elseif line == "/revoke" or line:sub(1, 8) == "/revoke " then
+      dofile('lua/core/binding_cli.lua').run('revoke',line:sub(9),read_line,print)
     elseif line == "/session" then
       print(agent.session_id)
     elseif line == "/new" then

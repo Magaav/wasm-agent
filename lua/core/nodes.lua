@@ -13,6 +13,8 @@ local CACHE_TTL = 15
 local cache, cache_at = nil, 0
 
 function M.rendezvous_url()
+  local binding=dofile('lua/core/binding.lua')
+  if binding.present() then local s=binding.saved();return s and s.service or '' end
   return host.getenv("WASM_AGENT_RENDEZVOUS") or ""
 end
 
@@ -354,6 +356,8 @@ end
 
 -- The relay that fronts nodes which cannot accept inbound connections.
 function M.relay_url()
+  local binding=dofile('lua/core/binding.lua')
+  if binding.present() then local s=binding.saved();return s and s.service or '' end
   return host.getenv("WASM_AGENT_RELAY") or ""
 end
 
@@ -478,9 +482,21 @@ function M.remote_call(selector, capability, args)
 end
 
 -- Registry authority first, then the recipient's pinned local grant. Report partial changes.
-function M.network_role(node_id, role)
+function M.network_role(node_id, role, preview)
   if role ~= "master" and role ~= "guest" then return { error = "invalid_role" } end
-  local body = json.encode({ node_id = node_id, role = role, nonce = host.uuid() })
+  -- Resolve one exact current registration; display-name ambiguity never chooses a target.
+  local rows={};for _,n in ipairs(M.peers({fresh=true})) do if n.node_id==node_id then rows[#rows+1]=n end end
+  if #rows~=1 then return {error='network_role_target_unknown'} end
+  local request={node_id=node_id,public_key=rows[1].public_key,role=role,nonce=host.uuid()}
+  local lookup=json.decode(host.http('GET',M.rendezvous_url()..'/lookup?node_id='..node_id,json.encode(M.signed_headers('lookup')),''))
+  local value=lookup and lookup.status==200 and json.decode(lookup.body) or nil
+  if not value or value.public_key~=request.public_key then return {error='network_role_identity_changed'} end
+  if value.binding and value.binding.request then
+    local b=value.binding
+    if preview and (preview.node.public_key~=value.public_key or preview.node.role~=value.role or preview.binding.digest~=b.digest or preview.binding.revision~=b.revision) then return {error='binding_generation_changed'} end
+    request.binding_id,request.binding_digest,request.binding_revision,request.expected_role=b.request.id,b.digest,b.revision,value.role
+  end
+  local body = json.encode(request)
   local headers = M.signed_headers("grant-role", body)
   local response = json.decode(host.http("POST", M.rendezvous_url():gsub("/+$", "") .. "/role", json.encode(headers), body))
   if not response or tonumber(response.status) ~= 200 then
@@ -488,7 +504,10 @@ function M.network_role(node_id, role)
   end
   M.invalidate()
   local result = M.remote_call(node_id, "set_role", { role = role })
-  if result.error then return { error = "network_role_changed_local_update_failed", network_role = role, detail = result } end
+  if result.error or result.ok~=true or result.node_id~=node_id or result.role~=role then return { error = "network_role_changed_local_update_failed", network_role = role, detail = result } end
+  local readback=json.decode(host.http('GET',M.rendezvous_url()..'/lookup?node_id='..node_id,json.encode(M.signed_headers('lookup')),''))
+  local current=readback and readback.status==200 and json.decode(readback.body) or nil
+  if not current or current.public_key~=request.public_key or current.role~=role then return {error='network_role_readback_unconfirmed',network_role=role,target_acknowledged=true} end
   return result
 end
 

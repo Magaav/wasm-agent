@@ -200,8 +200,13 @@ elseif command == "sessions" then
     if row.state == "unfinished" then print("      " .. row.state_detail) end
   end
 elseif command == "nodes" then
-  local nodes = dofile("lua/core/nodes.lua")
-  print(json.encode({ node_id = (nodes.identity() or {}).node_id, nodes = nodes.list() }))
+  if args[2]=='pending' then
+    local result=dofile('lua/core/binding_cli.lua').run('nodes','pending')
+    if result.error or result.ok==false then os.exit(1) end
+  else
+    local nodes = dofile("lua/core/nodes.lua")
+    print(json.encode({ node_id = (nodes.identity() or {}).node_id, nodes = nodes.list() }))
+  end
 elseif command == "paths" then
   -- What an operator runs first when the agent says "no model configured": where
   -- this node keeps its files, and which file the host actually reads for the
@@ -228,6 +233,9 @@ elseif command == "call" then
     if ok and type(decoded) == "table" then payload = decoded end
   end
   print(json.encode(nodes.remote_call(args[2], args[3], payload)))
+elseif command == 'bind' or command == 'unbind' or command == 'accept' or command == 'promote' or command == 'demote' or command == 'revoke' then
+  local result=dofile('lua/core/binding_cli.lua').run(command,args[2] or '')
+  if result.error or result.ok==false then os.exit(1) end
 elseif command == "network" then
   if args[2] ~= "role" or not args[3] then
     print(json.encode({ error = "usage: wa network role <node-id> master|guest" }))
@@ -283,6 +291,8 @@ elseif command == "help" then
   print("    sessions | skills | stats | status | nodes | call <node> <capability> [args-json]")
   print("    resume [--list] [--session <id>] [prompt]   see and continue an unfinished thread")
   print("    paths  where this node keeps its files, and the config file it would read")
+  print('    bind [service|status|renew|run] | unbind | nodes pending | accept <pairing-code>')
+  print('    promote <node> | demote <node> | revoke <node>  confirmed network controls')
   print("    network role <node-id> master|guest  administrator-controlled network role")
   print("    access [log]  managed-access status or recent local audit events (no model)")
   print("    subscription [status | login [--device|--browser|--code <url>]]  this node's ChatGPT")

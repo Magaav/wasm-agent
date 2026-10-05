@@ -450,6 +450,16 @@ It writes no target claim/history and always returns `global_identity_safety:fal
 `production_registry_admission:false`, and `effect_authorized:false`. It cannot
 resolve a production legacy inventory or authorize an effect by itself.
 
+`host.binding_state('read'|'cas',args_json)` provides private atomic binding-file
+storage, with full-object expected-state equality under an OS file lock. CAS
+refuses corrupt/unreadable or moved state; Unix temporary and final files are
+mode 0600. `host.binding_transport('preflight'|'start'|'status')` owns one outbound-only
+capability interpreter under a per-home exclusive SQLite lease, released by the
+OS on process exit. It runs the Lua binding tick without inference or an inbound
+listener. Start is a receipt, not registration/attachment proof. No model tool
+exposes these controls. Local consent, pin/protocol checks, exact signed requests
+and acceptance/revocation policy live in [BINDING.md](BINDING.md), not the host.
+
 `host.monotonic_ms()` measures elapsed time within a process. Use `host.now()` only
 for cross-process event timestamps. `host.runtime_info()` returns version, OS,
 architecture, PID, a process-unique `boot_id`, and the SHA-256 of the executable

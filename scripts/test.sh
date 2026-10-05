@@ -1773,6 +1773,9 @@ gate_run bash scripts/test-push-guard.sh
 # as nothing checked it. The rule is the window's list against the REPL's, plus the one sentence that
 # is deliberately written twice (the `/merge` brief).
 gate_run node scripts/test-command-parity.cjs
+# Explicit two-sided binding proof; private registry/CLI, no live service or inference.
+gate_run node scripts/test-binding.cjs "$BIN"
+gate_run node scripts/test-binding-runtime.cjs "$BIN"
 gate_run node scripts/test-verify-install.mjs
 gate_run node scripts/test-merge-audit.mjs
 # The boundary the audit's own verify verb answers, run at a wave's two entrypoints: a repository that

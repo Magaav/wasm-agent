@@ -10,6 +10,7 @@ mod http_transport;
 mod operations;
 mod lua;
 mod node;
+mod binding_runtime;
 mod system_resources;
 mod relay_client;
 mod rendezvous;
@@ -51,6 +52,8 @@ const EMBEDDED: &[(&str, &str)] = &[
     ("lua/core/spells.lua", include_str!("../../../lua/core/spells.lua")),
     ("lua/core/nodes.lua", include_str!("../../../lua/core/nodes.lua")),
     ("lua/core/enrollment.lua", include_str!("../../../lua/core/enrollment.lua")),
+    ("lua/core/binding.lua", include_str!("../../../lua/core/binding.lua")),
+    ("lua/core/binding_cli.lua", include_str!("../../../lua/core/binding_cli.lua")),
     ("lua/core/state.lua", include_str!("../../../lua/core/state.lua")),
     ("lua/core/status.lua", include_str!("../../../lua/core/status.lua")),
     ("lua/core/update.lua", include_str!("../../../lua/core/update.lua")),
@@ -381,6 +384,8 @@ fn main() {
     lua.register("run_cancelled", host::run_cancelled);
     lua.register("sleep", host::sleep);
     lua.register("node_identity", host::node_identity);
+    lua.register("binding_state", host::binding_state);
+    lua.register("binding_transport", host::binding_transport);
     lua.register("sign", host::sign);
     lua.register("verify", host::verify);
     lua.register_with_upvalue("client", host::client, host_ptr);
@@ -479,6 +484,7 @@ fn main() {
         }
         state
     });
+    binding_runtime::set_factory(interpreter_factory.clone());
     let factory_for_subagents = interpreter_factory.clone();
     subagents::set_factory(Box::new(move || factory_for_subagents()));
 
@@ -523,6 +529,9 @@ fn main() {
             .and_then(|value| value.parse().ok())
             .unwrap_or(8800);
         client_bridge::serve(client_port, bridge.clone());
+        if binding_runtime::present() {
+            if let Err(error)=binding_runtime::transport("start"){eprintln!("binding_transport:{error}");std::process::exit(2);}
+        }
         if let Ok(rendezvous_url) = std::env::var("WASM_AGENT_RENDEZVOUS") {
             if !rendezvous_url.is_empty() {
                 node::spawn_heartbeat(rendezvous_url);
