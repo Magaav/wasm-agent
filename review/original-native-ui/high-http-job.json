@@ -1,0 +1,19 @@
+{
+    "drained":  true,
+    "native_exit":  0,
+    "native_pid":  25584,
+    "phase":  "exited",
+    "creation_proven":  true,
+    "schema":  1,
+    "limit_flags":  8192,
+    "in_job":  true,
+    "no_breakaway":  true,
+    "kill_on_close":  true,
+    "stop_requested":  false,
+    "accounting":  {
+                       "terminated_processes":  0,
+                       "active_processes":  0,
+                       "total_processes":  11
+                   },
+    "assigned":  true
+}

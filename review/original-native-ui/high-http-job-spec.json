@@ -1,0 +1,10 @@
+{
+    "args":  [
+                 "scripts/test-run-key-http.cjs",
+                 "C:/Users/Victor/AppData/Local/Temp/wa-review-original-ui-target/debug/wa.exe"
+             ],
+    "stop":  "C:\\Users\\Victor\\orca\\workspaces\\wasm-agent\\review-original-native-ui\\review\\original-native-ui\\high-http-job.stop",
+    "program":  "C:\\Program Files\\nodejs\\node.exe",
+    "cwd":  "C:\\Users\\Victor\\orca\\workspaces\\wasm-agent\\review-original-native-ui",
+    "receipt":  "C:\\Users\\Victor\\orca\\workspaces\\wasm-agent\\review-original-native-ui\\review\\original-native-ui\\high-http-job.json"
+}

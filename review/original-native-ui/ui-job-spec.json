@@ -1,0 +1,19 @@
+{
+    "args":  [
+                 "-NoProfile",
+                 "-ExecutionPolicy",
+                 "Bypass",
+                 "-File",
+                 "C:\\Users\\Victor\\orca\\workspaces\\wasm-agent\\review-original-native-ui/scripts/test-ui.ps1",
+                 "-WaExe",
+                 "C:/Users/Victor/AppData/Local/Temp/wa-review-original-ui-target/debug/wa.exe",
+                 "-Port",
+                 "65297",
+                 "-ClientPort",
+                 "65298"
+             ],
+    "stop":  "C:\\Users\\Victor\\orca\\workspaces\\wasm-agent\\review-original-native-ui/review/original-native-ui/ui-job.stop",
+    "program":  "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+    "cwd":  "C:\\Users\\Victor\\orca\\workspaces\\wasm-agent\\review-original-native-ui",
+    "receipt":  "C:\\Users\\Victor\\orca\\workspaces\\wasm-agent\\review-original-native-ui/review/original-native-ui/ui-job.json"
+}

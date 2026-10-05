@@ -1,0 +1,295 @@
+{
+  "schema": 1,
+  "kind": "independent-exact-successor-source-review-not-admission",
+  "verdict": "original_findings_resolved",
+  "requestChanges": false,
+  "scope": "The two original18 findings and connected native fallback/cursor/identity regressions; later Root chat-control changes are excluded",
+  "producer": {
+    "head": "c5038e8c1f55875d9a87b0409a35e2af1d1bd9a5",
+    "tree": "7439933c623c165c6589d86eda533dd35dc14bac",
+    "parent": "18bc6bf05be9cdbd01a1e50a6a520e0e9e9a499b",
+    "packet": "C:\\Users\\Victor\\orca\\projects\\wasm-agent\\.git\\wa-original-ui-repair\\ctx_4c7b6e9b1ae8\\report.json",
+    "packetHash": "cccd5f12f311d39d5d976861cc55de344b41eb30bce76c1762133f58101954f9"
+  },
+  "review": {
+    "branch": "change/review-original-native-ui",
+    "custodyMerge": "87fc159706441264dd8b6ce574950542080ff53a",
+    "custodyTree": "c62f818b50b4d977902b3cc53a8381cbe382ece4",
+    "originMain": "898a9a238c89c5f64b83cfa219f8c17840b441f9",
+    "behind": 0,
+    "mergeTree": "c62f818b50b4d977902b3cc53a8381cbe382ece4",
+    "session": "01a102af-b8f7-7fc3-9d50-5fc5f319f8f0",
+    "terminal": "term_3f65c45a-b412-41ed-b814-5b3ca0f95894",
+    "task": "task_970828440678",
+    "dispatch": "ctx_8a67cfaf05c9",
+    "sourceChanged": false,
+    "originalReviewUnchanged": true
+  },
+  "build": {
+    "binary": "C:\\Users\\Victor\\AppData\\Local\\Temp\\wa-review-original-ui-target\\debug\\wa.exe",
+    "sha256": "40d3b1351b1a246289839a2ae104248490cf5f761b78349a508d19631a7a04db",
+    "receipt": "build.json",
+    "jobs": 2,
+    "binding": "actual caller-attested cargo source hashes before/after build plus final verification; not binary introspection"
+  },
+  "checks": [
+    {
+      "name": "native-source",
+      "passed": true,
+      "originalAssertions": 101,
+      "additionalReviewCases": 0,
+      "skipped": 0,
+      "raw": "C:\\Users\\Victor\\orca\\projects\\wasm-agent\\.git\\wa-recovery-evidence\\wa-native-browser-Xrqseo\\report.json",
+      "rawHash": "df70691ba5cff2f09fb02f7574c2400a51b767c4214bf21d1ad93f74306e136f",
+      "binary": {
+        "path": "C:\\Users\\Victor\\AppData\\Local\\Temp\\wa-review-original-ui-target\\debug\\wa.exe",
+        "sha256": "40d3b1351b1a246289839a2ae104248490cf5f761b78349a508d19631a7a04db"
+      },
+      "lua": "explicit source Lua root",
+      "cleanupVerified": true
+    },
+    {
+      "name": "native-embedded",
+      "passed": true,
+      "originalAssertions": 101,
+      "additionalReviewCases": 0,
+      "skipped": 0,
+      "raw": "C:\\Users\\Victor\\orca\\projects\\wasm-agent\\.git\\wa-recovery-evidence\\wa-native-browser-D1t1J7\\report.json",
+      "rawHash": "e676cc527fa577d71258a2726a6d99d81205e632ee6901d2b2a428567bb6e9da",
+      "binary": {
+        "path": "C:\\Users\\Victor\\AppData\\Local\\Temp\\wa-review-original-ui-target\\debug\\wa.exe",
+        "sha256": "40d3b1351b1a246289839a2ae104248490cf5f761b78349a508d19631a7a04db"
+      },
+      "lua": "embedded candidate modules",
+      "cleanupVerified": true
+    },
+    {
+      "name": "matrix-source",
+      "passed": true,
+      "originalAssertions": 76,
+      "additionalReviewCases": 50,
+      "skipped": 0,
+      "raw": "C:\\Users\\Victor\\orca\\projects\\wasm-agent\\.git\\wa-recovery-evidence\\wa-native-browser-Tsnh3C\\report.json",
+      "rawHash": "a7f49cd123655070b751cf8f7628f7fa315374212f881dc9c33f32737e84c93f",
+      "binary": {
+        "path": "C:\\Users\\Victor\\AppData\\Local\\Temp\\wa-review-original-ui-target\\debug\\wa.exe",
+        "sha256": "40d3b1351b1a246289839a2ae104248490cf5f761b78349a508d19631a7a04db"
+      },
+      "lua": "explicit source Lua root",
+      "cleanupVerified": true
+    },
+    {
+      "name": "matrix-embedded",
+      "passed": true,
+      "originalAssertions": 76,
+      "additionalReviewCases": 54,
+      "skipped": 0,
+      "raw": "C:\\Users\\Victor\\orca\\projects\\wasm-agent\\.git\\wa-recovery-evidence\\wa-native-browser-PgENBA\\report.json",
+      "rawHash": "b80829ea89ca7c80b1e56faa29052180e97ed72af2b0f80014d6e5121d4d024c",
+      "binary": {
+        "path": "C:\\Users\\Victor\\AppData\\Local\\Temp\\wa-review-original-ui-target\\debug\\wa.exe",
+        "sha256": "40d3b1351b1a246289839a2ae104248490cf5f761b78349a508d19631a7a04db"
+      },
+      "lua": "embedded candidate modules",
+      "cleanupVerified": true
+    },
+    {
+      "name": "recovery",
+      "passed": true,
+      "originalAssertions": 22,
+      "additionalReviewCases": 0,
+      "skipped": 0,
+      "raw": "C:\\Users\\Victor\\orca\\projects\\wasm-agent\\.git\\wa-recovery-evidence\\wa-two-window-vRnBeW\\report.json",
+      "rawHash": "86ff2fcf6b5a6ad3b682ee8d1a60165d6ba8a506618d643bc13a898df41a05b4",
+      "binary": {
+        "path": "C:\\Users\\Victor\\AppData\\Local\\Temp\\wa-review-original-ui-target\\debug\\wa.exe",
+        "sha256": "40d3b1351b1a246289839a2ae104248490cf5f761b78349a508d19631a7a04db"
+      },
+      "lua": "explicit source Lua root",
+      "cleanupVerified": true
+    }
+  ],
+  "directUi": {
+    "passed": true,
+    "stages": [
+      "reload",
+      "startup-recovery",
+      "inspect-window",
+      "view-window"
+    ],
+    "job": {
+      "drained": true,
+      "native_exit": 0,
+      "native_pid": 26728,
+      "phase": "exited",
+      "creation_proven": true,
+      "schema": 1,
+      "limit_flags": 8192,
+      "in_job": true,
+      "no_breakaway": true,
+      "kill_on_close": true,
+      "stop_requested": false,
+      "accounting": {
+        "terminated_processes": 0,
+        "active_processes": 0,
+        "total_processes": 50
+      },
+      "assigned": true
+    },
+    "log": "ui.log"
+  },
+  "independentCausalControls": [
+    {
+      "name": "disable-main-terminal",
+      "exit": 1,
+      "expected": "unavailable terminal journal existing main and pane show durable answer",
+      "intended": true,
+      "failures": [
+        "unavailable terminal journal existing main and pane show durable answer",
+        "unavailable terminal journal answer exactly once",
+        "main stored terminal fallback contains complete original content",
+        "repeated unavailable terminal fallback is idempotent"
+      ],
+      "error": "review matrix failures: unavailable terminal journal existing main and pane show durable answer; unavailable terminal journal answer exactly once; main stored terminal fallback contains complete original content; repeated unavailable terminal fallback is idempotent",
+      "receipt": "C:\\Users\\Victor\\orca\\projects\\wasm-agent\\.git\\wa-recovery-evidence\\wa-native-browser-CQH0Kn\\report.json",
+      "mutantHash": "3e5b5940057a9ed2e1a24f8ff752e79f25ff117d4944af74dc55a554cbd795a2",
+      "receiptHash": "ff8d3d26fe65b0c4424b9309c731d1332b574adf781bd95589d4a1339996948e",
+      "logHash": "23912f1a9d80b2c4f6a4d935d0b36b1f78e1a9fc089983f834911bbb2504c0b0"
+    },
+    {
+      "name": "disable-pane-terminal",
+      "exit": 1,
+      "expected": "unavailable terminal journal existing main and pane show durable answer",
+      "intended": true,
+      "failures": [
+        "unavailable terminal journal existing main and pane show durable answer",
+        "unavailable terminal journal answer exactly once",
+        "stored terminal fallback contains every original byte without clipping",
+        "repeated unavailable terminal fallback is idempotent"
+      ],
+      "error": "review matrix failures: unavailable terminal journal existing main and pane show durable answer; unavailable terminal journal answer exactly once; stored terminal fallback contains every original byte without clipping; repeated unavailable terminal fallback is idempotent",
+      "receipt": "C:\\Users\\Victor\\orca\\projects\\wasm-agent\\.git\\wa-recovery-evidence\\wa-native-browser-EEmGYm\\report.json",
+      "mutantHash": "ccce8c28f6a81e41af8e6e64d042c1cec3cef93cd0d6b16ba16b5d1f007401ea",
+      "receiptHash": "a069cdd42be40a2c6ccb34ed5c5f46118a04ad8d49269fe012fdf512b5802f67",
+      "logHash": "3fe35ace9719b0ec4973d990d642502010039c64bbc90b526ab91c2509275a17"
+    },
+    {
+      "name": "replace-known-raw",
+      "exit": 1,
+      "expected": "terminal fallback preserves original raw DOM and folds",
+      "intended": true,
+      "failures": [
+        "terminal fallback preserves original raw DOM and folds",
+        "terminal fallback retains original raw scroll anchor"
+      ],
+      "error": "review matrix failures: terminal fallback preserves original raw DOM and folds; terminal fallback retains original raw scroll anchor",
+      "receipt": "C:\\Users\\Victor\\orca\\projects\\wasm-agent\\.git\\wa-recovery-evidence\\wa-native-browser-Wp7Veo\\report.json",
+      "mutantHash": "4a759557b79633b3d9ea9d392937769cdbcf720ef92ba4bf4a2ab272fdd510b9",
+      "receiptHash": "319e722c3970b8da05c515ce9730b096dbe7113c71b1be66576d6105cc692faa",
+      "logHash": "034e1e4d5bb178a502de19991af18e95790d5c4fb88216262d960a1792997d5e"
+    },
+    {
+      "name": "malformed-to-zero",
+      "exit": 1,
+      "expected": "malformed cursor named refusal \"garbage\"",
+      "intended": true,
+      "failures": [
+        "malformed cursor named refusal \"garbage\"",
+        "malformed cursor named refusal {}",
+        "malformed cursor named refusal []",
+        "malformed cursor named refusal true",
+        "malformed cursor named refusal false",
+        "malformed cursor named refusal \"NaN\"",
+        "malformed cursor named refusal \"Infinity\""
+      ],
+      "error": "review matrix failures: malformed cursor named refusal \"garbage\"; malformed cursor named refusal {}; malformed cursor named refusal []; malformed cursor named refusal true; malformed cursor named refusal false; malformed cursor named refusal \"NaN\"; malformed cursor named refusal \"Infinity\"",
+      "receipt": "C:\\Users\\Victor\\orca\\projects\\wasm-agent\\.git\\wa-recovery-evidence\\wa-native-browser-3CZ8vA\\report.json",
+      "mutantHash": "89f55b41b8135e0cc1dbc3648ce8eeb5ca9b68b5082b429352301ed3a753b54b",
+      "receiptHash": "6df01d19540b974ac68ac41a352780439946a086d3c71785f2adcc1fbc1e0136",
+      "logHash": "242c4f8bcdda9ae125dc44817a5df6c6ae4296e346dc592c1ab9c0b4930ad8b9"
+    }
+  ],
+  "producerCausalRawLogsInspected": [
+    {
+      "name": "main-terminal-fallback",
+      "assertion": "native main unavailable journal shows stored terminal with visible gap",
+      "exit": 1,
+      "raw": "C:\\Users\\Victor\\orca\\projects\\wasm-agent\\.git\\wa-native-mutations\\27fa405e-24fe-4b8b-a075-9bbd57c3f753\\main-terminal-fallback.log",
+      "rawHash": "f0fe1386e520331ba123950d49c95023f9a1d3a084780e10300801b22e0565ed"
+    },
+    {
+      "name": "pane-terminal-fallback",
+      "assertion": "native attached pane unavailable journal shows stored terminal with visible source and gap",
+      "exit": 1,
+      "raw": "C:\\Users\\Victor\\orca\\projects\\wasm-agent\\.git\\wa-native-mutations\\27fa405e-24fe-4b8b-a075-9bbd57c3f753\\pane-terminal-fallback.log",
+      "rawHash": "aaf523db273c6a57c68cd5f4522eb9ba5a1bf4354c003c6f92cbdb7fb8e33ac3"
+    },
+    {
+      "name": "retain-raw-dom",
+      "assertion": "native terminal fallback preserves already seen raw DOM and folds",
+      "exit": 1,
+      "raw": "C:\\Users\\Victor\\orca\\projects\\wasm-agent\\.git\\wa-native-mutations\\27fa405e-24fe-4b8b-a075-9bbd57c3f753\\retain-raw-dom.log",
+      "rawHash": "dab7c745982965bb6aa34060e9f1e33bc0d2a7ec317f37c80e25bdecc9765f50"
+    },
+    {
+      "name": "lua-malformed-to-zero",
+      "assertion": "native refuses malformed supplied cursor \"garbage\"",
+      "exit": 1,
+      "raw": "C:\\Users\\Victor\\orca\\projects\\wasm-agent\\.git\\wa-native-mutations\\27fa405e-24fe-4b8b-a075-9bbd57c3f753\\lua-malformed-to-zero.log",
+      "rawHash": "e7ea30e0509d638cad2fa863b6666409b4276c6a68055636f96bcfa0172e2ee0"
+    }
+  ],
+  "originalControls": {
+    "review": "../original-native-ui/report.json",
+    "reviewCommit": "fd4b521e41f886ffb7fdef48108bde9c3f36a876",
+    "preparedMatrixCommit": "6b3aeba",
+    "originalSource": "18bc6bf05be9cdbd01a1e50a6a520e0e9e9a499b",
+    "originalRecovery503": "../original-native-ui/recovery-initial.receipt.json",
+    "originalFailureControlReused": true,
+    "repeatedBroadOriginalSuiteDuringPreparation": false
+  },
+  "instruments": {
+    "sourceMatrix": {
+      "commit": "6b3aeba",
+      "path": "source-matrix-instrument.cjs",
+      "hash": "26d62e45e57f9269d4f13255e0a138a7c1a470091ef3e62284fe13307022b8b6",
+      "cases": 50
+    },
+    "strengthenedMatrix": {
+      "path": "probe.cjs",
+      "hash": "da00b3cd45e6319ec1697b74afa615ed6aed0eac6558fc9ebeb4c04fd42eefef",
+      "cases": 54
+    },
+    "immutableNativeTemplate": {
+      "commit": "18bc6bf05be9cdbd01a1e50a6a520e0e9e9a499b",
+      "file": "scripts/test-native-child-browser.cjs"
+    }
+  },
+  "admission": {
+    "authored": false,
+    "gateVerified": false,
+    "sourceAcceptanceAuthored": false,
+    "soleLane": "ctx_50a3da02dcf1",
+    "currentRequirementReportedByRoot": "full_required for original18 plus runtime footprint; focused source review is not admission; known inherited harness fixes belong separate exact combined gate",
+    "unreviewedHarnessImported": false
+  },
+  "publication": {
+    "producerPush": false,
+    "reviewBranchPush": false,
+    "reason": "remote.main_only=true; local branch is deliverable",
+    "mainMoved": false,
+    "deployed": false
+  },
+  "limits": [
+    "The original review folder/source ancestry remain unchanged; this new folder contains successor evidence. Private build target was reused, so original binary receipts retain historical hashes while current candidate has its own source binding.",
+    "Source matrix50 ran before strengthening; embedded matrix54 adds explicit retained raw DOM/fold/anchor and full original terminal content checks. Their exact instruments are distinguished rather than counting 54 for both.",
+    "A terminal gap retains separately labelled partial live output and complete stored messages. Text can overlap between those sources, but known raw DOM identities and the final durable message are not replayed or duplicated. No complete raw history reconstruction is claimed.",
+    "Restoration proves retained known DOM and the original first256 archive page; it does not prove all archived history through power loss or compare every archived page after restart.",
+    "Raw unavailable errors become named gaps; owner/session/node/attempt/epoch/cursor refusals do not grant fallback. JSON null remains absent through the unchanged decoder, not a new cursor contract.",
+    "The strengthened embedded matrix matched the full terminal content to the actual original; no production resource/account/provider/node/window or paid inference was used.",
+    "No new Rust tests were repeated: correction changes only Lua/UI/test code, and original selected20 native +2 journal +36 high-ID HTTP receipts remain historical proof, not admission for this combined tree.",
+    "Producer graph audit timed out and was positively drained; no completed graph omission audit or correctness certificate is claimed. Manual connected source/callers were inspected.",
+    "FULL synchronous journal writes, unbounded durable events and full materialized history costs are inherited; no performance or retention default is endorsed.",
+    "Later Root background completion/read-capacity and failed-task continuation changes remain separate. Full application gate/admission/main/deploy remain sole merge-lane work."
+  ]
+}

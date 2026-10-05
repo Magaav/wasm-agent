@@ -1,0 +1,9 @@
+{
+  "invalid": ["garbage", {}, [], true, false, -1, 0.5, "9007199254740993", "-1", "0.5", "NaN", "Infinity"],
+  "validInitial": [0, "0"],
+  "absentInitial": true,
+  "safeFuture": 9007199254740990,
+  "futureError": "native_event_cursor_out_of_range",
+  "invalidError": "invalid_native_event_cursor",
+  "notes": "Null/empty-string policy is recorded separately unless an authoritative contract settles it; exact delivered sequence should work as safe number and decimal string."
+}

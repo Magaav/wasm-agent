@@ -1,0 +1,3 @@
+evidence: C:\Users\Victor\orca\projects\wasm-agent\.git\wa-recovery-evidence\wa-native-browser-D1t1J7\report.json
+native child browser ok (101 checks, 0 skipped; real browser/node, owned mock inference)
+ALL PASS

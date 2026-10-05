@@ -1,0 +1,12 @@
+evidence: C:\Users\Victor\orca\projects\wasm-agent\.git\wa-recovery-evidence\wa-two-window-XtL4kt\report.json
+node : Error: deadline: native authenticated session pane live tail
+At line:2 char:1
++ node scripts/test-recovery-two-window.cjs C:/Users/Victor/AppData/Loc ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (Error: deadline... pane live tail:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+    at until 
+(C:\Users\Victor\orca\workspaces\wasm-agent\review-original-native-ui\scripts\test-recovery-two-window.cjs:32:161)
+    at async 
+C:\Users\Victor\orca\workspaces\wasm-agent\review-original-native-ui\scripts\test-recovery-two-window.cjs:80:3
