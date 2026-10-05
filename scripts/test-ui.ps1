@@ -118,6 +118,8 @@ $harness = @'
     window.__expireRecoveryBackoff();
     await window.__watch();
     for (var attempt = 0; attempt < 200 && !document.getElementById("messages").textContent.includes("RELOAD-MID-RUN-QUESTION"); attempt++) await tick();
+    // Catalogue recovery is deliberately deferred until the history is back.
+    await window.__ensureMeta();
     check(window.__modelsRejected > 0, "startup fixture must fail the model catalogue");
     check(document.getElementById("messages").textContent.includes("RELOAD-MID-RUN-QUESTION"),
       "an idle startup must retry its transcript even when /models fails");
@@ -649,10 +651,10 @@ $harness = @'
   // computed rather than printed as a placeholder.
   // The panel lives in a popover, so the harness draws it through the same
   // function the popover calls rather than reaching for the DOM it would build.
-  // Metatada is fetched after the renderer loads (app.js chains them), so wait for
-  // that first and then let the fixture's microtasks settle. Asserting earlier only
-  // ever tests the no-budget branch, which is how this check first passed wrongly.
+  // Metadata follows transcript recovery, not renderer startup. Wait for the
+  // real metadata read before testing its measured values.
   if (window.rendererLoaded) { await window.rendererLoaded; }
+  await window.__ensureMeta();
   for (var c = 0; c < 20; c++) { await tick(); }
   window.renderContext();
   var contextText = document.getElementById("context-box").textContent;
@@ -2770,6 +2772,50 @@ $harness = @'
   var restoreA=window.__restoreSession(),restoreB=window.__restoreSession(),restoreC=window.__restoreSession();
   check(heldTranscriptReads===1,'simultaneous recovery callers must share one transcript request');
   settleTranscript();await Promise.all([restoreA,restoreB,restoreC]);window.fetch=savedRecoveryFetch;
+  // Match the node's two read slots: another window's held catalogue leaves
+  // one available. Transcript and native lookup must not fan out into it.
+  var capacityFetch=window.fetch, capacityReads=1, capacityRefusals=0, capacityRoutes=[];
+  var releaseCapacityTranscript=null;
+  window.fetch=function(url,options) {
+    var route=String(url), lookup=route==='subagents' && String(options?.body).includes('lookup_session');
+    if(!route.startsWith('session?') && !lookup)return capacityFetch(url,options);
+    capacityRoutes.push(route.startsWith('session?') ? 'transcript' : 'identity');
+    if(capacityReads>=2) {
+      capacityRefusals++;
+      return Promise.resolve(new Response(JSON.stringify({error:'read_capacity_busy'}),{status:503}));
+    }
+    capacityReads++;
+    if(route.startsWith('session?'))return new Promise(resolve=>{
+      releaseCapacityTranscript=()=>{capacityReads--;resolve(capacityFetch(url,options));};
+    });
+    return Promise.resolve(capacityFetch(url,options)).finally(()=>{capacityReads--;});
+  };
+  var capacityRestore=window.__restoreSession();
+  for(var capacityTick=0;capacityTick<20;capacityTick++)await tick();
+  check(capacityRoutes.join(',')==='transcript',
+    'recovery must load the transcript before competing for native identity capacity');
+  releaseCapacityTranscript();
+  var capacityRestored=await capacityRestore;
+  window.fetch=capacityFetch;
+  check(capacityRestored && capacityRefusals===0 && capacityRoutes.join(',')==='transcript,identity',
+    'one occupied read slot must not make transcript recovery overload itself, saw refusals='+capacityRefusals);
+  // Startup diagnostics are optional: they must not take read capacity before
+  // the account and transcript. Keep all original functions/state afterwards.
+  var startupSync=sync, startupMe=refreshMe, startupMeta=ensureMeta, startupRestore=restoreSession;
+  var startupSynced=synced, startupRunning=syncRunning, startupCalls=[], releaseStartupHistory=null;
+  synced=false;syncRunning=false;
+  refreshMe=async()=>{startupCalls.push('account');return true;};
+  ensureMeta=async()=>{startupCalls.push('metadata');};
+  restoreSession=()=>{startupCalls.push('transcript');return new Promise(resolve=>{releaseStartupHistory=resolve;});};
+  await startupSync('capacity regression');
+  check(startupCalls.join(',')==='account,transcript',
+    'startup must defer model metadata until transcript recovery succeeds, saw '+startupCalls.join(','));
+  releaseStartupHistory(true);
+  for(var startupTick=0;startupTick<10;startupTick++)await tick();
+  check(startupCalls.join(',')==='account,transcript,metadata',
+    'successful transcript recovery must then start model metadata');
+  refreshMe=startupMe;ensureMeta=startupMeta;restoreSession=startupRestore;
+  synced=startupSynced;syncRunning=startupRunning;
   // Switch at each asynchronous recovery boundary. A first-response fence does
   // not protect the idle-tail reread or checkpoint's subsequent ledger await.
   var raceThread=chatSession,raceNode=activeNode,raceHealth=window.__fixtures.health;
