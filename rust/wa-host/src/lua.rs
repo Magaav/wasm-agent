@@ -4,7 +4,7 @@
 //! is one Rust binary with Lua inside: no Python, no interpreter dependency.
 #![allow(non_camel_case_types)]
 
-use std::ffi::{c_char, c_int, c_void, CStr, CString};
+use std::ffi::{c_char, c_int, c_void, CString};
 
 pub type LuaState = c_void;
 pub type LuaCFunction = extern "C" fn(*mut LuaState) -> c_int;
@@ -285,7 +285,9 @@ pub fn arg_string(l: *mut LuaState, idx: c_int) -> Option<String> {
         if ptr.is_null() {
             None
         } else {
-            Some(CStr::from_ptr(ptr).to_string_lossy().to_string())
+            // The whole Lua string, by its length: reading it as a C string stopped at the first NUL, so a
+            // write of text containing one silently truncated the file and still reported success.
+            Some(String::from_utf8_lossy(std::slice::from_raw_parts(ptr as *const u8, len)).into_owned())
         }
     }
 }
