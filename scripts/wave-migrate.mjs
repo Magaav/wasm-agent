@@ -117,7 +117,7 @@ export function apply(dir, id, actor = 'operator') {
   const db = open(dir);
   try {
     const current = row(db, id);
-    if (current.state === 'complete') fail('completed_wave_needs_no_migration');
+    if (current.state === 'complete' || current.state === 'withdrawn') fail('finished_wave_needs_no_migration');
     ensureLegacyColumn(db);
     const file = migrationFile(dir, id);
     const existing = readRecordFile(file);

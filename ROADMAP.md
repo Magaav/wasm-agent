@@ -249,6 +249,22 @@ existing window was not replaced/restarted. Full release/package/bootstrap and
 live WebView2 navigation proof were not claimed. This documentation-only closure
 note does not change deployed runtime bytes or request another installation.
 
+2026-10-06, targeted historical-backlog recovery: the legacy wave's exact
+journal shows all three stages pending, zero attempts, no operation IDs and no
+owner boot/PID. Added an explicit `withdraw-plan`/`withdraw` route for only this
+never-admitted migrated-plan shape: exact manifest/snapshot pins, preserved
+original row/steps/events, one atomic audited disposition and replay-time
+validation. Withdrawal reports `not-run`, not verified convergence; land/admit
+still need fresh authority. Running/unknown/history mutations refuse. No watcher,
+subagent or full release gate introduced. Self-review; focused private withdrawal21,
+derived55, lifecycle44, corners24, monitor16, shipping21 and policy19 checks passed.
+New evidence leads were bounded: a hash-preserved copy of the damaged pre-scrub
+backup exposed a truncated last page and no exact remaining claim IDs; native
+process-event sources were denied(Security), absent(Sysmon) or disabled(kernel).
+No original process/effect proof emerged. The77 operations,3 uncertain claims and
+46 dependent workspace retirements remain held, not falsely settled or replayed.
+The wave withdrawal is a distinct bookkeeping effect and does not clear them.
+
 ## Status vocabulary
 
 - **Implemented:** a mechanism exists in the repository; not a release certification.

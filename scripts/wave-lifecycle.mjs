@@ -10,6 +10,7 @@ import {fileURLToPath} from 'node:url';
 import {fullProof,findFullProof} from './lib/full-gate-proof.mjs';
 import {boundary} from './lib/lane-boundary.mjs';
 import {waveActivity,activitySource,isolatedRepository} from './lib/wave-activity.mjs';
+import {finishedWave,validateWithdrawal,withdrawNeverAdmitted,withdrawalPlan} from './lib/wave-withdrawal.mjs';
 
 const hash = data => crypto.createHash('sha256').update(data).digest('hex');
 const requiredChecks = ['operations','claims','runtime','registries','deliveries','owners'];
@@ -154,13 +155,14 @@ export function create(dir, manifest) {
     const rows=db.prepare('SELECT * FROM waves WHERE repo=? ORDER BY created_at DESC').all(native(manifest.repo));
     const verdicts=rows.map(row=>{const source=activitySource(JSON.parse(row.manifest))||activitySource(manifest);return {row,source,verdict:waveActivity(source,row)};});
     const newest=rows[0]||null, newest_verdict=verdicts.length?verdicts[0].verdict:null;
-    const unfinished_report=verdicts.filter(entry=>entry.row.state!=='complete').map(entry=>({id:entry.row.id,state:entry.row.state,activity:entry.verdict.activity,convergence:entry.verdict.convergence,runtime_state:entry.verdict.runtime_state,reason:entry.verdict.reason}));
+    const unfinished_report=verdicts.filter(entry=>!finishedWave(db,entry.row)).map(entry=>({id:entry.row.id,state:entry.row.state,activity:entry.verdict.activity,convergence:entry.verdict.convergence,runtime_state:entry.verdict.runtime_state,reason:entry.verdict.reason}));
+    for(const entry of verdicts)finishedWave(db,entry.row);
     const active=verdicts.find(entry=>entry.verdict.activity==='on');
     if (active) fail(`previous_wave_active:${active.row.id}`);
     // AN UNVERIFIABLE ACTIVITY ANSWER IS NOT AN OFF ONE. A claim of current work that could not be
     // resolved (a turn whose tree is gone, a binding mid-release, an uncorroborated child
     // completion) makes the answer unverifiable, and the named reason is consulted here.
-    const unobservable=verdicts.find(entry=>entry.verdict.activity==='unverifiable' && entry.row.state!=='complete');
+    const unobservable=verdicts.find(entry=>entry.verdict.activity==='unverifiable' && !finishedWave(db,entry.row));
     if (unobservable) {
       if (unobservable.source?.kind!=='none') fail(`previous_wave_activity_unverifiable:${unobservable.row.id}:${unobservable.verdict.reason}`);
       if (!isolatedRepository(manifest.repo)) fail(`production_activity_source_required:${unobservable.row.id}`);
@@ -193,7 +195,7 @@ export async function advance(dir,id) {
     transaction(db,()=>{
       const row=wave(db,id),live=alive(dir,row.boot);
       if (live!==false) fail(live===true?'wave_owner_live':'wave_owner_identity_unverifiable');
-      if (row.state==='complete') fail('wave_already_complete');
+      if (finishedWave(db,row)) fail(row.state==='withdrawn'?'wave_withdrawn_never_replay':'wave_already_complete');
       held=lease(dir,boot);
       // A crashed launch may have executed before its receipt reached SQLite.
       // Never rerun it; completion recovery is a separate observed transition.
@@ -286,17 +288,18 @@ export function inspect(dir,id) {
   const db=new DatabaseSync(path.join(dir,'waves.sqlite'),{readOnly:true});
   try {
     const row=wave(db,id),live=alive(dir,row.boot);
+    if(row.state==='withdrawn')validateWithdrawal(db,row);
     const verdict=waveActivity(activitySource(JSON.parse(row.manifest)),row);
     // A `running` row with nothing in flight is never reported as an active wave: the derived
     // verdict decides, and the durable value stays visible as `bookkeeping_state`. Every other
     // durable state is reported as it is stored, so a blocked wave stays a named blocked state.
     const state=row.state==='running' && verdict.activity!=='on' ? 'idle' : row.state;
-    const next_action=state==='complete' || live!==false?{kind:'none',argv:[]}:
+    const next_action=finishedWave(db,row) || live!==false?{kind:'none',argv:[]}:
       state==='blocked'||state==='unverified'?{kind:'inspect_effects_and_reconcile_or_resume',argv:[]}:
       {kind:'advance',argv:[process.execPath,fileURLToPath(import.meta.url),'advance',dir,id]};
     // THIS STORE'S OTHER UNFINISHED ROWS, by their own derived verdicts: a second unfinished wave
     // must never be a silent orphan of an inspect that only ever looked at one row.
-    const others=db.prepare("SELECT * FROM waves WHERE repo=? AND state!='complete' AND id != ?").all(row.repo,id);
+    const others=db.prepare("SELECT * FROM waves WHERE repo=? AND id != ?").all(row.repo,id).filter(other=>!finishedWave(db,other));
     const unfinished=others.map(other=>{const otherVerdict=waveActivity(activitySource(JSON.parse(other.manifest)),other);return {id:other.id,state:other.state,activity:otherVerdict.activity,convergence:otherVerdict.convergence,runtime_state:otherVerdict.runtime_state,reason:otherVerdict.reason};});
     return {...row,state,bookkeeping_state:row.state,owner_liveness:live,next_action,activity:verdict.activity,convergence:verdict.convergence,runtime_state:verdict.runtime_state,legacy_migrated:verdict.legacy_migrated,activity_reason:verdict.reason,agents:verdict.agents,claims:verdict.claims,unfinished,activity_evidence:verdict.evidence,steps:db.prepare('SELECT * FROM steps WHERE wave=? ORDER BY position').all(id),events:db.prepare('SELECT * FROM events WHERE wave=? ORDER BY sequence').all(id)};
   }
@@ -308,9 +311,15 @@ export function list(dir) {
   const db=new DatabaseSync(path.join(dir,'waves.sqlite'),{readOnly:true});
   try {
     const rows=db.prepare('SELECT * FROM waves ORDER BY created_at DESC').all();
+    for(const row of rows)finishedWave(db,row);
     const waves=rows.map(row=>{const verdict=waveActivity(activitySource(JSON.parse(row.manifest)),row);return {id:row.id,repo:row.repo,state:row.state,reason:row.reason,activity:verdict.activity,convergence:verdict.convergence,runtime_state:verdict.runtime_state,legacy_migrated:verdict.legacy_migrated,created_at:row.created_at};});
-    return {ok:true,store:dir,waves,unfinished:waves.filter(row=>row.state!=='complete').map(row=>row.id)};
+    return {ok:true,store:dir,waves,unfinished:rows.filter(row=>!finishedWave(db,row)).map(row=>row.id)};
   } finally { db.close(); }
+}
+export function withdraw(dir,id,input) {
+  if(!fs.existsSync(path.join(dir,'waves.sqlite')))fail('wave_store_missing');
+  const db=new DatabaseSync(path.join(dir,'waves.sqlite'));
+  try{return input?withdrawNeverAdmitted(db,id,input):withdrawalPlan(db,id);}finally{db.close();}
 }
 export function resume(dir,id,evidence) {
   if (!evidence?.trim()) fail('observed_resolution_evidence_required');
@@ -334,8 +343,10 @@ if (process.argv[1] && path.resolve(process.argv[1])===fileURLToPath(import.meta
     else if (action==='list') result=list(path.resolve(dir));
     else if (action==='reconcile') result=reconcile(path.resolve(dir),id,JSON.parse(fs.readFileSync(file,'utf8')));
     else if (action==='resume') result=resume(path.resolve(dir),id,file);
+    else if (action==='withdraw-plan') result=withdraw(path.resolve(dir),id);
+    else if (action==='withdraw') result=withdraw(path.resolve(dir),id,JSON.parse(fs.readFileSync(file,'utf8')));
     else if (action==='verify') result=verify(JSON.parse(fs.readFileSync(dir,'utf8')));
-    else fail('usage: create DIR MANIFEST | advance DIR ID | inspect DIR ID | list DIR | reconcile DIR ID EVIDENCE | verify MANIFEST');
+    else fail('usage: create DIR MANIFEST | advance DIR ID | inspect DIR ID | list DIR | reconcile DIR ID EVIDENCE | withdraw-plan DIR ID | withdraw DIR ID EVIDENCE | verify MANIFEST');
     process.stdout.write(`${JSON.stringify(result,null,2)}\n`); if (result.ok===false) process.exitCode=1;
   } catch(e) { process.stdout.write(`${JSON.stringify({ok:false,error:e.message})}\n`); process.exitCode=1; }
 }

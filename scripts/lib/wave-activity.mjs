@@ -20,6 +20,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {spawnSync} from 'node:child_process';
 import {DatabaseSync} from 'node:sqlite';
+import {withdrawalProof} from './wave-withdrawal.mjs';
 
 export const key = value => {
   const p = path.resolve(String(value || '')).replaceAll('\\', '/').replace(/^\/\/\?\//, '').replace(/\/+$/, '');
@@ -403,7 +404,8 @@ export function waveActivity(source, row) {
   // A wave whose convergence was never verified is a NAMED state, never a silent completion.
   // `legacy-unverified` is the row a documented migration recorded: it never ran its steps, and
   // nothing is in flight, so it is off - and visibly unverified rather than quietly complete.
-  const convergence = bookkeeping === 'complete' ? 'verified' : bookkeeping === 'blocked' ? 'unverified' : legacy ? 'legacy-unverified' : 'open';
+  const withdrawn=bookkeeping==='withdrawn' && withdrawalProof(row);
+  const convergence = withdrawn ? 'not-run' : bookkeeping === 'complete' ? 'verified' : bookkeeping === 'blocked' ? 'unverified' : legacy ? 'legacy-unverified' : 'open';
   let inventory = null;
   let activity = 'off';
   let reason = '';
@@ -421,11 +423,11 @@ export function waveActivity(source, row) {
   }
   // `unknown` is its own reported state: an activity answer that could not be observed is neither
   // active nor idle, and must never be reported as either.
-  const runtime_state = convergence === 'verified' ? 'complete' : activity === 'on' ? 'active' : activity === 'unverifiable' ? 'unknown' : convergence === 'open' ? 'idle' : 'unverified';
+  const runtime_state = convergence === 'verified' ? 'complete' : activity === 'on' ? 'active' : activity === 'unverifiable' ? 'unknown' : withdrawn ? 'withdrawn' : convergence === 'open' ? 'idle' : 'unverified';
   return {
     wave_id: row?.id, bookkeeping_state: bookkeeping, activity, convergence, runtime_state, legacy_migrated: Boolean(legacy),
     claims: (inventory?.claims || []).map(claim => ({session: claim.session, claim: claim.claim, worktree: claim.worktree, child_id: claim.child?.child_id || '', run_id: claim.turn?.run_id || claim.child?.run_id || '', boot: claim.turn?.boot || ''})),
-    reason: reason || (convergence === 'verified' ? '' : convergence === 'legacy-unverified' ? 'legacy row: its steps never ran and its convergence was never verified' : String(row?.reason || '')),
+    reason: reason || (withdrawn ? 'never-admitted plan withdrawn; original history retained; convergence not verified' : convergence === 'verified' ? '' : convergence === 'legacy-unverified' ? 'legacy row: its steps never ran and its convergence was never verified' : String(row?.reason || '')),
     agents: inventory?.agents || [], evidence: inventory?.evidence || null, unresolved: inventory?.unresolved || []
   };
 }
