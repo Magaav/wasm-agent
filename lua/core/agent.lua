@@ -1869,8 +1869,11 @@ end
 -- Deterministic fallback when no model provider is configured.
 function M:local_run(text)
   local lines = {}
-  for _, row in ipairs(memory.recall(text, 5)) do lines[#lines + 1] = "- " .. row.content end
-  for _, row in ipairs(memory.search_ledger(text, nil, 5)) do
+  local master = self.role == "master" or self.role == "admin"
+  local recalled = master and memory.recall(text, 5) or memory.recall(text, 5, "user:" .. tostring(self.user), true)
+  for _, row in ipairs(recalled) do lines[#lines + 1] = "- " .. row.content end
+  -- The ledger is every conversation on this node: a master's to search, not a guest's.
+  for _, row in ipairs(master and memory.search_ledger(text, nil, 5) or {}) do
     lines[#lines + 1] = "- [" .. row.conversation_id .. "] " .. row.body
   end
   if #lines == 0 then return "No provider is configured and nothing in memory matched." end

@@ -694,10 +694,14 @@ function M.dispatch(memory, name, args, role, ctx)
     return tool_output.read(args.sha256,args.offset,args.limit)
   end
 
+  -- A guest's memory is its own: it writes and reads only `user:<id>`, never `global` (which a
+  -- master's recall and runs read) and never another scope. The model picks `scope`; the role decides.
+  local guest_scope = not is_master(role) and ("user:" .. tostring(user_id)) or nil
   if name == "remember" then
     if not args.content or args.content == "" then return { error = "content_required" } end
-    return { ok = true, id = memory.remember(args.content, args.scope or "global", args.tags or {}) }
+    return { ok = true, id = memory.remember(args.content, guest_scope or args.scope or "global", args.tags or {}) }
   elseif name == "recall" then
+    if guest_scope then return memory.recall(args.query or "", args.limit or 10, guest_scope, true) end
     return memory.recall(args.query or "", args.limit or 10, args.scope)
   elseif name == "skill" then
     local skills = dofile("lua/core/skills.lua")
@@ -715,7 +719,7 @@ function M.dispatch(memory, name, args, role, ctx)
     end
     return { name = found.name, path = found.path, dir = found.dir, content = skills.content(found) }
   elseif name == "memories" then
-    return memory.memories(args.scope, args.limit or 50)
+    return memory.memories(guest_scope or args.scope, args.limit or 50)
   elseif name == "forget" then
     if not args.id or args.id == "" then return { error = "id_required" } end
     return { id = args.id, forgotten = memory.forget(args.id) and true or false }

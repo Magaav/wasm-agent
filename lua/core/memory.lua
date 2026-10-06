@@ -293,6 +293,11 @@ function M.remember(content, scope, tags)
     "SELECT id FROM memories WHERE scope=? AND content_sha256=? AND deleted_at IS NULL LIMIT 1",
     {scope, hash})
   if #existing > 0 then return existing[1].id end
+  -- A guest's scope is bounded, so one caller cannot fill the shared database.
+  if scope:sub(1, 5) == "user:" then
+    local held = query("SELECT COUNT(*) AS n FROM memories WHERE scope=? AND deleted_at IS NULL", {scope})
+    if (tonumber(held[1] and held[1].n) or 0) >= 500 then error("memory_scope_full") end
+  end
   local id = host.uuid()
   local now = host.now()
   exec("INSERT INTO memories(id,scope,content,tags,source,session_id,created_at,updated_at,content_sha256) " ..
@@ -307,15 +312,22 @@ function M.remember(content, scope, tags)
   return id
 end
 
-local function query_memories(match, limit, scope)
+local function query_memories(match, limit, scope, exclusive)
   local sql = "SELECT m.id,m.scope,m.content,m.tags,m.source,m.created_at,m.updated_at," ..
               "bm25(memories_fts) AS rank FROM memories_fts " ..
               "JOIN memories m ON m.id=memories_fts.memory_id " ..
               "WHERE memories_fts MATCH ? AND m.deleted_at IS NULL"
   local params = {match}
-  if scope then
+  if scope and exclusive then
+    sql = sql .. " AND m.scope=?"
+    params[#params + 1] = scope
+  elseif scope then
     sql = sql .. " AND (m.scope=? OR m.scope='global')"
     params[#params + 1] = scope
+  else
+    -- An unscoped recall (a master's default) leaves out guests' own scopes: what a guest stored is
+    -- that guest's text, and surfacing it in a master's context would let a guest plant instructions.
+    sql = sql .. " AND m.scope NOT LIKE 'user:%'"
   end
   sql = sql .. " ORDER BY rank LIMIT ?"
   params[#params + 1] = limit
@@ -330,13 +342,14 @@ end
 -- it is about, so requiring every term returns nothing, and returning nothing
 -- here is what made the agent tell the user the memory store was empty while the
 -- fact was sitting in it. The second pass matches any term and lets bm25 rank.
-function M.recall(text, limit, scope)
+-- `exclusive` searches `scope` alone, without the shared `global` scope: a guest's view.
+function M.recall(text, limit, scope, exclusive)
   limit = limit or 10
   local terms = fts_terms(text)
   if #terms == 0 then return {} end
-  local rows = query_memories(table.concat(terms, " AND "), limit, scope)
+  local rows = query_memories(table.concat(terms, " AND "), limit, scope, exclusive)
   if #rows == 0 and #terms > 1 then
-    rows = query_memories(table.concat(terms, " OR "), limit, scope)
+    rows = query_memories(table.concat(terms, " OR "), limit, scope, exclusive)
   end
   return rows
 end
