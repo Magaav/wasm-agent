@@ -3,7 +3,7 @@ $source=Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot 'measure-sentinel
 $tokens=$null;$errors=$null
 [Management.Automation.Language.Parser]::ParseInput($source,[ref]$tokens,[ref]$errors)|Out-Null
 if($errors.Count){throw 'measure script syntax invalid'}
-$match=[regex]::Match($source,'(?m)^function Idle\(\$h\)\{.*\}$')
+$match=[regex]::Match($source,'(?m)^function Idle\(\$h\)\{[^\r\n]*\}\r?$')
 if(!$match.Success){throw 'actual idle predicate missing'}
 Invoke-Expression $match.Value
 function Sample(){[pscustomobject]@{ok=$true;execution_schema=1;run_ids=@();queue=0;subagents=[pscustomobject]@{active=0};operations=@()}}
