@@ -264,6 +264,11 @@ process-event sources were denied(Security), absent(Sysmon) or disabled(kernel).
 No original process/effect proof emerged. The77 operations,3 uncertain claims and
 46 dependent workspace retirements remain held, not falsely settled or replayed.
 The wave withdrawal is a distinct bookkeeping effect and does not clear them.
+Actual supported withdrawal now passed exact original snapshot validation at
+source3757053; the legacy plan reports `withdrawn/not-run`, its original full
+SQLite snapshot and hashes remain in `WAVE-WITHDRAWN-v106.json`. Fresh retained
+readback `BACKLOG-AFTER-WITHDRAWAL-v107.json` verifies77/3/46 remain held and all76
+original hashes unchanged. No live owner or unknown effect was cleared.
 
 ## Status vocabulary
 
