@@ -441,7 +441,16 @@ fn spawn_node_thread(slots: &mut Vec<Option<std::sync::mpsc::SyncSender<Work>>>,
     if index > max_index {
         return None;
     }
-    let state = (pool.factory)();
+    // Building an interpreter opens the database (`expect` on failure) on the accept thread; a full disk or
+    // a permissions change then took the whole node down. A failed build is now one refused request (503,
+    // the caller retries) and a log line, and the next spawn tries again.
+    let state = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (pool.factory)())) {
+        Ok(state) => state,
+        Err(_) => {
+            eprintln!("[serve] could not start an interpreter for node-thread {index}; refusing this request");
+            return None;
+        }
+    };
     let (sender, receiver) = std::sync::mpsc::sync_channel::<Work>(pool.queue_depth);
     while slots.len() <= index {
         slots.push(None);
@@ -1788,6 +1797,7 @@ fn node_thread_loop(
     let test_stall = index == 0 && std::env::var("WASM_AGENT_TEST_STALL_WORKER").is_ok();
     let mut stalled_once = false;
     let mut idle_since = std::time::Instant::now();
+    let mut retiring = false;
     loop {
         beat();
         // Local requests first. Peer-relayed work is real work, but it is not the human's request, and
@@ -1937,10 +1947,12 @@ fn node_thread_loop(
         }
         if index != 0 {
             // A read node-thread retires itself once it has been idle long enough and the pool is above the warm
-            // minimum. Two things make that safe: it clears its own slot *before* returning, so the
-            // dispatcher stops choosing it, and a request already on its way to a retired node-thread is not
-            // lost - `try_send` reports Disconnected and the accept thread reselects read capacity.
-            if idle_since.elapsed().as_secs() >= read_idle_seconds() && node_thread_count() > warm_read_node_threads() + 1 {
+            // minimum. It clears its own slot first, so the dispatcher stops choosing it - but it does not
+            // return yet: a dispatcher that cloned the sender just before the slot was cleared may still
+            // deliver one request, and returning would drop it with the receiver (no reply, and its queue
+            // and reservation counters never released). It keeps serving until the last sender is gone,
+            // which the channel reports as Disconnected, and returns there.
+            if !retiring && idle_since.elapsed().as_secs() >= read_idle_seconds() && node_thread_count() > warm_read_node_threads() + 1 {
                 if let Some(pool) = POOL.get() {
                     if let Ok(mut slots) = pool.slots.lock() {
                         if slots.get(index).is_some() {
@@ -1950,7 +1962,7 @@ fn node_thread_loop(
                         }
                     }
                 }
-                return;
+                retiring = true;
             }
             continue;
         }
