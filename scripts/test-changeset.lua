@@ -124,3 +124,25 @@ ok(host.read_file(old) == "one\ntwo\nthree\n", "leaving the file exactly as it w
   string.format("%q", tostring(host.read_file(old))))
 
 print("changeset ok (" .. checks .. " checks)")
+
+-- An existing file whose text cannot be captured (binary / invalid UTF-8) is recorded as not undoable,
+-- never as an empty "before" that undo would write back over it.
+do
+  local entry = changeset.new and changeset.new() or { files = {} }
+  changeset.record(entry, "/tmp/wa-binary-target", false, "replacement")
+  local file = entry.files[1]
+  assert(file and file.recorded == false, "an uncapturable before is not undoable")
+  local can, why = changeset.check(entry)
+  assert(not can and tostring(why):find("too_large_to_undo"), "and undo refuses it: " .. tostring(why))
+end
+-- A blob whose bytes no longer hash to its name is refused, not restored.
+do
+  local digest = changeset.store("blob integrity text")
+  local paths = dofile("lua/core/paths.lua")
+  host.write_file(paths.data() .. "/changes/" .. digest:sub(1, 2) .. "/" .. digest, "torn")
+  local text, why = changeset.load(digest)
+  assert(text == nil and why == "blob_corrupt", "a torn blob is reported: " .. tostring(why))
+  assert(changeset.store("blob integrity text") == digest and changeset.load(digest) == "blob integrity text",
+    "and storing the text again repairs it")
+end
+print("changeset integrity ok")

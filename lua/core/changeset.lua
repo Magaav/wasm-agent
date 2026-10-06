@@ -40,7 +40,9 @@ function M.store(text)
   if type(text) ~= "string" then return nil, "not_text" end
   local digest = host.sha256(text)
   local path = store_dir() .. "/" .. digest:sub(1, 2) .. "/" .. digest
-  if not (host.read_file and host.read_file(path)) then
+  -- An existing blob is trusted only if its bytes still hash to its name; a torn one is rewritten.
+  local existing = host.read_file and host.read_file(path)
+  if existing == nil or host.sha256(existing) ~= digest then
     if not (host.write_file and host.write_file(path, text)) then
       return nil, "store_write_failed:" .. path
     end
@@ -55,6 +57,9 @@ function M.load(digest)
   local path = store_dir() .. "/" .. digest:sub(1, 2) .. "/" .. digest
   local text = host.read_file and host.read_file(path)
   if text == nil then return nil, "blob_missing" end
+  -- Content-addressed means checkable: a blob whose bytes no longer hash to its name would make undo
+  -- restore the wrong text.
+  if host.sha256(text) ~= digest then return nil, "blob_corrupt" end
   return text
 end
 
@@ -278,6 +283,8 @@ function M.record(entry, path, before, after)
     if file.path == path then existing = file break end
   end
   local recorded = true
+  -- `false` means "the file existed but its text could not be captured": not undoable.
+  if before == false then recorded, before = false, "" end
   if type(before) == "string" and #before > RECORD_CAP then recorded = false end
   if type(after) == "string" and #after > RECORD_CAP then recorded = false end
   local before_id, after_id
@@ -381,6 +388,25 @@ function M.check(entry)
   return true, "undoable"
 end
 
+-- Write every file or none. The checks run first; if a write still fails part-way (a full disk, a file
+-- locked on Windows) the files already written are put back to what they held a moment ago, so the
+-- result is never half one turn and half the other. `wanted[i]` is the text for entry.files[i].
+function M.apply_all(entry, wanted, done)
+  local host_write = host.write_file
+  if not host_write then return nil, "write_failed:no_host" end
+  local previous = {}
+  for index, file in ipairs(entry.files) do previous[index] = host.read_file and host.read_file(file.path) end
+  for index, file in ipairs(entry.files) do
+    if not host_write(file.path, wanted[index]) then
+      for back = index - 1, 1, -1 do
+        if previous[back] ~= nil then host_write(entry.files[back].path, previous[back]) end
+      end
+      return nil, "write_failed:" .. file.path
+    end
+  end
+  return true, done
+end
+
 -- Put the files back, and refuse rather than clobber.
 --
 -- Undo is all-or-nothing by design: a half-restored edit is worse than none, so the guards
@@ -397,12 +423,7 @@ function M.undo(entry)
     local text = M.load(file.before)
     wanted[index] = text
   end
-  for index, file in ipairs(entry.files) do
-    if not host_write or not host_write(file.path, wanted[index]) then
-      return nil, "write_failed:" .. file.path
-    end
-  end
-  return true, "undone"
+  return M.apply_all(entry, wanted, "undone")
 end
 
 -- Apply the change again, after an undo. Same guards, same all-or-nothing rule: a redo
@@ -431,12 +452,7 @@ function M.redo(entry)
       return nil, "changed_since_undo:" .. file.path
     end
   end
-  for index, file in ipairs(entry.files) do
-    if not host_write or not host_write(file.path, wanted[index]) then
-      return nil, "write_failed:" .. file.path
-    end
-  end
-  return true, "redone"
+  return M.apply_all(entry, wanted, "redone")
 end
 
 -- A unified diff of one recorded file, built when it is asked for.

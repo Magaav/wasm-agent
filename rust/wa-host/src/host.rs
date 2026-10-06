@@ -555,6 +555,20 @@ pub extern "C" fn read_file(l: *mut LuaState) -> c_int {
     }
 }
 
+/// host.path_kind(path) -> "file" | "dir" | "missing" | "other". `read_file` answers nil both for a
+/// missing file and for one it cannot read as text, and a caller about to overwrite needs to know which.
+#[no_mangle]
+pub extern "C" fn path_kind(l: *mut LuaState) -> c_int {
+    let kind = match arg_string(l, 1).map(|path| std::fs::metadata(path)) {
+        Some(Ok(meta)) if meta.is_file() => "file",
+        Some(Ok(meta)) if meta.is_dir() => "dir",
+        Some(Ok(_)) => "other",
+        _ => "missing",
+    };
+    unsafe { lua_pushlstring(l, kind.as_ptr() as *const c_char, kind.len()) };
+    1
+}
+
 /// Identify the image formats the provider path accepts from their bytes, never
 /// from an extension supplied by a file name.
 fn supported_image_mime(bytes: &[u8]) -> Option<&'static str> {
