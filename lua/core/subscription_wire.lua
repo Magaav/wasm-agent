@@ -129,6 +129,21 @@ end
 -- leaving two files that can disagree about a *credential*, which is the defect this closes.
 M.CREDENTIAL_MODULE = 'lua/core/openai_sub_auth.lua'
 
+-- wa-vault (docs/VAULT.md). With `WASM_AGENT_VAULT_URL` set, this route's token lives in the vault
+-- and never in this process: the two endpoints go through the vault's fixed `openai-sub` route, and
+-- the seam is `lua/core/vault.lua`, whose `token()` answers presence from the vault and hands this file
+-- a placeholder that the vault replaces. The headers below are built exactly as before; the vault
+-- drops the placeholder `Authorization`/`chatgpt-account-id` and sets the real ones.
+do
+  local vault = dofile('lua/core/vault.lua')
+  local base = vault.base('openai-sub')
+  if base then
+    M.ENDPOINT = base .. '/codex/responses'
+    M.USAGE_ENDPOINT = base .. '/wham/usage'
+    M.CREDENTIAL_MODULE = 'lua/core/vault.lua'
+  end
+end
+
 -- A failure of this file's own making, in the credential lane's shape: a `code` to branch on plus a
 -- sentence, and a `tostring` that reads like that lane's own sentence. Used only for the two cases
 -- the credential module cannot report for itself - its file missing/unloadable, or `token()`

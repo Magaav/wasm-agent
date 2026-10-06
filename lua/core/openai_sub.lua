@@ -65,6 +65,14 @@ end
 -- that silently kept using Pi would look like a working cutover.
 function M.transport()
   local value = (host.getenv('WASM_AGENT_SUBSCRIPTION_TRANSPORT') or ''):lower()
+  -- A vaulted node holds no token for Pi to use, so only the native wire can serve it; an explicit
+  -- `pi` there is a contradiction and is refused rather than silently ignored.
+  if (host.getenv('WASM_AGENT_VAULT_URL') or '') ~= '' then
+    if value == 'pi' then
+      error('invalid_subscription_transport: WASM_AGENT_VAULT_URL brokers only the native wire, got pi')
+    end
+    return 'native'
+  end
   if value == '' or value == 'pi' then return 'pi' end
   if value == 'native' or value == 'wire' then return 'native' end
   error('invalid_subscription_transport: expected pi or native, got ' .. value)
