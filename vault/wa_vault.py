@@ -76,6 +76,9 @@ ADMIN_TOKEN = os.environ.get("WA_VAULT_ADMIN_TOKEN", "")
 PROXY_PORT = int(os.environ.get("WA_VAULT_PROXY_PORT", "8810"))
 ADMIN_PORT = int(os.environ.get("WA_VAULT_ADMIN_PORT", "8801"))
 BIND = os.environ.get("WA_VAULT_BIND", "0.0.0.0")
+# The admin listener can be bound apart from the proxy, so a deployment can keep the token-gated page off
+# the network the agent shares with the vault (the proxy must stay reachable from the agent; the page need not).
+ADMIN_BIND = os.environ.get("WA_VAULT_ADMIN_BIND", BIND)
 UPSTREAM_TIMEOUT = float(os.environ.get("WA_VAULT_UPSTREAM_TIMEOUT", "3600"))
 
 PROVIDERS = ("opencode-go", "openai-sub")
@@ -378,6 +381,9 @@ def poll_device_login(device_auth_id, user_code, interval):
     finish("error", error="flow_expired: the code was not entered in time")
 
 
+MAX_BODY = 8 * 1024 * 1024
+
+
 class VaultError(Exception):
     def __init__(self, status, code, message):
         super().__init__(message)
@@ -408,16 +414,25 @@ def cancel_login():
 
 # --- the proxy (the node's side) ---------------------------------------------------------------
 
+# The only ChatGPT endpoints the node uses. The OAuth bearer is attached to whatever this proxy forwards,
+# so it forwards exactly these and nothing else on that host.
+OPENAI_SUB_PATHS = ("/openai-sub/codex/responses", "/openai-sub/wham/usage")
+
+
 def route(path):
     """(upstream_url, provider) for a proxy path, or None. The upstream host is never the caller's."""
     parsed = urllib.parse.urlsplit(path)
     query = ("?" + parsed.query) if parsed.query else ""
-    segments = parsed.path.split("/")
-    if any(segment in ("..", ".") for segment in segments):
+    # No percent-encoding and no backslash at all: `%2e%2e` is `..` to an upstream that normalises, and
+    # a check on the raw text alone let it through with the credential attached. The paths the node
+    # uses never need either.
+    if "%" in parsed.path or "\\" in parsed.path:
+        return None
+    if any(segment in ("..", ".") for segment in parsed.path.split("/")) or "//" in parsed.path:
         return None
     if parsed.path.startswith("/opencode-go/v1/"):
         return OPENCODE_BASE + parsed.path[len("/opencode-go/v1"):] + query, "opencode-go"
-    if parsed.path.startswith("/openai-sub/codex/") or parsed.path == "/openai-sub/wham/usage":
+    if parsed.path in OPENAI_SUB_PATHS:
         return CHATGPT_BASE + parsed.path[len("/openai-sub"):] + query, "openai-sub"
     return None
 
@@ -449,17 +464,25 @@ class Handler(BaseHTTPRequestHandler):
         self.send_json(status, {"error": {"code": code, "message": message, "type": "wa_vault"}})
 
     def read_body(self):
+        # Bounded: the vault has 128 MiB and the agent can send it anything.
         if "chunked" in (self.headers.get("Transfer-Encoding") or "").lower():
-            chunks = []
+            chunks, total = [], 0
             while True:
                 size = int(self.rfile.readline().split(b";")[0].strip() or b"0", 16)
                 if size == 0:
                     self.rfile.readline()
                     break
+                total += size
+                if total > MAX_BODY:
+                    self.close_connection = True
+                    raise VaultError(413, "vault_body_too_large", "request body over %d bytes" % MAX_BODY)
                 chunks.append(self.rfile.read(size))
                 self.rfile.readline()
             return b"".join(chunks)
         length = int(self.headers.get("Content-Length") or 0)
+        if length > MAX_BODY:
+            self.close_connection = True
+            raise VaultError(413, "vault_body_too_large", "request body over %d bytes" % MAX_BODY)
         return self.rfile.read(length) if length > 0 else b""
 
 
@@ -486,8 +509,8 @@ class ProxyHandler(Handler):
 
     def login(self):
         """The CLI's door: start the device login, or store a key. Never answers with a value."""
-        body = self.read_body()
         try:
+            body = self.read_body()
             if self.path == "/login/openai-sub":
                 login = start_device_login()
                 return self.send_json(200, {"providers": public_status(read_store()), "login": login})
@@ -496,6 +519,12 @@ class ProxyHandler(Handler):
                     payload = json.loads(body) if body else {}
                 except ValueError:
                     raise VaultError(400, "bad_json", "the body is not JSON")
+                # The agent's own door may store a first key, never replace one: an injected agent could
+                # otherwise swap in a key for an account someone else reads, and every prompt would go
+                # there. Replacing a key is the operator's, on the token-gated vault page.
+                if configured(read_store(), "opencode-go"):
+                    raise VaultError(409, "vault_key_exists",
+                                     "wa-vault already holds an opencode-go key - replace it on the vault page")
                 set_opencode_key(payload.get("key") if isinstance(payload, dict) else None)
                 return self.send_json(200, {"providers": public_status(read_store())})
         except VaultError as error:
@@ -509,7 +538,10 @@ class ProxyHandler(Handler):
             del body
             return self.send_error_json(404, "vault_no_route", "wa-vault has no route for " + self.path.split("?")[0])
         url, provider = target
-        body = self.read_body()
+        try:
+            body = self.read_body()
+        except VaultError as error:
+            return self.send_error_json(error.status, error.code, error.message)
         headers = {name: value for name, value in self.headers.items() if name.lower() not in DROP_REQUEST}
         try:
             if provider == "opencode-go":
@@ -689,11 +721,12 @@ def test_provider(provider):
     return {"ok": status == 200, "detail": detail, "ms": int((time.monotonic() - started) * 1000)}
 
 
-def serve(port, handler, name):
-    server = ThreadingHTTPServer((BIND, port), handler)
+def serve(port, handler, name, bind=None):
+    bind = bind or BIND
+    server = ThreadingHTTPServer((bind, port), handler)
     server.daemon_threads = True
     server.name = name
-    log("%s listening on %s:%d" % (name, BIND, port))
+    log("%s listening on %s:%d" % (name, bind, port))
     return server
 
 
@@ -704,7 +737,7 @@ def main():
         return 2
     os.makedirs(DATA_DIR, mode=0o700, exist_ok=True)
     proxy = serve(PROXY_PORT, ProxyHandler, "proxy")
-    admin = serve(ADMIN_PORT, AdminHandler, "admin")
+    admin = serve(ADMIN_PORT, AdminHandler, "admin", ADMIN_BIND)
     threading.Thread(target=admin.serve_forever, daemon=True).start()
     try:
         proxy.serve_forever()
