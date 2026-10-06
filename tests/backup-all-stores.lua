@@ -9,7 +9,9 @@ local function sql(s,p)
 end
 sql("ATTACH DATABASE ? AS g", {paths.data() .. '/graph.db'})
 sql("CREATE TABLE IF NOT EXISTS g.t(x)");sql("INSERT INTO g.t VALUES(1)");sql("DETACH DATABASE g")
+assert(host.write_file(paths.data()..'/fixture.run-lease.sqlite',''), 'lease fixture file')
 local backup = dofile("lua/core/backup.lua")
+for _,p in ipairs(backup.stores()) do assert(not p:find('fixture.run%-lease%.sqlite$'),'an exclusive OS lease is not a data snapshot') end
 for i = 1, 7 do backup.run("t" .. i) end
 local result = backup.run("final")
 local live = ""
