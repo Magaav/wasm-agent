@@ -349,7 +349,10 @@ function renderMarkdown(text) {
       const packed = renderer.render(pointer, bytes.length);
       const outPointer = Number((packed >> 32n) & 0xffffffffn);
       const outLength = Number(packed & 0xffffffffn);
-      return safeLinks(enhanceCodeBlocks(new TextDecoder().decode(new Uint8Array(renderer.memory.buffer, outPointer, outLength))));
+      const html = new TextDecoder().decode(new Uint8Array(renderer.memory.buffer, outPointer, outLength));
+      // Both buffers go back to the module; without this every render leaked its input and output.
+      if (renderer.dealloc) { renderer.dealloc(pointer, bytes.length); renderer.dealloc(outPointer, outLength); }
+      return safeLinks(enhanceCodeBlocks(html));
     } catch (error) { /* fall through */ }
   }
   return safeLinks(escapeHtml(text).replace(/\n/g, "<br>"));
@@ -1415,7 +1418,20 @@ function typeOut(body, text) {
   }, 14);
 }
 
+let deltaFrame = 0;
+function paintDelta() {
+  deltaFrame = 0;
+  if (!streamBody) return;
+  if (streamBody.classList.contains('final-answer')) {
+    streamBody.innerHTML = renderMarkdown(stripThinking(streamText));
+    streamBody.style.whiteSpace = 'normal';
+  } else streamBody.textContent = stripThinking(streamText);
+  pin();
+}
+
 function handleEvent(event) {
+  // Anything other than more text sees the stream as it stands, so a pending paint happens first.
+  if (deltaFrame && event.type !== "delta") { cancelAnimationFrame(deltaFrame); paintDelta(); }
   if (["round", "reasoning", "commentary", "commentary_delta", "commentary_end", "pending_delta", "decision", "tool", "tool_result", "delta", "reply", "error", "done"].includes(event.type)) {
     clearActiveRunNotice();
   }
@@ -1517,11 +1533,9 @@ function handleEvent(event) {
     }
     streamText += event.text || "";
     streamBody.rawText=streamText;
-    if (streamBody.classList.contains('final-answer')) {
-      streamBody.innerHTML = renderMarkdown(stripThinking(streamText));
-      streamBody.style.whiteSpace = 'normal';
-    } else streamBody.textContent = stripThinking(streamText);
-    pin();
+    // Painted at most once per frame: a long answer arrives as thousands of deltas, and rewriting
+    // (and re-rendering the markdown of) the whole text for each one is quadratic.
+    if (!deltaFrame) deltaFrame = requestAnimationFrame(paintDelta);
   } else if (event.type === "reply") {
     if (!replayingMessages) finishRunStep();
     discardPendingText();
