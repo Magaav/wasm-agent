@@ -511,6 +511,7 @@ function M.release(memory,id,user_id,expected_head)
   local workspace=memory.session_workspace(id)
   if not workspace or not workspace.required then return nil,'workspace_not_managed' end
   if workspace.state=='released' then return workspace end
+  if workspace.start_state.quarantined_retirement then return nil,'quarantine_park_preserved_no_removal' end
   if not host.canonical_path then return nil,'workspace_canonical_path_unavailable' end
   local ctx={user_id=user_id,session_id=id..':release',run_id=host.uuid()}
   local claimed=resources.claim(ctx,{'session:'..id})
@@ -608,6 +609,7 @@ function M.reconcile_release(memory,id,user_id,evidence)
   local workspace=memory.session_workspace(id)
   if not workspace or not workspace.required then return nil,'workspace_not_managed' end
   if workspace.state=='released' then return workspace end
+  if workspace.start_state.quarantined_retirement then return nil,'quarantine_park_preserved_no_removal' end
   local clean_id=tostring(id):gsub('[^%w-]','')
   local expected=paths.data()..'/wa-worktree-'..clean_id
   local branch_name=workspace.branch~='' and workspace.branch or workspace.start_state.parked_branch
@@ -720,4 +722,61 @@ function M.reconcile_park(memory,id,user_id,expected_head,evidence,perform_detac
   return result,why
 end
 
+-- Operator risk-accepted parking, with original binding retained. No ref deletion.
+function M.quarantine_park(memory,id,principal,authorization_sha256)
+  if host.getenv('WA_QUARANTINE_EXECUTOR')~='1' or host.getenv('WASM_AGENT_IN_TURN')=='1' then return nil,'quarantine_requires_explicit_external_executor' end
+  local session=memory.session(id);if not session or session.user_id~=principal then return nil,'quarantine_session_owner_mismatch' end
+  local workspace=memory.session_workspace(id);if not workspace or not workspace.required then return nil,'workspace_not_managed' end
+  if workspace.state=='parked' and workspace.start_state.quarantined_retirement then
+    local prior=workspace.start_state.quarantined_retirement
+    local check=json.decode(host.resource('quarantine_validate',json.encode({kind='workspace',id=id,expected=prior.original,authorization_sha256=authorization_sha256})))
+    if check.error or prior.authorization_sha256~=authorization_sha256 then return nil,'quarantine_park_archive_moved' end
+    local head=run('git rev-parse HEAD',workspace.worktree);local branch=run('git rev-parse --abbrev-ref HEAD',workspace.worktree)
+    if not head or trimmed(head.stdout)~=prior.head or not branch or trimmed(branch.stdout)~='HEAD' then return nil,'quarantine_park_postcondition_moved' end
+    return workspace
+  end
+  if workspace.state~='allocated' then return nil,'quarantine_binding_transition_requires_inspection' end
+  local clean=id:gsub('[^%w-]','');local expected_path=paths.data()..'/wa-worktree-'..clean
+  if normalized(workspace.worktree)~=normalized(expected_path) then return nil,'quarantine_workspace_path_mismatch' end
+  local expected={session_id=id,principal=principal,worktree=workspace.worktree,branch=workspace.branch,
+    base_commit=workspace.base_commit,source_path=workspace.source_path,start_state_json=workspace.workspace_start_state,state=workspace.state}
+  local proof=json.decode(host.resource('quarantine_validate',json.encode({kind='workspace',id=id,expected=expected,authorization_sha256=authorization_sha256})))
+  if proof.error or proof.original_outcome~='unknown' then return nil,proof.error or 'quarantine_archive_invalid' end
+  local item=proof.item
+  local ctx={user_id=principal,session_id=id..':quarantine-park',run_id=host.uuid()}
+  local claimed=resources.claim(ctx,{'session:'..id});if not claimed.ok then return nil,claimed.error end
+  local function body()
+    local canonical=host.canonical_path(expected_path);local root=host.canonical_path(paths.data())
+    if not canonical or not root or normalized(canonical)~=normalized(root..'/wa-worktree-'..clean) then return nil,'quarantine_path_unverified' end
+    local common=run('git rev-parse --path-format=absolute --git-common-dir',expected_path)
+    if not common or normalized(trimmed(common.stdout))~=normalized(item.git_common_dir) then return nil,'quarantine_git_registry_mismatch' end
+    local status=run('git status --porcelain --untracked-files=all --ignored',expected_path)
+    if not status or trimmed(status.stdout)~='' then return nil,'workspace_release_dirty_or_ignored_files' end
+    local head=run('git rev-parse HEAD',expected_path);local branch=run('git rev-parse --abbrev-ref HEAD',expected_path)
+    if not head or trimmed(head.stdout)~=item.head or not branch or trimmed(branch.stdout)~=item.actual_branch then return nil,'quarantine_tip_or_branch_moved' end
+    if not run('git merge-base --is-ancestor '..assert(quote(item.head))..' refs/remotes/origin/main',expected_path) then return nil,'workspace_release_unmerged_commits' end
+    local lookup=json.decode(host.operation('relevant',json.encode({cwd=canonical,limit=1})))
+    if lookup.ok~=true or type(lookup.operations)~='table' or #lookup.operations>0 or lookup.truncated then return nil,'quarantine_operation_fence_unresolved' end
+    -- Preserve all original binding bytes and authorized branch/source differences.
+    local latest=memory.session_workspace(id)
+    if json.encode(latest.start_state)~=json.encode(workspace.start_state) or latest.branch~=workspace.branch or latest.state~=workspace.state then return nil,'quarantine_binding_moved' end
+    workspace.start_state.quarantined_retirement={original=json.decode(json.encode(expected)),authorization_sha256=authorization_sha256,
+      archive_manifest=proof.archive_manifest,archive_sha256=proof.archive_sha256,head=item.head,actual_branch=item.actual_branch,
+      git_common_dir=item.git_common_dir,risk_accepted=true,original_outcome='unknown',never_replay=true,at=host.now()}
+    workspace.state='parking';memory.set_session_workspace(id,workspace)
+    if item.actual_branch~='HEAD' and not run('git switch --detach '..assert(quote(item.head)),expected_path) then
+      workspace.state,workspace.error='park_unknown','quarantined detach requires inspection';memory.set_session_workspace(id,workspace);resources.uncertain(ctx);return nil,'quarantine_detach_unknown'
+    end
+    local detached=json.decode(host.exec('git symbolic-ref --quiet HEAD',expected_path,120))
+    if tonumber(detached.code)~=1 then return nil,'quarantine_detached_postcondition_failed' end
+    workspace.start_state.parked_branch=workspace.branch
+    workspace.start_state.park_reconciliation={head=item.head,evidence='operator risk-accepted quarantined retirement; original outcomes unknown',at=host.now()}
+    workspace.state,workspace.branch,workspace.error='parked','',''
+    return memory.set_session_workspace(id,workspace)
+  end
+  local ok,result,why=pcall(body);local finished=resources.finish(ctx)
+  if not finished.ok then return nil,finished.error end
+  if not ok then return nil,tostring(result) end
+  return result,why
+end
 return M

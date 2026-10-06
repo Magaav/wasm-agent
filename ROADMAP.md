@@ -270,6 +270,27 @@ SQLite snapshot and hashes remain in `WAVE-WITHDRAWN-v106.json`. Fresh retained
 readback `BACKLOG-AFTER-WITHDRAWAL-v107.json` verifies77/3/46 remain held and all76
 original hashes unchanged. No live owner or unknown effect was cleared.
 
+2026-10-06, explicitly authorized quarantined-retirement alternative: added a
+separate exact operator-policy/archive risk path, not historical drain or effect
+settlement. Native operation reservations get additive quarantine history;
+original state/output/before-reconcile bytes stay unchanged and relevant lookup
+revalidates archives. Exact dead-lease claims are archived/audited before release;
+archive movement blocks key reuse. Session-fenced workspace parking preserves
+original binding, source bundles and refs; ordinary deletion of quarantined trees
+refuses. Live owners, moved identity/archives, dirty/ignored/unmerged source and
+in-turn mutation refuse. No automatic sweep/replay. Self-review and private native
+quarantine20 plus in-turn2, operation42(one explicit helper ignore), host99 and
+existing workspace37/13 checks passed. Build parallelism capped2. Exact production
+archive preparation verified77 operations/3 claims/46 bindings; ownership has not
+yet been released. Human authorization is retained from original message3106,
+not an assistant-generated approval. Linux ARM64 native quarantine20+in-turn2 and operation37(helper ignore1)
+passed on exact candidatedb6bf0d; native Windows quarantine20+2, operation42,
+host99 and normal workspace37/13 passed. Archive generationv117 reverified411
+preserved files and all77/3/46 exact pins, with no ownership released yet.
+Integration/install/application remain separate, with partial effects requiring inspection. Risk accepted by the
+operator: old external outcomes remain unreconstructable/unknown; availability
+release does not prove those effects drained. See `docs/QUARANTINED-RETIREMENT.md`.
+
 ## Status vocabulary
 
 - **Implemented:** a mechanism exists in the repository; not a release certification.

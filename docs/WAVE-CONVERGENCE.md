@@ -288,6 +288,14 @@ is a real detached exact tip with an empty branch and a `parked` binding. The
 `retire` plan's owner fence is required before any effect, and only then - a target
 whose binding is already released or parked has nothing left to settle.
 
+## Explicit operator risk-accepted quarantine alternative
+
+The historical backlog may use the separately authorized, item-pinned
+[quarantined-retirement contract](QUARANTINED-RETIREMENT.md). It preserves unknown
+outcomes and originals, retires obsolete reservations without claiming historical
+drain/effect settlement, and keeps normal adjudication unchanged. Missing/moved
+archives or current-live-owner checks refuse. No automatic sweep or replay.
+
 ## External legacy allocation-safety bridge
 
 `wave-legacy.mjs <config> <bundle>` invokes native `legacy_adjudicate` only from an

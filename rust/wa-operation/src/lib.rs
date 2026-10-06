@@ -4,6 +4,7 @@ mod process;
 mod redact;
 mod index;
 mod legacy;
+pub mod quarantine;
 use process::Process;
 use redact::Redactor;
 use serde_json::{json, Value};
@@ -464,6 +465,7 @@ impl Manager {
     pub fn reconcile(&self, args: &Value) -> io::Result<Value> { self.index()?.reconcile(args) }
     pub fn adjudicate_legacy(&self,args:&Value)->io::Result<Value>{self.index()?.adjudicate_legacy(args)}
     pub fn allocation_safety(&self,args:&Value)->io::Result<Value>{self.index()?.allocation_safety(args)}
+    pub fn quarantine_retire(&self,args:&Value)->io::Result<Value>{self.index()?.quarantine_retire(args)}
     pub fn identity(&self)->io::Result<Value>{Ok(json!({"owner_boot":self.index()?.boot,"process_id":std::process::id(),"creation_stamp":legacy::creation(std::process::id())?,"cwd":std::env::current_dir()?.to_string_lossy()}))}
     /// Live in-memory launch linkage; durable PID annotations never authorize this.
     pub fn observe_owned_child(&self,id:&str,pid:u32,owner:&str)->io::Result<Value>{

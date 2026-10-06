@@ -35,6 +35,7 @@ impl Index {
           CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);
           CREATE TABLE IF NOT EXISTS reconciliation(id TEXT PRIMARY KEY,expected TEXT NOT NULL,evidence TEXT NOT NULL,at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
           CREATE TABLE IF NOT EXISTS legacy_quarantine(id TEXT PRIMARY KEY,expected TEXT NOT NULL,bundle TEXT NOT NULL,receipt TEXT NOT NULL);
+          CREATE TABLE IF NOT EXISTS risk_quarantine(id TEXT PRIMARY KEY,expected TEXT NOT NULL,args TEXT NOT NULL,receipt TEXT NOT NULL);
           CREATE TABLE IF NOT EXISTS history(at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,action TEXT NOT NULL,id TEXT NOT NULL,evidence TEXT NOT NULL);").map_err(error)?;
         if empty { db.execute("INSERT OR IGNORE INTO meta VALUES('complete','new-store')", []).map_err(error)?; }
         Ok(Self { root: root.into(), boot, db: Mutex::new(db), _lease: Mutex::new(lease) })
@@ -107,6 +108,11 @@ impl Index {
         for row in rows {
             let (id, state, originals) = row.map_err(error)?;
             examined+=1;last=id.clone();
+            let risk=db.query_row("SELECT args FROM risk_quarantine WHERE id=? AND expected=?",params![id,state],|r|r.get::<_,String>(0)).optional().map_err(error)?;
+            if let Some(raw)=risk {
+                let args:Value=serde_json::from_str(&raw).map_err(error)?;
+                if let Ok(receipt)=self.validate_risk(&args) {if crate::quarantine::check_owner(&self.root,&receipt["expected"],&id).is_ok(){quarantined+=1;continue;}}
+            }
             let bundle=db.query_row("SELECT bundle FROM legacy_quarantine WHERE id=? AND expected=?",params![id,state],|r|r.get::<_,String>(0)).optional().map_err(error)?;
             if let Some(bundle)=bundle {
                 let bundle:Value=serde_json::from_str(&bundle).map_err(error)?;
@@ -144,6 +150,36 @@ impl Index {
         let db=self.db.lock().map_err(error)?;
         let bundle=db.query_row("SELECT bundle FROM legacy_quarantine WHERE id=?",[id],|r|r.get::<_,String>(0)).optional().map_err(error)?;
         match bundle {Some(bundle)=>crate::legacy::validate(&self.root,&serde_json::from_str::<Value>(&bundle).map_err(error)?),None=>Err(error("legacy_allocation_safety_not_adjudicated"))}
+    }
+    fn validate_risk(&self,args:&Value)->io::Result<Value>{
+        let id=args["id"].as_str().ok_or_else(||error("operation_id_required"))?;validate_id(id)?;
+        let state:Value=serde_json::from_slice(&crate::quarantine::file(&self.root.join(id).join("state.json"))?).map_err(error)?;
+        let expected:Value=serde_json::from_str(args["expected_state_json"].as_str().ok_or_else(||error("expected_state_json_required"))?).map_err(error)?;
+        if state!=expected{return Err(error("quarantine_operation_state_moved"));}
+        let receipt=crate::quarantine::validate(self.root.parent().ok_or_else(||error("data_root_required"))?,args,"operation",id,&state)?;
+        let files=receipt["files"].as_array().unwrap();
+        let live=fs::read_dir(self.root.join(id))?.map(|e|e.map(|e|e.file_name().to_string_lossy().to_string())).collect::<io::Result<Vec<_>>>()?;
+        if live.len()!=files.len(){return Err(error("quarantine_operation_inventory_moved"));}
+        for f in files {
+            let name=f["name"].as_str().ok_or_else(||error("quarantine_name_required"))?;
+            if !live.iter().any(|s|s==name) || crate::quarantine::hash(&crate::quarantine::file(&self.root.join(id).join(name))?)!=f["sha256"] {return Err(error("quarantine_original_operation_bytes_moved"));}
+        }
+        Ok(receipt)
+    }
+    pub fn quarantine_retire(&self,args:&Value)->io::Result<Value>{
+        let receipt=self.validate_risk(args)?;let id=args["id"].as_str().unwrap();
+        let _lease=crate::quarantine::check_owner(&self.root,&receipt["expected"],id)?;
+        let mut db=self.db.lock().map_err(error)?;let tx=db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(error)?;
+        let state:String=tx.query_row("SELECT state FROM operations WHERE id=?",[id],|r|r.get(0)).map_err(error)?;
+        if serde_json::from_str::<Value>(&state).map_err(error)?!=receipt["expected"]{return Err(error("quarantine_index_identity_moved"));}
+        if let Some(old)=tx.query_row("SELECT args FROM risk_quarantine WHERE id=?",[id],|r|r.get::<_,String>(0)).optional().map_err(error)? {
+            if serde_json::from_str::<Value>(&old).map_err(error)?!=*args{return Err(error("quarantine_existing_disposition_moved"));}
+            return Ok(receipt);
+        }
+        self.validate_risk(args)?;
+        tx.execute("INSERT INTO risk_quarantine VALUES(?,?,?,?)",params![id,state,args.to_string(),receipt.to_string()]).map_err(error)?;
+        tx.execute("INSERT INTO history(action,id,evidence) VALUES('operator_risk_quarantine',?,?)",params![id,receipt.to_string()]).map_err(error)?;
+        tx.commit().map_err(error)?;Ok(receipt)
     }
     pub fn reconcile(&self, args: &Value) -> io::Result<Value> {
         let required = |name: &str| args[name].as_str().filter(|s| !s.trim().is_empty()).ok_or_else(|| error(format!("{name}_required")));

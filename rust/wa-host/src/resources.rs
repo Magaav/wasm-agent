@@ -413,6 +413,9 @@ impl Store {
             tx.commit().map_err(err)?;
             return Ok(inventory);
         }
+        if action=="quarantine_validate" {
+            return wa_operation::quarantine::validate(self.root.parent().ok_or("data_root_required")?,args,field(args,"kind")?,field(args,"id")?,&args["expected"]).map_err(err);
+        }
         let run = field(args, "run")?;
         let principal = field(args, "principal")?;
         if action == "claim" {
@@ -434,6 +437,11 @@ impl Store {
                 .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
                 .map_err(err)?;
             for key in &keys {
+                let archived:Option<String>=tx.query_row("SELECT evidence FROM history WHERE action='operator_risk_quarantine' AND json_extract(claim,'$.key')=? ORDER BY id DESC LIMIT 1",[key],|r|r.get(0)).optional().map_err(err)?;
+                if let Some(raw)=archived {
+                    let receipt:Value=serde_json::from_str(&raw).map_err(err)?;
+                    wa_operation::quarantine::validate(self.root.parent().ok_or("data_root_required")?,&receipt,"claim",key,&receipt["expected"]).map_err(|_|"quarantine_claim_archive_unverifiable".to_string())?;
+                }
                 let previous = tx
                     .query_row(
                         "SELECT key,principal,session,run,boot,uncertain FROM claims WHERE key=?",
@@ -563,6 +571,23 @@ impl Store {
             tx.commit().map_err(err)?;
             state.live.remove(run);
             return Ok(json!({"ok":true}));
+        }
+        if action == "quarantine_retire" {
+            if crate::serve::in_turn() || std::env::var("WASM_AGENT_IN_TURN").as_deref()==Ok("1") || std::env::var("WA_QUARANTINE_EXECUTOR").as_deref()!=Ok("1") {return Err("quarantine_requires_explicit_external_executor".into());}
+            let key=field(args,"key")?;let expected:Value=serde_json::from_str(field(args,"expected_claim_json")?).map_err(err)?;
+            let current=state.db.query_row("SELECT key,principal,session,run,boot,uncertain FROM claims WHERE key=?",[key],row).optional().map_err(err)?.ok_or("resource_not_found")?;
+            if current!=expected || current["run"]!=run || current["principal"]!=principal || current["boot"]==self.boot || state.live.contains(field(&current,"run")?) {return Err("quarantine_claim_identity_moved_or_live".into());}
+            let boot=field(&current,"boot")?;if !valid_boot(boot){return Err("invalid_resource_boot".into());}
+            let lease=Connection::open_with_flags(self.root.join(format!("{boot}.lease.sqlite")),rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE).map_err(err)?;
+            lease.busy_timeout(Duration::ZERO).map_err(err)?;lease.execute_batch("BEGIN EXCLUSIVE").map_err(|_|"quarantine_claim_owner_live_or_unavailable")?;
+            let raw:Option<String>=state.db.query_row("SELECT identity FROM claim_identity WHERE key=? AND boot=?",params![key,boot],|r|r.get(0)).optional().map_err(err)?;
+            if let Some(raw)=raw {let identity:Value=serde_json::from_str(&raw).map_err(err)?;if let Some(pid)=identity["process_id"].as_u64(){let probe=json!({"owner_process_id":pid});wa_operation::quarantine::check_owner(&self.root,&probe,"claim").map_err(err)?;}}
+            let receipt=wa_operation::quarantine::validate(self.root.parent().ok_or("data_root_required")?,args,"claim",key,&current).map_err(err)?;
+            let tx=state.db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(err)?;
+            if tx.query_row("SELECT key,principal,session,run,boot,uncertain FROM claims WHERE key=?",[key],row).map_err(err)?!=current{return Err("quarantine_claim_moved".into());}
+            tx.execute("INSERT INTO history(action,evidence,claim) VALUES('operator_risk_quarantine',?,?)",params![receipt.to_string(),current.to_string()]).map_err(err)?;
+            tx.execute("DELETE FROM claims WHERE key=? AND run=? AND boot=?",params![key,field(&current,"run")?,boot]).map_err(err)?;
+            tx.commit().map_err(err)?;return Ok(receipt);
         }
         if action == "reconcile" {
             let key = field(args, "key")?;
