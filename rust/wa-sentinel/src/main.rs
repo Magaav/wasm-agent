@@ -2726,6 +2726,9 @@ mod self_update_tests {
         let dir = std::env::temp_dir().join(format!("wa-deploy-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("temp dir");
+        // Never inherit the real watcher's recorded service owner/capture path.
+        let old_home=std::env::var_os("WASM_AGENT_HOME");std::env::set_var("WASM_AGENT_HOME",&dir);
+        let old_supervisor=std::env::var_os("WA_SENTINEL_SUPERVISOR");std::env::set_var("WA_SENTINEL_SUPERVISOR","none");
         let marker = dir.join("ran.txt");
         let script = dir.join("deploy-stub.sh");
         std::fs::write(
@@ -2758,6 +2761,8 @@ mod self_update_tests {
         assert!(written.contains("--prompt continue"), "the prompt must reach the script: {written}");
         assert!(written.contains("--reason fixture"), "the reason must reach the script: {written}");
         std::env::remove_var("WA_SENTINEL_DEPLOY");
+        match old_home{Some(v)=>std::env::set_var("WASM_AGENT_HOME",v),None=>std::env::remove_var("WASM_AGENT_HOME")};
+        match old_supervisor{Some(v)=>std::env::set_var("WA_SENTINEL_SUPERVISOR",v),None=>std::env::remove_var("WA_SENTINEL_SUPERVISOR")};
         let _ = std::fs::remove_dir_all(&dir);
     }
 
