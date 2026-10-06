@@ -9,10 +9,15 @@ const messages = chatShell.content;
 // surface. Two renderers is how a child grew an `Earlier messages` control and a `Load original
 // message 3` button that the conversation it is a view of never had.
 let transcript = messages;
+// Assistive technology hears new messages as they arrive, and the composer has a name, not only a
+// placeholder.
+messages.setAttribute("role", "log");
+messages.setAttribute("aria-live", "polite");
 const jump = document.getElementById("jump");
 const meta = document.getElementById("meta");
 const form = chatShell.form;
 const input = chatShell.input;
+if (input && !input.getAttribute("aria-label")) input.setAttribute("aria-label", "Message wasm-agent");
 // The draft's undo/redo are keyboard-only since the diff topic took the only toggle in the
 // transcript: the two footer buttons acted on the *draft* while looking like they acted on
 // the conversation, and the transcript is where the reader looks for "undo the last thing".
@@ -1401,21 +1406,6 @@ function flushDecision(final = false) {
     runBubble = null;
   }
   pin();
-}
-
-function typeOut(body, text) {
-  let index = 0;
-  const step = Math.max(2, Math.ceil(text.length / 180));
-  const timer = setInterval(() => {
-    index = Math.min(text.length, index + step);
-    body.textContent = text.slice(0, index);
-    pin();
-    if (index >= text.length) {
-      clearInterval(timer);
-      body.innerHTML = renderMarkdown(text);
-      body.style.whiteSpace = "normal";
-    }
-  }, 14);
 }
 
 let deltaFrame = 0;
@@ -6277,9 +6267,14 @@ document.addEventListener("keydown", (event) => {
     if (document.body.classList.contains("term")) { event.preventDefault(); setTerm(false); input.focus(); return; }
     if (document.body.classList.contains("control")) { event.preventDefault(); closeControl(); return; }
   }
+  // Ctrl+E and Ctrl+D are line editing keys inside a text field (end of line, delete forward on macOS and
+  // in readline-style fields); the panel shortcuts apply only outside one.
+  const editing = event.target && (event.target.isContentEditable || /^(INPUT|TEXTAREA)$/.test(event.target.tagName || ""));
   if (event.ctrlKey && (event.key === "`" || event.code === "Backquote")) {
     event.preventDefault();
     setTerm(!document.body.classList.contains("term"));
+  } else if (editing && event.ctrlKey && /^[eEdD]$/.test(event.key)) {
+    // leave the key to the field
   } else if (event.ctrlKey && (event.key === "e" || event.key === "E")) {
     event.preventDefault();
     setEngine(!document.body.classList.contains("engine"));
