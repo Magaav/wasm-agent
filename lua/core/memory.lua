@@ -32,9 +32,14 @@ end
 -- Terms for an FTS5 MATCH expression, each quoted so that arbitrary user text
 -- cannot be read as FTS syntax, and deduplicated so a repeated word does not
 -- skew the ranking.
+--
+-- A word is a run of anything that is not ASCII space or punctuation, so UTF-8 letters stay inside it:
+-- `[%w_]+` is ASCII-only and cut "configuração" into "configura" and "o", which then matched every row
+-- containing an "o". The FTS tokenizer folds case and diacritics on both sides, so the query word
+-- matches the indexed one. Quotes are punctuation, so a term can never close its own quoting.
 local function fts_terms(text)
   local terms, seen = {}, {}
-  for term in tostring(text or ""):gmatch("[%w_]+") do
+  for term in tostring(text or ""):gmatch("[^%s%p]+") do
     local key = term:lower()
     if not seen[key] then
       seen[key] = true
@@ -332,7 +337,10 @@ local function query_memories(match, limit, scope, exclusive)
     -- that guest's text, and surfacing it in a master's context would let a guest plant instructions.
     sql = sql .. " AND m.scope NOT LIKE 'user:%'"
   end
-  sql = sql .. " ORDER BY rank LIMIT ?"
+  -- bm25 (lower is better) with a small bonus for recent memories, so of two equally relevant facts the
+  -- newer one - usually the correction - comes first. The bonus is at most 1 and fades over months.
+  sql = sql .. " ORDER BY rank - 1.0 / (1.0 + (? - m.updated_at) / 2592000.0) LIMIT ?"
+  params[#params + 1] = host.now()
   params[#params + 1] = limit
   local rows = query(sql, params)
   for _, row in ipairs(rows) do row.tags = json.decode(row.tags) end
@@ -352,7 +360,10 @@ function M.recall(text, limit, scope, exclusive)
   if #terms == 0 then return {} end
   local rows = query_memories(table.concat(terms, " AND "), limit, scope, exclusive)
   if #rows == 0 and #terms > 1 then
-    rows = query_memories(table.concat(terms, " OR "), limit, scope, exclusive)
+    -- Any-term matching, minus one-letter words ("a", "e", "o"): those match nearly every row.
+    local wide = {}
+    for _, term in ipairs(terms) do if #term > 3 then wide[#wide + 1] = term end end
+    if #wide > 0 then rows = query_memories(table.concat(wide, " OR "), limit, scope, exclusive) end
   end
   return rows
 end
