@@ -304,6 +304,28 @@ remain focused verification. Original attempt/evidence retained; continuation
 must exclude already-disposed exact5 and inspect postconditions, never replay
 whole plan. No original execution success, claim release or parking inferred.
 
+2026-10-06, authorized historical quarantine **applied and verified**: repaired
+runtime324e98b is installed with final clean-built provenance; actual verifier
+passed67 checks, zero failures/skips. The first failed attempt's5 completed
+operation dispositions were inspected/preserved and omitted from the exact
+remainder plan. Sentinel remainder request1791329148354430000 and operation
+op-1791329148521975-16620-25 settled successfully (code0, cleanupterminated)
+without replaying those5 or any old external action. Native readback validates
+all77 quarantined unknown operation records and zero targeted allocation blockers;
+all3 scoped uncertain execution reservations are archived/released, and all46
+workspaces are parked at their exact detached integrated tips with empty binding
+branches. Trees, original bindings, transcripts, branch refs, source bundles,
+draft backups and unknown outcomes are retained. All411 private archive files,
+every live original operation file and76 original before-reconcile hashes match.
+Legacy wave remains explicitly withdrawn/not-run, not verified convergence.
+Dated private proof: `QUARANTINE-FINAL-VERIFIED-v135.json` and original archive
+v117 in session6cebcd88 scratch. Jobs/revisions unchanged; no new schedules,
+subagents or full release gate. **Targeted77/3/46 retirement is complete under
+operator risk acceptance**, with original drain/effect settlement still unproved.
+Other current/unrelated claims and managed bindings remain outside this scope;
+no global runtime-convergence, fan, vault, Arch or companion claim is made.
+This closure note is documentation only; it does not require another installation.
+
 ## Status vocabulary
 
 - **Implemented:** a mechanism exists in the repository; not a release certification.
