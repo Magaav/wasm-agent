@@ -149,6 +149,25 @@ contact, not an OS sandbox or guaranteed cancellation of already-running effects
 Prior cleanup unknowns remain unchanged. See `docs/BINDING.md` and
 `docs/RENDEZVOUS.md` for commands, verification and recovery boundaries.
 
+2026-10-05, outstanding cloud maintenance: partial installation reached the exact
+published node bytes but the legacy watcher lacked its current lifetime identity;
+verified systemd PID/image/cgroup ownership permitted restarting that exact unit.
+The subsequent supported installer exposed a separate polkit refusal for its
+non-root system-unit restart. `WA_DEPLOY_SENTINEL_SUDO=1` is an explicit opt-in
+that preflights noninteractive authority and elevates only the installed
+sentinel's verified manager restart; default remains unprivileged, no automatic
+sudo fallback or policy weakening. Private command tests5, deploy-policy8 and
+clean-environment record34 checks pass. Self-review; original partial/failure
+records remain evidence, final cloud installation is still separately verified.
+A shipped read-only Windows idle-I/O measurement waits for native idle state,
+checks exact process generations and retains three bounded samples rather than
+calling an active sentinel continuation an idle baseline. Eight actual-predicate
+checks and the98-check shipping manifest pass; no recurrent measurement job or
+fan-causation claim is introduced. Fresh cleanup inventory still has77 historical
+operations,3 uncertain claims,46 held bindings and the legacy-unverified wave;
+all76 saved original hashes remain unchanged. Arch node86a8cbb is absent from
+the live registry, so remote update/local consent cannot be fabricated.
+
 ## Status vocabulary
 
 - **Implemented:** a mechanism exists in the repository; not a release certification.

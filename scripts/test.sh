@@ -1803,6 +1803,7 @@ gate_run node scripts/test-merge-lane-retention.mjs
 gate_run node scripts/test-delivery-admission.mjs
 gate_run node scripts/test-wave-release.mjs
 gate_run bash scripts/test-deploy-gate-policy.sh
+gate_run bash scripts/test-deploy-sentinel-sudo.sh
 gate_run bash scripts/test-deploy-preconditions.sh
 # The install record, and the self-ship that used to kill the deploy before it wrote one. Both read the real
 # record step / ship helper out of deploy.sh and upgrade.sh and run them against a private install
