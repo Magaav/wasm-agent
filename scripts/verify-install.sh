@@ -216,7 +216,7 @@ if [ -n "$TREE" ] && git -C "$TREE" rev-parse --is-inside-work-tree >/dev/null 2
     record skip "installed sentinel == built sentinel" "no built sentinel at $BUILT_SENT"
   fi
 
-  for rel in scripts/deploy.sh scripts/upgrade.sh; do
+  for rel in scripts/deploy.sh scripts/upgrade.sh scripts/measure-sentinel-io.ps1; do
     src="$TREE/$rel"; dst="$INSTALL_DIR/$rel"
     if [ -f "$src" ]; then
       record "$([ -f "$dst" ] && cmp -s "$src" "$dst" && echo ok || echo fail)" \

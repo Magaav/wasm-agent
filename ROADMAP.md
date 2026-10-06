@@ -168,6 +168,18 @@ operations,3 uncertain claims,46 held bindings and the legacy-unverified wave;
 all76 saved original hashes remain unchanged. Arch node86a8cbb is absent from
 the live registry, so remote update/local consent cannot be fabricated.
 
+2026-10-06, post-maintenance continuation: local binary/verdict65 checks passed,
+but an explicit read found the newly added idle sampler absent. The prior installed
+deployer updated itself during that run without executing its new shipping line;
+existing verification did not include this asset. A red private missing-asset
+regression now pins it, and17 install-verifier checks pass after adding the exact
+measurement comparison. Native sentinel `run` now selects system PowerShell for
+approved Windows `.ps1` scripts (same allowlist/owned-operation checks), with
+explicit non-Windows refusal and no silent shell fallback. This closes the actual
+measurement execution route, not a claim that a sample has already run. Historical
+cleanup unknowns remain preserved; cloud final install at6f2902b is separately
+verified with65 installation and44/16 binding/recovery checks, no enabled jobs.
+
 ## Status vocabulary
 
 - **Implemented:** a mechanism exists in the repository; not a release certification.
