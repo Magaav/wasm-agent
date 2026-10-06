@@ -1142,13 +1142,53 @@ fn to_msys_path(path: &Path) -> String {
     text
 }
 
+/// How long `upgrade` may run before it is killed (WA_SENTINEL_UPGRADE_TIMEOUT_SECONDS, default 30 min).
+fn upgrade_timeout() -> Duration {
+    Duration::from_secs(
+        std::env::var("WA_SENTINEL_UPGRADE_TIMEOUT_SECONDS").ok().and_then(|v| v.parse().ok()).unwrap_or(1800),
+    )
+}
+
+/// Run a command to completion or until `limit`, then kill it. Returns its output either way; a killed
+/// command has a failing status and says so in stderr.
+fn run_bounded(mut command: std::process::Command, limit: Duration) -> Result<std::process::Output> {
+    let dir = std::env::temp_dir();
+    let tag = format!("wa-sentinel-{}-{}", std::process::id(), now_epoch());
+    let (out_path, err_path) = (dir.join(format!("{tag}.out")), dir.join(format!("{tag}.err")));
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::fs::File::create(&out_path)?)
+        .stderr(std::fs::File::create(&err_path)?);
+    let mut child = command.spawn()?;
+    let started = Instant::now();
+    let (status, timed_out) = loop {
+        if let Some(status) = child.try_wait()? {
+            break (status, false);
+        }
+        if started.elapsed() >= limit {
+            let _ = child.kill();
+            break (child.wait()?, true);
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    };
+    let stdout = std::fs::read(&out_path).unwrap_or_default();
+    let mut stderr = std::fs::read(&err_path).unwrap_or_default();
+    let _ = std::fs::remove_file(&out_path);
+    let _ = std::fs::remove_file(&err_path);
+    if timed_out {
+        stderr.extend_from_slice(format!("\n[sentinel] killed after {}s (timeout)\n", limit.as_secs()).as_bytes());
+    }
+    Ok(std::process::Output { status, stdout, stderr })
+}
+
 pub(crate) fn verb_upgrade(binary: &str, reason: &str) -> Result<String> {
     if binary.is_empty() {
         bail!("upgrade needs --binary");
     }
     let script = resolve_upgrade_script()?;
     let (interpreter, script_arg) = shell_for(&script);
-    let output = std::process::Command::new(&interpreter)
+    let mut command = std::process::Command::new(&interpreter);
+    command
         // The path is passed to the interpreter as its first argument. Git Bash does not accept a
         // `C:/...` path there, and WSL's bash cannot see `/c/...` at all, so both the interpreter
         // *and* the path form have to agree (`shell_for`).
@@ -1160,9 +1200,11 @@ pub(crate) fn verb_upgrade(binary: &str, reason: &str) -> Result<String> {
         // directory does not matter to it. This used to pin cwd to the sentinel's own, which was
         // the install directory - a directory with no `scripts/` in it, which is exactly why the
         // relative default could never be found from a detached watcher.
-        .current_dir(std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
-        .output()
-        .context("run the upgrade script")?;
+        .current_dir(std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    // Bounded. `output()` waited forever: a hung upgrade.sh (waiting for an idle node that never
+    // came) left MAINTENANCE_ACTIVE set and held every later restart. Output goes to files rather than
+    // pipes so a chatty script cannot fill a pipe and deadlock against the wait.
+    let output = run_bounded(command, upgrade_timeout()).context("run the upgrade script")?;
     let log = sentinel_dir().join("upgrade.log");
     let mut record = format!("{}\t{}\t{}\n", now_epoch(), binary, reason);
     record.push_str(&String::from_utf8_lossy(&output.stdout));
@@ -2974,5 +3016,18 @@ mod reap_tests {
         assert!(std::path::Path::new(&format!("/proc/{pid}")).exists(), "still a zombie: not yet reaped");
         assert!(!super::pid_alive(pid), "a zombie is dead");
         let _ = child.wait();
+    }
+
+    /// The regression: `upgrade` waited on its script forever, holding maintenance mode.
+    #[test]
+    fn a_hung_script_is_killed_at_its_limit() {
+        let mut command = std::process::Command::new("sh");
+        command.args(["-c", "echo started; sleep 30"]);
+        let started = std::time::Instant::now();
+        let output = super::run_bounded(command, std::time::Duration::from_secs(1)).expect("run");
+        assert!(started.elapsed() < std::time::Duration::from_secs(5), "killed near the limit");
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stdout).contains("started"));
+        assert!(String::from_utf8_lossy(&output.stderr).contains("timeout"));
     }
 }
