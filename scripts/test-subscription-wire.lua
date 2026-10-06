@@ -389,5 +389,29 @@ check(subscription.configured() == false,
   'the Pi transport still asks Pi\'s auth file, which is not there in this fixture')
 host.getenv, host.read_file = native_getenv, native_read
 
+-- Encrypted reasoning is captured whole and replayed before the turn's own items: with store=false
+-- the endpoint keeps nothing, so a reasoning model only keeps its chain of thought if it is sent back.
+local reasoning_item = {type = 'reasoning', id = 'rs_fixture', summary = {{type = 'summary_text', text = 'plan'}},
+  encrypted_content = 'enc-fixture'}
+local with_reasoning = tool_fixture:gsub('(event: response%.in_progress\n[^\n]*\n\n)', function(head)
+  return head .. 'event: response.output_item.added\ndata: ' ..
+    json.encode({type = 'response.output_item.added', output_index = 9,
+      item = {id = 'rs_fixture', type = 'reasoning', summary = {}}}) .. '\n\n' ..
+    'event: response.output_item.done\ndata: ' ..
+    json.encode({type = 'response.output_item.done', output_index = 9, item = reasoning_item}) .. '\n\n'
+end, 1)
+replay(with_reasoning)
+local reasoned = wire.complete('gpt-6-luna', messages, tools, true, {session_id = 'replay'}, {selected = 'low'})
+check(type(reasoned.reasoning_items) == 'table', 'a stream with encrypted reasoning returns it')
+eq(reasoned.reasoning_items.model, 'gpt-6-luna', 'bound to the model that produced it')
+eq(reasoned.reasoning_items.items[1].encrypted_content, 'enc-fixture', 'with the encrypted content intact')
+eq(reasoned.reasoning_items.items[1].id, nil, 'and without an item id store=false cannot resolve')
+local _, replayed = wire.items({
+  {role = 'user', content = 'q'},
+  {role = 'assistant', content = '', reasoning_items = reasoned.reasoning_items.items, tool_calls = reasoned.tool_calls},
+})
+eq(replayed[2].type, 'reasoning', 'the reasoning is replayed before the turn')
+eq(replayed[3].type, 'function_call', 'and the turn\'s call follows it')
+
 host.stream = native_stream
 print('subscription wire ok (' .. checks .. ' checks)')

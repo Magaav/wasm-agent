@@ -648,6 +648,14 @@ function M:build_context()
       -- Full text or nothing. `provider.reasoning` documents why a partial replay (a
       -- "window") is a cache-hostile change to a message already sent, not an option.
       if replay_reasoning then message.reasoning_content = row.reasoning or "" end
+      -- Encrypted Responses reasoning is only valid for the model that produced it.
+      if row.reasoning_items and row.reasoning_items ~= "" then
+        local ok_items, stored = pcall(json.decode, row.reasoning_items)
+        if ok_items and type(stored) == "table" and stored.model == self.model and type(stored.items) == "table"
+            and (provider.active() or {}).id == "openai-sub" then
+          message.reasoning_items = stored.items
+        end
+      end
       if type(row.tool_calls) == "table" and #row.tool_calls > 0 then
         message.tool_calls = row.tool_calls
       end
@@ -1094,6 +1102,7 @@ function M:run_body(text, images)
   local trace = {}
   local reply = ""
   local reply_reasoning, reply_phase, reply_message_id, completed = "", "", nil, false
+  local reply_reasoning_items
   local totals = { prompt = 0, completion = 0, total = 0, cached = 0 }
   local run_started = host.now()
   -- What this message changes on disk, recorded by write/edit as it goes. It lives on the
@@ -1588,6 +1597,7 @@ function M:run_body(text, images)
     if #calls == 0 then
       reply = result.content or ""
       reply_reasoning = result.reasoning or ""
+      reply_reasoning_items = result.reasoning_items
       reply_phase = result.final_phase or ""
       -- An empty answer with no tool call is not an answer. A reasoning model that
       -- runs out of output budget before it writes anything returns exactly this,
@@ -1674,7 +1684,7 @@ function M:run_body(text, images)
     end
     record_turn(self, {
       id = assistant_id, role = "assistant", content = result.content or "", tool_calls = calls, debug = self.debug,
-      reasoning=result.reasoning or "", phase=result.final_phase or "",
+      reasoning=result.reasoning or "", phase=result.final_phase or "", reasoning_items=result.reasoning_items,
     })
 
     local dispatch_ctx = { session_id = self.session_id, user_id = self.user, node_id = self.node,
@@ -1845,6 +1855,7 @@ function M:run_body(text, images)
   record_turn(self, {
     id = message_id,ok=completed,
     role = "assistant", content = reply, reasoning=reply_reasoning, phase=reply_phase,
+    reasoning_items = reply_reasoning_items,
     trace = trace, tokens = totals.total, debug = self.debug,
     ms = math.floor((host.now() - run_started) * 1000),
     changes = changes,

@@ -218,6 +218,9 @@ local function migrate()
   -- reads as no topic rather than an empty one.
   add_column("messages", "changes", "TEXT NOT NULL DEFAULT '{}'")
   add_column("messages", "reasoning", "TEXT NOT NULL DEFAULT ''")
+  -- The Responses route's encrypted reasoning items, `{model=..., items=[...]}` as JSON. Replayed to the
+  -- same model so it keeps its chain of thought across tool rounds (store=false keeps nothing upstream).
+  add_column("messages", "reasoning_items", "TEXT NOT NULL DEFAULT ''")
   -- Assistant message phases are part of the provider transcript contract. In
   -- particular, OpenAI Responses commentary must replay as commentary rather
   -- than being mistaken for a completed answer on the next request.
@@ -945,13 +948,14 @@ local function append_turn(session_id, turn)
     local seq = turn.seq or M.next_seq(session_id)
     local id = turn.id or host.uuid()
     exec("INSERT INTO messages(id,session_id,seq,role,content,images,tool_calls,tool_call_id,tool_name," ..
-         "tokens,ms,ok,debug,trace,changes,created_at,reasoning,phase) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+         "tokens,ms,ok,debug,trace,changes,created_at,reasoning,phase,reasoning_items) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
          {id, session_id, seq, turn.role or "user", turn.content or "",
           json.encode(turn.images or {}),
           json.encode(turn.tool_calls or {}), turn.tool_call_id or "", turn.tool_name or "",
           turn.tokens or 0, turn.ms or 0, turn.ok == false and 0 or 1,
           turn.debug and 1 or 0, json.encode(turn.trace or {}),
-          json.encode(turn.changes or {}), host.now(), turn.reasoning or "", turn.phase or ""})
+          json.encode(turn.changes or {}), host.now(), turn.reasoning or "", turn.phase or "",
+          turn.reasoning_items and json.encode(turn.reasoning_items) or ""})
     exec("INSERT INTO messages_fts(content,session_id,message_id) VALUES(?,?,?)",
          {turn.content or "", session_id, id})
     exec("UPDATE sessions SET updated_at=? WHERE id=?", {host.now(), session_id})
