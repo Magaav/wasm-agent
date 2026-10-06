@@ -43,13 +43,13 @@ static ENV_OVERRIDES: OnceLock<HashMap<String, String>> = OnceLock::new();
 static DB_READY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// host.db_ready() -> boolean: has this process already migrated the schema?
-pub extern "C" fn db_ready(l: *mut LuaState) -> c_int {
+pub extern "C-unwind" fn db_ready(l: *mut LuaState) -> c_int {
     unsafe { crate::lua::lua_pushboolean(l, DB_READY.load(std::sync::atomic::Ordering::SeqCst) as c_int) };
     1
 }
 
 /// host.mark_db_ready() -> nil: record that the schema migration has run.
-pub extern "C" fn mark_db_ready(l: *mut LuaState) -> c_int {
+pub extern "C-unwind" fn mark_db_ready(l: *mut LuaState) -> c_int {
     DB_READY.store(true, std::sync::atomic::Ordering::SeqCst);
     // One explicit nil, never zero results: `select('#', host.mark_db_ready())`
     // must be 1, or a caller that passes the result around gets nothing.
@@ -65,7 +65,7 @@ pub fn set_env_overrides(values: HashMap<String, String>) {
 ///
 /// Env access as a capability, like the rest of `host.*`: it checks what the
 /// host resolved first and falls back to the real process environment.
-pub extern "C" fn getenv(l: *mut LuaState) -> c_int {
+pub extern "C-unwind" fn getenv(l: *mut LuaState) -> c_int {
     let name = arg_string(l, 1).unwrap_or_default();
     let value = ENV_OVERRIDES
         .get()
@@ -95,7 +95,7 @@ pub extern "C" fn getenv(l: *mut LuaState) -> c_int {
 /// A host function always returns a value: an absent string is `nil`, never
 /// "no values", because zero results expand to nothing when used as an argument
 /// (`tonumber(host.getenv(X))` became `tonumber()` and failed).
-pub extern "C" fn paths(l: *mut LuaState) -> c_int {
+pub extern "C-unwind" fn paths(l: *mut LuaState) -> c_int {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
     let base = format!("{home}/.wasm-agent");
     let entries: [(&str, String); 5] = [
@@ -117,7 +117,7 @@ pub extern "C" fn paths(l: *mut LuaState) -> c_int {
 }
 
 /// Resolve an existing path through symlinks/junctions; missing paths return nil.
-pub extern "C" fn canonical_path(l: *mut LuaState) -> c_int {
+pub extern "C-unwind" fn canonical_path(l: *mut LuaState) -> c_int {
     let path=arg_string(l,1).and_then(|value|std::fs::canonicalize(value).ok());
     if let Some(path)=path {
         let value=path.to_string_lossy().replace('\\',"/");
@@ -191,7 +191,7 @@ fn shell_config() -> &'static (String, String) {
 /// `sh -c` on Linux and `cmd /C` on Windows, and without this the model guesses
 /// POSIX: it runs `pwd`, `ls` and `grep`, gets "not recognized as an internal or
 /// external command", and burns its tool budget on retries.
-pub extern "C" fn platform(l: *mut LuaState) -> c_int {
+pub extern "C-unwind" fn platform(l: *mut LuaState) -> c_int {
     let entries: [(&str, String); 5] = [
         ("os", std::env::consts::OS.to_string()),
         ("arch", std::env::consts::ARCH.to_string()),
@@ -226,7 +226,7 @@ pub extern "C" fn platform(l: *mut LuaState) -> c_int {
 /// on Windows - the tool used to fail with "'grep' is not recognized" on a
 /// Windows node. Plain substring matching, optionally case-insensitive: enough
 /// for finding code, and it behaves identically on every platform.
-pub extern "C" fn grep(l: *mut LuaState) -> c_int {
+pub extern "C-unwind" fn grep(l: *mut LuaState) -> c_int {
     let pattern = arg_string(l, 1).unwrap_or_default();
     let path = arg_string(l, 2).unwrap_or_else(|| ".".to_string());
     let options = arg_string(l, 3).unwrap_or_default();
@@ -240,7 +240,7 @@ pub extern "C" fn grep(l: *mut LuaState) -> c_int {
 /// The `ls` tool used to shell out to `ls -la`, which does not exist on Windows:
 /// its description claimed to be portable while the implementation was not, and
 /// a self-evolution run found that before I did.
-pub extern "C" fn list_dir(l: *mut LuaState) -> c_int {
+pub extern "C-unwind" fn list_dir(l: *mut LuaState) -> c_int {
     let path = arg_string(l, 1).unwrap_or_else(|| ".".to_string());
     let mut entries: Vec<Value> = Vec::new();
     match std::fs::read_dir(&path) {
@@ -378,16 +378,24 @@ pub fn set_run_cancel_probe(probe: fn() -> bool) {
     let _ = RUN_CANCEL_PROBE.set(probe);
 }
 
+/// Ctrl+C on an empty line in `wa chat`: the terminal-side half of cancellation (there is no serve
+/// layer to register a probe in the CLI). Cleared when the next line is submitted.
+static CLI_INTERRUPT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn cli_interrupted() -> bool {
+    CLI_INTERRUPT.load(std::sync::atomic::Ordering::SeqCst)
+}
+
 pub(crate) fn run_cancel_requested() -> bool {
-    RUN_CANCEL_PROBE.get().map(|probe| probe()).unwrap_or(false) || crate::subagents::cancel_requested()
+    RUN_CANCEL_PROBE.get().map(|probe| probe()).unwrap_or(false) || cli_interrupted() || crate::subagents::cancel_requested()
 }
 
 /// host.run_cancelled() -> {cancelled, run_cancel, subagent_cancel}
 ///
 /// `cancelled` is true while either source is set. A foreground run's scoped
 /// cancellation is the run half; a supervised child's is the subagent half.
-pub extern "C" fn run_cancelled(l: *mut LuaState) -> c_int {
-    let run_cancel = RUN_CANCEL_PROBE.get().map(|probe| probe()).unwrap_or(false);
+pub extern "C-unwind" fn run_cancelled(l: *mut LuaState) -> c_int {
+    let run_cancel = RUN_CANCEL_PROBE.get().map(|probe| probe()).unwrap_or(false) || cli_interrupted();
     let subagent_cancel = crate::subagents::cancel_requested();
     push_json(
         l,
@@ -435,7 +443,7 @@ fn params(values: &[Value]) -> Vec<Box<dyn rusqlite::ToSql>> {
 /// autocommit the later write, breaking atomicity. A transaction is closed only at
 /// an uncaught callback error (`Lua::rollback_if_open`) or when the interpreter's
 /// connection drops.
-pub extern "C" fn sql_exec(l: *mut LuaState) -> c_int {
+pub extern "C-unwind" fn sql_exec(l: *mut LuaState) -> c_int {
     let host = host_of(l);
     let sql = arg_string(l, 1).unwrap_or_default();
     let params_json = arg_string(l, 2).unwrap_or_else(|| "[]".into());
@@ -458,7 +466,7 @@ pub extern "C" fn sql_exec(l: *mut LuaState) -> c_int {
 }
 
 /// host.sql_query(sql, params_json) -> [ {column: value}, ... ] | {error}
-pub extern "C" fn sql_query(l: *mut LuaState) -> c_int {
+pub extern "C-unwind" fn sql_query(l: *mut LuaState) -> c_int {
     let host = host_of(l);
     let sql = arg_string(l, 1).unwrap_or_default();
     let params_json = arg_string(l, 2).unwrap_or_else(|| "[]".into());
@@ -493,7 +501,7 @@ pub extern "C" fn sql_query(l: *mut LuaState) -> c_int {
 }
 
 /// host.sha256(text) -> hex
-pub extern "C" fn sha256(l: *mut LuaState) -> c_int {
+pub extern "C-unwind" fn sha256(l: *mut LuaState) -> c_int {
     let text = arg_string(l, 1).unwrap_or_default();
     let digest = ring::digest::digest(&ring::digest::SHA256, text.as_bytes());
     let hex: String = digest.as_ref().iter().map(|byte| format!("{byte:02x}")).collect();
@@ -535,14 +543,14 @@ pub(crate) fn new_uuid() -> String {
     )
 }
 
-pub extern "C" fn uuid(l: *mut LuaState) -> c_int {
+pub extern "C-unwind" fn uuid(l: *mut LuaState) -> c_int {
     let value = new_uuid();
     unsafe { lua_pushlstring(l, value.as_ptr() as *const c_char, value.len()) };
     1
 }
 
 /// host.read_file(path) -> string | nil
-pub extern "C" fn read_file(l: *mut LuaState) -> c_int {
+pub extern "C-unwind" fn read_file(l: *mut LuaState) -> c_int {
     match arg_string(l, 1).and_then(|path| std::fs::read_to_string(path).ok()) {
         Some(text) => {
             unsafe { lua_pushlstring(l, text.as_ptr() as *const c_char, text.len()) };
@@ -553,6 +561,35 @@ pub extern "C" fn read_file(l: *mut LuaState) -> c_int {
             1
         }
     }
+}
+
+/// host.isatty(stream) -> boolean: is "stdout" (default), "stderr" or "stdin" a terminal?
+/// Not named `isatty` in Rust: with #[no_mangle] that replaced libc's own isatty process-wide, and the
+/// first caller (the test harness) crashed.
+#[no_mangle]
+pub extern "C-unwind" fn stream_is_terminal(l: *mut LuaState) -> c_int {
+    use std::io::IsTerminal;
+    let answer = match arg_string(l, 1).as_deref() {
+        Some("stdin") => std::io::stdin().is_terminal(),
+        Some("stderr") => std::io::stderr().is_terminal(),
+        _ => std::io::stdout().is_terminal(),
+    };
+    unsafe { crate::lua::lua_pushboolean(l, answer as c_int) };
+    1
+}
+
+/// host.path_kind(path) -> "file" | "dir" | "missing" | "other". `read_file` answers nil both for a
+/// missing file and for one it cannot read as text, and a caller about to overwrite needs to know which.
+#[no_mangle]
+pub extern "C-unwind" fn path_kind(l: *mut LuaState) -> c_int {
+    let kind = match arg_string(l, 1).map(|path| std::fs::metadata(path)) {
+        Some(Ok(meta)) if meta.is_file() => "file",
+        Some(Ok(meta)) if meta.is_dir() => "dir",
+        Some(Ok(_)) => "other",
+        _ => "missing",
+    };
+    unsafe { lua_pushlstring(l, kind.as_ptr() as *const c_char, kind.len()) };
+    1
 }
 
 /// Identify the image formats the provider path accepts from their bytes, never
@@ -628,7 +665,7 @@ fn read_image_value(path: &str, max_bytes: usize) -> Value {
 /// Probe by magic bytes and read a supported image with a hard allocation bound.
 /// `not_image` is an ordinary answer: Lua then uses the UTF-8 text reader. The
 /// base64 is transport across the Lua/WIT seam; it is not a model-facing result.
-pub extern "C" fn read_image_base64(l: *mut LuaState) -> c_int {
+pub extern "C-unwind" fn read_image_base64(l: *mut LuaState) -> c_int {
     let path = arg_string(l, 1).unwrap_or_default();
     let maximum = arg_integer(l, 2).unwrap_or(4_000_000);
     let value = if path.is_empty() {
@@ -718,9 +755,20 @@ mod image_file_tests {
 /// so two writers cannot collide, the bytes are fsynced before the rename so a power loss cannot leave
 /// the new name pointing at empty content, and the temp file is removed on every failure path so a
 /// failed write leaves no litter beside the user's file.
+/// Files that hold a credential: created owner-only, never readable in between (a later chmod left a
+/// window). Anything else keeps the umask default, so a script or web asset the agent writes is not
+/// silently made private.
+fn secret_file(name: &str) -> bool {
+    matches!(name, "credentials.json" | "auth.json" | "node.key" | "env" | "vault.env")
+}
+
 fn write_atomic(path: &str, text: &str) -> bool {
     use std::io::Write;
-    let target = std::path::Path::new(path);
+    // Write through a symlink, not over it: renaming onto the link replaced it with a regular file and
+    // silently detached a linked dotfile from its real location.
+    let resolved = std::fs::canonicalize(path).ok().filter(|real| real.is_file());
+    let target_buf = resolved.unwrap_or_else(|| std::path::PathBuf::from(path));
+    let target = target_buf.as_path();
     if let Some(parent) = target.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
@@ -739,8 +787,18 @@ fn write_atomic(path: &str, text: &str) -> bool {
         COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     );
     let temporary = directory.join(unique);
+    let private = !target.exists() && secret_file(&name);
     let written = (|| -> std::io::Result<()> {
-        let mut file = std::fs::File::create(&temporary)?;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        if private {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        #[cfg(not(unix))]
+        let _ = private;
+        let mut file = options.open(&temporary)?;
         file.write_all(text.as_bytes())?;
         file.sync_all()?;
         Ok(())
@@ -757,8 +815,16 @@ fn write_atomic(path: &str, text: &str) -> bool {
         let _ = std::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(metadata.permissions().mode()));
     }
     match std::fs::rename(&temporary, target) {
-        Ok(()) => true,
-        Err(_) => {
+        Ok(()) => {
+            // The rename is durable only once the directory entry is: fsync the directory too.
+            #[cfg(unix)]
+            if let Ok(dir) = std::fs::File::open(&directory) {
+                let _ = dir.sync_all();
+            }
+            true
+        }
+        Err(error) => {
+            eprintln!("[write] atomic rename into {} failed ({error}); writing in place, not atomically", target.display());
             // A rename can fail where a direct write would not: a target another process holds open on
             // Windows, a read-only file, a target that is not a plain file. Falling back keeps the
             // promise this function always made - a boolean, and the bytes where they were asked for -
@@ -770,7 +836,7 @@ fn write_atomic(path: &str, text: &str) -> bool {
     }
 }
 
-pub extern "C" fn write_file(l: *mut LuaState) -> c_int {
+pub extern "C-unwind" fn write_file(l: *mut LuaState) -> c_int {
     let path = arg_string(l, 1).unwrap_or_default();
     let text = arg_string(l, 2).unwrap_or_default();
     let ok = write_atomic(&path, &text);
@@ -820,7 +886,7 @@ fn run_bounded(
 }
 
 /// host.operation(action, args_json) -> operation receipt/state/output | {error}
-pub extern "C" fn operation(l: *mut LuaState) -> c_int {
+pub extern "C-unwind" fn operation(l: *mut LuaState) -> c_int {
     let action = arg_string(l, 1).unwrap_or_default();
     let args = arg_string(l, 2).unwrap_or_else(|| "{}".into());
     let result = serde_json::from_str(&args).map_err(|e|e.to_string())
@@ -830,7 +896,7 @@ pub extern "C" fn operation(l: *mut LuaState) -> c_int {
 }
 
 /// host.jobs(action, args_json): local automation management, never execution.
-pub extern "C" fn jobs(l: *mut LuaState) -> c_int {
+pub extern "C-unwind" fn jobs(l: *mut LuaState) -> c_int {
     let action=arg_string(l,1).unwrap_or_else(||"list".into());
     let args:Value=serde_json::from_str(&arg_string(l,2).unwrap_or_else(||"{}".into())).unwrap_or(Value::Null);
     let root=std::path::PathBuf::from(std::env::var("HOME").unwrap_or_else(|_|".".into())).join(".wasm-agent/sentinel/jobs.db");
@@ -849,7 +915,7 @@ pub extern "C" fn jobs(l: *mut LuaState) -> c_int {
 }
 
 /// Internal scheduler enqueue; not exposed as a model tool or HTTP route.
-pub extern "C" fn enqueue_completion(l: *mut LuaState) -> c_int {
+pub extern "C-unwind" fn enqueue_completion(l: *mut LuaState) -> c_int {
     let body=arg_string(l,1).unwrap_or_default();
     push_json(l,&crate::serve::enqueue_completion(&body));
     1
@@ -863,7 +929,7 @@ pub extern "C" fn enqueue_completion(l: *mut LuaState) -> c_int {
 /// the cancellation flag, so a Lua interpreter is never the thing that keeps a
 /// child alive. Owner scoping is enforced here as well as in Lua: a caller can
 /// only read or cancel a task it owns.
-pub extern "C" fn subagent(l: *mut LuaState) -> c_int {
+pub extern "C-unwind" fn subagent(l: *mut LuaState) -> c_int {
     let action = arg_string(l, 1).unwrap_or_default();
     let args: Value = serde_json::from_str(&arg_string(l, 2).unwrap_or_else(|| "{}".into()))
         .unwrap_or(Value::Null);
@@ -872,24 +938,24 @@ pub extern "C" fn subagent(l: *mut LuaState) -> c_int {
 }
 
 /// Atomic named-resource claims. Resource choice and authorization stay in Lua.
-pub extern "C" fn binding_state(l:*mut LuaState)->c_int {
+pub extern "C-unwind" fn binding_state(l:*mut LuaState)->c_int {
     let action=arg_string(l,1).unwrap_or_default();
     let args=arg_string(l,2).and_then(|s|serde_json::from_str::<Value>(&s).ok()).unwrap_or(Value::Null);
     push_json(l,&crate::binding_runtime::state(&action,&args).unwrap_or_else(|error|json!({"ok":false,"error":error})));1
 }
-pub extern "C" fn binding_transport(l:*mut LuaState)->c_int {
+pub extern "C-unwind" fn binding_transport(l:*mut LuaState)->c_int {
     let action=arg_string(l,1).unwrap_or_default();
     push_json(l,&crate::binding_runtime::transport(&action).unwrap_or_else(|error|json!({"ok":false,"error":error})));1
 }
 
-pub extern "C" fn resource(l: *mut LuaState) -> c_int {
+pub extern "C-unwind" fn resource(l: *mut LuaState) -> c_int {
     let action=arg_string(l,1).unwrap_or_default();
     let args=arg_string(l,2).and_then(|raw|serde_json::from_str::<Value>(&raw).ok()).unwrap_or(Value::Null);
     push_json(l,&crate::resources::control(&action,&args).unwrap_or_else(|error|json!({"ok":false,"error":error})));
     1
 }
 
-pub extern "C" fn exec(l: *mut LuaState) -> c_int {
+pub extern "C-unwind" fn exec(l: *mut LuaState) -> c_int {
     let command = arg_string(l, 1).unwrap_or_default();
     let cwd = arg_string(l, 2).unwrap_or_default();
     let requested = arg_integer(l, 3).and_then(|value| u64::try_from(value).ok());
@@ -906,7 +972,7 @@ pub extern "C" fn exec(l: *mut LuaState) -> c_int {
 /// client with `wa ui`" for every case, which was wrong for the one that actually
 /// happens (a wedged bridge, with the window perfectly healthy) and would have
 /// put a second window on the same bridge.
-pub extern "C" fn client(l: *mut LuaState) -> c_int {
+pub extern "C-unwind" fn client(l: *mut LuaState) -> c_int {
     let host = host_of(l);
     let action = arg_string(l, 1).unwrap_or_default();
     let args: Value = serde_json::from_str(&arg_string(l, 2).unwrap_or_else(|| "{}".into()))
@@ -1100,14 +1166,14 @@ mod client_diagnosis_tests {
 }
 
 /// host.client_status() -> {connected, last_seen_secs, queued}
-pub extern "C" fn client_status(l: *mut LuaState) -> c_int {
+pub extern "C-unwind" fn client_status(l: *mut LuaState) -> c_int {
     let host = host_of(l);
     push_json(l, &host.client.status());
     1
 }
 
 /// host.node_identity() -> {node_id, public_key}
-pub extern "C" fn node_identity(l: *mut LuaState) -> c_int {
+pub extern "C-unwind" fn node_identity(l: *mut LuaState) -> c_int {
     match crate::node::Identity::load() {
         Ok(identity) => push_json(
             l,
@@ -1119,7 +1185,7 @@ pub extern "C" fn node_identity(l: *mut LuaState) -> c_int {
 }
 
 /// host.sign(text) -> {signature}
-pub extern "C" fn sign(l: *mut LuaState) -> c_int {
+pub extern "C-unwind" fn sign(l: *mut LuaState) -> c_int {
     let text = arg_string(l, 1).unwrap_or_default();
     match crate::node::Identity::load() {
         Ok(identity) => push_json(l, &json!({"signature": identity.sign(&text)})),
@@ -1129,7 +1195,7 @@ pub extern "C" fn sign(l: *mut LuaState) -> c_int {
 }
 
 /// host.verify(public_key, text, signature) -> boolean
-pub extern "C" fn verify(l: *mut LuaState) -> c_int {
+pub extern "C-unwind" fn verify(l: *mut LuaState) -> c_int {
     let public_key = arg_string(l, 1).unwrap_or_default();
     let text = arg_string(l, 2).unwrap_or_default();
     let signature = arg_string(l, 3).unwrap_or_default();
@@ -1139,7 +1205,7 @@ pub extern "C" fn verify(l: *mut LuaState) -> c_int {
 }
 
 /// host.sleep(milliseconds) — used between deterministic spell steps.
-pub extern "C" fn sleep(l: *mut LuaState) -> c_int {
+pub extern "C-unwind" fn sleep(l: *mut LuaState) -> c_int {
     let millis = arg_string(l, 1)
         .and_then(|value| value.parse::<u64>().ok())
         .unwrap_or(0)
@@ -1195,7 +1261,7 @@ fn mask(value: &str) -> String {
     format!("{}...{}", &trimmed[..3], &trimmed[trimmed.len() - 4..])
 }
 
-pub extern "C" fn log(l: *mut LuaState) -> c_int {
+pub extern "C-unwind" fn log(l: *mut LuaState) -> c_int {
     if let Some(message) = arg_string(l, 1) {
         eprintln!("[lua] {}", redact(&message));
     }
@@ -1203,7 +1269,7 @@ pub extern "C" fn log(l: *mut LuaState) -> c_int {
 }
 
 /// host.stream(json) -> push one server-sent event to the connected UI.
-pub extern "C" fn stream(l: *mut LuaState) -> c_int {
+pub extern "C-unwind" fn stream(l: *mut LuaState) -> c_int {
     if let Some(payload) = arg_string(l, 1) {
         crate::serve::write_event(&payload);
     }
@@ -1211,7 +1277,7 @@ pub extern "C" fn stream(l: *mut LuaState) -> c_int {
 }
 
 /// host.plugins() -> JSON `[{name, description, parameters}, ...]`
-pub extern "C" fn plugins(l: *mut LuaState) -> c_int {
+pub extern "C-unwind" fn plugins(l: *mut LuaState) -> c_int {
     let host = host_of(l);
     let list = host
         .plugins
@@ -1223,7 +1289,7 @@ pub extern "C" fn plugins(l: *mut LuaState) -> c_int {
 }
 
 /// host.invoke(name, arguments_json) -> plugin JSON result | {error}
-pub extern "C" fn invoke(l: *mut LuaState) -> c_int {
+pub extern "C-unwind" fn invoke(l: *mut LuaState) -> c_int {
     let host = host_of(l);
     let name = arg_string(l, 1).unwrap_or_default();
     let arguments = arg_string(l, 2).unwrap_or_else(|| "{}".into());
@@ -1242,7 +1308,7 @@ pub extern "C" fn invoke(l: *mut LuaState) -> c_int {
 }
 
 /// host.http(method, url, headers_json, body) -> {status, body} | {error}
-pub extern "C" fn http(l: *mut LuaState) -> c_int {
+pub extern "C-unwind" fn http(l: *mut LuaState) -> c_int {
     let method = arg_string(l, 1).unwrap_or_else(|| "POST".into()).to_uppercase();
     let url = arg_string(l, 2).unwrap_or_default();
     let headers_json = arg_string(l, 3).unwrap_or_else(|| "{}".into());
@@ -1290,7 +1356,7 @@ pub extern "C" fn http(l: *mut LuaState) -> c_int {
 /// at each run and tool boundary; a long tool call or a stalled provider read is then
 /// visible as silence rather than as health.
 #[no_mangle]
-pub extern "C" fn beat(_l: *mut LuaState) -> c_int {
+pub extern "C-unwind" fn beat(_l: *mut LuaState) -> c_int {
     crate::serve::beat();
     0
 }
@@ -1567,7 +1633,7 @@ fn start_ticker(spec: TickerSpec) -> bool {
 /// caller's to erase, which is what the view does before it prints anything else. Returns
 /// `true` while a ticker is running, and `nil` when none is (no argument, a spec that does
 /// not parse, or `WASM_AGENT_CLI_TICKER=off`).
-pub extern "C" fn ticker(l: *mut LuaState) -> c_int {
+pub extern "C-unwind" fn ticker(l: *mut LuaState) -> c_int {
     let running = match arg_string(l, 1).and_then(|text| parse_ticker_spec(&text)) {
         // No argument is a stop, not a no-op: the caller is about to draw on that line
         // itself, and a ticker still running would fight it for the cursor.
@@ -1743,7 +1809,7 @@ mod ticker_tests {
 /// finish_reason, tool_calls, usage}` so the caller can continue the tool loop.
 /// Reasoning is kept apart from content: it is the model's thinking, not its
 /// answer, and conflating the two is how an unanswered run looks answered.
-pub extern "C" fn http_stream(l: *mut LuaState) -> c_int {
+pub extern "C-unwind" fn http_stream(l: *mut LuaState) -> c_int {
     let method = arg_string(l, 1).unwrap_or_else(|| "POST".into()).to_uppercase();
     let url = arg_string(l, 2).unwrap_or_default();
     let headers_json = arg_string(l, 3).unwrap_or_else(|| "{}".into());
@@ -1785,7 +1851,7 @@ pub extern "C" fn http_stream(l: *mut LuaState) -> c_int {
 ///   (its event mapping is what knows which event completes a response).
 /// - Returns `nil` for nothing: the callback is required, and a call without one is refused, not
 ///   read into nothing.
-pub extern "C" fn http_sse(l: *mut LuaState) -> c_int {
+pub extern "C-unwind" fn http_sse(l: *mut LuaState) -> c_int {
     let method = arg_string(l, 1).unwrap_or_else(|| "POST".into()).to_uppercase();
     let url = arg_string(l, 2).unwrap_or_default();
     let headers_json = arg_string(l, 3).unwrap_or_else(|| "{}".into());
@@ -1911,7 +1977,7 @@ fn call_lua_string(l: *mut LuaState, index: c_int, payload: &str) -> Result<(), 
 ///
 /// POSTs to a peer and forwards every SSE `data:` line straight to our UI
 /// client, so a remote node's reply streams here unchanged.
-pub extern "C" fn relay(l: *mut LuaState) -> c_int {
+pub extern "C-unwind" fn relay(l: *mut LuaState) -> c_int {
     let url = arg_string(l, 1).unwrap_or_default();
     let headers_json = arg_string(l, 2).unwrap_or_else(|| "{}".into());
     let body = arg_string(l, 3).unwrap_or_default();
@@ -2214,14 +2280,14 @@ mod sse_line_tests {
 }
 
 /// host.now() -> seconds since epoch
-pub extern "C" fn monotonic_ms(l: *mut LuaState) -> c_int {
+pub extern "C-unwind" fn monotonic_ms(l: *mut LuaState) -> c_int {
     static START: OnceLock<std::time::Instant> = OnceLock::new();
     let ms = START.get_or_init(std::time::Instant::now).elapsed().as_secs_f64() * 1000.0;
     unsafe { crate::lua::lua_pushnumber(l, ms) };
     1
 }
 
-pub extern "C" fn runtime_info(l: *mut LuaState) -> c_int {
+pub extern "C-unwind" fn runtime_info(l: *mut LuaState) -> c_int {
     static IDENTITY: OnceLock<Value> = OnceLock::new();
     let identity = IDENTITY.get_or_init(|| {
         let digest = std::env::current_exe().ok().and_then(|path| std::fs::read(path).ok())
@@ -2236,7 +2302,7 @@ pub extern "C" fn runtime_info(l: *mut LuaState) -> c_int {
 }
 
 /// host.system_resources() -> a fresh CPU, memory and workspace-filesystem sample.
-pub extern "C" fn system_resources(l: *mut LuaState) -> c_int {
+pub extern "C-unwind" fn system_resources(l: *mut LuaState) -> c_int {
     push_json(l, &crate::system_resources::sample());
     1
 }
@@ -2345,7 +2411,7 @@ fn usable_size(columns: i32, rows: i32) -> Option<(i32, i32)> {
     Some((columns, rows))
 }
 
-pub extern "C" fn terminal_size(l: *mut LuaState) -> c_int {
+pub extern "C-unwind" fn terminal_size(l: *mut LuaState) -> c_int {
     match console_size() {
         Some((columns, rows)) => push_json(l, &json!({"columns": columns, "rows": rows})),
         None => unsafe { crate::lua::lua_pushnil(l) },
@@ -2355,7 +2421,7 @@ pub extern "C" fn terminal_size(l: *mut LuaState) -> c_int {
 
 /// Serialize terminal writes with the editor and the ticker. The Lua view uses this
 /// only for its real stdout; captured/plain views keep their own writers.
-pub extern "C" fn terminal_write(l: *mut LuaState) -> c_int {
+pub extern "C-unwind" fn terminal_write(l: *mut LuaState) -> c_int {
     let ok = arg_string(l, 1).is_some_and(|text| write_at_editor(&text).is_ok());
     unsafe { crate::lua::lua_pushboolean(l, if ok { 1 } else { 0 }) };
     1
@@ -2458,8 +2524,15 @@ fn console_reader() {
                         let frame = input.render();
                         if !frame.is_empty() { let _ = crate::terminal_editor::write(&frame); }
                         match action {
-                            crate::terminal_editor::Action::Submit(text) => state.lines.push(text),
+                            crate::terminal_editor::Action::Submit(text) => {
+                                CLI_INTERRUPT.store(false, std::sync::atomic::Ordering::SeqCst);
+                                state.lines.push(text)
+                            }
                             crate::terminal_editor::Action::Eof => { state.eof = true; state.running = false; },
+                            crate::terminal_editor::Action::Interrupt => {
+                                CLI_INTERRUPT.store(true, std::sync::atomic::Ordering::SeqCst);
+                                let _ = crate::terminal_editor::write("\r\n[interrupting - Ctrl+C again to quit]\r\n");
+                            }
                             crate::terminal_editor::Action::None => {}
                         }
                         wake.notify_all();
@@ -2512,7 +2585,7 @@ fn console_reader() {
 ///
 /// Idempotent: a caller that starts twice gets one reader and one `true`, so nothing has to
 /// remember whether it already did.
-pub extern "C" fn input_start(l: *mut LuaState) -> c_int {
+pub extern "C-unwind" fn input_start(l: *mut LuaState) -> c_int {
     let (lock, _) = console_input();
     match lock.lock() {
         Ok(mut state) => {
@@ -2541,7 +2614,7 @@ pub extern "C" fn input_start(l: *mut LuaState) -> c_int {
 
 /// Configure and draw the live editor's input row after the view sets its scroll region.
 /// No reader thread is started here: it must already be the *one* input_start reader.
-pub extern "C" fn input_editor(l: *mut LuaState) -> c_int {
+pub extern "C-unwind" fn input_editor(l: *mut LuaState) -> c_int {
     let row = arg_integer(l, 1).unwrap_or(0).max(0) as usize;
     let width = arg_integer(l, 2).unwrap_or(0).max(0) as usize;
     let height = arg_integer(l, 3).unwrap_or(1).clamp(1, 3) as usize;
@@ -2588,7 +2661,7 @@ fn wait_for_input(
 /// ends, with no polling and no lost keystrokes. `timeout_ms` of 0 means "take what is there
 /// now", for a caller draining a queue. An empty answer is an array and not a missing value:
 /// "nothing typed yet" is not "no console".
-pub extern "C" fn input_take(l: *mut LuaState) -> c_int {
+pub extern "C-unwind" fn input_take(l: *mut LuaState) -> c_int {
     let timeout_ms = arg_integer(l, 1).unwrap_or(0).max(0) as u64;
     let (lock, wake) = console_input();
     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
@@ -2621,7 +2694,7 @@ pub fn restore_input() {
     }
 }
 
-pub extern "C" fn input_stop(l: *mut LuaState) -> c_int {
+pub extern "C-unwind" fn input_stop(l: *mut LuaState) -> c_int {
     restore_input();
     push_json(l, &json!({"stopped": true}));
     1
@@ -2645,7 +2718,7 @@ mod terminal_tests {
 }
 
 /// Wall clock is for correlating events, never calculating durations.
-pub extern "C" fn now(l: *mut LuaState) -> c_int {
+pub extern "C-unwind" fn now(l: *mut LuaState) -> c_int {
     let seconds = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs_f64())
@@ -2660,7 +2733,7 @@ pub extern "C" fn now(l: *mut LuaState) -> c_int {
 /// With an override, it applies the same validation and child budget as `host.exec`, so a trace can
 /// show the actual deadline. Out-of-range integer overrides return `nil`; `host.exec` reports the
 /// corresponding error when called.
-pub extern "C" fn exec_timeout(l: *mut LuaState) -> c_int {
+pub extern "C-unwind" fn exec_timeout(l: *mut LuaState) -> c_int {
     let requested = match arg_integer(l, 1) {
         Some(value) => match u64::try_from(value) {
             Ok(value) => Some(value),

@@ -9,23 +9,32 @@
 //! It is a subset on purpose. A model asked for a table writes a table, so a table
 //! has to look like one; everything else it writes is prose, and prose that wraps
 //! is the requirement there.
-use std::mem;
 use std::slice;
 
+// Every buffer handed to the page is a boxed slice (capacity == length), so the page can hand it back
+// with `dealloc(pointer, length)` and the exact allocation is rebuilt. Before `dealloc` existed every
+// render leaked its input and its output, and a streamed answer re-rendered on each delta leaked the
+// whole answer each time.
 fn packed(value: String) -> i64 {
-    let bytes = value.into_bytes();
+    let bytes = value.into_bytes().into_boxed_slice();
     let length = bytes.len() as i64;
-    let pointer = bytes.as_ptr() as i64;
-    mem::forget(bytes);
+    let pointer = Box::into_raw(bytes) as *mut u8 as i64;
     (pointer << 32) | (length & 0xffff_ffff)
 }
 
 #[no_mangle]
 pub extern "C" fn alloc(length: i32) -> i32 {
-    let mut buffer = Vec::<u8>::with_capacity(length.max(0) as usize);
-    let pointer = buffer.as_mut_ptr() as i32;
-    mem::forget(buffer);
-    pointer
+    let buffer = vec![0u8; length.max(0) as usize].into_boxed_slice();
+    Box::into_raw(buffer) as *mut u8 as i32
+}
+
+#[no_mangle]
+pub extern "C" fn dealloc(pointer: i32, length: i32) {
+    if pointer == 0 {
+        return;
+    }
+    let length = length.max(0) as usize;
+    unsafe { drop(Box::from_raw(slice::from_raw_parts_mut(pointer as *mut u8, length) as *mut [u8])) };
 }
 
 #[no_mangle]

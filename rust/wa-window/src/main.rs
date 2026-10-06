@@ -514,6 +514,25 @@ mod companion {
         Ok((window, id, webview))
     }
 
+    /// `scheme://host[:port]` of a URL, lowercased; empty if it has none.
+    fn origin_of(url: &str) -> String {
+        let lower = url.trim().to_ascii_lowercase();
+        let Some((scheme, rest)) = lower.split_once("://") else { return String::new() };
+        let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+        format!("{scheme}://{authority}")
+    }
+
+    /// Hand an http(s) link to the user's default browser. Anything else (javascript:, file:, ms-*:)
+    /// is dropped: a model-written link must not become a local command.
+    fn open_in_system_browser(target: &str) {
+        let lower = target.trim().to_ascii_lowercase();
+        if !(lower.starts_with("http://") || lower.starts_with("https://")) || target.contains('"') {
+            note(&format!("blocked a new-window request for {target}"));
+            return;
+        }
+        let _ = std::process::Command::new("explorer").arg(target.trim()).spawn();
+    }
+
     /// `WindowId` is opaque; its debug form is stable enough to carry through an event and compare
     /// back, which is all this needs - the alternative is a map keyed by the id type itself.
     fn encode_id(id: tao::window::WindowId) -> usize {
@@ -604,8 +623,19 @@ mod companion {
         // The main window's identity, so the loop can tell which window an event or an IPC came
         // from - a view's "close" must close the view, not the chat.
         let main_id = encode_id(window.id());
+        // The companion only ever shows the node's own UI. A link in a reply (`target=_blank`) opens in
+        // the system browser instead of a WebView2 popup that shares this profile, and the main view
+        // never navigates to another site - where the injected bridge script would otherwise follow it.
+        let home_origin = origin_of(&url);
         let webview = WebViewBuilder::new_with_web_context(&mut web_context)
             .with_url(&url)
+            .with_navigation_handler(move |target: String| {
+                target == "about:blank" || origin_of(&target) == home_origin
+            })
+            .with_new_window_req_handler(|target: String, _features| {
+                open_in_system_browser(&target);
+                wry::NewWindowResponse::Deny
+            })
             .with_transparent(false)
             // We draw our own right-click menu in the page.
             .with_default_context_menus(false)

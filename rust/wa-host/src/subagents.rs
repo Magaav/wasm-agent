@@ -388,7 +388,7 @@ impl Manager {
             }
         };
         let boot = boot_id();
-        let mut tasks = self.inner.tasks.lock().expect("subagents tasks");
+        let mut tasks = self.inner.tasks.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         for entry in entries {
             let entry = match entry {
                 Ok(entry) => entry,
@@ -631,7 +631,7 @@ impl Manager {
             .map_err(|error| {
                 // The thread could not start: settle the record rather than leave
                 // an accepted receipt that nothing will ever advance.
-                let mut tasks = self.inner.tasks.lock().expect("subagents tasks");
+                let mut tasks = self.inner.tasks.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 if let Some(task) = tasks.get_mut(id) {
                     task.state = "failed".into();
                     task.settled = true;
@@ -687,7 +687,7 @@ impl Manager {
     }
 
     fn list(&self, owner: &str) -> Value {
-        let tasks = self.inner.tasks.lock().expect("subagents tasks");
+        let tasks = self.inner.tasks.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut items: Vec<Value> = tasks
             .values()
             .filter(|task| task.owner_user == owner)
@@ -769,7 +769,7 @@ impl Manager {
     /// stopped is still running (or still queued), so it stays inside `active`
     /// until it settles.
     fn summary(&self) -> Value {
-        let tasks = self.inner.tasks.lock().expect("subagents tasks");
+        let tasks = self.inner.tasks.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut queued = 0u64;
         let mut running = 0u64;
         let mut settled = json!({"completed": 0u64, "failed": 0u64, "cancelled": 0u64, "unknown": 0u64});
@@ -804,7 +804,7 @@ impl Manager {
         let lookup = format!("{owner}\u{1}{key}");
         // Same lock order as `start` (tasks then idem), so admission and lookup
         // cannot deadlock or disagree.
-        let tasks = self.inner.tasks.lock().expect("subagents tasks");
+        let tasks = self.inner.tasks.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let id = self.inner.idem.lock().ok().and_then(|idem| idem.get(&lookup).cloned());
         match id {
             Some(id) => match tasks.get(&id) {
@@ -905,7 +905,7 @@ fn run_child(inner: Arc<Inner>, runner: Runner, id: String, cancel: Arc<AtomicBo
     // A queued conversation turn must not occupy a node-thread while its predecessor
     // still owns that session. Unknown effects stop the chain visibly.
     {
-        let mut tasks = inner.tasks.lock().expect("subagents tasks");
+        let mut tasks = inner.tasks.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         loop {
             let after = tasks.get(&id).and_then(|task| task.spec["after_id"].as_str()).map(str::to_string);
             let Some(after) = after else { break };
@@ -925,7 +925,7 @@ fn run_child(inner: Arc<Inner>, runner: Runner, id: String, cancel: Arc<AtomicBo
         return;
     }
     {
-        let mut tasks = inner.tasks.lock().expect("subagents tasks");
+        let mut tasks = inner.tasks.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(task) = tasks.get_mut(&id) {
             if task.settled {
                 release(&inner);
@@ -938,7 +938,7 @@ fn run_child(inner: Arc<Inner>, runner: Runner, id: String, cancel: Arc<AtomicBo
     // The execution budget begins when execution does, not when the receipt was
     // admitted, so queueing does not secretly eat a child's timeout.
     let (timeout_seconds, owner) = {
-        let tasks = inner.tasks.lock().expect("subagents tasks");
+        let tasks = inner.tasks.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         match tasks.get(&id) {
             Some(task) => (task.timeout_seconds, format!("subagent:{}", task.session_id)),
             None => (0, String::new()),
@@ -947,7 +947,7 @@ fn run_child(inner: Arc<Inner>, runner: Runner, id: String, cancel: Arc<AtomicBo
     let deadline = if timeout_seconds > 0 { Some(Instant::now() + Duration::from_secs(timeout_seconds)) } else { None };
     enter_task(TaskContext { cancel: cancel.clone(), deadline, sockets, owner, provenance: Provenance::Child });
     let receipt = {
-        let tasks = inner.tasks.lock().expect("subagents tasks");
+        let tasks = inner.tasks.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         tasks.get(&id).map(|task| {
             let mut spec = task.spec.clone();
             if !spec.is_object() {
@@ -978,7 +978,7 @@ fn run_child(inner: Arc<Inner>, runner: Runner, id: String, cancel: Arc<AtomicBo
 
 fn acquire(inner: &Arc<Inner>, cancel: &Arc<AtomicBool>) -> bool {
     let max = inner.max_concurrent;
-    let mut running = inner.running.lock().expect("subagent running");
+    let mut running = inner.running.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     loop {
         if *running < max {
             *running += 1;
@@ -996,13 +996,13 @@ fn acquire(inner: &Arc<Inner>, cancel: &Arc<AtomicBool>) -> bool {
 }
 
 fn release(inner: &Arc<Inner>) {
-    let mut running = inner.running.lock().expect("subagent running");
+    let mut running = inner.running.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     *running = running.saturating_sub(1);
     inner.capacity.notify_all();
 }
 
 fn settle_view(inner: &Arc<Inner>, id: &str, state: &str, result: Value, error: Option<String>, accounting: Value) {
-    let mut tasks = inner.tasks.lock().expect("subagents tasks");
+    let mut tasks = inner.tasks.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let Some(task) = tasks.get_mut(id) else { return };
     if task.settled {
         return;
@@ -1137,7 +1137,7 @@ pub fn capture_event(payload: &str) -> bool {
     let Some(owner) = current_owner() else { return false };
     let Some(session) = owner.strip_prefix("subagent:") else { return false };
     let event = serde_json::from_str::<Value>(payload).unwrap_or(Value::Null);
-    let mut tasks = manager().inner.tasks.lock().expect("subagents tasks");
+    let mut tasks = manager().inner.tasks.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     if let Some(task) = tasks.values_mut().find(|task| task.session_id == session && task.state == "running" && !task.settled) {
         // Append original event before presentation. Retained per task; no automatic deletion.
         let path=manager().inner.root.join(&task.id).join("events.sqlite");

@@ -885,6 +885,38 @@ function M.response_timeout_retries()
   return math.max(0, math.min(3, math.floor(count)))
 end
 
+-- A failure the provider may not repeat if asked again a little later: rate limiting, an overloaded
+-- or restarting upstream, a dropped connection, a stream cut before it finished. None of these returned
+-- a tool call that ran, so replaying the same request is safe. A monthly-quota 429 is not retried here:
+-- `record_serving_http` marks the route blocked and the next attempt is refused before it is sent.
+local TRANSIENT_STATUS = { ["408"]=true, ["409"]=true, ["425"]=true, ["429"]=true, ["500"]=true,
+  ["502"]=true, ["503"]=true, ["504"]=true, ["529"]=true }
+local TRANSIENT_TEXT = { "connection reset", "connection refused", "broken pipe", "timed out", "timeout",
+  "connection closed", "unexpected eof", "dns", "temporarily unavailable", "overloaded" }
+
+function M.is_transient(problem)
+  local text = tostring(problem or ""):lower()
+  -- Lost response headers have their own, deliberately smaller budget (`response_timeout_retries`).
+  if M.is_response_timeout(text) then return false end
+  -- Errors arrive with Lua's `file:line:` prefixes, so the markers are found, not anchored.
+  local status = text:match("provider_http_(%d+)") or text:match("subscription_http_(%d+)")
+  if status then return TRANSIENT_STATUS[status] == true end
+  if text:find("subscription_transport_", 1, true) then return true end
+  if text:find("provider_error:", 1, true) then
+    for _, pattern in ipairs(TRANSIENT_TEXT) do
+      if text:find(pattern, 1, true) then return true end
+    end
+  end
+  return false
+end
+
+-- How many times a transient failure is retried, with exponential backoff (2, 4, 8, 16 s, jittered).
+function M.transient_retries()
+  local count = tonumber(env("WASM_AGENT_PROVIDER_RETRIES") or "")
+  if not count then return 4 end
+  return math.max(0, math.min(8, math.floor(count)))
+end
+
 -- `stream` forwards content deltas to the UI and still returns the whole
 -- message (content + tool_calls + usage) so the tool loop can continue.
 function M.complete(messages, tools, stream, opts)

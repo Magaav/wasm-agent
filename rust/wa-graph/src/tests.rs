@@ -994,3 +994,21 @@ fn opening_an_existing_database_adds_resolution_provenance_columns() {
     drop(store);
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// A symlink loop, a dangling link and a file that is not UTF-8 used to make indexing walk forever or
+/// abort, and every graph read then failed. They are skipped, and the snapshot still reads as fresh.
+#[cfg(unix)]
+#[test]
+fn links_and_undecodable_files_do_not_break_the_index() {
+    let root = temp_dir("links");
+    std::fs::write(root.join("good.rs"), "fn kept() {}\n").unwrap();
+    std::fs::write(root.join("binary.rs"), [0xffu8, 0xfe, 0x00, 0x80]).unwrap();
+    std::os::unix::fs::symlink(&root, root.join("loop")).unwrap();
+    std::os::unix::fs::symlink(root.join("missing.rs"), root.join("dangling.rs")).unwrap();
+    let db = root.join(".wa-graph").join("graph.db");
+    std::fs::create_dir_all(db.parent().unwrap()).unwrap();
+    let mut store = Store::open(&db).unwrap();
+    store.index(&root, true).expect("index survives links and undecodable files");
+    let reader = Store::open_readonly(&db).unwrap();
+    assert!(reader.verify_snapshot(&root).unwrap(), "and the snapshot is fresh");
+}

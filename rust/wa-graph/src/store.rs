@@ -178,7 +178,12 @@ impl Store {
         }
         for abs in collect_files(root)? {
             let rel = relative(root, &abs);
-            let source = std::fs::read(&abs)?;
+            // The same files the indexer skips are skipped here, or a skipped file would read as "stale"
+            // on every query and force a re-index that skips it again.
+            let Ok(source) = std::fs::read(&abs) else { continue };
+            if std::str::from_utf8(&source).is_err() {
+                continue;
+            }
             if sources.remove(&rel).as_deref() != Some(source.as_slice()) {
                 return Ok(false);
             }
@@ -259,7 +264,8 @@ impl Store {
 
     fn index_inner(&self, root: &Path, force: bool) -> Result<IndexReport> {
         let mut report = IndexReport::default();
-        let mut seen: Vec<String> = Vec::new();
+        // A set: `Vec::contains` in the removal pass below made a re-index quadratic in the repo size.
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         let files = collect_files(root)?;
         for abs in files {
             let rel = relative(root, &abs);
@@ -267,7 +273,15 @@ impl Store {
                 Some(l) => l,
                 None => continue,
             };
-            let source = std::fs::read_to_string(&abs)?;
+            // One file that is not UTF-8 (or vanished mid-scan) is skipped, not fatal: `?` here aborted
+            // the whole index, and every graph read then failed with graph_source_unstable.
+            let source = match std::fs::read_to_string(&abs) {
+                Ok(source) => source,
+                Err(error) => {
+                    eprintln!("[graph] skipped {rel}: {error}");
+                    continue;
+                }
+            };
             let meta = std::fs::metadata(&abs).ok();
             let mtime = meta
                 .as_ref()
@@ -277,7 +291,7 @@ impl Store {
                 .unwrap_or(0);
             let size = source.len() as i64;
             let hash = format!("{EXTRACT_VERSION}:{}", fnv1a(source.as_bytes()));
-            seen.push(rel.clone());
+            seen.insert(rel.clone());
 
             if !force {
                 if let Some((old_hash, old_mtime, old_size, old_source)) = self.file_stamp(&rel)? {
@@ -1561,7 +1575,14 @@ fn collect_files(root: &Path) -> Result<Vec<PathBuf>> {
             let entry = entry?;
             let path = entry.path();
             let name = entry.file_name().to_string_lossy().to_string();
-            if std::fs::metadata(&path)?.is_dir() {
+            // The entry's own type, not the target's: following symlinks let a link loop walk forever, and
+            // a dangling link made metadata() fail and abort the whole collection. Links are skipped, as
+            // file_search does.
+            let Ok(kind) = entry.file_type() else { continue };
+            if kind.is_symlink() {
+                continue;
+            }
+            if kind.is_dir() {
                 if matches!(
                     name.as_str(),
                     ".git"

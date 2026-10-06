@@ -842,7 +842,12 @@ fn start_node(binary: &Path, reason: &str) -> Result<()> {
             command.env_clear();
             command.envs(instance::guest_env(&selected));
         }
-        command.spawn().context("spawn node")?.id()
+        let child = command.spawn().context("spawn node")?;
+        let id = child.id();
+        if let Ok(mut children) = CHILDREN.lock() {
+            children.push(child);
+        }
+        id
     };
     say(&format!("started pid {child_pid}"));
     // Record what was started, so a later stop can prove it is the same process rather than trusting
@@ -1137,13 +1142,53 @@ fn to_msys_path(path: &Path) -> String {
     text
 }
 
+/// How long `upgrade` may run before it is killed (WA_SENTINEL_UPGRADE_TIMEOUT_SECONDS, default 30 min).
+fn upgrade_timeout() -> Duration {
+    Duration::from_secs(
+        std::env::var("WA_SENTINEL_UPGRADE_TIMEOUT_SECONDS").ok().and_then(|v| v.parse().ok()).unwrap_or(1800),
+    )
+}
+
+/// Run a command to completion or until `limit`, then kill it. Returns its output either way; a killed
+/// command has a failing status and says so in stderr.
+fn run_bounded(mut command: std::process::Command, limit: Duration) -> Result<std::process::Output> {
+    let dir = std::env::temp_dir();
+    let tag = format!("wa-sentinel-{}-{}", std::process::id(), now_epoch());
+    let (out_path, err_path) = (dir.join(format!("{tag}.out")), dir.join(format!("{tag}.err")));
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::fs::File::create(&out_path)?)
+        .stderr(std::fs::File::create(&err_path)?);
+    let mut child = command.spawn()?;
+    let started = Instant::now();
+    let (status, timed_out) = loop {
+        if let Some(status) = child.try_wait()? {
+            break (status, false);
+        }
+        if started.elapsed() >= limit {
+            let _ = child.kill();
+            break (child.wait()?, true);
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    };
+    let stdout = std::fs::read(&out_path).unwrap_or_default();
+    let mut stderr = std::fs::read(&err_path).unwrap_or_default();
+    let _ = std::fs::remove_file(&out_path);
+    let _ = std::fs::remove_file(&err_path);
+    if timed_out {
+        stderr.extend_from_slice(format!("\n[sentinel] killed after {}s (timeout)\n", limit.as_secs()).as_bytes());
+    }
+    Ok(std::process::Output { status, stdout, stderr })
+}
+
 pub(crate) fn verb_upgrade(binary: &str, reason: &str) -> Result<String> {
     if binary.is_empty() {
         bail!("upgrade needs --binary");
     }
     let script = resolve_upgrade_script()?;
     let (interpreter, script_arg) = shell_for(&script);
-    let output = std::process::Command::new(&interpreter)
+    let mut command = std::process::Command::new(&interpreter);
+    command
         // The path is passed to the interpreter as its first argument. Git Bash does not accept a
         // `C:/...` path there, and WSL's bash cannot see `/c/...` at all, so both the interpreter
         // *and* the path form have to agree (`shell_for`).
@@ -1155,9 +1200,11 @@ pub(crate) fn verb_upgrade(binary: &str, reason: &str) -> Result<String> {
         // directory does not matter to it. This used to pin cwd to the sentinel's own, which was
         // the install directory - a directory with no `scripts/` in it, which is exactly why the
         // relative default could never be found from a detached watcher.
-        .current_dir(std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
-        .output()
-        .context("run the upgrade script")?;
+        .current_dir(std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    // Bounded. `output()` waited forever: a hung upgrade.sh (waiting for an idle node that never
+    // came) left MAINTENANCE_ACTIVE set and held every later restart. Output goes to files rather than
+    // pipes so a chatty script cannot fill a pipe and deadlock against the wait.
+    let output = run_bounded(command, upgrade_timeout()).context("run the upgrade script")?;
     let log = sentinel_dir().join("upgrade.log");
     let mut record = format!("{}\t{}\t{}\n", now_epoch(), binary, reason);
     record.push_str(&String::from_utf8_lossy(&output.stdout));
@@ -2202,6 +2249,7 @@ fn watch() -> Result<()> {
         // Watching the node, not restarting it: an auto-restart that nobody asked for would fight the
         // operator every time they stop a node on purpose. The outage is reported; restarting is a
         // request.
+        reap_children();
         if node_is_up() {
             if down_since.take().is_some() {
                 audit("node-up", &format!("port {}", node_port()), "the node is answering again");
@@ -2367,7 +2415,25 @@ fn pid_alive(pid: u32) -> bool {
             .output();
         return output.map(|o| String::from_utf8_lossy(&o.stdout).contains(&pid.to_string())).unwrap_or(false);
     }
-    Path::new(&format!("/proc/{pid}")).exists()
+    reap_children();
+    // A zombie keeps its /proc entry until its parent reaps it, so "the directory exists" read a killed
+    // node as alive and every second restart refused with "still alive". The state field says.
+    match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+        Ok(stat) => !matches!(stat.rsplit(')').next().and_then(|rest| rest.trim_start().chars().next()), Some('Z' | 'X')),
+        Err(_) => false,
+    }
+}
+
+/// The nodes this sentinel started, kept so they can be reaped. Dropping the `Child` after spawning
+/// left every stopped node a zombie for the sentinel's whole lifetime.
+#[cfg(not(windows))]
+static CHILDREN: std::sync::Mutex<Vec<std::process::Child>> = std::sync::Mutex::new(Vec::new());
+
+fn reap_children() {
+    #[cfg(not(windows))]
+    if let Ok(mut children) = CHILDREN.lock() {
+        children.retain_mut(|child| !matches!(child.try_wait(), Ok(Some(_))));
+    }
 }
 
 fn status() -> Result<()> {
@@ -2933,5 +2999,35 @@ mod request_verb_tests {
             None=>std::env::remove_var("WASM_AGENT_HOME"),
         }
         let _=std::fs::remove_dir_all(&home);
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod reap_tests {
+    /// The regression: a node the sentinel had killed but not reaped is a zombie, still listed in /proc,
+    /// and `pid_alive` said "alive" - so the next restart waited 10 s and refused.
+    #[test]
+    fn a_killed_unreaped_child_is_not_alive() {
+        let mut child = std::process::Command::new("sleep").arg("30").spawn().expect("spawn sleep");
+        let pid = child.id();
+        assert!(super::pid_alive(pid));
+        child.kill().expect("kill");
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert!(std::path::Path::new(&format!("/proc/{pid}")).exists(), "still a zombie: not yet reaped");
+        assert!(!super::pid_alive(pid), "a zombie is dead");
+        let _ = child.wait();
+    }
+
+    /// The regression: `upgrade` waited on its script forever, holding maintenance mode.
+    #[test]
+    fn a_hung_script_is_killed_at_its_limit() {
+        let mut command = std::process::Command::new("sh");
+        command.args(["-c", "echo started; sleep 30"]);
+        let started = std::time::Instant::now();
+        let output = super::run_bounded(command, std::time::Duration::from_secs(1)).expect("run");
+        assert!(started.elapsed() < std::time::Duration::from_secs(5), "killed near the limit");
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stdout).contains("started"));
+        assert!(String::from_utf8_lossy(&output.stderr).contains("timeout"));
     }
 }

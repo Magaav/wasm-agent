@@ -57,6 +57,7 @@ const EMBEDDED: &[(&str, &str)] = &[
     ("lua/core/state.lua", include_str!("../../../lua/core/state.lua")),
     ("lua/core/status.lua", include_str!("../../../lua/core/status.lua")),
     ("lua/core/update.lua", include_str!("../../../lua/core/update.lua")),
+    ("lua/core/backup.lua", include_str!("../../../lua/core/backup.lua")),
     ("lua/core/merge.lua", include_str!("../../../lua/core/merge.lua")),
     ("lua/core/toolchain.lua", include_str!("../../../lua/core/toolchain.lua")),
     ("lua/core/provider.lua", include_str!("../../../lua/core/provider.lua")),
@@ -219,11 +220,29 @@ fn open_db(path: &str) -> Connection {
     let connection = Connection::open_with_flags(&database, flags).expect("open database");
     connection
         .execute_batch(
-            "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;\
+            // FULL, not NORMAL: `effect_sends` is the durable reservation taken before a WhatsApp send,
+            // and in WAL mode NORMAL can lose the last commits on power loss - the send would then be
+            // replayed after reboot. Every other store here already uses FULL.
+            "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;\
              PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;",
         )
         .expect("pragma");
     connection
+}
+
+/// Create the node's state directory readable by its owner only. It holds transcripts, the WhatsApp
+/// ledger, the node key and credentials; with a default umask those were readable by every local user.
+/// An existing directory is tightened only if it is the node's own `.wasm-agent`.
+pub(crate) fn private_dir(path: &std::path::Path) {
+    let existed = path.exists();
+    let _ = std::fs::create_dir_all(path);
+    #[cfg(unix)]
+    if !existed || path.file_name().is_some_and(|name| name == ".wasm-agent") {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700));
+    }
+    #[cfg(not(unix))]
+    let _ = existed;
 }
 
 /// Load KEY=VALUE pairs from ~/.wasm-agent/env without overwriting real env.
@@ -276,11 +295,12 @@ fn main() {
         println!("wasm-agent {}", env!("CARGO_PKG_VERSION"));
         return;
     }
-    // Every node and node-thread gets rg, including service launches with a sparse PATH.
-    // Installation happens before model execution; failure is visible, never a shell 127 later.
+    // Every node and node-thread gets rg, including service launches with a sparse PATH. Installation
+    // happens before model execution and a failure is said out loud - but it no longer stops the node:
+    // offline, firewalled or with GitHub down, exiting here put a service into a restart loop it could
+    // never leave, while the `grep` tool has its own built-in search and only a bare `rg` in `bash` needs it.
     if let Err(error) = ripgrep::ensure(std::path::Path::new(&home)) {
-        eprintln!("ripgrep_unavailable: {error:#}");
-        std::process::exit(2);
+        eprintln!("ripgrep_unavailable: {error:#} (continuing: the grep tool does not need it; `rg` in bash will fail)");
     }
 
     // The host consumes --db; the Lua core gets the rest.
@@ -318,7 +338,7 @@ fn main() {
         .unwrap_or_else(|| PathBuf::from(format!("{home}/.wasm-agent/graph.db")));
     graph::configure(graph_root.clone(), graph_db.clone());
     if let Some(parent) = std::path::Path::new(&db).parent() {
-        let _ = std::fs::create_dir_all(parent);
+        private_dir(parent);
     }
     // Every interpreter gets its OWN SQLite connection to the same WAL database.
     // One shared connection made a transaction an interpreter held open visible to
@@ -373,6 +393,8 @@ fn main() {
     lua.register("sha256", host::sha256);
     lua.register("uuid", host::uuid);
     lua.register("read_file", host::read_file);
+    lua.register("path_kind", host::path_kind);
+    lua.register("isatty", host::stream_is_terminal);
     lua.register("read_image_base64", host::read_image_base64);
     lua.register("write_file", host::write_file);
     lua.register("exec", host::exec);

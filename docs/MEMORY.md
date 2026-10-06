@@ -184,7 +184,11 @@ the durable telemetry totals, including unsuccessful attempts.
 Summaries are **lossy interpretations**, not lossless compression. The retained
 original transcript is the evidence, accessible via `session`/`search_messages`;
 `session` supports `before_seq` pagination. Default transcript retention remains
-seven days; debug transcripts persist. `session`/`search_messages` also offer an
+seven days (`WASM_AGENT_RETENTION_DAYS`, 0 keeps everything); debug transcripts persist.
+The node runs it daily when quiet (`wa_retention`): an old message is removed only when
+it is at/before its session's compaction point or the session has been quiet past the
+cutoff, the replication journal is trimmed behind every peer's cursor, and telemetry
+keeps four times the transcript window. `session`/`search_messages` also offer an
 explicit `view:'compact'` with omitted diagnostic fields and exact-row references;
 full remains the default. Exact `message_id` lookup checks session identity and
 ownership before returning anything. Byte-paged exact row JSON is available to the
@@ -343,3 +347,13 @@ Two bugs this surfaced, both fixed:
 rows. Debug sessions are never pruned. Summaries outlive their messages (they are
 the compressed value), so a years-old session still contributes its conclusions
 without carrying the raw trace.
+
+## Backups
+
+`lua/core/backup.lua` snapshots every SQLite store under the data/config directories plus the live
+database (`VACUUM INTO`, WAL included), checks each copy with `PRAGMA integrity_check`, writes them to
+`<config>/backups/<UTC stamp>[-label]/` and keeps the newest five. `/update` takes one (`pre-update`)
+before queueing a deploy and refuses to deploy if it fails, because the new binary migrates the schema
+and an older binary refuses a migrated database. By hand:
+`WA_SCRIPT=tests/backup-all-stores.lua` shows the call; `dofile("lua/core/backup.lua").run("label")`.
+

@@ -108,7 +108,9 @@ impl Bridge {
         let id = {
             let mut inner = self.inner.lock().unwrap();
             inner.next_id += 1;
-            inner.next_id.to_string()
+            // The counter keeps ids ordered in logs; the random tail makes a result unforgeable by
+            // anyone who did not receive the command (a sequential id could be guessed and answered).
+            format!("{}-{}", inner.next_id, random_tag())
         };
         {
             let mut inner = self.inner.lock().unwrap();
@@ -371,10 +373,21 @@ fn handle(bridge: &Bridge, stream: &mut TcpStream) -> std::io::Result<()> {
             let method = request.next().unwrap_or("").to_string();
             let path = request.next().unwrap_or("/").to_string();
             let mut length = 0usize;
+            let mut from_browser = false;
             for line in lines {
-                if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                let lower = line.to_ascii_lowercase();
+                if let Some(value) = lower.strip_prefix("content-length:") {
                     length = value.trim().parse().unwrap_or(0);
                 }
+                // The window polls with a native client. A browser always marks its requests (`Origin` on a
+                // POST, `Sec-Fetch-*` everywhere), so any page - including a DNS-rebound one - is refused
+                // before it can read a command or post a forged result.
+                if lower.starts_with("origin:") || lower.starts_with("sec-fetch-") {
+                    from_browser = true;
+                }
+            }
+            if from_browser {
+                return respond(stream, 403, "{\"error\":\"foreign_origin\"}");
             }
             if data.len() >= end + 4 + length {
                 break (method, path, data[end + 4..end + 4 + length].to_vec());
@@ -429,6 +442,14 @@ fn respond(stream: &mut TcpStream, status: u16, body: &str) -> std::io::Result<(
     stream.write_all(head.as_bytes())?;
     stream.write_all(body.as_bytes())?;
     stream.flush()
+}
+
+/// 64 random bits as hex, from the OS generator.
+fn random_tag() -> String {
+    use ring::rand::{SecureRandom, SystemRandom};
+    let mut bytes = [0u8; 8];
+    let _ = SystemRandom::new().fill(&mut bytes);
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// The budget a caller gets when it does not say. Exposed so the tool schema and

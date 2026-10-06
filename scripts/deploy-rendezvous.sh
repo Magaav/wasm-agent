@@ -30,7 +30,7 @@ i=args.index(b'--db');print(args[i+1].decode())
 PY
 )"
 [ -f "$DB" ] || fail 'exact service registry database unavailable'
-CARGO_BUILD_JOBS=2 cargo build --release --offline --manifest-path "$ROOT/rust/Cargo.toml" -p wa-host || fail 'canonical native build failed before installation'
+CARGO_BUILD_JOBS=2 cargo build --release --offline --locked --manifest-path "$ROOT/rust/Cargo.toml" -p wa-host || fail 'canonical native build failed before installation'
 [ -f "$ROOT/rust/target/release/wa" ] || fail 'canonical build produced no binary'
 NEW="$ROOT/rust/target/release/wa"
 DIR="$(dirname "$TARGET")"; EVIDENCE="$DIR/rendezvous-deploy-$EXPECTED"

@@ -8,9 +8,27 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=ubuntu
+# WASM_AGENT_NETWORK_ADMINS=<operator node ids, comma-separated>. Without it every node registers
+# as a guest and no peer can command another (a role is never taken from the node itself).
+EnvironmentFile=-/home/ubuntu/.wasm-agent/rendezvous.env
 ExecStart=/home/ubuntu/.local/bin/wa rendezvous --bind 127.0.0.1 --port 8890 --db /home/ubuntu/.wasm-agent/rendezvous.db
 Restart=always
 RestartSec=3
+# The one internet-facing process: it needs its database and nothing else of the machine. (The node and the
+# sentinel are deliberately left unconfined - the agent is meant to act on this machine.)
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/ubuntu/.wasm-agent
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryMax=512M
+TasksMax=512
+LimitNOFILE=4096
 
 [Install]
 WantedBy=multi-user.target

@@ -368,15 +368,17 @@ end
 
 -- ---- is this a terminal? --------------------------------------------------------
 
--- There is no tty check in the host (`host.*` exposes no isatty), so this is a
--- heuristic, and it is stated as one: every terminal this runs in sets one of these,
--- and a pipe, a file or a test does not. NO_COLOR always wins, and the explicit
--- override exists because a guess needs a way to be overruled.
-function M.wants_live(getenv)
+-- Output that is not a terminal (`wa chat | tee log`) never gets the live view: the host says so
+-- directly (`host.isatty`). Past that it is a heuristic, stated as one: every terminal this runs in
+-- sets one of these variables. NO_COLOR always wins, and the explicit override exists because a guess
+-- needs a way to be overruled. `istty` is injectable for tests, like `getenv`.
+function M.wants_live(getenv, istty)
   getenv = getenv or function(name) return host.getenv(name) end
+  istty = istty or function() if host.isatty then return host.isatty("stdout") end return nil end
   local explicit = getenv("WASM_AGENT_CLI_VIEW") or ""
   if explicit == "plain" or explicit == "off" or explicit == "0" then return false end
   if explicit == "live" or explicit == "on" or explicit == "1" then return true end
+  if istty() == false then return false end
   if (getenv("NO_COLOR") or "") ~= "" then return false end
   local term = getenv("TERM") or ""
   if term == "dumb" then return false end

@@ -42,6 +42,8 @@ CREATE TABLE IF NOT EXISTS ledger_messages (
   PRIMARY KEY (conversation_id, message_id));
 CREATE INDEX IF NOT EXISTS ledger_messages_conversation_idx ON ledger_messages(conversation_id, observed_at);
 CREATE INDEX IF NOT EXISTS ledger_messages_time_idx ON ledger_messages(observed_at);
+-- `ledger_message(id)` filters on message_id alone, the second column of the primary key: a scan without this.
+CREATE INDEX IF NOT EXISTS ledger_messages_message_idx ON ledger_messages(message_id);
 CREATE VIRTUAL TABLE IF NOT EXISTS ledger_messages_fts USING fts5(
   body, conversation_id UNINDEXED, message_id UNINDEXED,
   tokenize = 'unicode61 remove_diacritics 2');

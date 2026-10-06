@@ -4,10 +4,13 @@
 //! is one Rust binary with Lua inside: no Python, no interpreter dependency.
 #![allow(non_camel_case_types)]
 
-use std::ffi::{c_char, c_int, c_void, CStr, CString};
+use std::ffi::{c_char, c_int, c_void, CString};
 
 pub type LuaState = c_void;
 pub type LuaCFunction = extern "C" fn(*mut LuaState) -> c_int;
+/// A host callback. `C-unwind`, so a panic inside it can reach the guard that catches it (a plain
+/// `extern "C"` function aborts the process at its own boundary). Lua only ever calls the guard.
+pub type HostFn = extern "C-unwind" fn(*mut LuaState) -> c_int;
 pub type LuaInteger = i64;
 pub type LuaNumber = f64;
 
@@ -188,18 +191,21 @@ impl Lua {
     }
 
     /// Register a C function (no upvalue) into the table on top of the stack.
-    pub fn register(&self, name: &str, f: LuaCFunction) {
+    pub fn register(&self, name: &str, f: HostFn) {
         unsafe {
-            lua_pushcclosure(self.l, f, 0);
+            lua_pushlightuserdata(self.l, f as *mut c_void);
+            lua_pushcclosure(self.l, guarded_1, 1);
             lua_setfield(self.l, -2, cstr(name).as_ptr());
         }
     }
 
-    /// Register a C function with a lightuserdata upvalue into the top table.
-    pub fn register_with_upvalue(&self, name: &str, f: LuaCFunction, data: *mut c_void) {
+    /// Register a C function with a lightuserdata upvalue into the top table. The data stays upvalue 1,
+    /// where the callback reads it; the callback itself rides along as upvalue 2 for the guard.
+    pub fn register_with_upvalue(&self, name: &str, f: HostFn, data: *mut c_void) {
         unsafe {
             lua_pushlightuserdata(self.l, data);
-            lua_pushcclosure(self.l, f, 1);
+            lua_pushlightuserdata(self.l, f as *mut c_void);
+            lua_pushcclosure(self.l, guarded_2, 2);
             lua_setfield(self.l, -2, cstr(name).as_ptr());
         }
     }
@@ -277,6 +283,38 @@ impl Drop for Lua {
     }
 }
 
+// Every host callback runs behind one of these guards. A Rust panic that unwinds out of an `extern "C"`
+// function aborts the process (Rust 1.81+), so one `expect` on a poisoned lock inside any of ~60 host
+// functions used to take the whole node down. The guard catches it, restores the stack, and answers the
+// Lua caller with `{"error":"host_panic"}` - a value every caller can survive - instead of aborting.
+fn guarded(l: *mut LuaState, upvalue: c_int) -> c_int {
+    let callback = unsafe { lua_touserdata(l, upvalue_index(upvalue)) };
+    if callback.is_null() {
+        return 0;
+    }
+    let callback: HostFn = unsafe { std::mem::transmute(callback) };
+    let top = unsafe { lua_gettop(l) };
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| callback(l))) {
+        Ok(results) => results,
+        Err(_) => {
+            let answer = b"{\"error\":\"host_panic\"}";
+            unsafe {
+                lua_settop(l, top);
+                lua_pushlstring(l, answer.as_ptr() as *const c_char, answer.len());
+            }
+            1
+        }
+    }
+}
+
+extern "C" fn guarded_1(l: *mut LuaState) -> c_int {
+    guarded(l, 1)
+}
+
+extern "C" fn guarded_2(l: *mut LuaState) -> c_int {
+    guarded(l, 2)
+}
+
 /// Read a C string at `idx` (returns None for non-strings).
 pub fn arg_string(l: *mut LuaState, idx: c_int) -> Option<String> {
     unsafe {
@@ -285,7 +323,9 @@ pub fn arg_string(l: *mut LuaState, idx: c_int) -> Option<String> {
         if ptr.is_null() {
             None
         } else {
-            Some(CStr::from_ptr(ptr).to_string_lossy().to_string())
+            // The whole Lua string, by its length: reading it as a C string stopped at the first NUL, so a
+            // write of text containing one silently truncated the file and still reported success.
+            Some(String::from_utf8_lossy(std::slice::from_raw_parts(ptr as *const u8, len)).into_owned())
         }
     }
 }
@@ -300,5 +340,33 @@ pub fn arg_integer(l: *mut LuaState, idx: c_int) -> Option<i64> {
         } else {
             Some(value)
         }
+    }
+}
+
+#[cfg(test)]
+mod guard_tests {
+    use super::*;
+
+    extern "C-unwind" fn panics(_l: *mut LuaState) -> c_int {
+        panic!("a host callback failed");
+    }
+
+    extern "C-unwind" fn answers(l: *mut LuaState) -> c_int {
+        let text = b"fine";
+        unsafe { lua_pushlstring(l, text.as_ptr() as *const c_char, text.len()) };
+        1
+    }
+
+    /// The regression: a panic inside any host callback unwound out of `extern "C"` and aborted the node.
+    #[test]
+    fn a_panicking_callback_answers_instead_of_aborting() {
+        let lua = Lua::new();
+        lua.push_table();
+        lua.register("boom", panics);
+        lua.register("ok", answers);
+        lua.set_global("probe");
+        lua.do_string("RESULT = probe.boom('x', 'y') .. '|' .. probe.ok()", "guard").unwrap();
+        lua.do_string("function result() return RESULT end", "read").unwrap();
+        assert_eq!(lua.call_string("result", &[]).unwrap(), "{\"error\":\"host_panic\"}|fine");
     }
 }

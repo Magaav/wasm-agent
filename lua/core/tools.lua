@@ -655,7 +655,9 @@ end
 
 function M.dispatch(memory, name, args, role, ctx)
   args = args or {}
-  role = role or "master"
+  -- No role means the least one, not the most: a future caller that forgets to pass a role must not
+  -- get the shell.
+  role = role or "guest"
   ctx = ctx or {}
   local user_id = ctx.user_id or "master"
   -- A subagent runs only the exact tools its profile named. Checked here as well
@@ -694,10 +696,14 @@ function M.dispatch(memory, name, args, role, ctx)
     return tool_output.read(args.sha256,args.offset,args.limit)
   end
 
+  -- A guest's memory is its own: it writes and reads only `user:<id>`, never `global` (which a
+  -- master's recall and runs read) and never another scope. The model picks `scope`; the role decides.
+  local guest_scope = not is_master(role) and ("user:" .. tostring(user_id)) or nil
   if name == "remember" then
     if not args.content or args.content == "" then return { error = "content_required" } end
-    return { ok = true, id = memory.remember(args.content, args.scope or "global", args.tags or {}) }
+    return { ok = true, id = memory.remember(args.content, guest_scope or args.scope or "global", args.tags or {}) }
   elseif name == "recall" then
+    if guest_scope then return memory.recall(args.query or "", args.limit or 10, guest_scope, true) end
     return memory.recall(args.query or "", args.limit or 10, args.scope)
   elseif name == "skill" then
     local skills = dofile("lua/core/skills.lua")
@@ -715,7 +721,7 @@ function M.dispatch(memory, name, args, role, ctx)
     end
     return { name = found.name, path = found.path, dir = found.dir, content = skills.content(found) }
   elseif name == "memories" then
-    return memory.memories(args.scope, args.limit or 50)
+    return memory.memories(guest_scope or args.scope, args.limit or 50)
   elseif name == "forget" then
     if not args.id or args.id == "" then return { error = "id_required" } end
     return { id = args.id, forgotten = memory.forget(args.id) and true or false }
@@ -854,7 +860,13 @@ function M.dispatch(memory, name, args, role, ctx)
     if not args.path then return { error = "path_required" } end
     if type(args.content)~="string" then return {error="content_required"} end
     local path = resolve_path(memory, ctx, args.path)
-    local before = (host.read_file and host.read_file(path)) or ""
+    local before = host.read_file and host.read_file(path)
+    -- nil is "missing" only if the file is really missing. An existing file that is not readable as
+    -- text (binary, invalid UTF-8) has no "before" this store can hold: record it as not undoable,
+    -- never as an empty file that undo would then write back over the original.
+    if before == nil then
+      before = (host.path_kind and host.path_kind(path) == "file") and false or ""
+    end
     local ok = host.write_file and host.write_file(path, args.content or "")
     -- Record what changed while the previous text is still in hand: this is what the diff
     -- topic shows and what its undo replays. A failed write records nothing.

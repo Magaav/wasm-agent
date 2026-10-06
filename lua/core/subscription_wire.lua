@@ -306,6 +306,7 @@ function M.items(messages, entry)
     if role == 'system' then
       instructions[#instructions + 1] = flat_text(message.content)
     elseif role == 'assistant' then
+      for _, item in ipairs(message.reasoning_items or {}) do items[#items + 1] = item end
       local content = flat_text(message.content)
       if content ~= '' then
         local phase = message.phase
@@ -510,6 +511,7 @@ function M.session(opts)
     commentary = {},
     commentary_ids = {},
     reasoning = {},
+    reasoning_items = {},
     ttft = nil,
     request_id = nil,
     stop_reason = 'pending',
@@ -737,6 +739,13 @@ function M.session(opts)
       state.completed_items[event.output_index] = true
       if not slot then return end
       if item.type == 'reasoning' and slot.kind == 'thinking' then
+        -- Kept whole for replay: with store=false the endpoint remembers nothing, so the next round
+        -- only has this reasoning if it is sent back. The id is left out on purpose (store=false
+        -- cannot resolve item ids); the encrypted content is what carries the state.
+        if type(item.encrypted_content) == 'string' and item.encrypted_content ~= '' then
+          state.reasoning_items[#state.reasoning_items + 1] = {type = 'reasoning',
+            summary = item.summary or {}, encrypted_content = item.encrypted_content}
+        end
         local summary = {}
         for _, part in ipairs(item.summary or {}) do summary[#summary + 1] = part.text or '' end
         local content = {}
@@ -893,6 +902,7 @@ function M.session(opts)
         return table.concat(texts, '')
       end)(),
       tool_calls = tool_calls,
+      reasoning_items = #state.reasoning_items > 0 and {model = model, items = state.reasoning_items} or nil,
       finish_reason = finish,
       stream_complete = true,
       model = model,

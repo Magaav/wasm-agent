@@ -578,6 +578,14 @@ local function node_capability(capability, args, caller)
   })
 end
 
+-- A verified call's answer is signed by this node over the caller's request signature and the reply
+-- bytes, so the relay (or anything on a plain-HTTP hop) cannot hand the caller a forged result - and a
+-- forged result in a master's context is a prompt it would act on.
+local function signed_reply(signature, ts, out)
+  local _, reply_sig = nodeslib.sign_action("reply", math.floor(tonumber(ts) or 0), tostring(signature or "") .. "\n" .. out)
+  return json.encode({ reply = out, reply_sig = reply_sig or "" })
+end
+
 function wa_node_call(payload, from, public_key, ts, signature)
   local ok, request = pcall(json.decode, payload)
   if not ok or type(request) ~= "table" then return json.encode({ error = "bad_request" }) end
@@ -586,21 +594,24 @@ function wa_node_call(payload, from, public_key, ts, signature)
   if capability == "remote" then return json.encode({ error = "remote_cannot_recurse" }) end
   local caller, problem = verify_peer(from, public_key, ts, signature, "call", payload)
   if problem then return json.encode({ error = problem }) end
-  if capability == "subagent" and request.to_node_id ~= (nodeslib.identity() or {}).node_id then
+  -- The signed body names its target for every capability, so a relay that re-addresses a valid call
+  -- (a master's `bash` meant for node A, delivered to node B) is refused here.
+  if request.to_node_id ~= (nodeslib.identity() or {}).node_id then
     return json.encode({error="wrong_target"})
   end
+  local function answer(value) return signed_reply(signature, ts, json.encode(value)) end
   if enrollment.managed() then
-    if not enrollment.target(request) then return json.encode({ error = "wrong_target" }) end
+    if not enrollment.target(request) then return answer({ error = "wrong_target" }) end
     local allowed = { status=true, set_role=true, read=true, write=true, edit=true,
       ls=true, grep=true, bash=true, shell=true, client=true }
-    if not allowed[capability] then return json.encode({ error = "capability_not_granted" }) end
+    if not allowed[capability] then return answer({ error = "capability_not_granted" }) end
     enrollment.audit(caller, capability, "started")
     local ran, result = pcall(node_capability, capability, request.args, caller)
     enrollment.audit(caller, capability, ran and not result.error and "completed" or "failed")
-    if not ran then return json.encode({ error = tostring(result) }) end
-    return json.encode(result)
+    if not ran then return answer({ error = tostring(result) }) end
+    return answer(result)
   end
-  return json.encode(node_capability(capability, request.args, caller))
+  return answer(node_capability(capability, request.args, caller))
 end
 
 -- Streaming turn requested by a peer (/node/chat): events go to that stream.
@@ -979,19 +990,27 @@ end
 -- Accept a batch from a peer: idempotent, and never echo an entry's own origin.
 function wa_sync_apply(payload, from, public_key, ts, signature)
   if enrollment.managed() then return json.encode({ error = "managed_sync_disabled" }) end
-  local _, problem = verify_peer(from, public_key, ts, signature, "sync")
+  -- `sync-v2` signs the body and the body names its target, so neither the relay nor anything on a
+  -- plain-HTTP hop can swap the entries (planting turns or memories) or replay a batch at another node.
+  -- An old `sync` sender fails `bad_signature` here: both sides must run the same protocol.
+  local _, problem = verify_peer(from, public_key, ts, signature, "sync-v2", payload or "")
   if problem then return json.encode({ error = problem }) end
   local ok, request = pcall(json.decode, payload)
   if not ok or type(request) ~= "table" or type(request.entries) ~= "table" then
     return json.encode({ error = "bad_request" })
   end
   local self_id = (nodeslib.identity() or {}).node_id or ""
-  local applied = 0
-  for _, entry in ipairs(request.entries) do
-    if entry.origin ~= self_id and memory.apply_entry(entry) then
-      applied = applied + 1
+  if request.to_node_id ~= self_id then return json.encode({ error = "wrong_target" }) end
+  -- One batch, one transaction: all of it lands or none of it does, and 200 entries cost one commit.
+  local applied = memory.transaction(function()
+    local count = 0
+    for _, entry in ipairs(request.entries) do
+      if entry.origin ~= self_id and memory.apply_entry(entry) then
+        count = count + 1
+      end
     end
-  end
+    return count
+  end)
   return json.encode({ ok = true, applied = applied, head = memory.journal_head() })
 end
 
@@ -1011,12 +1030,18 @@ function wa_sync_tick()
         -- A name/id routes through the fabric (direct, else relay); a URL is used directly.
         local target = nodeslib.find(peer)
         if not target and peer:match("^https?://") then
-          target = { node_id = peer, name = peer, endpoints = { peer } }
+          -- A bare URL names no node, and the batch must: ask the peer which node it is.
+          local okh, head = pcall(function()
+            local response = json.decode(host.http("GET", peer:gsub("/+$", "") .. "/sync/head", "{}", ""))
+            return response and tonumber(response.status) == 200 and json.decode(response.body) or nil
+          end)
+          local id = okh and type(head) == "table" and tostring(head.node_id or "") or ""
+          if id ~= "" then target = { node_id = id, name = peer, endpoints = { peer } } end
         end
-        local headers = target and nodeslib.signed_headers("sync") or nil
+        local body = target and json.encode({ entries = entries, to_node_id = target.node_id }) or nil
+        local headers = target and nodeslib.signed_headers("sync-v2", body) or nil
         if headers then
-          local response = nodeslib.request(target, "/sync/push",
-            json.encode({ entries = entries }), headers)
+          local response = nodeslib.request(target, "/sync/push", body, headers)
           local applied = false
           if response and tonumber(response.status) == 200 then
             -- A 200 carrying an error body is a REJECTION: do not advance the
@@ -1041,6 +1066,24 @@ function wa_sync_tick()
     end
   end
   return json.encode({ ok = failed == 0, peers = peers, pushed = pushed, failed = failed, error = last_error })
+end
+
+-- Daily housekeeping, called by the node when it is quiet. WASM_AGENT_RETENTION_DAYS (default 7; 0 keeps
+-- everything) is the transcript window; telemetry keeps four times as long. Nothing here touches a debug
+-- session, a memory, or anything a live context still reads.
+function wa_retention()
+  local days = tonumber(host.getenv("WASM_AGENT_RETENTION_DAYS") or "") or 7
+  if days <= 0 then return json.encode({ ok = true, skipped = "retention_disabled" }) end
+  local messages = memory.prune(days)
+  local journal = memory.prune_journal(days)
+  local events = 0
+  pcall(function()
+    local result = json.decode(host.sql_exec("DELETE FROM harness_events WHERE at < ?",
+      json.encode({ host.now() - days * 4 * 86400 })))
+    events = (type(result) == "table" and result.changes) or 0
+  end)
+  pcall(host.sql_exec, "PRAGMA wal_checkpoint(TRUNCATE)", "[]")
+  return json.encode({ ok = true, days = days, messages = messages, journal = journal, telemetry = events })
 end
 
 function wa_sync_status()

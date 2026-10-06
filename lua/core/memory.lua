@@ -32,9 +32,14 @@ end
 -- Terms for an FTS5 MATCH expression, each quoted so that arbitrary user text
 -- cannot be read as FTS syntax, and deduplicated so a repeated word does not
 -- skew the ranking.
+--
+-- A word is a run of anything that is not ASCII space or punctuation, so UTF-8 letters stay inside it:
+-- `[%w_]+` is ASCII-only and cut "configuração" into "configura" and "o", which then matched every row
+-- containing an "o". The FTS tokenizer folds case and diacritics on both sides, so the query word
+-- matches the indexed one. Quotes are punctuation, so a term can never close its own quoting.
 local function fts_terms(text)
   local terms, seen = {}, {}
-  for term in tostring(text or ""):gmatch("[%w_]+") do
+  for term in tostring(text or ""):gmatch("[^%s%p]+") do
     local key = term:lower()
     if not seen[key] then
       seen[key] = true
@@ -204,6 +209,17 @@ local function migrate()
   add_column("sessions", "interrupted_seq", "INTEGER NOT NULL DEFAULT 0")
   add_column("sessions", "interrupted_reason", "TEXT NOT NULL DEFAULT ''")
   add_column("sessions", "interrupted_count", "INTEGER NOT NULL DEFAULT 0")
+  -- When this row last changed in any way, for replication only. `updated_at` is deliberately not
+  -- bumped by a worktree/workspace change (the session list is ordered by use), so last-writer-wins on
+  -- `updated_at` let a stale peer row overwrite a newer local change. A trigger keeps it honest without
+  -- every mutator having to remember; an applied replica that carries its own value is left alone.
+  add_column("sessions", "changed_at", "REAL NOT NULL DEFAULT 0")
+  -- ensure_session / latest_session / list_sessions filter on the owner and sort by last use; with one
+  -- session per subagent this table grows fast, and every lookup was a scan and a sort.
+  exec("CREATE INDEX IF NOT EXISTS sessions_owner_idx ON sessions(user_id, node_id, updated_at)")
+  exec("CREATE TRIGGER IF NOT EXISTS sessions_changed AFTER UPDATE ON sessions " ..
+       "WHEN NEW.changed_at = OLD.changed_at BEGIN " ..
+       "UPDATE sessions SET changed_at = unixepoch('subsec') WHERE id = NEW.id; END")
   -- Images attached to a user turn. A JSON array of
   -- {mime, sha256, name, bytes}; the bytes live on disk as base64 under
   -- attachments/ (content-addressed by sha256), never in `content`. Content is
@@ -218,6 +234,9 @@ local function migrate()
   -- reads as no topic rather than an empty one.
   add_column("messages", "changes", "TEXT NOT NULL DEFAULT '{}'")
   add_column("messages", "reasoning", "TEXT NOT NULL DEFAULT ''")
+  -- The Responses route's encrypted reasoning items, `{model=..., items=[...]}` as JSON. Replayed to the
+  -- same model so it keeps its chain of thought across tool rounds (store=false keeps nothing upstream).
+  add_column("messages", "reasoning_items", "TEXT NOT NULL DEFAULT ''")
   -- Assistant message phases are part of the provider transcript contract. In
   -- particular, OpenAI Responses commentary must replay as commentary rather
   -- than being mistaken for a completed answer on the next request.
@@ -236,6 +255,9 @@ local function migrate()
   exec("UPDATE sessions SET interrupted_reason = replace(interrupted_reason, 'died after a decision', 'stopped after a step') WHERE interrupted_reason LIKE '%died after a decision%'")
 end
 
+-- The schema this binary writes. Bump it with any migration a previous binary would misread.
+local SCHEMA_VERSION = 1
+
 function M.setup()
   -- Migrations are idempotent but they WRITE. Every interpreter opens its own
   -- connection now, so a second interpreter booting while another holds a write
@@ -243,6 +265,17 @@ function M.setup()
   -- locked") merely to re-run DDL that is already applied. The first interpreter
   -- in the process migrates; the rest trust the schema and use their connection.
   if host.db_ready and host.db_ready() then return end
+  -- A database a newer binary has migrated is refused rather than written with an older idea of the
+  -- schema (MEMORY.md used to rely on the operator remembering to roll the data back with the binary).
+  local version = tonumber((query("PRAGMA user_version")[1] or {}).user_version) or 0
+  if version > SCHEMA_VERSION then
+    error(string.format("database_newer_than_binary: schema %d, this binary knows %d - upgrade wa or restore a backup",
+      version, SCHEMA_VERSION))
+  end
+  -- All of it is one transaction under the write lock: `wa serve` and a CLI `wa` booting together both
+  -- ran "check, then ALTER" and one failed on "duplicate column"; a crash mid-way left a half-renamed
+  -- database. SQLite DDL is transactional, so now it is all applied or none of it.
+  in_transaction(function()
   -- The shape migration runs *before* the schema. `schema.sql` creates `messages`, so a rename that
   -- arrived after it would find the name taken, skip, and strand the old rows in a table nothing reads
   -- any more. Renaming first moves the rows; the schema then fills in whatever a fresh database lacks.
@@ -276,6 +309,8 @@ function M.setup()
     local first = query("SELECT content FROM messages WHERE session_id=? AND role='user' ORDER BY seq ASC LIMIT 1", {row.id})
     if first[1] then M.name_session(row.id, first[1].content or "") end
   end
+  exec("PRAGMA user_version=" .. SCHEMA_VERSION)
+  end)
   -- The schema is now present on this connection; later interpreters skip the DDL.
   if host.mark_db_ready then host.mark_db_ready() end
 end
@@ -288,11 +323,20 @@ function M.remember(content, scope, tags)
   if #content > 8000 then error("memory_too_large") end
   scope = scope or "global"
   tags = tags or {}
+  -- One unit: the row, its search entry and its journal entry. Before, a crash between them left a
+  -- memory recall could never find, or one that never replicated; and two interpreters could both pass
+  -- the duplicate check. BEGIN IMMEDIATE takes the write lock before the check.
+  return in_transaction(function()
   local hash = host.sha256(content)
   local existing = query(
     "SELECT id FROM memories WHERE scope=? AND content_sha256=? AND deleted_at IS NULL LIMIT 1",
     {scope, hash})
   if #existing > 0 then return existing[1].id end
+  -- A guest's scope is bounded, so one caller cannot fill the shared database.
+  if scope:sub(1, 5) == "user:" then
+    local held = query("SELECT COUNT(*) AS n FROM memories WHERE scope=? AND deleted_at IS NULL", {scope})
+    if (tonumber(held[1] and held[1].n) or 0) >= 500 then error("memory_scope_full") end
+  end
   local id = host.uuid()
   local now = host.now()
   exec("INSERT INTO memories(id,scope,content,tags,source,session_id,created_at,updated_at,content_sha256) " ..
@@ -305,19 +349,30 @@ function M.remember(content, scope, tags)
     created_at = now, updated_at = now, content_sha256 = hash,
   })
   return id
+  end)
 end
 
-local function query_memories(match, limit, scope)
+local function query_memories(match, limit, scope, exclusive)
   local sql = "SELECT m.id,m.scope,m.content,m.tags,m.source,m.created_at,m.updated_at," ..
               "bm25(memories_fts) AS rank FROM memories_fts " ..
               "JOIN memories m ON m.id=memories_fts.memory_id " ..
               "WHERE memories_fts MATCH ? AND m.deleted_at IS NULL"
   local params = {match}
-  if scope then
+  if scope and exclusive then
+    sql = sql .. " AND m.scope=?"
+    params[#params + 1] = scope
+  elseif scope then
     sql = sql .. " AND (m.scope=? OR m.scope='global')"
     params[#params + 1] = scope
+  else
+    -- An unscoped recall (a master's default) leaves out guests' own scopes: what a guest stored is
+    -- that guest's text, and surfacing it in a master's context would let a guest plant instructions.
+    sql = sql .. " AND m.scope NOT LIKE 'user:%'"
   end
-  sql = sql .. " ORDER BY rank LIMIT ?"
+  -- bm25 (lower is better) with a small bonus for recent memories, so of two equally relevant facts the
+  -- newer one - usually the correction - comes first. The bonus is at most 1 and fades over months.
+  sql = sql .. " ORDER BY rank - 1.0 / (1.0 + (? - m.updated_at) / 2592000.0) LIMIT ?"
+  params[#params + 1] = host.now()
   params[#params + 1] = limit
   local rows = query(sql, params)
   for _, row in ipairs(rows) do row.tags = json.decode(row.tags) end
@@ -330,13 +385,17 @@ end
 -- it is about, so requiring every term returns nothing, and returning nothing
 -- here is what made the agent tell the user the memory store was empty while the
 -- fact was sitting in it. The second pass matches any term and lets bm25 rank.
-function M.recall(text, limit, scope)
+-- `exclusive` searches `scope` alone, without the shared `global` scope: a guest's view.
+function M.recall(text, limit, scope, exclusive)
   limit = limit or 10
   local terms = fts_terms(text)
   if #terms == 0 then return {} end
-  local rows = query_memories(table.concat(terms, " AND "), limit, scope)
+  local rows = query_memories(table.concat(terms, " AND "), limit, scope, exclusive)
   if #rows == 0 and #terms > 1 then
-    rows = query_memories(table.concat(terms, " OR "), limit, scope)
+    -- Any-term matching, minus one-letter words ("a", "e", "o"): those match nearly every row.
+    local wide = {}
+    for _, term in ipairs(terms) do if #term > 3 then wide[#wide + 1] = term end end
+    if #wide > 0 then rows = query_memories(table.concat(wide, " OR "), limit, scope, exclusive) end
   end
   return rows
 end
@@ -354,12 +413,17 @@ function M.memories(scope, limit)
 end
 
 function M.forget(memory_id)
-  local result = exec("UPDATE memories SET deleted_at=?, updated_at=? WHERE id=? AND deleted_at IS NULL",
-                      {host.now(), host.now(), memory_id})
-  if (result.changes or 0) > 0 then
-    exec("DELETE FROM memories_fts WHERE memory_id=?", {memory_id})
-  end
-  return (result.changes or 0) > 0
+  return in_transaction(function()
+    local now = host.now()
+    local result = exec("UPDATE memories SET deleted_at=?, updated_at=? WHERE id=? AND deleted_at IS NULL",
+                        {now, now, memory_id})
+    if (result.changes or 0) > 0 then
+      exec("DELETE FROM memories_fts WHERE memory_id=?", {memory_id})
+      -- Journalled, so a forgotten memory is forgotten on every peer too (it used to stay there).
+      M.journal("memory", memory_id, { id = memory_id, deleted_at = now, updated_at = now }, "delete")
+    end
+    return (result.changes or 0) > 0
+  end)
 end
 
 -- ------------------------------------------------------------------ ledger
@@ -397,7 +461,12 @@ function M.meta_set(key, value)
   return meta_set(key, value)
 end
 
+local record_message, apply_entry
 function M.record_message(message)
+  return in_transaction(function() return record_message(message) end)
+end
+
+function record_message(message)
   local conversation_id = tostring(message.conversation_id or "")
   local message_id = tostring(message.message_id or "")
   if conversation_id == "" or message_id == "" then error("message_identity_required") end
@@ -772,9 +841,9 @@ end
 
 -- Append a mutation to the replication journal. Every write that should reach
 -- peers goes through here; applying a remote entry does NOT journal it again.
-function M.journal(kind, entity_id, payload)
+function M.journal(kind, entity_id, payload, op)
   exec("INSERT INTO journal(kind,entity_id,op,origin,payload,created_at) VALUES(?,?,?,?,?,?)",
-       {kind, entity_id, "upsert", origin(), json.encode(payload), host.now()})
+       {kind, entity_id, op or "upsert", origin(), json.encode(payload), host.now()})
 end
 
 -- -------------------------------------------------------------------- images
@@ -918,8 +987,15 @@ end
 -- read-modify-write is atomic, writers are serialised, and the three writes (message, search row, session
 -- touch) are one unit a kill cannot tear in half.
 in_transaction = function(fn)
+  -- Reentrant: a write that is already inside a transaction joins it. The depth is kept on the
+  -- interpreter, not in this module, because several modules load their own copy of this file and all
+  -- of them share the interpreter's one connection.
+  local depth = rawget(_G, "__wa_tx_depth") or 0
+  if depth > 0 then return fn() end
   exec("BEGIN IMMEDIATE")
+  rawset(_G, "__wa_tx_depth", 1)
   local ok, result = pcall(fn)
+  rawset(_G, "__wa_tx_depth", 0)
   if not ok then
     pcall(exec, "ROLLBACK")
     error(result)
@@ -932,13 +1008,14 @@ local function append_turn(session_id, turn)
     local seq = turn.seq or M.next_seq(session_id)
     local id = turn.id or host.uuid()
     exec("INSERT INTO messages(id,session_id,seq,role,content,images,tool_calls,tool_call_id,tool_name," ..
-         "tokens,ms,ok,debug,trace,changes,created_at,reasoning,phase) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+         "tokens,ms,ok,debug,trace,changes,created_at,reasoning,phase,reasoning_items) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
          {id, session_id, seq, turn.role or "user", turn.content or "",
           json.encode(turn.images or {}),
           json.encode(turn.tool_calls or {}), turn.tool_call_id or "", turn.tool_name or "",
           turn.tokens or 0, turn.ms or 0, turn.ok == false and 0 or 1,
           turn.debug and 1 or 0, json.encode(turn.trace or {}),
-          json.encode(turn.changes or {}), host.now(), turn.reasoning or "", turn.phase or ""})
+          json.encode(turn.changes or {}), host.now(), turn.reasoning or "", turn.phase or "",
+          turn.reasoning_items and json.encode(turn.reasoning_items) or ""})
     exec("INSERT INTO messages_fts(content,session_id,message_id) VALUES(?,?,?)",
          {turn.content or "", session_id, id})
     exec("UPDATE sessions SET updated_at=? WHERE id=?", {host.now(), session_id})
@@ -1277,16 +1354,35 @@ function M.unfinished(user_id, limit)
   return found
 end
 
--- Retention: default sessions keep 100% of traces for 7 days; debug sessions
--- are kept forever (they are the fixtures we evolve from).
+-- Retention: default sessions keep their transcript for 7 days; debug sessions are kept forever (they
+-- are the fixtures we evolve from). A message older than the cutoff goes only when the live context no
+-- longer needs it: it is at or before the session's compaction point, or the whole session has been
+-- quiet past the cutoff. Deleting by age alone took the head off a long, uncompacted session and could
+-- leave a tool result whose call was gone, which a provider rejects.
 function M.prune(days)
   days = days or 7
   local cutoff = host.now() - (days * 86400)
-  local result = exec(
-    "DELETE FROM messages WHERE created_at < ? AND session_id IN " ..
-    "(SELECT id FROM sessions WHERE mode <> 'debug')", {cutoff})
-  exec("DELETE FROM messages_fts WHERE message_id NOT IN (SELECT id FROM messages)")
-  return result.changes or 0
+  local doomed = "created_at < ? AND session_id IN (SELECT id FROM sessions s WHERE s.mode <> 'debug' AND " ..
+    "(s.updated_at < ? OR messages.seq <= s.summarized_until))"
+  return M.transaction(function()
+    exec("DELETE FROM messages_fts WHERE message_id IN (SELECT id FROM messages WHERE " .. doomed .. ")", {cutoff, cutoff})
+    local result = exec("DELETE FROM messages WHERE " .. doomed, {cutoff, cutoff})
+    return result.changes or 0
+  end)
+end
+
+-- The replication journal keeps every mutation's full payload. An entry every configured peer has
+-- acknowledged (or, with no peer configured, any entry) is no longer needed once it is past the cutoff.
+function M.prune_journal(days)
+  local cutoff = host.now() - ((days or 7) * 86400)
+  local peers = query("SELECT COUNT(*) AS n, MIN(cursor) AS low FROM sync_cursors", {})[1] or {}
+  local configured = tostring(host.getenv("WASM_AGENT_SYNC_TO") or "") ~= ""
+  if (tonumber(peers.n) or 0) > 0 then
+    return exec("DELETE FROM journal WHERE id <= ? AND created_at < ?", {tonumber(peers.low) or 0, cutoff}).changes or 0
+  elseif not configured then
+    return exec("DELETE FROM journal WHERE created_at < ?", {cutoff}).changes or 0
+  end
+  return 0
 end
 
 -- A fixture: everything needed to reproduce a session, for regression tests.
@@ -1345,6 +1441,10 @@ end
 
 -- Idempotent: safe to apply the same entry twice. Never journals what it applies.
 function M.apply_entry(entry)
+  return in_transaction(function() return apply_entry(entry) end)
+end
+
+function apply_entry(entry)
   local payload = entry.payload
   if type(payload) == "string" then
     local ok, decoded = pcall(json.decode, payload)
@@ -1368,15 +1468,27 @@ function M.apply_entry(entry)
     exec("INSERT INTO messages_fts(content,session_id,message_id) VALUES(?,?,?)",
          {payload.content or "", payload.session_id, payload.id})
   elseif entry.kind == "session" then
-    local local_rows = query("SELECT updated_at FROM sessions WHERE id=?", {payload.id})
-    if #local_rows == 0 or (payload.updated_at or 0) >= (local_rows[1].updated_at or 0) then
-      -- Every position needs a concrete value: a nil would leave a hole in the
-      -- params array and the JSON encoder rejects sparse arrays.
-      exec("INSERT OR REPLACE INTO sessions(id,route_id,objective,parent_session_id,started_at," ..
+    local local_rows = query("SELECT updated_at, changed_at FROM sessions WHERE id=?", {payload.id})
+    local function stamp(row) return math.max(tonumber(row.changed_at) or 0, tonumber(row.updated_at) or 0) end
+    if #local_rows == 0 or stamp(payload) >= stamp(local_rows[1]) then
+      -- An upsert of exactly the replicated columns. `INSERT OR REPLACE` deleted the row and wrote a new
+      -- one, resetting every column it did not list (interrupted_*) to its default. NULLs travel as ""
+      -- and 0 (a parameter list cannot hold nil) and are turned back into NULL here, so an open session
+      -- stays open (`ended_at IS NULL`) on the replica instead of reading as ended at epoch 0.
+      exec("INSERT INTO sessions(id,route_id,objective,parent_session_id,started_at," ..
            "ended_at,user_id,node_id,title,mode,summary,summarized_until,updated_at,worktree," ..
            "fork_parent_id,fork_parent_seq,workspace_required,workspace_state,workspace_branch," ..
-           "workspace_base_commit,workspace_source_path,workspace_start_state,workspace_error) " ..
-           "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+           "workspace_base_commit,workspace_source_path,workspace_start_state,workspace_error,changed_at) " ..
+           "VALUES(?,?,?,NULLIF(?,''),?,NULLIF(?,0),?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) " ..
+           "ON CONFLICT(id) DO UPDATE SET route_id=excluded.route_id,objective=excluded.objective," ..
+           "parent_session_id=excluded.parent_session_id,started_at=excluded.started_at,ended_at=excluded.ended_at," ..
+           "user_id=excluded.user_id,node_id=excluded.node_id,title=excluded.title,mode=excluded.mode," ..
+           "summary=excluded.summary,summarized_until=excluded.summarized_until,updated_at=excluded.updated_at," ..
+           "worktree=excluded.worktree,fork_parent_id=excluded.fork_parent_id,fork_parent_seq=excluded.fork_parent_seq," ..
+           "workspace_required=excluded.workspace_required,workspace_state=excluded.workspace_state," ..
+           "workspace_branch=excluded.workspace_branch,workspace_base_commit=excluded.workspace_base_commit," ..
+           "workspace_source_path=excluded.workspace_source_path,workspace_start_state=excluded.workspace_start_state," ..
+           "workspace_error=excluded.workspace_error,changed_at=excluded.changed_at",
            {payload.id, payload.route_id or "", payload.objective or "",
             payload.parent_session_id or "", payload.started_at or host.now(),
             payload.ended_at or 0, payload.user_id or "master",
@@ -1386,8 +1498,12 @@ function M.apply_entry(entry)
             payload.workspace_required or 0, payload.workspace_state or "unbound",
             payload.workspace_branch or "", payload.workspace_base_commit or "",
             payload.workspace_source_path or "", payload.workspace_start_state or "{}",
-            payload.workspace_error or ""})
+            payload.workspace_error or "", stamp(payload)})
     end
+  elseif entry.kind == "memory" and entry.op == "delete" then
+    exec("UPDATE memories SET deleted_at=?, updated_at=? WHERE id=? AND deleted_at IS NULL",
+         {payload.deleted_at or host.now(), payload.updated_at or host.now(), payload.id})
+    exec("DELETE FROM memories_fts WHERE memory_id=?", {payload.id})
   elseif entry.kind == "memory" then
     exec("INSERT OR IGNORE INTO memories(id,scope,content,tags,source,session_id,created_at," ..
          "updated_at,content_sha256) VALUES(?,?,?,?,?,?,?,?,?)",
@@ -1397,7 +1513,8 @@ function M.apply_entry(entry)
           payload.updated_at or host.now(), payload.content_sha256 or ""})
     exec("DELETE FROM memories_fts WHERE memory_id=?", {payload.id})
     exec("INSERT INTO memories_fts(content,tags,memory_id) VALUES(?,?,?)",
-         {payload.content or "", payload.tags or "", payload.id})
+         {payload.content or "", type(payload.tags) == "table" and table.concat(payload.tags, " ") or (payload.tags or ""),
+          payload.id})
   elseif entry.kind == "run" then
     exec("INSERT OR REPLACE INTO runs(id,session_id,run_id,status,outcome,reply,started_at,ended_at) " ..
          "VALUES(?,?,?,?,?,?,?,?)",
