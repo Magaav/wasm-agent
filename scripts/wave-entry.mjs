@@ -10,6 +10,7 @@ import {fileURLToPath} from 'node:url';
 import {create,inspect,advance} from './wave-lifecycle.mjs';
 import {waveActivity,activitySource,isolatedRepository} from './lib/wave-activity.mjs';
 import {recoveryAdmission} from './lib/wave-recovery.mjs';
+import {finishedWave} from './lib/wave-withdrawal.mjs';
 const hash=x=>crypto.createHash('sha256').update(x).digest('hex');
 const key=x=>{const p=path.resolve(x).replaceAll('\\','/');return process.platform==='win32'?p.toLowerCase():p;};
 function git(repo,...args){const r=spawnSync('git',['-C',repo,...args],{encoding:'utf8',windowsHide:true});if(r.status!==0)throw Error('wave_git_identity_unavailable');return r.stdout.trim();}
@@ -33,7 +34,7 @@ export function checkAdmission(repo,{phase='produce',recovery=null,native=null,s
       if(['produce','admit','land'].includes(phase))return {ok:true,wave_verified:false,mode:'unregistered_initial_migration_review',reason:'No wave authority established; public start/allocation/completion still require registration'};
     }
     const row=registration(repo),db=new DatabaseSync(path.join(row.store,'waves.sqlite'),{readOnly:true});
-    let rows;try{rows=db.prepare('SELECT * FROM waves ORDER BY created_at DESC').all();}finally{db.close();}
+    let rows,finished;try{rows=db.prepare('SELECT * FROM waves ORDER BY created_at DESC').all();finished=new Set(rows.filter(entry=>finishedWave(db,entry)).map(entry=>entry.id));}finally{db.close();}
     const current=rows[0];
     if(!current)throw Error('registered_wave_not_started');
     // EVERY UNFINISHED ROW IS CONSULTED, not just the newest: since the one-row-per-repository index
@@ -42,7 +43,7 @@ export function checkAdmission(repo,{phase='produce',recovery=null,native=null,s
     // durable row's bookkeeping.
     const verdicts=rows.map(entry=>({row:entry,verdict:waveActivity(activitySource(JSON.parse(entry.manifest)),entry)}));
     const newest=verdicts[0].verdict;
-    const unfinished=verdicts.filter(entry=>entry.row.state!=='complete');
+    const unfinished=verdicts.filter(entry=>!finished.has(entry.row.id));
     const named={activity:newest.activity,convergence:newest.convergence,runtime_state:newest.runtime_state,reason:newest.reason||current.reason||'',
       unfinished:unfinished.map(entry=>({id:entry.row.id,state:entry.row.state,activity:entry.verdict.activity,convergence:entry.verdict.convergence,runtime_state:entry.verdict.runtime_state,reason:entry.verdict.reason}))};
     if(phase==='observe')return {ok:true,wave_verified:true,wave_id:current.id,store:row.store,phase,...named};
@@ -53,8 +54,8 @@ export function checkAdmission(repo,{phase='produce',recovery=null,native=null,s
     // older unfinished rows, because a completed wave beside an unfinished one is a mixed store
     // and the operator has to see both. Producing and allocating are admitted: the wave is OFF
     // (nothing is running), and an unrelated old row must not fence a repository that is working.
-    if(current.state==='complete') {
-      if(!['land','admit'].includes(phase))return {ok:true,wave_verified:true,wave_id:current.id,store:row.store,phase,...named,note:'the newest wave is complete; producing and allocating are not fenced by it'};
+    if(current.state==='complete' || current.state==='withdrawn') {
+      if(!['land','admit'].includes(phase))return {ok:true,wave_verified:true,wave_id:current.id,store:row.store,phase,...named,note:'the newest wave is finished or withdrawn; producing and allocating are not fenced by it'};
       throw Error(`next_wave_requires_fresh_public_start:${current.id}${unfinished.length?`:unfinished:${unfinished.map(entry=>entry.row.id).join(',')}`:''}`);
     }
     // THE REPOSITORY-LEVEL ACTS. Landing and independent delivery admission are admitted only while
@@ -121,7 +122,7 @@ export function monitor(repo) {
     // EVERY UNFINISHED ROW IS READ. The monitor drives the OLDEST unfinished wave (deterministic,
     // one at a time, each with its own budget), and reports the whole unfinished set - a second
     // unfinished wave is never silently ignored because a newest-only read did not see it.
-    const unfinished=db.prepare("SELECT id FROM waves WHERE state!='complete' ORDER BY created_at").all().map(entry=>entry.id);
+    const unfinished=db.prepare('SELECT * FROM waves ORDER BY created_at').all().filter(entry=>!finishedWave(db,entry)).map(entry=>entry.id);
     if(!unfinished.length)return {ok:true,state:'complete',disable_monitor:true,reason:'no unfinished wave remains'};
     const latest={id:unfinished[0]};
     const status=inspect(row.store,latest.id);
@@ -155,7 +156,7 @@ export function monitor(repo) {
     const result=spawnSync(process.execPath,[path.join(row.source_root,'scripts/wave-entry.mjs'),'finish',row.repo,latest.id],{cwd:JSON.parse(status.manifest).executor_cwd,encoding:'utf8',windowsHide:true,timeout:10800000,maxBuffer:32*1024*1024});
     const after=inspect(row.store,latest.id);
     db.prepare('UPDATE monitor SET state=?,reason=? WHERE id=?').run(after.state,result.error?.message || after.reason || null,latest.id);
-    return {ok:after.state==='complete',state:after.state,disable_monitor:after.state==='blocked'||!db.prepare("SELECT id FROM waves WHERE state!='complete'").all().length,reason:after.reason,wave_id:latest.id,unfinished,output:result.stdout,error:result.error?.message};
+    return {ok:after.state==='complete',state:after.state,disable_monitor:after.state==='blocked'||!db.prepare('SELECT * FROM waves').all().filter(entry=>!finishedWave(db,entry)).length,reason:after.reason,wave_id:latest.id,unfinished,output:result.stdout,error:result.error?.message};
   }finally{db.close();}
 }
 export function watcherDefinition(repo) {

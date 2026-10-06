@@ -147,6 +147,25 @@ a **fresh** wave is started - and a fresh wave can only be started while the act
 `off`: no agents working, and no unresolved activity claim (unsupported stale settlement remains held,
 printed with its exact refusal and owning-runtime recovery path).
 
+## Withdraw a migrated plan that never admitted an effect
+
+An obsolete legacy plan can be **withdrawn**, not called complete. Use
+`node scripts/wave-lifecycle.mjs withdraw-plan <store> <id>` to pin the exact
+manifest and original row/steps/events hash; then `withdraw <store> <id> <input>`
+with those pins, explicit actor and inspected evidence. Only migrated pending
+plans with null owner boot/PID/completion receipt, three pending stages, zero
+command/post attempts, no operation IDs/results and no admission/effect events
+qualify. Any running, unknown, checked or completed stage refuses.
+
+The atomic withdrawal retains the complete original snapshot, leaves all step
+rows and prior events unchanged, and appends one withdrawal event/receipt. Reads
+and admission revalidate it; changed history revokes the disposition. The plan
+reports `convergence:not-run`, never verified. `advance` cannot replay a withdrawn
+plan and new land/admit still requires a fresh public start. No monitor is enabled.
+This closes only unexecuted plan bookkeeping: operation unknowns, execution claims,
+workspace bindings and missing external-effect proof remain protected separately.
+Focused mutation proof is `scripts/test-wave-withdrawal.mjs`.
+
 ## Sanctioned entry and repaired proof boundaries
 
 Use `wave-entry.mjs register <canonical-main> <config> <bootstrap-admission>`

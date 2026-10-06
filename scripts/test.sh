@@ -187,6 +187,7 @@ run_proof_fixture waveOwner 53 node scripts/test-wave-owner-refusal.mjs
 run_proof_fixture waveOwnerMutations 3 node scripts/test-wave-owner-mutations.mjs
 run_proof_fixture waveCorners 24 node scripts/test-wave-activity-corners.mjs
 run_proof_fixture waveDerived 55 node scripts/test-wave-derived-state.mjs
+gate_run node scripts/test-wave-withdrawal.mjs
 run_proof_fixture waveActivityFix 62 node scripts/test-wave-activity-fix.mjs
 # END wave-owner safety proofs
 
