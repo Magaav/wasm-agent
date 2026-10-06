@@ -2331,6 +2331,25 @@ fn read_request(stream: &mut TcpStream) -> std::io::Result<Option<Request>> {
     }
 }
 
+/// The UI file a request names, or `None` if the name could leave the UI directory. Every component
+/// must be a plain name: no `..`, and no root or prefix, because on Windows `ui.join("C:/Users/..")` or a
+/// `\\server\share` path *replaces* the base instead of extending it. A file that exists must also
+/// resolve inside the UI directory, so a link inside it cannot point elsewhere.
+fn ui_file(ui: &std::path::Path, relative: &str) -> Option<std::path::PathBuf> {
+    use std::path::Component;
+    let candidate = std::path::Path::new(relative);
+    if relative.contains("..") || relative.contains('\\') || relative.contains(':')
+        || !candidate.components().all(|part| matches!(part, Component::Normal(_)))
+    {
+        return None;
+    }
+    let file = ui.join(candidate);
+    match (file.canonicalize(), ui.canonicalize()) {
+        (Ok(real), Ok(root)) if !real.starts_with(&root) => None,
+        _ => Some(file),
+    }
+}
+
 /// Answered on the accept thread, without the interpreter: the two facts a node is
 /// asked for when it looks unwell, and the files the window needs to redraw itself.
 /// Anything else - including an unknown route - goes to the agent thread.
@@ -2360,13 +2379,13 @@ fn static_reply(ui: &std::path::Path, request: &Request) -> Option<Reply> {
     } else {
         route.trim_start_matches('/').to_string()
     };
-    if relative.contains("..") {
+    let Some(file) = ui_file(ui, &relative) else {
         return Some((400, "text/plain", b"bad path".to_vec()));
-    }
+    };
     // A route the UI does not have could still be an API route (they are all
     // handled by `dispatch`), so absence is not a 404 here - it means "ask the
     // agent thread". That keeps the route table in exactly one place.
-    match std::fs::read(ui.join(&relative)) {
+    match std::fs::read(&file) {
         Ok(bytes) => Some((200, content_type(&relative), bytes)),
         Err(_) => None,
     }
@@ -2604,10 +2623,10 @@ fn dispatch(
             } else {
                 route.trim_start_matches('/').to_string()
             };
-            if relative.contains("..") {
+            let Some(file) = ui_file(ui, &relative) else {
                 return Some((400, "text/plain", b"bad path".to_vec()));
-            }
-            return match std::fs::read(ui.join(&relative)) {
+            };
+            return match std::fs::read(&file) {
                 Ok(bytes) => Some((200, content_type(&relative), bytes)),
                 Err(_) => Some((404, "text/plain; charset=utf-8", b"not found".to_vec())),
             };
@@ -2963,5 +2982,22 @@ mod origin_tests {
         assert!(admit_origin(&link, 8799).is_ok());
         let peer = request("POST", "/node/call", &[("host", "10.0.0.5:8799")]);
         assert!(admit_origin(&peer, 8799).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod ui_file_tests {
+    use super::ui_file;
+
+    /// On Windows `Path::join` with an absolute or prefixed path replaces the base, so a request for
+    /// `/C:/Users/x/.wasm-agent/env` used to read that file. Each form is refused on every platform.
+    #[test]
+    fn a_request_cannot_name_a_file_outside_the_ui() {
+        let ui = std::env::temp_dir();
+        for bad in ["../etc/passwd", "a/../../b", "C:/Users/x/.wasm-agent/env", "\\\\server\\share\\x", "/etc/passwd", "sub\\..\\x"] {
+            assert!(ui_file(&ui, bad).is_none(), "{bad} must be refused");
+        }
+        assert!(ui_file(&ui, "index.html").is_some());
+        assert!(ui_file(&ui, "icons/icon-192.png").is_some());
     }
 }
