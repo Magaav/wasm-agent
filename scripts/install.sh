@@ -93,7 +93,7 @@ fi
 if [ "$SENTINEL_GOT" = "0" ] && [ -n "$ROOT" ] && [ -d "$ROOT/rust/wa-sentinel" ]; then
   step "building the sentinel from $ROOT"
   if command -v cargo >/dev/null 2>&1; then
-    (cd "$ROOT" && cargo build --release --manifest-path rust/wa-sentinel/Cargo.toml 2>&1 | tail -1) || true
+    (cd "$ROOT" && cargo build --release --locked --manifest-path rust/wa-sentinel/Cargo.toml 2>&1 | tail -1) || true
     for built in "$ROOT/rust/wa-sentinel/target/release/wa-sentinel" "$ROOT/rust/wa-sentinel/target/release/wa-sentinel.exe"; do
       if [ -x "$built" ]; then
         cp -f "$built" "$DIR/" && SENTINEL_GOT=1

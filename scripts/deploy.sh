@@ -479,11 +479,11 @@ case "${WA_DEPLOY_SENTINEL_SUDO:-0}" in
 esac
 command -v cargo >/dev/null 2>&1 || fail "refused(cargo_unavailable): cargo is not on PATH (PATH=${PATH:-unset}); this step builds the tree with 'cargo build --release --offline --manifest-path rust/Cargo.toml', so a deploy without it cannot build what it would install. Install Rust (https://rustup.rs), or run the deploy on the tree that has the toolchain (the cloud tree builds this repository). Nothing was built and nothing was installed. To build or test without installing, use the gate's own command instead: bash scripts/test.sh."
 
-( cd rust && cargo build --release --offline -p wa-host ) || fail "the build failed"
+( cd rust && cargo build --release --offline --locked -p wa-host ) || fail "the build failed"
 # The sentinel is its own crate, outside the `rust/` workspace (which lists only `wa-host`), so it is
 # built with its own manifest. Asking the workspace for `-p wa-sentinel` fails - "package ID
 # specification did not match any packages" - and that is how it came to be installed by hand at all.
-( cd rust && cargo build --release --offline --manifest-path wa-sentinel/Cargo.toml ) || fail "the sentinel build failed"
+( cd rust && cargo build --release --offline --locked --manifest-path wa-sentinel/Cargo.toml ) || fail "the sentinel build failed"
 NEW="rust/target/release/wa.exe"
 [ -f "$NEW" ] || NEW="rust/target/release/wa"
 [ -x "$NEW" ] || fail "no built binary at $NEW"
