@@ -431,6 +431,14 @@ retains them. `list` returns durable ownership. `reconcile` requires the exact
 OS-held SQLite lease proves process liveness; elapsed time is never that proof.
 Every operation returns a JSON value, including visible storage/refusal errors.
 
+Explicit external `quarantine_retire` is a separate, operator item-pinned
+risk disposition for operations/claims; `quarantine_validate` reads verified
+archive/policy pins. Neither is execution settlement. Live owners refuse,
+original outcomes remain unknown and missing/moved operation archives restore
+allocation blockers. There is no model/HTTP exposure or default sweep. See
+[QUARANTINED-RETIREMENT.md](QUARANTINED-RETIREMENT.md) for authorization,
+archive, mutation and trusted-boundary limits.
+
 The additive held-target contract is specified in
 [NATIVE-TARGET-RESOURCE.md](NATIVE-TARGET-RESOURCE.md). `claim` also returns the
 actual granted `claims`; `list` retains its existing `claims` fields and adds

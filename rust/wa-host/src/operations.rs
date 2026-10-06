@@ -217,6 +217,10 @@ pub fn control(action: &str, args: &Value, shell: &(String, String)) -> Result<V
         ),
         "index" => manager().import_index(args["evidence"].as_str().unwrap_or("")),
         "reconcile" => manager().reconcile(args),
+        "quarantine_retire" => {
+            if crate::serve::in_turn() || std::env::var("WASM_AGENT_IN_TURN").as_deref()==Ok("1") || std::env::var("WA_QUARANTINE_EXECUTOR").as_deref()!=Ok("1") {return Err("quarantine_requires_explicit_external_executor".into());}
+            manager().quarantine_retire(args)
+        },
         "legacy_adjudicate" => {
             if crate::serve::in_turn() || std::env::var("WASM_AGENT_IN_TURN").ok().as_deref()==Some("1") || std::env::var("WA_LEGACY_EXTERNAL_EXECUTOR").ok().as_deref()!=Some("1") {return Err("legacy_adjudication_requires_external_reviewed_executor".into());}
             manager().adjudicate_legacy(args)

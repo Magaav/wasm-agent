@@ -1512,6 +1512,7 @@ grep '^run isolation ok$' "$DB.isolation.log"
 run_proof_fixture sqlite 6 node scripts/test-sqlite-isolation.cjs "$BIN"
 run_proof_fixture peer 43 node scripts/test-peer-run-admission.cjs "$BIN"
 gate_run node scripts/test-peer-sync.cjs "$BIN"
+gate_run node scripts/test-quarantined-retirement.cjs "$BIN"
 WA_SCRIPT=tests/peer-reply-verification.lua "$BIN" --db "$DB.peer-reply" | grep 'peer signed reply verification ok'
 run_proof_fixture foreground 3 bash scripts/test-foreground-cancel.sh
 rm -f "$DB.window"*
