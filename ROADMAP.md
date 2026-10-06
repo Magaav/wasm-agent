@@ -283,8 +283,11 @@ quarantine20 plus in-turn2, operation42(one explicit helper ignore), host99 and
 existing workspace37/13 checks passed. Build parallelism capped2. Exact production
 archive preparation verified77 operations/3 claims/46 bindings; ownership has not
 yet been released. Human authorization is retained from original message3106,
-not an assistant-generated approval. Linux verification/integration/install/application
-remain separate, with partial effects requiring inspection. Risk accepted by the
+not an assistant-generated approval. Linux ARM64 native quarantine20+in-turn2 and operation37(helper ignore1)
+passed on exact candidatedb6bf0d; native Windows quarantine20+2, operation42,
+host99 and normal workspace37/13 passed. Archive generationv117 reverified411
+preserved files and all77/3/46 exact pins, with no ownership released yet.
+Integration/install/application remain separate, with partial effects requiring inspection. Risk accepted by the
 operator: old external outcomes remain unreconstructable/unknown; availability
 release does not prove those effects drained. See `docs/QUARANTINED-RETIREMENT.md`.
 
