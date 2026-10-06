@@ -347,3 +347,13 @@ Two bugs this surfaced, both fixed:
 rows. Debug sessions are never pruned. Summaries outlive their messages (they are
 the compressed value), so a years-old session still contributes its conclusions
 without carrying the raw trace.
+
+## Backups
+
+`lua/core/backup.lua` snapshots every SQLite store under the data/config directories plus the live
+database (`VACUUM INTO`, WAL included), checks each copy with `PRAGMA integrity_check`, writes them to
+`<config>/backups/<UTC stamp>[-label]/` and keeps the newest five. `/update` takes one (`pre-update`)
+before queueing a deploy and refuses to deploy if it fails, because the new binary migrates the schema
+and an older binary refuses a migrated database. By hand:
+`WA_SCRIPT=tests/backup-all-stores.lua` shows the call; `dofile("lua/core/backup.lua").run("label")`.
+

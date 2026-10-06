@@ -430,6 +430,21 @@ function M.run(options)
     return verdict
   end
 
+  -- The new binary migrates the schema when it starts, and an older one refuses a migrated database:
+  -- take a checked snapshot of every store first, or do not deploy. (MEMORY.md used to ask the
+  -- operator to remember this.)
+  if not options.skip_backup then
+    local backed, snapshot = pcall(function() return dofile("lua/core/backup.lua").run("pre-update") end)
+    if not backed then
+      verdict.ok, verdict.queued, verdict.status = false, nil, "backup_failed"
+      verdict.error = "backup_failed"
+      verdict.observed = tostring(snapshot)
+      verdict.next = "free disk space or repair the store named above, then ask again; nothing was deployed"
+      return verdict
+    end
+    verdict.backup = snapshot.dir
+  end
+
   local reason = trim(options.reason or "")
   if reason == "" then
     reason = reason_for(facts)
