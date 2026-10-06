@@ -200,12 +200,20 @@ transcripts, journals, leases and backups remain preserved; batching and new
 provider retries are opt-in risk knobs, not unmeasured new defaults. Sync now
 requires a target-signed acknowledgment before cursor advancement.
 Focused Windows proof: workspace tests36/95/34/41 before repairs (one explicit
-operation helper ignore); repaired host98, sentinel48, binding43, managed40,
+operation helper ignore); repaired host99, sentinel48, binding43, managed40,
 peer-chat43, real two-node sync7, 13 private Lua suites, shipping98 and policy19
 passed. Browser/UI reload/recovery/inspector and final-answer suites passed;
 a staged Chrome screenshot was inspected. Vault80 passed with one explicit
-Unix-mode skip on Windows. Linux, final source integration and installed-source
-verification remain separate steps. Package/bootstrap/full release gate not run;
+Unix-mode skip on Windows. Linux ARM64 host99/sentinel48, vault81 (zero skips),
+binding44, managed40, signed sync7 and reply6 passed on source d9c09bd.
+Final-answer loop55 is preserved by the default retry opt-out. Window source
+locked native compilation passed after updating its missing operation dependency
+lock; auxiliary views now have the same origin confinement as the main view.
+Window unit tests13 passed with one explicit native-notification test ignored;
+that is not live WebView2 navigation proof. The existing desktop window was not
+restarted/replaced. Vault page render9 and
+screenshots passed using fixture data only. Final source integration and
+installed-source verification remain separate steps. Package/bootstrap/full release gate not run;
 `gate_verified:false`, `release_verified:false`. No real vault/credentials were
 migrated, device consent fabricated or historical unknown settled. Existing77
 operation unknowns,3 uncertain claims,46 held workspace targets and legacy wave
