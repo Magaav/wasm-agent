@@ -1064,6 +1064,24 @@ function wa_sync_tick()
   return json.encode({ ok = failed == 0, peers = peers, pushed = pushed, failed = failed, error = last_error })
 end
 
+-- Daily housekeeping, called by the node when it is quiet. WASM_AGENT_RETENTION_DAYS (default 7; 0 keeps
+-- everything) is the transcript window; telemetry keeps four times as long. Nothing here touches a debug
+-- session, a memory, or anything a live context still reads.
+function wa_retention()
+  local days = tonumber(host.getenv("WASM_AGENT_RETENTION_DAYS") or "") or 7
+  if days <= 0 then return json.encode({ ok = true, skipped = "retention_disabled" }) end
+  local messages = memory.prune(days)
+  local journal = memory.prune_journal(days)
+  local events = 0
+  pcall(function()
+    local result = json.decode(host.sql_exec("DELETE FROM harness_events WHERE at < ?",
+      json.encode({ host.now() - days * 4 * 86400 })))
+    events = (type(result) == "table" and result.changes) or 0
+  end)
+  pcall(host.sql_exec, "PRAGMA wal_checkpoint(TRUNCATE)", "[]")
+  return json.encode({ ok = true, days = days, messages = messages, journal = journal, telemetry = events })
+end
+
 function wa_sync_status()
   return json.encode({
     node_id = (nodeslib.identity() or {}).node_id or "",

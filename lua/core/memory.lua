@@ -1294,16 +1294,35 @@ function M.unfinished(user_id, limit)
   return found
 end
 
--- Retention: default sessions keep 100% of traces for 7 days; debug sessions
--- are kept forever (they are the fixtures we evolve from).
+-- Retention: default sessions keep their transcript for 7 days; debug sessions are kept forever (they
+-- are the fixtures we evolve from). A message older than the cutoff goes only when the live context no
+-- longer needs it: it is at or before the session's compaction point, or the whole session has been
+-- quiet past the cutoff. Deleting by age alone took the head off a long, uncompacted session and could
+-- leave a tool result whose call was gone, which a provider rejects.
 function M.prune(days)
   days = days or 7
   local cutoff = host.now() - (days * 86400)
-  local result = exec(
-    "DELETE FROM messages WHERE created_at < ? AND session_id IN " ..
-    "(SELECT id FROM sessions WHERE mode <> 'debug')", {cutoff})
-  exec("DELETE FROM messages_fts WHERE message_id NOT IN (SELECT id FROM messages)")
-  return result.changes or 0
+  local doomed = "created_at < ? AND session_id IN (SELECT id FROM sessions s WHERE s.mode <> 'debug' AND " ..
+    "(s.updated_at < ? OR messages.seq <= s.summarized_until))"
+  return M.transaction(function()
+    exec("DELETE FROM messages_fts WHERE message_id IN (SELECT id FROM messages WHERE " .. doomed .. ")", {cutoff, cutoff})
+    local result = exec("DELETE FROM messages WHERE " .. doomed, {cutoff, cutoff})
+    return result.changes or 0
+  end)
+end
+
+-- The replication journal keeps every mutation's full payload. An entry every configured peer has
+-- acknowledged (or, with no peer configured, any entry) is no longer needed once it is past the cutoff.
+function M.prune_journal(days)
+  local cutoff = host.now() - ((days or 7) * 86400)
+  local peers = query("SELECT COUNT(*) AS n, MIN(cursor) AS low FROM sync_cursors", {})[1] or {}
+  local configured = tostring(host.getenv("WASM_AGENT_SYNC_TO") or "") ~= ""
+  if (tonumber(peers.n) or 0) > 0 then
+    return exec("DELETE FROM journal WHERE id <= ? AND created_at < ?", {tonumber(peers.low) or 0, cutoff}).changes or 0
+  elseif not configured then
+    return exec("DELETE FROM journal WHERE created_at < ?", {cutoff}).changes or 0
+  end
+  return 0
 end
 
 -- A fixture: everything needed to reproduce a session, for regression tests.

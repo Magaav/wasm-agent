@@ -1780,6 +1780,8 @@ fn node_thread_loop(
     agent_ui: PathBuf,
 ) {
     let mut next_sync = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    // Retention runs a minute after boot and then daily, on node-thread 0 only, when the node is quiet.
+    let mut next_retention = std::time::Instant::now() + std::time::Duration::from_secs(60);
     // A deterministic wedge, for the regression test: the hook stalls node-thread 0 on its first request, which
     // is exactly the shape that was found in the wild. Only node-thread 0, or a node with read node-threads would
     // stall all of them and the test would be measuring itself.
@@ -2022,6 +2024,16 @@ fn node_thread_loop(
             begin_work("sync tick".to_string());
             if let Err(error) = lua.call_string("wa_sync_tick", &[]) {
                 eprintln!("[sync] tick failed: {error}");
+            }
+            end_work();
+            beat();
+        }
+        if index == 0 && std::time::Instant::now() >= next_retention && QUEUED.load(Ordering::Relaxed) == 0 && quiet {
+            next_retention = std::time::Instant::now() + std::time::Duration::from_secs(86_400);
+            begin_work("retention".to_string());
+            match lua.call_string("wa_retention", &[]) {
+                Ok(summary) => eprintln!("[retention] {summary}"),
+                Err(error) => eprintln!("[retention] failed: {error}"),
             }
             end_work();
             beat();
