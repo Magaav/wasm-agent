@@ -219,6 +219,14 @@ migrated, device consent fabricated or historical unknown settled. Existing77
 operation unknowns,3 uncertain claims,46 held workspace targets and legacy wave
 remain protected; absence of evidence is not a cleanup todo to silently erase.
 
+2026-10-06, deployment preflight follow-up: the first cloud snapshot attempt
+blocked on its exclusive run-lease database before either installer dispatched.
+Exact transient-unit PID/child/cgroup and unchanged installed-source proofs
+permitted stopping only that attempt; original partial backup/refusal remains.
+Backup discovery now excludes both resource `.lease.sqlite` and run `-lease.sqlite`
+files, with a regression. Lease files are OS ownership locks, not VACUUM snapshots.
+No production node stopped or unknown historical effect was replayed.
+
 ## Status vocabulary
 
 - **Implemented:** a mechanism exists in the repository; not a release certification.

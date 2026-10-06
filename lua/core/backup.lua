@@ -34,7 +34,7 @@ local function list(dir)
 end
 
 local function is_store(name)
-  if name:find("%.lease%.sqlite$") or name:find("%-journal$") or name:find("%-wal$") or name:find("%-shm$") then
+  if name:find("%.lease%.sqlite$") or name:find("%-lease%.sqlite$") or name:find("%-journal$") or name:find("%-wal$") or name:find("%-shm$") then
     return false
   end
   return name:find("%.db$") ~= nil or name:find("%.sqlite$") ~= nil
