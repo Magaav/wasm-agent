@@ -120,6 +120,12 @@ impl Editor {
     pub fn feed(&mut self, byte: u8) -> Action {
         if !self.escape.is_empty() {
             self.escape.push(byte);
+            // ESC followed by anything that cannot start a sequence (a lone Esc, or Alt+key) is not an
+            // escape sequence: drop the ESC and keep the key - it used to swallow the next keystroke.
+            if self.escape.len() == 2 && !matches!(byte, b'[' | b'O' | b'\r' | b'\n' | 0x1b) {
+                self.escape.clear();
+                return self.feed(byte);
+            }
             let seq = self.escape.as_slice();
             // CSI arrows, Home/End, Delete and bracketed paste boundaries.
             if seq == b"\x1b[200~" { self.paste = true; self.escape.clear(); return Action::None; }
@@ -261,6 +267,14 @@ mod tests {
         let mut action = Action::None;
         for &byte in bytes { action = editor.feed(byte); }
         action
+    }
+    #[test]
+    fn a_lone_escape_does_not_eat_the_next_key() {
+        let mut e = Editor::default();
+        type_bytes(&mut e, b"\x1bab");
+        assert_eq!(e.text(), "ab");
+        type_bytes(&mut e, b"\x1b[D!");
+        assert_eq!(e.text(), "a!b", "real sequences still work");
     }
     #[test]
     fn ctrl_c_clears_a_draft_then_interrupts_then_quits() {

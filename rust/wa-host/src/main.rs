@@ -394,6 +394,7 @@ fn main() {
     lua.register("uuid", host::uuid);
     lua.register("read_file", host::read_file);
     lua.register("path_kind", host::path_kind);
+    lua.register("isatty", host::stream_is_terminal);
     lua.register("read_image_base64", host::read_image_base64);
     lua.register("write_file", host::write_file);
     lua.register("exec", host::exec);

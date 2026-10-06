@@ -563,6 +563,21 @@ pub extern "C-unwind" fn read_file(l: *mut LuaState) -> c_int {
     }
 }
 
+/// host.isatty(stream) -> boolean: is "stdout" (default), "stderr" or "stdin" a terminal?
+/// Not named `isatty` in Rust: with #[no_mangle] that replaced libc's own isatty process-wide, and the
+/// first caller (the test harness) crashed.
+#[no_mangle]
+pub extern "C-unwind" fn stream_is_terminal(l: *mut LuaState) -> c_int {
+    use std::io::IsTerminal;
+    let answer = match arg_string(l, 1).as_deref() {
+        Some("stdin") => std::io::stdin().is_terminal(),
+        Some("stderr") => std::io::stderr().is_terminal(),
+        _ => std::io::stdout().is_terminal(),
+    };
+    unsafe { crate::lua::lua_pushboolean(l, answer as c_int) };
+    1
+}
+
 /// host.path_kind(path) -> "file" | "dir" | "missing" | "other". `read_file` answers nil both for a
 /// missing file and for one it cannot read as text, and a caller about to overwrite needs to know which.
 #[no_mangle]

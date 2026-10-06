@@ -101,14 +101,17 @@ ok(view_lib.duration(125.4) == "2m05s", "and keeps counting in minutes")
 local function env_of(table_of)
   return function(name) return table_of[name] end
 end
-ok(view_lib.wants_live(env_of({ TERM = "xterm-256color" })) == true, "a terminal gets the live view")
-ok(view_lib.wants_live(env_of({ ORCA_TERMINAL_HANDLE = "term_x" })) == true, "Orca's terminal counts as one")
-ok(view_lib.wants_live(env_of({})) == false, "no terminal means no escape sequences")
-ok(view_lib.wants_live(env_of({ TERM = "dumb" })) == false, "a dumb terminal is not a terminal to paint")
-ok(view_lib.wants_live(env_of({ TERM = "xterm", NO_COLOR = "1" })) == false, "NO_COLOR wins over everything")
-ok(view_lib.wants_live(env_of({ NO_COLOR = "1", WASM_AGENT_CLI_VIEW = "live" })) == true,
+local function tty() return true end
+ok(view_lib.wants_live(env_of({ TERM = "xterm-256color" }), tty) == true, "a terminal gets the live view")
+ok(view_lib.wants_live(env_of({ TERM = "xterm-256color" }), function() return false end) == false,
+  "a pipe gets plain output even when TERM is set (wa chat | tee log)")
+ok(view_lib.wants_live(env_of({ ORCA_TERMINAL_HANDLE = "term_x" }), tty) == true, "Orca's terminal counts as one")
+ok(view_lib.wants_live(env_of({}), tty) == false, "no terminal means no escape sequences")
+ok(view_lib.wants_live(env_of({ TERM = "dumb" }), tty) == false, "a dumb terminal is not a terminal to paint")
+ok(view_lib.wants_live(env_of({ TERM = "xterm", NO_COLOR = "1" }), tty) == false, "NO_COLOR wins over everything")
+ok(view_lib.wants_live(env_of({ NO_COLOR = "1", WASM_AGENT_CLI_VIEW = "live" }), tty) == true,
   "an explicit request wins over NO_COLOR")
-ok(view_lib.wants_live(env_of({ TERM = "xterm", WASM_AGENT_CLI_VIEW = "plain" })) == false,
+ok(view_lib.wants_live(env_of({ TERM = "xterm", WASM_AGENT_CLI_VIEW = "plain" }), tty) == false,
   "an explicit refusal wins over the terminal")
 
 -- ---- a run, replayed ------------------------------------------------------------
