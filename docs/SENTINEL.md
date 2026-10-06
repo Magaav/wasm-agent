@@ -267,8 +267,13 @@ or retry with weaker ownership. Invalid values refuse before installation.
 
 ### Bounded idle I/O observation (Windows)
 
-Queue the shipped `scripts/measure-sentinel-io.ps1` with sentinel `request run`,
-then end the turn. It waits at most 180 seconds for empty native run/child/operation
+Queue the shipped `scripts/measure-sentinel-io.ps1` with sentinel `request run`
+using `--session <id> --prompt <collect instruction>`, then end the turn. Request
+dispatch is concurrent: two separately queued run/wake requests are NOT a serial
+completion guarantee. The run continuation is created only after the original
+known-settled success/failure record is durable, using a deterministic per-request
+wake key; a consumed/claimed/queued wake is never duplicated. Unknown execution
+or a crash between record and continuation requires inspection, not effect replay. It waits at most 180 seconds for empty native run/child/operation
 inventories and records three eight-second samples of process read counters and
 CPU time, binding each sample to the original process creation generation. Busy,
 changed or unavailable evidence is a refusal/invalid sample, never idle success.

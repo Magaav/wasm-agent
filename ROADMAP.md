@@ -180,6 +180,17 @@ measurement execution route, not a claim that a sample has already run. Historic
 cleanup unknowns remain preserved; cloud final install at6f2902b is separately
 verified with65 installation and44/16 binding/recovery checks, no enabled jobs.
 
+2026-10-06, measurement collection ordering: the first one-shot sampler ended
+`node_never_idle` (known failed/terminated, no samples) because a separately queued
+collection wake ran concurrently. Queue order was not completion order; original
+failure retained and never relabelled success. `request run --session --prompt`
+now validates both fields before effect, persists the original known result,
+then creates one exact request-bound continuation. Consumed/claimed wake keys
+never duplicate; unknown execution holds collection and requires inspection.
+This is a bounded continuation for already authorized scripts, not a recurrent
+watcher or effect replay. Native regressions fail old half-continuation behavior
+and pin durable-before-wake/idempotent-after-delivery boundaries.
+
 ## Status vocabulary
 
 - **Implemented:** a mechanism exists in the repository; not a release certification.

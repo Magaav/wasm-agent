@@ -1483,7 +1483,8 @@ fn verb_run(script: &str, reason: &str) -> Result<String> {
     let id=manager.start(spec)?;
     let state=manager.wait(&id,Duration::from_secs(302))?;
     audit("run",&path.display().to_string(),reason);
-    if state["ok"]==true {Ok(format!("operation {id} completed"))} else {let _=manager.cancel(&id);bail!("operation {id}: {}",state["error"])}
+    if state["settled"]!=true || state["cleanup"]=="unknown" {bail!("operation {id}: outcome unknown; inspect original, no effect replay or completion wake");}
+    if state["ok"]==true {Ok(format!("operation {id} completed"))} else {bail!("operation {id} failed code={} error={}; inspect retained stdout/stderr",state["code"],state["error"])}
 }
 
 fn verb_recover(reason:&str)->Result<String> {
@@ -1545,7 +1546,10 @@ fn perform(request: &Value) -> Result<String> {
                 start_deploy_detached(&script, &deploy_capture_path(), reason, &interpreter, &args)
             } else { verb_deploy(session, prompt, reason) }
         }
-        "run" => verb_run(request.get("script").and_then(Value::as_str).unwrap_or(""), reason),
+        "run" => {
+            validate_run_continuation(request)?;
+            verb_run(request.get("script").and_then(Value::as_str).unwrap_or(""), reason)
+        },
         // A plan the agent exported. Validated against a whitelist before a single step runs, and
         // settled by this process's own /health check - the assertion the node cannot make about
         // itself while it is the thing being replaced.
@@ -1558,6 +1562,43 @@ fn perform(request: &Value) -> Result<String> {
         }
         other => bail!("unknown verb {other:?}"),
     }
+}
+
+fn validate_run_continuation(request:&Value)->Result<()> {
+    let session=request["session"].as_str().unwrap_or("");
+    let prompt=request["prompt"].as_str().unwrap_or("");
+    if session.is_empty()!=prompt.is_empty(){bail!("run continuation requires both --session and --prompt");}
+    if request.get("session").is_some_and(|v|!v.is_string())||request.get("prompt").is_some_and(|v|!v.is_string()) {bail!("run continuation fields must be strings");}
+    Ok(())
+}
+
+/// Original result is durable before this named one-shot wake exists. Request dispatch itself is concurrent.
+fn queue_run_continuation(claim:&Path,request:&Value,record:&Value)->Result<()> {
+    validate_run_continuation(request)?;
+    if request["verb"]!="run"||request["session"].as_str().unwrap_or("").is_empty(){return Ok(());}
+    if record["detail"].as_str().is_some_and(|s|s.contains("outcome unknown")){bail!("run continuation held: outcome unknown; inspect original, never replay");}
+    let id=claim.file_stem().and_then(|s|s.to_str()).context("run continuation request id missing")?;
+    if id.is_empty()||!id.bytes().all(|b|b.is_ascii_alphanumeric()||b==b'-'){bail!("run continuation request id invalid");}
+    let original=sentinel_dir().join(if record["ok"]==true{"done"}else{"failed"}).join(claim.file_name().unwrap());
+    let stored:Value=serde_json::from_slice(&std::fs::read(&original).context("run continuation original result missing")?)?;
+    if stored!=*record{bail!("run continuation original result changed");}
+    let key=format!("run-return-{id}.json");
+    let wake=json!({"verb":"wake","session":request["session"],
+        "prompt":format!("{}\n[run result evidence; not approval] request={} ok={} detail={} receipt={}",request["prompt"].as_str().unwrap(),id,record["ok"],record["detail"],original.display()),
+        "reason":format!("run settled: {}",request["reason"].as_str().unwrap_or("requested script")),"run_return_request":id});
+    let _lock=queue_lock()?;
+    for lane in ["requests","claimed","done","failed"] {
+        let path=sentinel_dir().join(lane).join(&key);
+        if path.exists(){
+            let old:Value=serde_json::from_slice(&std::fs::read(path)?)?;
+            let old=if lane=="done"||lane=="failed"{&old["request"]}else{&old};
+            if old!=&wake{bail!("run continuation identity changed; no second wake");}
+            return Ok(());
+        }
+    }
+    wa_operation::atomic_json(&sentinel_dir().join("requests").join(&key),&wake)?;
+    audit("run-continuation-queued",id,"original result durable; single request-bound wake");
+    Ok(())
 }
 
 // ---------------------------------------------------------------- the drop-box
@@ -1597,7 +1638,10 @@ fn finish_request(claim: &Path, request: &Value) {
     let record=json!({"request":request,"ok":ok,"detail":detail,"at":now_epoch(),"phase":phase});
     let target=sentinel_dir().join(folder).join(claim.file_name().unwrap_or_default());
     match wa_operation::atomic_json(&target,&record) {
-        Ok(())=>{let _=std::fs::remove_file(claim);},
+        Ok(())=>{
+            if let Err(error)=queue_run_continuation(claim,request,&record){audit("run-continuation-failed",&claim.display().to_string(),&error.to_string());}
+            let _=std::fs::remove_file(claim);
+        },
         Err(error)=>audit("request-record-failed",&claim.display().to_string(),&error.to_string()),
     }
     say(&format!("{}: {detail}",if ok {"ok"}else{"failed"}));
@@ -1821,7 +1865,7 @@ fn print_request_help() {
     }
     println!();
     println!("  --reason <text>                  why, recorded in the audit log");
-    println!("  --session <id> --prompt <text>   wake that session when the request is done (upgrade, deploy, wake)");
+    println!("  --session <id> --prompt <text>   wake that session when the request is done (upgrade, deploy, run, wake)");
     println!("  --expected-sha <full SHA>        deploy protocol: exact published canonical main source");
     println!("  --binary <path>                  the binary to install (upgrade)");
     println!("  --script <path>                  the allow-listed script to run (run)");
@@ -1867,6 +1911,7 @@ fn request(args: &[String]) -> Result<()> {
         fields.insert(key, json!(value));
         index += 2;
     }
+    if verb=="run"{validate_run_continuation(&Value::Object(fields.clone()))?;}
     let _lifecycle_lock=if dedupe_deploy {
         let file=open_lock(&start_lock_path())?;
         file.try_lock().map_err(|e|anyhow::anyhow!("lifecycle change in progress; no request written: {e}"))?;
@@ -2563,6 +2608,8 @@ mod self_update_tests {
             // The deploy path has the same rule: half a continuation is a wake nobody can receive.
             json!({"verb":"deploy","session":"thread"}),
             json!({"verb":"deploy","prompt":"continue"}),
+            json!({"verb":"run","script":"not-a-script","session":"thread"}),
+            json!({"verb":"run","script":"not-a-script","prompt":"continue"}),
         ] {
             let error = perform(&request).unwrap_err().to_string();
             assert!(error.contains("requires both --session and --prompt"), "{error}");
