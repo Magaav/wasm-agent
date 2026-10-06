@@ -214,6 +214,9 @@ local function migrate()
   -- `updated_at` let a stale peer row overwrite a newer local change. A trigger keeps it honest without
   -- every mutator having to remember; an applied replica that carries its own value is left alone.
   add_column("sessions", "changed_at", "REAL NOT NULL DEFAULT 0")
+  -- ensure_session / latest_session / list_sessions filter on the owner and sort by last use; with one
+  -- session per subagent this table grows fast, and every lookup was a scan and a sort.
+  exec("CREATE INDEX IF NOT EXISTS sessions_owner_idx ON sessions(user_id, node_id, updated_at)")
   exec("CREATE TRIGGER IF NOT EXISTS sessions_changed AFTER UPDATE ON sessions " ..
        "WHEN NEW.changed_at = OLD.changed_at BEGIN " ..
        "UPDATE sessions SET changed_at = unixepoch('subsec') WHERE id = NEW.id; END")
