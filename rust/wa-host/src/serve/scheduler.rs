@@ -218,7 +218,16 @@ impl Scheduler {
         let mut inner = self.inner.lock().unwrap_or_else(|poison| poison.into_inner());
         inner.next_run_id = inner.next_run_id.wrapping_add(1);
         let fallback_id = inner.next_run_id;
-        if self.journal_failed.load(Ordering::SeqCst) { return Decision::Refused(Refusal::JournalUnavailable); }
+        if self.journal_failed.load(Ordering::SeqCst) {
+            // One failed write used to refuse every run until a restart. A successful probe lifts it.
+            match self.journal.as_ref().map(|journal| journal.probe()) {
+                Some(Ok(())) => {
+                    self.journal_failed.store(false, Ordering::SeqCst);
+                    eprintln!("[run-journal] writes succeed again; admitting runs");
+                }
+                _ => return Decision::Refused(Refusal::JournalUnavailable),
+            }
+        }
         let allocate = || -> Result<u64, String> {
             match &self.journal { Some(journal) => journal.admit(owner, conversation), None => Ok(fallback_id) }
         };
@@ -463,6 +472,11 @@ impl Scheduler {
 
     pub fn config(&self) -> Config {
         self.config
+    }
+
+    /// Whether the durable run journal has refused a write (runs are refused until a probe succeeds).
+    pub fn journal_failed(&self) -> bool {
+        self.journal_failed.load(Ordering::SeqCst)
     }
 }
 

@@ -802,6 +802,7 @@ fn health_body() -> Vec<u8> {
     }
     // Local subagent runtime. Computed here rather than inside the macro so the strict counts are a
     // plain value. Never contains a prompt or a credential.
+    let journal_failed = scheduler::global().map(|s| s.journal_failed()).unwrap_or(false);
     let subagent_health = crate::subagents::health();
     let subagent_queued = subagent_health.get("queued").and_then(|value| value.as_u64()).unwrap_or(0);
     let subagent_running = subagent_health.get("running").and_then(|value| value.as_u64()).unwrap_or(0);
@@ -825,7 +826,9 @@ fn health_body() -> Vec<u8> {
         // (`subagents`, `runs`, `run_ids`, `current`, `queue`, `node_threads`) existing. A client that does
         // not see it must fall back to the legacy fields explicitly.
         "execution_schema": 1,
-        "ok": !stalled,
+        "ok": !stalled && !journal_failed,
+        // A node whose run journal refused a write refuses runs too; say so where a watcher looks.
+        "run_journal_failed": journal_failed,
         // The node's aggregate execution state (alive/busy/stalled) - not a thread and not a subagent.
         // It keeps its old name because `scripts/upgrade.sh` reads it as the progress signal while
         // waiting for an idle node, and that script also has to read *older* nodes: renaming the key is
