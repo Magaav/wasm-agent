@@ -1469,17 +1469,11 @@ pub fn run(first: Lua, factory: Box<dyn Fn() -> Lua + Send + Sync>, port: u16, u
             Ok(Some(request)) => request,
             _ => continue,
         };
-        if std::env::var("WASM_AGENT_MANAGED").as_deref() == Ok("1")
-            || matches!(split_path(&request.path).0.as_str(), "/jobs" | "/operations" | "/operation" | "/subagents" | "/runs" | "/run-events") {
-            let host = header_of(&request.node_headers, "host").to_ascii_lowercase();
-            let origin = header_of(&request.node_headers, "origin").to_ascii_lowercase();
-            let port = stream.local_addr().map(|a| a.port()).unwrap_or(0);
-            let local_host = host == format!("127.0.0.1:{port}") || host == format!("localhost:{port}");
-            let cross_site = header_of(&request.node_headers, "sec-fetch-site") == "cross-site";
-            if !local_host || cross_site || (!origin.is_empty() && origin != format!("http://{host}")) {
-                let _ = respond(&mut stream, 403, "application/json", b"{\"error\":\"foreign_origin\"}");
-                continue;
-            }
+        let port = stream.local_addr().map(|a| a.port()).unwrap_or(0);
+        if let Err(reason) = admit_origin(&request, port) {
+            eprintln!("[serve] refused {} {}: {reason}", request.method, split_path(&request.path).0);
+            let _ = respond(&mut stream, 403, "application/json", b"{\"error\":\"foreign_origin\"}");
+            continue;
         }
         // The page's own heartbeat, recorded where every request passes - including the ones the accept
         // thread answers itself, because `/version` is one of those and it is exactly the request that says
@@ -2118,6 +2112,49 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|window| window == needle)
 }
 
+/// Routes a peer reaches across the network. Each one carries its own node signature, verified by Lua
+/// before anything runs, so the caller's Host is whatever address the peer dialled, never ours.
+fn is_signed_peer_route(route: &str) -> bool {
+    matches!(route, "/node/call" | "/node/chat" | "/sync/push" | "/sync/head")
+}
+
+/// Only this machine's own pages and local tools may talk to the node. A browser marks every request
+/// from another site (`Sec-Fetch-Site: cross-site`, a foreign `Origin`), and a DNS-rebinding page still
+/// sends its own name as `Host`, so all three are checked on every route that can read or act.
+/// Static UI files only need the Host check (rebinding), so a link from elsewhere still opens the UI.
+/// `WASM_AGENT_ALLOWED_HOSTS` (comma list of `host:port`) admits a trusted proxy or tunnel name.
+fn admit_origin(request: &Request, port: u16) -> Result<(), &'static str> {
+    let route = split_path(&request.path).0;
+    if is_signed_peer_route(&route) {
+        return Ok(());
+    }
+    let host = header_of(&request.node_headers, "host").to_ascii_lowercase();
+    let allowed = std::env::var("WASM_AGENT_ALLOWED_HOSTS").unwrap_or_default().to_ascii_lowercase();
+    let local_host = host == format!("127.0.0.1:{port}")
+        || host == format!("localhost:{port}")
+        || host == format!("[::1]:{port}")
+        || allowed.split(',').map(str::trim).any(|name| !name.is_empty() && name == host);
+    if !local_host {
+        return Err("host");
+    }
+    if request.method == "GET" && static_route(&route) {
+        return Ok(());
+    }
+    if header_of(&request.node_headers, "sec-fetch-site") == "cross-site" {
+        return Err("cross_site");
+    }
+    let origin = header_of(&request.node_headers, "origin").to_ascii_lowercase();
+    if !origin.is_empty() && origin != format!("http://{host}") && origin != format!("https://{host}") {
+        return Err("origin");
+    }
+    Ok(())
+}
+
+/// A file the UI ships (anything with an extension, or the index) - not an API route.
+fn static_route(route: &str) -> bool {
+    route == "/" || route.is_empty() || route.rsplit('/').next().is_some_and(|last| last.contains('.'))
+}
+
 fn header_of(headers: &[(String, String)], name: &str) -> String {
     headers
         .iter()
@@ -2347,7 +2384,7 @@ fn settle_cancelled_run(stream: &mut TcpStream, request: &Request) -> std::io::R
     if request.accept_sse || route == "/node/chat" {
         stream.write_all(
             b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\n\
-              Connection: close\r\nAccess-Control-Allow-Origin: *\r\n\r\n",
+              Connection: close\r\n\r\n",
         )?;
         stream.write_all(b"data: {\"type\":\"error\",\"error\":\"run_cancelled\"}\n\n")?;
         stream.write_all(b"data: {\"type\":\"done\"}\n\n")?;
@@ -2370,7 +2407,7 @@ fn handle(lua: &Lua, ui: &std::path::Path, stream: &mut TcpStream, request: &Req
         if accept_sse || route.contains("stream=1") {
             stream.write_all(
                 b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\n\
-                  Connection: close\r\nAccess-Control-Allow-Origin: *\r\n\r\n",
+                  Connection: close\r\n\r\n",
             )?;
             stream.flush()?;
             // The sink belongs to this run for exactly as long as the call below runs.
@@ -2393,7 +2430,7 @@ fn handle(lua: &Lua, ui: &std::path::Path, stream: &mut TcpStream, request: &Req
         let text = String::from_utf8_lossy(&body).to_string();
         stream.write_all(
             b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\n\
-              Connection: close\r\nAccess-Control-Allow-Origin: *\r\n\r\n",
+              Connection: close\r\n\r\n",
         )?;
         stream.flush()?;
         let _sink = stream.try_clone().ok().map(|clone| SinkGuard::set(Sink::Socket {
@@ -2643,7 +2680,7 @@ fn respond(stream: &mut TcpStream, status: u16, content_type: &str, body: &[u8])
     };
     let head = format!(
         "HTTP/1.1 {status} {reason}\r\n{location}Content-Type: {content_type}\r\nContent-Length: {length}\r\n\
-         Cache-Control: no-store\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n"
+         Cache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n"
     );
     stream.write_all(head.as_bytes())?;
     if status != 301 {
@@ -2877,5 +2914,54 @@ mod peer_conversation_tests {
         assert_eq!(peer_conversation(&without_thread, "node-1"), "peer:node-1");
         let anonymous = request(b"plain text", vec![]);
         assert_eq!(peer_conversation(&anonymous, ""), "");
+    }
+}
+
+#[cfg(test)]
+mod origin_tests {
+    use super::{admit_origin, scheduler, Request};
+
+    fn request(method: &str, path: &str, headers: &[(&str, &str)]) -> Request {
+        Request {
+            method: method.into(),
+            path: path.into(),
+            session: String::new(),
+            routing_session: String::new(),
+            run_class: scheduler::RunClass::Interactive,
+            run_id: 0,
+            owner: String::new(),
+            run_cancel: None,
+            peer_verified: None,
+            run_sockets: None,
+            node_headers: headers.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+            body: Vec::new(),
+            accept_sse: false,
+        }
+    }
+
+    /// The attack this closes: a page on any site POSTs a command to the local node with a
+    /// `text/plain` body (no preflight), or rebinds its own name to 127.0.0.1.
+    #[test]
+    fn a_foreign_page_cannot_reach_an_api_route() {
+        let cross = request("POST", "/shell", &[("host", "127.0.0.1:8799"), ("origin", "https://evil.example"), ("sec-fetch-site", "cross-site")]);
+        assert!(admit_origin(&cross, 8799).is_err());
+        let no_fetch_meta = request("POST", "/chat", &[("host", "127.0.0.1:8799"), ("origin", "https://evil.example")]);
+        assert!(admit_origin(&no_fetch_meta, 8799).is_err());
+        let rebound = request("GET", "/sessions", &[("host", "evil.example:8799")]);
+        assert!(admit_origin(&rebound, 8799).is_err());
+        let rebound_static = request("GET", "/app.js", &[("host", "evil.example:8799")]);
+        assert!(admit_origin(&rebound_static, 8799).is_err());
+    }
+
+    #[test]
+    fn the_own_page_local_tools_and_signed_peers_still_pass() {
+        let page = request("POST", "/chat", &[("host", "127.0.0.1:8799"), ("origin", "http://127.0.0.1:8799"), ("sec-fetch-site", "same-origin")]);
+        assert!(admit_origin(&page, 8799).is_ok());
+        let curl = request("GET", "/health", &[("host", "localhost:8799")]);
+        assert!(admit_origin(&curl, 8799).is_ok());
+        let link = request("GET", "/", &[("host", "127.0.0.1:8799"), ("sec-fetch-site", "cross-site")]);
+        assert!(admit_origin(&link, 8799).is_ok());
+        let peer = request("POST", "/node/call", &[("host", "10.0.0.5:8799")]);
+        assert!(admit_origin(&peer, 8799).is_ok());
     }
 }
