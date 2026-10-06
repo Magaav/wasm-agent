@@ -1001,12 +1001,16 @@ function wa_sync_apply(payload, from, public_key, ts, signature)
   end
   local self_id = (nodeslib.identity() or {}).node_id or ""
   if request.to_node_id ~= self_id then return json.encode({ error = "wrong_target" }) end
-  local applied = 0
-  for _, entry in ipairs(request.entries) do
-    if entry.origin ~= self_id and memory.apply_entry(entry) then
-      applied = applied + 1
+  -- One batch, one transaction: all of it lands or none of it does, and 200 entries cost one commit.
+  local applied = memory.transaction(function()
+    local count = 0
+    for _, entry in ipairs(request.entries) do
+      if entry.origin ~= self_id and memory.apply_entry(entry) then
+        count = count + 1
+      end
     end
-  end
+    return count
+  end)
   return json.encode({ ok = true, applied = applied, head = memory.journal_head() })
 end
 

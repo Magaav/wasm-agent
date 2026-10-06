@@ -209,6 +209,14 @@ local function migrate()
   add_column("sessions", "interrupted_seq", "INTEGER NOT NULL DEFAULT 0")
   add_column("sessions", "interrupted_reason", "TEXT NOT NULL DEFAULT ''")
   add_column("sessions", "interrupted_count", "INTEGER NOT NULL DEFAULT 0")
+  -- When this row last changed in any way, for replication only. `updated_at` is deliberately not
+  -- bumped by a worktree/workspace change (the session list is ordered by use), so last-writer-wins on
+  -- `updated_at` let a stale peer row overwrite a newer local change. A trigger keeps it honest without
+  -- every mutator having to remember; an applied replica that carries its own value is left alone.
+  add_column("sessions", "changed_at", "REAL NOT NULL DEFAULT 0")
+  exec("CREATE TRIGGER IF NOT EXISTS sessions_changed AFTER UPDATE ON sessions " ..
+       "WHEN NEW.changed_at = OLD.changed_at BEGIN " ..
+       "UPDATE sessions SET changed_at = unixepoch('subsec') WHERE id = NEW.id; END")
   -- Images attached to a user turn. A JSON array of
   -- {mime, sha256, name, bytes}; the bytes live on disk as base64 under
   -- attachments/ (content-addressed by sha256), never in `content`. Content is
@@ -296,6 +304,10 @@ function M.remember(content, scope, tags)
   if #content > 8000 then error("memory_too_large") end
   scope = scope or "global"
   tags = tags or {}
+  -- One unit: the row, its search entry and its journal entry. Before, a crash between them left a
+  -- memory recall could never find, or one that never replicated; and two interpreters could both pass
+  -- the duplicate check. BEGIN IMMEDIATE takes the write lock before the check.
+  return in_transaction(function()
   local hash = host.sha256(content)
   local existing = query(
     "SELECT id FROM memories WHERE scope=? AND content_sha256=? AND deleted_at IS NULL LIMIT 1",
@@ -318,6 +330,7 @@ function M.remember(content, scope, tags)
     created_at = now, updated_at = now, content_sha256 = hash,
   })
   return id
+  end)
 end
 
 local function query_memories(match, limit, scope, exclusive)
@@ -381,12 +394,17 @@ function M.memories(scope, limit)
 end
 
 function M.forget(memory_id)
-  local result = exec("UPDATE memories SET deleted_at=?, updated_at=? WHERE id=? AND deleted_at IS NULL",
-                      {host.now(), host.now(), memory_id})
-  if (result.changes or 0) > 0 then
-    exec("DELETE FROM memories_fts WHERE memory_id=?", {memory_id})
-  end
-  return (result.changes or 0) > 0
+  return in_transaction(function()
+    local now = host.now()
+    local result = exec("UPDATE memories SET deleted_at=?, updated_at=? WHERE id=? AND deleted_at IS NULL",
+                        {now, now, memory_id})
+    if (result.changes or 0) > 0 then
+      exec("DELETE FROM memories_fts WHERE memory_id=?", {memory_id})
+      -- Journalled, so a forgotten memory is forgotten on every peer too (it used to stay there).
+      M.journal("memory", memory_id, { id = memory_id, deleted_at = now, updated_at = now }, "delete")
+    end
+    return (result.changes or 0) > 0
+  end)
 end
 
 -- ------------------------------------------------------------------ ledger
@@ -424,7 +442,12 @@ function M.meta_set(key, value)
   return meta_set(key, value)
 end
 
+local record_message, apply_entry
 function M.record_message(message)
+  return in_transaction(function() return record_message(message) end)
+end
+
+function record_message(message)
   local conversation_id = tostring(message.conversation_id or "")
   local message_id = tostring(message.message_id or "")
   if conversation_id == "" or message_id == "" then error("message_identity_required") end
@@ -799,9 +822,9 @@ end
 
 -- Append a mutation to the replication journal. Every write that should reach
 -- peers goes through here; applying a remote entry does NOT journal it again.
-function M.journal(kind, entity_id, payload)
+function M.journal(kind, entity_id, payload, op)
   exec("INSERT INTO journal(kind,entity_id,op,origin,payload,created_at) VALUES(?,?,?,?,?,?)",
-       {kind, entity_id, "upsert", origin(), json.encode(payload), host.now()})
+       {kind, entity_id, op or "upsert", origin(), json.encode(payload), host.now()})
 end
 
 -- -------------------------------------------------------------------- images
@@ -945,8 +968,15 @@ end
 -- read-modify-write is atomic, writers are serialised, and the three writes (message, search row, session
 -- touch) are one unit a kill cannot tear in half.
 in_transaction = function(fn)
+  -- Reentrant: a write that is already inside a transaction joins it. The depth is kept on the
+  -- interpreter, not in this module, because several modules load their own copy of this file and all
+  -- of them share the interpreter's one connection.
+  local depth = rawget(_G, "__wa_tx_depth") or 0
+  if depth > 0 then return fn() end
   exec("BEGIN IMMEDIATE")
+  rawset(_G, "__wa_tx_depth", 1)
   local ok, result = pcall(fn)
+  rawset(_G, "__wa_tx_depth", 0)
   if not ok then
     pcall(exec, "ROLLBACK")
     error(result)
@@ -1392,6 +1422,10 @@ end
 
 -- Idempotent: safe to apply the same entry twice. Never journals what it applies.
 function M.apply_entry(entry)
+  return in_transaction(function() return apply_entry(entry) end)
+end
+
+function apply_entry(entry)
   local payload = entry.payload
   if type(payload) == "string" then
     local ok, decoded = pcall(json.decode, payload)
@@ -1415,15 +1449,27 @@ function M.apply_entry(entry)
     exec("INSERT INTO messages_fts(content,session_id,message_id) VALUES(?,?,?)",
          {payload.content or "", payload.session_id, payload.id})
   elseif entry.kind == "session" then
-    local local_rows = query("SELECT updated_at FROM sessions WHERE id=?", {payload.id})
-    if #local_rows == 0 or (payload.updated_at or 0) >= (local_rows[1].updated_at or 0) then
-      -- Every position needs a concrete value: a nil would leave a hole in the
-      -- params array and the JSON encoder rejects sparse arrays.
-      exec("INSERT OR REPLACE INTO sessions(id,route_id,objective,parent_session_id,started_at," ..
+    local local_rows = query("SELECT updated_at, changed_at FROM sessions WHERE id=?", {payload.id})
+    local function stamp(row) return math.max(tonumber(row.changed_at) or 0, tonumber(row.updated_at) or 0) end
+    if #local_rows == 0 or stamp(payload) >= stamp(local_rows[1]) then
+      -- An upsert of exactly the replicated columns. `INSERT OR REPLACE` deleted the row and wrote a new
+      -- one, resetting every column it did not list (interrupted_*) to its default. NULLs travel as ""
+      -- and 0 (a parameter list cannot hold nil) and are turned back into NULL here, so an open session
+      -- stays open (`ended_at IS NULL`) on the replica instead of reading as ended at epoch 0.
+      exec("INSERT INTO sessions(id,route_id,objective,parent_session_id,started_at," ..
            "ended_at,user_id,node_id,title,mode,summary,summarized_until,updated_at,worktree," ..
            "fork_parent_id,fork_parent_seq,workspace_required,workspace_state,workspace_branch," ..
-           "workspace_base_commit,workspace_source_path,workspace_start_state,workspace_error) " ..
-           "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+           "workspace_base_commit,workspace_source_path,workspace_start_state,workspace_error,changed_at) " ..
+           "VALUES(?,?,?,NULLIF(?,''),?,NULLIF(?,0),?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) " ..
+           "ON CONFLICT(id) DO UPDATE SET route_id=excluded.route_id,objective=excluded.objective," ..
+           "parent_session_id=excluded.parent_session_id,started_at=excluded.started_at,ended_at=excluded.ended_at," ..
+           "user_id=excluded.user_id,node_id=excluded.node_id,title=excluded.title,mode=excluded.mode," ..
+           "summary=excluded.summary,summarized_until=excluded.summarized_until,updated_at=excluded.updated_at," ..
+           "worktree=excluded.worktree,fork_parent_id=excluded.fork_parent_id,fork_parent_seq=excluded.fork_parent_seq," ..
+           "workspace_required=excluded.workspace_required,workspace_state=excluded.workspace_state," ..
+           "workspace_branch=excluded.workspace_branch,workspace_base_commit=excluded.workspace_base_commit," ..
+           "workspace_source_path=excluded.workspace_source_path,workspace_start_state=excluded.workspace_start_state," ..
+           "workspace_error=excluded.workspace_error,changed_at=excluded.changed_at",
            {payload.id, payload.route_id or "", payload.objective or "",
             payload.parent_session_id or "", payload.started_at or host.now(),
             payload.ended_at or 0, payload.user_id or "master",
@@ -1433,8 +1479,12 @@ function M.apply_entry(entry)
             payload.workspace_required or 0, payload.workspace_state or "unbound",
             payload.workspace_branch or "", payload.workspace_base_commit or "",
             payload.workspace_source_path or "", payload.workspace_start_state or "{}",
-            payload.workspace_error or ""})
+            payload.workspace_error or "", stamp(payload)})
     end
+  elseif entry.kind == "memory" and entry.op == "delete" then
+    exec("UPDATE memories SET deleted_at=?, updated_at=? WHERE id=? AND deleted_at IS NULL",
+         {payload.deleted_at or host.now(), payload.updated_at or host.now(), payload.id})
+    exec("DELETE FROM memories_fts WHERE memory_id=?", {payload.id})
   elseif entry.kind == "memory" then
     exec("INSERT OR IGNORE INTO memories(id,scope,content,tags,source,session_id,created_at," ..
          "updated_at,content_sha256) VALUES(?,?,?,?,?,?,?,?,?)",
@@ -1444,7 +1494,8 @@ function M.apply_entry(entry)
           payload.updated_at or host.now(), payload.content_sha256 or ""})
     exec("DELETE FROM memories_fts WHERE memory_id=?", {payload.id})
     exec("INSERT INTO memories_fts(content,tags,memory_id) VALUES(?,?,?)",
-         {payload.content or "", payload.tags or "", payload.id})
+         {payload.content or "", type(payload.tags) == "table" and table.concat(payload.tags, " ") or (payload.tags or ""),
+          payload.id})
   elseif entry.kind == "run" then
     exec("INSERT OR REPLACE INTO runs(id,session_id,run_id,status,outcome,reply,started_at,ended_at) " ..
          "VALUES(?,?,?,?,?,?,?,?)",
