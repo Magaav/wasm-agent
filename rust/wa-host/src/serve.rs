@@ -2754,6 +2754,35 @@ fn module_content_type(from_route: &str) -> &'static str {
     }
 }
 
+/// The page's Content-Security-Policy, with a hash for each of its own inline scripts. Computed from the
+/// bytes being served, so editing an inline script can never leave a stale hash that silently blocks it.
+/// Scripts, styles, frames and connections come from this origin only; nothing may frame the UI from
+/// elsewhere; WebAssembly may compile (the markdown renderer).
+fn content_security_policy(html: &[u8]) -> String {
+    use base64::Engine;
+    let text = String::from_utf8_lossy(html);
+    let mut hashes = String::new();
+    let mut rest = text.as_ref();
+    while let Some(open) = rest.find("<script") {
+        let after = &rest[open..];
+        let Some(close_tag) = after.find('>') else { break };
+        let tag = &after[..close_tag];
+        let body = &after[close_tag + 1..];
+        let Some(end) = body.find("</script>") else { break };
+        if !tag.contains("src=") {
+            let digest = ring::digest::digest(&ring::digest::SHA256, body[..end].as_bytes());
+            hashes.push_str(&format!(" 'sha256-{}'", base64::engine::general_purpose::STANDARD.encode(digest.as_ref())));
+        }
+        rest = &body[end..];
+    }
+    format!(
+        "Content-Security-Policy: default-src 'self'; script-src 'self' 'wasm-unsafe-eval'{hashes}; \
+         style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' data: blob:; \
+         connect-src 'self'; worker-src 'self'; frame-src 'self'; frame-ancestors 'self'; \
+         object-src 'none'; base-uri 'self'; form-action 'self'\r\n"
+    )
+}
+
 fn respond(stream: &mut TcpStream, status: u16, content_type: &str, body: &[u8]) -> std::io::Result<()> {
     let reason = match status {
         200 => "OK",
@@ -2771,9 +2800,10 @@ fn respond(stream: &mut TcpStream, status: u16, content_type: &str, body: &[u8])
     } else {
         (String::new(), body.len())
     };
+    let policy = if content_type.starts_with("text/html") { content_security_policy(body) } else { String::new() };
     let head = format!(
         "HTTP/1.1 {status} {reason}\r\n{location}Content-Type: {content_type}\r\nContent-Length: {length}\r\n\
-         Cache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n"
+         Cache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\n{policy}Connection: close\r\n\r\n"
     );
     stream.write_all(head.as_bytes())?;
     if status != 301 {
