@@ -192,11 +192,24 @@ Verified with a node that advertises **no endpoints at all** (NAT simulation):
 succeeded through `https://rendezvous.colmeio.com`, with the queue draining to
 zero afterwards (`GET /relay/status`).
 
+## Coordinated hardening upgrade
+
+Announcements sign `v2|node_id|ts|name|<JSON endpoints>`; old id/time-only
+registrations refuse. Deploy the registry and participating nodes/CLIs together;
+there is no unsigned metadata fallback. Roles remain registry/admin grants.
+`/node/call` replies and `/sync/push` acknowledgments are target-signed over the
+original request signature plus exact reply bytes. Sync signs its full body and
+target under `sync-v2`; forged/unsigned acknowledgments cannot advance a cursor.
+If application happened but its acknowledgment was lost, the cursor remains held
+for explicit inspection, not falsely acknowledged or blindly replayed.
+The public registry is the authenticated trust anchor; its TLS/admin configuration
+must be protected. These changes are not device enrollment or vault configuration.
+
 ## Security notes
 
 - Every write is **signature-verified**; a node cannot claim another's identity.
-- `role` is *claimed* by the node and recorded; the master still enforces
-  permissions locally (never trust a peer's self-description).
+- `role` is granted by configured administrators or exact administrator role grants,
+  never a node's self-description; recipients separately enforce pinned local consent.
 - Nothing sensitive is stored: only public keys and endpoints.
 - The service is read-mostly and tiny; rate-limit per source if it is ever
   abused.

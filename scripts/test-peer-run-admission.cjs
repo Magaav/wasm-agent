@@ -170,7 +170,7 @@ async function register(service, node, role = 'master') {
   const ts = now();
   const payload = {
     node_id: node.node_id, public_key: node.public_key, name: node.name, role, endpoints: [], ts,
-    signature: signature(node, node.node_id + '|' + ts),
+    signature: signature(node, 'v2|' + node.node_id + '|' + ts + '|' + node.name + '|[]'),
   };
   return request(service + '/register', 'POST', JSON.stringify(payload), { 'content-type': 'application/json' });
 }
@@ -277,7 +277,8 @@ async function startDestination(node, service, mockPort) {
   // The relay may transport the legacy unsigned outer envelope, but the target must reject a
   // redirected EXECUTION: the outer `to` is B while the signed inner target is A.
   const redirectRid = crypto.randomUUID();
-  const redirectEnvelope = JSON.stringify({ rid: redirectRid, to: primaryB.node_id, method: 'POST', path: '/node/chat', body: redirectBody, headers: redirectHeaders });
+  const relayRedirectBody = JSON.stringify({...JSON.parse(redirectBody),nonce:crypto.randomUUID()});
+  const redirectEnvelope = JSON.stringify({ rid: redirectRid, to: primaryB.node_id, method: 'POST', path: '/node/chat', body: relayRedirectBody, headers: chatHeaders(peer,relayRedirectBody) });
   const relayRedirect = await request(service + '/relay/send', 'POST', redirectEnvelope, signedHeaders(peer, 'relay-send'));
   check(relayRedirect.status === 200 && relayRedirect.value.status === 403 && /wrong_target/.test(relayRedirect.value.body || ''), 'a relay envelope whose outer target is B but whose signed target is A is refused by B');
   check(!runIds((await request(primaryB.url + '/health')).value).some((row) => row.conversation === redirectThread), 'the redirected relay chat created no admission on B');

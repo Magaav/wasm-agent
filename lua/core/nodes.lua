@@ -458,6 +458,17 @@ function M.request(node, path, body, inner_headers)
   return { error = "no_route" }
 end
 
+-- Only target-authenticated bytes are a result (also used for sync acknowledgments).
+function M.verified_reply(node, headers, body)
+  local ok,envelope=pcall(json.decode,body)
+  if not ok or type(envelope)~='table' or type(envelope.reply)~='string' then return nil,'unsigned_reply' end
+  local message=table.concat({'reply',node.node_id,headers['X-WA-Ts'],host.sha256(headers['X-WA-Sig']..'\n'..envelope.reply)},'|')
+  if not node.public_key or not host.verify(node.public_key,message,envelope.reply_sig or '') then return nil,'remote_reply_unverified' end
+  local decoded_ok,decoded=pcall(json.decode,envelope.reply)
+  if not decoded_ok or type(decoded)~='table' then return nil,'bad_reply' end
+  return decoded
+end
+
 -- Call a capability on a peer: direct when possible, else through the relay.
 function M.remote_call(selector, capability, args)
   local node = M.find(selector)
@@ -486,19 +497,8 @@ function M.remote_call(selector, capability, args)
       node = node.name,
     }
   end
-  local ok, envelope = pcall(json.decode, response.body)
-  -- Only a reply the target signed over our own request signature is a result. An unsigned body is
-  -- a refusal from before verification (or a forgery) and is reported, never used as a result.
-  if not ok or type(envelope) ~= "table" or type(envelope.reply) ~= "string" then
-    local refusal = ok and type(envelope) == "table" and envelope.error or "unsigned_reply"
-    return { error = "remote_refused", detail = tostring(refusal):sub(1, 120), node = node.name }
-  end
-  local message = table.concat({ "reply", node.node_id, headers["X-WA-Ts"], host.sha256(headers["X-WA-Sig"] .. "\n" .. envelope.reply) }, "|")
-  if not node.public_key or not host.verify(node.public_key, message, envelope.reply_sig or "") then
-    return { error = "remote_reply_unverified", node = node.name }
-  end
-  local decoded_ok, decoded = pcall(json.decode, envelope.reply)
-  if not decoded_ok or type(decoded) ~= "table" then return { result = envelope.reply, node = node.name } end
+  local decoded,problem=M.verified_reply(node,headers,response.body)
+  if not decoded then return {error=problem,node=node.name} end
   decoded.node = node.name
   return decoded
 end

@@ -14,6 +14,7 @@ pub struct Journal {
     /// under the node-wide lock; deltas now go to disk in one transaction per batch, and any other event
     /// (checkpoint, tool, error, done) flushes the batch first, so the order on disk is unchanged.
     pending: Mutex<(Vec<(u64, String)>, std::time::Instant)>,
+    batch: bool,
 }
 
 /// Events that only carry more streamed text. Losing the last fraction of a second of these in a crash
@@ -27,6 +28,10 @@ const PENDING_AGE: std::time::Duration = std::time::Duration::from_millis(250);
 
 impl Journal {
     pub fn open(path: &Path) -> Result<Self, String> {
+        Self::open_with_batch(path, std::env::var("WASM_AGENT_RUN_EVENT_BATCH").as_deref()==Ok("1"))
+    }
+
+    fn open_with_batch(path: &Path, batch: bool) -> Result<Self, String> {
         let lease = Connection::open(std::path::PathBuf::from(format!("{}.run-lease.sqlite",path.display()))).map_err(|e| e.to_string())?;
         lease.busy_timeout(std::time::Duration::from_millis(0)).map_err(|e| e.to_string())?;
         lease.execute_batch("PRAGMA journal_mode=DELETE; BEGIN EXCLUSIVE;")
@@ -44,15 +49,12 @@ impl Journal {
             UPDATE admissions SET state=CASE WHEN state='queued' THEN 'not_started' ELSE 'unknown' END,
                 updated_at=unixepoch() WHERE state IN ('queued','running');")
             .map_err(|e| e.to_string())?;
-        // Nothing pruned this store, and every streamed token was a row. Settled runs keep their stream
-        // evidence for a week and their admission row for a month; an unsettled one is never pruned.
-        db.execute_batch("DELETE FROM events WHERE run_id IN (SELECT id FROM admissions
-                WHERE state NOT IN ('queued','running','unknown') AND updated_at < unixepoch() - 7*86400);
-            DELETE FROM admissions WHERE state NOT IN ('queued','running','unknown') AND updated_at < unixepoch() - 30*86400;
-            PRAGMA wal_checkpoint(TRUNCATE);")
-            .map_err(|e| e.to_string())?;
+        // Admissions/events are original execution evidence, including for claims and operations
+        // outside this store. A terminal label or age cannot prove nobody still needs that evidence.
+        // Preserve it on startup; explicit evidence-aware maintenance owns archival/retirement.
+        db.execute_batch("PRAGMA wal_checkpoint(PASSIVE);").map_err(|e|e.to_string())?;
         Ok(Self { db: Mutex::new(db), _lease: Mutex::new(lease),
-            pending: Mutex::new((Vec::new(), std::time::Instant::now())) })
+            pending: Mutex::new((Vec::new(), std::time::Instant::now())), batch })
     }
 
     /// Write any batched deltas. Called before every other write and read, so nothing observes a gap.
@@ -130,7 +132,9 @@ impl Journal {
     pub fn event(&self, id: u64, payload: &str) -> Result<(), String> {
         let value: Value = serde_json::from_str(payload).map_err(|e| e.to_string())?;
         let mut db = self.db.lock().map_err(|e| e.to_string())?;
-        if coalescable(value["type"].as_str().unwrap_or("")) {
+        // Opt-in experiment only. Default remains crash-durable raw stream evidence; batching
+        // risks a final partial display batch on crash and has not proved equivalent recovery.
+        if self.batch && coalescable(value["type"].as_str().unwrap_or("")) {
             let due = {
                 let mut pending = self.pending.lock().map_err(|e| e.to_string())?;
                 pending.0.push((id, payload.to_string()));
@@ -257,10 +261,27 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
+    fn startup_preserves_old_terminal_admissions_and_raw_events() {
+        let root=std::env::temp_dir().join(format!("wa-preserve-{}",crate::host::new_uuid()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path=root.join("memory.db");
+        let journal=Journal::open_with_batch(&path,false).unwrap();
+        let id=journal.admit("alice","held").unwrap();
+        journal.event(id,r#"{"type":"delta","text":"original"}"#).unwrap();
+        assert_eq!(journal.db.lock().unwrap().query_row("SELECT COUNT(*) FROM events",[],|r|r.get::<_,i64>(0)).unwrap(),1);
+        journal.state(id,"completed",false).unwrap();
+        journal.db.lock().unwrap().execute("UPDATE admissions SET updated_at=1",[]).unwrap();
+        drop(journal);
+        let journal=Journal::open_with_batch(&path,false).unwrap();
+        let replay=journal.replay("alice","held",id,0,true).unwrap().unwrap();
+        assert_eq!(replay["events"][0]["event"]["text"],"original");
+        drop(journal);std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
     fn deltas_are_batched_but_never_reordered() {
         let root=std::env::temp_dir().join(format!("wa-run-batch-{}-{}",std::process::id(),crate::serve::now_ms()));
         std::fs::create_dir_all(&root).unwrap();
-        let journal=Journal::open(&root.join("memory.db")).unwrap();
+        let journal=Journal::open_with_batch(&root.join("memory.db"),true).unwrap();
         let id=journal.admit("alice","a").unwrap();
         journal.event(id,r#"{"type":"delta","text":"a"}"#).unwrap();
         journal.event(id,r#"{"type":"delta","text":"b"}"#).unwrap();

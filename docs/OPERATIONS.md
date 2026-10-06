@@ -247,6 +247,15 @@ is about 29 ms here; it cannot explain the field audit's 88.2-second bash p95 or
 The tests prove those boundaries, not universal freedom from hangs or safe
 execution of arbitrary privileged commands.
 
+## Opt-in provider retry policy
+
+`WASM_AGENT_PROVIDER_RETRIES=0` is the default for the new exponential-backoff
+loop; a positive integer (capped at eight) opts in. Risk: a lost inference response
+may already have been billed or partially streamed. Known returned content,
+commentary, reasoning or tool calls prohibit retry. These are inference retries,
+never permission to replay a dispatched tool, credential refresh or unknown effect.
+The existing separately bounded response-header-timeout policy is unchanged.
+
 ## Supply chain
 
 - Builds use `--locked`, so a build can never resolve different crates than `Cargo.lock` names.

@@ -156,7 +156,7 @@ recovery must not be the thing that breaks the request.
 | | `default` | `debug` |
 | --- | --- | --- |
 | tool payloads | stable bounded view + retrievable original JSON artifact | same, plus first-step model/messages/tools snapshot (not a complete provider request) |
-| retention | **100% for 7 days**, then pruned | **kept forever** |
+| retention | **originals preserved**; no automatic age-based deletion | **kept forever** |
 | purpose | everyday use, small DB | reproduce a failure, build a fixture |
 
 Flip it with `session_debug{mode}` (or the button in **engine → sessions**).
@@ -184,11 +184,10 @@ the durable telemetry totals, including unsuccessful attempts.
 Summaries are **lossy interpretations**, not lossless compression. The retained
 original transcript is the evidence, accessible via `session`/`search_messages`;
 `session` supports `before_seq` pagination. Default transcript retention remains
-seven days (`WASM_AGENT_RETENTION_DAYS`, 0 keeps everything); debug transcripts persist.
-The node runs it daily when quiet (`wa_retention`): an old message is removed only when
-it is at/before its session's compaction point or the session has been quiet past the
-cutoff, the replication journal is trimmed behind every peer's cursor, and telemetry
-keeps four times the transcript window. `session`/`search_messages` also offer an
+preservation (`WASM_AGENT_RETENTION_DAYS` defaults to 0); debug transcripts persist.
+`wa_retention`, `memory.prune` and `prune_journal` refuse deletion without evidence-aware
+retirement admission. Quiet sessions, compaction, age and replication acknowledgments
+cannot prove an original is no longer needed by an operation, claim or workspace. `session`/`search_messages` also offer an
 explicit `view:'compact'` with omitted diagnostic fields and exact-row references;
 full remains the default. Exact `message_id` lookup checks session identity and
 ownership before returning anything. Byte-paged exact row JSON is available to the
@@ -343,16 +342,25 @@ Two bugs this surfaced, both fixed:
 
 ## Retention
 
-`memory.prune(7)` deletes non-debug messages older than 7 days and vacuums their FTS
-rows. Debug sessions are never pruned. Summaries outlive their messages (they are
-the compressed value), so a years-old session still contributes its conclusions
-without carrying the raw trace.
+Original transcripts, replication mutations, telemetry, run admissions/events and resource
+lease files are preserved by default. `memory.prune`/`prune_journal` return
+`nil, retention_evidence_admission_required`; the quiet scheduler reports the same refusal
+for a positive retention window. Summary text is not a replacement for original execution
+evidence. Explicit maintenance must prove scope, dependencies and recoverable archives
+before any retirement. No historical unknown is settled by upgrading this code.
+
+`WASM_AGENT_RUN_EVENT_BATCH=1` opts into stream-event batching (64 events/250 ms,
+flushed at non-delta events and reads). Risk: a crash can lose the pending raw stream
+tail. Default is synchronous raw-event durability; no equivalence or fan/I/O benefit is
+claimed for that opt-in.
 
 ## Backups
 
 `lua/core/backup.lua` snapshots every SQLite store under the data/config directories plus the live
 database (`VACUUM INTO`, WAL included), checks each copy with `PRAGMA integrity_check`, writes them to
-`<config>/backups/<UTC stamp>[-label]/` and keeps the newest five. `/update` takes one (`pre-update`)
+`<config>/backups/<UTC stamp>-<uuid>[-label]/` and retains all recoverable snapshots.
+Inventory/read/write/integrity failures are visible; failed or partial backups do not
+permit deployment. This is per-store consistency, not one simultaneous multi-store snapshot. `/update` takes one (`pre-update`)
 before queueing a deploy and refuses to deploy if it fails, because the new binary migrates the schema
 and an older binary refuses a migrated database. By hand:
 `WA_SCRIPT=tests/backup-all-stores.lua` shows the call; `dofile("lua/core/backup.lua").run("label")`.

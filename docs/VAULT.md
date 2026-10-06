@@ -42,7 +42,7 @@ In `wa chat`, type `/login`. It lists the providers and their state, then:
 
 Either way, the provider then becomes the active one. The vault page (the operator's side) does the same, and can also remove a credential, disable a provider or test it.
 
-`/login` talks to the vault's node-side door (`/login`, `/login/<provider>` on the proxy listener). Those routes need no admin token, so the agent can reach them as well. It can start a device login, which only a person with the ChatGPT account can complete, or replace the opencode-go key. Like everything else on the vault, those routes are write-only: no answer carries a stored value. Removing a credential stays on the admin page.
+`/login` talks to the vault's node-side door (`/login`, `/login/<provider>` on the proxy listener). Those routes need no admin token, so the agent can reach them as well. It can start a device login, which only a person with the ChatGPT account can complete, or store a first opencode-go key. Replacement on the node-side door refuses `vault_key_exists`; only the token-gated operator page may replace credentials. Like everything else on the vault, those routes are write-only: no answer carries a stored value. Removing a credential stays on the admin page.
 
 Known limit: the pasted key passes through the `wa chat` process on its way to the vault. The line editor's up-arrow history (in memory, per session) also holds it until that `wa chat` exits.
 
@@ -56,20 +56,21 @@ Standard library Python, one file. It has two listeners for two audiences:
 The rules it is built around (the reasons are in the file header):
 
 1. **No read path.** The admin API can write, replace, delete, enable/disable, test and report status. It cannot return a key. A stolen admin token can overwrite a key but not read it.
-2. **The upstream is fixed per route.** The caller picks a path, never a host. The Host header is not passed through and redirects are not followed. The subscription route only allows `codex/` and `wham/usage`, so the OAuth token reaches only the two endpoints wasm-agent uses.
+2. **The upstream is fixed per route.** The caller picks a path, never a host. The Host header is not passed through and redirects are not followed. The subscription route only allows exact `codex/responses` and `wham/usage`, so the OAuth token reaches only the two endpoints wasm-agent uses.
 3. **The node's credential headers are dropped**, and so are cookie and forwarding headers.
-4. **Single-flight refresh.** The refresh token rotates on every use, so refresh runs once under a lock and the store is re-read inside it. A rejected refresh is never retried.
+4. **Single-flight refresh.** The refresh token rotates on every use, so refresh runs once under a lock and the store is re-read inside it. Before refresh dispatch a durable `refresh_pending` fence is saved. Rejected, malformed or ambiguous responses retain that fence and cannot be automatically retried, including after restart; the operator must log in again.
 
 The OAuth client id, endpoints and device-code flow are the ones `lua/core/openai_sub_auth.lua` measured from Pi 0.87.1 (MIT).
 
 ## Tests
 
 - `scripts/test-vault-login.lua`: drives `/login` with a scripted reader against a live vault. It checks that the key is stored, is never printed, and that the provider is selected; a cancel stores nothing.
-- `python3 scripts/test-vault.py`: runs the real vault against local fake upstreams. It also covers the `/login` door: no token needed, write-only, cannot delete. It checks that the key reaches the upstream and the placeholder does not, that no endpoint or log line carries a stored value, the token gate, the route allowlist, that redirects are passed back rather than followed, SSE streaming, one refresh for five concurrent callers, and the device login end to end.
+- `python3 scripts/test-vault.py`: runs the real vault against local fake upstreams. It also covers the `/login` door: no token needed, write-only, cannot delete. It checks exact path/body refusals, no node-side replacement, that the key reaches the upstream and the placeholder does not, that no endpoint or log line carries a stored value, the token gate, the route allowlist, that redirects are passed back rather than followed, SSE streaming, one refresh for five concurrent callers, and the device login end to end.
 - `scripts/test-vault-routing.lua`: run once with `WASM_AGENT_VAULT_URL` set and once without (see its header). It checks that the provider, the wire and the transport route through the vault only when the variable is set.
 
 ## Risks
 
 - **Same risk as the native subscription wire.** The vault uses the same private ChatGPT endpoints and the same measured OAuth flow.
+- **Windows fixtures are not vault isolation.** Private Unix files use mode 600 from creation. Windows inherits the selected data directory's ACL; Python chmod does not create an ACL sandbox. No production vault or credential migration is implied by source installation.
 - **The boundary is the deployment, not this code.** The vault's volume and `WA_VAULT_ADMIN_TOKEN` must stay out of the agent's container. If you run the vault as the node's own user on the same filesystem, the agent can read the store again.
 - **The agent can spend the credential.** It can send any request the routes allow. That is the point of "use but not read". Disable a provider on the page to stop it.

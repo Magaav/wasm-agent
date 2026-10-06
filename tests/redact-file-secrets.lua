@@ -6,8 +6,9 @@ local paths = dofile("lua/core/paths.lua")
 local key = string.rep("ab12", 16)
 host.write_file(paths.config() .. "/node.key", key)
 local refresh = "rt_" .. string.rep("Z9", 20)
-host.write_file(host.getenv("WASM_AGENT_OPENAI_SUB_STORE"),
-  '{"openai-codex":{"access_token":"at_' .. string.rep("Q7", 20) .. '","refresh_token":"' .. refresh .. '","account":"acct"}}')
+local store=assert(host.getenv("WASM_AGENT_OPENAI_SUB_STORE"),'private fixture store required')
+assert(host.write_file(store,
+  '{"openai-codex":{"access_token":"at_' .. string.rep("Q7", 20) .. '","refresh_token":"' .. refresh .. '","account":"acct"}}'))
 local out, hits = redact.value({ stdout = "key=" .. key .. "\nrefresh " .. refresh .. "\naccount acct" })
 assert(not out.stdout:find(key, 1, true), "the node key is redacted")
 assert(not out.stdout:find(refresh, 1, true), "the refresh token is redacted")

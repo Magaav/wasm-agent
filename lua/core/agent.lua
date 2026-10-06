@@ -1388,7 +1388,9 @@ function M:run_body(text, images)
     local empty_retried = false
     local function retryable(value)
       if ok then
-        if type(value) ~= "table" or provider.visible_text(value.content) ~= "" or #(value.tool_calls or {}) > 0 then
+        if type(value) ~= "table" or provider.visible_text(value.content) ~= "" or
+            provider.visible_text(value.commentary)~='' or tostring(value.reasoning or '')~='' or
+            #(value.reasoning_items or {})>0 or #(value.tool_calls or {}) > 0 then
           return false
         end
         if value.stream_complete == false then return true end

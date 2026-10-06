@@ -715,8 +715,8 @@ fn env_seconds(name: &str, fallback: u64) -> u64 {
 /// ones with it, and with a single interpreter this is exactly the old behaviour. Idle node-threads beat
 /// every 100 ms, so only a node-thread that stopped reporting can age this far.
 fn exit_if_every_node_thread_stalled() {
-    let all_stalled = live_node_thread_ids()
-        .iter()
+    let live=live_node_thread_ids();
+    let all_stalled = !live.is_empty() && live.iter()
         .all(|index| node_thread_age_ms(*index) >= stall_exit_seconds() * 1000);
     if stall_exit_seconds() > 0 && all_stalled {
         eprintln!(
@@ -1522,10 +1522,12 @@ pub fn run(first: Lua, factory: Box<dyn Fn() -> Lua + Send + Sync>, port: u16, u
                 // static files itself, and a run's event stream would otherwise wedge its node-thread).
                 let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(15)));
                 let request = read_request(&mut stream);
-                READING.fetch_sub(1, Ordering::SeqCst);
                 if let Ok(Some(request)) = request {
-                    let _ = read_tx.send((stream, request));
+                    // A full queue must not release the reader budget while
+                    // leaving an unbounded population blocked in send().
+                    let _ = read_tx.try_send((stream, request));
                 }
+                READING.fetch_sub(1, Ordering::SeqCst);
             });
         }
     });
@@ -2770,7 +2772,10 @@ fn content_security_policy(html: &[u8]) -> String {
         let body = &after[close_tag + 1..];
         let Some(end) = body.find("</script>") else { break };
         if !tag.contains("src=") {
-            let digest = ring::digest::digest(&ring::digest::SHA256, body[..end].as_bytes());
+            // HTML parsing normalizes CRLF and bare CR before CSP hashes inline
+            // script text. Hash the browser's bytes, not Windows source endings.
+            let script=body[..end].replace("\r\n","\n").replace('\r',"\n");
+            let digest = ring::digest::digest(&ring::digest::SHA256, script.as_bytes());
             hashes.push_str(&format!(" 'sha256-{}'", base64::engine::general_purpose::STANDARD.encode(digest.as_ref())));
         }
         rest = &body[end..];
@@ -2829,6 +2834,11 @@ fn content_type(path: &str) -> &'static str {
 #[cfg(test)]
 mod content_type_tests {
     use super::content_type;
+    #[test]
+    fn inline_csp_hashes_browser_normalized_line_endings() {
+        assert_eq!(super::content_security_policy(b"<script>one\r\ntwo\rthree</script>"),
+            super::content_security_policy(b"<script>one\ntwo\nthree</script>"));
+    }
 
     #[test]
     fn pwa_assets_have_browser_types() {

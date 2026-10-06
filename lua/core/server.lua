@@ -1011,7 +1011,7 @@ function wa_sync_apply(payload, from, public_key, ts, signature)
     end
     return count
   end)
-  return json.encode({ ok = true, applied = applied, head = memory.journal_head() })
+  return signed_reply(signature,ts,json.encode({ ok = true, applied = applied, head = memory.journal_head() }))
 end
 
 -- Push everything after each peer's cursor. Called on a timer by the host.
@@ -1036,7 +1036,10 @@ function wa_sync_tick()
             return response and tonumber(response.status) == 200 and json.decode(response.body) or nil
           end)
           local id = okh and type(head) == "table" and tostring(head.node_id or "") or ""
-          if id ~= "" then target = { node_id = id, name = peer, endpoints = { peer } } end
+          if id ~= "" then
+            local registered=nodeslib.find(id)
+            if registered and registered.public_key then target={node_id=id,public_key=registered.public_key,name=peer,endpoints={peer}} end
+          end
         end
         local body = target and json.encode({ entries = entries, to_node_id = target.node_id }) or nil
         local headers = target and nodeslib.signed_headers("sync-v2", body) or nil
@@ -1046,11 +1049,11 @@ function wa_sync_tick()
           if response and tonumber(response.status) == 200 then
             -- A 200 carrying an error body is a REJECTION: do not advance the
             -- cursor, or the batch would be lost silently.
-            local ok, decoded = pcall(json.decode, response.body)
-            if ok and type(decoded) == "table" and decoded.error == nil then
+            local decoded,problem=nodeslib.verified_reply(target,headers,response.body)
+            if decoded and decoded.ok==true and decoded.error==nil and type(decoded.applied)=='number' then
               applied = true
             else
-              last_error = ok and decoded.error or "bad_response"
+              last_error = problem or (decoded and decoded.error) or 'bad_response'
             end
           else
             last_error = response and (response.error or response.status) or "no_response"
@@ -1061,6 +1064,8 @@ function wa_sync_tick()
           else
             failed = failed + 1
           end
+        else
+          failed=failed+1;last_error='sync_target_identity_unavailable'
         end
       end
     end
@@ -1068,22 +1073,15 @@ function wa_sync_tick()
   return json.encode({ ok = failed == 0, peers = peers, pushed = pushed, failed = failed, error = last_error })
 end
 
--- Daily housekeeping, called by the node when it is quiet. WASM_AGENT_RETENTION_DAYS (default 7; 0 keeps
--- everything) is the transcript window; telemetry keeps four times as long. Nothing here touches a debug
--- session, a memory, or anything a live context still reads.
+-- Quiet is not evidence that a transcript/telemetry row is no longer required
+-- by a historical operation, claim or workspace. Automatic retirement is held.
 function wa_retention()
-  local days = tonumber(host.getenv("WASM_AGENT_RETENTION_DAYS") or "") or 7
+  -- Activating deletion on upgrade could erase the still-held recovery backlog.
+  -- Explicit opt-in only; originals remain available by default.
+  local days = tonumber(host.getenv("WASM_AGENT_RETENTION_DAYS") or "") or 0
   if days <= 0 then return json.encode({ ok = true, skipped = "retention_disabled" }) end
-  local messages = memory.prune(days)
-  local journal = memory.prune_journal(days)
-  local events = 0
-  pcall(function()
-    local result = json.decode(host.sql_exec("DELETE FROM harness_events WHERE at < ?",
-      json.encode({ host.now() - days * 4 * 86400 })))
-    events = (type(result) == "table" and result.changes) or 0
-  end)
-  pcall(host.sql_exec, "PRAGMA wal_checkpoint(TRUNCATE)", "[]")
-  return json.encode({ ok = true, days = days, messages = messages, journal = journal, telemetry = events })
+  return json.encode({ ok = false, error = 'retention_evidence_admission_required', days = days,
+    messages = 0, journal = 0, telemetry = 0 })
 end
 
 function wa_sync_status()

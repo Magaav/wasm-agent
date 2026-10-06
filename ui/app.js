@@ -1408,9 +1408,7 @@ function flushDecision(final = false) {
   pin();
 }
 
-let deltaFrame = 0;
 function paintDelta() {
-  deltaFrame = 0;
   if (!streamBody) return;
   if (streamBody.classList.contains('final-answer')) {
     streamBody.innerHTML = renderMarkdown(stripThinking(streamText));
@@ -1420,8 +1418,6 @@ function paintDelta() {
 }
 
 function handleEvent(event) {
-  // Anything other than more text sees the stream as it stands, so a pending paint happens first.
-  if (deltaFrame && event.type !== "delta") { cancelAnimationFrame(deltaFrame); paintDelta(); }
   if (["round", "reasoning", "commentary", "commentary_delta", "commentary_end", "pending_delta", "decision", "tool", "tool_result", "delta", "reply", "error", "done"].includes(event.type)) {
     clearActiveRunNotice();
   }
@@ -1523,9 +1519,9 @@ function handleEvent(event) {
     }
     streamText += event.text || "";
     streamBody.rawText=streamText;
-    // Painted at most once per frame: a long answer arrives as thousands of deltas, and rewriting
-    // (and re-rendering the markdown of) the whole text for each one is quadratic.
-    if (!deltaFrame) deltaFrame = requestAnimationFrame(paintDelta);
+    // Keep streaming observable synchronously, including background tabs where
+    // animation frames may stop. Allocation reclamation bounds renderer growth.
+    paintDelta();
   } else if (event.type === "reply") {
     if (!replayingMessages) finishRunStep();
     discardPendingText();

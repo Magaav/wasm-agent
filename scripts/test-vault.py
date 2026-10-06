@@ -62,6 +62,7 @@ SECRETS = [OPENCODE_KEY, REFRESH_1, REFRESH_2, ACCESS_1, ACCESS_2, ADMIN_TOKEN]
 
 seen = []          # (path, headers) of every upstream request
 refreshes = []     # refresh_token values the fake auth server received
+reject_refresh = False
 device_polls = []
 
 
@@ -118,6 +119,8 @@ class Upstream(BaseHTTPRequestHandler):
             if form.get("grant_type") == "refresh_token":
                 refreshes.append(form.get("refresh_token"))
                 time.sleep(0.2)  # long enough for concurrent callers to pile up behind the lock
+                if reject_refresh:
+                    return self.reply(401,{"error":"rejected " + REFRESH_1})
                 return self.reply(200, {"access_token": ACCESS_2, "refresh_token": REFRESH_2, "expires_in": 3600})
             if form.get("grant_type") == "authorization_code":
                 return self.reply(200, {"access_token": ACCESS_1, "refresh_token": REFRESH_1, "expires_in": -1})
@@ -205,7 +208,10 @@ try:
     ok(status == 400, "a key with whitespace inside is refused")
     with open(os.path.join(data_dir, "vault.json")) as handle:
         ok(OPENCODE_KEY in handle.read(), "the store holds the trimmed key")
-    ok(oct(os.stat(os.path.join(data_dir, "vault.json")).st_mode & 0o777) == "0o600", "the store is mode 600")
+    if os.name == "posix":
+        ok(os.stat(os.path.join(data_dir, "vault.json")).st_mode & 0o777 == 0o600, "the store is mode 600")
+    else:
+        print("SKIP Unix mode enforcement on Windows; fixture does not prove ACL isolation")
 
     seen.clear()
     status, payload = request(PROXY, "POST", "/opencode-go/v1/chat/completions", {"model": "m1"}, {
@@ -299,27 +305,44 @@ try:
     ok(b"data: {\"n\": 0}" in first and first_at < 0.1, "the first event arrives before the stream ends")
 
     # --- redirects are not followed (they would carry the credential elsewhere)
+    before = len(seen)
     status, _ = request(PROXY, "GET", "/openai-sub/codex/redirect")
-    ok(status == 302, "an upstream redirect is passed back, not followed")
+    ok(status == 404 and len(seen) == before, "an unallowlisted redirect endpoint is refused before upstream")
+    for path in ("/openai-sub/codex/responses/extra", "/openai-sub/codex/%72esponses",
+                 "/openai-sub/codex/../wham/usage", "/opencode-go/v1/%2e%2e/keys",
+                 "/opencode-go/v1//models", "/opencode-go/v1/./models"):
+        status, _ = request(PROXY, "GET", path)
+        ok(status == 404 and len(seen) == before, "allowlist refuses " + path)
+    status, payload = request(PROXY, "POST", "/opencode-go/v1/chat/completions", b"", {"Content-Length": str(8 * 1024 * 1024 + 1)})
+    ok(status == 413 and b"vault_body_too_large" in payload and len(seen) == before, "oversized body refused before credential use")
 
     # --- the CLI's door (/login on the proxy side): no token, write-only, never a value
     status, payload = request(PROXY, "POST", "/login/opencode-go", {"key": "sk-opencode-SECRET-cli-9999"},
                               {"Content-Type": "application/json"})
     SECRETS.append("sk-opencode-SECRET-cli-9999")
-    ok(status == 200 and json.loads(payload)["providers"]["opencode-go"]["configured"], "/login stores a key without a token")
+    ok(status == 409 and b"vault_key_exists" in payload, "/login cannot replace an existing key")
     no_secret(payload, "the /login store answer")
     seen.clear()
     request(PROXY, "GET", "/opencode-go/v1/models")
-    ok({k.lower(): v for k, v in seen[-1][1].items()}.get("authorization") == "Bearer sk-opencode-SECRET-cli-9999",
-       "a key replaced through /login is the one used")
+    ok({k.lower(): v for k, v in seen[-1][1].items()}.get("authorization") == "Bearer " + OPENCODE_KEY,
+       "the original key remains after refused replacement")
+    admin("DELETE", "/api/opencode-go/key")
     status, payload = request(PROXY, "POST", "/login/opencode-go", {"key": ""}, {"Content-Type": "application/json"})
-    ok(status == 400, "/login refuses an empty key")
+    ok(status == 400, "/login refuses an empty first key")
+    status, payload = request(PROXY, "POST", "/login/opencode-go", {"key": "sk-opencode-SECRET-cli-9999"}, {"Content-Type": "application/json"})
+    ok(status == 200, "/login can store a first key after operator removal")
+    no_secret(payload, "the first-key store answer")
+    status, payload = request(PROXY, "POST", "/login/opencode-go", {"key": ""}, {"Content-Type": "application/json"})
+    ok(status == 400, "/login rejects an empty key without changing the store")
     for method, path in (("GET", "/login"), ("GET", "/login/opencode-go"), ("GET", "/login/openai-sub")):
         status, payload = request(PROXY, method, path)
         no_secret(payload, "%s %s" % (method, path))
     status, _ = request(PROXY, "DELETE", "/login/opencode-go")
     ok(status == 404, "/login cannot delete a key (that stays on the admin page)")
     device_polls.clear()
+    status, payload = request(PROXY, "POST", "/login/openai-sub")
+    ok(status == 409, "node-side device login cannot replace stored credentials")
+    admin("DELETE", "/api/openai-sub")
     status, payload = request(PROXY, "POST", "/login/openai-sub")
     ok(status == 200 and json.loads(payload)["login"]["user_code"] == "ABCD-1234", "/login starts the device login")
     for _ in range(100):
@@ -331,6 +354,34 @@ try:
     no_secret(json.dumps(state), "the /login state after login")
     status, payload = request(PROXY, "DELETE", "/login/openai-sub")
     ok(status == 200 and json.loads(payload)["login"]["state"] == "idle", "/login can cancel a pending login")
+
+    # --- failed rotation is held, not replayed; provider errors cannot echo credentials
+    reject_refresh = True
+    admin("DELETE", "/api/openai-sub")
+    admin("POST", "/api/openai-sub/login")
+    for _ in range(100):
+        state=json.loads(admin("GET", "/api/status")[1])
+        if state["login"].get("state") != "pending": break
+        time.sleep(0.1)
+    before_refresh=len(refreshes)
+    status,payload=request(PROXY,"GET","/openai-sub/wham/usage")
+    ok(status==401 and len(refreshes)==before_refresh+1,"one rejected refresh dispatch")
+    no_secret(payload,"rejected refresh response")
+    status,payload=request(PROXY,"GET","/openai-sub/wham/usage")
+    ok(status==409 and len(refreshes)==before_refresh+1,"rejected refresh cannot earn automatic replay")
+    no_secret(admin("GET","/api/status")[1],"held-refresh status")
+    status,_=admin("POST","/api/opencode-go/key",[])
+    ok(status==400,"admin JSON must be an object")
+    admin("DELETE", "/api/opencode-go/key")
+    first_results=[]
+    barrier=threading.Barrier(2)
+    def first_login():
+        barrier.wait()
+        first_results.append(request(PROXY,"POST","/login/opencode-go",{"key":OPENCODE_KEY})[0])
+    first_threads=[threading.Thread(target=first_login) for _ in range(2)]
+    for t in first_threads: t.start()
+    for t in first_threads: t.join()
+    ok(sorted(first_results)==[200,409],"concurrent first-key login has exactly one mutation")
 
     # --- remove: gone, and refused again
     admin("DELETE", "/api/opencode-go/key")
@@ -346,5 +397,5 @@ finally:
     child.wait(timeout=10)
     upstream.shutdown()
 
-print("%d checks, %d failed" % (checks, failures))
+print("%d checks, %d failed, %d skipped" % (checks, failures, 0 if os.name == "posix" else 1))
 sys.exit(1 if failures else 0)

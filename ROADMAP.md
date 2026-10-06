@@ -191,6 +191,26 @@ This is a bounded continuation for already authorized scripts, not a recurrent
 watcher or effect replay. Native regressions fail old half-continuation behavior
 and pin durable-before-wake/idempotent-after-delivery boundaries.
 
+2026-10-06, direct review of PRs #27/#28 plus #28's key-vault dependency:
+combined candidate self-review repaired unsafe startup retention/lease deletion,
+Windows vault storage/backup paths, concurrent first-key replacement, durable
+refresh no-replay fencing, CSP CRLF hashing, background-tab streaming, bounded
+HTTP reader admission, and process-tree upgrade timeout ownership. Original
+transcripts, journals, leases and backups remain preserved; batching and new
+provider retries are opt-in risk knobs, not unmeasured new defaults. Sync now
+requires a target-signed acknowledgment before cursor advancement.
+Focused Windows proof: workspace tests36/95/34/41 before repairs (one explicit
+operation helper ignore); repaired host98, sentinel48, binding43, managed40,
+peer-chat43, real two-node sync7, 13 private Lua suites, shipping98 and policy19
+passed. Browser/UI reload/recovery/inspector and final-answer suites passed;
+a staged Chrome screenshot was inspected. Vault80 passed with one explicit
+Unix-mode skip on Windows. Linux, final source integration and installed-source
+verification remain separate steps. Package/bootstrap/full release gate not run;
+`gate_verified:false`, `release_verified:false`. No real vault/credentials were
+migrated, device consent fabricated or historical unknown settled. Existing77
+operation unknowns,3 uncertain claims,46 held workspace targets and legacy wave
+remain protected; absence of evidence is not a cleanup todo to silently erase.
+
 ## Status vocabulary
 
 - **Implemented:** a mechanism exists in the repository; not a release certification.

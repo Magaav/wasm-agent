@@ -925,7 +925,9 @@ end
 -- How many times a transient failure is retried, with exponential backoff (2, 4, 8, 16 s, jittered).
 function M.transient_retries()
   local count = tonumber(env("WASM_AGENT_PROVIDER_RETRIES") or "")
-  if not count then return 4 end
+  -- Opt-in: a lost inference response may already be billed upstream, and a
+  -- transport exception does not prove it emitted no visible stream.
+  if not count then return 0 end
   return math.max(0, math.min(8, math.floor(count)))
 end
 

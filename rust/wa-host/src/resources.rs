@@ -307,11 +307,13 @@ impl Store {
     /// Every process start leaves a `<boot>.lease.sqlite`, and nothing removed them. A lease whose boot no
     /// claim names and whose lock can be taken (its process is gone) is evidence of nothing; delete it.
     /// A lease that is held, or that a claim still names, is kept for the inventory to judge.
+    #[cfg(test)]
     fn collect_dead_leases(root: &Path, own: &str, db: &Connection) {
-        let referenced: HashSet<String> = db
+        let Ok(referenced):std::result::Result<HashSet<String>,_> = db
             .prepare("SELECT boot FROM claims UNION SELECT boot FROM claim_identity")
-            .and_then(|mut stmt| stmt.query_map([], |row| row.get::<_, String>(0))?.collect())
-            .unwrap_or_default();
+            .and_then(|mut stmt| stmt.query_map([], |row| row.get::<_, String>(0))?.collect()) else {
+                eprintln!("resource lease collection refused: reference inventory unavailable; all files retained");return;
+            };
         let Ok(entries) = std::fs::read_dir(root) else { return };
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().to_string();
@@ -350,7 +352,9 @@ impl Store {
               key TEXT PRIMARY KEY, boot TEXT NOT NULL, identity TEXT NOT NULL);",
         )
         .map_err(err)?;
-        Self::collect_dead_leases(root, &boot, &db);
+        // Explicit maintenance only: an unreferenced lease may still be historical provenance.
+        // No startup deletion while an original-effect recovery backlog is held.
+        // No automatic collection; original-effect evidence is retained.
         Ok(Self {
             root: root.into(),
             boot,
@@ -691,10 +695,23 @@ mod tests {
         drop(first);
         let held=Store::open(&root).unwrap();
         let held_boot=held.boot.clone();
-        assert!(!root.join(format!("{first_boot}.lease.sqlite")).exists(), "the dead boot's lease is gone");
+        assert!(root.join(format!("{first_boot}.lease.sqlite")).exists(), "startup preserves old provenance");
+        Store::collect_dead_leases(&root,&held_boot,&held.state.lock().unwrap().db);
+        assert!(!root.join(format!("{first_boot}.lease.sqlite")).exists(), "explicit private collection sees a complete inventory");
         let third=Store::open(&root).unwrap();
         assert!(root.join(format!("{held_boot}.lease.sqlite")).exists(), "a held lease is kept");
         drop(third);drop(held);std::fs::remove_dir_all(root).unwrap();
+
+    }
+    #[test]
+    fn reference_inventory_failure_never_collects_a_lease() {
+        let root=std::env::temp_dir().join(format!("wa-ref-failure-{}",crate::host::new_uuid()));
+        std::fs::create_dir_all(&root).unwrap();
+        let lease=root.join("old.lease.sqlite");Connection::open(&lease).unwrap();
+        let db=Connection::open_in_memory().unwrap();
+        Store::collect_dead_leases(&root,"current",&db);
+        assert!(lease.exists());
+        std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
     fn current_executor_is_read_only_and_requires_current_generation() {

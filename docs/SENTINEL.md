@@ -212,7 +212,12 @@ An upgrade with both `--session` and `--prompt` wakes that session only after a
 successful upgrade, avoiding a race between separately queued upgrade and wake
 requests. `installed.txt` records the exact hash even for sentinel upgrades;
 their source commit remains explicitly unverified unless built by the clean
-deployment gate. The detailed upgrade transcript is in `sentinel/upgrade.log`.
+deployment gate. The detailed upgrade transcript is in `sentinel/upgrade.log`. The upgrade script
+runs under the existing `wa-operation` process-tree supervisor (default 1,800 s;
+`WA_SENTINEL_UPGRADE_TIMEOUT_SECONDS` selects the budget). Original state/output
+are retained in sentinel operations, not colliding temporary filenames. Timeout
+terminates owned descendants; unknown cleanup refuses success and replay. Killing
+only the shell is not completion of the installer.
 
 ### `/update`: the node asking, on a human's behalf
 

@@ -5,12 +5,11 @@
 -- store under the node's data and config directories (memory, graph, jobs, resource claims, the run
 -- journal), snapshots each with `VACUUM INTO` through this connection (an attached store is vacuumed
 -- by name, so the WAL is included and no store is copied mid-write), checks each copy with
--- `PRAGMA integrity_check`, and keeps the newest few backups.
+-- `PRAGMA integrity_check`, and preserves every recoverable snapshot.
 local json = dofile("lua/vendor/json.lua")
 local paths = dofile("lua/core/paths.lua")
 local M = {}
 
-local KEEP = 5
 
 local function sql(statement, params)
   local raw = host.sql_exec(statement, json.encode(params or {}))
@@ -28,9 +27,9 @@ end
 
 local function list(dir)
   local ok, raw = pcall(host.list_dir, dir)
-  if not ok then return {} end
+  if not ok then error('backup_inventory_failed: '..dir..': '..tostring(raw),0) end
   local value = type(raw) == "string" and json.decode(raw) or raw
-  if type(value) ~= "table" or value.error then return {} end
+  if type(value) ~= "table" or value.error then error('backup_inventory_failed: '..dir..': '..tostring(type(value)=='table' and value.error or raw),0) end
   return value.entries or value
 end
 
@@ -77,23 +76,23 @@ end
 -- Snapshot every store into <config>/backups/<stamp>/ and check each copy. Returns
 -- {ok, dir, stores = {{source, copy, check}}} or raises with the first failure.
 function M.run(label)
-  local stamp = os.date("!%Y%m%dT%H%M%SZ") .. (label and label ~= "" and ("-" .. label:gsub("[^%w_-]", "")) or "")
+  local stamp = os.date("!%Y%m%dT%H%M%SZ") .. '-' .. host.uuid() .. (label and label ~= "" and ("-" .. label:gsub("[^%w_-]", "")) or "")
   local dir = paths.config() .. "/backups/" .. stamp
-  host.write_file(dir .. "/.keep", "")
+  assert(host.write_file(dir .. "/.keep", ""),'backup_directory_write_failed')
   local results, main = {}, main_db()
   for index, source in ipairs(M.stores()) do
-    local copy = dir .. "/" .. source:gsub("^.*/", ""):gsub("^(.*)$", function(name) return index .. "-" .. name end)
+    local copy = dir .. "/" .. source:gsub("^.*[/\\\\]", ""):gsub("^(.*)$", function(name) return index .. "-" .. name end)
     if source == main then
       sql("VACUUM INTO ?", { copy })
     else
       sql("ATTACH DATABASE ? AS wa_backup_source", { source })
       local ok, problem = pcall(sql, "VACUUM wa_backup_source INTO ?", { copy })
-      pcall(sql, "DETACH DATABASE wa_backup_source")
+      sql("DETACH DATABASE wa_backup_source")
       if not ok then error("backup_failed: " .. source .. ": " .. tostring(problem), 0) end
     end
     sql("ATTACH DATABASE ? AS wa_backup_check", { copy })
     local rows = query("PRAGMA wa_backup_check.integrity_check")
-    pcall(sql, "DETACH DATABASE wa_backup_check")
+    sql("DETACH DATABASE wa_backup_check")
     local verdict = rows[1] and (rows[1].integrity_check or rows[1][1]) or "unknown"
     if verdict ~= "ok" then error("backup_corrupt: " .. copy .. ": " .. tostring(verdict), 0) end
     results[#results + 1] = { source = source, copy = copy, check = verdict }
@@ -102,22 +101,10 @@ function M.run(label)
   return { ok = true, dir = dir, stores = results }
 end
 
--- Keep the newest KEEP backups. Names are timestamps, so they sort by age.
+-- A newer snapshot does not prove an older recovery source obsolete. Keep all
+-- snapshots; evidence-aware, explicitly scoped maintenance owns retirement.
 function M.prune()
-  local root = paths.config() .. "/backups"
-  local names = {}
-  for _, entry in ipairs(list(root)) do
-    if entry.kind == "dir" then names[#names + 1] = tostring(entry.name) end
-  end
-  table.sort(names)
-  local windows = dofile("lua/core/platform.lua").os() == "windows"
-  for index = 1, #names - KEEP do
-    local name = names[index]
-    if name:match("^%d+T%d+Z[%w_-]*$") then -- only names this module made
-      local command = windows and ('rmdir /s /q "' .. name .. '"') or ("rm -rf -- '" .. name .. "'")
-      pcall(host.exec, command, root, 120)
-    end
-  end
+  return { skipped = 'recovery_evidence_preserved' }
 end
 
 return M

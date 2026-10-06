@@ -1151,33 +1151,30 @@ fn upgrade_timeout() -> Duration {
 
 /// Run a command to completion or until `limit`, then kill it. Returns its output either way; a killed
 /// command has a failing status and says so in stderr.
-fn run_bounded(mut command: std::process::Command, limit: Duration) -> Result<std::process::Output> {
-    let dir = std::env::temp_dir();
-    let tag = format!("wa-sentinel-{}-{}", std::process::id(), now_epoch());
-    let (out_path, err_path) = (dir.join(format!("{tag}.out")), dir.join(format!("{tag}.err")));
-    command
-        .stdin(std::process::Stdio::null())
-        .stdout(std::fs::File::create(&out_path)?)
-        .stderr(std::fs::File::create(&err_path)?);
-    let mut child = command.spawn()?;
-    let started = Instant::now();
-    let (status, timed_out) = loop {
-        if let Some(status) = child.try_wait()? {
-            break (status, false);
-        }
-        if started.elapsed() >= limit {
-            let _ = child.kill();
-            break (child.wait()?, true);
-        }
-        std::thread::sleep(Duration::from_millis(250));
-    };
-    let stdout = std::fs::read(&out_path).unwrap_or_default();
-    let mut stderr = std::fs::read(&err_path).unwrap_or_default();
-    let _ = std::fs::remove_file(&out_path);
-    let _ = std::fs::remove_file(&err_path);
-    if timed_out {
-        stderr.extend_from_slice(format!("\n[sentinel] killed after {}s (timeout)\n", limit.as_secs()).as_bytes());
+fn run_bounded(command: std::process::Command, limit: Duration) -> Result<std::process::Output> {
+    // Use the existing owned process-tree supervisor, not Child::kill (only the
+    // shell) and shared temp filenames. Original output/state remain durable.
+    let manager=wa_operation::Manager::new(sentinel_dir().join("operations"));
+    let mut spec=wa_operation::Spec::command(command.get_program().to_string_lossy(),
+        command.get_args().map(|v|v.to_string_lossy().into_owned()).collect());
+    spec.timeout=limit;spec.owner="sentinel:upgrade".into();
+    spec.cwd=command.get_current_dir().map(|p|p.display().to_string()).unwrap_or_default();
+    for (key,value) in command.get_envs() {
+        let value=value.context("bounded command cannot remove inherited environment")?;
+        spec.env.push((key.to_string_lossy().into_owned(),value.to_string_lossy().into_owned()));
     }
+    let id=manager.start(spec)?;
+    let state=manager.wait(&id,limit+Duration::from_secs(2))?;
+    if state["settled"]!=true || state["cleanup"]=="unknown" {
+        bail!("upgrade operation {id} outcome unknown; retained originals require inspection; no replay");
+    }
+    let root=sentinel_dir().join("operations").join(&id);
+    let stdout=std::fs::read(root.join("stdout"))?;
+    let mut stderr=std::fs::read(root.join("stderr"))?;
+    if state["ok"]!=true {stderr.extend_from_slice(format!("\n[sentinel] operation {id} failed: {}\n",state["error"]).as_bytes());}
+    let code=if state["ok"]==true {0} else {state["code"].as_i64().filter(|v|*v!=0).unwrap_or(1) as i32};
+    #[cfg(windows)] let status={use std::os::windows::process::ExitStatusExt;std::process::ExitStatus::from_raw(code as u32)};
+    #[cfg(unix)] let status={use std::os::unix::process::ExitStatusExt;std::process::ExitStatus::from_raw((code & 255)<<8)};
     Ok(std::process::Output { status, stdout, stderr })
 }
 
@@ -3002,10 +2999,11 @@ mod request_verb_tests {
     }
 }
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(test)]
 mod reap_tests {
     /// The regression: a node the sentinel had killed but not reaped is a zombie, still listed in /proc,
     /// and `pid_alive` said "alive" - so the next restart waited 10 s and refused.
+    #[cfg(target_os="linux")]
     #[test]
     fn a_killed_unreaped_child_is_not_alive() {
         let mut child = std::process::Command::new("sleep").arg("30").spawn().expect("spawn sleep");
@@ -3021,13 +3019,19 @@ mod reap_tests {
     /// The regression: `upgrade` waited on its script forever, holding maintenance mode.
     #[test]
     fn a_hung_script_is_killed_at_its_limit() {
-        let mut command = std::process::Command::new("sh");
-        command.args(["-c", "echo started; sleep 30"]);
+        let _alone=super::ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+        let root=std::env::temp_dir().join(format!("wa-bounded-upgrade-{}-{}",std::process::id(),super::now_epoch()));
+        let old=std::env::var_os("WASM_AGENT_HOME");std::env::set_var("WASM_AGENT_HOME",&root);
+        #[cfg(windows)] let mut command={let mut c=std::process::Command::new(std::path::PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32/cmd.exe"));c.args(["/C","echo started & ping -n 30 127.0.0.1 >nul"]);c};
+        #[cfg(not(windows))] let mut command={let mut c=std::process::Command::new("sh");c.args(["-c","echo started; sleep 30"]);c};
+        command.current_dir(std::env::temp_dir());
         let started = std::time::Instant::now();
         let output = super::run_bounded(command, std::time::Duration::from_secs(1)).expect("run");
         assert!(started.elapsed() < std::time::Duration::from_secs(5), "killed near the limit");
         assert!(!output.status.success());
         assert!(String::from_utf8_lossy(&output.stdout).contains("started"));
-        assert!(String::from_utf8_lossy(&output.stderr).contains("timeout"));
+        assert!(String::from_utf8_lossy(&output.stderr).contains("deadline"));
+        match old{Some(v)=>std::env::set_var("WASM_AGENT_HOME",v),None=>std::env::remove_var("WASM_AGENT_HOME")};
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
