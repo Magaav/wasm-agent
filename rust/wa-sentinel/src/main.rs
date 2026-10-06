@@ -842,7 +842,12 @@ fn start_node(binary: &Path, reason: &str) -> Result<()> {
             command.env_clear();
             command.envs(instance::guest_env(&selected));
         }
-        command.spawn().context("spawn node")?.id()
+        let child = command.spawn().context("spawn node")?;
+        let id = child.id();
+        if let Ok(mut children) = CHILDREN.lock() {
+            children.push(child);
+        }
+        id
     };
     say(&format!("started pid {child_pid}"));
     // Record what was started, so a later stop can prove it is the same process rather than trusting
@@ -2202,6 +2207,7 @@ fn watch() -> Result<()> {
         // Watching the node, not restarting it: an auto-restart that nobody asked for would fight the
         // operator every time they stop a node on purpose. The outage is reported; restarting is a
         // request.
+        reap_children();
         if node_is_up() {
             if down_since.take().is_some() {
                 audit("node-up", &format!("port {}", node_port()), "the node is answering again");
@@ -2367,7 +2373,25 @@ fn pid_alive(pid: u32) -> bool {
             .output();
         return output.map(|o| String::from_utf8_lossy(&o.stdout).contains(&pid.to_string())).unwrap_or(false);
     }
-    Path::new(&format!("/proc/{pid}")).exists()
+    reap_children();
+    // A zombie keeps its /proc entry until its parent reaps it, so "the directory exists" read a killed
+    // node as alive and every second restart refused with "still alive". The state field says.
+    match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+        Ok(stat) => !matches!(stat.rsplit(')').next().and_then(|rest| rest.trim_start().chars().next()), Some('Z' | 'X')),
+        Err(_) => false,
+    }
+}
+
+/// The nodes this sentinel started, kept so they can be reaped. Dropping the `Child` after spawning
+/// left every stopped node a zombie for the sentinel's whole lifetime.
+#[cfg(not(windows))]
+static CHILDREN: std::sync::Mutex<Vec<std::process::Child>> = std::sync::Mutex::new(Vec::new());
+
+fn reap_children() {
+    #[cfg(not(windows))]
+    if let Ok(mut children) = CHILDREN.lock() {
+        children.retain_mut(|child| !matches!(child.try_wait(), Ok(Some(_))));
+    }
 }
 
 fn status() -> Result<()> {
@@ -2933,5 +2957,22 @@ mod request_verb_tests {
             None=>std::env::remove_var("WASM_AGENT_HOME"),
         }
         let _=std::fs::remove_dir_all(&home);
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod reap_tests {
+    /// The regression: a node the sentinel had killed but not reaped is a zombie, still listed in /proc,
+    /// and `pid_alive` said "alive" - so the next restart waited 10 s and refused.
+    #[test]
+    fn a_killed_unreaped_child_is_not_alive() {
+        let mut child = std::process::Command::new("sleep").arg("30").spawn().expect("spawn sleep");
+        let pid = child.id();
+        assert!(super::pid_alive(pid));
+        child.kill().expect("kill");
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert!(std::path::Path::new(&format!("/proc/{pid}")).exists(), "still a zombie: not yet reaped");
+        assert!(!super::pid_alive(pid), "a zombie is dead");
+        let _ = child.wait();
     }
 }

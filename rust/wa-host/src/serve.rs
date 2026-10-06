@@ -702,6 +702,32 @@ fn env_seconds(name: &str, fallback: u64) -> u64 {
 /// How long a request may sit behind a node-thread that has shown no progress before it is
 /// told so instead of waiting. Long enough that a slow run is not mistaken for a
 /// wedge; short enough that a client is not left holding an open socket for minutes.
+/// Exit only when *every* node-thread that is running is stalled: a wedged lane must not take the healthy
+/// ones with it, and with a single interpreter this is exactly the old behaviour. Idle node-threads beat
+/// every 100 ms, so only a node-thread that stopped reporting can age this far.
+fn exit_if_every_node_thread_stalled() {
+    let all_stalled = live_node_thread_ids()
+        .iter()
+        .all(|index| node_thread_age_ms(*index) >= stall_exit_seconds() * 1000);
+    if stall_exit_seconds() > 0 && all_stalled {
+        eprintln!(
+            "[serve] every node-thread has been stalled for {}s: exiting so the service manager can restart the node",
+            stall_exit_seconds()
+        );
+        std::process::exit(3);
+    }
+}
+
+/// The same check on a timer. It used to run only when a non-static request reached a stalled node-thread,
+/// and `/health` (the only thing a watcher sends) is answered before that point - so a wedged node that
+/// nobody else talked to answered `ok:false` forever and was never restarted.
+fn spawn_stall_watchdog() {
+    std::thread::spawn(|| loop {
+        std::thread::sleep(std::time::Duration::from_secs(15));
+        exit_if_every_node_thread_stalled();
+    });
+}
+
 fn stall_seconds() -> u64 {
     env_seconds("WASM_AGENT_WORKER_STALL_SECONDS", 120)
 }
@@ -1447,6 +1473,7 @@ pub fn run(first: Lua, factory: Box<dyn Fn() -> Lua + Send + Sync>, port: u16, u
         );
     }
     eprintln!("[serve] wasm-agent UI at http://127.0.0.1:{port}  (ui: {})", ui.display());
+    spawn_stall_watchdog();
 
     if let Ok(relay_url) = std::env::var("WASM_AGENT_RELAY") {
         if !relay_url.is_empty() {
@@ -1609,18 +1636,7 @@ fn dispatch_http(
                 age_ms / 1000
             );
         }
-        // Exit only when *every* node-thread that is running is stalled: a wedged lane must not take the
-        // healthy ones with it, and with a single interpreter this is exactly the old behaviour.
-        let all_stalled = live_node_thread_ids()
-            .iter()
-            .all(|index| node_thread_age_ms(*index) >= stall_exit_seconds() * 1000);
-        if stall_exit_seconds() > 0 && all_stalled {
-            eprintln!(
-                "[serve] every node-thread has been stalled for {}s: exiting so the service manager can restart the node",
-                stall_exit_seconds()
-            );
-            std::process::exit(3);
-        }
+        exit_if_every_node_thread_stalled();
         if is_run {
             // The admission is already claimed; the run is not going to start, so give the
             // conversation's place back before refusing.
