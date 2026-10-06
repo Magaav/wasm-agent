@@ -655,7 +655,9 @@ end
 
 function M.dispatch(memory, name, args, role, ctx)
   args = args or {}
-  role = role or "master"
+  -- No role means the least one, not the most: a future caller that forgets to pass a role must not
+  -- get the shell.
+  role = role or "guest"
   ctx = ctx or {}
   local user_id = ctx.user_id or "master"
   -- A subagent runs only the exact tools its profile named. Checked here as well
