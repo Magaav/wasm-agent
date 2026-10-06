@@ -170,9 +170,13 @@ pub fn network_active() -> bool {
     std::env::var("WASM_AGENT_MANAGED").as_deref() != Ok("1") || managed_profile().is_some()
 }
 
-/// The canonical string a node signs when announcing itself.
-pub fn announcement(node_id: &str, ts: u64) -> String {
-    format!("{node_id}|{ts}")
+/// The canonical string a node signs when announcing itself. It covers the name and the endpoints,
+/// not only the id and time: an unsigned endpoint could be swapped in a replayed heartbeat to point
+/// every peer's direct calls at someone else. The role is not signed because the rendezvous never
+/// takes it from the node. `v2` is in the message so an old signer fails closed (`bad_signature`).
+pub fn announcement(node_id: &str, ts: u64, name: &str, endpoints: &serde_json::Value) -> String {
+    let endpoints = serde_json::to_string(endpoints).unwrap_or_else(|_| "[]".into());
+    format!("v2|{node_id}|{ts}|{name}|{endpoints}")
 }
 
 /// Register once and then heartbeat, in the background. Outbound only, so no
@@ -203,14 +207,15 @@ pub fn spawn_heartbeat(url: String) {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|duration| duration.as_secs())
                 .unwrap_or(0);
-            let message = announcement(&identity.node_id, ts);
+            let endpoints = json!(if endpoint.is_empty() { vec![] } else { vec![endpoint.clone()] });
+            let message = announcement(&identity.node_id, ts, &name, &endpoints);
             let resources = crate::system_resources::sample();
             let payload = json!({
                 "node_id": identity.node_id,
                 "public_key": identity.public_key,
                 "name": name,
                 "role": role,
-                "endpoints": if endpoint.is_empty() { vec![] } else { vec![endpoint.clone()] },
+                "endpoints": endpoints,
                 "resources": resources,
                 "ts": ts,
                 "signature": identity.sign(&message),

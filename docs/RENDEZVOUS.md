@@ -140,10 +140,12 @@ on the strength of a cached list. That is the answer to "a guest can fake a mast
 call": it would have to hold the master's private key *and* still be enrolled for
 that node id.
 
-The rendezvous records what each node says about itself, which is all it can know.
-With `WASM_AGENT_TRUSTED_MASTERS` set (comma-separated node ids or names) an
-enrolled list decides instead: a caller not named there is refused even though the
-rendezvous would vouch for its key.
+The rendezvous never takes a node's role from the node: `master` is granted only to
+the node ids in the operator's `WASM_AGENT_NETWORK_ADMINS` (or by an admin's role
+grant), and with that list empty every node is a guest. With
+`WASM_AGENT_TRUSTED_MASTERS` set (comma-separated **node ids** — names are
+self-chosen and never match) an enrolled list decides instead: a caller not listed
+there is refused even though the rendezvous would vouch for its key.
 
 `scripts/test-guest-e2e.sh` starts a real guest beside the master and attacks it —
 a shell request, a forged master call, a replay, a rename that must not move a

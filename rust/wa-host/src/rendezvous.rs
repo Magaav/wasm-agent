@@ -107,6 +107,9 @@ pub fn run(bind: &str, port: u16, db_path: &str) {
         }
     };
     eprintln!("[rendezvous] listening on {bind}:{port} (db {db_path})");
+    if network_admins().is_empty() {
+        eprintln!("[rendezvous] WASM_AGENT_NETWORK_ADMINS is empty: every node registers as guest and no peer can command another");
+    }
 
     let relay: Arc<Mutex<RelayState>> = Arc::new(Mutex::new(RelayState::default()));
     // One thread per connection: long polls must not block the registry.
@@ -546,15 +549,18 @@ fn register(connection: &Connection, stream: &mut TcpStream, payload: &Value, pa
     if public_key_of(connection, node_id).map(|old| old != public_key).unwrap_or(false) {
         return respond(stream, 409, "{\"error\":\"identity_conflict\"}");
     }
-    if !node::verify(public_key, &node::announcement(node_id, ts as u64), signature) {
+    let signed_name = payload["name"].as_str().unwrap_or_default();
+    let signed_endpoints = if payload["endpoints"].is_array() { payload["endpoints"].clone() } else { json!([]) };
+    if !node::verify(public_key, &node::announcement(node_id, ts as u64, signed_name, &signed_endpoints), signature) {
         return respond(stream, 401, "{\"error\":\"bad_signature\"}");
     }
     let now = now();
     let name = payload["name"].as_str().unwrap_or_default().to_string();
     let admins = network_admins();
-    let role = if admins.is_empty() {
-        payload["role"].as_str().unwrap_or("guest").to_string()
-    } else if admins.iter().any(|id| id == node_id) { "master".into() }
+    // A role is never self-declared: `role` in the payload is unsigned and anyone can send it. Master comes
+    // only from the operator's `WASM_AGENT_NETWORK_ADMINS` or a role an admin granted; every other node
+    // is a guest. With no admins configured nobody is master here - closed, not open.
+    let role = if admins.iter().any(|id| id == node_id) { "master".to_string() }
     else { connection.query_row("SELECT role FROM network_roles WHERE node_id=?1", [node_id], |r| r.get::<_, String>(0))
         .unwrap_or_else(|_| "guest".into()) };
     let endpoints = serde_json::to_string(&payload["endpoints"]).unwrap_or_else(|_| "[]".into());

@@ -8,6 +8,9 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=ubuntu
+# WASM_AGENT_NETWORK_ADMINS=<operator node ids, comma-separated>. Without it every node registers
+# as a guest and no peer can command another (a role is never taken from the node itself).
+EnvironmentFile=-/home/ubuntu/.wasm-agent/rendezvous.env
 ExecStart=/home/ubuntu/.local/bin/wa rendezvous --bind 127.0.0.1 --port 8890 --db /home/ubuntu/.wasm-agent/rendezvous.db
 Restart=always
 RestartSec=3

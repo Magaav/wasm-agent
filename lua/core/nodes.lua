@@ -73,18 +73,18 @@ function M.author_of(caller)
   if enrollment.managed() then return enrollment.author(caller) end
   if type(caller) ~= "table" then return nil end
   if normalize_role(caller.role) ~= "master" then return nil end
-  -- Who is allowed to be a master at all. The rendezvous records what each node says about
-  -- itself, which is fine while every node is honest and useless once one is not: the record is
-  -- evidence of identity, not of intent. With this set, the rendezvous stops being the only
-  -- authority and an enrolled list decides. Unset means "the rendezvous is the authority", which
-  -- is the default - said out loud here so the choice is visible.
+  -- Who is allowed to be a master at all. The rendezvous only grants master to its operator's
+  -- WASM_AGENT_NETWORK_ADMINS, but it is still a third party. With this set, an enrolled list of
+  -- node ids decides instead. Ids only: an id is the hash of the key the caller signed with, while a
+  -- name is whatever the caller registered, so matching a name would let any node claim to be one.
+  -- Unset means "the rendezvous is the authority" - said out loud here so the choice is visible.
   local enrolled = tostring(host.getenv("WASM_AGENT_TRUSTED_MASTERS") or "")
   if enrolled ~= "" then
     local node_id = tostring(caller.node_id or "")
     local name = tostring(caller.name or "")
     for entry in enrolled:gmatch("[^,]+") do
       entry = entry:gsub("^%s+", ""):gsub("%s+$", "")
-      if entry ~= "" and (entry == node_id or entry == name) then return name ~= "" and name or node_id end
+      if entry ~= "" and entry == node_id then return name ~= "" and name or node_id end
     end
     return nil
   end
