@@ -1359,6 +1359,45 @@ function M:run_body(text, images)
       call_opts.attempt = response_attempt + 1
       ok, result = pcall(provider.complete_with, self.model, messages, tool_list, self.stream, call_opts)
     end
+    -- Rate limits, 5xx, dropped connections and streams that died before showing anything are
+    -- replayed with exponential backoff. A stream that ended early *after* visible text or with tool
+    -- calls is not: that text already reached the reader, and partial tool calls never run.
+    -- An empty reply that is not an output-limit stop (nothing visible, no tool call, finished
+    -- normally) is also asked again, once: it is usually an upstream hiccup, not the model's answer.
+    local empty_retried = false
+    local function retryable(value)
+      if ok then
+        if type(value) ~= "table" or provider.visible_text(value.content) ~= "" or #(value.tool_calls or {}) > 0 then
+          return false
+        end
+        if value.stream_complete == false then return true end
+        if value.finish_reason ~= "length" and not empty_retried then empty_retried = true return true end
+        return false
+      end
+      return provider.is_transient(tostring(value))
+    end
+    local transient_limit, transient_attempt = provider.transient_retries(), 0
+    while transient_attempt < transient_limit and retryable(result) do
+      transient_attempt = transient_attempt + 1
+      local wait_ms = math.floor((2 ^ transient_attempt) * 1000 * (0.75 + math.random() * 0.5))
+      local reason = ok and (result.stream_complete == false and "incomplete_stream" or "empty_reply")
+        or redact.text(tostring(result)):sub(1, 80)
+      self.emit({ type = "status", text = string.format("provider unavailable (%s) - retrying in %ds (%d/%d)",
+        reason, math.floor(wait_ms / 1000), transient_attempt, transient_limit) })
+      telemetry.event(self.session_id,self.run_id,"","provider_retry","attempt",{
+        reason=reason,attempt=transient_attempt,limit=transient_limit,wait_ms=wait_ms,context_estimate=context_tokens})
+      local waited, stop = 0, nil
+      while waited < wait_ms do
+        if foreground_cancelled() then stop = "run_cancelled" break end
+        local retry_child = child_status()
+        if retry_child and retry_child.cancelled then stop = "subagent_cancelled" break end
+        host.sleep(math.min(250, wait_ms - waited))
+        waited = waited + 250
+      end
+      if stop then ok, result = false, stop break end
+      call_opts.attempt = (call_opts.attempt or 1) + 1
+      ok, result = pcall(provider.complete_with, self.model, messages, tool_list, self.stream, call_opts)
+    end
     -- A provider 400/413 on a request at/near the window is a context overflow even when
     -- the body says nothing - this deployment answers a too-large request with a bare
     -- `{"model":"..."}`. Without this the thread re-sends the same oversized request on
