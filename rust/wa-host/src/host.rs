@@ -787,14 +787,16 @@ fn write_atomic(path: &str, text: &str) -> bool {
         COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     );
     let temporary = directory.join(unique);
-    let private = !target.exists() && secret_file(&name);
+    let private = secret_file(&name);
+    #[cfg(unix)] let prior_permissions=std::fs::metadata(target).ok().map(|m|m.permissions());
     let written = (|| -> std::io::Result<()> {
         let mut options = std::fs::OpenOptions::new();
         options.write(true).create_new(true);
         #[cfg(unix)]
-        if private {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
+        {
+            use std::os::unix::fs::{OpenOptionsExt,PermissionsExt};
+            if private {options.mode(0o600);}
+            else if let Some(p)=&prior_permissions {options.mode(p.mode());}
         }
         #[cfg(not(unix))]
         let _ = private;
@@ -812,7 +814,10 @@ fn write_atomic(path: &str, text: &str) -> bool {
     #[cfg(unix)]
     if let Ok(metadata) = std::fs::metadata(target) {
         use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(metadata.permissions().mode()));
+        let mode=if private {0o600} else {metadata.permissions().mode()};
+        if std::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(mode)).is_err() {
+            let _=std::fs::remove_file(&temporary);return false;
+        }
     }
     match std::fs::rename(&temporary, target) {
         Ok(()) => {
@@ -824,15 +829,33 @@ fn write_atomic(path: &str, text: &str) -> bool {
             true
         }
         Err(error) => {
-            eprintln!("[write] atomic rename into {} failed ({error}); writing in place, not atomically", target.display());
-            // A rename can fail where a direct write would not: a target another process holds open on
-            // Windows, a read-only file, a target that is not a plain file. Falling back keeps the
-            // promise this function always made - a boolean, and the bytes where they were asked for -
-            // rather than failing a write that used to succeed.
-            let ok = std::fs::write(target, text).is_ok();
+            eprintln!("[write] atomic replacement refused for {} ({error}); original retained",target.display());
             let _ = std::fs::remove_file(&temporary);
-            ok
+            false
         }
+    }
+}
+
+#[cfg(test)]
+mod atomic_write_tests {
+    #[test]
+    fn replacement_preserves_bytes_and_refuses_invalid_target() {
+        let root=std::env::temp_dir().join(format!("wa-atomic-{}",super::new_uuid()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path=root.join("file");
+        assert!(super::write_atomic(&path.display().to_string(),"original"));
+        assert!(super::write_atomic(&path.display().to_string(),"new\0tail"));
+        assert_eq!(std::fs::read(&path).unwrap(),b"new\0tail");
+        assert!(!super::write_atomic(&root.display().to_string(),"must not truncate"));
+        assert_eq!(std::fs::read(&path).unwrap(),b"new\0tail");
+        #[cfg(unix)] {
+            use std::os::unix::fs::PermissionsExt;
+            let secret=root.join("credentials.json");std::fs::write(&secret,"old").unwrap();
+            std::fs::set_permissions(&secret,std::fs::Permissions::from_mode(0o644)).unwrap();
+            assert!(super::write_atomic(&secret.display().to_string(),"new"));
+            assert_eq!(std::fs::metadata(secret).unwrap().permissions().mode()&0o777,0o600);
+        }
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
 

@@ -80,7 +80,8 @@ end
 -- Secrets the node keeps in files rather than the environment: its own signing key and the OAuth
 -- credentials it can log in with. `cat` of any of them would otherwise put a refresh token or the
 -- node's private key into the transcript, the provider request and the sync journal sent to peers.
-local file_cache, file_cache_at = nil, -1
+-- Re-read at each output boundary: rotation during a turn must not leak the
+-- fresh token for a cache window.
 
 local function json_secrets(path, label, out)
   local raw = host.read_file and host.read_file(path)
@@ -102,8 +103,6 @@ local function json_secrets(path, label, out)
 end
 
 local function file_secret_values()
-  local now = host.now and host.now() or 0
-  if file_cache and now - file_cache_at < 30 then return file_cache end
   local out = {}
   pcall(function()
     local paths = dofile("lua/core/paths.lua")
@@ -114,13 +113,17 @@ local function file_secret_values()
         if #key >= 32 then out[#out + 1] = { name = "NODE_KEY", escape = escape_pattern(key), value = key } end
       end
     end
+    local override=host.getenv('WASM_AGENT_NODE_KEY')
+    if override and override~='' then
+      local key=host.read_file(override)
+      if type(key)=='string' then key=key:gsub('%s+','');if #key>=32 then out[#out+1]={name='NODE_KEY',escape=escape_pattern(key),value=key} end end
+    end
     local auth_ok, auth = pcall(dofile, "lua/core/openai_sub_auth.lua")
     if auth_ok and type(auth) == "table" then
       if auth.store_path then json_secrets(auth.store_path(), "OPENAI_SUB_CREDENTIAL", out) end
       if auth.pi_auth_path then json_secrets(auth.pi_auth_path(), "PI_AUTH_CREDENTIAL", out) end
     end
   end)
-  file_cache, file_cache_at = out, now
   return out
 end
 
