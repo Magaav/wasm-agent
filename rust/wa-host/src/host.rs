@@ -718,9 +718,20 @@ mod image_file_tests {
 /// so two writers cannot collide, the bytes are fsynced before the rename so a power loss cannot leave
 /// the new name pointing at empty content, and the temp file is removed on every failure path so a
 /// failed write leaves no litter beside the user's file.
+/// Files that hold a credential: created owner-only, never readable in between (a later chmod left a
+/// window). Anything else keeps the umask default, so a script or web asset the agent writes is not
+/// silently made private.
+fn secret_file(name: &str) -> bool {
+    matches!(name, "credentials.json" | "auth.json" | "node.key" | "env" | "vault.env")
+}
+
 fn write_atomic(path: &str, text: &str) -> bool {
     use std::io::Write;
-    let target = std::path::Path::new(path);
+    // Write through a symlink, not over it: renaming onto the link replaced it with a regular file and
+    // silently detached a linked dotfile from its real location.
+    let resolved = std::fs::canonicalize(path).ok().filter(|real| real.is_file());
+    let target_buf = resolved.unwrap_or_else(|| std::path::PathBuf::from(path));
+    let target = target_buf.as_path();
     if let Some(parent) = target.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
@@ -739,8 +750,18 @@ fn write_atomic(path: &str, text: &str) -> bool {
         COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     );
     let temporary = directory.join(unique);
+    let private = !target.exists() && secret_file(&name);
     let written = (|| -> std::io::Result<()> {
-        let mut file = std::fs::File::create(&temporary)?;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        if private {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        #[cfg(not(unix))]
+        let _ = private;
+        let mut file = options.open(&temporary)?;
         file.write_all(text.as_bytes())?;
         file.sync_all()?;
         Ok(())
@@ -757,8 +778,16 @@ fn write_atomic(path: &str, text: &str) -> bool {
         let _ = std::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(metadata.permissions().mode()));
     }
     match std::fs::rename(&temporary, target) {
-        Ok(()) => true,
-        Err(_) => {
+        Ok(()) => {
+            // The rename is durable only once the directory entry is: fsync the directory too.
+            #[cfg(unix)]
+            if let Ok(dir) = std::fs::File::open(&directory) {
+                let _ = dir.sync_all();
+            }
+            true
+        }
+        Err(error) => {
+            eprintln!("[write] atomic rename into {} failed ({error}); writing in place, not atomically", target.display());
             // A rename can fail where a direct write would not: a target another process holds open on
             // Windows, a read-only file, a target that is not a plain file. Falling back keeps the
             // promise this function always made - a boolean, and the bytes where they were asked for -

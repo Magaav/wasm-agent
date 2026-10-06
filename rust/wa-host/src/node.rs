@@ -52,9 +52,19 @@ impl Identity {
                     Ed25519KeyPair::generate_pkcs8(&rng).map_err(|error| error.to_string())?;
                 let bytes = document.as_ref().to_vec();
                 if let Some(parent) = path.parent() {
-                    let _ = std::fs::create_dir_all(parent);
+                    crate::private_dir(parent);
                 }
-                std::fs::write(&path, hex(&bytes)).map_err(|error| error.to_string())?;
+                // Owner-only from the first byte: the key is the node's identity on the network.
+                let mut options = std::fs::OpenOptions::new();
+                options.write(true).create_new(true);
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::OpenOptionsExt;
+                    options.mode(0o600);
+                }
+                use std::io::Write;
+                options.open(&path).and_then(|mut file| file.write_all(hex(&bytes).as_bytes()))
+                    .map_err(|error| error.to_string())?;
                 bytes
             }
         };
