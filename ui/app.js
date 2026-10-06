@@ -2709,14 +2709,22 @@ async function send(text, options = {}) {
         for (const part of parts) {
           const line = part.split("\n").find((l) => l.startsWith("data: "));
           if (!line) continue;
-          try {
-            const event = JSON.parse(line.slice(6));
-            if (stillViewingRun()) handleEvent(event);
+          // Parsed once. A malformed event is skipped, but a *rendering* failure is reported: swallowing it
+          // made a render bug look like a stream that silently skipped (the inline reporter forwards
+          // console.error to the node).
+          let event = null;
+          try { event = JSON.parse(line.slice(6)); } catch (error) { event = null; }
+          if (event) {
+            try {
+              if (stillViewingRun()) handleEvent(event);
+            } catch (error) {
+              console.error("rendering a run event failed:", event.type, error);
+            }
             lastEvent = Date.now();
-          } catch (error) { /* ignore */ }
+          }
           // A run that says it is done, or has answered, or has failed, is finished: whatever the
           // watchdog asks next, this run is not unfinished, and any notice it put up is stale.
-          const kind = (() => { try { return JSON.parse(line.slice(6)).type; } catch (error) { return ""; } })();
+          const kind = event && typeof event.type === "string" ? event.type : "";
           if (kind === "done") sawDone = true;
           if (kind === "done" || kind === "reply" || kind === "error") {
             turnFinished = true;
