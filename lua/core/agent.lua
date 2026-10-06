@@ -1082,6 +1082,18 @@ function M:run_body(text, images)
   self.overflow_recovery_attempted = false
   self:note_interruption()
   self.emit({ type = "status", text = "thinking" })
+  -- A full disk fails in the middle of a turn (SQLITE_FULL, a torn write). Say so before it does, but do
+  -- not refuse: freeing space may be exactly the work this run is about to do.
+  pcall(function()
+    local floor = tonumber(host.getenv("WASM_AGENT_DISK_FLOOR_BYTES") or "") or (1024 * 1024 * 1024)
+    local disk = host.system_resources and (json.decode(host.system_resources()) or {}).disk
+    local free = disk and tonumber(disk.available_bytes)
+    if free and floor > 0 and free < floor then
+      self.emit({ type = "status", text = string.format("low disk: %.0f MiB free (floor %.0f MiB) - writes may fail",
+        free / 1048576, floor / 1048576) })
+      telemetry.event(self.session_id, self.run_id, "", "disk", "low", { available_bytes = free, floor = floor })
+    end
+  end)
   self.debug = (memory.session(self.session_id) or {}).mode == "debug"
 
   record_turn(self, {

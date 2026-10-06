@@ -304,6 +304,31 @@ impl Store {
         Ok(json!({"ok":true,"schema":1,"kind":"resource-inventory","complete":true,"identities_complete":identities_complete,"claims":claims}))
     }
 
+    /// Every process start leaves a `<boot>.lease.sqlite`, and nothing removed them. A lease whose boot no
+    /// claim names and whose lock can be taken (its process is gone) is evidence of nothing; delete it.
+    /// A lease that is held, or that a claim still names, is kept for the inventory to judge.
+    fn collect_dead_leases(root: &Path, own: &str, db: &Connection) {
+        let referenced: HashSet<String> = db
+            .prepare("SELECT boot FROM claims UNION SELECT boot FROM claim_identity")
+            .and_then(|mut stmt| stmt.query_map([], |row| row.get::<_, String>(0))?.collect())
+            .unwrap_or_default();
+        let Ok(entries) = std::fs::read_dir(root) else { return };
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            let Some(boot) = name.strip_suffix(".lease.sqlite") else { continue };
+            if boot == own || boot.starts_with("target-") || referenced.contains(boot) {
+                continue;
+            }
+            let free = Connection::open(entry.path())
+                .and_then(|lease| { lease.busy_timeout(Duration::from_millis(0))?; lease.execute_batch("BEGIN EXCLUSIVE; ROLLBACK") })
+                .is_ok();
+            if free {
+                let _ = std::fs::remove_file(entry.path());
+                let _ = std::fs::remove_file(root.join(format!("{name}-journal")));
+            }
+        }
+    }
+
     fn open(root: &Path) -> Result<Self> {
         std::fs::create_dir_all(root).map_err(err)?;
         let boot = crate::host::new_uuid();
@@ -325,6 +350,7 @@ impl Store {
               key TEXT PRIMARY KEY, boot TEXT NOT NULL, identity TEXT NOT NULL);",
         )
         .map_err(err)?;
+        Self::collect_dead_leases(root, &boot, &db);
         Ok(Self {
             root: root.into(),
             boot,
@@ -657,6 +683,19 @@ fn registered_inspect(args: &Value) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn dead_unreferenced_leases_are_collected_and_live_ones_kept() {
+        let root=std::env::temp_dir().join(format!("wa-lease-gc-{}",crate::host::new_uuid()));
+        let first=Store::open(&root).unwrap();
+        let first_boot=first.boot.clone();
+        drop(first);
+        let held=Store::open(&root).unwrap();
+        let held_boot=held.boot.clone();
+        assert!(!root.join(format!("{first_boot}.lease.sqlite")).exists(), "the dead boot's lease is gone");
+        let third=Store::open(&root).unwrap();
+        assert!(root.join(format!("{held_boot}.lease.sqlite")).exists(), "a held lease is kept");
+        drop(third);drop(held);std::fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn current_executor_is_read_only_and_requires_current_generation() {
         let root=std::env::temp_dir().join(format!("wa-current-executor-{}",crate::host::new_uuid()));
