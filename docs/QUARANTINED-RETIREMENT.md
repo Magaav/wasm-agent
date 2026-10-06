@@ -39,7 +39,10 @@ in-turn markers refuse mutation. No model tool or HTTP action exposes this escap
 - Native `host.operation('quarantine_retire', ...)` binds exact raw state, live
   directory inventory/hashes and archive to policy. A present original PID generation or held/missing current-format owner lease
   refuses. A positive newer Windows creation timestamp can distinguish recycled
-  PIDs from original admission; this is identity exclusion, not drain proof. An additive `risk_quarantine` row and
+  PIDs from original admission; this is identity exclusion, not drain proof.
+  When a protected service denies `OpenProcess`, a bounded native system-process
+  snapshot supplies positive creation-time evidence. Invalid/truncated/error
+  snapshots still refuse; access denied alone never means the owner is absent. An additive `risk_quarantine` row and
   audited history retire only allocation-blocking reservation; state/output remain
   untouched. `relevant` revalidates policy, archives, originals and live-owner refusal:
   missing/moved evidence restores the blocker. Normal known settlement remains separate.

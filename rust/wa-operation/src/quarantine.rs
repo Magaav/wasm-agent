@@ -44,7 +44,7 @@ pub fn validate(root:&Path,args:&Value,kind:&str,id:&str,expected:&Value)->io::R
     if kind=="workspace" {
         let start:Value=serde_json::from_str(field(expected,"start_state_json")?).map_err(error)?;
         if let Some(pid)=start["executor"]["process_id"].as_u64(){
-            let current=crate::legacy::creation(u32::try_from(pid).map_err(error)?)?;
+            let current=current_creation(u32::try_from(pid).map_err(error)?)?;
             if current.is_some() && (start["executor"]["creation_stamp"].as_str().is_none() || current.as_deref()==start["executor"]["creation_stamp"].as_str()){return Err(error("quarantine_workspace_original_executor_present"));}
         }
     }
@@ -53,10 +53,49 @@ pub fn validate(root:&Path,args:&Value,kind:&str,id:&str,expected:&Value)->io::R
         "original_outcome":"unknown","never_replay":true,"risk_accepted":true,"drain_proven":false,"effect_settlement_proven":false,
         "files":files,"item":item}))
 }
+// Protected unrelated services may deny OpenProcess. A complete native process
+// snapshot can still positively observe their creation time, never infer drain.
+#[cfg(windows)]
+fn snapshot_creation(pid:u32)->io::Result<Option<String>> {
+    #[repr(C)] struct Prefix {
+        next:u32,threads:u32,private_working_set:i64,hard_faults:u32,high_threads:u32,cycles:u64,
+        created:i64,user:i64,kernel:i64,name:windows_sys::Win32::Foundation::UNICODE_STRING,
+        priority:i32,pid:windows_sys::Win32::Foundation::HANDLE,
+    }
+    #[link(name="ntdll")] extern "system" {
+        fn NtQuerySystemInformation(class:u32,buffer:*mut std::ffi::c_void,length:u32,returned:*mut u32)->i32;
+    }
+    let mut size=65536usize;
+    loop {
+        if size>64*1024*1024{return Err(error("quarantine_process_snapshot_too_large"));}
+        let mut buffer=vec![0u64;(size+7)/8];let mut returned=0u32;
+        let status=unsafe{NtQuerySystemInformation(5,buffer.as_mut_ptr().cast(),size as u32,&mut returned)};
+        if status==0xc0000004u32 as i32 {size=(returned as usize).max(size*2);continue;}
+        if status<0 || returned as usize>size{return Err(error(format!("quarantine_process_snapshot_failed:{status}")));}
+        let length=returned as usize;let mut offset=0usize;
+        loop {
+            if offset+std::mem::size_of::<Prefix>()>length{return Err(error("quarantine_process_snapshot_truncated"));}
+            let entry=unsafe{&*(buffer.as_ptr().cast::<u8>().add(offset).cast::<Prefix>())};
+            if entry.pid as usize==pid as usize {
+                if entry.created<=0{return Err(error("quarantine_process_creation_unavailable"));}
+                return Ok(Some(format!("windows-filetime:{}",entry.created)));
+            }
+            if entry.next==0{return Ok(None);}
+            if (entry.next as usize)<std::mem::size_of::<Prefix>() || entry.next as usize%8!=0{return Err(error("quarantine_process_snapshot_invalid_offset"));}
+            offset=offset.checked_add(entry.next as usize).ok_or_else(||error("quarantine_process_snapshot_overflow"))?;
+        }
+    }
+}
+fn current_creation(pid:u32)->io::Result<Option<String>> {
+    match crate::legacy::creation(pid) {
+        #[cfg(windows)] Err(e) if e.raw_os_error()==Some(5)=>snapshot_creation(pid),
+        result=>result,
+    }
+}
 pub fn check_owner(operations:&Path,state:&Value,id:&str)->io::Result<Option<rusqlite::Connection>>{
     let pid=state["owner_process_id"].as_u64().or_else(||id.split('-').nth(2)?.parse().ok()).ok_or_else(||error("quarantine_original_pid_missing"))?;
     let pid=u32::try_from(pid).map_err(error)?;
-    if let Some(stamp)=crate::legacy::creation(pid)?{
+    if let Some(stamp)=current_creation(pid)?{
         let recorded=state["creation_stamp"].as_str();
         let distinct=recorded.is_some_and(|old|old!=stamp);
         // A positive newer OS creation time proves PID reuse, not original drain.
@@ -77,6 +116,10 @@ pub fn check_owner(operations:&Path,state:&Value,id:&str)->io::Result<Option<rus
 }
 #[cfg(test)]mod tests{
  use super::*;
+ #[cfg(windows)] #[test]fn native_snapshot_matches_opened_current_process_generation(){
+   let pid=std::process::id();assert_eq!(snapshot_creation(pid).unwrap(),crate::legacy::creation(pid).unwrap());
+   assert!(snapshot_creation(u32::MAX).unwrap().is_none());
+ }
  #[test]fn exact_archives_and_explicit_risk_are_required(){
   let root=std::env::temp_dir().join(format!("wa-quarantine-{}-{}",std::process::id(),crate::SEQUENCE.fetch_add(1,std::sync::atomic::Ordering::Relaxed)));fs::create_dir_all(root.join("archive")).unwrap();
   fs::write(root.join("approval"),"operator approved exact risk disposition").unwrap();fs::write(root.join("archive/original"),"unknown original").unwrap();let expected=json!({"owner":"old"});
