@@ -252,6 +252,9 @@ local function migrate()
   exec("UPDATE sessions SET interrupted_reason = replace(interrupted_reason, 'died after a decision', 'stopped after a step') WHERE interrupted_reason LIKE '%died after a decision%'")
 end
 
+-- The schema this binary writes. Bump it with any migration a previous binary would misread.
+local SCHEMA_VERSION = 1
+
 function M.setup()
   -- Migrations are idempotent but they WRITE. Every interpreter opens its own
   -- connection now, so a second interpreter booting while another holds a write
@@ -259,6 +262,17 @@ function M.setup()
   -- locked") merely to re-run DDL that is already applied. The first interpreter
   -- in the process migrates; the rest trust the schema and use their connection.
   if host.db_ready and host.db_ready() then return end
+  -- A database a newer binary has migrated is refused rather than written with an older idea of the
+  -- schema (MEMORY.md used to rely on the operator remembering to roll the data back with the binary).
+  local version = tonumber((query("PRAGMA user_version")[1] or {}).user_version) or 0
+  if version > SCHEMA_VERSION then
+    error(string.format("database_newer_than_binary: schema %d, this binary knows %d - upgrade wa or restore a backup",
+      version, SCHEMA_VERSION))
+  end
+  -- All of it is one transaction under the write lock: `wa serve` and a CLI `wa` booting together both
+  -- ran "check, then ALTER" and one failed on "duplicate column"; a crash mid-way left a half-renamed
+  -- database. SQLite DDL is transactional, so now it is all applied or none of it.
+  in_transaction(function()
   -- The shape migration runs *before* the schema. `schema.sql` creates `messages`, so a rename that
   -- arrived after it would find the name taken, skip, and strand the old rows in a table nothing reads
   -- any more. Renaming first moves the rows; the schema then fills in whatever a fresh database lacks.
@@ -292,6 +306,8 @@ function M.setup()
     local first = query("SELECT content FROM messages WHERE session_id=? AND role='user' ORDER BY seq ASC LIMIT 1", {row.id})
     if first[1] then M.name_session(row.id, first[1].content or "") end
   end
+  exec("PRAGMA user_version=" .. SCHEMA_VERSION)
+  end)
   -- The schema is now present on this connection; later interpreters skip the DDL.
   if host.mark_db_ready then host.mark_db_ready() end
 end
