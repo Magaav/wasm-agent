@@ -5,6 +5,10 @@
 # restart:  caddy validate --config /etc/caddy/Caddyfile && systemctl restart caddy
 rendezvous.colmeio.com {
 	encode zstd gzip
+	# The rendezvous refuses bodies over 4 MB itself; refusing them here keeps them off the box.
+	request_body {
+		max_size 4MB
+	}
 	reverse_proxy 127.0.0.1:8890 {
 		header_up X-Real-IP {remote_host}
 		header_up X-Forwarded-For {remote_host}

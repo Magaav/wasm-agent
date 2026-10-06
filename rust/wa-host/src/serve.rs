@@ -1489,13 +1489,35 @@ pub fn run(first: Lua, factory: Box<dyn Fn() -> Lua + Send + Sync>, port: u16, u
     // Bounded on purpose: an unbounded queue runs a busy node into an unbounded number of open sockets,
     // and the accept thread can then only fail it loudly.
 
-    for stream in listener.incoming() {
-        let Ok(mut stream) = stream else { continue };
-        let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(10)));
-        let request = match read_request(&mut stream) {
-            Ok(Some(request)) => request,
-            _ => continue,
-        };
+    // Requests are *read* on their own short-lived threads and handed to this loop whole, so a client that
+    // trickles its head (or never finishes it) costs one reader thread, not the accept thread every other
+    // request - `/health` included - is waiting behind. Everything after the read stays serial, as before.
+    let (read_tx, read_rx) = std::sync::mpsc::sync_channel::<(TcpStream, Request)>(64);
+    std::thread::spawn(move || {
+        static READING: AtomicUsize = AtomicUsize::new(0);
+        const MAX_READERS: usize = 64;
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            if READING.fetch_add(1, Ordering::SeqCst) >= MAX_READERS {
+                READING.fetch_sub(1, Ordering::SeqCst);
+                let _ = respond(&mut stream, 503, "application/json", b"{\"error\":\"too_many_connections\"}");
+                continue;
+            }
+            let read_tx = read_tx.clone();
+            std::thread::spawn(move || {
+                let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(10)));
+                // A reader that stops reading must not block a writer forever (the accept thread answers
+                // static files itself, and a run's event stream would otherwise wedge its node-thread).
+                let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(15)));
+                let request = read_request(&mut stream);
+                READING.fetch_sub(1, Ordering::SeqCst);
+                if let Ok(Some(request)) = request {
+                    let _ = read_tx.send((stream, request));
+                }
+            });
+        }
+    });
+    for (mut stream, request) in read_rx {
         let port = stream.local_addr().map(|a| a.port()).unwrap_or(0);
         if let Err(reason) = admit_origin(&request, port) {
             eprintln!("[serve] refused {} {}: {reason}", request.method, split_path(&request.path).0);
@@ -2284,7 +2306,16 @@ struct RelayWork {
 fn read_request(stream: &mut TcpStream) -> std::io::Result<Option<Request>> {
     let mut data = Vec::new();
     let mut chunk = [0u8; 16384];
+    // One deadline for the whole request, not only per read: this runs on the accept thread, and a
+    // client trickling a byte every few seconds would otherwise hold every other request (and /health)
+    // for as long as it liked.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            return Ok(None);
+        }
+        let _ = stream.set_read_timeout(Some(left.min(std::time::Duration::from_secs(5))));
         let read = stream.read(&mut chunk)?;
         if read == 0 {
             return Ok(None);
