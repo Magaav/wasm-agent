@@ -294,11 +294,12 @@ fn main() {
         println!("wasm-agent {}", env!("CARGO_PKG_VERSION"));
         return;
     }
-    // Every node and node-thread gets rg, including service launches with a sparse PATH.
-    // Installation happens before model execution; failure is visible, never a shell 127 later.
+    // Every node and node-thread gets rg, including service launches with a sparse PATH. Installation
+    // happens before model execution and a failure is said out loud - but it no longer stops the node:
+    // offline, firewalled or with GitHub down, exiting here put a service into a restart loop it could
+    // never leave, while the `grep` tool has its own built-in search and only a bare `rg` in `bash` needs it.
     if let Err(error) = ripgrep::ensure(std::path::Path::new(&home)) {
-        eprintln!("ripgrep_unavailable: {error:#}");
-        std::process::exit(2);
+        eprintln!("ripgrep_unavailable: {error:#} (continuing: the grep tool does not need it; `rg` in bash will fail)");
     }
 
     // The host consumes --db; the Lua core gets the rest.
