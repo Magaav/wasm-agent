@@ -193,7 +193,8 @@ function M.tick()
   local checked=M.inspect(s.service);if not checked.ok or not same_pins(checked.operators,s.operators) then return failure('binding_service_authority_changed') end
   local v,err=request_status(s);if not valid_reply(s,v) or v.binding.state~='accepted' then return failure('binding_approval_unavailable',err) end
   if not M.last_heartbeat or host.now()-M.last_heartbeat>=60 then
-    local ts=math.floor(host.now());local i=identity();local sig=decode(host.sign(i.node_id..'|'..ts))
+    -- Same v2 announcement as node.rs: the signature covers the name and the (empty) endpoint list.
+    local ts=math.floor(host.now());local i=identity();local sig=decode(host.sign('v2|'..i.node_id..'|'..ts..'|'..tostring(s.request.name or '')..'|[]'))
     local r,e=http(s.service,'POST','/register',nil,{node_id=i.node_id,public_key=i.public_key,name=s.request.name,role=s.network_role,endpoints={},ts=ts,signature=sig.signature})
     if not r then return failure('binding_registration_failed',e) end;M.last_heartbeat=host.now()
   end

@@ -98,18 +98,11 @@ end
 -- Requests already answered, so a signature captured on the wire cannot be replayed inside the
 -- window where it is still fresh. Keyed by the whole request (caller, action, timestamp and
 -- signature), so replaying it is the only way to collide with it - and a forgery cannot produce
--- the same key without the same signature.
-local seen = {}
-
+-- the same key without the same signature. Kept in SQLite, not in this interpreter: the node runs
+-- several interpreters and restarts on deploys, and a per-interpreter table let the same request
+-- run once on each of them.
 function M.seen_before(id)
-  if enrollment.managed() then return enrollment.seen_before(id) end
-  if seen[id] then return true end
-  local now = host.now()
-  for key, at in pairs(seen) do
-    if (now - at) > 300 then seen[key] = nil end
-  end
-  seen[id] = now
-  return false
+  return enrollment.seen_before(id)
 end
 
 -- What a human calls this node when four of them are in a list.
@@ -323,9 +316,27 @@ end
 -- the caller holds the private key for a public key that the rendezvous, right now, associates
 -- with that node id. It does not prove the caller is well-intentioned - that is what the role
 -- check and `author_of`'s enrolment list are for - and it fails closed: no rendezvous, no answer.
+-- One node's record, straight from the rendezvous. `/lookup` of an admin needs no credential, so a
+-- guest can verify the master calling it - `/nodes` (the whole list) is masters-only once the
+-- rendezvous has admins, and a guest asking for it gets nothing.
+local function lookup_node(node_id)
+  local url = M.rendezvous_url()
+  if url == "" or not tostring(node_id):match("^%x+$") then return nil end
+  local ok, node = pcall(function()
+    local headers = json.encode(M.signed_headers("lookup") or {})
+    local response = json.decode(host.http("GET", url:gsub("/+$", "") .. "/lookup?node_id=" .. node_id, headers, ""))
+    return response and tonumber(response.status) == 200 and json.decode(response.body) or nil
+  end)
+  return ok and type(node) == "table" and node or nil
+end
+
 function M.verify_caller(node_id, public_key, opts)
   if enrollment.managed() then return enrollment.caller(node_id, public_key) end
   if not node_id or not public_key then return nil end
+  if type(opts) == "table" and opts.fresh then
+    local node = lookup_node(node_id)
+    if node and node.node_id == node_id and node.public_key == public_key then return node end
+  end
   local peers = fetch_peers(type(opts) == "table" and opts.fresh)
   for _, node in ipairs(peers) do
     if node.node_id == node_id and node.public_key == public_key then
@@ -475,8 +486,19 @@ function M.remote_call(selector, capability, args)
       node = node.name,
     }
   end
-  local ok, decoded = pcall(json.decode, response.body)
-  if not ok or type(decoded) ~= "table" then return { result = response.body, node = node.name } end
+  local ok, envelope = pcall(json.decode, response.body)
+  -- Only a reply the target signed over our own request signature is a result. An unsigned body is
+  -- a refusal from before verification (or a forgery) and is reported, never used as a result.
+  if not ok or type(envelope) ~= "table" or type(envelope.reply) ~= "string" then
+    local refusal = ok and type(envelope) == "table" and envelope.error or "unsigned_reply"
+    return { error = "remote_refused", detail = tostring(refusal):sub(1, 120), node = node.name }
+  end
+  local message = table.concat({ "reply", node.node_id, headers["X-WA-Ts"], host.sha256(headers["X-WA-Sig"] .. "\n" .. envelope.reply) }, "|")
+  if not node.public_key or not host.verify(node.public_key, message, envelope.reply_sig or "") then
+    return { error = "remote_reply_unverified", node = node.name }
+  end
+  local decoded_ok, decoded = pcall(json.decode, envelope.reply)
+  if not decoded_ok or type(decoded) ~= "table" then return { result = envelope.reply, node = node.name } end
   decoded.node = node.name
   return decoded
 end
