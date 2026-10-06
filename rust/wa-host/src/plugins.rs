@@ -16,14 +16,24 @@
 use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
-use wasmtime::{Engine, Instance, Memory, Module, Store, TypedFunc};
+use wasmtime::{Config, Engine, Instance, Memory, Module, Store, StoreLimits, StoreLimitsBuilder, TypedFunc};
+
+// A plugin is untrusted code. Without limits one that loops forever wedged the interpreter that called
+// it (behind the process-wide plugin lock, every interpreter), and one that reported a huge result length
+// made the host allocate up to 4 GiB.
+/// Instructions a single describe/call may execute (roughly seconds of work, not hours).
+const FUEL_PER_CALL: u64 = 5_000_000_000;
+/// Linear memory a plugin may grow to.
+const MEMORY_LIMIT: usize = 256 << 20;
+/// Largest JSON a plugin may hand back.
+const RESULT_LIMIT: usize = 16 << 20;
 
 struct Plugin {
     name: String,
     description: String,
     parameters: Value,
     internal: bool,
-    store: Store<()>,
+    store: Store<StoreLimits>,
     memory: Memory,
     alloc: TypedFunc<i32, i32>,
     call: TypedFunc<(i32, i32), i64>,
@@ -37,12 +47,15 @@ pub struct PluginRegistry {
 
 fn read_packed(
     memory: &Memory,
-    store: &mut Store<()>,
+    store: &mut Store<StoreLimits>,
     packed: i64,
     free: Option<&TypedFunc<(i32, i32), ()>>,
 ) -> Result<String> {
     let pointer = ((packed >> 32) & 0xffff_ffff) as u32 as usize;
     let length = (packed & 0xffff_ffff) as u32 as usize;
+    if length > RESULT_LIMIT {
+        return Err(anyhow!("plugin_result_too_large:{length}"));
+    }
     let mut buffer = vec![0u8; length];
     memory.read(&*store, pointer, &mut buffer)?;
     if let Some(free) = free {
@@ -53,8 +66,20 @@ fn read_packed(
 
 impl PluginRegistry {
     pub fn load(directory: &Path) -> Self {
-        let engine = Engine::default();
+        let mut config = Config::new();
+        config.consume_fuel(true);
+        // Without metering there is no limit, so no plugin loads at all rather than an unbounded one.
+        let (engine, metered) = match Engine::new(&config) {
+            Ok(engine) => (engine, true),
+            Err(error) => {
+                eprintln!("[plugin] metered engine unavailable ({error}); plugins disabled");
+                (Engine::default(), false)
+            }
+        };
         let mut plugins = Vec::new();
+        if !metered {
+            return PluginRegistry { engine, plugins };
+        }
         if let Ok(entries) = std::fs::read_dir(directory) {
             for entry in entries.flatten() {
                 let path = entry.path();
@@ -73,7 +98,9 @@ impl PluginRegistry {
 
     fn load_one(engine: &Engine, path: &Path) -> Result<Plugin> {
         let module = Module::from_file(engine, path)?;
-        let mut store = Store::new(engine, ());
+        let mut store = Store::new(engine, StoreLimitsBuilder::new().memory_size(MEMORY_LIMIT).build());
+        store.limiter(|limits| limits);
+        store.set_fuel(FUEL_PER_CALL)?;
         let instance = Instance::new(&mut store, &module, &[])?;
         let memory = instance
             .get_memory(&mut store, "memory")
@@ -153,6 +180,7 @@ impl PluginRegistry {
             .find(|plugin| plugin.name == name)
             .ok_or_else(|| anyhow!("plugin_not_found:{name}"))?;
         let bytes = arguments_json.as_bytes();
+        plugin.store.set_fuel(FUEL_PER_CALL)?;
         let pointer = plugin.alloc.call(&mut plugin.store, bytes.len() as i32)?;
         plugin
             .memory
