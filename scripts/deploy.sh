@@ -92,6 +92,20 @@ WA_SCRIPTS_DIR="$INSTALL_DIR/scripts"
 command -v cygpath >/dev/null 2>&1 && WA_SCRIPTS_DIR="$(cygpath -w "$WA_SCRIPTS_DIR")"
 export WA_SENTINEL_SCRIPTS="${WA_SENTINEL_SCRIPTS:-$WA_SCRIPTS_DIR}"
 
+# Explicit operator-selected privilege only for the verified installed sentinel's
+# manager restart. Never infer sudo from a polkit failure or run the deploy as root.
+sentinel_restart() {
+  case "${WA_DEPLOY_SENTINEL_SUDO:-0}" in
+    0) "$INSTALL_DIR/$SENTINEL_NAME" restart ;;
+    1)
+      case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) echo 'sentinel sudo restart is POSIX-only' >&2; return 1 ;; esac
+      sudo -n env "WASM_AGENT_HOME=$(wa_home_dir)" "WA_INSTALL_DIR=$INSTALL_DIR" \
+        "WA_SENTINEL_SUPERVISOR=${WA_SENTINEL_SUPERVISOR:-}" \
+        "$INSTALL_DIR/$SENTINEL_NAME" restart ;;
+    *) echo 'WA_DEPLOY_SENTINEL_SUDO must be 0 or 1' >&2; return 1 ;;
+  esac
+}
+
 # A machine-readable result, written on both sides of the outcome. `installed.txt` says what is installed;
 # this says what the *deploy* did, so a woken run reads one small file instead of re-deriving the answer
 # from installed.txt, deploy.log, hashes and the sentinel status. `fail` writes it too, so a refusal is a
@@ -458,6 +472,11 @@ fi
 #
 # Written as a one-line guard because `scripts/test-deploy-gate-policy.sh` reads the proof block above out
 # of this file by its markers, and the `fi` of an unindented `if` here would close that block early.
+case "${WA_DEPLOY_SENTINEL_SUDO:-0}" in
+  0) ;;
+  1) command -v sudo >/dev/null 2>&1 && sudo -n true || fail 'explicit sentinel sudo restart requested but noninteractive authority is unavailable; nothing installed' ;;
+  *) fail 'WA_DEPLOY_SENTINEL_SUDO must be 0 or 1; nothing installed' ;;
+esac
 command -v cargo >/dev/null 2>&1 || fail "refused(cargo_unavailable): cargo is not on PATH (PATH=${PATH:-unset}); this step builds the tree with 'cargo build --release --offline --manifest-path rust/Cargo.toml', so a deploy without it cannot build what it would install. Install Rust (https://rustup.rs), or run the deploy on the tree that has the toolchain (the cloud tree builds this repository). Nothing was built and nothing was installed. To build or test without installing, use the gate's own command instead: bash scripts/test.sh."
 
 ( cd rust && cargo build --release --offline -p wa-host ) || fail "the build failed"
@@ -637,7 +656,7 @@ SENTINEL_WATCH_PID="$("$INSTALL_DIR/$SENTINEL_NAME" status 2>/dev/null \
   | awk '$1=="sentinel:" && $2=="watching" {gsub(/[^0-9]/,"",$4); print $4; exit}')"
 if [ -n "$SENTINEL_WATCH_PID" ]; then
   echo "deploy: restarting the watching sentinel to load the installed image"
-  "$INSTALL_DIR/$SENTINEL_NAME" restart || fail "node installed, but the sentinel could not restart"
+  sentinel_restart || fail "node installed, but the sentinel could not restart"
   SENTINEL_NEW_PID=""
   for _ in $(seq 1 50); do
     SENTINEL_NEW_PID="$("$INSTALL_DIR/$SENTINEL_NAME" status 2>/dev/null \
@@ -763,6 +782,7 @@ fi
 
 ship_file "$ROOT/scripts/verify-install.sh" "$INSTALL_DIR/scripts/verify-install.sh" "installation verifier"
 ship_file "$ROOT/scripts/sentinel-install-proof.mjs" "$INSTALL_DIR/scripts/sentinel-install-proof.mjs" "request-bound installation proof"
+ship_file "$ROOT/scripts/measure-sentinel-io.ps1" "$INSTALL_DIR/scripts/measure-sentinel-io.ps1" "bounded read-only Windows idle measurement"
 
 # Ship the WhatsApp pipeline with the node it belongs to. `upgrade.sh` installs the binary, the UI and the
 # self-update skill, and has never carried these: the scripts that read the inbox, the job files that

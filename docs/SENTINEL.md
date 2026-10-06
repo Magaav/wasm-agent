@@ -252,6 +252,25 @@ when you need it most.
   `sudo wa-sentinel stop`. A refusal is loud and names the manager's reason and the unit - never a quiet
   stop file.
 
+A non-root deploy whose system watcher needs administrator authority may explicitly
+set `WA_DEPLOY_SENTINEL_SUDO=1` (default 0). It validates noninteractive sudo
+before installation and invokes only the installed sentinel's verified `restart`
+through `sudo -n env`, passing its exact home/install and declared supervisor.
+The rest of the deployment remains the service user; no polkit rule or root-owned
+agent is created. A sudo refusal is terminal, not permission to spawn a watcher
+or retry with weaker ownership. Invalid values refuse before installation.
+
+### Bounded idle I/O observation (Windows)
+
+Queue the shipped `scripts/measure-sentinel-io.ps1` with sentinel `request run`,
+then end the turn. It waits at most 180 seconds for empty native run/child/operation
+inventories and records three eight-second samples of process read counters and
+CPU time, binding each sample to the original process creation generation. Busy,
+changed or unavailable evidence is a refusal/invalid sample, never idle success.
+Receipts are under `<data>/sentinel/io-idle-*.json`; no recurrent job is created.
+An old sample during an active wake is not a matched idle baseline. OS counters
+include cached/network I/O; this diagnostic does not measure fan causation.
+
 ## Operating
 
 ```
