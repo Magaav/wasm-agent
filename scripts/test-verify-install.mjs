@@ -24,7 +24,7 @@ function verify(){
 try {
   fs.mkdirSync(tree,{recursive:true});fs.mkdirSync(install,{recursive:true});fs.mkdirSync(home,{recursive:true});fs.mkdirSync(mock,{recursive:true});
   git('init','-q','--initial-branch=main');git('config','user.name','verify fixture');git('config','user.email','verify@example.invalid');git('config','core.hooksPath',path.join(root,'no-hooks'));
-  const shipped=['scripts/deploy.sh','scripts/upgrade.sh','skills/self-update/SKILL.md','skills/git-orchestrator/SKILL.md','skills/git-orchestrator/scripts/audit.mjs'];
+  const shipped=['scripts/deploy.sh','scripts/upgrade.sh','scripts/measure-sentinel-io.ps1','skills/self-update/SKILL.md','skills/git-orchestrator/SKILL.md','skills/git-orchestrator/scripts/audit.mjs'];
   for(const rel of shipped){const source=path.resolve(rel);const dest=path.join(tree,rel);fs.mkdirSync(path.dirname(dest),{recursive:true});fs.copyFileSync(source,dest);}
   git('add','.');git('commit','-qm','source fixture');
   for(const rel of shipped){
@@ -61,6 +61,12 @@ try {
   check(clean.status===0&&clean.result.failed===0&&clean.result.skipped===0,`consistent fixture passes without skips: ${JSON.stringify(clean.result.results)}`);
   check(clean.result.results.some(item=>item.name==='shipped skills/git-orchestrator/SKILL.md == repo'&&item.status==='ok'),'repository skill is compared to its installed copy');
   check(clean.result.results.some(item=>item.name==='shipped skills/git-orchestrator/scripts/audit.mjs == repo'&&item.status==='ok'),'repository audit helper is compared to its installed copy');
+
+  const measurement=path.join(install,'scripts/measure-sentinel-io.ps1');
+  fs.rmSync(measurement);
+  const missingMeasurement=verify();
+  check(missingMeasurement.status===1&&missingMeasurement.result.results.some(x=>x.name==='shipped scripts/measure-sentinel-io.ps1 == repo'&&x.status==='fail'),'missing shipped measurement fails rather than green installation');
+  fs.copyFileSync(path.join(tree,'scripts/measure-sentinel-io.ps1'),measurement);
 
   for(const rel of shipped.filter(item=>item.includes('git-orchestrator'))){
     const dest=path.join(home,'.wasm-agent',rel);fs.appendFileSync(dest,'\ninstalled drift fixture\n');

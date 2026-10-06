@@ -195,6 +195,11 @@ it as data. `deploy.sh` also writes `<install>/deploy-result.json` and puts a on
 continuation wake, so the outcome is read once instead of re-derived. `request run --script` executes only
 from directories in `WA_SENTINEL_SCRIPTS` (the install's `scripts/`, set by the gate, the unit and
 `scripts/install-sentinel-task.ps1`); use it for work that must happen outside a turn.
+On Windows an approved `.ps1` script uses the native system PowerShell executable
+with `-NoProfile -NonInteractive -File` and a native path, never Bash or an
+inline command. The same canonical allowlist check precedes interpreter selection;
+script errors are failed supervised operations. A `.ps1` on other platforms
+refuses with no shell fallback. Other script interpreter behavior is unchanged.
 
 A stopped watcher can still only be restarted from outside a turn: nothing that is running can hear a
 request. That is why the supervisor belongs in a service or a logon task (`deploy/wa-sentinel.service`
