@@ -227,6 +227,28 @@ Backup discovery now excludes both resource `.lease.sqlite` and run `-lease.sqli
 files, with a regression. Lease files are OS ownership locks, not VACUUM snapshots.
 No production node stopped or unknown historical effect was replayed.
 
+2026-10-06, PR installation closure: runtime source `76d38c20` is installed
+locally, on cloud and on the public rendezvous. Local and cloud actual installation
+verification each passed66 checks with zero failures/skips, final
+`clean-built-by-deploy` provenance and matching node/sentinel bytes. Administrator
+pins and job revisions are unchanged; schedules remain disabled (local event-only
+return hook enabled, all cloud jobs disabled). Installed private binding43/44 and
+signed sync7 checks passed on Windows/Linux, without live model/provider calls.
+PR27 is merged; PR28 and its vault dependency are exact ancestors of main and
+PR28 is closed already-contained. Remote carries only main; owned/canonical trees
+are clean. Dated private evidence: `PR-FINAL-RESULT-v97.json` in the cleanup
+session scratch directory, with installed receipts and archived dependency refs.
+All76 protected original files rehashed unchanged;77 historical operation
+unknowns,3 uncertain claims,46 held workspace targets and the legacy wave still
+require original identity/drain/effect evidence. No generic approval or successful
+install settled them. Arch remains unreachable without local consent/access;
+no valid idle samples or fan-causation proof. Production vault configuration and
+credential migration were not performed. Companion changes are source-verified,
+not installed: the supported node deploy does not ship `wa-window.exe`, and the
+existing window was not replaced/restarted. Full release/package/bootstrap and
+live WebView2 navigation proof were not claimed. This documentation-only closure
+note does not change deployed runtime bytes or request another installation.
+
 ## Status vocabulary
 
 - **Implemented:** a mechanism exists in the repository; not a release certification.
