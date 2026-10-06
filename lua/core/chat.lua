@@ -341,6 +341,10 @@ function M.run(argv)
       each(memory.conversation(line:sub(15), 50), function(row)
         return string.format("%s  %s  %s", row.conversation_id, row.sender_id or "-", row.body)
       end, print)
+    elseif line:match("^/[%w_-]+$") or line:match("^/[%w_-]+%s") then
+      -- A slash word that is not a command (a typo like /hlep, or a command missing its argument) used to
+      -- start a full agent run with tools. A path ("/home/x ...") has a second slash and still goes through.
+      print("unknown or incomplete command " .. line:match("^(/[%w_-]+)") .. " - /help lists them")
     else
       turn(line)
     end
