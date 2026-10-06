@@ -73,18 +73,18 @@ function M.author_of(caller)
   if enrollment.managed() then return enrollment.author(caller) end
   if type(caller) ~= "table" then return nil end
   if normalize_role(caller.role) ~= "master" then return nil end
-  -- Who is allowed to be a master at all. The rendezvous records what each node says about
-  -- itself, which is fine while every node is honest and useless once one is not: the record is
-  -- evidence of identity, not of intent. With this set, the rendezvous stops being the only
-  -- authority and an enrolled list decides. Unset means "the rendezvous is the authority", which
-  -- is the default - said out loud here so the choice is visible.
+  -- Who is allowed to be a master at all. The rendezvous only grants master to its operator's
+  -- WASM_AGENT_NETWORK_ADMINS, but it is still a third party. With this set, an enrolled list of
+  -- node ids decides instead. Ids only: an id is the hash of the key the caller signed with, while a
+  -- name is whatever the caller registered, so matching a name would let any node claim to be one.
+  -- Unset means "the rendezvous is the authority" - said out loud here so the choice is visible.
   local enrolled = tostring(host.getenv("WASM_AGENT_TRUSTED_MASTERS") or "")
   if enrolled ~= "" then
     local node_id = tostring(caller.node_id or "")
     local name = tostring(caller.name or "")
     for entry in enrolled:gmatch("[^,]+") do
       entry = entry:gsub("^%s+", ""):gsub("%s+$", "")
-      if entry ~= "" and (entry == node_id or entry == name) then return name ~= "" and name or node_id end
+      if entry ~= "" and entry == node_id then return name ~= "" and name or node_id end
     end
     return nil
   end
@@ -98,18 +98,11 @@ end
 -- Requests already answered, so a signature captured on the wire cannot be replayed inside the
 -- window where it is still fresh. Keyed by the whole request (caller, action, timestamp and
 -- signature), so replaying it is the only way to collide with it - and a forgery cannot produce
--- the same key without the same signature.
-local seen = {}
-
+-- the same key without the same signature. Kept in SQLite, not in this interpreter: the node runs
+-- several interpreters and restarts on deploys, and a per-interpreter table let the same request
+-- run once on each of them.
 function M.seen_before(id)
-  if enrollment.managed() then return enrollment.seen_before(id) end
-  if seen[id] then return true end
-  local now = host.now()
-  for key, at in pairs(seen) do
-    if (now - at) > 300 then seen[key] = nil end
-  end
-  seen[id] = now
-  return false
+  return enrollment.seen_before(id)
 end
 
 -- What a human calls this node when four of them are in a list.
@@ -323,9 +316,27 @@ end
 -- the caller holds the private key for a public key that the rendezvous, right now, associates
 -- with that node id. It does not prove the caller is well-intentioned - that is what the role
 -- check and `author_of`'s enrolment list are for - and it fails closed: no rendezvous, no answer.
+-- One node's record, straight from the rendezvous. `/lookup` of an admin needs no credential, so a
+-- guest can verify the master calling it - `/nodes` (the whole list) is masters-only once the
+-- rendezvous has admins, and a guest asking for it gets nothing.
+local function lookup_node(node_id)
+  local url = M.rendezvous_url()
+  if url == "" or not tostring(node_id):match("^%x+$") then return nil end
+  local ok, node = pcall(function()
+    local headers = json.encode(M.signed_headers("lookup") or {})
+    local response = json.decode(host.http("GET", url:gsub("/+$", "") .. "/lookup?node_id=" .. node_id, headers, ""))
+    return response and tonumber(response.status) == 200 and json.decode(response.body) or nil
+  end)
+  return ok and type(node) == "table" and node or nil
+end
+
 function M.verify_caller(node_id, public_key, opts)
   if enrollment.managed() then return enrollment.caller(node_id, public_key) end
   if not node_id or not public_key then return nil end
+  if type(opts) == "table" and opts.fresh then
+    local node = lookup_node(node_id)
+    if node and node.node_id == node_id and node.public_key == public_key then return node end
+  end
   local peers = fetch_peers(type(opts) == "table" and opts.fresh)
   for _, node in ipairs(peers) do
     if node.node_id == node_id and node.public_key == public_key then
@@ -447,6 +458,17 @@ function M.request(node, path, body, inner_headers)
   return { error = "no_route" }
 end
 
+-- Only target-authenticated bytes are a result (also used for sync acknowledgments).
+function M.verified_reply(node, headers, body)
+  local ok,envelope=pcall(json.decode,body)
+  if not ok or type(envelope)~='table' or type(envelope.reply)~='string' then return nil,'unsigned_reply' end
+  local message=table.concat({'reply',node.node_id,headers['X-WA-Ts'],host.sha256(headers['X-WA-Sig']..'\n'..envelope.reply)},'|')
+  if not node.public_key or not host.verify(node.public_key,message,envelope.reply_sig or '') then return nil,'remote_reply_unverified' end
+  local decoded_ok,decoded=pcall(json.decode,envelope.reply)
+  if not decoded_ok or type(decoded)~='table' then return nil,'bad_reply' end
+  return decoded
+end
+
 -- Call a capability on a peer: direct when possible, else through the relay.
 function M.remote_call(selector, capability, args)
   local node = M.find(selector)
@@ -475,8 +497,8 @@ function M.remote_call(selector, capability, args)
       node = node.name,
     }
   end
-  local ok, decoded = pcall(json.decode, response.body)
-  if not ok or type(decoded) ~= "table" then return { result = response.body, node = node.name } end
+  local decoded,problem=M.verified_reply(node,headers,response.body)
+  if not decoded then return {error=problem,node=node.name} end
   decoded.node = node.name
   return decoded
 end

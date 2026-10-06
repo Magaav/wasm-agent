@@ -46,6 +46,11 @@ M.commands = {
   { name = "/memories", usage = "/memories", hint = "list recent memories" },
   { name = "/search", usage = "/search <query>", hint = "search the message ledger" },
   { name = "/conversation", usage = "/conversation <id>", hint = "read a conversation" },
+  {
+    name = "/login",
+    usage = "/login",
+    hint = "sign in to a provider through wa-vault: ChatGPT subscription (device code) or OpenCode Go key",
+  },
   { name = "/stats", usage = "/stats", hint = "database counts" },
   { name = "/console", usage = "/console", hint = "toggle the console: every event and a tool's whole output, unclipped" },
   {

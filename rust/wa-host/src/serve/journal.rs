@@ -10,10 +10,28 @@ use std::sync::Mutex;
 pub struct Journal {
     db: Mutex<Connection>,
     _lease: Mutex<Connection>,
+    /// Streamed deltas not yet written. A token stream used to cost one fsync'd transaction per token
+    /// under the node-wide lock; deltas now go to disk in one transaction per batch, and any other event
+    /// (checkpoint, tool, error, done) flushes the batch first, so the order on disk is unchanged.
+    pending: Mutex<(Vec<(u64, String)>, std::time::Instant)>,
+    batch: bool,
 }
+
+/// Events that only carry more streamed text. Losing the last fraction of a second of these in a crash
+/// loses display text the transcript checkpoint does not depend on.
+fn coalescable(kind: &str) -> bool {
+    kind == "delta" || kind == "reasoning" || kind.ends_with("_delta")
+}
+
+const PENDING_MAX: usize = 64;
+const PENDING_AGE: std::time::Duration = std::time::Duration::from_millis(250);
 
 impl Journal {
     pub fn open(path: &Path) -> Result<Self, String> {
+        Self::open_with_batch(path, std::env::var("WASM_AGENT_RUN_EVENT_BATCH").as_deref()==Ok("1"))
+    }
+
+    fn open_with_batch(path: &Path, batch: bool) -> Result<Self, String> {
         let lease = Connection::open(std::path::PathBuf::from(format!("{}.run-lease.sqlite",path.display()))).map_err(|e| e.to_string())?;
         lease.busy_timeout(std::time::Duration::from_millis(0)).map_err(|e| e.to_string())?;
         lease.execute_batch("PRAGMA journal_mode=DELETE; BEGIN EXCLUSIVE;")
@@ -31,7 +49,37 @@ impl Journal {
             UPDATE admissions SET state=CASE WHEN state='queued' THEN 'not_started' ELSE 'unknown' END,
                 updated_at=unixepoch() WHERE state IN ('queued','running');")
             .map_err(|e| e.to_string())?;
-        Ok(Self { db: Mutex::new(db), _lease: Mutex::new(lease) })
+        // Admissions/events are original execution evidence, including for claims and operations
+        // outside this store. A terminal label or age cannot prove nobody still needs that evidence.
+        // Preserve it on startup; explicit evidence-aware maintenance owns archival/retirement.
+        db.execute_batch("PRAGMA wal_checkpoint(PASSIVE);").map_err(|e|e.to_string())?;
+        Ok(Self { db: Mutex::new(db), _lease: Mutex::new(lease),
+            pending: Mutex::new((Vec::new(), std::time::Instant::now())), batch })
+    }
+
+    /// Write any batched deltas. Called before every other write and read, so nothing observes a gap.
+    fn flush(&self, db: &mut Connection) -> Result<(), String> {
+        let mut pending = self.pending.lock().map_err(|e| e.to_string())?;
+        if pending.0.is_empty() {
+            return Ok(());
+        }
+        let tx = db.transaction().map_err(|e| e.to_string())?;
+        for (id, payload) in pending.0.iter() {
+            tx.execute("INSERT INTO events(run_id,seq,payload) SELECT ?,COALESCE(MAX(seq),0)+1,? FROM events WHERE run_id=?",
+                params![id, payload, id]).map_err(|e| e.to_string())?;
+        }
+        tx.commit().map_err(|e| e.to_string())?;
+        pending.0.clear();
+        pending.1 = std::time::Instant::now();
+        Ok(())
+    }
+
+    /// A write that proves the database accepts writes again, so a transient failure (a busy or full
+    /// disk) does not refuse every run until the process restarts.
+    pub fn probe(&self) -> Result<(), String> {
+        let mut db = self.db.lock().map_err(|e| e.to_string())?;
+        self.flush(&mut db)?;
+        db.execute_batch("BEGIN IMMEDIATE; COMMIT;").map_err(|e| e.to_string())
     }
 
     pub fn admit(&self, owner: &str, conversation: &str) -> Result<u64, String> {
@@ -59,7 +107,8 @@ impl Journal {
     }
 
     pub fn state(&self, id: u64, state: &str, cancelled: bool) -> Result<(), String> {
-        let db = self.db.lock().map_err(|e| e.to_string())?;
+        let mut db = self.db.lock().map_err(|e| e.to_string())?;
+        self.flush(&mut db)?;
         // Failed stream evidence must never later become a successful settlement.
         db.execute("UPDATE admissions SET state=CASE WHEN had_error=1 AND ?='completed' THEN 'failed' ELSE ? END,
             cancel_requested=MAX(cancel_requested,?), updated_at=unixepoch() WHERE id=?",
@@ -83,6 +132,17 @@ impl Journal {
     pub fn event(&self, id: u64, payload: &str) -> Result<(), String> {
         let value: Value = serde_json::from_str(payload).map_err(|e| e.to_string())?;
         let mut db = self.db.lock().map_err(|e| e.to_string())?;
+        // Opt-in experiment only. Default remains crash-durable raw stream evidence; batching
+        // risks a final partial display batch on crash and has not proved equivalent recovery.
+        if self.batch && coalescable(value["type"].as_str().unwrap_or("")) {
+            let due = {
+                let mut pending = self.pending.lock().map_err(|e| e.to_string())?;
+                pending.0.push((id, payload.to_string()));
+                pending.0.len() >= PENDING_MAX || pending.1.elapsed() >= PENDING_AGE
+            };
+            return if due { self.flush(&mut db) } else { Ok(()) };
+        }
+        self.flush(&mut db)?;
         let tx = db.transaction().map_err(|e| e.to_string())?;
         tx.execute("INSERT INTO events(run_id,seq,payload) SELECT ?,COALESCE(MAX(seq),0)+1,? FROM events WHERE run_id=?",
             params![id,payload,id]).map_err(|e| e.to_string())?;
@@ -94,7 +154,8 @@ impl Journal {
 
     pub fn replay(&self, owner: &str, conversation: &str, id: u64, after: u64, archive: bool) -> Result<Option<Value>, String> {
         use rusqlite::OptionalExtension;
-        let db = self.db.lock().map_err(|e| e.to_string())?;
+        let mut db = self.db.lock().map_err(|e| e.to_string())?;
+        self.flush(&mut db)?;
         let state = db.query_row("SELECT state FROM admissions WHERE id=? AND owner=? AND conversation=?",
             params![id,owner,conversation], |row| row.get::<_,String>(0)).optional().map_err(|e| e.to_string())?;
         let Some(state) = state else { return Ok(None) };
@@ -128,6 +189,16 @@ impl Journal {
     }
 }
 
+impl Drop for Journal {
+    /// A clean shutdown keeps every batched delta. Only a hard crash can lose the last batch (at most
+    /// PENDING_AGE of streamed text; checkpoints, tool events and errors are never batched).
+    fn drop(&mut self) {
+        if let Ok(mut db) = self.db.lock() {
+            let _ = self.flush(&mut db);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -138,7 +209,7 @@ mod tests {
         let path=root.join("memory.db");
         let journal=Journal::open(&path).unwrap();
         let id=9_007_199_254_740_993u64;
-        journal.db.lock().unwrap().execute("INSERT INTO admissions(id,owner,conversation,state,created_at,updated_at) VALUES(?, 'alice','thread','completed',0,0)",[id]).unwrap();
+        journal.db.lock().unwrap().execute("INSERT INTO admissions(id,owner,conversation,state,created_at,updated_at) VALUES(?, 'alice','thread','completed',unixepoch(),unixepoch())",[id]).unwrap();
         assert_eq!(journal.inspect("alice","thread",id).unwrap().unwrap()["run_key"],id.to_string());
         assert!(journal.inspect("bob","thread",id).unwrap().is_none());
         assert!(journal.inspect("alice","foreign",id).unwrap().is_none());
@@ -188,5 +259,39 @@ mod tests {
         assert_eq!(archive["has_more"],true);
         drop(journal);
         std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn startup_preserves_old_terminal_admissions_and_raw_events() {
+        let root=std::env::temp_dir().join(format!("wa-preserve-{}",crate::host::new_uuid()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path=root.join("memory.db");
+        let journal=Journal::open_with_batch(&path,false).unwrap();
+        let id=journal.admit("alice","held").unwrap();
+        journal.event(id,r#"{"type":"delta","text":"original"}"#).unwrap();
+        assert_eq!(journal.db.lock().unwrap().query_row("SELECT COUNT(*) FROM events",[],|r|r.get::<_,i64>(0)).unwrap(),1);
+        journal.state(id,"completed",false).unwrap();
+        journal.db.lock().unwrap().execute("UPDATE admissions SET updated_at=1",[]).unwrap();
+        drop(journal);
+        let journal=Journal::open_with_batch(&path,false).unwrap();
+        let replay=journal.replay("alice","held",id,0,true).unwrap().unwrap();
+        assert_eq!(replay["events"][0]["event"]["text"],"original");
+        drop(journal);std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn deltas_are_batched_but_never_reordered() {
+        let root=std::env::temp_dir().join(format!("wa-run-batch-{}-{}",std::process::id(),crate::serve::now_ms()));
+        std::fs::create_dir_all(&root).unwrap();
+        let journal=Journal::open_with_batch(&root.join("memory.db"),true).unwrap();
+        let id=journal.admit("alice","a").unwrap();
+        journal.event(id,r#"{"type":"delta","text":"a"}"#).unwrap();
+        journal.event(id,r#"{"type":"delta","text":"b"}"#).unwrap();
+        let rows: i64 = journal.db.lock().unwrap().query_row("SELECT COUNT(*) FROM events",[],|r|r.get(0)).unwrap();
+        assert_eq!(rows, 0, "two deltas inside the window are not yet written");
+        journal.event(id,r#"{"type":"tool","name":"x"}"#).unwrap();
+        let replay=journal.replay("alice","a",id,0,true).unwrap().unwrap();
+        let kinds: Vec<String> = replay["events"].as_array().unwrap().iter()
+            .map(|e| e["event"]["text"].as_str().or(e["event"]["type"].as_str()).unwrap_or("").to_string()).collect();
+        assert_eq!(kinds, vec!["a","b","tool"], "a non-delta event flushes the batch first, in order");
+        drop(journal);std::fs::remove_dir_all(root).unwrap();
     }
 }

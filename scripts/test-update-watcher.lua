@@ -113,8 +113,9 @@ vfs[sentinel] = "#!/bin/sh - the fixture's sentinel\n"
 local function ask()
   -- One case's evidence only: what was issued while *this* question was answered.
   issued = {}
+  -- skip_backup: this fixture stubs the host's filesystem; the pre-update backup has its own test.
   return update.run({ install = install, sentinel_dir = sentinel_dir, skip_source_sync = true,
-                      reason = "the watcher test" })
+                      skip_backup = true, reason = "the watcher test" })
 end
 
 local function queued(fragment)

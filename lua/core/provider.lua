@@ -12,6 +12,7 @@ local telemetry = dofile("lua/core/telemetry.lua")
 local prefix_audit = dofile("lua/core/prefix_audit.lua")
 local M = {}
 local subscription = dofile("lua/core/openai_sub.lua")
+local vault = dofile("lua/core/vault.lua")
 
 local function env(name) return host.getenv(name) end
 local function trim(value) return (value or ""):gsub("^%s+", ""):gsub("%s+$", "") end
@@ -38,15 +39,24 @@ end
 -- A profile also declares the `transport` it speaks and, where one exists, the `pi_provider` key
 -- whose ids it is. That pair is compared against the `api` of a model in pi's store, and it is
 -- the only thing that decides servability here; nothing re-lists a catalogue. See M.serves.
+--
+-- With `WASM_AGENT_VAULT_URL` set (docs/VAULT.md), opencode-go is reached through wa-vault: the base
+-- URL is the vault's fixed route and the key is a placeholder the vault replaces, so this process -
+-- and the agent's shell, which runs as this process's user - never holds it. The vault wins over the
+-- key and base-URL variables on purpose: a node that is vaulted and *also* has the key in its
+-- environment has not kept the key from the agent, and the env key is simply not used.
 function M.providers()
+  local vaulted_go = vault.base("opencode-go")
   return {
     {
       id = "opencode-go",
       label = "opencode-go",
-      base_url = env("WASM_AGENT_LLM_BASE_URL") or env("WASM_AGENT_OPENAI_BASE_URL")
+      base_url = vaulted_go or env("WASM_AGENT_LLM_BASE_URL") or env("WASM_AGENT_OPENAI_BASE_URL")
         or "https://opencode.ai/zen/go/v1",
-      api_key = env("WASM_AGENT_LLM_API_KEY") or env("OPENCODE_GO_API_KEY")
-        or env("OPENAI_API_KEY") or "",
+      api_key = vaulted_go and vault.PLACEHOLDER or env("WASM_AGENT_LLM_API_KEY")
+        or env("OPENCODE_GO_API_KEY") or env("OPENAI_API_KEY") or "",
+      -- The service behind the vault route, for M.attribution_rule.
+      upstream_host = vaulted_go and vault.ROUTES["opencode-go"].upstream_host or nil,
       default_model = "deepseek-v4.1-flash",
       -- This client posts /chat/completions to this route. The edge serves some of its ids
       -- over other apis - gpt-6-luna is `openai-responses`, minimax-m3 is
@@ -461,7 +471,9 @@ end
 -- guessed session header: routing a conversation by the wrong id is worse than
 -- not routing it at all, because it is invisible.
 function M.attribution_rule(provider)
-  local host = base_host(provider and provider.base_url)
+  -- A vaulted profile reaches its service through wa-vault, so the base URL names the vault; the
+  -- service's headers are still the service's, and `upstream_host` says which service that is.
+  local host = (provider and provider.upstream_host) or base_host(provider and provider.base_url)
   if not host then return nil end
   for _, rule in ipairs(ATTRIBUTION) do
     if rule.host == host then return rule end
@@ -883,6 +895,40 @@ function M.response_timeout_retries()
   local count = tonumber(raw)
   if not count then return 1 end
   return math.max(0, math.min(3, math.floor(count)))
+end
+
+-- A failure the provider may not repeat if asked again a little later: rate limiting, an overloaded
+-- or restarting upstream, a dropped connection, a stream cut before it finished. None of these returned
+-- a tool call that ran, so replaying the same request is safe. A monthly-quota 429 is not retried here:
+-- `record_serving_http` marks the route blocked and the next attempt is refused before it is sent.
+local TRANSIENT_STATUS = { ["408"]=true, ["409"]=true, ["425"]=true, ["429"]=true, ["500"]=true,
+  ["502"]=true, ["503"]=true, ["504"]=true, ["529"]=true }
+local TRANSIENT_TEXT = { "connection reset", "connection refused", "broken pipe", "timed out", "timeout",
+  "connection closed", "unexpected eof", "dns", "temporarily unavailable", "overloaded" }
+
+function M.is_transient(problem)
+  local text = tostring(problem or ""):lower()
+  -- Lost response headers have their own, deliberately smaller budget (`response_timeout_retries`).
+  if M.is_response_timeout(text) then return false end
+  -- Errors arrive with Lua's `file:line:` prefixes, so the markers are found, not anchored.
+  local status = text:match("provider_http_(%d+)") or text:match("subscription_http_(%d+)")
+  if status then return TRANSIENT_STATUS[status] == true end
+  if text:find("subscription_transport_", 1, true) then return true end
+  if text:find("provider_error:", 1, true) then
+    for _, pattern in ipairs(TRANSIENT_TEXT) do
+      if text:find(pattern, 1, true) then return true end
+    end
+  end
+  return false
+end
+
+-- How many times a transient failure is retried, with exponential backoff (2, 4, 8, 16 s, jittered).
+function M.transient_retries()
+  local count = tonumber(env("WASM_AGENT_PROVIDER_RETRIES") or "")
+  -- Opt-in: a lost inference response may already be billed upstream, and a
+  -- transport exception does not prove it emitted no visible stream.
+  if not count then return 0 end
+  return math.max(0, math.min(8, math.floor(count)))
 end
 
 -- `stream` forwards content deltas to the UI and still returns the whole

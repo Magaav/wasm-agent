@@ -129,6 +129,21 @@ end
 -- leaving two files that can disagree about a *credential*, which is the defect this closes.
 M.CREDENTIAL_MODULE = 'lua/core/openai_sub_auth.lua'
 
+-- wa-vault (docs/VAULT.md). With `WASM_AGENT_VAULT_URL` set, this route's token lives in the vault
+-- and never in this process: the two endpoints go through the vault's fixed `openai-sub` route, and
+-- the seam is `lua/core/vault.lua`, whose `token()` answers presence from the vault and hands this file
+-- a placeholder that the vault replaces. The headers below are built exactly as before; the vault
+-- drops the placeholder `Authorization`/`chatgpt-account-id` and sets the real ones.
+do
+  local vault = dofile('lua/core/vault.lua')
+  local base = vault.base('openai-sub')
+  if base then
+    M.ENDPOINT = base .. '/codex/responses'
+    M.USAGE_ENDPOINT = base .. '/wham/usage'
+    M.CREDENTIAL_MODULE = 'lua/core/vault.lua'
+  end
+end
+
 -- A failure of this file's own making, in the credential lane's shape: a `code` to branch on plus a
 -- sentence, and a `tostring` that reads like that lane's own sentence. Used only for the two cases
 -- the credential module cannot report for itself - its file missing/unloadable, or `token()`
@@ -306,6 +321,7 @@ function M.items(messages, entry)
     if role == 'system' then
       instructions[#instructions + 1] = flat_text(message.content)
     elseif role == 'assistant' then
+      for _, item in ipairs(message.reasoning_items or {}) do items[#items + 1] = item end
       local content = flat_text(message.content)
       if content ~= '' then
         local phase = message.phase
@@ -510,6 +526,7 @@ function M.session(opts)
     commentary = {},
     commentary_ids = {},
     reasoning = {},
+    reasoning_items = {},
     ttft = nil,
     request_id = nil,
     stop_reason = 'pending',
@@ -737,6 +754,13 @@ function M.session(opts)
       state.completed_items[event.output_index] = true
       if not slot then return end
       if item.type == 'reasoning' and slot.kind == 'thinking' then
+        -- Kept whole for replay: with store=false the endpoint remembers nothing, so the next round
+        -- only has this reasoning if it is sent back. The id is left out on purpose (store=false
+        -- cannot resolve item ids); the encrypted content is what carries the state.
+        if type(item.encrypted_content) == 'string' and item.encrypted_content ~= '' then
+          state.reasoning_items[#state.reasoning_items + 1] = {type = 'reasoning',
+            summary = item.summary or {}, encrypted_content = item.encrypted_content}
+        end
         local summary = {}
         for _, part in ipairs(item.summary or {}) do summary[#summary + 1] = part.text or '' end
         local content = {}
@@ -893,6 +917,7 @@ function M.session(opts)
         return table.concat(texts, '')
       end)(),
       tool_calls = tool_calls,
+      reasoning_items = #state.reasoning_items > 0 and {model = model, items = state.reasoning_items} or nil,
       finish_reason = finish,
       stream_complete = true,
       model = model,

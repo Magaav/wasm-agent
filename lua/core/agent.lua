@@ -648,6 +648,14 @@ function M:build_context()
       -- Full text or nothing. `provider.reasoning` documents why a partial replay (a
       -- "window") is a cache-hostile change to a message already sent, not an option.
       if replay_reasoning then message.reasoning_content = row.reasoning or "" end
+      -- Encrypted Responses reasoning is only valid for the model that produced it.
+      if row.reasoning_items and row.reasoning_items ~= "" then
+        local ok_items, stored = pcall(json.decode, row.reasoning_items)
+        if ok_items and type(stored) == "table" and stored.model == self.model and type(stored.items) == "table"
+            and (provider.active() or {}).id == "openai-sub" then
+          message.reasoning_items = stored.items
+        end
+      end
       if type(row.tool_calls) == "table" and #row.tool_calls > 0 then
         message.tool_calls = row.tool_calls
       end
@@ -1074,6 +1082,18 @@ function M:run_body(text, images)
   self.overflow_recovery_attempted = false
   self:note_interruption()
   self.emit({ type = "status", text = "thinking" })
+  -- A full disk fails in the middle of a turn (SQLITE_FULL, a torn write). Say so before it does, but do
+  -- not refuse: freeing space may be exactly the work this run is about to do.
+  pcall(function()
+    local floor = tonumber(host.getenv("WASM_AGENT_DISK_FLOOR_BYTES") or "") or (1024 * 1024 * 1024)
+    local disk = host.system_resources and (json.decode(host.system_resources()) or {}).disk
+    local free = disk and tonumber(disk.available_bytes)
+    if free and floor > 0 and free < floor then
+      self.emit({ type = "status", text = string.format("low disk: %.0f MiB free (floor %.0f MiB) - writes may fail",
+        free / 1048576, floor / 1048576) })
+      telemetry.event(self.session_id, self.run_id, "", "disk", "low", { available_bytes = free, floor = floor })
+    end
+  end)
   self.debug = (memory.session(self.session_id) or {}).mode == "debug"
 
   record_turn(self, {
@@ -1094,6 +1114,7 @@ function M:run_body(text, images)
   local trace = {}
   local reply = ""
   local reply_reasoning, reply_phase, reply_message_id, completed = "", "", nil, false
+  local reply_reasoning_items
   local totals = { prompt = 0, completion = 0, total = 0, cached = 0 }
   local run_started = host.now()
   -- What this message changes on disk, recorded by write/edit as it goes. It lives on the
@@ -1359,6 +1380,47 @@ function M:run_body(text, images)
       call_opts.attempt = response_attempt + 1
       ok, result = pcall(provider.complete_with, self.model, messages, tool_list, self.stream, call_opts)
     end
+    -- Rate limits, 5xx, dropped connections and streams that died before showing anything are
+    -- replayed with exponential backoff. A stream that ended early *after* visible text or with tool
+    -- calls is not: that text already reached the reader, and partial tool calls never run.
+    -- An empty reply that is not an output-limit stop (nothing visible, no tool call, finished
+    -- normally) is also asked again, once: it is usually an upstream hiccup, not the model's answer.
+    local empty_retried = false
+    local function retryable(value)
+      if ok then
+        if type(value) ~= "table" or provider.visible_text(value.content) ~= "" or
+            provider.visible_text(value.commentary)~='' or tostring(value.reasoning or '')~='' or
+            #(value.reasoning_items or {})>0 or #(value.tool_calls or {}) > 0 then
+          return false
+        end
+        if value.stream_complete == false then return true end
+        if value.finish_reason ~= "length" and not empty_retried then empty_retried = true return true end
+        return false
+      end
+      return provider.is_transient(tostring(value))
+    end
+    local transient_limit, transient_attempt = provider.transient_retries(), 0
+    while transient_attempt < transient_limit and retryable(result) do
+      transient_attempt = transient_attempt + 1
+      local wait_ms = math.floor((2 ^ transient_attempt) * 1000 * (0.75 + math.random() * 0.5))
+      local reason = ok and (result.stream_complete == false and "incomplete_stream" or "empty_reply")
+        or redact.text(tostring(result)):sub(1, 80)
+      self.emit({ type = "status", text = string.format("provider unavailable (%s) - retrying in %ds (%d/%d)",
+        reason, math.floor(wait_ms / 1000), transient_attempt, transient_limit) })
+      telemetry.event(self.session_id,self.run_id,"","provider_retry","attempt",{
+        reason=reason,attempt=transient_attempt,limit=transient_limit,wait_ms=wait_ms,context_estimate=context_tokens})
+      local waited, stop = 0, nil
+      while waited < wait_ms do
+        if foreground_cancelled() then stop = "run_cancelled" break end
+        local retry_child = child_status()
+        if retry_child and retry_child.cancelled then stop = "subagent_cancelled" break end
+        host.sleep(math.min(250, wait_ms - waited))
+        waited = waited + 250
+      end
+      if stop then ok, result = false, stop break end
+      call_opts.attempt = (call_opts.attempt or 1) + 1
+      ok, result = pcall(provider.complete_with, self.model, messages, tool_list, self.stream, call_opts)
+    end
     -- A provider 400/413 on a request at/near the window is a context overflow even when
     -- the body says nothing - this deployment answers a too-large request with a bare
     -- `{"model":"..."}`. Without this the thread re-sends the same oversized request on
@@ -1549,6 +1611,7 @@ function M:run_body(text, images)
     if #calls == 0 then
       reply = result.content or ""
       reply_reasoning = result.reasoning or ""
+      reply_reasoning_items = result.reasoning_items
       reply_phase = result.final_phase or ""
       -- An empty answer with no tool call is not an answer. A reasoning model that
       -- runs out of output budget before it writes anything returns exactly this,
@@ -1635,7 +1698,7 @@ function M:run_body(text, images)
     end
     record_turn(self, {
       id = assistant_id, role = "assistant", content = result.content or "", tool_calls = calls, debug = self.debug,
-      reasoning=result.reasoning or "", phase=result.final_phase or "",
+      reasoning=result.reasoning or "", phase=result.final_phase or "", reasoning_items=result.reasoning_items,
     })
 
     local dispatch_ctx = { session_id = self.session_id, user_id = self.user, node_id = self.node,
@@ -1806,6 +1869,7 @@ function M:run_body(text, images)
   record_turn(self, {
     id = message_id,ok=completed,
     role = "assistant", content = reply, reasoning=reply_reasoning, phase=reply_phase,
+    reasoning_items = reply_reasoning_items,
     trace = trace, tokens = totals.total, debug = self.debug,
     ms = math.floor((host.now() - run_started) * 1000),
     changes = changes,
@@ -1830,8 +1894,11 @@ end
 -- Deterministic fallback when no model provider is configured.
 function M:local_run(text)
   local lines = {}
-  for _, row in ipairs(memory.recall(text, 5)) do lines[#lines + 1] = "- " .. row.content end
-  for _, row in ipairs(memory.search_ledger(text, nil, 5)) do
+  local master = self.role == "master" or self.role == "admin"
+  local recalled = master and memory.recall(text, 5) or memory.recall(text, 5, "user:" .. tostring(self.user), true)
+  for _, row in ipairs(recalled) do lines[#lines + 1] = "- " .. row.content end
+  -- The ledger is every conversation on this node: a master's to search, not a guest's.
+  for _, row in ipairs(master and memory.search_ledger(text, nil, 5) or {}) do
     lines[#lines + 1] = "- [" .. row.conversation_id .. "] " .. row.body
   end
   if #lines == 0 then return "No provider is configured and nothing in memory matched." end

@@ -37,6 +37,7 @@ local USER, NODE = "master", ""
 -- (`lua/core/commands.lua`), so the list a reader is shown and the arms below cannot drift apart, and
 -- `scripts/test-command-parity.cjs` can fail when this REPL is missing a command the window offers.
 local commands = dofile("lua/core/commands.lua")
+local vault = dofile("lua/core/vault.lua")
 
 local HELP = commands.help()
 
@@ -298,6 +299,36 @@ function M.run(argv)
         return lines
       end
       print(redact.text(notice))
+    elseif line == "/login" then
+      -- pi's `/login`, with the credential going to wa-vault rather than to this node (docs/VAULT.md).
+      -- The key prompt reads the line without `view:accepted`, so the pasted key is not written into the
+      -- transcript; it is held only long enough to hand it to the vault.
+      local function ask(text, private)
+        view:prompt(text)
+        while true do
+          local answer, eof = input:poll(cli_input.WAIT_MS)
+          if answer ~= nil then
+            if not private then view:accepted(answer) end
+            view:submitted()
+            return answer
+          end
+          if eof then return nil end
+        end
+      end
+      vault.login({
+        print = print,
+        ask = function(text) return ask(text, false) end,
+        ask_private = function(text) return ask(text, true) end,
+        wait = function(ms)
+          local deadline = host.monotonic_ms() + ms
+          while host.monotonic_ms() < deadline do
+            local answer = input:poll(math.min(cli_input.WAIT_MS, deadline - host.monotonic_ms()))
+            if answer ~= nil then view:submitted(); return answer end
+          end
+          return nil
+        end,
+        select = function(id) return provider.set_provider(id) end,
+      })
     elseif line == "/stats" then
       print(json.encode(memory.stats()))
     elseif line == "/console" then
@@ -341,6 +372,10 @@ function M.run(argv)
       each(memory.conversation(line:sub(15), 50), function(row)
         return string.format("%s  %s  %s", row.conversation_id, row.sender_id or "-", row.body)
       end, print)
+    elseif line:match("^/[%w_-]+$") or line:match("^/[%w_-]+%s") then
+      -- A slash word that is not a command (a typo like /hlep, or a command missing its argument) used to
+      -- start a full agent run with tools. A path ("/home/x ...") has a second slash and still goes through.
+      print("unknown or incomplete command " .. line:match("^(/[%w_-]+)") .. " - /help lists them")
     else
       turn(line)
     end

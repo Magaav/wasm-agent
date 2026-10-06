@@ -33,8 +33,10 @@ Environment=WA_SENTINEL_SCRIPTS=/usr/local/bin/scripts;/home/ubuntu/.local/bin/s
 WorkingDirectory=/usr/local/bin
 # Waking the model costs money, so the budget is set where an operator can see it.
 Environment=WA_SENTINEL_WAKE_BUDGET=6
-StandardOutput=append:/home/ubuntu/.wasm-agent/sentinel/sentinel.out
-StandardError=append:/home/ubuntu/.wasm-agent/sentinel/sentinel.out
+# To the journal, which rotates; `append:` to sentinel.out grew without bound.
+# Read it with: journalctl -u wa-sentinel
+StandardOutput=journal
+StandardError=journal
 
 [Install]
 WantedBy=multi-user.target

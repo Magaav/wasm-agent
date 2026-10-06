@@ -77,6 +77,56 @@ local function escape_pattern(text)
   return (tostring(text):gsub("([^%w])", "%%%1"))
 end
 
+-- Secrets the node keeps in files rather than the environment: its own signing key and the OAuth
+-- credentials it can log in with. `cat` of any of them would otherwise put a refresh token or the
+-- node's private key into the transcript, the provider request and the sync journal sent to peers.
+-- Re-read at each output boundary: rotation during a turn must not leak the
+-- fresh token for a cache window.
+
+local function json_secrets(path, label, out)
+  local raw = host.read_file and host.read_file(path)
+  if type(raw) ~= "string" or raw == "" then return end
+  local ok, decoded = pcall(function() return dofile("lua/vendor/json.lua").decode(raw) end)
+  if not ok or type(decoded) ~= "table" then return end
+  local function walk(node, key)
+    if type(node) == "table" then
+      for k, v in pairs(node) do walk(v, tostring(k)) end
+    elseif type(node) == "string" and #node >= 20 then
+      local lowered = tostring(key or ""):lower()
+      if lowered:find("token") or lowered:find("refresh") or lowered:find("access")
+          or lowered:find("secret") or lowered:find("key") then
+        out[#out + 1] = { name = label, escape = escape_pattern(node), value = node }
+      end
+    end
+  end
+  walk(decoded, "")
+end
+
+local function file_secret_values()
+  local out = {}
+  pcall(function()
+    local paths = dofile("lua/core/paths.lua")
+    for _, dir in ipairs({ paths.config(), paths.home() .. "/.wasm-agent" }) do
+      local key = host.read_file(dir .. "/node.key")
+      if type(key) == "string" then
+        key = key:gsub("%s+", "")
+        if #key >= 32 then out[#out + 1] = { name = "NODE_KEY", escape = escape_pattern(key), value = key } end
+      end
+    end
+    local override=host.getenv('WASM_AGENT_NODE_KEY')
+    if override and override~='' then
+      local key=host.read_file(override)
+      if type(key)=='string' then key=key:gsub('%s+','');if #key>=32 then out[#out+1]={name='NODE_KEY',escape=escape_pattern(key),value=key} end end
+    end
+    local auth_ok, auth = pcall(dofile, "lua/core/openai_sub_auth.lua")
+    if auth_ok and type(auth) == "table" then
+      if auth.store_path then json_secrets(auth.store_path(), "OPENAI_SUB_CREDENTIAL", out) end
+      if auth.pi_auth_path then json_secrets(auth.pi_auth_path(), "PI_AUTH_CREDENTIAL", out) end
+    end
+  end)
+  return out
+end
+
 function M.secret_values()
   local values = {}
   if host and host.getenv then
@@ -86,6 +136,9 @@ function M.secret_values()
         values[#values + 1] = { name = name, escape = escape_pattern(value), value = value }
       end
     end
+  end
+  if host and host.read_file then
+    for _, secret in ipairs(file_secret_values()) do values[#values + 1] = secret end
   end
   return values
 end

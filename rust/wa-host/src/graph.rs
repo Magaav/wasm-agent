@@ -98,7 +98,7 @@ fn read(
 ///
 /// Build or refresh the graph. Incremental by content hash, so a repeat call with nothing changed
 /// reparses nothing. `{ "root": "...", "force": true }` overrides the configured location.
-pub extern "C" fn graph_index(l: *mut LuaState) -> std::ffi::c_int {
+pub extern "C-unwind" fn graph_index(l: *mut LuaState) -> std::ffi::c_int {
     let options = json_arg(l, 1);
     let outcome = (|| -> Result<Value, String> {
         let root = root_for(&options)?;
@@ -130,7 +130,7 @@ pub extern "C" fn graph_index(l: *mut LuaState) -> std::ffi::c_int {
 }
 
 /// host.graph_query(text, opts_json?) -> [ {kind,name,path,line,detail} ] | {error}
-pub extern "C" fn graph_query(l: *mut LuaState) -> std::ffi::c_int {
+pub extern "C-unwind" fn graph_query(l: *mut LuaState) -> std::ffi::c_int {
     let text = arg_string(l, 1).unwrap_or_default();
     read(l, 2, |store, options, _| {
         let limit = options
@@ -143,7 +143,7 @@ pub extern "C" fn graph_query(l: *mut LuaState) -> std::ffi::c_int {
 }
 
 /// host.graph_search(text, opts_json?) -> ranked symbol selectors with confidence evidence.
-pub extern "C" fn graph_search(l: *mut LuaState) -> std::ffi::c_int {
+pub extern "C-unwind" fn graph_search(l: *mut LuaState) -> std::ffi::c_int {
     let text = arg_string(l, 1).unwrap_or_default();
     read(l, 2, |store, options, _| {
         let limit = options
@@ -160,7 +160,7 @@ pub extern "C" fn graph_search(l: *mut LuaState) -> std::ffi::c_int {
 }
 
 /// host.graph_source(opts_json) -> an exact, bounded page of one indexed definition.
-pub extern "C" fn graph_source(l: *mut LuaState) -> std::ffi::c_int {
+pub extern "C-unwind" fn graph_source(l: *mut LuaState) -> std::ffi::c_int {
     read(l, 1, |store, options, _| {
         let path = options
             .get("path")
@@ -195,7 +195,7 @@ pub extern "C" fn graph_source(l: *mut LuaState) -> std::ffi::c_int {
 }
 
 /// host.graph_explain(name, opts_json?) -> [ {node, outgoing, incoming} ] | {error}
-pub extern "C" fn graph_explain(l: *mut LuaState) -> std::ffi::c_int {
+pub extern "C-unwind" fn graph_explain(l: *mut LuaState) -> std::ffi::c_int {
     let name = arg_string(l, 1).unwrap_or_default();
     read(l, 2, |store, _, _| {
         store.explain_json(&name).map_err(|e| e.to_string())
@@ -203,7 +203,7 @@ pub extern "C" fn graph_explain(l: *mut LuaState) -> std::ffi::c_int {
 }
 
 /// host.graph_path(from, to, opts_json?) -> [ {kind,name,path,line,via} ] | null | {error}
-pub extern "C" fn graph_path(l: *mut LuaState) -> std::ffi::c_int {
+pub extern "C-unwind" fn graph_path(l: *mut LuaState) -> std::ffi::c_int {
     let from = arg_string(l, 1).unwrap_or_default();
     let to = arg_string(l, 2).unwrap_or_default();
     read(l, 3, |store, _, _| {
@@ -212,14 +212,14 @@ pub extern "C" fn graph_path(l: *mut LuaState) -> std::ffi::c_int {
 }
 
 /// host.graph_caps(opts_json?) -> [ {capability, uses} ] | {error}
-pub extern "C" fn graph_caps(l: *mut LuaState) -> std::ffi::c_int {
+pub extern "C-unwind" fn graph_caps(l: *mut LuaState) -> std::ffi::c_int {
     read(l, 1, |store, _, _| {
         store.caps_json().map_err(|e| e.to_string())
     })
 }
 
 /// host.graph_stats(opts_json?) -> {files,nodes,edges,resolved,unresolved,byKind} | {error}
-pub extern "C" fn graph_stats(l: *mut LuaState) -> std::ffi::c_int {
+pub extern "C-unwind" fn graph_stats(l: *mut LuaState) -> std::ffi::c_int {
     read(l, 1, |store, _, _| {
         store
             .stats()
@@ -229,7 +229,7 @@ pub extern "C" fn graph_stats(l: *mut LuaState) -> std::ffi::c_int {
 }
 
 /// host.graph_overview(opts_json?) -> bounded architecture sections with exact totals.
-pub extern "C" fn graph_overview(l: *mut LuaState) -> std::ffi::c_int {
+pub extern "C-unwind" fn graph_overview(l: *mut LuaState) -> std::ffi::c_int {
     read(l, 1, |store, options, _| {
         let aspects = options
             .get("aspects")
@@ -268,7 +268,7 @@ pub extern "C" fn graph_overview(l: *mut LuaState) -> std::ffi::c_int {
 }
 
 /// host.graph_impact(request_json) -> changed definitions and bounded transitive impact evidence.
-pub extern "C" fn graph_impact(l: *mut LuaState) -> std::ffi::c_int {
+pub extern "C-unwind" fn graph_impact(l: *mut LuaState) -> std::ffi::c_int {
     read(l, 1, |store, request, root| {
         store.impact_json(root, request).map_err(|e| e.to_string())
     })
@@ -277,7 +277,7 @@ pub extern "C" fn graph_impact(l: *mut LuaState) -> std::ffi::c_int {
 /// host.graph_status(opts_json?) -> {root, db, ready} | {error}
 ///
 /// `ready` means the graph matches every indexed file's current bytes, not merely that a DB exists.
-pub extern "C" fn graph_status(l: *mut LuaState) -> std::ffi::c_int {
+pub extern "C-unwind" fn graph_status(l: *mut LuaState) -> std::ffi::c_int {
     let options = json_arg(l, 1);
     let outcome = (|| -> Result<Value, String> {
         let root = root_for(&options)?;
@@ -304,7 +304,7 @@ pub extern "C" fn graph_status(l: *mut LuaState) -> std::ffi::c_int {
 /// host.graph_patch_audit(request_json) -> review leads or an explicit error.
 /// This refreshes synchronously: a background watcher event is not evidence that the patch
 /// and its dependency edges belong to the same source snapshot.
-pub extern "C" fn graph_patch_audit(l: *mut LuaState) -> std::ffi::c_int {
+pub extern "C-unwind" fn graph_patch_audit(l: *mut LuaState) -> std::ffi::c_int {
     let request = json_arg(l, 1);
     let outcome = (|| -> Result<Value, String> {
         let root = root_for(&request)?;

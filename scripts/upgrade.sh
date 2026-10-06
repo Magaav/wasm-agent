@@ -377,7 +377,9 @@ elif cmp -s "$NEW" "$INSTALLED"; then
   # Same bytes, different file: copying would only move the mtime, which nothing should read as a change.
   say "the new binary is byte-identical to $INSTALLED - nothing to swap, restarting it"
 else
-  cp -f "$NEW" "$INSTALLED" || SWAP_OK=0
+  # Copied next to the target and renamed over it: a crash mid-copy used to leave a torn binary at the
+  # installed path, while a rename is all-or-nothing.
+  { cp -f "$NEW" "$INSTALLED.new" && mv -f "$INSTALLED.new" "$INSTALLED"; } || { rm -f "$INSTALLED.new"; SWAP_OK=0; }
   say "installed $(basename "$NEW") over $INSTALLED"
 fi
 UI_OK=$SWAP_OK

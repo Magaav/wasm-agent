@@ -61,13 +61,21 @@ async function until(fn, label) {
 async function register(service,node,role='master',override={}) {
   const ts=now();
   const payload={node_id:node.node_id,public_key:node.public_key,name:node.name,role,endpoints:[],ts,
-    signature:signature(node,`${node.node_id}|${ts}`),...override};
+    ...override};
+  payload.signature=override.signature || signature(node,`v2|${payload.node_id}|${payload.ts}|${payload.name}|${JSON.stringify(payload.endpoints)}`);
   return request(service+'/register','POST',JSON.stringify(payload),{'content-type':'application/json'});
 }
 function callBody(target,capability,args={}) { return JSON.stringify({to_node_id:target.node_id,capability,args,nonce:crypto.randomUUID()}); }
 async function direct(target,author,capability,args={},to=target) {
   const body=callBody(to,capability,args);
-  return request(target.url+'/node/call','POST',body,headers(author,'call',body));
+  const h=headers(author,'call',body), r=await request(target.url+'/node/call','POST',body,h);
+  if(typeof r.value.reply==='string') {
+    const message=`reply|${target.node_id}|${h['x-wa-ts']}|${hash(h['x-wa-sig']+'\n'+r.value.reply)}`;
+    const key=crypto.createPublicKey({key:Buffer.concat([Buffer.from('302a300506032b6570032100','hex'),Buffer.from(target.public_key,'hex')]),format:'der',type:'spki'});
+    assert(crypto.verify(null,Buffer.from(message),key,Buffer.from(r.value.reply_sig,'hex')),'target reply signature');
+    r.value=JSON.parse(r.value.reply);
+  } else assert(r.value.error,'unsigned response cannot be a result');
+  return r;
 }
 async function stop(child) {
   if(child.exitCode !== null || child.signalCode !== null) return;

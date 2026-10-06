@@ -842,7 +842,12 @@ fn start_node(binary: &Path, reason: &str) -> Result<()> {
             command.env_clear();
             command.envs(instance::guest_env(&selected));
         }
-        command.spawn().context("spawn node")?.id()
+        let child = command.spawn().context("spawn node")?;
+        let id = child.id();
+        if let Ok(mut children) = CHILDREN.lock() {
+            children.push(child);
+        }
+        id
     };
     say(&format!("started pid {child_pid}"));
     // Record what was started, so a later stop can prove it is the same process rather than trusting
@@ -1137,13 +1142,50 @@ fn to_msys_path(path: &Path) -> String {
     text
 }
 
+/// How long `upgrade` may run before it is killed (WA_SENTINEL_UPGRADE_TIMEOUT_SECONDS, default 30 min).
+fn upgrade_timeout() -> Duration {
+    Duration::from_secs(
+        std::env::var("WA_SENTINEL_UPGRADE_TIMEOUT_SECONDS").ok().and_then(|v| v.parse().ok()).unwrap_or(1800),
+    )
+}
+
+/// Run a command to completion or until `limit`, then kill it. Returns its output either way; a killed
+/// command has a failing status and says so in stderr.
+fn run_bounded(command: std::process::Command, limit: Duration) -> Result<std::process::Output> {
+    // Use the existing owned process-tree supervisor, not Child::kill (only the
+    // shell) and shared temp filenames. Original output/state remain durable.
+    let manager=wa_operation::Manager::new(sentinel_dir().join("operations"));
+    let mut spec=wa_operation::Spec::command(command.get_program().to_string_lossy(),
+        command.get_args().map(|v|v.to_string_lossy().into_owned()).collect());
+    spec.timeout=limit;spec.owner="sentinel:upgrade".into();
+    spec.cwd=command.get_current_dir().map(|p|p.display().to_string()).unwrap_or_default();
+    for (key,value) in command.get_envs() {
+        let value=value.context("bounded command cannot remove inherited environment")?;
+        spec.env.push((key.to_string_lossy().into_owned(),value.to_string_lossy().into_owned()));
+    }
+    let id=manager.start(spec)?;
+    let state=manager.wait(&id,limit+Duration::from_secs(2))?;
+    if state["settled"]!=true || state["cleanup"]=="unknown" {
+        bail!("upgrade operation {id} outcome unknown; retained originals require inspection; no replay");
+    }
+    let root=sentinel_dir().join("operations").join(&id);
+    let stdout=std::fs::read(root.join("stdout"))?;
+    let mut stderr=std::fs::read(root.join("stderr"))?;
+    if state["ok"]!=true {stderr.extend_from_slice(format!("\n[sentinel] operation {id} failed: {}\n",state["error"]).as_bytes());}
+    let code=if state["ok"]==true {0} else {state["code"].as_i64().filter(|v|*v!=0).unwrap_or(1) as i32};
+    #[cfg(windows)] let status={use std::os::windows::process::ExitStatusExt;std::process::ExitStatus::from_raw(code as u32)};
+    #[cfg(unix)] let status={use std::os::unix::process::ExitStatusExt;std::process::ExitStatus::from_raw((code & 255)<<8)};
+    Ok(std::process::Output { status, stdout, stderr })
+}
+
 pub(crate) fn verb_upgrade(binary: &str, reason: &str) -> Result<String> {
     if binary.is_empty() {
         bail!("upgrade needs --binary");
     }
     let script = resolve_upgrade_script()?;
     let (interpreter, script_arg) = shell_for(&script);
-    let output = std::process::Command::new(&interpreter)
+    let mut command = std::process::Command::new(&interpreter);
+    command
         // The path is passed to the interpreter as its first argument. Git Bash does not accept a
         // `C:/...` path there, and WSL's bash cannot see `/c/...` at all, so both the interpreter
         // *and* the path form have to agree (`shell_for`).
@@ -1155,9 +1197,11 @@ pub(crate) fn verb_upgrade(binary: &str, reason: &str) -> Result<String> {
         // directory does not matter to it. This used to pin cwd to the sentinel's own, which was
         // the install directory - a directory with no `scripts/` in it, which is exactly why the
         // relative default could never be found from a detached watcher.
-        .current_dir(std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
-        .output()
-        .context("run the upgrade script")?;
+        .current_dir(std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    // Bounded. `output()` waited forever: a hung upgrade.sh (waiting for an idle node that never
+    // came) left MAINTENANCE_ACTIVE set and held every later restart. Output goes to files rather than
+    // pipes so a chatty script cannot fill a pipe and deadlock against the wait.
+    let output = run_bounded(command, upgrade_timeout()).context("run the upgrade script")?;
     let log = sentinel_dir().join("upgrade.log");
     let mut record = format!("{}\t{}\t{}\n", now_epoch(), binary, reason);
     record.push_str(&String::from_utf8_lossy(&output.stdout));
@@ -2202,6 +2246,7 @@ fn watch() -> Result<()> {
         // Watching the node, not restarting it: an auto-restart that nobody asked for would fight the
         // operator every time they stop a node on purpose. The outage is reported; restarting is a
         // request.
+        reap_children();
         if node_is_up() {
             if down_since.take().is_some() {
                 audit("node-up", &format!("port {}", node_port()), "the node is answering again");
@@ -2367,7 +2412,25 @@ fn pid_alive(pid: u32) -> bool {
             .output();
         return output.map(|o| String::from_utf8_lossy(&o.stdout).contains(&pid.to_string())).unwrap_or(false);
     }
-    Path::new(&format!("/proc/{pid}")).exists()
+    reap_children();
+    // A zombie keeps its /proc entry until its parent reaps it, so "the directory exists" read a killed
+    // node as alive and every second restart refused with "still alive". The state field says.
+    match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+        Ok(stat) => !matches!(stat.rsplit(')').next().and_then(|rest| rest.trim_start().chars().next()), Some('Z' | 'X')),
+        Err(_) => false,
+    }
+}
+
+/// The nodes this sentinel started, kept so they can be reaped. Dropping the `Child` after spawning
+/// left every stopped node a zombie for the sentinel's whole lifetime.
+#[cfg(not(windows))]
+static CHILDREN: std::sync::Mutex<Vec<std::process::Child>> = std::sync::Mutex::new(Vec::new());
+
+fn reap_children() {
+    #[cfg(not(windows))]
+    if let Ok(mut children) = CHILDREN.lock() {
+        children.retain_mut(|child| !matches!(child.try_wait(), Ok(Some(_))));
+    }
 }
 
 fn status() -> Result<()> {
@@ -2663,6 +2726,9 @@ mod self_update_tests {
         let dir = std::env::temp_dir().join(format!("wa-deploy-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("temp dir");
+        // Never inherit the real watcher's recorded service owner/capture path.
+        let old_home=std::env::var_os("WASM_AGENT_HOME");std::env::set_var("WASM_AGENT_HOME",&dir);
+        let old_supervisor=std::env::var_os("WA_SENTINEL_SUPERVISOR");std::env::set_var("WA_SENTINEL_SUPERVISOR","none");
         let marker = dir.join("ran.txt");
         let script = dir.join("deploy-stub.sh");
         std::fs::write(
@@ -2695,6 +2761,8 @@ mod self_update_tests {
         assert!(written.contains("--prompt continue"), "the prompt must reach the script: {written}");
         assert!(written.contains("--reason fixture"), "the reason must reach the script: {written}");
         std::env::remove_var("WA_SENTINEL_DEPLOY");
+        match old_home{Some(v)=>std::env::set_var("WASM_AGENT_HOME",v),None=>std::env::remove_var("WASM_AGENT_HOME")};
+        match old_supervisor{Some(v)=>std::env::set_var("WA_SENTINEL_SUPERVISOR",v),None=>std::env::remove_var("WA_SENTINEL_SUPERVISOR")};
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2933,5 +3001,42 @@ mod request_verb_tests {
             None=>std::env::remove_var("WASM_AGENT_HOME"),
         }
         let _=std::fs::remove_dir_all(&home);
+    }
+}
+
+#[cfg(test)]
+mod reap_tests {
+    /// The regression: a node the sentinel had killed but not reaped is a zombie, still listed in /proc,
+    /// and `pid_alive` said "alive" - so the next restart waited 10 s and refused.
+    #[cfg(target_os="linux")]
+    #[test]
+    fn a_killed_unreaped_child_is_not_alive() {
+        let mut child = std::process::Command::new("sleep").arg("30").spawn().expect("spawn sleep");
+        let pid = child.id();
+        assert!(super::pid_alive(pid));
+        child.kill().expect("kill");
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert!(std::path::Path::new(&format!("/proc/{pid}")).exists(), "still a zombie: not yet reaped");
+        assert!(!super::pid_alive(pid), "a zombie is dead");
+        let _ = child.wait();
+    }
+
+    /// The regression: `upgrade` waited on its script forever, holding maintenance mode.
+    #[test]
+    fn a_hung_script_is_killed_at_its_limit() {
+        let _alone=super::ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+        let root=std::env::temp_dir().join(format!("wa-bounded-upgrade-{}-{}",std::process::id(),super::now_epoch()));
+        let old=std::env::var_os("WASM_AGENT_HOME");std::env::set_var("WASM_AGENT_HOME",&root);
+        #[cfg(windows)] let mut command={let mut c=std::process::Command::new(std::path::PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32/cmd.exe"));c.args(["/C","echo started & ping -n 30 127.0.0.1 >nul"]);c};
+        #[cfg(not(windows))] let mut command={let mut c=std::process::Command::new("sh");c.args(["-c","echo started; sleep 30"]);c};
+        command.current_dir(std::env::temp_dir());
+        let started = std::time::Instant::now();
+        let output = super::run_bounded(command, std::time::Duration::from_secs(1)).expect("run");
+        assert!(started.elapsed() < std::time::Duration::from_secs(5), "killed near the limit");
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stdout).contains("started"));
+        assert!(String::from_utf8_lossy(&output.stderr).contains("deadline"));
+        match old{Some(v)=>std::env::set_var("WASM_AGENT_HOME",v),None=>std::env::remove_var("WASM_AGENT_HOME")};
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

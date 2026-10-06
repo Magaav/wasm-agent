@@ -140,10 +140,12 @@ on the strength of a cached list. That is the answer to "a guest can fake a mast
 call": it would have to hold the master's private key *and* still be enrolled for
 that node id.
 
-The rendezvous records what each node says about itself, which is all it can know.
-With `WASM_AGENT_TRUSTED_MASTERS` set (comma-separated node ids or names) an
-enrolled list decides instead: a caller not named there is refused even though the
-rendezvous would vouch for its key.
+The rendezvous never takes a node's role from the node: `master` is granted only to
+the node ids in the operator's `WASM_AGENT_NETWORK_ADMINS` (or by an admin's role
+grant), and with that list empty every node is a guest. With
+`WASM_AGENT_TRUSTED_MASTERS` set (comma-separated **node ids** — names are
+self-chosen and never match) an enrolled list decides instead: a caller not listed
+there is refused even though the rendezvous would vouch for its key.
 
 `scripts/test-guest-e2e.sh` starts a real guest beside the master and attacks it —
 a shell request, a forged master call, a replay, a rename that must not move a
@@ -190,11 +192,24 @@ Verified with a node that advertises **no endpoints at all** (NAT simulation):
 succeeded through `https://rendezvous.colmeio.com`, with the queue draining to
 zero afterwards (`GET /relay/status`).
 
+## Coordinated hardening upgrade
+
+Announcements sign `v2|node_id|ts|name|<JSON endpoints>`; old id/time-only
+registrations refuse. Deploy the registry and participating nodes/CLIs together;
+there is no unsigned metadata fallback. Roles remain registry/admin grants.
+`/node/call` replies and `/sync/push` acknowledgments are target-signed over the
+original request signature plus exact reply bytes. Sync signs its full body and
+target under `sync-v2`; forged/unsigned acknowledgments cannot advance a cursor.
+If application happened but its acknowledgment was lost, the cursor remains held
+for explicit inspection, not falsely acknowledged or blindly replayed.
+The public registry is the authenticated trust anchor; its TLS/admin configuration
+must be protected. These changes are not device enrollment or vault configuration.
+
 ## Security notes
 
 - Every write is **signature-verified**; a node cannot claim another's identity.
-- `role` is *claimed* by the node and recorded; the master still enforces
-  permissions locally (never trust a peer's self-description).
+- `role` is granted by configured administrators or exact administrator role grants,
+  never a node's self-description; recipients separately enforce pinned local consent.
 - Nothing sensitive is stored: only public keys and endpoints.
 - The service is read-mostly and tiny; rate-limit per source if it is ever
   abused.

@@ -208,6 +208,9 @@ a[href]:focus-visible { outline: 2px solid #8bbcff; outline-offset: 2px; }
   border-radius: var(--radius); border: 1px solid var(--line);
 }
 wa-message { display: block; }
+/* A long session's older messages skip layout and paint while off-screen (the DOM of a live session
+   only grows). The newest few stay fully rendered so pinning to the bottom measures real sizes. */
+wa-message:not(:nth-last-child(-n+8)) { content-visibility: auto; contain-intrinsic-size: auto 160px; }
 wa-message.user { align-self: flex-end; background: var(--user); border-color: #2a3a63; }
 wa-message.assistant { align-self: flex-start; background: var(--assistant); }
 .message-images { display: flex; flex-direction: column; gap: var(--gap); margin-top: var(--gap); }

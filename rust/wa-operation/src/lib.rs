@@ -629,6 +629,8 @@ fn execute(spec: &Spec, dir: &Path, entry: &Entry, secrets: &[Vec<u8>]) -> io::R
     let mut views = [Vec::new(), Vec::new()];
     let mut eof = [false, false];
     let mut bytes = 0usize;
+    let (mut idle_ms, mut idle_bytes) = (5u64, 0usize);
+    let mut published: Option<(usize, Option<i32>, bool)> = None;
     let mut code = None;
     let mut reason = None;
     let mut cleanup = None;
@@ -770,11 +772,15 @@ fn execute(spec: &Spec, dir: &Path, entry: &Entry, secrets: &[Vec<u8>]) -> io::R
         if promoted && stopped.is_none() && eof.iter().all(|v| *v) && !process.descendants()? {
             break;
         }
-        {
+        // Published only when something changed: this ran (lock + three JSON writes) 200 times a second
+        // for the whole life of every operation.
+        let observed = (bytes, code, eof.iter().all(|v| *v));
+        if published != Some(observed) {
+            published = Some(observed);
             let mut state = entry.state.lock().unwrap();
             state["output_bytes"] = json!(bytes);
             state["process_exit_code"] = json!(code);
-            state["output_streams_closed"] = json!(eof.iter().all(|v| *v));
+            state["output_streams_closed"] = json!(observed.2);
         }
         if let Some(at) = stopped {
             // Windows can observe its contained tree. POSIX groups only prove signal delivery;
@@ -789,7 +795,11 @@ fn execute(spec: &Spec, dir: &Path, entry: &Entry, secrets: &[Vec<u8>]) -> io::R
                 break;
             }
         }
-        std::thread::sleep(Duration::from_millis(5));
+        // 5 ms while output is flowing, backing off to 25 ms while a long command is silent, so a
+        // day-long build does not cost 200 wakeups a second.
+        idle_ms = if bytes == idle_bytes { (idle_ms * 2).min(25) } else { 5 };
+        idle_bytes = bytes;
+        std::thread::sleep(Duration::from_millis(idle_ms));
     }
     // Flush whatever a stream still held back for a possible split secret. A stream that did
     // not reach EOF - cancelled, deadline, or the drain allowance - still gets its tail

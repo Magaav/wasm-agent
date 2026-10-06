@@ -22,7 +22,7 @@ function state(n){const f=path.join(n.home,'.wasm-agent/binding.json');return fs
  registry.env.WASM_AGENT_NETWORK_ADMINS=admin.node_id+','+other.node_id;
  start(registry,['rendezvous','--port',String(p)]);
  await until(async()=>{try{return(await request(service+'/health')).status===200}catch{return false}},'registry startup');
- for(const n of [admin,other,stranger]){const ts=Math.floor(Date.now()/1000);const b=JSON.stringify({node_id:n.node_id,public_key:n.public_key,name:n.name,role:'master',endpoints:[],ts,signature:sign(n,n.node_id+'|'+ts)});assert.equal((await request(service+'/register','POST',b,{'content-type':'application/json'})).status,200);n.env.WASM_AGENT_RENDEZVOUS=service;n.env.WASM_AGENT_RELAY=service;}
+ for(const n of [admin,other,stranger]){const ts=Math.floor(Date.now()/1000);const b=JSON.stringify({node_id:n.node_id,public_key:n.public_key,name:n.name,role:'master',endpoints:[],ts,signature:sign(n,'v2|'+n.node_id+'|'+ts+'|'+n.name+'|[]')});assert.equal((await request(service+'/register','POST',b,{'content-type':'application/json'})).status,200);n.env.WASM_AGENT_RENDEZVOUS=service;n.env.WASM_AGENT_RELAY=service;}
  ok((await request(service+'/service')).value.binding_protocol===1,'binding service discovery version');
  const beforeKey=fs.readFileSync(path.join(app.home,'.wasm-agent/node.key'));
  app.env.WASM_AGENT_NODE_NAME='arch-cli';

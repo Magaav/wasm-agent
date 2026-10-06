@@ -229,6 +229,17 @@ function M.sync_source(tree, expected_branch)
       " commit(s) behind origin/main; the deploy gate requires the source commit to be integrated" }
   end
   if behind > 0 then
+    -- What the node builds and then runs - as whatever user it runs as - is whatever origin/main says.
+    -- With WASM_AGENT_UPDATE_REQUIRE_SIGNED=1 the commit must carry a signature git trusts
+    -- (gpg.ssh.allowedSignersFile or the gpg keyring), so a push by someone who took over the account
+    -- or the remote is not deployed to every node. Off by default: the history is not signed today.
+    if tostring(host.getenv("WASM_AGENT_UPDATE_REQUIRE_SIGNED") or "") == "1" then
+      local verified = shell("git -C " .. quote(tree) .. " verify-commit origin/main 2>&1")
+      if not verified or verified.code ~= 0 then
+        return { ok=false, error="unsigned_source", observed="origin/main does not carry a trusted signature: " ..
+          trim(verified and (verified.stderr ~= "" and verified.stderr or verified.stdout) or "git verify-commit returned no result") }
+      end
+    end
     local merged = shell("git -C " .. quote(tree) .. " merge --ff-only --quiet origin/main 2>&1")
     if not merged or merged.code ~= 0 then
       return { ok=false, error="runtime_fast_forward_failed", observed=trim(merged and (merged.stderr ~= "" and merged.stderr or merged.stdout) or "git merge returned no result") }
@@ -428,6 +439,21 @@ function M.run(options)
   local verdict = decorate(M.verdict(facts), facts)
   if verdict.status ~= "queue" then
     return verdict
+  end
+
+  -- The new binary migrates the schema when it starts, and an older one refuses a migrated database:
+  -- take a checked snapshot of every store first, or do not deploy. (MEMORY.md used to ask the
+  -- operator to remember this.)
+  if not options.skip_backup then
+    local backed, snapshot = pcall(function() return dofile("lua/core/backup.lua").run("pre-update") end)
+    if not backed then
+      verdict.ok, verdict.queued, verdict.status = false, nil, "backup_failed"
+      verdict.error = "backup_failed"
+      verdict.observed = tostring(snapshot)
+      verdict.next = "free disk space or repair the store named above, then ask again; nothing was deployed"
+      return verdict
+    end
+    verdict.backup = snapshot.dir
   end
 
   local reason = trim(options.reason or "")

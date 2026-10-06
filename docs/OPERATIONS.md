@@ -246,3 +246,23 @@ is about 29 ms here; it cannot explain the field audit's 88.2-second bash p95 or
 
 The tests prove those boundaries, not universal freedom from hangs or safe
 execution of arbitrary privileged commands.
+
+## Opt-in provider retry policy
+
+`WASM_AGENT_PROVIDER_RETRIES=0` is the default for the new exponential-backoff
+loop; a positive integer (capped at eight) opts in. Risk: a lost inference response
+may already have been billed or partially streamed. Known returned content,
+commentary, reasoning or tool calls prohibit retry. These are inference retries,
+never permission to replay a dispatched tool, credential refresh or unknown effect.
+The existing separately bounded response-header-timeout policy is unchanged.
+
+## Supply chain
+
+- Builds use `--locked`, so a build can never resolve different crates than `Cargo.lock` names.
+- `WASM_AGENT_UPDATE_REQUIRE_SIGNED=1` makes `/update` refuse to fast-forward the runtime tree unless
+  `git verify-commit origin/main` passes (configure `gpg.ssh.allowedSignersFile` or a GPG keyring with the
+  maintainers' keys, and sign merges to main). Off by default because the history is not signed yet;
+  turn it on once it is, since the node runs whatever it builds.
+- `scripts/install.sh`/`install.ps1` are fetched from a moving `main`; pin a tag and its checksum when
+  handing them to anyone else.
+

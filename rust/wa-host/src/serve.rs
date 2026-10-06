@@ -441,7 +441,16 @@ fn spawn_node_thread(slots: &mut Vec<Option<std::sync::mpsc::SyncSender<Work>>>,
     if index > max_index {
         return None;
     }
-    let state = (pool.factory)();
+    // Building an interpreter opens the database (`expect` on failure) on the accept thread; a full disk or
+    // a permissions change then took the whole node down. A failed build is now one refused request (503,
+    // the caller retries) and a log line, and the next spawn tries again.
+    let state = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (pool.factory)())) {
+        Ok(state) => state,
+        Err(_) => {
+            eprintln!("[serve] could not start an interpreter for node-thread {index}; refusing this request");
+            return None;
+        }
+    };
     let (sender, receiver) = std::sync::mpsc::sync_channel::<Work>(pool.queue_depth);
     while slots.len() <= index {
         slots.push(None);
@@ -702,6 +711,32 @@ fn env_seconds(name: &str, fallback: u64) -> u64 {
 /// How long a request may sit behind a node-thread that has shown no progress before it is
 /// told so instead of waiting. Long enough that a slow run is not mistaken for a
 /// wedge; short enough that a client is not left holding an open socket for minutes.
+/// Exit only when *every* node-thread that is running is stalled: a wedged lane must not take the healthy
+/// ones with it, and with a single interpreter this is exactly the old behaviour. Idle node-threads beat
+/// every 100 ms, so only a node-thread that stopped reporting can age this far.
+fn exit_if_every_node_thread_stalled() {
+    let live=live_node_thread_ids();
+    let all_stalled = !live.is_empty() && live.iter()
+        .all(|index| node_thread_age_ms(*index) >= stall_exit_seconds() * 1000);
+    if stall_exit_seconds() > 0 && all_stalled {
+        eprintln!(
+            "[serve] every node-thread has been stalled for {}s: exiting so the service manager can restart the node",
+            stall_exit_seconds()
+        );
+        std::process::exit(3);
+    }
+}
+
+/// The same check on a timer. It used to run only when a non-static request reached a stalled node-thread,
+/// and `/health` (the only thing a watcher sends) is answered before that point - so a wedged node that
+/// nobody else talked to answered `ok:false` forever and was never restarted.
+fn spawn_stall_watchdog() {
+    std::thread::spawn(|| loop {
+        std::thread::sleep(std::time::Duration::from_secs(15));
+        exit_if_every_node_thread_stalled();
+    });
+}
+
 fn stall_seconds() -> u64 {
     env_seconds("WASM_AGENT_WORKER_STALL_SECONDS", 120)
 }
@@ -776,6 +811,7 @@ fn health_body() -> Vec<u8> {
     }
     // Local subagent runtime. Computed here rather than inside the macro so the strict counts are a
     // plain value. Never contains a prompt or a credential.
+    let journal_failed = scheduler::global().map(|s| s.journal_failed()).unwrap_or(false);
     let subagent_health = crate::subagents::health();
     let subagent_queued = subagent_health.get("queued").and_then(|value| value.as_u64()).unwrap_or(0);
     let subagent_running = subagent_health.get("running").and_then(|value| value.as_u64()).unwrap_or(0);
@@ -799,7 +835,9 @@ fn health_body() -> Vec<u8> {
         // (`subagents`, `runs`, `run_ids`, `current`, `queue`, `node_threads`) existing. A client that does
         // not see it must fall back to the legacy fields explicitly.
         "execution_schema": 1,
-        "ok": !stalled,
+        "ok": !stalled && !journal_failed,
+        // A node whose run journal refused a write refuses runs too; say so where a watcher looks.
+        "run_journal_failed": journal_failed,
         // The node's aggregate execution state (alive/busy/stalled) - not a thread and not a subagent.
         // It keeps its old name because `scripts/upgrade.sh` reads it as the progress signal while
         // waiting for an idle node, and that script also has to read *older* nodes: renaming the key is
@@ -1447,6 +1485,7 @@ pub fn run(first: Lua, factory: Box<dyn Fn() -> Lua + Send + Sync>, port: u16, u
         );
     }
     eprintln!("[serve] wasm-agent UI at http://127.0.0.1:{port}  (ui: {})", ui.display());
+    spawn_stall_watchdog();
 
     if let Ok(relay_url) = std::env::var("WASM_AGENT_RELAY") {
         if !relay_url.is_empty() {
@@ -1462,24 +1501,42 @@ pub fn run(first: Lua, factory: Box<dyn Fn() -> Lua + Send + Sync>, port: u16, u
     // Bounded on purpose: an unbounded queue runs a busy node into an unbounded number of open sockets,
     // and the accept thread can then only fail it loudly.
 
-    for stream in listener.incoming() {
-        let Ok(mut stream) = stream else { continue };
-        let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(10)));
-        let request = match read_request(&mut stream) {
-            Ok(Some(request)) => request,
-            _ => continue,
-        };
-        if std::env::var("WASM_AGENT_MANAGED").as_deref() == Ok("1")
-            || matches!(split_path(&request.path).0.as_str(), "/jobs" | "/operations" | "/operation" | "/subagents" | "/runs" | "/run-events") {
-            let host = header_of(&request.node_headers, "host").to_ascii_lowercase();
-            let origin = header_of(&request.node_headers, "origin").to_ascii_lowercase();
-            let port = stream.local_addr().map(|a| a.port()).unwrap_or(0);
-            let local_host = host == format!("127.0.0.1:{port}") || host == format!("localhost:{port}");
-            let cross_site = header_of(&request.node_headers, "sec-fetch-site") == "cross-site";
-            if !local_host || cross_site || (!origin.is_empty() && origin != format!("http://{host}")) {
-                let _ = respond(&mut stream, 403, "application/json", b"{\"error\":\"foreign_origin\"}");
+    // Requests are *read* on their own short-lived threads and handed to this loop whole, so a client that
+    // trickles its head (or never finishes it) costs one reader thread, not the accept thread every other
+    // request - `/health` included - is waiting behind. Everything after the read stays serial, as before.
+    let (read_tx, read_rx) = std::sync::mpsc::sync_channel::<(TcpStream, Request)>(64);
+    std::thread::spawn(move || {
+        static READING: AtomicUsize = AtomicUsize::new(0);
+        const MAX_READERS: usize = 64;
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            if READING.fetch_add(1, Ordering::SeqCst) >= MAX_READERS {
+                READING.fetch_sub(1, Ordering::SeqCst);
+                let _ = respond(&mut stream, 503, "application/json", b"{\"error\":\"too_many_connections\"}");
                 continue;
             }
+            let read_tx = read_tx.clone();
+            std::thread::spawn(move || {
+                let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(10)));
+                // A reader that stops reading must not block a writer forever (the accept thread answers
+                // static files itself, and a run's event stream would otherwise wedge its node-thread).
+                let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(15)));
+                let request = read_request(&mut stream);
+                if let Ok(Some(request)) = request {
+                    // A full queue must not release the reader budget while
+                    // leaving an unbounded population blocked in send().
+                    let _ = read_tx.try_send((stream, request));
+                }
+                READING.fetch_sub(1, Ordering::SeqCst);
+            });
+        }
+    });
+    for (mut stream, request) in read_rx {
+        let port = stream.local_addr().map(|a| a.port()).unwrap_or(0);
+        if let Err(reason) = admit_origin(&request, port) {
+            eprintln!("[serve] refused {} {}: {reason}", request.method, split_path(&request.path).0);
+            let _ = respond(&mut stream, 403, "application/json", b"{\"error\":\"foreign_origin\"}");
+            continue;
         }
         // The page's own heartbeat, recorded where every request passes - including the ones the accept
         // thread answers itself, because `/version` is one of those and it is exactly the request that says
@@ -1615,18 +1672,7 @@ fn dispatch_http(
                 age_ms / 1000
             );
         }
-        // Exit only when *every* node-thread that is running is stalled: a wedged lane must not take the
-        // healthy ones with it, and with a single interpreter this is exactly the old behaviour.
-        let all_stalled = live_node_thread_ids()
-            .iter()
-            .all(|index| node_thread_age_ms(*index) >= stall_exit_seconds() * 1000);
-        if stall_exit_seconds() > 0 && all_stalled {
-            eprintln!(
-                "[serve] every node-thread has been stalled for {}s: exiting so the service manager can restart the node",
-                stall_exit_seconds()
-            );
-            std::process::exit(3);
-        }
+        exit_if_every_node_thread_stalled();
         if is_run {
             // The admission is already claimed; the run is not going to start, so give the
             // conversation's place back before refusing.
@@ -1745,12 +1791,15 @@ fn node_thread_loop(
     agent_ui: PathBuf,
 ) {
     let mut next_sync = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    // Retention runs a minute after boot and then daily, on node-thread 0 only, when the node is quiet.
+    let mut next_retention = std::time::Instant::now() + std::time::Duration::from_secs(60);
     // A deterministic wedge, for the regression test: the hook stalls node-thread 0 on its first request, which
     // is exactly the shape that was found in the wild. Only node-thread 0, or a node with read node-threads would
     // stall all of them and the test would be measuring itself.
     let test_stall = index == 0 && std::env::var("WASM_AGENT_TEST_STALL_WORKER").is_ok();
     let mut stalled_once = false;
     let mut idle_since = std::time::Instant::now();
+    let mut retiring = false;
     loop {
         beat();
         // Local requests first. Peer-relayed work is real work, but it is not the human's request, and
@@ -1900,10 +1949,12 @@ fn node_thread_loop(
         }
         if index != 0 {
             // A read node-thread retires itself once it has been idle long enough and the pool is above the warm
-            // minimum. Two things make that safe: it clears its own slot *before* returning, so the
-            // dispatcher stops choosing it, and a request already on its way to a retired node-thread is not
-            // lost - `try_send` reports Disconnected and the accept thread reselects read capacity.
-            if idle_since.elapsed().as_secs() >= read_idle_seconds() && node_thread_count() > warm_read_node_threads() + 1 {
+            // minimum. It clears its own slot first, so the dispatcher stops choosing it - but it does not
+            // return yet: a dispatcher that cloned the sender just before the slot was cleared may still
+            // deliver one request, and returning would drop it with the receiver (no reply, and its queue
+            // and reservation counters never released). It keeps serving until the last sender is gone,
+            // which the channel reports as Disconnected, and returns there.
+            if !retiring && idle_since.elapsed().as_secs() >= read_idle_seconds() && node_thread_count() > warm_read_node_threads() + 1 {
                 if let Some(pool) = POOL.get() {
                     if let Ok(mut slots) = pool.slots.lock() {
                         if slots.get(index).is_some() {
@@ -1913,7 +1964,7 @@ fn node_thread_loop(
                         }
                     }
                 }
-                return;
+                retiring = true;
             }
             continue;
         }
@@ -1987,6 +2038,16 @@ fn node_thread_loop(
             begin_work("sync tick".to_string());
             if let Err(error) = lua.call_string("wa_sync_tick", &[]) {
                 eprintln!("[sync] tick failed: {error}");
+            }
+            end_work();
+            beat();
+        }
+        if index == 0 && std::time::Instant::now() >= next_retention && QUEUED.load(Ordering::Relaxed) == 0 && quiet {
+            next_retention = std::time::Instant::now() + std::time::Duration::from_secs(86_400);
+            begin_work("retention".to_string());
+            match lua.call_string("wa_retention", &[]) {
+                Ok(summary) => eprintln!("[retention] {summary}"),
+                Err(error) => eprintln!("[retention] failed: {error}"),
             }
             end_work();
             beat();
@@ -2118,6 +2179,49 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|window| window == needle)
 }
 
+/// Routes a peer reaches across the network. Each one carries its own node signature, verified by Lua
+/// before anything runs, so the caller's Host is whatever address the peer dialled, never ours.
+fn is_signed_peer_route(route: &str) -> bool {
+    matches!(route, "/node/call" | "/node/chat" | "/sync/push" | "/sync/head")
+}
+
+/// Only this machine's own pages and local tools may talk to the node. A browser marks every request
+/// from another site (`Sec-Fetch-Site: cross-site`, a foreign `Origin`), and a DNS-rebinding page still
+/// sends its own name as `Host`, so all three are checked on every route that can read or act.
+/// Static UI files only need the Host check (rebinding), so a link from elsewhere still opens the UI.
+/// `WASM_AGENT_ALLOWED_HOSTS` (comma list of `host:port`) admits a trusted proxy or tunnel name.
+fn admit_origin(request: &Request, port: u16) -> Result<(), &'static str> {
+    let route = split_path(&request.path).0;
+    if is_signed_peer_route(&route) {
+        return Ok(());
+    }
+    let host = header_of(&request.node_headers, "host").to_ascii_lowercase();
+    let allowed = std::env::var("WASM_AGENT_ALLOWED_HOSTS").unwrap_or_default().to_ascii_lowercase();
+    let local_host = host == format!("127.0.0.1:{port}")
+        || host == format!("localhost:{port}")
+        || host == format!("[::1]:{port}")
+        || allowed.split(',').map(str::trim).any(|name| !name.is_empty() && name == host);
+    if !local_host {
+        return Err("host");
+    }
+    if request.method == "GET" && static_route(&route) {
+        return Ok(());
+    }
+    if header_of(&request.node_headers, "sec-fetch-site") == "cross-site" {
+        return Err("cross_site");
+    }
+    let origin = header_of(&request.node_headers, "origin").to_ascii_lowercase();
+    if !origin.is_empty() && origin != format!("http://{host}") && origin != format!("https://{host}") {
+        return Err("origin");
+    }
+    Ok(())
+}
+
+/// A file the UI ships (anything with an extension, or the index) - not an API route.
+fn static_route(route: &str) -> bool {
+    route == "/" || route.is_empty() || route.rsplit('/').next().is_some_and(|last| last.contains('.'))
+}
+
 fn header_of(headers: &[(String, String)], name: &str) -> String {
     headers
         .iter()
@@ -2231,7 +2335,16 @@ struct RelayWork {
 fn read_request(stream: &mut TcpStream) -> std::io::Result<Option<Request>> {
     let mut data = Vec::new();
     let mut chunk = [0u8; 16384];
+    // One deadline for the whole request, not only per read: this runs on the accept thread, and a
+    // client trickling a byte every few seconds would otherwise hold every other request (and /health)
+    // for as long as it liked.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            return Ok(None);
+        }
+        let _ = stream.set_read_timeout(Some(left.min(std::time::Duration::from_secs(5))));
         let read = stream.read(&mut chunk)?;
         if read == 0 {
             return Ok(None);
@@ -2294,6 +2407,25 @@ fn read_request(stream: &mut TcpStream) -> std::io::Result<Option<Request>> {
     }
 }
 
+/// The UI file a request names, or `None` if the name could leave the UI directory. Every component
+/// must be a plain name: no `..`, and no root or prefix, because on Windows `ui.join("C:/Users/..")` or a
+/// `\\server\share` path *replaces* the base instead of extending it. A file that exists must also
+/// resolve inside the UI directory, so a link inside it cannot point elsewhere.
+fn ui_file(ui: &std::path::Path, relative: &str) -> Option<std::path::PathBuf> {
+    use std::path::Component;
+    let candidate = std::path::Path::new(relative);
+    if relative.contains("..") || relative.contains('\\') || relative.contains(':')
+        || !candidate.components().all(|part| matches!(part, Component::Normal(_)))
+    {
+        return None;
+    }
+    let file = ui.join(candidate);
+    match (file.canonicalize(), ui.canonicalize()) {
+        (Ok(real), Ok(root)) if !real.starts_with(&root) => None,
+        _ => Some(file),
+    }
+}
+
 /// Answered on the accept thread, without the interpreter: the two facts a node is
 /// asked for when it looks unwell, and the files the window needs to redraw itself.
 /// Anything else - including an unknown route - goes to the agent thread.
@@ -2323,13 +2455,13 @@ fn static_reply(ui: &std::path::Path, request: &Request) -> Option<Reply> {
     } else {
         route.trim_start_matches('/').to_string()
     };
-    if relative.contains("..") {
+    let Some(file) = ui_file(ui, &relative) else {
         return Some((400, "text/plain", b"bad path".to_vec()));
-    }
+    };
     // A route the UI does not have could still be an API route (they are all
     // handled by `dispatch`), so absence is not a 404 here - it means "ask the
     // agent thread". That keeps the route table in exactly one place.
-    match std::fs::read(ui.join(&relative)) {
+    match std::fs::read(&file) {
         Ok(bytes) => Some((200, content_type(&relative), bytes)),
         Err(_) => None,
     }
@@ -2347,7 +2479,7 @@ fn settle_cancelled_run(stream: &mut TcpStream, request: &Request) -> std::io::R
     if request.accept_sse || route == "/node/chat" {
         stream.write_all(
             b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\n\
-              Connection: close\r\nAccess-Control-Allow-Origin: *\r\n\r\n",
+              Connection: close\r\n\r\n",
         )?;
         stream.write_all(b"data: {\"type\":\"error\",\"error\":\"run_cancelled\"}\n\n")?;
         stream.write_all(b"data: {\"type\":\"done\"}\n\n")?;
@@ -2370,7 +2502,7 @@ fn handle(lua: &Lua, ui: &std::path::Path, stream: &mut TcpStream, request: &Req
         if accept_sse || route.contains("stream=1") {
             stream.write_all(
                 b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\n\
-                  Connection: close\r\nAccess-Control-Allow-Origin: *\r\n\r\n",
+                  Connection: close\r\n\r\n",
             )?;
             stream.flush()?;
             // The sink belongs to this run for exactly as long as the call below runs.
@@ -2393,7 +2525,7 @@ fn handle(lua: &Lua, ui: &std::path::Path, stream: &mut TcpStream, request: &Req
         let text = String::from_utf8_lossy(&body).to_string();
         stream.write_all(
             b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\n\
-              Connection: close\r\nAccess-Control-Allow-Origin: *\r\n\r\n",
+              Connection: close\r\n\r\n",
         )?;
         stream.flush()?;
         let _sink = stream.try_clone().ok().map(|clone| SinkGuard::set(Sink::Socket {
@@ -2567,10 +2699,10 @@ fn dispatch(
             } else {
                 route.trim_start_matches('/').to_string()
             };
-            if relative.contains("..") {
+            let Some(file) = ui_file(ui, &relative) else {
                 return Some((400, "text/plain", b"bad path".to_vec()));
-            }
-            return match std::fs::read(ui.join(&relative)) {
+            };
+            return match std::fs::read(&file) {
                 Ok(bytes) => Some((200, content_type(&relative), bytes)),
                 Err(_) => Some((404, "text/plain; charset=utf-8", b"not found".to_vec())),
             };
@@ -2624,6 +2756,38 @@ fn module_content_type(from_route: &str) -> &'static str {
     }
 }
 
+/// The page's Content-Security-Policy, with a hash for each of its own inline scripts. Computed from the
+/// bytes being served, so editing an inline script can never leave a stale hash that silently blocks it.
+/// Scripts, styles, frames and connections come from this origin only; nothing may frame the UI from
+/// elsewhere; WebAssembly may compile (the markdown renderer).
+fn content_security_policy(html: &[u8]) -> String {
+    use base64::Engine;
+    let text = String::from_utf8_lossy(html);
+    let mut hashes = String::new();
+    let mut rest = text.as_ref();
+    while let Some(open) = rest.find("<script") {
+        let after = &rest[open..];
+        let Some(close_tag) = after.find('>') else { break };
+        let tag = &after[..close_tag];
+        let body = &after[close_tag + 1..];
+        let Some(end) = body.find("</script>") else { break };
+        if !tag.contains("src=") {
+            // HTML parsing normalizes CRLF and bare CR before CSP hashes inline
+            // script text. Hash the browser's bytes, not Windows source endings.
+            let script=body[..end].replace("\r\n","\n").replace('\r',"\n");
+            let digest = ring::digest::digest(&ring::digest::SHA256, script.as_bytes());
+            hashes.push_str(&format!(" 'sha256-{}'", base64::engine::general_purpose::STANDARD.encode(digest.as_ref())));
+        }
+        rest = &body[end..];
+    }
+    format!(
+        "Content-Security-Policy: default-src 'self'; script-src 'self' 'wasm-unsafe-eval'{hashes}; \
+         style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' data: blob:; \
+         connect-src 'self'; worker-src 'self'; frame-src 'self'; frame-ancestors 'self'; \
+         object-src 'none'; base-uri 'self'; form-action 'self'\r\n"
+    )
+}
+
 fn respond(stream: &mut TcpStream, status: u16, content_type: &str, body: &[u8]) -> std::io::Result<()> {
     let reason = match status {
         200 => "OK",
@@ -2641,9 +2805,10 @@ fn respond(stream: &mut TcpStream, status: u16, content_type: &str, body: &[u8])
     } else {
         (String::new(), body.len())
     };
+    let policy = if content_type.starts_with("text/html") { content_security_policy(body) } else { String::new() };
     let head = format!(
         "HTTP/1.1 {status} {reason}\r\n{location}Content-Type: {content_type}\r\nContent-Length: {length}\r\n\
-         Cache-Control: no-store\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n"
+         Cache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\n{policy}Connection: close\r\n\r\n"
     );
     stream.write_all(head.as_bytes())?;
     if status != 301 {
@@ -2669,6 +2834,11 @@ fn content_type(path: &str) -> &'static str {
 #[cfg(test)]
 mod content_type_tests {
     use super::content_type;
+    #[test]
+    fn inline_csp_hashes_browser_normalized_line_endings() {
+        assert_eq!(super::content_security_policy(b"<script>one\r\ntwo\rthree</script>"),
+            super::content_security_policy(b"<script>one\ntwo\nthree</script>"));
+    }
 
     #[test]
     fn pwa_assets_have_browser_types() {
@@ -2877,5 +3047,71 @@ mod peer_conversation_tests {
         assert_eq!(peer_conversation(&without_thread, "node-1"), "peer:node-1");
         let anonymous = request(b"plain text", vec![]);
         assert_eq!(peer_conversation(&anonymous, ""), "");
+    }
+}
+
+#[cfg(test)]
+mod origin_tests {
+    use super::{admit_origin, scheduler, Request};
+
+    fn request(method: &str, path: &str, headers: &[(&str, &str)]) -> Request {
+        Request {
+            method: method.into(),
+            path: path.into(),
+            session: String::new(),
+            routing_session: String::new(),
+            run_class: scheduler::RunClass::Interactive,
+            run_id: 0,
+            owner: String::new(),
+            run_cancel: None,
+            peer_verified: None,
+            run_sockets: None,
+            node_headers: headers.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+            body: Vec::new(),
+            accept_sse: false,
+        }
+    }
+
+    /// The attack this closes: a page on any site POSTs a command to the local node with a
+    /// `text/plain` body (no preflight), or rebinds its own name to 127.0.0.1.
+    #[test]
+    fn a_foreign_page_cannot_reach_an_api_route() {
+        let cross = request("POST", "/shell", &[("host", "127.0.0.1:8799"), ("origin", "https://evil.example"), ("sec-fetch-site", "cross-site")]);
+        assert!(admit_origin(&cross, 8799).is_err());
+        let no_fetch_meta = request("POST", "/chat", &[("host", "127.0.0.1:8799"), ("origin", "https://evil.example")]);
+        assert!(admit_origin(&no_fetch_meta, 8799).is_err());
+        let rebound = request("GET", "/sessions", &[("host", "evil.example:8799")]);
+        assert!(admit_origin(&rebound, 8799).is_err());
+        let rebound_static = request("GET", "/app.js", &[("host", "evil.example:8799")]);
+        assert!(admit_origin(&rebound_static, 8799).is_err());
+    }
+
+    #[test]
+    fn the_own_page_local_tools_and_signed_peers_still_pass() {
+        let page = request("POST", "/chat", &[("host", "127.0.0.1:8799"), ("origin", "http://127.0.0.1:8799"), ("sec-fetch-site", "same-origin")]);
+        assert!(admit_origin(&page, 8799).is_ok());
+        let curl = request("GET", "/health", &[("host", "localhost:8799")]);
+        assert!(admit_origin(&curl, 8799).is_ok());
+        let link = request("GET", "/", &[("host", "127.0.0.1:8799"), ("sec-fetch-site", "cross-site")]);
+        assert!(admit_origin(&link, 8799).is_ok());
+        let peer = request("POST", "/node/call", &[("host", "10.0.0.5:8799")]);
+        assert!(admit_origin(&peer, 8799).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod ui_file_tests {
+    use super::ui_file;
+
+    /// On Windows `Path::join` with an absolute or prefixed path replaces the base, so a request for
+    /// `/C:/Users/x/.wasm-agent/env` used to read that file. Each form is refused on every platform.
+    #[test]
+    fn a_request_cannot_name_a_file_outside_the_ui() {
+        let ui = std::env::temp_dir();
+        for bad in ["../etc/passwd", "a/../../b", "C:/Users/x/.wasm-agent/env", "\\\\server\\share\\x", "/etc/passwd", "sub\\..\\x"] {
+            assert!(ui_file(&ui, bad).is_none(), "{bad} must be refused");
+        }
+        assert!(ui_file(&ui, "index.html").is_some());
+        assert!(ui_file(&ui, "icons/icon-192.png").is_some());
     }
 }

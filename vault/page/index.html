@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="theme-color" content="#0b0d12" />
+  <meta name="referrer" content="no-referrer" />
+  <title>wa-vault</title>
+  <link rel="manifest" href="manifest.webmanifest" />
+  <link rel="icon" href="icon.svg" type="image/svg+xml" />
+  <style>
+    :root { --bg:#0b0d12; --card:#141821; --line:#252b38; --fg:#e6e8ee; --muted:#8b93a7; --accent:#7aa2f7; --ok:#9ece6a; --bad:#f7768e; }
+    * { box-sizing: border-box; }
+    body { margin:0; background:var(--bg); color:var(--fg); font:14px/1.5 system-ui, sans-serif; }
+    main { max-width:560px; margin:0 auto; padding:20px 16px 40px; }
+    h1 { font-size:18px; margin:0 0 4px; }
+    .sub { color:var(--muted); margin:0 0 20px; }
+    section { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:14px 16px; margin-bottom:14px; }
+    .head { display:flex; align-items:center; gap:10px; }
+    .head h2 { font-size:15px; margin:0; flex:1; }
+    .state { font-size:12px; color:var(--muted); }
+    .state.ok { color:var(--ok); } .state.bad { color:var(--bad); }
+    .row { display:flex; gap:8px; margin-top:10px; flex-wrap:wrap; align-items:center; }
+    input[type=password], input[type=text] { flex:1; min-width:0; background:var(--bg); color:var(--fg); border:1px solid var(--line); border-radius:6px; padding:7px 9px; font:inherit; }
+    button { background:var(--line); color:var(--fg); border:0; border-radius:6px; padding:7px 12px; font:inherit; cursor:pointer; }
+    button.primary { background:var(--accent); color:#0b0d12; }
+    button:disabled { opacity:.5; cursor:default; }
+    label.toggle { display:flex; gap:6px; align-items:center; color:var(--muted); font-size:13px; }
+    .note { color:var(--muted); font-size:12px; margin-top:8px; }
+    .code { font:600 20px/1.2 ui-monospace, monospace; letter-spacing:2px; color:var(--accent); }
+    a { color:var(--accent); }
+    #err { color:var(--bad); min-height:1.5em; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>wa-vault</h1>
+    <p class="sub">Provider keys for wasm-agent. The agent can use them through the vault; it cannot read them back. Nothing here ever shows a stored value.</p>
+    <div id="err" role="alert"></div>
+
+    <section id="auth" hidden>
+      <div class="head"><h2>Admin token</h2></div>
+      <p class="note">Open this page with <code>wa-vault-open</code> (it passes the token), or paste the token from <code>~/.config/wasm-agent-sandbox/vault.env</code>.</p>
+      <form class="row" id="auth-form">
+        <input id="auth-token" type="password" autocomplete="off" placeholder="admin token" />
+        <button class="primary" type="submit">Use</button>
+      </form>
+    </section>
+
+    <section id="openai-sub" hidden>
+      <div class="head">
+        <h2>OpenAI subscription</h2>
+        <span class="state" id="sub-state">…</span>
+      </div>
+      <div class="row">
+        <button class="primary" id="sub-login" type="button">Log in with ChatGPT</button>
+        <button id="sub-test" type="button">Test</button>
+        <button id="sub-logout" type="button">Log out</button>
+        <label class="toggle"><input id="sub-enabled" type="checkbox" /> enabled</label>
+      </div>
+      <div id="sub-flow" hidden>
+        <p class="note">Open <a id="sub-url" target="_blank" rel="noopener noreferrer"></a>, sign in, and enter this code:</p>
+        <div class="code" id="sub-code"></div>
+        <div class="row"><button id="sub-cancel" type="button">Cancel</button></div>
+      </div>
+      <div class="note" id="sub-note"></div>
+    </section>
+
+    <section id="opencode-go" hidden>
+      <div class="head">
+        <h2>OpenCode Go</h2>
+        <span class="state" id="ocg-state">…</span>
+      </div>
+      <form class="row" id="ocg-form">
+        <input id="ocg-key" type="password" autocomplete="off" spellcheck="false" placeholder="paste the API key" />
+        <button class="primary" type="submit">Save</button>
+      </form>
+      <div class="row">
+        <button id="ocg-test" type="button">Test</button>
+        <button id="ocg-remove" type="button">Remove</button>
+        <label class="toggle"><input id="ocg-enabled" type="checkbox" /> enabled</label>
+      </div>
+      <div class="note" id="ocg-note"></div>
+    </section>
+
+    <p class="note">After a provider is set, pick it in wasm-agent's provider menu (the status chip). The agent reaches it through the vault; a key pasted here is never returned by any endpoint.</p>
+  </main>
+  <script src="app.js"></script>
+</body>
+</html>

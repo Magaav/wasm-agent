@@ -413,6 +413,10 @@ mod companion {
                 } else {
                     request.url.clone()
                 };
+                let own=main_webview.url().unwrap_or_default();
+                if origin_of(&url)!=origin_of(&own) || origin_of(&own).is_empty() {
+                    note("blocked foreign-origin view request");return false;
+                }
                 match open_view(target, proxy, &view, &url) {
                     Ok((window, window_id, webview)) => {
                         note(&format!("view {view} opened: {url}"));
@@ -501,8 +505,11 @@ mod companion {
         let mut context = WebContext::new(Some(profile));
         let proxy = proxy.clone();
         let id = encode_id(window.id());
+        let home_origin=origin_of(url);
         let webview = WebViewBuilder::new_with_web_context(&mut context)
             .with_url(url)
+            .with_navigation_handler(move |target:String|target=="about:blank" || origin_of(&target)==home_origin)
+            .with_new_window_req_handler(|target:String,_features|{open_in_system_browser(&target);wry::NewWindowResponse::Deny})
             .with_default_context_menus(true)
             .with_initialization_script(bridge_script())
             .with_ipc_handler(move |request| {
@@ -512,6 +519,37 @@ mod companion {
             .build(&window)
             .context("create view webview")?;
         Ok((window, id, webview))
+    }
+
+    /// `scheme://host[:port]` of a URL, lowercased; empty if it has none.
+    fn origin_of(url: &str) -> String {
+        let lower = url.trim().to_ascii_lowercase();
+        let Some((scheme, rest)) = lower.split_once("://") else { return String::new() };
+        let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+        format!("{scheme}://{authority}")
+    }
+
+    #[cfg(test)]
+    mod navigation_tests {
+        #[test]
+        fn own_origin_does_not_include_foreign_or_executable_urls() {
+            let own=super::origin_of("http://127.0.0.1:8799/");
+            assert_eq!(super::origin_of("http://127.0.0.1:8799/?view=inspect"),own);
+            for url in ["https://foreign.example/","http://127.0.0.1:8799@foreign.example/","javascript:alert(1)","file:///C:/secret"] {
+                assert_ne!(super::origin_of(url),own);
+            }
+        }
+    }
+
+    /// Hand an http(s) link to the user's default browser. Anything else (javascript:, file:, ms-*:)
+    /// is dropped: a model-written link must not become a local command.
+    fn open_in_system_browser(target: &str) {
+        let lower = target.trim().to_ascii_lowercase();
+        if !(lower.starts_with("http://") || lower.starts_with("https://")) || target.contains('"') {
+            note(&format!("blocked a new-window request for {target}"));
+            return;
+        }
+        let _ = std::process::Command::new("explorer").arg(target.trim()).spawn();
     }
 
     /// `WindowId` is opaque; its debug form is stable enough to carry through an event and compare
@@ -604,8 +642,19 @@ mod companion {
         // The main window's identity, so the loop can tell which window an event or an IPC came
         // from - a view's "close" must close the view, not the chat.
         let main_id = encode_id(window.id());
+        // The companion only ever shows the node's own UI. A link in a reply (`target=_blank`) opens in
+        // the system browser instead of a WebView2 popup that shares this profile, and the main view
+        // never navigates to another site - where the injected bridge script would otherwise follow it.
+        let home_origin = origin_of(&url);
         let webview = WebViewBuilder::new_with_web_context(&mut web_context)
             .with_url(&url)
+            .with_navigation_handler(move |target: String| {
+                target == "about:blank" || origin_of(&target) == home_origin
+            })
+            .with_new_window_req_handler(|target: String, _features| {
+                open_in_system_browser(&target);
+                wry::NewWindowResponse::Deny
+            })
             .with_transparent(false)
             // We draw our own right-click menu in the page.
             .with_default_context_menus(false)

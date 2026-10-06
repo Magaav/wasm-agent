@@ -1,0 +1,10 @@
+{
+  "name": "wa-vault",
+  "short_name": "wa-vault",
+  "description": "Provider keys for wasm-agent, kept where the agent cannot read them.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0b0d12",
+  "theme_color": "#0b0d12",
+  "icons": [{ "src": "icon.svg", "sizes": "any", "type": "image/svg+xml" }]
+}

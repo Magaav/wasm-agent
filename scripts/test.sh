@@ -654,7 +654,7 @@ host.write_file(tree .. '/rust/target/release/' .. update.binary_name(), 'placeh
 host.write_file(broken .. '/runtime-worktree.txt', (tree:gsub('/', '\\')) .. "\r\n")
 host.write_file(broken .. '/installed.txt', 'commit=0000000\nsource_commit_hint=0000000\n')
 host.write_file(broken .. '/' .. update.sentinel_name(), 'not a program\n')
-local report = update.run({ install = broken, reason = 'the update test', skip_source_sync = true,
+local report = update.run({ install = broken, reason = 'the update test', skip_source_sync = true, skip_backup = true,
   sentinel_dir = state })
 ok(report.ok == false, 'a request no watcher can perform must not report success: ' .. tostring(report.message))
 ok(report.error == 'no_watcher', 'the refusal must name the missing watcher, got ' .. tostring(report.error))
@@ -1510,6 +1510,8 @@ WA_BIN="$BIN" bash scripts/test-run-isolation.sh "$ISOLATION_PORT" > "$DB.isolat
 grep '^run isolation ok$' "$DB.isolation.log"
 run_proof_fixture sqlite 6 node scripts/test-sqlite-isolation.cjs "$BIN"
 run_proof_fixture peer 43 node scripts/test-peer-run-admission.cjs "$BIN"
+gate_run node scripts/test-peer-sync.cjs "$BIN"
+WA_SCRIPT=tests/peer-reply-verification.lua "$BIN" --db "$DB.peer-reply" | grep 'peer signed reply verification ok'
 run_proof_fixture foreground 3 bash scripts/test-foreground-cancel.sh
 rm -f "$DB.window"*
 gate_phase_begin recovery-cli

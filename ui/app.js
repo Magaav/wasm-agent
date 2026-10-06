@@ -9,10 +9,15 @@ const messages = chatShell.content;
 // surface. Two renderers is how a child grew an `Earlier messages` control and a `Load original
 // message 3` button that the conversation it is a view of never had.
 let transcript = messages;
+// Assistive technology hears new messages as they arrive, and the composer has a name, not only a
+// placeholder.
+messages.setAttribute("role", "log");
+messages.setAttribute("aria-live", "polite");
 const jump = document.getElementById("jump");
 const meta = document.getElementById("meta");
 const form = chatShell.form;
 const input = chatShell.input;
+if (input && !input.getAttribute("aria-label")) input.setAttribute("aria-label", "Message wasm-agent");
 // The draft's undo/redo are keyboard-only since the diff topic took the only toggle in the
 // transcript: the two footer buttons acted on the *draft* while looking like they acted on
 // the conversation, and the transcript is where the reader looks for "undo the last thing".
@@ -349,7 +354,10 @@ function renderMarkdown(text) {
       const packed = renderer.render(pointer, bytes.length);
       const outPointer = Number((packed >> 32n) & 0xffffffffn);
       const outLength = Number(packed & 0xffffffffn);
-      return safeLinks(enhanceCodeBlocks(new TextDecoder().decode(new Uint8Array(renderer.memory.buffer, outPointer, outLength))));
+      const html = new TextDecoder().decode(new Uint8Array(renderer.memory.buffer, outPointer, outLength));
+      // Both buffers go back to the module; without this every render leaked its input and output.
+      if (renderer.dealloc) { renderer.dealloc(pointer, bytes.length); renderer.dealloc(outPointer, outLength); }
+      return safeLinks(enhanceCodeBlocks(html));
     } catch (error) { /* fall through */ }
   }
   return safeLinks(escapeHtml(text).replace(/\n/g, "<br>"));
@@ -1400,19 +1408,13 @@ function flushDecision(final = false) {
   pin();
 }
 
-function typeOut(body, text) {
-  let index = 0;
-  const step = Math.max(2, Math.ceil(text.length / 180));
-  const timer = setInterval(() => {
-    index = Math.min(text.length, index + step);
-    body.textContent = text.slice(0, index);
-    pin();
-    if (index >= text.length) {
-      clearInterval(timer);
-      body.innerHTML = renderMarkdown(text);
-      body.style.whiteSpace = "normal";
-    }
-  }, 14);
+function paintDelta() {
+  if (!streamBody) return;
+  if (streamBody.classList.contains('final-answer')) {
+    streamBody.innerHTML = renderMarkdown(stripThinking(streamText));
+    streamBody.style.whiteSpace = 'normal';
+  } else streamBody.textContent = stripThinking(streamText);
+  pin();
 }
 
 function handleEvent(event) {
@@ -1517,11 +1519,9 @@ function handleEvent(event) {
     }
     streamText += event.text || "";
     streamBody.rawText=streamText;
-    if (streamBody.classList.contains('final-answer')) {
-      streamBody.innerHTML = renderMarkdown(stripThinking(streamText));
-      streamBody.style.whiteSpace = 'normal';
-    } else streamBody.textContent = stripThinking(streamText);
-    pin();
+    // Keep streaming observable synchronously, including background tabs where
+    // animation frames may stop. Allocation reclamation bounds renderer growth.
+    paintDelta();
   } else if (event.type === "reply") {
     if (!replayingMessages) finishRunStep();
     discardPendingText();
@@ -2695,14 +2695,22 @@ async function send(text, options = {}) {
         for (const part of parts) {
           const line = part.split("\n").find((l) => l.startsWith("data: "));
           if (!line) continue;
-          try {
-            const event = JSON.parse(line.slice(6));
-            if (stillViewingRun()) handleEvent(event);
+          // Parsed once. A malformed event is skipped, but a *rendering* failure is reported: swallowing it
+          // made a render bug look like a stream that silently skipped (the inline reporter forwards
+          // console.error to the node).
+          let event = null;
+          try { event = JSON.parse(line.slice(6)); } catch (error) { event = null; }
+          if (event) {
+            try {
+              if (stillViewingRun()) handleEvent(event);
+            } catch (error) {
+              console.error("rendering a run event failed:", event.type, error);
+            }
             lastEvent = Date.now();
-          } catch (error) { /* ignore */ }
+          }
           // A run that says it is done, or has answered, or has failed, is finished: whatever the
           // watchdog asks next, this run is not unfinished, and any notice it put up is stale.
-          const kind = (() => { try { return JSON.parse(line.slice(6)).type; } catch (error) { return ""; } })();
+          const kind = event && typeof event.type === "string" ? event.type : "";
           if (kind === "done") sawDone = true;
           if (kind === "done" || kind === "reply" || kind === "error") {
             turnFinished = true;
@@ -6255,9 +6263,14 @@ document.addEventListener("keydown", (event) => {
     if (document.body.classList.contains("term")) { event.preventDefault(); setTerm(false); input.focus(); return; }
     if (document.body.classList.contains("control")) { event.preventDefault(); closeControl(); return; }
   }
+  // Ctrl+E and Ctrl+D are line editing keys inside a text field (end of line, delete forward on macOS and
+  // in readline-style fields); the panel shortcuts apply only outside one.
+  const editing = event.target && (event.target.isContentEditable || /^(INPUT|TEXTAREA)$/.test(event.target.tagName || ""));
   if (event.ctrlKey && (event.key === "`" || event.code === "Backquote")) {
     event.preventDefault();
     setTerm(!document.body.classList.contains("term"));
+  } else if (editing && event.ctrlKey && /^[eEdD]$/.test(event.key)) {
+    // leave the key to the field
   } else if (event.ctrlKey && (event.key === "e" || event.key === "E")) {
     event.preventDefault();
     setEngine(!document.body.classList.contains("engine"));
