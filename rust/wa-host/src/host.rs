@@ -378,8 +378,16 @@ pub fn set_run_cancel_probe(probe: fn() -> bool) {
     let _ = RUN_CANCEL_PROBE.set(probe);
 }
 
+/// Ctrl+C on an empty line in `wa chat`: the terminal-side half of cancellation (there is no serve
+/// layer to register a probe in the CLI). Cleared when the next line is submitted.
+static CLI_INTERRUPT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn cli_interrupted() -> bool {
+    CLI_INTERRUPT.load(std::sync::atomic::Ordering::SeqCst)
+}
+
 pub(crate) fn run_cancel_requested() -> bool {
-    RUN_CANCEL_PROBE.get().map(|probe| probe()).unwrap_or(false) || crate::subagents::cancel_requested()
+    RUN_CANCEL_PROBE.get().map(|probe| probe()).unwrap_or(false) || cli_interrupted() || crate::subagents::cancel_requested()
 }
 
 /// host.run_cancelled() -> {cancelled, run_cancel, subagent_cancel}
@@ -387,7 +395,7 @@ pub(crate) fn run_cancel_requested() -> bool {
 /// `cancelled` is true while either source is set. A foreground run's scoped
 /// cancellation is the run half; a supervised child's is the subagent half.
 pub extern "C-unwind" fn run_cancelled(l: *mut LuaState) -> c_int {
-    let run_cancel = RUN_CANCEL_PROBE.get().map(|probe| probe()).unwrap_or(false);
+    let run_cancel = RUN_CANCEL_PROBE.get().map(|probe| probe()).unwrap_or(false) || cli_interrupted();
     let subagent_cancel = crate::subagents::cancel_requested();
     push_json(
         l,
@@ -2501,8 +2509,15 @@ fn console_reader() {
                         let frame = input.render();
                         if !frame.is_empty() { let _ = crate::terminal_editor::write(&frame); }
                         match action {
-                            crate::terminal_editor::Action::Submit(text) => state.lines.push(text),
+                            crate::terminal_editor::Action::Submit(text) => {
+                                CLI_INTERRUPT.store(false, std::sync::atomic::Ordering::SeqCst);
+                                state.lines.push(text)
+                            }
                             crate::terminal_editor::Action::Eof => { state.eof = true; state.running = false; },
+                            crate::terminal_editor::Action::Interrupt => {
+                                CLI_INTERRUPT.store(true, std::sync::atomic::Ordering::SeqCst);
+                                let _ = crate::terminal_editor::write("\r\n[interrupting - Ctrl+C again to quit]\r\n");
+                            }
                             crate::terminal_editor::Action::None => {}
                         }
                         wake.notify_all();

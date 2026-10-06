@@ -91,12 +91,13 @@ pub struct RawMode;
 pub fn try_raw() -> Option<RawMode> { None }
 
 #[derive(Debug, PartialEq)]
-pub enum Action { None, Submit(String), Eof }
+pub enum Action { None, Submit(String), Eof, Interrupt }
 
 #[derive(Default)]
 pub struct Editor {
     chars: Vec<char>, cursor: usize, history: Vec<String>, history_at: Option<usize>, saved: String,
     escape: Vec<u8>, utf8: Vec<u8>, paste: bool, pub row: usize, pub width: usize, pub height: usize,
+    last_interrupt: Option<std::time::Instant>,
 }
 
 impl Editor {
@@ -151,7 +152,16 @@ impl Editor {
                 Action::Submit(line)
             }
             b'\n' => { self.insert('\n'); Action::None } // Ctrl+J: multiline without submitting
-            3 => { self.chars.clear(); self.cursor = 0; Action::None } // Ctrl+C clears a draft
+            // Ctrl+C clears a draft; on an empty line it interrupts the running turn (raw mode turned the
+            // terminal's own SIGINT off, so a runaway turn could otherwise only be stopped by killing the
+            // terminal), and a second one within a second leaves.
+            3 if !self.chars.is_empty() => { self.chars.clear(); self.cursor = 0; Action::None }
+            3 => {
+                let now = std::time::Instant::now();
+                let twice = self.last_interrupt.is_some_and(|at| now.duration_since(at) < std::time::Duration::from_secs(1));
+                self.last_interrupt = Some(now);
+                if twice { Action::Eof } else { Action::Interrupt }
+            }
             4 if self.chars.is_empty() => Action::Eof,
             4 => { if self.cursor < self.chars.len() { self.chars.remove(self.cursor); } Action::None }
             8 | 127 => { if self.cursor > 0 { self.cursor -= 1; self.chars.remove(self.cursor); } Action::None }
@@ -251,6 +261,15 @@ mod tests {
         let mut action = Action::None;
         for &byte in bytes { action = editor.feed(byte); }
         action
+    }
+    #[test]
+    fn ctrl_c_clears_a_draft_then_interrupts_then_quits() {
+        let mut e = Editor::default();
+        type_bytes(&mut e, b"draft");
+        assert_eq!(e.feed(3), Action::None, "a draft is cleared first");
+        assert_eq!(e.text(), "");
+        assert_eq!(e.feed(3), Action::Interrupt, "an empty line interrupts the turn");
+        assert_eq!(e.feed(3), Action::Eof, "a second Ctrl+C within a second quits");
     }
     #[test]
     fn edit_submit_history_and_multiline() {
