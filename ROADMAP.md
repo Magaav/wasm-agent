@@ -291,6 +291,19 @@ Integration/install/application remain separate, with partial effects requiring 
 operator: old external outcomes remain unreconstructable/unknown; availability
 release does not prove those effects drained. See `docs/QUARANTINED-RETIREMENT.md`.
 
+2026-10-06, quarantine application preflight: exact installed91a0aef passed67
+installation checks, zero failures/skips. The first external application settled
+failed after5 additive operation dispositions;3 claims and46 bindings unchanged.
+Native `OpenProcess` denied a recycled protected service PID4880(GCUBridge.exe),
+whose actual OS creation timestamp is newer than the original September21 record.
+Added bounded native system-process snapshot fallback only on access denied, with
+strict size/offset/truncation/status validation and current-generation equality
+regression. Access denied never means absence/drain; normal adjudication unchanged.
+Operation43 checks passed(one explicit helper ignore), private quarantine20+in-turn2
+remain focused verification. Original attempt/evidence retained; continuation
+must exclude already-disposed exact5 and inspect postconditions, never replay
+whole plan. No original execution success, claim release or parking inferred.
+
 ## Status vocabulary
 
 - **Implemented:** a mechanism exists in the repository; not a release certification.
