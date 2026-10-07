@@ -1622,8 +1622,11 @@ fn validate_run_continuation(request:&Value)->Result<()> {
 
 /// Original result is durable before this named one-shot wake exists. Request dispatch itself is concurrent.
 fn queue_run_continuation(claim:&Path,request:&Value,record:&Value)->Result<()> {
+    // Protocol deploy carries a parent without a legacy prompt: only `run`
+    // owns this continuation door. Other verbs must not be validated as `run`.
+    if request["verb"]!="run"{return Ok(());}
     validate_run_continuation(request)?;
-    if request["verb"]!="run"||request["session"].as_str().unwrap_or("").is_empty(){return Ok(());}
+    if request["session"].as_str().unwrap_or("").is_empty(){return Ok(());}
     if record["detail"].as_str().is_some_and(|s|s.contains("outcome unknown")){bail!("run continuation held: outcome unknown; inspect original, never replay");}
     let id=claim.file_stem().and_then(|s|s.to_str()).context("run continuation request id missing")?;
     if id.is_empty()||!id.bytes().all(|b|b.is_ascii_alphanumeric()||b==b'-'){bail!("run continuation request id invalid");}

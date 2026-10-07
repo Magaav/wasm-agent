@@ -8,9 +8,11 @@ fn identity_text(value: &str) -> bool {
 pub(crate) fn parent_owner(parent: &str) -> Result<String> {
     if !identity_text(parent) { bail!("parent_identity_invalid"); }
     let agent:ureq::Agent=ureq::Agent::config_builder().timeout_global(Some(Duration::from_secs(3))).build().into();
-    let body=agent.get(&format!("http://127.0.0.1:{}/session/owner?id={parent}",node_port()))
+    let response=agent.get(&format!("http://127.0.0.1:{}/session/owner?id={parent}",node_port()))
         .header("X-WA-Session",&std::env::var("WA_SENTINEL_AUTH_SESSION").unwrap_or_default())
-        .call().context("parent_owner_unavailable")?.into_body().read_to_string()?;
+        .call().map_err(|error|anyhow::anyhow!("parent_owner_unavailable: {error}"))?;
+    let body=response.into_body().read_to_string()
+        .map_err(|error|anyhow::anyhow!("parent_owner_body_unavailable: {error}"))?;
     let value:Value=serde_json::from_str(&body)?;
     if value["session"]["id"].as_str()!=Some(parent) { bail!("parent_identity_not_confirmed"); }
     let owner=value["session"]["user_id"].as_str().filter(|s|identity_text(s)).context("parent_owner_not_confirmed")?;

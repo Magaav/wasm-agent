@@ -34,8 +34,11 @@ wa-sentinel request deploy --expected-sha <full 40-character main SHA> \
 The CLI returns a queue receipt. The watcher separately records `intent.json`,
 `ack.json` and `state.json` under `sentinel/deploy-protocol/<request-id>/`.
 An acknowledgement means the watcher observed the immutable request; it grants
-neither effect authority nor installation success. A separate cheap intake lane
-observes new identities while health, source or verifier work is blocked. The
+neither effect authority nor installation success. Parent-owner HTTP/body failures
+retain their underlying cause in durable refusal text (no credentials or body dump).
+A failed pre-admission request is not automatically replayed; preserve its original
+record and prove no effect reservation/spawn before proposing any fresh intent.
+A separate cheap intake lane observes new identities while health, source or verifier work is blocked. The
 five-second observation policy is tested on the trusted local runtime, not a hard
 real-time Windows guarantee. A malformed or changed identity produces a named
 problem while preserving the original intent and acknowledgement.
@@ -198,8 +201,10 @@ from directories in `WA_SENTINEL_SCRIPTS` (the install's `scripts/`, set by the 
 On Windows an approved `.ps1` script uses the native system PowerShell executable
 with `-NoProfile -NonInteractive -File` and a native path, never Bash or an
 inline command. The same canonical allowlist check precedes interpreter selection;
-script errors are failed supervised operations. A `.ps1` on other platforms
-refuses with no shell fallback. Approved `.js`, `.mjs` and `.cjs` files (case
+script errors are failed supervised operations. Only `run` requests validate and
+queue the legacy run-result continuation; protocol deploys carry a parent without
+requiring a legacy prompt and must not produce a spurious run-continuation error.
+A `.ps1` on other platforms refuses with no shell fallback. Approved `.js`, `.mjs` and `.cjs` files (case
 insensitive) run directly through Node with a separate native script argument,
 never through Bash or an inline command. Node is resolved to an absolute
 executable before admitting an operation: explicit `WA_SENTINEL_NODE`, else the

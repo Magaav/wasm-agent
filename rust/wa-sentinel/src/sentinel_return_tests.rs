@@ -1,6 +1,27 @@
 use super::*;
 use std::io::{Read,Write};
 #[test]
+fn non_run_parent_fields_do_not_enter_run_continuation_validation() {
+ let claim=Path::new("private-protocol-deploy.json");
+ let request=json!({"verb":"deploy","session":"parent","expected_sha":"a".repeat(40)});
+ assert!(validate_run_continuation(&request).is_err(),"legacy run validator would reject protocol shape");
+ assert!(queue_run_continuation(claim,&request,&json!({"ok":false})).is_ok(),"non-run must return before filesystem/effect work");
+ let run=json!({"verb":"run","session":"parent"});
+ assert!(queue_run_continuation(claim,&run,&json!({"ok":false})).is_err(),"real run still requires prompt");
+}
+#[test]
+fn owner_transport_refusal_retains_underlying_cause_without_effect() {
+ let _lock=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+ let oldport=std::env::var_os("WASM_AGENT_PORT");
+ let listener=std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+ let port=listener.local_addr().unwrap().port();drop(listener);
+ std::env::set_var("WASM_AGENT_PORT",port.to_string());
+ let error=sentinel_return::parent_owner("private-parent").unwrap_err().to_string();
+ match oldport {Some(v)=>std::env::set_var("WASM_AGENT_PORT",v),None=>std::env::remove_var("WASM_AGENT_PORT")}
+ assert!(error.starts_with("parent_owner_unavailable: "),"{error}");
+ assert!(error.len()>"parent_owner_unavailable: ".len(),"underlying cause discarded");
+}
+#[test]
 fn returns_bind_runtime_owner_and_refuse_event_session_authority(){
  let _lock=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
  let home=std::env::temp_dir().join(format!("wa-return-owner-{}",std::process::id()));
