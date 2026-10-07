@@ -341,6 +341,12 @@ Private `DISCOVERY-MEASURE-v138.json` retains counts/limits. Recorded discovery
 spell replay refused enforced worktree context; verified CLI remains preferred,
 with no binding relaxation. Skill-only shipping must preserve binary install
 provenance and all prior evidence; no full gate or context-mode installation.
+2026-10-07, exact published e51ccba skill/helper bytes now verified in both local
+skill roots:35 checks each, zero skips. Sentinel readback-only operation
+op-1791331474490094-16620-867 completed/settled/terminated; partial shipping
+failures retained and no copy replayed after missing-rg verification failure.
+`DISCOVERY-FINAL-v145.json` pins6 shipped files; binary hashes/install record,
+serve PID and job revisions unchanged. No node/window restart or cloud deployment.
 
 ## Status vocabulary
 
