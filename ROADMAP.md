@@ -415,6 +415,23 @@ claim. Source integrated/published at a248aba. Skill-only installation request
 manual installed-skill copy or effect replay; published repository CLI is available,
 but installed-skill convergence is explicitly unverified until supported recovery.
 
+2026-10-07, implemented benchmark candidate1 behind
+`WASM_AGENT_BATCHING_GUIDANCE=1`: explicit available-tool-aware grouping of known
+independent ranges/checks, exact errors/cursors, dependency/write ordering and
+scoped relative discovery. Unset control prompt bytes/schema/history unchanged;
+existing executor is reused, no automatic arbitrary-shell concurrency or new tool.
+Added actual-loop response-group/range/treatment telemetry and strict aggregate
+reporting, with old exports unmeasured and no IDs in offline output. Self-review,
+source-root batching37, tool-cues99, observability77 and token-audit checks passed,
+zero paid calls. Offline jobs2 build and the same37/99/77 checks passed in disk
+and embedded modes; actual SQLite exports passed strict grouping audit. Pinned
+baseline comparison proves parent/child default prompt bytes identical; opted-in
+instruction deltas are427B/843B. Direct-policy19 passed. Installation blocked:
+sentinel still stopped; no install request queued behind the historical pending
+skill request or manual restart. Baseline pinned dfce34ea; no Luna/Pi comparative
+success or speedup claimed, AGENTS byte delta0, live treatment remains off.
+No subagent, index, permanent instruction growth, full gate or watcher recovery.
+
 ## Status vocabulary
 
 - **Implemented:** a mechanism exists in the repository; not a release certification.

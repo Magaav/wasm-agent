@@ -74,6 +74,9 @@ function audit(input) {
   const timing = {model_ms:[],ttft_ms:[],run_ms:[],prefix_audit_ms:[]};
   const tools = {completed:0,failed:0,pending:0,repeated_arguments_within_run:0};
   const toolBuckets = new Map(), toolTimes = [], toolTimesByClock = new Map();
+  const toolGroups=new Map();let unmeasuredGroupCalls=0;
+  const grouping={measured_groups:0,complete_groups:0,incomplete_groups:0,multi_call_groups:0,
+    measured_tool_calls:0,unmeasured_tool_calls:0,read_many_calls:0,requested_read_ranges:0,by_treatment:{}};
   const executionTimings=[];let executionTimingReported=0,executionTimingIncomplete=0,executionTimingInvalid=0;
   const slowBashArguments=new Map(),slowBashMissing={calls:0,total_ms:0,failed:0};
   const runParts = new Map(), completedRuns = [];
@@ -110,6 +113,30 @@ function audit(input) {
       const startName=pair.start?.payload?.name,endName=end?.name;
       if(typeof startName==='string'&&typeof endName==='string'&&startName!==endName) throw Error('inconsistent_tool_name');
       const name=startName||endName,bucket=bucketFor(name),event=pair.start||pair.end;
+      const start=pair.start?.payload;
+      if(!pair.start || (start?.tool_group_id===undefined && end?.tool_group_id===undefined)) unmeasuredGroupCalls++;
+      else {
+        const valid=start && typeof start.tool_group_id==='string' && start.tool_group_id
+          && count(start.tool_group_size) && start.tool_group_size>0 && count(start.tool_group_index)
+          && start.tool_group_index>0 && start.tool_group_index<=start.tool_group_size
+          && ['control','candidate-1'].includes(start.batching_guidance);
+        if(!valid) throw Error('invalid_tool_group_metadata');
+        if(end && ['tool_group_id','tool_group_size','tool_group_index','batching_guidance']
+          .some(field=>end[field]!==start[field])) throw Error('inconsistent_tool_group_boundaries');
+        const groupKey=JSON.stringify([event.session_id,event.run_id,start.tool_group_id]);
+        const group=toolGroups.get(groupKey)||{size:start.tool_group_size,mode:start.batching_guidance,indexes:new Set(),completed:0};
+        if(group.size!==start.tool_group_size||group.mode!==start.batching_guidance||group.indexes.has(start.tool_group_index))
+          throw Error('inconsistent_tool_group_members');
+        group.indexes.add(start.tool_group_index);if(end) group.completed++;toolGroups.set(groupKey,group);
+        grouping.measured_tool_calls++;
+        if(name==='read_many') {
+          grouping.read_many_calls++;
+          if(start.read_many_ranges!==undefined) {
+            if(!count(start.read_many_ranges)) throw Error('invalid_read_many_range_count');
+            grouping.requested_read_ranges+=start.read_many_ranges;
+          }
+        }
+      }
       if (!end) {
         tools.pending++;bucket.pending++;const parts=partsFor(event);if(parts) parts.unmeasured++;
       } else {
@@ -265,6 +292,17 @@ function audit(input) {
   finishNavigation(navigation);
   for (const phase of Object.values(navigation.by_phase)) finishNavigation(phase);
   navigation.note = 'graph/grep/read outcomes only; hit_rate counts judged calls, and a hit is not a correctness verdict';
+  grouping.unmeasured_tool_calls=unmeasuredGroupCalls;
+  for(const group of toolGroups.values()) {
+    grouping.measured_groups++;
+    const complete=group.indexes.size===group.size&&group.completed===group.size;
+    if(complete) grouping.complete_groups++;else grouping.incomplete_groups++;
+    if(group.size>1) grouping.multi_call_groups++;
+    const bucket=grouping.by_treatment[group.mode]||(grouping.by_treatment[group.mode]={groups:0,multi_call_groups:0,complete_groups:0});
+    bucket.groups++;if(group.size>1) bucket.multi_call_groups++;if(complete) bucket.complete_groups++;
+  }
+  if(!count(grouping.requested_read_ranges)) throw Error('tool_group_range_count_overflow');
+  grouping.note='response groups and requested ranges, not proof of independence, parallel execution or saved model calls; absent historical metadata or unmatched starts are unmeasured';
   const toolTotal=total(toolTimes);
   if(!Number.isSafeInteger(toolTotal)) throw Error('tool_time_total_exceeds_safe_integer');
   tools.measured_elapsed=toolTimes.length;
@@ -336,7 +374,7 @@ function audit(input) {
   runTiming.scope='summed completed-run spans; concurrent runs can overlap, so this is not global wall-clock share';
 
   return {schema:'wasm-agent.token-audit/v1',events:events.length,duplicate_events:duplicates,
-    usage,tools,navigation,run_timing:runTiming,prefix,prepared_prefix:prepared,
+    usage,tools,tool_grouping:grouping,navigation,run_timing:runTiming,prefix,prepared_prefix:prepared,
     timing:Object.fromEntries(Object.entries(timing).map(([name,values])=>[name,
       {samples:values.length,p50:percentile(values,.5),p95:percentile(values,.95)}])),
     average_request_bytes:Object.fromEntries(Object.keys(shape).map(k=>[k,{mean:shape[k]/shapeSamples[k],samples:shapeSamples[k]}])),

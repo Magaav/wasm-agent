@@ -246,6 +246,33 @@ local function source_edit_guideline(have)
   return line
 end
 
+-- Candidate 1: an explicit planning treatment, not a new executor or default.
+-- Keep the old prompt byte-identical when unset; measure against that control.
+local function batching_guidelines(have)
+  if host.getenv("WASM_AGENT_BATCHING_GUIDANCE") ~= "1" then return nil end
+  local lines = {}
+  if have.read_many then
+    lines[#lines + 1] = "Batching candidate 1: when you already know several independent file ranges, "
+      .. "fetch them in one read_many (up to eight ranges). Keep exact contents, per-file errors "
+      .. "and continuation/version addresses; do not replace evidence with summaries"
+  elseif have.read then
+    lines[#lines + 1] = "Batching candidate 1: request already-known independent read ranges "
+      .. "together in one response; retain each exact result and error"
+  end
+  if next(have) then
+    lines[#lines + 1] = "Before requesting tools, identify independent reads/checks whose arguments "
+      .. "are already known and group them in the same response. If a later action depends on "
+      .. "interpreting a result, leave it for the next response. Keep writes, dependent commands "
+      .. "and conflicting side effects ordered; a batch is not permission to overlap arbitrary shell commands"
+  end
+  if have.bash then
+    lines[#lines + 1] = "Scope shell discovery to the named module or artifact reports and return "
+      .. "relative paths with counts; never recursively inventory retained solver worktrees. "
+      .. "If output is incomplete, narrow scope or follow exact continuation rather than discard its tail"
+  end
+  return lines
+end
+
 local function guidelines_for(tool_list)
   local have = {}
   for _, tool in ipairs(tool_list or {}) do
@@ -270,14 +297,19 @@ local function guidelines_for(tool_list)
   if have.bash then
     add(SHELL_SEARCH_GUIDELINE)
   end
-  if have.read_many then
-    add("When several known file reads are independent, request them together with read_many; "
-      .. "keep dependent reads and edits in order")
+  local batching = batching_guidelines(have)
+  if batching then
+    for _, line in ipairs(batching) do add(line) end
+  else
+    if have.read_many then
+      add("When several known file reads are independent, request them together with read_many; "
+        .. "keep dependent reads and edits in order")
+    end
+    add("When multiple tool actions are independent, request them together in one assistant response "
+      .. "so the tool round can make progress without another model reply. The tool runner may "
+      .. "overlap independent shell commands; keep dependent actions and conflicting side effects "
+      .. "in separate responses")
   end
-  add("When multiple tool actions are independent, request them together in one assistant response "
-    .. "so the tool round can make progress without another model reply. The tool runner may "
-    .. "overlap independent shell commands; keep dependent actions and conflicting side effects "
-    .. "in separate responses")
   add(source_edit_guideline(have))
   add("Before changing this project's behaviour, read the relevant file under docs/ "
     .. "(or the section of AGENTS.md) in full, and follow its cross-references")
@@ -372,6 +404,9 @@ function M.subagent_system_prompt(self, tool_list)
   end
   local child_guidelines = {}
   if have.bash then child_guidelines[#child_guidelines + 1] = SHELL_SEARCH_GUIDELINE end
+  for _, line in ipairs(batching_guidelines(have) or {}) do
+    child_guidelines[#child_guidelines + 1] = line
+  end
   local edit_guideline = source_edit_guideline(have)
   if edit_guideline then child_guidelines[#child_guidelines + 1] = edit_guideline end
   if #child_guidelines > 0 then
@@ -1708,8 +1743,9 @@ function M:run_body(text, images)
       model = self.model, reasoning = (provider.reasoning(self.model) or {}).selected }
     dispatch_ctx.steering_admit=function() return steering.admit(self.user,self.session_id,self.steering_run_id) end
     local parallel_ops = tools.start_parallel_bash(calls, memory, self.role, dispatch_ctx)
+    local batching_mode = host.getenv("WASM_AGENT_BATCHING_GUIDANCE") == "1" and "candidate-1" or "control"
 
-    for _, call in ipairs(calls) do
+    for tool_index, call in ipairs(calls) do
       local function_ = call["function"] or {}
       if function_.name=="bash" then shell_used=true end
       local args,argument_error = {},nil
@@ -1733,7 +1769,9 @@ function M:run_body(text, images)
       local parallel_op = parallel_ops and parallel_ops[call.id]
       local tool_span=telemetry.start({session_id=self.session_id,run_id=self.run_id},"tool",
         {name=function_.name,call_id=call.id,round=round,parallel_batch=parallel_op~=nil,
-          arguments_hash=host.sha256(function_.arguments or "")})
+          tool_group_id=assistant_id,tool_group_size=#calls,tool_group_index=tool_index,
+          read_many_ranges=function_.name=="read_many" and type(args.requests)=="table" and #args.requests or nil,
+          batching_guidance=batching_mode,arguments_hash=host.sha256(function_.arguments or "")})
       host.beat()
       local handled, output = pcall(function() if argument_error then return {error=argument_error} end
         if parallel_op then
@@ -1806,6 +1844,8 @@ function M:run_body(text, images)
       local nav = navigation_outcome(function_.name, args, output)
       if nav then nav.trial_phase=patch_audit.PHASE end
       telemetry.finish(tool_span,{name=function_.name,ok=ok_tool,code=type(output)=="table" and output.code or nil,
+        tool_group_id=assistant_id,tool_group_size=#calls,tool_group_index=tool_index,
+        batching_guidance=batching_mode,
         error=not projected and "tool_output_storage_failed" or type(output)=="table" and output.error or nil,
         full_bytes=#json.encode(output),view_bytes=#content,storage_ok=projected,execution_timing=execution_timing,nav=nav})
       trace[#trace + 1] = { kind = "tool", name = function_.name, ok = ok_tool, round = round,

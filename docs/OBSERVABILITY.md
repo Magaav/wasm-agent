@@ -1,7 +1,9 @@
 # Engineering from everyday runs
 
-No task benchmark, leaderboard or automatic agent-quality score is introduced.
+Ordinary telemetry is not a leaderboard or automatic agent-quality score.
 Use wasm-agent and Pi normally, then review the next day or two of actual work.
+The separately opt-in matched-task experiment is [AGENT-BENCHMARK.md](AGENT-BENCHMARK.md);
+its preparation is not a completed coding comparison.
 
 ## What is measured
 
@@ -76,7 +78,12 @@ source bytes of assistant reasoning and tool arguments. These are diagnostic
 subsets, not token allocations: JSON escaping and provider tokenization differ.
 They help identify growth without copying prompt text into the event ledger.
 `read_many` can request up to eight independent file ranges in one step;
-each result uses the same read path and reports its own failure. Large combined
+each result uses the same read path and reports its own failure.
+Tool starts/ends also identify the response group (`tool_group_id`, size/index)
+and `batching_guidance` treatment; starts count `read_many_ranges` separately.
+The offline audit exposes only aggregate complete/incomplete groups and counts,
+never group IDs. Historical missing group metadata stays unmeasured. This measures
+requested grouping, not proof of independence/parallel execution or saved model calls. Large combined
 results keep the full JSON in an output artifact for exact retrieval.
 The 50 KiB tool-result limit applies to the entire model-facing JSON view,
 including nested session pages, not just a top-level `content` or `stdout`

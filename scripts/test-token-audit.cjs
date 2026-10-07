@@ -79,6 +79,30 @@ r=audit([tool('a','1'),tool('b','1'),tool('c','2')]);
 assert.equal(r.tools.repeated_arguments_within_run,1);assert.equal(r.tools.pending,3);
 assert.ok(r.limitations.includes('repeated_arguments_are_not_automatically_waste'));
 
+// Response groups are measured separately from physical parallelism and model calls.
+const grouped=(id,index,name='read',extra={})=>{
+  const p={tool_group_id:id,tool_group_size:2,tool_group_index:index,batching_guidance:'candidate-1'};
+  return [event('group-'+id+'-'+index,'tool','start',{name,...p,...extra}),
+    event('group-'+id+'-'+index,'tool','end',{name,ok:index===1,ms:3,...p})];
+};
+const groupedRows=[...grouped('private-group-id',1,'read_many',{read_many_ranges:3}),...grouped('private-group-id',2)];
+r=audit(groupedRows);
+assert.equal(r.tool_grouping.measured_groups,1);assert.equal(r.tool_grouping.complete_groups,1);
+assert.equal(r.tool_grouping.multi_call_groups,1);assert.equal(r.tool_grouping.requested_read_ranges,3);
+assert.equal(r.tool_grouping.by_treatment['candidate-1'].groups,1);
+assert.equal(r.tools.failed,1);assert(!JSON.stringify(r).includes('private-group-id'));
+assert.equal(audit(groupedRows.slice(0,2)).tool_grouping.incomplete_groups,1);
+assert.equal(audit([groupedRows[0],...groupedRows.slice(2)]).tool_grouping.incomplete_groups,1);
+assert.equal(audit([tool('old','r')]).tool_grouping.unmeasured_tool_calls,1);
+assert.equal(audit([groupedRows[1]]).tool_grouping.unmeasured_tool_calls,1); // Time-window export without its start.
+assert.equal(audit([groupedRows[1]]).tool_grouping.complete_groups,0);
+assert.throws(()=>audit([{...groupedRows[0],payload:{...groupedRows[0].payload,tool_group_index:3}}]),/invalid_tool_group/);
+assert.throws(()=>audit([groupedRows[0],{...groupedRows[1],payload:{...groupedRows[1].payload,batching_guidance:'control'}}]),/inconsistent_tool_group_boundaries/);
+const repeatedMember=grouped('private-group-id',1);
+repeatedMember.forEach(row=>row.span_id='different-span');
+assert.throws(()=>audit([...groupedRows,...repeatedMember]),/inconsistent_tool_group_members/);
+assert.throws(()=>audit([{...groupedRows[0],payload:{...groupedRows[0].payload,read_many_ranges:-1}}]),/invalid_read_many_range_count/);
+
 // Tool elapsed time is attributed without exposing arguments or private plugin names.
 const elapsedRows=[];
 elapsedRows.push(event('run-time','run','start',{},'a','timed'));
