@@ -56,6 +56,8 @@ pub(crate) enum Owner {
     Ourselves,
     /// A systemd unit owns the running watcher. `user` selects the user manager.
     Systemd { unit: String, user: bool },
+    /// Windows SCM owns this exact named service; no console fallback.
+    WindowsService { name: String },
     /// We are inside a unit, but one this cannot show owns the watcher: report it, change nothing.
     Unrecognised { unit: String },
 }
@@ -120,6 +122,12 @@ fn stated_owner(text: &str) -> Option<Owner> {
         // inside no unit, and a `start` there must still get a detached watcher.
         return Some(Owner::Ourselves);
     }
+    if let Some(name) = text.strip_prefix("windows:") {
+        return Some(if !name.is_empty() && name.len() <= 80
+            && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') {
+            Owner::WindowsService {name:name.to_string()}
+        } else {Owner::Unrecognised {unit:text.to_string()}});
+    }
     let (name, user) = match text.strip_prefix("user:") {
         Some(rest) => (rest, true),
         None => (text, false),
@@ -180,6 +188,7 @@ pub(crate) enum Step {
     Manager { command: Vec<String>, unit: String, user: bool },
     /// Nothing outside owns the watcher: the caller may stop it or replace it directly.
     Direct,
+    WindowsService { name: String, verb: String },
     /// Inside a unit that cannot be shown to own the watcher: name it, change nothing, and never spawn a
     /// competitor inside a control group this process did not choose.
     Refuse { unit: String },
@@ -195,6 +204,9 @@ pub(crate) fn step(owner: &Owner, lifecycle: Lifecycle) -> Step {
             unit: unit.clone(),
             user: *user,
         },
+        Owner::WindowsService { name } => Step::WindowsService {name:name.clone(),verb:match lifecycle {
+            Lifecycle::Start => "start", Lifecycle::Stop => "stop", Lifecycle::Restart => "restart"
+        }.to_string()},
         Owner::Unrecognised { unit } => Step::Refuse { unit: unit.clone() },
         Owner::Ourselves => Step::Direct,
     }
@@ -219,7 +231,7 @@ pub(crate) fn placement(owner: &Owner) -> Placement {
     match owner {
         Owner::Systemd { unit, user } => Placement::OwnUnit { unit: unit.clone(), user: *user },
         Owner::Unrecognised { unit } => Placement::Refuse { unit: unit.clone() },
-        Owner::Ourselves => Placement::Detached,
+        Owner::WindowsService { .. } | Owner::Ourselves => Placement::Detached,
     }
 }
 
@@ -229,6 +241,7 @@ pub(crate) fn placement(owner: &Owner) -> Placement {
 pub(crate) fn describe(owner: &Owner) -> Option<String> {
     match owner {
         Owner::Systemd { unit, user } => Some(if *user { format!("user:{unit}") } else { unit.clone() }),
+        Owner::WindowsService { name } => Some(format!("windows:{name}")),
         Owner::Ourselves => Some("none".to_string()),
         Owner::Unrecognised { .. } => None,
     }

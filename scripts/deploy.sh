@@ -605,6 +605,7 @@ HASH="$(sha256sum < "$INSTALLED_NODE" 2>/dev/null | awk '{print $1}')"
 # rolled back. A running sentinel holds its own image open on Windows, so the copy is attempted and
 # its failure is reported rather than fatal: the swap is completed by the one-shot restart below.
 SENTINEL_HASH="(none)"
+SENTINEL_SWAP_STARTED=0
 if [ -f "$INSTALL_DIR/$SENTINEL_NAME" ]; then
   cp -f "$NEW_SENTINEL" "$INSTALL_DIR/$SENTINEL_NAME" 2>/dev/null || true
   if cmp -s "$NEW_SENTINEL" "$INSTALL_DIR/$SENTINEL_NAME"; then
@@ -620,10 +621,14 @@ if [ -f "$INSTALL_DIR/$SENTINEL_NAME" ]; then
     if [ -f "$INSTALL_DIR/$SENTINEL_NAME" ]; then
       case "$(uname -s)" in
         MINGW*|MSYS*|CYGWIN*)
-          "$INSTALL_DIR/$SENTINEL_NAME" stop >/dev/null 2>&1 || true
+          # A Windows SCM stop is authoritative and synchronous. Never copy/start
+          # after an access-denied/mismatched stop, or manufacture updated bytes.
+          "$INSTALL_DIR/$SENTINEL_NAME" stop || fail "sentinel stop refused; installed supervisor left intact"
           sleep 2
-          cp -f "$NEW_SENTINEL" "$INSTALL_DIR/$SENTINEL_NAME" 2>/dev/null || true
-          "$INSTALL_DIR/$SENTINEL_NAME" start >/dev/null 2>&1 || true
+          cp -f "$NEW_SENTINEL" "$INSTALL_DIR/$SENTINEL_NAME" \
+            || fail "sentinel stopped but replacement failed; inspect before recovery"
+          "$INSTALL_DIR/$SENTINEL_NAME" start || fail "sentinel replacement placed but manager start failed"
+          SENTINEL_SWAP_STARTED=1
           ;;
         *)
           cp -f "$NEW_SENTINEL" "$INSTALL_DIR/$SENTINEL_NAME.new.$$" 2>/dev/null || true
@@ -654,7 +659,13 @@ fi
 # one that was already watching, then prove its pid changed.
 SENTINEL_WATCH_PID="$("$INSTALL_DIR/$SENTINEL_NAME" status 2>/dev/null \
   | awk '$1=="sentinel:" && $2=="watching" {gsub(/[^0-9]/,"",$4); print $4; exit}')"
-if [ -n "$SENTINEL_WATCH_PID" ]; then
+if [ "$SENTINEL_SWAP_STARTED" = "1" ]; then
+  # The Windows swap already loaded the candidate. A second restart would kill
+  # work admitted by the fresh service for no installation benefit.
+  [ -n "$SENTINEL_WATCH_PID" ] || fail "sentinel swap start answered but no watcher is proven"
+  SENTINEL_NEW_PID="$SENTINEL_WATCH_PID"
+  echo "deploy: sentinel swap already started the installed image (pid $SENTINEL_NEW_PID)"
+elif [ -n "$SENTINEL_WATCH_PID" ]; then
   echo "deploy: restarting the watching sentinel to load the installed image"
   sentinel_restart || fail "node installed, but the sentinel could not restart"
   SENTINEL_NEW_PID=""
@@ -783,6 +794,7 @@ fi
 ship_file "$ROOT/scripts/verify-install.sh" "$INSTALL_DIR/scripts/verify-install.sh" "installation verifier"
 ship_file "$ROOT/scripts/sentinel-install-proof.mjs" "$INSTALL_DIR/scripts/sentinel-install-proof.mjs" "request-bound installation proof"
 ship_file "$ROOT/scripts/measure-sentinel-io.ps1" "$INSTALL_DIR/scripts/measure-sentinel-io.ps1" "bounded read-only Windows idle measurement"
+ship_file "$ROOT/scripts/install-sentinel-service.ps1" "$INSTALL_DIR/scripts/install-sentinel-service.ps1" "explicit external Windows SCM installer"
 
 # Ship the WhatsApp pipeline with the node it belongs to. `upgrade.sh` installs the binary, the UI and the
 # self-update skill, and has never carried these: the scripts that read the inbox, the job files that

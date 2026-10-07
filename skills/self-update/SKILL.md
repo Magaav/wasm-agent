@@ -85,8 +85,20 @@ Two limits worth knowing before you rely on this:
 
 - **A stopped watcher cannot be revived from a run.** Nothing running can hear a request, so use
   `deploy`/`upgrade` while the watcher is up, and keep the supervisor in a service or logon task so it
-  comes back by itself (`deploy/wa-sentinel.service` for systemd; `scripts/install-sentinel-task.ps1`
-  registers the Windows logon task, with the `run` allow-list set).
+  comes back by itself (`deploy/wa-sentinel.service` for systemd; Windows native SCM
+  preparation is in `docs/WINDOWS-SENTINEL-SERVICE.md` and
+  `scripts/install-sentinel-service.ps1`). SCM migration requires an external
+  administrator and provisioned non-admin service identity; never bypass a stopped
+  watcher, elevate silently or consume old unknown requests to install it.
+  The Windows logon task remains a fallback until real SCM identity/recovery/deploy
+  proof succeeds. The recorded `sentinel-service-private-cli` spell runs
+  `scripts/test-sentinel-service.cjs` with a source-built Sentinel/fresh evidence
+  directory and verifies retained log/binary hashes via `--post`; it does not
+  certify live recovery. Spell replay currently refuses enforced session worktrees
+  (`workspace_execution_context_unsupported`), so it is not replay-verified or
+  preferred: use those same direct CLI commands without relaxing the binding.
+  Also run `scripts/test-sentinel-service-installer.ps1` for read-only/negative
+  installer boundaries; real registration is deliberately not an agent-run spell.
 - **The first sentinel that understands `deploy` has to get there by hand once.** A watcher running an
   older build answers `unknown verb "deploy"`, so that one step is a shell command: build, then
   `bash scripts/deploy.sh --reason "…"` from outside the run.

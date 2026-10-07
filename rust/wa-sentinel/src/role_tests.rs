@@ -262,6 +262,7 @@ fn the_recorded_identity_decides_after_the_watcher_died() {
     );
     for owner in [
         Owner::Ourselves,
+        Owner::WindowsService { name: "wasm-agent-sentinel".into() },
         Owner::Systemd { unit: "wa-sentinel.service".into(), user: false },
         Owner::Systemd { unit: "wa-sentinel.service".into(), user: true },
     ] {
@@ -271,6 +272,21 @@ fn the_recorded_identity_decides_after_the_watcher_died() {
             owner,
             "the words a watcher records must decide the same owner when they are read back: {text}"
         );
+    }
+}
+
+#[test]
+fn windows_service_identity_routes_only_to_scm_and_never_console_fallback() {
+    use role::{Lifecycle, Owner, Placement, Step};
+    let owner=role::owner_of(&stated("windows:renamed-sentinel"));
+    assert_eq!(owner,Owner::WindowsService {name:"renamed-sentinel".into()});
+    for (lifecycle,verb) in [(Lifecycle::Start,"start"),(Lifecycle::Stop,"stop"),(Lifecycle::Restart,"restart")] {
+        assert_eq!(role::step(&owner,lifecycle),Step::WindowsService {name:"renamed-sentinel".into(),verb:verb.into()});
+    }
+    assert_eq!(role::placement(&owner),Placement::Detached);
+    assert_eq!(role::describe(&owner).as_deref(),Some("windows:renamed-sentinel"));
+    for value in ["windows:","windows:bad name","windows:../other"] {
+        assert!(matches!(role::owner_of(&stated(value)),Owner::Unrecognised {..}));
     }
 }
 
