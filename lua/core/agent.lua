@@ -866,6 +866,11 @@ function M:maybe_compact(messages, force)
   local rows = memory.session_messages(self.session_id, {
     after_seq = session.summarized_until or 0, all = true,exclude_summaries=true,
   })
+  -- Retry rows are display evidence, not dialogue; retain originals but never
+  -- send them to inference or the summary model.
+  local dialogue={}
+  for _,row in ipairs(rows) do if row.role~='retry' then dialogue[#dialogue+1]=row end end
+  rows=dialogue
   if #rows < 4 then return false end
 
   -- Keep the newest `keep` tokens *of transcript*; summarise what is older.

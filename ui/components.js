@@ -595,6 +595,67 @@ class WaRun extends HTMLElement {
 }
 customElements.define("wa-run", WaRun);
 
+// A transport recovery is activity, not assistant prose or a model control.
+class WaRetry extends HTMLElement {
+  constructor() {super();this._attempts=new Map();}
+  static get observedAttributes() {return ['open'];}
+  connectedCallback() {
+    if(this._parts)return;
+    this._parts=topicParts(this,{className:'trace',glyph:'↻',label:'Retry',bodyTag:'ol',bodyClass:'trace-body retry-body'});
+    this.classList.add('retry');
+    this.append(this._parts.header,this._parts.body);this._sync();
+  }
+  get open(){return this.hasAttribute('open');}
+  set open(value){this.toggleAttribute('open',!!value);}
+  toggle(){this.open=!this.open;}
+  attributeChangedCallback(){if(this._parts)this._sync();}
+  _sync(){this._parts.body.hidden=!this.open;this._parts.header.setAttribute('aria-expanded',String(this.open));topicChevron(this._parts.chevron,this.open);}
+  update(event) {
+    this.connectedCallback();
+    const index=Number(event.index),limit=Number(event.limit);
+    if(!Number.isInteger(index)||index<1||!Number.isInteger(limit)||limit<1||limit>10||index>limit)return;
+    const terminal=['recovered','exhausted','suppressed','cancelled','unfinished'].includes(event.state);
+    const cycle=Number(event.cycle)||1,key=cycle+':'+index;
+    let item=this._attempts.get(key);
+    if(!item){
+      const line=document.createElement('li'),title=document.createElement('b'),reason=document.createElement('div');
+      line.className='retry-line';reason.className='retry-reason';line.append(title,reason);this._parts.body.append(line);
+      item={line,title,reason,reasons:new Set()};this._attempts.set(key,item);
+    }
+    item.title.textContent=index+'/'+limit+' · cycle '+cycle+' · '+String(event.state || 'waiting');
+    const text=String(event.reason || 'Reason unavailable');
+    if(!item.reasons.has(text)){item.reasons.add(text);item.reason.textContent=Array.from(item.reasons).join(' · ');}
+    item.line.dataset.state=event.state;this.dataset.state=event.state;
+    this._historical=false;
+    this._event={...event,index,limit};this._updated=Date.now();
+    this._parts.label.textContent=event.state==='reconnecting'?'Reconnecting in 3 minutes':'Retry '+index+'/'+limit;
+    if(cycle>1)this._parts.label.textContent+=' · cycle '+cycle;
+    this._parts.glyph.textContent=event.state==='recovered'?'✓':terminal?'!':'↻';
+    this._parts.header.classList.toggle('running',!terminal);
+    this.classList.toggle('has-error',terminal&&event.state!=='recovered');
+    this.open=event.state==='recovered'?false:true;
+    this.setAge();
+  }
+  setAge(){
+    if(!this._event)return;
+    if(this._historical)return;
+    const e=this._event,active=['waiting','attempting','failed','connected'].includes(e.state);
+    if(e.state==='reconnecting') {
+      const left=Math.max(0,(Number.isFinite(Number(e.wait_ms))?Number(e.wait_ms):180000)-(Date.now()-this._updated));
+      this._parts.meta.textContent='next check in '+Math.ceil(left/1000)+'s · '+e.index+'/'+e.limit;
+      return;
+    }
+    const elapsed=Math.min(Number(e.window_ms)||60000,(Number(e.elapsed_ms)||0)+(active?Date.now()-this._updated:0));
+    this._parts.meta.textContent=String(e.state)+' · '+Math.floor(elapsed/1000)+'s / '+Math.floor((Number(e.window_ms)||60000)/1000)+'s';
+  }
+  freeze(){this._historical=true;}
+  interrupt(state='unfinished'){
+    if(this._event&&['waiting','attempting','failed','connected','reconnecting'].includes(this._event.state))
+      this.update({...this._event,state,reason:state==='cancelled'?'Recovery cancelled':'Recovery outcome not recorded'});
+  }
+}
+customElements.define('wa-retry',WaRetry);
+
 // <wa-reasoning> — the model's own thinking, as a topic like every other one.
 //
 // It is the route to the reply, not the reply, so it folds away once the run moves on - but it stays a

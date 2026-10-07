@@ -963,6 +963,7 @@ WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-observability.lua" "$BIN" --db "$DB
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-tool-cues.lua" "$BIN" --db "$DB.tool-cues" | grep 'tool cues ok'
 # Candidate batching is opt-in; exact evidence/order and response-group telemetry stay visible.
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-batching-guidance.lua" "$BIN" --db "$DB.batching-guidance" | grep 'batching guidance ok'
+WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-retry-context.lua" "$BIN" --db "$DB.retry-context" | grep 'retry context ok'
 # A session can own a checkout so parallel sessions on one node do not overwrite each other. The
 # default is the contract: a session with no worktree must resolve relative paths exactly as before,
 # or this feature would silently relocate every existing session's files.

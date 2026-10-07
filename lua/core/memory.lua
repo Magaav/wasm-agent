@@ -1225,6 +1225,7 @@ function detail_of(state, last, pending)
   if not last then return "nothing is recorded after the last turn" end
   if last.role == "user" then return "an unanswered question, " .. ago(last.created_at) end
   if last.role == "summary" then return "stopped after a compaction, " .. ago(last.created_at) end
+  if last.role == "retry" then return "provider recovery recorded but no completed answer; the run may still be reconnecting, " .. ago(last.created_at) end
   if last.role == "assistant" then
     if last.phase == "commentary" then
       return "the assistant sent commentary but no completed answer is recorded, " .. ago(last.created_at)

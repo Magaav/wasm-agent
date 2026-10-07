@@ -25,13 +25,14 @@ const causeChain = error => {
 // Observe below Pi's error normalizer, which otherwise drops Node's error.cause.
 // Never copy URLs, headers, request bodies or streamed text into diagnostics.
 // Error messages are bounded/redacted heuristically; cause codes are typed identifiers.
-function observedFetch(state) {
+function observedFetch(state,onConnected) {
   const fetchImpl=globalThis.fetch.bind(globalThis);
   return async (url,options) => {
     state.fetch_observed=true;state.stage='response_headers';
     let response;
     try {response=await fetchImpl(url,options);} catch(error) {state.causes=causeChain(error);state.cancelled=options?.signal?.aborted===true;throw error;}
     state.http_status=response.status;
+    if(response.ok)onConnected?.();
     for(const name of ['x-request-id','request-id']) {
       const value=response.headers.get(name);
       if(value && /^[a-zA-Z0-9_-]{1,128}$/.test(value)) {state.request_id=value;break;}
@@ -199,23 +200,62 @@ try {
     name:decision.name, arguments_text:(decision.preview || '') +
       (decision.truncated ? '… [preview only; complete arguments in result]' : ''), complete,
     ...(decision.truncated ? {arguments_truncated:true} : {})});
-  const retryLimit=request.transport_retries ?? 1;
-  if(!Number.isInteger(retryLimit) || retryLimit<0 || retryLimit>1) throw Error('invalid_subscription_transport_retries');
+  const retryLimit=request.transport_retries ?? 10;
+  if(!Number.isInteger(retryLimit) || retryLimit<0 || retryLimit>10) throw Error('invalid_subscription_transport_retries');
+  const recoveryWindow=request.recovery_window_ms ?? 60000;
+  if(!Number.isInteger(recoveryWindow) || recoveryWindow<1 || recoveryWindow>60000) throw Error('invalid_subscription_recovery_window');
+  const interval=recoveryWindow/Math.max(1,retryLimit);
+  const initialWait=Math.min(500,interval/4);
+  const cooldownMs=request.reconnect_cooldown_ms ?? 180000;
+  if(!Number.isInteger(cooldownMs) || cooldownMs<1 || cooldownMs>180000) throw Error('invalid_subscription_reconnect_cooldown');
+  let recoveryStarted,retryIndex=0,cycle=1;
+  const retryEvent=async(state,reason,extra={})=>send({type:'retry',retry_id:request.stream_id || 'subscription-recovery',
+    index:retryIndex,limit:retryLimit,cycle,state,reason,window_ms:recoveryWindow,
+    elapsed_ms:recoveryStarted===undefined ? 0 : Date.now()-recoveryStarted,...extra});
   const timeoutMs=request.timeout_ms ?? 3600000;
   if(!Number.isInteger(timeoutMs) || timeoutMs<1 || timeoutMs>86400000) throw Error('invalid_subscription_timeout');
   const deadline=Date.now()+timeoutMs;
-  let answer;
+  const restartCycle=async(reason)=>{
+    await retryEvent('exhausted',reason);
+    if(Date.now()+cooldownMs>=deadline) {
+      await retryEvent('exhausted','Original request deadline cannot fit another reconnect check');
+      throw Error('subscription_retry_deadline_exhausted; '+reason);
+    }
+    await retryEvent('reconnecting',reason,{wait_ms:cooldownMs,cooldown_ms:cooldownMs});
+    await new Promise(resolve=>setTimeout(resolve,cooldownMs));
+    if(Date.now()>=deadline) throw Error('subscription_retry_deadline_exhausted');
+    cycle++;retryIndex=0;recoveryStarted=Date.now();
+  };
+  let answer,lastFailure='Recovery window expired';
   for(let attempt=1;;attempt++) {
+    answer=undefined;
     activeTransport={schema_version:1,attempt,stage:'adapter',fetch_observed:false,response_bytes:0,
       body_eof:false,model_output_seen:false,causes:[]};
+    let recoveryTimer;
+    const recoveryController=new AbortController();
+    if(retryIndex>0) {
+      let remaining=Math.min(deadline,recoveryStarted+recoveryWindow)-Date.now();
+      if(remaining<=0) {
+        await restartCycle(lastFailure);retryIndex=1;
+        remaining=Math.min(deadline,recoveryStarted+recoveryWindow)-Date.now();
+      }
+      await retryEvent('attempting','Reconnecting to provider');
+      recoveryTimer=setTimeout(()=>{activeTransport.recovery_timeout=true;recoveryController.abort();},Math.min(interval,remaining));
+    }
     try {
       const stream = models.stream(model, context, {sessionId:request.session_id,
         transport:'sse', reasoningEffort:request.reasoning, maxTokens:request.max_output,
-        maxRetries:0,fetch:observedFetch(activeTransport)});
+        maxRetries:0,signal:recoveryController.signal,fetch:observedFetch(activeTransport,()=>{
+          clearTimeout(recoveryTimer);
+          if(retryIndex>0)retryEvent('connected','Provider connection established; waiting for model output');
+        })});
       for await (const event of stream) {
         // Unknown/new progress events are conservative: never replay across a
         // provider-version change merely because the bridge cannot display them.
-        if(!['start','error','done'].includes(event.type)) activeTransport.model_output_seen=true;
+        if(!['start','error','done'].includes(event.type)) {
+          activeTransport.model_output_seen=true;
+          clearTimeout(recoveryTimer);
+        }
     if (event.type === 'text_delta' || event.type === 'thinking_delta') {
       ttft ??= Date.now() - started;
       // A response-global mutable stopReason is not a per-item phase.
@@ -292,28 +332,51 @@ try {
         if((answer.content || []).length) activeTransport.model_output_seen=true;
         throw new Error(answer.errorMessage || answer.stopReason);
       }
+      clearTimeout(recoveryTimer);
       if(activeTransport.fetch_observed || attempt>1)
         await send({type:'transport_attempt',diagnostic:{...activeTransport,ok:true,elapsed_ms:Date.now()-started}});
+      if(retryIndex>0) await retryEvent('recovered','Provider response restored');
       break;
     } catch(error) {
       if(!activeTransport.causes.length) activeTransport.causes=causeChain(error);
       const status=activeTransport.http_status;
-      const aborted=activeTransport.cancelled===true || answer?.stopReason==='aborted'
-        || activeTransport.causes.some(c=>['AbortError','TimeoutError'].includes(c.name));
-      const knownTransient=!aborted && activeTransport.fetch_observed && activeTransport.causes.some(c=>transientCodes.has(c.code))
+      clearTimeout(recoveryTimer);
+      const ownTimeout=activeTransport.recovery_timeout===true;
+      const aborted=!ownTimeout && (activeTransport.cancelled===true || answer?.stopReason==='aborted'
+        || activeTransport.causes.some(c=>['AbortError','TimeoutError'].includes(c.name)));
+      const knownTransient=!aborted && activeTransport.fetch_observed
+        && (ownTimeout || activeTransport.causes.some(c=>transientCodes.has(c.code)))
         && (status===undefined || status===200) && !activeTransport.model_output_seen;
-      const retry=knownTransient && attempt<=retryLimit && Date.now()+1000<deadline;
+      if(knownTransient && recoveryStarted===undefined) recoveryStarted=Date.now();
+      let recoveryDeadline=Math.min(deadline,(recoveryStarted ?? Date.now())+recoveryWindow);
+      const nextCycle=knownTransient && retryLimit>0 && (retryIndex>=retryLimit || Date.now()>=recoveryDeadline);
+      const retry=knownTransient && retryLimit>0 && Date.now()<deadline;
       await send({type:'transport_attempt',diagnostic:{...activeTransport,ok:false,retry_scheduled:retry,
         retry_limit:retryLimit,elapsed_ms:Date.now()-started,upstream_usage:'unknown'}});
+      const code=ownTimeout ? 'recovery_attempt_timeout' : activeTransport.causes.find(c=>c.code)?.code || 'unclassified';
+      const reason=activeTransport.stage+': '+code+' — '+redactError(error.message || error).slice(0,256);
+      lastFailure=reason;
+      if(retryIndex>0) await retryEvent('failed',reason);
       if(!retry) {
-        const code=activeTransport.causes.find(c=>c.code)?.code || 'unclassified';
+        if(retryIndex>0) await retryEvent(knownTransient ? 'exhausted' : 'suppressed',reason);
         throw Error('subscription_stream_failure: stage='+activeTransport.stage+' cause='+code
           +' attempt='+attempt+' model_output_seen='+activeTransport.model_output_seen+'; '+redactError(error.message || error));
       }
-      await send({type:'transport_retry',attempt,limit:retryLimit,wait_ms:1000,
+      if(nextCycle) {
+        await restartCycle(reason);
+        recoveryDeadline=Math.min(deadline,recoveryStarted+recoveryWindow);
+      }
+      retryIndex++;
+      const target=recoveryStarted+initialWait+(retryIndex-1)*interval;
+      const waitMs=Math.max(0,Math.min(target-Date.now(),recoveryDeadline-Date.now()));
+      await retryEvent('waiting',reason,{wait_ms:waitMs});
+      await send({type:'transport_retry',attempt,index:retryIndex,cycle,limit:retryLimit,wait_ms:waitMs,
         note:'Retrying inference before model output; prior upstream usage unknown; no tools replayed'});
-      await new Promise(resolve=>setTimeout(resolve,1000));
-      if(Date.now()>=deadline) throw Error('subscription_retry_deadline_exhausted');
+      if(waitMs>0) await new Promise(resolve=>setTimeout(resolve,waitMs));
+      if(Date.now()>=recoveryDeadline) {
+        await restartCycle(reason);retryIndex=1;
+        await retryEvent('waiting',reason,{wait_ms:0});
+      }
     }
   }
   const usage = answer.usage;
