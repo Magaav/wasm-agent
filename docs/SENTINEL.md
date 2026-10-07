@@ -199,7 +199,19 @@ On Windows an approved `.ps1` script uses the native system PowerShell executabl
 with `-NoProfile -NonInteractive -File` and a native path, never Bash or an
 inline command. The same canonical allowlist check precedes interpreter selection;
 script errors are failed supervised operations. A `.ps1` on other platforms
-refuses with no shell fallback. Other script interpreter behavior is unchanged.
+refuses with no shell fallback. Approved `.js`, `.mjs` and `.cjs` files (case
+insensitive) run directly through Node with a separate native script argument,
+never through Bash or an inline command. Node is resolved to an absolute
+executable before admitting an operation: explicit `WA_SENTINEL_NODE`, else the
+watcher's absolute PATH entries, then standard Windows Program Files Node installs.
+An invalid explicit override or missing runtime refuses as
+`node_runtime_unavailable`, with no shell fallback and no script effect. No npm
+install/download or arbitrary runtime from event fields occurs. Empty/relative
+PATH entries are ignored. This is the trusted local executable boundary, not a
+binary-signature guarantee. Job `run`, pipeline `run` and wake `prepare` share this
+same dispatch after canonical allowlisting. Script dependency PATH remains the
+script/operator's responsibility; selecting Node does not make `rg` or other
+child executables available. Other script interpreter behavior is unchanged.
 
 A stopped watcher can still only be restarted from outside a turn: nothing that is running can hear a
 request. That is why the supervisor belongs in a service or a logon task (`deploy/wa-sentinel.service`
