@@ -73,7 +73,13 @@ carries a one-line verdict, so the outcome is data you read once.
 sentinel executes it only from directories in `WA_SENTINEL_SCRIPTS` (the install's `scripts/` is what the
 gate and the service set). That is a deliberate boundary, not an obstacle to route around with
 `Start-Process` or Task Scheduler - a run that fights the OS for eight rounds is a run that should have
-queued a request.
+queued a request. Approved `.js`/`.mjs`/`.cjs` use native Node dispatch, never Bash;
+Node must be on the watcher's PATH or in its standard Windows Program Files install,
+or pinned by absolute `WA_SENTINEL_NODE`. Missing/invalid Node refuses before spawn.
+Preflight the script's own child executables separately: native Node selection does
+not inherit Git Bash's PATH additions. Before this dispatcher is installed, use
+an explicit `.ps1`/`.sh` Node wrapper with pinned executables, not a raw `.cjs`
+request. Keep exact failed receipts and inspect partial effects before repair.
 
 Two limits worth knowing before you rely on this:
 

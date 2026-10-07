@@ -572,8 +572,8 @@ pub(crate) fn execute(store: &wa_jobs::Store, delivery: &Value) -> Result<String
         }
         "run" => {
             let path = approved_script(action["script"].as_str().unwrap())?;
-            let (program, argument) = shell_for(&path);
-            let mut spec = wa_operation::Spec::command(program, vec![argument]);
+            let (program, args) = run_script_command(&path)?;
+            let mut spec = wa_operation::Spec::command(program, args);
             spec.timeout = Duration::from_secs(action["timeout_seconds"].as_u64().unwrap_or(300));
             spec.owner = format!("job:{id}:{}", delivery["id"]);
             let event_path = sentinel_dir().join(format!("job-event-{}.json", delivery["id"]));
@@ -829,7 +829,7 @@ fn wake_ledger_record(id: &str, key: &str, delivery: i64) -> Result<()> {
 /// The deterministic step a `wake` action may carry, run *before* the wake is submitted.
 ///
 /// A `prepare` is a `run` step in every respect the process boundary and the allow-list care about: the
-/// script must be absolute and inside `WA_SENTINEL_SCRIPTS`, it is started through the same shell, its
+/// script must be absolute and inside `WA_SENTINEL_SCRIPTS`, it uses the same interpreter dispatch, its
 /// timeout is bounded the same way, it receives the delivery's own event as `WA_JOB_EVENT_FILE`, it is
 /// cancelled when the job is disabled or revised while it runs, and what it prints is its result. What
 /// differs is where that result goes: into the wake's own message, not into a `foreach`.
@@ -839,7 +839,7 @@ fn wake_ledger_record(id: &str, key: &str, delivery: i64) -> Result<()> {
 /// by a script; the model turn that follows starts from that answer instead of re-deriving it. The step
 /// makes no model call and no network call of its own, and a step that prints no `instruction` refuses
 /// the wake rather than waking someone with an empty instruction in the message.
-fn run_prepare(
+pub(crate) fn run_prepare(
     store: &wa_jobs::Store,
     id: &str,
     rev: i64,
@@ -848,8 +848,8 @@ fn run_prepare(
 ) -> Result<String> {
     let path = approved_script(prepare["script"].as_str().unwrap_or(""))
         .context("wake prepare step needs an absolute script inside WA_SENTINEL_SCRIPTS")?;
-    let (program, argument) = shell_for(&path);
-    let mut spec = wa_operation::Spec::command(program, vec![argument]);
+    let (program, args) = run_script_command(&path)?;
+    let mut spec = wa_operation::Spec::command(program, args);
     spec.timeout = Duration::from_secs(prepare["timeout_seconds"].as_u64().unwrap_or(120));
     spec.owner = format!("job:{id}:{}:prepare", delivery["id"]);
     let event_path = sentinel_dir().join(format!("job-event-{}.json", delivery["id"]));
@@ -922,7 +922,7 @@ fn run_prepare(
 /// One `run` step of a pipeline. The step's result is what it printed: one JSON object on stdout, the
 /// same contract a `run` action and a spell's `run` step already use - so "a deterministic step succeeded"
 /// has one shape in this system rather than three.
-fn run_pipeline_step(
+pub(crate) fn run_pipeline_step(
     store: &wa_jobs::Store,
     id: &str,
     rev: i64,
@@ -931,8 +931,8 @@ fn run_pipeline_step(
     number: usize,
 ) -> Result<Value> {
     let path = approved_script(step["script"].as_str().unwrap_or(""))?;
-    let (program, argument) = shell_for(&path);
-    let mut spec = wa_operation::Spec::command(program, vec![argument]);
+    let (program, args) = run_script_command(&path)?;
+    let mut spec = wa_operation::Spec::command(program, args);
     spec.timeout = Duration::from_secs(step["timeout_seconds"].as_u64().unwrap_or(300));
     spec.owner = format!("job:{id}:{}", delivery["id"]);
     let event_path = sentinel_dir().join(format!("job-event-{}.json", delivery["id"]));

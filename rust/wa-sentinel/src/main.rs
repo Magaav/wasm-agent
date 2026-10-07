@@ -39,6 +39,7 @@ use std::time::{Duration, Instant};
 // the node, and this one carries out a sequence the *agent* wrote, under a whitelist.
 mod spell;
 mod jobs;
+mod script_runner;
 mod cdp;
 mod instance;
 
@@ -67,6 +68,8 @@ mod return_engine_tests;
 mod observation_io_tests;
 #[cfg(test)]
 mod run_script_tests;
+#[cfg(test)]
+mod node_script_tests;
 #[cfg(test)]
 mod deploy_protocol_tests;
 #[cfg(test)]
@@ -1505,18 +1508,7 @@ fn approved_script(script: &str) -> Result<PathBuf> {
 }
 
 fn run_script_command(path:&Path)->Result<(String,Vec<String>)> {
-    if path.extension().is_some_and(|s|s.eq_ignore_ascii_case("ps1")) {
-        #[cfg(windows)] {
-            let root=std::env::var_os("SystemRoot").context("powershell_system_root_unavailable")?;
-            let program=PathBuf::from(root).join("System32/WindowsPowerShell/v1.0/powershell.exe");
-            if !program.is_file(){bail!("powershell_runtime_unavailable");}
-            let script=path.display().to_string();
-            let script=script.strip_prefix(r"\\?\").unwrap_or(&script).to_string();
-            return Ok((program.display().to_string(),vec!["-NoProfile".into(),"-NonInteractive".into(),"-File".into(),script]));
-        }
-        #[cfg(not(windows))] {bail!("powershell_script_requires_windows; no shell fallback");}
-    }
-    let (program,argument)=shell_for(path);Ok((program,vec![argument]))
+    script_runner::command(path)
 }
 
 fn verb_run(script: &str, reason: &str) -> Result<String> {

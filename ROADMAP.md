@@ -348,6 +348,21 @@ failures retained and no copy replayed after missing-rg verification failure.
 `DISCOVERY-FINAL-v145.json` pins6 shipped files; binary hashes/install record,
 serve PID and job revisions unchanged. No node/window restart or cloud deployment.
 
+2026-10-07, fixed sentinel interpreting approved `.cjs` as Bash: shared native
+JavaScript dispatch for `.js`/`.mjs`/`.cjs` in request-run, job-run, pipeline-run
+and wake-prepare. Resolve an absolute executable from explicit WA_SENTINEL_NODE,
+absolute watcher PATH or standard Windows Node installation; missing/invalid
+runtime refuses before operation admission with no shell fallback. Canonical
+script allowlist still precedes dispatch; native argv handles space/Unicode and
+metacharacters without command interpolation. Trusted local executable selection
+is not binary signature or dependency PATH assurance. Self-review and Windows
+sentinel51 tests passed, zero failures/ignored, including actual common/module/JS
+requests, exit7 preservation, missing runtime/no-operation proof and all3 job
+paths; original shell/PowerShell/ownership/return tests remain green. Previous
+shipping failure and its partial-copy evidence retained, no historical replay.
+Instruction byte delta0; no new job, watcher, agent or full release gate. Candidate
+integration and actual installed-script readback remain separate proofs.
+
 ## Status vocabulary
 
 - **Implemented:** a mechanism exists in the repository; not a release certification.

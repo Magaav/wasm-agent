@@ -81,6 +81,12 @@ separate credential; it is not taken from event data or logged.
 No shell text is accepted in an event, and event fields are never interpolated into
 a shell command. `WA_JOB_EVENT_FILE` names the retained JSON event for the script.
 The script runs as a bounded operation; its exit/output evidence is retained.
+Interpreter dispatch is shared with sentinel `request run`: `.js`/`.mjs`/`.cjs`
+use a resolved Node executable, Windows `.ps1` uses native PowerShell, and other
+scripts retain shell behavior. Missing/invalid Node refuses before an operation
+starts, never falling back to Bash. `WA_SENTINEL_NODE` may pin an absolute local
+Node executable; see [SENTINEL.md](SENTINEL.md) for resolution and its trust limits.
+The same dispatcher covers pipeline `run` and wake `prepare`.
 Scripts and their dependencies are operator-controlled files, not immutable signed
 packages; editing them changes behavior. The allow-list is not an OS sandbox.
 A successful exit is not a proof of business correctness: the reviewed script must
@@ -269,7 +275,7 @@ has to re-derive what a diff and a set membership already decided.
 Six rules keep it a step rather than a second action language:
 
 - **It is a `run` step in everything the boundary cares about.** The script must be absolute and inside
-  `WA_SENTINEL_SCRIPTS`, it is started through the same shell a `run` action uses, its timeout is bounded
+  `WA_SENTINEL_SCRIPTS`, it uses the same interpreter dispatch as a `run` action, its timeout is bounded
   the same way, it receives the delivery's event as `WA_JOB_EVENT_FILE`, it is cancelled if the job is
   disabled or revised while it runs, and what it prints is its result. A step that prints no `instruction`,
   or no JSON at all, **fails the delivery**: a wake with an empty instruction in it is worse than no wake.
