@@ -1641,6 +1641,9 @@ LUA
 WA_SCRIPT="$DB.memory.lua" "$BIN" --db "$DB" | grep "memory curation ok"
 rm -f "$DB.memory.lua"
 
+# Read-only scoped file discovery: exact candidate pages, no hidden clipped tail.
+gate_run node skills/code-graph/scripts/test-discover-files.mjs "$WASM_AGENT_HOME"
+
 # Skills: on-demand instructions (the Agent Skills standard pi implements).
 # Only name and description are always in context; the body loads when a task
 # matches, which is the whole point - a technique needed occasionally must not
