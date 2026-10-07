@@ -362,6 +362,17 @@ paths; original shell/PowerShell/ownership/return tests remain green. Previous
 shipping failure and its partial-copy evidence retained, no historical replay.
 Instruction byte delta0; no new job, watcher, agent or full release gate. Candidate
 integration and actual installed-script readback remain separate proofs.
+2026-10-07, native Node dispatcher **installed and verified** at97d040a:
+final clean-built-by-deploy provenance, actual installer verification69 checks,
+zero failures/skips; sentinel SHA2565204d70eb6a0975be6366757ee3d9274ddd589e3ccefc09773cfacd9cf848416.
+Live allowlisted `.cjs`/`.mjs`/`.js` requests each ran once without wrappers,
+printed exact nonce/runtime/executable/script proof and completed code0,
+settled/cleanupterminated. Evidence `NODE-DISPATCH-INSTALL-v150.json` and
+`NODE-DISPATCH-INSTALLED-PROBES-v150.json`; operations
+op-1791332200303023-6932-17, op-1791332200443497-6932-22,
+op-1791332200656358-6932-27. Job enablement/revisions unchanged; no cloud
+installation, provider calls or old maintenance replay. This closure is only a
+ROADMAP note after the installed source, not another binary deployment.
 
 ## Status vocabulary
 
