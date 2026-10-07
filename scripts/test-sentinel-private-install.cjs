@@ -87,7 +87,9 @@ async function gone(pid){await until(()=>{try{process.kill(pid,0);return false;}
  const listener=proof.processIdentity(Number(fs.readFileSync(path.join(install,'serve.pid')))),watcher=proof.processIdentity(Number(fs.readFileSync(path.join(box,'sentinel.pid'))));
  assert.notEqual(listener.created,originalNode.created);assert.notEqual(watcher.created,originalWatcher.created);save('native-after.json',{listener,watcher,health:await api('/health')});
  const transcript=await api('/session?id='+session.id);save('actual-parent-transcript.json',transcript);assert(JSON.stringify(transcript.messages).includes('I am updated'));
- let admissionNegatives=0;
+ let admissionNegatives=0,negativeCount=0;
+ const reconciliationOnly=args.includes('--reconciliation-only');
+ if(!reconciliationOnly) {
  for(const [name,owner,sha,problem] of [['owner','wrong-owner',packet.head,'parent_owner_mismatch'],['source',session.user_id,'b'.repeat(40),'canonical source']]) {
   const prior=new Set(fs.readdirSync(path.join(box,'deploy-protocol')));
   cli('request','deploy','--expected-sha',sha,'--owner',owner,'--session',session.id,'--reason','private admission negative '+name);
@@ -102,7 +104,6 @@ async function gone(pid){await until(()=>{try{process.kill(pid,0);return false;}
  }
  // Actual verifier negatives preserve each failing raw receipt; every altered file is restored exactly.
  const installedFile=path.join(install,'installed.txt'),installedBytes=fs.readFileSync(installedFile),resultFile=path.join(dir,'result.json'),resultBytes=fs.readFileSync(resultFile);
- let negativeCount=0;
  for(const [name,mutate,restore] of [
   ['request',()=>fs.writeFileSync(resultFile,JSON.stringify({...result,request_id:'wrong-request'})),()=>fs.writeFileSync(resultFile,resultBytes)],
   ['future',()=>fs.writeFileSync(resultFile,JSON.stringify({...result,at:new Date(Date.now()+600000).toISOString()})),()=>fs.writeFileSync(resultFile,resultBytes)],
@@ -122,6 +123,8 @@ async function gone(pid){await until(()=>{try{process.kill(pid,0);return false;}
  fs.writeFileSync(mutantFile,originalHelper.replace('result?.request_id!==intent.id||',''));
  const mutant=await import(pathToFileURL(mutantFile).href);
  try{fs.writeFileSync(resultFile,JSON.stringify({...result,request_id:'wrong-request'}));assert.equal(mutant.verifyActual(source,install,request,binding,dir,privateEnv).ok,true,'removed causal check must admit the actual wrong request');negativeCount++;save('causal-removal.json',{red:true,actual_wrong_request:'wrong-request',original_refused:true,mutant_admitted:true});}finally{fs.writeFileSync(resultFile,resultBytes);}
+ }
+ const installedFile=path.join(install,'installed.txt'),resultFile=path.join(dir,'result.json'),resultBytes=fs.readFileSync(resultFile);
  const clean=verifyActual(source,install,request,JSON.parse(fs.readFileSync(path.join(dir,'binding.json'))),dir);assert.equal(clean.ok,true);
  // Recovery after a consumed terminal failure uses the real native verifier, not
  // cursor deletion or a second installation. Original immutable return survives.
@@ -150,7 +153,7 @@ async function gone(pid){await until(()=>{try{process.kill(pid,0);return false;}
  // Leave the fixture's original observation evidence intact for later inspection.
  fs.writeFileSync(cursorFile,originalCursor);fs.unlinkSync(failureFile);
  const recoveryChecks=8;
- save('result.json',{ok:true,request_id:request.id,head:packet.head,tree:packet.tree,ack_ms:ackMs,checks:10+negativeCount+admissionNegatives+recoveryChecks,skipped:0,paid_calls:0,actual_installer:true,actual_verifier:true,actual_reconciliation:true,private_source:source,notices:terminal.length});
+ save('result.json',{ok:true,request_id:request.id,head:packet.head,tree:packet.tree,ack_ms:ackMs,checks:10+negativeCount+admissionNegatives+recoveryChecks,skipped:0,paid_calls:0,actual_installer:true,actual_verifier:true,actual_reconciliation:true,scope:reconciliationOnly?'installation and reconciliation only':'installation negatives and reconciliation',private_source:source,notices:terminal.length});
  console.log(`sentinel private install ok (${10+negativeCount+admissionNegatives+recoveryChecks} checks, 0 skipped)`);
  }finally{
   if(releaseBusy)releaseBusy();
