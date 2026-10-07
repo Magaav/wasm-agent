@@ -387,6 +387,13 @@ installation, provider calls, inference agents, full gate or AGENTS growth.
 Recorded collector spell refused enforced worktree binding; verified CLI remains
 preferred, no binding relaxation. This is a collector-only external skill repair,
 not a Node/sentinel binary change or arbitrary process-tree drain certificate.
+2026-10-07, external collector/skill34a40b3 installed and verified in both local
+skill roots:28 checks each plus original Ponytail14 through installed TAP helper,
+actual exit0 and zero skips/todos. Sentinel native `.cjs` shipping operation
+op-1791333346838993-6932-490 completed/settled/terminated in one request, no wrapper
+or reporter repair. `TAP-COLLECTOR-INSTALLED-v156.json` verifies6 shipped hashes;
+original skill backups/spec evidence retained, binary hashes/install/PID/jobs
+unchanged. No restart, cloud deployment, provider call or full release gate.
 
 ## Status vocabulary
 
