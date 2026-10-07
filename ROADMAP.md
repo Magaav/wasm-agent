@@ -395,6 +395,22 @@ or reporter repair. `TAP-COLLECTOR-INSTALLED-v156.json` verifies6 shipped hashes
 original skill backups/spec evidence retained, binary hashes/install/PID/jobs
 unchanged. No restart, cloud deployment, provider call or full release gate.
 
+2026-10-07, repaired recursive benchmark-artifact discovery: immediate run
+metadata only, exact report names, relative addresses, bounded pages/snapshot
+continuation and visible missing reports/errors. Actual8 runs fit2623B without
+entering solver worktrees;34 regression checks cover1202 nested noise files and
+pagination/postconditions. Self-review, direct-policy19 and existing token-audit
+checks passed; AGENTS byte delta0. Read-only spell replay refused enforced workspace
+context; verified CLI remains preferred. Prepared `docs/AGENT-BENCHMARK.md` and
+candidate telemetry-empty-payload descriptor/hidden oracle: broken baseline fails,
+known repair28checks passes, permissive-array mutant fails. Candidate is NOT
+Pi-qualified or promoted;5–10min is an unmeasured target. npm latest stable Pi1.0.4
+queried/pinned as Docker build default (overridable exact wave pin), not installed
+or run. Existing UI/OpenCode runner needs shared Luna-medium transport, non-UI
+oracle, separate current/patched runtime pins and complete accounting adapters.
+No solver/provider call, current-runtime patch, new index, full gate or release
+claim. Skill-only installation/readback is separate from this source verification.
+
 ## Status vocabulary
 
 - **Implemented:** a mechanism exists in the repository; not a release certification.

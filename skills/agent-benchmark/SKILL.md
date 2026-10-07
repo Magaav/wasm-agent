@@ -5,7 +5,17 @@ description: Run a matched coding task in disposable Pi and wasm-agent sandboxes
 
 # Agent benchmark
 
-Use `node scripts/agent-benchmark.mjs <fixture.json>` from this repository. The
+Read `<repo>/docs/AGENT-BENCHMARK.md` in the explicitly selected source repo
+(not relative to an installed skill root) for runner/accounting limits and the
+proposed Luna-medium triad. The
+active direct-workflow rule forbids launching subagents/external inference agents;
+preparation and model-free checks do not override it. A future execution needs an
+explicitly lifted restriction. The proposed telemetry fixture is not Pi-qualified.
+Model-free preflight:
+`node <absolute-skill-dir>/scripts/check-fixture.mjs <absolute-repo> <absolute-evidence-scratch>`.
+It proves broken/known-repair/permissive-mutant behavior; it never starts an agent.
+
+Use `node <repo>/scripts/agent-benchmark.mjs <fixture.json>` from this repository. The
 fixture pins the source revision, original task, model, time limit and independent
 oracle. The runner starts both agents from the same tracked tree in separate Docker
 containers, retains their transcripts, logs, diffs and verdicts, and removes the
@@ -40,10 +50,34 @@ and tool output; keep them private. Confirm no benchmark containers remain after
 run. If cleanup fails, surface their names and refuse to claim isolation. The
 runner never installs, deploys, pushes, or connects to the live node or window.
 
+## Locate existing evidence without recursive repository noise
+
+Use [scripts/artifacts.mjs](scripts/artifacts.mjs), not recursive `rg --files`
+over an artifact root. Inspect immediate run directories and only their known
+manifest/report/summary filenames; retained `worktrees/` are never traversed.
+
+```
+node <absolute-skill-dir>/scripts/artifacts.mjs --root <artifact-root> --prefix edit-workflow- --max-bytes 8192
+```
+
+Relative paths, bytes, missing reports, explicit counts and continuation are data;
+read only the named reports next. Follow `next_offset` with `snapshot` or narrow
+the prefix. Inventory change/errors refuse, not silently omit. Tests:
+`node <skill>/scripts/test-artifacts.mjs <absolute-evidence-scratch>`.
+The `agent-benchmark-artifacts` spell wraps this same read-only invocation and
+rechecks its snapshot. Mandatory-workspace replay currently refuses execution;
+keep this verified CLI preferred, never relax the binding or fake settlement.
+
+## Historical UI runner
+
 The pinned first fixture is `benchmarks/agent-benchmark/ui-diff-topic.json`: a
 historical wasm-agent task that took 358 seconds. Build the cached image once with
-`docker build -f benchmarks/agent-benchmark/Dockerfile -t wa-agent-benchmark:observation .`,
-then set the fixture's `image` to that tag. The image supplies `wa-ui-observe`
+`docker build --build-arg PI_VERSION=<exact-latest-stable> -f <repo>/benchmarks/agent-benchmark/Dockerfile -t wa-agent-benchmark:observation <repo>`,
+resolving npm's stable latest immediately before calibration and pinning its exact
+version/integrity for the whole wave. Latest observed2026-10-07:1.0.4, not0.87.1.
+Verify the package version inside the disposable image; do not update live Pi.
+The existing runner remains UI/OpenCode-Go only, not a Luna subscription triad.
+Then set the historical fixture's `image` to that tag. The image supplies `wa-ui-observe`
 for real headless Chromium rendering and optional probes, and `wa-ui-contracts`
 for deterministic review leads about removed UI classes, elements and events.
 These tools are visible to agents; the independent oracle stays hidden. Give all
