@@ -68,7 +68,7 @@ function audit(input) {
   }
   events.sort((a,b) => a.seq-b.seq);
   const usage = {completed_calls:0, summaries:0, failed_calls:0, missing_usage:0, missing_cache:0,
-    unpriced_calls:0, invalid_usage:0, pending_calls:0, unmatched_ends:0,
+    unpriced_calls:0, invalid_usage:0, pending_calls:0, unmatched_ends:0,transport_failed_attempts:0,
     observed_prompt_tokens:0, observed_output_tokens:0, observed_cache_read_tokens:0,
     observed_cache_write_tokens:0, observed_uncached_tokens:0, observed_priced_cost_usd:0};
   const timing = {model_ms:[],ttft_ms:[],run_ms:[],prefix_audit_ms:[]};
@@ -181,6 +181,10 @@ function audit(input) {
       continue;
     }
     usage.completed_calls++; if (pair.kind === 'summary') usage.summaries++;
+    if(end.transport_failed_attempts!==undefined) {
+      if(!count(end.transport_failed_attempts)) throw Error('invalid_transport_attempt_count');
+      usage.transport_failed_attempts+=end.transport_failed_attempts;
+    }
     if (!pair.start) usage.unmatched_ends++;
     if (end.ok === false) usage.failed_calls++;
     if (number(end.ms)) timing.model_ms.push(end.ms);
@@ -218,7 +222,7 @@ function audit(input) {
     ? usage.observed_prompt_tokens/(usage.completed_calls-usage.missing_usage) : null;
   // This is only the observed export, not an invoice, verified task score, or full-session guarantee.
   usage.recorded_calls_cost_usd = usage.completed_calls && !usage.pending_calls && !usage.unpriced_calls
-    && !usage.unmatched_ends ? usage.observed_priced_cost_usd : null;
+    && !usage.unmatched_ends && !usage.transport_failed_attempts ? usage.observed_priced_cost_usd : null;
   const prefix = {comparisons:0,stable_recorded_components:0,changed_recorded_components:0,
     incomplete_metadata_pairs:0,stable_components_zero_cache_calls:0,changed_fields:{}};
   const fields = ['system_hash','schema_hash','model','provider','settings','attribution','runtime','summary_watermark'];

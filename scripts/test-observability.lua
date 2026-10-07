@@ -44,6 +44,12 @@ telemetry.event(sid,'run','','step','end',{outcome='answered'})
 local report=dofile('lua/core/telemetry.lua').snapshot(sid)
 check(report.total.calls==2 and report.compaction.calls==1 and report.total.failed==1,'summary failures included in durable totals')
 check(report.runs==1 and report.pending==1 and report.total.missing_usage==1,'unfinished starts and run outcomes survive module restart')
+local recovered_session=session('transport-recovered-cost')
+local recovered_span=telemetry.start({session_id=recovered_session,run_id='recovered'},'model_call',{})
+telemetry.finish(recovered_span,{ok=true,normalized=normalized,transport_failed_attempts=1})
+local recovered_report=telemetry.snapshot(recovered_session)
+check(recovered_report.total.transport_failed_attempts==1 and not recovered_report.total.cost_known,
+  'recovered transport cannot claim complete cost when the lost attempt usage is unknown')
 local page=telemetry.events(sid,0,2)
 check(#page.events==2 and page.has_more and telemetry.events(sid,page.next_cursor,2).events[1].seq>page.next_cursor,'export cursor does not skip or repeat')
 

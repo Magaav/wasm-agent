@@ -235,8 +235,8 @@ function M.build(opts)
   local write = tonumber(normalized.cacheWrite)
   local output = tonumber(normalized.output) or 0
   local uncached = tonumber(normalized.input)
-  local cost = { known = false }
-  if rates and normalized.known == true then
+  local cost = { known = false, transport_usage_unknown=(response.transport_failed_attempts or 0)>0 }
+  if rates and normalized.known == true and (response.transport_failed_attempts or 0)==0 then
     local input_rate, output_rate = tonumber(rates.input), tonumber(rates.output)
     if input_rate and output_rate then
       local input_cost = (uncached or 0) * input_rate / 1000000
@@ -288,7 +288,7 @@ function M.build(opts)
   local totals = snapshot.total or {}
   local inference = snapshot.inference or {}
   local session_cost = { known = false }
-  if inference.calls and inference.calls > 0 and inference.unpriced == 0 then
+  if inference.calls and inference.calls > 0 and inference.unpriced == 0 and (inference.transport_failed_attempts or 0)==0 then
     session_cost = { known = true, total = inference.cost, cache = nil }
   end
   report.session = {
@@ -302,7 +302,9 @@ function M.build(opts)
     cost_known = totals.cost_known == true,
     cache_known = totals.cache_known == true,
     inference_cost = inference.cost,
-    inference_cost_known = inference.calls and inference.calls > 0 and inference.unpriced == 0 or false,
+    inference_cost_known = inference.calls and inference.calls > 0 and inference.unpriced == 0
+      and (inference.transport_failed_attempts or 0)==0 or false,
+    transport_failed_attempts = totals.transport_failed_attempts or 0,
     inference_cache_read = inference.cacheRead or 0,
     inference_prompt = inference.prompt or 0,
     compaction_calls = (snapshot.compaction or {}).calls or 0,
@@ -400,7 +402,9 @@ function M.render(report)
       money(cache.cost.uncached_input), money(cache.cost.cache_read),
       money(cache.cost.cache_write), money(cache.cost.output))
   else
-    lines[#lines + 1] = "  cost unpriced (no rates for this model)"
+    lines[#lines + 1] = cache.cost.transport_usage_unknown
+      and "  cost incomplete (lost transport attempt usage unknown)"
+      or "  cost unpriced (no rates for this model)"
   end
   if cache.relation then
     lines[#lines + 1] = string.format("  prefix %s%s", tostring(cache.relation),

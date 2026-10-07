@@ -255,6 +255,11 @@ may already have been billed or partially streamed. Known returned content,
 commentary, reasoning or tool calls prohibit retry. These are inference retries,
 never permission to replay a dispatched tool, credential refresh or unknown effect.
 The existing separately bounded response-header-timeout policy is unchanged.
+The Pi subscription bridge has its own one-retry transport policy, default1 via
+`WASM_AGENT_SUBSCRIPTION_TRANSPORT_RETRIES` (0 disables). It requires an observed
+transient cause before model output, preserves one operation deadline, records
+both attempts and never multiplies through this generic retry loop. See
+[OPENAI-SUB.md](OPENAI-SUB.md#stream-diagnostics-and-one-safe-retry).
 
 ## Supply chain
 

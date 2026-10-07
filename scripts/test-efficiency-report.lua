@@ -118,6 +118,16 @@ check(unknown_report.cache.known == false and unknown_report.cache.hit_percent =
 local unknown_text = efficiency.render(unknown_report)
 check(unknown_text:find('unknown, not zero', 1, true) ~= nil, 'the unknown cache rate says so')
 
+local recovered=session('efficiency-transport-recovered')
+local recovered_start=telemetry.start({session_id=recovered,run_id='run'},'model_call',{model='test-model',prompt_shape=SHAPE})
+telemetry.finish(recovered_start,{ok=true,usage=RAW,normalized=telemetry.normalize(RAW,RATES),transport_failed_attempts=1})
+local recovered_report=efficiency.build({session_id=recovered})
+check(not recovered_report.cache.cost.known and not recovered_report.session.cost_known
+  and not recovered_report.session.inference_cost_known,'lost retry usage cannot become a complete priced call or session')
+check(recovered_report.session.transport_failed_attempts==1,'recovered transport attempt is counted explicitly')
+check(efficiency.render(recovered_report):find('lost transport attempt usage unknown',1,true),
+  'a priced but incomplete request names missing transport usage, not missing rates')
+
 -- The legacy debug `request` key captures only model/messages/tools, not an exact request.
 local with_prefix = session('efficiency-prefix')
 memory.append_turn(with_prefix, {

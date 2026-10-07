@@ -258,7 +258,7 @@ function M.runtime()
   if runtime then return runtime end
   local root = host.getenv("WASM_AGENT_LUA_ROOT") or ""
   local sources = {}
-  for _, name in ipairs({"agent", "provider", "memory", "tools", "telemetry", "tool_output", "model_window", "file_tools", "evidence_view", "diagnose", "prefix_audit"}) do
+  for _, name in ipairs({"agent", "provider", "memory", "tools", "telemetry", "tool_output", "model_window", "file_tools", "evidence_view", "diagnose", "prefix_audit", "openai_sub", "openai_sub_bridge"}) do
     local key = "lua/core/" .. name .. ".lua"
     sources[name] = (LOADED_SOURCES or {})[key] or "unavailable (older host)"
   end
@@ -301,12 +301,13 @@ end
 local function empty()
   return {calls=0, failed=0, missing_usage=0, missing_cache=0, unpriced=0,
     prompt=0, input=0, cacheRead=0, cacheWrite=0, output=0, reasoning=0,
-    reasoning_unknown=0, cost=0, ms=0}
+    reasoning_unknown=0, transport_failed_attempts=0, cost=0, ms=0}
 end
 local function add(total, data)
   total.calls = total.calls + 1
   total.failed = total.failed + (data.ok == false and 1 or 0)
   total.ms = total.ms + (data.ms or 0)
+  total.transport_failed_attempts = total.transport_failed_attempts + (data.transport_failed_attempts or 0)
   local u = data.normalized or {}
   if not u.known then total.missing_usage = total.missing_usage + 1 end
   if not u.cache_known then total.missing_cache = total.missing_cache + 1 end
@@ -387,6 +388,7 @@ function M.snapshot(session_id)
   report.run_p95_ms=run_durations[math.max(1,math.ceil(#run_durations*.95))]
   report.total.total = report.total.prompt + report.total.output
   report.total.cost_known = report.total.unpriced == 0 and report.total.calls > 0
+    and report.total.transport_failed_attempts == 0
   report.total.cache_known = report.total.missing_cache == 0 and report.total.calls > 0
   -- The two context reads are not allowed to take the report down with them: what a ledger that can be
   -- read says with an unavailable context block is still more than a Lua error to the caller.

@@ -1836,6 +1836,7 @@ gate_run node scripts/check-deploy-docs.mjs
 gate_run node scripts/test-delivery-refresh.mjs
 env -u GATE_LANE_HELD node scripts/test-gate-lane-wiring.cjs
 gate_run node scripts/test-openai-sub.cjs "$BIN"
+gate_run node scripts/test-subscription-transport.cjs "$WASM_AGENT_HOME" "$BIN"
 # And the levels that route declares, read from the catalogue this repo owns
 # (`lua/core/openai_sub_catalogue.lua`) rather than from a third-party store at request time: the
 # fixture writes a *disagreeing* store where pi's store lives and none of it may reach the answer, so
