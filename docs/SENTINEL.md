@@ -53,6 +53,26 @@ survives watcher replacement; an unsettled earlier effect refuses another.
 Only actual verified installation settles that reservation. Failed/unknown
 effects are retained for explicit reconciliation and are never replayed.
 
+A consumed terminal failure can leave the installation reservation held even after
+finalization is separately repaired. From an external authorized executor use:
+
+```text
+wa-sentinel protocol reconcile <exact-request-id> --reason "why this recovery is authorized"
+```
+
+This is **verification only**, never installation retry. It revalidates the parent
+owner, immutable intent and exact admitted reservation generation, current clean
+published source, installed artifacts/UI/scripts, process creation identities and
+fresh actual verifier. It archives original request/result/state/cursor/reservation
+before checking, then marks only that exact reservation verified on success. It
+preserves failed return journals and terminal delivery cursors, emits no new wake,
+and cannot grant another attempt to an unknown effect. Missing/mismatched evidence
+or verification failure leaves the reservation held; cached green packets do not
+settle it. In-turn invocation refuses; queue an allowlisted operator script through
+Sentinel `request run` for the external verification door. Repeat verification is
+allowed but never replays the installer. A source newer than the request still
+refuses, so reconcile while its exact source remains the installed baseline.
+
 The watcher observes returns natively. The shipped `sentinel-return-observe.sh`
 and `sentinel-return-prepare.sh` invoke `protocol observe` and
 `protocol compose <key-only-event-file>` respectively. General event ingress

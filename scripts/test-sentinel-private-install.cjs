@@ -27,7 +27,7 @@ function save(name,value){fs.writeFileSync(path.join(base,name),JSON.stringify(v
 async function until(fn,label,ms=180000){const started=Date.now();while(Date.now()-started<ms){if(await fn())return;await sleep(100);}throw Error(label);}
 async function run(program,argv,name){const out=fs.openSync(path.join(base,name+'.stdout'),'wx'),err=fs.openSync(path.join(base,name+'.stderr'),'wx');const child=spawn(program,argv,{cwd:source,env:privateEnv,windowsHide:true,stdio:['ignore',out,err]});const receipt=await new Promise((resolve,reject)=>{child.once('error',reject);child.once('exit',(code,signal)=>resolve({pid:child.pid,code,signal}));});fs.closeSync(out);fs.closeSync(err);save(name+'.receipt.json',receipt);assert.equal(receipt.code,0,name+' failed; inspect retained stdout/stderr');return receipt;}
 async function api(route,body){const r=await fetch(url+route,{...(body?{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)}:{}),signal:AbortSignal.timeout(120000)});assert(r.ok,route+' HTTP '+r.status);return r.json();}
-function cli(...argv){const r=spawnSync(path.join(install,'wa-sentinel.exe'),argv,{cwd:source,env:privateEnv,encoding:'utf8',windowsHide:true,timeout:30000});save('cli-'+(++sequence)+'.json',{argv,pid:r.pid,status:r.status,stdout:r.stdout,stderr:r.stderr});assert.equal(r.status,0,r.stderr);return r.stdout;}
+function cli(...argv){const r=spawnSync(path.join(install,'wa-sentinel.exe'),argv,{cwd:source,env:privateEnv,encoding:'utf8',windowsHide:true,timeout:argv[0]==='protocol'&&argv[1]==='reconcile'?120000:30000});save('cli-'+(++sequence)+'.json',{argv,pid:r.pid,status:r.status,stdout:r.stdout,stderr:r.stderr});assert.equal(r.status,0,r.stderr);return r.stdout;}
 async function gone(pid){await until(()=>{try{process.kill(pid,0);return false;}catch{return true;}},'owned pid did not exit '+pid,15000);}
 (async()=>{try{
  // Source is a full clone with an actual private remote main, never fake upstream on a live checkout.
@@ -123,8 +123,35 @@ async function gone(pid){await until(()=>{try{process.kill(pid,0);return false;}
  const mutant=await import(pathToFileURL(mutantFile).href);
  try{fs.writeFileSync(resultFile,JSON.stringify({...result,request_id:'wrong-request'}));assert.equal(mutant.verifyActual(source,install,request,binding,dir,privateEnv).ok,true,'removed causal check must admit the actual wrong request');negativeCount++;save('causal-removal.json',{red:true,actual_wrong_request:'wrong-request',original_refused:true,mutant_admitted:true});}finally{fs.writeFileSync(resultFile,resultBytes);}
  const clean=verifyActual(source,install,request,JSON.parse(fs.readFileSync(path.join(dir,'binding.json'))),dir);assert.equal(clean.ok,true);
- save('result.json',{ok:true,request_id:request.id,head:packet.head,tree:packet.tree,ack_ms:ackMs,checks:10+negativeCount+admissionNegatives,skipped:0,paid_calls:0,actual_installer:true,actual_verifier:true,private_source:source,notices:terminal.length});
- console.log(`sentinel private install ok (${10+negativeCount+admissionNegatives} checks, 0 skipped)`);
+ // Recovery after a consumed terminal failure uses the real native verifier, not
+ // cursor deletion or a second installation. Original immutable return survives.
+ cli('job','disable','onSentinelReturn');
+ await until(async()=>{const h=await api('/health');return h.current===null&&h.runs.length===0;},'parent drained for reconciliation');
+ const activeFile=path.join(box,'protocol-effect.json'),effectBytes=fs.readFileSync(path.join(dir,'effect.json')),effect=JSON.parse(effectBytes);
+ fs.writeFileSync(activeFile,JSON.stringify(effect));
+ const cursorFile=path.join(dir,'observation.json'),originalCursor=fs.readFileSync(cursorFile);
+ const failureFile=path.join(dir,'returns','private-reconciled-failure.json'),failureBytes=Buffer.from(JSON.stringify({id:request.id,phase:'failed',detail:'private already-recovered finalization',at:Math.floor(Date.now()/1000)}));
+ fs.writeFileSync(failureFile,failureBytes);fs.writeFileSync(cursorFile,JSON.stringify({slot:99,next_at:Number.MAX_SAFE_INTEGER,last_event:'private-reconciled-failure'}));
+ const terminalCursor=fs.readFileSync(cursorFile),beforeRecovery=proof.snapshot(source,install,undefined,privateEnv);
+ const negativeCli=(label,env=privateEnv)=>{const r=spawnSync(path.join(install,'wa-sentinel.exe'),['protocol','reconcile',request.id,'--reason','private explicit verification-only recovery'],{cwd:source,env,encoding:'utf8',windowsHide:true,timeout:120000});save('reconcile-negative-'+label+'.json',{status:r.status,stdout:r.stdout,stderr:r.stderr});assert.notEqual(r.status,0,label);assert.deepEqual(fs.readFileSync(activeFile),Buffer.from(JSON.stringify(effect)),'negative cannot settle reservation');};
+ negativeCli('in-turn',{...privateEnv,WASM_AGENT_IN_TURN:'1'});
+ try{fs.writeFileSync(resultFile,JSON.stringify({...result,request_id:'wrong-reconciliation-request'}));negativeCli('wrong-result');}finally{fs.writeFileSync(resultFile,resultBytes);}
+ const settled=JSON.parse(cli('protocol','reconcile',request.id,'--reason','private recovered finalization observed end to end'));
+ assert(settled.ok&&settled.reservation==='verified'&&settled.effect_replayed===false&&settled.original_returns_preserved);
+ assert.equal(JSON.parse(fs.readFileSync(activeFile)).phase,'verified');
+ assert.deepEqual(fs.readFileSync(cursorFile),terminalCursor);assert.deepEqual(fs.readFileSync(failureFile),failureBytes);
+ const afterRecovery=proof.snapshot(source,install,undefined,privateEnv);
+ assert.equal(afterRecovery.listener_created,beforeRecovery.listener_created);assert.equal(afterRecovery.watcher_created,beforeRecovery.watcher_created);
+ assert.equal(afterRecovery.node_sha256,beforeRecovery.node_sha256);assert.equal(afterRecovery.sentinel_sha256,beforeRecovery.sentinel_sha256);
+ assert.deepEqual(fs.readFileSync(path.join(dir,'effect.json')),effectBytes);
+ const repeated=JSON.parse(cli('protocol','reconcile',request.id,'--reason','private idempotent re-verification, no second effect'));
+ assert(repeated.ok&&repeated.effect_replayed===false);
+ save('reconciliation-e2e.json',{ok:true,native_actual_verifier:true,terminal_cursor_preserved:true,failed_return_preserved:true,processes_unchanged:true,effect_replayed:false});
+ // Leave the fixture's original observation evidence intact for later inspection.
+ fs.writeFileSync(cursorFile,originalCursor);fs.unlinkSync(failureFile);
+ const recoveryChecks=8;
+ save('result.json',{ok:true,request_id:request.id,head:packet.head,tree:packet.tree,ack_ms:ackMs,checks:10+negativeCount+admissionNegatives+recoveryChecks,skipped:0,paid_calls:0,actual_installer:true,actual_verifier:true,actual_reconciliation:true,private_source:source,notices:terminal.length});
+ console.log(`sentinel private install ok (${10+negativeCount+admissionNegatives+recoveryChecks} checks, 0 skipped)`);
  }finally{
   if(releaseBusy)releaseBusy();
   if(fs.existsSync(path.join(box,'sentinel.pid'))){const pid=Number(fs.readFileSync(path.join(box,'sentinel.pid')));fs.writeFileSync(path.join(box,'stop'),'owned private fixture cleanup');await gone(pid);}

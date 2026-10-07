@@ -215,6 +215,12 @@ else
 fi
 # END sentinel-intake required proofs
 gate_run node scripts/test-sentinel-service-deploy.cjs
+if [ "${OS:-}" = "Windows_NT" ]; then
+  gate_run node scripts/test-sentinel-reconcile.cjs "$PWD/rust/wa-sentinel/target/debug/wa-sentinel.exe" "$(cygpath -w "$GATE_HOME/rc")"
+else
+  echo "SKIP: native Windows reconciliation CLI fixture (1 skipped)"
+  SKIPPED=$((SKIPPED + 1))
+fi
 gate_run node scripts/test-install-isolation.mjs
 gate_run node scripts/test-gate-check.mjs
 run_proof_fixture producer 16 node scripts/test-producer-admission.mjs
@@ -1923,7 +1929,7 @@ run_proof_fixture fleet 20 node scripts/test-orchestrator.cjs "$BIN"
 gate_run node scripts/test-completion-wake.cjs "$BIN"
 if [ "${OS:-}" = "Windows_NT" ]; then
   gate_run python scripts/test-sentinel-owned-job.py --repo "$PWD" --evidence "$(git rev-parse --git-path owned-return-gate-$$)"
-  run_proof_fixture sentinelInstall 22 python scripts/test-sentinel-owned-job.py --repo "$PWD" --evidence "$(git rev-parse --git-path private-install-gate-$$)" --script "$PWD/scripts/test-sentinel-private-install.cjs" --deadline 1800
+  run_proof_fixture sentinelInstall 30 python scripts/test-sentinel-owned-job.py --repo "$PWD" --evidence "$(git rev-parse --git-path private-install-gate-$$)" --script "$PWD/scripts/test-sentinel-private-install.cjs" --deadline 1800
 else
   echo "SKIP: Windows owned return Job proof"
   SKIPPED=$((SKIPPED + 1))
