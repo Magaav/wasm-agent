@@ -125,8 +125,23 @@ Use `impact` after a patch when you need the changed symbols plus resolved
 callers, dependencies, and test leads in one bounded result. Every impact row
 includes hop direction and the call-site edge that reached it, including the
 resolver strategy and confidence. Continue with `next_cursor`; a cursor fails if
-the graph generation or request changed. This is factual static reachability. It
-does not estimate risk and cannot see dynamic calls.
+the graph generation, request or root changed. Source actions use the session's
+worktree by default; explicit `cwd` selects a different read-only source root.
+Git audit/impact use its actual Git top-level for both patch and index. Check
+`impact.root` against the intended checkout; missing/failed required bindings
+refuse, never silently fall back. Root-scoped caches are on-demand and do not
+replace the runtime watcher index. This is factual static reachability, not a
+risk estimate; dynamic calls remain invisible.
+
+Focused repair verification: `node <repo>/scripts/test-graph-workspace.cjs
+<source-built-wa> <fresh-evidence-dir>` then the same command with `--post` before
+its arguments. The recorded `graph-workspace-regression` spell crystallizes
+that sequence and verifies source/binary/log hashes. Replay currently refuses
+enforced session worktrees (`workspace_execution_context_unsupported`), so it
+is not replay-verified or preferred; keep the verified direct CLI without
+relaxing workspace binding. Tests reproduce three false missing files on the
+old path, and exercise explicit/default/nested/native roots and cursor isolation.
+They do not install the candidate or claim dynamic-call completeness.
 
 ```
 graph {action:"explain", name:"append_turn"}

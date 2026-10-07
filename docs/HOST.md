@@ -195,10 +195,15 @@ one database rather than a silent per-interpreter split.
 ## The code graph
 
 `host.graph_index|query|search|source|overview|impact|explain|path|caps|stats|status` expose `wa-graph`'s SQLite
-index of the source tree to Lua. The graph lives beside the ledger
-(`<home>/.wasm-agent/graph.db`) and indexes the runtime worktree — the node's cwd —
-which is the source the binary is actually running from. `WA_GRAPH_ROOT` and
-`WA_GRAPH_DB` override both; `WA_GRAPH_WATCH=0` disables the watcher.
+index of the source tree to Lua. The configured runtime graph lives beside the
+ledger (`<home>/.wasm-agent/graph.db`). Model source actions pass the session
+worktree (or explicit `cwd`) as `root`; Git audit/impact normalize it to the Git
+top-level for both patch and index. Failed/missing required bindings refuse.
+Unbound navigation uses the configured runtime root. Other canonical roots get
+on-demand caches at `<configured-db-stem>.roots/<root-SHA256>.db`, leaving the
+runtime watcher/index independent. Explicit host `db` overrides are preserved.
+`WA_GRAPH_ROOT` and `WA_GRAPH_DB` override runtime defaults;
+`WA_GRAPH_WATCH=0` disables its watcher. See [GRAPH.md](GRAPH.md).
 
 Reads pin a read-only database snapshot and compare every in-scope file's exact
 bytes before and after answering. A stale or unbuilt graph is rebuilt

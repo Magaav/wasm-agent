@@ -360,7 +360,9 @@ impl Store {
             .and_then(Value::as_u64)
             .unwrap_or(24_000)
             .clamp(2_048, 200_000) as usize;
+        let canonical_root=root.canonicalize()?.to_string_lossy().into_owned();
         let digest = crate::store::fnv1a(&serde_json::to_vec(&json!({
+            "root":canonical_root,
             "changes":request.get("changes"),"direction":direction,"depth":depth
         }))?);
         let mut offset = request.get("offset").and_then(Value::as_u64).unwrap_or(0) as usize;
@@ -471,7 +473,7 @@ impl Store {
         let build = |selected: &[Value]| {
             let next = offset + selected.len();
             json!({
-                "generation":generation,"freshness":"verified_snapshot",
+                "root":canonical_root,"generation":generation,"freshness":"verified_snapshot",
                 "direction":direction,"depth":depth,
                 "changed_symbols":{"total":changed_total,"returned":changed_public.len(),
                     "truncated":changed_public.len() < changed_total,"rows":changed_public},

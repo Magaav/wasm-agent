@@ -18,6 +18,11 @@ The final answer says when leads, gaps, or audit errors remain.
 
 The native `graph {action:"audit"}` verb can run the same check on demand;
 `source:"git"` audits the current Git working-tree patch (staged and unstaged).
+Patch and index share the selected Git top-level, not the node's canonical
+checkout: explicit `cwd`, else the session worktree, else ambient Git cwd.
+Native changeset audits use the session root too, including automatic final-answer
+and pre-commit checks. Required missing/failed bindings refuse rather than audit
+a different tree; workspace caches do not replace the runtime index ([GRAPH.md](GRAPH.md)).
 A standard `git commit` issued through the `bash` tool is checked before the
 command runs: if it has unread leads, the first attempt returns them without
 committing. A repeated attempt with the same patch can acknowledge a false

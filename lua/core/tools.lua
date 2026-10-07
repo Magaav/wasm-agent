@@ -207,7 +207,7 @@ M.admin = {
     outcome = { type = "string", enum = { "confirmed_catch", "false_positive", "unresolved" }, description = "audit_feedback: operator-reviewed outcome; never self-certify a catch." },
     commit = { type = "string", description = "audit_feedback: optional commit hash for evidence." },
     source = { type = "string", enum = { "native", "git" }, description = "audit/impact: native changeset or current Git working-tree patch; impact defaults to git." },
-    cwd = { type = "string", description = "audit/impact source=git: repository working directory; defaults to the session cwd." },
+    cwd = { type = "string", description = "Source actions: indexed directory; defaults to the session worktree. Git audit/impact also collect the patch from this repository (subdirectories resolve to its root)." },
   }, { "action" }),
   schema("diagnose", "Execute up to eight predetermined read/grep steps once, in order. Stop on failure, incomplete evidence or an unmet expectation. No shell, repair, retry or effects.", {
     steps={type="array",minItems=1,maxItems=8,items={type="object",properties={
@@ -914,14 +914,19 @@ function M.dispatch(memory, name, args, role, ctx)
   elseif name == "graph" then
     local graph = dofile("lua/core/graph.lua")
     local action = args.action or "explain"
+    local root, root_err
+    if action~="audit_report" and action~="audit_assess" and action~="audit_feedback" then
+      root,root_err=patch_audit.workspace_root(memory,ctx,args.cwd)
+      if root_err then return {error=root_err} end
+    end
     if action == "audit" then
       if args.source=="git" then
         if ctx.subagent then return {error="git_audit_forbidden_for_subagent"} end
-        return patch_audit.git_audit(args.cwd or session_cwd(memory,ctx),ctx.reviewed_paths,
+        return patch_audit.git_audit(root,ctx.reviewed_paths,
           {session_id=ctx.session_id,run_id=ctx.run_id})
       end
       return patch_audit.run(ctx.changes, ctx.reviewed_paths,
-        {session_id=ctx.session_id,run_id=ctx.run_id})
+        {session_id=ctx.session_id,run_id=ctx.run_id,root=root})
     elseif action == "audit_report" then
       return patch_audit.report(args.hours)
     elseif action == "audit_assess" then
@@ -932,26 +937,26 @@ function M.dispatch(memory, name, args, role, ctx)
     if not graph.available() then return { error = "graph_unavailable" } end
     local result, err
     if action == "search_symbols" then result, err = graph.search_symbols(args.name,
-      { limit = args.limit, prefer_implementations = args.prefer_implementations })
+      { root=root, limit = args.limit, prefer_implementations = args.prefer_implementations })
     elseif action == "symbol_source" then result, err = graph.symbol_source({
       path=args.path,name=args.name,line=args.line,kind=args.kind},
-      {byte_offset=args.byte_offset,max_bytes=args.max_bytes})
-    elseif action == "overview" then result, err = graph.overview({aspects=args.aspects,limit=args.limit,max_bytes=args.max_bytes})
+      {root=root,byte_offset=args.byte_offset,max_bytes=args.max_bytes})
+    elseif action == "overview" then result, err = graph.overview({root=root,aspects=args.aspects,limit=args.limit,max_bytes=args.max_bytes})
     elseif action == "impact" then
       local patch, patch_err
       local source=args.source or "git"
       if source=="native" then patch,patch_err=patch_audit.native_changes(ctx.changes)
-      else patch,patch_err=patch_audit.git_changes(args.cwd or session_cwd(memory,ctx)) end
+      else patch,patch_err=patch_audit.git_changes(root) end
       if not patch then return {error=patch_err or "impact_patch_unavailable",source=source} end
-      result,err=graph.impact(patch,{direction=args.direction,depth=args.depth,limit=args.limit,
+      result,err=graph.impact(patch,{root=root,direction=args.direction,depth=args.depth,limit=args.limit,
         offset=args.offset,cursor=args.cursor,max_bytes=args.max_bytes})
       if result then result.source=source; result.patch_fingerprint=patch.fingerprint end
-    elseif action == "explain" then result, err = graph.explain(args.name)
-    elseif action == "query" then result, err = graph.query(args.name, { limit = args.limit })
-    elseif action == "path" then result, err = graph.path(args.from, args.to)
-    elseif action == "caps" then result, err = graph.caps()
-    elseif action == "stats" then result, err = graph.stats()
-    elseif action == "index" then result, err = graph.index({ force = args.force })
+    elseif action == "explain" then result, err = graph.explain(args.name,{root=root})
+    elseif action == "query" then result, err = graph.query(args.name, { root=root,limit = args.limit })
+    elseif action == "path" then result, err = graph.path(args.from, args.to,{root=root})
+    elseif action == "caps" then result, err = graph.caps({root=root})
+    elseif action == "stats" then result, err = graph.stats({root=root})
+    elseif action == "index" then result, err = graph.index({ root=root,force = args.force })
     else return { error = "unknown_graph_action:" .. tostring(action) } end
     if not result then return { error = err or "graph_error" } end
     return result

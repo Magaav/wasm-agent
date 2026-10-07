@@ -20,7 +20,44 @@ function M.enabled()
   return host.getenv and host.getenv("WA_GRAPH_PATCH_AUDIT") == "1"
 end
 
+-- One root for the patch and index. A missing required binding must not silently
+-- audit canonical/runtime source. Explicit cwd is read-only scope, not a write grant.
+function M.workspace_root(memory, context, cwd)
+  local binding
+  if memory and context and context.session_id then
+    if memory.session_workspace then
+      local ok, workspace=pcall(memory.session_workspace,context.session_id)
+      if not ok then return nil,"graph_workspace_lookup_failed" end
+      if workspace and workspace.required and (workspace.state~="allocated"
+          or not workspace.worktree or workspace.worktree=="") then
+        return nil,"session_workspace_unavailable"
+      end
+      binding=workspace and workspace.worktree
+    elseif memory.session_worktree then
+      local ok, worktree=pcall(memory.session_worktree,context.session_id)
+      if not ok then return nil,"graph_workspace_lookup_failed" end
+      binding=worktree
+    end
+  end
+  local root=type(cwd)=="string" and cwd~="" and cwd or binding
+  if not root or root=="" then return nil end -- legacy unbound runtime default
+  if type(root)~="string" then return nil,"graph_workspace_invalid" end
+  local normalized=root:gsub("\\", "/")
+  if normalized:sub(1,1)~="/" and not normalized:match("^%a:/") and binding and binding~="" then
+    root=binding:gsub("[/\\]+$","").."/"..root
+  end
+  if not host.canonical_path then return nil,"graph_root_resolution_unavailable" end
+  local real=host.canonical_path(root)
+  if not real then return nil,"graph_root_unavailable:"..root end
+  return real
+end
+
 local function run_request(request, reviewed, context, source)
+  if context and not request.root then
+    local root,err=M.workspace_root(dofile("lua/core/memory.lua"),context,context.root)
+    if err then return failure(context,source,err) end
+    request.root=root
+  end
   if not host.graph_patch_audit then return failure(context,source,"graph_patch_audit_unavailable") end
   request.reviewed={}
   for path, seen in pairs(reviewed or {}) do
@@ -53,6 +90,7 @@ end
 function M.run(changes, reviewed, context)
   local request, err=M.native_changes(changes)
   if not request then return {error=err} end
+  request.root=context and context.root
   return run_request(request,reviewed,context,"native_changeset")
 end
 
@@ -82,6 +120,13 @@ end
 -- current-file line anchors from the actual Git working-tree patch (staged and unstaged).
 -- This is workspace evidence, not attribution to one run.
 function M.git_changes(cwd)
+  local top,root_err=git("git rev-parse --show-toplevel",cwd)
+  if not top then return nil,root_err end
+  cwd=top:gsub("[\r\n]+$","")
+  if cwd=="" or cwd:find("[\r\n]") then return nil,"git_root_invalid" end
+  if not host.canonical_path then return nil,"graph_root_resolution_unavailable" end
+  cwd=host.canonical_path(cwd)
+  if not cwd then return nil,"git_root_unavailable" end
   local diff, err=git("git -c core.quotePath=false diff HEAD --no-ext-diff --no-renames --unified=0 --no-color --",cwd)
   if not diff then return nil,err end
   local untracked, untracked_err=git("git -c core.quotePath=false ls-files --others --exclude-standard --",cwd)
@@ -132,14 +177,16 @@ function M.git_changes(cwd)
     changes[#changes+1]={path=name,gap="deleted_file"}
   end
   table.sort(changes,function(a,b) return a.path<b.path end)
-  return {changes=changes, fingerprint=host.sha256(diff.."\0"..untracked)}
+  return {root=cwd,changes=changes, fingerprint=host.sha256(cwd.."\0"..diff.."\0"..untracked)}
 end
 
 function M.git_audit(cwd, reviewed, context)
-  local patch, err=M.git_changes(cwd)
+  local root,root_err=M.workspace_root(dofile("lua/core/memory.lua"),context,cwd)
+  if root_err then return failure(context,"git_worktree",root_err) end
+  local patch, err=M.git_changes(root)
   if not patch then return failure(context,"git_worktree",err) end
   if #patch.changes==0 then return {verdict="no_patch",lead_count=0,source="git_worktree",worthy="unproven"} end
-  local report=run_request({changes=patch.changes},reviewed,context,"git_worktree")
+  local report=run_request({root=patch.root,changes=patch.changes},reviewed,context,"git_worktree")
   report.patch_fingerprint=patch.fingerprint
   report.patch_source="git_worktree_not_run_attributed"
   return report
