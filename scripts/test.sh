@@ -1646,6 +1646,8 @@ gate_run node skills/parallel-evolution/scripts/test-node-tests.mjs "$WASM_AGENT
 
 # Read-only scoped file discovery: exact candidate pages, no hidden clipped tail.
 gate_run node skills/code-graph/scripts/test-discover-files.mjs "$WASM_AGENT_HOME"
+# Benchmark evidence metadata never recurses into retained solver repositories.
+gate_run node skills/agent-benchmark/scripts/test-artifacts.mjs "$WASM_AGENT_HOME"
 
 # Skills: on-demand instructions (the Agent Skills standard pi implements).
 # Only name and description are always in context; the body loads when a task

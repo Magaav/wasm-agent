@@ -1,0 +1,23 @@
+{
+  "schema": "wasm-agent.benchmark-candidate/v1",
+  "id": "telemetry-empty-payload",
+  "status": "candidate-awaiting-pi-qualification",
+  "taskSource": "9fa1ae552d96d5f54f97a3c857035246a7d69d1d",
+  "sourcePaths": [
+    "scripts/audit-tokens.cjs",
+    "scripts/lib/token-audit.cjs",
+    "scripts/test-token-audit.cjs",
+    "docs/OBSERVABILITY.md"
+  ],
+  "oracle": "telemetry-empty-payload-oracle.cjs",
+  "oracleHiddenDuringRuns": true,
+  "model": "gpt-6-luna",
+  "reasoning": "medium",
+  "piPackage": "@earendil-works/pi-coding-agent",
+  "piLatestObserved": "1.0.4",
+  "piLatestCheckedAt": "2026-10-07",
+  "targetMinutes": [5, 10],
+  "experimentalTimeoutSeconds": 900,
+  "prompt": "Fix the offline telemetry auditor. A genuine Lua export can contain a fieldless payload encoded as [] or the JSON string \"[]\"; today the auditor rejects the export. Accept that empty representation wherever a fieldless event payload is valid, while preserving strict rejection of nonempty arrays, malformed JSON, null and primitive payloads. Keep missing inference usage/cost unknown, preserve duplicate-event and span-boundary validation, and do not mutate the export. Use the existing auditor rather than adding a new framework or dependency. Add focused regression tests and run the existing checks. Work only in this disposable checkout; no network, deployment or push. Finish with the repair and a concise verification report.",
+  "promotionRule": "Pi latest must finish normally in the 5-10 minute calibration window, pass the hidden behavioral oracle and existing checks, and leave a scoped diff. A correct but faster/slower run or failed run triggers fixture reassessment, not success relabelling. Qualification run is excluded from comparative results."
+}

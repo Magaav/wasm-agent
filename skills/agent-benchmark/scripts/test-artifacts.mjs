@@ -1,0 +1,70 @@
+#!/usr/bin/env node
+import fs from 'node:fs';
+import path from 'node:path';
+import assert from 'node:assert/strict';
+import {spawnSync} from 'node:child_process';
+import {fileURLToPath} from 'node:url';
+import {artifacts} from './artifacts.mjs';
+
+const scratch=process.argv[2];
+if(!scratch || !path.isAbsolute(scratch)) throw Error('pass an absolute evidence scratch directory');
+const root=fs.mkdtempSync(path.join(scratch,'artifact-discovery-'));
+let checks=0;
+const check=fn=>{fn();checks++;};
+const put=(file,text='{}')=>{fs.mkdirSync(path.dirname(path.join(root,file)),{recursive:true});fs.writeFileSync(path.join(root,file),text);};
+try {
+  put('edit-workflow-a/report.json');put('edit-workflow-a/manifest.json');
+  put('edit-workflow-a/worktrees/control/report.json','not a report');
+  put('edit-workflow-a/worktrees/control/SKILL.md','noise');
+  for(let i=0;i<1200;i++) put('edit-workflow-a/worktrees/control/nested/'+i+'.md','noise');
+  put('edit-workflow-b/interrupted.txt');put('unrelated/report.json');
+  const page=artifacts({root,prefix:'edit-workflow-'});
+  check(()=>assert.equal(page.recursive,false));
+  check(()=>assert.equal(page.matched_runs,2));
+  check(()=>assert.equal(page.scanned_entries,3));
+  check(()=>assert.equal(page.inspected_report_paths,8));
+  check(()=>assert.deepEqual(page.runs[0].artifacts.map(f=>f.path),['edit-workflow-a/manifest.json','edit-workflow-a/report.json']));
+  check(()=>assert.equal(page.runs[1].report_present,false));
+  check(()=>assert(!JSON.stringify(page).includes('worktrees')));
+  check(()=>assert(page.complete && page.next_offset===null));
+  check(()=>assert.equal(artifacts({root,prefix:'absent-'}).matched_runs,0));
+  check(()=>assert.throws(()=>artifacts({root,prefix:''}),/prefix/));
+  check(()=>assert.throws(()=>artifacts({root,prefix:'../'}),/prefix/));
+  check(()=>assert.throws(()=>artifacts({root,prefix:'edit-',maxBytes:511}),/max-bytes/));
+  check(()=>assert.throws(()=>artifacts({root,prefix:'edit-',offset:-1}),/offset/));
+  check(()=>assert.throws(()=>artifacts({root,prefix:'edit-',offset:1}),/snapshot/));
+  for(let i=0;i<60;i++) put('edit-workflow-many-'+String(i).padStart(3,'0')+'/report.json');
+  let next=artifacts({root,prefix:'edit-workflow-',maxBytes:2048}),pages=0;
+  const collected=[];
+  while(true) {
+    check(()=>assert(Buffer.byteLength(JSON.stringify(next)+'\n')<=2048));
+    collected.push(...next.runs);pages++;
+    if(next.complete) break;
+    next=artifacts({root,prefix:'edit-workflow-',maxBytes:2048,offset:next.next_offset,snapshot:next.snapshot});
+  }
+  check(()=>assert.equal(collected.length,62));
+  check(()=>assert.equal(new Set(collected.map(r=>r.directory)).size,62));
+  put('edit-workflow-a/report.json','changed-size');
+  check(()=>assert.throws(()=>artifacts({root,prefix:'edit-workflow-',offset:1,snapshot:next.snapshot}),/changed/));
+  check(()=>assert.throws(()=>artifacts({root,prefix:'edit-workflow-',offset:63,snapshot:artifacts({root,prefix:'edit-workflow-'}).snapshot}),/exceeds/));
+  fs.mkdirSync(path.join(root,'edit-workflow-b/report.json'));
+  check(()=>assert.throws(()=>artifacts({root,prefix:'edit-workflow-'}),/regular file/));
+  fs.rmdirSync(path.join(root,'edit-workflow-b/report.json'));
+  const cli=fileURLToPath(new URL('./artifacts.mjs',import.meta.url));
+  const run=spawnSync(process.execPath,[cli,'--root',root,'--prefix','edit-workflow-a'],{encoding:'utf8'});
+  check(()=>assert.equal(run.status,0,run.stderr));
+  check(()=>assert.equal(JSON.parse(run.stdout).matched_runs,1));
+  const post=fileURLToPath(new URL('./artifacts-post.mjs',import.meta.url));
+  const state=artifacts({root,prefix:'edit-workflow-a'});
+  const settled=spawnSync(process.execPath,[post,root,'edit-workflow-a',state.snapshot,'1'],{encoding:'utf8'});
+  check(()=>assert.equal(settled.status,0,settled.stdout+settled.stderr));
+  check(()=>assert.equal(JSON.parse(settled.stdout).matched_runs,1));
+  const wrong=spawnSync(process.execPath,[post,root,'edit-workflow-a',state.snapshot,'2'],{encoding:'utf8'});
+  check(()=>assert.equal(wrong.status,1));
+  const stale=spawnSync(process.execPath,[post,root,'edit-workflow-a','0'.repeat(64),'1'],{encoding:'utf8'});
+  check(()=>assert.equal(stale.status,1));
+  const bad=spawnSync(process.execPath,[cli,'--root',root,'--prefix','edit-','--recursive','yes'],{encoding:'utf8'});
+  check(()=>assert.equal(bad.status,1));
+  check(()=>assert.equal(JSON.parse(bad.stdout).ok,false));
+  console.log(JSON.stringify({ok:true,checks,skipped:0,nested_noise_files:1202,recursive:false,pagination_pages:pages}));
+} finally {fs.rmSync(root,{recursive:true,force:true});}
