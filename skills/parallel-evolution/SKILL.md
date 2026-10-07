@@ -92,6 +92,30 @@ with your change in it. If there is no gate, say so in your report.
 In wasm-agent, the closing spell below supplies this gate after the candidate commit
 and push, before integration. A published concern branch is still a proposal until it passes.
 
+For a native Node `--test` suite, never infer its reporter from captured stdout.
+Use `--test-reporter=tap` explicitly when collecting TAP. The verified helper
+[scripts/node-tests.mjs](scripts/node-tests.mjs) takes absolute cwd, a fresh
+absolute evidence directory, and explicit test files:
+
+```
+node <absolute-skill-dir>/scripts/node-tests.mjs <repo> <new-evidence-dir> <test-file> [test-file...]
+```
+
+It retains full stdout/stderr and a receipt with the actual process exit/signal,
+TAP counts and hashes. Missing/duplicate/incomplete summaries, zero tests,
+nonzero exits and timeouts refuse success. Skips/todos stay visible; decide
+whether they satisfy the requested scope rather than calling them tested.
+Never manufacture `status:0` from an old text log or rerun effects merely to
+repair a format assumption. Existing evidence generations refuse overwrite.
+This is a test collector, not a process-tree settlement certificate; external
+long-lived descendants still require the operation supervisor. Validate with
+`node <skill>/scripts/test-node-tests.mjs <absolute-evidence-scratch>`.
+The recorded `node-test-tap-collect` spell uses shell-quoted runner/cwd/evidence/
+file arguments and a JS string literal `receipt_js`; its post reads the retained
+receipt rather than rerunning tests. Replay currently refuses mandatory worktree
+bindings (`workspace_execution_context_unsupported`); it is not replay-verified
+or preferred. Keep this verified CLI until actual spell postconditions pass.
+
 **5. Commit one logical change.**
 A small commit whose message says **why**, not what — the diff already says what. Include
 the provenance trailer the repository requires (harness, node, session), or the commit

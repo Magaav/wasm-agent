@@ -374,6 +374,20 @@ op-1791332200656358-6932-27. Job enablement/revisions unchanged; no cloud
 installation, provider calls or old maintenance replay. This closure is only a
 ROADMAP note after the installed source, not another binary deployment.
 
+2026-10-07, fixed Ponytail-review collector assuming TAP while Node emitted
+spec output. Added focused `parallel-evolution/scripts/node-tests.mjs` with
+explicit --test-reporter=tap, native file argv and fresh evidence generations;
+retains actual exit/signal, complete stdout/stderr, counts and hashes. Missing,
+duplicate/incomplete summaries, failed/timed-out processes and zero tests refuse
+success; skips/todos remain visible. Collector28 and direct-policy19 passed,
+zero skips. Same Ponytail14 focused tests collected actual exit0, TAP14pass,
+0fail/skip/todo in `PONYTAIL-TAP-TESTS-v153`; original v152 spec log/collector/
+receipts preserved, never relabelled as new TAP proof. Self-review; no Ponytail
+installation, provider calls, inference agents, full gate or AGENTS growth.
+Recorded collector spell refused enforced worktree binding; verified CLI remains
+preferred, no binding relaxation. This is a collector-only external skill repair,
+not a Node/sentinel binary change or arbitrary process-tree drain certificate.
+
 ## Status vocabulary
 
 - **Implemented:** a mechanism exists in the repository; not a release certification.
