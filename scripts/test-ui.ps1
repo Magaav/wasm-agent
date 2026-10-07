@@ -646,6 +646,23 @@ $harness = @'
   window.handleEvent({ type: "done" });
   window.__setBusy(false);
 
+  // Retry topic uses the shared topic header, numbered history and safe text reasons.
+  var retryTopic = document.createElement('wa-retry');
+  document.body.append(retryTopic);
+  for (var ri=1;ri<=10;ri++) retryTopic.update({index:ri,limit:10,cycle:1,state:'failed',reason:'ECONNRESET <img src=x>',window_ms:60000,elapsed_ms:ri*5000});
+  check(retryTopic.querySelectorAll('.retry-line').length===10 && !retryTopic.querySelector('img'),
+    'retry: ten numbered attempts preserve reasons as text');
+  retryTopic.update({index:10,limit:10,cycle:1,state:'reconnecting',reason:'socket failed',wait_ms:180000,window_ms:60000,elapsed_ms:60000});
+  check(retryTopic.querySelector('.trace-label').textContent==='Reconnecting in 3 minutes' && retryTopic.open,
+    'retry: exhausted cycle stays visibly reconnecting');
+  retryTopic.update({index:1,limit:10,cycle:2,state:'attempting',reason:'second cycle',window_ms:60000,elapsed_ms:0});
+  check(retryTopic.querySelectorAll('.retry-line').length===11,
+    'retry: a new cycle keeps previous attempt history');
+  retryTopic.update({index:1,limit:10,cycle:2,state:'recovered',reason:'restored',window_ms:60000,elapsed_ms:1000});
+  check(!retryTopic.open && retryTopic.dataset.state==='recovered',
+    'retry: actual restoration folds the topic without losing its rows');
+  retryTopic.remove();
+
   // The context panel states what it knows in one line. The fixture has a budget
   // and no usage, so this is the "0 / budget" case, and the percentage must be
   // computed rather than printed as a placeholder.

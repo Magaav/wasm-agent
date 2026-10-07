@@ -28,16 +28,17 @@ stream(_m,context,options){
   if(mode==='auth'||mode==='quota'){
    const r=await options.fetch('http://fixture.invalid',{method:'POST'});if(r.status===401||r.status===429)throw Error('HTTP refused');return;
   }
-  if(mode==='fetch-reset'||mode==='redaction'||mode==='signal-abort'){
+  if(mode==='fetch-reset'||mode==='redaction'||mode==='signal-abort'||mode==='recovery-hang'){
    const controller=new AbortController();if(mode==='signal-abort')controller.abort();
-   try{await options.fetch('http://fixture.invalid',{method:'POST',signal:controller.signal});}catch{throw Error('terminated');}return;
+   try{await options.fetch('http://fixture.invalid',{method:'POST',signal:mode==='recovery-hang'?options.signal:controller.signal});}catch{throw Error('terminated');}return;
   }
   if(mode==='partial-text')yield {type:'text_delta',contentIndex:0,delta:'partial'};
   if(mode==='partial-thought')yield {type:'thinking_delta',contentIndex:0,delta:'thinking'};
   if(mode==='partial-tool')yield {type:'toolcall_start',contentIndex:0,partial:{content:[{id:'partial',name:'never_execute'}]}};
   if(mode==='new-progress')yield {type:'future_progress',value:'not displayed'};
   const server=http.createServer((req,res)=>{req.resume();
-   if(mode==='retry-success'&&attempts===2){res.writeHead(200,{'Content-Type':'text/event-stream','x-request-id':'req-local'});res.end('data: {}\\n\\n');return;}
+   if(((mode==='retry-success'||mode==='healthy-slow')&&attempts===2)||(mode==='cycle-success'&&attempts===12)){res.writeHead(200,{'Content-Type':'text/event-stream','x-request-id':'req-local'});
+    res.flushHeaders();if(mode==='healthy-slow')setTimeout(()=>res.end('data: {}\\n\\n'),150);else res.end('data: {}\\n\\n');return;}
    res.writeHead(200,{'Content-Type':'text/event-stream','Content-Length':1000,'x-request-id':'req-local'});
    res.write('data: {}\\n\\n');setTimeout(()=>res.socket.destroy(),15);
   });
@@ -56,6 +57,10 @@ globalThis.fetch=async(url,opts)=>{
   const e=Error('terminated');e.cause=Error('Bearer fixture-sensitive-token https://secret.example/query?token=private');e.cause.code='ECONNRESET';
   if(process.env.FIXTURE_MODE==='auth')return new Response('denied',{status:401});
   if(process.env.FIXTURE_MODE==='quota')return new Response('limited',{status:429});
+  if(process.env.FIXTURE_MODE==='recovery-hang'&&attempts>1){
+    await new Promise((resolve,reject)=>{const abort=()=>{const a=Error('recovery timeout');a.name='AbortError';reject(a);};
+      if(opts.signal.aborted)abort();else opts.signal.addEventListener('abort',abort,{once:true});});
+  }
   throw e;
  }
  return nativeFetch(url,opts);
@@ -65,7 +70,7 @@ globalThis.fetch=async(url,opts)=>{
   const bridge=put('bridge.mjs',text.split('return [==[')[1].split(']==]')[0]);
   const run=(mode,extra={})=>{
     const input=put('request-'+mode+'.json',JSON.stringify({home:root,auth_path:'dummy',model:'fixture',reasoning:'medium',
-      messages:[{role:'user',content:mode}],tools:[],timeout_ms:5000,...extra}));
+      messages:[{role:'user',content:mode}],tools:[],timeout_ms:5000,transport_retries:1,recovery_window_ms:1000,...extra}));
     const result=spawnSync(process.execPath,[bridge,input],{env:{...process.env,WASM_AGENT_PI_PACKAGE:path.join(root,'pi'),FIXTURE_MODE:mode},encoding:'utf8',timeout:10000});
     check(()=>assert(!result.error,result.error?.message));
     const events=(result.stdout||'').trim().split('\n').filter(Boolean).map(line=>JSON.parse(line));
@@ -80,10 +85,14 @@ globalThis.fetch=async(url,opts)=>{
   check(()=>assert.equal(recovered.attempts[0].diagnostic.model_output_seen,false));
   check(()=>assert.equal(recovered.events.filter(e=>e.type==='transport_retry').length,1));
   check(()=>assert.equal(recovered.events.at(-1).result.content,'success'));
+  const healthy=run('healthy-slow',{transport_retries:10,recovery_window_ms:1000});
+  check(()=>assert.equal(healthy.status,0,healthy.stdout));
+  check(()=>assert.equal(healthy.attempts.length,2));
+  check(()=>assert(healthy.events.some(e=>e.type==='retry'&&e.state==='connected')));
   const exhausted=run('repeat-failure');
   check(()=>assert.equal(exhausted.status,1));check(()=>assert.equal(exhausted.attempts.length,2));
   check(()=>assert.equal(exhausted.events.filter(e=>e.type==='transport_retry').length,1));
-  check(()=>assert.match(exhausted.events.at(-1).error,/cause=UND_ERR_(SOCKET|RES_CONTENT_LENGTH_MISMATCH)/));
+  check(()=>assert.match(exhausted.events.at(-1).error,/UND_ERR_(SOCKET|RES_CONTENT_LENGTH_MISMATCH)/));
   const off=run('disabled',{transport_retries:0});
   check(()=>assert.equal(off.attempts.length,1));check(()=>assert.equal(off.events.filter(e=>e.type==='transport_retry').length,0));
   const expired=run('deadline',{timeout_ms:1});
@@ -98,6 +107,21 @@ globalThis.fetch=async(url,opts)=>{
     const r=run(mode);check(()=>assert.equal(r.status,1));check(()=>assert.equal(r.attempts.length,1));
     check(()=>assert.equal(r.events.filter(e=>e.type==='transport_retry').length,0));
   }
+  const ten=run('repeat-failure',{transport_retries:10,recovery_window_ms:1000});
+  check(()=>assert.equal(ten.attempts.length,11));
+  check(()=>assert.equal(ten.events.filter(e=>e.type==='transport_retry').length,10));
+  check(()=>assert.deepEqual(ten.events.filter(e=>e.type==='retry'&&e.state==='attempting').map(e=>e.index),[1,2,3,4,5,6,7,8,9,10]));
+  check(()=>assert.equal(ten.events.filter(e=>e.type==='retry').at(-1).state,'exhausted'));
+  const cycled=run('cycle-success',{transport_retries:10,recovery_window_ms:1000,reconnect_cooldown_ms:50});
+  check(()=>assert.equal(cycled.status,0,cycled.stdout));
+  check(()=>assert.equal(cycled.attempts.length,12));
+  check(()=>assert(cycled.events.some(e=>e.type==='retry'&&e.state==='reconnecting'&&e.cycle===1)));
+  check(()=>assert(cycled.events.some(e=>e.type==='retry'&&e.state==='attempting'&&e.cycle===2&&e.index===1)));
+  check(()=>assert.equal(cycled.events.filter(e=>e.type==='retry').at(-1).state,'recovered'));
+  const hung=run('recovery-hang',{transport_retries:10,recovery_window_ms:1000});
+  check(()=>assert(hung.attempts.length>=9&&hung.attempts.length<=11,'hanging reconnect attempts bounded in cycle'));
+  check(()=>assert(hung.attempts.slice(1).some(e=>e.diagnostic.recovery_timeout===true)));
+  check(()=>assert(hung.events.some(e=>e.type==='retry'&&e.state==='exhausted')));
   const reset=run('fetch-reset');check(()=>assert.equal(reset.attempts[0].diagnostic.stage,'response_headers'));
   check(()=>assert.equal(reset.attempts.length,2));
   const secret=run('redaction');check(()=>assert(!secret.stdout.includes('fixture-sensitive-token')));
@@ -109,6 +133,8 @@ local adapter=dofile('lua/core/openai_sub.lua')
 local telemetry=dofile('lua/core/telemetry.lua')
 local memory=dofile('lua/core/memory.lua');memory.setup()
 local sid=memory.start_session('','subscription-transport-fixture',{user_id='master',node_id=''})
+local real_getenv=host.getenv
+host.getenv=function(k) if k=='WASM_AGENT_SUBSCRIPTION_TRANSPORT_RETRIES' then return '1' end return real_getenv(k) end
 local result=adapter.complete('fixture',{{role='user',content='retry-success'}},{},false,
   {session_id=sid,run_id='fixture'}, {selected='medium'})
 assert(result.content=='success' and result.transport_failed_attempts==1,'retry recovers once with lost usage visible')
@@ -118,23 +144,26 @@ for _,e in ipairs(telemetry.events(sid,0,100).events) do
  if e.kind=='subscription_transport' and e.phase=='retry' then retries=retries+1 end
 end
 assert(attempts==2 and retries==1,'both attempts and recovery durably recorded')
+local stored_retry=0
+for _,row in ipairs(memory.session_messages(sid,{all=true})) do if row.role=='retry' then stored_retry=stored_retry+1 end end
+assert(stored_retry>=3,'retry topic events survive transcript reload')
 local real_stream,real_cancelled=host.stream,host.run_cancelled
 local cancel=false
 host.stream=function(raw)
  local e=json.decode(raw)
- if e.type=='status' and e.text:find('retrying once',1,true) then cancel=true end
+ if e.type=='retry' and e.state=='reconnecting' then cancel=true end
 end
 host.run_cancelled=function() return json.encode({cancelled=cancel}) end
 local cancelled_sid=memory.start_session('','cancel-during-retry',{user_id='master',node_id=''})
 local success,why=pcall(adapter.complete,'fixture',{{role='user',content='repeat-failure'}},{},true,
  {session_id=cancelled_sid,run_id='cancelled'}, {selected='medium'})
 host.stream,host.run_cancelled=real_stream,real_cancelled
-assert(not success and tostring(why):find('run_cancelled',1,true),'cancellation interrupts retry backoff')
+assert(not success and tostring(why):find('run_cancelled',1,true),'cancellation interrupts three-minute cooldown')
 local cancel_attempts=0
 for _,e in ipairs(telemetry.events(cancelled_sid,0,100).events) do
  if e.kind=='subscription_transport' and e.phase=='attempt' then cancel_attempts=cancel_attempts+1 end
 end
-assert(cancel_attempts==1,'no second inference after cancellation')
+assert(cancel_attempts==2,'no new cycle inference after cooldown cancellation')
 print('native transport recovery ok (4 checks)')
 `);
     const home=path.join(root,'native');fs.mkdirSync(home);

@@ -16,6 +16,7 @@ local paths = dofile('lua/core/paths.lua')
 local catalogue = dofile('lua/core/openai_sub_catalogue.lua')
 local wire = dofile('lua/core/subscription_wire.lua')
 local telemetry = dofile('lua/core/telemetry.lua')
+local memory = dofile('lua/core/memory.lua')
 local M = {}
 -- The *picker* list: what this route offers a reader to choose. It is not this route's
 -- catalogue - five ids the route serves are absent from it (gpt-5.5, gpt-5.6-luna,
@@ -162,8 +163,10 @@ function M.request_timeout()
 end
 function M.transport_retries()
   local raw=host.getenv('WASM_AGENT_SUBSCRIPTION_TRANSPORT_RETRIES')
-  local value=raw==nil and 1 or tonumber(raw)
-  if value~=0 and value~=1 then error('invalid_subscription_transport_retries: expected 0 or 1') end
+  local value=raw==nil and 10 or tonumber(raw)
+  if not value or value~=math.floor(value) or value<0 or value>10 then
+    error('invalid_subscription_transport_retries: expected integer 0..10')
+  end
   return value
 end
 function M.complete(model, messages, tools, stream, opts, reasoning)
@@ -206,7 +209,13 @@ function M.complete(model, messages, tools, stream, opts, reasoning)
           elseif event.type=='transport_retry' then
             telemetry.event(opts.session_id,opts.run_id,stream_id,'subscription_transport','retry',
               {attempt=event.attempt,limit=event.limit,wait_ms=event.wait_ms,upstream_usage='unknown'})
-            if stream then host.stream(json.encode({type='status',text='subscription stream interrupted before model output - retrying once; prior inference usage unknown'})) end
+          elseif event.type=='retry' then
+            telemetry.event(opts.session_id,opts.run_id,stream_id,'subscription_transport','progress',event)
+            if opts.session_id and opts.session_id~='' then
+              local seq=memory.append_turn(opts.session_id,{role='retry',content=json.encode(event),ms=event.elapsed_ms})
+              if stream then host.stream(json.encode({type='checkpoint',seq=seq})) end
+            end
+            if stream then host.stream(json.encode(event)) end
           elseif event.type=='result' then
             result=event.result
             result.transport_failed_attempts=failed_transport_attempts

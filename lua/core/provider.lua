@@ -887,7 +887,7 @@ end
 -- retry count is explicit and operator-disableable rather than a general retry policy.
 function M.is_response_timeout(problem)
   local text=tostring(problem or ""):lower()
-  if text:find("subscription_stream_failure:",1,true) then return false end
+  if text:find("subscription_stream_failure:",1,true) or text:find("subscription_retry_",1,true) then return false end
   return text:find("provider_error: timeout: receive response", 1, true) ~= nil
 end
 
@@ -914,7 +914,7 @@ function M.is_transient(problem)
   if M.is_response_timeout(text) then return false end
   -- The observed Pi stream already used its bounded pre-output retry inside one
   -- supervised request. Never compound it through this broader opt-in policy.
-  if text:find("subscription_stream_failure:",1,true) then return false end
+  if text:find("subscription_stream_failure:",1,true) or text:find("subscription_retry_",1,true) then return false end
   -- Errors arrive with Lua's `file:line:` prefixes, so the markers are found, not anchored.
   local status = text:match("provider_http_(%d+)") or text:match("subscription_http_(%d+)")
   if status then return TRANSIENT_STATUS[status] == true end

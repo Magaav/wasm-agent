@@ -347,6 +347,10 @@ wa-step[data-state="failed"] { color: #f85149; }
 wa-trace { display: block; align-self: flex-start; max-width: 760px; width: 100%; }
 .trace { border: 1px solid var(--line); border-radius: var(--radius); background: rgba(15, 18, 25, .6); overflow: hidden; }
 .trace.has-error { border-color: #f85149; }
+wa-retry { display: block; width: 100%; }
+.retry-line { padding: var(--pad); border-left: 2px solid var(--warn); }
+.retry-line[data-state="recovered"] { border-left-color: var(--ok); }
+.retry-reason { color: var(--muted); overflow-wrap: anywhere; padding-top: var(--space); }
 .trace-head {
   display: flex; align-items: center; gap: var(--gap); width: 100%; text-align: left;
   padding: 4px var(--space); background: none; border: 0; color: var(--muted);

@@ -451,6 +451,23 @@ unchanged. Installation blocked by stopped sentinel/no outside supervisor; no
 manual restart or extra queued deployment behind the untouched skill request.
 Graph minimum/shared-budget repair remains separately pending after interruption.
 
+2026-10-07, extended confirmed pre-output subscription recovery to default10
+numbered retries per60s reconnect cycle, then180s cooldown and another cycle while
+the original request deadline permits. No scheduler/wake, new session or tool replay;
+auth/quota/unclassified/partial progress/cancellation still refuse. Successful HTTP
+connection clears the reconnect timer so healthy silent thinking is not cut off.
+Shared wa-retry topic shows count/cycle/reason/countdown and recorded restoration;
+retry ledger rows survive repaint/main/child hosting, stay out of inference/summary,
+and leave historical outcomes unfinished rather than invent live clocks. Self-review:
+transport94 in disk+embedded, context7, recovery, observability78, timeout11 and
+efficiency42 passed; actual4-stage UI suite and targeted Chrome replay/cooldown probe
+passed. Screenshot inspected; false assertion detected; offline jobs2 source-hashed
+build retained. No paid calls, AGENTS byte delta0, full release gate or live install.
+Existing stop/non-replay rules retained: sentinel preflight not_running(pid8380),
+no stop file; scheduled task0xC000013A/^C interruption and RestartCount0 explain
+why installation is unavailable, not why provider disconnected. No manual restart,
+new queued deploy or old effect replay. Graph minimum/shared-budget fix still pending.
+
 ## Status vocabulary
 
 - **Implemented:** a mechanism exists in the repository; not a release certification.

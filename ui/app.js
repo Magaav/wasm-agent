@@ -649,6 +649,7 @@ function runDuration(ms) {
 }
 
 function updateRunElapsed() {
+  for(const retry of runBubble?.querySelectorAll('wa-retry') || []) retry.setAge();
   const step = runStepState?.active;
   if (step) step.node.setStep(step.label, "running", Date.now() - step.started);
   if (!statusElapsed) return;
@@ -669,6 +670,8 @@ function startRunStatusTicker() {
 }
 
 function finishRunStatus(label = "completed") {
+  for(const retry of runBubble?.querySelectorAll('wa-retry') || [])
+    retry.interrupt(label==='cancelled'?'cancelled':'unfinished');
   if (!replayingMessages) {
     finishRunStep(label === "failed" ? "failed" : label === "unfinished" ? "unfinished" : "completed");
     if (runStepState) runStepState.settled = true;
@@ -1352,7 +1355,7 @@ function collapseRun(finalStart = false) {
   // it even when that batch added no tool call: the guard is about *creating* the topic, not about
   // folding into one that is already there. Getting this wrong left the preamble sitting outside as
   // its own text segment, so the bubble read run,text,text instead of one run and one answer.
-  if (!existing && traces.length === 0 && !finalStart) return;
+  if (!existing && traces.length === 0 && !moves.some(c=>c.tagName==='WA-RETRY') && !finalStart) return;
   if (moves.length === 0) return;
   const run = existing || document.createElement("wa-run");
   if (!existing) {
@@ -1438,6 +1441,18 @@ function handleEvent(event) {
     }
     collapseRun(true);
     if (!answerReleased.has(transcript)) anchorAnswer(streamBody);
+  } else if (event.type === "retry") {
+    const index=Number(event.index),limit=Number(event.limit);
+    if(!Number.isInteger(index)||index<1||!Number.isInteger(limit)||limit<1||limit>10||index>limit)return;
+    const bubble=currentBubble(),id=String(event.retry_id || 'subscription-recovery');
+    let retry=Array.from(bubble.querySelectorAll('wa-retry')).find(node=>node.dataset.retryId===id);
+    if(!retry){retry=document.createElement('wa-retry');retry.dataset.retryId=id;bubble.body.append(retry);}
+    retry.update(event);
+    if(!replayingMessages) {
+      showRunStep('retry:'+id+':'+(event.cycle||1)+':'+event.index+':'+event.state,
+        event.state==='reconnecting'?'Reconnecting in 3 minutes':'Retry '+event.index+'/'+event.limit+' — '+event.state);
+      setStatus('Retry '+event.index+'/'+event.limit+' — '+(event.reason || event.state));
+    }
   } else if (event.type === "round") {
     releaseAnswerAnchor(transcript, false);
     // A new step begins: close the previous one (its text and its tool topic).
@@ -1644,6 +1659,7 @@ function finishReplayedRun(isLast = false, options = {}) {
   }
   if (!statusLine) setStatus(label);
   finishRunStatus(label);
+  for(const retry of runBubble?.querySelectorAll('wa-retry') || [])retry.freeze();
 }
 // ---- device notifications: the engine bell, and the native toast it turns on --------
 //
@@ -1877,6 +1893,16 @@ function repaintMessages(rows, options = {}) {
         userBody.closest('wa-message').dataset.ledgerKey=String(message.id || message.seq);
         userBody.closest('wa-message').dataset.messageSeq=String(message.seq || "");
         replayUserSeq = Number(message.seq) || null;
+      } else if (message.role === "retry") {
+        const event=JSON.parse(message.content || '{}');
+        if(event.type!=='retry')throw Error('invalid retry ledger row');
+        if(options.active && event.state==='reconnecting' && Number(message.created_at)>0)
+          event.wait_ms=Math.max(0,Number(event.wait_ms)-Math.max(0,Date.now()-Number(message.created_at)*1000));
+        handleEvent(event);
+        if(!options.active)for(const retry of runBubble?.querySelectorAll('wa-retry') || [])retry.freeze();
+        replayRunLastMessage=message;
+        if(Number(message.created_at)>0)replayMessageEndedAt=Number(message.created_at)*1000;
+        if(runBubble&&!runBubble.dataset.ledgerKey)runBubble.dataset.ledgerKey=String(message.id || message.seq);
       } else if (message.role === "assistant") {
         replayRunLastMessage = message;
         if (Number(message.created_at) > 0) replayMessageEndedAt = Number(message.created_at) * 1000;
@@ -1908,7 +1934,7 @@ function repaintMessages(rows, options = {}) {
           }
         }
         if(runBubble && !runBubble.dataset.ledgerKey)runBubble.dataset.ledgerKey=String(message.id || message.seq);
-        for(const [index,segment] of Array.from(runBubble?.querySelectorAll('wa-run,wa-trace,wa-reasoning,wa-commentary,.seg')||[]).entries())
+        for(const [index,segment] of Array.from(runBubble?.querySelectorAll('wa-run,wa-trace,wa-retry,wa-reasoning,wa-commentary,.seg')||[]).entries())
           if(!segment.dataset.ledgerKey)segment.dataset.ledgerKey=String(message.id || message.seq)+':segment:'+index;
         if (message.id) renderedMessageIds.add(String(message.id));
       } else if (message.role === "tool") {
@@ -5240,7 +5266,7 @@ function renderJournalEvents(events,raw,identity) {
     const prefix='native:'+identity.attempt_id+':event:'+raw[i].seq;
     if(runBubble) {
       if(!runBubble.dataset.ledgerKey)runBubble.dataset.ledgerKey=prefix;
-      for(const [n,el] of Array.from(runBubble.querySelectorAll('wa-run,wa-trace,wa-reasoning,wa-commentary,.seg')).entries())if(!el.dataset.ledgerKey){
+      for(const [n,el] of Array.from(runBubble.querySelectorAll('wa-run,wa-trace,wa-retry,wa-reasoning,wa-commentary,.seg')).entries())if(!el.dataset.ledgerKey){
         el.dataset.ledgerKey=prefix+':segment:'+n;el.dataset.liveAttempt=identity.attempt_id;el.dataset.liveChannel=event.type;
       }
     }

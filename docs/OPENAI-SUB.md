@@ -55,7 +55,7 @@ tool calls return to the Lua agent, and cancellation/deadlines stop the process.
 The model window is Pi's subscription catalog's 272,000 tokens, rather than assuming
 the public API's larger window. Subscription access still depends on the account.
 
-## Stream diagnostics and one safe retry
+## Stream diagnostics and visible reconnect cycles
 
 The Pi bridge observes fetch below Pi's error normalizer: response-header/body
 stage, bounded redacted cause chain/code, HTTP status, safe request ID, response
@@ -65,13 +65,30 @@ bounded heuristic redaction, not a universal secret-scrubbing guarantee; keep lo
 `subscription_transport` attempt/retry events are durable; raw operation results
 remain the execution evidence. Reader cancellation propagates to the real stream.
 
-`WASM_AGENT_SUBSCRIPTION_TRANSPORT_RETRIES=1` is the default (only0/1 accepted).
-One retry with1s backoff is allowed only for a recognized Node network/body-read
-cause before any text, reasoning, tool progress or unknown progress event. Auth,
-quota/non200 status, cancellation, protocol/opaque errors and partial output do
-not retry. Pi's internal maxRetries is0 here; the broader Lua retry policy cannot
-multiply this bridge retry. Both attempts share one supervised operation/deadline;
-cancellation during backoff kills owned work. Native transport policy is unchanged.
+`WASM_AGENT_SUBSCRIPTION_TRANSPORT_RETRIES=10` is the default (integer0..10;
+0 disables). A cycle makes up to10 reconnect attempts over60s after a recognized
+pre-output Node transport failure. Header establishment is bounded by the remaining
+cycle slot; HTTP200 connection establishment removes that reconnect timer, so
+healthy model thinking is not mistaken for a failed connection. Real body-read
+failure before model progress can still recover. Partial text/reasoning/tool or
+unknown progress, auth/quota/non200, cancellation and unclassified errors suppress
+replay. Pi's internal maxRetries is0; broader Lua policies cannot multiply recovery.
+
+After10/10 or the cycle window, the same supervised request waits3 minutes then
+starts a new cycle, while its original request deadline permits. There is no
+scheduled job/watcher/wake or new task/session. Cancellation interrupts backoff and
+cooldown; no old tool is replayed. Existing request deadline still terminates an
+unrecoverable outage; this is not a guarantee that tasks can never stop. Native
+transport policy is unchanged. Test-only descriptor inputs can shorten the fixed
+60s/180s windows for hermetic tests; production Lua sends only the retry count and
+original timeout.
+
+The bubble's shared `<wa-retry>` topic shows1/10…10/10, cycle number, failure
+stage/code/reason and elapsed/countdown. Cooldown says “Reconnecting in 3 minutes”;
+actual restoration folds the history, terminal failure/cancellation stays visible.
+Display-only `role:'retry'` transcript rows preserve updates across reload/main/child
+hosts; inference and compaction exclude them without deleting originals. A crash
+leaves recovery unfinished, not a manufactured success or automatic effect replay.
 
 Risk: the provider may have computed/billed the lost inference. Attempt diagnostics
 mark usage unknown; recovered results record transport_failed_attempts so whole-call
