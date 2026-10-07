@@ -18,6 +18,10 @@ struct Config {
 
 static CONFIG: OnceLock<Config> = OnceLock::new();
 
+#[cfg(test)]
+#[path = "graph_tests.rs"]
+mod tests;
+
 /// Resolve the graph location once, at node startup. Root defaults to the runtime worktree (the
 /// node's cwd), which is the source the agent is actually running from.
 pub fn configure(root: PathBuf, db: PathBuf) {
@@ -44,18 +48,27 @@ fn opt_str(options: &Value, key: &str) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
-fn db_for(options: &Value) -> Result<PathBuf, String> {
-    opt_str(options, "db")
-        .map(PathBuf::from)
-        .or_else(|| CONFIG.get().map(|config| config.db.clone()))
-        .ok_or_else(|| "graph_not_configured".to_string())
-}
-
-fn root_for(options: &Value) -> Result<PathBuf, String> {
-    opt_str(options, "root")
-        .map(PathBuf::from)
-        .or_else(|| CONFIG.get().map(|config| config.root.clone()))
-        .ok_or_else(|| "graph_not_configured".to_string())
+// Select root and DB together. Workspace caches are on-demand; the background
+// watcher owns only config.db, so switching workspaces cannot replace its index.
+fn locations(options: &Value, config: Option<&Config>) -> Result<(PathBuf, PathBuf), String> {
+    let root = opt_str(options, "root").map(PathBuf::from)
+        .or_else(|| config.map(|c| c.root.clone()))
+        .ok_or_else(|| "graph_not_configured".to_string())?;
+    let root = root.canonicalize().map_err(|e| format!("graph_root_unavailable: {e}"))?;
+    if !root.is_dir() {return Err("graph_root_not_directory".into());}
+    if let Some(db) = opt_str(options, "db") {return Ok((root, PathBuf::from(db)));}
+    let config = config.ok_or_else(|| "graph_not_configured".to_string())?;
+    let identity = |path: &std::path::Path| {
+        let text = path.to_string_lossy().into_owned();
+        if cfg!(windows) {text.to_lowercase()} else {text}
+    };
+    let same = config.root.canonicalize().ok().map(|p| identity(&p) == identity(&root)).unwrap_or(false);
+    let db = if same {config.db.clone()} else {
+        let digest = ring::digest::digest(&ring::digest::SHA256, identity(&root).as_bytes());
+        let key: String = digest.as_ref().iter().map(|byte| format!("{byte:02x}")).collect();
+        config.db.with_extension("roots").join(format!("{key}.db"))
+    };
+    Ok((root, db))
 }
 
 fn read(
@@ -65,8 +78,7 @@ fn read(
 ) -> std::ffi::c_int {
     let options = json_arg(l, options_index);
     let outcome = (|| -> Result<Value, String> {
-        let root = root_for(&options)?;
-        let db = db_for(&options)?;
+        let (root, db) = locations(&options, CONFIG.get())?;
         for _ in 0..3 {
             if let Ok(store) = wa_graph::Store::open_readonly(&db) {
                 store.begin_read().map_err(|e| e.to_string())?;
@@ -101,8 +113,7 @@ fn read(
 pub extern "C-unwind" fn graph_index(l: *mut LuaState) -> std::ffi::c_int {
     let options = json_arg(l, 1);
     let outcome = (|| -> Result<Value, String> {
-        let root = root_for(&options)?;
-        let db = db_for(&options)?;
+        let (root, db) = locations(&options, CONFIG.get())?;
         let force = options
             .get("force")
             .and_then(Value::as_bool)
@@ -280,8 +291,7 @@ pub extern "C-unwind" fn graph_impact(l: *mut LuaState) -> std::ffi::c_int {
 pub extern "C-unwind" fn graph_status(l: *mut LuaState) -> std::ffi::c_int {
     let options = json_arg(l, 1);
     let outcome = (|| -> Result<Value, String> {
-        let root = root_for(&options)?;
-        let db = db_for(&options)?;
+        let (root, db) = locations(&options, CONFIG.get())?;
         let ready = if db.exists() {
             let store = wa_graph::Store::open_readonly(&db).map_err(|e| e.to_string())?;
             store.verify_snapshot(&root).map_err(|e| e.to_string())?
@@ -307,8 +317,7 @@ pub extern "C-unwind" fn graph_status(l: *mut LuaState) -> std::ffi::c_int {
 pub extern "C-unwind" fn graph_patch_audit(l: *mut LuaState) -> std::ffi::c_int {
     let request = json_arg(l, 1);
     let outcome = (|| -> Result<Value, String> {
-        let root = root_for(&request)?;
-        let db = db_for(&request)?;
+        let (root, db) = locations(&request, CONFIG.get())?;
         let mut store = wa_graph::Store::open(&db).map_err(|e| e.to_string())?;
         store.index(&root, false).map_err(|e| e.to_string())?;
         let mut report = store

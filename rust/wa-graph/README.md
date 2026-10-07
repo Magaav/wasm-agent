@@ -89,8 +89,13 @@ not manufacture a risk score. Search uses deterministic BM25-like field weights,
 identifier tokenization, and a visible score breakdown; it does not require an
 embedding service or model download.
 
-The database lives at `<home>/.wasm-agent/graph.db` and indexes the runtime worktree (the node's
-cwd). `WA_GRAPH_ROOT` / `WA_GRAPH_DB` override both; `WA_GRAPH_WATCH=0` disables the watcher. Reads
+The runtime database lives at `<home>/.wasm-agent/graph.db`; `WA_GRAPH_ROOT` /
+`WA_GRAPH_DB` override its defaults and `WA_GRAPH_WATCH=0` disables its watcher.
+Model source actions use the session worktree or explicit `cwd`; Git impact/audit
+use one actual Git root for patch and index. Other roots have independent,
+on-demand `<configured-db-stem>.roots/<canonical-root-SHA256>.db` caches;
+required missing/failed workspace bindings never fall back to runtime source.
+Impact reports its root and binds cursors to it even for identical-source trees. Reads
 pin a read-only graph snapshot and verify source bytes; a stale query may rebuild and take the
 write lock. This is source-snapshot consistency, not an atomic freeze of concurrent external
 writers or of code already loaded in a worker. See

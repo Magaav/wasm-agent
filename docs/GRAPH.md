@@ -30,8 +30,8 @@ evidence, not a risk score or a correctness certificate.
 
 | | |
 |---|---|
-| database | `<home>/.wasm-agent/graph.db` (beside the ledger) |
-| indexed root | the node's cwd — the runtime worktree it runs from |
+| database | runtime: `<home>/.wasm-agent/graph.db`; other roots: `<configured-db-stem>.roots/<SHA256-of-canonical-root>.db` |
+| indexed root | the session worktree, or explicit tool `cwd`; unbound sessions use the configured runtime root |
 | freshness | watcher refreshes in the background; each answer checks exact source bytes before and after its read, synchronously rebuilding or failing if stale |
 | write path | one `BEGIN IMMEDIATE` transaction per index run — atomic, and it serializes writers |
 | read path | pinned read-only SQLite snapshot; stale queries may synchronously take the write lock to rebuild |
@@ -60,6 +60,20 @@ dynamic calls remain uncertain even when its source snapshot is current.
 `host.graph_index|query|search|source|overview|impact|explain|path|caps|stats|status`. Each returns a JSON
 string, and an error as `{"error": ...}` — the same shape as `host.sql_query`.
 `graph_status` reports the resolved root/db and whether the index exists yet.
+The model tool passes the session binding through every source action. Git
+`audit`/`impact` resolve `cwd` to Git's actual top-level and use that same root
+for diff collection, changed-line mapping, indexing and source verification.
+Relative `cwd` resolves from the bound worktree. A required binding that is
+failed/missing refuses instead of falling back to canonical/runtime source.
+`impact.root` exposes the indexed root; its cursor also binds that root, so even
+identical-source checkouts cannot exchange cursors. Unbound navigation keeps the
+configured runtime default, including `WA_GRAPH_ROOT`.
+
+Other roots have on-demand independent caches; the existing watcher still watches
+only the configured runtime root. No new watcher or job is created. Switching
+worktrees does not replace the runtime graph. Explicit host `db` overrides remain
+available for isolated tests. Cache files persist as local derived data; this
+change does not add an automatic cleanup policy or a filesystem sandbox.
 
 `lua/core/graph.lua` wraps them and compacts the results (a well-connected
 function can have hundreds of callers; the model needs the shape and the first

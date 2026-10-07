@@ -3,6 +3,7 @@ local json = dofile("lua/vendor/json.lua")
 local changeset = dofile("lua/core/changeset.lua")
 local audit = dofile("lua/core/patch_audit.lua")
 local paths = dofile("lua/core/paths.lua")
+dofile('lua/core/memory.lua').setup()
 local path = paths.temp() .. "/wa-patch-audit-" .. tostring(host.now()) .. ".lua"
 local before = "function M.one()\n  return 1\nend\nfunction M.two()\n  return 2\nend\n"
 local after = "function M.one()\n  return 3\nend\nfunction M.two()\n  return 2\nend\n"
@@ -77,7 +78,9 @@ host.getenv = function(name)
   return original_getenv(name)
 end
 host.exec = function(command)
-  if command:find("diff HEAD",1,true) then
+  if command:find("--show-toplevel",1,true) then
+    return json.encode({code=0,stdout=root.."\n"})
+  elseif command:find("diff HEAD",1,true) then
     return json.encode({code=0,stdout="diff --git a/source.lua b/source.lua\n--- a/source.lua\n+++ b/source.lua\n@@ -1,3 +1,3 @@\n"})
   elseif command:find("ls-files",1,true) then
     return json.encode({code=0,stdout=""})

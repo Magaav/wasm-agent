@@ -27,8 +27,8 @@ function M.available()
   return capability("graph_query") and capability("graph_explain")
 end
 
-function M.status()
-  return call("graph_status", "{}")
+function M.status(opts)
+  return call("graph_status", json.encode(opts or {}))
 end
 
 function M.index(opts)
@@ -40,7 +40,7 @@ function M.query(text, opts)
   -- A broad name used to return 50 path matches before the useful symbol. Fetch one extra
   -- row so the model can tell whether a compact answer omitted more candidates.
   local limit = math.max(1, math.min(tonumber(opts and opts.limit) or 12, 200))
-  local rows, err = call("graph_query", text, json.encode({ limit = limit + 1 }))
+  local rows, err = call("graph_query", text, json.encode({ limit = limit + 1, root=opts and opts.root, db=opts and opts.db }))
   if not rows then return nil, err end
   local truncated = #rows > limit
   local results = {}
@@ -59,7 +59,8 @@ function M.search_symbols(text, opts)
   local limit = math.max(1, math.min(tonumber(opts and opts.limit) or 8, 50))
   local prefer = opts and opts.prefer_implementations == true
   local rows, err = call("graph_search", text,
-    json.encode({ limit = limit + 1, prefer_implementations = prefer }))
+    json.encode({ limit = limit + 1, prefer_implementations = prefer,
+      root=opts and opts.root, db=opts and opts.db }))
   if not rows then return nil, err end
   local results = {}
   for i = 1, math.min(#rows, limit) do
@@ -95,6 +96,7 @@ function M.symbol_source(selector, opts)
   if not line or line < 1 or line % 1 ~= 0 then return nil, "line_required" end
   opts = opts or {}
   return call("graph_source", json.encode({
+    root=opts.root, db=opts.db,
     path = selector.path, name = selector.name, line = line, kind = selector.kind,
     byte_offset = tonumber(opts.byte_offset) or 0,
     max_bytes = tonumber(opts.max_bytes) or 20000,
@@ -144,21 +146,21 @@ function M.explain(name, opts)
   return { name = name, definitions = out }
 end
 
-function M.path(from, to)
+function M.path(from, to, opts)
   if type(from) ~= "string" or from == "" or type(to) ~= "string" or to == "" then
     return nil, "from_and_to_required"
   end
-  local result, err = call("graph_path", from, to, "{}")
+  local result, err = call("graph_path", from, to, json.encode(opts or {}))
   if not result then return nil, err end
   return { from = from, to = to, found = result.found, steps = result.steps or {} }
 end
 
-function M.caps()
-  return call("graph_caps", "{}")
+function M.caps(opts)
+  return call("graph_caps", json.encode(opts or {}))
 end
 
-function M.stats()
-  return call("graph_stats", "{}")
+function M.stats(opts)
+  return call("graph_stats", json.encode(opts or {}))
 end
 
 function M.overview(opts)
@@ -171,7 +173,7 @@ function M.overview(opts)
       aspects[i] = aspect
     end
   end
-  return call("graph_overview", json.encode({aspects=aspects,
+  return call("graph_overview", json.encode({root=opts.root,db=opts.db,aspects=aspects,
     limit=math.max(1,math.min(tonumber(opts.limit) or 8,50)),
     max_bytes=math.max(2048,math.min(tonumber(opts.max_bytes) or 24000,200000))}))
 end
@@ -180,7 +182,7 @@ function M.impact(patch, opts)
   if not capability("graph_impact") then return nil, "graph_impact_unavailable" end
   if type(patch) ~= "table" or type(patch.changes) ~= "table" then return nil, "changes_required" end
   opts = opts or {}
-  return call("graph_impact", json.encode({changes=patch.changes,
+  return call("graph_impact", json.encode({root=patch.root or opts.root,db=opts.db,changes=patch.changes,
     direction=opts.direction or "both",depth=tonumber(opts.depth) or 2,
     limit=tonumber(opts.limit) or 50,offset=tonumber(opts.offset) or 0,
     cursor=opts.cursor,max_bytes=tonumber(opts.max_bytes) or 24000}))

@@ -248,6 +248,7 @@ gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-ho
 # The graph is a capability the agent navigates its own code with, so its extractor and
 # incremental reindex are part of the contract, not a side project.
 gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-graph
+gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-host graph::tests
 # Run the serve-level invariants, each a measured regression: routing by session (a wake carries its
 # conversation in the body's `thread`, not the auth header) and the UI version tracking content rather
 # than mtime (a `cp -f` of identical files must not force every open page to reload).
@@ -1019,6 +1020,7 @@ WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-provider-timeout-recovery.lua" "$BI
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-model-route-servability.lua" "$BIN" --db "$DB.model-route" | grep 'model route servability ok'
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-graph-tool.lua" "$BIN" --db "$DB.graph-tool" | grep 'graph tool ok'
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-graph-freshness.lua" "$BIN" --db "$DB.graph-freshness" | grep 'graph freshness ok'
+WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-graph-workspace.lua" "$BIN" --db "$DB.graph-workspace" | grep 'graph workspace ok'
 # Offline accounting must run even when UI tests are explicitly skipped.
 gate_run node scripts/test-token-audit.cjs
 WA_BIN="$BIN" node scripts/test-efficiency.cjs
