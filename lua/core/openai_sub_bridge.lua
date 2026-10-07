@@ -7,8 +7,52 @@ import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 const send = value => new Promise(resolve => process.stdout.write(JSON.stringify(value) + '\n', resolve));
+const redactError = value => String(value || '').replace(/eyJ[\w-]+\.[\w-]+\.[\w-]+/g, '<redacted>')
+  .replace(/Bearer\s+\S+/gi, 'Bearer <redacted>').replace(/sk-[\w-]+/g, '<redacted>')
+  .replace(/https?:\/\/[^\s)]+/gi,'<url-redacted>');
+const transientCodes = new Set(['UND_ERR_SOCKET','UND_ERR_RES_CONTENT_LENGTH_MISMATCH',
+  'UND_ERR_HEADERS_TIMEOUT','UND_ERR_BODY_TIMEOUT','ECONNRESET','ECONNREFUSED','EPIPE','ETIMEDOUT','EAI_AGAIN']);
+const causeChain = error => {
+  const chain=[],seen=new Set();
+  for(let current=error;current && !seen.has(current) && chain.length<4;current=current.cause) {
+    seen.add(current);
+    const raw=redactError(current.message || current);
+    chain.push({name:redactError(current.name || 'Error').slice(0,80),code:typeof current.code==='string' && /^[A-Z][A-Z0-9_]{0,79}$/.test(current.code) ? current.code : null,
+      message:raw.slice(0,256),message_truncated:raw.length>256});
+  }
+  return chain;
+};
+// Observe below Pi's error normalizer, which otherwise drops Node's error.cause.
+// Never copy URLs, headers, request bodies or streamed text into diagnostics.
+// Error messages are bounded/redacted heuristically; cause codes are typed identifiers.
+function observedFetch(state) {
+  const fetchImpl=globalThis.fetch.bind(globalThis);
+  return async (url,options) => {
+    state.fetch_observed=true;state.stage='response_headers';
+    let response;
+    try {response=await fetchImpl(url,options);} catch(error) {state.causes=causeChain(error);state.cancelled=options?.signal?.aborted===true;throw error;}
+    state.http_status=response.status;
+    for(const name of ['x-request-id','request-id']) {
+      const value=response.headers.get(name);
+      if(value && /^[a-zA-Z0-9_-]{1,128}$/.test(value)) {state.request_id=value;break;}
+    }
+    if(!response.body) return response;
+    const reader=response.body.getReader();state.stage='response_body';
+    const body=new ReadableStream({
+      async pull(controller) {
+        try {
+          const item=await reader.read();
+          if(item.done) {state.body_eof=true;reader.releaseLock();controller.close();}
+          else {state.response_bytes+=item.value.byteLength;controller.enqueue(item.value);}
+        } catch(error) {state.causes=causeChain(error);state.cancelled=options?.signal?.aborted===true;try{reader.releaseLock();}catch{} controller.error(error);}
+      },
+      async cancel(reason) {try{return await reader.cancel(reason);}finally{try{reader.releaseLock();}catch{}}}
+    });
+    return new Response(body,{status:response.status,statusText:response.statusText,headers:response.headers});
+  };
+}
 async function main() {
-let request;
+let request,activeTransport;
 try {
   const input = process.argv[2];
   request = JSON.parse(readFileSync(input, 'utf8'));
@@ -155,9 +199,23 @@ try {
     name:decision.name, arguments_text:(decision.preview || '') +
       (decision.truncated ? '… [preview only; complete arguments in result]' : ''), complete,
     ...(decision.truncated ? {arguments_truncated:true} : {})});
-  const stream = models.stream(model, context, {sessionId:request.session_id,
-    transport:'sse', reasoningEffort:request.reasoning, maxTokens:request.max_output});
-  for await (const event of stream) {
+  const retryLimit=request.transport_retries ?? 1;
+  if(!Number.isInteger(retryLimit) || retryLimit<0 || retryLimit>1) throw Error('invalid_subscription_transport_retries');
+  const timeoutMs=request.timeout_ms ?? 3600000;
+  if(!Number.isInteger(timeoutMs) || timeoutMs<1 || timeoutMs>86400000) throw Error('invalid_subscription_timeout');
+  const deadline=Date.now()+timeoutMs;
+  let answer;
+  for(let attempt=1;;attempt++) {
+    activeTransport={schema_version:1,attempt,stage:'adapter',fetch_observed:false,response_bytes:0,
+      body_eof:false,model_output_seen:false,causes:[]};
+    try {
+      const stream = models.stream(model, context, {sessionId:request.session_id,
+        transport:'sse', reasoningEffort:request.reasoning, maxTokens:request.max_output,
+        maxRetries:0,fetch:observedFetch(activeTransport)});
+      for await (const event of stream) {
+        // Unknown/new progress events are conservative: never replay across a
+        // provider-version change merely because the bridge cannot display them.
+        if(!['start','error','done'].includes(event.type)) activeTransport.model_output_seen=true;
     if (event.type === 'text_delta' || event.type === 'thinking_delta') {
       ttft ??= Date.now() - started;
       // A response-global mutable stopReason is not a per-item phase.
@@ -229,9 +287,34 @@ try {
       toolDecisions.delete(index);
     }
   }
-  const answer = await stream.result();
-  if (answer.stopReason === 'error' || answer.stopReason === 'aborted') {
-    throw new Error(answer.errorMessage || answer.stopReason);
+      answer = await stream.result();
+      if (answer.stopReason === 'error' || answer.stopReason === 'aborted') {
+        if((answer.content || []).length) activeTransport.model_output_seen=true;
+        throw new Error(answer.errorMessage || answer.stopReason);
+      }
+      if(activeTransport.fetch_observed || attempt>1)
+        await send({type:'transport_attempt',diagnostic:{...activeTransport,ok:true,elapsed_ms:Date.now()-started}});
+      break;
+    } catch(error) {
+      if(!activeTransport.causes.length) activeTransport.causes=causeChain(error);
+      const status=activeTransport.http_status;
+      const aborted=activeTransport.cancelled===true || answer?.stopReason==='aborted'
+        || activeTransport.causes.some(c=>['AbortError','TimeoutError'].includes(c.name));
+      const knownTransient=!aborted && activeTransport.fetch_observed && activeTransport.causes.some(c=>transientCodes.has(c.code))
+        && (status===undefined || status===200) && !activeTransport.model_output_seen;
+      const retry=knownTransient && attempt<=retryLimit && Date.now()+1000<deadline;
+      await send({type:'transport_attempt',diagnostic:{...activeTransport,ok:false,retry_scheduled:retry,
+        retry_limit:retryLimit,elapsed_ms:Date.now()-started,upstream_usage:'unknown'}});
+      if(!retry) {
+        const code=activeTransport.causes.find(c=>c.code)?.code || 'unclassified';
+        throw Error('subscription_stream_failure: stage='+activeTransport.stage+' cause='+code
+          +' attempt='+attempt+' model_output_seen='+activeTransport.model_output_seen+'; '+redactError(error.message || error));
+      }
+      await send({type:'transport_retry',attempt,limit:retryLimit,wait_ms:1000,
+        note:'Retrying inference before model output; prior upstream usage unknown; no tools replayed'});
+      await new Promise(resolve=>setTimeout(resolve,1000));
+      if(Date.now()>=deadline) throw Error('subscription_retry_deadline_exhausted');
+    }
   }
   const usage = answer.usage;
   const textMessages = answer.content
@@ -263,11 +346,8 @@ try {
       completion_tokens_details:{reasoning_tokens:usage.reasoning}}}});
 } catch (error) {
   // Provider errors can contain bearer tokens. Never print unfiltered diagnostics.
-  const message = String(error?.message || error)
-    .replace(/eyJ[\w-]+\.[\w-]+\.[\w-]+/g, '<redacted>')
-    .replace(/Bearer\s+\S+/gi, 'Bearer <redacted>')
-    .replace(/sk-[\w-]+/g, '<redacted>');
-  send({type:'error', error:message});
+  const message = redactError(error?.message || error);
+  await send({type:'error', error:message,diagnostic:activeTransport});
   process.exitCode = 1;
 }
 }

@@ -886,7 +886,9 @@ end
 -- possible the upstream completed and billed the inference before its edge lost the response, so the
 -- retry count is explicit and operator-disableable rather than a general retry policy.
 function M.is_response_timeout(problem)
-  return tostring(problem or ""):lower():find("provider_error: timeout: receive response", 1, true) ~= nil
+  local text=tostring(problem or ""):lower()
+  if text:find("subscription_stream_failure:",1,true) then return false end
+  return text:find("provider_error: timeout: receive response", 1, true) ~= nil
 end
 
 function M.response_timeout_retries()
@@ -910,6 +912,9 @@ function M.is_transient(problem)
   local text = tostring(problem or ""):lower()
   -- Lost response headers have their own, deliberately smaller budget (`response_timeout_retries`).
   if M.is_response_timeout(text) then return false end
+  -- The observed Pi stream already used its bounded pre-output retry inside one
+  -- supervised request. Never compound it through this broader opt-in policy.
+  if text:find("subscription_stream_failure:",1,true) then return false end
   -- Errors arrive with Lua's `file:line:` prefixes, so the markers are found, not anchored.
   local status = text:match("provider_http_(%d+)") or text:match("subscription_http_(%d+)")
   if status then return TRANSIENT_STATUS[status] == true end
@@ -1080,6 +1085,7 @@ function M.complete_with(model, messages, tools, stream, opts)
   local observation=telemetry.finish(span,{ok=complete,model=result.model,
     provider=provider.id,request_id=result.request_id,finish_reason=result.finish_reason,
     usage=result.usage,normalized=telemetry.normalize(result.usage,M.rates(result.model)),
+    transport_failed_attempts=result.transport_failed_attempts,
     ttft_ms=result.ttft_ms,stream_complete=result.stream_complete,
     reasoning_bytes=#(result.reasoning or ""),answer_bytes=#(result.content or ""),
     error=not complete and (result.stream_complete==false and "incomplete_stream" or result.finish_reason=="length" and "output_limit_reached" or "empty_reply") or nil})

@@ -55,6 +55,33 @@ tool calls return to the Lua agent, and cancellation/deadlines stop the process.
 The model window is Pi's subscription catalog's 272,000 tokens, rather than assuming
 the public API's larger window. Subscription access still depends on the account.
 
+## Stream diagnostics and one safe retry
+
+The Pi bridge observes fetch below Pi's error normalizer: response-header/body
+stage, bounded redacted cause chain/code, HTTP status, safe request ID, response
+byte count, EOF and whether any model progress occurred. No request URL/header,
+body or streamed-text payload is copied into these diagnostics. Error messages use
+bounded heuristic redaction, not a universal secret-scrubbing guarantee; keep logs private.
+`subscription_transport` attempt/retry events are durable; raw operation results
+remain the execution evidence. Reader cancellation propagates to the real stream.
+
+`WASM_AGENT_SUBSCRIPTION_TRANSPORT_RETRIES=1` is the default (only0/1 accepted).
+One retry with1s backoff is allowed only for a recognized Node network/body-read
+cause before any text, reasoning, tool progress or unknown progress event. Auth,
+quota/non200 status, cancellation, protocol/opaque errors and partial output do
+not retry. Pi's internal maxRetries is0 here; the broader Lua retry policy cannot
+multiply this bridge retry. Both attempts share one supervised operation/deadline;
+cancellation during backoff kills owned work. Native transport policy is unchanged.
+
+Risk: the provider may have computed/billed the lost inference. Attempt diagnostics
+mark usage unknown; recovered results record transport_failed_attempts so whole-call
+cost is unknown even when the successful attempt's usage is measured. No returned
+or previously dispatched tool is replayed. A repeated failure remains visible.
+This prevents opaque-error loss in the observed path, not every possible network
+outage or proof of which server/proxy closed a historical socket whose cause was
+already discarded. Validate with `scripts/test-subscription-transport.cjs` in
+an isolated evidence directory, plus existing bridge/observability tests.
+
 Risk: this intentionally depends on Pi's installed adapter API and OpenAI's private usage
 endpoint. Update Pi to a version whose catalog includes the GPT-6 family; an id the installed Pi
 predates still resolves when the store publishes it for this route, and anything else fails

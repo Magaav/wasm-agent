@@ -38,6 +38,9 @@ assert.equal(r.usage.missing_usage,1);assert.equal(r.usage.pending_calls,1);
 assert.equal(r.usage.observed_priced_cost_usd,.01);assert.equal(r.usage.recorded_calls_cost_usd,null);
 assert.equal(r.usage.failed_calls,1);assert.equal(r.usage.average_prompt_tokens,100);
 assert.equal(r.usage.cached_input_share,.8); // Same population in numerator and denominator.
+r=audit([start('recovered'),end('recovered',{transport_failed_attempts:1})]);
+assert.equal(r.usage.transport_failed_attempts,1);assert.equal(r.usage.recorded_calls_cost_usd,null);
+assert.equal(r.usage.observed_priced_cost_usd,.01); // Known winning attempt subtotal, not whole request.
 const orphan=end('orphan');r=audit([orphan]);assert.equal(r.usage.unmatched_ends,1);
 assert.equal(r.usage.recorded_calls_cost_usd,null);
 

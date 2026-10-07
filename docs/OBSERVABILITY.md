@@ -54,6 +54,11 @@ a pin that cannot run stays a loud pre-request refusal. Unknown catalogue entrie
 undecided/allowed; a stale catalogue can still hide a newly supported protocol until it is
 refreshed.
 Prices are not inferred from a subscription or copied as zero from a catalogue.
+Pi bridge `subscription_transport` events retain observed stage/cause/HTTP identity
+and retry decisions without payloads or credentials. Recovered model ends carry
+`transport_failed_attempts`; live/offline aggregate cost stays unknown if any
+lost attempt has unknown usage, even when the winning attempt has priced usage.
+This count is separate from ordinary model-call counts and is not omitted work.
 
 ## Accounting invariants
 

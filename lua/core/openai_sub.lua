@@ -15,6 +15,7 @@ local json = dofile('lua/vendor/json.lua')
 local paths = dofile('lua/core/paths.lua')
 local catalogue = dofile('lua/core/openai_sub_catalogue.lua')
 local wire = dofile('lua/core/subscription_wire.lua')
+local telemetry = dofile('lua/core/telemetry.lua')
 local M = {}
 -- The *picker* list: what this route offers a reader to choose. It is not this route's
 -- catalogue - five ids the route serves are absent from it (gpt-5.5, gpt-5.6-luna,
@@ -159,6 +160,12 @@ function M.request_timeout()
   end
   return seconds
 end
+function M.transport_retries()
+  local raw=host.getenv('WASM_AGENT_SUBSCRIPTION_TRANSPORT_RETRIES')
+  local value=raw==nil and 1 or tonumber(raw)
+  if value~=0 and value~=1 then error('invalid_subscription_transport_retries: expected 0 or 1') end
+  return value
+end
 function M.complete(model, messages, tools, stream, opts, reasoning)
   if M.transport() == 'native' then
     -- Same arguments, same result. The wire owns its own deadline check but reads the same
@@ -173,9 +180,10 @@ function M.complete(model, messages, tools, stream, opts, reasoning)
     models_store=M.models_store_path(),
     model=model, messages=messages, tools=tools, session_id=opts.session_id, stream_id=stream_id,
     reasoning=reasoning.selected=='provider' and 'medium' or reasoning.selected=='off' and 'none' or reasoning.selected,
-    max_output=opts.max_output}))
+    max_output=opts.max_output,transport_retries=M.transport_retries(),timeout_ms=M.request_timeout()*1000}))
   local id, offset, pending, result, failure = nil, 0, '', nil, nil
   local commentary_ids, commentary_pending_ids = {}, {}
+  local failed_transport_attempts=0
   local ok, problem = pcall(function()
     local launch = operation('start', {program='node',args={script,input},
       timeout_seconds=M.request_timeout()})
@@ -192,8 +200,16 @@ function M.complete(model, messages, tools, stream, opts, reasoning)
           local ending = pending:find('\n',1,true)
           local event = json.decode(pending:sub(1,ending-1))
           pending = pending:sub(ending+1)
-          if event.type=='result' then
+          if event.type=='transport_attempt' then
+            if event.diagnostic and event.diagnostic.ok==false then failed_transport_attempts=failed_transport_attempts+1 end
+            telemetry.event(opts.session_id,opts.run_id,stream_id,'subscription_transport','attempt',event.diagnostic)
+          elseif event.type=='transport_retry' then
+            telemetry.event(opts.session_id,opts.run_id,stream_id,'subscription_transport','retry',
+              {attempt=event.attempt,limit=event.limit,wait_ms=event.wait_ms,upstream_usage='unknown'})
+            if stream then host.stream(json.encode({type='status',text='subscription stream interrupted before model output - retrying once; prior inference usage unknown'})) end
+          elseif event.type=='result' then
             result=event.result
+            result.transport_failed_attempts=failed_transport_attempts
             if type(result.commentary) == 'table' then
               for index, item in ipairs(result.commentary) do
                 local text = type(item) == 'table' and item.content or item

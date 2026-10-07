@@ -432,6 +432,25 @@ skill request or manual restart. Baseline pinned dfce34ea; no Luna/Pi comparativ
 success or speedup claimed, AGENTS byte delta0, live treatment remains off.
 No subagent, index, permanent instruction growth, full gate or watcher recovery.
 
+2026-10-07, fixed opaque Pi subscription stream failure and added exactly one
+cause-proven pre-output retry (default1, WASM_AGENT_SUBSCRIPTION_TRANSPORT_RETRIES=0
+disables). Fetch/body observer retains bounded redacted cause chain, stage/status,
+safe request ID, byte/EOF/progress evidence below Pi's message-only normalizer;
+no request/header/body dump. Unknown/partial/new progress, auth/quota, cancellation
+and deadlines refuse replay; Pi/generic/response-timeout retries cannot multiply
+it. Attempts share one operation/deadline, cancellation during backoff tested.
+Lost attempt usage remains unknown in live/offline/efficiency cost totals; runtime
+fingerprints now include both adapter modules. Self-review:75 transport checks,
+observability78, timeout11, efficiency42 and batching37 passed in disk+embedded
+modes, bridge15 and token-audit/policy19 also passed. Offline jobs2 build source
+hashes pinned; localhost actual installed Pi0.87.1 observer retained UND_ERR_SOCKET
+where unwrapped adapter emitted only terminated. No real provider call, old task
+replay, Pi upgrade, full gate or AGENTS byte growth. Original incident cannot be
+retrospectively assigned a network endpoint cause; its prior38B error record stays
+unchanged. Installation blocked by stopped sentinel/no outside supervisor; no
+manual restart or extra queued deployment behind the untouched skill request.
+Graph minimum/shared-budget repair remains separately pending after interruption.
+
 ## Status vocabulary
 
 - **Implemented:** a mechanism exists in the repository; not a release certification.
