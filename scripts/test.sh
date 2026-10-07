@@ -1641,6 +1641,9 @@ LUA
 WA_SCRIPT="$DB.memory.lua" "$BIN" --db "$DB" | grep "memory curation ok"
 rm -f "$DB.memory.lua"
 
+# Native Node test collection pins TAP, retains actual exit and reports skips.
+gate_run node skills/parallel-evolution/scripts/test-node-tests.mjs "$WASM_AGENT_HOME"
+
 # Read-only scoped file discovery: exact candidate pages, no hidden clipped tail.
 gate_run node skills/code-graph/scripts/test-discover-files.mjs "$WASM_AGENT_HOME"
 

@@ -25,6 +25,17 @@ without captured baseline JSON. Independent reviews can run in parallel; seriali
 shared writes to a candidate tree. Preserve all local refs and worktrees during
 `/merge`; the remote main-only invariant is separate.
 
+### Native Node test receipts
+
+When a collector reads TAP, request it explicitly (`node --test
+--test-reporter=tap`); Node's default may be the spec reporter even for captured
+output. `skills/parallel-evolution/scripts/node-tests.mjs` is the focused collector:
+absolute cwd, fresh absolute evidence directory, then explicit test files. It
+preserves stdout/stderr, actual exit/signal, TAP counts and hashes. No summary can
+override a nonzero/unknown process result; incomplete/duplicate summaries and
+zero tests refuse success. Skips/todos are visible, not a tested-scope claim.
+This collector does not prove arbitrary descendant drain or run a full gate.
+
 ### Gate parallelism
 
 `scripts/test.sh` compiled with whatever cargo does by default: one job per logical core. On a
