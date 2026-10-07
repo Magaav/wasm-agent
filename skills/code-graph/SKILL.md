@@ -31,6 +31,39 @@ graph {action:"overview", aspects:["modules","entry_points","boundaries"], limit
 Each section reports exact `total`, `returned`, and `truncated` counts. Ask for a
 specific section or a larger limit only when the clipped rows hide a needed lead.
 
+## Scoped file discovery fallback
+
+For an external/unindexed repository or a low-confidence graph result, choose
+explicit relative roots (`src`, `docs`, a named module) and filename terms from
+the task. Do not print `rg --files <absolute-root>`: repeated root prefixes can
+consume the response before useful paths arrive. Run from that root and return
+relative paths. A clipped inventory is not evidence of absence; do not hide it
+with `head`, discard the tail, or repeat the same whole-tree request.
+
+The read-only helper [scripts/discover-files.mjs](scripts/discover-files.mjs)
+requires explicit scope, reports scanned/matched/returned counts and emits complete
+JSON pages within a byte budget. Paths are not summaries. The recorded spell
+`code-graph-discover-files` accepts shell-quoted `runner_arg`, `root_arg`, `scope_arg`
+and `match_arg`; `scope_arg` is one relative root and `match_arg` a path regex.
+Its postcondition requires a complete page, but replay currently refuses mandatory
+session workspaces (`workspace_execution_context_unsupported`). The spell is not
+replay-verified or preferred: use the verified direct CLI below without relaxing
+the workspace binding; prefer the spell only after actual postconditions pass:
+
+```
+node <absolute-skill-dir>/scripts/discover-files.mjs --root <repo> --scope src --scope docs --match 'executor|server|security|session' --max-bytes 8192
+```
+
+If `complete:false`, keep the exact page and continue with its `next_offset`
+and `snapshot` using `--offset N --snapshot SHA`; a changed inventory refuses.
+Alternatively narrow an unrelated scope, never pretend omitted candidates were
+examined. Scope/term selection and reading the returned source remain inference.
+Read independent known source ranges together with `read_many`, keeping exact
+bytes, errors and continuation addresses. No index or filter replaces necessary
+source inspection. Private proof: `node <skill>/scripts/test-discover-files.mjs
+<absolute-evidence-scratch>`; it checks pagination, Unicode/space paths, ignored
+files, exact candidate sets, changed-snapshot refusal and visible failures.
+
 ## Retrieve implementation source
 
 ```

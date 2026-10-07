@@ -326,6 +326,22 @@ Other current/unrelated claims and managed bindings remain outside this scope;
 no global runtime-convergence, fan, vault, Arch or companion claim is made.
 This closure note is documentation only; it does not require another installation.
 
+2026-10-06, fixed the context-mode review's clipped absolute-path discovery:
+added a read-only scoped relative-path helper under `skills/code-graph/scripts/`,
+explicit candidate counts, bounded complete JSON pages and snapshot-bound
+continuation. The skill now rejects treating a clipped inventory as absence and
+keeps exact source inspection; no blanket output compression, retrieval quota,
+new runtime tool or permanent `AGENTS.md` growth. Regression35 and direct-policy19
+checks passed, zero skips; fixture pagination retrieved all450 paths across11
+pages and changed inventory refused. Self-review measurement at external
+context-mode d064241: the same539 paths occupy91488B absolute versus17645B
+relative; task-scoped25 exact Git-oracle paths fit1204B, complete. This is one
+navigation measurement, not proof of better coding success/total cost/latency.
+Private `DISCOVERY-MEASURE-v138.json` retains counts/limits. Recorded discovery
+spell replay refused enforced worktree context; verified CLI remains preferred,
+with no binding relaxation. Skill-only shipping must preserve binary install
+provenance and all prior evidence; no full gate or context-mode installation.
+
 ## Status vocabulary
 
 - **Implemented:** a mechanism exists in the repository; not a release certification.
