@@ -409,7 +409,11 @@ queried/pinned as Docker build default (overridable exact wave pin), not install
 or run. Existing UI/OpenCode runner needs shared Luna-medium transport, non-UI
 oracle, separate current/patched runtime pins and complete accounting adapters.
 No solver/provider call, current-runtime patch, new index, full gate or release
-claim. Skill-only installation/readback is separate from this source verification.
+claim. Source integrated/published at a248aba. Skill-only installation request
+1791367198361349500-5880-00000000000000000000 remains queued/untouched:
+`wa-sentinel status` reports watcher not running/no outside supervisor. No restart,
+manual installed-skill copy or effect replay; published repository CLI is available,
+but installed-skill convergence is explicitly unverified until supported recovery.
 
 ## Status vocabulary
 
