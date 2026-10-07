@@ -22,6 +22,31 @@ These are two entry paths into one runtime:
 The fleet console serves these journeys. It is not the product's required first
 screen, and 32 workers are not a prerequisite for helping one customer.
 
+## Windows Sentinel service preparation — 2026-10-07
+
+Native SCM hosting is implemented, not installed: exact service/config/image/home
+validation, non-elevated runtime, Windows-owned failure recovery and durable
+manual-stop intent without a console/detached fallback. External two-phase installer
+requires administrator registration plus a provisioned local non-admin service-logon
+identity; it preserves task/manager evidence and only disables the old task after
+actual service/watcher readiness. Deployment refuses failed stop/copy/start and
+avoids a second restart after the Windows swap already loaded the new image.
+See [WINDOWS-SENTINEL-SERVICE.md](docs/WINDOWS-SENTINEL-SERVICE.md) for provisioning,
+external commands, partial-state reconciliation and remaining live proof.
+
+Self-review and focused Windows verification: sentinel55 native tests, private
+CLI46, installer22, deploy swap17, shipping99 and direct-policy19 checks passed;
+no skipped checks in those scopes. Evidence is retained in this session's scratch
+`service-verification-v7/receipt.json`. The private CLI post hashes the binary and
+retained logs. Recorded spell replay refuses enforced-worktree context; verified
+CLI remains preferred. `AGENTS.md` byte delta0. No inference agents, new recurrent
+job, full release gate or production state mutation.
+
+**Live migration blocked:** the assistant is non-elevated and has no provisioned
+service credential. Registration, actual SCM crash recovery/account/deploy behavior
+and live installation remain unverified. The stopped Sentinel and historical queued
+request are untouched; no original unknown effect is replayed or declared settled.
+
 ## Maintenance baseline — 2026-10-05
 
 The operator-selected direct workflow in `AGENTS.md` is active: one human-requested

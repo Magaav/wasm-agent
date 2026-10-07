@@ -57,6 +57,17 @@ mod role;
 // and is what `SENTINEL.md` requires; see the module header for why the mechanism cannot weaken it.
 #[cfg(windows)]
 mod winproc;
+#[cfg(windows)]
+mod windows_service;
+
+fn service_stopping() -> bool {
+    #[cfg(windows)] {return windows_service::stopping();}
+    #[cfg(not(windows))] {false}
+}
+fn service_lifecycle(name: &str, verb: &str) -> Result<()> {
+    #[cfg(windows)] {return windows_service::lifecycle(name, verb);}
+    #[cfg(not(windows))] {let _=(name,verb);bail!("Windows service lifecycle is unavailable on this platform");}
+}
 
 mod deploy_protocol;
 mod sentinel_return;
@@ -376,6 +387,7 @@ pub(crate) fn audit(verb: &str, detail: &str, reason: &str) {
 }
 
 pub(crate) fn say(message: &str) {
+    #[cfg(windows)] if windows_service::active() {windows_service::log(message);return;}
     println!("  {message}");
 }
 
@@ -1765,7 +1777,7 @@ fn process_requests(background: bool, held: &mut Held) -> Result<u32> {
     let newest_upgrade = newest_upgrade_in(&entries);
     for path in entries {
         use std::sync::atomic::Ordering;
-        if background && stop_path().exists() {break;}
+        if background && (stop_path().exists() || service_stopping()) {break;}
         let preview:Value=std::fs::read(&path).ok().and_then(|b|serde_json::from_slice(&b).ok()).unwrap_or(Value::Null);
         let reserved_id=path.file_stem().and_then(|s|s.to_str()).unwrap_or("");
         if deploy_protocol::reserved(reserved_id) {
@@ -2173,7 +2185,7 @@ fn watch() -> Result<()> {
     let intake_stop=std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let intake_signal=intake_stop.clone();
     let intake_thread=std::thread::spawn(move||{
-        while !intake_signal.load(std::sync::atomic::Ordering::Acquire) {
+        while !intake_signal.load(std::sync::atomic::Ordering::Acquire) && !service_stopping() {
             if let Err(error)=deploy_protocol::scan_intake(){audit("intake-lane-error","requests",&error.to_string());}
             std::thread::sleep(Duration::from_millis(100));
         }
@@ -2199,6 +2211,7 @@ fn watch() -> Result<()> {
             }
         }
     }
+    #[cfg(windows)] windows_service::ready()?;
     say(&format!("watching: node on port {}, requests in {}", node_port(), sentinel_dir().join("requests").display()));
     say(&format!("stop it with: wa-sentinel stop   (or create {})", stop_path().display()));
     let mut held = Held::default();
@@ -2209,21 +2222,21 @@ fn watch() -> Result<()> {
         say(&format!("triggers: {}", triggers_path().display()));
     }
     loop {
-        if stop_path().exists() {
+        if stop_path().exists() || service_stopping() {
             intake_stop.store(true,std::sync::atomic::Ordering::Release);
             let _=intake_thread.join();
-            audit("watch", "stop file", "sentinel stopping on request");
-            say("stop file found - stopping");
+            audit("watch", if service_stopping() {"SCM control"} else {"stop file"}, "sentinel stopping on request");
+            say(if service_stopping() {"SCM stop/shutdown control - stopping"} else {"stop file found - stopping"});
             let _ = std::fs::remove_file(pid_path());
             return Ok(());
         }
         if let Err(error) = process_requests(true, &mut held) {
             audit("box-error", "requests", &error.to_string());
         }
-        if stop_path().exists(){continue;}
+        if stop_path().exists() || service_stopping(){continue;}
         if let Ok(entries)=std::fs::read_dir(sentinel_dir().join("deploy-protocol")) {
             for entry in entries.flatten() {
-                if stop_path().exists(){break;}
+                if stop_path().exists() || service_stopping(){break;}
                 if entry.path().is_dir() {
                     if let Some(id)=entry.file_name().to_str() {
                         if let Err(error)=sentinel_return::observe(id) {audit("return-observation-problem",id,&error.to_string());}
@@ -2231,10 +2244,11 @@ fn watch() -> Result<()> {
                 }
             }
         }
-        if stop_path().exists(){continue;}
+        if stop_path().exists() || service_stopping(){continue;}
         check_triggers(&mut triggers);
+        if stop_path().exists() || service_stopping(){continue;}
         if let Err(error)=automations.tick() {audit("jobs-error","tick",&error.to_string());}
-        if stop_path().exists(){continue;}
+        if stop_path().exists() || service_stopping(){continue;}
         // Watching the node, not restarting it: an auto-restart that nobody asked for would fight the
         // operator every time they stop a node on purpose. The outage is reported; restarting is a
         // request.
@@ -2283,6 +2297,7 @@ fn start_self() -> Result<()> {
     start_self_unlocked()
 }
 fn start_self_unlocked() -> Result<()> {
+    if service_stopping() {bail!("service stop in progress; no lifecycle replay");}
     // A supervisor that already owns this role is asked, not emulated. This used to do the opposite - spawn
     // a second watcher beside the unit's own - and the unit lost: its watcher could not take the runner
     // lock, exited, and `Restart=always` started it again (observed as `activating`, `MainPID 0`,
@@ -2292,6 +2307,7 @@ fn start_self_unlocked() -> Result<()> {
             let _ = std::fs::remove_file(stop_path());
             return ask_manager(&command, &unit, "start");
         }
+        role::Step::WindowsService {name,verb} => return service_lifecycle(&name,&verb),
         role::Step::Refuse { unit } => bail!("{}", refusal(&unit)),
         role::Step::Direct => {}
     }
@@ -2337,6 +2353,9 @@ fn stop_self() -> Result<()> {
     stop_self_unlocked()
 }
 fn stop_self_unlocked() -> Result<()> {
+    // SCM validates identity/authority before its handler persists intentional stop.
+    // An access-denied caller must not leave a stop file as a partial mutation.
+    if let role::Owner::WindowsService {name}=owner() {return service_lifecycle(&name,"stop");}
     // The file records the request - a deploy reads it before deciding to start a watcher - but the stop
     // itself belongs to the manager whenever one owns the watcher: under `Restart=always` a stop file is not
     // a stop, because the watcher exits on it and the manager immediately starts it again. That is a flap,
@@ -2348,6 +2367,7 @@ fn stop_self_unlocked() -> Result<()> {
             say("the stop file records the request");
             Ok(())
         }
+        role::Step::WindowsService {name,verb} => service_lifecycle(&name,&verb),
         role::Step::Refuse { unit } => {
             // Say what was seen, and change nothing: adopting a unit this cannot identify is how the wrong
             // thing gets stopped, which is worse than not knowing. It is an error, because under
@@ -2363,6 +2383,7 @@ fn stop_self_unlocked() -> Result<()> {
 }
 
 fn restart_self() -> Result<()> {
+    if service_stopping() {bail!("service stop in progress; no lifecycle replay");}
     let _start_lock=open_lock(&start_lock_path())?;
     _start_lock.try_lock().map_err(|e|anyhow::anyhow!("another lifecycle command owns this instance: {e}"))?;
     if stop_path().exists() {bail!("sentinel intentionally stopped; use explicit start to resume before restart");}
@@ -2373,6 +2394,7 @@ fn restart_self() -> Result<()> {
             let _ = std::fs::remove_file(stop_path());
             return ask_manager(&command, &unit, "restart");
         }
+        role::Step::WindowsService {name,verb} => return service_lifecycle(&name,&verb),
         role::Step::Refuse { unit } => bail!("{}", refusal(&unit)),
         role::Step::Direct => {}
     }
@@ -2447,6 +2469,7 @@ fn status() -> Result<()> {
         role::Owner::Unrecognised { unit } => format!(
             "inside {unit}, which cannot be shown to own this watcher - lifecycle verbs refuse"
         ),
+        role::Owner::WindowsService {name} => format!("{name} owns this watcher (Windows SCM); stop and restart are asked of it"),
         role::Owner::Ourselves => "none: nothing outside owns this watcher, so the stop file is a real stop".to_string(),
     }));
     let pending = std::fs::read_dir(sentinel_dir().join("requests")).map(|d| d.count()).unwrap_or(0);
@@ -2513,6 +2536,17 @@ budgeted (WA_SENTINEL_WAKE_BUDGET per hour, 6 by default). `run` is disabled unl
 WA_SENTINEL_SCRIPTS names the directories it may execute from."#;
 
 fn main() -> Result<()> {
+    // SCM establishes explicit paths/environment before any ambient profile or
+    // instance lookup. Never turn a service invocation into a console watcher.
+    let service_args:Vec<String>=std::env::args().skip(1).collect();
+    if service_args.first().map(String::as_str)==Some("service-config-check") {
+        #[cfg(windows)] {return windows_service::check(&service_args[1..]);}
+        #[cfg(not(windows))] {bail!("native Windows service configuration is unavailable on this platform");}
+    }
+    if service_args.first().map(String::as_str)==Some("service") {
+        #[cfg(windows)] {return windows_service::run(&service_args[1..]);}
+        #[cfg(not(windows))] {bail!("native Windows service mode is unavailable on this platform");}
+    }
     // The registry and the operator's own paths live under the ambient environment. Capture them
     // before any instance selection overwrites `WASM_AGENT_HOME`/`WA_INSTALL_DIR`, and pin them so
     // every later resolution sees the operator's paths rather than the selected instance's.

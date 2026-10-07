@@ -319,7 +319,10 @@ the running watcher's own control group (`/proc/<pid>/cgroup` for the pid in
 `<config>/sentinel/sentinel.pid`), what the watcher recorded about itself when it took the role
 (`<config>/sentinel/supervisor`), and `WA_SENTINEL_SUPERVISOR` — which states the fact when none of that
 can be seen: `none` for a watcher started by hand on a machine that happens to run systemd, `user:<unit>`
-for a user unit, or a unit name. So `wa-sentinel stop` in an operator's shell stops the *unit's* watcher,
+for a user unit, a unit name, or `windows:<exact-service-name>` for Windows SCM.
+Windows lifecycle verifies the configured image/name/home and never falls back to
+an unmanaged watcher after access-denied or a mismatched binding.
+So `wa-sentinel stop` in an operator's shell stops the *unit's* watcher,
 and `wa-sentinel restart` there asks the manager instead of spawning a second watcher beside the unit's
 own.
 
@@ -342,8 +345,9 @@ watcher nothing outside owns (a `nohup`, a logon task); use `wa-sentinel stop` f
 
 - **No model, no Lua, no ledger.** It executes declared intents; it does not converse, decide, or write
   to the transcript. It is a supervisor, not a second agent.
-- **No automatic restarts.** An auto-restart nobody asked for fights the operator every time they stop
-  a node on purpose. It reports an outage and waits to be asked.
+- **No automatic node restarts.** An auto-restart nobody asked for fights the operator every time they stop
+  a node on purpose. It reports an outage and waits to be asked. Explicitly configured OS recovery may
+  restart the Sentinel itself after an unexpected failure; intentional stops remain respected.
 - **No shell verbs.** A verb list, not a command line.
 
 ## For an agent
@@ -406,9 +410,12 @@ the obvious next ones and take the same shape — a watcher that calls `fire()`.
 
 ## Running it as a service
 
-`deploy/wa-sentinel.service` is the systemd unit, and the header of that file carries the Windows
-scheduled-task equivalent. It must not be a child of the node: a supervisor that dies with the thing it
-supervises is decoration.
+`deploy/wa-sentinel.service` is the systemd unit. Native Windows SCM integration,
+least-privilege identity, failure recovery, intentional stops, external installer and
+live-proof limits are in [WINDOWS-SENTINEL-SERVICE.md](WINDOWS-SENTINEL-SERVICE.md).
+The existing logon task remains the fallback until SCM migration is actually proved;
+no console executable is blindly registered as a service. It must not be a child of
+the node: a supervisor that dies with the thing it supervises is decoration.
 
 ## Self-update — the `spell` verb
 

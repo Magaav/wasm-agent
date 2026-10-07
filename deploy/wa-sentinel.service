@@ -7,11 +7,11 @@
 #   sudo cp deploy/wa-sentinel.service /etc/systemd/system/
 #   sudo systemctl enable --now wa-sentinel
 #
-# On Windows the equivalent is a scheduled task that runs at logon, because the sentinel needs the user's
-# environment to find the node's config and the client bridge:
-#
-#   schtasks /Create /TN wasm-agent-sentinel /SC ONLOGON /RL LIMITED ^
-#     /TR "\"%LOCALAPPDATA%\wasm-agent\wa-sentinel.exe\" watch"
+# Windows native SCM hosting is described in docs/WINDOWS-SENTINEL-SERVICE.md and installed explicitly
+# with scripts/install-sentinel-service.ps1 under a provisioned non-administrator service account.
+# Its exact paths/environment are config, not an inherited interactive console. The existing Windows
+# logon task remains a fallback until live SCM identity/recovery/deploy proof succeeds; never register
+# a console `watch` executable as a service without its native service dispatcher.
 #
 [Unit]
 Description=wasm-agent sentinel (restarts, upgrades, and wakes the node from outside)
