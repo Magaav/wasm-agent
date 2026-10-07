@@ -961,6 +961,8 @@ WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-observability.lua" "$BIN" --db "$DB
 # The prompt index is an authored cue, not a slice of the schema description. Without this,
 # the same text is sent twice and nothing in the suite notices when the slicing returns.
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-tool-cues.lua" "$BIN" --db "$DB.tool-cues" | grep 'tool cues ok'
+# Candidate batching is opt-in; exact evidence/order and response-group telemetry stay visible.
+WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-batching-guidance.lua" "$BIN" --db "$DB.batching-guidance" | grep 'batching guidance ok'
 # A session can own a checkout so parallel sessions on one node do not overwrite each other. The
 # default is the contract: a session with no worktree must resolve relative paths exactly as before,
 # or this feature would silently relocate every existing session's files.

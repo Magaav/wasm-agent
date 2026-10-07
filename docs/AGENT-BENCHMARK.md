@@ -127,7 +127,8 @@ scoped exception for these isolated solver processes, not general re-enabled del
    - candidate3: opt-in evidence locator only if traces show retrieval is the remaining
      bottleneck; exact originals, surrounding reads and missed-caveat controls;
    - candidate4: one targeted repair justified by prior outcomes, not automatic scope.
-   These are hypotheses, not existing patches. Stop once success/efficiency meets the
+   Candidate1 is implemented opt-in below; candidates2–4 remain hypotheses, not
+   existing patches. Stop once success/efficiency meets the
    predeclared criterion or no credible bottleneck remains. Do not build an index
    merely to fill an iteration number.
 5. Selection pilots can use one fresh attempt per arm/treatment. Freeze the chosen
@@ -139,6 +140,32 @@ scoped exception for these isolated solver processes, not general re-enabled del
    +12 pilot +9 confirmation attempts (22 total, <=330 solver-min at that cap).
    This is a proposed upper bound, not authorization or an expected duration. Pilot
    budgeting does not add caps to the production agent loop. No automatic retries.
+
+## Implemented candidate1: opt-in batching guidance
+
+Baseline runtime source is `dfce34ea3e159b4c3bf1afda87cef71c8759cf04`.
+The patched runtime supports `WASM_AGENT_BATCHING_GUIDANCE=1`; unset/other values
+retain the old parent and child prompt bytes. Both builders use available-tool-aware
+instructions: known independent ranges together, exact outputs/errors/cursors,
+interpretation-dependent actions later, writes/conflicting commands ordered and
+scoped relative discovery. Existing read_many and shell execution stay unchanged.
+No arbitrary bash command becomes safe to overlap because of this switch.
+
+Tool telemetry now records the assistant response's `tool_group_id`, size/index,
+`read_many_ranges` and `batching_guidance` (`control`/`candidate-1`) at matched
+boundaries. The strict offline token auditor aggregates complete/incomplete groups,
+multi-call groups and requested ranges, omits group IDs and reports historical
+missing fields as unmeasured. Grouping is NOT proof of independence, physical overlap,
+fewer model calls or correct task completion. Raw transcript and schemas remain intact.
+
+Validate with `scripts/test-batching-guidance.lua` under an explicit Lua root and
+isolated home/DB, existing tool-cue/observability tests and `test-token-audit.cjs`.
+The mocked provider exercises actual serialization/dispatch/ledger paths without
+paid calls. Pin both runtime revisions and treatment switch in future manifests;
+the candidate does not cure the runner/route/qualification blockers above.
+No live switch, permanent instruction-file growth or evidence truncation is authorized
+by preparing this comparison. An embedded install requires supported sentinel rollout;
+explicit Lua-root tests prove source, not installed bytes.
 
 ## Measurements and upfront predictions
 
