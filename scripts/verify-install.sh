@@ -61,7 +61,18 @@ sha() { # file -> hash, empty when unreadable
 }
 
 sed_field() { sed -n "s/^$1=//p" "$INSTALL_DIR/installed.txt" 2>/dev/null | head -1 | tr -d '[:space:]'; }
-json_escape() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | tr '\r\n' '  '; }
+# Pure shell serialization: no sed/tr/cut subprocess per field/check.
+# Escapes remain JSON, not lossy summaries; keep tab/newline detail bytes.
+json_escape() {
+  JSON_ESCAPED="$1"
+  JSON_ESCAPED="${JSON_ESCAPED//\\/\\\\}"
+  JSON_ESCAPED="${JSON_ESCAPED//\"/\\\"}"
+  JSON_ESCAPED="${JSON_ESCAPED//$'\b'/\\b}"
+  JSON_ESCAPED="${JSON_ESCAPED//$'\f'/\\f}"
+  JSON_ESCAPED="${JSON_ESCAPED//$'\n'/\\n}"
+  JSON_ESCAPED="${JSON_ESCAPED//$'\r'/\\r}"
+  JSON_ESCAPED="${JSON_ESCAPED//$'\t'/\\t}"
+}
 
 # The tree the install was built from: WA_DEPLOY_ROOT, else `..` when it really is a work tree, else the
 # runtime worktree upgrade.sh records. Same order deploy.sh uses; a check that cannot run is a skip.
@@ -283,8 +294,12 @@ if [ "$JSON" = "1" ]; then
   for r in "${results[@]}"; do
     [ "$first" = "1" ] || printf ','
     first=0
-    printf '{"status":"%s","name":"%s","detail":"%s"}' \
-      "$(cut -f1 <<<"$r")" "$(json_escape "$(cut -f2 <<<"$r")")" "$(json_escape "$(cut -f3 <<<"$r")")"
+    status="${r%%$'\t'*}"; remainder="${r#*$'\t'}"
+    name="${remainder%%$'\t'*}"; detail="${remainder#*$'\t'}"
+    json_escape "$status"; status="$JSON_ESCAPED"
+    json_escape "$name"; name="$JSON_ESCAPED"
+    json_escape "$detail"; detail="$JSON_ESCAPED"
+    printf '{"status":"%s","name":"%s","detail":"%s"}' "$status" "$name" "$detail"
   done
   printf ']}\n'
 else

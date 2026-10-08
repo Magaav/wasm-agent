@@ -1,5 +1,8 @@
 //! Durable acknowledgement is not an installation result. Legacy requests retain legacy behavior.
 use super::*;
+#[cfg(test)]
+#[path="protocol_reconcile_tests.rs"]
+mod reconcile_tests;
 
 pub(crate) fn reserved(id: &str) -> bool {
     !id.is_empty() && id.bytes().all(|b|b.is_ascii_alphanumeric() || b==b'-') && sentinel_dir().join("deploy-protocol").join(id).join("intent.json").exists()
@@ -124,7 +127,47 @@ pub(crate) fn admit(request:&Value) -> Result<PathBuf> {
 }
 
 pub(crate) fn verify_install(id:&str) -> Result<Value> {
+    verify_install_inner(id, None)
+}
+
+// Compare the full admitted generation, not just a request id/source. A reused
+// or replaced reservation cannot be settled by an earlier request's proof.
+fn same_effect(active:&Value,effect:&Value)->bool {
+    let (Some(mut active),Some(mut effect))=(active.as_object().cloned(),effect.as_object().cloned()) else {return false;};
+    for key in ["phase","verified_at"] {active.remove(key);effect.remove(key);}
+    active==effect
+}
+
+/// Explicit verification-only recovery after a terminal failed return. Never
+/// reset observer/delivery cursors or call the installer. Original evidence stays.
+pub(crate) fn reconcile(id:&str,reason:&str)->Result<Value> {
+    if std::env::var("WASM_AGENT_IN_TURN").as_deref()==Ok("1") {bail!("protocol_reconcile_requires_external_executor");}
+    if reason.trim().is_empty() || reason.len()>600 || reason.contains(['\n','\r','\0']) {bail!("protocol_reconcile_reason_required");}
+    verify_install_inner(id,Some(reason))
+}
+
+fn verify_install_inner(id:&str,reconcile_reason:Option<&str>) -> Result<Value> {
+    if id.is_empty() || id.len()>200 || !id.bytes().all(|b|b.is_ascii_alphanumeric()||b==b'-') {bail!("protocol_id_invalid");}
+    // Hold admission while observing and settling the exact current generation.
+    // This is not an effect replay and grants no installation authority.
+    let install_lock=std::fs::OpenOptions::new().create(true).truncate(false).read(true).write(true).open(sentinel_dir().join("protocol-effect.lock"))?;
+    install_lock.lock()?;
     let dir=sentinel_dir().join("deploy-protocol").join(id);
+    let active_file=sentinel_dir().join("protocol-effect.json");
+    let effect:Value=serde_json::from_slice(&std::fs::read(dir.join("effect.json")).context("verification_effect_missing")?)?;
+    let active=if active_file.exists(){Some(serde_json::from_slice::<Value>(&std::fs::read(&active_file)?)?)}else{None};
+    if let Some(reason)=reconcile_reason {
+        let active=active.as_ref().context("protocol_reconcile_reservation_missing")?;
+        if !same_effect(active,&effect) || !["admitted","verified"].contains(&active["phase"].as_str().unwrap_or("")) {bail!("protocol_reconcile_reservation_mismatch");}
+        let generation=dir.join("reconciliations").join(format!("{}-{}",now_epoch(),std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()));
+        std::fs::create_dir_all(&generation)?;
+        for name in ["intent.json","binding.json","ack.json","effect.json","result.json","state.json","observation.json"] {
+            let file=dir.join(name);
+            if file.exists(){std::fs::copy(file,generation.join(name))?;}
+        }
+        std::fs::copy(&active_file,generation.join("reservation.json"))?;
+        wa_operation::atomic_json(&generation.join("intent.json.reconcile"),&json!({"id":id,"reason":reason,"at":now_epoch(),"effect_replayed":false}))?;
+    }
     let intent:Value=serde_json::from_slice(&std::fs::read(dir.join("intent.json"))?)?;
     validate(&intent,id)?;
     let binding=sentinel_return::bind_parent(id)?;
@@ -143,15 +186,17 @@ pub(crate) fn verify_install(id:&str) -> Result<Value> {
     if proof["ok"]!=true || proof["request_id"]!=id || proof["expected_sha"]!=intent["expected_sha"]
         || proof["owner"]!=binding["owner"] || proof["parent"]!=binding["parent"] {bail!("actual_verification_identity_mismatch");}
     wa_operation::atomic_json(&dir.join("verification.json"),&proof)?;
-    let install_lock=std::fs::OpenOptions::new().create(true).truncate(false).read(true).write(true).open(sentinel_dir().join("protocol-effect.lock"))?;
-    install_lock.lock()?;
-    let active_file=sentinel_dir().join("protocol-effect.json");
-    if active_file.exists() {
-        let mut active:Value=serde_json::from_slice(&std::fs::read(&active_file)?)?;
+    if let Some(mut active)=active {
         if active["id"]==id && active["expected_sha"]==intent["expected_sha"] {
+            if !same_effect(&active,&effect) {bail!("verification_reservation_generation_mismatch");}
             active["phase"]=json!("verified");active["verified_at"]=proof["at"].clone();
             wa_operation::atomic_json(&active_file,&active)?;
         }
+    }
+    if reconcile_reason.is_some() {
+        audit("protocol-reconciled",id,"fresh actual installation proof settled reservation; no installer replay or return cursor reset");
+        return Ok(json!({"ok":true,"id":id,"expected_sha":intent["expected_sha"],"reservation":"verified","effect_replayed":false,
+            "original_returns_preserved":true,"proof":proof}));
     }
     Ok(proof)
 }

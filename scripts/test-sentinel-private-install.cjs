@@ -27,7 +27,7 @@ function save(name,value){fs.writeFileSync(path.join(base,name),JSON.stringify(v
 async function until(fn,label,ms=180000){const started=Date.now();while(Date.now()-started<ms){if(await fn())return;await sleep(100);}throw Error(label);}
 async function run(program,argv,name){const out=fs.openSync(path.join(base,name+'.stdout'),'wx'),err=fs.openSync(path.join(base,name+'.stderr'),'wx');const child=spawn(program,argv,{cwd:source,env:privateEnv,windowsHide:true,stdio:['ignore',out,err]});const receipt=await new Promise((resolve,reject)=>{child.once('error',reject);child.once('exit',(code,signal)=>resolve({pid:child.pid,code,signal}));});fs.closeSync(out);fs.closeSync(err);save(name+'.receipt.json',receipt);assert.equal(receipt.code,0,name+' failed; inspect retained stdout/stderr');return receipt;}
 async function api(route,body){const r=await fetch(url+route,{...(body?{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)}:{}),signal:AbortSignal.timeout(120000)});assert(r.ok,route+' HTTP '+r.status);return r.json();}
-function cli(...argv){const r=spawnSync(path.join(install,'wa-sentinel.exe'),argv,{cwd:source,env:privateEnv,encoding:'utf8',windowsHide:true,timeout:30000});save('cli-'+(++sequence)+'.json',{argv,pid:r.pid,status:r.status,stdout:r.stdout,stderr:r.stderr});assert.equal(r.status,0,r.stderr);return r.stdout;}
+function cli(...argv){const r=spawnSync(path.join(install,'wa-sentinel.exe'),argv,{cwd:source,env:privateEnv,encoding:'utf8',windowsHide:true,timeout:argv[0]==='protocol'&&argv[1]==='reconcile'?120000:30000});save('cli-'+(++sequence)+'.json',{argv,pid:r.pid,status:r.status,stdout:r.stdout,stderr:r.stderr});assert.equal(r.status,0,r.stderr);return r.stdout;}
 async function gone(pid){await until(()=>{try{process.kill(pid,0);return false;}catch{return true;}},'owned pid did not exit '+pid,15000);}
 (async()=>{try{
  // Source is a full clone with an actual private remote main, never fake upstream on a live checkout.
@@ -71,7 +71,9 @@ async function gone(pid){await until(()=>{try{process.kill(pid,0);return false;}
  await until(()=>fs.existsSync(path.join(dir,'effect.json')),'actual effect admission');
  const busyDuringUpdate=api('/chat',{text:'hold private parent',thread:session.id});await until(()=>!!releaseBusy,'actual parent busy during installation');
  const noticesBefore=notices.length;
- await sleep(12000);
+ // Wait for the actual durable clock, not an assumed 12s scheduling window.
+ // Cold native owner reads/filesystem work may delay observation on Windows.
+ await until(()=>{try{const c=JSON.parse(fs.readFileSync(path.join(dir,'check.json')));return c.due_at!==undefined&&c.at>=c.due_at;}catch{return false;}},'actual durable updating check',60000);
  assert.equal(notices.length,noticesBefore,'updating return coalesced while real parent busy');
  const check=JSON.parse(fs.readFileSync(path.join(dir,'check.json')));
  assert(check.at>=check.due_at&&check.due_at>=request.queued_at+10,'actual ten-second check observed while busy');
@@ -87,7 +89,9 @@ async function gone(pid){await until(()=>{try{process.kill(pid,0);return false;}
  const listener=proof.processIdentity(Number(fs.readFileSync(path.join(install,'serve.pid')))),watcher=proof.processIdentity(Number(fs.readFileSync(path.join(box,'sentinel.pid'))));
  assert.notEqual(listener.created,originalNode.created);assert.notEqual(watcher.created,originalWatcher.created);save('native-after.json',{listener,watcher,health:await api('/health')});
  const transcript=await api('/session?id='+session.id);save('actual-parent-transcript.json',transcript);assert(JSON.stringify(transcript.messages).includes('I am updated'));
- let admissionNegatives=0;
+ let admissionNegatives=0,negativeCount=0;
+ const reconciliationOnly=args.includes('--reconciliation-only');
+ if(!reconciliationOnly) {
  for(const [name,owner,sha,problem] of [['owner','wrong-owner',packet.head,'parent_owner_mismatch'],['source',session.user_id,'b'.repeat(40),'canonical source']]) {
   const prior=new Set(fs.readdirSync(path.join(box,'deploy-protocol')));
   cli('request','deploy','--expected-sha',sha,'--owner',owner,'--session',session.id,'--reason','private admission negative '+name);
@@ -102,7 +106,6 @@ async function gone(pid){await until(()=>{try{process.kill(pid,0);return false;}
  }
  // Actual verifier negatives preserve each failing raw receipt; every altered file is restored exactly.
  const installedFile=path.join(install,'installed.txt'),installedBytes=fs.readFileSync(installedFile),resultFile=path.join(dir,'result.json'),resultBytes=fs.readFileSync(resultFile);
- let negativeCount=0;
  for(const [name,mutate,restore] of [
   ['request',()=>fs.writeFileSync(resultFile,JSON.stringify({...result,request_id:'wrong-request'})),()=>fs.writeFileSync(resultFile,resultBytes)],
   ['future',()=>fs.writeFileSync(resultFile,JSON.stringify({...result,at:new Date(Date.now()+600000).toISOString()})),()=>fs.writeFileSync(resultFile,resultBytes)],
@@ -122,9 +125,40 @@ async function gone(pid){await until(()=>{try{process.kill(pid,0);return false;}
  fs.writeFileSync(mutantFile,originalHelper.replace('result?.request_id!==intent.id||',''));
  const mutant=await import(pathToFileURL(mutantFile).href);
  try{fs.writeFileSync(resultFile,JSON.stringify({...result,request_id:'wrong-request'}));assert.equal(mutant.verifyActual(source,install,request,binding,dir,privateEnv).ok,true,'removed causal check must admit the actual wrong request');negativeCount++;save('causal-removal.json',{red:true,actual_wrong_request:'wrong-request',original_refused:true,mutant_admitted:true});}finally{fs.writeFileSync(resultFile,resultBytes);}
+ }
+ const installedFile=path.join(install,'installed.txt'),resultFile=path.join(dir,'result.json'),resultBytes=fs.readFileSync(resultFile);
  const clean=verifyActual(source,install,request,JSON.parse(fs.readFileSync(path.join(dir,'binding.json'))),dir);assert.equal(clean.ok,true);
- save('result.json',{ok:true,request_id:request.id,head:packet.head,tree:packet.tree,ack_ms:ackMs,checks:10+negativeCount+admissionNegatives,skipped:0,paid_calls:0,actual_installer:true,actual_verifier:true,private_source:source,notices:terminal.length});
- console.log(`sentinel private install ok (${10+negativeCount+admissionNegatives} checks, 0 skipped)`);
+ // Recovery after a consumed terminal failure uses the real native verifier, not
+ // cursor deletion or a second installation. Original immutable return survives.
+ cli('job','disable','onSentinelReturn');
+ await until(async()=>{const h=await api('/health');return h.current===null&&h.runs.length===0;},'parent drained for reconciliation');
+ const activeFile=path.join(box,'protocol-effect.json'),effectBytes=fs.readFileSync(path.join(dir,'effect.json'));
+ // Native Windows FILETIME can exceed JS's exact integer range. Preserve raw
+ // JSON bytes: parsing/stringifying would manufacture a different generation.
+ fs.writeFileSync(activeFile,effectBytes);
+ const cursorFile=path.join(dir,'observation.json'),originalCursor=fs.readFileSync(cursorFile);
+ const failureFile=path.join(dir,'returns','private-reconciled-failure.json'),failureBytes=Buffer.from(JSON.stringify({id:request.id,phase:'failed',detail:'private already-recovered finalization',at:Math.floor(Date.now()/1000)}));
+ fs.writeFileSync(failureFile,failureBytes);fs.writeFileSync(cursorFile,JSON.stringify({slot:99,next_at:Number.MAX_SAFE_INTEGER,last_event:'private-reconciled-failure'}));
+ const terminalCursor=fs.readFileSync(cursorFile),beforeRecovery=proof.snapshot(source,install,undefined,privateEnv);
+ const negativeCli=(label,env=privateEnv)=>{const r=spawnSync(path.join(install,'wa-sentinel.exe'),['protocol','reconcile',request.id,'--reason','private explicit verification-only recovery'],{cwd:source,env,encoding:'utf8',windowsHide:true,timeout:120000});save('reconcile-negative-'+label+'.json',{status:r.status,stdout:r.stdout,stderr:r.stderr});assert.notEqual(r.status,0,label);assert.deepEqual(fs.readFileSync(activeFile),effectBytes,'negative cannot settle reservation');};
+ negativeCli('in-turn',{...privateEnv,WASM_AGENT_IN_TURN:'1'});
+ try{fs.writeFileSync(resultFile,JSON.stringify({...result,request_id:'wrong-reconciliation-request'}));negativeCli('wrong-result');}finally{fs.writeFileSync(resultFile,resultBytes);}
+ const settled=JSON.parse(cli('protocol','reconcile',request.id,'--reason','private recovered finalization observed end to end'));
+ assert(settled.ok&&settled.reservation==='verified'&&settled.effect_replayed===false&&settled.original_returns_preserved);
+ assert.equal(JSON.parse(fs.readFileSync(activeFile)).phase,'verified');
+ assert.deepEqual(fs.readFileSync(cursorFile),terminalCursor);assert.deepEqual(fs.readFileSync(failureFile),failureBytes);
+ const afterRecovery=proof.snapshot(source,install,undefined,privateEnv);
+ assert.equal(afterRecovery.listener_created,beforeRecovery.listener_created);assert.equal(afterRecovery.watcher_created,beforeRecovery.watcher_created);
+ assert.equal(afterRecovery.node_sha256,beforeRecovery.node_sha256);assert.equal(afterRecovery.sentinel_sha256,beforeRecovery.sentinel_sha256);
+ assert.deepEqual(fs.readFileSync(path.join(dir,'effect.json')),effectBytes);
+ const repeated=JSON.parse(cli('protocol','reconcile',request.id,'--reason','private idempotent re-verification, no second effect'));
+ assert(repeated.ok&&repeated.effect_replayed===false);
+ save('reconciliation-e2e.json',{ok:true,native_actual_verifier:true,terminal_cursor_preserved:true,failed_return_preserved:true,processes_unchanged:true,effect_replayed:false});
+ // Leave the fixture's original observation evidence intact for later inspection.
+ fs.writeFileSync(cursorFile,originalCursor);fs.unlinkSync(failureFile);
+ const recoveryChecks=8;
+ save('result.json',{ok:true,request_id:request.id,head:packet.head,tree:packet.tree,ack_ms:ackMs,checks:10+negativeCount+admissionNegatives+recoveryChecks,skipped:0,paid_calls:0,actual_installer:true,actual_verifier:true,actual_reconciliation:true,scope:reconciliationOnly?'installation and reconciliation only':'installation negatives and reconciliation',private_source:source,notices:terminal.length});
+ console.log(`sentinel private install ok (${10+negativeCount+admissionNegatives+recoveryChecks} checks, 0 skipped)`);
  }finally{
   if(releaseBusy)releaseBusy();
   if(fs.existsSync(path.join(box,'sentinel.pid'))){const pid=Number(fs.readFileSync(path.join(box,'sentinel.pid')));fs.writeFileSync(path.join(box,'stop'),'owned private fixture cleanup');await gone(pid);}

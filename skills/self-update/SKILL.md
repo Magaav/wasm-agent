@@ -69,6 +69,16 @@ verdict. Run that instead of hashing binaries, diffing scripts and reading `/hea
 comparisons, not judgement. A deploy also writes `<install>/deploy-result.json`, and the continuation wake
 carries a one-line verdict, so the outcome is data you read once.
 
+If a terminal failure was delivered but the actual installed state was subsequently
+recovered and verified, use the external native `wa-sentinel protocol reconcile
+<exact-id> --reason "..."` verification-only door. It archives old evidence and
+reruns the actual exact-source verifier before settling the admitted generation;
+no installer replay, cursor reset, duplicate wake or hand-edited ownership. Queue
+an approved one-shot script via Sentinel `request run`; in-turn reconciliation
+refuses. Inspect its known-settled receipt and `protocol-effect.json`, not a cached
+positive verdict. Source/owner/process mismatches remain refusals. See
+`docs/SENTINEL.md` for the complete boundary.
+
 `request run --script <path>` is the sanctioned way to run a script **outside** the node's turn. The
 sentinel executes it only from directories in `WA_SENTINEL_SCRIPTS` (the install's `scripts/` is what the
 gate and the service set). That is a deliberate boundary, not an obstacle to route around with

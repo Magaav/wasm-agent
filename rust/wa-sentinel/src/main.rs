@@ -2603,12 +2603,16 @@ fn main() -> Result<()> {
                 }}}
                 Ok(())
             },
+            Some("reconcile") if rest.len()==4 && rest[2]=="--reason" => {
+                println!("{}",deploy_protocol::reconcile(&rest[1],&rest[3])?);
+                Ok(())
+            },
             Some("compose") if rest.len()==2 => {
                 let event:Value=serde_json::from_slice(&std::fs::read(&rest[1])?)?;
                 println!("{}",sentinel_return::instruction(&sentinel_return::resolve_event(&event)?));
                 Ok(())
             },
-            _=>bail!("protocol requires observe or compose <key-only-event-file>"),
+            _=>bail!("protocol requires observe, compose <key-only-event-file>, or reconcile <id> --reason <reason> (external verification only)"),
         },
         "instance" => instance::cli(rest),
         "recover" => verb_recover(rest.first().map(String::as_str).unwrap_or("explicit operator recovery")).map(|s|say(&s)),
