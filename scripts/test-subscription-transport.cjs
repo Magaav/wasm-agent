@@ -38,19 +38,31 @@ stream(_m,context,options){
   if(mode==='new-progress')yield {type:'future_progress',value:'not displayed'};
   if(mode==='empty-thinking-start')yield {type:'thinking_start',contentIndex:0,partial:{content:[{type:'thinking',thinking:''}]}};
   if(mode==='empty-text-start')yield {type:'text_start',contentIndex:0,partial:{content:[{type:'text',text:''}]}};
+  if(mode==='result-empty-thinking')yield {type:'thinking_start',contentIndex:0,partial:{content:[{type:'thinking',thinking:''}]}};
+  if(mode==='result-empty-text')yield {type:'text_start',contentIndex:0,partial:{content:[{type:'text',text:''}]}};
+  if(mode==='malformed-start')yield {type:'thinking_start',contentIndex:0};
+  if(mode==='nonempty-start')yield {type:'thinking_start',contentIndex:0,partial:{content:[{type:'thinking',thinking:'already generated'}]}};
+  if(mode==='signature-start')yield {type:'thinking_start',contentIndex:0,partial:{content:[{type:'thinking',thinking:'',thinkingSignature:'opaque'}]}};
+  if(mode==='prior-nonempty-start')yield {type:'text_start',contentIndex:1,partial:{content:[{type:'thinking',thinking:'prior output'},{type:'text',text:''}]}};
+  if(mode==='start-then-text'){yield {type:'text_start',contentIndex:0,partial:{content:[{type:'text',text:''}]}};yield {type:'text_delta',contentIndex:0,delta:'partial'};}
+  if(mode==='wrong-index-start')yield {type:'text_start',contentIndex:2,partial:{content:[{type:'text',text:''}]}};
+  if(mode==='unknown-block-start')yield {type:'text_start',contentIndex:0,partial:{content:[{type:'text',text:'',futureProperty:true}]}};
+  if(mode==='sparse-start'){const content=[];content[1]={type:'text',text:''};yield {type:'text_start',contentIndex:1,partial:{content}};}
+  if(mode==='unknown-event-field-start')yield {type:'text_start',contentIndex:0,futurePayload:'unknown',partial:{content:[{type:'text',text:''}]}};
+  if(mode==='wrong-type-start')yield {type:'text_start',contentIndex:0,partial:{content:[{type:'thinking',thinking:''}]}};
   const server=http.createServer((req,res)=>{req.resume();
-   if(((mode==='retry-success'||mode==='healthy-slow')&&attempts===2)||(mode==='cycle-success'&&attempts===12)){res.writeHead(200,{'Content-Type':'text/event-stream','x-request-id':'req-local'});
+   if(((['retry-success','healthy-slow','empty-thinking-start','empty-text-start','result-empty-thinking','result-empty-text'].includes(mode))&&attempts===2)||(mode==='cycle-success'&&attempts===12)){res.writeHead(200,{'Content-Type':'text/event-stream','x-request-id':'req-local'});
     res.flushHeaders();if(mode==='healthy-slow')setTimeout(()=>res.end('data: {}\\n\\n'),150);else res.end('data: {}\\n\\n');return;}
    res.writeHead(200,{'Content-Type':'text/event-stream','Content-Length':1000,'x-request-id':'req-local'});
    res.write('data: {}\\n\\n');setTimeout(()=>res.socket.destroy(),15);
   });
   await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
   try{const r=await options.fetch('http://127.0.0.1:'+server.address().port+'/fixture',{method:'POST'});
-   try{for await(const chunk of r.body){};}catch{throw Error('terminated');}
+   try{for await(const chunk of r.body){};}catch{if(mode.startsWith('result-empty-'))return;throw Error('terminated');}
   }finally{await new Promise(resolve=>server.close(resolve));}
   yield {type:'text_delta',contentIndex:0,delta:'success'};
  },
- async result(){return {stopReason:'stop',content:[{type:'text',text:'success'}],usage:{input:2,output:1,cacheRead:0,cacheWrite:0,totalTokens:3}};}
+ async result(){if(mode.startsWith('result-empty-')&&attempts===1)return {stopReason:'error',errorMessage:'terminated',content:[mode==='result-empty-text'?{type:'text',text:''}:{type:'thinking',thinking:''}]};return {stopReason:'stop',content:[{type:'text',text:'success'}],usage:{input:2,output:1,cacheRead:0,cacheWrite:0,totalTokens:3}};}
  };}};}
 // Private fake wire makes handshake failure/auth reproducible before body streaming.
 const nativeFetch=globalThis.fetch;
@@ -105,13 +117,22 @@ globalThis.fetch=async(url,opts)=>{
     check(()=>assert.equal(r.events.filter(e=>e.type==='transport_retry').length,0));
     check(()=>assert.equal(r.events.filter(e=>e.type==='result').length,0));
   }
-  // Reproduce the live 20s warning: adapter observes an empty item-open but
-  // forwards no delta/decision; conservative replay remains suppressed.
-  for(const mode of ['empty-thinking-start','empty-text-start']){
+  // Both thrown body errors and Pi-normalized empty-content failures recover.
+  for(const mode of ['empty-thinking-start','empty-text-start','result-empty-thinking','result-empty-text']){
+    const r=run(mode);check(()=>assert.equal(r.status,0,r.stdout));check(()=>assert.equal(r.attempts.length,2));
+    check(()=>assert.equal(r.attempts[0].diagnostic.model_output_seen,false));
+    check(()=>assert.equal(r.attempts[0].diagnostic.retry_scheduled,true));
+    check(()=>assert.equal(r.events.filter(e=>e.type==='transport_retry').length,1));
+    check(()=>assert.equal(r.events.filter(e=>e.type==='result').length,1));
+    check(()=>assert.equal(r.events.at(-1).result.content,'success'));
+    check(()=>assert.equal(r.attempts[0].diagnostic.empty_item_starts[mode.includes('thinking')?'thinking':'text'],1));
+    check(()=>assert.equal(r.events.filter(e=>['reasoning','decision'].includes(e.type)).length,0));
+  }
+  for(const mode of ['malformed-start','nonempty-start','signature-start','prior-nonempty-start','start-then-text','wrong-index-start','unknown-block-start','sparse-start','unknown-event-field-start','wrong-type-start']){
     const r=run(mode);check(()=>assert.equal(r.status,1));check(()=>assert.equal(r.attempts.length,1));
     check(()=>assert.equal(r.attempts[0].diagnostic.model_output_seen,true));
-    check(()=>assert.equal(r.events.filter(e=>['delta','pending_delta','reasoning','decision'].includes(e.type)).length,0));
     check(()=>assert.equal(r.events.filter(e=>e.type==='transport_retry').length,0));
+    check(()=>assert(r.attempts[0].diagnostic.output_progress_class));
   }
   for(const mode of ['unknown','auth','quota','cancel','deadline-abort','signal-abort']){
     const r=run(mode);check(()=>assert.equal(r.status,1));check(()=>assert.equal(r.attempts.length,1));
@@ -157,6 +178,17 @@ assert(attempts==2 and retries==1,'both attempts and recovery durably recorded')
 local stored_retry=0
 for _,row in ipairs(memory.session_messages(sid,{all=true})) do if row.role=='retry' then stored_retry=stored_retry+1 end end
 assert(stored_retry>=3,'retry topic events survive transcript reload')
+for _,mode in ipairs({'result-empty-thinking','empty-text-start'}) do
+ local empty_sid=memory.start_session('','empty-start-recovery',{user_id='master',node_id=''})
+ local repaired=adapter.complete('fixture',{{role='user',content=mode}},{},false,
+   {session_id=empty_sid,run_id='empty-start'}, {selected='medium'})
+ assert(repaired.content=='success' and repaired.transport_failed_attempts==1,'empty starts recover in actual Lua/operation path')
+ local first
+ for _,e in ipairs(telemetry.events(empty_sid,0,100).events) do
+  if e.kind=='subscription_transport' and e.phase=='attempt' then first=first or e.payload end
+ end
+ assert(first and first.model_output_seen==false and first.retry_scheduled==true,'durable empty-start safe replay evidence')
+end
 local real_stream,real_cancelled=host.stream,host.run_cancelled
 local cancel=false
 host.stream=function(raw)
@@ -174,7 +206,7 @@ for _,e in ipairs(telemetry.events(cancelled_sid,0,100).events) do
  if e.kind=='subscription_transport' and e.phase=='attempt' then cancel_attempts=cancel_attempts+1 end
 end
 assert(cancel_attempts==2,'no new cycle inference after cooldown cancellation')
-print('native transport recovery ok (4 checks)')
+print('native transport recovery ok (8 checks)')
 `);
     const home=path.join(root,'native');fs.mkdirSync(home);
     const env={...process.env};for(const key of Object.keys(env))if(/^(WA_|WASM_AGENT_|OPENAI_|OPENCODE_|PI_)/.test(key))delete env[key];

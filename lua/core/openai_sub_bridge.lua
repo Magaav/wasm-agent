@@ -193,6 +193,37 @@ try {
   const streamedFinalText = new Set();
   const toolDecisions = new Map();
   const partialToolCall = event => event.partial?.content?.[event.contentIndex] || {};
+  // Item-open is not output. Only exact known empty blocks are replay-safe:
+  // a signature/encrypted thought, tool placeholder, unknown property or missing
+  // snapshot remains conservative. Check the whole snapshot, not only the new item.
+  const knownEmptyBlocks = content => Array.isArray(content) && Array.from(content).every(block => {
+    if(!block || typeof block!=='object' || Array.isArray(block)) return false;
+    const field=block.type==='text' ? 'text' : block.type==='thinking' ? 'thinking' : null;
+    return field!==null && block[field]==='' && Object.keys(block).every(key=>key==='type'||key===field);
+  });
+  const emptyItemStart = event => {
+    const field=event.type==='text_start' ? 'text' : event.type==='thinking_start' ? 'thinking' : null;
+    const index=event.contentIndex,content=event.partial?.content;
+    return field!==null && Object.keys(event).every(key=>['type','contentIndex','partial'].includes(key))
+      && Number.isInteger(index) && index>=0 && Array.isArray(content)
+      && index<content.length && content[index]?.type===(field==='text'?'text':'thinking')
+      && knownEmptyBlocks(content);
+  };
+  const recordProgress = event => {
+    const known=['start','error','done','text_start','thinking_start','text_delta','thinking_delta',
+      'text_end','thinking_end','toolcall_start','toolcall_delta','toolcall_end'];
+    activeTransport.last_adapter_event=known.includes(event.type)?event.type:'unknown_progress';
+    if(emptyItemStart(event)) {
+      const field=event.type==='text_start'?'text':'thinking';
+      activeTransport.empty_item_starts[field]++;
+      return;
+    }
+    if(!['start','error','done'].includes(event.type)) {
+      activeTransport.model_output_seen=true;
+      activeTransport.output_progress_class ??= activeTransport.last_adapter_event;
+      return true;
+    }
+  };
   // Decisions are display telemetry; the result below carries exact arguments for execution.
   // Never re-emit the growing argument prefix on every token (quadratic wire output).
   const publishDecision = (decision, complete, previousId) => send({type:'decision',
@@ -230,7 +261,7 @@ try {
   for(let attempt=1;;attempt++) {
     answer=undefined;
     activeTransport={schema_version:1,attempt,stage:'adapter',fetch_observed:false,response_bytes:0,
-      body_eof:false,model_output_seen:false,causes:[]};
+      body_eof:false,model_output_seen:false,empty_item_starts:{text:0,thinking:0},causes:[]};
     let recoveryTimer;
     const recoveryController=new AbortController();
     if(retryIndex>0) {
@@ -250,12 +281,9 @@ try {
           if(retryIndex>0)retryEvent('connected','Provider connection established; waiting for model output');
         })});
       for await (const event of stream) {
-        // Unknown/new progress events are conservative: never replay across a
-        // provider-version change merely because the bridge cannot display them.
-        if(!['start','error','done'].includes(event.type)) {
-          activeTransport.model_output_seen=true;
-          clearTimeout(recoveryTimer);
-        }
+        // Known empty text/thinking starts carry no visible or dispatchable output.
+        // Tool starts and unknown/new progress still fence replay, even if invisible.
+        if(recordProgress(event)) clearTimeout(recoveryTimer);
     if (event.type === 'text_delta' || event.type === 'thinking_delta') {
       ttft ??= Date.now() - started;
       // A response-global mutable stopReason is not a per-item phase.
@@ -329,7 +357,10 @@ try {
   }
       answer = await stream.result();
       if (answer.stopReason === 'error' || answer.stopReason === 'aborted') {
-        if((answer.content || []).length) activeTransport.model_output_seen=true;
+        if(!knownEmptyBlocks(answer.content)) {
+          activeTransport.model_output_seen=true;
+          activeTransport.output_progress_class ??= 'failed_result_content';
+        }
         throw new Error(answer.errorMessage || answer.stopReason);
       }
       clearTimeout(recoveryTimer);

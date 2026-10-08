@@ -70,9 +70,25 @@ remain the execution evidence. Reader cancellation propagates to the real stream
 pre-output Node transport failure. Header establishment is bounded by the remaining
 cycle slot; HTTP200 connection establishment removes that reconnect timer, so
 healthy model thinking is not mistaken for a failed connection. Real body-read
-failure before model progress can still recover. Partial text/reasoning/tool or
-unknown progress, auth/quota/non200, cancellation and unclassified errors suppress
-replay. Pi's internal maxRetries is0; broader Lua policies cannot multiply recovery.
+failure before model progress can still recover. Known `thinking_start`/`text_start`
+events are NOT output only when their typed partial snapshot contains exclusively
+verified empty text/thinking blocks. Their counts and exact safe event class are
+recorded. The same distinction applies to Pi's normalized failed result: an array
+of known empty blocks is not generated output. Missing/malformed/nonempty/unknown
+blocks, tool calls (even a start with no arguments), real text/reasoning deltas and
+unknown progress suppress replay, as do auth/quota/non200, cancellation and
+unclassified errors. A future adapter event never gains replay authority by being
+invisible. This closes the empty-item-start false suppression without replaying
+any displayed text, reasoning or selected/dispatched tool. Pi's internal maxRetries
+is0; broader Lua policies cannot multiply recovery.
+
+Focused proof: `node scripts/test-subscription-empty-start.cjs <absolute-built-wa>
+<fresh-absolute-evidence>` runs both disk and embedded Lua and a private mutation
+restoring the old start classification.389 assertions passed with zero skips,
+including actual Lua/operation recovery after empty starts; the old-policy mutant
+fails. `--post` verifies retained source/binary/log hashes without replay. This is
+candidate evidence, not a claim that the installed older binary already retries.
+See [measurements/subscription-empty-start-20261008.json](measurements/subscription-empty-start-20261008.json).
 
 After10/10 or the cycle window, the same supervised request waits3 minutes then
 starts a new cycle, while its original request deadline permits. There is no
