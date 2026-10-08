@@ -241,7 +241,9 @@ model wake, job approval or conversation injection is introduced.
 
 ### Optional evidence views; unchanged default access
 
-`session` and `search_messages` accept `view:'compact'`. The default stays `full`.
+`session` and `search_messages` accept `view:'compact'`. `session` defaults to
+`full`; evidence-first history search defaults to `snippets` and `scope:dialogue`,
+with explicit full/all access. See [HISTORY-SEARCH.md](HISTORY-SEARCH.md).
 Compact views retain content, identity, chronology, timing/outcome, concise call
 identities and trace failures; they omit argument bodies, reasoning, images, diffs
 and accounting details **explicitly**, with exact-row references. No stored row or

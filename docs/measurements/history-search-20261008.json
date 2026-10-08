@@ -1,0 +1,258 @@
+{
+  "schema": "wasm-agent.history-search-evaluation/v1",
+  "review": "self-review",
+  "receipt_sha256": "92e0e3fe6849c09b492ec3bf5a665d144f9f8da8d18784489001b67fc6967431",
+  "source": [
+    {
+      "path": "lua/core/history_search.lua",
+      "sha256": "6c218f62fdb165099d8498ee197df4c5141a05f598dade782af327c7810eabdc"
+    },
+    {
+      "path": "lua/core/session_view.lua",
+      "sha256": "57026ca4b27810336fa4c88cd9d3968062d44bb787a206c55cd480fbf36929c9"
+    },
+    {
+      "path": "lua/core/memory.lua",
+      "sha256": "b8b2e52bbfc89da8d2867f5033735e3f692758fa52d79531e543ba698bf6e493"
+    },
+    {
+      "path": "lua/core/tools.lua",
+      "sha256": "20056c5563e25aa516b9fed22e38d9efbe9cecd0547ada9e52c466e1f8c21e4a"
+    },
+    {
+      "path": "scripts/test-history-search.lua",
+      "sha256": "f332f0042506e28574299ce205a1e1e46a03953e1804cdbd24675f5a592b8edc"
+    },
+    {
+      "path": "scripts/bench-history-search.lua",
+      "sha256": "07fff25f133fa561913d8a75e992ba9b0424d8e21734b2761208a353b60bb560"
+    },
+    {
+      "path": "scripts/test-history-search.cjs",
+      "sha256": "0b0d5def8375a5363432e9f940058bb7f4361e4c1e7095ab49ff21d1c5c002b9"
+    }
+  ],
+  "checks": 740,
+  "skipped": 0,
+  "paid_calls": 0,
+  "gate_verified": false,
+  "release_verified": false,
+  "runs": [
+    {
+      "name": "disk",
+      "checks": 145,
+      "contract": "history-search",
+      "ok": true,
+      "originals_preserved": true,
+      "paid_calls": 0,
+      "skipped": 0
+    },
+    {
+      "name": "embedded",
+      "checks": 145,
+      "contract": "history-search",
+      "ok": true,
+      "originals_preserved": true,
+      "paid_calls": 0,
+      "skipped": 0
+    },
+    {
+      "name": "freshness",
+      "checks": 4,
+      "ok": true,
+      "skipped": 0
+    },
+    {
+      "name": "synthetic",
+      "checks": 235,
+      "known_sources": 5,
+      "limitation": "First-call is process-cold, not OS-cache-cold. Warm timings alternate arms; deterministic source retrieval is not paid-model answer quality or token-cost proof.",
+      "messages": 800,
+      "mode": "synthetic",
+      "ok": true,
+      "paid_calls": 0,
+      "queries": [
+        {
+          "new": {
+            "bytes": 12762,
+            "exact_accessible": 20,
+            "first_ms": 74.925422668457,
+            "has_more": true,
+            "p50_ms": 88.204383850098,
+            "p95_ms": 95.989465713501,
+            "returned": 20
+          },
+          "old": {
+            "bytes": 729432,
+            "first_ms": 178.84826660156,
+            "p50_ms": 186.61069869995,
+            "p95_ms": 195.67537307739,
+            "returned": 20,
+            "tool_hits": 20
+          },
+          "query": "benchmark"
+        },
+        {
+          "new": {
+            "bytes": 12862,
+            "exact_accessible": 20,
+            "first_ms": 92.771053314209,
+            "has_more": true,
+            "p50_ms": 85.244655609131,
+            "p95_ms": 94.535827636719,
+            "returned": 20
+          },
+          "old": {
+            "bytes": 729432,
+            "first_ms": 211.22026443481,
+            "p50_ms": 183.20608139038,
+            "p95_ms": 218.14393997192,
+            "returned": 20,
+            "tool_hits": 20
+          },
+          "query": "benchmark Pi"
+        },
+        {
+          "new": {
+            "bytes": 12732,
+            "exact_accessible": 20,
+            "first_ms": 21.270275115967,
+            "has_more": true,
+            "p50_ms": 26.408195495605,
+            "p95_ms": 31.462669372559,
+            "returned": 20
+          },
+          "old": {
+            "bytes": 10153,
+            "first_ms": 7.9717636108398,
+            "p50_ms": 3.5820007324219,
+            "p95_ms": 5.9475898742676,
+            "returned": 20,
+            "tool_hits": 0
+          },
+          "query": "efficiency"
+        },
+        {
+          "new": {
+            "bytes": 401,
+            "exact_accessible": 0,
+            "first_ms": 0.64253807067871,
+            "has_more": false,
+            "p50_ms": 0.4730224609375,
+            "p95_ms": 0.77724456787109,
+            "returned": 0
+          },
+          "old": {
+            "bytes": 14,
+            "first_ms": 0.5805492401123,
+            "p50_ms": 0.27203559875488,
+            "p95_ms": 0.41580200195312,
+            "returned": 0,
+            "tool_hits": 0
+          },
+          "query": "nohistorymatchqxzz"
+        }
+      ],
+      "skipped": 0
+    },
+    {
+      "name": "historical",
+      "checks": 211,
+      "known_sources": 5,
+      "limitation": "First-call is process-cold, not OS-cache-cold. Warm timings alternate arms; deterministic source retrieval is not paid-model answer quality or token-cost proof.",
+      "messages": 64776,
+      "mode": "private_historical_snapshot",
+      "ok": true,
+      "paid_calls": 0,
+      "queries": [
+        {
+          "new": {
+            "bytes": 15514,
+            "exact_accessible": 17,
+            "first_ms": 28.079986572266,
+            "has_more": true,
+            "p50_ms": 26.701211929321,
+            "p95_ms": 33.986806869507,
+            "returned": 17
+          },
+          "old": {
+            "bytes": 114427,
+            "first_ms": 25.340557098389,
+            "p50_ms": 25.089502334595,
+            "p95_ms": 47.838926315308,
+            "returned": 20,
+            "tool_hits": 19
+          },
+          "query": "benchmark"
+        },
+        {
+          "new": {
+            "bytes": 10353,
+            "exact_accessible": 12,
+            "first_ms": 11.747121810913,
+            "has_more": false,
+            "p50_ms": 11.428594589233,
+            "p95_ms": 14.641761779785,
+            "returned": 12
+          },
+          "old": {
+            "bytes": 238499,
+            "first_ms": 24.000883102417,
+            "p50_ms": 23.898124694824,
+            "p95_ms": 25.180101394653,
+            "returned": 20,
+            "tool_hits": 17
+          },
+          "query": "benchmark Pi"
+        },
+        {
+          "new": {
+            "bytes": 15634,
+            "exact_accessible": 19,
+            "first_ms": 31.121969223022,
+            "has_more": true,
+            "p50_ms": 29.643774032593,
+            "p95_ms": 32.98282623291,
+            "returned": 19
+          },
+          "old": {
+            "bytes": 127309,
+            "first_ms": 33.15544128418,
+            "p50_ms": 28.64670753479,
+            "p95_ms": 31.875133514404,
+            "returned": 20,
+            "tool_hits": 20
+          },
+          "query": "efficiency"
+        },
+        {
+          "new": {
+            "bytes": 401,
+            "exact_accessible": 0,
+            "first_ms": 0.31542778015137,
+            "has_more": false,
+            "p50_ms": 0.17428398132324,
+            "p95_ms": 0.27847290039062,
+            "returned": 0
+          },
+          "old": {
+            "bytes": 13458,
+            "first_ms": 1.4204978942871,
+            "p50_ms": 1.192569732666,
+            "p95_ms": 1.6567707061768,
+            "returned": 2,
+            "tool_hits": 2
+          },
+          "query": "nohistorymatchqxzz"
+        }
+      ],
+      "skipped": 0
+    }
+  ],
+  "conclusions": [
+    "Source-linked dialogue retrieval reduces log flooding on the observed archive.",
+    "Known-source access, Unicode, corrections and authorization were tested deterministically.",
+    "No paid-model task correctness, token cost, OS-cache-cold latency or instant response guarantee is established.",
+    "Synthetic dialogue-only efficiency query was slower than the old unrestricted query; session diversity and encoded previews have overhead."
+  ]
+}
