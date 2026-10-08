@@ -272,6 +272,18 @@ no JavaScript. Ask the page itself rather than guessing: start the window with
 `performance.getEntriesByType("navigation")[0].responseStatus`. That one query found in seconds what three
 hypotheses (a cache, a profile lock, the runtime) had not.
 
+## Subscription empty-start retry proof
+
+For Pi bridge retry changes run `node <repo>/scripts/test-subscription-empty-start.cjs
+<absolute-built-wa> <fresh-absolute-evidence-dir>`, then its `--post` mode.
+The private source/embedded matrix verifies known empty item-open recovery, failed
+result empty blocks, hostile/nonempty/unknown no-replay and a causal old-policy
+negative control. `subscription-empty-start-proof` records these adjacent steps
+with shell-quoted runner/binary/evidence arguments and retained-hash postconditions.
+Replay refuses enforced workspace bindings, so prefer the verified direct CLI until
+replay itself passes. Do not confuse passing candidate fixtures with installation:
+read Sentinel's actual outcome and binary hash before promising next live-call recovery.
+
 ## The zero-downtime path, for Lua-only changes
 
 Only development nodes explicitly started with `WASM_AGENT_LUA_ROOT` read Lua

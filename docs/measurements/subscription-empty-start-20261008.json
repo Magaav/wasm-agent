@@ -1,0 +1,18 @@
+{
+  "schema": "wasm-agent.subscription-empty-start-proof/v1",
+  "review": "self-review",
+  "candidate_binary_sha256": "6a872d07aaef40a2634f25912b8473f772b69200be4bf1e51a6528bb0b77ccfe",
+  "bridge_sha256": "1b26e2e4cc1117642e0f025d604a271514924de7dc184f567e5b70e6ca40bb5f",
+  "checks": 389,
+  "modes": [{"mode":"disk","checks":194},{"mode":"embedded","checks":194}],
+  "negative_control": "old_empty_start_policy_fails",
+  "skipped": 0,
+  "paid_calls": 0,
+  "safe_recovery": ["known empty text_start", "known empty thinking_start", "Pi-normalized failed result containing only verified empty blocks"],
+  "suppressed": ["real text/reasoning delta", "tool start/selection", "unknown progress", "nonempty prior block", "encrypted/signature block", "missing snapshot", "wrong type/index", "unknown event/block property", "sparse array", "auth/quota/non200", "cancellation/deadline"],
+  "other_checks": {"native_subscription_operations":15,"instruction_policy":21,"recovery_diagnosis":15},
+  "installed": false,
+  "gate_verified": false,
+  "release_verified": false,
+  "limitations": "Hermetic fake Pi with real localhost socket failures and actual Lua/operation pipeline. No guarantee for outages after visible output or unknown events; no paid-provider timing/effect test. Candidate proof is not installation."
+}
