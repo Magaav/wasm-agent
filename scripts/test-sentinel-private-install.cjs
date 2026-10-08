@@ -132,13 +132,15 @@ async function gone(pid){await until(()=>{try{process.kill(pid,0);return false;}
  // cursor deletion or a second installation. Original immutable return survives.
  cli('job','disable','onSentinelReturn');
  await until(async()=>{const h=await api('/health');return h.current===null&&h.runs.length===0;},'parent drained for reconciliation');
- const activeFile=path.join(box,'protocol-effect.json'),effectBytes=fs.readFileSync(path.join(dir,'effect.json')),effect=JSON.parse(effectBytes);
- fs.writeFileSync(activeFile,JSON.stringify(effect));
+ const activeFile=path.join(box,'protocol-effect.json'),effectBytes=fs.readFileSync(path.join(dir,'effect.json'));
+ // Native Windows FILETIME can exceed JS's exact integer range. Preserve raw
+ // JSON bytes: parsing/stringifying would manufacture a different generation.
+ fs.writeFileSync(activeFile,effectBytes);
  const cursorFile=path.join(dir,'observation.json'),originalCursor=fs.readFileSync(cursorFile);
  const failureFile=path.join(dir,'returns','private-reconciled-failure.json'),failureBytes=Buffer.from(JSON.stringify({id:request.id,phase:'failed',detail:'private already-recovered finalization',at:Math.floor(Date.now()/1000)}));
  fs.writeFileSync(failureFile,failureBytes);fs.writeFileSync(cursorFile,JSON.stringify({slot:99,next_at:Number.MAX_SAFE_INTEGER,last_event:'private-reconciled-failure'}));
  const terminalCursor=fs.readFileSync(cursorFile),beforeRecovery=proof.snapshot(source,install,undefined,privateEnv);
- const negativeCli=(label,env=privateEnv)=>{const r=spawnSync(path.join(install,'wa-sentinel.exe'),['protocol','reconcile',request.id,'--reason','private explicit verification-only recovery'],{cwd:source,env,encoding:'utf8',windowsHide:true,timeout:120000});save('reconcile-negative-'+label+'.json',{status:r.status,stdout:r.stdout,stderr:r.stderr});assert.notEqual(r.status,0,label);assert.deepEqual(fs.readFileSync(activeFile),Buffer.from(JSON.stringify(effect)),'negative cannot settle reservation');};
+ const negativeCli=(label,env=privateEnv)=>{const r=spawnSync(path.join(install,'wa-sentinel.exe'),['protocol','reconcile',request.id,'--reason','private explicit verification-only recovery'],{cwd:source,env,encoding:'utf8',windowsHide:true,timeout:120000});save('reconcile-negative-'+label+'.json',{status:r.status,stdout:r.stdout,stderr:r.stderr});assert.notEqual(r.status,0,label);assert.deepEqual(fs.readFileSync(activeFile),effectBytes,'negative cannot settle reservation');};
  negativeCli('in-turn',{...privateEnv,WASM_AGENT_IN_TURN:'1'});
  try{fs.writeFileSync(resultFile,JSON.stringify({...result,request_id:'wrong-reconciliation-request'}));negativeCli('wrong-result');}finally{fs.writeFileSync(resultFile,resultBytes);}
  const settled=JSON.parse(cli('protocol','reconcile',request.id,'--reason','private recovered finalization observed end to end'));
