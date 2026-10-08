@@ -126,6 +126,12 @@ impl Store {
     /// Audit changed source lines against resolved incoming calls. A result is a review lead;
     /// absence of leads never certifies that a patch is safe (dynamic calls are invisible here).
     pub fn audit_json(&self, root: &Path, request: &Value) -> Result<Value> {
+        self.audit_report(root, request, 20)
+    }
+
+    // Impact needs the complete diagnostic streams to page them without losing evidence.
+    // Standalone audit keeps its established preview contract.
+    fn audit_report(&self, root: &Path, request: &Value, diagnostic_limit: usize) -> Result<Value> {
         let changes = request
             .get("changes")
             .and_then(Value::as_array)
@@ -295,7 +301,7 @@ impl Store {
             for row in rows {
                 let (path,line,target)=row?;
                 unresolved_count+=1;
-                if unresolved.len()<20 {
+                if unresolved.len()<diagnostic_limit {
                     unresolved.push(json!({"path":path,"line":line,"target":target,
                         "relation":"originates_in_changed_symbol","symbol":symbol,
                         "resolution":"unresolved_or_ambiguous","not_a_dependency":true,
@@ -321,8 +327,8 @@ impl Store {
             "ignored_lines": ignored_lines,
             "changed_symbol_count": changed_symbol_count,
             "changed_symbols": changed_symbols.into_values().collect::<Vec<_>>(),
-            "gap_count": gap_count, "gaps": gaps.into_iter().take(20).collect::<Vec<_>>(),
-            "gaps_truncated":gap_count>20,
+            "gap_count": gap_count, "gaps": gaps.into_iter().take(diagnostic_limit).collect::<Vec<_>>(),
+            "gaps_truncated":gap_count>diagnostic_limit,
             "generation":self.generation()?,
             "unresolved_calls":{"total":unresolved_total,"relevant":unresolved_count,
                 "outside_changed_symbols":unresolved_total.saturating_sub(unresolved_count as i64),
@@ -336,7 +342,7 @@ impl Store {
     /// Expand changed definitions through resolved relationships. The result is a review map with
     /// provenance, not a safety score: dynamic dispatch and unsupported syntax remain explicit gaps.
     pub fn impact_json(&self, root: &Path, request: &Value) -> Result<Value> {
-        let audit = self.audit_json(root, request)?;
+        let audit = self.audit_report(root, request, usize::MAX)?;
         let generation = self.generation()?;
         let direction = request
             .get("direction")
@@ -365,15 +371,21 @@ impl Store {
             "root":canonical_root,
             "changes":request.get("changes"),"direction":direction,"depth":depth
         }))?);
-        let mut offset = request.get("offset").and_then(Value::as_u64).unwrap_or(0) as usize;
+        let mut offsets = [request.get("offset").and_then(Value::as_u64).unwrap_or(0) as usize, 0, 0, 0];
         if let Some(cursor) = request.get("cursor").and_then(Value::as_str) {
             let parts: Vec<&str> = cursor.split('.').collect();
             if parts.len() != 3 || parts[0] != generation || parts[2] != digest {
                 return Err("stale_or_mismatched_impact_cursor".into());
             }
-            offset = parts[1]
-                .parse::<usize>()
-                .map_err(|_| "invalid_impact_cursor")?;
+            if let Some(body) = parts[1].strip_prefix("v2:") {
+                let positions = body.split(':').collect::<Vec<_>>();
+                if positions.len() != 4 { return Err("invalid_impact_cursor".into()); }
+                for (slot, position) in offsets.iter_mut().zip(positions) {
+                    *slot = position.parse::<usize>().map_err(|_| "invalid_impact_cursor")?;
+                }
+            } else {
+                offsets[0] = parts[1].parse::<usize>().map_err(|_| "invalid_impact_cursor")?;
+            }
         }
 
         let changed = audit
@@ -384,7 +396,6 @@ impl Store {
         let changed_total = changed.len();
         let changed_public: Vec<Value> = changed
             .iter()
-            .take(limit)
             .map(|symbol| {
                 json!({
                     "kind":symbol.get("kind"),"name":symbol.get("name"),
@@ -461,45 +472,71 @@ impl Store {
                 .then_with(|| a["path"].as_str().cmp(&b["path"].as_str()))
                 .then_with(|| a["line"].as_i64().cmp(&b["line"].as_i64()))
         });
-        let total = rows.len();
-        if offset > total {
+        let unresolved = &audit["unresolved_calls"];
+        let streams = [rows, changed_public,
+            audit["gaps"].as_array().cloned().unwrap_or_default(),
+            unresolved["rows"].as_array().cloned().unwrap_or_default()];
+        let totals = streams.each_ref().map(|rows| rows.len());
+        if offsets.iter().zip(totals).any(|(offset, total)| *offset > total) {
             return Err("impact_offset_out_of_range".into());
         }
-        let mut selected = rows
-            .into_iter()
-            .skip(offset)
-            .take(limit)
-            .collect::<Vec<_>>();
-        let build = |selected: &[Value]| {
-            let next = offset + selected.len();
+        let build = |selected: &[Vec<Value>; 4]| {
+            let next = std::array::from_fn::<_, 4, _>(|i| offsets[i] + selected[i].len());
+            let truncated = next.iter().zip(totals).any(|(offset, total)| *offset < total);
+            let cursor = if truncated {
+                json!(format!("{generation}.v2:{}:{}:{}:{}.{digest}", next[0], next[1], next[2], next[3]))
+            } else { Value::Null };
             json!({
                 "root":canonical_root,"generation":generation,"freshness":"verified_snapshot",
-                "direction":direction,"depth":depth,
-                "changed_symbols":{"total":changed_total,"returned":changed_public.len(),
-                    "truncated":changed_public.len() < changed_total,"rows":changed_public},
-                "impact":{"total":total,"offset":offset,"returned":selected.len(),
-                    "truncated":next < total,"rows":selected,
-                    "next_cursor":if next < total { json!(format!("{generation}.{next}.{digest}")) } else { Value::Null }},
+                "direction":direction,"depth":depth,"truncated":truncated,"next_cursor":cursor,
+                "changed_symbols":{"total":changed_total,"offset":offsets[1],"returned":selected[1].len(),
+                    "truncated":next[1] < totals[1],"rows":selected[1]},
+                "impact":{"total":totals[0],"offset":offsets[0],"returned":selected[0].len(),
+                    "truncated":next[0] < totals[0],"rows":selected[0],"next_cursor":cursor},
                 "coverage":{"changed_lines":audit.get("changed_lines"),
                     "mapped_lines":audit.get("mapped_lines"),"ignored_lines":audit.get("ignored_lines"),
-                    "gap_count":audit.get("gap_count"),"gaps":audit.get("gaps"),
-                    "gaps_truncated":audit.get("gaps_truncated"),"unresolved_calls":audit.get("unresolved_calls")},
+                    "gap_count":audit.get("gap_count"),"gaps_offset":offsets[2],
+                    "gaps_returned":selected[2].len(),"gaps":selected[2],"gaps_truncated":next[2] < totals[2],
+                    "unresolved_calls":{"total":unresolved["total"],"relevant":unresolved["relevant"],
+                        "outside_changed_symbols":unresolved["outside_changed_symbols"],
+                        "offset":offsets[3],"returned":selected[3].len(),"truncated":next[3] < totals[3],
+                        "rows":selected[3],"scope":unresolved["scope"]}},
                 "test_evidence":"static_test_links_only; execution_and_pass_status_unknown",
                 "scope":"resolved_static_edges_only_not_a_correctness_or_risk_score"
             })
         };
+        let mut selected: [Vec<Value>; 4] = std::array::from_fn(|_| Vec::new());
         let mut output = build(&selected);
-        while serde_json::to_vec(&output)?.len() > max_bytes && !selected.is_empty() {
-            selected.pop();
-            output = build(&selected);
+        let metadata_bytes = serde_json::to_vec(&output)?.len();
+        if metadata_bytes > max_bytes {
+            return Err(format!("impact_budget_too_small_for_metadata: minimum_bytes={metadata_bytes}").into());
         }
-        if serde_json::to_vec(&output)?.len() > max_bytes {
-            return Err(if total > offset {
-                "impact_budget_too_small_for_one_row"
-            } else {
-                "impact_budget_too_small_for_metadata"
+        // Fair whole-response paging: first give callers a chance, then each diagnostic stream.
+        // Never shorten a row's identity/provenance, or issue a nonadvancing success cursor.
+        loop {
+            let mut advanced = false;
+            for i in 0..4 {
+                let position = offsets[i] + selected[i].len();
+                if position >= totals[i] || selected[i].len() >= limit { continue; }
+                selected[i].push(streams[i][position].clone());
+                let candidate = build(&selected);
+                if serde_json::to_vec(&candidate)?.len() <= max_bytes {
+                    output = candidate;
+                    advanced = true;
+                } else { selected[i].pop(); }
             }
-            .into());
+            if !advanced { break; }
+        }
+        if selected.iter().all(Vec::is_empty) && offsets.iter().zip(totals).any(|(offset, total)| *offset < total) {
+            let mut minimum = usize::MAX;
+            for i in 0..4 {
+                if offsets[i] < totals[i] {
+                    selected[i].push(streams[i][offsets[i]].clone());
+                    minimum = minimum.min(serde_json::to_vec(&build(&selected))?.len());
+                    selected[i].pop();
+                }
+            }
+            return Err(format!("impact_budget_too_small_for_one_row: minimum_bytes={minimum}").into());
         }
         Ok(output)
     }

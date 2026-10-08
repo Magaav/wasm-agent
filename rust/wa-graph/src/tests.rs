@@ -959,6 +959,88 @@ fn impact_maps_changed_symbols_to_callers_tests_and_snapshot_cursor() {
 }
 
 #[test]
+fn impact_pages_all_streams_within_whole_response_budget() {
+    let dir = temp_dir("impact-paging");
+    let mut source = String::new();
+    for i in 0..28 {
+        source.push_str(&format!("local setting_{i} = {i}\nfunction changed_{i}() unknown_{i}(); return {i} end\n"));
+    }
+    std::fs::write(dir.join("source.lua"), &source).unwrap();
+    for i in 0..8 {
+        std::fs::write(dir.join(format!("caller_é_{i}.lua")),
+            format!("function caller_{i}() return changed_{i}() end\n")).unwrap();
+    }
+    let mut store = Store::open(dir.join("graph.db")).unwrap();
+    store.index(&dir, false).unwrap();
+    let request = json!({"changes":[{"path":"source.lua","lines":(1..=56).collect::<Vec<_>>()}],
+        "direction":"inbound","depth":1,"limit":200,"max_bytes":200000});
+    let all = store.impact_json(&dir, &request).unwrap();
+    assert_eq!(all["coverage"]["gap_count"], 28);
+    assert_eq!(all["coverage"]["unresolved_calls"]["relevant"], 28);
+    assert_eq!(all["changed_symbols"]["total"], 28);
+    assert!(all["impact"]["total"].as_u64().unwrap() >= 8);
+    assert!(serde_json::to_vec(&all).unwrap().len() > 12000);
+    assert_eq!(all["truncated"], false);
+    for budget in [2048, 12000, 24000] {
+        let mut next = request.clone(); next["max_bytes"] = json!(budget);
+        let mut collected: [Vec<serde_json::Value>; 4] = std::array::from_fn(|_| Vec::new());
+        let mut previous_cursor = String::new();
+        let mut pages = 0;
+        loop {
+            let page = store.impact_json(&dir, &next).unwrap();
+            assert!(serde_json::to_vec(&page).unwrap().len() <= budget, "{page}");
+            for (i, rows) in [&page["impact"]["rows"], &page["changed_symbols"]["rows"],
+                &page["coverage"]["gaps"], &page["coverage"]["unresolved_calls"]["rows"]].iter().enumerate() {
+                let offset = match i {0=>&page["impact"]["offset"],1=>&page["changed_symbols"]["offset"],
+                    2=>&page["coverage"]["gaps_offset"],_=>&page["coverage"]["unresolved_calls"]["offset"]};
+                assert_eq!(offset.as_u64().unwrap() as usize, collected[i].len());
+                collected[i].extend(rows.as_array().unwrap().iter().cloned());
+            }
+            if pages == 0 { assert!(page["impact"]["returned"].as_u64().unwrap() > 0); }
+            pages += 1; assert!(pages < 200, "cursor did not advance");
+            let Some(cursor) = page["next_cursor"].as_str() else {break;};
+            assert_ne!(cursor, previous_cursor); previous_cursor = cursor.to_owned();
+            assert_eq!(page["impact"]["next_cursor"], page["next_cursor"]);
+            next["cursor"] = json!(cursor);
+        }
+        for (i, rows) in [&all["impact"]["rows"], &all["changed_symbols"]["rows"],
+            &all["coverage"]["gaps"], &all["coverage"]["unresolved_calls"]["rows"]].iter().enumerate() {
+            assert_eq!(&collected[i], rows.as_array().unwrap(), "stream {i}, budget {budget}");
+        }
+    }
+    let mut small = request.clone(); small["max_bytes"] = json!(2048);
+    let first = store.impact_json(&dir, &small).unwrap();
+    small["cursor"] = first["next_cursor"].clone(); small["max_bytes"] = json!(12000);
+    let second = store.impact_json(&dir, &small).unwrap();
+    assert_eq!(second["impact"]["offset"], first["impact"]["returned"]);
+    small["direction"] = json!("outbound");
+    assert!(store.impact_json(&dir, &small).unwrap_err().to_string().contains("stale_or_mismatched"));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn impact_refuses_unpageable_identity_without_nonadvancing_cursor() {
+    let dir = temp_dir("impact-large-row");
+    std::fs::write(dir.join("source.lua"), "function changed() return 1 end\n").unwrap();
+    std::fs::write(dir.join("caller.lua"), "function caller() return changed() end\n").unwrap();
+    let mut store = Store::open(dir.join("graph.db")).unwrap();store.index(&dir,false).unwrap();
+    let huge = "é".repeat(5000);
+    store.conn.execute("UPDATE nodes SET name=?1 WHERE name='caller'", rusqlite::params![huge]).unwrap();
+    let request=json!({"changes":[{"path":"source.lua","lines":[1]}],"direction":"inbound","max_bytes":2048});
+    let first=store.impact_json(&dir,&request).unwrap();
+    assert_eq!(first["impact"]["returned"],0);
+    assert_eq!(first["changed_symbols"]["returned"],1);
+    let mut next=request.clone();next["cursor"]=first["next_cursor"].clone();
+    let error=store.impact_json(&dir,&next).unwrap_err().to_string();
+    assert!(error.contains("minimum_bytes="),"{error}");
+    next["max_bytes"]=json!(24000);
+    let final_page=store.impact_json(&dir,&next).unwrap();
+    assert_eq!(final_page["impact"]["rows"][0]["name"],huge);
+    assert_eq!(final_page["truncated"],false);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn opening_an_existing_database_adds_resolution_provenance_columns() {
     let dir = temp_dir("edge-schema-upgrade");
     let db = dir.join("graph.db");

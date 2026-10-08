@@ -271,6 +271,15 @@ gate_run cargo test --release --offline --manifest-path rust/wa-sentinel/Cargo.t
 gate_phase_begin instances
 CARGO_BUILD_JOBS=2 cargo build --release --offline --manifest-path rust/wa-sentinel/Cargo.toml >/dev/null
 gate_run node scripts/test-sentinel-ownership.cjs "rust/wa-sentinel/target/release/wa-sentinel"
+gate_run node scripts/test-sentinel-task-launcher.mjs
+if command -v powershell.exe >/dev/null 2>&1; then
+  gate_run powershell.exe -NoProfile -NonInteractive -File scripts/test-restore-sentinel-task.ps1
+fi
+if command -v cygpath >/dev/null 2>&1; then
+  SENTINEL_DETACHED_BIN="$(cygpath -w "$(pwd)/rust/wa-sentinel/target/release/wa-sentinel.exe")"
+  SENTINEL_DETACHED_EVIDENCE="$(cygpath -w "$GATE_HOME/sentinel-detached")"
+  gate_run node scripts/test-sentinel-detached.cjs "$SENTINEL_DETACHED_BIN" "$SENTINEL_DETACHED_EVIDENCE"
+fi
 INSTANCE_VERDICT="$(mktemp)"
 rm -f "$INSTANCE_VERDICT" # The child must produce NEW evidence, never a previous run's verdict.
 INSTANCE_STATUS=0
@@ -987,6 +996,9 @@ if command -v cygpath >/dev/null 2>&1; then
   HISTORY_EVIDENCE="$(cygpath -w "$HISTORY_EVIDENCE")"
 fi
 gate_run node scripts/test-history-search.cjs "$HISTORY_BIN" "$HISTORY_EVIDENCE"
+IMPACT_EVIDENCE="$GATE_HOME/graph-impact-paging"
+if command -v cygpath >/dev/null 2>&1; then IMPACT_EVIDENCE="$(cygpath -w "$IMPACT_EVIDENCE")"; fi
+gate_run node scripts/test-graph-impact-paging.cjs "$HISTORY_BIN" "$IMPACT_EVIDENCE"
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-session-owner.lua" "$BIN" --db "$DB.session-owner" | grep 'session owner ok'
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-session-worktree.lua" "$BIN" --db "$DB.session-worktree" | grep 'session worktree ok'
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-session-fork.lua" "$BIN" --db "$DB.session-fork" | grep 'session fork ok'

@@ -101,7 +101,14 @@ Two limits worth knowing before you rely on this:
   administrator and provisioned non-admin service identity; never bypass a stopped
   watcher, elevate silently or consume old unknown requests to install it.
   The Windows logon task remains a fallback until real SCM identity/recovery/deploy
-  proof succeeds. The recorded `sentinel-service-private-cli` spell runs
+  proof succeeds. Its launcher now uses supported native detached `start` rather
+  than a foreground CMD-hosted watcher. `start`/`restart` refuse an in-turn caller.
+  For stopped-task repair, hand the external operator
+  `<repo>/scripts/restore-sentinel-task.ps1 -ExpectedSha <published-sha>
+  -ParentSession <parent>`; `-Check` is read-only. It preserves task/launcher
+  evidence and requires exact clean main, no live/unknown watcher, no intentional
+  stop and no unsettled protocol effect. Do not use a raw Start-Process/schtasks
+  workaround or remove run markers. See `docs/SENTINEL.md`. The recorded `sentinel-service-private-cli` spell runs
   `scripts/test-sentinel-service.cjs` with a source-built Sentinel/fresh evidence
   directory and verifies retained log/binary hashes via `--post`; it does not
   certify live recovery. Spell replay currently refuses enforced session worktrees

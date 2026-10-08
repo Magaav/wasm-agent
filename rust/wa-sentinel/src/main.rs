@@ -2294,7 +2294,15 @@ fn refusal(unit: &str) -> String {
     )
 }
 
+fn require_external_watcher_lifecycle() -> Result<()> {
+    if std::env::var("WASM_AGENT_IN_TURN").as_deref() == Ok("1") {
+        bail!("watcher_lifecycle_requires_external_executor: use the installed supervisor/task outside the node turn");
+    }
+    Ok(())
+}
+
 fn start_self() -> Result<()> {
+    require_external_watcher_lifecycle()?;
     let _start_lock=open_lock(&start_lock_path())?;
     _start_lock.try_lock().map_err(|e|anyhow::anyhow!("another lifecycle command owns this instance: {e}"))?;
     start_self_unlocked()
@@ -2330,16 +2338,20 @@ fn start_self_unlocked() -> Result<()> {
     // what an operator checking the lane wants to see - "the launcher set it" is not a fact a child can
     // check.
     let (reserved, source) = jobs::reserved_child_capacity();
-    let spawned_pid = if cfg!(windows) {
-        let output=std::process::Command::new("powershell")
-            .env("WA_SENTINEL_JOB_RESERVED_CHILD_CAPACITY",reserved.to_string())
-            .args(["-NoProfile","-Command",&format!("$sentinelChild=Start-Process -FilePath '{}' -ArgumentList @('watch') -WindowStyle Hidden -PassThru; $sentinelChild.Id",me.display().to_string().replace("'","''"))]).output()?;
-        if !output.status.success() {bail!("watcher launch failed: {}",String::from_utf8_lossy(&output.stderr));}
-        String::from_utf8_lossy(&output.stdout).trim().parse::<u32>().context("watcher launch returned no pid")?
-    } else {
-        std::process::Command::new(&me).arg("watch").env("WA_SENTINEL_JOB_RESERVED_CHILD_CAPACITY",reserved.to_string())
-            .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn()?.id()
+    #[cfg(windows)]
+    let spawned_pid = {
+        // A hidden window is not console-independent lifetime. Native detachment
+        // inherits no handles/console and uses its own process group; keep the
+        // existing owner lock and readiness proof after spawn.
+        let mut environment: Vec<(String, String)> = std::env::vars()
+            .filter(|(key,_)| !key.eq_ignore_ascii_case("WA_SENTINEL_JOB_RESERVED_CHILD_CAPACITY"))
+            .collect();
+        environment.push(("WA_SENTINEL_JOB_RESERVED_CHILD_CAPACITY".into(),reserved.to_string()));
+        winproc::start_detached_with_env(&me,&["watch".into()],Some(&environment))?
     };
+    #[cfg(not(windows))]
+    let spawned_pid = std::process::Command::new(&me).arg("watch").env("WA_SENTINEL_JOB_RESERVED_CHILD_CAPACITY",reserved.to_string())
+        .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn()?.id();
     for _ in 0..100 {
         let recorded=std::fs::read_to_string(pid_path()).ok().and_then(|p|p.trim().parse::<u32>().ok());
         if recorded==Some(spawned_pid)&&watcher_state()?==WatcherState::Running {
@@ -2386,6 +2398,7 @@ fn stop_self_unlocked() -> Result<()> {
 }
 
 fn restart_self() -> Result<()> {
+    require_external_watcher_lifecycle()?;
     if service_stopping() {bail!("service stop in progress; no lifecycle replay");}
     let _start_lock=open_lock(&start_lock_path())?;
     _start_lock.try_lock().map_err(|e|anyhow::anyhow!("another lifecycle command owns this instance: {e}"))?;
@@ -2661,6 +2674,16 @@ mod role_tests;
 #[cfg(test)]
 mod self_update_tests {
     use super::*;
+
+    #[test]
+    fn watcher_lifecycle_refuses_node_turn_before_mutation() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let old = std::env::var_os("WASM_AGENT_IN_TURN");
+        std::env::set_var("WASM_AGENT_IN_TURN", "1");
+        assert!(start_self().unwrap_err().to_string().contains("requires_external_executor"));
+        assert!(restart_self().unwrap_err().to_string().contains("requires_external_executor"));
+        match old {Some(value)=>std::env::set_var("WASM_AGENT_IN_TURN",value),None=>std::env::remove_var("WASM_AGENT_IN_TURN")}
+    }
 
     #[test]
     fn watcher_probe_fails_closed_for_running_legacy_pid_and_distinguishes_stopped() {

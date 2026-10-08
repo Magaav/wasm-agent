@@ -45,7 +45,10 @@ rem Reserved child capacity for job inference, so a job's child does not have to
 rem node. Unset, the inference lane is idle-gated and every child sits in the queue while a turn
 rem runs - which reads like the design and is really the fallback (docs/JOBS.md).
 set "WA_SENTINEL_JOB_RESERVED_CHILD_CAPACITY=1"
-"%~dp0wa-sentinel.exe" watch >> "$LogDir\sentinel.out" 2>&1
+rem Start a console-independent watcher and exit after its lifetime-lock proof.
+rem CMD / task Ctrl-C must not become the supervisor's lifetime.
+"%~dp0wa-sentinel.exe" start >> "$LogDir\sentinel.out" 2>&1
+exit /b %errorlevel%
 "@
 Set-Content -Path $Launcher -Value $launcherText -Encoding ASCII
 Write-Host "wrote launcher $Launcher"

@@ -323,6 +323,33 @@ Receipts are under `<data>/sentinel/io-idle-*.json`; no recurrent job is created
 An old sample during an active wake is not a matched idle baseline. OS counters
 include cached/network I/O; this diagnostic does not measure fan causation.
 
+## Console-independent Windows watcher start
+
+The supported unmanaged `start`/`restart` path now uses native Win32 detached
+process creation, not a PowerShell `Start-Process` hop. The watcher has no inherited
+console, a separate process group, no inherited handles, and the existing lifetime
+lock/readiness proof. This prevents an ordinary Ctrl-C in the launcher's console
+from terminating the watcher; it is not crash recovery or a live SCM certification.
+Direct `watch` remains a foreground diagnostic mode. The logon-task launcher uses
+`start` and exits after readiness, instead of hosting a foreground watcher in CMD.
+
+An in-turn `start`/`restart` refuses before lifecycle mutations. A stopped watcher
+must still be restored by an authorized external operator through installed
+`wa-sentinel start` or its existing verified logon task. Do not remove the run
+marker, spawn a competitor, or replay unknown effects. The external helper
+`scripts/restore-sentinel-task.ps1 -Check -ExpectedSha <main-sha>` is read-only;
+without `-Check`, run it from an external PowerShell with `-ParentSession <id>`
+to preserve/back up the existing limited task and launcher, replace only its
+foreground `watch` invocation with supported `start`, queue the exact new source
+when needed and start that existing task. It refuses SCM, live/unknown ownership,
+intentional stops, source drift and unsettled prior protocol effects before changes.
+It never registers a new task, elevates, copies a binary or calls the installer.
+Intentional stop markers,
+manager identity, queue contents and historical effect reservations remain binding.
+After restoring the exact task, the normal queue installs published source while
+idle. Existing queued source-bound requests remain immutable; if source changed
+before any effect reservation, preserve their refusal and issue a fresh intent.
+
 ## Operating
 
 ```
