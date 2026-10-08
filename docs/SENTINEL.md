@@ -482,7 +482,25 @@ always the same: **write a request and let this process do it.**
 that `spell` deliberately does not go through `run`, so enabling `run` does not widen what a plan
 can do.
 
-### How fast it is
+### Update-path speed, not release gating
+
+Routine deployment does not run the private E2E fixture or full release gate.
+The update still owns source provenance, idle safety, scratch startup, rollback,
+artifact equality and fresh final verification; speed removes duplicate work,
+not those boundaries. Exact-source proof brackets the verifier with two current
+source/remote observations, instead of four identical nested checks. Windows
+listener/watcher identities are observed in one native PowerShell invocation per
+snapshot. Verifier JSON uses shell builtins rather than at least 525 formatting
+subprocesses for 75 rows; all rows/counts and ordinary details are identical,
+with control-character details preserved by JSON escaping.
+
+Matched three-sample offline Windows measurements (`test-install-speed.mjs`):
+75-row serialization median 10,840 ms -> 57 ms; native process pair median
+468 ms -> 231 ms. Sample order alternates, but this is a microbenchmark, not a
+full update or outage guarantee. Actual build/idle/install timing remains separate.
+No production test/wake/job or extra default release gate is added.
+
+### Historical upgrade timing
 
 Measured on this machine, not estimated. The numbers matter because "seamless" is a claim about
 seconds, so it should be a claim about *measured* seconds:

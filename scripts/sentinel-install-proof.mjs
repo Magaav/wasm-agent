@@ -39,16 +39,23 @@ export function sourceIdentity(root,expected) {
  if(git('symbolic-ref','--short','HEAD')!=='main'||git('rev-parse','origin/main')!==head||git('ls-remote','origin','refs/heads/main').split(/\s/)[0]!==head)throw Error('source_main_mismatch');
  return {resolved_commit:head,tree:git('rev-parse','HEAD^{tree}')};
 }
-export function processIdentity(pid) {
- if(!Number.isInteger(pid)||pid<=0)throw Error('invalid process pid');
+export function processIdentities(pids) {
+ if(!Array.isArray(pids)||pids.length===0||pids.some(pid=>!Number.isInteger(pid)||pid<=0))throw Error('invalid process pid');
  if(process.platform==='win32') {
-  return JSON.parse(run('powershell.exe',['-NoProfile','-Command',`$p=Get-Process -Id ${pid} -ErrorAction Stop; @{pid=$p.Id; image=$p.Path; created=$p.StartTime.ToUniversalTime().ToFileTimeUtc().ToString()} | ConvertTo-Json -Compress`]));
+  // One fresh native query for the pair, not two interpreter launches.
+  const value=JSON.parse(run('powershell.exe',['-NoProfile','-Command',`@(${pids.join(',')}) | ForEach-Object { $p=Get-Process -Id $_ -ErrorAction Stop; @{pid=$p.Id; image=$p.Path; created=$p.StartTime.ToUniversalTime().ToFileTimeUtc().ToString()} } | ConvertTo-Json -Compress`]));
+  const rows=Array.isArray(value)?value:[value];
+  if(rows.length!==pids.length||rows.some((row,index)=>row.pid!==pids[index]))throw Error('process_identity_response_mismatch');
+  return rows;
  }
- const stat=fs.readFileSync(`/proc/${pid}/stat`,'utf8').split(') ').at(-1).split(' ');
- return {pid,image:fs.readlinkSync(`/proc/${pid}/exe`),created:stat[19]};
+ return pids.map(pid=>{const stat=fs.readFileSync(`/proc/${pid}/stat`,'utf8').split(') ').at(-1).split(' ');
+  return {pid,image:fs.readlinkSync(`/proc/${pid}/exe`),created:stat[19]};});
 }
+export function processIdentity(pid) {return processIdentities([pid])[0];}
 export function snapshot(root,install,manifest,environment=process.env) {
- const identity=sourceIdentity(root);
+ return snapshotWithIdentity(root,install,manifest,environment,sourceIdentity(root));
+}
+function snapshotWithIdentity(root,install,manifest,environment,identity) {
  const suffix=process.platform==='win32'?'.exe':'';
  const nodeFile=path.join(install,'wa'+suffix),sentFile=path.join(install,'wa-sentinel'+suffix);
  if(hash(nodeFile)!==hash(path.join(root,'rust/target/release/wa'+suffix))||hash(sentFile)!==hash(path.join(root,'rust/wa-sentinel/target/release/wa-sentinel'+suffix)))throw Error('built_artifact_mismatch');
@@ -65,7 +72,7 @@ export function snapshot(root,install,manifest,environment=process.env) {
  const config=path.join(environment.WASM_AGENT_HOME,'.wasm-agent');
  const listener_pid=Number(fs.readFileSync(path.join(install,'serve.pid'),'utf8').trim());
  const watcher_pid=Number(fs.readFileSync(path.join(config,'sentinel/sentinel.pid'),'utf8').trim());
- const listener=processIdentity(listener_pid),watcher=processIdentity(watcher_pid);
+ const [listener,watcher]=processIdentities([listener_pid,watcher_pid]);
  const same=(a,b)=>fs.realpathSync(a).toLowerCase()===fs.realpathSync(b).toLowerCase();
  if(!same(listener.image,nodeFile)||!same(watcher.image,sentFile))throw Error('process_image_mismatch');
  return {...identity,node_sha256:hash(nodeFile),sentinel_sha256:hash(sentFile),scripts_sha256:digest(path.join(install,'scripts'),scriptFiles),ui_sha256:digest(path.join(install,'ui'),uiFiles),listener_pid,watcher_pid,listener_created:listener.created,watcher_created:watcher.created,script_files:scriptFiles};
@@ -79,12 +86,12 @@ export function finalizeRecord(root,install) {
 }
 export function verifyActual(root,install,intent,binding,evidence,environment=process.env) {
  if(binding.id!==intent.id||JSON.stringify(binding.intent)!==JSON.stringify(intent)||binding.owner!==intent.owner||binding.parent!==intent.session)throw Error('binding_mismatch');
- sourceIdentity(root,intent.expected_sha);
+ const initialIdentity=sourceIdentity(root,intent.expected_sha);
  const effect=read(path.join(evidence,'effect.json'));
- if(effect.id!==intent.id||effect.expected_sha!==intent.expected_sha||effect.owner!==binding.owner||effect.parent!==binding.parent||effect.tree!==sourceIdentity(root,intent.expected_sha).tree||effect.script_sha256!==hash(path.join(root,'scripts/deploy.sh')))throw Error('effect_generation_mismatch');
+ if(effect.id!==intent.id||effect.expected_sha!==intent.expected_sha||effect.owner!==binding.owner||effect.parent!==binding.parent||effect.tree!==initialIdentity.tree||effect.script_sha256!==hash(path.join(root,'scripts/deploy.sh')))throw Error('effect_generation_mismatch');
  const installed=record(path.join(install,'installed.txt'));
  for(const k of ['listener_pid','watcher_pid'])installed[k]=Number(installed[k]);
- const actual=snapshot(root,install,JSON.parse(installed.script_files),environment);
+ const actual=snapshotWithIdentity(root,install,JSON.parse(installed.script_files),environment,initialIdentity);
  if(actual.listener_created!==installed.listener_created||actual.watcher_created!==installed.watcher_created)throw Error('process_creation_mismatch');
  const result=read(path.join(evidence,'result.json'));
  const script=path.join(root,'scripts/verify-install.sh');
@@ -98,7 +105,9 @@ export function verifyActual(root,install,intent,binding,evidence,environment=pr
  if(health.ok!==true)throw Error('health_not_ok');
  const proof={...actual,...raw,exit:r.status,request_id:intent.id,expected_sha:intent.expected_sha,owner:binding.owner,parent:binding.parent,at:new Date().toISOString(),raw_stdout:`verify-${nonce}.stdout`,raw_stderr:`verify-${nonce}.stderr`};
  // Fresh native identities are sampled after the verifier, never normalized from expected values.
- Object.assign(proof,snapshot(root,install,JSON.parse(installed.script_files),environment));
+ // Bracket the full verification with source checks; avoid identical inner
+ // git/remote checks while retaining independently observed before/after roots.
+ Object.assign(proof,snapshotWithIdentity(root,install,JSON.parse(installed.script_files),environment,sourceIdentity(root,intent.expected_sha)));
  if(proof.listener_created!==installed.listener_created||proof.watcher_created!==installed.watcher_created)throw Error('process_creation_mismatch');
  proof.at=new Date().toISOString();
  const verdict=installVerdict(intent,result,installed,proof);

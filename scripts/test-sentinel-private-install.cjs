@@ -71,7 +71,9 @@ async function gone(pid){await until(()=>{try{process.kill(pid,0);return false;}
  await until(()=>fs.existsSync(path.join(dir,'effect.json')),'actual effect admission');
  const busyDuringUpdate=api('/chat',{text:'hold private parent',thread:session.id});await until(()=>!!releaseBusy,'actual parent busy during installation');
  const noticesBefore=notices.length;
- await sleep(12000);
+ // Wait for the actual durable clock, not an assumed 12s scheduling window.
+ // Cold native owner reads/filesystem work may delay observation on Windows.
+ await until(()=>{try{const c=JSON.parse(fs.readFileSync(path.join(dir,'check.json')));return c.due_at!==undefined&&c.at>=c.due_at;}catch{return false;}},'actual durable updating check',60000);
  assert.equal(notices.length,noticesBefore,'updating return coalesced while real parent busy');
  const check=JSON.parse(fs.readFileSync(path.join(dir,'check.json')));
  assert(check.at>=check.due_at&&check.due_at>=request.queued_at+10,'actual ten-second check observed while busy');

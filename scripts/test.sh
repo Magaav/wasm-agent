@@ -1954,6 +1954,8 @@ run_proof_fixture subagentReturn 206 node scripts/test-subagent-return-hook.cjs
 # have a floor: a guard nobody counts is a guard that can lose checks silently.
 run_proof_fixture deployShipped 92 node scripts/check-deploy-shipped.mjs
 node scripts/test-sentinel-quarantine.mjs || exit 1
+node scripts/test-sentinel-install-proof.mjs || exit 1
+node scripts/test-install-speed.mjs || exit 1
 run_proof_fixture orchestration 33 node scripts/test-orchestration-e2e.cjs "$BIN"
 run_proof_fixture whatsapp 40 node scripts/test-whatsapp-subagent-e2e.cjs
 # The reader's acted cursor: a message may be consumed only when a durable decision exists for it, the

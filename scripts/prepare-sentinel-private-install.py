@@ -2,9 +2,13 @@
 No inherited WA marker is removed. Refuse reuse and remote/public source.
 """
 import argparse,pathlib,subprocess,json,hashlib,socket,os,tempfile
-p=argparse.ArgumentParser();p.add_argument('--repo',required=True);p.add_argument('--head',required=True);p.add_argument('--packet',required=True);a=p.parse_args()
+p=argparse.ArgumentParser();p.add_argument('--repo',required=True);p.add_argument('--head',required=True);p.add_argument('--packet',required=True);p.add_argument('--private-root');a=p.parse_args()
 repo=pathlib.Path(a.repo).resolve();packet=pathlib.Path(a.packet).resolve()
-assert packet.is_relative_to(pathlib.Path(tempfile.gettempdir()).resolve()),'packet must stay in the explicitly private temp boundary'
+private_root=pathlib.Path(a.private_root).resolve() if a.private_root else pathlib.Path(tempfile.gettempdir()).resolve()
+assert private_root.is_dir() and packet!=private_root and packet.is_relative_to(private_root),'packet must stay beneath the explicitly private boundary'
+# Long source roots fail Win32 archive journals and MSVC output paths. Keep the
+# explicit root read/write scope unchanged; refuse before any clone/effect.
+if os.name=='nt':assert len(str(packet))<=100,'private Windows packet root too long; pass a short explicit --private-root'
 assert os.environ.get('WASM_AGENT_IN_TURN')!='1','outside WA execution required; marker must never be removed'
 packet.mkdir(parents=True,exist_ok=False)
 def git(*args):return subprocess.check_output(['git','-C',str(repo),*args],text=True).strip()
