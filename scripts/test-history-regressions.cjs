@@ -1,0 +1,8 @@
+#!/usr/bin/env node
+// Focused unchanged-session/recovery regressions against the actual disk source.
+const fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto'),{spawnSync}=require('node:child_process');
+const [binary,out]=process.argv.slice(2);if(!binary||!out||!path.isAbsolute(binary)||!path.isAbsolute(out)||fs.existsSync(out))throw Error('absolute binary and fresh evidence required');fs.mkdirSync(out,{recursive:true});
+const repo=path.resolve(__dirname,'..'),scripts=['test-session-view.lua','test-memory-window.lua','test-session-owner.lua','test-recovery.lua','test-efficiency.lua'];
+const runs=[];
+for(const script of scripts){const home=path.join(out,script);fs.mkdirSync(home);const env={...process.env};for(const k of Object.keys(env))if(/^(WA_|WASM_AGENT_|OPENAI_|OPENCODE_|ANTHROPIC_)/.test(k))delete env[k];Object.assign(env,{WASM_AGENT_HOME:home,WASM_AGENT_LUA_ROOT:repo,WASM_AGENT_RENDEZVOUS:'',WASM_AGENT_RELAY:'',WASM_AGENT_MANAGED:'0',WASM_AGENT_LLM_BASE_URL:'http://127.0.0.1:1',WASM_AGENT_LLM_API_KEY:'fixture',WA_SCRIPT:path.join(repo,'scripts',script)});const r=spawnSync(binary,['--db',path.join(home,'test.db')],{cwd:repo,env,encoding:'utf8',timeout:120000,maxBuffer:4*1024*1024});fs.writeFileSync(path.join(home,'stdout'),r.stdout||'');fs.writeFileSync(path.join(home,'stderr'),r.stderr||'');if(r.status!==0)throw Error(script+' failed: '+(r.stderr||r.error?.message));runs.push({script,exit:r.status,verdict:(r.stdout||'').trim().split('\n').at(-1)});}
+const receipt={ok:true,skipped:0,binary_sha256:crypto.createHash('sha256').update(fs.readFileSync(binary)).digest('hex'),runs};fs.writeFileSync(path.join(out,'receipt.json'),JSON.stringify(receipt,null,2));console.log(JSON.stringify(receipt));

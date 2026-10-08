@@ -100,14 +100,26 @@ M.shared = {
   schema("session", "Read a session. Defaults to newest messages; pass next_before_seq back as before_seq to retrieve earlier evidence.", {
     session_id = { type = "string" },
     before_seq = { type = "integer", minimum = 1 },
+    around_seq = { type = "integer", minimum = 1, description = "Centre on a search hit; includes nonmatching neighbours in chronological order." },
+    before = { type = "integer", minimum = 0, maximum = 20 },
+    after = { type = "integer", minimum = 0, maximum = 20 },
+    message_ids = { type = "array", minItems = 1, maxItems = 20, items = {type="string"}, description = "Batch selected originals in this session; missing or foreign rows refuse the entire batch." },
     message_id = { type = "string", description = "Exact row, with ownership checked against this session." },
     byte_offset = { type = "integer", minimum = 1, description = "With message_id, page exact row JSON without requiring operator artifact access." },
     byte_limit = { type = "integer", minimum = 4, maximum = 20000 }, message_version = {type="string"},
     view = { type = "string", enum = {"full", "compact"}, description = "Full is default; compact omits diagnostic details, not content, with exact-row references." },
     limit = { type = "integer", minimum = 1, maximum = 1000 } }, { "session_id" }),
-  schema("search_messages", "Search your own past sessions for text (what did we decide about X?).", {
-    query = { type = "string" },
-    view = { type = "string", enum = {"full", "compact"} },
+  schema("search_messages", "Search history locally: dialogue-first exact excerpts with original evidence references. Use scope=evidence for execution/tool results, all for unrestricted history including retrieval echoes. Filters apply before ranking. session around_seq reads neighbouring context.", {
+    query = { type = "string", maxLength = 4096 },
+    scope = { type = "string", enum = {"dialogue", "evidence", "all"} },
+    view = { type = "string", enum = {"snippets", "full", "compact"}, description = "Snippets default: exact matching excerpts, not generated summaries. Full/compact explicit; originals always accessible." },
+    roles = { type = "array", minItems = 1, maxItems = 6, items = {type="string",enum={"user","assistant","tool","summary","retry","system"}} },
+    session_id = {type="string"}, tool_name = {type="string"},
+    after = {type="number",description="Inclusive Unix seconds."}, before = {type="number",description="Inclusive Unix seconds."},
+    sort = {type="string",enum={"relevance","newest"}}, match = {type="string",enum={"terms","phrase"}},
+    group_by = {type="string",enum={"session","message"},description="Session default: at most two hits per session; message disables diversity."},
+    offset = {type="integer",minimum=0,maximum=1000000,description="Follow next_offset; pagination uses live ranks, not a frozen snapshot."},
+    byte_limit = {type="integer",minimum=2048,maximum=20000},
     limit = { type = "integer", minimum = 1, maximum = 50 } }, { "query" }),
   schema("resume_session", "Fold a past session into this one: its summary and recent messages become context.", {
     session_id = { type = "string" },
@@ -998,10 +1010,9 @@ function M.dispatch(memory, name, args, role, ctx)
     if session.user_id ~= user_id and not is_master(role) then return { error = "forbidden" } end
     return dofile('lua/core/session_view.lua').get(memory,args.session_id,args)
   elseif name == "search_messages" then
-    if args.view~=nil and args.view~='full' and args.view~='compact' then return {error='invalid_view'} end
-    local matches=memory.search_messages(args.query or '',is_master(role) and nil or user_id,math.min(50,math.max(1,tonumber(args.limit) or 20)))
-    if args.view=='compact' then matches=evidence_view.messages(matches) end
-    return {matches=matches,limit_reached=#matches==math.min(50,math.max(1,tonumber(args.limit) or 20))}
+    local owner
+    if not is_master(role) then owner=user_id end
+    return dofile('lua/core/history_search.lua').search(memory,args,owner)
   elseif name == "resume_session" then
     local target = memory.session(args.session_id)
     if not target then return { error = "unknown_session" } end

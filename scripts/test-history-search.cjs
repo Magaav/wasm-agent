@@ -1,0 +1,23 @@
+#!/usr/bin/env node
+// Verified private native checks and optional read-only historical replay. No provider.
+const fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto'),{spawnSync}=require('node:child_process');
+const repo=path.resolve(__dirname,'..');
+const args=process.argv.slice(2),post=args[0]==='--post';if(post)args.shift();
+const [binary,out,...options]=args;
+if(!binary||!out||!path.isAbsolute(binary)||!path.isAbsolute(out))throw Error('usage: [--post] <absolute-wa-binary> <fresh-absolute-evidence-dir> [--disk-only] [--history-db path]');
+const hash=p=>crypto.createHash('sha256').update(fs.readFileSync(p)).digest('hex');
+if(post){const receipt=JSON.parse(fs.readFileSync(path.join(out,'receipt.json')));if(!receipt.ok||receipt.binary_sha256!==hash(binary))throw Error('receipt/binary mismatch');for(const file of receipt.files)if(hash(path.join(out,file.path))!==file.sha256)throw Error('evidence changed: '+file.path);for(const file of receipt.source)if(hash(path.join(repo,file.path))!==file.sha256)throw Error('source changed: '+file.path);console.log(JSON.stringify({ok:true,verified:true,checks:receipt.checks,skipped:receipt.skipped}));process.exit(0);}
+if(fs.existsSync(out))throw Error('evidence generation already exists');fs.mkdirSync(out,{recursive:true});
+const source=['lua/core/history_search.lua','lua/core/session_view.lua','lua/core/memory.lua','lua/core/tools.lua','scripts/test-history-search.lua','scripts/bench-history-search.lua','scripts/test-history-search.cjs'];
+let checks=0;const files=[];const runs=[];
+function retain(name,text){fs.writeFileSync(path.join(out,name),text);files.push({path:name,sha256:hash(path.join(out,name))});}
+function env(home,script,disk){const e={...process.env};for(const k of Object.keys(e))if(/^(WA_|WASM_AGENT_|OPENAI_|OPENCODE_|ANTHROPIC_)/.test(k))delete e[k];Object.assign(e,{WASM_AGENT_HOME:home,WASM_AGENT_RENDEZVOUS:'',WASM_AGENT_RELAY:'',WASM_AGENT_MANAGED:'0',WASM_AGENT_LLM_BASE_URL:'http://127.0.0.1:1',WASM_AGENT_LLM_API_KEY:'fixture',WA_SCRIPT:script});if(disk)e.WASM_AGENT_LUA_ROOT=repo;return e;}
+function run(name,script,db,disk=true,extra={}){const home=path.join(out,name+'-home');fs.mkdirSync(home);const result=spawnSync(binary,['--db',db],{cwd:repo,env:{...env(home,script,disk),...extra},encoding:'utf8',timeout:120000,maxBuffer:8*1024*1024});retain(name+'.stdout',result.stdout||'');retain(name+'.stderr',result.stderr||'');if(result.status!==0)throw Error(name+' failed: '+(result.stderr||result.error?.message));const lines=(result.stdout||'').trim().split('\n');const last=JSON.parse(lines.at(-1));if(!last.ok||last.skipped!==0)throw Error(name+' missing/nonpassing verdict');checks+=last.checks||0;runs.push({name,...last});return last;}
+for(const mode of options.includes('--disk-only')?['disk']:['disk','embedded'])run(mode,path.join(repo,'scripts/test-history-search.lua'),path.join(out,mode+'.db'),mode==='disk');
+if(!options.includes('--disk-only')){
+ const probe=path.join(out,'embedding.lua');fs.writeFileSync(probe,"local j=dofile('lua/vendor/json.lua');local n=0;for _,p in ipairs({'lua/core/history_search.lua','lua/core/session_view.lua','lua/core/tools.lua','lua/core/memory.lua'}) do assert(EMBEDDED[p]==host.read_file(p),'stale embedding '..p);n=n+1 end;print(j.encode({ok=true,checks=n,skipped=0}))\n");
+ run('freshness',probe,path.join(out,'freshness.db'),false);
+}
+run('synthetic',path.join(repo,'scripts/bench-history-search.lua'),path.join(out,'synthetic.db'),true);
+const historyAt=options.indexOf('--history-db');if(historyAt>=0){const live=options[historyAt+1];if(!live||!path.isAbsolute(live))throw Error('absolute history db required');const snapshot=path.join(out,'history.db');const backup=path.join(out,'snapshot.py');fs.writeFileSync(backup,"import sqlite3,sys,pathlib\nsrc=sqlite3.connect(pathlib.Path(sys.argv[1]).as_uri()+'?mode=ro',uri=True)\ndst=sqlite3.connect(sys.argv[2]);src.backup(dst);assert dst.execute('pragma integrity_check').fetchone()[0]=='ok';dst.close();src.close()\n");const r=spawnSync('python',[backup,live,snapshot],{encoding:'utf8',timeout:120000});if(r.status!==0)throw Error('read-only snapshot failed: '+r.stderr);run('historical',path.join(repo,'scripts/bench-history-search.lua'),snapshot,true,{WA_HISTORY_REPLAY:'1'});}
+const receipt={ok:true,checks,skipped:0,paid_calls:0,gate_verified:false,release_verified:false,binary:path.resolve(binary),binary_sha256:hash(binary),source:source.map(p=>({path:p,sha256:hash(path.join(repo,p))})),files,runs};fs.writeFileSync(path.join(out,'receipt.json'),JSON.stringify(receipt,null,2));console.log(JSON.stringify(receipt));

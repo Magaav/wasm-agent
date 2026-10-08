@@ -34,9 +34,65 @@ local function reference(row,sid,id)
     content='[Oversized message: retrieve the original using evidence.]',omitted=true,evidence=address}
 end
 
+local function bounded_rows(rows,sid,args,task,mode)
+  local bytes=tonumber(args.byte_limit) or math.min(16000,output.MAX_BYTES-2048)
+  if bytes<2048 or bytes>output.MAX_BYTES-2048 or bytes%1~=0 then return {error='invalid_session_byte_limit'} end
+  local page={session_id=sid,messages={},view=args.view or 'full',mode=mode,returned=0,
+    note='Originals unchanged. Oversized rows have exact-retrieval evidence.'}
+  for _,row in ipairs(rows) do
+    local item=args.view=='compact' and evidence.message(row) or row
+    page.messages[#page.messages+1]=item;page.returned=#page.messages
+    if #json.encode(page)>bytes then
+      page.messages[#page.messages]=reference(row,sid,task and (args.id or task.subagent_id))
+      if #json.encode(page)>bytes then return {error='session_batch_budget_too_small',requested=#rows} end
+    end
+  end
+  return page
+end
+
 function M.get(memory,sid,args,task)
   args=args or {}
   if args.view~=nil and args.view~='full' and args.view~='compact' then return {error='invalid_view'} end
+  local modes=(args.message_id and 1 or 0)+(args.message_ids and 1 or 0)+(args.around_seq~=nil and 1 or 0)
+  if modes>1 or (modes>0 and (args.before_seq~=nil or args.after_seq~=nil)) or
+      ((args.message_ids or args.around_seq~=nil) and (args.byte_offset~=nil or args.message_version~=nil)) then return {error='session_cursor_conflict'} end
+  if args.around_seq==nil and (args.before~=nil or args.after~=nil) then return {error='session_window_anchor_required'} end
+  if args.message_ids then
+    local ids=args.message_ids
+    if type(ids)~='table' or #ids<1 or #ids>20 then return {error='invalid_message_ids'} end
+    for key,id in pairs(ids) do
+      if type(key)~='number' or key%1~=0 or key<1 or key>#ids or type(id)~='string' then return {error='invalid_message_ids'} end
+    end
+    local rows,seen={},{}
+    for _,id in ipairs(ids) do
+      if seen[id] then return {error='duplicate_message_id'} end
+      seen[id]=true
+      local row=memory.message(id)
+      if not row or row.session_id~=sid then return {error='unknown_message'} end
+      rows[#rows+1]=row
+    end
+    table.sort(rows,function(a,b)return a.seq<b.seq end)
+    return bounded_rows(rows,sid,args,task,'batch')
+  end
+  if args.around_seq~=nil then
+    local seq,before,after=tonumber(args.around_seq),args.before or 2,args.after or 2
+    if not seq or seq<1 or seq%1~=0 or type(before)~='number' or before<0 or before>20 or before%1~=0 or type(after)~='number' or after<0 or after>20 or after%1~=0 then return {error='invalid_session_window'} end
+    local rows=memory.session_messages(sid,{around_seq=seq,before=before,after=after})
+    local found=false;for _,row in ipairs(rows) do if row.seq==seq then found=true end end
+    if not found then return {error='unknown_message'} end
+    local page=bounded_rows(rows,sid,args,task,'around')
+    if not page.error then
+      page.around_seq=seq
+      local bounds=memory.session_message_bounds(sid)
+      local first,last=rows[1].seq,rows[#rows].seq
+      page.has_more_before=first>bounds.first_seq;page.has_more_after=last<bounds.last_seq
+      page.next_before_seq=page.has_more_before and first or nil
+      page.next_after_seq=page.has_more_after and last or nil
+      -- Include cursor overhead in the same encoded bound.
+      if #json.encode(page)>(args.byte_limit or math.min(16000,output.MAX_BYTES-2048)) then return {error='session_batch_budget_too_small',requested=#rows} end
+    end
+    return page
+  end
   if args.message_id then
     local row=memory.message(args.message_id)
     if not row or row.session_id~=sid then return {error='unknown_message'} end

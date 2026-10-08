@@ -1086,7 +1086,10 @@ function M.session_messages(session_id, opts)
   opts = opts or {}
   local limit = opts.limit or 200
   local sql, params
-  if opts.all then
+  if opts.around_seq then
+    sql="SELECT * FROM (SELECT * FROM (SELECT * FROM messages WHERE session_id=? AND seq<=? ORDER BY seq DESC LIMIT ?) UNION ALL SELECT * FROM (SELECT * FROM messages WHERE session_id=? AND seq>? ORDER BY seq ASC LIMIT ?)) ORDER BY seq ASC"
+    params={session_id,opts.around_seq,(opts.before or 2)+1,session_id,opts.around_seq,opts.after or 2}
+  elseif opts.all then
     sql="SELECT * FROM messages WHERE session_id=? AND seq>? "..(opts.exclude_summaries and "AND role<>'summary' " or "").."ORDER BY seq ASC"
     params={session_id,opts.after_seq or 0}
   elseif opts.before_seq then

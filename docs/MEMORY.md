@@ -193,7 +193,10 @@ preservation (`WASM_AGENT_RETENTION_DAYS` defaults to 0); debug transcripts pers
 retirement admission. Quiet sessions, compaction, age and replication acknowledgments
 cannot prove an original is no longer needed by an operation, claim or workspace. `session`/`search_messages` also offer an
 explicit `view:'compact'` with omitted diagnostic fields and exact-row references;
-full remains the default. Exact `message_id` lookup checks session identity and
+full remains the default for `session`; history search now defaults to dialogue
+snippets with exact source references. See [HISTORY-SEARCH.md](HISTORY-SEARCH.md)
+for scopes, filters, grouping, centred context and batch original retrieval.
+Exact `message_id` lookup checks session identity and
 ownership before returning anything. Byte-paged exact row JSON is available to the
 row's authorized reader, including guests, without operator artifact access. See
 [TOKEN_EFFICIENCY.md](TOKEN_EFFICIENCY.md) for those bounded presentation contracts.

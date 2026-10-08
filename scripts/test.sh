@@ -980,6 +980,13 @@ WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-retry-context.lua" "$BIN" --db "$DB
 # A session can own a checkout so parallel sessions on one node do not overwrite each other. The
 # default is the contract: a session with no worktree must resolve relative paths exactly as before,
 # or this feature would silently relocate every existing session's files.
+HISTORY_BIN="$(cd "$(dirname "$BIN")" && pwd)/$(basename "$BIN")"
+HISTORY_EVIDENCE="$GATE_HOME/history-search"
+if command -v cygpath >/dev/null 2>&1; then
+  HISTORY_BIN="$(cygpath -w "$HISTORY_BIN")"
+  HISTORY_EVIDENCE="$(cygpath -w "$HISTORY_EVIDENCE")"
+fi
+gate_run node scripts/test-history-search.cjs "$HISTORY_BIN" "$HISTORY_EVIDENCE"
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-session-owner.lua" "$BIN" --db "$DB.session-owner" | grep 'session owner ok'
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-session-worktree.lua" "$BIN" --db "$DB.session-worktree" | grep 'session worktree ok'
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-session-fork.lua" "$BIN" --db "$DB.session-fork" | grep 'session fork ok'
