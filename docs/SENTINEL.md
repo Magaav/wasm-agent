@@ -238,10 +238,11 @@ same dispatch after canonical allowlisting. Script dependency PATH remains the
 script/operator's responsibility; selecting Node does not make `rg` or other
 child executables available. Other script interpreter behavior is unchanged.
 
-A stopped watcher can still only be restarted from outside a turn: nothing that is running can hear a
-request. That is why the supervisor belongs in a service or a logon task (`deploy/wa-sentinel.service`
-is the systemd unit; `scripts/install-sentinel-task.ps1` registers the Windows logon task). This verb
-removes the human step for *updating*; the one for *reviving* remains.
+A stopped watcher cannot hear a queued request. Restore its existing validated
+OS task through the restore-only procedure below, which an authorized operator
+agent may invoke via node-side shell even during a turn. Node replacement still
+belongs outside the run and waits for idle. Keep the supervisor in a service or
+logon task (`deploy/wa-sentinel.service`; `scripts/install-sentinel-task.ps1`).
 
 `request` **writes a file** and returns. `watch` (or `once`) performs it. That split is the whole
 point: the writer may die immediately afterwards, and the request still lands.
@@ -333,18 +334,29 @@ from terminating the watcher; it is not crash recovery or a live SCM certificati
 Direct `watch` remains a foreground diagnostic mode. The logon-task launcher uses
 `start` and exits after readiness, instead of hosting a foreground watcher in CMD.
 
-An in-turn `start`/`restart` refuses before lifecycle mutations. A stopped watcher
-must still be restored by an authorized external operator through installed
-`wa-sentinel start` or its existing verified logon task. Do not remove the run
-marker, spawn a competitor, or replay unknown effects. The external helper
-`scripts/restore-sentinel-task.ps1 -Check -ExpectedSha <main-sha>` is read-only;
-without `-Check`, run it from an external PowerShell with `-ParentSession <id>`
-to preserve/back up the existing limited task and launcher, replace only its
-foreground `watch` invocation with supported `start`, queue the exact new source
-when needed and start that existing task. It refuses SCM, live/unknown ownership,
-intentional stops, source drift and unsettled prior protocol effects before changes.
-It never registers a new task, elevates, copies a binary or calls the installer.
-Intentional stop markers,
+General in-turn `start`/`restart` still refuse; they can replace a live watcher.
+**Restoring a proven stopped supervisor is different from replacing the node.**
+An authorized operator agent must retain a recovery route even with a bound
+workspace and stopped watcher: use the node-side shell and
+`scripts/restore-sentinel-task.ps1 -RestoreOnly -ExpectedSha <main-sha>`.
+`-Check` performs the same read-only preflight. No client, unbinding or run-marker
+removal is needed. This starts ONLY the existing validated limited logon task,
+under the same operator SID, after backing up its task/launcher. The task runs
+outside the node's supervised process tree and executes installed supported
+`start`; the helper never detaches a watcher itself or installs a binary.
+Unknown/live watcher identity, SCM binding, intentional stop, unexpected task,
+source drift or access denial still refuse. Such factual OS/identity failures
+are exact blockers, not a blanket instruction to wait for a human.
+
+`-RestoreOnly` creates no new deployment intent, clears no reservation and treats
+unsettled installation records as preserved evidence—not a reason to forbid
+restoring the observer that can reconcile them. Existing approved queue intake
+may proceed; native installation admission still blocks an unsettled effect.
+Without `-RestoreOnly`, the combined restore/deploy helper remains external and
+requires `-ParentSession <id>` plus no unsettled prior installation reservation.
+It preserves/backups the task/launcher, replaces foreground `watch` with supported
+`start`, and queues exact new source when needed. It never registers a new task,
+elevates, copies a binary or calls the installer. Intentional stop markers,
 manager identity, queue contents and historical effect reservations remain binding.
 After restoring the exact task, the normal queue installs published source while
 idle. Existing queued source-bound requests remain immutable; if source changed
