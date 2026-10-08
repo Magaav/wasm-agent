@@ -997,6 +997,12 @@ if command -v cygpath >/dev/null 2>&1; then
   HISTORY_EVIDENCE="$(cygpath -w "$HISTORY_EVIDENCE")"
 fi
 gate_run node scripts/test-history-search.cjs "$HISTORY_BIN" "$HISTORY_EVIDENCE"
+HOOK_EVIDENCE="$GATE_HOME/hook-events"
+if command -v cygpath >/dev/null 2>&1; then HOOK_EVIDENCE="$(cygpath -w "$HOOK_EVIDENCE")"; fi
+gate_run node scripts/test-hook-events.cjs "$HISTORY_BIN" "$HOOK_EVIDENCE"
+FINAL_EVALUATION="$GATE_HOME/before-final-evaluation"
+if command -v cygpath >/dev/null 2>&1; then FINAL_EVALUATION="$(cygpath -w "$FINAL_EVALUATION")"; fi
+gate_run node scripts/evaluate-before-final.cjs "$HISTORY_BIN" "$FINAL_EVALUATION"
 IMPACT_EVIDENCE="$GATE_HOME/graph-impact-paging"
 if command -v cygpath >/dev/null 2>&1; then IMPACT_EVIDENCE="$(cygpath -w "$IMPACT_EVIDENCE")"; fi
 gate_run node scripts/test-graph-impact-paging.cjs "$HISTORY_BIN" "$IMPACT_EVIDENCE"

@@ -1,0 +1,13 @@
+// Execute the actual unchanged agent/Responses loop and evaluate display-vs-commit boundaries.
+const fs=require('node:fs'),path=require('node:path'),assert=require('node:assert/strict'),{spawnSync}=require('node:child_process');
+const [binary,out]=process.argv.slice(2),repo=path.resolve(__dirname,'..');assert(binary&&out&&path.isAbsolute(binary)&&path.isAbsolute(out));assert(!fs.existsSync(out));fs.mkdirSync(out,{recursive:true});
+const env=Object.fromEntries(Object.entries(process.env).filter(([k])=>!/^(WA_|WASM_AGENT_|OPENAI_|OPENCODE_|ANTHROPIC_)/.test(k)));
+const events=path.join(out,'events.json');Object.assign(env,{WASM_AGENT_HOME:out,WASM_AGENT_LUA_ROOT:repo,WA_SCRIPT:path.join(repo,'scripts/test-final-answer-loop.lua'),WA_FINAL_EVENTS:events,WASM_AGENT_RENDEZVOUS:'',WASM_AGENT_RELAY:'',WASM_AGENT_MANAGED:'0'});
+const r=spawnSync(binary,['--db',path.join(out,'test.db')],{cwd:repo,env,encoding:'utf8',timeout:60000,maxBuffer:2*1024*1024});fs.writeFileSync(path.join(out,'stdout'),r.stdout||'');fs.writeFileSync(path.join(out,'stderr'),r.stderr||'');assert.equal(r.status,0,r.stderr);const scenarios=JSON.parse(fs.readFileSync(events));let checks=0;const check=(v,label)=>{assert(v,label);checks++;};
+const rows=scenarios.map(({scenario,events})=>({scenario,begins:events.filter(e=>e.type==='final_answer_begin').length,replies:events.filter(e=>e.type==='reply').length,begin_then_tool:events.some((e,i)=>e.type==='final_answer_begin'&&events.slice(i+1).some(x=>x.type==='tool'))}));
+const by=Object.fromEntries(rows.map(x=>[x.scenario,x]));
+check(by.tool.begins===2&&by.tool.replies===1&&by.tool.begin_then_tool,'early begin can be followed by tools/second candidate');
+check(by.steer.begins===2&&by.steer.replies===1,'steering supersedes candidate');check(by.followup.begins===2&&by.followup.replies===1,'queued followup supersedes candidate');
+check(by.failure.begins===1&&by.failure.replies===0,'begin exists on later failure');check(by.cancel.begins===1&&by.cancel.replies===0,'begin exists on cancellation');
+check(by.unknown.begins===0&&by.unknown.replies===1,'settled answer can exist without phase begin');check(by.commentary.begins===0&&by.commentary.replies===0,'commentary never final');
+const report={ok:true,checks,skipped:0,paid_calls:0,actual_loop_verdict:r.stdout.trim().split('\n').at(-1),scenarios:rows,conclusion:'Provider final_answer_begin is neither universal nor a settlement/check barrier. A harness before-final-commit candidate barrier is feasible but not implemented or pre-stream by default.',crash_guarantee:'not supplied; durable prepare and unknown-effect reconciliation required'};fs.writeFileSync(path.join(out,'report.json'),JSON.stringify(report,null,2));console.log(JSON.stringify(report));

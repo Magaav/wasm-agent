@@ -296,6 +296,7 @@ function wa_jobs(body, session)
   local ok, args = pcall(json.decode, body or "{}")
   if not ok or type(args) ~= "table" then return json.encode({error="invalid_job_request"}) end
   local action = args.action or "list"
+  if action=='hooks' then return json.encode(dofile('lua/core/hook_events.lua').get()) end
   -- `controls` is here because the Engine shows a job's declared numbers and has to be able to move
   -- them; the store owns what a control may be and what the edit costs. Nothing here executes a job.
   if action ~= "list" and action ~= "history" and action ~= "enable" and action ~= "disable" and action ~= "controls" then

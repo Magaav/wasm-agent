@@ -15,6 +15,10 @@ The sentinel observes sources and consumes a durable SQLite queue at
 tools**, with toggles, source state, queued count, last outcome and the exact definition; a job that
 declares controls gets a field and a button per number. Neither a toggle nor a control is shown successful
 until the server confirms it, and a refusal is shown in the store's own words.
+A separate read-only **hooks / events** topic after Jobs lists native producers,
+display telemetry, configured event handlers and explicit absent/evaluated events.
+`POST /jobs {action:"hooks"}` returns that catalogue without enabling or executing
+anything; Jobs retains all management controls. See [HOOK-EVENTS.md](HOOK-EVENTS.md).
 
 Definitions are installed with `wa-sentinel job put <definition.json>`. New AND
 edited definitions are disabled; an edit invalidates approval. Enable deliberately:

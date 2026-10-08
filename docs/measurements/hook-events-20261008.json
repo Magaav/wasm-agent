@@ -1,0 +1,31 @@
+{
+  "schema": "wasm-agent.hook-events-evaluation/v1",
+  "review": "self-review",
+  "catalogue_checks": {"disk":27,"embedded":27,"total":54},
+  "browser_checks": 10,
+  "negative_control": "empty handler catalogue fails the real-browser handler-listed assertion",
+  "ui_suite": "PASS structure, mid-run reload, startup recovery, inspect and view windows; final-answer normal suite zero skips",
+  "before_final_evaluation": {
+    "actual_agent_loop_checks":55,
+    "boundary_assertions":7,
+    "scenarios":[
+      {"scenario":"tools after candidate","display_begins":2,"settled_replies":1},
+      {"scenario":"steering","display_begins":2,"settled_replies":1},
+      {"scenario":"queued followup","display_begins":2,"settled_replies":1},
+      {"scenario":"cancel","display_begins":1,"settled_replies":0},
+      {"scenario":"failure","display_begins":1,"settled_replies":0},
+      {"scenario":"unknown phase","display_begins":0,"settled_replies":1},
+      {"scenario":"commentary only","display_begins":0,"settled_replies":0}
+    ],
+    "conclusion":"Provider final_answer_begin is neither universal nor a settlement/check barrier. A durable harness completed-candidate barrier before final commit is feasible; pre-stream timing would need buffering. beforeFinalAnswer remains unimplemented.",
+    "crashes":"No exactly-once external effect or guaranteed eventual answer is established. Prepared candidate records and unknown-effect reconciliation would be required."
+  },
+  "skipped":0,
+  "paid_calls":0,
+  "jobs_or_hooks_enabled":false,
+  "automatic_git_repair_added":false,
+  "gate_verified":false,
+  "release_verified":false,
+  "installed":false,
+  "limitations":"Private SQLite/host catalogue source+embedded checks and real Chromium staged UI. One second required UI run failed in an unchanged Pi fixture while a candidate build ran concurrently; serial unchanged bridge and full UI rerun passed. No live installation or universal callback completeness is claimed."
+}
