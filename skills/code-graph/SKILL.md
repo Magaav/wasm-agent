@@ -124,9 +124,18 @@ graph {action:"impact", source:"git", direction:"both", depth:2, limit:50}
 Use `impact` after a patch when you need the changed symbols plus resolved
 callers, dependencies, and test leads in one bounded result. Every impact row
 includes hop direction and the call-site edge that reached it, including the
-resolver strategy and confidence. Continue with `next_cursor`; a cursor fails if
+resolver strategy and confidence. The whole byte budget pages callers, changed
+symbols, gaps and unresolved rows; counts remain exact and omitted rows stay
+retrievable. Continue with top-level `next_cursor` (also `impact.next_cursor`),
+even after impact rows finish if diagnostics remain. A cursor fails if
 the graph generation, request or root changed. Source actions use the session's
 worktree by default; explicit `cwd` selects a different read-only source root.
+Focused paging proof: `node <repo>/scripts/test-graph-impact-paging.cjs
+<absolute-built-wa> <fresh-absolute-evidence-dir>`, then the same CLI with
+`--post` before its arguments. `graph-impact-paging-check` records this verified
+sequence with shell-quoted `runner_arg`, `binary_arg`, `evidence_arg`; replay
+refuses enforced worktree bindings, so retain the verified direct CLI until actual
+spell postconditions pass. It verifies 2/12/24 KB traversal, not dynamic completeness.
 Git audit/impact use its actual Git top-level for both patch and index. Check
 `impact.root` against the intended checkout; missing/failed required bindings
 refuse, never silently fall back. Root-scoped caches are on-demand and do not

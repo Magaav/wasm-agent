@@ -6,7 +6,7 @@ let binary=path.resolve(process.argv[2]||path.join('rust/wa-sentinel/target/rele
 if(process.platform==='win32'&&!fs.existsSync(binary)&&fs.existsSync(binary+'.exe'))binary+='.exe';
 let checks=0,server,watcherPid,held=[],healthCalls=0,hold=false;
 const env={...process.env,WASM_AGENT_HOME:root,WA_SENTINEL_SUPERVISOR:'none',WA_SENTINEL_WAKE_BUDGET:'0'};
-for(const key of Object.keys(env))if(/^(OPENAI_|ANTHROPIC_|OPENCODE_)/.test(key))delete env[key];
+for(const key of Object.keys(env))if(/^(OPENAI_|ANTHROPIC_|OPENCODE_)/.test(key)||key==='WASM_AGENT_IN_TURN')delete env[key];
 const check=(v,label)=>{assert.ok(v,label);checks++};
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 async function until(fn,label){const until=Date.now()+10000;while(Date.now()<until){if(await fn())return;await sleep(30);}throw Error('timeout '+label);}

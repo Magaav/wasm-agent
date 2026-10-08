@@ -1,0 +1,32 @@
+{
+  "schema": 1,
+  "review": "self-review",
+  "gate_verified": false,
+  "release_verified": false,
+  "tests": {
+    "rust_graph": 38,
+    "rust_sentinel": 60,
+    "native_graph_workspace": 34,
+    "native_paging": 137,
+    "native_sentinel_ownership": 29,
+    "windows_console_detachment": 9,
+    "task_launcher": 5,
+    "restoration_negative": 12,
+    "policy": 19
+  },
+  "skipped": 0,
+  "runtime": {
+    "installed_source": "26eddb7f434fe69b6bd21ead136fdc6264fde20c",
+    "watcher": "not_running",
+    "task_last_exit": "0xC000013A",
+    "control_event_sender": "unknown",
+    "pending_deploy": "1791456710396366600-9368-00000000000000000000",
+    "unsettled_effect": "1791418603937642600-7564-00000000000000000000",
+    "reservation_source": "26eddb7f434fe69b6bd21ead136fdc6264fde20c",
+    "reservation_phase": "admitted",
+    "verification": "missing",
+    "client_execution": "workspace_execution_context_unsupported",
+    "restoration": "requires_external_executor; deploy remains blocked by original reservation"
+  },
+  "scope": "Transport pagination and watcher console lifetime are tested; no live restoration, SCM migration or install is claimed."
+}

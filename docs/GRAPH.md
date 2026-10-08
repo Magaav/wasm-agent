@@ -129,6 +129,10 @@ changeset, direction, and depth. It maps changed lines to enclosing symbols and
 walks resolved non-document edges, returning each hop with its call site,
 resolution strategy, and confidence. Paging uses a cursor bound to the request
 and graph generation; stale cursors fail instead of mixing snapshots.
+All response streams share the byte budget: callers, changed symbols, gaps and
+unresolved-call rows page without fixed diagnostic overhead. Follow top-level
+`next_cursor` (also mirrored under `impact`) until absent, including diagnostic-only
+pages. See [GRAPH-IMPACT-PAGING.md](GRAPH-IMPACT-PAGING.md).
 
 ## How the model reaches it
 
