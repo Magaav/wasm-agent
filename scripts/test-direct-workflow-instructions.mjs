@@ -51,6 +51,11 @@ try {
     fs.writeFileSync(target,original);
   }
   const agents=path.join(fixture,'AGENTS.md'),bytes=fs.readFileSync(agents);
+  const text=bytes.toString('utf8'),restore='watcher via the checked node-side `-RestoreOnly` task path';
+  check(text.split(restore).length===2,'stopped-supervisor recovery anchor unique');
+  fs.writeFileSync(agents,text.replace(restore,'watcher restoration unavailable'));
+  check(run(fixture).stdout.includes('restore stopped supervisor without a bound-workspace dead end'),'removing recovery path fails');
+  fs.writeFileSync(agents,bytes);
   fs.appendFileSync(agents,'\n'+'.'.repeat(10419));
   check(run(fixture).stdout.includes('  failed: AGENTS.md grew'),'original byte budget must remain enforced');
   fs.writeFileSync(agents,bytes);

@@ -272,6 +272,7 @@ gate_phase_begin instances
 CARGO_BUILD_JOBS=2 cargo build --release --offline --manifest-path rust/wa-sentinel/Cargo.toml >/dev/null
 gate_run node scripts/test-sentinel-ownership.cjs "rust/wa-sentinel/target/release/wa-sentinel"
 gate_run node scripts/test-sentinel-task-launcher.mjs
+gate_run node scripts/test-recovery-diagnosis.mjs
 if command -v powershell.exe >/dev/null 2>&1; then
   gate_run powershell.exe -NoProfile -NonInteractive -File scripts/test-restore-sentinel-task.ps1
 fi

@@ -1,0 +1,46 @@
+{
+  "schema": 1,
+  "review": "self-review",
+  "restoration": {
+    "ok": true,
+    "watcher_pid": 6804,
+    "task_backup": "20261008T1718506225347Z",
+    "unknown_reservation_preserved": true,
+    "node_restarted": false,
+    "binary_installed": false
+  },
+  "failure": {
+    "native_run": 1034,
+    "step": 45,
+    "model_call_ms": 20236,
+    "http_status": 200,
+    "response_bytes": 125996,
+    "body_eof": false,
+    "cancelled": false,
+    "cause": "UND_ERR_SOCKET",
+    "model_output_seen": true,
+    "ui_delta_events": 0,
+    "retry_scheduled": false,
+    "usage": "unknown",
+    "exact_startup_event": "not recorded"
+  },
+  "reservation": {
+    "id": "1791418603937642600-7564-00000000000000000000",
+    "source": "26eddb7f434fe69b6bd21ead136fdc6264fde20c",
+    "phase": "admitted",
+    "installer_ok": true,
+    "verification_missing": true,
+    "notification_submission": "unknown-no-replay",
+    "observer_coupling": "pending return slot prevents refreshed installation phase verification",
+    "main_drift_prevents_reconcile": true
+  },
+  "checks": {
+    "restoration_negative": 16,
+    "subscription_transport": 106,
+    "ui_failure_render": 9
+  },
+  "skipped": 0,
+  "paid_probe_calls": 0,
+  "gate_verified": false,
+  "release_verified": false
+}

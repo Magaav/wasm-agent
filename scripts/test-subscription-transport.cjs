@@ -36,6 +36,8 @@ stream(_m,context,options){
   if(mode==='partial-thought')yield {type:'thinking_delta',contentIndex:0,delta:'thinking'};
   if(mode==='partial-tool')yield {type:'toolcall_start',contentIndex:0,partial:{content:[{id:'partial',name:'never_execute'}]}};
   if(mode==='new-progress')yield {type:'future_progress',value:'not displayed'};
+  if(mode==='empty-thinking-start')yield {type:'thinking_start',contentIndex:0,partial:{content:[{type:'thinking',thinking:''}]}};
+  if(mode==='empty-text-start')yield {type:'text_start',contentIndex:0,partial:{content:[{type:'text',text:''}]}};
   const server=http.createServer((req,res)=>{req.resume();
    if(((mode==='retry-success'||mode==='healthy-slow')&&attempts===2)||(mode==='cycle-success'&&attempts===12)){res.writeHead(200,{'Content-Type':'text/event-stream','x-request-id':'req-local'});
     res.flushHeaders();if(mode==='healthy-slow')setTimeout(()=>res.end('data: {}\\n\\n'),150);else res.end('data: {}\\n\\n');return;}
@@ -102,6 +104,14 @@ globalThis.fetch=async(url,opts)=>{
     check(()=>assert.equal(r.attempts[0].diagnostic.model_output_seen,true));
     check(()=>assert.equal(r.events.filter(e=>e.type==='transport_retry').length,0));
     check(()=>assert.equal(r.events.filter(e=>e.type==='result').length,0));
+  }
+  // Reproduce the live 20s warning: adapter observes an empty item-open but
+  // forwards no delta/decision; conservative replay remains suppressed.
+  for(const mode of ['empty-thinking-start','empty-text-start']){
+    const r=run(mode);check(()=>assert.equal(r.status,1));check(()=>assert.equal(r.attempts.length,1));
+    check(()=>assert.equal(r.attempts[0].diagnostic.model_output_seen,true));
+    check(()=>assert.equal(r.events.filter(e=>['delta','pending_delta','reasoning','decision'].includes(e.type)).length,0));
+    check(()=>assert.equal(r.events.filter(e=>e.type==='transport_retry').length,0));
   }
   for(const mode of ['unknown','auth','quota','cancel','deadline-abort','signal-abort']){
     const r=run(mode);check(()=>assert.equal(r.status,1));check(()=>assert.equal(r.attempts.length,1));

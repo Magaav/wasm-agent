@@ -46,7 +46,8 @@ wa-sentinel request deploy \
   --reason "why"
 ```
 
-`deploy` runs the full gate (`scripts/deploy.sh`), waits until no turn is running before it starts, and
+`deploy` runs the installation checks (`scripts/deploy.sh`), not a full release
+gate unless explicitly selected; it waits until no turn is running before it starts, and
 runs **detached** — the process it replaces is the one that would otherwise be its parent. It installs
 the node, the UI and the sentinel, proves the new node on a scratch port, rolls back on its own if that
 proof fails, and queues your continuation once the new node answers `/health`. Read the outcome from
@@ -93,22 +94,28 @@ request. Keep exact failed receipts and inspect partial effects before repair.
 
 Two limits worth knowing before you rely on this:
 
-- **A stopped watcher cannot be revived from a run.** Nothing running can hear a request, so use
-  `deploy`/`upgrade` while the watcher is up, and keep the supervisor in a service or logon task so it
-  comes back by itself (`deploy/wa-sentinel.service` for systemd; Windows native SCM
+- **Restore a stopped watcher; do not leave a recovery dead end.** A request alone
+  cannot start a stopped watcher. An authorized operator agent uses node-side `bash`
+  with `<repo>/scripts/restore-sentinel-task.ps1 -RestoreOnly -ExpectedSha <main-sha>`
+  (`-Check` first). It validates the existing limited task/same SID, stopped native
+  lifetime ownership, no intentional stop and current published source; backs up
+  task/launcher; starts only that existing OS-owned task outside the node process tree.
+  Bound workspaces do not forbid this host-maintenance procedure. Never unbind a
+  session, strip run markers, hand-copy binaries or invent a detached competitor.
+  Restoration is not deployment/reservation settlement; unknown effects survive.
+  General in-turn `start`/`restart` and combined restore/deploy remain refused.
+  Keep the supervisor in a service or logon task (`deploy/wa-sentinel.service` for
+  systemd; Windows native SCM
   preparation is in `docs/WINDOWS-SENTINEL-SERVICE.md` and
   `scripts/install-sentinel-service.ps1`). SCM migration requires an external
   administrator and provisioned non-admin service identity; never bypass a stopped
   watcher, elevate silently or consume old unknown requests to install it.
   The Windows logon task remains a fallback until real SCM identity/recovery/deploy
   proof succeeds. Its launcher now uses supported native detached `start` rather
-  than a foreground CMD-hosted watcher. `start`/`restart` refuse an in-turn caller.
-  For stopped-task repair, hand the external operator
-  `<repo>/scripts/restore-sentinel-task.ps1 -ExpectedSha <published-sha>
-  -ParentSession <parent>`; `-Check` is read-only. It preserves task/launcher
-  evidence and requires exact clean main, no live/unknown watcher, no intentional
-  stop and no unsettled protocol effect. Do not use a raw Start-Process/schtasks
-  workaround or remove run markers. See `docs/SENTINEL.md`. The recorded `sentinel-service-private-cli` spell runs
+  than a foreground CMD-hosted watcher. The restore-only path keeps unsettled
+  installation evidence without blocking watcher readiness. SCM provisioning
+  and any identity/access refusal still require the exact OS authority, never
+  silent elevation. See `docs/SENTINEL.md`. The recorded `sentinel-service-private-cli` spell runs
   `scripts/test-sentinel-service.cjs` with a source-built Sentinel/fresh evidence
   directory and verifies retained log/binary hashes via `--post`; it does not
   certify live recovery. Spell replay currently refuses enforced session worktrees
