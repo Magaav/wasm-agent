@@ -226,6 +226,13 @@
           </button>
           <div class="engine-content" id="jobs-box" hidden><wa-jobs></wa-jobs></div>
         </div>
+        <div class="engine-topic">
+          <button class="engine-head" type="button" data-target="hooks-box">
+            <span class="engine-caret">▸</span><span class="engine-name">hooks / events</span>
+            <span class="engine-note">read-only lifecycle inventory</span>
+          </button>
+          <div class="engine-content" id="hooks-box" hidden><wa-hook-events></wa-hook-events></div>
+        </div>
         <!-- The bell for THIS device. Its state lives in this window's own storage, so it is per
              machine by construction and not a node setting: the node cannot know which device is
              awake, and a device the operator is not sitting at must not decide for this one. The

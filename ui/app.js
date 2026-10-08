@@ -157,6 +157,7 @@ function rememberNode(node) {
   detachConversationView();
   activeNode = node;
   conversationEpoch += 1;
+  invalidateHookInventory();
   resetConversationFollowState();
   metaReady = false;
   return true;
@@ -6088,6 +6089,29 @@ async function forkSessionAt(id, seq, control) {
   finally { control.disabled=false; }
 }
 
+let hookInventoryEpoch = 0;
+function invalidateHookInventory() {
+  hookInventoryEpoch++;
+  const panel = document.querySelector('#hooks-box wa-hook-events');
+  if (panel) panel.message = 'Hook inventory not loaded for this node. Expand hooks / events to read its catalogue.';
+}
+async function refreshHooks() {
+  const box = document.getElementById('hooks-box');
+  let panel = box.querySelector('wa-hook-events');
+  if (!panel) { panel = document.createElement('wa-hook-events'); box.replaceChildren(panel); }
+  const epoch = ++hookInventoryEpoch, node = activeNode, thread = chatSession, account = session, conversation = conversationEpoch;
+  const current = () => epoch === hookInventoryEpoch && node === activeNode && thread === chatSession && account === session && conversation === conversationEpoch;
+  panel.message = 'Loading hook/event inventory…';
+  try {
+    const response = await apiFetch('jobs', {method:'POST', headers:apiHeaders({'Content-Type':'application/json'}), body:JSON.stringify({action:'hooks'})});
+    if (!current()) return;
+    const payload = await response.json();
+    if (!current()) return;
+    if (!response.ok || payload.error) throw new Error(payload.detail || payload.error || `HTTP ${response.status}`);
+    panel.catalogue = payload;
+  } catch (error) { if (current()) panel.message = 'Hook inventory unavailable: ' + String(error.message || error); }
+}
+
 async function refreshJobs() {
   const box = document.getElementById('jobs-box');
   try {
@@ -6146,6 +6170,7 @@ function loadTopic(id) {
   else if (id === "spells-box") refreshSpells();
   else if (id === "tools-box") refreshTools();
   else if (id === "jobs-box") refreshJobs();
+  else if (id === "hooks-box") refreshHooks();
   else if (id === "tasks-box") refreshTasks();
   else if (id === "notify-box") refreshNotifySupport();
 }

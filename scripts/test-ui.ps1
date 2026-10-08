@@ -300,6 +300,12 @@ $harness = @'
   // Managed jobs are rules, after tools, and never optimistically reported enabled.
   check(document.querySelector('[data-target="tools-box"]').closest('.engine-topic').nextElementSibling.querySelector('[data-target="jobs-box"]'), 'jobs must follow tools in the engine');
   await refreshJobs();
+  await refreshHooks();
+  var hooksPanel = document.querySelector('#hooks-box wa-hook-events');
+  check(!!document.querySelector('[data-target="hooks-box"]') && !!hooksPanel && hooksPanel.textContent.includes('onSentinelReturn'), 'Engine explicitly lists hook events and configured handlers');
+  check(hooksPanel.textContent.includes('beforeFinalAnswer') && hooksPanel.textContent.includes('not implemented'), 'absent beforeFinalAnswer is not advertised as implemented');
+  check(!hooksPanel.querySelector('button,input'), 'hook inventory cannot enable or execute handlers');
+  check(window.__calls.some(function(call){ return call.url === 'jobs' && call.method === 'POST' && JSON.parse(call.body || '{}').action === 'hooks'; }), 'hook inventory uses the read-only jobs catalogue action');
   var jobPanel = document.querySelector('wa-jobs');
   check(!!jobPanel && !jobPanel.querySelector('img'), 'job text must not execute as HTML');
   var jobToggle = jobPanel.querySelector('input');

@@ -1076,8 +1076,11 @@ body.view-only { margin: 0; background: var(--bg); }
 .pop-head-action:hover { color: var(--text); border-color: var(--accent); }
 wa-balloon.file-diff .pop-head { display: flex; align-items: center; gap: var(--gap); }
 
-wa-jobs { display: block; padding: var(--pad); }
-wa-jobs .job-row { padding: var(--pad); border-bottom: 1px solid var(--line); }
+wa-jobs, wa-hook-events { display: block; padding: var(--pad); }
+wa-jobs .job-row, wa-hook-events .job-row { padding: var(--pad); border-bottom: 1px solid var(--line); }
+wa-hook-events .job-row { overflow-wrap: anywhere; }
+wa-hook-events .job-status { color: var(--muted); }
+wa-hook-events details { padding-top: var(--space); }
 wa-jobs .job-toggle { display: flex; align-items: center; gap: var(--gap); }
 wa-jobs .job-status { color: var(--muted); }
 wa-jobs pre { white-space: pre-wrap; overflow-wrap: anywhere; }

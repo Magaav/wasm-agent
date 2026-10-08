@@ -1335,6 +1335,45 @@ class WaHarnessStatus extends HTMLElement {
 }
 customElements.define('wa-harness-status',WaHarnessStatus);
 
+// Read-only lifecycle inventory. Handler controls remain in Jobs; events grant no effects.
+class WaHookEvents extends HTMLElement {
+  set catalogue(value) {
+    this.replaceChildren();
+    if (!value || value.schema !== 1 || value.read_only !== true || !Array.isArray(value.events) || value.events.some(event => !event || typeof event !== 'object' || typeof event.id !== 'string' || !Array.isArray(event.handlers) || event.handlers.some(handler => !handler || typeof handler !== 'object'))) {
+      this.message = 'Hook inventory unavailable: unsupported catalogue; no events inferred.';
+      return;
+    }
+    const note = document.createElement('p'); note.textContent = value.note || 'Read-only event inventory, not execution authority.';
+    this.append(note);
+    for (const event of value.events) {
+      const row = document.createElement('section'); row.className = 'job-row'; row.dataset.eventId = String(event.id || '');
+      const name = document.createElement('strong'); name.textContent = event.name || event.id || 'Unnamed event';
+      const status = document.createElement('div'); status.className = 'job-status';
+      status.textContent = `${event.id || '?'} · ${event.kind || '?'} · ${event.state || 'state unknown'}`;
+      const producer = document.createElement('div'); producer.textContent = 'Producer: ' + (event.producer || 'unknown');
+      const boundary = document.createElement('div'); boundary.textContent = 'Boundary: ' + (event.boundary || 'unknown');
+      row.append(name, status, producer, boundary);
+      if (event.source_job) { const source = document.createElement('div'); source.textContent = 'Source job: ' + event.source_job; row.append(source); }
+      const handlers = document.createElement('div'); handlers.className = 'hook-handlers';
+      if (!Array.isArray(event.handlers) || !event.handlers.length) handlers.textContent = 'No configured event-job handlers; native callbacks are not job approvals.';
+      else for (const handler of event.handlers) {
+        const line = document.createElement('div');
+        line.textContent = `${handler.name || handler.id} (${handler.id}) · ${handler.enabled ? 'enabled' : 'disabled'} · revision ${handler.revision ?? 'unknown'} · ${handler.action || '?'} · ${handler.queued ?? 'unknown'} queued`;
+        if (handler.last_delivery) line.textContent += ` · last ${handler.last_delivery.state || 'unknown'}: ${handler.last_delivery.detail || ''}`;
+        handlers.append(line);
+      }
+      row.append(handlers);
+      const details = document.createElement('details');
+      const summary = document.createElement('summary'); summary.textContent = 'Reliability / guarantees';
+      const explanation = document.createElement('p'); explanation.textContent = event.reliability || 'No reliability claim recorded.';
+      details.append(summary, explanation); row.append(details); this.append(row);
+    }
+    if (!value.events.length) { const empty = document.createElement('p'); empty.textContent = 'Catalogue returned no events. This is not proof that native callbacks do not exist.'; this.append(empty); }
+  }
+  set message(text) { this.replaceChildren(); const note = document.createElement('p'); note.textContent = String(text); this.append(note); }
+}
+customElements.define('wa-hook-events', WaHookEvents);
+
 // Jobs are automation rules. They are not the operations used to execute their actions.
 class WaJobs extends HTMLElement {
   set items(items) {

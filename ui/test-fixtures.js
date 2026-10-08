@@ -322,6 +322,10 @@ window.fetch = function (input, init) {
   }
   if (path === 'jobs' && init?.method === 'POST') {
     const request = JSON.parse(init.body);
+    if (request.action === 'hooks') return Promise.resolve({ok:true,status:200,json:()=>Promise.resolve(window.__fixtures.hooks || {schema:1,read_only:true,note:'Fixture inventory, not execution authority.',events:[
+      {id:'sentinel.return',name:'Sentinel return',kind:'native event + jobs',producer:'native watcher',boundary:'request outcome',state:'source available',reliability:'Unknown delivery is never replayed.',handlers:[{id:'onSentinelReturn',name:'onSentinelReturn',enabled:true,revision:2,action:'wake',queued:0,last_delivery:{state:'unknown',detail:'completion unconfirmed'}}]},
+      {id:'beforeFinalAnswer',name:'beforeFinalAnswer',kind:'evaluated / not implemented',producer:'none',boundary:'proposed candidate barrier',state:'not implemented; no event is emitted',reliability:'Not a pre-stream execution barrier.',handlers:[]}
+    ]})});
     if (window.__fixtures.jobsRefuse) return Promise.resolve({ok:false,status:403,json:()=>Promise.resolve({error:'fixture_job_refused'})});
     const job = window.__fixtures.jobs.jobs.find(j=>j.id===request.id);
     // A control change is an edit, and the fixture answers like the store does - revision moves, the job is
