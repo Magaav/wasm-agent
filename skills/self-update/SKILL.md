@@ -284,6 +284,20 @@ Replay refuses enforced workspace bindings, so prefer the verified direct CLI un
 replay itself passes. Do not confuse passing candidate fixtures with installation:
 read Sentinel's actual outcome and binary hash before promising next live-call recovery.
 
+## Subscription midstream regeneration proof
+
+For disconnects while reasoning/text/tool arguments stream, use
+`node <repo>/scripts/test-subscription-midstream.cjs <absolute-built-wa>
+<fresh-absolute-evidence>`, then its `--post` mode. It checks disk and embedded
+Lua through the actual agent loop, no duplicate earlier tool effects, private
+old-policy/browser-negative mutations and retained-hash evidence. The recorded
+`subscription-midstream-proof` spell has shell-quoted runner/binary/evidence
+parameters and the same postcheck. Replay currently refuses enforced worktree
+bindings, so prefer the verified direct CLI without weakening that binding.
+Also run `scripts/test-ui.ps1`; installation must separately verify candidate
+binary and served UI. Regeneration is inference-only; unknown effects are never
+replayed, and a permanent outage can still exhaust the original request deadline.
+
 ## The zero-downtime path, for Lua-only changes
 
 Only development nodes explicitly started with `WASM_AGENT_LUA_ROOT` read Lua

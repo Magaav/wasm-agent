@@ -1,0 +1,20 @@
+{
+  "scope": "Self-reviewed focused source/embedded and Chromium fault fixtures; no paid provider call, live installation or full release gate",
+  "source_base": "0f3360345d24a77ec520fe8a132bdb7cab5359f7",
+  "trigger": {"native_run": 1046, "round": 10, "transport_event_seq": 120968, "code": "UND_ERR_SOCKET", "http_status": 200, "body_eof": false, "model_output_seen": true, "retry_scheduled": false},
+  "candidate_binary_sha256": "ba8fb418f704cf66585df83409277c48740d6f648e2510dcecc3414075a76aea",
+  "focused_checks": 1126,
+  "skipped": 0,
+  "paid_calls": 0,
+  "disk_checks": 556,
+  "embedded_checks": 556,
+  "browser_checks": 12,
+  "negative_controls": ["old midstream suppression refuses the positive recovery", "missing interruption sealing fails browser assertion"],
+  "execution_contract": "Only a complete successful result returns calls to the agent. Abandoned function-call previews execute zero tools; earlier completed tools remain in context and are not replayed.",
+  "evidence": "session-owned scratch/midstream-v3/receipt.json with retained source, binary, loop, transport and browser hashes",
+  "required_ui_test": "scripts/test-ui.ps1 passed against candidate binary; shared final-answer suite passed",
+  "risk": "Regeneration may be billed twice and may change the answer. Old text/reasoning and bounded call previews are retained explicitly interrupted. Unknown shapes, auth/quota, cancellation and original deadline remain refusals.",
+  "gate_verified": false,
+  "release_verified": false,
+  "live_verified": false
+}

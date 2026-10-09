@@ -75,12 +75,40 @@ events are NOT output only when their typed partial snapshot contains exclusivel
 verified empty text/thinking blocks. Their counts and exact safe event class are
 recorded. The same distinction applies to Pi's normalized failed result: an array
 of known empty blocks is not generated output. Missing/malformed/nonempty/unknown
-blocks, tool calls (even a start with no arguments), real text/reasoning deltas and
-unknown progress suppress replay, as do auth/quota/non200, cancellation and
-unclassified errors. A future adapter event never gains replay authority by being
-invisible. This closes the empty-item-start false suppression without replaying
-any displayed text, reasoning or selected/dispatched tool. Pi's internal maxRetries
-is0; broader Lua policies cannot multiply recovery.
+blocks and unknown progress suppress the pre-output replay path, as do
+auth/quota/non200, cancellation and unclassified errors. A future adapter event
+never gains replay authority by being invisible. Pi's internal maxRetries is0;
+broader Lua policies cannot multiply recovery.
+
+### Regenerating an interrupted response within the run
+
+The production Lua caller now explicitly grants the bridge `midstream_recovery`:
+recognized transport failures can also regenerate known provisional text/thinking
+and function-call output, even after a tool item ends, because **the bridge cannot
+dispatch tools**. Only a successful complete result reaches the agent's transcript
+commit and dispatch boundary. Earlier rounds' completed tools remain in context
+and never execute again. Unknown adapter events, unknown/malformed block shapes,
+server/custom tool shapes, auth/quota/non200, cancellation and unclassified errors
+still refuse. This is regeneration from the last committed request, not byte-level
+resume or exactly-once provider inference.
+
+Before retry, a durable `role:retry` row retains full abandoned text/reasoning and
+bounded argument previews with `tools_executed:0`; the supervised operation retains
+original output. Transport diagnostics exclude generated text. The renderer marks
+the abandoned output interrupted/not executed, seals its preview state, and keeps
+each new attempt's text IDs distinct. It never silently overwrites the old evidence
+or mixes partial arguments into a new completed call. Nonstreaming callers have
+the same execution boundary. No prior installer, send or tool result is replayed.
+
+The existing ten-attempt cycles, cooldown and original deadline still apply; retries
+can be disabled with the existing environment setting. Persistent outages can fail;
+regeneration may compute/bill inference twice and may produce a different answer.
+These risks do not authorize replay of external effects or deleting history.
+Focused paired proof: `scripts/test-subscription-midstream.cjs <built-wa> <fresh-evidence>`
+then `--post`; the actual agent loop checks one regenerated write, earlier completed
+tools, interrupted commentary/final text, normalized Pi failure, unknown shapes,
+cancellation and disabled retry. A private old-policy mutation must fail. No paid
+provider calls or full release certification is implied.
 
 Focused proof: `node scripts/test-subscription-empty-start.cjs <absolute-built-wa>
 <fresh-absolute-evidence>` runs both disk and embedded Lua and a private mutation

@@ -183,7 +183,8 @@ function M.complete(model, messages, tools, stream, opts, reasoning)
     models_store=M.models_store_path(),
     model=model, messages=messages, tools=tools, session_id=opts.session_id, stream_id=stream_id,
     reasoning=reasoning.selected=='provider' and 'medium' or reasoning.selected=='off' and 'none' or reasoning.selected,
-    max_output=opts.max_output,transport_retries=M.transport_retries(),timeout_ms=M.request_timeout()*1000}))
+    max_output=opts.max_output,transport_retries=M.transport_retries(),midstream_recovery=true,
+    timeout_ms=M.request_timeout()*1000}))
   local id, offset, pending, result, failure = nil, 0, '', nil, nil
   local commentary_ids, commentary_pending_ids = {}, {}
   local failed_transport_attempts=0
@@ -210,7 +211,12 @@ function M.complete(model, messages, tools, stream, opts, reasoning)
             telemetry.event(opts.session_id,opts.run_id,stream_id,'subscription_transport','retry',
               {attempt=event.attempt,limit=event.limit,wait_ms=event.wait_ms,upstream_usage='unknown'})
           elseif event.type=='retry' then
-            telemetry.event(opts.session_id,opts.run_id,stream_id,'subscription_transport','progress',event)
+            local diagnostic={}
+            for key,value in pairs(event) do if key~='discarded_attempt' then diagnostic[key]=value end end
+            -- Generated text stays in the private transcript/operation evidence, not
+            -- transport diagnostics. Only the completed attempt can return tools.
+            telemetry.event(opts.session_id,opts.run_id,stream_id,'subscription_transport','progress',diagnostic)
+            if event.discarded_attempt then commentary_ids,commentary_pending_ids={},{} end
             if opts.session_id and opts.session_id~='' then
               local seq=memory.append_turn(opts.session_id,{role='retry',content=json.encode(event),ms=event.elapsed_ms})
               if stream then host.stream(json.encode({type='checkpoint',seq=seq})) end

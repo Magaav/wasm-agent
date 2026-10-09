@@ -668,6 +668,25 @@ $harness = @'
   check(!retryTopic.open && retryTopic.dataset.state==='recovered',
     'retry: actual restoration folds the topic without losing its rows');
   retryTopic.remove();
+  window.__setBusy(true);
+  handleEvent({type:'round',n:1});
+  handleEvent({type:'reasoning',text:'abandoned thought'});
+  handleEvent({type:'pending_delta',pending_id:'recover-1:0',text:'abandoned text'});
+  handleEvent({type:'decision',call_id:'recover-call',name:'write',arguments_text:'partial',complete:false});
+  var recoverySnapshot={id:'recover-1',tools_executed:0,reasoning:'abandoned thought',
+    texts:[{pending_id:'recover-1:0',text:'abandoned text',phase:''}],
+    decisions:[{call_id:'recover-call',name:'write',arguments_text:'partial',complete:false}]};
+  handleEvent({type:'retry',retry_id:'midstream',index:1,limit:10,cycle:1,state:'interrupted',reason:'UND_ERR_SOCKET',discarded_attempt:recoverySnapshot});
+  check(!trace && !reasoningBlock && phasePendingText.size===0,'midstream: abandoned previews sealed before regeneration');
+  check([...transcript.querySelectorAll('.tool-outcome')].some(el=>el.textContent==='not executed'),'midstream: incomplete call never paints executed');
+  var interruptedMarkers=transcript.querySelectorAll('[data-interrupted-attempt]').length;
+  handleEvent({type:'retry',retry_id:'midstream',index:1,limit:10,cycle:1,state:'interrupted',reason:'UND_ERR_SOCKET',discarded_attempt:recoverySnapshot});
+  check(transcript.querySelectorAll('[data-interrupted-attempt]').length===interruptedMarkers,'midstream: repeated snapshot has no duplicate evidence');
+  handleEvent({type:'reasoning',text:'fresh thought'});
+  check(reasoningBlock.textContent.includes('fresh thought') && !reasoningBlock.textContent.includes('abandoned thought'),'midstream: reasoning starts fresh');
+  handleEvent({type:'pending_delta',pending_id:'recover-2:0',text:'fresh answer'});
+  check([...transcript.querySelectorAll('.phase-incomplete')].some(el=>el.textContent.includes('abandoned text')),'midstream: interrupted text preserved explicitly');
+  handleEvent({type:'reply',text:'fresh answer'});handleEvent({type:'done'});window.__setBusy(false);
 
   // The context panel states what it knows in one line. The fixture has a budget
   // and no usage, so this is the "0 / budget" case, and the percentage must be
