@@ -36,6 +36,8 @@ The CLI returns a queue receipt. The watcher separately records `intent.json`,
 An acknowledgement means the watcher observed the immutable request; it grants
 neither effect authority nor installation success. Parent-owner HTTP/body failures
 retain their underlying cause in durable refusal text (no credentials or body dump).
+Only HTTP503 with the exact `read_capacity_busy` code defers the immutable claim
+before an effect exists, with backoff. Other HTTP/identity failures remain failures.
 A failed pre-admission request is not automatically replayed; preserve its original
 record and prove no effect reservation/spawn before proposing any fresh intent.
 A separate cheap intake lane observes new identities while health, source or verifier work is blocked. The
@@ -70,8 +72,22 @@ and cannot grant another attempt to an unknown effect. Missing/mismatched eviden
 or verification failure leaves the reservation held; cached green packets do not
 settle it. In-turn invocation refuses; queue an allowlisted operator script through
 Sentinel `request run` for the external verification door. Repeat verification is
-allowed but never replays the installer. A source newer than the request still
-refuses, so reconcile while its exact source remains the installed baseline.
+allowed but never replays the installer. The ordinary reconcile still requires
+current main equal to the requested source.
+
+When main has advanced but the old clean-built generation is still installed,
+use `protocol reconcile-historical <id> --reason "..."` through the same external
+door. It validates current clean published main, proves the old source is its
+ancestor, compares installed UI/scripts/skills against retained Git blobs and raw
+recorded aggregate hashes, rechecks result/binding/reservation identity, and brackets
+native node/watcher image/creation/lifetime ownership. It retains original installed
+process IDs while explicitly recording freshly proven replacement generations;
+`installed.txt` is never edited. Historical Windows text-only CRLF copies require
+exact LF-normalized blob equality AND the original raw digest for scripts/UI;
+normalization is reported, never applied. Missing evidence/hash/identity fails.
+Only that exact reservation settles; notification unknowns remain unknown.
+A tested source-built Sentinel may perform this verification-only bootstrap via
+an allowlisted `request run` without replacing the live watcher.
 
 The watcher observes returns natively. The shipped `sentinel-return-observe.sh`
 and `sentinel-return-prepare.sh` invoke `protocol observe` and
@@ -108,6 +124,9 @@ refuse when due, and delivery/composition always revalidate independently.
 `GET /session/owner?id=<parent>` resolves the ordinary authenticated/local account
 and session ownership boundary but returns only `session.id` and
 `session.user_id`, without loading messages or derived transcript state.
+Installation observation is recorded independently of notification delivery.
+An unknown submitted notification preserves its immutable journal/slot and is never
+resent, but cannot prevent fresh result verification and exact reservation settlement.
 Busy parents keep one pending event; due observations coalesce on disk rather
 than spawning extra wakes. Revision cancellation before submission can emit the
 same immutable key against the new revision. Before HTTP submission the watcher

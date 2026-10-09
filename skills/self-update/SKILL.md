@@ -74,7 +74,14 @@ If a terminal failure was delivered but the actual installed state was subsequen
 recovered and verified, use the external native `wa-sentinel protocol reconcile
 <exact-id> --reason "..."` verification-only door. It archives old evidence and
 reruns the actual exact-source verifier before settling the admitted generation;
-no installer replay, cursor reset, duplicate wake or hand-edited ownership. Queue
+no installer replay, cursor reset, duplicate wake or hand-edited ownership.
+When main has advanced while the old clean-built generation remains installed,
+use the explicit `protocol reconcile-historical <id> --reason "..."` door. It
+proves retained Git source/raw artifacts and current native lifetime identities,
+preserves old install/process records and leaves notification unknowns unchanged.
+A source-built checked Sentinel may bootstrap this verification via the existing
+allowlisted run path without replacing the live watcher. Never reset main or
+hand-edit the reservation to satisfy current-source equality. Queue
 an approved one-shot script via Sentinel `request run`; in-turn reconciliation
 refuses. Inspect its known-settled receipt and `protocol-effect.json`, not a cached
 positive verdict. Source/owner/process mismatches remain refusals. See

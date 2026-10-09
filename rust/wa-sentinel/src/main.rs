@@ -84,6 +84,8 @@ mod node_script_tests;
 #[cfg(test)]
 mod deploy_protocol_tests;
 #[cfg(test)]
+mod deploy_recovery_tests;
+#[cfg(test)]
 mod intake_tests;
 
 // ---------------------------------------------------------------- paths
@@ -1672,6 +1674,21 @@ fn finish_request(claim: &Path, request: &Value) {
         Ok(Err(error))=>("failed",false,error.to_string()),
         Err(_)=>("failed",false,"request worker panicked; outcome unknown".into()),
     };
+    // Typed capacity contention is a read refusal BEFORE reservation, not an
+    // installer outcome. Put only this immutable, proven unadmitted claim back.
+    if !ok && detail.starts_with("parent_owner_read_capacity_busy") && request.get("expected_sha").is_some()
+        && !sentinel_dir().join("deploy-protocol").join(id).join("effect.json").exists() {
+        let back=sentinel_dir().join("requests").join(claim.file_name().unwrap_or_default());
+        if let Ok(_lock)=queue_lock() {
+        if !back.exists() && std::fs::rename(claim,&back).is_ok() {
+            let _=deploy_protocol::record(request,id,"held",&detail);
+            audit("owner-read-deferred",id,&detail);
+            drop(_lock);
+            std::thread::sleep(Duration::from_secs(1));
+            return;
+        }
+        }
+    }
     // A wake deferred for budget is neither a failure nor a completion: the request goes back to the queue
     // and is retried when the allowance rolls over. Before this, the budget turned a deploy's continuation
     // into a `failed` record - so the run that asked for the deploy was never woken and nobody was told.
@@ -2618,6 +2635,10 @@ fn main() -> Result<()> {
             },
             Some("reconcile") if rest.len()==4 && rest[2]=="--reason" => {
                 println!("{}",deploy_protocol::reconcile(&rest[1],&rest[3])?);
+                Ok(())
+            },
+            Some("reconcile-historical") if rest.len()==4 && rest[2]=="--reason" => {
+                println!("{}",deploy_protocol::reconcile_historical(&rest[1],&rest[3])?);
                 Ok(())
             },
             Some("compose") if rest.len()==2 => {
