@@ -627,7 +627,7 @@ pub fn expected_node_id_from_home(home: &Path) -> Result<String> {
 /// The node id an install/home pair will announce, by asking the binary itself (which generates the
 /// key on first use), so a fresh instance's record and its running node agree by construction.
 pub fn node_id_for(binary: &Path, home: &Path, clear_env: bool) -> Result<String> {
-    let mut command = std::process::Command::new(binary);
+    let mut command = crate::quiet_command(binary);
     command.arg("node");
     if clear_env {
         command.env_clear();

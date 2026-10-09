@@ -184,6 +184,16 @@ plan whose point never happened.
 5. **The installed binary and your build output are often the same file** (a hard link). `cp` will say
    so; that is not an error.
 
+## Quiet Windows launch proof
+
+For Windows console churn, run Sentinel's `quiet_launch_tests` and the actual
+host probe `node <repo>/scripts/test-quiet-host.cjs <absolute-built-wa>
+<fresh-evidence>` then `--post`. It checks no console on a real ordinary child;
+a forced-console negative control must fail. Measure process starts with native
+Toolhelp snapshots, not a spawned WMI command on every sample. Keep source/native
+proof distinct from live installation and post-install process-start measurement.
+Do not kill by image name or change unrelated editor/terminal state.
+
 ## Bootstrap an observer too old to admit its own fix
 
 After diagnosing the exact refusal and proving prior attempts have no effect,

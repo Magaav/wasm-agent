@@ -200,7 +200,7 @@ fn verify_install_inner(id:&str,reconcile_reason:Option<&str>,historical:bool) -
     if historical && (!instance::same_path(Path::new(effect["source"].as_str().unwrap_or("")),root)
         || !instance::same_path(Path::new(effect["script"].as_str().unwrap_or("")),&script)) {bail!("historical_effect_source_path_mismatch");}
     let native=if historical {Some(historical_native_identity()?)}else{None};
-    let mut command=std::process::Command::new("node");
+    let mut command=quiet_command("node");
     if historical {command.arg(root.join("scripts/sentinel-historical-proof.mjs"));}
     else {command.arg(root.join("scripts/sentinel-install-proof.mjs")).arg("verify");}
     let output=command.arg(root).arg(&install).arg(dir.join("intent.json")).arg(dir.join("binding.json")).arg(&dir)
@@ -251,7 +251,7 @@ pub(crate) fn scan_intake() -> Result<()> {
 }
 
 fn git(root: &Path, args: &[&str]) -> Result<String> {
-    let output = std::process::Command::new("git").arg("-C").arg(root).args(args).output()?;
+    let output = quiet_command("git").arg("-C").arg(root).args(args).output()?;
     if !output.status.success() { bail!("canonical source git check failed: {}", String::from_utf8_lossy(&output.stderr)); }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }

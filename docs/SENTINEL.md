@@ -347,6 +347,19 @@ Receipts are under `<data>/sentinel/io-idle-*.json`; no recurrent job is created
 An old sample during an active wake is not a matched idle baseline. OS counters
 include cached/network I/O; this diagnostic does not measure fan causation.
 
+## Quiet Windows observation
+
+Captured Sentinel probes and Git/Node verification commands use explicit
+`CREATE_NO_WINDOW`: a detached observer must never repeatedly allocate consoles
+or default-terminal windows merely to inspect state. The detached installer and
+watcher keep their distinct lifetime flags. Windows liveness/IPv4+IPv6 listener
+ownership use native handle/TCP-table APIs instead of spawning `tasklist`/`netstat`;
+no PID/port success is cached. Superseded installed-source results refuse from
+the fresh `installed.txt` identity before invoking the expensive verifier. Old
+outcomes and unknown notification records remain intact, not silently settled.
+Private regression compares an actual no-console child with a deliberately
+console-creating negative control and native TCP listener/PID ownership.
+
 ## Console-independent Windows watcher start
 
 The supported unmanaged `start`/`restart` path now uses native Win32 detached

@@ -136,6 +136,12 @@ reconciliation, not automatic replay; lack of attachment is not proof of death. 
 
 ## Platform guarantees and limits
 
+On Windows the host and Sentinel select Git's real `usr/bin/bash.exe` before
+its `bin/bash.exe` launcher, avoiding redundant launcher respawns. Explicit
+operator shell overrides remain honored. This does not ban requested shell tools:
+operations still use the same no-window/suspended/job-contained execution path.
+No additional process watcher, automatic worker or recurring gate is created.
+
 Windows uses a non-inheritable Job Object with KILL_ON_JOB_CLOSE and a 64-process
 limit. The child is created suspended, assigned before it can execute, and only
 then resumed. A handle allow-list prevents parallel launches inheriting one

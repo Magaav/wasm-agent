@@ -89,6 +89,8 @@ mod deploy_recovery_tests;
 #[cfg(test)]
 mod target_identity_tests;
 #[cfg(test)]
+mod quiet_launch_tests;
+#[cfg(test)]
 mod intake_tests;
 
 // ---------------------------------------------------------------- paths
@@ -374,6 +376,14 @@ fn ui_dir() -> PathBuf {
 
 // ---------------------------------------------------------------- logging
 
+// Ordinary probes/captured commands must NEVER ask Windows for a console. The
+// detached installer/watcher paths have their own explicit lifetime flags.
+pub(crate) fn quiet_command(program:impl AsRef<std::ffi::OsStr>)->std::process::Command {
+    let mut command=std::process::Command::new(program);
+    #[cfg(windows)] {use std::os::windows::process::CommandExt;command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);}
+    command
+}
+
 pub(crate) fn now_epoch() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -590,24 +600,8 @@ pub(crate) fn hold_for<F: FnOnce() -> bool>(verb: &str, activity: Option<bool>, 
 /// The pid listening on a port. By *port*, never by image name: another `wa` on the machine may be
 /// somebody's session, and killing every process that shares a name is how that session dies.
 pub(crate) fn pid_on_port(port: u16) -> Option<u32> {
-    if cfg!(windows) {
-        let output = std::process::Command::new("netstat").args(["-ano", "-p", "TCP"]).output().ok()?;
-        let text = String::from_utf8_lossy(&output.stdout);
-        let needle = format!(":{port} ");
-        for line in text.lines() {
-            let fields: Vec<&str> = line.split_whitespace().collect();
-            // Proto  Local            Foreign          State       PID
-            if fields.len() >= 5 && fields[0].eq_ignore_ascii_case("TCP")
-                && fields[1].ends_with(&needle.trim_end()) && fields[1].contains(&format!(":{port}"))
-                && fields[3].eq_ignore_ascii_case("LISTENING")
-            {
-                if let Ok(pid) = fields[4].parse() {
-                    return Some(pid);
-                }
-            }
-        }
-        return None;
-    }
+    #[cfg(windows)] {return winproc::listener_pid(port);}
+    #[cfg(not(windows))] {
     let output = std::process::Command::new("ss").args(["-ltnp"]).output().ok()?;
     let text = String::from_utf8_lossy(&output.stdout);
     for line in text.lines() {
@@ -620,6 +614,7 @@ pub(crate) fn pid_on_port(port: u16) -> Option<u32> {
         }
     }
     None
+    }
 }
 
 /// The node id a listener on `port` announces. `/sync/head` is unauthenticated and carries the
@@ -1126,8 +1121,9 @@ fn shell_for(script: &Path) -> (String, String) {
         return ("sh".into(), script.display().to_string());
     }
     for candidate in [
-        r"C:\Program Files\Git\bin\bash.exe",
         r"C:\Program Files\Git\usr\bin\bash.exe",
+        r"C:\Program Files (x86)\Git\usr\bin\bash.exe",
+        r"C:\Program Files\Git\bin\bash.exe",
         r"C:\Program Files (x86)\Git\bin\bash.exe",
     ] {
         if Path::new(candidate).exists() {
@@ -2463,18 +2459,15 @@ fn restart_self() -> Result<()> {
 }
 
 fn pid_alive(pid: u32) -> bool {
-    if cfg!(windows) {
-        let output = std::process::Command::new("tasklist")
-            .args(["/FI", &format!("PID eq {pid}"), "/NH"])
-            .output();
-        return output.map(|o| String::from_utf8_lossy(&o.stdout).contains(&pid.to_string())).unwrap_or(false);
-    }
+    #[cfg(windows)] {return winproc::pid_alive(pid);}
+    #[cfg(not(windows))] {
     reap_children();
     // A zombie keeps its /proc entry until its parent reaps it, so "the directory exists" read a killed
     // node as alive and every second restart refused with "still alive". The state field says.
     match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
         Ok(stat) => !matches!(stat.rsplit(')').next().and_then(|rest| rest.trim_start().chars().next()), Some('Z' | 'X')),
         Err(_) => false,
+    }
     }
 }
 
