@@ -981,6 +981,7 @@ gate_phase_begin tools
 WA_SCRIPT="$DB.evidence.lua" "$BIN" --db "$DB" | grep "tool evidence ok"
 rm -f "$DB.evidence.lua"
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-observability.lua" "$BIN" --db "$DB.observability" | grep 'observability ok'
+WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-telemetry-incremental.lua" "$BIN" --db "$DB.telemetry-incremental" | grep 'telemetry incremental ok'
 # The prompt index is an authored cue, not a slice of the schema description. Without this,
 # the same text is sent twice and nothing in the suite notices when the slicing returns.
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-tool-cues.lua" "$BIN" --db "$DB.tool-cues" | grep 'tool cues ok'

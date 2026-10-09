@@ -29,7 +29,8 @@ Status construction and run pinning read one snapshot; a running run retains it,
 and other interpreters read the new selection for the next run.
 
 The UI fences settings responses by node, thread and epoch, rejects lower
-revisions, and periodically reconciles other windows. An aborted write is an
+revisions, and reconciles other windows through same-origin invalidation plus
+visibility/activity-aware fallback reads ([LIGHTWEIGHT-UI.md](LIGHTWEIGHT-UI.md)). An aborted write is an
 unconfirmed acknowledgement, not proof of no effect. Its note names the observed
 pair and updates on later reads if a delayed write becomes visible. Successful
 rendering and failure rendering use the existing control/error surfaces.

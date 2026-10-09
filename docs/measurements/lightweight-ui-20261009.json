@@ -1,0 +1,47 @@
+{
+  "schema": 1,
+  "date": "2026-10-09",
+  "scope": "focused self-review; not release verification",
+  "baseline": {
+    "installed_commit": "45688c59989bcbc77a25ed008e65aa13181df6bc",
+    "session_events": 3832,
+    "telemetry_payload_bytes": 3175795,
+    "live_window_gpu_3d_mean_percent_samples": [22.27, 26.11, 34.06],
+    "gpu_utilization_is_not_power_or_fan_cause": true
+  },
+  "verified_fixture": {
+    "telemetry_history_rows": 2000,
+    "telemetry_history_payload_bytes": 677945,
+    "unchanged_reads": 20,
+    "unchanged_historical_payload_rows": 0,
+    "unchanged_reads_total_ms_disk": 20.8469,
+    "unchanged_reads_total_ms_embedded": 23.6203,
+    "telemetry_checks_per_mode": 40,
+    "observability_checks_per_mode": 78,
+    "efficiency_checks_per_mode": 42,
+    "model_route_checks_per_mode": 81,
+    "browser_lightweight_checks": 13,
+    "browser_lightweight_skips": 0,
+    "interactive_two_window_checks": 22,
+    "interactive_two_window_skips": 1,
+    "native_child_scope": "broader fixture unknown_session in HTTP transcript route; explicitly not certified",
+    "causal_negative": "old telemetry fails unchanged historical-payload assertion; old UI fails no-backdrop assertion",
+    "private_sqlite_lock": "drop visible/run survives; retry stores seven events",
+    "required_ui_test": "real Chromium structure/reload/recovery/inspect/view/final-answer pass"
+  },
+  "isolated_gpu_attempt": {
+    "old_mean_3d_percent": 0.03548,
+    "new_engine_peaks_below_percent": 0.1,
+    "comparable_to_live": false,
+    "reason": "Small staged fixture did not reproduce live window GPU demand; native shell logged compact 110x110 startup. No meaningful live GPU improvement percentage inferred.",
+    "supervisor": "command exit zero; remaining test WebView descendants drained by owned Job cleanup, operation flagged background_descendants",
+    "live_window_untouched": true
+  },
+  "limits": [
+    "No live post-install CPU/GPU/I/O benefit claimed yet.",
+    "Browser render virtualization retains DOM and original history; does not bound transcript DOM memory.",
+    "Telemetry accumulator retains exact duration/identity state; eight-session LRU does not bound a single session.",
+    "Some idle changes elsewhere are observed only at the fallback interval; not a global push subscription.",
+    "No full release gate or paid-model diagnostic inference."
+  ]
+}

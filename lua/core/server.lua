@@ -1094,6 +1094,7 @@ function wa_sync_status()
   })
 end
 
+local model_stats, model_stats_at
 function wa_model(node, session, chat_session)
   return provider.with_selection(function()
   if remote_target(node) then
@@ -1120,6 +1121,11 @@ function wa_model(node, session, chat_session)
     }
   end
   local limits, limits_error = provider.limits()
+  -- Storage inventory is not live usage. Exact counts sampled at most once per minute
+  -- per reader; expose their age instead of rescanning every node table on status polls.
+  if not model_stats or host.now()-(model_stats_at or 0)>=60 then
+    model_stats=memory.stats();model_stats_at=host.now()
+  end
   return json.encode({
     provider = settings.provider,
     settings_revision = provider.selection_revision(),
@@ -1153,7 +1159,8 @@ function wa_model(node, session, chat_session)
     -- Where the window came from, and whether the catalogue was reached at all. Without
     -- this, "why is my window wrong" needs a log; with it, the answer is one field.
     context_catalogue = windowlib.catalogue_status(),
-    stats = memory.stats(),
+    stats = model_stats,
+    stats_sampled_at = model_stats_at,
     database = host.getenv("WASM_AGENT_DB") or "",
   })
   end)

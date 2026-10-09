@@ -150,20 +150,20 @@ body.compact {
   width: 40px; height: 40px; border-radius: 50%;
   background: radial-gradient(circle at 35% 30%, #ffffff, #dbe7ff 70%, #9fbcff);
   box-shadow: 0 0 20px rgba(120, 170, 255, .95), inset 0 0 6px rgba(255, 255, 255, .9);
-  animation: breathe 3.6s ease-in-out infinite;
+  /* Resting light is static: motion belongs to a gesture, not an idle GPU loop. */
+  transition: transform 160ms ease-out;
 }
-@keyframes breathe { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.12); } }
+.orb:hover .orb-core, .orb:focus-visible .orb-core { transform: scale(1.08); }
+.orb:active .orb-core { transform: scale(.97); }
 
-/* the translucent, rounded chat panel */
+/* Opaque tonal depth: no full-window backdrop sampling/compositor blur. */
 .panel {
   display: flex; flex-direction: column; width: 100%; height: 100%; gap: 0;
   color: var(--text);
   font: var(--font-size)/1.55 var(--font);
   border: 1px solid rgba(255, 255, 255, .09);
   border-radius: var(--radius-lg); overflow: hidden;
-  background: rgba(11, 13, 18, .94);
-  backdrop-filter: blur(16px) saturate(1.25);
-  -webkit-backdrop-filter: blur(16px) saturate(1.25);
+  background: linear-gradient(160deg, #131924 0%, #0b0d12 55%);
   box-shadow: 0 15px 45px rgba(0, 0, 0, .55);
 }
 @media (display-mode: standalone), (display-mode: fullscreen) {
@@ -208,9 +208,8 @@ a[href]:focus-visible { outline: 2px solid #8bbcff; outline-offset: 2px; }
   border-radius: var(--radius); border: 1px solid var(--line);
 }
 wa-message { display: block; }
-/* A long session's older messages skip layout and paint while off-screen (the DOM of a live session
-   only grows). The newest few stay fully rendered so pinning to the bottom measures real sizes. */
-wa-message:not(:nth-last-child(-n+8)) { content-visibility: auto; contain-intrinsic-size: auto 160px; }
+/* Long-history containment is opt-in after measurement; short/live rows are ordinary DOM. */
+.messages > wa-message, .agent-transcript > wa-message { flex-shrink: 0; }
 wa-message.user { align-self: flex-end; background: var(--user); border-color: #2a3a63; }
 wa-message.assistant { align-self: flex-start; background: var(--assistant); }
 .message-images { display: flex; flex-direction: column; gap: var(--gap); margin-top: var(--gap); }
@@ -331,7 +330,29 @@ wa-step[data-state="failed"] { color: #f85149; }
   position: static; z-index: auto; width: 100%; margin-top: var(--space); padding: var(--space) 0 0;
   border: 0; border-top: 1px solid var(--line); border-radius: 0; background: none; font-size: 11px;
 }
-.spinner { width: 10px; height: 10px; border: 2px solid var(--line); border-top-color: var(--accent); border-radius: 50%; display: inline-block; animation: spin .8s linear infinite; }
+.spinner { width: 10px; height: 10px; border: 2px solid var(--line); border-top-color: var(--accent); border-radius: 50%; display: inline-block; animation: spin 1s steps(8) infinite; }
+/* Browser-native render virtualization keeps find, copy, selection and original DOM intact.
+   auto remembers measured height; the estimate is only for never-seen bubbles. */
+@supports (content-visibility: auto) {
+  .messages > wa-message.render-contained, .agent-transcript > wa-message.render-contained {
+    content-visibility: auto;
+    contain-intrinsic-size: auto 150px;
+  }
+  /* The live/newest bubble always lays out synchronously, including hidden streams. */
+  .messages > wa-message:last-of-type, .agent-transcript > wa-message:last-of-type {
+    content-visibility: visible;
+  }
+}
+body.ui-resting .spinner, body.ui-resting .trace-glyph,
+body.ui-resting .thread-notice::before, body.ui-resting .update-spinner {
+  animation-play-state: paused;
+}
+.topbar-btn, .collapse, .icon-btn {
+  transition: background-color 120ms ease-out, border-color 120ms ease-out;
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; }
+}
 @keyframes spin { to { transform: rotate(360deg); } }
 .tool {
   align-self: flex-start; max-width: 760px; border: 1px solid var(--line);
@@ -732,6 +753,7 @@ wa-chat-shell.dropping .composer { border-color: var(--accent); }
   border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--panel-2);
   color: var(--muted); cursor: pointer;
   display: inline-flex; align-items: center; justify-content: center;
+  transition: background-color 120ms ease-out, border-color 120ms ease-out;
 }
 .chat-control svg { width: 15px; height: 15px; fill: currentColor; display: block; }
 .chat-control[data-label] { padding: 0 var(--pad); font: inherit; font-size: 12px; color: var(--text); }

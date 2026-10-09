@@ -8,6 +8,14 @@ Rules for the web UI (`ui/`) and any future surface (desktop shell, mobile, docs
 These are **enforced**, not suggestions: when a change conflicts with a rule here,
 change the change — or amend this file first with a reason.
 
+## Idle rendering
+
+Polish comes from tonal depth, readable hierarchy and brief gesture feedback—not
+continuous idle animation or full-window backdrop sampling. Resting surfaces are
+static; hidden/off-screen work is suppressed without dropping transcript text,
+searchability or live-stream state. [LIGHTWEIGHT-UI.md](docs/LIGHTWEIGHT-UI.md)
+defines freshness, render virtualization, fallback and measurement limits.
+
 ## 1. Reuse before you create
 
 Prefer a component, token, or pattern that already exists in this project over a

@@ -9,6 +9,8 @@ if(process.platform==='win32'&&!binary.toLowerCase().endsWith('.exe')&&fs.exists
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'wa-two-window-'));const report={schema:1,root,checks:[],requests:[],models:[]};
 const embedded=process.argv.includes('--embedded');
 const keep=process.argv.includes('--keep');
+const interactiveOnly=process.argv.includes('--interactive-only');
+report.skips=interactiveOnly?['native child journal host (outside interactive-only scope)']:[];
 report.lua=embedded?'embedded candidate modules':'explicit source Lua root';
 report.binary={path:binary,sha256:require('node:crypto').createHash('sha256').update(fs.readFileSync(binary)).digest('hex')};
 const delay=ms=>new Promise(r=>setTimeout(r,ms));const children=[],sockets=new Set();let node,provider,proxy,chrome,ws;
@@ -69,7 +71,14 @@ function finish(res,text){event(res,{choices:[{delta:{content:text},finish_reaso
   const profile=path.join(root,'browser');chrome=launchOwned(chromePath,['--headless=new','--disable-gpu','--no-first-run','--remote-debugging-port=0','--user-data-dir='+profile,'about:blank'],{cwd:privateRepo,env,windowsHide:true,stdio:'ignore'});children.push(chrome);await creation(chrome);
   await until(()=>fs.existsSync(path.join(profile,'DevToolsActivePort')),'DevTools ready');const [debugPort,endpoint]=fs.readFileSync(path.join(profile,'DevToolsActivePort'),'utf8').trim().split(/\r?\n/);
   ws=new WebSocket('ws://127.0.0.1:'+debugPort+endpoint);await once(ws,'open');ws.addEventListener('message',e=>{const data=JSON.parse(e.data);const item=waiting.get(data.id);if(item){waiting.delete(data.id);clearTimeout(item.timer);data.error?item.reject(new Error(JSON.stringify(data.error))):item.resolve(data.result);}});
+  // Known thread restoration correctly refuses an unknown id. Seed these two
+  // private fixture sessions before opening windows, using the owned mock only.
+  for(const thread of ['thread-A','thread-B']){
+    const r=await fetch('http://127.0.0.1:'+port+'/chat',{method:'POST',headers:{'content-type':'application/json','accept':'text/event-stream'},body:JSON.stringify({thread,text:'SEED-PRIVATE-RECOVERY'}),signal:AbortSignal.timeout(10000)});
+    check(r.ok,'private fixture session seeded');await r.text();
+  }
   const url='http://127.0.0.1:'+browserPort+'/';const a=await page(url,'thread-A'),b=await page(url,'thread-B');
+  if(!interactiveOnly) {
   // Native read-only child: no writable profile/allocation in the shared project.
   const receipt=await api('subagents',{action:'start',profile:'explore',prompt:'RECOVERY-B native child held',idempotency_key:'native-browser-child'});
   check(!!receipt.subagent_id,'native child admitted');
@@ -86,6 +95,7 @@ function finish(res,text){event(res,{choices:[{delta:{content:text},finish_reaso
   finish(held.get('B'),'NATIVE-B-COMPLETE');
   await until(async()=>{const r=await api('subagents',{action:'status',id:receipt.subagent_id});return r.settled;},'native child terminal');
   held.delete('B');
+  }
   await evaluate(a,"void send('RECOVERY-A'); 'started'");await until(()=>held.has('A'),'tool result and held A');
   const bRun=fetch('http://127.0.0.1:'+port+'/chat',{method:'POST',headers:{'content-type':'application/json','accept':'text/event-stream'},body:JSON.stringify({thread:'thread-B',text:'RECOVERY-B'})}).then(r=>r.text());await until(()=>held.has('B'),'held B');
   check((await api('health')).runs.length===2,'two actual long runs active');
@@ -109,7 +119,8 @@ function finish(res,text){event(res,{choices:[{delta:{content:text},finish_reaso
   await evaluate(b,'apiTimeout=8000; true');
   await until(()=>evaluate(a,"settings.provider==='gpt'").catch(()=>false),'other window versioned settings refresh');
   const current=await api('models');const stale=await api('model',{value:'fixture-next',revision:current.settings_revision-1});check(stale.error==='settings_conflict','stale cross-window selection refuses');
-  await evaluate(b,"setModel('fixture-next').then(()=>true)");
+  // A followed run owns this window's controls too. Wait for its settlement
+  // before exercising the next-run setting; do not call a correct refusal a failure.
   held.get('A').end();
   await until(async()=>{const s=await api('session?id=thread-A');return s.state?.state==='failed';},'durable mid-run failure');
   await cdp('Page.reload',{},a);
@@ -120,6 +131,10 @@ function finish(res,text){event(res,{choices:[{delta:{content:text},finish_reaso
   check(report.savedIdentity.every(m=>recovered.messages.some(r=>r.id===m.id&&r.seq===m.seq&&r.role===m.role&&r.content===m.content)),'real reload/drop preserves exact saved message identity and bytes');
   finish(held.get('B'),'B-COMPLETE');await bRun;
   await until(async()=>!(await api('health')).runs.length,'both runs settled');
+  await evaluate(b,"watchTurn().then(()=>true)");
+  await until(()=>evaluate(b,'!composerBusy()'),'B controls released');
+  await evaluate(b,"setModel('fixture-next').then(()=>true)");
+  check(await evaluate(b,"settings.model==='fixture-next'"),'next model setting confirmed before send');
   await evaluate(b,"send('NEXT-RUN').then(()=>true)");
   check(report.models.filter(m=>m.name!=='NEXT').every(m=>m.model==='fixture-model'),'in-flight runs retain immutable model snapshot');
   check(report.models.some(m=>m.name==='NEXT'&&m.model==='fixture-next'),'next run uses confirmed settings');
@@ -167,6 +182,6 @@ function finish(res,text){event(res,{choices:[{delta:{content:text},finish_reaso
   }else report.cleanup.fixture_home_removed=false;
   report.evidence=evidence;
   fs.writeFileSync(path.join(evidence,'report.json'),JSON.stringify(report,null,2)+'\n');console.log('evidence: '+path.join(evidence,'report.json'));
-  if(report.passed)console.log('two-window recovery ok ('+report.checks.length+' checks, 0 skipped; real browser/node, owned mock inference)');
+  if(report.passed)console.log('two-window recovery ok ('+report.checks.length+' checks, '+report.skips.length+' skipped; real browser/node, owned mock inference)');
  }
 })().catch(e=>{console.error(e.stack);process.exitCode=1;});

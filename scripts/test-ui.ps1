@@ -39,6 +39,12 @@ $harness = @'
   var problems = [];
   try {
   var tick = function () { return Promise.resolve(); };
+  check(getComputedStyle(document.querySelector('.panel')).backdropFilter==='none', 'idle panel must not continuously sample a blurred backdrop');
+  check(getComputedStyle(document.querySelector('.orb-core')).animationName==='none', 'idle avatar must not run a perpetual animation');
+  var lightStep=document.createElement('wa-step');document.body.append(lightStep);lightStep.setStep('fixture','running',1000);
+  var lightObserver=new MutationObserver(function(){});lightObserver.observe(lightStep,{subtree:true,attributes:true,childList:true,characterData:true});
+  lightStep.setStep('fixture','running',1400);
+  check(lightObserver.takeRecords().length===0,'unchanged phase clock must not mutate DOM');lightObserver.disconnect();lightStep.remove();
   function check(ok, label) { if (!ok) problems.push(label); }
   // THE INSPECTOR WINDOW. `?view=inspect` is the chat *itself* in a window of its own, and the one thing
   // that makes it an inspector rather than a DOM panel is that the page leaves the browser's own context
@@ -3752,6 +3758,10 @@ try {
   try {
     & node scripts/test-final-answer-suite.mjs $WaExe (Join-Path $tmp 'final-answer')
     if ($LASTEXITCODE -ne 0) { throw 'final-answer focused suite failed' }
+    & node scripts/test-lightweight-browser.cjs (Join-Path $tmp 'lightweight')
+    if ($LASTEXITCODE -ne 0) { throw 'lightweight browser suite failed' }
+    & node scripts/test-lightweight-browser.cjs (Join-Path $tmp 'lightweight') --post
+    if ($LASTEXITCODE -ne 0) { throw 'lightweight browser evidence postcheck failed' }
   } finally { Pop-Location }
   Write-Host "  ok   UI structure, mid-run reload, startup recovery, the inspect window, and a view window [stages: reload,startup-recovery,inspect-window,view-window]" -ForegroundColor Green
 } finally {
