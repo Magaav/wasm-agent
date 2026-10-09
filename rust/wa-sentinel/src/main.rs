@@ -1665,6 +1665,10 @@ fn queue_run_continuation(claim:&Path,request:&Value,record:&Value)->Result<()> 
 static REQUEST_ACTIVE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 static MAINTENANCE_ACTIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+fn admission_read_contention(detail:&str)->bool {
+    detail.starts_with("parent_owner_read_capacity_busy") || detail.starts_with("protocol_native_target_not_owned: node_identity_read_capacity_busy")
+}
+
 fn finish_request(claim: &Path, request: &Value) {
     let id=claim.file_stem().and_then(|s|s.to_str()).unwrap_or("");
     if deploy_protocol::reserved(id) {
@@ -1682,7 +1686,7 @@ fn finish_request(claim: &Path, request: &Value) {
     };
     // Typed capacity contention is a read refusal BEFORE reservation, not an
     // installer outcome. Put only this immutable, proven unadmitted claim back.
-    if !ok && (detail.starts_with("parent_owner_read_capacity_busy") || detail.starts_with("protocol_native_target_not_owned: node_identity_read_capacity_busy")) && request.get("expected_sha").is_some()
+    if !ok && admission_read_contention(&detail) && request.get("expected_sha").is_some()
         && !sentinel_dir().join("deploy-protocol").join(id).join("effect.json").exists() {
         let back=sentinel_dir().join("requests").join(claim.file_name().unwrap_or_default());
         if let Ok(_lock)=queue_lock() {
