@@ -9,7 +9,14 @@ pub(crate) fn execute(expected:&str,owner:&str,parent:&str,reason:&str)->Result<
     let lock=open_lock(&sentinel_dir().join("bootstrap.lock"))?;
     lock.try_lock().map_err(|_|anyhow::anyhow!("bootstrap_already_owned; no second effect"))?;
     deploy_protocol::canonical_script(expected)?;
-    if sentinel_return::parent_owner(parent)?!=owner {bail!("bootstrap_parent_owner_mismatch");}
+    let until=Instant::now()+Duration::from_secs(900);
+    loop {
+        match sentinel_return::parent_owner(parent) {
+            Ok(actual)=>{if actual!=owner {bail!("bootstrap_parent_owner_mismatch");}break;},
+            Err(error) if admission_read_contention(&error.to_string()) && Instant::now()<until=>std::thread::sleep(Duration::from_secs(1)),
+            Err(error)=>return Err(error),
+        }
+    }
     if watcher_state()?!=WatcherState::Running || stop_path().exists() {bail!("bootstrap_watcher_not_ready");}
     for lane in ["requests","claimed"] {
         if !deploy_requests_in(&sentinel_dir().join(lane))?.is_empty() {bail!("bootstrap_existing_deploy; inspect original");}
@@ -21,7 +28,6 @@ pub(crate) fn execute(expected:&str,owner:&str,parent:&str,reason:&str)->Result<
     }
     // In particular, run requests are NOT considered idle just because the requesting model ended.
     // There is no idle override, flag removal, process stop or loop of installer attempts here.
-    let until=Instant::now()+Duration::from_secs(900);
     while node_activity()!=Some(true) {
         if Instant::now()>=until {bail!("bootstrap_idle_unconfirmed; no intent or effect");}
         if stop_path().exists() || watcher_state()?!=WatcherState::Running {bail!("bootstrap_watcher_changed; no effect");}
@@ -33,11 +39,28 @@ pub(crate) fn execute(expected:&str,owner:&str,parent:&str,reason:&str)->Result<
     let nonce=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos();
     let id=format!("{nonce}-{}-bootstrap",std::process::id());
     let request=json!({"verb":"deploy","id":id,"expected_sha":expected,"owner":owner,"session":parent,"queued_at":now_epoch(),"reason":reason});
+    let dir=sentinel_dir().join("deploy-protocol").join(&id);
+    std::fs::create_dir_all(&dir)?;
+    // Do not let the old observer wake the parent mid-admission for a mere held
+    // acknowledgement. Notification resumes once admission settles; no slot reset.
+    let observation=open_lock(&dir.join("observation.lock"))?;observation.lock()?;
     deploy_protocol::intake(&request,&id)?;
-    if node_activity()!=Some(true) {deploy_protocol::record(&request,&id,"failed","bootstrap node became busy before admission; no effect")?;bail!("bootstrap_became_busy; no effect");}
-    // `perform` performs the ordinary parent/hook/source/native-target checks, reserves
-    // the one generation durably, and selects only canonical scripts/deploy.sh.
-    let outcome=perform(&request);
+    // Only proven read refusals before reservation can repeat. All iterations
+    // retain one immutable intent and revalidate source/owner/target/positive idle.
+    let outcome=loop {
+        if stop_path().exists() || watcher_state()?!=WatcherState::Running {break Err(anyhow::anyhow!("bootstrap_watcher_changed; no effect"));}
+        if Instant::now()>=until {break Err(anyhow::anyhow!("bootstrap_admission_deadline; no automatic replay"));}
+        if node_activity()!=Some(true) {std::thread::sleep(Duration::from_millis(500));continue;}
+        let next=perform(&request);
+        if let Err(error)=&next {
+            let detail=format!("{error:#}");
+            if admission_read_contention(&detail) && !dir.join("effect.json").exists() {
+                deploy_protocol::record(&request,&id,"held",&detail)?;
+                std::thread::sleep(Duration::from_secs(1));continue;
+            }
+        }
+        break next;
+    };
     match outcome {
         Ok(detail)=>{
             deploy_protocol::record(&request,&id,"spawned",&detail)?;

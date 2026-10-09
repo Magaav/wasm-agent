@@ -407,6 +407,11 @@ not installation; raw receipt, installer result and fresh verifier remain requir
 The observer remains live and is replaced only by the supported installer. The
 bootstrap cannot start inside the node or a supervised run that it would wait on.
 Failure restores the launcher but leaves all effects/unknowns for inspection.
+Typed parent-owner/node-identity read-capacity refusal before `effect.json` waits
+with backoff under the same intent ID. The bootstrap holds only that request's
+observation lock during admission, preventing a held notice from waking its own
+parent into the idle gap. On admission/failure it releases notification observation
+normally. No other refusal, reserved effect or spawn is retried.
 
 ## Operating
 

@@ -39,8 +39,10 @@ $env:WASM_AGENT_HOME=$plan.home;$env:WA_INSTALL_DIR=$plan.install
 $env:WA_SENTINEL_SCRIPTS=Join-Path $plan.install 'scripts'
 $env:PATH='C:\Program Files\Git\cmd;C:\Program Files\Git\usr\bin;C:\Program Files\nodejs;'+$env:PATH
 Set-Location $plan.source
+$ErrorActionPreference='Continue'
 & $plan.candidate protocol bootstrap --expected-sha $plan.expected_sha --owner $plan.owner --session $plan.parent --reason 'Human-authorized existing-task bootstrap of current exact-source installer; installed observer predates native admission fixes; preserve old refusal/unknown records; no full release gate' 1> (Join-Path $generation 'stdout') 2> (Join-Path $generation 'stderr')
 $code=$LASTEXITCODE
+$ErrorActionPreference='Stop'
 @{exit=$code;at=[DateTime]::UtcNow.ToString('o');launcher_restored=$true;installation_complete=$false}|ConvertTo-Json -Compress|Set-Content (Join-Path $generation 'result.json')
 exit $code
 '@
