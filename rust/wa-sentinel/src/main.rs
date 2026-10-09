@@ -70,6 +70,7 @@ fn service_lifecycle(name: &str, verb: &str) -> Result<()> {
 }
 
 mod deploy_protocol;
+mod deploy_bootstrap;
 mod sentinel_return;
 #[cfg(test)]
 mod sentinel_return_tests;
@@ -2636,6 +2637,10 @@ fn main() -> Result<()> {
                 if root.exists(){for entry in std::fs::read_dir(root)?.flatten(){if entry.path().is_dir(){
                     sentinel_return::observe(entry.file_name().to_str().context("protocol id encoding")?)?;
                 }}}
+                Ok(())
+            },
+            Some("bootstrap") if rest.len()==9 && rest[1]=="--expected-sha" && rest[3]=="--owner" && rest[5]=="--session" && rest[7]=="--reason" => {
+                println!("{}",deploy_bootstrap::execute(&rest[2],&rest[4],&rest[6],&rest[8])?);
                 Ok(())
             },
             Some("target") if rest.len()==1 => {

@@ -1,13 +1,13 @@
 // Private historical verifier using real Git/files/native child identities; fake health only.
 const fs=require('node:fs'),path=require('node:path'),assert=require('node:assert/strict'),crypto=require('node:crypto'),http=require('node:http'),{spawn,spawnSync}=require('node:child_process'),{pathToFileURL}=require('node:url');
-const out=process.argv[2],sentinelBinary=process.argv[3];assert(out&&path.isAbsolute(out)&&!fs.existsSync(out));fs.mkdirSync(out,{recursive:true});
+const out=process.argv[2],sentinelBinary=process.argv[3],bootstrap=process.argv[4]==='bootstrap';assert(out&&path.isAbsolute(out)&&!fs.existsSync(out));fs.mkdirSync(out,{recursive:true});
 const repo=path.join(out,'source'),install=path.join(out,'install'),home=path.join(out,'home'),evidence=path.join(out,'evidence');for(const p of [repo,install,home,evidence])fs.mkdirSync(p);fs.mkdirSync(home+'/.wasm-agent/sentinel',{recursive:true});
 const hash=b=>crypto.createHash('sha256').update(b).digest('hex'),put=(p,b)=>{fs.mkdirSync(path.dirname(p),{recursive:true});fs.writeFileSync(p,b);};
 function git(...a){const r=spawnSync('git',['-C',repo,...a],{encoding:'utf8'});assert.equal(r.status,0,r.stderr);return r.stdout.trim();}
 put(repo+'/scripts/deploy.sh','never install fixture\n');put(repo+'/scripts/upgrade.sh','UI_FILES="index.html"\n');put(repo+'/scripts/probe.js','exact historical script\n');put(repo+'/skills/fixture/SKILL.md','historical skill\n');put(repo+'/ui/index.html','historical ui\n');
 git('init','-b','main');git('config','core.autocrlf','false');git('config','core.hooksPath',out+'/no-hooks');git('config','user.email','fixture@invalid');git('config','user.name','fixture');git('add','.');git('commit','-m','historical source');const sha=git('rev-parse','HEAD'),tree=git('rev-parse','HEAD^{tree}');git('remote','add','origin',repo);git('fetch','origin');
 const native=process.platform==='win32'?'.exe':'';fs.copyFileSync(process.execPath,install+'/wa'+native);fs.copyFileSync(sentinelBinary||process.execPath,install+'/wa-sentinel'+native);
-const node=spawn(install+'/wa'+native,['-e',`const http=require('http');const s=http.createServer((q,r)=>r.end(JSON.stringify(q.url.startsWith('/session/owner')?{session:{id:'parent',user_id:'owner'}}:q.url.startsWith('/sync/head')?{node_id:'private-node',node:'private-node'}:{ok:true,busy:true,worker:'busy'})));s.listen(0,'127.0.0.1',()=>process.send(s.address().port));`],{windowsHide:true,stdio:['ignore','ignore','ignore','ipc']});let watch;
+const node=spawn(install+'/wa'+native,['-e',`const http=require('http');let idle=false;process.on('message',()=>{idle=true;process.send('idle');});const s=http.createServer((q,r)=>r.end(JSON.stringify(q.url.startsWith('/session/owner')?{session:{id:'parent',user_id:'owner'}}:q.url.startsWith('/sync/head')?{node_id:'private-node',node:'private-node'}:{ok:true,busy:!idle,worker:idle?'alive':'busy',current:idle?null:{run:1},queue:0,operation_overdue:false,workers:[{state:idle?'alive':'busy'}],execution_schema:1,operations:[],subagents:{queued:0,running:0,active:0}})));s.listen(0,'127.0.0.1',()=>process.send(s.address().port));`],{windowsHide:true,stdio:['ignore','ignore','ignore','ipc']});let watch;
 const portPromise=new Promise(r=>node.once('message',r));
 for(const rel of ['scripts/deploy.sh','scripts/upgrade.sh','scripts/probe.js','ui/index.html'])put(install+'/'+rel,fs.readFileSync(repo+'/'+rel));put(home+'/.wasm-agent/skills/fixture/SKILL.md',fs.readFileSync(repo+'/skills/fixture/SKILL.md'));put(install+'/serve.pid',String(node.pid));
 const names=['deploy.sh','upgrade.sh','probe.js'],digest=(base,ns)=>hash(ns.map(n=>`${n}\0${hash(fs.readFileSync(base+'/'+n))}\n`).join('')),at=new Date().toISOString();
@@ -47,6 +47,22 @@ if(sentinelBinary){
  const r=spawnSync(install+'/wa-sentinel'+native,['protocol','reconcile-historical',intent.id,'--reason','private historical recovery'],{env:privateEnv,cwd:repo,encoding:'utf8',timeout:60000,maxBuffer:4*1024*1024});
  put(out+'/cli.stdout',r.stdout||'');put(out+'/cli.stderr',r.stderr||'');assert.equal(r.status,0,r.stderr);const cli=JSON.parse(r.stdout);assert(cli.ok&&cli.effect_replayed===false);assert.equal(JSON.parse(fs.readFileSync(box+'/protocol-effect.json')).phase,'verified');checks+=3;
  for(const [n,b]of Object.entries(originals)){assert(fs.readFileSync(dir+'/'+n).equals(b),'original changed '+n);checks++;}
+ if(bootstrap){
+  // Exact-source admission succeeds through the native bootstrap; private script
+  // records argv only. It does not replace the private node or any installed bytes.
+  const marker=out.replaceAll('\\','/')+'/bootstrap-marker';
+  put(repo+'/scripts/deploy.sh',`#!/usr/bin/env bash\nprintf '%s\\n' "$@" > '${marker}'\n`);
+  git('add','.');git('commit','-m','private bootstrap deployer');git('fetch','origin');
+  const def=path.resolve('jobs/on-sentinel-return.json');
+  for(const args of [['job','put',def],['job','enable','onSentinelReturn']]){const r=spawnSync(install+'/wa-sentinel'+native,args,{env:privateEnv,cwd:repo,encoding:'utf8'});assert.equal(r.status,0,r.stderr);}
+  const waiting=new Promise(r=>node.once('message',r));node.send('idle');await waiting;
+  const r=spawnSync(install+'/wa-sentinel'+native,['protocol','bootstrap','--expected-sha',git('rev-parse','HEAD'),'--owner','owner','--session','parent','--reason','private source-bound bootstrap'],{env:privateEnv,cwd:repo,encoding:'utf8',timeout:30000});
+  put(out+'/bootstrap.stdout',r.stdout||'');put(out+'/bootstrap.stderr',r.stderr||'');assert.equal(r.status,0,r.stderr);const receipt=JSON.parse(r.stdout);assert(receipt.ok&&!receipt.installation_complete&&receipt.phase==='spawned');checks++;
+  const deadline=Date.now()+10000;while(!fs.existsSync(marker)&&Date.now()<deadline)await new Promise(r=>setTimeout(r,20));assert(fs.existsSync(marker),'actual detached private deployer never ran');checks++;
+  const args=fs.readFileSync(marker,'utf8');assert(args.includes(receipt.request_id)&&args.includes(git('rev-parse','HEAD')),'exact generation arguments missing');checks++;
+  const reserved=JSON.parse(fs.readFileSync(box+'/protocol-effect.json'));assert.equal(reserved.id,receipt.request_id);assert.equal(reserved.phase,'admitted');checks++;
+  const again=spawnSync(install+'/wa-sentinel'+native,['protocol','bootstrap','--expected-sha',git('rev-parse','HEAD'),'--owner','owner','--session','parent','--reason','private second attempt forbidden'],{env:privateEnv,cwd:repo,encoding:'utf8',timeout:15000});assert.notEqual(again.status,0);assert(again.stderr.includes('unsettled'));checks++;
+ }
 }
 const receipt={ok:true,checks,skipped:0,labelled_mock:'health/owner HTTP only',native_processes:true,source_and_artifact_hashes:true,no_installer:true};put(out+'/receipt.json',JSON.stringify(receipt,null,2));console.log(JSON.stringify(receipt));
 }finally{node.kill();watch.kill();await Promise.all([new Promise(r=>node.exitCode!==null?r():node.once('exit',r)),new Promise(r=>watch.exitCode!==null?r():watch.once('exit',r))]);}})().catch(e=>{console.error(e);process.exitCode=1;});

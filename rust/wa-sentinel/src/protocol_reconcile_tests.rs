@@ -21,5 +21,6 @@ fn reconciliation_inside_turn_refuses_before_touching_runtime_state() {
     let original=std::env::var_os("WASM_AGENT_IN_TURN");std::env::set_var("WASM_AGENT_IN_TURN","1");
     assert!(reconcile("fixture","explicit test").unwrap_err().to_string().contains("external_executor"));
     assert!(reconcile_historical("fixture","explicit test").unwrap_err().to_string().contains("external_executor"));
+    assert!(deploy_bootstrap::execute(&"a".repeat(40),"owner","parent","explicit test").unwrap_err().to_string().contains("external_executor"));
     match original {Some(v)=>std::env::set_var("WASM_AGENT_IN_TURN",v),None=>std::env::remove_var("WASM_AGENT_IN_TURN")}
 }

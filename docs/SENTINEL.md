@@ -385,6 +385,29 @@ After restoring the exact task, the normal queue installs published source while
 idle. Existing queued source-bound requests remain immutable; if source changed
 before any effect reservation, preserve their refusal and issue a fresh intent.
 
+## Existing-task exact-source bootstrap
+
+If the installed observer predates fixes required to admit the current published
+build, use `scripts/bootstrap-sentinel-deploy.ps1 -Check -ExpectedSha <main>
+-ParentSession <id>` first, then the same call without `-Check`. This reuses ONLY
+the existing limited interactive logon task under the same SID: no registration,
+elevation, binary copy, node stop, claim deletion or new recurring wake. It refuses
+SCM/unknown task/action/active task, pending deploys, intentional stop, unsettled
+reservation and source drift. Task XML and launcher are backed up; a one-shot
+launcher restores its original bytes before calling the hash-pinned source-built
+Sentinel. No installed UI or binaries are instrumented.
+
+`protocol bootstrap --expected-sha <main> --owner <owner> --session <parent>
+--reason <text>` is external-only. It waits for positive native idle evidence,
+revalidates parent/hook/source/native target, reserves a fresh effect generation,
+and launches only canonical `scripts/deploy.sh` through the same supported detached
+path. A participating bootstrap lock and global effect reservation prevent a second
+installer. Prior failed requests are not replayed. Admission or detached spawn is
+not installation; raw receipt, installer result and fresh verifier remain required.
+The observer remains live and is replaced only by the supported installer. The
+bootstrap cannot start inside the node or a supervised run that it would wait on.
+Failure restores the launcher but leaves all effects/unknowns for inspection.
+
 ## Operating
 
 ```
