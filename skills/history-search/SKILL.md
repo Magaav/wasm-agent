@@ -11,6 +11,12 @@ Use `roles:["user"]` to find an original request, `sort:"newest"` for chronology
 and `match:"phrase"` only for an exact phrase. Filters are explicit; never guess
 that a failed/no-match search proves an event did not happen.
 
+For a failed run, use `session {session_id,message_id,view:"full"}` directly when
+its row is known; otherwise newest `view:"full",limit:1` or a small range around
+the failure. Do not begin failure diagnosis with compact discovery. Oversized
+rows expose a last-failed-span excerpt; follow the exact row reference for the
+full error/trace. An excerpt is not full execution evidence.
+
 For commands/results use `scope:"evidence"`, optionally `tool_name`. `scope:"all"`
 also exposes retrieval echoes, summaries and automatic notices. Echoes are copies,
 not independent confirmation. `group_by:"message"` removes the two-hits-per-session

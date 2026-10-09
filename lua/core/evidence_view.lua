@@ -2,6 +2,27 @@
 local json=dofile('lua/vendor/json.lua')
 local output=dofile('lua/core/tool_output.lua')
 local M={}
+-- Even an oversized row must expose why it failed, not just where to fetch it.
+-- This is an exact excerpt of the LAST failed span; it is not a generated diagnosis.
+function M.failure(row)
+  local trace=row.trace
+  if type(trace)=='string' then local ok,value=pcall(json.decode,trace);trace=ok and value or {} end
+  local failed
+  if type(trace)=='table' then
+    for n=#trace,1,-1 do
+      local span=trace[n]
+      if type(span)=='table' and (span.ok==false or span.ok==0 or span.error~=nil) then failed=span;break end
+    end
+  end
+  if not failed then return nil end
+  local error=tostring(failed.error or '')
+  -- Escaping-heavy errors still fit the smallest session page. Originals remain
+  -- accessible through the reference; never imply this excerpt is the whole trace.
+  local text=output.slice(error,1,192)
+  return {kind=failed.kind,name=failed.name,model=failed.model,round=failed.round,ms=failed.ms,ok=failed.ok,
+    error=text,error_bytes=#error,error_truncated=#text<#error,scope='last_failed_span_excerpt'}
+end
+
 function M.message(row)
   local view={}
   for _,key in ipairs({'id','seq','session_id','role','content','tool_call_id','tool_name','ok','ms','created_at','at','title','rank','user_id'}) do

@@ -246,7 +246,10 @@ model wake, job approval or conversation injection is introduced.
 with explicit full/all access. See [HISTORY-SEARCH.md](HISTORY-SEARCH.md).
 Compact views retain content, identity, chronology, timing/outcome, concise call
 identities and trace failures; they omit argument bodies, reasoning, images, diffs
-and accounting details **explicitly**, with exact-row references. No stored row or
+and accounting details **explicitly**, with exact-row references. Oversized row
+references preserve timing/outcome and an exact last-failed-span excerpt (192 UTF-8
+bytes maximum, original byte count and truncation flag). Failure diagnosis should
+request the known exact row in `full` view first, not compact discovery. No stored row or
 active conversation is rewritten. `session {session_id,message_id,view:'full'}`
 retrieves the original row after checking both ownership and row/session identity.
 
