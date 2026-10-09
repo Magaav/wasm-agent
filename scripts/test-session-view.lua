@@ -43,4 +43,25 @@ assert(memory.message_count(sid)==24,'no transcript modification')
 assert(view.get(memory,sid,{after_seq='bad'},task).error=='invalid_session_cursor')
 assert(view.get(memory,sid,{after_seq=0,before_seq=3},task).error=='session_cursor_conflict')
 assert(view.get(memory,'other',{message_id=ref.message_id},task).error=='unknown_message')
+-- Regression: an enormous compact failure used to lose its entire trace when
+-- replaced by the oversized envelope (observed production seq829).
+local failure_sid=memory.start_session('','failure-envelope',{user_id='owner'})
+local trace={}
+for n=1,60 do trace[#trace+1]={kind='model_call',model='fixture',ms=1000,ok=true,round=n}end
+trace[#trace+1]={kind='model_call',model='fixture',ms=111236,ok=false,error='UND_ERR_SOCKET: other side closed'}
+memory.append_turn(failure_sid,{role='assistant',content=string.rep('large output',3000),ok=false,trace=trace})
+local failed_id=memory.session_messages(failure_sid,{limit=1})[1].id
+local original=json.encode(memory.message(failed_id))
+for _,mode in ipairs({'compact','full'})do
+ local preview=view.get(memory,failure_sid,{limit=1,byte_limit=2048,view=mode})
+ assert(not preview.error and #json.encode(preview)<=2048,'failure page bound')
+ local failed=preview.messages[1]
+ assert(failed.omitted and failed.ok==0 and failed.failure and failed.failure.error=='UND_ERR_SOCKET: other side closed','oversized row retains exact failure')
+ assert(failed.failure.ms==111236 and failed.failure.model=='fixture' and failed.failure.scope=='last_failed_span_excerpt','failure timing and scope')
+ assert(failed.evidence.message_id==failed_id and failed.evidence.byte_offset==1,'full original address retained')
+end
+local large_error=string.rep('é\\"',1000)
+local ev=dofile('lua/core/evidence_view.lua').failure({trace={{ok=false,error=large_error}}})
+assert(ev.error_truncated and ev.error_bytes==#large_error and utf8.len(ev.error),'long errors are explicit UTF8 excerpts')
+assert(json.encode(memory.message(failed_id))==original,'original trace/content unchanged')
 print('session view ok')

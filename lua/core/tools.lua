@@ -97,7 +97,7 @@ M.shared = {
   }, { "action" }),
   schema("sessions", "List your own past sessions (resumable threads), most recent first.", {
     limit = { type = "integer", minimum = 1, maximum = 100 } }),
-  schema("session", "Read a session. Defaults to newest messages; pass next_before_seq back as before_seq to retrieve earlier evidence.", {
+  schema("session", "Read a session. Defaults to newest messages; pass next_before_seq back as before_seq to retrieve earlier evidence. For failure diagnosis use view=full and a small limit or exact message_id; oversized rows keep a last-failure excerpt and exact-original pointer.", {
     session_id = { type = "string" },
     before_seq = { type = "integer", minimum = 1 },
     around_seq = { type = "integer", minimum = 1, description = "Centre on a search hit; includes nonmatching neighbours in chronological order." },

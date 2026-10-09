@@ -30,7 +30,8 @@ end
 local function reference(row,sid,id)
   local address={session_id=sid,message_id=row.id,byte_offset=1,view='full'}
   if id then address.tool='subagent';address.action='session';address.id=id else address.tool='session' end
-  return {id=row.id,seq=row.seq,role=row.role,tool_name=row.tool_name,
+  return {id=row.id,seq=row.seq,role=row.role,tool_name=row.tool_name,ok=row.ok,ms=row.ms,
+    created_at=row.created_at,failure=evidence.failure(row),
     content='[Oversized message: retrieve the original using evidence.]',omitted=true,evidence=address}
 end
 
