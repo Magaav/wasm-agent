@@ -1885,6 +1885,9 @@ if command -v cygpath >/dev/null 2>&1; then
   EMPTY_START_EVIDENCE="$(cygpath -w "$EMPTY_START_EVIDENCE")"
 fi
 gate_run node scripts/test-subscription-empty-start.cjs "$EMPTY_START_BIN" "$EMPTY_START_EVIDENCE"
+MIDSTREAM_EVIDENCE="$GATE_HOME/subscription-midstream"
+if command -v cygpath >/dev/null 2>&1; then MIDSTREAM_EVIDENCE="$(cygpath -w "$MIDSTREAM_EVIDENCE")"; fi
+gate_run node scripts/test-subscription-midstream.cjs "$EMPTY_START_BIN" "$MIDSTREAM_EVIDENCE"
 # And the levels that route declares, read from the catalogue this repo owns
 # (`lua/core/openai_sub_catalogue.lua`) rather than from a third-party store at request time: the
 # fixture writes a *disagreeing* store where pi's store lives and none of it may reach the answer, so

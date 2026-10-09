@@ -44,6 +44,10 @@ in-memory message list, which is what makes restarts resumable.
 on live/repaint/child hosts, not assistant prose or tool effects. They remain in
 the ledger and sync, but build_context and compaction exclude them from model
 input. A retry tail is unfinished; no restored connection implies task completion.
+For recognized subscription disconnects, an interrupted retry row also retains the
+uncommitted attempt's text/reasoning and bounded tool previews, labelled not executed.
+Only a complete regenerated result is committed as assistant output and dispatched;
+prior tools are never replayed. See [OPENAI-SUB.md](OPENAI-SUB.md).
 
 The read-only `GET /session/owner?id=<id>` returns only `{session:{id,user_id}}`
 for native sentinel ownership checks. It uses the existing account resolution and

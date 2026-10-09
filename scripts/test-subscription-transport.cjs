@@ -22,6 +22,41 @@ stream(_m,context,options){
  attempts++;
  return {
  async *[Symbol.asyncIterator](){
+  if(mode.startsWith('midstream-')){
+   const first=attempts===1;
+   if(first){
+    const thinking={type:'thinking',thinking:''},text={type:'text',text:''};
+    const tool={type:'toolCall',id:'unfinished-call',name:'write',arguments:{},partialJson:''};
+    const partial={content:[thinking]};
+    yield {type:'thinking_start',contentIndex:0,partial};thinking.thinking='interrupted thinking';
+    yield {type:'thinking_delta',contentIndex:0,delta:thinking.thinking,partial};
+    thinking.thinkingSignature='opaque known signature';
+    if(mode==='midstream-thinking-end')thinking.thinking='complete end-only thinking';
+    yield {type:'thinking_end',contentIndex:0,content:thinking.thinking,partial};
+    partial.content.push(text);yield {type:'text_start',contentIndex:1,partial};text.text='interrupted progress';
+    yield {type:'text_delta',contentIndex:1,delta:text.text,partial};
+    if(mode==='midstream-commentary'){text.textSignature=JSON.stringify({phase:'commentary'});yield {type:'text_end',contentIndex:1,content:text.text,partial};}
+    if(mode==='midstream-final'){text.textSignature=JSON.stringify({phase:'final_answer'});yield {type:'text_end',contentIndex:1,content:text.text,partial};}
+    partial.content.push(tool);yield {type:'toolcall_start',contentIndex:2,partial};
+    tool.partialJson='{\"path\":';yield {type:'toolcall_delta',contentIndex:2,delta:tool.partialJson,partial};
+    if(mode==='midstream-completed-tool'){delete tool.partialJson;tool.arguments={path:'must-not-execute'};yield {type:'toolcall_end',contentIndex:2,toolCall:tool,partial};}
+    if(mode==='midstream-unknown'){yield {type:'future_progress',value:'unknown'};}
+    if(mode==='midstream-unknown-field'){yield {type:'text_delta',contentIndex:1,delta:'extra',partial,future:true};}
+    if(mode==='midstream-unknown-error'){yield {type:'error',reason:'error',error:{content:[{type:'serverEffect'}]}};}
+    if(mode==='midstream-unknown-block'){partial.content.push({type:'serverEffect',id:'unknown'});yield {type:'text_delta',contentIndex:1,delta:'extra',partial};}
+    if(mode==='midstream-malformed'){yield {type:'toolcall_delta',contentIndex:99,delta:'malformed',partial};}
+    if(mode==='midstream-cancel'){const e=Error('cancel');e.name='AbortError';throw e;}
+    if(mode==='midstream-auth'||mode==='midstream-quota'){const r=await options.fetch('http://fixture.invalid',{method:'POST'});throw Error('HTTP '+r.status);}
+    if(mode==='midstream-result')delete tool.partialJson;
+   }
+   if(!first){
+    const tool={type:'toolCall',id:'completed-call',name:'write',arguments:{path:'fixture-effect',content:'once'}};
+    const partial={content:[tool]};
+    yield {type:'toolcall_start',contentIndex:0,partial};
+    yield {type:'toolcall_end',contentIndex:0,toolCall:tool,partial};
+    return;
+   }
+  }
   if(mode==='unknown')throw Error('opaque terminated');
   if(mode==='cancel'){const e=Error('Request was aborted');e.name='AbortError';throw e;}
   if(mode==='deadline-abort'){const e=Error('local deadline');e.name='TimeoutError';e.cause=Error('socket');e.cause.code='ECONNRESET';throw e;}
@@ -58,19 +93,22 @@ stream(_m,context,options){
   });
   await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
   try{const r=await options.fetch('http://127.0.0.1:'+server.address().port+'/fixture',{method:'POST'});
-   try{for await(const chunk of r.body){};}catch{if(mode.startsWith('result-empty-'))return;throw Error('terminated');}
+   try{for await(const chunk of r.body){};}catch{if(mode.startsWith('result-empty-')||mode==='midstream-result')return;throw Error('terminated');}
   }finally{await new Promise(resolve=>server.close(resolve));}
   yield {type:'text_delta',contentIndex:0,delta:'success'};
  },
- async result(){if(mode.startsWith('result-empty-')&&attempts===1)return {stopReason:'error',errorMessage:'terminated',content:[mode==='result-empty-text'?{type:'text',text:''}:{type:'thinking',thinking:''}]};return {stopReason:'stop',content:[{type:'text',text:'success'}],usage:{input:2,output:1,cacheRead:0,cacheWrite:0,totalTokens:3}};}
+ async result(){if(mode.startsWith('midstream-')){
+  if(attempts===1)return {stopReason:'error',errorMessage:'terminated',content:[{type:'toolCall',id:'unfinished-call',name:'write',arguments:{}}]};
+  return {stopReason:'toolUse',content:[{type:'toolCall',id:'completed-call',name:'write',arguments:{path:'fixture-effect',content:'once'}}],usage:{input:2,output:1,cacheRead:0,cacheWrite:0,totalTokens:3}};
+ }if(mode.startsWith('result-empty-')&&attempts===1)return {stopReason:'error',errorMessage:'terminated',content:[mode==='result-empty-text'?{type:'text',text:''}:{type:'thinking',thinking:''}]};return {stopReason:'stop',content:[{type:'text',text:'success'}],usage:{input:2,output:1,cacheRead:0,cacheWrite:0,totalTokens:3}};}
  };}};}
 // Private fake wire makes handshake failure/auth reproducible before body streaming.
 const nativeFetch=globalThis.fetch;
 globalThis.fetch=async(url,opts)=>{
  if(url==='http://fixture.invalid'){
   const e=Error('terminated');e.cause=Error('Bearer fixture-sensitive-token https://secret.example/query?token=private');e.cause.code='ECONNRESET';
-  if(process.env.FIXTURE_MODE==='auth')return new Response('denied',{status:401});
-  if(process.env.FIXTURE_MODE==='quota')return new Response('limited',{status:429});
+  if(['auth','midstream-auth'].includes(process.env.FIXTURE_MODE))return new Response('denied',{status:401});
+  if(['quota','midstream-quota'].includes(process.env.FIXTURE_MODE))return new Response('limited',{status:429});
   if(process.env.FIXTURE_MODE==='recovery-hang'&&attempts>1){
     await new Promise((resolve,reject)=>{const abort=()=>{const a=Error('recovery timeout');a.name='AbortError';reject(a);};
       if(opts.signal.aborted)abort();else opts.signal.addEventListener('abort',abort,{once:true});});
@@ -137,6 +175,33 @@ globalThis.fetch=async(url,opts)=>{
   for(const mode of ['unknown','auth','quota','cancel','deadline-abort','signal-abort']){
     const r=run(mode);check(()=>assert.equal(r.status,1));check(()=>assert.equal(r.attempts.length,1));
     check(()=>assert.equal(r.events.filter(e=>e.type==='transport_retry').length,0));
+  }
+  // Explicit Lua-owned uncommitted boundary: previews are not dispatched effects.
+  for(const mode of ['midstream-tool','midstream-completed-tool','midstream-commentary','midstream-final','midstream-result','midstream-thinking-end']){
+    const r=run(mode,{midstream_recovery:true});
+    check(()=>assert.equal(r.status,0,r.stdout));check(()=>assert.equal(r.attempts.length,2));
+    check(()=>assert.equal(r.attempts[0].diagnostic.model_output_seen,true));
+    check(()=>assert.equal(r.attempts[0].diagnostic.uncommitted_retry_safe,true));
+    const interrupted=r.events.filter(e=>e.type==='retry'&&e.state==='interrupted');
+    check(()=>assert.equal(interrupted.length,1));
+    check(()=>assert.equal(interrupted[0].discarded_attempt.tools_executed,0));
+    check(()=>assert.equal(interrupted[0].discarded_attempt.reasoning,mode==='midstream-thinking-end'?'complete end-only thinking':'interrupted thinking'));
+    check(()=>assert.equal(interrupted[0].discarded_attempt.texts[0].text,'interrupted progress'));
+    check(()=>assert.equal(r.events.filter(e=>e.type==='result').length,1));
+    check(()=>assert.deepEqual(r.events.at(-1).result.tool_calls.map(c=>c.id),['completed-call']));
+    check(()=>assert(r.events.filter(e=>e.type==='transport_retry').every(e=>e.note.includes('no tools replayed'))));
+    const bodyIds=r.events.filter(e=>e.type==='pending_delta').map(e=>e.pending_id);
+    check(()=>assert.equal(new Set(bodyIds).size,bodyIds.length,'attempt text IDs never reused'));
+  }
+  for(const mode of ['midstream-unknown','midstream-unknown-field','midstream-unknown-error','midstream-unknown-block','midstream-malformed','midstream-cancel','midstream-auth','midstream-quota','midstream-disabled']){
+    const r=run(mode,{midstream_recovery:true,...(mode==='midstream-disabled'?{transport_retries:0}:{})});
+    check(()=>assert.equal(r.status,1));check(()=>assert.equal(r.attempts.length,1));
+    check(()=>assert.equal(r.events.filter(e=>e.type==='transport_retry'||e.type==='result').length,0));
+  }
+  for(const mode of ['midstream-tool','midstream-commentary']){
+    const r=run(mode,{midstream_recovery:false});
+    check(()=>assert.equal(r.status,1));check(()=>assert.equal(r.attempts.length,1));
+    check(()=>assert.equal(r.events.filter(e=>e.type==='result'||e.type==='transport_retry').length,0));
   }
   const ten=run('repeat-failure',{transport_retries:10,recovery_window_ms:1000});
   check(()=>assert.equal(ten.attempts.length,11));
@@ -217,6 +282,11 @@ print('native transport recovery ok (8 checks)')
     fs.writeFileSync(root+'/native.stdout',native.stdout||'');fs.writeFileSync(root+'/native.stderr',native.stderr||'');
     check(()=>assert.equal(native.status,0,native.stdout+native.stderr));
     check(()=>assert.match(native.stdout,/native transport recovery ok/));
+    const loop=spawnSync(path.resolve(process.argv[3]),['--db',home+'/loop.db'],{cwd:repo,
+      env:{...env,WA_SCRIPT:path.join(repo,'scripts/test-subscription-midstream-loop.lua')},encoding:'utf8',timeout:20000});
+    fs.writeFileSync(root+'/loop.stdout',loop.stdout||'');fs.writeFileSync(root+'/loop.stderr',loop.stderr||'');
+    check(()=>assert.equal(loop.status,0,loop.stdout+loop.stderr));
+    check(()=>assert.match(loop.stdout,/subscription midstream production loop ok/));
   }
   console.log(JSON.stringify({ok:true,checks,skipped:0,paid_calls:0,evidence:root}));
 } catch(error){console.error('subscription transport fixture failed; evidence='+root);throw error;}

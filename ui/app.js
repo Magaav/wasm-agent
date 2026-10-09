@@ -731,11 +731,12 @@ function appendReasoning(text, complete = false) {
   return reasoningText;
 }
 
-function appendCommentary(text, messageId) {
+function appendCommentary(text, messageId, pendingId) {
   if (!text || (messageId && renderedMessageIds.has(String(messageId)))) return;
   const block = document.createElement("wa-commentary");
   block.open = !replayingMessages;
   block.setText(text);
+  if(pendingId)block.dataset.pendingId=String(pendingId);
   if (messageId) {
     block.dataset.messageId = String(messageId);
     renderedMessageIds.add(String(messageId));
@@ -1421,6 +1422,41 @@ function paintDelta() {
   pin();
 }
 
+// A retry never rolls back effects. It seals ONLY provisional model output;
+// the bridge supplies a retained interrupted snapshot before regenerating it.
+function interruptSubscriptionAttempt(saved) {
+  if (!saved || saved.tools_executed !== 0 || typeof saved.id !== 'string' ||
+      typeof saved.reasoning !== 'string' || !Array.isArray(saved.texts) || !Array.isArray(saved.decisions)) return;
+  const bubble=currentBubble();
+  if (Array.from(bubble.querySelectorAll('[data-interrupted-attempt]')).some(node=>node.dataset.interruptedAttempt===saved.id)) return;
+  finishRunStep('unfinished');
+  for (const item of saved.texts) {
+    if (typeof item.pending_id !== 'string' || typeof item.text !== 'string') continue;
+    let node=Array.from(bubble.querySelectorAll('[data-pending-id]')).find(node=>node.dataset.pendingId===item.pending_id);
+    if (!node && item.text) {
+      node=document.createElement('div');node.className='seg';node.textContent=item.text;
+      node.dataset.pendingId=item.pending_id;bubble.body.append(node);
+    }
+    if (node) {node.classList.remove('phase-pending','final-answer');node.classList.add('phase-incomplete');}
+  }
+  if (saved.reasoning) {
+    appendReasoning(saved.reasoning,true);
+    reasoningBlock?.classList.add('phase-incomplete');
+  }
+  if (!trace && saved.decisions.length) {
+    for (const item of saved.decisions) currentTrace().addDecision(item.call_id,item.name,item.arguments_text,item.complete,item.previous_call_id);
+  }
+  const marker=document.createElement('div');marker.className='patch-note';
+  marker.dataset.interruptedAttempt=saved.id;
+  marker.textContent='Interrupted model attempt — preserved, not executed; regenerating response';
+  bubble.body.append(marker);
+  markPendingTextIncomplete();markStreamedCommentaryIncomplete();
+  if (streamBody) streamBody.classList.add('phase-incomplete');
+  flushDecision();
+  delete bubble.dataset.finalMessage;
+  releaseAnswerAnchor(transcript,false);
+}
+
 function handleEvent(event) {
   if (["round", "reasoning", "commentary", "commentary_delta", "commentary_end", "pending_delta", "decision", "tool", "tool_result", "delta", "reply", "error", "done"].includes(event.type)) {
     clearActiveRunNotice();
@@ -1445,6 +1481,7 @@ function handleEvent(event) {
   } else if (event.type === "retry") {
     const index=Number(event.index),limit=Number(event.limit);
     if(!Number.isInteger(index)||index<1||!Number.isInteger(limit)||limit<1||limit>10||index>limit)return;
+    if(event.state==='interrupted')interruptSubscriptionAttempt(event.discarded_attempt);
     const bubble=currentBubble(),id=String(event.retry_id || 'subscription-recovery');
     let retry=Array.from(bubble.querySelectorAll('wa-retry')).find(node=>node.dataset.retryId===id);
     if(!retry){retry=document.createElement('wa-retry');retry.dataset.retryId=id;bubble.body.append(retry);}
@@ -1475,7 +1512,7 @@ function handleEvent(event) {
   } else if (event.type === "commentary") {
     showRunStep("commentary", "Receiving progress update");
     removePendingText(event.pending_id);
-    appendCommentary(event.text || "", event.message_id);
+    appendCommentary(event.text || "", event.message_id, event.pending_id);
   } else if (event.type === "commentary_delta") {
     showRunStep("commentary", "Receiving progress update");
     appendStreamedCommentary(event.text || "");
@@ -1514,6 +1551,7 @@ function handleEvent(event) {
     if (!pending) {
       const node = document.createElement("div");
       node.className = "seg phase-pending";
+      node.dataset.pendingId=key;
       currentBubble().body.append(node);
       anchorRunStepContent(node);
       pending = { node, text: "" };
@@ -1533,6 +1571,7 @@ function handleEvent(event) {
       currentBubble().body.append(streamBody);
       anchorRunStepContent(streamBody);
     }
+    if(event.pending_id)streamBody.dataset.pendingId=String(event.pending_id);
     streamText += event.text || "";
     streamBody.rawText=streamText;
     // Keep streaming observable synchronously, including background tabs where

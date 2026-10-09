@@ -192,6 +192,43 @@ try {
   let reasoningText = '';
   const streamedFinalText = new Set();
   const toolDecisions = new Map();
+  let attemptTag=request.stream_id || 'stream';
+  let attemptTexts=new Map(),attemptDecisions=new Map(),attemptThoughts=new Map(),lastPartialContent;
+  // This bridge never dispatches tools. Known adapter output is provisional until
+  // a successful result reaches Lua; regenerating it cannot replay an old tool.
+  // Reject new event/block fields rather than treating invisible output as safe.
+  const knownBlocks = content => Array.isArray(content) && Array.from(content).every(block => {
+    if(!block || typeof block!=='object' || Array.isArray(block))return false;
+    const fields=block.type==='text' ? ['type','text','textSignature']
+      : block.type==='thinking' ? ['type','thinking','thinkingSignature']
+      : block.type==='toolCall' ? ['type','id','name','arguments','partialJson','namespace'] : null;
+    if(!fields || Object.keys(block).some(key=>!fields.includes(key)))return false;
+    if(block.type==='toolCall')return typeof block.id==='string' && block.id!=='' && typeof block.name==='string'
+      && block.arguments!==null && typeof block.arguments==='object' && !Array.isArray(block.arguments)
+      && (block.partialJson===undefined || typeof block.partialJson==='string')
+      && (block.namespace===undefined || typeof block.namespace==='string');
+    const field=block.type==='text'?'text':'thinking',signature=block.type==='text'?'textSignature':'thinkingSignature';
+    return typeof block[field]==='string' && (block[signature]===undefined || typeof block[signature]==='string');
+  });
+  const knownProvisionalEvent = event => {
+    const fields={start:['type','partial'],error:['type','reason','error'],done:['type','reason','message'],
+      text_start:['type','contentIndex','partial'],thinking_start:['type','contentIndex','partial'],
+      text_delta:['type','contentIndex','delta','partial'],thinking_delta:['type','contentIndex','delta','partial'],
+      text_end:['type','contentIndex','content','partial'],thinking_end:['type','contentIndex','content','partial'],
+      toolcall_start:['type','contentIndex','partial'],toolcall_delta:['type','contentIndex','delta','partial'],
+      toolcall_end:['type','contentIndex','toolCall','partial']}[event.type];
+    if(!fields || Object.keys(event).some(key=>!fields.includes(key)))return false;
+    if(event.type==='error')return knownBlocks(event.error?.content);
+    if(event.type==='done')return knownBlocks(event.message?.content);
+    if(event.type==='start')return knownBlocks(event.partial?.content);
+    const content=event.partial?.content,index=event.contentIndex;
+    if(!Number.isInteger(index) || index<0 || !knownBlocks(content) || index>=content.length)return false;
+    const expected=event.type.startsWith('text_')?'text':event.type.startsWith('thinking_')?'thinking':'toolCall';
+    if(content[index].type!==expected)return false;
+    if(event.type.endsWith('_delta') && typeof event.delta!=='string')return false;
+    if(event.type.endsWith('_end') && expected!=='toolCall' && typeof event.content!=='string')return false;
+    return event.type!=='toolcall_end' || knownBlocks([event.toolCall]);
+  };
   const partialToolCall = event => event.partial?.content?.[event.contentIndex] || {};
   // Item-open is not output. Only exact known empty blocks are replay-safe:
   // a signature/encrypted thought, tool placeholder, unknown property or missing
@@ -210,6 +247,14 @@ try {
       && knownEmptyBlocks(content);
   };
   const recordProgress = event => {
+    if(knownBlocks(event.partial?.content))lastPartialContent=event.partial.content;
+    if(!knownProvisionalEvent(event)) {
+      activeTransport.uncommitted_retry_safe=false;
+      if(!['start','error','done'].includes(event.type)) {
+        activeTransport.model_output_seen=true;
+        activeTransport.output_progress_class ??= 'unknown_adapter_shape';
+      }
+    }
     const known=['start','error','done','text_start','thinking_start','text_delta','thinking_delta',
       'text_end','thinking_end','toolcall_start','toolcall_delta','toolcall_end'];
     activeTransport.last_adapter_event=known.includes(event.type)?event.type:'unknown_progress';
@@ -226,11 +271,17 @@ try {
   };
   // Decisions are display telemetry; the result below carries exact arguments for execution.
   // Never re-emit the growing argument prefix on every token (quadratic wire output).
-  const publishDecision = (decision, complete, previousId) => send({type:'decision',
+  const publishDecision = (decision, complete, previousId) => {
+    if(previousId)attemptDecisions.delete(previousId);
+    const value={type:'decision',
     call_id:decision.id, ...(previousId && previousId !== decision.id ? {previous_call_id:previousId} : {}),
     name:decision.name, arguments_text:(decision.preview || '') +
       (decision.truncated ? '… [preview only; complete arguments in result]' : ''), complete,
-    ...(decision.truncated ? {arguments_truncated:true} : {})});
+    ...(decision.truncated ? {arguments_truncated:true} : {})};
+    attemptDecisions.set(decision.id,value);
+    return send(value);
+  };
+  const midstreamRecovery=request.midstream_recovery===true;
   const retryLimit=request.transport_retries ?? 10;
   if(!Number.isInteger(retryLimit) || retryLimit<0 || retryLimit>10) throw Error('invalid_subscription_transport_retries');
   const recoveryWindow=request.recovery_window_ms ?? 60000;
@@ -260,8 +311,11 @@ try {
   let answer,lastFailure='Recovery window expired';
   for(let attempt=1;;attempt++) {
     answer=undefined;
+    attemptTag=(request.stream_id || 'stream')+(attempt===1?'':':attempt-'+attempt);
+    reasoningText='';attemptTexts=new Map();attemptDecisions=new Map();attemptThoughts=new Map();lastPartialContent=undefined;
+    toolDecisions.clear();streamedFinalText.clear();
     activeTransport={schema_version:1,attempt,stage:'adapter',fetch_observed:false,response_bytes:0,
-      body_eof:false,model_output_seen:false,empty_item_starts:{text:0,thinking:0},causes:[]};
+      body_eof:false,model_output_seen:false,uncommitted_retry_safe:true,empty_item_starts:{text:0,thinking:0},causes:[]};
     let recoveryTimer;
     const recoveryController=new AbortController();
     if(retryIndex>0) {
@@ -281,18 +335,24 @@ try {
           if(retryIndex>0)retryEvent('connected','Provider connection established; waiting for model output');
         })});
       for await (const event of stream) {
-        // Known empty text/thinking starts carry no visible or dispatchable output.
-        // Tool starts and unknown/new progress still fence replay, even if invisible.
+        // Unknown shapes fence regeneration. Known output is still uncommitted:
+        // no tool dispatch is possible inside this bridge.
         if(recordProgress(event)) clearTimeout(recoveryTimer);
     if (event.type === 'text_delta' || event.type === 'thinking_delta') {
       ttft ??= Date.now() - started;
       // A response-global mutable stopReason is not a per-item phase.
       if (event.type === 'text_delta') {
-        send({type:'pending_delta', pending_id:`${request.stream_id || 'stream'}:${event.contentIndex}`, text:event.delta});
+        const id=`${attemptTag}:${event.contentIndex}`;
+        const item=attemptTexts.get(id) || {pending_id:id,text:'',phase:''};
+        item.text+=event.delta;attemptTexts.set(id,item);
+        send({type:'pending_delta', pending_id:id, text:event.delta});
       } else if (event.type === 'thinking_delta') {
         reasoningText += event.delta;
+        attemptThoughts.set(event.contentIndex,(attemptThoughts.get(event.contentIndex)||'')+event.delta);
         send({type:'reasoning', text:event.delta, chars:[...reasoningText].length});
       }
+    } else if (event.type === 'thinking_end') {
+      attemptThoughts.set(event.contentIndex,event.content || event.partial?.content?.[event.contentIndex]?.thinking || '');
     } else if (event.type === 'text_end') {
       ttft ??= Date.now() - started;
       const block = event.partial?.content?.[event.contentIndex] || {};
@@ -304,7 +364,8 @@ try {
       // Pi exposes final_answer while deltas are arriving, but commentary only
       // on the completed text block's signature. Keep unclassified text visibly
       // provisional, then resolve it to commentary or the completed answer here.
-      const pendingId = `${request.stream_id || 'stream'}:${event.contentIndex}`;
+      const pendingId = `${attemptTag}:${event.contentIndex}`;
+      attemptTexts.set(pendingId,{pending_id:pendingId,text:event.content || block.text || '',phase});
       if (phase === 'final_answer') send({type:'final_answer_begin', message_id:pendingId,
         pending_id:pendingId, source:'pi.text_end.signature', timing:'late'});
       if (phase === 'commentary') send({type:'commentary', pending_id:pendingId, text:event.content || block.text || ''});
@@ -357,6 +418,7 @@ try {
   }
       answer = await stream.result();
       if (answer.stopReason === 'error' || answer.stopReason === 'aborted') {
+        if(!knownBlocks(answer.content))activeTransport.uncommitted_retry_safe=false;
         if(!knownEmptyBlocks(answer.content)) {
           activeTransport.model_output_seen=true;
           activeTransport.output_progress_class ??= 'failed_result_content';
@@ -377,7 +439,9 @@ try {
         || activeTransport.causes.some(c=>['AbortError','TimeoutError'].includes(c.name)));
       const knownTransient=!aborted && activeTransport.fetch_observed
         && (ownTimeout || activeTransport.causes.some(c=>transientCodes.has(c.code)))
-        && (status===undefined || status===200) && !activeTransport.model_output_seen;
+        && (status===undefined || status===200)
+        && ((!activeTransport.model_output_seen && activeTransport.uncommitted_retry_safe)
+          || (midstreamRecovery && activeTransport.uncommitted_retry_safe));
       if(knownTransient && recoveryStarted===undefined) recoveryStarted=Date.now();
       let recoveryDeadline=Math.min(deadline,(recoveryStarted ?? Date.now())+recoveryWindow);
       const nextCycle=knownTransient && retryLimit>0 && (retryIndex>=retryLimit || Date.now()>=recoveryDeadline);
@@ -393,6 +457,22 @@ try {
         throw Error('subscription_stream_failure: stage='+activeTransport.stage+' cause='+code
           +' attempt='+attempt+' model_output_seen='+activeTransport.model_output_seen+'; '+redactError(error.message || error));
       }
+      // Pi may finalize a thinking block without a delta, and normalizes failed
+      // results after deleting scratch fields. Preserve that final known snapshot.
+      const retained=knownBlocks(answer?.content)?answer.content:lastPartialContent;
+      for(const [index,block] of (retained || []).entries()) {
+        if(block.type==='thinking')attemptThoughts.set(index,block.thinking);
+        else if(block.type==='text') {
+          const id=`${attemptTag}:${index}`,item=attemptTexts.get(id)||{pending_id:id,phase:''};
+          item.text=block.text;attemptTexts.set(id,item);
+        }
+      }
+      // Freeze the abandoned previews BEFORE another attempt. Durable retry rows
+      // retain full text/reasoning plus bounded tool previews; operation evidence
+      // retains the original bridge output. Never commit an abandoned tool call.
+      if(activeTransport.model_output_seen)await retryEvent('interrupted',reason,{index:Math.max(1,retryIndex),
+        discarded_attempt:{id:attemptTag,attempt,reasoning:[...attemptThoughts.values()].join('\n\n'),texts:[...attemptTexts.values()],
+          decisions:[...attemptDecisions.values()],tools_executed:0}});
       if(nextCycle) {
         await restartCycle(reason);
         recoveryDeadline=Math.min(deadline,recoveryStarted+recoveryWindow);
@@ -402,7 +482,8 @@ try {
       const waitMs=Math.max(0,Math.min(target-Date.now(),recoveryDeadline-Date.now()));
       await retryEvent('waiting',reason,{wait_ms:waitMs});
       await send({type:'transport_retry',attempt,index:retryIndex,cycle,limit:retryLimit,wait_ms:waitMs,
-        note:'Retrying inference before model output; prior upstream usage unknown; no tools replayed'});
+        note:activeTransport.model_output_seen ? 'Regenerating uncommitted response; prior output preserved as interrupted; upstream usage unknown; no tools replayed'
+          : 'Retrying inference before model output; prior upstream usage unknown; no tools replayed'});
       if(waitMs>0) await new Promise(resolve=>setTimeout(resolve,waitMs));
       if(Date.now()>=recoveryDeadline) {
         await restartCycle(reason);retryIndex=1;
@@ -420,7 +501,7 @@ try {
         const value = JSON.parse(p.textSignature || '{}').phase;
         if (value === 'commentary' || value === 'final_answer') phase = value;
       } catch {}
-      return {phase, content:p.text, pending_id:`${request.stream_id || 'stream'}:${index}`};
+      return {phase, content:p.text, pending_id:`${attemptTag}:${index}`};
     });
   const finalMessages = textMessages.filter(message => message.phase !== 'commentary');
   const finalPhase = finalMessages.length ? finalMessages[finalMessages.length - 1].phase : '';
