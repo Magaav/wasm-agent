@@ -184,6 +184,18 @@ plan whose point never happened.
 5. **The installed binary and your build output are often the same file** (a hard link). `cp` will say
    so; that is not an error.
 
+## Bootstrap an observer too old to admit its own fix
+
+After diagnosing the exact refusal and proving prior attempts have no effect,
+use `<repo>/scripts/bootstrap-sentinel-deploy.ps1 -Check -ExpectedSha <main>
+-ParentSession <id>`, then apply. The existing limited same-SID OS task restores
+its launcher before invoking hash-pinned source-built `protocol bootstrap`.
+Native idle, parent/hook/source/target and durable effect reservation still apply;
+no task registration, elevation, direct binary copy or old request replay. Read
+`docs/SENTINEL.md` and run `scripts/test-bootstrap-sentinel-deploy.ps1` plus the
+private `test-sentinel-historical.cjs <fresh-out> <built-sentinel> bootstrap` proof.
+Installation is observed on continuation; do not stay in a turn waiting for idle.
+
 ## What a fresh node must have
 
 Self-update is unavailable without these beside the binary, and a fresh install has been missing them
