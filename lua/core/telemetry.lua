@@ -122,7 +122,13 @@ function M.setup()
     session_id TEXT NOT NULL, run_id TEXT NOT NULL, span_id TEXT NOT NULL,
     kind TEXT NOT NULL, phase TEXT NOT NULL, at REAL NOT NULL, payload TEXT NOT NULL);
     CREATE INDEX IF NOT EXISTS harness_events_session ON harness_events(session_id,seq);
-    CREATE INDEX IF NOT EXISTS harness_events_span ON harness_events(span_id,phase);]])
+    CREATE INDEX IF NOT EXISTS harness_events_span ON harness_events(span_id,phase);
+    CREATE TABLE IF NOT EXISTS harness_mutation (id INTEGER PRIMARY KEY CHECK(id=1), revision INTEGER NOT NULL);
+    INSERT OR IGNORE INTO harness_mutation VALUES(1,0);
+    CREATE TRIGGER IF NOT EXISTS harness_updated AFTER UPDATE ON harness_events BEGIN
+      UPDATE harness_mutation SET revision=revision+1 WHERE id=1; END;
+    CREATE TRIGGER IF NOT EXISTS harness_deleted AFTER DELETE ON harness_events BEGIN
+      UPDATE harness_mutation SET revision=revision+1 WHERE id=1; END;]])
   if not result then return false end
   schema_missing, ready = false, true
   return true
@@ -318,13 +324,29 @@ local function add(total, data)
   end
 end
 
-local snapshots = {}
+local snapshots, snapshot_order = {}, {}
 function M.snapshot(session_id)
   if not session_id or session_id == "" then return {available=false, scope="no session"} end
   M.setup()
-  local cached = snapshots[session_id]
-  if cached and M.clock() - cached.at < 2000 then return cached.value end
-  local rows, unreadable = query("SELECT seq,span_id,run_id,kind,phase,at,payload FROM harness_events WHERE session_id=? ORDER BY seq", {session_id})
+  -- Covering-index metadata, not historical payloads. Updates/deletes invalidate
+  -- even when count and high-water stay unchanged; imports below it change count.
+  local heads, problem=query([[SELECT COUNT(*) AS count,MIN(seq) AS first,MAX(seq) AS last,
+    (SELECT revision FROM harness_mutation WHERE id=1) AS revision
+    FROM harness_events WHERE session_id=?]],{session_id})
+  local head=heads and heads[1]
+  if not head or head.revision==nil then
+    return {available=false,scope="session",reason="ledger_unreadable",detail=problem or "mutation_revision_unavailable",dropped_writes=drops.count}
+  end
+  local cached=snapshots[session_id]
+  if cached and (cached.revision~=head.revision or cached.first~=head.first
+      or (head.last or 0)<cached.seq or head.count<cached.value.events) then cached=nil end
+  local rows, unreadable=query([[SELECT seq,span_id,run_id,kind,phase,at,payload FROM harness_events
+    WHERE session_id=? AND seq>? AND seq<=? ORDER BY seq]],{session_id,cached and cached.seq or 0,head.last or 0})
+  if rows and cached and cached.value.events+#rows~=head.count then
+    cached=nil
+    rows,unreadable=query([[SELECT seq,span_id,run_id,kind,phase,at,payload FROM harness_events
+      WHERE session_id=? AND seq<=? ORDER BY seq]],{session_id,head.last or 0})
+  end
   if not rows then
     -- An unreadable ledger answers "unknown", and does not answer as a session with no events. The
     -- degraded shape is the one the callers already handle (`wa_model` passes an unavailable
@@ -333,14 +355,29 @@ function M.snapshot(session_id)
       reason="ledger_unreadable", detail=unreadable, dropped_writes=drops.count,
       runtime=M.runtime(), verified_success_rate=false}
   end
-  local report = {available=#rows>0, scope="session", session_id=session_id, events=#rows,
-    since=rows[1] and rows[1].at, total=empty(), inference=empty(), compaction=empty(),
+  -- Do not commit a partial accumulator if another connection repaired/deleted
+  -- evidence between our metadata and payload reads. Appends above the pin wait
+  -- for the next read; no elapsed-time stale-success shortcut is used.
+  local revision=query("SELECT revision FROM harness_mutation WHERE id=1")
+  if not revision or not revision[1] or revision[1].revision~=head.revision
+      or (cached and cached.value.events or 0)+#rows~=head.count then
+    snapshots[session_id]=nil
+    return {available=false,scope="session",reason="ledger_changed_during_read",dropped_writes=drops.count}
+  end
+  local report = cached and cached.value or {available=false, scope="session", session_id=session_id, events=0,
+    total=empty(), inference=empty(), compaction=empty(),
     tool_calls=0, tool_failures=0, tool_ms=0, pending=0, runs=0, incomplete_runs=0,repeated_tools=0,run_ms=0,
     compaction_failures=0, errors={}, runtime=M.runtime(), verified_success_rate=false,
     dropped_writes=drops.count}
   local active, durations, run_ids, tool_keys, run_durations = {}, {}, {}, {}, {}
+  if cached then active,durations,run_ids,tool_keys,run_durations=cached.active,cached.durations,cached.run_ids,cached.tool_keys,cached.run_durations end
   for _, row in ipairs(rows) do
-    local p = json.decode(row.payload)
+    local ok,p=pcall(json.decode,row.payload)
+    if not ok or type(p)~="table" then
+      snapshots[session_id]=nil
+      return {available=false,scope="session",reason="ledger_unreadable",detail="unreadable_payload at seq "..tostring(row.seq),dropped_writes=drops.count}
+    end
+    if not report.since then report.since=row.at end
     if row.kind == "step" then
       if not run_ids[row.run_id] then report.runs=report.runs+1; run_ids[row.run_id]=true end
       if p.outcome ~= "answered" then report.incomplete_runs=report.incomplete_runs+1 end
@@ -379,11 +416,12 @@ function M.snapshot(session_id)
       if p.ok == false then report.compaction_failures=report.compaction_failures+1 end
     end
   end
+  report.events=report.events+#rows;report.available=report.events>0;report.pending=0
+  report.dropped_writes=drops.count
   for _ in pairs(active) do report.pending = report.pending + 1 end
-  table.sort(durations)
+  if #rows>0 then table.sort(durations);table.sort(run_durations) end
   report.request_p50_ms = durations[math.max(1,math.ceil(#durations*.5))]
   report.request_p95_ms = durations[math.max(1,math.ceil(#durations*.95))]
-  table.sort(run_durations)
   report.run_p50_ms=run_durations[math.max(1,math.ceil(#run_durations*.5))]
   report.run_p95_ms=run_durations[math.max(1,math.ceil(#run_durations*.95))]
   report.total.total = report.total.prompt + report.total.output
@@ -392,18 +430,23 @@ function M.snapshot(session_id)
   report.total.cache_known = report.total.missing_cache == 0 and report.total.calls > 0
   -- The two context reads are not allowed to take the report down with them: what a ledger that can be
   -- read says with an unavailable context block is still more than a Lua error to the caller.
-  local session_row = query("SELECT summarized_until,summary FROM sessions WHERE id=?",{session_id})
+  local session_row = query("SELECT summarized_until,length(CAST(summary AS BLOB)) AS summary_bytes FROM sessions WHERE id=?",{session_id})
   local coverage_row = query("SELECT COUNT(*) AS rows,MIN(seq) AS first_seq,MAX(seq) AS last_seq FROM messages WHERE session_id=? AND seq>? AND role<>'summary'",
     {session_id, (session_row and session_row[1] or {}).summarized_until or 0})
   local session, coverage = (session_row or {})[1] or {}, (coverage_row or {})[1] or {}
-  report.context={summary_watermark=session.summarized_until or 0,summary_bytes=#(session.summary or ""),
+  report.context={summary_watermark=session.summarized_until or 0,summary_bytes=session.summary_bytes or 0,
     unsummarized_rows=coverage.rows,first_seq=coverage.first_seq,last_seq=coverage.last_seq,
     row_cap=false,estimate_is_not_a_tokenizer=true,summary_is_lossy=true}
   if not (session_row and coverage_row) then
     report.context={unavailable=true, reason="ledger_unreadable"}
   end
-  snapshots[session_id] = {at=M.clock(), value=report}
-  return report
+  snapshots[session_id] = {seq=head.last or 0,revision=head.revision,first=head.first,value=report,
+    active=active,durations=durations,run_ids=run_ids,tool_keys=tool_keys,run_durations=run_durations}
+  for i,id in ipairs(snapshot_order) do if id==session_id then table.remove(snapshot_order,i);break end end
+  snapshot_order[#snapshot_order+1]=session_id
+  if #snapshot_order>8 then snapshots[table.remove(snapshot_order,1)]=nil end
+  -- Detached public snapshot: consumers cannot mutate the retained exact accumulator.
+  return json.decode(json.encode(report))
 end
 
 -- What telemetry lost: the count of dropped writes, the last refusal and when. A caller that wants

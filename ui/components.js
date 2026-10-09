@@ -196,9 +196,25 @@ class WaMenu extends WaOverlay {
 }
 customElements.define("wa-menu", WaMenu);
 
+// Measure once before permitting skipped rendering; never insert guessed heights into
+// short/live transcripts. ResizeObserver is event-driven, not a scan or frame loop.
+const messageRenderObserver=typeof ResizeObserver==='function' ? new ResizeObserver(entries=>{
+  for(const entry of entries){
+    const node=entry.target,owner=node.parentElement;
+    if(!owner?.matches('.messages,.agent-transcript') || owner.children.length<60 || !node.nextElementSibling)continue;
+    // Intrinsic size describes the content box, not border+padding; rounding
+    // each bubble would accumulate scroll drift in long histories.
+    const height=entry.contentRect.height;
+    if(height<=0)continue;
+    const size='auto '+height+'px';
+    if(node.style.containIntrinsicSize!==size)node.style.containIntrinsicSize=size;
+    node.classList.add('render-contained');
+  }
+}) : null;
 // <wa-message> — a chat bubble. `role` is user|assistant; `.body` is writable.
 class WaMessage extends HTMLElement {
-  connectedCallback() { this._build(); }
+  connectedCallback() { this._build();messageRenderObserver?.observe(this); }
+  disconnectedCallback() { messageRenderObserver?.unobserve(this); }
 
   // Building is lazy so `element.body` works even before the element is in the
   // document. Reaching for `.body` right after createElement is the obvious
@@ -237,11 +253,12 @@ class WaStep extends HTMLElement {
   }
   setStep(label, state, ms) {
     this.connectedCallback();
-    this.dataset.state = state;
-    this._label.textContent = label;
-    this._glyph.className = state === "running" ? "spinner" : "run-step-glyph";
-    this._glyph.textContent = state === "running" ? "" : state === "failed" ? "!" : state === "unfinished" ? "?" : "✓";
-    this._age.textContent = ms == null ? "duration unknown" : Math.max(0, Math.floor(ms / 1000)) + "s";
+    if(this.dataset.state!==state)this.dataset.state=state;
+    const values=[[this._label,label],[this._glyph,state==='running'?'':state==='failed'?'!':state==='unfinished'?'?':'✓'],
+      [this._age,ms==null?'duration unknown':Math.max(0,Math.floor(ms/1000))+'s']];
+    for(const [node,text] of values)if(node.textContent!==text)node.textContent=text;
+    const glyph=state==='running'?'spinner':'run-step-glyph';
+    if(this._glyph.className!==glyph)this._glyph.className=glyph;
   }
 }
 customElements.define("wa-step", WaStep);
@@ -459,7 +476,8 @@ class WaTrace extends HTMLElement {
     const elapsed = seconds === undefined ? (Date.now() - target.started) / 1000 : seconds;
     const text = `${Math.max(0, Math.floor(elapsed))}s`;
     const limit = bound === undefined ? target.bound : bound;
-    target.outcome.textContent = limit ? `${text} of ${Math.floor(limit)}s` : text;
+    const value=limit ? `${text} of ${Math.floor(limit)}s` : text;
+    if(target.outcome.textContent!==value)target.outcome.textContent=value;
   }
 
   // setProgress(text) paints the running operation's newest output line under the oldest
@@ -2144,14 +2162,15 @@ class WaAgentSession extends HTMLElement {
     if (expand) expand.hidden = this._promoted;
   }
   get promoted() { return this._promoted === true; }
-  startClock() { if(!this.clock)this.clock=setInterval(()=>this.updateClock(),1000); }
+  startClock() { if(!this.clock)this.clock=setInterval(()=>{if(this._task?.settled){clearInterval(this.clock);this.clock=null;}else this.updateClock();},1000); }
   disconnectedCallback() { clearInterval(this.clock);this.clock=null; }
   updateClock() {
-    if(!this._task)return;
+    if(!this._task || document.hidden)return;
     const task=this._task, started=Number(task.started_at)*1000;
     const end=task.settled ? Number(task.settled_at)*1000 : Date.now();
     const duration=started && end ? agentElapsed(end-started) : 'duration unknown';
-    this.statusLine.querySelector('.chat-content-run-elapsed').textContent=duration;
+    const elapsed=this.statusLine.querySelector('.chat-content-run-elapsed');
+    if(elapsed.textContent!==duration)elapsed.textContent=duration;
     // The in-flight call's own age, on the line the shared renderer drew. A child streams to the node,
     // so this element is the only thing polling and the node's own report of the call (`started_at`,
     // the bound it enforces) is the measurement: `42s of 300s` is readable, a clock nobody runs is not.

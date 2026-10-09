@@ -185,6 +185,12 @@ let nodeList = [];
 // forever - so the page sat on "connecting…" long after the node had recovered. A hung
 // request must never be able to stop the retry. Requests that bring their own signal (the
 // chat stream) pass through untouched: a run is legitimately long.
+// Preserve durable state and live sockets when hidden; pause only optional visual/status work.
+function uiVisible() { return !document.hidden && !document.body.classList.contains('compact'); }
+function setText(node, text) {
+  const value=String(text ?? '');
+  if(node && node.textContent!==value) node.textContent=value;
+}
 let apiTimeout = 8000;
 function apiFetch(path, options = {}, timeout = apiTimeout) {
   if (!timeout || options.signal) return fetch(path, options);
@@ -570,7 +576,10 @@ function ensureObservedRunStep(current) {
 // Re-appending after anything new lands keeps it below; appending an existing child moves
 // it, so this is the whole of it.
 function keepStatusLast() {
-  if (statusLine) (runBubble?.body || transcript).append(statusLine);
+  if (statusLine) {
+    const owner=runBubble?.body || transcript;
+    if (owner.lastElementChild!==statusLine) owner.append(statusLine);
+  }
 }
 
 function currentBubble() {
@@ -629,7 +638,7 @@ function setStatus(text) {
     statusLine.append(statusSpinner, statusLabel, statusElapsed);
     if (turnIsActive() && !replayingMessages) startRunStatusTicker();
   }
-  statusLabel.textContent = text;
+  setText(statusLabel, text);
   if (turnIsActive()) currentBubble();
   const container = runBubble?.body || transcript;
   if (statusLine.parentNode !== container) container.append(statusLine);
@@ -662,12 +671,12 @@ function updateRunElapsed() {
   // Date.now() there would print days on a footer for a turn that took four seconds - the same
   // mistake the run topic's own summary avoids by reading replayMessageEndedAt.
   const endedAt = replayingMessages && replayMessageEndedAt ? replayMessageEndedAt : Date.now();
-  statusElapsed.textContent = runDuration(endedAt - (runStartedAt || endedAt));
+  setText(statusElapsed, runDuration(endedAt - (runStartedAt || endedAt)));
 }
 
 function startRunStatusTicker() {
-  if (runStatusTicker) clearInterval(runStatusTicker);
-  runStatusTicker = setInterval(updateRunElapsed, 1000);
+  if (runStatusTicker) return;
+  runStatusTicker = setInterval(() => { if (uiVisible()) updateRunElapsed(); }, 1000);
 }
 
 function finishRunStatus(label = "completed") {
@@ -1222,7 +1231,7 @@ function startToolTicker() {
   if (toolTicker) return;
   toolTicker = setInterval(() => {
     if (!trace || !trace.pending) { stopToolTicker(); return; }
-    trace.setAge();
+    if (uiVisible()) trace.setAge();
   }, 1000);
 }
 
@@ -2800,6 +2809,7 @@ async function send(text, options = {}) {
     if (stillViewingRun()) {
       setBusy(false);
       refreshMeta();
+      notifyMetadataChange();
       // A dead stream can finish after the ledger follower already read its tail
       // while this page was busy. Re-read once after releasing the stream so the
       // recorded tool result can trigger recovery without a page reload.
@@ -2825,15 +2835,15 @@ function activeProvider() {
 }
 
 function updateChip() {
-  chipModel.textContent = settings.configured ? (settings.model || "model") : "local mode";
+  setText(chipModel, settings.configured ? (settings.model || "model") : "local mode");
   const observedModel = lastUsedModel || settings.observability?.last_request?.model || "";
-  composerModel.textContent = observedModel || settings.model || "model unavailable";
+  setText(composerModel, observedModel || settings.model || "model unavailable");
   composerModel.title = observedModel
     ? "Model used for the latest request: " + observedModel
     : settings.model ? "Selected model; no request model observed yet" : "No model information available";
   statusBtn.classList.toggle("local", !settings.configured);
   const total = settings.observability?.available ? settings.observability.total?.total : 0;
-  chipUsage.textContent = total ? formatTokens(total) + " tok" : "";
+  setText(chipUsage, total ? formatTokens(total) + " tok" : "");
 }
 
 function renderNodeSelect() {
@@ -3102,6 +3112,7 @@ async function post(path, body) {
   try { if (!acceptSettings(payload)) return; }
   catch (error) { await reconcileControls(error.message, {asked:body, reads:SETTING_VALUE[path]}); return; }
   try {
+    metadataPaintKeys.clear();
     updateNodeLabel(settings.node_name, settings.node_worktree);
     updateChip();
     renderControls();
@@ -3118,6 +3129,7 @@ async function post(path, body) {
   }
   settingsError.textContent = payload.model_error || "";
   settingsReconciliation = null;
+  notifyMetadataChange();
 }
 
 // Draw the controls from the node's own answer after a settings change, and say what that answer is.
@@ -3640,6 +3652,7 @@ statusBtn.addEventListener("click", () => {
   balloon.toggle();
   statusBtn.setAttribute("aria-expanded", String(balloon.open));
   if (balloon.open) {
+    metadataPaintKeys.clear();
     refreshNodes();
     refreshMeta();
     renderControls();
@@ -3894,6 +3907,40 @@ function openUserMenu() {
   userBtn.setAttribute("aria-expanded", "true");
 }
 
+// Compare only each view's dependencies. An unchanged response never replaces option
+// nodes, expanded diagnostic sections, or text the reader is selecting.
+const metadataPaintKeys=new Map();
+function renderMetadataParts() {
+  const parts=[
+    ['user',[me,settings.node_name],renderUser],
+    ['chip',[settings.configured,settings.model,lastUsedModel,settings.observability?.last_request?.model,settings.observability?.total?.total],updateChip],
+  ];
+  if(balloon.open) parts.push(
+    ['controls',[settings.providers,settings.provider,settings.model,settings.reasoning,settings.model_error,me.role],renderControls],
+    ['context',[settings.model,settings.context_limit,settings.context_source,settings.usage,settings.observability?.last_request?.model,settings.observability?.last,settings.observability?.context],renderContext],
+    ['limits',[settings.limits,settings.limits_error,Math.floor(Date.now()/60000)],renderLimits],
+    ['usage',[settings.observability,settings.provider,settings.model,settings.output_limit,settings.compact_trigger,settings.compact_reserve,settings.compact_keep,settings.reasoning],renderUsage],
+    ['foot',[settings.provider,settings.base_url,settings.database],renderPopFoot]);
+  for(const [key,facts,draw] of parts){
+    const signature=JSON.stringify(facts);
+    if(metadataPaintKeys.get(key)===signature)continue;
+    draw();metadataPaintKeys.set(key,signature);
+  }
+}
+// Same-origin windows announce invalidation only, never settings, auth or payloads.
+// Live run SSE already carries completion/change events; idle reads remain a fallback.
+let metadataChannel=null;
+try {
+  if(typeof BroadcastChannel==='function') {
+    metadataChannel=new BroadcastChannel('wa-ui-invalidation-v1');
+    metadataChannel.onmessage=(event)=>{
+      if(event.data?.node!==activeNode)return;
+      metadataRefreshedAt=0;
+      if(uiVisible())void ensureMeta();
+    };
+  }
+}catch(error){ /* periodic reads remain authoritative when unavailable */ }
+function notifyMetadataChange() { metadataChannel?.postMessage({node:activeNode}); }
 let metadataRefresh = null;
 let metadataRefreshedAt = 0;
 let metadataRetryAt = 0;
@@ -3901,6 +3948,7 @@ let metadataFailures = 0;
 async function refreshMeta() {
   const key = activeNode + ":" + chatSession + ":" + conversationEpoch;
   if (metadataRefresh?.key === key) return metadataRefresh.promise;
+  // Direct settings/open-panel/settlement reads still bypass idle scheduling.
   const pending = {key, promise: refreshMetaOnce()};
   metadataRefresh = pending;
   try { return await pending.promise; }
@@ -3925,22 +3973,14 @@ async function refreshMetaOnce() {
     metadataRefreshedAt = Date.now();
     updateNodeLabel(settings.node_name, settings.node_worktree);
     // The account tooltip names the node, so it follows the same payload.
-    renderUser();
-    updateChip();
-    if (balloon.open) {
-      renderControls();
-      renderContext();
-      renderLimits();
-      renderUsage();
-      renderPopFoot();
-    }
+    renderMetadataParts();
     // A timed-out write can apply after the immediate reconciliation read.
     // Keep its note tied to the newly observed state on later refreshes too.
     renderSettingsReconciliation(true);
     const provider = activeProvider();
     const label = provider ? provider.label : "local";
     const where = activeNode || "local";
-    meta.textContent = `${where} · ${label} · ${settings.model}`;
+    setText(meta, `${where} · ${label} · ${settings.model}`);
     return true;
   } catch (error) {
     if (chatSession !== target || conversationEpoch !== epoch || activeNode !== node) return false;
@@ -4104,7 +4144,8 @@ let metaReady = false;
 let metaRunning = false;
 
 async function ensureMeta() {
-  if (metaRunning || Date.now() < metadataRetryAt || (metaReady && Date.now() - metadataRefreshedAt < 5000)) return;
+  const interval=!uiVisible() ? 60000 : composerBusy() || balloon.open ? 5000 : 30000;
+  if (metaRunning || Date.now() < metadataRetryAt || (metaReady && Date.now() - metadataRefreshedAt < interval)) return;
   metaRunning = true;
   try { metaReady = await refreshMeta(); }
   finally { metaRunning = false; }
@@ -4240,7 +4281,7 @@ async function watch() {
       }
     }
   } catch (error) { /* keep polling: the deadline is what keeps this loop alive */ }
-  setTimeout(watch, 1000);
+  setTimeout(watch, uiVisible() ? 3000 : 5000);
 }
 
 // The node owns the run; the browser only watches it. If one was running when this page
@@ -4249,6 +4290,7 @@ async function watch() {
 // of making the reader reload to see it.
 let sawTurnInFlight = false;
 let runPolling = false;
+let turnPollTimer=null;
 let lastFollowAt = 0;
 // The thread's `last_seq` as of the last redraw, so a poll redraws only when the run moved.
 let followedSeq = null;
@@ -4389,7 +4431,8 @@ async function syncLiveRun(current) {
 async function watchTurn() {
   // One at a time: a poll that has not answered yet is not a reason to start another, and when the
   // node runs one node-thread that is the difference between asking and queueing.
-  if (runPolling) { setTimeout(watchTurn, 3000); return; }
+  if (runPolling) return;
+  clearTimeout(turnPollTimer);
   runPolling = true;
   const node=activeNode, target=chatSession, epoch=conversationEpoch;
   const viewing=()=>node===activeNode && target===chatSession && epoch===conversationEpoch;
@@ -4435,7 +4478,7 @@ async function watchTurn() {
   } catch (error) { /* the node is down; watchNode handles that */ }
   finally {
     runPolling = false;
-    setTimeout(watchTurn, 1000);
+    turnPollTimer=setTimeout(watchTurn, !uiVisible() ? 15000 : composerBusy() || sawTurnInFlight ? 1000 : 5000);
   }
 }
 
@@ -4448,9 +4491,12 @@ const collapse = document.getElementById("collapse");
 const dragbar = document.getElementById("dragbar");
 
 function applyMode(mode) {
+  const wasResting=document.body.classList.contains('ui-resting');
   document.body.classList.toggle("compact", mode === "compact");
   document.body.classList.toggle("expanded", mode === "expanded");
   try { localStorage.setItem("wa-mode", mode); } catch (error) { /* private mode */ }
+  document.body.classList.toggle('ui-resting', !uiVisible());
+  if(wasResting && mode==='expanded')resumeUi();
 }
 // Keep the page and the window in step across hot reloads: restore the last mode
 // and ask the shell to size itself to match.
@@ -6115,7 +6161,7 @@ document.getElementById('tasks-box').addEventListener('task-action',async event=
   } catch(error) { if(serial===panel.actionSerial)panel.message='Task action did not complete: '+error.message+'. Inspect the task list before retrying.'; }
   finally { if(action==='start') panel.finishSubmission(); else if(control)control.disabled=false; }
 });
-setInterval(()=>{if(!document.getElementById('tasks-box').hidden) void refreshTasks();},3000);
+setInterval(()=>{if(uiVisible() && !document.getElementById('tasks-box').hidden) void refreshTasks();},3000);
 
 async function forkSessionAt(id, seq, control) {
   control.disabled=true;
@@ -6444,4 +6490,20 @@ window.rendererLoaded = loadRenderer().then(() => {
 window.addEventListener("online", () => sync("online"));
 watch();
 watchTurn();
+// Restore clocks and reconcile immediately on return, not after a hidden-tab timer.
+let uiResumeQueued=false;
+function resumeUi() {
+  document.body.classList.toggle('ui-resting',!uiVisible());
+  if(!uiVisible() || uiResumeQueued)return;
+  uiResumeQueued=true;
+  queueMicrotask(()=>{
+    uiResumeQueued=false;
+    if(!uiVisible())return;
+    updateRunElapsed();trace?.setAge();
+    metadataRefreshedAt=0;
+    void ensureMeta();void watchTurn();
+  });
+}
+document.addEventListener('visibilitychange',resumeUi);
+window.addEventListener('focus',resumeUi);
 if (!native) input.focus();

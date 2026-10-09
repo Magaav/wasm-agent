@@ -171,6 +171,19 @@ the shell loses its quoting and its backslashes.
 - Do not pass `--focus`: the tab is yours, not the user's foreground, and close it when
   you are done.
 
+## Lightweight rendering proof
+
+For idle resource/polling or long-history changes, `lightweight-ui-proof`
+crystallizes `node <repo>/scripts/test-lightweight-browser.cjs <fresh-evidence>`
+plus the same command with `--post`. It verifies 13 real-Chromium checks and
+retained source/screenshot hashes; no installed UI or user browser is touched.
+Mandatory session workspaces currently refuse spell execution, so this spell is
+recorded, not replay-verified/preferred. Use the verified direct CLI without
+relaxing bindings. Also run `scripts/test-ui.ps1`. Headless rendering assertions
+are not GPU/power proof: record real-window measurements separately, never call
+percent utilization a temperature or a fan-speed cause. Keep the HTML title
+unchanged in probes; the observer positively checks that exact title.
+
 ## 4. Leave the test behind
 
 If the thing you verified is worth keeping correct, make it a `check(...)` in

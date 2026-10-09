@@ -60,6 +60,11 @@ and retry decisions without payloads or credentials. Recovered model ends carry
 lost attempt has unknown usage, even when the winning attempt has priced usage.
 This count is separate from ordinary model-call counts and is not omitted work.
 
+Status aggregation is append-aware with mutation/import invalidation, exact
+percentile samples and no historical payload scan on an unchanged read. Context
+coverage and dropped writes remain fresh. Storage inventory is separately sampled
+with an explicit timestamp. See [LIGHTWEIGHT-UI.md](LIGHTWEIGHT-UI.md).
+
 ## Accounting invariants
 
 For reported OpenAI-compatible usage:

@@ -217,6 +217,8 @@ local function migrate()
   -- ensure_session / latest_session / list_sessions filter on the owner and sort by last use; with one
   -- session per subagent this table grows fast, and every lookup was a scan and a sort.
   exec("CREATE INDEX IF NOT EXISTS sessions_owner_idx ON sessions(user_id, node_id, updated_at)")
+  -- Status coverage must not visit transcript payload pages on every metadata refresh.
+  exec("CREATE INDEX IF NOT EXISTS messages_status_coverage ON messages(session_id,seq) WHERE role<>'summary'")
   exec("CREATE TRIGGER IF NOT EXISTS sessions_changed AFTER UPDATE ON sessions " ..
        "WHEN NEW.changed_at = OLD.changed_at BEGIN " ..
        "UPDATE sessions SET changed_at = unixepoch('subsec') WHERE id = NEW.id; END")
