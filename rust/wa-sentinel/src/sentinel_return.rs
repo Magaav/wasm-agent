@@ -7,13 +7,18 @@ fn identity_text(value: &str) -> bool {
 
 pub(crate) fn parent_owner(parent: &str) -> Result<String> {
     if !identity_text(parent) { bail!("parent_identity_invalid"); }
-    let agent:ureq::Agent=ureq::Agent::config_builder().timeout_global(Some(Duration::from_secs(3))).build().into();
+    let agent:ureq::Agent=ureq::Agent::config_builder().http_status_as_error(false).timeout_global(Some(Duration::from_secs(3))).build().into();
     let response=agent.get(&format!("http://127.0.0.1:{}/session/owner?id={parent}",node_port()))
         .header("X-WA-Session",&std::env::var("WA_SENTINEL_AUTH_SESSION").unwrap_or_default())
         .call().map_err(|error|anyhow::anyhow!("parent_owner_unavailable: {error}"))?;
+    let status=response.status().as_u16();
     let body=response.into_body().read_to_string()
         .map_err(|error|anyhow::anyhow!("parent_owner_body_unavailable: {error}"))?;
     let value:Value=serde_json::from_str(&body)?;
+    // Only the node's typed capacity refusal is a safe read-only deferral.
+    // Authentication/identity/other 503 errors remain terminal; no guessed retry.
+    if status==503 && value["error"]=="read_capacity_busy" {bail!("parent_owner_read_capacity_busy; hold before any effect");}
+    if status!=200 {bail!("parent_owner_unavailable: http status: {status}");}
     if value["session"]["id"].as_str()!=Some(parent) { bail!("parent_identity_not_confirmed"); }
     let owner=value["session"]["user_id"].as_str().filter(|s|identity_text(s)).context("parent_owner_not_confirmed")?;
     Ok(owner.to_string())
@@ -260,7 +265,11 @@ fn observe_due(id:&str,dir:&Path,mut cursor:Value,now:u64) -> Result<()> {
     let key=format!("{id}-{slot}");
     let file=dir.join("returns").join(format!("{key}.json"));
     let state:Value=std::fs::read(dir.join("state.json")).ok().and_then(|b|serde_json::from_slice(&b).ok()).unwrap_or(Value::Null);
-    let (phase,detail)=if file.exists(){("pending".into(),String::new())}else{observed_phase(&binding,&state,now)};
+    // Installation observation must progress even when a prior notification's
+    // HTTP outcome is unknown. Keep its immutable slot and never resend it.
+    let current=observed_phase(&binding,&state,now);
+    wa_operation::atomic_json(&dir.join("installation-observation.json"),&json!({"id":id,"phase":current.0,"detail":current.1,"at":now}))?;
+    let (phase,detail)=if file.exists(){("pending".into(),String::new())}else{current};
     let mut journal=json!({"id":id,"event_key":key,"expected_sha":binding["intent"]["expected_sha"],"parent":binding["parent"],"owner":binding["owner"],"phase":phase,"at":now,"detail":detail});
     std::fs::create_dir_all(dir.join("returns"))?;
     if !file.exists(){wa_operation::atomic_json(&file,&journal)?;} else {journal=serde_json::from_slice(&std::fs::read(&file)?)?;}

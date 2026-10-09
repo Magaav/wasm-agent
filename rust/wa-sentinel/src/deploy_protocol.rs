@@ -127,7 +127,7 @@ pub(crate) fn admit(request:&Value) -> Result<PathBuf> {
 }
 
 pub(crate) fn verify_install(id:&str) -> Result<Value> {
-    verify_install_inner(id, None)
+    verify_install_inner(id, None, false)
 }
 
 // Compare the full admitted generation, not just a request id/source. A reused
@@ -143,10 +143,29 @@ fn same_effect(active:&Value,effect:&Value)->bool {
 pub(crate) fn reconcile(id:&str,reason:&str)->Result<Value> {
     if std::env::var("WASM_AGENT_IN_TURN").as_deref()==Ok("1") {bail!("protocol_reconcile_requires_external_executor");}
     if reason.trim().is_empty() || reason.len()>600 || reason.contains(['\n','\r','\0']) {bail!("protocol_reconcile_reason_required");}
-    verify_install_inner(id,Some(reason))
+    verify_install_inner(id,Some(reason),false)
 }
 
-fn verify_install_inner(id:&str,reconcile_reason:Option<&str>) -> Result<Value> {
+fn historical_native_identity()->Result<Value> {
+    let node=verify_target(node_port(),true).context("historical_native_node_not_owned")?;
+    if watcher_state()?!=WatcherState::Running {bail!("historical_watcher_lifetime_unconfirmed");}
+    let watcher:u32=std::fs::read_to_string(pid_path())?.trim().parse()?;
+    let installed=installed_binary();let sentinel=installed.parent().context("historical_install_parent")?.join(if cfg!(windows){"wa-sentinel.exe"}else{"wa-sentinel"});
+    let image=instance::process_image(watcher).context("historical_watcher_image_missing")?;
+    if !instance::same_path(&image,&sentinel) {bail!("historical_watcher_image_mismatch");}
+    Ok(json!({"node":node,"node_created":instance::process_start(node).context("historical_node_creation_missing")?,
+        "watcher":watcher,"watcher_created":instance::process_start(watcher).context("historical_watcher_creation_missing")?}))
+}
+
+/// Explicit historical verification: current published main may have advanced,
+/// but installed source/artifacts must still match the original admitted effect.
+pub(crate) fn reconcile_historical(id:&str,reason:&str)->Result<Value> {
+    if std::env::var("WASM_AGENT_IN_TURN").as_deref()==Ok("1") {bail!("protocol_reconcile_requires_external_executor");}
+    if reason.trim().is_empty() || reason.len()>600 || reason.contains(['\n','\r','\0']) {bail!("protocol_reconcile_reason_required");}
+    verify_install_inner(id,Some(reason),true)
+}
+
+fn verify_install_inner(id:&str,reconcile_reason:Option<&str>,historical:bool) -> Result<Value> {
     if id.is_empty() || id.len()>200 || !id.bytes().all(|b|b.is_ascii_alphanumeric()||b==b'-') {bail!("protocol_id_invalid");}
     // Hold admission while observing and settling the exact current generation.
     // This is not an effect replay and grants no installation authority.
@@ -161,23 +180,32 @@ fn verify_install_inner(id:&str,reconcile_reason:Option<&str>) -> Result<Value> 
         if !same_effect(active,&effect) || !["admitted","verified"].contains(&active["phase"].as_str().unwrap_or("")) {bail!("protocol_reconcile_reservation_mismatch");}
         let generation=dir.join("reconciliations").join(format!("{}-{}",now_epoch(),std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()));
         std::fs::create_dir_all(&generation)?;
-        for name in ["intent.json","binding.json","ack.json","effect.json","result.json","state.json","observation.json"] {
+        let generation=std::fs::canonicalize(&generation)?;
+        for name in ["intent.json","binding.json","ack.json","effect.json","result.json","state.json","observation.json","return-status.json","pending-return.json","installation-observation.json"] {
             let file=dir.join(name);
-            if file.exists(){std::fs::copy(file,generation.join(name))?;}
+            if file.exists(){std::fs::copy(file,generation.join(name)).with_context(||format!("archive reconciliation evidence {name}"))?;}
         }
-        std::fs::copy(&active_file,generation.join("reservation.json"))?;
+        std::fs::copy(&active_file,generation.join("reservation.json")).context("archive reconciliation reservation")?;
         wa_operation::atomic_json(&generation.join("intent.json.reconcile"),&json!({"id":id,"reason":reason,"at":now_epoch(),"effect_replayed":false}))?;
     }
     let intent:Value=serde_json::from_slice(&std::fs::read(dir.join("intent.json"))?)?;
     validate(&intent,id)?;
     let binding=sentinel_return::bind_parent(id)?;
     if binding["owner"]!=intent["owner"] {bail!("verification_owner_mismatch");}
-    let script=canonical_script(intent["expected_sha"].as_str().context("expected_sha_missing")?)?;
+    let canonical=canonical_root()?;
+    let expected=if historical {git(&canonical,&["rev-parse","HEAD"])?}else{intent["expected_sha"].as_str().context("expected_sha_missing")?.to_owned()};
+    let script=canonical_script(&expected)?;
     let root=script.parent().and_then(Path::parent).context("verification_root_missing")?;
     let install=installed_binary().parent().context("install_parent_missing")?.to_path_buf();
-    let output=std::process::Command::new("node").arg(root.join("scripts/sentinel-install-proof.mjs"))
-        .arg("verify").arg(root).arg(&install).arg(dir.join("intent.json")).arg(dir.join("binding.json")).arg(&dir)
+    if historical && (!instance::same_path(Path::new(effect["source"].as_str().unwrap_or("")),root)
+        || !instance::same_path(Path::new(effect["script"].as_str().unwrap_or("")),&script)) {bail!("historical_effect_source_path_mismatch");}
+    let native=if historical {Some(historical_native_identity()?)}else{None};
+    let mut command=std::process::Command::new("node");
+    if historical {command.arg(root.join("scripts/sentinel-historical-proof.mjs"));}
+    else {command.arg(root.join("scripts/sentinel-install-proof.mjs")).arg("verify");}
+    let output=command.arg(root).arg(&install).arg(dir.join("intent.json")).arg(dir.join("binding.json")).arg(&dir)
         .env("WA_PORT",node_port().to_string()).env("WA_DEPLOY_ROOT",root).output()?;
+    if let Some(native)=native {if historical_native_identity()?!=native {bail!("historical_native_generation_changed");}}
     let nonce=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos();
     std::fs::write(dir.join(format!("proof-{nonce}.stdout")),&output.stdout)?;
     std::fs::write(dir.join(format!("proof-{nonce}.stderr")),&output.stderr)?;
@@ -185,7 +213,9 @@ fn verify_install_inner(id:&str,reconcile_reason:Option<&str>) -> Result<Value> 
     let proof:Value=serde_json::from_slice(&output.stdout)?;
     if proof["ok"]!=true || proof["request_id"]!=id || proof["expected_sha"]!=intent["expected_sha"]
         || proof["owner"]!=binding["owner"] || proof["parent"]!=binding["parent"] {bail!("actual_verification_identity_mismatch");}
-    wa_operation::atomic_json(&dir.join("verification.json"),&proof)?;
+    if historical && (proof["suite"]!="verify-historical-install" || proof["failed"]!=0 || proof["skipped"]!=0
+        || proof["current_source"]!=expected || proof["tree"]!=effect["tree"]) {bail!("historical_verification_identity_mismatch");}
+    wa_operation::atomic_json(&dir.join(if historical {"historical-verification.json"}else{"verification.json"}),&proof)?;
     if let Some(mut active)=active {
         if active["id"]==id && active["expected_sha"]==intent["expected_sha"] {
             if !same_effect(&active,&effect) {bail!("verification_reservation_generation_mismatch");}
@@ -228,7 +258,7 @@ fn git(root: &Path, args: &[&str]) -> Result<String> {
 
 /// Select only the configured runtime repository's PRIMARY checkout. No request-supplied path.
 /// Revalidate at dispatch; deploy.sh revalidates the source SHA before building and before swapping.
-pub(crate) fn canonical_script(expected: &str) -> Result<PathBuf> {
+fn canonical_root() -> Result<PathBuf> {
     let record = installed_binary().parent().context("install parent")?.join("runtime-worktree.txt");
     let runtime = PathBuf::from(std::fs::read_to_string(&record).context("configured runtime-worktree missing")?.trim());
     let common = PathBuf::from(git(&runtime, &["rev-parse", "--path-format=absolute", "--git-common-dir"])?);
@@ -236,6 +266,11 @@ pub(crate) fn canonical_script(expected: &str) -> Result<PathBuf> {
     if canonical.join(".git").is_dir() == false { bail!("runtime shared Git has no canonical primary checkout"); }
     let canonical_common = PathBuf::from(git(canonical, &["rev-parse", "--path-format=absolute", "--git-common-dir"])?);
     if std::fs::canonicalize(&common)? != std::fs::canonicalize(canonical_common)? { bail!("runtime root identity changed"); }
+    Ok(canonical.to_path_buf())
+}
+
+pub(crate) fn canonical_script(expected: &str) -> Result<PathBuf> {
+    let root=canonical_root()?;let canonical=root.as_path();
     if git(canonical, &["symbolic-ref", "--short", "HEAD"])? != "main" { bail!("canonical checkout is not main"); }
     if !git(canonical, &["status", "--porcelain"])?.is_empty() { bail!("canonical checkout is dirty"); }
     if git(canonical, &["rev-parse", "HEAD"])? != expected || git(canonical, &["rev-parse", "origin/main"])? != expected {

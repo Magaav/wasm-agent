@@ -83,13 +83,24 @@ fn observation_io_is_due_guarded_and_failed_ownership_backs_off() {
     assert_eq!(schedule["next_at"],now+140);
     for _ in 0..50 {sentinel_return::observe_at("private-io",now+139).unwrap();}
     assert_eq!(calls.load(Ordering::SeqCst),5,"successful pending observations also obey cadence");
+    // A notification with unknown HTTP outcome cannot block independent install
+    // observation or earn a replay. Keep the immutable pending slot unchanged.
+    let cursor=std::fs::read(dir.join("pending-return.json")).unwrap();
+    wa_operation::atomic_json(&dir.join("delivery-private-io-0.json"),&json!({"phase":"unknown"})).unwrap();
+    wa_operation::atomic_json(&dir.join("state.json"),&json!({"id":"private-io","expected_sha":intent["expected_sha"],"at":now,"phase":"failed","detail":"separate installer failure"})).unwrap();
+    sentinel_return::observe_at("private-io",now+140).unwrap();
+    let observed:Value=serde_json::from_slice(&std::fs::read(dir.join("installation-observation.json")).unwrap()).unwrap();
+    assert_eq!(observed["phase"],"failed");assert_eq!(observed["detail"],"separate installer failure");
+    assert_eq!(std::fs::read(dir.join("returns/private-io-0.json")).unwrap(),journal);
+    assert_eq!(std::fs::read(dir.join("pending-return.json")).unwrap(),cursor);
+    let status:Value=serde_json::from_slice(&std::fs::read(dir.join("return-status.json")).unwrap()).unwrap();assert_eq!(status["phase"],"unknown");
     changed.store(true, Ordering::SeqCst);
-    assert!(sentinel_return::observe_at("private-io",now+140).unwrap_err().to_string().contains("owner_mismatch"));
+    assert!(sentinel_return::observe_at("private-io",now+150).unwrap_err().to_string().contains("owner_mismatch"));
     assert_eq!(std::fs::read(dir.join("returns/private-io-0.json")).unwrap(),journal,"owner change cannot replace immutable return");
     assert!(!dir.join("effect.json").exists());
     std::fs::write(dir.join("observation-poll.json"),b"{").unwrap();
-    assert!(sentinel_return::observe_at("private-io",now+150).unwrap_err().to_string().contains("schedule_corrupt"));
-    assert_eq!(calls.load(Ordering::SeqCst),6,"corrupt schedule refuses before HTTP");
+    assert!(sentinel_return::observe_at("private-io",now+160).unwrap_err().to_string().contains("schedule_corrupt"));
+    assert_eq!(calls.load(Ordering::SeqCst),7,"corrupt schedule refuses before HTTP");
     stop.store(true, Ordering::SeqCst);
     server.join().unwrap();
     for (key, value) in [("WASM_AGENT_HOME", previous), ("WASM_AGENT_PORT", oldport), ("WA_SENTINEL_AUTH_SESSION", oldauth)] {
