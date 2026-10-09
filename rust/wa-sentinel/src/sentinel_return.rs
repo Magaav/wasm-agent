@@ -165,6 +165,13 @@ fn observed_phase(binding:&Value,state:&Value,now:u64) -> (String,String) {
             return ("unknown".into(),"outcome_identity_or_timestamp_mismatch; no replay".into());
         }
         if result["ok"]!=true {return ("failed".into(),result["detail"].as_str().unwrap_or("installer failed").into());}
+        // A superseded installed generation cannot pass current-source proof.
+        // Check this fresh cheap fact before spawning git/Node for old unknown
+        // notifications. Historical reconciliation is explicit, never automatic.
+        let record=installed_binary().parent().and_then(|p|std::fs::read_to_string(p.join("installed.txt")).ok());
+        if record.as_deref().and_then(|text|text.lines().find_map(|line|line.strip_prefix("resolved_commit=")))!=intent["expected_sha"].as_str() {
+            return ("failed".into(),"installation_generation_not_current; historical evidence retained; no effect replay".into());
+        }
         return match deploy_protocol::verify_install(id) {
             Ok(_)=>("verified".into(),"fresh actual request-bound verify-install, source/artifacts/scripts/UI/listener/watcher green; I am updated".into()),
             Err(e)=>("failed".into(),format!("actual_installation_verification_failed:{e}; retain raw evidence; no replay")),

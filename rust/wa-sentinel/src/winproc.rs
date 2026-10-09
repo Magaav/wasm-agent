@@ -195,6 +195,55 @@ pub fn process_creation_time(pid: u32) -> Option<u64> {
     Some(((creation.dwHighDateTime as u64) << 32) | creation.dwLowDateTime as u64)
 }
 
+/// No shell/probe process for liveness. The opened handle is the observed
+/// generation; WAIT_TIMEOUT means it is live, any other outcome is not proof.
+pub fn pid_alive(pid:u32)->bool {
+    const SYNCHRONIZE:u32=0x00100000;
+    let handle=unsafe{OpenProcess(SYNCHRONIZE,FALSE,pid)};
+    if handle.is_null(){return false;}
+    let status=unsafe{WaitForSingleObject(handle,0)};
+    unsafe{CloseHandle(handle)};
+    status==windows_sys::Win32::Foundation::WAIT_TIMEOUT
+}
+
+/// Native TCP owner tables. No netstat/console spawn and no cached port ownership.
+pub fn listener_pid(port:u16)->Option<u32> {
+    listener_pid_v4(port).or_else(||listener_pid_v6(port))
+}
+
+fn listener_pid_v4(port:u16)->Option<u32> {
+    use windows_sys::Win32::NetworkManagement::IpHelper::{GetExtendedTcpTable,TCP_TABLE_OWNER_PID_LISTENER,MIB_TCPTABLE_OWNER_PID};
+    use windows_sys::Win32::Networking::WinSock::AF_INET;
+    let mut size=0u32;
+    unsafe{GetExtendedTcpTable(std::ptr::null_mut(),&mut size,FALSE,AF_INET as u32,TCP_TABLE_OWNER_PID_LISTENER,0)};
+    if size==0 || size>16*1024*1024{return None;}
+    // Alignment matters: table rows are DWORDs, not byte-aligned references.
+    let mut storage=vec![0u32;(size as usize+3)/4];
+    let status=unsafe{GetExtendedTcpTable(storage.as_mut_ptr() as _,&mut size,FALSE,AF_INET as u32,TCP_TABLE_OWNER_PID_LISTENER,0)};
+    if status!=0{return None;}
+    let table=storage.as_ptr() as *const MIB_TCPTABLE_OWNER_PID;
+    let count=unsafe{(*table).dwNumEntries} as usize;
+    let row_size=std::mem::size_of::<windows_sys::Win32::NetworkManagement::IpHelper::MIB_TCPROW_OWNER_PID>();
+    if count.checked_mul(row_size)?.checked_add(4)?>size as usize{return None;}
+    let rows=unsafe{std::slice::from_raw_parts(std::ptr::addr_of!((*table).table) as *const windows_sys::Win32::NetworkManagement::IpHelper::MIB_TCPROW_OWNER_PID,count)};
+    rows.iter().find(|row|u16::from_be(row.dwLocalPort as u16)==port).map(|row|row.dwOwningPid)
+}
+
+fn listener_pid_v6(port:u16)->Option<u32> {
+    use windows_sys::Win32::NetworkManagement::IpHelper::{GetExtendedTcpTable,TCP_TABLE_OWNER_PID_LISTENER,MIB_TCP6TABLE_OWNER_PID,MIB_TCP6ROW_OWNER_PID};
+    use windows_sys::Win32::Networking::WinSock::AF_INET6;
+    let mut size=0u32;
+    unsafe{GetExtendedTcpTable(std::ptr::null_mut(),&mut size,FALSE,AF_INET6 as u32,TCP_TABLE_OWNER_PID_LISTENER,0)};
+    if size==0 || size>16*1024*1024{return None;}
+    let mut storage=vec![0u32;(size as usize+3)/4];
+    if unsafe{GetExtendedTcpTable(storage.as_mut_ptr() as _,&mut size,FALSE,AF_INET6 as u32,TCP_TABLE_OWNER_PID_LISTENER,0)}!=0{return None;}
+    let table=storage.as_ptr() as *const MIB_TCP6TABLE_OWNER_PID;
+    let count=unsafe{(*table).dwNumEntries} as usize;
+    if count.checked_mul(std::mem::size_of::<MIB_TCP6ROW_OWNER_PID>())?.checked_add(4)?>size as usize{return None;}
+    let rows=unsafe{std::slice::from_raw_parts(std::ptr::addr_of!((*table).table) as *const MIB_TCP6ROW_OWNER_PID,count)};
+    rows.iter().find(|row|u16::from_be(row.dwLocalPort as u16)==port).map(|row|row.dwOwningPid)
+}
+
 /// The executable image a pid is running. This is the process proof a port cannot give: the pid
 /// on a port may be a foreign program, and stopping it because it happens to hold the port is the
 /// failure this exists to prevent.

@@ -1,0 +1,13 @@
+{
+  "scope": "Observed local Windows eight-second process-start samples; no universal uptime or CPU-load guarantee",
+  "baseline": {"seconds":8,"code_extension_host_pid":2888,"cmd_wmic_chains":16,"sentinel_git_starts":3,"windows_terminal_starts":3},
+  "vscode_source": "mutantdino.resourcemonitor-1.0.7 polls systeminformation every2000ms; battery/temperature queried even when their display is disabled",
+  "mitigation": "Backed up user settings and extension. Disabled resource displays, raised poll interval to3600000ms then removed this extension using supported VS Code CLI. No editor restart or unrelated extension changes.",
+  "after_settings": {"seconds":8,"cmd_wmic_chains":0,"sentinel_git_starts":7,"windows_terminal_starts":7},
+  "patch": ["Captured Sentinel Git/Node/probe commands explicitly use CREATE_NO_WINDOW", "Native Windows TCP-owner/liveness APIs replace netstat/tasklist shell probes", "Host/Sentinel prefer real usr/bin/bash.exe, not Git bin launcher", "Older installed-generation results refuse cheaply before spawning exact-source verifier"],
+  "candidate_verification": "63 Sentinel tests including native no-console positive and forced-console negative control; native ownership tests; source-built actual historical CLI; private real host execution",
+  "preserved": "Historical effects and unknown notifications unchanged; no new automatic agent/job/watcher/gate; no broad process kill",
+  "live_patch_verified": false,
+  "gate_verified": false,
+  "release_verified": false
+}

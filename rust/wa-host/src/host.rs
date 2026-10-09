@@ -157,9 +157,12 @@ fn shell_config() -> &'static (String, String) {
         }
         if cfg!(target_os = "windows") {
             let mut candidates = vec![
+                // Use the real MSYS interpreter, not Git's bin launcher. The
+                // launcher recursively respawns wrappers and console hosts.
+                r"C:\Program Files\Git\usr\bin\bash.exe".to_string(),
+                r"C:\Program Files (x86)\Git\usr\bin\bash.exe".to_string(),
                 r"C:\Program Files\Git\bin\bash.exe".to_string(),
                 r"C:\Program Files (x86)\Git\bin\bash.exe".to_string(),
-                r"C:\Program Files\Git\usr\bin\bash.exe".to_string(),
             ];
             for name in ["bash.exe", "sh.exe"] {
                 if let Some(found) = executable_on_path(name) {

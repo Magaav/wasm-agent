@@ -10,6 +10,9 @@ fn observation_io_is_due_guarded_and_failed_ownership_backs_off() {
     let previous = std::env::var_os("WASM_AGENT_HOME");
     let oldport = std::env::var_os("WASM_AGENT_PORT");
     let oldauth = std::env::var_os("WA_SENTINEL_AUTH_SESSION");
+    let oldinstall=std::env::var_os("WA_INSTALL_DIR");
+    std::fs::create_dir_all(home.join("install")).unwrap();
+    std::env::set_var("WA_INSTALL_DIR",home.join("install"));
     std::env::set_var("WASM_AGENT_HOME", &home);
     std::env::set_var("WA_SENTINEL_AUTH_SESSION", "private-auth");
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -93,17 +96,31 @@ fn observation_io_is_due_guarded_and_failed_ownership_backs_off() {
     assert_eq!(observed["phase"],"failed");assert_eq!(observed["detail"],"separate installer failure");
     assert_eq!(std::fs::read(dir.join("returns/private-io-0.json")).unwrap(),journal);
     assert_eq!(std::fs::read(dir.join("pending-return.json")).unwrap(),cursor);
+    // Older successful result is not the current installed generation. This must
+    // refuse BEFORE launching Git/Node verification for a historical unknown.
+    let mut result=json!({"ok":true,"request_id":"private-io","expected_sha":intent["expected_sha"],"at":"2026-01-01T00:00:00Z"});
+    // Attribute the exact UTC timestamp to the test's actual queue clock.
+    #[cfg(windows)] let time=quiet_command("powershell.exe").args(["-NoProfile","-NonInteractive","-Command",&format!("[DateTimeOffset]::FromUnixTimeSeconds({now}).UtcDateTime.ToString('yyyy-MM-ddTHH:mm:ssZ')")]).output().unwrap();
+    #[cfg(not(windows))] let time=quiet_command("date").args(["-u","-d",&format!("@{now}"),"+%Y-%m-%dT%H:%M:%SZ"]).output().unwrap();
+    result["at"]=json!(String::from_utf8(time.stdout).unwrap().trim());
+    wa_operation::atomic_json(&dir.join("result.json"),&result).unwrap();
+    wa_operation::atomic_json(&dir.join("state.json"),&json!({"id":"private-io","expected_sha":intent["expected_sha"],"at":now,"phase":"spawned"})).unwrap();
+    std::fs::write(home.join("install/installed.txt"),format!("resolved_commit={}\n","b".repeat(40))).unwrap();
+    sentinel_return::observe_at("private-io",now+150).unwrap();
+    let observed:Value=serde_json::from_slice(&std::fs::read(dir.join("installation-observation.json")).unwrap()).unwrap();
+    assert_eq!(observed["phase"],"failed");assert!(observed["detail"].as_str().unwrap().contains("generation_not_current"));
+    assert!(!dir.join("verification.json").exists());
     let status:Value=serde_json::from_slice(&std::fs::read(dir.join("return-status.json")).unwrap()).unwrap();assert_eq!(status["phase"],"unknown");
     changed.store(true, Ordering::SeqCst);
-    assert!(sentinel_return::observe_at("private-io",now+150).unwrap_err().to_string().contains("owner_mismatch"));
+    assert!(sentinel_return::observe_at("private-io",now+160).unwrap_err().to_string().contains("owner_mismatch"));
     assert_eq!(std::fs::read(dir.join("returns/private-io-0.json")).unwrap(),journal,"owner change cannot replace immutable return");
     assert!(!dir.join("effect.json").exists());
     std::fs::write(dir.join("observation-poll.json"),b"{").unwrap();
-    assert!(sentinel_return::observe_at("private-io",now+160).unwrap_err().to_string().contains("schedule_corrupt"));
-    assert_eq!(calls.load(Ordering::SeqCst),7,"corrupt schedule refuses before HTTP");
+    assert!(sentinel_return::observe_at("private-io",now+170).unwrap_err().to_string().contains("schedule_corrupt"));
+    assert_eq!(calls.load(Ordering::SeqCst),8,"corrupt schedule refuses before HTTP");
     stop.store(true, Ordering::SeqCst);
     server.join().unwrap();
-    for (key, value) in [("WASM_AGENT_HOME", previous), ("WASM_AGENT_PORT", oldport), ("WA_SENTINEL_AUTH_SESSION", oldauth)] {
+    for (key, value) in [("WASM_AGENT_HOME", previous), ("WASM_AGENT_PORT", oldport), ("WA_SENTINEL_AUTH_SESSION", oldauth),("WA_INSTALL_DIR",oldinstall)] {
         match value { Some(v) => std::env::set_var(key,v), None => std::env::remove_var(key) }
     }
     eprintln!("private observation I/O evidence retained {}", home.display());
