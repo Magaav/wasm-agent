@@ -86,6 +86,8 @@ mod deploy_protocol_tests;
 #[cfg(test)]
 mod deploy_recovery_tests;
 #[cfg(test)]
+mod target_identity_tests;
+#[cfg(test)]
 mod intake_tests;
 
 // ---------------------------------------------------------------- paths
@@ -623,12 +625,15 @@ pub(crate) fn pid_on_port(port: u16) -> Option<u32> {
 /// identity, so this is the one probe that distinguishes "our node" from "some program on our
 /// port". It is best-effort: a wedged node may not answer, which is why `recover` does not require
 /// it (the pid, creation time and image are still proved).
-fn node_id_on_port(port: u16) -> Option<String> {
+fn node_id_on_port(port: u16) -> Result<String> {
     let url = format!("http://127.0.0.1:{port}/sync/head");
-    let response = health_agent().get(&url).call().ok()?;
-    let text = response.into_body().read_to_string().ok()?;
-    let value: Value = serde_json::from_str(&text).ok()?;
-    value.get("node_id").and_then(Value::as_str).map(str::to_string)
+    let response = health_agent().get(&url).call().context("node_identity_http_unavailable")?;
+    let status=response.status().as_u16();
+    let text = response.into_body().read_to_string().context("node_identity_body_unavailable")?;
+    let value: Value = serde_json::from_str(&text).context("node_identity_body_invalid")?;
+    if status==503 && value["error"]=="read_capacity_busy" {bail!("node_identity_read_capacity_busy; no target authority");}
+    if status!=200 {bail!("node_identity_http_status:{status}");}
+    value.get("node_id").and_then(Value::as_str).map(str::to_string).context("node_identity_missing")
 }
 
 /// Prove that the pid listening on `port` is the node this sentinel started for the selected
@@ -692,8 +697,8 @@ fn verify_target(port: u16, probe_identity: bool) -> Result<u32> {
                 None => bail!("refusing to stop pid {listener}: cannot read its image to prove it is ours"),
             }
             if probe_identity {
-                let announced = node_id_on_port(port);
-                if announced.as_deref() != Some(record.node_id.as_str()) {
+                let announced = node_id_on_port(port)?;
+                if announced != record.node_id {
                     bail!(
                         "refusing to stop pid {listener}: the node on port {port} announces {:?}, not the recorded node_id {}",
                         announced,
@@ -1676,7 +1681,7 @@ fn finish_request(claim: &Path, request: &Value) {
     };
     // Typed capacity contention is a read refusal BEFORE reservation, not an
     // installer outcome. Put only this immutable, proven unadmitted claim back.
-    if !ok && detail.starts_with("parent_owner_read_capacity_busy") && request.get("expected_sha").is_some()
+    if !ok && (detail.starts_with("parent_owner_read_capacity_busy") || detail.starts_with("protocol_native_target_not_owned: node_identity_read_capacity_busy")) && request.get("expected_sha").is_some()
         && !sentinel_dir().join("deploy-protocol").join(id).join("effect.json").exists() {
         let back=sentinel_dir().join("requests").join(claim.file_name().unwrap_or_default());
         if let Ok(_lock)=queue_lock() {
@@ -2631,6 +2636,11 @@ fn main() -> Result<()> {
                 if root.exists(){for entry in std::fs::read_dir(root)?.flatten(){if entry.path().is_dir(){
                     sentinel_return::observe(entry.file_name().to_str().context("protocol id encoding")?)?;
                 }}}
+                Ok(())
+            },
+            Some("target") if rest.len()==1 => {
+                let pid=verify_target(node_port(),true)?;
+                println!("{}",json!({"ok":true,"target_pid":pid,"target_created":instance::process_start(pid),"idle":node_activity()}));
                 Ok(())
             },
             Some("reconcile") if rest.len()==4 && rest[2]=="--reason" => {
