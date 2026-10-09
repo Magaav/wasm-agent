@@ -102,7 +102,7 @@ pub(crate) fn admit(request:&Value) -> Result<PathBuf> {
     let job=jobs::store().get("onSentinelReturn").map_err(|e|anyhow::anyhow!(e.to_string()))?;
     if !hook_ready(&job) {bail!("return_hook_not_ready");}
     let script=canonical_script(request["expected_sha"].as_str().context("protocol_sha_missing")?)?;
-    let target=verify_target(node_port(),true).context("protocol_native_target_not_owned")?;
+    let target=verify_target(node_port(),true).map_err(|error|anyhow::anyhow!("protocol_native_target_not_owned: {error:#}"))?;
     let dir=sentinel_dir().join("deploy-protocol").join(id);
     let install_lock=std::fs::OpenOptions::new().create(true).truncate(false).read(true).write(true).open(sentinel_dir().join("protocol-effect.lock"))?;
     install_lock.lock()?;

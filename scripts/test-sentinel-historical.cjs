@@ -43,6 +43,7 @@ if(sentinelBinary){
  const originals=Object.fromEntries(['observation.json','return-status.json','result.json','effect.json'].map(n=>[n,fs.readFileSync(dir+'/'+n)]));
  for(const name of ['sentinel-historical-proof.mjs','sentinel-install-proof.mjs'])put(repo+'/scripts/'+name,fs.readFileSync(path.resolve('scripts',name)));
  git('add','.');git('commit','-m','current verifier source');git('fetch','origin');
+ const target=spawnSync(install+'/wa-sentinel'+native,['protocol','target'],{env:privateEnv,cwd:repo,encoding:'utf8',timeout:15000});assert.equal(target.status,0,target.stderr);assert.equal(JSON.parse(target.stdout).target_pid,node.pid);checks++;
  const r=spawnSync(install+'/wa-sentinel'+native,['protocol','reconcile-historical',intent.id,'--reason','private historical recovery'],{env:privateEnv,cwd:repo,encoding:'utf8',timeout:60000,maxBuffer:4*1024*1024});
  put(out+'/cli.stdout',r.stdout||'');put(out+'/cli.stderr',r.stderr||'');assert.equal(r.status,0,r.stderr);const cli=JSON.parse(r.stdout);assert(cli.ok&&cli.effect_replayed===false);assert.equal(JSON.parse(fs.readFileSync(box+'/protocol-effect.json')).phase,'verified');checks+=3;
  for(const [n,b]of Object.entries(originals)){assert(fs.readFileSync(dir+'/'+n).equals(b),'original changed '+n);checks++;}

@@ -36,7 +36,7 @@ The CLI returns a queue receipt. The watcher separately records `intent.json`,
 An acknowledgement means the watcher observed the immutable request; it grants
 neither effect authority nor installation success. Parent-owner HTTP/body failures
 retain their underlying cause in durable refusal text (no credentials or body dump).
-Only HTTP503 with the exact `read_capacity_busy` code defers the immutable claim
+Only HTTP503 with the exact `read_capacity_busy` code at parent-owner or node-identity lookup defers the immutable claim
 before an effect exists, with backoff. Other HTTP/identity failures remain failures.
 A failed pre-admission request is not automatically replayed; preserve its original
 record and prove no effect reservation/spawn before proposing any fresh intent.
@@ -44,6 +44,10 @@ A separate cheap intake lane observes new identities while health, source or ver
 five-second observation policy is tested on the trusted local runtime, not a hard
 real-time Windows guarantee. A malformed or changed identity produces a named
 problem while preserving the original intent and acknowledgement.
+
+`protocol target` is a read-only native ownership diagnostic (and may perform the
+existing verified legacy lifecycle re-adoption). It reports pid/creation/idle and
+preserves the underlying ownership refusal, never grants installation authority.
 
 An effect waits for actual parent ownership, the enabled `onSentinelReturn` hook,
 a clean primary `main` checkout exactly equal to both `origin/main` and the
