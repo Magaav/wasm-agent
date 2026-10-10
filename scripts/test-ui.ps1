@@ -1086,9 +1086,8 @@ $harness = @'
   var lineHeight=parseFloat(getComputedStyle(card).lineHeight);
   check(cardHeight<=lineHeight*2+15,'sidebar cards must be compact two-line cards');
   showroom.data=[{...agents[0],state:'completed'},...agents.slice(1)];
-  check(showroom.sidebar.querySelector('[data-state="completed"] .agent-card-status').textContent==='completed' &&
-    getComputedStyle(showroom.sidebar.querySelector('[data-state="completed"]')).opacity!=='1',
-    'settled cards must be distinguishable from running cards without opening them');
+  check(!showroom.sidebar.querySelector('[data-state="completed"]') && showroom.sidebar.querySelectorAll('.agent-card').length===3,
+    'settled tasks remain history, not cards in the active orchestrator');
   showroom.data=agents;
   agents.forEach(task=>showroom.pin(task));
   check(showroom.panes.size===4,'four pinned agents must create four session panes');
@@ -1582,6 +1581,8 @@ $harness = @'
     parent_session_id:'aaaaaaaa-0000-0000-0000-000000000001',mode:'chat',message_count:18,
     worktree:'C:/fixtures/wa-worktree-direct-0001',workspace_branch:'change/fixture-direct',
     state:'unfinished',state_detail:'1 tool call(s) with no recorded result: bash, 12s ago'};
+  var directHealth=window.__fixtures.health;
+  window.__fixtures.health={...directHealth,node_threads:[...(directHealth.node_threads||[]),{role:'runs',label:'POST /chat',session:directChild.id,run_id:'991'}]};
   var withDirectChild={sessions:window.__fixtures.sessions.sessions.concat([directChild])};
   showroom.live=window.__liveChildRows({sessions:withDirectChild.sessions,
     dispatches:window.__fixtures.subagents.subagents.concat([peerRow]),fleet:window.__fixtures.fleet,health:window.__fixtures.health});
@@ -1595,10 +1596,10 @@ $harness = @'
   check(!!liveRowFor('child-session-peer') && liveRowFor('child-session-peer').dataset.node==='bbbbbbbb-5555-6666-7777-888888888888' &&
     /openclaw/.test(liveRowFor('child-session-peer').textContent) && !/bbbbbbbb/.test(liveRowFor('child-session-peer').textContent),
     'a child on a peer must be named, not shown as its id, saw: '+(liveRowFor('child-session-peer')||{}).textContent);
-  check(!!liveRowFor('child-direct-0001') && /unfinished/.test(liveRowFor('child-direct-0001').textContent) &&
+  check(!!liveRowFor('child-direct-0001') && /running/.test(liveRowFor('child-direct-0001').textContent) &&
     liveRowFor('child-direct-0001').textContent.indexOf('child-direct-0001')>=0 &&
     /bash, 12s ago/.test(liveRowFor('child-direct-0001').textContent) && liveRowFor('child-direct-0001').tagName==='DIV',
-    'a child with no placement row must still appear with its session id and the node own detail, saw: '+(liveRowFor('child-direct-0001')||{}).textContent);
+    'a health-confirmed child with no placement row must appear with its session id and recorded detail, saw: '+(liveRowFor('child-direct-0001')||{}).textContent);
   check(/2 running/.test(showroom.querySelector('.live-children-counts').textContent) &&
     /1 queued/.test(showroom.querySelector('.live-children-counts').textContent),
     'the node own subagent counts must be shown as they were reported, saw: '+showroom.querySelector('.live-children-counts').textContent);
@@ -1620,6 +1621,7 @@ $harness = @'
     'the live list must rest on the node health view and the session ledger');
   livePanel.remove();
   window.__fixtures.sessions=sessionsFixture;
+  window.__fixtures.health=directHealth;
   showroom.remove();
 
   document.title = "stage: node block done";
@@ -3777,6 +3779,10 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'final-answer focused suite failed' }
     & node scripts/test-coordinator-steps.cjs
     if ($LASTEXITCODE -ne 0) { throw 'compact phase/debug browser suite failed' }
+    & node scripts/test-orchestrator-active.cjs (Join-Path $tmp 'orchestrator-active')
+    if ($LASTEXITCODE -ne 0) { throw 'active-only orchestrator browser suite failed' }
+    & node scripts/test-orchestrator-active.cjs (Join-Path $tmp 'orchestrator-active') --post
+    if ($LASTEXITCODE -ne 0) { throw 'active-only orchestrator evidence postcheck failed' }
     & node scripts/test-turn-ownership.cjs (Join-Path $tmp 'turn-ownership')
     if ($LASTEXITCODE -ne 0) { throw 'turn ownership browser suite failed' }
     & node scripts/test-turn-ownership.cjs (Join-Path $tmp 'turn-ownership') --post

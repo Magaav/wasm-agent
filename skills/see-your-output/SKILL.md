@@ -221,6 +221,15 @@ Spell replay remains unsupported with enforced worktrees; keep the direct CLI
 until actual replay passes, without weakening bindings. Inspect the screenshot.
 No phase inference, task settlement or installed-source claim follows from scroll.
 
+## Active orchestrator proof
+
+Run `node <repo>/scripts/test-orchestrator-active.cjs <fresh-evidence>`, then the
+same with `--post`, for active-only cards/live rows, historical followup dedup,
+settlement, health-confirmed recordless children and preserved open/saved drafts.
+`orchestrator-active-proof` records the sequence; use the supported direct CLI
+for required worktrees. The private all-history mutation must fail. Also run
+`scripts/test-ui.ps1` and inspect the screenshot; filtering is not task settlement.
+
 ## Turn ownership proof
 
 Run `node <repo>/scripts/test-turn-ownership.cjs <fresh-evidence>`, then the same

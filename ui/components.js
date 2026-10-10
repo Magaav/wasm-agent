@@ -2058,6 +2058,21 @@ class WaChatActions extends HTMLElement {
 }
 customElements.define("wa-chat-actions", WaChatActions);
 
+// Positive execution evidence only; unfinished/unknown is not proof of activity.
+function agentTaskActive(task) {
+  return !!task && task.settled !== true && task.settled !== 1
+    && ['running','accepted','queued','placing'].includes(task.state);
+}
+function agentLatestTasks(tasks) {
+  const sessions=new Map();
+  for(const task of tasks || []) {
+    if(!task)continue;
+    const key=(task.execution_node || 'local')+':'+(task.session_id || task.subagent_id);
+    const old=sessions.get(key);
+    if(!old || (Number(task.created_at) || 0)>=(Number(old.created_at) || 0))sessions.set(key,task);
+  }
+  return [...sessions.values()];
+}
 function agentTaskTitle(task) {
   const text=String(task.title || task.prompt || '').replace(/\s+/g,' ').trim();
   return text ? (text.length>90 ? text.slice(0,87)+'…' : text) : 'Untitled task';
@@ -2239,7 +2254,7 @@ class WaOrchestrator extends HTMLElement {
     // The live list comes first because it is the answer to "what is running": the dispatch table
     // below it holds the placement records, and a child with no placement record appears only here
     // (see the note the host writes into it, and app.js's liveChildRows).
-    this.innerHTML='<header class="orchestrator-head"><strong>Orchestrator</strong><span class="orchestrator-status" role="status"></span><button type="button" data-action="refresh">Refresh</button><button type="button" data-action="close">Back to main chat</button></header><div class="orchestrator-body"><aside class="orchestrator-sidebar"><details class="live-children" open><summary>Live children</summary><p class="live-children-counts" role="status"></p><div class="live-children-list"></div><p class="live-children-foot"></p></details><details class="placement"><summary>Node order and limits</summary><p>Fill in order. A limit of 0 keeps a device out of background execution.</p><label><input type="checkbox" class="placement-enabled"> Use ordered placement</label><div class="placement-nodes"></div><button type="button" data-action="save-placement">Save placement</button></details><nav aria-label="Agents"></nav></aside><main class="orchestrator-canvas"><p class="orchestrator-empty">Agents appear here when delegated from the main chat. Select a card to follow its conversation.</p></main></div>';
+    this.innerHTML='<header class="orchestrator-head"><strong>Orchestrator</strong><span class="orchestrator-status" role="status"></span><button type="button" data-action="refresh">Refresh</button><button type="button" data-action="close">Back to main chat</button></header><div class="orchestrator-body"><aside class="orchestrator-sidebar"><details class="live-children" open><summary>Live children</summary><p class="live-children-counts" role="status"></p><div class="live-children-list"></div><p class="live-children-foot"></p></details><details class="placement"><summary>Node order and limits</summary><p>Fill in order. A limit of 0 keeps a device out of background execution.</p><label><input type="checkbox" class="placement-enabled"> Use ordered placement</label><div class="placement-nodes"></div><button type="button" data-action="save-placement">Save placement</button></details><nav aria-label="Agents"></nav></aside><main class="orchestrator-canvas"><p class="orchestrator-empty">Select an active card to follow its conversation. History remains in Engine → Sessions.</p></main></div>';
     this.sidebar=this.querySelector('nav'); this.canvas=this.querySelector('main'); this.panes=new Map(); this.drafts=new Map();
     // Promoted conversations: each is a <wa-window> reading the same task as the pane it came from.
     this.windows=new Map();
@@ -2270,7 +2285,7 @@ class WaOrchestrator extends HTMLElement {
     const list=this.querySelector('.live-children-list');
     if(!rows.length) {
       const empty=document.createElement('p'); empty.className='live-children-empty';
-      empty.textContent='No child is running or unfinished that this node reports.';
+      empty.textContent='No active children reported.';
       list.replaceChildren(empty);
       return;
     }
@@ -2311,15 +2326,11 @@ class WaOrchestrator extends HTMLElement {
   set data(tasks) {
     this.connectedCallback();
     // Follow-up tasks share a session. One card per conversation, newest run.
-    const sessions=new Map();
-    for(const task of tasks || []) {
-      const key=(task.execution_node || 'local')+':'+(task.session_id || task.subagent_id);
-      const old=sessions.get(key);
-      if(!old || task.created_at>=old.created_at)sessions.set(key,task);
-    }
-    this.tasks=[...sessions.values()];
+    this.tasks=agentLatestTasks(tasks);
+    // Keep history for existing panes, but only positive active states create cards.
+    this.activeTasks=this.tasks.filter(task=>agentTaskActive(task));
     const lanes=new Map();
-    for(const task of this.tasks) this.groupByLane(lanes,task);
+    for(const task of this.activeTasks) this.groupByLane(lanes,task);
     this.sidebar.replaceChildren(...[...lanes.values()].map(group=>this.laneElement(group)));
     for(const task of this.tasks) {
       for(const pane of this.panes.values()) {
