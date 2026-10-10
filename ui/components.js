@@ -279,7 +279,7 @@ customElements.define("wa-step", WaStep);
 // standard, so it lives here and every topic asks for it.
 function topicParts(host, options) {
   const { className, glyph, label, bodyTag = "div", bodyClass } = options;
-  host.classList.add(className);
+  host.classList.add("topic", className);
   const header = document.createElement("button");
   header.type = "button";
   header.className = "trace-head";
@@ -297,7 +297,7 @@ function topicParts(host, options) {
   chevron.textContent = "\u203a";
   header.append(glyphEl, labelEl, metaEl, chevron);
   const body = document.createElement(bodyTag);
-  body.className = bodyClass;
+  body.className = "topic-body " + bodyClass;
   body.hidden = true;
   header.addEventListener("click", () => host.toggle());
   return { header, glyph: glyphEl, label: labelEl, meta: metaEl, chevron, body };
@@ -612,6 +612,53 @@ class WaRun extends HTMLElement {
   }
 }
 customElements.define("wa-run", WaRun);
+
+// Delegation is a topic, not a separate card pattern. The receipt is launch evidence;
+// opening the conversation is a host action, never a claim that the child finished.
+class WaSubagent extends HTMLElement {
+  static get observedAttributes() { return ["open"]; }
+  connectedCallback() { this._build(); }
+  _build() {
+    if (this._parts) return;
+    this._parts = topicParts(this, {
+      className: "subagent", glyph: "⑂", label: "subagent", bodyClass: "reasoning-body",
+    });
+    this.append(this._parts.header, this._parts.body);
+    this._sync();
+  }
+  get body() { this._build(); return this._parts.body; }
+  get open() { return this.hasAttribute("open"); }
+  set open(value) { this.toggleAttribute("open", Boolean(value)); }
+  toggle() { this.open = !this.open; }
+  attributeChangedCallback() { this._build(); this._sync(); }
+  _sync() {
+    this._parts.body.hidden = !this.open;
+    this._parts.header.setAttribute("aria-expanded", String(this.open));
+    topicChevron(this._parts.chevron, this.open);
+  }
+  set receipt(payload) {
+    this._build();
+    const profile = String(payload.profile || "unknown");
+    const session = payload.session_id ? String(payload.session_id) : "";
+    const facts = [];
+    if (payload.state) facts.push(String(payload.state));
+    if (payload.settled === true) facts.push("settled");
+    this._parts.label.textContent = "subagent · " + profile;
+    this._parts.label.title = this._parts.label.textContent;
+    this._parts.meta.textContent = [...facts, ...(session ? [session.slice(0, 8)] : [])].join(" · ");
+    const details = document.createElement("div");
+    details.textContent = ["profile: " + profile, ...facts, ...(session ? ["session: " + session] : [])].join(" · ");
+    this.body.replaceChildren(details);
+    if (session) {
+      const control = chatControl({text: "Open conversation"});
+      control.addEventListener("click", () => this.dispatchEvent(new CustomEvent("subagent-open", {
+        bubbles: true, detail: {session},
+      })));
+      this.body.append(control);
+    }
+  }
+}
+customElements.define("wa-subagent", WaSubagent);
 
 // A transport recovery is activity, not assistant prose or a model control.
 class WaRetry extends HTMLElement {

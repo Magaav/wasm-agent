@@ -1390,21 +1390,10 @@ function renderSubagentCard(result) {
   if (typeof payload === "string") { try { payload = JSON.parse(payload); } catch (error) { return; } }
   if (!payload || typeof payload !== "object") return;
   if (!payload.profile && !payload.session_id) return;
-  const card = document.createElement("div");
-  card.className = "subagent-card";
-  const title = document.createElement("span");
-  title.className = "subagent-title";
-  title.textContent = "subagent · " + (payload.profile || "unknown");
-  const meta = document.createElement("span");
-  meta.className = "subagent-meta";
-  const parts = [];
-  if (payload.state) parts.push(payload.state);
-  if (payload.settled === true) parts.push("settled");
-  if (payload.session_id) parts.push(String(payload.session_id).slice(0, 8));
-  meta.textContent = parts.join(" · ");
-  card.append(title, meta);
-  if (payload.session_id) card.append(nodeButton("open", () => openSession(payload.session_id)));
-  currentBubble().body.append(card);
+  const topic = document.createElement("wa-subagent");
+  topic.receipt = payload;
+  topic.addEventListener("subagent-open", event => openSession(event.detail.session));
+  currentBubble().body.append(topic);
 }
 
 function finishTrace() {
