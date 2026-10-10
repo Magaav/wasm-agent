@@ -47,6 +47,23 @@ the idle-tail second read, health reconciliation and checkpoint ledger refresh.
 Node selection advances the epoch and resets node-specific follower state. A
 replay response also belongs to its captured run and polling owner.
 
+A new Send/Continue in the **same conversation** advances a submission generation:
+older transcript, health, native-journal and event-tail observations cannot repaint
+it even if the new stream finishes before they return. Own SSE (including its
+pre-admission health wait) retains renderer ownership until its existing cleanup;
+idle health alone cannot free it. Its exact-run watchdog remains the recovery path
+for a lost stream. Read restoration refuses while that own stream is active,
+without moving loaded-row cursors or replacing the optimistic user/request bubble.
+New submission seals prior text/reasoning/tool buffers before the new user boundary.
+After actual stream release, ordinary durable repaint/reload remains available.
+No new timer/poll/backend event, inferred effect, request replay or ledger rewrite.
+Risk: history refresh waits for stream release; retained live output is authoritative
+for that view in the meantime. `scripts/test-turn-ownership.cjs` holds the real
+browser Send/Continue SSE and delays an older same-thread read; it fails on the
+previous UI, passes with the fence, checks unchanged old answer/footer and exact
+ordered request/answer bubbles, stale idle health and post-settlement stale reads.
+Run its retained hash `--post`; the normal UI suite includes it.
+
 ## Focused evidence, before integration
 
 `scripts/test-ui.ps1` passes in real headless Chromium, including real reload,

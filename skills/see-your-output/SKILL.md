@@ -221,6 +221,17 @@ Spell replay remains unsupported with enforced worktrees; keep the direct CLI
 until actual replay passes, without weakening bindings. Inspect the screenshot.
 No phase inference, task settlement or installed-source claim follows from scroll.
 
+## Turn ownership proof
+
+Run `node <repo>/scripts/test-turn-ownership.cjs <fresh-evidence>`, then the same
+with `--post`, for Send/Continue versus delayed same-thread transcript and idle
+health reads. It holds real fixture SSE, retains the request bubble, keeps output
+out of the old completed answer, fences post-settlement stale responses and
+checks ordered turn boundaries. `turn-ownership-proof` records that sequence;
+choose the supported direct runner for required worktrees without a refused probe.
+The previous UI fails the race assertion; no live request/tool is replayed.
+Also run `scripts/test-ui.ps1` and inspect the screenshot.
+
 ## Failure notice proof
 
 Run `node <repo>/scripts/test-failure-notice.cjs <fresh-evidence>`, then the same

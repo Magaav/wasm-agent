@@ -95,6 +95,10 @@ const composerBusy = () => busy || observedRun?.session === chatSession;
 // executing while this request waits behind it, so cancellation must carry this request's id.
 let activeRunId = null;
 let submittedRunIds = null;
+// A new submission in the same conversation is still a new renderer owner.
+// Node/session epochs alone cannot fence an older transcript/health response.
+let submissionEpoch = 0;
+const ownStreamActive = () => busy && controller !== null;
 let statusLine = null;
 // The status line's parts, held by reference. Reaching back into the DOM for them on every
 // streamed chunk would make the line depend on a parser that a stub document does not have,
@@ -2290,19 +2294,24 @@ let transcriptFailure = "";
 async function restoreSession(target = chatSession, retry = false) {
   const epoch = conversationEpoch;
   const node = activeNode;
-  if (restoringSession && restoringSession.target === target && restoringSession.epoch === epoch && restoringSession.node === node) {
+  const submission = submissionEpoch;
+  if (ownStreamActive()) return false;
+  if (restoringSession && restoringSession.target === target && restoringSession.epoch === epoch && restoringSession.node === node && restoringSession.submission === submission) {
     return restoringSession.promise;
   }
   if (retry && Date.now() < transcriptRetryAt) return false;
-  const pending = { target, epoch, node, promise: restoreSessionOnce(target, epoch, node) };
+  const pending = { target, epoch, node, submission, promise: restoreSessionOnce(target, epoch, node) };
   restoringSession = pending;
   try { return await pending.promise; }
   finally { if (restoringSession === pending) restoringSession = null; }
 }
 
 async function restoreSessionOnce(target, epoch, node = activeNode) {
+  const submission = submissionEpoch;
+  if (ownStreamActive()) return false;
   let phase = "session discovery";
-  const viewing = () => chatSession === target && conversationEpoch === epoch && activeNode === node;
+  const viewing = () => chatSession === target && conversationEpoch === epoch && activeNode === node
+    && submissionEpoch === submission && !ownStreamActive();
   try {
     // A known thread is already enough to read its authorized ledger. Discovery
     // is only needed for a new window, never a prerequisite on every reconnect.
@@ -2725,8 +2734,12 @@ function threadOfRun(health, runId, session = chatSession) {
 
 async function send(text, options = {}) {
   const runThread = options.session || chatSession;
-  const runEpoch = conversationEpoch;
-  const stillViewingRun = () => chatSession === runThread && conversationEpoch === runEpoch;
+  const runEpoch = conversationEpoch, runNode = activeNode;
+  const submission = ++submissionEpoch;
+  const stillViewingRun = () => chatSession === runThread && conversationEpoch === runEpoch
+    && activeNode === runNode && submissionEpoch === submission;
+  // Seal previous view buffers before the new user boundary, never reuse its trace/text.
+  markPendingTextIncomplete();markStreamedCommentaryIncomplete();flushDecision(true);clearStatus();
   activeRunId = null;
   submittedRunIds = null;
   // The draft is going out, so what was stored is stale: a respawn must not put the sent prompt
@@ -2764,11 +2777,11 @@ async function send(text, options = {}) {
   // so later polls can tell its queued id from an older run in the same conversation.
   try {
     const before = await nodeHealth();
-    submittedRunIds = new Set((before.run_ids || [])
+    if (stillViewingRun()) submittedRunIds = new Set((before.run_ids || [])
       .filter((run) => run.conversation === runThread)
       .map(runKey).filter(key=>key!==null));
   } catch (error) {
-    submittedRunIds = new Set();
+    if (stillViewingRun()) submittedRunIds = new Set();
   }
   // Declared out here, not inside the `try` below: the `finally` clears it, and a `const` inside the try
   // is not in scope there. It was inside, so every run ended by throwing `watchdog is not defined` from
@@ -2812,6 +2825,7 @@ async function send(text, options = {}) {
       asking = true;
       try {
         const health = await nodeHealth();
+        if (!stillViewingRun()) return;
         if(!health)throw new Error('health unavailable');
         identifySubmittedRun(health);
         // Asked and answered while the run was ending: say nothing. The run finished; there is
@@ -4354,12 +4368,14 @@ let reconciling = false;
 let reconciledAt = 0;
 
 async function reconcile() {
-  if (reconciling || !synced) return;
+  // Own SSE (including admission wait) owns its view until its finally block.
+  // Its watchdog checks exact run standing; idle health alone cannot release it.
+  if (reconciling || !synced || ownStreamActive()) return;
   reconciling = true;
-  const node=activeNode, target=chatSession, epoch=conversationEpoch;
+  const node=activeNode, target=chatSession, epoch=conversationEpoch, submission=submissionEpoch;
   try {
     const health = await nodeHealth(1000);
-    if (node!==activeNode || target!==chatSession || epoch!==conversationEpoch) return;
+    if (node!==activeNode || target!==chatSession || epoch!==conversationEpoch || submission!==submissionEpoch || ownStreamActive()) return;
     if (health && !activeRun(health)) {
       // What the live DOM still believes is worth checking *before* clearing it: if the page thought a message was
       // running, then whatever it is still showing - a tool topic waiting for a result that already arrived,
@@ -4467,13 +4483,13 @@ function detachConversationView() {
 async function followRun() {
   const target = chatSession;
   const epoch = conversationEpoch;
-  const node = activeNode;
-  if (!target) return;
+  const node = activeNode, submission = submissionEpoch;
+  if (!target || ownStreamActive()) return;
   // /sessions is small and carries the thread's `last_seq`; the 1.5 MB /session read happens only
   // when there is something new. Redrawing an unchanged transcript would cost a megabyte every
   // three seconds and fight the reader's scroll for nothing.
   const list = await (await apiFetch("sessions", { headers: apiHeaders() })).json();
-  if (chatSession !== target || conversationEpoch !== epoch || activeNode !== node) return;
+  if (chatSession !== target || conversationEpoch !== epoch || activeNode !== node || submission !== submissionEpoch || ownStreamActive()) return;
   const mine = (list.sessions || []).find((entry) => entry.id === target);
   if (!mine) return;
   const seq = Number(mine.last_seq) || 0;
@@ -4481,7 +4497,7 @@ async function followRun() {
   // Preserve the established epoch/dedupe/backoff and loaded-row cursor contract.
   rememberPlace();
   if (await restoreSession(target, true)) {
-    if (chatSession !== target || conversationEpoch !== epoch || activeNode !== node) return;
+    if (chatSession !== target || conversationEpoch !== epoch || activeNode !== node || submission !== submissionEpoch || ownStreamActive()) return;
     restorePlace();
   }
 }
@@ -4495,12 +4511,13 @@ async function syncLiveRun(current) {
   const epoch = conversationEpoch;
   const node = activeNode;
   if (current.session && current.session !== target) return;
-  const poll = { target, epoch, node };
+  const submission = submissionEpoch;
+  const poll = { target, epoch, node, submission };
   liveRunPolling = poll;
   const id=runKey(current);
   if(id===null) {liveRunPolling=null;setStatus('exact run identity unavailable; saved transcript only');return;}
   const viewing = () => chatSession === target && conversationEpoch === epoch && activeNode === node
-    && liveRunId === id && liveRunPolling === poll && !busy;
+    && liveRunId === id && liveRunPolling === poll && !busy && submission === submissionEpoch;
   if (liveRunId !== id) {
     liveRunId = id;
     liveEventSeq = 0;
@@ -4569,8 +4586,8 @@ async function watchTurn() {
   if (runPolling) return;
   clearTimeout(turnPollTimer);
   runPolling = true;
-  const node=activeNode, target=chatSession, epoch=conversationEpoch;
-  const viewing=()=>node===activeNode && target===chatSession && epoch===conversationEpoch;
+  const node=activeNode, target=chatSession, epoch=conversationEpoch, submission=submissionEpoch;
+  const viewing=()=>node===activeNode && target===chatSession && epoch===conversationEpoch && submission===submissionEpoch;
   try {
     const health = await nodeHealth();
     if (!viewing()) return;
@@ -4601,7 +4618,7 @@ async function watchTurn() {
       }
     } else if (!busy && await syncNativeSession(target, epoch, node)) {
       // Native children have opaque attempts and never enter HTTP run admission.
-    } else if (sawTurnInFlight) {
+    } else if (!busy && sawTurnInFlight) {
       sawTurnInFlight = false;
       liveRunId = null;
       liveEventSeq = 0;
@@ -5393,8 +5410,8 @@ async function attachNativeJournal(task, readHistory, viewing=()=>true) {
   return {rows,events,raw,state:last.state,settled:last.settled,identity,checkpointSeq:checkpoint,nextSeq:last.next_seq};
 }
 async function syncNativeSession(target,epoch,node) {
-  const credential=session;
-  const viewing=()=>target===chatSession && epoch===conversationEpoch && node===activeNode && credential===session && !busy;
+  const credential=session,submission=submissionEpoch;
+  const viewing=()=>target===chatSession && epoch===conversationEpoch && node===activeNode && credential===session && !busy && submission===submissionEpoch;
   const task=await nativeSessionTask(target);
   if(!viewing() || !task)return false;
   try {
