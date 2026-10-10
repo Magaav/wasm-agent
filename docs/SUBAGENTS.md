@@ -81,9 +81,13 @@ Fork ancestry is separate from delegated parentage; neither forks nor cancellati
 roll back files or external effects.
 
 Profiles are local approved JSON files at `<config>/subagent-profiles/<id>.json`
-(`config` is `host.paths().config`, i.e. `~/.wasm-agent`). Built-ins live in Lua
-and cannot be broad: `explore` (read-only) and `guest` (its own memory only).
-There is no duplicate database source of truth.
+(`config` is `host.paths().config`, i.e. `~/.wasm-agent`). Ordinary built-ins live
+in Lua and are narrow: `explore` (read-only) and `guest` (its own memory only).
+There is no duplicate database source of truth. The reserved `orchestration-worker`
+is a shipped broad profile usable only by a local operator with explicit conversation
+mode on; it cannot be overridden by a profile file. It has no child/desktop/remote
+or supervisor tool and owns only implement/verify/integrate/report. See
+[ORCHESTRATION-MODE.md](ORCHESTRATION-MODE.md). Ordinary built-ins remain narrow.
 
 ```json
 {

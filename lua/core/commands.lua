@@ -58,6 +58,7 @@ M.commands = {
     usage = "/efficiency_report",
     hint = "deterministic cost/context report: token domination, KV cache, USD, and a readable prefix artifact",
   },
+  { name = "/orchestration", usage = "/orchestration", alias = { "/ochestration" }, hint = "toggle native task routing on/off; workers merge and report, coordinator alone updates" },
   { name = "/update", usage = "/update", hint = "install the newest build in this node's tree (the sentinel does it, once idle)" },
   { name = "/merge", usage = "/merge", hint = "merge internal branches; leave open PR work for review" },
   { name = "/merge all", usage = "/merge all", hint = "include all open PRs after review and required checks" },

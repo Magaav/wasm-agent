@@ -2433,7 +2433,8 @@ $harness = @'
     type("/");
     check(menu.open, "commands: `/` must open the list");
     var items = Array.prototype.slice.call(menu.querySelectorAll(".menu-item"));
-    check(items.length === 5, "commands: `/` must offer all five commands, got " + items.length);
+    check(items.length === 6, "commands: `/` must offer all six commands, got " + items.length);
+    check(items[5]?.textContent.includes('/orchestration') && /unknown|ON|OFF/.test(items[5]?.textContent), 'orchestration command shows observed on/off or unavailable state');
     check(items[0] && items[0].textContent.indexOf("/new") >= 0,
       "commands: the list must offer /new first, got: " + (items[0] && items[0].textContent));
     check(items[1] && items[1].textContent.indexOf("/update") >= 0,
@@ -3779,6 +3780,10 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'final-answer focused suite failed' }
     & node scripts/test-coordinator-steps.cjs
     if ($LASTEXITCODE -ne 0) { throw 'compact phase/debug browser suite failed' }
+    & node scripts/test-orchestration-ui.cjs (Join-Path $tmp 'orchestration-mode')
+    if ($LASTEXITCODE -ne 0) { throw 'orchestration mode browser suite failed' }
+    & node scripts/test-orchestration-ui.cjs (Join-Path $tmp 'orchestration-mode') --post
+    if ($LASTEXITCODE -ne 0) { throw 'orchestration mode postcheck failed' }
     & node scripts/test-orchestrator-active.cjs (Join-Path $tmp 'orchestrator-active')
     if ($LASTEXITCODE -ne 0) { throw 'active-only orchestrator browser suite failed' }
     & node scripts/test-orchestrator-active.cjs (Join-Path $tmp 'orchestrator-active') --post

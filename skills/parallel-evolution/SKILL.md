@@ -14,7 +14,11 @@ description: >-
 ## Active operator-selected direct workflow
 
 When `AGENTS.md` selects direct work, handle the human request serially without
-subagents or external inference agents. Self-review is allowed and must be named
+subagents or external inference agents while `/orchestration` is off. Explicit on
+uses native task owners: each implements/verifies/merges via `integrate`, then
+reports; coordinator followups wait for the report. Coordinator alone handles UI
+publication, `/update` and Sentinel. See `docs/ORCHESTRATION-MODE.md`.
+Self-review is allowed and must be named
 honestly. Use focused checks, ordinary Git integration through canonical main,
 remote readback and clean trees. Do not create factory admission receipts or
 run a full release gate unless requested. Preserve original unknown effects;

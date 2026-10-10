@@ -1959,6 +1959,9 @@ fn print_request_help() {
 }
 
 fn request(args: &[String]) -> Result<()> {
+    if std::env::var("WASM_AGENT_PROVENANCE").as_deref()==Ok("child") {
+        bail!("sentinel_coordinator_only: workers may implement/merge/report, never request supervisor effects");
+    }
     let verb = args.first().cloned().unwrap_or_default();
     // A question is not a request. `--help` (and `-h`) used to be read as a *verb*, so
     // `wa-sentinel request --help` wrote a real request file with `verb: "--help"`, which the worker then
@@ -2584,6 +2587,10 @@ fn main() -> Result<()> {
     // SCM establishes explicit paths/environment before any ambient profile or
     // instance lookup. Never turn a service invocation into a console watcher.
     let service_args:Vec<String>=std::env::args().skip(1).collect();
+    if std::env::var("WASM_AGENT_PROVENANCE").as_deref()==Ok("child")
+        && !matches!(service_args.first().map(String::as_str),Some("help"|"--help"|"-h"|"status"|"preflight")) {
+        bail!("sentinel_coordinator_only: child tasks cannot change supervisor, jobs or installation");
+    }
     if service_args.first().map(String::as_str)==Some("service-config-check") {
         #[cfg(windows)] {return windows_service::check(&service_args[1..]);}
         #[cfg(not(windows))] {bail!("native Windows service configuration is unavailable on this platform");}

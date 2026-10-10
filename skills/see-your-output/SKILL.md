@@ -221,6 +221,16 @@ Spell replay remains unsupported with enforced worktrees; keep the direct CLI
 until actual replay passes, without weakening bindings. Inspect the screenshot.
 No phase inference, task settlement or installed-source claim follows from scroll.
 
+## Orchestration mode proof
+
+Run `node <repo>/scripts/test-orchestration-ui.cjs <fresh-evidence>`, then the
+same with `--post`, for command balloon ON/OFF/unknown, alias, target fencing,
+single-flight and report-only worker drafts. `orchestration-mode-ui-proof`
+records that sequence; use the supported CLI in required worktrees without a
+known refused replay. Also run `scripts/test-ui.ps1`. Actual routing/integration
+needs `test-orchestration-routing.cjs <built-wa> <evidence>` against private
+Git/mock inference, never a live model or production branch as a test fixture.
+
 ## Active orchestrator proof
 
 Run `node <repo>/scripts/test-orchestrator-active.cjs <fresh-evidence>`, then the

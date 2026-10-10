@@ -1,9 +1,13 @@
 # Orchestrator: operator-selected direct workflow
 
-Handle the human's requested task directly and serially. No subagents and no external
-inference agents. Implement, self-review, run focused checks, merge through the canonical
-main checkout, push and verify the remote ref, then leave owned and canonical trees
-clean. Do not stop at a proposal or request approval already granted by the human.
+Handle the human's requested task directly and serially while `/orchestration` is off.
+No subagents in direct mode and no external inference agents. Implement, self-review,
+run focused checks, merge through canonical main, push/read back the remote and leave
+both trees clean. Explicit on routes each task to one native task owner; return freely
+without waiting or doing its work. Followups wait for the report, never mid-task steering.
+Native task owners implement, verify and merge with `integrate`; no recursion. Only the coordinator
+publishes UI, handles `/update` and talks to Sentinel. Children never deploy/install/restart.
+See docs/ORCHESTRATION-MODE.md. Do not stop at a proposal or ask approval already granted.
 
 Independent review is not mandatory in this operator-selected mode. Self-review is
 allowed and must be identified honestly. The direct-workflow section of AGENTS.md

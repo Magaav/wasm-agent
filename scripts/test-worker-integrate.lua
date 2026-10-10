@@ -1,0 +1,15 @@
+-- Real Git integration in a private repository/bare origin; no paid inference.
+local json=dofile('lua/vendor/json.lua');local memory=dofile('lua/core/memory.lua');memory.setup()
+local resources=dofile('lua/core/resources.lua');local integrate=dofile('lua/core/integrate.lua')
+local own=assert(host.getenv('WA_INTEGRATE_OWN'));local branch=assert(host.getenv('WA_INTEGRATE_BRANCH'))
+local sid=memory.start_session('','subagent',{id='worker-fixture',user_id='master'})
+memory.set_session_workspace(sid,{worktree=own,required=true,state='allocated',branch=branch})
+local ctx={user_id='master',session_id=sid,run_id='integration-fixture',subagent={id='orchestration-worker'}}
+assert(resources.begin(ctx).ok,'claim private session')
+assert(integrate.run(memory,{user_id='master',session_id=sid}).error=='integration_worker_only','ordinary caller cannot integrate as worker')
+local result=integrate.run(memory,ctx)
+assert(result.ok and result.remote_verified and result.clean and result.installed==false,'real integration verdict '..json.encode(result))
+local repeated=integrate.run(memory,ctx)
+assert(repeated.ok and repeated.observation_only and repeated.replayed==false,'settled receipt does not replay Git effects')
+assert(resources.finish(ctx).ok,'finish private claims')
+print(json.encode({ok=true,checks=4,skipped=0,result=result}))

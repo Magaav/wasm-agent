@@ -19,7 +19,12 @@ description: >-
 `AGENTS.md` currently selects serial direct work. The coordinator implements,
 self-reviews, runs focused checks and integrates through canonical main using
 ordinary Git, then pushes, reads back the remote ref and leaves both trees clean.
-No subagents, external inference agents or independent reviewer are required.
+No subagents in direct mode; no external inference agents or independent reviewer
+are required. Explicit `/orchestration` on is the opt-in exception: native task
+owners implement, self-review and use `integrate` under repository exclusion to
+merge through canonical main, then report. No mid-task steering or recursion.
+Only the coordinator publishes UI, handles `/update` or uses Sentinel. See
+`docs/ORCHESTRATION-MODE.md`; this is not the historical parallel factory.
 Never fabricate factory review/admission receipts to satisfy the historical
 parallel procedure below. Full release gates run only on an explicit user request.
 

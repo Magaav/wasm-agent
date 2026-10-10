@@ -2153,6 +2153,10 @@ class WaAgentSession extends HTMLElement {
   }
   // The same text reuses the same idempotency key, so a retry after a lost answer cannot arrive twice.
   sendDraft(action = 'message') {
+    if(this._task?.profile==='orchestration-worker' && (!this._task.settled || this._task.state==='unknown')) {
+      this.notice.textContent='This worker is completing its task. Followups wait for its report; your draft is kept.';
+      return;
+    }
     const text = this.input.value.trim();
     if (!text && this.shell.attachments.length === 0) return;
     const pictures = this.shell.attachments.filter(file => file.kind === 'image');
@@ -2228,7 +2232,7 @@ class WaAgentSession extends HTMLElement {
       {label:'node',value:value.node_name || value.execution_node || 'local'},
       {label:'state',value:value.state || 'unknown'}], value.model || 'model unknown');
     this.querySelector('[data-action="cancel"]').disabled=!!value.settled || value.state==='unknown';
-    this.querySelector('[data-action="steer"]').disabled=!!value.settled || value.state==='unknown';
+    this.querySelector('[data-action="steer"]').disabled=!!value.settled || value.state==='unknown' || value.profile==='orchestration-worker';
     this.preview.textContent=[value.preview?.reasoning,value.preview?.commentary,value.preview?.text].filter(Boolean).join('\n');
     this.preview.hidden=!this.preview.textContent;
     // The pane's own run readout, for what the shared transcript cannot say while a child is working:
