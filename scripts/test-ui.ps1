@@ -1309,6 +1309,10 @@ $harness = @'
   var boxOf=function(el){ if(!el) return null; var rect=el.getBoundingClientRect(), style=getComputedStyle(el);
     return {h:Math.round(rect.height),w:Math.round(rect.width),padTop:style.paddingTop,padLeft:style.paddingLeft,
       radius:style.borderRadius,border:style.borderTopWidth,cls:el.className}; };
+  var mainFooterControls=['user-btn','status-btn','mic','attach'].map(function(id){return document.getElementById(id);});
+  var childFooterControls=[paneShell.modelChip,paneShell.attach];
+  check(mainFooterControls.concat(childFooterControls).every(function(control){return control && boxOf(control).h===30;}),
+    'account, context, mic and append-file controls must all share the 30px footer height on both hosts');
   var paneRow=paneShell.querySelector('wa-chat-actions');
   var mainRow=mainShell.querySelector('wa-chat-actions');
   check(!document.getElementById('steer') && !paneRow.querySelector('[data-action="steer"]'),
