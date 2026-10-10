@@ -2290,7 +2290,7 @@ function paintChildTranscript(container, rows, options = {}) {
       const state=childRunState(task);finishRunStatus(state==='failed'?'failed':state==='answered'?'completed':'unfinished');
       markPendingTextIncomplete();markStreamedCommentaryIncomplete();flushDecision(true);
     } else renderChildProgress(task||{});
-    if(oldJournal===journal&&prior?.key===runStepState?.active?.key)runStepState.active.started=prior.started;
+    if(oldJournal===journal&&prior&&runStepState?.active&&prior.key===runStepState.active.key)runStepState.active.started=prior.started;
     for(const choice of choices) {
       const node=Array.from(container.querySelectorAll('wa-commentary')).find(node=>choice.id&&node.dataset.messageId===choice.id||choice.pending&&node.dataset.pendingId===choice.pending);
       if(node)node.open=choice.open;
@@ -4579,7 +4579,8 @@ async function watch() {
     const payload = await response.json();
     applyUiVersion(payload.version);
     // The node answered, so finish the first sync if it never finished. This loop always runs.
-    if (!synced) sync("watch");
+    if (openingView) { /* component owns recovery; no hidden main-chat reads */ }
+    else if (!synced) sync("watch");
     else {
       // Give durable recovery priority over optional model diagnostics. Periodic
       // versioned reads also reconcile changes made by another window.
@@ -5212,11 +5213,24 @@ orchestratorBtn.addEventListener('click',openOrchestrator);
 let orchestratorPanel=null;
 let orchestratorPolling=false;
 let orchestratorTimer=null;
+let orchestratorFailures=0;
+// One read at a time in this window, including layout and exact-row recovery.
+// Controls never queue behind this chain and are never automatically replayed.
+let orchestratorReadTail=Promise.resolve();
+function queueOrchestratorRead(read) {
+  const pending=orchestratorReadTail.then(read);
+  orchestratorReadTail=pending.catch(()=>{});
+  return pending;
+}
 async function orchestratorRequest(body) {
-  const response=await apiFetch('subagents',{method:'POST',headers:apiHeaders({'Content-Type':'application/json'}),body:JSON.stringify(body)},65000);
-  const result=await response.json();
-  if(!response.ok || result.error) throw new Error(result.error || `HTTP ${response.status}`);
-  return result;
+  const read=['fleet','list','status','session','events','lookup_session'].includes(body.action);
+  const request=async()=>{
+    const response=await apiFetch('subagents',{method:'POST',headers:apiHeaders({'Content-Type':'application/json'}),body:JSON.stringify(body)},read?apiTimeout:65000);
+    const result=await response.json();
+    if(!response.ok || result.error) throw new Error(result.error || `HTTP ${response.status}`);
+    return result;
+  };
+  return read ? queueOrchestratorRead(request) : request();
 }
 function saveOrchestratorLayout() {
   if(!orchestratorPanel)return;
@@ -5228,10 +5242,12 @@ function saveOrchestratorLayout() {
 // not read, rather than showing a short list that reads as "nothing is running".
 async function orchestratorRead(path) {
   try {
-    const response=await apiFetch(path,{headers:apiHeaders()});
-    const value=await response.json();
-    if(!response.ok || value.error) throw new Error(value.detail || value.error || `HTTP ${response.status}`);
-    return {value};
+    return await queueOrchestratorRead(async()=>{
+      const response=await apiFetch(path,{headers:apiHeaders()});
+      const value=await response.json();
+      if(!response.ok || value.error) throw new Error(value.detail || value.error || `HTTP ${response.status}`);
+      return {value};
+    });
   } catch(error) { return {error:path+': '+error.message}; }
 }
 // The orchestrator lists children, not dispatches.
@@ -5377,11 +5393,19 @@ function taskLane(task,index) {
   return unknown;
 }
 
+function orchestratorDelay() {
+  const base=!uiVisible()?15000:orchestratorPanel?.activeTasks.length?2000:10000;
+  return Math.max(base,orchestratorFailures?Math.min(30000,2000*2**Math.min(orchestratorFailures,4)):0);
+}
 async function refreshOrchestrator() {
   if(!orchestratorPanel || orchestratorPolling)return;
+  clearTimeout(orchestratorTimer);
   orchestratorPolling=true;
   try {
-    const fleet=await orchestratorRequest({action:'fleet'});
+    // Placement/node configuration is not a live transcript dependency.
+    const fleet=orchestratorPanel.fleet && Date.now()-orchestratorPanel.fleetAt<30000 ? orchestratorPanel.fleet : await orchestratorRequest({action:'fleet'});
+    if(fleet!==orchestratorPanel.fleet)orchestratorPanel.fleetAt=Date.now();
+    orchestratorPanel.fleet=fleet;
     if(!orchestratorPanel.configured)orchestratorPanel.configure(fleet);
     const list=await orchestratorRequest({action:'list'});
     // The dispatches are not the whole truth about what is running: read the session ledger and the
@@ -5410,11 +5434,12 @@ async function refreshOrchestrator() {
       orchestratorPanel.restoring=false;
     }
     for(const pane of orchestratorPanel.allPanes()) await refreshAgentPane(pane);
+    orchestratorFailures=sessions.error||health.error?orchestratorFailures+1:0;
     orchestratorPanel.message=`${orchestratorPanel.activeTasks.length} active card(s) · closing this window keeps work running`;
-  } catch(error) { orchestratorPanel.message='Orchestration unavailable: '+error.message; }
+  } catch(error) { orchestratorFailures++;orchestratorPanel.message='Orchestration unavailable: '+error.message; }
   finally {
     orchestratorPolling=false;
-    if(orchestratorPanel?.isConnected)orchestratorTimer=setTimeout(refreshOrchestrator,2000);
+    if(orchestratorPanel?.isConnected)orchestratorTimer=setTimeout(refreshOrchestrator,orchestratorDelay());
   }
 }
 // A settled child's own words decide its footer where they are definite: a failure says `failed` and
@@ -5471,8 +5496,8 @@ async function panePage(pane, options) {
 // bounded and normally never runs: one page is the whole conversation.
 // Shared ordered ledger collector: callers supply their authenticated session page transport.
 // It preserves original rows and identities and refuses cyclic paging rather than inventing history.
-async function collectSessionHistory(readPage) {
-  let page=await readPage({}),rows=page.messages||[],seen=new Set();
+async function collectSessionHistory(readPage, firstPage=null) {
+  let page=firstPage || await readPage({}),rows=page.messages||[],seen=new Set();
   while(page.has_more_before) {
     const cursor=page.next_before_seq ?? rows[0]?.seq;
     if(cursor==null || seen.has(cursor))throw Error('session_cursor_did_not_advance');
@@ -5538,11 +5563,15 @@ async function nativeSessionTask(thread) {
   return task;
 }
 // Native identity is intentionally opaque; never feed it to runKey or /run-events.
-async function attachNativeJournal(task, readHistory, viewing=()=>true) {
+async function attachNativeJournal(task, readHistory, viewing=()=>true, previous=null) {
   const identity={id:task.subagent_id,attempt_id:task.attempt_id,session_id:task.session_id,
     node_id:task.node_id,event_node_id:task.event_node_id,event_epoch:task.event_epoch};
   if(!identity.id || !identity.attempt_id || !identity.event_node_id || !identity.event_epoch)throw Error('native_event_identity_unavailable');
-  let rows=await readHistory(),after=0,checkpoint=null,events=[],raw=[],seen=new Set(),last;
+  // A pane follows its last validated cursor. Main-chat recovery may still ask
+  // for a fresh attachment. Checkpoint changes reload the unmodified ledger.
+  let rows=previous?.rows || [],after=previous?.nextSeq || 0,checkpoint=previous?.checkpointSeq ?? null;
+  let events=previous?.events.slice() || [],raw=previous?.raw.slice() || [];
+  let seen=new Set(raw.map(item=>item.seq)),last;
   if(!viewing())throw Error('native_session_view_changed');
   for(;;) {
     const page=await orchestratorRequest({action:'events',...identity,after});
@@ -5551,6 +5580,8 @@ async function attachNativeJournal(task, readHistory, viewing=()=>true) {
       page.session_id!==identity.session_id || page.node_id!==identity.node_id || page.event_node_id!==identity.event_node_id || page.event_epoch!==identity.event_epoch)
       throw Error('native_event_identity_mismatch');
     if(page.durable!==true)throw Error('native_event_evidence_unavailable');
+    if(!Number.isSafeInteger(page.checkpoint_seq) || page.checkpoint_seq<0 ||
+      (checkpoint!==null && page.checkpoint_seq<checkpoint))throw Error('native_event_checkpoint_regressed');
     if(checkpoint!==page.checkpoint_seq) {
       rows=await readHistory();
       if(!viewing())throw Error('native_session_view_changed');
@@ -5699,7 +5730,7 @@ async function paneMessages(pane) {
   // not just its tail. The node still bounds the page - by bytes, by its own budget - and answers with
   // an address for a row too large to send; the rows are then drawn by the window's own renderer.
   const page=await panePage(pane,{});
-  let rows=page.has_more_before ? await collectSessionHistory(args=>panePage(pane,args)) : (page.messages || []);
+  let rows=page.has_more_before ? await collectSessionHistory(args=>panePage(pane,args),page) : (page.messages || []);
   for(let older=0; older<3 && rows[0]?.role==='tool'; older++) {
     const first=Number(rows[0].seq);
     if(!Number.isFinite(first) || first<=1) break;
@@ -5708,7 +5739,9 @@ async function paneMessages(pane) {
     if(!earlier.length) break;
     rows=earlier.concat(rows);
   }
-  rows=await Promise.all(rows.map(row=>row.omitted&&row.id&&row.evidence ? exactSessionRow(row,options=>panePage(pane,options)) : row));
+  // Exact retrieval can span many requests; never fan out one read per row.
+  for(let i=0;i<rows.length;i++)if(rows[i].omitted&&rows[i].id&&rows[i].evidence)
+    rows[i]=await exactSessionRow(rows[i],options=>panePage(pane,options));
   if(rows.some(row=>row.session_id && row.session_id!==pane.task.session_id))throw Error('native_session_identity_mismatch');
   return {rows,task:page.task,mode:page.session?.mode};
 }
@@ -5730,13 +5763,34 @@ async function exactSessionRow(reference,readPage) {
   if(row.id!==reference.id || row.seq!==reference.seq)throw Error('exact_message_identity_mismatch');
   return row;
 }
-async function refreshAgentPane(pane) {
+const paneRefreshes=new WeakMap();
+const paneJournals=new WeakMap();
+const paneRetries=new WeakMap();
+function paneReadFailed(pane,error) {
+  const failures=(paneRetries.get(pane)?.failures || 0)+1;
+  const delay=Math.min(30000,2000*2**Math.min(failures,4));
+  paneRetries.set(pane,{failures,at:Date.now()+delay,key:nativeViewKey(pane.task)});
+  pane.notice.setNotice('journal','Conversation refresh unavailable: '+error.message+'; retrying in '+delay/1000+'s. Previously loaded output retained.');
+}
+function refreshAgentPane(pane) {
+  if(paneRetries.has(pane) && paneRetries.get(pane).key!==nativeViewKey(pane.task))paneRetries.delete(pane);
+  if(Date.now()<(paneRetries.get(pane)?.at || 0))return Promise.resolve();
+  if(paneRefreshes.has(pane))return paneRefreshes.get(pane);
+  const pending=refreshAgentPaneOnce(pane).finally(()=>{if(paneRefreshes.get(pane)===pending)paneRefreshes.delete(pane);});
+  paneRefreshes.set(pane,pending);
+  return pending;
+}
+async function refreshAgentPaneOnce(pane) {
   if(!pane.task.session_id) { pane.notice.setNotice('journal',pane.task.error || 'Waiting for placement…'); return; }
   const target=pane.task.session_id,node=activeNode,attempt=pane.task.subagent_id,nativeAttempt=pane.task.attempt_id,credential=session;
   const viewing=()=>pane.isConnected && pane.task.session_id===target && pane.task.subagent_id===attempt && pane.task.attempt_id===nativeAttempt && activeNode===node && credential===session;
   try {
-    const result=await paneMessages(pane);
+    const cached=paneJournals.get(pane);
+    const previous=cached?.key===nativeViewKey(pane.task)?cached:null;
+    if(previous?.settled && pane.task.settled && pane.painted && !paneRetries.has(pane) && Date.now()-previous.at<30000)return;
+    let result=pane.task.transport==='native' ? null : await paneMessages(pane);
     if(!viewing())return;
+    const history=async()=>{result=await paneMessages(pane);return result.rows;};
     let attached=null;
     let journalError='';
     try {
@@ -5745,9 +5799,21 @@ async function refreshAgentPane(pane) {
         throw error;
       });
       if(!viewing())return;
-      if(native.transport==='native'&&native.session_id===target)attached=await attachNativeJournal(native,async()=>(await paneMessages(pane)).rows,viewing);
-      else attached=await attachSessionJournal(pane.task.session_id,async()=> (await paneMessages(pane)).rows);
-    }catch(error){journalError='Live journal unavailable: '+error.message;}
+      if(native.transport==='native'&&native.session_id===target) {
+        attached=await attachNativeJournal(native,history,viewing,previous);
+        if(viewing())paneJournals.set(pane,{...attached,key:nativeViewKey(pane.task),mode:result?.mode || previous?.mode,at:Date.now()});
+      } else attached=await attachSessionJournal(pane.task.session_id,history);
+    }catch(error){
+      journalError='Live journal unavailable: '+error.message;
+      if(viewing() && (pane.task.transport==='native' || /read_capacity_busy/.test(error.message)))paneReadFailed(pane,error);
+    }
+    if(!viewing())return;
+    if(!attached && pane.task.transport==='native' && journalError &&
+      !nativeJournalUnavailable({message:journalError.replace('Live journal unavailable: ','')}))return;
+    if(!result) {
+      const terminalGap=pane.task.settled && nativeJournalUnavailable({message:journalError.replace('Live journal unavailable: ','')});
+      result=attached ? {rows:attached.rows,mode:previous?.mode} : previous && !terminalGap ? {rows:previous.rows,mode:previous.mode} : await paneMessages(pane);
+    }
     if(!viewing())return;
     if(!attached && pane.task.transport==='native' && journalError) {
       const terminal={...pane.task,...result.task};
@@ -5757,17 +5823,16 @@ async function refreshAgentPane(pane) {
         pane.notice.setNotice('journal',journalError+'; showing stored terminal messages. Previously seen output retained; raw history gap remains.');
         return;
       }else if(pane.liveJournalAttached || !nativeJournalUnavailable({message:journalError.replace('Live journal unavailable: ','')})) {
-        pane.notice.setNotice('journal',journalError);
         return;
       }
     }
     if(!attached && pane.liveJournalAttached && pane.painted && journalError) {
-      pane.notice.setNotice('journal',journalError);
       return;
     }
     if(attached){
       if(attached.identity && retainNativeTerminal(pane.transcript,pane.task,attached.rows)) {
         pane.notice.setNotice('journal','Native journal restored; stored messages and previously seen output retained.');
+        paneRetries.delete(pane);
         return;
       }
       pane.liveJournalAttached=!!(attached.identity||attached.runKey);
@@ -5785,7 +5850,7 @@ async function refreshAgentPane(pane) {
     if(latest) pane.task={...pane.task,context_readout:contextReadout(measured&&(!latest.model||measured.model===latest.model)?{...measured,capacity:latest.capacity}:latest)};
     // A repaint throws away the transcript's scroll position and its folded topics, so a poll that
     // found the same rows, the same state and the same in-flight call leaves the pane it found alone.
-    const painted=JSON.stringify([rows,result.events,result.mode,pane.task.state,pane.task.settled,
+    const painted=JSON.stringify([rows,result.events,result.identity,result.raw,result.mode,pane.task.state,pane.task.settled,
       pane.task.preview?.tool?.call_id]);
     if(painted!==pane.painted) {
       pane.painted=painted;
@@ -5801,7 +5866,8 @@ async function refreshAgentPane(pane) {
     // sit here, restating the `completed`/duration footer the run already draws in its own bubble.
     pane.notice.setNotice('journal',[panePageNote,journalError,pane.task.error].filter(Boolean).join(' '));
     if(panePageNote)pane.notice.title=panePageNoteDetail;
-  } catch(error) { if(viewing())pane.notice.setNotice('journal','Conversation unavailable: '+error.message); }
+    if(!journalError)paneRetries.delete(pane);
+  } catch(error) { if(viewing())paneReadFailed(pane,error); }
 }
 function mountOrchestrator() {
   rememberNode(''); // This node owns the dispatcher; each task carries its destination.
@@ -5812,12 +5878,23 @@ function mountOrchestrator() {
   orchestratorPanel.addEventListener('orchestrator-action',async event=>{
     const {action}=event.detail;
     if(action==='close') { saveOrchestratorLayout(); if(native?.closeView)native.closeView();else window.close();return; }
-    if(action==='layout') { if(!orchestratorPanel.restoring)saveOrchestratorLayout(); for(const pane of orchestratorPanel.allPanes())refreshAgentPane(pane);return; }
+    if(action==='layout') {
+      if(!orchestratorPanel.restoring)saveOrchestratorLayout();
+      // Startup/poll already refreshes restored panes. A layout is not a reason
+      // to reread every existing conversation (including promoted duplicates).
+      if(!orchestratorPolling)for(const pane of orchestratorPanel.allPanes())if(!pane.painted)void refreshAgentPane(pane);
+      return;
+    }
     try {
       if(action==='save-placement') {
         await orchestratorRequest({action:'placement',policy:orchestratorPanel.policy});
+        orchestratorPanel.fleet=null;
         orchestratorPanel.message='Node order and limits saved.';
-      } else if(action==='refresh') { clearTimeout(orchestratorTimer);await refreshOrchestrator(); }
+      } else if(action==='refresh') {
+        orchestratorPanel.fleet=null;
+        for(const pane of orchestratorPanel.allPanes()){paneJournals.delete(pane);paneRetries.delete(pane);}
+        await refreshOrchestrator();
+      }
     } catch(error) { orchestratorPanel.message=error.message; }
   });
   orchestratorPanel.addEventListener('agent-action',async event=>{
@@ -6826,9 +6903,9 @@ if (!openingView) {
 window.rendererLoaded = loadRenderer().then(() => {
   if (openingView || inspectWindow) applyViewMode();
 });
-window.addEventListener("online", () => sync("online"));
+window.addEventListener("online", () => { if(!openingView)sync("online");else if(orchestratorPanel)void refreshOrchestrator(); });
 watch();
-watchTurn();
+if(!openingView)watchTurn();
 // Restore clocks and reconcile immediately on return, not after a hidden-tab timer.
 let uiResumeQueued=false;
 function resumeUi() {
@@ -6839,8 +6916,8 @@ function resumeUi() {
     uiResumeQueued=false;
     if(!uiVisible())return;
     updateRunElapsed();trace?.setAge();
-    metadataRefreshedAt=0;
-    void ensureMeta();void watchTurn();
+    if(openingView) { if(orchestratorPanel)void refreshOrchestrator(); }
+    else { metadataRefreshedAt=0;void ensureMeta();void watchTurn(); }
   });
 }
 document.addEventListener('visibilitychange',resumeUi);
