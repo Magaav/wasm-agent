@@ -63,10 +63,27 @@ Directories are scanned recursively for `SKILL.md`, skipping `.git`,
 
 When executing any skill, identify segments with repeatable inputs, deterministic
 steps and observable success. Work out the sequence, parameterize changing values,
-save it with `spell_save`, execute it and verify its mandatory `post`. Refactor the
-editable skill to point to that spell, its inputs, and its fallback. Keep the original
+save it with `spell_save`, execute it where supported and verify its mandatory
+`post`. Refactor the editable skill to point to that spell, its inputs, and its fallback. Keep the original
 inference procedure available until the replacement is proven. Stay within the current
 task's authorization and tool/file scope; do not install or edit someone else's skill.
+
+### Choose the supported execution path before replay
+
+When the session already has an allocated **required** worktree, use the skill's
+verified direct CLI and its postcheck first. Do not call `spell_run` just to
+rediscover `workspace_execution_context_unsupported`. If workspace status is
+unknown, inspect it once; a missing/unavailable required tree remains a blocker,
+not permission to run elsewhere. Never clear the binding or relax protection.
+Run the equivalent scripts against the owned root with the same preconditions,
+postconditions, timeouts and evidence retention. A CLI failure still requires
+inspection; it is not a reason to blindly replay effects.
+
+Keep named spell definitions as portable, versioned plans; record unsupported
+replay as unverified, not failed execution or settled success. Resume replay
+verification only after explicit evidence that the runner supports this binding.
+This routing avoids a known refused call; it does not implement workspace-aware
+spell execution or make a plain script automatically a verified spell.
 
 If spell A succeeds in one turn and spell B follows in the next, crystallize their
 verified sequence with `spell_compose` when it will recur. Preserve A's postconditions,
