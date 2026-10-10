@@ -68,7 +68,7 @@ with an explicit timestamp. See [LIGHTWEIGHT-UI.md](LIGHTWEIGHT-UI.md).
 ## Compact chat phases and debug history
 
 Ordinary chat shows the compact strip in the existing sticky footer:
-`✦ 6s · ◈ ≥1.1M · ✧ 26 · ⚒ 82 · ◷ 2:24`. The left clock measures the current
+`✦ 6s · ◈ ~250k · ✧ 26 · ⚒ 82 · ◷ 2:24`. The left clock measures the current
 phase (description in tooltip/debug); the last clock is total turn duration.
 Token estimate/reporting and compact context occupancy are defined in
 [MINIMAL-CHAT.md](MINIMAL-CHAT.md). The phase replaces the
@@ -83,11 +83,15 @@ the next frame returns to the dot. The existing once-per-second status clock adv
 there is no CSS rotation/pulse, new timer, blur or full-window effect. Hidden
 surfaces do not tick it; settlement removes it.
 Settlement hides the current phase and preserves totals in the footer:
-`completed                 ✧ 5 · ⚒ 8 · ◷ 1:08`. `✧` counts provider-call
+`completed            ◈ 250k · ✧ 5 · ⚒ 8 · ◷ 1:08`. `✧` counts provider-call
 attempts at the prepared-request boundary (including failed/retried requests and
 summaries), not decision rounds, billed inferences or internal transport reconnects.
 Pre-request refusals do not count. `⚒` counts requested tool dispatches, including
 failed/fenced calls; it is not successful effects or ranges inside `read_many`.
+`◈` is net task-context growth, not provider/cache spend: measured post-request
+boundary minus the pre-turn boundary; original billed accounting remains below.
+Snapshots retain both endpoints and uncertainty for replay, including compaction
+net shrink and unknown historical baselines. See [MINIMAL-CHAT.md](MINIMAL-CHAT.md).
 Cumulative versioned `run_counts` snapshots live in existing message traces,
 never model context, and are re-emitted after checkpoints so reconnects can
 recover the count. Snapshot replay replaces totals; it never sums repeated rows.

@@ -197,6 +197,23 @@ are not GPU/power proof: record real-window measurements separately, never call
 percent utilization a temperature or a fan-speed cause. Keep the HTML title
 unchanged in probes; the observer positively checks that exact title.
 
+## Turn context-growth proof
+
+Run `node <repo>/scripts/test-context-growth.cjs <fresh-evidence>` and its
+`--post` check for signed net growth before model/tool/time counters, 600k→850k
+showing250k, historical unknowns, partial endpoints, duplicate/reload/child
+isolation and exact tooltip. `context-growth-proof` records the same sequence;
+required workspaces use the verified CLI. Also run the hermetic real-agent
+`scripts/test-context-growth.lua` with private home/DB, both explicit source root
+and standalone embedded candidate; compare hot/cold cache, summary, failure,
+new-run baseline and net shrink. Provider billing stays separate. Run the
+required UI/recovery suite, not a full release gate. Never claim exact per-token
+streaming from chars or substitute cache misses for context growth.
+Adjacent `test-turn-topics.cjs <fresh-evidence>` + `--post` checks actual-summary
+visibility/clock/replay, dashed queued steering above status/read-to-Steered topic
+identity and main/child isolation, plus truthful partial `read_many` failures.
+Use its direct CLI in a required workspace; these probes never control live runs.
+
 ## Run-count footer proof
 
 Run `node <repo>/scripts/test-run-counts.cjs <fresh-evidence>`, then the same

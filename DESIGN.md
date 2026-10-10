@@ -132,6 +132,12 @@ the trigger. An opaque resting surface blends into the composer and gains a
 clickable border/background on hover or keyboard focus; keyboard and balloon close
 behavior remain unchanged.
 
+Actual model summary requests show a shared topic **Model is summarizing** inside
+the bubble, including elapsed time; no debug toggle is needed. Queued steering is
+one dashed topic per receipt at the bubble bottom immediately above status;
+consumed steering becomes **Steered**, not a separate user bubble. Read means
+entered context, never compliance. Main and children share this presentation.
+
 Commentary streams inside an open `wa-commentary` topic, with character count
 updated per chunk. Only explicit per-item phase establishes commentary. Unknown
 phase stays provisional. Commentary is never automatically closed or folded into
@@ -148,6 +154,9 @@ sections, in order:
    misreports what that run used;
 2. **context** — last measured request input and selected model capacity. Never
    substitute a whole run's cumulative input for one request's context;
+   bubble `◈` separately shows **net context added this turn**, not cache rereads
+   or billed usage, before `✧ · ⚒ · ◷` both live and completed. Exact measured
+   post-request endpoints remain in details; missing historical baselines stay unknown;
 3. **limits** — the provider's rolling windows: `5h` (`rolling`), `7d`
    (`weekly`), `30d` (`monthly`), each a percent with a meter and a reset
    estimate; "limits unavailable" when the provider exposes none;

@@ -304,6 +304,29 @@ function M.events(session_id, cursor, limit, since)
     dropped_writes=drops.count}
 end
 
+-- One last task-request boundary, not cumulative billed input or cache misses.
+-- The covering session/seq index walks backwards to one model end; no history payload scan.
+function M.last_context_boundary(session_id,model)
+  M.setup()
+  local rows,reason=query([[SELECT payload FROM harness_events
+    WHERE session_id=? AND kind='model_call' AND phase='end' ORDER BY seq DESC LIMIT 1]],{session_id})
+  if not rows then return nil,'ledger_unreadable: '..tostring(reason) end
+  if not rows[1] then
+    local history=query("SELECT EXISTS(SELECT 1 FROM messages WHERE session_id=? LIMIT 1) AS present",{session_id})
+    if history and history[1] and history[1].present==0 then return 0,'empty_session' end
+    return nil,'prior_context_unmeasured'
+  end
+  local ok,last=pcall(json.decode,rows[1].payload)
+  local usage=ok and type(last)=='table' and last.normalized
+  if not usage or not usage.known or usage.issue or type(usage.prompt)~='number' or type(usage.output)~='number'
+      or usage.prompt<0 or usage.output<0 or usage.prompt%1~=0 or usage.output%1~=0
+      or usage.prompt+usage.output>9007199254740991 then
+    return nil,'prior_context_unmeasured'
+  end
+  if last.model~=model then return nil,'model_changed' end
+  return usage.prompt+usage.output,'provider_boundary'
+end
+
 local function empty()
   return {calls=0, failed=0, missing_usage=0, missing_cache=0, unpriced=0,
     prompt=0, input=0, cacheRead=0, cacheWrite=0, output=0, reasoning=0,

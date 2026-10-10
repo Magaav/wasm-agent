@@ -204,9 +204,14 @@ the transcript needs one result per call id. Read means entered context, not
 obedience. Unread messages at settlement or boot mismatch are deferred, never
 replayed.
 
-Main chat exposes **Steer** / Ctrl+Enter while busy; plain Enter keeps the draft
-and Stop remains explicit. Child panes distinguish **Send** (follow-up) from
-**Steer** (active run). Drafts clear only after an accepted receipt. Cards expose
+Main chat keeps Ctrl+Enter while busy; plain Enter keeps the draft and Stop
+remains explicit. Dedicated Steer buttons are removed. Accepted queued steering
+is a dashed shared topic immediately above bubble status; read becomes **Steered**
+in that same turn (entered context, not compliance). New durable rows carry an
+additive identity trace, original text unchanged. Existing session reads include
+bounded unread receipt metadata, not duplicated steering text or a new poll.
+Child transports retain the backend steering capability; orchestration task-owner
+followups still require the terminal report. Drafts clear only after an accepted receipt. Cards expose
 model and reasoning, with unknown values labeled rather than guessed. Links are
 blue-ish and underlined; executable URL schemes are refused.
 

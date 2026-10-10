@@ -523,23 +523,63 @@ function applyRunCounts(counts) {
   if(counts.context?.estimated===false && Number.isSafeInteger(counts.context.tokens) && counts.context.tokens>=0)
     measuredContexts.set(transcript,{...counts.context,scope:runStepScope()});
   if(transcript===messages) updateContextReadouts();
+  renderSummaryStep(counts.summary_step);
   updateRunElapsed();
+}
+
+function renderSummaryStep(fact) {
+  if(fact?.version!==1 || typeof fact.id!=='string' || !fact.id ||
+    !Number.isFinite(fact.started_at) || fact.started_at<=0 ||
+    !['running','completed','failed','unfinished'].includes(fact.state))return;
+  const bubble=currentBubble();
+  let topic=Array.from(bubble.querySelectorAll('wa-summary')).find(node=>node.dataset.summaryId===fact.id);
+  if(!topic){topic=document.createElement('wa-summary');bubble.body.append(topic);}
+  if(topic.fact?.state!=='running'&&fact.state==='running'&&topic.fact)return;
+  topic.update(fact);
+  if(fact.state==='running') {
+    if(!replayingMessages) {
+      showRunStep('summary:'+fact.id,'Model is summarizing');
+      if(runStepState?.active?.key==='summary:'+fact.id)runStepState.active.started=fact.started_at*1000;
+    }
+  } else if(runStepState?.active?.key==='summary:'+fact.id)finishRunStep(fact.state);
+  keepStatusLast();
+}
+
+function renderSteering(fact) {
+  if(typeof fact?.id!=='string'||!fact.id||!['queued','read','deferred','unknown'].includes(fact.state))return;
+  const bubble=currentBubble();
+  let topic=Array.from(bubble.querySelectorAll('wa-steering')).find(node=>node.dataset.steeringId===fact.id);
+  if(!topic){topic=document.createElement('wa-steering');bubble.body.append(topic);}
+  if(topic.fact?.state==='read'&&fact.state!=='read')return;
+  topic.update({...topic.fact,...fact});
+  keepStatusLast();pin();
 }
 
 function runCountsFooter(duration) {
   const prefix = replayingMessages && runCounts && !runCounts.complete ? '≥' : '';
   if (replayingMessages && runCounts?.complete && Number.isFinite(runCounts.elapsed_ms) && runCounts.elapsed_ms >= 0)
     duration = runDuration(runCounts.elapsed_ms);
-  return `✧ ${prefix}${runCounts?.model_calls ?? '?'} · ⚒ ${prefix}${runCounts?.tool_calls ?? '?'} · ◷ ${duration}`;
+  return `◈ ${turnTokenReadout()} · ✧ ${prefix}${runCounts?.model_calls ?? '?'} · ⚒ ${prefix}${runCounts?.tool_calls ?? '?'} · ◷ ${duration}`;
 }
 
 function turnTokenReadout() {
-  if(!Number.isSafeInteger(runCounts?.tokens_reported))return '?';
-  const pending=runCounts.model_calls>(runCounts.usage_calls ?? 0);
-  // Providers report usage at request completion, not every visible text chunk.
-  // Never label a characters/4 guess or unseen reasoning as exact tokens.
-  const prefix=runCounts.usage_unknown || pending ? '≥' : '';
-  return prefix+formatTokens(runCounts.tokens_reported);
+  const growth=runCounts?.context_growth;
+  if(growth?.version!==1 || !growth.known || !Number.isSafeInteger(growth.added)||
+    !Number.isSafeInteger(growth.baseline)||!Number.isSafeInteger(growth.current)||
+    growth.baseline<0||growth.current<0||growth.added!==growth.current-growth.baseline)return '?';
+  const incomplete=growth.partial||growth.pending||replayingMessages&&!growth.complete;
+  const prefix=incomplete?'~':'';
+  const number=growth.added<0?'-'+formatTokens(-growth.added):formatTokens(growth.added);
+  return prefix+number;
+}
+function turnTokenDetail() {
+  const growth=runCounts?.context_growth;
+  if(turnTokenReadout()==='?')return 'Context added this turn: unavailable (no comparable provider-measured baseline/end). Historical billed/cache totals are not substituted.';
+  return 'Net context added this turn: '+growth.added.toLocaleString('en-US')+' tokens ('+
+    growth.baseline.toLocaleString('en-US')+' → '+growth.current.toLocaleString('en-US')+
+    '). Cached prompt rereads are not added; not billed token spend.'+
+    (growth.compactions?' Includes '+growth.compactions+' compaction(s); negative values mean net context shrank.':'')+
+    (growth.partial||growth.pending?' ~ is an incomplete observed boundary, not exact live tokenization.':'');
 }
 function turnIsActive() { return rendererTask ? !rendererTask.settled&&/^(running|accepted|queued|placing)$/.test(rendererTask.state) : busy || observedRun?.session === chatSession; }
 function runStepScope() { return activeNode + ":" + (rendererTask?.session_id||chatSession) + ":" + conversationEpoch + (rendererTask?':'+(rendererTask.attempt_id||rendererTask.subagent_id):''); }
@@ -677,6 +717,7 @@ function ensureObservedRunStep(current) {
 function keepStatusLast() {
   if (statusLine) {
     const owner=runBubble?.body || transcript;
+    for(const queued of owner.querySelectorAll(':scope > wa-steering[data-state="queued"]'))owner.append(queued);
     if (owner.lastElementChild!==statusLine) owner.append(statusLine);
   }
 }
@@ -766,6 +807,7 @@ function runDuration(ms) {
 
 function updateRunElapsed() {
   for(const retry of runBubble?.querySelectorAll('wa-retry') || []) retry.setAge();
+  for(const summary of runBubble?.querySelectorAll('wa-summary') || []) summary.setAge();
   const step = runStepState?.active;
   if (step && transcript.dataset.debug === 'true') step.node.setStep(step.label, "running", Date.now() - step.started);
   updateRunPhase();
@@ -784,7 +826,7 @@ function updateRunElapsed() {
   if(!replayingMessages&&runCounts?.context) {
     if(rendererTask)updateChildContextReadouts();else if(transcript===messages)updateContextReadouts();
   }
-  statusElapsed.title='Turn provider-reported input + output: '+(Number.isSafeInteger(runCounts?.tokens_reported)?runCounts.tokens_reported.toLocaleString('en-US'):'unknown')+' tokens (cached input/retries/summaries included). ≥ means pending or missing usage; exact per-token streaming is unavailable.';
+  statusElapsed.title=turnTokenDetail();
 }
 
 function startRunStatusTicker() {
@@ -794,6 +836,7 @@ function startRunStatusTicker() {
 }
 
 function finishRunStatus(label = "completed") {
+  for(const summary of runBubble?.querySelectorAll('wa-summary') || []) summary.freeze(label==='failed'?'failed':'unfinished');
   if(transcript===messages)chatShell.warning.setNotice('active','');
   for(const retry of runBubble?.querySelectorAll('wa-retry') || [])
     retry.interrupt(label==='cancelled'?'cancelled':'unfinished');
@@ -810,7 +853,7 @@ function finishRunStatus(label = "completed") {
   statusLabel.textContent = label;
   updateRunElapsed();
   statusElapsed.textContent = runCountsFooter(statusElapsed.textContent);
-  statusElapsed.title = 'Provider-call attempts (includes retries/summaries, excludes internal transport reconnects) · requested tool calls · total duration; ? means unavailable, ≥ means last recorded lower bound';
+  statusElapsed.title = turnTokenDetail()+' Provider-call attempts (includes retries/summaries) · requested tool calls · total duration; ? means unavailable, ≥ means count lower bound.';
   statusLine.classList.add("finished");
   updateRunPhase();
   if (body) body.append(statusLine);
@@ -1027,6 +1070,15 @@ function toolOutcome(name, result) {
     case "read": {
       const lines = String(r.content || "").split("\n").length - 1;
       return { text: `${lines} lines` };
+    }
+    case "read_many": {
+      const results=Array.isArray(r.results)?r.results:[];
+      const errors=results.filter(item=>item?.error);
+      const failed=Number.isSafeInteger(r.failed)?r.failed:errors.length;
+      const first=errors[0];
+      const detail=first?' · '+(first.path||'request')+': '+first.error:'';
+      return {text:(results.length-failed)+' read'+(results.length-failed===1?'':'s')+' · '+failed+' failed'+detail,
+        failed:r.ok===false||failed>0};
     }
     case "bash":
     case "shell":
@@ -1479,14 +1531,14 @@ function collapseRun(finalStart = false) {
   // reader then opens topics to reach topics.
   const existing = Array.prototype.find.call(body.children, (c) => c.tagName === "WA-RUN");
   const moves = Array.prototype.filter.call(body.children,
-    (c) => c !== answer && c !== existing && c.tagName !== "WA-DIFF" && c.tagName !== "WA-COMMENTARY" && c !== statusLine);
+    (c) => c !== answer && c !== existing && c.tagName !== "WA-DIFF" && c.tagName !== "WA-COMMENTARY" && !(c.tagName==='WA-STEERING'&&c.dataset.state==='queued') && c !== statusLine);
   const traces = moves.filter((c) => c.tagName === "WA-TRACE");
   // A run topic is only created once something actually ran - a run that never called a tool keeps
   // its plain answer. But once a topic exists, a later reply must still fold the previous answer into
   // it even when that batch added no tool call: the guard is about *creating* the topic, not about
   // folding into one that is already there. Getting this wrong left the preamble sitting outside as
   // its own text segment, so the bubble read run,text,text instead of one run and one answer.
-  if (!existing && traces.length === 0 && !moves.some(c=>c.tagName==='WA-RETRY') && !finalStart) return;
+  if (!existing && traces.length === 0 && !moves.some(c=>c.tagName==='WA-RETRY'||c.tagName==='WA-SUMMARY'||c.tagName==='WA-STEERING') && !finalStart) return;
   if (moves.length === 0) return;
   const run = existing || document.createElement("wa-run");
   if (!existing) {
@@ -1630,6 +1682,8 @@ function handleEvent(event) {
     flushDecision();
   } else if (event.type === "run_counts") {
     applyRunCounts(event.counts);
+  } else if (event.type === 'steering') {
+    renderSteering(event);
   } else if (event.type === "checkpoint") {
     if (runStepState && !runStepState.userSeq && !trace) runStepState.userSeq = Number(event.seq) || null;
   } else if (event.type === "node") {
@@ -2022,6 +2076,8 @@ async function refreshNotifySupport() {
 function repaintMessages(rows, options = {}) {
   const savedSteps = runStepState?.scope === runStepScope() ? runStepState : null;
   const savedCounts = runCounts?.scope === runStepScope() ? runCounts : null;
+  const savedSteering=Array.from(runBubble?.querySelectorAll('wa-steering')||[]).filter(node=>node.fact?.state==='queued').map(node=>({node,fact:node.fact}));
+  const topicChoices=Array.from(transcript.querySelectorAll('wa-summary,wa-steering')).map(node=>({id:node.dataset.summaryId||node.dataset.steeringId,open:node.open}));
   const commentaryChoices=Array.from(transcript.querySelectorAll('wa-commentary')).map(node=>({id:node.dataset.messageId,pending:node.dataset.pendingId,text:node.body.textContent,open:node.open}));
   const savedCountUser = Number(Array.from(transcript.querySelectorAll('wa-message[role="user"]')).at(-1)?.dataset.messageSeq) || null;
   const changedRun = savedSteps?.id && runStepId() && savedSteps.id !== runStepId();
@@ -2071,7 +2127,10 @@ function repaintMessages(rows, options = {}) {
     // stops halfway is how "my own input is missing" becomes invisible: the rows before the throw
     // are drawn, the rows after it are not, and nothing says so.
     try {
-      if (message.role === "user") {
+      const steered=(message.trace||[]).find(item=>item.kind==='steering'&&item.state==='read'&&item.id===message.id);
+      if(message.role==='user'&&steered) {
+        renderSteering({...steered,text:message.content,seq:message.seq});
+      } else if (message.role === "user") {
         finishReplayedRun();
         runCounts = null;
         flushDecision(true);
@@ -2170,6 +2229,7 @@ function repaintMessages(rows, options = {}) {
   // reader could not tell it from a live one. Every replayed decision closes as unrecorded.
   // Replay has no `done` event. Close each historical run at its next user boundary, then use
   // the ledger's current state for the final run. An active run remains open until it settles.
+  for(const fact of options.steering||[])if(fact.state!=='read'||!transcript.querySelector('wa-steering[data-steering-id="'+CSS.escape(fact.id)+'"]'))renderSteering(fact);
   finishReplayedRun(true, options);
   // A repaint holds no stream for the run it draws, so a call with no recorded result is history: it
   // is closed as unrecorded rather than left with a clock nobody is timing. The exception is the call
@@ -2201,6 +2261,15 @@ function repaintMessages(rows, options = {}) {
   } else runStepState = null;
   if (options.active && observedRun?.session === chatSession) ensureObservedRunStep(observedRun);
   if (options.active && savedCounts && !changedRun && savedCountUser === replayUserSeq) {applyRunCounts(savedCounts);updateRunElapsed();}
+  if(options.active&&runCounts?.summary_step?.state==='running')renderSummaryStep(runCounts.summary_step);
+  if(!options.active)for(const topic of transcript.querySelectorAll('wa-summary'))topic.freeze();
+  if(options.active&&!changedRun&&savedCountUser===replayUserSeq)for(const item of savedSteering) {
+    const existing=runBubble?.querySelector('wa-steering[data-steering-id="'+CSS.escape(item.fact.id)+'"]');
+    if(!existing){currentBubble().body.append(item.node);keepStatusLast();}
+  }
+  for(const node of transcript.querySelectorAll('wa-summary,wa-steering')) {
+    const choice=topicChoices.find(old=>old.id===(node.dataset.summaryId||node.dataset.steeringId));if(choice)node.open=choice.open;
+  }
   for(const node of transcript.querySelectorAll('wa-commentary')) {
     const choice=commentaryChoices.find(old=>old.id&&old.id===node.dataset.messageId || old.pending&&old.pending===node.dataset.pendingId || !old.id&&!node.dataset.messageId&&old.text===node.body.textContent);
     if(choice)node.open=choice.open;
@@ -2462,7 +2531,7 @@ async function restoreSessionOnce(target, epoch, node = activeNode) {
     const loadedSeq = (full.messages || []).reduce((last, row) => Math.max(last, Number(row.seq) || 0), 0);
     if (full && Array.isArray(full.messages) && full.messages.length) {
       repaintMessages(full.messages, { state: outcome.name, stateAt: full.state?.at,
-        active: !!activeRun(health, wanted.id) });
+        active: !!activeRun(health, wanted.id),steering:full.steering });
     } else {
       repaintMessages([]);
     }
@@ -3606,7 +3675,7 @@ async function steerActiveRun() {
       input.value='';draftGeneration++;draftUndo=[];draftRedo=[];autosize();saveDraft();
     }
     steeringSubmission=null;
-    setStatus('Steering '+receipt.state+' — applies at the next safe boundary; in-flight effects are not undone.');
+    renderSteering({...receipt,text});
   } catch(error) {if(viewing())setStatus('Steering not confirmed; draft kept: '+error.message);}
   finally {steeringPending=false;if(steerButton)steerButton.disabled=false;}
 }
@@ -3669,7 +3738,7 @@ input.addEventListener("keydown", (event) => {
       // Typing ahead is not a stop gesture. The red button remains the explicit stop control; Enter
       // keeps the next prompt in the composer so one keystroke cannot cancel a healthy provider call.
       saveDraft();
-      setStatus("run still working — draft kept; Ctrl+Enter or Steer sends it now; Stop cancels");
+      setStatus("run still working — draft kept; Ctrl+Enter sends steering; Stop cancels");
       return;
     }
     form.requestSubmit();
@@ -5743,7 +5812,7 @@ async function paneMessages(pane) {
   for(let i=0;i<rows.length;i++)if(rows[i].omitted&&rows[i].id&&rows[i].evidence)
     rows[i]=await exactSessionRow(rows[i],options=>panePage(pane,options));
   if(rows.some(row=>row.session_id && row.session_id!==pane.task.session_id))throw Error('native_session_identity_mismatch');
-  return {rows,task:page.task,mode:page.session?.mode};
+  return {rows,task:page.task,mode:page.session?.mode,steering:page.steering,steeringMore:page.steering_more};
 }
 async function exactSessionRow(reference,readPage) {
   let offset=1,version=null,text='',bytes=null;
@@ -5850,21 +5919,21 @@ async function refreshAgentPaneOnce(pane) {
     if(latest) pane.task={...pane.task,context_readout:contextReadout(measured&&(!latest.model||measured.model===latest.model)?{...measured,capacity:latest.capacity}:latest)};
     // A repaint throws away the transcript's scroll position and its folded topics, so a poll that
     // found the same rows, the same state and the same in-flight call leaves the pane it found alone.
-    const painted=JSON.stringify([rows,result.events,result.identity,result.raw,result.mode,pane.task.state,pane.task.settled,
+    const painted=JSON.stringify([rows,result.events,result.identity,result.raw,result.mode,result.steering,result.steeringMore,pane.task.state,pane.task.settled,
       pane.task.preview?.tool?.call_id]);
     if(painted!==pane.painted) {
       pane.painted=painted;
       // Preserve the reader's place while the shared ledger renderer appends/repaints.
       const position=transcriptPlace(pane.transcript);
       paintChildTranscript(pane.transcript,rows,{state:childRunState(pane.task),
-        task:pane.task,mode:result.mode,stateAt:pane.task.settled_at,active:!pane.task.settled,liveTool:pane.task.preview?.tool,events:result.events,raw:result.raw,identity:result.identity});
+        task:pane.task,mode:result.mode,steering:result.steering,stateAt:pane.task.settled_at,active:!pane.task.settled,liveTool:pane.task.preview?.tool,events:result.events,raw:result.raw,identity:result.identity});
       restoreTranscriptPlace(pane.transcript,position);
       if(result.identity)rememberNativeRows(pane.transcript,pane.task,rows,result.raw);
     }
     // What is left for the pane's own notice is what the shared transcript cannot say: a failure the
     // child reported, a page size this node refused, or nothing. `Ready for your next message.` used to
     // sit here, restating the `completed`/duration footer the run already draws in its own bubble.
-    pane.notice.setNotice('journal',[panePageNote,journalError,pane.task.error].filter(Boolean).join(' '));
+    pane.notice.setNotice('journal',[panePageNote,journalError,pane.task.error,result.steeringMore?'Some queued steering receipts exceed this bounded page; full receipts remain available via steering_status.':''].filter(Boolean).join(' '));
     if(panePageNote)pane.notice.title=panePageNoteDetail;
     if(!journalError)paneRetries.delete(pane);
   } catch(error) { if(viewing())paneReadFailed(pane,error); }
@@ -5909,7 +5978,10 @@ function mountOrchestrator() {
         if(action==='message')pane.task={...receipt,execution_node:pane.task.execution_node};
         saveOrchestratorLayout();
       }
-      pane.notice.setNotice('submission',action==='steer' ? 'Steering '+receipt.state+'; in-flight effects are not undone.' : action==='message' ? 'Message accepted in this session.' : 'Cancellation requested.');
+      if(action==='steer') {
+        withChildRenderer(pane.transcript,pane.task,()=>renderSteering({...receipt,text}));
+        pane.notice.setNotice('submission','');
+      } else pane.notice.setNotice('submission',action==='message' ? 'Message accepted in this session.' : 'Cancellation requested.');
     } catch(error) { pane.notice.setNotice('submission',error.message); }
     finally { if(button)button.disabled=false; }
   });

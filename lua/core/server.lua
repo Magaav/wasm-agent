@@ -780,6 +780,7 @@ function wa_session(session_id, session)
     session = record,
     state = memory.session_state(session_id),
     messages = memory.session_messages(session_id, { limit = 500 }),
+    steering = dofile('lua/core/steering.lua').view(session_id),
     orchestration = record.objective~='subagent' and users.is_master(effective_role(user)) and
       dofile('lua/core/orchestration_mode.lua').read(session_id) or nil,
   })

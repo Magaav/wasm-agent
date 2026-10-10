@@ -48,12 +48,15 @@ assert(steering.control({session_id=sid,text='new',idempotency_key='two'},ctx).e
 assert(steering.control({session_id=sid,text='race',idempotency_key='race'},ctx,receipt.run_id).error=='no_active_steering_target','settlement race refuses stale trusted child target')
 assert(steering.control({session_id=sid,text='new',idempotency_key='two'},{user_id='other'}).error=='forbidden_steering_session')
 local found=0
-for _,r in ipairs(memory.session_messages(sid)) do if r.id==receipt.id then found=found+1 end end
+for _,r in ipairs(memory.session_messages(sid)) do if r.id==receipt.id then
+  found=found+1;assert(r.trace[1].kind=='steering' and r.trace[1].state=='read' and r.trace[1].run_id==receipt.run_id,'durable steering display identity')
+end end
 assert(found==1,'atomic consumption appends once')
 steering.begin('owner',sid,'second')
 assert(steering.control({session_id=sid,text='x',idempotency_key='stale',run_id='old'},ctx).error=='steering_target_changed')
 local pending=steering.control({session_id=sid,text='next',idempotency_key='second'},ctx)
 assert(not steering.admit('owner',sid,'second'),'queued message fences admission')
+local view=steering.view(sid);assert(view[1].id==pending.id and view[1].state=='queued' and view[1].text==nil,'existing session read exposes bounded queued steering identity without duplicating text or consumption')
 assert(#steering.consume('owner',sid,'second')==1 and #steering.consume('owner',sid,'second')==0)
 assert(steering.admit('owner',sid,'second'),'consumed inbox permits new plan')
 steering.control({session_id=sid,text='interrupted',idempotency_key='third'},ctx)

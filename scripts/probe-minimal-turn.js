@@ -3,16 +3,16 @@ const report=document.createElement('pre');report.id='wa-probe';report.hidden=tr
 try {
  await rendererLoaded;for(let i=0;i<200&&!transcriptReady;i++)await new Promise(r=>setTimeout(r,10));check(transcriptReady,'startup ready');
  for(let i=1;i<10000;i++){clearTimeout(i);clearInterval(i);}busy=true;observedRun=null;runBubble=null;clearStatus();transcript.replaceChildren();runStepState=null;runCounts=null;
- const snapshot=(extra={})=>({version:1,run_id:'minimal',model_calls:26,tool_calls:82,tokens_reported:12000,usage_calls:25,usage_unknown:0,pending_input:1000,context:{tokens:260000,capacity:1000000,estimated:true},...extra});
+ const snapshot=(extra={})=>({version:1,run_id:'minimal',model_calls:26,tool_calls:82,tokens_reported:12000,context_growth:{version:1,baseline:600000,current:610000,added:10000,known:true,pending:true,partial:false,complete:false,compactions:0},usage_calls:25,usage_unknown:0,pending_input:1000,context:{tokens:260000,capacity:1000000,estimated:true},...extra});
  runStartedAt=Date.now()-144000;handleEvent({type:'run_counts',counts:snapshot()});handleEvent({type:'status',text:'model'});runStepState.active.started=Date.now()-6000;updateRunElapsed();
  check(statusPhase.textContent==='6s'&&statusPhase.title==='Reasoning','only phase seconds; phase retained as tooltip');
- check(statusElapsed.textContent===' · ◈ ≥12k · ✧ 26 · ⚒ 82 · ◷ 2:24','requested spaced live strip with pending usage marked');
- handleEvent({type:'reasoning',text:'x'.repeat(40)});updateRunElapsed();check(turnTokenReadout()==='≥12k','text characters never fabricate exact billed tokens');
- handleEvent({type:'reasoning',text:'x'.repeat(200),complete:true});check(turnTokenReadout()==='≥12k','authoritative full copy never counts as usage');
- handleEvent({type:'run_counts',counts:snapshot({tokens_reported:13000,usage_calls:26,pending_input:null,context:{tokens:261000,capacity:1000000,estimated:false}})});
+ check(statusElapsed.textContent===' · ◈ ~10k · ✧ 26 · ⚒ 82 · ◷ 2:24','requested spaced live strip with pending usage marked');
+ handleEvent({type:'reasoning',text:'x'.repeat(40)});updateRunElapsed();check(turnTokenReadout()==='~10k','text characters never fabricate exact billed tokens');
+ handleEvent({type:'reasoning',text:'x'.repeat(200),complete:true});check(turnTokenReadout()==='~10k','authoritative full copy never counts as usage');
+ handleEvent({type:'run_counts',counts:snapshot({tokens_reported:13000,context_growth:{version:1,baseline:600000,current:613000,added:13000,known:true,pending:false,partial:false,complete:true,compactions:0},usage_calls:26,pending_input:null,context:{tokens:261000,capacity:1000000,estimated:false}})});
  check(turnTokenReadout()==='13k','reported usage replaces pending lower bound');
  check(chipModel.textContent==='▤ 26%/1M'&&composerModel.hidden&&!statusBtn.textContent.includes('fixture-model'),'context only, no model footer');
- handleEvent({type:'run_counts',counts:snapshot({tokens_reported:13000,usage_calls:26,usage_unknown:1})});check(turnTokenReadout()==='≥13k','unknown prior usage never invents a zero');
+ handleEvent({type:'run_counts',counts:snapshot({tokens_reported:13000,context_growth:{version:1,baseline:600000,current:613000,added:13000,known:true,pending:false,partial:true,complete:true,compactions:0},usage_calls:26,usage_unknown:1})});check(turnTokenReadout()==='~13k','unknown prior usage never invents a zero');
  const style=getComputedStyle(statusBtn),composerStyle=getComputedStyle(document.querySelector('.composer'));check(style.backgroundColor===composerStyle.backgroundColor&&style.borderTopColor===composerStyle.backgroundColor&&style.borderRadius==='5px','minimal trigger opaque resting style blends into composer');
  statusBtn.click();check(balloon.open,'minimal trigger still opens balloon');balloon.close();
  check(getComputedStyle(document.documentElement).getPropertyValue('--radius').trim()==='5px'&&getComputedStyle(input).borderRadius==='5px'&&getComputedStyle(sendButton).borderRadius==='5px','one global component radius');
@@ -60,11 +60,11 @@ try {
  balloon.open=true;const first=contextBox.firstChild;updateContextReadouts();check(contextBox.firstChild===first,'unchanged context does not replace selected balloon text');
  runCounts={...snapshot(),context:{tokens:900000,capacity:1050000,model:'context-fixture',estimated:true},scope:runStepScope()};updateContextReadouts();
  check(chipModel.textContent==='▤ 42%/1.05M'&&contextBox.textContent.includes('436.8k'),'pending text estimate never replaces measured context');
- handleEvent({type:'run_counts',counts:snapshot({tokens_reported:1138787,model_calls:26,usage_calls:26,pending_input:null,context:{tokens:500000,capacity:1050000,estimated:false,model:'context-fixture'}})});
- check(chipModel.textContent==='▤ 48%/1.05M'&&contextValue('last measured input')==='500k'&&turnTokenReadout()==='1.1M','streamed provider snapshot updates both surfaces together');
- check(contextBox.textContent.includes('500,000')&&statusElapsed?.title?.includes('1,138,787'),'abbreviation retains exact raw turn/context details');
- handleEvent({type:'run_counts',counts:snapshot({tokens_reported:1138787,model_calls:27,usage_calls:26,context:{tokens:777777,capacity:1050000,estimated:true,model:'context-fixture'}})});
- check(chipModel.textContent==='▤ 48%/1.05M'&&turnTokenReadout()==='≥1.1M','next pending attempt keeps exact last measure and marks lower bound');
+ handleEvent({type:'run_counts',counts:snapshot({tokens_reported:1138787,context_growth:{version:1,baseline:250000,current:500000,added:250000,known:true,pending:false,complete:true,compactions:0},model_calls:26,usage_calls:26,pending_input:null,context:{tokens:500000,capacity:1050000,estimated:false,model:'context-fixture'}})});
+ check(chipModel.textContent==='▤ 48%/1.05M'&&contextValue('last measured input')==='500k'&&turnTokenReadout()==='250k','streamed provider snapshot updates both surfaces together');
+ check(contextBox.textContent.includes('500,000')&&statusElapsed?.title?.includes('250,000'),'abbreviation retains exact raw turn/context details');
+ handleEvent({type:'run_counts',counts:snapshot({tokens_reported:1138787,context_growth:{version:1,baseline:250000,current:500000,added:250000,known:true,pending:true,complete:false,compactions:0},model_calls:27,usage_calls:26,context:{tokens:777777,capacity:1050000,estimated:true,model:'context-fixture'}})});
+ check(chipModel.textContent==='▤ 48%/1.05M'&&turnTokenReadout()==='~250k','next pending attempt keeps exact last measure and marks lower bound');
  // Settings capacity switches invalidate paint even if total token spend stays unchanged.
  busy=false;observedRun=null;settings={...settings,context_limit:2000000};renderMetadataParts();
  check(chipModel.textContent==='▤ 25%/2M'&&contextBox.textContent.includes('25%/2M'),'capacity setting invalidates both views immediately');

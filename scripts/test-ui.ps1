@@ -3765,6 +3765,14 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'shared chat parity browser suite failed' }
     & node scripts/test-shared-chat.cjs (Join-Path $tmp 'shared-chat') --post
     if ($LASTEXITCODE -ne 0) { throw 'shared chat postcheck failed' }
+    & node scripts/test-context-growth.cjs (Join-Path $tmp 'context-growth')
+    if ($LASTEXITCODE -ne 0) { throw 'context growth browser suite failed' }
+    & node scripts/test-context-growth.cjs (Join-Path $tmp 'context-growth') --post
+    if ($LASTEXITCODE -ne 0) { throw 'context growth postcheck failed' }
+    & node scripts/test-turn-topics.cjs (Join-Path $tmp 'turn-topics')
+    if ($LASTEXITCODE -ne 0) { throw 'turn topics browser suite failed' }
+    & node scripts/test-turn-topics.cjs (Join-Path $tmp 'turn-topics') --post
+    if ($LASTEXITCODE -ne 0) { throw 'turn topics postcheck failed' }
     & node scripts/test-coordinator-steps.cjs
     if ($LASTEXITCODE -ne 0) { throw 'compact phase/debug browser suite failed' }
     & node scripts/test-orchestration-ui.cjs (Join-Path $tmp 'orchestration-mode')
