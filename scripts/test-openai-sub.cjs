@@ -35,6 +35,11 @@ try {
   put('pi/node_modules/@earendil-works/pi-ai/dist/models.js', `
     import assert from 'node:assert/strict';
     globalThis.fetch = async (url, options) => {
+      if(url==='https://fixture.invalid/responses') {
+        const frame='data: '+JSON.stringify({type:'response.output_item.added',output_index:0,item:{type:'message',phase:globalThis.earlyMode==='known'?'commentary':undefined}})+'\\r\\n\\r\\n';
+        const encoded=new TextEncoder().encode(frame);
+        return new Response(new ReadableStream({start(controller){for(let i=0;i<encoded.length;i+=3)controller.enqueue(encoded.slice(i,i+3));controller.close();}}),{headers:{'Content-Type':'text/event-stream'}});
+      }
       assert.equal(url,'https://chatgpt.com/backend-api/wham/usage');
       assert.equal(options.headers['ChatGPT-Account-Id'],'fixture-account');
       assert.equal(options.headers.Authorization,'Bearer fixture-access-token');
@@ -67,6 +72,17 @@ try {
                 content:[{type:'toolCall',id:'call-large',name:'large_fixture',arguments:args}],
                 usage:{input:0,cacheRead:0,cacheWrite:0,output:0,totalTokens:0,reasoning:0}};}
             };
+          }
+          if (context.tools[0].name === 'early_phase') {
+            globalThis.earlyMode=context.messages.at(-1).content[0].text;
+            return {async *[Symbol.asyncIterator]() {
+              const response=await options.fetch('https://fixture.invalid/responses',{signal:options.signal});
+              for await(const bytes of response.body) {};
+              yield {type:'text_start',contentIndex:0,partial:{content:[{type:'text',text:''}]}};
+              yield {type:'text_delta',contentIndex:0,delta:'Checking ',partial:{content:[{type:'text',text:'Checking '}]}};
+              yield {type:'text_delta',contentIndex:0,delta:'now',partial:{content:[{type:'text',text:'Checking now'}]}};
+              yield {type:'text_end',contentIndex:0,content:'Checking now',partial:{content:[{type:'text',text:'Checking now',textSignature:JSON.stringify({phase:'commentary'})}]}};
+            },async result(){return {stopReason:'toolUse',content:[{type:'text',text:'Checking now',textSignature:JSON.stringify({phase:'commentary'})}],usage:{input:10,output:2,totalTokens:12}};}};
           }
           if (context.tools[0].name === 'phase_adversarial') {
             const mode=context.messages.at(-1).content[0].text;
@@ -139,6 +155,15 @@ try {
     assert.equal(response.stderr,'');
     return {...response,events:response.stdout.trim().split('\n').map(line=>JSON.parse(line))};
   };
+  for(const mode of ['known','unknown']) {
+    const early=run({...request,tools:[{function:{name:'early_phase',parameters:{type:'object'}}}],messages:[{role:'user',content:mode}]});
+    assert.equal(early.status,0,early.stdout);
+    const deltas=early.events.filter(e=>e.type==='commentary_delta'||e.type==='pending_delta');
+    assert.equal(deltas.length,2);
+    assert(deltas.every(e=>e.type===(mode==='known'?'commentary_delta':'pending_delta')),'only explicit per-message early phase opens commentary');
+    assert.equal(deltas.map(e=>e.text).join(''),'Checking now');
+    assert.equal(early.events.filter(e=>e.type==='commentary').length,1,'completed identity resolves once');
+  }
   const success=run(request);
   assert.equal(success.status,0,success.stdout);
   const pending=success.events.filter(event=>event.type==='pending_delta');

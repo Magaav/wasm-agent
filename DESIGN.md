@@ -97,7 +97,8 @@ One scale: **5px**.
 - **Gaps:** between sibling elements the gap is **0** or **5px**. Never invent
   8px/12px/14px gaps.
 - Sizes of square controls are multiples of 5 (`30px`, `40px`).
-- Radii: `5px`, `10px`, `15px`.
+- Component radius: **3px**, defined once by `--radius`; `--radius-sm` and
+  `--radius-lg` alias it. Circular glyphs/avatars remain circles, full-bleed regions square.
 - Use the tokens `--space`, `--pad`, `--gap`, `--radius*` rather than literals.
 
 
@@ -113,6 +114,19 @@ Providers are chosen first, models second.
 
 
 ## 6. Status balloon contents
+
+The compact footer trigger displays only `▤ 26%/1M`: one request's context
+occupancy and capacity in millions, not cumulative session spending. `~` marks
+current estimates, `??` unknown/mismatched context. Updates reuse stream events
+and existing metadata reads. Provider/model stay inside the balloon, not beside
+the trigger. A transparent resting surface gains a clickable border/background
+on hover or keyboard focus; keyboard and balloon close behavior remain unchanged.
+
+Commentary streams inside an open `wa-commentary` topic, with character count
+updated per chunk. Only explicit per-item phase establishes commentary. Unknown
+phase stays provisional. Commentary is never automatically closed or folded into
+the run topic; manual closure survives completion/checkpoint repaint.
+
 
 The status balloon is about **the model and harness observability**, not memory storage. Required
 sections, in order:
@@ -189,7 +203,7 @@ same shape, and the same rule: the row says which device the choice belongs to.
 | `<wa-orchestrator>` | External workspace with node priority controls, an active-only agent sidebar whose cards are grouped by lane (the child's recorded branch or worktree, with that lane's end-state checklist) and stable tiled sessions. Two of that checklist's four outcomes are measurements of that record (`retired` from the recorded workspace state, `main-only` from whether the lane holds a branch or worktree of its own); `merged` and `clean` are git facts about refs which this view is never given, so they read `unknown` with the reason for every lane - they are not outcomes it is withholding. | `.data`, `.message`, `.configure(fleet)`, `.policy`, `.panes`, `.windows` (promoted conversations), `.allPanes()`, `.promote(pane)`, `.unpin(key, pane)` | `orchestrator-action` |
 | `<wa-chat-shell>` | **The** chat surface: transcript region, composer (text area, send, attach/paste/drop intake), attachment chips, model readout and picker, notification sound. The main conversation and every child session host the same element, so a chat improvement lands in one place. | `.content`, `.host` (the host's own rows between transcript and composer), `.form`, `.input`, `.send`, `.attach`, `.file`, `.attachments` (the live list), `.attachmentsEl`, `.modelEl`, `modelChip`, `.busy`, `.enterLocked`, `.addFiles(files)`, `.renderAttachments()`, `.clearAttachments()`, `.composedText(text)`, `.autosize()`, `.notify()`, `.setModelPicker(facts, label)`; author-provided children take `data-slot` (`footer-left`, `footer-right`, `balloon`, or none for the transcript) | `chat-send` (`{text, busy}`), `chat-files` (`{files}`), `chat-attachments` (`{action, …}`) |
 | `<wa-agent-session>` | Child conversation, original tool evidence, live preview and independent composer. **Hosts the shared `<wa-chat-shell>`** rather than its own composer; its own header is the panel's two controls (close as an `x`, expand as a square that promotes it into its own `<wa-window>`), never the window's topbar. Its transcript is drawn by the window's own renderer (`app.js`'s `paintChildTranscript`), so a child's bubble, its run topic and its run-status footer are the same DOM as the main chat's - one implementation, not a parallel one. | `.task`, `.promoted`, `.clearDraft()`, `.input`, `.form`, `.transcript`, `.notice`, `.preview`, `.statusLine` | `agent-action` |
-| `<wa-chat-actions>` | **The** row of per-message actions a chat footer carries: the main chat's Steer, and a child pane's Steer and Cancel task. One element on both surfaces, and its controls come from the shell's own `chatControl()` factory, so an action and the append-file control beside it are the same control - one class, `.chat-control`, is the whole box in `style.css`, and a change to one moves all of them. A host authors *declarations* (one child per action: `data-action`, its label as its text, and any `id`/`title`/`hidden` it addresses) and hears `chat-action`, never one particular button. | `data-slot="footer-right"` on the row, `data-action` on a declaration; `.controls`; `#steer` is the main chat's own control | `chat-action` (`{action, control}`) |
+| `<wa-chat-actions>` | **The** row of per-message actions a chat footer carries. Steering buttons are removed on all surfaces; a child pane retains Cancel task. One element on both surfaces, and its controls come from the shell's own `chatControl()` factory, so an action and the append-file control beside it are the same control - one class, `.chat-control`, is the whole box in `style.css`, and a change to one moves all of them. A host authors *declarations* (one child per action: `data-action`, its label as its text, and any `id`/`title`/`hidden` it addresses) and hears `chat-action`, never one particular button. | `data-slot="footer-right"` on the row, `data-action` on a declaration; `.controls`; `#steer` is the main chat's own control | `chat-action` (`{action, control}`) |
 | `<wa-jobs>` | Reviewed automation definitions, enabled state, queue/source/outcome evidence. Engine topic immediately after tools. | `.items` | `job-toggle` |
 | `<wa-hook-events>` | Read-only lifecycle inventory after Jobs: producers, boundaries, configured handlers and reliability limits; evaluated absent events are labelled, not advertised as working. | `.catalogue`, `.message` | — |
 

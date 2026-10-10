@@ -18,9 +18,9 @@
   /* The one size every square control takes, and the height every footer control takes. */
   --control-size: 30px;
   --gap: 5px;
-  --radius: 10px;
-  --radius-sm: 5px;
-  --radius-lg: 15px;
+  --radius: 3px;
+  --radius-sm: var(--radius);
+  --radius-lg: var(--radius);
   /* The terminal face pi uses (VS Code/PowerShell ship Consolas on Windows). */
   --font: Consolas, "Cascadia Mono", "Cascadia Code", "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
   --font-size: 14.5px;
@@ -312,7 +312,7 @@ wa-diff { display: block; align-self: flex-start; max-width: 760px; width: 100%;
 .hints { display: flex; flex-wrap: wrap; gap: var(--gap); justify-content: center; margin-top: var(--gap); }
 .hints button {
   background: var(--panel-2); color: var(--text); border: 1px solid var(--line);
-  border-radius: 999px; padding: var(--space) var(--pad); cursor: pointer; font-size: 13px;
+  border-radius: var(--radius); padding: var(--space) var(--pad); cursor: pointer; font-size: 13px;
 }
 .hints button:hover { border-color: var(--accent); }
 
@@ -324,10 +324,12 @@ wa-diff { display: block; align-self: flex-start; max-width: 760px; width: 100%;
 /* The existing one-second status clock changes a tiny glyph; no CSS or extra animation loop. */
 .run-activity-glyph { flex: 0 0 15px; width: 15px; height: 15px; display: inline-flex; align-items: center; justify-content: center; color: var(--accent); line-height: 1; }
 .chat-content-run-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.chat-content-run-phase { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.chat-content-run-phase { flex: 0 0 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-variant-numeric: tabular-nums; }
 /* Detailed phase history is diagnostic-only; the compact current phase stays in the footer. */
 .messages:not([data-debug="true"]) wa-step, .agent-transcript:not([data-debug="true"]) wa-step { display: none; }
-.chat-content-run-elapsed { margin-left: auto; flex: 0 0 auto; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.chat-content-run-elapsed { margin-left: 0; flex: 1 1 auto; min-width: 0; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.chat-content-run-phase:not([hidden]) + .chat-content-run-elapsed { margin-left: calc(-1 * var(--gap)); }
+.finished .chat-content-run-elapsed { margin-left: auto; flex: 0 0 auto; }
 wa-step.run-step { display: flex; align-items: center; gap: var(--gap); padding: var(--space); color: var(--muted); font-size: 13px; }
 .run-step-label { flex: 1; min-width: 0; }
 .run-step-age { flex: none; font-variant-numeric: tabular-nums; }
@@ -433,7 +435,7 @@ wa-retry { display: block; width: 100%; }
   position: fixed; right: 15px; bottom: 90px; z-index: 5;
   display: none; align-items: center; gap: 4px;
   border: 1px solid var(--line); background: var(--panel-2); color: var(--text);
-  border-radius: 999px; padding: 3px var(--space); font-size: 11px; cursor: pointer;
+  border-radius: var(--radius); padding: 3px var(--space); font-size: 11px; cursor: pointer;
 }
 .jump.show { display: inline-flex; }
 .jump:hover { border-color: var(--accent); }
@@ -515,7 +517,7 @@ body.engine .engine { display: flex; }
 /* A thread that needs attention says so where the thread is listed. */
 .session-state {
   font-size: 10px; text-transform: uppercase; letter-spacing: .5px;
-  padding: 1px var(--space); border-radius: 999px; border: 1px solid #f85149;
+  padding: 1px var(--space); border-radius: var(--radius); border: 1px solid #f85149;
   color: #f85149; cursor: help;
 }
 .session-state.interrupted { border-color: #d29922; color: #d29922; }
@@ -727,12 +729,12 @@ wa-chat-shell.dropping .composer { border-color: var(--accent); }
 .composer textarea::-webkit-scrollbar { width: 8px; height: 8px; }
 .composer textarea::-webkit-scrollbar-track { background: transparent; }
 .composer textarea::-webkit-scrollbar-thumb {
-  background: var(--line); border-radius: 4px; border: 2px solid transparent; background-clip: content-box;
+  background: var(--line); border-radius: var(--radius); border: 2px solid transparent; background-clip: content-box;
 }
 .composer textarea::-webkit-scrollbar-thumb:hover { background: var(--muted); background-clip: content-box; }
 
 .send {
-  flex: none; width: 45px; height: 45px; border-radius: 50%; border: none;
+  flex: none; width: 45px; height: 45px; border-radius: var(--radius); border: none;
   background: var(--accent); color: white; cursor: pointer;
   display: grid; place-items: center;
 }
@@ -794,9 +796,12 @@ wa-chat-shell.dropping .composer { border-color: var(--accent); }
 .chip {
   display: inline-flex; align-items: center; gap: var(--gap); min-width: 0; max-width: 100%;
   border: 1px solid var(--line); background: var(--panel-2); color: var(--text);
-  border-radius: 999px; padding: var(--space) var(--pad); cursor: pointer; font-size: 12px;
+  border-radius: var(--radius); padding: var(--space) var(--pad); cursor: pointer; font-size: 12px;
 }
 .chip:hover { border-color: var(--accent); }
+.chip.context-trigger { border-color: transparent; background: transparent; }
+.chip.context-trigger:hover, .chip.context-trigger:focus-visible { border-color: var(--line); background: var(--panel-2); }
+.context-trigger #chip-model, .context-trigger .chip-label { max-width: none; }
 .chip-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--ok); flex: none; }
 .chip.local .chip-dot { background: var(--warn); }
 .chip #chip-model, .chip .chip-label { max-width: 145px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -920,14 +925,14 @@ body.view-only .panel { display: none; }
 #update-lock .lock-card {
   pointer-events: auto;
   display: flex; align-items: center; gap: var(--pad);
-  background: var(--panel); border: 1px solid var(--line); border-radius: 999px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
   padding: var(--space) var(--pad); box-shadow: 0 12px 30px rgba(0,0,0,.55);
 }
 #update-lock .lock-title { font-size: 12px; color: var(--accent); }
 #update-lock .lock-reason { color: var(--muted); font-size: 11.5px; }
 #update-lock .lock-actions { display: flex; gap: var(--gap); }
 #update-lock button {
-  background: var(--panel-2); border: 1px solid var(--line); border-radius: 999px;
+  background: var(--panel-2); border: 1px solid var(--line); border-radius: var(--radius);
   color: var(--text); font: inherit; font-size: 11.5px; padding: 1px var(--pad); cursor: pointer;
 }
 #update-lock button:hover { border-color: var(--accent); }

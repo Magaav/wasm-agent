@@ -38,7 +38,9 @@ rendering and failure rendering use the existing control/error surfaces.
 A known conversation reads `/session` directly; `/sessions` discovery is reserved
 for a new or deliberately blank window. Restoration is single-flight and retains
 the last confirmed view on failure, with endpoint/phase diagnostics and exponential
-backoff capped at 30 seconds. Successful recovery clears its failure state. The
+backoff capped at 30 seconds. Retry diagnostics and known-active unfinished
+notices now use independent causes in the shared top warning, not run status or
+transcript rows ([MINIMAL-CHAT.md](MINIMAL-CHAT.md)). Successful recovery clears its failure state. The
 follower advances only through rows actually loaded, before reconciling checkpoint
 and event cursors. Reconnect never re-executes a tool; existing guarded continuation
 requires a complete recorded batch and an unchanged durable sequence.

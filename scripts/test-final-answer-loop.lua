@@ -73,6 +73,15 @@ for _,scenario in ipairs({'tool','steer','followup','cancel','failure','unknown'
     check(ok,'loop succeeds '..scenario..': '..tostring(value))
     check(calls==((scenario=='tool' or scenario=='steer' or scenario=='followup') and 2 or 1),'unchanged continuation count '..scenario)
   end
+  if scenario=='commentary' then
+    local deltas,resolved=0,0
+    for _,e in ipairs(events) do
+      if e.type=='commentary_delta' then deltas=deltas+1 end
+      if e.type=='commentary' then resolved=resolved+1 end
+      check(e.type~='pending_delta','known early commentary never appears as provisional answer')
+    end
+    check(deltas==1 and resolved==1,'early commentary streams before its completed identity')
+  end
   local begins=0
   for i,e in ipairs(events) do
     if e.type=='final_answer_begin' then

@@ -234,7 +234,7 @@ function M.complete(model, messages, tools, stream, opts, reasoning)
             end
             result.commentary_streamed = stream and #commentary_ids > 0 or false
           elseif event.type=='error' then failure=event.error
-          elseif stream and (event.type=='delta' or event.type=='pending_delta' or event.type=='reasoning' or event.type=='decision' or event.type=='commentary') then
+          elseif stream and (event.type=='delta' or event.type=='pending_delta' or event.type=='commentary_delta' or event.type=='reasoning' or event.type=='decision' or event.type=='commentary') then
             if event.type == 'commentary' then
               event.message_id = host.uuid()
               commentary_ids[#commentary_ids + 1] = event.message_id

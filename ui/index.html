@@ -111,22 +111,14 @@
       <button id="user-btn" class="chip user-chip" type="button" data-slot="footer-left" title="Account" aria-haspopup="true" aria-label="Account">
         <span class="user-avatar" id="user-avatar">?</span>
       </button>
-      <button id="status-btn" class="chip" type="button" data-slot="footer-left" title="Provider, model and usage" aria-haspopup="true" aria-expanded="false">
-        <span class="chip-dot"></span>
-        <span id="chip-model">connecting…</span>
+      <button id="status-btn" class="chip context-trigger" type="button" data-slot="footer-left" title="Provider, model and usage" aria-haspopup="true" aria-expanded="false">
+        <span id="chip-model">▤ ??%/?M</span>
         <span id="chip-usage" class="chip-usage"></span>
       </button>
       <button id="mic" class="icon-btn" type="button" data-slot="footer-left" title="Talk with voice" aria-label="Talk with voice">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a3 3 0 0 1 3 3v5a3 3 0 0 1-6 0V6a3 3 0 0 1 3-3zm7 8a7 7 0 0 1-6 6.9V21h-2v-3.1A7 7 0 0 1 5 11h2a5 5 0 0 0 10 0h2z"/></svg>
       </button>
-      <!-- The per-message actions, in the `footer-right` slot beside the shell's own model readout. What is
-           authored here is a *declaration*, not the control: `<wa-chat-actions>` builds each action with the
-           shell's own control factory, so this button is the same box as the append-file button beside it,
-           and the same row as a child pane's Steer and Cancel task. `#steer` is the id the app and its tests
-           address, and it survives onto the built control. -->
-      <wa-chat-actions data-slot="footer-right">
-        <button id="steer" type="button" data-action="steer" hidden title="Send this text to the active run (Ctrl+Enter)">Steer</button>
-      </wa-chat-actions>
+      <wa-chat-actions data-slot="footer-right"></wa-chat-actions>
       <wa-balloon id="status-balloon" class="popover" data-slot="balloon" anchor="status-btn">
         <div class="pop-row">
           <label class="pop-head" for="provider-select">provider</label>

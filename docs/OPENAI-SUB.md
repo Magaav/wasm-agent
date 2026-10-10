@@ -57,6 +57,11 @@ cancels/restarts a provider call just because the output file is not created yet
 Unknown/running/terminal missing files and genuine I/O failures still fail with
 operation/stream/path diagnostics. See [OPERATIONS.md](OPERATIONS.md).
 
+Explicit early commentary phase is preserved through the Pi bridge's bounded,
+passive SSE metadata observation; original bytes still reach Pi unchanged. Known
+commentary chunks open their topic immediately; missing early phase stays
+provisional until the completed signature. See [MINIMAL-CHAT.md](MINIMAL-CHAT.md).
+
 The bridge runs as a supervised operation: streamed text and reasoning are forwarded,
 tool calls return to the Lua agent, and cancellation/deadlines stop the process.
 The model window is Pi's subscription catalog's 272,000 tokens, rather than assuming

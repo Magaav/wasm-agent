@@ -730,6 +730,7 @@ customElements.define("wa-reasoning", WaReasoning);
 // A Responses API commentary message is user-facing progress, not hidden
 // reasoning and not the completed answer. Keep it as its own readable topic.
 class WaCommentary extends HTMLElement {
+  get body() {this._build();return this._body;}
   static get observedAttributes() { return ["open"]; }
   connectedCallback() { this._build(); }
 
@@ -1639,11 +1640,15 @@ const CHAT_ATTACH_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M
 
 class WaChatWarning extends HTMLElement {
   connectedCallback() { this.setAttribute('role','status'); this.setAttribute('aria-live','polite'); }
-  set message(value) {
-    const text=String(value || '');
+  set message(value) { this.setNotice('liveness',value); }
+  setNotice(kind,value) {
+    this._notices ||= new Map();
+    if(value)this._notices.set(kind,String(value));else this._notices.delete(kind);
+    const text=Array.from(this._notices.values()).join('\n');
     if(this.textContent!==text)this.textContent=text;
     if(this.hidden!==!text)this.hidden=!text;
   }
+  clearNotices() {this._notices?.clear();this.setNotice('liveness','');}
 }
 customElements.define('wa-chat-warning',WaChatWarning);
 
@@ -1945,15 +1950,13 @@ class WaChatShell extends HTMLElement {
     if (!this._modelChip) {
       const chip = document.createElement("button");
       chip.type = "button";
-      chip.className = "chip";
+      chip.className = "chip context-trigger";
       chip.setAttribute("aria-haspopup", "true");
       chip.setAttribute("aria-expanded", "false");
       chip.title = "Model and settings this conversation runs with";
-      const dot = document.createElement("span");
-      dot.className = "chip-dot";
       this._chipLabel = document.createElement("span");
       this._chipLabel.className = "chip-label";
-      chip.append(dot, this._chipLabel);
+      chip.append(this._chipLabel);
       this._footerLeft.prepend(chip);
       const balloon = document.createElement("wa-balloon");
       balloon.className = "popover";
@@ -2116,7 +2119,7 @@ class WaAgentSession extends HTMLElement {
     // shell reads its authored children into their slots.
     const actions = document.createElement("wa-chat-actions");
     actions.setAttribute("data-slot", "footer-right");
-    for (const [action, label] of [["steer", "Steer"], ["cancel", "Cancel task"]]) {
+    for (const [action, label] of [["cancel", "Cancel task"]]) {
       const declaration = document.createElement("button");
       declaration.type = "button";
       declaration.dataset.action = action;
@@ -2223,16 +2226,14 @@ class WaAgentSession extends HTMLElement {
     this.querySelector('.agent-pane-head span').textContent=[value.profile,value.model,value.reasoning || 'reasoning unknown',value.node_name || value.execution_node || 'local',value.state].filter(Boolean).join(' · ');
     // The model strip is the shared one: the readout every shell has, plus a picker built from facts,
     // because a child runs with the model it was delegated rather than one this panel can choose.
-    const model=[value.model || 'model unknown',value.reasoning || 'reasoning unknown'].join(' · ');
-    this.shell.modelEl.textContent=model;
-    this.shell.modelEl.title='Model this conversation runs with: '+model+' · '+(value.profile || 'profile unknown');
+    this.shell.modelEl.hidden=true;
     this.shell.setModelPicker([{label:'model',value:value.model || 'model unknown'},
       {label:'reasoning',value:value.reasoning || 'reasoning unknown'},
       {label:'profile',value:value.profile || 'profile unknown'},
       {label:'node',value:value.node_name || value.execution_node || 'local'},
-      {label:'state',value:value.state || 'unknown'}], value.model || 'model unknown');
+      {label:'state',value:value.state || 'unknown'}] , value.context_readout || '▤ ??%/?M');
     this.querySelector('[data-action="cancel"]').disabled=!!value.settled || value.state==='unknown';
-    this.querySelector('[data-action="steer"]').disabled=!!value.settled || value.state==='unknown' || value.profile==='orchestration-worker';
+    // No steering control; its durable protocol remains available for future UI work.
     this.preview.textContent=[value.preview?.reasoning,value.preview?.commentary,value.preview?.text].filter(Boolean).join('\n');
     this.preview.hidden=!this.preview.textContent;
     // The pane's own run readout, for what the shared transcript cannot say while a child is working:

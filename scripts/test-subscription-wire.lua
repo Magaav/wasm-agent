@@ -260,14 +260,14 @@ local text_result = wire.complete('gpt-6-luna', messages, tools, true, {session_
 check(#text_result.commentary > 0, 'the recorded stream carries commentary text')
 local pending, resolved = {}, {}
 for _, event in ipairs(events) do
-  if event.type == 'pending_delta' then
+  if event.type == 'pending_delta' or event.type == 'commentary_delta' then
     pending[event.pending_id] = (pending[event.pending_id] or '') .. event.text
   elseif event.type == 'commentary' or (event.type == 'delta' and event.pending_id) then
     resolved[event.pending_id] = resolved[event.pending_id] or {}
     resolved[event.pending_id][#resolved[event.pending_id] + 1] = event
   end
 end
-check(next(pending) ~= nil, 'and it streamed that text provisionally while it arrived')
+check(next(pending) ~= nil, 'and it streamed text inside its known phase or provisionally while unknown')
 for pending_id, text in pairs(pending) do
   local answers = resolved[pending_id]
   check(answers ~= nil and #answers == 1,
