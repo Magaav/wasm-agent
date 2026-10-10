@@ -240,9 +240,11 @@ and `style.css` states that box once (one place, and no other rule may state it:
 child of the shell). A labelled control is the same height, border and radius and differs only in the width its
 own label needs; an icon control is the square `--control-size` (30px). The **host's own** footer children are
 not part of this: the audio control (`#mic`), the account chip and the status chip are authored by `app.js` and
-styled as they were (`.icon-btn` and the chip classes), because they are not per-message controls the shell
-builds. "One implementation" here means one factory and one box for what the factory makes, not every button
-that happens to sit on that row.
+styled with `.icon-btn` and the chip classes, because they are not per-message controls the shell
+builds. All footer controls nevertheless share the `--control-size` height (30px), including the account,
+context/model, mic and append-file controls on both hosts. Footer chips center their contents with no
+vertical padding so avatar/text intrinsic sizes cannot change that height. "One implementation" here
+means one factory and one box for what the factory makes, not every button that happens to sit on that row.
 
 The engine view's topics (nodes, spells, tools) are expandable cards rendered in
 `app.js`; each loads its data on first expand (`GET /nodes`, `/spells`, `/tools`).

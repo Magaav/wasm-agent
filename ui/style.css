@@ -802,6 +802,9 @@ wa-chat-shell.dropping .composer { border-color: var(--accent); }
   border: 1px solid var(--line); background: var(--panel-2); color: var(--text);
   border-radius: var(--radius); padding: var(--space) var(--pad); cursor: pointer; font-size: 12px;
 }
+/* Host-owned account/context chips share the footer controls' height, not their content's
+   intrinsic height (the avatar and text otherwise produce different-sized boxes). */
+.composer-footer .chip { height: var(--control-size); padding-top: 0; padding-bottom: 0; }
 .chip:hover { border-color: var(--accent); }
 .chip.context-trigger { border-color: var(--panel); background: var(--panel); }
 .chip.context-trigger:hover, .chip.context-trigger:focus-visible { border-color: var(--line); background: var(--panel-2); }
