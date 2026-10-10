@@ -501,6 +501,24 @@ jump.addEventListener("click", () => { releaseAnswerAnchor(messages); setFollow(
 let runBubble = null;
 let runStartedAt = 0;
 let runStepState = null;
+let runCounts = null;
+
+function applyRunCounts(counts) {
+  if (counts?.version !== 1 || typeof counts.run_id !== 'string' || !counts.run_id ||
+      !Number.isSafeInteger(counts.model_calls) || counts.model_calls < 0 ||
+      !Number.isSafeInteger(counts.tool_calls) || counts.tool_calls < 0) return;
+  if (runCounts?.run_id === counts.run_id &&
+      (counts.model_calls < runCounts.model_calls || counts.tool_calls < runCounts.tool_calls)) return;
+  runCounts = {...counts, scope:runStepScope()};
+  updateRunPhase();
+}
+
+function runCountsFooter(duration) {
+  const prefix = replayingMessages && runCounts && !runCounts.complete ? '≥' : '';
+  if (replayingMessages && runCounts?.complete && Number.isFinite(runCounts.elapsed_ms) && runCounts.elapsed_ms >= 0)
+    duration = runDuration(runCounts.elapsed_ms);
+  return `✧ ${prefix}${runCounts?.model_calls ?? '?'} · ⚒ ${prefix}${runCounts?.tool_calls ?? '?'} · ◷ ${duration}`;
+}
 
 function turnIsActive() { return busy || observedRun?.session === chatSession; }
 function runStepScope() { return activeNode + ":" + chatSession + ":" + conversationEpoch; }
@@ -538,7 +556,11 @@ function updateRunPhase() {
     const size = frame.size + 'px';
     if (statusSpinner.style.fontSize !== size) statusSpinner.style.fontSize = size;
   }
-  if (live) setText(statusPhase, step.label + ' · ' + Math.max(0, Math.floor((Date.now() - step.started) / 1000)) + 's');
+  if (live) {
+    const count = runCounts ? runCounts.model_calls + ' · ' : '';
+    setText(statusPhase, count + step.label + ' · ' + Math.max(0, Math.floor((Date.now() - step.started) / 1000)) + 's');
+    statusPhase.title = runCounts ? runCounts.model_calls + ' provider-call attempts (includes retries and summaries)' : 'Model-call count unavailable';
+  }
   else setText(statusPhase, '');
 }
 function finishRunStep(state = "completed") {
@@ -759,6 +781,8 @@ function finishRunStatus(label = "completed") {
   statusSpinner?.remove();
   statusLabel.textContent = label;
   updateRunElapsed();
+  statusElapsed.textContent = runCountsFooter(statusElapsed.textContent);
+  statusElapsed.title = 'Provider-call attempts (includes retries/summaries, excludes internal transport reconnects) · requested tool calls · total duration; ? means unavailable, ≥ means last recorded lower bound';
   statusLine.classList.add("finished");
   updateRunPhase();
   if (body) body.append(statusLine);
@@ -1583,6 +1607,8 @@ function handleEvent(event) {
     if (!runStartedAt) runStartedAt = Date.now();
     markStreamedCommentaryIncomplete();
     flushDecision();
+  } else if (event.type === "run_counts") {
+    applyRunCounts(event.counts);
   } else if (event.type === "checkpoint") {
     if (runStepState && !runStepState.userSeq && !trace) runStepState.userSeq = Number(event.seq) || null;
   } else if (event.type === "node") {
@@ -1970,6 +1996,8 @@ async function refreshNotifySupport() {
 
 function repaintMessages(rows, options = {}) {
   const savedSteps = runStepState?.scope === runStepScope() ? runStepState : null;
+  const savedCounts = runCounts?.scope === runStepScope() ? runCounts : null;
+  const savedCountUser = Number(Array.from(transcript.querySelectorAll('wa-message[role="user"]')).at(-1)?.dataset.messageSeq) || null;
   const changedRun = savedSteps?.id && runStepId() && savedSteps.id !== runStepId();
   if (changedRun && savedSteps.active) {
     const first = rows.findIndex(row => row.role === "user" && Number(row.seq) === savedSteps.userSeq);
@@ -2004,6 +2032,7 @@ function repaintMessages(rows, options = {}) {
   streamedCommentaryText = "";
   phasePendingText = new Map();
   runStartedAt = 0;
+  runCounts = null;
   replayMessageEndedAt = 0;
   replayRunLastMessage = null;
   renderedMessageIds = new Set();
@@ -2018,6 +2047,7 @@ function repaintMessages(rows, options = {}) {
     try {
       if (message.role === "user") {
         finishReplayedRun();
+        runCounts = null;
         flushDecision(true);
         runStartedAt = Number(message.created_at) > 0 ? Number(message.created_at) * 1000 : 0;
         replayMessageEndedAt = 0;
@@ -2026,6 +2056,9 @@ function repaintMessages(rows, options = {}) {
         userBody.closest('wa-message').dataset.ledgerKey=String(message.id || message.seq);
         userBody.closest('wa-message').dataset.messageSeq=String(message.seq || "");
         replayUserSeq = Number(message.seq) || null;
+        for (const item of message.trace || []) if (item.kind === 'run_counts') applyRunCounts(item);
+      } else if (message.role === "summary") {
+        for (const item of message.trace || []) if (item.kind === 'run_counts') applyRunCounts(item);
       } else if (message.role === "retry") {
         const event=JSON.parse(message.content || '{}');
         if(event.type!=='retry')throw Error('invalid retry ledger row');
@@ -2037,6 +2070,7 @@ function repaintMessages(rows, options = {}) {
         if(Number(message.created_at)>0)replayMessageEndedAt=Number(message.created_at)*1000;
         if(runBubble&&!runBubble.dataset.ledgerKey)runBubble.dataset.ledgerKey=String(message.id || message.seq);
       } else if (message.role === "assistant") {
+        for (const item of message.trace || []) if (item.kind === 'run_counts') applyRunCounts(item);
         replayRunLastMessage = message;
         if (Number(message.created_at) > 0) replayMessageEndedAt = Number(message.created_at) * 1000;
         // The stored message carries its changes summary and its id, and both are needed: the summary is
@@ -2071,6 +2105,7 @@ function repaintMessages(rows, options = {}) {
           if(!segment.dataset.ledgerKey)segment.dataset.ledgerKey=String(message.id || message.seq)+':segment:'+index;
         if (message.id) renderedMessageIds.add(String(message.id));
       } else if (message.role === "tool") {
+        for (const item of message.trace || []) if (item.kind === 'run_counts') applyRunCounts(item);
         replayRunLastMessage = message;
         if (Number(message.created_at) > 0) replayMessageEndedAt = Number(message.created_at) * 1000;
         // The stored row carries the ledger's own verdict (`ok`), and a repaint that dropped it drew a
@@ -2137,6 +2172,7 @@ function repaintMessages(rows, options = {}) {
     restoreRunSteps(savedSteps, savedBubble);
   } else runStepState = null;
   if (options.active && observedRun?.session === chatSession) ensureObservedRunStep(observedRun);
+  if (options.active && savedCounts && !changedRun && savedCountUser === replayUserSeq) applyRunCounts(savedCounts);
   pin(true);
   if (failed) {
     add("assistant", `repaint: ${rendered} of ${rows.length} messages drawn, ${failed} failed — first: ${firstFailure}`);
@@ -2167,12 +2203,12 @@ function repaintMessages(rows, options = {}) {
 function paintChildTranscript(container, rows, options = {}) {
   if (!container) return null;
   const saved = { transcript, runBubble, statusLine, statusLabel, statusElapsed, statusSpinner,
-    runStepState,
+    runStepState, runCounts,
     statusPhase, lastAssistantBody, runStatusTicker, toolTicker, streamBody, streamText, phasePendingText, trace, lastTool,
     reasoningBlock, reasoningText, streamedCommentaryBlock, streamedCommentaryText, runStartedAt, replayingMessages,
     replayMessageEndedAt, replayRunLastMessage, renderedMessageIds };
   transcript = container;
-  runStepState = null;
+  runStepState = null;runCounts = null;
   // Child teardown must never remove the main status DOM, clear its timers or share its text buffer.
   statusLine=null;statusLabel=null;statusPhase=null;statusElapsed=null;statusSpinner=null;runStatusTicker=null;toolTicker=null;
   setTranscriptDebug(container, options.mode);
@@ -2184,7 +2220,7 @@ function paintChildTranscript(container, rows, options = {}) {
     stopToolTicker();
     if(runStatusTicker)clearInterval(runStatusTicker);
     ({ transcript, runBubble, statusLine, statusLabel, statusElapsed, statusSpinner, lastAssistantBody,
-      runStepState,
+      runStepState, runCounts,
       statusPhase, runStatusTicker, toolTicker, streamBody, streamText, phasePendingText, trace, lastTool, reasoningBlock,
       reasoningText, streamedCommentaryBlock, streamedCommentaryText, runStartedAt, replayingMessages,
       replayMessageEndedAt, replayRunLastMessage, renderedMessageIds } = saved);
@@ -2691,7 +2727,7 @@ async function send(text, options = {}) {
   setFollow(true);
   pin(true);
   runBubble = null;   // the reply gets its own bubble
-  runStepState = null;
+  runStepState = null;runCounts = null;
   runStartedAt = Date.now();
   const runController = new AbortController();
   controller = runController;

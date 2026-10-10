@@ -68,7 +68,7 @@ with an explicit timestamp. See [LIGHTWEIGHT-UI.md](LIGHTWEIGHT-UI.md).
 ## Compact chat phases and debug history
 
 Ordinary chat shows one current phase in the existing sticky footer:
-`Reasoning · 9s                 1:05`. The left clock measures the current
+`✧ 1 · Reasoning · 9s                 1:05`. The left clock measures the current
 phase; the right clock remains the total turn duration. The phase replaces the
 redundant `thinking…`/`responding…` label. Output labels omit `Receiving` (`Model
 output`, `Progress update`); spaces around `·` remain. `Reasoning` is the requested
@@ -80,7 +80,19 @@ its 15px glyph slot keeps the phase and total timer still. A deterministic
 the next frame returns to the dot. The existing once-per-second status clock advances it;
 there is no CSS rotation/pulse, new timer, blur or full-window effect. Hidden
 surfaces do not tick it; settlement removes it.
-Settlement hides the current phase and preserves the existing final-duration footer.
+Settlement hides the current phase and preserves totals in the footer:
+`completed                 ✧ 5 · ⚒ 8 · ◷ 1:08`. `✧` counts provider-call
+attempts at the prepared-request boundary (including failed/retried requests and
+summaries), not decision rounds, billed inferences or internal transport reconnects.
+Pre-request refusals do not count. `⚒` counts requested tool dispatches, including
+failed/fenced calls; it is not successful effects or ranges inside `read_many`.
+Cumulative versioned `run_counts` snapshots live in existing message traces,
+never model context, and are re-emitted after checkpoints so reconnects can
+recover the count. Snapshot replay replaces totals; it never sums repeated rows.
+Older runs lacking snapshots show `?`; unfinished recorded snapshots show `≥`
+as a lower bound. Abrupt stops can lose the last live increment, never fabricate
+complete totals. Child totals remain isolated from the main chat. No new poll,
+clock, schema, historical rewrite or scan of the telemetry ledger is needed.
 Errors, recovery/queue notices, tool evidence and reasoning content remain visible.
 Healthy heartbeat milliseconds are no longer printed in the turn. A shared
 `wa-chat-warning` stays hidden normally and overlays the chat viewport top only
