@@ -57,6 +57,10 @@ exponential failure backoff remain. Risk: background activity begun elsewhere ca
 be discovered at the fallback interval; this is not a global push subscription.
 Opening controls, returning to the window and own stream changes remain immediate.
 
+The orchestration component has its own serialized, incremental read loop; it
+never runs invisible main-chat/model recovery. See [ORCHESTRATOR-READS.md](ORCHESTRATOR-READS.md)
+for the one-child overload cause, request counts, cadence and measurement limits.
+
 ## Exact telemetry, no repeated payload scans
 
 `telemetry.snapshot` retains a per-interpreter, eight-session LRU accumulator.

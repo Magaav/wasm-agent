@@ -1492,7 +1492,7 @@ $harness = @'
   await window.__refreshAgentPane(panes[0]);
   check(![...panes[0].transcript.querySelectorAll('button')].some(b=>b.textContent.includes('Load original message')) &&
     panes[0].transcript.textContent.includes('retrieve the original using evidence'),
-    'an oversized child row must say so in the node\'s words, without a pane-only retrieval button');
+    'an oversized child row must say so in the node\'s words, without a pane-only retrieval button; notice='+panes[0].notice.textContent+'; transcript='+panes[0].transcript.textContent);
   var livePane=panes[1];
   var liveStart=Date.now()/1000-65;
   // A child streams to the node, not to this window: the node reports the call in flight on the task
@@ -3769,6 +3769,10 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'active-only orchestrator browser suite failed' }
     & node scripts/test-orchestrator-active.cjs (Join-Path $tmp 'orchestrator-active') --post
     if ($LASTEXITCODE -ne 0) { throw 'active-only orchestrator evidence postcheck failed' }
+    & node scripts/test-orchestrator-reads.cjs (Join-Path $tmp 'orchestrator-reads')
+    if ($LASTEXITCODE -ne 0) { throw 'serialized incremental orchestrator browser suite failed' }
+    & node scripts/test-orchestrator-reads.cjs (Join-Path $tmp 'orchestrator-reads') --post
+    if ($LASTEXITCODE -ne 0) { throw 'orchestrator read evidence postcheck failed' }
     & node scripts/test-turn-ownership.cjs (Join-Path $tmp 'turn-ownership')
     if ($LASTEXITCODE -ne 0) { throw 'turn ownership browser suite failed' }
     & node scripts/test-turn-ownership.cjs (Join-Path $tmp 'turn-ownership') --post
