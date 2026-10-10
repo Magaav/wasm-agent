@@ -33,7 +33,10 @@ it, including promoted shadow panels (no private radius fallback).
 Square attachment previews retain filenames only as hover/accessibility metadata;
 remove × is top right. Successful intake adds no run status/timer; refusal and
 stale-read diagnostics remain. Circle icons/avatars and intentional square full-bleed regions are exceptions.
-Visible Steer buttons are removed in main/child UI only; durable backend steering
+Dedicated Steer and Cancel task buttons are removed in main/child chat; the shared
+Send/Stop and dark button color are identical. Child panes use the full shared
+status strip, topics, warnings and journal renderer, never a second raw preview/
+running-duration row. See [SHARED-CHAT.md](SHARED-CHAT.md). Durable backend steering
 and the existing keyboard path are not removed or redesigned.
 
 Commentary with an explicit early item phase streams directly into an open

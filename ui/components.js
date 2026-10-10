@@ -1740,7 +1740,8 @@ class WaChatShell extends HTMLElement {
     // and the shell leaves the key alone for the host's own listener.
     this._input.addEventListener("keydown", (event) => {
       if (event.key !== "Enter" || event.shiftKey || event.ctrlKey || event.metaKey || event.altKey) return;
-      if (this._busy || this.enterLocked) return;
+      if (this._busy) {event.preventDefault();return;}
+      if (this.enterLocked) return;
       event.preventDefault();
       this._form.requestSubmit();
     });
@@ -1980,7 +1981,10 @@ class WaChatShell extends HTMLElement {
       this._modelChip = chip;
       this._modelBalloon = balloon;
     }
-    this._chipLabel.textContent = label || "model unknown";
+    this._chipLabel.textContent = label || "context unknown";
+    const signature=JSON.stringify(facts);
+    if(this._modelFactsSignature===signature)return this._modelChip;
+    this._modelFactsSignature=signature;
     this._modelBalloon.replaceChildren(...(facts || []).map((fact) => {
       const row = document.createElement("div");
       row.className = "pop-row";
@@ -2119,41 +2123,21 @@ class WaAgentSession extends HTMLElement {
     this.shell = document.createElement("wa-chat-shell");
     this.shell.setAttribute("placeholder", "Talk to this agent…");
     this.shell.setAttribute("label", "Message this agent");
-    // Steer and Cancel are the panel's own: they reach the child routes, and they sit where the main
-    // chat keeps its per-message actions. The row is the shared one and it is authored the way the main
-    // chat authors its own - a `data-slot="footer-right"` child of the shell - so a child pane and the
-    // main conversation build their actions out of one component and one control factory. It is
-    // appended before the shell is built (the first property access below), because that is when the
-    // shell reads its authored children into their slots.
+    // No child-only per-message buttons. The shared Send/Stop is the sole action.
     const actions = document.createElement("wa-chat-actions");
     actions.setAttribute("data-slot", "footer-right");
-    for (const [action, label] of [["cancel", "Cancel task"]]) {
-      const declaration = document.createElement("button");
-      declaration.type = "button";
-      declaration.dataset.action = action;
-      declaration.textContent = label;
-      actions.append(declaration);
-    }
     this.shell.append(actions);
     this.append(this.shell);
     this.form = this.shell.form;
     this.input = this.shell.input;
     this.transcript = this.shell.content;
-    // The transcript keeps the pane's own measurement hooks, so its rules still apply to it.
-    this.transcript.classList.add("agent-transcript");
-    // The pane's live readout, between the transcript and the composer.
-    this.preview = document.createElement("div"); this.preview.className = "agent-preview";
-    this.statusLine = document.createElement("div"); this.statusLine.className = "status chat-content-run-status";
-    this.statusLine.innerHTML = '<span class="spinner"></span><span class="chat-content-run-label"></span><span class="chat-content-run-elapsed"></span>';
-    this.statusLine.setAttribute("role", "status");
-    this.notice = document.createElement("div"); this.notice.className = "agent-notice"; this.notice.setAttribute("role", "status");
-    this.shell.host.append(this.preview, this.statusLine, this.notice);
+    this.transcript.classList.add("agent-transcript"); // Identity only, not a second stylesheet.
+    this.notice = this.shell.warning;
     this.startClock();
-    // `Send` and `Steer` are one draft leaving in two ways, so they are one path with a name: the
-    // shell hands over the text and the attachments, and this element decides what a child accepts.
-    this.shell.addEventListener("chat-send", () => this.sendDraft());
+    // The shell owns Send/Stop and intake; this host only addresses child transport.
+    this.shell.addEventListener("chat-send", event => event.detail.busy ? this.emit('cancel') : this.sendDraft());
     this.shell.addEventListener("chat-files", (event) => this.collectFiles(event.detail.files));
-    // The row is the pane's own two actions, and it says which one was chosen.
+    // Future declared actions still use the shell's factory; none are offered now.
     actions.addEventListener("chat-action", (event) => {
       if (event.detail.action === "steer") this.sendDraft("steer");
       else this.emit(event.detail.action);
@@ -2165,7 +2149,7 @@ class WaAgentSession extends HTMLElement {
   // The same text reuses the same idempotency key, so a retry after a lost answer cannot arrive twice.
   sendDraft(action = 'message') {
     if(this._task?.profile==='orchestration-worker' && (!this._task.settled || this._task.state==='unknown')) {
-      this.notice.textContent='This worker is completing its task. Followups wait for its report; your draft is kept.';
+      this.notice.setNotice('submission','This worker is completing its task. Followups wait for its report; your draft is kept.');
       return;
     }
     const text = this.input.value.trim();
@@ -2174,7 +2158,7 @@ class WaAgentSession extends HTMLElement {
     // A picture has no structured part on the child route; refusing it here is visible, dropping it
     // silently is how a reader sends a screenshot nobody ever sees.
     if (pictures.length) {
-      this.notice.textContent = pictures.length + ' picture(s) cannot ride into a delegated message yet; nothing was sent.';
+      this.notice.setNotice('submission',pictures.length + ' picture(s) cannot ride into a delegated message yet; nothing was sent.');
       return;
     }
     const body = this.shell.composedText(text);
@@ -2189,7 +2173,7 @@ class WaAgentSession extends HTMLElement {
     // Successful intake is already visible in the shared attachment cards.
     if (receipt.refused > 0) parts.push(receipt.refused + ' image(s) skipped - only png, jpeg, webp and gif are accepted');
     if (receipt.stale.length) parts.push('the draft was sent while ' + receipt.stale[0] + ' was reading - it was not attached');
-    if (parts.length) this.notice.textContent = parts.join('; ');
+    if (parts.length) this.notice.setNotice('attachments',parts.join('; '));
   }
   // What a host clears when it has accepted the draft. One call, because the draft is not just text.
   clearDraft() {
@@ -2210,21 +2194,10 @@ class WaAgentSession extends HTMLElement {
   disconnectedCallback() { clearInterval(this.clock);this.clock=null; }
   updateClock() {
     if(!this._task || document.hidden)return;
-    const task=this._task, started=Number(task.started_at)*1000;
-    const end=task.settled ? Number(task.settled_at)*1000 : Date.now();
-    const duration=started && end ? agentElapsed(end-started) : 'duration unknown';
-    const elapsed=this.statusLine.querySelector('.chat-content-run-elapsed');
-    if(elapsed.textContent!==duration)elapsed.textContent=duration;
-    // The in-flight call's own age, on the line the shared renderer drew. A child streams to the node,
-    // so this element is the only thing polling and the node's own report of the call (`started_at`,
-    // the bound it enforces) is the measurement: `42s of 300s` is readable, a clock nobody runs is not.
-    const live=task.preview?.tool;
-    if(live?.started_at) {
-      const traceElement=this.transcript?.querySelector('wa-trace');
-      if(traceElement?.pending) traceElement.setAge((Date.now()/1000)-live.started_at,
-        live.timeout_ms ? Math.round(live.timeout_ms/1000) : undefined);
-    }
+    // Reuse the pane's existing clock, but all painting belongs to the shared renderer.
+    this.dispatchEvent(new CustomEvent('chat-render-tick',{bubbles:true,detail:{pane:this}}));
   }
+  get statusLine() {return this.transcript?.querySelector('.chat-content-run-status:not(.finished)') || Array.from(this.transcript?.querySelectorAll('.chat-content-run-status.finished')||[]).at(-1);}
   emit(action,detail={}) { this.dispatchEvent(new CustomEvent('agent-action',{bubbles:true,detail:{action,pane:this,...detail}})); }
   set task(value) {
     this.connectedCallback();
@@ -2235,23 +2208,11 @@ class WaAgentSession extends HTMLElement {
     // The model strip is the shared one: the readout every shell has, plus a picker built from facts,
     // because a child runs with the model it was delegated rather than one this panel can choose.
     this.shell.modelEl.hidden=true;
-    this.shell.setModelPicker([{label:'model',value:value.model || 'model unknown'},
-      {label:'reasoning',value:value.reasoning || 'reasoning unknown'},
-      {label:'profile',value:value.profile || 'profile unknown'},
-      {label:'node',value:value.node_name || value.execution_node || 'local'},
-      {label:'state',value:value.state || 'unknown'}] , value.context_readout || '▤ ??%/?M');
-    this.querySelector('[data-action="cancel"]').disabled=!!value.settled || value.state==='unknown';
-    // No steering control; its durable protocol remains available for future UI work.
-    this.preview.textContent=[value.preview?.reasoning,value.preview?.commentary,value.preview?.text].filter(Boolean).join('\n');
-    this.preview.hidden=!this.preview.textContent;
-    // The pane's own run readout, for what the shared transcript cannot say while a child is working:
-    // a child streams to the node rather than to this window, so the state and the preview come from
-    // the poll. A settled child says nothing here - its `completed`/`unfinished`/`failed` footer and
-    // its duration are drawn inside its own bubble by the shared renderer, which is where the
-    // window's own chat says the same thing.
-    this.statusLine.querySelector('.chat-content-run-label').textContent=value.preview?.status || value.state || 'unknown';
-    this.statusLine.querySelector('.spinner').hidden=!!value.settled || value.state==='unknown';
-    this.statusLine.hidden=!!value.settled || value.state==='unknown';
+    if(!this.shell.modelChip)this.shell.setModelPicker([{label:'model',value:value.model || 'model unknown'},
+      {label:'reasoning',value:value.reasoning || 'reasoning unknown'}],value.context_readout || '▤ ??%/?M');
+    this.shell.busy=!value.settled && /^(running|accepted|queued|placing)$/.test(value.state);
+    this.shell.enterLocked=this.shell.busy;
+    // Live preview is transported to the shared transcript, never rendered as raw extra text.
     // A child that has just finished is the one thing worth hearing while the reader is looking at
     // something else. The shell owns the sound; this is the pane's only call into it.
     if(previous && !previous.settled && value.settled)this.shell.notify();
@@ -2456,7 +2417,7 @@ class WaOrchestrator extends HTMLElement {
       this.dispatchEvent(new CustomEvent('orchestrator-action',{bubbles:true,detail:{action:'layout'}}));
     });
     this.windows.set(key,{window:frame,pane:promoted});
-    if(pane.notice)pane.notice.textContent='Open in its own window.';
+    if(pane.notice)pane.notice.setNotice('panel','Open in its own window.');
     // The host refreshes panes when the layout changes, which is how the promoted frame gets the
     // conversation without this component ever fetching anything itself.
     this.dispatchEvent(new CustomEvent('orchestrator-action',{bubbles:true,detail:{action:'layout'}}));
