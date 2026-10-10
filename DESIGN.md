@@ -11,8 +11,11 @@ change the change — or amend this file first with a reason.
 ## Idle rendering
 
 Polish comes from tonal depth, readable hierarchy and brief gesture feedback—not
-continuous idle animation or full-window backdrop sampling. Resting surfaces are
-static; hidden/off-screen work is suppressed without dropping transcript text,
+continuous idle animation or full-window backdrop sampling. Colored UI surfaces
+(including popovers and hover/focus fills) and state text are opaque: use solid
+colors rather than alpha fills or whole-element opacity. Layout-only containers,
+unpainted glyphs and decorative shadows do not make content surfaces translucent.
+Resting surfaces are static; hidden/off-screen work is suppressed without dropping transcript text,
 searchability or live-stream state. [LIGHTWEIGHT-UI.md](docs/LIGHTWEIGHT-UI.md)
 defines freshness, render virtualization, fallback and measurement limits.
 
@@ -122,8 +125,9 @@ format and percentage. Pending text/preparation estimates do not overwrite a
 measured prompt; `??` means unknown/mismatched context. Raw integer counts and
 percent remain visible in details, not rounded into a different denominator. Updates reuse stream events
 and existing metadata reads. Provider/model stay inside the balloon, not beside
-the trigger. A transparent resting surface gains a clickable border/background
-on hover or keyboard focus; keyboard and balloon close behavior remain unchanged.
+the trigger. An opaque resting surface blends into the composer and gains a
+clickable border/background on hover or keyboard focus; keyboard and balloon close
+behavior remain unchanged.
 
 Commentary streams inside an open `wa-commentary` topic, with character count
 updated per chunk. Only explicit per-item phase establishes commentary. Unknown

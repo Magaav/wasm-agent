@@ -3749,6 +3749,10 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'minimal chat browser suite failed' }
     & node scripts/test-minimal-chat.cjs (Join-Path $tmp 'minimal-chat') --post
     if ($LASTEXITCODE -ne 0) { throw 'minimal chat postcheck failed' }
+    & node scripts/test-opaque-ui.cjs (Join-Path $tmp 'opaque-ui')
+    if ($LASTEXITCODE -ne 0) { throw 'opaque UI browser suite failed' }
+    & node scripts/test-opaque-ui.cjs (Join-Path $tmp 'opaque-ui') --post
+    if ($LASTEXITCODE -ne 0) { throw 'opaque UI evidence postcheck failed' }
     & node scripts/test-coordinator-steps.cjs
     if ($LASTEXITCODE -ne 0) { throw 'compact phase/debug browser suite failed' }
     & node scripts/test-orchestration-ui.cjs (Join-Path $tmp 'orchestration-mode')
