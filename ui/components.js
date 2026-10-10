@@ -1100,7 +1100,7 @@ class WaWindow extends HTMLElement {
           box-sizing: border-box;
           min-width: 320px; min-height: 220px; overflow: hidden;
           background: var(--panel, #10131a); color: var(--text, #e6e9f0);
-          border: 1px solid var(--line, #232936); border-radius: var(--radius, 10px);
+          border: 1px solid var(--line, #232936); border-radius: var(--radius);
           box-shadow: 0 24px 60px rgba(0,0,0,.6);
         }
         .bar {
@@ -1866,19 +1866,27 @@ class WaChatShell extends HTMLElement {
     this._attachments.forEach((file, index) => {
       const chip = document.createElement("span");
       chip.className = "attachment" + (file.kind === "image" ? " attachment-image" : "");
-      const name = document.createElement("b");
+      chip.title = file.name;
       if (file.kind === "image") {
         const thumb = document.createElement("img");
         thumb.className = "attachment-thumb";
         thumb.src = file.data;
         thumb.alt = file.name;
         chip.append(thumb);
+      } else {
+        const glyph = document.createElement("span");
+        glyph.className = "attachment-file-glyph";
+        glyph.textContent = "▧";
+        glyph.setAttribute("role", "img");
+        glyph.setAttribute("aria-label", file.name);
+        chip.append(glyph);
       }
-      name.textContent = file.name;
       const remove = document.createElement("button");
       remove.type = "button";
       remove.textContent = "×";
-      remove.title = "Remove";
+      remove.className = "attachment-remove";
+      remove.title = "Remove " + file.name;
+      remove.setAttribute("aria-label", remove.title);
       remove.addEventListener("click", () => {
         // Announced *before* the change, so a host that keeps an undo stack can record the state to
         // come back to. A chip removed by hand is the easiest way to lose a pasted screenshot.
@@ -1886,7 +1894,7 @@ class WaChatShell extends HTMLElement {
         this._attachments.splice(index, 1);
         this.renderAttachments();
       });
-      chip.append(name, remove);
+      chip.append(remove);
       this._attachmentsEl.append(chip);
     });
   }
@@ -2178,7 +2186,7 @@ class WaAgentSession extends HTMLElement {
   async collectFiles(files) {
     const receipt = await this.shell.addFiles(files);
     const parts = [];
-    if (receipt.added > 0) parts.push(receipt.added + ' file(s) attached - press Enter to send');
+    // Successful intake is already visible in the shared attachment cards.
     if (receipt.refused > 0) parts.push(receipt.refused + ' image(s) skipped - only png, jpeg, webp and gif are accepted');
     if (receipt.stale.length) parts.push('the draft was sent while ' + receipt.stale[0] + ' was reading - it was not attached');
     if (parts.length) this.notice.textContent = parts.join('; ');

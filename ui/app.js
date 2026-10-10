@@ -3966,9 +3966,8 @@ async function addFiles(files) {
   const receipt = await chatShell.addFiles(files, () => generation === draftGeneration);
   if (receipt.refused > 0) {
     setStatus(`${receipt.refused} image(s) skipped - only png, jpeg, webp and gif are accepted`);
-  } else if (receipt.added > 0) {
-    setStatus(`${receipt.added} file(s) attached - press Enter to send`);
   }
+  // Successful attachment intake is shown by the cards, never by a run status/timer.
   // The draft moved on while a file was in flight. A file the reader attached that quietly does not
   // appear is worse than one that explains why it did not.
   if (receipt.stale.length > 0) {

@@ -213,9 +213,11 @@ It is not live installation proof. Also run `scripts/test-ui.ps1` and inspect th
 
 `minimal-chat-proof` records `node <repo>/scripts/test-minimal-chat.cjs <fresh-evidence>`
 plus its retained `--post` check. It covers live token estimate/report replacement,
-context-only hover/focus trigger, global3px radius, removed steering buttons,
+context-only hover/focus trigger, shared radius token, removed steering buttons,
 commentary first-chunk/character growth/manual closure/replay, independent top
-warning causes and actual recovery routes. Required worktrees use this verified
+warning causes and actual recovery routes, square nameless attachment cards,
+quiet successful intake (idle/active/child), refusal visibility, removal/undo and
+one-token radius changes including promoted shadow panels. Required worktrees use this verified
 CLI first, never a known refused spell replay. Also run `scripts/test-ui.ps1`,
 hermetic run-count/Responses/Pi phase fixtures and standalone embedded checks.
 Inspect the screenshot; estimates are not exact provider tokens or billing.

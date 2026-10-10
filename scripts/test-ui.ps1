@@ -605,10 +605,10 @@ $harness = @'
   // A pile of pasted screenshots must not push the composer off the screen. The strip
   // caps its height and scrolls; the message box stays visible under it, and the last
   // chip is reachable without the layout growing.
-  window.__attachMany(24);
+  window.__attachMany(48);
   var strip = document.getElementById("attachments");
   var composer = document.getElementById("composer");
-  check(strip.children.length === 24, "24 attachments must render 24 chips, saw " + strip.children.length);
+  check(strip.children.length === 48, "48 attachments must render 48 square cards, saw " + strip.children.length);
   check(strip.clientHeight <= 151, "the strip must cap its height at ~150px, saw " + strip.clientHeight + "px");
   check(strip.scrollHeight > strip.clientHeight + 40,
     "and the overflow must be scrollable, saw scrollHeight " + strip.scrollHeight + " vs " + strip.clientHeight);
@@ -1323,8 +1323,8 @@ $harness = @'
   check(mainRow.constructor===paneRow.constructor && mainSteer.className===paneSteer.className,
     'remaining actions share one factory');
   var footerBoxes=[mainAttach,mainSteer,paneAttach,paneSteer].map(boxOf);
-  check(footerBoxes.every(box=>box && box.cls==='chat-control' && box.radius==='3px'),
-    'all remaining footer controls share the global 3px radius');
+  check(footerBoxes.every(box=>box && box.cls==='chat-control' && box.radius==='5px'),
+    'all remaining footer controls share the global 5px radius');
   check(footerBoxes[2].h===30 && footerBoxes[3].h===footerBoxes[2].h,
     'child cancel follows append-file height');
   // the control a shell makes must be the same control. That is "same implementation" where two surfaces are

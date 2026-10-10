@@ -97,7 +97,7 @@ One scale: **5px**.
 - **Gaps:** between sibling elements the gap is **0** or **5px**. Never invent
   8px/12px/14px gaps.
 - Sizes of square controls are multiples of 5 (`30px`, `40px`).
-- Component radius: **3px**, defined once by `--radius`; `--radius-sm` and
+- Component radius: **5px**, defined once by `--radius`; `--radius-sm` and
   `--radius-lg` alias it. Circular glyphs/avatars remain circles, full-bleed regions square.
 - Use the tokens `--space`, `--pad`, `--gap`, `--radius*` rather than literals.
 
@@ -245,6 +245,11 @@ not HTML. Jobs are automation definitions, not external process operations.
 Attachments ride through the composer's existing `.attachment` chip, extended
 rather than forked (§1): an image adds `.attachment-image` and an
 `.attachment-thumb` preview so you can see what you are about to send.
+Cards are square (`--attachment-size`), without visible filenames/descriptions;
+the remove × sits at the top right. Names remain in hover/accessibility metadata
+and the outgoing payload. Text files use a file glyph. Successful intake never
+creates run-status text or an elapsed timer: the cards are its acknowledgement.
+Refused/failed/stale intake remains visible. Main and child use this one shell.
 
 Two kinds, and they travel differently:
 
