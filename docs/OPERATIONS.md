@@ -93,6 +93,13 @@ reconciliation, not automatic replay; lack of attachment is not proof of death. 
   then `/`); when even that is not a directory, `used` is `null`, the caller's value is kept and the
   spawn reports its own failure instead of a destination that was invented. A directory that exists
   is unchanged: `cwd` is the one that was asked for and no substitution is claimed.
+* An attached accepted operation can be observed before its supervisor creates
+  stdout/stderr. `read` returns empty `pending_output:true` with an unchanged cursor
+  during that pre-setup interval; it is not EOF, completion or a provider failure.
+  Missing output for an unknown, running or terminal operation still fails, with
+  operation/stream/path in the diagnostic; other I/O errors are never suppressed.
+  This fixes the subscription bridge's accepted-output race without another launch,
+  provider retry, silent data loss or replay of tools. Original cancelled evidence stays intact.
 * Captured output is retained incrementally on disk, with a combined 8 MiB default
   per-operation limit (64 MiB API maximum). Crossing it terminates execution and
   reports `output_limit_exceeded`, never silent truncation. In-memory result tails

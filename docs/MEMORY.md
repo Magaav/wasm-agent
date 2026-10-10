@@ -81,6 +81,13 @@ proceeds. The last turn is an exact record of how far the process got:
 | `failed` | assistant with `ok=0` | the model call errored or the runaway guard was exhausted — a **landed** outcome, not an unfinished one |
 | `unfinished` | user, tool, retry, assistant commentary, or assistant with `tool_calls` | no completed answer is recorded after this turn; the process may have stopped or may still be working |
 
+Failed state details now use the last failed span's recorded error (UTF-8-safe
+bounded excerpt, explicitly labelled if truncated), rather than generic “inspect
+its error” prose. The session listing reads terminal failed traces in its existing
+joined query, without N+1 history scans. Missing error evidence stays explicitly
+unknown. The UI can read the last failed assistant trace on older nodes and paints
+error text as text, never HTML. Original records and failed classification remain.
+
 `memory.session_state(id)` returns that, plus where it stopped and which calls of the
 last step have no recorded result: "1 of 2 never reported" is a different fact
 from "nothing ran", and only the step knows which — when the process dies between

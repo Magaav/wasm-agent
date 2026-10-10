@@ -3777,6 +3777,10 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'final-answer focused suite failed' }
     & node scripts/test-coordinator-steps.cjs
     if ($LASTEXITCODE -ne 0) { throw 'compact phase/debug browser suite failed' }
+    & node scripts/test-failure-notice.cjs (Join-Path $tmp 'failure-notice')
+    if ($LASTEXITCODE -ne 0) { throw 'failure notice browser suite failed' }
+    & node scripts/test-failure-notice.cjs (Join-Path $tmp 'failure-notice') --post
+    if ($LASTEXITCODE -ne 0) { throw 'failure notice evidence postcheck failed' }
     & node scripts/test-run-counts.cjs (Join-Path $tmp 'run-counts')
     if ($LASTEXITCODE -ne 0) { throw 'run count browser suite failed' }
     & node scripts/test-run-counts.cjs (Join-Path $tmp 'run-counts') --post

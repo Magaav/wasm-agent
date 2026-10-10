@@ -50,6 +50,13 @@ Codex's private `/wham/usage` endpoint when the account response exposes them. P
 wasm-agent keeps the token inside its short-lived bridge process. If the endpoint
 or account response changes, the balloon reports limits unavailable.
 
+The bridge's first output read may precede stdout/stderr initialization after
+operation acceptance. That precise attached pre-setup state returns pending empty
+output with the cursor unchanged; Lua keeps observing the same operation. It never
+cancels/restarts a provider call just because the output file is not created yet.
+Unknown/running/terminal missing files and genuine I/O failures still fail with
+operation/stream/path diagnostics. See [OPERATIONS.md](OPERATIONS.md).
+
 The bridge runs as a supervised operation: streamed text and reasoning are forwarded,
 tool calls return to the Lua agent, and cancellation/deadlines stop the process.
 The model window is Pi's subscription catalog's 272,000 tokens, rather than assuming

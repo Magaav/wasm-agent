@@ -554,7 +554,35 @@ impl Manager {
         if stream != "stdout" && stream != "stderr" {
             return Err(error("invalid_operation_stream"));
         }
-        let mut file = File::open(self.root.join(id).join(stream))?;
+        let path = self.root.join(id).join(stream);
+        let mut file = match File::open(&path) {
+            Ok(file) => file,
+            Err(problem) => {
+                // start() admits before its supervisor creates output files. A read during
+                // that interval is pending output, not a missing executable/provider fault.
+                // Only a live attached pre-setup admission can prove this distinction.
+                let entry = self.entries.lock().map_err(error)?.get(id).cloned();
+                let pending = if let Some(entry) = entry {
+                    let state = entry.state.lock().map_err(error)?;
+                    state["state"] == "accepted" && state["settled"] == false
+                        && state["timing"]["setup_ms"].is_null()
+                } else { false };
+                if problem.kind() == io::ErrorKind::NotFound && pending {
+                    return Ok(json!({"operation_id":id,"stream":stream,"offset":offset,
+                        "next_offset":offset,"content":"","text_lossy":false,
+                        "available_bytes":0,"pending_output":true,
+                        "note":"accepted operation has not initialized this output stream yet"}));
+                }
+                // Initialization may have completed between the failed open and state
+                // observation. Re-open once; never retry execution or hide a lost file.
+                match File::open(&path) {
+                    Ok(file) if problem.kind() == io::ErrorKind::NotFound => file,
+                    _ => return Err(io::Error::new(problem.kind(), format!(
+                        "operation_output_open_failed: operation={id} stream={stream} path={}: {problem}",
+                        path.display()))),
+                }
+            }
+        };
         file.seek(SeekFrom::Start(offset))?;
         let mut data = vec![0; limit.clamp(1, VIEW_BYTES)];
         let n = file.read(&mut data)?;

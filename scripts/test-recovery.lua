@@ -53,6 +53,25 @@ assert(waiting(failed) == nil, "a failed turn must not be listed as unfinished")
 assert((tonumber(memory.session(failed).interrupted_count) or 0) == 0,
   "a failed turn must not be recorded as unfinished")
 
+-- The failure notice uses the last failed span, never a prior successful tool
+-- or old failure when the terminal trace has none. Original errors stay intact.
+local detailed = session('failure-detail')
+local problem='operation_output_open_failed: operation=op-fixture stream=stdout path=fixture/stdout: missing'
+local failed_id=host.uuid()
+memory.append_turn(detailed,{id=failed_id,role='assistant',content='',ok=false,trace={
+  {kind='tool',ok=false,error='older error'},
+  {kind='model_call',ok=false,error=problem},
+  {kind='run_counts',model_calls=2,tool_calls=1}}})
+assert(state(detailed).detail==problem,'state returns actual terminal cause')
+local found
+for _,row in ipairs(memory.list_sessions('master',100,{states=true})) do if row.id==detailed then found=row end end
+assert(found and found.state_detail==problem,'session list shares exact failure detail without N+1')
+assert(memory.message(failed_id).trace[2].error==problem,'notice never rewrites original evidence')
+assert(state(failed).detail:find('no error detail recorded',1,true),'legacy missing error stays explicitly unknown')
+local huge=session('long-failure')
+memory.append_turn(huge,{role='assistant',content='',ok=false,trace={{kind='model_call',ok=false,error=string.rep('é',500)}}})
+assert(#state(huge).detail<300 and state(huge).detail:find('excerpt',1,true),'large errors remain bounded and labelled')
+
 -- unfinished (1): asked, never answered. The process stopped between the question
 -- and the model's reply.
 local asked = session("asked")

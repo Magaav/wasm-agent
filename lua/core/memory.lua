@@ -2,6 +2,8 @@
 -- The ledger is source of truth; *_fts is an index; the model never rewrites it.
 local json = dofile("lua/vendor/json.lua")
 local paths = dofile("lua/core/paths.lua")
+local evidence = dofile("lua/core/evidence_view.lua")
+local redact = dofile("lua/core/redact.lua")
 local M = {}
 local in_transaction
 
@@ -737,7 +739,8 @@ function M.list_sessions(user_id, limit, opts)
   if opts.states then
     -- The last turn per session, in the same query: one row per thread, no N+1.
     sql = sql .. ", l.role AS last_role, l.ok AS last_ok, l.phase AS last_phase, l.tool_calls AS last_tool_calls, " ..
-                "l.created_at AS last_at, l.seq AS last_seq"
+                "l.created_at AS last_at, l.seq AS last_seq, " ..
+                "CASE WHEN l.role='assistant' AND l.ok=0 THEN l.trace ELSE '[]' END AS last_trace"
   end
   sql = sql .. " FROM sessions s"
   if opts.states then
@@ -752,9 +755,10 @@ function M.list_sessions(user_id, limit, opts)
   if opts.states then
     for _, row in ipairs(rows) do
       local last = row.last_seq and { role = row.last_role, ok = row.last_ok, phase = row.last_phase,
-        tool_calls = row.last_tool_calls, created_at = row.last_at } or nil
+        tool_calls = row.last_tool_calls, created_at = row.last_at, trace = row.last_trace } or nil
       row.state = classify(last)
       row.state_detail = detail_of(row.state, last, nil)
+      row.last_trace = nil -- Keep the list bounded; original trace lives in the message.
     end
   end
   return rows
@@ -1226,7 +1230,13 @@ end
 function detail_of(state, last, pending)
   if state == "empty" then return "no messages yet" end
   if state == "answered" then return "settled - the last message is a reply" end
-  if state == "failed" then return "the last run failed (inspect its error and transcript)" end
+  if state == "failed" then
+    local failure = last and evidence.failure(last)
+    if failure and failure.error ~= '' then
+      return redact.text(failure.error) .. (failure.error_truncated and ' (excerpt; full error in transcript)' or '')
+    end
+    return "the last run failed (no error detail recorded; inspect its transcript)"
+  end
   if not last then return "nothing is recorded after the last turn" end
   if last.role == "user" then return "an unanswered question, " .. ago(last.created_at) end
   if last.role == "summary" then return "stopped after a compaction, " .. ago(last.created_at) end

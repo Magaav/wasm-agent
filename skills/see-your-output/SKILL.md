@@ -221,6 +221,15 @@ Spell replay remains unsupported with enforced worktrees; keep the direct CLI
 until actual replay passes, without weakening bindings. Inspect the screenshot.
 No phase inference, task settlement or installed-source claim follows from scroll.
 
+## Failure notice proof
+
+Run `node <repo>/scripts/test-failure-notice.cjs <fresh-evidence>`, then the same
+with `--post`, to check the actual terminal model error in the yellow recovery
+notice, inert text rendering and explicit Continue. `failure-notice-proof`
+records the same sequence; choose the supported runner as above, never probe a
+known refused binding. Also run the scratch-root `scripts/test-recovery.lua`
+fixture for authoritative session details and the required UI suite.
+
 ## Chat health proof
 
 `chat-health-proof` records `node <repo>/scripts/test-chat-health.cjs <fresh-evidence>`
