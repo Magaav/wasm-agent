@@ -3777,6 +3777,10 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'final-answer focused suite failed' }
     & node scripts/test-coordinator-steps.cjs
     if ($LASTEXITCODE -ne 0) { throw 'compact phase/debug browser suite failed' }
+    & node scripts/test-turn-ownership.cjs (Join-Path $tmp 'turn-ownership')
+    if ($LASTEXITCODE -ne 0) { throw 'turn ownership browser suite failed' }
+    & node scripts/test-turn-ownership.cjs (Join-Path $tmp 'turn-ownership') --post
+    if ($LASTEXITCODE -ne 0) { throw 'turn ownership evidence postcheck failed' }
     & node scripts/test-failure-notice.cjs (Join-Path $tmp 'failure-notice')
     if ($LASTEXITCODE -ne 0) { throw 'failure notice browser suite failed' }
     & node scripts/test-failure-notice.cjs (Join-Path $tmp 'failure-notice') --post
