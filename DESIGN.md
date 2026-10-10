@@ -22,7 +22,10 @@ defines freshness, render virtualization, fallback and measurement limits.
 ## 1. Reuse before you create
 
 Prefer a component, token, or pattern that already exists in this project over a
-new one.
+new one. Transcript topics share `topicParts()`, one `.topic` surface and the
+`.trace-head` glyph/label/meta/chevron header. Subagent receipts use this pattern,
+not a separate card. Component-owned `.topic-body` lists never inherit markdown
+list margins or indentation; header padding follows the 5px scale on every host.
 
 
 ## 2. Web components are the default pattern
@@ -203,6 +206,7 @@ same shape, and the same rule: the row says which device the choice belongs to.
 | `<wa-tool>` | A tool-activity chip. | `name`, `.detail`, status class | — |
 | `<wa-trace>` | A step's tool trace inside a reply bubble. `.body`, and `.setAge(seconds, bound)` on the in-flight line so `bash` reads `42s of 300s`, not just `bash`. | — |
 | `<wa-run>` | The collapsible topic a run's tool lines live in. | — | — |
+| `<wa-subagent>` | Shared topic for native/legacy delegation receipts, with a branch glyph, recorded profile/state/session and an expanded conversation link. A receipt is not task completion. | `.receipt`, `.body`, `open` | `subagent-open` (`{session}`) |
 | `<wa-diff>` | The file changes a run made, below its answer. | — | — |
 | `<wa-window>` | A promoted panel in its own OS window (§3). | — | — |
 | `<wa-harness-status>` | §6's harness diagnostics. | — | `export` |
