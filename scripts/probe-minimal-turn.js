@@ -13,7 +13,7 @@ try {
  check(turnTokenReadout()==='13k','reported usage replaces pending lower bound');
  check(chipModel.textContent==='▤ 26%/1M'&&composerModel.hidden&&!statusBtn.textContent.includes('fixture-model'),'context only, no model footer');
  handleEvent({type:'run_counts',counts:snapshot({tokens_reported:13000,usage_calls:26,usage_unknown:1})});check(turnTokenReadout()==='≥13k','unknown prior usage never invents a zero');
- const style=getComputedStyle(statusBtn);check(style.backgroundColor==='rgba(0, 0, 0, 0)'&&style.borderTopColor==='rgba(0, 0, 0, 0)'&&style.borderRadius==='5px','minimal trigger resting style');
+ const style=getComputedStyle(statusBtn),composerStyle=getComputedStyle(document.querySelector('.composer'));check(style.backgroundColor===composerStyle.backgroundColor&&style.borderTopColor===composerStyle.backgroundColor&&style.borderRadius==='5px','minimal trigger opaque resting style blends into composer');
  statusBtn.click();check(balloon.open,'minimal trigger still opens balloon');balloon.close();
  check(getComputedStyle(document.documentElement).getPropertyValue('--radius').trim()==='5px'&&getComputedStyle(input).borderRadius==='5px'&&getComputedStyle(sendButton).borderRadius==='5px','one global component radius');
  check(!document.querySelector('#steer,[data-action="steer"]'),'no main steer button');
