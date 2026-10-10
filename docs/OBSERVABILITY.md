@@ -65,6 +65,28 @@ percentile samples and no historical payload scan on an unchanged read. Context
 coverage and dropped writes remain fresh. Storage inventory is separately sampled
 with an explicit timestamp. See [LIGHTWEIGHT-UI.md](LIGHTWEIGHT-UI.md).
 
+## Compact chat phases and debug history
+
+Ordinary chat shows one current phase in the existing sticky footer:
+`thinking…  Waiting on model · 9s  1:05`. The middle clock measures the current
+phase; the right clock remains the total turn duration. Selecting/executing tools
+and receiving output replace that middle phase, never stack completed status rows.
+Settlement hides the current phase and preserves the existing final-duration footer.
+Errors, recovery/queue notices, tool evidence and reasoning content remain visible.
+
+Detailed `wa-step` history is visible only for a session whose existing recording
+mode is `debug` (Engine → Sessions). `/session` mode is applied after target/epoch
+validation; an acknowledged mode toggle updates the current container. Session/node
+switches reset to quiet until mode is read. Child containers do not borrow main debug
+state. Hidden phase rows remain available for debug without counting as visible run
+steps; ordinary ticks update only the compact clock, not hidden step clocks. This
+changes presentation, not retention, execution events or logging authority.
+
+Risk: debug changes made from another surface appear on the next authoritative
+session read; there is no new polling or watcher. `scripts/test-coordinator-steps.cjs`
+now runs within `scripts/test-ui.ps1`, covering quiet/debug modes, phase/total clocks,
+checkpoint continuity, settlement, child isolation and narrow-footer overflow.
+
 ## Accounting invariants
 
 For reported OpenAI-compatible usage:

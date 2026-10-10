@@ -318,7 +318,10 @@ wa-diff { display: block; align-self: flex-start; max-width: 760px; width: 100%;
   gap: var(--gap); color: var(--muted); font-size: 13px; padding: var(--space);
   background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius-sm);
 }
-.chat-content-run-label { min-width: 0; }
+.chat-content-run-label { min-width: 0; flex: 0 0 auto; }
+.chat-content-run-phase { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-variant-numeric: tabular-nums; }
+/* Detailed phase history is diagnostic-only; the compact current phase stays in the footer. */
+.messages:not([data-debug="true"]) wa-step, .agent-transcript:not([data-debug="true"]) wa-step { display: none; }
 .chat-content-run-elapsed { margin-left: auto; flex: 0 0 auto; font-variant-numeric: tabular-nums; }
 wa-step.run-step { display: flex; align-items: center; gap: var(--gap); padding: var(--space); color: var(--muted); font-size: 13px; }
 .run-step-label { flex: 1; min-width: 0; }
