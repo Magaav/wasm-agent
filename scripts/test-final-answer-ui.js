@@ -128,6 +128,27 @@
       check(atBottom()&&!answerAnchors.has(messages),'jump-to-latest explicitly resumes tail following');
     }
   }
+  // Markdown must be visible BEFORE text_end/reply, including late/unknown phase.
+  for(const mode of ['explicit','pending','delta']) {
+    readingFixture();
+    if(mode==='explicit')handleEvent({type:'final_answer_begin',message_id:'markdown-'+mode});
+    const chunks=['## Live heading\n\nA **bo','ld** word and `inline code`.\n\n- First item\n- Second item\n\n',
+      '```js\nconst answer = 42;\n','```\n\n[unsafe](javascript:alert(1)) <think>literal text</think>\n\n'];
+    let raw='';
+    for(let i=0;i<chunks.length;i++) {
+      raw+=chunks[i];handleEvent({type:mode==='pending'?'pending_delta':'delta',pending_id:'markdown-'+mode,text:chunks[i]});
+      const node=mode==='pending'?phasePendingText.get('markdown-'+mode).node:streamBody;
+      check(!!node.querySelector('h2'),'heading formatted synchronously before completion: '+mode+'/'+i);
+      check(node.rawText===raw,'exact Markdown source preserved during '+mode+'/'+i);
+      if(i>=1)check(node.querySelector('strong')?.textContent==='bold' && !!node.querySelector('ul li') && !!node.querySelector('code'),'split emphasis/list/code formatted while streaming: '+mode+'/'+i);
+      if(i>=2)check(node.querySelector('pre code')?.textContent.includes('const answer = 42;'),'open fenced code readable before closing fence: '+mode+'/'+i);
+      if(i===3)check(!node.querySelector('a[href^="javascript:"]') && !node.querySelector('think') && node.textContent.includes('<think>literal text</think>'),'stream uses existing safe Markdown renderer: '+mode);
+    }
+    const node=mode==='pending'?phasePendingText.get('markdown-'+mode).node:streamBody;
+    check(mode!=='pending'||node.classList.contains('phase-pending')&&!node.classList.contains('final-answer'),'Markdown does not manufacture final phase');
+    handleEvent({type:'reply',text:raw});
+    check(messages.querySelectorAll('h2').length===1 && messages.textContent.includes('const answer = 42;'),'completion retains formatted answer exactly once: '+mode);
+  }
   // Starting a response must not steal a reader already reviewing older messages.
   readingFixture();messages.scrollTop=0;setFollow(false);
   handleEvent({type:'final_answer_begin',message_id:'scrollback'});
@@ -189,10 +210,11 @@
   // Leave the screenshot on the requested reading position, not a tail-follow fixture.
   readingFixture();
   document.getElementById('panel').style.width='540px';
-  handleEvent({type:'final_answer_begin',message_id:'visual-reading'});
-  handleEvent({type:'delta',text:'# Read from the beginning\n\nThe first lines stay here while the rest of the answer arrives below.\n\n'+('Additional output grows below the viewport; scroll down when you are ready.\n\n'.repeat(30))});
+  handleEvent({type:'pending_delta',pending_id:'visual-reading',text:'# Read from the beginning\n\n**Markdown renders while output arrives**, before final phase or completion.\n\n- Formatted lists\n- `Inline code`\n\n```js\nconst live = true;\n```\n\n'+('Additional output grows below the viewport; scroll down when you are ready.\n\n'.repeat(30))});
   pin();
-  check(Math.abs(streamBody.getBoundingClientRect().top-messages.getBoundingClientRect().top)<3,'narrow-window answer starts at top');
+  const visualAnswer=phasePendingText.get('visual-reading').node;
+  check(Math.abs(visualAnswer.getBoundingClientRect().top-messages.getBoundingClientRect().top)<3,'narrow-window answer starts at top');
+  check(!!visualAnswer.querySelector('h1')&&!!visualAnswer.querySelector('strong')&&!!visualAnswer.querySelector('pre'),'narrow-window provisional Markdown visible before reply');
   const log=document.createElement('pre'); log.id='wa-probe';log.hidden=true;
   log.dataset.status=problems.length?'fail':'pass';
   log.textContent=problems.length?problems.join(' ;; '):'final-answer UI causal checks pass';

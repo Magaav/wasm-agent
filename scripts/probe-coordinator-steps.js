@@ -11,7 +11,8 @@
   }
   try {
     await window.rendererLoaded;
-    for (let i = 0; i < 100; i++) await Promise.resolve();
+    for (let i = 0; i < 200 && !transcriptReady; i++) await new Promise(resolve=>setTimeout(resolve,10));
+    check(transcriptReady,'startup transcript settled before phase observation');
     busy = false;
     activeRunId = null;
     liveRunId = null;
@@ -20,14 +21,20 @@
     repaintMessages([row], {active:true,notify:false});
     const bubble = currentBubble();
     check(transcript.querySelectorAll('wa-message.assistant').length === 1, 'background admission immediately creates one balloon');
-    check(bubble.querySelector('wa-step[data-state="running"]'), 'a background turn has an immediate visible phase');
+    check(bubble.querySelector('wa-step[data-state="running"]'), 'background phase is retained for debug');
+    check(getComputedStyle(bubble.querySelector('wa-step')).display==='none','ordinary mode hides detailed phase rows');
+    check(statusPhase.textContent.startsWith('Working')&&!statusPhase.hidden,'ordinary mode has a compact current phase');
+    check(statusLabel.nextElementSibling===statusPhase&&statusPhase.nextElementSibling===statusElapsed,'phase lives between thinking label and total duration');
+    setTranscriptDebug(transcript,'debug');
+    check(getComputedStyle(bubble.querySelector('wa-step')).display!=='none','debug mode reveals phase history');
     check(bubble.body.querySelector(':scope > .chat-content-run-status'), 'live status is inside the balloon');
     check(statusElapsed.textContent === '1:05', 'background elapsed time uses the saved start time');
     check(!!runStatusTicker, 'background turns start the elapsed ticker');
     handleEvent({type:'status',text:'thinking'});
     handleEvent({type:'round',n:1});
     handleEvent({type:'status',text:'model'});
-    check(bubble.textContent.includes('Preparing turn') && bubble.textContent.includes('Waiting for model response'), 'preparation and model wait are separate visible steps');
+    check(bubble.textContent.includes('Preparing turn') && bubble.textContent.includes('Waiting on model'), 'debug preparation and model wait are separate steps');
+    check(statusLabel.textContent==='thinking…'&&statusPhase.textContent==='Waiting on model · 0s','model waiting is compact, shortened and timed');
     const waiting = runStepState.active;
     const count = runStepState.steps.length;
     handleEvent({type:'status',text:'model'});
@@ -35,9 +42,12 @@
     const clock = Date.now;
     try { Date.now = () => clock() + 2000; updateRunElapsed(); }
     finally { Date.now = clock; }
-    check(waiting.node.querySelector('.run-step-age').textContent === '2s', 'the current phase has its own measured elapsed time');
+    check(waiting.node.querySelector('.run-step-age').textContent === '2s', 'debug phase has its own measured elapsed time');
+    check(statusPhase.textContent==='Waiting on model · 2s','compact phase has its own elapsed time, distinct from total');
     handleEvent({type:'decision',call_id:'inspect-one',name:'read_many',arguments_text:'worker-result.json',complete:true});
+    check(statusPhase.textContent==='Selecting tools · 0s','tool selection replaces compact current phase');
     handleEvent({type:'tool',call_id:'inspect-one',name:'read_many',arguments:{requests:[{path:'worker-result.json'}]}});
+    check(statusPhase.textContent==='Executing tools · 0s','tool execution replaces compact phase without a second status row');
     check(bubble.textContent.includes('Selecting tools') && bubble.textContent.includes('Executing tools'), 'tool selection and execution are shown as phases');
     check(bubble.querySelectorAll('.tool-line[data-call-id="inspect-one"]').length === 1, 'the actual inspection tool is shown once');
     check(runStepState.active.node.nextElementSibling?.tagName === 'WA-TRACE', 'execution phase precedes a promoted streamed decision trace');
@@ -64,10 +74,12 @@
     } finally { sessionEventPage = originalPage; followedSeq = originalFollowed; }
     check(savedNode.isConnected && statusLine.closest('wa-message.assistant'), 'an empty event tail after a checkpoint does not erase the live step');
     const mainState = runStepState;
+    const mainPhase = statusPhase;
     const child = document.createElement('div');
     document.body.append(child);
     paintChildTranscript(child, [{seq:1,role:'user',content:'Child task'}], {active:true,notify:false});
-    check(runStepState === mainState && savedNode.isConnected, 'child transcript rendering leaves coordinator progress intact');
+    check(runStepState === mainState && savedNode.isConnected && statusPhase===mainPhase, 'child rendering leaves coordinator phase/status intact');
+    check(child.dataset.debug==='false'&&transcript.dataset.debug==='true','child debug state is independent of main');
     child.remove();
     handleEvent({type:'pending_delta',pending_id:'answer',text:'The review'});
     check(currentBubble().textContent.includes('Receiving model output'), 'provisional output has a visible step');
@@ -79,6 +91,10 @@
     check(!finished.querySelector('wa-step[data-state="running"]'), 'settlement stops every phase spinner');
     check(!runStatusTicker, 'settlement clears the elapsed ticker');
     check(finished.body.lastElementChild.classList.contains('finished'), 'the final duration remains the balloon footer');
+    check(finished.querySelector('.chat-content-run-phase').hidden,'settlement removes compact active phase');
+    setTranscriptDebug(transcript,'default');
+    check(Array.from(finished.querySelectorAll('wa-step')).every(node=>getComputedStyle(node).display==='none'),'turning debug off hides retained history');
+    setTranscriptDebug(transcript,'debug');
     evidence.push({case:'background coordinator',steps:Array.from(finished.querySelectorAll('wa-step')).map(e=>e.textContent),tools:finished.querySelectorAll('.tool-line').length});
     observedRun = {session:chatSession,run_id:902,ms:1000};
     repaintMessages([{...row,id:'next-notice',seq:200,content:'Next turn',created_at:(Date.now()-1000)/1000}], {active:true,notify:false});
@@ -97,6 +113,7 @@
       {...row,id:'following-notice',seq:400,content:'Following turn',created_at:Date.now()/1000}];
     repaintMessages(history, {active:true,notify:false});
     check(oldActive.dataset.state === 'completed', 'a new run settles the previous cached phase from that turn durable answer');
+    check(Array.from(transcript.querySelectorAll('.finished .chat-content-run-phase')).every(node=>node.hidden),'historical completion never borrows active phase clock');
     check(transcript.querySelectorAll('wa-step[data-state="running"]').length === 1, 'full-history repaint never leaves an orphaned phase spinner');
     check(runStepState.id === '904', 'the new run owns the active phase after a full-history repaint');
     handleEvent({type:'status',text:'model'});
@@ -126,12 +143,24 @@
     check(runStepState.active.label === 'Starting turn', 'queue-to-running transition updates the phase');
     handleEvent({type:'commentary_delta',text:'Checking the worker result.'});
     check(runStepState.active.label === 'Receiving progress update', 'coordinator commentary is a visible phase');
+    setTranscriptDebug(transcript,'default');
+    check(Array.from(transcript.querySelectorAll('wa-step')).every(node=>getComputedStyle(node).display==='none'),'normal mode stays quiet during live output');
     setLiveness(null);
     finishRunStatus();
     busy = false;
     activeRunId = null;
     observedRun = null;
     runBubble = null;
+    // Leave real screenshot on ordinary compact status with both independent clocks.
+    transcript.replaceChildren();runBubble=null;runStepState=null;streamBody=null;streamText='';
+    busy=true;activeRunId='906';runStartedAt=Date.now()-65000;setFollow(true);
+    document.getElementById('panel').style.width='540px';
+    handleEvent({type:'status',text:'model'});
+    runStepState.active.started=Date.now()-9000;updateRunElapsed();
+    check(statusPhase.textContent==='Waiting on model · 9s'&&statusElapsed.textContent==='1:05','compact screenshot has separate phase and total clocks');
+    const box=statusLine.getBoundingClientRect();
+    check(statusLabel.getBoundingClientRect().right<=statusPhase.getBoundingClientRect().left+1&&statusPhase.getBoundingClientRect().right<=statusElapsed.getBoundingClientRect().left+1,'narrow footer orders label/phase/total without overlap');
+    check(statusLine.scrollWidth<=statusLine.clientWidth+1&&box.width>0,'narrow compact status fits viewport');
     report.dataset.status = 'pass';
     report.textContent = JSON.stringify({checks,skipped:0,evidence},null,2);
   } catch (error) {

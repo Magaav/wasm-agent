@@ -580,8 +580,9 @@ $harness = @'
   var runMeta = run ? run.querySelector(".trace-meta") : null;
   var runText = runMeta ? runMeta.textContent : "";
   check(runText.indexOf("2 tool calls") >= 0, "the run topic should total its tool calls, saw: " + runText);
-  check(runText.indexOf("7 steps") >= 0 && runBody.querySelectorAll('wa-step').length === 5,
-    "the run topic should count its text and observed phase steps, saw: " + runText);
+  check(runText.indexOf("2 steps") >= 0 && runBody.querySelectorAll('wa-step').length === 5 &&
+    Array.from(runBody.querySelectorAll('wa-step')).every(function(node){return getComputedStyle(node).display==='none';}),
+    "ordinary run topic counts visible text steps, hides debug-only phase history, saw: " + runText);
 
   // Tool topics belong to the reply, not to the transcript.
   check(messages.querySelectorAll(":scope > wa-trace").length === 0,
@@ -1026,8 +1027,9 @@ $harness = @'
   window.handleEvent({ type: "reasoning", chars: 4096 });
   var reasoningStatuses = document.querySelectorAll(".chat-content-run-status:not(.finished)");
   var reasoningStatus = reasoningStatuses[reasoningStatuses.length - 1];
-  check(!!reasoningStatus && /4096/.test(reasoningStatus.textContent),
-    "reasoning must be visible while it happens, saw: " +
+  check(!!reasoningStatus && reasoningStatus.querySelector('.chat-content-run-label').textContent==='thinking…' &&
+    reasoningStatus.querySelector('.chat-content-run-phase').textContent.indexOf('Model is reasoning')>=0,
+    "reasoning uses one compact timed phase instead of noisy character counts, saw: " +
     (reasoningStatus ? reasoningStatus.textContent : "no status line"));
 
   // A run must not widen the transcript. Mid-run the bubble holds raw text and
@@ -2949,7 +2951,9 @@ $harness = @'
       "one run is one bubble however many times it speaks (was " + before + ", now " + after + ")");
     var multi = msgs.querySelectorAll("wa-message.assistant")[after - 1];
     var multiBody = multi ? multi.querySelector(".body") : null;
-    var multiShape = multiBody ? Array.prototype.map.call(multiBody.children, function (c) {
+    var multiShape = multiBody ? Array.prototype.filter.call(multiBody.children, function(c) {
+      return !c.classList.contains('chat-content-run-status');
+    }).map(function (c) {
       return c.tagName === "WA-RUN" ? "run" : (c.tagName === "WA-TRACE" ? "trace"
         : (c.tagName === "WA-DIFF" ? "diff" : "text"));
     }).join(",") : "";
@@ -3758,6 +3762,8 @@ try {
   try {
     & node scripts/test-final-answer-suite.mjs $WaExe (Join-Path $tmp 'final-answer')
     if ($LASTEXITCODE -ne 0) { throw 'final-answer focused suite failed' }
+    & node scripts/test-coordinator-steps.cjs
+    if ($LASTEXITCODE -ne 0) { throw 'compact phase/debug browser suite failed' }
     & node scripts/test-lightweight-browser.cjs (Join-Path $tmp 'lightweight')
     if ($LASTEXITCODE -ne 0) { throw 'lightweight browser suite failed' }
     & node scripts/test-lightweight-browser.cjs (Join-Path $tmp 'lightweight') --post

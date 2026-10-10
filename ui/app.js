@@ -100,6 +100,7 @@ let statusLine = null;
 // streamed chunk would make the line depend on a parser that a stub document does not have,
 // and three references are cheaper than three queries anyway.
 let statusLabel = null;
+let statusPhase = null;
 let statusElapsed = null;
 let statusSpinner = null;
 // The body of the newest assistant bubble, tracked as it is created: the run status is
@@ -146,6 +147,7 @@ let conversationEpoch = 0;
 function rememberSession(id) {
   if (!id || id === chatSession) return false;
   chatSession = id;
+  delete messages.dataset.debug;
   conversationEpoch += 1;
   resetConversationFollowState();
   try { localStorage.setItem(SESSION_KEY, id); } catch (error) { /* private mode */ }
@@ -156,6 +158,7 @@ function rememberNode(node) {
   if (node === activeNode) return false;
   detachConversationView();
   activeNode = node;
+  delete messages.dataset.debug;
   conversationEpoch += 1;
   invalidateHookInventory();
   resetConversationFollowState();
@@ -498,6 +501,30 @@ let runStepState = null;
 function turnIsActive() { return busy || observedRun?.session === chatSession; }
 function runStepScope() { return activeNode + ":" + chatSession + ":" + conversationEpoch; }
 function runStepId() { return busy ? runKey(activeRunId) : runKey(observedRun); }
+function setTranscriptDebug(container, mode) {
+  container.dataset.debug = String(mode === 'debug');
+  if (container === transcript) {
+    if (mode === 'debug' && runStepState?.active) {
+      const step = runStepState.active;
+      step.node.setStep(step.label, 'running', Date.now() - step.started);
+    }
+    updateRunPhase();
+  }
+  for (const topic of container.querySelectorAll('wa-run')) {
+    const children = Array.from(topic.body.children);
+    const steps = children.filter(node => node.classList.contains('seg') ||
+      (mode === 'debug' && node.tagName === 'WA-STEP')).length;
+    topic.setSummary(steps, topic.summary?.calls || 0, topic.summary?.ms ?? null);
+  }
+}
+function updateRunPhase() {
+  if (!statusPhase) return;
+  const step = runStepState?.active;
+  const live = !!step && !replayingMessages && !statusLine?.classList.contains('finished');
+  statusPhase.hidden = !live;
+  if (live) setText(statusPhase, step.label + ' · ' + Math.max(0, Math.floor((Date.now() - step.started) / 1000)) + 's');
+  else setText(statusPhase, '');
+}
 function finishRunStep(state = "completed") {
   const step = runStepState?.active;
   if (!step) return;
@@ -505,6 +532,7 @@ function finishRunStep(state = "completed") {
   step.ms = Date.now() - step.started;
   step.node.setStep(step.label, state, step.ms);
   runStepState.active = null;
+  updateRunPhase();
 }
 function showRunStep(key, label) {
   if (replayingMessages) return;
@@ -527,6 +555,8 @@ function showRunStep(key, label) {
   currentBubble().body.append(node);
   node.setStep(label, "running", 0);
   if (!runStartedAt) runStartedAt = Date.now();
+  if (turnIsActive()) setStatus('thinking…');
+  updateRunPhase();
   keepStatusLast();
   pin();
 }
@@ -563,7 +593,8 @@ function restoreRunSteps(state, bubble) {
   const topic = bubble.body.querySelector(":scope > wa-run");
   if (topic) {
     const children = Array.from(topic.body.children);
-    const steps = children.filter(node => node.tagName === "WA-STEP" || node.classList.contains("seg")).length;
+    const steps = children.filter(node => node.classList.contains("seg") ||
+      (transcript.dataset.debug === 'true' && node.tagName === "WA-STEP")).length;
     const calls = children.filter(node => node.tagName === "WA-TRACE").reduce((sum,node) => sum + node.count, 0);
     topic.setSummary(steps, calls, topic.summary?.ms ?? null);
   }
@@ -576,7 +607,7 @@ function ensureObservedRunStep(current) {
       (runStepId() && runStepState.id && runStepId() !== runStepState.id)) {
     showRunStep("working", "Working — waiting for the next step");
   }
-  setStatus(runStepState.active.label);
+  setStatus('thinking…');
 }
 
 // The status line belongs to the run in flight and must stay the *last* thing in the
@@ -643,12 +674,16 @@ function setStatus(text) {
     statusSpinner.className = "spinner";
     statusLabel = document.createElement("span");
     statusLabel.className = "chat-content-run-label";
+    statusPhase = document.createElement("span");
+    statusPhase.className = "chat-content-run-phase";
+    statusPhase.hidden = true;
     statusElapsed = document.createElement("span");
     statusElapsed.className = "chat-content-run-elapsed";
-    statusLine.append(statusSpinner, statusLabel, statusElapsed);
+    statusLine.append(statusSpinner, statusLabel, statusPhase, statusElapsed);
     if (turnIsActive() && !replayingMessages) startRunStatusTicker();
   }
   setText(statusLabel, text);
+  updateRunPhase();
   if (turnIsActive()) currentBubble();
   const container = runBubble?.body || transcript;
   if (statusLine.parentNode !== container) container.append(statusLine);
@@ -671,7 +706,8 @@ function runDuration(ms) {
 function updateRunElapsed() {
   for(const retry of runBubble?.querySelectorAll('wa-retry') || []) retry.setAge();
   const step = runStepState?.active;
-  if (step) step.node.setStep(step.label, "running", Date.now() - step.started);
+  if (step && transcript.dataset.debug === 'true') step.node.setStep(step.label, "running", Date.now() - step.started);
+  updateRunPhase();
   if (!statusElapsed) return;
   if (replayingMessages && (!runStartedAt || !replayMessageEndedAt)) {
     statusElapsed.textContent = "duration unknown";
@@ -705,10 +741,11 @@ function finishRunStatus(label = "completed") {
   statusLabel.textContent = label;
   updateRunElapsed();
   statusLine.classList.add("finished");
+  updateRunPhase();
   if (body) body.append(statusLine);
   else statusLine.remove();
   statusLine = null;
-  statusLabel = null; statusElapsed = null; statusSpinner = null;
+  statusLabel = null; statusPhase = null; statusElapsed = null; statusSpinner = null;
   if (runStatusTicker) { clearInterval(runStatusTicker); runStatusTicker = null; }
   pin();
 }
@@ -716,7 +753,7 @@ function finishRunStatus(label = "completed") {
 function clearStatus() {
   statusLine?.remove();
   statusLine = null;
-  statusLabel = null; statusElapsed = null; statusSpinner = null;
+  statusLabel = null; statusPhase = null; statusElapsed = null; statusSpinner = null;
   if (runStatusTicker) { clearInterval(runStatusTicker); runStatusTicker = null; }
 }
 
@@ -1398,7 +1435,7 @@ function collapseRun(finalStart = false) {
   let steps = 0;
   for (const child of run.body.children) {
     if (child.tagName === "WA-TRACE") calls += child.count || 0;
-    else if (child.tagName === "WA-STEP" || child.classList?.contains("seg")) steps += 1;
+    else if (child.classList?.contains("seg") || (transcript.dataset.debug === 'true' && child.tagName === "WA-STEP")) steps += 1;
   }
   if (finalStart) run.open = false;
   const endedAt = replayingMessages ? replayMessageEndedAt : Date.now();
@@ -1434,10 +1471,9 @@ function flushDecision(final = false) {
 
 function paintDelta() {
   if (!streamBody) return;
-  if (streamBody.classList.contains('final-answer')) {
-    streamBody.innerHTML = renderMarkdown(stripThinking(streamText));
-    streamBody.style.whiteSpace = 'normal';
-  } else streamBody.textContent = stripThinking(streamText);
+  // Formatting is presentation, not proof of provider phase or completion.
+  streamBody.innerHTML = renderMarkdown(stripThinking(streamText));
+  streamBody.style.whiteSpace = 'normal';
   pin();
 }
 
@@ -1526,8 +1562,8 @@ function handleEvent(event) {
   } else if (event.type === "status") {
     const note = event.text || "working";
     showRunStep(note === "model" ? "model" : note === "thinking" ? "preparing" : "status:" + note,
-      note === "model" ? "Waiting for model response" : note === "thinking" ? "Preparing turn" : note);
-    setStatus(note === "model" ? "thinking…" : "wasm-agent is " + note + "…");
+      note === "model" ? "Waiting on model" : note === "thinking" ? "Preparing turn" : note);
+    setStatus(note === "model" || note === "thinking" ? "thinking…" : "wasm-agent is " + note + "…");
   } else if (event.type === "commentary") {
     showRunStep("commentary", "Receiving progress update");
     const pending = phasePendingText.get(String(event.pending_id || ''));
@@ -1542,11 +1578,10 @@ function handleEvent(event) {
   } else if (event.type === "reasoning") {
     showRunStep("reasoning", "Model is reasoning");
     // A reasoning model can think for a long time before it says anything, and a
-    // silent panel is indistinguishable from a hung one. The text becomes a thinking
-    // block; the count still drives the status line, the live "not hung" signal.
-    const fullText = appendReasoning(event.text || "", event.complete === true);
-    const chars = Number(event.chars) || Array.from(fullText || "").length;
-    if (!replayingMessages) setStatus("thinking… " + chars + " chars of reasoning");
+    // silent panel is indistinguishable from a hung one. Keep the reasoning
+    // topic; the compact measured phase provides the live "not hung" signal.
+    appendReasoning(event.text || "", event.complete === true);
+    if (!replayingMessages) setStatus("thinking…");
   } else if (event.type === "decision") {
     addDecision(event);
   } else if (event.type === "tool") {
@@ -1580,7 +1615,9 @@ function handleEvent(event) {
       anchorAnswer(node);
     }
     pending.text += event.text || "";
-    pending.node.textContent = pending.text;
+    pending.node.rawText = pending.text;
+    pending.node.innerHTML = renderMarkdown(pending.text);
+    pending.node.style.whiteSpace = 'normal';
     pin();
   } else if (event.type === "delta") {
     showRunStep("answer", "Writing response");
@@ -2098,13 +2135,14 @@ function paintChildTranscript(container, rows, options = {}) {
   if (!container) return null;
   const saved = { transcript, runBubble, statusLine, statusLabel, statusElapsed, statusSpinner,
     runStepState,
-    lastAssistantBody, runStatusTicker, toolTicker, streamBody, streamText, phasePendingText, trace, lastTool,
+    statusPhase, lastAssistantBody, runStatusTicker, toolTicker, streamBody, streamText, phasePendingText, trace, lastTool,
     reasoningBlock, reasoningText, streamedCommentaryBlock, streamedCommentaryText, runStartedAt, replayingMessages,
     replayMessageEndedAt, replayRunLastMessage, renderedMessageIds };
   transcript = container;
   runStepState = null;
   // Child teardown must never remove the main status DOM, clear its timers or share its text buffer.
-  statusLine=null;statusLabel=null;statusElapsed=null;statusSpinner=null;runStatusTicker=null;toolTicker=null;
+  statusLine=null;statusLabel=null;statusPhase=null;statusElapsed=null;statusSpinner=null;runStatusTicker=null;toolTicker=null;
+  setTranscriptDebug(container, options.mode);
   try {
     const result=repaintMessages(rows || [], { ...options, notify: false });
     renderJournalEvents(options.events||[],options.raw,options.identity);
@@ -2114,7 +2152,7 @@ function paintChildTranscript(container, rows, options = {}) {
     if(runStatusTicker)clearInterval(runStatusTicker);
     ({ transcript, runBubble, statusLine, statusLabel, statusElapsed, statusSpinner, lastAssistantBody,
       runStepState,
-      runStatusTicker, toolTicker, streamBody, streamText, phasePendingText, trace, lastTool, reasoningBlock,
+      statusPhase, runStatusTicker, toolTicker, streamBody, streamText, phasePendingText, trace, lastTool, reasoningBlock,
       reasoningText, streamedCommentaryBlock, streamedCommentaryText, runStartedAt, replayingMessages,
       replayMessageEndedAt, replayRunLastMessage, renderedMessageIds } = saved);
   }
@@ -2247,6 +2285,7 @@ async function restoreSessionOnce(target, epoch, node = activeNode) {
         outcome = sessionOutcome(full);
       }
     }
+    setTranscriptDebug(messages, full.session?.mode);
     const loadedSeq = (full.messages || []).reduce((last, row) => Math.max(last, Number(row.seq) || 0), 0);
     if (full && Array.isArray(full.messages) && full.messages.length) {
       repaintMessages(full.messages, { state: outcome.name, stateAt: full.state?.at,
@@ -5392,7 +5431,7 @@ async function paneMessages(pane) {
   }
   rows=await Promise.all(rows.map(row=>row.omitted&&row.id&&row.evidence ? exactSessionRow(row,options=>panePage(pane,options)) : row));
   if(rows.some(row=>row.session_id && row.session_id!==pane.task.session_id))throw Error('native_session_identity_mismatch');
-  return {rows,task:page.task};
+  return {rows,task:page.task,mode:page.session?.mode};
 }
 async function exactSessionRow(reference,readPage) {
   let offset=1,version=null,text='',bytes=null;
@@ -5463,14 +5502,14 @@ async function refreshAgentPane(pane) {
     const rows=result.rows;
     // A repaint throws away the transcript's scroll position and its folded topics, so a poll that
     // found the same rows, the same state and the same in-flight call leaves the pane it found alone.
-    const painted=JSON.stringify([rows,result.events,pane.task.state,pane.task.settled,
+    const painted=JSON.stringify([rows,result.events,result.mode,pane.task.state,pane.task.settled,
       pane.task.preview?.tool?.call_id]);
     if(painted!==pane.painted) {
       pane.painted=painted;
       // Preserve the reader's place while the shared ledger renderer appends/repaints.
       const position=transcriptPlace(pane.transcript);
       paintChildTranscript(pane.transcript,rows,{state:childRunState(pane.task),
-        stateAt:pane.task.settled_at,active:!pane.task.settled,liveTool:pane.task.preview?.tool,events:result.events,raw:result.raw,identity:result.identity});
+        mode:result.mode,stateAt:pane.task.settled_at,active:!pane.task.settled,liveTool:pane.task.preview?.tool,events:result.events,raw:result.raw,identity:result.identity});
       restoreTranscriptPlace(pane.transcript,position);
       if(result.identity)rememberNativeRows(pane.transcript,pane.task,rows,result.raw);
     }
@@ -6040,12 +6079,17 @@ async function openSessionById(id) {
   bar.append(nodeButton("← sessions", () => refreshSessions()));
   bar.append(nodeButton(session.mode === "debug" ? "debug: on" : "debug: off", async () => {
     const next = session.mode === "debug" ? "default" : "debug";
-    await apiFetch("session/mode", {
+    const node = activeNode, epoch = conversationEpoch;
+    const response = await apiFetch("session/mode", {
       method: "POST",
       headers: apiHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify({ session_id: id, mode: next }),
     });
-    openSessionById(id);
+    const result = await response.json();
+    if (activeNode !== node || conversationEpoch !== epoch) return;
+    if (!response.ok || result.error) { setStatus('Debug mode not changed: ' + (result.error || response.status)); return; }
+    if (chatSession === id) setTranscriptDebug(messages, result.mode);
+    if (activeNode === node) openSessionById(id);
   }));
   bar.append(nodeButton("export fixture", async () => {
     const fixture = await (await apiFetch("session/fixture?id=" + encodeURIComponent(id), { headers: apiHeaders() })).json();
