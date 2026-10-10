@@ -1268,7 +1268,7 @@ $harness = @'
   var mainShell=document.getElementById('chat');
   var paneShell=panes[1].querySelector('wa-chat-shell');
   var shellParts=function(shell){return Array.prototype.map.call(shell.querySelectorAll('[data-part]'),function(node){return node.dataset.part;}).join(',');};
-  check(!!mainShell && !!paneShell && shellParts(mainShell)==='content,host,composer,attachments,input,send,footer-left,attach,file,footer-right,model'
+  check(!!mainShell && !!paneShell && shellParts(mainShell)==='warning,content,host,composer,attachments,input,send,footer-left,attach,file,footer-right,model'
     && shellParts(paneShell)===shellParts(mainShell),
     'the main conversation and a child panel must both be the same shell component, saw main: '
       + (mainShell?shellParts(mainShell):'none') + ' / child: ' + (paneShell?shellParts(paneShell):'none'));
@@ -2399,26 +2399,16 @@ $harness = @'
   (function () {
     window.__stopLiveness();
     window.__setLiveness({ working: true, stalled: 46, busy_ms: 25369, climbing_ms: 0, node_thread_state: "alive", queue: 0 });
-    var ok = document.getElementById("liveness");
-    check(!!ok, "liveness: no line rendered while working");
-    if (ok) {
-      check(!ok.classList.contains("stuck"), "liveness: a fresh beat must not read as stuck");
-      check(ok.textContent.indexOf("working") >= 0, "liveness: the working state must say so");
-      // The socket number is the node's own evidence, so it has to appear rather than a guess.
-      check(ok.textContent.indexOf("46 ms") >= 0, "liveness: the beat age must be shown, got: " + ok.textContent);
-      check(ok.textContent.indexOf("25") >= 0, "liveness: the elapsed time must be shown, got: " + ok.textContent);
-    }
+    var warning = chatShell.warning;
+    check(!document.getElementById('liveness')&&warning.hidden,
+      'healthy liveness stays quiet, no duplicated heartbeat or duration');
     window.__setLiveness({ working: false, stalled: 9000, busy_ms: 60000, climbing_ms: 9000, node_thread_state: "alive", queue: 0 });
-    var stuck = document.getElementById("liveness");
-    check(!!stuck, "liveness: the line vanished when it turned into a stall");
-    if (stuck) {
-      check(stuck.classList.contains("stuck"), "liveness: no beat for 9s must be flagged");
-      check(stuck.textContent.indexOf("stuck") >= 0, "liveness: the stuck state must say so, got: " + stuck.textContent);
-    }
-    // One element, not two: a status line that accumulates is litter in the transcript.
-    check(document.querySelectorAll("#liveness").length === 1, "liveness: more than one line in the transcript");
+    check(!warning.hidden&&warning.textContent.includes('may be unresponsive')&&warning.textContent.includes('9s'),
+      'uncertainty uses a seconds-based pinned warning, not a failed-run claim');
+    check(!warning.closest('wa-message')&&!messages.contains(warning)&&getComputedStyle(warning).position==='absolute',
+      'warning is outside transcript and pinned to chat viewport');
     window.__stopLiveness();
-    check(!document.getElementById("liveness"), "liveness: the line outlived the turn it described");
+    check(!document.getElementById('liveness')&&warning.hidden,'warning clears at turn end');
   })();
   // ---- `/` commands -------------------------------------------------------
   //
@@ -3787,6 +3777,10 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'final-answer focused suite failed' }
     & node scripts/test-coordinator-steps.cjs
     if ($LASTEXITCODE -ne 0) { throw 'compact phase/debug browser suite failed' }
+    & node scripts/test-chat-health.cjs (Join-Path $tmp 'chat-health')
+    if ($LASTEXITCODE -ne 0) { throw 'chat health warning/poll-sharing suite failed' }
+    & node scripts/test-chat-health.cjs (Join-Path $tmp 'chat-health') --post
+    if ($LASTEXITCODE -ne 0) { throw 'chat health evidence postcheck failed' }
     & node scripts/test-lightweight-browser.cjs (Join-Path $tmp 'lightweight')
     if ($LASTEXITCODE -ne 0) { throw 'lightweight browser suite failed' }
     & node scripts/test-lightweight-browser.cjs (Join-Path $tmp 'lightweight') --post

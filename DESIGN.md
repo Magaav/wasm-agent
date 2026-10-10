@@ -177,6 +177,7 @@ same shape, and the same rule: the row says which device the choice belongs to.
 | `<wa-menu>` | A list of choices at a point or above its anchor. | `.items` (`{label, action, danger?, separator?, element?}`), `.selected`, `.openAt(x, y, {above, inset})`, `.move(±1)`, `.activate()` | `open`, `close` |
 | `<wa-message>` | A chat message bubble. | `role` (`user`/`assistant`), `.body` | — |
 | `<wa-step>` | A turn's observed phase inside its message bubble, with running/finished state and measured elapsed time. | `.setStep(label, state, ms)` | — |
+| `<wa-chat-warning>` | Exception-only yellow uncertainty overlay at the shared chat viewport top; outside transcript, no scroll shift. | `.message` (empty hides), `role="status"` | — |
 | `<wa-retry>` | Shared transport-recovery topic inside the turn bubble/run history; numbered attempts, cycle, safe text reasons and reconnect countdown. Restoration is not task completion. | `.update(event)`, `.setAge()`, `.interrupt(state)`, `.freeze()`, `open` | — |
 | `<wa-tool>` | A tool-activity chip. | `name`, `.detail`, status class | — |
 | `<wa-trace>` | A step's tool trace inside a reply bubble. `.body`, and `.setAge(seconds, bound)` on the in-flight line so `bash` reads `42s of 300s`, not just `bash`. | — |
@@ -197,7 +198,7 @@ must be the same item, or Enter chooses something other than what the list shows
 
 **One chat, two hosts.** `<wa-chat-shell>` is the chat surface, and the main conversation and every
 child session instantiate it rather than building a composer each. The shell owns the furniture and the
-gestures (transcript region, composer controls, attach/paste/drop intake, attachment chips, model strip,
+gestures (transcript region, exception-only warning overlay, composer controls, attach/paste/drop intake, attachment chips, model strip,
 send button's busy state, the notification sound) and speaks to its host only through
 `chat-send`/`chat-files`/`chat-attachments`. The host owns what a send *means* — thread, transport,
 streaming — and how one ledger row becomes a bubble, because those are what actually differ between a

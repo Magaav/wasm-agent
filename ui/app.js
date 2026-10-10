@@ -1543,6 +1543,7 @@ function interruptSubscriptionAttempt(saved) {
 }
 
 function handleEvent(event) {
+  if (!replayingMessages && transcript===messages && !['done','error'].includes(event.type)) markRunStreamAlive();
   if (["round", "reasoning", "commentary", "commentary_delta", "commentary_end", "pending_delta", "decision", "tool", "tool_result", "delta", "reply", "error", "done"].includes(event.type)) {
     clearActiveRunNotice();
   }
@@ -1729,6 +1730,7 @@ function handleEvent(event) {
     updateChip();
     if (balloon.open) { renderUsage(); renderControls(); }
   } else if (event.type === "error") {
+    if(!replayingMessages&&transcript===messages)stopLiveness();
     releaseAnswerAnchor();
     markPendingTextIncomplete();
     markStreamedCommentaryIncomplete();
@@ -1737,6 +1739,7 @@ function handleEvent(event) {
     finishTrace();
     runBubble = null;
   } else if (event.type === "done") {
+    if(!replayingMessages&&transcript===messages)stopLiveness();
     releaseAnswerAnchor();
     markPendingTextIncomplete();
     markStreamedCommentaryIncomplete();
@@ -2422,106 +2425,86 @@ function applySettingsSovereignty() {
     ? "a run is in flight \u2014 a change here applies at the next turn" : "";
 }
 
-// Whether this run is *working* or *stuck*, which looked identical from outside.
-//
-// A run can legitimately spend minutes inside one command, and until this existed the only signals
-// were a spinner and a tool line that had not come back - so a long call and a wedged one were
-// indistinguishable, and the difference arrived 300 seconds later when the call was killed. The user
-// had no way to tell "still working" from "never coming back", which is exactly when they should be
-// told to stop it.
-//
-// The node already knows, and has done all along: `stalled_ms` (also `node_threads[].age_ms`) is the age
-// of the last heartbeat. `host.exec` beats while a command runs, so a *fresh* number proves progress
-// and a number that keeps climbing proves a stall. That is the node's own evidence, reported rather
-// than guessed - no client-side timeout, no heuristic about how long things should take.
-let liveness = null;
+// One exact-run observation, fed by watchTurn's existing health poll. No independent timer.
+const CHAT_UNCERTAINTY_MS = 5000;
+let lastRunStreamAt = 0;
+let livenessSample = null;
+let connectionFailures = 0;
+let connectionFailedAt = null;
+let livenessWarningKind = '';
 
 function startLiveness() {
-  if (liveness) return;
-  let lastStalled = null;
-  let climbingSince = 0;
-  liveness = setInterval(async () => {
-    // Only while a run is busy. The accept thread answers /health without the interpreter, so this
-    // costs nothing the run needs and cannot itself be the thing that wedges.
-    if (!busy) return;
-    let health = null;
-    try { health = await (await apiFetch("health", { headers: apiHeaders() })).json(); }
-    catch (error) { return; }   // the offline path owns that case and says its piece
-    const running = activeRun(health);
-    if (!running) { setLiveness(null); return; }
-    identifySubmittedRun(health);
-    refreshOperationProgress(health, running);
-
-    if (typeof health.exec_timeout_seconds === "number") execTimeoutSeconds = health.exec_timeout_seconds;
-    const stalled = health.stalled_ms;
-    if (typeof stalled !== "number") { setLiveness(null); return; }
-    // "Climbing" is the honest signal for a stall: a single large number could be a long step between
-    // beats, but a number that grows across two polls means nothing has beaten since the last one.
-    if (lastStalled !== null && stalled > lastStalled + 500) {
-      if (!climbingSince) climbingSince = Date.now();
-    } else {
-      climbingSince = 0;
-    }
-    lastStalled = stalled;
-    const working = stalled < 5000 || !climbingSince;
-    const busyFor = running.busy_ms || running.ms || Date.now() - (runStartedAt || Date.now());
-    const ownState = (health.run_ids || []).find((run) => run.conversation===chatSession && runKey(run)===runKey(activeRunId))?.state;
-    setLiveness({
-      working,
-      stalled,
-      busy_ms: busyFor,
-      climbing_ms: climbingSince ? Date.now() - climbingSince : 0,
-      // `health.worker` is the node's aggregate execution state (alive/busy/stalled); the field keeps
-      // that name on the wire - see serve.rs - so it is read, not renamed, here.
-      node_thread_state: health.worker || "alive",
-      queue: health.queue || 0,
-      run_state: ownState,
-      current_run_id: runKey(running),
-    });
-  }, 1000);
+  stopLiveness();
+  lastRunStreamAt = 0;
 }
-
 function stopLiveness() {
-  if (liveness) { clearInterval(liveness); liveness = null; }
+  livenessSample = null;
+  connectionFailures = 0;
+  connectionFailedAt = null;
   setLiveness(null);
 }
-
-function setLiveness(info) {
-  let node = document.getElementById("liveness");
-  if (!info) { if (node) node.remove(); return; }
-  if (info.run_state === "queued") {
-    showRunStep("queued", "Queued — waiting for the current turn");
-    setStatus("Queued — waiting for the current turn");
-  } else if (info.run_state === "running" && runStepState?.active?.key === "queued") {
-    showRunStep("working", "Starting turn");
-    setStatus("Starting turn");
+function markRunStreamAlive() {
+  lastRunStreamAt = Date.now();
+  if (livenessWarningKind === 'connection') setLiveness(null);
+}
+function observeRunHealth(health) {
+  const id = busy ? runKey(activeRunId) : runKey(observedRun);
+  const scope = runStepScope() + ':' + (id || 'unidentified');
+  if (livenessSample?.scope !== scope) {
+    livenessSample = {scope, beat: null, staleAt: null};
+    connectionFailures = 0; connectionFailedAt = null;
+    setLiveness(null);
   }
-  if (!node) {
-    node = document.createElement("div");
-    node.id = "liveness";
-    node.className = "liveness";
-    // Inside the message list, so it lives with the run it describes and disappears with it - a
-    // status bar elsewhere would keep reporting a run that has already been answered.
-    currentBubble().body.append(node);
+  if (!composerBusy() || (runStepState?.settled && runStepState.id === id && runStepState.scope === runStepScope())) {
+    stopLiveness(); return;
   }
-  keepStatusLast();
-  const seconds = (ms) => (ms / 1000).toFixed(0);
-  if (info.working) {
-    node.classList.remove("stuck");
-    if (info.run_state === "queued") {
-      node.textContent = "queued · this run has not started; waiting for run #"
-        + info.current_run_id + " · node beat " + info.stalled + " ms ago"
-        + (info.queue ? " · " + info.queue + " queued" : "");
-    } else {
-      node.textContent = "working — node beat " + info.stalled + " ms ago · this run "
-        + seconds(info.busy_ms) + "s" + (info.queue ? " · " + info.queue + " queued" : "");
+  const now = Date.now();
+  if (!health) {
+    connectionFailures += 1;
+    connectionFailedAt ??= now;
+    const quietFor = now - Math.max(connectionFailedAt, lastRunStreamAt);
+    if (connectionFailures >= 2 && quietFor >= CHAT_UNCERTAINTY_MS) {
+      setLiveness({kind:'connection', working:false, seconds:Math.floor(quietFor/1000)});
     }
-  } else {
-    node.classList.add("stuck");
-    node.textContent = "possibly stuck — no node beat for " + seconds(info.climbing_ms) + "s"
-      + " (node-thread state: " + info.node_thread_state + ") · send to stop";
+    return;
   }
-  pin();
+  connectionFailures = 0; connectionFailedAt = null;
+  if (livenessWarningKind === 'connection') setLiveness(null);
+  if (!id) return; // An aggregate node beat never belongs to an unidentified run.
+  const row = (health.run_ids || []).find(run => run.conversation === chatSession && runKey(run) === id);
+  if (row && /^(completed|cancelled|failed)$/.test(row.state)) {stopLiveness();return;}
+  if (row?.state === 'queued') {setLiveness({working:true,run_state:'queued'});return;}
+  const thread = threadOfRun(health,id);
+  if (!thread || thread.role === 'reads' || !Number.isFinite(thread.age_ms) || thread.age_ms < 0) {
+    livenessSample.beat=null;livenessSample.staleAt=null;
+    // Missing scoped evidence is not a foreign/aggregate stall and cannot sustain its alarm.
+    if(livenessWarningKind==='worker')setLiveness(null);
+    return;
+  }
+  const beat = now - thread.age_ms;
+  const stalled = thread.age_ms >= CHAT_UNCERTAINTY_MS && livenessSample.beat !== null && beat <= livenessSample.beat + 500;
+  if (stalled) livenessSample.staleAt ??= now;
+  else {livenessSample.staleAt = null;setLiveness({working:true,run_state:'running'});}
+  livenessSample.beat = beat;
+  if (livenessSample.staleAt !== null && now - livenessSample.staleAt >= CHAT_UNCERTAINTY_MS) {
+    setLiveness({kind:'worker',working:false,seconds:Math.floor(thread.age_ms/1000)});
+  }
+}
+function setLiveness(info) {
+  document.getElementById('liveness')?.remove(); // Retire the old transcript counter.
+  if (info?.run_state === 'queued') {
+    showRunStep('queued','Queued — waiting for the current turn');
+    setStatus('Queued — waiting for the current turn');
+  } else if (info?.run_state === 'running' && runStepState?.active?.key === 'queued') {
+    showRunStep('working','Starting turn');setStatus('Starting turn');
+  }
+  const warning = chatShell.warning;
+  if (!info || info.working) {warning.message='';livenessWarningKind='';return;}
+  livenessWarningKind = info.kind || 'worker';
+  const seconds = Math.max(0, Math.floor(info.seconds ?? (info.stalled || 0)/1000));
+  warning.message = livenessWarningKind === 'connection'
+    ? 'Connection uncertain for '+seconds+'s; this chat may be out of sync. Outcome not yet confirmed.'
+    : 'Execution worker may be unresponsive; its heartbeat has not refreshed for '+seconds+'s. Outcome not yet confirmed.';
 }
 
 // Canonical decimal identity. Never stringify a rounded legacy JSON number.
@@ -2599,8 +2582,8 @@ function watchNode() {
   nodeOffline(true);
   nodeWatch = setInterval(async () => {
     try {
-      const response = await apiFetch("health", { headers: apiHeaders() });
-      if (response.ok) { clearInterval(nodeWatch); nodeWatch = null; nodeOffline(false); refreshMeta(); }
+      const health = await nodeHealth(1000);
+      if (health) { clearInterval(nodeWatch); nodeWatch = null; nodeOffline(false); refreshMeta(); }
     } catch (error) { /* still down */ }
   }, 3000);
 }
@@ -2733,7 +2716,7 @@ async function send(text, options = {}) {
   // /health is answered without waiting for a node-thread. Take the baseline before admitting this run
   // so later polls can tell its queued id from an older run in the same conversation.
   try {
-    const before = await (await apiFetch("health", { headers: apiHeaders() })).json();
+    const before = await nodeHealth();
     submittedRunIds = new Set((before.run_ids || [])
       .filter((run) => run.conversation === runThread)
       .map(runKey).filter(key=>key!==null));
@@ -2781,7 +2764,8 @@ async function send(text, options = {}) {
       if (!stillViewingRun()) { clearInterval(watchdog); return; }
       asking = true;
       try {
-        const health = await (await apiFetch("health", { headers: apiHeaders() })).json();
+        const health = await nodeHealth();
+        if(!health)throw new Error('health unavailable');
         identifySubmittedRun(health);
         // Asked and answered while the run was ending: say nothing. The run finished; there is
         // nothing to report and nothing to continue.
@@ -3364,11 +3348,13 @@ function cancelActiveRun() {
   if (thread && activeRunId === null && submittedRunIds) {
     // Admission and the next health poll can cross. Resolve the new id once more instead of
     // falling back to the route's default, which would cancel the older running turn.
-    apiFetch("health", { headers: apiHeaders() }).then((response) => response.json()).then((health) => {
+    const node=activeNode,epoch=conversationEpoch;
+    nodeHealth().then((health) => {
+      if(node!==activeNode || thread!==chatSession || epoch!==conversationEpoch)return;
       identifySubmittedRun(health);
       if (activeRunId !== null) cancelRun(activeRunId);
       else setStatus("this run is still being admitted — try stop again in a moment");
-    }).catch(() => setStatus("could not identify this run to stop it"));
+    }).catch(() => {if(node===activeNode&&thread===chatSession&&epoch===conversationEpoch)setStatus("could not identify this run to stop it");});
     return;
   }
   cancelRun(activeRunId);
@@ -4245,13 +4231,27 @@ function setConnecting(label) {
 
 /// The node's own answer, which is served without the interpreter - so it works exactly when the Lua
 /// routes do not, which is while a run is running. Null means the node really is not answering.
-async function nodeHealth() {
-  try {
-    const response = await apiFetch("health", { headers: apiHeaders() });
-    return response.ok ? await response.json() : null;
-  } catch (error) {
-    return null;
-  }
+let healthFlight = null;
+let healthSample = null;
+function nodeHealth(maxAge = 0) {
+  const scope=activeNode+':'+session+':'+chatSession+':'+conversationEpoch;
+  if (healthFlight?.scope===scope) return healthFlight.promise;
+  if (maxAge>0 && healthSample?.scope===scope && Date.now()-healthSample.at<maxAge) return Promise.resolve(healthSample.value);
+  const request={scope,promise:null};
+  healthFlight=request;
+  request.promise=(async()=>{
+    try {
+      const response=await apiFetch('health',{headers:apiHeaders()});
+      const value=response.ok?await response.json():null;
+      if(scope===activeNode+':'+session+':'+chatSession+':'+conversationEpoch) healthSample={scope,at:Date.now(),value};
+      return value;
+    } catch {
+      if(scope===activeNode+':'+session+':'+chatSession+':'+conversationEpoch)healthSample=null;
+      return null;
+    }
+    finally {if(healthFlight===request)healthFlight=null;}
+  })();
+  return request.promise;
 }
 
 async function sync(reason) {
@@ -4311,7 +4311,7 @@ async function reconcile() {
   reconciling = true;
   const node=activeNode, target=chatSession, epoch=conversationEpoch;
   try {
-    const health = await (await apiFetch("health", { headers: apiHeaders() })).json();
+    const health = await nodeHealth(1000);
     if (node!==activeNode || target!==chatSession || epoch!==conversationEpoch) return;
     if (health && !activeRun(health)) {
       // What the live DOM still believes is worth checking *before* clearing it: if the page thought a message was
@@ -4385,6 +4385,7 @@ let liveSyncFailed = false;
 let nativeSessionPainted = null;
 
 function resetConversationFollowState() {
+  stopLiveness();lastRunStreamAt=0;
   observedRun = null;
   applyRunControls();
   transcriptReady = false;
@@ -4511,6 +4512,10 @@ async function syncLiveRun(current) {
   }
 }
 
+function turnHealthDelay() {
+  const streamFresh=busy && lastRunStreamAt>0 && Date.now()-lastRunStreamAt<5000 && !trace?.pending;
+  return !uiVisible() ? 15000 : streamFresh ? 5000 : composerBusy() || sawTurnInFlight ? 1000 : 5000;
+}
 async function watchTurn() {
   // One at a time: a poll that has not answered yet is not a reason to start another, and when the
   // node runs one node-thread that is the difference between asking and queueing.
@@ -4520,15 +4525,19 @@ async function watchTurn() {
   const node=activeNode, target=chatSession, epoch=conversationEpoch;
   const viewing=()=>node===activeNode && target===chatSession && epoch===conversationEpoch;
   try {
-    const response = await apiFetch("health");
-    if (!response.ok) throw new Error("health unavailable");
-    const health = await response.json();
+    const health = await nodeHealth();
     if (!viewing()) return;
+    if (!health) {observeRunHealth(null);throw new Error('health unavailable');}
+    if (busy) {identifySubmittedRun(health);observeRunHealth(health);}
+    if (typeof health.exec_timeout_seconds==='number') execTimeoutSeconds=health.exec_timeout_seconds;
+    const ownId=busy?runKey(activeRunId):runKey(activeRun(health));
+    if(ownId) void refreshOperationProgress(health,threadOfRun(health,ownId));
     // Keep the session list's live badges in step with the run this loop is already watching, with
     // no extra request: a thread turns "running" the moment a run is admitted and back when it ends.
     if (document.body.classList.contains("engine")) applySessionHealth(health);
     const current = activeRun(health);
     observedRun = current;
+    if (!busy) observeRunHealth(health);
     applyRunControls();
     if (current) {
       sawTurnInFlight = true;
@@ -4561,7 +4570,8 @@ async function watchTurn() {
   } catch (error) { /* the node is down; watchNode handles that */ }
   finally {
     runPolling = false;
-    turnPollTimer=setTimeout(watchTurn, !uiVisible() ? 15000 : composerBusy() || sawTurnInFlight ? 1000 : 5000);
+    // Fresh own-stream events prove transport life; quiet tools/followers retain the fast check.
+    turnPollTimer=setTimeout(watchTurn, turnHealthDelay());
   }
 }
 
@@ -6041,7 +6051,7 @@ async function refreshSessions() {
     // answerable while a run holds the run node-thread.
     const [listResponse, health] = await Promise.all([
       apiFetch("sessions", { headers: apiHeaders() }),
-      apiFetch("health", { headers: apiHeaders() }).then((response) => response.json()).catch(() => null),
+      nodeHealth(1000),
     ]);
     const payload = await listResponse.json();
     sessionList = payload.sessions || [];
