@@ -22,7 +22,10 @@ defines freshness, render virtualization, fallback and measurement limits.
 ## 1. Reuse before you create
 
 Prefer a component, token, or pattern that already exists in this project over a
-new one.
+new one. Transcript topics share `topicParts()`, one `.topic` surface and the
+`.trace-head` glyph/label/meta/chevron header. Subagent receipts use this pattern,
+not a separate card. Component-owned `.topic-body` lists never inherit markdown
+list margins or indentation; header padding follows the 5px scale on every host.
 
 
 ## 2. Web components are the default pattern
@@ -203,6 +206,7 @@ same shape, and the same rule: the row says which device the choice belongs to.
 | `<wa-tool>` | A tool-activity chip. | `name`, `.detail`, status class | — |
 | `<wa-trace>` | A step's tool trace inside a reply bubble. `.body`, and `.setAge(seconds, bound)` on the in-flight line so `bash` reads `42s of 300s`, not just `bash`. | — |
 | `<wa-run>` | The collapsible topic a run's tool lines live in. | — | — |
+| `<wa-subagent>` | Shared topic for native/legacy delegation receipts, with a branch glyph, recorded profile/state/session and an expanded conversation link. A receipt is not task completion. | `.receipt`, `.body`, `open` | `subagent-open` (`{session}`) |
 | `<wa-diff>` | The file changes a run made, below its answer. | — | — |
 | `<wa-window>` | A promoted panel in its own OS window (§3). | — | — |
 | `<wa-harness-status>` | §6's harness diagnostics. | — | `export` |
@@ -240,9 +244,11 @@ and `style.css` states that box once (one place, and no other rule may state it:
 child of the shell). A labelled control is the same height, border and radius and differs only in the width its
 own label needs; an icon control is the square `--control-size` (30px). The **host's own** footer children are
 not part of this: the audio control (`#mic`), the account chip and the status chip are authored by `app.js` and
-styled as they were (`.icon-btn` and the chip classes), because they are not per-message controls the shell
-builds. "One implementation" here means one factory and one box for what the factory makes, not every button
-that happens to sit on that row.
+styled with `.icon-btn` and the chip classes, because they are not per-message controls the shell
+builds. All footer controls nevertheless share the `--control-size` height (30px), including the account,
+context/model, mic and append-file controls on both hosts. Footer chips center their contents with no
+vertical padding so avatar/text intrinsic sizes cannot change that height. "One implementation" here
+means one factory and one box for what the factory makes, not every button that happens to sit on that row.
 
 The engine view's topics (nodes, spells, tools) are expandable cards rendered in
 `app.js`; each loads its data on first expand (`GET /nodes`, `/spells`, `/tools`).

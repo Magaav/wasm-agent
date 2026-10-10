@@ -1014,12 +1014,12 @@ $harness = @'
   window.handleEvent({ type: "tool_result", name: "subagent", result: {
     profile: "explore", state: "completed", settled: true, session_id: "abcdef01-2345-6789-abcd-ef0123456789" } });
   for (var sc = 0; sc < 5; sc++) await tick();
-  var sub = messages.querySelector(".subagent-card");
-  check(!!sub, "a subagent result must render a child card");
+  var sub = messages.querySelector("wa-subagent");
+  check(!!sub && !!sub.querySelector('.trace-head') && !!sub.querySelector('.trace-glyph').textContent,
+    "a subagent result must render the shared topic with an icon");
   check(!!sub && /explore/.test(sub.textContent) && /abcdef01/.test(sub.textContent),
-    "the card must name the profile and the child session, saw " + (sub ? sub.textContent : "no card"));
-  check(!!sub && !!sub.querySelector("button"), "the child card must link to the child session");
-
+    "the topic must name the profile and the child session, saw " + (sub ? sub.textContent : "no topic"));
+  check(!!sub && !!sub.body.querySelector("button"), "the child topic must link to the child session");
   // A reasoning model thinks before it speaks, and a panel that shows nothing
   // during that time is indistinguishable from a hung one. The count is also the
   // number that explains where the output budget went when a turn ends with no
@@ -1309,6 +1309,10 @@ $harness = @'
   var boxOf=function(el){ if(!el) return null; var rect=el.getBoundingClientRect(), style=getComputedStyle(el);
     return {h:Math.round(rect.height),w:Math.round(rect.width),padTop:style.paddingTop,padLeft:style.paddingLeft,
       radius:style.borderRadius,border:style.borderTopWidth,cls:el.className}; };
+  var mainFooterControls=['user-btn','status-btn','mic','attach'].map(function(id){return document.getElementById(id);});
+  var childFooterControls=[paneShell.modelChip,paneShell.attach];
+  check(mainFooterControls.concat(childFooterControls).every(function(control){return control && boxOf(control).h===30;}),
+    'account, context, mic and append-file controls must all share the 30px footer height on both hosts');
   var paneRow=paneShell.querySelector('wa-chat-actions');
   var mainRow=mainShell.querySelector('wa-chat-actions');
   check(!document.getElementById('steer') && !paneRow.querySelector('[data-action="steer"]'),
@@ -3745,6 +3749,8 @@ try {
   }
   Push-Location $root
   try {
+    & node scripts/agent-benchmark-ui-observe.mjs --ui $ui --probe (Join-Path $PSScriptRoot 'probe-topic-pattern.js') --out (Join-Path $tmp 'topic-pattern')
+    if ($LASTEXITCODE -ne 0) { throw 'shared topic pattern browser probe failed' }
     & node scripts/test-final-answer-suite.mjs $WaExe (Join-Path $tmp 'final-answer')
     if ($LASTEXITCODE -ne 0) { throw 'final-answer focused suite failed' }
     & node scripts/test-minimal-chat.cjs (Join-Path $tmp 'minimal-chat')

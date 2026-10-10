@@ -228,7 +228,7 @@ wa-message.assistant { align-self: flex-start; background: var(--assistant); }
 
 /* The run topic: the whole run's path, collapsed above the answer. */
 .msg .body.steps wa-run { width: 100%; max-width: none; }
-.run { border: 1px solid var(--line); border-radius: var(--radius); background: var(--topic); overflow: hidden; }
+.topic { display: block; width: 100%; min-width: 0; border: 1px solid var(--line); border-radius: var(--radius); background: var(--topic); overflow: hidden; }
 .run-body {
   display: flex; flex-direction: column; gap: var(--gap);
   padding: var(--space) var(--space) var(--space) 0;
@@ -247,14 +247,12 @@ wa-message.assistant { align-self: flex-start; background: var(--assistant); }
 wa-reasoning, wa-commentary { display: block; align-self: flex-start; max-width: 760px; width: 100%; }
 wa-commentary.phase-pending .trace-label, wa-commentary.phase-incomplete .trace-label { color: var(--muted); }
 wa-commentary.phase-incomplete .commentary { text-decoration: underline dotted; }
-.reasoning { border: 1px solid var(--line); border-radius: var(--radius); background: var(--topic); overflow: hidden; }
-.commentary { border: 1px solid var(--line); border-radius: var(--radius); background: var(--topic); overflow: hidden; }
 .reasoning-body, .commentary-body {
   padding: var(--space); border-top: 1px solid var(--line);
   color: var(--muted); font-size: 12px; white-space: pre-wrap;
   word-break: break-word; max-height: 320px; overflow: auto;
 }
-.run-body wa-trace, .run-body wa-reasoning, .run-body wa-commentary { border: 0; border-left: 2px solid var(--line); border-radius: 0; background: none; }
+.run-body > .topic { border: 0; border-left: 2px solid var(--line); border-radius: 0; background: none; }
 
 /* The diff topic: what the run changed on disk, collapsed *after* the answer.
    It uses the same `trace-head` header as <wa-run>/<wa-trace> - a topic is a topic, and a
@@ -263,7 +261,6 @@ wa-commentary.phase-incomplete .commentary { text-decoration: underline dotted; 
    contain a button), the body lists files, and the toggle is the only control. */
 .msg .body.steps wa-diff { width: 100%; max-width: none; }
 wa-diff { display: block; align-self: flex-start; max-width: 760px; width: 100%; }
-.diff { border: 1px solid var(--line); border-radius: var(--radius); background: var(--topic); overflow: hidden; }
 .diff.undone { border-color: var(--warn); }
 /* Same header, with room taken from it by the toggle rather than by a second style. */
 .diff-row { display: flex; align-items: center; width: 100%; }
@@ -376,7 +373,6 @@ body.ui-resting .thread-notice::before, body.ui-resting .update-spinner {
 /* Decision traces: one topic per assistant run, collapsed to a summary line.
    The transcript should read as steps; the tool payloads are one click away. */
 wa-trace { display: block; align-self: flex-start; max-width: 760px; width: 100%; }
-.trace { border: 1px solid var(--line); border-radius: var(--radius); background: var(--topic); overflow: hidden; }
 .trace.has-error { border-color: #f85149; }
 wa-retry { display: block; width: 100%; }
 .retry-line { padding: var(--pad); border-left: 2px solid var(--warn); }
@@ -384,13 +380,13 @@ wa-retry { display: block; width: 100%; }
 .retry-reason { color: var(--muted); overflow-wrap: anywhere; padding-top: var(--space); }
 .trace-head {
   display: flex; align-items: center; gap: var(--gap); width: 100%; text-align: left;
-  padding: 4px var(--space); background: none; border: 0; color: var(--muted);
-  font: inherit; font-size: 12px; cursor: pointer;
+  margin: 0; padding: var(--space); background: none; border: 0; color: var(--muted);
+  font: inherit; font-size: 12px; line-height: 1.5; cursor: pointer;
 }
 .trace-head:hover { background: #18212b; }
 .trace-glyph { color: var(--accent); font-size: 11px; }
 .trace.has-error .trace-glyph { color: #f85149; }
-.trace-label { color: var(--text); }
+.trace-label { color: var(--text); min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .trace-meta { color: var(--muted); font-size: 11px; flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .trace-chevron { color: var(--muted); font-size: 11px; }
 .trace-head.running .trace-glyph { animation: trace-spin 1.1s linear infinite; }
@@ -802,6 +798,9 @@ wa-chat-shell.dropping .composer { border-color: var(--accent); }
   border: 1px solid var(--line); background: var(--panel-2); color: var(--text);
   border-radius: var(--radius); padding: var(--space) var(--pad); cursor: pointer; font-size: 12px;
 }
+/* Host-owned account/context chips share the footer controls' height, not their content's
+   intrinsic height (the avatar and text otherwise produce different-sized boxes). */
+.composer-footer .chip { height: var(--control-size); padding-top: 0; padding-bottom: 0; }
 .chip:hover { border-color: var(--accent); }
 .chip.context-trigger { border-color: var(--panel); background: var(--panel); }
 .chip.context-trigger:hover, .chip.context-trigger:focus-visible { border-color: var(--line); background: var(--panel-2); }
@@ -1004,8 +1003,9 @@ body.node-offline .composer textarea::placeholder { color: #d29922; }
 .msg .body h1 { font-size: 15px; }
 .msg .body h2 { font-size: 14px; }
 .msg .body h3, .msg .body h4 { font-size: 13px; }
-.msg .body ul, .msg .body ol { margin: var(--space) 0; padding-left: 20px; }
-.msg .body li { margin: 1px 0; }
+/* Markdown list rules must not style component-owned lists (especially deciding tools). */
+.msg .body ul:not(.topic-body), .msg .body ol:not(.topic-body) { margin: var(--space) 0; padding-left: 20px; }
+.msg .body li:not(.tool-line) { margin: 1px 0; }
 .msg .body pre {
   margin: var(--space) 0; padding: var(--space);
   background: #0a0c11; border: 1px solid var(--line); border-radius: var(--radius-sm);
@@ -1025,16 +1025,6 @@ body.node-offline .composer textarea::placeholder { color: #d29922; }
 .msg .body .copy-code:hover { color: #c9d1e0; border-color: var(--accent); }
 .msg .body .copy-code.copied { color: var(--accent); border-color: var(--accent); }
 .msg .body .copy-code.copy-failed { color: #f85149; border-color: #f85149; }
-/* A subagent's receipt as a card, so the chat shows the child and links to its transcript. */
-.subagent-card {
-  display: flex; align-items: center; gap: var(--gap); flex-wrap: wrap;
-  margin: var(--space) 0; padding: 4px var(--pad);
-  background: #0d1117; border: 1px solid var(--line); border-radius: var(--radius-sm);
-  font-size: 11.5px;
-}
-.subagent-title { color: #c9d1e0; font-weight: 600; }
-.subagent-meta { color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
-.subagent-card button { margin-left: auto; }
 .session-parent { color: var(--muted); font-size: 11px; }
 /* A table scrolls inside its own box, not by widening the transcript. */
 .md-table { margin: var(--space) 0; overflow-x: auto; max-width: 100%; }
