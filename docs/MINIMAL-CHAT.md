@@ -25,8 +25,11 @@ Unknown/mismatched metadata remains `??`. Existing stream/metadata reads update
 it, including children. Provider/model controls remain inside its balloon.
 Resting trigger is transparent; hover/focus reveals its clickable surface.
 
-All rounded noncircular components use `--radius:3px`; size aliases reference
-it. Circle icons/avatars and intentional square full-bleed regions are exceptions.
+All rounded noncircular components use `--radius:5px`; size aliases reference
+it, including promoted shadow panels (no private radius fallback).
+Square attachment previews retain filenames only as hover/accessibility metadata;
+remove × is top right. Successful intake adds no run status/timer; refusal and
+stale-read diagnostics remain. Circle icons/avatars and intentional square full-bleed regions are exceptions.
 Visible Steer buttons are removed in main/child UI only; durable backend steering
 and the existing keyboard path are not removed or redesigned.
 

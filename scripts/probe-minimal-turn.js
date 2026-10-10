@@ -13,9 +13,9 @@ try {
  check(turnTokenReadout()==='13000'&&liveTokenChars===0,'reported usage replaces estimate');
  check(chipModel.textContent==='▤ 26%/1M'&&composerModel.hidden&&!statusBtn.textContent.includes('fixture-model'),'context only, no model footer');
  handleEvent({type:'run_counts',counts:snapshot({tokens_reported:13000,usage_calls:26,usage_unknown:1})});check(turnTokenReadout()==='≥13000','unknown prior usage never invents a zero');
- const style=getComputedStyle(statusBtn);check(style.backgroundColor==='rgba(0, 0, 0, 0)'&&style.borderTopColor==='rgba(0, 0, 0, 0)'&&style.borderRadius==='3px','minimal trigger resting style');
+ const style=getComputedStyle(statusBtn);check(style.backgroundColor==='rgba(0, 0, 0, 0)'&&style.borderTopColor==='rgba(0, 0, 0, 0)'&&style.borderRadius==='5px','minimal trigger resting style');
  statusBtn.click();check(balloon.open,'minimal trigger still opens balloon');balloon.close();
- check(getComputedStyle(document.documentElement).getPropertyValue('--radius').trim()==='3px'&&getComputedStyle(input).borderRadius==='3px'&&getComputedStyle(sendButton).borderRadius==='3px','one global component radius');
+ check(getComputedStyle(document.documentElement).getPropertyValue('--radius').trim()==='5px'&&getComputedStyle(input).borderRadius==='5px'&&getComputedStyle(sendButton).borderRadius==='5px','one global component radius');
  check(!document.querySelector('#steer,[data-action="steer"]'),'no main steer button');
  const child=document.createElement('wa-agent-session');document.body.append(child);child.task={subagent_id:'minimal-child',session_id:'minimal-child',state:'running',profile:'worker',model:'test-model'};
  check(!child.querySelector('[data-action="steer"]')&&!!child.querySelector('[data-action="cancel"]'),'child keeps cancel, not steer');child.remove();
@@ -46,7 +46,46 @@ try {
  window.__fixtures.session=originalSession;window.__fixtures.health=originalHealth;observedRun=null;chatShell.warning.clearNotices();
  for(const width of [320,540,800]){document.getElementById('panel').style.width=width+'px';busy=true;runBubble=null;runCounts=null;clearStatus();runStepState=null;handleEvent({type:'run_counts',counts:snapshot()});handleEvent({type:'status',text:'model'});updateRunElapsed();check(statusLine.scrollWidth<=statusLine.clientWidth+1,'live strip fits '+width);clearStatus();}
  document.getElementById('panel').style.width='540px';busy=false;runBubble=null;runStepState=null;repaintMessages(rows,{state:'answered',notify:false});
- // Leave a representative live strip and open commentary for visual inspection.
+ // Shared attachment intake: cards acknowledge success; no run status/timer.
+ clearStatus();busy=false;runBubble=null;runStepState=null;observedRun=null;runStatusTicker=null;
+ chatShell.clearAttachments();input.value='draft';draftUndo=[];draftRedo=[];draftNow=snapshotDraft();
+ const Reader=window.FileReader;
+ window.FileReader=class {readAsDataURL(){this.result='data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==';queueMicrotask(()=>this.onload());}};
+ const picture=new File(['fixture-image'],'pasted.png',{type:'image/png'}),note=new File(['note contents'],'notes.txt',{type:'text/plain'});
+ try {
+  const receipt=await addFiles([picture,note]);check(receipt.added===2&&!statusLine&&!runStatusTicker,'idle successful intake creates neither status nor timer');
+  const cards=chatShell.attachmentsEl.children;check(cards.length===2&&cards[0].textContent==='×'&&cards[1].textContent==='▧×'&&!chatShell.attachmentsEl.querySelector('b'),'cards have no visible names/descriptions');
+  for(const card of cards){const box=card.getBoundingClientRect(),remove=card.querySelector('button'),button=remove.getBoundingClientRect();
+    check(Math.abs(box.width-box.height)<1&&box.width===55,'square card uses central size');
+    check(button.right<=box.right+1&&button.top>=box.top&&button.right>box.right-3&&button.top<box.top+3,'remove at card top right');
+    check(remove.getAttribute('aria-label').includes(card.title),'filename remains accessible on remove');
+  }
+  check(cards[0].querySelector('img').alt==='pasted.png'&&composedBody('draft').body.includes('pasted.png')&&composedText('draft').includes('[file: notes.txt]'),'preview and outgoing identity unchanged');
+  cards[0].querySelector('button').click();check(attachments.length===1&&attachments[0].name==='notes.txt','remove deletes exact draft attachment');
+  check(undoDraft()&&attachments.length===2&&attachments[0].name==='pasted.png','manual removal remains undoable');clearStatus();
+  busy=true;runBubble=null;runStepState=null;runCounts=null;runStartedAt=Date.now();handleEvent({type:'status',text:'model'});
+  const status=statusLine,statusText=statusLabel.textContent,phase=runStepState.active,clock=runStatusTicker;
+  await addFiles([picture]);check(statusLine===status&&statusLabel.textContent===statusText&&runStepState.active===phase&&runStatusTicker===clock,'active intake cannot replace phase/status/clock');
+  const pane=document.createElement('wa-agent-session');document.body.append(pane);pane.task={subagent_id:'attachment-child',session_id:'attachment-child',state:'running',profile:'worker'};
+  const notice=pane.notice.textContent;await pane.collectFiles([picture]);
+  check(pane.notice.textContent===notice&&pane.shell.attachmentsEl.children.length===1&&!pane.shell.attachmentsEl.textContent.includes('pasted.png'),'child successful intake uses only shared cards');
+  await pane.collectFiles([new File(['x'],'bad.bmp',{type:'image/bmp'})]);check(pane.notice.textContent.includes('skipped'),'child refusal remains visible');
+  pane.remove();await addFiles([new File(['x'],'bad.bmp',{type:'image/bmp'})]);check(statusLabel.textContent.includes('skipped'),'main refusal remains visible');
+  clearStatus();busy=false;runBubble=null;runStepState=null;chatShell.clearAttachments();
+  const promoted=document.createElement('wa-window');document.body.append(promoted);
+  check(getComputedStyle(promoted.shadowRoot.querySelector('.frame')).borderRadius==='5px','promoted shadow frame inherits global radius');
+  document.documentElement.style.setProperty('--radius','9px');
+  check([input,sendButton,statusBtn,promoted.shadowRoot.querySelector('.frame')].every(node=>getComputedStyle(node).borderRadius==='9px'),'single token flips composer/status/promoted frame');
+  document.documentElement.style.removeProperty('--radius');promoted.remove();
+  let prevented=false;chatShell._paste({clipboardData:{items:[{kind:'file',getAsFile:()=>picture}]},preventDefault(){prevented=true;}});
+  for(let i=0;i<12;i++)await Promise.resolve();
+  check(prevented&&attachments.length===1&&!statusLine&&!runStatusTicker,'actual clipboard path stays quiet and renders its card');
+  const pastedName=attachments[0].name;check(pastedName==='pasted.png','paste keeps outgoing file identity');
+  chatShell.clearAttachments();await addFiles([picture,picture,picture]);check(!statusLine&&!runStatusTicker,'final preview intake stays quiet');
+ } finally {window.FileReader=Reader;}
+ // Remove fixture-only refusal bubbles before the representative screenshot.
+ repaintMessages(rows,{state:'answered',notify:false});
+ // Leave a representative live strip, open commentary and attachment squares for inspection.
  busy=true;runStartedAt=Date.now()-144000;runBubble=transcript.querySelector('wa-message[role="assistant"]');runStepState=null;
  handleEvent({type:'run_counts',counts:snapshot()});handleEvent({type:'status',text:'model'});runStepState.active.started=Date.now()-6000;updateRunElapsed();
  report.dataset.status='pass';report.textContent=JSON.stringify({checks,skipped:0});
