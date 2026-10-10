@@ -1323,57 +1323,10 @@ WA_SCRIPT="$DB.node-name.lua" "$BIN" --db "$DB" | grep "node name ok"
 rm -f "$DB.node-name.lua"
 WA_SCRIPT=scripts/test-empty-reply.lua "$BIN" --db "$DB" | grep "empty reply ok"
 
-# Every Lua core module must be reachable from the *shipped* binary. The embedded list in
-# rust/wa-host/src/main.rs is maintained by hand, so a new module is invisible to a deployed
-# node until someone remembers to add it - which is how a node crash-looped on
-# "embedded module missing: lua/core/model_window.lua". Every other check here sets
-# WASM_AGENT_LUA_ROOT and therefore reads the working tree; this one deliberately does not,
-# because that is the path the node actually runs.
-cat > "$DB.embedded.lua" <<'LUA'
-local json = dofile("lua/vendor/json.lua")
-local listing = host.list_dir("lua/core")
-assert(type(listing) == "string", "host.list_dir must return a listing")
-local decoded = json.decode(listing)
-local names = {}
-for _, entry in ipairs(decoded.entries or {}) do
-  if entry.kind == "file" and entry.name:match("%.lua$") then names[#names + 1] = entry.name end
-end
-assert(#names >= 10, "expected the core modules in the listing, found " .. #names)
-for _, required in ipairs({ "agent.lua", "provider.lua", "model_window.lua", "memory.lua" }) do
-  local found = false
-  for _, name in ipairs(names) do if name == required then found = true end end
-  assert(found, required .. " is missing from lua/core")
-end
-local function embedded_chunk(path)
-  local source=EMBEDDED and EMBEDDED[path]
-  if type(source)~='string' then return nil end
-  return load(source,'@'..path)
-end
--- loadfile reads disk, even with WASM_AGENT_LUA_ROOT unset. Test the actual embedded registry.
-local probe='lua/core/provider.lua';local saved=EMBEDDED[probe]
-EMBEDDED[probe]=nil;assert(not embedded_chunk(probe),'negative control: absent embedding must fail')
-EMBEDDED[probe]='!invalid Lua';assert(not embedded_chunk(probe),'negative control: invalid embedding must fail')
-EMBEDDED[probe]=saved
-local missing = {}
-for _, name in ipairs(names) do
-  if not embedded_chunk('lua/core/'..name) then missing[#missing + 1] = name end
-end
-assert(#missing == 0, "on disk but not in the binary: " .. table.concat(missing, ", "))
--- Presence is not freshness: compare the exact embedded text to the working tree too.
-local stale = {}
-for _, name in ipairs(names) do
-  local path = "lua/core/" .. name
-  local embedded = EMBEDDED and EMBEDDED[path]
-  local on_disk = host.read_file and host.read_file(path)
-  if type(embedded) == "string" and type(on_disk) == "string" and embedded ~= on_disk then
-    stale[#stale + 1] = name
-  end
-end
-assert(#stale == 0, "the embedded core is stale - rebuild before trusting this binary: " .. table.concat(stale, ", "))
-print("embedded modules ok (" .. #names .. " files)")
-LUA
-( unset WASM_AGENT_LUA_ROOT; WA_SCRIPT="$DB.embedded.lua" "$BIN" --db "$DB" ) | grep "embedded modules ok"
-rm -f "$DB.embedded.lua"
+# Test the shipping registry, including missing/stale/invalid negative controls.
+( export WA_EMBEDDED_SOURCE_ROOT="$WASM_AGENT_LUA_ROOT"; unset WASM_AGENT_LUA_ROOT
+  WA_SCRIPT="$WA_EMBEDDED_SOURCE_ROOT/scripts/test-embedded-runtime.lua" "$BIN" --db "$DB" ) \
+  | grep "embedded runtime regression ok"
 # Which copy of the Lua a script run loaded has to be visible. With no WASM_AGENT_LUA_ROOT the
 # `dofile` bootstrap resolves every module from the copy compiled into the binary, so a focused test
 # whose subject is an edit under `lua/` can run green while never loading that edit: one worker lost

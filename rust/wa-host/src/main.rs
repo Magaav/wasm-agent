@@ -28,92 +28,9 @@ use std::ffi::{c_int, c_void};
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-/// The Lua core is embedded so `wa` is a single self-contained binary that runs
-/// from any working directory. WA_SCRIPT overrides the entry point with a file.
-const EMBEDDED: &[(&str, &str)] = &[
-    ("AGENTS.orchestrator.md", include_str!("../../../AGENTS.orchestrator.md")),
-    ("AGENTS.subagents.md", include_str!("../../../AGENTS.subagents.md")),
-    ("lua/vendor/json.lua", include_str!("../../../lua/vendor/json.lua")),
-    ("lua/core/schema.sql", include_str!("../../../lua/core/schema.sql")),
-    ("lua/core/skills.lua", include_str!("../../../lua/core/skills.lua")),
-    ("lua/core/redact.lua", include_str!("../../../lua/core/redact.lua")),
-    ("lua/core/telemetry.lua", include_str!("../../../lua/core/telemetry.lua")),
-    ("lua/core/tool_output.lua", include_str!("../../../lua/core/tool_output.lua")),
-    ("lua/core/file_tools.lua", include_str!("../../../lua/core/file_tools.lua")),
-    ("lua/core/evidence_view.lua", include_str!("../../../lua/core/evidence_view.lua")),
-    ("lua/core/diagnose.lua", include_str!("../../../lua/core/diagnose.lua")),
-    ("lua/core/prefix_audit.lua", include_str!("../../../lua/core/prefix_audit.lua")),
-    ("lua/core/platform.lua", include_str!("../../../lua/core/platform.lua")),    ("lua/core/paths.lua", include_str!("../../../lua/core/paths.lua")),
-    ("lua/core/modules.lua", include_str!("../../../lua/core/modules.lua")),
-    ("lua/core/memory.lua", include_str!("../../../lua/core/memory.lua")),
-    ("lua/core/tools.lua", include_str!("../../../lua/core/tools.lua")),
-    ("lua/core/graph.lua", include_str!("../../../lua/core/graph.lua")),
-    ("lua/core/users.lua", include_str!("../../../lua/core/users.lua")),
-    ("lua/core/spells.lua", include_str!("../../../lua/core/spells.lua")),
-    ("lua/core/nodes.lua", include_str!("../../../lua/core/nodes.lua")),
-    ("lua/core/enrollment.lua", include_str!("../../../lua/core/enrollment.lua")),
-    ("lua/core/binding.lua", include_str!("../../../lua/core/binding.lua")),
-    ("lua/core/binding_cli.lua", include_str!("../../../lua/core/binding_cli.lua")),
-    ("lua/core/state.lua", include_str!("../../../lua/core/state.lua")),
-    ("lua/core/status.lua", include_str!("../../../lua/core/status.lua")),
-    ("lua/core/update.lua", include_str!("../../../lua/core/update.lua")),
-    ("lua/core/backup.lua", include_str!("../../../lua/core/backup.lua")),
-    ("lua/core/merge.lua", include_str!("../../../lua/core/merge.lua")),
-    ("lua/core/toolchain.lua", include_str!("../../../lua/core/toolchain.lua")),
-    ("lua/core/provider.lua", include_str!("../../../lua/core/provider.lua")),
-    ("lua/core/openai_sub.lua", include_str!("../../../lua/core/openai_sub.lua")),
-    ("lua/core/openai_sub_bridge.lua", include_str!("../../../lua/core/openai_sub_bridge.lua")),
-    // The subscription credential: our own store, refresh and login, which the transport lane
-    // reaches through `M.token()`. It is here because this list is what a deployed node can load -
-    // a module absent from it exists in the working tree and not in the shipped binary.
-    //
-    // The *key* is not free, and this is the cutover fact the two lanes disagreed about: the wire
-    // loads the credential as `dofile(M.CREDENTIAL_MODULE)` and nothing else, so this exact string
-    // is the path a deployed binary resolves. A credential registered under a name the wire never
-    // asks for is shipped, embedded and unreachable - present in the registry, absent in every
-    // request. These two strings are one decision, and the no-Lua-root proof is what executes it.
-    ("lua/core/openai_sub_auth.lua", include_str!("../../../lua/core/openai_sub_auth.lua")),
-    // The login CLI itself, not only the module it drives: the door in `lua/core/init.lua` loads this
-    // from HERE. `scripts/` is not in this registry at all, so a `dofile` of a `scripts/` path resolves
-    // in a checkout and dies in an installed node - `embedded module missing:`
-    // `scripts/openai-sub-login.lua`, measured - which is the defect this entry closes. The script of
-    // that name stays on disk as a wrapper for the `WA_SCRIPT=` spelling the credential module's own
-    // `LOGIN_COMMAND` names, and it works in both shapes because it loads this entry.
-    ("lua/core/openai_sub_login.lua", include_str!("../../../lua/core/openai_sub_login.lua")),
-    ("lua/core/openai_sub_catalogue.lua", include_str!("../../../lua/core/openai_sub_catalogue.lua")),
-    ("lua/core/subscription_wire.lua", include_str!("../../../lua/core/subscription_wire.lua")),
-    // wa-vault's client and, when vaulted, the subscription wire's credential seam (docs/VAULT.md):
-    // the wire `dofile`s it by this exact name, like `openai_sub_auth.lua` above.
-    ("lua/core/vault.lua", include_str!("../../../lua/core/vault.lua")),
-    ("lua/core/model_window.lua", include_str!("../../../lua/core/model_window.lua")),
-    ("lua/core/changeset.lua", include_str!("../../../lua/core/changeset.lua")),
-    ("lua/core/patch_audit.lua", include_str!("../../../lua/core/patch_audit.lua")),
-    ("lua/core/effects.lua", include_str!("../../../lua/core/effects.lua")),
-    ("lua/core/whatsapp.lua", include_str!("../../../lua/core/whatsapp.lua")),
-    ("lua/core/subagents.lua", include_str!("../../../lua/core/subagents.lua")),
-    ("lua/core/session_view.lua", include_str!("../../../lua/core/session_view.lua")),
-    ("lua/core/history_search.lua", include_str!("../../../lua/core/history_search.lua")),
-    ("lua/core/hook_events.lua", include_str!("../../../lua/core/hook_events.lua")),
-    ("lua/core/steering.lua", include_str!("../../../lua/core/steering.lua")),
-    ("lua/core/completions.lua", include_str!("../../../lua/core/completions.lua")),
-    ("lua/core/orchestrator.lua", include_str!("../../../lua/core/orchestrator.lua")),
-    ("lua/core/resources.lua", include_str!("../../../lua/core/resources.lua")),
-    ("lua/core/workspaces.lua", include_str!("../../../lua/core/workspaces.lua")),
-    ("lua/core/agent.lua", include_str!("../../../lua/core/agent.lua")),
-    ("lua/core/markdown.lua", include_str!("../../../lua/core/markdown.lua")),
-    ("lua/core/cli_view.lua", include_str!("../../../lua/core/cli_view.lua")),
-    ("lua/core/cli_input.lua", include_str!("../../../lua/core/cli_input.lua")),
-    ("lua/core/efficiency.lua", include_str!("../../../lua/core/efficiency.lua")),
-    ("lua/core/commands.lua", include_str!("../../../lua/core/commands.lua")),
-    ("lua/core/chat.lua", include_str!("../../../lua/core/chat.lua")),
-    ("lua/core/server.lua", include_str!("../../../lua/core/server.lua")),
-    ("lua/core/init.lua", include_str!("../../../lua/core/init.lua")),
-];
+// Generated from the Lua tree at build time: new modules ship without a second registry edit.
+include!(concat!(env!("OUT_DIR"), "/embedded.rs"));
 
-// NOTE: this list is hand-maintained, and a module missing from it exists in the working
-// tree and not in the shipped binary - which crash-loops a deployed node with
-// "embedded module missing". scripts/test.sh now loads every lua/core/*.lua with
-// WASM_AGENT_LUA_ROOT unset, so the list cannot drift silently again.
 /// Source for one of the entry modules the host loads itself.
 ///
 /// `dofile` prefers the on-disk copy when WASM_AGENT_LUA_ROOT is set, but these

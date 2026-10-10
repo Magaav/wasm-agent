@@ -513,6 +513,17 @@ esac
 #    that is serving.
 SCRATCH=$((PORT + 40))
 SCRATCH_HOME="$(mktemp -d)"
+EMBEDDED_ROOT="$ROOT"; EMBEDDED_SCRIPT="$ROOT/scripts/check-embedded-runtime.lua"; EMBEDDED_HOME="$SCRATCH_HOME"
+if command -v cygpath >/dev/null 2>&1; then
+  EMBEDDED_ROOT="$(cygpath -w "$EMBEDDED_ROOT")"; EMBEDDED_SCRIPT="$(cygpath -w "$EMBEDDED_SCRIPT")"
+  EMBEDDED_HOME="$(cygpath -w "$EMBEDDED_HOME")"
+fi
+if ! WASM_AGENT_HOME="$EMBEDDED_HOME" WASM_AGENT_LUA_ROOT='' \
+  WA_EMBEDDED_SOURCE_ROOT="$EMBEDDED_ROOT" WA_SCRIPT="$EMBEDDED_SCRIPT" \
+  "$NEW" --db "$EMBEDDED_HOME/embedded.db"; then
+  rm -rf "$SCRATCH_HOME"
+  fail "embedded runtime check failed; not installing it"
+fi
 WASM_AGENT_HOME="$SCRATCH_HOME" "$NEW" serve --port "$SCRATCH" --client-port "$((SCRATCH + 1))" --ui "$ROOT/ui" >"$SCRATCH_HOME/out.log" 2>&1 &
 SCRATCH_PID=$!
 ANSWERED=0

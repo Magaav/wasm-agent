@@ -1,6 +1,6 @@
 // Every literal `dofile` target reachable from the binary's embedded Lua must itself be embedded.
 //
-// Why this exists: `rust/wa-host/src/main.rs`'s `EMBEDDED` table is the whole module set an *installed*
+// Why this exists: the build-generated `EMBEDDED` table is the whole module set an *installed*
 // node has. A node runs with no `WASM_AGENT_LUA_ROOT` (that is the shipped shape; `deploy.sh` ships it
 // that way and `wa-sentinel/src/instance.rs` protects it), so `dofile("scripts/...")` and any other path
 // the table does not carry resolves in a checkout and dies in production with
@@ -12,10 +12,8 @@
 //
 // What it checks, mechanically: the `EMBEDDED` keys are the registry; starting from them, follow every
 // *literal* `dofile("x")` reachable in the tree, and fail naming each target that is not a registry key.
-// Non-literal targets (`dofile(some_variable)`) cannot be checked statically, so they are counted and
-// printed rather than guessed at. A parse that does not account for every `include_str!` in the table is
-// a failure, not a smaller answer - a partial registry is how this check would pass vacuously. Comments
-// and string literals are stripped before the scan, so a comment that names a path is not a call.
+// Non-literal targets are counted rather than guessed at. The deploy runtime check verifies
+// the actual generated artifact with disk Lua disabled. Comments are stripped before the scan.
 //
 //   node scripts/check-embedded-lua-closure.mjs [repo root]
 import fs from 'node:fs';
@@ -30,20 +28,17 @@ const die = message => { process.stderr.write('check-embedded-lua-closure: ' + m
 if (!fs.existsSync(mainRs)) die('no ' + mainRs + ' - run this from the repository root');
 
 const source = fs.readFileSync(mainRs, 'utf8');
-const start = source.indexOf('const EMBEDDED');
-if (start < 0) die('no EMBEDDED table in ' + mainRs);
-const table = source.slice(start, source.indexOf('];', start));
-
-const entries = (table.match(/include_str!/g) || []).length;
+if (!source.includes('include!(concat!(env!("OUT_DIR"), "/embedded.rs"))')) die('generated registry is not wired into main.rs');
 const registry = new Map();
-for (const match of table.matchAll(/\(\s*"([^"]+)"\s*,\s*include_str!\(\s*"([^"]+)"\s*\)\s*\)/g)) {
-  registry.set(match[1], match[2]);
+function collect(dir) {
+  for (const entry of fs.readdirSync(path.join(repo, dir), {withFileTypes:true})) {
+    const name = dir + '/' + entry.name;
+    if (entry.isDirectory()) collect(name);
+    else if (/\.(lua|sql)$/.test(name)) registry.set(name, name);
+  }
 }
-if (registry.size === 0) die('the EMBEDDED table parsed as empty - this check would pass vacuously');
-if (registry.size !== entries) {
-  die('parsed ' + registry.size + ' of ' + entries + ' EMBEDDED entries in ' + mainRs +
-    ' - a partial parse silently checks a partial registry, so this is a failure and not a smaller answer');
-}
+collect('lua/core'); collect('lua/vendor');
+for (const name of ['AGENTS.orchestrator.md', 'AGENTS.subagents.md']) registry.set(name, name);
 
 const problems = [];
 const seen = new Set();
@@ -103,7 +98,7 @@ while (queue.length > 0) {
 }
 
 const luaEntries = [...registry.keys()].filter(name => name.endsWith('.lua')).length;
-say('embedded registry: ' + registry.size + ' entries, all ' + entries + ' include_str! accounted for (' +
+say('generated embedded registry: ' + registry.size + ' entries (' +
   luaEntries + ' .lua)');
 say('traversed: ' + filesRead + ' embedded file(s), ' + literals + ' literal dofile target(s), ' +
   dynamic + ' non-literal (not checkable statically)');
