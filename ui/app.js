@@ -151,6 +151,7 @@ let conversationEpoch = 0;
 function rememberSession(id) {
   if (!id || id === chatSession) return false;
   chatSession = id;
+  orchestrationMode=null;
   delete messages.dataset.debug;
   conversationEpoch += 1;
   resetConversationFollowState();
@@ -162,6 +163,7 @@ function rememberNode(node) {
   if (node === activeNode) return false;
   detachConversationView();
   activeNode = node;
+  orchestrationMode=null;
   delete messages.dataset.debug;
   conversationEpoch += 1;
   invalidateHookInventory();
@@ -1575,7 +1577,9 @@ function handleEvent(event) {
   if (["round", "reasoning", "commentary", "commentary_delta", "commentary_end", "pending_delta", "decision", "tool", "tool_result", "delta", "reply", "error", "done"].includes(event.type)) {
     clearActiveRunNotice();
   }
-  if (event.type === "final_answer_begin") {
+  if (event.type === 'delegated') {
+    if(event.task?.subagent_id)renderSubagentCard(event.task);
+  } else if (event.type === "final_answer_begin") {
     const bubble = currentBubble();
     const key = [event.run_id || '', event.response_id || '', event.message_id || event.pending_id || ''].join('|');
     if (!event.message_id && !event.pending_id) return;
@@ -2077,6 +2081,8 @@ function repaintMessages(rows, options = {}) {
         for (const item of message.trace || []) if (item.kind === 'run_counts') applyRunCounts(item);
         replayRunLastMessage = message;
         if (Number(message.created_at) > 0) replayMessageEndedAt = Number(message.created_at) * 1000;
+        for(const span of message.trace || []) if(span.kind==='delegation' && span.ok===true && span.receipt?.subagent_id)
+          handleEvent({type:'delegated',task:span.receipt});
         // The stored message carries its changes summary and its id, and both are needed: the summary is
         // the topic, and the id is what the undo route is asked about. Dropping them here is why a
         // reloaded transcript showed no diff topics at all - the live path had them, the repaint did
@@ -2374,6 +2380,7 @@ async function restoreSessionOnce(target, epoch, node = activeNode) {
         outcome = sessionOutcome(full);
       }
     }
+    orchestrationMode=full.orchestration || null;
     setTranscriptDebug(messages, full.session?.mode);
     const loadedSeq = (full.messages || []).reduce((last, row) => Math.max(last, Number(row.seq) || 0), 0);
     if (full && Array.isArray(full.messages) && full.messages.length) {
@@ -3600,6 +3607,34 @@ const ORCHESTRATOR_ALL_BRIEF = "Act as the git orchestrator for this repository.
   "Preserve uncommitted work and active checkouts. Resolve understood conflicts without losing either intent; escalate an unresolved decision, never force it. " +
   "Scope: /merge all explicitly includes every open PR head, including forks. Review each PR and honor required checks and approvals before integration.";
 
+let orchestrationMode=null,orchestrationRead=null;
+async function readOrchestrationMode() {
+  const thread=chatSession,node=activeNode,epoch=conversationEpoch;
+  if(!thread)return;
+  const key=node+'|'+thread+'|'+epoch;
+  if(orchestrationRead?.key===key)return orchestrationRead.promise;
+  const pending={key,promise:null};
+  pending.promise=(async()=>{try {
+    const r=await orchestratorRequest({action:'orchestration_mode',thread,mode_action:'get'});
+    if(thread!==chatSession||node!==activeNode||epoch!==conversationEpoch)return;
+    if(!r.ok||typeof r.orchestration?.enabled!=='boolean'||r.orchestration.thread!==thread)throw Error(r.error||'invalid mode reply');
+    orchestrationMode=r.orchestration;
+    if(input.value.startsWith('/'))syncCommands();
+  }catch(error){if(thread===chatSession&&node===activeNode&&epoch===conversationEpoch)orchestrationMode=null;}
+  finally{if(orchestrationRead===pending)orchestrationRead=null;}})();
+  orchestrationRead=pending;return pending.promise;
+}
+async function toggleOrchestration() {
+  const thread=chatSession,node=activeNode,epoch=conversationEpoch;
+  await readOrchestrationMode();
+  if(thread!==chatSession||node!==activeNode||epoch!==conversationEpoch)return;
+  if(!orchestrationMode){add('assistant','Orchestration state unavailable; no change made.');return;}
+  const r=await orchestratorRequest({action:'orchestration_mode',thread,mode_action:'toggle',revision:orchestrationMode.revision});
+  if(thread!==chatSession||node!==activeNode||epoch!==conversationEpoch)return;
+  if(!r.ok||r.orchestration?.thread!==thread||typeof r.orchestration?.enabled!=='boolean'){add('assistant','Orchestration change refused: '+(r.error||'unconfirmed'));await readOrchestrationMode();return;}
+  orchestrationMode=r.orchestration;
+  add('assistant','Orchestration '+(orchestrationMode.enabled?'on — tasks route to native workers; I remain available.':'off — I handle new tasks directly. Existing workers keep running.'));
+}
 const COMMANDS = [
   {
     name: "/new",
@@ -3625,6 +3660,11 @@ const COMMANDS = [
     name: "/efficiency_report",
     hint: "what the last call sent and cost — tokens, KV cache, USD, and the prefix to inspect",
     run: efficiencyReport,
+  },
+  {
+    name: "/orchestration",
+    get hint(){return (orchestrationMode ? (orchestrationMode.enabled?'ON':'OFF') : 'unknown')+' — toggle native task routing';},
+    run:()=>{toggleOrchestration().catch(error=>add('assistant','Orchestration change failed: '+error.message));},
   },
 ];
 
@@ -3743,7 +3783,8 @@ function newThread() {
 // closes it, so a message that merely starts with a slash is not trapped.
 function commandMatches(value) {
   if (value[0] !== "/" || value.includes("\n")) return [];
-  const typed = value.slice(1).trim().toLowerCase();
+  let typed = value.slice(1).trim().toLowerCase();
+  if(typed.startsWith('ochestration'))typed='orchestration'+typed.slice('ochestration'.length);
   return COMMANDS.filter((command) => command.name.slice(1).startsWith(typed));
 }
 
@@ -3768,7 +3809,7 @@ function syncCommands() {
   // about to do instead of waiting to be told.
   commandMenu.move(1);
 }
-input.addEventListener("input", syncCommands);
+input.addEventListener("input", () => {syncCommands();if(commandMatches(input.value).some(command=>command.name==='/orchestration'))void readOrchestrationMode();});
 input.addEventListener("focus", syncCommands);
 window.addEventListener("resize", () => requestAnimationFrame(autosize));
 

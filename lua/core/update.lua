@@ -412,6 +412,7 @@ local function decorate(verdict, facts)
 end
 
 function M.run(options)
+  if host.getenv('WASM_AGENT_PROVENANCE')=='child' then return {ok=false,error='update_coordinator_only',status='refused',message='Workers merge/report; only coordinator requests installation.'} end
   options = options or {}
   local facts = M.facts(options)
   -- Asked before the tree is synchronized: a request no watcher can perform is refused without moving

@@ -240,6 +240,13 @@ end
 function M.ensure(memory, session_id, source_session_id, options)
   local session = memory.session(session_id)
   if not session then return nil, "workspace_session_not_found" end
+  -- Explicit task-owned mode uses ordinary integration, not historical wave factory admission.
+  -- The exception is derived from the trusted parent mode/profile, never caller arguments.
+  local parent=source_session_id and memory.session(source_session_id)
+  local direct_owner=options and options.orchestration_owner==true and parent
+    and session.parent_session_id==source_session_id and session.user_id==parent.user_id
+    and session.objective=='subagent'
+    and dofile('lua/core/orchestration_mode.lua').read(source_session_id).enabled
   local current=memory.session_workspace(session_id)
   local root_recovery=options and options.root_recovery==true
   local is_root=tostring(session.parent_session_id or '')=='' and tostring(session.fork_parent_id or '')==''
@@ -286,7 +293,8 @@ function M.ensure(memory, session_id, source_session_id, options)
     return nil,"workspace_released_or_release_unresolved"
   end
   if workspace.state == "allocated" then
-    local admitted,why=wave_admission(workspace.start_state.source_root,'produce')
+    local admitted,why=true,nil
+    if not direct_owner then admitted,why=wave_admission(workspace.start_state.source_root,'produce') end
     if not admitted then return nil,'workspace_wave_admission_refused:'..tostring(why) end
     local valid, err = verify_binding(memory, session_id, workspace)
     if valid then return workspace end
@@ -309,7 +317,8 @@ function M.ensure(memory, session_id, source_session_id, options)
   local root = inspected.root
   -- New allocations participate in the same shared-repository wave admission
   -- used by producer/merge public entrypoints. No arbitrary alternate store.
-  local admitted,admission_why=wave_admission(root,'allocate')
+  local admitted,admission_why=true,nil
+  if not direct_owner then admitted,admission_why=wave_admission(root,'allocate') end
   if not admitted then
     local why='workspace_wave_admission_refused:'..tostring(admission_why)
     mark(memory,session_id,workspace,'failed',why)

@@ -72,7 +72,7 @@ fn configure_spec(mut spec: Spec, cwd: &str, seconds: u64, owner: String, promot
     // A child's operation is owned by the child session/run, not by whatever
     // interpreter slot happens to be on this thread, so settlement is attributable.
     spec.owner = crate::subagents::current_owner().unwrap_or(owner);
-    if crate::serve::in_turn() {
+    if crate::serve::in_turn() || crate::subagents::current_provenance() == Some("child") {
         spec.env.push(("WASM_AGENT_IN_TURN".into(), "1".into()));
     } // naming-check: allow (installed deploy scripts)
     // Who this process is, so a guard can decide by role. The host knows it from the thread's own
@@ -325,6 +325,18 @@ mod deadline_note_tests {
     use super::deadline_note;
     use serde_json::json;
 
+    #[test]
+    fn child_shell_is_marked_in_turn_and_cannot_request_installation() {
+        use crate::subagents::{TaskContext,Provenance,SocketSlot};
+        use std::sync::{Arc,atomic::AtomicBool};
+        crate::subagents::enter_task(TaskContext{cancel:Arc::new(AtomicBool::new(false)),deadline:None,
+            sockets:SocketSlot::default(),owner:"child-fixture".into(),provenance:Provenance::Child});
+        let spec=super::configure_spec(wa_operation::Spec::command("fixture",vec![]),"",1,"".into(),false);
+        crate::subagents::leave_task();
+        assert!(spec.env.contains(&("WASM_AGENT_IN_TURN".into(),"1".into())));
+        assert!(spec.env.contains(&("WASM_AGENT_PROVENANCE".into(),"child".into())));
+        assert_eq!(spec.owner,"child-fixture");
+    }
     // What the reader gets is the measurement, in the order the operation spends it.
     #[test]
     fn the_note_reports_the_measured_phases() {

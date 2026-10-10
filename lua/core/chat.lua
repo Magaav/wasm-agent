@@ -338,6 +338,11 @@ function M.run(argv)
       local on = view:set_console(not view:console_on())
       print(on and "  console on: every event, and a tool's output unclipped"
         or "  console off: the formatted view")
+    elseif line == "/orchestration" or line == "/ochestration" then
+      local mode=dofile('lua/core/orchestration_mode.lua')
+      local current=mode.read(agent.session_id)
+      local result=mode.control({mode_action='toggle',revision=current.revision},{role='master',user_id=USER,session_id=agent.session_id})
+      print(result.ok and ('orchestration '..(result.orchestration.enabled and 'on' or 'off')) or json.encode(result))
     elseif line == "/update" then
       -- The same report the window gets from POST /update, and the same sentence: this node cannot
       -- replace itself, so the answer is what it decided and what it queued for the sentinel.

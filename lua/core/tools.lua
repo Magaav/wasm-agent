@@ -289,6 +289,7 @@ M.admin = {
     action = { type = "string", enum = { "status", "allocate", "recover", "release", "set", "clear" } },
     path = { type = "string", description = "set: an existing directory for a legacy non-managed session." },
     session_id = { type = "string", description = "Defaults to the current session." } }, { "action" }),
+  schema("integrate", "Orchestration worker only: land your clean tested tip through canonical main under a repository claim, push and verify remote. Conflicts refuse for owned-tree refactoring; unknown effects must be inspected, never replayed. Does not deploy.", {}),
   schema("resource", "Inspect durable resource claims. Reconcile only after checking the recorded owner's effects; name the exact key, run, principal and evidence. Live owners cannot be released. No automatic timeout or effect replay.", {
     action={type="string",enum={"list","reconcile"}},key={type="string"},run={type="string"},
     principal={type="string"},evidence={type="string"} }, {"action"}),
@@ -304,7 +305,7 @@ M.tier_of = {
   sessions = "sessions", session = "sessions", search_messages = "sessions",
   resume_session = "sessions", session_debug = "sessions", session_fixture = "sessions",
   session_worktree = "sessions",
-  resource = "sessions",
+  resource = "sessions", integrate = "sessions",
   bash = "environment", read = "environment", read_many = "environment", write = "environment",
   diagnose = "environment", operation = "environment",
   edit = "environment", ls = "environment", grep = "environment", graph = "environment",
@@ -406,6 +407,7 @@ local CUES = {
   diagnose = "Run a fixed read/grep check sequence once",
   client = "Act on the user's machine: screen, mouse, keyboard, browser",
   shell = "Run a shell command on the client machine",
+  integrate = "Land an orchestration worker's tested tip; never deploy",
   spell_save = "Save a verified command sequence as a reusable spell",
   spell_run = "Replay a saved spell",
   spell_compose = "Combine a verified spell sequence with its checks intact",
@@ -460,7 +462,9 @@ end
 -- without `ctx.subagent`, so a parent that sees them can only ever get
 -- `whatsapp_requires_subagent`. Hiding them removes a dead choice and the schemas it
 -- costs; the child still receives them through `all_for`, which reads the catalog.
-local PROMPT_HIDDEN = WHATSAPP_TOOLS
+local PROMPT_HIDDEN = {}
+for name,value in pairs(WHATSAPP_TOOLS) do PROMPT_HIDDEN[name]=value end
+PROMPT_HIDDEN.integrate=true -- Task-owner-only; parent cannot execute it. Child all_for reads catalog.
 
 -- The schemas a role's prompt shows, and what `capabilities` reports.
 function M.all(role)
@@ -681,6 +685,7 @@ function M.dispatch(memory, name, args, role, ctx)
     if name == "subagent" then return { error = "subagent_recursion_forbidden" } end
   end
   if not is_master(role) and admin_names()[name] then return { error = "forbidden_for_role:" .. role } end
+  if name=='integrate' then return dofile('lua/core/integrate.lua').run(memory,ctx) end
   local workspace_error = required_workspace_error(memory, ctx, name, args)
   if workspace_error then return workspace_error end
   if name=="resource" then

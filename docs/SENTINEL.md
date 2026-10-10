@@ -17,6 +17,17 @@ acting on.**
 So the sentinel lives outside, watches, and acts on **declared requests** — a fixed verb list, never a
 shell. The thing that can restart your agent must not be something your agent can talk into anything.
 
+## Coordinator-only installation
+
+Task-owning orchestration workers implement/verify/merge/report; they do not
+install code, publish installed UI or control Sentinel. Child shells carry both
+`WASM_AGENT_PROVENANCE=child` and the existing in-turn installer marker. Mutating
+Sentinel CLI calls refuse that child provenance before requests, jobs, services or
+protocol effects. Help/status/preflight remain read-only. This is an inherited
+cooperative boundary, not an OS sandbox against an unrestricted shell deliberately
+stripping markers; such bypasses are never approved. Only the coordinator decides
+readiness and requests installation. See [ORCHESTRATION-MODE.md](ORCHESTRATION-MODE.md).
+
 ## Asking
 
 ### Exact-source deployment and deterministic return

@@ -981,6 +981,8 @@ gate_phase_begin tools
 WA_SCRIPT="$DB.evidence.lua" "$BIN" --db "$DB" | grep "tool evidence ok"
 rm -f "$DB.evidence.lua"
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-subscription-pending-output.lua" "$BIN" --db "$DB.pending-output" | grep 'subscription pending output ok'
+WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-worker-integrate-refusals.lua" "$BIN" --db "$DB.integration-refusals" | grep 'worker integrate refusals ok'
+WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-orchestration-mode.lua" "$BIN" --db "$DB.orchestration-mode" | grep 'orchestration mode ok'
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-observability.lua" "$BIN" --db "$DB.observability" | grep 'observability ok'
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-run-counts.lua" "$BIN" --db "$DB.run-counts" | grep 'run counts ok'
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-telemetry-incremental.lua" "$BIN" --db "$DB.telemetry-incremental" | grep 'telemetry incremental ok'

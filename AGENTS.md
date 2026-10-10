@@ -1,11 +1,12 @@
 ## Operator-selected direct workflow (2026-10-05)
 
-The operator has disabled delegation for this repository. Work directly and serially
-on each human-requested task: implement, self-review, run appropriate focused checks,
-merge in the canonical main checkout, push and read back origin/main, and leave the
-owned and canonical worktrees clean. Do not start subagents or external inference agents.
-Do not create new orchestration, watchers or gates to complete ordinary work. Full
-release gates run only when the human explicitly requests them.
+Default off: implement, self-review, focused checks, merge through canonical main,
+push/read back origin/main; leave both trees clean. Do not start
+subagents or external inference agents unless the operator explicitly enables
+`/orchestration`. On: native task owners implement/verify/merge via `integrate` and
+report; coordinator routes and stays free. No recursion or mid-task steering.
+Only the coordinator owns `/update`, UI publication and Sentinel, never children.
+No watchers or gates; full release gates require a human request.
 
 The coordinator may review and merge its own changes; an independent reviewer is
 not required in this mode. This operator-selected rule overrides conflicting
@@ -23,7 +24,7 @@ cleanup and runtime readiness separately; an unresolved historical record does n
 prevent completing unrelated requested code changes. If a runtime boundary refuses
 cleanup, report its exact remaining scope and complete the other authorized work.
 
-This direct workflow remains active until the operator explicitly changes it.
+See docs/ORCHESTRATION-MODE.md.
 
 # AGENTS.md — working on wasm-agent
 

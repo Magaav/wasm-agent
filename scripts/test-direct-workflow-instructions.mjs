@@ -39,7 +39,9 @@ try {
     fs.writeFileSync(policy,original);
   }
   for(const [file,before,reason] of [
-    ['AGENTS.md','Do not start subagents or external inference agents','home AGENTS.md'],
+    ['AGENTS.md','subagents or external inference agents unless the operator explicitly enables','home AGENTS.md'],
+    ['AGENTS.md','Only the coordinator owns','home AGENTS.md'],
+    ['docs/ORCHESTRATION-MODE.md','Follow-up','home docs/ORCHESTRATION-MODE.md'],
     ['skills/parallel-evolution/SKILL.md','Active operator-selected direct workflow','home skills/parallel-evolution/SKILL.md'],
     ['skills/git-orchestrator/SKILL.md','Active operator-selected direct workflow','home skills/git-orchestrator/SKILL.md'],
     ['docs/SKILLS.md','Do not call `spell_run` just to','home docs/SKILLS.md'],

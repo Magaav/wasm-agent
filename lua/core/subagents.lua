@@ -37,11 +37,12 @@ M.RETRYABLE_ADMISSION = { node_full = true, queue_full = true, subagent_runtime_
 local BROAD = {
   bash = true, shell = true, client = true, remote = true,
   write = true, edit = true, spell_save = true, spell_run = true, spell_export = true,
-  resource = true,
+  resource = true, integrate = true,
 }
 
 -- Built-in profiles. `explore` is the default and is read-only; `guest` is the
--- only profile a guest may start. Anything broader is a file under
+-- only profile a guest may start. The explicit mode reserves its task owner below.
+-- Other broad profiles are a file under
 -- `<config>/subagent-profiles/` that an operator put there, and it must say
 -- `"operator_authorized": true`.
 local BUILTIN = {
@@ -58,6 +59,13 @@ local BUILTIN = {
     allowed_tools = { "read", "read_many", "grep", "ls", "graph", "diagnose" },
     resources = {},
     limits = { max_depth = 0, timeout_seconds = 600, max_output_bytes = 65536 },
+  },
+  ['orchestration-worker'] = {
+    schema_version=1,id='orchestration-worker',builtin=true,operator_authorized=true,
+    description='Explicit orchestration-mode task owner: implement, focused self-review, integrate and report. No nested workers or Sentinel.',
+    instructions='Own the operator task end to end in your allocated worktree. Read session_worktree status, project docs and relevant skills. Implement using write/edit, self-review honestly, run focused checks, commit with Agent provenance, fetch/sync/refactor conflicts until mergeable, then use integrate to land through canonical main and verify remote. Do not directly edit canonical files, bypass hooks, force push or invent verification. If semantic conflict cannot be resolved safely, report the exact blocker and preserve work. No full release gate unless explicitly requested. NEVER call Sentinel, /update, deploy/install/restart scripts or write installed UI/assets/configuration. Only the coordinator publishes UI or installs code after readiness. Do not spawn children; no polling model loop. Complete and report; coordinator followup comes only after your report.',
+    allowed_tools={'skill','capabilities','recall','memories','session','search_messages','read','read_many','grep','ls','diagnose','graph','write','edit','bash','operation','session_worktree','tool_result','integrate'},
+    resources={},limits={max_depth=0,timeout_seconds=0,max_output_bytes=131072,max_prompt_bytes=262144},
   },
   guest = {
     schema_version = 1,
@@ -125,7 +133,9 @@ function M.profiles()
   local profiles = {}
   for id, profile in pairs(BUILTIN) do profiles[id] = profile end
   local files, errors = file_profiles()
-  for id, profile in pairs(files) do profiles[id] = profile end
+  for id, profile in pairs(files) do
+    if id~='orchestration-worker' then profiles[id] = profile end -- Reserved operator opt-in contract cannot be weakened by a file override.
+  end
   return profiles, errors
 end
 
@@ -209,6 +219,9 @@ function M.resolve(id, ctx)
   ctx = ctx or {}
   local profiles, errors = M.profiles()
   local profile = profiles[tostring(id or "explore")]
+  if tostring(id)=='orchestration-worker' and (ctx.remote or not users.is_master(ctx.role)) then
+    return nil,'orchestration_operator_only'
+  end
   if not profile then
     local available = {}
     for key in pairs(profiles) do available[#available + 1] = key end
@@ -480,13 +493,16 @@ function M.start(args, ctx)
   args = args or {}
   ctx = derive_ctx(ctx)
   if ctx.subagent then return { error = "subagent_recursion_forbidden" } end
-  if not ctx.remote and not ctx.placement then
+  if not ctx.remote and not ctx.placement and args.profile~='orchestration-worker' then
     local fleet = dofile("lua/core/orchestrator.lua")
     if fleet.enabled(ctx.user_id) then return fleet.enqueue(args, ctx) end
   end
   local raw_prompt = tostring(args.prompt or "")
   if raw_prompt == "" then return { error = "prompt_required" } end
   local profile_id = tostring(args.profile or "explore")
+  if profile_id=='orchestration-worker' and (ctx.remote or not dofile('lua/core/orchestration_mode.lua').read(ctx.session_id).enabled) then
+    return {error='orchestration_mode_not_enabled',not_started=true}
+  end
   local profile, refusal, detail = M.resolve(profile_id, ctx)
   if not profile then
     local out = { error = refusal }
@@ -593,7 +609,7 @@ function M.start(args, ctx)
   end
   local workspace
   if needs_workspace then
-    workspace, detail = workspaces.ensure(memory, session_id, ctx.session_id)
+    workspace, detail = workspaces.ensure(memory, session_id, ctx.session_id,{orchestration_owner=profile.id=='orchestration-worker'})
     if not workspace then
       pcall(memory.finish_session, session_id)
       -- The refusal keeps its own code (and its sentence in `detail`) so a coordinator can act on
@@ -678,6 +694,7 @@ function M.control(args, ctx)
   end
   ctx = derive_ctx(ctx)
   local action = tostring(args.action or "list")
+  if action=='orchestration_mode' then return dofile('lua/core/orchestration_mode.lua').control(args,ctx) end
   if ctx.subagent then
     -- A child has no subagents of its own and may not inspect or control any.
     return { error = "subagent_recursion_forbidden" }
@@ -696,6 +713,12 @@ function M.control(args, ctx)
 
   if action=='steer_session' or (action=='steering_status' and not args.id and not args.subagent_id) then
     if ctx.remote then return {error='explicit_child_target_required'} end
+    if action=='steer_session' then
+      local target=json.decode(host.subagent('lookup_session',json.encode({owner_user=ctx.user_id,conversation_id=tostring(args.session_id or '')})))
+      if target.found and target.task and target.task.profile=='orchestration-worker' then
+        return {error='worker_followup_requires_report',effect='none',next='Use message after its terminal report, not session steering.'}
+      end
+    end
     return dofile('lua/core/steering.lua').control(args,ctx)
   end
   if action == "session" or action == "message" or action=='steer' or action=='steering_status' then
@@ -705,6 +728,9 @@ function M.control(args, ctx)
     -- inspectable/continuable; native lookup refusals have no task/session identity.
     if not receipt or (receipt.error and not (receipt.subagent_id and receipt.session_id)) then
       return receipt or { error = "subagent_runtime_error" }
+    end
+    if receipt.profile=='orchestration-worker' and (receipt.settled~=true or receipt.state=='unknown') and (action=='steer' or action=='message') then
+      return {error='worker_followup_requires_report',effect='none',subagent_id=receipt.subagent_id}
     end
     if action=='steer' or action=='steering_status' then
       local request={}
@@ -988,6 +1014,10 @@ function wa_subagents(body, session)
   if requested ~= "" then parent=requested end
   if parent ~= "" then
     local existing = memory.session(parent)
+    if not existing and decoded.action=='orchestration_mode' and users.is_master(role) then
+      memory.start_session('', 'chat',{id=parent,user_id=user.id,node_id='',title='chat'})
+      existing=memory.session(parent)
+    end
     if not existing or existing.user_id ~= user.id then return json.encode({error="forbidden_parent_session"}) end
   end
   local ctx = {

@@ -333,6 +333,10 @@ function M.control(args, ctx, api)
       return true,view(row)
     end
     local receipt = json.decode(row.receipt)
+    if (action=='steer' or action=='message') and json.decode(row.args or '{}').profile=='orchestration-worker' then
+      local actual=invoke(row.destination,{action='status',id=receipt.subagent_id},json.decode(row.context),api)
+      if actual.settled~=true or actual.state=='unknown' then return true,{error='worker_followup_requires_report',effect='none'} end
+    end
     local forwarded = json.decode(json.encode(args))
     forwarded.id=receipt.subagent_id
     forwarded.subagent_id=nil
