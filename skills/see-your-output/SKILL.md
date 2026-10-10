@@ -209,6 +209,17 @@ Lua root for the actual provider retry/refusal boundary. Mandatory worktrees
 currently refuse spell replay; use this verified direct CLI, not relaxed bindings.
 It is not live installation proof. Also run `scripts/test-ui.ps1` and inspect the image.
 
+## Shared main/subagent chat proof
+
+Run `node <repo>/scripts/test-shared-chat.cjs <fresh-evidence>` then the same
+with `--post` for exact shared topic/composer/Send-Stop styles, full live status,
+context/raw details, parent/child renderer clock ownership, draft/scroll/manual
+commentary folds, repeated journal clocks and terminal-tail settlement. See
+[SHARED-CHAT.md](../../docs/SHARED-CHAT.md). `shared-chat-proof` records the
+same sequence; required workspaces use its verified CLI until replay is supported.
+Also run `scripts/test-ui.ps1` (including opaque surfaces). A live observation is
+read-only: never Send/Stop/steer/reload an operator page or child as a test.
+
 ## Minimal chat proof
 
 `minimal-chat-proof` records `node <repo>/scripts/test-minimal-chat.cjs <fresh-evidence>`

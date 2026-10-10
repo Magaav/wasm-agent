@@ -509,6 +509,8 @@ let runStartedAt = 0;
 let runStepState = null;
 let runCounts = null;
 const measuredContexts = new WeakMap();
+let rendererTask=null;
+const childRenderStates=new WeakMap();
 
 function applyRunCounts(counts) {
   if (counts?.version !== 1 || typeof counts.run_id !== 'string' || !counts.run_id ||
@@ -539,9 +541,9 @@ function turnTokenReadout() {
   const prefix=runCounts.usage_unknown || pending ? '≥' : '';
   return prefix+formatTokens(runCounts.tokens_reported);
 }
-function turnIsActive() { return busy || observedRun?.session === chatSession; }
-function runStepScope() { return activeNode + ":" + chatSession + ":" + conversationEpoch; }
-function runStepId() { return busy ? runKey(activeRunId) : runKey(observedRun); }
+function turnIsActive() { return rendererTask ? !rendererTask.settled&&/^(running|accepted|queued|placing)$/.test(rendererTask.state) : busy || observedRun?.session === chatSession; }
+function runStepScope() { return activeNode + ":" + (rendererTask?.session_id||chatSession) + ":" + conversationEpoch + (rendererTask?':'+(rendererTask.attempt_id||rendererTask.subagent_id):''); }
+function runStepId() { return rendererTask ? rendererTask.attempt_id||rendererTask.subagent_id : busy ? runKey(activeRunId) : runKey(observedRun); }
 function setTranscriptDebug(container, mode) {
   container.dataset.debug = String(mode === 'debug');
   if (container === transcript) {
@@ -779,11 +781,14 @@ function updateRunElapsed() {
   const duration=runDuration(endedAt - (runStartedAt || endedAt));
   setText(statusElapsed,!replayingMessages && runStepState?.active
     ? ` · ◈ ${turnTokenReadout()} · ✧ ${runCounts?.model_calls ?? '?'} · ⚒ ${runCounts?.tool_calls ?? '?'} · ◷ ${duration}` : duration);
-  if(transcript===messages && !replayingMessages && runCounts?.context) updateContextReadouts();
+  if(!replayingMessages&&runCounts?.context) {
+    if(rendererTask)updateChildContextReadouts();else if(transcript===messages)updateContextReadouts();
+  }
   statusElapsed.title='Turn provider-reported input + output: '+(Number.isSafeInteger(runCounts?.tokens_reported)?runCounts.tokens_reported.toLocaleString('en-US'):'unknown')+' tokens (cached input/retries/summaries included). ≥ means pending or missing usage; exact per-token streaming is unavailable.';
 }
 
 function startRunStatusTicker() {
+  if (rendererTask) return; // Child host supplies its existing clock to this same renderer.
   if (runStatusTicker) return;
   runStatusTicker = setInterval(() => { if (uiVisible()) updateRunElapsed(); }, 1000);
 }
@@ -1777,7 +1782,9 @@ function handleEvent(event) {
     // still one run, and the run topic has to be able to span everything it did; closing the bubble
     // here was the bug - one run drew one bubble per reply. flushDecision(true) closes it, on `done`
     // or on the next user turn, which is the contract its own comment already stated.
-  } else if (event.type === "usage") {    settings.usage = event.total || settings.usage;
+  } else if (event.type === "usage") {
+    if(rendererTask){updateChildContextReadouts();return;}
+    settings.usage = event.total || settings.usage;
     if (event.model) {
       lastUsedModel = event.model;
       composerModel.hidden = true;
@@ -2236,32 +2243,87 @@ function repaintMessages(rows, options = {}) {
 // `wa-message` bubble with a `steps` body, the same run topic, and the same
 // `completed`/`unfinished`/`failed` footer - which is the point: a reader looking at a child and at
 // this window's own chat is looking at one implementation, so a fix to either lands in both.
-function paintChildTranscript(container, rows, options = {}) {
-  if (!container) return null;
-  const saved = { transcript, runBubble, statusLine, statusLabel, statusElapsed, statusSpinner,
-    runStepState, runCounts,
-    statusPhase, lastAssistantBody, runStatusTicker, toolTicker, streamBody, streamText, phasePendingText, trace, lastTool,
-    reasoningBlock, reasoningText, streamedCommentaryBlock, streamedCommentaryText, runStartedAt, replayingMessages,
-    replayMessageEndedAt, replayRunLastMessage, renderedMessageIds };
-  transcript = container;
-  runStepState = null;runCounts = null;
-  // Child teardown must never remove the main status DOM, clear its timers or share its text buffer.
-  statusLine=null;statusLabel=null;statusPhase=null;statusElapsed=null;statusSpinner=null;runStatusTicker=null;toolTicker=null;
-  setTranscriptDebug(container, options.mode);
-  try {
-    const result=repaintMessages(rows || [], { ...options, notify: false });
-    renderJournalEvents(options.events||[],options.raw,options.identity);
-    return result;
-  } finally {
-    stopToolTicker();
-    if(runStatusTicker)clearInterval(runStatusTicker);
-    ({ transcript, runBubble, statusLine, statusLabel, statusElapsed, statusSpinner, lastAssistantBody,
-      runStepState, runCounts,
-      statusPhase, runStatusTicker, toolTicker, streamBody, streamText, phasePendingText, trace, lastTool, reasoningBlock,
-      reasoningText, streamedCommentaryBlock, streamedCommentaryText, runStartedAt, replayingMessages,
-      replayMessageEndedAt, replayRunLastMessage, renderedMessageIds } = saved);
+function captureRenderer() {
+  return {transcript,runBubble,statusLine,statusLabel,statusElapsed,statusSpinner,runStepState,runCounts,
+    statusPhase,lastAssistantBody,runStatusTicker,toolTicker,streamBody,streamText,phasePendingText,trace,lastTool,
+    reasoningBlock,reasoningText,streamedCommentaryBlock,streamedCommentaryText,runStartedAt,replayingMessages,
+    replayMessageEndedAt,replayRunLastMessage,renderedMessageIds,rendererTask};
+}
+function restoreRenderer(value) {
+  ({transcript,runBubble,statusLine,statusLabel,statusElapsed,statusSpinner,runStepState,runCounts,
+    statusPhase,lastAssistantBody,runStatusTicker,toolTicker,streamBody,streamText,phasePendingText,trace,lastTool,
+    reasoningBlock,reasoningText,streamedCommentaryBlock,streamedCommentaryText,runStartedAt,replayingMessages,
+    replayMessageEndedAt,replayRunLastMessage,renderedMessageIds,rendererTask}=value);
+}
+function childRenderKey(task) {return [activeNode,session,task?.session_id,task?.attempt_id||task?.subagent_id].join('|');}
+function withChildRenderer(container,task,render) {
+  const parent=captureRenderer(),retained=childRenderStates.get(container);
+  if(retained?.key===childRenderKey(task))restoreRenderer(retained.renderer);
+  else {
+    transcript=container;runBubble=null;runStepState=null;runCounts=null;
+    statusLine=null;statusLabel=null;statusPhase=null;statusElapsed=null;statusSpinner=null;runStatusTicker=null;toolTicker=null;
+    trace=null;lastTool=null;lastAssistantBody=null;streamBody=null;streamText='';phasePendingText=new Map();
+    reasoningBlock=null;reasoningText='';streamedCommentaryBlock=null;streamedCommentaryText='';runStartedAt=0;
+    replayingMessages=false;replayMessageEndedAt=0;replayRunLastMessage=null;renderedMessageIds=new Set();
+  }
+  rendererTask=task;
+  try {return render();}
+  finally {
+    stopToolTicker();if(runStatusTicker)clearInterval(runStatusTicker);runStatusTicker=null;
+    childRenderStates.set(container,{key:childRenderKey(task),journal:container._renderJournal,renderer:captureRenderer()});restoreRenderer(parent);
   }
 }
+function renderChildProgress(task) {
+  if(!turnIsActive()||!runBubble)return;
+  if(!runStartedAt&&Number(task?.started_at)>0)runStartedAt=Number(task.started_at)*1000;
+  const preview=task.preview || {},live=preview.tool;
+  if(!runStepState?.active || runStepState.active.fallback&&runStepState.active.preview!==preview.status) {
+    const note=live?'tools':preview.status || 'working';
+    showRunStep(live?'tool:'+live.call_id:note,live?'Executing tools':note==='model'?'Reasoning':note==='queued'?'Queued':'Working');
+    if(runStepState?.active){runStepState.active.fallback=true;runStepState.active.preview=preview.status;}
+  }
+  if(live?.started_at&&trace?.pending)trace.setAge(Date.now()/1000-live.started_at,live.timeout_ms?Math.round(live.timeout_ms/1000):undefined);
+  if(!statusLine)setStatus('');updateRunElapsed();
+}
+function paintChildTranscript(container, rows, options = {}) {
+  if(!container)return null;
+  const task=options.task||container.closest('wa-agent-session')?.task||
+    {session_id:container.dataset.session||'child',subagent_id:'child',state:options.active?'running':'completed',settled:!options.active};
+  return withChildRenderer(container,task,()=>{
+    const choices=Array.from(container.querySelectorAll('wa-commentary')).map(node=>({id:node.dataset.messageId,pending:node.dataset.pendingId,open:node.open}));
+    const prior=runStepState?.active,oldJournal=childRenderStates.get(container)?.journal;
+    const journal=JSON.stringify([options.identity,options.raw||options.events]);
+    setTranscriptDebug(container,options.mode);
+    const result=repaintMessages(rows||[],{...options,notify:false});
+    // Phase clocks belong to observation/event time, never repeated repaint time.
+    renderJournalEvents(options.events||[],options.raw,options.identity);
+    if(task?.settled) {
+      const state=childRunState(task);finishRunStatus(state==='failed'?'failed':state==='answered'?'completed':'unfinished');
+      markPendingTextIncomplete();markStreamedCommentaryIncomplete();flushDecision(true);
+    } else renderChildProgress(task||{});
+    if(oldJournal===journal&&prior?.key===runStepState?.active?.key)runStepState.active.started=prior.started;
+    for(const choice of choices) {
+      const node=Array.from(container.querySelectorAll('wa-commentary')).find(node=>choice.id&&node.dataset.messageId===choice.id||choice.pending&&node.dataset.pendingId===choice.pending);
+      if(node)node.open=choice.open;
+    }
+    updateRunElapsed();
+    if(rendererTask)updateChildContextReadouts();
+    container._renderJournal=journal;
+    return result;
+  });
+}
+document.addEventListener('chat-render-tick',event=>{
+  const pane=event.detail.pane;
+  if(!pane?.isConnected)return;
+  withChildRenderer(pane.transcript,pane.task,()=>{
+    if(pane.task?.settled&&statusLine) {
+      const state=childRunState(pane.task);finishRunStatus(state==='failed'?'failed':state==='answered'?'completed':'unfinished');
+      flushDecision(true);
+    } else renderChildProgress(pane.task);
+    updateRunElapsed();
+  });
+  if(pendingReload&&!activeChatView()){pendingReload=false;reload();}
+});
 
 // The newest session for this user is the one that just ran, which is how the window finds out
 // which conversation it is in: the chat route does not return the id it used. Once known the id is
@@ -2499,7 +2561,7 @@ function applyRunControls() {
   chatShell.busy = value;
   applySettingsSovereignty();
   // Both a followed run and our own stream defer an update until ownership ends.
-  if (!value && pendingReload) { pendingReload = false; reload(); }
+  if (!value && pendingReload && !activeChatView()) { pendingReload = false; reload(); }
 }
 
 // Turn sovereignty for the model controls: a switch is seen by the next run, never by the one
@@ -3012,6 +3074,12 @@ function contextReadout(context) {
   return `▤ ${percent}%/${formatContextCapacity(capacity)}`;
 }
 function contextFacts() {
+  if(rendererTask) {
+    const measured=measuredContexts.get(transcript),latest=runCounts?.context;
+    return measured?.scope===runStepScope()&&(!latest?.model||latest.model===measured.model)
+      ? {...measured,capacity:latest?.capacity||measured.capacity}
+      : {tokens:null,capacity:latest?.capacity,model:latest?.model};
+  }
   const scope=runStepScope(),request=settings.observability?.last_request;
   const current=runCounts?.scope===scope?runCounts.context:null;
   const model=composerBusy()?(current?.model||settings.model):settings.model;
@@ -3038,6 +3106,16 @@ function updateChip() {
   if(chipModel.title!==detail)chipModel.title=detail;
   composerModel.hidden=true;
   setText(chipUsage,'');
+}
+function updateChildContextReadouts() {
+  const pane=transcript.closest('wa-agent-session');if(!pane?.shell.modelChip)return;
+  const context=contextFacts(),facts=[{label:'last measured input',value:context.tokens==null?'unknown':formatTokens(context.tokens)},
+    {label:'selected capacity',value:formatContextCapacity(context.capacity)},
+    {label:'occupancy',value:contextReadout(context).replace(/^▤ /,'')},
+    {label:'exact counts',value:contextDetail(context)},
+    {label:'model',value:rendererTask.model||context.model||'unknown'},
+    {label:'reasoning',value:rendererTask.reasoning||'unknown'}];
+  pane.shell.setModelPicker(facts,contextReadout(context));
 }
 let contextPaintKey='';
 function updateContextReadouts() {
@@ -4335,14 +4413,17 @@ function hotSwapStyles() {
 
 // Split out from the polling so the step can be driven directly: the step is the
 // part worth testing, not the fetch around it.
+function activeChatView() {
+  return composerBusy() || Array.from(document.querySelectorAll('wa-agent-session')).some(pane=>pane.shell?.busy);
+}
 function applyUiVersion(next) {
   if (version === null) { version = next; return "init"; }
   if (next === version) return "same";
   version = next;
   hotSwapStyles();
-  if (composerBusy()) {
+  if (activeChatView()) {
     pendingReload = true;
-    setStatus("update ready - reloading when this run finishes");
+    if(!viewMode())setStatus("update ready - reloading when this run finishes");
     updateLock("New UI is ready. Reloading waits for this run to finish; your place and draft are kept.", false);
     return "deferred";
   }
@@ -5598,9 +5679,18 @@ function retainNativeTerminal(container,task,rows,gap=false,terminal=task) {
   return true;
 }
 // Projection addresses cite genuine native event IDs until a reply supplies its durable message ID.
+const journalPhaseClocks=new WeakMap();
 function renderJournalEvents(events,raw,identity) {
+  let clocks=journalPhaseClocks.get(transcript);
+  if(!clocks){clocks=new Map();journalPhaseClocks.set(transcript,clocks);}
   for(const [i,event] of events.entries()) {
+    const prior=runStepState?.active;
     handleEvent(event);
+    if(rendererTask&&identity&&raw?.[i]&&runStepState?.active!==prior&&runStepState?.active) {
+      const key=identity.attempt_id+':'+raw[i].seq;
+      if(clocks.has(key))runStepState.active.started=clocks.get(key);
+      else clocks.set(key,runStepState.active.started);
+    }
     if(!identity||!raw?.[i])continue;
     const prefix='native:'+identity.attempt_id+':event:'+raw[i].seq;
     if(runBubble) {
@@ -5652,7 +5742,7 @@ async function exactSessionRow(reference,readPage) {
   return row;
 }
 async function refreshAgentPane(pane) {
-  if(!pane.task.session_id) { pane.notice.textContent=pane.task.error || 'Waiting for placement…'; return; }
+  if(!pane.task.session_id) { pane.notice.setNotice('journal',pane.task.error || 'Waiting for placement…'); return; }
   const target=pane.task.session_id,node=activeNode,attempt=pane.task.subagent_id,nativeAttempt=pane.task.attempt_id,credential=session;
   const viewing=()=>pane.isConnected && pane.task.session_id===target && pane.task.subagent_id===attempt && pane.task.attempt_id===nativeAttempt && activeNode===node && credential===session;
   try {
@@ -5675,20 +5765,20 @@ async function refreshAgentPane(pane) {
       if(nativeJournalUnavailable({message:journalError.replace('Live journal unavailable: ','')}) && terminal.settled) {
         retainNativeTerminal(pane.transcript,pane.task,result.rows,true,terminal);
         pane.task=terminal;
-        pane.notice.textContent=journalError+'; showing stored terminal messages. Previously seen output retained; raw history gap remains.';
+        pane.notice.setNotice('journal',journalError+'; showing stored terminal messages. Previously seen output retained; raw history gap remains.');
         return;
       }else if(pane.liveJournalAttached || !nativeJournalUnavailable({message:journalError.replace('Live journal unavailable: ','')})) {
-        pane.notice.textContent=journalError;
+        pane.notice.setNotice('journal',journalError);
         return;
       }
     }
     if(!attached && pane.liveJournalAttached && pane.painted && journalError) {
-      pane.notice.textContent=journalError;
+      pane.notice.setNotice('journal',journalError);
       return;
     }
     if(attached){
       if(attached.identity && retainNativeTerminal(pane.transcript,pane.task,attached.rows)) {
-        pane.notice.textContent='Native journal restored; stored messages and previously seen output retained.';
+        pane.notice.setNotice('journal','Native journal restored; stored messages and previously seen output retained.');
         return;
       }
       pane.liveJournalAttached=!!(attached.identity||attached.runKey);
@@ -5713,18 +5803,16 @@ async function refreshAgentPane(pane) {
       // Preserve the reader's place while the shared ledger renderer appends/repaints.
       const position=transcriptPlace(pane.transcript);
       paintChildTranscript(pane.transcript,rows,{state:childRunState(pane.task),
-        mode:result.mode,stateAt:pane.task.settled_at,active:!pane.task.settled,liveTool:pane.task.preview?.tool,events:result.events,raw:result.raw,identity:result.identity});
+        task:pane.task,mode:result.mode,stateAt:pane.task.settled_at,active:!pane.task.settled,liveTool:pane.task.preview?.tool,events:result.events,raw:result.raw,identity:result.identity});
       restoreTranscriptPlace(pane.transcript,position);
       if(result.identity)rememberNativeRows(pane.transcript,pane.task,rows,result.raw);
     }
     // What is left for the pane's own notice is what the shared transcript cannot say: a failure the
     // child reported, a page size this node refused, or nothing. `Ready for your next message.` used to
     // sit here, restating the `completed`/duration footer the run already draws in its own bubble.
-    pane.notice.textContent=[panePageNote,journalError,pane.task.error ||
-      (pane.task.settled ? '' : 'Working. Send queues a follow-up.')]
-      .filter(Boolean).join(' ');
+    pane.notice.setNotice('journal',[panePageNote,journalError,pane.task.error].filter(Boolean).join(' '));
     if(panePageNote)pane.notice.title=panePageNoteDetail;
-  } catch(error) { if(viewing())pane.notice.textContent='Conversation unavailable: '+error.message; }
+  } catch(error) { if(viewing())pane.notice.setNotice('journal','Conversation unavailable: '+error.message); }
 }
 function mountOrchestrator() {
   rememberNode(''); // This node owns the dispatcher; each task carries its destination.
@@ -5747,7 +5835,7 @@ function mountOrchestrator() {
     const {action,pane,text,key}=event.detail;
     if(!['message','steer','cancel'].includes(action))return;
     const button=pane.querySelector(action==='message' ? 'button[type="submit"]' : '[data-action="'+action+'"]');
-    button.disabled=true;
+    if(button)button.disabled=true;
     try {
       const receipt=await orchestratorRequest({action,id:pane.task.subagent_id,text,idempotency_key:key});
       if(action==='message' || action==='steer') {
@@ -5755,9 +5843,9 @@ function mountOrchestrator() {
         if(action==='message')pane.task={...receipt,execution_node:pane.task.execution_node};
         saveOrchestratorLayout();
       }
-      pane.notice.textContent=action==='steer' ? 'Steering '+receipt.state+'; in-flight effects are not undone.' : action==='message' ? 'Message accepted in this session.' : 'Cancellation requested.';
-    } catch(error) { pane.notice.textContent=error.message; }
-    finally { button.disabled=false; }
+      pane.notice.setNotice('submission',action==='steer' ? 'Steering '+receipt.state+'; in-flight effects are not undone.' : action==='message' ? 'Message accepted in this session.' : 'Cancellation requested.');
+    } catch(error) { pane.notice.setNotice('submission',error.message); }
+    finally { if(button)button.disabled=false; }
   });
   document.addEventListener('keydown',event=>{
     // Escape leaves the orchestrator window. A promoted conversation is its own window: it closes the

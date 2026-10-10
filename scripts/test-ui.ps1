@@ -1318,7 +1318,8 @@ $harness = @'
   mainSteer.removeAttribute('id');mainSteer.removeAttribute('data-part');mainSteer.dataset.label='Cancel task';
   mainSteer.textContent='Cancel task';mainRow.append(mainSteer);
   var mainAttach=document.getElementById('attach');
-  var paneSteer=paneRow.querySelector('button[data-action="cancel"]');
+  check(!paneRow.querySelector('button'),'child has no dedicated cancel/steer actions');
+  var paneSteer=mainSteer.cloneNode(true);paneRow.append(paneSteer);
   var paneAttach=paneShell.querySelector('[data-part="attach"]');
   check(mainRow.constructor===paneRow.constructor && mainSteer.className===paneSteer.className,
     'remaining actions share one factory');
@@ -1454,8 +1455,7 @@ $harness = @'
     'the same kind of control must compute the same style on both surfaces, property for property - an inline style on one alone is not the shared control, saw '
       + JSON.stringify(appearanceDiff));
   mainSteer.hidden=steerWasHidden;
-  mainSteer.remove();
-  // Requirement: a child panel's header is its own two controls, with the icons asked for.
+  mainSteer.remove();paneSteer.remove();  // Requirement: a child panel's header is its own two controls, with the icons asked for.
   var header=panes[1].querySelector('.agent-pane-head');
   var headerButtons=header?Array.prototype.slice.call(header.querySelectorAll('button')):[];
   check(headerButtons.length===2 && headerButtons.some(function(b){return b.dataset.action==='collapse';})
@@ -1473,9 +1473,9 @@ $harness = @'
 
   var messageDetail;
   showroom.addEventListener('agent-action',event=>{if(event.detail.action==='message')messageDetail=event.detail;});
-  panes[0].form.requestSubmit();
+  panes[0].sendDraft();
   var messageKey=messageDetail?.key;
-  panes[0].form.requestSubmit();
+  panes[0].sendDraft();
   check(messageDetail?.text==='keep my draft' && messageKey===messageDetail.key,'a repeated send must retain its idempotency key');
   var steerDetail=null;
   panes[0].addEventListener('agent-action',event=>{if(event.detail.action==='steer')steerDetail=event.detail;});
@@ -1515,7 +1515,7 @@ $harness = @'
   var liveTrace=livePane.querySelector('wa-trace');
   liveTrace.open=false;
   livePane.task={...livePane.task,preview:{...livePane.task.preview,text:'progress arrived'}};
-  check(livePane.querySelector('wa-trace')===liveTrace && liveTrace.open===false && livePane.preview.textContent.includes('progress arrived'),'a live task update must refresh the readout without rebuilding the reader\'s transcript, so their fold choice survives');
+  check(livePane.querySelector('wa-trace')===liveTrace && liveTrace.open===false && !livePane.querySelector('.agent-preview'),'a live task update must refresh the readout without rebuilding the reader\'s transcript, so their fold choice survives');
   childPages['tile-1']={session_id:'session-1',returned:4,view:'full',note:'Bounded inspection only.',
     messages:[{seq:1,role:'user',content:'Run the check',created_at:liveStart,tool_calls:[]},
       {seq:2,role:'assistant',content:'',created_at:liveStart,tool_calls:[{id:'live-call',function:{name:'bash',arguments:'{}'}}]},
@@ -1529,7 +1529,7 @@ $harness = @'
     [...livePane.querySelectorAll('.tool-line')].map(line=>line.className).join('|') +
     ' text=' + livePane.transcript.textContent.slice(0,120));
   check(livePane.querySelector('wa-message[role="assistant"]').body.querySelector(':scope > .chat-content-run-status')?.textContent.includes('1:05'),'elapsed footer is inside the worker balloon');
-  check(livePane.statusLine.textContent.includes('failed') && livePane.statusLine.querySelector('.spinner').hidden,'settled worker status stops its spinner');
+  check(livePane.statusLine.textContent.includes('failed') && !livePane.statusLine.querySelector('.run-activity-glyph'),'settled worker status stops its spinner');
   // THE PAGE BUDGET IS THE NODE'S. `lua/core/session_view.lua` refuses a `byte_limit` above
   // `MAX_BYTES-2048`, and `WASM_AGENT_TOOL_OUTPUT_BYTES` lowers that budget; a hard-coded request made
   // every child pane read `Conversation unavailable: invalid_session_byte_limit` with no transcript at
@@ -3552,7 +3552,9 @@ $harness = @'
   var reloadedPane=document.createElement('wa-agent-session');document.body.append(reloadedPane);
   reloadedPane.task={session_id:attachThread,subagent_id:'attach-reload',state:'running',settled:false};
   await window.__refreshAgentPane(reloadedPane);
-  check(reloadedPane.transcript.textContent===attachPane.transcript.textContent,'newly mounted pane converges saved rows and tail after terminal');
+  var visibleTranscriptText=container=>{var copy=container.cloneNode(true);copy.querySelectorAll('wa-step').forEach(node=>node.remove());return copy.textContent;};
+  check(visibleTranscriptText(reloadedPane.transcript)===visibleTranscriptText(attachPane.transcript),'newly mounted pane converges saved content, topics and terminal footer; retained live debug phases need not exist in fresh history');
+  check(!reloadedPane.transcript.querySelector('.chat-content-run-status:not(.finished)')&&!attachPane.transcript.querySelector('.chat-content-run-status:not(.finished)'),'terminal tail never invents a live running status in either pane');
   reloadedPane.remove();attachPane.remove();window.__restorePaneReaderForAttach();window.fetch=attachFetch;
 
   // THE `inspect` MENU ITEM. The main window draws its own right-click menu, and the inspector is asked for
@@ -3753,6 +3755,10 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'opaque UI browser suite failed' }
     & node scripts/test-opaque-ui.cjs (Join-Path $tmp 'opaque-ui') --post
     if ($LASTEXITCODE -ne 0) { throw 'opaque UI evidence postcheck failed' }
+    & node scripts/test-shared-chat.cjs (Join-Path $tmp 'shared-chat')
+    if ($LASTEXITCODE -ne 0) { throw 'shared chat parity browser suite failed' }
+    & node scripts/test-shared-chat.cjs (Join-Path $tmp 'shared-chat') --post
+    if ($LASTEXITCODE -ne 0) { throw 'shared chat postcheck failed' }
     & node scripts/test-coordinator-steps.cjs
     if ($LASTEXITCODE -ne 0) { throw 'compact phase/debug browser suite failed' }
     & node scripts/test-orchestration-ui.cjs (Join-Path $tmp 'orchestration-mode')

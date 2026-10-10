@@ -112,23 +112,15 @@ wa-agent-session { min-width:0; min-height:0; display:flex; flex-direction:colum
 /* The pane's header controls are strokes: `.icon-btn svg { fill:currentColor }` would turn the squared
    outline into a solid block. */
 .agent-pane-head .icon-btn svg { fill:none; }
-.agent-transcript { flex:1; min-height:0; overflow:auto; padding:var(--pad); display:flex; flex-direction:column; gap:var(--gap); }
-.agent-transcript wa-message { flex:none; max-width:100%; }
-.agent-transcript wa-message.assistant { width:min(760px,100%); }
-.agent-transcript wa-run { width:100%; }
-.agent-transcript pre { overflow:auto; white-space:pre-wrap; overflow-wrap:anywhere; }
-/* A pane's per-message actions (Steer, Cancel task) are the shared row: the same element and the same
-   control as the main chat's Steer. Nothing about their size is stated here - `.chat-actions` and
-   `.chat-control` live in the composer section, beside the append-file control they must follow. */
-.agent-notice { padding:0 var(--space); color:var(--muted); font-size:12px; overflow-wrap:anywhere; }
-.agent-preview { padding:var(--pad); white-space:pre-wrap; overflow:auto; max-height:40%; overflow-wrap:anywhere; }
-wa-agent-session[journal-attached] .agent-preview { display:none; }
+/* Child transcripts inherit .messages/.msg/topic rules exactly; identity has no paint override. */
+/* Chat actions live in the shared shell; no child-only cancel/steer furniture. */
+/* Child notices use the same pinned wa-chat-warning, not a raw preview/status row. */
 /* The orchestrator's own buttons (sidebar cards, live children, lanes). `.chat-control` is excluded rather
    than out-specified: a composer-footer control's box is the shared factory's (`.chat-control` beside the
    append-file control), and a rule here that stated that box for the same element a second time would be a
    duplicate that happens to lose today and moves the pane's actions the moment it wins. */
-wa-orchestrator button:not(.chat-control) { cursor:pointer; color:var(--text); background:var(--panel-2); border:1px solid var(--line); border-radius:var(--radius-sm); padding:var(--space); font:inherit; }
-wa-orchestrator button:not(.chat-control):disabled { color:var(--disabled); cursor:default; }
+wa-orchestrator button:not(.chat-control):not(wa-chat-shell *) { cursor:pointer; color:var(--text); background:var(--panel-2); border:1px solid var(--line); border-radius:var(--radius-sm); padding:var(--space); font:inherit; }
+wa-orchestrator button:not(.chat-control):not(wa-chat-shell *):disabled { color:var(--disabled); cursor:default; }
 @media(max-width:700px) { .orchestrator-sidebar { width:200px; min-width:150px; } .orchestrator-canvas[data-count] { grid-template-columns:minmax(0,1fr); } }
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
@@ -747,14 +739,14 @@ wa-chat-shell.dropping .composer { border-color: var(--accent); }
 .composer textarea::-webkit-scrollbar-thumb:hover { background: var(--muted); }
 
 .send {
-  flex: none; width: 45px; height: 45px; border-radius: var(--radius); border: none;
-  background: var(--accent); color: white; cursor: pointer;
+  flex: none; width: 45px; height: 45px; border-radius: var(--radius); border: 1px solid var(--line);
+  background: var(--panel-2); color: var(--text); cursor: pointer; padding: var(--space); font: inherit;
   display: grid; place-items: center;
 }
 .send svg { width: 20px; height: 20px; fill: currentColor; display: block; }
 .send .icon-send { transform: translateX(1px); }
 .send .icon-stop { display: none; }
-.send.busy { background: #f2555a; }
+.send.busy { background: var(--panel-2); color: var(--text); }
 .send.busy .icon-send { display: none; }
 .send.busy .icon-stop { display: block; }
 .send:disabled { background: #294571; color: var(--muted); cursor: default; }
@@ -763,8 +755,7 @@ wa-chat-shell.dropping .composer { border-color: var(--accent); }
 .footer-left, .footer-right { display: flex; align-items: center; gap: var(--gap); min-width: 0; }
 .footer-right { justify-content: flex-end; margin-left: auto; flex-wrap:wrap; max-width:100%; }
 
-/* The row of per-message actions (`<wa-chat-actions>`): the main chat's Steer, and a child pane's Steer
-   and Cancel task. One row element on both surfaces. */
+/* One declarative per-message action row; current hosts use the shared Send/Stop only. */
 .chat-actions { display: flex; flex:none; align-items: center; gap: var(--gap); }
 
 /* The footer's controls, and the only place one of them is sized: the append-file button and every

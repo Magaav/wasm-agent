@@ -18,7 +18,7 @@ try {
  check(getComputedStyle(document.documentElement).getPropertyValue('--radius').trim()==='5px'&&getComputedStyle(input).borderRadius==='5px'&&getComputedStyle(sendButton).borderRadius==='5px','one global component radius');
  check(!document.querySelector('#steer,[data-action="steer"]'),'no main steer button');
  const child=document.createElement('wa-agent-session');document.body.append(child);child.task={subagent_id:'minimal-child',session_id:'minimal-child',state:'running',profile:'worker',model:'test-model'};
- check(!child.querySelector('[data-action="steer"]')&&!!child.querySelector('[data-action="cancel"]'),'child keeps cancel, not steer');child.remove();
+ check(!child.querySelector('[data-action="steer"],[data-action="cancel"]'),'child uses shared Send/Stop only');child.remove();
  handleEvent({type:'commentary_delta',pending_id:'c1',text:'Checking '});const topic=streamedCommentaryBlock;
  check(topic.open&&topic.body.textContent==='Checking'&&topic.querySelector('.trace-meta').textContent==='9 chars'&&!topic.closest('wa-run'),'first commentary chunk already in open topic');
  handleEvent({type:'commentary_delta',pending_id:'c1',text:'the result.'});check(topic.querySelector('.trace-meta').textContent==='20 chars','header grows live');

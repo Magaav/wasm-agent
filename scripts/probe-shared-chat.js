@@ -1,0 +1,57 @@
+(async function(){const report=document.createElement('pre');report.id='wa-probe';report.hidden=true;document.body.append(report);let checks=0;const check=(ok,label)=>{if(!ok)throw Error(label);checks++;};
+try {await rendererLoaded;for(let i=0;i<200&&!transcriptReady;i++)await new Promise(r=>setTimeout(r,10));check(transcriptReady,'startup');for(let i=1;i<10000;i++){clearTimeout(i);clearInterval(i);}document.getElementById('panel').style.width='600px';busy=false;observedRun=null;clearStatus();transcript.replaceChildren();runBubble=null;runStepState=null;runCounts=null;
+ const now=Date.now(),counts={kind:'run_counts',version:1,run_id:'child-turn',model_calls:3,tool_calls:8,tokens_reported:1138787,usage_calls:2,usage_unknown:0,context:{tokens:436800,capacity:1050000,model:'fixture-model',estimated:false}};
+ const rows=[{seq:1,id:'child-user',role:'user',content:'Run parity task',created_at:(now-47000)/1000,trace:[{...counts,model_calls:0,tool_calls:0,tokens_reported:0,usage_calls:0}]},{seq:2,id:'comment',role:'assistant',phase:'commentary',content:'Checking parity.',created_at:(now-10000)/1000,trace:[counts]},{seq:3,id:'call-row',role:'assistant',content:'',created_at:(now-9000)/1000,tool_calls:[{id:'inspect',function:{name:'read',arguments:'{}'}}],trace:[counts]},{seq:4,role:'tool',tool_name:'read',tool_call_id:'inspect',content:'Observed.',created_at:(now-8000)/1000,trace:[counts]}];
+ const task={subagent_id:'parity-child',attempt_id:'parity-attempt',session_id:'parity-child',profile:'orchestration-worker',model:'fixture-model',state:'running',settled:false,started_at:(now-47000)/1000,preview:{status:'model'}};
+ const parent=document.createElement('wa-orchestrator');document.body.append(parent);const pane=parent.pin(task);pane.style.height='400px';pane.input.value='unsent child draft';
+ const tail=[{type:'run_counts',counts},{type:'status',text:'model'},{type:'commentary_delta',pending_id:'live-comment',text:'Streaming commentary '},{type:'commentary_delta',pending_id:'live-comment',text:'inside its topic.'},{type:'commentary',pending_id:'live-comment',message_id:'live-id',text:'Streaming commentary inside its topic.'},{type:'status',text:'model'}];
+ const identity={attempt_id:'parity-attempt'},raw=tail.map((event,i)=>({seq:100+i,event}));
+ paintChildTranscript(pane.transcript,rows,{task,active:true,events:tail,identity,raw,notify:false});
+ check(!pane.querySelector('[data-action="cancel"],[data-action="steer"]'),'no child Cancel task or Steer button');
+ check(!pane.querySelector('.agent-preview')&&!pane.shell.host.children.length,'no separate raw preview/status host');
+ const line=pane.statusLine;check(line?.closest('wa-message')&&line.querySelector('.chat-content-run-elapsed').textContent.includes('◈ ≥1.1M · ✧ 3 · ⚒ 8 · ◷ 0:47'),'child uses full shared run strip inside its bubble');
+ check(line.querySelector('.run-activity-glyph')&&!line.querySelector('.spinner'),'same grow/shrink glyph, not legacy spinner');
+ check(pane.shell.modelChip.textContent==='▤ 42%/1.05M'&&!pane.querySelector('#user-btn'),'child context readout without node menu');
+ pane.shell.modelChip.click();check(pane.shell._modelBalloon.textContent.includes('436,800')&&pane.shell._modelBalloon.textContent.includes('1,050,000'),'child balloon exact shared context facts');pane.shell._modelBalloon.close();
+ const mainSettings=settings;settings={...settings,model:'fixture-model',context_limit:1050000};
+ const mainRows=rows.map(row=>({...row,session_id:chatSession}));busy=true;repaintMessages(mainRows,{active:true,notify:false});renderJournalEvents(tail,raw,identity);
+ const mainLine=statusLine;check(mainLine&&line.constructor===mainLine.constructor&&line.className===mainLine.className,'same status DOM on main/child');
+ const samePaint=(a,b,label)=>{const first=getComputedStyle(a),second=getComputedStyle(b);for(const key of ['backgroundColor','backgroundImage','color','borderTopWidth','borderRadius','paddingTop','paddingLeft','fontSize','fontFamily','fontWeight','lineHeight','whiteSpace'])check(first[key]===second[key],label+' '+key);};
+ input.blur();pane.input.blur();
+ samePaint(pane.shell.send,sendButton,'send/stop shared');samePaint(pane.input,input,'composer shared');samePaint(pane.transcript,messages,'transcript shared');
+ for(const tag of ['wa-message.assistant','wa-commentary','wa-trace'])samePaint(pane.transcript.querySelector(tag),messages.querySelector(tag),tag+' shared');
+ check(getComputedStyle(sendButton).backgroundColor==='rgb(23, 27, 36)'&&getComputedStyle(pane.shell.send).backgroundColor==='rgb(23, 27, 36)','operator-preferred child dark send color on both');
+ const savedUsage=settings.usage,savedModel=lastUsedModel;
+ withChildRenderer(pane.transcript,pane.task,()=>handleEvent({type:'usage',model:'foreign-child-model',total:{total:999}}));
+ check(settings.usage===savedUsage&&lastUsedModel===savedModel,'child usage event cannot replace parent model/usage');
+ const reloadOriginal=reload;let reloadCalls=0;reload=()=>{reloadCalls++;};version='shared-old';
+ busy=false;observedRun=null;check(applyUiVersion('shared-new')==='deferred'&&reloadCalls===0,'active child prevents page reload even with idle main');pendingReload=false;document.getElementById('update-lock')?.remove();reload=reloadOriginal;busy=true;
+ const topic=pane.transcript.querySelector('[data-message-id="live-id"]');topic.open=false;const mainPhase=runStepState,mainCounts=runCounts,mainBody=runBubble;
+ pane.updateClock();check(runStepState===mainPhase&&runCounts===mainCounts&&runBubble===mainBody&&statusLine===mainLine,'child clock leaves every parent renderer owner intact');
+ const previous=childRenderStates.get(pane.transcript).renderer.runStepState.active.started;
+ paintChildTranscript(pane.transcript,rows,{task,active:true,events:tail,identity,raw,notify:false});
+ check(!pane.transcript.querySelector('[data-message-id="live-id"]').open,'manual commentary closure survives child checkpoint');
+ check(childRenderStates.get(pane.transcript).renderer.runStepState.active.started===previous,'replayed unchanged journal never resets child phase clock');
+ check(pane.input.value==='unsent child draft','repaint never consumes unsent child draft');
+ const enter=new KeyboardEvent('keydown',{key:'Enter',bubbles:true,cancelable:true});pane.input.dispatchEvent(enter);
+ check(enter.defaultPrevented&&pane.input.value==='unsent child draft','busy Enter keeps draft, never sends/cancels child');
+ let effects=0;pane.addEventListener('agent-action',event=>{if(['cancel','message','steer'].includes(event.detail.action))effects++;});pane.updateClock();check(effects===0,'view clock has no execution/control effect');
+ const retainedView=childRenderStates.get(pane.transcript);pane.task={...task,state:'completed',settled:true,settled_at:now/1000};
+ check(!pane.transcript.querySelector('.chat-content-run-status:not(.finished)'),'terminal task observation stops retained strip even before rows refresh');
+ const settled={...task,state:'completed',settled:true,settled_at:now/1000};paintChildTranscript(pane.transcript,[...rows,{seq:5,id:'answer',role:'assistant',content:'Parity verified.',created_at:now/1000,trace:[{...counts,complete:true,usage_calls:3,elapsed_ms:47000}]}],{task:settled,active:false,state:'answered',notify:false});
+ check(!pane.transcript.querySelector('.chat-content-run-status:not(.finished)')&&pane.statusLine?.textContent.includes('✧ 3 · ⚒ 8 · ◷ 0:47'),'same terminal footer with no duplicate running status');
+ check(pane.transcript.querySelector('wa-commentary').open,'commentary default stays open after child settlement');
+ // A read-only warning has the same pinned component, independent causes and no transcript shift.
+ const before=pane.transcript.getBoundingClientRect().top;pane.notice.setNotice('journal','Conversation refresh unavailable; outcome unconfirmed');
+ check(!pane.transcript.contains(pane.notice)&&pane.notice.tagName==='WA-CHAT-WARNING'&&pane.transcript.getBoundingClientRect().top===before,'same pinned warning outside child content geometry');
+ pane.notice.setNotice('journal','');
+ // Stop is one shared control, never two. Explicit click only on fixture pane.
+ pane.task=task;pane.shell.send.click();check(effects===1,'shared Stop reaches exactly one explicit cancellation');
+ settings=mainSettings;busy=false;clearStatus();
+ // Leave main and a live child side by side at equal widths for appearance proof.
+ pane.task=task;paintChildTranscript(pane.transcript,rows,{task,active:true,events:tail,identity,raw,notify:false});
+ parent.style.cssText='position:fixed;left:610px;top:0;width:600px;height:900px;display:flex';parent.querySelector('.orchestrator-sidebar').hidden=true;
+ pane.style.height='850px';
+
+ report.dataset.status='pass';report.textContent=JSON.stringify({checks,skipped:0});
+}catch(error){report.dataset.status='fail';report.textContent=String(error.stack||error);}})();
