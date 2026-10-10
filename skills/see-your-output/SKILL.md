@@ -174,6 +174,16 @@ the shell loses its quoting and its backslashes.
 - Do not pass `--focus`: the tab is yours, not the user's foreground, and close it when
   you are done.
 
+## Choose the supported proof runner first
+
+In an allocated required session worktree, **run the verified direct CLI first**
+with its `--post` check; do not try `spell_run` merely to rediscover the known
+`workspace_execution_context_unsupported` refusal. Use the binding already in
+context; inspect workspace status once only if unknown. An unavailable required
+worktree blocks execution, never falls back to another checkout. Keep its binding,
+assertions, deadlines and retained evidence intact. The saved spell remains a
+portable record, not replay-verified. See [SKILLS.md](../../docs/SKILLS.md).
+
 ## Lightweight rendering proof
 
 For idle resource/polling or long-history changes, `lightweight-ui-proof`
@@ -189,9 +199,10 @@ unchanged in probes; the observer positively checks that exact title.
 
 ## Run-count footer proof
 
-`run-counts-proof` records the staged-browser test and retained hash postcheck:
-`node <repo>/scripts/test-run-counts.cjs <fresh-evidence>`, then the same with
-`--post`. Use it for live provider-attempt/tool totals, checkpoint/reload replay,
+Run `node <repo>/scripts/test-run-counts.cjs <fresh-evidence>`, then the same
+with `--post`, for the staged-browser test and retained hash postcheck.
+`run-counts-proof` records that sequence for supported replay. This proof covers
+live provider-attempt/tool totals, checkpoint/reload replay,
 unknown/lower-bound historical counts, child isolation and narrow footer layout.
 Run the hermetic `scripts/test-run-counts.lua` with a scratch home/DB and explicit
 Lua root for the actual provider retry/refusal boundary. Mandatory worktrees
@@ -200,9 +211,10 @@ It is not live installation proof. Also run `scripts/test-ui.ps1` and inspect th
 
 ## Streaming-answer reading proof
 
-Use `final-answer-reading-proof` for the verified fixture-only browser run plus
-source/screenshot/DOM hash postcheck (`scripts/test-final-answer-reading.cjs`,
-then `--post`). The normal UI suite also runs its asynchronous explicit,
+Run `node <repo>/scripts/test-final-answer-reading.cjs <fresh-evidence>`, then
+repeat with `--post`, for the fixture-only browser run and retained hash check.
+`final-answer-reading-proof` records that same sequence for supported replay.
+The normal UI suite also runs its asynchronous explicit,
 provisional and unphased growth tests: short output rises to the viewport top,
 then overflow grows below while manual reading/jump and child isolation survive.
 Spell replay remains unsupported with enforced worktrees; keep the direct CLI

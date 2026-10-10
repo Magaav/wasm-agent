@@ -24,10 +24,11 @@ when the operator re-enables it.
 Verify this policy with
 `node <repo>/scripts/test-direct-workflow-instructions.mjs`. It runs the complete
 instruction checker plus private policy-removal mutations, not a full release gate.
-Spell replay currently refuses mandatory session workspaces
-(`workspace_execution_context_unsupported`); use the direct CLI without weakening
-that binding or the original instruction byte budget. A refusal needs inspection,
-not a blind retry or fabricated verification.
+In an allocated required worktree, use the verified direct CLI first; do not
+call `spell_run` to rediscover `workspace_execution_context_unsupported`.
+Inspect workspace status only if unknown; an unavailable binding still blocks
+execution. Preserve the same postchecks, binding and instruction byte budget.
+See `docs/SKILLS.md` for supported-path routing; no blind retry or fabricated proof.
 
 **wasm-agent policy (parallel mode):** routine merges use appropriate focused source checks and independent
 exact-source review, including shared runtime changes. Only the user selects pre-release

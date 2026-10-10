@@ -42,6 +42,10 @@ try {
     ['AGENTS.md','Do not start subagents or external inference agents','home AGENTS.md'],
     ['skills/parallel-evolution/SKILL.md','Active operator-selected direct workflow','home skills/parallel-evolution/SKILL.md'],
     ['skills/git-orchestrator/SKILL.md','Active operator-selected direct workflow','home skills/git-orchestrator/SKILL.md'],
+    ['docs/SKILLS.md','Do not call `spell_run` just to','home docs/SKILLS.md'],
+    ['docs/SKILLS.md','Never clear the binding or relax protection','home docs/SKILLS.md'],
+    ['skills/see-your-output/SKILL.md','**run the verified direct CLI first**','home skills/see-your-output/SKILL.md'],
+    ['skills/parallel-evolution/SKILL.md','use the verified direct CLI first','home skills/parallel-evolution/SKILL.md'],
   ]) {
     const target=path.join(fixture,file),original=fs.readFileSync(target,'utf8');
     check(original.split(before).length===2,'active-policy anchor must be unique: '+file);
