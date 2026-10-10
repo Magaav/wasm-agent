@@ -184,6 +184,17 @@ are not GPU/power proof: record real-window measurements separately, never call
 percent utilization a temperature or a fan-speed cause. Keep the HTML title
 unchanged in probes; the observer positively checks that exact title.
 
+## Streaming-answer reading proof
+
+Use `final-answer-reading-proof` for the verified fixture-only browser run plus
+source/screenshot/DOM hash postcheck (`scripts/test-final-answer-reading.cjs`,
+then `--post`). The normal UI suite also runs its asynchronous explicit,
+provisional and unphased growth tests: short output rises to the viewport top,
+then overflow grows below while manual reading/jump and child isolation survive.
+Spell replay remains unsupported with enforced worktrees; keep the direct CLI
+until actual replay passes, without weakening bindings. Inspect the screenshot.
+No phase inference, task settlement or installed-source claim follows from scroll.
+
 ## 4. Leave the test behind
 
 If the thing you verified is worth keeping correct, make it a `check(...)` in

@@ -63,6 +63,7 @@
   check(messages.textContent.includes('The retained answer.'), 'late harness answer retained');
   // Different final candidates must not share buffers; duplicates across sources stay idempotent.
   handleEvent({type:'done'});
+  setFollow(true); // a newly submitted turn follows; old scrollback remains opt-out
   handleEvent({type:'final_answer_begin',run_id:'r2',response_id:'p2',message_id:'same'});
   handleEvent({type:'delta',text:'First candidate'});
   const first=streamBody;
@@ -84,6 +85,55 @@
     handleEvent({type:terminal,error:'cancelled'});
     check(!answerAnchors.has(messages) && messages.textContent.includes('Retained '+terminal),'terminal invalidation preserves '+terminal);
   }
+  // Real asynchronous chunks: short output rises, then overflow grows below
+  // the first line, even when the provider cannot classify it until text_end.
+  const samples=[];
+  function readingFixture() {
+    handleEvent({type:'done'});clearStatus();
+    messages.replaceChildren();runBubble=null;streamBody=null;streamText='';
+    setFollow(true);
+    for(let i=0;i<12;i++)add('user','Earlier evidence '+('retained text '.repeat(35)));
+  }
+  for(const mode of ['explicit','pending','delta']) {
+    readingFixture();
+    if(mode==='explicit')handleEvent({type:'final_answer_begin',message_id:'grow-'+mode});
+    const rows=[];
+    for(let i=0;i<24;i++) {
+      handleEvent({type:mode==='pending'?'pending_delta':'delta',pending_id:'grow-'+mode,
+        text:(i===0?'Read this answer from the beginning.\n\n':'')+'Paragraph '+i+' '+('readable evidence '.repeat(8))+'\n\n'});
+      await new Promise(resolve=>setTimeout(resolve,25));
+      const node=mode==='pending'?phasePendingText.get('grow-'+mode).node:streamBody;
+      rows.push({top:node.getBoundingClientRect().top-messages.getBoundingClientRect().top,
+        height:node.getBoundingClientRect().height,view:messages.clientHeight,
+        scroll:messages.scrollTop,anchored:answerAnchors.get(messages)===node});
+    }
+    samples.push({mode,rows});
+    check(rows.every(row=>row.anchored),'chunk/frame retains '+mode+' reading anchor');
+    check(rows[0].top>30 && rows[2].top<rows[0].top-20,'short '+mode+' answer grows upward');
+    const long=rows.filter(row=>row.height>row.view+50);
+    check(long.length>3 && long.every(row=>Math.abs(row.top)<3),'overflow '+mode+' keeps first line at viewport top');
+    check(long.length>3 && long.every(row=>Math.abs(row.scroll-long[0].scroll)<2),'overflow '+mode+' grows scroll range instead of chasing bottom');
+    check(mode!=='pending'||!messages.querySelector('wa-run'),'unclassified streaming never claims final phase or collapses activity');
+    if(mode==='pending') {
+      const text=phasePendingText.get('grow-'+mode).text;
+      handleEvent({type:'final_answer_begin',message_id:'grow-'+mode,pending_id:'grow-'+mode});
+      handleEvent({type:'delta',pending_id:'grow-'+mode,text});
+      check(!messages.querySelector('.phase-pending') && streamBody.textContent.includes('Paragraph 23'),'late final phase replaces provisional text without loss');
+    }
+    handleEvent({type:'reply',text:streamText});
+    check(Math.abs(answerAnchors.get(messages)?.getBoundingClientRect().top-messages.getBoundingClientRect().top)<3,'reply retains '+mode+' beginning');
+    if(mode==='delta') {
+      jump.click();
+      handleEvent({type:'delta',text:'\n\n'+('Following latest output.\n\n'.repeat(20))});
+      check(atBottom()&&!answerAnchors.has(messages),'jump-to-latest explicitly resumes tail following');
+    }
+  }
+  // Starting a response must not steal a reader already reviewing older messages.
+  readingFixture();messages.scrollTop=0;setFollow(false);
+  handleEvent({type:'final_answer_begin',message_id:'scrollback'});
+  handleEvent({type:'delta',text:'New answer '+('evidence '.repeat(200))});
+  check(messages.scrollTop===0&&!answerAnchors.has(messages),'final begin respects existing scrollback');
+  readingFixture();
   // Real layout: grow well past viewport, keep the start rather than chasing the bottom.
   handleEvent({type:'final_answer_begin',message_id:'layout'});
   const layout=streamBody;
@@ -136,8 +186,16 @@
   handleEvent({type:'delta',text:'\n\n'+('resumed growth\n\n'.repeat(20))});
   check(atBottom(),'return-bottom follows subsequent growth');
   childA.remove();childB.remove();
-  const log=document.createElement('pre'); log.id='wa-probe';
+  // Leave the screenshot on the requested reading position, not a tail-follow fixture.
+  readingFixture();
+  document.getElementById('panel').style.width='540px';
+  handleEvent({type:'final_answer_begin',message_id:'visual-reading'});
+  handleEvent({type:'delta',text:'# Read from the beginning\n\nThe first lines stay here while the rest of the answer arrives below.\n\n'+('Additional output grows below the viewport; scroll down when you are ready.\n\n'.repeat(30))});
+  pin();
+  check(Math.abs(streamBody.getBoundingClientRect().top-messages.getBoundingClientRect().top)<3,'narrow-window answer starts at top');
+  const log=document.createElement('pre'); log.id='wa-probe';log.hidden=true;
   log.dataset.status=problems.length?'fail':'pass';
   log.textContent=problems.length?problems.join(' ;; '):'final-answer UI causal checks pass';
+  log.dataset.growth=JSON.stringify(samples);
   document.body.append(log);
 })();
