@@ -212,7 +212,9 @@ It is not live installation proof. Also run `scripts/test-ui.ps1` and inspect th
 ## Minimal chat proof
 
 `minimal-chat-proof` records `node <repo>/scripts/test-minimal-chat.cjs <fresh-evidence>`
-plus its retained `--post` check. It covers live token estimate/report replacement,
+plus its retained `--post` check. It covers compact reported-token/lower-bound
+formatting (never char guesses), coherent measured context footer/balloon/raw
+counts, model/capacity invalidation and unchanged DOM selection,
 context-only hover/focus trigger, shared radius token, removed steering buttons,
 commentary first-chunk/character growth/manual closure/replay, independent top
 warning causes and actual recovery routes, square nameless attachment cards,

@@ -329,7 +329,9 @@ wa-diff { display: block; align-self: flex-start; max-width: 760px; width: 100%;
 /* Detailed phase history is diagnostic-only; the compact current phase stays in the footer. */
 .messages:not([data-debug="true"]) wa-step, .agent-transcript:not([data-debug="true"]) wa-step { display: none; }
 .chat-content-run-elapsed { margin-left: 0; flex: 1 1 auto; min-width: 0; font-variant-numeric: tabular-nums; white-space: nowrap; }
-.chat-content-run-phase:not([hidden]) + .chat-content-run-elapsed { margin-left: calc(-1 * var(--gap)); }
+.chat-content-run-phase:not([hidden]) + .chat-content-run-elapsed { margin-left: calc(-1 * var(--gap)); white-space: pre; }
+/* Tight windows retain all numbers and separators, never clip a counter. */
+@media (max-width: 400px) { .chat-content-run-status:not(.finished) { font-size: 11px; } }
 .finished .chat-content-run-elapsed { margin-left: auto; flex: 0 0 auto; }
 wa-step.run-step { display: flex; align-items: center; gap: var(--gap); padding: var(--space); color: var(--muted); font-size: 13px; }
 .run-step-label { flex: 1; min-width: 0; }

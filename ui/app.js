@@ -508,8 +508,7 @@ let runBubble = null;
 let runStartedAt = 0;
 let runStepState = null;
 let runCounts = null;
-let liveTokenChars = 0;
-let liveDecisionChars = new Map();
+const measuredContexts = new WeakMap();
 
 function applyRunCounts(counts) {
   if (counts?.version !== 1 || typeof counts.run_id !== 'string' || !counts.run_id ||
@@ -518,9 +517,10 @@ function applyRunCounts(counts) {
   if (runCounts?.run_id === counts.run_id &&
       (counts.model_calls < runCounts.model_calls || counts.tool_calls < runCounts.tool_calls ||
        (counts.usage_calls ?? 0)<(runCounts.usage_calls ?? 0))) return;
-  if (counts.run_id !== runCounts?.run_id || counts.usage_calls !== runCounts?.usage_calls || counts.model_calls !== runCounts?.model_calls) {liveTokenChars=0;liveDecisionChars.clear();}
   runCounts = {...counts, scope:runStepScope()};
-  if(transcript===messages && counts.context) updateChip();
+  if(counts.context?.estimated===false && Number.isSafeInteger(counts.context.tokens) && counts.context.tokens>=0)
+    measuredContexts.set(transcript,{...counts.context,scope:runStepScope()});
+  if(transcript===messages) updateContextReadouts();
   updateRunElapsed();
 }
 
@@ -534,10 +534,10 @@ function runCountsFooter(duration) {
 function turnTokenReadout() {
   if(!Number.isSafeInteger(runCounts?.tokens_reported))return '?';
   const pending=runCounts.model_calls>(runCounts.usage_calls ?? 0);
-  const estimate=!replayingMessages&&pending ? (runCounts.pending_input || 0)+Math.ceil(liveTokenChars/4) : 0;
-  const prefix=(runCounts.usage_unknown ? '≥' : '')+(estimate||pending ? '~' : '');
-  // Exact integer readout keeps every observed live increment visible even on long turns.
-  return prefix+String(runCounts.tokens_reported+estimate);
+  // Providers report usage at request completion, not every visible text chunk.
+  // Never label a characters/4 guess or unseen reasoning as exact tokens.
+  const prefix=runCounts.usage_unknown || pending ? '≥' : '';
+  return prefix+formatTokens(runCounts.tokens_reported);
 }
 function turnIsActive() { return busy || observedRun?.session === chatSession; }
 function runStepScope() { return activeNode + ":" + chatSession + ":" + conversationEpoch; }
@@ -778,9 +778,9 @@ function updateRunElapsed() {
   const endedAt = replayingMessages && replayMessageEndedAt ? replayMessageEndedAt : Date.now();
   const duration=runDuration(endedAt - (runStartedAt || endedAt));
   setText(statusElapsed,!replayingMessages && runStepState?.active
-    ? `|◈ ${turnTokenReadout()}|✧ ${runCounts?.model_calls ?? '?'}|⚒ ${runCounts?.tool_calls ?? '?'}|◷ ${duration}` : duration);
-  if(transcript===messages && !replayingMessages && runCounts?.context) updateChip();
-  statusElapsed.title='Turn tokens: reported input + output, including cache/retries/summaries; ~ includes live text/4 estimate, ≥ has unknown usage. Hidden reasoning/transport usage is not measurable live.';
+    ? ` · ◈ ${turnTokenReadout()} · ✧ ${runCounts?.model_calls ?? '?'} · ⚒ ${runCounts?.tool_calls ?? '?'} · ◷ ${duration}` : duration);
+  if(transcript===messages && !replayingMessages && runCounts?.context) updateContextReadouts();
+  statusElapsed.title='Turn provider-reported input + output: '+(Number.isSafeInteger(runCounts?.tokens_reported)?runCounts.tokens_reported.toLocaleString('en-US'):'unknown')+' tokens (cached input/retries/summaries included). ≥ means pending or missing usage; exact per-token streaming is unavailable.';
 }
 
 function startRunStatusTicker() {
@@ -1596,12 +1596,6 @@ function handleEvent(event) {
   if (["round", "reasoning", "commentary", "commentary_delta", "commentary_end", "pending_delta", "decision", "tool", "tool_result", "delta", "reply", "error", "done"].includes(event.type)) {
     if(transcript===messages)clearActiveRunNotice();
   }
-  if(!replayingMessages && ['reasoning','pending_delta','delta','commentary_delta','decision'].includes(event.type) && !event.complete) {
-    if(event.type==='decision') {
-      const key=event.call_id || '',length=String(event.arguments_text || '').length;
-      liveTokenChars+=Math.max(0,length-(liveDecisionChars.get(key)||0));liveDecisionChars.set(key,length);
-    } else if(!(event.type==='delta'&&event.pending_id)) liveTokenChars+=String(event.text || '').length;
-  }
   if (event.type === 'delegated') {
     if(event.task?.subagent_id)renderSubagentCard(event.task);
   } else if (event.type === "final_answer_begin") {
@@ -2032,7 +2026,6 @@ async function refreshNotifySupport() {
 function repaintMessages(rows, options = {}) {
   const savedSteps = runStepState?.scope === runStepScope() ? runStepState : null;
   const savedCounts = runCounts?.scope === runStepScope() ? runCounts : null;
-  const savedTokenChars=liveTokenChars,savedDecisionChars=new Map(liveDecisionChars);
   const commentaryChoices=Array.from(transcript.querySelectorAll('wa-commentary')).map(node=>({id:node.dataset.messageId,pending:node.dataset.pendingId,text:node.body.textContent,open:node.open}));
   const savedCountUser = Number(Array.from(transcript.querySelectorAll('wa-message[role="user"]')).at(-1)?.dataset.messageSeq) || null;
   const changedRun = savedSteps?.id && runStepId() && savedSteps.id !== runStepId();
@@ -2211,7 +2204,7 @@ function repaintMessages(rows, options = {}) {
     restoreRunSteps(savedSteps, savedBubble);
   } else runStepState = null;
   if (options.active && observedRun?.session === chatSession) ensureObservedRunStep(observedRun);
-  if (options.active && savedCounts && !changedRun && savedCountUser === replayUserSeq) {applyRunCounts(savedCounts);liveTokenChars=savedTokenChars;liveDecisionChars=savedDecisionChars;updateRunElapsed();}
+  if (options.active && savedCounts && !changedRun && savedCountUser === replayUserSeq) {applyRunCounts(savedCounts);updateRunElapsed();}
   for(const node of transcript.querySelectorAll('wa-commentary')) {
     const choice=commentaryChoices.find(old=>old.id&&old.id===node.dataset.messageId || old.pending&&old.pending===node.dataset.pendingId || !old.id&&!node.dataset.messageId&&old.text===node.body.textContent);
     if(choice)node.open=choice.open;
@@ -2246,12 +2239,12 @@ function repaintMessages(rows, options = {}) {
 function paintChildTranscript(container, rows, options = {}) {
   if (!container) return null;
   const saved = { transcript, runBubble, statusLine, statusLabel, statusElapsed, statusSpinner,
-    runStepState, runCounts, liveTokenChars, liveDecisionChars,
+    runStepState, runCounts,
     statusPhase, lastAssistantBody, runStatusTicker, toolTicker, streamBody, streamText, phasePendingText, trace, lastTool,
     reasoningBlock, reasoningText, streamedCommentaryBlock, streamedCommentaryText, runStartedAt, replayingMessages,
     replayMessageEndedAt, replayRunLastMessage, renderedMessageIds };
   transcript = container;
-  runStepState = null;runCounts = null;liveTokenChars=0;liveDecisionChars=new Map();
+  runStepState = null;runCounts = null;
   // Child teardown must never remove the main status DOM, clear its timers or share its text buffer.
   statusLine=null;statusLabel=null;statusPhase=null;statusElapsed=null;statusSpinner=null;runStatusTicker=null;toolTicker=null;
   setTranscriptDebug(container, options.mode);
@@ -2263,7 +2256,7 @@ function paintChildTranscript(container, rows, options = {}) {
     stopToolTicker();
     if(runStatusTicker)clearInterval(runStatusTicker);
     ({ transcript, runBubble, statusLine, statusLabel, statusElapsed, statusSpinner, lastAssistantBody,
-      runStepState, runCounts, liveTokenChars, liveDecisionChars,
+      runStepState, runCounts,
       statusPhase, runStatusTicker, toolTicker, streamBody, streamText, phasePendingText, trace, lastTool, reasoningBlock,
       reasoningText, streamedCommentaryBlock, streamedCommentaryText, runStartedAt, replayingMessages,
       replayMessageEndedAt, replayRunLastMessage, renderedMessageIds } = saved);
@@ -2995,10 +2988,17 @@ async function send(text, options = {}) {
 }
 
 function formatTokens(value) {
-  const n = Number(value) || 0;
-  if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + "M";
-  if (n >= 1000) return (n / 1000).toFixed(1) + "k";
-  return String(n);
+  const n=Number(value);
+  if(!Number.isFinite(n)||n<0)return '?';
+  if(n<1000)return String(Math.round(n));
+  // Decimal SI units, one fractional digit; promote a rounded 1000k to 1M.
+  const units=['k','M','G','T'];let index=0,scaled=n/1000;
+  while(scaled>=999.95&&index<units.length-1){scaled/=1000;index++;}
+  return scaled.toFixed(1).replace(/\.0$/,'')+units[index];
+}
+function formatContextCapacity(value) {
+  const n=Number(value);
+  return n>0&&Number.isFinite(n)?(n/1e6).toFixed(6).replace(/0+$/,'').replace(/\.$/,'')+'M':'?M';
 }
 
 function activeProvider() {
@@ -3007,21 +3007,42 @@ function activeProvider() {
 
 function contextReadout(context) {
   const capacity=Number(context?.capacity),tokens=Number(context?.tokens);
-  const known=context?.tokens!=null && Number.isFinite(tokens) && tokens>=0 && capacity>0;
-  const percent=known ? String(Math.round(tokens/capacity*100)).padStart(2,'0') : '??';
-  const max=capacity>0 ? (capacity/1e6).toFixed(6).replace(/0+$/,'').replace(/\.$/,'')+'M' : '?M';
-  return `▤ ${context?.estimated&&known?'~':''}${percent}%/${max}`;
+  const known=context?.estimated!==true&&context?.tokens!=null&&Number.isSafeInteger(tokens)&&tokens>=0&&capacity>0;
+  const percent=known?String(Math.round(tokens/capacity*100)).padStart(2,'0'):'??';
+  return `▤ ${percent}%/${formatContextCapacity(capacity)}`;
+}
+function contextFacts() {
+  const scope=runStepScope(),request=settings.observability?.last_request;
+  const current=runCounts?.scope===scope?runCounts.context:null;
+  const model=composerBusy()?(current?.model||settings.model):settings.model;
+  const measured=measuredContexts.get(transcript);
+  if(measured?.scope===scope&&(!measured.model||measured.model===model))
+    return {...measured,capacity:composerBusy()?(current?.capacity||measured.capacity):settings.context_limit};
+  const sameModel=!request?.model||request.model===model;
+  const observation=settings.observability;
+  const inScope=!observation?.session_id||observation.session_id===chatSession;
+  const prompt=observation?.last?.normalized?.prompt;
+  return {tokens:inScope&&sameModel&&Number.isSafeInteger(prompt)?prompt:null,
+    capacity:composerBusy()?current?.capacity||settings.context_limit:settings.context_limit,model,estimated:false};
+}
+function contextDetail(context) {
+  const tokens=context.tokens,capacity=context.capacity;
+  return 'Last provider-reported request input: '+(tokens==null?'unknown':tokens.toLocaleString('en-US'))+
+    ' tokens / capacity '+(capacity>0?capacity.toLocaleString('en-US'):'unknown')+
+    ' tokens'+(tokens!=null&&capacity>0?' ('+(tokens/capacity*100).toFixed(4)+'%)':'')+'. Rounded display; no live text estimate.';
 }
 function updateChip() {
-  const request=settings.observability?.last_request;
-  const current=runCounts?.scope===runStepScope() && runCounts?.context;
-  const sameModel=!request?.model || request.model===settings.model;
-  let context=current || {tokens:sameModel?settings.observability?.last?.normalized?.prompt:null,capacity:settings.context_limit};
-  if(current && runCounts.model_calls>(runCounts.usage_calls ?? 0) && liveTokenChars) context={...current,tokens:current.tokens+Math.ceil(liveTokenChars/4),estimated:true};
+  const context=contextFacts();
   setText(chipModel,contextReadout(context));
-  chipModel.title=context?.estimated ? 'Current request context estimate; provider usage is authoritative' : 'Last measured request context / model capacity; ?? means unknown';
+  const detail=contextDetail(context);
+  if(chipModel.title!==detail)chipModel.title=detail;
   composerModel.hidden=true;
   setText(chipUsage,'');
+}
+let contextPaintKey='';
+function updateContextReadouts() {
+  updateChip();
+  if(balloon.open)renderContext();
 }
 
 function renderNodeSelect() {
@@ -3142,27 +3163,14 @@ function formatReset(iso) {
 // budget of zero is a fact worth stating - "taken 12K, budget -" reads like a
 // missing value rather than a configured absence.
 function renderContext() {
-  contextBox.replaceChildren();
-  if ('observability' in settings) {
-    const request=settings.observability?.last_request || {}, last=settings.observability?.last;
-    const taken=last?.normalized?.prompt;
-    const capacity=Number(settings.context_limit);
-    const mismatch=request.model && request.model!==settings.model;
-    contextBox.append(grid([['last measured input',taken==null ? 'unknown' : formatTokens(taken)],
-      ['selected capacity',capacity ? formatTokens(capacity) : 'unknown']]));
-    if (taken!=null && capacity>0 && !mismatch) contextBox.append(meter(taken/capacity*100));
-    return;
-  }
-  const usage = settings.usage || {};
-  const taken = Number((usage.last && usage.last.prompt) || 0);
-  const budget = Number(settings.context_limit) || 0;
-  if (!budget) {
-    contextBox.append(grid([["used", `${formatTokens(taken)} taken · no budget`]]));
-    return;
-  }
-  const percent = Math.min(100, Math.round((taken / budget) * 100));
-  contextBox.append(grid([["used", `${formatTokens(taken)} / ${formatTokens(budget)} · ${percent}%`]]));
-  contextBox.append(meter(percent));
+  const context=contextFacts(),key=JSON.stringify([runStepScope(),context.tokens,context.capacity,context.model]);
+  if(contextPaintKey===key&&contextBox.childElementCount)return;
+  contextPaintKey=key;contextBox.replaceChildren();
+  contextBox.append(grid([['last measured input',context.tokens==null?'unknown':formatTokens(context.tokens)],
+    ['selected capacity',formatContextCapacity(context.capacity)],['occupancy',contextReadout(context).replace(/^▤ /,'')]]));
+  const raw=document.createElement('span');raw.className='usage-note';
+  raw.textContent=contextDetail(context);contextBox.append(raw);
+  if(context.tokens!=null&&context.capacity>0)contextBox.append(meter(context.tokens/context.capacity*100));
 }
 
 // Rolling provider limits: 5h, 7d and 30d.
@@ -3247,6 +3255,9 @@ function acceptSettings(payload) {
   if (settingsNode === activeNode && Number.isFinite(payload.settings_revision) && Number.isFinite(settings.settings_revision)
       && payload.settings_revision < settings.settings_revision) return false;
   settings = { ...settings, ...payload };
+  // Once this page no longer follows/owns a stream, a fresh authoritative read
+  // supersedes the cached checkpoint measure (which may predate another window).
+  if(!composerBusy()&&payload.observability?.session_id===chatSession)measuredContexts.delete(messages);
   settingsNode = activeNode;
   return true;
 }
@@ -4126,11 +4137,11 @@ const metadataPaintKeys=new Map();
 function renderMetadataParts() {
   const parts=[
     ['user',[me,settings.node_name],renderUser],
-    ['chip',[settings.configured,settings.model,lastUsedModel,settings.observability?.last_request?.model,settings.observability?.total?.total],updateChip],
+    ['chip',[runStepScope(),settings.model,settings.context_limit,settings.observability?.last_request?.model,settings.observability?.last?.normalized?.prompt,contextFacts()],updateChip],
   ];
   if(balloon.open) parts.push(
     ['controls',[settings.providers,settings.provider,settings.model,settings.reasoning,settings.model_error,me.role],renderControls],
-    ['context',[settings.model,settings.context_limit,settings.context_source,settings.usage,settings.observability?.last_request?.model,settings.observability?.last,settings.observability?.context],renderContext],
+    ['context',[runStepScope(),contextFacts()],renderContext],
     ['limits',[settings.limits,settings.limits_error,Math.floor(Date.now()/60000)],renderLimits],
     ['usage',[settings.observability,settings.provider,settings.model,settings.output_limit,settings.compact_trigger,settings.compact_reserve,settings.compact_keep,settings.reasoning],renderUsage],
     ['foot',[settings.provider,settings.base_url,settings.database],renderPopFoot]);
@@ -4202,7 +4213,8 @@ async function refreshMetaOnce() {
     // The chat may still be healthy. A catalogue failure must describe only
     // this read, and the watch loop retries it without blocking the transcript.
     meta.textContent = "model info unavailable · retrying (" + String(error.message || error) + ")";
-    chipModel.textContent = "model info unavailable · retrying";
+    // A metadata outage must not turn the context-only trigger into an error banner.
+    updateContextReadouts();
     return false;
   }
 }
@@ -4539,7 +4551,8 @@ function resetConversationFollowState() {
   transcriptFailures = 0;
   transcriptFailure = "";
   chatShell.warning.clearNotices();
-  liveTokenChars=0;
+  measuredContexts.delete(messages);
+  contextPaintKey='';
   sawTurnInFlight = false;
   followedSeq = null;
   lastFollowAt = 0;
@@ -5687,8 +5700,10 @@ async function refreshAgentPane(pane) {
     // A placed task's control address is logical; a session echo may name its native attempt.
     if(result.task)pane.task={...pane.task,...result.task,subagent_id:attempt};
     const rows=result.rows;
-    const counts=rows.flatMap(row=>row.trace||[]).filter(span=>span.kind==='run_counts'&&span.context).at(-1);
-    if(counts) pane.task={...pane.task,context_readout:contextReadout(counts.context)};
+    const contextSnapshots=rows.flatMap(row=>row.trace||[]).filter(span=>span.kind==='run_counts'&&span.context);
+    const measured=contextSnapshots.filter(span=>span.context.estimated===false).at(-1)?.context;
+    const latest=contextSnapshots.at(-1)?.context;
+    if(latest) pane.task={...pane.task,context_readout:contextReadout(measured&&(!latest.model||measured.model===latest.model)?{...measured,capacity:latest.capacity}:latest)};
     // A repaint throws away the transcript's scroll position and its folded topics, so a poll that
     // found the same rows, the same state and the same in-flight call leaves the pane it found alone.
     const painted=JSON.stringify([rows,result.events,result.mode,pane.task.state,pane.task.settled,

@@ -28,7 +28,7 @@
     setTranscriptDebug(transcript,'debug');
     check(getComputedStyle(bubble.querySelector('wa-step')).display!=='none','debug mode reveals phase history');
     check(bubble.body.querySelector(':scope > .chat-content-run-status'), 'live status is inside the balloon');
-    check(statusElapsed.textContent.endsWith('|◷ 1:05'), 'background elapsed time uses the saved start time');
+    check(statusElapsed.textContent.endsWith(' · ◷ 1:05'), 'background elapsed time uses the saved start time');
     check(!!runStatusTicker, 'background turns start the elapsed ticker');
     handleEvent({type:'status',text:'thinking'});
     handleEvent({type:'round',n:1});
@@ -157,7 +157,7 @@
     document.getElementById('panel').style.width='540px';
     handleEvent({type:'status',text:'model'});
     runStepState.active.started=Date.now()-9000;updateRunElapsed();
-    check(statusPhase.textContent==='9s'&&statusElapsed.textContent.endsWith('|◷ 1:05'),'compact screenshot has separate phase and total clocks');
+    check(statusPhase.textContent==='9s'&&statusElapsed.textContent.endsWith(' · ◷ 1:05'),'compact screenshot has separate phase and total clocks');
     const box=statusLine.getBoundingClientRect();
     for (const width of [320,540,800]) {
       document.getElementById('panel').style.width=width+'px';

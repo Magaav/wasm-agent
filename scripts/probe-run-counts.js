@@ -13,7 +13,7 @@
     repaintMessages([user],{active:true,notify:false});
     handleEvent({type:'run_counts',counts:snapshot(1,0)});
     handleEvent({type:'status',text:'model'});
-    check(statusPhase.textContent==='0s'&&statusElapsed.textContent.includes('|✧ 1|⚒ 0|◷ '),'one provider attempt live');
+    check(statusPhase.textContent==='0s'&&statusElapsed.textContent.includes(' · ✧ 1 · ⚒ 0 · ◷ '),'one provider attempt live');
     handleEvent({type:'round',n:1});handleEvent({type:'round',n:1});
     check(runCounts.model_calls===1,'round events never count model attempts');
     handleEvent({type:'run_counts',counts:snapshot(2,0)});
@@ -21,7 +21,7 @@
     handleEvent({type:'run_counts',counts:snapshot(1,0)});
     check(runCounts.model_calls===2,'retry snapshot counted once; stale snapshot cannot roll back');
     handleEvent({type:'decision',call_id:'read',name:'read_many',arguments_text:'source',complete:true});
-    check(statusPhase.textContent==='0s'&&statusPhase.title==='Selecting tools'&&statusElapsed.textContent.includes('|✧ 2|'),'count precedes selection phase');
+    check(statusPhase.textContent==='0s'&&statusPhase.title==='Selecting tools'&&statusElapsed.textContent.includes(' · ✧ 2 · '),'count precedes selection phase');
     const calls={id:'calls',seq:101,role:'assistant',content:'',created_at:now/1000,
       tool_calls:[{id:'read',function:{name:'read_many',arguments:'{}'}}],trace:[snapshot(2,1)]};
     handleEvent({type:'run_counts',counts:snapshot(2,1)});

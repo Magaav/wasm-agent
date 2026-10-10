@@ -116,8 +116,11 @@ Providers are chosen first, models second.
 ## 6. Status balloon contents
 
 The compact footer trigger displays only `▤ 26%/1M`: one request's context
-occupancy and capacity in millions, not cumulative session spending. `~` marks
-current estimates, `??` unknown/mismatched context. Updates reuse stream events
+occupancy and capacity in millions, not cumulative session spending. It and
+the balloon share the same last provider-reported task input, exact capacity
+format and percentage. Pending text/preparation estimates do not overwrite a
+measured prompt; `??` means unknown/mismatched context. Raw integer counts and
+percent remain visible in details, not rounded into a different denominator. Updates reuse stream events
 and existing metadata reads. Provider/model stay inside the balloon, not beside
 the trigger. A transparent resting surface gains a clickable border/background
 on hover or keyboard focus; keyboard and balloon close behavior remain unchanged.
