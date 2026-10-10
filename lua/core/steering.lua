@@ -63,6 +63,14 @@ function M.control(args,ctx,target,closed)
     return query('SELECT * FROM steering_inbox WHERE id=?',{id})[1]
   end)
 end
+-- Bounded view for existing session reads; no consumption or recovery effect.
+function M.view(sid)
+  return query([[SELECT inbox.id,inbox.run_id,inbox.state,inbox.message_seq AS seq
+    FROM steering_inbox AS inbox JOIN steering_runs AS run
+    ON inbox.owner=run.owner AND inbox.session_id=run.session_id AND inbox.run_id=run.run_id
+    WHERE run.session_id=? AND inbox.state<>'read'
+    ORDER BY inbox.ordinal LIMIT 128]],{sid})
+end
 function M.pending(owner,sid,rid)
   return query("SELECT id FROM steering_inbox WHERE owner=? AND session_id=? AND run_id=? AND state='queued' LIMIT 1",{owner,sid,rid})[1]~=nil
 end
@@ -77,7 +85,8 @@ function M.consume(owner,sid,rid)
   return memory.transaction(function()
     local rows=query("SELECT * FROM steering_inbox WHERE owner=? AND session_id=? AND run_id=? AND state='queued' ORDER BY ordinal",{owner,sid,rid})
     for _,row in ipairs(rows) do
-      row.message_seq=memory.append_turn_in_transaction(sid,{id=row.id,role='user',content=row.text})
+      row.message_seq=memory.append_turn_in_transaction(sid,{id=row.id,role='user',content=row.text,
+        trace={{kind='steering',version=1,id=row.id,run_id=rid,state='read'}}})
       exec("UPDATE steering_inbox SET state='read',read_at=?,message_seq=? WHERE id=?",{host.now(),row.message_seq,row.id})
       row.state='read'
     end

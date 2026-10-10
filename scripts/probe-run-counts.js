@@ -39,11 +39,11 @@
     handleEvent({type:'reply',text:'Answer.',message_id:'answer'});handleEvent({type:'done'});
     const footer=transcript.querySelector('.finished');
     check(footer.querySelector('.chat-content-run-label').textContent==='completed','completion stays left');
-    check(footer.querySelector('.chat-content-run-elapsed').textContent==='✧ 3 · ⚒ 1 · ◷ 1:08','model/tool/time totals preserved right');
+    check(footer.querySelector('.chat-content-run-elapsed').textContent==='◈ ? · ✧ 3 · ⚒ 1 · ◷ 1:08','model/tool/time totals preserved right');
     const answer={id:'answer',seq:102,role:'assistant',content:'Answer.',created_at:now/1000,trace:[snapshot(3,1,{complete:true,elapsed_ms:68000})]};
     observedRun=null;runCounts=null;
     repaintMessages([user,calls,answer],{state:'answered',notify:false});
-    check(transcript.querySelector('.finished .chat-content-run-elapsed').textContent==='✧ 3 · ⚒ 1 · ◷ 1:08','durable replay restores exact totals after reload');
+    check(transcript.querySelector('.finished .chat-content-run-elapsed').textContent==='◈ ? · ✧ 3 · ⚒ 1 · ◷ 1:08','durable replay restores exact totals after reload');
     repaintMessages([{...user,trace:[]},{...answer,trace:[]}],{state:'answered',notify:false});
     check(transcript.querySelector('.finished .chat-content-run-elapsed').textContent.includes('✧ ? · ⚒ ?'),'historical missing counts remain unknown');
     repaintMessages([user,calls],{state:'unfinished',notify:false});

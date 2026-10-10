@@ -32,6 +32,8 @@ local function counts_snapshot(self)
     started_at=self.run_counts.started_at,
     tokens_reported=self.run_counts.tokens_reported,usage_calls=self.run_counts.usage_calls,
     usage_unknown=self.run_counts.usage_unknown,context=context,pending_input=self.run_counts.pending_input,
+    context_growth=self.run_counts.context_growth and json.decode(json.encode(self.run_counts.context_growth)) or nil,
+    summary_step=self.run_counts.summary_step and json.decode(json.encode(self.run_counts.summary_step)) or nil,
     elapsed_ms=math.max(0,math.floor((host.now()-self.run_counts.started_at)*1000))}
 end
 
@@ -44,6 +46,13 @@ local function record_turn(self, turn)
   local counts=counts_snapshot(self)
   if counts then
     counts.complete=turn.role=="assistant" and turn.phase~="commentary" and #(turn.tool_calls or {})==0
+    if counts.context_growth then
+      counts.context_growth.complete=counts.complete
+      if counts.complete and turn.ok==false then counts.context_growth.partial=true end
+      if counts.complete and counts.model_calls==0 then
+        counts.context_growth.known=false;counts.context_growth.source='no_provider_boundary'
+      end
+    end
     turn.trace=turn.trace or {}
     -- Do not mutate the cumulative diagnostic trace: one snapshot per stored row.
     local copy={};for _,item in ipairs(turn.trace) do copy[#copy+1]=item end
@@ -1039,6 +1048,9 @@ function M:maybe_compact(messages, force)
   table.sort(file_lines)
   if #file_lines>0 then merged=merged.."\n\n<file-operations>\n"..table.concat(file_lines,"\n").."\n</file-operations>" end
   memory.set_session_summary(self.session_id, cut.seq, merged)
+  if self.run_counts and self.run_counts.context_growth then
+    self.run_counts.context_growth.compactions=self.run_counts.context_growth.compactions+1
+  end
   self.last_prompt_tokens,self.measured_messages,self.measured_total,self.measured_prefix=0,nil,nil,nil
   local after = self:context_tokens()
   -- Record it in the transcript so a compaction (and the cache invalidation it
@@ -1112,12 +1124,21 @@ function M:run(text, images)
   local claimed=resources.begin(resource_ctx)
   if not claimed.ok then error("run_resource_refused: "..json.encode(claimed)) end
   self.run_counts={model_calls=0,tool_calls=0,started_at=host.now(),tokens_reported=0,usage_calls=0,usage_unknown=0}
+  -- Initialized after provider/child selection is pinned, before the new user row.
+  self.run_counts.context_growth={version=1,known=false,source='awaiting_baseline',partial=false,pending=false,compactions=0}
   self.on_call_start=function(kind,request,capacity)
     self.run_counts.pending_input=request and request.context_tokens_estimate or nil
     self.run_counts.model_calls=self.run_counts.model_calls+1
+    if kind=='summary' then
+      self.run_counts.summary_step={version=1,id=host.uuid(),model=request and request.model,
+        started_at=host.now(),state='running'}
+    end
     -- Context is one task request, never cumulative spend or a summary's smaller window.
     if kind~='summary' and request then
       self.run_counts.context={tokens=request.context_tokens_estimate,capacity=capacity,estimated=true,model=request.model}
+      local growth=self.run_counts.context_growth
+      growth.pending=true;growth.complete=false
+      if growth.model~=request.model then growth.known=false;growth.source='model_changed' end
     end
     emit_counts(self)
   end
@@ -1131,9 +1152,22 @@ function M:run(text, images)
     if observation and (observation.transport_failed_attempts or 0)>0 then
       self.run_counts.usage_unknown=self.run_counts.usage_unknown+observation.transport_failed_attempts
     end
-    if observation and kind~='summary' and usage and usage.known then
-      local context=self.run_counts.context
-      if context then context.tokens=usage.prompt;context.estimated=false end
+    if kind=='summary' and self.run_counts.summary_step then
+      local step=self.run_counts.summary_step
+      step.state=observation and observation.ok and 'completed' or 'failed'
+      step.ms=observation and observation.ms or math.max(0,math.floor((host.now()-step.started_at)*1000))
+    end
+    if kind~='summary' then
+      local growth=self.run_counts.context_growth
+      growth.pending=false
+      if usage and usage.known and not usage.issue then
+        local current=usage.prompt+usage.output
+        if observation.model and observation.model~=growth.model then growth.known=false;growth.source='model_changed' end
+        growth.current=current
+        if growth.known then growth.added=current-growth.baseline end
+        local context=self.run_counts.context
+        if context then context.tokens=usage.prompt;context.estimated=false end
+      else growth.partial=true end
     end
     emit_counts(self)
   end
@@ -1154,12 +1188,25 @@ function M:run(text, images)
       if self.subagent.reasoning and self.subagent.reasoning ~= "" then pinned.reasoning.selected = self.subagent.reasoning end
     end
   end
+  local model=provider.settings().model
+  local boundary,source=telemetry.last_context_boundary(self.session_id,model)
+  self.run_counts.context_growth={version=1,baseline=boundary,current=boundary,
+    added=boundary and 0 or nil,model=model,source=source,
+    known=boundary~=nil,partial=false,pending=false,compactions=0}
   return self:run_body(text,images)
   end)
   provider.unpin()
   self.reserve_summary=nil
   self.on_call_start=nil
   self.on_call_end=nil
+  if self.run_counts.summary_step and self.run_counts.summary_step.state=='running' then
+    self.run_counts.summary_step.state='unfinished'
+    self.run_counts.summary_step.ms=math.max(0,math.floor((host.now()-self.run_counts.summary_step.started_at)*1000))
+  end
+  if self.run_counts.context_growth then
+    self.run_counts.context_growth.complete=true
+    if self.run_counts.model_calls==0 then self.run_counts.context_growth.known=false;self.run_counts.context_growth.source='no_provider_boundary' end
+  end
   emit_counts(self)
   local inbox_ok,inbox_error=pcall(steering.finish,self.user,self.session_id,self.steering_run_id,ok and 'settled' or 'failed')
   if not inbox_ok then ok,result=false,'steering_settlement_failed: '..tostring(inbox_error) end
@@ -1398,7 +1445,7 @@ function M:run_body(text, images)
     local rows=steering.consume(self.user,self.session_id,self.steering_run_id)
     for _,row in ipairs(rows) do
       messages[#messages+1]={role='user',content=row.text}
-      self.emit({type='steering',id=row.id,state='read',seq=row.message_seq})
+      self.emit({type='steering',version=1,id=row.id,run_id=row.run_id,state='read',text=row.text,seq=row.message_seq})
       self.emit({type='checkpoint',seq=row.message_seq})
     end
     return #rows

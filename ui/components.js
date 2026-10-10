@@ -660,6 +660,76 @@ class WaSubagent extends HTMLElement {
 }
 customElements.define("wa-subagent", WaSubagent);
 
+// Real summary-request activity: visible in quiet chat too, using the shared topic.
+class WaSummary extends HTMLElement {
+  static get observedAttributes() {return ['open'];}
+  connectedCallback() {this._build();}
+  _build() {
+    if(this._parts)return;
+    this._parts=topicParts(this,{className:'summarizing',glyph:'▤',label:'Model is summarizing',bodyClass:'reasoning-body'});
+    this.append(this._parts.header,this._parts.body);this._sync();
+  }
+  get body() {this._build();return this._parts.body;}
+  get open() {return this.hasAttribute('open');}
+  set open(value) {this.toggleAttribute('open',Boolean(value));}
+  toggle() {this.open=!this.open;}
+  attributeChangedCallback() {this._build();this._sync();}
+  _sync() {
+    this._parts.body.hidden=!this.open;
+    this._parts.header.setAttribute('aria-expanded',String(this.open));
+    topicChevron(this._parts.chevron,this.open);
+  }
+  update(fact) {
+    this._build();this.fact={...fact};this.dataset.summaryId=fact.id;this.setAge();
+  }
+  setAge() {
+    if(!this.fact)return;
+    const fact=this.fact,state=fact.state;
+    const ms=state==='running'?Math.max(0,Date.now()-fact.started_at*1000):fact.ms;
+    const seconds=Number.isFinite(ms)?Math.floor(ms/1000)+'s':'duration unknown';
+    const paint=JSON.stringify([state,seconds,fact.model]);if(this._paint===paint)return;this._paint=paint;
+    this.dataset.state=state;
+    this._parts.label.textContent=state==='running'?'Model is summarizing':'Model summary';
+    this._parts.meta.textContent=(state==='running'?'':state+' · ')+seconds;
+    this._parts.body.textContent='Model: '+(fact.model||'unknown')+'. '+
+      (state==='running'?'Summarizing session context; original transcript is retained.':
+      state==='completed'?'Summary request completed; original transcript is retained.':
+      'Summary '+state+'; no successful compaction is inferred. Original transcript is retained.');
+  }
+  freeze(state='unfinished') {
+    if(this.fact?.state!=='running')return;
+    this.update({...this.fact,state,ms:null});
+  }
+}
+customElements.define('wa-summary',WaSummary);
+
+class WaSteering extends HTMLElement {
+  static get observedAttributes() {return ['open'];}
+  connectedCallback() {this._build();}
+  _build() {
+    if(this._parts)return;
+    this._parts=topicParts(this,{className:'steering',glyph:'↪',label:'Steering queued',bodyClass:'reasoning-body'});
+    this.append(this._parts.header,this._parts.body);this._sync();
+  }
+  get body() {this._build();return this._parts.body;}
+  get open() {return this.hasAttribute('open');}
+  set open(value) {this.toggleAttribute('open',Boolean(value));}
+  toggle() {this.open=!this.open;}
+  attributeChangedCallback() {this._build();this._sync();}
+  _sync() {
+    this._parts.body.hidden=!this.open;
+    this._parts.header.setAttribute('aria-expanded',String(this.open));
+    topicChevron(this._parts.chevron,this.open);
+  }
+  update(fact) {
+    this._build();this.fact={...fact};this.dataset.steeringId=fact.id;this.dataset.state=fact.state;
+    this._parts.label.textContent=fact.state==='read'?'Steered':fact.state==='queued'?'Steering queued':'Steering not placed';
+    this._parts.meta.textContent=fact.state==='read'?'entered context':fact.state==='queued'?'next safe boundary':fact.state;
+    this._parts.body.textContent=(fact.text||'Accepted steering text is retained in the durable inbox; this receipt view contains identity and state only.')+(fact.state==='read'?' — Read into model context; not proof of compliance.':' — Not yet entered model context; in-flight effects are not undone.');
+  }
+}
+customElements.define('wa-steering',WaSteering);
+
 // A transport recovery is activity, not assistant prose or a model control.
 class WaRetry extends HTMLElement {
   constructor() {super();this._attempts=new Map();}

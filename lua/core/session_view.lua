@@ -110,9 +110,15 @@ function M.get(memory,sid,args,task)
   local bounds=memory.session_message_bounds(sid)
   local rows=memory.session_messages(sid,{limit=limit,before_seq=before,after_seq=after,forward_after_seq=after~=nil})
   local page={session_id=sid,messages={},view=args.view or 'full',returned=0,
+    steering=task and dofile('lua/core/steering.lua').view(sid) or nil,
     note='Bounded inspection only; original transcript unchanged. Oversized rows have exact-retrieval evidence.'}
   if task then page.task={subagent_id=task.subagent_id,session_id=sid,state=task.state,settled=task.settled,
     profile=task.profile,model=task.model,reasoning=task.reasoning} end
+  if page.steering then
+    while #page.steering>0 and #json.encode(page)>math.floor(bytes/2) do
+      table.remove(page.steering);page.steering_more=true
+    end
+  end
   local function frame()
     local first=page.messages[1] and page.messages[1].seq
     local last=page.messages[#page.messages] and page.messages[#page.messages].seq
