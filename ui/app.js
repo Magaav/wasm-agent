@@ -508,15 +508,20 @@ let runBubble = null;
 let runStartedAt = 0;
 let runStepState = null;
 let runCounts = null;
+let liveTokenChars = 0;
+let liveDecisionChars = new Map();
 
 function applyRunCounts(counts) {
   if (counts?.version !== 1 || typeof counts.run_id !== 'string' || !counts.run_id ||
       !Number.isSafeInteger(counts.model_calls) || counts.model_calls < 0 ||
       !Number.isSafeInteger(counts.tool_calls) || counts.tool_calls < 0) return;
   if (runCounts?.run_id === counts.run_id &&
-      (counts.model_calls < runCounts.model_calls || counts.tool_calls < runCounts.tool_calls)) return;
+      (counts.model_calls < runCounts.model_calls || counts.tool_calls < runCounts.tool_calls ||
+       (counts.usage_calls ?? 0)<(runCounts.usage_calls ?? 0))) return;
+  if (counts.run_id !== runCounts?.run_id || counts.usage_calls !== runCounts?.usage_calls || counts.model_calls !== runCounts?.model_calls) {liveTokenChars=0;liveDecisionChars.clear();}
   runCounts = {...counts, scope:runStepScope()};
-  updateRunPhase();
+  if(transcript===messages && counts.context) updateChip();
+  updateRunElapsed();
 }
 
 function runCountsFooter(duration) {
@@ -526,6 +531,14 @@ function runCountsFooter(duration) {
   return `✧ ${prefix}${runCounts?.model_calls ?? '?'} · ⚒ ${prefix}${runCounts?.tool_calls ?? '?'} · ◷ ${duration}`;
 }
 
+function turnTokenReadout() {
+  if(!Number.isSafeInteger(runCounts?.tokens_reported))return '?';
+  const pending=runCounts.model_calls>(runCounts.usage_calls ?? 0);
+  const estimate=!replayingMessages&&pending ? (runCounts.pending_input || 0)+Math.ceil(liveTokenChars/4) : 0;
+  const prefix=(runCounts.usage_unknown ? '≥' : '')+(estimate||pending ? '~' : '');
+  // Exact integer readout keeps every observed live increment visible even on long turns.
+  return prefix+String(runCounts.tokens_reported+estimate);
+}
 function turnIsActive() { return busy || observedRun?.session === chatSession; }
 function runStepScope() { return activeNode + ":" + chatSession + ":" + conversationEpoch; }
 function runStepId() { return busy ? runKey(activeRunId) : runKey(observedRun); }
@@ -563,9 +576,8 @@ function updateRunPhase() {
     if (statusSpinner.style.fontSize !== size) statusSpinner.style.fontSize = size;
   }
   if (live) {
-    const count = runCounts ? runCounts.model_calls + ' · ' : '';
-    setText(statusPhase, count + step.label + ' · ' + Math.max(0, Math.floor((Date.now() - step.started) / 1000)) + 's');
-    statusPhase.title = runCounts ? runCounts.model_calls + ' provider-call attempts (includes retries and summaries)' : 'Model-call count unavailable';
+    setText(statusPhase, Math.max(0, Math.floor((Date.now() - step.started) / 1000)) + 's');
+    statusPhase.title = step.label;
   }
   else setText(statusPhase, '');
 }
@@ -764,7 +776,11 @@ function updateRunElapsed() {
   // Date.now() there would print days on a footer for a turn that took four seconds - the same
   // mistake the run topic's own summary avoids by reading replayMessageEndedAt.
   const endedAt = replayingMessages && replayMessageEndedAt ? replayMessageEndedAt : Date.now();
-  setText(statusElapsed, runDuration(endedAt - (runStartedAt || endedAt)));
+  const duration=runDuration(endedAt - (runStartedAt || endedAt));
+  setText(statusElapsed,!replayingMessages && runStepState?.active
+    ? `|◈ ${turnTokenReadout()}|✧ ${runCounts?.model_calls ?? '?'}|⚒ ${runCounts?.tool_calls ?? '?'}|◷ ${duration}` : duration);
+  if(transcript===messages && !replayingMessages && runCounts?.context) updateChip();
+  statusElapsed.title='Turn tokens: reported input + output, including cache/retries/summaries; ~ includes live text/4 estimate, ≥ has unknown usage. Hidden reasoning/transport usage is not measurable live.';
 }
 
 function startRunStatusTicker() {
@@ -773,6 +789,7 @@ function startRunStatusTicker() {
 }
 
 function finishRunStatus(label = "completed") {
+  if(transcript===messages)chatShell.warning.setNotice('active','');
   for(const retry of runBubble?.querySelectorAll('wa-retry') || [])
     retry.interrupt(label==='cancelled'?'cancelled':'unfinished');
   if (!replayingMessages) {
@@ -839,7 +856,7 @@ function appendReasoning(text, complete = false) {
 function appendCommentary(text, messageId, pendingId) {
   if (!text || (messageId && renderedMessageIds.has(String(messageId)))) return;
   const block = document.createElement("wa-commentary");
-  block.open = !replayingMessages;
+  block.open = true;
   block.setText(text);
   if(pendingId)block.dataset.pendingId=String(pendingId);
   if (messageId) {
@@ -851,13 +868,15 @@ function appendCommentary(text, messageId, pendingId) {
   pin();
 }
 
-function appendStreamedCommentary(text) {
+function appendStreamedCommentary(text, pendingId) {
   if (!text) return;
   const bubble = currentBubble();
+  if(streamedCommentaryBlock && pendingId && streamedCommentaryBlock.dataset.pendingId!==String(pendingId))markStreamedCommentaryIncomplete();
   if (!streamedCommentaryBlock || streamedCommentaryBlock.parentNode !== bubble.body) {
     streamedCommentaryBlock = document.createElement("wa-commentary");
     streamedCommentaryBlock.classList.add("phase-pending");
-    streamedCommentaryBlock.open = !replayingMessages;
+    streamedCommentaryBlock.open = true;
+    if(pendingId)streamedCommentaryBlock.dataset.pendingId=String(pendingId);
     bubble.body.append(streamedCommentaryBlock);
     anchorRunStepContent(streamedCommentaryBlock);
     streamedCommentaryText = "";
@@ -1466,7 +1485,7 @@ function collapseRun(finalStart = false) {
   // reader then opens topics to reach topics.
   const existing = Array.prototype.find.call(body.children, (c) => c.tagName === "WA-RUN");
   const moves = Array.prototype.filter.call(body.children,
-    (c) => c !== answer && c !== existing && c.tagName !== "WA-DIFF" && c !== statusLine);
+    (c) => c !== answer && c !== existing && c.tagName !== "WA-DIFF" && c.tagName !== "WA-COMMENTARY" && c !== statusLine);
   const traces = moves.filter((c) => c.tagName === "WA-TRACE");
   // A run topic is only created once something actually ran - a run that never called a tool keeps
   // its plain answer. But once a topic exists, a later reply must still fold the previous answer into
@@ -1575,7 +1594,13 @@ function interruptSubscriptionAttempt(saved) {
 function handleEvent(event) {
   if (!replayingMessages && transcript===messages && !['done','error'].includes(event.type)) markRunStreamAlive();
   if (["round", "reasoning", "commentary", "commentary_delta", "commentary_end", "pending_delta", "decision", "tool", "tool_result", "delta", "reply", "error", "done"].includes(event.type)) {
-    clearActiveRunNotice();
+    if(transcript===messages)clearActiveRunNotice();
+  }
+  if(!replayingMessages && ['reasoning','pending_delta','delta','commentary_delta','decision'].includes(event.type) && !event.complete) {
+    if(event.type==='decision') {
+      const key=event.call_id || '',length=String(event.arguments_text || '').length;
+      liveTokenChars+=Math.max(0,length-(liveDecisionChars.get(key)||0));liveDecisionChars.set(key,length);
+    } else if(!(event.type==='delta'&&event.pending_id)) liveTokenChars+=String(event.text || '').length;
   }
   if (event.type === 'delegated') {
     if(event.task?.subagent_id)renderSubagentCard(event.task);
@@ -1634,10 +1659,13 @@ function handleEvent(event) {
     const pending = phasePendingText.get(String(event.pending_id || ''));
     if (pending?.node === answerAnchors.get(transcript)) releaseAnswerAnchor(transcript, false);
     removePendingText(event.pending_id);
-    appendCommentary(event.text || "", event.message_id, event.pending_id);
+    if(streamedCommentaryBlock && (!event.pending_id || streamedCommentaryBlock.dataset.pendingId===String(event.pending_id))) {
+      streamedCommentaryBlock.setText(event.text || streamedCommentaryText);
+      finishStreamedCommentary(event.message_id);
+    } else appendCommentary(event.text || "", event.message_id, event.pending_id);
   } else if (event.type === "commentary_delta") {
     showRunStep("commentary", "Progress update");
-    appendStreamedCommentary(event.text || "");
+    appendStreamedCommentary(event.text || "",event.pending_id);
   } else if (event.type === "commentary_end") {
     finishStreamedCommentary(event.message_id);
   } else if (event.type === "reasoning") {
@@ -1758,8 +1786,7 @@ function handleEvent(event) {
   } else if (event.type === "usage") {    settings.usage = event.total || settings.usage;
     if (event.model) {
       lastUsedModel = event.model;
-      composerModel.textContent = event.model;
-      composerModel.title = "Model used for the latest request: " + event.model;
+      composerModel.hidden = true;
     }
     updateChip();
     if (balloon.open) { renderUsage(); renderControls(); }
@@ -2005,6 +2032,8 @@ async function refreshNotifySupport() {
 function repaintMessages(rows, options = {}) {
   const savedSteps = runStepState?.scope === runStepScope() ? runStepState : null;
   const savedCounts = runCounts?.scope === runStepScope() ? runCounts : null;
+  const savedTokenChars=liveTokenChars,savedDecisionChars=new Map(liveDecisionChars);
+  const commentaryChoices=Array.from(transcript.querySelectorAll('wa-commentary')).map(node=>({id:node.dataset.messageId,pending:node.dataset.pendingId,text:node.body.textContent,open:node.open}));
   const savedCountUser = Number(Array.from(transcript.querySelectorAll('wa-message[role="user"]')).at(-1)?.dataset.messageSeq) || null;
   const changedRun = savedSteps?.id && runStepId() && savedSteps.id !== runStepId();
   if (changedRun && savedSteps.active) {
@@ -2182,7 +2211,11 @@ function repaintMessages(rows, options = {}) {
     restoreRunSteps(savedSteps, savedBubble);
   } else runStepState = null;
   if (options.active && observedRun?.session === chatSession) ensureObservedRunStep(observedRun);
-  if (options.active && savedCounts && !changedRun && savedCountUser === replayUserSeq) applyRunCounts(savedCounts);
+  if (options.active && savedCounts && !changedRun && savedCountUser === replayUserSeq) {applyRunCounts(savedCounts);liveTokenChars=savedTokenChars;liveDecisionChars=savedDecisionChars;updateRunElapsed();}
+  for(const node of transcript.querySelectorAll('wa-commentary')) {
+    const choice=commentaryChoices.find(old=>old.id&&old.id===node.dataset.messageId || old.pending&&old.pending===node.dataset.pendingId || !old.id&&!node.dataset.messageId&&old.text===node.body.textContent);
+    if(choice)node.open=choice.open;
+  }
   pin(true);
   if (failed) {
     add("assistant", `repaint: ${rendered} of ${rows.length} messages drawn, ${failed} failed — first: ${firstFailure}`);
@@ -2213,12 +2246,12 @@ function repaintMessages(rows, options = {}) {
 function paintChildTranscript(container, rows, options = {}) {
   if (!container) return null;
   const saved = { transcript, runBubble, statusLine, statusLabel, statusElapsed, statusSpinner,
-    runStepState, runCounts,
+    runStepState, runCounts, liveTokenChars, liveDecisionChars,
     statusPhase, lastAssistantBody, runStatusTicker, toolTicker, streamBody, streamText, phasePendingText, trace, lastTool,
     reasoningBlock, reasoningText, streamedCommentaryBlock, streamedCommentaryText, runStartedAt, replayingMessages,
     replayMessageEndedAt, replayRunLastMessage, renderedMessageIds };
   transcript = container;
-  runStepState = null;runCounts = null;
+  runStepState = null;runCounts = null;liveTokenChars=0;liveDecisionChars=new Map();
   // Child teardown must never remove the main status DOM, clear its timers or share its text buffer.
   statusLine=null;statusLabel=null;statusPhase=null;statusElapsed=null;statusSpinner=null;runStatusTicker=null;toolTicker=null;
   setTranscriptDebug(container, options.mode);
@@ -2230,7 +2263,7 @@ function paintChildTranscript(container, rows, options = {}) {
     stopToolTicker();
     if(runStatusTicker)clearInterval(runStatusTicker);
     ({ transcript, runBubble, statusLine, statusLabel, statusElapsed, statusSpinner, lastAssistantBody,
-      runStepState, runCounts,
+      runStepState, runCounts, liveTokenChars, liveDecisionChars,
       statusPhase, runStatusTicker, toolTicker, streamBody, streamText, phasePendingText, trace, lastTool, reasoningBlock,
       reasoningText, streamedCommentaryBlock, streamedCommentaryText, runStartedAt, replayingMessages,
       replayMessageEndedAt, replayRunLastMessage, renderedMessageIds } = saved);
@@ -2421,7 +2454,7 @@ async function restoreSessionOnce(target, epoch, node = activeNode) {
         notice.append(nodeButton("continue", () => { notice.remove(); resumeSession(wanted.id); }));
       }
       if (notice.classList.contains("active-run-notice")) {
-        (runBubble || currentBubble()).body.append(notice);
+        chatShell.warning.setNotice('active',notice.textContent);
       } else messages.append(notice);
     }
     // Advance only through rows actually read. A list or checkpoint observed
@@ -2430,7 +2463,8 @@ async function restoreSessionOnce(target, epoch, node = activeNode) {
     transcriptReady = true;
     transcriptFailures = 0;
     transcriptRetryAt = 0;
-    if (transcriptFailure && statusLabel?.textContent.startsWith("transcript")) clearStatus();
+    chatShell.warning.setNotice('transcript','');
+    if(outcome.name!=='unfinished'||!activeRun(health,wanted.id))chatShell.warning.setNotice('active','');
     transcriptFailure = "";
     if (autoResumeSeq !== null) {
       const key = node + ":" + wanted.id + ":" + autoResumeSeq;
@@ -2447,7 +2481,7 @@ async function restoreSessionOnce(target, epoch, node = activeNode) {
     const delay = Math.min(30000, 500 * (2 ** Math.min(transcriptFailures - 1, 6)));
     transcriptRetryAt = Date.now() + delay;
     transcriptFailure = phase + ": " + String(error.message || error);
-    setStatus("transcript " + (followedSeq ? "refresh failed; saved view kept" : "not loaded") + " - retrying in " + Math.ceil(delay / 1000) + "s (" + transcriptFailure + ")");
+    chatShell.warning.setNotice('transcript',"transcript " + (followedSeq ? "refresh failed; saved view kept" : "not loaded") + " - retrying in " + Math.ceil(delay / 1000) + "s (" + transcriptFailure + ")");
     return false;
   }
 }
@@ -2464,7 +2498,7 @@ function applyRunControls() {
   // A durable follower owns controls too, but it must not pretend to own the
   // original stream: `busy` still prevents repaint only for our own socket.
   const value = composerBusy();
-  document.getElementById('steer').hidden=!value;
+  // Steering remains a backend/keyboard capability, not a visible control.
   sendButton.classList.toggle("busy", value);
   sendButton.title = value ? "Stop" : "Send";
   sendButton.setAttribute("aria-label", sendButton.title);
@@ -2662,10 +2696,12 @@ function clearStreamNotice() {
   // node says the thread is settled, the claim is stale and the span should go - the durable record is
   // the engine's sessions topic, which is where a reader looks for it.
   for (const notice of document.querySelectorAll(".unfinished-notice")) notice.remove();
+  chatShell.warning.setNotice('active','');
 }
 
 function clearActiveRunNotice() {
   for (const notice of document.querySelectorAll(".active-run-notice")) notice.remove();
+  chatShell.warning.setNotice('active','');
 }
 
 // What the node's own answer says about the run this window is watching.
@@ -2969,16 +3005,23 @@ function activeProvider() {
   return (settings.providers || []).find((provider) => provider.id === settings.provider) || null;
 }
 
+function contextReadout(context) {
+  const capacity=Number(context?.capacity),tokens=Number(context?.tokens);
+  const known=context?.tokens!=null && Number.isFinite(tokens) && tokens>=0 && capacity>0;
+  const percent=known ? String(Math.round(tokens/capacity*100)).padStart(2,'0') : '??';
+  const max=capacity>0 ? (capacity/1e6).toFixed(6).replace(/0+$/,'').replace(/\.$/,'')+'M' : '?M';
+  return `▤ ${context?.estimated&&known?'~':''}${percent}%/${max}`;
+}
 function updateChip() {
-  setText(chipModel, settings.configured ? (settings.model || "model") : "local mode");
-  const observedModel = lastUsedModel || settings.observability?.last_request?.model || "";
-  setText(composerModel, observedModel || settings.model || "model unavailable");
-  composerModel.title = observedModel
-    ? "Model used for the latest request: " + observedModel
-    : settings.model ? "Selected model; no request model observed yet" : "No model information available";
-  statusBtn.classList.toggle("local", !settings.configured);
-  const total = settings.observability?.available ? settings.observability.total?.total : 0;
-  setText(chipUsage, total ? formatTokens(total) + " tok" : "");
+  const request=settings.observability?.last_request;
+  const current=runCounts?.scope===runStepScope() && runCounts?.context;
+  const sameModel=!request?.model || request.model===settings.model;
+  let context=current || {tokens:sameModel?settings.observability?.last?.normalized?.prompt:null,capacity:settings.context_limit};
+  if(current && runCounts.model_calls>(runCounts.usage_calls ?? 0) && liveTokenChars) context={...current,tokens:current.tokens+Math.ceil(liveTokenChars/4),estimated:true};
+  setText(chipModel,contextReadout(context));
+  chipModel.title=context?.estimated ? 'Current request context estimate; provider usage is authoritative' : 'Last measured request context / model capacity; ?? means unknown';
+  composerModel.hidden=true;
+  setText(chipUsage,'');
 }
 
 function renderNodeSelect() {
@@ -3460,7 +3503,8 @@ async function steerActiveRun() {
     steeringSubmission={text,thread,node,epoch,key:crypto.randomUUID()};
   const submission=steeringSubmission;
   steeringPending=true;
-  document.getElementById('steer').disabled=true;
+  const steerButton=document.getElementById('steer');
+  if(steerButton)steerButton.disabled=true;
   try {
     let receipt;
     for(let attempt=0;attempt<2;attempt++) {
@@ -3486,9 +3530,8 @@ async function steerActiveRun() {
     steeringSubmission=null;
     setStatus('Steering '+receipt.state+' — applies at the next safe boundary; in-flight effects are not undone.');
   } catch(error) {if(viewing())setStatus('Steering not confirmed; draft kept: '+error.message);}
-  finally {steeringPending=false;document.getElementById('steer').disabled=false;}
+  finally {steeringPending=false;if(steerButton)steerButton.disabled=false;}
 }
-document.getElementById('steer').addEventListener('click',steerActiveRun);
 
 // The shell owns the form: a click on Send, an Enter in the field and `requestSubmit()` all arrive
 // here as one event, so the composer has one send path whatever the reader did.
@@ -4496,6 +4539,8 @@ function resetConversationFollowState() {
   transcriptRetryAt = 0;
   transcriptFailures = 0;
   transcriptFailure = "";
+  chatShell.warning.clearNotices();
+  liveTokenChars=0;
   sawTurnInFlight = false;
   followedSeq = null;
   lastFollowAt = 0;
@@ -5643,6 +5688,8 @@ async function refreshAgentPane(pane) {
     // A placed task's control address is logical; a session echo may name its native attempt.
     if(result.task)pane.task={...pane.task,...result.task,subagent_id:attempt};
     const rows=result.rows;
+    const counts=rows.flatMap(row=>row.trace||[]).filter(span=>span.kind==='run_counts'&&span.context).at(-1);
+    if(counts) pane.task={...pane.task,context_readout:contextReadout(counts.context)};
     // A repaint throws away the transcript's scroll position and its folded topics, so a poll that
     // found the same rows, the same state and the same in-flight call leaves the pane it found alone.
     const painted=JSON.stringify([rows,result.events,result.mode,pane.task.state,pane.task.settled,
@@ -5660,7 +5707,7 @@ async function refreshAgentPane(pane) {
     // child reported, a page size this node refused, or nothing. `Ready for your next message.` used to
     // sit here, restating the `completed`/duration footer the run already draws in its own bubble.
     pane.notice.textContent=[panePageNote,journalError,pane.task.error ||
-      (pane.task.settled ? '' : 'Working. Steer updates the active run; Send queues a follow-up.')]
+      (pane.task.settled ? '' : 'Working. Send queues a follow-up.')]
       .filter(Boolean).join(' ');
     if(panePageNote)pane.notice.title=panePageNoteDetail;
   } catch(error) { if(viewing())pane.notice.textContent='Conversation unavailable: '+error.message; }

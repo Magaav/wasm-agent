@@ -43,6 +43,27 @@ for _,event in ipairs(events) do if event.type=='run_counts' then
   check(event.counts.model_calls>=maximum,'live snapshots are monotonic');maximum=event.counts.model_calls
 end end
 check(maximum==3,'live model count matches durable final')
+check(final.usage_calls==3 and final.usage_unknown==3 and final.tokens_reported==0,'missing provider usage stays unknown, not invented')
+check(final.context and final.context.tokens>0 and final.context.estimated,'current request estimates persist')
+local measured_sid=memory.start_session('','reported tokens',{user_id='master'})
+host.http_stream=function() return json.encode({status=200,content='measured',stream_complete=true,finish_reason='stop',tool_calls={},
+  usage={prompt_tokens=1000,completion_tokens=20,total_tokens=1020,prompt_tokens_details={cached_tokens=900}}}) end
+local measured,start_cb,end_cb
+measured=agent.new(measured_sid,function(event)
+  start_cb=measured.on_call_start or start_cb;end_cb=measured.on_call_end or end_cb
+end,'master','master','')
+check(measured:run('reported usage')=='measured','reported usage fixture')
+local measured_counts=counts(memory.session_messages(measured_sid,{limit=1})[1])
+check(measured_counts.tokens_reported==1020 and measured_counts.usage_calls==1 and measured_counts.usage_unknown==0,'reported input includes cache once plus output')
+check(measured_counts.context.tokens==1000 and not measured_counts.context.estimated,'provider prompt replaces context estimate')
+-- Summaries count toward spend, never replace the task's context occupancy.
+local context_before=measured.run_counts.context
+local tokens_before=measured.run_counts.tokens_reported
+host.http=function() return json.encode({status=200,body=json.encode({choices={{message={content='summary'},finish_reason='stop'}},usage={prompt_tokens=10,completion_tokens=2,total_tokens=12}})}) end
+local previous_prompt=measured.run_counts.context.tokens
+provider.complete_with('deepseek-v4.1-flash',{{role='user',content='summarize'}},nil,false,
+  {session_id=measured_sid,run_id=measured_counts.run_id,kind='summary',on_call_start=start_cb,on_call_end=end_cb})
+check(measured.run_counts.tokens_reported==tokens_before+12 and measured.run_counts.context==context_before and measured.run_counts.context.tokens==previous_prompt,'summary adds spend through actual callbacks without overwriting task context')
 local seen=0
 host.http=function() return json.encode({status=200,body=json.encode({choices={{message={content='summary'},finish_reason='stop'}}})}) end
 provider.complete_with('deepseek-v4.1-flash',{{role='user',content='summarize'}},nil,false,

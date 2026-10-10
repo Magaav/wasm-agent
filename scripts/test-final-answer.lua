@@ -19,7 +19,7 @@ send({type='response.output_text.delta',output_index=1,delta='unknown'})
 assert(events[#events].type=='pending_delta','another item not contaminated by global stopReason')
 item(2,'commentary','commentary')
 send({type='response.output_text.delta',output_index=2,delta='checking'})
-assert(events[#events].type=='pending_delta','commentary remains provisional')
+assert(events[#events].type=='commentary_delta','known commentary streams inside its own topic')
 send({type='response.output_item.done',output_index=2,item={type='message',id='commentary',phase='commentary',content={{type='output_text',text='checking'}}}})
 assert(events[#events].type=='commentary','commentary resolves')
 local n=#events

@@ -67,11 +67,13 @@ with an explicit timestamp. See [LIGHTWEIGHT-UI.md](LIGHTWEIGHT-UI.md).
 
 ## Compact chat phases and debug history
 
-Ordinary chat shows one current phase in the existing sticky footer:
-`✧ 1 · Reasoning · 9s                 1:05`. The left clock measures the current
-phase; the right clock remains the total turn duration. The phase replaces the
-redundant `thinking…`/`responding…` label. Output labels omit `Receiving` (`Model
-output`, `Progress update`); spaces around `·` remain. `Reasoning` is the requested
+Ordinary chat shows the compact strip in the existing sticky footer:
+`✦ 6s|◈ ~13000|✧ 26|⚒ 82|◷ 2:24`. The left clock measures the current
+phase (description in tooltip/debug); the last clock is total turn duration.
+Token estimate/reporting and compact context occupancy are defined in
+[MINIMAL-CHAT.md](MINIMAL-CHAT.md). The phase replaces the
+redundant `thinking…`/`responding…` label. Debug output labels omit `Receiving` (`Model
+output`, `Progress update`); other surfaces retain spaces around `·`. `Reasoning` is the requested
 UI name for model wait/reasoning, not proof of provider-internal reasoning activity.
 Selecting/executing tools and output replace that phase, never stack completed rows.
 Live status uses normal whitespace rather than inheriting transcript pre-wrap;

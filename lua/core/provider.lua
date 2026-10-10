@@ -1006,7 +1006,7 @@ function M.complete_with(model, messages, tools, stream, opts)
   local span=telemetry.start(opts,opts.kind or "model_call",request_meta)
   -- Count the provider boundary, not a decision round or pre-request refusal.
   -- Transport reconnects inside a subscription call remain separate diagnostics.
-  if opts.on_call_start then opts.on_call_start(opts.kind or "model_call") end
+  if opts.on_call_start then opts.on_call_start(opts.kind or "model_call",request_meta,M.budget(body.model).context) end
   local ok,result=pcall(function()
   if provider.id=="openai-sub" then
     local bridge_opts={}
@@ -1074,8 +1074,9 @@ function M.complete_with(model, messages, tools, stream, opts)
   }
   end)
   if not ok then
-    telemetry.finish(span,{ok=false,error=result,model=body.model,provider=provider.id,
+    local observation=telemetry.finish(span,{ok=false,error=result,model=body.model,provider=provider.id,
       normalized=telemetry.normalize(nil)})
+    if opts.on_call_end then opts.on_call_end(observation,opts.kind or 'model_call') end
     error(result)
   end
   local visible=M.visible_text(result.content)
@@ -1092,6 +1093,7 @@ function M.complete_with(model, messages, tools, stream, opts)
     ttft_ms=result.ttft_ms,stream_complete=result.stream_complete,
     reasoning_bytes=#(result.reasoning or ""),answer_bytes=#(result.content or ""),
     error=not complete and (result.stream_complete==false and "incomplete_stream" or result.finish_reason=="length" and "output_limit_reached" or "empty_reply") or nil})
+  if opts.on_call_end then opts.on_call_end(observation,opts.kind or 'model_call') end
   result.observation=observation
   result.request_meta=request_meta
   result.span_id=span.id

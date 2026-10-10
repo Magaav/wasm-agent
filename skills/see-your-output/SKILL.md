@@ -209,6 +209,17 @@ Lua root for the actual provider retry/refusal boundary. Mandatory worktrees
 currently refuse spell replay; use this verified direct CLI, not relaxed bindings.
 It is not live installation proof. Also run `scripts/test-ui.ps1` and inspect the image.
 
+## Minimal chat proof
+
+`minimal-chat-proof` records `node <repo>/scripts/test-minimal-chat.cjs <fresh-evidence>`
+plus its retained `--post` check. It covers live token estimate/report replacement,
+context-only hover/focus trigger, global3px radius, removed steering buttons,
+commentary first-chunk/character growth/manual closure/replay, independent top
+warning causes and actual recovery routes. Required worktrees use this verified
+CLI first, never a known refused spell replay. Also run `scripts/test-ui.ps1`,
+hermetic run-count/Responses/Pi phase fixtures and standalone embedded checks.
+Inspect the screenshot; estimates are not exact provider tokens or billing.
+
 ## Streaming-answer reading proof
 
 Run `node <repo>/scripts/test-final-answer-reading.cjs <fresh-evidence>`, then

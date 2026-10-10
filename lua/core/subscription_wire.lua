@@ -505,10 +505,9 @@ end
 -- One response, built from its events. Kept separate from the transport so the fixture test can
 -- drive it with recorded bytes and no socket at all.
 --
--- The phase rule this preserves, and must keep preserving: text arrives *provisionally* as
--- `pending_delta`, and is resolved to `commentary` or to the answer when the completed message item
--- says which it was. Only text the response already knows is the final answer streams as `delta`
--- while it arrives. Flattening the two would put a model's running commentary into the answer, and
+-- Explicit per-item phase is display authority: known commentary streams as `commentary_delta`,
+-- known final text as `delta`. Only unknown text is provisional `pending_delta`, resolved by the
+-- completed message item. Never classify with a response-global stop reason. Flattening the two would put a model's running commentary into the answer, and
 -- the UI's commentary balloons, the reasoning fold and the tool-decision telemetry all read this.
 function M.session(opts)
   opts = opts or {}
@@ -608,6 +607,8 @@ function M.session(opts)
     if slot.phase == 'final_answer' then
       emit({type = 'delta', text = delta, message_id = slot.item_id})
       state.streamed_final[slot.index] = true
+    elseif slot.phase == 'commentary' then
+      emit({type = 'commentary_delta', pending_id = stream_id .. ':' .. slot.index, text = delta})
     else
       emit({type = 'pending_delta', pending_id = stream_id .. ':' .. slot.index, text = delta})
     end

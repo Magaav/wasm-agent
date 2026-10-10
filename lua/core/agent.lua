@@ -25,9 +25,13 @@ M.__index = M
 -- keeps only stream events after the latest checkpoint, which avoids duplicating transcript content.
 local function counts_snapshot(self)
   if not self.run_counts then return nil end
+  local context=self.run_counts.context
+  if context then local copy={};for key,value in pairs(context) do copy[key]=value end;context=copy end
   return {kind="run_counts",version=1,run_id=self.run_id,
     model_calls=self.run_counts.model_calls,tool_calls=self.run_counts.tool_calls,
     started_at=self.run_counts.started_at,
+    tokens_reported=self.run_counts.tokens_reported,usage_calls=self.run_counts.usage_calls,
+    usage_unknown=self.run_counts.usage_unknown,context=context,pending_input=self.run_counts.pending_input,
     elapsed_ms=math.max(0,math.floor((host.now()-self.run_counts.started_at)*1000))}
 end
 
@@ -1017,7 +1021,7 @@ function M:maybe_compact(messages, force)
   -- cache = false: a one-off prompt must not read or write the conversation's
   -- cache (pi does the same, to avoid paying a cache-write premium for nothing).
   local summary_opts={cache=false,session_id=self.session_id,run_id=self.run_id,kind='summary',max_output=math.floor(reserve*.8),
-    on_call_start=self.on_call_start}
+    on_call_start=self.on_call_start,on_call_end=self.on_call_end}
   if self.reserve_summary then self.reserve_summary(prompt,summary_opts,self:summary_model()) end
   local ok, result = pcall(provider.complete_with, self:summary_model(), prompt, nil, false,summary_opts)
   if not ok or provider.visible_text(type(result)=="table" and result.content or "")==""
@@ -1107,9 +1111,30 @@ function M:run(text, images)
   local resource_ctx={session_id=self.session_id,user_id=self.user,run_id=self.run_id,subagent=self.subagent}
   local claimed=resources.begin(resource_ctx)
   if not claimed.ok then error("run_resource_refused: "..json.encode(claimed)) end
-  self.run_counts={model_calls=0,tool_calls=0,started_at=host.now()}
-  self.on_call_start=function()
+  self.run_counts={model_calls=0,tool_calls=0,started_at=host.now(),tokens_reported=0,usage_calls=0,usage_unknown=0}
+  self.on_call_start=function(kind,request,capacity)
+    self.run_counts.pending_input=request and request.context_tokens_estimate or nil
     self.run_counts.model_calls=self.run_counts.model_calls+1
+    -- Context is one task request, never cumulative spend or a summary's smaller window.
+    if kind~='summary' and request then
+      self.run_counts.context={tokens=request.context_tokens_estimate,capacity=capacity,estimated=true,model=request.model}
+    end
+    emit_counts(self)
+  end
+  self.on_call_end=function(observation,kind)
+    local usage=observation and observation.normalized
+    self.run_counts.pending_input=nil
+    self.run_counts.usage_calls=self.run_counts.usage_calls+1
+    if usage and usage.known then
+      self.run_counts.tokens_reported=self.run_counts.tokens_reported+usage.total
+    else self.run_counts.usage_unknown=self.run_counts.usage_unknown+1 end
+    if observation and (observation.transport_failed_attempts or 0)>0 then
+      self.run_counts.usage_unknown=self.run_counts.usage_unknown+observation.transport_failed_attempts
+    end
+    if observation and kind~='summary' and usage and usage.known then
+      local context=self.run_counts.context
+      if context then context.tokens=usage.prompt;context.estimated=false end
+    end
     emit_counts(self)
   end
   self.steering_run_id=self.subagent and self.subagent.run_id or self.run_id
@@ -1134,6 +1159,7 @@ function M:run(text, images)
   provider.unpin()
   self.reserve_summary=nil
   self.on_call_start=nil
+  self.on_call_end=nil
   emit_counts(self)
   local inbox_ok,inbox_error=pcall(steering.finish,self.user,self.session_id,self.steering_run_id,ok and 'settled' or 'failed')
   if not inbox_ok then ok,result=false,'steering_settlement_failed: '..tostring(inbox_error) end
@@ -1437,7 +1463,7 @@ function M:run_body(text, images)
     end
     local budget_opts, budget_reserved = child_call_budget(context_tokens, context_source, round)
     local call_opts = {session_id=self.session_id,run_id=self.run_id,round=round,context_tokens=context_tokens,
-       on_call_start=self.on_call_start,context={estimate_source=context_source,summary_watermark=(memory.session(self.session_id) or {}).summarized_until or 0}}
+       on_call_start=self.on_call_start,on_call_end=self.on_call_end,context={estimate_source=context_source,summary_watermark=(memory.session(self.session_id) or {}).summarized_until or 0}}
     for key, value in pairs(budget_opts or {}) do call_opts[key] = value end
     local ok, result = pcall(provider.complete_with, self.model, messages, tool_list, self.stream, call_opts)
     -- No response headers means no model output reached this process, hence no returned tool call

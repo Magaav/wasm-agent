@@ -25,7 +25,7 @@ const causeChain = error => {
 // Observe below Pi's error normalizer, which otherwise drops Node's error.cause.
 // Never copy URLs, headers, request bodies or streamed text into diagnostics.
 // Error messages are bounded/redacted heuristically; cause codes are typed identifiers.
-function observedFetch(state,onConnected) {
+function observedFetch(state,onConnected,onMessagePhase) {
   const fetchImpl=globalThis.fetch.bind(globalThis);
   return async (url,options) => {
     state.fetch_observed=true;state.stage='response_headers';
@@ -39,12 +39,34 @@ function observedFetch(state,onConnected) {
     }
     if(!response.body) return response;
     const reader=response.body.getReader();state.stage='response_body';
+    // Pi omits added-item phase from text_start. Read only that explicit metadata;
+    // never classify with global stopReason or modify the bytes Pi receives.
+    const decoder=new TextDecoder(),seen=new Set();let pending='',discard=false;
+    if(!response.headers.get('content-type')?.includes('text/event-stream'))onMessagePhase?.(null);
+    const phases=bytes=>{
+      pending+=decoder.decode(bytes,{stream:true});
+      for(;;){const end=pending.search(/\r?\n\r?\n/);if(end<0)break;
+        const frame=pending.slice(0,end);pending=pending.slice(end).replace(/^\r?\n\r?\n/,'');
+        if(!discard&&frame.length<=65536&&frame.includes('response.output_item.added')) {
+          try {const data=frame.split(/\r?\n/).filter(line=>line.startsWith('data:')).map(line=>line.slice(5).trimStart()).join('\n');
+            const event=JSON.parse(data);
+            if(event.type==='response.output_item.added'&&event.item?.type==='message'&&!seen.has(event.output_index)) {
+              if(!Number.isInteger(event.output_index)||seen.size>=512){onMessagePhase?.(null);return;}
+              seen.add(event.output_index);onMessagePhase?.(['commentary','final_answer'].includes(event.item.phase)?event.item.phase:'');
+            }
+          }catch{onMessagePhase?.(null);} // Lose early classification, never output.
+        }
+        if(discard||frame.length>65536)onMessagePhase?.(null);
+        discard=false;
+      }
+      if(pending.length>65536){pending=pending.slice(-3);discard=true;onMessagePhase?.(null);}
+    };
     const body=new ReadableStream({
       async pull(controller) {
         try {
           const item=await reader.read();
           if(item.done) {state.body_eof=true;reader.releaseLock();controller.close();}
-          else {state.response_bytes+=item.value.byteLength;controller.enqueue(item.value);}
+          else {state.response_bytes+=item.value.byteLength;phases(item.value);controller.enqueue(item.value);}
         } catch(error) {state.causes=causeChain(error);state.cancelled=options?.signal?.aborted===true;try{reader.releaseLock();}catch{} controller.error(error);}
       },
       async cancel(reason) {try{return await reader.cancel(reason);}finally{try{reader.releaseLock();}catch{}}}
@@ -328,24 +350,30 @@ try {
       recoveryTimer=setTimeout(()=>{activeTransport.recovery_timeout=true;recoveryController.abort();},Math.min(interval,remaining));
     }
     try {
+      const earlyMessagePhases=[];let earlyPhasesSafe=true;
       const stream = models.stream(model, context, {sessionId:request.session_id,
         transport:'sse', reasoningEffort:request.reasoning, maxTokens:request.max_output,
         maxRetries:0,signal:recoveryController.signal,fetch:observedFetch(activeTransport,()=>{
           clearTimeout(recoveryTimer);
           if(retryIndex>0)retryEvent('connected','Provider connection established; waiting for model output');
-        })});
+        },phase=>{if(phase===null||earlyMessagePhases.length>=512){earlyPhasesSafe=false;earlyMessagePhases.length=0;}else if(earlyPhasesSafe)earlyMessagePhases.push(phase);})});
       for await (const event of stream) {
         // Unknown shapes fence regeneration. Known output is still uncommitted:
         // no tool dispatch is possible inside this bridge.
         if(recordProgress(event)) clearTimeout(recoveryTimer);
-    if (event.type === 'text_delta' || event.type === 'thinking_delta') {
+    if(event.type==='text_start') {
+      const id=`${attemptTag}:${event.contentIndex}`;
+      let phase=earlyMessagePhases.shift() || '';
+      try {phase=JSON.parse(event.partial?.content?.[event.contentIndex]?.textSignature || '{}').phase || phase;}catch{}
+      attemptTexts.set(id,{pending_id:id,text:'',phase});
+    } else if (event.type === 'text_delta' || event.type === 'thinking_delta') {
       ttft ??= Date.now() - started;
       // A response-global mutable stopReason is not a per-item phase.
       if (event.type === 'text_delta') {
         const id=`${attemptTag}:${event.contentIndex}`;
         const item=attemptTexts.get(id) || {pending_id:id,text:'',phase:''};
         item.text+=event.delta;attemptTexts.set(id,item);
-        send({type:'pending_delta', pending_id:id, text:event.delta});
+        send({type:item.phase==='commentary'?'commentary_delta':'pending_delta', pending_id:id, text:event.delta});
       } else if (event.type === 'thinking_delta') {
         reasoningText += event.delta;
         attemptThoughts.set(event.contentIndex,(attemptThoughts.get(event.contentIndex)||'')+event.delta);
@@ -361,9 +389,8 @@ try {
         const value = JSON.parse(block.textSignature || '{}').phase;
         if (value === 'commentary' || value === 'final_answer') phase = value;
       } catch {}
-      // Pi exposes final_answer while deltas are arriving, but commentary only
-      // on the completed text block's signature. Keep unclassified text visibly
-      // provisional, then resolve it to commentary or the completed answer here.
+      // The completed signature is authoritative even after early metadata.
+      // Unclassified text remains provisional until this per-item boundary.
       const pendingId = `${attemptTag}:${event.contentIndex}`;
       attemptTexts.set(pendingId,{pending_id:pendingId,text:event.content || block.text || '',phase});
       if (phase === 'final_answer') send({type:'final_answer_begin', message_id:pendingId,

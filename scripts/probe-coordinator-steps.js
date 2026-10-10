@@ -23,18 +23,18 @@
     check(transcript.querySelectorAll('wa-message.assistant').length === 1, 'background admission immediately creates one balloon');
     check(bubble.querySelector('wa-step[data-state="running"]'), 'background phase is retained for debug');
     check(getComputedStyle(bubble.querySelector('wa-step')).display==='none','ordinary mode hides detailed phase rows');
-    check(statusPhase.textContent.startsWith('Working')&&!statusPhase.hidden,'ordinary mode has a compact current phase');
+    check(statusPhase.title.startsWith('Working')&&!statusPhase.hidden,'ordinary mode has a compact current phase');
     check(statusLabel.hidden&&statusPhase.nextElementSibling===statusElapsed,'phase replaces redundant thinking label before total duration');
     setTranscriptDebug(transcript,'debug');
     check(getComputedStyle(bubble.querySelector('wa-step')).display!=='none','debug mode reveals phase history');
     check(bubble.body.querySelector(':scope > .chat-content-run-status'), 'live status is inside the balloon');
-    check(statusElapsed.textContent === '1:05', 'background elapsed time uses the saved start time');
+    check(statusElapsed.textContent.endsWith('|◷ 1:05'), 'background elapsed time uses the saved start time');
     check(!!runStatusTicker, 'background turns start the elapsed ticker');
     handleEvent({type:'status',text:'thinking'});
     handleEvent({type:'round',n:1});
     handleEvent({type:'status',text:'model'});
     check(bubble.textContent.includes('Preparing turn') && bubble.textContent.includes('Reasoning'), 'debug preparation and requested model label are separate steps');
-    check(statusLabel.hidden&&statusLabel.textContent===''&&statusPhase.textContent==='Reasoning · 0s','model phase is the only timed description');
+    check(statusLabel.hidden&&statusLabel.textContent===''&&statusPhase.textContent==='0s'&&statusPhase.title==='Reasoning','model phase is the only timed description');
     const waiting = runStepState.active;
     const count = runStepState.steps.length;
     handleEvent({type:'status',text:'model'});
@@ -43,11 +43,11 @@
     try { Date.now = () => clock() + 2000; updateRunElapsed(); }
     finally { Date.now = clock; }
     check(waiting.node.querySelector('.run-step-age').textContent === '2s', 'debug phase has its own measured elapsed time');
-    check(statusPhase.textContent==='Reasoning · 2s','compact phase has its own elapsed time, distinct from total');
+    check(statusPhase.textContent==='2s'&&statusPhase.title==='Reasoning','compact phase has its own elapsed time, distinct from total');
     handleEvent({type:'decision',call_id:'inspect-one',name:'read_many',arguments_text:'worker-result.json',complete:true});
-    check(statusPhase.textContent==='Selecting tools · 0s','tool selection replaces compact current phase');
+    check(statusPhase.textContent==='0s'&&statusPhase.title==='Selecting tools','tool selection replaces compact current phase');
     handleEvent({type:'tool',call_id:'inspect-one',name:'read_many',arguments:{requests:[{path:'worker-result.json'}]}});
-    check(statusPhase.textContent==='Executing tools · 0s','tool execution replaces compact phase without a second status row');
+    check(statusPhase.textContent==='0s'&&statusPhase.title==='Executing tools','tool execution replaces compact phase without a second status row');
     check(bubble.textContent.includes('Selecting tools') && bubble.textContent.includes('Executing tools'), 'tool selection and execution are shown as phases');
     check(bubble.querySelectorAll('.tool-line[data-call-id="inspect-one"]').length === 1, 'the actual inspection tool is shown once');
     check(runStepState.active.node.nextElementSibling?.tagName === 'WA-TRACE', 'execution phase precedes a promoted streamed decision trace');
@@ -157,7 +157,7 @@
     document.getElementById('panel').style.width='540px';
     handleEvent({type:'status',text:'model'});
     runStepState.active.started=Date.now()-9000;updateRunElapsed();
-    check(statusPhase.textContent==='Reasoning · 9s'&&statusElapsed.textContent==='1:05','compact screenshot has separate phase and total clocks');
+    check(statusPhase.textContent==='9s'&&statusElapsed.textContent.endsWith('|◷ 1:05'),'compact screenshot has separate phase and total clocks');
     const box=statusLine.getBoundingClientRect();
     for (const width of [320,540,800]) {
       document.getElementById('panel').style.width=width+'px';
@@ -165,7 +165,7 @@
       check(getComputedStyle(statusLine).whiteSpace==='normal','status does not inherit transcript pre-wrap at '+width);
       check(Math.abs(spinnerBox.width-15)<1&&Math.abs(spinnerBox.height-15)<1,'activity glyph keeps its fixed slot at '+width);
       check(Math.abs((phaseBox.top+phaseBox.bottom)/2-(totalBox.top+totalBox.bottom)/2)<1,'phase and total vertically aligned at '+width);
-      check(Math.abs(phaseBox.left-spinnerBox.right-5)<1&&phaseBox.right<=totalBox.left-4,'one spacing-scale gap before phase at '+width);
+      check(Math.abs(phaseBox.left-spinnerBox.right-5)<1&&phaseBox.right<=totalBox.left+1,'one spacing-scale gap before phase at '+width);
       check(statusLine.scrollWidth<=statusLine.clientWidth+1,'status fits at '+width);
     }
     document.getElementById('panel').style.width='540px';
