@@ -23,9 +23,31 @@ M.__index = M
 
 -- A browser that reconnects can repaint durable rows first, then resume from this boundary. The host
 -- keeps only stream events after the latest checkpoint, which avoids duplicating transcript content.
+local function counts_snapshot(self)
+  if not self.run_counts then return nil end
+  return {kind="run_counts",version=1,run_id=self.run_id,
+    model_calls=self.run_counts.model_calls,tool_calls=self.run_counts.tool_calls,
+    started_at=self.run_counts.started_at,
+    elapsed_ms=math.max(0,math.floor((host.now()-self.run_counts.started_at)*1000))}
+end
+
+local function emit_counts(self)
+  local counts=counts_snapshot(self)
+  if counts then self.emit({type="run_counts",counts=counts}) end
+end
+
 local function record_turn(self, turn)
+  local counts=counts_snapshot(self)
+  if counts then
+    counts.complete=turn.role=="assistant" and turn.phase~="commentary" and #(turn.tool_calls or {})==0
+    turn.trace=turn.trace or {}
+    -- Do not mutate the cumulative diagnostic trace: one snapshot per stored row.
+    local copy={};for _,item in ipairs(turn.trace) do copy[#copy+1]=item end
+    copy[#copy+1]=counts;turn.trace=copy
+  end
   local seq = memory.append_turn(self.session_id, turn)
   self.emit({ type = "checkpoint", seq = seq })
+  emit_counts(self)
   return seq
 end
 
@@ -988,7 +1010,8 @@ function M:maybe_compact(messages, force)
   local started = host.now()
   -- cache = false: a one-off prompt must not read or write the conversation's
   -- cache (pi does the same, to avoid paying a cache-write premium for nothing).
-  local summary_opts={cache=false,session_id=self.session_id,run_id=self.run_id,kind='summary',max_output=math.floor(reserve*.8)}
+  local summary_opts={cache=false,session_id=self.session_id,run_id=self.run_id,kind='summary',max_output=math.floor(reserve*.8),
+    on_call_start=self.on_call_start}
   if self.reserve_summary then self.reserve_summary(prompt,summary_opts,self:summary_model()) end
   local ok, result = pcall(provider.complete_with, self:summary_model(), prompt, nil, false,summary_opts)
   if not ok or provider.visible_text(type(result)=="table" and result.content or "")==""
@@ -1078,6 +1101,11 @@ function M:run(text, images)
   local resource_ctx={session_id=self.session_id,user_id=self.user,run_id=self.run_id,subagent=self.subagent}
   local claimed=resources.begin(resource_ctx)
   if not claimed.ok then error("run_resource_refused: "..json.encode(claimed)) end
+  self.run_counts={model_calls=0,tool_calls=0,started_at=host.now()}
+  self.on_call_start=function()
+    self.run_counts.model_calls=self.run_counts.model_calls+1
+    emit_counts(self)
+  end
   self.steering_run_id=self.subagent and self.subagent.run_id or self.run_id
   local span
   local ok,result=pcall(function()
@@ -1099,6 +1127,8 @@ function M:run(text, images)
   end)
   provider.unpin()
   self.reserve_summary=nil
+  self.on_call_start=nil
+  emit_counts(self)
   local inbox_ok,inbox_error=pcall(steering.finish,self.user,self.session_id,self.steering_run_id,ok and 'settled' or 'failed')
   if not inbox_ok then ok,result=false,'steering_settlement_failed: '..tostring(inbox_error) end
   local marked=not ok and resources.uncertain(resource_ctx) or {ok=true}
@@ -1391,7 +1421,7 @@ function M:run_body(text, images)
     end
     local budget_opts, budget_reserved = child_call_budget(context_tokens, context_source, round)
     local call_opts = {session_id=self.session_id,run_id=self.run_id,round=round,context_tokens=context_tokens,
-       context={estimate_source=context_source,summary_watermark=(memory.session(self.session_id) or {}).summarized_until or 0}}
+       on_call_start=self.on_call_start,context={estimate_source=context_source,summary_watermark=(memory.session(self.session_id) or {}).summarized_until or 0}}
     for key, value in pairs(budget_opts or {}) do call_opts[key] = value end
     local ok, result = pcall(provider.complete_with, self.model, messages, tool_list, self.stream, call_opts)
     -- No response headers means no model output reached this process, hence no returned tool call
@@ -1769,6 +1799,8 @@ function M:run_body(text, images)
           if seconds then emitted.timeout_ms = math.floor(seconds * 1000) end
         end
       end
+      self.run_counts.tool_calls=self.run_counts.tool_calls+1
+      emit_counts(self)
       self.emit(emitted)
       local tool_started = host.now()
       local parallel_op = parallel_ops and parallel_ops[call.id]

@@ -69,6 +69,7 @@ local model_calls=0
 local summary_calls=0
 local requests={}
 provider.complete_with=function(_,messages,_,_,opts)
+  if opts.on_call_start then opts.on_call_start(opts.kind or 'model_call') end
   if opts and opts.kind=='summary' then
     summary_calls=summary_calls+1
     return {content='a checkpoint',tool_calls={},finish_reason='stop',usage=raw}
@@ -86,4 +87,7 @@ check(requests[1].round==1 and requests[2].round==1 and
   'one decision step may issue two different provider requests and a separate summary call')
 check(memory.session(sid).summarized_until>0,'the recovery compacted the transcript')
 provider.budget=real_budget
+local final=memory.session_messages(sid,{limit=1})[1];local counts
+for _,item in ipairs(final.trace or {}) do if item.kind=='run_counts' then counts=item end end
+check(counts and counts.model_calls==3 and counts.tool_calls==0,'overflow request, summary and recovered request all reach the run counter')
 print('overflow recovery ok ('..cases..' checks)')

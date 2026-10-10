@@ -67,7 +67,8 @@ for _,scenario in ipairs({'tool','steer','followup','cancel','failure','unknown'
   local ok,value=pcall(function() return bot:run('fixture') end)
   if scenario=='cancel' or scenario=='failure' or scenario=='commentary' then
     check(not ok,'provider failure propagates')
-    for _,e in ipairs(events) do check(e.type~='reply','no manufactured reply') end
+    -- Additive count snapshots are unrelated to the final-answer causal contract.
+    for _,e in ipairs(events) do if e.type~='run_counts' then check(e.type~='reply','no manufactured reply') end end
   else
     check(ok,'loop succeeds '..scenario..': '..tostring(value))
     check(calls==((scenario=='tool' or scenario=='steer' or scenario=='followup') and 2 or 1),'unchanged continuation count '..scenario)

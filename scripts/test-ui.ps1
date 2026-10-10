@@ -2659,7 +2659,7 @@ $harness = @'
     window.handleEvent({ type: "done" });
     check(!!runStatus && runStatus.classList.contains("finished") && runStatus.closest("wa-message"),
       "run status: on completion, the same status becomes the assistant bubble footer");
-    check(!!runStatus && /^\d+:\d{2}$/.test(runStatus.querySelector(".chat-content-run-elapsed").textContent),
+    check(!!runStatus && /◷ \d+:\d{2}$/.test(runStatus.querySelector(".chat-content-run-elapsed").textContent),
       "run status: the completed footer keeps the run duration");
   })();
 
@@ -3777,6 +3777,10 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'final-answer focused suite failed' }
     & node scripts/test-coordinator-steps.cjs
     if ($LASTEXITCODE -ne 0) { throw 'compact phase/debug browser suite failed' }
+    & node scripts/test-run-counts.cjs (Join-Path $tmp 'run-counts')
+    if ($LASTEXITCODE -ne 0) { throw 'run count browser suite failed' }
+    & node scripts/test-run-counts.cjs (Join-Path $tmp 'run-counts') --post
+    if ($LASTEXITCODE -ne 0) { throw 'run count evidence postcheck failed' }
     & node scripts/test-chat-health.cjs (Join-Path $tmp 'chat-health')
     if ($LASTEXITCODE -ne 0) { throw 'chat health warning/poll-sharing suite failed' }
     & node scripts/test-chat-health.cjs (Join-Path $tmp 'chat-health') --post

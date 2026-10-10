@@ -187,6 +187,17 @@ are not GPU/power proof: record real-window measurements separately, never call
 percent utilization a temperature or a fan-speed cause. Keep the HTML title
 unchanged in probes; the observer positively checks that exact title.
 
+## Run-count footer proof
+
+`run-counts-proof` records the staged-browser test and retained hash postcheck:
+`node <repo>/scripts/test-run-counts.cjs <fresh-evidence>`, then the same with
+`--post`. Use it for live provider-attempt/tool totals, checkpoint/reload replay,
+unknown/lower-bound historical counts, child isolation and narrow footer layout.
+Run the hermetic `scripts/test-run-counts.lua` with a scratch home/DB and explicit
+Lua root for the actual provider retry/refusal boundary. Mandatory worktrees
+currently refuse spell replay; use this verified direct CLI, not relaxed bindings.
+It is not live installation proof. Also run `scripts/test-ui.ps1` and inspect the image.
+
 ## Streaming-answer reading proof
 
 Use `final-answer-reading-proof` for the verified fixture-only browser run plus

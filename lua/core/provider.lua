@@ -1004,6 +1004,9 @@ function M.complete_with(model, messages, tools, stream, opts)
     end
   end
   local span=telemetry.start(opts,opts.kind or "model_call",request_meta)
+  -- Count the provider boundary, not a decision round or pre-request refusal.
+  -- Transport reconnects inside a subscription call remain separate diagnostics.
+  if opts.on_call_start then opts.on_call_start(opts.kind or "model_call") end
   local ok,result=pcall(function()
   if provider.id=="openai-sub" then
     local bridge_opts={}
