@@ -315,11 +315,13 @@ wa-diff { display: block; align-self: flex-start; max-width: 760px; width: 100%;
 
 .chat-content-run-status {
   position: sticky; bottom: 0; z-index: 2; align-self: stretch; display: flex; align-items: center;
-  gap: var(--gap); color: var(--muted); font-size: 13px; padding: var(--space);
+  gap: var(--gap); color: var(--muted); font-size: 13px; padding: var(--space); white-space: normal;
   background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius-sm);
 }
-.chat-content-run-label { min-width: 0; flex: 0 0 auto; }
-.chat-content-run-phase { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-variant-numeric: tabular-nums; }
+/* One tiny transform-only indicator while work is live; no blur, shadow or JS animation loop. */
+.chat-content-run-status > .spinner { flex: 0 0 auto; border-right-color: var(--accent); animation-timing-function: linear; }
+.chat-content-run-label { min-width: 0; }
+.chat-content-run-phase { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-variant-numeric: tabular-nums; }
 /* Detailed phase history is diagnostic-only; the compact current phase stays in the footer. */
 .messages:not([data-debug="true"]) wa-step, .agent-transcript:not([data-debug="true"]) wa-step { display: none; }
 .chat-content-run-elapsed { margin-left: auto; flex: 0 0 auto; font-variant-numeric: tabular-nums; }
@@ -355,7 +357,11 @@ body.ui-resting .thread-notice::before, body.ui-resting .update-spinner {
 }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }
+  /* Requested live feedback only: gentle opacity, never spatial motion or flashing. */
+  .chat-content-run-status > .spinner { animation: run-status-pulse 2.5s ease-in-out infinite !important; }
+  body.ui-resting .chat-content-run-status > .spinner { animation-play-state: paused !important; }
 }
+@keyframes run-status-pulse { 0%, 100% { opacity: .65; } 50% { opacity: 1; } }
 @keyframes spin { to { transform: rotate(360deg); } }
 .tool {
   align-self: flex-start; max-width: 760px; border: 1px solid var(--line);

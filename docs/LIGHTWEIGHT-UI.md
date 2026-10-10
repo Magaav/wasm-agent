@@ -9,7 +9,10 @@ The resting avatar is static; hover/press uses a short transform transition.
 The panel uses opaque tonal depth instead of full-viewport backdrop blur. Controls
 retain the existing spacing, contrast, keyboard/focus and popover contracts, with
 brief color transitions only during interaction. Reduced-motion users get no
-animations. Hidden/compact surfaces pause status animation and decorative clocks;
+spatial/decorative animation; the explicitly requested 10px live-status indicator
+uses a gentle 2.5s opacity pulse (.65–1) instead of rotation. This narrow functional
+exception is removed at settlement; it is not an idle decoration or a flash.
+Hidden/compact surfaces pause status animation and decorative clocks;
 stream data and durable state are never paused or discarded.
 
 Long transcripts (60+ rows) use browser-native `content-visibility:auto` only after

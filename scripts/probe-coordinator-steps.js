@@ -24,7 +24,7 @@
     check(bubble.querySelector('wa-step[data-state="running"]'), 'background phase is retained for debug');
     check(getComputedStyle(bubble.querySelector('wa-step')).display==='none','ordinary mode hides detailed phase rows');
     check(statusPhase.textContent.startsWith('Working')&&!statusPhase.hidden,'ordinary mode has a compact current phase');
-    check(statusLabel.nextElementSibling===statusPhase&&statusPhase.nextElementSibling===statusElapsed,'phase lives between thinking label and total duration');
+    check(statusLabel.hidden&&statusPhase.nextElementSibling===statusElapsed,'phase replaces redundant thinking label before total duration');
     setTranscriptDebug(transcript,'debug');
     check(getComputedStyle(bubble.querySelector('wa-step')).display!=='none','debug mode reveals phase history');
     check(bubble.body.querySelector(':scope > .chat-content-run-status'), 'live status is inside the balloon');
@@ -33,8 +33,8 @@
     handleEvent({type:'status',text:'thinking'});
     handleEvent({type:'round',n:1});
     handleEvent({type:'status',text:'model'});
-    check(bubble.textContent.includes('Preparing turn') && bubble.textContent.includes('Waiting on model'), 'debug preparation and model wait are separate steps');
-    check(statusLabel.textContent==='thinking…'&&statusPhase.textContent==='Waiting on model · 0s','model waiting is compact, shortened and timed');
+    check(bubble.textContent.includes('Preparing turn') && bubble.textContent.includes('Reasoning'), 'debug preparation and requested model label are separate steps');
+    check(statusLabel.hidden&&statusLabel.textContent===''&&statusPhase.textContent==='Reasoning · 0s','model phase is the only timed description');
     const waiting = runStepState.active;
     const count = runStepState.steps.length;
     handleEvent({type:'status',text:'model'});
@@ -43,7 +43,7 @@
     try { Date.now = () => clock() + 2000; updateRunElapsed(); }
     finally { Date.now = clock; }
     check(waiting.node.querySelector('.run-step-age').textContent === '2s', 'debug phase has its own measured elapsed time');
-    check(statusPhase.textContent==='Waiting on model · 2s','compact phase has its own elapsed time, distinct from total');
+    check(statusPhase.textContent==='Reasoning · 2s','compact phase has its own elapsed time, distinct from total');
     handleEvent({type:'decision',call_id:'inspect-one',name:'read_many',arguments_text:'worker-result.json',complete:true});
     check(statusPhase.textContent==='Selecting tools · 0s','tool selection replaces compact current phase');
     handleEvent({type:'tool',call_id:'inspect-one',name:'read_many',arguments:{requests:[{path:'worker-result.json'}]}});
@@ -82,7 +82,7 @@
     check(child.dataset.debug==='false'&&transcript.dataset.debug==='true','child debug state is independent of main');
     child.remove();
     handleEvent({type:'pending_delta',pending_id:'answer',text:'The review'});
-    check(currentBubble().textContent.includes('Receiving model output'), 'provisional output has a visible step');
+    check(runStepState.active.label==='Model output'&&statusLabel.hidden, 'provisional output omits receiving/redundant label');
     handleEvent({type:'delta',pending_id:'answer',text:'The review passed.'});
     check(currentBubble().textContent.includes('Writing response'), 'answer streaming has a visible step');
     handleEvent({type:'reply',text:'The review passed.',message_id:'review-answer'});
@@ -142,7 +142,7 @@
     setLiveness({working:true,run_state:'running',busy_ms:1000,stalled:10,queue:0});
     check(runStepState.active.label === 'Starting turn', 'queue-to-running transition updates the phase');
     handleEvent({type:'commentary_delta',text:'Checking the worker result.'});
-    check(runStepState.active.label === 'Receiving progress update', 'coordinator commentary is a visible phase');
+    check(runStepState.active.label === 'Progress update'&&statusLabel.hidden, 'progress update omits receiving/redundant label');
     setTranscriptDebug(transcript,'default');
     check(Array.from(transcript.querySelectorAll('wa-step')).every(node=>getComputedStyle(node).display==='none'),'normal mode stays quiet during live output');
     setLiveness(null);
@@ -157,10 +157,40 @@
     document.getElementById('panel').style.width='540px';
     handleEvent({type:'status',text:'model'});
     runStepState.active.started=Date.now()-9000;updateRunElapsed();
-    check(statusPhase.textContent==='Waiting on model · 9s'&&statusElapsed.textContent==='1:05','compact screenshot has separate phase and total clocks');
+    check(statusPhase.textContent==='Reasoning · 9s'&&statusElapsed.textContent==='1:05','compact screenshot has separate phase and total clocks');
     const box=statusLine.getBoundingClientRect();
-    check(statusLabel.getBoundingClientRect().right<=statusPhase.getBoundingClientRect().left+1&&statusPhase.getBoundingClientRect().right<=statusElapsed.getBoundingClientRect().left+1,'narrow footer orders label/phase/total without overlap');
+    for (const width of [320,540,800]) {
+      document.getElementById('panel').style.width=width+'px';
+      const spinnerBox=statusSpinner.getBoundingClientRect(),phaseBox=statusPhase.getBoundingClientRect(),totalBox=statusElapsed.getBoundingClientRect();
+      check(getComputedStyle(statusLine).whiteSpace==='normal','status does not inherit transcript pre-wrap at '+width);
+      check(Math.abs(spinnerBox.width-10)<1&&Math.abs(spinnerBox.height-10)<1,'spinner does not shrink at '+width);
+      check(Math.abs((phaseBox.top+phaseBox.bottom)/2-(totalBox.top+totalBox.bottom)/2)<1,'phase and total vertically aligned at '+width);
+      check(Math.abs(phaseBox.left-spinnerBox.right-5)<1&&phaseBox.right<=totalBox.left-4,'one spacing-scale gap before phase at '+width);
+      check(statusLine.scrollWidth<=statusLine.clientWidth+1,'status fits at '+width);
+    }
+    document.getElementById('panel').style.width='540px';
+    setStatus('Could not stop this run: run_not_found');
+    check(!statusLabel.hidden&&statusLabel.textContent.includes('run_not_found'),'error notices remain visible without thinking label');
+    setStatus('');
+    check(statusLabel.hidden,'return to normal phase hides notice label');
+    check(statusLabel.hidden&&statusPhase.getBoundingClientRect().right<=statusElapsed.getBoundingClientRect().left+1,'narrow footer orders phase/total without redundant label');
     check(statusLine.scrollWidth<=statusLine.clientWidth+1&&box.width>0,'narrow compact status fits viewport');
+    // Tiny CSS-only feedback: rotation normally, gentle non-spatial pulse under reduced motion.
+    document.body.classList.remove('ui-resting');
+    const reduced=matchMedia('(prefers-reduced-motion: reduce)').matches;
+    const animation=statusSpinner.getAnimations()[0];
+    check(!!animation&&getComputedStyle(statusSpinner).animationName===(reduced?'run-status-pulse':'spin'),'live indicator animates in current motion preference');
+    animation.pause();animation.currentTime=0;
+    const first=getComputedStyle(statusSpinner)[reduced?'opacity':'transform'];
+    animation.currentTime=reduced?1250:400;
+    check(first!==getComputedStyle(statusSpinner)[reduced?'opacity':'transform'],'indicator visibly changes across the cycle');
+    if(reduced)check(getComputedStyle(statusSpinner).transform==='none','reduced-motion live feedback has no spatial motion');
+    animation.play();
+    document.body.classList.add('ui-resting');check(getComputedStyle(statusSpinner).animationPlayState==='paused','hidden/resting indicator pauses');
+    document.body.classList.remove('ui-resting');
+    check(getComputedStyle(statusSpinner).animationPlayState==='running','visible indicator resumes');
+    // Own only fixture timers; avoid delayed startup/status repaints in this observation.
+    for (let timer=1;timer<10000;timer++) {clearTimeout(timer);clearInterval(timer);}
     report.dataset.status = 'pass';
     report.textContent = JSON.stringify({checks,skipped:0,evidence},null,2);
   } catch (error) {

@@ -522,6 +522,8 @@ function updateRunPhase() {
   const step = runStepState?.active;
   const live = !!step && !replayingMessages && !statusLine?.classList.contains('finished');
   statusPhase.hidden = !live;
+  // Routine work needs one description: its measured phase, not a second label.
+  if (statusLabel) statusLabel.hidden = !statusLabel.textContent;
   if (live) setText(statusPhase, step.label + ' · ' + Math.max(0, Math.floor((Date.now() - step.started) / 1000)) + 's');
   else setText(statusPhase, '');
 }
@@ -555,7 +557,7 @@ function showRunStep(key, label) {
   currentBubble().body.append(node);
   node.setStep(label, "running", 0);
   if (!runStartedAt) runStartedAt = Date.now();
-  if (turnIsActive()) setStatus('thinking…');
+  if (turnIsActive()) setStatus('');
   updateRunPhase();
   keepStatusLast();
   pin();
@@ -607,7 +609,7 @@ function ensureObservedRunStep(current) {
       (runStepId() && runStepState.id && runStepId() !== runStepState.id)) {
     showRunStep("working", "Working — waiting for the next step");
   }
-  setStatus('thinking…');
+  setStatus('');
 }
 
 // The status line belongs to the run in flight and must stay the *last* thing in the
@@ -1562,26 +1564,26 @@ function handleEvent(event) {
   } else if (event.type === "status") {
     const note = event.text || "working";
     showRunStep(note === "model" ? "model" : note === "thinking" ? "preparing" : "status:" + note,
-      note === "model" ? "Waiting on model" : note === "thinking" ? "Preparing turn" : note);
-    setStatus(note === "model" || note === "thinking" ? "thinking…" : "wasm-agent is " + note + "…");
+      note === "model" ? "Reasoning" : note === "thinking" ? "Preparing turn" : note);
+    setStatus(note === "model" || note === "thinking" ? "" : "wasm-agent is " + note + "…");
   } else if (event.type === "commentary") {
-    showRunStep("commentary", "Receiving progress update");
+    showRunStep("commentary", "Progress update");
     const pending = phasePendingText.get(String(event.pending_id || ''));
     if (pending?.node === answerAnchors.get(transcript)) releaseAnswerAnchor(transcript, false);
     removePendingText(event.pending_id);
     appendCommentary(event.text || "", event.message_id, event.pending_id);
   } else if (event.type === "commentary_delta") {
-    showRunStep("commentary", "Receiving progress update");
+    showRunStep("commentary", "Progress update");
     appendStreamedCommentary(event.text || "");
   } else if (event.type === "commentary_end") {
     finishStreamedCommentary(event.message_id);
   } else if (event.type === "reasoning") {
-    showRunStep("reasoning", "Model is reasoning");
+    showRunStep("reasoning", "Reasoning");
     // A reasoning model can think for a long time before it says anything, and a
     // silent panel is indistinguishable from a hung one. Keep the reasoning
     // topic; the compact measured phase provides the live "not hung" signal.
     appendReasoning(event.text || "", event.complete === true);
-    if (!replayingMessages) setStatus("thinking…");
+    if (!replayingMessages) setStatus("");
   } else if (event.type === "decision") {
     addDecision(event);
   } else if (event.type === "tool") {
@@ -1599,10 +1601,10 @@ function handleEvent(event) {
   } else if (event.type === "tool_result") {
     settleTool(event.result, event.name, event.failed);
   } else if (event.type === "pending_delta") {
-    showRunStep("output", "Receiving model output");
+    showRunStep("output", "Model output");
     const key = String(event.pending_id || "");
     if (!key) return;
-    if (statusLabel) statusLabel.textContent = "responding…";
+    if (statusLabel) { setText(statusLabel, ''); updateRunPhase(); }
     let pending = phasePendingText.get(key);
     if (!pending) {
       const node = document.createElement("div");
@@ -1622,7 +1624,7 @@ function handleEvent(event) {
   } else if (event.type === "delta") {
     showRunStep("answer", "Writing response");
     removePendingText(event.pending_id);
-    if (statusLabel) statusLabel.textContent = "responding…";
+    if (statusLabel) { setText(statusLabel, ''); updateRunPhase(); }
     // A new segment per step, inside the same bubble.
     if (!streamBody) {
       streamBody = document.createElement("div");
@@ -1641,7 +1643,7 @@ function handleEvent(event) {
     if (!replayingMessages) finishRunStep();
     discardPendingText();
     markStreamedCommentaryIncomplete();
-    if (statusLabel) statusLabel.textContent = "finishing…";
+    if (statusLabel) { setText(statusLabel, 'finishing…'); updateRunPhase(); }
     if (!replayingMessages && event.message_id && renderedMessageIds.has(String(event.message_id))) {
       // The durable reply can be repainted before its trailing `reply` event is replayed.
       // Keep the saved bubble and let `done` settle it without appending the answer twice.
