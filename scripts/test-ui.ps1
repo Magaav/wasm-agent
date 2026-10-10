@@ -1027,8 +1027,8 @@ $harness = @'
   window.handleEvent({ type: "reasoning", chars: 4096 });
   var reasoningStatuses = document.querySelectorAll(".chat-content-run-status:not(.finished)");
   var reasoningStatus = reasoningStatuses[reasoningStatuses.length - 1];
-  check(!!reasoningStatus && reasoningStatus.querySelector('.chat-content-run-label').textContent==='thinking…' &&
-    reasoningStatus.querySelector('.chat-content-run-phase').textContent.indexOf('Model is reasoning')>=0,
+  check(!!reasoningStatus && reasoningStatus.querySelector('.chat-content-run-label').hidden &&
+    /^Reasoning · [0-9]+s$/.test(reasoningStatus.querySelector('.chat-content-run-phase').textContent),
     "reasoning uses one compact timed phase instead of noisy character counts, saw: " +
     (reasoningStatus ? reasoningStatus.textContent : "no status line"));
 

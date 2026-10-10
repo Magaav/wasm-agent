@@ -68,9 +68,18 @@ with an explicit timestamp. See [LIGHTWEIGHT-UI.md](LIGHTWEIGHT-UI.md).
 ## Compact chat phases and debug history
 
 Ordinary chat shows one current phase in the existing sticky footer:
-`thinking…  Waiting on model · 9s  1:05`. The middle clock measures the current
-phase; the right clock remains the total turn duration. Selecting/executing tools
-and receiving output replace that middle phase, never stack completed status rows.
+`Reasoning · 9s                 1:05`. The left clock measures the current
+phase; the right clock remains the total turn duration. The phase replaces the
+redundant `thinking…`/`responding…` label. Output labels omit `Receiving` (`Model
+output`, `Progress update`); spaces around `·` remain. `Reasoning` is the requested
+UI name for model wait/reasoning, not proof of provider-internal reasoning activity.
+Selecting/executing tools and output replace that phase, never stack completed rows.
+Live status uses normal whitespace rather than inheriting transcript pre-wrap;
+its 10px spinner keeps its size and the phase flexes between it and the total timer.
+The spinner is one transform-only CSS rotation with a visible accent arc, linear
+while live. Reduced motion uses only a slow opacity pulse, explicitly requested
+for this functional indicator; hidden/resting surfaces pause both.
+There is no decorative idle animation, extra timer, blur or full-window effect.
 Settlement hides the current phase and preserves the existing final-duration footer.
 Errors, recovery/queue notices, tool evidence and reasoning content remain visible.
 
