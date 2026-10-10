@@ -319,7 +319,7 @@ wa-diff { display: block; align-self: flex-start; max-width: 760px; width: 100%;
   background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius-sm);
 }
 /* The existing one-second status clock changes a tiny glyph; no CSS or extra animation loop. */
-.run-activity-glyph { flex: 0 0 10px; width: 10px; text-align: center; color: var(--accent); line-height: 1; }
+.run-activity-glyph { flex: 0 0 15px; width: 15px; height: 15px; display: inline-flex; align-items: center; justify-content: center; color: var(--accent); line-height: 1; }
 .chat-content-run-label { min-width: 0; }
 .chat-content-run-phase { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-variant-numeric: tabular-nums; }
 /* Detailed phase history is diagnostic-only; the compact current phase stays in the footer. */

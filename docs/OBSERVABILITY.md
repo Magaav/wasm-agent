@@ -75,8 +75,9 @@ output`, `Progress update`); spaces around `·` remain. `Reasoning` is the reque
 UI name for model wait/reasoning, not proof of provider-internal reasoning activity.
 Selecting/executing tools and output replace that phase, never stack completed rows.
 Live status uses normal whitespace rather than inheriting transcript pre-wrap;
-its 10px dot/star/spike glyph keeps its width and the phase flexes between it and
-the total timer. The existing once-per-second status clock advances the glyph;
+its 15px glyph slot keeps the phase and total timer still. A deterministic
+`· • ✧ ✦ ✶ ✳ ✺ ✳ ✶ ✦ ✧ •` cycle grows from 7px to 13px then shrinks back;
+the next frame returns to the dot. The existing once-per-second status clock advances it;
 there is no CSS rotation/pulse, new timer, blur or full-window effect. Hidden
 surfaces do not tick it; settlement removes it.
 Settlement hides the current phase and preserves the existing final-duration footer.

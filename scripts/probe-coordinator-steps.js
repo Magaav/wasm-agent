@@ -163,7 +163,7 @@
       document.getElementById('panel').style.width=width+'px';
       const spinnerBox=statusSpinner.getBoundingClientRect(),phaseBox=statusPhase.getBoundingClientRect(),totalBox=statusElapsed.getBoundingClientRect();
       check(getComputedStyle(statusLine).whiteSpace==='normal','status does not inherit transcript pre-wrap at '+width);
-      check(Math.abs(spinnerBox.width-10)<1&&spinnerBox.height>0,'activity glyph keeps its fixed width at '+width);
+      check(Math.abs(spinnerBox.width-15)<1&&Math.abs(spinnerBox.height-15)<1,'activity glyph keeps its fixed slot at '+width);
       check(Math.abs((phaseBox.top+phaseBox.bottom)/2-(totalBox.top+totalBox.bottom)/2)<1,'phase and total vertically aligned at '+width);
       check(Math.abs(phaseBox.left-spinnerBox.right-5)<1&&phaseBox.right<=totalBox.left-4,'one spacing-scale gap before phase at '+width);
       check(statusLine.scrollWidth<=statusLine.clientWidth+1,'status fits at '+width);
@@ -177,10 +177,15 @@
     check(statusLine.scrollWidth<=statusLine.clientWidth+1&&box.width>0,'narrow compact status fits viewport');
     // Requested dot/star/spike frames use the existing status clock, no CSS animation.
     check(statusSpinner.className==='run-activity-glyph'&&statusSpinner.getAnimations().length===0,'activity is a text glyph, not a loading animation');
-    const glyphClock=Date.now,glyphs=[];
-    try {for(let i=0;i<6;i++){Date.now=()=>runStartedAt+i*1000;updateRunElapsed();glyphs.push(statusSpinner.textContent);}}
-    finally {Date.now=glyphClock;updateRunElapsed();}
-    check(glyphs.join('')===runActivityGlyphs.join(''),'existing clock cycles exact dot/star/spike sequence');
+    const glyphClock=Date.now,glyphs=[],sizes=[],positions=[];
+    try {for(let i=0;i<=runActivityFrames.length;i++){
+      Date.now=()=>runStartedAt+i*1000;updateRunElapsed();glyphs.push(statusSpinner.textContent);
+      sizes.push(parseFloat(getComputedStyle(statusSpinner).fontSize));
+      positions.push({left:statusPhase.getBoundingClientRect().left,slot:statusSpinner.getBoundingClientRect().width});
+    }} finally {Date.now=glyphClock;updateRunElapsed();}
+    check(glyphs.join('')==='·•✧✦✶✳✺✳✶✦✧•·','existing clock follows fixed grow/shrink icon cycle and wraps');
+    check(sizes.join(',')==='7,8,9,10,11,12,13,12,11,10,9,8,7','glyph really grows then shrinks rather than random swapping');
+    check(positions.every(p=>Math.abs(p.left-positions[0].left)<1&&Math.abs(p.slot-15)<1),'growth never shifts phase or timer layout');
     check(statusSpinner.getAttribute('aria-hidden')==='true'&&getComputedStyle(statusSpinner).transform==='none','glyph feedback has no spatial motion or screenreader noise');
     // Own only fixture timers; avoid delayed startup/status repaints in this observation.
     for (let timer=1;timer<10000;timer++) {clearTimeout(timer);clearInterval(timer);}

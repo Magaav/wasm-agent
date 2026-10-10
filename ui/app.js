@@ -517,7 +517,10 @@ function setTranscriptDebug(container, mode) {
     topic.setSummary(steps, topic.summary?.calls || 0, topic.summary?.ms ?? null);
   }
 }
-const runActivityGlyphs = ['·', '✦', '✳', '✶', '✳', '✦'];
+// Ordered small → full star → small. The fixed slot keeps the phase/timers still.
+const runActivityGrowth = ['·', '•', '✧', '✦', '✶', '✳', '✺'];
+const runActivityFrames = runActivityGrowth.map((glyph, index) => ({glyph, size: 7 + index}));
+runActivityFrames.push(...runActivityFrames.slice(1, -1).reverse());
 function updateRunPhase() {
   if (!statusPhase) return;
   const step = runStepState?.active;
@@ -526,7 +529,10 @@ function updateRunPhase() {
   // Routine work needs one description: its measured phase, not a second label.
   if (statusLabel) statusLabel.hidden = !statusLabel.textContent;
   if (statusSpinner && live) {
-    setText(statusSpinner, runActivityGlyphs[Math.floor((Date.now() - (runStartedAt || step.started)) / 1000) % runActivityGlyphs.length]);
+    const frame = runActivityFrames[Math.max(0, Math.floor((Date.now() - (runStartedAt || step.started)) / 1000)) % runActivityFrames.length];
+    setText(statusSpinner, frame.glyph);
+    const size = frame.size + 'px';
+    if (statusSpinner.style.fontSize !== size) statusSpinner.style.fontSize = size;
   }
   if (live) setText(statusPhase, step.label + ' · ' + Math.max(0, Math.floor((Date.now() - step.started) / 1000)) + 's');
   else setText(statusPhase, '');
@@ -679,7 +685,8 @@ function setStatus(text) {
     statusSpinner = document.createElement("span");
     statusSpinner.className = "run-activity-glyph";
     statusSpinner.setAttribute('aria-hidden', 'true');
-    statusSpinner.textContent = runActivityGlyphs[0];
+    statusSpinner.textContent = runActivityFrames[0].glyph;
+    statusSpinner.style.fontSize = runActivityFrames[0].size + 'px';
     statusLabel = document.createElement("span");
     statusLabel.className = "chat-content-run-label";
     statusPhase = document.createElement("span");

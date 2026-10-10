@@ -9,8 +9,9 @@ The resting avatar is static; hover/press uses a short transform transition.
 The panel uses opaque tonal depth instead of full-viewport backdrop blur. Controls
 retain the existing spacing, contrast, keyboard/focus and popover contracts, with
 brief color transitions only during interaction. Reduced-motion users get no
-spatial/decorative animation. The explicitly requested 10px live-status indicator
-cycles dot/star/spike text once per second using the existing status clock, never
+spatial/decorative animation. The requested live-status glyph grows from dot to
+full star and shrinks in a deterministic mirrored 7–13px cycle inside a fixed
+15px slot. It advances once per second using the existing status clock, never
 CSS rotation, opacity animation or an extra loop. It stops at settlement and
 hidden/compact surfaces do not tick it. This is functional state feedback, not
 an idle decoration, flash or provider-progress claim.
