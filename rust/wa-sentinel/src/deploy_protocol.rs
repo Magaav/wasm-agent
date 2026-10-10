@@ -109,7 +109,7 @@ pub(crate) fn admit(request:&Value) -> Result<PathBuf> {
     let active_file=sentinel_dir().join("protocol-effect.json");
     if active_file.exists() {
         let active:Value=serde_json::from_slice(&std::fs::read(&active_file)?)?;
-        if active["phase"]!="verified" {bail!("prior_protocol_effect_unsettled:{}; reconcile, never replay",active["id"]);}
+        if !reservation_released(&active)? {bail!("prior_protocol_effect_unsettled:{}; reconcile, never replay",active["id"]);}
     }
     let lock=std::fs::OpenOptions::new().create(true).truncate(false).read(true).write(true).open(dir.join("effect.lock"))?;
     lock.lock()?;
@@ -134,8 +134,83 @@ pub(crate) fn verify_install(id:&str) -> Result<Value> {
 // or replaced reservation cannot be settled by an earlier request's proof.
 fn same_effect(active:&Value,effect:&Value)->bool {
     let (Some(mut active),Some(mut effect))=(active.as_object().cloned(),effect.as_object().cloned()) else {return false;};
-    for key in ["phase","verified_at"] {active.remove(key);effect.remove(key);}
+    for key in ["phase","verified_at","retired_at"] {active.remove(key);effect.remove(key);}
     active==effect
+}
+
+pub(crate) fn reservation_released(active:&Value)->Result<bool> {
+    if active["phase"]=="verified" {return Ok(true);}
+    if active["phase"]!="aborted_preinstall" {return Ok(false);}
+    let id=active["id"].as_str().context("preinstall_receipt_id_missing")?;
+    let receipt:Value=serde_json::from_slice(&std::fs::read(sentinel_dir().join("deploy-protocol").join(id).join("preinstall-retirement.json"))?)?;
+    Ok(receipt["ok"]==true && receipt["installation_occurred"]==false && receipt["effect_replayed"]==false
+        && receipt["reservation_released"]==true && same_effect(active,&receipt["effect"]))
+}
+
+/// Retire ONLY an installer positively known to have exited before replacement:
+/// exact capture + unchanged live target creation generation + exact retained source.
+/// This never calls the installer or claims installation verification.
+pub(crate) fn retire_preinstall(id:&str,reason:&str)->Result<Value> {
+    if std::env::var("WASM_AGENT_IN_TURN").as_deref()==Ok("1") {bail!("preinstall_retirement_requires_external_executor");}
+    if reason.trim().is_empty() || reason.len()>600 || reason.contains(['\n','\r','\0']) {bail!("preinstall_reason_required");}
+    if id.is_empty() || !id.bytes().all(|b|b.is_ascii_alphanumeric()||b==b'-') {bail!("preinstall_id_invalid");}
+    let lock=open_lock(&sentinel_dir().join("protocol-effect.lock"))?;lock.lock()?;
+    let dir=sentinel_dir().join("deploy-protocol").join(id);
+    let intent:Value=serde_json::from_slice(&std::fs::read(dir.join("intent.json"))?)?;validate(&intent,id)?;
+    let binding=sentinel_return::bind_parent(id)?;
+    if binding["owner"]!=intent["owner"] {bail!("preinstall_owner_mismatch");}
+    let effect:Value=serde_json::from_slice(&std::fs::read(dir.join("effect.json"))?)?;
+    let mut active:Value=serde_json::from_slice(&std::fs::read(sentinel_dir().join("protocol-effect.json"))?)?;
+    if !same_effect(&active,&effect) || active["phase"]!="admitted" {bail!("preinstall_reservation_mismatch");}
+    let root=canonical_root()?;let current=git(&root,&["rev-parse","HEAD"])?;canonical_script(&current)?;
+    git(&root,&["merge-base","--is-ancestor",intent["expected_sha"].as_str().context("preinstall_sha_missing")?,&current])?;
+    let script=git(&root,&["show",&format!("{}:scripts/deploy.sh",intent["expected_sha"].as_str().unwrap())])?;
+    // Git stdout trim affects the final newline; digest the blob through output, not git()'s text view.
+    let raw=quiet_command("git").arg("-C").arg(&root).args(["show",&format!("{}:scripts/deploy.sh",intent["expected_sha"].as_str().unwrap())]).output()?;
+    if !raw.status.success() || hex_digest(&raw.stdout)!=effect["script_sha256"].as_str().unwrap_or("") {bail!("preinstall_script_identity_mismatch");}
+    if !script.contains("# 1. Clean.") || !script.contains("installing through upgrade.sh") {bail!("preinstall_script_contract_unrecognized");}
+    let target=verify_target(node_port(),true)?;
+    if effect["target_pid"].as_u64()!=Some(target as u64) || effect["target_created"].as_u64()!=instance::process_start(target) {bail!("preinstall_target_generation_changed");}
+    let node:Value=serde_json::from_slice(&std::fs::read(sentinel_dir().join("node.json"))?)?;
+    let binary=installed_binary();
+    if node["pid"]!=target || node["process_start"]!=effect["target_created"] || node["binary_sha256"].as_str()!=Some(hex_digest(&std::fs::read(&binary)?).as_str()) {bail!("preinstall_node_artifact_changed");}
+    let state:Value=serde_json::from_slice(&std::fs::read(dir.join("state.json"))?)?;
+    if state["id"]!=id || state["expected_sha"]!=intent["expected_sha"] || effect["id"]!=id
+        || effect["expected_sha"]!=intent["expected_sha"] || !instance::same_path(&root,Path::new(effect["source"].as_str().unwrap_or(""))) {bail!("preinstall_source_or_state_mismatch");}
+    if dir.join("result.json").exists() {bail!("preinstall_result_exists; use ordinary verification");}
+    let capture=std::fs::read(deploy_capture_path())?;let text=std::str::from_utf8(&capture)?;
+    let stanza=preinstall_capture(&intent,&effect,&state,text)?;
+    if verify_target(node_port(),true)?!=target || instance::process_start(target)!=effect["target_created"].as_u64() {bail!("preinstall_target_changed_during_proof");}
+    let evidence=dir.join(format!("preinstall-evidence-{}",std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()));std::fs::create_dir_all(&evidence)?;
+    for name in ["intent.json","binding.json","effect.json","state.json","return-status.json","observation.json"] {let file=dir.join(name);if file.exists(){std::fs::copy(file,evidence.join(name))?;}}
+    std::fs::copy(sentinel_dir().join("protocol-effect.json"),evidence.join("reservation.json"))?;
+    std::fs::write(evidence.join("deploy.out"),&capture)?;std::fs::write(evidence.join("exact-stanza.txt"),stanza)?;
+    let receipt=json!({"ok":true,"id":id,"effect":effect,"reason":reason,"at":now_epoch(),"target_pid":target,
+        "target_created":instance::process_start(target),"capture_sha256":hex_digest(&capture),"evidence":evidence,
+        "installation_occurred":false,"effect_replayed":false,"reservation_released":true});
+    wa_operation::atomic_json(&dir.join("preinstall-retirement.json"),&receipt)?;
+    active["phase"]=json!("aborted_preinstall");active["retired_at"]=json!(now_epoch());
+    wa_operation::atomic_json(&sentinel_dir().join("protocol-effect.json"),&active)?;
+    record(&intent,id,"failed","explicit unchanged-target pre-install retirement; original failure preserved; no installation or replay")?;
+    Ok(receipt)
+}
+fn hex_digest(bytes:&[u8])->String {ring::digest::digest(&ring::digest::SHA256,bytes).as_ref().iter().map(|b|format!("{b:02x}")).collect()}
+fn preinstall_capture<'a>(intent:&Value,effect:&Value,state:&Value,text:&'a str)->Result<&'a str> {
+    let header=deploy_capture_header(Path::new(effect["script"].as_str().context("preinstall_script_missing")?),intent["reason"].as_str().unwrap_or(""),"detached",effect["at"].as_u64().context("preinstall_at_missing")?);
+    let positions=text.match_indices(&header).collect::<Vec<_>>();if positions.len()!=1 {bail!("preinstall_capture_not_unique");}
+    let tail=&text[positions[0].0+header.len()..];
+    let pid=state["detail"].as_str().and_then(|s|s.strip_prefix("pid ")).and_then(|s|s.split(',').next()).and_then(|s|s.parse::<u32>().ok()).context("preinstall_spawn_pid_missing")?;
+    let ending=format!("--- deploy pid {pid} exited with exit code: 1 after ");
+    let stop=tail.find(&ending).context("preinstall_owned_exit_missing")?;
+    let end=tail[stop..].find('\n').map(|n|stop+n+1).context("preinstall_owned_exit_incomplete")?;
+    let duration=&tail[stop+ending.len()..end-1];
+    if !duration.ends_with('s') || duration[..duration.len()-1].parse::<f64>().ok().is_none_or(|v|!v.is_finite()||v<0.0) {bail!("preinstall_exit_duration_invalid");}
+    let stanza=&tail[..end];
+    if !stanza.contains("dirname: command not found") || !stanza.contains("date: command not found")
+        || !stanza.contains("deploy: the tree has  uncommitted change(s); commit or stash them first")
+        || stanza.contains("deploy: building") || stanza.contains("installing through upgrade.sh") || stanza.contains("upgrade:")
+        || stanza[..stop].contains("--- deploy") {bail!("preinstall_capture_boundary_unproven");}
+    Ok(stanza)
 }
 
 /// Explicit verification-only recovery after a terminal failed return. Never

@@ -5,6 +5,15 @@ absolute execution budget, output cursors, cancellation and a terminal outcome.
 A **job** is an automation definition, never another name for an operation.
 See [JOBS.md](JOBS.md) and ARCHITECTURE.md section 6.
 
+## Windows Git shell environment
+
+An absolute Git Bash/sh command receives that verified installation's bundled
+utilities on its child PATH before admission/spawn. This applies to `bash` and
+explicit background operations; detached Sentinel installers use the same helper.
+No user/login profiles or global PATH edits. Missing required utilities refuse
+before effects. Other shells/non-Windows behavior and CREATE_NO_WINDOW containment
+remain unchanged. See [SENTINEL.md](SENTINEL.md).
+
 ## Contract and implementation
 
 `rust/wa-operation` owns shell process lifetime and output independently of Lua.

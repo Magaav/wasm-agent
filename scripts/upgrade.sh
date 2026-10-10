@@ -19,6 +19,10 @@
 #   WA_PORT=8799 WA_INSTALL_DIR=/usr/local/bin scripts/upgrade.sh ./rust/target/release/wa
 set -uo pipefail
 
+for required in dirname date mkdir sed tr wc uname; do
+  command -v "$required" >/dev/null 2>&1 || { printf 'upgrade: shell_environment_missing:%s; no installation attempted\n' "$required" >&2; exit 127; }
+done
+
 say() { printf '  %s\n' "$*"; }
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"

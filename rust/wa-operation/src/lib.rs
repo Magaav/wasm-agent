@@ -1,6 +1,7 @@
 //! An operation owns execution, output, cancellation and settlement. A job is an automation rule,
 //! not a process. See docs/OPERATIONS.md. No model, Lua state, HTTP or UI is needed to supervise it.
 mod process;
+pub mod shell_env;
 mod redact;
 mod index;
 mod legacy;
@@ -312,6 +313,7 @@ impl Manager {
         self
     }
     pub fn start(&self, mut spec: Spec) -> io::Result<String> {
+        shell_env::configure_spec(&mut spec)?;
         if spec.timeout.is_zero()
             || spec.timeout > Duration::from_secs(86400)
             || spec.output_limit == 0

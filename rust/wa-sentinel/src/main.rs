@@ -1393,6 +1393,7 @@ fn start_deploy_detached(script: &Path, capture: &Path, reason: &str, interprete
     }
     write_to_capture(&mut file, &deploy_capture_header(script, reason, "detached", now_epoch()));
     let mut command = Command::new(interpreter);
+    wa_operation::shell_env::configure_command(&mut command).context("prepare detached Git shell environment")?;
     command
         .args(args)
         .stdin(Stdio::null())
@@ -1407,7 +1408,11 @@ fn start_deploy_detached(script: &Path, capture: &Path, reason: &str, interprete
     }
     let child = command.spawn().context("start the deploy script detached")?;
     let pid = child.id();
-    watch_deploy_exit(child, capture.to_path_buf(), Instant::now());
+    let protocol=args.windows(2).find(|pair|pair[0]=="--request-id").map(|pair|pair[1].clone());
+    let exit_file=protocol.as_deref().map(|id|sentinel_dir().join("deploy-protocol").join(id).join("process-exit.json"));
+    let identity=protocol.as_deref().and_then(|id|std::fs::read(sentinel_dir().join("deploy-protocol").join(id).join("effect.json")).ok())
+        .and_then(|bytes|serde_json::from_slice::<Value>(&bytes).ok());
+    watch_deploy_exit(child, capture.to_path_buf(), Instant::now(), exit_file, identity);
     Ok(format!("pid {pid}, output appended to {}", capture.display()))
 }
 
@@ -1416,17 +1421,21 @@ fn start_deploy_detached(script: &Path, capture: &Path, reason: &str, interprete
 /// the question the capture exists to answer. It costs a thread per deploy (deploys are rare), and it is
 /// best-effort by nature: if this process exits first - a `once` run, or the watcher being replaced - the
 /// ending is missing, and the absence of any later line is then the evidence.
-fn watch_deploy_exit(mut child: std::process::Child, capture: PathBuf, started: Instant) {
+fn watch_deploy_exit(mut child: std::process::Child, capture: PathBuf, started: Instant, exit_file:Option<PathBuf>, effect:Option<Value>) {
     std::thread::spawn(move || {
         let pid = child.id();
-        let ending = match child.wait() {
-            Ok(status) => format!(
-                "--- deploy pid {pid} exited with {status} after {:.1}s\n",
-                started.elapsed().as_secs_f32()
-            ),
-            Err(error) => format!("--- deploy pid {pid} could not be waited on: {error}\n"),
+        let (ending,exit) = match child.wait() {
+            Ok(status) => (format!("--- deploy pid {pid} exited with {status} after {:.1}s\n",started.elapsed().as_secs_f32()),
+                json!({"wait_ok":true,"success":status.success(),"code":status.code(),"status":status.to_string()})),
+            Err(error) => (format!("--- deploy pid {pid} could not be waited on: {error}\n"),json!({"wait_ok":false,"error":error.to_string()})),
         };
         append_to_capture(&capture, &ending);
+        if let (Some(file),Some(effect))=(exit_file,effect) {
+            let record=json!({"schema":1,"id":effect["id"],"expected_sha":effect["expected_sha"],"effect":effect,
+                "pid":pid,"at":now_epoch(),"exit":exit,"elapsed_ms":started.elapsed().as_millis(),
+                "effect_replayed":false,"installation_verified":false});
+            if let Err(error)=wa_operation::atomic_json(&file,&record) {append_to_capture(&capture,&format!("native_exit_record_failed:{error}\n"));}
+        }
     });
 }
 
@@ -2647,6 +2656,15 @@ fn main() -> Result<()> {
             },
             Some("reconcile") if rest.len()==4 && rest[2]=="--reason" => {
                 println!("{}",deploy_protocol::reconcile(&rest[1],&rest[3])?);
+                Ok(())
+            },
+            Some("retire-preinstall") if rest.len()==4 && rest[2]=="--reason" => {
+                println!("{}",deploy_protocol::retire_preinstall(&rest[1],&rest[3])?);
+                Ok(())
+            },
+            Some("retirement-status") if rest.len()==1 => {
+                let active:Value=serde_json::from_slice(&std::fs::read(sentinel_dir().join("protocol-effect.json"))?)?;
+                println!("{}",json!({"released":deploy_protocol::reservation_released(&active)?,"id":active["id"],"phase":active["phase"]}));
                 Ok(())
             },
             Some("reconcile-historical") if rest.len()==4 && rest[2]=="--reason" => {
