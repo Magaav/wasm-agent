@@ -38,8 +38,19 @@ send invalidation-only BroadcastChannel messages, never credentials or settings.
 Failure/unavailability falls back to authoritative reads, not optimistic state.
 
 Model metadata fallback is 5s during a run/open status panel, 30s visible idle,
-and 60s hidden. Health follows at 1s during observed work, 5s visible idle, 15s
-hidden, with immediate reconciliation when visible/focused again. UI version and
+and 60s hidden. Health uses one existing poll: 1s for quiet active work/followers
+and pending operation progress, 5s during fresh own-stream output or visible idle,
+15s hidden, with immediate reconciliation when visible/focused again. The old
+independent one-second liveness interval is removed. Health consumers share one
+in-flight request per node/account/thread/epoch; recovery consumers may explicitly
+reuse a sample for at most1s, while admission/cancellation checks require a fresh
+read. Arriving stream events are transport evidence, never task-success proof.
+A healthy run adds no heartbeat row or counter repaint. Sustained uncertainty is
+shown in the shared shell's top overlay, outside the transcript, without changing
+scroll geometry. Only exact-run worker heartbeat stagnation is a worker warning;
+aggregate/foreign/read-thread age cannot trigger it. Connection warnings require
+repeated failed observations and five seconds without stream evidence. Recovery,
+settlement and target/run switches clear appropriate warnings; no effect replay. UI version and
 shell heartbeat remain bounded (3s visible, 5s hidden) for reload/error recovery.
 Existing request deadlines, single-flight, epochs, lower-revision refusals and
 exponential failure backoff remain. Risk: background activity begun elsewhere can

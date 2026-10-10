@@ -1637,7 +1637,18 @@ function chatControl({ part = "", action = "", id = "", text = "", name = "", ti
 // `chatControl()`, so this footer has one control factory rather than one markup path plus one code path.
 const CHAT_ATTACH_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16.5 6.6 8.7 14.4a1.5 1.5 0 0 0 2.1 2.1l7.8-7.8a3.5 3.5 0 0 0-5-5l-8.1 8.1a5.5 5.5 0 0 0 7.8 7.8l6.7-6.7-1.4-1.4-6.7 6.7a3.5 3.5 0 0 1-5-5l8.1-8.1a1.5 1.5 0 0 1 2.1 2.1z"/></svg>';
 
+class WaChatWarning extends HTMLElement {
+  connectedCallback() { this.setAttribute('role','status'); this.setAttribute('aria-live','polite'); }
+  set message(value) {
+    const text=String(value || '');
+    if(this.textContent!==text)this.textContent=text;
+    if(this.hidden!==!text)this.hidden=!text;
+  }
+}
+customElements.define('wa-chat-warning',WaChatWarning);
+
 const CHAT_SHELL_MARKUP = `
+  <wa-chat-warning data-part="warning" hidden></wa-chat-warning>
   <div class="messages" data-part="content"></div>
   <div class="chat-host" data-part="host"></div>
   <form class="composer" data-part="composer">
@@ -1669,6 +1680,7 @@ class WaChatShell extends HTMLElement {
     this.innerHTML = CHAT_SHELL_MARKUP;
     const part = (name) => this.querySelector('[data-part="' + name + '"]');
     this._content = part("content");
+    this._warning = part("warning");
     this._host = part("host");
     this._form = part("composer");
     this._attachmentsEl = part("attachments");
@@ -1768,6 +1780,7 @@ class WaChatShell extends HTMLElement {
 
   // ---- the transcript region and the host's own rows ----------------------
   get content() { this._ensure(); return this._content; }
+  get warning() { this._ensure(); return this._warning; }
   get host() { this._ensure(); return this._host; }
 
   // ---- the composer ------------------------------------------------------

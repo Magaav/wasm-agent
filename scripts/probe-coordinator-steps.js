@@ -138,7 +138,7 @@
     check(runStepState.id === '905' && runStepState.steps.length === 2, 'submission phases stay with the newly identified turn');
     setLiveness({working:true,run_state:'queued',current_run_id:'904',stalled:10,queue:1});
     check(runStepState.active.key === 'queued', 'exact submitted-run queue state has a visible phase');
-    check(document.getElementById('liveness').closest('wa-message.assistant') === currentBubble(), 'queue and heartbeat information live inside the turn balloon');
+    check(!document.getElementById('liveness')&&chatShell.warning.hidden, 'queued phase stays compact without heartbeat counter or alarm');
     setLiveness({working:true,run_state:'running',busy_ms:1000,stalled:10,queue:0});
     check(runStepState.active.label === 'Starting turn', 'queue-to-running transition updates the phase');
     handleEvent({type:'commentary_delta',text:'Checking the worker result.'});

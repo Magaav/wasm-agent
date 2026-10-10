@@ -198,6 +198,14 @@ Spell replay remains unsupported with enforced worktrees; keep the direct CLI
 until actual replay passes, without weakening bindings. Inspect the screenshot.
 No phase inference, task settlement or installed-source claim follows from scroll.
 
+## Chat health proof
+
+`chat-health-proof` records `node <repo>/scripts/test-chat-health.cjs <fresh-evidence>`
+and its `--post` hash check. The required UI suite includes this probe: quiet healthy
+state, exact-run/connection uncertainty, fixed overlay geometry, recovery and scoped
+single-flight observations. Replay remains unsupported for enforced worktrees;
+use the direct CLI until its postconditions can actually replay, never relax binding.
+
 ## 4. Leave the test behind
 
 If the thing you verified is worth keeping correct, make it a `check(...)` in

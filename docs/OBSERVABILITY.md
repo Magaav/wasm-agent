@@ -82,6 +82,12 @@ there is no CSS rotation/pulse, new timer, blur or full-window effect. Hidden
 surfaces do not tick it; settlement removes it.
 Settlement hides the current phase and preserves the existing final-duration footer.
 Errors, recovery/queue notices, tool evidence and reasoning content remain visible.
+Healthy heartbeat milliseconds are no longer printed in the turn. A shared
+`wa-chat-warning` stays hidden normally and overlays the chat viewport top only
+for sustained exact-run worker/connection uncertainty, using seconds and explicitly
+unconfirmed wording. It never declares failed effects, stops a run, steals scroll
+or occupies a transcript row. See [LIGHTWEIGHT-UI.md](LIGHTWEIGHT-UI.md) for shared
+health polling and evidence thresholds.
 
 Detailed `wa-step` history is visible only for a session whose existing recording
 mode is `debug` (Engine → Sessions). `/session` mode is applied after target/epoch
