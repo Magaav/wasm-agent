@@ -250,6 +250,13 @@ function M.execution_timing(name, output)
   return timing
 end
 
+-- Only a proven pre-admission steering fence is cancellation, never an unknown/failed effect.
+function M.cancelled(output)
+  return type(output)=='table' and output.error=='superseded_by_steering'
+    and output.executed==false and output.effect=='none'
+    and (output.ok==nil or output.ok==false) and output.code==nil
+end
+
 function M.outcome(name, output)
   if type(output) ~= "table" then return true end
   if output.error ~= nil or output.ok == false then return false end

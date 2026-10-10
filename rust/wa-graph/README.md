@@ -96,8 +96,9 @@ use one actual Git root for patch and index. Other roots have independent,
 on-demand `<configured-db-stem>.roots/<canonical-root-SHA256>.db` caches;
 required missing/failed workspace bindings never fall back to runtime source.
 Impact reports its root and binds cursors to it even for identical-source trees. Reads
-pin a read-only graph snapshot and verify source bytes; a stale query may rebuild and take the
-write lock. This is source-snapshot consistency, not an atomic freeze of concurrent external
+pin a read-only graph snapshot and verify source bytes; a stale query returns
+`graph_refresh_required` without rebuilding or taking the write lock. Indexing is
+an explicit incremental action unless `force:true` is chosen. This is source-snapshot consistency, not an atomic freeze of concurrent external
 writers or of code already loaded in a worker. See
 `docs/GRAPH.md` and `docs/HOST.md`.
 

@@ -69,6 +69,15 @@ repeat local part=output.read(ref.sha256,cursor,1); check(part.next_offset>curso
 check(reconstructed==unicode,'unicode artifact retrieval is lossless')
 check(not output.outcome('bash',{code=7}) and not output.outcome('write',{ok=false}),'failed effects are failed tools')
 check(output.outcome('grep',{code=1}),'no-match is a valid search')
+local fenced={error='superseded_by_steering',executed=false,effect='none'}
+check(output.cancelled(fenced) and not output.outcome('write',fenced),'cancelled is non-execution, not successful effect')
+check(not output.cancelled({error='superseded_by_steering',effect='none'}) and
+  not output.cancelled({error='superseded_by_steering',executed=true,effect='none'}) and
+  not output.cancelled({error='tool_output_storage_failed',original_result=fenced}),'uncertain/executed/storage-failed effects never cancellation')
+local cancel_span=telemetry.start({session_id=sid,run_id='cancel-fixture'},'tool',{name='write'})
+telemetry.finish(cancel_span,{name='write',ok=false,cancelled=true,outcome='cancelled_before_execution',error='superseded_by_steering'})
+local cancelled_report=telemetry.snapshot(sid)
+check(cancelled_report.tool_cancelled==1 and cancelled_report.tool_failures==0,'fenced calls counted separately, not failures')
 check(tools.dispatch(memory,'tool_result',{sha256=projected.full_result.sha256},'guest').error~=nil,'artifact retrieval role gate')
 local read_original=host.read_file
 host.read_file=function(path)

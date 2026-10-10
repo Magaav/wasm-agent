@@ -517,6 +517,7 @@ function setTranscriptDebug(container, mode) {
     topic.setSummary(steps, topic.summary?.calls || 0, topic.summary?.ms ?? null);
   }
 }
+const runActivityGlyphs = ['·', '✦', '✳', '✶', '✳', '✦'];
 function updateRunPhase() {
   if (!statusPhase) return;
   const step = runStepState?.active;
@@ -524,6 +525,9 @@ function updateRunPhase() {
   statusPhase.hidden = !live;
   // Routine work needs one description: its measured phase, not a second label.
   if (statusLabel) statusLabel.hidden = !statusLabel.textContent;
+  if (statusSpinner && live) {
+    setText(statusSpinner, runActivityGlyphs[Math.floor((Date.now() - (runStartedAt || step.started)) / 1000) % runActivityGlyphs.length]);
+  }
   if (live) setText(statusPhase, step.label + ' · ' + Math.max(0, Math.floor((Date.now() - step.started) / 1000)) + 's');
   else setText(statusPhase, '');
 }
@@ -673,7 +677,9 @@ function setStatus(text) {
     statusLine = document.createElement("div");
     statusLine.className = "status chat-content-run-status";
     statusSpinner = document.createElement("span");
-    statusSpinner.className = "spinner";
+    statusSpinner.className = "run-activity-glyph";
+    statusSpinner.setAttribute('aria-hidden', 'true');
+    statusSpinner.textContent = runActivityGlyphs[0];
     statusLabel = document.createElement("span");
     statusLabel.className = "chat-content-run-label";
     statusPhase = document.createElement("span");
@@ -939,8 +945,18 @@ function toolTitle(name, args) {
 
 // What the call produced, in one short phrase (pi shows the payload only when a
 // tool line is expanded).
+function steeringCancellation(result) {
+  let value=result;
+  // Historical replay wraps the original JSON in content; never infer cancellation from prose.
+  if (value && typeof value.content==='string' && Object.keys(value).length===1) {
+    try { value=JSON.parse(value.content); } catch { return false; }
+  }
+  return !!value && value.error==='superseded_by_steering' && value.executed===false
+    && value.effect==='none' && (value.ok===undefined || value.ok===false) && value.code===undefined;
+}
 function toolOutcome(name, result) {
   const r = result || {};
+  if (steeringCancellation(r)) return {text:'not executed · superseded', cancelled:true, failed:false};
   if (r.error) return { text: String(r.error).slice(0, 80), failed: true };
   switch (name) {
     case "read": {
@@ -1288,13 +1304,14 @@ function stopToolTicker() {
   if (toolTicker) { clearInterval(toolTicker); toolTicker = null; }
 }
 
-function settleTool(result, name, failed) {
+function settleTool(result, name, failed, cancelled) {
   if (!trace) return;
   const outcome = toolOutcome(name || lastTool, result);
   // The ledger's own verdict, where the caller has one, outranks what the payload looks like: a
   // replayed `ok: 0` row carries no exit code, and reading it as a success is how a failed call came
   // back after a reload as a green line.
-  trace.settle(outcome.text, toolDetail(result), failed === undefined ? outcome.failed : failed === true);
+  const notExecuted=cancelled!==false && outcome.cancelled===true;
+  trace.settle(outcome.text, toolDetail(result), notExecuted ? false : failed === undefined ? outcome.failed : failed === true, notExecuted);
   if ((name || lastTool) === "subagent") renderSubagentCard(result);
   if (!trace.pending) stopToolTicker();
   pin();
@@ -1599,7 +1616,7 @@ function handleEvent(event) {
       : (event.name === "bash" || event.name === "shell" ? execTimeoutSeconds * 1000 : null);
     addTool(event.name, event.arguments, { timeoutMs: boundMs, callId: event.call_id });
   } else if (event.type === "tool_result") {
-    settleTool(event.result, event.name, event.failed);
+    settleTool(event.result, event.name, event.failed, event.cancelled);
   } else if (event.type === "pending_delta") {
     showRunStep("output", "Model output");
     const key = String(event.pending_id || "");

@@ -11,6 +11,7 @@ for i=1,28 do
 end
 assert(host.write_file(root..'/source.lua',table.concat(source,'\n')..'\n'))
 for i=1,8 do assert(host.write_file(root..'/caller_'..i..'.lua','function caller_'..i..'() return changed_'..i..'() end\n'))end
+local indexed,index_error=graph.index({root=root});assert(indexed,index_error)
 local patch={root=root,changes={{path='source.lua',lines=lines}}}
 local all,err=graph.impact(patch,{direction='inbound',depth=1,limit=200,max_bytes=200000})
 assert(all,err);assert(not all.truncated)

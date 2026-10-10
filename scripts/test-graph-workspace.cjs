@@ -5,10 +5,10 @@ const post=process.argv[2]==='--post',binary=path.resolve(process.argv[post?3:2]
 assert(process.argv[post?3:2] && process.argv[post?4:3],'usage: [--post] <source-built-wa> <fresh-evidence-directory>');
 if(post){
  const receipt=JSON.parse(fs.readFileSync(path.join(out,'receipt.json'),'utf8'));
- assert(receipt.ok && receipt.checks===34 && receipt.skipped===0);assert.equal(receipt.binary_sha256,sha(binary));
+ assert(receipt.ok && receipt.checks===37 && receipt.skipped===0);assert.equal(receipt.binary_sha256,sha(binary));
  for(const [name,hash] of Object.entries(receipt.logs))assert.equal(sha(path.join(out,name)),hash);
  for(const [name,hash] of Object.entries(receipt.sources))assert.equal(sha(path.join(repo,name)),hash);
- console.log(JSON.stringify({ok:true,checks:34,skipped:0,evidence_verified:true}));process.exit(0);
+ console.log(JSON.stringify({ok:true,checks:37,skipped:0,evidence_verified:true}));process.exit(0);
 }
 assert(!fs.existsSync(out),'fresh evidence directory required');fs.mkdirSync(out,{recursive:true});
 const env=Object.fromEntries(Object.entries(process.env).filter(([key])=>!/^(WA_|WASM_AGENT_|OPENAI_|OPENCODE_|ANTHROPIC_|PI_)/i.test(key)));
@@ -20,9 +20,9 @@ Object.assign(env,{WASM_AGENT_HOME:home,WASM_AGENT_LUA_ROOT:repo,WA_SCRIPT:path.
 const result=spawnSync(binary,['--db',path.join(home,'fixture.db')],{cwd:repo,env,encoding:'utf8',timeout:120000,maxBuffer:4*1024*1024,windowsHide:true});
 fs.writeFileSync(path.join(out,'stdout.log'),result.stdout||'');fs.writeFileSync(path.join(out,'stderr.log'),result.stderr||'');
 assert.equal(result.status,0,result.error?.message||result.stdout+result.stderr);assert(!result.signal);
-assert((result.stdout||'').includes('graph workspace ok (34 checks)'),'missing complete fixture verdict');
+assert((result.stdout||'').includes('graph workspace ok (37 checks)'),'missing complete fixture verdict');
 for(const [name,hash] of Object.entries(sources))assert.equal(sha(path.join(repo,name)),hash,'source changed during fixture');
-const receipt={ok:true,checks:34,skipped:0,exit:result.status,binary_sha256:sha(binary),sources,
+const receipt={ok:true,checks:37,skipped:0,exit:result.status,binary_sha256:sha(binary),sources,
  logs:Object.fromEntries(['stdout.log','stderr.log'].map(name=>[name,sha(path.join(out,name))])),evidence:out};
 fs.writeFileSync(path.join(out,'receipt.json'),JSON.stringify(receipt,null,2)+'\n');
-console.log(JSON.stringify({ok:true,checks:34,skipped:0,exit:result.status,evidence:out}));
+console.log(JSON.stringify({ok:true,checks:37,skipped:0,exit:result.status,evidence:out}));

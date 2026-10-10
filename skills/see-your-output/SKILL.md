@@ -75,6 +75,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-ui.ps1
 ```
 
 It prints one verdict line. Add your claim as a `check(...)` beside the others.
+First run the focused disposable-browser probe; only after it passes run the
+required UI suite once. Do not launch the broader suite alongside a probe still
+known to fail, or repeat read/discovery/graph work that already established the fix.
 
 Rules that save time, all of them learned the hard way:
 

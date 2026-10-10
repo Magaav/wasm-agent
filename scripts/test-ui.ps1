@@ -2609,6 +2609,29 @@ $harness = @'
     window.handleEvent({ type: "reply", text: "Slow check done." });
     window.handleEvent({ type: "done" });
   })();
+  // A proven steering fence is not a failed effect, including original legacy ok:0 rows.
+  (function () {
+    window.handleEvent({type:'done'});
+    window.handleEvent({type:'tool',name:'write',call_id:'fenced-live',arguments:{path:'not-written'}});
+    window.handleEvent({type:'tool_result',name:'write',result:{error:'superseded_by_steering',executed:false,effect:'none'}});
+    var fenced=document.querySelector('.tool-line[data-call-id="fenced-live"]');
+    check(fenced.classList.contains('cancelled')&&!fenced.classList.contains('err')&&!fenced.classList.contains('ok'),
+      'steering cancellation is neutral, never red or green success');
+    check(fenced.textContent.includes('not executed')&&!fenced.closest('wa-trace').classList.contains('has-error'),
+      'steering cancellation labels non-execution without error count');
+    window.handleEvent({type:'tool',name:'write',call_id:'fenced-unknown',arguments:{path:'unknown'}});
+    window.handleEvent({type:'tool_result',name:'write',result:{error:'superseded_by_steering',effect:'none'}});
+    check(document.querySelector('.tool-line[data-call-id="fenced-unknown"]').classList.contains('err'),
+      'missing non-execution proof remains a visible failure');
+    window.handleEvent({type:'done'});
+    var savedRows=[{seq:1,role:'user',content:'Legacy cancellation',created_at:1},
+      {seq:2,role:'assistant',content:'',tool_calls:[{id:'fenced-replay',function:{name:'write',arguments:'{}'}}],created_at:2},
+      {seq:3,role:'tool',tool_call_id:'fenced-replay',tool_name:'write',ok:0,
+        content:JSON.stringify({error:'superseded_by_steering',executed:false,effect:'none'}),created_at:3}];
+    var host=document.createElement('div');messages.append(host);paintChildTranscript(host,savedRows,{state:'unfinished'});
+    check(host.querySelector('.tool-line[data-call-id="fenced-replay"]').classList.contains('cancelled'),
+      'legacy cancelled row survives replay as neutral despite original ok:0');host.remove();
+  })();
   // ---- reasoning ----------------------------------------------------------
   //
   // A reasoning model's thinking arrives in a field of its own, so a turn whose content was

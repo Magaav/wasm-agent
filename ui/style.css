@@ -318,8 +318,8 @@ wa-diff { display: block; align-self: flex-start; max-width: 760px; width: 100%;
   gap: var(--gap); color: var(--muted); font-size: 13px; padding: var(--space); white-space: normal;
   background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius-sm);
 }
-/* One tiny transform-only indicator while work is live; no blur, shadow or JS animation loop. */
-.chat-content-run-status > .spinner { flex: 0 0 auto; border-right-color: var(--accent); animation-timing-function: linear; }
+/* The existing one-second status clock changes a tiny glyph; no CSS or extra animation loop. */
+.run-activity-glyph { flex: 0 0 10px; width: 10px; text-align: center; color: var(--accent); line-height: 1; }
 .chat-content-run-label { min-width: 0; }
 .chat-content-run-phase { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-variant-numeric: tabular-nums; }
 /* Detailed phase history is diagnostic-only; the compact current phase stays in the footer. */
@@ -357,11 +357,7 @@ body.ui-resting .thread-notice::before, body.ui-resting .update-spinner {
 }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }
-  /* Requested live feedback only: gentle opacity, never spatial motion or flashing. */
-  .chat-content-run-status > .spinner { animation: run-status-pulse 2.5s ease-in-out infinite !important; }
-  body.ui-resting .chat-content-run-status > .spinner { animation-play-state: paused !important; }
 }
-@keyframes run-status-pulse { 0%, 100% { opacity: .65; } 50% { opacity: 1; } }
 @keyframes spin { to { transform: rotate(360deg); } }
 .tool {
   align-self: flex-start; max-width: 760px; border: 1px solid var(--line);
@@ -401,6 +397,7 @@ wa-retry { display: block; width: 100%; }
 .tool-line { padding: 2px var(--space) 2px var(--gap); border-left: 2px solid transparent; }
 .tool-line.ok { border-left-color: rgba(63, 185, 80, .5); }
 .tool-line.err { border-left-color: #f85149; }
+.tool-line.cancelled { border-left-color: var(--muted); }
 .tool-line.unrecorded { border-left-color: var(--warn); }
 .tool-line.decision { border-left-color: var(--accent); }
 .tool-line.decision-complete .tool-outcome { color: var(--accent); }

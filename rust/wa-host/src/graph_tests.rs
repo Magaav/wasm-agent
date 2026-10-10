@@ -1,5 +1,24 @@
 use super::*;
 
+#[test]
+fn graph_reads_never_create_or_refresh_an_index() {
+    let fixture=Fixture::new();let root=fixture.0.join("owned");let db=fixture.0.join("read.db");
+    let file=root.join("source.lua");std::fs::write(&file,"function original() return 1 end\n").unwrap();
+    let refused=read_snapshot(&root,&db,&json!({}),|_,_,_|panic!("body on missing index")).unwrap();
+    assert_eq!(refused["error"],"graph_refresh_required");assert!(!db.exists());
+    {let mut store=wa_graph::Store::open(&db).unwrap();store.index(&root,false).unwrap();}
+    let bytes=std::fs::read(&db).unwrap();
+    assert_eq!(read_snapshot(&root,&db,&json!({}),|_,_,_|Ok(json!({"fresh":true}))).unwrap()["fresh"],true);
+    std::fs::write(&file,"function changed() return 2 end\n").unwrap();
+    let refused=read_snapshot(&root,&db,&json!({}),|_,_,_|panic!("body on stale index")).unwrap();
+    assert_eq!(refused["error"],"graph_refresh_required");assert_eq!(std::fs::read(&db).unwrap(),bytes);
+    {let mut store=wa_graph::Store::open(&db).unwrap();store.index(&root,false).unwrap();}
+    let refused=read_snapshot(&root,&db,&json!({}),|_,_,_|{
+        std::fs::write(&file,"function raced() return 3 end\n").unwrap();Ok(json!({"must_not_escape":true}))
+    }).unwrap();
+    assert_eq!(refused["error"],"graph_refresh_required");assert!(refused.get("must_not_escape").is_none());
+}
+
 struct Fixture(PathBuf);
 impl Fixture {
     fn new() -> Self {

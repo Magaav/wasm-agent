@@ -366,7 +366,7 @@ function M.snapshot(session_id)
   end
   local report = cached and cached.value or {available=false, scope="session", session_id=session_id, events=0,
     total=empty(), inference=empty(), compaction=empty(),
-    tool_calls=0, tool_failures=0, tool_ms=0, pending=0, runs=0, incomplete_runs=0,repeated_tools=0,run_ms=0,
+    tool_calls=0, tool_failures=0, tool_cancelled=0, tool_ms=0, pending=0, runs=0, incomplete_runs=0,repeated_tools=0,run_ms=0,
     compaction_failures=0, errors={}, runtime=M.runtime(), verified_success_rate=false,
     dropped_writes=drops.count}
   local active, durations, run_ids, tool_keys, run_durations = {}, {}, {}, {}, {}
@@ -402,12 +402,14 @@ function M.snapshot(session_id)
       elseif row.kind == "tool" then
         report.tool_calls = report.tool_calls + 1
         report.tool_ms = report.tool_ms + (p.ms or 0)
-        report.tool_failures = report.tool_failures + (p.ok == false and 1 or 0)
+        local cancelled=p.cancelled==true and p.outcome=='cancelled_before_execution'
+        report.tool_cancelled = (report.tool_cancelled or 0) + (cancelled and 1 or 0)
+        report.tool_failures = report.tool_failures + (p.ok == false and not cancelled and 1 or 0)
       elseif row.kind=='run' then
         report.run_ms=report.run_ms+(p.ms or 0)
         run_durations[#run_durations+1]=p.ms or 0
       end
-      if p.ok == false then
+      if p.ok == false and not (row.kind=='tool' and p.cancelled==true and p.outcome=='cancelled_before_execution') then
         report.errors[#report.errors+1] = {kind=row.kind, at=row.at, error=p.error, code=p.code, name=p.name}
         if #report.errors > 10 then table.remove(report.errors,1) end
       end

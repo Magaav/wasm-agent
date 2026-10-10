@@ -32,17 +32,22 @@ evidence, not a risk score or a correctness certificate.
 |---|---|
 | database | runtime: `<home>/.wasm-agent/graph.db`; other roots: `<configured-db-stem>.roots/<SHA256-of-canonical-root>.db` |
 | indexed root | the session worktree, or explicit tool `cwd`; unbound sessions use the configured runtime root |
-| freshness | watcher refreshes in the background; each answer checks exact source bytes before and after its read, synchronously rebuilding or failing if stale |
+| freshness | watcher refreshes runtime in the background; reads verify exact bytes before/after and return `graph_refresh_required` if missing/stale, never rebuild |
 | write path | one `BEGIN IMMEDIATE` transaction per index run — atomic, and it serializes writers |
-| read path | pinned read-only SQLite snapshot; stale queries may synchronously take the write lock to rebuild |
+| read path | pinned read-only SQLite snapshot; no write lock, parse or resolution pass; stale reads explicitly refuse |
 | overrides | `WA_GRAPH_ROOT`, `WA_GRAPH_DB`; `WA_GRAPH_WATCH=0` disables the watcher |
 
 The watcher registers before its initial index, **off the accept path**. A query
-before that index finishes builds a verified snapshot itself; it never treats an
-unbuilt graph as an empty answer. Reindexing in the watcher is incremental by
+before that index finishes returns `graph_refresh_required`; it never treats an
+unbuilt graph as an empty answer. Workspace caches need an explicit `graph
+{action:"index",cwd:"<root>"}` when graph evidence is worthwhile. Use `read`/`grep`
+otherwise. No navigation or audit read starts a hidden full rebuild. Reindexing in the watcher is incremental by
 content hash. Query-time verification compares the complete target area to the
 exact bytes stored with the graph, so a missed event cannot silently return an
-old answer. Indexing or verification failures return an error; use `read`/`grep`.
+old answer. Verification failure returns an error; use `read`/`grep`. Explicit
+index remains incremental by source bytes unless `force:true` is deliberately selected.
+It can still be expensive (resolution is repository-wide); this change removes it
+from the read critical path, not a universal graph-query latency guarantee.
 
 The whole reindex is one `BEGIN IMMEDIATE` transaction. A reader sees the old
 graph or the new one, never a half-indexed file, and the watcher and a manual
