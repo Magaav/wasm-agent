@@ -160,6 +160,27 @@ fn a_failing_deploy_leaves_its_message_in_the_capture() {
     );
 }
 
+/// Native exit survives even when the shell cannot produce result.json.
+#[cfg(windows)]
+#[test]
+fn plain_windows_path_deploy_has_utilities_and_records_early_exit() {
+    let _alone=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut fixture=Fixture::new("plain-path");
+    let system=std::env::var("SystemRoot").unwrap();fixture.set("PATH",format!("{system}\\System32"));
+    let id="path-fixture";let dir=fixture.state().join("deploy-protocol").join(id);std::fs::create_dir_all(&dir).unwrap();
+    let effect=json!({"id":id,"expected_sha":"a".repeat(40),"at":now_epoch(),"phase":"admitted"});
+    wa_operation::atomic_json(&dir.join("effect.json"),&effect).unwrap();
+    let script=fixture.dir.join("utilities.sh");
+    std::fs::write(&script,"#!/bin/bash\nfor x in dirname date mkdir sed tr wc uname git; do command -v \"$x\" >/dev/null || exit 9; done\nprintf 'utilities-ready\\n'\nexit 3\n").unwrap();
+    let (interpreter,arg)=shell_for(&script);let args=vec![arg,"--request-id".into(),id.into()];
+    let capture=deploy_capture_path();start_deploy_detached(&script,&capture,"plain PATH",&interpreter,&args).unwrap();
+    let text=wait_for(&capture,|v|v.contains("exited with"));assert!(text.contains("utilities-ready"),"{text}");
+    for _ in 0..100 {if dir.join("process-exit.json").exists(){break;}std::thread::sleep(Duration::from_millis(10));}
+    let exit:Value=serde_json::from_slice(&std::fs::read(dir.join("process-exit.json")).unwrap()).unwrap();
+    assert_eq!(exit["effect"],effect);assert_eq!(exit["exit"]["code"],3);assert_eq!(exit["exit"]["success"],false);
+    assert!(!dir.join("result.json").exists());assert_eq!(exit["installation_verified"],false);
+}
+
 /// Fix 2. A held request is visible while it waits, and nothing is dispatched behind its back.
 #[test]
 fn a_busy_or_undecidable_node_is_announced_and_nothing_is_dispatched() {

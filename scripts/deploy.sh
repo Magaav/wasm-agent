@@ -36,6 +36,12 @@
 #      in scripts/lib/service-target.sh, which is the one expression this project has for that question.
 set -uo pipefail
 
+# Refuse before even source/target resolution when the non-login shell lacks its tools.
+# Use only builtins here: a missing dirname/date must not cause cascading false refusals.
+for required in dirname date mkdir sed tr wc uname git; do
+  command -v "$required" >/dev/null 2>&1 || { printf 'deploy: shell_environment_missing:%s; no installation attempted\n' "$required" >&2; exit 127; }
+done
+
 REQUIRE_MAIN=0
 REASON=""
 SESSION=""

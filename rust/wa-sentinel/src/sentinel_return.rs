@@ -177,6 +177,21 @@ fn observed_phase(binding:&Value,state:&Value,now:u64) -> (String,String) {
             Err(e)=>("failed".into(),format!("actual_installation_verification_failed:{e}; retain raw evidence; no replay")),
         };
     }
+    if dir.join("process-exit.json").exists() {
+        let receipt=std::fs::read(dir.join("process-exit.json")).ok().and_then(|b|serde_json::from_slice::<Value>(&b).ok());
+        let effect=std::fs::read(dir.join("effect.json")).ok().and_then(|b|serde_json::from_slice::<Value>(&b).ok());
+        match (receipt,effect) {
+            (Some(exit),Some(effect)) if exit["schema"]==1 && exit["id"]==id
+                && exit["expected_sha"]==intent["expected_sha"] && exit["effect"]==effect
+                && exit["at"].as_u64().is_some_and(|at|at>=queued&&at<=now) => {
+                if exit["exit"]["wait_ok"]==true && exit["exit"]["success"]==false {
+                    return ("failed".into(),format!("installer_process_failed:{}; installer result missing; effects remain unresolved, no replay",exit["exit"]["status"]));
+                }
+                return ("unknown".into(),"installer exited without attributable installation result; no success or replay inferred".into());
+            },
+            _=>return ("unknown".into(),"native_exit_identity_mismatch; retain evidence, no replay".into()),
+        }
+    }
     if now.saturating_sub(queued)>=600 {return ("unknown".into(),"bounded observation elapsed without attributable outcome; reconcile, never replay".into());}
     if state["phase"]=="spawned" {("updating".into(),"effect reserved/spawned; actual installation result pending; ten-second observation".into())}
     else {("held".into(),state["detail"].as_str().unwrap_or("owner/source/target prerequisites not ready").into())}
@@ -333,6 +348,27 @@ mod completion_boundary_tests {
         let missing=json!({"id":"private","expected_sha":"a".repeat(40),"phase":"spawned"});
         assert_eq!(observed_phase(&binding,&missing,now_epoch()).0,"unknown");
         match previous{Some(v)=>std::env::set_var("WASM_AGENT_HOME",v),None=>std::env::remove_var("WASM_AGENT_HOME")};
+    }
+    #[test]
+    fn native_failed_exit_is_failed_not_updating_but_never_settles_effects() {
+        let _lock=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let old=std::env::var_os("WASM_AGENT_HOME");
+        let home=std::env::temp_dir().join(format!("wa-native-exit-{}-{}",std::process::id(),now_epoch()));std::env::set_var("WASM_AGENT_HOME",&home);
+        let now=now_epoch();let intent=json!({"id":"private-exit","verb":"deploy","session":"parent","owner":"owner","queued_at":now,"expected_sha":"a".repeat(40)});
+        deploy_protocol::intake(&intent,"private-exit").unwrap();
+        let binding=json!({"id":"private-exit","intent":intent,"parent":"parent","owner":"owner"});
+        let state=json!({"id":"private-exit","expected_sha":intent["expected_sha"],"phase":"spawned","at":now});
+        let dir=sentinel_dir().join("deploy-protocol/private-exit");let effect=json!({"id":"private-exit","phase":"admitted"});
+        wa_operation::atomic_json(&dir.join("effect.json"),&effect).unwrap();
+        let mut receipt=json!({"schema":1,"id":"private-exit","expected_sha":intent["expected_sha"],"effect":effect,"at":now,
+            "exit":{"wait_ok":true,"success":false,"code":3,"status":"exit code: 3"}});
+        wa_operation::atomic_json(&dir.join("process-exit.json"),&receipt).unwrap();
+        assert_eq!(observed_phase(&binding,&state,now).0,"failed");
+        assert_eq!(serde_json::from_slice::<Value>(&std::fs::read(dir.join("effect.json")).unwrap()).unwrap(),effect);
+        receipt["exit"]["success"]=json!(true);wa_operation::atomic_json(&dir.join("process-exit.json"),&receipt).unwrap();
+        assert_eq!(observed_phase(&binding,&state,now).0,"unknown");
+        receipt["expected_sha"]=json!("b".repeat(40));wa_operation::atomic_json(&dir.join("process-exit.json"),&receipt).unwrap();
+        assert_eq!(observed_phase(&binding,&state,now).0,"unknown");
+        match old{Some(v)=>std::env::set_var("WASM_AGENT_HOME",v),None=>std::env::remove_var("WASM_AGENT_HOME")};let _=std::fs::remove_dir_all(home);
     }
     #[test]
     fn interrupted_submission_never_earns_a_second_http_attempt() {

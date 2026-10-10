@@ -24,7 +24,7 @@ pub(crate) fn execute(expected:&str,owner:&str,parent:&str,reason:&str)->Result<
     let active=sentinel_dir().join("protocol-effect.json");
     if active.exists() {
         let prior:Value=serde_json::from_slice(&std::fs::read(active)?)?;
-        if prior["phase"]!="verified" {bail!("prior_protocol_effect_unsettled; no bootstrap");}
+        if !deploy_protocol::reservation_released(&prior)? {bail!("prior_protocol_effect_unsettled; no bootstrap");}
     }
     // In particular, run requests are NOT considered idle just because the requesting model ended.
     // There is no idle override, flag removal, process stop or loop of installer attempts here.

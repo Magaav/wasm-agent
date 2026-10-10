@@ -206,6 +206,22 @@ no task registration, elevation, direct binary copy or old request replay. Read
 private `test-sentinel-historical.cjs <fresh-out> <built-sentinel> bootstrap` proof.
 Installation is observed on continuation; do not stay in a turn waiting for idle.
 
+## Windows direct-shell PATH regression
+
+Do not assume direct Git `usr/bin/bash.exe` has login PATH. The shared
+`wa-operation::shell_env` sets bundled utility paths only on the child; no profiles
+or global environment edits. Sentinel's plain-Windows-PATH deploy test exercises
+real dirname/date/mkdir/sed/tr/wc/uname/git and preserves a native bound process
+exit when script reporting fails. A failed process is not installation or replay
+permission. Unknown/partial effects remain blocked.
+
+External `protocol retire-preinstall <id> --reason <text>` is only for the exact
+historical early PATH refusal with unchanged live target/binary and retained source/
+capture proof. It preserves originals, writes a receipt-bound aborted reservation,
+never pretends it verified installation, and never retries the old intent. Bootstrap
+may then admit ONE fresh exact-source generation through the checked existing OS task.
+Run focused Sentinel/operation tests before broader checks; see docs/SENTINEL.md.
+
 ## What a fresh node must have
 
 Self-update is unavailable without these beside the binary, and a fresh install has been missing them

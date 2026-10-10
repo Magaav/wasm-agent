@@ -347,6 +347,36 @@ Receipts are under `<data>/sentinel/io-idle-*.json`; no recurrent job is created
 An old sample during an active wake is not a matched idle baseline. OS counters
 include cached/network I/O; this diagnostic does not measure fan causation.
 
+## Direct Git shell environment and early installer outcomes
+
+Direct Git `usr/bin/bash.exe` remains console-quiet, but is not a login shell.
+`wa-operation::shell_env` validates the selected absolute Git installation layout
+and prepends that installation's `usr/bin`, `cmd` and MinGW tools only to the child
+PATH. Host foreground/background operations and detached Sentinel deployments
+share it. Existing PATH entries/explicit shell choices remain; unrelated shells
+are untouched. No profile, global PATH mutation, elevation or new watcher.
+Missing essential bundled utilities refuse before spawn; deploy/upgrade scripts
+also use builtin preflight before source resolution, preventing false dirty-tree
+errors when `dirname`/`wc` are missing. Real ordinary-Windows-PATH positive and
+old-environment negative tests cover the actual utility commands.
+
+For source-bound detached installers, the owning child wait writes native
+`process-exit.json` bound to the full admitted effect. Nonzero exit with no script
+result is reported `failed`, not perpetual `updating`. Exit zero without a result
+is `unknown`, never installed; malformed/foreign evidence remains unknown. Neither
+exit nor failure releases an installation reservation, and watcher death can still
+leave an unknown outcome. Raw capture and original journals stay intact.
+
+For the narrow historical PATH failure, external-only `protocol retire-preinstall
+<id> --reason <text>` validates immutable parent/effect/source, exact unique failed
+capture, unchanged live target PID+creation+binary, and the retained script's early
+clean-check boundary. It archives originals and writes `aborted_preinstall` plus a
+retirement receipt; it does not claim installation, reset return cursors or replay
+the old request. Any partial-install/changed-target/unknown evidence refuses.
+Admission/bootstrap recognize only a receipt-bound released reservation. Use a
+fresh exact-source intent via the supported task bootstrap for an old observer;
+unknown effects remain blocked. Private capture mutations prove those refusals.
+
 ## Quiet Windows observation
 
 Captured Sentinel probes and Git/Node verification commands use explicit

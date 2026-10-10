@@ -15,7 +15,14 @@ $env:WASM_AGENT_HOME=$NodeHome;$env:WA_INSTALL_DIR=$Install
 $pre=(& $installed preflight)|ConvertFrom-Json
 if($LASTEXITCODE -ne 0 -or $pre.watcher -ne 'running' -or $pre.stop_file -or -not $pre.inventory_verified -or @($pre.pending_deploys).Count){throw 'bootstrap_live_owner_or_queue_refused'}
 $box=Join-Path $NodeHome '.wasm-agent\sentinel';$effect=Join-Path $box 'protocol-effect.json'
-if((Test-Path $effect) -and ((Get-Content $effect -Raw)|ConvertFrom-Json).phase -ne 'verified'){throw 'bootstrap_prior_effect_unsettled'}
+if(Test-Path $effect){
+ $prior=(Get-Content $effect -Raw)|ConvertFrom-Json
+ if($prior.phase -ne 'verified'){
+  if($prior.phase -ne 'aborted_preinstall'){throw 'bootstrap_prior_effect_unsettled'}
+  $retired=(& $candidate protocol retirement-status)|ConvertFrom-Json
+  if($LASTEXITCODE -ne 0 -or -not $retired.released -or $retired.id -ne $prior.id){throw 'bootstrap_prior_effect_unsettled'}
+ }
+}
 function Git([string[]]$Arguments){$raw=& git.exe -C $Source @Arguments;if($LASTEXITCODE -ne 0){throw 'bootstrap_source_git_failed'};return ($raw -join "`n").Trim()}
 if((Git @('branch','--show-current')) -ne 'main' -or (Git @('status','--porcelain')) -or (Git @('rev-parse','HEAD')) -ne $ExpectedSha -or (Git @('rev-parse','origin/main')) -ne $ExpectedSha -or ((Git @('ls-remote','origin','refs/heads/main')) -split '\s+')[0] -ne $ExpectedSha){throw 'bootstrap_clean_published_source_required'}
 if(-not(Test-Path $candidate)){throw 'bootstrap_candidate_missing'}
