@@ -1,28 +1,31 @@
 # Minimal chat readouts and commentary
 
-Live run strip: `✦ 6s|◈ ~13000|✧ 26|⚒ 82|◷ 2:24`. The growing glyph
+Live run strip: `✦ 6s · ◈ ≥1.1M · ✧ 26 · ⚒ 82 · ◷ 2:24`. The growing glyph
 and clock reuse the existing once-per-second ticker. Phase text stays in its
 tooltip/debug history. Provider/tool totals retain their documented meanings.
 `◈` is cumulative turn input + output, including cached input and summaries.
-Each completed provider attempt replaces the live estimate with normalized
-reported usage; missing usage is unknown (`≥`), historical absent data is `?`.
-During streaming `~` adds the prepared request input estimate plus visible
-text/argument characters divided by four;
-this is not a tokenizer or provider billing measurement. Hidden reasoning and
-lost internal transport usage cannot be measured live. Integer token readout
-keeps increments visible even at millions; it is never rounded into a static `M`.
-Totals may correct
-downward when the provider reports. No inference, tokenizer dependency, new
+Each completed provider attempt updates the exact normalized reported total.
+Pending or missing usage is a lower bound (`≥`), historical absent data is `?`.
+No characters/4 or prepared-input estimate is mixed into the reported number.
+Provider usage is not supplied for every streamed token; an exact live streaming
+count cannot be inferred from text (hidden reasoning, tools and tokenizer differ).
+The compact decimal formatter uses one fractional digit for k/M and promotes
+rounded 1000k to1M. 1138787→1.1M, 1543336→1.5M; full exact integer appears in
+the tooltip. Abbreviation changes precision of presentation, never accounting. No inference, tokenizer dependency, new
 poll/timer or whole-ledger scan is added. Additive fields in existing version1
 `run_counts` snapshots preserve exact known values at checkpoints/reload.
 
 The footer trigger shows only `▤ 26%/1M`: occupancy of one task request versus
 its own model capacity, not summed session spend. Two digits minimum; 100+
-remains truthful, never clamped. Request preparation provides an estimate,
-streamed output a marked tail estimate, and completed usage its measured prompt.
+remains truthful, never clamped. One shared context-facts function feeds both
+the footer and balloon: last provider-reported task input, same capacity/percentage,
+exact raw integers and percent in the details. The capacity formatter is shared
+and lossless (1050000→1.05M, 128000→0.128M), not the turn-total abbreviation.
+Pending preparation/text estimates never overwrite the last measured prompt.
 Summary requests never replace the task context with their smaller prompt/window.
-Unknown/mismatched metadata remains `??`. Existing stream/metadata reads update
-it, including children. Provider/model controls remain inside its balloon.
+Unknown/mismatched/foreign metadata remains `??`. Existing stream/metadata reads
+update both at once; model/capacity/usage dependencies invalidate even without
+cumulative spend changing, while unchanged balloon DOM/selection survives. Provider/model controls remain inside its balloon.
 Resting trigger is transparent; hover/focus reveals its clickable surface.
 
 All rounded noncircular components use `--radius:5px`; size aliases reference
