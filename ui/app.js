@@ -2247,10 +2247,21 @@ async function learnSession() {
 // Treat those as two documented shapes, not as interchangeable strings.
 function sessionOutcome(full) {
   const value = full && full.state;
-  if (value && typeof value === "object") {
-    return { name: value.state || "", detail: value.detail || "" };
+  const outcome = value && typeof value === 'object'
+    ? {name:value.state || '',detail:value.detail || ''}
+    : {name:typeof value === 'string' ? value : '',detail:full?.state_detail || ''};
+  if (outcome.name === 'failed' && (!outcome.detail || /inspect (its error|its transcript)/i.test(outcome.detail))) {
+    const row = full?.messages?.at(-1);
+    // Older nodes expose only generic state prose. The last failed assistant's
+    // own trace is original evidence, not a guess from preceding tool failures.
+    if (row?.role === 'assistant' && (row.ok === 0 || row.ok === false)) {
+      const failure = (Array.isArray(row.trace) ? row.trace : []).slice().reverse().find(span =>
+        span && (span.ok === false || span.ok === 0) && typeof span.error === 'string' && span.error);
+      if (failure) outcome.detail = failure.error.length <= 1200 ? failure.error
+        : failure.error.slice(0,1200) + ' (excerpt; full error in transcript)';
+    }
   }
-  return { name: typeof value === "string" ? value : "", detail: full?.state_detail || "" };
+  return outcome;
 }
 
 // A recorded tool result is safe to continue from only when every call in its

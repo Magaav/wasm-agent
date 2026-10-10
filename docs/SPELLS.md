@@ -103,6 +103,36 @@ foreground command result can complete a step while descendants remain supervise
 only the spell's observed `post` conditions can establish that their intended effect
 occurred. A launch receipt without `command_completed` is not successful spell evidence.
 
+## Scripts, spells and workspace execution context
+
+Both can express the same model-free algorithm. A spell is a standardized plan
+around steps that may themselves be scripts; parameters, assertions, traces,
+versions and controlled retries are the extra contract, not a different kind of
+computation. “Deterministic” means no model chooses the next step, not a pure
+function: cwd, filesystem, environment and external state are effective inputs.
+Neither a script nor a spell inherently makes arbitrary effects repeatable.
+
+The current required-worktree refusal is an implementation boundary:
+
+- `tools.lua` validates a direct `bash` call against the allocated binding and
+  defaults it to `session_cwd`. Its shell command explicitly enters that owned
+  directory before running a script. This is execution-context routing, not a
+  filesystem sandbox for arbitrary shell code.
+- `spell_run` is refused by `required_workspace_error` **before any saved plan
+  executes**, including harmless node-only plans. This is conservative, not a
+  failed assertion, forbidden script or nondeterministic spell.
+- `tools.lua` currently calls `spells.run(name,params)` without the session ctx;
+  `spells.run_step` calls `host.exec(command,"",timeout)` with the node's default
+  cwd. Pre/post commands use the same unbound runner. Absolute path parameters
+  cannot prove every nested action/check obeys the current binding.
+
+A proper workspace-aware runner would carry validated execution context through
+all preconditions, steps and postconditions, revalidate it at execution boundaries,
+and keep unsupported client/remote actions refused. Removing the outer guard or
+clearing the session binding is not that implementation. Until it is proven, use
+verified skill CLIs directly with the same checks/evidence; see [SKILLS.md](SKILLS.md).
+This section explains the current limitation; it does not claim it is repaired.
+
 ## Compose verified sequences
 
 `spell_compose({name, parts:[{name, params?}, ...]})` saves one node-side spell from

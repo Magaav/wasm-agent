@@ -232,6 +232,48 @@ fn remove_fixture(root: PathBuf) {
     }
 }
 #[test]
+fn accepted_output_before_initialization_is_pending_not_a_launch_failure() {
+    let (m, root) = fixture();
+    fs::create_dir_all(&root).unwrap();
+    let id = "op-pre-output-fixture";
+    // Freeze precisely the real start() receipt boundary: attached admission,
+    // supervisor not yet at execute()/File::create. No timing lottery or sleeps.
+    let index = m.index().unwrap();
+    let state = json!({"state":"accepted","settled":false,"timing":timing_payload()});
+    let entry = Arc::new(Entry {owned_child:Mutex::new(None),index,
+        cancel:AtomicBool::new(false),state:Mutex::new(state),settled:Condvar::new(),
+        started:Instant::now(),deadline_ms:AtomicU64::new(300000)});
+    m.entries.lock().unwrap().insert(id.into(),entry.clone());
+    for stream in ["stdout","stderr"] {
+        assert_eq!(File::open(root.join(id).join(stream)).unwrap_err().kind(),io::ErrorKind::NotFound);
+        let page=m.read(id,stream,17,64).unwrap();
+        assert_eq!(page["pending_output"],true);
+        assert_eq!(page["content"],"");
+        assert_eq!(page["next_offset"],17); // Never advance an unread cursor.
+    }
+    let dir=root.join(id);fs::create_dir_all(&dir).unwrap();
+    execute(&shell("printf 'completed response'"),&dir,&entry,&[]).unwrap();
+    let page=m.read(id,"stdout",0,64).unwrap();
+    assert_eq!(page["content"],"completed response");
+    assert!(page.get("pending_output").is_none());
+    // Missing historical/running/terminal outputs and other I/O faults stay errors.
+    fs::remove_file(dir.join("stderr")).unwrap();
+    entry.state.lock().unwrap()["state"]=json!("running");
+    assert!(m.read(id,"stderr",0,64).unwrap_err().to_string().contains("operation_output_open_failed"));
+    entry.state.lock().unwrap()["state"]=json!("accepted");
+    entry.state.lock().unwrap()["settled"]=json!(true);
+    assert!(m.read(id,"stderr",0,64).is_err());
+    assert!(m.read("op-unknown","stdout",0,64).is_err());
+    entry.state.lock().unwrap()["settled"]=json!(false);
+    entry.state.lock().unwrap()["timing"]["setup_ms"]=json!(1);
+    assert!(m.read(id,"stderr",0,64).is_err()); // Setup completed: deletion is not pending.
+    entry.state.lock().unwrap()["timing"]["setup_ms"]=Value::Null;
+    fs::create_dir(dir.join("stderr")).unwrap();
+    entry.state.lock().unwrap()["settled"]=json!(false);
+    assert!(m.read(id,"stderr",0,64).is_err());
+    drop(entry);drop(m);remove_fixture(root);
+}
+#[test]
 fn settlement_wakes_all_observers_without_relaunch_or_lost_notification() {
     let (m,root)=fixture();
     let id=m.start(shell("sleep 30 & wait")).unwrap();
