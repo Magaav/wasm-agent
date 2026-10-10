@@ -192,7 +192,7 @@ M.admin = {
   }, { "pattern" }),
   -- Retrieval returns selected implementation text; relationship and audit actions remain
   -- explicitly separate so their evidence can be evaluated independently.
-  schema("graph", "Retrieve implementation source, get a bounded architecture overview, or map the current patch to resolved callers, dependencies and tests. search_symbols/symbol_source handle discovery; inspect unmatched_definition_terms and use bounded grep for partial or absent evidence. overview handles orientation; impact handles factual patch reachability without claiming risk.", {
+  schema("graph", "Retrieve implementation source, get a bounded architecture overview, or map the current patch to resolved callers, dependencies and tests. search_symbols/symbol_source handle discovery; inspect unmatched_definition_terms and use bounded grep for partial or absent evidence. overview handles orientation; impact handles factual patch reachability without claiming risk. Reads never rebuild; graph_refresh_required means use read/grep or explicitly index when worthwhile.", {
     action = { type = "string", enum = { "search_symbols", "symbol_source", "overview", "impact", "explain", "query", "path", "caps", "stats", "index", "audit", "audit_assess", "audit_report", "audit_feedback" } },
     name = { type = "string", description = "search_symbols: concept or identifier; symbol_source/explain/query: exact selected name." },
     prefer_implementations = { type = "boolean", description = "search_symbols: opt-in ranking that demotes partial local-variable matches; useful when looking for a component/function implementation, not a state binding." },
@@ -970,7 +970,11 @@ function M.dispatch(memory, name, args, role, ctx)
     elseif action == "stats" then result, err = graph.stats({root=root})
     elseif action == "index" then result, err = graph.index({ root=root,force = args.force })
     else return { error = "unknown_graph_action:" .. tostring(action) } end
-    if not result then return { error = err or "graph_error" } end
+    if not result then
+      if err=='graph_refresh_required' then return {error=err,refresh_required=true,indexed=false,
+        next='Use read/grep now, or explicitly run graph action=index for this cwd; reads never rebuild.'} end
+      return {error=err or 'graph_error'}
+    end
     return result
   elseif name == "client" then
     local ok, raw = pcall(host.client, args.action or "", json.encode(args))

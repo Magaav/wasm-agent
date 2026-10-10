@@ -75,11 +75,10 @@ output`, `Progress update`); spaces around `·` remain. `Reasoning` is the reque
 UI name for model wait/reasoning, not proof of provider-internal reasoning activity.
 Selecting/executing tools and output replace that phase, never stack completed rows.
 Live status uses normal whitespace rather than inheriting transcript pre-wrap;
-its 10px spinner keeps its size and the phase flexes between it and the total timer.
-The spinner is one transform-only CSS rotation with a visible accent arc, linear
-while live. Reduced motion uses only a slow opacity pulse, explicitly requested
-for this functional indicator; hidden/resting surfaces pause both.
-There is no decorative idle animation, extra timer, blur or full-window effect.
+its 10px dot/star/spike glyph keeps its width and the phase flexes between it and
+the total timer. The existing once-per-second status clock advances the glyph;
+there is no CSS rotation/pulse, new timer, blur or full-window effect. Hidden
+surfaces do not tick it; settlement removes it.
 Settlement hides the current phase and preserves the existing final-duration footer.
 Errors, recovery/queue notices, tool evidence and reasoning content remain visible.
 
@@ -95,6 +94,17 @@ Risk: debug changes made from another surface appear on the next authoritative
 session read; there is no new polling or watcher. `scripts/test-coordinator-steps.cjs`
 now runs within `scripts/test-ui.ps1`, covering quiet/debug modes, phase/total clocks,
 checkpoint continuity, settlement, child isolation and narrow-footer overflow.
+
+## Proven non-execution versus failures
+
+A steering fence with exact `error:superseded_by_steering`, `executed:false`,
+`effect:none` is shown neutrally as `not executed · superseded`, not red and not
+a successful effect. Missing/contradictory proof and actual failures stay red.
+The original JSON, `ok:false` ledger row and unknown effects are preserved. New
+telemetry records `cancelled_before_execution` separately from `tool_failures`;
+legacy statistics retain their recorded verdict rather than rewriting history.
+Replay can classify exact old fenced payloads without treating arbitrary error
+prose as a cancellation. Storage failures cannot earn the neutral state.
 
 ## Accounting invariants
 

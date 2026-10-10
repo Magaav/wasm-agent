@@ -63,6 +63,8 @@ assert(host.write_file(root .. "/source.lua",
   "function M.changed()\n  return 2\nend\n"))
 assert(host.write_file(root .. "/caller.lua",
   "local M = require('source')\nfunction use_changed() return M.changed() end\n"))
+local indexed=json.decode(host.graph_index(json.encode({root=root,db=root..'/graph.db'})))
+assert(indexed.ok)
 local native = json.decode(host.graph_patch_audit(json.encode({root=root,
   db=root .. "/graph.db",changes={{path="source.lua",lines={2}}},reviewed={}})))
 assert(not native.error, tostring(native.error))

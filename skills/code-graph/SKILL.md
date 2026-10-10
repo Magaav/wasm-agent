@@ -111,9 +111,14 @@ After an audit follow-up step, use `audit_assess` to record your usefulness
 grade (0-3), concrete reason and critique. This is your opinion, not a confirmed
 catch; grade 3 only means the lead prompted a patch or test revision.
 
-The node refreshes the index as files change. Every answer verifies the indexed
-source bytes; if verification or refresh fails, the tool reports an error. Use
-`grep`/`read` in that case rather than treating an empty graph result as evidence.
+Every read verifies indexed source bytes before/after and never indexes implicitly.
+`graph_refresh_required` means no current graph answer—not an empty result. Use
+bounded `grep`/`read` immediately for small known patches. Only when graph evidence
+is worthwhile explicitly run `graph {action:"index",cwd:"<root>"}`; default indexing
+is incremental, `force:true` is an intentional full rebuild. The runtime watcher
+still exists; workspace caches remain on-demand. Do not repeatedly call stale reads
+or choose graph merely to satisfy a ritual. Run the focused probe before broader
+required tests; never launch broad tests alongside a probe still known to fail.
 
 ## Relationship questions
 

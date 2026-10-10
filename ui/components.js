@@ -497,15 +497,15 @@ class WaTrace extends HTMLElement {
 
   // Tool calls in one decision execute in order; replay adds them all before their
   // result rows, so settle the oldest pending line, not the most recently added one.
-  settle(outcome, detail, failed) {
+  settle(outcome, detail, failed, cancelled = false) {
     const target = this._pending.shift();
     if (!target) return;
     target.progress.hidden = true;
     target.outcome.textContent = outcome || "";
     target.line.classList.remove("pending");
-    target.line.classList.add(failed ? "err" : "ok");
+    target.line.classList.add(cancelled ? "cancelled" : failed ? "err" : "ok");
     if (detail) target.output.textContent = detail;
-    if (failed) {
+    if (failed && !cancelled) {
       this._errors += 1;
       // An error is never hidden inside a collapsed topic.
       target.output.hidden = false;
@@ -1305,6 +1305,7 @@ class WaHarnessStatus extends HTMLElement {
       ['run wall time p50 / p95',`${ms(report.run_p50_ms)} / ${ms(report.run_p95_ms)}`],
       ['inference / summary time',`${ms(i.ms)} / ${ms(c.ms)}`],
       ['tools / failed',`${n(report.tool_calls)} / ${n(report.tool_failures)}`],
+      ['cancelled before execution',n(report.tool_cancelled)],
       ['tool time',ms(report.tool_ms)],
       ['repeated tool arguments',`${n(report.repeated_tools)} (signal, not proof of waste)`],
       ['recorded runs / incomplete',`${n(report.runs)} / ${n(report.incomplete_runs)}`],

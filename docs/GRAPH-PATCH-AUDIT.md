@@ -28,9 +28,11 @@ command runs: if it has unread leads, the first attempt returns them without
 committing. A repeated attempt with the same patch can acknowledge a false
 positive. This is a soft review prompt, not a security boundary or universal
 commit hook; commits hidden in scripts/other tools are not intercepted. It
-synchronously reindexes before evaluating the patch, then checks for source
-changes again. `WA_GRAPH_WATCH=0` can remove the always-on watcher cost in an
-audit-only trial; the audit still refreshes itself. Do not disable the watcher
+verifies a pinned source snapshot before/after evaluating the patch, but never
+reindexes on a read. A stale/missing index returns `graph_refresh_required`, not
+zero leads or a certificate. Explicitly refresh with `graph action=index` when
+worthwhile; otherwise inspect callers directly. `WA_GRAPH_WATCH=0` can remove the
+always-on watcher cost; an audit no longer silently refreshes itself. Do not disable the watcher
 for navigation on an older node whose ordinary graph reads lack source-freshness
 checks.
 
@@ -102,6 +104,6 @@ events and `current_phase_started_at` begins with the first Phase 4 audit. The
 
 The always-on watcher is a potential waste: it scans and hashes the indexed
 source tree after source change events even when no agent queries the graph.
-This implementation adds no new daemon. The audit's two synchronous scans are
+This implementation adds no new daemon. The audit's two source-verification scans are
 timed in telemetry; `WA_GRAPH_WATCH=0` is available for the audit-only trial.
 No memory leak has been established by this code review or the model-free tests.

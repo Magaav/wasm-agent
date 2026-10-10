@@ -163,7 +163,7 @@
       document.getElementById('panel').style.width=width+'px';
       const spinnerBox=statusSpinner.getBoundingClientRect(),phaseBox=statusPhase.getBoundingClientRect(),totalBox=statusElapsed.getBoundingClientRect();
       check(getComputedStyle(statusLine).whiteSpace==='normal','status does not inherit transcript pre-wrap at '+width);
-      check(Math.abs(spinnerBox.width-10)<1&&Math.abs(spinnerBox.height-10)<1,'spinner does not shrink at '+width);
+      check(Math.abs(spinnerBox.width-10)<1&&spinnerBox.height>0,'activity glyph keeps its fixed width at '+width);
       check(Math.abs((phaseBox.top+phaseBox.bottom)/2-(totalBox.top+totalBox.bottom)/2)<1,'phase and total vertically aligned at '+width);
       check(Math.abs(phaseBox.left-spinnerBox.right-5)<1&&phaseBox.right<=totalBox.left-4,'one spacing-scale gap before phase at '+width);
       check(statusLine.scrollWidth<=statusLine.clientWidth+1,'status fits at '+width);
@@ -175,20 +175,13 @@
     check(statusLabel.hidden,'return to normal phase hides notice label');
     check(statusLabel.hidden&&statusPhase.getBoundingClientRect().right<=statusElapsed.getBoundingClientRect().left+1,'narrow footer orders phase/total without redundant label');
     check(statusLine.scrollWidth<=statusLine.clientWidth+1&&box.width>0,'narrow compact status fits viewport');
-    // Tiny CSS-only feedback: rotation normally, gentle non-spatial pulse under reduced motion.
-    document.body.classList.remove('ui-resting');
-    const reduced=matchMedia('(prefers-reduced-motion: reduce)').matches;
-    const animation=statusSpinner.getAnimations()[0];
-    check(!!animation&&getComputedStyle(statusSpinner).animationName===(reduced?'run-status-pulse':'spin'),'live indicator animates in current motion preference');
-    animation.pause();animation.currentTime=0;
-    const first=getComputedStyle(statusSpinner)[reduced?'opacity':'transform'];
-    animation.currentTime=reduced?1250:400;
-    check(first!==getComputedStyle(statusSpinner)[reduced?'opacity':'transform'],'indicator visibly changes across the cycle');
-    if(reduced)check(getComputedStyle(statusSpinner).transform==='none','reduced-motion live feedback has no spatial motion');
-    animation.play();
-    document.body.classList.add('ui-resting');check(getComputedStyle(statusSpinner).animationPlayState==='paused','hidden/resting indicator pauses');
-    document.body.classList.remove('ui-resting');
-    check(getComputedStyle(statusSpinner).animationPlayState==='running','visible indicator resumes');
+    // Requested dot/star/spike frames use the existing status clock, no CSS animation.
+    check(statusSpinner.className==='run-activity-glyph'&&statusSpinner.getAnimations().length===0,'activity is a text glyph, not a loading animation');
+    const glyphClock=Date.now,glyphs=[];
+    try {for(let i=0;i<6;i++){Date.now=()=>runStartedAt+i*1000;updateRunElapsed();glyphs.push(statusSpinner.textContent);}}
+    finally {Date.now=glyphClock;updateRunElapsed();}
+    check(glyphs.join('')===runActivityGlyphs.join(''),'existing clock cycles exact dot/star/spike sequence');
+    check(statusSpinner.getAttribute('aria-hidden')==='true'&&getComputedStyle(statusSpinner).transform==='none','glyph feedback has no spatial motion or screenreader noise');
     // Own only fixture timers; avoid delayed startup/status repaints in this observation.
     for (let timer=1;timer<10000;timer++) {clearTimeout(timer);clearInterval(timer);}
     report.dataset.status = 'pass';

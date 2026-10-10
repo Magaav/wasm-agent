@@ -31,6 +31,7 @@ durable.set_session_worktree(ctx.session_id,owned)
 local real=assert(host.canonical_path(owned))
 local function same(value) return type(value)=='string' and value:gsub('\\','/')==real end
 local function dispatch(args,mem) return tools.dispatch(mem or memory,'graph',args,'master',ctx) end
+check(not dispatch({action='index',cwd=owned}).error,'explicit workspace index')
 local impact=dispatch({action='impact',source='git',cwd=owned,direction='inbound',depth=1,limit=50})
 check(not impact.error,'impact failed: '..json.encode(impact))
 check(impact.coverage.gap_count==0,'false missing-file/line gaps: '..json.encode(impact.coverage))
@@ -78,11 +79,15 @@ check(same(status.root) and status.ready,'root cache status not ready')
 local canonical_status=decode(host.graph_status(json.encode({root=canonical})))
 local sibling_status=decode(host.graph_status(json.encode({root=sibling})))
 check(status.db~=canonical_status.db and status.db~=sibling_status.db,'distinct roots share mutable cache')
+decode(host.graph_index(json.encode({root=canonical})))
 check(decode(host.graph_query('canonical_only',json.encode({root=canonical})))[1].name=='canonical_only','canonical control query')
 check(decode(host.graph_status(json.encode({root=owned}))).ready,'querying canonical invalidated owned cache')
 write(owned..'/src/new.lua','function owned_new() return 4 end\n')
 check(not decode(host.graph_status(json.encode({root=owned}))).ready,'workspace edit reported fresh')
 check(decode(host.graph_status(json.encode({root=canonical}))).ready,'workspace edit invalidated canonical cache')
+source=dispatch({action='symbol_source',path=selector.path,name=selector.name,line=selector.line,kind=selector.kind})
+check(source.error=='graph_refresh_required' and source.refresh_required,'stale workspace read did not refuse')
+check(not dispatch({action='index'}).error,'explicit incremental workspace refresh')
 source=dispatch({action='symbol_source',path=selector.path,name=selector.name,line=selector.line,kind=selector.kind})
 check(not source.error and source.source:find('return 4',1,true),'workspace refresh not observed')
 local failed={session_workspace=function() return {required=true,state='failed',worktree=''} end}
@@ -101,6 +106,7 @@ for _,file in ipairs({'existing.lua','new.lua','extra.lua','callers.lua'}) do wr
 local request={root=owned,changes={{path='src/new.lua',lines={1}}},direction='inbound',depth=1,limit=1,max_bytes=24000}
 local first=decode(host.graph_impact(json.encode(request)))
 check(first.impact.next_cursor~=nil,'fixture has no cursor')
+decode(host.graph_index(json.encode({root=mirror})))
 request.root=mirror;request.cursor=first.impact.next_cursor
 local crossed=json.decode(host.graph_impact(json.encode(request)))
 check(crossed.error=='stale_or_mismatched_impact_cursor','cursor crossed identical-source roots')

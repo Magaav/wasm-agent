@@ -102,4 +102,28 @@ assert(not tools.has_effect('read') and not tools.has_effect('read_many') and
   not tools.has_effect('recall') and not tools.has_effect('session'),'a read must not be fenced by steering')
 assert(tools.has_effect('some-plugin-tool-this-file-never-heard-of'),'an unknown tool must default to effectful')
 assert(tools.has_effect(nil),'a nameless call must default to effectful')
+-- Queue steering DURING an admitted read: the next effect in that batch must be a typed cancellation.
+local sid3=memory.start_session('','steering-midbatch',{user_id='owner'})
+local events3={};local bot3=agent.new(sid3,function(e) events3[#events3+1]=e end,'master','owner','')
+local rounds3=0
+provider.complete_with=function()
+  rounds3=rounds3+1
+  if rounds3==1 then return {content='',tool_calls={
+    {id='read-before-fence',type='function',['function']={name='read',arguments='{"path":"AGENTS.md"}'}},
+    {id='write-after-fence',type='function',['function']={name='write',arguments='{"path":"NEVER-WRITTEN.txt","content":"forbidden"}'}}
+  },usage={prompt_tokens=10,completion_tokens=1}} end
+  return {content='corrected',tool_calls={},usage={prompt_tokens=10,completion_tokens=1}}
+end
+local saved_dispatch=tools.dispatch
+tools.dispatch=function(memory_,name,args,role,context)
+  local value=saved_dispatch(memory_,name,args,role,context)
+  if name=='read' then steering.control({session_id=sid3,text='Stop stale write',idempotency_key='midbatch'},ctx) end
+  return value
+end
+assert(bot3:run('original')=='corrected');tools.dispatch=saved_dispatch
+local fenced_event
+for _,event in ipairs(events3) do if event.type=='tool_result' and event.name=='write' then fenced_event=event end end
+assert(fenced_event and fenced_event.cancelled==true and fenced_event.failed==false and fenced_event.result.executed==false,'typed neutral cancelled event')
+local totals=dofile('lua/core/telemetry.lua').snapshot(sid3)
+assert(totals.tool_cancelled==1 and totals.tool_failures==0,'actual loop cancellation separated from failure totals')
 print('durable steering ok')

@@ -1,7 +1,7 @@
 //! `host.graph_*` — the code graph as a capability.
 //!
 //! The graph is built by the `wa-graph` crate and stored beside the ledger. Reads verify the
-//! complete source snapshot; a stale graph is synchronously refreshed or rejected. A Lua run can
+//! complete source snapshot; stale reads refuse without indexing. Only explicit graph_index writes. A Lua run can
 //! ask "who calls `append_turn`" without a
 //! grep-and-read round trip, and a `host.*` reference is a typed edge to a capability node.
 
@@ -71,38 +71,39 @@ fn locations(options: &Value, config: Option<&Config>) -> Result<(PathBuf, PathB
     Ok((root, db))
 }
 
+fn read_snapshot(
+    root: &std::path::Path,
+    db: &std::path::Path,
+    options: &Value,
+    body: impl Fn(&wa_graph::Store, &Value, &std::path::Path) -> Result<Value, String>,
+) -> Result<Value, String> {
+    let started = std::time::Instant::now();
+    let refresh = || json!({"error":"graph_refresh_required", "refresh_required":true,
+        "root":root.to_string_lossy(), "indexed":false, "read_ms":started.elapsed().as_millis(),
+        "next":"Use read/grep now, or explicitly run graph action=index for this cwd; reads never rebuild."});
+    if !db.exists() { return Ok(refresh()); }
+    let store = wa_graph::Store::open_readonly(db).map_err(|e| e.to_string())?;
+    store.begin_read().map_err(|e| e.to_string())?;
+    if !store.verify_snapshot(root).map_err(|e| e.to_string())? {
+        store.end_read().map_err(|e| e.to_string())?;
+        return Ok(refresh());
+    }
+    let answer = body(&store, options, root)?;
+    let still_fresh = store.verify_snapshot(root).map_err(|e| e.to_string())?;
+    store.end_read().map_err(|e| e.to_string())?;
+    if !still_fresh { return Ok(refresh()); }
+    Ok(answer)
+}
+
 fn read(
     l: *mut LuaState,
     options_index: std::ffi::c_int,
     body: impl Fn(&wa_graph::Store, &Value, &std::path::Path) -> Result<Value, String>,
 ) -> std::ffi::c_int {
     let options = json_arg(l, options_index);
-    let outcome = (|| -> Result<Value, String> {
-        let (root, db) = locations(&options, CONFIG.get())?;
-        for _ in 0..3 {
-            if let Ok(store) = wa_graph::Store::open_readonly(&db) {
-                store.begin_read().map_err(|e| e.to_string())?;
-                let fresh = store.verify_snapshot(&root).map_err(|e| e.to_string())?;
-                if fresh {
-                    let answer = body(&store, &options, &root)?;
-                    let still_fresh = store.verify_snapshot(&root).map_err(|e| e.to_string())?;
-                    store.end_read().map_err(|e| e.to_string())?;
-                    if still_fresh {
-                        return Ok(answer);
-                    }
-                }
-            }
-            let mut writer = wa_graph::Store::open(&db).map_err(|e| e.to_string())?;
-            // A stale or legacy snapshot may have missing source records. Rebuild all
-            // records rather than trusting the old incremental stamps to repair them.
-            writer.index(&root, true).map_err(|e| e.to_string())?;
-        }
-        Err("graph_source_unstable: use read/grep and retry later".into())
-    })();
-    push_json(
-        l,
-        &outcome.unwrap_or_else(|error| json!({ "error": error })),
-    );
+    let outcome = locations(&options, CONFIG.get())
+        .and_then(|(root, db)| read_snapshot(&root, &db, &options, body));
+    push_json(l, &outcome.unwrap_or_else(|error| json!({ "error": error })));
     1
 }
 
@@ -312,28 +313,13 @@ pub extern "C-unwind" fn graph_status(l: *mut LuaState) -> std::ffi::c_int {
 }
 
 /// host.graph_patch_audit(request_json) -> review leads or an explicit error.
-/// This refreshes synchronously: a background watcher event is not evidence that the patch
-/// and its dependency edges belong to the same source snapshot.
+/// Like navigation, audit verifies a pinned snapshot but never refreshes implicitly.
 pub extern "C-unwind" fn graph_patch_audit(l: *mut LuaState) -> std::ffi::c_int {
-    let request = json_arg(l, 1);
-    let outcome = (|| -> Result<Value, String> {
-        let (root, db) = locations(&request, CONFIG.get())?;
-        let mut store = wa_graph::Store::open(&db).map_err(|e| e.to_string())?;
-        store.index(&root, false).map_err(|e| e.to_string())?;
-        let mut report = store
-            .audit_json(&root, &request)
-            .map_err(|e| e.to_string())?;
-        let after = store.index(&root, false).map_err(|e| e.to_string())?;
-        if after.indexed > 0 || after.removed > 0 {
-            return Err("graph_source_changed_during_audit".into());
-        }
+    read(l, 1, |store, request, root| {
+        let mut report = store.audit_json(root, request).map_err(|e| e.to_string())?;
+        let (_, db) = locations(request, CONFIG.get())?;
         report["root"] = json!(root.to_string_lossy());
-        report["db_bytes"] = json!(std::fs::metadata(&db).map_err(|e| e.to_string())?.len());
+        report["db_bytes"] = json!(std::fs::metadata(db).map_err(|e| e.to_string())?.len());
         Ok(report)
-    })();
-    push_json(
-        l,
-        &outcome.unwrap_or_else(|error| json!({ "error": error })),
-    );
-    1
+    })
 }
