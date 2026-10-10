@@ -404,6 +404,7 @@ const answerScrollPositions = new WeakMap();
 function releaseAnswerAnchor(container = transcript, manual = true) {
   answerAnchors.delete(container);
   if (manual) {
+    answerScrollPositions.delete(container);
     answerReleased.add(container);
     if (container===messages) setFollow(false);
     else scrollState(container).follow=false;
@@ -466,7 +467,10 @@ function setFollow(value) {
 }
 
 messages.addEventListener("scroll", () => {
-  if (pinning) return;
+  const expected = answerScrollPositions.get(messages);
+  // Scroll delivery can follow the frame that cleared pinning. A position we
+  // just set is still programmatic, not a reader opting out of answer-start.
+  if (pinning || (expected != null && Math.abs(messages.scrollTop - expected) < 1)) return;
   releaseAnswerAnchor();
   setFollow(atBottom());
 }, { passive: true });
