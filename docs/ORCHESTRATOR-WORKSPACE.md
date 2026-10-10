@@ -2,10 +2,22 @@
 
 The topbar Orchestrator control opens a separate native view window (a browser
 window outside the companion). The current chat remains the coordinator. The
-left sidebar lists delegated sessions; pinning opens their conversations in the
+left sidebar creates cards only for active delegated sessions; pinning opens their conversations in the
 main canvas, with four panes forming a 2×2 grid. Expansion, collapse and window
 closure are presentation operations and never cancel work. Layout and drafts
 are local to the authenticated window account; execution is node-owned.
+
+## Active-only cards
+
+Cards require a positive `running`, `accepted`, `queued` or `placing` task state
+and no terminal settlement. Completed/failed/cancelled/refused/unknown records
+remain in history but create no card or lane group. The live-child list uses the
+same filter; a recordless child needs an actual current health run, not merely
+an unfinished ledger or retained worktree. Unknown effects remain unknown in
+Engine → Sessions; filtering never settles, cancels, deletes or replays them.
+Only active cards are restored as panes on window startup. Already-open panes,
+promoted windows and unsent drafts remain until explicitly closed; their task
+status continues updating after settlement. Existing polling is unchanged.
 
 ## Instructions and envelope
 
