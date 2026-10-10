@@ -122,12 +122,25 @@
     }
     handleEvent({type:'reply',text:streamText});
     check(Math.abs(answerAnchors.get(messages)?.getBoundingClientRect().top-messages.getBoundingClientRect().top)<3,'reply retains '+mode+' beginning');
+    // A delayed browser scroll at our exact pin is not reader intent.
+    pinning=false;messages.dispatchEvent(new Event('scroll'));
+    check(answerAnchors.has(messages),'delayed own scroll retains '+mode+' answer anchor');
     if(mode==='delta') {
       jump.click();
       handleEvent({type:'delta',text:'\n\n'+('Following latest output.\n\n'.repeat(20))});
       check(atBottom()&&!answerAnchors.has(messages),'jump-to-latest explicitly resumes tail following');
     }
   }
+  // Settlement preserves the beginning, not the bottom, after real frames.
+  readingFixture();
+  const settledText='# Settled answer start\n\n'+('Readable paragraph of evidence.\n\n'.repeat(100));
+  handleEvent({type:'final_answer_begin',message_id:'settled-start'});
+  handleEvent({type:'delta',text:settledText});
+  const settledNode=streamBody;
+  handleEvent({type:'reply',message_id:'settled-start',text:settledText});
+  handleEvent({type:'done'});
+  await new Promise(resolve=>setTimeout(resolve,50));
+  check(Math.abs(settledNode.getBoundingClientRect().top-messages.getBoundingClientRect().top)<3,'done/frame keeps completed answer beginning readable');
   // Markdown must be visible BEFORE text_end/reply, including late/unknown phase.
   for(const mode of ['explicit','pending','delta']) {
     readingFixture();
