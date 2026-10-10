@@ -407,8 +407,14 @@ function releaseAnswerAnchor(container = transcript, manual = true) {
   }
 }
 function anchorAnswer(node) {
-  if (replayingMessages) return;
+  if (replayingMessages || answerReleased.has(transcript)) return;
   const container = transcript;
+  // Start reading with the first visible chunk, even before its provider phase
+  // is known. This is a scroll policy, never evidence of a final/settled answer.
+  // Do not steal a reader already in scrollback; an existing anchor may transfer
+  // from provisional text to the confirmed answer in the same event turn.
+  const following = container === messages ? follow : scrollState(container).follow;
+  if (!following && !answerAnchors.has(container)) return;
   answerAnchors.set(container, node);
   for (const gesture of ['wheel', 'touchstart']) {
     container.addEventListener(gesture, () => { releaseAnswerAnchor(container); if(container===messages)setFollow(false); }, {passive:true, once:true});
@@ -434,7 +440,11 @@ function pin(force = false) {
   const answer = answerAnchors.get(transcript);
   if (answer?.isConnected && !force) {
     if (state) state.pinning=true; else pinning = true;
-    transcript.scrollTop += answer.getBoundingClientRect().top - transcript.getBoundingClientRect().top;
+    // Clamp to the available scroll range: short output grows upward from the
+    // bottom; once its start reaches the viewport top, only the overflow grows.
+    const start = container.scrollTop + answer.getBoundingClientRect().top - container.getBoundingClientRect().top;
+    const target = Math.max(0, Math.min(start, container.scrollHeight - container.clientHeight));
+    if (Math.abs(container.scrollTop - target) >= 1) container.scrollTop = target;
     answerScrollPositions.set(transcript, transcript.scrollTop);
     requestAnimationFrame(() => { if(state)state.pinning=false;else pinning = false; });
     return;
@@ -474,7 +484,7 @@ messages.addEventListener("keydown", (event) => {
 if (typeof ResizeObserver === "function") {
   new ResizeObserver(() => pin()).observe(messages);
 }
-jump.addEventListener("click", () => { setFollow(true); pin(true); });
+jump.addEventListener("click", () => { releaseAnswerAnchor(messages); setFollow(true); pin(true); });
 
 // One assistant bubble per run. Decisions and their tool topics live *inside*
 // it as stacked segments: separate bubbles put a border between every step,
@@ -1520,6 +1530,8 @@ function handleEvent(event) {
     setStatus(note === "model" ? "thinking…" : "wasm-agent is " + note + "…");
   } else if (event.type === "commentary") {
     showRunStep("commentary", "Receiving progress update");
+    const pending = phasePendingText.get(String(event.pending_id || ''));
+    if (pending?.node === answerAnchors.get(transcript)) releaseAnswerAnchor(transcript, false);
     removePendingText(event.pending_id);
     appendCommentary(event.text || "", event.message_id, event.pending_id);
   } else if (event.type === "commentary_delta") {
@@ -1565,6 +1577,7 @@ function handleEvent(event) {
       anchorRunStepContent(node);
       pending = { node, text: "" };
       phasePendingText.set(key, pending);
+      anchorAnswer(node);
     }
     pending.text += event.text || "";
     pending.node.textContent = pending.text;
@@ -1579,6 +1592,7 @@ function handleEvent(event) {
       streamBody.className = "seg";
       currentBubble().body.append(streamBody);
       anchorRunStepContent(streamBody);
+      anchorAnswer(streamBody);
     }
     if(event.pending_id)streamBody.dataset.pendingId=String(event.pending_id);
     streamText += event.text || "";
