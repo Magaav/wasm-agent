@@ -10,6 +10,13 @@ on this request path. The catalogue is explicit per-model metadata; operator
 refused rather than guessed. `WASM_AGENT_SUBSCRIPTION_TRANSPORT=pi` is an explicit
 legacy rollback only; failure never silently switches to it.
 
+Native SSE error frames accept both top-level and nested `error` code/message
+fields. The observed nested `context_length_exceeded` now reaches the existing
+one-compaction/one-retry recovery; throttling/authentication failures do not
+authorize compaction or replay. Unknown errors stay visible with explicit missing
+details. `test-native-overflow-recovery.lua` exercises the parser, transport
+callback envelope and actual agent together, including repeat rejection.
+
 Native added-item phase is retained by identity before text deltas: known
 commentary streams directly into its topic and final-answer begin can precede
 text. Missing early phase stays provisional. Typed count-only phase diagnostics

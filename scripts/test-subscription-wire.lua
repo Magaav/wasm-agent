@@ -292,6 +292,25 @@ check(tostring(cut_error):find('partial answer is not an answer', 1, true) ~= ni
   'and says why, rather than reporting a short answer')
 
 -- 4. A frame that is not JSON, an HTTP refusal and a cancelled run are all visible.
+for _, case in ipairs({
+  {body=fixture('codex-context-error-sse.txt'), code='context_length_exceeded',
+    message='Your input exceeds the context window'},
+  {body='data: {"type":"error","code":"rate_limit_exceeded","message":"Try later"}\n\n',
+    code='rate_limit_exceeded',message='Try later'},
+  {body='data: {"type":"error","error":{"type":"invalid_request_error","message":"Bad request"}}\n\n',
+    code='invalid_request_error',message='Bad request'},
+  {body='data: {"type":"error","error":"Upstream unavailable"}\n\n',
+    code='unknown',message='Upstream unavailable'},
+  {body='data: {"type":"error"}\n\n',code='unknown',message='no error details in response'},
+}) do
+  replay(case.body)
+  local ok, problem=pcall(wire.complete,'gpt-6-luna',messages,tools,false,
+    {session_id='replay'},{selected='low'})
+  check(not ok and tostring(problem):find(case.code,1,true)~=nil,
+    'provider error preserves code: '..tostring(problem))
+  check(tostring(problem):find(case.message,1,true)~=nil,
+    'provider error preserves message: '..tostring(problem))
+end
 replay('event: response.output_text.delta\ndata: not json at all\n\n')
 local bad_ok, bad_error = pcall(wire.complete, 'gpt-6-luna', messages, tools, false,
   {session_id = 'replay'}, {selected = 'low'})
