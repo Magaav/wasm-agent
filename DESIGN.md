@@ -98,13 +98,20 @@ has open, so the inspector is reused rather than stacked.
 
 One scale: **5px**.
 
-- **Inner padding:** every component pads its own content by **5px** minimum
-  (multiples of 5 — `10px`, `15px` — are fine for larger surfaces).
+- **Inner padding:** use **5px**, shared by `--space` and `--pad`, including
+  bubbles, composer, panels and promoted headers. The former 10px inner inset is
+  reduced for compactness; do not shrink fonts, icons or control hit targets.
+  Structural offsets, safe-area insets and Markdown indentation are not padding
+  density controls.
 - **Gaps:** between sibling elements the gap is **0** or **5px**. Never invent
   8px/12px/14px gaps.
 - Sizes of square controls are multiples of 5 (`30px`, `40px`).
 - Component radius: **5px**, defined once by `--radius`; `--radius-sm` and
-  `--radius-lg` alias it. Circular glyphs/avatars remain circles, full-bleed regions square.
+  `--radius-lg` alias it. The native expanded shell clips to the same 5 logical
+  pixels (GDI ellipse diameter10, scaled by DPI), not its former 18px radius.
+  Circular glyphs/avatars remain circles, full-bleed/maximized regions square.
+- Bubble run-status rows use the closed-topic outer height (30px), including
+  live and settled states; counters retain exact content and narrow-screen fit.
 - Use the tokens `--space`, `--pad`, `--gap`, `--radius*` rather than literals.
 
 

@@ -1221,7 +1221,7 @@ class WaWindow extends HTMLElement {
           box-shadow: 0 24px 60px rgba(0,0,0,.6);
         }
         .bar {
-          display: flex; align-items: center; gap: var(--gap, 5px); padding: var(--space, 5px) var(--pad, 10px);
+          display: flex; align-items: center; gap: var(--gap, 5px); padding: var(--space, 5px) var(--pad, 5px);
           background: var(--panel-2, #161a23); border-bottom: 1px solid var(--line, #232936);
           cursor: grab; user-select: none; flex: none;
         }
