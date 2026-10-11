@@ -1018,7 +1018,7 @@ function M.complete(model, messages, tools, stream, opts, reasoning)
       if host.beat then host.beat() end
       if observe then observe(text) end
       line(text)
-    end)
+    end, math.floor(timeout_ms / 1000))
   if stopped_by then error(stopped_by, 0) end
   local decoded = json.decode(outcome)
   if decoded.error then

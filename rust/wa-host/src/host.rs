@@ -1882,6 +1882,13 @@ pub extern "C-unwind" fn http_sse(l: *mut LuaState) -> c_int {
     let url = arg_string(l, 2).unwrap_or_default();
     let headers_json = arg_string(l, 3).unwrap_or_else(|| "{}".into());
     let body = arg_string(l, 4).unwrap_or_default();
+    let seconds = if unsafe { crate::lua::lua_type(l, 6) } <= crate::lua::LUA_TNIL {
+        3600
+    } else { arg_integer(l, 6).unwrap_or(0) };
+    if !(1..=86400).contains(&seconds) {
+        push_json(l, &json!({"error": "invalid_sse_timeout: expected 1..86400 seconds"}));
+        return 1;
+    }
     let headers = parse_headers(&headers_json);
     if unsafe { crate::lua::lua_type(l, 5) } == crate::lua::LUA_TNIL {
         push_json(l, &json!({"error": "http_sse_requires_on_line"}));
@@ -1897,7 +1904,12 @@ pub extern "C-unwind" fn http_sse(l: *mut LuaState) -> c_int {
         return 1;
     }
     let _heartbeat = crate::serve::Heartbeat::start();
-    let mut request = agent_for_call().post(&url);
+    let (_, read, _) = http_timeouts();
+    let total = std::time::Duration::from_secs(seconds as u64);
+    let total = crate::subagents::remaining_budget().map(|remaining| total.min(remaining)).unwrap_or(total);
+    let (stream_agent, stream_control) = crate::http_transport::stream_agent(
+        build_config(read), std::time::Duration::from_secs(read), total);
+    let mut request = stream_agent.post(&url);
     for (key, value) in &headers {
         request = request.header(key, value);
     }
@@ -1910,6 +1922,7 @@ pub extern "C-unwind" fn http_sse(l: *mut LuaState) -> c_int {
         }
     };
     let status = response.status().as_u16();
+    stream_control.received_headers();
     if status != 200 {
         let text = response.into_body().read_to_string().unwrap_or_default();
         crate::subagents::clear_active_socket();

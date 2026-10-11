@@ -376,10 +376,19 @@ second, 80 last.
 
 ## Streaming a provider's own protocol
 
-`host.http_sse(method, url, headers_json, body, on_line)` POSTs to an endpoint that answers
+`host.http_sse(method, url, headers_json, body, on_line, timeout_seconds?)` POSTs to an endpoint that answers
 `text/event-stream` and hands **each response line** to the Lua callback `on_line(text)` as it
 arrives, then returns `{status, lines, termination}` - or `{status, body, termination:"http_error"}`
 for a non-200, or `{error, termination}` when the read failed.
+
+The optional overall deadline is 1..86400 integer seconds (default 3600), capped
+by the remaining child budget. Header waiting retains `WASM_AGENT_HTTP_RESPONSE_TIMEOUT`;
+after headers arrive, `WASM_AGENT_HTTP_READ_TIMEOUT` bounds each silent socket
+read, while the overall deadline bounds the entire stream. A healthy SSE body
+outlives the header deadline. Foreground and child cancellation interrupt silent
+reads through the existing 250ms cancellation slices. Risk: the streaming path
+owns this phase transition because ureq 3 carries the preceding header timeout
+into its body timing; ordinary HTTP calls retain their existing policy.
 
 It exists because `host.http_stream` reads exactly *one* SSE dialect: OpenAI-compatible chunks whose
 content lives at `choices[0].delta`, which it maps to the UI's `delta`/`reasoning` events itself. A

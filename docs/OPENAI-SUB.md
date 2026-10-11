@@ -16,6 +16,10 @@ one-compaction/one-retry recovery; throttling/authentication failures do not
 authorize compaction or replay. Unknown errors stay visible with explicit missing
 details. `test-native-overflow-recovery.lua` exercises the parser, transport
 callback envelope and actual agent together, including repeat rejection.
+The native stream also passes its original request deadline to `host.http_sse`.
+Summary/reasoning streams that continue receiving bytes are no longer stopped
+by the already-completed response-header timeout. Header, idle-read, overall
+deadline and cancellation limits remain distinct and bounded.
 
 Native added-item phase is retained by identity before text deltas: known
 commentary streams directly into its topic and final-answer begin can precede
