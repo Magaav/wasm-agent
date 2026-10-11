@@ -1062,6 +1062,7 @@ WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-graph-workspace.lua" "$BIN" --db "$
 # Offline accounting must run even when UI tests are explicitly skipped.
 gate_run node scripts/test-token-audit.cjs
 WA_BIN="$BIN" node scripts/test-efficiency.cjs
+WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-batch-tools.lua" "$BIN" --db "$DB.batch-tools" | grep 'batch tools ok'
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-patch-audit.lua" "$BIN" --db "$DB.patch-audit" | grep 'patch audit ok'
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-patch-audit-agent.lua" "$BIN" --db "$DB.patch-audit-agent" | grep 'patch audit agent ok'
 # A module is one directory under `modules/`, so the route has to list what is on disk and a node

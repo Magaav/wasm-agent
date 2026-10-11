@@ -36,7 +36,7 @@ M.RETRYABLE_ADMISSION = { node_full = true, queue_full = true, subagent_runtime_
 -- must be explicitly operator-authorized; a built-in read-only profile never is.
 local BROAD = {
   bash = true, shell = true, client = true, remote = true,
-  write = true, edit = true, spell_save = true, spell_run = true, spell_export = true,
+  write = true, edit = true, write_many=true, edit_many=true, spell_save = true, spell_run = true, spell_export = true,
   resource = true, integrate = true,
 }
 
@@ -56,7 +56,7 @@ local BUILTIN = {
     -- `index` rebuilds the node's own local graph.db. It reaches no external state, so a
     -- read-only investigator may use it. Without it, a child delegated code exploration is
     -- blind to the navigation capability the parent already has.
-    allowed_tools = { "read", "read_many", "grep", "ls", "graph", "diagnose" },
+    allowed_tools = { "read", "read_many", "grep", "grep_many", "ls", "graph", "symbol_source_many", "diagnose" },
     resources = {},
     limits = { max_depth = 0, timeout_seconds = 600, max_output_bytes = 65536 },
   },
@@ -64,7 +64,7 @@ local BUILTIN = {
     schema_version=1,id='orchestration-worker',builtin=true,operator_authorized=true,
     description='Explicit orchestration-mode task owner: implement, focused self-review, integrate and report. No nested workers or Sentinel.',
     instructions='Own the operator task end to end in your allocated worktree. Read session_worktree status, project docs and relevant skills. Implement using write/edit, self-review honestly, run focused checks, commit with Agent provenance, fetch/sync/refactor conflicts until mergeable, then use integrate to land through canonical main and verify remote. Do not directly edit canonical files, bypass hooks, force push or invent verification. If semantic conflict cannot be resolved safely, report the exact blocker and preserve work. No full release gate unless explicitly requested. NEVER call Sentinel, /update, deploy/install/restart scripts or write installed UI/assets/configuration. Only the coordinator publishes UI or installs code after readiness. Do not spawn children; no polling model loop. Complete and report; coordinator followup comes only after your report.',
-    allowed_tools={'skill','capabilities','recall','memories','session','search_messages','read','read_many','grep','ls','diagnose','graph','write','edit','bash','operation','session_worktree','tool_result','integrate'},
+    allowed_tools={'skill','capabilities','recall','memories','session','session_many','search_messages','search_messages_many','read','read_many','grep','grep_many','ls','diagnose','graph','symbol_source_many','write','write_many','edit','edit_many','bash','operation','session_worktree','tool_result','integrate'},
     resources={},limits={max_depth=0,timeout_seconds=0,max_output_bytes=131072,max_prompt_bytes=262144},
   },
   guest = {
@@ -78,6 +78,17 @@ local BUILTIN = {
     limits = { max_depth = 0, timeout_seconds = 300, max_output_bytes = 32768, max_tokens = 100000 },
   },
 }
+
+-- Disabling optional APIs must not make the shipped ordinary profiles unusable.
+if not tools.batch_enabled() then
+  for _,profile in pairs(BUILTIN) do
+    local ordinary={}
+    for _,name in ipairs(profile.allowed_tools) do
+      if not tools.batch_base(name) then ordinary[#ordinary+1]=name end
+    end
+    profile.allowed_tools=ordinary
+  end
+end
 
 local function profile_dir()
   return paths.config() .. "/subagent-profiles"
@@ -256,6 +267,11 @@ function M.resolve(id, ctx)
       allowed_set[name] = true
       allowed_list[#allowed_list + 1] = name
     end
+  end
+
+  for _,name in ipairs(allowed_list) do
+    local primitive=tools.batch_base(name)
+    if primitive and not allowed_set[primitive] then return nil,'profile_batch_requires_primitive:'..primitive end
   end
 
   local limits = profile.limits or {}

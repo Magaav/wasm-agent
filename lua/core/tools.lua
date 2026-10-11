@@ -9,6 +9,7 @@ local changeset = dofile("lua/core/changeset.lua")
 local patch_audit = dofile("lua/core/patch_audit.lua")
 local tool_output = dofile("lua/core/tool_output.lua")
 local file_tools = dofile("lua/core/file_tools.lua")
+local batch_tools = dofile("lua/core/batch_tools.lua")
 local evidence_view = dofile("lua/core/evidence_view.lua")
 local diagnose = dofile("lua/core/diagnose.lua")
 local workspaces = dofile("lua/core/workspaces.lua")
@@ -295,6 +296,58 @@ M.admin = {
     principal={type="string"},evidence={type="string"} }, {"action"}),
 }
 
+-- Batch schemas reuse the primitive properties so their contracts cannot drift.
+-- Only selected read actions are batched; no generic effect dispatcher is exposed.
+local BATCH = {
+  edit_many={base='edit',mutates=true}, write_many={base='write',mutates=true},
+  grep_many={base='grep'}, session_many={base='session'},
+  search_messages_many={base='search_messages'}, symbol_source_many={base='graph'},
+}
+local function add_batches(list)
+  local originals={}
+  for _,group in ipairs({M.shared,M.admin}) do
+    for _,entry in ipairs(group) do originals[entry['function'].name]=entry['function'].parameters end
+  end
+  local additions={}
+  for name,entry in pairs(BATCH) do
+    local original=originals[entry.base]
+    if original then
+      local properties={}
+      for key,value in pairs(original.properties or {}) do properties[key]=value end
+      local required=original.required
+      if name=='symbol_source_many' then
+        properties={}
+        for _,key in ipairs({'path','name','line','kind','byte_offset','max_bytes','cwd'}) do properties[key]=original.properties[key] end
+        required={'path','name','line'}
+      elseif name=='write_many' then
+        properties.version={type='string',description='Optional expected existing text SHA-256; never relaxed for empty strings.'}
+      end
+      entry.item={type='object',properties=properties,required=required}
+      local description=entry.mutates and
+        ('Apply 1-8 independent '..entry.base..' requests. Validate every item/path/snapshot before any write; duplicate/overlapping targets refuse. Serial application rechecks each file and stops on failure or steering. Per-item results and diff/undo retained; NOT a multi-file transaction. Never retry unknown effects.') or
+        ('Run 1-8 independent '..(name=='symbol_source_many' and 'graph symbol_source' or entry.base)..' reads. Same permissions, scopes, limits and exact evidence as the primitive. Ordered per-item results/errors; inspect each continuation/completeness flag. No snapshot, retries or indexing.')
+      additions[#additions+1]=schema(name,description,{requests={type='array',minItems=1,maxItems=8,items=entry.item}},{'requests'})
+    end
+  end
+  table.sort(additions,function(a,b)return a['function'].name<b['function'].name end)
+  for _,entry in ipairs(additions) do list[#list+1]=entry end
+end
+-- Operator batches only: guest surfaces and artifact access do not expand.
+add_batches(M.admin)
+-- Stable per-interpreter rollback knob, never automatic failure fallback or
+-- per-round schema shuffling. The operator explicitly requested these APIs.
+local batches_enabled=host.getenv('WASM_AGENT_BATCH_TOOLS')~='0'
+if not batches_enabled then
+  local ordinary={}
+  for _,entry in ipairs(M.admin) do
+    if not BATCH[entry['function'].name] then ordinary[#ordinary+1]=entry end
+  end
+  M.admin=ordinary
+end
+
+function M.batch_base(name)return BATCH[name] and BATCH[name].base end
+function M.batch_enabled()return batches_enabled end
+
 -- Which capability tier each tool belongs to (DESIGN.md §8). Anything not
 -- listed here is a WASM plugin.
 M.tier_of = {
@@ -303,12 +356,14 @@ M.tier_of = {
   capabilities = "capabilities",
   subagent = "subagents",
   sessions = "sessions", session = "sessions", search_messages = "sessions",
+  session_many = "sessions", search_messages_many = "sessions",
   resume_session = "sessions", session_debug = "sessions", session_fixture = "sessions",
   session_worktree = "sessions",
   resource = "sessions", integrate = "sessions",
   bash = "environment", read = "environment", read_many = "environment", write = "environment",
   diagnose = "environment", operation = "environment",
   edit = "environment", ls = "environment", grep = "environment", graph = "environment",
+  edit_many="environment",write_many="environment",grep_many="environment",symbol_source_many="environment",
   shell = "shell",
   search_ledger = "ledger", conversation = "ledger", list_conversations = "ledger",
   client = "client",
@@ -399,6 +454,12 @@ local CUES = {
   operation = "Run or collect a supervised long command",
   read = "Read a file (text or image), paged",
   read_many = "Read several files or ranges in one call",
+  edit_many = "Preflight independent edits, then apply with per-file outcomes",
+  write_many = "Preflight independent writes, retaining diff and undo evidence",
+  grep_many = "Run separately scoped literal searches together",
+  session_many = "Read bounded ranges from several sessions",
+  search_messages_many = "Run independently filtered history searches together",
+  symbol_source_many = "Retrieve several selected symbol implementations",
   write = "Create or overwrite a file",
   edit = "Replace a versioned range returned by read",
   ls = "List a directory",
@@ -562,8 +623,32 @@ local function inside_scratch(root, target)
   return false
 end
 
+local function target_identity(path)
+  local probe,suffix=path,''
+  while host.canonical_path and probe~='' do
+    local real=host.canonical_path(probe)
+    if real then path=real..suffix;break end
+    local parent,leaf=probe:gsub('\\','/'):match('^(.*)/([^/]+)$')
+    if not parent then
+      local cwd=host.canonical_path('.')
+      if cwd then path=cwd..'/'..probe..suffix end
+      break
+    end
+    if parent==probe then break end
+    suffix='/'..leaf..suffix;probe=parent
+  end
+  -- Rust canonicalize uses Windows verbatim prefixes; compare the same path
+  -- representation as ordinary workspace bindings, without changing authority.
+  path=tostring(path):gsub('\\','/')
+  if platform.os()=='windows' then
+    path=path:gsub('^//%?/[Uu][Nn][Cc]/','//'):gsub('^//%?/','')
+  end
+  path=normalized_path(path)
+  return platform.os()=='windows' and path:lower() or path
+end
+
 local function required_workspace_error(memory, ctx, name, args)
-  local writes_files = name == "write" or name == "edit" or name == "bash"
+  local writes_files = name == "write" or name == "edit" or name == "write_many" or name == "edit_many" or name == "bash"
     or name == "operation" and (args.action or "") == "start"
     or name == "shell" or name == "client" or name == "remote" or name == "spell_run"
   if not writes_files or not memory or not ctx.session_id or not memory.session_workspace then return nil end
@@ -685,6 +770,38 @@ function M.dispatch(memory, name, args, role, ctx)
     if name == "subagent" then return { error = "subagent_recursion_forbidden" } end
   end
   if not is_master(role) and admin_names()[name] then return { error = "forbidden_for_role:" .. role } end
+  if BATCH[name] then
+    if not is_master(role) then return {error='forbidden_for_role:'..role} end
+    if not batches_enabled then return {error='batch_tools_disabled',effect='none'} end
+    local batch=BATCH[name]
+    -- The wrapper grants nothing: a profile must explicitly permit BOTH names.
+    if ctx.subagent and not (ctx.subagent.allowed or {})[batch.base] then
+      return {error='capability_not_in_profile:'..batch.base}
+    end
+    if not batch.mutates then
+      return batch_tools.read(args,batch.item,function(request)
+        if name=='symbol_source_many' then request.action='symbol_source' end
+        return M.dispatch(memory,batch.base,request,role,ctx)
+      end)
+    end
+    local record=ctx.changes and function(path,before,after)
+      changeset.record(ctx.changes,path,before,after)
+    end or nil
+    return batch_tools.mutate(args,batch.item,function(request)
+      local refusal=required_workspace_error(memory,ctx,batch.base,request)
+      if refusal then return refusal end
+      request.path=resolve_path(memory,ctx,request.path)
+      local real_refusal=required_workspace_error(memory,ctx,batch.base,{path=target_identity(request.path)})
+      if real_refusal then return real_refusal end
+      if batch.base=='edit' then return file_tools.edit(request,nil,true) end
+      return file_tools.prepare_write(request)
+    end,function(plan)
+      local refusal=required_workspace_error(memory,ctx,batch.base,{path=plan.path})
+        or required_workspace_error(memory,ctx,batch.base,{path=target_identity(plan.path)})
+      if refusal then return refusal end
+      return file_tools.apply(plan,record)
+    end,target_identity,ctx.steering_admit,file_tools.check)
+  end
   if name=='integrate' then return dofile('lua/core/integrate.lua').run(memory,ctx) end
   local workspace_error = required_workspace_error(memory, ctx, name, args)
   if workspace_error then return workspace_error end
@@ -1143,7 +1260,8 @@ end
 -- a call needs stopping only when it has one. A read-only allowlist, not an effectful one: a tool
 -- this file has never heard of (a plugin's) keeps the fence, which is the safe direction.
 local READ_ONLY = {
-  read = true, read_many = true, grep = true, ls = true, tool_result = true, skill = true,
+  read = true, read_many = true, grep = true, grep_many=true, session_many=true,
+  search_messages_many=true,symbol_source_many=true, ls = true, tool_result = true, skill = true,
   graph = true, diagnose = true, capabilities = true, nodes = true,
   recall = true, memories = true, sessions = true, session = true,
   search_messages = true, search_ledger = true, conversation = true, list_conversations = true,

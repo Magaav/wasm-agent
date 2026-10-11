@@ -645,6 +645,8 @@ local function navigation_outcome(name, args, output)
       return { action = action, found = output.ok ~= false, count = tonumber(output.indexed) or 0 }
     end
     return { action = action, found = true }
+  elseif type(name)=='string' and name:match('_many$') and type(output.results)=='table' then
+    return {action='batch',found=output.ok==true,count=#output.results,failed=tonumber(output.failed) or 0}
   elseif name == "grep" then
     local n = tonumber(output.count) or 0
     return { action = "literal", found = n > 0, count = n }
@@ -962,9 +964,11 @@ function M:maybe_compact(messages, force)
         local f=call["function"] or {}
         local ok,args=pcall(json.decode,f.arguments or "{}")
         if ok and type(args)=="table" then
-          if f.name=="read_many" and type(args.requests)=="table" then
+          if (f.name=="read_many" or f.name=="edit_many" or f.name=="write_many") and type(args.requests)=="table" then
             for _, request in ipairs(args.requests) do
-              if type(request)=="table" and type(request.path)=="string" then read_files[request.path]=true end
+              if type(request)=="table" and type(request.path)=="string" then
+                if f.name=='read_many' then read_files[request.path]=true else modified_files[request.path]=true end
+              end
             end
           elseif type(args.path)=="string" then
             if f.name=="read" then read_files[args.path]=true
@@ -995,9 +999,11 @@ function M:maybe_compact(messages, force)
       for _,call in ipairs(rows[index].tool_calls or {}) do
         local f=call['function'] or {}; local ok,args=pcall(json.decode,f.arguments or '{}')
         if ok and type(args)=='table' then
-          if f.name=='read_many' and type(args.requests)=='table' then
+          if (f.name=='read_many' or f.name=='edit_many' or f.name=='write_many') and type(args.requests)=='table' then
             for _,request in ipairs(args.requests) do
-              if type(request)=='table' and type(request.path)=='string' then read_files[request.path]=true end
+              if type(request)=='table' and type(request.path)=='string' then
+                if f.name=='read_many' then read_files[request.path]=true else modified_files[request.path]=true end
+              end
             end
           elseif type(args.path)=='string' then
             if f.name=='read' then read_files[args.path]=true
@@ -1899,6 +1905,7 @@ function M:run_body(text, images)
       local tool_span=telemetry.start({session_id=self.session_id,run_id=self.run_id},"tool",
         {name=function_.name,call_id=call.id,round=round,parallel_batch=parallel_op~=nil,
           tool_group_id=assistant_id,tool_group_size=#calls,tool_group_index=tool_index,
+          batch_items=type(function_.name)=='string' and function_.name:match('_many$') and type(args.requests)=='table' and #args.requests or nil,
           read_many_ranges=function_.name=="read_many" and type(args.requests)=="table" and #args.requests or nil,
           batching_guidance=batching_mode,arguments_hash=host.sha256(function_.arguments or "")})
       host.beat()
