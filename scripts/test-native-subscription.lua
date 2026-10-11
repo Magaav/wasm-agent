@@ -5,6 +5,7 @@ local real_getenv,read=host.getenv,host.read_file
 local env={WASM_AGENT_PROVIDER='openai-sub',WASM_AGENT_LLM_MODEL='gpt-6.1-sol',
  WASM_AGENT_SUBSCRIPTION_TRANSPORT='',WASM_AGENT_SUBSCRIPTION_TIMEOUT='30',WASM_AGENT_MAX_TOOL_ROUNDS='4',
  WASM_AGENT_CONTEXT_BUDGET='0',WASM_AGENT_PROVIDER_RETRIES='0',WASM_AGENT_PROVIDER_TRANSIENT_RETRIES='0',
+ WASM_AGENT_SUBSCRIPTION_TRANSPORT_RETRIES='0',
  WASM_AGENT_OPENAI_SUB_STORE=paths.data()..'/native-fixture/credentials.json'}
 host.getenv=function(k)if env[k]~=nil then return env[k]end return real_getenv(k)end
 assert(host.write_file(env.WASM_AGENT_OPENAI_SUB_STORE,json.encode({version=1,provider='openai-codex',type='oauth',access='private-fixture',refresh='private-fixture',expires=host.now()*1000+3600000,account_id='fixture-account'})))

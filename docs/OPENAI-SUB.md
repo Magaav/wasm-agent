@@ -21,6 +21,20 @@ Summary/reasoning streams that continue receiving bytes are no longer stopped
 by the already-completed response-header timeout. Header, idle-read, overall
 deadline and cancellation limits remain distinct and bounded.
 
+Native connection loss now regenerates only the unfinished inference request.
+`WASM_AGENT_SUBSCRIPTION_TRANSPORT_RETRIES` controls 0..10 reconnects (default 10,
+matching the legacy transport); backoff is 0.5, 1, 2, 4, then 5 seconds, always
+inside the original request deadline. Earlier completed tool effects remain in
+context and are not re-executed. Interrupted reasoning/text, encrypted reasoning
+items and uncommitted tool arguments are retained in private durable retry rows;
+the UI seals the old previews before displaying replacement output. Only a
+complete validated response can dispatch tools. Unknown events/items, malformed
+frames, provider refusals, cancellation and deadline exhaustion never authorize
+regeneration. Exhaustion/suppression prevents an outer retry loop. A permanent
+outage still ends visibly; reconnect can incur another upstream inference charge
+even when the first response was lost. `test-native-disconnect-recovery.lua`
+proves these boundaries through the actual native provider/agent loop.
+
 Native added-item phase is retained by identity before text deltas: known
 commentary streams directly into its topic and final-answer begin can precede
 text. Missing early phase stays provisional. Typed count-only phase diagnostics
