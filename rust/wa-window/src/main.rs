@@ -35,6 +35,22 @@ mod companion {
     const COMPACT: u32 = 88;
     const PANEL_WIDTH: u32 = 430;
     const PANEL_HEIGHT: u32 = 640;
+    // CSS --radius is 5 logical px. GDI takes the corner ellipse's diameter.
+    const PANEL_CORNER_RADIUS: f64 = 5.0;
+    fn panel_corner_diameter(scale: f64) -> i32 {
+        (2.0 * PANEL_CORNER_RADIUS * scale).round().max(1.0) as i32
+    }
+    #[cfg(test)]
+    mod corner_tests {
+        use super::panel_corner_diameter;
+        #[test]
+        fn expanded_region_matches_five_logical_pixel_radius_at_each_dpi() {
+            assert_eq!(panel_corner_diameter(1.0), 10);
+            assert_eq!(panel_corner_diameter(1.25), 13);
+            assert_eq!(panel_corner_diameter(1.5), 15);
+            assert_eq!(panel_corner_diameter(2.0), 20);
+        }
+    }
     const TOPMOST_INTERVAL: Duration = Duration::from_millis(750);
     const DEFAULT_URL: &str = "http://127.0.0.1:8799/";
 
@@ -354,8 +370,8 @@ mod companion {
                 // A full rectangle: rounding is for a floating panel, and this is not one.
                 None
             } else if mode == "expanded" {
-                // Match the panel's CSS `border-radius: 18px` in physical pixels.
-                let r = (36.0 * scale).round().max(8.0) as i32;
+                // Match CSS --radius (5 logical px), scaled once to physical pixels.
+                let r = panel_corner_diameter(scale);
                 Some(CreateRoundRectRgn(0, 0, w + 1, h + 1, r, r))
             } else {
                 // A centred circle of the smaller dimension, so the avatar stays

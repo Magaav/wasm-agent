@@ -19,7 +19,7 @@
   --danger-soft: #342027;
   --disabled: #61697a;
   --space: 5px;
-  --pad: 10px;
+  --pad: var(--space);
   /* The one size every square control takes, and the height every footer control takes. */
   --control-size: 30px;
   --attachment-size: 55px;
@@ -163,7 +163,7 @@ body.compact {
   color: var(--text);
   font: var(--font-size)/1.55 var(--font);
   border: 1px solid #272c38;
-  border-radius: var(--radius-lg); overflow: hidden;
+  border-radius: var(--radius); overflow: hidden;
   background: linear-gradient(160deg, #131924 0%, #0b0d12 55%);
   box-shadow: 0 15px 45px rgba(0, 0, 0, .55);
 }
@@ -314,7 +314,7 @@ wa-diff { display: block; align-self: flex-start; max-width: 760px; width: 100%;
 
 .chat-content-run-status {
   position: sticky; bottom: 0; z-index: 2; align-self: stretch; display: flex; align-items: center;
-  gap: var(--gap); color: var(--muted); font-size: 13px; padding: var(--space); white-space: normal;
+  gap: var(--gap); color: var(--muted); font-size: 13px; line-height: 18px; min-height: 30px; padding: var(--space); white-space: normal;
   background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius-sm);
 }
 /* The existing one-second status clock changes a tiny glyph; no CSS or extra animation loop. */
@@ -565,7 +565,7 @@ body.engine .engine { display: flex; }
 .node-kind, .node-caps { color: var(--muted); font-size: 11px; }
 .node-caps { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .node-resources {
-  flex: 0 0 100%; padding-left: 10px; color: var(--muted); font-size: 11px;
+  flex: 0 0 100%; padding-left: var(--space); color: var(--muted); font-size: 11px;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .node button {

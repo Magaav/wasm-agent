@@ -8,6 +8,18 @@
     await rendererLoaded;
     for (let i = 0; i < 200; i++) await Promise.resolve();
     const messages = document.getElementById('messages');
+    const inset=node=>{const style=getComputedStyle(node);return ['paddingTop','paddingRight','paddingBottom','paddingLeft'].every(key=>style[key]==='5px');};
+    check(getComputedStyle(document.documentElement).getPropertyValue('--pad').trim()==='5px', 'shared inner padding is 5px');
+    for(const selector of ['.topbar','.messages','.composer textarea','.engine-content','.diff-patch','.task-card']) {
+      let node=document.querySelector(selector),temporary=false;
+      if(!node){node=document.createElement(selector==='.diff-patch'?'pre':'div');node.className=selector.slice(1);document.body.append(node);temporary=true;}
+      check(inset(node),'compact shared inset '+selector);if(temporary)node.remove();
+    }
+    check(getComputedStyle(document.querySelector('.composer')).gap==='5px'&&getComputedStyle(messages).gap==='5px','existing sibling gaps unchanged');
+    check(document.querySelector('.send').getBoundingClientRect().height===45&&getComputedStyle(messages).fontSize==='14.5px','control hit target and text size unchanged');
+    check(getComputedStyle(document.getElementById('panel')).borderRadius==='5px','expanded panel outer corners use shared5px radius');
+    const promoted=document.createElement('wa-window');document.body.append(promoted);
+    check(inset(promoted.shadowRoot.querySelector('.bar')),'promoted header shares compact padding');promoted.remove();
     messages.replaceChildren();
     handleEvent({type:'delegated', task:{subagent_id:'topic-child',profile:'orchestration-worker',state:'accepted',session_id:'topic-child-session'}});
     const receipt = messages.querySelector('wa-subagent');
@@ -55,6 +67,7 @@
     for (const host of hosts) {
       const bubble = document.createElement('wa-message'); bubble.setAttribute('role','assistant'); host.append(bubble);
       bubble.body.classList.add('steps');
+      check(inset(bubble)&&inset(host),'main and child bubble/transcript use 5px inset');
       const trace = document.createElement('wa-trace'); bubble.body.append(trace);
       trace.addDecision('topic-call','read','{"path":"DESIGN.md"}',false);
       const reasoning = document.createElement('wa-reasoning'); bubble.body.append(reasoning); reasoning.setText('Choosing a tool');
@@ -99,6 +112,24 @@
       retry.freeze(); retry.remove(); trace.open = true; subagent.open = true;
     }
     check(shapes.every(height => height === shapes[0]), 'main and child topic headers have identical geometry');
+    const count={version:1,run_id:'height-proof',model_calls:4,tool_calls:3,usage_calls:4,elapsed_ms:45000,complete:true};
+    for(const width of [320,540,800]) {
+      document.getElementById('panel').style.width=width+'px';
+      busy=true;observedRun=null;runBubble=null;runStepState=null;runCounts=null;clearStatus();runStartedAt=Date.now()-45000;
+      handleEvent({type:'run_counts',counts:count});handleEvent({type:'status',text:'model'});
+      const topic=document.createElement('wa-commentary');runBubble.body.append(topic);topic.setText('Row height');keepStatusLast();
+      const line=statusLine,target=topic.getBoundingClientRect().height;
+      check(line.getBoundingClientRect().height===target&&target===30,'live status matches closed topic at '+width);
+      handleEvent({type:'reply',text:'Height matched.'});handleEvent({type:'done'});busy=false;
+      check(line.getBoundingClientRect().height===30&&line.scrollWidth<=line.clientWidth+1,'settled status matches topic and retains counters at '+width);
+      const task={session_id:'height-child',subagent_id:'height-child',state:'running',settled:false,profile:'worker'};
+      pane.task=task;parent.style.width=width+'px';
+      paintChildTranscript(pane.transcript,[{id:'height-user',seq:1,role:'user',content:'Height fixture'}],{task,active:true,events:[{type:'run_counts',counts:count},{type:'status',text:'model'}]});
+      check(pane.statusLine.getBoundingClientRect().height===30,'child live status matches topic at '+width);
+      paintChildTranscript(pane.transcript,[{id:'height-user',seq:1,role:'user',content:'Height fixture'},{id:'height-answer',seq:2,role:'assistant',content:'Matched.',trace:[{kind:'run_counts',...count}]}],{task:{...task,state:'completed',settled:true},state:'answered',notify:false});
+      check(pane.statusLine.getBoundingClientRect().height===30,'child settled status matches topic at '+width);
+    }
+    parent.style.width='600px';
     // Keep the main fixture and the child receipt side by side in the screenshot.
     document.getElementById('panel').style.width = '630px';
     report.dataset.status = 'pass'; report.textContent = JSON.stringify({checks,skipped:0});
