@@ -11,6 +11,16 @@ local json = dofile('lua/vendor/json.lua')
 local paths = dofile('lua/core/paths.lua')
 local catalogue = dofile('lua/core/openai_sub_catalogue.lua')
 local wire = dofile('lua/core/subscription_wire.lua')
+-- Bootstrap the optional-tool contract at the native facade. Responses defaults
+-- omitted strictness to strict schemas, which forces both mutually exclusive edit
+-- forms and empty optional read versions. Host validation remains authoritative.
+-- Move this field into the wire assembler after this installed boundary is repaired.
+local assemble_body = wire.body
+wire.body = function(...)
+  local body = assemble_body(...)
+  for _, tool in ipairs(body.tools or {}) do tool.strict = false end
+  return body
+end
 local telemetry = dofile('lua/core/telemetry.lua')
 local memory = dofile('lua/core/memory.lua')
 local M = {}
