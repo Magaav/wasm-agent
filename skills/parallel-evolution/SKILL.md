@@ -34,6 +34,14 @@ Inspect workspace status only if unknown; an unavailable binding still blocks
 execution. Preserve the same postchecks, binding and instruction byte budget.
 See `docs/SKILLS.md` for supported-path routing; no blind retry or fabricated proof.
 
+For independent batch-tool changes run
+`node <repo>/scripts/test-batch-tools.cjs <absolute-built-wa> <fresh-evidence>`,
+then the same CLI with `--post` before its arguments. `batch-tools-proof` records
+that verified source/embedded plus retained-hash sequence; required workspaces
+still use the direct CLI, not unsupported spell replay. See `<repo>/docs/BATCH-TOOLS.md`.
+Batch only already-known independent items; retain every outcome/continuation,
+preflight file mutations, and never replay unknown effects or claim a transaction.
+
 **wasm-agent policy (parallel mode):** routine merges use appropriate focused source checks and independent
 exact-source review, including shared runtime changes. Only the user selects pre-release
 gating (`lane-policy.json`); never infer a full/combined gate from paths. Gate/closing-spell

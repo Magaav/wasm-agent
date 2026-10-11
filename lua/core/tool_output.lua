@@ -24,6 +24,8 @@ if configured_bytes and configured_bytes >= 4096 and configured_bytes <= 4 * 102
   M.MAX_BYTES = math.floor(configured_bytes)
 end
 local legacy_views,legacy_count={},0
+local BATCH_OUTPUTS={read_many=true,edit_many=true,write_many=true,grep_many=true,
+  session_many=true,search_messages_many=true,symbol_source_many=true}
 
 function M.slice(text, from, count)
   text = tostring(text or "")
@@ -161,6 +163,26 @@ function M.project(name, output)
   end
   if array and #encoded > M.MAX_BYTES then
     return preview_view(name, output, encoded, M.store(encoded))
+  end
+  if BATCH_OUTPUTS[name] and type(output.results)=='table' and #encoded>M.MAX_BYTES then
+    -- Keep every slot's outcome visible even when a batch exceeds the total
+    -- budget. Raw items and the whole response remain exactly retrievable.
+    local batch={}
+    for key,value in pairs(output) do if key~='results' then batch[key]=value end end
+    batch.results={};batch.omitted=true;batch.full_result=M.store(encoded)
+    batch.note='Batch exceeded the total view budget; omitted items retain exact full_result JSON. Retrieve an omitted item before using its content or continuation.'
+    local per_item=math.floor((M.MAX_BYTES-4096)/math.max(1,#output.results))
+    for i,item in ipairs(output.results) do
+      local original=json.encode(item)
+      if #original<=per_item then batch.results[i]=item else
+        local view={omitted=true,full_result=M.store(original)}
+        for _,key in ipairs({'ok','error','path','outcome','applied','executed','effect','no_change','count','complete','has_more','returned'}) do view[key]=item[key] end
+        batch.results[i]=view
+      end
+    end
+    local bounded=json.encode(batch)
+    if #bounded<=M.MAX_BYTES then return bounded end
+    -- Refuse to hide an unusually large outcome: generic exact-artifact fallback.
   end
   local view = {}
   for key,value in pairs(output) do view[key]=value end

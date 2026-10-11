@@ -306,7 +306,48 @@ local function dense_array(value,maximum)
   return true
 end
 
-function M.edit(args,record)
+-- Apply only a freshly rechecked text snapshot. Shared by single-file edits
+-- and mutation batches; preparation must not write or record anything.
+function M.check(plan)
+  if host.read_file(plan.path)~=plan.before
+      or plan.before==nil and host.path_kind(plan.path)~='missing' then
+    return {error='file_changed_before_write',path=plan.path,applied=false}
+  end
+end
+
+function M.apply(plan,record)
+  local refusal=M.check(plan)
+  if refusal then return refusal end
+  local result=plan.result
+  if plan.after==plan.before then result.no_change=true;return result end
+  local called,written=pcall(host.write_file,plan.path,plan.after)
+  if not called or not written then return {ok=false,error='write_failed',path=plan.path,outcome='unknown',
+    note='Inspect the file before retrying; earlier batch effects were not rolled back.'} end
+  result.applied=true
+  if record then
+    local ok=pcall(record,plan.path,plan.before or '',plan.after)
+    if not ok then return {ok=false,error='edit_applied_but_record_failed',path=plan.path,
+      applied=true,version=host.sha256(plan.after)} end
+  end
+  return result
+end
+
+function M.prepare_write(args)
+  if type(args.path)~='string' or args.path=='' then return {error='path_required'} end
+  if type(args.content)~='string' then return {error='content_required',path=args.path} end
+  local before=host.read_file(args.path)
+  if before==nil then
+    if not host.path_kind then return {error='path_kind_unavailable',path=args.path} end
+    local kind=host.path_kind(args.path)
+    if kind~='missing' then return {error='target_not_readable_text',path=args.path,kind=kind} end
+  end
+  local hash=before and host.sha256(before) or nil
+  if args.version~=nil and args.version~=hash then return {error='file_changed',path=args.path,version=hash} end
+  return {path=args.path,before=before,after=args.content,
+    result={ok=true,path=args.path,previous_version=hash,version=host.sha256(args.content)}}
+end
+
+function M.edit(args,record,prepare_only)
   if type(args.path)~='string' or args.path=='' then return {error='path_required'} end
   local range_form=args.range_edits~=nil
   local legacy_form=args.edits~=nil or args.old_text~=nil or args.new_text~=nil
@@ -465,14 +506,9 @@ function M.edit(args,record)
       lines=last_line-first_line+1,bytes=#r.target,sha256=host.sha256(r.target),
       first=snippet(body:match('^[^\r\n]*') or ''),last=snippet(body:match('[^\r\n]*$') or '')}
   end
-  -- Detect intervening changes before writing. Not an OS-wide CAS against arbitrary editors.
-  if host.read_file(args.path)~=text then return {error='file_changed_before_write'} end
-  if updated==text then return {ok=true,path=args.path,edits=#ranges,version=hash,previous_version=hash,no_change=true,replaced=replaced} end
-  if not host.write_file(args.path,updated) then return {ok=false,error='write_failed',path=args.path,outcome='unknown',note='Inspect the file before retrying.'} end
-  if record then
-    local ok=pcall(record,args.path,text,updated)
-    if not ok then return {ok=false,error='edit_applied_but_record_failed',path=args.path,version=host.sha256(updated)} end
-  end
-  return {ok=true,path=args.path,edits=#ranges,previous_version=hash,version=host.sha256(updated),replaced=replaced}
+  local plan={path=args.path,before=text,after=updated,
+    result={ok=true,path=args.path,edits=#ranges,previous_version=hash,version=host.sha256(updated),replaced=replaced}}
+  if prepare_only then return plan end
+  return M.apply(plan,record)
 end
 return M

@@ -413,7 +413,7 @@ end
 
 function M.requires_write_tools(allowed)
   for _, name in ipairs(allowed or {}) do
-    if name == "write" or name == "edit" or name == "bash" or name == "shell"
+    if name == "write" or name == "edit" or name == "write_many" or name == "edit_many" or name == "bash" or name == "shell"
         or name == "client" or name == "remote" or name == "operation" or name == "spell_run" then return true end
   end
   return false

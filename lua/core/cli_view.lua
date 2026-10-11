@@ -219,7 +219,9 @@ function M.call_line(name, args, limit)
   local a = (type(args) == "table") and args or {}
   local path = tostring(a.path or a.file_path or "")
   limit = limit or 96
-  if name == "bash" or name == "shell" then
+  if type(name)=='string' and name:match('_many$') and type(a.requests)=='table' then
+    return string.format('%d independent requests',#a.requests)
+  elseif name == "bash" or name == "shell" then
     return "$ " .. clip(a.command or "", limit)
   elseif name == "read" then
     local range = (a.offset or a.limit)
@@ -264,6 +266,9 @@ end
 function M.outcome(name, result)
   local r = (type(result) == "table") and result or {}
   if r.error then return false, clip(r.error, 80) end
+  if type(name)=='string' and name:match('_many$') and type(r.results)=='table' then
+    return r.ok==true,string.format('%d items; %d failed; %d not run',#r.results,r.failed or 0,r.not_run or 0)
+  end
   if name == "read" then
     local lines = select(2, tostring(r.content or ""):gsub("\n", ""))
     return true, string.format("%d lines", lines)
