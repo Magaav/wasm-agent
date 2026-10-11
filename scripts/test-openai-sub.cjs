@@ -288,7 +288,7 @@ print('native subscription operations ok (15 checks)')
     const env={...process.env};
     for(const key of Object.keys(env))if(/^(WA_|WASM_AGENT_)/.test(key))delete env[key];
     const nativeTemp=path.join(root,'native temp');fs.mkdirSync(nativeTemp);
-    Object.assign(env,{TEMP:nativeTemp,TMP:nativeTemp,TMPDIR:nativeTemp,WASM_AGENT_HOME:root,WASM_AGENT_LUA_ROOT:process.cwd(),WASM_AGENT_PI_PACKAGE:path.join(root,'pi'),
+    Object.assign(env,{TEMP:nativeTemp,TMP:nativeTemp,TMPDIR:nativeTemp,WASM_AGENT_HOME:root,WASM_AGENT_LUA_ROOT:process.cwd(),WASM_AGENT_PI_PACKAGE:path.join(root,'pi'),WASM_AGENT_SUBSCRIPTION_TRANSPORT:'pi',
       WASM_AGENT_PI_MODELS_STORE:store,
       WASM_AGENT_SHELL:path.join(root,'nonexistent-shell'),WASM_AGENT_RELAY:'',WASM_AGENT_RENDEZVOUS:'',
       WA_SCRIPT:fixture,WA_SUB_REQUEST:nativeInput});

@@ -1,5 +1,46 @@
 # OpenAI subscription
 
+## Native runtime (operator-requested cutover)
+
+The ordinary route now uses `lua/core/subscription_wire.lua`, our Responses SSE
+parser over `host.http_sse`, with our owned OAuth store and catalogue. No Pi
+package, Node process, Pi auth/store read, or passive secondary parser is needed
+on this request path. The catalogue is explicit per-model metadata; operator
+`WASM_AGENT_MODEL_LIMITS` overrides remain in force. Unknown native model IDs are
+refused rather than guessed. `WASM_AGENT_SUBSCRIPTION_TRANSPORT=pi` is an explicit
+legacy rollback only; failure never silently switches to it.
+
+Native added-item phase is retained by identity before text deltas: known
+commentary streams directly into its topic and final-answer begin can precede
+text. Missing early phase stays provisional. Typed count-only phase diagnostics
+record known/missing early phase and commentary/provisional chunk totals, without
+prompt/text/credential payloads. Unfinished tool items at terminal response are
+refused before dispatch. Missing usage/cache/reasoning counts remain unknown,
+never fabricated zeroes. Encrypted reasoning is preserved across live rounds as
+well as reload; previously only the durable/reload path carried it.
+
+`wa subscription status` and `wa subscription login` own native credentials.
+A one-time `login --import` can populate an empty native store from a previous
+Pi login; no subsequent request reads Pi. Rotating refresh tokens cannot safely
+be shared between two actively refreshing runtimes. Preserve obsolete stores and
+migrate the active generation explicitly; never spend/reimport a stale copy or
+silently overwrite an existing native credential. Native failures, cancellation,
+truncation and unknown provider usage remain visible. The explicit legacy Pi
+reconnect/regeneration procedure below is not claimed as native retry parity.
+The native path retains its existing no-automatic-regeneration semantics.
+
+Focused proof: `scripts/test-native-subscription.lua` exercises the actual
+provider/agent/default route with Pi reads and Node launches forbidden, two-round
+tools, early/missing phase, large encrypted reasoning, quota reads, terminal
+truncation and incomplete-tool refusal. Run with source Lua and with a fresh
+standalone embedded binary. Also run wire/auth/model-route/UI focused checks.
+Live installation and real provider acceptance are separate evidence.
+The focused real embedded probe returned final text and one inspect-fixture tool
+call (not executed):8 early commentary chunks,0 provisional chunks,2 requests.
+That proves this exchange, not a guarantee the provider always supplies early phase.
+
+## Historical Pi-backed path (explicit rollback only)
+
 Select **OpenAI subscription** (`openai-sub`) in the model picker, then
 `gpt-6-luna`, `gpt-6-sol`, `gpt-6.1-sol`, or `gpt-6-astra`. OpenCode Go remains a separate provider.
 
