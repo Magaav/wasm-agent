@@ -109,7 +109,8 @@
     }
     samples.push({mode,rows});
     check(rows.every(row=>row.anchored),'chunk/frame retains '+mode+' reading anchor');
-    check(rows[0].top>30 && rows[2].top<rows[0].top-20,'short '+mode+' answer grows upward');
+    if(mode==='explicit')check(rows.every(row=>Math.abs(row.top)<3),'confirmed answer starts at top from first short chunk');
+    else check(rows[0].top>30 && rows[2].top<rows[0].top-20,'short '+mode+' answer grows upward');
     const long=rows.filter(row=>row.height>row.view+50);
     check(long.length>3 && long.every(row=>Math.abs(row.top)<3),'overflow '+mode+' keeps first line at viewport top');
     check(long.length>3 && long.every(row=>Math.abs(row.scroll-long[0].scroll)<2),'overflow '+mode+' grows scroll range instead of chasing bottom');
@@ -131,6 +132,47 @@
       check(atBottom()&&!answerAnchors.has(messages),'jump-to-latest explicitly resumes tail following');
     }
   }
+  // Short answers need scroll room immediately, not only after a viewport of text.
+  readingFixture();
+  handleEvent({type:'final_answer_begin',message_id:'short-start'});
+  handleEvent({type:'delta',text:'Read this first line.'});
+  const shortNode=streamBody;
+  check(Math.abs(shortNode.getBoundingClientRect().top-messages.getBoundingClientRect().top)<3,'one-line final starts at top immediately');
+  handleEvent({type:'delta',text:' More text arrives.'});
+  handleEvent({type:'reply',text:streamText});handleEvent({type:'done'});
+  await new Promise(resolve=>setTimeout(resolve,50));
+  check(answerAnchors.get(messages)===shortNode && Math.abs(shortNode.getBoundingClientRect().top-messages.getBoundingClientRect().top)<3,'short completed answer retains first line at top');
+  readingFixture();
+  const originalReadingMedia=window.matchMedia;
+  window.matchMedia=query=>query==='(prefers-reduced-motion: reduce)'?{matches:false}:originalReadingMedia.call(window,query);
+  releaseAnswerAnchor(messages,false);setFollow(true);
+  const realAnswerFrame=window.requestAnimationFrame;
+  const answerFrames=[];
+  if(!window.__realAnswerMotion)window.requestAnimationFrame=frame=>(answerFrames.push(frame),answerFrames.length);
+  const driveAnswerFrames=time=>{for(const frame of answerFrames.splice(0))frame(time);};
+  handleEvent({type:'reply',message_id:'late-short',text:'# Late-confirmed first line\n\n'+('Long retained answer.\n\n'.repeat(70))});
+  const lateNode=answerAnchors.get(messages);
+  check(answerMotions.has(messages),'late confirmation uses finite smooth movement: '+JSON.stringify({top:messages.scrollTop,target:lateNode?answerStartTarget(messages,lateNode):null,anchor:!!lateNode,released:answerReleased.has(messages)}));
+  handleEvent({type:'done'});
+  if(window.__realAnswerMotion)await new Promise(resolve=>setTimeout(resolve,350));
+  else {driveAnswerFrames(0);driveAnswerFrames(110);driveAnswerFrames(220);}
+  check(lateNode && Math.abs(lateNode.getBoundingClientRect().top-messages.getBoundingClientRect().top)<3 && !answerMotions.has(messages),'late final smoothly reaches its beginning and settles');
+  readingFixture();
+  handleEvent({type:'reply',message_id:'late-manual',text:'Manual control wins.'});
+  messages.dispatchEvent(new WheelEvent('wheel',{deltaY:-1}));
+  messages.scrollTop=Math.max(0,messages.scrollTop-20);
+  const interruptedPosition=messages.scrollTop;
+  if(window.__realAnswerMotion)await new Promise(resolve=>setTimeout(resolve,350));
+  else {driveAnswerFrames(300);driveAnswerFrames(600);}
+  check(!answerMotions.has(messages)&&!answerAnchors.has(messages)&&messages.scrollTop===interruptedPosition,'manual gesture cancels queued final scroll frames');
+  window.requestAnimationFrame=realAnswerFrame;
+  window.matchMedia=originalReadingMedia;
+  readingFixture();
+  const realMedia=window.matchMedia;window.matchMedia=()=>({matches:true});
+  handleEvent({type:'reply',text:'Reduced-motion first line.'});
+  const reducedNode=answerAnchors.get(messages);
+  check(reducedNode && !answerMotions.has(messages) && Math.abs(reducedNode.getBoundingClientRect().top-messages.getBoundingClientRect().top)<3,'reduced motion aligns without animation');
+  window.matchMedia=realMedia;
   // Settlement preserves the beginning, not the bottom, after real frames.
   readingFixture();
   const settledText='# Settled answer start\n\n'+('Readable paragraph of evidence.\n\n'.repeat(100));
@@ -201,6 +243,15 @@
   await new Promise(resolve=>setTimeout(resolve,50));
   check(childA.transcript.scrollTop===childPosition,'reviewer regression child stays at zero after delta/reply/frame');
   check(messages.scrollTop===mainPosition && childB.transcript.scrollTop===otherPosition,'child release leaves main/sibling position unchanged');
+  releaseAnswerAnchor(childA.transcript,false);scrollState(childA.transcript).follow=true;
+  childA.transcript.replaceChildren();runBubble=null;streamBody=null;streamText='';
+  handleEvent({type:'final_answer_begin',message_id:'child-short'});
+  handleEvent({type:'delta',text:'Child first line stays readable.'});
+  const shortChild=streamBody;
+  handleEvent({type:'reply',text:streamText});handleEvent({type:'done'});
+  await new Promise(resolve=>setTimeout(resolve,50));
+  check(answerAnchors.get(childA.transcript)===shortChild && Math.abs(shortChild.getBoundingClientRect().top-childA.transcript.getBoundingClientRect().top)<3,'short child final keeps first line at its own top after done');
+  check(messages.scrollTop===mainPosition && childB.transcript.scrollTop===otherPosition,'short child alignment leaves other containers unchanged');
   transcript=savedTranscript;runBubble=null;streamBody=null;streamText='';
   // Race a manual gesture against the pending real pin frame; test after real browser timer turn.
   handleEvent({type:'final_answer_begin',message_id:'race'});

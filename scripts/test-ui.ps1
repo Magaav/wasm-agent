@@ -3557,7 +3557,7 @@ $harness = @'
   reloadedPane.task={session_id:attachThread,subagent_id:'attach-reload',state:'running',settled:false};
   await window.__refreshAgentPane(reloadedPane);
   var visibleTranscriptText=container=>{var copy=container.cloneNode(true);copy.querySelectorAll('wa-step').forEach(node=>node.remove());return copy.textContent;};
-  check(visibleTranscriptText(reloadedPane.transcript)===visibleTranscriptText(attachPane.transcript),'newly mounted pane converges saved content, topics and terminal footer; retained live debug phases need not exist in fresh history');
+  check(visibleTranscriptText(reloadedPane.transcript)===visibleTranscriptText(attachPane.transcript),'newly mounted pane converges saved content, topics and terminal footer; retained live debug phases need not exist in fresh history: '+JSON.stringify({fresh:visibleTranscriptText(reloadedPane.transcript),retained:visibleTranscriptText(attachPane.transcript)}));
   check(!reloadedPane.transcript.querySelector('.chat-content-run-status:not(.finished)')&&!attachPane.transcript.querySelector('.chat-content-run-status:not(.finished)'),'terminal tail never invents a live running status in either pane');
   reloadedPane.remove();attachPane.remove();window.__restorePaneReaderForAttach();window.fetch=attachFetch;
 

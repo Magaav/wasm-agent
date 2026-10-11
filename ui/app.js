@@ -407,8 +407,45 @@ function scrollState(container) {
 const answerSeen = new WeakMap();
 const answerReleased = new WeakSet();
 const answerScrollPositions = new WeakMap();
+const answerMotions = new WeakMap();
+const answerGestures = new WeakSet();
+function answerStartTarget(container, answer) {
+  const rect=answer.getBoundingClientRect();
+  if(answer.classList.contains('final-answer') && (answer.textContent || answer.childElementCount)) {
+    const previous=parseFloat(container.style.getPropertyValue('--answer-reading-space'))||0;
+    const style=getComputedStyle(container),basePadding=parseFloat(style.paddingBottom)||0;
+    const gap=parseFloat(style.rowGap)||0;
+    const last=container.lastElementChild;
+    const tail=(last?last.getBoundingClientRect().bottom:rect.bottom)-rect.top+basePadding+gap;
+    const space=Math.ceil(Math.max(0,container.clientHeight-tail));
+    if(Math.abs(space-previous)>=1)container.style.setProperty('--answer-reading-space',space+'px');
+    container.classList.add('answer-reading','answer-space');
+  }
+  const start=container.scrollTop+answer.getBoundingClientRect().top-container.getBoundingClientRect().top;
+  return Math.max(0,Math.min(start,container.scrollHeight-container.clientHeight));
+}
+function smoothAnswerStart(container,answer) {
+  if(window.matchMedia?.('(prefers-reduced-motion: reduce)').matches)return pin();
+  const target=answerStartTarget(container,answer);
+  if(Math.abs(target-container.scrollTop)<1)return pin();
+  const motion={answer,from:container.scrollTop,started:null};
+  answerMotions.set(container,motion);
+  const frame=now=>{
+    if(answerMotions.get(container)!==motion || answerAnchors.get(container)!==answer || !container.contains(answer))return;
+    if(motion.started==null)motion.started=now;
+    const progress=Math.min(1,(now-motion.started)/220),ease=1-Math.pow(1-progress,3);
+    container.scrollTop=motion.from+(answerStartTarget(container,answer)-motion.from)*ease;
+    answerScrollPositions.set(container,container.scrollTop);
+    if(progress<1)requestAnimationFrame(frame);
+    else answerMotions.delete(container);
+  };
+  requestAnimationFrame(frame);
+}
 function releaseAnswerAnchor(container = transcript, manual = true) {
+  answerMotions.delete(container);
   answerAnchors.delete(container);
+  container.classList.remove('answer-reading');
+  if(!manual){container.style.removeProperty('--answer-reading-space');container.classList.remove('answer-space');}
   if (manual) {
     answerScrollPositions.delete(container);
     answerReleased.add(container);
@@ -416,7 +453,7 @@ function releaseAnswerAnchor(container = transcript, manual = true) {
     else scrollState(container).follow=false;
   }
 }
-function anchorAnswer(node) {
+function anchorAnswer(node, smooth = false) {
   if (replayingMessages || answerReleased.has(transcript)) return;
   const container = transcript;
   // Start reading with the first visible chunk, even before its provider phase
@@ -426,34 +463,42 @@ function anchorAnswer(node) {
   const following = container === messages ? follow : scrollState(container).follow;
   if (!following && !answerAnchors.has(container)) return;
   answerAnchors.set(container, node);
-  for (const gesture of ['wheel', 'touchstart']) {
-    container.addEventListener(gesture, () => { releaseAnswerAnchor(container); if(container===messages)setFollow(false); }, {passive:true, once:true});
+  if(!answerGestures.has(container)) {
+    answerGestures.add(container);
+    for (const gesture of ['wheel', 'touchstart']) {
+      container.addEventListener(gesture, () => releaseAnswerAnchor(container), {passive:true});
+    }
+    container.addEventListener('pointerdown',()=>{
+      if(answerMotions.has(container))releaseAnswerAnchor(container);
+    },{passive:true});
+    container.addEventListener('keydown', event => {
+      if (['PageUp','PageDown','ArrowUp','ArrowDown','Home','End',' '].includes(event.key) &&
+        !event.target.closest('input,textarea,[contenteditable]')) releaseAnswerAnchor(container);
+    });
+    container.addEventListener('scroll', () => {
+      const expected=answerScrollPositions.get(container);
+      if (expected != null && Math.abs(container.scrollTop-expected)<1) return;
+      releaseAnswerAnchor(container);
+      const bottom=container.scrollHeight-container.scrollTop-container.clientHeight<40;
+      if (container===messages) setFollow(bottom);
+      else scrollState(container).follow=bottom;
+    }, {passive:true});
   }
-  container.addEventListener('keydown', event => {
-    if (['PageUp','PageDown','ArrowUp','ArrowDown','Home','End',' '].includes(event.key) &&
-      !event.target.closest('input,textarea,[contenteditable]')) releaseAnswerAnchor(container);
-  });
-  container.addEventListener('scroll', () => {
-    const expected=answerScrollPositions.get(container);
-    if (expected != null && Math.abs(container.scrollTop-expected)<1) return;
-    releaseAnswerAnchor(container);
-    const bottom=container.scrollHeight-container.scrollTop-container.clientHeight<40;
-    if (container===messages) setFollow(bottom);
-    else scrollState(container).follow=bottom;
-  }, {passive:true});
-  pin();
+  if(smooth)smoothAnswerStart(container,node);else pin();
 }
 
 function pin(force = false) {
   const container=transcript;
   const state=container===messages ? null : scrollState(container);
   const answer = answerAnchors.get(transcript);
-  if (answer?.isConnected && !force) {
+  if(force || answer && !container.contains(answer)) {
+    answerMotions.delete(container);answerAnchors.delete(container);
+    container.classList.remove('answer-reading','answer-space');container.style.removeProperty('--answer-reading-space');
+  }
+  if (answer?.isConnected && container.contains(answer) && !force) {
+    const target=answerStartTarget(container,answer);
+    if(answerMotions.has(container))return;
     if (state) state.pinning=true; else pinning = true;
-    // Clamp to the available scroll range: short output grows upward from the
-    // bottom; once its start reaches the viewport top, only the overflow grows.
-    const start = container.scrollTop + answer.getBoundingClientRect().top - container.getBoundingClientRect().top;
-    const target = Math.max(0, Math.min(start, container.scrollHeight - container.clientHeight));
     if (Math.abs(container.scrollTop - target) >= 1) container.scrollTop = target;
     answerScrollPositions.set(transcript, transcript.scrollTop);
     requestAnimationFrame(() => { if(state)state.pinning=false;else pinning = false; });
@@ -1809,7 +1854,9 @@ function handleEvent(event) {
     // While active the diff remains below the candidate answer. Settlement folds
     // every activity topic (including commentary/diff) into one run above the final answer.
     collapseRun();
-    if (newlyConfirmed && !answerReleased.has(transcript)) anchorAnswer(streamBody);
+    streamBody.classList.add('final-answer');
+    streamBody.dataset.answerComplete='true';
+    if (newlyConfirmed && !answerReleased.has(transcript)) anchorAnswer(streamBody,true);
     sealReasoning();
     const diff = renderDiff(currentBubble(), event.changes);
     if (diff) {
@@ -1843,13 +1890,14 @@ function handleEvent(event) {
     runBubble = null;
   } else if (event.type === "done") {
     if(!replayingMessages&&transcript===messages)stopLiveness();
-    releaseAnswerAnchor();
+    if(answerAnchors.get(transcript)?.dataset.answerComplete!=='true')releaseAnswerAnchor();
     markPendingTextIncomplete();
     markStreamedCommentaryIncomplete();
     finishRunStatus();
     flushDecision(true);
   }
   keepStatusLast();
+  if(event.type==='done' && answerAnchors.has(transcript))pin();
 }
 
 function restoreDraft() {

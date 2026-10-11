@@ -151,6 +151,12 @@ phase stays provisional. Commentary stays outside the run topic while active,
 then moves inside the collapsed run on settlement. Its own manual fold survives;
 only the final answer stays outside activity topics (alongside the status row).
 Run-to-answer spacing uses one5px flex gap, never an additional segment margin.
+A confirmed final answer's first visible line stays at the chat content top while
+it grows, including short answers. Late-confirmed finals smoothly reveal their
+beginning after completion (instant with reduced motion). Completed answers retain
+that reading position; manual scrolling always takes priority. Container-local
+trailing space supplies the necessary scroll range, not a sticky overlay or a
+second transcript. Main and child use the same policy.
 Main header shows the model (and an explicit remote target), not `local` or provider;
 provider selection/diagnostics remain in the status balloon.
 

@@ -203,7 +203,9 @@ a[href]:focus-visible { outline: 2px solid #8bbcff; outline-offset: 2px; }
 .topbar-btn:hover, .collapse:hover { border-color: var(--accent); background: #1d2330; }
 .topbar-btn.active { color: #fff; background: var(--accent); border-color: var(--accent); }
 
-.messages { flex: 1; overflow-y: auto; padding: var(--pad); display: flex; flex-direction: column; gap: var(--gap); position: relative; }
+.messages { flex: 1; min-height: 0; overflow-y: auto; padding: var(--pad); display: flex; flex-direction: column; gap: var(--gap); position: relative; }
+.messages.answer-reading { overflow-anchor: none; }
+.messages.answer-space::after { content: ""; display: block; flex: 0 0 var(--answer-reading-space, 0px); pointer-events: none; }
 .msg {
   max-width: 760px; width: fit-content; padding: var(--pad);
   border-radius: var(--radius); border: 1px solid var(--line);
