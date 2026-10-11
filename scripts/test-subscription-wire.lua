@@ -198,7 +198,9 @@ local function replay(body_text, done)
   local lines = {}
   for line in (body_text .. '\n'):gmatch('([^\n]*)\n') do lines[#lines + 1] = line end
   frames = 0
-  host.http_sse = function(method, url, headers_json, request, on_line)
+  host.http_sse = function(method, url, headers_json, request, on_line, timeout_seconds)
+    check(type(timeout_seconds)=='number' and timeout_seconds>=1 and timeout_seconds<=86400,
+      'native transport receives the original overall deadline')
     check(method == 'POST' and url == wire.ENDPOINT, 'the transport posts to our endpoint')
     local sent = json.decode(headers_json)
     check(sent['Authorization'] == 'Bearer fixture-access', 'with the credential seam\'s token')

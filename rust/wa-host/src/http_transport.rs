@@ -13,6 +13,7 @@
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::time::Duration;
+use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 use ureq::config::Config;
 use ureq::unversioned::resolver::DefaultResolver;
 use ureq::unversioned::transport::{
@@ -20,6 +21,35 @@ use ureq::unversioned::transport::{
     RustlsConnector, Transport,
 };
 use ureq::Error;
+
+/// ureq 3 also considers the preceding response-header deadline during body
+/// reads. Once headers arrive, SSE instead needs an idle-read limit and the
+/// caller's overall deadline; a talking stream must not die at 120 seconds.
+#[derive(Clone, Debug)]
+pub struct StreamControl {
+    headers_received: Arc<AtomicBool>,
+    deadline: std::time::Instant,
+    idle: Duration,
+}
+
+impl StreamControl {
+    pub fn received_headers(&self) {
+        self.headers_received.store(true, Ordering::SeqCst);
+    }
+
+    fn read_budget(&self, timeout: NextTimeout) -> (Option<Duration>, ureq::Timeout) {
+        let remaining = self.deadline.saturating_duration_since(std::time::Instant::now());
+        if self.headers_received.load(Ordering::SeqCst) {
+            if remaining <= self.idle { (Some(remaining), ureq::Timeout::Global) }
+            else { (Some(self.idle), ureq::Timeout::RecvBody) }
+        } else {
+            let phase = timeout.not_zero().map(|value| *value);
+            if phase.is_none_or(|value| remaining <= value) {
+                (Some(remaining), ureq::Timeout::Global)
+            } else { (phase, timeout.reason) }
+        }
+    }
+}
 
 fn is_timeout(error: &std::io::Error) -> bool {
     // Windows reports a socket timeout as `TimedOut`; Unix as `WouldBlock`.
@@ -48,15 +78,17 @@ pub struct ShutdownTcpTransport {
     buffers: LazyBuffers,
     timeout_write: Option<Duration>,
     timeout_read: Option<Duration>,
+    stream_control: Option<StreamControl>,
 }
 
 impl ShutdownTcpTransport {
-    fn new(stream: TcpStream) -> Self {
+    fn new(stream: TcpStream, stream_control: Option<StreamControl>) -> Self {
         ShutdownTcpTransport {
             stream,
             buffers: LazyBuffers::new(128 * 1024, 128 * 1024),
             timeout_write: None,
             timeout_read: None,
+            stream_control,
         }
     }
 }
@@ -67,6 +99,17 @@ impl Transport for ShutdownTcpTransport {
     }
 
     fn transmit_output(&mut self, amount: usize, timeout: NextTimeout) -> Result<(), Error> {
+        if let Some(control) = &self.stream_control {
+            let remaining = control.deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() { return Err(Error::Timeout(ureq::Timeout::Global)); }
+            let wait = timeout.not_zero().map(|value| (*value).min(remaining)).unwrap_or(remaining);
+            self.stream.set_write_timeout(Some(wait)).map_err(Error::Io)?;
+            self.timeout_write = Some(wait);
+            let output = &self.buffers.output()[..amount];
+            return self.stream.write_all(output).map_err(|error| {
+                if is_timeout(&error) { Error::Timeout(ureq::Timeout::Global) } else { Error::Io(error) }
+            });
+        }
         update_timeout(timeout, &mut self.timeout_write, &self.stream, |stream, value| {
             stream.set_write_timeout(value)
         })
@@ -80,7 +123,7 @@ impl Transport for ShutdownTcpTransport {
     }
 
     fn await_input(&mut self, timeout: NextTimeout) -> Result<bool, Error> {
-        if !crate::subagents::in_task() {
+        if !crate::subagents::in_task() && self.stream_control.is_none() {
             // No task, no cancellation to observe: one read on the request's own budget.
             update_timeout(timeout, &mut self.timeout_read, &self.stream, |stream, value| {
                 stream.set_read_timeout(value)
@@ -101,18 +144,19 @@ impl Transport for ShutdownTcpTransport {
         // re-check the cancellation flag. A slice timeout is a POLL, not a failure:
         // the read is retried, so a long healthy pause before the first token is not
         // cut short, and the request's own budget still bounds the whole wait.
-        let budget = timeout.not_zero().map(|value| *value);
+        let (budget, reason) = self.stream_control.as_ref().map(|control| control.read_budget(timeout))
+            .unwrap_or_else(|| (timeout.not_zero().map(|value| *value), timeout.reason));
         let started = std::time::Instant::now();
         let slice = std::time::Duration::from_millis(250);
         loop {
             if crate::host::run_cancel_requested() {
-                return Err(Error::Timeout(timeout.reason));
+                return Err(Error::Timeout(reason));
             }
             let wait = match budget {
                 Some(total) => {
                     let elapsed = started.elapsed();
                     if elapsed >= total {
-                        return Err(Error::Timeout(timeout.reason));
+                        return Err(Error::Timeout(reason));
                     }
                     (total - elapsed).min(slice)
                 }
@@ -154,7 +198,9 @@ impl Transport for ShutdownTcpTransport {
 
 /// Opens TCP sockets and registers them so a cancel can wake a silent read.
 #[derive(Debug)]
-pub struct ShutdownTcpConnector;
+pub struct ShutdownTcpConnector {
+    stream_control: Option<StreamControl>,
+}
 
 impl<In: Transport> Connector<In> for ShutdownTcpConnector {
     type Out = Either<In, ShutdownTcpTransport>;
@@ -174,6 +220,9 @@ impl<In: Transport> Connector<In> for ShutdownTcpConnector {
             .not_zero()
             .map(|value| *value)
             .unwrap_or(std::time::Duration::from_secs(10));
+        let connect = self.stream_control.as_ref().map(|control|
+            connect.min(control.deadline.saturating_duration_since(std::time::Instant::now()))).unwrap_or(connect);
+        if connect.is_zero() { return Err(Error::Timeout(ureq::Timeout::Global)); }
         let mut last_error = None;
         for address in details.addrs.iter() {
             match TcpStream::connect_timeout(address, connect) {
@@ -189,7 +238,7 @@ impl<In: Transport> Connector<In> for ShutdownTcpConnector {
                     if crate::host::run_cancel_requested() {
                         let _ = stream.shutdown(std::net::Shutdown::Both);
                     }
-                    return Ok(Some(Either::B(ShutdownTcpTransport::new(stream))));
+                    return Ok(Some(Either::B(ShutdownTcpTransport::new(stream, self.stream_control.clone()))));
                 }
                 Err(error) => last_error = Some(error),
             }
@@ -204,7 +253,111 @@ impl<In: Transport> Connector<In> for ShutdownTcpConnector {
 /// Build an agent whose TCP reads can be interrupted by `shutdown`.
 pub fn agent(config: Config) -> ureq::Agent {
     let chain = ConnectProxyConnector::default()
-        .chain(ShutdownTcpConnector)
+        .chain(ShutdownTcpConnector { stream_control: None })
         .chain(RustlsConnector::default());
     ureq::Agent::with_parts(config, chain, DefaultResolver::default())
+}
+
+/// One stream owns its phase marker and deadline; pooled requests never share it.
+pub fn stream_agent(config: Config, idle: Duration, total: Duration) -> (ureq::Agent, StreamControl) {
+    let control = StreamControl {
+        headers_received: Arc::new(AtomicBool::new(false)),
+        deadline: std::time::Instant::now() + total,
+        idle,
+    };
+    let chain = ConnectProxyConnector::default()
+        .chain(ShutdownTcpConnector { stream_control: Some(control.clone()) })
+        .chain(RustlsConnector::default());
+    (ureq::Agent::with_parts(config, chain, DefaultResolver::default()), control)
+}
+
+#[cfg(test)]
+mod streaming_timeout_tests {
+    use super::*;
+    use std::net::TcpListener;
+
+    fn server(header_delay: Duration, gap: Duration, chunks: usize) -> (String, std::thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/stream", listener.local_addr().unwrap());
+        let worker = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            socket.set_write_timeout(Some(Duration::from_secs(3))).unwrap();
+            let mut bytes = Vec::new();
+            let mut byte = [0];
+            while socket.read(&mut byte).unwrap_or(0) == 1 {
+                bytes.push(byte[0]);
+                if bytes.ends_with(b"\r\n\r\n") { break; }
+            }
+            std::thread::sleep(header_delay);
+            if socket.write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n").is_err() { return; }
+            for _ in 0..chunks {
+                std::thread::sleep(gap);
+                if socket.write_all(b"3\r\nx\n\n\r\n").is_err() { return; }
+            }
+            let _ = socket.write_all(b"0\r\n\r\n");
+        });
+        (url, worker)
+    }
+
+    fn config() -> Config {
+        ureq::Agent::config_builder().proxy(None)
+            .timeout_recv_response(Some(Duration::from_millis(250)))
+            .timeout_recv_body(Some(Duration::from_millis(500)))
+            .build()
+    }
+
+    #[test]
+    fn healthy_stream_outlives_header_timeout() {
+        let (url, worker) = server(Duration::ZERO, Duration::from_millis(100), 12);
+        let (agent, control) = stream_agent(config(), Duration::from_millis(500), Duration::from_secs(5));
+        let response = agent.get(&url).call().unwrap();
+        control.received_headers();
+        let mut body = String::new();
+        response.into_body().into_reader().read_to_string(&mut body).unwrap();
+        assert_eq!(body, "x\n\n".repeat(12));
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn old_header_policy_cuts_a_talking_stream() {
+        let (url, worker) = server(Duration::ZERO, Duration::from_millis(100), 12);
+        let (agent, _control) = stream_agent(config(), Duration::from_millis(500), Duration::from_secs(5));
+        let response = agent.get(&url).call().unwrap();
+        let mut body = String::new();
+        let error = response.into_body().into_reader().read_to_string(&mut body).unwrap_err();
+        assert!(error.to_string().contains("receive response"), "{error}");
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn silent_headers_still_timeout() {
+        let (url, worker) = server(Duration::from_millis(600), Duration::ZERO, 0);
+        let (agent, _) = stream_agent(config(), Duration::from_millis(500), Duration::from_secs(3));
+        let error = agent.get(&url).call().unwrap_err();
+        assert!(error.to_string().contains("receive response"), "{error}");
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn silent_body_uses_idle_timeout() {
+        let (url, worker) = server(Duration::ZERO, Duration::from_millis(800), 1);
+        let (agent, control) = stream_agent(config(), Duration::from_millis(500), Duration::from_secs(3));
+        let response = agent.get(&url).call().unwrap();
+        control.received_headers();
+        let error = response.into_body().into_reader().read_to_string(&mut String::new()).unwrap_err();
+        assert!(error.to_string().contains("receive body"), "{error}");
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn talking_body_still_obeys_total_deadline() {
+        let (url, worker) = server(Duration::ZERO, Duration::from_millis(100), 20);
+        let (agent, control) = stream_agent(config(), Duration::from_millis(500), Duration::from_millis(750));
+        let response = agent.get(&url).call().unwrap();
+        control.received_headers();
+        let error = response.into_body().into_reader().read_to_string(&mut String::new()).unwrap_err();
+        assert!(error.to_string().contains("global"), "{error}");
+        worker.join().unwrap();
+    }
 }
