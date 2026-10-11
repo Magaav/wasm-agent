@@ -822,7 +822,7 @@ function updateRunElapsed() {
   const endedAt = replayingMessages && replayMessageEndedAt ? replayMessageEndedAt : Date.now();
   const duration=runDuration(endedAt - (runStartedAt || endedAt));
   setText(statusElapsed,!replayingMessages && runStepState?.active
-    ? ` · ◈ ${turnTokenReadout()} · ✧ ${runCounts?.model_calls ?? '?'} · ⚒ ${runCounts?.tool_calls ?? '?'} · ◷ ${duration}` : duration);
+    ? `◈ ${turnTokenReadout()} · ✧ ${runCounts?.model_calls ?? '?'} · ⚒ ${runCounts?.tool_calls ?? '?'} · ◷ ${duration}` : duration);
   if(!replayingMessages&&runCounts?.context) {
     if(rendererTask)updateChildContextReadouts();else if(transcript===messages)updateContextReadouts();
   }
@@ -844,6 +844,7 @@ function finishRunStatus(label = "completed") {
     finishRunStep(label === "failed" ? "failed" : label === "unfinished" ? "unfinished" : "completed");
     if (runStepState) runStepState.settled = true;
   }
+  if(runBubble)collapseRun(false,true,label==='completed');
   if (!statusLine) return;
   // The footer goes *inside the bubble's body*, after the answer, not on the custom element:
   // the element's children are its body and nothing else, so appending to it left the line
@@ -1521,25 +1522,26 @@ async function refreshOperationProgress(health, running) {
 // The answer is the point; the route is reference. On reply, everything the run
 // did before the answer moves into one collapsed run topic at the top of the
 // bubble, and the answer sits below it.
-function collapseRun(finalStart = false) {
+function collapseRun(finalStart = false, settled = false, answered = true) {
   const bubble = runBubble;
   if (!bubble) return;
   const body = bubble.body;
-  const answer = streamBody;
+  const answer = streamBody || (settled&&answered ? Array.from(body.children).filter(node=>node.classList.contains('seg')).at(-1) : null);
   // One run topic per bubble. A run that answers more than once - a preamble, then the answer -
   // reuses the topic it already has: creating a second one nests the first inside it, and the
   // reader then opens topics to reach topics.
   const existing = Array.prototype.find.call(body.children, (c) => c.tagName === "WA-RUN");
   const moves = Array.prototype.filter.call(body.children,
-    (c) => c !== answer && c !== existing && c.tagName !== "WA-DIFF" && c.tagName !== "WA-COMMENTARY" && !(c.tagName==='WA-STEERING'&&c.dataset.state==='queued') && c !== statusLine);
+    (c) => c !== answer && c !== existing && !c.classList.contains('chat-content-run-status') &&
+      (settled || (c.tagName !== 'WA-DIFF' && c.tagName !== 'WA-COMMENTARY' && !(c.tagName==='WA-STEERING'&&c.dataset.state==='queued'))));
   const traces = moves.filter((c) => c.tagName === "WA-TRACE");
   // A run topic is only created once something actually ran - a run that never called a tool keeps
   // its plain answer. But once a topic exists, a later reply must still fold the previous answer into
   // it even when that batch added no tool call: the guard is about *creating* the topic, not about
   // folding into one that is already there. Getting this wrong left the preamble sitting outside as
   // its own text segment, so the bubble read run,text,text instead of one run and one answer.
-  if (!existing && traces.length === 0 && !moves.some(c=>c.tagName==='WA-RETRY'||c.tagName==='WA-SUMMARY'||c.tagName==='WA-STEERING') && !finalStart) return;
-  if (moves.length === 0) return;
+  if (!existing && traces.length === 0 && !moves.some(c=>c.tagName==='WA-RETRY'||c.tagName==='WA-SUMMARY'||c.tagName==='WA-STEERING'||settled&&(c.tagName==='WA-COMMENTARY'||c.tagName==='WA-DIFF'||c.tagName==='WA-REASONING')) && !finalStart) return;
+  if (moves.length === 0) {if(settled&&existing)existing.open=false;return;}
   const run = existing || document.createElement("wa-run");
   if (!existing) {
     body.prepend(run);
@@ -1562,7 +1564,7 @@ function collapseRun(finalStart = false) {
     if (child.tagName === "WA-TRACE") calls += child.count || 0;
     else if (child.classList?.contains("seg") || (transcript.dataset.debug === 'true' && child.tagName === "WA-STEP")) steps += 1;
   }
-  if (finalStart) run.open = false;
+  if (finalStart || settled) run.open = false;
   const endedAt = replayingMessages ? replayMessageEndedAt : Date.now();
   run.setSummary(steps, calls, Math.max(0, endedAt - (runStartedAt || endedAt)));
 }
@@ -1804,12 +1806,8 @@ function handleEvent(event) {
       streamBody = segment;
     }
     finishTrace();
-    // The run topic goes *above* the answer; the diff goes *below* it. Order matters and was
-    // wrong here: the diff used to be appended *before* collapseRun(), which moves every child
-    // that is not the answer into the run topic - so the diff landed inside the run topic,
-    // where the reader had to open the run's path to find out what it changed. The diff is
-    // created after the run is collapsed, and collapseRun() also refuses to swallow a WA-DIFF,
-    // so the two cannot get back into that order.
+    // While active the diff remains below the candidate answer. Settlement folds
+    // every activity topic (including commentary/diff) into one run above the final answer.
     collapseRun();
     if (newlyConfirmed && !answerReleased.has(transcript)) anchorAnswer(streamBody);
     sealReasoning();
@@ -4337,10 +4335,7 @@ async function refreshMetaOnce() {
     // A timed-out write can apply after the immediate reconciliation read.
     // Keep its note tied to the newly observed state on later refreshes too.
     renderSettingsReconciliation(true);
-    const provider = activeProvider();
-    const label = provider ? provider.label : "local";
-    const where = activeNode || "local";
-    setText(meta, `${where} · ${label} · ${settings.model}`);
+    setText(meta, [activeNode,settings.model].filter(Boolean).join(' · '));
     return true;
   } catch (error) {
     if (chatSession !== target || conversationEpoch !== epoch || activeNode !== node) return false;

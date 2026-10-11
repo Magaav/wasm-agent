@@ -323,8 +323,9 @@ wa-diff { display: block; align-self: flex-start; max-width: 760px; width: 100%;
 .chat-content-run-phase { flex: 0 0 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-variant-numeric: tabular-nums; }
 /* Detailed phase history is diagnostic-only; the compact current phase stays in the footer. */
 .messages:not([data-debug="true"]) wa-step, .agent-transcript:not([data-debug="true"]) wa-step { display: none; }
-.chat-content-run-elapsed { margin-left: 0; flex: 1 1 auto; min-width: 0; font-variant-numeric: tabular-nums; white-space: nowrap; }
-.chat-content-run-phase:not([hidden]) + .chat-content-run-elapsed { margin-left: calc(-1 * var(--gap)); white-space: pre; }
+.chat-content-run-elapsed { margin-left: auto; flex: 0 1 auto; min-width: 0; font-variant-numeric: tabular-nums; white-space: nowrap; }
+/* Live bubble uses the available width: phase left, measured counters right. */
+.msg:has(> .body > .chat-content-run-status:not(.finished)) { width: 100%; }
 /* Tight windows retain all numbers and separators, never clip a counter. */
 @media (max-width: 400px) { .chat-content-run-status:not(.finished) { font-size: 11px; } }
 .finished .chat-content-run-elapsed { margin-left: auto; flex: 0 0 auto; }
@@ -995,7 +996,7 @@ body.node-offline .composer textarea::placeholder { color: #d29922; }
    as two unrelated blocks - and when a model calls a tool before writing anything,
    the topic comes first, which made it look like "tools, then a step". */
 .msg .body.steps { gap: var(--space); }
-.msg .body.steps .seg:not(:first-child) { margin-top: var(--space); }
+.msg .body.steps .seg { margin-top: 0; }
 
 /* --- blocks the renderer can produce -------------------------------------- */
 .msg .body h1, .msg .body h2, .msg .body h3, .msg .body h4 {

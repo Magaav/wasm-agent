@@ -19,7 +19,8 @@ Historical terminal rows settle normally; active tails retain same run bubble,
 phase/cumulative tokens/provider/tool/time strip and exact shared context facts.
 Unknown usage remains unknown. Repeating the same journal does not restart a
 phase clock. Commentary manual closures survive checkpoint/tail reconstruction,
-default open topics stay outside automatic run folds. Scroll/draft anchors stay
+active open commentary stays outside run folds, then folds inside the settled run
+with its manual state retained. Only final answer/status remain outside. Scroll/draft anchors stay
 container-scoped. Preview text is never duplicated outside its actual phase topic.
 A missing/unavailable journal uses the shared pinned warning and retained original
 view, not guessed completion or raw preview masquerading as authoritative output.
