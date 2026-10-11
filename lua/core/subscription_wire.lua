@@ -845,8 +845,16 @@ function M.session(opts)
     end,
     ['error'] = function(event)
       state.terminal = true
-      raise('subscription_provider_error: Error Code ' .. tostring(event.code) .. ': ' ..
-        tostring(event.message))
+      -- Codex can nest the same error fields under `error`. Losing that code hid
+      -- context_length_exceeded from the agent's bounded compaction recovery.
+      local failure = type(event.error) == 'table' and event.error or event
+      local code = failure.code or event.code or (failure ~= event and failure.type) or 'unknown'
+      local message = failure.message or event.message
+      if type(message) ~= 'string' or message == '' then
+        message = type(event.error) == 'string' and event.error or 'no error details in response'
+      end
+      raise('subscription_provider_error: Error Code ' .. tostring(code) .. ': ' ..
+        dofile('lua/core/redact.lua').text(message))
     end,
   }
 
