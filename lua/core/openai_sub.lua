@@ -1,16 +1,12 @@
--- The ChatGPT-subscription route. Two transports meet here, and the default is still Pi's adapter:
---
---   * `pi` (default) - Pi's maintained adapter, through Node. Requires an installed Pi, and its
---     dependencies fail visibly. This is what the route does today.
---   * `native` - wasm-agent's own wire (`lua/core/subscription_wire.lua`): our endpoint, our
---     headers, our SSE client over `host.http_sse`, with no Node and no Pi in the runtime at all.
---     `WASM_AGENT_SUBSCRIPTION_TRANSPORT=native` selects it.
+-- ChatGPT subscription uses our native Responses parser by default: no Pi or Node
+-- on the request path. Explicit WASM_AGENT_SUBSCRIPTION_TRANSPORT=pi is a legacy
+-- rollback only; it is never selected automatically after a native failure.
 --
 -- Both answer the same event contract, the same result shape and the same cancellation, deadline and
 -- truncation rules, so the route can be cut over - and rolled back - with one environment variable
--- while both are verified. The catalogue and the credential are shared, not duplicated: the ids and
--- thinking levels come from `lua/core/openai_sub_catalogue.lua`, and the credential from
--- `lua/core/subscription_auth.lua` (owned by the credential lane; this file only calls `token()`).
+-- while both are verified. Native ids and thinking levels come from our owned
+-- `lua/core/openai_sub_catalogue.lua`, and the native credential from
+-- `lua/core/openai_sub_auth.lua` (the credential module; this file only calls `token()`).
 local json = dofile('lua/vendor/json.lua')
 local paths = dofile('lua/core/paths.lua')
 local catalogue = dofile('lua/core/openai_sub_catalogue.lua')
@@ -62,9 +58,8 @@ function M.thinking_level_map(model)
   return catalogue.thinking_level_map(model)
 end
 
--- Which transport this route uses. `pi` - Pi's adapter through Node - is the default and stays the
--- default; `native` is wasm-agent's own wire. Anything else is refused rather than guessed: a typo
--- that silently kept using Pi would look like a working cutover.
+-- Native is the dependency-free default. Pi is an explicit legacy rollback,
+-- never an automatic fallback; invalid settings are refused rather than guessed.
 function M.transport()
   local value = (host.getenv('WASM_AGENT_SUBSCRIPTION_TRANSPORT') or ''):lower()
   -- A vaulted node holds no token for Pi to use, so only the native wire can serve it; an explicit
@@ -75,8 +70,8 @@ function M.transport()
     end
     return 'native'
   end
-  if value == '' or value == 'pi' then return 'pi' end
-  if value == 'native' or value == 'wire' then return 'native' end
+  if value == 'pi' then return 'pi' end
+  if value == '' or value == 'native' or value == 'wire' then return 'native' end
   error('invalid_subscription_transport: expected pi or native, got ' .. value)
 end
 function M.configured()

@@ -374,8 +374,8 @@ local function as(transport, credential)
   end
   if credential then seam_wire.credential_provider = credential end
 end
-as('native', function() return {access = 'seam-access', account_id = 'seam-account'} end)
-check(subscription.transport() == 'native', 'the transport override is the one under test')
+as('', function() return {access = 'seam-access', account_id = 'seam-account'} end)
+check(subscription.transport() == 'native', 'native is the default with no Pi dependency or override')
 check(subscription.configured() == true,
   'on native, a usable seam credential configures the route with no Pi on disk at all')
 as('native', function() return nil end)

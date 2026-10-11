@@ -1750,6 +1750,9 @@ function M:run_body(text, images)
     if replay_phase or #calls > 0 then assistant_id = host.uuid() end
     if replay_phase and assistant_id then assistant.id = assistant_id end
     if provider.reasoning(self.model).replay then assistant.reasoning_content=result.reasoning or "" end
+    if type(result.reasoning_items)=='table' and result.reasoning_items.model==self.model then
+      assistant.reasoning_items=result.reasoning_items.items
+    end
     if result.finish_reason=="length" or result.stream_complete==false then
       local reason=result.stream_complete==false and "incomplete_stream" or "output_limit"
       local problem=reason=="output_limit" and provider.visible_text(result.content)=="" and provider.empty_reply_reason(result)

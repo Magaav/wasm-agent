@@ -154,8 +154,8 @@ check(offered, 'the subscription picker must offer gpt-6.1-sol: ' ..
   table.concat(subscription.models or {}, ','))
 check(provider.serves('gpt-6.1-sol', sub) == true and provider.unservable('gpt-6.1-sol', sub) == nil,
   'and this route must serve it: ' .. tostring(provider.unservable('gpt-6.1-sol', sub)))
-check(provider.serves('sol 6.1', sub) == nil and provider.unservable('sol 6.1', sub) == nil,
-  'the spoken name is not the id: an id the catalogue never mentions stays undecided, not mapped')
+check(provider.serves('sol 6.1', sub) == false and provider.unservable('sol 6.1', sub)~=nil,
+  'native route requires a published exact model id, no spoken-name mapping or guessed metadata')
 
 -- The wrong route still refuses it, and still for the true reason: opencode-go posts
 -- /chat/completions and this id is served over openai-codex-responses. An id that is reachable
@@ -223,9 +223,9 @@ check(launch_error:find('serves this id over ', 1, true) ~= nil,
   'and give the true reason: ' .. launch_error)
 -- The mirror: a chat-completions id on the subscription route names both protocols too.
 local mirror_error = tostring(provider.unservable('deepseek-v4.1-flash', sub))
-check(mirror_error:find('openai-completions (route opencode-go)', 1, true) ~= nil and
-  mirror_error:find('this route speaks openai-codex-responses', 1, true) ~= nil,
-  'the mirror refusal names the protocol both ways: ' .. mirror_error)
+check(mirror_error:find('native subscription catalogue does not publish this id',1,true)~=nil and
+  mirror_error:find('provider=openai-sub',1,true)~=nil,
+  'native refusal uses owned catalogue, not third-party store: '..mirror_error)
 local latest_after = memory.latest_session('master', '')
 check(latest_after and latest_before and latest_after.id == latest_before.id,
   'no child session may be created for a pair that cannot run')

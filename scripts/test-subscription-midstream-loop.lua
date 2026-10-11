@@ -9,6 +9,7 @@ host.getenv=function(k)
   if k=='WASM_AGENT_PROVIDER' then return 'opencode-go' end
   if k=='WASM_AGENT_LLM_MODEL' then return 'deepseek-v4.1-flash' end
   if k=='WASM_AGENT_LLM_API_KEY' then return 'private-fixture' end
+  if k=='WASM_AGENT_SUBSCRIPTION_TRANSPORT' then return 'pi' end -- legacy bridge contract, not native default
   if k=='WASM_AGENT_SUBSCRIPTION_TRANSPORT_RETRIES' then return '1' end
   return real_getenv(k)
 end

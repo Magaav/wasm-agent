@@ -262,6 +262,10 @@ function M.serves(model, provider)
   provider = provider or M.active()
   model = trim(model or "")
   if model == "" then return nil end
+  if provider.id=='openai-sub' then
+    -- Native route metadata is ours; no Pi store read decides request admission.
+    return subscription.catalogue().serves(model)
+  end
   local protocols = catalogue_protocols(model)
   if #protocols == 0 then return nil end
   local own_published, reachable_elsewhere = false, false
@@ -404,6 +408,10 @@ function M.unservable(model, provider)
   provider = provider or M.active()
   model = trim(model or "")
   if model == "" or M.serves(model, provider) ~= false then return nil end
+  if provider.id=='openai-sub' then
+    return 'model_not_servable: provider=openai-sub cannot serve model='..model..
+      '; the native subscription catalogue does not publish this id; refused before request, nothing substituted'
+  end
   local served_over, seen = {}, {}
   for _, entry in ipairs(catalogue_protocols(model)) do
     local where = (provider.pi_provider ~= nil and entry.provider == provider.pi_provider)
@@ -636,10 +644,11 @@ end
 -- WASM_AGENT_MODEL_LIMITS still overrides everything, and the old global is kept as the
 -- last-resort fallback so no existing deployment changes behaviour by surprise.
 function M.budget(model)
-  local window = windowlib.for_model(model)
-  if M.active().id=="openai-sub" then
-    window={context=272000,output=128000,source="pi-openai-codex"}
-  end
+  local window
+  if M.active().id=='openai-sub' then
+    local entry=subscription.catalogue().window(model)
+    window={context=entry and entry.context_window or 0,output=entry and entry.max_output or 0,source='openai-sub-catalogue'}
+  else window=windowlib.for_model(model) end
   local budget = {
     context = window.context,
     source = window.source,

@@ -1861,6 +1861,7 @@ WA_SCRIPT=scripts/test-openai-sub-levels.lua "$BIN" --db "$DB.sub-levels" | grep
 # and no Node; the bytes are the endpoint's, and re-recording them is what
 # `scripts/check-subscription-wire-live.lua` does (it is not in this gate: it needs the network).
 WA_SCRIPT=scripts/test-subscription-wire.lua "$BIN" --db "$DB.sub-wire" | grep "subscription wire ok"
+WA_SCRIPT=scripts/test-native-subscription.lua "$BIN" --db "$DB.native-sub" | grep "native subscription default ok"
 # The credential half of the subscription route, which used to be Pi's: our own store, our own
 # refresh, our own login, and the single-flight lock. Hermetic - a node fixture stands in for
 # auth.openai.com on 127.0.0.1, so the two-process proof that one rotating token is spent once is

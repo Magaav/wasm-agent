@@ -536,6 +536,8 @@ function M.session(opts)
     finished = false,
     event_count = 0,
     last_event = '',
+    phase_observation={version=1,message_items=0,known_at_added=0,missing_at_added=0,
+      early_commentary_chunks=0,provisional_chunks=0},
   }
   state.time = function()
     if not host.monotonic_ms then return 0 end
@@ -573,6 +575,11 @@ function M.session(opts)
     elseif item.type == 'message' then
       apply_phase(item)
       slot = {kind = 'text', text = '', phase = item.phase, item_id = item.id}
+      local phase_stats=state.phase_observation
+      phase_stats.message_items=phase_stats.message_items+1
+      if not late and (item.phase=='commentary' or item.phase=='final_answer') then
+        phase_stats.known_at_added=phase_stats.known_at_added+1
+      else phase_stats.missing_at_added=phase_stats.missing_at_added+1 end
       state.blocks[#state.blocks + 1] = {kind = 'text', text = '', phase = nil}
     elseif item.type == 'function_call' or item.type == 'custom_tool_call' then
       local id = item.call_id and (tostring(item.call_id) .. '|' .. tostring(item.id or '')) or nil
@@ -608,8 +615,10 @@ function M.session(opts)
       emit({type = 'delta', text = delta, message_id = slot.item_id})
       state.streamed_final[slot.index] = true
     elseif slot.phase == 'commentary' then
+      state.phase_observation.early_commentary_chunks=state.phase_observation.early_commentary_chunks+1
       emit({type = 'commentary_delta', pending_id = stream_id .. ':' .. slot.index, text = delta})
     else
+      state.phase_observation.provisional_chunks=state.phase_observation.provisional_chunks+1
       emit({type = 'pending_delta', pending_id = stream_id .. ':' .. slot.index, text = delta})
     end
   end
@@ -647,11 +656,11 @@ function M.session(opts)
       local input_details = usage.input_tokens_details or {}
       local output_details = usage.output_tokens_details or {}
       state.usage = {
-        prompt_tokens = usage.input_tokens or 0,
-        completion_tokens = usage.output_tokens or 0,
-        total_tokens = usage.total_tokens or 0,
-        prompt_tokens_details = {cached_tokens = input_details.cached_tokens or 0},
-        completion_tokens_details = {reasoning_tokens = output_details.reasoning_tokens or 0},
+        prompt_tokens = usage.input_tokens,
+        completion_tokens = usage.output_tokens,
+        total_tokens = usage.total_tokens,
+        prompt_tokens_details = {cached_tokens = input_details.cached_tokens},
+        completion_tokens_details = {reasoning_tokens = output_details.reasoning_tokens},
       }
     end
     local status = state.status
@@ -876,6 +885,9 @@ function M.session(opts)
     if state.status == 'failed' or state.status == 'cancelled' then
       raise('subscription_response_' .. tostring(state.status))
     end
+    for _,slot in pairs(state.slots) do
+      if slot.kind=='tool' then raise('subscription_tool_incomplete: terminal response left a tool item uncommitted') end
+    end
     if state.stop_reason == 'error' then
       raise('subscription_response_error: ' .. tostring(state.error_message or 'the provider ' ..
         'reported an error after the stream ended'))
@@ -1019,6 +1031,9 @@ function M.complete(model, messages, tools, stream, opts, reasoning)
   result.lines = decoded.lines
   result.events = state.event_count
   result.saw_terminal_event = true
+  result.phase_observation=state.phase_observation
+  dofile('lua/core/telemetry.lua').event(opts.session_id,opts.run_id,stream_id,'subscription_transport','phase',
+    {transport='native-codex-responses',phase_observation=state.phase_observation})
   return result
 end
 
