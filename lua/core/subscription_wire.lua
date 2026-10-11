@@ -586,6 +586,7 @@ function M.session(opts)
       slot = {kind = 'tool', id = id, name = item.name or '', arguments = {}, partial_json = item.arguments or ''}
       state.blocks[#state.blocks + 1] = {kind = 'tool', id = id, name = item.name or '', arguments = {}}
     else
+      state.recovery_unsafe = true
       return nil
     end
     slot.index = #state.blocks
@@ -875,11 +876,40 @@ function M.session(opts)
     local kind = type(event.type) == 'string' and event.type or name
     state.last_event = kind or ''
     local handler = handlers[kind or '']
-    if handler then handler(event) end
+    if handler then handler(event)
+    elseif not ({['response.in_progress']=true,['response.queued']=true,
+      ['response.content_part.added']=true,['response.content_part.done']=true,
+      ['response.output_text.done']=true,['response.refusal.done']=true,
+      ['response.reasoning_summary_text.done']=true,['response.reasoning_text.done']=true,
+      ['response.reasoning_summary_part.added']=true})[kind or ''] then
+      state.recovery_unsafe = true
+    end
     state.events[#state.events + 1] = kind
   end
 
   session.line = M.framing(session.event)
+
+  function session.recovery()
+    local discarded={id=stream_id,reasoning='',texts={},decisions={},tools_executed=0,
+      reasoning_items=state.reasoning_items,uncommitted_tools={}}
+    local thoughts={}
+    for index,block in ipairs(state.blocks) do
+      if block.kind=='thinking' then thoughts[#thoughts+1]=block.text
+      elseif block.kind=='text' then
+        discarded.texts[#discarded.texts+1]={pending_id=stream_id..':'..index,
+          text=block.text,phase=block.phase or ''}
+      elseif block.kind=='tool' then
+        local arguments=block.partial_json or json.encode(block.arguments or {})
+        discarded.uncommitted_tools[#discarded.uncommitted_tools+1]={id=block.id,
+          name=block.name,arguments_text=arguments}
+        discarded.decisions[#discarded.decisions+1]={type='decision',call_id=block.id,
+          name=block.name,arguments_text=preview(arguments,M.DECISION_PREVIEW_CHARS),
+          complete=false,arguments_truncated=codepoints(arguments)>M.DECISION_PREVIEW_CHARS}
+      end
+    end
+    discarded.reasoning=table.concat(thoughts,'\n\n')
+    return not state.terminal and not state.recovery_unsafe,discarded
+  end
 
   -- The result, or a loud failure. A stream that ended without a terminal event is reported as a
   -- truncated stream and never as a short answer, whatever arrived before it.
@@ -958,7 +988,7 @@ end
 -- One completion over `host.http_sse`. Same inputs and the same result contract as the pi-backed
 -- path it replaces: `(model, messages, tools, stream, opts, reasoning)` in, the result table
 -- provider.lua reads out.
-function M.complete(model, messages, tools, stream, opts, reasoning)
+local function complete_attempt(model, messages, tools, stream, opts, reasoning, recovery)
   opts = opts or {}
   local entry = catalogue.get(model)
   if not entry then
@@ -985,9 +1015,10 @@ function M.complete(model, messages, tools, stream, opts, reasoning)
   local emit = function(event)
     if stream then host.stream(json.encode(event)) end
   end
-  local started = host.monotonic_ms and host.monotonic_ms() or 0
+  local started = recovery.started
   local session = M.session({stream_id = stream_id, run_id = opts.run_id, emit = emit, started_ms = started,
     new_id = host.uuid})
+  recovery.session=session
   local line = session.line
   local counted = 0
   local observe = opts.on_line    -- a diagnostic/recording seam; nothing in the runtime path sets it
@@ -1018,9 +1049,10 @@ function M.complete(model, messages, tools, stream, opts, reasoning)
       if host.beat then host.beat() end
       if observe then observe(text) end
       line(text)
-    end, math.floor(timeout_ms / 1000))
+    end, math.max(1,math.ceil((timeout_ms-((host.monotonic_ms and host.monotonic_ms() or started)-started))/1000)))
   if stopped_by then error(stopped_by, 0) end
   local decoded = json.decode(outcome)
+  recovery.outcome=decoded
   if decoded.error then
     if decoded.error == 'run_cancelled' then error('run_cancelled', 0) end
     error(string.format('subscription_transport_%s: %s (after %s line(s))',
@@ -1043,6 +1075,78 @@ function M.complete(model, messages, tools, stream, opts, reasoning)
   dofile('lua/core/telemetry.lua').event(opts.session_id,opts.run_id,stream_id,'subscription_transport','phase',
     {transport='native-codex-responses',phase_observation=state.phase_observation})
   return result
+end
+
+-- Regenerate inference only: no attempt returns tool calls until a terminal,
+-- validated response. Earlier agent rounds and their durable effects are untouched.
+function M.complete(model,messages,tools,stream,opts,reasoning)
+  opts=opts or {}
+  local limit=tonumber(host.getenv('WASM_AGENT_SUBSCRIPTION_TRANSPORT_RETRIES') or '10')
+  if not limit or limit~=math.floor(limit) or limit<0 or limit>10 then
+    error('invalid_subscription_transport_retries: expected integer 0..10',0)
+  end
+  local started=host.monotonic_ms and host.monotonic_ms() or 0
+  local timeout=(tonumber(opts.timeout_seconds) or M.request_timeout())*1000
+  local retry_id=opts.stream_id or (host.uuid and host.uuid() or 'native-recovery')
+  local function elapsed() return (host.monotonic_ms and host.monotonic_ms() or started)-started end
+  local function stop()
+    if host.run_cancelled and json.decode(host.run_cancelled()).cancelled then error('run_cancelled',0) end
+    if elapsed()>=timeout then error('subscription_timeout: original request deadline exhausted during recovery',0) end
+  end
+  local function progress(state,index,reason,discarded,wait)
+    local event={type='retry',retry_id=retry_id,index=index,limit=limit,cycle=1,
+      state=state,reason=reason,elapsed_ms=elapsed(),window_ms=timeout,wait_ms=wait,
+      discarded_attempt=discarded}
+    local diagnostic={state=state,index=index,limit=limit,elapsed_ms=elapsed(),
+      reason=reason,upstream_usage='unknown'}
+    dofile('lua/core/telemetry.lua').event(opts.session_id,opts.run_id,retry_id,
+      'subscription_transport','retry',diagnostic)
+    if opts.session_id and opts.session_id~='' then
+      local memory=dofile('lua/core/memory.lua')
+      if memory.session(opts.session_id) then
+        local seq=memory.append_turn(opts.session_id,{role='retry',content=json.encode(event),ms=elapsed()})
+        if stream then host.stream(json.encode({type='checkpoint',seq=seq})) end
+      end
+    end
+    if stream then host.stream(json.encode(event)) end
+  end
+  for attempt=0,limit do
+    stop()
+    local attempt_opts={}; for key,value in pairs(opts) do attempt_opts[key]=value end
+    attempt_opts.stream_id=attempt==0 and (opts.stream_id or retry_id) or (retry_id..':attempt-'..attempt)
+    local recovery={started=started}
+    local ok,result=pcall(complete_attempt,model,messages,tools,stream,attempt_opts,reasoning,recovery)
+    if ok then
+      if attempt>0 then progress('recovered',attempt,'Provider response restored') end
+      result.transport_failed_attempts=attempt
+      return result
+    end
+    stop()
+    local outcome=recovery.outcome or {}
+    local safe,discarded=false,nil
+    if recovery.session then safe,discarded=recovery.session.recovery() end
+    local problem=tostring(result)
+    local text=problem:lower()
+    local network=outcome.termination=='eof' and text:find('subscription_stream_truncated:',1,true)
+      or (outcome.termination=='read_failed' or outcome.termination=='request_failed') and
+        (text:find('peer disconnected',1,true) or text:find('connection reset',1,true)
+        or text:find('unexpected eof',1,true) or text:find('broken pipe',1,true)
+        or text:find('connection closed',1,true) or text:find('timeout',1,true))
+    if limit==0 then error(result,0) end
+    if not safe or not network then error('subscription_retry_suppressed: '..problem,0) end
+    progress('interrupted',math.min(attempt+1,limit),dofile('lua/core/redact.lua').text(problem),discarded)
+    if attempt==limit then
+      progress('exhausted',attempt,'Provider reconnect limit exhausted')
+      error('subscription_retry_exhausted: '..problem,0)
+    end
+    local wait=math.min(5000,500*2^attempt)
+    progress('waiting',attempt+1,'Reconnecting to provider',nil,wait)
+    local waited=0
+    while waited<wait do
+      stop(); local slice=math.min(100,wait-waited); host.sleep(slice); waited=waited+slice
+    end
+    stop(); progress('attempting',attempt+1,'Reconnecting to provider')
+  end
 end
 
 -- ---------------------------------------------------------------------------------------------

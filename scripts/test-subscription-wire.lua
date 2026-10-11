@@ -14,6 +14,12 @@ local json = dofile('lua/vendor/json.lua')
 local paths = dofile('lua/core/paths.lua')
 local wire = dofile('lua/core/subscription_wire.lua')
 local catalogue = dofile('lua/core/openai_sub_catalogue.lua')
+-- Parser refusal fixtures intentionally disable reconnect; recovery has its own suite.
+local recovery_getenv=host.getenv
+host.getenv=function(key)
+  if key=='WASM_AGENT_SUBSCRIPTION_TRANSPORT_RETRIES' then return '0' end
+  return recovery_getenv(key)
+end
 
 local checks = 0
 local function check(ok, message) assert(ok, message); checks = checks + 1 end
