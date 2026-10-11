@@ -244,7 +244,8 @@ plus its retained `--post` check. It covers compact reported-token/lower-bound
 formatting (never char guesses), coherent measured context footer/balloon/raw
 counts, model/capacity invalidation and unchanged DOM selection,
 context-only hover/focus trigger, shared radius token, removed steering buttons,
-commentary first-chunk/character growth/manual closure/replay, independent top
+commentary first-chunk/character growth/manual closure/replay and settled folding
+inside the run (only final answer/status outside), independent top
 warning causes and actual recovery routes, square nameless attachment cards,
 quiet successful intake (idle/active/child), refusal visibility, removal/undo and
 one-token radius changes including promoted shadow panels. Required worktrees use this verified

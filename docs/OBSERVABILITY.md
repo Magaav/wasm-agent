@@ -68,7 +68,8 @@ with an explicit timestamp. See [LIGHTWEIGHT-UI.md](LIGHTWEIGHT-UI.md).
 ## Compact chat phases and debug history
 
 Ordinary chat shows the compact strip in the existing sticky footer:
-`✦ 6s · ◈ ~250k · ✧ 26 · ⚒ 82 · ◷ 2:24`. The left clock measures the current
+`✦ 6s      ◈ ~250k · ✧ 26 · ⚒ 82 · ◷ 2:24`. Flexible space pushes counters
+right across the live bubble, not a separator/newline before `◈`. The left clock measures the current
 phase (description in tooltip/debug); the last clock is total turn duration.
 Token estimate/reporting and compact context occupancy are defined in
 [MINIMAL-CHAT.md](MINIMAL-CHAT.md). The phase replaces the

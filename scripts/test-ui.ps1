@@ -423,24 +423,24 @@ $harness = @'
     return c.tagName === "WA-RUN" ? "run" : (c.tagName === "WA-TRACE" ? "trace"
       : (c.tagName === "WA-DIFF" ? "diff" : "text"));
   }).filter(function (item) { return item !== "status"; }).join(",") : "";
-  check(shape === "run,text,diff",
-    "expected run,text,diff in the bubble after the reply, saw " + shape);
+  check(shape === "run,text",
+    "expected run,text in the finished bubble, saw " + shape);
 
   // The diff must be a *sibling*, not a descendant of the run topic: it used to be appended
   // before collapseRun(), which sweeps every non-answer child into the run - so the reader
   // had to open the turn's path to find out which files changed.
   var runTopic = body ? body.querySelector("wa-run") : null;
-  check(!!runTopic && !runTopic.querySelector("wa-diff"),
-    "the diff topic must not be inside the run topic");
-  var diffTopic = body ? body.querySelector(":scope > wa-diff") : null;
-  check(!!diffTopic, "the diff topic should be a direct child of the bubble body");
+  check(!!runTopic && !!runTopic.querySelector("wa-diff"),
+    "the diff activity topic must be inside the finished run topic");
+  var diffTopic = body ? body.querySelector("wa-run wa-diff") : null;
+  check(!!diffTopic, "the diff topic should remain accessible inside run history");
 
   // ...and after the answer, not before it.
   var kids = body ? Array.prototype.slice.call(body.children) : [];
   var answerIndex = kids.findIndex(function (c) { return c.classList && c.classList.contains("seg"); });
   var diffIndex = kids.findIndex(function (c) { return c.tagName === "WA-DIFF"; });
-  check(diffIndex > answerIndex && answerIndex >= 0,
-    "the diff topic must come after the answer (answer at " + answerIndex + ", diff at " + diffIndex + ")");
+  check(diffIndex === -1 && answerIndex >= 0,
+    "only the final answer remains outside activity history (answer at " + answerIndex + ", diff at " + diffIndex + ")");
 
   // The header is the real topic header - the same button, the same parts, in the same order
   // as <wa-run> - so the diff reads as a topic rather than as its own kind of thing.
@@ -573,9 +573,9 @@ $harness = @'
     check(innerTraces[t2].hasAttribute('open'), 'tools inside a finished run should be visible in one click');
   }
   var inner = runBody ? Array.prototype.map.call(runBody.children, function (c) {
-    return c.tagName === "WA-TRACE" ? "trace" : (c.tagName === "WA-STEP" ? "phase" : "text");
+    return c.tagName === "WA-TRACE" ? "trace" : c.tagName === "WA-DIFF" ? "diff" : (c.tagName === "WA-STEP" ? "phase" : "text");
   }).filter(function (item) { return item !== "phase"; }).join(",") : "";
-  check(inner === "text,trace,text,trace", "expected text,trace,text,trace inside the run, saw " + inner);
+  check(inner === "text,trace,text,trace,diff", "expected text,trace,text,trace,diff inside the finished run, saw " + inner);
 
   var runMeta = run ? run.querySelector(".trace-meta") : null;
   var runText = runMeta ? runMeta.textContent : "";

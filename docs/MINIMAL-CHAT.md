@@ -1,6 +1,8 @@
 # Minimal chat readouts and commentary
 
-Live run strip: `✦ 6s · ◈ ~250k · ✧ 26 · ⚒ 82 · ◷ 2:24`.
+Live run strip: `✦ 6s      ◈ ~250k · ✧ 26 · ⚒ 82 · ◷ 2:24`.
+Phase stays left; flexible space pushes counters right in a full-width active
+bubble. No leading dot separator/newline before `◈`; counter dots retain spaces.
 Completed: `completed · ◈ 250k · ✧ 4 · ⚒ 3 · ◷ 0:45`. The growing glyph
 and clock reuse the existing once-per-second ticker. Phase text stays in its
 tooltip/debug history. Provider/tool totals retain their documented meanings.
@@ -80,8 +82,12 @@ Unknown/oversized/malformed metadata remains provisional, never guessed from
 stopReason or text. Completed signatures remain authoritative. Risk: a changed
 adapter ordering requires revalidation; a 64KiB metadata frame cap can lose
 presentation classification, never output/dispatch correctness.
-Commentary stays outside automatic run folds. Manual closure survives resolution,
-completion and same-thread checkpoint repaint; replay defaults open.
+Commentary stays outside the run fold while active, then joins all activity topics
+(including diffs) inside the collapsed run on settlement; only the final answer and
+status row remain outside. Its manual fold survives resolution/completion/repaint.
+Run-to-answer spacing is one5px flex gap, not gap+margin10px. Main header removes
+local/provider decoration; the model and explicit remote target remain, with
+provider controls/diagnostics in the status balloon.
 
 Transcript-read retry and known-active unfinished notices use independently
 keyed entries in the shared `wa-chat-warning`, with existing liveness warnings.

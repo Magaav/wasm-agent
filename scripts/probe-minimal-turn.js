@@ -6,7 +6,7 @@ try {
  const snapshot=(extra={})=>({version:1,run_id:'minimal',model_calls:26,tool_calls:82,tokens_reported:12000,context_growth:{version:1,baseline:600000,current:610000,added:10000,known:true,pending:true,partial:false,complete:false,compactions:0},usage_calls:25,usage_unknown:0,pending_input:1000,context:{tokens:260000,capacity:1000000,estimated:true},...extra});
  runStartedAt=Date.now()-144000;handleEvent({type:'run_counts',counts:snapshot()});handleEvent({type:'status',text:'model'});runStepState.active.started=Date.now()-6000;updateRunElapsed();
  check(statusPhase.textContent==='6s'&&statusPhase.title==='Reasoning','only phase seconds; phase retained as tooltip');
- check(statusElapsed.textContent===' · ◈ ~10k · ✧ 26 · ⚒ 82 · ◷ 2:24','requested spaced live strip with pending usage marked');
+ check(statusElapsed.textContent==='◈ ~10k · ✧ 26 · ⚒ 82 · ◷ 2:24','requested spaced live strip with pending usage marked');
  handleEvent({type:'reasoning',text:'x'.repeat(40)});updateRunElapsed();check(turnTokenReadout()==='~10k','text characters never fabricate exact billed tokens');
  handleEvent({type:'reasoning',text:'x'.repeat(200),complete:true});check(turnTokenReadout()==='~10k','authoritative full copy never counts as usage');
  handleEvent({type:'run_counts',counts:snapshot({tokens_reported:13000,context_growth:{version:1,baseline:600000,current:613000,added:13000,known:true,pending:false,partial:false,complete:true,compactions:0},usage_calls:26,pending_input:null,context:{tokens:261000,capacity:1000000,estimated:false}})});
@@ -28,7 +28,7 @@ try {
  handleEvent({type:'commentary',pending_id:'c2',message_id:'c2-id',text:'Verified.'});
  handleEvent({type:'tool',name:'read',call_id:'minimal-read',arguments:{path:'evidence'}});handleEvent({type:'tool_result',name:'read',result:{ok:true}});
  handleEvent({type:'final_answer_begin',message_id:'a1'});handleEvent({type:'delta',text:'The change is verified.'});handleEvent({type:'reply',message_id:'a1',text:'The change is verified.'});handleEvent({type:'done'});
- check(second.open&&!second.closest('wa-run')&&second.body.getBoundingClientRect().height>0,'commentary stays readable after final/run folding');
+ check(second.open&&second.closest('wa-run')&&!second.closest('wa-run').open,'commentary joins closed settled run while retaining own open choice');
  const rows=[{seq:1,id:'minimal',role:'user',content:'Minimal chat',created_at:Date.now()/1000},{seq:2,id:'c1-id',role:'assistant',phase:'commentary',content:'Checking the result.'},{seq:3,id:'c2-id',role:'assistant',phase:'commentary',content:'Verified.'},{seq:4,id:'a1',role:'assistant',content:'The change is verified.'}];
  busy=false;repaintMessages(rows,{state:'answered',notify:false});check(!transcript.querySelector('[data-message-id="c1-id"]').open&&transcript.querySelector('[data-message-id="c2-id"]').open,'checkpoint repaint keeps explicit closure and open default');
  chatShell.warning.setNotice('transcript','transcript not loaded - retrying in 30s');setLiveness({working:false,kind:'worker',seconds:55});setLiveness({working:true});check(chatShell.warning.textContent.includes('retrying'),'healthy heartbeat cannot erase transcript warning');

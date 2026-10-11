@@ -147,8 +147,12 @@ entered context, never compliance. Main and children share this presentation.
 
 Commentary streams inside an open `wa-commentary` topic, with character count
 updated per chunk. Only explicit per-item phase establishes commentary. Unknown
-phase stays provisional. Commentary is never automatically closed or folded into
-the run topic; manual closure survives completion/checkpoint repaint.
+phase stays provisional. Commentary stays outside the run topic while active,
+then moves inside the collapsed run on settlement. Its own manual fold survives;
+only the final answer stays outside activity topics (alongside the status row).
+Run-to-answer spacing uses one5px flex gap, never an additional segment margin.
+Main header shows the model (and an explicit remote target), not `local` or provider;
+provider selection/diagnostics remain in the status balloon.
 
 
 The status balloon is about **the model and harness observability**, not memory storage. Required
