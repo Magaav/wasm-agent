@@ -24,6 +24,21 @@ progressive disclosure, and it is the point: a technique needed occasionally mus
 not cost context every turn, and must not have to be explained twice. The model
 loads one with the `skill` tool (`wa skills` lists them from the CLI).
 
+The loader returns the complete `SKILL.md`, including frontmatter, exact UTF-8
+and final instructions; it has no private 12,000-byte prefix cap. Procedures that
+fit the shared tool-output budget arrive in one call. Larger responses still use
+the normal bounded view and `full_result`/`tool_result` exact-byte retrieval, not
+silent data loss or a larger global budget. Skill descriptions alone remain in
+the automatic prompt; full bodies are still on demand.
+
+Focused regression: `node <repo>/scripts/test-skill-content.cjs <absolute-wa>
+<fresh-evidence>`, then the same command with `--post` before its arguments. It
+checks source and embedded dispatch, the old byte boundary, Unicode, trailing
+safety instructions, roles, hidden/missing skills and oversized full-result
+paging. Run in a private home; it never writes the installed skills. The
+`skill-content-proof` spell records this sequence; required worktrees use the
+verified direct CLI and identical postcheck, not unsupported spell replay.
+
 ## Where they are found
 
 Scanned in order, first match per name wins:

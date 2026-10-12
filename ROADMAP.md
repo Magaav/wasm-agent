@@ -22,6 +22,25 @@ These are two entry paths into one runtime:
 The fleet console serves these journeys. It is not the product's required first
 screen, and 32 workers are not a prerequisite for helping one customer.
 
+## Complete on-demand skill loading — 2026-10-12 (verified candidate; installation pending)
+
+Removed the loader's destructive12,000-byte prefix cap. The complete `SKILL.md`,
+including UTF-8 and trailing safety rules, now reaches dispatch; the real
+`git-orchestrator` procedure fits in one model-view call. Larger responses retain
+the unchanged shared output budget and exact `full_result`/`tool_result` retrieval.
+Descriptions alone stay automatic; no permission, automatic-prompt, job or worker expansion.
+
+Focused native source/embedded checks59+59 passed with zero skips; boundary,
+Unicode, real procedure, master/guest, hidden/missing and oversized paging covered.
+The previous source and installed embedding causally fail at12,001 bytes.
+All14 retrieval regression runs passed in short private evidence paths; the
+long-path fixture failure is retained, not claimed as a general operation repair.
+Offline release build and retained hash postchecks passed. Self-review only;
+`gate_verified:false`, `release_verified:false`. Candidate
+`57e2910ad18f58a8039b2d8ca5ffee8d97bc86d912832fce909a9e795411db14` is not yet
+installed: inspected exact request-bound Sentinel proof remains pending.
+See `docs/SKILLS.md`; the `skill-content-proof` plan records the verified CLI.
+
 ## History projection and automatic graph revisions — 2026-10-12 (installed and verified)
 
 `session`/owned child session/`session_many` now offer explicit `view:'tool_calls'`:
