@@ -20,6 +20,7 @@
     "scripts/install-sentinel-service.ps1"
   ],
   "globs": [
+    "scripts/mcp-*",
     "scripts/whatsapp-*",
     "scripts/lib/*",
     "scripts/wave-*",

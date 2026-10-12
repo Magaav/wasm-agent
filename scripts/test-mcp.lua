@@ -1,0 +1,67 @@
+-- Real host + private DB/operations, with a disposable stdio peer. No live app.
+local json=dofile('lua/vendor/json.lua')
+local setup=json.decode(host.sql_exec('CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY,value TEXT NOT NULL)','[]'))
+assert(setup.ok,'private registry table setup failed')
+local memory=dofile('lua/core/memory.lua')
+local mcp=dofile('lua/core/mcp.lua')
+local tools=dofile('lua/core/tools.lua')
+local checks=0
+local function check(value,label)checks=checks+1;if not value then error('MCP CHECK FAILED: '..label)end end
+local ctx={role='master',session_id='mcp-private-fixture'}
+local function control(action,extra)
+ local args=extra or {};args.action=action;args.expected_revision=mcp.inventory().revision
+ return mcp.control(args,ctx)
+end
+local root=assert(host.getenv('MCP_TEST_SOURCE'))
+local def={id='fixture',name='Fixture',transport='stdio',program=assert(host.getenv('WA_NODE')),args={root..'/scripts/fixtures/mcp-peer.mjs'},tools={echo='read'},timeout_seconds=5}
+check(mcp.inventory().revision==0,'fresh registry')
+check(#mcp.inventory().servers==0,'listing does not launch')
+check(mcp.control({action='put',definition=def},ctx).error=='mcp_store_revision_changed','explicit revision required')
+check(mcp.control({action='list'},{role='guest'}).error=='forbidden','guest management forbidden')
+check(mcp.control({action='list'},{role='master',subagent={}}).error=='mcp_management_forbidden_for_subagent','child management forbidden')
+check(control('put',{definition=def}).ok,'store disabled definition')
+check(mcp.inventory().servers[1].enabled==false,'no implicit enable')
+check(control('enable',{id='fixture'}).error=='mcp_probe_required','probe required')
+local probed=control('probe',{id='fixture'});check(probed.ok,'real native-operation stdio probe')
+check(probed.operation_id~=nil and probed.request~=nil,'retained operation/request provenance')
+check(host.read_file(probed.request..'.result.json')~=nil,'exact retained result')
+check(probed.tools[1].input_schema_json:find('"value":{}',1,true)~=nil,'exact schema string')
+check(mcp.inventory().servers[1].enabled==false,'probe does not enable')
+check(#mcp.schemas()==0,'disabled schemas not exposed')
+check(control('enable',{id='fixture'}).ok,'explicit selected approval')
+local names=mcp.schemas();check(#names==1,'only selected schemas')
+local name=names[1]['function'].name
+check(#name<=64 and name:sub(1,12)=='mcp_fixture_','bounded namespace')
+local encoded=json.encode(names);check(encoded:find('"value":{}',1,true)~=nil,'schema empty object preserved')
+check(encoded:find('"required":[]',1,true)~=nil,'schema empty array preserved')
+local raw=json.raw('{"type":"object","properties":{"x":{"enum":[null,{},[]]}}}')
+check(json.encode(raw)=='{"type":"object","properties":{"x":{"enum":[null,{},[]]}}}','raw schema nested null/object/array fidelity')
+check(not pcall(json.raw,'{"x":1} garbage'),'raw schema syntax fenced')
+check(json.encode(json.decode('{}'))=='[]','ordinary JSON compatibility unchanged')
+check(tools.has_effect(name)==false,'only locally classified read skips effect fence')
+check(tools.dispatch(memory,name,{},'guest',{}).error=='forbidden_for_role:guest','guest dynamic call denied')
+check(tools.dispatch(memory,name,{},'master',{subagent={allowed={}}}).error:find('capability_not_in_profile',1,true)~=nil,'child exact-name ceiling')
+local rawargs='{"value":{"empty":{},"array":[],"nil":null}}'
+local result=tools.dispatch(memory,name,{},'master',{session_id='mcp-private-fixture',tool_arguments_json=rawargs})
+check(result.ok and result.tool_call_issued,'one actual native call')
+check(result.result_json:find('"nil":null',1,true)~=nil,'result null retained')
+check(result.result_json:find('"empty":{}',1,true)~=nil,'result empty object retained')
+check(result.result_json:find('"array":[]',1,true)~=nil,'result array retained')
+check(mcp.inventory().servers[1].last_call.ok==true,'durable last call')
+local bound={session_workspace=function()return {required=true,state='allocated',worktree=root}end}
+check(tools.dispatch(bound,'mcp',{action='probe',id='fixture'},'master',{session_id='bound'}).error=='workspace_execution_context_unsupported','generic probe required-workspace boundary')
+check(control('disable',{id='fixture'}).ok,'disable persisted')
+check(mcp.call(name,{},ctx).error=='mcp_tool_not_approved','disabled tool cannot dispatch')
+check(#mcp.schemas()==0,'disabled tool removed')
+def.program='missing-mcp-fixture-program-'..host.uuid()
+check(control('put',{definition=def}).ok,'edit invalidates prior approval')
+local failed=control('probe',{id='fixture'});check(failed.ok==false,'bad executable fails visibly')
+local row=mcp.inventory().servers[1]
+check(row.probe.ok==false and row.probe.error~=nil,'failed probe durably retained')
+check(row.enabled==false and row.observed_status=='last probe failed','failed probe disables')
+check(control('enable',{id='fixture'}).error=='mcp_probe_required','failed probe cannot enable')
+local template=mcp.default_whatsapp();template.tools.send_message='write'
+check(mcp.validate(template)=='whatsapp_send_requires_scoped_facade','generic WhatsApp send cannot bypass facade')
+check(mcp.validate({id='bad',transport='stdio',program='node',args={},tools={},env={TOKEN='inline-secret-value'}})=='mcp_credentials_require_environment_references','inline credentials refused')
+check(mcp.namespace('fixture','same/x')~=mcp.namespace('fixture','same_x'),'sanitized names cannot collide')
+print('mcp native ok ('..checks..' checks)')

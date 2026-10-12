@@ -1930,6 +1930,7 @@ function M:run_body(text, images)
               ..'any later effectful call in the same batch, were not admitted. Re-issue the ones '
               ..'that remain valid.') or nil}
         end
+        dispatch_ctx.tool_arguments_json=function_.arguments
         return tools.dispatch(memory, function_.name, args, self.role,
         dispatch_ctx) end)
       host.beat()

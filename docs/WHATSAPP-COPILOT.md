@@ -3,6 +3,17 @@
 One feature, two job records. It reads the operator's WhatsApp store, decides which messages are
 waiting on them, and answers those — or records, durably, why it did not.
 
+## MCP app boundary
+
+The owned WhatsApp MCP exposes bound snapshot/self/target reads, media retrieval
+and the existing verified store send. It contains no scheduler or reply policy.
+Read/audio/store-send compatibility CLIs now route through it; internal raw/backend
+modes preserve the reviewed app drivers without recursion. Jobs retains eligibility,
+window/hold controls, cursors, dedupe, local STT and wakes; the responder retains
+trusted event scope, approval, reservation, budget and confirmation. Generic
+registration of the owned send tool cannot bypass that facade. No job is auto-enabled.
+See [MCP.md](MCP.md) for configuration, limits and proof scope.
+
 ## One job, and why one
 
 A job is exactly **one trigger + one action**, and this pipeline is one `pipeline` action with four

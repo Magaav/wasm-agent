@@ -1512,6 +1512,51 @@ class WaHookEvents extends HTMLElement {
 customElements.define('wa-hook-events', WaHookEvents);
 
 // Jobs are automation rules. They are not the operations used to execute their actions.
+// MCP inventory reads no app and never launches a server. Explicit controls emit
+// intent; the app retains data/errors and keeps drafts separate from refreshes.
+class WaMcps extends HTMLElement {
+  connectedCallback(){
+    if(this.editor)return;
+    this.drafts=new Map();this.notice=document.createElement('p');this.notice.setAttribute('role','status');
+    this.retry=document.createElement('button');this.retry.type='button';this.retry.textContent='Refresh MCPs';this.retry.onclick=()=>this.emit('list',{},this.retry);
+    this.list=document.createElement('div');this.list.className='mcp-list';
+    const details=document.createElement('details'),summary=document.createElement('summary');summary.textContent='Add or edit a trusted MCP';
+    this.editor=document.createElement('textarea');this.editor.rows=8;this.editor.className='mcp-editor';this.editor.setAttribute('aria-label','Reviewed MCP definition JSON');
+    this.template=document.createElement('button');this.template.type='button';this.template.textContent='WhatsApp read-only template';
+    this.template.onclick=()=>{if(this.data?.templates?.whatsapp){this.editor.value=JSON.stringify(this.data.templates.whatsapp,null,2);details.open=true;}};
+    this.save=document.createElement('button');this.save.type='button';this.save.textContent='Save disabled definition';
+    this.save.onclick=()=>{try{const definition=JSON.parse(this.editor.value);this.emit('put',{definition},this.save);}catch(error){this.message='Invalid JSON: '+String(error.message||error);}};
+    const warning=document.createElement('p');warning.textContent='Trusted executable code, not a sandbox. Credentials are environment-variable references. Tools need local read/write approval; server hints grant nothing. Saving/probing leaves the connector disabled. Jobs alone own triggers and wakes.';
+    details.append(summary,warning,this.template,this.editor,this.save);this.append(this.retry,this.notice,this.list,details);
+  }
+  emit(action,args,control){this.dispatchEvent(new CustomEvent('mcp-action',{bubbles:true,detail:{action,args,control}}));}
+  set message(value){this.notice.textContent=String(value||'');}
+  set busy(value){this.pending=!!value;this.querySelectorAll('button').forEach(button=>button.disabled=!!value||button.dataset.approvalRequired==='true');}
+  configureScope(scope){
+    if(this.scope===scope)return;this.connectedCallback();if(this.scope!==undefined)this.drafts.set(this.scope,this.editor.value);
+    this.scope=scope;this.editor.value=this.drafts.get(scope)||'';this.data=null;this.list.replaceChildren();this.message='MCP inventory not yet loaded for this node/account';this.busy=false;
+  }
+  set inventory(data){
+    this.connectedCallback();this.data=data;this.list.replaceChildren();
+    for(const adapter of data.adapters||[]){const row=document.createElement('section');row.className='job-row';const label=document.createElement('strong');label.textContent=adapter.name+' · built-in profile-managed MCP';const body=document.createElement('p');body.textContent=(adapter.capabilities||[]).join(' · ')+'. '+adapter.note;row.append(label,body);this.list.append(row);}
+    if(!(data.servers||[]).length){const empty=document.createElement('p');empty.textContent='No MCPs configured. WhatsApp is available as a read-only template; adding it does not enable sending or Jobs.';this.list.append(empty);}
+    for(const server of data.servers||[]){
+      const row=document.createElement('section');row.className='job-row';const name=document.createElement('strong');name.textContent=server.name||server.id;
+      const status=document.createElement('div');status.textContent=`${server.enabled?'enabled':'disabled'} · ${server.definition.transport} · ${server.observed_status} · request-scoped, not a persistent connection`;
+      const evidence=document.createElement('p');evidence.textContent=server.probe?.error?`Probe failed: ${server.probe.error}`:server.last_call?.error?`Last call: ${server.last_call.error}`:'No continuous health observation';
+      const controls=document.createElement('div');controls.className='job-controls';
+      const button=(label,action)=>{const b=document.createElement('button');b.type='button';b.textContent=label;b.onclick=()=>this.emit(action,{id:server.id},b);return b;};
+      const probe=button('Probe (no tool call)','probe'),toggle=button(server.enabled?'Disable':'Enable approved tools',server.enabled?'disable':'enable');toggle.dataset.approvalRequired=String(!server.enabled&&server.probe?.ok!==true);toggle.disabled=toggle.dataset.approvalRequired==='true';
+      const edit=document.createElement('button');edit.type='button';edit.textContent='Edit permissions/config';edit.onclick=()=>{this.editor.value=JSON.stringify(server.definition,null,2);this.editor.closest('details').open=true;};
+      controls.append(probe,toggle,edit);row.append(name,status,evidence,controls);
+      const tools=document.createElement('ul');tools.className='mcp-tools';
+      for(const tool of server.probe?.tools||[]){const item=document.createElement('li');item.textContent=`${tool.name} · ${server.definition.tools?.[tool.name]||'not approved'} — ${tool.description||''}`;tools.append(item);}row.append(tools);this.list.append(row);
+    }
+    this.message=`${(data.servers||[]).length} configured MCPs · registry revision ${data.revision}. Inventory does not probe or connect.`;
+  }
+}
+customElements.define('wa-mcps',WaMcps);
+
 class WaJobs extends HTMLElement {
   set items(items) {
     this.replaceChildren();

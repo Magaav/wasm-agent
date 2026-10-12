@@ -304,7 +304,8 @@ $harness = @'
     !window.__calls.some(function (call) { return call.url === 'envelope'; }),
     'the tools topic reads the preview route, not the legacy envelope route');
   // Managed jobs are rules, after tools, and never optimistically reported enabled.
-  check(document.querySelector('[data-target="tools-box"]').closest('.engine-topic').nextElementSibling.querySelector('[data-target="jobs-box"]'), 'jobs must follow tools in the engine');
+  check(document.querySelector('[data-target="tools-box"]').closest('.engine-topic').nextElementSibling.querySelector('[data-target="mcp-box"]'), 'MCP app capabilities follow tools in the engine');
+  check(document.querySelector('[data-target="mcp-box"]').closest('.engine-topic').nextElementSibling.querySelector('[data-target="jobs-box"]'), 'Jobs follow MCP capabilities and retain automation controls');
   await refreshJobs();
   await refreshHooks();
   var hooksPanel = document.querySelector('#hooks-box wa-hook-events');

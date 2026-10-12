@@ -57,6 +57,8 @@ end
 
 
 local function encode_table(val, stack)
+  local tag=getmetatable(val)
+  if type(tag)=='table' and type(tag.__json_raw)=='string' then return tag.__json_raw end
   local res = {}
   stack = stack or {}
 
@@ -396,5 +398,16 @@ function json.decode(str)
   return res
 end
 
+
+-- Explicit validated raw JSON for foreign schemas/arguments. Ordinary decoding
+-- stays unchanged; JSON data cannot forge a Lua metatable. Preserve nested
+-- empty objects/arrays and nulls without changing existing memory semantics.
+function json.raw(str)
+  local decoded=json.decode(str)
+  if str:match('^%s*{') then
+    return setmetatable(type(decoded)=='table' and decoded or {},{__json_raw=str})
+  end
+  error('raw JSON must be an object')
+end
 
 return json

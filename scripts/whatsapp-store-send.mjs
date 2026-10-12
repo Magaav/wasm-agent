@@ -23,6 +23,7 @@
 // stdout is JSON. Exit codes: 0 ok, 1 usage/body, 3 endpoint, 5 refused, 6 crashed, 7 send resource
 // busy, 8 ambiguous post-dispatch outcome.
 import { readFileSync } from "node:fs";
+import {callApp,readBinding} from './whatsapp-mcp-client.mjs';
 
 import { acquire as acquireSendLock, defaultLockPath } from "./whatsapp-sendlock.mjs";
 import { WebSocket } from "./lib/websocket-runtime.mjs";
@@ -69,6 +70,12 @@ async function main() {
     return;
   }
 
+  if(!process.argv.includes('--mcp-backend')){
+    const binding=readBinding({...(args.expectAccount?{account:args.expectAccount}:{}),...(args.expectBrowserEndpoint?{browser_endpoint:args.expectBrowserEndpoint}:{}),
+      allow_send:args.send===true,allowed_conversations:[args.chat],reservation_key:'compatibility-cli:caller-owns-approval-and-reservation'});
+    const data=await callApp(args.send?'send_message':'inspect_chat',{conversation_id:args.chat,...(args.send?{body:args.body,confirm:true}:{})},binding);
+    console.log(JSON.stringify(data));process.exitCode=data.ok?0:data.dispatch?8:5;return;
+  }
   // Connect only the explicitly bound endpoint. No discovery, no fallback to a default 9222, and
   // loopback only: a route that can be pointed at a browser nobody named is not a bound route.
   const expectedEndpoint = String(args.expectBrowserEndpoint || "");

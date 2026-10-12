@@ -22,6 +22,35 @@ These are two entry paths into one runtime:
 The fleet console serves these journeys. It is not the product's required first
 screen, and 32 workers are not a prerequisite for helping one customer.
 
+## MCP extension boundary — 2026-10-12 (verified candidate; installation pending)
+
+Implemented native MCP registry, request-scoped stdio/Streamable HTTP transport,
+role/profile/effect/workspace fences and Engine inventory/management. New/edited
+and probed connectors stay disabled until explicit local tool/schema approval;
+failed probes remain durable, changed schemas refuse before dispatch, and no tool
+is automatically replayed. Credentials remain references with explicit redaction;
+no Pi runtime, recurring observer or extra inference worker.
+
+WhatsApp is the first profile-managed app adapter (reads, lookup, audio, verified
+store send). Existing compatibility clients route through MCP; Jobs keeps controls,
+eligibility, cursor/dedupe, deterministic STT and delivery/wake ownership. Existing
+profile/reservation/budget/verification remains the send authority. No third-party
+send, existing-job enable or new unattended wake performed.
+
+Focused evidence: real private stdio/HTTP and app CDP peers; native source/embedded
+42+42 checks; Chromium MCP24 checks and causal guard-removal refusal; required UI
+suite; WhatsApp durable-effects42, cursor/transcription/audio-loss regressions;
+batch-tool regression and62-module embedded freshness. Read-only live MCP self
+identity was proven; no live send. The retained responder profile still selects
+the retired UI route and has no page/store-send binding: it was not silently
+rewritten or activated. Self-review, not independent
+review. Candidate source/binary proof is not installed proof: canonical integration,
+remote readback and one exact-source idle-safe Sentinel installation still pending.
+`gate_verified:false`, `release_verified:false`. See `docs/MCP.md`.
+
+Last read-only live job inventory: `whatsapp-copilot` revision21 and
+`whatsapp-events` revision13 disabled, queued0; no definition changes requested.
+
 ## Windows Sentinel service preparation — 2026-10-07
 
 Native SCM hosting is implemented, not installed: exact service/config/image/home

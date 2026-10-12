@@ -833,7 +833,7 @@ if [ -d "$ROOT/jobs" ] && [ -d "$ROOT/scripts" ]; then
   cp -f "$ROOT/rust/plugins/whatsapp-transcript/target/wasm32-unknown-unknown/release/wa_plugin_whatsapp_transcript.wasm" \
     "$INSTALL_DIR/plugins/whatsapp-transcript.wasm" \
     || fail "could not ship the WhatsApp transcript plugin"
-  for source in "$ROOT"/scripts/whatsapp-*; do
+  for source in "$ROOT"/scripts/whatsapp-* "$ROOT"/scripts/mcp-*.mjs; do
     [ -f "$source" ] || continue
     cp -f "$source" "$INSTALL_DIR/scripts/" || fail "node installed, but could not ship $(basename "$source")"
     PIPELINE=$((PIPELINE + 1))
@@ -849,7 +849,7 @@ if [ -d "$ROOT/jobs" ] && [ -d "$ROOT/scripts" ]; then
   # hand-written list would have been wrong in exactly the same way one commit later. So the list is the
   # imports.
   MODULES=""
-  for source in "$ROOT"/scripts/whatsapp-*; do
+  for source in "$ROOT"/scripts/whatsapp-* "$ROOT"/scripts/mcp-*.mjs; do
     [ -f "$source" ] || continue
     MODULES="$MODULES$(grep -o '\./lib/[A-Za-z0-9._-]*' "$source" 2>/dev/null | sed 's|^\./lib/||')
 "
@@ -866,7 +866,7 @@ if [ -d "$ROOT/jobs" ] && [ -d "$ROOT/scripts" ]; then
   # And prove the install is import-closed, so a script that cannot load is a refused deploy instead of a
   # silent run of failing deliveries: every relative import of a shipped script must resolve inside
   # <install>/scripts, next to the script that names it.
-  for source in "$INSTALL_DIR"/scripts/whatsapp-*; do
+  for source in "$INSTALL_DIR"/scripts/whatsapp-* "$INSTALL_DIR"/scripts/mcp-*.mjs; do
     [ -f "$source" ] || continue
     for relative in $(grep -o '\./[A-Za-z0-9._/-]*' "$source" 2>/dev/null | sort -u); do
       [ -f "$INSTALL_DIR/scripts/${relative#./}" ] \

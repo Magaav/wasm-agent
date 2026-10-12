@@ -9,6 +9,7 @@ local changeset = dofile("lua/core/changeset.lua")
 local patch_audit = dofile("lua/core/patch_audit.lua")
 local tool_output = dofile("lua/core/tool_output.lua")
 local file_tools = dofile("lua/core/file_tools.lua")
+local mcp = dofile('lua/core/mcp.lua')
 local batch_tools = dofile("lua/core/batch_tools.lua")
 local evidence_view = dofile("lua/core/evidence_view.lua")
 local diagnose = dofile("lua/core/diagnose.lua")
@@ -334,6 +335,8 @@ local function add_batches(list)
 end
 -- Operator batches only: guest surfaces and artifact access do not expand.
 add_batches(M.admin)
+M.admin[#M.admin+1]=schema('mcp','List/manage explicit MCP connectors. New/edited definitions remain disabled; probe never grants tool/send/job authority.',{
+ action={type='string',enum={'list','put','probe','enable','disable'}},id={type='string'},expected_revision={type='integer',minimum=0,description='Required for changes/probes: exact registry revision from list. Stale state refuses.'},definition={type='object',description='Reviewed connector: id/name, transport stdio or http, program/args or url, optional cwd, environment-reference env/headers, timeout_seconds; tools maps exact tool names to locally approved read/write.'}},nil)
 -- Stable per-interpreter rollback knob, never automatic failure fallback or
 -- per-round schema shuffling. The operator explicitly requested these APIs.
 local batches_enabled=host.getenv('WASM_AGENT_BATCH_TOOLS')~='0'
@@ -351,6 +354,7 @@ function M.batch_enabled()return batches_enabled end
 -- Which capability tier each tool belongs to (DESIGN.md §8). Anything not
 -- listed here is a WASM plugin.
 M.tier_of = {
+  mcp='mcp',
   remember = "memory", recall = "memory", memories = "memory", forget = "memory",
   skill = "skills",
   capabilities = "capabilities",
@@ -375,7 +379,7 @@ M.tier_of = {
 
 local TIER_ORDER = {
   "memory", "sessions", "capabilities", "subagents", "environment", "shell", "ledger",
-  "client", "spells", "nodes", "whatsapp", "plugins",
+  "client", "spells", "nodes", "whatsapp", "mcp", "plugins",
 }
 
 -- The advertised tool surface, grouped by tier (not a complete model request).
@@ -383,7 +387,7 @@ function M.tiers(role)
   local groups = {}
   for _, item in ipairs(M.all(role)) do
     local name = item["function"].name
-    local tier = M.tier_of[name] or "plugins"
+    local tier = name:sub(1,4)=='mcp_' and 'mcp' or M.tier_of[name] or "plugins"
     groups[tier] = groups[tier] or {}
     table.insert(groups[tier], {
       name = name,
@@ -508,6 +512,7 @@ function M.catalog(role)
       sha256={type="string"},offset={type="integer",minimum=1},limit={type="integer",minimum=1,maximum=51200}
     },{"sha256"})
     for _, item in ipairs(M.admin) do list[#list + 1] = item end
+    for _, item in ipairs(mcp.schemas()) do list[#list+1]=item end
     for _, item in ipairs(whatsapp_schemas()) do list[#list + 1] = item end
     local plugins=wasm_plugins()
     table.sort(plugins,function(a,b)return tostring(a.name)<tostring(b.name) end)
@@ -649,6 +654,8 @@ end
 
 local function required_workspace_error(memory, ctx, name, args)
   local writes_files = name == "write" or name == "edit" or name == "write_many" or name == "edit_many" or name == "bash"
+    or name=='mcp' and args.action=='probe'
+    or name:sub(1,4)=='mcp_' and not mcp.is_read(name)
     or name == "operation" and (args.action or "") == "start"
     or name == "shell" or name == "client" or name == "remote" or name == "spell_run"
   if not writes_files or not memory or not ctx.session_id or not memory.session_workspace then return nil end
@@ -658,7 +665,7 @@ local function required_workspace_error(memory, ctx, name, args)
     return {error="session_workspace_unavailable",state=workspace.state or "unknown",
       detail=workspace.error or "required workspace has no durable binding"}
   end
-  if name == "shell" or name == "client" or name == "remote" or name == "spell_run" then
+  if name == "shell" or name == "client" or name == "remote" or name == "spell_run" or name=='mcp' or name:sub(1,4)=='mcp_' then
     return {error="workspace_execution_context_unsupported",tool=name,
       detail="this capability does not yet accept an enforced session worktree binding"}
   end
@@ -817,6 +824,20 @@ function M.dispatch(memory, name, args, role, ctx)
     if not claimed.ok then claimed=reuse_own_client_claim(ctx,claimed) end
     if not claimed.ok then return claimed end
     ctx.resource_effect_generation=(ctx.resource_effect_generation or 0)+1
+  end
+  if name=='mcp' then
+    local control={role=role,subagent=ctx.subagent,session_id=ctx.session_id,cwd=session_cwd(memory,ctx)}
+    return mcp.control(args,control)
+  end
+  if name:sub(1,4)=='mcp_' then
+    if not is_master(role) then return {error='forbidden_for_role:'..role} end
+    local id,row,tool=mcp.resolve_tool(name)
+    if not id then return {error='mcp_tool_not_approved',effect='none'} end
+    if row.definition.tools[tool.name]=='write' and ctx.run_id then
+      local claimed=resources.claim(ctx,{'mcp:'..id});if not claimed.ok then return claimed end
+      ctx.resource_effect_generation=(ctx.resource_effect_generation or 0)+1
+    end
+    ctx.cwd=session_cwd(memory,ctx);return mcp.call(name,args,ctx)
   end
   if name == "operation" then
     if not is_master(role) then return {error="forbidden_for_role:" .. role} end
@@ -1268,7 +1289,7 @@ local READ_ONLY = {
   spell_list = true, spell_get = true,
 }
 
-function M.has_effect(name) return READ_ONLY[name] ~= true end
+function M.has_effect(name) if name:sub(1,4)=='mcp_' then return not mcp.is_read(name) end;return READ_ONLY[name] ~= true end
 
 function M.start_parallel_bash(calls, memory, role, ctx)
   if not is_master(role) or (ctx and ctx.subagent
