@@ -22,7 +22,7 @@ These are two entry paths into one runtime:
 The fleet console serves these journeys. It is not the product's required first
 screen, and 32 workers are not a prerequisite for helping one customer.
 
-## History projection and automatic graph revisions — 2026-10-12 (verified candidate; installation pending)
+## History projection and automatic graph revisions — 2026-10-12 (installed and verified)
 
 `session`/owned child session/`session_many` now offer explicit `view:'tool_calls'`:
 SQL does not fetch encrypted reasoning/prose/trace, exact call arguments and outcomes
@@ -46,8 +46,18 @@ benchmark: cold index263–273s→9.85–10.17s, eight exact sources1.17–1.43s
 source hashes and resolved/unresolved counts match. Raw reply JSON grows11.9% for
 identity/revision evidence. One workload/two cold pairs is not model-quality,
 net-token or universal graph-versus-grep proof. Self-review, not independent review.
-Candidate `eb26737068069e00467cdf2aebbc4d51a27b528162f25bb482814193a26e9642` is tested,
-not yet installed; merge/remote publication and immutable Sentinel verification remain.
+Private candidate `eb26737068069e00467cdf2aebbc4d51a27b528162f25bb482814193a26e9642`
+passed focused checks. Merged/pushed runtime source
+`3cd1abcf46aa8310d900601b12c5632fbe3a7afd` is now installed through immutable
+Sentinel request `1791840140425927200-17908-00000000000000000000`.
+Actual request-bound verification at21:31 UTC:76 checks, failed0, skipped0, exit0;
+source/artifacts/scripts/UI/listener/watcher identities match. Fresh Sentinel-built
+installed node `b818a8e670a6d78049b1be49d493ad139982dfa2e30b0c570f2716cc7d65b3fc`
+is distinct from the private candidate. All14 private source/embedded retrieval runs
+also passed on the installed binary, with retained source/log/binary hash postchecks.
+Standing-authorized notes-to-self report confirmed as `3EB0F9F9B32C28720ABB22`;
+no third-party message or deployment replay. This completion record is documentation
+only, not another runtime installation.
 `gate_verified:false`, `release_verified:false`; see `docs/GRAPH.md` and
 `docs/HISTORY-SEARCH.md`. Previous drafts, disabled WhatsApp jobs and responder
 binding remain untouched.
