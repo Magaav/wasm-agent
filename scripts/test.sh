@@ -1708,6 +1708,8 @@ print("skills ok")
 LUA
 WA_SCRIPT="$DB.skills.lua" "$BIN" --db "$DB" | grep "skills ok"
 rm -f "$DB.skills.lua"
+# Long procedures retain all instructions; shared oversized-result paging stays bounded.
+gate_run env WA_SCRIPT=scripts/test-skill-content.lua "$BIN" --db "$DB"
 
 # The plugins are staged in a directory this section owns, and it owns it where it is *used*. The
 # directory is created near the top of the run and used ~1300 lines later, and in between nothing

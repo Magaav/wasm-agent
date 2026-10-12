@@ -171,11 +171,10 @@ function M.find(name)
 end
 
 function M.content(skill)
-  local text = read(skill.path)
-  if not text then return nil end
-  -- Cap it: a skill is instructions, not an archive.
-  if #text > 12000 then text = text:sub(1, 12000) .. "\n…(truncated)" end
-  return text
+  -- Procedures must be complete: a private prefix cap can drop safety rules and
+  -- split UTF-8. The shared tool-output projector handles oversized responses
+  -- with a retrievable full original instead of destructively clipping here.
+  return read(skill.path)
 end
 
 -- Where a skill came from. Three roots matter, and they mean different things: the repository's
