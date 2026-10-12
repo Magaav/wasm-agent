@@ -22,7 +22,7 @@ These are two entry paths into one runtime:
 The fleet console serves these journeys. It is not the product's required first
 screen, and 32 workers are not a prerequisite for helping one customer.
 
-## MCP extension boundary — 2026-10-12 (verified candidate; installation pending)
+## MCP extension boundary — 2026-10-12 (installed and verified)
 
 Implemented native MCP registry, request-scoped stdio/Streamable HTTP transport,
 role/profile/effect/workspace fences and Engine inventory/management. New/edited
@@ -41,11 +41,17 @@ Focused evidence: real private stdio/HTTP and app CDP peers; native source/embed
 42+42 checks; Chromium MCP24 checks and causal guard-removal refusal; required UI
 suite; WhatsApp durable-effects42, cursor/transcription/audio-loss regressions;
 batch-tool regression and62-module embedded freshness. Read-only live MCP self
-identity was proven; no live send. The retained responder profile still selects
+identity was proven; no live third-party send. The retained responder profile still selects
 the retired UI route and has no page/store-send binding: it was not silently
-rewritten or activated. Self-review, not independent
-review. Candidate source/binary proof is not installed proof: canonical integration,
-remote readback and one exact-source idle-safe Sentinel installation still pending.
+rewritten or activated. Self-review, not independent review. Merged/pushed runtime
+source `ac05d9c9a5ff10965fa8ba98377e8ad81aa63ab6`; actual request-bound Sentinel
+installation `1791812098410392200-2968-00000000000000000000` verified at13:37 UTC:
+76 checks, failed0, skipped0, exit0; installed node/scripts/UI/source/listener/watcher
+identities match. Native `mcp{action:'list'}` confirms the profile-managed WhatsApp
+adapter and disabled read-only template, with0 generically configured connectors.
+Standing-authorized notes-to-self report confirmed as `3EB038D05822CCE6CC5657`;
+no third-party message or deployment replay. This completion record is documentation
+only, not another runtime installation.
 `gate_verified:false`, `release_verified:false`. See `docs/MCP.md`.
 
 Last read-only live job inventory: `whatsapp-copilot` revision21 and
