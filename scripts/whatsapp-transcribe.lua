@@ -35,7 +35,7 @@ local function prepare_bodies(id, detail, dir, node)
   local audio = paths.temp() .. "/wa-audio-" .. host.uuid() .. ".ogg"
   local audio_script = host.getenv("WA_WHATSAPP_AUDIO_SCRIPT") or (dir .. "/whatsapp-audio.mjs")
   local fetched, problem = run(table.concat({quote(node),quote(audio_script),"--message-id",quote(id),
-    "--chat",quote(detail.conversation_id),"--out",quote(audio)}," "),100)
+    "--chat",quote(detail.conversation_id),"--profile-file",quote(dofile('lua/core/whatsapp.lua').profile_path()),"--out",quote(audio)}," "),100)
   if not fetched then clean(audio); return nil,"download",problem end
   local python = host.getenv("WA_WHATSAPP_STT_PYTHON") or "python3"
   local stt_script = host.getenv("WA_WHATSAPP_STT_SCRIPT") or (dir .. "/whatsapp-stt-local.py")
@@ -99,6 +99,7 @@ local dir = script_dir()
 local node = host.getenv("WA_WHATSAPP_NODE") or "node"
 local dump = paths.temp() .. "/wa-audio-read-" .. host.uuid() .. ".json"
 local read, read_error = run(table.concat({quote(node), quote(dir .. "/whatsapp-read.mjs"),
+  "--profile-file",quote(dofile('lua/core/whatsapp.lua').profile_path()),
   "--since", tostring(floor), "--limit", "10000", "--out", quote(dump)}, " "), 90)
 if not read then
   print(json.encode({ok=false,step="read",error=read_error,pending=pending}))

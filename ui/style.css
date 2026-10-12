@@ -1100,7 +1100,11 @@ body.view-only { margin: 0; background: var(--bg); }
 wa-balloon.file-diff .pop-head { display: flex; align-items: center; gap: var(--gap); }
 
 wa-jobs, wa-hook-events { display: block; padding: var(--pad); }
-wa-jobs .job-row, wa-hook-events .job-row { padding: var(--pad); border-bottom: 1px solid var(--line); }
+wa-jobs .job-row, wa-hook-events .job-row, wa-mcps .job-row { padding: var(--pad); border-bottom: 1px solid var(--line); }
+wa-mcps { display: block; overflow-wrap: anywhere; }
+wa-mcps .mcp-editor { display: block; width: 100%; min-width: 0; box-sizing: border-box; font: inherit; padding: var(--pad); margin-block: var(--space); color: var(--text); background: var(--panel-2); border: 1px solid var(--line); border-radius: var(--radius); }
+wa-mcps .job-controls { display: flex; flex-wrap: wrap; gap: var(--gap); }
+wa-mcps .mcp-tools { margin: var(--space) 0; padding-left: calc(var(--space) * 4); }
 wa-hook-events .job-row { overflow-wrap: anywhere; }
 wa-hook-events .job-status { color: var(--muted); }
 wa-hook-events details { padding-top: var(--space); }
@@ -1110,9 +1114,9 @@ wa-jobs pre { white-space: pre-wrap; overflow-wrap: anywhere; }
 .job-error { color: var(--danger, #f88); padding: var(--pad); }
 
 wa-tasks { display: block; padding: var(--space); }
-wa-tasks button { font: inherit; padding: var(--space); color: var(--text); background: var(--panel-2); border: 1px solid var(--line); border-radius: var(--radius-sm); cursor: pointer; }
-wa-tasks button:hover { border-color: var(--accent); }
-wa-tasks button:disabled { color: var(--disabled); cursor: default; }
+wa-tasks button, wa-mcps button { font: inherit; padding: var(--space); color: var(--text); background: var(--panel-2); border: 1px solid var(--line); border-radius: var(--radius-sm); cursor: pointer; }
+wa-tasks button:hover, wa-mcps button:hover { border-color: var(--accent); }
+wa-tasks button:disabled, wa-mcps button:disabled { color: var(--disabled); cursor: default; }
 wa-tasks > details { margin-bottom: var(--space); }
 wa-tasks summary { cursor: pointer; padding: var(--space); }
 .task-form, .task-form label, .task-list { display: grid; gap: var(--gap); }

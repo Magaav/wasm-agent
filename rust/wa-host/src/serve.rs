@@ -325,7 +325,7 @@ pub(crate) fn node_thread_id() -> usize {
 fn is_read_route(request: &Request) -> bool {
     // These controls use independent synchronized runtimes, never agent state. A blocked run must
     // not queue its own cancellation or the operator's disable behind itself.
-    if matches!(split_path(&request.path).0.as_str(), "/jobs" | "/operations" | "/operation") {return true;}
+    if matches!(split_path(&request.path).0.as_str(), "/jobs" | "/mcp" | "/operations" | "/operation") {return true;}
     // A GET is a read, by default. This was an allow-list, and that was backwards: a route nobody
     // remembered to add fell through to node-thread 0 and queued behind whatever run held it. It cost
     // several incidents - `/sync/head`, `/tools`, and `/efficiency` - and each looked like the node
@@ -2627,6 +2627,8 @@ fn dispatch(
         "/model-configuration-preview" => (200, "application/json", call("wa_model_configuration_preview", &[session]).into_bytes()),
         "/envelope" => (200, "application/json", call("wa_envelope", &[session]).into_bytes()), // legacy alias
         "/tools" => (200, "application/json", call("wa_tools", &[session]).into_bytes()),
+        "/mcp" if method == "GET" => (200,"application/json",call("wa_mcp", &["{}",session]).into_bytes()),
+        "/mcp" if method == "POST" => (200,"application/json",call("wa_mcp", &[body,session]).into_bytes()),
         "/jobs" if method == "GET" => (200,"application/json",call("wa_jobs", &["{}",session]).into_bytes()),
         "/jobs" if method == "POST" => (200,"application/json",call("wa_jobs", &[body,session]).into_bytes()),
         "/operations" if method == "GET" => (200,"application/json",call("wa_operation", &["{}",session]).into_bytes()),
@@ -3009,6 +3011,7 @@ mod read_route_tests {
     fn a_control_post_is_a_read() {
         assert!(is_read_route(&request("POST", "/operation")));
         assert!(is_read_route(&request("POST", "/operations")));
+        assert!(is_read_route(&request("POST", "/mcp")));
         assert!(is_read_route(&request("POST", "/jobs")));
     }
 }

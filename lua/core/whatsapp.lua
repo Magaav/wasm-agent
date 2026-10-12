@@ -523,30 +523,10 @@ local function send_tool(args, profile, ctx)
       if type(effects.release) == "function" then pcall(effects.release, { message_id = event.message_id }) end
       return fail("send_route_unbound", { route = route.name })
     end
-    local node = (host.getenv and host.getenv("WA_NODE")) or "node"
-    -- The body goes through a file, never the shell command line: a message is untrusted text.
-    local body_file = paths.temp() .. "/wa-whatsapp-body-" .. tostring(host.uuid()) .. ".txt"
-    if not (host.write_file and host.write_file(body_file, body)) then
-      if type(effects.release) == "function" then pcall(effects.release, { message_id = event.message_id }) end
-      return fail("body_not_written")
-    end
-    local script_args = {
-      quote(node), quote(route.script),
-      "--chat", quote(event.conversation_id),
-      "--body-file", quote(body_file),
-      "--send",
-    }
-    for _, pair in ipairs(M.route_identity_flags(profile)) do
-      script_args[#script_args + 1] = pair[1]
-      script_args[#script_args + 1] = quote(pair[2])
-    end
-    local command = table.concat(script_args, " ")
-    local ok, raw = pcall(host.exec, command, "")
-    if host.exec then pcall(host.exec, "rm -f " .. quote(body_file), "") end
-    if not ok then return fail("send_route_failed", { detail = tostring(raw):sub(1, 200) }) end
-    local decoded, decode_error = M.decode_exec(raw)
-    if not decoded then return fail(decode_error, { detail = tostring(raw):sub(1, 200) }) end
-    result = decoded
+    result = dofile('lua/core/mcp.lua').whatsapp('send_message',
+      {conversation_id=event.conversation_id,body=body,confirm=true},
+      {account=profile.resources.account,browser_endpoint=profile.resources.browser_endpoint,
+       allow_send=true,reservation_key=event.message_id,allowed_conversations={event.conversation_id},store_send_script=route.script},ctx)
   end
 
   local verify_error = M.verify_send_result(result, event.conversation_id, body,

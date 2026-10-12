@@ -7,12 +7,20 @@ external execution, not an automation rule. A wake starts an agent **run**; a
 script need not start a run or call a model. See ARCHITECTURE.md section 6 and
 [OPERATIONS.md](OPERATIONS.md).
 
+## Capability boundary
+
+MCP connectors expose app/store operations; they do not own triggers, schedules,
+eligibility, cursors/deduplication, STT, delivery state or wakes. Engine lists MCPs
+separately and opening that inventory never probes an app. WhatsApp's compatibility
+clients use the owned MCP adapter while Jobs preserves its existing deterministic
+rules and approvals. No job is enabled by connector configuration. See [MCP.md](MCP.md).
+
 ## Ownership and scope
 
 The sentinel observes sources and consumes a durable SQLite queue at
 `<config>/sentinel/jobs.db`. The host exposes the same store through master-only
 `GET /jobs` and `POST /jobs` (enable/disable, and a job's controls). The Engine lists jobs **after
-tools**, with toggles, source state, queued count, last outcome and the exact definition; a job that
+MCP app capabilities**, with toggles, source state, queued count, last outcome and the exact definition; a job that
 declares controls gets a field and a button per number. Neither a toggle nor a control is shown successful
 until the server confirms it, and a refusal is shown in the store's own words.
 A separate read-only **hooks / events** topic after Jobs lists native producers,

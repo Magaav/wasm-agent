@@ -260,7 +260,7 @@ function M.resolve(id, ctx)
     name = tostring(name)
     if name == "subagent" then return nil, "subagent_recursion_forbidden" end
     if not ceiling[name] then return nil, "profile_exceeds_caller:" .. name end
-    if BROAD[name] and profile.operator_authorized ~= true then
+    if (BROAD[name] or name=='mcp' or name:sub(1,4)=='mcp_') and profile.operator_authorized ~= true then
       return nil, "profile_not_authorized:" .. name
     end
     if not allowed_set[name] then

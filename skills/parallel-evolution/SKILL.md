@@ -34,6 +34,13 @@ Inspect workspace status only if unknown; an unavailable binding still blocks
 execution. Preserve the same postchecks, binding and instruction byte budget.
 See `docs/SKILLS.md` for supported-path routing; no blind retry or fabricated proof.
 
+For MCP changes, `mcp-native-proof` records
+`node <repo>/scripts/test-mcp-native.cjs <absolute-built-wa> <fresh-evidence>`
+and its `--post` hash check. Use that verified direct CLI in required workspaces,
+not unsupported spell replay. Also run private stdio/HTTP/CDP peers and the MCP
+Chromium proof, then the required UI suite. See `<repo>/docs/MCP.md`; probe is not
+app identity/send approval, and unknown effects are never replayed.
+
 For independent batch-tool changes run
 `node <repo>/scripts/test-batch-tools.cjs <absolute-built-wa> <fresh-evidence>`,
 then the same CLI with `--post` before its arguments. `batch-tools-proof` records

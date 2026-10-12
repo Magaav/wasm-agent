@@ -6728,6 +6728,36 @@ async function refreshHooks() {
   } catch (error) { if (current()) panel.message = 'Hook inventory unavailable: ' + String(error.message || error); }
 }
 
+const mcpReads=new Map(),mcpControls=new Set(),mcpEpochs=new Map();
+const mcpScope=()=>JSON.stringify([session||'',activeNode||'']);
+async function mcpRequest(method,body,headers,timeout,controller=new AbortController()){
+  const timer=setTimeout(()=>controller.abort(),timeout);
+  try{const response=await apiFetch('mcp',{method,headers,signal:controller.signal,...(body?{body:JSON.stringify(body)}:{})});const payload=await response.json();
+    if(!response.ok||payload.error||payload.registry_observation_error)throw Error(payload.error||payload.registry_observation_error||`HTTP ${response.status}`);return payload;
+  }finally{clearTimeout(timer);}
+}
+async function refreshMcps(){
+  const panel=document.querySelector('#mcp-box wa-mcps'),scope=mcpScope();panel.configureScope(scope);
+  if(mcpReads.has(scope))return mcpReads.get(scope).promise;
+  const epoch=mcpEpochs.get(scope)||0,controller=new AbortController();
+  const headers=apiHeaders(),current=()=>mcpScope()===scope&&panel.scope===scope&&(mcpEpochs.get(scope)||0)===epoch;
+  const promise=(async()=>{try{if(current())panel.message='Loading configured MCPs (no server starts)…';
+    const payload=await mcpRequest('GET',null,headers,8000,controller);if(current())panel.inventory=payload;
+  }catch(error){if(current())panel.message='MCP inventory unavailable; retained last data. Refresh to retry: '+String(error.message||error);}
+  finally{if(mcpReads.get(scope)?.promise===promise)mcpReads.delete(scope);}})();mcpReads.set(scope,{promise,controller});return promise;
+}
+document.getElementById('mcp-box').addEventListener('mcp-action',async event=>{
+  const {action,args}=event.detail;if(action==='list'){await refreshMcps();return;}
+  const panel=document.querySelector('#mcp-box wa-mcps'),scope=mcpScope();if(mcpControls.has(scope))return;
+  panel.configureScope(scope);if(!panel.data){panel.message='Load this node’s current registry before changing it.';return;}
+  const body={...args,action,expected_revision:panel.data.revision},headers=apiHeaders({'Content-Type':'application/json'});
+  mcpEpochs.set(scope,(mcpEpochs.get(scope)||0)+1);mcpReads.get(scope)?.controller.abort();mcpReads.delete(scope);
+  mcpControls.add(scope);panel.busy=true;panel.message='Explicit MCP control pending; no automatic retry.';
+  try{await mcpRequest('POST',body,headers,action==='probe'?120000:8000);if(mcpScope()===scope)await refreshMcps();}
+  catch(error){if(mcpScope()===scope)panel.message='MCP control failed or response uncertain; inspect/refresh before a new decision, never replay automatically: '+String(error.message||error);}
+  finally{mcpControls.delete(scope);if(mcpScope()===scope)panel.busy=false;}
+});
+
 async function refreshJobs() {
   const box = document.getElementById('jobs-box');
   try {
@@ -6785,6 +6815,7 @@ function loadTopic(id) {
   else if (id === "skills-box") refreshSkills();
   else if (id === "spells-box") refreshSpells();
   else if (id === "tools-box") refreshTools();
+  else if (id === "mcp-box") refreshMcps();
   else if (id === "jobs-box") refreshJobs();
   else if (id === "hooks-box") refreshHooks();
   else if (id === "tasks-box") refreshTasks();

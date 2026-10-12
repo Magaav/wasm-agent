@@ -291,6 +291,14 @@ local function require_master(session)
   return user
 end
 
+function wa_mcp(body, session)
+  local user=require_master(session);if not user then return json.encode({error='forbidden'}) end
+  local ok,args=pcall(json.decode,body or '{}');if not ok or type(args)~='table' then return json.encode({error='invalid_mcp_request'}) end
+  local done,result=pcall(dofile('lua/core/mcp.lua').control,args,{role=effective_role(user),session_id='mcp-control:'..tostring(user.id)})
+  if not done then return json.encode({ok=false,error=tostring(result)}) end
+  return json.encode(result)
+end
+
 function wa_jobs(body, session)
   if not require_master(session) then return json.encode({error="forbidden"}) end
   local ok, args = pcall(json.decode, body or "{}")

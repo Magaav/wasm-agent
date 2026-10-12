@@ -248,6 +248,7 @@ local function main()
   local command = table.concat({
     quote(node),
     quote(directory .. "/whatsapp-read.mjs"),
+    "--profile-file",quote(dofile('lua/core/whatsapp.lua').profile_path()),
     "--since", tostring(since),
     "--out", quote(dump),
     (operator and operator ~= "") and ("--operator " .. quote(operator)) or "",

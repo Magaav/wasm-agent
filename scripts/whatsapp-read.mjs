@@ -20,9 +20,14 @@
 const DEFAULT_PORTS = [9222];
 const WHATSAPP_URL = "web.whatsapp.com";
 
+import {pathToFileURL} from 'node:url';
+import {resolve} from 'node:path';
 import { eligibility, holdFor, windowFromEnv } from "./whatsapp-eligibility.mjs";
 import { deriveLeft } from "./whatsapp-read-core.mjs";
 import { WebSocket } from "./lib/websocket-runtime.mjs";
+import {boundIdentityExpression} from './whatsapp-bound-identity.mjs';
+import {endpointMatches} from './whatsapp-store-core.mjs';
+import {callApp,readBinding} from './whatsapp-mcp-client.mjs';
 // A message whose body is media is stored as base64 by the app; keeping that would put megabytes in
 // the ledger per photo, so the body is a marker and the caption only.
 const MAX_BODY = 4000;
@@ -50,6 +55,10 @@ function parseArgs(argv) {
       if (Number.isSafeInteger(seconds) && seconds >= 0) args.hold = seconds;
       index += 1;
     }
+    else if (flag === "--profile-file") { args.profileFile=String(value||'');index+=1; }
+    else if (flag === "--expect-account") { args.account=String(value||'');index+=1; }
+    else if (flag === "--raw-store") { args.rawStore = true; }
+    else if (flag === "--expect-browser-endpoint") { args.boundEndpoint=String(value||'');index+=1; }
     else if (flag === "--print-expression") { args.printExpression = true; }
   }
   return args;
@@ -82,8 +91,9 @@ async function discover(ports) {
   return { endpoint: null, tried };
 }
 
-function expression(since) {
+export function expression(since,account='') {
   return `(() => {
+    ${boundIdentityExpression(account)}
     const grab = (name) => { try { return window.require(name); } catch (error) { return null; } };
     const chatModule = grab('WAWebChatCollection');
     const msgModule = grab('WAWebMsgCollection');
@@ -221,14 +231,22 @@ async function main() {
   // A debug flag, not a feature: when WhatsApp changes its build, the question is always "what did we
   // actually send", and the answer must not require editing this file to find out.
   if (args.printExpression) { console.log(expression(args.since)); return; }
-  const { endpoint, tried } = await discover(args.ports);
+  let endpoint,tab,payload;
+  if(!args.rawStore){
+    const data=await callApp('read_snapshot',{since:args.since,limit:args.limit},readBinding({...(args.profileFile?{profile_file:args.profileFile}:{}),...(args.account?{account:args.account}:{}),...(args.boundEndpoint?{browser_endpoint:args.boundEndpoint}:{})}));
+    if(data.ok!==true){console.log(JSON.stringify(data));process.exitCode=5;return;}
+    endpoint=data.endpoint;tab=data.tab;payload=data;
+  }else{
+  const discovered = await discover(args.ports);endpoint=discovered.endpoint;const tried=discovered.tried;
   if (!endpoint) {
     console.log(JSON.stringify({ ok: false, error: "no_cdp_endpoint", tried }));
     process.exit(3);
   }
   const targets = JSON.parse(await text(`http://${endpoint.host}:${endpoint.port}/json/list`));
   const pages = (targets || []).filter((target) => target.type === "page");
-  const tab = pages.find((page) => (page.url || "").includes(WHATSAPP_URL));
+  tab = args.boundEndpoint
+    ? pages.find(page=>endpointMatches(page.webSocketDebuggerUrl,args.boundEndpoint) && (page.url||'').startsWith('https://web.whatsapp.com/'))
+    : pages.find((page) => (page.url || "").includes(WHATSAPP_URL));
   if (!tab) {
     console.log(JSON.stringify({ ok: false, error: "no_whatsapp_tab", endpoint, pages: pages.map((page) => page.url) }));
     process.exit(3);
@@ -240,7 +258,7 @@ async function main() {
     ws.addEventListener("error", () => reject(new Error("websocket refused")), { once: true });
   });
   const evaluated = await call(ws, "Runtime.evaluate", {
-    expression: expression(args.since),
+    expression: expression(args.since,args.account),
     returnByValue: true,
     awaitPromise: true,
   });
@@ -249,7 +267,8 @@ async function main() {
     console.log(JSON.stringify({ ok: false, error: "evaluate_failed", detail: evaluated.exceptionDetails.text }));
     process.exit(4);
   }
-  const payload = JSON.parse(evaluated.result.value);
+  payload = JSON.parse(evaluated.result.value);
+  }
   if (payload.error) {
     console.log(JSON.stringify({ ok: false, error: payload.error }));
     process.exit(5);
@@ -259,6 +278,13 @@ async function main() {
   // model turn on a message that a rule already excludes, and an unverifiable chat fails closed here.
   // `left` is derived first: the app exposes no explicit membership flag, and passing its null through
   // refused every chat (`left_unknown`), which is what kept this pipeline silent.
+  if(args.rawStore){
+    const raw={ok:true,since:args.since,conversations:payload.conversations,messages,store:payload.store||null,
+      newest:payload.newest||0,dropped_over_limit:(payload.dropped_over_limit||0)+payload.messages.length-messages.length,skipped_no_timestamp:payload.skipped_no_timestamp||0,
+      endpoint,tab:{id:tab.id,url:tab.url,title:tab.title}};
+    if(args.out){const fs=await import('node:fs');fs.writeFileSync(args.out,JSON.stringify(raw));console.log(JSON.stringify({ok:true,out:args.out,messages:messages.length}));}
+    else console.log(JSON.stringify(raw));return;
+  }
   payload.conversations = (payload.conversations || []).map((chat) => ({ ...chat, left: deriveLeft(chat) }));
   const chatById = new Map((payload.conversations || []).map((chat) => [String(chat.id), chat]));
   const operatorIds = String(args.operator || "").split(",").map((value) => value.trim()).filter(Boolean);
@@ -303,7 +329,7 @@ async function main() {
     messages,
     skipped_no_timestamp: payload.skipped_no_timestamp || 0,
     store: payload.store || null,
-    dropped_over_limit: payload.messages.length - messages.length,
+    dropped_over_limit: (payload.dropped_over_limit || 0) + payload.messages.length - messages.length,
     newest: payload.newest || 0,
     eligible,
     ineligible,
@@ -344,7 +370,7 @@ async function main() {
   console.log(JSON.stringify(full));
 }
 
-main().catch((error) => {
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) main().catch((error) => {
   console.log(JSON.stringify({ ok: false, error: "reader_failed", detail: String(error && error.message || error) }));
   process.exit(6);
 });

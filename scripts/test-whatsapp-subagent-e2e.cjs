@@ -1,8 +1,8 @@
 // Real WhatsApp durable-effects pipeline proof: node + sentinel + SQLite + child runtime + profile +
-// whatsapp tools + a deterministic FAKE SEND subprocess.
+// whatsapp tools + a standard MCP transport with a deterministic FAKE APP server.
 //
 // ZERO live browser and ZERO paid model: the only model is a local HTTP mock, and the send route is a
-// fixture subprocess. There is no `/subagents` protocol stub - the sentinel posts to the real route and
+// fixture MCP server. There is no `/subagents` protocol stub - the sentinel posts to the real route and
 // the runtime starts a real child. If a dependency is not implemented, this test reports
 // `DEPENDENCY_MISSING` and exits non-zero; it never fakes the route and never prints ALL PASS.
 //
@@ -134,6 +134,26 @@ function providerServer() {
 }
 
 function writeFakeSender() {
+  const mcpDir=path.join(root,'mcp-fixture');fs.mkdirSync(mcpDir,{recursive:true});
+  for(const file of ['mcp-client-core.mjs','mcp-server-core.mjs'])fs.copyFileSync(path.join(repo,'scripts',file),path.join(mcpDir,file));
+  const entry=fs.readFileSync(path.join(repo,'scripts/mcp-client.mjs'),'utf8');
+  const anchor="const input=JSON.parse(bytes.toString('utf8'));const result=await requestMCP(input);";
+  assert(entry.includes(anchor),'private MCP client env injection anchor');
+  fs.writeFileSync(path.join(mcpDir,'mcp-client.mjs'),entry.replace(anchor,"const input=JSON.parse(bytes.toString('utf8'));input.server.env={WA_FAKE_COUNTER:'WA_FAKE_COUNTER',WA_FAKE_ACTUAL_ACCOUNT:'WA_FAKE_ACTUAL_ACCOUNT',WA_FAKE_ACTUAL_ENDPOINT:'WA_FAKE_ACTUAL_ENDPOINT',WA_FAKE_MODE:'WA_FAKE_MODE'};const result=await requestMCP(input);"));
+  fs.writeFileSync(path.join(mcpDir,'mcp-whatsapp.mjs'),`
+import fs from 'node:fs';import {serveMCP} from './mcp-server-core.mjs';
+const at=process.argv.indexOf('--binding-json'),binding=JSON.parse(process.argv[at+1]);
+serveMCP({name:'private-fake-whatsapp',tools:[{name:'send_message',inputSchema:{type:'object',properties:{conversation_id:{type:'string'},body:{type:'string'},confirm:{type:'boolean'}}}}],call:async(name,args)=>{
+ const counter=process.env.WA_FAKE_COUNTER,account=process.env.WA_FAKE_ACTUAL_ACCOUNT,endpoint=process.env.WA_FAKE_ACTUAL_ENDPOINT;
+ fs.appendFileSync(counter,JSON.stringify({chat:args.conversation_id,body:args.body,account,at:Date.now()})+'\\n');
+ if(binding.account!==account)return {ok:false,error:'account_mismatch'};
+ if(binding.browser_endpoint!==endpoint)return {ok:false,error:'endpoint_mismatch'};
+ if(process.env.WA_FAKE_MODE==='block'){fs.writeFileSync(counter+'.pid',String(process.pid));await new Promise(()=>setTimeout(()=>{},60000));}
+ const lines=fs.readFileSync(counter,'utf8').trim().split('\\n').filter(Boolean);
+ return {ok:true,sent:true,verified:true,dispatch:'fake',chat:{id:args.conversation_id},body:args.body,account,browser_endpoint:endpoint,message:{id:'fake-'+lines.length,ack:3}};
+}});
+`);
+  const syntax=spawnSync(process.execPath,['--check',path.join(mcpDir,'mcp-whatsapp.mjs')],{encoding:'utf8',windowsHide:true});assert.equal(syntax.status,0,syntax.stderr);
   fs.writeFileSync(fakeSender, `// Deterministic fake send route: no browser, exact receipt, scratch counter.
 const fs = require("node:fs");
 const arg = (name) => { const i = process.argv.indexOf(name); return i >= 0 ? process.argv[i + 1] : ""; };
@@ -229,6 +249,7 @@ function nodeEnv(port, modelPort, mode) {
     WASM_AGENT_RELAY: "",
     WASM_AGENT_RENDEZVOUS: "",
     WASM_AGENT_MANAGED: "0",
+    WA_MCP_SCRIPT_DIR: path.join(root,'mcp-fixture'),
     WA_FAKE_COUNTER: counter,
     WA_FAKE_ACTUAL_ACCOUNT: ACCOUNT,
     WA_FAKE_ACTUAL_ENDPOINT: ENDPOINT,
@@ -371,6 +392,10 @@ async function main() {
     check(!chat.text.includes("ANSWER_" + (chat.name === "A" ? "B" : "A")), `interactive ${chat.name} has no other session's marker`);
     check((chat.text.match(/"type"\s*:\s*"done"/g) || []).length === 1, `interactive ${chat.name} has exactly one terminal done`);
   }
+  const mcpInventory=await (await fetch(base+'/mcp',{signal:AbortSignal.timeout(5000)})).json();
+  check(mcpInventory.ok===true&&mcpInventory.adapters.some(adapter=>adapter.id==='whatsapp'),'MCP inventory answers independently while children are held');
+  const mcpControl=await (await fetch(base+'/mcp',{method:'POST',headers:{'Content-Type':'application/json'},body:'{"action":"list"}',signal:AbortSignal.timeout(5000)})).json();
+  check(mcpControl.ok===true,'MCP read/control interpreter is not pinned to inference');
   // Release the held children; the actual WhatsApp chain then runs to completion.
   holdChildren = false;
   for (const item of held) item.deliver();

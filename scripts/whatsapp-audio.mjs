@@ -6,6 +6,9 @@ import { writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { WebSocket } from "./lib/websocket-runtime.mjs";
+import {boundIdentityExpression} from './whatsapp-bound-identity.mjs';
+import {callApp,readBinding} from './whatsapp-mcp-client.mjs';
+import {readFileSync} from 'node:fs';
 
 const MAX_AUDIO_BYTES = 20 * 1024 * 1024;
 const args = process.argv.slice(2);
@@ -35,8 +38,9 @@ export function browserExceptionReason(details) {
   return String((details && details.text) || "unknown").slice(0, 200);
 }
 
-export function audioExpression(id, chat) {
+export function audioExpression(id, chat,account='') {
   return `(async () => {
+    ${boundIdentityExpression(account)}
     const ID = ${JSON.stringify(id)};
     const CHAT = ${JSON.stringify(chat)};
     try {
@@ -75,6 +79,7 @@ export function audioExpression(id, chat) {
       mimetype:mime,
       signal:new AbortController().signal, downloadQpl:qpl
     });
+    ${boundIdentityExpression(account)}
     const bytes = raw instanceof Uint8Array ? raw : new Uint8Array(raw);
     if (!bytes.length || bytes.length > ${MAX_AUDIO_BYTES}) return JSON.stringify({error:'audio_size_invalid',bytes:bytes.length});
     let binary = '';
@@ -94,6 +99,8 @@ export function audioExpression(id, chat) {
 }
 
 async function discover() {
+  const explicit=arg('--expect-browser-endpoint');
+  if(explicit){const target=new URL(explicit);if(!['ws:','wss:'].includes(target.protocol)||!['127.0.0.1','localhost','[::1]'].includes(target.hostname)||!target.pathname.startsWith('/devtools/page/'))throw Error('invalid_bound_whatsapp_endpoint');return explicit;}
   for (const host of ["127.0.0.1", "[::1]"]) {
     try {
       const origin = `http://${host}:${port}`;
@@ -109,6 +116,13 @@ async function discover() {
 
 async function main() {
   if (!messageId || !chatId || !out) throw new Error("message_id_chat_out_required");
+  if(!args.includes('--mcp-backend')){
+    const binding=readBinding({...(arg('--profile-file')?{profile_file:arg('--profile-file')}:{}),... (arg('--expect-account')?{account:arg('--expect-account')}:{}),...(arg('--expect-browser-endpoint')?{browser_endpoint:arg('--expect-browser-endpoint')}:{})});
+    const data=await callApp('download_audio',{message_id:messageId,conversation_id:chatId},binding);
+    if(!data.ok){console.log(JSON.stringify(data));process.exitCode=1;return;}
+    const bytes=readFileSync(data.path);if(bytes.length!==data.bytes||createHash('sha256').update(bytes).digest('hex')!==data.sha256)throw Error('mcp_audio_artifact_unverified');
+    writeFileSync(out,bytes,{flag:'wx',mode:0o600});console.log(JSON.stringify({ok:true,bytes:data.bytes,mime:data.mime,sha256:data.sha256}));return;
+  }
   const endpoint = await discover();
   const ws = new WebSocket(endpoint);
   await new Promise((resolve, reject) => {
@@ -127,7 +141,7 @@ async function main() {
         frame.error ? reject(new Error("cdp_evaluate_failed")) : resolve(frame.result);
       });
       ws.send(JSON.stringify({ id: 1, method: "Runtime.evaluate", params: {
-        expression: audioExpression(messageId, chatId), returnByValue: true, awaitPromise: true,
+        expression: audioExpression(messageId, chatId,arg('--expect-account')), returnByValue: true, awaitPromise: true,
       } }));
     });
   } finally { ws.close(); }
