@@ -1381,6 +1381,7 @@ name = "wa-graph"
 version = "0.1.0"
 dependencies = [
  "notify",
+ "ring",
  "rusqlite",
  "serde_json",
  "tree-sitter",

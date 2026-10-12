@@ -866,6 +866,7 @@ pub extern "C-unwind" fn write_file(l: *mut LuaState) -> c_int {
     let path = arg_string(l, 1).unwrap_or_default();
     let text = arg_string(l, 2).unwrap_or_default();
     let ok = write_atomic(&path, &text);
+    if ok {crate::graph::native_write(&path);}
     unsafe { crate::lua::lua_pushboolean(l, ok as c_int) };
     1
 }

@@ -97,7 +97,7 @@ graph {action:"symbol_source", path:"lua/core/agent.lua", name:"choose_worker", 
 
 Copy the selector fields from one search result. The source is the exact syntax
 definition from the graph's verified snapshot. Large definitions are paged;
-continue with the returned `next_byte_offset`. A selector cannot read arbitrary
+continue with the returned `next_byte_offset` and `source_version`. A selector cannot read arbitrary
 files. Source retrieval replaces the first broad read, but inspect imports and
 nearby state before changing code.
 
@@ -111,14 +111,29 @@ After an audit follow-up step, use `audit_assess` to record your usefulness
 grade (0-3), concrete reason and critique. This is your opinion, not a confirmed
 catch; grade 3 only means the lead prompted a patch or test revision.
 
-Every read verifies indexed source bytes before/after and never indexes implicitly.
-`graph_refresh_required` means no current graph answer—not an empty result. Use
-bounded `grep`/`read` immediately for small known patches. Only when graph evidence
-is worthwhile explicitly run `graph {action:"index",cwd:"<root>"}`; default indexing
-is incremental, `force:true` is an intentional full rebuild. The runtime watcher
-still exists; workspace caches remain on-demand. Do not repeatedly call stale reads
-or choose graph merely to satisfy a ritual. Run the focused probe before broader
-required tests; never launch broad tests alongside a probe still known to fail.
+Every query captures content evidence, freezes a required revision and automatically
+waits for a committed snapshot covering it. Native mutations (including `edit_many`)
+and OS events queue shared root-isolated indexing; missed hints are reconciled by
+content, never Git/mtime alone. `graph_wait_timeout` or `graph_index_failed` is an
+explicit failure, not an empty result: inspect revision/progress/recovery fields and
+use bounded `grep`/`read`. Do not blindly retry or heartbeat a quiet worker. Explicit
+`index force:true` remains the full-rebuild/repaired-index path; unavailable/poisoned
+workers need supported node recovery. Later edits do not make this query chase a
+moving target. Known locations can still make grep/read cheaper than graph.
+
+For1–8 known definitions use `graph {action:'symbol_source_many',requests:[...]}`
+or compatibility `symbol_source_many`. They share one captured/pinned snapshot per
+resolved root. Follow each item's `graph_snapshot_index` into `graph_snapshots` and
+inspect every error/continuation. Carry returned `source_version` with continuation
+selectors; ambiguous/changed definitions refuse, never auto-select.
+
+Focused proof and retained hash check:
+`node <repo>/scripts/test-retrieval-native.cjs <absolute-built-wa> <fresh-evidence>`,
+then the same CLI with `--post` before its arguments. `retrieval-native-proof`
+records this verified sequence. Required workspaces still use the direct CLI;
+unsupported spell replay is not a reason to unbind or weaken checks. The proof uses
+private source/embedded processes, no inference, and real OS hints plus causal
+failure checks. See `docs/GRAPH.md` for measured limits and source-domain omissions.
 
 ## Relationship questions
 

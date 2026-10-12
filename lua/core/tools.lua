@@ -81,7 +81,7 @@ M.shared = {
     offset = { type = "integer", minimum = 0, description = "list: next_offset from previous page." },
     limit = { type = "integer", minimum = 1, maximum = 1000 },
     byte_limit = { type = "integer", minimum = 4, maximum = 20000 },
-    view = { type = "string", enum = { "full", "compact" } },
+    view = { type = "string", enum = { "full", "compact", "tool_calls" } },
     message_id = { type = "string" },
     byte_offset = { type = "integer", minimum = 1 },
     message_version = { type = "string" },
@@ -107,9 +107,9 @@ M.shared = {
     after = { type = "integer", minimum = 0, maximum = 20 },
     message_ids = { type = "array", minItems = 1, maxItems = 20, items = {type="string"}, description = "Batch selected originals in this session; missing or foreign rows refuse the entire batch." },
     message_id = { type = "string", description = "Exact row, with ownership checked against this session." },
-    byte_offset = { type = "integer", minimum = 1, description = "With message_id, page exact row JSON without requiring operator artifact access." },
+    byte_offset = { type = "integer", minimum = 1, description = "With message_id, page selected view JSON; full preserves the original, tool_calls avoids encrypted reasoning." },
     byte_limit = { type = "integer", minimum = 4, maximum = 20000 }, message_version = {type="string"},
-    view = { type = "string", enum = {"full", "compact"}, description = "Full is default; compact omits diagnostic details, not content, with exact-row references." },
+    view = { type = "string", enum = {"full", "compact", "tool_calls"}, description = "Full is default; tool_calls returns exact calls/arguments and tool outcomes without loading encrypted reasoning. Projections retain full-original references; compact omits diagnostics." },
     limit = { type = "integer", minimum = 1, maximum = 1000 } }, { "session_id" }),
   schema("search_messages", "Search history locally: dialogue-first exact excerpts with original evidence references. Use scope=evidence for execution/tool results, all for unrestricted history including retrieval echoes. Filters apply before ranking. session around_seq reads neighbouring context.", {
     query = { type = "string", maxLength = 4096 },
@@ -194,13 +194,14 @@ M.admin = {
   }, { "pattern" }),
   -- Retrieval returns selected implementation text; relationship and audit actions remain
   -- explicitly separate so their evidence can be evaluated independently.
-  schema("graph", "Retrieve implementation source, get a bounded architecture overview, or map the current patch to resolved callers, dependencies and tests. search_symbols/symbol_source handle discovery; inspect unmatched_definition_terms and use bounded grep for partial or absent evidence. overview handles orientation; impact handles factual patch reachability without claiming risk. Reads never rebuild; graph_refresh_required means use read/grep or explicitly index when worthwhile.", {
-    action = { type = "string", enum = { "search_symbols", "symbol_source", "overview", "impact", "explain", "query", "path", "caps", "stats", "index", "audit", "audit_assess", "audit_report", "audit_feedback" } },
+  schema("graph", "Concept discovery, exact source (including bounded source batches), overview and patch reachability. Queries capture content evidence, automatically await a committed invocation revision and never silently return stale results; use read/grep after explicit indexing failures.", {
+    action = { type = "string", enum = { "search_symbols", "symbol_source", "symbol_source_many", "overview", "impact", "explain", "query", "path", "caps", "stats", "index", "audit", "audit_assess", "audit_report", "audit_feedback" } },
     name = { type = "string", description = "search_symbols: concept or identifier; symbol_source/explain/query: exact selected name." },
     prefer_implementations = { type = "boolean", description = "search_symbols: opt-in ranking that demotes partial local-variable matches; useful when looking for a component/function implementation, not a state binding." },
     path = { type = "string", description = "symbol_source: path from a search_symbols result." },
     line = { type = "integer", minimum = 1, description = "symbol_source: definition line from a search_symbols result." },
     kind = { type = "string", description = "symbol_source: optional definition kind from the selected result." },
+    source_version = {type='string',description='symbol_source: optional exact file SHA-256 from discovery/source; refuses changed source, including continuation pages.'},
     byte_offset = { type = "integer", minimum = 0, description = "symbol_source: continue a large definition at this returned byte offset." },
     max_bytes = { type = "integer", minimum = 256, maximum = 200000, description = "symbol_source: source bytes/page (clamped to 20000); overview/impact: whole-response budget (default 24000)." },
     aspects = { type = "array", maxItems = 8, items = {type="string", enum={"overview","languages","modules","entry_points","routes","capabilities","hotspots","boundaries","resolution"}}, description = "overview: optional sections; omitted returns the bounded overview." },
@@ -318,7 +319,7 @@ local function add_batches(list)
       local required=original.required
       if name=='symbol_source_many' then
         properties={}
-        for _,key in ipairs({'path','name','line','kind','byte_offset','max_bytes','cwd'}) do properties[key]=original.properties[key] end
+        for _,key in ipairs({'path','name','line','kind','source_version','byte_offset','max_bytes','cwd'}) do properties[key]=original.properties[key] end
         required={'path','name','line'}
       elseif name=='write_many' then
         properties.version={type='string',description='Optional expected existing text SHA-256; never relaxed for empty strings.'}
@@ -327,9 +328,11 @@ local function add_batches(list)
       local description=entry.mutates and
         ('Apply 1-8 independent '..entry.base..' requests. Validate every item/path/snapshot before any write; duplicate/overlapping targets refuse. Serial application rechecks each file and stops on failure or steering. Per-item results and diff/undo retained; NOT a multi-file transaction. Never retry unknown effects.') or
         ('Run 1-8 independent '..(name=='symbol_source_many' and 'graph symbol_source' or entry.base)..' reads. Same permissions, scopes, limits and exact evidence as the primitive. Ordered per-item results/errors; inspect each continuation/completeness flag. No snapshot, retries or indexing.')
+      if name=='symbol_source_many' then description='Retrieve 1-8 exact definitions. Shared admission revision and pinned snapshot per resolved root; automatically waits for background indexing. Same graph permissions, selector/version checks, byte ceilings and ordered per-item errors.' end
       additions[#additions+1]=schema(name,description,{requests={type='array',minItems=1,maxItems=8,items=entry.item}},{'requests'})
     end
   end
+  originals.graph.properties.requests={type='array',minItems=1,maxItems=8,items=BATCH.symbol_source_many.item,description='symbol_source_many: selectors, grouped by resolved root; shares the compatibility tool backend.'}
   table.sort(additions,function(a,b)return a['function'].name<b['function'].name end)
   for _,entry in ipairs(additions) do list[#list+1]=entry end
 end
@@ -761,6 +764,45 @@ local function reuse_own_client_claim(ctx,refused)
   return resources.claim(ctx,{"client:local"})
 end
 
+local function graph_hint(memory,ctx,path)
+  if type(host.graph_notify)~='function' then return {error='graph_notify_unavailable'} end
+  local root,err=patch_audit.workspace_root(memory,ctx)
+  if err then return {error=err} end
+  local called,raw=pcall(host.graph_notify,json.encode({root=root,path=path}))
+  return called and json.decode(raw or '') or {error='graph_notification_failed',detail=tostring(raw)}
+end
+
+-- One implementation for graph source batches and the compatibility alias.
+local function graph_sources(memory,args,ctx)
+  if not batches_enabled then return {error='batch_tools_disabled',effect='none'} end
+  local requests,failure=batch_tools.requests({requests=args.requests})
+  if not requests then return failure end
+  local results,groups,order,snapshots={},{},{},{}
+  for i,request in ipairs(requests) do
+    local refusal=batch_tools.item(request,BATCH.symbol_source_many.item,i)
+    local root,err
+    if not refusal then root,err=patch_audit.workspace_root(memory,ctx,request.cwd or args.cwd);if err then refusal={error=err} end end
+    if refusal then results[i]=refusal else
+      local key=root or '<configured>'
+      if not groups[key] then groups[key]={root=root,requests={},positions={}};order[#order+1]=key end
+      local group=groups[key];local item=batch_tools.copy(request);item.cwd=nil
+      group.requests[#group.requests+1]=item;group.positions[#group.positions+1]=i
+    end
+  end
+  local graph=dofile('lua/core/graph.lua')
+  for _,key in ipairs(order) do
+    local group=groups[key];local reply,err,detail=graph.symbol_sources(group.requests,{root=group.root})
+    local snapshot_index
+    if reply and reply.graph_snapshot then snapshots[#snapshots+1]=reply.graph_snapshot;snapshot_index=#snapshots end
+    for position,index in ipairs(group.positions) do
+      results[index]=reply and reply.results and reply.results[position] or detail or {error=err or 'graph_batch_failed'}
+      if snapshot_index then results[index].graph_snapshot_index=snapshot_index end
+    end
+  end
+  local failed=0;for _,item in ipairs(results) do if item.error or item.ok==false then failed=failed+1 end end
+  return {ok=failed==0,results=results,failed=failed,succeeded=#requests-failed,graph_snapshots=snapshots}
+end
+
 function M.dispatch(memory, name, args, role, ctx)
   args = args or {}
   -- No role means the least one, not the most: a future caller that forgets to pass a role must not
@@ -785,6 +827,10 @@ function M.dispatch(memory, name, args, role, ctx)
     if ctx.subagent and not (ctx.subagent.allowed or {})[batch.base] then
       return {error='capability_not_in_profile:'..batch.base}
     end
+    if name=='symbol_source_many' then
+      local requests,failure=batch_tools.requests(args);if not requests then return failure end
+      return graph_sources(memory,args,ctx)
+    end
     if not batch.mutates then
       return batch_tools.read(args,batch.item,function(request)
         if name=='symbol_source_many' then request.action='symbol_source' end
@@ -806,7 +852,9 @@ function M.dispatch(memory, name, args, role, ctx)
       local refusal=required_workspace_error(memory,ctx,batch.base,{path=plan.path})
         or required_workspace_error(memory,ctx,batch.base,{path=target_identity(plan.path)})
       if refusal then return refusal end
-      return file_tools.apply(plan,record)
+      local result=file_tools.apply(plan,record)
+      if result.applied then result.graph_index=graph_hint(memory,ctx,result.path) end
+      return result
     end,target_identity,ctx.steering_admit,file_tools.check)
   end
   if name=='integrate' then return dofile('lua/core/integrate.lua').run(memory,ctx) end
@@ -1023,17 +1071,20 @@ function M.dispatch(memory, name, args, role, ctx)
       before = (host.path_kind and host.path_kind(path) == "file") and false or ""
     end
     local ok = host.write_file and host.write_file(path, args.content or "")
+    local notification=ok and graph_hint(memory,ctx,path) or nil
     -- Record what changed while the previous text is still in hand: this is what the diff
     -- topic shows and what its undo replays. A failed write records nothing.
     if ok and ctx and ctx.changes then
       changeset.record(ctx.changes, path, before, args.content or "")
     end
-    return { ok = ok and true or false, path = path, error=not ok and "write_failed" or nil }
+    return { ok = ok and true or false, path = path, error=not ok and "write_failed" or nil, graph_index=notification }
   elseif name == "edit" then
     args.path = resolve_path(memory, ctx, args.path)
-    return file_tools.edit(args,ctx.changes and function(path,before,after)
+    local result=file_tools.edit(args,ctx.changes and function(path,before,after)
       changeset.record(ctx.changes,path,before,after)
     end or nil)
+    if result.applied then result.graph_index=graph_hint(memory,ctx,result.path) end
+    return result
   elseif name == "ls" then
     -- Native listing: `ls -la` does not exist on Windows, and the description
     -- promises portability.
@@ -1089,31 +1140,33 @@ function M.dispatch(memory, name, args, role, ctx)
     elseif action == "audit_feedback" then
       return patch_audit.feedback(args.run_id,args.outcome,args.commit,ctx)
     end
+    if action=='symbol_source_many' then return graph_sources(memory,args,ctx) end
     if not graph.available() then return { error = "graph_unavailable" } end
-    local result, err
-    if action == "search_symbols" then result, err = graph.search_symbols(args.name,
+    local result, err, diagnostic
+    if action == "search_symbols" then result, err, diagnostic = graph.search_symbols(args.name,
       { root=root, limit = args.limit, prefer_implementations = args.prefer_implementations })
-    elseif action == "symbol_source" then result, err = graph.symbol_source({
+    elseif action == "symbol_source" then result, err, diagnostic = graph.symbol_source({
       path=args.path,name=args.name,line=args.line,kind=args.kind},
-      {root=root,byte_offset=args.byte_offset,max_bytes=args.max_bytes})
-    elseif action == "overview" then result, err = graph.overview({root=root,aspects=args.aspects,limit=args.limit,max_bytes=args.max_bytes})
+      {root=root,source_version=args.source_version,byte_offset=args.byte_offset,max_bytes=args.max_bytes})
+    elseif action == "overview" then result, err, diagnostic = graph.overview({root=root,aspects=args.aspects,limit=args.limit,max_bytes=args.max_bytes})
     elseif action == "impact" then
       local patch, patch_err
       local source=args.source or "git"
       if source=="native" then patch,patch_err=patch_audit.native_changes(ctx.changes)
       else patch,patch_err=patch_audit.git_changes(root) end
       if not patch then return {error=patch_err or "impact_patch_unavailable",source=source} end
-      result,err=graph.impact(patch,{root=root,direction=args.direction,depth=args.depth,limit=args.limit,
+      result,err,diagnostic=graph.impact(patch,{root=root,direction=args.direction,depth=args.depth,limit=args.limit,
         offset=args.offset,cursor=args.cursor,max_bytes=args.max_bytes})
       if result then result.source=source; result.patch_fingerprint=patch.fingerprint end
-    elseif action == "explain" then result, err = graph.explain(args.name,{root=root})
-    elseif action == "query" then result, err = graph.query(args.name, { root=root,limit = args.limit })
-    elseif action == "path" then result, err = graph.path(args.from, args.to,{root=root})
-    elseif action == "caps" then result, err = graph.caps({root=root})
-    elseif action == "stats" then result, err = graph.stats({root=root})
-    elseif action == "index" then result, err = graph.index({ root=root,force = args.force })
+    elseif action == "explain" then result, err, diagnostic = graph.explain(args.name,{root=root})
+    elseif action == "query" then result, err, diagnostic = graph.query(args.name, { root=root,limit = args.limit })
+    elseif action == "path" then result, err, diagnostic = graph.path(args.from, args.to,{root=root})
+    elseif action == "caps" then result, err, diagnostic = graph.caps({root=root})
+    elseif action == "stats" then result, err, diagnostic = graph.stats({root=root})
+    elseif action == "index" then result, err, diagnostic = graph.index({ root=root,force = args.force })
     else return { error = "unknown_graph_action:" .. tostring(action) } end
     if not result then
+      if diagnostic and diagnostic.error then return diagnostic end
       if err=='graph_refresh_required' then return {error=err,refresh_required=true,indexed=false,
         next='Use read/grep now, or explicitly run graph action=index for this cwd; reads never rebuild.'} end
       return {error=err or 'graph_error'}

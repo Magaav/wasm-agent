@@ -20,7 +20,8 @@ pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + S
 // `graph_sources` record of the exact bytes a generation was built from. A stamp written by either
 // binary must therefore be re-parsed rather than trusted, and keeping either value would leave the
 // other side's edges in place, which is the failure this constant exists to prevent.
-const EXTRACT_VERSION: &str = "6";
+pub(crate) const EXTRACT_VERSION: &str = "9";
+pub(crate) fn sha256(bytes:&[u8])->String{ring::digest::digest(&ring::digest::SHA256,bytes).as_ref().iter().map(|b|format!("{b:02x}")).collect()}
 
 pub struct Store {
     pub(crate) conn: Connection,
@@ -83,6 +84,7 @@ pub struct Stats {
 
 #[derive(Debug, Default)]
 pub struct IndexReport {
+    pub re_resolved: usize,
     pub indexed: usize,
     pub unchanged: usize,
     pub removed: usize,
@@ -92,13 +94,28 @@ pub struct IndexReport {
     pub unresolved: usize,
 }
 
+fn graph_connection(path:&Path,flags:rusqlite::OpenFlags)->Result<Connection>{
+    // Root-isolated digest caches can exceed MAX_PATH even when the source root does not.
+    // Keep the exact SQLite flags/locking; never select the no-lock VFS or silently fall back.
+    #[cfg(windows)] {
+        // SQLite's long-path VFS raises its buffer ceiling; Win32 still needs the
+        // extended absolute filename (including WAL/SHM siblings) for CreateFileW.
+        let native=if path.exists(){path.canonicalize()?}else{
+            let parent=path.parent().filter(|p|!p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+            parent.canonicalize()?.join(path.file_name().ok_or("graph_db_filename_required")?)
+        };
+        Ok(Connection::open_with_flags_and_vfs(native,flags,"win32-longpath")?)
+    }
+    #[cfg(not(windows))] {Ok(Connection::open_with_flags(path,flags)?)}
+}
+
 impl Store {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        let conn = Connection::open(path)?;
+        let conn = graph_connection(path, rusqlite::OpenFlags::default())?;
         conn.busy_timeout(std::time::Duration::from_secs(10))?;
         let _ = conn.pragma_update(None, "journal_mode", "WAL");
         let store = Self { conn };
@@ -109,7 +126,7 @@ impl Store {
     /// Open an existing graph without creating or migrating it. A reader never takes the write
     /// lock, so the node can query while the watcher reindexes.
     pub fn open_readonly(path: impl AsRef<Path>) -> Result<Self> {
-        let conn = Connection::open_with_flags(
+        let conn = graph_connection(
             path.as_ref(),
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )?;
@@ -168,7 +185,7 @@ impl Store {
             let Some(source) = sources.get(&path) else {
                 return Ok(false);
             };
-            if hash != format!("{EXTRACT_VERSION}:{}", fnv1a(source)) {
+            if hash != format!("{EXTRACT_VERSION}:{}", sha256(source)) {
                 return Ok(false);
             }
             file_count += 1;
@@ -180,7 +197,7 @@ impl Store {
             let rel = relative(root, &abs);
             // The same files the indexer skips are skipped here, or a skipped file would read as "stale"
             // on every query and force a re-index that skips it again.
-            let Ok(source) = std::fs::read(&abs) else { continue };
+            let source = std::fs::read(&abs)?;
             if std::str::from_utf8(&source).is_err() {
                 continue;
             }
@@ -233,6 +250,13 @@ impl Store {
             "confidence",
             "INTEGER NOT NULL DEFAULT 0",
         )?;
+        ensure_column(&self.conn,"nodes","lookup_name","TEXT NOT NULL DEFAULT ''")?;
+        self.conn.execute_batch("CREATE INDEX IF NOT EXISTS idx_nodes_lookup ON nodes(lookup_name);CREATE INDEX IF NOT EXISTS idx_nodes_path_lookup ON nodes(path,lookup_name);CREATE INDEX IF NOT EXISTS idx_imports_alias_path ON imports(alias,path);")?;
+        ensure_column(&self.conn,"nodes","start_byte","INTEGER NOT NULL DEFAULT 0")?;
+        ensure_column(&self.conn,"nodes","end_byte","INTEGER NOT NULL DEFAULT 0")?;
+        ensure_column(&self.conn,"edges","lookup_name","TEXT NOT NULL DEFAULT ''")?;
+        ensure_column(&self.conn,"edges","receiver","TEXT NOT NULL DEFAULT ''")?;
+        self.conn.execute_batch("CREATE INDEX IF NOT EXISTS idx_edges_lookup ON edges(lookup_name);CREATE INDEX IF NOT EXISTS idx_edges_receiver ON edges(receiver);CREATE TABLE IF NOT EXISTS latent_mentions(src INTEGER,target TEXT,path TEXT,line INTEGER,col INTEGER,lookup_name TEXT);CREATE INDEX IF NOT EXISTS idx_latent_lookup ON latent_mentions(lookup_name);")?;
         Ok(())
     }
 
@@ -243,101 +267,12 @@ impl Store {
     /// `host.graph_index` from interleaving, and stops two deferred writers deadlocking on the
     /// upgrade. Readers are unaffected (WAL): they keep the previous snapshot until this commits.
     pub fn index(&mut self, root: &Path, force: bool) -> Result<IndexReport> {
-        self.conn.execute_batch("BEGIN IMMEDIATE")?;
-        match self.index_inner(root, force).and_then(|report| {
-            if self.verify_snapshot(root)? {
-                Ok(report)
-            } else {
-                Err("graph_source_changed_during_index".into())
-            }
-        }) {
-            Ok(report) => {
-                self.conn.execute_batch("COMMIT")?;
-                Ok(report)
-            }
-            Err(error) => {
-                let _ = self.conn.execute_batch("ROLLBACK");
-                Err(error)
-            }
-        }
+        let manifest=crate::incremental::Manifest::capture(root,&mut |_,_|{})?;
+        let revision=self.committed_revision()?.saturating_add(1);
+        self.index_manifest(&manifest,force,revision,&mut |_,_|{})
     }
 
-    fn index_inner(&self, root: &Path, force: bool) -> Result<IndexReport> {
-        let mut report = IndexReport::default();
-        // A set: `Vec::contains` in the removal pass below made a re-index quadratic in the repo size.
-        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-        let files = collect_files(root)?;
-        for abs in files {
-            let rel = relative(root, &abs);
-            let lang = match extract::language_for(&rel) {
-                Some(l) => l,
-                None => continue,
-            };
-            // One file that is not UTF-8 (or vanished mid-scan) is skipped, not fatal: `?` here aborted
-            // the whole index, and every graph read then failed with graph_source_unstable.
-            let source = match std::fs::read_to_string(&abs) {
-                Ok(source) => source,
-                Err(error) => {
-                    eprintln!("[graph] skipped {rel}: {error}");
-                    continue;
-                }
-            };
-            let meta = std::fs::metadata(&abs).ok();
-            let mtime = meta
-                .as_ref()
-                .and_then(|m| m.modified().ok())
-                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-                .map(|d| d.as_secs() as i64)
-                .unwrap_or(0);
-            let size = source.len() as i64;
-            let hash = format!("{EXTRACT_VERSION}:{}", fnv1a(source.as_bytes()));
-            seen.insert(rel.clone());
-
-            if !force {
-                if let Some((old_hash, old_mtime, old_size, old_source)) = self.file_stamp(&rel)? {
-                    if old_hash == hash
-                        && old_mtime == mtime
-                        && old_size == size
-                        && old_source == source.as_bytes()
-                    {
-                        report.unchanged += 1;
-                        continue;
-                    }
-                }
-            }
-
-            self.remove_file(&rel)?;
-            let ex = extract::extract(&rel, lang, &source);
-            self.insert_extract(&rel, lang, &ex, hash, mtime, size, source.as_bytes())?;
-            report.indexed += 1;
-            report.nodes += ex.nodes.len();
-            report.edges += ex.edges.len();
-        }
-
-        // Anything recorded but no longer present is removed.
-        for rel in self.all_file_paths()? {
-            if !seen.contains(&rel) {
-                self.remove_file(&rel)?;
-                report.removed += 1;
-            }
-        }
-
-        let (resolved, unresolved) = self.resolve()?;
-        let generation = self.compute_generation()?;
-        self.conn.execute(
-            "INSERT OR REPLACE INTO graph_meta(key,value) VALUES('root',?1)",
-            params![root.canonicalize()?.to_string_lossy().as_ref()],
-        )?;
-        self.conn.execute(
-            "INSERT OR REPLACE INTO graph_meta(key,value) VALUES('generation',?1)",
-            params![generation],
-        )?;
-        report.resolved = resolved;
-        report.unresolved = unresolved;
-        Ok(report)
-    }
-
-    fn compute_generation(&self) -> Result<String> {
+    pub(crate) fn compute_generation(&self) -> Result<String> {
         let mut stmt = self
             .conn
             .prepare("SELECT path,hash FROM files ORDER BY path")?;
@@ -352,7 +287,7 @@ impl Store {
             bytes.extend_from_slice(hash.as_bytes());
             bytes.push(b'\n');
         }
-        Ok(fnv1a(&bytes))
+        Ok(sha256(&bytes))
     }
 
     pub fn generation(&self) -> Result<String> {
@@ -367,7 +302,7 @@ impl Store {
             .unwrap_or_else(|| "unknown".to_string()))
     }
 
-    fn file_stamp(&self, path: &str) -> Result<Option<(String, i64, i64, Vec<u8>)>> {
+    pub(crate) fn file_stamp(&self, path: &str) -> Result<Option<(String, i64, i64, Vec<u8>)>> {
         let row = self
             .conn
             .query_row(
@@ -386,19 +321,20 @@ impl Store {
         Ok(row)
     }
 
-    fn all_file_paths(&self) -> Result<Vec<String>> {
+    pub(crate) fn all_file_paths(&self) -> Result<Vec<String>> {
         let mut stmt = self.conn.prepare("SELECT path FROM files")?;
         let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
 
-    fn remove_file(&self, path: &str) -> Result<()> {
+    pub(crate) fn remove_file(&self, path: &str) -> Result<()> {
         // Incoming edges to this file's nodes lose their target; they are re-resolved at the end.
         self.conn.execute(
             "UPDATE edges SET dst=NULL,resolution='unresolved',confidence=0
              WHERE dst IN (SELECT id FROM nodes WHERE path=?1)",
             params![path],
         )?;
+        self.conn.execute("DELETE FROM latent_mentions WHERE path=?1",params![path])?;
         self.conn
             .execute("DELETE FROM nodes WHERE path=?1", params![path])?;
         self.conn
@@ -412,7 +348,7 @@ impl Store {
         Ok(())
     }
 
-    fn insert_extract(
+    pub(crate) fn insert_extract(
         &self,
         path: &str,
         lang: &str,
@@ -425,7 +361,7 @@ impl Store {
         let now = now_secs();
         {
             let mut insert_node = self.conn.prepare(
-                "INSERT INTO nodes(kind,name,path,line,col,lang,detail) VALUES(?1,?2,?3,?4,?5,?6,?7)",
+                "INSERT INTO nodes(kind,name,path,line,col,lang,detail,start_byte,end_byte,lookup_name) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
             )?;
             for n in &ex.nodes {
                 insert_node.execute(params![
@@ -435,7 +371,10 @@ impl Store {
                     n.line as i64,
                     n.col as i64,
                     lang,
-                    n.detail
+                    n.detail,
+                    n.start_byte as i64,
+                    n.end_byte as i64,
+                    extract::simple_name(&n.name)
                 ])?;
             }
             let rowids: Vec<i64> = {
@@ -446,8 +385,8 @@ impl Store {
                 rows.collect::<std::result::Result<_, _>>()?
             };
             let mut insert_edge = self.conn.prepare(
-                "INSERT INTO edges(src,kind,target,path,line,col,dst,resolution,confidence)
-                 VALUES(?1,?2,?3,?4,?5,?6,NULL,'unresolved',0)",
+                "INSERT INTO edges(src,kind,target,path,line,col,dst,resolution,confidence,lookup_name,receiver)
+                 VALUES(?1,?2,?3,?4,?5,?6,NULL,'unresolved',0,?7,?8)",
             )?;
             for e in &ex.edges {
                 let src = rowids
@@ -460,7 +399,9 @@ impl Store {
                     e.target,
                     path,
                     e.line as i64,
-                    e.col as i64
+                    e.col as i64,
+                    extract::simple_name(&e.target),
+                    e.target.split_once('.').map(|v|v.0).unwrap_or("")
                 ])?;
             }
             let mut insert_import = self
@@ -483,22 +424,24 @@ impl Store {
 
     /// Turn every unresolved edge's target name into a node id. Same-file beats same-directory
     /// beats globally-unique. A `host.*` reference with no definition becomes a capability node.
-    fn resolve(&self) -> Result<(usize, usize)> {
+    pub(crate) fn resolve_affected(&self, progress:&mut impl FnMut(&str,usize)) -> Result<(usize, usize, usize)> {
         let pending: Vec<(i64, String, String, String)> = {
             let mut stmt = self
                 .conn
-                .prepare("SELECT id, target, path, kind FROM edges WHERE dst IS NULL")?;
+                .prepare("SELECT id, target, path, kind FROM edges WHERE id IN(SELECT id FROM affected_edges)")?;
             let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?;
             rows.collect::<std::result::Result<_, _>>()?
         };
-        let mut resolved = 0usize;
-        for (edge_id, target, path, kind) in &pending {
+        let mut memo:std::collections::HashMap<(&str,&str,&str),Option<Resolved>>=std::collections::HashMap::new();
+        for (position,(edge_id, target, path, kind)) in pending.iter().enumerate() {
             let simple = extract::simple_name(target);
             // A dotted call is `receiver.member`, and the receiver decides the resolution
             // (`resolve_dotted`). The one thing it must never do is guess a bare local that
             // shares `member`'s name: `provider.budget()` resolved to a local `budget` that way,
             // and the edge read as *resolved* while pointing at the wrong symbol.
-            let hit = if kind == "capability" && extract::is_capability(target) {
+            let key=(target.as_str(),path.as_str(),kind.as_str());
+            let hit = if let Some(hit)=memo.get(&key){hit.clone()}else{
+              let hit=if kind == "capability" && extract::is_capability(target) {
                 Some(Resolved {
                     id: ensure_capability(&self.conn, target)?,
                     strategy: "capability_exact",
@@ -508,25 +451,30 @@ impl Store {
                 resolve_dotted(&self.conn, target, simple, path)?
             } else {
                 pick_candidate(&self.conn, target, simple, path)?
+              };
+              memo.insert(key,hit.clone());hit
             };
             if let Some(hit) = hit {
                 self.conn.execute(
                     "UPDATE edges SET dst=?1,resolution=?2,confidence=?3 WHERE id=?4",
                     params![hit.id, hit.strategy, hit.confidence, edge_id],
                 )?;
-                resolved += 1;
             } else if kind == "mentions" {
                 // A doc mention that names no real definition is noise; keep the graph clean.
+                self.conn.execute("INSERT INTO latent_mentions SELECT src,target,path,line,col,lookup_name FROM edges WHERE id=?1",params![edge_id])?;
                 self.conn
                     .execute("DELETE FROM edges WHERE id=?1", params![edge_id])?;
             }
+            if position%128==0 {progress("resolving",position+1);}
         }
         let unresolved: i64 =
             self.conn
                 .query_row("SELECT COUNT(*) FROM edges WHERE dst IS NULL", [], |r| {
                     r.get(0)
                 })?;
-        Ok((resolved, unresolved as usize))
+        let total:i64=self.conn.query_row("SELECT COUNT(*) FROM edges WHERE dst IS NOT NULL",[],|r|r.get(0))?;
+        progress("resolved",pending.len());
+        Ok((total as usize, unresolved as usize, pending.len()))
     }
 
     pub fn explain(&self, name: &str) -> Result<Vec<(NodeRow, Vec<EdgeRow>, Vec<EdgeRow>)>> {
@@ -905,19 +853,12 @@ impl Store {
             |row| Ok((row.get(0)?, row.get(1)?)),
         ).optional()?.ok_or("symbol_path_not_found")?;
         let source = std::str::from_utf8(&bytes).map_err(|_| "graph_source_not_utf8")?;
-        let extracted = extract::extract(path, &lang, source);
-        let symbol = extracted
-            .nodes
-            .into_iter()
-            .find(|node| {
-                node.name == name
-                    && node.line as i64 == line
-                    && kind.map_or(true, |want| node.kind == want)
-            })
-            .ok_or("symbol_not_found_in_verified_source")?;
-        let exact = source
-            .get(symbol.start_byte..symbol.end_byte)
-            .ok_or("symbol_source_range_invalid")?;
+        let mut stmt=self.conn.prepare("SELECT kind,name,line,start_byte,end_byte FROM nodes WHERE path=?1 AND name=?2 AND line=?3 AND (?4='' OR kind=?4)")?;
+        let matches=stmt.query_map(params![path,name,line,kind.unwrap_or("")],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,i64>(2)?,r.get::<_,i64>(3)?,r.get::<_,i64>(4)?)))?.collect::<std::result::Result<Vec<_>,_>>()?;
+        if matches.is_empty(){return Err("symbol_not_found_in_verified_source".into());}
+        if matches.len()!=1{return Err("symbol_selector_ambiguous".into());}
+        let (symbol_kind,symbol_name,symbol_line,start,end)=&matches[0];
+        let exact = source.get(*start as usize..*end as usize).ok_or("symbol_source_range_invalid")?;
         if byte_offset > exact.len() || !exact.is_char_boundary(byte_offset) {
             return Err("symbol_source_offset_invalid".into());
         }
@@ -928,8 +869,9 @@ impl Store {
         let chunk = &exact[byte_offset..end];
         let eof = end == exact.len();
         Ok(json!({
-            "symbol": {"kind": symbol.kind, "name": symbol.name, "path": path,
-                "line": symbol.line, "language": lang},
+            "symbol": {"kind": symbol_kind, "name": symbol_name, "path": path,
+                "line": symbol_line, "language": lang},
+            "source_version": sha256(&bytes),
             "source": chunk,
             "bytes": exact.len(),
             "byte_offset": byte_offset,
@@ -1189,8 +1131,10 @@ impl Store {
         Ok(Value::Array(
             self.search_symbols_with_preference(text, limit, prefer_implementations)?
                 .into_iter()
-                .map(|hit| {
-                    json!({
+                .map(|hit| -> Result<Value> {
+                    let stamp:String=self.conn.query_row("SELECT hash FROM files WHERE path=?1",params![hit.node.path],|r|r.get(0))?;
+                    Ok(json!({
+                        "source_version":stamp.split_once(':').map(|p|p.1),
                         "kind": hit.node.kind,
                         "name": hit.node.name,
                         "path": hit.node.path,
@@ -1204,9 +1148,9 @@ impl Store {
                         "unmatched_terms": hit.unmatched_terms,
                         "unmatched_definition_terms": hit.unmatched_definition_terms,
                         "score_breakdown": hit.score_breakdown,
-                    })
+                    }))
                 })
-                .collect(),
+                .collect::<Result<Vec<_>>>()?,
         ))
     }
 }
@@ -1302,7 +1246,7 @@ fn pick_candidate(
     for name in [target, simple] {
         let same_dir: Option<i64> = conn
             .query_row(
-                "SELECT id FROM nodes WHERE name=?1 AND path LIKE ?2 ORDER BY line LIMIT 1",
+                "SELECT id FROM nodes WHERE name=?1 AND path LIKE ?2 ORDER BY line,path LIMIT 1",
                 params![name, format!("{dir}/%")],
                 |r| r.get(0),
             )
@@ -1387,7 +1331,7 @@ fn resolve_dotted(
 fn scoped_member(conn: &Connection, simple: &str, path: &str) -> Result<Option<i64>> {
     let hit = conn
         .query_row(
-            "SELECT id FROM nodes WHERE path=?1 AND (name=?2 OR name LIKE ?3 OR name LIKE ?4)
+            "SELECT id FROM nodes WHERE path=?1 AND lookup_name=?2 AND (name=?2 OR name LIKE ?3 OR name LIKE ?4)
              ORDER BY (kind='fn' OR kind='method') DESC, (name=?2) DESC, line LIMIT 1",
             params![path, simple, format!("%.{simple}"), format!("%:{simple}")],
             |r| r.get(0),
@@ -1428,7 +1372,7 @@ fn resolve_alias(conn: &Connection, target: &str, edge_path: &str) -> Result<Opt
         .optional()?
         .or_else(|| {
             conn.query_row(
-                "SELECT module FROM imports WHERE alias=?1 LIMIT 1",
+                "SELECT module FROM imports WHERE alias=?1 ORDER BY path LIMIT 1",
                 params![alias],
                 |r| r.get(0),
             )
@@ -1460,7 +1404,7 @@ fn resolve_alias(conn: &Connection, target: &str, edge_path: &str) -> Result<Opt
     // happens to share the name. Without this the edge resolved - to the wrong symbol.
     let hit: Option<i64> = conn
         .query_row(
-            "SELECT id FROM nodes WHERE (path LIKE ?1 OR path LIKE ?2 OR path LIKE ?3)
+            "SELECT id FROM nodes WHERE lookup_name=?4 AND (path LIKE ?1 OR path LIKE ?2 OR path LIKE ?3)
                AND (name=?4 OR name LIKE ?5)
              ORDER BY (name LIKE ?5) DESC, (kind='fn' OR kind='method') DESC, (name=?4) DESC, line LIMIT 1",
             params![by_path, by_lua, by_base, simple, dot_suffix],
@@ -1566,19 +1510,26 @@ impl Stats {
 }
 
 /// Recursively collect indexable files, skipping build artifacts and VCS internals.
-fn collect_files(root: &Path) -> Result<Vec<PathBuf>> {
+pub(crate) fn collect_files(root: &Path) -> Result<Vec<PathBuf>> {
+    collect_files_progress(root,None,&mut |_,_|{})
+}
+pub(crate) fn collect_files_progress(root:&Path,deadline:Option<std::time::Instant>,progress:&mut impl FnMut(&str,usize))->Result<Vec<PathBuf>>{
     let mut out = Vec::new();
+    let mut walked=0usize;
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
+        if deadline.map_or(false,|end|std::time::Instant::now()>=end){return Err("graph_capture_timeout".into());}
         let entries = std::fs::read_dir(&dir)?;
+        walked+=1;progress("walking",walked);
         for entry in entries {
+            if deadline.map_or(false,|end|std::time::Instant::now()>=end){return Err("graph_capture_timeout".into());}
             let entry = entry?;
             let path = entry.path();
             let name = entry.file_name().to_string_lossy().to_string();
             // The entry's own type, not the target's: following symlinks let a link loop walk forever, and
             // a dangling link made metadata() fail and abort the whole collection. Links are skipped, as
             // file_search does.
-            let Ok(kind) = entry.file_type() else { continue };
+            let kind = entry.file_type()?;
             if kind.is_symlink() {
                 continue;
             }
@@ -1604,7 +1555,7 @@ fn collect_files(root: &Path) -> Result<Vec<PathBuf>> {
     Ok(out)
 }
 
-fn relative(root: &Path, path: &Path) -> String {
+pub(crate) fn relative(root: &Path, path: &Path) -> String {
     path.strip_prefix(root)
         .unwrap_or(path)
         .to_string_lossy()

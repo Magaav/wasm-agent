@@ -16,7 +16,7 @@ pub struct DefNode {
     pub line: usize,
     pub col: usize,
     /// Exact UTF-8 byte range of the syntax node in the indexed source snapshot.
-    /// Ranges are not persisted: source retrieval reparses only the selected file.
+    /// Ranges are persisted atomically with source, so retrieval does not reparse.
     pub start_byte: usize,
     pub end_byte: usize,
     pub detail: Option<String>,
@@ -91,12 +91,17 @@ pub fn parser_for(lang: &str) -> Option<Parser> {
 
 /// Extract every definition and reference from one source file.
 pub fn extract(path: &str, lang: &str, source: &str) -> Extract {
+    extract_progress(path,lang,source,&mut |_,_|{}).expect("graph extraction failed")
+}
+pub fn extract_progress(path:&str,lang:&str,source:&str,progress:&mut impl FnMut(&str,usize))->Result<Extract,String>{
     let mut ctx = Ctx {
         src: source,
         nodes: Vec::new(),
         edges: Vec::new(),
         imports: Vec::new(),
         scope: Vec::new(),
+        visited:0,
+        progress,
         lang,
     };
     // Node 0 is always the file itself, so file-level refs (imports, doc mentions) have a source.
@@ -113,32 +118,39 @@ pub fn extract(path: &str, lang: &str, source: &str) -> Extract {
 
     match lang {
         "rust" | "lua" | "bash" | "powershell" | "javascript" | "typescript" => {
-            if let Some(mut parser) = parser_for(lang) {
-                if let Some(tree) = parser.parse(source, None) {
-                    walk(&mut ctx, tree.root_node());
-                }
-            }
+            let mut parser=parser_for(lang).ok_or_else(||format!("graph_parser_unavailable:{lang}"))?;
+            let timeout=std::env::var("WA_GRAPH_PARSE_TIMEOUT_MS").ok().map(|value|value.parse::<u64>().ok().filter(|ms|*ms>0&&*ms<=120_000).ok_or("invalid_graph_parse_timeout_ms")).transpose()?.unwrap_or(30_000);
+            parser.set_timeout_micros(timeout*1000);
+            let mut highwater=0;
+            let tree=parser.parse_with(&mut |offset,_|{
+                let end=(offset+8192).min(source.len());
+                if end>highwater+16384{highwater=end;(ctx.progress)("parse_input_bytes",end);}
+                &source.as_bytes()[offset.min(source.len())..end]
+            },None).ok_or_else(||format!("graph_parse_failed_or_timeout:{path}"))?;
+            walk(&mut ctx,tree.root_node());
         }
         "markdown" => markdown_mentions(&mut ctx, source),
-        _ => {}
+        _ => return Err(format!("graph_language_unsupported:{lang}")),
     }
-    Extract {
+    Ok(Extract {
         nodes: ctx.nodes,
         edges: ctx.edges,
         imports: ctx.imports,
-    }
+    })
 }
 
-struct Ctx<'a> {
+struct Ctx<'a,'p> {
     src: &'a str,
     nodes: Vec<DefNode>,
     edges: Vec<RefEdge>,
     imports: Vec<ImportAlias>,
     scope: Vec<usize>,
+    visited:usize,
+    progress:&'p mut dyn FnMut(&str,usize),
     lang: &'a str,
 }
 
-impl<'a> Ctx<'a> {
+impl<'a,'p> Ctx<'a,'p> {
     fn cur(&self) -> usize {
         *self.scope.last().unwrap_or(&0)
     }
@@ -188,6 +200,7 @@ impl<'a> Ctx<'a> {
 }
 
 fn walk(ctx: &mut Ctx, node: Node) {
+    ctx.visited+=1;if ctx.visited%512==0{(ctx.progress)("extracting_nodes",ctx.visited);}
     if ctx.lang == "rust" {
         if walk_rust(ctx, node) {
             return;

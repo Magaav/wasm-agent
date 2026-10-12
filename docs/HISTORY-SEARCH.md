@@ -53,6 +53,22 @@ Every referenced row is checked against the authorized session; a mixed batch
 with a missing/foreign row refuses atomically. Oversized bodies retain exact-row
 references. Inspect originals before treating excerpts as execution settlement.
 
+## Tool-call projection
+
+`session`/`session_many` and owned child-session inspection accept explicit
+`view:tool_calls`. It returns exact call IDs, names and raw arguments, tool-result
+content, phase/status/timing and full-original evidence references. Assistant
+prose, encrypted reasoning, traces, images and accounting are explicitly omitted;
+this is a projection, not a rewritten transcript or sufficient general dialogue
+context. Full remains the default and full originals remain accessible.
+
+SQL selects only projection columns, so an 84 KiB encrypted-reasoning field cannot
+crowd out a 1 KiB call list or consume parsing/I/O just to discard it. Exact
+projection byte paging is labelled `tool_calls_message_json`; its version hashes
+that projection, never masquerades as the full-original hash. Ownership and all
+batch/cursor checks remain unchanged. Oversized arguments/results still have
+explicit continuations; no argument is silently clipped.
+
 ## Performance and risk
 
 The SQL candidate phase selects identities/ranks, not `t.*`; snippet/body loading

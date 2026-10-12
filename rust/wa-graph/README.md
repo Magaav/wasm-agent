@@ -67,9 +67,15 @@ clean `host.<ident>`, and the Rust path never emits a capability edge. That make
   (`memory.append_turn` → `M.append_turn`), and creates a capability node for `host.*`. A whole
   index run is one `BEGIN IMMEDIATE` transaction: a reader sees the old graph or the new one, never
   a half-indexed file, and the watcher and a manual `index` cannot interleave.
-- **`watch.rs`** — a `notify` watcher (debounced) refreshes the index. It registers before
-  its initial scan and logs errors. Host queries independently verify all in-scope source
-  bytes and rebuild or fail closed, so missed events do not silently serve old results.
+- **`incremental.rs`** — captured SHA-256/content manifests; changed-file parsing
+  precedes atomic source/range/relationship/revision publication. Affected dependency
+  keys include unchanged callers and latent mentions; literal node-name indices and
+  pass-local memoization avoid repeated suffix scans without merging call sites.
+- **`coordinator.rs` / `watch.rs`** — one deterministic worker and one OS backend,
+  root-isolated queues, bounded coalescing and frozen admission revisions. Native
+  edits and events enqueue; content reconciliation covers missed events. Queries
+  wait with actual-progress heartbeats and explicit failures, then pin read-only WAL
+  snapshots. Windows long cache filenames preserve locking/read-only semantics.
 - **`main.rs`** — the CLI above, with `--json` on every read verb.
 
 ## Node integration
@@ -95,12 +101,14 @@ Model source actions use the session worktree or explicit `cwd`; Git impact/audi
 use one actual Git root for patch and index. Other roots have independent,
 on-demand `<configured-db-stem>.roots/<canonical-root-SHA256>.db` caches;
 required missing/failed workspace bindings never fall back to runtime source.
-Impact reports its root and binds cursors to it even for identical-source trees. Reads
-pin a read-only graph snapshot and verify source bytes; a stale query returns
-`graph_refresh_required` without rebuilding or taking the write lock. Indexing is
-an explicit incremental action unless `force:true` is chosen. This is source-snapshot consistency, not an atomic freeze of concurrent external
-writers or of code already loaded in a worker. See
-`docs/GRAPH.md` and `docs/HOST.md`.
+Impact reports its root and binds cursors to it even for identical-source trees.
+Queries reconcile content and freeze their required revision; automatic indexing
+publishes atomically, then reads pin a committed snapshot covering that revision.
+Explicit `force:true` remains a full rebuild. Definition source uses persisted
+ranges and optional file SHA-256 fences, not a selected-file reparse. Source batches
+share a root snapshot and ordered failures through one backend. This is captured
+source consistency, not a freeze of external writers or the loaded interpreter.
+See `docs/GRAPH.md` for limits, recovery and private benchmark evidence.
 
 ## Proven
 

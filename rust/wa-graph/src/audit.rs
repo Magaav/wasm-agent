@@ -486,7 +486,7 @@ impl Store {
             let cursor = if truncated {
                 json!(format!("{generation}.v2:{}:{}:{}:{}.{digest}", next[0], next[1], next[2], next[3]))
             } else { Value::Null };
-            json!({
+            let mut report=json!({
                 "root":canonical_root,"generation":generation,"freshness":"verified_snapshot",
                 "direction":direction,"depth":depth,"truncated":truncated,"next_cursor":cursor,
                 "changed_symbols":{"total":changed_total,"offset":offsets[1],"returned":selected[1].len(),
@@ -503,7 +503,9 @@ impl Store {
                         "rows":selected[3],"scope":unresolved["scope"]}},
                 "test_evidence":"static_test_links_only; execution_and_pass_status_unknown",
                 "scope":"resolved_static_edges_only_not_a_correctness_or_risk_score"
-            })
+            });
+            if let Some(snapshot)=request.get("_graph_snapshot"){report["graph_snapshot"]=snapshot.clone();}
+            report
         };
         let mut selected: [Vec<Value>; 4] = std::array::from_fn(|_| Vec::new());
         let mut output = build(&selected);

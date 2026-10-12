@@ -22,6 +22,12 @@ also exposes retrieval echoes, summaries and automatic notices. Echoes are copie
 not independent confirmation. `group_by:"message"` removes the two-hits-per-session
 presentation cap when investigating a particular thread.
 
+For inspecting executed tools, choose `session {view:"tool_calls", ...}` (also
+`session_many`/owned child sessions): exact calls/arguments and tool outcomes are
+selected without encrypted reasoning. It explicitly omits prose/diagnostics and
+retains full-original references. Use full for general context and diagnosis;
+projection byte versions belong to the selected encoding, not the original row.
+
 Read the exact hit and context using `session {session_id,around_seq:seq}`. Batch
 selected originals with `message_ids` within one authorized session. Follow exact
 row/artifact references for large output. Excerpts are original text, not the whole

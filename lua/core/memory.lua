@@ -1088,6 +1088,7 @@ end
 -- `limit` bounds the window and `after_seq` moves its start. To know whether rows
 -- were dropped, compare with M.message_count(session_id) - the tool that shows a session
 -- to the model says so in words, because a silent truncation is a memory bug.
+local TOOL_CALL_COLUMNS="id,seq,session_id,role,tool_call_id,tool_name,tool_calls,ok,ms,created_at,phase,CASE WHEN role='tool' THEN content ELSE NULL END AS content"
 function M.session_messages(session_id, opts)
   opts = opts or {}
   local limit = opts.limit or 200
@@ -1113,10 +1114,11 @@ function M.session_messages(session_id, opts)
       "ORDER BY seq DESC LIMIT ?) ORDER BY seq ASC"
     params = {session_id, limit}
   end
+  if opts.view=='tool_calls' then sql=sql:gsub('SELECT %*','SELECT '..TOOL_CALL_COLUMNS) end
   local rows = query(sql, params)
   for _, row in ipairs(rows) do
     row.tool_calls = json.decode(row.tool_calls)
-    row.trace = json.decode(row.trace)
+    if opts.view~='tool_calls' then row.trace = json.decode(row.trace) end
     if row.images then row.images = decode(row.images) end
     -- An older row has `{}` rather than a summary, and `{}` decodes to an empty table
     -- that is truthy in Lua - so turn it into nil here. Otherwise every turn written
@@ -1137,13 +1139,14 @@ end
 -- transcript, and what identifies that topic has to survive a reload, a compaction and a
 -- second reader. A sequence number would not - the window moves - and the id is what the
 -- journal already replicates, so a peer's turn resolves here too.
-function M.message(message_id)
+function M.message(message_id, opts)
   if not message_id or message_id == "" then return nil end
-  local rows = query("SELECT * FROM messages WHERE id=?", {message_id})
+  local columns=opts and opts.view=='tool_calls' and TOOL_CALL_COLUMNS or '*'
+  local rows = query("SELECT "..columns.." FROM messages WHERE id=?", {message_id})
   local row = rows[1]
   if not row then return nil end
   row.tool_calls = json.decode(row.tool_calls)
-  row.trace = json.decode(row.trace)
+  if not opts or opts.view~='tool_calls' then row.trace = json.decode(row.trace) end
   if row.images then row.images = decode(row.images) end
   row.changes = decode(row.changes)
   if type(row.changes) ~= "table" or row.changes.files == nil then row.changes = nil end
