@@ -22,7 +22,7 @@ These are two entry paths into one runtime:
 The fleet console serves these journeys. It is not the product's required first
 screen, and 32 workers are not a prerequisite for helping one customer.
 
-## Complete on-demand skill loading — 2026-10-12 (verified candidate; installation pending)
+## Complete on-demand skill loading — 2026-10-12 (installed and verified)
 
 Removed the loader's destructive12,000-byte prefix cap. The complete `SKILL.md`,
 including UTF-8 and trailing safety rules, now reaches dispatch; the real
@@ -36,10 +36,20 @@ The previous source and installed embedding causally fail at12,001 bytes.
 All14 retrieval regression runs passed in short private evidence paths; the
 long-path fixture failure is retained, not claimed as a general operation repair.
 Offline release build and retained hash postchecks passed. Self-review only;
-`gate_verified:false`, `release_verified:false`. Candidate
-`57e2910ad18f58a8039b2d8ca5ffee8d97bc86d912832fce909a9e795411db14` is not yet
-installed: inspected exact request-bound Sentinel proof remains pending.
-See `docs/SKILLS.md`; the `skill-content-proof` plan records the verified CLI.
+`gate_verified:false`, `release_verified:false`. Private candidate
+`57e2910ad18f58a8039b2d8ca5ffee8d97bc86d912832fce909a9e795411db14`
+remains distinct from the fresh installed generation. Merged/pushed runtime source
+`0aecb8fb1734861fb278113c9940d6529b5a4320` was installed through immutable
+Sentinel request `1791849047144703100-12164-00000000000000000000`.
+Actual request-bound verification at23:53 UTC:76 checks, failed0, skipped0, exit0;
+source/artifacts/scripts/skills/UI/listener/watcher identities match. Installed node
+`ca54906050d8f2078f19879979c09da812d84ea43f7581108ba71395f9ef380f`
+also passed59+59 private source/embedded checks and retained hash postchecks.
+The live `skill(git-orchestrator)` call returned the complete procedure with zero
+follow-up file reads, replacing the observed three-read workaround.
+Standing-authorized notes-to-self report confirmed as `3EB0D2BAA7357FF3081BAD`.
+This completion record is documentation only: no second installation, third-party
+message or replay. See `docs/SKILLS.md`; `skill-content-proof` records the verified CLI.
 
 ## History projection and automatic graph revisions — 2026-10-12 (installed and verified)
 
