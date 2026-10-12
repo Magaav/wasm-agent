@@ -32,37 +32,58 @@ evidence, not a risk score or a correctness certificate.
 |---|---|
 | database | runtime: `<home>/.wasm-agent/graph.db`; other roots: `<configured-db-stem>.roots/<SHA256-of-canonical-root>.db` |
 | indexed root | the session worktree, or explicit tool `cwd`; unbound sessions use the configured runtime root |
-| freshness | watcher refreshes runtime in the background; reads verify exact bytes before/after and return `graph_refresh_required` if missing/stale, never rebuild |
-| write path | one `BEGIN IMMEDIATE` transaction per index run — atomic, and it serializes writers |
-| read path | pinned read-only SQLite snapshot; no write lock, parse or resolution pass; stale reads explicitly refuse |
-| overrides | `WA_GRAPH_ROOT`, `WA_GRAPH_DB`; `WA_GRAPH_WATCH=0` disables the watcher |
+| freshness | native source mutations and OS events queue a shared worker; every query reconciles content and freezes its required revision |
+| write path | parsing precedes one `BEGIN IMMEDIATE` transaction publishing sources, symbols, relationships and committed revision together |
+| read path | bounded wait for the captured revision, then a pinned read-only SQLite snapshot; no silent stale fallback |
+| overrides | `WA_GRAPH_ROOT`, `WA_GRAPH_DB`; `WA_GRAPH_WATCH=0` disables OS hints, not mutation notifications or admission reconciliation; `WA_GRAPH_PARSE_TIMEOUT_MS` bounds each syntax parse (default30,000;1–120,000) |
 
-The watcher registers before its initial index, **off the accept path**. A query
-before that index finishes returns `graph_refresh_required`; it never treats an
-unbuilt graph as an empty answer. Workspace caches need an explicit `graph
-{action:"index",cwd:"<root>"}` when graph evidence is worthwhile. Use `read`/`grep`
-otherwise. No navigation or audit read starts a hidden full rebuild. Reindexing in the watcher is incremental by
-content hash. Query-time verification compares the complete target area to the
-exact bytes stored with the graph, so a missed event cannot silently return an
-old answer. Verification failure returns an error; use `read`/`grep`. Explicit
-index remains incremental by source bytes unless `force:true` is deliberately selected.
-It can still be expensive (resolution is repository-wide); this change removes it
-from the read critical path, not a universal graph-query latency guarantee.
+One process-wide deterministic worker and one OS event backend serve root-isolated
+queues. No inference worker, Engine job or recurring wake is introduced. Events,
+including overflow, are hints: admission and startup reconcile supported source
+bytes, so additions/deletions and same-size/restored-mtime changes are detected
+without relying on Git or timestamps. Roots register before capture; up to32 live
+cache entries are retained, with only idle derived entries evicted. Cache DBs remain
+on disk. Excluded/build directories and unrelated scratch writes do not queue work.
 
-The whole reindex is one `BEGIN IMMEDIATE` transaction. A reader sees the old
-graph or the new one, never a half-indexed file, and the watcher and a manual
-`host.graph_index` cannot interleave. Readers are unaffected (WAL): they keep the
-previous snapshot until the index commits.
+Successful `write`, `edit`, `write_many` and `edit_many` applications notify the
+selected source root. Per-file notifications also cover partial batches; failed
+preflight has no indexing effect. A75ms coalescing window replaces pending captures
+with the latest root revision, without indefinitely waiting for a quiet writer.
+Only changed source files are parsed. Dependency keys select affected relationships,
+including unchanged callers, previous unresolved calls, import aliases and latent
+doc mentions. Indexed literal name lookups and pass-local resolution memoization
+avoid repository-wide suffix scans without collapsing distinct call sites.
 
-This is a verified *source snapshot*, not a claim that a live filesystem or
-running Lua interpreter is frozen. An uncoordinated writer can change a file
-immediately after verification; absolute real-time guarantees require immutable
-revisions or coordinated writes. The graph still resolves syntax by name, so
-dynamic calls remain uncertain even when its source snapshot is current.
+Queries capture one required revision and do not chase later changes. They await
+an atomic commit covering that revision (navigation60s, explicit index120s), then
+pin it for the whole read/source batch. Later committed revisions may cover that
+requirement; later filesystem edits do not retroactively invalidate the invocation.
+Timeout/failure returns required/committed/workspace revisions, progress and recovery
+guidance, never an empty success or stale source. A failed content capture explicitly
+reports unknown required revision. An expired waiter does not cancel shared indexing.
+Use bounded `read`/`grep` after refusal. Inspect/fix the cause before deliberate
+`index force:true`; poisoned/unavailable workers need supported node recovery.
+
+`graph_snapshot` reports revisions and wait/work evidence. Counters describe the
+named committed publication, not invented work per warm read. Separate admission
+capture progress cannot heartbeat a stuck indexing worker: wait heartbeats advance
+only on actual shared indexing progress. Parsing input, AST visits, staging,
+resolution and commit provide scoped progress; elapsed time alone does not.
+`graph_status` and native progress logs expose queued/active/failure states.
+
+This is a captured **supported UTF-8 source** snapshot, not an atomic freeze of
+external multi-file writers or the running interpreter. Symlinks, excluded directories
+and unsupported suffixes remain outside the graph; `skipped_non_utf8` explicitly
+lists supported files outside the text domain. Static/dynamic resolution limits remain.
+Stored exact bytes and definition ranges, relationships and revisions publish in one
+transaction. Read-only WAL snapshots never see partial generations. Full rebuilds
+remain explicit with `force:true`; extractor-version migration preserves that path.
+Windows root-digest cache paths use SQLite's locking long-path VFS with extended
+absolute filenames, including read-only/WAL semantics, not a no-lock fallback.
 
 ## The capability
 
-`host.graph_index|query|search|source|overview|impact|explain|path|caps|stats|status`. Each returns a JSON
+`host.graph_index|query|search|source|sources|notify|overview|impact|explain|path|caps|stats|status`. Each returns a JSON
 string, and an error as `{"error": ...}` — the same shape as `host.sql_query`.
 `graph_status` reports the resolved root/db and whether the index exists yet.
 The model tool passes the session binding through every source action. Git
@@ -74,11 +95,10 @@ failed/missing refuses instead of falling back to canonical/runtime source.
 identical-source checkouts cannot exchange cursors. Unbound navigation keeps the
 configured runtime default, including `WA_GRAPH_ROOT`.
 
-Other roots have on-demand independent caches; the existing watcher still watches
-only the configured runtime root. No new watcher or job is created. Switching
-worktrees does not replace the runtime graph. Explicit host `db` overrides remain
-available for isolated tests. Cache files persist as local derived data; this
-change does not add an automatic cleanup policy or a filesystem sandbox.
+Other roots have independent on-demand caches and registrations on the shared
+backend. Switching worktrees never replaces the runtime graph. Explicit host `db`
+overrides remain available for isolated tests. Derived-cache eviction is not source,
+worktree, history or runtime-ownership cleanup, and adds no filesystem sandbox.
 
 `lua/core/graph.lua` wraps them and compacts the results (a well-connected
 function can have hundreds of callers; the model needs the shape and the first
@@ -102,10 +122,19 @@ off by default: one historical UI fixture does not establish a task-performance
 gain. Identifiers are split across
 camelCase and snake_case boundaries. It is
 lexical ranking, not embedding similarity.
-`source` reparses only the selected indexed file and returns the exact syntax
-definition. Definitions larger than the response budget continue from a byte
-offset. Both calls use the same before/after source verification as relationship
-actions.
+`source` selects persisted exact definition ranges without reparsing. Copy optional
+`source_version` (file SHA-256) from discovery/source and carry it across continuation
+pages to refuse changed source. Path/name/line/optional kind remain mandatory identity;
+ambiguous selectors refuse instead of silently picking a match. Old selectors remain
+compatible; discovery never automatically chooses an ambiguous definition.
+
+`graph action=symbol_source_many` and compatibility `symbol_source_many` share one
+backend (1–8 selectors). Each resolved root captures once and uses one pinned snapshot;
+items retain ordered failures and independent20,000-byte source pages. Each item has
+`graph_snapshot_index` into top-level `graph_snapshots`, avoiding repeated status text.
+Different roots never share a mutable snapshot or cache. Legacy low-level array
+responses remain arrays; the Lua facade opts into snapshot envelopes. `overview` and
+`impact` count bounded revision metadata inside their whole-response byte budgets.
 
 `explain` reports incoming callers at the exact call line, not the enclosing
 function's definition line. Exact names and qualified-member suffixes suppress
@@ -165,6 +194,28 @@ context to use it before `grep` and how to read the result — including that a
   can miss; low-confidence or absent answers fall back to `grep`.
 - Definition source omits surrounding imports, sibling attributes and module
   state. Inspect that context before editing.
+
+## Measured retrieval update — 2026-10-12
+
+Private interleaved baseline/candidate/baseline evidence on the same1,201-file tree:
+133,188 references,45,013 stored nodes,54,078 resolved and72,181 unresolved in both arms.
+Cold index:262.6–272.6s baseline versus9.85–10.17s candidate. Eight exact selectors
+(two definitions repeated) over four warm passes per arm:1.17–1.43s versus75–84ms.
+Returned source hashes match. Raw reply JSON grew13,617→15,238 bytes (11.9%) for
+explicit source identity/revision evidence; there is no token-billing or net-context
+saving claim. Two cold runs and one lexical workload are not broad task-quality,
+latency or graph-versus-grep proof. The first unoptimized candidate timed out on
+this real tree; indexed dependency keys and memoization fixed that measured scan.
+The benchmark is `scripts/bench-retrieval.cjs`, with private DBs and zero inference.
+
+Focused proof:47 crate checks,4 native bridge checks, source/embedded projection and
+automatic-graph suites, real external-writer OS events, intentional parse failure,
+restored timestamps/event loss, full rebuild parity, root isolation, frozen/bounded
+waits, no fake quiet-worker heartbeat, deep Unicode/read-only/WAL cache paths and
+whole-response impact pagination. `scripts/test-retrieval-native.cjs <built-wa>
+<fresh-evidence>`, then `--post`, binds logs, source closure and binary hashes.
+Self-review is not independent review; these checks do not certify dynamic callers
+or a full release gate.
 
 ## Adoption check (Phase 1, 2026-09-23 through 2026-09-24)
 

@@ -1,4 +1,4 @@
--- Real reads refuse stale/missing graphs without writes; refresh is explicit and incremental.
+-- Queries automatically capture/wait for committed source revisions; full rebuild remains explicit.
 local json = dofile("lua/vendor/json.lua")
 local root = dofile("lua/core/paths.lua").data() .. "/graph-freshness-fixture"
 local db = root .. "/graph.db"
@@ -17,9 +17,8 @@ end
 
 assert(host.write_file(root .. "/a.rs", "fn alpha() {}\n"))
 assert(decode(host.graph_status(opts)).ready == false)
-local missing=json.decode(host.graph_query('alpha',opts))
-assert(missing.error=='graph_refresh_required' and missing.indexed==false and not host.read_file(db))
-assert(decode(host.graph_index(opts)).indexed==1)
+local missing=decode(host.graph_query('alpha',opts))
+assert(has(missing,'alpha') and host.path_kind(db)=='file')
 assert(has(decode(host.graph_query("alpha", opts)), "alpha"))
 local alpha = decode(host.graph_search("alpha", opts))[1]
 assert(alpha.name == "alpha")
@@ -30,18 +29,18 @@ assert(decode(host.graph_status(opts)).ready == true)
 
 assert(host.write_file(root .. "/a.rs", "fn bravo() {}\n"))
 assert(decode(host.graph_status(opts)).ready == false)
-local stale=json.decode(host.graph_query('alpha',opts))
-assert(stale.error=='graph_refresh_required' and stale.next:find('read/grep',1,true))
-assert(decode(host.graph_index(opts)).indexed==1)
+local stale=decode(host.graph_query('alpha',opts))
+assert(not has(stale,'alpha'))
 assert(not has(decode(host.graph_query("alpha", opts)), "alpha"))
 assert(has(decode(host.graph_query("bravo", opts)), "bravo"))
 assert(#decode(host.graph_search("alpha", opts)) == 0)
 
 assert(host.write_file(root .. "/b.lua", "local function beta() end\n"))
-assert(decode(host.graph_index(opts)).indexed==1)
 assert(has(decode(host.graph_query("beta", opts)), "beta"))
+assert(decode(host.graph_status(opts)).ready == true)
+
 assert(host.write_file(root .. "/c.lua", "local function caller() beta() end\n"))
-assert(decode(host.graph_index(opts)).indexed==1)
+assert(has(decode(host.graph_query("beta", opts)), "beta"))
 assert(has(decode(host.graph_query("caller", opts)), "caller"))
 local overview = decode(host.graph_overview(json.encode({root=root,db=db,
   aspects={"languages","entry_points","resolution"},limit=4,max_bytes=12000})))

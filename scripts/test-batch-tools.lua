@@ -117,11 +117,11 @@ for i,q in ipairs(queries)do
  check(json.encode(single)==json.encode(many),'history result parity '..i)
 end
 check(tools.dispatch(memory,'session',{session_id=s2},'guest',{user_id='alice'}).error=='forbidden','primitive account boundary unchanged')
--- Graph batching dispatches only selected-source reads, never refresh/index.
-local graphsource=host.graph_source;local seen={}
-host.graph_source=function(options)local p=json.decode(options);seen[#seen+1]=p;return json.encode({source='function fixture() end',eof=true,path=p.path,name=p.name,line=p.line})end
+-- Graph batching admits selected-source reads on one snapshot per root.
+local graphsource=host.graph_sources;local seen={}
+host.graph_sources=function(options)local p=json.decode(options);local results={};for _,item in ipairs(p.requests) do seen[#seen+1]=item;results[#results+1]={source='function fixture() end',eof=true,path=item.path,name=item.name,line=item.line} end;return json.encode({ok=true,results=results}) end
 r=call('symbol_source_many',{{path='fixture.lua',name='fixture',line=1,cwd=root},{path='fixture.lua',name='other',line=2,cwd=root},{path='fixture.lua',name='bad',line=3,action='index'}})
-host.graph_source=graphsource
+host.graph_sources=graphsource
 check(r.failed==1 and #seen==2 and r.results[1].source=='function fixture() end','source batch is selected reads only')
 -- Oversized batches preserve every outcome and exact full item JSON.
 local big={ok=false,failed=1,results={}}

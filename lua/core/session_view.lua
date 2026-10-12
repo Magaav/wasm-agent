@@ -4,31 +4,45 @@ local output = dofile('lua/core/tool_output.lua')
 local evidence = dofile('lua/core/evidence_view.lua')
 local M = {}
 
-function M.exact(row,args)
+function M.tool_calls(row,task)
+  local value={}
+  for _,key in ipairs({'id','seq','session_id','role','phase','tool_name','tool_call_id','tool_calls','ok','ms','created_at'}) do value[key]=row[key] end
+  if row.role=='tool' then value.content=row.content end
+  value.view='tool_calls';value.omitted_fields={'non_tool_prose','reasoning','reasoning_items','trace','images','changes','accounting'}
+  value.evidence={tool='session',session_id=row.session_id,message_id=row.id,view='full',byte_offset=1}
+  if task then value.evidence={tool='subagent',action='session',id=task.subagent_id,message_id=row.id,view='full',byte_offset=1} end
+  return value
+end
+local function presented(row,args,task)
+  if args.view=='tool_calls' then return M.tool_calls(row,task) end
+  return args.view=='compact' and evidence.message(row) or row
+end
+function M.exact(row,args,task)
+  local selected=presented(row,args,task)
   if args.byte_offset == nil then
-    return {message=args.view=='compact' and evidence.message(row) or row}
+    return {message=selected}
   end
   local maximum=output.MAX_BYTES-2048
   local offset,limit=tonumber(args.byte_offset),tonumber(args.byte_limit) or maximum
   if not offset or offset<1 or offset%1~=0 or limit<4 or limit>maximum or limit%1~=0 then
     return {error='invalid_message_range'}
   end
-  local encoded=json.encode(row)
+  local encoded=json.encode(args.view=='tool_calls' and selected or row)
   local version=host.sha256(encoded)
   if offset>#encoded+1 then return {error='message_range_out_of_bounds'} end
   if offset<=#encoded and encoded:byte(offset)>=128 and encoded:byte(offset)<192 then return {error='offset_inside_utf8'} end
   if args.message_version and args.message_version~=version then return {error='message_changed',message_version=version} end
   while true do
     local content,next_offset=output.slice(encoded,offset,limit)
-    local page={content=content,encoding='exact_message_json',message_id=row.id,message_version=version,
+    local page={content=content,encoding=args.view=='tool_calls' and 'tool_calls_message_json' or 'exact_message_json',message_id=row.id,message_version=version,
       next_offset=next_offset,bytes=#encoded,eof=next_offset>#encoded}
     if #json.encode(page)<=output.MAX_BYTES or limit<=4 then return page end
     limit=math.max(4,math.floor(limit*0.75))
   end
 end
 
-local function reference(row,sid,id)
-  local address={session_id=sid,message_id=row.id,byte_offset=1,view='full'}
+local function reference(row,sid,id,view)
+  local address={session_id=sid,message_id=row.id,byte_offset=1,view=view=='tool_calls' and 'tool_calls' or 'full'}
   if id then address.tool='subagent';address.action='session';address.id=id else address.tool='session' end
   return {id=row.id,seq=row.seq,role=row.role,tool_name=row.tool_name,ok=row.ok,ms=row.ms,
     created_at=row.created_at,failure=evidence.failure(row),
@@ -41,10 +55,10 @@ local function bounded_rows(rows,sid,args,task,mode)
   local page={session_id=sid,messages={},view=args.view or 'full',mode=mode,returned=0,
     note='Originals unchanged. Oversized rows have exact-retrieval evidence.'}
   for _,row in ipairs(rows) do
-    local item=args.view=='compact' and evidence.message(row) or row
+    local item=presented(row,args,task)
     page.messages[#page.messages+1]=item;page.returned=#page.messages
     if #json.encode(page)>bytes then
-      page.messages[#page.messages]=reference(row,sid,task and (args.id or task.subagent_id))
+      page.messages[#page.messages]=reference(row,sid,task and (args.id or task.subagent_id),args.view)
       if #json.encode(page)>bytes then return {error='session_batch_budget_too_small',requested=#rows} end
     end
   end
@@ -53,7 +67,7 @@ end
 
 function M.get(memory,sid,args,task)
   args=args or {}
-  if args.view~=nil and args.view~='full' and args.view~='compact' then return {error='invalid_view'} end
+  if args.view~=nil and args.view~='full' and args.view~='compact' and args.view~='tool_calls' then return {error='invalid_view'} end
   local modes=(args.message_id and 1 or 0)+(args.message_ids and 1 or 0)+(args.around_seq~=nil and 1 or 0)
   if modes>1 or (modes>0 and (args.before_seq~=nil or args.after_seq~=nil)) or
       ((args.message_ids or args.around_seq~=nil) and (args.byte_offset~=nil or args.message_version~=nil)) then return {error='session_cursor_conflict'} end
@@ -68,7 +82,7 @@ function M.get(memory,sid,args,task)
     for _,id in ipairs(ids) do
       if seen[id] then return {error='duplicate_message_id'} end
       seen[id]=true
-      local row=memory.message(id)
+      local row=memory.message(id,{view=args.view})
       if not row or row.session_id~=sid then return {error='unknown_message'} end
       rows[#rows+1]=row
     end
@@ -78,7 +92,7 @@ function M.get(memory,sid,args,task)
   if args.around_seq~=nil then
     local seq,before,after=tonumber(args.around_seq),args.before or 2,args.after or 2
     if not seq or seq<1 or seq%1~=0 or type(before)~='number' or before<0 or before>20 or before%1~=0 or type(after)~='number' or after<0 or after>20 or after%1~=0 then return {error='invalid_session_window'} end
-    local rows=memory.session_messages(sid,{around_seq=seq,before=before,after=after})
+    local rows=memory.session_messages(sid,{around_seq=seq,before=before,after=after,view=args.view})
     local found=false;for _,row in ipairs(rows) do if row.seq==seq then found=true end end
     if not found then return {error='unknown_message'} end
     local page=bounded_rows(rows,sid,args,task,'around')
@@ -95,9 +109,9 @@ function M.get(memory,sid,args,task)
     return page
   end
   if args.message_id then
-    local row=memory.message(args.message_id)
+    local row=memory.message(args.message_id,{view=args.view})
     if not row or row.session_id~=sid then return {error='unknown_message'} end
-    return M.exact(row,args)
+    return M.exact(row,args,task)
   end
   local limit=tonumber(args.limit) or 8
   local bytes=tonumber(args.byte_limit) or math.min(16000,output.MAX_BYTES-2048)
@@ -108,7 +122,7 @@ function M.get(memory,sid,args,task)
   if (args.before_seq~=nil and (not before or before<1 or before%1~=0)) or
      (args.after_seq~=nil and (not after or after<0 or after%1~=0)) then return {error='invalid_session_cursor'} end
   local bounds=memory.session_message_bounds(sid)
-  local rows=memory.session_messages(sid,{limit=limit,before_seq=before,after_seq=after,forward_after_seq=after~=nil})
+  local rows=memory.session_messages(sid,{limit=limit,before_seq=before,after_seq=after,forward_after_seq=after~=nil,view=args.view})
   local page={session_id=sid,messages={},view=args.view or 'full',returned=0,
     steering=task and dofile('lua/core/steering.lua').view(sid) or nil,
     note='Bounded inspection only; original transcript unchanged. Oversized rows have exact-retrieval evidence.'}
@@ -131,11 +145,11 @@ function M.get(memory,sid,args,task)
   -- Latest/backward pages choose nearest rows first but always return chronological order.
   for n=1,#rows do
     local row=rows[after~=nil and n or (#rows-n+1)]
-    local item=args.view=='compact' and evidence.message(row) or row
+    local item=presented(row,args,task)
     local position=after~=nil and (#page.messages+1) or 1
     table.insert(page.messages,position,item);frame()
     if #json.encode(page)>bytes then
-      page.messages[position]=reference(row,sid,task and (args.id or task.subagent_id));frame()
+      page.messages[position]=reference(row,sid,task and (args.id or task.subagent_id),args.view);frame()
       if #json.encode(page)>bytes then
         table.remove(page.messages,position);frame()
         if #page.messages==0 then return {error='session_page_budget_too_small',minimum_bytes=2048} end

@@ -8,6 +8,8 @@
 pub mod extract;
 pub mod audit;
 pub mod store;
+pub mod incremental;
+pub mod coordinator;
 pub mod watch;
 
 #[cfg(test)]

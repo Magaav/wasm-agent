@@ -14,12 +14,16 @@ end
 
 local function call(name, ...)
   if not capability(name) then return nil, "graph_capability_missing" end
-  local ok, raw = pcall(host[name], ...)
+  local values={...}
+  local index=(name=='graph_query' or name=='graph_search' or name=='graph_explain') and 2 or name=='graph_path' and 3 or 1
+  local options=json.decode(values[index] or '') or {};options.with_snapshot=true;values[index]=json.encode(options)
+  local ok, raw = pcall(host[name], table.unpack(values))
   if not ok then return nil, tostring(raw) end
   local decoded = json.decode(raw or "")
   if type(decoded) ~= "table" then return nil, "graph_decode_failed" end
-  if decoded.error then return nil, decoded.error end
-  return decoded
+  if decoded.error then return nil, decoded.error, decoded end
+  if decoded.items then return decoded.items,nil,decoded.graph_snapshot end
+  return decoded,nil,decoded.graph_snapshot
 end
 
 -- Whether this host can answer graph questions at all (an older host cannot).
@@ -40,15 +44,15 @@ function M.query(text, opts)
   -- A broad name used to return 50 path matches before the useful symbol. Fetch one extra
   -- row so the model can tell whether a compact answer omitted more candidates.
   local limit = math.max(1, math.min(tonumber(opts and opts.limit) or 12, 200))
-  local rows, err = call("graph_query", text, json.encode({ limit = limit + 1, root=opts and opts.root, db=opts and opts.db }))
-  if not rows then return nil, err end
+  local rows, err, snapshot = call("graph_query", text, json.encode({ limit = limit + 1, root=opts and opts.root, db=opts and opts.db }))
+  if not rows then return nil, err, snapshot end
   local truncated = #rows > limit
   local results = {}
   for i = 1, math.min(#rows, limit) do
     local row = rows[i]
     results[#results + 1] = { kind = row.kind, name = row.name, path = row.path, line = row.line }
   end
-  return { query = text, count = #results, truncated = truncated, results = results }
+  return { query = text, count = #results, truncated = truncated, results = results, graph_snapshot=snapshot }
 end
 
 -- Ranked discovery is separate from legacy `query`: callers can measure whether returning a
@@ -58,16 +62,16 @@ function M.search_symbols(text, opts)
   if not capability("graph_search") then return nil, "graph_retrieval_unavailable" end
   local limit = math.max(1, math.min(tonumber(opts and opts.limit) or 8, 50))
   local prefer = opts and opts.prefer_implementations == true
-  local rows, err = call("graph_search", text,
+  local rows, err, snapshot = call("graph_search", text,
     json.encode({ limit = limit + 1, prefer_implementations = prefer,
       root=opts and opts.root, db=opts and opts.db }))
-  if not rows then return nil, err end
+  if not rows then return nil, err, snapshot end
   local results = {}
   for i = 1, math.min(#rows, limit) do
     local row = rows[i]
     results[#results + 1] = {
       kind = row.kind, name = row.name, path = row.path, line = row.line,
-      language = row.language, signature = row.signature, score = row.score,
+      language = row.language, signature = row.signature, source_version=row.source_version, score = row.score,
       confidence = row.confidence, reason = row.reason, matched_terms = row.matched_terms,
       unmatched_terms = row.unmatched_terms,
       unmatched_definition_terms = row.unmatched_definition_terms,
@@ -78,7 +82,7 @@ function M.search_symbols(text, opts)
   local partial = top and ((top.unmatched_terms and #top.unmatched_terms > 0)
     or (top.unmatched_definition_terms and #top.unmatched_definition_terms > 0))
   return {
-    query = text, count = #results, truncated = #rows > limit,
+    query = text, count = #results, truncated = #rows > limit, graph_snapshot=snapshot,
     verdict = #results == 0 and "absent" or partial and "partial" or "ok", results = results,
     next = #results == 0 and "Try an exact identifier or bounded grep; absence here is lexical only."
       or partial and "Top result lacks some query terms in its definition. Inspect a likely definition, then use bounded grep for the missing terms before editing."
@@ -97,10 +101,15 @@ function M.symbol_source(selector, opts)
   opts = opts or {}
   return call("graph_source", json.encode({
     root=opts.root, db=opts.db,
-    path = selector.path, name = selector.name, line = line, kind = selector.kind,
+    path = selector.path, name = selector.name, line = line, kind = selector.kind, source_version=opts.source_version or selector.source_version,
     byte_offset = tonumber(opts.byte_offset) or 0,
     max_bytes = tonumber(opts.max_bytes) or 20000,
   }))
+end
+
+function M.symbol_sources(requests,opts)
+  if not capability('graph_sources') then return nil,'graph_retrieval_unavailable' end
+  opts=opts or {};return call('graph_sources',json.encode({root=opts.root,db=opts.db,requests=requests,wait_ms=opts.wait_ms}))
 end
 
 local function edge_label(edge)
@@ -113,8 +122,8 @@ end
 
 function M.explain(name, opts)
   if type(name) ~= "string" or name == "" then return nil, "name_required" end
-  local rows, err = call("graph_explain", name, json.encode(opts or {}))
-  if not rows then return nil, err end
+  local rows, err, snapshot = call("graph_explain", name, json.encode(opts or {}))
+  if not rows then return nil, err, snapshot end
   local out = {}
   for _, entry in ipairs(rows) do
     local node = entry.node or {}
@@ -143,20 +152,22 @@ function M.explain(name, opts)
       use_evidence = use_evidence, caller_evidence = caller_evidence,
     }
   end
-  return { name = name, definitions = out }
+  return { name = name, definitions = out, graph_snapshot=snapshot }
 end
 
 function M.path(from, to, opts)
   if type(from) ~= "string" or from == "" or type(to) ~= "string" or to == "" then
     return nil, "from_and_to_required"
   end
-  local result, err = call("graph_path", from, to, json.encode(opts or {}))
-  if not result then return nil, err end
-  return { from = from, to = to, found = result.found, steps = result.steps or {} }
+  local result, err, snapshot = call("graph_path", from, to, json.encode(opts or {}))
+  if not result then return nil, err, snapshot end
+  return { from = from, to = to, found = result.found, steps = result.steps or {}, graph_snapshot=result.graph_snapshot }
 end
 
 function M.caps(opts)
-  return call("graph_caps", json.encode(opts or {}))
+  local result,err,snapshot=call("graph_caps", json.encode(opts or {}))
+  if not result then return nil,err,snapshot end
+  return snapshot and {capabilities=result,graph_snapshot=snapshot} or result
 end
 
 function M.stats(opts)

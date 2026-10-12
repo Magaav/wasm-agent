@@ -22,6 +22,36 @@ These are two entry paths into one runtime:
 The fleet console serves these journeys. It is not the product's required first
 screen, and 32 workers are not a prerequisite for helping one customer.
 
+## History projection and automatic graph revisions — 2026-10-12 (verified candidate; installation pending)
+
+`session`/owned child session/`session_many` now offer explicit `view:'tool_calls'`:
+SQL does not fetch encrypted reasoning/prose/trace, exact call arguments and outcomes
+remain, and full-original evidence is preserved. Synthetic original108,595 bytes
+projects to under1KB; this is selected JSON size, not token billing or a universal
+context saving. Default full/compact history is unchanged.
+
+Successful native source edits, including mutation batches, queue one deterministic
+root-isolated graph worker. Content reconciliation handles external changes, missed
+hints and restored timestamps. Changed files and affected relationships publish
+atomically with revision metadata; queries freeze/wait/pin, never silently return
+stale data. Source batches share one backend and root snapshot, with exact SHA-256
+selectors, per-item failures and deduplicated snapshot references. No inference
+worker, Engine job, recurrent wake, source permission expansion or UI change.
+
+Focused source/embedded suites,47 graph crate checks,4 bridge checks,182 impact
+paging checks, batch482, workspace37, history/session/recovery regressions and62-module
+freshness passed. Tests caught and fixed long Windows SQLite cache paths, whole-budget
+metadata overflow and irrelevant scratch-write indexing. Real1,201-file interleaved
+benchmark: cold index263–273s→9.85–10.17s, eight exact sources1.17–1.43s→75–84ms;
+source hashes and resolved/unresolved counts match. Raw reply JSON grows11.9% for
+identity/revision evidence. One workload/two cold pairs is not model-quality,
+net-token or universal graph-versus-grep proof. Self-review, not independent review.
+Candidate `eb26737068069e00467cdf2aebbc4d51a27b528162f25bb482814193a26e9642` is tested,
+not yet installed; merge/remote publication and immutable Sentinel verification remain.
+`gate_verified:false`, `release_verified:false`; see `docs/GRAPH.md` and
+`docs/HISTORY-SEARCH.md`. Previous drafts, disabled WhatsApp jobs and responder
+binding remain untouched.
+
 ## MCP extension boundary — 2026-10-12 (installed and verified)
 
 Implemented native MCP registry, request-scoped stdio/Streamable HTTP transport,

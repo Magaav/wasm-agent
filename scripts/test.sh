@@ -1059,6 +1059,11 @@ WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-model-route-servability.lua" "$BIN"
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-graph-tool.lua" "$BIN" --db "$DB.graph-tool" | grep 'graph tool ok'
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-graph-freshness.lua" "$BIN" --db "$DB.graph-freshness" | grep 'graph freshness ok'
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-graph-workspace.lua" "$BIN" --db "$DB.graph-workspace" | grep 'graph workspace ok'
+# Focused automatic indexing / explicit projection contracts; no inference or Engine jobs.
+WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-tool-call-projection.lua" "$BIN" --db "$DB.tool-call-projection" | grep 'tool-call projection ok'
+WA_GRAPH_WATCH=0 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-graph-automatic.lua" "$BIN" --db "$DB.graph-automatic" | grep 'graph automatic native ok'
+WA_GRAPH_WATCH=1 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-graph-watch.lua" "$BIN" --db "$DB.graph-watch" | grep 'graph external watch ok'
+WA_GRAPH_PARSE_TIMEOUT_MS=invalid WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-graph-index-failure.lua" "$BIN" --db "$DB.graph-index-failure" | grep 'graph failed index ok'
 # Offline accounting must run even when UI tests are explicitly skipped.
 gate_run node scripts/test-token-audit.cjs
 WA_BIN="$BIN" node scripts/test-efficiency.cjs

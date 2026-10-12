@@ -304,6 +304,8 @@ fn main() {
     lua.register("graph_query", graph::graph_query);
     lua.register("graph_search", graph::graph_search);
     lua.register("graph_source", graph::graph_source);
+    lua.register("graph_sources", graph::graph_sources);
+    lua.register("graph_notify", graph::graph_notify);
     lua.register("graph_explain", graph::graph_explain);
     lua.register("graph_path", graph::graph_path);
     lua.register("graph_caps", graph::graph_caps);

@@ -1,22 +1,22 @@
 use super::*;
 
 #[test]
-fn graph_reads_never_create_or_refresh_an_index() {
+fn graph_reads_automatically_wait_for_a_frozen_committed_revision() {
     let fixture=Fixture::new();let root=fixture.0.join("owned");let db=fixture.0.join("read.db");
     let file=root.join("source.lua");std::fs::write(&file,"function original() return 1 end\n").unwrap();
-    let refused=read_snapshot(&root,&db,&json!({}),|_,_,_|panic!("body on missing index")).unwrap();
-    assert_eq!(refused["error"],"graph_refresh_required");assert!(!db.exists());
-    {let mut store=wa_graph::Store::open(&db).unwrap();store.index(&root,false).unwrap();}
-    let bytes=std::fs::read(&db).unwrap();
-    assert_eq!(read_snapshot(&root,&db,&json!({}),|_,_,_|Ok(json!({"fresh":true}))).unwrap()["fresh"],true);
+    let first=read_snapshot(&root,&db,&json!({"with_snapshot":true}),|store,_,_|store.query_json("original",10).map_err(|e|e.to_string())).unwrap();
+    assert!(db.exists());assert_eq!(first["items"][0]["name"],"original");
+    let revision=first["graph_snapshot"]["required_revision"].as_u64().unwrap();
+    assert!(revision>0);assert!(first["graph_snapshot"]["committed_revision"].as_u64().unwrap()>=revision);
     std::fs::write(&file,"function changed() return 2 end\n").unwrap();
-    let refused=read_snapshot(&root,&db,&json!({}),|_,_,_|panic!("body on stale index")).unwrap();
-    assert_eq!(refused["error"],"graph_refresh_required");assert_eq!(std::fs::read(&db).unwrap(),bytes);
-    {let mut store=wa_graph::Store::open(&db).unwrap();store.index(&root,false).unwrap();}
-    let refused=read_snapshot(&root,&db,&json!({}),|_,_,_|{
-        std::fs::write(&file,"function raced() return 3 end\n").unwrap();Ok(json!({"must_not_escape":true}))
+    let second=read_snapshot(&root,&db,&json!({"with_snapshot":true}),|store,_,_|store.query_json("changed",10).map_err(|e|e.to_string())).unwrap();
+    assert_eq!(second["items"][0]["name"],"changed");assert!(second["graph_snapshot"]["required_revision"].as_u64().unwrap()>revision);
+    // Later edits do not invalidate the pinned invocation snapshot or make it chase a moving target.
+    let during=read_snapshot(&root,&db,&json!({"with_snapshot":true}),|store,_,_|{
+        std::fs::write(&file,"function raced() return 3 end\n").unwrap();store.query_json("changed",10).map_err(|e|e.to_string())
     }).unwrap();
-    assert_eq!(refused["error"],"graph_refresh_required");assert!(refused.get("must_not_escape").is_none());
+    assert_eq!(during["items"][0]["name"],"changed");
+    wa_graph::coordinator::shared().stop_watch(&root);
 }
 
 struct Fixture(PathBuf);

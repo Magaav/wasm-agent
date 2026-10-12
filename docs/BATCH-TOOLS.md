@@ -10,15 +10,19 @@ multiple independent calls in one model response remain available.
 
 - Each request reuses its primitive's fields, bounds and authorization. Batch
   schemas derive from primitive schemas instead of maintaining duplicate contracts.
-  Symbol requests contain selected path/name/line/kind and byte/cwd options only;
-  they cannot index, audit or run another graph action. No implicit refresh occurs.
+  Symbol requests contain selected path/name/line/kind, optional file SHA-256,
+  byte/cwd options only; they cannot index, audit or dispatch another action.
+  They share the graph source-batch backend and automatic revision wait.
+  `graph_snapshot_index` points to one top-level `graph_snapshots` record per root.
 - All new batches are operator-only. A child needs both the batch and primitive
   in its explicit profile; built-in explore gains only search/source batches.
   Task owners gain the same safe read/write conveniences, never broader authority.
   Guest tools/account visibility and remote image restrictions do not expand.
 - Read results remain in request order with separate errors, source identities,
   scope/filter semantics and continuations. Search omissions are not success at
-  complete discovery. A batch is not a simultaneous filesystem/database snapshot.
+  complete discovery. General batches are not a simultaneous filesystem/database
+  snapshot. Source batches are the explicit exception: one pinned graph snapshot
+  per resolved root, never a cross-root or live-filesystem transaction.
 - Mutations validate all item shapes, workspace paths, text/receipt versions,
   anchors/ranges, duplicate/ancestor targets and prepared snapshots before the
   first write. No-op requests do not rewrite files. Each actual application
@@ -40,13 +44,17 @@ multiple independent calls in one model response remain available.
   originals are retained. Retrieve an omitted item before using its contents or
   continuation; large batches can cost additional retrieval rounds.
 - No batch sends, deployments, restarts, cancellation, arbitrary tool dispatch,
-  retries, watchers, parallel mutation workers, or new host capability.
+  retries or parallel mutation workers. Source indexing uses the shared graph
+  coordinator, not a batch-owned watcher/job. Successful source mutations notify
+  their actual root; partial outcomes still retain each notification and effect.
 
 ## Performance and risk
 
 The measurable target is less invocation/envelope overhead for the same verified
-work. Batches still execute the underlying reads/writes; no I/O/corpus/result cache
-or invented speedup is introduced. Existing independent calls already share a
+work. General batches still execute their underlying reads/writes; source batches
+explicitly share graph admission/content reconciliation and a pinned root snapshot
+(see `GRAPH.md`). This is not an invented result cache or a universal speedup.
+Existing independent calls already share a
 model round, so batches do not inherently reduce inference rounds. Added schemas
 increase each operator request's tool surface, and large outputs may need extra
 artifact reads. This risk must be weighed against measured task latency/context,
