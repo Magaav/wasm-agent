@@ -21,7 +21,13 @@ Summary/reasoning streams that continue receiving bytes are no longer stopped
 by the already-completed response-header timeout. Header, idle-read, overall
 deadline and cancellation limits remain distinct and bounded.
 
-Native connection loss now regenerates only the unfinished inference request.
+Native connection loss and explicitly transient provider failures regenerate only
+the unfinished inference request. SSE `error` (flat or nested) and
+`response.failed` codes `server_error`/`internal_server_error`, plus HTTP
+500/502/503/504 responses, share the same bounded recovery. A failed terminal
+event has committed no response or tools; it does not mean successful completion.
+Parser failures retain their original identity across the host callback wrapper,
+and retry evidence retains the structured provider code and request/response ID.
 `WASM_AGENT_SUBSCRIPTION_TRANSPORT_RETRIES` controls 0..10 reconnects (default 10,
 matching the legacy transport); backoff is 0.5, 1, 2, 4, then 5 seconds, always
 inside the original request deadline. Earlier completed tool effects remain in
@@ -29,11 +35,15 @@ context and are not re-executed. Interrupted reasoning/text, encrypted reasoning
 items and uncommitted tool arguments are retained in private durable retry rows;
 the UI seals the old previews before displaying replacement output. Only a
 complete validated response can dispatch tools. Unknown events/items, malformed
-frames, provider refusals, cancellation and deadline exhaustion never authorize
+frames, permanent/unknown provider refusals, cancellation and deadline exhaustion never authorize
 regeneration. Exhaustion/suppression prevents an outer retry loop. A permanent
 outage still ends visibly; reconnect can incur another upstream inference charge
 even when the first response was lost. `test-native-disconnect-recovery.lua`
 proves these boundaries through the actual native provider/agent loop.
+`test-subscription-server-recovery.lua` reproduces the streamed server-error
+callback envelope, partial output and completed-but-uncommitted tool calls,
+preserves prior effects through actual agent rounds, and verifies cancellation,
+deadline, permanent refusals and exhaustion without network or paid inference.
 
 Native added-item phase is retained by identity before text deltas: known
 commentary streams directly into its topic and final-answer begin can precede
@@ -52,7 +62,7 @@ migrate the active generation explicitly; never spend/reimport a stale copy or
 silently overwrite an existing native credential. Native failures, cancellation,
 truncation and unknown provider usage remain visible. The explicit legacy Pi
 reconnect/regeneration procedure below is not claimed as native retry parity.
-The native path retains its existing no-automatic-regeneration semantics.
+Native automatic regeneration follows the bounded, explicit allowlist above.
 
 Focused proof: `scripts/test-native-subscription.lua` exercises the actual
 provider/agent/default route with Pi reads and Node launches forbidden, two-round
