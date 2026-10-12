@@ -509,6 +509,12 @@ end
 -- known final text as `delta`. Only unknown text is provisional `pending_delta`, resolved by the
 -- completed message item. Never classify with a response-global stop reason. Flattening the two would put a model's running commentary into the answer, and
 -- the UI's commentary balloons, the reasoning fold and the tool-decision telemetry all read this.
+-- Error codes are protocol data, never inferred from a traceback or error message.
+-- Authentication, quota, context and unknown failures remain non-retryable.
+local function transient_provider_failure(code)
+  return code == 'server_error' or code == 'internal_server_error'
+end
+
 function M.session(opts)
   opts = opts or {}
   local stream_id = opts.stream_id or 'stream'
@@ -842,6 +848,8 @@ function M.session(opts)
         message = 'Unknown error (no error details in response)'
       end
       state.terminal = true
+      state.failure = {code = type(failure) == 'table' and failure.code or nil,
+        request_id = response.id or state.request_id}
       raise('subscription_response_failed: ' .. message)
     end,
     ['error'] = function(event)
@@ -850,6 +858,7 @@ function M.session(opts)
       -- context_length_exceeded from the agent's bounded compaction recovery.
       local failure = type(event.error) == 'table' and event.error or event
       local code = failure.code or event.code or (failure ~= event and failure.type) or 'unknown'
+      state.failure = {code = code, request_id = event.request_id or state.request_id}
       local message = failure.message or event.message
       if type(message) ~= 'string' or message == '' then
         message = type(event.error) == 'string' and event.error or 'no error details in response'
@@ -908,7 +917,11 @@ function M.session(opts)
       end
     end
     discarded.reasoning=table.concat(thoughts,'\n\n')
-    return not state.terminal and not state.recovery_unsafe,discarded
+    -- A failed response is terminal on the wire, but has committed no inference
+    -- result or tools. Only explicitly transient failures may regenerate it.
+    local retryable = state.failure and transient_provider_failure(state.failure.code)
+    return not state.finished and (not state.terminal or retryable) and
+      not state.recovery_unsafe,discarded,state.failure
   end
 
   -- The result, or a loud failure. A stream that ended without a terminal event is reported as a
@@ -1048,7 +1061,8 @@ local function complete_attempt(model, messages, tools, stream, opts, reasoning,
       counted = counted + 1
       if host.beat then host.beat() end
       if observe then observe(text) end
-      line(text)
+      local ok, problem = pcall(line, text)
+      if not ok then stopped_by = problem; error(problem, 0) end
     end, math.max(1,math.ceil((timeout_ms-((host.monotonic_ms and host.monotonic_ms() or started)-started))/1000)))
   if stopped_by then error(stopped_by, 0) end
   local decoded = json.decode(outcome)
@@ -1093,12 +1107,12 @@ function M.complete(model,messages,tools,stream,opts,reasoning)
     if host.run_cancelled and json.decode(host.run_cancelled()).cancelled then error('run_cancelled',0) end
     if elapsed()>=timeout then error('subscription_timeout: original request deadline exhausted during recovery',0) end
   end
-  local function progress(state,index,reason,discarded,wait)
+  local function progress(state,index,reason,discarded,wait,failure)
     local event={type='retry',retry_id=retry_id,index=index,limit=limit,cycle=1,
       state=state,reason=reason,elapsed_ms=elapsed(),window_ms=timeout,wait_ms=wait,
-      discarded_attempt=discarded}
+      discarded_attempt=discarded,provider_failure=failure}
     local diagnostic={state=state,index=index,limit=limit,elapsed_ms=elapsed(),
-      reason=reason,upstream_usage='unknown'}
+      reason=reason,upstream_usage='unknown',provider_failure=failure}
     dofile('lua/core/telemetry.lua').event(opts.session_id,opts.run_id,retry_id,
       'subscription_transport','retry',diagnostic)
     if opts.session_id and opts.session_id~='' then
@@ -1123,8 +1137,8 @@ function M.complete(model,messages,tools,stream,opts,reasoning)
     end
     stop()
     local outcome=recovery.outcome or {}
-    local safe,discarded=false,nil
-    if recovery.session then safe,discarded=recovery.session.recovery() end
+    local safe,discarded,failure=false,nil,nil
+    if recovery.session then safe,discarded,failure=recovery.session.recovery() end
     local problem=tostring(result)
     local text=problem:lower()
     local network=outcome.termination=='eof' and text:find('subscription_stream_truncated:',1,true)
@@ -1133,19 +1147,25 @@ function M.complete(model,messages,tools,stream,opts,reasoning)
         or text:find('unexpected eof',1,true) or text:find('broken pipe',1,true)
         or text:find('connection closed',1,true) or text:find('timeout',1,true))
     if limit==0 then error(result,0) end
-    if not safe or not network then error('subscription_retry_suppressed: '..problem,0) end
-    progress('interrupted',math.min(attempt+1,limit),dofile('lua/core/redact.lua').text(problem),discarded)
+    local transient = failure and transient_provider_failure(failure.code)
+    -- A rejected HTTP request has no parsed output and no tools to commit.
+    local server_http = not outcome.error and (outcome.status == 500 or outcome.status == 502 or
+      outcome.status == 503 or outcome.status == 504)
+    if not safe or not (network or transient or server_http) then
+      error('subscription_retry_suppressed: '..problem,0)
+    end
+    progress('interrupted',math.min(attempt+1,limit),dofile('lua/core/redact.lua').text(problem),discarded,nil,failure)
     if attempt==limit then
       progress('exhausted',attempt,'Provider reconnect limit exhausted')
       error('subscription_retry_exhausted: '..problem,0)
     end
     local wait=math.min(5000,500*2^attempt)
-    progress('waiting',attempt+1,'Reconnecting to provider',nil,wait)
+    progress('waiting',attempt+1,'Retrying provider request',nil,wait)
     local waited=0
     while waited<wait do
       stop(); local slice=math.min(100,wait-waited); host.sleep(slice); waited=waited+slice
     end
-    stop(); progress('attempting',attempt+1,'Reconnecting to provider')
+    stop(); progress('attempting',attempt+1,'Retrying provider request')
   end
 end
 

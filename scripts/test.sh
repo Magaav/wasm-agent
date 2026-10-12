@@ -1868,6 +1868,7 @@ WA_SCRIPT=scripts/test-openai-sub-levels.lua "$BIN" --db "$DB.sub-levels" | grep
 # `scripts/check-subscription-wire-live.lua` does (it is not in this gate: it needs the network).
 WA_SCRIPT=scripts/test-subscription-wire.lua "$BIN" --db "$DB.sub-wire" | grep "subscription wire ok"
 WA_SCRIPT=scripts/test-native-subscription.lua "$BIN" --db "$DB.native-sub" | grep "native subscription default ok"
+WA_SCRIPT=scripts/test-subscription-server-recovery.lua "$BIN" --db "$DB.server-recovery" | grep "subscription server recovery ok"
 WA_SCRIPT=scripts/test-native-overflow-recovery.lua "$BIN" --db "$DB.native-overflow" | grep "native overflow recovery ok"
 WA_SCRIPT=scripts/test-native-disconnect-recovery.lua "$BIN" --db "$DB.native-disconnect" | grep "native disconnect recovery ok"
 # The credential half of the subscription route, which used to be Pi's: our own store, our own
