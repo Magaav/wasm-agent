@@ -378,15 +378,36 @@ is `unknown`, never installed; malformed/foreign evidence remains unknown. Neith
 exit nor failure releases an installation reservation, and watcher death can still
 leave an unknown outcome. Raw capture and original journals stay intact.
 
-For the narrow historical PATH failure, external-only `protocol retire-preinstall
-<id> --reason <text>` validates immutable parent/effect/source, exact unique failed
-capture, unchanged live target PID+creation+binary, and the retained script's early
-clean-check boundary. It archives originals and writes `aborted_preinstall` plus a
-retirement receipt; it does not claim installation, reset return cursors or replay
-the old request. Any partial-install/changed-target/unknown evidence refuses.
-Admission/bootstrap recognize only a receipt-bound released reservation. Use a
-fresh exact-source intent via the supported task bootstrap for an old observer;
-unknown effects remain blocked. Private capture mutations prove those refusals.
+For the narrow historical PATH failure or the pinned historical embedded-runtime
+check failure, external-only `protocol retire-preinstall <id> --reason <text>`
+validates immutable parent/effect/source, exact unique failed capture, unchanged
+live target PID+creation+binary, and the retained script's pre-install boundary.
+The embedded-check path additionally requires the exact retained deploy script
+SHA256 (`6d35ec43…`), failed result with empty installed identities, and native
+process-exit record bound to the full effect/PID/exit1/elapsed time. This is not a
+generic failed-result escape: other scripts, missing/foreign exit evidence,
+partial-install markers or changed target refuse. It archives original result,
+exit, capture and return evidence and writes `aborted_preinstall` plus a retirement
+receipt; it does not claim installation, reset return cursors or replay the old
+request. Admission/bootstrap recognize only a receipt-bound released reservation.
+
+An observer too old to perform this narrow retirement can use the existing checked
+`bootstrap-sentinel-deploy.ps1 -RetirePreinstallId <exact-id>` path (`-Check` first),
+with current published main SHA, parent and owner. The existing same-SID limited
+OS task restores its original launcher before invoking the hash-pinned source-built
+native retirement. This mode does not bootstrap an installer or clear any state
+itself. Inspect its generation result and native retirement receipt once. Only then
+may a separate fresh exact-source bootstrap proceed; unknown effects stay blocked.
+Run `test-sentinel-preinstall.cjs <built-sentinel> <fresh-evidence>` and `--post`,
+focused native reconcile tests and bootstrap parser/boundary tests. Private native
+proof mocks only owner/node-id HTTP and never runs an installer.
+
+A stale canonical build cache is not an installation. Preserve/quarantine old
+canonical target directories in a fresh evidence generation before a clean-source
+rebuild, verify unchanged published source and complete embedded module identities,
+and leave deploy/verify-install selecting their existing fixed canonical artifact
+paths. Do not rewrite historical evidence, hand-copy installed binaries or claim a
+causal cache diagnosis from failure to reproduce it.
 
 ## Quiet Windows observation
 

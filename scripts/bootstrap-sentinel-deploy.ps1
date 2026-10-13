@@ -1,9 +1,10 @@
 # Checked one-shot reuse of the existing limited logon task; no task registration or binary copy.
 param([switch]$Check,[Parameter(Mandatory=$true)][string]$ExpectedSha,[Parameter(Mandatory=$true)][string]$ParentSession,
  [string]$Owner='master',[string]$Install=(Join-Path $env:LOCALAPPDATA 'wasm-agent'),[string]$NodeHome=$env:USERPROFILE,
- [string]$Source=(Join-Path $env:USERPROFILE 'orca\projects\wasm-agent'))
+ [string]$Source=(Join-Path $env:USERPROFILE 'orca\projects\wasm-agent'),[string]$RetirePreinstallId='')
 $ErrorActionPreference='Stop'
 if($ExpectedSha -notmatch '^[a-f0-9]{40}$' -or $ParentSession -notmatch '^[a-zA-Z0-9-]+$' -or $Owner -notmatch '^[a-zA-Z0-9-]+$'){throw 'bootstrap_identity_invalid'}
+if($RetirePreinstallId -and $RetirePreinstallId -notmatch '^[a-zA-Z0-9-]{1,200}$'){throw 'bootstrap_retirement_identity_invalid'}
 $task=Get-ScheduledTask -TaskName 'wasm-agent-sentinel'
 $launcher=Join-Path $Install 'sentinel-task.cmd';$installed=Join-Path $Install 'wa-sentinel.exe';$candidate=Join-Path $Source 'rust\wa-sentinel\target\release\wa-sentinel.exe'
 if($task.Actions.Count -ne 1 -or [IO.Path]::GetFullPath($task.Actions[0].Execute) -ne [IO.Path]::GetFullPath($launcher) -or $task.Actions[0].Arguments){throw 'bootstrap_task_action_mismatch'}
@@ -17,18 +18,21 @@ if($LASTEXITCODE -ne 0 -or $pre.watcher -ne 'running' -or $pre.stop_file -or -no
 $box=Join-Path $NodeHome '.wasm-agent\sentinel';$effect=Join-Path $box 'protocol-effect.json'
 if(Test-Path $effect){
  $prior=(Get-Content $effect -Raw)|ConvertFrom-Json
- if($prior.phase -ne 'verified'){
+ if($RetirePreinstallId){
+  if($prior.phase -ne 'admitted' -or $prior.id -ne $RetirePreinstallId -or $prior.parent -ne $ParentSession -or $prior.owner -ne $Owner){throw 'bootstrap_retirement_generation_mismatch'}
+ }elseif($prior.phase -ne 'verified'){
   if($prior.phase -ne 'aborted_preinstall'){throw 'bootstrap_prior_effect_unsettled'}
   $retired=(& $candidate protocol retirement-status)|ConvertFrom-Json
   if($LASTEXITCODE -ne 0 -or -not $retired.released -or $retired.id -ne $prior.id){throw 'bootstrap_prior_effect_unsettled'}
  }
 }
+if($RetirePreinstallId -and -not(Test-Path $effect)){throw 'bootstrap_retirement_reservation_missing'}
 function Git([string[]]$Arguments){$raw=& git.exe -C $Source @Arguments;if($LASTEXITCODE -ne 0){throw 'bootstrap_source_git_failed'};return ($raw -join "`n").Trim()}
 if((Git @('branch','--show-current')) -ne 'main' -or (Git @('status','--porcelain')) -or (Git @('rev-parse','HEAD')) -ne $ExpectedSha -or (Git @('rev-parse','origin/main')) -ne $ExpectedSha -or ((Git @('ls-remote','origin','refs/heads/main')) -split '\s+')[0] -ne $ExpectedSha){throw 'bootstrap_clean_published_source_required'}
 if(-not(Test-Path $candidate)){throw 'bootstrap_candidate_missing'}
 $text=[IO.File]::ReadAllText($launcher)
 if(-not $text.Contains('"%~dp0wa-sentinel.exe" start') -or $text.Contains('bootstrap')){throw 'bootstrap_launcher_unknown_or_already_prepared'}
-if($Check){@{ok=$true;check_only=$true;expected_sha=$ExpectedSha;watcher_pid=$pre.watcher_pid;task_sid=$sid;no_binary_copy=$true}|ConvertTo-Json -Compress;exit}
+if($Check){@{ok=$true;check_only=$true;retirement_only=[bool]$RetirePreinstallId;expected_sha=$ExpectedSha;watcher_pid=$pre.watcher_pid;task_sid=$sid;no_binary_copy=$true}|ConvertTo-Json -Compress;exit}
 $generation=Join-Path $box ('task-bootstrap\'+[DateTime]::UtcNow.ToString('yyyyMMddTHHmmssfffffffZ'));New-Item -ItemType Directory $generation|Out-Null
 Copy-Item -LiteralPath $launcher -Destination (Join-Path $generation 'sentinel-task.cmd')
 [IO.File]::WriteAllText((Join-Path $generation 'scheduled-task.xml'),(Export-ScheduledTask -InputObject $task))
@@ -47,16 +51,20 @@ $env:WA_SENTINEL_SCRIPTS=Join-Path $plan.install 'scripts'
 $env:PATH='C:\Program Files\Git\cmd;C:\Program Files\Git\usr\bin;C:\Program Files\nodejs;'+$env:PATH
 Set-Location $plan.source
 $ErrorActionPreference='Continue'
-& $plan.candidate protocol bootstrap --expected-sha $plan.expected_sha --owner $plan.owner --session $plan.parent --reason 'Human-authorized existing-task bootstrap of current exact-source installer; installed observer predates native admission fixes; preserve old refusal/unknown records; no full release gate' 1> (Join-Path $generation 'stdout') 2> (Join-Path $generation 'stderr')
+if($plan.retire_id){
+ & $plan.candidate protocol retire-preinstall $plan.retire_id --reason 'Human-authorized unchanged-target pre-install retirement; preserve original failed installer/return evidence; no installer replay' 1> (Join-Path $generation 'stdout') 2> (Join-Path $generation 'stderr')
+}else{
+ & $plan.candidate protocol bootstrap --expected-sha $plan.expected_sha --owner $plan.owner --session $plan.parent --reason 'Human-authorized existing-task bootstrap of current exact-source installer; installed observer predates native admission fixes; preserve old refusal/unknown records; no full release gate' 1> (Join-Path $generation 'stdout') 2> (Join-Path $generation 'stderr')
+}
 $code=$LASTEXITCODE
 $ErrorActionPreference='Stop'
 @{exit=$code;at=[DateTime]::UtcNow.ToString('o');launcher_restored=$true;installation_complete=$false}|ConvertTo-Json -Compress|Set-Content (Join-Path $generation 'result.json')
 exit $code
 '@
 [IO.File]::WriteAllText($runner,$body,[Text.Encoding]::UTF8)
-@{candidate=$candidate;candidate_hash=$candidateHash;source=$Source;expected_sha=$ExpectedSha;parent=$ParentSession;owner=$Owner;home=$NodeHome;install=$Install;launcher=$launcher;original_hash=$originalHash}|ConvertTo-Json -Compress|Set-Content (Join-Path $generation 'plan.json')
+@{candidate=$candidate;candidate_hash=$candidateHash;retire_id=$RetirePreinstallId;source=$Source;expected_sha=$ExpectedSha;parent=$ParentSession;owner=$Owner;home=$NodeHome;install=$Install;launcher=$launcher;original_hash=$originalHash}|ConvertTo-Json -Compress|Set-Content (Join-Path $generation 'plan.json')
 $ps=Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
 $oneShot="@echo off`r`nrem bootstrap one-shot; runner restores original launcher before native effects`r`n`"$ps`" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$runner`"`r`nexit /b %errorlevel%`r`n"
 [IO.File]::WriteAllText($launcher+'.bootstrap',$oneShot,[Text.Encoding]::ASCII);Move-Item -LiteralPath ($launcher+'.bootstrap') -Destination $launcher -Force
 Start-ScheduledTask -InputObject $task
-@{ok=$true;os_task_started=$true;installation_complete=$false;generation=$generation;task_identity_preserved=$true;no_binary_copy=$true}|ConvertTo-Json -Compress
+@{ok=$true;os_task_started=$true;retirement_only=[bool]$RetirePreinstallId;installation_complete=$false;generation=$generation;task_identity_preserved=$true;no_binary_copy=$true}|ConvertTo-Json -Compress

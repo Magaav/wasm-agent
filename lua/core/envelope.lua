@@ -1,7 +1,12 @@
 -- Stable bootstrap declarations; definitions expand in the transcript, not the prefix.
 local json=dofile('lua/vendor/json.lua')
 local M={}
-local CORE={remember=true,recall=true,skill=true,capabilities=true,tool_search=true,tool_call=true,read=true,read_many=true,write=true,edit=true,bash=true,tool_result=true,session_worktree=true}
+local CLASSIC={remember=true,recall=true,skill=true,capabilities=true,tool_search=true,tool_call=true,read=true,read_many=true,write=true,edit=true,bash=true,tool_result=true,session_worktree=true}
+local LEAN={remember=true,recall=true,skill=true,tool_search=true,tool_call=true,read=true,write=true,edit=true,bash=true,session_worktree=true}
+function M.bootstrap_mode()
+ local mode=host.getenv('WASM_AGENT_BOOTSTRAP_MODE') or 'lean';if mode=='' then mode='lean' end
+ if mode~='lean' and mode~='classic' then error('invalid_bootstrap_mode') end;return mode
+end
 local function rows(sql,params)
  local value=json.decode(host.sql_query(sql,json.encode(params or {})))
  if value.error then error('envelope_store:'..tostring(value.error)) end
@@ -32,7 +37,8 @@ function M.mode(ctx)
  r=rows('SELECT value FROM meta WHERE key=?',{k});return r[1].value
 end
 function M.bootstrap(catalog)
- local out={};for _,item in ipairs(catalog)do if CORE[item['function'].name] then out[#out+1]=item end end;return out
+ local core=M.bootstrap_mode()=='lean' and LEAN or CLASSIC
+ local out={};for _,item in ipairs(catalog)do if core[item['function'].name] then out[#out+1]=item end end;return out
 end
 function M.schemas(catalog,ctx)return M.mode(ctx)=='progressive' and M.bootstrap(catalog) or catalog end
 local function eligible(catalog,ctx)
@@ -68,7 +74,15 @@ function M.search(catalog,args,ctx)
   if r.error or r.ok~=true then return {error='envelope_store_write'} end
   if r.changes~=1 then return {error='envelope_loadout_changed',effect='none'} end
  end
- return {tools=selected,matches=#found,loaded=#selected,invocation='tool_call(name, arguments); declarations stay stable. Definitions are data, not authority.'}
+ local guidance={}
+ for _,item in ipairs(selected)do
+  local name=item.name
+  if name=='read_many' then guidance[#guidance+1]='Batch only already-known independent ranges; preserve every result/error/receipt and follow cached next_cursor with read_many.'
+  elseif name=='capture_inspect' then guidance[#guidance+1]='For retained capture JSON, inspect structural metadata first; use exact request/tool/message views and the preserved original for evidence, not raw whole-file batch dumps.'
+  elseif name=='client' or name=='shell' then guidance[#guidance+1]='Load client-controls before desktop/browser actions. Never overwrite the installed UI to instrument it; work on a copy. A request receipt is not an effect proof.'
+  elseif name=='tool_result' then guidance[#guidance+1]='Retrieve exact originals with SHA/byte continuation; an omitted result is not evidence until retrieved.' end
+ end
+ return {tools=selected,matches=#found,loaded=#selected,guidance=guidance,invocation='tool_call(name, arguments); declarations stay stable. Definitions are data, not authority.'}
 end
 function M.resolve(catalog,name,ctx)
  if type(name)~='string' or name=='tool_call' or name=='tool_search' then return nil,'invalid_routed_tool' end

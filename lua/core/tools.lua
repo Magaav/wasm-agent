@@ -79,7 +79,7 @@ M.shared = {
     snapshot = { type = "string", description = "Carry the returned snapshot when continuing a metadata page." } }),
   schema("capabilities", "List the tools available to this account (its capabilities).", {}),
   schema('tool_search','Discover permitted tools and load exact definitions into this session. Then invoke with tool_call; discovery grants no permissions.',{query={type='string',maxLength=256},limit={type='integer',minimum=1,maximum=8}},{'query'}),
-  schema('tool_call','Invoke a tool previously loaded by tool_search with its documented arguments. The target retains every role, profile, workspace and effect check.',{name={type='string'},arguments={type='object'}},{'name','arguments'}),
+  schema('tool_call','Invoke a loaded tool by name/arguments; checked=true validates its current JSON schema first. Or preflight 1-8 known independent pure reads in calls (serial, not a transaction). Follow cached batch cursor without replay. All target permissions/effect/workspace checks remain.',{name={type='string'},arguments={type='object'},checked={type='boolean'},calls={type='array',minItems=1,maxItems=8,items={type='object',properties={name={type='string'},arguments={type='object'}},required={'name','arguments'}}},cursor={type='string'}}),
   schema("subagent", "Start and supervise a child agent (a subagent), using configured node placement, that works on a bounded task with its own fresh context, its own transcript and a restricted tool profile. `start` returns a durable receipt, not a result: the child runs in the background. Use `await` (one bounded wait, never repeated model polling) or `status`/`result` to collect it, and `cancel` to stop it. A placed task's own `state` says what the placement proved: `refused` means the destination answered that it started nothing, so the task will not run and `cancel` retracts it; `unknown` means a delivery may or may not have arrived, and only `reconcile` - which asks the destination whether it holds a run for that key - may then retry or cancel it. `attempts` counts how many times a destination was asked. You may only inspect or cancel the subagents you started. A profile's tools can only narrow your own; they can never grant more than you have. Use `list` to see your subagents and `profiles` to see what is approved. `session` reads the original child conversation; `message` queues its next turn with the same profile and model.", {
     action = { type = "string", enum = { "start", "status", "list", "result", "await", "cancel", "reconcile", "profiles", "message", "steer", "steer_session", "steering_status", "session", "events", "fleet" } },
     text = { type = "string", description = "message: queue a follow-up; steer: amend active child; steer_session: amend active main session. Steering fences calls not yet admitted, never undoes in-flight effects." },
@@ -361,6 +361,11 @@ if not batches_enabled then
   M.admin=ordinary
 end
 
+M.admin[#M.admin+1]=schema('capture_inspect','Inspect retained JSON model-request captures as bounded structural metadata before reading raw dumps. Exact request/tool/message views and complete hash-bound originals remain available. No inference or app calls.',{
+ path={type='string'},view={type='string',enum={'summary','request','tool','message'}},
+ offset={type='integer',minimum=0},limit={type='integer',minimum=1,maximum=8},snapshot={type='string'},
+ request_index={type='integer',minimum=1},item_index={type='integer',minimum=1}},{'path'})
+
 M.admin[#M.admin+1]=schema('web_search','Search public web sources; keep complete search evidence behind a cache ref. No browser actions or paid credentials.',{query={type='string',maxLength=512},limit={type='integer',minimum=1,maximum=10}},{'query'})
 M.admin[#M.admin+1]=schema('web_read','Read static public HTTPS text or page an immutable web cache ref. Returns citations, byte cursor and exact-source evidence. Not a JS-rendered browser/PDF reader.',{url={type='string'},ref={type='string'},offset={type='integer',minimum=0},limit={type='integer',minimum=4,maximum=16384},refresh={type='boolean'}})
 
@@ -370,6 +375,7 @@ function M.batch_enabled()return batches_enabled end
 -- Which capability tier each tool belongs to (DESIGN.md §8). Anything not
 -- listed here is a WASM plugin.
 M.tier_of = {
+  capture_inspect='environment',
   mcp='mcp', web_search='mcp', web_read='mcp',
   remember = "memory", recall = "memory", memories = "memory", forget = "memory",
   skill = "skills",
@@ -845,18 +851,17 @@ function M.dispatch(memory, name, args, role, ctx)
   local routed_catalog=ctx.subagent and M.all_for(ctx.subagent.allowed or {},role) or nil
   if name=='tool_search' then return envelope.search(routed_catalog or M.all(role),args,ctx) end
   if name=='tool_call' then
-    local selected,problem=envelope.resolve(routed_catalog or M.all(role),args.name,ctx)
-    if not selected then return {error=problem,effect='none'} end
-    if type(args.arguments)~='table' then return {error='tool_arguments_object_required',effect='none'} end
-    local original=ctx.tool_arguments_json
-    local fragment=envelope.argument_fragment(original)
-    if fragment and not fragment:match('^%s*{') then return {error='tool_arguments_object_required',effect='none'} end
-    for k in pairs(args.arguments)do if type(k)~='string' then return {error='tool_arguments_object_required',effect='none'} end end
-    ctx.tool_arguments_json=fragment or (next(args.arguments)==nil and '{}' or json.encode(args.arguments))
-    local ok,result=pcall(M.dispatch,memory,args.name,args.arguments,role,ctx)
-    ctx.tool_arguments_json=original
-    if not ok then error(result) end
-    return result
+    local scope=''
+    if args.calls~=nil or args.cursor~=nil then
+      local workspace=memory and ctx.session_id and memory.session_workspace and memory.session_workspace(ctx.session_id) or nil
+      scope=host.sha256(json.encode({kind='routed_read_batch',user=ctx.user_id or user_id,role=role,
+        session=ctx.session_id or '',cwd=memory and session_cwd(memory,ctx) or platform.cwd(),workspace=workspace,profile=ctx.subagent and ctx.subagent.allowed or nil}))
+    end
+    return dofile('lua/core/routed_calls.lua').invoke(routed_catalog or M.all(role),args,ctx,scope,function(target,parameters,fragment)
+      local original=ctx.tool_arguments_json;ctx.tool_arguments_json=fragment
+      local ok,result=pcall(M.dispatch,memory,target,parameters,role,ctx);ctx.tool_arguments_json=original
+      if not ok then error(result) end;return result
+    end)
   end
   if BATCH[name] then
     if not is_master(role) then return {error='forbidden_for_role:'..role} end
@@ -1091,6 +1096,9 @@ function M.dispatch(memory, name, args, role, ctx)
   elseif name == "read" then
     args.path = resolve_path(memory, ctx, args.path)
     return file_tools.read(args,function(entry) return memory.store_image(entry) end)
+  elseif name == 'capture_inspect' then
+    args.path=resolve_path(memory,ctx,args.path)
+    return dofile('lua/core/capture_view.lua').inspect(args)
   elseif name == "diagnose" then
     return diagnose.run(args.steps,function(tool,options)
       return M.dispatch(memory,tool,options,role,ctx)
@@ -1390,7 +1398,7 @@ end
 -- a call needs stopping only when it has one. A read-only allowlist, not an effectful one: a tool
 -- this file has never heard of (a plugin's) keeps the fence, which is the safe direction.
 local READ_ONLY = {
-  read = true, read_many = true, grep = true, grep_many=true, session_many=true,
+  read = true, read_many = true, capture_inspect=true, grep = true, grep_many=true, session_many=true,
   search_messages_many=true,symbol_source_many=true, ls = true, tool_result = true, skill = true,
   graph = true, diagnose = true, capabilities = true, tool_search=true, web_search=true,web_read=true,nodes = true,
   recall = true, memories = true, sessions = true, session = true,

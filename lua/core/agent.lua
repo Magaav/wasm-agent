@@ -339,6 +339,8 @@ local function guidelines_for(tool_list, envelope_mode)
     if have.read_many then
       add("When several known file reads are independent, request them together with read_many; "
         .. "keep dependent reads and edits in order")
+    elseif envelope_mode=='progressive' then
+      add('For several already-known independent read ranges, discover read_many; keep exact results/receipts and cached continuations. Do not batch interpretation-dependent reads or effects.')
     end
     add("When multiple tool actions are independent, request them together in one assistant response "
       .. "so the tool round can make progress without another model reply. The tool runner may "
@@ -353,9 +355,11 @@ local function guidelines_for(tool_list, envelope_mode)
   end
   add("For anything beyond a trivial command, write a script file and run it: "
     .. "a long one-liner passed through the shell loses its quoting and its backslashes")
-  add("Never overwrite the installed UI to instrument it - copy it somewhere first, "
-    .. "or the user's window starts running your probe")
-  add("Be concise in your responses")
+  if envelope_mode~='progressive' then
+    add("Never overwrite the installed UI to instrument it - copy it somewhere first, " ..
+      "or the user's window starts running your probe")
+    add("Be concise in your responses")
+  end
   add("Show file paths clearly when working with files")
   return list
 end
@@ -364,9 +368,9 @@ local function system_prompt(role, agents, agents_path, tool_list, envelope_mode
   local parts = { SYSTEM, "Running on: " .. ENVIRONMENT }
   local execution = role_block("orchestrator", role)
   if execution then parts[#parts + 1] = execution end
-  if tool_list and #tool_list > 0 then
-    -- pi lists the tools in the prompt as well as in the schemas: a model that
-    -- under-uses a tool is more likely to reach for it when it is named here.
+  if tool_list and #tool_list > 0 and envelope_mode~='progressive' then
+    -- Full/legacy prompts retain their tool index; progressive schemas already
+    -- declare the bootstrap and on-demand discovery supplies optional guidance.
     parts[#parts + 1] = tool_index(tool_list, "Available tools:")
     parts[#parts + 1] = "In addition to the tools above, you may have access to other tools " ..
       "depending on the project."
