@@ -22,7 +22,7 @@ These are two entry paths into one runtime:
 The fleet console serves these journeys. It is not the product's required first
 screen, and 32 workers are not a prerequisite for helping one customer.
 
-## Progressive envelope and working web — 2026-10-13 (source verified; installation pending)
+## Progressive envelope and working web — 2026-10-13 (source verified; installation refused)
 
 Latest published Pi1.2.0 (privately integrity-pinned; upstream `b9ab2a6238d2c91cf0c6ebf836dfd05883f9db51`)
 corrects the older inspection below: codemode uses compact server pointers,
@@ -65,6 +65,26 @@ verified source, not inspected production installation. Canonical-main integrati
 and remote readback are pinned in the delivery receipt; exact-source idle-safe
 Sentinel deployment and its actual verifier remain separate requirements. See `docs/PROGRESSIVE-ENVELOPE.md`; final measurement
 `pw-wave4/receipt.json`, recovery `pw-r4/receipt.json`, build `pw-build2/receipt.json`.
+Implementation merged/pushed/read back as `ca486f6d8f66c30ac1390621f48f4621dff1c50a`.
+Immutable Sentinel request `1791917148535224500-8800-00000000000000000000`
+failed before replacement: actual embedded-runtime check found stale `agent.lua`.
+Canonical cached `embedded.rs` still names `wa-terminal-disconnect-fix`; its
+old9ff08219 binary remained unchanged while Cargo reported a0.21s cached build.
+The retained candidate4f9a1b8f passes the same check against published canonical
+source: all65 Lua modules match. This proves the candidate, not installation.
+
+The exact failed request/result/process-exit and admitted reservation are preserved.
+Current retirement supports only the earlier PATH failure and rejects a request
+with `result.json`; ordinary reconciliation cannot call an uninstalled source
+verified. No second installer, hand-copy, reservation edit or fabricated settlement.
+Two small Cargo relocation experiments refreshed their baseline and did not prove
+a proposed root-environment fix; that proposal was archived and withdrawn, not
+promoted from weak evidence. Installation remains separately blocked on supported
+failed-preinstall reconciliation and a genuinely fresh canonical artifact.
+Git/source completion does not settle that runtime boundary. Final standalone
+HTML records this refusal rather than claiming an update; no full release gate.
+Evidence: `pw-build-investigation/`, `pw-embedded-main-proof/`, immutable request.
+
 Previous implementation/history/graph/skill-loading evidence remains unchanged.
 
 ## MCP/Pi context economics — 2026-10-13 (historical measurement; superseded implementation above)
