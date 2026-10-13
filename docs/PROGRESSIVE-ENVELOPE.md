@@ -14,8 +14,14 @@ tools rather than assuming routed reads overlap.
 
 The first system message and declaration array do not grow when optional tools
 are discovered. The transcript does grow by selected definitions and results.
-Skills retain their complete name/description/location metadata and on-demand
-bodies. Mandatory role/project instructions and reasoning replay are not cut.
+Optional skills, including WhatsApp, are discovered with `skill(query="<task>")`;
+metadata no longer populates new progressive prefixes. `skill(name="<match>")`
+returns the unchanged complete body and directory. Query `*` enumerates all
+visible metadata with explicit counts/offset/snapshot; changed catalogue or
+account/session/role/profile/workspace refuses continuation. Hidden metadata stays
+hidden; explicit hidden loading keeps its prior contract. Shared procedure policy
+stays once in the system prompt, not duplicated into every loaded skill reply.
+Mandatory role/project instructions and reasoning replay are not cut.
 No memory facts, spell catalogue, connector catalogue or web originals are injected.
 AGENTS.md is unchanged. Cached definitions are not free context; provider cache
 hits and billing savings are unmeasured by the shadow fixture.
@@ -35,6 +41,30 @@ profile declarations. `WASM_AGENT_ENVELOPE_MODE=full` is the explicit rollback.
 fail, not silently choose a mode. Default new-session promotion is the operator's
 requested treatment; the risk is an added discovery step and unmeasured autonomous
 model behavior beyond this small fixture. The escape hatch and evidence remain.
+
+## Skill discovery and remaining Pi gap
+
+The retained Pi1.2 SDK replay selects read/bash/edit/write/codemode and supplies
+no skill catalogue; it is not the complete autonomous Pi agent. The older patched
+capture lists WhatsApp only in skill metadata, not as a bootstrap tool. Its
+catalogue is9,256bytes and its13 tool schemas9,020bytes versus Pi's five4,479bytes.
+These are recorded treatment differences, not proof our routing facade has the
+same execution semantics or cost as Pi's JavaScript codemode.
+
+`test-skill-discovery.cjs <candidate-wa> <fresh-evidence> <baseline-wa>` and
+`--post` exercise source/embedded discovery, complete bodies, caller/metadata
+snapshots, hidden/guest/profile boundaries, fixed-prefix growth and an exact
+old-API negative control. Native embedded before/after captures hold the source
+cwd/current catalogue constant. Run existing envelope and complete-body proofs too.
+The scope is serialized bytes and deterministic contracts, not provider tokens,
+billing, cache hit rates or autonomous task quality. First unknown procedure use
+can add a discovery round; lexical search can miss synonyms. Known names load
+directly and complete enumeration remains available. Full mode is the rollback.
+
+Next candidates are a measured smaller bootstrap and task-specific guidance, not
+blindly removing memory, workspace, role or unknown-effect safety to match Pi's
+schema count. A true script codemode would need separate execution/security and
+quality evidence; this change does not introduce one or claim parity.
 
 ## MCP reads, writes and results
 

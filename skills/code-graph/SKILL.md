@@ -1,9 +1,13 @@
 ---
 name: code-graph
-description: Retrieve a ranked code symbol and its exact implementation, answer explicit dependency questions, or audit a patch's possible missed callers. Use for concept-to-code discovery where broad file reads would be wasteful; grep remains the fallback for absent or low-confidence results.
+description: Retrieve a ranked code symbol and its exact implementation, answer explicit dependency questions, or audit a patch's possible missed callers. Use for concept-to-code discovery where broad file reads would be wasteful; grep remains the fallback for absent or low-confidence results. Whenever you use graph, briefly explain in the final answer whether it helped your reasoning and why.
 ---
 
 # Symbol retrieval, dependency leads and patch impact
+
+Whenever you use graph, include a brief final-answer assessment of whether it
+helped your reasoning and why, including a concrete limitation when it did not.
+Do not equate static leads with correctness or measured test coverage.
 
 Use graph for discovery and static relationships. An empty result is not proof
 of absence. Inspect source before editing; investigate relevant unresolved edges.

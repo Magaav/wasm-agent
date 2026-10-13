@@ -42,6 +42,13 @@ plus `--post`; use the verified direct CLI in required workspaces. Also run
 See `<repo>/docs/PROGRESSIVE-ENVELOPE.md`. The tiny three-way shadow measures
 serialized bytes and replay mechanics, not autonomous quality or paid tokens.
 
+For skill-metadata envelope changes, `skill-discovery-proof` records
+`node <repo>/scripts/test-skill-discovery.cjs <candidate-wa> <fresh-evidence> <baseline-wa>`
+plus `--post`; required workspaces use this verified direct CLI, not unsupported
+replay. Also run complete skill-body and progressive-envelope proofs. Preserve
+scope/snapshot refusals and shared safety policy; first-use discovery and lexical
+misses remain risks. Bytes alone do not establish autonomous quality or billing.
+
 For `read_many` packing changes, `read-batch-packing-proof` records
 `node <repo>/scripts/test-read-batch.cjs <built-wa> <fresh-evidence> <capture>`
 plus `--post`; required worktrees use that verified direct CLI. Verify whole
