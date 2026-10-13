@@ -343,6 +343,16 @@ Also run `scripts/test-ui.ps1`; installation must separately verify candidate
 binary and served UI. Regeneration is inference-only; unknown effects are never
 replayed, and a permanent outage can still exhaust the original request deadline.
 
+## Subscription keepalive recovery proof
+
+`subscription-keepalive-proof` records the verified sequence:
+`node <repo>/scripts/test-subscription-keepalive.cjs <built-wa> <fresh-evidence>`,
+then the same command with `--post`. Required workspaces use this direct CLI,
+not unsupported spell replay. Also run `test-subscription-terminal.cjs` and its
+`--post` for real local sockets and the source/embedded actual agent loop.
+Known heartbeat objects are nonsemantic; malformed or unknown payloads retain
+no-replay safety. Candidate proof is not installation or a network guarantee.
+
 ## The zero-downtime path, for Lua-only changes
 
 Only development nodes explicitly started with `WASM_AGENT_LUA_ROOT` read Lua

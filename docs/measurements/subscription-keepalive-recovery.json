@@ -1,0 +1,43 @@
+{
+  "review": "self-review; direct workflow; no subagents",
+  "base_commit": "e6ceaa49f3eb2616790cb02a41c0b1234e8e131d",
+  "historical_failure": {
+    "run_id": "b4a7c9de-99bf-4e49-83dc-c8d312eaa3bc",
+    "telemetry_seq": 137416,
+    "span_id": "597d02e3-7f92-439b-9a7f-281ac24d21d9",
+    "attempt": 1,
+    "retry_limit": 10,
+    "lines": 406,
+    "retryable": true,
+    "retry_safe": false,
+    "blocker": {"event": "keepalive", "reason": "unsupported_event"},
+    "evidence": "session-scratch/66333539356236392d356133332d346530622d626566632d653232336537613466306231/subscription-failure-406.json",
+    "limitation": "The event classification is retained, not the raw heartbeat payload or all 406 SSE lines. The upstream socket-close cause remains unknown."
+  },
+  "fix": {
+    "contract": "Treat JSON object keepalive control frames as nonsemantic. Accept optional type=keepalive and optional finite nonnegative integer sequence_number; accept named SSE keepalive with an empty JSON object. SSE comments remain unchanged.",
+    "safety": "Malformed JSON remains a protocol error. Semantic/unknown heartbeat fields and nonobject envelopes mark recovery unsafe. Unknown event/item and prior blockers remain unsafe; keepalive never clears them, settles a response, emits an answer, or dispatches tools.",
+    "recovery": "Existing bounded retry, original deadline, cancellation, durable retry diagnostics and earlier committed tool rounds remain unchanged. Only the unfinished inference response regenerates. No reconnect watcher, default retry-count change, provider fallback, or process-restart resume mechanism is added.",
+    "risk": "Conservative heartbeat metadata validation can refuse a future protocol shape until it is inspected and explicitly supported. Candidate fixtures prove the documented control-frame contract, not the unretained historical body or a guarantee against network disconnects."
+  },
+  "verification": {
+    "candidate_sha256": "9e5192ecd60131b061fb3da2361e7f61cf0dde3f599ba5c9581dc5c044378236",
+    "control_frame_checks": 59,
+    "control_modes": "29 source + 29 embedded + exact pre-fix wire causal refusal",
+    "socket_and_agent_checks": 167,
+    "socket_scope": "Real private localhost pre-terminal reset after keepalive and an uncommitted tool; identical request bodies on retry. Source/embedded actual agent loop preserves earlier effects and excludes abandoned tools. Permanent failures, terminal teardown, unknown effects, cancellation and original deadline are retained.",
+    "regression_checks": 426,
+    "regression_modes": "Source and embedded wire175, native default28, pending output3, retry context7",
+    "read_batch_checks": 92,
+    "read_scope": "Exact original six-result overflow, cached originals, scope/receipt/integrity fences and separate native-process continuation; unchanged 50KiB budget.",
+    "evidence_generations": ["ka-controls1", "ka-sockets1", "ka-regressions1", "ka-read-batch1"],
+    "paid_calls": 0,
+    "live_provider_calls": 0,
+    "gate_verified": false,
+    "release_verified": false
+  },
+  "installation": {
+    "verified": false,
+    "blocker": "Previous failed exact-source Sentinel request 1791917148535224500-8800-00000000000000000000 remains admitted. Its embedded runtime check refused installation. No request replay, reservation mutation, binary hand-copy or new deployment was performed."
+  }
+}
