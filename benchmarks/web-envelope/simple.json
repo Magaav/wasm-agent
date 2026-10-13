@@ -1,0 +1,16 @@
+{
+  "name": "two-source-mcp-research",
+  "scope": "Extremely simple, model-free shadow fixture; not autonomous agent quality",
+  "question": "Which local transport and tool-list method does MCP use? Cite the two sources.",
+  "followup": "What notification finishes initialization? Re-read the tools source from its cached ref.",
+  "query": "MCP local transport tool list",
+  "clock": "2026-10-13T16:00:00Z",
+  "sources": [
+    {"url":"https://fixture.test/transports","title":"MCP transports","html":"<html><title>MCP transports</title><p>Local MCP servers communicate with clients over stdio.</p><p>This reference is a short authored protocol fixture, not a fetched live page.</p></html>"},
+    {"url":"https://fixture.test/tools","title":"MCP tools","html":"<html><title>MCP tools</title><p>The tools/list method discovers the server's tools.</p><p>The client sends notifications/initialized after initialization.</p></html>"}
+  ],
+  "required_facts": ["stdio", "tools/list", "notifications/initialized"],
+  "expected_tool_calls": 4,
+  "experimental_repetitions": 25,
+  "no_artificial_delay": true
+}

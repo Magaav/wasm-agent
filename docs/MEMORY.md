@@ -227,7 +227,12 @@ tokens — **93% of the input was reused**, and cache hits bill at roughly a ten
 of misses.
 
 The prefix is stable by construction: `system (+AGENTS.md) → tools → transcript`,
-append-only, deterministic tier order. Each llm span records a `prefix`
+append-only, deterministic tier order. New progressive sessions keep bootstrap
+schemas stable and load optional exact definitions in tool results, not by
+rewriting the first message. Existing conversations retain their full surface;
+see [PROGRESSIVE-ENVELOPE.md](PROGRESSIVE-ENVELOPE.md). Definitions remain in full
+history and may need rediscovery after compaction; the session's hash-fenced loaded
+names do not prove model awareness. Each llm span records a `prefix`
 fingerprint so a cache-hostile change is visible rather than mysterious.
 
 What invalidates it: **compaction** (rewrites the middle), **editing AGENTS.md**

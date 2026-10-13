@@ -10,6 +10,8 @@ local patch_audit = dofile("lua/core/patch_audit.lua")
 local tool_output = dofile("lua/core/tool_output.lua")
 local file_tools = dofile("lua/core/file_tools.lua")
 local mcp = dofile('lua/core/mcp.lua')
+local envelope = dofile('lua/core/envelope.lua')
+local web = dofile('lua/core/web.lua')
 local batch_tools = dofile("lua/core/batch_tools.lua")
 local evidence_view = dofile("lua/core/evidence_view.lua")
 local diagnose = dofile("lua/core/diagnose.lua")
@@ -71,6 +73,8 @@ M.shared = {
   schema("skill", "Load a skill: the full instructions for a specialized task listed in your context. Read the one that matches before starting that kind of work.", {
     name = { type = "string", description = "The skill's name, as listed in <available_skills>." } }, { "name" }),
   schema("capabilities", "List the tools available to this account (its capabilities).", {}),
+  schema('tool_search','Discover permitted tools and load exact definitions into this session. Then invoke with tool_call; discovery grants no permissions.',{query={type='string',maxLength=256},limit={type='integer',minimum=1,maximum=8}},{'query'}),
+  schema('tool_call','Invoke a tool previously loaded by tool_search with its documented arguments. The target retains every role, profile, workspace and effect check.',{name={type='string'},arguments={type='object'}},{'name','arguments'}),
   schema("subagent", "Start and supervise a child agent (a subagent), using configured node placement, that works on a bounded task with its own fresh context, its own transcript and a restricted tool profile. `start` returns a durable receipt, not a result: the child runs in the background. Use `await` (one bounded wait, never repeated model polling) or `status`/`result` to collect it, and `cancel` to stop it. A placed task's own `state` says what the placement proved: `refused` means the destination answered that it started nothing, so the task will not run and `cancel` retracts it; `unknown` means a delivery may or may not have arrived, and only `reconcile` - which asks the destination whether it holds a run for that key - may then retry or cancel it. `attempts` counts how many times a destination was asked. You may only inspect or cancel the subagents you started. A profile's tools can only narrow your own; they can never grant more than you have. Use `list` to see your subagents and `profiles` to see what is approved. `session` reads the original child conversation; `message` queues its next turn with the same profile and model.", {
     action = { type = "string", enum = { "start", "status", "list", "result", "await", "cancel", "reconcile", "profiles", "message", "steer", "steer_session", "steering_status", "session", "events", "fleet" } },
     text = { type = "string", description = "message: queue a follow-up; steer: amend active child; steer_session: amend active main session. Steering fences calls not yet admitted, never undoes in-flight effects." },
@@ -351,16 +355,19 @@ if not batches_enabled then
   M.admin=ordinary
 end
 
+M.admin[#M.admin+1]=schema('web_search','Search public web sources; keep complete search evidence behind a cache ref. No browser actions or paid credentials.',{query={type='string',maxLength=512},limit={type='integer',minimum=1,maximum=10}},{'query'})
+M.admin[#M.admin+1]=schema('web_read','Read static public HTTPS text or page an immutable web cache ref. Returns citations, byte cursor and exact-source evidence. Not a JS-rendered browser/PDF reader.',{url={type='string'},ref={type='string'},offset={type='integer',minimum=0},limit={type='integer',minimum=4,maximum=16384},refresh={type='boolean'}})
+
 function M.batch_base(name)return BATCH[name] and BATCH[name].base end
 function M.batch_enabled()return batches_enabled end
 
 -- Which capability tier each tool belongs to (DESIGN.md §8). Anything not
 -- listed here is a WASM plugin.
 M.tier_of = {
-  mcp='mcp',
+  mcp='mcp', web_search='mcp', web_read='mcp',
   remember = "memory", recall = "memory", memories = "memory", forget = "memory",
   skill = "skills",
-  capabilities = "capabilities",
+  capabilities = "capabilities", tool_search='capabilities', tool_call='capabilities',
   subagent = "subagents",
   sessions = "sessions", session = "sessions", search_messages = "sessions",
   session_many = "sessions", search_messages_many = "sessions",
@@ -445,6 +452,10 @@ local CUES = {
   forget = "Delete a stored fact by id",
   skill = "Load a skill's full instructions by name",
   capabilities = "List the tools this account may use",
+  tool_search = 'Discover and load a permitted tool definition',
+  tool_call = 'Call a discovered tool without expanding permanent declarations',
+  web_search='Search public web sources with retained evidence',
+  web_read='Read a public source or page an immutable cache ref',
   subagent = "Start and collect a child agent on a bounded task",
   sessions = "List your past sessions",
   session = "Read a session, paging earlier evidence",
@@ -542,6 +553,11 @@ function M.all(role)
     if not PROMPT_HIDDEN[item["function"].name] then shown[#shown + 1] = item end
   end
   return shown
+end
+
+function M.envelope(role,ctx)
+  ctx=ctx or {};ctx.role=role or 'guest'
+  return envelope.schemas(M.all(role),ctx),envelope.mode(ctx)
 end
 
 -- Tool schemas restricted to an exact allowed set (a subagent profile). The
@@ -810,6 +826,7 @@ function M.dispatch(memory, name, args, role, ctx)
   role = role or "guest"
   ctx = ctx or {}
   local user_id = ctx.user_id or "master"
+  ctx.role=role
   -- A subagent runs only the exact tools its profile named. Checked here as well
   -- as in the schema list it was offered: a model can ask for a tool it was not
   -- offered, and a schema filter that is not re-checked is not a boundary.
@@ -819,6 +836,22 @@ function M.dispatch(memory, name, args, role, ctx)
     if name == "subagent" then return { error = "subagent_recursion_forbidden" } end
   end
   if not is_master(role) and admin_names()[name] then return { error = "forbidden_for_role:" .. role } end
+  local routed_catalog=ctx.subagent and M.all_for(ctx.subagent.allowed or {},role) or nil
+  if name=='tool_search' then return envelope.search(routed_catalog or M.all(role),args,ctx) end
+  if name=='tool_call' then
+    local selected,problem=envelope.resolve(routed_catalog or M.all(role),args.name,ctx)
+    if not selected then return {error=problem,effect='none'} end
+    if type(args.arguments)~='table' then return {error='tool_arguments_object_required',effect='none'} end
+    local original=ctx.tool_arguments_json
+    local fragment=envelope.argument_fragment(original)
+    if fragment and not fragment:match('^%s*{') then return {error='tool_arguments_object_required',effect='none'} end
+    for k in pairs(args.arguments)do if type(k)~='string' then return {error='tool_arguments_object_required',effect='none'} end end
+    ctx.tool_arguments_json=fragment or (next(args.arguments)==nil and '{}' or json.encode(args.arguments))
+    local ok,result=pcall(M.dispatch,memory,args.name,args.arguments,role,ctx)
+    ctx.tool_arguments_json=original
+    if not ok then error(result) end
+    return result
+  end
   if BATCH[name] then
     if not is_master(role) then return {error='forbidden_for_role:'..role} end
     if not batches_enabled then return {error='batch_tools_disabled',effect='none'} end
@@ -872,6 +905,11 @@ function M.dispatch(memory, name, args, role, ctx)
     if not claimed.ok then claimed=reuse_own_client_claim(ctx,claimed) end
     if not claimed.ok then return claimed end
     ctx.resource_effect_generation=(ctx.resource_effect_generation or 0)+1
+  end
+  if name=='web_search' or name=='web_read' then
+    if not is_master(role) then return {error='forbidden_for_role:'..role} end
+    ctx.cwd=session_cwd(memory,ctx)
+    return web.call(mcp,name=='web_search' and 'search' or 'read',args,ctx)
   end
   if name=='mcp' then
     local control={role=role,subagent=ctx.subagent,session_id=ctx.session_id,cwd=session_cwd(memory,ctx)}
@@ -1336,7 +1374,7 @@ end
 local READ_ONLY = {
   read = true, read_many = true, grep = true, grep_many=true, session_many=true,
   search_messages_many=true,symbol_source_many=true, ls = true, tool_result = true, skill = true,
-  graph = true, diagnose = true, capabilities = true, nodes = true,
+  graph = true, diagnose = true, capabilities = true, tool_search=true, web_search=true,web_read=true,nodes = true,
   recall = true, memories = true, sessions = true, session = true,
   search_messages = true, search_ledger = true, conversation = true, list_conversations = true,
   spell_list = true, spell_get = true,

@@ -1,0 +1,36 @@
+'use strict';
+// Three-way deterministic shadow replay. Never launches an inference solver or live app.
+const fs=require('node:fs'),cp=require('node:child_process'),path=require('node:path'),crypto=require('node:crypto'),assert=require('node:assert/strict');
+const argv=process.argv.slice(2),post=argv[0]==='--post';if(post)argv.shift();
+if(argv.length<4)throw Error('usage: [--post] bench-web-envelope.cjs <frozen-baseline> <private-pi-prefix> <wa-binary> <fresh-evidence> [runs]');
+const [baseline,pi,binary,evidence]=argv.slice(0,4).map(v=>path.resolve(v)),runs=Number(argv[4]||25),repo=path.resolve(__dirname,'..'),receiptFile=path.join(evidence,'receipt.json'),sha=b=>crypto.createHash('sha256').update(b).digest('hex'),hash=f=>sha(fs.readFileSync(f));
+const sourceFiles=['lua/core/envelope.lua','lua/core/agent.lua','lua/core/tools.lua','lua/core/mcp.lua','lua/core/mcp_session.lua','lua/core/web.lua','scripts/mcp-client-core.mjs','scripts/mcp-client.mjs','scripts/mcp-server-core.mjs','scripts/mcp-session.mjs','scripts/web-core.mjs','scripts/mcp-web.mjs','scripts/fixtures/web-shadow-peer.mjs','scripts/bench-web-arm.lua','scripts/bench-web-pi.mjs','scripts/bench-web-envelope.cjs','scripts/web-shadow-oracle.cjs','benchmarks/web-envelope/simple.json'];
+if(post){const r=JSON.parse(fs.readFileSync(receiptFile));assert(r.ok);for(const [f,h]of Object.entries(r.hashes))assert.equal(hash(f),h,'changed evidence/source '+f);console.log(JSON.stringify({ok:true,post:true,trials:r.trials.length,checks:r.trials.reduce((n,t)=>n+t.oracle.checks,0)}));process.exit(0);}
+assert(Number.isInteger(runs)&&runs>=1&&runs<=30);fs.mkdirSync(evidence);const fixture=JSON.parse(fs.readFileSync(path.join(repo,'benchmarks/web-envelope/simple.json'))),oracle=require('./web-shadow-oracle.cjs');
+const hashes=Object.fromEntries([binary,...sourceFiles.map(f=>path.join(repo,f)),...['lua/core/agent.lua','lua/core/tools.lua','lua/core/mcp.lua','scripts/mcp-client-core.mjs'].map(f=>path.join(baseline,f)),path.join(pi,'node_modules/@earendil-works/pi-coding-agent/package.json')].map(f=>[f,hash(f)]));
+const piFiles=['package.json','dist/extensions/mcp/runtime.js','dist/extensions/mcp/tools.js','dist/extensions/mcp/index.js','dist/extensions/codemode/tool.js','dist/extensions/codemode/execute.js','dist/core/system-prompt.js'].map(f=>path.join(pi,'node_modules/@earendil-works/pi-coding-agent',f));
+for(const f of piFiles)hashes[f]=hash(f);
+const envBase=Object.fromEntries(Object.entries(process.env).filter(([k])=>!/^(WA_|WASM_AGENT_|PI_|OPENAI_|ANTHROPIC_|OPENCODE_|BRAVE_|TAVILY_|FIRECRAWL_)/i.test(k))),trials=[];let failure;
+const begin=performance.now();
+try{for(let repetition=0;repetition<runs;repetition++){
+ const orders=[['current','patched','pi'],['pi','current','patched'],['patched','pi','current']];
+ for(const arm of orders[repetition%orders.length]){
+  const out=path.join(evidence,arm+'-'+String(repetition+1).padStart(2,'0'));fs.mkdirSync(out);const env={...envBase,HOME:out,USERPROFILE:out,PI_CODING_AGENT_DIR:out+'/private-pi'};let program,args;
+  if(arm==='pi'){program=process.execPath;args=[path.join(repo,'scripts/bench-web-pi.mjs'),pi,repo,out];}
+  else{program=binary;args=['--db',out+'/private.db'];Object.assign(env,{WASM_AGENT_HOME:out,WASM_AGENT_LUA_ROOT:arm==='current'?baseline:repo,WA_SCRIPT:path.join(repo,'scripts/bench-web-arm.lua'),WEB_SHADOW_OUT:out,WEB_SHADOW_SOURCE:repo,WEB_SHADOW_ARM:arm,WA_NODE:process.execPath,WA_WEB_ADAPTER_SCRIPT:path.join(repo,'scripts/fixtures/web-shadow-peer.mjs'),WA_GRAPH_WATCH:'0',WASM_AGENT_MANAGED:'0'});}
+  const t=performance.now(),r=cp.spawnSync(program,args,{cwd:repo,env,encoding:'utf8',windowsHide:true,timeout:90000,maxBuffer:8*1024*1024}),wall_ms=performance.now()-t;
+  for(const s of ['stdout','stderr']){const file=path.join(out,s+'.log');fs.writeFileSync(file,r[s]||'');hashes[file]=hash(file);}
+  assert.equal(r.status,0,arm+' failed: '+r.stderr+' '+r.stdout+' '+r.error?.message);
+  const file=path.join(out,'arm.json'),data=JSON.parse(fs.readFileSync(file)),readLines=f=>fs.readFileSync(f,'utf8').trim().split('\n').filter(Boolean).map(JSON.parse),protocol=readLines(data.protocol_log),fetches=readLines(data.fetch_log);
+  const acceptance=oracle(data,fixture,protocol,fetches);for(const f of [file,data.protocol_log,data.fetch_log])hashes[f]=hash(f);
+  // Prove the scorer is not a permanently green parser.
+  if(repetition===0){const bad=structuredClone(data);bad.answer='lost necessary facts';assert.throws(()=>oracle(bad,fixture,protocol,fetches));const duplicate=[...protocol,{pid:0,method:'tools/call'}];assert.throws(()=>oracle(data,fixture,duplicate,fetches));}
+  const bytes=v=>Buffer.byteLength(typeof v==='string'?v:JSON.stringify(v)),first=data.requests[0],initial_system_bytes=bytes(first.messages[0].content),initial_schema_bytes=bytes(first.tools),response_bytes=data.tool_results.reduce((n,v)=>n+bytes(v.content),0);
+  const entry={arm,repetition:repetition+1,wall_ms,setup_ms:data.setup_ms,first_ms:data.first_ms,followup_ms:data.followup_ms,task_ms:data.first_ms+data.followup_ms,initial_tool_count:first.tools.length,initial_schema_bytes,initial_system_bytes,initial_envelope_bytes:bytes({messages:[first.messages[0]],tools:first.tools}),peak_request_bytes:Math.max(...data.requests.map(bytes)),final_request_bytes:bytes(data.requests.at(-1)),tool_response_bytes:response_bytes,recorded_model_requests:data.requests.length,provider_calls:0,server_processes:new Set(protocol.map(v=>v.pid)).size,protocol_messages:protocol.length,handshakes:protocol.filter(v=>v.method==='initialize').length,catalogue_lists:protocol.filter(v=>v.method==='tools/list').length,app_tool_calls:protocol.filter(v=>v.method==='tools/call').length,backend_fetches:fetches.length,oracle:acceptance,artifact:path.relative(evidence,file)};
+  trials.push(entry);console.log(JSON.stringify({arm,repetition:repetition+1,ok:true,task_ms:Math.round(entry.task_ms),initial_schema_bytes,server_processes:entry.server_processes}));
+ }
+}}catch(e){failure=String(e);process.exitCode=1;}
+const fields=['wall_ms','setup_ms','task_ms','first_ms','followup_ms','initial_schema_bytes','initial_system_bytes','initial_envelope_bytes','peak_request_bytes','final_request_bytes','tool_response_bytes'];
+const stats=values=>{const v=values.slice().sort((a,b)=>a-b);return {min:v[0],median:v[Math.floor(v.length/2)],p95:v[Math.min(v.length-1,Math.ceil(v.length*.95)-1)],max:v.at(-1)};};
+const groups=Object.fromEntries(['current','patched','pi'].map(arm=>{const items=trials.filter(t=>t.arm===arm);return [arm,{count:items.length,verified:items.filter(t=>t.oracle.ok).length,stats:Object.fromEntries(fields.map(f=>[f,stats(items.map(t=>t[f]))]))}];}));
+const result={ok:!failure&&trials.length===runs*3,error:failure,runs,elapsed_ms:performance.now()-begin,scope:'Recorded model-free shadow replay; actual native wasm loop and published Pi SDK/codemode, not autonomous inference/CLI ranking',fixture,groups,trials,hashes,provider_tokens:null,provider_cache_hits:null,financial_savings:null,provider_calls:0,real_apps_touched:false,gate_verified:false,release_verified:false};fs.writeFileSync(receiptFile,JSON.stringify(result,null,2)+'\n');console.log(JSON.stringify({ok:result.ok,error:failure,trials:trials.length,elapsed_ms:result.elapsed_ms,groups,evidence}));

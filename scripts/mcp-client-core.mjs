@@ -64,14 +64,19 @@ async function stdio(server,signal,stats){
   bytes+=chunk.length;if(bytes>MAX_BYTES)fail('mcp_stream_too_large');buffer+=decoder.decode(chunk,{stream:true});
   if(Buffer.byteLength(buffer)>MAX_LINE&&!buffer.includes('\n'))fail('mcp_line_too_large');
   let at;while((at=buffer.indexOf('\n'))>=0){const line=buffer.slice(0,at).replace(/\r$/,'');buffer=buffer.slice(at+1);if(!line.trim())fail('mcp_non_protocol_stdout');if(Buffer.byteLength(line)>MAX_LINE)fail('mcp_line_too_large');const message=validateMessage(JSON.parse(line));
-   if(message.method){if('id'in message)send({jsonrpc:'2.0',id:message.id,...(message.method==='ping'?{result:{}}:{error:{code:-32601,message:'Client feature not supported'}})});else stats.notifications++;continue;}
+   if(message.method){if('id'in message)send({jsonrpc:'2.0',id:message.id,...(message.method==='ping'?{result:{}}:{error:{code:-32601,message:'Client feature not supported'}})});else {stats.notifications++;if(message.method==='notifications/tools/list_changed'){stats.tools_generation=(stats.tools_generation||0)+1;stats.tools_changed=true;}}continue;}
    const slot=pending.get(message.id);if(!slot)fail('mcp_unmatched_or_duplicate_response');pending.delete(message.id);slot.resolve(message);
   }
  }catch(error){fault=error;rejectAll(error);child.kill();}});
  return {
   async request(method,params){if(fault)throw fault;if(closed)throw closedError();const id=randomUUID();return new Promise((resolve,reject)=>{pending.set(id,{resolve,reject});try{send({jsonrpc:'2.0',id,method,params});}catch(error){pending.delete(id);reject(error);}});},
   async notify(method,params){send({jsonrpc:'2.0',method,params});},
-  async close(){signal.removeEventListener('abort',abort);if(!closed){child.stdin.end();await Promise.race([new Promise(r=>child.once('close',r)),new Promise(r=>setTimeout(r,200))]);if(!closed)child.kill();await Promise.race([new Promise(r=>child.once('close',r)),new Promise(r=>setTimeout(r,1000))]);}if(!closed)fail('mcp_server_cleanup_unverified');stats.stderr=stderr;if(fault)throw fault;},
+  async close(){
+   signal.removeEventListener('abort',abort);
+   const waitClosed=async ms=>{if(closed)return;let timer,listener;try{await Promise.race([new Promise(r=>{listener=r;child.once('close',listener);}),new Promise(r=>{timer=setTimeout(r,ms);})]);}finally{clearTimeout(timer);if(listener)child.removeListener('close',listener);}};
+   if(!closed){child.stdin.end();await waitClosed(200);if(!closed){child.kill();await waitClosed(1000);}}
+   if(!closed)fail('mcp_server_cleanup_unverified');stats.stderr=stderr;if(fault)throw fault;
+  },
  };
 }
 async function http(server,signal,stats){
@@ -98,6 +103,55 @@ async function http(server,signal,stats){
  return {request:(method,params)=>post({jsonrpc:'2.0',id:randomUUID(),method,params}),notify:(method,params)=>post({jsonrpc:'2.0',method,params}),setVersion:value=>{version=value;},async close(){if(session){if(signal.aborted)fail('mcp_http_session_cleanup_unverified');const result=await fetch(server.url,{method:'DELETE',redirect:'error',headers:{...credentials,'Mcp-Session-Id':session,'MCP-Protocol-Version':version},signal});if(!result.ok&&result.status!==405)fail('mcp_http_session_cleanup_'+result.status);await result.body?.cancel();}}};
 }
 function resultOf(reply){if(reply.error){const error=Error('mcp_rpc_error:'+String(reply.error.code)+':'+String(reply.error.message));error.rpc_error=reply.error;throw error;}if(!object(reply.result))fail('invalid_mcp_result');return reply.result;}
+// Session connection used only by approved read facades. Writes retain request-scoped settlement.
+export async function openMCP(server){
+ validateServer(server);const credentials=secretPolicy(server),stats={notifications:0};
+ const controller=new AbortController();let timer=setTimeout(()=>controller.abort(),(server.timeout_seconds||30)*1000),transport,metadata,poisoned=false,busy=false;
+ async function discover(){
+  const generation=stats.tools_generation||0;
+  const tools=[],cursors=new Set();let cursor;
+  for(let pages=0;pages<32;pages++){
+   const page=toolList(resultOf(await transport.request('tools/list',cursor?{cursor}:{})));tools.push(...page.tools);if(tools.length>1000)fail('mcp_tool_count_exceeds_bound');
+   if(page.nextCursor===undefined)break;if(typeof page.nextCursor!=='string'||!page.nextCursor||cursors.has(page.nextCursor)||pages===31)fail('invalid_mcp_tools_cursor');cursors.add(page.nextCursor);cursor=page.nextCursor;
+  }
+  if(new Set(tools.map(t=>t.name)).size!==tools.length)fail('duplicate_mcp_tool_name');
+  if(credentials.contains(tools))fail('mcp_metadata_contains_configured_credential');
+  stats.tools_changed=(stats.tools_generation||0)!==generation;return tools;
+ }
+ try{
+  transport=server.transport==='stdio'?await stdio(server,controller.signal,stats):await http(server,controller.signal,stats);
+  const initialized=resultOf(await transport.request('initialize',{protocolVersion:VERSIONS[0],capabilities:{},clientInfo:{name:'wasm-agent',version:'1'}}));
+  if(!VERSIONS.includes(initialized.protocolVersion)||!object(initialized.capabilities)||!object(initialized.serverInfo))fail('unsupported_mcp_initialize');
+  if(credentials.contains(initialized.serverInfo))fail('mcp_metadata_contains_configured_credential');
+  transport.setVersion?.(initialized.protocolVersion);await transport.notify('notifications/initialized',{});
+  const tools=await discover();metadata={protocol_version:initialized.protocolVersion,server_info:initialized.serverInfo,tools:tools.map(t=>({...t,input_schema_json:JSON.stringify(t.inputSchema)})),schema_hash:schemaHash(tools),session_mode:'persistent-read'};
+ }catch(error){try{await transport?.close();}catch{}clearTimeout(timer);throw error;}clearTimeout(timer);
+ let calls=0;
+ return {
+  metadata:credentials.redact(metadata),
+  async call(input){
+   if(poisoned)return {ok:false,error:'mcp_connection_uncertain',outcome:'not_submitted',tool_call_issued:false};
+   if(busy)return {ok:false,error:'mcp_connection_busy',outcome:'not_submitted',tool_call_issued:false};
+   busy=true;let issued=false,phase='preflight';timer=setTimeout(()=>controller.abort(),(server.timeout_seconds||30)*1000);
+   try{
+    if(stats.tools_changed){phase='tools/list';const tools=await discover();metadata.tools=tools.map(t=>({...t,input_schema_json:JSON.stringify(t.inputSchema)}));metadata.schema_hash=schemaHash(tools);}
+    if(stats.tools_changed)fail('mcp_catalogue_changing');
+    const args=input.arguments_json!==undefined?JSON.parse(input.arguments_json):input.arguments||{};
+    if(!object(args)||typeof input.tool!=='string')fail('invalid_mcp_action');
+    if(input.schema_hash&&input.schema_hash!==metadata.schema_hash)fail('mcp_tool_schemas_changed');
+    if(!metadata.tools.some(t=>t.name===input.tool))fail('unknown_mcp_tool');
+    phase='tools/call';issued=true;const result=resultOf(await transport.request('tools/call',{name:input.tool,arguments:args}));
+    if(!Array.isArray(result.content)||result.isError!==undefined&&typeof result.isError!=='boolean'||result.structuredContent!==undefined&&!object(result.structuredContent))fail('invalid_mcp_tool_result');
+    for(const item of result.content)if(!object(item)||typeof item.type!=='string'||item.type==='text'&&typeof item.text!=='string')fail('invalid_mcp_content_block');
+    const unsupported_content_types=[...new Set(result.content.filter(item=>item.type!=='text').map(item=>item.type))];
+    const answer={ok:result.isError!==true,result,schema_hash:metadata.schema_hash,session_mode:'persistent-read',reused:calls++>0,tool_call_issued:true,...(unsupported_content_types.length?{unsupported_content_types,content_delivery:'raw evidence only; no image/resource materialization'}:{})};
+    return credentials.redact(answer);
+   }catch(error){if(issued||controller.signal.aborted)poisoned=true;return credentials.redact({ok:false,error:String(error.message||error),phase,tool_call_issued:issued,outcome:issued?'unknown':'not_submitted'});}
+   finally{clearTimeout(timer);busy=false;}
+  },
+  async close(){poisoned=true;timer=setTimeout(()=>controller.abort(),3000);try{await transport.close();}finally{clearTimeout(timer);}},
+ };
+}
 export async function requestMCP(input){
  let transport,issued=false,phase='preflight',answer,credentials;const stats={notifications:0};const controller=new AbortController();let timer;
  try{
