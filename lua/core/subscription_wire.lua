@@ -887,7 +887,22 @@ function M.session(opts)
     local kind = type(event.type) == 'string' and event.type or name
     state.last_event = kind or ''
     local handler = handlers[kind or '']
-    if handler then handler(event)
+    if kind == 'keepalive' then
+      -- Known nonsemantic control frame, not an unknown application effect. Keep
+      -- this narrow: only an object with optional type/sequence metadata is safe.
+      -- Future payload fields refuse recovery rather than silently hiding effects.
+      local valid = text:match('^%s*{') ~= nil and
+        (event.type == nil or event.type == 'keepalive')
+      for key,value in pairs(event) do
+        if key ~= 'type' and not (key == 'sequence_number' and type(value) == 'number' and
+          value >= 0 and value < math.huge and value % 1 == 0) then valid = false end
+      end
+      if not valid then
+        state.recovery_unsafe = true
+        state.recovery_blocker = state.recovery_blocker or
+          {reason='invalid_keepalive',event=kind}
+      end
+    elseif handler then handler(event)
     elseif not ({['response.in_progress']=true,['response.queued']=true,
       ['response.content_part.added']=true,['response.content_part.done']=true,
       ['response.output_text.done']=true,['response.refusal.done']=true,

@@ -75,6 +75,32 @@ local function reset()attempts=0;events={};clock=0;cancel=false;sleep_hook=nil;r
 local function call(opts)
   return adapter.complete('gpt-6.1-sol',{{role='user',content='fixture'}},{},true,opts or {},'low')
 end
+-- Reproduce the observed blocker: an inference-only keepalive followed by a
+-- 406-line peer disconnect. No failed-attempt tool may reach the agent.
+for _,named in ipairs({false,true}) do
+  reset();transport(function(line,n)
+    if n==1 then
+      text(line,'Abandoned heartbeat attempt');tool(line,'heartbeat-abandoned','must-not-execute')
+      if named then line('event: keepalive');line('data: {}');line('')
+      else send(line,{type='keepalive',sequence_number=36}) end
+      return {status=200,termination='read_failed',error='Peer disconnected',lines=406}
+    end
+    text(line,'Recovered after heartbeat');complete(line)
+  end)
+  local sid=memory.start_session('','keepalive disconnect diagnosis',{user_id='master'})
+  local recovered=call({session_id=sid,run_id='heartbeat'})
+  check(attempts==2 and recovered.content=='Recovered after heartbeat' and #recovered.tool_calls==0,
+    'known keepalive does not suppress retry or return abandoned tools')
+  local diagnosed=false
+  for _,e in ipairs(dofile('lua/core/telemetry.lua').events(sid,0,100).events) do
+    if e.kind=='subscription_transport' and e.phase=='attempt' then
+      local p=e.payload
+      diagnosed=p.lines==406 and p.retry_safe==true and p.retryable==true and
+        p.parser.last_event=='keepalive' and p.parser.recovery_unsafe==false and p.parser.blocker==nil
+    end
+  end
+  check(diagnosed,'durable diagnostics prove keepalive is no longer the blocker')
+end
 for _,shape in ipairs({'flat','nested','response.failed'}) do
   reset()
   transport(function(line,n)
@@ -211,6 +237,28 @@ check(bot:run('prior effect then streamed server error')=='Finished','actual age
 check(attempts==4 and effects==2 and seen['prior-effect'] and seen['regenerated-effect'],'no failed or earlier tool replay')
 for _,row in ipairs(memory.session_messages(sid,{all=true})) do
   for _,c in ipairs(row.tool_calls or {}) do check(not c.id:find('abandoned-call',1,true),'failed call excluded from durable dialogue') end
+end
+-- Actual agent loop with heartbeat+disconnect after a previously committed tool.
+reset();effects=0;seen={}
+transport(function(line,n)
+  if n==1 then tool(line,'heartbeat-prior','heartbeat-prior-effect');complete(line)
+  elseif n==2 then
+    check(effects==1,'prior effect committed before heartbeat disconnect')
+    text(line,'abandoned');tool(line,'heartbeat-abandoned','must-not-execute')
+    send(line,{type='keepalive'})
+    return {status=200,termination='read_failed',error='Peer disconnected',lines=406}
+  elseif n==3 then tool(line,'heartbeat-restored','heartbeat-restored-effect');complete(line)
+  else check(effects==2,'heartbeat recovery preserves prior effects');text(line,'Heartbeat recovered');complete(line) end
+end)
+local heartbeat_sid=memory.start_session('','actual keepalive recovery loop',{user_id='master'})
+local heartbeat_bot=agent.new(heartbeat_sid,function(e)events[#events+1]=e end,'master','master','')
+check(heartbeat_bot:run('prior effect then keepalive disconnect')=='Heartbeat recovered',
+  'actual agent survives keepalive disconnect')
+check(attempts==4 and effects==2 and seen['heartbeat-prior-effect'] and seen['heartbeat-restored-effect'],
+  'heartbeat recovery never replays prior or abandoned effects')
+for _,row in ipairs(memory.session_messages(heartbeat_sid,{all=true})) do
+  for _,c in ipairs(row.tool_calls or {}) do check(not c.id:find('heartbeat-abandoned',1,true),
+    'abandoned heartbeat tool excluded from durable dialogue') end
 end
 -- Exhaustion through the actual agent must report failure, never an empty success.
 reset();transport(function(line)failed(line,'flat','server_error')end)

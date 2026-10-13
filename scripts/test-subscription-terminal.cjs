@@ -30,7 +30,8 @@ const server=http.createServer((req,res)=>{
  if(req.url==='/retry'&&++retryRequests%2===1){
   const item={type:'function_call',id:'discarded',call_id:'discarded',name:'write',arguments:'{"path":"must-not-execute"}'};
   res.write(frame({type:'response.output_item.added',output_index:0,item})+
-   frame({type:'response.output_item.done',output_index:0,item}));
+   frame({type:'response.output_item.done',output_index:0,item})+
+   frame({type:'keepalive',sequence_number:2}));
   setTimeout(()=>res.destroy(),40).unref();return;
  }
  res.write(body);if(req.url==='/reset')setTimeout(()=>res.destroy(),40).unref();
