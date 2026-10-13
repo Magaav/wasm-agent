@@ -22,6 +22,23 @@ These are two entry paths into one runtime:
 The fleet console serves these journeys. It is not the product's required first
 screen, and 32 workers are not a prerequisite for helping one customer.
 
+## Bounded read batches — 2026-10-13 (source verified; not installed)
+
+Fixed the exact harness lead from seq5193:59,723-byte independent read batch
+returned three artifact-only items. `read_many` now packs whole results into the
+unchanged50 KiB view, returning an account/session/role/profile/workspace-fenced
+SQLite cursor for the remaining cached results. Same six original results in
+two pages, artifact recovery3→0; exact bytes, UTF-8, images, errors, versions and
+edit receipts retained. Small result shape and other batch/mutation contracts
+remain unchanged; no instructions/AGENTS growth or global budget increase.
+
+Actual source/embedded proof43+43, native restart3+3 and batch regression245+245
+passed on isolated DB/homes; offline candidate build, retained hash checks and
+honest self-review. `gate_verified:false`, `release_verified:false`.
+Installation remains separately blocked by the previous admitted failed deployment;
+no replay, hand-copy, reservation release or installed claim. Evidence
+`rb-final1/`, `rb-regression1/`, `rb-build/`; see `docs/BATCH-TOOLS.md`.
+
 ## Progressive envelope and working web — 2026-10-13 (source verified; installation refused)
 
 Latest published Pi1.2.0 (privately integrity-pinned; upstream `b9ab2a6238d2c91cf0c6ebf836dfd05883f9db51`)
