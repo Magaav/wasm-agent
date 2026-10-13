@@ -18,18 +18,30 @@ description: How to verify work whose result is visual. Use before claiming a UI
 
 ## Why on demand
 
-Only the `name` and `description` of each skill sit in the system prompt, inside
-an `<available_skills>` block; the body loads only when a task matches. That is
-progressive disclosure, and it is the point: a technique needed occasionally must
-not cost context every turn, and must not have to be explained twice. The model
-loads one with the `skill` tool (`wa skills` lists them from the CLI).
+Full/legacy sessions retain names/descriptions in `<available_skills>` and load
+bodies only on a match. New progressive sessions instead keep a short discovery
+contract: `skill(query="<task keywords>")` returns ranked name/description/location
+metadata, then `skill(name="<match>")` loads the complete body. Known names may
+load directly. Query `*` enumerates the complete visible catalogue with explicit
+counts, offsets and a snapshot; continuation refuses catalogue or caller scope
+drift rather than silently skipping entries. Search is lexical, so an empty result
+is not proof of absence. Existing role/profile checks still run; no capability is
+granted by metadata. Full mode (`WASM_AGENT_ENVELOPE_MODE=full`) restores automatic
+metadata. The CLI/Engine inventory remains complete in either mode.
+
+The shared skill-use and safety policy remains once in the prompt. It is not
+repeated in each loaded skill reply, and `AGENTS.md` is neither trimmed nor grown.
+Focused proof: `test-skill-discovery.cjs <candidate-wa> <fresh-evidence> <baseline-wa>`
+and its retained-hash `--post`; no provider/inference calls. Compare full procedure
+content too with the proof below. Additional first-use discovery and missed synonyms
+are named risks, not settled autonomous quality or billing improvements.
 
 The loader returns the complete `SKILL.md`, including frontmatter, exact UTF-8
 and final instructions; it has no private 12,000-byte prefix cap. Procedures that
 fit the shared tool-output budget arrive in one call. Larger responses still use
 the normal bounded view and `full_result`/`tool_result` exact-byte retrieval, not
-silent data loss or a larger global budget. Skill descriptions alone remain in
-the automatic prompt; full bodies are still on demand.
+silent data loss or a larger global budget. Full/legacy prompts retain descriptions;
+progressive prompts discover them on demand. Full bodies still load only by name.
 
 Focused regression: `node <repo>/scripts/test-skill-content.cjs <absolute-wa>
 <fresh-evidence>`, then the same command with `--post` before its arguments. It
@@ -58,7 +70,7 @@ Directories are scanned recursively for `SKILL.md`, skipping `.git`,
 | Field | Required | Meaning |
 | --- | --- | --- |
 | `name` | yes | lowercase a-z, 0-9, hyphens |
-| `description` | yes | what it does **and when to use it** — this is the only part always in context, so it carries the trigger |
+| `description` | yes | what it does **and when to use it** — the trigger appears in full prompts or discovered metadata |
 | `disable-model-invocation` | no | `true` keeps it out of the prompt (the human loads it by name) |
 
 ## Writing one that works
@@ -137,7 +149,11 @@ itself, no built-in knowledge of the sentinel, and nine failed upgrade attempts 
 | --- | --- |
 | `self-update` | the procedure is long (the command, the whitelist, the deadlock, the recovery) and needed rarely. The description is written to match the *moment* — "use it whenever a change requires restarting or replacing this node" — so it is loaded when it matters and costs nothing when it does not. |
 
-### The economics, measured
+### Historical full-catalogue economics
+
+These five-skill figures predate the current catalogue and progressive metadata
+discovery. They are historical examples, not current envelope/token measurements.
+The current discovery proof records exact serialized bytes and leaves billing unknown.
 
 | | cost |
 | --- | --- |

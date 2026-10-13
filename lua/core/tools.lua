@@ -71,8 +71,12 @@ M.shared = {
   schema("memories", "List what is stored, most recent first, with each entry's id. Use it when the user asks what you remember or wants the store tidied: reading the ids is how you find what `forget` should remove.", {
     scope = { type = "string" },
     limit = { type = "integer", minimum = 1, maximum = 200 } }),
-  schema("skill", "Load a skill: the full instructions for a specialized task listed in your context. Read the one that matches before starting that kind of work.", {
-    name = { type = "string", description = "The skill's name, as listed in <available_skills>." } }, { "name" }),
+  schema("skill", "Discover procedure metadata by query, or load complete instructions by name; never both. Load a matching skill before specialized work. Discovery grants no authority.", {
+    name = { type = "string", description = "Exact skill name to load." },
+    query = { type = "string", maxLength = 256, description = "Task keywords; * lists all visible metadata." },
+    limit = { type = "integer", minimum = 1, maximum = 8 },
+    offset = { type = "integer", minimum = 0 },
+    snapshot = { type = "string", description = "Carry the returned snapshot when continuing a metadata page." } }),
   schema("capabilities", "List the tools available to this account (its capabilities).", {}),
   schema('tool_search','Discover permitted tools and load exact definitions into this session. Then invoke with tool_call; discovery grants no permissions.',{query={type='string',maxLength=256},limit={type='integer',minimum=1,maximum=8}},{'query'}),
   schema('tool_call','Invoke a tool previously loaded by tool_search with its documented arguments. The target retains every role, profile, workspace and effect check.',{name={type='string'},arguments={type='object'}},{'name','arguments'}),
@@ -200,7 +204,7 @@ M.admin = {
   }, { "pattern" }),
   -- Retrieval returns selected implementation text; relationship and audit actions remain
   -- explicitly separate so their evidence can be evaluated independently.
-  schema("graph", "Concept discovery, exact source (including bounded source batches), overview and patch reachability. Queries capture content evidence, automatically await a committed invocation revision and never silently return stale results; use read/grep after explicit indexing failures.", {
+  schema("graph", "Concept discovery, exact source (including bounded source batches), overview and patch reachability. Queries capture content evidence, automatically await a committed invocation revision and never silently return stale results; use read/grep after explicit indexing failures. After using graph, state in the final answer whether it helped your reasoning and why.", {
     action = { type = "string", enum = { "search_symbols", "symbol_source", "symbol_source_many", "overview", "impact", "explain", "query", "path", "caps", "stats", "index", "audit", "audit_assess", "audit_report", "audit_feedback" } },
     name = { type = "string", description = "search_symbols: concept or identifier; symbol_source/explain/query: exact selected name." },
     prefer_implementations = { type = "boolean", description = "search_symbols: opt-in ranking that demotes partial local-variable matches; useful when looking for a component/function implementation, not a state binding." },
@@ -452,7 +456,7 @@ local CUES = {
   recall = "Look up stored facts before answering about the user",
   memories = "List stored facts, with their ids",
   forget = "Delete a stored fact by id",
-  skill = "Load a skill's full instructions by name",
+  skill = "Discover procedures by query or load a full skill by name",
   capabilities = "List the tools this account may use",
   tool_search = 'Discover and load a permitted tool definition',
   tool_call = 'Call a discovered tool without expanding permanent declarations',
@@ -950,6 +954,13 @@ function M.dispatch(memory, name, args, role, ctx)
     return memory.recall(args.query or "", args.limit or 10, args.scope)
   elseif name == "skill" then
     local skills = dofile("lua/core/skills.lua")
+    if args.query~=nil then
+      if args.name~=nil then return {error='skill_forms_are_exclusive'} end
+      local workspace=ctx.session_id and memory.session_workspace and memory.session_workspace(ctx.session_id) or nil
+      return skills.search(args,{user=ctx.user_id or user_id,role=role,session=ctx.session_id or '',
+        cwd=session_cwd(memory,ctx),workspace=workspace,profile=ctx.subagent and ctx.subagent.allowed or nil})
+    end
+    if args.limit~=nil or args.offset~=nil or args.snapshot~=nil then return {error='skill_query_required'} end
     local wanted = args.name or ""
     if wanted == "" then
       local names = {}

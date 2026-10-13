@@ -1,0 +1,62 @@
+{
+  "review": "self-review; direct workflow; no subagents or external inference agents",
+  "base_commit": "d78a9aca739972afa14bedf558aefba45fe19416",
+  "historical_capture": {
+    "scope": "Retained Pi1.2 published SDK/codemode replay and patched native loop, not autonomous-agent parity",
+    "patched_system_bytes": 25535,
+    "patched_skill_catalogue_bytes": 9256,
+    "patched_schema_bytes": 9020,
+    "patched_bootstrap_tools": 13,
+    "pi_system_bytes": 13157,
+    "pi_schema_bytes": 4479,
+    "pi_bootstrap_tools": 5,
+    "pi_skills_supplied": false,
+    "whatsapp": "Skill metadata only; no WhatsApp bootstrap tool schema",
+    "native_discovery_routing_schema_bytes": 707,
+    "pi_codemode_schema_bytes": 1411,
+    "caveat": "The routing pair and JS codemode are different capabilities. These declaration sizes do not compare equivalent runtime execution or autonomous task quality.",
+    "evidence": "session-scratch/66333539356236392d356133332d346530622d626566632d653232336537613466306231/en-audit1/receipt.json"
+  },
+  "new_behavior": {
+    "new_progressive_sessions": "Optional procedure metadata is discovered by skill(query), full original bodies loaded by skill(name). Known names load directly; query * enumerates all visible metadata with exact counts and scope-bound metadata snapshots.",
+    "safety": "Shared skill policy stays once in the prompt; project/role instructions, memory-on-demand, tool permissions/profile/workspace/effect checks and complete bodies remain. No app send, connector enable, new JS interpreter or scheduler is introduced.",
+    "reporting": "Graph skill description/body and native graph schema require a brief final reasoning-value assessment. Bash-capable prompts disclose actual non-rg shell fallback; intentional portable literal grep remains supported.",
+    "risk": "A first unknown procedure can require another discovery exchange; lexical matching can miss synonyms. Full-mode rollback and complete catalogue enumeration remain. Model quality, billing and total-context benefits after many loaded procedures are unmeasured.",
+    "compatibility": "Full/legacy automatic-catalogue policy and exact child tool/profile ceilings are retained; the requested reporting rules apply to both modes. Existing name-based skill loading remains compatible. AGENTS.md remains 10389 bytes, delta0. Metadata snapshots do not certify body freshness; body loads read the current complete file."
+  },
+  "native_paired_capture": {
+    "scope": "Actual embedded empty-session system+schema serialization with fixed source cwd/current visible catalogue. Same native host revision; candidate Lua differs. Original before/after JSON is retained.",
+    "baseline_binary_sha256": "9e5192ecd60131b061fb3da2361e7f61cf0dde3f599ba5c9581dc5c044378236",
+    "candidate_binary_sha256": "7862440b7486541ee505a798017a7104bf3b210ef07982a0da2c6ef2df23762e",
+    "before": {"system_bytes":25637,"schema_bytes":9189,"envelope_bytes":35234},
+    "after": {"system_bytes":17889,"schema_bytes":9467,"envelope_bytes":27696},
+    "saved_bytes": 7538,
+    "saved_percent_rounded": 21.4,
+    "tool_count_both": 13,
+    "whatsapp_metadata_after": false,
+    "caveat": "Different from the historical web-task envelope, and not a fresh Pi comparison. Serialized bytes are not provider tokens/cache hits/billing or model quality."
+  },
+  "verification": {
+    "discovery_checks": 104,
+    "discovery_scope": "49 source +49 embedded, exact old API refusal, paired native capture assertions and identical visible catalogue fingerprints; query/load exclusivity, pagination, full UTF-8 bodies, hidden metadata, guest/profile and account/session/role/workspace snapshot fences",
+    "existing_envelope_checks": 154,
+    "existing_complete_body_checks": 118,
+    "read_batch_and_native_restart_checks": 92,
+    "direct_instruction_checks": 33,
+    "mcp_native_reconstruction_checks": 58,
+    "embedded_web_oracle_checks": 12,
+    "total_focused_checks": 571,
+    "provider_calls": 0,
+    "paid_calls": 0,
+    "evidence_generations": ["en-final2","en-envelope2","en-content2","en-reads2","en-mcp1","en-web1"],
+    "preserved_pilots": "Failed en-build child-catalogue assumption retained with original fixture/log; corrected against unchanged actual child builder. en-build2/en-proof1/en-envelope1/en-content1 retained as pilots; final qualified code is en-build3.",
+    "graph_assessment": "Limited additional reasoning value: no unread resolved caller leads; dynamic dofile prompt-block edge remained unresolved and builtin/top-level gaps remained. Source and native tests were decisive; incomplete graph audit is not correctness proof.",
+    "shell_search": "rg15.2.0 present; no shell search fallback required",
+    "gate_verified": false,
+    "release_verified": false
+  },
+  "installation": {
+    "verified": false,
+    "blocker": "Prior failed exact-source Sentinel request 1791917148535224500-8800-00000000000000000000 remains admitted. No reservation mutation, installer replay, binary replacement or fresh deploy request."
+  }
+}

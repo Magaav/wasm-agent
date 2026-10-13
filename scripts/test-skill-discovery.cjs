@@ -1,0 +1,19 @@
+// Source/embedded metadata discovery, unchanged prefix growth and exact controls.
+'use strict';
+const fs=require('node:fs'),path=require('node:path'),cp=require('node:child_process'),crypto=require('node:crypto'),assert=require('node:assert/strict');
+const args=process.argv.slice(2),post=args[0]==='--post';if(post)args.shift();const [binary,out,baseline]=args.map(p=>path.resolve(p)),repo=path.resolve(__dirname,'..');assert.equal(args.length,3,'usage: [--post] test-skill-discovery.cjs <candidate-wa> <fresh-evidence> <baseline-wa>');
+const sha=p=>crypto.createHash('sha256').update(fs.readFileSync(p)).digest('hex'),file=out+'/receipt.json';
+if(post){const r=JSON.parse(fs.readFileSync(file));assert(r.ok);for(const [p,h]of Object.entries(r.hashes))assert.equal(sha(p),h,p);console.log(JSON.stringify({ok:true,post:true,checks:r.checks,measurement:r.measurement}));process.exit(0);}
+fs.mkdirSync(out);const sources=['lua/core/skills.lua','lua/core/agent.lua','lua/core/tools.lua','scripts/test-skill-discovery.lua','scripts/test-skill-discovery.cjs','scripts/capture-skill-envelope.lua'];
+const r={ok:false,checks:0,runs:[],provider_calls:0,gate_verified:false,release_verified:false,hashes:Object.fromEntries([binary,baseline,...sources.map(p=>repo+'/'+p)].map(p=>[p,sha(p)]))};
+function run(name,exe,script,source){const home=out+'/'+name;fs.mkdirSync(home);const env=Object.fromEntries(Object.entries(process.env).filter(([k])=>!/^(WA_|WASM_AGENT_|PI_|OPENAI_|ANTHROPIC_|OPENCODE_)/i.test(k)));Object.assign(env,{WASM_AGENT_HOME:home,WA_SCRIPT:repo+'/scripts/'+script,WA_GRAPH_WATCH:'0',WASM_AGENT_MANAGED:'0',WA_CAPTURE_OUTPUT:home+'/capture.json'});if(source)env.WASM_AGENT_LUA_ROOT=repo;
+ const c=cp.spawnSync(exe,['--db',home+'/private.db'],{cwd:repo,env,encoding:'utf8',windowsHide:true,timeout:60000,maxBuffer:8388608});for(const s of ['stdout','stderr']){const p=home+'/'+s+'.log';fs.writeFileSync(p,c[s]||'');r.hashes[p]=sha(p);}return {c,home};}
+try{
+ for(const mode of ['source','embedded']){const {c}=run(mode,binary,'test-skill-discovery.lua',mode==='source');assert.equal(c.status,0,c.stdout+c.stderr);const m=/skill discovery ok \((\d+) checks, 0 skipped/.exec(c.stdout);assert(m);r.checks+=Number(m[1]);r.runs.push({mode,checks:Number(m[1])});}
+ const negative=run('old-api-negative',baseline,'test-skill-discovery.lua',false);assert.notEqual(negative.c.status,0);assert.match(negative.c.stderr,/skill metadata discovery is available/);r.checks++;
+ const measurements={};for(const [name,exe]of [['before',baseline],['after',binary]]){const {c,home}=run('capture-'+name,exe,'capture-skill-envelope.lua',false);assert.equal(c.status,0,c.stdout+c.stderr);const p=home+'/capture.json';r.hashes[p]=sha(p);measurements[name]=JSON.parse(fs.readFileSync(p));}
+ const {before,after}=measurements;assert(before.metadata_present&&before.whatsapp_present);assert(!after.metadata_present&&!after.whatsapp_present&&after.policy_retained);assert.equal(before.tool_count,13);assert.equal(after.tool_count,13);assert.equal(before.catalogue_sha256,after.catalogue_sha256);assert(after.envelope_bytes<before.envelope_bytes);r.checks+=5;
+ r.measurement={before:{system:before.system_bytes,schemas:before.schema_bytes,envelope:before.envelope_bytes},after:{system:after.system_bytes,schemas:after.schema_bytes,envelope:after.envelope_bytes},saved_bytes:before.envelope_bytes-after.envelope_bytes,scope:'Native embedded empty-session system+schema serialization, same source cwd and current visible catalogue; no provider tokens/billing or autonomous quality measured.'};
+ for(const [p,h]of Object.entries(r.hashes))assert.equal(sha(p),h,p);r.ok=true;
+}catch(e){r.error=String(e);process.exitCode=1;}
+fs.writeFileSync(file,JSON.stringify(r,null,2)+'\n');console.log(JSON.stringify({...r,hashes:undefined}));

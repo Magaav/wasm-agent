@@ -1,10 +1,9 @@
 -- Skills: on-demand capability packages, following the Agent Skills standard that
 -- pi implements (and that Orca already feeds to other harnesses).
 --
--- Only a skill's name and description are always in context; the body loads when
--- a task matches. That is the point: a procedure needed once a week should not
--- cost context every turn, and the agent should not have to be told the same
--- technique twice.
+-- Full/legacy sessions include skill metadata; progressive sessions discover it
+-- on demand. Complete bodies load by name in either mode; occasional procedures
+-- do not need to occupy every progressive request's prefix.
 --
 -- A skill is a directory with a SKILL.md:
 --
@@ -189,8 +188,9 @@ end
 
 -- The engine's view: every skill this node can see, and what is true of each one.
 --
--- Two different facts live in one row, which is why the topic exists. The *description* is always
--- in the model's context (unless the skill opts out of that), so the agent knows the skill exists;
+-- Two different facts live in one row. The description is available to full
+-- prompts or progressive metadata discovery (unless hidden); that inventory
+-- count does not promise automatic injection into every session's context.
 -- the *body* is only read when a task matches, so "the agent can load this on demand" is a
 -- separate claim - and a skill whose file cannot be read is visible here and useless to the model.
 function M.report(role)
@@ -226,17 +226,10 @@ local function xml_escape(value)
     :gsub("\"", "&quot;"):gsub("'", "&apos;")
 end
 
--- The block injected into the system prompt: pi's wording, so the same skills
--- work in either harness.
-function M.prompt_block()
-  local visible = {}
-  for _, skill in ipairs(M.list()) do
-    if not skill.hidden then visible[#visible + 1] = skill end
-  end
-  if #visible == 0 then return nil end
-  local lines = {
-    "The following skills provide specialized instructions for specific tasks.",
-    "Read the full skill file when the task matches its description.",
+-- Shared procedure policy stays once in the prompt in both modes. Deferring
+-- metadata must not remove safety rules or repeat this policy in every tool reply.
+function M.usage()
+  return table.concat({
     "While using any skill, crystallize repeatable deterministic sequences into verified spells, " ..
       "then refactor the skill to call them. Verify the postconditions before preferring the spell.",
     "Compose consecutive spells into one reusable spell when their sequence and parameter bindings " ..
@@ -247,6 +240,22 @@ function M.prompt_block()
       "Stay within your allowed tools and editable skill scope.",
     "When a skill file references a relative path, resolve it against the skill directory " ..
       "(parent of SKILL.md / dirname of the path) and use that absolute path in tool commands.",
+  },"\n")
+end
+
+function M.prompt_block(mode)
+  if mode=='search' then
+    return M.usage()..'\n\nBefore specialized work, discover procedures with skill(query="<task keywords>"), then load the matching full instructions with skill(name="<name>"). Known names may load directly. Query "*" with offset/snapshot to inspect the complete visible catalogue; no match is not proof of absence. Metadata and discovery never grant authority.'
+  end
+  local visible = {}
+  for _, skill in ipairs(M.list()) do
+    if not skill.hidden then visible[#visible + 1] = skill end
+  end
+  if #visible == 0 then return nil end
+  local lines = {
+    "The following skills provide specialized instructions for specific tasks.",
+    "Read the full skill file when the task matches its description.",
+    M.usage(),
     "",
     "<available_skills>",
   }
@@ -259,6 +268,41 @@ function M.prompt_block()
   end
   lines[#lines + 1] = "</available_skills>"
   return table.concat(lines, "\n")
+end
+
+-- Metadata search, never procedure execution. Complete visible enumeration is
+-- available with query='*'; continuation refuses catalogue or caller drift.
+function M.search(args,scope)
+  local json=dofile('lua/vendor/json.lua')
+  local query=args.query
+  if type(query)~='string' or #query>256 or not query:find('%S') then return {error='skill_query_required'} end
+  local limit,offset=args.limit or 3,args.offset or 0
+  if type(limit)~='number' or limit%1~=0 or limit<1 or limit>8 then return {error='invalid_skill_limit'} end
+  if type(offset)~='number' or offset%1~=0 or offset<0 or offset==math.huge then return {error='invalid_skill_offset'} end
+  if offset>0 and type(args.snapshot)~='string' then return {error='skill_snapshot_required'} end
+  local visible={}
+  for _,skill in ipairs(M.list(true)) do
+    if not skill.hidden then visible[#visible+1]={name=skill.name,description=skill.description,path=skill.path,dir=skill.dir} end
+  end
+  local snapshot=host.sha256(json.encode({skills=visible,query=query,scope=scope or {}}))
+  if args.snapshot~=nil and args.snapshot~=snapshot then return {error='skill_catalogue_changed',effect='none'} end
+  local terms={};for term in query:lower():gmatch('[%w_]+')do terms[#terms+1]=term end
+  local matches={}
+  for _,skill in ipairs(visible)do
+    local score=query=='*' and 1 or 0
+    local name,hay=skill.name:lower(),(skill.name..' '..skill.description):lower()
+    if name==query:lower() then score=10000 end
+    for _,term in ipairs(terms)do
+      if hay:find(term,1,true) then score=score+1;if name:find(term,1,true) then score=score+4 end end
+    end
+    if score>0 then matches[#matches+1]={score=score,skill=skill} end
+  end
+  table.sort(matches,function(a,b)return a.score==b.score and a.skill.name<b.skill.name or a.score>b.score end)
+  local selected={};for i=offset+1,math.min(#matches,offset+limit)do selected[#selected+1]=matches[i].skill end
+  local complete=offset+#selected>=#matches
+  return {skills=selected,matches=#matches,offset=offset,complete=complete,has_more=not complete,
+    next_offset=not complete and (offset+#selected) or nil,snapshot=snapshot,
+    invocation='Load complete instructions with skill(name). Metadata is not authority; no match does not prove absence. Query * for all visible entries.'}
 end
 
 return M
