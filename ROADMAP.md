@@ -22,6 +22,31 @@ These are two entry paths into one runtime:
 The fleet console serves these journeys. It is not the product's required first
 screen, and 32 workers are not a prerequisite for helping one customer.
 
+## MCP/Pi context economics — 2026-10-13 (measured; implementation pending)
+
+Private native measurement with source Lua, isolated SQLite and a fake protocol
+peer; no model/web API or real app calls. Live inventory had0 generic connectors.
+MCP management adds728 schema bytes+6 cue bytes=734 fixed-prefix bytes; the whole
+47-tool catalogue is43,233 bytes. Minimal prototype two-tool exposure adds578
+bytes natively versus700 through MCP. These are exact serialized bytes, not
+provider token counts, billing or net-context savings.
+
+Approved schemas are cached, but always advertised; unapproved schemas stay out
+of the prompt. Generic MCP call replies repeat the full server catalogue: a66-byte
+fixture value becomes1,555 bytes with2 tools or10,022 with27 synthetic tools.
+Ten calls created10 server processes and40 protocol messages; cold native stdio
+median1.139–1.144s includes startup/supervision/cleanup, not web latency. Retained
+source/log hashes passed postchecks, including after upstream synchronization.
+
+Installed Pi0.87.1 source uses four default coding tools, metadata-only skill
+pointers, active tool loadouts and provider-dependent additive/deferred tool
+registration. Prompt caching can reduce processing cost, not context occupancy.
+Proposed next implementation: a small stable native web facade, on-demand procedure
+detail, cached full-source refs/pages and direct REST for owned web backends; keep
+MCP for interoperability and scoped facades, without catalogue dumps in replies.
+This remains a proposal, not an installed capability or changed MCP configuration.
+Evidence: session `mp-1/assessment.json`; `gate_verified:false`, `release_verified:false`.
+
 ## Bounded repository-survey output — 2026-10-13 (source CLI verified)
 
 Fixed the collector's reply, not the global tool-output budget. It now emits a
