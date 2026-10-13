@@ -44,6 +44,12 @@ fn embedded_preinstall_requires_pinned_script_failed_result_and_owned_native_exi
     let header=deploy_capture_header(Path::new("C:/source/scripts/deploy.sh"),"fixture","detached",123);
     let text=format!("{header}deploy: building\nstale embedded Lua module\ndeploy: embedded runtime check failed; not installing it\n--- deploy pid 7 exited with exit code: 1 after 0.4s\n");
     assert!(embedded_preinstall_capture(&intent,&effect,&state,&text,&result,&exit).is_ok());
+    let rounded=text.replace("0.4s","8.6s");let mut rounded_exit=exit.clone();rounded_exit["elapsed_ms"]=json!(8593);
+    assert!(embedded_preinstall_capture(&intent,&effect,&state,&rounded,&result,&rounded_exit).is_ok());
+    assert!((8600.0_f64-8593.0).abs()>1.0,"causal prior 1ms rule refuses retained producer output");
+    for mismatch in [rounded.replace("8.6s","8.5s"),rounded.replace("8.6s","8.593s"),rounded.replace("8.6s","8.60s")] {
+        assert!(embedded_preinstall_capture(&intent,&effect,&state,&mismatch,&result,&rounded_exit).is_err());
+    }
     for key in ["ok","request_id","expected_sha","commit","branch","reason","detail","node_sha256","sentinel_sha256","watcher_pid"] {
         let mut bad=result.clone();bad[key]=json!("foreign");assert!(embedded_preinstall_capture(&intent,&effect,&state,&text,&bad,&exit).is_err(),"result {key}");
     }

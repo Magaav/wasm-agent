@@ -384,7 +384,12 @@ validates immutable parent/effect/source, exact unique failed capture, unchanged
 live target PID+creation+binary, and the retained script's pre-install boundary.
 The embedded-check path additionally requires the exact retained deploy script
 SHA256 (`6d35ec43…`), failed result with empty installed identities, and native
-process-exit record bound to the full effect/PID/exit1/elapsed time. This is not a
+process-exit record bound to the full effect/PID/exit1/elapsed time. Duration
+comparison uses the native producer's one-decimal f32 display, not an invented
+millisecond precision: the retained8593ms record prints8.6s. Other displays/time
+records still refuse. PowerShell5 task redirection writes UTF-16; inspect its BOM
+and decode retained stderr before interpreting a UTF-8 reader's not_found result.
+This is not a
 generic failed-result escape: other scripts, missing/foreign exit evidence,
 partial-install markers or changed target refuse. It archives original result,
 exit, capture and return evidence and writes `aborted_preinstall` plus a retirement

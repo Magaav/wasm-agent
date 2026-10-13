@@ -246,8 +246,12 @@ fn embedded_preinstall_capture<'a>(intent:&Value,effect:&Value,state:&Value,text
         || stanza.contains("installing through upgrade.sh") || stanza.contains("upgrade:")
         || stanza.contains("deploy: the new binary answers on a scratch port") {bail!("preinstall_embedded_boundary_unproven");}
     let suffix=format!("--- deploy pid {pid} exited with exit code: 1 after ");
-    let duration=stanza.split(&suffix).nth(1).and_then(|s|s.split('s').next()).and_then(|s|s.parse::<f64>().ok()).context("preinstall_embedded_duration_missing")?;
-    if (duration*1000.0-exit["elapsed_ms"].as_u64().unwrap() as f64).abs()>1.0 {bail!("preinstall_embedded_exit_duration_mismatch");}
+    let duration=stanza.split(&suffix).nth(1).and_then(|s|s.split('s').next()).context("preinstall_embedded_duration_missing")?;
+    // watch_deploy_exit prints as_secs_f32() with ONE decimal, while the native
+    // JSON record retains integer milliseconds. Match that producer format,
+    // not a made-up 1ms precision (historical 8593ms was captured as 8.6s).
+    let rendered=format!("{:.1}",exit["elapsed_ms"].as_u64().unwrap() as f32/1000.0);
+    if duration!=rendered {bail!("preinstall_embedded_exit_duration_mismatch");}
     Ok(stanza)
 }
 
