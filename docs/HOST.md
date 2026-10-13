@@ -402,9 +402,13 @@ without a terminal event is an error rather than a short answer. The line reader
   is buffered. A Lua error raised in `on_line` - a cancelled run, an expired deadline - ends the read
   at that line and comes back as `{error, termination:"line_callback_failed"}`.
 - `on_line` is required: a call without one is refused, not read into nothing.
+- An explicit `false` from `on_line` stops reading successfully with
+  `termination:"callback_stopped"`. Nil/omitted returns continue reading. The Lua
+  protocol stops after its fully framed terminal event, validates the response
+  and releases the socket without waiting for EOF or a trailing HTTP chunk.
 - Cancellation is checked per line and the request uses the same shutdown-aware transport as
   `host.http`/`host.http_stream`. `termination` says how the read ended (`eof`, `cancelled`,
-  `http_error`, `request_failed`, `read_failed`, `line_callback_failed`); EOF is not an error here,
+  `http_error`, `request_failed`, `read_failed`, `line_callback_failed`, `callback_stopped`); EOF is not an error here,
   because only the protocol's owner can say which event completes a response.
 - A line ending at EOF is still a line: the recorded fixture in `tests/fixtures/subscription/` shows
   this endpoint ends at EOF with no `data: [DONE]` sentinel, so a reader waiting for one would call a

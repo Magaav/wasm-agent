@@ -126,6 +126,59 @@ for _,status in ipairs({500,502,503,504,401,403,429,400}) do
   local transient=status>=500
   check(ok==transient and attempts==(transient and 2 or 1),'HTTP status classified: '..status)
 end
+-- The endpoint can finish the response and then reset its HTTP stream. Older
+-- hosts/fake peers ignore callback false, so validated terminals must also win
+-- over a subsequent read_failed without regenerating the committed response.
+for _,kind in ipairs({'text','tool'}) do
+  reset();transport(function(line)
+    if kind=='text' then text(line,'Completed before disconnect')
+    else tool(line,'completed-call','completed-effect') end
+    complete(line)
+    return {status=200,termination='read_failed',error='Peer disconnected',lines=235}
+  end)
+  local result=call()
+  check(attempts==1 and result.transport_failed_attempts==0 and
+    result.termination=='response_complete','terminal '..kind..' survives teardown without replay')
+  check(kind=='text' and result.content=='Completed before disconnect' or
+    kind=='tool' and #result.tool_calls==1,'validated terminal result preserved')
+end
+reset();transport(function(line)
+  send(line,{type='response.output_item.added',output_index=1,
+    item={type='function_call',id='unfinished',call_id='unfinished',name='write'}})
+  complete(line)
+  return {status=200,termination='read_failed',error='Peer disconnected',lines=235}
+end)
+ok,why=pcall(call)
+check(not ok and attempts==1 and tostring(why):find('subscription_tool_incomplete',1,true),
+  'a terminal with unfinished tool arguments never becomes success')
+reset();transport(function(line,n)
+  text(line,n==1 and 'Abandoned' or 'Regenerated')
+  if n==1 then
+    tool(line,'uncommitted-call','must-not-execute')
+    return {status=200,termination='read_failed',error='Peer disconnected',lines=235}
+  end
+  complete(line)
+end)
+local result=call()
+check(attempts==2 and result.content=='Regenerated' and #result.tool_calls==0,
+  'completed tool item without response terminal still regenerates')
+reset();transport(function(line)
+  send(line,{type='future_server_effect'})
+  return {status=200,termination='read_failed',error='Peer disconnected',lines=235}
+end)
+local diagnostic_sid=memory.start_session('','suppressed disconnect diagnosis',{user_id='master'})
+ok,why=pcall(call,{session_id=diagnostic_sid,run_id='diagnostic'})
+check(not ok and attempts==1 and tostring(why):find('subscription_retry_suppressed:',1,true),
+  'unknown effects retain the no-replay boundary')
+local diagnosed=false
+for _,e in ipairs(dofile('lua/core/telemetry.lua').events(diagnostic_sid,0,100).events) do
+  if e.kind=='subscription_transport' and e.phase=='attempt' then
+    local p=e.payload
+    diagnosed=p.lines==235 and p.retry_safe==false and p.retryable==true and
+      p.parser.terminal==false and p.parser.blocker.event=='future_server_effect'
+  end
+end
+check(diagnosed,'durable suppression diagnostics identify the exact blocking event')
 reset();transport(function(line)failed(line,'flat','internal_server_error')end)
 ok,why=pcall(call)
 check(not ok and attempts==3 and tostring(why):find('subscription_retry_exhausted:',1,true),'internal server error uses bounded recovery')
@@ -165,4 +218,19 @@ local failed_sid=memory.start_session('','exhausted server loop',{user_id='maste
 local failed_bot=agent.new(failed_sid,function(e)events[#events+1]=e end,'master','master','')
 ok,why=pcall(function()return failed_bot:run('repeated server failure')end)
 check(not ok and attempts==3 and tostring(why):find('subscription_retry_exhausted:',1,true),'actual agent fails visibly after bounded recovery')
+-- A previous tool round and a terminal-then-disconnected tool round each execute
+-- exactly once; the completed final answer survives the same socket teardown.
+reset();effects=0;seen={}
+transport(function(line,n)
+  if n==1 then tool(line,'first-call','first-effect');complete(line)
+  elseif n==2 then tool(line,'second-call','second-effect');complete(line)
+  else check(effects==2,'terminal disconnect caused no duplicate effect');text(line,'Finished after teardown');complete(line) end
+  return {status=200,termination='read_failed',error='Peer disconnected',lines=235}
+end)
+local terminal_sid=memory.start_session('','terminal disconnect agent loop',{user_id='master'})
+local terminal_bot=agent.new(terminal_sid,function(e)events[#events+1]=e end,'master','master','')
+check(terminal_bot:run('completed response then socket reset')=='Finished after teardown',
+  'actual provider/agent loop survives terminal teardown')
+check(attempts==3 and effects==2 and seen['first-effect'] and seen['second-effect'],
+  'terminal tool results dispatch once with no inference retry')
 print('subscription server recovery ok ('..checks..' checks, 0 skipped; no network or paid calls)')

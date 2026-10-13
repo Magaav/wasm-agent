@@ -1867,13 +1867,16 @@ pub extern "C-unwind" fn http_stream(l: *mut LuaState) -> c_int {
 ///   `{error, termination:"line_callback_failed"}` after the socket is dropped; a caller that
 ///   raises `run_cancelled` or its own deadline from the callback therefore ends the read at that
 ///   line rather than at the end of the stream.
+/// - **An explicit `false` from the callback ends the read successfully.** The protocol owner
+///   can stop at its terminal frame instead of waiting for socket EOF after a completed response.
+///   A missing return value retains the original read-to-EOF behavior.
 /// - **A non-200 is not a stream.** The status and a bounded body come back exactly as
 ///   `host.http` reports them, so an auth or quota refusal is visible rather than an empty stream
 ///   that looks like a provider with nothing to say.
 /// - **Cancellation is checked per line**, and the request uses the same shutdown-aware transport
 ///   as `host.http`/`host.http_stream`, so a cancelled child stops reading at the next chunk.
 ///   `termination` says how the read ended: `eof`, `cancelled`, `http_error`, `request_failed`,
-///   `read_failed`, `line_callback_failed`. EOF is *not* an error here: whether a stream that
+///   `read_failed`, `line_callback_failed`, `callback_stopped`. EOF is *not* an error here: whether a stream that
 ///   ended with no terminal event is a failure is a question only the protocol's owner can answer
 ///   (its event mapping is what knows which event completes a response).
 /// - Returns `nil` for nothing: the callback is required, and a call without one is refused, not
@@ -1935,7 +1938,7 @@ pub extern "C-unwind" fn http_sse(l: *mut LuaState) -> c_int {
     let outcome = read_sse_lines(reader, |line| call_lua_string(l, 5, line));
     crate::subagents::clear_active_socket();
     let value = match outcome {
-        Ok(lines) => json!({"status": status, "lines": lines, "termination": "eof"}),
+        Ok((lines, termination)) => json!({"status": status, "lines": lines, "termination": termination}),
         Err(failure) => json!({"error": failure.message, "termination": failure.termination,
             "status": status, "lines": failure.lines}),
     };
@@ -1959,10 +1962,10 @@ struct SseFailure {
 /// A residual line at EOF is handed over like any other (a stream whose last frame has no trailing
 /// newline is a real ending), and a read that leaves the body empty is not an error here: whether
 /// an empty stream is a failure is the protocol owner's question.
-fn read_sse_lines<R, F>(reader: R, mut on_line: F) -> Result<u64, SseFailure>
+fn read_sse_lines<R, F>(reader: R, mut on_line: F) -> Result<(u64, &'static str), SseFailure>
 where
     R: std::io::BufRead,
-    F: FnMut(&str) -> Result<(), String>,
+    F: FnMut(&str) -> Result<bool, String>,
 {
     let mut lines = 0u64;
     for line in reader.lines() {
@@ -1976,30 +1979,36 @@ where
             }
         };
         lines += 1;
-        if let Err(failure) = on_line(&line) {
-            return Err(SseFailure { message: failure, termination: "line_callback_failed", lines });
+        match on_line(&line) {
+            Ok(false) => return Ok((lines, "callback_stopped")),
+            Ok(true) => {},
+            Err(failure) => return Err(SseFailure {
+                message: failure, termination: "line_callback_failed", lines,
+            }),
         }
     }
-    Ok(lines)
+    Ok((lines, "eof"))
 }
 
-/// Call a Lua function with one string argument and no results.
+/// Call a Lua line callback, continuing unless it returns the boolean `false`.
 ///
 /// The one place a host capability calls back into the interpreter, so it is small and total: the
 /// callee is anchored in the *caller's* frame (it is an argument of the C function that is
 /// running), the stack is restored on both paths, and a Lua error becomes `Err(text)` instead of
 /// unwinding through the C boundary. The text is redacted and bounded: it crosses into a provider
 /// error path where a token must never appear.
-fn call_lua_string(l: *mut LuaState, index: c_int, payload: &str) -> Result<(), String> {
-    use crate::lua::{lua_gettop, lua_pcallk, lua_settop, lua_tolstring, LUA_OK};
+fn call_lua_string(l: *mut LuaState, index: c_int, payload: &str) -> Result<bool, String> {
+    use crate::lua::{lua_gettop, lua_pcallk, lua_settop, lua_tolstring, lua_toboolean,
+        lua_type, LUA_OK, LUA_TBOOLEAN};
     unsafe {
         let base = lua_gettop(l);
         crate::lua::lua_pushvalue(l, index);
         lua_pushlstring(l, payload.as_ptr() as *const c_char, payload.len());
-        let status = lua_pcallk(l, 1, 0, 0, 0, std::ptr::null_mut());
+        let status = lua_pcallk(l, 1, 1, 0, 0, std::ptr::null_mut());
         if status == LUA_OK {
+            let keep_reading = lua_type(l, -1) != LUA_TBOOLEAN || lua_toboolean(l, -1) != 0;
             lua_settop(l, base);
-            return Ok(());
+            return Ok(keep_reading);
         }
         let mut len = 0usize;
         let pointer = lua_tolstring(l, -1, &mut len);
@@ -2250,11 +2259,12 @@ mod sse_line_tests {
 
     fn collect(body: &str) -> (Vec<String>, u64) {
         let mut seen: Vec<String> = Vec::new();
-        let lines = read_sse_lines(std::io::Cursor::new(body), |line| {
+        let (lines, termination) = read_sse_lines(std::io::Cursor::new(body), |line| {
             seen.push(line.to_string());
-            Ok(())
+            Ok(true)
         })
         .expect("a body with no failing callback reads to EOF");
+        assert_eq!(termination, "eof");
         (seen, lines)
     }
 
@@ -2297,7 +2307,7 @@ mod sse_line_tests {
         let mut handed = 0u64;
         let failure = read_sse_lines(std::io::Cursor::new(&body), |_line| {
             handed += 1;
-            if handed == 3 { Err("run_cancelled".to_string()) } else { Ok(()) }
+            if handed == 3 { Err("run_cancelled".to_string()) } else { Ok(true) }
         })
         .expect_err("a callback that fails must end the read");
         assert_eq!(failure.termination, "line_callback_failed");
@@ -2316,6 +2326,36 @@ mod sse_line_tests {
         // An empty body is an empty read, not a failure: a provider that answers with no body at
         // all is a fact to report, not an error to invent here.
         assert_eq!(collect("").1, 0);
+    }
+
+    #[test]
+    fn a_protocol_stop_does_not_read_the_failed_socket_tail() {
+        struct FailedTail(std::io::Cursor<Vec<u8>>);
+        impl std::io::Read for FailedTail {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                let n = self.0.read(buf)?;
+                if n == 0 { Err(std::io::Error::new(std::io::ErrorKind::ConnectionReset,
+                    "Peer disconnected")) } else { Ok(n) }
+            }
+        }
+        impl std::io::BufRead for FailedTail {
+            fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
+                if self.0.position() as usize == self.0.get_ref().len() {
+                    return Err(std::io::Error::new(std::io::ErrorKind::ConnectionReset,
+                        "Peer disconnected"));
+                }
+                self.0.fill_buf()
+            }
+            fn consume(&mut self, n: usize) { self.0.consume(n); }
+        }
+        let body = b"data: terminal\n\n".to_vec();
+        let stopped = read_sse_lines(FailedTail(std::io::Cursor::new(body.clone())),
+            |line| Ok(!line.is_empty())).expect("stop before reading socket teardown");
+        assert_eq!(stopped, (2, "callback_stopped"));
+        let failed = read_sse_lines(FailedTail(std::io::Cursor::new(body)), |_| Ok(true))
+            .expect_err("the old EOF-dependent path must reproduce the disconnect");
+        assert_eq!(failed.termination, "read_failed");
+        assert_eq!(failed.lines, 2);
     }
 }
 
