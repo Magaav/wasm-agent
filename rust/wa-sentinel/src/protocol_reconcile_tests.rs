@@ -30,6 +30,37 @@ fn preinstall_capture_requires_exact_early_failure_and_refuses_partial_install()
 }
 
 #[test]
+fn embedded_preinstall_requires_pinned_script_failed_result_and_owned_native_exit() {
+    let expected="a".repeat(40);
+    let intent=json!({"id":"fixture","expected_sha":expected,"owner":"owner","session":"parent","reason":"fixture"});
+    let effect=json!({"id":"fixture","expected_sha":expected,"tree":"b".repeat(40),"owner":"owner","parent":"parent",
+        "source":"C:/source","script":"C:/source/scripts/deploy.sh","script_sha256":EMBEDDED_PREINSTALL_SCRIPT,
+        "target_pid":11,"target_created":1234,"watcher_pid":9,"at":123,"phase":"admitted"});
+    let state=json!({"detail":"pid 7, output appended"});
+    let result=json!({"ok":false,"request_id":"fixture","expected_sha":expected,"commit":"aaaaaaaa","branch":"main",
+        "reason":"fixture","detail":"embedded runtime check failed; not installing it","node_sha256":"","sentinel_sha256":"","watcher_pid":""});
+    let exit=json!({"schema":1,"id":"fixture","expected_sha":expected,"effect":effect,"pid":7,"at":124,"elapsed_ms":400,
+        "effect_replayed":false,"installation_verified":false,"exit":{"wait_ok":true,"success":false,"code":1}});
+    let header=deploy_capture_header(Path::new("C:/source/scripts/deploy.sh"),"fixture","detached",123);
+    let text=format!("{header}deploy: building\nstale embedded Lua module\ndeploy: embedded runtime check failed; not installing it\n--- deploy pid 7 exited with exit code: 1 after 0.4s\n");
+    assert!(embedded_preinstall_capture(&intent,&effect,&state,&text,&result,&exit).is_ok());
+    for key in ["ok","request_id","expected_sha","commit","branch","reason","detail","node_sha256","sentinel_sha256","watcher_pid"] {
+        let mut bad=result.clone();bad[key]=json!("foreign");assert!(embedded_preinstall_capture(&intent,&effect,&state,&text,&bad,&exit).is_err(),"result {key}");
+    }
+    for key in ["schema","id","expected_sha","effect","pid","at","elapsed_ms","effect_replayed","installation_verified","exit"] {
+        let mut bad=exit.clone();bad[key]=Value::Null;assert!(embedded_preinstall_capture(&intent,&effect,&state,&text,&result,&bad).is_err(),"exit {key}");
+    }
+    for key in ["wait_ok","success","code"] {let mut bad=exit.clone();bad["exit"][key]=Value::Null;assert!(embedded_preinstall_capture(&intent,&effect,&state,&text,&result,&bad).is_err());}
+    let mut foreign=effect.clone();foreign["script_sha256"]=json!("c".repeat(64));
+    assert!(embedded_preinstall_capture(&intent,&foreign,&state,&text,&result,&exit).is_err());
+    for bad in [format!("{text}{text}"),text.replace("0.4s","0.5s"),text.replace("pid 7 exited","pid 8 exited"),
+        text.replace("deploy: building","deploy: installing through upgrade.sh"),text.replace("deploy: building","upgrade: started"),
+        text.replace("deploy: building","deploy: the new binary answers on a scratch port"),text.replace("not installing it","unknown outcome")] {
+        assert!(embedded_preinstall_capture(&intent,&effect,&state,&bad,&result,&exit).is_err());
+    }
+}
+
+#[test]
 fn reconciliation_inside_turn_refuses_before_touching_runtime_state() {
     let _lock=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
     let original=std::env::var_os("WASM_AGENT_IN_TURN");std::env::set_var("WASM_AGENT_IN_TURN","1");

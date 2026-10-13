@@ -42,6 +42,17 @@ plus `--post`; use the verified direct CLI in required workspaces. Also run
 See `<repo>/docs/PROGRESSIVE-ENVELOPE.md`. The tiny three-way shadow measures
 serialized bytes and replay mechanics, not autonomous quality or paid tokens.
 
+For capture/lean-bootstrap/typed-routing changes, `envelope-iteration-proof`
+records `test-envelope-iteration.cjs <built-wa> <fresh-evidence> <exact-capture>`
+and `test-envelope-outcomes.cjs <built-wa> <other-fresh-evidence>`, with both
+retained-hash `--post` checks. Required worktrees use these verified native Node
+CLIs, not unsupported spell replay. Preserve complete originals, JSON shapes,
+role/profile/workspace/definition fences and the unchanged global output budget.
+Task plans are deterministic native replay, not autonomous quality or token/billing
+proof. Report discovery and total input plus tool-result context; grouping already
+independent singles does not itself save a model round. See
+`<repo>/docs/PROGRESSIVE-ENVELOPE.md` and its measurement.
+
 For skill-metadata envelope changes, `skill-discovery-proof` records
 `node <repo>/scripts/test-skill-discovery.cjs <candidate-wa> <fresh-evidence> <baseline-wa>`
 plus `--post`; required workspaces use this verified direct CLI, not unsupported

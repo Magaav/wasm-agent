@@ -15,4 +15,7 @@ Check ($text.IndexOf('bootstrap_clean_published_source_required') -lt $text.Inde
 $ps=Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
 $ErrorActionPreference='Continue';$r=& $ps -NoProfile -NonInteractive -File $Helper -ExpectedSha 'bad' -ParentSession 'fixture' 2>&1;$code=$LASTEXITCODE;$ErrorActionPreference='Stop'
 Check ($code -ne 0 -and ($r|Out-String).Contains('bootstrap_identity_invalid')) 'invalid identity refuses before task lookup'
+foreach($needle in @('bootstrap_retirement_generation_mismatch','bootstrap_retirement_reservation_missing','protocol retire-preinstall','retirement_only','bootstrap_retirement_identity_invalid')){Check ($text.Contains($needle)) ('missing retirement boundary '+$needle)}
+$ErrorActionPreference='Continue';$r=& $ps -NoProfile -NonInteractive -File $Helper -ExpectedSha ('a'*40) -ParentSession 'fixture' -RetirePreinstallId '../foreign' 2>&1;$code=$LASTEXITCODE;$ErrorActionPreference='Stop'
+Check ($code -ne 0 -and ($r|Out-String).Contains('bootstrap_retirement_identity_invalid')) 'invalid retirement identity refuses before task lookup'
 @{ok=$true;checks=$checks;skipped=0;live_effects=0;scope='OS-task bootstrap parser and boundaries'}|ConvertTo-Json -Compress

@@ -215,12 +215,20 @@ real dirname/date/mkdir/sed/tr/wc/uname/git and preserves a native bound process
 exit when script reporting fails. A failed process is not installation or replay
 permission. Unknown/partial effects remain blocked.
 
-External `protocol retire-preinstall <id> --reason <text>` is only for the exact
-historical early PATH refusal with unchanged live target/binary and retained source/
-capture proof. It preserves originals, writes a receipt-bound aborted reservation,
-never pretends it verified installation, and never retries the old intent. Bootstrap
-may then admit ONE fresh exact-source generation through the checked existing OS task.
-Run focused Sentinel/operation tests before broader checks; see docs/SENTINEL.md.
+External `protocol retire-preinstall <id> --reason <text>` accepts only the exact
+historical early PATH refusal or pinned embedded-runtime-check failure, with
+unchanged live target/binary and retained source/capture proof. The embedded path
+also requires a failed result with empty installed identities and a full-effect-bound
+native exit1/PID/time record. It preserves originals and notification unknowns,
+writes a receipt-bound aborted reservation and never claims installation/replays.
+For an old observer use the checked existing OS task helper with
+`-RetirePreinstallId <id>` (`-Check` first); this mode retires only, not bootstrap.
+Inspect its result and native receipt once before a separate fresh-source admission.
+`sentinel-preinstall-proof` records `test-sentinel-preinstall.cjs <built-sentinel>
+<fresh-evidence>` and `--post`; required worktrees use this verified direct CLI.
+Run focused native reconcile and bootstrap-parser checks too. Preserve stale
+canonical cache generations before clean-source builds; do not hand-copy installed
+binaries or mistake candidate module checks for installation. See docs/SENTINEL.md.
 
 ## What a fresh node must have
 

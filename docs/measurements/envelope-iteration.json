@@ -1,0 +1,54 @@
+{
+  "schema": 1,
+  "scope": "Deterministic native source/embedded contracts and five predeclared tool paths; no autonomous inference, provider tokens/cache/billing or new Pi comparison.",
+  "base": "7174f1b812771e60ff79b93f39899d282a0fac60",
+  "candidate_sha256": "aa8e64eaee34892b3ecf76ed56d1873cc6cd7ec09c0574c58acde3680efd7075",
+  "sentinel_candidate_sha256": "fbc784ee7d8aa7b6fa6879decd3572542321be339b4f798e9782869a71af9b02",
+  "installed_at_measurement": false,
+  "capture_inspection": {
+    "original_artifact_sha256": "21f56e71a97878b4377abe0ef432b99d87a5b965b7dbf6fe559a014b40805e59",
+    "original_batch_bytes": 100331,
+    "new_inspection_bytes": 35558,
+    "old_omitted_items": 4,
+    "new_omitted_items": 0,
+    "capture_metadata_bytes": [2302, 1577],
+    "preserved_other_results": 4,
+    "contract": "Same six positions: four captured source results remain exact; two raw capture dumps become structural metadata with unchanged complete-original references. This deliberately changes the inspection view, not the original evidence.",
+    "first_capture_only_bytes": 2305,
+    "global_tool_output_budget_bytes": 51200
+  },
+  "current_wave_native_prefix": {
+    "before": {"tools": 13, "system_bytes": 17889, "schema_bytes": 9467, "envelope_bytes": 27696},
+    "after": {"tools": 10, "system_bytes": 16940, "schema_bytes": 8347, "envelope_bytes": 25608},
+    "saved_bytes": 2088,
+    "control": "Historical en-build3 and current embedded candidate share the same source cwd/current visible catalogue fingerprint. Mandatory AGENTS.md remains 10389 bytes. This is initial serialization only."
+  },
+  "native_task_paths_source": [
+    {"task":"repair", "outcomes_passed":2, "input_before":85202, "input_after":80993, "tool_result_before":1650, "tool_result_after":1644, "rounds_before":3, "rounds_after":3, "discovery_before":0, "discovery_after":0},
+    {"task":"recall", "outcomes_passed":2, "input_before":54590, "input_after":51806, "tool_result_before":220, "tool_result_after":230, "rounds_before":2, "rounds_after":2, "discovery_before":0, "discovery_after":0},
+    {"task":"remember", "outcomes_passed":2, "input_before":54427, "input_after":51630, "tool_result_before":55, "tool_result_after":55, "rounds_before":2, "rounds_after":2, "discovery_before":0, "discovery_after":0},
+    {"task":"capture_singles", "outcomes_passed":2, "input_before":87516, "input_after":83313, "tool_result_before":3584, "tool_result_after":3578, "rounds_before":3, "rounds_after":3, "discovery_before":1, "discovery_after":1},
+    {"task":"capture_group", "outcomes_passed":2, "input_before":87441, "input_after":83238, "tool_result_before":3660, "tool_result_after":3654, "rounds_before":3, "rounds_after":3, "discovery_before":1, "discovery_after":1}
+  ],
+  "task_control": "Classic13 versus lean10 within the new implementation, same real AGENTS.md and behavioral oracles. Native tools execute predeclared plans, not model inference or a complete native agent-loop benchmark. All ten outcomes passed in both source and embedded modes. Private path/identifier serialization contributes a few bytes; retained evidence includes every initial/peak/input/tool-result snapshot.",
+  "grouping_tradeoff": "Two capture reads still execute, and singles already share one response. Grouping saves one wrapper invocation and 75 serialized input bytes but emits 76 more result bytes: input-plus-new-result sum is one byte worse. No demonstrated total-cost or model-round win; typed preflight and one wrapper are the evaluation result, not JavaScript codemode parity.",
+  "remember_tradeoff": "Nine-tool pilot deferred remember and added discovery/worsened complete task input. Final lean10 retains remember, recall and workspace immediately; capabilities, read_many and tool_result are discovered. Rollback: WASM_AGENT_BOOTSTRAP_MODE=classic; full envelope rollback remains.",
+  "verification": {
+    "contract_source_embedded":158, "task_source_embedded":62, "progressive_envelope":156, "skill_discovery":104,
+    "complete_skill_bodies":118, "read_batch_native_restart":92, "batch_tools":492, "mcp_native_restart":58,
+    "keepalive":59, "real_socket_recovery":167, "private_native_retirement":26,
+    "focused_rust_reconcile_tests":4, "bootstrap_parser_boundaries":21, "direct_instructions":33,
+    "total":1550, "provider_calls":0, "app_calls":0, "gate_verified":false, "release_verified":false,
+    "evidence": "Session scratch: it-final4, it-outcomes-final2, it-envelope3, it-discovery3, it-bodies3, it-reads3, it-batch3, it-mcp3, it-keepalive3, it-sockets3, it-retirement1, it-build1 (Sentinel), it-build2 (node), it-regressions3, it-capture1 and it-capture3. Fresh source/binary/log retained-hash postchecks passed; earlier failures/pilots remain separate."
+  },
+  "limitations": [
+    "An optional procedure/tool first use can add discovery; this small fixture cannot select a universal optimum or establish autonomous quality.",
+    "Typed singles are opt-in and groups mandatory; a conservative JSON Schema subset is supported, not arbitrary JSON Schema. Unsupported constraints, composite enum values, malformed/duplicate JSON and invalid UTF-8 refuse.",
+    "Pure-read groups are serial, not concurrent/transactional, and never admit mutations, bash, plugins or MCP/app effects.",
+    "Capture metadata is structural, not evidence replacement. Arbitrarily large selected exact views can still need original byte retrieval.",
+    "Captured cursor records have no TTL/quota. Caller/workspace/profile/owner and artifact-integrity fences remain.",
+    "Graph confirmed already-planned read-batch/MCP checks but added no patch; callback prepare was a name-collision lead and dynamic/top-level edges were incomplete. audit_assess returned no_active_audit_step, not a successful assessment receipt.",
+    "Candidate proof is not installation. Old admitted failed deployment must be narrowly retired by the supported external executor; unknown notifications stay unknown and no old request may replay.",
+    "Stale-cache causal root remains unproven. Preserve old canonical targets before a clean-source rebuild rather than reviving the withdrawn manifest-dir hypothesis."
+  ]
+}

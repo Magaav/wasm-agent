@@ -177,17 +177,22 @@ pub(crate) fn retire_preinstall(id:&str,reason:&str)->Result<Value> {
     let state:Value=serde_json::from_slice(&std::fs::read(dir.join("state.json"))?)?;
     if state["id"]!=id || state["expected_sha"]!=intent["expected_sha"] || effect["id"]!=id
         || effect["expected_sha"]!=intent["expected_sha"] || !instance::same_path(&root,Path::new(effect["source"].as_str().unwrap_or(""))) {bail!("preinstall_source_or_state_mismatch");}
-    if dir.join("result.json").exists() {bail!("preinstall_result_exists; use ordinary verification");}
     let capture=std::fs::read(deploy_capture_path())?;let text=std::str::from_utf8(&capture)?;
-    let stanza=preinstall_capture(&intent,&effect,&state,text)?;
-    if verify_target(node_port(),true)?!=target || instance::process_start(target)!=effect["target_created"].as_u64() {bail!("preinstall_target_changed_during_proof");}
+    let late_result=dir.join("result.json");
+    let (stanza,failure_class)=if late_result.exists() {
+        let result:Value=serde_json::from_slice(&std::fs::read(&late_result)?)?;
+        let exit:Value=serde_json::from_slice(&std::fs::read(dir.join("process-exit.json"))?)?;
+        (embedded_preinstall_capture(&intent,&effect,&state,text,&result,&exit)?,"embedded_runtime_check")
+    }else{(preinstall_capture(&intent,&effect,&state,text)?,"early_path")};
+    if verify_target(node_port(),true)?!=target || instance::process_start(target)!=effect["target_created"].as_u64()
+        || node["binary_sha256"].as_str()!=Some(hex_digest(&std::fs::read(&binary)?).as_str()) {bail!("preinstall_target_changed_during_proof");}
     let evidence=dir.join(format!("preinstall-evidence-{}",std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()));std::fs::create_dir_all(&evidence)?;
-    for name in ["intent.json","binding.json","effect.json","state.json","return-status.json","observation.json"] {let file=dir.join(name);if file.exists(){std::fs::copy(file,evidence.join(name))?;}}
+    for name in ["intent.json","binding.json","effect.json","state.json","result.json","process-exit.json","return-status.json","observation.json"] {let file=dir.join(name);if file.exists(){std::fs::copy(file,evidence.join(name))?;}}
     std::fs::copy(sentinel_dir().join("protocol-effect.json"),evidence.join("reservation.json"))?;
     std::fs::write(evidence.join("deploy.out"),&capture)?;std::fs::write(evidence.join("exact-stanza.txt"),stanza)?;
     let receipt=json!({"ok":true,"id":id,"effect":effect,"reason":reason,"at":now_epoch(),"target_pid":target,
         "target_created":instance::process_start(target),"capture_sha256":hex_digest(&capture),"evidence":evidence,
-        "installation_occurred":false,"effect_replayed":false,"reservation_released":true});
+        "failure_class":failure_class,"installation_occurred":false,"effect_replayed":false,"reservation_released":true});
     wa_operation::atomic_json(&dir.join("preinstall-retirement.json"),&receipt)?;
     active["phase"]=json!("aborted_preinstall");active["retired_at"]=json!(now_epoch());
     wa_operation::atomic_json(&sentinel_dir().join("protocol-effect.json"),&active)?;
@@ -195,7 +200,7 @@ pub(crate) fn retire_preinstall(id:&str,reason:&str)->Result<Value> {
     Ok(receipt)
 }
 fn hex_digest(bytes:&[u8])->String {ring::digest::digest(&ring::digest::SHA256,bytes).as_ref().iter().map(|b|format!("{b:02x}")).collect()}
-fn preinstall_capture<'a>(intent:&Value,effect:&Value,state:&Value,text:&'a str)->Result<&'a str> {
+fn owned_preinstall_stanza<'a>(intent:&Value,effect:&Value,state:&Value,text:&'a str)->Result<&'a str> {
     let header=deploy_capture_header(Path::new(effect["script"].as_str().context("preinstall_script_missing")?),intent["reason"].as_str().unwrap_or(""),"detached",effect["at"].as_u64().context("preinstall_at_missing")?);
     let positions=text.match_indices(&header).collect::<Vec<_>>();if positions.len()!=1 {bail!("preinstall_capture_not_unique");}
     let tail=&text[positions[0].0+header.len()..];
@@ -206,10 +211,43 @@ fn preinstall_capture<'a>(intent:&Value,effect:&Value,state:&Value,text:&'a str)
     let duration=&tail[stop+ending.len()..end-1];
     if !duration.ends_with('s') || duration[..duration.len()-1].parse::<f64>().ok().is_none_or(|v|!v.is_finite()||v<0.0) {bail!("preinstall_exit_duration_invalid");}
     let stanza=&tail[..end];
+    if stanza[..stop].contains("--- deploy") {bail!("preinstall_capture_boundary_unproven");}
+    Ok(stanza)
+}
+fn preinstall_capture<'a>(intent:&Value,effect:&Value,state:&Value,text:&'a str)->Result<&'a str> {
+    let stanza=owned_preinstall_stanza(intent,effect,state,text)?;
     if !stanza.contains("dirname: command not found") || !stanza.contains("date: command not found")
         || !stanza.contains("deploy: the tree has  uncommitted change(s); commit or stash them first")
         || stanza.contains("deploy: building") || stanza.contains("installing through upgrade.sh") || stanza.contains("upgrade:")
-        || stanza[..stop].contains("--- deploy") {bail!("preinstall_capture_boundary_unproven");}
+        {bail!("preinstall_capture_boundary_unproven");}
+    Ok(stanza)
+}
+
+// Deliberately narrow historical contract, not a generic failed-result escape.
+// This exact retained script's embedded check precedes scratch startup/install;
+// its fail() writes only failure records then exits. A future script needs new proof.
+const EMBEDDED_PREINSTALL_SCRIPT:&str="6d35ec43563d92d560a3d63acdb0676a56424827f0220b7e26ab7d25cd4862b1";
+fn embedded_preinstall_capture<'a>(intent:&Value,effect:&Value,state:&Value,text:&'a str,result:&Value,exit:&Value)->Result<&'a str> {
+    if effect["script_sha256"]!=EMBEDDED_PREINSTALL_SCRIPT {bail!("preinstall_embedded_script_contract_unrecognized");}
+    let expected=intent["expected_sha"].as_str().context("preinstall_sha_missing")?;
+    if expected.len()!=40 || result["ok"]!=false || result["request_id"]!=intent["id"] || result["expected_sha"]!=intent["expected_sha"]
+        || result["detail"]!="embedded runtime check failed; not installing it" || result["reason"]!=intent["reason"]
+        || result["commit"]!=&expected[..8] || result["branch"]!="main"
+        || result["node_sha256"]!="" || result["sentinel_sha256"]!="" || result["watcher_pid"]!="" {bail!("preinstall_embedded_result_unproven");}
+    let pid=state["detail"].as_str().and_then(|s|s.strip_prefix("pid ")).and_then(|s|s.split(',').next()).and_then(|s|s.parse::<u64>().ok()).context("preinstall_spawn_pid_missing")?;
+    if exit["schema"]!=1 || exit["id"]!=intent["id"] || exit["expected_sha"]!=intent["expected_sha"]
+        || !same_effect(&exit["effect"],effect) || exit["pid"].as_u64()!=Some(pid)
+        || exit["exit"]["wait_ok"]!=true || exit["exit"]["success"]!=false || exit["exit"]["code"]!=1
+        || exit["effect_replayed"]!=false || exit["installation_verified"]!=false
+        || exit["at"].as_u64().is_none_or(|at|at<effect["at"].as_u64().unwrap_or(u64::MAX))
+        || exit["elapsed_ms"].as_u64().is_none() {bail!("preinstall_embedded_native_exit_unproven");}
+    let stanza=owned_preinstall_stanza(intent,effect,state,text)?;
+    if !stanza.contains("deploy: embedded runtime check failed; not installing it")
+        || stanza.contains("installing through upgrade.sh") || stanza.contains("upgrade:")
+        || stanza.contains("deploy: the new binary answers on a scratch port") {bail!("preinstall_embedded_boundary_unproven");}
+    let suffix=format!("--- deploy pid {pid} exited with exit code: 1 after ");
+    let duration=stanza.split(&suffix).nth(1).and_then(|s|s.split('s').next()).and_then(|s|s.parse::<f64>().ok()).context("preinstall_embedded_duration_missing")?;
+    if (duration*1000.0-exit["elapsed_ms"].as_u64().unwrap() as f64).abs()>1.0 {bail!("preinstall_embedded_exit_duration_mismatch");}
     Ok(stanza)
 }
 

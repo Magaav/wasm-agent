@@ -2,15 +2,26 @@
 
 ## Model boundary
 
-New operator sessions use thirteen stable bootstrap declarations: remember, recall,
-skill, capabilities, tool_search, tool_call, read, read_many, write, edit, bash,
-tool_result and session_worktree. The role-filtered execution catalogue remains
+New operator sessions use ten stable bootstrap declarations: remember, recall,
+skill, tool_search, tool_call, read, write, edit, bash and session_worktree.
+`WASM_AGENT_BOOTSTRAP_MODE=classic` restores the former thirteen (including
+capabilities, read_many and tool_result); invalid values refuse. The role-filtered execution catalogue remains
 complete. `tool_search` loads matching exact definitions into the transcript;
 `tool_call(name, arguments)` routes a loaded definition through the existing
 native dispatcher. There is no JavaScript interpreter or new authority in this
 facade. Scope, profile, workspace, effect reservation and target checks still run.
-Unknown/plugin effects remain conservatively effectful; use explicit native batch
-tools rather than assuming routed reads overlap.
+Unknown/plugin effects remain conservatively effectful. `tool_call(checked=true)`
+validates the target's current supported JSON-schema subset before dispatch;
+unsupported constraints (including composite enum values) refuse. Ordinary singles
+retain their existing behavior. `calls` preflights one to eight already-known
+independent pure local reads (read, grep, ls, recall, skill, capture_inspect),
+then dispatches serially. It is neither concurrency nor a transaction and never
+admits bash, mutations, MCP or plugin effects. Current permissions and definition
+hashes are rechecked before each dispatch; cancellation/authority drift leaves
+an explicit unexecuted suffix. Null array slots and duplicate raw members refuse.
+Name/arguments, calls and cursor forms are exclusive. Large group replies page
+captured originals using tool_call(cursor); they cannot cross read_many cursor
+ownership, accounts or workspace/profile scope. Cursor retention has no TTL/quota.
 
 The first system message and declaration array do not grow when optional tools
 are discovered. The transcript does grow by selected definitions and results.
@@ -61,10 +72,42 @@ billing, cache hit rates or autonomous task quality. First unknown procedure use
 can add a discovery round; lexical search can miss synonyms. Known names load
 directly and complete enumeration remains available. Full mode is the rollback.
 
-Next candidates are a measured smaller bootstrap and task-specific guidance, not
-blindly removing memory, workspace, role or unknown-effect safety to match Pi's
-schema count. A true script codemode would need separate execution/security and
-quality evidence; this change does not introduce one or claim parity.
+## Task-local guidance, capture inspection and outcome scope
+
+Progressive prefixes no longer duplicate the bootstrap tool index or the concise
+style instruction. Optional UI instrumentation guidance arrives with client/shell
+discovery; capture/read-result guidance arrives with those definitions. Mandatory
+project, role, memory, workspace, skill-use and unknown-effect policy remains.
+Full/legacy prompts and exact child profile declarations retain their contracts.
+
+Discover `capture_inspect` before inspecting retained model-request JSON. Default
+summary selects one request, with bounded tool names and explicit omission counts;
+limit (max8), offset and source-hash snapshot cover subsequent metadata. Exact
+request/tool/message views preserve raw null/object/array distinctions. The complete
+original is unchanged and hash-addressed. These are structural sizes/counts, not a
+content summary or task-quality verdict. Unsupported layouts, ambiguous JSON or
+source drift refuse. Arbitrarily large selected views can still require original
+byte retrieval; the global50KiB output budget is unchanged, not silently clipped.
+
+Run `test-envelope-iteration.cjs <built-wa> <fresh-evidence> <exact-capture>` and
+`test-envelope-outcomes.cjs <built-wa> <fresh-evidence>`, then each `--post`.
+The former covers source/embedded structural/typed/scope/cursor contracts. The
+latter runs five predeclared native tool paths under classic13 and lean10,
+with failing-before/passing-after code-repair and memory/capture oracles. It records
+initial, peak and summed input serialization, total tool-result bytes, discovery
+calls, wrapper invocations and planned model-round snapshots. It is not an
+inference-driven benchmark or an actual full agent-loop comparison with Pi.
+No provider calls, tokens, cache/billing or autonomous quality are measured.
+
+The nine-tool pilot deferred remember, added discovery and worsened total task
+context; remember therefore stays immediate. Grouped capture calls save a wrapper
+invocation, not a model round: existing independent singles already share a model
+response and both paths still perform two reads. The measured group has75 fewer
+input bytes but76 more newly emitted result bytes: one byte worse on their sum,
+not a demonstrated total-cost improvement. See
+`docs/measurements/envelope-iteration.json` for qualified results/limitations.
+`WASM_AGENT_ENVELOPE_MODE=full` and bootstrap classic remain rollback knobs.
+There is no added JavaScript engine and no claim of codemode parity with Pi.
 
 ## MCP reads, writes and results
 
