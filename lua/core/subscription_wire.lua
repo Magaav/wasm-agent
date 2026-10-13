@@ -593,6 +593,8 @@ function M.session(opts)
       state.blocks[#state.blocks + 1] = {kind = 'tool', id = id, name = item.name or '', arguments = {}}
     else
       state.recovery_unsafe = true
+      state.recovery_blocker = state.recovery_blocker or
+        {reason='unsupported_item',item_type=item.type}
       return nil
     end
     slot.index = #state.blocks
@@ -892,11 +894,17 @@ function M.session(opts)
       ['response.reasoning_summary_text.done']=true,['response.reasoning_text.done']=true,
       ['response.reasoning_summary_part.added']=true})[kind or ''] then
       state.recovery_unsafe = true
+      state.recovery_blocker = state.recovery_blocker or
+        {reason='unsupported_event',event=kind}
     end
     state.events[#state.events + 1] = kind
   end
 
   session.line = M.framing(session.event)
+
+  -- The protocol's terminal frame settles the response. Socket EOF is teardown,
+  -- and waiting for it can discard a completed response or hang after completion.
+  function session.terminal() return state.terminal end
 
   function session.recovery()
     local discarded={id=stream_id,reasoning='',texts={},decisions={},tools_executed=0,
@@ -921,7 +929,10 @@ function M.session(opts)
     -- result or tools. Only explicitly transient failures may regenerate it.
     local retryable = state.failure and transient_provider_failure(state.failure.code)
     return not state.finished and (not state.terminal or retryable) and
-      not state.recovery_unsafe,discarded,state.failure
+      not state.recovery_unsafe,discarded,state.failure,
+      {terminal=state.terminal,status=state.status,request_id=state.request_id,
+        events=state.event_count,last_event=state.last_event,
+        recovery_unsafe=state.recovery_unsafe==true,blocker=state.recovery_blocker}
   end
 
   -- The result, or a loud failure. A stream that ended without a terminal event is reported as a
@@ -1063,11 +1074,17 @@ local function complete_attempt(model, messages, tools, stream, opts, reasoning,
       if observe then observe(text) end
       local ok, problem = pcall(line, text)
       if not ok then stopped_by = problem; error(problem, 0) end
+      return not session.terminal()
     end, math.max(1,math.ceil((timeout_ms-((host.monotonic_ms and host.monotonic_ms() or started)-started))/1000)))
   if stopped_by then error(stopped_by, 0) end
   local decoded = json.decode(outcome)
   recovery.outcome=decoded
-  if decoded.error then
+  -- Compatibility with hosts/fixture peers that ignore callback return values:
+  -- a read failure after a fully framed terminal still goes through result()
+  -- validation. Incomplete tools and unsuccessful terminal responses stay errors.
+  local completed_before_disconnect = decoded.status == 200 and
+    decoded.termination == 'read_failed' and decoded.error ~= 'run_cancelled' and session.terminal()
+  if decoded.error and not completed_before_disconnect then
     if decoded.error == 'run_cancelled' then error('run_cancelled', 0) end
     error(string.format('subscription_transport_%s: %s (after %s line(s))',
       tostring(decoded.termination or 'failed'), tostring(decoded.error),
@@ -1081,13 +1098,16 @@ local function complete_attempt(model, messages, tools, stream, opts, reasoning,
   -- Streaming telemetry, so an incomplete stream can say how it ended rather than only that it did.
   result.commentary_streamed = stream and (#result.commentary > 0) or false
   result.transport = 'native-codex-responses'
-  result.termination = decoded.termination
+  result.termination = completed_before_disconnect and 'response_complete' or decoded.termination
   result.lines = decoded.lines
   result.events = state.event_count
   result.saw_terminal_event = true
   result.phase_observation=state.phase_observation
   dofile('lua/core/telemetry.lua').event(opts.session_id,opts.run_id,stream_id,'subscription_transport','phase',
-    {transport='native-codex-responses',phase_observation=state.phase_observation})
+    {transport='native-codex-responses',phase_observation=state.phase_observation,
+      termination=result.termination,lines=decoded.lines,
+      teardown_error=completed_before_disconnect and
+        dofile('lua/core/redact.lua').text(tostring(decoded.error)) or nil})
   return result
 end
 
@@ -1137,8 +1157,8 @@ function M.complete(model,messages,tools,stream,opts,reasoning)
     end
     stop()
     local outcome=recovery.outcome or {}
-    local safe,discarded,failure=false,nil,nil
-    if recovery.session then safe,discarded,failure=recovery.session.recovery() end
+    local safe,discarded,failure,parser=false,nil,nil,nil
+    if recovery.session then safe,discarded,failure,parser=recovery.session.recovery() end
     local problem=tostring(result)
     local text=problem:lower()
     local network=outcome.termination=='eof' and text:find('subscription_stream_truncated:',1,true)
@@ -1146,11 +1166,16 @@ function M.complete(model,messages,tools,stream,opts,reasoning)
         (text:find('peer disconnected',1,true) or text:find('connection reset',1,true)
         or text:find('unexpected eof',1,true) or text:find('broken pipe',1,true)
         or text:find('connection closed',1,true) or text:find('timeout',1,true))
-    if limit==0 then error(result,0) end
     local transient = failure and transient_provider_failure(failure.code)
     -- A rejected HTTP request has no parsed output and no tools to commit.
     local server_http = not outcome.error and (outcome.status == 500 or outcome.status == 502 or
       outcome.status == 503 or outcome.status == 504)
+    dofile('lua/core/telemetry.lua').event(opts.session_id,opts.run_id,attempt_opts.stream_id,
+      'subscription_transport','attempt',{ok=false,attempt=attempt+1,limit=limit,
+        termination=outcome.termination,status=outcome.status,lines=outcome.lines,
+        retry_safe=safe,retryable=(network or transient or server_http) and true or false,
+        parser=parser,error=dofile('lua/core/redact.lua').text(problem)})
+    if limit==0 then error(result,0) end
     if not safe or not (network or transient or server_http) then
       error('subscription_retry_suppressed: '..problem,0)
     end

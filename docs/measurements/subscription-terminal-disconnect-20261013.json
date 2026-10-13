@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "date": "2026-10-13",
+  "review": "self-review; direct workflow, no subagents",
+  "historical_run": {
+    "admission": 1226,
+    "run_id": "b0649c29-7193-4690-aba3-f3a60b2980d9",
+    "session_id": "f3595b69-5a33-4e0b-befc-e223e7a4f0b1",
+    "ended_at": "2026-10-13T11:53:19Z",
+    "run_ms": 1094012,
+    "failed_model_round": 16,
+    "failed_model_call_ms": 58408,
+    "transport": "native-codex-responses",
+    "installed_binary_sha256": "ca54906050d8f2078f19879979c09da812d84ea43f7581108ba71395f9ef380f",
+    "error": "subscription_retry_suppressed: subscription_transport_read_failed: Peer disconnected (after 235 line(s))",
+    "cancel_requested": false,
+    "retry_attempts": 0,
+    "evidence": "C:/Users/Victor/wa-terminal-disconnect-evidence/historical-run.json",
+    "limitation": "Raw failed-stream SSE frames and parser terminal/unknown-event state were not retained. The run proves read failure and retry suppression, but cannot retrospectively distinguish terminal-state suppression from unsupported-event/item suppression. The upstream reason for closing the socket is not known."
+  },
+  "confirmed_local_defect": {
+    "trigger": "A fully framed response.completed followed by an HTTP-body read failure or a connection held open.",
+    "before": "http_sse waited for socket EOF. complete_attempt rejected read_failed before validating the terminal result. recovery refused a completed terminal response, so the whole run failed with no retry.",
+    "after": "Lua returns false after the terminal frame. The Rust capability closes the reader successfully with callback_stopped. Terminal result validation still refuses incomplete tools and unsuccessful responses. Older hosts that ignore callback returns preserve a validated terminal response after read_failed and retain the teardown error in telemetry.",
+    "causal_control": "The original wire reproduces the exact historical error including 235 lines. The original installed host fails the explicit callback-stop socket test. Both negative controls are retained, without replaying the historical run or its effects."
+  },
+  "recovery": {
+    "before_terminal": "Known inference-only streams regenerate within the existing retry count and original request deadline. Earlier completed rounds are retained; failed-attempt tools never dispatch.",
+    "after_terminal": "Validated response returned once, without inference regeneration or duplicated tool effects.",
+    "diagnostics": "Each failed native attempt records termination, HTTP status, line count, request id, event count, last event, terminal state, retry safety and first unsupported event/item blocker. No prompt or raw SSE body is recorded by these diagnostics.",
+    "limits": "Permanent outages, exhausted deadlines/retries, cancellation, authentication/quota/context failures and unknown effects remain visible failures. No client can guarantee that a remote peer never disconnects."
+  },
+  "verification": {
+    "candidate_binary_sha256": "1f043f84e2e0807b1f08671d6cc41c554dd2ab6d1f7d620b31058d6f4727b909",
+    "socket_and_recovery_matrix_checks": 145,
+    "matrix_skipped": 0,
+    "matrix_paid_calls": 0,
+    "matrix": "C:/Users/Victor/wa-terminal-disconnect-evidence/final-matrix/receipt.json",
+    "matrix_postcheck": "passed",
+    "coverage": [
+      "real localhost terminal reset and held-open socket",
+      "real localhost pre-terminal reset with completed tool item, unchanged retry body and abandoned tool exclusion",
+      "disk and embedded Lua through actual provider/agent loop",
+      "terminal tools dispatched exactly once",
+      "incomplete terminal tool refusal",
+      "transient server failures, original deadline and cancellation",
+      "unknown-effect suppression with exact durable blocking-event diagnostics",
+      "nil, true and nonboolean callback compatibility; false stop and callback error"
+    ],
+    "existing_regression_runs": 10,
+    "existing_regression_checks": 1140,
+    "existing_regressions": "C:/Users/Victor/wa-terminal-disconnect-evidence/final-regressions/receipt.json",
+    "rust_line_reader_tests": 5,
+    "rust_line_reader_failed": 0,
+    "rust_line_reader_ignored": 0,
+    "rust_tests": "C:/Users/Victor/wa-terminal-disconnect-evidence/final-rust-tests.stdout",
+    "direct_workflow_instruction_checks": 33,
+    "live_probe_calls": 1,
+    "live_probe": "Old installed host, native wire, one fixture tool requested but never dispatched. Completed normally; only supported event/item types observed. This does not prove the failed historical stream's event types.",
+    "live_probe_evidence": "C:/Users/Victor/wa-terminal-disconnect-evidence/probe.stdout"
+  },
+  "gate_verified": false,
+  "release_verified": false,
+  "installation": "Separate Sentinel installation and actual installed-byte verification are required; candidate checks alone do not prove installation."
+}
