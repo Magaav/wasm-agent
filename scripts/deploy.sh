@@ -813,6 +813,7 @@ ship_file "$ROOT/scripts/sentinel-install-proof.mjs" "$INSTALL_DIR/scripts/senti
 ship_file "$ROOT/scripts/sentinel-historical-proof.mjs" "$INSTALL_DIR/scripts/sentinel-historical-proof.mjs" "verification-only historical generation proof"
 ship_file "$ROOT/scripts/measure-sentinel-io.ps1" "$INSTALL_DIR/scripts/measure-sentinel-io.ps1" "bounded read-only Windows idle measurement"
 ship_file "$ROOT/scripts/install-sentinel-service.ps1" "$INSTALL_DIR/scripts/install-sentinel-service.ps1" "explicit external Windows SCM installer"
+ship_file "$ROOT/scripts/web-core.mjs" "$INSTALL_DIR/scripts/web-core.mjs" "read-only web adapter core"
 
 # Ship the WhatsApp pipeline with the node it belongs to. `upgrade.sh` installs the binary, the UI and the
 # self-update skill, and has never carried these: the scripts that read the inbox, the job files that

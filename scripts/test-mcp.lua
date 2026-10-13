@@ -44,9 +44,12 @@ check(tools.dispatch(memory,name,{},'master',{subagent={allowed={}}}).error:find
 local rawargs='{"value":{"empty":{},"array":[],"nil":null}}'
 local result=tools.dispatch(memory,name,{},'master',{session_id='mcp-private-fixture',tool_arguments_json=rawargs})
 check(result.ok and result.tool_call_issued,'one actual native call')
-check(result.result_json:find('"nil":null',1,true)~=nil,'result null retained')
-check(result.result_json:find('"empty":{}',1,true)~=nil,'result empty object retained')
-check(result.result_json:find('"array":[]',1,true)~=nil,'result array retained')
+local exact_result=json.encode(result.result)
+check(exact_result:find('"nil":null',1,true)~=nil,'result null retained')
+check(exact_result:find('"empty":{}',1,true)~=nil,'result empty object retained')
+check(exact_result:find('"array":[]',1,true)~=nil,'result array retained')
+check(result.evidence and host.read_file(result.evidence.path)~=nil,'full protocol evidence retained outside model view')
+check(not json.encode(result):find('"tools":',1,true),'catalogue not repeated in model reply')
 check(mcp.inventory().servers[1].last_call.ok==true,'durable last call')
 local bound={session_workspace=function()return {required=true,state='allocated',worktree=root}end}
 check(tools.dispatch(bound,'mcp',{action='probe',id='fixture'},'master',{session_id='bound'}).error=='workspace_execution_context_unsupported','generic probe required-workspace boundary')

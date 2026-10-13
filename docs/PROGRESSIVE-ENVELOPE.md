@@ -1,0 +1,129 @@
+# Progressive envelope and web research
+
+## Model boundary
+
+New operator sessions use thirteen stable bootstrap declarations: remember, recall,
+skill, capabilities, tool_search, tool_call, read, read_many, write, edit, bash,
+tool_result and session_worktree. The role-filtered execution catalogue remains
+complete. `tool_search` loads matching exact definitions into the transcript;
+`tool_call(name, arguments)` routes a loaded definition through the existing
+native dispatcher. There is no JavaScript interpreter or new authority in this
+facade. Scope, profile, workspace, effect reservation and target checks still run.
+Unknown/plugin effects remain conservatively effectful; use explicit native batch
+tools rather than assuming routed reads overlap.
+
+The first system message and declaration array do not grow when optional tools
+are discovered. The transcript does grow by selected definitions and results.
+Skills retain their complete name/description/location metadata and on-demand
+bodies. Mandatory role/project instructions and reasoning replay are not cut.
+No memory facts, spell catalogue, connector catalogue or web originals are injected.
+AGENTS.md is unchanged. Cached definitions are not free context; provider cache
+hits and billing savings are unmeasured by the shadow fixture.
+
+Loaded names are session/user/role scoped and hash-fenced in SQLite. Discovery
+never authorizes a tool. Role/profile ceilings and current MCP approval are checked
+again at invocation; changed definitions require rediscovery. Raw nested MCP JSON
+arguments preserve null/empty-object/empty-array shapes. Duplicate routed JSON
+members refuse. Full original history/results stay retrievable. Compaction can
+remove a definition from active context, so search it again when its contract is
+no longer visible; a loaded hash is not proof of model awareness.
+
+Existing conversations with recorded assistant activity keep the full surface;
+user-only unanswered sessions may adopt progressive mode. Children keep their exact approved
+profile declarations. `WASM_AGENT_ENVELOPE_MODE=full` is the explicit rollback.
+`progressive` can force the new facade in a controlled session. Invalid settings
+fail, not silently choose a mode. Default new-session promotion is the operator's
+requested treatment; the risk is an added discovery step and unmeasured autonomous
+model behavior beyond this small fixture. The escape hatch and evidence remain.
+
+## MCP reads, writes and results
+
+Approved generic reads and the fixed web facade reuse a supervised read-session
+process. Connection keys bind caller/session/role, definition, credential hashes,
+read-only names and approved schema hash. No shared cross-account client exists.
+An idle session closes after30 seconds; an operation deadline still bounds it.
+There are no jobs, model polling, subscriptions, detached workers or inference.
+Native operation ownership/process-tree containment remains the supervisor.
+
+Initialize/list happen once per live read connection. A tool-list notification
+causes on-demand rediscovery; changed approval hashes refuse before the next
+app call. Silent server changes without notifications cannot be detected from a
+cached catalogue: explicit re-probe is the refresh boundary. This limitation is
+not relabeled per-call verification. Writes, probes and WhatsApp retain their
+request-scoped settlement/effect contracts. No unknown call is retried. Read
+uncertainty is reserved durably before HTTP submission and released only after
+hash-bound known result verification. Missing/malformed acknowledgements, native
+interruption and process reconstruction retain the exact request and refuse replay;
+a competing uncertainty claim cannot submit. Fixed built-in facades pin the initial
+connected catalogue too. Cancelling a process is not semantic settlement.
+
+Generic replies expose the actual result/error and a hash-bound evidence pointer,
+not the entire server catalogue again. Exact request/result files and operation
+records remain private originals. A persistent-call acknowledgement proves that
+call's retained response, not that its still-live session process has settled.
+
+The one-shot stdio cleanup also fixes two costs: waiting for an already-fired
+close event and leaving losing race timers alive. Do not attribute that eliminated
+one-second delay entirely to process startup or persistent connections.
+
+## Web interface
+
+Discover `web_search` and `web_read` through tool_search, then use tool_call.
+They are fixed, read-only MCP-backed native facades. No generic connector enabling
+or account creation is needed. Search queries leave the machine: the live default
+is anonymous DuckDuckGo HTML. Challenges/errors refuse visibly; there is no CAPTCHA
+bypass, automatic replay or paid API. Bing RSS was tested and rejected as the live
+default after irrelevant results; its failed-quality evidence is retained.
+
+The reader supports public HTTPS static HTML/text/JSON/XML, not JavaScript rendering,
+PDF extraction, browser actions or Firecrawl parity. Public DNS addresses are
+checked and pinned per request; redirects are validated separately, credentials
+and private targets refuse, and response sizes/deadlines are bounded. No cookies
+or authenticated browser profile are used. Source content is untrusted data.
+
+Successful originals, extracted text and metadata are content-addressed locally.
+Responses include citations, an immutable ref and explicit UTF-8 byte paging.
+Repeated URL reads reuse a recent public-source cache; ref reads never fetch.
+Changed cached bytes refuse. Full raw HTML remains available even when scripts,
+styles and templates are excluded from the static text view. Cache is explicit
+retention, not a disk quota or a promise the page is still current; refresh requests
+fetch anew. Selected search results count omitted cached candidates explicitly.
+
+## Focused proof and shadow scope
+
+`scripts/test-envelope.lua`, `test-mcp.lua`, `test-web.mjs` and
+`test-mcp-session.mjs` and `test-mcp-recovery.cjs` cover native discovery, source/embedded freshness, permission
+and schema fences, raw shapes, connection reuse/notification/unknown no-replay,
+public target refusal, cache integrity and complete Unicode paging. Existing
+MCP/WhatsApp tests remain. No full release gate is implied.
+
+The fixture `benchmarks/web-envelope/simple.json` is one question, one search, two
+short authored sources, two citations, and one cached follow-up. It is intentionally
+not a broad research task. `scripts/bench-web-envelope.cjs` runs25 serial,
+counterbalanced repetitions per arm: frozen current wasm, patched wasm, and
+privately pinned latest Pi. Every arm receives the same question/corpus/backend;
+independent acceptance rejects missing facts/citations and extra app calls.
+
+Wasm uses its real native agent loop with recorded model responses. Pi uses its
+published MCP/codemode SDK and prompt/declaration builders with recorded scripts,
+not its autonomous CLI agent loop. Therefore bytes/protocol/replay timing are
+mechanical shadow evidence, not an apples-to-apples autonomous agent ranking.
+Different bootstrap capabilities, mandatory role instructions and skills are
+visible treatment differences, not silently normalized away. Setup is separate
+and also included in end-to-end wall time. Exact provider tokens, cache hits,
+subscription quota and dollars remain unknown; bytes are not measured tokens.
+
+Run `test-progressive-envelope.cjs <built-wa> <fresh-evidence>` and its `--post`
+check; `progressive-envelope-proof` records this verified sequence, while required
+worktrees use the direct CLI without relaxing their binding. Native reconstruction
+uses `test-mcp-recovery.cjs`; standalone embedded web uses
+`test-web-shadow-embedded.cjs`. For the offline report, generate with
+`render-envelope-report.mjs <qualified-wave> <fresh-output.html> <status.json>`,
+then `test-envelope-report.cjs <report-dir-with-index.html> <fresh-proof>` and
+`--post`. Inspect the screenshot; its content-mutation control must fail.
+
+Run with absolute frozen baseline/Pi/binary/evidence paths; the evidence directory
+must be fresh. `--post` verifies retained source/runtime/package/trace hashes without
+replaying the experiment. The final HTML shows initial actual snapshots, expansion,
+before/after distributions, applied improvements, failures and limitations.
+Installation is separately observed through the exact-source Sentinel receipt.

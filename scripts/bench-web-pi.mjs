@@ -1,0 +1,29 @@
+// Published Pi 1.2 SDK/MCP/codemode replay. No Pi CLI, autonomous solver, auth or provider call.
+import {readFileSync,writeFileSync,mkdirSync} from 'node:fs';import {pathToFileURL} from 'node:url';import {join,resolve} from 'node:path';import assert from 'node:assert/strict';
+const [piRoot,source,out]=process.argv.slice(2).map(v=>resolve(v)),dist=join(piRoot,'node_modules/@earendil-works/pi-coding-agent/dist');
+const module=rel=>import(pathToFileURL(join(dist,rel)).href),started=performance.now();
+const [{McpServerConnection,createDefaultTransport},{createMcpToolDefinition},{createCodemodeToolDefinition},{createCodingTools},{buildSystemPrompt},{renderServersSection}]=await Promise.all([module('extensions/mcp/runtime.js'),module('extensions/mcp/tools.js'),module('extensions/codemode/tool.js'),module('core/tools/index.js'),module('core/system-prompt.js'),module('extensions/mcp/index.js')]);
+const fixture=JSON.parse(readFileSync(join(source,'benchmarks/web-envelope/simple.json'),'utf8'));mkdirSync(join(out,'backend'),{recursive:true});
+const entry={name:'fixture',config:{command:process.execPath,args:[join(source,'scripts/fixtures/web-shadow-peer.mjs'),'--binding-json',JSON.stringify({cache_dir:join(out,'backend')})],exposure:'codemode',description:'Search and read two short web references',timeout:10}},connection=new McpServerConnection({entry,cwd:out,createTransport:createDefaultTransport,onTools:()=>{},credentials:{forServer(){throw Error('unexpected OAuth');}}});
+await connection.getClient();const namespace={name:'mcp__fixture',aliases:['fixture'],description:entry.config.description};
+const nested=connection.tools.map(tool=>createMcpToolDefinition({server:'fixture',tool,name:'mcp__fixture__'+tool.name,exposure:'codemode',namespace,getClient:async()=>connection,timeoutMs:10000}));
+const coding=createCodingTools(out).filter(t=>['read','bash','edit','write'].includes(t.name));assert.equal(coding.length,4);
+const codemode=createCodemodeToolDefinition({getToolNamespace:()=>namespace});
+const prepared=codemode.prepareLoadout({declared:[...coding,codemode],callable:[...coding,...nested],getExposure:name=>name.startsWith('mcp__')?'deferred':'direct',getNamespace:name=>name.startsWith('mcp__')?namespace:undefined,getPromptGuidelines:()=>[]});
+const declared=[...coding,codemode].map(t=>({name:t.name,description:prepared.descriptions[t.name]||t.description,parameters:t.parameters}));
+const system=buildSystemPrompt({cwd:out,selectedTools:declared.map(t=>t.name),toolSnippets:Object.fromEntries(declared.map(t=>[t.name,t.name==='codemode'?'Run scripts that call tools and filter output':'Coding tool'])),contextFiles:[{path:'AGENTS.md',content:readFileSync(join(source,'AGENTS.md'),'utf8')}],sections:{mcp_servers:renderServersSection([{entry,connection}])}});
+const requests=[],tool_results=[],messages=[{role:'system',content:system}],ctx={tools:nested,sessionManager:{getBranch:()=>[]},executeTool:async(name,args)=>{const tool=nested.find(t=>t.name===name);assert(tool,'unregistered fixture tool');const result=await tool.execute('nested',args,new AbortController().signal);return {toolCall:{id:'nested',name},result,isError:result.isError===true};}};
+const capture=()=>requests.push({messages:structuredClone(messages),tools:declared});
+async function execute(code,id){capture();messages.push({role:'assistant',tool_calls:[{id,type:'function',function:{name:'codemode',arguments:JSON.stringify({code})}}]});const r=await codemode.execute(id,{code},new AbortController().signal,undefined,ctx);assert(!r.isError,JSON.stringify(r));const content=r.content.filter(x=>x.type==='text').map(x=>x.text).join('\n');messages.push({role:'tool',tool_call_id:id,content});tool_results.push({name:'codemode',content});return r.content.filter(x=>x.type==='text').map(x=>x.text).at(-1);}
+function value(text){return JSON.parse(text);}
+const setup_ms=performance.now()-started;let first_ms,followup_ms,answer,followup;
+try{
+ const t=performance.now();messages.push({role:'user',content:fixture.question});
+ await execute('const matches = await searchTools("search read", {limit:2, namespace:"fixture"}); return await Promise.all(matches.map(t=>describeTool(t.name)));','discover');
+ const search=value(await execute('return (await tools.mcp__fixture__search('+JSON.stringify({query:fixture.query,limit:2})+')).structuredContent;','search'));assert.equal(search.results.length,2);
+ const reads=value(await execute('return await Promise.all('+JSON.stringify(fixture.sources.map(s=>({url:s.url})))+'.map(async a=>(await tools.mcp__fixture__read(a)).structuredContent));','read'));
+ assert(reads[0].content.includes('stdio')&&reads[1].content.includes('tools/list'));capture();answer='MCP uses stdio locally; tools/list discovers tools. Sources: '+reads[0].url+' '+reads[1].url;messages.push({role:'assistant',content:answer});first_ms=performance.now()-t;
+ const f=performance.now();messages.push({role:'user',content:fixture.followup});
+ const last=value(await execute('return (await tools.mcp__fixture__read('+JSON.stringify({ref:reads[1].ref})+')).structuredContent;','followup'));assert(last.content.includes('notifications/initialized'));capture();followup='Initialization completes with notifications/initialized. Source: '+fixture.sources[1].url;messages.push({role:'assistant',content:followup});followup_ms=performance.now()-f;
+}finally{await connection.close();}
+writeFileSync(join(out,'arm.json'),JSON.stringify({ok:true,arm:'pi',pi_version:JSON.parse(readFileSync(join(dist,'../package.json'),'utf8')).version,setup_ms,first_ms,followup_ms,answer,followup,requests,tool_results,protocol_log:join(out,'backend/protocol.jsonl'),fetch_log:join(out,'backend/fetch.jsonl'),cleanup:'awaited SDK connection.close',provider_calls:0,model_mode:'recorded script, published SDK/codemode execution; no inference'},null,2));console.log('web shadow pi ok');

@@ -22,7 +22,52 @@ These are two entry paths into one runtime:
 The fleet console serves these journeys. It is not the product's required first
 screen, and 32 workers are not a prerequisite for helping one customer.
 
-## MCP/Pi context economics — 2026-10-13 (measured; implementation pending)
+## Progressive envelope and working web — 2026-10-13 (source verified; installation pending)
+
+Latest published Pi1.2.0 (privately integrity-pinned; upstream `b9ab2a6238d2c91cf0c6ebf836dfd05883f9db51`)
+corrects the older inspection below: codemode uses compact server pointers,
+on-demand contracts and reusable connections. Catalogue repetition/fresh startup
+were wasm-agent implementation costs, not inherent MCP overhead.
+
+Implemented thirteen stable bootstrap declarations, exact role-filtered discovery,
+hash-fenced native routing, compact evidence-backed MCP replies, supervised
+read-only connection reuse, crash-durable pre-submit uncertainty/no replay, and
+MCP-backed anonymous public search/static HTTPS reading with immutable originals,
+UTF-8 pages and cached follow-up refs. Mandatory instructions and full skill
+procedures remain; AGENTS.md stays10,389 bytes. Legacy assistant-active sessions
+and child profiles keep their original tool surface; unanswered user-only sessions
+may adopt the new facade. Explicit full/request-mode rollbacks remain.
+
+Final four-call/two-source model-free shadow:75/75 trials,900 oracle assertions,
+219.08s. Median current→patched: initial envelope71,357→34,963 bytes;
+schemas43,964→9,020; final request88,206→42,172; tool replies12,670→4,737;
+task replay5,430.89→844.88ms; complete arm6,761.12→991.68ms. Pi SDK/codemode
+reference:17,946 initial bytes,23,710 final bytes,258.56ms task/942.32ms arm.
+Pi's SDK replay is not an identical autonomous loop; capabilities/skills differ.
+Provider tokens/cache hits/quota/dollars and general model quality are unmeasured.
+Request-only ablation≈1,192.78ms shows cleanup versus reuse; the historical
+one-second delay was not all startup. Failed pilots/waves remain preserved.
+
+Focused source+embedded: envelope77+77, native MCP44+44, recovery29+29,
+batches245+245; private Node49, MCP Chromium24, shipped closure101 and policy33
+checks passed. Recovery causal control fails the previous embedded candidate;
+reconstruction proves zero additional app calls. Live native DDG search→official
+stdio source→immutable cached ref passed; Bing RSS mechanical success/irrelevant
+results were rejected, not erased. Static text is not browser/Firecrawl/PDF parity
+or broad search-quality proof. Final standalone embedding also passes the12-check
+web oracle (`pw-we1`) and live search/read/ref proof (`pw-live4`); the required UI
+suite passed after a diagnosed transient0ms/1ms comparison failure, without a
+renderer/test relaxation. Standalone report rendering41 checks+negative control
+passed; full original failures/raw operation output remain.
+
+Self-review, `gate_verified:false`, `release_verified:false`. This entry records
+verified source, not inspected production installation. Canonical-main integration
+and remote readback are pinned in the delivery receipt; exact-source idle-safe
+Sentinel deployment and its actual verifier remain separate requirements. See `docs/PROGRESSIVE-ENVELOPE.md`; final measurement
+`pw-wave4/receipt.json`, recovery `pw-r4/receipt.json`, build `pw-build2/receipt.json`.
+Previous implementation/history/graph/skill-loading evidence remains unchanged.
+
+## MCP/Pi context economics — 2026-10-13 (historical measurement; superseded implementation above)
 
 Private native measurement with source Lua, isolated SQLite and a fake protocol
 peer; no model/web API or real app calls. Live inventory had0 generic connectors.

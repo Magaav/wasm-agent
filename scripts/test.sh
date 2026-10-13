@@ -1072,7 +1072,11 @@ MCP_NODE="$(command -v node)"
 if command -v cygpath >/dev/null 2>&1; then MCP_NODE="$(cygpath -m "$MCP_NODE")"; fi
 MCP_TEST_SOURCE="$WASM_AGENT_LUA_ROOT" WA_NODE="$MCP_NODE" WA_MCP_SCRIPT_DIR="$WASM_AGENT_LUA_ROOT/scripts" \
   WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-mcp.lua" "$BIN" --db "$DB.mcp" | grep 'mcp native ok'
-gate_run node --test --test-reporter=tap scripts/test-mcp.mjs scripts/test-mcp-whatsapp.mjs
+gate_run node --test --test-reporter=tap scripts/test-mcp.mjs scripts/test-mcp-whatsapp.mjs scripts/test-mcp-session.mjs scripts/test-web.mjs
+WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-envelope.lua" "$BIN" --db "$DB.envelope" | grep 'envelope ok'
+MCP_RECOVERY_BIN="$BIN"
+if command -v cygpath >/dev/null 2>&1; then MCP_RECOVERY_BIN="$(cygpath -m "$BIN")"; fi
+gate_run node scripts/test-mcp-recovery.cjs "$MCP_RECOVERY_BIN" "$WASM_AGENT_HOME/mcp-recovery-proof"
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-patch-audit.lua" "$BIN" --db "$DB.patch-audit" | grep 'patch audit ok'
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-patch-audit-agent.lua" "$BIN" --db "$DB.patch-audit-agent" | grep 'patch audit agent ok'
 # A module is one directory under `modules/`, so the route has to list what is on disk and a node

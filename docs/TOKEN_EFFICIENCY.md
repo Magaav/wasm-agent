@@ -5,6 +5,17 @@ percentage or a smaller schema at any cost. See [OBSERVABILITY.md](OBSERVABILITY
 for accounting and adjudication. This work is staged; a measurement change is
 not permission to change agent policy.
 
+## Progressive bootstrap (operator-requested treatment)
+
+New sessions now use stable bootstrap declarations and load optional exact tool
+definitions into the transcript through tool_search/tool_call. Existing sessions
+retain full declarations; child profile ceilings are unchanged. Mandatory project/
+role instructions, full skills, memory-on-demand and raw originals are preserved.
+Provider cache hits/financial savings are not implied by smaller serialized bytes.
+See [PROGRESSIVE-ENVELOPE.md](PROGRESSIVE-ENVELOPE.md) for rollout/rollback, risks,
+permission/freshness checks and the model-free three-way shadow scope. This is a
+separate, explicitly requested treatment, not a retrospective Stage1 policy claim.
+
 ## Stage 1: implemented, offline only
 
 No runtime source, provider request, tool schema, permission, memory injection,

@@ -34,6 +34,14 @@ Inspect workspace status only if unknown; an unavailable binding still blocks
 execution. Preserve the same postchecks, binding and instruction byte budget.
 See `docs/SKILLS.md` for supported-path routing; no blind retry or fabricated proof.
 
+For progressive model-envelope changes, `progressive-envelope-proof` records
+`node <repo>/scripts/test-progressive-envelope.cjs <built-wa> <fresh-evidence>`
+plus `--post`; use the verified direct CLI in required workspaces. Also run
+`test-mcp-recovery.cjs` source+embedded reconstruction/no-replay proof and
+`test-web-shadow-embedded.cjs` for the four-call source/citation oracle.
+See `<repo>/docs/PROGRESSIVE-ENVELOPE.md`. The tiny three-way shadow measures
+serialized bytes and replay mechanics, not autonomous quality or paid tokens.
+
 For MCP changes, `mcp-native-proof` records
 `node <repo>/scripts/test-mcp-native.cjs <absolute-built-wa> <fresh-evidence>`
 and its `--post` hash check. Use that verified direct CLI in required workspaces,

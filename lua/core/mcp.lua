@@ -2,6 +2,7 @@
 local json=dofile('lua/vendor/json.lua')
 local paths=dofile('lua/core/paths.lua')
 local platform=dofile('lua/core/platform.lua')
+local read_sessions=dofile('lua/core/mcp_session.lua')
 local M={KEY='mcp.extensions.v1'}
 local function fail(error,extra)local result=extra or {};result.ok=false;result.error=error;return result end
 local function decode(raw)local ok,value=pcall(json.decode,tostring(raw or ''));if not ok or type(value)~='table' then return nil end;return value end
@@ -78,7 +79,13 @@ local function native_data(answer)
  end
 end
 function M.invoke(input,ctx)
- ctx=ctx or {};local directory=M.script_dir();if not directory then return fail('mcp_script_directory_unbound',{tool_call_issued=false,outcome='not_submitted'}) end
+ ctx=ctx or {}
+ local directory=M.script_dir()
+ if input.persistent_read and host.getenv('WA_MCP_SESSION_MODE')~='request' then
+  if not directory or not host.read_file(directory..'/mcp-session.mjs') then return fail('mcp_session_not_installed',{outcome='not_submitted',tool_call_issued=false}) end
+  return read_sessions.invoke(input,ctx,directory)
+ end
+ local directory=M.script_dir();if not directory then return fail('mcp_script_directory_unbound',{tool_call_issued=false,outcome='not_submitted'}) end
  local client=directory..'/mcp-client.mjs';if not host.read_file(client)then return fail('mcp_client_not_installed',{tool_call_issued=false,outcome='not_submitted'}) end
  local request=paths.data()..'/mcp/requests/'..host.uuid()..'.json'
  input.result_file=request..'.result.json'
@@ -99,12 +106,16 @@ function M.invoke(input,ctx)
   if answer.result_path~=input.result_file then return fail('mcp_result_path_mismatch',{operation_id=id,outcome='unknown',tool_call_issued=input.action=='call'}) end
   local retained=host.read_file(answer.result_path)
   if not retained or #retained~=answer.result_bytes or host.sha256(retained)~=answer.result_sha256 then return fail('mcp_result_artifact_unverified',{operation_id=id,outcome='unknown',tool_call_issued=input.action=='call'}) end
-  answer=decode(retained)
+  answer.evidence={path=input.result_file,sha256=answer.result_sha256,bytes=answer.result_bytes}
+  local parsed=decode(retained)
+  if parsed then parsed.evidence=answer.evidence end
+  answer=parsed
  end
  if not answer then return fail('mcp_operation_result_unreadable',{operation_id=id,request=request,tool_call_issued=input.action=='call',outcome=input.action=='call' and 'unknown' or 'not_submitted'}) end
  answer.operation_id=id;answer.request=request
  return answer
 end
+function M.close_read_sessions()return read_sessions.close() end
 function M.default_whatsapp()
  local directory=M.script_dir() or '<installed scripts directory>'
  return {id='whatsapp',name='WhatsApp',transport='stdio',program=host.getenv('WA_NODE') or 'node',args={directory..'/mcp-whatsapp.mjs','--binding-json',json.encode({cache_dir=paths.cache()..'/mcp/whatsapp'})},
@@ -115,12 +126,12 @@ function M.inventory()
  local store=load_store();local servers={}
  for id,row in pairs(store.servers)do
   servers[#servers+1]={id=id,name=row.definition.name or id,definition=row.definition,enabled=row.enabled==true,revision=row.revision,
-   probe=row.probe,last_call=row.last_call,session_mode='request',observed_status=row.probe and (row.probe.ok and 'last probe passed' or 'last probe failed') or 'not verified'}
+   probe=row.probe,last_call=row.last_call,session_mode='read-reuse/write-request',observed_status=row.probe and (row.probe.ok and 'last probe passed' or 'last probe failed') or 'not verified'}
  end
  table.sort(servers,function(a,b)return a.id<b.id end)
  return {ok=true,revision=store.revision,servers=servers,templates={whatsapp=M.default_whatsapp()},can_manage=true,
   adapters={{id='whatsapp',name='WhatsApp',profile_managed=true,capabilities={'snapshot reads','verified self/target lookup','media retrieval','profile-scoped verified send'},note='Built-in MCP app adapter. Profile/compatibility callers retain approval and reservations; Jobs own eligibility, cursors and wakes. This row is not an enabled generic send tool.'}},
-  note='Explicit trusted connectors; last probe is not a persistent connection. Jobs owns wakes. Definitions/edits stay disabled until approval.'}
+  note='Explicit trusted connectors; last probe is not live health. Approved reads may reuse idle-bounded sessions; writes and WhatsApp stay request-scoped. Jobs owns wakes.'}
 end
 function M.control(args,ctx)
  args=args or {};ctx=ctx or {};if ctx.role~='master' and ctx.role~='admin' then return fail('forbidden') end
@@ -173,6 +184,11 @@ function M.is_read(name)local id,row,tool=M.resolve_tool(name);return id~=nil an
 function M.call(name,args,ctx)
  local id,row,tool=M.resolve_tool(name);if not id then return fail('mcp_tool_not_approved') end
  local options={action='call',server=row.definition,tool=tool.name,schema_hash=row.probe.schema_hash}
+ if row.definition.tools[tool.name]=='read' then
+  options.persistent_read=true;options.read_tools={}
+  for allowed,effect in pairs(row.definition.tools)do if effect=='read' then options.read_tools[#options.read_tools+1]=allowed end end
+  table.sort(options.read_tools)
+ end
  if ctx and ctx.tool_arguments_json then options.arguments_json=ctx.tool_arguments_json elseif next(args or {})then options.arguments=args end
  local answer=M.invoke(options,ctx)
  local current,raw=load_store();local same=current.servers[id]
@@ -184,7 +200,15 @@ function M.call(name,args,ctx)
   end)
   if not recorded.ok then answer.registry_observation_error=recorded.error end
  end
- return answer
+ return M.project(answer)
+end
+-- Catalogue/transport evidence stays exact on disk, outside ordinary model replies.
+function M.project(answer)
+ local out={ok=answer.ok,error=answer.error,phase=answer.phase,rpc_error=answer.rpc_error,outcome=answer.outcome,tool_call_issued=answer.tool_call_issued,evidence=answer.evidence,
+  session_mode=answer.session_mode,reused=answer.reused,unsupported_content_types=answer.unsupported_content_types,content_delivery=answer.content_delivery,registry_observation_error=answer.registry_observation_error}
+ if answer.result_json then out.result=json.raw(answer.result_json) elseif answer.result then out.result=answer.result end
+ if not answer.evidence and not answer.result_json and not answer.result then out.detail=answer end
+ return out
 end
 -- Trusted WhatsApp facade only. Its caller already reserved the effect and
 -- checked profile/event/budget/operator-precedence; MCP cannot grant those.

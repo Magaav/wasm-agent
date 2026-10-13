@@ -12,14 +12,18 @@ JSON/SSE replies: initialize → initialized → paginated tools/list → option
 single tools/call. HTTP uses negotiated session/version headers, HTTPS or explicit
 loopback HTTP, refuses redirects and ends sessions (405 means DELETE unsupported).
 No legacy HTTP+SSE, OAuth login, sampling, elicitation, prompts, autonomous tasks,
-background event subscription, reconnect or automatic tool replay.
+background event subscription or automatic tool replay. See
+[the progressive envelope contract](PROGRESSIVE-ENVELOPE.md).
 
 The native Lua manager uses existing supervised `host.operation` program/argv
-execution. Sessions are **request-scoped**, not persistent daemons. Startup and
-handshake overhead are an explicit trade-off. Native full-tree settlement is
-required; a response plus uncertain cleanup is not clean success. EOF/timeout
-following submission is unknown. Exact request/result artifacts and operation
-receipts remain evidence; an ambiguous send never gains a retry.
+execution. Approved reads reuse caller/session/credential-bound connections,
+with an idle close and native operation deadline; initialization/list are not
+repeated for each call. Catalogue-change notifications invalidate cached discovery;
+silent unannounced changes require explicit re-probe. Generic writes, probes and
+WhatsApp stay request-scoped with full-tree settlement. Persistent read replies
+prove an exact retained call, not that their live session has settled. Unknown
+submission/confirmation stays held durably and is never retried. Ordinary model
+replies omit repeated catalogues while keeping exact protocol/effect evidence.
 
 Bounds: 1 MiB request file; 32 MiB protocol exchange; 24 MiB stdio line; 32 tool
 pages / 1,000 discovered tools; 128 KiB selected schema/description budget before
@@ -89,6 +93,15 @@ Jobs retain triggers, schedules, controls, eligibility/window/hold rules, ledger
 cursors/deduplication/handoffs, local deterministic STT, delivery history/ownership
 and wakes. Their app operations use MCP; source-service/wake plumbing remains Jobs.
 No existing job is enabled or new unattended wake created by this migration.
+
+## Web research
+
+`web_search`/`web_read` are fixed read-only MCP-backed native facades, discovered
+through the stable envelope. The live default is anonymous DuckDuckGo HTML;
+public HTTPS static source reading/cache refs are supported, not Firecrawl rendering,
+PDF or browser actions. Queries leave the machine; no account/paid key is configured.
+Private targets/credentials/challenges refuse. See [PROGRESSIVE-ENVELOPE.md](PROGRESSIVE-ENVELOPE.md)
+for exact cache, permission, paging and shadow-benchmark limits.
 
 ## Focused proof
 
