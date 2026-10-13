@@ -48,6 +48,34 @@ multiple independent calls in one model response remain available.
   coordinator, not a batch-owned watcher/job. Successful source mutations notify
   their actual root; partial outcomes still retain each notification and effect.
 
+## Budget-paged `read_many`
+
+`read_many` accepts1–8 independent requests OR an opaque `cursor`, never both.
+Small replies retain the original shape. Large replies return whole results in
+request order within the unchanged50 KiB budget, with `first_index`, `last_index`,
+`total`, all outcome slots, `complete`, `has_more` and `next_cursor`. Call
+`read_many({cursor:next_cursor})` for the remaining cached results: no file refetch,
+per-item omission or `tool_result` detour for ordinary oversized text batches.
+The complete original JSON remains hash-bound evidence. Versions, byte continuations,
+image references and receipt-bound edit frames are preserved exactly.
+
+Cursors are SQLite-persisted and fenced by account/session/role/profile/workspace
+and cwd. A changed scope or damaged artifact refuses. A new interpreter can resume
+without repeating reads. These are captured read results, not a guarantee files
+are still current; edits retain their ordinary stale-version checks. Individual
+near-limit text pages reserve wrapper overhead and expose normal line/byte cursors.
+An unusually oversized nontext item still refuses with its original evidence;
+this is not a claim that arbitrary metadata always fits. No budget increase,
+mutation batching change, automatic memory or recurring cursor-cleanup job.
+
+Exact seq5193 fixture:59,723 bytes/six results previously required three artifact
+reads. Whole-result packing returns the identical six results in two pages and
+zero artifact-recovery calls. `test-read-batch.cjs <wa> <fresh-evidence>
+<exact-seq5193-capture>` plus `--post` verifies source/embedded43+43 checks,
+restart3+3, UTF-8/escaping, integrity, receipt and scope fences; ordinary batch
+regression245+245. The historical capture is caller-supplied, not user-path-bound
+in the runner. This is model-free mechanism proof, not paid token/quality savings.
+
 ## Performance and risk
 
 The measurable target is less invocation/envelope overhead for the same verified

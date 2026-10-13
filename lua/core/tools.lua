@@ -9,6 +9,7 @@ local changeset = dofile("lua/core/changeset.lua")
 local patch_audit = dofile("lua/core/patch_audit.lua")
 local tool_output = dofile("lua/core/tool_output.lua")
 local file_tools = dofile("lua/core/file_tools.lua")
+local read_batch = dofile('lua/core/read_batch.lua')
 local mcp = dofile('lua/core/mcp.lua')
 local envelope = dofile('lua/core/envelope.lua')
 local web = dofile('lua/core/web.lua')
@@ -167,12 +168,13 @@ M.admin = {
     offset = { type = "integer", minimum = 1 },
     column = { type = "integer", minimum = 1 }, version = { type = "string" },
     limit = { type = "integer", minimum = 1, maximum = 2000 } }, { "path" }),
-  schema("read_many", "Read several independent text ranges or images up to 4 MB each in one step. Prefer a line range for text; images are detected from their bytes and returned as visual input. Results match individual read calls in request order; each item reports its own error.", {
+  schema("read_many", "Read independent file ranges/images in budget-sized pages. Results retain request order, errors, versions and edit receipts. If next_cursor is returned, call read_many with only cursor to retrieve remaining cached results without refetching. Prefer bounded line ranges; the total view budget is unchanged.", {
+    cursor = {type='string',maxLength=36,description='Opaque next_cursor from this account/session/profile/workspace; exclusive with requests.'},
     requests = { type = "array", minItems = 1, maxItems = 8, items = { type = "object",
       properties = { path = { type = "string" }, offset = { type = "integer", minimum = 1 },
         column = { type = "integer", minimum = 1 }, version = { type = "string" },
         limit = { type = "integer", minimum = 1, maximum = 2000 } }, required = { "path" } } }
-  }, { "requests" }),
+  }, {}),
   schema("write", "Create or overwrite a text file with the given content. A required session workspace also permits its own session-owned evidence scratch root; outside-path refusals name both roots in allowed_writes. No general temp-directory or other-session write grant.", {
     path = { type = "string" }, content = { type = "string" } }, { "path", "content" }),
   schema("edit", "Replace text in one file, in one of two addressing forms, never both. `edits` quotes the exact bytes you can see (old_text/new_text): it must occur exactly once, a miss is refused with the nearest region rather than guessed, and it needs no receipt - this is the form that cannot hit the wrong place. `range_edits` copies a read receipt (selection, unchanged) with replacement_lines and is for replacing structure whose line endings matter, or text that is not quotable; its optional start_line/end_line are inclusive lines inside the receipt's edit_lines frame. Every range is validated against one snapshot and applied atomically, and the result names what each range actually replaced (first_line, last_line, lines, bytes, sha256, first, last) - read that echo, because a slice that stays inside its receipt is never diagnosed for you. No multi-file transaction.", {
@@ -1083,6 +1085,11 @@ function M.dispatch(memory, name, args, role, ctx)
       return M.dispatch(memory,tool,options,role,ctx)
     end)
   elseif name == "read_many" then
+    if args.cursor~=nil and args.requests~=nil then return {error='read_many_forms_are_exclusive'} end
+    local workspace=ctx.session_id and memory.session_workspace and memory.session_workspace(ctx.session_id) or nil
+    local scope=host.sha256(json.encode({user=ctx.user_id or user_id,role=role,session=ctx.session_id or '',
+      cwd=session_cwd(memory,ctx),workspace=workspace,profile=ctx.subagent and ctx.subagent.allowed or nil}))
+    if args.cursor~=nil then return read_batch.resume(args.cursor,scope) end
     if type(args.requests) ~= "table" or #args.requests < 1 or #args.requests > 8 then
       return { error = "requests_required_1_to_8" }
     end
@@ -1092,11 +1099,11 @@ function M.dispatch(memory, name, args, role, ctx)
         results[index] = { error = "path_required" }
       else
         request.path = resolve_path(memory, ctx, request.path)
-        results[index] = file_tools.read(request,function(entry) return memory.store_image(entry) end)
+        results[index] = file_tools.read(request,function(entry) return memory.store_image(entry) end,tool_output.MAX_BYTES-1024)
       end
       if results[index].error then failed = failed + 1 end
     end
-    return { ok = failed == 0, results = results, failed = failed }
+    return read_batch.start({ok=failed==0,results=results,failed=failed},scope)
   elseif name == "write" then
     if not args.path then return { error = "path_required" } end
     if type(args.content)~="string" then return {error="content_required"} end

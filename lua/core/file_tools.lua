@@ -129,7 +129,7 @@ local function read_image(args,store_image)
   }
 end
 
-function M.read(args,store_image)
+function M.read(args,store_image,view_bytes)
   if type(args.path)~='string' or args.path=='' then return {error='path_required'} end
   local line=integer(args.offset,1,2147483647)
   local column=integer(args.column,1,2147483647)
@@ -168,7 +168,7 @@ function M.read(args,store_image)
   -- inside the same envelope `tool_output` enforces; otherwise an oversized page comes
   -- back "omitted" and the model loses the exact-cursor contract that makes pagination
   -- work at all. Deriving it here is what keeps the two from drifting apart again.
-  local view_budget=output.MAX_BYTES
+  local view_budget=math.min(output.MAX_BYTES,tonumber(view_bytes) or output.MAX_BYTES)
   local capacity=view_budget-2048
   local part,next_byte=output.slice(text:sub(1,last),first,capacity)
   local function envelope()

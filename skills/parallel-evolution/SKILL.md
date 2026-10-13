@@ -42,6 +42,13 @@ plus `--post`; use the verified direct CLI in required workspaces. Also run
 See `<repo>/docs/PROGRESSIVE-ENVELOPE.md`. The tiny three-way shadow measures
 serialized bytes and replay mechanics, not autonomous quality or paid tokens.
 
+For `read_many` packing changes, `read-batch-packing-proof` records
+`node <repo>/scripts/test-read-batch.cjs <built-wa> <fresh-evidence> <capture>`
+plus `--post`; required worktrees use that verified direct CLI. Verify whole
+results/receipts, scope fences, source/embedded native restart and exact historical
+payload parity. The global view budget stays unchanged; follow cached `next_cursor`
+with read_many, not an artifact-recovery workaround. See `<repo>/docs/BATCH-TOOLS.md`.
+
 For MCP changes, `mcp-native-proof` records
 `node <repo>/scripts/test-mcp-native.cjs <absolute-built-wa> <fresh-evidence>`
 and its `--post` hash check. Use that verified direct CLI in required workspaces,
