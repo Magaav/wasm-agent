@@ -64,6 +64,25 @@ source inspection. Private proof: `node <skill>/scripts/test-discover-files.mjs
 <absolute-evidence-scratch>`; it checks pagination, Unicode/space paths, ignored
 files, exact candidate sets, changed-snapshot refusal and visible failures.
 
+## Retained public-repository surveys
+
+After a collector has saved full metadata, pinned commit/tree JSON and README/source
+files in session evidence scratch, do not print its complete results/excerpts or
+recursive file inventory. Use [scripts/repo-survey.mjs](scripts/repo-survey.mjs):
+
+```
+node <absolute-skill-dir>/scripts/repo-survey.mjs --cache <absolute-cache> --max-bytes 8192
+```
+
+The metadata-only view retains every candidate, explicit counts/failures and relative
+evidence paths. Inspect selected original files; omitted excerpts are still cached.
+Continue an incomplete page with `--offset <next_offset> --snapshot <snapshot>`;
+changed cache evidence refuses. Do not refetch the network just to repair display.
+`repo-survey-cached-view` records this verified read-only sequence; required worktrees
+use the direct CLI, not unsupported replay. Source CLI works without a node restart.
+Private proof: `node <skill>/scripts/test-repo-survey.mjs <absolute-evidence-scratch>`.
+See [the cache contract](../../docs/REPO-SURVEY.md); metadata is not a quality benchmark.
+
 ## Retrieve implementation source
 
 ```

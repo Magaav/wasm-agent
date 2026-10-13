@@ -1659,6 +1659,8 @@ gate_run node skills/parallel-evolution/scripts/test-node-tests.mjs "$WASM_AGENT
 
 # Read-only scoped file discovery: exact candidate pages, no hidden clipped tail.
 gate_run node skills/code-graph/scripts/test-discover-files.mjs "$WASM_AGENT_HOME"
+# Repository surveys keep full source evidence while bounding all-candidate metadata pages.
+gate_run node skills/code-graph/scripts/test-repo-survey.mjs "$WASM_AGENT_HOME"
 # Benchmark evidence metadata never recurses into retained solver repositories.
 gate_run node skills/agent-benchmark/scripts/test-artifacts.mjs "$WASM_AGENT_HOME"
 

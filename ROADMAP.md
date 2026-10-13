@@ -22,6 +22,29 @@ These are two entry paths into one runtime:
 The fleet console serves these journeys. It is not the product's required first
 screen, and 32 workers are not a prerequisite for helping one customer.
 
+## Bounded repository-survey output — 2026-10-13 (source CLI verified)
+
+Fixed the collector's reply, not the global tool-output budget. It now emits a
+metadata-only page with all-candidate counts, relative source paths and a cache
+snapshot fence; complete original metadata/commit/tree/README and inspected source
+files remain retained. No network replay is needed to repair a display.
+
+Actual six-repository cache:59,910-byte clipped dump→2,650-byte complete view,
+all6 candidates retained and source hashes unchanged.36 private offline checks,
+skipped0, plus retained-hash postchecks passed: pagination, UTF-8, failures,
+changed/inconsistent cache, concurrent changes, path escape and directory ambiguity.
+The original collector is rewired; a fresh pinned `firecrawl/firecrawl` capture
+used the same bounded view. Code-graph source procedure and the focused CI hook
+are updated. Self-review, `gate_verified:false`, `release_verified:false`.
+
+This is a directly usable source CLI, not a new runtime capability or connector.
+No node/UI replacement or skill publication was performed; the installed runtime
+remains unchanged. Source comparison clarifies that Firecrawl can itself use
+SearXNG for search: the initial choice is narrow search/read versus a larger
+rendering/crawling stack, not a universal search-quality or free-versus-paid win.
+No live provider benchmark or search/scraping service installation was performed.
+See `docs/REPO-SURVEY.md`; retained evidence is `repo-survey-proof-3/receipt.json`.
+
 ## Complete on-demand skill loading — 2026-10-12 (installed and verified)
 
 Removed the loader's destructive12,000-byte prefix cap. The complete `SKILL.md`,
