@@ -91,6 +91,11 @@ check(control('close',{id=expired.id,owner=owner}).ok,'expired idle guest can be
 check(not control('start',{owner=owner,tools={},globals={},store={},code='return 1',wasm_path=root..'/a.txt'}).ok,'tampered external wasm refuses even after module cache is warm')
 check(not control('start',{owner=owner,tools={},globals={},store={},code='return 1',prelude_path=root..'/a.txt'}).ok,'tampered prelude refuses before evaluation')
 local original_dispatch=tools.dispatch
+local scalar_index=0
+tools.dispatch=function(m,n,a,role,c)if n=='read' then scalar_index=scalar_index+1;if scalar_index==1 then return false elseif scalar_index==2 then return nil else return 'scalar' end end;return original_dispatch(m,n,a,role,c)end
+r=call('return [await tools.read({path:"a"}),await tools.read({path:"b"}),await tools.read({path:"c"})];')
+tools.dispatch=original_dispatch
+check(r.ok and r.value=='[false,null,"scalar"]' and #r.calls==3 and r.calls[1].ok and r.calls[2].ok,'valid false/null/string results are preserved, never mislabeled unknown failures')
 local read_schema;for _,entry in ipairs(tools.all('master'))do if entry['function'].name=='read' then read_schema=entry['function'] end end
 local original_description=read_schema.description;local drift=true
 tools.dispatch=function(m,n,a,role,c)local value=original_dispatch(m,n,a,role,c);if n=='read' and drift then drift=false;read_schema.description=original_description..' changed' end;return value end

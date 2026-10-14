@@ -81,7 +81,9 @@ function M.run(memory,args,role,ctx,catalog,current_catalog,dispatch,execution)
        local params=json.decode(call.args or '{}')
        local span=telemetry.start(ctx,'tool',{name=def.name,nested=true,codemode_call=call.id,arguments_hash=host.sha256(call.args or '{}')})
        local called,result=pcall(dispatch,def.name,params,call.args);admitted=true
-       value=called and result or {error=tostring(result),effect='unknown',replay_allowed=false};success=called and type(value)=='table' and not value.error and value.ok~=false
+       if called then
+        value=result;success=type(value)~='table' or (not value.error and value.ok~=false)
+       else value={error=tostring(result),effect='unknown',replay_allowed=false};success=false end
        local encoded=json.encode(value);local reference=output.store(encoded)
        calls[#calls+1]={id=call.id,name=def.name,ok=success,evidence=reference}
        telemetry.finish(span,{ok=success,name=def.name,nested=true,codemode_call=call.id,result_bytes=#encoded,result_hash=host.sha256(encoded)})
