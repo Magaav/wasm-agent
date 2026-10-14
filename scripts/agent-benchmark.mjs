@@ -18,6 +18,11 @@ if (!fixturePath || !fs.existsSync(fixturePath)) {
   process.exit(2);
 }
 const fixture = JSON.parse(fs.readFileSync(fixturePath, 'utf8'));
+// Candidate foundations are not solver fixtures. Refuse before credentials, Docker,
+// workspace export or inference; the legacy UI substrate is not a four-arm runner.
+if (fixture.status === 'incomplete-do-not-export-or-launch' || fixture.taskSource || fixture.arms) {
+  throw new Error('benchmark readiness refused: non-UI adapter, separate runtime pins, isolated shared route, trace completeness and sealed cleanup must be proven');
+}
 if (!/^[a-z0-9-]+$/.test(fixture.id || '') ||
     !/^[0-9a-f]{40}$/.test(fixture.source || '') ||
     !/^[0-9a-f]{40}$/.test(fixture.knownFix || '') ||

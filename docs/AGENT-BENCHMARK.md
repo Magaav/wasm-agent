@@ -1,5 +1,58 @@
 # Agent benchmark: current readiness and next experiment
 
+## Code-mode STAGE A checkpoint (not ready)
+
+`fixtures/benchmarks/binding-discovery/v1/provenance.candidate.json` preserves the
+exact request and retrieved run/message boundary, broken task source and original
+refusal. It is explicitly incomplete and MUST NOT be exported to a solver. Private
+original-content seals, native declarations and complete relevant context are still
+missing. The reported thirty minutes is not a measured duration. Runtime source is
+separate and unknown. No gold patch or later discussion is included in task text.
+
+`scripts/agent-benchmark-foundations.mjs` supplies model-free reporting/accounting,
+request-prefix continuity, readiness and cleanup-authorization contracts. These are
+not integrated trace adapters or an effectful cleanup implementation. Prefix
+continuity is not a cache hit; backend KV contents are opaque. Scope/routing fences
+are testable, comprehensive absence of leakage is not established. Unknown counters,
+usage, timing, subscription dollars and scores stay null. All attempts, including
+failed summaries/retries, must enter accounting. Reference-rate costs, if added,
+are hypothetical, never actual billing. Provider adapters must normalize disjoint
+input accounting before calling this module; reasoning remains an output subset.
+
+Four prospective arms are Pi, current wasm, Node-hosted QuickJS-WASI and
+Rust-Wasmtime-hosted QuickJS-WASI. Final V2/native host design remains unresolved;
+this list does not impose a Node dependency on production. Pin task source,
+runtime source, package, binary, image, tools, instructions, model, reasoning,
+provider and oracle separately. No complete comparison is presently possible.
+The runner refuses candidate fixtures before credentials or effects. Non-UI oracle,
+separate runtime pins, isolated shared model route, trace completeness and sealed
+cleanup are still required. No inference was launched.
+
+Authorized coordination requires explicit operator enablement and approved native
+task ownership, no recursion/hidden coding agents. Parallelize independent hermetic
+setup/checks only; timed solver arms are serial/counterbalanced by default. Proposed
+first pilot: one attempt per four arms, 45 minutes each, gpt-6.1-sol LOW only if the
+same credential-isolated route is proven. Exact token/quota/spend pins remain
+undeclared and block launch; these are experiment controls, not production caps.
+
+Quality rubric totals100: correctness35, completeness25, safety/scope20,
+verification15, clarity5. Coordinator assigns reasoning-based scores later, with
+per-arm evidence/notes and anonymous IDs where feasible. Scores are subjective,
+separate from hidden acceptance and measured counters; none exist yet.
+
+Before deletion, seal and independently validate a compact lossless bundle containing
+manifest, task/context/oracle IDs, outputs, patches, full relevant raw traces/logs,
+failed attempts, receipts, accounting/cache/quality data. Preserve reproducible results
+and fixture. Only generation-owned disposable containers/volumes/networks/checkouts/
+temp builds/solver homes with proved drain and known effects may then be removed.
+Never delete active trees, shared caches/images, credentials, unrelated historical
+records or uncertain effects. Integrity/cleanup errors block 'finished clean'. Crash
+recovery reconciles exact ownership without replay. The current cleanupPlan tests
+are authorization-contract negatives, NOT proof of actual Docker/filesystem cleanup.
+Implement sealed-bundle and ownership adapters before a paid run; legacy UI runner
+cleanup does not meet this new contract. Keep verified CLI/postchecks where native
+spell tools are unavailable; do not attempt unsupported replay.
+
 2026-10-07; preparation, not a completed coding comparison.
 
 ## Existing components and actual limits
