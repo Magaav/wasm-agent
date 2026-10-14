@@ -351,6 +351,17 @@ Also run `scripts/test-ui.ps1`; installation must separately verify candidate
 binary and served UI. Regeneration is inference-only; unknown effects are never
 replayed, and a permanent outage can still exhaust the original request deadline.
 
+## Subscription retry-buffer HTTP507 recovery proof
+
+`subscription-buffer-recovery-proof` records
+`node <repo>/scripts/test-subscription-buffer-recovery.cjs <built-wa> <fresh-evidence>`,
+then retained-hash `--post`. Required workspaces use this verified direct CLI.
+Source/embedded and actual localhost HTTP507→SSE cases preserve full request bytes,
+prior tools and parser/unknown-error/cancel/deadline fences; old-wire control fails.
+Exact pre-stream gateway buffer507 is not generic507 or a context-window refusal.
+See `<repo>/docs/SUBSCRIPTION-BUFFER-RECOVERY.md`. Do not replay old inference/effects
+or force early compaction; candidate fixtures are not installation/upstream proof.
+
 ## Subscription keepalive recovery proof
 
 `subscription-keepalive-proof` records the verified sequence:

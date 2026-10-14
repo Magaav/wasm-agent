@@ -45,6 +45,15 @@ callback envelope, partial output and completed-but-uncommitted tool calls,
 preserves prior effects through actual agent rounds, and verifies cancellation,
 deadline, permanent refusals and exhaustion without network or paid inference.
 
+Native pre-stream HTTP507 with the exact `exceeded request buffer limit while
+retrying upstream` gateway reply is also explicitly recoverable, only with an
+empty/nonterminal/safe parser and no contradictory host error. Generic507,
+parsed/unknown output, auth/quota and other body/status shapes gain no retry
+permission. Same-body inference retries preserve complete context and earlier
+tools, inside the existing budget/deadline; failed usage/cost stays unknown.
+See [SUBSCRIPTION-BUFFER-RECOVERY.md](SUBSCRIPTION-BUFFER-RECOVERY.md) for the
+original3.62MB request pair, narrow classifier and source/embedded/socket proof.
+
 Native added-item phase is retained by identity before text deltas: known
 commentary streams directly into its topic and final-answer begin can precede
 text. Missing early phase stays provisional. Typed count-only phase diagnostics
