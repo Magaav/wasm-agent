@@ -45,16 +45,21 @@ local windowlib=dofile('lua/core/model_window.lua')
 check(windowlib.policy(1000000)>=100000,'a 1M window reserves at least ten percent')
 check(windowlib.policy(128000)==16384,'a small window keeps the fixed reserve')
 
--- 3. The measured count is a floor even when the system prefix changed (a deploy), because
--- the estimator undercounts and a too-low count is what lets a request cross the limit.
-local floor_sid=session('measured-floor')
+-- 3. Provider usage is authoritative only for its exact measured prefix.
+-- Preserve the old undercount protection without a stale floor after a rewrite/summary.
+local floor_sid=session('measured-prefix')
 local floor_bot=agentlib.new(floor_sid,function() end,'master','master','')
-floor_bot.measured_prefix='a-prefix-that-no-longer-matches'
-floor_bot.measured_messages=10
-floor_bot.measured_total=900000
 floor_bot.tool_list={}
-local floor_tokens,floor_source=floor_bot:context_tokens({{role='system',content='x'},{role='user',content='y'}})
-check(floor_tokens>=900000 and floor_source=='measured-floor','the measured count is a floor when the prefix changed')
+local meter=dofile('lua/core/context_usage.lua')
+local measured={{role='system',content='x'},{role='user',content='y'}}
+check(meter.remember(floor_bot,measured,{}, {known=true,prompt=900000,output=0},meter.route(provider)),
+  'measured undercount fixture retained')
+local floor_tokens,floor_source=floor_bot:context_tokens(measured)
+check(floor_tokens==900000 and floor_source=='provider-plus-tail-estimate',
+  'known provider count prevents an unchanged-prefix undercount')
+local shortened_tokens,shortened_source=floor_bot:context_tokens({{role='system',content='new checkpoint'}})
+check(shortened_tokens<1000 and shortened_source=='bytes/4-plus-image-estimate',
+  'rewritten/compacted prefix cannot reuse the previous high count')
 
 -- 4. Recovery: the run compacts and retries once, then answers.
 local sid=session('overflow-retry')

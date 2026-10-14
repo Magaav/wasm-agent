@@ -42,6 +42,14 @@ plus `--post`; use the verified direct CLI in required workspaces. Also run
 See `<repo>/docs/PROGRESSIVE-ENVELOPE.md`. The tiny three-way shadow measures
 serialized bytes and replay mechanics, not autonomous quality or paid tokens.
 
+For provider-measured compaction changes, `context-usage-proof` records
+`test-context-usage.cjs <built-wa> <fresh-evidence>` and retained-hash `--post`.
+Required workspaces use this verified direct CLI. The source/embedded seed/restart,
+actual92% boundary, complete-prefix/schema/model/provider/scope fences and
+old-policy negative control must pass, along with focused overflow/accounting
+regressions. Preserve originals and reasoning; estimated cold/tail context is
+not provider usage. See `<repo>/docs/CONTEXT-COMPACTION.md`.
+
 For tagged prompt/read_many bootstrap or recoverable public HTTP changes,
 `layered-web-proof` records `test-layered-web.cjs <built-wa> <fresh-evidence>
 <baseline-wa>` and its retained-hash `--post`. Required worktrees use that same
