@@ -42,6 +42,13 @@ plus `--post`; use the verified direct CLI in required workspaces. Also run
 See `<repo>/docs/PROGRESSIVE-ENVELOPE.md`. The tiny three-way shadow measures
 serialized bytes and replay mechanics, not autonomous quality or paid tokens.
 
+For native subscription retry-buffer failures, `subscription-buffer-recovery-proof`
+records `test-subscription-buffer-recovery.cjs <built-wa> <fresh-evidence>` and
+retained-hash `--post`. Required workspaces use this verified direct CLI.
+Keep exact507/body/empty-parser boundaries and prior-tool no-replay; run existing
+server/disconnect/overflow/keepalive regressions. Request bytes are not model tokens;
+unknown usage stays unknown. See `<repo>/docs/SUBSCRIPTION-BUFFER-RECOVERY.md`.
+
 For binding-aware discovery, `binding-discovery-proof` records
 `test-binding-discovery.cjs <built-wa> <fresh-evidence>` and retained-hash `--post`.
 Required workspaces use this verified direct CLI. Run source/embedded seed/restart,

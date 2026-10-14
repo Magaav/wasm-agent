@@ -1069,7 +1069,10 @@ local function complete_attempt(model, messages, tools, stream, opts, reasoning,
   -- `subscription_timeout` this route documents. A caller matching on the documented name would
   -- not find it, so the two names are raised from here instead.
   local stopped_by = nil
-  local outcome = host.http_sse('POST', M.ENDPOINT, json.encode(headers), json.encode(body),
+  local encoded_body=json.encode(body)
+  recovery.request_bytes=#encoded_body
+  recovery.request_sha256=host.sha256 and host.sha256(encoded_body) or nil
+  local outcome = host.http_sse('POST', M.ENDPOINT, json.encode(headers), encoded_body,
     function(text)
       -- Cancellation and the deadline are checked here, on every line, because this is inside the
       -- read: raising from here is what ends a run that has been cancelled or has run out of budget,
@@ -1124,6 +1127,17 @@ local function complete_attempt(model, messages, tools, stream, opts, reasoning,
       teardown_error=completed_before_disconnect and
         dofile('lua/core/redact.lua').text(tostring(decoded.error)) or nil})
   return result
+end
+
+-- The observed gateway reply is a failed upstream retry buffer, not a generic
+-- HTTP507 or model-context limit. Only an empty, safe parser may regenerate it.
+local function retry_buffer_http(outcome,parser)
+  if outcome.status~=507 or outcome.error or type(outcome.body)~='string'
+      or not parser or parser.events~=0 or parser.terminal~=false
+      or parser.recovery_unsafe~=false then return false end
+  local text=outcome.body:gsub('^%s+',''):gsub('%s+$','')
+  local known='exceeded request buffer limit while retrying upstream'
+  return text==known or text==known..'.'
 end
 
 -- Regenerate inference only: no attempt returns tool calls until a terminal,
@@ -1185,13 +1199,18 @@ function M.complete(model,messages,tools,stream,opts,reasoning)
     -- A rejected HTTP request has no parsed output and no tools to commit.
     local server_http = not outcome.error and (outcome.status == 500 or outcome.status == 502 or
       outcome.status == 503 or outcome.status == 504)
+    local buffer_http=retry_buffer_http(outcome,parser)
     dofile('lua/core/telemetry.lua').event(opts.session_id,opts.run_id,attempt_opts.stream_id,
       'subscription_transport','attempt',{ok=false,attempt=attempt+1,limit=limit,
         termination=outcome.termination,status=outcome.status,lines=outcome.lines,
-        retry_safe=safe,retryable=(network or transient or server_http) and true or false,
+        retry_safe=safe,retryable=(network or transient or server_http or buffer_http) and true or false,
+        recovery_class=buffer_http and 'upstream_retry_buffer_overflow' or nil,
+        request_bytes=recovery.request_bytes,request_sha256=recovery.request_sha256,
+        response_bytes=type(outcome.body)=='string' and #outcome.body or nil,
+        response_sha256=type(outcome.body)=='string' and host.sha256 and host.sha256(outcome.body) or nil,
         parser=parser,error=dofile('lua/core/redact.lua').text(problem)})
     if limit==0 then error(result,0) end
-    if not safe or not (network or transient or server_http) then
+    if not safe or not (network or transient or server_http or buffer_http) then
       error('subscription_retry_suppressed: '..problem,0)
     end
     progress('interrupted',math.min(attempt+1,limit),dofile('lua/core/redact.lua').text(problem),discarded,nil,failure)
