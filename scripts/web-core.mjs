@@ -6,6 +6,7 @@ import {readFileSync,writeFileSync,mkdirSync,existsSync} from 'node:fs';
 import {join,isAbsolute} from 'node:path';
 import {createHash} from 'node:crypto';
 import {TextDecoder} from 'node:util';
+import {createHTTPOutcomes,challengeHTML} from './web-http-outcomes.mjs';
 const hash=b=>createHash('sha256').update(b).digest('hex');
 export function publicAddress(address){
  if(isIP(address)===4){const a=address.split('.').map(Number);return !(a[0]===0||a[0]===10||a[0]===127||a[0]>=224||a[0]===169&&a[1]===254||a[0]===172&&a[1]>=16&&a[1]<=31||a[0]===192&&a[1]===168||a[0]===100&&a[1]>=64&&a[1]<=127||a[0]===198&&[18,19].includes(a[1]));}
@@ -22,7 +23,7 @@ export async function fetchPublic(value,{maxBytes=8*1024*1024}={}){
    });req.setTimeout(20000,()=>req.destroy(Error('web_request_timeout')));req.on('error',reject);req.end();
   });
   if([301,302,303,307,308].includes(reply.status)){if(redirects===3||!reply.headers.location)throw Error('web_redirect_limit');u=publicURL(new URL(reply.headers.location,u).href);continue;}
-  if(reply.status!==200)throw Error('web_http_'+reply.status);return reply;
+  if(reply.status!==200){const error=Error('web_http_'+reply.status);error.response=reply;throw error;}return reply;
  }
 }
 export function entities(text){return text.replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g,'$1').replace(/&(#x[0-9a-f]+|#\d+|amp|lt|gt|quot|apos|nbsp);/gi,(_m,key)=>{const names={amp:'&',lt:'<',gt:'>',quot:'"',apos:"'",nbsp:' '};if(key[0]!=='#')return names[key.toLowerCase()];const n=key[1].toLowerCase()==='x'?parseInt(key.slice(2),16):Number(key.slice(1));return n>=0&&n<=0x10ffff&&!(n>=0xd800&&n<=0xdfff)?String.fromCodePoint(n):'�';});}
@@ -30,7 +31,7 @@ export function extractHTML(raw){const title=entities((raw.match(/<title\b[^>]*>
 const field=(text,name)=>entities((text.match(new RegExp('<'+name+'(?:\\s[^>]*)?>([\\s\\S]*?)<\\/'+name+'>','i'))||[])[1]||'').trim();
 export function parseRSS(raw){if(!/<rss\b/i.test(raw))throw Error('web_search_invalid_rss');return [...raw.matchAll(/<item\b[^>]*>([\s\S]*?)<\/item>/gi)].map(m=>({title:field(m[1],'title'),url:new URL(field(m[1],'link')).href,snippet:extractHTML(field(m[1],'description')).text,published:field(m[1],'pubDate')||null}));}
 export function parseSearchHTML(raw){
- if(/anomaly-modal|challenge-form|captcha/i.test(raw))throw Error('web_search_challenge_refused');
+ if(challengeHTML(raw))throw Error('web_search_challenge_refused');
  const results=[];
  for(const m of raw.matchAll(/<a\b([^>]*\bclass=["'][^"']*\bresult__a\b[^"']*["'][^>]*)>([\s\S]*?)<\/a>/gi)){
   const href=(m[1].match(/\bhref=["']([^"']+)["']/i)||[])[1];if(!href)continue;
@@ -45,16 +46,37 @@ export function createWebAdapter({cacheDir,fetch=fetchPublic,clock=()=>new Date(
  if(typeof cacheDir!=='string'||!isAbsolute(cacheDir))throw Error('web_cache_requires_absolute_path');mkdirSync(cacheDir,{recursive:true,mode:0o700});
  const put=record=>{const bytes=Buffer.from(JSON.stringify(record)),ref=hash(bytes),file=join(cacheDir,ref+'.json');if(!existsSync(file))writeFileSync(file,bytes,{flag:'wx',mode:0o600});return ref;};
  const get=ref=>{if(typeof ref!=='string'||!/^[a-f0-9]{64}$/.test(ref))throw Error('invalid_web_ref');const raw=readFileSync(join(cacheDir,ref+'.json'));if(hash(raw)!==ref)throw Error('web_cache_changed');return JSON.parse(utf8(raw));};
- function view(ref,offset=0,limit=4096){if(!Number.isInteger(offset)||offset<0||!Number.isInteger(limit)||limit<4||limit>16384)throw Error('invalid_web_page');const record=get(ref),bytes=Buffer.from(record.text);if(offset>bytes.length||offset<bytes.length&&(bytes[offset]&0xc0)===0x80)throw Error('web_offset_not_utf8_boundary');let end=Math.min(bytes.length,offset+limit);while(end>offset&&end<bytes.length&&(bytes[end]&0xc0)===0x80)end--;return {ok:true,ref,url:record.url,title:record.title,source_kind:record.source_kind,fetched_at:record.fetched_at,content:utf8(bytes.subarray(offset,end)),offset,next_offset:end,eof:end===bytes.length,total_bytes:bytes.length,raw_sha256:record.raw_sha256,limitations:record.limitations};}
+ const outcomes=createHTTPOutcomes({put,get,clock,publicURL});
+ async function http(url){let reply;try{reply=await fetch(url);}catch(error){if(!error.response)throw error;reply=error.response;}
+  if(!Number.isInteger(reply.status)||reply.status<100||reply.status>599||!Buffer.isBuffer(reply.bytes))throw Error('web_response_invalid');return reply;
+ }
+ function pageRecord(reply,evidence){
+  const kind=String(reply.headers['content-type']||'').split(';')[0].toLowerCase();
+  if(!['text/html','text/plain','application/json','application/xml','application/rss+xml','text/xml'].includes(kind))return {error:'web_content_type_unsupported:'+kind,response_ref:evidence.response_ref};
+  const raw=evidence.raw,parsed=kind==='text/html'?extractHTML(raw):{title:'',text:raw};
+  return {ref:put({url:reply.url,title:parsed.title,source_kind:kind,fetched_at:clock(),raw,raw_sha256:hash(reply.bytes),text:parsed.text,http_response_ref:evidence.response_ref,limitations:kind==='text/html'?'Static HTML text only; scripts, styles and templates excluded from the view. Exact raw source retained. JavaScript rendering/PDF not supported.':null})};
+ }
+ function view(ref,offset=0,limit=4096){if(!Number.isInteger(offset)||offset<0||!Number.isInteger(limit)||limit<4||limit>16384)throw Error('invalid_web_page');const record=get(ref);if(record.source_kind==='web-pending')throw Error('web_pending_requires_pending_ref');const bytes=Buffer.from(record.text);if(offset>bytes.length||offset<bytes.length&&(bytes[offset]&0xc0)===0x80)throw Error('web_offset_not_utf8_boundary');let end=Math.min(bytes.length,offset+limit);while(end>offset&&end<bytes.length&&(bytes[end]&0xc0)===0x80)end--;return {ok:true,ref,url:record.url,title:record.title,source_kind:record.source_kind,fetched_at:record.fetched_at,content:utf8(bytes.subarray(offset,end)),offset,next_offset:end,eof:end===bytes.length,total_bytes:bytes.length,raw_sha256:record.raw_sha256,http_response_ref:record.http_response_ref,limitations:record.limitations};}
  async function search(args){if(typeof args.query!=='string'||!args.query.trim()||args.query.length>512)throw Error('web_query_required');const limit=args.limit??5;if(!Number.isInteger(limit)||limit<1||limit>10)throw Error('invalid_web_search_limit');
-  const url=searchURL?searchURL(args.query):'https://html.duckduckgo.com/html/?q='+encodeURIComponent(args.query);const reply=await fetch(url),raw=utf8(reply.bytes),provider=searchURL?'fixture-rss':'duckduckgo-html',all=searchURL?parseRSS(raw):parseSearchHTML(raw);if(!all.length)throw Error('web_search_no_results');
-  const record={source_kind:'search-'+provider,url:reply.url,title:args.query,fetched_at:clock(),raw,raw_sha256:hash(reply.bytes),text:JSON.stringify(all),limitations:'Public search results; ranking/coverage is not a quality guarantee.'},ref=put(record);
+  const url=searchURL?searchURL(args.query):'https://html.duckduckgo.com/html/?q='+encodeURIComponent(args.query);const reply=await http(url),evidence=outcomes.retain(reply),state=outcomes.classify(reply,evidence);if(state)return state;
+  const raw=evidence.raw,provider=searchURL?'fixture-rss':'duckduckgo-html';let all;
+  try{all=searchURL?parseRSS(raw):parseSearchHTML(raw);}catch(error){return {ok:false,state:'failed',error:error.message,response_ref:evidence.response_ref,status:reply.status,url:reply.url};}
+  const record={source_kind:'search-'+provider,url:reply.url,title:args.query,fetched_at:clock(),raw,raw_sha256:hash(reply.bytes),http_response_ref:evidence.response_ref,text:JSON.stringify(all),limitations:'Public search results; ranking/coverage is not a quality guarantee.'},ref=put(record);
   return {ok:true,query:args.query,provider,results:all.slice(0,limit),returned:Math.min(limit,all.length),total_cached:all.length,ref,fetched_at:record.fetched_at};
  }
- async function read(args){if(args.ref){if(args.url||args.refresh)throw Error('web_ref_conflicts_with_url');return view(args.ref,args.offset??0,args.limit??4096);}const url=publicURL(args.url).href,index=join(cacheDir,'url-'+hash(url)+'.json');let ref,cacheHit=false;
+ async function read(args){
+  if(args.pending_ref){
+   if(args.url||args.ref||args.refresh)throw Error('web_pending_conflicts_with_url_or_ref');
+   const pending=outcomes.pending(args.pending_ref);
+   if(!outcomes.due(pending))return {ok:false,state:'pending',pending_ref:args.pending_ref,poll_after_at:pending.poll_after_at,response_ref:pending.response_ref,request_issued:false};
+   const reply=await http(pending.monitor_url),evidence=outcomes.retain(reply),state=outcomes.classify(reply,evidence,{pending});if(state)return state;
+   const page=pageRecord(reply,evidence);if(page.error)return {ok:false,state:'failed',...page};
+   return {...view(page.ref,args.offset??0,args.limit??4096),state:'complete',completed_pending_ref:args.pending_ref,request_issued:true};
+  }
+  if(args.ref){if(args.url||args.refresh)throw Error('web_ref_conflicts_with_url');return view(args.ref,args.offset??0,args.limit??4096);}const url=publicURL(args.url).href,index=join(cacheDir,'url-'+hash(url)+'.json');let ref,cacheHit=false;
   if(!args.refresh&&existsSync(index)){const row=JSON.parse(readFileSync(index,'utf8'));if(Date.now()-row.saved_at<300000){get(row.ref);ref=row.ref;cacheHit=true;}}
-  if(!ref){const reply=await fetch(url),kind=String(reply.headers['content-type']||'').split(';')[0].toLowerCase();if(!['text/html','text/plain','application/json','application/xml','application/rss+xml','text/xml'].includes(kind))throw Error('web_content_type_unsupported:'+kind);const raw=utf8(reply.bytes),parsed=kind==='text/html'?extractHTML(raw):{title:'',text:raw};
-   ref=put({url:reply.url,title:parsed.title,source_kind:kind,fetched_at:clock(),raw,raw_sha256:hash(reply.bytes),text:parsed.text,limitations:kind==='text/html'?'Static HTML text only; scripts, styles and templates excluded from the view. Exact raw source retained. JavaScript rendering/PDF not supported.':null});
+  if(!ref){const reply=await http(url),evidence=outcomes.retain(reply),state=outcomes.classify(reply,evidence);if(state)return state;
+   const page=pageRecord(reply,evidence);if(page.error)return {ok:false,state:'failed',...page};ref=page.ref;
    writeFileSync(index,JSON.stringify({ref,saved_at:Date.now()}),{mode:0o600});
   }
   return {...view(ref,args.offset??0,args.limit??4096),cache_hit:cacheHit};
@@ -62,4 +84,4 @@ export function createWebAdapter({cacheDir,fetch=fetchPublic,clock=()=>new Date(
  return {search,read,get};
 }
 export const WEB_TOOLS=[{name:'search',description:'Search public web sources. Full search response is retained behind ref.',inputSchema:{type:'object',properties:{query:{type:'string'},limit:{type:'integer',minimum:1,maximum:10}},required:['query']},annotations:{readOnlyHint:true}},
- {name:'read',description:'Read static public HTTPS text, or page an immutable cached ref. No browser actions.',inputSchema:{type:'object',properties:{url:{type:'string'},ref:{type:'string'},offset:{type:'integer',minimum:0},limit:{type:'integer',minimum:4,maximum:16384},refresh:{type:'boolean'}}},annotations:{readOnlyHint:true}}];
+ {name:'read',description:'Read static public HTTPS text, page an immutable ref, or read pending_ref for one async monitor GET (never replay the original query). Challenges require human action; no browser actions or automatic polling.',inputSchema:{type:'object',properties:{url:{type:'string'},ref:{type:'string'},pending_ref:{type:'string'},offset:{type:'integer',minimum:0},limit:{type:'integer',minimum:4,maximum:16384},refresh:{type:'boolean'}}},annotations:{readOnlyHint:true}}];

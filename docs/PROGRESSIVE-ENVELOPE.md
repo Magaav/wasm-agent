@@ -2,10 +2,12 @@
 
 ## Model boundary
 
-New operator sessions use ten stable bootstrap declarations: remember, recall,
-skill, tool_search, tool_call, read, write, edit, bash and session_worktree.
+New operator sessions use eleven stable bootstrap declarations: remember, recall,
+skill, tool_search, tool_call, read, read_many, write, edit, bash and session_worktree.
+`read_many` is explicitly part of the main loop, not deferred. See
+`docs/LAYERED-PROMPT.md` for the generic/stack/workflow/project/session sections.
 `WASM_AGENT_BOOTSTRAP_MODE=classic` restores the former thirteen (including
-capabilities, read_many and tool_result); invalid values refuse. The role-filtered execution catalogue remains
+capabilities and tool_result); invalid values refuse. The role-filtered execution catalogue remains
 complete. `tool_search` loads matching exact definitions into the transcript;
 `tool_call(name, arguments)` routes a loaded definition through the existing
 native dispatcher. There is no JavaScript interpreter or new authority in this
@@ -144,8 +146,10 @@ one-second delay entirely to process startup or persistent connections.
 Discover `web_search` and `web_read` through tool_search, then use tool_call.
 They are fixed, read-only MCP-backed native facades. No generic connector enabling
 or account creation is needed. Search queries leave the machine: the live default
-is anonymous DuckDuckGo HTML. Challenges/errors refuse visibly; there is no CAPTCHA
-bypass, automatic replay or paid API. Bing RSS was tested and rejected as the live
+is anonymous DuckDuckGo HTML. Detected challenges return an evidence-backed human
+handoff; documented async acceptance returns a pending handle for one later monitor
+read. No CAPTCHA bypass, browser/cookie reuse, automatic polling/query replay or
+paid API is introduced. See `docs/WEB-HTTP-OUTCOMES.md`. Bing RSS was tested and rejected as the live
 default after irrelevant results; its failed-quality evidence is retained.
 
 The reader supports public HTTPS static HTML/text/JSON/XML, not JavaScript rendering,

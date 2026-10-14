@@ -42,6 +42,17 @@ plus `--post`; use the verified direct CLI in required workspaces. Also run
 See `<repo>/docs/PROGRESSIVE-ENVELOPE.md`. The tiny three-way shadow measures
 serialized bytes and replay mechanics, not autonomous quality or paid tokens.
 
+For tagged prompt/read_many bootstrap or recoverable public HTTP changes,
+`layered-web-proof` records `test-layered-web.cjs <built-wa> <fresh-evidence>
+<baseline-wa>` and its retained-hash `--post`. Required worktrees use that same
+verified direct CLI, not unsupported replay. Also run the TAP web/HTTP suites,
+existing envelope/full bodies/read-batch/MCP no-replay/socket regressions and
+shipping/instruction checks. Keep original responses and source-scope boundaries;
+HTTP acceptance is not completion, challenge solving is human-only, and a browser
+solve does not certify anonymous HTTP recovery. See `<repo>/docs/LAYERED-PROMPT.md`
+and `<repo>/docs/WEB-HTTP-OUTCOMES.md`. Tags/read_many may cost initial bytes;
+report actual task outcomes and context, not a claimed saving.
+
 For capture/lean-bootstrap/typed-routing changes, `envelope-iteration-proof`
 records `test-envelope-iteration.cjs <built-wa> <fresh-evidence> <exact-capture>`
 and `test-envelope-outcomes.cjs <built-wa> <other-fresh-evidence>`, with both

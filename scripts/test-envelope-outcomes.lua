@@ -11,7 +11,7 @@ local results={};local checks=0
 local function check(v,label)assert(v,label);checks=checks+1 end
 for _,treatment in ipairs({'classic','lean'})do
  mode=treatment
- for _,kind in ipairs({'repair','recall','remember','capture_singles','capture_group'})do
+ for _,kind in ipairs({'repair','read_many','recall','remember','capture_singles','capture_group'})do
   local sid=memory.start_session('','task replay '..treatment..' '..kind,{user_id='master'})
   local ctx={session_id=sid,user_id='master'}
   local schemas=tools.envelope('master',ctx)
@@ -45,6 +45,11 @@ for _,treatment in ipairs({'classic','lean'})do
    check(read.content==original,'read exact repair source')
    local edit=step({{name='edit',arguments={path=file,edits={{old_text='return a-b',new_text='return a+b'}}}}})[1]
    local repaired=assert(host.read_file(file));stats.outcome=not edit.error and assert(load(repaired))()(2,3)==5
+  elseif kind=='read_many' then
+   local reads={};for i=1,4 do local p=root..'/'..mode..'-range-'..i..'.txt';assert(host.write_file(p,'exact '..i));reads[i]={path=p} end
+   local r=step({{name='read_many',arguments={requests=reads}}})[1]
+   stats.outcome=r.ok and #r.results==4
+   for i,item in ipairs(r.results)do stats.outcome=stats.outcome and item.content=='exact '..i and item.selection~=nil end
   elseif kind=='recall' then
    memory.remember('fixture codeword is ORCHID','task-fixture',{'fixture'})
    local r=step({{name='recall',arguments={query='fixture codeword',scope='task-fixture'}}})[1]
@@ -72,7 +77,7 @@ for _,treatment in ipairs({'classic','lean'})do
  end
 end
 local by={};for _,r in ipairs(results)do by[r.mode..':'..r.task]=r end
-for _,kind in ipairs({'repair','recall','remember','capture_singles','capture_group'})do
+for _,kind in ipairs({'repair','read_many','recall','remember','capture_singles','capture_group'})do
  local before,after=by['classic:'..kind],by['lean:'..kind]
  check(before.rounds==after.rounds and before.discovery_rounds==after.discovery_rounds,'common task round counts retained '..kind)
  check(after.total_input_bytes<before.total_input_bytes,'complete task context reduced '..kind)
