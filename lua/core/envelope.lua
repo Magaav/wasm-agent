@@ -2,7 +2,7 @@
 local json=dofile('lua/vendor/json.lua')
 local M={}
 local CLASSIC={remember=true,recall=true,skill=true,capabilities=true,tool_search=true,tool_call=true,read=true,read_many=true,write=true,edit=true,bash=true,tool_result=true,session_worktree=true}
-local LEAN={remember=true,recall=true,skill=true,tool_search=true,tool_call=true,read=true,write=true,edit=true,bash=true,session_worktree=true}
+local LEAN={remember=true,recall=true,skill=true,tool_search=true,tool_call=true,read=true,read_many=true,write=true,edit=true,bash=true,session_worktree=true}
 function M.bootstrap_mode()
  local mode=host.getenv('WASM_AGENT_BOOTSTRAP_MODE') or 'lean';if mode=='' then mode='lean' end
  if mode~='lean' and mode~='classic' then error('invalid_bootstrap_mode') end;return mode

@@ -1,0 +1,16 @@
+{
+  "scope": "User-selected layered generic/stack/workflow/project/session prompt plus immediate read_many and recoverable web HTTP; source/embedded/native fixtures, not autonomous quality or billed tokens.",
+  "base": "c789c65d5dd87ec15500595944b638bb6c9e543c",
+  "candidate_sha256": "76518b3ded747531bb4b4a4ffdf461e9a746bfc45ef5cd74e93343bb7e594e63",
+  "reuse": "Lua adaptation of Pi1.2 ordered section renderer/diff, upstream b9ab2a6238d2; MIT copyright/license retained in embedded module and licenses/pi-MIT.txt. No JS engine or incremental provider protocol added.",
+  "before": {"tools":10,"system_bytes":16940,"schema_bytes":8347,"envelope_bytes":25608},
+  "after": {"tools":11,"system_bytes":17292,"schema_bytes":9216,"envelope_bytes":26874},
+  "increase_bytes":1266,
+  "tradeoff": "Explicit operator choice: structural auditability and immediate read_many, not a startup-token saving. AGENTS.md unchanged10389 bytes. Capabilities/tool_result stay discoverable; full/child ceilings retained.",
+  "focused_proofs": ["lw-final2 (108 source/embedded layer/native HTTP/reconstruction checks)","web-http-source2 (53 Node TAP tests,0 skipped)","lw-outcomes1 (six predeclared accepted native task paths per mode, includes direct read_many)","lw-envelope1","lw-skills1","lw-read-batch1","lw-typed1","lw-batch1","lw-mcp1","lw-web1","lw-keepalive1","lw-sockets1","lw-regressions1 (all retained-hash postchecks plus instruction/shipping checks)"],
+  "provider_calls":0,"gate_verified":false,"release_verified":false,
+  "safety": "HTTP raw status/headers/bytes retained before classification; no browser/CAPTCHA/cookie actions, original-query replay, automatic polling or new wakes. pending_ref performs one documented same-origin public-HTTPS monitor GET respecting Retry-After; private/ambiguous/credentialed/cross-origin monitors refuse; native uncertainty fences remain.",
+  "limitations": "Fixtures do not prove live challenge success or every async provider contract. Cache has no TTL/quota and retaining HTTP originals adds disk cost. Tags are inspection boundaries, not authorization or general XML validation of authored instructions.",
+  "graph": "Confirmed web adapter fixture/test callers already exercised; dynamic Lua dofile and top-level schema edges remain unresolved. Native tests/source inspection were decisive.",
+  "historical_runtime_recovery": "Previous c789 exact verification correctly refused process_creation_mismatch after a native restart. Supported external reconcile-historical then exited0 and marked the exact reservation verified, preserving stale install/return records and unknown notifications; no installer replay. Evidence lw-reconcile1 and lw-reconcile-historical1. Current candidate is not installed at measurement."
+}
