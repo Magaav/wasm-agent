@@ -1,110 +1,81 @@
 #!/usr/bin/env python3
-"""Summarize retained Pi and wasm-agent traces without printing prompt contents."""
-import collections
+"""Offline trace adapters. Private raw records stay private; reports contain no prompts."""
 import glob
 import json
 import pathlib
 import sqlite3
+import subprocess
 import sys
+
+ADAPTER = pathlib.Path(__file__).with_name('agent-benchmark-observe.mjs')
+
+
+def adapt(kind, raw):
+    result = subprocess.run(['node', str(ADAPTER), kind, '-'], input=raw,
+                            text=True, encoding='utf-8', capture_output=True, timeout=120)
+    if result.returncode:
+        raise ValueError('trace adapter refused: ' + result.stderr)
+    return json.loads(result.stdout)
 
 
 def pi_trace(root):
-    files = glob.glob(str(root / "pi" / "session" / "*.jsonl"))
+    files = glob.glob(str(root / 'pi' / 'session' / '*.jsonl'))
     if len(files) != 1:
-        return {"error": f"expected one Pi session, found {len(files)}"}
-    entries = []
-    malformed = 0
-    with open(files[0], encoding="utf-8") as stream:
-        for line in stream:
-            try:
-                entries.append(json.loads(line))
-            except json.JSONDecodeError:
-                malformed += 1
-    assistants = [e for e in entries if e.get("type") == "message" and
-                  e.get("message", {}).get("role") == "assistant"]
-    results = [e for e in entries if e.get("type") == "message" and
-               e.get("message", {}).get("role") == "toolResult"]
-    calls = [part for e in assistants for part in e["message"].get("content", [])
-             if part.get("type") == "toolCall"]
-    usage = [e["message"].get("usage") or {} for e in assistants]
-    tokens = {key: sum(u.get(key) or 0 for u in usage)
-              for key in ("input", "cacheRead", "cacheWrite", "output", "reasoning")}
-    return {"modelCalls": len(assistants), "toolCalls": len(calls),
-            "tools": dict(collections.Counter(c.get("name") for c in calls)),
-            "toolFailures": sum(bool(e["message"].get("isError")) for e in results),
-            "tokens": tokens, "malformedJsonlLines": malformed,
-            "unfinishedToolCalls": len(calls) - len(results),
-            "reportedCostUsd": round(sum((u.get("cost") or {}).get("total") or 0
-                                         for u in usage), 6)}
+        raise ValueError(f'expected one Pi session, found {len(files)}')
+    return adapt('pi', pathlib.Path(files[0]).read_text(encoding='utf-8'))
 
 
-def wasm_trace(root, label="wasm"):
-    db = root / label / "wa.db"
-    if not db.exists():
-        return {"error": "wasm-agent session database absent"}
-    connection = sqlite3.connect(f"file:{db.as_posix()}?mode=ro", uri=True)
-    with connection:
-        events = [json.loads(row[0]) for row in connection.execute(
-            "SELECT payload FROM harness_events WHERE kind='model_call' AND phase='end'")]
-        starts = connection.execute(
-            "SELECT count(*) FROM harness_events WHERE kind='model_call' AND phase='start'").fetchone()[0]
-        calls = [call for (raw,) in connection.execute(
-            "SELECT tool_calls FROM messages WHERE role='assistant' ORDER BY seq")
-            for call in json.loads(raw or "[]")]
-        failures = connection.execute(
-            "SELECT count(*) FROM messages WHERE role='tool' AND ok=0").fetchone()[0]
-        results = connection.execute(
-            "SELECT count(*) FROM messages WHERE role='tool'").fetchone()[0]
-    tokens = {key: sum((e.get("normalized") or {}).get(key) or 0 for e in events)
-              for key in ("input", "cacheRead", "cacheWrite", "output", "reasoning")}
-    result = {"modelCalls": len(events), "unfinishedModelCalls": starts - len(events),
-            "toolCalls": len(calls),
-            "tools": dict(collections.Counter(c.get("function", {}).get("name") for c in calls)),
-            "toolFailures": failures, "unfinishedToolCalls": len(calls) - results,
-            "tokens": tokens, "modelElapsedMs": sum(e.get("ms") or 0 for e in events)}
-    if label == "wasm-graph":
-        steps = [(c.get("function", {}).get("name"),
-                  json.loads(c.get("function", {}).get("arguments") or "{}")) for c in calls]
-        first_edit = next((i for i, (name, args) in enumerate(steps)
-                           if name == "edit" and "/ui/" in args.get("path", "")), None)
-        before = steps[:first_edit] if first_edit is not None else []
-        after = steps[first_edit + 1:] if first_edit is not None else []
-        result["graphTreatmentComplied"] = bool(
-            any(name == "graph" and args.get("action") == "search_symbols"
-                for name, args in before)
-            and any(name == "graph" and args.get("action") == "symbol_source"
-                    for name, args in before)
-            and any(name == "graph" and args.get("action") == "impact"
-                    for name, args in after))
-    return result
+def wasm_trace(root, label='wasm'):
+    db = root / label / 'wa.db'
+    connection = sqlite3.connect(f'file:{db.as_posix()}?mode=ro', uri=True)
+    connection.row_factory = sqlite3.Row
+    try:
+        # All kinds/phases, not just successful final model ends: summaries, failures,
+        # orphan/pending starts and tool/run boundaries are validated by the auditor.
+        rows = [dict(row) for row in connection.execute(
+            'SELECT id,session_id,run_id,span_id,seq,kind,phase,at,payload FROM harness_events ORDER BY seq')]
+    finally:
+        connection.close()
+    return adapt('native', json.dumps({'events': rows, 'has_more': False}))
+
+
+def hypothetical_cost(accounting, rates):
+    fields = ('uncached_input', 'cache_read', 'cache_write', 'output')
+    if not all(accounting.get(k) is not None and isinstance(rates.get(k), (int, float))
+               and rates[k] >= 0 for k in fields):
+        return None
+    return sum(accounting[k] * rates[k] for k in fields) / 1_000_000
 
 
 def main():
     if len(sys.argv) != 3:
-        raise SystemExit("usage: agent-benchmark-report.py <trace-dir> <fixture.json>")
+        raise SystemExit('usage: agent-benchmark-report.py <trace-dir> <fixture.json>')
     root = pathlib.Path(sys.argv[1]).resolve()
-    fixture = json.loads(pathlib.Path(sys.argv[2]).read_text(encoding="utf-8"))
-    run = json.loads((root / "report.json").read_text(encoding="utf-8"))
-    rates = fixture.get("ratesUsdPerMillion") or {}
-    arms = {name: pi_trace(root) if name == "pi" else wasm_trace(root, name)
-            for name in run.get("arms", {})}
-    for name, arm in arms.items():
-        receipt = run.get("arms", {}).get(name, {})
-        arm.update({"oraclePass": receipt.get("oracle", {}).get("pass"),
-                    "timedOut": receipt.get("timedOut"),
-                    "elapsedMs": receipt.get("elapsedMs"),
-                    "patchBytes": receipt.get("patchBytes")})
-        if "tokens" in arm and all(key in rates for key in
-                                   ("input", "cacheRead", "cacheWrite", "output")):
-            arm["configuredRateCostUsd"] = round(sum(
-                arm["tokens"][key] * rates[key] for key in
-                ("input", "cacheRead", "cacheWrite", "output")) / 1_000_000, 6)
-            prompt = arm["tokens"]["input"] + arm["tokens"]["cacheRead"] + arm["tokens"]["cacheWrite"]
-            arm["cacheReadShare"] = round(arm["tokens"]["cacheRead"] / prompt, 4) if prompt else None
-    print(json.dumps({"fixture": run["fixture"], "source": run["source"],
-                      "model": run["model"], "controls": run["controls"],
-                      "cleanup": run["cleanup"], "arms": arms}, indent=2))
+    fixture = json.loads(pathlib.Path(sys.argv[2]).read_text(encoding='utf-8'))
+    run = json.loads((root / 'report.json').read_text(encoding='utf-8'))
+    arms = {}
+    for name, receipt in run.get('arms', {}).items():
+        arm = pi_trace(root) if name == 'pi' else wasm_trace(root, name)
+        passed = receipt.get('oracle', {}).get('pass')
+        timed_out = receipt.get('timedOut')
+        normal_exit = timed_out is False and receipt.get('exit') == 0
+        arm.update({'oraclePass': passed, 'timedOut': timed_out,
+                    'finish': 'normal-process-exit' if normal_exit else
+                              'oracle-pass-at-timeout' if timed_out is True and passed is True else 'incomplete',
+                    'deliverableFinished': receipt.get('handoffVerified'),
+                    'elapsedMs': receipt.get('elapsedMs'), 'patchBytes': receipt.get('patchBytes'),
+                    'hypotheticalReferenceCostUsd': hypothetical_cost(
+                        arm['accounting'], fixture.get('referenceRatesUsdPerMillion') or {}),
+                    'referenceCostIsActualBilling': False,
+                    'pins': receipt.get('pins'),
+                    'quality': {'scores': None, 'notes': [], 'evidence': [], 'subjective': True,
+                                'rubric': {'correctness': 35, 'completeness': 25, 'safety_scope': 20,
+                                           'verification': 15, 'clarity': 5}}})
+        arms[name] = arm
+    print(json.dumps({'fixture': run.get('fixture'), 'source': run.get('source'),
+                      'model': run.get('model'), 'controls': run.get('controls'),
+                      'cleanup': run.get('cleanup'), 'arms': arms}, indent=2))
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
