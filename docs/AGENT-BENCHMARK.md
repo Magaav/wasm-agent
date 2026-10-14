@@ -19,14 +19,27 @@ failed summaries/retries, must enter accounting. Reference-rate costs, if added,
 are hypothetical, never actual billing. Provider adapters must normalize disjoint
 input accounting before calling this module; reasoning remains an output subset.
 
-Four prospective arms are Pi, current wasm, Node-hosted QuickJS-WASI and
-Rust-Wasmtime-hosted QuickJS-WASI. Final V2/native host design remains unresolved;
-this list does not impose a Node dependency on production. Pin task source,
-runtime source, package, binary, image, tools, instructions, model, reasoning,
-provider and oracle separately. No complete comparison is presently possible.
-The runner refuses candidate fixtures before credentials or effects. Non-UI oracle,
-separate runtime pins, isolated shared model route, trace completeness and sealed
-cleanup are still required. No inference was launched.
+Four prospective arms are Pi, current wasm, Node-hosted QuickJS-WASI (V1,
+comparison only) and Rust/Wasmtime-hosted QuickJS-WASI (V2, the implementation
+target). The operator confirmed that V2 must be Node-free: Rust hosts Wasmtime,
+and executing code-mode must not require a Node process, Node bridge or Node
+fallback. V1 remains isolated comparison/reference code, not a production backend.
+Node-based benchmark/test tooling and the Pi comparison arm are separate from
+V2's runtime requirement; this decision does not remove them.
+
+The host choice is settled, not the implementation or readiness. This checkout
+contains benchmark foundations, not a V1/V2 code-mode engine. Preserve the existing
+native tool authorization, role/profile/workspace and effect-ownership boundaries
+when wiring V2; the JavaScript guest must not bypass the dispatcher. The guest ABI,
+WASI imports, pinned QuickJS artifact/build and runtime integration still need an
+explicit implementation contract and focused verification. Do not label the arm
+Node-free merely from its name: prove code-mode execution without Node available.
+
+Pin task source, runtime source, package, binary, image, tools, instructions, model,
+reasoning, provider and oracle separately. No complete comparison is presently
+possible. The runner refuses candidate fixtures before credentials or effects.
+Non-UI oracle, separate runtime pins, isolated shared model route, trace
+completeness and sealed cleanup are still required. No inference was launched.
 
 Authorized coordination requires explicit operator enablement and approved native
 task ownership, no recursion/hidden coding agents. Parallelize independent hermetic
