@@ -6,6 +6,10 @@ description: Run a matched coding task in disposable Pi and wasm-agent sandboxes
 # Agent benchmark
 
 Code-mode STAGE A is incomplete: see the checkpoint in docs/AGENT-BENCHMARK.md.
+The confirmed V2 target is Node-free Rust/Wasmtime-hosted QuickJS-WASI; Node-hosted
+V1 is comparison only, never a production backend or runtime fallback. Prove V2
+execution without Node available before claiming that requirement is implemented.
+This architecture decision does not make the benchmark ready.
 Never launch/export provenance.candidate.json. Mandatory future cleanup order:
 seal and validate the complete lossless results bundle FIRST, then reconcile exact
 generation ownership, process drain and outstanding effects before deleting only
