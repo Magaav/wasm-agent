@@ -5,6 +5,17 @@ description: Run a matched coding task in disposable Pi and wasm-agent sandboxes
 
 # Agent benchmark
 
+Code-mode STAGE A is incomplete: see the checkpoint in docs/AGENT-BENCHMARK.md.
+Never launch/export provenance.candidate.json. Mandatory future cleanup order:
+seal and validate the complete lossless results bundle FIRST, then reconcile exact
+generation ownership, process drain and outstanding effects before deleting only
+owned disposable resources. Retain failed evidence; refuse archive corruption,
+shared/live/escaping resources or uncertain effects, and report cleanup errors.
+The legacy runner does not yet implement this contract. Native coordination needs
+explicit operator enablement and approved task ownership; no recursive workers.
+Timed arms remain isolated and serial/counterbalanced; only independent model-free
+preparation/checks may overlap. No paid launch until all readiness checks pass.
+
 Read `<repo>/docs/AGENT-BENCHMARK.md` in the explicitly selected source repo
 (not relative to an installed skill root) for runner/accounting limits and the
 proposed Luna-medium triad. The

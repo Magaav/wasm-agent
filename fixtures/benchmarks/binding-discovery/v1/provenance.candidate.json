@@ -1,0 +1,20 @@
+{
+  "id": "binding-discovery-v1",
+  "status": "incomplete-do-not-export-or-launch",
+  "taskSource": "dc11c4626358438514624afa05c20bacb68cdbe7",
+  "runtimeSource": null,
+  "originalTask": "amazing\n\n`harness: client open/status both refused workspace bindings | evidence: tool=client | cheaper: expose binding support before invocation, then provide the artifact link | predicts: refused calls 2→0.` fix it",
+  "privateOriginalReferences": {
+    "session": "f3595b69-5a33-4e0b-befc-e223e7a4f0b1",
+    "userMessage": "c09fe974-feb2-4877-a2e6-bcc2143abb07",
+    "userSequence": 6592,
+    "runId": "c09fe974-feb2-4877-a2e6-bcc2143abb07",
+    "runStartedAt": 1791982804.6237,
+    "refusals": ["0a9d6d65-301f-4086-b138-504b2c2301f5", "798764bc-c161-4547-a05f-9220b7a96d58"]
+  },
+  "requiredWorkspaceCondition": "enforced required session worktree binding",
+  "nativeRefusal": {"detail":"this capability does not yet accept an enforced session worktree binding","error":"workspace_execution_context_unsupported","tool":"client"},
+  "measuredHistoricalDuration": null,
+  "normalization": ["JSON escaping only for originalTask", "unrelated conversation omitted; this is not yet a complete frozen context", "private evidence references are locators, not immutable original-content hashes"],
+  "missing": ["complete privately sealed originals and hashes", "exact native declarations and relevant pre-request context", "blind solver export", "hidden non-UI adapter and deceptive-mutant preflight"]
+}
