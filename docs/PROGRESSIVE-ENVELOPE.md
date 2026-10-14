@@ -55,6 +55,16 @@ fail, not silently choose a mode. Default new-session promotion is the operator'
 requested treatment; the risk is an added discovery step and unmeasured autonomous
 model behavior beyond this small fixture. The escape hatch and evidence remain.
 
+## Binding-aware execution discovery
+
+`tool_search`/`capabilities` expose caller-scoped workspace execution metadata
+before invocation, separately from permission and exact schemas. Blocked/unknown
+definitions are not loaded. For bound `client`, including status, provide an
+existing artifact link or report the limitation; do not invoke/retry it or use
+another executor/session to bypass the binding. Conditional tools still require
+native argument/preflight checks. See [BINDING-DISCOVERY.md](BINDING-DISCOVERY.md).
+The stable bootstrap and role/profile/effect boundaries remain unchanged.
+
 ## Skill discovery and remaining Pi gap
 
 The retained Pi1.2 SDK replay selects read/bash/edit/write/codemode and supplies

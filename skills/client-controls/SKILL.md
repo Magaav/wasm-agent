@@ -8,6 +8,16 @@ description: How to act on the user's own machine (screenshot, mouse, keyboard, 
 The `client` tool reaches the machine that runs the desktop window. The node is
 the server; the window dials out to it, so nothing here needs inbound access.
 
+## Check execution support before a client action
+
+Permission is not executability. In a required bound workspace, discover
+`client` with `tool_search` (or inspect `capabilities.execution.client`). A
+blocked/unknown result is not loaded: do not invoke it or retry `status`.
+Provide an existing artifact link or report the limitation. Never clear the
+binding or use another executor/session to bypass it. Metadata covers only
+workspace policy; actual permissions/arguments/effects are still checked.
+See `<repo>/docs/BINDING-DISCOVERY.md` for the discovery contract.
+
 ## Start with the cheap question
 
 ```
@@ -17,7 +27,10 @@ client {action: "status"}
 It costs one probe and answers: is the window polling, what did it last do, is a
 Chrome running for it, on which port, and which pages are open. The `nodes` tool
 shows the same thing as a `client` row (`online`, `bridge.health`, `busy`,
-`browser`) without a round trip. Do this *after* a failure, not before every call.
+`browser`) without a round trip. Do this *after a runtime client failure*, not
+before every call. A `workspace_execution_context_unsupported` or missing
+required binding is a pre-execution refusal, not a runtime client failure:
+there is no client effect to diagnose, and `client status` is blocked too.
 
 ## Browsing: use `browser`, not `cdp`
 
@@ -71,6 +84,14 @@ collects it, even if the window has since gone.
 Never: stop the node to fix the controls, start a second window, guess a CDP
 port, or replace the window binary. Evidence lives in `/health` (the `client`
 block), `%LOCALAPPDATA%\wasm-agent\wa-window.log` and `chrome-launch.log`.
+
+## Verified discovery contract
+
+The on-demand `binding-discovery-proof` spell records
+`node <repo>/scripts/test-binding-discovery.cjs <built-wa> <fresh-evidence>`
+and its retained-hash `--post`. Required workspaces use this verified direct
+CLI, not unsupported replay. It proves the metadata/unchanged native refusal,
+not real desktop/browser execution. Keep blocked client/status at zero attempts.
 
 ## Making it repeatable
 

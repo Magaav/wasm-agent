@@ -42,6 +42,14 @@ plus `--post`; use the verified direct CLI in required workspaces. Also run
 See `<repo>/docs/PROGRESSIVE-ENVELOPE.md`. The tiny three-way shadow measures
 serialized bytes and replay mechanics, not autonomous quality or paid tokens.
 
+For binding-aware discovery, `binding-discovery-proof` records
+`test-binding-discovery.cjs <built-wa> <fresh-evidence>` and retained-hash `--post`.
+Required workspaces use this verified direct CLI. Run source/embedded seed/restart,
+stable exact schemas, profile/role fences, unchanged native refusals and causal
+old-tools control; also MCP native/restart and typed-routing regressions.
+See `<repo>/docs/BINDING-DISCOVERY.md`. Blocked metadata is not execution,
+and the deterministic zero-refusal plan is not autonomous-quality proof.
+
 For provider-measured compaction changes, `context-usage-proof` records
 `test-context-usage.cjs <built-wa> <fresh-evidence>` and retained-hash `--post`.
 Required workspaces use this verified direct CLI. The source/embedded seed/restart,
