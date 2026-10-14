@@ -47,8 +47,18 @@ is proved. Exact reported-token/quota/spend caps are still missing and block lau
 These are experiment controls, never production coding-loop caps. Canonical
 architecture decision496de546 confirms V2 must be Node-free Rust/Wasmtime: no Node
 process, bridge or fallback for code-mode execution. V1 Node hosting is comparison
-only; benchmark/test tooling and Pi are separate. The engine/guest ABI/imports still
-need explicit contracts and proof with Node unavailable before readiness changes.
+only; benchmark/test tooling and Pi are separate. See `<repo>/docs/CODEMODE.md`
+for the implemented experimental ABI and Node-unavailable source/embedded proof.
+The V1 peer-to-solver adapter and common paid route remain unfinished.
+
+For native engine qualification, the `codemode-native-proof` spell records
+`node <repo>/scripts/test-codemode-native.mjs <binary> <fresh-evidence> [assets]`
+then its `--post` source/binary/log hash check. Required worktrees use the verified
+CLI, not unsupported spell replay. Embed pinned assets at build time; Node is
+absent during native execution. Also run the upstream VM's benchmark-only
+`test-codemode-reference.mjs <prepared-assets> <fresh-evidence>` and binding/envelope
+regressions. The runtime safety limits and host differences must be disclosed;
+these model-free proofs never grant paid launch or certify quality/cache/billing.
 
 ## Model-free fixture and hidden oracle
 

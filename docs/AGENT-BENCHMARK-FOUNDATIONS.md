@@ -3,6 +3,9 @@
 This extends `scripts/agent-benchmark.mjs` and the existing offline token auditor;
 it is not another platform or a ready four-arm comparison. No code-mode engines,
 benchmark solver inference, installed assets/configuration or production caps change.
+Subsequent experimental engine implementation is documented separately in
+[CODEMODE.md](CODEMODE.md); the foundation below remains a model-free fixture,
+not a completed four-arm comparison.
 Preparation assistant inference is real work and must not be labeled zero inference.
 
 ## Fixture and hidden behavioral acceptance
@@ -208,5 +211,5 @@ and solver Git-checkout lifecycle wiring, and concrete reported-token/quota/spen
 caps. The proposed first pilot is one attempt per four arms,45min each,
 gpt-6.1-sol LOW only after a common isolated route is proved. V1 Node hosting remains comparison only; the confirmed V2 target is
 Node-free Rust/Wasmtime, with no Node process/bridge/fallback during execution.
-Benchmark/test tooling and Pi are separate. Guest ABI/imports/integration contracts
-still need implementation and actual proof with Node unavailable.
+Benchmark/test tooling and Pi are separate. The experimental ABI/imports/native dispatcher and Node-unavailable proof now exist;
+see CODEMODE.md. V1 solver wiring and a matched autonomous comparison remain open.

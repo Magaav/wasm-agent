@@ -1,0 +1,29 @@
+# Native code-mode implementation contract
+
+Experimental, default off. `WASM_AGENT_CODEMODE=native` adds one `codemode` declaration while retaining read_many and ordinary direct tools. JavaScript uses Pi1.2's unchanged prelude and QuickJS-WASI3.6.2's actual wasm artifact. Native Rust/Wasmtime provides VM/ABI/resource capabilities; all target policy remains Lua/native dispatch. V1 `benchmarks/codemode/node-reference.mjs` hosts Pi's actual VM driver for comparison only, never production fallback.
+
+Pins: Pi-codemode1.2.0 npm integrity `sha512-UZF7IN0IIrf3bop2wTxrwoAakGctH6d3zdPwhPN+QHMECfoI5E6B6l6I17YGFZPj8cmGex6xX7mLCNJXRf7wsw==`; guest wasm SHA256 `d4c9375f2b1ca4dc95f72c8aa2982a7a9951ac8011490d79c6582df732b4bbd9`; rendered Pi prelude SHA256 `57c8dc8c0e812117d82167fa751bc368f249d5aaee56d321066fc5280c785281`. MIT notices: licenses/pi-MIT.txt (Mario Zechner2025) and licenses/quickjs-wasi-MIT.txt (Vercel2026). The wasm uses12 imports: timezone, interrupt, promise rejection, module hooks, host bridge and six minimal WASI functions. No ambient filesystem, socket, environment or process access is imported (the fd stubs only discard diagnostic output). The `node_required:false` field describes the native implementation, not a process-counter measurement. Module loading is denied.
+
+## Native boundary
+
+`host.quickjs(action,json)` always returns one JSON value. Start verifies both pinned assets, initializes a fresh guest, passes only scoped tool descriptions/globals/store/code to the reused prelude and drains promise jobs. Host callbacks only queue protocol messages. They do not re-enter the VM with results or dispatch tools. Lua validates current role/profile/catalogue hash, supported exact JSON types and workspace/effect authority, then invokes the normal dispatcher and supplies each result. Native response IDs are unique/pending; wrong owner/duplicate/unrecognized responses refuse.
+
+VMs/handles stay interpreter-thread local and require a scope hash for every action. Compiled modules may be shared immutably to avoid repeated compilation, but guest stores/contexts, tool data and session state are never shared. Deadline/cancellation and Wasmtime fuel bound CPU loops and pending-job loops; heap64MiB, linear memory128MiB, stack512KiB, cumulative output16MiB/100000 items and up to4 thread-local guest handles are safety limits, not agent run/round budgets. These prototype limits are explicit and may affect workloads; benchmark before selecting defaults.
+
+## Tool behavior
+
+`await tools.<name>(args)`, `text`, return, console, store/load, searchTools and describeTool are available. No classifiers/image generation, implicit paid models, arbitrary native host objects, Node or ambient network/filesystem are injected. Guest profile/catalogue excludes recursion/delegation/integration/worktree-control facades. Image output is not yet enabled. All admitted effects are serial; simultaneous independent read execution is not claimed. Unawaited pending calls at completion are explicitly not admitted; completed earlier native effects are never rolled back/replayed after script failure.
+
+Admission rechecks deadline/cancellation before every queued native call, including after a slow prior tool. A native dispatcher exception has an explicitly unknown effect and forbids replay. All call attempts, including refusals, retain raw argument/result references and a separate journal; admitted native tool spans remain distinguishable from attempts. Nested full originals are hash-addressed and nested tool start/end events are durable. Only selected script output enters the model-facing result; ordinary50KiB output projection remains. Filtering is an opt-in awareness risk, not lossless compression; hidden acceptance and late-caveat fixtures must demonstrate task outcomes. Stores are snapshot/scoped derived state and commit only on successful script completion.
+
+## Present readiness
+
+The guest ABI smoke and real native dispatcher source/embedded cases execute with Node absent from the child PATH. Actual Node-unavailable evidence and sandbox/profile/type/store/no-unawaited-effect/error/loop tests must remain separately recorded. Bindings can embed prepared assets at build time with `WA_CODEMODE_BUILD_ASSETS=<fresh-assets-dir>`. Runtime then needs no asset paths, Node, npm or network. `WASM_AGENT_CODEMODE_ASSETS` is an explicit checksum-fenced external override, not a fallback; missing assets in a build without embedding refuse visibly. Provision with `node scripts/provision-codemode-assets.mjs <fresh-absolute-dir> [verified-package-cache]`, retain its pinned tarballs/receipt/notices, then build with that environment variable. The benchmark-only Node VM has a separate model-free mock-tool proof; it is not yet wired into a wasm-agent V1 solver. The paired model route, runner wiring, exact spending caps and four-arm autonomous comparison remain unfinished.
+## Focused proof and retained postcheck
+
+```
+node scripts/test-codemode-native.mjs <absolute-native-binary> <fresh-evidence> [external-assets]
+node scripts/test-codemode-native.mjs --post <absolute-native-binary> <same-evidence>
+```
+
+The collector removes Node from the child PATH and confirms `ENOENT`, retains complete source/embedded logs and hashes, and separately identifies embedded/external assets. It is model-free, not a security theorem or autonomous solver result. A source proof never substitutes for an embedded one. Interruption/heap failures preserve completed effects and pending-call nonadmission; the long delivery case checks transient handle recycling. Failed proof generations remain evidence, not overwritten destinations.

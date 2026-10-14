@@ -38,7 +38,7 @@ function M.mode(ctx)
 end
 function M.bootstrap(catalog)
  local core=M.bootstrap_mode()=='lean' and LEAN or CLASSIC
- local out={};for _,item in ipairs(catalog)do if core[item['function'].name] then out[#out+1]=item end end;return out
+ local out={};for _,item in ipairs(catalog)do local name=item['function'].name;if core[name] or name=='codemode' and host.getenv('WASM_AGENT_CODEMODE')=='native' then out[#out+1]=item end end;return out
 end
 function M.schemas(catalog,ctx)return M.mode(ctx)=='progressive' and M.bootstrap(catalog) or catalog end
 local function eligible(catalog,ctx)

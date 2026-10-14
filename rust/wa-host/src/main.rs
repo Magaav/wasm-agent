@@ -15,6 +15,7 @@ mod system_resources;
 mod relay_client;
 mod rendezvous;
 mod plugins;
+mod quickjs;
 mod subagents;
 mod resources;
 mod serve;
@@ -327,6 +328,7 @@ fn main() {
     lua.register("subagent", host::subagent);
     lua.register("enqueue_completion", host::enqueue_completion);
     lua.register("resource", host::resource);
+    lua.register("quickjs", quickjs::capability);
     lua.register("run_cancelled", host::run_cancelled);
     lua.register("sleep", host::sleep);
     lua.register("node_identity", host::node_identity);

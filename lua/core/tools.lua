@@ -538,6 +538,9 @@ function M.catalog(role)
       sha256={type="string"},offset={type="integer",minimum=1},limit={type="integer",minimum=1,maximum=51200}
     },{"sha256"})
     for _, item in ipairs(M.admin) do list[#list + 1] = item end
+    if host.quickjs and host.getenv('WASM_AGENT_CODEMODE')=='native' then
+      list[#list+1]=schema('codemode','Opt-in Node-free JavaScript sandbox calling approved native tools. Use await tools.<name>(args), text(value), return, searchTools and describeTool. Native permissions/workspace/type/effect checks apply per call. Scripts may filter results; complete nested originals remain hash-addressed. No filesystem/network/Node or implicit models API. Unawaited calls are not admitted; effectful calls are serial.',{code={type='string'},timeout_ms={type='integer',minimum=1,maximum=300000}},{'code'})
+    end
     for _, item in ipairs(mcp.schemas()) do list[#list+1]=item end
     for _, item in ipairs(whatsapp_schemas()) do list[#list + 1] = item end
     local plugins=wasm_plugins()
@@ -684,7 +687,7 @@ local function target_identity(path)
 end
 
 local WORKSPACE_UNSUPPORTED={shell=true,client=true,remote=true,spell_run=true}
-local WORKSPACE_FIXED={write=true,edit=true,write_many=true,edit_many=true,bash=true}
+local WORKSPACE_FIXED={write=true,edit=true,write_many=true,edit_many=true,bash=true,codemode=true}
 local function workspace_effectful(name,args)
   return WORKSPACE_FIXED[name] or WORKSPACE_UNSUPPORTED[name]
     or name=='mcp' and args.action=='probe'
@@ -1037,6 +1040,17 @@ function M.dispatch(memory, name, args, role, ctx)
   elseif name == "forget" then
     if not args.id or args.id == "" then return { error = "id_required" } end
     return { id = args.id, forgotten = memory.forget(args.id) and true or false }
+  elseif name == 'codemode' then
+    if not is_master(role) then return {error='forbidden_for_role:'..role} end
+    local catalog=routed_catalog or M.all(role)
+    local execution=M.discovery_execution(memory,ctx)
+    return dofile('lua/core/codemode.lua').run(memory,args,role,ctx,catalog,function()
+      return ctx.subagent and M.all_for(ctx.subagent.allowed or {},role) or M.all(role)
+    end,function(target,parameters,fragment)
+      local old=ctx.tool_arguments_json;ctx.tool_arguments_json=fragment
+      local ok,value=pcall(M.dispatch,memory,target,parameters,role,ctx);ctx.tool_arguments_json=old
+      if not ok then error(value) end;return value
+    end,execution)
   elseif name == "capabilities" then
     local list,execution={},{}
     local describe,workspace=M.discovery_execution(memory,ctx)

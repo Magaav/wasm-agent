@@ -414,6 +414,16 @@ without a terminal event is an error rather than a short answer. The line reader
   this endpoint ends at EOF with no `data: [DONE]` sentinel, so a reader waiting for one would call a
   finished stream truncated.
 
+## Node-free QuickJS reactor
+
+`host.quickjs(action,json)` returns exactly one JSON value, including errors.
+It hosts the checksum-pinned WASM guest in Wasmtime; there is no Node execution
+or fallback. `info` reports embedded assets and carries both original MIT notices.
+Start/deliver/admit/close require scoped handles; only Lua dispatch grants tool
+permissions/effects. Prepared assets may be embedded at build time, never fetched
+by runtime. See [CODEMODE.md](CODEMODE.md) for ABI, limits, provenance, source/embedded
+Node-unavailable proofs and the separate benchmark-only Node reference host.
+
 ## Adding a capability
 
 `host.operation('start', args_json)` accepts either a shell `command` or a native
