@@ -1,57 +1,50 @@
 # Agent benchmark: current readiness and next experiment
 
-## Code-mode STAGE A checkpoint (not ready)
+## Code-mode STAGE A: model-free foundations; paid launch refused
 
-`fixtures/benchmarks/binding-discovery/v1/provenance.candidate.json` preserves the
-exact request and retrieved run/message boundary, broken task source and original
-refusal. It is explicitly incomplete and MUST NOT be exported to a solver. Private
-original-content seals, native declarations and complete relevant context are still
-missing. The reported thirty minutes is not a measured duration. Runtime source is
-separate and unknown. No gold patch or later discussion is included in task text.
+See [AGENT-BENCHMARK-FOUNDATIONS.md](AGENT-BENCHMARK-FOUNDATIONS.md) for the
+verified fixture, native behavioral oracle, strict Pi/native trace adapters, actual
+prepared-message prefix analysis and seal-first owned-resource cleanup procedures.
+The final fixture is `fixtures/benchmarks/binding-discovery/v1/manifest.json`; only
+its `solver/` input and the clean original task snapshot are exported. The earlier
+candidate descriptor remains an explicitly obsolete, non-exportable checkpoint.
+Private complete selected originals and artifact bytes are sealed with SHA-256
+references; paths/unrelated history/normalization are disclosed. Historical native
+run elapsed time is1,797,766ms, not the user's approximate thirty-minute assertion.
 
-`scripts/agent-benchmark-foundations.mjs` supplies model-free reporting/accounting,
-request-prefix continuity, readiness and cleanup-authorization contracts. These are
-not integrated trace adapters or an effectful cleanup implementation. Prefix
-continuity is not a cache hit; backend KV contents are opaque. Scope/routing fences
-are testable, comprehensive absence of leakage is not established. Unknown counters,
-usage, timing, subscription dollars and scores stay null. All attempts, including
-failed summaries/retries, must enter accounting. Reference-rate costs, if added,
-are hypothetical, never actual billing. Provider adapters must normalize disjoint
-input accounting before calling this module; reasoning remains an output subset.
+The runner extends the existing substrate with model-free binding export/grading/
+preflight and seal/verify/cleanup commands. Paid entry refuses before credentials
+or Docker until per-arm runtime pins, a shared credential-isolated model route,
+complete provider attempt capture and exact experimental caps are proven. The
+legacy paid UI path is also refused: its old cleanup cannot meet the new contract.
+No benchmark solver inference was launched. Preparation itself uses ordinary
+assistant inference: the coordinator reported22calls/795,577tokens for the prior
+checkpoint, with unpriced dollars; continuation preparation is additional work.
 
-Four prospective arms are Pi, current wasm, Node-hosted QuickJS-WASI and
-Rust-Wasmtime-hosted QuickJS-WASI. Final V2/native host design remains unresolved;
-this list does not impose a Node dependency on production. Pin task source,
-runtime source, package, binary, image, tools, instructions, model, reasoning,
-provider and oracle separately. No complete comparison is presently possible.
-The runner refuses candidate fixtures before credentials or effects. Non-UI oracle,
-separate runtime pins, isolated shared model route, trace completeness and sealed
-cleanup are still required. No inference was launched.
+Prospective arms remain Pi/current wasm/Node-hosted QuickJS-WASI/Rust-Wasmtime-
+hosted QuickJS-WASI. Canonical architecture decision496de546 confirms V1 Node
+hosting is comparison only and V2 is Node-free Rust/Wasmtime: no Node process,
+bridge or fallback during V2 code-mode execution. Benchmark/test tooling and Pi
+remain separate. No engine is implemented; guest ABI/imports and integration still
+need explicit implementation contracts and proof with Node unavailable. Pin task source, runtime
+source, package, binary, image, tools, instructions, model, reasoning, provider and
+oracle separately. Unknown timing/resources/counters/billing and scores stay null.
+The fixed100-point rubric is subjective and separate from behavioral acceptance.
 
-Authorized coordination requires explicit operator enablement and approved native
-task ownership, no recursion/hidden coding agents. Parallelize independent hermetic
-setup/checks only; timed solver arms are serial/counterbalanced by default. Proposed
-first pilot: one attempt per four arms, 45 minutes each, gpt-6.1-sol LOW only if the
-same credential-isolated route is proven. Exact token/quota/spend pins remain
-undeclared and block launch; these are experiment controls, not production caps.
+Coordination requires explicit operator enablement and approved native task owners;
+no recursion or hidden coding agents. Parallelize independent hermetic preparation/
+checks only; timed arms are isolated and serial/counterbalanced by default. Proposed
+first pilot remains one attempt per four arms,45min each, gpt-6.1-sol LOW only if
+the same isolated route is proven. Token/quota/spend caps remain undeclared and
+block launch. These experiment controls are never production coding-loop caps.
 
-Quality rubric totals100: correctness35, completeness25, safety/scope20,
-verification15, clarity5. Coordinator assigns reasoning-based scores later, with
-per-arm evidence/notes and anonymous IDs where feasible. Scores are subjective,
-separate from hidden acceptance and measured counters; none exist yet.
+## Archived earlier telemetry-triad proposal
 
-Before deletion, seal and independently validate a compact lossless bundle containing
-manifest, task/context/oracle IDs, outputs, patches, full relevant raw traces/logs,
-failed attempts, receipts, accounting/cache/quality data. Preserve reproducible results
-and fixture. Only generation-owned disposable containers/volumes/networks/checkouts/
-temp builds/solver homes with proved drain and known effects may then be removed.
-Never delete active trees, shared caches/images, credentials, unrelated historical
-records or uncertain effects. Integrity/cleanup errors block 'finished clean'. Crash
-recovery reconciles exact ownership without replay. The current cleanupPlan tests
-are authorization-contract negatives, NOT proof of actual Docker/filesystem cleanup.
-Implement sealed-bundle and ownership adapters before a paid run; legacy UI runner
-cleanup does not meet this new contract. Keep verified CLI/postchecks where native
-spell tools are unavailable; do not attempt unsupported replay.
+The dated material below describes the earlier substrate and proposal, not current
+paid-run authorization or readiness. In particular, the old reporter gaps have now
+been addressed by strict adapters, and the non-UI model-free grader exists; shared
+transport, complete provider journals and runtime-image selection still need wiring.
+
 
 2026-10-07; preparation, not a completed coding comparison.
 

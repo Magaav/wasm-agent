@@ -1,0 +1,72 @@
+{
+  "originalTask": "amazing\n\n`harness: client open/status both refused workspace bindings | evidence: tool=client | cheaper: expose binding support before invocation, then provide the artifact link | predicts: refused calls 2→0.` fix it",
+  "context": [
+    {
+      "role": "assistant",
+      "tool": "client",
+      "arguments": {
+        "action": "browser",
+        "target": "open",
+        "url": "file:///benchmark/artifacts/envelope.html"
+      },
+      "normalization": "Original private Windows artifact path replaced with a stable local benchmark path; other simultaneous unrelated tool calls omitted."
+    },
+    {
+      "role": "tool",
+      "tool": "client",
+      "result": {
+        "detail": "this capability does not yet accept an enforced session worktree binding",
+        "error": "workspace_execution_context_unsupported",
+        "tool": "client"
+      }
+    },
+    {
+      "role": "assistant",
+      "tool": "client",
+      "arguments": {
+        "action": "status"
+      },
+      "normalization": "Other simultaneous unrelated source reads omitted."
+    },
+    {
+      "role": "tool",
+      "tool": "client",
+      "result": {
+        "detail": "this capability does not yet accept an enforced session worktree binding",
+        "error": "workspace_execution_context_unsupported",
+        "tool": "client"
+      }
+    },
+    {
+      "role": "assistant",
+      "content": "**`dc11c462` is installed and verified.** All 78 installation checks passed, with zero failures/skips; installed-binary restart, threshold and overflow tests also passed.\n\nCompaction now uses verified provider usage plus the new tail, targeting the configured **92%**. Missing or changed measurements remain explicitly estimated. No paid near-limit probe was run.",
+      "normalization": "Verbatim immediately preceding assistant answer; original ID and content hash retained in provenance outside solver."
+    }
+  ],
+  "workspace": {
+    "required": true,
+    "state": "allocated",
+    "worktree": "/benchmark/work",
+    "role": "master",
+    "normalization": "Absolute user/worktree/session identifiers replaced. Required/allocated and role semantics retained."
+  },
+  "nativeDeclarations": "native-declarations.json",
+  "source": {
+    "revision": "dc11c4626358438514624afa05c20bacb68cdbe7",
+    "delivery": "Clean tracked snapshot, no original Git directory/remotes/history. Task source is not the harness runtime."
+  },
+  "artifact": {
+    "path": "/benchmark/artifacts/envelope.html",
+    "normalization": "A sanitized reference artifact is supplied, not private historical prompts. The original raw artifact stays in private provenance."
+  },
+  "constraints": [
+    "Deliver a local patch and clear handoff; do not push, deploy, install, restart, contact live clients/browsers/send APIs or launch inference agents.",
+    "Keep invocation workspace/profile/role/effect fences intact. Permission/discovery is not a grant of executability.",
+    "Expose caller-scoped workspace support before invocation without probing real clients. Preserve exact native parameter schemas, truthful supported/action-dependent/unknown states and unchanged unbound status behavior.",
+    "Do not blanket deny/hide permitted tools or hardcode client unavailability. Discovery/load state must follow binding changes, missing/unknown metadata and native process reconstruction.",
+    "Do not automatically inject memories or trim instruction files."
+  ],
+  "historicalStateNote": "Relevant evidence is selected by causal relationship, not by chronological concatenation. Original chronological order was client open refusal, client status refusal, then the immediately preceding installed-verification answer, then this task. No completed repair, later discussion, oracle or solved history is part of this input.",
+  "nativeBootstrap": "native-bootstrap.json",
+  "nativeDeclarationEvidence": "Catalogue comes from exact original source; bootstrap declarations come from a retained model-free original-runtime envelope proof, not the unavailable exact historical task provider body. Original loaded-name state before the request is unknown; the two direct refusals are exact retained evidence."
+}

@@ -1,0 +1,157 @@
+{
+  "id": "binding-discovery-v1",
+  "status": "model-free-fixture-validated-paid-launch-refused",
+  "taskSource": "dc11c4626358438514624afa05c20bacb68cdbe7",
+  "runtimeSource": null,
+  "solverDirectory": "solver",
+  "task_sha256": "7677bb33fdd8ce0a665fb4989884318960cc346a917342267c3b2144507b5f53",
+  "solver_input_sha256": "8ec9516683a895b270c2e4b414fb58f81a04b6d34cbdbe10d33c1b2b92a8b30c",
+  "native_declarations_sha256": "010e46616fd4440d1bb76812d50330a4f0abae16a325c56e238048ecfc43e83f",
+  "original_artifact_sha256": "a7e1a7a73658398a40f5a0e109b8e9c7d8f86c1593eeac79dd95b51afe536e0c",
+  "private_originals": {
+    "bundle_sha256": "a6e1fbc0b064a3259a7a1310452c6fed74fbf1bbd81828901ee3d11f3f7a339c",
+    "original_rows_sha256": "2233c58b5d5a2dd74041f33a4c545ec9632ed62cb4ad04275a369b985c7e31d2",
+    "references": [
+      {
+        "id": "93555b6c-fe86-4289-8aa6-1ba71fb3ed18",
+        "seq": 6428,
+        "content_sha256": "a0f56c5efeebd733d558c4b5fe2c1a858d4629e8083160a7e66233d666c35b57",
+        "row_sha256": "105de54128c59d24938500a65af0498df057845ac1fb61bb55cc2b6d0d0b902a"
+      },
+      {
+        "id": "e7625df1-118c-4b86-b044-421cec9a77bc",
+        "seq": 6454,
+        "content_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "row_sha256": "b912b53bc87ac8cc04ba4008ec1fa72ebe2d618187b8de8321c2ee3f8d1477fc"
+      },
+      {
+        "id": "0a9d6d65-301f-4086-b138-504b2c2301f5",
+        "seq": 6455,
+        "content_sha256": "d6ec13c147b039e81881ae15d9f890d105916e81878775eb605d6ca0a979dfc8",
+        "row_sha256": "5562a20e75f2a3016fa33b797bd0e654f18ef24b1f86309ed2235693110f91f7"
+      },
+      {
+        "id": "236e531a-83ca-4b55-8fbb-39c62743d954",
+        "seq": 6458,
+        "content_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "row_sha256": "bc7b8bb7a67db9e798b87ebd1f36295ef0aadf8b5392d9aec78f6c92fa6b75ca"
+      },
+      {
+        "id": "798764bc-c161-4547-a05f-9220b7a96d58",
+        "seq": 6459,
+        "content_sha256": "d6ec13c147b039e81881ae15d9f890d105916e81878775eb605d6ca0a979dfc8",
+        "row_sha256": "7bee47188c39d0fe18be193cae5cd23f9cc9afb78b71e596b2b9da7921df4909"
+      },
+      {
+        "id": "3775fcdb-0cfc-459a-a2ea-3beeaad498ea",
+        "seq": 6591,
+        "content_sha256": "7ac84f6b57caaa44093de74fe78ef7b8172eeafd9d0b40f9a6f7b79d881ac936",
+        "row_sha256": "aac10c56441b7a5132732e5936b2c952c5af69c24d18d49efe59572703c23bf8"
+      },
+      {
+        "id": "c09fe974-feb2-4877-a2e6-bcc2143abb07",
+        "seq": 6592,
+        "content_sha256": "7677bb33fdd8ce0a665fb4989884318960cc346a917342267c3b2144507b5f53",
+        "row_sha256": "36f139de8842d3d0568b63c12bd2afa7e6c204e6ad6d81aa49c04af97a0ff5f6"
+      },
+      {
+        "id": "abd48d0b-3246-487c-b959-69cbfbab022e",
+        "seq": 6682,
+        "content_sha256": "143ecedccf3219e194c861d1bcec8c595840e9f8c55ac52421e455d1bdf561f0",
+        "row_sha256": "4730eec64998af8f209d80d32a01a569e6f42a8fdcb64527b773c4ac7dfb284f"
+      }
+    ],
+    "locator": "coordinator-retained child scratch/fixture-seal3/results.json.gz",
+    "complete_original_run": {
+      "first_seq": 6592,
+      "last_seq": 6682,
+      "rows": 91,
+      "sha256": "d45801c123df704825238219e8a5def68d8d5ffa5bbc2ec95855d4ac7b31c5a9"
+    }
+  },
+  "historical_run_boundary": {
+    "run_id": "c09fe974-feb2-4877-a2e6-bcc2143abb07",
+    "start": 1791982804.6237,
+    "end_message_at": 1791984602.3929,
+    "wall_from_fields_ms": 1797769.2000865936,
+    "recorded_run_elapsed_ms": 1797766,
+    "answer_ms": 1797387
+  },
+  "normalization": [
+    "Private SQLite TEXT fields preserved exactly inside UTF-8 JSON container. Container key/escaping format is normalized; original content and whole row hashes are distinct. Only original sequences/IDs previously retrieved through session/history tools were selected. Read-only source DB, no credential/env reads.",
+    "Only causally relevant pre-request originals exported: two original calls/refusals, required allocated workspace condition, immediately preceding answer and native declarations. Unrelated simultaneous calls, encrypted reasoning, private paths and artifact contents remain private.",
+    "Client artifact URL and worktree mapped to /benchmark/artifacts/envelope.html and /benchmark/work. Existing artifact replaced by explicit sanitized reference HTML. Original bytes privately sealed.",
+    "Original user task and refusal JSON values unchanged. Conversation excerpts reordered to original relevant chronology. No automatic memory injection or instruction trimming.",
+    "Native declarations captured model-free from pinned original Lua using a separately hashed native host binary; raw output retained privately.",
+    "Historical end/gold reply used only for measured run boundary outside solver. No original solved Git history exported.",
+    "Added retained model-free original-runtime bootstrap declaration proof (11 tools). This proof is not the unavailable exact historical task provider body; original pre-request loaded-name state remains unknown. Full private capture retained and hashed, only declaration array exported.",
+    "Complete original repair run6592..6682 additionally retained privately, with every original field and failed attempt. It is outside solver exports. Earlier selected pre-request originals remain separately hashed."
+  ],
+  "blocked": [
+    "shared credential-isolated model route",
+    "per-arm runtime/package/image pins",
+    "complete provider attempt journal including Pi retries/summaries",
+    "predeclared exact token/quota/spend cap"
+  ],
+  "native_bootstrap_sha256": "f75926f2931d2a9b3f5a109d1a72eb6ddafaac2c2e541d7a0e8f6070b6577b47",
+  "original_bootstrap_capture_sha256": "94300c00c55c7ab06f21c3c0e2165b2f79c3576f47317d61dc556eef10aa4699",
+  "model_free_acceptance": {
+    "adapter": "binding-discovery-native-v1",
+    "oracle_sha256": "c03303e73f162462b102dcacebd9f7d4b678ef314146086291f13c04c82df3bf",
+    "baseline_failed": true,
+    "known_repair_passed": true,
+    "positive_checks": [
+      142,
+      144
+    ],
+    "deceptive_controls": [
+      {
+        "name": "blanket-deny",
+        "expected_failure": true
+      },
+      {
+        "name": "discovery-hide",
+        "expected_failure": true
+      },
+      {
+        "name": "hardcoded-unavailable",
+        "expected_failure": true
+      },
+      {
+        "name": "guard-bypass",
+        "expected_failure": true
+      },
+      {
+        "name": "unbound-rejection",
+        "expected_failure": true
+      },
+      {
+        "name": "profile-bypass",
+        "expected_failure": true
+      },
+      {
+        "name": "stale-load-state",
+        "expected_failure": true
+      },
+      {
+        "name": "restart-loss",
+        "expected_failure": true
+      },
+      {
+        "name": "role-bypass",
+        "expected_failure": true
+      },
+      {
+        "name": "dynamic-scope-hardcode",
+        "expected_failure": true
+      },
+      {
+        "name": "schema-drift",
+        "expected_failure": true
+      }
+    ],
+    "bundle_sha256": "6ab839787adbbfa5f6c153a5c1af57d0ee10254501beb6cd1c0472dbbf00ab03",
+    "cleanup_verified": true,
+    "locator": "coordinator-retained child scratch/bp4/preflight.json and results.json.gz"
+  }
+}

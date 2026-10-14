@@ -10,7 +10,25 @@ import { fileURLToPath } from 'node:url';
 import { DUMMY_KEY } from './agent-benchmark-proxy.mjs';
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+// Model-free adapters extend this substrate. They never enter paid solver setup.
+const offline = process.argv[2];
+if (['--binding-preflight','--binding-grade','--binding-export','--seal-results','--verify-results','--cleanup-results','--reconcile-results'].includes(offline)) {
+  const args=process.argv.slice(3).map(p=>path.resolve(p));
+  const binding=await import('./agent-benchmark-binding.mjs');
+  const results=await import('./agent-benchmark-results.mjs');
+  let result;
+  if(offline==='--binding-preflight' && args.length===2)result=await binding.preflight(...args);
+  else if(offline==='--binding-grade' && args.length===3)result=await binding.gradeStandalone(...args);
+  else if(offline==='--binding-export' && args.length===1)result=binding.exportBinding(...args);
+  else if(offline==='--seal-results' && args.length===1)result=results.seal(...args);
+  else if(offline==='--verify-results' && args.length===1)result=results.verifyBundle(...args);
+  else if(offline==='--cleanup-results' && args.length===1)result=results.cleanup(...args);
+  else if(offline==='--reconcile-results' && args.length===1)result=results.reconcileFilesystem(...args);
+  else throw Error('invalid model-free adapter arguments');
+  console.log(JSON.stringify(result,null,2));process.exit(0);
+}
 const checkOnly = process.argv.includes('--check');
+if(!checkOnly)throw Error('paid benchmark readiness refused: seal-first Docker/worktree adapter, per-arm runtime pins, shared isolated model route and complete attempt accounting remain unproven');
 const fixtureArgument = process.argv.slice(2).find(arg => arg !== '--check');
 const fixturePath = fixtureArgument && path.resolve(fixtureArgument);
 if (!fixturePath || !fs.existsSync(fixturePath)) {
