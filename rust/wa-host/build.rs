@@ -5,6 +5,7 @@ fn main() {
     // binary keeps the core it was last built with. It did not, and the consequence is the one this project
     // keeps paying for: a deploy ships a fix that is not in the artifact. Presence is not freshness.
     generate_embedded();
+    generate_codemode_assets();
     // Lua's configuration is selected by defines, and the platform matters:
     // LUA_USE_LINUX pulls in LUA_USE_POSIX, which switches the error handling to
     // _setjmp/_longjmp. mingw-w64 declares `_setjmp(jmp_buf, void *)` - two
@@ -34,6 +35,25 @@ fn main() {
     if target_os != "windows" {
         println!("cargo:rustc-link-lib=m");
         println!("cargo:rustc-link-lib=dl");
+    }
+}
+
+// Build-time only: prepared, integrity-pinned assets may be embedded for an offline,
+// Node-free runtime. No downloader or package manager runs in the production host.
+fn generate_codemode_assets() {
+    println!("cargo:rerun-if-env-changed=WA_CODEMODE_BUILD_ASSETS");
+    let out = std::path::PathBuf::from(std::env::var_os("OUT_DIR").unwrap());
+    let dir = std::env::var_os("WA_CODEMODE_BUILD_ASSETS").map(std::path::PathBuf::from);
+    for name in ["quickjs.wasm", "prelude.js"] {
+        let bytes = match &dir {
+            Some(dir) => {
+                let path = dir.join(name);
+                println!("cargo:rerun-if-changed={}", path.display());
+                std::fs::read(path).expect("prepared code-mode asset; provision first")
+            }
+            None => Vec::new(),
+        };
+        std::fs::write(out.join(name), bytes).expect("write code-mode build asset");
     }
 }
 

@@ -28,11 +28,13 @@ V2: Rust hosts Wasmtime; code-mode execution must require no Node process, bridg
 or fallback. V1 is isolated comparison/reference code, not a production backend.
 Node benchmark/test tooling and Pi remain separate and are not removed.
 
-The host choice is settled, not implementation or readiness. No V1/V2 engine is
-implemented here. Preserve native tool authorization, role/profile/workspace and
-effect ownership; JavaScript guests must never bypass the dispatcher. Guest ABI,
-WASI imports, pinned QuickJS artifact/build and integration still need explicit
-contracts and focused proof with Node unavailable, not merely a Node-free label.
+The host choice is settled. An opt-in Node-free native engine and benchmark-only
+Node reference peer now exist; see [CODEMODE.md](CODEMODE.md). The native engine
+reuses the pinned Pi prelude and guest, embeds offline assets, and preserves scoped
+native dispatch. Source/embedded/restart qualification and Node-unavailable evidence
+are model-free implementation proof, not four-arm solver results. V1 peer-to-solver
+wiring, common provider route, per-arm runtime pins and spending controls remain
+unfinished; paid admission still refuses.
 
 Pin task source, runtime source, package, binary, image, tools, instructions, model,
 reasoning, provider and oracle separately. Unknown timing/resources/counters/billing
