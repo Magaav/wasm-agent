@@ -21,15 +21,23 @@ No benchmark solver inference was launched. Preparation itself uses ordinary
 assistant inference: the coordinator reported22calls/795,577tokens for the prior
 checkpoint, with unpriced dollars; continuation preparation is additional work.
 
-Prospective arms remain Pi/current wasm/Node-hosted QuickJS-WASI/Rust-Wasmtime-
-hosted QuickJS-WASI. Canonical architecture decision496de546 confirms V1 Node
-hosting is comparison only and V2 is Node-free Rust/Wasmtime: no Node process,
-bridge or fallback during V2 code-mode execution. Benchmark/test tooling and Pi
-remain separate. No engine is implemented; guest ABI/imports and integration still
-need explicit implementation contracts and proof with Node unavailable. Pin task source, runtime
-source, package, binary, image, tools, instructions, model, reasoning, provider and
-oracle separately. Unknown timing/resources/counters/billing and scores stay null.
-The fixed100-point rubric is subjective and separate from behavioral acceptance.
+Four prospective arms are Pi, current wasm, Node-hosted QuickJS-WASI (V1,
+comparison only) and Rust/Wasmtime-hosted QuickJS-WASI (V2, the implementation
+target). Canonical decision496de546 records the operator's confirmed Node-free
+V2: Rust hosts Wasmtime; code-mode execution must require no Node process, bridge
+or fallback. V1 is isolated comparison/reference code, not a production backend.
+Node benchmark/test tooling and Pi remain separate and are not removed.
+
+The host choice is settled, not implementation or readiness. No V1/V2 engine is
+implemented here. Preserve native tool authorization, role/profile/workspace and
+effect ownership; JavaScript guests must never bypass the dispatcher. Guest ABI,
+WASI imports, pinned QuickJS artifact/build and integration still need explicit
+contracts and focused proof with Node unavailable, not merely a Node-free label.
+
+Pin task source, runtime source, package, binary, image, tools, instructions, model,
+reasoning, provider and oracle separately. Unknown timing/resources/counters/billing
+and scores stay null. The fixed100-point rubric is subjective, separate from hidden
+behavioral acceptance. No complete four-arm comparison is ready.
 
 Coordination requires explicit operator enablement and approved native task owners;
 no recursion or hidden coding agents. Parallelize independent hermetic preparation/

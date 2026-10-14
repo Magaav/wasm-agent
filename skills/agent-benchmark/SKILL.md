@@ -7,12 +7,15 @@ description: Prepare matched coding fixtures, run model-free hidden acceptance a
 
 Read `<selected-repo>/docs/AGENT-BENCHMARK.md` and
 `docs/AGENT-BENCHMARK-FOUNDATIONS.md` completely, not relative to an installed skill
-root. Current code-mode STAGE A is model-free preparation, not a completed four-arm
-comparison. The final binding fixture is under
-`fixtures/benchmarks/binding-discovery/v1/`; `solver/` is the only committed solver
-input. Never export its manifest/private evidence/old candidate, known repair,
-hidden oracle or solved Git history. Task source and runtime source are separate.
-No memories are automatically injected and instruction files are never trimmed.
+root. STAGE A is model-free preparation, not a completed four-arm comparison.
+The final binding fixture is `fixtures/benchmarks/binding-discovery/v1/`; `solver/`
+is the only committed solver input. Never export manifest/private evidence/old
+candidate, known repair, hidden oracle or solved Git history. Task/runtime sources
+are separate; no automatic memory injection or instruction trimming.
+The confirmed V2 target is Node-free Rust/Wasmtime-hosted QuickJS-WASI. V1 Node
+hosting is comparison only, not a production backend/fallback. Prove V2 execution
+with Node unavailable before claiming implementation; the decision is not readiness.
+
 
 ## Admission and coordination
 
