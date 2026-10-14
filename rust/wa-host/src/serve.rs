@@ -22,7 +22,7 @@ use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 
 mod scheduler;
 mod journal;
@@ -49,11 +49,25 @@ static QUEUED: AtomicUsize = AtomicUsize::new(0);
 // A non-run request reserves its destination before enqueue. Busy labels alone
 // leave a gap between selection and dequeue, admitting a burst behind one read.
 static READ_RESERVED: OnceLock<Vec<AtomicBool>> = OnceLock::new();
+// A small burst is not sustained overload. Wait for actual destination release,
+// off the listener and under a bounded FIFO/deadline, without adding interpreters.
+static READ_READY: (Mutex<()>, Condvar) = (Mutex::new(()), Condvar::new());
+static READ_WAITING: AtomicUsize = AtomicUsize::new(0);
+fn notify_read_ready() {
+    if let Ok(_guard) = READ_READY.0.lock() { READ_READY.1.notify_one(); }
+}
+fn read_admission_ms() -> u64 {
+    env_usize("WASM_AGENT_READ_ADMISSION_MS", 250).clamp(1, 1000) as u64
+}
+fn read_queue_depth() -> usize {
+    env_usize("WASM_AGENT_READ_QUEUE_DEPTH", 16).clamp(1, 256)
+}
 fn read_reservations() -> &'static Vec<AtomicBool> {
     READ_RESERVED.get_or_init(|| (0..=max_node_threads()).map(|_| AtomicBool::new(false)).collect())
 }
 fn release_read_destination(index: usize) {
     if let Some(slot) = read_reservations().get(index) { slot.store(false, Ordering::Release); }
+    notify_read_ready();
 }
 /// When the last request was taken off the queue, so the tick can wait for a quiet moment.
 static LAST_SERVED_MS: AtomicU64 = AtomicU64::new(0);
@@ -594,6 +608,28 @@ fn choose_node_thread(request: &Request) -> Option<usize> {
     None
 }
 
+/// The mutex bridges selection and sleep: a destination cannot be freed between
+/// a failed selection and wait without waking this dispatcher. Queue residence
+/// consumes the same deadline; an expired request never reaches Lua.
+fn choose_read_destination_until(request: &Request, deadline: std::time::Instant) -> Option<usize> {
+    let mut ready = READ_READY.0.lock().ok()?;
+    loop {
+        if std::time::Instant::now() >= deadline { return None; }
+        if let Some(index) = choose_node_thread(request) {
+            drop(ready);
+            // Interpreter construction can consume the admission budget too.
+            if std::time::Instant::now() >= deadline {
+                release_read_destination(index);
+                return None;
+            }
+            return Some(index);
+        }
+        let remaining = deadline.checked_duration_since(std::time::Instant::now())?;
+        let (guard, _) = READ_READY.1.wait_timeout(ready, remaining).ok()?;
+        ready = guard;
+    }
+}
+
 fn now_ms() -> u64 {
     STARTED.get_or_init(std::time::Instant::now).elapsed().as_millis() as u64
 }
@@ -631,6 +667,7 @@ fn end_work() {
             }
         }
     }
+    if index >= control_floor() { notify_read_ready(); }
 }
 
 pub fn beat() {
@@ -845,6 +882,11 @@ fn health_body() -> Vec<u8> {
         "worker": state,
         "stalled_ms": age_ms,
         "queue": QUEUED.load(Ordering::Relaxed),
+        "read_admission": {
+            "waiting": READ_WAITING.load(Ordering::Relaxed),
+            "queue_depth": read_queue_depth(),
+            "timeout_ms": read_admission_ms(),
+        },
         // The bound a `bash`/`shell` call is given, so a client can show an in-flight tool's age
         // against its deadline (`bash · 42s of 300s`) without waiting for the tool event to carry it.
         // Same number `host.exec_timeout()` reports, from the one place the host enforces it.
@@ -1405,6 +1447,16 @@ pub fn run(first: Lua, factory: Box<dyn Fn() -> Lua + Send + Sync>, port: u16, u
             dispatch_http(stream, request, &admission_resolver, deadline);
         }
     }).expect("admission dispatcher");
+    // Read/control admission has its own bounded FIFO. Waiting here must never
+    // delay health/assets/run cancellation on the listener or resolver dispatcher.
+    let (read_admission_tx, read_admission_rx) = std::sync::mpsc::sync_channel::<(TcpStream, Request, std::time::Instant)>(read_queue_depth());
+    let read_resolver = resolve_tx.clone();
+    std::thread::Builder::new().name("wa-read-admission".into()).spawn(move || {
+        while let Ok((stream, request, deadline)) = read_admission_rx.recv() {
+            dispatch_http(stream, request, &read_resolver, deadline);
+            READ_WAITING.fetch_sub(1, Ordering::Relaxed);
+        }
+    }).expect("read admission dispatcher");
     // Admission bounds. `background_max` is how many background conversations may run at once and
     // `background_backlog` how many more may wait; together they keep a wake storm from growing
     // without limit. `session_queue_depth` bounds one conversation's own backlog so a single
@@ -1561,14 +1613,26 @@ pub fn run(first: Lua, factory: Box<dyn Fn() -> Lua + Send + Sync>, port: u16, u
                         b"{\"error\":\"admission_busy\",\"hint\":\"the admission queue is full or unavailable; retry shortly\"}");
                 }
             }
+        } else if is_read_route(&request) || is_control_route(&request) {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(read_admission_ms());
+            READ_WAITING.fetch_add(1, Ordering::Relaxed);
+            match read_admission_tx.try_send((stream, request, deadline)) {
+                Ok(()) => {},
+                Err(std::sync::mpsc::TrySendError::Full((mut stream, _, _)))
+                | Err(std::sync::mpsc::TrySendError::Disconnected((mut stream, _, _))) => {
+                    READ_WAITING.fetch_sub(1, Ordering::Relaxed);
+                    let _ = respond(&mut stream, 503, "application/json", b"{\"error\":\"read_capacity_busy\",\"hint\":\"read/control admission queue is full or unavailable\"}");
+                }
+            }
         } else {
             dispatch_http(stream, request, &resolve_tx, deadline);
         }
     }
 }
 
-/// Dispatch one parsed request. Resolver waits happen only on the admission thread; ordinary reads
-/// call this directly. The scheduler still authenticates before claiming, journaling or executing.
+/// Dispatch one parsed request. Resolver waits happen only on the run admission
+/// thread; read/control destination waits happen on their separate dispatcher.
+/// The scheduler still authenticates before claiming, journaling or executing.
 fn dispatch_http(
     mut stream: TcpStream,
     mut request: Request,
@@ -1649,10 +1713,13 @@ fn dispatch_http(
             }
         }
     } else {
-        match choose_node_thread(&request) {
+        let target = if is_read_route(&request) || is_control_route(&request) {
+            choose_read_destination_until(&request, deadline)
+        } else { choose_node_thread(&request) };
+        match target {
             Some(index) => index,
             None => {
-                let _ = respond(&mut stream, 503, "application/json", b"{\"error\":\"read_capacity_busy\",\"hint\":\"read/control capacity is occupied; retry with backoff\"}");
+                let _ = respond(&mut stream, 503, "application/json", b"{\"error\":\"read_capacity_busy\",\"hint\":\"read/control admission deadline expired; retry with backoff\"}");
                 return;
             }
         }

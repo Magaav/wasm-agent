@@ -1,12 +1,14 @@
 # Settings and transcript recovery
 
 Read/control requests reserve one independent destination before enqueue. They
-never fall back to a run slot, including after retirement/disconnection. When
-the reserve is occupied, the listener returns `503 read_capacity_busy` promptly.
-`WASM_AGENT_CONTROL_WORKERS` remains the capacity knob (default two). Risk:
-simultaneous diagnostic requests can now receive explicit overload rather than
-queueing; browser single-flight requests and bounded recovery backoff are required.
-This does not bound slow provider catalogue/network work or SQLite lock waiting.
+never fall back to a run slot, including after retirement/disconnection. Short
+collisions now wait in a bounded admission FIFO off the listener; sustained
+occupation or a full FIFO returns `503 read_capacity_busy` without executing the
+request. `WASM_AGENT_CONTROL_WORKERS` remains the capacity knob (default two).
+[ORCHESTRATOR-READS.md](ORCHESTRATOR-READS.md#server-admission-short-collisions)
+owns the admission deadline/queue knobs and reproduction. Browser single-flight
+and bounded recovery backoff remain required for sustained overload. This does
+not bound slow provider catalogue/network work or SQLite lock waiting.
 
 Startup reads the account and transcript before starting optional model metadata.
 Transcript recovery reads `/session` before native session lookup; `/health` may
