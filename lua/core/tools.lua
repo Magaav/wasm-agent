@@ -77,8 +77,8 @@ M.shared = {
     limit = { type = "integer", minimum = 1, maximum = 8 },
     offset = { type = "integer", minimum = 0 },
     snapshot = { type = "string", description = "Carry the returned snapshot when continuing a metadata page." } }),
-  schema("capabilities", "List the tools available to this account (its capabilities).", {}),
-  schema('tool_search','Discover permitted tools and load exact definitions into this session. Then invoke with tool_call; discovery grants no permissions.',{query={type='string',maxLength=256},limit={type='integer',minimum=1,maximum=8}},{'query'}),
+  schema("capabilities", "List permitted tools and their current workspace execution limits; permission is not executability.", {}),
+  schema('tool_search','Discover permitted definitions and workspace execution limits before invocation. Blocked tools are not loaded; discovery grants no permissions.',{query={type='string',maxLength=256},limit={type='integer',minimum=1,maximum=8}},{'query'}),
   schema('tool_call','Invoke a loaded tool by name/arguments; checked=true validates its current JSON schema first. Or preflight 1-8 known independent pure reads in calls (serial, not a transaction). Follow cached batch cursor without replay. All target permissions/effect/workspace checks remain.',{name={type='string'},arguments={type='object'},checked={type='boolean'},calls={type='array',minItems=1,maxItems=8,items={type='object',properties={name={type='string'},arguments={type='object'}},required={'name','arguments'}}},cursor={type='string'}}),
   schema("subagent", "Start and supervise a child agent (a subagent), using configured node placement, that works on a bounded task with its own fresh context, its own transcript and a restricted tool profile. `start` returns a durable receipt, not a result: the child runs in the background. Use `await` (one bounded wait, never repeated model polling) or `status`/`result` to collect it, and `cancel` to stop it. A placed task's own `state` says what the placement proved: `refused` means the destination answered that it started nothing, so the task will not run and `cancel` retracts it; `unknown` means a delivery may or may not have arrived, and only `reconcile` - which asks the destination whether it holds a run for that key - may then retry or cancel it. `attempts` counts how many times a destination was asked. You may only inspect or cancel the subagents you started. A profile's tools can only narrow your own; they can never grant more than you have. Use `list` to see your subagents and `profiles` to see what is approved. `session` reads the original child conversation; `message` queues its next turn with the same profile and model.", {
     action = { type = "string", enum = { "start", "status", "list", "result", "await", "cancel", "reconcile", "profiles", "message", "steer", "steer_session", "steering_status", "session", "events", "fleet" } },
@@ -245,7 +245,7 @@ M.admin = {
   -- fighting the debug endpoint, falling back to PowerShell one-liners mangled by
   -- the shell, and briefly overwriting the installed app.js to instrument it.
   -- None of that was needed - the UI is a page this node serves.
-  schema("client", "Act on the user's machine at their request: screenshot, mouse, keyboard, a shell on their machine, and a browser (Chrome DevTools). When a call has failed, ask `status` first - it says whether the window is polling, what its browser is doing and on which port. Use `browser` to browse (target: open/read/list/eval/close/activate/quit) and `cdp` only as the low-level escape hatch. This is not how to inspect the wasm-agent UI - that is a page this node serves, so fetch it or load it in a headless browser.", {
+  schema("client", "Act on the user's machine at their request: screenshot, mouse, keyboard, a shell on their machine, and a browser (Chrome DevTools). Workspace-bound sessions cannot invoke client, including status; inspect tool_search/capabilities execution metadata first. After a runtime client failure ask `status`; after a workspace refusal do not retry client/status. Use `browser` to browse (target: open/read/list/eval/close/activate/quit) and `cdp` only as the low-level escape hatch. This is not how to inspect the wasm-agent UI - that is a page this node serves, so fetch it or load it in a headless browser.", {
     action = { type = "string", enum = { "screenshot", "frame", "click", "move", "type", "key", "shell", "status", "browser", "cdp" } },
     x = { type = "integer" }, y = { type = "integer" },
     text = { type = "string" }, key = { type = "string" },
@@ -683,12 +683,62 @@ local function target_identity(path)
   return platform.os()=='windows' and path:lower() or path
 end
 
-local function required_workspace_error(memory, ctx, name, args)
-  local writes_files = name == "write" or name == "edit" or name == "write_many" or name == "edit_many" or name == "bash"
+local WORKSPACE_UNSUPPORTED={shell=true,client=true,remote=true,spell_run=true}
+local WORKSPACE_FIXED={write=true,edit=true,write_many=true,edit_many=true,bash=true}
+local function workspace_effectful(name,args)
+  return WORKSPACE_FIXED[name] or WORKSPACE_UNSUPPORTED[name]
     or name=='mcp' and args.action=='probe'
     or name:sub(1,4)=='mcp_' and not mcp.is_read(name)
-    or name == "operation" and (args.action or "") == "start"
-    or name == "shell" or name == "client" or name == "remote" or name == "spell_run"
+    or name=='operation' and (args.action or '')=='start'
+end
+
+-- Pure, caller-scoped discovery: read one workspace snapshot, never probe a client,
+-- app or executor. The scope is workspace policy only, not complete executability.
+function M.discovery_execution(memory,ctx)
+  local workspace,unreadable
+  if memory and ctx.session_id and memory.session_workspace then
+    local ok,value=pcall(memory.session_workspace,ctx.session_id)
+    if ok and (value==nil or type(value)=='table') then workspace=value else unreadable=true end
+  end
+  local required=workspace and workspace.required and true or false
+  local summary={scope='workspace_policy_only',required=required,
+    state=unreadable and 'unknown' or required and (workspace.state or 'unknown') or 'not_required'}
+  if unreadable then summary.required=nil end
+  local function describe(name)
+    local conditional=name=='operation' or name=='mcp' or name:sub(1,4)=='mcp_'
+    local affected=WORKSPACE_FIXED[name] or WORKSPACE_UNSUPPORTED[name] or conditional
+    local binding=WORKSPACE_UNSUPPORTED[name] and 'unsupported'
+      or conditional and 'action_dependent' or WORKSPACE_FIXED[name] and 'supported' or 'not_applicable'
+    local result={scope='workspace_policy_only',workspace_binding=binding,status='not_blocked'}
+    if not affected then return result end
+    if unreadable then result.status='unknown';result.reason='workspace_metadata_unreadable';return result end
+    if not required then return result end
+    if conditional then
+      result.status='argument_dependent'
+      result.reason='workspace_preflight_required'
+      result.detail=name=='operation' and 'Only start requires a valid bound workspace/cwd; observations remain separately checked.'
+        or 'Probe and non-read MCP calls do not support enforced workspaces; reads and registry actions retain their own checks.'
+      return result
+    end
+    if workspace.state~='allocated' or not workspace.worktree or workspace.worktree=='' then
+      result.status='blocked';result.available=false;result.reason='session_workspace_unavailable'
+      result.detail='Required workspace has no allocated durable binding; do not fall back to another tree.'
+    elseif WORKSPACE_UNSUPPORTED[name] then
+      result.status='blocked';result.available=false;result.reason='workspace_execution_context_unsupported'
+      result.detail='This capability does not accept an enforced session worktree binding.'
+      result.next=name=='client' and 'Do not invoke client or retry status. Provide an existing artifact link or report the limitation; never bypass the binding with another executor.'
+        or 'Use only an explicitly supported, authorized node-local procedure with equivalent checks; never bypass the binding.'
+    else
+      result.status='argument_dependent';result.reason='workspace_preflight_required'
+      result.detail='Invocation still validates the bound directory, requested path/cwd and native permissions.'
+    end
+    return result
+  end
+  return describe,summary
+end
+
+local function required_workspace_error(memory, ctx, name, args)
+  local writes_files=workspace_effectful(name,args)
   if not writes_files or not memory or not ctx.session_id or not memory.session_workspace then return nil end
   local workspace = memory.session_workspace(ctx.session_id)
   if not workspace or not workspace.required then return nil end
@@ -696,7 +746,7 @@ local function required_workspace_error(memory, ctx, name, args)
     return {error="session_workspace_unavailable",state=workspace.state or "unknown",
       detail=workspace.error or "required workspace has no durable binding"}
   end
-  if name == "shell" or name == "client" or name == "remote" or name == "spell_run" or name=='mcp' or name:sub(1,4)=='mcp_' then
+  if WORKSPACE_UNSUPPORTED[name] or name=='mcp' or name:sub(1,4)=='mcp_' then
     return {error="workspace_execution_context_unsupported",tool=name,
       detail="this capability does not yet accept an enforced session worktree binding"}
   end
@@ -849,7 +899,10 @@ function M.dispatch(memory, name, args, role, ctx)
   end
   if not is_master(role) and admin_names()[name] then return { error = "forbidden_for_role:" .. role } end
   local routed_catalog=ctx.subagent and M.all_for(ctx.subagent.allowed or {},role) or nil
-  if name=='tool_search' then return envelope.search(routed_catalog or M.all(role),args,ctx) end
+  if name=='tool_search' then
+    local describe=M.discovery_execution(memory,ctx)
+    return envelope.search(routed_catalog or M.all(role),args,ctx,describe)
+  end
   if name=='tool_call' then
     local scope=''
     if args.calls~=nil or args.cursor~=nil then
@@ -985,9 +1038,13 @@ function M.dispatch(memory, name, args, role, ctx)
     if not args.id or args.id == "" then return { error = "id_required" } end
     return { id = args.id, forgotten = memory.forget(args.id) and true or false }
   elseif name == "capabilities" then
-    local list = {}
-    for _,item in ipairs(M.all(role)) do list[#list+1]=item['function'].name end
-    return { role = role, capabilities = list, note = "ask a master to unlock more" }
+    local list,execution={},{}
+    local describe,workspace=M.discovery_execution(memory,ctx)
+    for _,item in ipairs(routed_catalog or M.all(role)) do
+      local tool=item['function'].name;list[#list+1]=tool;execution[tool]=describe(tool)
+    end
+    return {role=role,capabilities=list,execution=execution,workspace=workspace,
+      note='Permitted catalogue, not an execution guarantee. Inspect workspace status before invocation; native permissions, arguments, profile and effect checks remain authoritative.'}
   elseif name == "subagent" then
     -- One Lua facade for the model and for the HTTP control route; the owner is
     -- derived from `ctx` (server side), never from the arguments the model sent.
