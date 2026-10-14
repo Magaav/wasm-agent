@@ -187,8 +187,13 @@ reserve (Pi's defaults: 16,384 reserved, 20,000 recent tokens kept), an older pr
 
 An explicit positive `WASM_AGENT_CONTEXT_BUDGET` can trigger earlier; there is no
 default 64K cap. Every unsummarized ledger row participates, without a 500-row gap.
-Context estimates use the last measured request plus trailing messages when valid,
-otherwise text bytes/4 and Pi's 1,200-token image estimate. Neither is a tokenizer.
+Context estimates use a scope/model/schema/full-prefix-fenced provider measurement
+persisted across agent turns and interpreter restarts, plus only appended rows.
+Complete-history bytes/4 must not override a matching measured count: encrypted
+reasoning JSON caused observed44–55% compactions against a92% configured trigger.
+Missing/changed measurements fall back to text bytes/4 and Pi's1,200-token image
+estimate, explicitly labelled. Neither tail nor fallback is a tokenizer.
+See [CONTEXT-COMPACTION.md](CONTEXT-COMPACTION.md) for the evidence, fences and risks.
 
 The summarizer receives full user/assistant text, reasoning and tool arguments;
 large tool results get explicit 2,000-byte excerpts with artifact references.

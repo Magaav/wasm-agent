@@ -13,6 +13,7 @@ local provider = dofile("lua/core/provider.lua")
 local memory = dofile("lua/core/memory.lua")
 local steering = dofile("lua/core/steering.lua")
 local telemetry = dofile("lua/core/telemetry.lua")
+local context_usage = dofile("lua/core/context_usage.lua")
 local tool_output = dofile("lua/core/tool_output.lua")
 -- Failure text is persisted in the trace and shown in the session view, so it is
 -- redacted before it is stored, not only when it is displayed.
@@ -879,22 +880,14 @@ end
 
 function M:context_tokens(messages)
   messages=messages or self:build_context()
-  local prefix=host.sha256(json.encode(messages[1] or {})..json.encode(self.tool_list or {}))
-  local estimated=telemetry.estimate_messages(messages)+estimate_tokens(json.encode(self.tool_list or {}))
-  -- Pi uses the last measured usage plus the messages appended after it. A
-  -- changed system prefix, compaction or restart falls back to an explicit estimate.
-  if self.measured_prefix==prefix and self.measured_messages and #messages>=self.measured_messages then
-    local tokens=self.measured_total or 0
-    for i=self.measured_messages+1,#messages do tokens=tokens+telemetry.estimate_messages({messages[i]}) end
-    return math.max(tokens,estimated),"provider-plus-tail-estimate"
-  end
-  -- The measured count is a floor even when the prefix changed. The estimator undercounts -
-  -- a request measured at 894,056 tokens estimated at 811,985 - and a count that is too low is
-  -- what lets a request cross the provider's real limit before compaction fires.
-  if self.measured_total and self.measured_total>estimated then
-    return self.measured_total,"measured-floor"
-  end
-  return estimated,"bytes/4-plus-image-estimate"
+  local measured,source=context_usage.estimate(self,messages,self.tool_list,context_usage.route(provider))
+  if measured then self.context_measurement_reason=nil else self.context_measurement_reason=source end
+  -- Measured input is authoritative for its exact model/schema/message prefix.
+  -- Only appended rows are estimated. Whole-history bytes (especially encrypted
+  -- reasoning) must not override a valid provider count and compact at44-55%.
+  if measured then return measured,source end
+  return telemetry.estimate_messages(messages)+estimate_tokens(json.encode(self.tool_list or {})),
+    "bytes/4-plus-image-estimate"
 end
 
 -- Automatic compaction. Policy borrowed from pi: trigger only when the context
@@ -920,7 +913,8 @@ function M:maybe_compact(messages, force)
   -- message bodies: the request also carries the system prompt, AGENTS.md and
   -- every tool schema (several thousand tokens), which an estimate of the
   -- transcript alone misses entirely.
-  local before = self:context_tokens(messages)
+  local before,estimate_source = self:context_tokens(messages)
+  local measurement_reason=self.context_measurement_reason
   -- Pi compacts at capacity. A smaller engineering budget is an explicit choice,
   -- never inferred from uncached-input statistics masquerading as total input.
   -- No budget by default: the window decides, which is pi's policy and the one the prefix fix depends on.
@@ -1091,7 +1085,8 @@ function M:maybe_compact(messages, force)
   if self.run_counts and self.run_counts.context_growth then
     self.run_counts.context_growth.compactions=self.run_counts.context_growth.compactions+1
   end
-  self.last_prompt_tokens,self.measured_messages,self.measured_total,self.measured_prefix=0,nil,nil,nil
+  self.last_prompt_tokens=0
+  context_usage.reset(self)
   local after = self:context_tokens()
   -- Record it in the transcript so a compaction (and the cache invalidation it
   -- causes) is visible in the session view instead of being invisible work.
@@ -1104,13 +1099,17 @@ function M:maybe_compact(messages, force)
       split_turn = split_turn, superseded = previous_summary ~= "",
       template = split_turn and "prefix" or "checkpoint",
       summary_model = self:summary_model(),
+      capacity=limit,trigger=trigger,reserve=reserve,forced=force==true,
+      estimate_source=estimate_source,measurement_reason=measurement_reason,
       usage=result.usage,normalized=result.observation and result.observation.normalized,
       ms = math.floor((host.now() - started) * 1000),
     } },
   })
   telemetry.event(self.session_id,self.run_id,"","compact","applied",{ok=true,
     summarized_from=(session.summarized_until or 0)+1,summarized_until=cut.seq,
-    before=before,after_estimate=after,summary_bytes=#merged,invalidates_cache=true})
+    before=before,after_estimate=after,summary_bytes=#merged,invalidates_cache=true,
+    capacity=limit,trigger=trigger,reserve=reserve,forced=force==true,
+    estimate_source=estimate_source,measurement_reason=measurement_reason})
   self.emit({ type = "compact", through = cut.seq, tokens_before = before, tokens_after = after })
   return true
 end
@@ -1701,9 +1700,9 @@ function M:run_body(text, images)
       end
       -- The provider's own count for this request is the true context size.
       self.last_prompt_tokens = prompt
-      self.measured_prefix=host.sha256(json.encode(messages[1] or {})..json.encode(tool_list))
-      self.measured_messages=#messages+1
-      self.measured_total=prompt+completion
+      if not result.model or result.model=="" or result.model==self.model then
+        context_usage.remember(self,messages,tool_list,normalized,context_usage.route(provider))
+      end
       trace[#trace + 1] = span
     else
       trace[#trace + 1] = { kind = "model_call", model = self.model, ok = true, round = round,
