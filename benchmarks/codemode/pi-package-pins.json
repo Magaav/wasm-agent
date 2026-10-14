@@ -1,0 +1,15 @@
+{
+  "status": "public-package-pins-not-paid-run-admission",
+  "pi-coding-agent": {
+    "version": "1.2.0",
+    "integrity": "sha512-h/4WaVWv1VlCaY8x8qEN5U+7jbF/e7+Ck6moPeEOFn5juMTWwNAXjwgYM7gRgbBYh8Zppwt6qWvJDzNTf4GNEQ==",
+    "registry_metadata_sha256": "4620b494df146e8c7284b3dd15906dbaea8c71502689e16f150025dc6986b788"
+  },
+  "pi-ai": {
+    "version": "1.2.0",
+    "integrity": "sha512-U5/1zXqfV1on7/9sbez03tT4Ru49Lvfb4+zXSDK3DBKF5cRk6KxvAOTOY3HJ4jimlZth+rs7vbJqN6iBQAoNuQ==",
+    "registry_metadata_sha256": "f08abaf9406286856d80bbf6d05082bd399608d4b871849ce6d42af47cbf6046"
+  },
+  "prepared_windows_npm_lock_sha256": "cde469d86bb56939a0ec6259212e6b62dd9b738b80ac0b17e56cb38d53a1185a",
+  "note": "Retain the complete lockfile and platform-specific image/runtime inventory in the sealed experiment. This manifest does not pin a Linux image or authorize inference."
+}

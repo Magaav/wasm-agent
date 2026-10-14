@@ -1,6 +1,12 @@
 -- Real native WASI guest and native dispatcher, private DB/home/files only.
 local json=dofile('lua/vendor/json.lua')
 local getenv=host.getenv;local on=true
+local backend=getenv('WA_CODEMODE_PROOF_BACKEND') or 'rust-wasmtime-quickjs-wasi'
+local skips=0
+if backend=='node-quickjs-wasi-reference' then
+ local client=assert(load(assert(host.read_file(getenv('WA_CODEMODE_CONTROLLER_CLIENT'))),'reference-client'))()
+ client.install({url=getenv('WA_CODEMODE_CONTROLLER_URL'),key=getenv('WA_CODEMODE_CONTROLLER_KEY')})
+end
 host.getenv=function(k)if k=='WASM_AGENT_CODEMODE' then return on and 'native' or '' end;if k=='WASM_AGENT_CODEMODE_ASSETS' then return getenv('WA_QJS_ASSETS') end;return getenv(k)end
 local memory=dofile('lua/core/memory.lua');memory.setup()
 local tools=dofile('lua/core/tools.lua')
@@ -19,7 +25,7 @@ local checks=0;local function check(v,label)assert(v,label);checks=checks+1 end
 local function call(code,c)return tools.dispatch(memory,'codemode',{code=code},'master',c or ctx)end
 local boot=tools.envelope('master',ctx);check(#boot==12,'opt-in adds one tool, read_many and direct tools retained')
 local r=call('const r=await tools.read({path:'..json.encode(root..'/a.txt')..'}); text(r.content); return 42;')
-check(r.ok and r.backend=='rust-wasmtime-quickjs-wasi' and r.items[1].text=='alpha','native guest calls real read and filters output')
+check(r.ok and r.backend==backend and r.items[1].text=='alpha','native guest calls real read and filters output')
 check(#r.calls==1 and r.calls[1].evidence and host.read_file(r.calls[1].evidence.path)~=nil and r.calls[1].evidence.sha256==host.sha256(host.read_file(r.calls[1].evidence.path)),'complete nested original retained with its exact hash')
 r=call('await tools.write({path:'..json.encode(root..'/b.txt')..',content:"beta"}); return (await tools.read({path:'..json.encode(root..'/b.txt')..'})).content;')
 check(r.ok and r.value=='"beta"' and host.read_file(root..'/b.txt')=='beta' and #r.calls==2,'effectful write/read chain executes through dispatcher')
@@ -58,8 +64,10 @@ local timeout_partial=tools.dispatch(memory,'codemode',{code='text("retained bef
 check(not timeout_partial.ok and timeout_partial.items[1].text=='retained before interrupt' and #timeout_partial.unexecuted==1 and host.read_file(root..'/not-admitted.txt')==nil,'VM interrupt retains output and explicitly refuses pending effects')
 r=call('let objects=[]; while(true) objects.push(new Array(100000).fill(1));')
 check(not r.ok,'heap exhaustion closes VM without admitting effects')
-r=call('for(let i=0;i<3000;i++) await tools.read({path:'..json.encode(root..'/a.txt')..',limit:1}); return 3000;')
-check(not r.ok and #r.calls>1000 and tostring(r.error):find('all fuel consumed',1,true),'fuel exhaustion is explicit; completed native calls remain retained')
+if backend=='rust-wasmtime-quickjs-wasi' then
+ r=tools.dispatch(memory,'codemode',{code='for(let i=0;i<3000;i++) await tools.read({path:'..json.encode(root..'/a.txt')..',limit:1}); return 3000;',timeout_ms=300000},'master',ctx)
+ check(not r.ok and #r.calls>1000 and tostring(r.error):find('all fuel consumed',1,true),'fuel exhaustion is explicit; completed native calls remain retained')
+else skips=skips+1 end -- Node has no Wasmtime fuel; never pretend this case ran.
 r=call('for(let i=0;i<1000;i++) await tools.read({path:'..json.encode(root..'/a.txt')..',limit:1}); return 1000;')
 check(r.ok and #r.calls==1000 and r.value=='1000','1000 deliveries recycle transient native handles below the declared fuel bound')
 local function control(action,args)return json.decode(host.quickjs(action,json.encode(args)))end
@@ -113,4 +121,4 @@ check(paused.ok,'restart fixture leaves only a not-admitted guest call')
 memory.meta_set('codemode-proof-active',paused.id)
 on=false;local disabled=tools.dispatch(memory,'codemode',{code='return 1'},'master',ctx)
 check(disabled.error=='codemode_not_enabled' and #tools.envelope('master',ctx)==11,'default-off declaration and dispatch unchanged')
-print(json.encode({ok=true,checks=checks,paid_calls=0,backend='rust-wasmtime-quickjs-wasi'}))
+print(json.encode({ok=true,checks=checks,skipped=skips,paid_calls=0,backend=backend}))
