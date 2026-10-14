@@ -212,4 +212,6 @@ caps. The proposed first pilot is one attempt per four arms,45min each,
 gpt-6.1-sol LOW only after a common isolated route is proved. V1 Node hosting remains comparison only; the confirmed V2 target is
 Node-free Rust/Wasmtime, with no Node process/bridge/fallback during execution.
 Benchmark/test tooling and Pi are separate. The experimental ABI/imports/native dispatcher and Node-unavailable proof now exist;
-see CODEMODE.md. V1 solver wiring and a matched autonomous comparison remain open.
+see CODEMODE.md and CODEMODE-BENCHMARK-WIRING.md. The V1 broker and four-framework
+two-round tool loops are wired and tested with a mock upstream. Real provider,
+isolated runtime/image pins and the autonomous comparison remain open.

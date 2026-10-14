@@ -33,8 +33,10 @@ Node reference peer now exist; see [CODEMODE.md](CODEMODE.md). The native engine
 reuses the pinned Pi prelude and guest, embeds offline assets, and preserves scoped
 native dispatch. Source/embedded/restart qualification and Node-unavailable evidence
 are model-free implementation proof, not four-arm solver results. V1 peer-to-solver
-wiring, common provider route, per-arm runtime pins and spending controls remain
-unfinished; paid admission still refuses.
+wiring is present only in the model-free harness; common provider protocol passes model-free qualification, and per-arm
+runtime/image pins plus real provider acceptance and spending controls remain open;
+paid admission still refuses. See [CODEMODE-BENCHMARK-WIRING.md](CODEMODE-BENCHMARK-WIRING.md)
+for actual native-broker and four-framework deterministic route/tool-loop evidence.
 
 Pin task source, runtime source, package, binary, image, tools, instructions, model,
 reasoning, provider and oracle separately. Unknown timing/resources/counters/billing

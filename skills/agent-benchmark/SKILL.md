@@ -187,6 +187,20 @@ allowed profile lacks spell tools; never attempt unsupported mandatory-worktree
 spell replay or grow AGENTS.md. The paid runner still needs lifecycle/route/capture
 wiring and pins before readiness can change.
 
+The comparison-only V1 broker and real four-framework mock-route/tool-loop proofs
+are in `<repo>/docs/CODEMODE-BENCHMARK-WIRING.md`. Run
+`test-codemode-reference-native.mjs <binary> <assets> <fresh-evidence>`,
+`test-agent-benchmark-model-route.mjs <fresh-evidence>`, and
+`test-agent-benchmark-runtime-route.mjs <binary> <assets> <fresh-evidence> <Pi-package>`.
+`benchmark-four-framework-route-proof` records the runtime-route CLI plus the
+retained `check-benchmark-framework-proof.mjs <evidence>` post assertion. Required
+worktrees use that verified CLI sequence; unsupported spell replay is not attempted.
+The latter runs actual Pi1.2/current-style/V1/V2 loops against deterministic SSE,
+not autonomous solver inference. The candidate current-style loop does not qualify
+a separately pinned baseline image. Preserve two explicitly skipped V1 fuel cases,
+raw/zstd/decoded/prepared bodies, unknown usage and all failed generations. Neither
+fixture is a paid-launch exception or real provider/model-entitlement proof.
+
 For old artifact discovery use [scripts/artifacts.mjs](scripts/artifacts.mjs), not
 recursive rg over roots/worktrees. Inspect only immediate directories and known
 manifest/report/summary filenames:
