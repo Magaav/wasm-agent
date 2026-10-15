@@ -192,6 +192,21 @@ and cancellation remain available. No failed call or external effect is auto-rep
   **skipped, with the reason written on its outbox row** - a silent skip would be indistinguishable
   from a lost wake. A failure is never skipped, whatever the profile says.
 
+### Action-specific idempotency keys
+
+The model-facing tool and `idempotency_key` property descriptions explicitly
+require a non-empty key for `message`, `steer` and `steer_session`. The key stays
+optional for `start` and is not needed for read-only actions; it must not be made
+globally required. The internal `resolve` action also requires the key it looks up.
+The native facade remains authoritative: missing keys refuse before follow-up or
+steering admission. Reuse a key only for the same request, retain its receipt,
+and inspect unknown effects instead of resubmitting them with a new key.
+
+These action-specific requirements are documented in the ordinary schema text,
+without adding provider-dependent conditional-schema keywords or relaxing runtime
+validation. `scripts/test-subagent-message-contract.cjs` checks source and embedded
+help/wire parity, missing-key refusal, key forwarding and durable steering deduplication.
+
 ### Bounded explicit inspection
 
 `subagent session` and the `session` tool default to the newest eight messages
