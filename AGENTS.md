@@ -1,11 +1,11 @@
 ## Operator-selected direct workflow (2026-10-05)
 
-Default off: implement, self-review, focused checks, merge through canonical main,
+Default off: implement, self-review, focused checks, integrate via canonical main,
 push/read back origin/main; leave both trees clean. Do not start
 subagents or external inference agents unless the operator explicitly enables
-`/orchestration`. On: native task owners implement/verify/merge via `integrate` and
-report; coordinator routes and stays free. No recursion or mid-task steering.
-Only the coordinator owns `/update`, UI publication and Sentinel, never children.
+`/orchestration`. On: coordinator reasons with context before native handoff;
+owners implement/verify/merge via `integrate` and report. No recursion or mid-task steering.
+Only the coordinator owns `/update`, UI publication and Sentinel.
 No watchers or gates; full release gates require a human request.
 
 The coordinator may review and merge its own changes; an independent reviewer is

@@ -2438,8 +2438,13 @@ document.addEventListener('chat-render-tick',event=>{
 // how a window ends up showing somebody else's thread, which is exactly what happened: the newest
 // session was another agent's, so the reader's own conversation looked like it had lost their input.
 async function learnSession() {
+  // Discovery begun by an older view/send must not select a different thread
+  // after the person navigates or starts a new intent. Known threads are sovereign.
+  if (chatSession) return chatSession;
+  const node = activeNode, account = session, epoch = conversationEpoch, submission = submissionEpoch;
   try {
     const payload = await (await apiFetch("sessions", { headers: apiHeaders() })).json();
+    if (chatSession || node !== activeNode || account !== session || epoch !== conversationEpoch || submission !== submissionEpoch) return;
     const mine = (payload.sessions || []).filter((s) => !me.user || !s.user_id || s.user_id === me.user.id);
     if (mine.length) rememberSession(mine[0].id);
   } catch (error) { /* unreachable: the next run tries again */ }
@@ -2800,10 +2805,9 @@ function composedBody(text, options = {}) {
   // thread the reader just left. Who may address a thread is decided once, by the node, which knows
   // the caller - and refuses a thread that is not theirs with `forbidden_thread`.
   const thread = options.session || chatSession;
-  if (images.length === 0 && !thread) {
-    return { contentType: "text/plain; charset=utf-8", body: composedText(text) };
-  }
-  const payload = { text: options.resumeSeq === undefined ? composedText(text) : text };
+  // UI sends are start-if-idle. The native admission lock closes the race with
+  // a child-completion/background turn starting after this page's last poll.
+  const payload = { text: options.resumeSeq === undefined ? composedText(text) : text, if_idle: true };
   if (images.length) payload.images = images.map((file) => ({ name: file.name, mime: file.mime, data: file.data }));
   if (thread) payload.thread = thread;
   if (options.resumeSeq !== undefined) payload.resume_seq = options.resumeSeq;
@@ -2935,18 +2939,21 @@ function threadOfRun(health, runId, session = chatSession) {
 }
 
 async function send(text, options = {}) {
-  const runThread = options.session || chatSession;
-  const runEpoch = conversationEpoch, runNode = activeNode;
+  let runThread = options.session || chatSession;
+  let runEpoch = conversationEpoch;
+  const runNode = activeNode, runAccount = session;
   const submission = ++submissionEpoch;
+  const submittedDraftGeneration = draftGeneration;
+  const submittedFiles = attachments.slice();
   const stillViewingRun = () => chatSession === runThread && conversationEpoch === runEpoch
-    && activeNode === runNode && submissionEpoch === submission;
+    && activeNode === runNode && session === runAccount && submissionEpoch === submission;
   // Seal previous view buffers before the new user boundary, never reuse its trace/text.
   markPendingTextIncomplete();markStreamedCommentaryIncomplete();flushDecision(true);clearStatus();
   activeRunId = null;
   submittedRunIds = null;
-  // The draft is going out, so what was stored is stale: a respawn must not put the sent prompt
-  // back into the composer.
-  if (options.resumeSeq === undefined) clearDraft();
+  // Keep the draft until native admission is confirmed. A busy refusal or lost
+  // response must not erase the text/files the person is trying to deliver.
+  saveDraft();
   setBusy(true);
   // Sending is an explicit request to see the answer: follow again, even if the
   // reader had scrolled up to read something.
@@ -2964,24 +2971,56 @@ async function send(text, options = {}) {
   const userBody = add("user", text + (names ? `\n\nattached: ${names}` : ""));
   appendMessageImages(userBody, attachedImages);
   const outgoing = composedBody(text, options);
-  // Clear in place, like the submit handler does. Reassigning the binding here was
-  // enough to make a reader's captured reference stale - which is how a test can end
-  // up asserting against a dead array and passing.
-  // Cleanup belongs here, after the user bubble and request have captured the attachments.
-  // Clearing them in the form handler runs before send() starts, leaving nothing to display or send.
-  if (options.resumeSeq === undefined) {
-    chatShell.clearAttachments();
-    draftNow = snapshotDraft();
-  }
+  const clearSubmittedDraft = () => {
+    if (options.resumeSeq !== undefined || !stillViewingRun()) return;
+    const unchanged = draftGeneration === submittedDraftGeneration;
+    if (unchanged && input.value.trim() === text.trim()) {
+      input.value = ''; draftUndo = []; draftRedo = []; autosize();
+    }
+    for (let i = attachments.length - 1; i >= 0; i--) {
+      if (submittedFiles.includes(attachments[i])) attachments.splice(i, 1);
+    }
+    chatShell.renderAttachments(); draftGeneration++;
+    draftNow = snapshotDraft(); saveDraft();
+  };
+  let watchdog = null;
+  const userMessage = userBody.closest('wa-message');
+  const handoffUnadmitted = async (health) => {
+    if (!stillViewingRun()) return;
+    // These are optimistic DOM nodes only: no native request was admitted.
+    userMessage?.remove();
+    if (runBubble) runBubble.remove();
+    runBubble = null; runStepState = null; runCounts = null; streamBody = null; streamText = '';
+    clearInterval(watchdog);
+    if (controller === runController) { controller = null; checkWatchedRun = null; }
+    activeRunId = null; submittedRunIds = null;
+    observedRun = activeRun(health, runThread);
+    setBusy(false);
+    if (!observedRun) {
+      chatShell.warning.setNotice('submission', 'The conversation was busy, but its current turn is not confirmed. Draft kept; no message was queued.');
+      void watchTurn(); return;
+    }
+    runStartedAt = 0; sawTurnInFlight = true; currentBubble();
+    ensureObservedRunStep({...observedRun, ms: observedRun.busy_ms ?? observedRun.ms}); applyRunControls();
+    if (options.resumeSeq !== undefined) {
+      chatShell.warning.setNotice('submission', 'This conversation is already running. Follow its active turn before continuing an interrupted request.');
+    } else {
+      await steerActiveRun(text, {files: submittedFiles, draftGeneration: submittedDraftGeneration});
+    }
+    void watchTurn();
+  };
   showRunStep("submitting", "Sending message");
   setStatus("Sending message…");
   // /health is answered without waiting for a node-thread. Take the baseline before admitting this run
   // so later polls can tell its queued id from an older run in the same conversation.
   try {
     const before = await nodeHealth();
-    if (stillViewingRun()) submittedRunIds = new Set((before.run_ids || [])
-      .filter((run) => run.conversation === runThread)
-      .map(runKey).filter(key=>key!==null));
+    if (stillViewingRun()) {
+      submittedRunIds = new Set((before.run_ids || [])
+        .filter((run) => run.conversation === runThread)
+        .map(runKey).filter(key=>key!==null));
+      if (activeRun(before, runThread)) { await handoffUnadmitted(before); return; }
+    }
   } catch (error) {
     if (stillViewingRun()) submittedRunIds = new Set();
   }
@@ -2990,8 +3029,16 @@ async function send(text, options = {}) {
   // the first line of the `finally` - which meant `clearInterval`, `setBusy(false)`, `controller = null`
   // and the meta refresh never ran, and the window sat there looking like it was still working on a run
   // that had finished. The gate's bug hunt found it; the product would only have shown it as "stuck".
-  let watchdog = null;
+  // A scoped preflight may have outlived navigation. The original unsent draft
+  // remains saved; do not steer or submit into the reader's newly selected view.
+  if (!stillViewingRun()) {
+    // A scope can change through metadata learning as well as explicit navigation.
+    // Release only this unadmitted intent, never a newer stream's controller.
+    if (controller === runController) { controller = null; checkWatchedRun = null; setBusy(false); }
+    return;
+  }
   let sawDone = false;
+  let unadmittedHandoff = false;
   let lostRun = false;  try {
     const headers = { "Content-Type": outgoing.contentType, "Accept": "text/event-stream" };
     // Which thread this run belongs to travels in the body (`composedBody`), not here: the header
@@ -3083,11 +3130,36 @@ async function send(text, options = {}) {
       body: outgoing.body,
       signal: runController.signal,
     });
-    if (!response.body) {
+    if (response.ok === false) {
+      const payload = await response.json().catch(() => ({}));
+      if (response.status === 409 && payload.error === 'session_busy'
+          && payload.not_started === true && payload.effect === 'none'
+          && (!runThread || payload.thread === runThread)) {
+        turnFinished = true;
+        unadmittedHandoff = true;
+        // A first request may not yet know its owned server-default thread. Adopt
+        // only this authenticated no-effect reply, and rebase the same intent's
+        // view fence before following it. Never adopt after navigation/account scope changes.
+        if (!runThread && payload.thread && stillViewingRun()) {
+          rememberSession(payload.thread); runThread = chatSession; runEpoch = conversationEpoch;
+        }
+        if (stillViewingRun()) await handoffUnadmitted(await nodeHealth());
+      } else if (stillViewingRun()) {
+        chatShell.warning.setNotice('submission', 'Message delivery not confirmed: ' + String(payload.error || ('HTTP ' + response.status)) + '. Draft kept; inspect the active turn before resending.');
+        showRunStep('error', 'Message not confirmed');
+      }
+      return;
+    }
+    const responseType = response.headers?.get?.('content-type') || '';
+    if (!response.body || (responseType && !responseType.includes('text/event-stream'))) {
       const payload = await response.json();
-      clearStatus();
-      add("assistant", payload.reply || payload.error || "(no reply)");
+      if (payload.error) {
+        chatShell.warning.setNotice('submission', 'Message delivery not confirmed: ' + String(payload.error) + '. Draft kept; inspect before resending.');
+      } else {
+        clearSubmittedDraft(); clearStatus(); add("assistant", payload.reply || "(no reply)");
+      }
     } else {
+      clearSubmittedDraft();
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
       let buffer = "";
@@ -3143,7 +3215,7 @@ async function send(text, options = {}) {
       // A dead stream can finish after the ledger follower already read its tail
       // while this page was busy. Re-read once after releasing the stream so the
       // recorded tool result can trigger recovery without a page reload.
-      if (!sawDone && (!runController.signal.aborted || lostRun)) void restoreSession(runThread);
+      if (!unadmittedHandoff && !sawDone && (!runController.signal.aborted || lostRun)) void restoreSession(runThread);
     }
     if (controller === runController) controller = null;
     // Learn which thread this run went into, but only until we know one: after that the window
@@ -3649,6 +3721,10 @@ function syncUndoButtons() {}
 function cancelActiveRun() {
   const thread = chatSession;
   if (!busy && observedRun?.session === thread) { cancelRun(runKey(observedRun)); return; }
+  if (busy && activeRunId === null && !submittedRunIds) {
+    setStatus('Message admission is not identified yet; no older turn was cancelled. Draft kept.');
+    return;
+  }
   if (thread && activeRunId === null && submittedRunIds) {
     // Admission and the next health poll can cross. Resolve the new id once more instead of
     // falling back to the route's default, which would cancel the older running turn.
@@ -3665,7 +3741,8 @@ function cancelActiveRun() {
 }
 
 async function cancelRun(runId) {
-  const thread = chatSession;
+  const thread = chatSession, node = activeNode, epoch = conversationEpoch, account = session;
+  const viewing = () => thread === chatSession && node === activeNode && epoch === conversationEpoch && session === account;
   if (!thread) { setStatus("there is no active conversation to stop"); return; }
   try {
     const response = await apiFetch("runs", {
@@ -3674,23 +3751,45 @@ async function cancelRun(runId) {
       body: JSON.stringify({ action: "cancel", thread, ...(runId === null ? {} : { run_id: runId }) }),
     });
     const payload = await response.json().catch(() => ({}));
+    if (!viewing()) return;
     if (!response.ok || payload.ok !== true || payload.cancel_requested !== true) {
       setStatus("could not stop this run: " + String(payload.error || ("HTTP " + response.status)));
       return;
     }
+    if (busy && payload.state === 'queued' && runKey(runId) === runKey(activeRunId)) {
+      // The node acknowledged cancellation of this not-yet-executing request.
+      // Detach its waiting socket, not the background writer; settlement remains
+      // the node's responsibility and the original request stays in its journal.
+      const pendingController = controller;
+      submissionEpoch++; controller = null; checkWatchedRun = null;
+      activeRunId = null; submittedRunIds = null;
+      runBubble = null; runStepState = null; runCounts = null; streamBody = null; streamText = '';
+      setBusy(false); pendingController?.abort();
+      const health = await nodeHealth();
+      if (!viewing()) return;
+      observedRun = activeRun(health, thread); applyRunControls();
+      if (observedRun) {
+        runStartedAt = 0; sawTurnInFlight = true; currentBubble();
+        ensureObservedRunStep({...observedRun, ms: observedRun.busy_ms ?? observedRun.ms});
+      }
+      setStatus('Queued message cancellation requested; following the active turn.');
+      void watchTurn();
+      return;
+    }
     setStatus("stop requested — waiting for the node to finish cancelling");
   } catch (error) {
-    setStatus("could not stop this run: " + String(error));
+    if (viewing()) setStatus("could not stop this run: " + String(error));
   }
 }
 
 let steeringSubmission=null;
 let steeringPending=false;
-async function steerActiveRun() {
-  const text=input.value.trim(), thread=chatSession, node=activeNode, epoch=conversationEpoch;
-  const viewing=()=>chatSession===thread && activeNode===node && conversationEpoch===epoch;
+async function steerActiveRun(textOverride, options = {}) {
+  const text=typeof textOverride==='string'?textOverride.trim():input.value.trim(), thread=chatSession, node=activeNode, epoch=conversationEpoch, account=session;
+  const generation=options.draftGeneration ?? draftGeneration;
+  const viewing=()=>chatSession===thread && activeNode===node && conversationEpoch===epoch && session===account;
   if(!composerBusy() || !thread || !text || steeringPending)return;
-  if(attachments.length) {setStatus('Steering accepts text only; attachments and draft kept.');return;}
+  if((options.files ?? attachments).length) {setStatus('Steering accepts text only; attachments and draft kept.');return;}
   if(!steeringSubmission || steeringSubmission.text!==text || steeringSubmission.thread!==thread
     || steeringSubmission.node!==node || steeringSubmission.epoch!==epoch)
     steeringSubmission={text,thread,node,epoch,key:crypto.randomUUID()};
@@ -3717,7 +3816,7 @@ async function steerActiveRun() {
       if(!response.ok || receipt.error || !receipt.id)throw new Error(receipt.error || 'missing steering receipt');
       break;
     }
-    if(viewing() && input.value.trim()===text) {
+    if(viewing() && draftGeneration===generation && input.value.trim()===text) {
       input.value='';draftGeneration++;draftUndo=[];draftRedo=[];autosize();saveDraft();
     }
     steeringSubmission=null;
@@ -3736,15 +3835,8 @@ chatShell.addEventListener("chat-send", (event) => {
   }
   if (!text && attachments.length === 0) return;
   commandMenu.close();
-  input.value = "";
-  draftGeneration += 1;
-  // The draft has been sent, so there is nothing to undo *to*: keeping the
-  // stack would let Ctrl+Z resurrect a draft that is already in the transcript,
-  // and pressing Enter again would send it twice.
-  draftUndo = [];
-  draftRedo = [];
-  syncUndoButtons();
-  autosize();
+  // send() retains the draft through preflight and clears only the confirmed
+  // submission, never newer typing/files or a request refused behind a background turn.
   send(text);
 });
 
@@ -3760,7 +3852,12 @@ input.addEventListener("keydown", (event) => {
       if (commandMenu.activate()) { event.preventDefault(); return; }
     }
   }
-  if(accel && event.key==='Enter' && composerBusy()) {event.preventDefault();steerActiveRun();return;}
+  if(accel && event.key==='Enter') {
+    event.preventDefault();
+    if (composerBusy()) steerActiveRun();
+    else if (input.value.trim() || attachments.length) send(input.value.trim());
+    return;
+  }
   // Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y, the three spellings people actually use.
   // Only while the composer has focus, so we never shadow an undo a browser
   // context (a dialog, a native field) is entitled to handle itself.
@@ -3869,7 +3966,7 @@ async function toggleOrchestration() {
   if(thread!==chatSession||node!==activeNode||epoch!==conversationEpoch)return;
   if(!r.ok||r.orchestration?.thread!==thread||typeof r.orchestration?.enabled!=='boolean'){add('assistant','Orchestration change refused: '+(r.error||'unconfirmed'));await readOrchestrationMode();return;}
   orchestrationMode=r.orchestration;
-  add('assistant','Orchestration '+(orchestrationMode.enabled?'on — tasks route to native workers; I remain available.':'off — I handle new tasks directly. Existing workers keep running.'));
+  add('assistant','Orchestration '+(orchestrationMode.enabled?'on — I reason with this conversation, then delegate concrete work to native owners. Questions stay here.':'off — I handle new tasks directly. Existing workers keep running.'));
 }
 const COMMANDS = [
   {

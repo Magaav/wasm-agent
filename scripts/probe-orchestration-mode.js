@@ -13,7 +13,7 @@
    check(commandMenu.textContent.includes('OFF'),'command balloon shows off');
    check(commandMatches('/ochestration')[0].name==='/orchestration','misspelled alias works');
    await toggleOrchestration();input.value='/orchestration';syncCommands();
-   check(commandMenu.textContent.includes('ON')&&messages.textContent.includes('I remain available'),'on displayed only after acknowledged state');
+   check(commandMenu.textContent.includes('ON')&&messages.textContent.includes('I reason with this conversation')&&messages.textContent.includes('Questions stay here'),'on and contextual coordinator policy displayed only after acknowledged state');
    await toggleOrchestration();check(!orchestrationMode.enabled,'second toggle turns off without cancelling workers');
    const oldThread=chatSession;rememberSession('another-mode-thread');check(orchestrationMode===null,'mode not borrowed across conversations');rememberSession(oldThread);
    orchestratorRequest=async()=>{throw Error('offline');};await readOrchestrationMode();input.value='/orchestration';syncCommands();check(commandMenu.textContent.includes('unknown'),'unavailable mode not guessed off');

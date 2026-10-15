@@ -11,7 +11,8 @@ param(
   [int]$Port = 8899,
   [int]$ClientPort = 8801,
   [string]$WaExe = "",
-  [string]$UiDirectory = ""
+  [string]$UiDirectory = "",
+  [switch]$KeepEvidence
 )
 $ErrorActionPreference = "Stop"
 $root = Split-Path $PSScriptRoot -Parent
@@ -1951,6 +1952,8 @@ $harness = @'
 
   // Stop must tell the node, not only stop reading the stream: a client-side abort leaves the model
   // call running. It must wait for the node's acknowledgment and surface a refusal.
+  // This case is an admitted run, not the new pre-admission/unknown identity guard.
+  window.__setAcceptedRunForTest(3);
   document.getElementById("send").click();
   for (var cancelTick = 0; cancelTick < 10; cancelTick++) await tick();
   var runCalls = window.__calls.filter(function (call) { return call.url === "runs" && call.method === "POST"; });
@@ -3048,12 +3051,15 @@ $harness = @'
   // transcript is state the other checks would read.
   await (async function () {
     var mergeInput = window.__commandInput();
+    var mergeHealth = window.__fixtures.health;
+    window.__fixtures.health = {ok:true,current:null,node_threads:[],runs:[],run_ids:[],worker:'alive',queue:0};
+    window.__idleRunForTest();
     window.__typeCommand("/merge");
     mergeInput.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
     // `send()` awaits /health before it posts, so the request is not in __calls yet: the turn has
     // to be drained before it is read. Reading it synchronously is how this check came to fail
     // against a command that was working - the POST simply had not happened yet.
-    for (var mergeDrain = 0; mergeDrain < 20; mergeDrain += 1) await tick();
+    for (var mergeDrain = 0; mergeDrain < 80; mergeDrain += 1) await tick();
     var merged = (window.__calls || []).filter(function (call) {
       return String(call.url).indexOf("chat") >= 0 && call.method === "POST";
     }).pop();
@@ -3071,6 +3077,7 @@ $harness = @'
       'commands: explicit merge all sends the PR-inclusive scope');
     check(!!allMerged && String(allMerged.body).includes('honor required checks and approvals'),
       'commands: merge all retains required PR review');
+    window.__fixtures.health = mergeHealth;
   })();
 
   // ---- choosing and creating sessions in the engine ------------------------------------------
@@ -3388,12 +3395,13 @@ $harness = @'
   check(diagnostic.length === 1, "the menu's test control must ask the shell for one notification, saw " + diagnostic.length);
   window.__setShell(null);
   // The bell stays ON into the reload below, which is where its persistence is asserted.
-  window.__setBusy(false);
+  window.__idleRunForTest();
+  window.__fixtures.health = {ok:true,current:null,node_threads:[],runs:[],run_ids:[],worker:'alive',queue:0};
   var mainBox=document.getElementById('input');
   var userTurnsBefore=document.querySelectorAll('wa-message.user').length;
   mainBox.value='VERB-FROM-THE-SHARED-SHELL';
   mainBox.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true,cancelable:true}));
-  for (var sendTick=0; sendTick<40 && document.getElementById('messages').textContent.indexOf('VERB-FROM-THE-SHARED-SHELL')<0; sendTick++) await tick();
+  for (var sendTick=0; sendTick<80 && (mainBox.value!=='' || document.getElementById('messages').textContent.indexOf('VERB-FROM-THE-SHARED-SHELL')<0); sendTick++) await tick();
   check(mainBox.value==='' && document.getElementById('messages').textContent.indexOf('VERB-FROM-THE-SHARED-SHELL')>=0 &&
     document.querySelectorAll('wa-message.user').length===userTurnsBefore+1,
     'Enter in the main composer must still send through the shared shell, saw value: ' + mainBox.value);
@@ -3631,7 +3639,7 @@ Set-Content -Path $index -Value ((Get-Content -Raw $index).Replace("</body>", $h
 $app = Join-Path $tmp "app.js"
 Add-Content -Path $app -Value "`nwindow.__safeLinks=safeLinks; window.__refreshTasks=refreshTasks; window.__openSessionById=openSessionById;"
 Add-Content -Path $app -Value "`nwindow.__refreshSessionsForRelease=refreshSessions;"
-Add-Content -Path $app -Value "`nwindow.handleEvent = handleEvent; window.isConnectionLoss = isConnectionLoss; window.connectionMessage = connectionMessage; window.rendererReady = () => !!renderer; window.renderContext = renderContext; window.__applyUiVersion = applyUiVersion; window.__native = native; window.__openControl = openControl; window.__renameNode = saveNodeName; window.__setReload = (fn) => { reload = fn; }; window.__uiVersion = () => version; window.__setBusy = setBusy; window.__setLiveness = setLiveness; window.__stopLiveness = stopLiveness; window.__setShell = (shell) => { native = shell; }; window.__rememberPlace = rememberPlace; window.__restorePlace = restorePlace; window.__restoreSession = restoreSession; window.__watchTurn = watchTurn; window.__loadTopic = loadTopic; window.__reloadTopics = reloadTopics; window.__reconcile = reconcile; window.__clearStreamNotice = clearStreamNotice; window.__attachMany = (n) => { attachments.length = 0; for (let i = 0; i < n; i += 1) attachments.push({ kind: 'image', name: 'shot-' + i + '.png', mime: 'image/png', data: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==' }); renderAttachments(); }; window.__commandInput = () => input; window.__commandMenu = () => commandMenu; window.__typeCommand = (value) => { input.value = value; input.dispatchEvent(new Event('input')); }; window.__chatThread = () => chatSession; window.__composed = (text) => composedBody(text); window.__cancelActiveRun = cancelActiveRun; window.__setToolAge = (s, b) => { if (trace) trace.setAge(s, b); }; window.__toolTickerActive = () => !!toolTicker; window.__updateNotice = updateNotice; window.__refreshOperationProgress = refreshOperationProgress; window.__watch = watch;"
+Add-Content -Path $app -Value "`nwindow.handleEvent = handleEvent; window.isConnectionLoss = isConnectionLoss; window.connectionMessage = connectionMessage; window.rendererReady = () => !!renderer; window.renderContext = renderContext; window.__applyUiVersion = applyUiVersion; window.__native = native; window.__openControl = openControl; window.__renameNode = saveNodeName; window.__setReload = (fn) => { reload = fn; }; window.__uiVersion = () => version; window.__setBusy = setBusy; window.__setAcceptedRunForTest = (id) => { activeRunId = String(id); submittedRunIds = new Set(); }; window.__idleRunForTest = () => { observedRun = null; controller = null; activeRunId = null; submittedRunIds = null; healthFlight = null; healthSample = null; setBusy(false); }; window.__setLiveness = setLiveness; window.__stopLiveness = stopLiveness; window.__setShell = (shell) => { native = shell; }; window.__rememberPlace = rememberPlace; window.__restorePlace = restorePlace; window.__restoreSession = restoreSession; window.__watchTurn = watchTurn; window.__loadTopic = loadTopic; window.__reloadTopics = reloadTopics; window.__reconcile = reconcile; window.__clearStreamNotice = clearStreamNotice; window.__attachMany = (n) => { attachments.length = 0; for (let i = 0; i < n; i += 1) attachments.push({ kind: 'image', name: 'shot-' + i + '.png', mime: 'image/png', data: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==' }); renderAttachments(); }; window.__commandInput = () => input; window.__commandMenu = () => commandMenu; window.__typeCommand = (value) => { input.value = value; input.dispatchEvent(new Event('input')); }; window.__chatThread = () => chatSession; window.__composed = (text) => composedBody(text); window.__cancelActiveRun = cancelActiveRun; window.__setToolAge = (s, b) => { if (trace) trace.setAge(s, b); }; window.__toolTickerActive = () => !!toolTicker; window.__updateNotice = updateNotice; window.__refreshOperationProgress = refreshOperationProgress; window.__watch = watch;"
 Add-Content -Path $app -Value "`nwindow.__cancelRunForTest = cancelRun;"
 Add-Content -Path $app -Value "`nwindow.__activeRunForTest = activeRun; window.__runningSessionsForTest = runningSessions; window.__steerForTest = steerActiveRun;"
 Add-Content -Path $app -Value "`nwindow.__rememberNodeForTest = rememberNode; window.__controlIdentityForTest = () => ({node:activeNode,thread:chatSession,epoch:conversationEpoch});"
@@ -3792,6 +3800,10 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'turn ownership browser suite failed' }
     & node scripts/test-turn-ownership.cjs (Join-Path $tmp 'turn-ownership') --post
     if ($LASTEXITCODE -ne 0) { throw 'turn ownership evidence postcheck failed' }
+    & node scripts/test-background-handoff.cjs (Join-Path $tmp 'background-handoff')
+    if ($LASTEXITCODE -ne 0) { throw 'background coordinator handoff browser suite failed' }
+    & node scripts/test-background-handoff.cjs (Join-Path $tmp 'background-handoff') --post
+    if ($LASTEXITCODE -ne 0) { throw 'background coordinator handoff evidence postcheck failed' }
     & node scripts/test-failure-notice.cjs (Join-Path $tmp 'failure-notice')
     if ($LASTEXITCODE -ne 0) { throw 'failure notice browser suite failed' }
     & node scripts/test-failure-notice.cjs (Join-Path $tmp 'failure-notice') --post
@@ -3817,8 +3829,10 @@ try {
   foreach ($key in $runtimeEnvironment.Keys) { [Environment]::SetEnvironmentVariable($key, $runtimeEnvironment[$key], 'Process') }
   $resolvedTmp = [IO.Path]::GetFullPath($tmp)
   $resolvedTemp = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
-  if ($resolvedTmp.StartsWith($resolvedTemp, [StringComparison]::OrdinalIgnoreCase) -and
+  if (-not $KeepEvidence -and $resolvedTmp.StartsWith($resolvedTemp, [StringComparison]::OrdinalIgnoreCase) -and
       [IO.Path]::GetFileName($resolvedTmp) -match '^wa-ui-test-[0-9a-f]{8}$') {
     Remove-Item -LiteralPath $resolvedTmp -Recurse -Force -ErrorAction SilentlyContinue
+  } elseif ($KeepEvidence) {
+    Write-Host "  evidence retained: $resolvedTmp"
   }
 }

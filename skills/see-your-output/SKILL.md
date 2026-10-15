@@ -284,6 +284,19 @@ settlement, health-confirmed recordless children and preserved open/saved drafts
 for required worktrees. The private all-history mutation must fail. Also run
 `scripts/test-ui.ps1` and inspect the screenshot; filtering is not task settlement.
 
+## Background/coordinator handoff proof
+
+`background-handoff-proof` records `node <repo>/scripts/test-background-handoff.cjs
+<fresh-evidence>` and its retained `--post` check. Required worktrees use this
+verified direct CLI, not unsupported spell replay. It checks active-owner discovery,
+atomic-refusal handoff, Ctrl+Enter, live follower progress, queued-cancel view recovery,
+newer drafts/files and scope/error safety. Run real private HTTP
+`test-chat-handoff.cjs <built-wa> <fresh-evidence> [--embedded]`, and the contextual
+`test-orchestration-routing.cjs`, source and embedded. Both use deterministic fake
+providers, not paid workers or a benchmark result. Prove the old UI/router fails;
+then run `scripts/test-ui.ps1 -KeepEvidence` once after focused checks pass and
+inspect its retained screenshot. Never Send/Stop/reload the operator's page as a test.
+
 ## Turn ownership proof
 
 Run `node <repo>/scripts/test-turn-ownership.cjs <fresh-evidence>`, then the same

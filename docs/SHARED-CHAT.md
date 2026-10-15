@@ -36,6 +36,20 @@ picture part and visibly refuses pictures rather than dropping them. UI parity d
 not invent backend sending authority. Main-only menus/model selection remain only
 where their host owns them; child context/model balloon is read-only.
 
+## Main/background submission handoff
+
+A stale local idle view is not permission to enqueue behind a coordinator already
+handling a child return. Main sends require atomic native start-if-idle admission;
+known owners and typed no-effect busy refusals switch to visible follower/steering
+instead of another chat stream. Drafts/files remain until confirmation and newer
+edits survive acknowledgements. The text-only steering refusal preserves pictures
+and files; it never silently omits them. Unknown delivery is not retried.
+Ctrl+Enter can discover an unseen owner. A queued-cancel acknowledgement releases
+only that browser's waiting socket, while native cancellation remains pending.
+The existing polling/journal renderer supplies progress; no new recurring poll,
+model classifier, extra writer or capacity increase. See CONCURRENCY.md and the
+source/embedded HTTP plus disposable-browser handoff fixtures.
+
 Verification: `test-shared-chat.cjs <fresh-evidence>` then `--post`, same-panel
 main/child computed style/state/clock/topic/draft/Stop isolation, existing recovery,
 reading, high-ID native event identity and UI suites. Live observation uses a

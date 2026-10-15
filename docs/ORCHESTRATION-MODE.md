@@ -11,15 +11,23 @@ not the disabled historical wave factory; workspace binding/dirty-source/owner c
 remain. There is no new cumulative task-time/token cap; provider/operation safety
 bounds and the existing native concurrency/queue ceiling remain.
 
-On: each ordinary operator task is delegated through the native subagent facade
-under the reserved task-owning `orchestration-worker` profile; it cannot be overridden
-or used from a mode-off/foreign/guest/remote context. The parent records the exact
-request and receipt, returns without waiting for worker inference, and remains
-available. Off: the existing direct loop runs. Turning off does not cancel tasks.
-Child/completion/Sentinel notifications never recursively delegate. Children have
-no subagent tool. Ambiguous admission is retained, never automatically retried or
-silently replaced by direct execution. Attachments travel as retained image refs
-for the worker to inspect; no parent transcript or memory is automatically copied.
+On: the coordinator first assesses the request with its ordinary conversation
+context. Questions and status checks stay here; a short continuation such as
+“go” is resolved against the pending task, or clarified if genuinely ambiguous.
+Concrete implementation is then delegated explicitly through the native subagent
+facade with its resolved goal, relevant context, acceptance criteria and requested
+model/reasoning. No pre-inference router may turn the raw continuation into a fresh
+child task. The exact original user row and the coordinator's tool/receipt remain
+in the parent ledger; the child receives only the authored bounded handoff, not
+automatic parent-history or memory injection.
+
+The reserved `orchestration-worker` profile cannot be overridden or used from a
+mode-off/foreign/guest/remote context. After admission the parent returns without
+waiting for worker inference and remains available. Off: the direct loop runs.
+Turning off does not cancel admitted tasks. Child/completion/Sentinel notices grant
+no new work authority. Children have no subagent tool. Ambiguous admission is
+retained, never automatically retried or silently replaced by direct execution.
+Attachments travel as retained image refs in the explicit handoff.
 
 Workers implement the assigned scope, self-review honestly, run focused checks,
 commit with provenance, sync/refactor conflicts in their own tree, and land through
@@ -50,8 +58,9 @@ and [SENTINEL.md](SENTINEL.md) for the existing ownership and effect boundaries.
 Focused proof: `test-orchestration-mode.lua` tests defaults, owner/guest/child/CAS
 and corrupt-state refusal; `test-orchestration-routing.cjs <built-wa> <evidence>`
 uses actual native worker execution, a local mock provider and private linked Git/
-bare remote to implement/commit/integrate/report with zero parent inference while
-held child work stays independent. `test-worker-integrate.cjs` checks real remote
+bare remote to prove contextual coordinator inference precedes native child
+admission, a raw “go” stays in the original ledger, and the child receives a resolved
+task. The coordinator returns while held child work continues independently. `test-worker-integrate.cjs` checks real remote
 readback/clean trees; `test-worker-integrate-refusals.lua` proves no-effect dirty/
 conflict refusal and held unknown post-merge push, without replay. Native shell
 marker and `test-child-supervisor.cjs` exercise child supervisor denial before

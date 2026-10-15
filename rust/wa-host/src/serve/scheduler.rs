@@ -96,6 +96,8 @@ impl RunState {
 /// left holding a socket.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Refusal {
+    /// The caller explicitly forbids queueing behind an existing conversation writer.
+    SessionBusy,
     /// This conversation already has its bounded backlog full. Retry when it drains.
     SessionQueueFull,
     JournalUnavailable,
@@ -107,6 +109,7 @@ impl Refusal {
     /// `(error code, hint)` for the 503 body.
     pub fn as_error(self) -> (&'static str, &'static str) {
         match self {
+            Refusal::SessionBusy => ("session_busy", "this conversation has an active run; this request was not queued; follow and steer that run"),
             Refusal::JournalUnavailable => ("run_journal_unavailable", "durable admission failed; inspect node diagnostics before retry"),
             Refusal::SessionQueueFull => (
                 "session_queue_full",
@@ -215,6 +218,22 @@ impl Scheduler {
     where
         F: FnOnce(RunClass, &HashSet<usize>) -> Option<usize>,
     {
+        self.admit_with_policy(conversation, owner, class, false, pick)
+    }
+
+    /// Refuse UI submissions behind an existing writer, under the admission lock.
+    /// No journal admission or queued request exists on this refusal.
+    pub fn admit_if_idle<F>(&self, conversation: &str, owner: &str, class: RunClass, pick: F) -> Decision
+    where
+        F: FnOnce(RunClass, &HashSet<usize>) -> Option<usize>,
+    {
+        self.admit_with_policy(conversation, owner, class, true, pick)
+    }
+
+    fn admit_with_policy<F>(&self, conversation: &str, owner: &str, class: RunClass, reject_busy: bool, pick: F) -> Decision
+    where
+        F: FnOnce(RunClass, &HashSet<usize>) -> Option<usize>,
+    {
         let mut inner = self.inner.lock().unwrap_or_else(|poison| poison.into_inner());
         inner.next_run_id = inner.next_run_id.wrapping_add(1);
         let fallback_id = inner.next_run_id;
@@ -250,6 +269,9 @@ impl Scheduler {
         // 1. Same conversation: queue behind its owner. This is the whole of same-session ordering.
         if !conversation.is_empty() {
             if let Some(owner_record) = inner.owners.get_mut(conversation) {
+                if reject_busy {
+                    return Decision::Refused(Refusal::SessionBusy);
+                }
                 if owner_record.pending >= self.config.session_queue_depth {
                     return Decision::Refused(Refusal::SessionQueueFull);
                 }
@@ -516,6 +538,22 @@ pub fn admit(
     }
 }
 
+pub fn admit_if_idle(
+    conversation: &str,
+    owner: &str,
+    class: RunClass,
+    pick: impl FnOnce(RunClass, &HashSet<usize>) -> Option<usize>,
+) -> Decision {
+    match global() {
+        Some(scheduler) => scheduler.admit_if_idle(conversation, owner, class, pick),
+        None => Decision::Run {
+            run_id: 0, node_thread: 0,
+            cancel: Arc::new(AtomicBool::new(false)),
+            sockets: Arc::new(Mutex::new(Vec::new())),
+        },
+    }
+}
+
 pub fn mark_running(run_id: u64) {
     if let Some(scheduler) = global() {
         scheduler.mark_running(run_id);
@@ -613,6 +651,46 @@ mod tests {
         assert!(matches!(scheduler.admit("", "master", RunClass::Interactive, |_, _| Some(0)), Decision::Run { .. }));
         assert!(matches!(scheduler.admit("", "master", RunClass::Interactive, |_, _| Some(1)), Decision::Run { .. }));
         assert!(scheduler.snapshot().is_empty());
+    }
+
+    #[test]
+    fn start_if_idle_refuses_background_owner_without_queue_or_cancellation() {
+        let scheduler = scheduler();
+        let (id, flag) = match scheduler.admit("c", "master", RunClass::Background, |_, _| Some(2)) {
+            Decision::Run { run_id, cancel, .. } => (run_id, cancel), _ => unreachable!(),
+        };
+        scheduler.mark_running(id);
+        assert!(matches!(scheduler.admit_if_idle("c", "master", RunClass::Interactive, |_, _| panic!("must not pick another writer")), Decision::Refused(Refusal::SessionBusy)));
+        assert_eq!(scheduler.runs_for("master", "c").len(), 1);
+        assert_eq!(scheduler.snapshot()[0].3, 1);
+        assert!(!flag.load(Ordering::SeqCst));
+        assert_eq!(scheduler.runs_for("master", "c")[0].state, RunState::Running);
+        scheduler.complete_run(id);
+        assert!(matches!(scheduler.admit_if_idle("c", "master", RunClass::Interactive, |_, _| Some(0)), Decision::Run { .. }));
+    }
+
+    #[test]
+    fn start_if_idle_reserves_even_before_execution_and_keeps_legacy_queue_policy() {
+        let scheduler = scheduler();
+        assert!(matches!(scheduler.admit_if_idle("c", "master", RunClass::Interactive, |_, _| Some(0)), Decision::Run { .. }));
+        assert!(matches!(scheduler.admit_if_idle("c", "master", RunClass::Interactive, |_, _| None), Decision::Refused(Refusal::SessionBusy)));
+        assert_eq!(scheduler.runs_for("master", "c").len(), 1);
+        assert!(matches!(scheduler.admit("c", "master", RunClass::Background, |_, _| None), Decision::Behind { .. }));
+        assert_eq!(scheduler.runs_for("master", "c").len(), 2);
+    }
+
+    #[test]
+    fn simultaneous_start_if_idle_has_one_writer_and_one_explicit_refusal() {
+        let scheduler = Arc::new(scheduler());
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let racers: Vec<_> = (0..2).map(|_| {
+            let scheduler = scheduler.clone(); let barrier = barrier.clone();
+            std::thread::spawn(move || { barrier.wait(); scheduler.admit_if_idle("c", "master", RunClass::Interactive, |_, _| Some(0)) })
+        }).collect();
+        let results: Vec<_> = racers.into_iter().map(|r| r.join().unwrap()).collect();
+        assert_eq!(results.iter().filter(|r| matches!(r, Decision::Run { .. })).count(), 1);
+        assert_eq!(results.iter().filter(|r| matches!(r, Decision::Refused(Refusal::SessionBusy))).count(), 1);
+        assert_eq!(scheduler.runs_for("master", "c").len(), 1);
     }
 
     /// The marker is one-way: only `background` is honoured, and `interactive` cannot promote.
