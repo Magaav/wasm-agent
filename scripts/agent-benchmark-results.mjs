@@ -5,6 +5,7 @@ import crypto from 'node:crypto';
 import zlib from 'node:zlib';
 import {isolatedEnvironment} from './agent-benchmark-environment.mjs';
 import {spawn,spawnSync} from 'node:child_process';
+import {writeFramedBundle,readFramedBundle,fileDigest} from './agent-benchmark-bundle.mjs';
 const digest = b => crypto.createHash('sha256').update(b).digest('hex');
 const json = x => Buffer.from(JSON.stringify(x));
 export const requiredRecords = ['manifest','task','context','oracle','outputs','patches','traces','failed_attempts','receipts','accounting','cache','quality'];
@@ -120,36 +121,40 @@ export async function containedProcess(root,binary,exe,args,{cwd,timeout_seconds
   const a=load(root),p=a.processes.find(p=>p.id===result.id);p.process_tree='settled';p.settlement={path:path.relative(root,path.join(dir,'settlement.json')),sha256:digest(bytes),operation_id:receipt.operation_id,binary_sha256:digest(fs.readFileSync(binary))};save(a);
   return {id:result.id,...receipt};
 }
-export function seal(root) {
+function verifyWorkspaceVolumes(s){
+ const ids=new Set((s.docker_resources||[]).map(r=>r.workspace_volume).filter(Boolean));
+ for(const id of ids){if(!/^[a-zA-Z0-9_.-]+$/.test(id))fail('invalid workspace volume identity');const proofPath=path.join(s.root,'records','volume-'+id+'.snapshot.json');noLinks(proofPath);const p=JSON.parse(fs.readFileSync(proofPath));if(p.volume!==id||p.complete!==true||p.provisional!==false||typeof p.path!=='string'||!p.path.startsWith('volume-'+id+'-')||!p.path.endsWith('.tar')||!/^[a-zA-Z0-9_.-]+$/.test(p.path))fail('workspace volume capture incomplete');const file=path.join(s.root,'records',p.path);noLinks(file);const bytes=fs.readFileSync(file);if(bytes.length!==p.bytes||digest(bytes)!==p.sha256)fail('workspace volume snapshot drift');}
+}
+export function seal(root,{formatVersion}={}) {
   const s=load(root);if(s.phase!=='collecting') fail('generation already sealed or uncertain');
   if(s.processes.some(p=>p.state!=='closed'||p.process_tree!=='settled') || s.docker_creation && s.docker_creation!=='settled' || (s.docker_resources||[]).some(r=>r.effect_state && r.effect_state!=='settled'))fail('cannot seal live/uncertain effects as complete results');
+  verifyWorkspaceVolumes(s);
   const dir=path.join(root,'records');
   for(const r of s.resources) {
     if(r.kind==='snapshot-checkout'&&!same(snapshotGitProof(r.path),r.git_proof))fail('snapshot Git ownership drift');
     r.sealed_inventory=inventory(r.path,{allowSnapshotGit:r.kind==='snapshot-checkout'});
   }
-  writeNew(path.join(dir,'disposable-inventory.json'),json(s.resources.map(r=>({path:r.path,kind:r.kind||'directory',identity:r.identity,files:r.sealed_inventory,git_proof:r.git_proof??null}))));
+  const inventoryFile=path.join(dir,'disposable-inventory.json'),inventoryBytes=json(s.resources.map(r=>({path:r.path,kind:r.kind||'directory',identity:r.identity,files:r.sealed_inventory,git_proof:r.git_proof??null})));
+  if(fs.existsSync(inventoryFile)){if(!fs.readFileSync(inventoryFile).equals(inventoryBytes))fail('existing seal inventory changed; no overwrite');}else writeNew(inventoryFile,inventoryBytes);
   const entries=inventory(dir);
   for(const kind of requiredRecords) if(!entries.some(e=>e.path===kind+'.json')) fail('missing required record: '+kind);
-  const bundle={version:1,generation:s.generation,nonce:s.nonce,entries:entries.map(e=>({...e,base64:fs.readFileSync(path.join(dir,e.path)).toString('base64')}))};
-  const bytes=zlib.gzipSync(json(bundle),{level:9});writeNew(path.join(root,'results.json.gz'),bytes);
-  s.bundle_sha256=digest(bytes);s.records=entries;s.phase='sealed';save(s);
+  const framed=formatVersion===2||formatVersion===undefined&&entries.reduce((n,e)=>n+e.bytes,0)>32*1024*1024;
+  if(formatVersion!==undefined&&![1,2].includes(formatVersion))fail('unsupported archive format');
+  if(framed){writeFramedBundle(path.join(root,'results.json.gz'),{generation:s.generation,nonce:s.nonce,entries},dir);s.bundle_version=2;}
+  else{const bundle={version:1,generation:s.generation,nonce:s.nonce,entries:entries.map(e=>({...e,base64:fs.readFileSync(path.join(dir,e.path)).toString('base64')}))};writeNew(path.join(root,'results.json.gz'),zlib.gzipSync(json(bundle),{level:9}));s.bundle_version=1;}
+  s.bundle_sha256=fileDigest(path.join(root,'results.json.gz'));s.records=entries;s.phase='sealed';save(s);
   return verifyBundle(root);
 }
-export function verifyBundle(root) {
-  const s=load(root);if(!['sealed','cleaning','cleaned','uncertain'].includes(s.phase)) fail('no sealed bundle');
-  const bytes=fs.readFileSync(path.join(root,'results.json.gz'));if(digest(bytes)!==s.bundle_sha256) fail('archive corruption');
-  const b=JSON.parse(zlib.gunzipSync(bytes));if(b.generation!==s.generation || b.nonce!==s.nonce) fail('archive ownership');
-  const names=new Set();for(const e of b.entries) {
-    if(typeof e.path!=='string' || !inside(path.resolve(root,'records'),path.resolve(root,'records',e.path)) || names.has(e.path)) fail('archive escape/duplicate');names.add(e.path);
-    const raw=Buffer.from(e.base64,'base64');if(raw.length!==e.bytes || digest(raw)!==e.sha256) fail('archive entry corruption');
-  }
-  for(const kind of requiredRecords)if(!names.has(kind+'.json')) fail('missing archive record');
-  if(!same(b.entries.map(({base64,...e})=>e),s.records)) fail('manifest mismatch');
-  // Evidence copies are retained until cleanup; changed originals refuse deletion.
-  if(fs.existsSync(path.join(root,'records')) && !same(inventory(path.join(root,'records')),s.records)) fail('original evidence drift');
-  return {generation:s.generation,sha256:s.bundle_sha256,entries:b.entries.length,bytes:bytes.length,lossless:true};
+function verifiedRecord(root,selected=null) {
+  const s=load(root);if(!['sealed','cleaning','cleaned','uncertain'].includes(s.phase))fail('no sealed bundle');const file=path.join(root,'results.json.gz');if(fileDigest(file)!==s.bundle_sha256)fail('archive corruption');
+  const names=new Set();for(const e of s.records||[]){if(typeof e.path!=='string'||!inside(path.resolve(root,'records'),path.resolve(root,'records',e.path))||names.has(e.path)||!Number.isSafeInteger(e.bytes)||e.bytes<0||!/^[a-f0-9]{64}$/.test(e.sha256))fail('archive escape/duplicate/metadata');names.add(e.path);}for(const kind of requiredRecords)if(!names.has(kind+'.json'))fail('missing archive record');if(selected!==null&&!names.has(selected))fail('archive record absent');
+  let content;
+  if(s.bundle_version===2){const read=readFramedBundle(file,s,selected);if(selected!==null)content=read;}
+  else{if(s.bundle_version!==undefined&&s.bundle_version!==1)fail('unsupported archive version');const b=JSON.parse(zlib.gunzipSync(fs.readFileSync(file)));if(b.version!==1||b.generation!==s.generation||b.nonce!==s.nonce)fail('archive ownership/version');for(const e of b.entries){const raw=Buffer.from(e.base64,'base64');if(raw.length!==e.bytes||digest(raw)!==e.sha256)fail('archive entry corruption');if(e.path===selected)content=raw;}if(!same(b.entries.map(({base64,...e})=>e),s.records))fail('manifest mismatch');}
+  if(fs.existsSync(path.join(root,'records'))&&!same(inventory(path.join(root,'records')),s.records))fail('original evidence drift');return {verdict:{generation:s.generation,sha256:s.bundle_sha256,entries:s.records.length,bytes:fs.statSync(file).size,lossless:true},content};
 }
+export function verifyBundle(root){return verifiedRecord(root).verdict;}
+export function readSealedRecord(root,name){return verifiedRecord(root,name).content;}
 export function reconcileFilesystem(root) {
   const s=load(root);const archive=verifyBundle(root),resources=[];
   for(const r of s.resources) {
@@ -203,7 +208,7 @@ export function dockerResource(root,kind,adapter) {
   if(!created?.id)fail('Docker create outcome uncertain; preserve journal');
   const observed=adapter.inspect(created.id);
   if(observed.generation!==s.generation || observed.owner_nonce!==s.nonce || observed.kind!==kind)fail('Docker creation ownership unproven');
-  (s.docker_resources??=[]).push({id:created.id,kind,state:'owned'});s.docker_creation='settled';save(s);
+  (s.docker_resources??=[]).push({id:created.id,kind,state:'owned',...(created.workspace_volume?{workspace_volume:created.workspace_volume}:{})});s.docker_creation='settled';save(s);
   writeNew(path.join(root,'records','docker-'+safeName(created.id)+'.json'),json({created,observed}));return created.id;
 }
 export function reconcileDocker(root,adapter) {
@@ -224,6 +229,7 @@ export function cleanupDocker(root,adapter) {
   const resources=s.docker_resources||[],observations=resources.filter(r=>r.state!=='removed').map(r=>adapter.inspect(r.id));
   for(const x of observations)if(x.generation!==s.generation || x.owner_nonce!==s.nonce || x.shared!==false || x.running!==false || x.effects!=='settled' || !['container','network','volume'].includes(x.kind))fail('Docker ownership/drain refusal');
   const receipts=[];
+  observations.sort((a,b)=>({container:0,network:1,volume:2}[a.kind]-{container:0,network:1,volume:2}[b.kind]));
   for(const x of observations) {
     const fresh=adapter.inspect(x.id);if(!same(fresh,x))fail('Docker drift');
     const r=resources.find(r=>r.id===x.id);r.state='removing';save(s);

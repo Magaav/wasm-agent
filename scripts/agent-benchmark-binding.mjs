@@ -38,10 +38,8 @@ export function captureDeclarations(binary,taskRoot,evidence) {
   if(r.status!==0)throw Error('declarations capture failed: '+r.stderr);const definitions=JSON.parse(r.stdout.trim());
   fs.writeFileSync(path.join(evidence,'declarations.json'),r.stdout.trim()+'\n');return definitions;
 }
-export async function gradeBinding(binary,taskRoot,evidence,oracleFile=path.join(repo,'scripts/test-binding-discovery.lua'),restartLoss=false,generationRoot=null) {
-  if (!generationRoot)throw Error('grading requires an owned result generation; use gradeStandalone');
+export function prepareGradeOracle(taskRoot,evidence,oracleFile=path.join(repo,'scripts/test-binding-discovery.lua')) {
   if(fs.existsSync(evidence))throw Error('fresh grader evidence only');fs.mkdirSync(evidence,{recursive:true});
-  const clean=isolatedEnvironment(evidence);
   // Hide grader implementation outside taskRoot. The oracle mocks all client/http effects.
   const oracle=path.join(evidence,'hidden-oracle.lua');
   const declarations=JSON.parse(fs.readFileSync(path.join(repo,'fixtures/benchmarks/binding-discovery/v1/solver/native-declarations.json'),'utf8'));
@@ -52,6 +50,11 @@ export async function gradeBinding(binary,taskRoot,evidence,oracleFile=path.join
   const finalPrint="print(json.encode({ok=true,phase=phase,checks=checks,planner_refused_calls=refused_calls,planner_client_calls=0,mocked_client_calls=client_calls,provider_calls=0}))";
   if(!original.includes(finalPrint))throw Error('hidden oracle source drift');
   fs.writeFileSync(oracle,effectFence+original.replace(finalPrint,'')+"\nlocal persisted=tools.dispatch(bound,'tool_search',{query='read',limit=1},'master',ctx);check(persisted.loaded==1,'persist unblocked read loadout')\nlocal expected=json.decode("+JSON.stringify(JSON.stringify(expected))+");local seen={};for _,s in ipairs(tools.all('master')) do local f=s['function'];check(expected[f.name] and json.encode(f.parameters)==json.encode(expected[f.name]), 'native parameter schema drift: '..f.name);seen[f.name]=true end;for name in pairs(expected)do check(seen[name], 'native declaration hidden: '..name) end\n"+finalPrint+"\n");
+  return oracle;
+}
+export async function gradeBinding(binary,taskRoot,evidence,oracleFile=path.join(repo,'scripts/test-binding-discovery.lua'),restartLoss=false,generationRoot=null) {
+  if (!generationRoot)throw Error('grading requires an owned result generation; use gradeStandalone');
+  const oracle=prepareGradeOracle(taskRoot,evidence,oracleFile),clean=isolatedEnvironment(evidence);
   const results=[];
   for(const phase of ['seed','restart']) {
     if(phase==='restart' && restartLoss) {
@@ -82,9 +85,7 @@ export async function gradeStandalone(binary,taskRoot,out) {
   record(out,'manifest',{id:'binding-grade',task_id:'binding-discovery-v1',binary_sha256:result.binary_sha256});record(out,'task',{id:'binding-discovery-v1',candidate_tools_sha256:result.task_tools_sha256});record(out,'context',{id:'binding-discovery-v1-sanitized'});record(out,'oracle',{id:result.oracle_sha256});record(out,'outputs',result);record(out,'patches',{candidate_owned_by_caller:true,not_deleted:true});record(out,'traces',{native_raw_receipts_retained:true});record(out,'failed_attempts',result.pass?[]:result.results.filter(x=>x.exit!==0));record(out,'receipts',result);record(out,'accounting',{benchmark_solver_inference_calls:0,provider_calls:0,preparation_usage:null});record(out,'cache',{backend_kv_contents:'opaque'});record(out,'quality',{scores:null});
   const bundle=seal(out);const cleaned=cleanup(out);const report={...result,bundle,cleanup:cleaned};fs.writeFileSync(path.join(out,'grade.json'),JSON.stringify(report,null,2));return report;
 }
-export async function preflight(binary,out) {
-  const invocationStarted=performance.now();let setupMs=0;
-  if(fs.existsSync(out))throw Error('fresh preflight generation only');createGeneration(out,'binding-preflight-'+crypto.randomUUID());
+export function bindingControls() {
   const cases=[{name:'broken',ref:baseline,pass:false},{name:'repair',ref:repair,pass:true},
     {name:'blanket-deny',pass:false,edit:(t)=>replace(t,'function M.discovery_execution(memory,ctx)','function M.discovery_execution(memory,ctx)\n  return function() return {status="blocked",available=false} end, {required=true}\nend\nlocal function unused_discovery(memory,ctx)')},
     {name:'discovery-hide',pass:false,edit:(t,e)=>replace(e,'function M.search(catalog,args,ctx,describe_execution)','function M.search(catalog,args,ctx,describe_execution) return {tools={},matches=0,loaded=0,guidance={}} end\nlocal function unused_search(catalog,args,ctx,describe_execution)')},
@@ -99,6 +100,12 @@ export async function preflight(binary,out) {
     {name:'schema-drift',pass:false,edit:(t)=>replace(t,"query={type='string',maxLength=256}", "query={type='number',maxLength=256}")}
   ];
   const failureLabels={broken:'discovery reports blocked client', 'blanket-deny':'permitted client has truthful binding refusal','discovery-hide':'discovery reports blocked client','hardcoded-unavailable':'unbound discovery and definition loading unchanged','guard-bypass':'direct native guard remains','unbound-rejection':'unbound discovery and definition loading unchanged','profile-bypass':'capabilities respects exact profile','stale-load-state':'routed blocked tool cannot acquire load authority','restart-loss':'unblocked read definition survives actual native restart','role-bypass':'role-hidden tool has no execution metadata leak','dynamic-scope-hardcode':'missing required binding never advertises writable execution','schema-drift':'native parameter schema drift'};
+  return {cases,failureLabels};
+}
+export async function preflight(binary,out) {
+  const invocationStarted=performance.now();let setupMs=0;
+  if(fs.existsSync(out))throw Error('fresh preflight generation only');createGeneration(out,'binding-preflight-'+crypto.randomUUID());
+  const {cases,failureLabels}=bindingControls();
   const results=[];
   for(const c of cases) {
     const setupStarted=performance.now();

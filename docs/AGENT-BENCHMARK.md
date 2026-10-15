@@ -1,6 +1,16 @@
 # Agent benchmark: current readiness and next experiment
 
-## Code-mode STAGE A: model-free foundations; paid launch refused
+## Current: qualified pilot setup; human limits approval pending
+
+The direct runner now connects actual four-framework loops to blind persistent
+Docker workspaces, the existing synthetic-vault transport, isolated behavioral
+grading and seal-first cleanup. The pinned pilot entry is documented in
+[AGENT-BENCHMARK-PILOT.md](AGENT-BENCHMARK-PILOT.md). Its model-free proof is not
+an autonomous comparison: **zero real contestant trials, no quality scores or
+winner**. Exact human approval and live credential-route/model acceptance remain
+separate prerequisites; no production installation/configuration is implied.
+
+### Retained STAGE A foundation evidence
 
 See [AGENT-BENCHMARK-FOUNDATIONS.md](AGENT-BENCHMARK-FOUNDATIONS.md) for the
 verified fixture, native behavioral oracle, strict Pi/native trace adapters, actual
@@ -13,10 +23,10 @@ references; paths/unrelated history/normalization are disclosed. Historical nati
 run elapsed time is1,797,766ms, not the user's approximate thirty-minute assertion.
 
 The runner extends the existing substrate with model-free binding export/grading/
-preflight and seal/verify/cleanup commands. Paid entry refuses before credentials
-or Docker until per-arm runtime pins, a shared credential-isolated model route,
-complete provider attempt capture and exact experimental caps are proven. The
-legacy paid UI path is also refused: its old cleanup cannot meet the new contract.
+preflight and seal/verify/cleanup commands. The legacy paid entry refuses before credentials or Docker. The new explicit
+pilot entry requires current source/artifact pins, verified sealed qualification,
+exact human-approved limits and a native-owned invocation. The legacy paid UI path
+also remains refused: its old cleanup cannot meet the new contract.
 No benchmark solver inference was launched. Preparation itself uses ordinary
 assistant inference: the coordinator reported22calls/795,577tokens for the prior
 checkpoint, with unpriced dollars; continuation preparation is additional work.
@@ -33,12 +43,15 @@ Node reference peer now exist; see [CODEMODE.md](CODEMODE.md). The native engine
 reuses the pinned Pi prelude and guest, embeds offline assets, and preserves scoped
 native dispatch. Source/embedded/restart qualification and Node-unavailable evidence
 are model-free implementation proof, not four-arm solver results. V1 peer-to-solver
-wiring is present only in the model-free harness. The common vault-subscription
+wiring is qualified model-free; live execution still needs explicit approval. The common vault-subscription
 transport now has exact model/reasoning pins, durable per-attempt capture, absolute
 deadlines and actual synthetic-vault/two-container isolation qualification. This is
-not real provider acceptance or qualification of solver images. Per-arm runtime/image
-pins, paid lifecycle/admission and spending controls remain open; paid admission
-still refuses. See [CODEMODE-BENCHMARK-WIRING.md](CODEMODE-BENCHMARK-WIRING.md)
+not real provider acceptance or qualification of solver images. Actual serial Windows runtime/SDK pins and a shared blind Linux tool-image topology
+are now model-free qualified; the direct lifecycle and isolated grader are connected.
+The proposed exact limits are recorded by `--pilot-prepare`, never automatically
+approved. Real provider entitlement, credential-backed route readiness, actual
+attempts/billing and coordinator grading remain unproven. See
+[AGENT-BENCHMARK-PILOT.md](AGENT-BENCHMARK-PILOT.md) for the guarded entry and risks. See [CODEMODE-BENCHMARK-WIRING.md](CODEMODE-BENCHMARK-WIRING.md)
 for actual native-broker and four-framework deterministic route/tool-loop evidence.
 
 Pin task source, runtime source, package, binary, image, tools, instructions, model,
@@ -48,10 +61,10 @@ behavioral acceptance. No complete four-arm comparison is ready.
 
 Coordination requires explicit operator enablement and approved native task owners;
 no recursion or hidden coding agents. Parallelize independent hermetic preparation/
-checks only; timed arms are isolated and serial/counterbalanced by default. Proposed
-first pilot remains one attempt per four arms,45min each, gpt-6.1-sol LOW only if
-the same isolated route is proven. Token/quota/spend caps remain undeclared and
-block launch. These experiment controls are never production coding-loop caps.
+checks only; timed arms are isolated and serial/counterbalanced by default. The first proposal is one attempt per arm,45min each, gpt-6.1-sol LOW,120 provider
+dispatches/20M reported input/120k output per arm, with explicit one-response token
+overshoot and unknown subscription billing. These are proposed experimental
+controls only; they never cap production coding loops or grant launch authority.
 
 ## Archived earlier telemetry-triad proposal
 

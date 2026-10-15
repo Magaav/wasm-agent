@@ -10,6 +10,13 @@ import { fileURLToPath } from 'node:url';
 import { DUMMY_KEY } from './agent-benchmark-proxy.mjs';
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const pilotCommand=process.argv[2];
+if(['--pilot-prepare','--pilot-qualify','--pilot-run-approved'].includes(pilotCommand)){
+  const pilot=await import('./agent-benchmark-pilot.mjs');const [configFile,out,approvedSha,approvalFile]=process.argv.slice(3);let result;
+  if(pilotCommand==='--pilot-run-approved')result=await pilot.runApprovedPilot(path.resolve(configFile),path.resolve(out),approvedSha,JSON.parse(fs.readFileSync(approvalFile)));
+  else{const config=JSON.parse(fs.readFileSync(configFile));result=pilotCommand==='--pilot-prepare'?pilot.preparePilot(config,path.resolve(out)):await pilot.qualifyPilot(config,path.resolve(out));}
+  console.log(JSON.stringify(result));process.exit(0);
+}
 // Model-free adapters extend this substrate. They never enter paid solver setup.
 const offline = process.argv[2];
 if (['--route-journal','--binding-preflight','--binding-grade','--binding-export','--seal-results','--verify-results','--cleanup-results','--reconcile-results'].includes(offline)) {

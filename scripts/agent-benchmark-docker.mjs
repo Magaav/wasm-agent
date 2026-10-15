@@ -1,10 +1,12 @@
 // Actual Docker effects for generation-owned resources only; no pull/prune/force.
 import fs from 'node:fs';import path from 'node:path';import crypto from 'node:crypto';import {spawnSync} from 'node:child_process';
-export function realDockerAdapter(root,{imageId,command=['node','-e','console.log("model-free disposable")'],networkId}={}) {
+export function realDockerAdapter(root,{imageId,command=['node','-e','console.log("model-free disposable")'],networkId,memoryMiB=128,tmpfsMiB=128,cpus=0.5,pids=32,stopSeconds=1,workspaceVolume,volumeReadOnly=false}={}) {
+  if(!Number.isSafeInteger(memoryMiB)||memoryMiB<128||memoryMiB>4096||!Number.isSafeInteger(tmpfsMiB)||tmpfsMiB<128||tmpfsMiB>2048)throw Error('bounded Docker memory/tmpfs required');
+  if(![0.5,1,2,4].includes(cpus)||!Number.isSafeInteger(pids)||pids<32||pids>256||!Number.isSafeInteger(stopSeconds)||stopSeconds<1||stopSeconds>10)throw Error('bounded Docker CPU/PID/stop controls required');
   root=path.resolve(root);
   const state=()=>JSON.parse(fs.readFileSync(path.join(root,'owner.json')));
   function run(args,{absence=false}={}) {
-    const r=spawnSync('docker',args,{encoding:'utf8',timeout:15000,maxBuffer:8388608});
+    const r=spawnSync('docker',args,{encoding:'utf8',timeout:15000,maxBuffer:args[0]==='logs'?256*1024*1024:8388608});
     const s=state(),log=s.phase==='collecting'?path.join(root,'records','docker-cli.jsonl'):path.join(root,'docker-cleanup.jsonl');
     fs.appendFileSync(log,JSON.stringify({args,code:r.status,error:r.error?.message??null,stdout:r.stdout||'',stderr:r.stderr||'',at:Date.now()})+'\n');
     if(absence && r.status===1 && /No such (?:object|container|volume|network)/i.test(r.stderr))return null;
@@ -23,13 +25,18 @@ export function realDockerAdapter(root,{imageId,command=['node','-e','console.lo
     const x=JSON.parse(raw)[0],labels=x.Config?.Labels||x.Labels||{},kind=x.State?'container':x.Containers?'network':'volume';
     let shared=false,running=false,effects='settled';
     if(kind==='container') {
-      shared=(x.Mounts||[]).some(m=>m.Type!=='tmpfs');
+      const s=state();shared=(x.Mounts||[]).some(m=>{
+        if(m.Type==='tmpfs')return false;
+        if(m.Type!=='volume'||m.Destination!=='/tmp/work'||!s.docker_resources?.some(r=>r.kind==='volume'&&r.id===m.Name&&r.state==='owned'))return true;
+        const v=JSON.parse(run(['volume','inspect',m.Name]))[0];return v.Labels?.['wa.benchmark.generation']!==s.generation||v.Labels?.['wa.benchmark.owner']!==s.nonce;
+      });
       running=x.State.Running===true||x.State.Restarting===true||x.State.Pid>0;
       if(x.State.Dead===true || !['created','exited'].includes(x.State.Status) && !running)effects='unknown';
     } else if(kind==='network') {
       shared=Object.keys(x.Containers||{}).length>0;running=shared;
     } else {
-      shared=run(['ps','-a','--filter','volume='+id,'--format','{{.ID}}'])!=='';running=shared;
+      const ids=run(['ps','-a','--filter','volume='+id,'--format','{{.ID}}']).split('\n').filter(Boolean),s=state();
+      for(const attached of ids){const c=JSON.parse(run(['inspect',attached]))[0],l=c.Config?.Labels||{};if(l['wa.benchmark.generation']!==s.generation||l['wa.benchmark.owner']!==s.nonce)shared=true;if(c.State?.Running||c.State?.Pid>0)running=true;}
     }
     return {id,kind,generation:labels['wa.benchmark.generation'],owner_nonce:labels['wa.benchmark.owner'],shared,running,effects};
   }
@@ -42,10 +49,11 @@ export function realDockerAdapter(root,{imageId,command=['node','-e','console.lo
         if(!/^sha256:[a-f0-9]{64}$/.test(imageId||''))throw Error('exact cached image ID required');
         const pinned=JSON.parse(run(['image','inspect',imageId]))[0];if(pinned.Id!==imageId)throw Error('image drift');
         if(networkId){const network=inspect(networkId);if(!s.docker_resources?.some(r=>r.id===networkId&&r.kind==='network'&&r.state==='owned')||network.kind!=='network'||network.generation!==s.generation||network.owner_nonce!==s.nonce)throw Error('network not owned by this generation');}
-        id=run(['create','--pull','never','--name',name,...flags,'--network',networkId||'none','--read-only','--tmpfs','/tmp:rw,nosuid,nodev,size=128m','--cap-drop','ALL','--security-opt','no-new-privileges','--pids-limit','32','--memory','128m','--cpus','0.5',imageId,...command]);
+        const mounts=[];if(workspaceVolume){const v=inspect(workspaceVolume);if(!s.docker_resources?.some(r=>r.id===workspaceVolume&&r.kind==='volume'&&r.state==='owned')||v.kind!=='volume'||v.generation!==s.generation||v.owner_nonce!==s.nonce||v.shared||v.running)throw Error('workspace volume not exclusively owned/drained');mounts.push('--mount','type=volume,source='+workspaceVolume+',target=/tmp/work'+(volumeReadOnly?',readonly':''));}
+        id=run(['create','--pull','never','--name',name,...flags,...mounts,'--network',networkId||'none','--read-only','--tmpfs','/tmp:rw,nosuid,nodev,size='+tmpfsMiB+'m','--cap-drop','ALL','--security-opt','no-new-privileges','--pids-limit',String(pids),'--memory',memoryMiB+'m','--cpus',String(cpus),imageId,...command]);
       } else if(labels.kind==='network')id=run(['network','create','--internal',...flags,name]);
       else if(labels.kind==='volume')id=run(['volume','create',...flags,name]);
-      else throw Error('unsupported Docker type');return {id,kind:labels.kind};
+      else throw Error('unsupported Docker type');return {id,kind:labels.kind,...(labels.kind==='container'&&workspaceVolume?{workspace_volume:workspaceVolume}:{})};
     },
     logs(id) {
       const s=state(),x=inspect(id);if(x.kind!=='container'||x.generation!==s.generation||x.owner_nonce!==s.nonce)throw Error('Docker log ownership refusal');return run(['logs',id]);
@@ -59,7 +67,7 @@ export function realDockerAdapter(root,{imageId,command=['node','-e','console.lo
       if(!r||r.kind!=='container'||x.generation!==s.generation||x.owner_nonce!==s.nonce)throw Error('Docker stop ownership refusal');
       // Explicit caller cancellation only. Never automatic stop or effect replay.
       if(!x.running)throw Error('Docker process already stopped; do not replay');
-      return effect(id,'stopping',()=>{run(['stop','--time','1',id]);const observed=inspect(id);if(observed.running||observed.effects!=='settled')throw Error('Docker drain unproven');run(['logs',id]);return observed;});
+      return effect(id,'stopping',()=>{run(['stop','--time',String(stopSeconds),id]);const observed=inspect(id);if(observed.running||observed.effects!=='settled')throw Error('Docker drain unproven');run(['logs',id]);return observed;});
     },
     drain(id) {
       const s=state(),r=s.docker_resources?.find(r=>r.id===id),x=inspect(id);

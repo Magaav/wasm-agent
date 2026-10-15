@@ -1,6 +1,6 @@
 ---
 name: agent-benchmark
-description: Prepare matched coding fixtures, run model-free hidden acceptance and seal-first cleanup checks, then compare authorized isolated agents from complete evidence. Use for harness/code-mode benchmarking; paid launch currently refuses missing prerequisites.
+description: Qualify isolated four-arm coding pilots, verify hidden acceptance and lossless cleanup, then compare only explicitly approved trials. Use for harness/code-mode benchmarking.
 ---
 
 # Agent benchmark
@@ -19,16 +19,19 @@ with Node unavailable before claiming implementation; the decision is not readin
 
 ## Admission and coordination
 
-Paid entry of `scripts/agent-benchmark.mjs` is refused before credentials or Docker.
+The legacy paid/UI entry of `scripts/agent-benchmark.mjs` remains refused. The new
+explicit pilot entry requires verified current-source qualification and exact human
+limits approval; read `<repo>/docs/AGENT-BENCHMARK-PILOT.md` completely before using it.
 Do not work around this with external solver scripts, alternate homes, insecure
 routes or live node execution. A human must authorize the later paid experiment
 and concrete pins/caps must be recorded first. Preparation assistant inference is
 real spend; 'no inference' must mean no **benchmark solver inference**, not no model
 work by the task owner. Missing/unpriced preparation dollars remain unknown.
 
-Authorized benchmark coordination uses explicitly operator-enabled native
-orchestration and approved native task ownership where independent setup/checks
-benefit. No recursion or hidden coding agents. This child profile cannot delegate.
+Direct preparation uses the coordinator's native-owned operation, not coding
+workers. Ordinary delegation still requires explicit orchestration enablement;
+the later four contestant processes need their own narrow experiment authorization.
+No recursion, hidden coding agents, alternate homes or failed-admission workaround.
 Native task owners self-review, run focused checks, commit with provenance and use
 ordinary integrate/remote readback; only coordinator owns promotion/installation/UI.
 Full release gates require an explicit request. When orchestration is off the active
@@ -43,13 +46,32 @@ Prove a credential-isolated shared route and complete provider-attempt/prepared-
 capture for all arms, including summaries/retries/failures, not just final messages.
 The proposed first pilot is one attempt per Pi/current wasm/Node QuickJS-WASI/Rust
 Wasmtime QuickJS-WASI arm,45min each, gpt-6.1-sol LOW only if the same isolated route
-is proved. Exact reported-token/quota/spend caps are still missing and block launch.
+is proved. The exact proposal is120dispatches/20M reported input/120k output per
+arm, with one-response token overshoot and unknown subscription dollars/quota.
+Approval is still missing; never convert a proposal or metadata flag into launch.
 These are experiment controls, never production coding-loop caps. Canonical
 architecture decision496de546 confirms V2 must be Node-free Rust/Wasmtime: no Node
 process, bridge or fallback for code-mode execution. V1 Node hosting is comparison
 only; benchmark/test tooling and Pi are separate. See `<repo>/docs/CODEMODE.md`
 for the implemented experimental ABI and Node-unavailable source/embedded proof.
-The V1 peer-to-solver adapter and common paid route remain unfinished.
+The direct isolated pilot now connects those components; actual provider acceptance
+and a completed comparison remain unproven. Use this verified CLI sequence:
+
+```
+node <repo>/scripts/agent-benchmark.mjs --pilot-qualify <artifact-config> <fresh-runtime-proof>
+node <repo>/scripts/test-agent-benchmark-pilot-grade.mjs <fresh-grade-proof> <exact-tool-image>
+node <repo>/scripts/check-agent-benchmark-pilot-proof.mjs <artifact-config> <runtime-proof> <grade-proof>
+node <repo>/scripts/agent-benchmark.mjs --pilot-prepare <preparation-config> <fresh-plan>
+```
+
+The `benchmark-pilot-qualification-proof` spell records the first CLI plus the
+retained/current-source postcheck against an already-qualified grader. Required
+worktrees use the verified direct CLI; do not retry unsupported spell replay.
+See the pilot doc for source/artifact/approval pins, original task instruction
+bytes, persistent volume snapshots, private artifact storage and exact risk/limits.
+The cached tool image's critical embedded Lua is matched to actual pre-task Git
+content, not inferred from its tag; full verification-binary build source is unknown.
+No live provider call or production configuration change occurs in preparation.
 
 For native engine qualification, the `codemode-native-proof` spell records
 `node <repo>/scripts/test-codemode-native.mjs <binary> <fresh-evidence> [assets]`
@@ -152,6 +174,15 @@ objects/single-worktree Git ownership; managed/active worktrees are never adopte
 streams, not mere shell exit. Windows native SQLite needs sufficiently short owned
 scratch paths; do not redirect into another user's/home/installed tree to avoid limits.
 
+For used workspace volumes, stop/drain the writer then capture with an exact-owned
+read-only reader. Complete, verified byte snapshots are required before sealing;
+remove containers before volumes and read back absence. Abrupt controller death
+may leave tool work until the one-shot lifetime/recovery, but persistent data stays
+owned; never replay a solver or claim cancellation is drain. Foreign/shared live
+volumes or ownership uncertainty refuse. These are not host/credential mounts.
+Large archives use bounded version2 gzip JSONL frames; version1 remains supported.
+Use `verifyBundle`/`readSealedRecord`, never one archive-sized JSON string.
+
 The real Docker adapter requires an existing exact image ID and ownership labels;
 no pull/prune/force/shared-image deletion. Inspect/drain/full log capture precede
 sealing. Delete intents are durable BEFORE effects; exact absence is read back.
@@ -184,8 +215,8 @@ node --test --test-reporter=tap <repo>/scripts/test-agent-benchmark-docker.mjs
 
 Keep full logs/counts/skips/receipts. Use equivalent verified CLI/postchecks when the
 allowed profile lacks spell tools; never attempt unsupported mandatory-worktree
-spell replay or grow AGENTS.md. The paid runner still needs lifecycle/route/capture
-wiring and pins before readiness can change.
+spell replay or grow AGENTS.md. Only the explicit pinned pilot entry can be
+considered after actual human approval; qualification is never a solver result.
 
 The comparison-only V1 broker and real four-framework mock-route/tool-loop proofs
 are in `<repo>/docs/CODEMODE-BENCHMARK-WIRING.md`. Run
@@ -212,4 +243,4 @@ node <skill>/scripts/artifacts.mjs --root <artifact-root> --prefix edit-workflow
 Follow snapshot/next_offset or narrow the root/prefix; errors are not absence.
 `node <skill>/scripts/test-artifacts.mjs <fresh-private-scratch>` verifies inventory.
 Historical UI/OpenCode-Go fixtures/image instructions in AGENT-BENCHMARK.md are
-archived context, not authorization to launch the currently refused paid path.
+archived context, not authorization for any paid entry.
