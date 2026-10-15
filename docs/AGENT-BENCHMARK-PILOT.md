@@ -25,6 +25,62 @@ trial effects. Copies cannot create another reservation. An existing/unknown int
 is observation/reconciliation work, never permission to rerun a contestant.
 The legacy/UI paid path remains disabled; boolean readiness declarations grant nothing.
 
+## Pi-only output-capture repair and fresh reservation
+
+The original four-arm reservation is consumed; never edit, resume or replay it.
+Its Pi output-limit failure and unknown final-request usage remain original evidence.
+The human's subsequent “fix output limit, rerun pi” request authorizes **one fresh
+Pi attempt**, not another four-arm wave. The coordinator must record that actual
+human message reference; no example reference or metadata flag is a grant.
+
+Pi now writes every SDK event, unabridged, to private `pi-events.jsonl` with exclusive
+creation, checked writes and fsync per event. Final fsync/close and a durable result
+file precede the single bounded console receipt (count/bytes/SHA-256 only). Complete
+messages and SDK session files remain private alongside the raw journal. Event,
+result-write or close failures cannot produce a normal-finish receipt; partial files
+and stderr remain evidence. Abrupt native termination may leave no completion hash;
+that is incomplete evidence, never a normal finish. `events_file` names the raw
+journal, not console metadata. Lifecycle verification and lossless sealing retain
+all of these files. No raw event is elided or made solver-visible; the global50KiB
+view and inherited8MiB supervisor capture bound are unchanged. Per-event fsync adds
+real logging overhead; this is disclosed, not a performance-neutral change.
+
+The new commands reuse the same source/artifact qualification, isolated arm,
+route/grader, durable once-only intent and seal-first cleanup. Old four-arm commands
+and defaults remain four-arm; neither entry accepts the other scope's manifest.
+Use absolute paths and **new directories**, with the original artifact config:
+
+```
+node scripts/agent-benchmark.mjs --pilot-pi-qualify <artifact-config.json> <fresh-pi-proof>
+node scripts/check-agent-benchmark-pilot-proof.mjs <artifact-config.json> <fresh-pi-proof> <verified-grade-proof> --pi-only
+# Copy artifact/preparation config privately; set qualificationReceipt to
+# <fresh-pi-proof>/receipt.json. Keep build/grading receipts and artifact pins.
+node scripts/agent-benchmark.mjs --pilot-pi-prepare <pi-preparation-config.json> <fresh-pi-plan>
+# Coordinator only, after recording the ACTUAL new human message reference:
+node scripts/agent-benchmark.mjs --pilot-pi-run-approved <fresh-pi-plan>/manifest.json <fresh-pi-results> <manifest-sha256> <actual-approval-reference.json>
+```
+
+Pi-only qualification streams over8MiB of actual SDK raw events through the unchanged
+native supervisor, followed by real blind read/write/bash results and final handoff,
+using the actual synthetic vault and **zero real provider calls**. The postcheck
+verifies source/artifact equality, archive integrity, raw event counts/bytes/hash,
+full later messages, bounded console receipt and owned cleanup. Source drift requires
+new qualification; a historical four-arm proof is not a Pi-only proof. Model-free
+failure controls reuse `test-agent-benchmark-pilot-policy.mjs --capture <native-binary>
+<fresh-evidence>` (old console overflow, exact raw retention and write/fsync/close
+failures), `test-agent-benchmark-pi-route.mjs <Pi-package> <fresh-evidence>
+--controller-failures` (actual SDK partial-stream and raw-write-failure aborts,
+retained failures/unknown usage and one dispatch/no replay), and
+`test-agent-benchmark-vault-route.mjs <fresh-evidence>` (unknown usage,
+abort/deadline/failure capture and no replay).
+
+The fresh Pi-only manifest fixes `arms/order` to `["pi"]`, gpt-6.1-sol LOW and exactly
+the same per-arm controls below (including180s absolute request deadline and zero
+automatic whole-trial retries). Task source, instructions, oracle, SDK/tools, blind
+broker, token overshoot and unknown dollars/quota are unchanged. Fresh home/session,
+volume/output and launch intent are mandatory; never continue request0010 or the
+failed Pi workspace. Preparation does not contact the live vault or launch a model.
+
 ## Real blind boundary
 
 Trusted runtime processes stay outside the tool box. Every model-directed file/shell
