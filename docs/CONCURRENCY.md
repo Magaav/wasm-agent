@@ -193,6 +193,33 @@ bound. These are controlled fixture measurements, not production latency promise
 interactive reserve, control node-threads) and `subagents`/`subagent_counts`, so the guarantees
 are observable from outside the process. None of these carry a prompt or a credential.
 
+## Human input crossing a background turn
+
+A child-return/background run can own the conversation while an idle-looking page
+is between health polls. UI chat payloads carry `if_idle:true`: after authentication
+and conversation-owner resolution, the scheduler atomically refuses an occupied
+conversation with HTTP409 `session_busy`, `not_started:true`, `effect:"none"`.
+No second admission, journal run or cancellation exists on that path. This only
+narrows local interactive admission; legacy API/background/peer queue policy and
+single-writer ordering remain unchanged.
+
+The UI first follows a known background owner and delivers text via the existing
+idempotent steering lane. The native409 closes the health-check/POST race and
+permits the same handoff only because it proves no chat was admitted. Unknown
+responses never authorize replay. The page keeps draft text/files until confirmed
+admission, preserves newer typing, reports non-SSE failures, and does not send
+attachments through the text-only steering API. Ctrl+Enter reconciles even when
+local busy state was stale. A queued cancellation acknowledgement may detach that
+waiting browser socket and follow the actual owner; it never claims native
+settlement or cancels/replays the older background turn.
+
+`test-chat-handoff.cjs <built-wa> <fresh-evidence> [--embedded]` uses a real private
+server, scheduler, steering database and fake model stream to prove409/no backlog,
+unchanged owner, one consumed correction and subsequent idle admission. The real
+browser `test-background-handoff.cjs <fresh-evidence>` plus `--post` checks visible
+controls/live replay, post-preflight races, keyboard, newer drafts, files, failure
+visibility and queued-cancellation view recovery. No live user input is replayed.
+
 ## Lane reservations and the serial gate
 
 The lanes above are the runtime's: node-thread index ranges, the interactive reserve, and

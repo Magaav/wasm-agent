@@ -1690,7 +1690,19 @@ fn dispatch_http(
                 }
             }
         }
-        match scheduler::admit(&request.routing_session, &request.owner, request.run_class, pick_run_node_thread) {
+        // An explicit UI no-queue intent only narrows admission. Authentication and
+        // conversation ownership above remain authoritative; background/peer ordering
+        // retains its existing queue policy. Check and claim happen under one lock.
+        let if_idle = split_path(&request.path).0 == "/chat"
+            && request.run_class == scheduler::RunClass::Interactive
+            && serde_json::from_slice::<serde_json::Value>(&request.body).ok()
+                .and_then(|body| body.get("if_idle").and_then(serde_json::Value::as_bool)) == Some(true);
+        let admission = if if_idle {
+            scheduler::admit_if_idle(&request.routing_session, &request.owner, request.run_class, pick_run_node_thread)
+        } else {
+            scheduler::admit(&request.routing_session, &request.owner, request.run_class, pick_run_node_thread)
+        };
+        match admission {
             scheduler::Decision::Run { run_id, node_thread, cancel, sockets }
             | scheduler::Decision::Behind { run_id, node_thread, cancel, sockets } => {
                 if let Some(scheduler) = scheduler::global() {
@@ -1707,8 +1719,13 @@ fn dispatch_http(
             }
             scheduler::Decision::Refused(refusal) => {
                 let (code, hint) = refusal.as_error();
-                let body = format!("{{\"error\":\"{code}\",\"hint\":\"{hint}\"}}");
-                let _ = respond(&mut stream, 503, "application/json", body.as_bytes());
+                if refusal == scheduler::Refusal::SessionBusy {
+                    let body = serde_json::json!({"error":code,"hint":hint,"not_started":true,"effect":"none","thread":request.routing_session});
+                    let _ = respond(&mut stream, 409, "application/json", body.to_string().as_bytes());
+                } else {
+                    let body = format!("{{\"error\":\"{code}\",\"hint\":\"{hint}\"}}");
+                    let _ = respond(&mut stream, 503, "application/json", body.as_bytes());
+                }
                 return;
             }
         }

@@ -3,8 +3,8 @@
 Handle the human's requested task directly and serially while `/orchestration` is off.
 No subagents in direct mode and no external inference agents. Implement, self-review,
 run focused checks, merge through canonical main, push/read back the remote and leave
-both trees clean. Explicit on routes each task to one native task owner; return freely
-without waiting or doing its work. Followups wait for the report, never mid-task steering.
+both trees clean. Explicit on: reason with context before native handoff; stay free.
+Followups wait for reports; never steer active subagents or do their implementation.
 Native task owners implement, verify and merge with `integrate`; no recursion. Only the coordinator
 publishes UI, handles `/update` and talks to Sentinel. Children never deploy/install/restart.
 See docs/ORCHESTRATION-MODE.md. Do not stop at a proposal or ask approval already granted.
