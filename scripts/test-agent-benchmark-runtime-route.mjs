@@ -1,8 +1,8 @@
 // Real native serializers and tool loops, all three native-runtime arms, one
 // deterministic local provider. No Pi/wasm solver inference or live credential use.
 import fs from 'node:fs';import path from 'node:path';import http from 'node:http';import cp from 'node:child_process';import crypto from 'node:crypto';import assert from 'node:assert/strict';import {fileURLToPath} from 'node:url';
-import {createSharedModelRoute} from './agent-benchmark-model-route.mjs';import {createReferenceServer} from '../benchmarks/codemode/reference-server.mjs';import {isolatedEnvironment} from './agent-benchmark-environment.mjs';
-const repo=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');const [binary,assets,out,piPackage]=process.argv.slice(2);assert([binary,assets,out].every(p=>p&&path.isAbsolute(p))&&!fs.existsSync(out));fs.mkdirSync(out,{recursive:true});
+import {createSharedModelRoute,createVaultSubscriptionRoute} from './agent-benchmark-model-route.mjs';import {startBenchmarkVault} from './fixtures/benchmark-vault.mjs';import {createReferenceServer} from '../benchmarks/codemode/reference-server.mjs';import {isolatedEnvironment} from './agent-benchmark-environment.mjs';
+const repo=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');const [binary,assets,out,piPackage,vaultFlag]=process.argv.slice(2);assert(!vaultFlag||vaultFlag==='--vault-fixture');assert([binary,assets,out].every(p=>p&&path.isAbsolute(p))&&!fs.existsSync(out));fs.mkdirSync(out,{recursive:true});
 let active,round=0;const requests=[];
 const upstream=http.createServer(async(req,res)=>{const chunks=[];for await(const b of req)chunks.push(b);const body=JSON.parse(Buffer.concat(chunks));requests.push({arm:active.arm,body});round++;
  res.writeHead(200,{'content-type':'text/event-stream'});const send=e=>res.write('data: '+JSON.stringify(e)+'\n\n');send({type:'response.created',response:{id:'fixture-'+active.arm+'-'+round}});
@@ -11,7 +11,8 @@ const upstream=http.createServer(async(req,res)=>{const chunks=[];for await(cons
  send({type:'response.completed',response:{id:'fixture-'+active.arm+'-'+round,status:'completed',usage:{input_tokens:100,output_tokens:20,input_tokens_details:{cached_tokens:40},output_tokens_details:{reasoning_tokens:5}}}});res.end();
 });await new Promise(r=>upstream.listen(0,'127.0.0.1',r));
 const arms=(piPackage?['pi','wasm-current','node-v1','rust-v2']:['wasm-current','node-v1','rust-v2']).map(arm=>({arm,handle:crypto.randomBytes(32).toString('hex'),maxRequests:4,maxPromptTotal:10000,maxOutputTotal:1000,maxMilliseconds:90000}));
-const route=createSharedModelRoute({mode:'model-free',upstream:'http://127.0.0.1:'+upstream.address().port+'/responses',credential:'MODEL_FREE_SYNTHETIC_ONLY',model:'gpt-6.1-sol',reasoning:'low',root:path.join(out,'route'),arms});await new Promise(r=>route.server.listen(0,'127.0.0.1',r));
+const vault=vaultFlag?await startBenchmarkVault({repo,out,upstream:'http://127.0.0.1:'+upstream.address().port}):null;
+const route=vault?createVaultSubscriptionRoute({vaultUrl:vault.url,root:path.join(out,'route'),arms}):createSharedModelRoute({mode:'model-free',upstream:'http://127.0.0.1:'+upstream.address().port+'/responses',credential:'MODEL_FREE_SYNTHETIC_ONLY',model:'gpt-6.1-sol',reasoning:'low',root:path.join(out,'route'),arms});await new Promise(r=>route.server.listen(0,'127.0.0.1',r));
 const results=[];let ok=true;
 try{for(const arm of arms){const home=path.join(out,arm.arm);fs.mkdirSync(home);const file=path.join(home,'input.txt');fs.writeFileSync(file,'private-alpha');active={...arm,file};round=0;
  let reference;const config={};if(arm.arm==='node-v1'){const key=crypto.randomBytes(32).toString('hex');reference=await createReferenceServer({assets,key});await new Promise(r=>reference.server.listen(0,'127.0.0.1',r));Object.assign(config,{WA_CODEMODE_CONTROLLER_CLIENT:path.join(repo,'benchmarks/codemode/reference-client.lua'),WA_CODEMODE_CONTROLLER_URL:'http://127.0.0.1:'+reference.server.address().port+'/quickjs',WA_CODEMODE_CONTROLLER_KEY:key});}
@@ -24,5 +25,6 @@ try{for(const arm of arms){const home=path.join(out,arm.arm);fs.mkdirSync(home);
  const pair=requests.filter(x=>x.arm===arm.arm);const output=pair[1]?.body.input?.some(x=>x.type==='function_call_output'&&x.output?.includes('private-alpha'));
  const pass=settled.exit===0&&summary?.ok&&round===2&&output;results.push({arm:arm.arm,...settled,checks:summary?.checks??null,rounds:round,real_tool_output_replayed:output??false});if(!pass){ok=false;break;}
  }
- fs.writeFileSync(path.join(out,'receipt.json'),JSON.stringify({ok,results,route:route.inspect(),paid_solver_calls:0,pi_sdk_covered:Boolean(piPackage)},null,2));console.log(JSON.stringify({ok,results,paid_solver_calls:0,pi_sdk_covered:Boolean(piPackage)}));if(!ok)process.exitCode=1;
-}finally{route.server.closeAllConnections();await new Promise(r=>route.server.close(r));upstream.closeAllConnections();await new Promise(r=>upstream.close(r));}
+ const receipt={ok,results,route:route.inspect(),actual_vault_fixture:Boolean(vault),paid_solver_calls:0,pi_sdk_covered:Boolean(piPackage)};
+ fs.writeFileSync(path.join(out,'receipt.json'),JSON.stringify(receipt,null,2));console.log(JSON.stringify({ok,results,actual_vault_fixture:Boolean(vault),paid_solver_calls:0,pi_sdk_covered:Boolean(piPackage)}));if(!ok)process.exitCode=1;
+}finally{route.dispose();await new Promise(r=>route.server.close(r));if(vault)await vault.close();upstream.closeAllConnections();await new Promise(r=>upstream.close(r));}

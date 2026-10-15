@@ -31,20 +31,53 @@ pretending it passed. All other common cases execute with real native tools.
 
 ## Shared Responses route
 
-`agent-benchmark-model-route.mjs` is currently a loopback-only, model-free factory.
-It implements the existing vault-compatible presence/Responses shape, with opaque
-per-arm route/cache scopes and fixed model/reasoning/stream pins. It forwards only
-to an explicit fixed mock upstream. It captures original client wire bytes, exact
-decoded JSON (including Pi1.2 zstd requests), the actual scope-bound upstream body,
-and complete observed response bytes with hashes and start/end/refusal journals.
-No real credentials enter solvers; the fixtures use unmistakably synthetic values.
+`agent-benchmark-model-route.mjs` now supports a candidate **vault-subscription**
+transport as well as the original loopback model-free factory. A controller calls
+`createVaultSubscriptionRoute({vaultUrl, root, arms})` with an exact fixed vault
+origin and fresh private evidence root. It selects only `/openai-sub/codex/responses`;
+model/reasoning/stream must be exactly `gpt-6.1-sol`/`low`/`true`. No credential is
+accepted in this mode. The existing `vault/wa_vault.py` attaches the subscription
+bearer/account to its fixed provider endpoint. No caller Host, credential, cookie,
+forwarding or identity headers pass through the relay. Common fixed subscription
+headers use the native measured codex-cli contract; session/cache scopes are opaque
+and arm-specific. Neither hop follows redirects. The relay exposes no vault login,
+usage, admin, URL override or provider continuation surface. `/status` describes
+transport configuration only, NOT credential presence or model entitlement.
 
-Reported-token/request/time controls apply only to the declared experiment fixture,
-never production worker loops. Token ceilings are observed after a response, so a
-future paid manifest must declare the one-request overshoot bound; this is not an
-unproven hard-dollar cap. Unknown/truncated/failed usage halts that arm before any
-new upstream request. Cached input and reasoning remain subsets, not added twice;
-missing fields/costs stay unknown. Provider KV contents are opaque.
+Original client wire bytes, decoded bytes (including Pi1.2 zstd), the exact prepared
+body and all observed response bytes are retained with lengths/hashes. An admitted
+upload is reserved before awaiting data, and its arm clock starts at first upload
+or explicit idempotent `activate(handle)`, not when all arm scopes are created.
+Absolute upload/stream timers cannot be extended by heartbeats. Failed/abandoned
+uploads and partial/error responses remain evidence. Each admitted attempt has one
+end; durable dispatch intent precedes the effect, including connection failures.
+Unknown usage halts the arm; there is no retry/replay. `readModelRouteJournal(root)`
+independently verifies completed capture hashes and leaves missing ends/crashes
+unsettled. This journals every observed HTTP request, including retries/summaries;
+it does not establish coverage of inference routed outside this controlled seam.
+
+Reported-token/request/time controls apply only to declared experiment arms, never
+production worker loops. Each arm requires maxRequests/maxPromptTotal/maxOutputTotal/
+maxMilliseconds and may specify a shorter maxRequestMilliseconds. Requests count
+provider dispatch intents, not rejected validation uploads. Token ceilings are
+observed AFTER a response: at most one response can overshoot, and its measured
+prompt/output overshoot is explicit. No hard token, quota or dollar cap is claimed;
+a paid manifest must budget the overshoot separately. Cached input and reasoning
+remain subsets, not added twice; cache-write/missing fields and subscription dollars
+stay unknown. Provider KV contents are opaque.
+
+Model-free tests exercise the **actual vault implementation**, with a fake upstream
+and synthetic credentials only, including failures, slow/abandoned uploads,
+heartbeats, serial clocks, malformed usage, no redirects/replay and journal integrity.
+An additional actual two-container proof uses a pinned cached image, internal owned
+network, private PID/mount namespaces, read-only roots and no shared credential
+store/admin/Docker socket. Only the trusted container contains vault/relay/fake
+provider; vault itself binds loopback. The client cannot reach that private vault
+port or store/processes. Exact captured bytes are collected after drain, sealed and
+verified before generation-owned removal; the shared image is preserved. This is
+proof of that synthetic topology, NOT qualification of a later solver image/network
+or a comprehensive container-security theorem. Same-user fixtures alone are NOT OS
+credential isolation; Windows file modes alone do not create an ACL sandbox.
 
 The terminal SSE frame is the completion boundary, not socket EOF. UTF8 and raw
 partial bytes are retained; the relay does not wait indefinitely on an already
@@ -57,6 +90,10 @@ node scripts/test-codemode-reference-native.mjs <native-binary> <prepared-assets
 node scripts/test-agent-benchmark-model-route.mjs <fresh-evidence>
 node scripts/test-agent-benchmark-runtime-route.mjs <native-binary> <prepared-assets> <fresh-evidence> <pi-coding-agent-package>
 node scripts/test-agent-benchmark-pi-route.mjs <pi-ai-package> <fresh-evidence>
+node scripts/test-agent-benchmark-vault-route.mjs <fresh-evidence>
+node scripts/agent-benchmark.mjs --route-journal <retained-route-evidence>
+node scripts/test-agent-benchmark-runtime-route.mjs <native-binary> <prepared-assets> <fresh-evidence> <pi-coding-agent-package> --vault-fixture
+node scripts/test-agent-benchmark-vault-container.mjs <fresh-evidence> <exact-cached-image-sha256>
 ```
 
 The four-framework fixture uses real Pi1.2 coding-agent and native current-style,
@@ -77,9 +114,11 @@ no production configuration is changed. No silent model fallback is accepted.
 
 ## Still required before paid results
 
-Exact per-arm runtime/source/binary/image/tool/instruction pins; credential-isolated
-real common route and model entitlement; complete real provider attempts/usage;
-blind task export and isolated grading; explicit experimental controls and native
-owner admission; serial timed arms; actual behavioral grading and subjective quality
-notes; lossless sealing before ownership/drain-aware cleanup. Do not remove the
-paid-readiness refusal merely because these model-free fixtures pass.
+Exact per-arm runtime/source/binary/image/tool/instruction pins; qualification of the
+actual solver topology using this vault transport, real provider entitlement and
+operator-owned credential configuration (none mutated here); predeclared quota/spend
+controls with overshoot allowance; native owner admission and paid-run lifecycle
+wiring; serial timed arms, blind fixture export/isolated grading, actual behavioral
+acceptance and subjective quality notes. Capture/route and owned cleanup APIs are
+implemented and model-free tested, not a completed autonomous comparison. The paid
+CLI remains refused; do not remove that boundary merely because these tests pass.

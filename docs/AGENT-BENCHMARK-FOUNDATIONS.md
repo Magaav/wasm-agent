@@ -213,5 +213,10 @@ gpt-6.1-sol LOW only after a common isolated route is proved. V1 Node hosting re
 Node-free Rust/Wasmtime, with no Node process/bridge/fallback during execution.
 Benchmark/test tooling and Pi are separate. The experimental ABI/imports/native dispatcher and Node-unavailable proof now exist;
 see CODEMODE.md and CODEMODE-BENCHMARK-WIRING.md. The V1 broker and four-framework
-two-round tool loops are wired and tested with a mock upstream. Real provider,
-isolated runtime/image pins and the autonomous comparison remain open.
+two-round tool loops are wired and tested with a mock upstream, now also through the
+actual vault using synthetic credentials. The candidate vault-subscription relay
+and restart-readable attempt journal are implemented; absolute upload/stream clocks,
+partial failure retention and a synthetic two-container isolation topology are
+model-free tested. Paid CLI refusal remains: actual solver topology/runtime pins,
+real provider entitlement, concrete spending controls and paid lifecycle/admission
+still need qualification. These are not autonomous comparison results.

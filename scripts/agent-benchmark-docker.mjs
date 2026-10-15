@@ -1,6 +1,6 @@
 // Actual Docker effects for generation-owned resources only; no pull/prune/force.
 import fs from 'node:fs';import path from 'node:path';import crypto from 'node:crypto';import {spawnSync} from 'node:child_process';
-export function realDockerAdapter(root,{imageId,command=['node','-e','console.log("model-free disposable")']}={}) {
+export function realDockerAdapter(root,{imageId,command=['node','-e','console.log("model-free disposable")'],networkId}={}) {
   root=path.resolve(root);
   const state=()=>JSON.parse(fs.readFileSync(path.join(root,'owner.json')));
   function run(args,{absence=false}={}) {
@@ -23,7 +23,7 @@ export function realDockerAdapter(root,{imageId,command=['node','-e','console.lo
     const x=JSON.parse(raw)[0],labels=x.Config?.Labels||x.Labels||{},kind=x.State?'container':x.Containers?'network':'volume';
     let shared=false,running=false,effects='settled';
     if(kind==='container') {
-      shared=(x.Mounts||[]).length>0;
+      shared=(x.Mounts||[]).some(m=>m.Type!=='tmpfs');
       running=x.State.Running===true||x.State.Restarting===true||x.State.Pid>0;
       if(x.State.Dead===true || !['created','exited'].includes(x.State.Status) && !running)effects='unknown';
     } else if(kind==='network') {
@@ -41,10 +41,14 @@ export function realDockerAdapter(root,{imageId,command=['node','-e','console.lo
       if(labels.kind==='container') {
         if(!/^sha256:[a-f0-9]{64}$/.test(imageId||''))throw Error('exact cached image ID required');
         const pinned=JSON.parse(run(['image','inspect',imageId]))[0];if(pinned.Id!==imageId)throw Error('image drift');
-        id=run(['create','--pull','never','--name',name,...flags,'--network','none','--read-only','--cap-drop','ALL','--security-opt','no-new-privileges','--pids-limit','32','--memory','128m','--cpus','0.5',imageId,...command]);
+        if(networkId){const network=inspect(networkId);if(!s.docker_resources?.some(r=>r.id===networkId&&r.kind==='network'&&r.state==='owned')||network.kind!=='network'||network.generation!==s.generation||network.owner_nonce!==s.nonce)throw Error('network not owned by this generation');}
+        id=run(['create','--pull','never','--name',name,...flags,'--network',networkId||'none','--read-only','--tmpfs','/tmp:rw,nosuid,nodev,size=128m','--cap-drop','ALL','--security-opt','no-new-privileges','--pids-limit','32','--memory','128m','--cpus','0.5',imageId,...command]);
       } else if(labels.kind==='network')id=run(['network','create','--internal',...flags,name]);
       else if(labels.kind==='volume')id=run(['volume','create',...flags,name]);
       else throw Error('unsupported Docker type');return {id,kind:labels.kind};
+    },
+    logs(id) {
+      const s=state(),x=inspect(id);if(x.kind!=='container'||x.generation!==s.generation||x.owner_nonce!==s.nonce)throw Error('Docker log ownership refusal');return run(['logs',id]);
     },
     start(id) {
       const s=state(),r=s.docker_resources?.find(r=>r.id===id),x=inspect(id);
