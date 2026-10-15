@@ -148,7 +148,10 @@ node scripts/agent-benchmark.mjs --cleanup-results <owned-generation>
 node scripts/agent-benchmark.mjs --reconcile-results <owned-generation>
 ```
 
-The gzip JSON/base64 bundle is compact and lossless. Its generation/nonce, manifest,
+Independent native/OS-owned tree settlement and complete
+volume capture precede sealing; large evidence uses bounded version2 gzip JSONL
+frames, with version1 still readable through the same verifier. Use `readSealedRecord`
+for selected evidence rather than materializing an archive-sized JSON string. Its generation/nonce, manifest,
 every file hash/length/path, required records and original-copy inventory are checked
 before removal. Keep the archive, owner journal, cleanup/reconciliation receipts and
 fixture. Only then remove exact registered disposable directories and redundant
@@ -171,8 +174,11 @@ Windows limits; use short names inside the owned scratch root, not another home.
 `agent-benchmark-docker.mjs` provides actual exact-generation Docker create/inspect/
 start/stop/drain/remove adapters. It requires an existing pinned image ID; never
 pulls, prunes, force-removes or removes shared images/caches. Resources carry the
-nonce label. Inspect rejects mounted/shared containers, live processes, attached
-networks/volumes and uncertain states. Drain/log capture precedes sealing; deletion
+nonce label. Inspect rejects foreign/shared mounts, live processes, attached
+networks/volumes and uncertain states. The direct pilot's exact generation-owned
+workspace volume is the narrow exception: it persists across process loss, is
+captured through a drained read-only reader, and requires a verified snapshot before
+sealing/removal. No host or credential mount is admitted. Drain/log capture precedes sealing; deletion
 is journaled before the effect and exact absence is read back. Actual model-free
 container/network/volume cleanup was tested against Docker27.3.1 with a cached Node
 image, no network/mounts and no inference. Shared image remained. Mock tests cover
@@ -204,11 +210,11 @@ Fresh evidence generations preserve failed attempts. Use these verified CLI/post
 where the allowed tool profile lacks spell tools; unsupported replay is not attempted.
 Do not grow AGENTS.md or impose benchmark caps on production coding.
 
-Paid runner admission remains unconditionally refused pending per-arm separate
-runtime/package/binary/image/tool/instruction pins, shared credential-isolated route,
-full provider-attempt and prepared-wire capture, isolated untrusted non-UI grading
-and solver Git-checkout lifecycle wiring, and concrete reported-token/quota/spend
-caps. The proposed first pilot is one attempt per four arms,45min each,
+The new guarded direct pilot is in [AGENT-BENCHMARK-PILOT.md](AGENT-BENCHMARK-PILOT.md).
+It connects these adapters to actual blind persistent tool workspaces and isolated
+grading; no autonomous trials or paid results are implied. The older boolean/UI
+entry remains refused. Exact current-source qualification and human approval are
+required before the new explicit entry can launch. The proposed first pilot is one attempt per four arms,45min each,
 gpt-6.1-sol LOW only after a common isolated route is proved. V1 Node hosting remains comparison only; the confirmed V2 target is
 Node-free Rust/Wasmtime, with no Node process/bridge/fallback during execution.
 Benchmark/test tooling and Pi are separate. The experimental ABI/imports/native dispatcher and Node-unavailable proof now exist;
@@ -217,6 +223,7 @@ two-round tool loops are wired and tested with a mock upstream, now also through
 actual vault using synthetic credentials. The candidate vault-subscription relay
 and restart-readable attempt journal are implemented; absolute upload/stream clocks,
 partial failure retention and a synthetic two-container isolation topology are
-model-free tested. Paid CLI refusal remains: actual solver topology/runtime pins,
-real provider entitlement, concrete spending controls and paid lifecycle/admission
-still need qualification. These are not autonomous comparison results.
+model-free tested. The direct pilot qualifies the actual runtime/tool-box topology and isolated
+behavioral oracle, with a source-bound limits proposal. Real provider entitlement,
+operator-owned credential configuration, approval and actual trials are still
+separate. No autonomous comparison results exist here.

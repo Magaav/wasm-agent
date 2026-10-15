@@ -2,8 +2,12 @@
 
 This is implementation/transport qualification, **not the requested autonomous comparison**.
 No completion-time, dollars/cache rankings or 0–100 final-quality scores exist here.
-The paid entry in `scripts/agent-benchmark.mjs` remains refused. Current direct mode
-also forbids native/external inference-agent launches until explicitly enabled.
+The legacy paid entry in `scripts/agent-benchmark.mjs` remains refused. The new
+explicit, source-bound pilot entry is described in
+[AGENT-BENCHMARK-PILOT.md](AGENT-BENCHMARK-PILOT.md); it does not launch before exact
+human limits approval. Direct preparation uses no inference workers. Benchmark
+contestants need their narrow explicit experiment authorization, not a workaround
+for native coding-worker admission.
 
 ## Same native policy, different guest hosts
 
@@ -114,11 +118,9 @@ no production configuration is changed. No silent model fallback is accepted.
 
 ## Still required before paid results
 
-Exact per-arm runtime/source/binary/image/tool/instruction pins; qualification of the
-actual solver topology using this vault transport, real provider entitlement and
-operator-owned credential configuration (none mutated here); predeclared quota/spend
-controls with overshoot allowance; native owner admission and paid-run lifecycle
-wiring; serial timed arms, blind fixture export/isolated grading, actual behavioral
-acceptance and subjective quality notes. Capture/route and owned cleanup APIs are
-implemented and model-free tested, not a completed autonomous comparison. The paid
-CLI remains refused; do not remove that boundary merely because these tests pass.
+The direct pilot now binds per-arm binaries/SDK/assets and the actual blind tool
+image, native process settlement, full observed route capture, isolated grading
+and seal-first persistent-volume cleanup. Runtime and grader qualification are
+model-free; real provider entitlement, the credential-backed operator route and
+human-approved limits remain prerequisites. No scores or autonomous results follow.
+See [AGENT-BENCHMARK-PILOT.md](AGENT-BENCHMARK-PILOT.md).
