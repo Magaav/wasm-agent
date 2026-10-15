@@ -108,6 +108,14 @@ not unsupported spell replay. Also run private stdio/HTTP/CDP peers and the MCP
 Chromium proof, then the required UI suite. See `<repo>/docs/MCP.md`; probe is not
 app identity/send approval, and unknown effects are never replayed.
 
+For subagent action-specific key/help changes, `subagent-message-contract-proof`
+records `node <repo>/scripts/test-subagent-message-contract.mjs <built-wa>
+<fresh-evidence> <old-wa>` and retained-hash `--post`. Required worktrees use this
+verified direct CLI, not unsupported spell replay. It checks source/embedded help,
+Responses serialization, real facade refusals/key forwarding and private SQLite
+steering deduplication; continuation execution is mocked. Run the existing policy
+suite and native subagent tests too. No live child or inference is admitted.
+
 For independent batch-tool changes run
 `node <repo>/scripts/test-batch-tools.cjs <absolute-built-wa> <fresh-evidence>`,
 then the same CLI with `--post` before its arguments. `batch-tools-proof` records
