@@ -1,7 +1,14 @@
 // Read-only retained/current-source postcheck. No provider, process or Docker effects.
 import fs from 'node:fs';import path from 'node:path';import assert from 'node:assert/strict';import {verifyBundle,readSealedRecord} from './agent-benchmark-results.mjs';import {runtimePins,fileSha} from './agent-benchmark-pilot-pins.mjs';import {fileURLToPath} from 'node:url';
-const repo=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');const [configFile,qualification,grading]=process.argv.slice(2),config=JSON.parse(fs.readFileSync(configFile));let frameworks,controls;
+import crypto from 'node:crypto';
+const fileDigest=b=>crypto.createHash('sha256').update(b).digest('hex');
+const repo=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');const [configFile,qualification,grading,scope]=process.argv.slice(2),config=JSON.parse(fs.readFileSync(configFile));assert(scope===undefined||scope==='--pi-only','fixed proof scope');let frameworks,controls;
 for(const [out,kind]of [[qualification,'runtime'],[grading,'grading']]){const root=path.join(out,'g'),r=JSON.parse(fs.readFileSync(path.join(out,'receipt.json'))),bundle=verifyBundle(root),m=JSON.parse(readSealedRecord(root,'manifest.json'));assert(r.ok&&r.bundle.sha256===bundle.sha256&&JSON.stringify(m.pins)===JSON.stringify(r.pins)&&JSON.stringify(m.results)===JSON.stringify(r.results));assert(r.cleanup.ok&&r.removed.every(x=>x.settled&&x.absent));const owner=JSON.parse(fs.readFileSync(path.join(root,'owner.json')));assert(owner.docker_resources.every(x=>x.state==='removed'));
- if(kind==='runtime'){assert(JSON.stringify(runtimePins(config))===JSON.stringify(r.pins),'current runtime/source mismatch');frameworks=r.results.length;assert(frameworks===4&&r.results.every(x=>x.finished&&x.requests===4));}
+ if(kind==='runtime'){assert(JSON.stringify(runtimePins(config))===JSON.stringify(r.pins),'current runtime/source mismatch');frameworks=r.results.length;assert(frameworks===(scope==='--pi-only'?1:4)&&r.results.every(x=>x.finished&&x.requests===4));if(scope==='--pi-only'){
+ const result=r.results[0];assert(result.arm==='pi'&&result.event_evidence?.complete&&result.event_evidence.bytes>8388608);
+ const raw=readSealedRecord(root,result.events_file.replaceAll('\\','/').replace(/^records\//,''));assert(raw.length===result.event_evidence.bytes&&fileDigest(raw)===result.event_evidence.sha256);assert(raw.toString('utf8').split('\n').length-1===result.event_evidence.count);
+ const state=JSON.parse(readSealedRecord(root,'pi/pi-result.json'));assert(state.ok&&state.messages.filter(x=>x.role==='toolResult').length===3&&JSON.stringify(state.messages.at(-1)).includes('qualification completed'),'later tool results and final handoff retained');
+ const consoleBytes=readSealedRecord(root,'pi/stdout');assert(consoleBytes.length<2048&&JSON.parse(consoleBytes).event_evidence.sha256===result.event_evidence.sha256,'bounded console references exact raw evidence');
+}}
  else{for(const [p,hash]of Object.entries(r.pins.sources))assert(fileSha(path.join(repo,p))===hash,'current grader source mismatch');controls=r.results.length;assert(controls===13&&r.results.filter(x=>x.pass).length===1);}}
 console.log(JSON.stringify({ok:true,frameworks,behavior_controls:controls,lossless_archives:true,cleaned:true,current_source_match:true,paid_solver_calls:0,real_provider_acceptance:false}));

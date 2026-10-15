@@ -17,6 +17,19 @@ hosting is comparison only, not a production backend/fallback. Prove V2 executio
 with Node unavailable before claiming implementation; the decision is not readiness.
 
 
+## Pi-only capture repair (current narrow continuation)
+
+For “fix output limit, rerun pi”, read the Pi-only section of the selected repo's
+`docs/AGENT-BENCHMARK-PILOT.md`. The consumed four-arm attempt is immutable evidence;
+never reuse its reservation or infer new authority from its receipt. The new
+`--pilot-pi-qualify/--pilot-pi-prepare/--pilot-pi-run-approved` path reserves one fresh
+Pi-only attempt with the same gpt-6.1-sol LOW/per-arm controls. Only the coordinator
+executes it after recording the actual new human message reference. Model-free
+qualification must match current execution-source/artifact hashes. Private raw Pi
+journals are lossless and fsynced; bounded console metadata is not the event stream.
+Keep partial/failing evidence, unknown usage, full messages/sessions and native
+settlement. No production caps, task/instruction bytes or oracle change.
+
 ## Admission and coordination
 
 The legacy paid/UI entry of `scripts/agent-benchmark.mjs` remains refused. The new
