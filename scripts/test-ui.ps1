@@ -3531,6 +3531,8 @@ $harness = @'
   window.__fixtures.health=nodeAnswer('alive',[],[]);
 
   // Exact high-ID durable attachment through the production pane refresh and main reconnect.
+  // Pin this synthetic replay clock: mounting the same tail twice may otherwise differ by 1ms.
+  var attachDateNow=Date.now, attachNow=Date.now();Date.now=function(){return attachNow;};
   var attachFetch=window.fetch, attachThread=window.__chatThread(), attachKey='9007199254740993';
   var attachRows=[{id:'attach-u',seq:1,role:'user',content:'ATTACH-SAVED-QUESTION',created_at:1},{id:'attach-a',seq:2,role:'assistant',content:'ATTACH-SAVED-ANSWER',created_at:2}];
   var attachRequests=[],attachPhase=0,attachTerminal=false,attachCheckpoint=0;
@@ -3569,6 +3571,7 @@ $harness = @'
   check(visibleTranscriptText(reloadedPane.transcript)===visibleTranscriptText(attachPane.transcript),'newly mounted pane converges saved content, topics and terminal footer; retained live debug phases need not exist in fresh history: '+JSON.stringify({fresh:visibleTranscriptText(reloadedPane.transcript),retained:visibleTranscriptText(attachPane.transcript)}));
   check(!reloadedPane.transcript.querySelector('.chat-content-run-status:not(.finished)')&&!attachPane.transcript.querySelector('.chat-content-run-status:not(.finished)'),'terminal tail never invents a live running status in either pane');
   reloadedPane.remove();attachPane.remove();window.__restorePaneReaderForAttach();window.fetch=attachFetch;
+  Date.now=attachDateNow;
 
   // THE `inspect` MENU ITEM. The main window draws its own right-click menu, and the inspector is asked for
   // immediately after `Reload window`. Its action asks the shell for ONE named view: the name is what the
