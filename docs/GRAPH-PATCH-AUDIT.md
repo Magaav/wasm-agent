@@ -58,6 +58,20 @@ checks.
   agent and operator can inspect them before retrying. Source can change concurrently after
   the check; the graph does not make the patch atomic.
 
+## Stage-aware Git evidence
+
+Git capture consumes retained original output, not exec previews. It collects
+HEAD→index and index→worktree separately, including cancelled staged edits.
+Standalone audit previews `patch_facts` with exact total/returned/truncated
+counts; impact pages all facts. Stage/path/status, source hashes and changed-line
+counts remain visible even when symbols cannot map. Index-version anchors only
+map when index bytes equal worktree snapshot bytes; otherwise the precise gap is
+`index_source_differs_from_worktree`. Unsupported/binary/deleted/metadata-only
+paths, old rename source and removal-only hunks are not clean successes. Native
+changesets remain run-attributed and distinct from these Git workspace facts.
+Limits or non-UTF-8/truncated output without its retained original explicitly fail.
+See [GRAPH.md](GRAPH.md) for Go and source-domain resolution limits.
+
 ## Actionable uncertainty
 
 `unresolved_calls` separates calls originating in changed definitions from the

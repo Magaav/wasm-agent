@@ -82,6 +82,9 @@ impl Store {
     self.conn.execute("INSERT OR IGNORE INTO affected_edges SELECT id FROM edges WHERE lookup_name=?1",params![name])?;
    }
    for alias in &aliases{self.conn.execute("INSERT OR IGNORE INTO affected_edges SELECT id FROM edges WHERE receiver=?1",params![alias])?;}
+   if prepared.iter().any(|p|p.1=="go_module") || removed.iter().any(|p|p.ends_with("go.mod")) {
+    self.conn.execute("INSERT OR IGNORE INTO affected_edges SELECT id FROM edges WHERE path LIKE '%.go'",[])?;
+   }
    self.conn.execute_batch("UPDATE edges SET dst=NULL,resolution='unresolved',confidence=0 WHERE id IN(SELECT id FROM affected_edges)")?;
    let (resolved,unresolved,examined)=self.resolve_affected(progress)?;report.resolved=resolved;report.unresolved=unresolved;report.re_resolved=examined;
    let generation=self.compute_generation()?;

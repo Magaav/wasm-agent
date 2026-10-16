@@ -50,7 +50,8 @@ function M.query(text, opts)
   local results = {}
   for i = 1, math.min(#rows, limit) do
     local row = rows[i]
-    results[#results + 1] = { kind = row.kind, name = row.name, path = row.path, line = row.line }
+    results[#results + 1] = { kind = row.kind, name = row.name, path = row.path, line = row.line,
+      source_domain=row.source_domain, source_role=row.source_role }
   end
   return { query = text, count = #results, truncated = truncated, results = results, graph_snapshot=snapshot }
 end
@@ -75,7 +76,7 @@ function M.search_symbols(text, opts)
       confidence = row.confidence, reason = row.reason, matched_terms = row.matched_terms,
       unmatched_terms = row.unmatched_terms,
       unmatched_definition_terms = row.unmatched_definition_terms,
-      score_breakdown = row.score_breakdown,
+      score_breakdown = row.score_breakdown, source_domain=row.source_domain, source_role=row.source_role,
     }
   end
   local top = results[1]
@@ -132,7 +133,7 @@ function M.explain(name, opts)
       uses[#uses + 1] = edge_label(edge)
       use_evidence[#use_evidence + 1] = {kind=edge.kind,target=edge.target,path=edge.path,
         line=edge.line,resolved=edge.resolved,resolution=edge.resolution,confidence=edge.confidence,
-        dst_path=edge.dst_path,dst_line=edge.dst_line}
+        dst_path=edge.dst_path,dst_line=edge.dst_line,source_domain=edge.source_domain,dst_source_domain=edge.dst_source_domain}
       if #uses >= 15 then break end
     end
     for _, edge in ipairs(entry.incoming or {}) do
@@ -142,12 +143,13 @@ function M.explain(name, opts)
         callers[#callers + 1] = tostring(edge.path or "?") .. ":" .. tostring(edge.line or 0)
         caller_evidence[#caller_evidence + 1] = {kind=edge.kind,path=edge.path,line=edge.line,
           resolution=edge.resolution,confidence=edge.confidence,
-          caller_path=edge.dst_path,caller_line=edge.dst_line}
+          caller_path=edge.dst_path,caller_line=edge.dst_line,source_domain=edge.source_domain,caller_source_domain=edge.dst_source_domain}
         if #callers >= 15 then break end
       end
     end
     out[#out + 1] = {
       kind = node.kind, name = node.name, path = node.path, line = node.line,
+      source_domain=node.source_domain, source_role=node.source_role,
       uses = uses, callers = callers,
       use_evidence = use_evidence, caller_evidence = caller_evidence,
     }

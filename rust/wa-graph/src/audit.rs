@@ -3,7 +3,7 @@
 
 use crate::extract;
 use crate::store::{Result, Store};
-use rusqlite::params;
+use rusqlite::{params,OptionalExtension};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -19,6 +19,12 @@ struct Scope {
 struct ByteRange {
     start: usize,
     end: usize,
+}
+
+fn patch_fact(change: &Value) -> Value {
+    let mut fact=change.clone();
+    if let Some(object)=fact.as_object_mut() { object.remove("lines"); }
+    fact
 }
 
 fn is_definition(kind: &str) -> bool {
@@ -45,6 +51,11 @@ fn is_definition(kind: &str) -> bool {
             | "assignment_statement"
             | "field"
             | "function_definition"
+            | "method_declaration"
+            | "type_spec"
+            | "type_alias"
+            | "var_spec"
+            | "const_spec"
             | "function_statement"
     )
 }
@@ -136,7 +147,7 @@ impl Store {
             .get("changes")
             .and_then(Value::as_array)
             .ok_or("changes_required")?;
-        if changes.len() > 64 {
+        if changes.len() > 16384 {
             return Err("too_many_changed_files".into());
         }
         let reviewed = request.get("reviewed").and_then(Value::as_array);
@@ -167,16 +178,26 @@ impl Store {
                     normalized.push((path, change));
                 }
                 Err(reason) => gaps.push(json!({"path":raw,
-                    "reason":change.get("gap").and_then(Value::as_str).unwrap_or(&reason)})),
+                    "reason":change.get("gap").and_then(Value::as_str).unwrap_or(&reason),"change":patch_fact(change)})),
             }
         }
 
-        let mut total_lines = 0usize;
+        let total_lines: usize = changes.iter().map(|c| c["changed_line_count"].as_u64().map(|n| n as usize).unwrap_or_else(|| c["lines"].as_array().map_or(0, Vec::len))).sum();
         let mut mapped_lines = 0usize;
         let mut ignored_lines = 0usize;
         let mut leads = BTreeMap::new();
         let mut changed_symbols = BTreeMap::new();
         for (path, change) in normalized {
+            if let Some(reason) = change.get("gap").and_then(Value::as_str) {
+                gaps.push(json!({"path":path,"reason":reason,"change":patch_fact(change)}));
+                continue;
+            }
+            if change["removed_only_lines"].as_u64().unwrap_or(0)>0 {
+                gaps.push(json!({"path":path,"reason":"deleted_lines_without_current_source","change":patch_fact(change)}));
+            }
+            if change.get("old_path").is_some() {
+                gaps.push(json!({"path":change["old_path"],"reason":"rename_old_path_not_mapped","change":patch_fact(change)}));
+            }
             let Some(lines) = change.get("lines").and_then(Value::as_array) else {
                 let reason = change
                     .get("gap")
@@ -196,7 +217,15 @@ impl Store {
                 gaps.push(json!({"path":path,"reason":"no_parser"}));
                 continue;
             };
-            let source = std::fs::read_to_string(root.join(&path))?;
+            let stored:Option<Vec<u8>>=self.conn.query_row("SELECT source FROM graph_sources WHERE path=?1",params![path],|r|r.get(0)).optional()?;
+            let source = match stored.and_then(|bytes|String::from_utf8(bytes).ok()) {
+                Some(source)=>source, None=>{gaps.push(json!({"path":path,"reason":"source_not_in_graph_snapshot"}));continue;}
+            };
+            if let Some(expected)=change["source_version"].as_str() {
+                if crate::store::sha256(source.as_bytes())!=expected {
+                    gaps.push(json!({"path":path,"reason":"patch_source_changed","change":patch_fact(change)}));continue;
+                }
+            }
             let Some(tree) = parser.parse(&source, None) else {
                 gaps.push(json!({"path":path,"reason":"parse_failed"}));
                 continue;
@@ -208,8 +237,8 @@ impl Store {
             let source_lines = source_lines(&source);
             let mut definitions = Vec::new();
             let mut stmt = self.conn.prepare(
-                "SELECT id,kind,name,line FROM nodes WHERE path=?1 AND kind IN
-                 ('fn','method','class','interface','enum','struct','trait','union','module')",
+                "SELECT id,kind,name,line FROM nodes WHERE path=?1 AND (kind IN
+                 ('fn','method','class','interface','enum','struct','trait','union','module') OR (lang='go' AND kind IN('type','const','var')))",
             )?;
             let rows = stmt.query_map(params![path], |row| {
                 Ok((
@@ -228,7 +257,6 @@ impl Store {
                     gaps.push(json!({"path":path,"reason":"invalid_changed_line"}));
                     continue;
                 };
-                total_lines += 1;
                 if nonsemantic_line(&source_lines, &comments, line) {
                     ignored_lines += 1;
                     continue;
@@ -323,6 +351,8 @@ impl Store {
         Ok(json!({
             "verdict": if !gaps.is_empty() { "incomplete" } else if lead_count > 0 { "leads" } else { "no_leads" },
             "leads": lead_rows, "lead_count": lead_count, "truncated": lead_count > 20,
+            "patch_facts":{"total":changes.len(),"returned":changes.len().min(diagnostic_limit),"truncated":changes.len()>diagnostic_limit,
+                "rows":changes.iter().take(diagnostic_limit).map(patch_fact).collect::<Vec<_>>()},
             "changed_lines": total_lines, "mapped_lines": mapped_lines,
             "ignored_lines": ignored_lines,
             "changed_symbol_count": changed_symbol_count,
@@ -371,15 +401,16 @@ impl Store {
             "root":canonical_root,
             "changes":request.get("changes"),"direction":direction,"depth":depth
         }))?);
-        let mut offsets = [request.get("offset").and_then(Value::as_u64).unwrap_or(0) as usize, 0, 0, 0];
+        let mut offsets = [request.get("offset").and_then(Value::as_u64).unwrap_or(0) as usize, 0, 0, 0, 0];
         if let Some(cursor) = request.get("cursor").and_then(Value::as_str) {
             let parts: Vec<&str> = cursor.split('.').collect();
             if parts.len() != 3 || parts[0] != generation || parts[2] != digest {
                 return Err("stale_or_mismatched_impact_cursor".into());
             }
-            if let Some(body) = parts[1].strip_prefix("v2:") {
+            if let Some(body) = parts[1].strip_prefix("v3:").or_else(||parts[1].strip_prefix("v2:")) {
                 let positions = body.split(':').collect::<Vec<_>>();
-                if positions.len() != 4 { return Err("invalid_impact_cursor".into()); }
+                let expected=if parts[1].starts_with("v3:"){5}else{4};
+                if positions.len()!=expected { return Err("invalid_impact_cursor".into()); }
                 for (slot, position) in offsets.iter_mut().zip(positions) {
                     *slot = position.parse::<usize>().map_err(|_| "invalid_impact_cursor")?;
                 }
@@ -399,7 +430,8 @@ impl Store {
             .map(|symbol| {
                 json!({
                     "kind":symbol.get("kind"),"name":symbol.get("name"),
-                    "path":symbol.get("path"),"line":symbol.get("line")
+                    "path":symbol.get("path"),"line":symbol.get("line"),
+                    "source_domain":symbol.get("path").and_then(Value::as_str).map(crate::store::source_domain)
                 })
             })
             .collect();
@@ -475,16 +507,17 @@ impl Store {
         let unresolved = &audit["unresolved_calls"];
         let streams = [rows, changed_public,
             audit["gaps"].as_array().cloned().unwrap_or_default(),
-            unresolved["rows"].as_array().cloned().unwrap_or_default()];
+            unresolved["rows"].as_array().cloned().unwrap_or_default(),
+            audit["patch_facts"]["rows"].as_array().cloned().unwrap_or_default()];
         let totals = streams.each_ref().map(|rows| rows.len());
         if offsets.iter().zip(totals).any(|(offset, total)| *offset > total) {
             return Err("impact_offset_out_of_range".into());
         }
-        let build = |selected: &[Vec<Value>; 4]| {
-            let next = std::array::from_fn::<_, 4, _>(|i| offsets[i] + selected[i].len());
+        let build = |selected: &[Vec<Value>; 5]| {
+            let next = std::array::from_fn::<_, 5, _>(|i| offsets[i] + selected[i].len());
             let truncated = next.iter().zip(totals).any(|(offset, total)| *offset < total);
             let cursor = if truncated {
-                json!(format!("{generation}.v2:{}:{}:{}:{}.{digest}", next[0], next[1], next[2], next[3]))
+                json!(format!("{generation}.v3:{}:{}:{}:{}:{}.{digest}", next[0], next[1], next[2], next[3], next[4]))
             } else { Value::Null };
             let mut report=json!({
                 "root":canonical_root,"generation":generation,"freshness":"verified_snapshot",
@@ -493,6 +526,8 @@ impl Store {
                     "truncated":next[1] < totals[1],"rows":selected[1]},
                 "impact":{"total":totals[0],"offset":offsets[0],"returned":selected[0].len(),
                     "truncated":next[0] < totals[0],"rows":selected[0],"next_cursor":cursor},
+                "patch_facts":{"total":totals[4],"offset":offsets[4],"returned":selected[4].len(),
+                    "truncated":next[4]<totals[4],"rows":selected[4]},
                 "coverage":{"changed_lines":audit.get("changed_lines"),
                     "mapped_lines":audit.get("mapped_lines"),"ignored_lines":audit.get("ignored_lines"),
                     "gap_count":audit.get("gap_count"),"gaps_offset":offsets[2],
@@ -507,7 +542,7 @@ impl Store {
             if let Some(snapshot)=request.get("_graph_snapshot"){report["graph_snapshot"]=snapshot.clone();}
             report
         };
-        let mut selected: [Vec<Value>; 4] = std::array::from_fn(|_| Vec::new());
+        let mut selected: [Vec<Value>; 5] = std::array::from_fn(|_| Vec::new());
         let mut output = build(&selected);
         let metadata_bytes = serde_json::to_vec(&output)?.len();
         if metadata_bytes > max_bytes {
@@ -517,7 +552,7 @@ impl Store {
         // Never shorten a row's identity/provenance, or issue a nonadvancing success cursor.
         loop {
             let mut advanced = false;
-            for i in 0..4 {
+            for i in 0..5 {
                 let position = offsets[i] + selected[i].len();
                 if position >= totals[i] || selected[i].len() >= limit { continue; }
                 selected[i].push(streams[i][position].clone());
@@ -531,7 +566,7 @@ impl Store {
         }
         if selected.iter().all(Vec::is_empty) && offsets.iter().zip(totals).any(|(offset, total)| *offset < total) {
             let mut minimum = usize::MAX;
-            for i in 0..4 {
+            for i in 0..5 {
                 if offsets[i] < totals[i] {
                     selected[i].push(streams[i][offsets[i]].clone());
                     minimum = minimum.min(serde_json::to_vec(&build(&selected))?.len());
@@ -551,10 +586,10 @@ fn impact_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(i64, Value)> {
         id,
         json!({
             "kind":row.get::<_, String>(1)?,"name":row.get::<_, String>(2)?,
-            "path":path,"line":row.get::<_, i64>(4)?,
+            "path":path,"line":row.get::<_, i64>(4)?,"source_domain":crate::store::source_domain(&path),
             "module":path.split('/').next().unwrap_or("."),
             "test":path.starts_with("tests/") || path.contains("/tests/")
-                || path.contains("/test_") || path.contains("/test-"),
+                || path.contains("/test_") || path.contains("/test-") || path.ends_with("_test.go"),
             "via":{"kind":row.get::<_, String>(5)?,"path":row.get::<_, String>(6)?,
                 "line":row.get::<_, i64>(7)?,"resolution":row.get::<_, String>(8)?,
                 "confidence":row.get::<_, i64>(9)?}

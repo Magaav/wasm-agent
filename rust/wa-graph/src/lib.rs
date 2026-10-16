@@ -14,6 +14,8 @@ pub mod watch;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod repair_tests;
 
 pub use store::{IndexReport, NodeRow, Stats, Store};
 pub use watch::WatchHandle;

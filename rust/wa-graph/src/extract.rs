@@ -48,8 +48,10 @@ pub struct ImportAlias {
 
 /// Which grammar a path belongs to. Unknown extensions are not indexed.
 pub fn language_for(path: &str) -> Option<&'static str> {
+    if path.replace('\\',"/").rsplit('/').next()==Some("go.mod") {return Some("go_module");}
     let ext = path.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
     match ext.as_str() {
+        "go" => Some("go"),
         "rs" => Some("rust"),
         "lua" => Some("lua"),
         "sh" | "bash" => Some("bash"),
@@ -64,6 +66,7 @@ pub fn language_for(path: &str) -> Option<&'static str> {
 pub fn parser_for(lang: &str) -> Option<Parser> {
     let mut parser = Parser::new();
     let loaded = match lang {
+        "go" => parser.set_language(&tree_sitter_go::LANGUAGE.into()).is_ok(),
         "rust" => parser
             .set_language(&tree_sitter_rust::LANGUAGE.into())
             .is_ok(),
@@ -103,6 +106,7 @@ pub fn extract_progress(path:&str,lang:&str,source:&str,progress:&mut impl FnMut
         visited:0,
         progress,
         lang,
+        go_locals:Vec::new(),
     };
     // Node 0 is always the file itself, so file-level refs (imports, doc mentions) have a source.
     ctx.nodes.push(DefNode {
@@ -117,7 +121,7 @@ pub fn extract_progress(path:&str,lang:&str,source:&str,progress:&mut impl FnMut
     ctx.scope.push(0);
 
     match lang {
-        "rust" | "lua" | "bash" | "powershell" | "javascript" | "typescript" => {
+        "go" | "rust" | "lua" | "bash" | "powershell" | "javascript" | "typescript" => {
             let mut parser=parser_for(lang).ok_or_else(||format!("graph_parser_unavailable:{lang}"))?;
             let timeout=std::env::var("WA_GRAPH_PARSE_TIMEOUT_MS").ok().map(|value|value.parse::<u64>().ok().filter(|ms|*ms>0&&*ms<=120_000).ok_or("invalid_graph_parse_timeout_ms")).transpose()?.unwrap_or(30_000);
             parser.set_timeout_micros(timeout*1000);
@@ -128,6 +132,20 @@ pub fn extract_progress(path:&str,lang:&str,source:&str,progress:&mut impl FnMut
                 &source.as_bytes()[offset.min(source.len())..end]
             },None).ok_or_else(||format!("graph_parse_failed_or_timeout:{path}"))?;
             walk(&mut ctx,tree.root_node());
+        }
+        "go_module" => {
+            let mut offset=0;
+            for (row,raw) in source.split_inclusive('\n').enumerate() {
+                let start=offset;offset+=raw.len();
+                let line=raw.trim_end_matches(['\r','\n']);
+                let mut words=line.split_whitespace();
+                if words.next()==Some("module") {
+                    if let Some(module)=words.next() {
+                        ctx.nodes.push(DefNode{kind:"module",name:module.trim_matches('\"').to_string(),line:row+1,col:0,start_byte:start,end_byte:start+line.len(),detail:Some("Go module identity; replace/workspace directives not resolved".into())});
+                    }
+                    break;
+                }
+            }
         }
         "markdown" => markdown_mentions(&mut ctx, source),
         _ => return Err(format!("graph_language_unsupported:{lang}")),
@@ -148,6 +166,7 @@ struct Ctx<'a,'p> {
     visited:usize,
     progress:&'p mut dyn FnMut(&str,usize),
     lang: &'a str,
+    go_locals:Vec<std::collections::BTreeSet<String>>,
 }
 
 impl<'a,'p> Ctx<'a,'p> {
@@ -205,6 +224,8 @@ fn walk(ctx: &mut Ctx, node: Node) {
         if walk_rust(ctx, node) {
             return;
         }
+    } else if ctx.lang == "go" && walk_go(ctx, node) {
+        return;
     } else if ctx.lang == "lua" && walk_lua(ctx, node) {
         return;
     } else if ctx.lang == "bash" && walk_bash(ctx, node) {
@@ -219,6 +240,93 @@ fn walk(ctx: &mut Ctx, node: Node) {
     for child in node.named_children(&mut cursor) {
         walk(ctx, child);
     }
+}
+
+fn go_local_names(node:Node,source:&str,names:&mut std::collections::BTreeSet<String>) {
+    if matches!(node.kind(),"parameter_declaration"|"variadic_parameter_declaration"|"var_spec"|"const_spec") {
+        let mut cursor=node.walk();for name in node.children_by_field_name("name",&mut cursor) {
+            names.insert(name.utf8_text(source.as_bytes()).unwrap_or("").to_string());
+        }
+    }
+    if matches!(node.kind(),"short_var_declaration"|"range_clause") {
+        if let Some(left)=node.child_by_field_name("left") {
+            let mut cursor=left.walk();for name in left.named_children(&mut cursor) {
+                if name.kind()=="identifier" {names.insert(name.utf8_text(source.as_bytes()).unwrap_or("").to_string());}
+            }
+        }
+    }
+    let mut cursor=node.walk();for child in node.named_children(&mut cursor){go_local_names(child,source,names);}
+}
+
+/// Go syntax only: selectors keep their receiver and do not imply interface identity.
+fn walk_go(ctx: &mut Ctx, node: Node) -> bool {
+    match node.kind() {
+        "function_declaration" | "method_declaration" => {
+            if let Some(name)=node.child_by_field_name("name") {
+                let mut qualified=ctx.text(name).to_string();
+                let kind=if node.kind()=="method_declaration" {"method"} else {"fn"};
+                if let Some(receiver)=node.child_by_field_name("receiver") {
+                    if let Some(parameter)=receiver.named_child(0) {
+                        if let Some(ty)=parameter.child_by_field_name("type") {
+                            let raw=ctx.text(ty).trim_start_matches('*').trim();
+                            let ty=raw.split('[').next().unwrap_or(raw);
+                            qualified=format!("{ty}.{qualified}");
+                        }
+                    }
+                }
+                let detail=ctx.text(node).split('{').next().unwrap_or("").trim().to_string();
+                let id=ctx.push_node(kind,qualified,node,Some(detail));
+                let mut locals=std::collections::BTreeSet::new();go_local_names(node,ctx.src,&mut locals);
+                ctx.go_locals.push(locals);
+                ctx.scope.push(id);
+                let mut cursor=node.walk();
+                for child in node.named_children(&mut cursor) {walk(ctx,child);}
+                ctx.scope.pop();ctx.go_locals.pop();
+                return true;
+            }
+        }
+        "type_spec" | "type_alias" => {
+            if let Some(name)=node.child_by_field_name("name") {
+                let kind=match node.child_by_field_name("type").map(|n|n.kind()) {
+                    Some("struct_type")=>"struct",Some("interface_type")=>"interface",_=>"type",
+                };
+                let id=ctx.push_node(kind,ctx.text(name).to_string(),node,Some(ctx.text(node).to_string()));
+                ctx.scope.push(id);
+                let mut cursor=node.walk();for child in node.named_children(&mut cursor){walk(ctx,child);}
+                ctx.scope.pop();return true;
+            }
+        }
+        "var_spec" | "const_spec" if ctx.cur()==0 => {
+            let mut cursor=node.walk();
+            for child in node.children_by_field_name("name",&mut cursor) {
+                ctx.push_node(if node.kind()=="const_spec"{"const"}else{"var"},ctx.text(child).to_string(),node,Some(ctx.text(node).to_string()));
+            }
+        }
+        "package_clause" => {
+            if let Some(name)=node.named_child(0) {ctx.push_node("package",ctx.text(name).to_string(),node,None);}
+            return true;
+        }
+        "import_spec" => {
+            if let Some(path)=node.child_by_field_name("path") {
+                let module=ctx.text(path).trim_matches(|c|c=='\"'||c=='`').to_string();
+                let alias=node.child_by_field_name("name").map(|n|ctx.text(n).to_string())
+                    .unwrap_or_else(||module.rsplit('/').next().unwrap_or("").to_string());
+                ctx.push_edge("imports",module.clone(),node);
+                ctx.imports.push(ImportAlias{alias,module});
+            }
+            return true;
+        }
+        "call_expression" => {
+            if let Some(function)=node.child_by_field_name("function") {
+                let raw=ctx.text(function);
+                let receiver=raw.split('.').next().unwrap_or(raw);
+                let shadowed=ctx.go_locals.iter().any(|names|names.contains(receiver));
+                ctx.push_edge("calls",if shadowed{format!("dynamic::{raw}")}else{raw.to_string()},node);
+            }
+        }
+        _=>{}
+    }
+    false
 }
 
 /// Bash: function definitions, `source`/`.` imports, and command invocations.
