@@ -329,3 +329,23 @@ fn go_extension_case_does_not_escape_go_resolution_limits() {
     assert!(edges[0].dst.is_none());
     assert_eq!(edges[0].resolution, "go_unresolved_selector_or_external");
 }
+
+#[test]
+fn go_unknown_selector_cannot_guess_a_local_type_for_an_external_default_alias() {
+    let f = Fixture::new("selector");
+    f.write(
+        "caller.go",
+        "package demo\nimport \"external.test/pkg/v2\"\nfunc Caller() { pkg.Method() }\n",
+    );
+    f.write(
+        "types.go",
+        "package demo\ntype pkg struct {}\nfunc (p pkg) Method() {}\n",
+    );
+    let s = f.store();
+    let edge = s.explain("Caller").unwrap().remove(0).1.remove(0);
+    assert!(
+        edge.dst.is_none(),
+        "unknown package selector must not become a typed method edge"
+    );
+    assert_eq!(edge.resolution, "go_unresolved_selector_or_external");
+}

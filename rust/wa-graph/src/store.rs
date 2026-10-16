@@ -1265,6 +1265,10 @@ fn resolve_go(conn:&Connection,target:&str,path:&str,kind:&str)->Result<Option<R
                 p!=module_path && other.len()>base.len() && (dir==other_dir || dir.starts_with(&format!("{other_dir}/")))
             }) {return Ok(None);}
             wanted=member.to_string();strategy="go_local_import_unique";confidence=95;
+        } else {
+            // A selector alone is not receiver/type identity. In particular an external
+            // package's default name need not equal its import-path basename (e.g. /v2).
+            return Ok(None);
         }
     }
     let mut stmt=conn.prepare("SELECT id,path FROM nodes WHERE name=?1 AND lang='go' AND kind IN('fn','method')")?;
