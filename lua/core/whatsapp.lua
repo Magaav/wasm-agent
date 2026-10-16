@@ -267,7 +267,7 @@ function M.schemas()
   return {
     schema("whatsapp_read",
       "Read recent messages from the explicitly bound linked-device journal, or the historical ledger for an old profile. Bounded, scoped and read-only; no app opening or read marking. The trusted event fixes the conversation; coverage/truncation is explicit.",
-      { limit = { type = "integer", minimum = 1, maximum = 200 } }),
+      { limit = { type = "integer", minimum = 1, maximum = 200 },before={type="integer",minimum=0},row={type="integer",minimum=1},field={type="string",enum={"chat","id","sender","body","unsupported","transcript","audio_state","audio_reason","sent_at","from_me","history","audio","observed_at"}},version={type="string",minLength=1,maxLength=128},offset={type="integer",minimum=0},length={type="integer",minimum=1,maximum=16384} }),
     schema("whatsapp_decide",
       "Record the decision for this message durably: reply or no_reply, with a reason. No external effect and no send approval.",
       { decision = { type = "string", enum = { "reply", "no_reply" } }, reason = { type = "string" } },
@@ -297,14 +297,22 @@ local function conversation_tool(memory, args, profile, ctx)
   limit = math.max(1, math.min(200, limit))
   if profile.resources.backend == "linked_device" then
     local r=profile.resources
-    local data=dofile('lua/core/mcp.lua').whatsapp('read_snapshot',{since=0,limit=limit},
+    local method,request='read_snapshot',{since=0,before=args.before or 0,limit=limit}
+    if args.row~=nil then method='read_field';request={resource='read_snapshot',row=args.row,field=args.field,version=args.version,offset=args.offset or 0,length=args.length or 16384} end
+    local data=dofile('lua/core/mcp.lua').whatsapp(method,request,
       {backend='linked_device',account=r.account,generation=r.generation,connector_url=r.connector_url,token_file=r.token_file,ca_file=r.ca_file,allowed_conversations={event.conversation_id}},ctx)
     if not data or data.ok~=true then return data or fail('connector_unreadable') end
+    if method=='read_field' then
+      if data.conversation_id~=event.conversation_id then return fail('connector_scope_mismatch') end
+      return data
+    end
+    for _,row in ipairs(data.oversized_rows or {}) do if row.conversation_id~=event.conversation_id then return fail('connector_scope_mismatch') end end
     for _,message in ipairs(data.messages or {}) do
       if message.conversation_id~=event.conversation_id then return fail('connector_scope_mismatch') end
     end
-    return {conversation_id=event.conversation_id,title=event.conversation_id,kind='unknown',messages=data.messages,count=#(data.messages or {}),scope_kind=data.scope_kind,source_state=data.source_state,next_before=data.next_before,limit_scope=data.limit_scope,coverage=data.coverage,draft_visibility='unsupported',truncated=data.truncated}
+    return {conversation_id=event.conversation_id,title=event.conversation_id,kind='unknown',messages=data.messages,oversized_rows=data.oversized_rows,order=data.order,rows_delivered=data.rows_delivered,inline_complete=data.inline_complete,byte_limit=data.byte_limit,encoded_bytes=data.encoded_bytes,byte_truncated=data.byte_truncated,row_truncated=data.row_truncated,page_version=data.page_version,count=#(data.messages or {}),scope_kind=data.scope_kind,source_state=data.source_state,next_before=data.next_before,limit_scope=data.limit_scope,coverage=data.coverage,draft_visibility='unsupported',truncated=data.truncated}
   end
+  if args.row~=nil then return fail('field_retrieval_requires_linked_device') end
   -- Historical browser-era ledger remains readable; never imported/reposted by title or guessed IDs.
   local messages = memory.conversation(event.conversation_id, limit)
   -- The ledger read must not stray outside the bound conversation. A row that says otherwise is a

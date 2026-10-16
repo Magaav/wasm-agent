@@ -7,6 +7,7 @@ import {tmpdir} from 'node:os';
 import {pathToFileURL} from 'node:url';
 import {execFileSync} from 'node:child_process';
 import {createWhatsAppAdapter,endpoint} from './mcp-whatsapp.mjs';
+import {bytePage} from './fixtures/whatsapp-byte-envelope.mjs';
 import {readBinding} from './whatsapp-mcp-client.mjs';
 
 test('one total scoped page, stable global cursor, explicit operator-wide authority; old fanout causal control',async()=>{
@@ -15,7 +16,7 @@ test('one total scoped page, stable global cursor, explicit operator-wide author
  const server=http.createServer((req,res)=>{calls++;let body='';req.on('data',b=>body+=b);req.on('end',()=>{const r=JSON.parse(body);const scoped=messages.filter(m=>(r.account_wide||r.conversations?.includes(m.conversation_id)||r.conversation_id===m.conversation_id)&&(!r.before||m.cursor<r.before));
   // Old per-chat calls get two rows each, reproducing the old aggregate-over-limit defect.
   let page=scoped.slice(0,r.limit||2);if(r.conversation_id==='300@s.whatsapp.net')page=[{id:'old1',conversation_id:r.conversation_id,cursor:30},{id:'old2',conversation_id:r.conversation_id,cursor:29}];
-  res.setHeader('Content-Type','application/json');res.end(JSON.stringify({ok:true,account:r.account,generation:r.generation,messages:page,conversations:[...new Set(page.map(m=>m.conversation_id))].map(id=>({id})),posts:[],cursor_version:1,limit_scope:'total',scope_kind:r.account_wide?'account':'selected',next_before:scoped.length>page.length?page.at(-1).cursor:0,truncated:scoped.length>page.length,source_state:{connection:'catching_up',persistence_gap:true,last_journal_observed_at:123,coverage:'partial'}}));});});await new Promise(r=>server.listen(0,'127.0.0.1',r));
+  res.setHeader('Content-Type','application/json');res.end(bytePage({ok:true,account:r.account,generation:r.generation,messages:page,conversations:[...new Set(page.map(m=>m.conversation_id))].map(id=>({id})),posts:[],cursor_version:1,limit_scope:'total',scope_kind:r.account_wide?'account':'selected',next_before:scoped.length>page.length?page.at(-1).cursor:0,truncated:scoped.length>page.length,source_state:{connection:'catching_up',persistence_gap:true,last_journal_observed_at:123,coverage:'partial'}}));});});await new Promise(r=>server.listen(0,'127.0.0.1',r));
  const binding={backend:'linked_device',account:'100@s.whatsapp.net',generation:1,allowed_conversations:['200@s.whatsapp.net','300@s.whatsapp.net'],connector_url:`http://127.0.0.1:${server.address().port}`,token_file};
  try{
   const call=createWhatsAppAdapter(binding);const first=await call('read_snapshot',{limit:2});assert.equal(calls,1);assert.equal(first.messages.length,2);assert.equal(first.source_state.persistence_gap,true);assert.equal(first.messages.some(m=>m.conversation_id==='400@g.us'),false);assert.equal(first.next_before,2);

@@ -6,11 +6,12 @@ import {join,resolve} from 'node:path';
 import http from 'node:http';
 import {spawnSync} from 'node:child_process';
 import {createWhatsAppAdapter,endpoint} from './mcp-whatsapp.mjs';
+import {bytePage} from './fixtures/whatsapp-byte-envelope.mjs';
 import {plan,retire,hash,definition} from './whatsapp-retire.mjs';
 
 test('linked-device MCP auth/scope, no redirects, no browser or model-send fallback',async()=>{
  const dir=mkdtempSync(join(tmpdir(),'wa-linked-fixture-'));const token='a'.repeat(64);const token_file=join(dir,'token');writeFileSync(token_file,token,{mode:0o600});let calls=0;
- const server=http.createServer((req,res)=>{calls++;assert.equal(req.headers.authorization,'Bearer '+token);let body='';req.on('data',b=>body+=b);req.on('end',()=>{const data=JSON.parse(body);assert.equal(data.account,'100@s.whatsapp.net');assert.equal(data.generation,1);assert.deepEqual(data.conversations,['200@s.whatsapp.net']);const conversation_id=data.conversations[0];res.setHeader('Content-Type','application/json');res.end(JSON.stringify({ok:true,account:'100@s.whatsapp.net',generation:1,messages:[{id:'fixture',conversation_id}],conversations:[{id:conversation_id}],cursor_version:1,limit_scope:'total',scope_kind:'selected',source_state:{connection:'connected',persistence_gap:false},next_before:0}));});});await new Promise(r=>server.listen(0,'127.0.0.1',r));
+ const server=http.createServer((req,res)=>{calls++;assert.equal(req.headers.authorization,'Bearer '+token);let body='';req.on('data',b=>body+=b);req.on('end',()=>{const data=JSON.parse(body);assert.equal(data.account,'100@s.whatsapp.net');assert.equal(data.generation,1);assert.deepEqual(data.conversations,['200@s.whatsapp.net']);const conversation_id=data.conversations[0];res.setHeader('Content-Type','application/json');res.end(bytePage({ok:true,account:'100@s.whatsapp.net',generation:1,messages:[{id:'fixture',conversation_id}],conversations:[{id:conversation_id}],cursor_version:1,limit_scope:'total',scope_kind:'selected',source_state:{connection:'connected',persistence_gap:false},next_before:0}));});});await new Promise(r=>server.listen(0,'127.0.0.1',r));
  const binding={backend:'linked_device',account:'100@s.whatsapp.net',generation:1,allowed_conversations:['200@s.whatsapp.net'],connector_url:`http://127.0.0.1:${server.address().port}`,token_file};
  try{
   const call=createWhatsAppAdapter(binding);const data=await call('read_snapshot',{});assert.equal(data.messages[0].id,'fixture');assert.equal(calls,1);

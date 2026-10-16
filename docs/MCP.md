@@ -80,8 +80,12 @@ marking or chat opening. Remote access requires authenticated trusted-CA HTTPS;
 numeric loopback HTTP is allowed locally. Redirects, insecure TLS and credential
 URLs refuse. Protocol probing does not prove app identity or authorize effects.
 
-The seven existing/added read/refusal tool names are recognizable: read_snapshot,
-list_chats, posting_status, lookup_self, inspect_chat, download_audio and send_message.
+The eight read/refusal tool names are read_snapshot, list_chats, posting_status,
+read_field, lookup_self, inspect_chat, download_audio and send_message. Page-v2
+responses have an incremental4MiB JSON budget and explicit ordered oversized
+references, not silent text clipping. Exact field reads are16KiB base64 chunks with
+optimistic versions; cursors are live scoped keyset windows, not pinned snapshots
+or cryptographic scope tokens. See [byte contract](WHATSAPP-BYTE-PAGES.md).
 Download_audio and
 send_message explicitly refuse: media belongs to the private deterministic worker,
 and GENERAL model sends cannot prove cross-device draft safety. No invented draft

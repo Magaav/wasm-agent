@@ -116,6 +116,10 @@ func openJournal(dir string) (*Journal, error) {
 		j.Close()
 		return nil, err
 	}
+	if err = installReadVersions(db); err != nil {
+		j.Close()
+		return nil, err
+	}
 	os.Chmod(filepath.Join(dir, "journal.db"), 0600)
 	if _, e := os.Stat(filepath.Join(dir, "persistence-gap.json")); e == nil {
 		j.gap = true

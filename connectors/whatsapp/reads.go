@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"strings"
 	"time"
@@ -16,6 +17,12 @@ type readRequest struct {
 	Before        int64    `json:"before"`
 	Conversations []string `json:"conversations"`
 	AccountWide   bool     `json:"account_wide"`
+	Resource      string   `json:"resource"`
+	Row           int64    `json:"row"`
+	Field         string   `json:"field"`
+	Offset        int64    `json:"offset"`
+	Length        int      `json:"length"`
+	Version       string   `json:"version"`
 }
 
 func (j *Journal) readScope(c Config, r readRequest, alias string) (string, []any, error) {
@@ -62,6 +69,9 @@ func (j *Journal) readScope(c Config, r readRequest, alias string) (string, []an
 	return where + " AND " + alias + "chat IN (" + strings.Join(slots, ",") + ")", args, nil
 }
 func (j *Journal) readPage(c Config, r readRequest, kind string) (map[string]any, error) {
+	return j.readPageBudget(c, r, kind, pageByteLimit)
+}
+func (j *Journal) readPageBudget(c Config, r readRequest, kind string, budget int) (map[string]any, error) {
 	limit := r.Limit
 	if limit == 0 {
 		limit = 2000
@@ -69,73 +79,123 @@ func (j *Journal) readPage(c Config, r readRequest, kind string) (map[string]any
 	if limit < 1 || limit > 10000 || r.Since < 0 || r.Before < 0 {
 		return nil, errors.New("invalid_window")
 	}
+	if budget > pageByteLimit || budget <= pageEnvelopeReserve {
+		return nil, errPageNoProgress
+	}
+	source, err := boundedSource(j, c)
+	if err != nil {
+		return nil, err
+	}
+	l, err := layout(kind)
+	if err != nil {
+		return nil, err
+	}
 	where, args, err := j.readScope(c, r, "m.")
 	if err != nil {
 		return nil, err
 	}
-	baseWhere := where
-	baseArgs := append([]any(nil), args...)
-	table := "messages"
-	cursor := "m.rowid"
-	columns := `m.chat,m.id,m.sender,m.body,m.sent,m.own,m.history,m.audio,m.unsupported,COALESCE(a.transcript,''),COALESCE(a.state,''),COALESCE(a.reason,''),m.rowid,m.observed`
-	join := ` LEFT JOIN audio a USING(account,generation,chat,id)`
-	if kind == "list_chats" {
-		table = "chats"
-		columns = "m.chat,m.rowid,COALESCE(h.reason,'')"
-		join = " LEFT JOIN chat_holds h USING(account,generation,chat)"
-	} else if kind == "posting_status" {
-		table = "outbox"
-		columns = "m.chat,m.source,m.part,m.send_id,m.state,m.ack,COALESCE(r.reason,''),COALESCE(r.next_attempt,0),m.rowid"
-		join = " LEFT JOIN post_retry r USING(account,generation,chat,source,part)"
-	}
+	baseWhere, baseArgs := where, append([]any(nil), args...)
 	if kind == "read_snapshot" {
 		where += " AND m.observed>=?"
 		args = append(args, r.Since)
 	}
-	where += " AND (?=0 OR " + cursor + "<?)"
+	where += " AND (?=0 OR m.rowid<?)"
 	args = append(args, r.Before, r.Before, limit+1)
-	rows, err := j.db.Query("SELECT "+columns+" FROM "+table+" m"+join+" WHERE "+where+" ORDER BY "+cursor+" DESC LIMIT ?", args...)
+	rows, err := j.db.Query("SELECT "+projection(l)+" FROM "+l.table+" m"+l.join+" WHERE "+where+" ORDER BY m.rowid DESC LIMIT ?", args...)
 	if err != nil {
 		return nil, err
 	}
 	messages := []Message{}
 	conversations := []map[string]any{}
 	posts := []map[string]any{}
-	cursors := []int64{}
+	oversized := []map[string]any{}
+	order := []map[string]any{}
 	seen := map[string]bool{}
+	used, delivered := pageEnvelopeReserve, 0
+	var lastDelivered int64
+	more, byBytes, byRows := false, false, false
 	for rows.Next() {
-		if kind == "read_snapshot" {
-			var m Message
-			err = rows.Scan(&m.Chat, &m.ID, &m.Sender, &m.Body, &m.Sent, &m.Own, &m.History, &m.Audio, &m.Unsupported, &m.Transcript, &m.AudioState, &m.AudioReason, &m.Cursor, &m.Observed)
-			if err == nil {
-				messages = append(messages, m)
-				cursors = append(cursors, m.Cursor)
-				if len(messages) <= limit && !seen[m.Chat] {
-					seen[m.Chat] = true
-					conversations = append(conversations, map[string]any{"id": m.Chat, "title": m.Chat, "archived": nil, "left": nil})
-				}
+		if delivered == limit {
+			more = true
+			byRows = true
+			break
+		}
+		row, e := scanCandidate(rows, l)
+		if e != nil {
+			rows.Close()
+			return nil, e
+		}
+		value, inline := row.inline(l, kind)
+		var encoded []byte
+		if inline {
+			encoded, e = json.Marshal(value)
+			if e != nil {
+				rows.Close()
+				return nil, e
 			}
-		} else if kind == "list_chats" {
-			var chat, hold string
-			var cursor int64
-			err = rows.Scan(&chat, &cursor, &hold)
-			if err == nil {
-				conversations = append(conversations, map[string]any{"id": chat, "cursor": cursor, "posting_hold_reason": hold})
-				cursors = append(cursors, cursor)
-			}
-		} else {
-			var chat, source, id, state, ack, reason string
-			var part int
-			var next, cursor int64
-			err = rows.Scan(&chat, &source, &part, &id, &state, &ack, &reason, &next, &cursor)
-			if err == nil {
-				posts = append(posts, map[string]any{"conversation_id": chat, "source_message_id": source, "part": part, "send_id": id, "state": state, "ack": ack, "reason": reason, "next_attempt": next, "cursor": cursor})
-				cursors = append(cursors, cursor)
+			if len(encoded) > inlineRowBytes {
+				inline = false
 			}
 		}
-		if err != nil {
+		outcomeKind, index := "inline", 0
+		var descriptor map[string]any
+		var chat map[string]any
+		var chatBytes []byte
+		if !inline {
+			descriptor = row.descriptor(l, kind)
+			encoded, e = json.Marshal(descriptor)
+			outcomeKind = "oversized"
+			index = len(oversized)
+		} else if kind == "read_snapshot" {
+			index = len(messages)
+			m := value.(Message)
+			if !seen[m.Chat] {
+				chat = map[string]any{"id": m.Chat, "title": m.Chat, "archived": nil, "left": nil}
+				chatBytes, e = json.Marshal(chat)
+			}
+		} else if kind == "list_chats" {
+			index = len(conversations)
+		} else {
+			index = len(posts)
+		}
+		if e != nil {
 			rows.Close()
-			return nil, err
+			return nil, e
+		}
+		outcome := map[string]any{"cursor": row.row, "kind": outcomeKind, "index": index}
+		outcomeBytes, e := json.Marshal(outcome)
+		if e != nil {
+			rows.Close()
+			return nil, e
+		}
+		// Count exact row/summary/order JSON plus conservative array punctuation, BEFORE append.
+		charge := len(encoded) + len(chatBytes) + len(outcomeBytes) + 16
+		if used+charge > budget {
+			more = true
+			byBytes = true
+			if delivered == 0 {
+				rows.Close()
+				return nil, errPageNoProgress
+			}
+			break
+		}
+		used += charge
+		delivered++
+		lastDelivered = row.row
+		order = append(order, outcome)
+		if !inline {
+			oversized = append(oversized, descriptor)
+		} else if kind == "read_snapshot" {
+			m := value.(Message)
+			messages = append(messages, m)
+			if chat != nil {
+				seen[m.Chat] = true
+				conversations = append(conversations, chat)
+			}
+		} else if kind == "list_chats" {
+			conversations = append(conversations, value.(map[string]any))
+		} else {
+			posts = append(posts, value.(map[string]any))
 		}
 	}
 	err = rows.Err()
@@ -143,31 +203,27 @@ func (j *Journal) readPage(c Config, r readRequest, kind string) (map[string]any
 	if err != nil {
 		return nil, err
 	}
-	more := len(cursors) > limit
-	var next int64
-	if more {
-		next = cursors[limit-1]
-		if len(messages) > limit {
-			messages = messages[:limit]
-		}
-		if kind == "list_chats" {
-			conversations = conversations[:limit]
-		}
-		if len(posts) > limit {
-			posts = posts[:limit]
-		}
-	}
-	var last int64
-	if err = j.db.QueryRow("SELECT COALESCE(MAX(m.observed),0) FROM messages m WHERE "+baseWhere, baseArgs...).Scan(&last); err != nil {
+	var lastObserved, invalidObserved int64
+	if err = j.db.QueryRow("SELECT COALESCE(MAX(CASE WHEN typeof(m.observed)='integer' THEN m.observed ELSE NULL END),0),COALESCE(SUM(CASE WHEN typeof(m.observed)='integer' THEN 0 ELSE 1 END),0) FROM messages m WHERE "+baseWhere, baseArgs...).Scan(&lastObserved, &invalidObserved); err != nil {
 		return nil, err
 	}
-	source := j.freshness()
-	source["last_journal_observed_at"] = last
+	// Late metadata is fetched after closing the cursor, validated and included in the reserved envelope.
+	source, err = boundedSource(j, c)
+	if err != nil {
+		return nil, err
+	}
+	source["last_journal_observed_at"] = lastObserved
+	source["observation_metadata_valid"] = invalidObserved == 0
+	source["invalid_observation_rows"] = invalidObserved
+	next := int64(0)
+	if more {
+		next = lastDelivered
+	}
 	scopeKind := "selected"
 	if r.AccountWide {
 		scopeKind = "account"
 	}
-	data := map[string]any{"ok": true, "scope_kind": scopeKind, "account": c.Account, "generation": c.Generation, "messages": messages, "conversations": conversations, "posts": posts, "truncated": more, "next_before": next, "cursor_version": 1, "limit_scope": "total", "coverage": "partial", "source_state": source, "snapshot_at": time.Now().Unix(), "draft_visibility": "unsupported"}
+	data := map[string]any{"ok": true, "scope_kind": scopeKind, "account": c.Account, "generation": c.Generation, "messages": messages, "conversations": conversations, "posts": posts, "oversized_rows": oversized, "order": order, "rows_delivered": delivered, "inline_rows_delivered": delivered - len(oversized), "inline_complete": len(oversized) == 0, "truncated": more, "byte_truncated": byBytes, "row_truncated": byRows, "next_before": next, "cursor_version": 1, "page_version": 2, "cursor_semantics": "scoped live row-ID keyset window; not a pinned snapshot or cryptographic scope token", "limit_scope": "total", "byte_limit": pageByteLimit, "inline_field_byte_limit": inlineFieldBytes, "inline_row_byte_limit": inlineRowBytes, "coverage": "partial", "source_state": source, "snapshot_at": time.Now().Unix(), "draft_visibility": "unsupported"}
 	if r.AccountWide {
 		var excluded int
 		if err = j.db.QueryRow("SELECT count(*) FROM excluded WHERE account=? AND generation=?", c.Account, c.Generation).Scan(&excluded); err != nil {
@@ -175,5 +231,6 @@ func (j *Journal) readPage(c Config, r readRequest, kind string) (map[string]any
 		}
 		data["excluded_scope_count"] = excluded
 	}
+	// Final HTTP encoding remains below the fixed budget, with no additional content fetch.
 	return data, nil
 }
