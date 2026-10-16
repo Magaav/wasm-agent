@@ -4,6 +4,7 @@ local json=dofile('lua/vendor/json.lua')
 local contract=dofile('lua/core/json_contract.lua')
 local output=dofile('lua/core/tool_output.lua')
 local telemetry=dofile('lua/core/telemetry.lua')
+local presentation=dofile('lua/core/codemode_view.lua')
 local M={}
 local forbidden={wave_autoflush=true,codemode=true,tool_call=true,tool_search=true,subagent=true,integrate=true,session_worktree=true,
  session=true,sessions=true,resume_session=true,session_debug=true,session_fixture=true,session_many=true,search_messages=true,search_messages_many=true,operation=true,
@@ -26,7 +27,8 @@ function M.run(memory,args,role,ctx,catalog,current_catalog,dispatch,execution)
    descriptors[#descriptors+1]={name=f.name,jsName=js,description=f.description}
   end
  end
- local globals={{name='searchTools',spread=true},{name='describeTool',spread=false}}
+ local globals={{name='searchTools',spread=true},{name='describeTool',spread=false},{name='showCall',spread=false}}
+ local selected={}
  local store_key='codemode-store.v1:'..scope
  local raw=memory.meta_get(store_key);local store=raw and json.decode(raw) or {}
  local spec={owner=scope,tools=descriptors,globals=globals,store=store,code=args.code,timeout_ms=args.timeout_ms or 30000}
@@ -66,7 +68,9 @@ function M.run(memory,args,role,ctx,catalog,current_catalog,dispatch,execution)
    if call.target=='global' then
     local ast,err=contract.parse(call.args or '{}');if not ast then error(err)end
     local params=json.decode(call.args or '{}')
-    if call.name=='searchTools' then
+    if call.name=='showCall' then
+     value,success=presentation.select(calls,selected,params)
+    elseif call.name=='searchTools' then
      local query=params[1];local options=params[2];local limit=type(options)=='table' and options.limit or 8
      if type(query)~='string' or #query>256 or not query:find('%S') then value={error='tool_search_query_required'};success=false
      elseif type(limit)~='number' or limit%1~=0 or limit<1 or limit>8 then value={error='invalid_tool_search_limit'};success=false
@@ -85,7 +89,7 @@ function M.run(memory,args,role,ctx,catalog,current_catalog,dispatch,execution)
      end
     elseif call.name=='describeTool' then
      local name=type(params)=='string' and params or params[1]
-     local def=definitions[name];value=def and {name=def.name,description=def.schema['function'].description,parameters=def.schema['function'].parameters,execution=execution(def.name)} or nil;success=true
+     local def=definitions[name];value=name=='showCall' and presentation.help or def and {name=def.name,description=def.schema['function'].description,parameters=def.schema['function'].parameters,execution=execution(def.name)} or nil;success=true
     else value={error='codemode_global_not_available'};success=false end
    elseif call.target=='tool' then
     local def=definitions[call.name]
@@ -130,7 +134,12 @@ function M.run(memory,args,role,ctx,catalog,current_catalog,dispatch,execution)
  local closed=json.decode(host.quickjs('close',json.encode({id=sandbox,owner=scope})))
  if not closed.ok then return {ok=false,error='codemode_close_failed',detail=closed.error,items=items,calls=calls}end
  local skipped={};for _,call in ipairs(pending)do skipped[#skipped+1]={id=call.id,name=call.name,executed=false,effect='none',reason='script_finished_before_admission'}end
- return {ok=ok and done and done.ok==true or false,error=not ok and tostring(problem) or done and not done.ok and done.error or nil,
+ local result={ok=ok and done and done.ok==true or false,error=not ok and tostring(problem) or done and not done.ok and done.error or nil,
   items=items,value=done and done.value,calls=calls,attempts=attempts,unexecuted=skipped,backend=response.backend or 'rust-wasmtime-quickjs-wasi',context_policy='only script output is model-facing; complete nested originals are retained by hash'}
+ local presented,view=pcall(presentation.finish,result,selected)
+ if presented then return view end
+ result.ok=false;result.presentation_partial=true;result.presentation_error=tostring(view)
+ result.shown=nil
+ return result
 end
 return M
