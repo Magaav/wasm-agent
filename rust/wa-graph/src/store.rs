@@ -20,7 +20,7 @@ pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + S
 // `graph_sources` record of the exact bytes a generation was built from. A stamp written by either
 // binary must therefore be re-parsed rather than trusted, and keeping either value would leave the
 // other side's edges in place, which is the failure this constant exists to prevent.
-pub(crate) const EXTRACT_VERSION: &str = "10";
+pub(crate) const EXTRACT_VERSION: &str = "11";
 pub(crate) fn sha256(bytes:&[u8])->String{ring::digest::digest(&ring::digest::SHA256,bytes).as_ref().iter().map(|b|format!("{b:02x}")).collect()}
 
 pub struct Store {

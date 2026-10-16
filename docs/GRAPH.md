@@ -218,7 +218,7 @@ patch source versions. Unreadable/non-UTF-8 Git output or capture limits refuse
 instead of producing clean/zero success. External multi-file writers are not frozen.
 
 Go uses pinned official `tree-sitter-go =0.23.4`, compatible with tree-sitter0.24;
-see the crate THIRD-PARTY.md and retained MIT notice. Extractor version10 migrates
+see the crate THIRD-PARTY.md and retained MIT notice. Extractor version11 migrates
 unchanged sources. Functions, receiver-qualified methods, types/interfaces/aliases
 and top-level var/const specifications have exact ranges. Imports and calls are
 recorded; unique same-package calls and local module imports expose

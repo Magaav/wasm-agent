@@ -148,6 +148,10 @@ fn go_migration_freshness_and_exclusion_are_content_bound() {
         .unwrap();
     assert_eq!(s.index(&f.0, false).unwrap().indexed, 2);
     assert_eq!(s.index(&f.0, false).unwrap().unchanged, 2);
+    s.conn
+        .execute("UPDATE files SET hash='10:pre-selector-guard'", [])
+        .unwrap();
+    assert_eq!(s.index(&f.0, false).unwrap().indexed, 2);
     let old = s.search_symbols_json("First", 2).unwrap()[0]["source_version"].clone();
     f.write("main.go", "package demo\nfunc Later() {}\n");
     s.index(&f.0, false).unwrap();

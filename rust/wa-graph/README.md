@@ -135,7 +135,7 @@ end to end: start → index, add a file → it appears, edit a file → the old 
 ## Go, Git stages and source provenance
 
 Go grammar and MIT provenance are pinned in [THIRD-PARTY.md](THIRD-PARTY.md).
-Version10 extraction adds exact function/receiver/type/interface/alias and top-level
+Version11 extraction adds exact function/receiver/type/interface/alias and top-level
 var/const ranges; captured go.mod identity resolves unique local-module calls.
 Package/import strategies expose confidence; dynamic/interface/external/shadowed
 calls remain explicit unresolved leads. No SDK/module cache/type checker is used.
