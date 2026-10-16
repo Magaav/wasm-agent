@@ -17,6 +17,23 @@ hosting is comparison only, not a production backend/fallback. Prove V2 executio
 with Node unavailable before claiming implementation; the decision is not readiness.
 
 
+## Explicit all-four forced-code-mode parallel scope
+
+For this newly authorized adapted experiment, read the selected repository's
+`docs/AGENT-BENCHMARK-FORCED.md`. Use only `--pilot-forced-qualify`,
+`--pilot-forced-negative`, `--pilot-forced-prepare` and the coordinator-owned
+`--pilot-forced-run-approved` path with a fresh concurrent scope/manifest. The old
+serial and Pi-only defaults do not become parallel or forced. Pi/historical are
+explicitly Node-VM-adapted treatments, not stock controls; V1 is Node and V2 stays
+native Rust/Wasmtime without a Node VM bridge/fallback. Verify trusted host/nested
+execution journals and source-bound sealed archives, not model/backend labels.
+Zero-use, bypass or incomplete evidence cannot rank as verified treatment.
+All actors and writers settle/drain before capture/grading/sealing. Unknown tool
+outcome fences every arm's new nested admission; unknown usage remains arm-local.
+Timed parallel results are CPU/provider-contention affected, not clean latency
+rankings. Preserve all old attempts/unknowns and Pi's lossless raw capture. Never
+repair the frozen task/oracle, probe credentials or publish UI as a task worker.
+
 ## Pi-only capture repair (current narrow continuation)
 
 For “fix output limit, rerun pi”, read the Pi-only section of the selected repo's

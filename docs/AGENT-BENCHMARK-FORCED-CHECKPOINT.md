@@ -1,5 +1,10 @@
 # Forced-code-mode parallel pilot: blocked implementation checkpoint
 
+> Historical checkpoint at `de33333`, superseded by the coordinator-authorized
+> adapter prerequisite and [the explicit forced/parallel guide](AGENT-BENCHMARK-FORCED.md).
+> The failures and original missing provenance below remain historical evidence,
+> not current qualification or a new execution.
+
 **Not qualified, not integrated, not ready for a live wave.** The old serial and
 Pi-only commands remain separate. No new approval reference has been fabricated.
 

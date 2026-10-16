@@ -1,5 +1,10 @@
 # Code-mode benchmark wiring (model-free)
 
+For the new explicitly adapted all-four forced/parallel scope, see
+[AGENT-BENCHMARK-FORCED.md](AGENT-BENCHMARK-FORCED.md). Its model-facing schema is
+neutral and dispatcher-enforced; the older optional/serial wiring below remains
+separate, not evidence that autonomous old trials used a VM.
+
 This is implementation/transport qualification, **not the requested autonomous comparison**.
 No completion-time, dollars/cache rankings or 0–100 final-quality scores exist here.
 The legacy paid entry in `scripts/agent-benchmark.mjs` remains refused. The new

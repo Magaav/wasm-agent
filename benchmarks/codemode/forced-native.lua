@@ -3,14 +3,18 @@ local M={}
 function M.install(config,adapter)
  local json=dofile('lua/vendor/json.lua')
  local tools=adapter.tools
- local all,dispatch=tools.all,tools.dispatch
+ local original_all,dispatch=tools.all,tools.dispatch
+ local function all(role)local rows={};for _,row in ipairs(original_all(role))do if row['function'].name~='codemode' then rows[#rows+1]=row end end;return rows end
  local nested=false
  local schema=json.decode(config.codemode_schema)
  local core=assert(load(assert(host.read_file(config.codemode_core)),'benchmark-codemode-adapter'))()
  local sequence=0;local journal=''
  local function record(row)
   sequence=sequence+1;row.seq=sequence;row.arm=config.arm;row.binding=config.binding
-  journal=journal..json.encode(row)..'\n';assert(host.write_file(config.vm_journal,journal)~=false,'VM journal write failed')
+  journal=journal..json.encode(row)..'\n';if not host.write_file(config.vm_journal,journal)then
+   host.http('POST',config.sandbox..'/halt',json.encode({['content-type']='application/json'}),'{}')
+   error('VM journal write failed; wave halted; no replay')
+  end
  end
  local quickjs=assert(host.quickjs)
  local invocation=0;local current
@@ -37,12 +41,13 @@ function M.install(config,adapter)
    local ok,value=pcall(core.run,memory,args,role,ctx,catalog,function()return all(role)end,function(target,parameters,fragment)
     -- Only the trusted VM broker callback can enter this scope; outer model
     -- arguments cannot set it. The original dispatcher remains authoritative.
+    assert(adapter.rpc('benchmark_admit',{})==true,'wave tool admission refused')
     local old=ctx.tool_arguments_json;ctx.tool_arguments_json=fragment;nested=true
     record({type='nested_start',invocation=current,name=target,arguments=fragment})
     local admitted,value=pcall(dispatch,memory,target,parameters,role,ctx)
     nested=false;ctx.tool_arguments_json=old
     record({type='nested_end',invocation=current,name=target,ok=admitted,result=admitted and value or tostring(value)})
-    if not admitted then
+    if not admitted or type(value)=='table' and (value.effect=='unknown' or value.cleanup=='unknown') then
      host.http('POST',config.sandbox..'/halt',json.encode({['content-type']='application/json'}),'{}')
      error(value)
     end;return value

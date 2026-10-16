@@ -1,5 +1,9 @@
 # Qualified four-arm pilot: execution and approval
 
+The separately guarded, explicitly adapted all-four forced-code-mode **parallel**
+scope is in [AGENT-BENCHMARK-FORCED.md](AGENT-BENCHMARK-FORCED.md). It does not change
+the serial/Pi-only entry contracts described below or reuse their reservations.
+
 This is the existing benchmark runner's integration, not a new agent platform.
 Qualification runs actual Pi1.2, historical wasm, Node-hosted QuickJS-WASI V1
 and Node-free Rust/Wasmtime V2 loops against a deterministic provider through the

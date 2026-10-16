@@ -26,5 +26,7 @@ local bot=agent.new(sid,function(e)
  print(json.encode({event=e}))
  if e.type=='tool_result' and not config.forced then adapter.end_tool(e.name)end
 end,'master','master','')
+local started_at=host.now()*1000
 local result=bot:run(config.prompt)
-print(json.encode({ok=true,session_id=sid,result=result,arm=config.arm,mode=config.mode}))
+local ended_at=host.now()*1000
+print(json.encode({ok=true,solver_started_at=started_at,solver_ended_at=ended_at,session_id=sid,result=result,changes=bot.changes,arm=config.arm,mode=config.mode}))

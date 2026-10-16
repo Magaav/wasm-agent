@@ -4,8 +4,28 @@
 local M={}
 function M.install(url)
  assert(url:match('^http://127%.0%.0%.1:%d+/%x+$'),'private sandbox RPC required')
- local json=dofile('lua/vendor/json.lua');local active=0;local controller_depth=0;local loading=false
+ local json=dofile('lua/vendor/json.lua');local active=0;local controller_depth=0;local loading=false;local changes_address=nil
+ local raw_read,raw_write,raw_canonical,raw_list=host.read_file,host.write_file,host.canonical_path,host.list_dir
+ local function normalized(p)return tostring(p):gsub('\\','/'):gsub('^//%?/',''):gsub('/+$',''):lower()end
  local private_root=tostring(host.getenv('WASM_AGENT_HOME') or ''):gsub('\\','/'):gsub('/+$',''):lower();assert(private_root~='','private benchmark home required')
+ local function changes_path(p)
+  assert(normalized(p)==changes_address,'changeset artifact path identity')
+  local ancestor=tostring(p):gsub('\\','/')
+  while #normalized(ancestor)>=#private_root do
+   local real=raw_canonical(ancestor)
+   if real then assert(normalized(real)==normalized(ancestor),'changeset artifact symlink/junction refused')end
+   local parent=ancestor:match('^(.*)/[^/]+$');if not parent or parent==ancestor then break end
+   -- canonicalize(nil) must not mistake a dangling link for an absent path.
+   -- Enumerate only a verified exact parent; never traverse a foreign parent.
+   if not real then local resolved=raw_canonical(parent);if resolved then
+    assert(normalized(resolved)==normalized(parent),'changeset artifact parent link refused')
+    local listing=json.decode(raw_list(parent));assert(listing and not listing.error and listing.entries,'changeset parent inspection failed')
+    local basename=ancestor:match('([^/]+)$'):lower();for _,entry in ipairs(listing.entries)do assert(entry.name:lower()~=basename,'dangling/inaccessible changeset artifact refused')end
+   end end
+   ancestor=parent
+  end
+  assert(normalized(raw_canonical(private_root))==private_root,'private home identity changed')
+ end
  local function controller_io(fn,...)
   local old=active;active=0;controller_depth=controller_depth+1;local values=table.pack(pcall(fn,...));controller_depth=controller_depth-1;active=old
   if not values[1]then error(values[2])end;return table.unpack(values,2,values.n)
@@ -21,9 +41,22 @@ function M.install(url)
   -- These trusted functions only address generated/hash-validated private
   -- artifacts, never a model-selected filesystem path. User read/write calls
   -- remain in the container, including attempts to read an artifact's host path.
+  if name=='lua/core/changeset.lua' then
+   for _,key in ipairs({'store','load'})do local fn=value[key];value[key]=function(argument,...)
+    if key=='store' and type(argument)~='string' then return nil,'not_text'end
+    local digest=key=='store' and host.sha256(argument) or argument
+    assert(type(digest)=='string' and #digest==64 and digest:match('^[a-f0-9]+$'),'invalid changeset content address')
+    local data=dofile('lua/core/paths.lua').data();assert(normalized(data)==private_root..'/.wasm-agent','changeset data outside exact private home')
+    local old=changes_address;changes_address=normalized(data..'/changes/'..digest:sub(1,2)..'/'..digest)
+    local values=table.pack(pcall(controller_io,fn,argument,...));changes_address=old
+    if not values[1]then error(values[2])end
+    if key=='store' then assert(values[2]==digest,'changeset storage failed: '..tostring(values[3]))end
+    return table.unpack(values,2,values.n)
+   end end
+  end
   local exports=name=='lua/core/tool_output.lua' and {'store','read'} or name=='lua/core/read_batch.lua' and {'start','resume'} or name=='lua/core/memory.lua' and {'store_image'} or nil
   if exports then for _,key in ipairs(exports)do local fn=value[key];if fn then value[key]=function(...)return controller_io(fn,...)end end end end
-  if name=='lua/core/tools.lua' or name=='lua/core/memory.lua' then shared[name]=value end
+  if name=='lua/core/tools.lua' or name=='lua/core/memory.lua' or name=='lua/core/changeset.lua' then shared[name]=value end
   return value
  end
  local function rpc(op,args)
@@ -36,6 +69,13 @@ function M.install(url)
   local original=host[name]
   host[name]=function(...)
    if active>0 then return rpc(name,{...}) end
+   if changes_address and controller_depth>0 and not loading and (name=='read_file' or name=='write_file')then
+    local p,text=...;changes_path(p)
+    if name=='write_file' then
+     local digest=changes_address:match('/([a-f0-9]+)$');assert(type(text)=='string' and host.sha256(text)==digest,'changeset bytes/address mismatch')
+     local result=raw_write(p,text);assert(result,'changeset artifact write failed');changes_path(p);assert(raw_read(p)==text,'changeset artifact readback failed');return result
+    end
+   end
    if controller_depth>0 and not loading and (name=='read_file' or name=='write_file')then
     local p=tostring((...)):gsub('\\','/'):gsub('^//%?/',''):lower()
     assert(p:sub(1,#private_root+1)==private_root..'/','artifact storage outside private benchmark home')
