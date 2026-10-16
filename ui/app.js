@@ -3968,6 +3968,69 @@ async function toggleOrchestration() {
   orchestrationMode=r.orchestration;
   add('assistant','Orchestration '+(orchestrationMode.enabled?'on — I reason with this conversation, then delegate concrete work to native owners. Questions stay here.':'off — I handle new tasks directly. Existing workers keep running.'));
 }
+let providerManagementPanel=null;
+async function openProviderManagement() {
+  if(providerManagementPanel){
+    if(providerManagementPanel.managementNode===activeNode && providerManagementPanel.managementAccount===session){providerManagementPanel.open=true;return;}
+    providerManagementPanel.remove();providerManagementPanel=null;
+  }
+  const target=activeNode, account=session;
+  const balloon=document.createElement('wa-balloon');balloon.setAttribute('anchor',input.id);balloon.className='popover provider-manager-balloon';
+  const panel=document.createElement('wa-provider-manager');balloon.append(panel);document.getElementById('status-balloon').parentElement.append(balloon);
+  providerManagementPanel=balloon;balloon.managementNode=target;balloon.managementAccount=account;balloon.open=true;
+  let pending=false, operation=null, held=false;
+  const operationKey='wa-provider-device:'+String(target)+':'+String(me.user?.id || 'operator');
+  try{operation=sessionStorage.getItem(operationKey);if(operation){held=true;panel.login={state:'outcome needs reconciliation'};panel.render();}}catch(_){/* no secret storage */}
+  const current=()=>activeNode===target && session===account;
+  const read=async()=>{
+    if(!current())throw new Error('Node/account changed. Close and reopen management; no action sent.');
+    const response=await apiFetch('provider-management',{headers:apiHeaders()});
+    const value=await response.json();
+    if(!current())throw new Error('Node/account changed; stale response ignored.');
+    if(value.native_login && !operation){operation=value.native_login.operation;held=value.native_login.state==='exchange_pending';sessionStorage.setItem(operationKey,operation);panel.login=value.native_login;}
+    panel.data=value;
+  };
+  panel.addEventListener('provider-action',async event=>{
+    if(pending)return;
+    const {action,id}=event.detail;
+    if(action==='close'){balloon.open=false;return;}
+    pending=true;panel.pending=true;
+    try {
+      if(!current())throw new Error('Node/account changed. Close and reopen management; no action sent.');
+      if(action==='refresh'){await read();return;}
+      if(action==='select'){
+        if(busy)throw new Error('Run active: selection not sent. Try after settlement.');
+        await setProvider(id);await read();return;
+      }
+      if(!['begin','poll','cancel','status'].includes(action))return;
+      if(busy)throw new Error('Run active: authentication action not sent. Try after settlement.');
+      if(action==='begin'){
+        if(operation || held)throw new Error('Reconcile/cancel the existing operation before a new login.');
+        if(!confirm('Explicitly re-login OpenAI subscription on this node? Existing authentication is retained until fresh human login commits. Provider selection is unchanged.'))return;
+        operation=crypto.randomUUID();
+        sessionStorage.setItem(operationKey,operation);
+      }
+      if(!operation)throw new Error('No device login operation.');
+      if(held && action==='poll')throw new Error('Outcome held: no replay. Cancel explicitly or reconcile with the operator.');
+      const response=await apiFetch('provider-management',{method:'POST',headers:apiHeaders({'Content-Type':'application/json'}),body:JSON.stringify({action,operation})},35000);
+      const value=await response.json();
+      if(!current())throw new Error('Scope changed; login outcome must be reconciled on its original node/account.');
+      if(value.error){
+        if(action==='begin' && ['login_busy','locked','invalid_login_operation','vault_login_required','explicit_legacy_source'].includes(value.error)){
+          operation=null;sessionStorage.removeItem(operationKey);
+        }
+        held=value.error==='login_outcome_unknown';throw new Error(value.error);
+      }
+      if(action==='status' && value.state==='pending')held=false;
+      panel.login=value;panel.message=value.state==='done'?'Fresh login committed; entitlement unknown. Selection unchanged.':value.state==='cancelled'?'Cancelled; previous credential retained.':value.state==='not_pending'?'No matching pending/local committed login for this operation. No replay; a fresh login requires explicit confirmation.':'Complete the human step, then check completion. No automatic inference/probe.';
+      if(['done','cancelled','not_pending'].includes(value.state)){operation=null;panel.login=null;held=false;sessionStorage.removeItem(operationKey);}
+      await read();
+    } catch(error){if(operation){held=true;panel.login={state:'outcome needs reconciliation'};}panel.message=String(error.message||error)+' No automatic replay.';}
+    finally{pending=false;panel.pending=false;}
+  });
+  balloon.addEventListener('close',()=>{panel.message=operation?'Login may still be pending. Reopen this panel to reconcile or cancel; closing is not credential deletion.':'';});
+  try{await read();}catch(error){panel.message=String(error.message||error);}
+}
 const COMMANDS = [
   {
     name: "/new",
@@ -3999,6 +4062,8 @@ const COMMANDS = [
     get hint(){return (orchestrationMode ? (orchestrationMode.enabled?'ON':'OFF') : 'unknown')+' — toggle native task routing';},
     run:()=>{toggleOrchestration().catch(error=>add('assistant','Orchestration change failed: '+error.message));},
   },
+  {name:'/provider',hint:'manage/select OpenAI subscription or OpenCode Go without inference',run:openProviderManagement},
+  {name:'/login',hint:'open provider management; never paste credentials into chat',run:openProviderManagement},
 ];
 
 // A thread is named by whoever starts it. The id is made here rather than asked for, so the name

@@ -1,0 +1,7 @@
+const fs=require('node:fs'),path=require('node:path'),os=require('node:os'),assert=require('node:assert/strict'),{spawnSync}=require('node:child_process');
+const root=path.resolve(__dirname,'..'),out=process.argv[2]?path.resolve(process.argv[2]):fs.mkdtempSync(path.join(os.tmpdir(),'wa-provider-ui-'));fs.mkdirSync(out,{recursive:true});
+function observe(name,ui,probe,pass){const r=spawnSync(process.execPath,[root+'/scripts/agent-benchmark-ui-observe.mjs','--ui',ui,'--probe',root+'/scripts/'+probe,'--out',out+'/'+name,...(name.startsWith('vault')?['--no-fixtures']:[])],{cwd:root,encoding:'utf8',windowsHide:true,timeout:150000});fs.writeFileSync(out+'/'+name+'.stdout',r.stdout);fs.writeFileSync(out+'/'+name+'.stderr',r.stderr);const value=JSON.parse(r.stdout.trim().split(/\r?\n/).at(-1));assert.equal(value.probeStatus,pass?'pass':'fail',r.stdout+r.stderr);assert.equal(r.status,pass?0:1,r.stdout+r.stderr);console.log(name+': '+value.probeStatus+' '+value.probeText);}
+observe('main',root+'/ui','probe-provider-management.js',true);
+observe('vault',root+'/vault/page','probe-vault-management.js',true);
+const mutant=out+'/mutant';fs.cpSync(root+'/ui',mutant,{recursive:true});const file=mutant+'/app.js';fs.writeFileSync(file,fs.readFileSync(file,'utf8').replace("name:'/provider'","name:'/removed-provider'"));observe('negative',mutant,'probe-provider-management.js',false);
+console.log('Staged Chromium evidence: '+out);

@@ -7,6 +7,43 @@
 // Implements the close rule from DESIGN.md §3: it closes only when the pointer
 // *press* originates outside the overlay and its anchor. A press that starts
 // inside and is released outside keeps it open.
+class WaProviderManager extends HTMLElement {
+  connectedCallback() { if (!this._ready) { this._ready=true; this.render(); } }
+  set data(value) { this._data=value; this.render(); }
+  set message(value) { this._message=value; this.render(); }
+  set pending(value) { this._pending=value; this.render(); }
+  render() {
+    this.replaceChildren(); this.className='provider-management';
+    const text=(tag,value)=>{const el=document.createElement(tag);el.textContent=value;this.append(el);return el;};
+    const button=(parent,label,action,id)=>{const el=document.createElement('button');el.type='button';el.textContent=label;el.disabled=!!this._pending;el.addEventListener('click',()=>this.dispatchEvent(new CustomEvent('provider-action',{detail:{action,id}})));parent.append(el);};
+    text('h3','Provider management');
+    text('p','Opening changes no account or provider and never replays a failed request. Credentials are entered only on the separate operator vault page, never in chat.');
+    const data=this._data;
+    if (data?.error) text('p','Management refused: '+data.error);
+    for (const row of data?.providers || []) {
+      const section=document.createElement('section');this.append(section);
+      const title=document.createElement('strong');title.textContent=row.label+' ('+row.id+')';section.append(title);
+      const state=document.createElement('p');state.textContent='Configured: '+(row.configured ?? 'unknown')+' · Enabled: '+(row.enabled ?? 'unknown')+' · Source: '+row.source+' · Entitlement: unknown'+(row.error?' · Error present':'');section.append(state);
+      if(row.vault_url){const route=document.createElement('p');route.textContent='Broker: '+row.vault_url+' · Vault identity: '+(row.vault_id || 'unknown');section.append(route);}
+      button(section,'Select for subsequent turns','select',row.id);
+      if (row.id==='openai-sub' && row.source==='native') button(section,'Confirm re-login…','begin',row.id);
+      else if (row.operator_url) {
+        const link=document.createElement('a');link.textContent='Manage / replace on operator vault page';link.href=row.operator_url;link.target='_blank';link.rel='noopener noreferrer';section.append(link);
+        const note=document.createElement('p');note.textContent='Enroll there with its dedicated password input. This manages only that vault; it does not change this node’s credential source.';section.append(note);
+      } else { const note=document.createElement('p');note.textContent='Operator setup required: durable isolated vault + nonsecret operator page URL. See docs/VAULT.md; no credential field is opened here.';section.append(note); }
+    }
+    if (data?.quota) text('p',data.quota);
+    if (this.login) {
+      text('p','Device login: '+this.login.state);
+      if (this.login.user_code) text('p',this.login.verification_url+' · '+this.login.user_code);
+      button(this,'Check device completion','poll');button(this,'Reconcile outcome (read only)','status');button(this,'Cancel device login','cancel');
+    }
+    if (this._message) {const note=text('p',this._message);note.setAttribute('role','status');}
+    button(this,'Read status','refresh');button(this,'Close','close');
+  }
+}
+customElements.define('wa-provider-manager',WaProviderManager);
+
 class WaOverlay extends HTMLElement {
   static get observedAttributes() { return ["open"]; }
 

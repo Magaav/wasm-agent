@@ -40,7 +40,7 @@
 
     <section id="auth" hidden>
       <div class="head"><h2>Admin token</h2></div>
-      <p class="note">Open this page with <code>wa-vault-open</code> (it passes the token), or paste the token from <code>~/.config/wasm-agent-sandbox/vault.env</code>.</p>
+      <p class="note">Operator enrollment: enter the admin token supplied through your administrator's private channel. It stays in this page's memory only. Never paste it into chat, node configuration or a URL.</p>
       <form class="row" id="auth-form">
         <input id="auth-token" type="password" autocomplete="off" placeholder="admin token" />
         <button class="primary" type="submit">Use</button>
@@ -74,6 +74,7 @@
       <form class="row" id="ocg-form">
         <input id="ocg-key" type="password" autocomplete="off" spellcheck="false" placeholder="paste the API key" />
         <button class="primary" type="submit">Save</button>
+        <button id="ocg-cancel" type="button">Cancel entry</button>
       </form>
       <div class="row">
         <button id="ocg-test" type="button">Test</button>
@@ -83,6 +84,7 @@
       <div class="note" id="ocg-note"></div>
     </section>
 
+    <button id="reconcile" type="button">Read status / reconcile save</button>
     <p class="note">After a provider is set, pick it in wasm-agent's provider menu (the status chip). The agent reaches it through the vault; a key pasted here is never returned by any endpoint.</p>
   </main>
   <script src="app.js"></script>
