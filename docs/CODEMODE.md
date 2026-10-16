@@ -20,6 +20,16 @@ VMs/handles stay interpreter-thread local and require a scope hash for every act
 
 Admission rechecks deadline/cancellation before every queued native call, including after a slow prior tool. A native dispatcher exception has an explicitly unknown effect and forbids replay. All call attempts, including refusals, retain raw argument/result references and a separate journal; admitted native tool spans remain distinguishable from attempts. Nested full originals are hash-addressed and nested tool start/end events are durable. Only selected script output enters the model-facing result; ordinary50KiB output projection remains. Filtering is an opt-in awareness risk, not lossless compression; hidden acceptance and late-caveat fixtures must demonstrate task outcomes. Stores are snapshot/scoped derived state and commit only on successful script completion.
 
+## Structured native presentation (opt-in)
+
+Use `await showCall({version:1,call:N})` to present an admitted native result as
+structured JSON without `text(result)` double escaping. Exact receipts and typed
+originals remain retained; encoded-budget overflow explicitly labels unread coverage
+and exact retrieval, while existing `read_many` cursors still resume cached pages.
+See [CODEMODE-PRESENTATION.md](CODEMODE-PRESENTATION.md) and the on-demand
+`codemode-output` skill, including fresh reread/edit after formatting. Raw/default
+output, global budgets, asset pins, authority checks and no-replay rules are unchanged.
+
 ## Present readiness
 
 Default eligibility performs checksum-verified native asset readiness before advertising the tool; host.quickjs presence alone is insufficient. Missing/corrupt assets fail visibly with the ordinary-tools/off escape, never Node V1 or Pi transport fallback. A plain build without prepared assets is usable in off mode but is not a supported default-code-mode shipping candidate. The supported shipping build contract is `node scripts/codemode-build.mjs build <absolute-source-root>`: it resolves the durable prepared asset location from common Git metadata, verifies pinned bytes/tarballs/receipt/notices, passes a fresh verified native snapshot path explicitly to Cargo, retains raw build logs, then executes the real embedded VM checker before any installer step. `deploy.sh` uses this exact non-installing helper; an ambient `WA_CODEMODE_BUILD_ASSETS` is never its source of truth. See the coordinator preparation/preflight procedure in [SENTINEL.md](SENTINEL.md#offline-native-build-preflight-before-a-deployment-request). No Node/npm installation is needed; provisioning may reuse verified retained package tarballs. Runtime is Node/npm/network-free.
