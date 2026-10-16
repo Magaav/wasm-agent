@@ -40,9 +40,12 @@ env.WASM_AGENT_OPENAI_SUB_VAULT_URL='native'
 local provider=dofile('lua/core/provider.lua')
 local manager=dofile('lua/core/provider_management.lua')
 previous.expires=host.now()*1000-1
+previous.last_error={code='fixture_error',detail='synthetic-old-access'}
 assert(host.write_file(env.WASM_AGENT_OPENAI_SUB_STORE,json.encode(previous)))
 local before=calls;local state=manager.state()
 check(exchanges==0,'opening management never refreshes an expired unrelated subscription credential')
+check(state.providers[1].error=='subscription_authentication_error' and not json.encode(state):find('synthetic-old-access',1,true),'management metadata cannot return credential-echoing historical error detail')
+previous.last_error=nil
 previous.expires=host.now()*1000+3600000
 assert(host.write_file(env.WASM_AGENT_OPENAI_SUB_STORE,json.encode(previous)))
 check(#state.providers==2 and state.providers[1].label=='OpenAI subscription' and state.providers[2].label=='OpenCode Go','only two friendly management routes')
