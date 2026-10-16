@@ -51,6 +51,9 @@ assert(host.write_file(env.WASM_AGENT_OPENAI_SUB_STORE,json.encode(previous)))
 check(#state.providers==2 and state.providers[1].label=='OpenAI subscription' and state.providers[2].label=='OpenCode Go','only two friendly management routes')
 check(state.providers[1].source=='native' and state.providers[2].source=='vault','truthful separate sources')
 check(state.providers[2].generation==generation and state.providers[2].entitlement=='unknown','presence not entitlement')
+env.WASM_AGENT_OPENCODE_GO_VAULT_URL='native';env.WASM_AGENT_LLM_API_KEY='';env.OPENCODE_GO_API_KEY='synthetic-lower-alias'
+check(manager.state().providers[2].configured==false,'empty effective highest-precedence key is unconfigured, without silently adopting a lower alias')
+env.WASM_AGENT_OPENCODE_GO_VAULT_URL='http://127.0.0.1:9';env.WASM_AGENT_LLM_API_KEY='synthetic-legacy';env.OPENCODE_GO_API_KEY=nil
 check(state.quota:find('same exhausted workspace',1,true)~=nil,'monthly quota explained')
 local answers={'2','manage'};local output={};manager.cli({print=function(s)output[#output+1]=s end,ask=function()return table.remove(answers,1)end})
 check(table.concat(output):find('http://127.0.0.1:8801',1,true)~=nil,'CLI management offers enrolled operator page, not terminal key reader')

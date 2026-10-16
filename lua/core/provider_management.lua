@@ -24,7 +24,7 @@ function M.state(owner)
       if row.operator_url and type(row.vault_id)=='string' and row.vault_id:match('^[%x%-]+$') and #row.vault_id==36 then
         row.operator_url=row.operator_url:gsub('/$','')..'/#vault='..row.vault_id
       else row.operator_url=nil end
-      if entry then row.configured=entry.configured;row.enabled=entry.enabled;row.error=entry.last_error and 'vault_provider_error' or nil;row.generation=entry.generation
+      if type(entry)=='table' then row.configured=entry.configured;row.enabled=entry.enabled;row.error=entry.last_error and 'vault_provider_error' or nil;row.generation=entry.generation
       else row.error=problem and problem.code or 'vault_status_unknown' end
     elseif item.id=='openai-sub' then
       if dofile('lua/core/openai_sub.lua').transport()~='native' then
@@ -35,7 +35,8 @@ function M.state(owner)
       end
     else
       row.source='legacy environment'
-      row.configured=host.getenv('WASM_AGENT_LLM_API_KEY')~=nil or host.getenv('OPENCODE_GO_API_KEY')~=nil or host.getenv('OPENAI_API_KEY')~=nil
+      local key=host.getenv('WASM_AGENT_LLM_API_KEY') or host.getenv('OPENCODE_GO_API_KEY') or host.getenv('OPENAI_API_KEY')
+      row.configured=type(key)=='string' and key~=''
       row.enabled=true
     end
     row.management=row.source=='vault' and (row.operator_url and 'operator vault page' or 'operator setup required') or item.id=='openai-sub' and 'device login' or 'operator vault setup required'
