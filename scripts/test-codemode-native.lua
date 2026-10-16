@@ -7,7 +7,7 @@ if backend=='node-quickjs-wasi-reference' then
  local client=assert(load(assert(host.read_file(getenv('WA_CODEMODE_CONTROLLER_CLIENT'))),'reference-client'))()
  client.install({url=getenv('WA_CODEMODE_CONTROLLER_URL'),key=getenv('WA_CODEMODE_CONTROLLER_KEY')})
 end
-host.getenv=function(k)if k=='WASM_AGENT_CODEMODE' then return on and 'native' or '' end;if k=='WASM_AGENT_CODEMODE_ASSETS' then return getenv('WA_QJS_ASSETS') end;return getenv(k)end
+host.getenv=function(k)if k=='WASM_AGENT_CODEMODE' then return on and 'native' or 'off' end;if k=='WASM_AGENT_CODEMODE_ASSETS' then return getenv('WA_QJS_ASSETS') end;return getenv(k)end
 local memory=dofile('lua/core/memory.lua');memory.setup()
 local tools=dofile('lua/core/tools.lua')
 if getenv('WA_CODEMODE_PROOF_PHASE')=='restart' then
@@ -119,6 +119,8 @@ memory.meta_set('codemode-proof-session',sid)
 local paused=control('start',{owner=owner,tools=spec.tools,globals={},store={},code=spec.code,timeout_ms=30000})
 check(paused.ok,'restart fixture leaves only a not-admitted guest call')
 memory.meta_set('codemode-proof-active',paused.id)
-on=false;local disabled=tools.dispatch(memory,'codemode',{code='return 1'},'master',ctx)
-check(disabled.error=='codemode_not_enabled' and #tools.envelope('master',ctx)==11,'default-off declaration and dispatch unchanged')
+on=false;local off_ctx={session_id=sid,user_id='master',role='master'}
+local disabled=tools.dispatch(memory,'codemode',{code='return 1'},'master',off_ctx)
+check(disabled.error=='codemode_not_enabled' and #tools.envelope('master',off_ctx)==11,'explicit-off declaration and dispatch unchanged')
+check(call('return 1').ok,'active run remains native after configuration changes')
 print(json.encode({ok=true,checks=checks,skipped=skips,paid_calls=0,backend=backend}))

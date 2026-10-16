@@ -439,7 +439,7 @@ M.system_prompt = system_prompt
 -- improvised the call as text markup instead of emitting a tool call, and the
 -- run ended having done nothing. Prefer the set; derive one from the list for a
 -- caller that only has the list.
-function M.subagent_tool_list(subagent, role)
+function M.subagent_tool_list(subagent, role,ctx)
   subagent = subagent or {}
   local allowed = subagent.allowed
   if type(allowed) ~= "table" or next(allowed) == nil then
@@ -450,7 +450,7 @@ function M.subagent_tool_list(subagent, role)
     -- An explicitly empty profile means reasoning-only, never the role default.
     if next(allowed) == nil then return {} end
   end
-  return tools.all_for(allowed, role)
+  return tools.all_for(allowed, role,ctx,memory)
 end
 
 -- The lean prompt a subagent runs with: the mandatory boundary rules, the
@@ -696,15 +696,17 @@ end
 function M:build_context()
   local session = memory.session(self.session_id) or {}
   local agents, agents_path, tool_list
+  local code_ctx={session_id=self.session_id,user_id=self.user,role=self.role,subagent=self.subagent,codemode_policy=self.codemode_policy}
+  self.codemode_policy=dofile('lua/core/codemode_policy.lua').pin(memory,self.role,code_ctx)
   if self.subagent then
     -- A child deliberately does NOT read the operator instruction file: those
     -- rules name internal paths and the deploy shape, and a child is exactly the
     -- role they are hidden from. The mandatory boundary rules replace it.
     agents, agents_path = nil, nil
-    tool_list = M.subagent_tool_list(self.subagent, self.role)
+    tool_list = M.subagent_tool_list(self.subagent,self.role,code_ctx)
   else
     agents, agents_path = M.agents_md(self.role)
-    tool_list,self.envelope_mode = tools.envelope(self.role,{session_id=self.session_id,user_id=self.user,role=self.role})
+    tool_list,self.envelope_mode = tools.envelope(self.role,code_ctx)
   end
   self.agents_source = agents_path
   self.tool_list = tool_list
@@ -716,6 +718,7 @@ function M:build_context()
       orchestration_enabled=self.role~='guest' and dofile('lua/core/orchestration_mode.lua').read(self.session_id).enabled or false,
     })
   end
+  if self.codemode_policy.enabled then first=first..'\n\n'..dofile('lua/core/codemode_policy.lua').guidance end
   local messages = { { role = "system", content = first } }
   if session.summary and session.summary ~= "" then
     messages[#messages + 1] = {
@@ -1264,6 +1267,7 @@ function M:run(text, images)
 end
 
 function M:run_body(text, images)
+  self.codemode_policy=nil -- configuration is pinned afresh per run, not per inference round
   self.model=provider.settings().model
   -- One overflow recovery per run, not per session: a provider rejection is retried once
   -- with a compacted context, and a second failure is surfaced rather than looped.
@@ -1893,7 +1897,7 @@ function M:run_body(text, images)
     })
 
     local dispatch_ctx = { session_id = self.session_id, user_id = self.user, node_id = self.node,
-      run_id = self.run_id, subagent = self.subagent, changes = self.changes,
+      run_id = self.run_id, subagent = self.subagent, changes = self.changes, codemode_policy=self.codemode_policy,
       model_call = true, reviewed_paths = self.reviewed_paths,
       commit_audits = self.commit_audits, audit_step = self.audit_step,
       model = self.model, reasoning = (provider.reasoning(self.model) or {}).selected }
