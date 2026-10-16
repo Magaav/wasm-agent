@@ -10,7 +10,7 @@ const post=process.argv[2]==='--post';
 const [binary,out]=process.argv.slice(post?3:2);
 assert(path.isAbsolute(binary||'')&&path.isAbsolute(out||''),'absolute binary and fresh evidence required');
 const sha=b=>crypto.createHash('sha256').update(b).digest('hex');
-const names=['lua/core/codemode.lua','lua/core/codemode_view.lua','lua/core/read_batch.lua','lua/core/tool_output.lua','scripts/test-codemode-presentation.lua','scripts/test-codemode-presentation.mjs'];
+const names=['lua/core/redact.lua','lua/core/json_contract.lua','lua/vendor/json.lua','lua/core/codemode.lua','lua/core/codemode_view.lua','lua/core/read_batch.lua','lua/core/tool_output.lua','scripts/test-codemode-presentation.lua','scripts/test-codemode-presentation.mjs'];
 const sources=names.map(name=>({name,sha256:sha(fs.readFileSync(path.join(repo,name)))}));
 if(post){
  const receipt=JSON.parse(fs.readFileSync(path.join(out,'receipt.json')));assert(receipt.ok);assert.equal(sha(fs.readFileSync(binary)),receipt.binary_sha256);assert.deepEqual(sources,receipt.sources);

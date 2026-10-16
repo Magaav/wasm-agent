@@ -59,6 +59,12 @@ end
 local function encode_table(val, stack)
   local tag=getmetatable(val)
   if type(tag)=='table' and type(tag.__json_raw)=='string' then return tag.__json_raw end
+  -- Typed empty containers carry no hidden/raw payload. Nonempty values still
+  -- traverse the normal encoder and its key/cycle validation.
+  if next(val)==nil and type(tag)=='table' then
+    if tag.__json_empty=='object' then return '{}' end
+    if tag.__json_empty=='null' then return 'null' end
+  end
   local res = {}
   stack = stack or {}
 

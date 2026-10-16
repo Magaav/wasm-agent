@@ -1,5 +1,9 @@
 # Native presentation implementation journal
 
+Historical raw-dispatch proof only: the post-install normal-boundary defect was
+later reproduced and corrected. These original receipts are unchanged and do not
+certify model-visible presentation. See `CODEMODE-MODEL-BOUNDARY-JOURNAL.md`.
+
 Task branch: `change/wa-session-childcodemode-budgeted-reads-receipts-fix-20261016-1`.
 Fresh initial sync: `476ccb75` → `fdc79bfc8bd78ab5e04ab3e925bb92a7dd8fffa5`.
 Implementation commit: `99e2205d076f2279f824e895e9ad7c7f1f79ff17`, tree
