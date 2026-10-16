@@ -28,7 +28,7 @@ export function createToolSandbox(root,{imageId,lifetimeMilliseconds=3060000,exi
  };
 }
 export async function sandboxRpc(sandbox,{onUnknown=()=>{}}={}){
- const token=crypto.randomBytes(32).toString('hex');let inflight=false;const server=http.createServer(async(req,res)=>{if(req.method!=='POST'||req.url!=='/'+token){res.writeHead(404);res.end();return;}if(inflight){res.writeHead(409);res.end(JSON.stringify({ok:false,error:'sandbox_inflight',effect:'none'}));return;}inflight=true;
+ const token=crypto.randomBytes(32).toString('hex');let inflight=false;const server=http.createServer(async(req,res)=>{if(req.method==='POST'&&req.url==='/'+token+'/halt'){onUnknown();res.writeHead(200,{'content-type':'application/json'});res.end(JSON.stringify({ok:true,halted:true,no_replay:true}));return;}if(req.method!=='POST'||req.url!=='/'+token){res.writeHead(404);res.end();return;}if(inflight){res.writeHead(409);res.end(JSON.stringify({ok:false,error:'sandbox_inflight',effect:'none'}));return;}inflight=true;
   try{const parts=[];let bytes=0;for await(const part of req){bytes+=part.length;assert(bytes<=8*1024*1024,'sandbox upload bound');parts.push(part);}const {op,args}=JSON.parse(Buffer.concat(parts)),value=sandbox.call(op,args);res.writeHead(200,{'content-type':'application/json'});res.end(JSON.stringify({ok:true,value}));}
   catch(e){if(sandbox.halted)onUnknown();res.writeHead(sandbox.halted?502:400,{'content-type':'application/json'});res.end(JSON.stringify({ok:false,error:e.message,code:e.code??null,unknown:sandbox.halted}));}finally{inflight=false;}
  });await new Promise(r=>server.listen(0,'127.0.0.1',r));return {url:'http://127.0.0.1:'+server.address().port+'/'+token,close:()=>new Promise(r=>server.close(r))};

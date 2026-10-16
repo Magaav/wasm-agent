@@ -1,14 +1,28 @@
 -- Actual native file tools over a blind tool box. No provider/client effects.
 local json=dofile('lua/vendor/json.lua')
+local raw_write=host.write_file;local inject_failure=false
+host.write_file=function(p,text)if inject_failure and tostring(p):find('/changes/',1,true)then return false end;return raw_write(p,text)end
 local adapter=assert(load(assert(host.read_file(host.getenv('WA_BENCHMARK_SANDBOX_CLIENT')))))().install(host.getenv('WA_BENCHMARK_SANDBOX_URL'))
 local memory=dofile('lua/core/memory.lua');memory.setup();local sid=memory.start_session('','sandbox-proof',{user_id='master'})
 memory.session_worktree=function()return '/tmp/work'end
 memory.session_workspace=function()return {required=true,state='allocated',worktree='/tmp/work'}end
-local ctx={session_id=sid,user_id='master'};local t=adapter.tools;local checks=0
+local changes=dofile('lua/core/changeset.lua');assert(changes==dofile('lua/core/changeset.lua'),'singleton changeset module')
+local ctx={session_id=sid,user_id='master',changes=changes.new()};local t=adapter.tools;local checks=0
 local function check(ok,msg)assert(ok,msg);checks=checks+1 end
 local r=t.dispatch(memory,'read',{path='input.txt'},'master',ctx);check(r.content=='private-alpha\n','sandbox read')
 check(t.dispatch(memory,'write',{path='second.txt',content='bravo\n'},'master',ctx).ok,'relative write')
 check(t.dispatch(memory,'edit',{path='second.txt',edits={{old_text='bravo',new_text='charlie'}}},'master',ctx).ok,'receipt-compatible edit')
+local entry=ctx.changes.files[1];check(entry.path=='/tmp/work/second.txt' and changes.load(entry.before)=='' and changes.load(entry.after)=='charlie\n','reversible write/edit blobs')
+check(entry.before==host.sha256('') and entry.after==host.sha256('charlie\n'),'content addresses match bytes')
+for _,address in ipairs({'../foreign','/etc/passwd',string.rep('a',63),string.rep('G',64),string.rep('e',64),string.rep('f',64)})do check(not pcall(changes.load,address),'malformed or linked changeset address refused')end
+local private=host.getenv('WASM_AGENT_HOME')..'/.wasm-agent/changes/'..entry.after:sub(1,2)..'/'..entry.after
+for _,operation in ipairs({'read','write'})do local args=operation=='read' and {path=private} or {path=private,content='corrupt'};local called,value=pcall(t.dispatch,memory,operation,args,'master',ctx);check(not called or value.error~=nil,'ordinary model file API cannot use private changeset path')end
+check(changes.load(entry.after)=='charlie\n','model refusals did not corrupt blob')
+for _,operation in ipairs({'read','write'})do local foreign=host.getenv('WASM_AGENT_HOME')..'/../foreign/.wasm-agent/changes/'..entry.after;local args=operation=='read' and {path=foreign} or {path=foreign,content='bad'};local called,value=pcall(t.dispatch,memory,operation,args,'master',ctx);check(not called or value.error~=nil,'foreign-home model paths refused')end
+local hp=host.paths;host.paths=function()return {data=host.getenv('WASM_AGENT_HOME')..'/../foreign'}end
+check(not pcall(changes.store,'foreign-controller-attempt'),'trusted changeset data root cannot change homes');host.paths=hp
+inject_failure=true;check(not pcall(changes.store,'deliberate unique store write failure'),'changeset logging failure is surfaced');inject_failure=false
+check(changes.load(entry.after)=='charlie\n','scope restored after storage failure')
 local b=t.dispatch(memory,'bash',{command='cat second.txt',timeout_seconds=10},'master',ctx);check(b.code==0 and b.stdout=='charlie\n','actual shell')
 check(t.dispatch(memory,'client',{action='status'},'master',ctx).effect=='none','client not permitted')
 check(t.dispatch(memory,'write',{path='guest.txt',content='denied'},'guest',ctx).error~=nil,'role ceiling')

@@ -18,7 +18,7 @@ const digest = b => crypto.createHash('sha256').update(b).digest('hex');
 let checks = 0;
 const check = (value, note) => { assert(value, note); checks++; };
 const observed = [], routes = [], streams = new Set();
-let redirectHits = 0;
+let redirectHits = 0, concurrentActive=0, concurrentPeak=0;
 const trap = http.createServer((req, res) => { redirectHits++; res.end('redirect should never arrive'); });
 await new Promise(r => trap.listen(0, '127.0.0.1', r));
 const terminal = {type: 'response.completed', response: {status: 'completed', usage: {
@@ -28,6 +28,8 @@ const provider = http.createServer(async (req, res) => {
   const raw = Buffer.concat(chunks), body = JSON.parse(raw);
   observed.push({path: req.url, headers: req.headers, body, wire_sha256: digest(raw)});
   const behavior = body.input[0]?.content;
+  if(String(behavior).startsWith('concurrent-')){concurrentActive++;concurrentPeak=Math.max(concurrentPeak,concurrentActive);await wait(behavior==='concurrent-deadline'?350:200);concurrentActive--;}
+
   if (behavior === 'redirect') { res.writeHead(307, {location: 'http://127.0.0.1:' + trap.address().port + '/steal'}); res.end('redirect retained'); return; }
   if (behavior === 'http-error') { res.writeHead(503); res.end('synthetic provider unavailable'); return; }
   res.writeHead(200, {'content-type': 'text/event-stream', 'set-cookie': 'never-forward=1'});
@@ -40,7 +42,8 @@ const provider = http.createServer(async (req, res) => {
   }
   if (behavior === 'incomplete') { res.end('data: {"type":"response.incomplete"}\n\n'); return; }
   const event = structuredClone(terminal);
-  if (behavior === 'missing-usage') delete event.response.usage;
+  if (behavior === 'missing-usage'||behavior==='concurrent-unknown') delete event.response.usage;
+  if(String(behavior).startsWith('concurrent-'))event.response.marker=behavior;
   if (behavior === 'bad-usage') event.response.usage.input_tokens_details.cached_tokens = 101;
   if (behavior === 'huge') { res.end(Buffer.alloc(33 * 1024 * 1024, 120)); return; }
   const wire = Buffer.from('data: ' + JSON.stringify(event) + '\n\n');
@@ -196,6 +199,20 @@ try {
   const duplicateRoot = path.join(out, 'duplicate-journal'); fs.cpSync(path.join(out, 'common'), duplicateRoot, {recursive: true});
   fs.appendFileSync(path.join(duplicateRoot, 'events.jsonl'), JSON.stringify(route.events.find(e => e.phase === 'end')) + '\n');
   assert.throws(() => readModelRouteJournal(duplicateRoot), /duplicate/); checks++;
+
+  const parallelArms=[arm('req-local',{maxRequests:1}),arm('token-local',{maxPromptTotal:50}),arm('unknown-local'),arm('healthy-local')],parallel=await make('parallel-independent',parallelArms);
+  const markers=['concurrent-request','concurrent-token','concurrent-unknown','concurrent-healthy'];
+  const replies=await Promise.all(parallelArms.map(async(a,i)=>{const r=await send(parallel.url(a),body(markers[i]));return r.text();}));
+  check(concurrentPeak===4,'four simultaneous actual vault arms');
+  check(replies.every((text,i)=>text.includes(markers[i])&&markers.every((m,j)=>i===j||!text.includes(m))),'no cross-arm response leakage');
+  const states=parallel.route.inspect();check(states.every(s=>s.provider_attempts===1&&!s.inflight),'independent captures settle once');
+  check(states.find(s=>s.arm==='unknown-local').unknown_usage===1&&states.find(s=>s.arm==='token-local').prompt_total===100,'unknown and overshoot remain arm-local');
+  for(const a of parallelArms.slice(0,3))check((await send(parallel.url(a),body('concurrent-refused'))).status===429,'one arm limit/unknown never replays');
+  const healthy=await send(parallel.url(parallelArms[3]),body('concurrent-healthy-again'));check(healthy.status===200&&(await healthy.text()).includes('concurrent-healthy-again'),'healthy arm remains usable after peer limits');
+  const parallelObserved=observed.filter(x=>String(x.body.input[0]?.content).startsWith('concurrent-'));check(new Set(parallelObserved.slice(0,4).map(x=>x.body.prompt_cache_key)).size===4,'concurrent cache scopes independent');
+  const deadlineArms=[arm('deadline-local',{maxRequestMilliseconds:60}),arm('deadline-peer',{maxRequestMilliseconds:2000})],deadlines=await make('parallel-deadline',deadlineArms);
+  await Promise.all(deadlineArms.map(async(a,i)=>{const r=await send(deadlines.url(a),body(i?'concurrent-peer':'concurrent-deadline'));await r.text();}));
+  check(deadlines.route.inspect()[0].halted&&!deadlines.route.inspect()[1].halted,'one deadline does not cancel peer');
 
   for (const r of routes) {
     r.dispose();

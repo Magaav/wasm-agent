@@ -11,6 +11,12 @@ import { DUMMY_KEY } from './agent-benchmark-proxy.mjs';
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const pilotCommand=process.argv[2];
+if(['--pilot-forced-prepare','--pilot-forced-qualify','--pilot-forced-run-approved','--pilot-forced-negative'].includes(pilotCommand)){
+ const pilot=await import('./agent-benchmark-forced-pilot.mjs');const [configFile,out,approvedSha,approvalFile]=process.argv.slice(3);let result;
+ if(pilotCommand==='--pilot-forced-run-approved')result=await pilot.runApprovedForcedPilot(path.resolve(configFile),path.resolve(out),approvedSha,JSON.parse(fs.readFileSync(approvalFile)));
+ else{const config=JSON.parse(fs.readFileSync(configFile));result=pilotCommand==='--pilot-forced-prepare'?pilot.prepareForcedPilot(config,path.resolve(out)):await pilot.qualifyForcedPilot(config,path.resolve(out),{negative:pilotCommand==='--pilot-forced-negative'});}
+ console.log(JSON.stringify(result.results?{ok:result.ok,scope:result.scope,results:result.results.map(r=>({arm:r.arm,finished:r.finished,vm_use:r.vm_use,requests:r.requests})),overlap_ms:result.overlap_ms,maxProviderActive:result.maxProviderActive,paid_solver_calls:result.paid_solver_calls??null,bundle:result.bundle}:result));process.exit(0);
+}
 if(['--pilot-prepare','--pilot-qualify','--pilot-run-approved','--pilot-pi-prepare','--pilot-pi-qualify','--pilot-pi-run-approved'].includes(pilotCommand)){
   const pilot=await import('./agent-benchmark-pilot.mjs');const [configFile,out,approvedSha,approvalFile]=process.argv.slice(3);let result;
   if(pilotCommand==='--pilot-pi-run-approved')result=await pilot.runApprovedPiPilot(path.resolve(configFile),path.resolve(out),approvedSha,JSON.parse(fs.readFileSync(approvalFile)));
