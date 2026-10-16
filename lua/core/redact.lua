@@ -190,6 +190,12 @@ function M.value(v)
     elseif type(x) == "table" then
       local out = {}
       for key, item in pairs(x) do out[key] = walk(item) end
+      -- Preserve only payload-free JSON shape tags. Never copy __json_raw or
+      -- arbitrary metatables: all actual strings must pass through walk above.
+      local tag=getmetatable(x)
+      if next(x)==nil and type(tag)=='table' and (tag.__json_empty=='object' or tag.__json_empty=='null') then
+        setmetatable(out,{__json_empty=tag.__json_empty})
+      end
       return out
     end
     return x

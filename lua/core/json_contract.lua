@@ -64,6 +64,26 @@ function M.compact(node)
  if node.kind=='null' then return 'null' end
  return json.encode(node.value)
 end
+-- Materialize a validated AST as traversable data, never opaque raw JSON.
+-- Nulls and empty objects need payload-free tags because ordinary Lua tables
+-- otherwise erase their distinction from empty arrays during recursive copies.
+function M.materialize(node,keymap)
+ if node.kind=='null' then return setmetatable({}, {__json_empty='null'}) end
+ if node.kind=='object' then
+  local value={};for _,key in ipairs(node.keys)do
+   local mapped=keymap and keymap(key) or key
+   if value[mapped]~=nil then error('json_materialize_key_collision') end
+   value[mapped]=M.materialize(node.children[key],keymap)
+  end
+  if next(value)==nil then setmetatable(value,{__json_empty='object'}) end
+  return value
+ end
+ if node.kind=='array' then
+  local value={};for i,child in ipairs(node.children)do value[i]=M.materialize(child,keymap) end
+  return value
+ end
+ return node.value
+end
 local annotations={description=true,title=true,default=true,examples=true}
 local supported={type=true,properties=true,required=true,enum=true,minimum=true,maximum=true,minLength=true,maxLength=true,minItems=true,maxItems=true,additionalProperties=true,items=true,anyOf=true}
 local function supported_schema(schema,path)

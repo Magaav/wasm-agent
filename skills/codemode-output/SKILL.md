@@ -18,7 +18,11 @@ attempt ID. `await describeTool('showCall')` gives the helper contract. Do not a
 `text`/return the same large result: that adds escaped copies. Small counters or
 explicitly selected diagnostics remain suitable for `text`.
 
-Inspect `shown`, per-item errors, EOF/byte continuations and cached `next_cursor`.
+Inspect `shown`, `presentation_sanitized`, `presentation_redacted`, per-item errors,
+EOF/byte continuations and cached `next_cursor`. Displayed content is a normal
+redacted model view, not byte-identical private evidence. Original source byte counts
+and selections remain tied to the captured original. Never form old_text from masked
+source. JSON-key redaction collisions refuse visibly, not complete empty success.
 A visible captured page is not necessarily a whole document or whole batch.
 Continue later cached results with ordinary `read_many({cursor:...})`; do not rerun
 the script, particularly effects. If `presentation_partial`, inspect all unread

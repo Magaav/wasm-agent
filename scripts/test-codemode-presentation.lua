@@ -101,7 +101,8 @@ keep('boundary-retrieval.json',{artifact_retrievals=retrievals,partial=true,sour
 local typed='{"results":[{"value":null,"object":{},"array":[]},{"error":"binary","effect":"none"}],"ok":false,"late":null}'
 local typedref=output.store(typed)
 local typedview=view.finish({ok=true,calls={{name='read_many',evidence=typedref}}},{1})
-check(json.encode(typedview.shown[1].result)==typed,'typed original bytes preserved exactly')
+local typed_tree=assert(dofile('lua/core/json_contract.lua').parse(json.encode(typedview.shown[1].result)))
+check(dofile('lua/core/json_contract.lua').at(typed_tree,{'results',1,'value'}).kind=='null' and dofile('lua/core/json_contract.lua').at(typed_tree,{'results',1,'object'}).kind=='object' and dofile('lua/core/json_contract.lua').at(typed_tree,{'results',1,'array'}).kind=='array' and host.read_file(typedref.path)==typed,'typed shapes survive in model view; original bytes stay exact')
 assert(host.write_file(typedref.path,typed..'broken'))
 local intact,problem=pcall(view.finish,{ok=true,calls={{name='read_many',evidence=typedref}}},{1})
 check(not intact and tostring(problem):find('evidence_changed',1,true),'corrupt presentation original refuses visibly')

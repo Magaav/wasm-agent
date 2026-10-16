@@ -19,9 +19,14 @@ await showCall({version:1,call:1});
 
 Instead of `text(await tools.read_many(...))`, the selected result appears as
 `shown[i].result`, native JSON once, without the guest text item's extra JSON
-string escaping. All original fields and JSON object/array/null shapes survive;
-source content, paths, versions, selections and inclusive edit frames are not
-shortened. `calls`, `attempts` and exact argument/result evidence stay distinguishable.
+string escaping. The model view preserves fields and JSON object/array/null shapes
+through normal redaction. `presentation_sanitized=true` identifies this derived
+view; `presentation_redacted` and named `presentation_redactions` identify configured
+secret replacements, and `presentation_key_redacted` identifies sanitized JSON keys.
+Native original bytes remain unchanged at their exact evidence references. Unredacted
+paths, versions, selections and inclusive edit frames remain exact. Source byte counts
+refer to the captured original, not the length of a redacted content string. Never
+construct an old_text edit from masked source text. `calls` and `attempts` stay distinguishable.
 Raw/default behavior is unchanged when no call is selected. Other receipt-producing
 calls can be selected too. A rejected tool normally throws in Pi; catch explicitly
 if you need to select that admitted failure, without retrying it:
@@ -37,21 +42,25 @@ Failures after a selection retain earlier output/receipts; nothing auto-replays.
 
 ## Encoded budget and incomplete awareness
 
-The helper measures `#json.encode(final_native_result)` including the outer call
-journal, paths, UTF-8 and escaping, against the unchanged tool-output budget
-(default50KiB). The supervisor's8MiB ceiling and all VM/asset limits are unchanged.
+The helper measures the encoded **sanitized** final tool-content object, including
+redaction labels, outer journal, paths, UTF-8 and escaping, against the unchanged
+output budget. An8-byte secret can expand to the10-byte mask; raw bytes alone do
+not establish that the final view fits. The normal agent boundary redacts again
+before projection, SSE serialization, transcript storage and subsequent provider
+messages. The default50KiB tool-content budget and supervisor8MiB ceiling are unchanged.
 The helper does not set a smaller read default, alter primitive schemas or create
 a read cache. Original native result bytes are the existing hash-addressed evidence.
 
-When everything fits, `shown[i].complete=true` means the *captured native result*
-is entirely visible, not that every document/page was read. For a `read_many`
+When everything fits, `shown[i].complete=true` means the *sanitized captured result*
+is entirely visible, not that original secret-bearing bytes were displayed or every
+document/page was read. For a `read_many`
 page, `next_cursor` still means later cached results remain unread. Follow it with
 ordinary `read_many({cursor:...})` across scripts/process restarts without refetch.
 Normal source byte/line continuations remain version-bound and separate.
 
 If the encoded envelope would exceed the budget, `presentation_partial=true`
 labels incomplete awareness. Native read batches pack whole items into `results`,
-preserve exact top-level page `metadata` (including cached continuation and late
+preserve typed top-level page `metadata` subject to redaction (including cached continuation and late
 notes), and give every captured slot `coverage`: original index, visible flag,
 error/effect/outcome/path fields where present, and an exact unread SHA-256/offset/
 byte count. No partial source text or clipped receipt is offered as editable data.
@@ -77,11 +86,36 @@ is no nearest-anchor rewrite, guessed whitespace repair, formatter-command parse
 mutating retry, rollback, or failed-script replay. A successful prior write followed
 by refusal/unknown remains partial/unknown according to its original journal.
 
+## Corrected normal model boundary
+
+The first implementation (`bebef12a` and earlier) used empty Lua tables containing
+opaque `__json_raw` metatables. Direct-dispatch tests encoded them successfully,
+but normal agent redaction copied only table fields and erased the payloads. This
+could display `complete:true,result:[]` while the retained original was nonempty.
+Earlier passing receipts do NOT cover the real model boundary and are not rewritten.
+
+Selected originals are now strict-parsed into traversable data. Only empty-object
+and null tags contain no data; the serializer and redactor preserve those shapes
+only on genuinely empty tables. Nonempty strings always traverse normal redaction.
+No arbitrary raw metatable is preserved. Configured secrets in selected JSON keys
+are also sanitized; a resulting key collision refuses presentation visibly rather
+than losing a field. Private native originals remain hash-bound and unchanged.
+
+The actual-agent regression captures the next mock-provider tool message, serialized
+SSE, stored row, exact paged session projection, and process-restart continuation.
+It verifies source/receipt/caveat coverage, typed null/object/array shapes, configured
+secret values and keys, redaction expansion budgets, caught failure and unknown/
+partial effects without replay. Old source and the prior standalone installed
+binary must fail by displaying empty data. Children have Node absent; no inference
+or installation occurs. See [CODEMODE-MODEL-BOUNDARY-JOURNAL.md](CODEMODE-MODEL-BOUNDARY-JOURNAL.md).
+
 ## Focused deterministic proof
 
 ```
-node scripts/test-codemode-presentation.mjs <absolute-built-wa> <fresh-evidence>
-node scripts/test-codemode-presentation.mjs --post <absolute-built-wa> <same-evidence>
+node scripts/test-codemode-model-boundary.mjs <absolute-built-wa> <fresh-evidence> [prior-binary]
+node scripts/test-codemode-model-boundary.mjs --post <absolute-built-wa> <same-evidence>
+node scripts/test-codemode-presentation.mjs <absolute-built-wa> <presentation-evidence>
+node scripts/test-codemode-presentation.mjs --post <absolute-built-wa> <presentation-evidence>
 ```
 
 The collector retains private source/standalone embedded seed/restart logs,
