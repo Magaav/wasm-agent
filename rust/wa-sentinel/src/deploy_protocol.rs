@@ -3,6 +3,11 @@ use super::*;
 #[cfg(test)]
 #[path="protocol_reconcile_tests.rs"]
 mod reconcile_tests;
+#[path="codemode_preinstall.rs"]
+mod codemode_preinstall;
+#[cfg(test)]
+#[path="protocol_codemode_tests.rs"]
+mod codemode_tests;
 
 pub(crate) fn reserved(id: &str) -> bool {
     !id.is_empty() && id.bytes().all(|b|b.is_ascii_alphanumeric() || b==b'-') && sentinel_dir().join("deploy-protocol").join(id).join("intent.json").exists()
@@ -152,6 +157,7 @@ pub(crate) fn reservation_released(active:&Value)->Result<bool> {
 /// This never calls the installer or claims installation verification.
 pub(crate) fn retire_preinstall(id:&str,reason:&str)->Result<Value> {
     if std::env::var("WASM_AGENT_IN_TURN").as_deref()==Ok("1") {bail!("preinstall_retirement_requires_external_executor");}
+    if std::env::var("WASM_AGENT_PROVENANCE").as_deref()==Ok("child") {bail!("sentinel_coordinator_only: preinstall retirement requires external operator");}
     if reason.trim().is_empty() || reason.len()>600 || reason.contains(['\n','\r','\0']) {bail!("preinstall_reason_required");}
     if id.is_empty() || !id.bytes().all(|b|b.is_ascii_alphanumeric()||b==b'-') {bail!("preinstall_id_invalid");}
     let lock=open_lock(&sentinel_dir().join("protocol-effect.lock"))?;lock.lock()?;
@@ -179,24 +185,44 @@ pub(crate) fn retire_preinstall(id:&str,reason:&str)->Result<Value> {
         || effect["expected_sha"]!=intent["expected_sha"] || !instance::same_path(&root,Path::new(effect["source"].as_str().unwrap_or(""))) {bail!("preinstall_source_or_state_mismatch");}
     let capture=std::fs::read(deploy_capture_path())?;let text=std::str::from_utf8(&capture)?;
     let late_result=dir.join("result.json");
-    let (stanza,failure_class)=if late_result.exists() {
+    let (stanza,failure_class,retained_helper)=if late_result.exists() {
         let result:Value=serde_json::from_slice(&std::fs::read(&late_result)?)?;
         let exit:Value=serde_json::from_slice(&std::fs::read(dir.join("process-exit.json"))?)?;
-        (embedded_preinstall_capture(&intent,&effect,&state,text,&result,&exit)?,"embedded_runtime_check")
-    }else{(preinstall_capture(&intent,&effect,&state,text)?,"early_path")};
+        if effect["script_sha256"]==codemode_preinstall::SCRIPT {
+            let helper=codemode_preinstall::source(&root,&intent,&effect)?;
+            if !instance::same_path(Path::new(effect["script"].as_str().unwrap_or("")),&root.join("scripts/deploy.sh")) {bail!("preinstall_codemode_script_path_mismatch");}
+            codemode_preinstall::generation(&intent,&effect,&active,&binding,&state,&node,target,instance::process_start(target),&hex_digest(&std::fs::read(&binary)?))?;
+            (codemode_preinstall::capture(&intent,&effect,&state,text,&result,&exit,&hex_digest(&helper))?,"codemode_rg_preflight",Some(helper))
+        }else{(embedded_preinstall_capture(&intent,&effect,&state,text,&result,&exit)?,"embedded_runtime_check",None)}
+    }else{(preinstall_capture(&intent,&effect,&state,text)?,"early_path",None)};
     if verify_target(node_port(),true)?!=target || instance::process_start(target)!=effect["target_created"].as_u64()
         || node["binary_sha256"].as_str()!=Some(hex_digest(&std::fs::read(&binary)?).as_str()) {bail!("preinstall_target_changed_during_proof");}
+    if retained_helper.is_some() {
+        if git(&root,&["rev-parse","HEAD"])?!=current {bail!("preinstall_codemode_source_changed_during_proof");}
+        canonical_script(&current)?;codemode_preinstall::source(&root,&intent,&effect)?;
+        let current_node:Value=serde_json::from_slice(&std::fs::read(sentinel_dir().join("node.json"))?)?;
+        if current_node!=node {bail!("preinstall_codemode_node_record_changed_during_proof");}
+    }
     let evidence=dir.join(format!("preinstall-evidence-{}",std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()));std::fs::create_dir_all(&evidence)?;
-    for name in ["intent.json","binding.json","effect.json","state.json","result.json","process-exit.json","return-status.json","observation.json"] {let file=dir.join(name);if file.exists(){std::fs::copy(file,evidence.join(name))?;}}
+    for name in ["intent.json","binding.json","ack.json","effect.json","state.json","result.json","process-exit.json","return-status.json","observation.json"] {let file=dir.join(name);if file.exists(){std::fs::copy(file,evidence.join(name))?;}}
+    if let Some(helper)=retained_helper {
+        codemode_preinstall::archive_json(&dir,&evidence)?;
+        std::fs::copy(sentinel_dir().join("node.json"),evidence.join("node.json"))?;
+        std::fs::write(evidence.join("retained-deploy.sh"),&raw.stdout)?;
+        std::fs::write(evidence.join("retained-codemode-build.mjs"),helper)?;
+    }
     std::fs::copy(sentinel_dir().join("protocol-effect.json"),evidence.join("reservation.json"))?;
     std::fs::write(evidence.join("deploy.out"),&capture)?;std::fs::write(evidence.join("exact-stanza.txt"),stanza)?;
-    let receipt=json!({"ok":true,"id":id,"effect":effect,"reason":reason,"at":now_epoch(),"target_pid":target,
+    let mut receipt=json!({"ok":true,"id":id,"effect":effect,"reason":reason,"at":now_epoch(),"target_pid":target,
         "target_created":instance::process_start(target),"capture_sha256":hex_digest(&capture),"evidence":evidence,
         "failure_class":failure_class,"installation_occurred":false,"effect_replayed":false,"reservation_released":true});
+    if failure_class=="codemode_rg_preflight" {receipt["notification_state_preserved"]=json!(true);}
     wa_operation::atomic_json(&dir.join("preinstall-retirement.json"),&receipt)?;
     active["phase"]=json!("aborted_preinstall");active["retired_at"]=json!(now_epoch());
     wa_operation::atomic_json(&sentinel_dir().join("protocol-effect.json"),&active)?;
-    record(&intent,id,"failed","explicit unchanged-target pre-install retirement; original failure preserved; no installation or replay")?;
+    if failure_class!="codemode_rg_preflight" {
+        record(&intent,id,"failed","explicit unchanged-target pre-install retirement; original failure preserved; no installation or replay")?;
+    } // This class leaves state/notification originals byte-for-byte untouched.
     Ok(receipt)
 }
 fn hex_digest(bytes:&[u8])->String {ring::digest::digest(&ring::digest::SHA256,bytes).as_ref().iter().map(|b|format!("{b:02x}")).collect()}

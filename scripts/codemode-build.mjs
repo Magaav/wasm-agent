@@ -12,7 +12,7 @@ const packages=[
  {name:'quickjs-wasi',version:'3.6.2',file:'quickjs-wasi.tgz',sha256:'f1f4349f19a2d849e33ea0ae9bec2e7062b8839f4eceb17c9051ddbaa2720982'}
 ];
 function requireValue(v,label){if(!v)throw Error('codemode_build:'+label);return v;}
-function git(root,...args){const r=cp.spawnSync('git',['-C',root,...args],{encoding:'utf8',windowsHide:true});requireValue(r.status===0,'git_failed:'+r.stderr);return r.stdout.trim();}
+function git(root,...args){const r=cp.spawnSync('git',['-C',root,...args],{encoding:'utf8',windowsHide:true});requireValue(r.status===0,'git_failed:'+JSON.stringify({status:r.status,error:r.error?{code:r.error.code,message:r.error.message}:null,stderr:r.stderr}));return r.stdout.trim();}
 export function assetPath(root){return path.join(git(root,'rev-parse','--path-format=absolute','--git-common-dir'),'codemode-assets','pi-1.2.0-quickjs-3.6.2');}
 export function verifyAssets(root,dir){
  const receipt=JSON.parse(fs.readFileSync(path.join(dir,'receipt.json')));
@@ -34,15 +34,30 @@ export function prepare(root,from){
  verifyAssets(root,stage);fs.renameSync(stage,target);
  return {ok:true,prepared:target,assets:verifyAssets(root,target)};
 }
+// Match the host's existing resolve_home + ripgrep::ensure contract, without
+// provisioning. rg is an offline STARTUP dependency, not a Cargo/Lua dependency.
+export function resolveRipgrep(env=process.env,spawn=cp.spawnSync){
+ const get=name=>Object.entries(env).find(([k])=>k.toLowerCase()===name.toLowerCase())?.[1];
+ const home=get('WASM_AGENT_HOME')||(process.platform==='win32'?(get('USERPROFILE')||(get('HOMEDRIVE')&&get('HOMEPATH')?get('HOMEDRIVE')+get('HOMEPATH'):get('HOME'))):get('HOME'));
+ const name=process.platform==='win32'?'rg.exe':'rg';const candidates=[];
+ if(home&&path.isAbsolute(home))candidates.push(path.join(home,'.wasm-agent/bin',name));
+ for(const entry of (get('PATH')||'').split(path.delimiter))if(path.isAbsolute(entry))candidates.push(path.join(entry,name));
+ const attempts=[];
+ for(const candidate of [...new Set(candidates)]){
+  const r=spawn(candidate,['--version'],{encoding:'utf8',windowsHide:true,timeout:10000});
+  if(r.status===0&&r.stdout?.startsWith('ripgrep '))return {path:fs.realpathSync(candidate),sha256:sha(fs.readFileSync(candidate)),version:r.stdout.trim(),attempts};
+  attempts.push({path:candidate,status:r.status,signal:r.signal,error:r.error?{code:r.error.code,message:r.error.message}:null,stderr:r.stderr||'',stdout:r.stdout||''});
+ }
+ throw Error('codemode_build:ripgrep_offline_startup_unavailable:'+JSON.stringify(attempts));
+}
 export function preflight(root,dir=assetPath(root)){
  const assets=verifyAssets(root,dir);
  requireValue(fs.existsSync(path.join(root,'scripts/check-embedded-runtime.lua')),'embedded_checker_missing');
  requireValue(fs.existsSync(path.join(root,'rust/Cargo.toml')),'cargo_manifest_missing');
  const cargo=cp.spawnSync('cargo',['--version'],{encoding:'utf8',windowsHide:true});
  requireValue(cargo.status===0,'cargo_unavailable:'+String(cargo.error||cargo.stderr));
- const rg=cp.spawnSync('rg',['--version'],{encoding:'utf8',windowsHide:true});
- requireValue(rg.status===0,'ripgrep_unavailable:prepare_offline_before_build');
- return {ok:true,root:fs.realpathSync(root),source_commit:git(root,'rev-parse','HEAD'),source_tree:git(root,'rev-parse','HEAD^{tree}'),source_dirty:git(root,'status','--porcelain')!=='',cargo:cargo.stdout.trim(),assets};
+ const ripgrep=resolveRipgrep();
+ return {ok:true,ripgrep,root:fs.realpathSync(root),source_commit:git(root,'rev-parse','HEAD'),source_tree:git(root,'rev-parse','HEAD^{tree}'),source_dirty:git(root,'status','--porcelain')!=='',cargo:cargo.stdout.trim(),assets};
 }
 export function build(root,dir=assetPath(root)){
  const before=preflight(root,dir);
@@ -61,11 +76,19 @@ export function build(root,dir=assetPath(root)){
   requireValue(result.status===0,'cargo_failed:'+String(result.error||result.stderr));
   const binary=path.join(root,'rust/target/release',process.platform==='win32'?'wa.exe':'wa');
   const home=path.join(evidence,'runtime-home');fs.mkdirSync(home);
+  const rg=path.join(home,'.wasm-agent/bin',process.platform==='win32'?'rg.exe':'rg');
+  fs.mkdirSync(path.dirname(rg),{recursive:true});fs.copyFileSync(before.ripgrep.path,rg,fs.constants.COPYFILE_EXCL);
+  requireValue(sha(fs.readFileSync(rg))===before.ripgrep.sha256,'ripgrep_changed_during_staging');
+  if(process.platform!=='win32')fs.chmodSync(rg,0o755);
+  const staged=cp.spawnSync(rg,['--version'],{encoding:'utf8',windowsHide:true,timeout:10000});
+  requireValue(staged.status===0&&staged.stdout?.startsWith('ripgrep '),'private_ripgrep_execution_failed:'+JSON.stringify({status:staged.status,error:staged.error?{code:staged.error.code,message:staged.error.message}:null,stderr:staged.stderr}));
+  receipt.runtime_ripgrep={path:rg,sha256:before.ripgrep.sha256,version:staged.stdout.trim()};
   const runtimeEnv=Object.fromEntries(Object.entries(process.env).filter(([k])=>!/^(WA_|WASM_AGENT_|PI_|OPENAI_|ANTHROPIC_|OPENCODE_)/i.test(k)));
   Object.assign(runtimeEnv,{WASM_AGENT_HOME:home,WASM_AGENT_LUA_ROOT:'',WASM_AGENT_CODEMODE_ASSETS:'',WA_EMBEDDED_SOURCE_ROOT:root,WA_SCRIPT:path.join(root,'scripts/check-embedded-runtime.lua'),WA_GRAPH_WATCH:'0',WASM_AGENT_MANAGED:'0'});
   const runtime=cp.spawnSync(binary,['--db',path.join(home,'private.db')],{cwd:home,env:runtimeEnv,encoding:'utf8',windowsHide:true,timeout:60000,maxBuffer:8*1024*1024});
   for(const stream of ['stdout','stderr'])fs.writeFileSync(path.join(evidence,'embedded.'+stream),runtime[stream]||'');
   requireValue(runtime.status===0&&runtime.stdout.includes('embedded native codemode ok'),'embedded_candidate_failed:'+String(runtime.error||runtime.stdout+runtime.stderr));
+  requireValue(!/ripgrep missing; installing|ripgrep_unavailable:/.test(runtime.stderr||''),'unexpected_ripgrep_provisioning_or_failure');
   verifyAssets(root,snapshot); // changed snapshot never earns a ready receipt
   requireValue(git(root,'rev-parse','HEAD')===before.source_commit&&git(root,'rev-parse','HEAD^{tree}')===before.source_tree,'source_changed_during_build');
   receipt.binary=binary;receipt.binary_sha256=sha(fs.readFileSync(binary));receipt.ok=true;

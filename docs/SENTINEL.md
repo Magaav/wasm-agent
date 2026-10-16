@@ -54,7 +54,19 @@ installation, runtime download, benchmark vault or Node VM fallback is involved.
 
 `preflight` is read-only and should be run BEFORE queuing the one exact-source
 request or reserving an installer. It checks assets, Cargo, ripgrep and checker
-prerequisites and prints source/asset identities. `build` is the optional complete
+prerequisites and prints source/asset identities. rg is not used by Cargo or the
+checker Lua, but the existing node startup calls `ripgrep::ensure` before WA_SCRIPT
+and can download when neither home-local nor PATH rg works. The offline helper
+therefore resolves the existing `<resolved-home>/.wasm-agent/bin/rg[.exe]` first,
+then absolute PATH entries, using the host's home precedence. It records each
+failed spawn's real status/error/stderr (absence is not access denial). A working
+executable's path/hash/version are recorded, then a hash-checked copy is staged
+ONLY into the checker's private home. No global/user PATH change, new registry,
+rg installation or download is performed. Missing/denied candidates fail visibly;
+the embedded check rejects any provisioning/failure diagnostic. The old helper's
+PATH-only preflight did not follow this host contract; the retained production
+failure did not record its spawn error, so PATH versus access remains unproven.
+`build` is the optional complete
 non-installing preparation door: offline/locked Cargo receives an explicit native
 verified snapshot path, never ambient `WA_CODEMODE_BUILD_ASSETS`; it checks complete
 embedded Lua identity and actually runs the pinned Rust/Wasmtime QuickJS guest
@@ -435,6 +447,32 @@ partial-install markers or changed target refuse. It archives original result,
 exit, capture and return evidence and writes `aborted_preinstall` plus a retirement
 receipt; it does not claim installation, reset return cursors or replay the old
 request. Admission/bootstrap recognize only a receipt-bound released reservation.
+
+An additional **separate** known-preinstall class, `codemode_rg_preflight`, accepts
+only source `acde06f016d27e4a29c644c5bea897ae53febf8c`, tree `33603112…`, deployer
+SHA256 `c0903556…` and the retained Git helper SHA256 `c02c6ac9…`. The exact ordered
+`deploy: building` / `codemode_build:ripgrep_unavailable:prepare_offline_before_build`
+/ native shipping-build refusal must end in the unique owned native exit1 stanza.
+Matching failed result requires empty installed identities; full effect, PID,
+u64 creation, owner/parent/source/native binary and actual published ancestry are
+rechecked. The elapsed4781ms producer renders **4.8s**, not4.781 or4.80.
+Missing/malformed/foreign data, helper/script drift, duplicate capture, installation
+markers or changed native identity refuse. This does not widen the two older
+classes or authorize generic failures saying “nothing installed”. All public
+request JSON/return journals/cursors, native node record, complete capture and
+retained source blobs are archived; unknown notifications stay unknown. Only
+`aborted_preinstall` / `installation_occurred:false` may release the exact
+reservation—never verified, never a wake/request or installer replay.
+
+Focused native tests read the preserved public packet without mutation and exercise
+pure positive/negative proof surfaces. The full private native CLI scenario is
+`scripts/test-sentinel-codemode-preinstall.mjs <absolute-built-sentinel>
+<fresh-evidence>`, then `--post` before those arguments. It explicitly refuses
+in-turn/child provenance before creating a fixture; run it only from an external
+operator executor. Its installer records/capture and owner HTTP are labelled
+synthetic; actual target creation/binary identity and Git source/remote are real.
+The existing source-built checked OS-task `-RetirePreinstallId` door already invokes
+the same native classifier; no alternate registry or watcher change is required.
 
 An observer too old to perform this narrow retirement can use the existing checked
 `bootstrap-sentinel-deploy.ps1 -RetirePreinstallId <exact-id>` path (`-Check` first),
