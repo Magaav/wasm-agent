@@ -1,5 +1,9 @@
 # WhatsApp reliability review completion
 
+The subsequent count-only response-byte finding is corrected by
+[WHATSAPP-BYTE-PAGES.md](WHATSAPP-BYTE-PAGES.md). This review's original test/artifact
+receipts remain historical evidence; they are not silently upgraded to byte proof.
+
 This is the follow-up to the coordinator's seven findings against fdc79bfc/e1361075.
 The older [delivery checkpoint](WHATSAPP-DELIVERY.md) and all of its artifact/log
 receipts are preserved, not relabelled as activation proof. Current operating steps

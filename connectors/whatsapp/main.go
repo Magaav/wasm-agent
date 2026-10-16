@@ -94,10 +94,45 @@ func api(j *Journal, token string) http.Handler {
 			}
 			data, err := j.readPage(c, req, strings.TrimPrefix(r.URL.Path, "/"))
 			if err != nil {
+				if errors.Is(err, errPageNoProgress) {
+					fail(503, "page_no_progress")
+					return
+				}
 				fail(503, "journal_unavailable")
 				return
 			}
-			json.NewEncoder(w).Encode(data)
+			encoded, err := marshalBytePage(data)
+			if err != nil {
+				fail(503, "page_no_progress")
+				return
+			}
+			w.Write(encoded)
+		case "/read_field":
+			if _, _, err := j.readScope(c, req, ""); err != nil {
+				fail(403, "read_scope_not_approved")
+				return
+			}
+			data, err := j.readField(c, req)
+			if err != nil {
+				var fieldErr *fieldReadError
+				if errors.As(err, &fieldErr) {
+					w.WriteHeader(fieldErr.status)
+					json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": fieldErr.name, "field_version": fieldErr.version, "byte_length": fieldErr.size})
+					return
+				}
+				if errors.Is(err, errPageNoProgress) {
+					fail(503, "page_no_progress")
+					return
+				}
+				fail(503, "journal_unavailable")
+				return
+			}
+			encoded, err := json.Marshal(data)
+			if err != nil || len(encoded)+1 > 64*1024 {
+				fail(503, "field_no_progress")
+				return
+			}
+			w.Write(append(encoded, '\n'))
 		case "/send_message":
 			fail(403, "general_send_refused_draft_visibility_unsupported")
 		case "/download_audio":

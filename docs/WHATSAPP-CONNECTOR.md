@@ -240,11 +240,15 @@ must set BOTH `account_wide:true` and `operator_account_read:true`. Model argume
 cannot set either. Native `whatsapp_read` STILL fixes one trusted-event conversation.
 A selected binding sends its exact conversations as a server-side SQL scope, never
 fetches unrelated chats and never loops once per chat. `read_snapshot`, `list_chats`
-and `posting_status` return one total page capped by limit, with `next_before`,
-`cursor_version:1`, `limit_scope:total`, connection/gap/coverage state and scoped
-last-observed freshness. Existing numeric `before` remains compatible; use cursors
-only within the same endpoint/account/generation/scope. New rows between pages do
-not change the row-ID ordering of older rows. Discovered chat listings and posting
+and `posting_status` return one total **row AND byte** bounded page:4MiB encoded
+UTF-8 JSON including late metadata/LF, with encoded_bytes, byte/row truncation,
+ordered inline/oversized outcomes and last-delivered next_before. Oversized fields
+are not clipped: read_field retrieves exact version-checked base64 chunks up to16KiB.
+See [the precise page-v2 contract](WHATSAPP-BYTE-PAGES.md), including application vs
+SQLite/upstream memory limits and no-progress refusal. Cursor_version1 remains a
+numeric scoped live keyset window—not a pinned snapshot, signed artifact cursor or
+cryptographic scope fence. Authorization is rechecked on each request. Mutable rows
+can change; higher-ID inserts do not reorder the older continuation. Discovered chat listings and posting
 unknown/blocked/retry evidence are bounded/scoped too; no reset/resend endpoint.
 Malformed/status/broadcast/unapproved scope exclusions are visible as counts without
 retaining their content/keys. The updated MCP refuses old servers lacking total-page
