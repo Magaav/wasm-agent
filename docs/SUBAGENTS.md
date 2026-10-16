@@ -391,7 +391,11 @@ app's store). A send whose confirmation cannot be written is reported as
 not-success, not as sent. Decisions live in their own table, keyed by the message
 id, so recording one never erases a reservation.
 
-Drafting and sending remain different capabilities: `resources.actions` gates
-them separately, `resources.send_approved` must be true to send, and the route
-(`store` vs `ui`) is bound in the profile, never derived from an event or an
-argument.
+Drafting and sending remain different capabilities. For the current WhatsApp
+linked-device backend, GENERAL sends fail closed BEFORE reservation because
+cross-device draft visibility is unsupported. `store`/`ui` are retired, not fallbacks.
+Profiles ship read-only and no responder job is newly enabled. Deterministic
+original-chat audio transcripts are a separate explicit policy with EN default/PT
+account configuration; they do not grant model sends or use a child/idle inference.
+See [connector](WHATSAPP-CONNECTOR.md) and [migration](WHATSAPP-MIGRATION.md).
+Historical ledgers/effects retain the contracts above and must not be reset.

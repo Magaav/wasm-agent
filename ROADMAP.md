@@ -230,7 +230,15 @@ failed probes remain durable, changed schemas refuse before dispatch, and no too
 is automatically replayed. Credentials remain references with explicit redaction;
 no Pi runtime, recurring observer or extra inference worker.
 
-WhatsApp is the first profile-managed app adapter (reads, lookup, audio, verified
+**Current WhatsApp replacement:** persistent linked-device ingestion/journal/STT and
+explicit legacy retirement are implemented in source, default-disabled. See
+[connector setup](docs/WHATSAPP-CONNECTOR.md), [retirement inventory](docs/WHATSAPP-MIGRATION.md)
+and [source reference inventory](docs/whatsapp-reference-inventory.json). EN is the
+product recognition default; this operator must explicitly configure PT per account.
+No production installation, pairing, real posting or legacy settlement is claimed.
+The MCP/WhatsApp delivery record below is historical evidence, not the current backend.
+
+WhatsApp was the first profile-managed app adapter (reads, lookup, audio, verified
 store send). Existing compatibility clients route through MCP; Jobs keeps controls,
 eligibility, cursor/dedupe, deterministic STT and delivery/wake ownership. Existing
 profile/reservation/budget/verification remains the send authority. No third-party

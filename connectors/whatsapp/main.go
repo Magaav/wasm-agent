@@ -1,0 +1,433 @@
+// Copyright 2026 wasm-agent contributors. SPDX-License-Identifier: MIT
+package main
+
+import (
+	"context"
+	"crypto/rand"
+	"crypto/subtle"
+	"database/sql"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"flag"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"os"
+	"os/signal"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"sync"
+	"syscall"
+	"time"
+
+	"github.com/skip2/go-qrcode"
+	"golang.org/x/term"
+)
+
+func api(j *Journal, token string) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "no-store")
+		fail := func(status int, reason string) {
+			w.WriteHeader(status)
+			json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": reason})
+		}
+		if r.Method != "POST" {
+			fail(405, "post_required")
+			return
+		}
+		if subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), []byte("Bearer "+token)) != 1 {
+			fail(401, "authentication_required")
+			return
+		}
+		var req struct {
+			Account    string `json:"account"`
+			Generation int64  `json:"generation"`
+			Chat       string `json:"conversation_id"`
+			Message    string `json:"message_id"`
+			Limit      int    `json:"limit"`
+			Since      int64  `json:"since"`
+			Before     int64  `json:"before"`
+		}
+		decoder := json.NewDecoder(io.LimitReader(r.Body, 8193))
+		decoder.DisallowUnknownFields()
+		if decoder.Decode(&req) != nil || decoder.Decode(new(any)) != io.EOF {
+			fail(400, "invalid_request")
+			return
+		}
+		c, err := j.scope(req.Account, req.Generation, req.Chat)
+		if err != nil {
+			fail(403, "scope_mismatch")
+			return
+		}
+		switch r.URL.Path {
+		case "/status":
+			status, err := j.status()
+			if err != nil {
+				fail(503, "journal_unavailable")
+				return
+			}
+			json.NewEncoder(w).Encode(status)
+		case "/lookup_self":
+			j.mu.Lock()
+			verified := j.verified
+			j.mu.Unlock()
+			if !verified {
+				fail(409, "paired_identity_unproven")
+				return
+			}
+			json.NewEncoder(w).Encode(map[string]any{"ok": true, "account": c.Account, "self_chat": c.Account, "generation": c.Generation})
+		case "/inspect_chat":
+			if req.Chat == "" {
+				fail(400, "chat_required")
+				return
+			}
+			json.NewEncoder(w).Encode(map[string]any{"ok": true, "account": c.Account, "conversation_id": req.Chat, "generation": c.Generation, "draft_visibility": "unsupported", "draft": nil, "general_send_supported": false})
+		case "/read_snapshot":
+			limit := req.Limit
+			if limit == 0 {
+				limit = 2000
+			}
+			if limit < 1 || limit > 10000 || req.Since < 0 || req.Before < 0 {
+				fail(400, "invalid_window")
+				return
+			}
+			rows, err := j.db.Query("SELECT m.chat,m.id,m.sender,m.body,m.sent,m.own,m.history,m.audio,m.unsupported,COALESCE(a.transcript,''),COALESCE(a.state,''),COALESCE(a.reason,''),m.rowid,m.observed FROM messages m LEFT JOIN audio a USING(account,generation,chat,id) WHERE m.account=? AND m.generation=? AND m.observed>=? AND (?='' OR m.chat=?) AND (?=0 OR m.rowid<?) ORDER BY m.rowid DESC LIMIT ?", c.Account, c.Generation, req.Since, req.Chat, req.Chat, req.Before, req.Before, limit+1)
+			if err != nil {
+				fail(503, "journal_unavailable")
+				return
+			}
+			messages := []Message{}
+			for rows.Next() {
+				var m Message
+				if rows.Scan(&m.Chat, &m.ID, &m.Sender, &m.Body, &m.Sent, &m.Own, &m.History, &m.Audio, &m.Unsupported, &m.Transcript, &m.AudioState, &m.AudioReason, &m.Cursor, &m.Observed) != nil {
+					rows.Close()
+					fail(503, "journal_unavailable")
+					return
+				}
+				messages = append(messages, m)
+			}
+			if rows.Err() != nil {
+				rows.Close()
+				fail(503, "journal_unavailable")
+				return
+			}
+			rows.Close()
+			more := len(messages) > limit
+			if more {
+				messages = messages[:limit]
+			}
+			chats := []map[string]any{}
+			for _, id := range c.Chats {
+				if req.Chat == "" || req.Chat == id {
+					chats = append(chats, map[string]any{"id": id, "title": id, "archived": nil, "left": nil})
+				}
+			}
+			json.NewEncoder(w).Encode(map[string]any{"ok": true, "account": c.Account, "generation": c.Generation, "messages": messages, "conversations": chats, "truncated": more, "coverage": "partial", "draft_visibility": "unsupported"})
+		case "/send_message":
+			fail(403, "general_send_refused_draft_visibility_unsupported")
+		case "/download_audio":
+			fail(403, "media_is_private_to_deterministic_worker")
+		default:
+			fail(404, "unknown_operation")
+		}
+	})
+}
+func privateTTY() bool {
+	return term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd())) && term.IsTerminal(int(os.Stderr.Fd()))
+}
+func pair(ctx context.Context, a *Adapter) error {
+	if !privateTTY() {
+		return errors.New("pairing_requires_private_interactive_tty_no_capture")
+	}
+	if a.client.Store.ID != nil {
+		return errors.New("already_paired")
+	}
+	ch, err := a.client.GetQRChannel(ctx)
+	if err != nil {
+		return errors.New("pairing_unavailable")
+	}
+	if err = a.client.ConnectContext(ctx); err != nil {
+		return errors.New("pairing_connection_failed")
+	}
+	defer fmt.Fprint(os.Stdout, "\033[2J\033[H")
+	for item := range ch {
+		switch item.Event {
+		case "code":
+			code, err := qrcode.New(item.Code, qrcode.Medium)
+			if err != nil {
+				return errors.New("qr_render_failed")
+			}
+			fmt.Fprint(os.Stdout, "\033[2J\033[HScan privately in WhatsApp → Linked devices. Do not record this terminal.\n", code.ToSmallString(false))
+		case "success":
+			return a.identity()
+		case "timeout":
+			return errors.New("pairing_expired")
+		}
+	}
+	return errors.New("pairing_not_confirmed")
+}
+func run() error {
+	if len(os.Args) < 2 {
+		return errors.New("usage: wa-whatsapp init|pair|serve|status|activate|pause|language --state PRIVATE_DIRECTORY [options]")
+	}
+	action := os.Args[1]
+	f := flag.NewFlagSet(action, flag.ContinueOnError)
+	dir := f.String("state", "", "private persistent state directory")
+	account := f.String("account", "", "exact PN account JID from operator")
+	chats := f.String("chats", "", "comma-separated exact approved chat JIDs")
+	lang := f.String("language", "en", "recognition language en/pt/auto; not translation")
+	listen := f.String("listen", "127.0.0.1:8787", "loopback API")
+	owners := f.String("owners", "", "shared per-user account fencing directory (default OS user config/wa-whatsapp-owners)")
+	python := f.String("python", "", "absolute private Python executable")
+	worker := f.String("worker", "", "absolute whatsapp-stt-local.py")
+	cache := f.String("models", "", "private preprovisioned model cache")
+	confirm := f.Bool("approve-transcript-posting", false, "explicit original-chat transcript policy approval after retirement check")
+	retired := f.String("retirement-receipt", "", "verified operator cutover receipt path")
+	if err := f.Parse(os.Args[2:]); err != nil {
+		return err
+	}
+	if *dir == "" || !filepath.IsAbs(*dir) {
+		return errors.New("absolute_private_state_required")
+	}
+	if action == "pair" && !privateTTY() {
+		return errors.New("pairing_requires_private_interactive_tty_no_capture")
+	}
+	j, err := openJournal(*dir)
+	if err != nil {
+		return err
+	}
+	defer j.Close()
+	if action == "init" {
+		if _, err = j.Config(); err == nil {
+			return errors.New("already_initialized")
+		} else if !errors.Is(err, sql.ErrNoRows) {
+			return errors.New("existing_config_unreadable_preserve_state")
+		}
+		c := Config{Account: *account, Generation: 1, Language: *lang, Chats: strings.Split(*chats, ","), Mode: "transcribe"}
+		if err = validConfig(c); err != nil {
+			return err
+		}
+		if !strings.HasSuffix(c.Account, "@s.whatsapp.net") || !validChat(c.Account) {
+			return errors.New("exact_account_pn_jid_required")
+		}
+		token := make([]byte, 32)
+		if _, err = rand.Read(token); err != nil {
+			return err
+		}
+		if err = writeNewSecret(filepath.Join(*dir, "api.token"), []byte(hex.EncodeToString(token))); err != nil {
+			return err
+		}
+		return j.save(c)
+	}
+	c, err := j.Config()
+	if err != nil {
+		return errors.New("init_required")
+	}
+	switch action {
+	case "status":
+		value, err := j.status()
+		if err != nil {
+			return err
+		}
+		return json.NewEncoder(os.Stdout).Encode(value)
+	case "pause":
+		c.Requested = false
+		return j.save(c)
+	case "language":
+		c.Language = *lang
+		return j.save(c)
+	case "activate":
+		if !*confirm || *retired == "" {
+			return errors.New("explicit_transcript_approval_and_retirement_receipt_required")
+		}
+		if err = validateRetirement(*retired, c.Account); err != nil {
+			return err
+		}
+		paired, err := newAdapter(context.Background(), j)
+		if err != nil {
+			return errors.New("device_store_unavailable")
+		}
+		identityErr := paired.identity()
+		paired.Close()
+		if identityErr != nil {
+			return identityErr
+		}
+		// Activation never changes the first cutover. Pauses retain backlog and uncertainty.
+		if c.Activated == 0 {
+			c.Activated = time.Now().Unix() + 1
+		}
+		c.Requested = true
+		return j.save(c)
+	case "pair", "serve":
+		ownerRoot, err := os.UserConfigDir()
+		if err != nil {
+			return errors.New("private_owner_root_unavailable")
+		}
+		ownerRoot = filepath.Join(ownerRoot, "wa-whatsapp-owners")
+		if *owners != "" {
+			if !filepath.IsAbs(*owners) {
+				return errors.New("absolute_owner_root_required")
+			}
+			ownerRoot = *owners
+		}
+		if err = j.fence(ownerRoot, c.Account); err != nil {
+			return err
+		}
+	default:
+		return errors.New("unknown_command")
+	}
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+	a, err := newAdapter(ctx, j)
+	if err != nil {
+		return errors.New("device_store_unavailable")
+	}
+	defer a.Close()
+	if action == "pair" {
+		if c.Requested {
+			return errors.New("pause_before_pairing")
+		}
+		if a.client.Store.ID == nil && c.Activated > 0 {
+			c.Generation++
+			c.Activated = 0
+			if err = j.save(c); err != nil {
+				return errors.New("pairing_generation_persistence_failed")
+			}
+		}
+		return pair(ctx, a)
+	}
+	if err = a.identity(); err != nil {
+		j.setState("needs_pairing")
+	}
+	host, port, err := net.SplitHostPort(*listen)
+	if err != nil {
+		return errors.New("invalid_listen")
+	}
+	ip := net.ParseIP(host)
+	if ip == nil || !ip.IsLoopback() {
+		return errors.New("loopback_only_use_authenticated_https_proxy_for_remote")
+	}
+	if _, err = strconv.Atoi(port); err != nil {
+		return err
+	}
+	token, err := os.ReadFile(filepath.Join(*dir, "api.token"))
+	if err != nil || len(token) != 64 {
+		return errors.New("private_api_token_missing")
+	}
+	listener, err := net.Listen("tcp", *listen)
+	if err != nil {
+		return err
+	}
+	server := &http.Server{Handler: api(j, string(token)), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 30 * time.Second, MaxHeaderBytes: 8192}
+	defer server.Close()
+	go func() { server.Serve(listener); cancel() }()
+	w := &Worker{Python: *python, Script: *worker, Cache: *cache}
+	defer w.Close()
+	var workers sync.WaitGroup
+	workers.Add(2)
+	defer func() { cancel(); workers.Wait() }()
+	go func() {
+		defer workers.Done()
+		ticker := time.NewTicker(time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if a.client.IsConnected() {
+					if err := j.processAudio(ctx, a, w); err != nil {
+						j.setState("degraded_compute_journal")
+					}
+				}
+			}
+		}
+	}()
+	go func() {
+		defer workers.Done()
+		ticker := time.NewTicker(time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if a.client.IsConnected() {
+					if err := j.post(ctx, a); err != nil {
+						j.setState("degraded_post_journal")
+					}
+				}
+			}
+		}
+	}()
+	if a.client.Store.ID == nil {
+		j.setState("needs_pairing")
+	} else if a.identity() != nil {
+		j.setState("degraded_account_mismatch")
+	} else {
+		j.setState("reconnecting")
+		if err = a.client.ConnectContext(ctx); err != nil {
+			j.setState("reconnecting")
+			j.event("connect_failed", "will reconnect; no protocol errors logged")
+		}
+	}
+	// Explicit reconnect handles initial connection failure too. No inference/scheduler required.
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+			if a.client.Store.ID == nil {
+				j.setState("needs_pairing")
+				continue
+			}
+			if a.identity() != nil {
+				j.setState("degraded_account_mismatch")
+				continue
+			}
+			if !a.client.IsConnected() {
+				a.client.ConnectContext(ctx)
+			}
+		}
+	}
+}
+func validateRetirement(path, account string) error {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return errors.New("retirement_receipt_unreadable")
+	}
+	var r struct {
+		Schema            int    `json:"schema"`
+		Account           string `json:"account"`
+		LegacyDisabled    bool   `json:"legacy_disabled"`
+		UnknownsPreserved bool   `json:"unknowns_preserved"`
+		IdentityVerified  bool   `json:"identity_verified"`
+	}
+	if json.Unmarshal(b, &r) != nil || r.Schema != 1 || r.Account != account || !r.LegacyDisabled || !r.UnknownsPreserved || !r.IdentityVerified {
+		return errors.New("retirement_not_verified")
+	}
+	return nil
+}
+func writeNewSecret(path string, data []byte) error {
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	if _, err = file.Write(data); err != nil {
+		return err
+	}
+	return file.Sync()
+}
+func main() {
+	if err := run(); err != nil {
+		fmt.Fprintln(os.Stderr, err.Error())
+		os.Exit(1)
+	}
+}

@@ -1,78 +1,104 @@
-"""Local-only speech recognition for one WhatsApp audio file.
-
-Install faster-whisper into a private Python environment and download the model
-once during setup. Event processing uses local_files_only so a voice recording
-never falls back to a hosted recognizer.
+"""Offline original-language recognition. --worker keeps one multilingual model warm.
+No translation/provider fallback; provision the private model cache separately.
 """
 import argparse
 import json
 import os
 import sys
 
-# A transcript is read by a UTF-8 reader, so it must be written as UTF-8.
-# Python picks the *locale* encoding for a piped stdout: on Windows that is the
-# ANSI code page, so `ensure_ascii=False` put a single cp1252 byte on the wire for
-# each accent and the reader, decoding UTF-8, replaced every one of them with
-# U+FFFD - "Area" became "<?>rea" and the text was lost, not merely garbled.
-# Set the encoding here, once, for stdout and stderr alike, rather than trusting
-# whatever locale the scheduler happened to hand us.
-for _stream in (sys.stdout, sys.stderr):
+for stream in (sys.stdout, sys.stderr):
     try:
-        _stream.reconfigure(encoding="utf-8")
+        stream.reconfigure(encoding="utf-8")
     except (AttributeError, ValueError):
         pass
+
+
+def load_model():
+    cache = os.environ.get("WA_WHATSAPP_STT_MODELS")
+    if not cache or not os.path.isdir(cache):
+        raise ValueError("WA_WHATSAPP_STT_MODELS_required")
+    os.environ["HF_HUB_OFFLINE"] = "1"
+    try:
+        from faster_whisper import WhisperModel
+    except ImportError as error:
+        raise RuntimeError("faster_whisper_missing") from error
+    try:
+        return WhisperModel(os.environ.get("WA_WHATSAPP_STT_MODEL", "small"),
+                            device="cpu", compute_type="int8",
+                            download_root=cache, local_files_only=True)
+    except Exception as error:
+        raise RuntimeError("offline_model_unavailable") from error
+
+
+def recognize(model, request):
+    if request.get("mode", "transcribe") != "transcribe":
+        raise ValueError("cross_language_translation_unsupported")
+    language = request.get("language", "en")
+    if language not in ("en", "pt", "auto"):
+        raise ValueError("language_must_be_en_pt_auto")
+    path = request["input"]
+    if os.path.getsize(path) > 20 * 1024 * 1024:
+        raise ValueError("audio_too_large")
+    segments, info = model.transcribe(
+        path, task="transcribe", language=None if language == "auto" else language,
+        beam_size=5, vad_filter=True,
+        vad_parameters={"min_silence_duration_ms": 300},
+        condition_on_previous_text=False)
+    parts = []
+    count = 0
+    for segment in segments:
+        text = segment.text.strip()
+        count += len(text)
+        if count > 12000:
+            raise ValueError("transcript_too_long")
+        parts.append(text)
+    transcript = " ".join(filter(None, parts)).strip()
+    if not transcript:
+        raise ValueError("no_speech_detected")
+    return {"ok": True, "transcript": transcript, "language": info.language,
+            "local_only": True, "mode": "transcribe"}
+
+
+def emit(value):
+    print(json.dumps(value, ensure_ascii=False), flush=True)
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--input")
     parser.add_argument("--check", action="store_true")
+    parser.add_argument("--worker", action="store_true")
     args = parser.parse_args()
-    if not args.check and not args.input:
+    if not args.worker and not args.check and not args.input:
         raise ValueError("input_required")
-    model_name = os.environ.get("WA_WHATSAPP_STT_MODEL", "small")
-    language = os.environ.get("WA_WHATSAPP_STT_LANGUAGE", "pt").strip().lower()
-    if language == "auto":
-        language = None
-    elif language and (len(language) not in (2, 3) or not language.isalpha()):
-        raise ValueError("invalid_WA_WHATSAPP_STT_LANGUAGE")
-    cache = os.environ.get("WA_WHATSAPP_STT_MODELS")
-    if not cache:
-        raise ValueError("WA_WHATSAPP_STT_MODELS_required")
-    try:
-        from faster_whisper import WhisperModel
-    except ImportError as error:
-        raise RuntimeError("faster_whisper_missing") from error
-    model = WhisperModel(model_name, device="cpu", compute_type="int8",
-                         download_root=cache, local_files_only=True)
-    if args.check:
-        print(json.dumps({"ok": True, "model": model_name, "local_only": True}))
+    model = None
+    if args.worker:
+        for line in sys.stdin:
+            try:
+                if len(line) > 16384:
+                    raise ValueError("request_too_large")
+                request = json.loads(line)
+                if model is None:
+                    model = load_model()
+                emit(recognize(model, request))
+            except Exception as error:
+                # Private paths, library URLs and credentials must not enter logs.
+                reason = str(error) if str(error) in {"WA_WHATSAPP_STT_MODELS_required", "faster_whisper_missing", "offline_model_unavailable", "request_too_large", "cross_language_translation_unsupported", "language_must_be_en_pt_auto", "audio_too_large", "transcript_too_long", "no_speech_detected"} else "local_compute_unavailable"
+                emit({"ok": False, "error": reason[:160]})
         return
-    if os.path.getsize(args.input) > 20 * 1024 * 1024:
-        raise ValueError("audio_too_large")
-    segments, info = model.transcribe(
-        args.input,
-        language=language,
-        beam_size=5,
-        vad_filter=True,
-        vad_parameters={"min_silence_duration_ms": 300},
-        condition_on_previous_text=False,
-    )
-    parts = []
-    for segment in segments:
-        parts.append(segment.text.strip())
-        if sum(map(len, parts)) > 12000:
-            raise ValueError("transcript_too_long")
-    transcript = " ".join(part for part in parts if part).strip()
-    if not transcript:
-        raise ValueError("no_speech_detected")
-    print(json.dumps({"ok": True, "transcript": transcript,
-                      "language": info.language, "local_only": True}, ensure_ascii=False))
+    model = load_model()
+    if args.check:
+        emit({"ok": True, "model": os.environ.get("WA_WHATSAPP_STT_MODEL", "small"),
+              "local_only": True, "language": os.environ.get("WA_WHATSAPP_STT_LANGUAGE", "en"),
+              "mode": "transcribe"})
+    else:
+        emit(recognize(model, {"input": args.input,
+                             "language": os.environ.get("WA_WHATSAPP_STT_LANGUAGE", "en")}))
 
 
 if __name__ == "__main__":
     try:
         main()
-    except Exception as error:
-        print(json.dumps({"ok": False, "error": str(error)[:160]}))
+    except Exception:
+        emit({"ok": False, "error": "local_compute_unavailable"})
         sys.exit(1)

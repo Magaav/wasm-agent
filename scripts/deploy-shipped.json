@@ -7,10 +7,13 @@
     "lua/",
     "skills/",
     "jobs/",
-    "deploy/"
+    "deploy/",
+    "connectors/whatsapp/"
   ],
   "files": [
     "scripts/deploy.sh",
+    "scripts/build-whatsapp.sh",
+    "scripts/install-whatsapp-chrome-task.ps1",
     "scripts/codemode-build.mjs",
     "scripts/check-embedded-runtime.lua",
     "scripts/upgrade.sh",
@@ -42,13 +45,14 @@
     "scripts/ship-wave.mjs"
   ],
   "over_included": {
+    "connectors/whatsapp/": "Separate human-run cloud artifact path (scripts/build-whatsapp.sh + whatsapp-install.py), not installed by node deploy.sh. Conservative impact classification; no automatic cloud installation or activation.",
     "jobs/": "deploy.sh installs the job definitions it names (jobs/whatsapp-*.json, jobs/on-subagent-return.json, jobs/subagent-return-observe.json) into the sentinel's job store, and every definition in jobs/ changes what the node runs. The whole directory is therefore treated as shipped: over-inclusion costs a needless deploy decision, under-inclusion is a node running a job nobody decided about.",
     "scripts/lib/*": "deploy.sh ships the scripts/lib modules the shipped scripts import, found by grepping `./lib/<name>` out of each shipped script. The whole flat directory is treated as shipped for the same reason (the glob is flat, matching that grep: scripts/lib/nested/x is NOT covered).",
     "deploy/": "install.sh installs deploy/*.service, deploy/caddy and deploy/env.example on a fresh install. Neither deploy.sh nor upgrade.sh copies them, so this entry is deliberately conservative rather than derived: a child editing the install path is not reported as having no install impact."
   },
   "notes": [
     "ui/** and skills/** are installed by scripts/upgrade.sh ($SOURCE_UI assets and $SOURCE_ROOT/skills/*).",
-    "rust/** is what the installed binaries are built from (wa.exe, wa-sentinel.exe, wa-window.exe, the WhatsApp transcript plugin) and lua/** is what the host loads as its Lua core, so a change to either needs a rebuilt, redeployed binary.",
+    "rust/** is what the installed binaries are built from (wa.exe, wa-sentinel.exe, wa-window.exe; the legacy pure WhatsApp formatter is no longer shipped) and lua/** is what the host loads as its Lua core, so a change to either needs a rebuilt, redeployed binary.",
     "scripts/upgrade.sh installs itself (upgrade.sh:386-389) and scripts/deploy.sh installs its own copy and scripts/lib/service-target.sh (deploy.sh:569-582) - the two entries that were missing from the hand-written predicate this manifest replaces.",
     "scripts/ship-wave.mjs is run by deploy.sh but is not copied into the install: it ships the scripts/wave-* closure, not itself. scripts/check-deploy-shipped.mjs runs it and checks every file it writes is covered here - that is how wave_closure_files was found (the closure of lib/wave-guard.mjs and lib/full-gate-proof.mjs reaches four scripts that are not named wave-*)."
   ]

@@ -96,15 +96,11 @@ const DEFERRED = [
   'scripts/test-resource-claims.cjs',
   'scripts/test-run-recovery.cjs',
   'scripts/test-session-title.lua',
-  'scripts/test-source-ensure.cjs',
   'scripts/test-sqlite-isolation.cjs',
   'scripts/test-sqlite-lifecycle.cjs',
   'scripts/test-subagents-policy.cjs',
   'scripts/test-subagents.cjs',
   'scripts/test-update-watcher.lua',
-  'scripts/test-whatsapp-cursor.cjs',
-  'scripts/test-whatsapp-subagent-e2e.cjs',
-  'scripts/test-whatsapp-transcribe.cjs',
   'scripts/wa-ui.ps1',
 ].map(file => ({ file, why: DEFERRED_WHY }));
 

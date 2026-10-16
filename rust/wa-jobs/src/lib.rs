@@ -121,6 +121,12 @@ pub fn validate_controls(job: &Value) -> Result<()> {
     Ok(())
 }
 
+/// Browser WhatsApp automation has no runtime successor in Jobs. Keep rows/history,
+/// but never re-enable, observe, enqueue or claim these retired owners.
+pub fn retired_whatsapp_job(id: &str) -> bool {
+    matches!(id, "whatsapp-copilot" | "whatsapp-events" | "whatsapp-wake-selftest" | "whatsapp-ingest" | "whatsapp-message" | "whatsapp-source" | "whatsapp-transcribe")
+}
+
 pub fn validate(job: &Value) -> Result<()> {
     if !ident(job["id"].as_str().unwrap_or("")) {
         return fail("invalid_job_id");
@@ -404,6 +410,7 @@ impl Store {
         Ok(json!(values))
     }
     pub fn enable(&self, id: &str, enabled: bool) -> Result<Value> {
+        if enabled && retired_whatsapp_job(id) { return fail("browser_whatsapp_job_retired"); }
         let mut db = self.db()?;
         let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         if tx.execute("UPDATE jobs SET enabled=?, revision=revision+1,next_at=0,source_status='not observed' WHERE id=?",params![enabled,id])?!=1 {return fail("job_not_found")}
@@ -447,6 +454,7 @@ impl Store {
         payload: &Value,
         now: i64,
     ) -> Result<bool> {
+        if retired_whatsapp_job(id) { return fail("browser_whatsapp_job_retired"); }
         if event_id.is_empty() || event_id.len() > 256 || payload.to_string().len() > 16384 {
             return fail("invalid_event_size_or_id");
         }
@@ -513,7 +521,7 @@ impl Store {
     pub fn schedule(&self, now: i64) -> Result<u64> {
         let mut count = 0;
         for job in self.list()?.as_array().unwrap() {
-            if job["enabled"] != true || job["trigger"]["kind"] != "schedule" {
+            if retired_whatsapp_job(job["id"].as_str().unwrap_or("")) || job["enabled"] != true || job["trigger"]["kind"] != "schedule" {
                 continue;
             }
             let id = job["id"].as_str().unwrap();
@@ -628,6 +636,7 @@ impl Store {
             .collect::<std::result::Result<Vec<_>, _>>()?;
         drop(statement);
         for (id, job_id, revision, event_id, payload, definition) in rows {
+            if retired_whatsapp_job(&job_id) { continue; }
             let job: Value = serde_json::from_str(&definition)?;
             let action = &job["action"];
             // Classified from the action, not from its kind name: a pipeline that starts a child is

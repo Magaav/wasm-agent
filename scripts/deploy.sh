@@ -834,16 +834,10 @@ ship_file "$ROOT/scripts/web-http-outcomes.mjs" "$INSTALL_DIR/scripts/web-http-o
 # directory is not deployed, so it is deployed here.
 if [ -d "$ROOT/jobs" ] && [ -d "$ROOT/scripts" ]; then
   PIPELINE=0
-  # The voice lane calls a pure internal WASM formatter from trusted Lua. Ship
-  # the exact module alongside its scripts so installing the job cannot leave
-  # it with a missing plugin at runtime.
-  cargo build --manifest-path "$ROOT/rust/plugins/whatsapp-transcript/Cargo.toml" \
-    --target wasm32-unknown-unknown --release --offline >/dev/null \
-    || fail "could not build the WhatsApp transcript plugin"
-  mkdir -p "$INSTALL_DIR/plugins" || fail "could not create the plugin directory"
-  cp -f "$ROOT/rust/plugins/whatsapp-transcript/target/wasm32-unknown-unknown/release/wa_plugin_whatsapp_transcript.wasm" \
-    "$INSTALL_DIR/plugins/whatsapp-transcript.wasm" \
-    || fail "could not ship the WhatsApp transcript plugin"
+  # Linked-device transcripts are formatted by the connector. The legacy pure
+  # formatter remains source-history compatibility only, not a shipped runtime.
+  cp -f "$ROOT/scripts/install-whatsapp-chrome-task.ps1" "$INSTALL_DIR/scripts/" \
+    || fail "could not ship the retired WhatsApp task-installer refusal"
   for source in "$ROOT"/scripts/whatsapp-* "$ROOT"/scripts/mcp-*.mjs; do
     [ -f "$source" ] || continue
     cp -f "$source" "$INSTALL_DIR/scripts/" || fail "node installed, but could not ship $(basename "$source")"

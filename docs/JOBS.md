@@ -1,5 +1,12 @@
 # Jobs: events to deliberate automation
 
+**WhatsApp replacement:** [wa-whatsapp](WHATSAPP-CONNECTOR.md) now owns persistent
+linked-device ingestion, audio tasks and deterministic transcripts. The browser jobs,
+Chrome keeper/task/hooks and copilot responder pipeline are [retired](WHATSAPP-MIGRATION.md).
+WhatsApp-specific browser examples/window measurements below are historical design
+context, not commands to enable or repair. Their ten-minute reply rule does NOT
+apply to post-cutover transcript backlog. Generic Jobs/CDP behavior is unchanged.
+
 A **job** is a durable automation definition: trigger + action + enabled state.
 A **trigger** matches an event or schedule. A **delivery** is one queued occurrence,
 pinned to a job revision and stable source event id. An **operation** is supervised
@@ -12,8 +19,8 @@ script need not start a run or call a model. See ARCHITECTURE.md section 6 and
 MCP connectors expose app/store operations; they do not own triggers, schedules,
 eligibility, cursors/deduplication, STT, delivery state or wakes. Engine lists MCPs
 separately and opening that inventory never probes an app. WhatsApp's compatibility
-clients use the owned MCP adapter while Jobs preserves its existing deterministic
-rules and approvals. No job is enabled by connector configuration. See [MCP.md](MCP.md).
+clients now use the linked-device boundary; deterministic STT/journaling/posting lives
+in that service, not Jobs. No job is enabled by connector configuration. See [MCP.md](MCP.md).
 
 ## Ownership and scope
 
@@ -433,23 +440,16 @@ A job can be exported as a versioned, machine-independent artifact and imported 
 local bindings and approval. Importing installs the job disabled; an identical import is a revision no-op.
 See [ARTIFACTS.md](ARTIFACTS.md).
 
-## WhatsApp: eligibility before a model turn
+## WhatsApp: linked-device replacement
 
-The declared pipeline is deterministic first. `scripts/whatsapp-read.mjs` reads the app's own store,
-attaches verified adapter metadata and applies `scripts/whatsapp-eligibility.mjs` to every message:
-
-- the chat's kind comes from its **id suffix**, never from its title or a group label;
-- direct chats are eligible; archived and left chats are excluded;
-- a group is eligible only on a verifiable operator mention (the app's mention list, or a literal
-  `@<bound number>`);
-- if this build does not expose archived/left (or mention) metadata, the message **fails closed** with a
-  reason. Unknown is not "no".
-
-Only an eligible incoming message produces a `whatsapp.message` event, so the reply profile never spends a
-turn on group chatter or a chat the operator has archived. The send itself is serialized across jobs and
-processes by `scripts/whatsapp-sendlock.mjs`, prechecks a human draft (refusing to overwrite it), compares
-the **whole** composer rather than a preview, and reconciles an ambiguous send against the store before
-any retry - an ambiguous send is never retried.
+The browser eligibility/source/transcription/responder pipeline described historically
+above is retired, not a fallback. `wa-whatsapp` handles durable scoped ingestion and
+both incoming/own-outgoing audio without inference. First activation suppresses old
+history posting; post-activation downtime backlog remains queued without transcript
+age expiry. EN is the shipped language; this operator must explicitly persist PT.
+GENERAL model replies remain disabled and fail closed on unsupported draft visibility.
+See [setup](WHATSAPP-CONNECTOR.md), [legacy exit](WHATSAPP-MIGRATION.md) and the
+machine-readable retirement manifest. No production retirement or pairing is claimed.
 
 ## Proof
 
