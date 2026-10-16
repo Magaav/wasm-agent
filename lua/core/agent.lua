@@ -1884,11 +1884,25 @@ function M:run_body(text, images)
         if self.audit_step and not self.audit_step.assessed then
           reply=reply.."\n\n[Graph audit self-assessment missing; see audit report.]"
         end
+        -- Narrow coordinator closure, after candidate steering/audit decisions.
+        -- This is not a generic beforeFinalAnswer hook or pre-stream guarantee.
+        local wave_ok,wave=pcall(function()
+          return dofile('lua/core/wave_autoflush.lua').finalize({session_id=self.session_id,
+            user_id=self.user,role=self.role,node_id=self.node,run_id=self.run_id,subagent=self.subagent,
+            current=function() return not foreground_cancelled() and not steering.pending(self.user,self.session_id,self.steering_run_id) end})
+        end)
+        if not wave_ok or wave then
+          reply=reply..'\n\n[Wave installation closure: '..json.encode(wave_ok and wave or {held=true,error=tostring(wave)})..']'
+        end
         -- The final assistant message is recorded once, after the loop, with the
         -- message's trace. Recording it here as well would duplicate it in context.
-        completed=true
-        reply_message_id = assistant_id
-        break
+        if steering.pending(self.user,self.session_id,self.steering_run_id) then
+          reply='' -- A late continuation invalidates this candidate, not its retained queue receipt.
+        else
+          completed=true
+          reply_message_id = assistant_id
+          break
+        end
       end
     end
     record_turn(self, {

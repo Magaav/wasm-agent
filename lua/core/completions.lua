@@ -32,6 +32,7 @@ function M.watch(id,ctx,occurrence)
   if ctx.remote or ctx.role~='master' or not ctx.session_id or ctx.session_id=='' then return end
   local parent=memory.session(ctx.session_id)
   if not parent or parent.user_id~=ctx.user_id or parent.objective=='subagent' then return end
+  dofile('lua/core/wave_autoflush.lua').admitted(id,ctx)
   exec("INSERT OR IGNORE INTO child_completions(child_id,target_id,owner,parent_session,state) VALUES(?,?,?,?,'watching')",{occurrence or id,id,ctx.user_id,ctx.session_id})
 end
 function M.status(id,owner)
@@ -189,6 +190,11 @@ local function settle(row,api,boot)
       session={id=tostring(result.session_id or ""),parent=row.parent_session},
       artifacts={available=false,reason="packet_assembly_failed: "..tostring(packet)}}
   end
+  -- Mechanical settlement is persisted in the SAME native notification path.
+  -- It is evidence only; never coordinator acceptance or queue authority.
+  if profile=='orchestration-worker' then
+    packet.install=dofile('lua/core/wave_autoflush.lua').settlement(result,row.owner,row.parent_session)
+  end
   local needs,kind,why=classify(packet.child.state,profile,settlement_of(profile,api),packet.artifacts)
   packet.review={needs_wake=needs,kind=kind,reason=why}
   local encoded=json.encode(packet)
@@ -243,7 +249,9 @@ function wa_completion_run(raw)
   -- "supersedes": "completion_wake"), so it is a fact about the installation rather than a second setting
   -- that can disagree with the job list. Without the marker this path behaves exactly as before.
   local superseded=host.read_file(dofile('lua/core/paths.lua').config()..'/sentinel/completion-wake-superseded')
-  if superseded and tostring(superseded)~='' then
+  local parsed_ok,parsed=pcall(json.decode,tostring(row.packet or ''))
+  local ordinary=parsed_ok and type(parsed)=='table' and type(parsed.child)=='table' and parsed.child.profile=='orchestration-worker'
+  if not ordinary and superseded and tostring(superseded)~='' then
     exec("UPDATE child_completions SET state='superseded',detail=? WHERE child_id=?",
       {'onSubagentReturn is enabled; the child-return notification and its instruction live in that hook',row.child_id})
     return json.encode({superseded=true,marker='completion-wake-superseded'})

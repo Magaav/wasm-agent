@@ -5,7 +5,7 @@ local contract=dofile('lua/core/json_contract.lua')
 local output=dofile('lua/core/tool_output.lua')
 local telemetry=dofile('lua/core/telemetry.lua')
 local M={}
-local forbidden={codemode=true,tool_call=true,tool_search=true,subagent=true,integrate=true,session_worktree=true,
+local forbidden={wave_autoflush=true,codemode=true,tool_call=true,tool_search=true,subagent=true,integrate=true,session_worktree=true,
  session=true,sessions=true,resume_session=true,session_debug=true,session_fixture=true,session_many=true,search_messages=true,search_messages_many=true,operation=true,
  remote=true,nodes=true,client=true,shell=true,mcp=true,capabilities=true,spell_run=true,spell_export=true,
  spell_save=true,spell_compose=true,spell_list=true,spell_get=true,spell_forget=true,resource=true}
