@@ -18,14 +18,16 @@ async function start(){
  child=spawn(binary,['serve','--state',state,'--owners',owners,'--listen',`127.0.0.1:${port}`],{stdio:['ignore','pipe','pipe']});let logs='';child.stdout.on('data',b=>logs+=b);child.stderr.on('data',b=>logs+=b);
  const binding={backend:'linked_device',account,generation:1,allowed_conversations:[chat],connector_url:`http://127.0.0.1:${port}`,token_file:join(state,'api.token')};
  let status;for(let i=0;i<60;i++){if(child.exitCode!==null)throw Error('private service exited: '+logs);try{status=await connectorRequest(binding,'status');break;}catch{await new Promise(r=>setTimeout(r,50));}}
- assert.ok(status?.ok,'private service did not start');assert.equal(status.connection,'needs_pairing');assert.equal(status.config.requested_on,false);
+ assert.ok(status?.ok,'private service did not start');assert.equal(status.connection,'needs_pairing');assert.equal(status.config.requested_on,false);assert.equal(status.config.all_chats,true);
+ const accountPage=await connectorRequest({...binding,allowed_conversations:[],account_wide:true,operator_account_read:true},'read_snapshot',{account_wide:true,limit:1});assert.equal(accountPage.limit_scope,'total');assert.equal(accountPage.source_state.connection,'needs_pairing');
+ assert.equal((await connectorRequest(binding,'read_snapshot',{})).ok,false,'wide reads require explicit request authority');
  assert.equal((await connectorRequest({...binding,generation:2},'status')).ok,false);
  assert.equal((await connectorRequest(binding,'lookup_self')).error,'paired_identity_unproven');
  const second=run('serve',['--owners',owners,'--listen',`127.0.0.1:${port+1}`]);assert.notEqual(second.status,0);assert.match(second.stderr,/account_owner_busy/);
  assert.equal(logs,'','unpaired service must not emit protocol/key/QR logs');return status;
 }
 try{
- const init=run('init',['--account',account,'--chats',chat]);assert.equal(init.status,0,init.stderr);
+ const init=run('init',['--account',account,'--all-chats']);assert.equal(init.status,0,init.stderr);
  assert.equal(JSON.parse(run('status').stdout).config.language,'en');
  const capture=run('pair',['--owners',owners]);assert.notEqual(capture.status,0);assert.match(capture.stderr,/private_interactive_tty_no_capture/);assert.equal(capture.stdout,'');
  await start();await stop();
