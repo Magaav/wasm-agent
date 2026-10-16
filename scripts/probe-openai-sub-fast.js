@@ -10,6 +10,9 @@
    fast_mode:{preference:'off',enabled:false,model_support:'documented',account_entitlement:'unknown'}};
   renderControls();const controls=document.getElementById('fast-mode-controls');
   check(controls.closest('#status-balloon'),'Fast is INSIDE existing status balloon');
+  check(fastWorkers.closest('label').innerText.trim()==='Fast mode for subagents','exact subagent Fast label');
+  check(controls.textContent.includes('only the ordinary orchestration-worker profile; guests and specialized profiles stay Standard.'),'subagent scope explanation unchanged');
+  check(fastWorkers.disabled,'subagent Fast disabled while operator Fast OFF');
   check(!controls.hidden&&!fastToggle.checked&&!fastToggle.disabled,'old default OFF and usable');
   check(controls.textContent.includes('2.5×')&&controls.querySelector('a').href==='https://learn.chatgpt.com/docs/agent-configuration/speed','premium and primary provenance');
   let sent=[];const old=apiFetch;
@@ -20,8 +23,11 @@
   fastToggle.checked=true;fastToggle.dispatchEvent(new Event('change'));await tick();
   check(sent.length===1&&sent[0].value==='on'&&sent[0].revision===10,'explicit ON CAS');
   check(fastToggle.checked&&settings.fast_mode.preference==='on','confirmed ON restored');
+  check(!fastWorkers.disabled,'subagent Fast enabled while operator Fast ON');
   fastWorkers.checked=true;fastWorkers.dispatchEvent(new Event('change'));await tick();
   check(sent.at(-1).value==='coding'&&fastWorkers.checked,'explicit ordinary coding inheritance');
+  fastWorkers.checked=false;fastWorkers.dispatchEvent(new Event('change'));await tick();
+  check(sent.at(-1).value==='on'&&!fastWorkers.checked,'subagent Fast OFF retains operator ON write value');
   fastToggle.checked=false;fastToggle.dispatchEvent(new Event('change'));await tick();
   check(sent.at(-1).value==='off'&&!fastToggle.checked,'persistent OFF escape');
   const revision=settings.settings_revision;
@@ -32,7 +38,7 @@
   release({ok:true,json:async()=>({...settings,settings_revision:settings.settings_revision+1,fast_mode:{preference:'on'}})});await tick();
   check(settings.fast_mode.preference==='off','delayed write reply cannot paint another node');activeNode='';
   busy=true;paintFastMode();check(fastToggle.disabled&&fastWorkers.disabled,'active run locked');busy=false;
-  me.role='guest';paintFastMode();check(fastToggle.disabled,'guest cannot upcharge');me.role='master';
+  me.role='guest';paintFastMode();check(fastToggle.disabled&&fastWorkers.disabled,'guest cannot upcharge');me.role='master';
   activeNode='foreign';paintFastMode();check(fastToggle.disabled,'remote preference refused');activeNode='';
   settings.provider='opencode-go';paintFastMode();check(controls.hidden,'Go has no Fast control');
   settings.provider='openai-sub';settings.fast_mode={preference:'on',model_support:'unknown',error:'fast_mode_model_unknown'};paintFastMode();

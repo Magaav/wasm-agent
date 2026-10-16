@@ -1,13 +1,13 @@
 # Subscription Fast mode
 
 The OpenAI subscription status balloon contains **Fast mode** and an optional
-**Include coding task owners** checkbox. Both use the existing revisioned node
+**Fast mode for subagents** checkbox. Both use the existing revisioned node
 selection store. The shipped preference remains OFF. Opening the balloon never
 enables it or sends a provider request.
 
 After installation, the coordinator/operator can select OpenAI subscription and a
 supported model, then check Fast mode for eligible **future** operator turns.
-Check Include coding task owners only to authorize the ordinary reserved
+Check Fast mode for subagents only to authorize the ordinary reserved
 `orchestration-worker` profile too. This is an explicit persisted preference, not
 a global environment default. Uncheck Fast mode for the persistent ordinary/Standard
 escape. No model or reasoning selection changes; `/new` still starts a new thread.
