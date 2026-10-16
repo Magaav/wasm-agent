@@ -1,5 +1,9 @@
 # WhatsApp source delivery checkpoint
 
+Historical fdc79bfc/e1361075 checkpoint, not activation acceptance. The coordinator's
+subsequent reliability findings and current completion are recorded in
+[WHATSAPP-REVIEW.md](WHATSAPP-REVIEW.md); original evidence below is preserved.
+
 ## Scope and readiness
 
 Self-review, not independent review. The linked-device replacement is implemented

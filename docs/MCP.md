@@ -71,12 +71,18 @@ An uncertain control requires inspection and a new explicit decision.
 
 The built-in `mcp-whatsapp.mjs` now uses ONLY explicit linked-device account,
 generation, exact chat scope, connector URL and credential FILE references.
+Explicit operator-wide bindings can read a service account approved with --all-chats;
+child/event reads stay narrow and model arguments cannot grant account scope. One
+server-side scoped query produces a globally capped page and stable before cursor,
+including source freshness/sticky gaps. Per-item posting diagnosis is read-only.
 Read_snapshot/lookup_self/inspect_chat access the durable journal without read
 marking or chat opening. Remote access requires authenticated trusted-CA HTTPS;
 numeric loopback HTTP is allowed locally. Redirects, insecure TLS and credential
 URLs refuse. Protocol probing does not prove app identity or authorize effects.
 
-The five existing tool names remain recognizable, but download_audio and
+The seven existing/added read/refusal tool names are recognizable: read_snapshot,
+list_chats, posting_status, lookup_self, inspect_chat, download_audio and send_message.
+Download_audio and
 send_message explicitly refuse: media belongs to the private deterministic worker,
 and GENERAL model sends cannot prove cross-device draft safety. No invented draft
 absence, browser/raw/backend fallback or generic owned-MCP send registration.

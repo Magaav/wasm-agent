@@ -8,13 +8,16 @@ const schema=properties=>({type:'object',properties,additionalProperties:false})
 const text={type:'string',minLength:1,maxLength:256};
 export const WHATSAPP_TOOLS=[
  {name:'read_snapshot',description:'Read the scoped linked-device journal; partial history, no read marking.',inputSchema:schema({since:{type:'number',minimum:0},before:{type:'integer',minimum:0},limit:{type:'integer',minimum:1,maximum:10000}})},
+ {name:'list_chats',description:'One bounded page of authorized discovered chat IDs; no inferred titles.',inputSchema:schema({before:{type:'integer',minimum:0},limit:{type:'integer',minimum:1,maximum:10000}})},
+ {name:'posting_status',description:'One scoped bounded page of posting/unknown/blocked evidence. Read-only; no reset or resend.',inputSchema:schema({before:{type:'integer',minimum:0},limit:{type:'integer',minimum:1,maximum:10000}})},
  {name:'lookup_self',description:'Read the explicitly bound paired account identity.',inputSchema:schema({})},
  {name:'inspect_chat',description:'Read exact chat scope; cross-device drafts are unsupported, not absent.',inputSchema:{...schema({conversation_id:text}),required:['conversation_id']}},
  {name:'download_audio',description:'Private media access is reserved to the deterministic connector worker.',inputSchema:{...schema({conversation_id:text,message_id:text}),required:['conversation_id','message_id']}},
  {name:'send_message',description:'General model sends fail closed: cross-device draft visibility is unsupported. Transcript posting is a separate explicitly activated deterministic policy.',inputSchema:{...schema({conversation_id:text,body:{type:'string',minLength:1,maxLength:4096},confirm:{type:'boolean',const:true}}),required:['conversation_id','body','confirm']}}
 ];
 export function endpoint(binding){
- if(binding.backend!=='linked_device'||!binding.account||!Number.isSafeInteger(binding.generation)||binding.generation<1||!Array.isArray(binding.allowed_conversations)||!binding.allowed_conversations.length)throw Error('linked_device_account_generation_chat_binding_required');
+ const wide=binding.account_wide===true&&binding.operator_account_read===true;
+ if(binding.backend!=='linked_device'||!binding.account||!Number.isSafeInteger(binding.generation)||binding.generation<1||(!wide&&(!Array.isArray(binding.allowed_conversations)||!binding.allowed_conversations.length||binding.allowed_conversations.length>256))||(!wide&&binding.account_wide===true))throw Error('linked_device_account_generation_chat_binding_required');
  const url=new URL(binding.connector_url);
  if(url.username||url.password||url.search||url.hash||url.pathname!=='/')throw Error('connector_url_must_not_contain_credentials_or_path');
  if(url.protocol!=='https:'&&!(url.protocol==='http:'&&['127.0.0.1','[::1]'].includes(url.hostname)))throw Error('authenticated_https_required_for_remote_connector');
@@ -37,14 +40,18 @@ export function createWhatsAppAdapter(binding){
   endpoint(binding);const tool=WHATSAPP_TOOLS.find(t=>t.name===name);if(!tool||!args||typeof args!=='object'||Array.isArray(args))throw Error('invalid_whatsapp_mcp_call');
   for(const key of Object.keys(args))if(!(key in tool.inputSchema.properties))throw Error('unsupported_whatsapp_argument:'+key);
   for(const key of tool.inputSchema.required||[])if(args[key]===undefined)throw Error('whatsapp_argument_required:'+key);
-  if(args.conversation_id&&!binding.allowed_conversations.includes(args.conversation_id))throw Error('whatsapp_conversation_not_bound');
+  const wide=binding.account_wide===true&&binding.operator_account_read===true;
+  if(args.conversation_id&&!wide&&!binding.allowed_conversations.includes(args.conversation_id))throw Error('whatsapp_conversation_not_bound');
   if(name==='send_message')return {ok:false,error:'general_send_refused_draft_visibility_unsupported',pre_dispatch:true};
   if(name==='download_audio')return {ok:false,error:'media_is_private_to_deterministic_worker',pre_dispatch:true};
-  if(name==='read_snapshot'){
+  if(['read_snapshot','list_chats','posting_status'].includes(name)){
    const since=args.since??0,before=args.before??0,limit=args.limit??2000;if(!Number.isSafeInteger(before)||before<0||!Number.isSafeInteger(since)||since<0||!Number.isInteger(limit)||limit<1||limit>10000)throw Error('invalid_whatsapp_snapshot_window');
-   // Query each authorized chat, never fetch unrelated chats then filter.
-   const data={ok:true,account:binding.account,generation:binding.generation,messages:[],conversations:[],coverage:'partial',draft_visibility:'unsupported'};
-   for(const conversation_id of binding.allowed_conversations){const part=await connectorRequest(binding,name,{conversation_id,since,before,limit});if(!part.ok)return part;if(part.account!==binding.account||part.generation!==binding.generation||(part.messages||[]).some(m=>m.conversation_id!==conversation_id)||(part.conversations||[]).some(c=>c.id!==conversation_id))throw Error('connector_response_scope_mismatch');data.messages.push(...part.messages);data.conversations.push(...part.conversations);if(part.truncated)data.truncated=true;}
+   // Scope is fixed by locally approved binding, not a model argument. One server-side total page.
+   const data=await connectorRequest(binding,name,{since,before,limit,...(wide?{account_wide:true}:{conversations:binding.allowed_conversations})});if(!data.ok)return data;
+   if(data.account!==binding.account||data.generation!==binding.generation)throw Error('connector_response_scope_mismatch');
+   if(data.cursor_version!==1||data.limit_scope!=='total'||data.scope_kind!==(wide?'account':'selected')||!data.source_state)throw Error('connector_requires_total_page_v1');
+   const permitted=id=>{if(typeof id!=='string')return false;if(!wide)return binding.allowed_conversations.includes(id);const parts=id.split('@');return parts.length===2&&/^[A-Za-z0-9:._-]+$/.test(parts[0])&&['s.whatsapp.net','lid','g.us'].includes(parts[1]);};
+   if((data.messages||[]).length>limit||(data.conversations||[]).length>limit||(data.posts||[]).length>limit||(data.messages||[]).some(m=>!permitted(m.conversation_id))||(data.conversations||[]).some(c=>!permitted(c.id))||(data.posts||[]).some(p=>!permitted(p.conversation_id)))throw Error('connector_response_scope_or_limit_mismatch');
    return data;
   }
   const data=await connectorRequest(binding,name,args);if(data.ok&&(data.account!==binding.account||data.generation!==binding.generation))throw Error('connector_response_scope_mismatch');return data;

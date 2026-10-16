@@ -43,16 +43,8 @@ func api(j *Journal, token string) http.Handler {
 			fail(401, "authentication_required")
 			return
 		}
-		var req struct {
-			Account    string `json:"account"`
-			Generation int64  `json:"generation"`
-			Chat       string `json:"conversation_id"`
-			Message    string `json:"message_id"`
-			Limit      int    `json:"limit"`
-			Since      int64  `json:"since"`
-			Before     int64  `json:"before"`
-		}
-		decoder := json.NewDecoder(io.LimitReader(r.Body, 8193))
+		var req readRequest
+		decoder := json.NewDecoder(io.LimitReader(r.Body, 131073))
 		decoder.DisallowUnknownFields()
 		if decoder.Decode(&req) != nil || decoder.Decode(new(any)) != io.EOF {
 			fail(400, "invalid_request")
@@ -85,48 +77,27 @@ func api(j *Journal, token string) http.Handler {
 				fail(400, "chat_required")
 				return
 			}
-			json.NewEncoder(w).Encode(map[string]any{"ok": true, "account": c.Account, "conversation_id": req.Chat, "generation": c.Generation, "draft_visibility": "unsupported", "draft": nil, "general_send_supported": false})
-		case "/read_snapshot":
-			limit := req.Limit
-			if limit == 0 {
-				limit = 2000
+			var hold string
+			if err := j.db.QueryRow("SELECT reason FROM chat_holds WHERE account=? AND generation=? AND chat=?", c.Account, c.Generation, req.Chat).Scan(&hold); err != nil && !errors.Is(err, sql.ErrNoRows) {
+				fail(503, "journal_unavailable")
+				return
 			}
-			if limit < 1 || limit > 10000 || req.Since < 0 || req.Before < 0 {
+			json.NewEncoder(w).Encode(map[string]any{"ok": true, "transcript_posting_hold": hold, "account": c.Account, "conversation_id": req.Chat, "generation": c.Generation, "draft_visibility": "unsupported", "draft": nil, "general_send_supported": false})
+		case "/read_snapshot", "/list_chats", "/posting_status":
+			if req.Limit < 0 || req.Limit > 10000 || req.Since < 0 || req.Before < 0 {
 				fail(400, "invalid_window")
 				return
 			}
-			rows, err := j.db.Query("SELECT m.chat,m.id,m.sender,m.body,m.sent,m.own,m.history,m.audio,m.unsupported,COALESCE(a.transcript,''),COALESCE(a.state,''),COALESCE(a.reason,''),m.rowid,m.observed FROM messages m LEFT JOIN audio a USING(account,generation,chat,id) WHERE m.account=? AND m.generation=? AND m.observed>=? AND (?='' OR m.chat=?) AND (?=0 OR m.rowid<?) ORDER BY m.rowid DESC LIMIT ?", c.Account, c.Generation, req.Since, req.Chat, req.Chat, req.Before, req.Before, limit+1)
+			if _, _, err := j.readScope(c, req, ""); err != nil {
+				fail(403, "read_scope_not_approved")
+				return
+			}
+			data, err := j.readPage(c, req, strings.TrimPrefix(r.URL.Path, "/"))
 			if err != nil {
 				fail(503, "journal_unavailable")
 				return
 			}
-			messages := []Message{}
-			for rows.Next() {
-				var m Message
-				if rows.Scan(&m.Chat, &m.ID, &m.Sender, &m.Body, &m.Sent, &m.Own, &m.History, &m.Audio, &m.Unsupported, &m.Transcript, &m.AudioState, &m.AudioReason, &m.Cursor, &m.Observed) != nil {
-					rows.Close()
-					fail(503, "journal_unavailable")
-					return
-				}
-				messages = append(messages, m)
-			}
-			if rows.Err() != nil {
-				rows.Close()
-				fail(503, "journal_unavailable")
-				return
-			}
-			rows.Close()
-			more := len(messages) > limit
-			if more {
-				messages = messages[:limit]
-			}
-			chats := []map[string]any{}
-			for _, id := range c.Chats {
-				if req.Chat == "" || req.Chat == id {
-					chats = append(chats, map[string]any{"id": id, "title": id, "archived": nil, "left": nil})
-				}
-			}
-			json.NewEncoder(w).Encode(map[string]any{"ok": true, "account": c.Account, "generation": c.Generation, "messages": messages, "conversations": chats, "truncated": more, "coverage": "partial", "draft_visibility": "unsupported"})
+			json.NewEncoder(w).Encode(data)
 		case "/send_message":
 			fail(403, "general_send_refused_draft_visibility_unsupported")
 		case "/download_audio":
@@ -172,13 +143,14 @@ func pair(ctx context.Context, a *Adapter) error {
 }
 func run() error {
 	if len(os.Args) < 2 {
-		return errors.New("usage: wa-whatsapp init|pair|serve|status|activate|pause|language --state PRIVATE_DIRECTORY [options]")
+		return errors.New("usage: wa-whatsapp init|pair|serve|status|activate|pause|language|scope --state PRIVATE_DIRECTORY [options]")
 	}
 	action := os.Args[1]
 	f := flag.NewFlagSet(action, flag.ContinueOnError)
 	dir := f.String("state", "", "private persistent state directory")
 	account := f.String("account", "", "exact PN account JID from operator")
 	chats := f.String("chats", "", "comma-separated exact approved chat JIDs")
+	allChats := f.Bool("all-chats", false, "explicit owner approval for current and future supported account chats")
 	lang := f.String("language", "en", "recognition language en/pt/auto; not translation")
 	listen := f.String("listen", "127.0.0.1:8787", "loopback API")
 	owners := f.String("owners", "", "shared per-user account fencing directory (default OS user config/wa-whatsapp-owners)")
@@ -207,7 +179,7 @@ func run() error {
 		} else if !errors.Is(err, sql.ErrNoRows) {
 			return errors.New("existing_config_unreadable_preserve_state")
 		}
-		c := Config{Account: *account, Generation: 1, Language: *lang, Chats: strings.Split(*chats, ","), Mode: "transcribe"}
+		c := Config{Account: *account, Generation: 1, Language: *lang, Chats: splitChats(*chats), AllChats: *allChats, Mode: "transcribe"}
 		if err = validConfig(c); err != nil {
 			return err
 		}
@@ -234,6 +206,15 @@ func run() error {
 			return err
 		}
 		return json.NewEncoder(os.Stdout).Encode(value)
+	case "scope":
+		if !*allChats {
+			return errors.New("explicit_all_chats_owner_approval_required")
+		}
+		c.AllChats = true
+		c.Chats = nil
+		c.Requested = false
+		c.Activated = 0
+		return j.save(c)
 	case "pause":
 		c.Requested = false
 		return j.save(c)
@@ -241,6 +222,9 @@ func run() error {
 		c.Language = *lang
 		return j.save(c)
 	case "activate":
+		if j.hasGap() {
+			return errors.New("persistence_gap_requires_reconciliation")
+		}
 		if !*confirm || *retired == "" {
 			return errors.New("explicit_transcript_approval_and_retirement_receipt_required")
 		}
@@ -324,7 +308,8 @@ func run() error {
 	}
 	server := &http.Server{Handler: api(j, string(token)), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 30 * time.Second, MaxHeaderBytes: 8192}
 	defer server.Close()
-	go func() { server.Serve(listener); cancel() }()
+	serverErrors := make(chan error, 1)
+	go serveAPI(server, listener, ctx, cancel, serverErrors)
 	w := &Worker{Python: *python, Script: *worker, Cache: *cache}
 	defer w.Close()
 	var workers sync.WaitGroup
@@ -381,7 +366,19 @@ func run() error {
 	for {
 		select {
 		case <-ctx.Done():
-			return nil
+			select {
+			case err := <-j.fatal:
+				return err
+			default:
+			}
+			select {
+			case err := <-serverErrors:
+				return err
+			default:
+				return nil
+			}
+		case err := <-j.fatal:
+			return err
 		case <-ticker.C:
 			if a.client.Store.ID == nil {
 				j.setState("needs_pairing")
@@ -428,6 +425,9 @@ func writeNewSecret(path string, data []byte) error {
 func main() {
 	if err := run(); err != nil {
 		fmt.Fprintln(os.Stderr, err.Error())
+		if errors.Is(err, errGapMarker) {
+			os.Exit(78)
+		}
 		os.Exit(1)
 	}
 }

@@ -11,6 +11,7 @@ import (
 
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waE2E"
+	"go.mau.fi/whatsmeow/proto/waHistorySync"
 	"go.mau.fi/whatsmeow/store/sqlstore"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
@@ -18,9 +19,10 @@ import (
 )
 
 type Adapter struct {
-	client  *whatsmeow.Client
-	store   *sqlstore.Container
-	journal *Journal
+	client         *whatsmeow.Client
+	store          *sqlstore.Container
+	journal        *Journal
+	downloadToFile func(context.Context, whatsmeow.DownloadableMessage, whatsmeow.File) error
 }
 
 func newAdapter(ctx context.Context, j *Journal) (*Adapter, error) {
@@ -50,7 +52,14 @@ func newAdapter(ctx context.Context, j *Journal) (*Adapter, error) {
 	}
 	a := &Adapter{client: whatsmeow.NewClient(device, nil), store: store, journal: j}
 	a.client.EnableAutoReconnect = true
-	a.client.AddEventHandler(a.event)
+	a.client.ManualHistorySyncDownload = true
+	a.client.DisableManualHistorySyncReceipt = true
+	a.client.EnableDecryptedEventBuffer = true
+	a.client.EmitAppStateEventsOnFullSync = true
+	a.client.BackgroundEventCtx = ctx
+	a.downloadToFile = a.client.DownloadToFile
+	a.client.SetMediaHTTPClient(mediaHTTPClient(mediaDeadline, maxEncryptedAudioBytes))
+	a.client.AddEventHandlerWithSuccessStatus(a.event)
 	return a, nil
 }
 func (a *Adapter) Close() { a.client.Disconnect(); a.store.Close() }
@@ -76,8 +85,41 @@ func (a *Adapter) identity() error {
 	a.journal.mu.Unlock()
 	return nil
 }
+func (a *Adapter) eventIdentity() bool {
+	err := a.identity()
+	if err == nil {
+		return true
+	}
+	if err.Error() == "needs_pairing" {
+		a.journal.setState("needs_pairing")
+		return false
+	}
+	if err.Error() == "paired_account_mismatch" {
+		a.journal.setState("degraded_account_mismatch")
+		return false
+	}
+	return a.journal.failPersistence()
+}
 func mapMessage(e *events.Message, history bool) Message {
 	m := Message{ID: e.Info.ID, Chat: e.Info.Chat.ToNonAD().String(), Sender: e.Info.Sender.ToNonAD().String(), Sent: e.Info.Timestamp.Unix(), Own: e.Info.IsFromMe, History: history}
+	p := e.Message.GetProtocolMessage()
+	if p == nil && e.SourceWebMsg != nil {
+		p = e.SourceWebMsg.GetMessage().GetProtocolMessage()
+	}
+	if e.IsEdit || (p != nil && (p.GetType() == waE2E.ProtocolMessage_REVOKE || p.GetType() == waE2E.ProtocolMessage_MESSAGE_EDIT)) {
+		m.Mutation = "edit"
+		m.Target = e.Info.ID
+		m.MutationScope = true
+		if p != nil {
+			if p.GetType() == waE2E.ProtocolMessage_REVOKE {
+				m.Mutation = "revoke"
+			}
+			m.Target = p.GetKey().GetID()
+			remote := p.GetKey().GetRemoteJID()
+			m.MutationScope = remote == "" || remote == m.Chat
+		}
+		return m
+	}
 	if e.Message == nil {
 		m.Unsupported = "empty_message"
 		return m
@@ -119,70 +161,118 @@ func mapMessage(e *events.Message, history bool) Message {
 	}
 	return m
 }
-func (a *Adapter) event(evt any) {
+func (a *Adapter) event(evt any) (success bool) {
 	j := a.journal
+	defer func() {
+		if recover() != nil {
+			success = j.failPersistence()
+		}
+	}()
+	persist := func(err error) bool {
+		if err != nil {
+			return j.failPersistence()
+		}
+		return true
+	}
 	switch e := evt.(type) {
 	case *events.Connected:
-		if a.identity() != nil {
-			j.setState("degraded_account_mismatch")
-			a.client.Disconnect()
-			return
+		if !a.eventIdentity() {
+			return false
+		}
+		if !persist(j.event("connected", "history coverage remains partial")) {
+			return false
 		}
 		j.setState("catching_up")
-		j.event("connected", "server connection; history completeness unknown")
 	case *events.OfflineSyncCompleted:
+		if !persist(j.event("catch_up", "offline sync signaled; sticky gaps are not cleared")) {
+			return false
+		}
 		j.setState("connected")
-		j.event("catch_up", "upstream offline sync completed; not a lossless guarantee")
 	case *events.Disconnected:
 		j.setState("reconnecting")
 	case *events.LoggedOut:
 		j.setState("needs_pairing")
-		c, err := j.Config()
-		if err == nil {
-			c.Requested = false
-			c.Generation++
-			c.Activated = 0
-			if err := j.save(c); err != nil {
-				j.setState("degraded_logout_persistence")
-			}
+		config, err := j.Config()
+		if err != nil {
+			return j.failPersistence()
 		}
-		j.event("logged_out", "explicit re-pairing required; sends paused")
+		config.Requested = false
+		config.Generation++
+		config.Activated = 0
+		if !persist(j.save(config)) {
+			return false
+		}
+		return persist(j.event("logged_out", "explicit pairing and activation required"))
 	case *events.Message:
-		if a.identity() != nil {
-			return
+		if !a.eventIdentity() {
+			return false
 		}
-		if e.IsEdit || e.Message.GetProtocolMessage() != nil {
-			j.event("edit_delete_protocol_unsupported", "retained as protocol event; no authoritative state reconstruction")
-		}
-		if err := j.ingest(mapMessage(e, false)); err != nil {
-			j.setState("degraded_persistence")
-		}
-	case *events.HistorySync:
-		if a.identity() != nil {
-			return
-		}
-		j.event("history_sync", "partial history received")
-		for _, chat := range e.Data.GetConversations() {
-			jid, err := types.ParseJID(chat.GetID())
+		if notification := e.Message.GetProtocolMessage().GetHistorySyncNotification(); notification != nil && e.Info.IsFromMe {
+			ctx, cancel := context.WithTimeout(a.client.BackgroundEventCtx, 2*time.Minute)
+			defer cancel()
+			history, err := a.client.DownloadHistorySync(ctx, notification, false)
 			if err != nil {
-				continue
+				return j.failPersistence()
 			}
-			for _, item := range chat.GetMessages() {
-				message, err := a.client.ParseWebMessage(jid, item.GetMessage())
-				if err != nil {
-					j.event("history_parse_unsupported", "message could not be mapped")
-					continue
-				}
-				if err = j.ingest(mapMessage(message, true)); err != nil {
-					j.setState("degraded_persistence")
-				}
+			if !a.persistHistory(history) {
+				return false
+			}
+			// Manual history mode: acknowledge only after the complete idempotent batch persisted.
+			// Do not delete server history media here. Upstream availability/redelivery is not guaranteed.
+			return persist(a.client.SendProtocolMessageReceipt(ctx, e.Info.ID, types.ReceiptTypeHistorySync))
+		}
+		return persist(j.ingest(mapMessage(e, false)))
+	case *events.HistorySync:
+		if !a.eventIdentity() {
+			return false
+		}
+		return a.persistHistory(e.Data)
+	case *events.DeleteForMe:
+		if !a.eventIdentity() {
+			return false
+		}
+		return persist(j.ingest(Message{Chat: e.ChatJID.ToNonAD().String(), Target: e.MessageID, Mutation: "owner_delete_for_me", MutationScope: true, OwnerMutation: true}))
+	case *events.ClearChat:
+		if !a.eventIdentity() {
+			return false
+		}
+		return persist(j.ingest(Message{Chat: e.JID.ToNonAD().String(), Mutation: "owner_chat_clear", OwnerMutation: true}))
+	case *events.DeleteChat:
+		if !a.eventIdentity() {
+			return false
+		}
+		return persist(j.ingest(Message{Chat: e.JID.ToNonAD().String(), Mutation: "owner_chat_delete", OwnerMutation: true}))
+	case *events.Receipt:
+		return persist(j.event("receipt", "per-recipient state not reconstructed"))
+	case *events.UndecryptableMessage:
+		return persist(j.event("unsupported_message", "undecryptable or unavailable; no lossless claim"))
+	}
+	return true
+}
+func (a *Adapter) persistHistory(data *waHistorySync.HistorySync) bool {
+	j := a.journal
+	if data == nil {
+		return j.failPersistence()
+	}
+	if err := j.event("history_sync", "partial history received"); err != nil {
+		return j.failPersistence()
+	}
+	for _, chat := range data.GetConversations() {
+		jid, err := types.ParseJID(chat.GetID())
+		if err != nil {
+			return j.failPersistence()
+		}
+		for _, item := range chat.GetMessages() {
+			message, err := a.client.ParseWebMessage(jid, item.GetMessage())
+			if err != nil {
+				return j.failPersistence()
+			}
+			if err = j.ingest(mapMessage(message, true)); err != nil {
+				return j.failPersistence()
 			}
 		}
-	case *events.Receipt:
-		j.event("receipt", "received; per-recipient delivery state not reconstructed")
-	case *events.UndecryptableMessage:
-		j.event("unsupported_message", "undecryptable or unavailable; upstream retry may occur")
 	}
+	return true
 }
 func (a *Adapter) Download(ctx context.Context, m Message) ([]byte, error) {
 	if err := a.identity(); err != nil {
@@ -196,12 +286,12 @@ func (a *Adapter) Download(ctx context.Context, m Message) ([]byte, error) {
 	if audio == nil || audio.GetViewOnce() {
 		return nil, permanentError("unsupported_media")
 	}
-	if audio.GetFileLength() > 20*1024*1024 {
-		return nil, permanentError("audio_too_large")
-	}
-	return a.client.Download(ctx, audio)
+	return boundedMedia(ctx, a.journal.dir, audio, a.downloadToFile, mediaDeadline)
 }
 func (a *Adapter) Ready(expected Config, source Message) error {
+	if a.journal.hasGap() {
+		return errors.New("persistence_gap_requires_reconciliation")
+	}
 	if err := a.identity(); err != nil {
 		return err
 	}
@@ -209,29 +299,48 @@ func (a *Adapter) Ready(expected Config, source Message) error {
 	if err != nil {
 		return err
 	}
-	if !current.Requested || !a.client.IsConnected() || source.Sender == "" {
+	if blocked, err := blockedSource(a.journal.db, current, source.Chat, source.ID); err != nil {
+		return err
+	} else if blocked {
+		return permanentError("source_mutation_or_chat_hold")
+	}
+	if source.Sender == "" {
+		return permanentError("source_sender_unproven")
+	}
+	if !current.Requested || !a.client.IsConnected() {
 		return errors.New("definite_pre_dispatch_refusal")
 	}
 	return nil
 }
 func (a *Adapter) NewID() string { return a.client.GenerateMessageID() }
 func (a *Adapter) Send(ctx context.Context, chat, body, id string, source Message) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", noSubmission("cancelled_before_dispatch", false)
+	}
 	if err := a.identity(); err != nil {
-		return "", err
+		return "", noSubmission("identity_unproven_before_dispatch", true)
 	}
 	if !a.client.IsConnected() {
-		return "", errors.New("not_connected")
+		return "", noSubmission("disconnected_before_dispatch", false)
 	}
-	c, err := a.journal.Config()
-	if err != nil || !c.Requested || !contains(c.Chats, chat) {
-		return "", errors.New("send_not_authorized")
+	c, err := a.journal.scope(source.OriginAccount, source.OriginGeneration, chat)
+	if err != nil || !c.Requested {
+		return "", noSubmission("scope_changed_before_dispatch", true)
 	}
 	to, err := types.ParseJID(chat)
 	if err != nil {
-		return "", err
+		return "", noSubmission("chat_unproven_before_dispatch", true)
 	}
 	quoted := &waE2E.Message{Conversation: proto.String("[audio]")}
 	message := &waE2E.Message{ExtendedTextMessage: &waE2E.ExtendedTextMessage{Text: proto.String(body), ContextInfo: &waE2E.ContextInfo{StanzaID: proto.String(source.ID), Participant: proto.String(source.Sender), QuotedMessage: quoted}}}
+	if a.journal.hasGap() {
+		return "", noSubmission("persistence_gap_before_dispatch", false)
+	}
+	if blocked, err := blockedSource(a.journal.db, c, chat, source.ID); err != nil {
+		return "", noSubmission("source_unproven_before_dispatch", true)
+	} else if blocked {
+		return "", noSubmission("source_mutation_or_chat_hold", true)
+	}
 	resp, err := a.client.SendMessage(ctx, to, message, whatsmeow.SendRequestExtra{ID: id, Timeout: 45 * time.Second})
 	if err != nil {
 		return "", err
