@@ -113,71 +113,120 @@ local function git(command, cwd)
   if result.error or tonumber(result.code)~=0 then
     return nil,"git_diff_failed:"..tostring(result.error or result.stderr or result.code):sub(1,200)
   end
-  return tostring(result.stdout or "")
+  -- exec previews can be a truncated TAIL, containing no diff headers at all.
+  -- Consume the retained original, never interpret a preview as a complete patch.
+  if result.output_complete==false or result.output_streams_closed==false then
+    return nil,"git_output_not_complete:"..tostring(result.operation_id)
+  end
+  local output=result.stdout
+  if result.stdout_path and host.read_file then
+    output=host.read_file(result.stdout_path)
+    if output==nil then return nil,"git_output_non_utf8_or_unreadable:"..tostring(result.operation_id) end
+  elseif result.output_truncated or result.stdout_truncated then
+    return nil,"git_output_incomplete:"..tostring(result.operation_id)
+  end
+  if type(output)~="string" then return nil,"git_output_missing" end
+  if #output>16*1024*1024 then return nil,"git_output_too_large" end
+  return output
 end
 
--- A shell edit does not enter the reversible changeset. For a pre-commit check, derive
--- current-file line anchors from the actual Git working-tree patch (staged and unstaged).
--- This is workspace evidence, not attribution to one run.
+-- Separate HEAD->index and index->worktree; a net HEAD diff loses cancelled index edits.
+-- All commands are read-only. Paths come from NUL manifests, never diff header guesses.
+local function quote(s) return "'"..s:gsub("'","'\\''").."'" end
+local function source_for(root,path)
+  local full=root.."/"..path
+  local canonical=host.canonical_path and host.canonical_path(full)
+  local normalize=function(p) p=p:gsub('\\','/');if p:match('^//%?/[%a]:/') or p:match('^[%a]:/') then p=p:lower() end;return p end
+  if canonical and normalize(canonical)~=normalize(full) then return nil,"symlink_or_redirected_source" end
+  return host.read_file and host.read_file(full)
+end
 function M.git_changes(cwd)
-  local top,root_err=git("git rev-parse --show-toplevel",cwd)
-  if not top then return nil,root_err end
-  cwd=top:gsub("[\r\n]+$","")
-  if cwd=="" or cwd:find("[\r\n]") then return nil,"git_root_invalid" end
+  local top,err=git("git rev-parse --show-toplevel",cwd)
+  if not top then return nil,err end
+  top=top:gsub("[\r\n]+$","")
+  if top=="" or top:find("[\r\n]") then return nil,"git_root_invalid" end
   if not host.canonical_path then return nil,"graph_root_resolution_unavailable" end
-  cwd=host.canonical_path(cwd)
+  cwd=host.canonical_path(top)
   if not cwd then return nil,"git_root_unavailable" end
-  local diff, err=git("git -c core.quotePath=false diff HEAD --no-ext-diff --no-renames --unified=0 --no-color --",cwd)
-  if not diff then return nil,err end
-  local untracked, untracked_err=git("git -c core.quotePath=false ls-files --others --exclude-standard --",cwd)
-  if not untracked then return nil,untracked_err end
-  local by_path, deleted, path, old_path={}, {}, nil, nil
-  for line in diff:gmatch("[^\n]+") do
-    line=line:gsub("\r$","")
-    if line:sub(1,6)=="--- a/" then
-      old_path=line:sub(7)
-    elseif line=="+++ /dev/null" and old_path then
-      deleted[old_path]=true
-      path=nil
-    elseif line:sub(1,6)=="+++ b/" then
-      path=line:sub(7)
-      by_path[path]=by_path[path] or {}
-    elseif line:sub(1,2)=="@@" and path then
-      local start,count=line:match("^@@ %-[%d,]+ %+(%d+),?(%d*) @@")
-      if not start then return nil,"git_diff_unparsed_hunk" end
-      start,count=tonumber(start),tonumber(count) or 1
-      if count>4096 then return nil,"git_diff_hunk_too_large" end
-      local last=count==0 and start or start+count-1
-      for n=math.max(1,start),math.max(1,last) do by_path[path][n]=true end
-    end
-  end
-  local code_ext={rs=true,lua=true,js=true,ts=true,tsx=true,jsx=true,
-    sh=true,bash=true,ps1=true,psm1=true}
-  for item in untracked:gmatch("[^\r\n]+") do
-    local ext=item:match("%.([%w]+)$")
-    if ext and code_ext[ext:lower()] then
-      local full=(cwd and cwd~="") and (cwd.."/"..item) or item
-      local source=host.read_file and host.read_file(full)
-      if source==nil then return nil,"untracked_file_unreadable:"..item end
-      local lines=1
-      for _ in source:gmatch("\n") do lines=lines+1 end
-      if lines>4096 then return nil,"untracked_file_too_large:"..item end
-      by_path[item]=by_path[item] or {}
-      for n=1,lines do by_path[item][n]=true end
-    end
-  end
+  local base="git -c core.quotePath=false -c diff.external= diff --no-ext-diff --no-textconv --no-color "
+  local index_identity,identity_err=git(base.."--cached --raw --abbrev=40 -z --no-renames --",cwd)
+  if not index_identity then return nil,identity_err end
+  local staged,e=git(base.."--cached --name-status -z --find-renames --",cwd)
+  if not staged then return nil,e end
+  local unstaged,u=git(base.."--name-status -z --find-renames --",cwd)
+  if not unstaged then return nil,u end
+  local untracked,v=git("git ls-files --others --exclude-standard -z --",cwd)
+  if not untracked then return nil,v end
+  local fingerprint={cwd,staged,unstaged,untracked}
   local changes={}
-  for name, marked in pairs(by_path) do
-    local lines={}
-    for n in pairs(marked) do lines[#lines+1]=n end
-    table.sort(lines)
-    changes[#changes+1]={path=name,lines=lines}
+  local function capture(manifest,stage,flags)
+    local tokens={};for s in manifest:gmatch("([^%z]+)%z") do tokens[#tokens+1]=s end
+    local i=1
+    while i<=#tokens do
+      local status=tokens[i];local path=tokens[i+1];i=i+2
+      if not path then return nil,"git_status_unparsed" end
+      local old
+      if status:sub(1,1)=="R" or status:sub(1,1)=="C" then old=path;path=tokens[i];i=i+1 end
+      if not path then return nil,"git_rename_unparsed" end
+      local diff,de=git(base..flags.." --no-renames --unified=0 -- "..quote(path),cwd)
+      if not diff then return nil,de end
+      fingerprint[#fingerprint+1]=diff
+      local change={path=path,stage=stage,status=status,old_path=old,lines={},added_lines=0,removed_lines=0,removed_only_lines=0}
+      local marked={}
+      for line in diff:gmatch("[^\n]+") do
+        if line:sub(1,2)=="@@" then
+          local os,oc,ns,nc=line:match("^@@ %-(%d+),?(%d*) %+(%d+),?(%d*) @@")
+          if not ns then return nil,"git_diff_unparsed_hunk" end
+          oc,nc=tonumber(oc) or 1,tonumber(nc) or 1;ns=tonumber(ns)
+          change.added_lines=change.added_lines+nc;change.removed_lines=change.removed_lines+oc
+          if nc==0 then change.removed_only_lines=change.removed_only_lines+oc
+          elseif nc>4096 then change.gap="large_patch" else
+            for n=ns,ns+nc-1 do marked[n]=true end
+          end
+        end
+      end
+      for n in pairs(marked) do change.lines[#change.lines+1]=n end
+      table.sort(change.lines)
+      change.changed_line_count=#change.lines+change.removed_only_lines
+      if change.gap=="large_patch" then change.changed_line_count=change.added_lines end
+      if diff:find("Binary files",1,true) or diff:find("GIT binary patch",1,true) then change.gap="binary_file" end
+      if status=="D" then change.gap="deleted_file";change.changed_line_count=change.removed_lines end
+      if #change.lines==0 and not change.gap then change.gap=change.removed_only_lines>0 and "deleted_lines_without_current_source" or "metadata_only_change" end
+      if old then change.rename_source_coverage="old_path_not_mapped" end
+      local source,source_gap=source_for(cwd,path)
+      if source_gap then change.gap=source_gap end
+      change.source_version=source and host.sha256(source) or nil
+      if stage=="index" and status~="D" and not change.gap then
+        local index,ie=git("git show "..quote(":"..path),cwd)
+        if not index then return nil,ie end
+        change.index_source_version=host.sha256(index)
+        if not source or index~=source then change.gap="index_source_differs_from_worktree" end
+      end
+      changes[#changes+1]=change
+      if #changes>16384 then return nil,"too_many_git_changes" end
+    end
+    return true
   end
-  for name in pairs(deleted) do
-    changes[#changes+1]={path=name,gap="deleted_file"}
+  local ok,ce=capture(staged,"index","--cached");if not ok then return nil,ce end
+  ok,ce=capture(unstaged,"worktree","");if not ok then return nil,ce end
+  for path in untracked:gmatch("([^%z]+)%z") do
+    local source,source_gap=source_for(cwd,path)
+    local change={path=path,stage="untracked",status="?",lines={}}
+    if source then
+      if source:find("\0",1,true) then change.gap="binary_file" end
+      local count=1;for _ in source:gmatch("\n") do count=count+1 end
+      change.changed_line_count=count;change.source_version=host.sha256(source)
+      if count>4096 then change.gap="large_patch" else for n=1,count do change.lines[#change.lines+1]=n end end
+    else change.gap=source_gap or "untracked_non_utf8_or_unreadable" end
+    changes[#changes+1]=change
+    fingerprint[#fingerprint+1]=path..":"..tostring(change.source_version)
   end
-  table.sort(changes,function(a,b) return a.path<b.path end)
-  return {root=cwd,changes=changes, fingerprint=host.sha256(cwd.."\0"..diff.."\0"..untracked)}
+  local index_after,after_err=git(base.."--cached --raw --abbrev=40 -z --no-renames --",cwd)
+  if not index_after then return nil,after_err end
+  if index_after~=index_identity then return nil,"git_index_changed_during_capture" end
+  fingerprint[#fingerprint+1]=index_identity
+  table.sort(changes,function(a,b) return a.path==b.path and a.stage<b.stage or a.path<b.path end)
+  return {root=cwd,changes=changes,fingerprint=host.sha256(table.concat(fingerprint,"\0"))}
 end
 
 function M.git_audit(cwd, reviewed, context)

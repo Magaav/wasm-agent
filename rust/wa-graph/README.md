@@ -14,7 +14,7 @@ wa-graph index | stats
 ```
 
 It is not a graphify clone. graphify is a general, 40-language, Python-packaged graph. This is the
-**wasm-agent-native slice**: the agent's own stack (Rust + Lua + Bash + PowerShell + Markdown), the
+**wasm-agent-native slice**: the agent's own stack (Rust + Lua + Go + JavaScript/TypeScript + Bash + PowerShell + Markdown), the
 node's own SQLite, and *capability-typed* edges (`host.*`) that graphify has no concept of. It is a
 workspace member of `rust/` and ships inside the node binary.
 
@@ -131,6 +131,28 @@ and exact-byte freshness:
 
 The repository gate (`scripts/test.sh`) runs these alongside the rest, and the live node was verified
 end to end: start → index, add a file → it appears, edit a file → the old definition is gone.
+
+## Go, Git stages and source provenance
+
+Go grammar and MIT provenance are pinned in [THIRD-PARTY.md](THIRD-PARTY.md).
+Version10 extraction adds exact function/receiver/type/interface/alias and top-level
+var/const ranges; captured go.mod identity resolves unique local-module calls.
+Package/import strategies expose confidence; dynamic/interface/external/shadowed
+calls remain explicit unresolved leads. No SDK/module cache/type checker is used.
+Vendor, cache, build and symlink sources stay excluded; replace/workspace/generic
+semantics are not inferred.
+
+Git capture lives in the Lua bridge, using complete retained supervised output
+and separate index/worktree/untracked facts. Byte-mismatched index definitions
+are gaps, not current-source mappings. Impact pages a fifth `patch_facts` stream;
+unsupported/binary/deleted/removal-only/large/metadata changes keep their facts.
+`changed_lines` is stage-specific evidence, not net or unique physical lines.
+
+Source domains label active versus history/archive and review/evidence paths.
+The explicit -400 lexical penalty favors active leads but keeps historical-only
+matches and exact selectors. Caller-domain resolution does not override an
+explicit historical import. Active tests remain visible. This path heuristic
+is not proof of deployment or type identity. See docs/GRAPH.md for details.
 
 ## Honest limitations
 

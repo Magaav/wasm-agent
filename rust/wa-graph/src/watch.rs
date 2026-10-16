@@ -15,7 +15,7 @@ pub(crate) fn ignored(event:&notify::Event)->bool{
  if event.paths.is_empty(){return false;}
  event.paths.iter().all(|path|{
   let text=path.to_string_lossy().replace('\\',"/");
-  text.split('/').any(|part|matches!(part,".git"|"target"|".wa-graph"|"node_modules"|"releases"|".orca-worktree-trash")) ||
+  text.split('/').any(|part|matches!(part,".git"|"target"|".wa-graph"|"vendor"|".cache"|"node_modules"|"releases"|".orca-worktree-trash")) ||
   (!path.is_dir() && crate::extract::language_for(&text).is_none() && !matches!(event.kind,notify::EventKind::Remove(notify::event::RemoveKind::Folder)|notify::EventKind::Modify(notify::event::ModifyKind::Name(_))|notify::EventKind::Create(notify::event::CreateKind::Folder)))
  })
 }

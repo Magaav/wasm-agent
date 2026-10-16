@@ -252,7 +252,21 @@ call is a typed edge, not a string.
 - It indexes syntax, not semantics. A call through a differently-named module
   alias may resolve to the wrong `M.x`, and trait/generic identity is not
   modelled. If `explain` shows no caller you expected, confirm with `grep`.
-- Rust, Lua, JavaScript/TypeScript, Bash, PowerShell and Markdown are indexed. Other files are not.
+- Rust, Lua, Go, JavaScript/TypeScript, Bash, PowerShell and Markdown are indexed.
+  Go module identity is captured from go.mod; workspace/replace/generic/interface
+  semantics are not inferred. Go local package/import call strategies are static
+  leads; dynamic/shadowed/external calls remain unresolved. Vendor/cache/build and
+  symlink sources are excluded. Other file changes still appear in Git patch facts.
+- Git uses separate index/worktree/untracked facts, never truncated exec previews.
+  Inspect `patch_facts` and every gap even when changed-symbol rows are empty.
+  Index bytes differing from worktree snapshot bytes are not silently mapped.
+  Follow `next_cursor` through the fifth patch-facts stream too. Native source
+  stays distinct; changed_lines is stage-specific, not a net/unique line count.
+- `source_domain` labels active, historical and evidence paths. A visible -400
+  score penalty favors active sources except explicit historical/evidence queries;
+  sole historical matches and exact selectors remain available. Active tests
+  remain active/test. Path labels are heuristics, not deployment identity. Explicit
+  historical imports remain dependencies when statically resolved.
 - Ranking is lexical. Synonyms that do not occur in a name, signature, or path can
   return `absent`; use `grep` rather than treating absence as proof.
 - With `prefer_implementations:true`, local variables that match only part of a multiword concept rank lower. This

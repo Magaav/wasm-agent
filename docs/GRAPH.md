@@ -14,9 +14,9 @@ on the real tree is in the crate README: "who calls `append_turn`" goes from 102
 grep matches to one call, and "what resolves `deploy.sh`" from 45 matches to the
 resolver plus its candidate list.
 
-It is deliberately *not* a general code-intelligence engine. It indexes seven
-grammars (Rust, Lua, JavaScript/TypeScript, Bash, PowerShell, Markdown), resolves
-references by name,
+It is deliberately *not* a general code-intelligence engine. It indexes Rust, Lua,
+Go, JavaScript/TypeScript, Bash and PowerShell syntax plus Markdown mentions,
+resolves references by name,
 and treats a `host.*` call as a typed edge to a capability — so the graph is also
 a control graph, not only a map.
 
@@ -194,6 +194,60 @@ context to use it before `grep` and how to read the result — including that a
   can miss; low-confidence or absent answers fall back to `grep`.
 - Definition source omits surrounding imports, sibling attributes and module
   state. Inspect that context before editing.
+
+## Git stages, Go and source domains — 2026-10-16
+
+Git capture reads complete retained command output, never a truncated head/tail.
+A private replay of the original 104-file staged delivery reproduced an empty
+patch on the old collector: its 24 KB tail contained no usable diff headers.
+Root selection was correct in that reproduction; net `diff HEAD` also independently
+loses staged edits cancelled in the worktree. Capture now uses separate index and
+worktree manifests, NUL path identities, per-path hunks and exact content hashes.
+Index identities are checked before/after capture; inspection never changes Git.
+
+`patch_facts` is a fifth losslessly paged impact stream, with stage (`index`,
+`worktree`, `untracked`), status, paths/rename origin, added/removed counts, line
+coverage and source hashes. `changed_lines` sums stage-specific anchors, including
+removed-only line counts; it is NOT a net diff or unique physical-line count.
+Unsupported, binary, metadata-only, deleted, redirected, large and non-indexed
+changes remain explicit gaps/facts. Changed index bytes map only if byte-identical
+to current worktree source; otherwise `index_source_differs_from_worktree` is a
+gap, not guessed offset translation. Deleted/old rename source is not reconstructed
+into current symbols. Mapping uses stored snapshot bytes and rejects differing
+patch source versions. Unreadable/non-UTF-8 Git output or capture limits refuse
+instead of producing clean/zero success. External multi-file writers are not frozen.
+
+Go uses pinned official `tree-sitter-go =0.23.4`, compatible with tree-sitter0.24;
+see the crate THIRD-PARTY.md and retained MIT notice. Extractor version10 migrates
+unchanged sources. Functions, receiver-qualified methods, types/interfaces/aliases
+and top-level var/const specifications have exact ranges. Imports and calls are
+recorded; unique same-package calls and local module imports expose
+`go_package_unique`/`go_local_import_unique` confidence, not type proof. Captured
+`go.mod` module identity participates in freshness and invalidates Go resolution.
+SDKs, external modules, vendor/build/cache directories and symlinks are not read
+for semantic resolution. Workspace/replace directives, dot/blank imports, default
+aliases differing from path basename, generics, interface dispatch and unknown
+receivers remain unresolved. Conservative local-name scans mark possibly shadowed
+calls `go_dynamic_or_shadowed`; nested scopes may over-report that uncertainty.
+
+Discovery/source/relationship rows label `source_domain`: `active`, `historical`
+(`history/`, `archive/`, `archives/` or corresponding `docs/` roots), or `evidence`
+(`reviews/`, `evidence/` or corresponding `docs/` roots).
+Active tests retain domain active plus role test, including Go `_test.go`. The
+lexical score adds an explicit -400 source-domain penalty unless history/evidence
+is queried explicitly. This is a path heuristic, not deployment identity; it
+keeps sole historical matches and exact selectors available. Same-directory and
+unique-name resolution prefer the caller domain without guessing between remaining
+ambiguous paths. Explicit historical imports override that preference. Edges label
+their destination domain and cross-domain fallback has lower confidence.
+No claim is made that historical candidates always ranked first before this fix.
+
+Focused proof: `scripts/test-graph-repair.cjs <built-wa> <fresh-evidence>`, then
+`--post` with the same arguments, covers private staged/unstaged/cancelled/shifted
+changes, actual linked-worktree/nested roots, native Go source/version fences and
+the original staged104 delivery. Crate tests cover Go syntax/resolution/migration,
+provenance and patch-fact paging alongside existing freshness/paging/audit tests.
+This is static partial coverage, not a full release gate or runtime installation.
 
 ## Measured retrieval update — 2026-10-12
 

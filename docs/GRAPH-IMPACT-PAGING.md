@@ -5,16 +5,18 @@ changed-symbol rows and twenty gap/unresolved-call records were fixed overhead;
 a 12 KB request could refuse before even one caller fitted. This is presentation
 cost, not proof of absence or permission to hide coverage gaps.
 
-The repaired response pages four streams: resolved `impact.rows`,
+The repaired response pages five streams: resolved `impact.rows`,
 `changed_symbols.rows`, `coverage.gaps`, and `coverage.unresolved_calls.rows`.
+A fifth stream, `patch_facts.rows`, retains stage/path/status, changed-line and
+source-version evidence even for files outside the symbol index.
 Each retains exact totals, returned counts, stream offsets and truncation.
 The top-level `next_cursor` (also `impact.next_cursor` for existing clients) carries
-all four offsets, bound to canonical root, patch, direction, depth and graph
+all five offsets, bound to canonical root, patch, direction, depth and graph
 generation. Follow it unchanged until absent. No section repeats, skips or loses
 rows when the byte budget changes. A continuation can advance diagnostics after
 resolved impacts are exhausted; inspect the top-level truncation, not impact
 row count alone. Existing numeric-offset cursors are accepted for resolved-row
-continuation; new cursors include all streams.
+continuation; new v3 cursors include all five streams; v2 four-stream cursors remain accepted.
 
 Rows are appended in round-robin order, starting with resolved impact, so useful
 callers are not starved by metadata. The encoder measures the complete JSON after
@@ -23,7 +25,7 @@ An individually unpageable row or metadata frame refuses with minimum needed
 bytes; no success cursor can loop without advancing. Counts and scope warnings
 remain even when the corresponding row list is empty on a page.
 
-This does not change code resolution, dynamic-call limits, audit policy, freshness
+Paging itself does not change code resolution, dynamic-call limits, audit policy, freshness
 or test execution claims. Standalone audit retains its historical 20-row previews;
 impact internally obtains complete diagnostics for lossless paging. Large patches
 can cost more internal memory; transport bounds are not a whole-index memory cap.

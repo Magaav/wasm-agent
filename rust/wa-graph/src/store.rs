@@ -20,7 +20,7 @@ pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + S
 // `graph_sources` record of the exact bytes a generation was built from. A stamp written by either
 // binary must therefore be re-parsed rather than trusted, and keeping either value would leave the
 // other side's edges in place, which is the failure this constant exists to prevent.
-pub(crate) const EXTRACT_VERSION: &str = "9";
+pub(crate) const EXTRACT_VERSION: &str = "10";
 pub(crate) fn sha256(bytes:&[u8])->String{ring::digest::digest(&ring::digest::SHA256,bytes).as_ref().iter().map(|b|format!("{b:02x}")).collect()}
 
 pub struct Store {
@@ -447,6 +447,8 @@ impl Store {
                     strategy: "capability_exact",
                     confidence: 100,
                 })
+            } else if extract::language_for(path)==Some("go") {
+                resolve_go(&self.conn,target,path,kind)?
             } else if kind == "calls" && target.contains('.') {
                 resolve_dotted(&self.conn, target, simple, path)?
             } else {
@@ -459,6 +461,9 @@ impl Store {
                     "UPDATE edges SET dst=?1,resolution=?2,confidence=?3 WHERE id=?4",
                     params![hit.id, hit.strategy, hit.confidence, edge_id],
                 )?;
+            } else if extract::language_for(path)==Some("go") && kind=="calls" {
+                self.conn.execute("UPDATE edges SET resolution=?1,confidence=0 WHERE id=?2",
+                    params![if target.starts_with("dynamic::"){"go_dynamic_or_shadowed"}else{"go_unresolved_selector_or_external"},edge_id])?;
             } else if kind == "mentions" {
                 // A doc mention that names no real definition is noise; keep the graph clean.
                 self.conn.execute("INSERT INTO latent_mentions SELECT src,target,path,line,col,lookup_name FROM edges WHERE id=?1",params![edge_id])?;
@@ -797,6 +802,12 @@ impl Store {
             }
             score += kind_score;
             score_breakdown.insert("symbol_kind".to_string(), kind_score);
+            let domain=source_domain(&path);
+            let explicit_history=terms.iter().any(|s|matches!(s.as_str(),"history"|"historical"|"archive"|"archives"|"evidence"|"reviews"));
+            if domain!="active" && !explicit_history {
+                score -= 400;
+                score_breakdown.insert("source_domain".to_string(), -400);
+            }
             if !wants_test && is_test_path(&path) {
                 score -= 30;
                 score_breakdown.insert("test_penalty".to_string(), -30);
@@ -870,7 +881,7 @@ impl Store {
         let eof = end == exact.len();
         Ok(json!({
             "symbol": {"kind": symbol_kind, "name": symbol_name, "path": path,
-                "line": symbol_line, "language": lang},
+                "line": symbol_line, "language": lang,"source_domain":source_domain(path)},
             "source_version": sha256(&bytes),
             "source": chunk,
             "bytes": exact.len(),
@@ -1135,6 +1146,8 @@ impl Store {
                     let stamp:String=self.conn.query_row("SELECT hash FROM files WHERE path=?1",params![hit.node.path],|r|r.get(0))?;
                     Ok(json!({
                         "source_version":stamp.split_once(':').map(|p|p.1),
+                        "source_domain":source_domain(&hit.node.path),
+                        "source_role":if is_test_path(&hit.node.path){"test"}else{"source"},
                         "kind": hit.node.kind,
                         "name": hit.node.name,
                         "path": hit.node.path,
@@ -1197,12 +1210,20 @@ fn ensure_column(conn: &Connection, table: &str, column: &str, declaration: &str
     Ok(())
 }
 
+pub(crate) fn source_domain(path:&str)->&'static str {
+    let path=path.replace('\\',"/");
+    if ["reviews/","docs/reviews/","evidence/","docs/evidence/"].iter().any(|prefix|path.starts_with(prefix)) {"evidence"}
+    else if ["history/","archive/","archives/","docs/history/","docs/archive/","docs/archives/"].iter().any(|prefix|path.starts_with(prefix)) {"historical"}
+    else {"active"}
+}
+
 fn is_test_path(path: &str) -> bool {
     path.starts_with("tests/")
         || path.contains("/tests/")
         || path.contains("/test_")
         || path.contains("/test-")
         || path.ends_with("/tests.rs")
+        || path.ends_with("_test.go")
 }
 
 fn top_component(path: &str) -> &str {
@@ -1216,6 +1237,49 @@ fn bounded_section(mut rows: Vec<Value>, limit: usize) -> Value {
     let total = rows.len();
     rows.truncate(limit);
     json!({"total":total,"returned":rows.len(),"truncated":total > rows.len(),"rows":rows})
+}
+
+fn resolve_go(conn:&Connection,target:&str,path:&str,kind:&str)->Result<Option<Resolved>> {
+    if kind!="calls" {return Ok(None);}
+    let directory=path.rsplit_once('/').map(|p|p.0).unwrap_or("");
+    let mut wanted=target.to_string();
+    let mut dir=directory.to_string();
+    let mut strategy="go_package_unique";
+    let mut confidence=90;
+    if let Some((alias,member))=target.split_once('.') {
+        let module:Option<String>=conn.query_row("SELECT module FROM imports WHERE path=?1 AND alias=?2",params![path,alias],|r|r.get(0)).optional()?;
+        if let Some(import)=module {
+            let mut stmt=conn.prepare("SELECT path,name FROM nodes WHERE kind='module' AND lang='go_module'")?;
+            let modules=stmt.query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))?.collect::<std::result::Result<Vec<_>,_>>()?;
+            let nearest=modules.iter().filter(|(p,_)| {
+                let base=p.strip_suffix("go.mod").unwrap_or("");path.starts_with(base)
+            }).max_by_key(|(p,_)|p.len());
+            let Some((module_path,module_name))=nearest else {return Ok(None);};
+            let suffix=if import==*module_name {""} else if let Some(s)=import.strip_prefix(&format!("{module_name}/")){s}else{return Ok(None);};
+            let base=module_path.strip_suffix("go.mod").unwrap_or("");
+            dir=format!("{base}{suffix}").trim_end_matches('/').to_string();
+            // Never bind across a nested module boundary without Go workspace semantics.
+            if modules.iter().any(|(p,_)|{
+                let other=p.strip_suffix("go.mod").unwrap_or("");
+                let other_dir=other.trim_end_matches('/');
+                p!=module_path && other.len()>base.len() && (dir==other_dir || dir.starts_with(&format!("{other_dir}/")))
+            }) {return Ok(None);}
+            wanted=member.to_string();strategy="go_local_import_unique";confidence=95;
+        }
+    }
+    let mut stmt=conn.prepare("SELECT id,path FROM nodes WHERE name=?1 AND lang='go' AND kind IN('fn','method')")?;
+    let candidates=stmt.query_map(params![wanted],|r|Ok((r.get::<_,i64>(0)?,r.get::<_,String>(1)?)))?.collect::<std::result::Result<Vec<_>,_>>()?;
+    let package:Option<String>=conn.query_row("SELECT name FROM nodes WHERE path=?1 AND kind='package'",params![path],|r|r.get(0)).optional()?;
+    let mut hits=Vec::new();
+    for (id,p) in candidates {
+        if p.rsplit_once('/').map(|p|p.0).unwrap_or("")!=dir {continue;}
+        if strategy=="go_package_unique" {
+            let other:Option<String>=conn.query_row("SELECT name FROM nodes WHERE path=?1 AND kind='package'",params![p],|r|r.get(0)).optional()?;
+            if other!=package {continue;}
+        }
+        hits.push(id);
+    }
+    Ok(if hits.len()==1 {Some(Resolved{id:hits[0],strategy,confidence})}else{None})
 }
 
 fn pick_candidate(
@@ -1243,33 +1307,20 @@ fn pick_candidate(
         }
     }
     let dir = edge_path.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
-    for name in [target, simple] {
-        let same_dir: Option<i64> = conn
-            .query_row(
-                "SELECT id FROM nodes WHERE name=?1 AND path LIKE ?2 ORDER BY line,path LIMIT 1",
-                params![name, format!("{dir}/%")],
-                |r| r.get(0),
-            )
-            .optional()?;
-        if let Some(id) = same_dir {
-            return Ok(Some(Resolved {
-                id,
-                strategy: "same_directory",
-                confidence: 85,
-            }));
-        }
-    }
-    for name in [target, simple] {
-        let mut stmt = conn.prepare("SELECT id FROM nodes WHERE name=?1 LIMIT 2")?;
-        let mut rows = stmt.query(params![name])?;
-        let first = rows.next()?.map(|r| r.get::<_, i64>(0)).transpose()?;
-        let second = rows.next()?.map(|r| r.get::<_, i64>(0)).transpose()?;
-        if first.is_some() && second.is_none() {
-            return Ok(first.map(|id| Resolved {
-                id,
-                strategy: "unique_name",
-                confidence: 75,
-            }));
+    for same_directory in [true,false] {
+        for name in [target,simple] {
+            let mut stmt=conn.prepare("SELECT id,path FROM nodes WHERE name=?1")?;
+            let candidates=stmt.query_map(params![name],|r|Ok((r.get::<_,i64>(0)?,r.get::<_,String>(1)?)))?.collect::<std::result::Result<Vec<_>,_>>()?;
+            let candidates:Vec<_>=candidates.into_iter().filter(|(_,p)|!same_directory || p.rsplit_once('/').map(|p|p.0).unwrap_or("")==dir).collect();
+            let preferred:Vec<_>=candidates.iter().filter(|(_,p)|source_domain(p)==source_domain(edge_path)).collect();
+            let selected=if preferred.is_empty(){candidates.iter().collect::<Vec<_>>()}else{preferred};
+            if selected.len()==1 {
+                let (id,p)=selected[0];
+                let cross_domain=source_domain(p)!=source_domain(edge_path);
+                return Ok(Some(Resolved{id:*id,
+                    strategy:if cross_domain {"unique_cross_domain_name"}else if same_directory {"same_directory"}else if candidates.len()>1 {"unique_source_domain_name"}else{"unique_name"},
+                    confidence:if cross_domain {60}else if same_directory {85}else{75}}));
+            }
         }
     }
     Ok(None)
@@ -1402,16 +1453,22 @@ fn resolve_alias(conn: &Connection, target: &str, edge_path: &str) -> Result<Opt
     // Prefer the module table's export (`M.budget`) over a bare `budget` declared inside it: the
     // alias names the module, so `provider.budget` is `M.budget`, not a local variable that
     // happens to share the name. Without this the edge resolved - to the wrong symbol.
-    let hit: Option<i64> = conn
-        .query_row(
-            "SELECT id FROM nodes WHERE lookup_name=?4 AND (path LIKE ?1 OR path LIKE ?2 OR path LIKE ?3)
-               AND (name=?4 OR name LIKE ?5)
-             ORDER BY (name LIKE ?5) DESC, (kind='fn' OR kind='method') DESC, (name=?4) DESC, line LIMIT 1",
-            params![by_path, by_lua, by_base, simple, dot_suffix],
-            |r| r.get(0),
-        )
-        .optional()?;
-    Ok(hit)
+    let mut stmt=conn.prepare(
+        "SELECT id,path FROM nodes WHERE lookup_name=?4 AND (path LIKE ?1 OR path LIKE ?2 OR path LIKE ?3)
+           AND (name=?4 OR name LIKE ?5)
+         ORDER BY (name LIKE ?5) DESC, (kind='fn' OR kind='method') DESC, (name=?4) DESC, line,path")?;
+    let candidates=stmt.query_map(params![by_path,by_lua,by_base,simple,dot_suffix],|r|Ok((r.get::<_,i64>(0)?,r.get::<_,String>(1)?)))?.collect::<std::result::Result<Vec<_>,_>>()?;
+    let relative=Path::new(edge_path).parent().unwrap_or(Path::new("")).join(raw);
+    let mut parts=Vec::new();for part in relative.components() {
+        match part {std::path::Component::Normal(p)=>parts.push(p.to_string_lossy().into_owned()),std::path::Component::ParentDir=>{parts.pop();},_=>{}}
+    }
+    let relative=parts.join("/");
+    let exact:Vec<_>=candidates.iter().filter(|(_,p)|p==trimmed || p==&relative).collect();
+    // An explicit historical path is stronger than the caller's source-domain preference.
+    let preferred:Vec<_>=if !exact.is_empty(){exact}else{candidates.iter().filter(|(_,p)|source_domain(p)==source_domain(edge_path)).collect()};
+    let selected=if preferred.is_empty(){candidates.iter().collect::<Vec<_>>()}else{preferred};
+    let paths:std::collections::BTreeSet<_>=selected.iter().map(|(_,p)|p.as_str()).collect();
+    Ok(if paths.len()==1 {selected.first().map(|(id,_)|*id)}else{None})
 }
 
 fn ensure_capability(conn: &Connection, name: &str) -> Result<i64> {
@@ -1463,6 +1520,8 @@ fn row_to_edge(r: &rusqlite::Row) -> rusqlite::Result<EdgeRow> {
 impl NodeRow {
     pub fn to_json(&self) -> Value {
         json!({
+            "source_domain":source_domain(&self.path),
+            "source_role":if is_test_path(&self.path){"test"}else{"source"},
             "kind": self.kind,
             "name": self.name,
             "path": self.path,
@@ -1481,6 +1540,8 @@ impl EdgeRow {
             "target": self.target,
             "path": self.path,
             "line": self.line,
+            "dst_source_domain":self.dst_path.as_deref().map(source_domain),
+            "source_domain":source_domain(&self.path),
             "resolved": self.dst.is_some(),
             "dst": self.dst_name,
             "dst_path": self.dst_path,
@@ -1538,6 +1599,8 @@ pub(crate) fn collect_files_progress(root:&Path,deadline:Option<std::time::Insta
                     name.as_str(),
                     ".git"
                         | "target"
+                        | "vendor"
+                        | ".cache"
                         | "node_modules"
                         | ".wa-graph"
                         | "releases"
