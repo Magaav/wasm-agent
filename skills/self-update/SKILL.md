@@ -216,7 +216,8 @@ exit when script reporting fails. A failed process is not installation or replay
 permission. Unknown/partial effects remain blocked.
 
 External `protocol retire-preinstall <id> --reason <text>` accepts only the exact
-historical early PATH refusal or pinned embedded-runtime-check failure, with
+historical early PATH refusal, pinned embedded-runtime-check failure, or the
+separately pinned acde06f0/c0903556/c02c6ac9 code-mode rg preflight failure, with
 unchanged live target/binary and retained source/capture proof. The embedded path
 also requires a failed result with empty installed identities and a full-effect-bound
 native exit1/PID/time record. It preserves originals and notification unknowns,
@@ -226,7 +227,15 @@ For an old observer use the checked existing OS task helper with
 Inspect its result and native receipt once before a separate fresh-source admission.
 `sentinel-preinstall-proof` records `test-sentinel-preinstall.cjs <built-sentinel>
 <fresh-evidence>` and `--post`; required worktrees use this verified direct CLI.
-Run focused native reconcile and bootstrap-parser checks too. Preserve stale
+Run focused native reconcile and bootstrap-parser checks too. The code-mode class
+has pure native/retained-public-packet tests and an external-only private CLI proof:
+`node scripts/test-sentinel-codemode-preinstall.mjs <built-sentinel> <fresh-evidence>`
+then `--post`. It refuses child/in-turn execution; never strip markers to run it.
+The existing checked `-RetirePreinstallId` helper selects the source-built classifier,
+not an unrelated old failure class. Code-mode shipping preflight resolves home-local
+rg using the host's existing home contract and stages a verified copy only in the
+checker's private home: rg is an offline startup prerequisite, not a Cargo/Lua need.
+No global PATH edit, download or new registry is required. Preserve stale
 canonical cache generations before clean-source builds; do not hand-copy installed
 binaries or mistake candidate module checks for installation. See docs/SENTINEL.md.
 
