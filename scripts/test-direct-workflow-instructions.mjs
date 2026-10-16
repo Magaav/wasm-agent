@@ -39,6 +39,12 @@ try {
     fs.writeFileSync(policy,original);
   }
   for(const [file,before,reason] of [
+    ['AGENTS.orchestrator.md','Relay ALL original subagent feedback','home AGENTS.orchestrator.md'],
+    ['AGENTS.orchestrator.md','after settlement only','home AGENTS.orchestrator.md'],
+    ['AGENTS.orchestrator.md','pre-delegation reasoning/checks','home AGENTS.orchestrator.md'],
+    ['AGENTS.subagents.md','Temporary operator evaluation contract','home AGENTS.subagents.md'],
+    ['AGENTS.subagents.md','used/not-used/unknown','home AGENTS.subagents.md'],
+    ['AGENTS.subagents.md','ALL relevant findings','home AGENTS.subagents.md'],
     ['AGENTS.md','subagents or external inference agents unless the operator explicitly enables','home AGENTS.md'],
     ['AGENTS.md','Only the coordinator owns','home AGENTS.md'],
     ['docs/ORCHESTRATION-MODE.md','Follow-up','home docs/ORCHESTRATION-MODE.md'],

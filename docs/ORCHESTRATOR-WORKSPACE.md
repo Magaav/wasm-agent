@@ -235,8 +235,11 @@ from the child's execution state; failed/unknown delivery is not hidden as succe
 Risk: automatic return spends coordinator inference and may queue behind active
 user work. It does not interrupt that run or claim task verification. Authority
 is rechecked at both observation and execution. The coordinator instructions
-bound feedback to one deduplicated improvement task and one review; this is an
-instruction policy, not a native semantic classifier of feedback requests.
+require temporary operator evaluation reporting and relay of ALL original worker
+feedback with attribution (AGENTS.orchestrator.md and AGENTS.subagents.md), until
+the operator explicitly removes that contract. Missing sections may be requested
+after settlement only; feedback does not authorize a recursive fix chain or new
+runtime admission/acceptance gate. This is instruction policy, not a semantic classifier.
 The showroom polls durable messages and bounded live model/tool preview every
 two seconds. Tool starts are visible before results; active runs are expanded by
 default, with reader folds and scroll position preserved across refreshes. Each
