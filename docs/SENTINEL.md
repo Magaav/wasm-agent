@@ -30,6 +30,46 @@ readiness and requests installation. See [ORCHESTRATION-MODE.md](ORCHESTRATION-M
 
 ## Asking
 
+### Offline native build preflight before a deployment request
+
+Routine `deploy.sh` calls the same non-installing shipping build contract as:
+
+```
+node scripts/codemode-build.mjs assets-path <absolute-canonical-source-root>
+node scripts/codemode-build.mjs prepare <absolute-canonical-source-root> <absolute-operator-prepared-assets>
+node scripts/codemode-build.mjs preflight <absolute-canonical-source-root>
+node scripts/codemode-build.mjs build <absolute-canonical-source-root>
+```
+
+Only the coordinator/operator prepares the real location. `assets-path` resolves
+`<common-git-dir>/codemode-assets/pi-1.2.0-quickjs-3.6.2`, shared durably by that
+repository's worktrees, not a conversational setting or ambient shell variable.
+`prepare` is explicit offline copying from an already provisioned generation;
+it verifies exact pinned wasm/prelude, original package tarballs, receipt identities
+and both source MIT notices before atomic publication. Existing locations refuse
+replacement: inspect/preflight them; preserve failed preparation generations.
+Provision an independent fresh input with `scripts/provision-codemode-assets.mjs`
+and an explicit verified retained package-cache argument when needed. No npm/Node
+installation, runtime download, benchmark vault or Node VM fallback is involved.
+
+`preflight` is read-only and should be run BEFORE queuing the one exact-source
+request or reserving an installer. It checks assets, Cargo, ripgrep and checker
+prerequisites and prints source/asset identities. `build` is the optional complete
+non-installing preparation door: offline/locked Cargo receives an explicit native
+verified snapshot path, never ambient `WA_CODEMODE_BUILD_ASSETS`; it checks complete
+embedded Lua identity and actually runs the pinned Rust/Wasmtime QuickJS guest
+without an external asset override. Raw Cargo/checker stdout/stderr, snapshot,
+source/asset/binary identities and failures remain in a unique
+`<git-dir>/codemode-build-*` generation. A private development build may explicitly
+pass `--assets <absolute-private-input>` to preflight/build; deploy never passes
+this override. Build output remains at the established `rust/target/release` path.
+
+These commands do not install, touch the live home/UI/services/jobs, reserve an
+effect, authorize replay, or certify remote/idle/ownership readiness. The actual
+deploy repeats asset validation and candidate execution even after a prior build;
+all existing clean-source/remote/idle/effect-reservation/rollback/verifier boundaries
+remain. Prepared assets or a successful preflight are not installation evidence.
+
 ### Exact-source deployment and deterministic return
 
 The source-bound protocol uses the native watcher and its declared

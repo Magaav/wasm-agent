@@ -485,7 +485,14 @@ case "${WA_DEPLOY_SENTINEL_SUDO:-0}" in
 esac
 command -v cargo >/dev/null 2>&1 || fail "refused(cargo_unavailable): cargo is not on PATH (PATH=${PATH:-unset}); this step builds the tree with 'cargo build --release --offline --manifest-path rust/Cargo.toml', so a deploy without it cannot build what it would install. Install Rust (https://rustup.rs), or run the deploy on the tree that has the toolchain (the cloud tree builds this repository). Nothing was built and nothing was installed. To build or test without installing, use the gate's own command instead: bash scripts/test.sh."
 
-( cd rust && cargo build --release --offline --locked -p wa-host ) || fail "the build failed"
+# BEGIN native code-mode shipping build (also exercised without any installer).
+command -v node >/dev/null 2>&1 || fail "codemode_build:node_build_tool_unavailable; nothing installed"
+CODEMODE_BUILD_SCRIPT="$ROOT/scripts/codemode-build.mjs"; CODEMODE_BUILD_ROOT="$ROOT"
+if command -v cygpath >/dev/null 2>&1; then
+  CODEMODE_BUILD_SCRIPT="$(cygpath -w "$CODEMODE_BUILD_SCRIPT")"; CODEMODE_BUILD_ROOT="$(cygpath -w "$CODEMODE_BUILD_ROOT")"
+fi
+node "$CODEMODE_BUILD_SCRIPT" build "$CODEMODE_BUILD_ROOT" || fail "native code-mode shipping build/readiness failed; nothing installed"
+# END native code-mode shipping build.
 # The sentinel is its own crate, outside the `rust/` workspace (which lists only `wa-host`), so it is
 # built with its own manifest. Asking the workspace for `-p wa-sentinel` fails - "package ID
 # specification did not match any packages" - and that is how it came to be installed by hand at all.
@@ -808,6 +815,8 @@ if [ -f "$LIB_SRC" ]; then
   ship_file "$LIB_SRC" "$INSTALL_DIR/scripts/lib/service-target.sh" "scripts/lib/service-target.sh beside deploy.sh"
 fi
 
+ship_file "$ROOT/scripts/codemode-build.mjs" "$INSTALL_DIR/scripts/codemode-build.mjs" "offline native shipping build contract"
+ship_file "$ROOT/scripts/check-embedded-runtime.lua" "$INSTALL_DIR/scripts/check-embedded-runtime.lua" "embedded source and native asset readiness checker"
 ship_file "$ROOT/scripts/verify-install.sh" "$INSTALL_DIR/scripts/verify-install.sh" "installation verifier"
 ship_file "$ROOT/scripts/sentinel-install-proof.mjs" "$INSTALL_DIR/scripts/sentinel-install-proof.mjs" "request-bound installation proof"
 ship_file "$ROOT/scripts/sentinel-historical-proof.mjs" "$INSTALL_DIR/scripts/sentinel-historical-proof.mjs" "verification-only historical generation proof"
