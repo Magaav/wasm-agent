@@ -2408,7 +2408,7 @@ $harness = @'
     type("/");
     check(menu.open, "commands: `/` must open the list");
     var items = Array.prototype.slice.call(menu.querySelectorAll(".menu-item"));
-    check(items.length === 6, "commands: `/` must offer all six commands, got " + items.length);
+    check(items.length === 8 && items[6]?.textContent.includes('/provider') && items[7]?.textContent.includes('/login'), "commands: `/` must preserve six established commands plus provider management/login, got " + items.length);
     check(items[5]?.textContent.includes('/orchestration') && /unknown|ON|OFF/.test(items[5]?.textContent), 'orchestration command shows observed on/off or unavailable state');
     check(items[0] && items[0].textContent.indexOf("/new") >= 0,
       "commands: the list must offer /new first, got: " + (items[0] && items[0].textContent));

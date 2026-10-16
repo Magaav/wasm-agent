@@ -1,5 +1,18 @@
 # OpenAI subscription
 
+## Deterministic operator recovery
+
+Bare `/provider` (also `/login`) in CLI/UI exposes confirmed native device re-login
+without inference. The old usable credential survives until a fresh human-completed
+login commits under the existing credential lock. The nonblocking management flow is
+operator/operation-scoped, cancelable, and fences authorization-code exchange before
+dispatch; unknown exchanges are held, never replayed. Opaque generation pinning prevents
+a run from sending later rounds with a replacement account. Legacy explicit Pi rollback
+is reported as a different source and is not silently changed by native management.
+Go can use `WASM_AGENT_OPENCODE_GO_VAULT_URL` without moving native subscription auth.
+Vault enrollment/replacement, transition prerequisites and guarded Go migration are in
+[VAULT.md](VAULT.md). Configuration/presence is not subscription entitlement proof.
+
 ## Native runtime (operator-requested cutover)
 
 The ordinary route now uses `lua/core/subscription_wire.lua`, our Responses SSE

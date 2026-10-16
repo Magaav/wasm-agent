@@ -84,6 +84,19 @@ function M.transport()
   if value == '' or value == 'native' or value == 'wire' then return 'native' end
   error('invalid_subscription_transport: expected pi or native, got ' .. value)
 end
+function M.present()
+  -- Configuration discovery is presence only. Never rotate a token just to open a picker
+  -- or recover a different provider; entitlement is checked only by actual authorized work.
+  local vault=dofile('lua/core/vault.lua')
+  if vault.base('openai-sub') then
+    local status=vault.status('openai-sub')
+    local entry=status and status.providers['openai-sub']
+    return type(entry)=='table' and entry.configured==true and entry.enabled~=false
+  end
+  if M.transport()~='native' then return M.configured() end -- legacy branch reads presence only
+  return dofile('lua/core/openai_sub_auth.lua').status().present==true
+end
+
 function M.configured()
   if M.transport() == 'native' then
     -- The credential is the seam's question, not Pi's disk. Measured, and the reason this branch

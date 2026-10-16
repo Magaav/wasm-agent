@@ -448,7 +448,7 @@ end
 local function clear_flow()
   -- No delete capability exists, so a consumed flow is *retired* by writing it empty: the file
   -- always exists and always means "nothing pending" when it says so.
-  host.write_file(flow_path(), json.encode({ version = 1, pending = false, retired_at = now_ms() }))
+  return host.write_file(flow_path(), json.encode({ version = 1, pending = false, retired_at = now_ms() }))
 end
 M.flow_path = flow_path
 
@@ -582,7 +582,7 @@ end
 -- --- the seam: a usable token ---------------------------------------------------------------
 local function token_of(credential, refreshed, adopted)
   return { access = credential.access, account_id = credential.account_id,
-           expires = credential.expires, refreshed = refreshed == true,
+           expires = credential.expires, generation = credential.generation or tostring(credential.obtained_at or "legacy"), refreshed = refreshed == true,
            adopted = adopted == true, fingerprint = fingerprint(credential.access),
            store = M.store_path() }
 end
@@ -638,7 +638,9 @@ local function refresh_locked(credential)
   local account_id = M.account_id_from_access(access) or current.account_id
   local next_value = { version = 1, provider = "openai-codex", type = "oauth",
     access = access, refresh = refresh, expires = now_ms() + math.floor(expires_in * 1000),
-    account_id = account_id, obtained_at = now_ms(), refreshes = (tonumber(current.refreshes) or 0) + 1,
+    account_id = account_id, obtained_at = current.obtained_at or now_ms(),
+    generation = current.generation or tostring(current.obtained_at or "legacy"), operation = current.operation, operation_owner = current.operation_owner,
+    refreshes = (tonumber(current.refreshes) or 0) + 1,
     access_fingerprint = fingerprint(access), refresh_fingerprint = fingerprint(refresh),
     previous_refresh_fingerprint = current.refresh_fingerprint or fingerprint(current.refresh),
     source = current.source or "login", last_error = nil }
@@ -653,9 +655,18 @@ function M.token(opts)
   opts = opts or {}
   local credential, read_failure = read_store()
   if not credential then return nil, read_failure end
+  if opts.expected_generation and opts.expected_generation ~= (credential.generation or tostring(credential.obtained_at or "legacy")) then
+    return nil, failure("credential_changed", "authentication changed since run start; no request sent")
+  end
   if now_ms() < credential.expires then return token_of(credential, false, false), nil end
   local release, lock_failure = M.acquire_lock(opts.lock_wait_ms)
   if not release then return nil, lock_failure end
+  if opts.expected_generation then
+    local latest=read_store()
+    if not latest or (latest.generation or tostring(latest.obtained_at or 'legacy'))~=opts.expected_generation then
+      release(); return nil,failure('credential_changed','authentication changed while awaiting refresh lock; no refresh/request sent')
+    end
+  end
   local ok, token, refresh_failure = pcall(refresh_locked, credential)
   local released, release_failure = pcall(release)
   if not ok then return nil, failure("refresh_failed", redact.text(tostring(token))) end
@@ -665,6 +676,9 @@ function M.token(opts)
     host.log("openai-sub: credential lock release failed: " .. redact.text(tostring(release_failure)))
   end
   if not token then return nil, refresh_failure end
+  if opts.expected_generation and token.generation ~= opts.expected_generation then
+    return nil, failure("credential_changed", "authentication changed during refresh; no request sent")
+  end
   return token, nil
 end
 
@@ -689,6 +703,9 @@ function M.status()
   report.expires = credential.expires
   report.expires_in_ms = credential.expires - now
   report.obtained_at = credential.obtained_at
+  report.generation = credential.generation or tostring(credential.obtained_at or "legacy")
+  report.operation = credential.operation
+  report.operation_owner = credential.operation_owner
   report.refreshes = credential.refreshes
   report.source = credential.source
   report.access_fingerprint = credential.access_fingerprint
@@ -759,7 +776,7 @@ local function emitter(opts)
   end
 end
 
-local function store_token_response(payload, source)
+local function store_token_response(payload, source, operation, operation_owner)
   local access, refresh, expires_in = payload.access_token, payload.refresh_token, payload.expires_in
   if type(access) ~= "string" or access == "" or type(refresh) ~= "string" or refresh == ""
      or type(expires_in) ~= "number" then
@@ -773,9 +790,20 @@ local function store_token_response(payload, source)
   end
   local value = { version = 1, provider = "openai-codex", type = "oauth", access = access,
     refresh = refresh, expires = now_ms() + math.floor(expires_in * 1000), account_id = account_id,
-    obtained_at = now_ms(), refreshes = 0, access_fingerprint = fingerprint(access),
+    obtained_at = now_ms(), generation = random_state(), operation = operation, operation_owner = operation_owner, refreshes = 0, access_fingerprint = fingerprint(access),
     refresh_fingerprint = fingerprint(refresh), source = source }
+  local release
+  if not operation then
+    local lock_failure
+    release, lock_failure = M.acquire_lock(0)
+    if not release then return nil, lock_failure end
+    local pending = read_flow()
+    if pending and pending.flow == 'device_management' then
+      release(); return nil, failure('login_busy', 'operator device flow owns the pending login; no credential replaced')
+    end
+  end
   local written, write_failure = write_store(value)
+  if release then release() end
   if not written then return nil, write_failure end
   clear_flow()
   return { ok = true, account_id = account_id, expires = value.expires, source = source,
@@ -996,6 +1024,89 @@ end
 -- budget, while the browser flow returns `{pending=true, url=...}` and completes on the next call
 -- with `code=`/`callback=`. Success means the store holds a credential that `M.token()` can use -
 -- never an assertion that it does.
+-- Nonblocking operator device flow. The credential lock serializes poll/cancel/commit with
+-- refresh. The old usable credential survives failure/cancellation; an exchange fence forbids
+-- replay of an ambiguous authorization-code send. No credential is returned to the UI.
+function M.management_state(owner)
+  local flow=read_flow()
+  if not flow or flow.flow~='device_management' or flow.owner~=owner then return nil end
+  return {state=flow.phase or 'pending',operation=flow.operation,user_code=flow.user_code,
+    verification_url=device_verification_uri(),interval=flow.interval}
+end
+
+function M.manage_device(action, operation, owner)
+  if type(operation) ~= 'string' or not operation:match('^%x%x%x%x%x%x%x%x%-%x%x%x%x%-4%x%x%x%-[89abAB]%x%x%x%-%x%x%x%x%x%x%x%x%x%x%x%x$')
+      or type(owner) ~= 'string' then
+    return nil, failure('invalid_login_operation', 'opaque operation and operator scope required')
+  end
+  local release, problem = M.acquire_lock(0)
+  if not release then return nil, problem end
+  local ok, result, err = pcall(function()
+    local status = M.status()
+    local flow = read_flow()
+    local function snapshot(pending)
+      return {state=pending.phase or 'pending', operation=operation,
+        user_code=pending.user_code, verification_url=device_verification_uri(), interval=pending.interval}
+    end
+    if status.operation == operation and status.operation_owner == owner then return {state='done',operation=operation} end
+    if action == 'begin' then
+      if flow then
+        if flow.flow == 'device_management' and flow.operation == operation and flow.owner == owner then return snapshot(flow) end
+        return nil, failure('login_busy', 'another login exists; resume its original operator flow or wait for expiry; no effect sent')
+      end
+      local response, request_error = post_json(device_user_code_url(), {client_id=CLIENT_ID})
+      if not response then return nil, request_error end
+      if response.status < 200 or response.status >= 300 then return nil, failure('flow_failed', 'device login was refused') end
+      local decoded, body = pcall(json.decode, response.body)
+      if not decoded or type(body) ~= 'table' or type(body.device_auth_id) ~= 'string' or type(body.user_code) ~= 'string' then
+        return nil, failure('invalid_response', 'device-code response was invalid')
+      end
+      local pending = {flow='device_management',operation=operation,owner=owner,phase='pending',
+        device_auth_id=body.device_auth_id,user_code=body.user_code,interval=math.max(1,tonumber(body.interval) or 5),
+        generation=status.generation or 'absent',expires_at=now_ms()+DEVICE_CODE_TIMEOUT_SECONDS*1000}
+      local saved, save_error = write_flow(pending)
+      if not saved then return nil, save_error end
+      return snapshot(pending)
+    end
+    if not flow and status.operation~=operation and (action=='status' or action=='cancel') then
+      return {state='not_pending',operation=operation}
+    end
+    if not flow or flow.flow ~= 'device_management' or flow.operation ~= operation or flow.owner ~= owner then
+      return nil, failure('login_scope_mismatch', 'no matching operator login; no action sent')
+    end
+    if action == 'cancel' then
+      if not clear_flow() then return nil,failure('cancel_outcome_unknown','could not retire device flow; no success claimed') end
+      return {state='cancelled',operation=operation}
+    end
+    if action == 'status' then return snapshot(flow) end
+    if action ~= 'poll' then return nil, failure('invalid_login_action', 'unsupported login action') end
+    if flow.phase ~= 'pending' then return nil, failure('login_outcome_unknown', 'exchange held; no replay; cancel and explicitly begin a fresh login') end
+    if now_ms() >= flow.expires_at then return nil, failure('flow_expired', 'cancel the expired login before starting another') end
+    if (status.generation or 'absent') ~= flow.generation then return nil, failure('credential_changed', 'another login committed; no exchange sent') end
+    if now_ms() < (flow.next_poll_at or 0) then return snapshot(flow) end
+    flow.next_poll_at = now_ms() + flow.interval*1000
+    local saved, save_error = write_flow(flow); if not saved then return nil, save_error end
+    local response, request_error = post_json(device_token_url(), {device_auth_id=flow.device_auth_id,user_code=flow.user_code})
+    if not response then return nil, request_error end
+    if response.status == 403 or response.status == 404 then return snapshot(flow) end
+    if response.status < 200 or response.status >= 300 then return nil, failure('flow_failed', 'device poll refused; no credential replaced') end
+    local decoded, body = pcall(json.decode, response.body)
+    if not decoded or type(body) ~= 'table' or type(body.authorization_code) ~= 'string' or type(body.code_verifier) ~= 'string' then
+      return nil, failure('invalid_response', 'invalid device authorization response')
+    end
+    flow.phase='exchange_pending'
+    saved, save_error=write_flow(flow); if not saved then return nil, save_error end
+    local granted, exchange_error=exchange_authorization_code(body.authorization_code,body.code_verifier,device_redirect_uri())
+    if not granted then return nil, exchange_error end
+    local stored, store_error=store_token_response(granted,'login:device',operation,owner)
+    if not stored then return nil, store_error end
+    return {state='done',operation=operation}
+  end)
+  release()
+  if not ok then return nil, failure('login_failed', 'operator login failed; reconcile before another action') end
+  return result, err
+end
+
 function M.login(mode, opts)
   opts = opts or {}
   if type(mode) == "table" then opts, mode = mode, opts end

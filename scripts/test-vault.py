@@ -23,11 +23,15 @@ import sys
 import tempfile
 import threading
 import time
+import uuid
+import importlib.util
+import argparse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ADMIN_TOKEN = "t" * 40
 OPENCODE_KEY = "sk-opencode-SECRET-0123456789"
+REPLACEMENT_KEY = "sk-opencode-SECRET-replacement-5555"
 REFRESH_1 = "rt-SECRET-first"
 REFRESH_2 = "rt-SECRET-second"
 
@@ -58,7 +62,7 @@ def jwt(account, marker):
 
 ACCESS_1 = jwt("acct-123", "SECRET-access-1")
 ACCESS_2 = jwt("acct-123", "SECRET-access-2")
-SECRETS = [OPENCODE_KEY, REFRESH_1, REFRESH_2, ACCESS_1, ACCESS_2, ADMIN_TOKEN]
+SECRETS = [OPENCODE_KEY, REPLACEMENT_KEY, REFRESH_1, REFRESH_2, ACCESS_1, ACCESS_2, ADMIN_TOKEN]
 
 seen = []          # (path, headers) of every upstream request
 refreshes = []     # refresh_token values the fake auth server received
@@ -148,6 +152,15 @@ def admin(method, path, body=None, token=ADMIN_TOKEN):
     headers = {"Content-Type": "application/json"}
     if token is not None:
         headers["X-Vault-Token"] = token
+    if path == '/api/opencode-go/key' and method in ('POST','DELETE') and token == ADMIN_TOKEN and (body is None or isinstance(body,dict)):
+        generation = json.loads(request(ADMIN,'GET','/api/status',headers=headers)[1])['providers']['opencode-go']['generation']
+        body = dict(body or {}, expected_generation=generation, operation=str(uuid.uuid4()))
+    if path == '/api/openai-sub/login' and method=='POST' and token==ADMIN_TOKEN:
+        generation=json.loads(request(ADMIN,'GET','/api/status',headers=headers)[1])['providers']['openai-sub']['generation']
+        body=dict(body or {},expected_generation=generation)
+    if path == '/api/openai-sub/login' and method=='DELETE' and token==ADMIN_TOKEN:
+        login=json.loads(request(ADMIN,'GET','/api/status',headers=headers)[1])['login']
+        body=dict(body or {},operation=login.get('operation','no-pending-operation'))
     return request(ADMIN, method, path, body, headers)
 
 
@@ -232,6 +245,35 @@ try:
     ok(status == 200 and json.loads(payload)["test"]["ok"] and "2 models" in json.loads(payload)["test"]["detail"],
        "the admin test calls the upstream with the stored key")
     no_secret(payload, "the test answer")
+
+    # --- generation CAS, operator origin and pinned-request refusal
+    current=json.loads(admin('GET','/api/status')[1])['providers']['opencode-go']
+    raw_headers={'X-Vault-Token':ADMIN_TOKEN,'Content-Type':'application/json'}
+    stale={'key':'synthetic-replacement','expected_generation':'absent','operation':str(uuid.uuid4())}
+    status,payload=request(ADMIN,'POST','/api/opencode-go/key',stale,raw_headers)
+    ok(status==409,'stale operator save refused')
+    status,_=request(ADMIN,'POST','/api/opencode-go/key',dict(stale,expected_generation=current['generation']),dict(raw_headers,Origin='http://evil.invalid'))
+    ok(status==401,'foreign origin refused even with token')
+    status,_=request(ADMIN,'POST','/api/opencode-go/key',dict(stale,expected_generation=current['generation']),dict(raw_headers,**{'X-Vault-Instance':'wrong-vault'}))
+    ok(status==401,'foreign vault identity refused even with token')
+    proxy_identity=json.loads(request(PROXY,'GET','/status')[1])['vault_id']
+    ok(json.loads(request(ADMIN,'GET','/identity')[1])['vault_id']==proxy_identity,'proxy/operator public identity binds the same durable vault')
+    before_count=len(seen)
+    status,_=request(PROXY,'POST','/opencode-go/v1/chat/completions',{'model':'m1'},{'X-Wa-Vault-Generation':'stale'})
+    ok(status==409 and len(seen)==before_count,'pinned stale generation sends nothing upstream')
+    operation=str(uuid.uuid4())
+    status,payload=request(ADMIN,'POST','/api/opencode-go/key',dict(stale,key=REPLACEMENT_KEY,expected_generation=current['generation'],operation=operation),raw_headers)
+    after=json.loads(admin('GET','/api/status')[1])['providers']['opencode-go']
+    ok(status==200 and after['operation']==operation and after['generation']!=current['generation'],'exact operation/generation readback reconciles commit')
+    old_count=len(seen)
+    stale_status,_=request(PROXY,'POST','/opencode-go/v1/chat/completions',{'model':'m1'},{'X-Wa-Vault-Generation':current['generation']})
+    ok(stale_status==409 and len(seen)==old_count,'old pinned generation cannot send with replacement account')
+    updated_status,updated_payload=request(PROXY,'POST','/opencode-go/v1/chat/completions',{'model':'m1'},{'Authorization':'Bearer wa-vault-brokered','X-Wa-Vault-Generation':after['generation']})
+    ok(updated_status==200 and seen[-1][1].get('Authorization')=='Bearer '+REPLACEMENT_KEY,'subsequent request uses the new operator key at fake upstream')
+    no_secret(updated_payload,'updated Go response')
+    status,_=request(ADMIN,'POST','/api/opencode-go/key',dict(stale,expected_generation=current['generation']),raw_headers)
+    ok(status==409,'concurrent loser cannot overwrite winner')
+    no_secret(payload,'CAS response')
 
     # --- no read path, anywhere
     for port, method, path in ((PROXY, "GET", "/status"), (PROXY, "GET", "/opencode-go/key"),
@@ -324,8 +366,8 @@ try:
     no_secret(payload, "the /login store answer")
     seen.clear()
     request(PROXY, "GET", "/opencode-go/v1/models")
-    ok({k.lower(): v for k, v in seen[-1][1].items()}.get("authorization") == "Bearer " + OPENCODE_KEY,
-       "the original key remains after refused replacement")
+    ok({k.lower(): v for k, v in seen[-1][1].items()}.get("authorization") == "Bearer " + REPLACEMENT_KEY,
+       "the operator replacement key remains after refused node replacement")
     admin("DELETE", "/api/opencode-go/key")
     status, payload = request(PROXY, "POST", "/login/opencode-go", {"key": ""}, {"Content-Type": "application/json"})
     ok(status == 400, "/login refuses an empty first key")
@@ -353,7 +395,7 @@ try:
     ok(state["login"].get("state") == "done", "the device login started from /login completes")
     no_secret(json.dumps(state), "the /login state after login")
     status, payload = request(PROXY, "DELETE", "/login/openai-sub")
-    ok(status == 200 and json.loads(payload)["login"]["state"] == "idle", "/login can cancel a pending login")
+    ok(status == 409, "node-side cancellation cannot manage a configured operator login")
 
     # --- failed rotation is held, not replayed; provider errors cannot echo credentials
     reject_refresh = True
@@ -382,6 +424,91 @@ try:
     for t in first_threads: t.start()
     for t in first_threads: t.join()
     ok(sorted(first_results)==[200,409],"concurrent first-key login has exactly one mutation")
+
+    # --- migration runs only with private synthetic files and real fixture HTTP
+    spec=importlib.util.spec_from_file_location('migration',os.path.join(ROOT,'scripts','migrate-go-vault.py'))
+    migration=importlib.util.module_from_spec(spec);spec.loader.exec_module(migration)
+    with tempfile.TemporaryDirectory(prefix='wa-migration-fixture-') as directory:
+        from pathlib import Path
+        source=Path(directory)/'env';journal=Path(directory)/'journal.json'
+        source.write_text('OPENCODE_GO_API_KEY='+OPENCODE_KEY+'\nUNRELATED=keep\nWASM_AGENT_OPENAI_SUB_VAULT_URL=native\n',encoding='utf-8')
+        args=argparse.Namespace(env_file=str(source),vault_url='http://127.0.0.1:'+str(PROXY),admin_url='http://127.0.0.1:'+str(ADMIN),journal=str(journal),node_url=None,confirm_go_source=True,check=True,apply=False,reconcile=False)
+        check=migration.execute(args,environ={})
+        ok(check['variable']=='OPENCODE_GO_API_KEY' and check['present'],'migration check reports effective variable without values')
+        no_secret(json.dumps(check),'migration check')
+        args.check=False;args.apply=True
+        real_request=migration.request
+        def foreign_identity(url,*a,**kw):
+            if url.endswith('/identity'): return {'vault_id':'foreign-vault'}
+            return real_request(url,*a,**kw)
+        try: migration.execute(args,environ={},token=ADMIN_TOKEN,http=foreign_identity);blocked=False
+        except ValueError: blocked=True
+        ok(blocked and not journal.exists(),'foreign operator vault identity refuses migration before any credential write')
+        try: migration.execute(args,environ={},token=ADMIN_TOKEN);blocked=False
+        except ValueError: blocked=True
+        ok(blocked and not journal.exists(),'migration refuses an already configured vault without overwrite')
+        admin('DELETE','/api/opencode-go/key')
+        original_http=migration.request
+        def ambiguous_http(url,*a,**kw):
+            result=original_http(url,*a,**kw)
+            if url.endswith('/api/opencode-go/key') and a and a[0]=='POST': raise OSError('synthetic lost write response')
+            return result
+        try: migration.execute(args,environ={},token=ADMIN_TOKEN,http=ambiguous_http);unknown=False
+        except OSError: unknown=True
+        ok(unknown and json.loads(journal.read_text())['phase']=='sending' and OPENCODE_KEY in source.read_text() and 'WASM_AGENT_OPENCODE_GO_VAULT_URL=' not in source.read_text(),'unknown credential write retains legacy source and has durable no-replay journal')
+        args.apply=False;args.reconcile=True
+        try: migration.execute(args,environ={},token=ADMIN_TOKEN);held=False
+        except ValueError: held=True
+        ok(held,'reconciliation requires effective node routing before retirement')
+        ok(OPENCODE_KEY in source.read_text() and 'WASM_AGENT_OPENCODE_GO_VAULT_URL=' in source.read_text(),'apply retains plaintext until node route readback')
+        no_secret(journal.read_text(),'migration journal')
+        record=json.loads(journal.read_text())
+        args.apply=False;args.reconcile=True;args.node_url='http://127.0.0.1:1'
+        original=migration.request
+        def wrong_route(url,*a,**kw):
+            if url.startswith(args.node_url): return {'providers':[{'id':'opencode-go','source':'vault','vault_url':args.vault_url,'generation':'stale'}]}
+            return original(url,*a,**kw)
+        try: migration.execute(args,environ={},token=ADMIN_TOKEN,http=wrong_route);held=False
+        except ValueError: held=True
+        ok(held and OPENCODE_KEY in source.read_text(),'wrong node generation cannot retire legacy entry')
+        def route_http(url,*a,**kw):
+            if url.startswith(args.node_url): return {'providers':[{'id':'opencode-go','source':'vault','vault_url':args.vault_url,'vault_id':record['vault_id'],'generation':record['generation']}]}
+            return original(url,*a,**kw)
+        retired=migration.execute(args,environ={},token=ADMIN_TOKEN,http=route_http)
+        ok(OPENCODE_KEY not in source.read_text() and 'UNRELATED=keep' in source.read_text() and 'WASM_AGENT_OPENAI_SUB_VAULT_URL=native' in source.read_text(),'retirement follows exact node route/generation and preserves unrelated/native subscription config')
+        drift=Path(directory)/'drift.env';drift_journal=Path(directory)/'drift-journal.json'
+        drift.write_text('OPENCODE_GO_API_KEY='+OPENCODE_KEY+'\nUNRELATED=keep\n',encoding='utf-8')
+        drift_record=dict(record,source_path=str(drift),source_stamp=migration.stamp(drift),phase='awaiting_node_route')
+        drift_journal.write_text(json.dumps(drift_record),encoding='utf-8')
+        drift.write_text(drift.read_text()+'CONCURRENT=retain\n',encoding='utf-8')
+        drift_args=argparse.Namespace(**vars(args));drift_args.env_file=str(drift);drift_args.journal=str(drift_journal)
+        try:migration.execute(drift_args,environ={},token=ADMIN_TOKEN,http=route_http);held=False
+        except ValueError:held=True
+        ok(held and OPENCODE_KEY in drift.read_text() and 'CONCURRENT=retain' in drift.read_text(),'concurrent source edit refuses retirement without losing unrelated config')
+        ok(migration.effective('OPENCODE_GO_API_KEY=file\nWASM_AGENT_LLM_API_KEY=first\n',{'OPENAI_API_KEY':'generic'})[:2]==('WASM_AGENT_LLM_API_KEY','first'),'effective aliases match per-variable process-over-file then route precedence')
+        seen.clear()
+        admin('POST','/api/opencode-go/enabled',{'enabled':True})
+        request(PROXY,'POST','/opencode-go/v1/chat/completions',{'model':'m1'},{'Authorization':'Bearer wa-vault-brokered','X-Wa-Vault-Generation':record['generation']})
+        ok(seen[-1][1].get('Authorization')=='Bearer '+OPENCODE_KEY,'migrated generation reaches fake upstream without placeholder')
+        # Existing journals cannot re-send a credential write.
+        args.reconcile=False;args.apply=True
+        try: migration.execute(args,environ={},token=ADMIN_TOKEN);blocked=False
+        except ValueError: blocked=True
+        ok(blocked,'existing migration journal refuses effect replay')
+
+    # Optional legacy scripted-reader compatibility, private native source + standalone embedding.
+    if len(sys.argv)>1:
+        SECRETS.append('sk-login-test-SECRET-4242')
+        for embedded in (False,True):
+            admin('DELETE','/api/opencode-go/key')
+            home=os.path.join(data_dir,'lua-embedded' if embedded else 'lua-source');os.makedirs(home,exist_ok=True)
+            clean={k:v for k,v in os.environ.items() if not k.startswith(('WA_','WASM_AGENT_','OPENAI_','OPENCODE_','PI_'))}
+            clean.update(WASM_AGENT_HOME=home,WASM_AGENT_VAULT_URL='http://127.0.0.1:'+str(PROXY),WA_SCRIPT=os.path.join(ROOT,'scripts','test-vault-login.lua'))
+            if not embedded: clean['WASM_AGENT_LUA_ROOT']=ROOT
+            result=subprocess.run([os.path.abspath(sys.argv[1]),'--db',os.path.join(home,'fixture.db')],cwd=home,env=clean,capture_output=True,timeout=30)
+            ok(result.returncode==0,'legacy scripted reader compatibility '+('embedded' if embedded else 'source'))
+            no_secret(result.stdout,'legacy scripted reader stdout')
+            no_secret(result.stderr,'legacy scripted reader diagnostics')
 
     # --- remove: gone, and refused again
     admin("DELETE", "/api/opencode-go/key")

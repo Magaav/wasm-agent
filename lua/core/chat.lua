@@ -37,7 +37,6 @@ local USER, NODE = "master", ""
 -- (`lua/core/commands.lua`), so the list a reader is shown and the arms below cannot drift apart, and
 -- `scripts/test-command-parity.cjs` can fail when this REPL is missing a command the window offers.
 local commands = dofile("lua/core/commands.lua")
-local vault = dofile("lua/core/vault.lua")
 
 local HELP = commands.help()
 
@@ -299,26 +298,24 @@ function M.run(argv)
         return lines
       end
       print(redact.text(notice))
-    elseif line == "/login" then
-      -- pi's `/login`, with the credential going to wa-vault rather than to this node (docs/VAULT.md).
-      -- The key prompt reads the line without `view:accepted`, so the pasted key is not written into the
-      -- transcript; it is held only long enough to hand it to the vault.
-      local function ask(text, private)
+    elseif line == "/login" or line == "/provider" then
+      -- Credentials are entered only on the separate operator vault origin. No secret is
+      -- accepted by this REPL/editor, whose ordinary lines have recall history.
+      local function ask(text)
         view:prompt(text)
         while true do
           local answer, eof = input:poll(cli_input.WAIT_MS)
           if answer ~= nil then
-            if not private then view:accepted(answer) end
+            view:accepted(answer)
             view:submitted()
             return answer
           end
           if eof then return nil end
         end
       end
-      vault.login({
+      dofile('lua/core/provider_management.lua').cli({
         print = print,
-        ask = function(text) return ask(text, false) end,
-        ask_private = function(text) return ask(text, true) end,
+        ask = ask,
         wait = function(ms)
           local deadline = host.monotonic_ms() + ms
           while host.monotonic_ms() < deadline do

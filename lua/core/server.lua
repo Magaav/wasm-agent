@@ -291,6 +291,23 @@ local function require_master(session)
   return user
 end
 
+function wa_provider_management(body, node, session)
+  local user=require_master(session)
+  if not user then return json.encode({error='forbidden'}) end
+  if node and node~='' and node~='local' then
+    local target=nodeslib.find(node)
+    if not target or not target.local_node then return json.encode({error='provider_management_local_only',message='Open the selected node operator UI directly; credentials are never relayed.'}) end
+  end
+  local ok,args=pcall(json.decode,body or '{}')
+  if not ok or type(args)~='table' then return json.encode({error='invalid_provider_management_request'}) end
+  -- Deliberately reject secret-bearing/generic arguments, including child targeting.
+  for key in pairs(args) do if key~='action' and key~='operation' then return json.encode({error='invalid_provider_management_field'}) end end
+  local manager=dofile('lua/core/provider_management.lua')
+  if not args.action or args.action=='state' then return json.encode(manager.state('ui-operator:'..tostring(user.id))) end
+  local result,problem=manager.device(args.action,args.operation,'ui-operator:'..tostring(user.id))
+  return json.encode(result or {error=problem and problem.code or 'login_failed'})
+end
+
 function wa_mcp(body, session)
   local user=require_master(session);if not user then return json.encode({error='forbidden'}) end
   local ok,args=pcall(json.decode,body or '{}');if not ok or type(args)~='table' then return json.encode({error='invalid_mcp_request'}) end
