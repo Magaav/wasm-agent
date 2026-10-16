@@ -5,11 +5,14 @@ local contract=dofile('lua/core/json_contract.lua')
 local output=dofile('lua/core/tool_output.lua')
 local telemetry=dofile('lua/core/telemetry.lua')
 local M={}
-local forbidden={codemode=true,tool_call=true,tool_search=true,subagent=true,integrate=true,session_worktree=true}
+local forbidden={codemode=true,tool_call=true,tool_search=true,subagent=true,integrate=true,session_worktree=true,
+ session=true,sessions=true,resume_session=true,session_debug=true,session_fixture=true,session_many=true,search_messages=true,search_messages_many=true,operation=true,
+ remote=true,nodes=true,client=true,shell=true,mcp=true,capabilities=true,spell_run=true,spell_export=true,
+ spell_save=true,spell_compose=true,spell_list=true,spell_get=true,spell_forget=true,resource=true}
 function M.run(memory,args,role,ctx,catalog,current_catalog,dispatch,execution)
- if host.getenv('WASM_AGENT_CODEMODE')~='native' or not host.quickjs then return {error='codemode_not_enabled'} end
+ local policy,refusal=dofile('lua/core/codemode_policy.lua').admit(memory,role,ctx)
+ if not policy then return {ok=false,error=refusal,calls={},attempts={}} end
  if type(args.code)~='string' or args.code=='' then return {error='codemode_source_required'} end
- local assets=host.getenv('WASM_AGENT_CODEMODE_ASSETS')
  local workspace=memory.session_workspace and memory.session_workspace(ctx.session_id) or nil
  local scope=host.sha256(json.encode({session=ctx.session_id,user=ctx.user_id,role=role,workspace=workspace,profile=ctx.subagent and ctx.subagent.allowed or nil}))
  local descriptors,definitions={},{}
@@ -27,7 +30,7 @@ function M.run(memory,args,role,ctx,catalog,current_catalog,dispatch,execution)
  local store_key='codemode-store.v1:'..scope
  local raw=memory.meta_get(store_key);local store=raw and json.decode(raw) or {}
  local spec={owner=scope,tools=descriptors,globals=globals,store=store,code=args.code,timeout_ms=args.timeout_ms or 30000}
- if assets and assets~='' then spec.wasm_path=assets..'/quickjs.wasm';spec.prelude_path=assets..'/prelude.js' end
+ spec.wasm_path=policy.wasm_path;spec.prelude_path=policy.prelude_path
  local response=json.decode(host.quickjs('start',json.encode(spec)))
  if not response.ok then
   response.items={};response.unexecuted={}
@@ -50,6 +53,8 @@ function M.run(memory,args,role,ctx,catalog,current_catalog,dispatch,execution)
  local ok,problem=pcall(function()
   consume(response.events)
   while not done do
+   local _,context_error=dofile('lua/core/codemode_policy.lua').admit(memory,role,ctx)
+   if context_error then error(context_error) end
    if host.run_cancelled and json.decode(host.run_cancelled()).cancelled then error('run_cancelled')end
    local admitted_now=json.decode(host.quickjs('admit',json.encode({id=sandbox,owner=scope})))
    if not admitted_now.ok then error(admitted_now.error)end
@@ -62,7 +67,22 @@ function M.run(memory,args,role,ctx,catalog,current_catalog,dispatch,execution)
     local ast,err=contract.parse(call.args or '{}');if not ast then error(err)end
     local params=json.decode(call.args or '{}')
     if call.name=='searchTools' then
-     local query=params[1];value=dispatch('tool_search',{query=query,limit=params[2] and params[2].limit or 8});success=not value.error
+     local query=params[1];local options=params[2];local limit=type(options)=='table' and options.limit or 8
+     if type(query)~='string' or #query>256 or not query:find('%S') then value={error='tool_search_query_required'};success=false
+     elseif type(limit)~='number' or limit%1~=0 or limit<1 or limit>8 then value={error='invalid_tool_search_limit'};success=false
+     else
+      -- Guest discovery is metadata over its own exact ceiling, never an envelope
+      -- facade invocation or a new delegation/load authority.
+      local matches={}
+      for _,descriptor in ipairs(descriptors)do
+       local def=definitions[descriptor.name];local hay=(def.name..' '..tostring(def.schema['function'].description)):lower();local score=0
+       for term in query:lower():gmatch('[%w_]+')do if hay:find(term,1,true)then score=score+1 end end
+       if score>0 then matches[#matches+1]={name=def.name,schema=def.schema,execution=execution(def.name),score=score} end
+      end
+      table.sort(matches,function(a,b)return a.score==b.score and a.name<b.name or a.score>b.score end)
+      local found={};for i=1,math.min(limit,#matches)do found[i]=matches[i];found[i].score=nil end
+      value={tools=found,matches=#matches,invocation='Guest-local metadata only; native current-catalog/profile/type/effect checks apply to each call.'};success=true
+     end
     elseif call.name=='describeTool' then
      local name=type(params)=='string' and params or params[1]
      local def=definitions[name];value=def and {name=def.name,description=def.schema['function'].description,parameters=def.schema['function'].parameters,execution=execution(def.name)} or nil;success=true
