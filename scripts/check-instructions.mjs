@@ -81,7 +81,17 @@ const HOMES = [
   { file: 'AGENTS.orchestrator.md', contains: [
     "Handle the human's requested task directly and serially", 'No subagents',
     'Self-review is', 'ordinary Git integration', 'Periodic watcher wakes remain disabled',
-    'unknown', 'never replay or falsely settle'] },
+    'unknown', 'never replay or falsely settle',
+    'Temporary operator evaluation contract', 'until the operator explicitly removes it',
+    'harness, graph and code mode', 'used/not-used/unknown',
+    'Relay ALL original subagent feedback', 'including criticism',
+    'never silently omit feedback', 'after settlement only',
+    'pre-delegation reasoning/checks', 'guest/WhatsApp/third-party'] },
+  { file: 'AGENTS.subagents.md', contains: [
+    'Temporary operator evaluation contract', 'until the operator explicitly removes it',
+    'harness, graph and code mode', 'used/not-used/unknown', 'ALL relevant findings',
+    'exact tool/call/receipt', 'No new findings is', 'feedback-skill limits',
+    'start no recursive fix chain'] },
   { file: 'docs/EVOLUTION.md', contains: ['skills/git-orchestrator/SKILL.md'] },
   { file: 'docs/ORCHESTRATION.md', contains: ['your branch is your deliverable'] },
   { file: 'docs/FACTORY.md', contains: [

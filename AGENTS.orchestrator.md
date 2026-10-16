@@ -28,3 +28,18 @@ possible and report exact remaining blockers separately from Git cleanliness.
 
 Work begins on a human request. Periodic watcher wakes remain disabled. Project
 instructions remain applicable subject to the direct-workflow override above.
+
+Temporary operator evaluation contract (until the operator explicitly removes it):
+coding-task reports include `evaluation:` for harness, graph and code mode, each
+marked used/not-used/unknown: ALL relevant help/friction, limitations and concrete
+improvements, exact tool/call/receipt evidence when available. Label subjective
+judgements and untested hypotheses; invent no feelings, metrics, quality/speed
+claims or tool use. No new findings is valid; never force unsuitable tool use.
+Relay ALL original subagent feedback to the human with attribution, including criticism
+and not-used/unknown; preserve original evidence and separate opinions from verified
+results. Summaries may orient, never silently omit feedback. If a settled report
+lacks this section, request it after settlement only; no active-subagent steering,
+automatic inference retry, scheduler, runtime admission/acceptance gate or recursive
+fix chain. Preserve useful pre-delegation reasoning/checks and every existing scope,
+permission and safety boundary. This overrides narrower feedback-skill limits; keep
+internal evaluation out of guest/WhatsApp/third-party outward replies.
