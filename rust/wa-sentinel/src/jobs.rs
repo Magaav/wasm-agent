@@ -230,7 +230,7 @@ impl Runner {
             .as_array()
             .unwrap()
             .iter()
-            .filter(|j| j["enabled"] == true)
+            .filter(|j| j["enabled"] == true && !wa_jobs::retired_whatsapp_job(j["id"].as_str().unwrap_or("")))
         {
             let id = job["id"].as_str().unwrap();
             let rev = job["revision"].as_i64().unwrap();

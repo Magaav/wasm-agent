@@ -24,7 +24,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DEPLOY="$ROOT/scripts/deploy.sh"
 # The block starts at the copy loop (its first line) and ends before the job files: everything between is
 # the WhatsApp pipeline's own ship list.
-START_MARK='for source in "$ROOT"/scripts/whatsapp-*; do'
+START_MARK='for source in "$ROOT"/scripts/whatsapp-* "$ROOT"/scripts/mcp-*.mjs; do'
 END_MARK='^  INSTALL_MIXED='
 
 fail() { echo "test-deploy-ship: $*" >&2; exit 1; }
@@ -41,6 +41,10 @@ trap 'rm -rf "$WORK"' EXIT
 run_block() { # root install_dir -> the block's output, refusal in it when it refused
   local root="$1" install="$2" wrapper="$WORK/run.sh"
   mkdir -p "$install/scripts" || return 1
+  # These siblings are shipped immediately before this block in deploy.sh.
+  for module in web-core.mjs web-http-outcomes.mjs; do
+    [ ! -f "$root/scripts/$module" ] || cp -f "$root/scripts/$module" "$install/scripts/" || return 1
+  done
   {
     echo 'set -uo pipefail'
     echo "ROOT=\"$root\""
@@ -56,8 +60,9 @@ run_block() { # root install_dir -> the block's output, refusal in it when it re
 # A scratch tree that is exactly what the repository has for this pipeline.
 stage_tree() { # destination
   mkdir -p "$1/scripts/lib" || return 1
-  cp -f "$ROOT"/scripts/whatsapp-* "$1/scripts/" || return 1
-  cp -f "$ROOT/scripts/lib/websocket-runtime.mjs" "$1/scripts/lib/" || return 1
+  cp -f "$ROOT"/scripts/whatsapp-* "$ROOT"/scripts/mcp-*.mjs "$ROOT"/scripts/web-core.mjs "$ROOT"/scripts/web-http-outcomes.mjs "$1/scripts/" || return 1
+  printf 'export const fixture=true;\n' > "$1/scripts/lib/private-fixture.mjs"
+  printf 'import "./lib/private-fixture.mjs";\n' > "$1/scripts/whatsapp-closure-fixture.mjs"
 }
 
 TREE="$WORK/tree"
@@ -68,8 +73,8 @@ echo "$OUT" | grep -q 'PIPELINE=' || fail "the ship block did not reach its end:
 
 # 1. The reader and the module it imports are both installed, and every other relative import resolves.
 [ -f "$WORK/install/scripts/whatsapp-read.mjs" ] || fail "the reader itself was not installed"
-[ -f "$WORK/install/scripts/lib/websocket-runtime.mjs" ] \
-  || fail "whatsapp-read.mjs imports ./lib/websocket-runtime.mjs and the deploy did not install it"
+[ -f "$WORK/install/scripts/lib/private-fixture.mjs" ] \
+  || fail "synthetic lib import was not shipped"
 for source in "$WORK/install"/scripts/whatsapp-*; do
   [ -f "$source" ] || continue
   for relative in $(grep -o '\./[A-Za-z0-9._/-]*' "$source" 2>/dev/null | sort -u); do
@@ -81,12 +86,12 @@ echo "ok   an installed pipeline is import-closed (lib: $(ls "$WORK/install/scri
 
 # 2. A tree that has the importing script but not the module it imports must be refused, naming it.
 BARE="$WORK/tree-bare"
-mkdir -p "$BARE/scripts" || fail "could not build the incomplete tree"
-cp -f "$ROOT"/scripts/whatsapp-* "$BARE/scripts/" || fail "could not stage the incomplete tree"
+stage_tree "$BARE" || fail "could not stage incomplete tree"
+rm "$BARE/scripts/lib/private-fixture.mjs"
 BARE_OUT="$(run_block "$BARE" "$WORK/install-bare")"
 BARE_STATUS=$?
 [ "$BARE_STATUS" != "0" ] || fail "a tree whose imported module is missing was installed anyway: $BARE_OUT"
-echo "$BARE_OUT" | grep -q 'scripts/lib/websocket-runtime.mjs' \
+echo "$BARE_OUT" | grep -q 'scripts/lib/private-fixture.mjs' \
   || fail "the refusal did not name the missing module: $BARE_OUT"
 echo "ok   a tree missing an imported module is refused, naming it"
 

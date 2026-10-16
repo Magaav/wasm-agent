@@ -1,0 +1,27 @@
+{
+  "schema":1,
+  "phase":"staged-default-off",
+  "owner":"coordinator-and-human-operator",
+  "baseline_source":"d300a6b416af04324aefbf0a57f47d8fb507dc98",
+  "canonical_backend":"linked_device",
+  "product_language":"en",
+  "operator_language_requires_explicit_private_setting":"pt",
+  "retired_job_ids":["whatsapp-copilot","whatsapp-events","whatsapp-wake-selftest","whatsapp-ingest","whatsapp-message","whatsapp-source","whatsapp-transcribe"],
+  "retired_task":"wasm-agent-whatsapp-chrome",
+  "removed_runtime_modules":["scripts/whatsapp-hook.mjs","scripts/whatsapp-bound-identity.mjs","scripts/whatsapp-read-core.mjs","scripts/whatsapp-reply-core.mjs","scripts/whatsapp-store-core.mjs","scripts/whatsapp-sendlock.mjs","scripts/whatsapp-eligibility.mjs"],
+  "canonical_entrypoints":["connectors/whatsapp/main.go","scripts/mcp-whatsapp.mjs","scripts/whatsapp-mcp-client.mjs","scripts/whatsapp-read.mjs","scripts/whatsapp-reply.mjs","lua/core/whatsapp.lua","lua/core/mcp.lua"],
+  "source_fences":["rust/wa-jobs/src/lib.rs: enable/enqueue/schedule/claim","rust/wa-sentinel/src/jobs.rs: source observation","jobs/whatsapp-copilot.json: tombstone","jobs/profiles/whatsapp-responder.json: read-only"],
+  "retirement_tombstones":["scripts/whatsapp-source-ensure.sh","scripts/whatsapp-preflight.sh","scripts/whatsapp-transcribe.sh","scripts/whatsapp-transcribe.lua","scripts/whatsapp-ingest.sh","scripts/whatsapp-ingest.lua","scripts/whatsapp-ingest-emit.sh","scripts/whatsapp-copilot-read.sh","scripts/whatsapp-adapter.mjs","scripts/whatsapp-trigger.mjs","scripts/whatsapp-audio.mjs","scripts/whatsapp-store-send.mjs","scripts/install-whatsapp-chrome-task.ps1"],
+  "shipping_import_surfaces":["scripts/deploy.sh","scripts/upgrade.sh","scripts/deploy-shipped.json","scripts/build-whatsapp.sh","scripts/whatsapp-install.py","rust/wa-jobs/src/artifact.rs","jobs/profiles/whatsapp-responder.json","docs/subagent-profiles/whatsapp-responder.json"],
+  "skills":["skills/whatsapp-reply/SKILL.md","skills/whatsapp-module-inspection/SKILL.md","skills/automation-jobs/SKILL.md"],
+  "retained":[
+    {"piece":"installed legacy artifacts and owners","owner":"coordinator","reason":"production inaccessible; disable and settlement not proved","remove_when":"exact supported-API ownership/hash readback, identity mapping, private paired cutover proof"},
+    {"piece":"source tombstones and retired job template","owner":"coordinator","reason":"overwrite/refuse old entrypoints during staged migration","remove_when":"all installed references/imports/launchers retired and removal shipping closure verified"},
+    {"piece":"Lua scoped facade, effects, ledgers","owner":"app-boundary maintainer","reason":"preserve event/profile/approval/reservation safeguards and historical evidence","remove_when":"only separately reviewed boundary replacement; no reset or automatic deletion"},
+    {"piece":"rust/plugins/whatsapp-transcript","owner":"connector maintainer","reason":"pure historical ABI formatter, no active runtime caller/shipping","remove_when":"dependent ABI tests/consumers explicitly retired"},
+    {"piece":"docs/history/whatsapp-browser and review/evidence/verify archives","owner":"evidence owner","reason":"original failures/proof claims/unknown effects","remove_when":"separate approved evidence retention policy"}
+  ],
+  "runtime_inventory_required":["fresh jobs definitions/revisions/enabled states/history/active deliveries","Windows task XML/principal/action/wrapper hashes and running-instance settlement","legacy triggers.json and custom jobs/spells/launchers","installed scripts/profile/import manifests and obsolete copied files","browser profile/drafts/ledgers/transcripts/unknown sends preserved","exact account and message-ID mapping verified or quarantined"],
+  "blockers":["no supported cloud execution context for worker","private human pairing required","production legacy ownership/settlement/identity mapping not verified","actual Linux runtime/systemd and real media/posting proof not performed"],
+  "activation_authorized_by_this_manifest":false
+}

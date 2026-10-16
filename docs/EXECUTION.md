@@ -218,7 +218,12 @@ retry an ambiguous model submission or external effect.
 See [JOBS.md](JOBS.md), [OPERATIONS.md](OPERATIONS.md), and [MEMORY.md](MEMORY.md) for
 existing queue, process-lifetime and transcript evidence contracts.
 
-## Browser automation proving case
+## Historical browser automation proving case (retired WhatsApp backend)
+
+The case below records the previous boundary design, not current operating instructions.
+The replacement is [linked-device](WHATSAPP-CONNECTOR.md); [retirement](WHATSAPP-MIGRATION.md)
+is mandatory. GENERAL sends now refuse unknown cross-device draft state; transcript
+posting is a separate deterministic, explicitly activated policy, with no responder wake.
 
 ```text
 WhatsApp ingest -> eligibility -> durable delivery -> scoped responder subagent

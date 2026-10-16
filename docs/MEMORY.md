@@ -14,7 +14,7 @@ Two rules drive all of this:
 | Store | What it is | Tool |
 | --- | --- | --- |
 | `memories` (+FTS) | distilled facts | `remember`, `recall` |
-| `ledger_messages` / `conversations` (+FTS) | **the external inbox/ledger** (WhatsApp, mail) | `search_ledger`, `conversation` |
+| `ledger_messages` / `conversations` (+FTS) | **the external inbox/ledger** (historical WhatsApp, mail; linked-device WhatsApp has its separate scoped connector journal, no automatic legacy import/repost) | `search_ledger`, `conversation` |
 | `messages` (+FTS) | **the agent's own dialogue** — its transcript | `sessions`, `session`, `search_messages`, `resume_session` |
 | `runs` | effect/settlement record per run | (internal) |
 

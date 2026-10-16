@@ -19,6 +19,29 @@ fn store() -> Store {
         SEQ.fetch_add(1, Ordering::Relaxed)
     )))
 }
+#[test]
+fn retired_whatsapp_owners_cannot_enable_schedule_enqueue_or_claim() {
+    let s = store();
+    let mut job = definition();
+    job["id"] = json!("whatsapp-copilot");
+    job["trigger"] = json!({"kind":"schedule","every_seconds":30});
+    s.put(&job).unwrap();
+    assert!(s.enable("whatsapp-copilot", true).unwrap_err().to_string().contains("retired"));
+    // Private fixture of an older enabled installation, NOT production database surgery.
+    s.db().unwrap().execute("UPDATE jobs SET enabled=1,next_at=1 WHERE id='whatsapp-copilot'", []).unwrap();
+    let revision = s.get("whatsapp-copilot").unwrap()["revision"].as_i64().unwrap();
+    assert_eq!(s.schedule(100).unwrap(), 0);
+    assert!(s.enqueue("whatsapp-copilot",revision,"fixture",&json!({}),100).is_err());
+    s.put(&definition()).unwrap();s.enable("messages",true).unwrap();
+    let rev=s.get("messages").unwrap()["revision"].as_i64().unwrap();
+    s.enqueue("messages",rev,"prior",&json!({}),100).unwrap();
+    s.db().unwrap().execute("UPDATE deliveries SET job_id='whatsapp-copilot',revision=?",[revision]).unwrap();
+    assert!(s.claim(101,6).unwrap().is_none());
+    let retained:i64=s.db().unwrap().query_row("SELECT count(*) FROM deliveries WHERE job_id='whatsapp-copilot'",[],|r|r.get(0)).unwrap();
+    assert_eq!(retained,1);
+    assert!(s.enable("whatsapp-copilot",false).is_ok());
+    assert!(!retired_whatsapp_job("unrelated-browser-job"));
+}
 fn definition() -> Value {
     json!({"id":"messages","name":"Message received","trigger":{"kind":"event","topic":"whatsapp.message"},"action":{"kind":"wake","session":"thread-id","prompt":"Apply the reviewed response policy.","skill":"reply-policy"}})
 }

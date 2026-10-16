@@ -1,0 +1,11 @@
+{
+  "package":"faster-whisper",
+  "version":"1.2.1",
+  "license":"MIT",
+  "requires_python":">=3.9",
+  "metadata_source":"https://pypi.org/pypi/faster-whisper/json",
+  "wheel":"faster_whisper-1.2.1-py3-none-any.whl",
+  "wheel_sha256":"79a66ad50688c0b794dd501dc340a736992a6342f7f95e5811be60b5224a26a7",
+  "proof":"Official metadata GET only; deterministic worker protocol/settings tested with private fake model, not real weights/recognition quality.",
+  "transitive_environment":"Human separately provisions/locks platform-specific native dependencies; no production Python environment installed by worker."
+}

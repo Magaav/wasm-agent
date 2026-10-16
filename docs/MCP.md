@@ -69,30 +69,31 @@ An uncertain control requires inspection and a new explicit decision.
 
 ## WhatsApp first
 
-The built-in `mcp-whatsapp.mjs` exposes read_snapshot, lookup_self, inspect_chat,
-download_audio and send_message. Snapshot/media reads prove the bound app account;
-only the explicitly bound loopback page is used. A protocol probe touches no app.
-The Engine lists the profile-managed built-in adapter separately from configured
-generic connectors and supplies a disabled read-only template (including media).
-Generic registration of the owned send tool is refused: use the scoped facade.
+The built-in `mcp-whatsapp.mjs` now uses ONLY explicit linked-device account,
+generation, exact chat scope, connector URL and credential FILE references.
+Read_snapshot/lookup_self/inspect_chat access the durable journal without read
+marking or chat opening. Remote access requires authenticated trusted-CA HTTPS;
+numeric loopback HTTP is allowed locally. Redirects, insecure TLS and credential
+URLs refuse. Protocol probing does not prove app identity or authorize effects.
 
-The responder retains trusted-event conversation scope, operator precedence,
-profile approval, body marker/limits, budget, **reserve before send**, verified
-recipient/body/from-me/server acknowledgement and durable confirmation. It calls
-MCP only after those checks. Transport/cleanup uncertainty never releases or
-replays a reservation. The existing store action is unchanged: no chat opening,
-read marking, draft overwrite, simulated input or send retry.
+The five existing tool names remain recognizable, but download_audio and
+send_message explicitly refuse: media belongs to the private deterministic worker,
+and GENERAL model sends cannot prove cross-device draft safety. No invented draft
+absence, browser/raw/backend fallback or generic owned-MCP send registration.
+Trusted event/profile scope, approvals, precedence, reservations and verification
+remain in the existing Lua boundary. Read-only profiles ship disabled/unapproved.
 
-Compatibility read/audio/store-send CLIs route through MCP; explicit raw/backend
-modes serve the owned adapter and avoid recursion. CLI callers still own approval
-and reservations; they are not a new untrusted sending surface. Jobs pass profile
-paths derived from host.paths(), not guessed home/account bindings. Missing binding
-fails closed. Existing app drivers and pure expression tests remain supported.
+Deterministic original-chat transcripts for BOTH incoming and own synchronized
+outgoing audio use the separate explicitly activated connector policy, not model
+send authority. Product recognition default is EN; configure this operator PT per
+account. No initial-history posting, hosted fallback or fake translation. Jobs
+does not run this connector/STT or enable a responder. Old WhatsApp owners are
+retired, not source-health repair targets. Generic Jobs/CDP features are unchanged.
 
-Jobs retain triggers, schedules, controls, eligibility/window/hold rules, ledger
-cursors/deduplication/handoffs, local deterministic STT, delivery history/ownership
-and wakes. Their app operations use MCP; source-service/wake plumbing remains Jobs.
-No existing job is enabled or new unattended wake created by this migration.
+See [connector/setup](WHATSAPP-CONNECTOR.md), [migration](WHATSAPP-MIGRATION.md)
+and the named retained artifacts/removal conditions. Production pairing/retirement
+and real posting are separate unperformed operator proofs.
+
 
 ## Web research
 
@@ -106,15 +107,16 @@ for exact cache, permission, paging and shadow-benchmark limits.
 ## Focused proof
 
 - `node --test --test-reporter=tap scripts/test-mcp.mjs scripts/test-mcp-whatsapp.mjs`
-  uses private real stdio/HTTP/CDP peers, including credentials, malformed output,
-  schema change, timeout/no replay, media, draft/unread safety and one verified
-  fake app-store send. No real WhatsApp messages or paid model.
+  uses private stdio/HTTP peers, credentials, malformed output, schema change,
+  timeout/no replay, linked-device scope/auth and explicit browser/model-send retirement.
+  Go connector fixtures separately cover fake transport/STT/posting against real SQLite.
+  No real WhatsApp messages or paid model.
 - `node scripts/test-mcp-native.cjs <built-wa> <fresh-evidence>` and `--post`
   verify private native SQL/operation source plus standalone embedded paths.
 - `node scripts/test-mcp-ui.cjs <fresh-evidence>` and `--post` verify real Chromium
   inventory, controls, retained drafts/errors and scope/child isolation. A private
   guard-removal mutation must fail. Also run `scripts/test-ui.ps1`.
-- Existing WhatsApp cursor/transcription/durable-effects, batch-tool, profile and
+- WhatsApp connector/retirement/durable-effects, batch-tool, profile and
   instruction checks remain focused regressions. Verify embedded module freshness
   and actual installed script closure separately. Self-review, ordinary canonical
   main merge and remote readback; gate_verified:false / release_verified:false.

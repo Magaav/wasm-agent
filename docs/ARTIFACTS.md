@@ -172,36 +172,26 @@ crash in the send/confirm window cannot replay. `reserve` returns `already_sent`
 After a store-verified send, `effects.confirm` must persist; if it does not, the tool reports
 `send_not_confirmed`, not success. A missing effect store or capability is a refusal, not "unlimited".
 
-### Routes and the unread marker
+### Linked-device WhatsApp binding and retirement
 
-- `send_path = "ui"` is retired and fails `ui_input_route_retired` before effect reservation. The raw
-  `whatsapp-reply.mjs` shim now supports read-only lookup only; there is no simulated-input fallback.
-- `send_path = "store"` requires a `store_send_script` and uses the app's own
-  `WAWebSendTextMsgChatAction.sendTextMsgToChat` action without opening/focusing a chat or marking it read.
-  The route requires bound account/page identity, Wid-method-proven direct/group metadata, no human draft or
-  active composition/link preview, one dispatch only, and exact store verification with server ack. A timeout
-  or missing proof is ambiguous and never retried. Bots, broadcasts and unknown/unproven kinds are refused.
-  The route is implemented and adversarially fixture-tested; it has not been live-proven against a third-party
-  send. Bind it locally only after operator approval.
-- Any other route value is refused.
+The WhatsApp template is now read-only, unapproved and explicitly linked-device.
+Bind account PN JID, generation, exact approved chat IDs, HTTPS connector URL and
+private credential FILE/CA references locally. Product recognition default is EN;
+this operator's private account setting must be PT. Import never enables a job or
+grants transcript posting permission. Never export keys or token values.
 
-The route must also prove the bound **identity**: when the profile binds `account` and/or
-`browser_endpoint`, they are passed to the raw script as `--expect-account`/`--expect-browser-endpoint`,
-and the script refuses a session logged in as a different account or against a different page before any
-send effect is dispatched. The tool re-checks the identity the route reports (`account`/`own_id`,
-`browser_endpoint`/`endpoint`); an unproven or mismatched identity is `send_account_unproven`,
-`send_account_mismatch`, `send_endpoint_unproven` or `send_endpoint_mismatch`, never a success. An account
-compares by digits only when both sides are phone/PN shapes (`@c.us` / `@s.whatsapp.net`, or a
-bare/formatted number); a `@lid` or a label compares exactly, so `operator1` never equals `other1`. An
-endpoint compares protocol, port and page id exactly, and only genuine loopback aliases
-(`localhost`/`127.0.0.1`/`[::1]`) are interchangeable; a non-loopback host never matches a loopback
-binding.
+`send_path=store` and `ui` are retired. GENERAL model sends fail closed before
+reservation because drafts across linked devices are unsupported, not absent.
+Deterministic incoming + own-outgoing audio transcripts have a separate explicit
+activation policy in `wa-whatsapp`, not the responder profile or a generic MCP tool.
+No browser/page/raw fallback, job repair, initial-history repost or unknown-send reset.
 
-The script's result is verified: the host wrapper's exit code must be zero, its stdout must decode, and
-the decoded result must prove the exact recipient, body and message id (`verified: true`). A shell exit
-code is never a send.
-
-See `docs/JOBS.md` for the deterministic eligibility rule that decides which messages even reach a profile.
+Old browser-era IDs/account bindings/ledgers remain historical read-only evidence;
+do not infer a new account or protocol ID mapping from titles/phone-like strings.
+Unknown mappings are quarantined. Verify exact identity/message IDs before any
+separately approved importer; no replay/backfill importer is included here.
+See [connector setup](WHATSAPP-CONNECTOR.md) and mandatory
+[migration/retirement](WHATSAPP-MIGRATION.md).
 
 ## Proof
 
@@ -211,15 +201,14 @@ See `docs/JOBS.md` for the deterministic eligibility rule that decides which mes
   bindings, loopback page bindings, importer-role allowlisting and normalization, owner spoofing and
   inconsistent scope, unknown schema versions, and the store-level install-disabled and revision-safety
   round trip.
-- `tests/whatsapp-scoped.lua` covers the profile-scoped tools: conversation scope, decision-without-send,
-  send approval, the unread blocker, body and per-run limits, the atomic reserve/confirm contract
-  (crash-window replay, ambiguous reconciliation, budget, persistence failure) and the approved-flag
-  pass-through.
-- `tests/whatsapp-reply-core.js` covers the verified-self lookup rules and asserts that legacy UI send
-  invocations fail closed before browser discovery or input.
+- `tests/whatsapp-scoped.lua` covers trusted event/profile/chat scope, approval and
+  current linked-device/store/UI general-send refusals BEFORE reservation/dispatch.
+  Go connector tests separately cover durable transcript reservations, crash windows,
+  independent ingestion and exact echo reconciliation. Former browser suites are
+  archived under `docs/history/whatsapp-browser/`, not current acceptance.
 - `scripts/test-job-subagents.cjs` (run with `node scripts/test-job-subagents.cjs`) starts a real sentinel against
   an isolated home and a local `/subagents` protocol fixture: it imports an artifact through the public
   CLI, proves import-disabled, reserved-capacity execution while the node is busy, exact start payload and
   idempotency key, settlement only on a settled child, `unknown` without retry, waiting without reserved
   capacity, guest import denial, and the scoped-tool denial suite. No paid inference.
-- `docs/WHATSAPP-PROOF.md` is the self-chat live-proof setup (performed by the coordinator, not here).
+- `docs/WHATSAPP-PROOF.md` distinguishes local fixtures from unperformed live cutover/pairing/posting proof.

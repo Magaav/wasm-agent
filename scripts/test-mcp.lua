@@ -3,6 +3,7 @@ local json=dofile('lua/vendor/json.lua')
 local setup=json.decode(host.sql_exec('CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY,value TEXT NOT NULL)','[]'))
 assert(setup.ok,'private registry table setup failed')
 local memory=dofile('lua/core/memory.lua')
+memory.setup() -- Real dispatch resolves session/workspace state; use the full private schema.
 local mcp=dofile('lua/core/mcp.lua')
 local tools=dofile('lua/core/tools.lua')
 local checks=0

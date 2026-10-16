@@ -1,5 +1,10 @@
 # Pipelines, spells and jobs — a proposal
 
+**WhatsApp migration notice:** WhatsApp examples below are historical pipeline-design
+evidence, NOT current setup or enable instructions. The browser copilot owners are
+retired. Use [linked-device setup](WHATSAPP-CONNECTOR.md) and mandatory
+[retirement](WHATSAPP-MIGRATION.md); no new responder or wake is enabled.
+
 **Status: slices 2 and 3 are implemented; slice 1 and artifact portability are not.** What landed:
 
 - a job action may be a **`pipeline`**: `run` (with `returns`), `subagent` and `foreach` steps, at most 32 of

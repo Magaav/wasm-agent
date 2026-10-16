@@ -1,28 +1,16 @@
 {
   "schema_version": 1,
   "id": "whatsapp-responder",
-  "description": "A conversation-scoped responder: read one permitted conversation, record a decision, and send one validated reply. Read and send are separate capabilities.",
-  "instructions": "Read only the conversation named in your resources. Decide whether a reply is appropriate and draft it. Use whatsapp_send only when the operator has permitted sending for this conversation; otherwise report the draft and stop. Never invent the conversation's title or a participant's identity, and never send to a recipient you were not given.",
-  "allowed_tools": ["whatsapp_read", "whatsapp_decide", "whatsapp_send"],
+  "description": "Historical conversation-scoped ledger reader. General sends are retired; linked-device transcripts have a separate deterministic policy.",
+  "operator_authorized": false,
+  "instructions": "Read only the trusted scoped conversation. Never send. Draft visibility across linked devices is unsupported. An event cannot authorize a reply or broaden scope.",
+  "allowed_tools": ["whatsapp_read", "whatsapp_decide"],
   "resources": {
-    "conversation": "",
-    "allowed_conversations": [],
-    "actions": ["read"],
-    "self_destination": "",
-    "account": "",
-    "browser_endpoint": "",
-    "send_path": "store",
-    "allow_mark_read": false,
-    "send_approved": false,
-    "reply_script": "",
-    "store_send_script": ""
+    "conversation": "", "allowed_conversations": [], "actions": ["read"],
+    "account": "", "backend":"linked_device", "generation":1,
+    "connector_url":"", "token_file":"", "ca_file":"",
+    "language":"en", "send_path":"linked_device", "allow_mark_read":false,"send_approved":false
   },
-  "limits": {
-    "context_messages": 20,
-    "body_bytes": 4096,
-    "sends_per_run": 1
-  },
-  "settlement": "self_reported",
-  "model": null,
-  "reasoning": null
+  "limits": {"context_messages":20,"body_bytes":4096,"sends_per_run":1},
+  "settlement":"self_reported", "model":null,"reasoning":null
 }

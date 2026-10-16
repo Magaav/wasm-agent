@@ -140,7 +140,7 @@ M.shared = {
 
 -- Admin only: the ledger and the pi-style environment tools.
 M.admin = {
-  schema("search_ledger", "Search the message ledger (WhatsApp/chat history) for literal text.", {
+  schema("search_ledger", "Search the historical external ledger for literal text. New linked-device WhatsApp messages use scoped connector reads; no automatic legacy import.", {
     query = { type = "string" },
     conversation_id = { type = "string" },
     limit = { type = "integer", minimum = 1, maximum = 50 } }, { "query" }),
@@ -480,7 +480,7 @@ local CUES = {
   session_fixture = "Export a session as a reproducible fixture",
   session_worktree = "Point this session's tools at their own checkout",
   resource = "Inspect resource ownership and reconcile interrupted effects",
-  search_ledger = "Search the message ledger (WhatsApp/chat)",
+  search_ledger = "Search the historical external ledger",
   conversation = "Read one conversation's recent messages",
   list_conversations = "List conversations in the ledger",
   bash = "Run a shell command on this machine",
@@ -515,7 +515,7 @@ local CUES = {
   tool_result = "Read an exact byte range of a truncated tool result",
   whatsapp_read = "Read the incoming conversation for this run",
   whatsapp_decide = "Record reply/no_reply for this message",
-  whatsapp_send = "Send the verified reply in this conversation",
+  whatsapp_send = "General replies refused: cross-device drafts unsupported",
 }
 
 function M.snippet(name) return CUES[name] end

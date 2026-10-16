@@ -43,7 +43,7 @@ M.REPLY_ICON = "🤖"
 -- the marker reads as a header above the message rather than as the first words of the sentence. The
 -- icon is its own constant only so that changing it is one line; the prefix stays one constant, because
 -- a profile knob would be a second way for the marker to be absent.
-M.REPLY_PREFIX = M.REPLY_ICON .. " _Copiloto_\n"
+M.REPLY_PREFIX = M.REPLY_ICON .. " _Copilot_\n"
 M.SCHEMA_VERSION = 1
 
 local function fail(code, extra)
@@ -266,14 +266,14 @@ end
 function M.schemas()
   return {
     schema("whatsapp_read",
-      "Read the recent messages of the incoming conversation for this run, from the ledger. Bounded, read-only; never opens the app and never marks anything read. The conversation is fixed by the run's trusted event, not by an argument.",
+      "Read recent messages from the explicitly bound linked-device journal, or the historical ledger for an old profile. Bounded, scoped and read-only; no app opening or read marking. The trusted event fixes the conversation; coverage/truncation is explicit.",
       { limit = { type = "integer", minimum = 1, maximum = 200 } }),
     schema("whatsapp_decide",
       "Record the decision for this message durably: reply or no_reply, with a reason. No external effect and no send approval.",
       { decision = { type = "string", enum = { "reply", "no_reply" } }, reason = { type = "string" } },
       { "decision" }),
     schema("whatsapp_send",
-      "Send one verified reply in the run's conversation. Refused unless the local profile approves sending, the conversation is in the approved scope, the route is real, and the send is verified by the app's store. Idempotent per message id; never retries an ambiguous send.",
+      "General replies currently refuse: cross-device draft visibility is unsupported, not absent. Browser/store/UI routes are retired. Trusted scope/approval/effect guards remain; deterministic original-chat transcripts use a separate human-activated connector policy, never this model tool.",
       { body = { type = "string" }, confirm = { type = "boolean" } },
       { "body", "confirm" }),
   }
@@ -295,6 +295,17 @@ local function conversation_tool(memory, args, profile, ctx)
   if not action_allowed(profile, "read") then return fail("action_not_in_profile", { action = "read" }) end
   local limit = tonumber(args.limit) or tonumber(profile.limits and profile.limits.context_messages) or 20
   limit = math.max(1, math.min(200, limit))
+  if profile.resources.backend == "linked_device" then
+    local r=profile.resources
+    local data=dofile('lua/core/mcp.lua').whatsapp('read_snapshot',{since=0,limit=limit},
+      {backend='linked_device',account=r.account,generation=r.generation,connector_url=r.connector_url,token_file=r.token_file,ca_file=r.ca_file,allowed_conversations={event.conversation_id}},ctx)
+    if not data or data.ok~=true then return data or fail('connector_unreadable') end
+    for _,message in ipairs(data.messages or {}) do
+      if message.conversation_id~=event.conversation_id then return fail('connector_scope_mismatch') end
+    end
+    return {conversation_id=event.conversation_id,title=event.conversation_id,kind='unknown',messages=data.messages,count=#(data.messages or {}),coverage=data.coverage,draft_visibility='unsupported',truncated=data.truncated}
+  end
+  -- Historical browser-era ledger remains readable; never imported/reposted by title or guessed IDs.
   local messages = memory.conversation(event.conversation_id, limit)
   -- The ledger read must not stray outside the bound conversation. A row that says otherwise is a
   -- scope mismatch, not context.
@@ -365,12 +376,11 @@ end
 -- manually-marked-unread notes-to-self has unread too).
 local function resolve_route(profile, conversation_id)
   local route = profile.resources.send_path
-  if route == nil or route == "" then route = "store" end
-  if route == "store" then
-    local script = profile.resources.store_send_script
-    if type(script) ~= "string" or script == "" then return nil, "store_route_unbound" end
-    return { name = "store", script = script }, nil
-  end
+  if route == nil or route == "" then route = "linked_device" end
+  -- Do not invent cross-device draft visibility. Deterministic transcripts have
+  -- their own explicit policy; that policy grants no model-send authority.
+  if route == "linked_device" then return nil, "general_send_refused_draft_visibility_unsupported" end
+  if route == "store" then return nil, "browser_whatsapp_retired" end
   if route == "ui" then return nil, "ui_input_route_retired" end
   return nil, "unsupported_send_route"
 end

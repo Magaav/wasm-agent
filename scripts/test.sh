@@ -1975,38 +1975,19 @@ node scripts/test-sentinel-quarantine.mjs || exit 1
 node scripts/test-sentinel-install-proof.mjs || exit 1
 node scripts/test-install-speed.mjs || exit 1
 run_proof_fixture orchestration 33 node scripts/test-orchestration-e2e.cjs "$BIN"
-run_proof_fixture whatsapp 40 node scripts/test-whatsapp-subagent-e2e.cjs
-# The reader's acted cursor: a message may be consumed only when a durable decision exists for it, the
-# attempt count is bounded, and media is reported instead of handed to a child. Mock store, real ingest.
-run_proof_fixture cursor 47 node scripts/test-whatsapp-cursor.cjs "$BIN"
-# Local audio bytes, WASM formatting, durable reservation, and exactly-once
-# verified sends. These use fake WhatsApp/STT adapters and no paid model.
-gate_run node scripts/test-whatsapp-audio.mjs
-# Staged here, at its use, for the same reason as the plugin loop above: this module is read about
-# ninety sections after it was built, and the section does not assume the staging directory it
-# created earlier is still there. The copy is still fatal if the module cannot be staged.
-stage_plugin "$(ls rust/plugins/whatsapp-transcript/target/wasm32-unknown-unknown/release/*.wasm | head -1)" whatsapp-transcript
-gate_run node scripts/test-whatsapp-transcribe.cjs "$BIN" "$PLUGINS/whatsapp-transcript.wasm"
-# The silent skip: a voice note whose browser download fails must stay reachable, and a pass that loses one
-# has to say so - with the id, the step and the underlying error - instead of {"ok":true,"pending":0,
-# "refused":[]}. Fake media/STT/send adapters, real Lua, real ledger.
-gate_run node scripts/test-whatsapp-audio-loss.cjs "$BIN" "$PLUGINS/whatsapp-transcript.wasm"
-# The pipeline seam: a `returns` list reaches the foreach, a step that produced nothing fails the
-# delivery, and a no-op run is distinguishable from a dropped result. Real sentinel, mock store, no model.
+# The browser WhatsApp proofs are historical, not connector acceptance.
+# Canonical private connector/retirement checks; no real account or paid inference.
+gate_run node --test --test-reporter=tap scripts/test-mcp-whatsapp.mjs
+gate_run python scripts/test-whatsapp-local.py
+if command -v go >/dev/null 2>&1; then
+  (cd connectors/whatsapp && GOTOOLCHAIN=local go test ./...) || exit 1
+else
+  echo 'SKIP WhatsApp Go connector: provision pinned Go SDK (docs/WHATSAPP-CONNECTOR.md)'
+  SKIPPED=$((SKIPPED + 1))
+fi
+# Generic pipeline behavior remains independent of the retired WhatsApp source.
 run_proof_fixture pipeline 19 node scripts/test-job-pipeline.cjs
-# The source keeper's categorical refusals, hermetically: a port held by something that is not the agent
-# browser is refused and left alone, and a missing logon task is named with the command that registers it.
-gate_run node scripts/test-source-ensure.cjs
-# The prevention: step 1 asks the preflight (which rebinds the document-start hook) instead of exiting on
-# "DevTools answered", and a trigger pin that names a dead target is re-pinned rather than merely reported.
-# A fake DevTools endpoint; the real adapter, trigger, preflight and sentinel CLI.
-gate_run node scripts/test-whatsapp-hook-rebind.cjs
-# be installed beside it, and both a missing module and an import this deploy cannot satisfy must be
-# refused by name. The block under test is read out of deploy.sh, so this cannot pass while the real
-# code is wrong - and it must not be a check that cannot fail (the live failure was a deploy that
-# reported success over a reader whose import was absent).
 gate_run bash scripts/test-deploy-ship.sh
-gate_run node scripts/test-source-ensure.cjs
 
 # The Android build itself needs Termux, but its installer and launcher contracts
 # are hermetic: setup preserves an existing secret, keeps the env private, UI

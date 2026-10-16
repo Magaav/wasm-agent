@@ -118,9 +118,9 @@ end
 function M.close_read_sessions()return read_sessions.close() end
 function M.default_whatsapp()
  local directory=M.script_dir() or '<installed scripts directory>'
- return {id='whatsapp',name='WhatsApp',transport='stdio',program=host.getenv('WA_NODE') or 'node',args={directory..'/mcp-whatsapp.mjs','--binding-json',json.encode({cache_dir=paths.cache()..'/mcp/whatsapp'})},
-  env={WA_MCP_WHATSAPP_ACCOUNT='WA_WHATSAPP_ACCOUNT',WA_MCP_WHATSAPP_ENDPOINT='WA_WHATSAPP_BROWSER_ENDPOINT'},
-  timeout_seconds=60,tools={read_snapshot='read',lookup_self='read',inspect_chat='read',download_audio='read'}}
+ return {id='whatsapp',name='WhatsApp',transport='stdio',program=host.getenv('WA_NODE') or 'node',args={directory..'/mcp-whatsapp.mjs','--binding-json',json.encode({backend='linked_device',allowed_conversations=json.decode('[]')})},
+  env={WA_MCP_WHATSAPP_ACCOUNT='WA_WHATSAPP_ACCOUNT',WA_MCP_WHATSAPP_GENERATION='WA_WHATSAPP_GENERATION',WA_MCP_WHATSAPP_URL='WA_WHATSAPP_CONNECTOR_URL',WA_MCP_WHATSAPP_TOKEN_FILE='WA_WHATSAPP_TOKEN_FILE'},
+  timeout_seconds=60,tools={read_snapshot='read',lookup_self='read',inspect_chat='read'}}
 end
 function M.inventory()
  local store=load_store();local servers={}
@@ -130,7 +130,7 @@ function M.inventory()
  end
  table.sort(servers,function(a,b)return a.id<b.id end)
  return {ok=true,revision=store.revision,servers=servers,templates={whatsapp=M.default_whatsapp()},can_manage=true,
-  adapters={{id='whatsapp',name='WhatsApp',profile_managed=true,capabilities={'snapshot reads','verified self/target lookup','media retrieval','profile-scoped verified send'},note='Built-in MCP app adapter. Profile/compatibility callers retain approval and reservations; Jobs own eligibility, cursors and wakes. This row is not an enabled generic send tool.'}},
+  adapters={{id='whatsapp',name='WhatsApp',profile_managed=true,capabilities={'scoped linked-device journal reads','explicit self/target identity','draft visibility unsupported; general sends refused'},note='Linked-device connector only. Private deterministic transcript policy is activated by the operator separately; no generic send authority, Chrome fallback or automatic wake.'}},
   note='Explicit trusted connectors; last probe is not live health. Approved reads may reuse idle-bounded sessions; writes and WhatsApp stay request-scoped. Jobs owns wakes.'}
 end
 function M.control(args,ctx)
@@ -214,7 +214,7 @@ end
 -- checked profile/event/budget/operator-precedence; MCP cannot grant those.
 function M.whatsapp(method,args,binding,ctx)
  local directory=M.script_dir();if not directory then return fail('mcp_script_directory_unbound') end
- binding=binding or {};binding.cache_dir=binding.cache_dir or paths.cache()..'/mcp/whatsapp'
+ binding=binding or {}
  local server={transport='stdio',program=host.getenv('WA_NODE') or 'node',args={directory..'/mcp-whatsapp.mjs','--binding-json',json.encode(binding)},timeout_seconds=120}
  local input={action='call',server=server,tool=method};if next(args or {})then input.arguments=args end
  local answer=M.invoke(input,ctx);local data=native_data(answer)
