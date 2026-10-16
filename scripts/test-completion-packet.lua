@@ -72,8 +72,12 @@ git("fetch origin",source)
 
 local parent=memory.start_session("local","packet-parent",{id="packet-parent",user_id="master",node_id="test-node",title="packet parent"})
 memory.set_session_worktree(parent,source)
+-- Use the current explicit ordinary-worker allocator contract, not the retired
+-- historical factory admission that this older fixture implicitly depended on.
+local enabled=dofile('lua/core/orchestration_mode.lua').control({mode_action='set',enabled=true,revision=0},{user_id='master',role='master',session_id=parent})
+check(enabled.ok,'private parent enables ordinary task-owner workspace allocation')
 local child=memory.start_session("local","subagent",{id="packet-child",user_id="master",node_id="test-node",parent_session_id=parent,workspace_required=true})
-local workspace,ensure_error=workspaces.ensure(memory,child,parent)
+local workspace,ensure_error=workspaces.ensure(memory,child,parent,{orchestration_owner=true})
 check(workspace~=nil,"a real worktree is allocated for the child session: "..tostring(ensure_error))
 check(workspace.state=="allocated" and host.read_file(workspace.worktree.."/seed.txt")=="clean baseline\n",
   "the child's checkout is its own worktree at the source's clean HEAD")

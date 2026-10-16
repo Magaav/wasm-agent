@@ -521,4 +521,88 @@ function M.run(options)
   return verdict
 end
 
+-- Source-bound coordinator closure path. Unlike legacy /update, never switches
+-- branches or appends a legacy continuation prompt. The caller journals first.
+function M.bound_command(facts,scope)
+  assert(type(scope.sha)=='string' and #scope.sha==40 and not scope.sha:find('[^%x]'),'full_source_sha_required')
+  assert(type(scope.owner)=='string' and scope.owner~='' and type(scope.session_id)=='string' and scope.session_id~='','bound_owner_parent_required')
+  return table.concat({quote(facts.sentinel),'request','deploy','--if-no-pending',
+    '--expected-sha',quote(scope.sha),'--owner',quote(scope.owner),'--session',quote(scope.session_id),
+    '--reason',quote('accepted coordinator wave closure '..tostring(scope.obligation_id or '')..'; exact source '..scope.sha)},' ')
+end
+-- Pure mirror of the supported native release receipt shape; never clears it.
+function M.reservation_released(prior,retirement)
+  if type(prior)~='table' then return false end
+  if prior.phase=='verified' then return true end
+  if prior.phase~='aborted_preinstall' or type(retirement)~='table' or retirement.code~=0 then return false end
+  local ok,value=pcall(json.decode,retirement.stdout or '')
+  return ok and type(value)=='table' and value.released==true and value.id==prior.id and value.phase=='aborted_preinstall'
+end
+function M.request_bound(scope)
+  if host.getenv('WASM_AGENT_PROVENANCE')=='child' then return {error='update_coordinator_only',held=true} end
+  local facts=M.facts()
+  local blocked=M.preconditions(facts)
+  if blocked then blocked.held=true;return blocked end
+  -- An old failed/admitted generation is protected even if request inventory is empty.
+  local reservation=facts.sentinel_dir..'/protocol-effect.json'
+  if exists(reservation) then
+    local ok,prior=pcall(json.decode,read(reservation) or '')
+    local retirement
+    if ok and type(prior)=='table' and prior.phase=='aborted_preinstall' then
+      -- Existing native verification-only release predicate; never edit/retire it here.
+      retirement=shell(quote(facts.sentinel)..' protocol retirement-status')
+    end
+    if not ok or not M.reservation_released(prior,retirement) then
+      return {held=true,error='installation_reservation_held',reservation=reservation}
+    end
+  end
+  local function exact()
+    if not facts.tree then return false end
+    local recorded,selected=slashes(facts.tree),slashes(scope.root)
+    if platform.os()=='windows' then recorded,selected=recorded:lower(),selected:lower() end
+    if recorded~=selected then return false end
+    local status=git(scope.root,'status --porcelain --untracked-files=all')
+    local sha=git(scope.root,'rev-parse HEAD');local tree=git(scope.root,'rev-parse HEAD^{tree}')
+    local remote=git(scope.root,'ls-remote origin refs/heads/main')
+    return status~=nil and trim(status)=='' and trim(sha)==scope.sha and trim(tree)==scope.tree
+      and trim(git(scope.root,'branch --show-current'))=='main'
+      and trim(git(scope.root,'rev-parse origin/main'))==scope.sha and tostring(remote):match('^(%x+)')==scope.sha
+  end
+  if not exact() then return {held=true,error='wave_source_changed'} end
+  local backed,snapshot=pcall(function() return dofile('lua/core/backup.lua').run('wave-autoflush') end)
+  if not backed then return {held=true,error='backup_failed',detail=tostring(snapshot)} end
+  if not exact() then return {held=true,error='wave_source_changed_after_backup',backup=snapshot.dir} end
+  if scope.prequeue then
+    local ok,ready=pcall(scope.prequeue)
+    if not ok or not ready then return {held=true,error='wave_prequeue_changed',detail=tostring(ready)} end
+  end
+  local command=M.bound_command(facts,scope)
+  local result=shell(command)
+  -- Preserve the complete structured operation receipt, including plaintext stdout.
+  local receipt=M.bound_receipt(result,scope,facts)
+  receipt.command=command;receipt.backup=snapshot.dir
+  return receipt
+end
+-- Readback only. A successful CLI exit is never installation evidence.
+function M.bound_receipt(result,scope,facts)
+  local receipt={operation=result,held=true,installed=false}
+  if not result or result.code~=0 or result.ok==false then receipt.error='wave_queue_unknown_or_refused';return receipt end
+  local file=tostring(result.stdout or ''):match('^requested deploy:%s*([^\r\n]+)')
+  if not file then receipt.error='wave_queue_receipt_unverifiable';return receipt end
+  local id=file:gsub('\\','/'):match('/([%w%-]+)%.json$')
+  if not id then receipt.error='wave_request_id_invalid';return receipt end
+  local raw=read(file) or read(facts.sentinel_dir..'/deploy-protocol/'..id..'/intent.json')
+  local ok,intent=pcall(json.decode,raw or '')
+  receipt.request=file;receipt.request_id=id;receipt.intent_raw=raw
+  if not ok or type(intent)~='table' or intent.id~=id or intent.verb~='deploy' or intent.expected_sha~=scope.sha
+      or intent.owner~=scope.owner or intent.session~=scope.session_id or (intent.prompt or '')~=''
+      or intent.reason~=('accepted coordinator wave closure '..tostring(scope.obligation_id or '')..'; exact source '..scope.sha)
+      or type(intent.queued_at)~='number' or intent.queued_at<=0 or intent.queued_at>host.now() then
+    receipt.error='wave_immutable_request_mismatch';return receipt
+  end
+  receipt.intent_sha256=host.sha256(raw);receipt.queued=true;receipt.held=false
+  receipt.status='queued; not installed; native request-bound verification remains external'
+  return receipt
+end
+
 return M

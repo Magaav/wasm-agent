@@ -26,11 +26,21 @@ let child,mock,wakes=0,delegated=false,runawayDelegated=false,runawayNotice='',s
  const log=fs.openSync(path.join(home,'node.log'),'a');
  child=spawn(binary,['serve','--port',String(p),'--client-port',String(cp),'--ui',path.join(root,'ui')],{cwd:home,env:{...env,WASM_AGENT_HOME:home,WASM_AGENT_LUA_ROOT:root,WASM_AGENT_MANAGED:'0',WASM_AGENT_RENDEZVOUS:'',WASM_AGENT_RELAY:'',WASM_AGENT_LLM_BASE_URL:'http://127.0.0.1:'+mock.address().port,WASM_AGENT_LLM_MODEL:'fixture',WASM_AGENT_LLM_API_KEY:'fixture',WASM_AGENT_MAX_TOOL_ROUNDS:'4'},stdio:['ignore',log,log],windowsHide:true});
  const base='http://127.0.0.1:'+p;
- const get=async(route,body)=>{const r=await fetch(base+route,{...(body?{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}:{}),signal:AbortSignal.timeout(30000)});return r.json();};
+ const get=async(route,body)=>{
+  const readOnly=route==='/subagents'&&['list','status','result'].includes(body?.action);
+  for(let attempt=0;;attempt++){
+   const r=await fetch(base+route,{...(body?{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}:{}),signal:AbortSignal.timeout(30000)});const value=await r.json();
+   fs.appendFileSync(path.join(home,'control-results.jsonl'),JSON.stringify({route,action:body?.action,attempt,value})+'\n');
+   // Only exact, proven read/control backpressure is retryable. Never resubmit
+   // chat, admission, cancellation or an ambiguous effect to repair a fixture.
+   if(!readOnly||value.error!=='read_capacity_busy'||attempt>=4)return value;
+   await sleep(250*(attempt+1));
+  }
+ };
  await until(async()=>{try{return (await get('/health')).ok!==false;}catch{return false;}},'startup');
  const answer=await get('/chat',{text:'delegate once',thread:'completion-parent'});assert(!answer.error,JSON.stringify(answer));
  await until(()=>wakes===1,'coordinator wake');await sleep(2500);assert.equal(wakes,1,'one notification, no recurring wake');
- const list=await get('/subagents',{action:'list'});assert.equal(list.subagents.length,1,'completion does not spawn another child');
+ const list=await get('/subagents',{action:'list'});assert(Array.isArray(list.subagents),JSON.stringify(list));assert.equal(list.subagents.length,1,'completion does not spawn another child');
  const result=await get('/subagents',{action:'result',id:list.subagents[0].subagent_id});assert.equal(result.state,'completed');
  const status=await get('/subagents',{action:'status',id:list.subagents[0].subagent_id});assert(!status.result,'status does not duplicate result');
  await get('/chat',{text:'delegate runaway once',thread:'completion-runaway-parent'});

@@ -666,7 +666,11 @@ function M.start(args, ctx)
     event = event,
     admission_limit = ctx.placement and ctx.placement.max_tasks,
   }
-  local receipt = json.decode(host.subagent("start", json.encode(spec)))
+  local receipt = memory.transaction(function()
+    local guard=dofile('lua/core/wave_autoflush.lua').admission_guard(ctx)
+    if guard then return guard end
+    return json.decode(host.subagent("start", json.encode(spec)))
+  end)
   if type(receipt) ~= "table" then return { error = "subagent_runtime_error" } end
   if receipt.error then
     -- Admission failed. A refusal that means "come back later" keeps the shell: the coordinator
@@ -759,9 +763,13 @@ function M.control(args, ctx)
     end
     if tostring(args.idempotency_key or "") == "" then return { error = "idempotency_key_required" } end
     for attempt = 1, 3 do
-      local result = json.decode(host.subagent("continue", json.encode({
-        owner_user = ctx.user_id, id = receipt.subagent_id, text = tostring(args.text or ""),
-        new_id = host.uuid(), idempotency_key = tostring(args.idempotency_key) })))
+      local result = memory.transaction(function()
+        local guard=dofile('lua/core/wave_autoflush.lua').admission_guard({session_id=receipt.parent_session_id})
+        if guard then return guard end
+        return json.decode(host.subagent("continue", json.encode({
+          owner_user = ctx.user_id, id = receipt.subagent_id, text = tostring(args.text or ""),
+          new_id = host.uuid(), idempotency_key = tostring(args.idempotency_key) })))
+      end)
       if result.error ~= "session_tail_changed" then
         if result.subagent_id then
           local parent_ctx={user_id=ctx.user_id,role=ctx.role,remote=ctx.remote,session_id=receipt.parent_session_id}

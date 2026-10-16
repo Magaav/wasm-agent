@@ -302,6 +302,8 @@ M.admin = {
     action = { type = "string", enum = { "status", "allocate", "recover", "release", "set", "clear" } },
     path = { type = "string", description = "set: an existing directory for a legacy non-managed session." },
     session_id = { type = "string", description = "Defaults to the current session." } }, { "action" }),
+  schema("wave_autoflush", "Master coordinator only, outside code mode: enable/off/status durable automatic wave-end queueing. Inspect native settlement facts; explicitly accept each exact child tip/digest against published sha/tree with original evidence, then qualify exact source. Completion never accepts work. Enabled coordinator finalization reserves and queues once; unknown effects hold, never replay.", {
+    action={type='string',enum={'enable','off','status','accept','qualify','reconcile'}}, request_id={type='string'}, revision={type='integer'}, child_id={type='string'}, tip={type='string'}, digest={type='string'}, sha={type='string'}, tree={type='string'}, evidence={type='string'} }, {'action'}),
   schema("integrate", "Orchestration worker only: land your clean tested tip through canonical main under a repository claim, push and verify remote. Conflicts refuse for owned-tree refactoring; unknown effects must be inspected, never replayed. Does not deploy.", {}),
   schema("resource", "Inspect durable resource claims. Reconcile only after checking the recorded owner's effects; name the exact key, run, principal and evidence. Live owners cannot be released. No automatic timeout or effect replay.", {
     action={type="string",enum={"list","reconcile"}},key={type="string"},run={type="string"},
@@ -385,7 +387,7 @@ M.tier_of = {
   session_many = "sessions", search_messages_many = "sessions",
   resume_session = "sessions", session_debug = "sessions", session_fixture = "sessions",
   session_worktree = "sessions",
-  resource = "sessions", integrate = "sessions",
+  resource = "sessions", integrate = "sessions", wave_autoflush = "sessions",
   bash = "environment", read = "environment", read_many = "environment", write = "environment",
   diagnose = "environment", operation = "environment",
   edit = "environment", ls = "environment", grep = "environment", graph = "environment",
@@ -498,6 +500,7 @@ local CUES = {
   diagnose = "Run a fixed read/grep check sequence once",
   client = "Act on the user's machine: screen, mouse, keyboard, browser",
   shell = "Run a shell command on the client machine",
+  wave_autoflush = "Control coordinator acceptance and durable wave-end installation obligation",
   integrate = "Land an orchestration worker's tested tip; never deploy",
   spell_save = "Save a verified command sequence as a reusable spell",
   spell_run = "Replay a saved spell",
@@ -966,6 +969,7 @@ function M.dispatch(memory, name, args, role, ctx)
       return result
     end,target_identity,ctx.steering_admit,file_tools.check)
   end
+  if name=='wave_autoflush' then return dofile('lua/core/wave_autoflush.lua').control(args,ctx) end
   if name=='integrate' then return dofile('lua/core/integrate.lua').run(memory,ctx) end
   local workspace_error = required_workspace_error(memory, ctx, name, args)
   if workspace_error then return workspace_error end

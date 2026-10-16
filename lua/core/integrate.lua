@@ -35,6 +35,9 @@ function M.run(memory,ctx)
     if not message:find('Agent:',1,true) or not message:find('session='..ctx.session_id,1,true) then
       return {error='integration_provenance_missing',effect='none'}
     end
+    -- Measure the native admission base -> original own tip BEFORE any merge/ff.
+    -- Unknown measurement is retained, not a reason to discard recoverable Git work.
+    local impact=dofile('lua/core/wave_autoflush.lua').capture(memory,ctx,own,tip,workspace.base_commit)
     local common=git(own,'rev-parse --path-format=absolute --git-common-dir')
     local main=git(own,'worktree list --porcelain'):match('^worktree ([^\r\n]+)')
     if not main or git(main,'branch --show-current')~='main' then return {error='canonical_main_unavailable',effect='none'} end
@@ -67,7 +70,7 @@ function M.run(memory,ctx)
     if remote~=landed then error('remote_main_mismatch') end
     git(own,'merge --ff-only origin/main')
     if git(own,'status --porcelain')~='' then error('worker_dirty_after_integration') end
-    local receipt={ok=true,tip=tip,landed=landed,remote_verified=true,clean=true,journal=journal,installed=false,gate_verified=false,release_verified=false}
+    local receipt={ok=true,tip=tip,impact=impact,landed=landed,remote_verified=true,clean=true,journal=journal,installed=false,gate_verified=false,release_verified=false}
     assert(host.write_file(journal,json.encode(receipt)),'integration_receipt_write_failed');return receipt
   end)
   if held then
