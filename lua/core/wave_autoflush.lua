@@ -385,7 +385,20 @@ function M.finalize(ctx)
           observation={installed_verified=true,source=installed.source,verification=installed.verification,notification='separate native return state'}
           return
         end
-        if s.inflight then error('wave_request_held:'..s.inflight) end
+        if s.inflight then
+          local request=s.requests[#s.requests]
+          local waiting=request and request.state=='queued' and s.blocker=='native_installation_verification_missing'
+          observation={held=true,state=request and request.state or 'held',reservation=s.inflight,
+            awaiting_verification=waiting or nil,blocker=s.blocker,
+            error=not waiting and (s.blocker or (request and request.receipt and request.receipt.error)) or nil}
+          return -- Observe the original reservation; never requeue to render status.
+        end
+        if s.active>0 then
+          -- Expected lifecycle waiting is not a failed readiness assertion. Keep
+          -- observing native activity, but do not inspect/queue a candidate yet.
+          observation={held=true,deferred=true,state='deferred',reason='active_workers'}
+          return
+        end
         if not ready(s,repo) then
           if s.generation then s.generation.closed=true end
           s.obligation='none';observation={not_applicable=true,reason='no_own_install_impact'};return
@@ -435,5 +448,46 @@ function M.finalize(ctx)
     return {held=true,error=tostring(result)}
   end
   return result
+end
+
+-- Reporting is separate from closure effects and assistant prose. Persist changed
+-- observations BEFORE emitting a status: delivery is at-most-once, not a claim
+-- that a disconnected operator saw it. Originals remain available after restart.
+function M.report(ctx,ok,result)
+  if not authority(ctx) then return end
+  if ok and not result then return end
+  local value=ok and result or {held=true,error=tostring(result)}
+  return memory.transaction(function()
+    local k='wave-autoflush-report:v1:'..ctx.session_id
+    local raw=memory.meta_get(k)
+    local journal=raw and assert(decode(raw),'wave_report_unreadable') or {schema=1,events={}}
+    assert(journal.schema==1 and type(journal.events)=='table','wave_report_unsupported')
+    local state=decode(memory.meta_get(key(ctx))) or {}
+    local last=state.requests and state.requests[#state.requests]
+    local phase=value.deferred and 'deferred' or value.installed_verified and 'installed_verified'
+      or value.error and 'held'
+      or (value.queued or value.state=='queued') and 'queued'
+      or value.not_applicable and 'not_applicable' or 'held'
+    -- A repeated observation of a queued request is the same transition as its
+    -- original receipt. Error identity excludes Lua source-line decoration only
+    -- for deduplication; the original value below is never rewritten.
+    local code=value.error and (tostring(value.error):match('(wave_[%w_]+)') or 'wave_closure_failed')
+    local identity={generation=state.generation and state.generation.id,
+      reservation=value.reservation or state.inflight or (last and last.id),phase=phase,
+      error=code,detail=value.error and tostring(value.error):gsub('^.-:%d+: ','')}
+    local digest=hash(identity)
+    if journal.current==digest then return end
+    journal.current=digest
+    local event={id=host.uuid(),at=host.now(),run=ctx.run_id,identity=identity,result=value}
+    journal.events[#journal.events+1]=event
+    local text
+    if phase=='held' then
+      text='SELF installation held ('..(code or 'wave_request_held')..'); inspect wave_autoflush status and the native closure report.'
+    elseif phase=='queued' then text='SELF installation queued; installation is not yet verified.'
+    elseif phase=='installed_verified' then text='SELF installation verified by the native installation proof.' end
+    event.notice=text
+    memory.meta_set(k,json.encode(journal))
+    if text then return {id=event.id,text=text,phase=phase,result=value} end
+  end)
 end
 return M

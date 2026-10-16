@@ -1887,13 +1887,31 @@ function M:run_body(text, images)
         end
         -- Narrow coordinator closure, after candidate steering/audit decisions.
         -- This is not a generic beforeFinalAnswer hook or pre-stream guarantee.
+        local wave_module
+        local wave_ctx={session_id=self.session_id,user_id=self.user,role=self.role,node_id=self.node,
+          run_id=self.run_id,subagent=self.subagent,run_origin=self.run_origin,
+          current=function() return not foreground_cancelled() and not steering.pending(self.user,self.session_id,self.steering_run_id) end}
         local wave_ok,wave=pcall(function()
-          return dofile('lua/core/wave_autoflush.lua').finalize({session_id=self.session_id,
-            user_id=self.user,role=self.role,node_id=self.node,run_id=self.run_id,subagent=self.subagent,run_origin=self.run_origin,
-            current=function() return not foreground_cancelled() and not steering.pending(self.user,self.session_id,self.steering_run_id) end})
+          wave_module=dofile('lua/core/wave_autoflush.lua')
+          return wave_module.finalize(wave_ctx)
         end)
-        if not wave_ok or wave then
-          reply=reply..'\n\n[Wave installation closure: '..json.encode(wave_ok and wave or {held=true,error=tostring(wave)})..']'
+        local report_ok,notice=pcall(function() return wave_module.report(wave_ctx,wave_ok,wave) end)
+        if not report_ok then
+          -- A reporting failure must remain diagnosable, never become answer text.
+          trace[#trace+1]={kind='wave_closure_report',ok=false,error=tostring(notice),
+            closure_error=not wave_ok and tostring(wave) or nil}
+          local parent=memory.session(self.session_id)
+          local origin=json.decode(host.runtime_info()).run_origin
+          if (origin=='cli' or origin=='interactive' or origin=='completion' or origin=='control')
+              and (self.role=='master' or self.role=='admin') and not self.subagent
+              and parent and parent.objective~='subagent'
+              and not tostring(parent.route_id):lower():find('whatsapp',1,true) then
+            self.emit({type='status',text='SELF closure reporting failed; inspect the native trace.'})
+          end
+        elseif notice then
+          trace[#trace+1]={kind='wave_closure',ok=notice.phase~='held',notice_id=notice.id,
+            state=notice.phase,text=notice.text,result=notice.result}
+          self.emit({type='status',text=notice.text,wave_notice_id=notice.id})
         end
         -- The final assistant message is recorded once, after the loop, with the
         -- message's trace. Recording it here as well would duplicate it in context.
