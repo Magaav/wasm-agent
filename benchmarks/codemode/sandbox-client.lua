@@ -2,7 +2,7 @@
 -- checks still execute unchanged; raw filesystem/shell effects occur ONLY inside
 -- a fresh networkless Docker tool container. No repaired runtime enters that box.
 local M={}
-function M.install(url)
+function M.install(url,fixture_schema)
  assert(url:match('^http://127%.0%.0%.1:%d+/%x+$'),'private sandbox RPC required')
  local json=dofile('lua/vendor/json.lua');local active=0;local controller_depth=0;local loading=false;local changes_address=nil
  local raw_read,raw_write,raw_canonical,raw_list=host.read_file,host.write_file,host.canonical_path,host.list_dir
@@ -92,12 +92,23 @@ function M.install(url)
  host.platform=function()local value=info();value.os='linux';value.shell='/bin/bash -c';value.cwd='/tmp/work';value.pathSeparator='/';return value end
  local tools=dofile('lua/core/tools.lua')
  local allowed={read=true,read_many=true,write=true,write_many=true,edit=true,edit_many=true,bash=true,ls=true,grep=true,grep_many=true,diagnose=true,tool_search=true,tool_call=true,capabilities=true,tool_result=true,codemode=true}
+ if fixture_schema then assert(fixture_schema['function'].name=='fixture_api','narrow screen API only');allowed.fixture_api=true end
  local all=tools.all
- tools.all=function(role)local result={};for _,row in ipairs(all(role))do if allowed[row['function'].name]then result[#result+1]=row end end;return result end
+ tools.all=function(role)local result={};for _,row in ipairs(all(role))do if allowed[row['function'].name]then result[#result+1]=row end end;if fixture_schema and role=='master' then result[#result+1]=fixture_schema end;return result end
+ if fixture_schema then
+  local discovery=tools.discovery_execution
+  tools.discovery_execution=function(memory,ctx)local get=discovery(memory,ctx);return function(name)if name=='fixture_api' then return {status=ctx.role=='guest' and 'blocked' or 'ready'} end;return get(name)end end
+ end
  local effects={read=true,read_many=true,write=true,write_many=true,edit=true,edit_many=true,bash=true,ls=true,grep=true,grep_many=true}
  local original=tools.dispatch
  tools.dispatch=function(memory,name,args,role,ctx)
   if not allowed[name]then return {error='benchmark_tool_not_permitted:'..tostring(name),effect='none'} end
+  if fixture_schema and name=='fixture_api' then
+   if role~='master' or not ctx or not ctx.session_id or ctx.subagent then return {error='fixture_scope_refused',effect='none'} end
+   local contract=dofile('lua/core/json_contract.lua');local _,err=contract.validate(fixture_schema['function'].parameters,ctx.tool_arguments_json or json.encode(args))
+   if err then return {error=err,effect='none'} end
+   return rpc('fixture_api',args)
+  end
   -- A tool never falls through to an ambient host filesystem. Nested native
   -- dispatch keeps the same admission checks and increases this dynamic scope.
   local scoped=effects[name] and true or false
