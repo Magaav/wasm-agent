@@ -49,8 +49,9 @@ M.commands = {
   {
     name = "/login",
     usage = "/login",
-    hint = "sign in to a provider through wa-vault: ChatGPT subscription (device code) or OpenCode Go key",
+    hint = "open deterministic provider management (alias of /provider); never paste a key into chat",
   },
+  { name = "/provider", usage = "/provider", hint = "manage/select OpenAI subscription or OpenCode Go without inference; credentials stay on the operator vault page" },
   { name = "/stats", usage = "/stats", hint = "database counts" },
   { name = "/console", usage = "/console", hint = "toggle the console: every event and a tool's whole output, unclipped" },
   {

@@ -50,7 +50,7 @@ function M.providers()
   return {
     {
       id = "opencode-go",
-      label = "opencode-go",
+      label = "OpenCode Go",
       base_url = vaulted_go or env("WASM_AGENT_LLM_BASE_URL") or env("WASM_AGENT_OPENAI_BASE_URL")
         or "https://opencode.ai/zen/go/v1",
       api_key = vaulted_go and vault.PLACEHOLDER or env("WASM_AGENT_LLM_API_KEY")
@@ -77,7 +77,7 @@ function M.providers()
     {
       id = "openai-sub", label = "OpenAI subscription",
       base_url = "https://chatgpt.com/backend-api",
-      api_key = "", auth = "subscription", configured = subscription.configured(),
+      api_key = "", auth = "subscription", configured = subscription.present(),
       default_model = "gpt-6-luna",
       -- Pi's bridge speaks the codex responses transport; this route has no catalogue here.
       -- `subscription.models` is a three-id *picker* list, not this route's catalogue, and
@@ -516,6 +516,7 @@ local function headers_for(provider, session_id)
     -- The provider edge rejects a default urllib/ureq-style agent string.
     ["User-Agent"] = "wasm-agent/0.1 provider-proxy",
   }
+  if provider.credential_generation then headers["X-Wa-Vault-Generation"] = provider.credential_generation end
   local rule = M.attribution_rule(provider)
   if rule and rule.session and session_id and session_id ~= "" then
     headers[rule.session] = tostring(session_id)
@@ -816,6 +817,12 @@ end
 function M.pin()
   state.with_snapshot(function()
   local profile,settings=M.active(),M.settings()
+  if vault.base(profile.id) then
+    local status = vault.status(profile.id)
+    profile.credential_generation = status and status.providers[profile.id] and status.providers[profile.id].generation or 'unknown'
+  elseif profile.id == 'openai-sub' then
+    profile.credential_generation = dofile('lua/core/openai_sub_auth.lua').status().generation or 'absent'
+  end
   local reasoning=M.reasoning(settings.model)
   M._pinned={provider=profile,settings=settings,reasoning=reasoning}
   M._pinned.revision=state.revision()
@@ -1021,6 +1028,7 @@ function M.complete_with(model, messages, tools, stream, opts)
     local bridge_opts={}
     for key,value in pairs(opts) do bridge_opts[key]=value end
     bridge_opts.max_output=effective.output_limit
+    bridge_opts.credential_generation=provider.credential_generation
     return subscription.complete(body.model,messages,tools,stream,bridge_opts,effective.reasoning)
   end
   if stream then

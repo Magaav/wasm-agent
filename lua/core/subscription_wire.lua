@@ -167,13 +167,13 @@ M.credential_failure = credential_failure
 -- and a caller cannot act on that: "log in", "another process is refreshing, wait" and "the server
 -- refused the refresh token" need three different answers. The second value is passed through
 -- unchanged - the code is the callable part, the message is what a log should show.
-function M.credential()
+function M.credential(opts)
   local ok, module = pcall(dofile, M.CREDENTIAL_MODULE)
   if not ok or type(module) ~= 'table' or type(module.token) ~= 'function' then
     return nil, credential_failure('subscription_credential_unavailable',
       M.CREDENTIAL_MODULE .. ' must return {token = function() -> {access, account_id, expires}}')
   end
-  local value, failure = module.token()
+  local value, failure = module.token({expected_generation=opts and opts.credential_generation})
   if type(value) == 'table' and type(value.access) == 'string' and value.access ~= '' then
     return value
   end
@@ -1039,7 +1039,7 @@ local function complete_attempt(model, messages, tools, stream, opts, reasoning,
   -- turn fails with, so the person reading the error is told which of the four happened instead of
   -- reading that a credential was `nil`. `error(..., 0)` keeps the code first in the text with no
   -- `file:line:` prepended: the code is the thing a caller greps and a human recognises.
-  local credential, absent = M.credential_provider()
+  local credential, absent = M.credential_provider(opts)
   if not credential then
     error(tostring(absent or credential_failure('subscription_credential_missing',
       'the credential seam returned no credential and no failure of its own')), 0)
@@ -1051,6 +1051,9 @@ local function complete_attempt(model, messages, tools, stream, opts, reasoning,
   local selected = type(reasoning) == 'table' and reasoning.selected or reasoning
   local body = M.body(model, messages, tools, opts, selected, entry)
   local headers = M.headers(credential, opts.session_id)
+  if opts.credential_generation and M.CREDENTIAL_MODULE == 'lua/core/vault.lua' then
+    headers['X-Wa-Vault-Generation'] = opts.credential_generation
+  end
   local emit = function(event)
     if stream then host.stream(json.encode(event)) end
   end

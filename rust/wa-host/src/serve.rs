@@ -339,7 +339,7 @@ pub(crate) fn node_thread_id() -> usize {
 fn is_read_route(request: &Request) -> bool {
     // These controls use independent synchronized runtimes, never agent state. A blocked run must
     // not queue its own cancellation or the operator's disable behind itself.
-    if matches!(split_path(&request.path).0.as_str(), "/jobs" | "/mcp" | "/operations" | "/operation") {return true;}
+    if matches!(split_path(&request.path).0.as_str(), "/jobs" | "/mcp" | "/operations" | "/operation" | "/provider-management") {return true;}
     // A GET is a read, by default. This was an allow-list, and that was backwards: a route nobody
     // remembered to add fell through to node-thread 0 and queued behind whatever run held it. It cost
     // several incidents - `/sync/head`, `/tools`, and `/efficiency` - and each looked like the node
@@ -2751,6 +2751,8 @@ fn dispatch(
         "/spell/export" if method == "POST" => (200, "application/json", call("wa_spell_export", &[body.trim(), session]).into_bytes()),
         "/update" if method == "POST" => (200, "application/json", call("wa_update", &[body.trim(), session]).into_bytes()),
         "/spell" if method == "POST" => (200, "application/json", call("wa_spell_run", &[body.trim(), session]).into_bytes()),
+        "/provider-management" if method == "GET" => (200,"application/json",call("wa_provider_management", &["{}", node.as_str(), session]).into_bytes()),
+        "/provider-management" if method == "POST" => (200,"application/json",call("wa_provider_management", &[body, node.as_str(), session]).into_bytes()),
         "/provider" if method == "POST" => (200, "application/json", call("wa_set_provider", &[body.trim(), node.as_str(), session]).into_bytes()),
         "/model" if method == "POST" => (200, "application/json", call("wa_set_model", &[body.trim(), node.as_str(), session]).into_bytes()),
         "/reasoning" if method == "POST" => (200,"application/json",call("wa_set_reasoning",&[body.trim(),node.as_str(),session]).into_bytes()),
@@ -3097,6 +3099,7 @@ mod read_route_tests {
         assert!(is_read_route(&request("POST", "/operations")));
         assert!(is_read_route(&request("POST", "/mcp")));
         assert!(is_read_route(&request("POST", "/jobs")));
+        assert!(is_read_route(&request("POST", "/provider-management")));
     }
 }
 
