@@ -157,7 +157,14 @@ Unsettled operations in that workspace block removal. Legacy operation records
 without cwd attribution conservatively block all cleanup while unresolved; this
 may require inspecting old operation evidence before a legacy node can release a
 workspace. There is no destructive automatic migration of those records. New
-operation receipts persist cwd. Missing/corrupt operation evidence fails visibly.
+operation receipts persist launch cwd. Bash and `operation start` select an omitted
+cwd from the bound session before native spawn, including nested Bash in code mode.
+Explicit relative cwd is resolved under that binding; required bindings never use
+the legacy missing-directory fallback. `cwd_requested` retains the original tool
+request, `cwd_source` distinguishes `explicit`, `session_workspace` and `node`, and
+`effective_cwd` is the canonical **launcher** directory used by release fencing.
+A later shell `cd` is command behavior, not automatically observed cwd metadata.
+Missing/corrupt operation evidence fails visibly.
 
 Release intent and outcome persist as `releasing`, `release_unknown`, or `released`.
 A lost removal receipt is reconciled against both the directory and Git registry.
