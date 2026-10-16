@@ -40,14 +40,20 @@ env.WASM_AGENT_OPENAI_SUB_VAULT_URL='native'
 local provider=dofile('lua/core/provider.lua')
 local manager=dofile('lua/core/provider_management.lua')
 previous.expires=host.now()*1000-1
+previous.last_error={code='fixture_error',detail='synthetic-old-access'}
 assert(host.write_file(env.WASM_AGENT_OPENAI_SUB_STORE,json.encode(previous)))
 local before=calls;local state=manager.state()
 check(exchanges==0,'opening management never refreshes an expired unrelated subscription credential')
+check(state.providers[1].error=='subscription_authentication_error' and not json.encode(state):find('synthetic-old-access',1,true),'management metadata cannot return credential-echoing historical error detail')
+previous.last_error=nil
 previous.expires=host.now()*1000+3600000
 assert(host.write_file(env.WASM_AGENT_OPENAI_SUB_STORE,json.encode(previous)))
 check(#state.providers==2 and state.providers[1].label=='OpenAI subscription' and state.providers[2].label=='OpenCode Go','only two friendly management routes')
 check(state.providers[1].source=='native' and state.providers[2].source=='vault','truthful separate sources')
 check(state.providers[2].generation==generation and state.providers[2].entitlement=='unknown','presence not entitlement')
+env.WASM_AGENT_OPENCODE_GO_VAULT_URL='native';env.WASM_AGENT_LLM_API_KEY='';env.OPENCODE_GO_API_KEY='synthetic-lower-alias'
+check(manager.state().providers[2].configured==false,'empty effective highest-precedence key is unconfigured, without silently adopting a lower alias')
+env.WASM_AGENT_OPENCODE_GO_VAULT_URL='http://127.0.0.1:9';env.WASM_AGENT_LLM_API_KEY='synthetic-legacy';env.OPENCODE_GO_API_KEY=nil
 check(state.quota:find('same exhausted workspace',1,true)~=nil,'monthly quota explained')
 local answers={'2','manage'};local output={};manager.cli({print=function(s)output[#output+1]=s end,ask=function()return table.remove(answers,1)end})
 check(table.concat(output):find('http://127.0.0.1:8801',1,true)~=nil,'CLI management offers enrolled operator page, not terminal key reader')

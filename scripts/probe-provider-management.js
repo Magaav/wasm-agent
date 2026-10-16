@@ -4,9 +4,10 @@
  try{
   await window.rendererLoaded;await tick();for(let i=1;i<10000;i++){clearTimeout(i);clearInterval(i);}
   check(commandMatches('/provider')[0]?.name==='/provider','bare deterministic provider command');
+  input.value='/';syncCommands();check(commandMenu.querySelectorAll('.menu-item').length===8,'rendered menu matches eight-command contract');
   check(COMMANDS.length===8&&COMMANDS.slice(0,6).map(c=>c.name).join(',')==='/new,/update,/merge,/merge all,/efficiency_report,/orchestration','established six command defaults/order preserved');
   check(COMMANDS[6].name==='/provider'&&COMMANDS[7].name==='/login','management commands extend rather than displace defaults');
-  input.value='/';syncCommands();check(commandMenu.querySelectorAll('.menu-item').length===8,'rendered menu matches eight-command contract');commandMenu.close();input.value='';
+  commandMenu.close();input.value='';
   let calls=[],release=null;const old=apiFetch,oldConfirm=window.confirm,oldSelect=setProvider;
   const data={providers:[{id:'openai-sub',label:'OpenAI subscription',source:'native',configured:true,enabled:true},{id:'opencode-go',label:'OpenCode Go',source:'vault',configured:true,enabled:true,operator_url:'http://127.0.0.1:8801'}],quota:'Monthly GoUsageLimitError is account/workspace quota. A key from the same exhausted workspace may still fail. No automatic retry or provider switch.'};
   apiFetch=async(path,options={})=>{calls.push({path,body:options.body});check(path==='provider-management','management never calls inference/chat');return{json:async()=>data};};
