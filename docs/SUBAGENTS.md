@@ -290,6 +290,21 @@ and never as an automatic retry.
 
 ## Lightweight discovery
 
+For model tool follow-up, reuse the exact recorded subagent/dispatch or native
+attempt ID unchanged: `status` needs one direct owner-checked lookup, not a `list`
+scan. A child session ID is not a task ID; never guess or strip its `child:` prefix.
+Only when the task ID is missing, use the model tool's read-only `lookup_session`
+with explicit non-empty `conversation_id`. Check its latest identity/state and
+current authority/profile/model/reasoning before an authorized follow-up. Lookup
+is not permission to message an active task owner; uncertainty still requires
+explicit reconciliation. Mutating actions do not auto-resolve session IDs.
+
+The private `test-subagent-message-contract.mjs` proof asserts source/standalone
+embedded schema and Responses help parity, old-help failure, and one exact-ID
+model status lookup without registry discovery. Existing selection/native tests
+retain latest-tail, cached remote observation, ownership and refusal coverage.
+This is a deterministic call-count contract, not measured latency/token/quality.
+
 `list` returns owner-scoped identity/state summaries, not full prompts, results,
 previews, accounting or completion packets. Local dispatches map to one bulk
 native snapshot; discovery never makes per-dispatch status calls or refreshes

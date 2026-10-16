@@ -43,7 +43,7 @@ if (post) {
   if (baseline) {
     assert(path.isAbsolute(baseline)); files.push(describe(baseline));
     const result = run('old-embedded-negative', baseline, false);
-    assert(result.status === 1 && result.stderr.toString().includes('message_requires_key_in_tool_help'), 'old help must fail the contract');
+    assert(result.status === 1 && result.stderr.toString().includes('recorded_id_reuse_help'), 'old schema/help must fail recorded-ID reuse contract');
   }
   for (const mode of ['source', 'embedded']) {
     const result = run(mode, binary, mode === 'source');
