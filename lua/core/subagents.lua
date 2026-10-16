@@ -421,6 +421,7 @@ local function derive_ctx(ctx)
     model = ctx.model,
     reasoning = ctx.reasoning,
     remote = ctx.remote,
+    run_origin = (json.decode(host.runtime_info()) or {}).run_origin,
     placement = ctx.placement,
   }
 end
@@ -656,6 +657,7 @@ function M.start(args, ctx)
     -- Derived from the authenticated context, not from the body: a caller cannot
     -- name the run a child is filed under.
     parent_run_id = ctx.run_id,
+    run_origin = ctx.run_origin,
     node_id = ctx.node_id,
     event_node_id = (nodes.identity() or {}).node_id,
     role = ctx.role,
@@ -764,10 +766,10 @@ function M.control(args, ctx)
     if tostring(args.idempotency_key or "") == "" then return { error = "idempotency_key_required" } end
     for attempt = 1, 3 do
       local result = memory.transaction(function()
-        local guard=dofile('lua/core/wave_autoflush.lua').admission_guard({session_id=receipt.parent_session_id})
+        local guard=dofile('lua/core/wave_autoflush.lua').admission_guard({session_id=receipt.parent_session_id,user_id=ctx.user_id,role=ctx.role})
         if guard then return guard end
         return json.decode(host.subagent("continue", json.encode({
-          owner_user = ctx.user_id, id = receipt.subagent_id, text = tostring(args.text or ""),
+          owner_user = ctx.user_id, id = receipt.subagent_id, run_origin=ctx.run_origin, text = tostring(args.text or ""),
           new_id = host.uuid(), idempotency_key = tostring(args.idempotency_key) })))
       end)
       if result.error ~= "session_tail_changed" then

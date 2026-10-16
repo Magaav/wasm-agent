@@ -2374,10 +2374,15 @@ pub extern "C-unwind" fn runtime_info(l: *mut LuaState) -> c_int {
             .map(|bytes| ring::digest::digest(&ring::digest::SHA256, &bytes).as_ref()
                 .iter().map(|b| format!("{b:02x}")).collect::<String>());
         json!({"version": env!("CARGO_PKG_VERSION"), "binary_sha256": digest,
+            "build_source_commit":option_env!("WA_BUILD_SOURCE_COMMIT").unwrap_or(""),"build_source_tree":option_env!("WA_BUILD_SOURCE_TREE").unwrap_or(""),
+            "build_wave_generation":option_env!("WA_BUILD_WAVE_GENERATION").unwrap_or(""),
             "process_id": std::process::id(), "boot_id": new_uuid(), "os": std::env::consts::OS,
             "arch": std::env::consts::ARCH})
     });
-    push_json(l, identity);
+    let mut value=identity.clone();
+    value["binary_path"]=json!(std::env::current_exe().ok());
+    value["run_origin"]=json!(crate::serve::current_run_origin());
+    push_json(l, &value);
     1
 }
 

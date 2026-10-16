@@ -1162,6 +1162,7 @@ end
 
 function M:run(text, images)
   self.run_id=host.uuid()
+  self.run_origin=(json.decode(host.runtime_info()) or {}).run_origin
   local resource_ctx={session_id=self.session_id,user_id=self.user,run_id=self.run_id,subagent=self.subagent}
   local claimed=resources.begin(resource_ctx)
   if not claimed.ok then error("run_resource_refused: "..json.encode(claimed)) end
@@ -1888,7 +1889,7 @@ function M:run_body(text, images)
         -- This is not a generic beforeFinalAnswer hook or pre-stream guarantee.
         local wave_ok,wave=pcall(function()
           return dofile('lua/core/wave_autoflush.lua').finalize({session_id=self.session_id,
-            user_id=self.user,role=self.role,node_id=self.node,run_id=self.run_id,subagent=self.subagent,
+            user_id=self.user,role=self.role,node_id=self.node,run_id=self.run_id,subagent=self.subagent,run_origin=self.run_origin,
             current=function() return not foreground_cancelled() and not steering.pending(self.user,self.session_id,self.steering_run_id) end})
         end)
         if not wave_ok or wave then
@@ -1911,7 +1912,7 @@ function M:run_body(text, images)
     })
 
     local dispatch_ctx = { session_id = self.session_id, user_id = self.user, node_id = self.node,
-      run_id = self.run_id, subagent = self.subagent, changes = self.changes, codemode_policy=self.codemode_policy,
+      run_id = self.run_id, subagent = self.subagent, run_origin=self.run_origin, changes = self.changes, codemode_policy=self.codemode_policy,
       model_call = true, reviewed_paths = self.reviewed_paths,
       commit_audits = self.commit_audits, audit_step = self.audit_step,
       model = self.model, reasoning = (provider.reasoning(self.model) or {}).selected }

@@ -251,6 +251,7 @@ impl Task {
             "settled": self.settled,
             "session_id": self.session_id,
             "profile": self.profile,
+            "run_origin": self.spec["run_origin"],
             "prompt": self.spec["prompt"],
             "title": self.spec["title"],
             "owner_user": self.owner_user,
@@ -287,7 +288,7 @@ impl Task {
             "transport": "native", "session_id": self.session_id,
             "event_epoch": self.boot, "event_node_id": self.spec["event_node_id"],
             "node_id": self.node_id, "state": self.state, "settled": self.settled,
-            "profile": self.profile, "title": self.spec["title"],
+            "profile": self.profile, "title": self.spec["title"], "run_origin": self.spec["run_origin"],
             "model": self.spec["model"], "reasoning": self.spec["reasoning"],
             "parent_session_id": self.parent_session_id, "parent_run_id": self.parent_run_id,
             "created_at": self.created_at, "started_at": self.started_at,
@@ -676,6 +677,7 @@ impl Manager {
             return Err("prompt_too_large".into());
         }
         let mut spec = task.spec.clone();
+        if args["run_origin"].is_string() { spec["run_origin"]=args["run_origin"].clone(); }
         spec["after_id"] = json!(task.id);
         spec["id"] = args["new_id"].clone();
         spec["prompt"] = json!(text);

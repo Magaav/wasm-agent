@@ -19,21 +19,23 @@ local function run(cmd,cwd)
 end
 local function git(root,args) return run('git -C '..q(root)..' '..args,root) end
 local function hash(v) return host.sha256(json.encode(v)) end
-local function key(ctx) return 'wave-autoflush:v1:'..ctx.session_id end
+local function key(ctx) return 'wave-autoflush:v2:'..ctx.session_id end
 local function load(ctx)
   local raw=memory.meta_get(key(ctx))
-  if not raw then return {schema=1,enabled=false,revision=0,children={},requests={}} end
+  if not raw then return {schema=2,enabled=false,revision=0,children={},requests={},history={}} end
   local s=assert(decode(raw),'wave_state_unreadable')
-  assert(s.schema==1 and type(s.enabled)=='boolean' and type(s.revision)=='number' and s.revision>=0 and s.revision%1==0 and type(s.children)=='table' and type(s.requests)=='table','wave_state_unsupported')
+  assert(s.schema==2 and type(s.enabled)=='boolean' and type(s.revision)=='number' and s.revision>=0 and s.revision%1==0 and type(s.children)=='table' and type(s.requests)=='table','wave_state_unsupported')
   return s
 end
 local function save(ctx,s) memory.meta_set(key(ctx),json.encode(s)) end
 local function authority(ctx)
+  local origin=(decode(host.runtime_info()) or {}).run_origin
+  if origin~='cli' and origin~='interactive' and origin~='completion' and origin~='control' then return nil,'wave_origin_not_applicable' end
   if ctx.subagent or ctx.remote or ctx.profile or ctx.job_id or ctx.delivery_id or not users.is_master(ctx.role) or not nodes.is_master() then return nil,'wave_coordinator_only' end
   local user=users.find(ctx.user_id)
   if not user or not users.is_master(user.role) then return nil,'wave_owner_revoked' end
   local p=memory.session(ctx.session_id)
-  if not p or p.user_id~=ctx.user_id or p.objective=='subagent' or tostring(p.route_id):lower():find('whatsapp',1,true) or tostring(p.objective):lower():find('whatsapp',1,true) or (p.parent_session_id or '')~='' then return nil,'wave_parent_forbidden' end
+  if not p or p.user_id~=ctx.user_id or p.objective=='subagent' or tostring(p.route_id):lower():find('whatsapp',1,true) or (p.parent_session_id or '')~='' then return nil,'wave_parent_forbidden' end
   local node=(nodes.identity() or {}).node_id
   if not node or node=='' or (p.node_id~='' and p.node_id~=node) then return nil,'wave_node_mismatch' end
   return {owner=ctx.user_id,parent=ctx.session_id,node=node}
@@ -43,11 +45,18 @@ local function repository(ctx)
   if not root or root=='' then
     local update=dofile('lua/core/update.lua');root=update.runtime_tree(update.install_dir())
   end
-  assert(root and root~='','wave_repository_missing')
-  local main=git(root,'worktree list --porcelain'):match('^worktree ([^\r\n]+)')
+  if not root or root=='' then return nil,'selected_repository_unavailable' end
+  local readable,common=pcall(git,root,'rev-parse --path-format=absolute --git-common-dir')
+  if not readable then return nil,'not_a_self_repository' end
+  local update=dofile('lua/core/update.lua')
+  local runtime=update.runtime_tree(update.install_dir())
+  assert(runtime and runtime~='','wave_runtime_identity_unavailable')
+  local runtime_common=git(runtime,'rev-parse --path-format=absolute --git-common-dir')
+  local normalize=function(v) return platform.os()=='windows' and v:lower() or v end
+  if normalize(common)~=normalize(runtime_common) then return nil,'other_repository' end
+  local main=git(runtime,'worktree list --porcelain'):match('^worktree ([^\r\n]+)')
   assert(main and git(main,'branch --show-current')=='main','wave_canonical_main_missing')
-  local common=git(root,'rev-parse --path-format=absolute --git-common-dir')
-  return {main=main,common=common,id=host.sha256(platform.os()=='windows' and common:lower() or common)}
+  return {main=main,common=common,id=host.sha256(normalize(common)),runtime_common=runtime_common}
 end
 local function source(repo)
   assert(git(repo.main,'status --porcelain --untracked-files=all')=='','wave_source_dirty')
@@ -78,11 +87,13 @@ function M.capture(mem,ctx,root,tip,base)
     fact.repository=git(root,'rev-parse --path-format=absolute --git-common-dir')
     fact.tree=git(root,'rev-parse '..tip..'^{tree}')
     assert(git(root,'status --porcelain --untracked-files=all')=='','child_dirty')
-    git(root,'merge-base --is-ancestor '..base..' '..tip)
+    fact.comparison_base=base
+    fact.merge_base=git(root,'merge-base '..base..' '..tip)
+    assert(fact.merge_base~=tip,'already_merged_own_tip_unmeasured')
     local manifest=assert(decode(git(root,'show '..base..':scripts/deploy-shipped.json')),'shipped_rules_unreadable')
     assert(manifest.schema==1 and type(manifest.directories)=='table' and type(manifest.files)=='table' and type(manifest.globs)=='table','shipped_rules_unsupported')
     fact.rules_sha256=hash(manifest);fact.paths={};fact.shipped={}
-    for path in git(root,'diff --name-only -z '..base..' '..tip):gmatch('[^%z]+') do
+    for path in git(root,'diff --name-only -z '..fact.merge_base..' '..tip):gmatch('[^%z]+') do
       fact.paths[#fact.paths+1]=path
       if shipped(path,manifest) then fact.shipped[#fact.shipped+1]=path end
     end
@@ -98,12 +109,11 @@ end
 function M.settlement(result,owner,parent)
   local sid=tostring(result.session_id or '')
   local fact=decode(memory.meta_get('wave-impact:'..sid))
+  if fact and (not fact.comparison_base or not fact.merge_base) then
+    fact={schema=1,session=sid,owner=owner,verdict='unknown',error='legacy_own_impact_unmeasured',original_fact_digest=fact.digest}
+  end
   if not fact then
-    local w=memory.session_workspace(sid)
-    if w and w.worktree and w.worktree~='' then
-      local ok,tip=pcall(git,w.worktree,'rev-parse HEAD')
-      fact=M.capture(memory,{session_id=sid,user_id=owner},w.worktree,ok and tip or nil,w.base_commit)
-    else fact={schema=1,session=sid,owner=owner,verdict='unknown',error='workspace_unreadable'} end
+    fact={schema=1,session=sid,owner=owner,verdict='unknown',error='original_own_tip_integration_comparison_unmeasured'}
   end
   local envelope={child=result.subagent_id,owner=owner,parent=parent,node=(nodes.identity() or {}).node_id,session=sid,state=result.state,impact=fact}
   envelope.digest=hash(envelope)
@@ -111,12 +121,40 @@ function M.settlement(result,owner,parent)
   return envelope
 end
 -- Native list is unpaginated and owner-scoped. Never infer activity from our owed rows.
-local function refresh(ctx,s)
+local function native_children(ctx)
   local view=assert(decode(host.subagent('list',json.encode({owner_user=ctx.user_id}))),'wave_native_list_unreadable')
   assert(not view.error and type(view.subagents)=='table','wave_native_list_unavailable')
+  return view.subagents
+end
+local function relevant(child,ctx,repo)
+  if child.parent_session_id~=ctx.session_id or child.profile~='orchestration-worker' then return false end
+  if child.run_origin~='cli' and child.run_origin~='interactive' and child.run_origin~='completion' and child.run_origin~='control' then return false end
+  local w=memory.session_workspace(child.session_id)
+  if not w or not w.worktree then return false end
+  local ok,common=pcall(git,w.worktree,'rev-parse --path-format=absolute --git-common-dir')
+  return ok and common==repo.common
+end
+local function generation(ctx,s,repo,admitted)
+  if s.generation then s.history[#s.history+1]={generation=s.generation,children=s.children,obligation=s.obligation} end
+  s.children={};s.qualified=nil
+  s.generation={id=host.uuid(),opened_at=host.now(),baseline={},included={}}
+  for _,c in ipairs(native_children(ctx)) do
+    s.generation.baseline[c.subagent_id]=true
+    if c.subagent_id==admitted or (not c.settled and c.state~='unknown' and relevant(c,ctx,repo)) then s.generation.included[c.subagent_id]=true end
+  end
+end
+local function refresh(ctx,s)
+  local repo=assert(s.repository,'wave_scope_required')
+  local native=native_children(ctx)
+  if s.generation and s.generation.closed then
+    for _,c in ipairs(native) do
+      if not s.generation.baseline[c.subagent_id] and not s.children[c.subagent_id] and relevant(c,ctx,repo) then generation(ctx,s,repo,c.subagent_id);break end
+    end
+  end
   local ids,active={},0
-  for _,child in ipairs(view.subagents) do
-    if child.parent_session_id==ctx.session_id and child.profile=='orchestration-worker' then
+  for _,child in ipairs(native) do
+    local member=s.generation and (s.children[child.subagent_id] or s.enabled and (s.generation.included[child.subagent_id] or not s.generation.baseline[child.subagent_id] and relevant(child,ctx,repo)))
+    if member then
       local id=assert(child.subagent_id,'wave_native_id_missing');ids[#ids+1]=id
       local old=s.children[id] or {}
       local settled=child.settled==true or child.state=='unknown'
@@ -187,19 +225,29 @@ local function observe(s)
     local child=s.children[id];if child and child.fingerprint==fingerprint then child.covered=fingerprint end
   end
   s.inflight=nil;s.blocker=nil;s.obligation='installed_verified'
+  if s.generation then s.generation.closed=true end
 end
 function M.admission_guard(ctx)
+  local scope=authority(ctx);if not scope then return end
+  local repo=repository(ctx);if not repo then return end
   local s=load(ctx)
+  if s.enabled and s.inflight then
+    bound(s,scope,repo)
+    observe(s) -- verification-only consumption before a new SELF admission; never replay
+    save(ctx,s)
+  end
   if s.enabled and s.inflight then return {error='wave_installation_obligation_held',effect='none',reservation=s.inflight} end
 end
 function M.admitted(id,ctx)
   -- Existing native admission notification only invalidates; it never queues.
-  local s=load(ctx)
+  local s=load(ctx);if not s.enabled then return end
   local scope=authority(ctx);if not scope then return end
+  local repo=repository(ctx);if not repo then return end
   local v=decode(host.subagent('status',json.encode({owner_user=ctx.user_id,id=id})))
-  if not v or v.profile~='orchestration-worker' or v.parent_session_id~=ctx.session_id then return end
+  if not v or not relevant(v,ctx,repo) then return end
   memory.transaction(function()
     s=load(ctx)
+    if not s.generation or s.generation.closed then generation(ctx,s,repo,id) end
     if not s.children[id] then
       -- Native admission reference survives a lost/corrupt runtime record. It is
       -- NOT an activity flag: refresh still derives working from native records,
@@ -232,22 +280,43 @@ local function ready(s,repo)
   end
   return owed
 end
+local function binary_ready(s,repo,current,receipt)
+  assert(type(receipt)=='string' and receipt~='','wave_source_bound_build_receipt_required')
+  local runtime=assert(decode(host.runtime_info()),'wave_runtime_identity_missing')
+  assert(runtime.binary_path and runtime.binary_sha256,'wave_installed_binary_unmeasured')
+  local command='node '..q(repo.main..'/scripts/codemode-build.mjs')..' qualify-wave '..q(repo.main)
+    ..' --receipt '..q(receipt)..' --generation '..q(s.generation.id)..' --opened-at '..q(s.generation.opened_at)
+    ..' --installed-binary '..q(runtime.binary_path)
+  local result=assert(decode(run(command,repo.main)),'wave_binary_verification_unreadable')
+  assert(result.ok==true and result.source_commit==current.sha and result.source_tree==current.tree
+    and result.generation==s.generation.id and result.binary_sha256~=runtime.binary_sha256,'wave_binary_identity_mismatch')
+  return result
+end
+local function recheck_binary(s,repo,qualified)
+  local actual=binary_ready(s,repo,qualified.source,qualified.binary.receipt)
+  for _,field in ipairs({'receipt_sha256','binary_sha256','binary','generation','platform','arch'}) do
+    assert(actual[field]==qualified.binary[field],'wave_qualified_binary_changed:'..field)
+  end
+end
 function M.control(args,ctx)
-  local scope,err=authority(ctx);if not scope then return {error=err} end
+  local scope,err=authority(ctx);if not scope then return {error=err,not_applicable=err=='wave_origin_not_applicable'} end
   local ok,result=pcall(function()
-    local repo=repository(ctx)
+    local repo,why=repository(ctx)
+    if not repo then return {ok=true,not_applicable=true,reason=why} end
     return memory.transaction(function()
       local s=load(ctx)
       if s.scope then bound(s,scope,repo) end
       if args.action=='enable' then
+        assert(not s.inflight,'wave_admitted_obligation_held; observe/reconcile the original before re-enabling')
         assert(host.getenv('WASM_AGENT_COMPLETION_WAKE')~='0','wave_native_completion_disabled')
         assert(args.revision==s.revision,'wave_revision_conflict')
+        if not s.enabled then generation(ctx,s,repo) end
         s.scope=scope;s.repository=repo;s.enabled=true;s.qualified=nil;s.revision=s.revision+1
       elseif args.action=='off' then
         assert(args.revision==s.revision,'wave_revision_conflict')
         s.enabled=false;s.qualified=nil;s.revision=s.revision+1
       elseif args.action~='status' and args.action~='accept' and args.action~='qualify' and args.action~='reconcile' then error('wave_action_invalid') end
-      refresh(ctx,s);observe(s)
+      if s.repository then refresh(ctx,s);observe(s) end
       if args.action=='reconcile' then
         assert(type(args.evidence)=='string' and args.evidence:find('%S'),'wave_original_evidence_required')
         assert(args.revision==s.revision and s.inflight,'wave_reconciliation_binding_required')
@@ -277,7 +346,8 @@ function M.control(args,ctx)
           s.qualified=nil;s.revision=s.revision+1
         else
           assert(ready(s,repo),'wave_no_install_impact')
-          s.qualified={source=current,revision=s.revision,childset=s.childset,evidence=args.evidence,run=ctx.run_id}
+          local binary=binary_ready(s,repo,current,args.binary_receipt)
+          s.qualified={source=current,binary=binary,revision=s.revision,childset=s.childset,evidence=args.evidence,run=ctx.run_id}
         end
       end
       save(ctx,s);return {ok=true,wave=s,source=(function() local ok,v=pcall(source,repo);return ok and v or {error=tostring(v)} end)()}
@@ -291,7 +361,8 @@ function M.finalize(ctx)
   local scope=authority(ctx);if not scope then return end
   local s=load(ctx);if not s.enabled then return end
   local ok,result=pcall(function()
-    local repo=repository(ctx);bound(s,scope,repo)
+    local repo,why=repository(ctx);if not repo then return {not_applicable=true,reason=why} end
+    bound(s,scope,repo)
     assert(not ctx.current or ctx.current(),'wave_coordinator_candidate_changed')
     local reservation,observation
     memory.transaction(function()
@@ -305,11 +376,16 @@ function M.finalize(ctx)
           return
         end
         if s.inflight then error('wave_request_held:'..s.inflight) end
+        if not ready(s,repo) then
+          if s.generation then s.generation.closed=true end
+          s.obligation='none';observation={not_applicable=true,reason='no_own_install_impact'};return
+        end
         assert(s.qualified,'wave_review_or_qualification_needed')
         assert(s.qualified.revision==s.revision and s.qualified.childset==s.childset,'wave_readiness_stale')
         assert(ready(s,repo),'wave_no_install_impact')
         local current=source(repo)
         assert(same(current,s.qualified.source),'wave_qualified_source_changed')
+        recheck_binary(s,repo,s.qualified)
         reservation={id=host.uuid(),state='reserved',source=current,scope=scope,qualified=s.qualified,fingerprints={}}
         for id,child in pairs(s.children) do reservation.fingerprints[id]=child.fingerprint end
         s.inflight=reservation.id;s.requests[#s.requests+1]=reservation;s.qualified=nil
@@ -331,6 +407,7 @@ function M.finalize(ctx)
           local current=load(ctx);refresh(ctx,current)
           assert(current.enabled and current.inflight==reservation.id and current.revision==reservation.qualified.revision and current.active==0,'wave_activity_changed_before_queue')
           assert(ready(current,repo),'wave_readiness_changed_before_queue')
+          recheck_binary(current,repo,reservation.qualified)
           save(ctx,current);return true
         end)
       end})

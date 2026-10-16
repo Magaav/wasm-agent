@@ -1,95 +1,114 @@
-# Durable ordinary-worker wave closure
+# Durable wasm-agent SELF wave closure
 
-This is a coordinator control plane, **not** the historical wave factory, a job,
-a generic beforeFinalAnswer hook, or an installer. Default is OFF. It uses the
-existing native child completion notification, with no second inference wake.
-The disabled legacy `onSubagentReturn` placeholder/polling jobs are not its producer
-and should remain disabled. Engine's native child-completion inventory names the
-actual producer. Inventory does not activate anything.
+This is not a scheduler, historical wave factory, generic beforeFinalAnswer hook,
+or installer. It defaults OFF. It reuses the native child completion notification,
+not the legacy placeholder/polling jobs. Those jobs remain disabled. Nothing here
+narrows Fast/native code mode for other eligible coding projects.
 
-## Coordinator activation after installation
+## Scope and generation
 
-Only the local MASTER root coordinator for the selected repository/node uses the
-ordinary `wave_autoflush` tool (also discoverable by `tool_search`). It is excluded
-from child profiles and code-mode guest wrappers. No settings, jobs, provider,
-model, reasoning, costs, services or installed assets are changed by activation.
+Only local MASTER root coordinators can control closure. The selected repository's
+actual common-Git identity must equal the repository in the node's authoritative
+runtime-worktree record (or native development runtime checkout). A directory name,
+a copied manifest, a candidate file, or model text does not establish self scope.
+Other repositories return NOT APPLICABLE before creating debt or admission fences.
 
-1. `wave_autoflush {action:"status"}`: inspect scope, source, native children,
-   measured facts, original evidence, revision and any blocker.
-2. `wave_autoflush {action:"enable",revision:<observed revision>}`.
-3. After a report, inspect the original child transcript/diff/focused check logs.
-   `completed`, fetching a result, integration and self-review are **not** acceptance.
-   For each required child call `accept` with the observed `revision`, `child_id`,
-   original own `tip`, settlement `digest`, current published full `sha`, `tree`,
-   and `evidence` naming the original records and coordinator judgement. Self-review
-   remains self-review, not independent review. Dirty/unreadable/unintegrated drafts
-   remain held and recoverable.
-4. `qualify` with the latest revision, exact published full sha/tree and original
-   evidence for the combined source. This explicitly authorizes closure queueing,
-   not installation success. Every required child must have settled and been accepted.
-   Newly admitted work or changed source invalidates old readiness.
-5. The **normal completed coordinator candidate** closes deterministically after
-   steering/audit decisions. It reserves durably before backup/queue and writes one
-   supported `request deploy --expected-sha ... --owner ... --session ...` request.
-   It retains the full structured operation/plaintext CLI receipt and immutable
-   request readback. No legacy prompt/branch-switching update route is used.
-   This is not a pre-stream timing guarantee. Ordinary status/questions without
-   explicit enabled+accepted+qualified owed work do not queue an installation.
+Native run origin is carried from admission through runtime_info and child specs.
+Background HTTP/automation, remote and job-script origins cannot qualify/queue or
+create self-wave obligations. Origin comes from native scheduling/context, never
+prompt text or a body field. Jobs' subagent submissions retain native background
+demotion. Specialized/guest/child/foreign contexts retain their original ceilings;
+`wave_autoflush` is excluded from code-mode guest wrappers.
 
-`wave_autoflush {action:"off",revision:<observed revision>}` disables future
-closure. It never cancels an admitted request or clears unknown installation
-reservations. `status` remains available. Enabling alone accepts nothing.
+`enable` opens a generation from a fresh native child snapshot. Settled historical
+records and old unknown leftovers are baseline history, not required members.
+Relevant active SELF workers at enable and new relevant native admissions belong
+to the generation. Operational-job and foreign-repository children do not. Missing
+previously enrolled native records hold as unknown; working/idle is still derived
+from the actual relevant native snapshot, not a pending flag. Off-time returns
+and preserved v1 records are never swept into a later wave. v2 starts OFF and does
+not adopt old qualification, reservations or synthetic readiness. Original v1
+records remain at `wave-autoflush:v1:<parent>`; v2 uses its own versioned key.
 
-## Evidence and crash boundaries
+Integration records the original own tip, fresh fetched actual-main comparison,
+merge base, exact changed paths and installer-shipped rule digest BEFORE merge/ff.
+Thus a docs-only child that synced another wave's shipped changes owes no install
+of its own. An already-merged child without original comparison proof is UNKNOWN,
+not zero. Dirty/rejected drafts and old facts remain recoverable and held.
 
-Versioned parent/owner/node/repository state lives in native memory `meta` under
-`wave-autoflush:v1:<parent>`. Original impact and settlement facts are separate
-append-only digest-addressed records. Integration measures the native workspace
-admission base -> original own tip **before** its fast-forward. Current main equality
-is not evidence of zero impact. Installer-shipped rules are read from the retained
-base's manifest; missing rules/base/checkout are unknown, never zero. This can
-conservatively over-include upstream work; it cannot erase integrated own work.
+## Coordinator procedure after installation
 
-Working/idle is derived from the actual owner-scoped, unpaginated native child list,
-not from pending wave bookkeeping. A missing previously observed native record is
-held. Same-database admission and reservation transactions fence new ordinary child
-starts/continuations during an admitted closure. Backup is followed by fresh
-native activity/source checks before the queue write. Native Sentinel still checks
-actual idle, immutable source/owner/node/hook and its global installation reservation.
-Privileged out-of-band filesystem/Git writers are outside this cooperative boundary.
+1. Ordinary `wave_autoflush {action:"status"}`, then `enable` with the observed
+   revision. Inspect the actual generation id/opening time and native membership.
+2. Read original child transcripts, diffs and focused check logs. For every required
+   child, call `accept` with revision, child_id, original tip, settlement digest,
+   current published full sha/tree and original evidence. Completion, fetching a
+   result, integration, or self-review never means acceptance. Self-review stays
+   labelled self-review, not independent review.
+3. A NEW physical release binary must **already exist**. Build from the exact
+   final accepted clean published canonical main using the existing offline door:
+   `node scripts/codemode-build.mjs build <absolute-main> --wave-generation <id>`
+   (existing prepared `--assets <path>` is supported). No downloader, package
+   manager, provisioning, global PATH edit or installer is used. Keep the emitted
+   original build receipt and raw Cargo/native/embedded logs.
+4. Call `qualify` with current revision, full sha/tree, `binary_receipt` pointing
+   to that actual build receipt, and original combined-source evidence. An evidence
+   string or ready:true cannot replace physical-binary proof. A no-install-impact
+   accepted generation closes without binary qualification or deployment debt.
+5. The normal completed coordinator candidate performs closure after existing
+   steering/audit decisions. It rechecks physical binary/receipt/source/activity,
+   reserves durably BEFORE any queue write, then uses supported source-bound
+   `request deploy --expected-sha ... --owner ... --session ...`. Backup is followed
+   by another activity/source/binary recheck. No legacy prompt/branch-switching
+   update route is used. There is no pre-stream timing promise.
 
-Crash before queue, lost response, busy/source mismatch, failed install and unknown
-notification all hold; none earns an automatic second effect. Original receipts,
-logs, reservations and native journals are never deleted/reset. An existing failed
-admitted native installation reservation blocks the strict queue path; this workflow
-cannot retire it or replay its installer. Reconciliation belongs to the existing
-external native protocol doors documented in SENTINEL.md.
+`off` with the observed revision disables future closure. It never clears an
+admitted request, installation reservation or unknown effect. `status` remains the
+inspection door. No live job or policy is enabled by installation or inventory.
 
-If a queue response was lost, after inspecting originals the coordinator may call
-`reconcile` with current revision, exact `request_id` and original `evidence`.
-This is read-only observation of an exact immutable intent carrying this wave's
-unique reservation marker; it never queues or clears a global reservation. The
-original ambiguous receipt is retained separately. Wrong parent/owner/source/wave
-ids refuse. An unqueued reservation with no attributable native intent stays held.
+## Binary qualification
 
-Queued/spawned/exit0/failure/generic green objects are **not installed**. Only a
-request-bound native `verification.json`, matching immutable intent/binding/effect,
-verified native global effect generation, successful actual installer result, exact
-source/tree/owner/parent/artifact identities and retained raw verifier logs can mark
-`installed_verified`. This is consumption of native historical verification evidence,
-not a new fresh verifier run by Lua. Only children in that exact request's snapshot
-are covered. Notification delivery and installation evidence remain distinct.
-A later wave can proceed after status observes that proof. No positive live install
-is claimed by the private fake-queue fixture.
+The existing codemode build receipt records source/common repository, clean flag,
+source tree, native target, build times, generation, actual binary hash and raw
+log hashes. The native artifact also contains compiled source/tree/generation
+identity (not runtime environment claims). The same offline builder's narrow
+`qualify-wave` adapter reads exact binary bytes (not host.read_file's UTF8 path),
+checks physical release location/target, current source, original receipt/logs,
+prepared asset snapshot and native runtime tool identity, then executes a FRESH
+private embedded source/assets/native guest check and compiled identity check.
+It never builds or installs. Missing/corrupt/stale/wrong-source/earlier-generation,
+unchanged installed bytes, and arbitrary ready flags refuse. Original receipts and
+new verifier logs remain accessible. Qualification stores their exact identities;
+closure and prequeue repeat verification so byte/receipt/source drift holds.
+The current node image is measured natively; an old installed artifact is not new
+binary availability. An ordinary untagged build is not wave qualification.
+
+## Effects and recovery
+
+Full original structured operations/stdout are retained. Sentinel's real TEXT
+receipt has two leading spaces; only a parsing view is normalized. Queue admission
+still requires exact immutable intent/owner/parent/source/wave-marker readback.
+Queued, spawned, generic exit0 and child claims are not installation evidence.
+
+Crash before/after queue, lost response, busy/change mismatch, failed installation
+and unknown notification retain named holds and never authorize automatic replay.
+The protected failed/admitted global reservation is never cleared or adopted by
+this workflow. Only existing external native reconciliation/retirement doors can
+settle their exact generation. `reconcile` observes an exact wave-tagged native
+request by id while preserving the original ambiguous receipt; it never queues.
+Native request-bound actual verification remains necessary for installed state,
+independent of notification delivery. Private fake queues are not installation
+proof. Privileged out-of-band filesystem writers remain outside this cooperative
+local boundary.
 
 ## Focused proof
 
 `node scripts/test-wave-autoflush.cjs <absolute-built-wa> <fresh-private-output>`
-runs actual Lua/SQLite/Git integration and the actual coordinator agent loop with
-fake inference and an explicitly FAKE queue, source and standalone embedded.
-It compares the old agent's owed+qualified/no-request closure against the new normal
-closure, tests duplicate/module/process restart and before/after queue ambiguity,
-all return states, authority fences, active/new work, source changes, dirty drafts,
-docs-only/unmeasured impact and exact TEXT receipt readback. It preserves inherited
-child provenance; no real forbidden Sentinel effect is coerced. Positive actual
-installation verification remains coordinator/external-Sentinel-only.
+uses private Git/bare remotes/homes/DBs, actual offline release builds and native
+embedded qualification, actual agent closure with fake inference/queue, source
+and standalone embedded modes, and process restart. It retains the baseline
+110 assertions and original logs; followup oracles add SELF/other repo, native
+operational-job, historical generation, docs/upstream sync, real missing/corrupt/
+stale/wrong-source/old-installed/earlier-wave artifacts, byte/source drift, real
+indented TEXT receipts and old permissive-source negative controls. It preserves
+inherited provenance/guards. No live activation, installer or paid provider is used.

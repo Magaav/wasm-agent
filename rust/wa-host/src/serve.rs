@@ -278,11 +278,18 @@ thread_local! {
     /// interpreter had made progress, so per-node-thread liveness was impossible until this existed.
     static NODE_THREAD_ID: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static CURRENT_RUN_ID: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static CURRENT_RUN_ORIGIN: std::cell::Cell<&'static str> = const { std::cell::Cell::new("cli") };
     static IN_RUN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// The cancel flag of the run this thread is executing right now. The runtime's provider reader
     /// and agent loop poll `run_cancel_requested()`, so a cancel request reaches a model call on the
     /// same thread that is blocked in it, without a global lookup and without reaching another run.
     static CURRENT_RUN_CANCEL: RefCell<Option<Arc<AtomicBool>>> = const { RefCell::new(None) };
+}
+
+/// Native admission origin, never a field from the chat body or model arguments.
+pub(crate) fn current_run_origin() -> &'static str {
+    if std::env::var_os("WA_JOB_DELIVERY_ID").is_some() || std::env::var_os("WA_JOB_EVENT_FILE").is_some() { return "job"; }
+    CURRENT_RUN_ORIGIN.with(|origin| origin.get())
 }
 
 /// Has the owner of the run on this thread requested cancellation?
@@ -1907,10 +1914,12 @@ fn node_thread_loop(
                 begin_run_events(run_id);
                 let mut request: serde_json::Value=serde_json::from_str(&body).unwrap_or_default();
                 request["cancelled"]=serde_json::json!(run_cancel_requested());
+                CURRENT_RUN_ORIGIN.with(|origin|origin.set("completion"));
                 if let Err(error) = lua.call_string("wa_completion_run", &[&request.to_string()]) {
                     write_event(&serde_json::json!({"type":"error","error":error}).to_string());
                 }
                 finish_run_events(run_id);
+                CURRENT_RUN_ORIGIN.with(|origin|origin.set("cli"));
                 CURRENT_RUN_ID.with(|id| id.set(0));
                 set_current_run_io(None,None,String::new());
                 IN_RUN.with(|flag| flag.set(false));
@@ -1956,6 +1965,7 @@ fn node_thread_loop(
                         }
                     }
                 }
+                CURRENT_RUN_ORIGIN.with(|origin|origin.set(if request.run_class==scheduler::RunClass::Background {"background"} else if is_run_route(&request) {"interactive"} else {"control"}));
                 IN_RUN.with(|flag| flag.set(is_run_route(&request)));
                 if is_run_route(&request) {
                     // Install this run's own cancel flag and socket slot, and mark it running, so a
@@ -1975,6 +1985,7 @@ fn node_thread_loop(
                 } else {
                     let _ = handle(&lua, &agent_ui, &mut stream, &request);
                 }
+                CURRENT_RUN_ORIGIN.with(|origin|origin.set("cli"));
                 if replay_run {
                     finish_run_events(request.run_id);
                 }
@@ -2017,8 +2028,10 @@ fn node_thread_loop(
                 set_current_run_io(Some(relay.cancel.clone()), Some(relay.sockets.clone()), format!("run:{}", relay.run_id));
                 CURRENT_RUN_ID.with(|id|id.set(relay.run_id));
                 scheduler::mark_running(relay.run_id);
+                CURRENT_RUN_ORIGIN.with(|origin|origin.set("remote"));
                 let (status, body) = if run_cancel_requested() { (503, "{\"error\":\"run_cancelled\"}".to_string()) }
                     else { process_relay_job(&lua, &agent_ui, &relay.job, relay.verified.as_ref()) };
+                CURRENT_RUN_ORIGIN.with(|origin|origin.set("cli"));
                 CURRENT_RUN_ID.with(|id|id.set(0));
                 set_current_run_io(None, None, String::new());
                 scheduler::complete_run(relay.run_id);
