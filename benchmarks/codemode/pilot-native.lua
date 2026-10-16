@@ -5,11 +5,11 @@ assert(config.mode=='qualification' or config.mode=='live' and host.getenv('WA_B
 assert(config.model=='gpt-6.1-sol' and config.reasoning=='low','fixed model/reasoning required')
 assert(config.route:match('^http://127%.0%.0%.1:%d+/arms/%x+$'),'private controlled model route required')
 local get=host.getenv
-host.getenv=function(k)if k=='WASM_AGENT_CODEMODE' then return (config.forced or config.arm~='wasm-current') and 'native' or ''end;return get(k)end
+host.getenv=function(k)if k=='WASM_AGENT_CODEMODE' then return (config.screen and config.screen.treatment=='B' or not config.screen and (config.forced or config.arm~='wasm-current')) and 'native' or ''end;return get(k)end
 if config.reference_client then
  assert(load(assert(host.read_file(config.reference_client)),'benchmark-reference-client'))().install({url=config.reference_url,key=config.reference_key})
 end
-local adapter=assert(load(assert(host.read_file(config.sandbox_client)),'benchmark-sandbox-client'))().install(config.sandbox)
+local adapter=assert(load(assert(host.read_file(config.sandbox_client)),'benchmark-sandbox-client'))().install(config.sandbox,config.screen and config.screen.api_schema)
 local memory=dofile('lua/core/memory.lua');memory.setup()
 local sid=memory.start_session('','isolated benchmark '..config.arm,{user_id='master'})
 -- This private session's actual filesystem is the recorded container, not a
