@@ -70,9 +70,9 @@ const INSTALLER_VARIABLES = {
 /// quote-then-slash form is how deploy.sh spells *every glob it installs*, and missing it is why dropping
 /// `jobs/`, `scripts/whatsapp-*` or `scripts/subagent-return-*` from the manifest used to stay green.
 const TREE_PATH = /\$(?:ROOT|SOURCE_ROOT|SOURCE_UI)["']?\/([A-Za-z0-9._*/-]+)/g;
-/// A line that installs something. `cp -f`/`cp -R`/plain `cp`, `install`, `mv`, and the `for source in`
+/// A line that installs something. `ship_file`, `cp -f`/`cp -R`/plain `cp`, `install`, `mv`, and the `for source in`
 /// loops that feed them. Prose is stripped first: `install` is an English word too.
-const COPY_LINE = /(^|[\s|;&({])(cp|install|mv)\s/;
+const COPY_LINE = /(^|[\s|;&({])(cp|install|mv|ship_file)\s/;
 const LOOP_LINE = /for\s+(source|skill_source)\s+in\s/;
 
 function stripComment(line) {
