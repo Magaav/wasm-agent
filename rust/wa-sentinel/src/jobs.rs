@@ -1117,6 +1117,7 @@ fn node_subagents(request: &Value) -> Result<Value> {
             "X-WA-Session",
             &std::env::var("WA_SENTINEL_AUTH_SESSION").unwrap_or_default(),
         )
+        .header("X-WA-Run-Class", "background") // native demotion also reaches control/subagent admission
         .send(request.to_string().as_bytes())?;
     let status = response.status().as_u16();
     let text = response.into_body().read_to_string().unwrap_or_default();

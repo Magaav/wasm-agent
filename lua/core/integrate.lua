@@ -35,9 +35,7 @@ function M.run(memory,ctx)
     if not message:find('Agent:',1,true) or not message:find('session='..ctx.session_id,1,true) then
       return {error='integration_provenance_missing',effect='none'}
     end
-    -- Measure the native admission base -> original own tip BEFORE any merge/ff.
-    -- Unknown measurement is retained, not a reason to discard recoverable Git work.
-    local impact=dofile('lua/core/wave_autoflush.lua').capture(memory,ctx,own,tip,workspace.base_commit)
+    -- Capture against fresh actual main, not the stale admission base.
     local common=git(own,'rev-parse --path-format=absolute --git-common-dir')
     local main=git(own,'worktree list --porcelain'):match('^worktree ([^\r\n]+)')
     if not main or git(main,'branch --show-current')~='main' then return {error='canonical_main_unavailable',effect='none'} end
@@ -56,6 +54,7 @@ function M.run(memory,ctx)
     if git(main,'rev-parse HEAD')~=base or git(main,'status --porcelain')~='' or git(own,'rev-parse HEAD')~=tip then
       return {error='integration_candidate_changed',effect='none'}
     end
+    local impact=dofile('lua/core/wave_autoflush.lua').capture(memory,ctx,own,tip,base)
     local journal=paths.data()..'/integration-'..host.uuid()..'.json'
     assert(host.write_file(journal,json.encode({state='admitted',own=own,main=main,tip=tip,base=base,session_id=ctx.session_id})),'integration_journal_write_failed')
     memory.meta_set(effect_key,journal)

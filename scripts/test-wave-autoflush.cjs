@@ -3,20 +3,32 @@ const fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypt
 const repo=path.resolve(__dirname,'..'),[binaryArg,outArg]=process.argv.slice(2);assert(binaryArg&&outArg);
 const binary=path.resolve(binaryArg),out=path.resolve(outArg);assert(!fs.existsSync(out));fs.mkdirSync(out,{recursive:true});
 const hash=f=>crypto.createHash('sha256').update(fs.readFileSync(f)).digest('hex');
-const sourceNames=['lua/core/agent.lua','lua/core/codemode.lua','lua/core/completions.lua','lua/core/hook_events.lua','lua/core/integrate.lua','lua/core/subagents.lua','lua/core/tools.lua','lua/core/update.lua','lua/core/wave_autoflush.lua','scripts/test-wave-autoflush.lua','scripts/test-wave-autoflush-restart.lua','scripts/test-wave-autoflush.cjs'];
+const sourceNames=['lua/core/agent.lua','lua/core/codemode.lua','lua/core/completions.lua','lua/core/hook_events.lua','lua/core/integrate.lua','lua/core/subagents.lua','lua/core/tools.lua','lua/core/update.lua','lua/core/wave_autoflush.lua','scripts/test-wave-autoflush.lua','scripts/test-wave-autoflush-restart.lua','scripts/test-wave-autoflush.cjs','scripts/test-wave-self-constraints.lua','scripts/test-wave-self-probe.lua','scripts/codemode-build.mjs','rust/wa-host/src/host.rs','rust/wa-host/src/serve.rs','rust/wa-host/src/subagents.rs','rust/wa-sentinel/src/jobs.rs'];
 const versions=Object.fromEntries(sourceNames.map(p=>[p,hash(repo+'/'+p)])),binaryVersion=hash(binary);
 const git=(cwd,...a)=>{const r=spawnSync('git',a,{cwd,encoding:'utf8',windowsHide:true});assert.equal(r.status,0,r.stdout+r.stderr);return r.stdout.trim();};
 const reports=[];
 for(const embedded of (process.argv.includes('--source-only')?[false]:[false,true])){
  const dir=out+'/'+(embedded?'embedded':'source');fs.mkdirSync(dir);const main=dir+'/main',own=dir+'/own',remote=dir+'/remote.git',home=dir+'/home';fs.mkdirSync(home);
  git(dir,'init','--bare',remote);git(dir,'init','-b','main',main);git(main,'config','core.autocrlf','false');git(main,'config','user.name','private fixture');git(main,'config','user.email','fixture@invalid');
- fs.mkdirSync(main+'/scripts');fs.mkdirSync(main+'/lua');fs.writeFileSync(main+'/scripts/deploy-shipped.json',fs.readFileSync(repo+'/scripts/deploy-shipped.json'));fs.writeFileSync(main+'/lua/private.lua','-- baseline\n');git(main,'add','.');git(main,'commit','-m','baseline');git(main,'remote','add','origin',remote);git(main,'push','-u','origin','main');const base=git(main,'rev-parse','HEAD');
- git(main,'worktree','add','-b','change/wave-fixture',own,'origin/main');fs.writeFileSync(own+'/lua/private.lua','-- changed shipped source\n');git(own,'add','.');git(own,'commit','-m','private worker task','-m','Agent: wasm-agent role=child session=wave-child-1');const tip=git(own,'rev-parse','HEAD');
+ fs.mkdirSync(main+'/scripts');fs.mkdirSync(main+'/jobs');
+ for(const name of ['lua','licenses'])fs.cpSync(repo+'/'+name,main+'/'+name,{recursive:true});
+ fs.mkdirSync(main+'/rust');for(const entry of fs.readdirSync(repo+'/rust',{withFileTypes:true})){
+  if(entry.name==='target'||entry.name==='.git')continue;
+  fs.cpSync(repo+'/rust/'+entry.name,main+'/rust/'+entry.name,{recursive:true,filter:p=>!p.split(path.sep).includes('target')});
+ }
+ for(const name of ['AGENTS.orchestrator.md','AGENTS.subagents.md'])fs.copyFileSync(repo+'/'+name,main+'/'+name);
+ for(const name of ['codemode-build.mjs','check-embedded-runtime.lua','deploy-shipped.json'])fs.copyFileSync(repo+'/scripts/'+name,main+'/scripts/'+name);
+ fs.writeFileSync(main+'/.gitignore','rust/target\n');fs.symlinkSync(repo+'/rust/target',main+'/rust/target',process.platform==='win32'?'junction':'dir');
+ fs.writeFileSync(main+'/jobs/private.json','{}\n');git(main,'add','.');git(main,'commit','-m','baseline');git(main,'remote','add','origin',remote);git(main,'push','-u','origin','main');const base=git(main,'rev-parse','HEAD');
+ git(main,'worktree','add','-b','change/wave-fixture',own,'origin/main');fs.writeFileSync(own+'/jobs/private.json','{"self_change":true}\n');git(own,'add','.');git(own,'commit','-m','private worker task','-m','Agent: wasm-agent role=child session=wave-child-1');const tip=git(own,'rev-parse','HEAD');
  const old=dir+'/old-agent.lua';fs.writeFileSync(old,git(repo,'show','acde06f016d27e4a29c644c5bea897ae53febf8c:lua/core/agent.lua'));
  // Preserve inherited provenance/run markers. Positive queue is a Lua FAKE, not
  // a real forbidden child Sentinel invocation. No live-home or job activation.
- const env={...process.env,WASM_AGENT_HOME:home,WA_SCRIPT:repo+'/scripts/test-wave-autoflush.lua',WASM_AGENT_LUA_ROOT:embedded?'':repo,WA_WAVE_MAIN:main,WA_WAVE_OWN:own,WA_WAVE_BASE:base,WA_WAVE_TIP:tip,WA_WAVE_OLD_AGENT:old,WA_WAVE_QUEUE:dir+'/fake-queue.json',WA_WAVE_RESTART:dir+'/restart.json',WASM_AGENT_RENDEZVOUS:'',WASM_AGENT_RELAY:'',WASM_AGENT_MANAGED:'0'};
- const r=spawnSync(binary,['--db',home+'/memory.db'],{cwd:embedded?dir:repo,env,encoding:'utf8',windowsHide:true,timeout:180000,maxBuffer:4*1024*1024});
+ const oldWave=dir+'/old-wave.lua';fs.writeFileSync(oldWave,git(repo,'show','9ac9bd8681e778627252c00691cee62eb5f9c6df:lua/core/wave_autoflush.lua'));
+ const install=dir+'/install';fs.mkdirSync(install);fs.writeFileSync(install+'/runtime-worktree.txt',main+'\n');
+ const assets=git(repo,'rev-parse','--path-format=absolute','--git-common-dir')+'/codemode-assets/pi-1.2.0-quickjs-3.6.2';
+ const env={...process.env,WA_INSTALL_DIR:install,WA_WAVE_ASSETS:assets,WASM_AGENT_HOME:home,WA_SCRIPT:repo+'/scripts/test-wave-autoflush.lua',WASM_AGENT_LUA_ROOT:embedded?'':repo,WA_WAVE_OLD_BINARY:repo+'/rust/target/wave-evidence/baseline-c457-wa.exe',WA_WAVE_DB:home+'/memory.db',WA_WAVE_PROBE:repo+'/scripts/test-wave-self-probe.lua',WA_WAVE_CONSTRAINTS:repo+'/scripts/test-wave-self-constraints.lua',WA_WAVE_BASELINE_MODULE:oldWave,WA_WAVE_MAIN:main,WA_WAVE_OWN:own,WA_WAVE_BASE:base,WA_WAVE_TIP:tip,WA_WAVE_OLD_AGENT:old,WA_WAVE_QUEUE:dir+'/fake-queue.json',WA_WAVE_RESTART:dir+'/restart.json',WASM_AGENT_RENDEZVOUS:'',WASM_AGENT_RELAY:'',WASM_AGENT_MANAGED:'0'};
+ const r=spawnSync(binary,['--db',home+'/memory.db'],{cwd:embedded?dir:repo,env,encoding:'utf8',windowsHide:true,timeout:1800000,maxBuffer:4*1024*1024});
  fs.writeFileSync(dir+'/stdout',r.stdout||'');fs.writeFileSync(dir+'/stderr',r.stderr||'');assert.equal(r.status,0,r.stdout+r.stderr);
  const restart=spawnSync(binary,['--db',home+'/memory.db'],{cwd:embedded?dir:repo,env:{...env,WA_SCRIPT:repo+'/scripts/test-wave-autoflush-restart.lua'},encoding:'utf8',windowsHide:true,timeout:60000});
  fs.writeFileSync(dir+'/restart.stdout',restart.stdout||'');fs.writeFileSync(dir+'/restart.stderr',restart.stderr||'');assert.equal(restart.status,0,restart.stdout+restart.stderr);assert(JSON.parse(restart.stdout.trim()).ok);

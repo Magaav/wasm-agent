@@ -59,16 +59,21 @@ export function preflight(root,dir=assetPath(root)){
  const ripgrep=resolveRipgrep();
  return {ok:true,ripgrep,root:fs.realpathSync(root),source_commit:git(root,'rev-parse','HEAD'),source_tree:git(root,'rev-parse','HEAD^{tree}'),source_dirty:git(root,'status','--porcelain')!=='',cargo:cargo.stdout.trim(),assets};
 }
-export function build(root,dir=assetPath(root)){
+function waveChecker(root,evidence,commit,tree,generation){
+ const file=path.join(evidence,'wave-native-check.lua');
+ const prefix=`do local j=dofile('lua/vendor/json.lua');local i=j.decode(host.runtime_info());assert(i.build_source_commit==${JSON.stringify(commit)},'native compiled source mismatch');assert(i.build_source_tree==${JSON.stringify(tree)},'native compiled tree mismatch');assert(i.build_wave_generation==${JSON.stringify(generation||'')},'native compiled generation mismatch');print('native compiled source/tree/wave identity ok') end\n`;
+ fs.writeFileSync(file,prefix+fs.readFileSync(path.join(root,'scripts/check-embedded-runtime.lua'),'utf8'));return file;
+}
+export function build(root,dir=assetPath(root),waveGeneration=null){
  const before=preflight(root,dir);
  const evidence=fs.mkdtempSync(path.join(git(root,'rev-parse','--path-format=absolute','--git-dir'),'codemode-build-'));
  const snapshot=path.join(evidence,'assets');fs.mkdirSync(snapshot);
- const receipt={...before,ok:false,evidence,build_assets:snapshot};
+ const receipt={...before,build_schema:1,kind:'codemode-offline-build',source_common:git(root,'rev-parse','--path-format=absolute','--git-common-dir'),platform:process.platform,arch:process.arch,wave_generation:waveGeneration,started_at:Date.now()/1000,ok:false,evidence,build_assets:snapshot};
  // Do not reuse mutable prepared files or an ambient env: Cargo sees this exact verified snapshot.
  try{
   for(const f of before.assets.files)fs.copyFileSync(path.join(dir,f.name),path.join(snapshot,f.name),fs.constants.COPYFILE_EXCL);
   receipt.snapshot=verifyAssets(root,snapshot);
-  const env={...process.env,WA_CODEMODE_BUILD_ASSETS:fs.realpathSync(snapshot),CARGO_TARGET_DIR:path.join(root,'rust/target')};
+  const env={...process.env,WA_CODEMODE_BUILD_ASSETS:fs.realpathSync(snapshot),CARGO_TARGET_DIR:path.join(root,'rust/target'),WA_BUILD_SOURCE_COMMIT:before.source_commit,WA_BUILD_SOURCE_TREE:before.source_tree,WA_BUILD_WAVE_GENERATION:waveGeneration||''};
   const args=['build','--release','--offline','--locked','-p','wa-host'];
   receipt.cargo_args=args;receipt.cargo_env={WA_CODEMODE_BUILD_ASSETS:env.WA_CODEMODE_BUILD_ASSETS,CARGO_TARGET_DIR:env.CARGO_TARGET_DIR};
   const result=cp.spawnSync('cargo',args,{cwd:path.join(root,'rust'),env,encoding:'utf8',windowsHide:true,timeout:1800000,maxBuffer:32*1024*1024});
@@ -84,14 +89,15 @@ export function build(root,dir=assetPath(root)){
   requireValue(staged.status===0&&staged.stdout?.startsWith('ripgrep '),'private_ripgrep_execution_failed:'+JSON.stringify({status:staged.status,error:staged.error?{code:staged.error.code,message:staged.error.message}:null,stderr:staged.stderr}));
   receipt.runtime_ripgrep={path:rg,sha256:before.ripgrep.sha256,version:staged.stdout.trim()};
   const runtimeEnv=Object.fromEntries(Object.entries(process.env).filter(([k])=>!/^(WA_|WASM_AGENT_|PI_|OPENAI_|ANTHROPIC_|OPENCODE_)/i.test(k)));
-  Object.assign(runtimeEnv,{WASM_AGENT_HOME:home,WASM_AGENT_LUA_ROOT:'',WASM_AGENT_CODEMODE_ASSETS:'',WA_EMBEDDED_SOURCE_ROOT:root,WA_SCRIPT:path.join(root,'scripts/check-embedded-runtime.lua'),WA_GRAPH_WATCH:'0',WASM_AGENT_MANAGED:'0'});
-  const runtime=cp.spawnSync(binary,['--db',path.join(home,'private.db')],{cwd:home,env:runtimeEnv,encoding:'utf8',windowsHide:true,timeout:60000,maxBuffer:8*1024*1024});
+  for(const [k,v]of Object.entries(process.env))if(/^(WASM_AGENT_(IN_TURN|PROVENANCE|RUN_ID|SESSION_ID)|WA_JOB_)/i.test(k))runtimeEnv[k]=v;
+  Object.assign(runtimeEnv,{WASM_AGENT_HOME:home,WASM_AGENT_LUA_ROOT:'',WASM_AGENT_CODEMODE_ASSETS:'',WA_EMBEDDED_SOURCE_ROOT:root,WA_EMBEDDED_EXPECT_COMMIT:before.source_commit,WA_EMBEDDED_EXPECT_TREE:before.source_tree,WA_EMBEDDED_EXPECT_GENERATION:waveGeneration||'',WA_SCRIPT:path.join(root,'scripts/check-embedded-runtime.lua'),WA_GRAPH_WATCH:'0',WASM_AGENT_MANAGED:'0'});
+  const runtime=cp.spawnSync(binary,['--db',path.join(home,'private.db')],{cwd:home,env:{...runtimeEnv,WA_SCRIPT:waveGeneration?waveChecker(root,evidence,before.source_commit,before.source_tree,waveGeneration):path.join(root,'scripts/check-embedded-runtime.lua')},encoding:'utf8',windowsHide:true,timeout:60000,maxBuffer:8*1024*1024});
   for(const stream of ['stdout','stderr'])fs.writeFileSync(path.join(evidence,'embedded.'+stream),runtime[stream]||'');
   requireValue(runtime.status===0&&runtime.stdout.includes('embedded native codemode ok'),'embedded_candidate_failed:'+String(runtime.error||runtime.stdout+runtime.stderr));
   requireValue(!/ripgrep missing; installing|ripgrep_unavailable:/.test(runtime.stderr||''),'unexpected_ripgrep_provisioning_or_failure');
   verifyAssets(root,snapshot); // changed snapshot never earns a ready receipt
   requireValue(git(root,'rev-parse','HEAD')===before.source_commit&&git(root,'rev-parse','HEAD^{tree}')===before.source_tree,'source_changed_during_build');
-  receipt.binary=binary;receipt.binary_sha256=sha(fs.readFileSync(binary));receipt.ok=true;
+  receipt.binary=binary;receipt.binary_sha256=sha(fs.readFileSync(binary));receipt.finished_at=Date.now()/1000;receipt.ok=true;
  }catch(error){receipt.error=String(error);throw Object.assign(error,{evidence});}
  finally{
   receipt.logs=Object.fromEntries(['cargo.stdout','cargo.stderr','embedded.stdout','embedded.stderr'].filter(name=>fs.existsSync(path.join(evidence,name))).map(name=>[name,sha(fs.readFileSync(path.join(evidence,name)))]));
@@ -99,14 +105,53 @@ export function build(root,dir=assetPath(root)){
  }
  return receipt;
 }
+// Qualify existing physical bytes, using the existing build receipt plus a FRESH
+// native embedded-source/assets execution. No ready flag, build, provisioning or install.
+export function qualifyWave(root,receiptFile,generation,openedAt,installedBinary){
+ const raw=fs.readFileSync(receiptFile),r=JSON.parse(raw),now=Date.now()/1000;
+ const same=(a,b)=>{const x=fs.realpathSync(a),y=fs.realpathSync(b);return process.platform==='win32'?x.toLowerCase()===y.toLowerCase():x===y;};
+ requireValue(r.build_schema===1&&r.kind==='codemode-offline-build'&&r.ok===true&&r.source_dirty===false,'wave_build_receipt_required');
+ requireValue(typeof generation==='string'&&generation.length>0&&r.wave_generation===generation,'wave_build_generation_mismatch');
+ requireValue(Number.isFinite(openedAt)&&r.started_at>=openedAt&&r.finished_at>=r.started_at&&r.finished_at<=now,'wave_build_time_mismatch');
+ requireValue(r.platform===process.platform&&r.arch===process.arch,'wave_candidate_target_mismatch');
+ requireValue(same(root,r.root)&&same(r.source_common,git(root,'rev-parse','--path-format=absolute','--git-common-dir')),'wave_build_repository_mismatch');
+ requireValue(git(root,'status','--porcelain')===''&&git(root,'branch','--show-current')==='main','wave_build_clean_main_required');
+ requireValue(r.source_commit===git(root,'rev-parse','HEAD')&&r.source_tree===git(root,'rev-parse','HEAD^{tree}')&&r.source_commit===git(root,'rev-parse','origin/main')&&r.source_commit===git(root,'ls-remote','origin','refs/heads/main').split(/\s+/)[0],'wave_build_source_mismatch');
+ const binary=path.join(root,'rust/target/release',process.platform==='win32'?'wa.exe':'wa');
+ requireValue(same(binary,r.binary),'wave_candidate_path_mismatch');
+ const bytes=fs.readFileSync(binary),digest=sha(bytes),installed=sha(fs.readFileSync(installedBinary));
+ requireValue(digest===r.binary_sha256&&digest!==installed,'wave_candidate_missing_corrupt_or_unchanged');
+ if(process.platform==='win32'){
+  requireValue(bytes.length>128&&bytes.toString('ascii',0,2)==='MZ','wave_candidate_not_native');
+  const pe=bytes.readUInt32LE(60);requireValue(pe+6<bytes.length&&bytes.toString('ascii',pe,pe+4)==='PE\0\0'&&bytes.readUInt16LE(pe+4)===(process.arch==='x64'?0x8664:0xaa64),'wave_candidate_target_mismatch');
+ }else requireValue(bytes.subarray(0,4).equals(Buffer.from([127,69,76,70])),'wave_candidate_not_native');
+ for(const name of ['cargo.stdout','cargo.stderr','embedded.stdout','embedded.stderr'])requireValue(r.logs?.[name]&&sha(fs.readFileSync(path.join(r.evidence,name)))===r.logs[name],'wave_build_original_log_mismatch:'+name);
+ requireValue(fs.readFileSync(path.join(r.evidence,'embedded.stdout'),'utf8').includes('embedded native codemode ok')&&fs.readFileSync(path.join(r.evidence,'embedded.stdout'),'utf8').includes('native compiled source/tree/wave identity ok'),'wave_build_native_proof_missing');
+ verifyAssets(root,r.build_assets);
+ const evidence=fs.mkdtempSync(path.join(r.evidence,'wave-verify-')),home=path.join(evidence,'home');fs.mkdirSync(home);
+ const rg=path.join(home,'.wasm-agent/bin',process.platform==='win32'?'rg.exe':'rg');fs.mkdirSync(path.dirname(rg),{recursive:true});
+ requireValue(sha(fs.readFileSync(r.runtime_ripgrep.path))===r.runtime_ripgrep.sha256,'wave_build_runtime_tool_changed');fs.copyFileSync(r.runtime_ripgrep.path,rg);if(process.platform!=='win32')fs.chmodSync(rg,0o755);
+ // Keep provenance/run/job guards. Overrides only isolate stores and force the embedded checker.
+ const env={...process.env,WASM_AGENT_HOME:home,WASM_AGENT_LUA_ROOT:'',WASM_AGENT_CODEMODE_ASSETS:'',WA_EMBEDDED_SOURCE_ROOT:root,WA_EMBEDDED_EXPECT_COMMIT:r.source_commit,WA_EMBEDDED_EXPECT_TREE:r.source_tree,WA_EMBEDDED_EXPECT_GENERATION:generation,WA_SCRIPT:path.join(root,'scripts/check-embedded-runtime.lua'),WA_GRAPH_WATCH:'0',WASM_AGENT_MANAGED:'0'};
+ const actual=cp.spawnSync(binary,['--db',path.join(home,'private.db')],{cwd:home,env:{...env,WA_SCRIPT:waveChecker(root,evidence,r.source_commit,r.source_tree,generation)},encoding:'utf8',windowsHide:true,timeout:60000,maxBuffer:8*1024*1024});
+ for(const stream of ['stdout','stderr'])fs.writeFileSync(path.join(evidence,stream),actual[stream]||'');
+ requireValue(actual.status===0&&actual.stdout.includes('embedded native codemode ok')&&!/ripgrep missing; installing|ripgrep_unavailable:/.test(actual.stderr||''),'wave_candidate_native_verification_failed:'+JSON.stringify({status:actual.status,error:String(actual.error||''),stdout:actual.stdout,stderr:actual.stderr,evidence}));
+ requireValue(sha(fs.readFileSync(binary))===digest&&sha(fs.readFileSync(receiptFile))===sha(raw)&&git(root,'status','--porcelain')===''&&git(root,'rev-parse','HEAD')===r.source_commit,'wave_candidate_changed_during_verification');
+ return {ok:true,binary:fs.realpathSync(binary),binary_sha256:digest,installed_sha256:installed,receipt:fs.realpathSync(receiptFile),receipt_sha256:sha(raw),source_commit:r.source_commit,source_tree:r.source_tree,platform:process.platform,arch:process.arch,generation,evidence};
+}
 if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url)){
  try{
   const [action,root,...extra]=process.argv.slice(2);requireValue(root&&path.isAbsolute(root),'absolute_source_root_required');
   if(action==='assets-path'){requireValue(extra.length===0,'usage');console.log(assetPath(root));}
   else if(action==='prepare'){requireValue(extra.length===1&&path.isAbsolute(extra[0]),'absolute_prepared_input_required');console.log(JSON.stringify(prepare(root,extra[0])));}
+  else if(action==='qualify-wave'){
+   requireValue(extra.length===8&&extra[0]==='--receipt'&&extra[2]==='--generation'&&extra[4]==='--opened-at'&&extra[6]==='--installed-binary','usage');
+   console.log(JSON.stringify(qualifyWave(root,extra[1],extra[3],Number(extra[5]),extra[7])));
+  }
   else if(action==='preflight'||action==='build'){
+   let generation=null;const gi=extra.indexOf('--wave-generation');if(gi>=0){requireValue(action==='build'&&gi+1<extra.length,'wave_generation_required');generation=extra[gi+1];extra.splice(gi,2);}
    requireValue(extra.length===0||extra.length===2&&extra[0]==='--assets'&&path.isAbsolute(extra[1]),'usage');
-   const result=action==='preflight'?preflight(root,extra[1]):build(root,extra[1]);if(action==='preflight')console.log(JSON.stringify(result));
+   const result=action==='preflight'?preflight(root,extra[1]):build(root,extra[1],generation);if(action==='preflight')console.log(JSON.stringify(result));
   }else throw Error('usage: codemode-build.mjs assets-path|prepare|preflight|build <absolute-root> [prepare-input | --assets <private-build-input>]');
  }catch(error){console.error(String(error)+(error.evidence?' evidence='+error.evidence:''));process.exitCode=1;}
 }

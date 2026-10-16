@@ -576,6 +576,7 @@ function M.request_bound(scope)
     local ok,ready=pcall(scope.prequeue)
     if not ok or not ready then return {held=true,error='wave_prequeue_changed',detail=tostring(ready)} end
   end
+  if not exact() then return {held=true,error='wave_source_changed_after_prequeue'} end
   local command=M.bound_command(facts,scope)
   local result=shell(command)
   -- Preserve the complete structured operation receipt, including plaintext stdout.
@@ -587,7 +588,9 @@ end
 function M.bound_receipt(result,scope,facts)
   local receipt={operation=result,held=true,installed=false}
   if not result or result.code~=0 or result.ok==false then receipt.error='wave_queue_unknown_or_refused';return receipt end
-  local file=tostring(result.stdout or ''):match('^requested deploy:%s*([^\r\n]+)')
+  local output=tostring(result.stdout or '')
+  local parsing=output:gsub('^%s+','') -- parsing view only; operation/stdout remain byte-for-byte original
+  local file=parsing:match('^requested deploy:%s*([^\r\n]+)')
   if not file then receipt.error='wave_queue_receipt_unverifiable';return receipt end
   local id=file:gsub('\\','/'):match('/([%w%-]+)%.json$')
   if not id then receipt.error='wave_request_id_invalid';return receipt end
