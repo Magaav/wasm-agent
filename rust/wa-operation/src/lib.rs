@@ -31,6 +31,11 @@ pub struct Spec {
     pub program: String,
     pub args: Vec<String>,
     pub cwd: String,
+    /// Trusted dispatcher provenance; absent for legacy/native callers.
+    pub cwd_requested: Option<String>,
+    pub cwd_source: Option<String>,
+    /// Required bindings must never use the legacy missing-directory fallback.
+    pub require_cwd: bool,
     pub env: Vec<(String, String)>,
     pub timeout: Duration,
     pub output_limit: usize,
@@ -46,6 +51,9 @@ impl Spec {
             program: program.into(),
             args,
             cwd: String::new(),
+            cwd_requested: None,
+            cwd_source: None,
+            require_cwd: false,
             env: vec![],
             timeout: Duration::from_secs(300),
             output_limit: 8 * 1024 * 1024,
@@ -325,12 +333,20 @@ impl Manager {
         // the output and the result all carry where the shell really ran rather than what was
         // asked for. An omitted cwd records the usable actual node directory;
         // cwd_requested retains the distinction between explicit and inherited cwd.
+        if spec.require_cwd && (spec.cwd.is_empty() || !is_usable_directory(Path::new(&spec.cwd))) {
+            return Err(error("session_workspace_unavailable: required launch directory is unavailable"));
+        }
         let node_cwd = std::env::current_dir().ok();
         let start_directory = resolve_start_directory(
             &spec.cwd,
             node_cwd.as_deref(),
             self.fallback.as_deref(),
         );
+        // The directory can disappear between validation and resolution. A required
+        // binding must refuse even if the legacy resolver found a usable fallback.
+        if spec.require_cwd && start_directory.substitution.is_some() {
+            return Err(error("session_workspace_unavailable: required launch directory is unavailable"));
+        }
         spec.cwd = start_directory.used.clone();
         // Execution uses the effective directory, but the recorded `cwd` keeps the primary
         // contract (scripts/test-start-directory.lua): a call that named no directory records
@@ -369,6 +385,12 @@ impl Manager {
         );
         let dir = self.root.join(&id);
         let mut state = json!({"operation_id":id,"owner":spec.owner,"cwd":recorded_cwd,"cwd_requested":start_directory.requested,"state":"accepted","settled":false,"timeout_ms":spec.timeout.as_millis() as u64,"cleanup_budget_ms":CLEANUP_MS,"containment":Process::containment(),"stdout_path":dir.join("stdout").to_string_lossy(),"stderr_path":dir.join("stderr").to_string_lossy(),"output_bytes":0,"timing":timing_payload()});
+        if let Some(requested) = &spec.cwd_requested {
+            state["cwd_requested"] = json!(requested);
+        }
+        if let Some(source) = &spec.cwd_source {
+            state["cwd_source"] = json!(source);
+        }
         state["owner_boot"] = json!(index.boot);
         state["owner_process_id"] = json!(std::process::id());
         state["effective_cwd"] = json!(fs::canonicalize(&spec.cwd)?.to_string_lossy().replace('\\', "/"));

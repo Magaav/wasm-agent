@@ -96,16 +96,23 @@ fn configure_spec(mut spec: Spec, cwd: &str, seconds: u64, owner: String, promot
     ));
     spec
 }
+fn launch_context(mut spec: Spec, context: &Value) -> Spec {
+    spec.cwd_requested = context["requested"].as_str().map(String::from);
+    spec.cwd_source = context["source"].as_str().map(String::from);
+    spec.require_cwd = context["required"] == true;
+    spec
+}
 pub fn foreground(
     program: &str,
     flag: &str,
     command: &str,
     cwd: &str,
     seconds: u64,
+    context: &Value,
 ) -> Result<Value, String> {
     command_preflight(program, flag, command)?;
     let id = manager()
-        .start(spec(
+        .start(launch_context(spec(
             program,
             flag,
             command,
@@ -113,7 +120,7 @@ pub fn foreground(
             seconds,
             format!("worker:{}", crate::serve::node_thread_id()),
             true,
-        ))
+        ), context))
         .map_err(|e| e.to_string())?;
     loop {
         let mut state = manager()
@@ -203,11 +210,14 @@ pub fn control(action: &str, args: &Value, shell: &(String, String)) -> Result<V
                 )
             };
             let id = manager()
-                .start(launch)
+                .start(launch_context(launch, &args["_launch_cwd"]))
                 .map_err(|e| e.to_string())?;
-            return Ok(
-                json!({"operation_id":id,"state":"accepted","settled":false,"note":"Launch receipt, not execution success. Observe this operation; do not launch it again. Keep background commands in the foreground of this shell (or use wait)."}),
-            );
+            let state = manager().snapshot(&id).map_err(|e| e.to_string())?;
+            let mut receipt = json!({"operation_id":id,"state":"accepted","settled":false,"note":"Launch receipt, not execution success. Observe this operation; do not launch it again. Keep background commands in the foreground of this shell (or use wait)."});
+            for key in ["cwd", "cwd_requested", "cwd_source", "effective_cwd", "cwd_substitution", "cwd_note"] {
+                if let Some(value) = state.get(key) { receipt[key] = value.clone(); }
+            }
+            return Ok(receipt);
         }
         "list" => return Ok(manager().list()),
         "relevant" => manager().relevant(

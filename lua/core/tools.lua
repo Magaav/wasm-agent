@@ -782,7 +782,7 @@ local function required_workspace_error(memory, ctx, name, args)
       return {error="workspace_path_outside_binding",path=target,
         allowed_writes={workspace.worktree,scratch}}
     end
-  elseif name == "bash" and args.cwd and args.cwd ~= "" then
+  elseif (name == "bash" or name == "operation" and args.action == "start") and args.cwd and args.cwd ~= "" then
     local cwd = args.cwd
     if cwd:sub(1,1) ~= "/" and not cwd:match("^%a:[/\\]") and cwd:sub(1,2) ~= "\\\\" then
       cwd = workspace.worktree:gsub("[/\\]+$", "") .. "/" .. cwd
@@ -798,14 +798,17 @@ local function required_workspace_error(memory, ctx, name, args)
   return nil
 end
 
-local function run(command, timeout_seconds, cwd)
-  -- `cwd` is applied in the shell rather than through host.exec's second argument, because that is
-  -- how a caller-supplied `args.cwd` already worked: one code path, so a session cwd and an explicit
-  -- one cannot behave differently.
-  if cwd and cwd ~= "" then
-    command = "cd " .. shell_quote(cwd) .. " && " .. command
-  end
-  local ok, raw = pcall(host.exec, command, "", timeout_seconds)
+local function launch_cwd(memory, ctx, requested)
+  local workspace = memory and ctx.session_id and memory.session_workspace and memory.session_workspace(ctx.session_id)
+  return {requested=requested or "", source=(requested and requested~="") and "explicit" or
+    ((session_cwd(memory,ctx) or "")~="" and "session_workspace" or "node"),
+    required=workspace and workspace.required == true or false}
+end
+
+local function run(command, timeout_seconds, cwd, provenance)
+  -- Set the process launch directory, never hide it in shell command text. Later shell `cd`
+  -- remains command behavior, not something the operation receipt claims to observe.
+  local ok, raw = pcall(host.exec, command, cwd or "", timeout_seconds, json.encode(provenance))
   if not ok then return { error = tostring(raw) } end
   local decoded = json.decode(raw)
   if type(decoded) ~= "table" then return { error = tostring(raw) } end
@@ -897,8 +900,9 @@ local function graph_sources(memory,args,ctx)
   return {ok=failed==0,results=results,failed=failed,succeeded=#requests-failed,graph_snapshots=snapshots}
 end
 
-function M.dispatch(memory, name, args, role, ctx)
+function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
   args = args or {}
+  local requested_cwd = args.cwd
   -- No role means the least one, not the most: a future caller that forgets to pass a role must not
   -- get the shell.
   role = role or "guest"
@@ -1009,6 +1013,10 @@ function M.dispatch(memory, name, args, role, ctx)
   if name == "operation" then
     if not is_master(role) then return {error="forbidden_for_role:" .. role} end
     args.owner = ctx.session_id or user_id
+    if args.action == "start" then
+      args._launch_cwd = cwd_provenance or launch_cwd(memory,ctx,requested_cwd)
+      if args.cwd == nil or args.cwd == "" then args.cwd = session_cwd(memory,ctx) end
+    end
     local ok, raw = pcall(host.operation, args.action or "status", json.encode(args))
     if not ok then return {error=tostring(raw)} end
     return json.decode(raw)
@@ -1155,9 +1163,9 @@ function M.dispatch(memory, name, args, role, ctx)
       -- Start independent shell calls through the existing supervised operation manager. The
       -- model chose this call group; policy, session cwd and the commit review still run here.
       return M.dispatch(memory, "operation", { action = "start", command = args.command,
-        cwd = cwd, timeout_seconds = timeout }, role, ctx)
+        cwd = cwd, timeout_seconds = timeout }, role, ctx, launch_cwd(memory,ctx,requested_cwd))
     end
-    local result = run(args.command, timeout, cwd)
+    local result = run(args.command, timeout, cwd, launch_cwd(memory,ctx,requested_cwd))
     -- The adopted-tree guidance is *policy*, and policy depends on what this caller may use:
     -- a profile with `bash` but not `operation` cannot read or cancel the operation it has just
     -- been handed, so telling it to would be the same dead end the old refusal was. The host
@@ -1566,10 +1574,10 @@ function M.await_parallel_bash(operation_id, role, ctx)
 end
 
 local dispatch = M.dispatch
-function M.dispatch(memory,name,args,role,ctx)
+function M.dispatch(memory,name,args,role,ctx,cwd_provenance)
   ctx=ctx or {}
   local generation=ctx.resource_effect_generation or 0
-  local ok,result=pcall(dispatch,memory,name,args,role,ctx)
+  local ok,result=pcall(dispatch,memory,name,args,role,ctx,cwd_provenance)
   -- Uncertainty is for unknown *effects*, not for refusals. A result the node marked
   -- `effect:"none"` never reached the client, so it cannot have changed anything, and
   -- branding the run's claims for it would take the client away from the run that had

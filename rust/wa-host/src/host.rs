@@ -909,7 +909,7 @@ fn run_bounded(
     // same 1-86400 range `operation start` accepts; an out-of-range value is refused,
     // not clamped, so a caller never believes it got a bound it did not.
     let seconds = effective_exec_timeout_seconds(requested_seconds)?;
-    crate::operations::foreground(program, flag, command, cwd, seconds)
+    crate::operations::foreground(program, flag, command, cwd, seconds, &Value::Null)
 }
 
 /// host.operation(action, args_json) -> operation receipt/state/output | {error}
@@ -987,7 +987,9 @@ pub extern "C-unwind" fn exec(l: *mut LuaState) -> c_int {
     let cwd = arg_string(l, 2).unwrap_or_default();
     let requested = arg_integer(l, 3).and_then(|value| u64::try_from(value).ok());
     let (program, flag) = shell_config();
-    let outcome = run_bounded(program, flag, &command, &cwd, requested);
+    let context = arg_string(l, 4).and_then(|raw| serde_json::from_str::<Value>(&raw).ok()).unwrap_or(Value::Null);
+    let outcome = effective_exec_timeout_seconds(requested).and_then(|seconds|
+        crate::operations::foreground(program, flag, &command, &cwd, seconds, &context));
     push_json(l, &outcome.unwrap_or_else(|error| json!({"error": error})));
     1
 }

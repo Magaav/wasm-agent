@@ -90,14 +90,20 @@ tell *which* key failed without being able to use it.
 
 ## Supervised execution and automation
 
-`host.exec(command, cwd, timeout_seconds?)` is the synchronous facade for an owned
+`host.exec(command, cwd, timeout_seconds?, launch_context_json?)` is the synchronous facade for an owned
 **operation**; the optional third argument bounds it (1-86400 seconds, the configured
 default when omitted). `host.exec_timeout(timeout_seconds?)` reports the same effective
 foreground deadline for the configured default or a requested override, including a tighter
 remaining child-run budget; out-of-range integer overrides return `nil`. `host.operation`
 exposes explicit launch receipts, status, cursor-based output, bounded waits and
 cancellation; `host.jobs` manages automation definitions/enable state, never executes
-a job itself. Both always return one JSON value, including failure. Do not add a
+a job itself. Both always return one JSON value, including failure. The optional
+fourth exec argument and operation-start `_launch_cwd` are internal trusted Lua
+adapter context (`requested`, `source`, `required`), not model-schema authority.
+Dispatch rebuilds that context from the original request and current binding;
+model arguments cannot supply a weaker required flag. Required launch directories
+refuse before admission/spawn if unavailable; legacy direct host callers retain
+the missing-directory fallback. Do not add a
 second shell runner with `Command::output`, `read_to_end` or detached reader threads.
 See [OPERATIONS.md](OPERATIONS.md) and [JOBS.md](JOBS.md) for contracts, platform
 limits, authority, recovery and the regression tests.

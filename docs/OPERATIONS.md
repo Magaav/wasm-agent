@@ -150,6 +150,31 @@ reconciliation, not automatic replay; lack of attachment is not proof of death. 
   operator, not backgrounded from an agent-owned shell: its supervisor must live
   outside the runtime it supervises.
 
+## Launch directory attribution
+
+The model Bash and operation-start paths share session cwd selection and explicit
+cwd escape checks. Bash passes cwd to the native launcher, not a prefixed shell
+`cd`. `cwd_requested` preserves the original tool value (empty for omitted/empty);
+`cwd_source` names `explicit`, `session_workspace` or `node`. `cwd` keeps its native
+compatibility shape, and canonical `effective_cwd` identifies the launcher directory
+used by the relevant-operation index. These fields do not observe later shell
+`cd` commands or arbitrary filesystem access. No process-global chdir or OS sandbox
+is involved. Required bindings suppress missing-directory substitution, including
+at native admission; unbound/direct legacy host calls retain the existing fallback.
+No historical operation is rewritten.
+
+Code-mode Bash reaches the same dispatcher and operation manager, serial effects
+and current role/profile/schema/workspace checks. Explicit `operation` remains a
+control-plane tool excluded from the VM catalog; code mode does not grant it.
+
+Focused model-free proof: `node scripts/test-workspace-cwd.mjs <absolute-wa>
+<fresh-absolute-evidence> [old-wa]`. Private linked Git workspaces check actual
+pwd/Git root/generated markers, native launch/index attribution, concurrent session
+operations, unavailable/escaped admission, code-mode Bash and unchanged control-plane
+exclusion, source/embedded modules, and old-source causal negatives. All generations,
+including failures, remain under the supplied evidence directory. This is not an
+arbitrary-shell sandbox or a measurement of autonomous model behavior.
+
 ## Platform guarantees and limits
 
 On Windows the host and Sentinel select Git's real `usr/bin/bash.exe` before
