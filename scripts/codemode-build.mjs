@@ -91,27 +91,45 @@ export function build(root,dir=assetPath(root),waveGeneration=null){
   const runtimeEnv=Object.fromEntries(Object.entries(process.env).filter(([k])=>!/^(WA_|WASM_AGENT_|PI_|OPENAI_|ANTHROPIC_|OPENCODE_)/i.test(k)));
   for(const [k,v]of Object.entries(process.env))if(/^(WASM_AGENT_(IN_TURN|PROVENANCE|RUN_ID|SESSION_ID)|WA_JOB_)/i.test(k))runtimeEnv[k]=v;
   Object.assign(runtimeEnv,{WASM_AGENT_HOME:home,WASM_AGENT_LUA_ROOT:'',WASM_AGENT_CODEMODE_ASSETS:'',WA_EMBEDDED_SOURCE_ROOT:root,WA_EMBEDDED_EXPECT_COMMIT:before.source_commit,WA_EMBEDDED_EXPECT_TREE:before.source_tree,WA_EMBEDDED_EXPECT_GENERATION:waveGeneration||'',WA_SCRIPT:path.join(root,'scripts/check-embedded-runtime.lua'),WA_GRAPH_WATCH:'0',WASM_AGENT_MANAGED:'0'});
-  const runtime=cp.spawnSync(binary,['--db',path.join(home,'private.db')],{cwd:home,env:{...runtimeEnv,WA_SCRIPT:waveGeneration?waveChecker(root,evidence,before.source_commit,before.source_tree,waveGeneration):path.join(root,'scripts/check-embedded-runtime.lua')},encoding:'utf8',windowsHide:true,timeout:60000,maxBuffer:8*1024*1024});
+  const runtime=cp.spawnSync(binary,['--db',path.join(home,'private.db')],{cwd:home,env:{...runtimeEnv,WA_SCRIPT:waveChecker(root,evidence,before.source_commit,before.source_tree,waveGeneration)},encoding:'utf8',windowsHide:true,timeout:60000,maxBuffer:8*1024*1024});
   for(const stream of ['stdout','stderr'])fs.writeFileSync(path.join(evidence,'embedded.'+stream),runtime[stream]||'');
   requireValue(runtime.status===0&&runtime.stdout.includes('embedded native codemode ok'),'embedded_candidate_failed:'+String(runtime.error||runtime.stdout+runtime.stderr));
   requireValue(!/ripgrep missing; installing|ripgrep_unavailable:/.test(runtime.stderr||''),'unexpected_ripgrep_provisioning_or_failure');
   verifyAssets(root,snapshot); // changed snapshot never earns a ready receipt
   requireValue(git(root,'rev-parse','HEAD')===before.source_commit&&git(root,'rev-parse','HEAD^{tree}')===before.source_tree,'source_changed_during_build');
-  receipt.binary=binary;receipt.binary_sha256=sha(fs.readFileSync(binary));receipt.finished_at=Date.now()/1000;receipt.ok=true;
+  receipt.binary=binary;receipt.binary_sha256=sha(fs.readFileSync(binary));receipt.finished_at=Date.now()/1000;receipt.native_checked=true;receipt.ok=true;
  }catch(error){receipt.error=String(error);throw Object.assign(error,{evidence});}
  finally{
   receipt.logs=Object.fromEntries(['cargo.stdout','cargo.stderr','embedded.stdout','embedded.stderr'].filter(name=>fs.existsSync(path.join(evidence,name))).map(name=>[name,sha(fs.readFileSync(path.join(evidence,name)))]));
-  fs.writeFileSync(path.join(evidence,'receipt.json'),JSON.stringify(receipt,null,2));console.log(JSON.stringify(receipt));
+  let published=false;
+  if(receipt.ok&&!receipt.source_dirty&&process.env.WA_JOB_EVENT_FILE===undefined&&process.env.WA_JOB_DELIVERY_ID===undefined){
+   try{published=git(root,'status','--porcelain')===''&&git(root,'branch','--show-current')==='main'
+    &&git(root,'rev-parse','HEAD')===before.source_commit&&git(root,'rev-parse','origin/main')===before.source_commit
+    &&git(root,'ls-remote','origin','refs/heads/main').split(/\s+/)[0]===before.source_commit;}
+   catch(error){receipt.readiness_not_published=String(error);} // build success is not conditional on publication
+  }
+  const receiptFile=path.join(evidence,'receipt.json');fs.writeFileSync(receiptFile,JSON.stringify(receipt,null,2));
+  // Index the ORIGINAL receipt only when ordinary publication facts exist.
+  // An unpublished/development build remains a build, not a failed extra gate.
+  if(published){
+   const ready=path.join(git(root,'rev-parse','--path-format=absolute','--git-dir'),'codemode-build-ready.json');
+   const temp=ready+'.'+process.pid+'.tmp';fs.writeFileSync(temp,JSON.stringify({schema:1,receipt:receiptFile,receipt_sha256:sha(fs.readFileSync(receiptFile)),source_commit:before.source_commit,source_tree:before.source_tree,binary_sha256:receipt.binary_sha256}));fs.renameSync(temp,ready);
+  }
+  console.log(JSON.stringify(receipt));
  }
  return receipt;
 }
-// Qualify existing physical bytes, using the existing build receipt plus a FRESH
-// native embedded-source/assets execution. No ready flag, build, provisioning or install.
+// Lightweight consumption of the ordinary build's already-verified facts.
+// Never rebuild, execute the candidate, run a test suite or create verification jobs.
 export function qualifyWave(root,receiptFile,generation,openedAt,installedBinary){
- const raw=fs.readFileSync(receiptFile),r=JSON.parse(raw),now=Date.now()/1000;
+ const pointer=JSON.parse(fs.readFileSync(path.join(git(root,'rev-parse','--path-format=absolute','--git-dir'),'codemode-build-ready.json')));
  const same=(a,b)=>{const x=fs.realpathSync(a),y=fs.realpathSync(b);return process.platform==='win32'?x.toLowerCase()===y.toLowerCase():x===y;};
+ if(receiptFile==='@latest')receiptFile=pointer.receipt;
+ requireValue(pointer.schema===1&&same(receiptFile,pointer.receipt),'wave_build_receipt_not_current');
+ const raw=fs.readFileSync(receiptFile),r=JSON.parse(raw),now=Date.now()/1000;
+ requireValue(sha(raw)===pointer.receipt_sha256&&pointer.binary_sha256===r.binary_sha256,'wave_build_receipt_not_current');
  requireValue(r.build_schema===1&&r.kind==='codemode-offline-build'&&r.ok===true&&r.source_dirty===false,'wave_build_receipt_required');
- requireValue(typeof generation==='string'&&generation.length>0&&r.wave_generation===generation,'wave_build_generation_mismatch');
+ requireValue(typeof generation==='string'&&generation.length>0&&(!r.wave_generation||r.wave_generation===generation),'wave_build_generation_mismatch');
  requireValue(Number.isFinite(openedAt)&&r.started_at>=openedAt&&r.finished_at>=r.started_at&&r.finished_at<=now,'wave_build_time_mismatch');
  requireValue(r.platform===process.platform&&r.arch===process.arch,'wave_candidate_target_mismatch');
  requireValue(same(root,r.root)&&same(r.source_common,git(root,'rev-parse','--path-format=absolute','--git-common-dir')),'wave_build_repository_mismatch');
@@ -128,16 +146,9 @@ export function qualifyWave(root,receiptFile,generation,openedAt,installedBinary
  for(const name of ['cargo.stdout','cargo.stderr','embedded.stdout','embedded.stderr'])requireValue(r.logs?.[name]&&sha(fs.readFileSync(path.join(r.evidence,name)))===r.logs[name],'wave_build_original_log_mismatch:'+name);
  requireValue(fs.readFileSync(path.join(r.evidence,'embedded.stdout'),'utf8').includes('embedded native codemode ok')&&fs.readFileSync(path.join(r.evidence,'embedded.stdout'),'utf8').includes('native compiled source/tree/wave identity ok'),'wave_build_native_proof_missing');
  verifyAssets(root,r.build_assets);
- const evidence=fs.mkdtempSync(path.join(r.evidence,'wave-verify-')),home=path.join(evidence,'home');fs.mkdirSync(home);
- const rg=path.join(home,'.wasm-agent/bin',process.platform==='win32'?'rg.exe':'rg');fs.mkdirSync(path.dirname(rg),{recursive:true});
- requireValue(sha(fs.readFileSync(r.runtime_ripgrep.path))===r.runtime_ripgrep.sha256,'wave_build_runtime_tool_changed');fs.copyFileSync(r.runtime_ripgrep.path,rg);if(process.platform!=='win32')fs.chmodSync(rg,0o755);
- // Keep provenance/run/job guards. Overrides only isolate stores and force the embedded checker.
- const env={...process.env,WASM_AGENT_HOME:home,WASM_AGENT_LUA_ROOT:'',WASM_AGENT_CODEMODE_ASSETS:'',WA_EMBEDDED_SOURCE_ROOT:root,WA_EMBEDDED_EXPECT_COMMIT:r.source_commit,WA_EMBEDDED_EXPECT_TREE:r.source_tree,WA_EMBEDDED_EXPECT_GENERATION:generation,WA_SCRIPT:path.join(root,'scripts/check-embedded-runtime.lua'),WA_GRAPH_WATCH:'0',WASM_AGENT_MANAGED:'0'};
- const actual=cp.spawnSync(binary,['--db',path.join(home,'private.db')],{cwd:home,env:{...env,WA_SCRIPT:waveChecker(root,evidence,r.source_commit,r.source_tree,generation)},encoding:'utf8',windowsHide:true,timeout:60000,maxBuffer:8*1024*1024});
- for(const stream of ['stdout','stderr'])fs.writeFileSync(path.join(evidence,stream),actual[stream]||'');
- requireValue(actual.status===0&&actual.stdout.includes('embedded native codemode ok')&&!/ripgrep missing; installing|ripgrep_unavailable:/.test(actual.stderr||''),'wave_candidate_native_verification_failed:'+JSON.stringify({status:actual.status,error:String(actual.error||''),stdout:actual.stdout,stderr:actual.stderr,evidence}));
- requireValue(sha(fs.readFileSync(binary))===digest&&sha(fs.readFileSync(receiptFile))===sha(raw)&&git(root,'status','--porcelain')===''&&git(root,'rev-parse','HEAD')===r.source_commit,'wave_candidate_changed_during_verification');
- return {ok:true,binary:fs.realpathSync(binary),binary_sha256:digest,installed_sha256:installed,receipt:fs.realpathSync(receiptFile),receipt_sha256:sha(raw),source_commit:r.source_commit,source_tree:r.source_tree,platform:process.platform,arch:process.arch,generation,evidence};
+ requireValue(r.native_checked===true,'wave_build_native_proof_missing');
+ requireValue(sha(fs.readFileSync(binary))===digest&&sha(fs.readFileSync(receiptFile))===sha(raw),'wave_candidate_changed_during_inspection');
+ return {ok:true,binary:fs.realpathSync(binary),binary_sha256:digest,installed_sha256:installed,receipt:fs.realpathSync(receiptFile),receipt_sha256:sha(raw),source_commit:r.source_commit,source_tree:r.source_tree,platform:process.platform,arch:process.arch,generation,build_generation:r.wave_generation,evidence:r.evidence,inspection:'existing verified build receipt + physical bytes; no runtime tests'};
 }
 if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url)){
  try{

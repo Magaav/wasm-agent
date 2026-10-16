@@ -81,22 +81,23 @@ local function accept(ctx,id)
  assert(a.ok,json.encode(a));return a
 end
 local builds={}
+local function normal_build(ctx)
+ local r=status(ctx);local id=r.wave.generation.id..':'..r.source.sha
+ if not builds[id] then
+  local command='node '..q(root..'/scripts/codemode-build.mjs')..' build '..q(root)..' --assets '..q(host.getenv('WA_WAVE_ASSETS'))
+  local built=json.decode(host.exec(command,root,1800));assert(built.code==0,json.encode(built))
+  local proof=json.decode(built.stdout);assert(proof.ok and proof.wave_generation==nil,'usual real build without a wave flag')
+  builds[id]=proof.evidence..'/receipt.json'
+ end
+ return builds[id]
+end
 local function qualify(ctx)
  local r=status(ctx);local receipt
  local can=true
- for _,v in pairs(r.wave.children)do if not v.acceptance or not v.settled or v.state=='unknown' then can=false end end
+ for _,v in pairs(r.wave.children)do if not v.settled or v.state=='unknown' then can=false end end
  if git(own,'status --porcelain')~='' then can=false end
- if can and r.wave.generation then
-  local id=r.wave.generation.id..':'..r.source.sha
-  receipt=builds[id]
-  if not receipt then
-   local command='node '..q(root..'/scripts/codemode-build.mjs')..' build '..q(root)..' --assets '..q(host.getenv('WA_WAVE_ASSETS'))..' --wave-generation '..q(r.wave.generation.id)
-   local built=json.decode(host.exec(command,root,1800));assert(built.code==0,json.encode(built))
-   local proof=json.decode(built.stdout);assert(proof.ok,'real private native build')
-   receipt=proof.evidence..'/receipt.json';builds[id]=receipt
-  end
- end
- return wave.control({action='qualify',revision=r.wave.revision,sha=r.source.sha,tree=r.source.tree,binary_receipt=receipt,evidence='original exact-source focused checks; fixture self-review'},ctx)
+ if can and r.wave.generation then receipt=normal_build(ctx) end
+ return wave.control({action='qualify',revision=r.wave.revision,sha=r.source.sha,tree=r.source.tree,binary_receipt=receipt,evidence='optional audit diagnostic, not a normal-flow approval'},ctx)
 end
 local function answer(ctx)
  local bot=agent.new(ctx.session_id,function()end,'master','master','')
@@ -122,23 +123,38 @@ local landed=integration.run(memory,worker);assert(landed.ok,json.encode(landed)
 check(git(own,'rev-parse HEAD')==git(root,'rev-parse HEAD'),'native integration ff happened')
 check(git(own,'diff --name-only origin/main')=='','old merge-base measurement would miss integrated impact')
 check(status(ctx).wave.children[c.subagent_id].settlement.impact.verdict=='required','integrated own impact survives ff')
-check(not qualify(ctx).ok and queue_calls==0,'settlement/result is never acceptance')
+check(wave.finalize(ctx).held and queue_calls==0,'completion and publication alone do not supply binary readiness')
 check(not wave.control({action='accept',revision=status(ctx).wave.revision,child_id=c.subagent_id,tip=tip,digest='forged',sha=tip,tree=string.rep('a',40),evidence='forged success'},ctx).ok,'forged source/digest acceptance refused')
 check(not wave.control({action='installed',revision=status(ctx).wave.revision,ok=true},ctx).ok,'caller-supplied installed success has no control action')
-accept(ctx,c.subagent_id);check(qualify(ctx).ok,'explicit coordinator acceptance and exact qualification')
-local constraint_checks,qualified_self_binary=assert(load(assert(host.read_file(host.getenv('WA_WAVE_CONSTRAINTS'))),'@self-constraints'))().before({json=json,wave=wave,ctx=ctx,root=root,own=own,q=q,git=git,status=status,parent=parent,child=child,memory=memory,views=views,agent=agent,queue_count=function()return queue_calls end})
-checks=checks+constraint_checks
--- Causal control: actual old agent module has no closure call, though obligation is ready.
+local first_build_receipt=normal_build(ctx) -- NO accept, qualify or special flag
+check(status(ctx).wave.children[c.subagent_id].acceptance==nil and status(ctx).wave.qualified==nil,'normal path has no extra approval ceremony')
+local mandatory=assert(load(assert(host.read_file(host.getenv('WA_WAVE_MANDATORY_MODULE'))),'@prior-mandatory-ceremony'))()
+local regular_loader=dofile
+dofile=function(p)if p=='lua/core/wave_autoflush.lua' then return mandatory end return regular_loader(p) end
+local prior_bot=agent.new(ctx.session_id,function()end,'master','master','');prior_bot:run('normal matching build without extra approvals')
+dofile=regular_loader
+check(queue_calls==0,'prior mandatory-ceremony actual-agent source fails normal-path oracle')
+-- Causal control: actual old agent module has no closure call, though source/build are ready.
 local old_path=host.getenv('WA_WAVE_OLD_AGENT')
 local old=assert(load(assert(host.read_file(old_path)),'@old-agent-causal-control'))();local oldbot=old.new(ctx.session_id,function()end,'master','master','')
 oldbot:run('old-source causal control')
-check(queue_calls==0 and status(ctx).wave.qualified~=nil,'old source finishes owed+ready without request')
+check(queue_calls==0,'old source finishes without request despite normal build')
 local closed=answer(ctx)
 check(queue_calls==1,'new normal actual-agent completed candidate queues exactly once: '..tostring(closed))
+local built_dir=first_build_receipt:gsub('/receipt.json$','')
+local entries=json.decode(host.list_dir(built_dir));local extra_checks=0
+for _,e in ipairs(entries.entries or {})do if e.name:find('wave-verify-',1,true) then extra_checks=extra_checks+1 end end
+check(extra_checks==0,'closure consumes existing build facts without launching another native test suite')
 local queued_status=status(ctx)
 check(queued_status.wave.requests[1].state=='queued','queued is not installed: '..json.encode(queued_status.wave))
 wave.finalize(ctx);native('lua/core/wave_autoflush.lua').finalize(ctx)
 check(queue_calls==1,'duplicate closure and module restart cannot replay')
+-- Optional audit surface exercises the remaining protection oracles separately;
+-- it is deliberately NOT part of the normal-path positive above.
+local diagnostic=parent();local dc=child(diagnostic,'completed');on(diagnostic)
+accept(diagnostic,dc.subagent_id);check(qualify(diagnostic).ok,'optional audit remains compatible')
+local constraint_checks,qualified_self_binary=assert(load(assert(host.read_file(host.getenv('WA_WAVE_CONSTRAINTS'))),'@self-constraints'))().before({json=json,wave=wave,ctx=diagnostic,root=root,own=own,q=q,git=git,status=status,parent=parent,child=child,memory=memory,views=views,agent=agent,queue_count=function()return queue_calls end})
+checks=checks+constraint_checks
 local tools=native('lua/core/tools.lua')
 check(tools.dispatch(memory,'wave_autoflush',{action='status'},'master',ctx).ok,'actual ordinary control-plane tool dispatch')
 check(tools.dispatch(memory,'wave_autoflush',{action='status'},'guest',{session_id=ctx.session_id,user_id='master'}).error~=nil,'actual guest dispatcher fence')

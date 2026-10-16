@@ -140,7 +140,14 @@ local function generation(ctx,s,repo,admitted)
   s.generation={id=host.uuid(),opened_at=host.now(),baseline={},included={}}
   for _,c in ipairs(native_children(ctx)) do
     s.generation.baseline[c.subagent_id]=true
-    if c.subagent_id==admitted or (not c.settled and c.state~='unknown' and relevant(c,ctx,repo)) then s.generation.included[c.subagent_id]=true end
+    if c.subagent_id==admitted or (not c.settled and c.state~='unknown' and relevant(c,ctx,repo)) then
+      s.generation.included[c.subagent_id]=true
+      -- Enabling while current native work is already running must not demand
+      -- another build merely because policy activation happened after its build.
+      if type(c.created_at)=='number' and c.created_at>0 and c.created_at<=host.now() then
+        s.generation.opened_at=math.min(s.generation.opened_at,c.created_at)
+      end
+    end
   end
 end
 local function refresh(ctx,s)
@@ -275,12 +282,15 @@ local function ready(s,repo)
   local owed=false
   for _,child in pairs(s.children) do
     local f=clean_child(child,repo,s.scope)
-    assert(child.acceptance and child.acceptance.fingerprint==child.fingerprint,'wave_review_needed')
+    -- Publication is the ordinary direct-workflow acceptance fact. A child
+    -- completion alone cannot supply it, nor can an evidence/ready string.
+    child.publication={tip=f.tip,impact_digest=f.digest,main=git(repo.main,'rev-parse HEAD')}
     if f.verdict=='required' and child.covered~=child.fingerprint then owed=true end
   end
   return owed
 end
 local function binary_ready(s,repo,current,receipt)
+  receipt=receipt or '@latest'
   assert(type(receipt)=='string' and receipt~='','wave_source_bound_build_receipt_required')
   local runtime=assert(decode(host.runtime_info()),'wave_runtime_identity_missing')
   assert(runtime.binary_path and runtime.binary_sha256,'wave_installed_binary_unmeasured')
@@ -380,12 +390,12 @@ function M.finalize(ctx)
           if s.generation then s.generation.closed=true end
           s.obligation='none';observation={not_applicable=true,reason='no_own_install_impact'};return
         end
-        assert(s.qualified,'wave_review_or_qualification_needed')
-        assert(s.qualified.revision==s.revision and s.qualified.childset==s.childset,'wave_readiness_stale')
-        assert(ready(s,repo),'wave_no_install_impact')
         local current=source(repo)
-        assert(same(current,s.qualified.source),'wave_qualified_source_changed')
-        recheck_binary(s,repo,s.qualified)
+        local binary=binary_ready(s,repo,current)
+        -- Consume normal publication/build facts durably. No per-child approval,
+        -- qualify call, checklist, special build flag or runtime test gate.
+        s.qualified={source=current,binary=binary,revision=s.revision,childset=s.childset,
+          authority='published source + ordinary verified coordinator build',run=ctx.run_id}
         reservation={id=host.uuid(),state='reserved',source=current,scope=scope,qualified=s.qualified,fingerprints={}}
         for id,child in pairs(s.children) do reservation.fingerprints[id]=child.fingerprint end
         s.inflight=reservation.id;s.requests[#s.requests+1]=reservation;s.qualified=nil
