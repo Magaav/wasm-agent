@@ -538,8 +538,8 @@ function M.catalog(role)
       sha256={type="string"},offset={type="integer",minimum=1},limit={type="integer",minimum=1,maximum=51200}
     },{"sha256"})
     for _, item in ipairs(M.admin) do list[#list + 1] = item end
-    if host.quickjs and host.getenv('WASM_AGENT_CODEMODE')=='native' then
-      list[#list+1]=schema('codemode','Opt-in Node-free JavaScript sandbox calling approved native tools. Use await tools.<name>(args), text(value), return, searchTools and describeTool. Native permissions/workspace/type/effect checks apply per call. Scripts may filter results; complete nested originals remain hash-addressed. No filesystem/network/Node or implicit models API. Unawaited calls are not admitted; effectful calls are serial.',{code={type='string'},timeout_ms={type='integer',minimum=1,maximum=300000}},{'code'})
+    if host.quickjs then
+      list[#list+1]=schema('codemode','Preferred programmatic coding path when admitted for this run: Node-free JavaScript sandbox calling approved native tools. Use await tools.<name>(args), text(value), return, searchTools and describeTool. Native permissions/workspace/type/effect checks apply per call. Scripts may filter results; complete nested originals remain hash-addressed. No filesystem/network/Node or implicit models API. Unawaited calls are not admitted; effectful calls are serial.',{code={type='string'},timeout_ms={type='integer',minimum=1,maximum=300000}},{'code'})
     end
     for _, item in ipairs(mcp.schemas()) do list[#list+1]=item end
     for _, item in ipairs(whatsapp_schemas()) do list[#list + 1] = item end
@@ -562,28 +562,37 @@ for name,value in pairs(WHATSAPP_TOOLS) do PROMPT_HIDDEN[name]=value end
 PROMPT_HIDDEN.integrate=true -- Task-owner-only; parent cannot execute it. Child all_for reads catalog.
 
 -- The schemas a role's prompt shows, and what `capabilities` reports.
-function M.all(role)
+local codemode_policy=dofile('lua/core/codemode_policy.lua')
+local function show_codemode(role,ctx,memory)
+  if ctx then return codemode_policy.pin(memory,role,ctx).enabled end
+  -- Schema-only legacy callers cannot establish default workspace eligibility.
+  return codemode_policy.setting()=='native' and host.quickjs~=nil
+end
+function M.all(role,ctx,memory)
   local shown = {}
+  local code=show_codemode(role,ctx,memory)
   for _, item in ipairs(M.catalog(role)) do
-    if not PROMPT_HIDDEN[item["function"].name] then shown[#shown + 1] = item end
+    local name=item['function'].name
+    if not PROMPT_HIDDEN[name] and (name~='codemode' or code) then shown[#shown + 1] = item end
   end
   return shown
 end
 
 function M.envelope(role,ctx)
   ctx=ctx or {};ctx.role=role or 'guest'
-  return envelope.schemas(M.all(role),ctx),envelope.mode(ctx)
+  return envelope.schemas(M.all(role,ctx,dofile('lua/core/memory.lua')),ctx),envelope.mode(ctx)
 end
 
 -- Tool schemas restricted to an exact allowed set (a subagent profile). The
 -- schema list is one half of the boundary; `dispatch` re-checks the same set. It reads the
 -- catalog, not the prompt projection, so a tool hidden from a parent can still be
 -- delegated to the child whose profile names it.
-function M.all_for(allowed, role)
+function M.all_for(allowed, role,ctx,memory)
   local out = {}
+  local code=show_codemode(role,ctx,memory)
   for _, item in ipairs(M.catalog(role or "master")) do
     local name = item["function"].name
-    if allowed and allowed[name] then out[#out + 1] = item end
+    if allowed and allowed[name] and (name~='codemode' or code) then out[#out + 1] = item end
   end
   table.sort(out, function(a, b) return tostring(a["function"].name) < tostring(b["function"].name) end)
   return out
@@ -901,7 +910,7 @@ function M.dispatch(memory, name, args, role, ctx)
     if name == "subagent" then return { error = "subagent_recursion_forbidden" } end
   end
   if not is_master(role) and admin_names()[name] then return { error = "forbidden_for_role:" .. role } end
-  local routed_catalog=ctx.subagent and M.all_for(ctx.subagent.allowed or {},role) or nil
+  local routed_catalog=ctx.subagent and M.all_for(ctx.subagent.allowed or {},role,ctx,memory) or M.all(role,ctx,memory)
   if name=='tool_search' then
     local describe=M.discovery_execution(memory,ctx)
     return envelope.search(routed_catalog or M.all(role),args,ctx,describe)
@@ -1045,7 +1054,7 @@ function M.dispatch(memory, name, args, role, ctx)
     local catalog=routed_catalog or M.all(role)
     local execution=M.discovery_execution(memory,ctx)
     return dofile('lua/core/codemode.lua').run(memory,args,role,ctx,catalog,function()
-      return ctx.subagent and M.all_for(ctx.subagent.allowed or {},role) or M.all(role)
+      return ctx.subagent and M.all_for(ctx.subagent.allowed or {},role,ctx,memory) or M.all(role,ctx,memory)
     end,function(target,parameters,fragment)
       local old=ctx.tool_arguments_json;ctx.tool_arguments_json=fragment
       local ok,value=pcall(M.dispatch,memory,target,parameters,role,ctx);ctx.tool_arguments_json=old

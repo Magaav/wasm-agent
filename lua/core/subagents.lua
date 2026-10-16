@@ -37,7 +37,7 @@ M.RETRYABLE_ADMISSION = { node_full = true, queue_full = true, subagent_runtime_
 local BROAD = {
   bash = true, shell = true, client = true, remote = true,
   write = true, edit = true, write_many=true, edit_many=true, spell_save = true, spell_run = true, spell_export = true,
-  resource = true, integrate = true,
+  resource = true, integrate = true, codemode = true,
 }
 
 -- Built-in profiles. `explore` is the default and is read-only; `guest` is the
@@ -64,7 +64,7 @@ local BUILTIN = {
     schema_version=1,id='orchestration-worker',builtin=true,operator_authorized=true,
     description='Explicit orchestration-mode task owner: implement, focused self-review, integrate and report. No nested workers or Sentinel.',
     instructions='Own the operator task end to end in your allocated worktree. Read session_worktree status, project docs and relevant skills. Implement using write/edit, self-review honestly, run focused checks, commit with Agent provenance, fetch/sync/refactor conflicts until mergeable, then use integrate to land through canonical main and verify remote. Do not directly edit canonical files, bypass hooks, force push or invent verification. If semantic conflict cannot be resolved safely, report the exact blocker and preserve work. No full release gate unless explicitly requested. NEVER call Sentinel, /update, deploy/install/restart scripts or write installed UI/assets/configuration. Only the coordinator publishes UI or installs code after readiness. Do not spawn children; no polling model loop. Complete and report; coordinator followup comes only after your report.',
-    allowed_tools={'skill','capabilities','recall','memories','session','session_many','search_messages','search_messages_many','read','read_many','grep','grep_many','ls','diagnose','graph','symbol_source_many','write','write_many','edit','edit_many','bash','operation','session_worktree','tool_result','integrate'},
+    allowed_tools={'skill','capabilities','recall','memories','session','session_many','search_messages','search_messages_many','read','read_many','grep','grep_many','ls','diagnose','graph','symbol_source_many','write','write_many','edit','edit_many','bash','operation','session_worktree','tool_result','integrate','codemode'},
     resources={},limits={max_depth=0,timeout_seconds=0,max_output_bytes=131072,max_prompt_bytes=262144},
   },
   guest = {
