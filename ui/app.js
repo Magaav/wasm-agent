@@ -37,6 +37,19 @@ nodeSelect.className = "wa-select";
 const providerSelect = document.getElementById("provider-select");
 const modelSelect = document.getElementById("model-select");
 const reasoningSelect = document.getElementById("reasoning-select");
+const fastToggle=document.getElementById('fast-mode-toggle');
+const fastWorkers=document.getElementById('fast-mode-workers');
+function paintFastMode() {
+  const fast=settings.fast_mode || {};
+  document.getElementById('fast-mode-controls').hidden=settings.provider!=='openai-sub';
+  fastToggle.checked=fast.preference==='on'||fast.preference==='coding';
+  fastWorkers.checked=fast.preference==='coding';
+  const locked=composerBusy()||settingsChanging||me.role!=='master'||(!!activeNode&&activeNode!=='local');
+  fastToggle.disabled=locked||(!fastToggle.checked&&!['documented','advertised'].includes(fast.model_support));
+  fastWorkers.disabled=locked||!fastToggle.checked;
+  const observed=settings.observability?.last?.fast_mode || settings.observability?.last_request?.fast_mode;
+  document.getElementById('fast-mode-note').textContent=`${fast.error||''} ${observed?.matches_requested===false?'Provider tier differs. ':''}Next turn · model support: ${fast.model_support||'unknown'} · account entitlement unknown. Requested: ${observed?.requested||'unknown'} · actual: ${observed?.actual||'unknown'}. Raw tokens unchanged. Not Ultrafast.`;
+}
 const settingsNote = document.getElementById("settings-note");
 const harnessStatus = document.getElementById("harness-status");
 const settingsError = document.getElementById("settings-error");
@@ -2682,6 +2695,7 @@ function applySettingsSovereignty() {
   providerSelect.disabled = locked;
   modelSelect.disabled = locked;
   reasoningSelect.disabled = locked || !(settings.reasoning || {}).supported || me.role !== "master";
+  paintFastMode();
   settingsNote.textContent = locked
     ? "a run is in flight \u2014 a change here applies at the next turn" : "";
 }
@@ -3489,6 +3503,7 @@ function renderPopFoot() {
 const SETTING_VALUE = {
   provider: (payload) => payload.provider,
   model: (payload) => payload.model,
+  'fast-mode': (payload) => payload.fast_mode?.preference,
   reasoning: (payload) => (payload.reasoning || {}).selected,
 };
 
@@ -4237,6 +4252,9 @@ providerSelect.addEventListener("change", () => setProvider(providerSelect.value
 modelSelect.addEventListener("change", () => setModel(modelSelect.value)
   .catch((error) => { settingsError.textContent = "the change could not be sent: " + String(error); }));
 reasoningSelect.addEventListener('change',()=>post('reasoning',reasoningSelect.value).catch(error=>{settingsError.textContent=String(error);}));
+const saveFastMode=()=>post('fast-mode',!fastToggle.checked?'off':fastWorkers.checked?'coding':'on').catch(error=>{settingsError.textContent=String(error);});
+fastToggle.addEventListener('change',saveFastMode);
+fastWorkers.addEventListener('change',saveFastMode);
 harnessStatus.addEventListener('export',async event=>{
   settingsError.textContent='Exporting recorded events…';
   try {
@@ -4485,6 +4503,7 @@ function renderMetadataParts() {
   ];
   if(balloon.open) parts.push(
     ['controls',[settings.providers,settings.provider,settings.model,settings.reasoning,settings.model_error,me.role],renderControls],
+    ['fast',[settings.provider,settings.fast_mode,settings.observability?.last?.fast_mode,settings.observability?.last_request?.fast_mode,me.role,activeNode,composerBusy(),settingsChanging],paintFastMode],
     ['context',[runStepScope(),contextFacts()],renderContext],
     ['limits',[settings.limits,settings.limits_error,Math.floor(Date.now()/60000)],renderLimits],
     ['usage',[settings.observability,settings.provider,settings.model,settings.output_limit,settings.compact_trigger,settings.compact_reserve,settings.compact_keep,settings.reasoning],renderUsage],

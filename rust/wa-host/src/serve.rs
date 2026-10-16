@@ -265,7 +265,7 @@ fn run_capacity() -> usize {
 /// `/subagents` is the one that can block for seconds, so it must never use node-thread 0.
 fn is_control_route(request: &Request) -> bool {
     let path = split_path(&request.path).0;
-    path == "/subagents" || (request.method == "POST" && matches!(path.as_str(), "/provider" | "/model" | "/reasoning"))
+    path == "/subagents" || (request.method == "POST" && matches!(path.as_str(), "/provider" | "/model" | "/reasoning" | "/fast-mode"))
 }
 
 /// The admission deadline, including queue residence and resolver wait. It never holds the listener.
@@ -2755,6 +2755,7 @@ fn dispatch(
         "/provider-management" if method == "POST" => (200,"application/json",call("wa_provider_management", &[body, node.as_str(), session]).into_bytes()),
         "/provider" if method == "POST" => (200, "application/json", call("wa_set_provider", &[body.trim(), node.as_str(), session]).into_bytes()),
         "/model" if method == "POST" => (200, "application/json", call("wa_set_model", &[body.trim(), node.as_str(), session]).into_bytes()),
+        "/fast-mode" if method == "POST" => (200,"application/json",call("wa_set_fast_mode",&[body.trim(),node.as_str(),session]).into_bytes()),
         "/reasoning" if method == "POST" => (200,"application/json",call("wa_set_reasoning",&[body.trim(),node.as_str(),session]).into_bytes()),
         "/chat" if method == "POST" => (200, "application/json", call("wa_reply", &[body, session, node.as_str()]).into_bytes()),
         // The module system: `/modules/` is its own page and `/modules/index.json` the listing beside

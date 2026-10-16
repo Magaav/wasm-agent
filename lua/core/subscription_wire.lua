@@ -456,6 +456,9 @@ function M.body(model, messages, tools, opts, selected, entry)
   if opts.max_output then body.max_output_tokens = opts.max_output end
   local reasoning = M.reasoning_field(entry, selected)
   if reasoning then body.reasoning = reasoning end
+  if opts.fast_selection then
+    body=dofile('lua/core/openai_sub_fast_policy.lua').request(body,opts.fast_selection)
+  end
   return body
 end
 
@@ -656,6 +659,7 @@ function M.session(opts)
 
   local function finalize(response)
     state.terminal = true
+    state.service_tier = response and response.service_tier or nil
     state.status = response and response.status or nil
     state.incomplete_reason = response and response.incomplete_details
       and response.incomplete_details.reason or nil
@@ -1014,6 +1018,7 @@ function M.session(opts)
       request_id = state.request_id,
       ttft_ms = state.ttft,
       usage = state.usage,
+      service_tier = state.service_tier,
     }, state
   end
 
@@ -1041,8 +1046,12 @@ local function complete_attempt(model, messages, tools, stream, opts, reasoning,
   -- `file:line:` prepended: the code is the thing a caller greps and a human recognises.
   local credential, absent = M.credential_provider(opts)
   if not credential then
-    error(tostring(absent or credential_failure('subscription_credential_missing',
-      'the credential seam returned no credential and no failure of its own')), 0)
+    local failure=absent or credential_failure('subscription_credential_missing',
+      'the credential seam returned no credential and no failure of its own')
+    if type(failure)=='table' and failure.code then
+      error(tostring(failure.code)..(failure.message and ': '..tostring(failure.message) or ''),0)
+    end
+    error(tostring(failure),0)
   end
   local stream_id = opts.stream_id or (host.uuid and host.uuid() or 'stream')
   local timeout_ms = (tonumber(opts.timeout_seconds) or M.request_timeout()) * 1000
@@ -1116,6 +1125,9 @@ local function complete_attempt(model, messages, tools, stream, opts, reasoning,
       tostring(decoded.body or ''):sub(1, 240)), 0)
   end
   local result, state = session.result(model)
+  if opts.fast_selection then
+    result.fast_mode=dofile('lua/core/openai_sub_fast_policy.lua').observation(opts.fast_selection,result)
+  end
   -- Streaming telemetry, so an incomplete stream can say how it ended rather than only that it did.
   result.commentary_streamed = stream and (#result.commentary > 0) or false
   result.transport = 'native-codex-responses'
