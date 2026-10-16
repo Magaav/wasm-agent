@@ -11,8 +11,16 @@ for _, tool in ipairs(tools.catalog('master')) do
   if tool['function'].name == 'subagent' then definition = tool['function'] end
 end
 check(definition ~= nil, 'subagent_schema_present')
+check(definition.description:find('Reuse the exact recorded subagent/dispatch or native attempt ID', 1, true), 'recorded_id_reuse_help')
+check(definition.description:find('one direct lookup, not `list` rediscovery', 1, true), 'known_id_one_lookup_help')
+check(definition.description:find('Never guess or strip a `child:` session name', 1, true), 'no_session_id_guessing_help')
 check(definition.description:find('`message`, `steer` and `steer_session` require a non-empty `idempotency_key`', 1, true), 'message_requires_key_in_tool_help')
 local parameters = definition.parameters
+local has_lookup = false
+for _, action in ipairs(parameters.properties.action.enum) do if action == 'lookup_session' then has_lookup = true end end
+check(has_lookup, 'lookup_session_model_action')
+check(parameters.properties.conversation_id.type == 'string' and parameters.properties.conversation_id.description:find('required, non-empty exact child session ID', 1, true), 'explicit_lookup_conversation_id')
+check(parameters.properties.id.description:find('not a child session ID', 1, true), 'task_attempt_not_session_id')
 check(parameters.properties.idempotency_key.description:find('Required, non-empty for message, steer and steer_session', 1, true), 'conditional_key_property_help')
 check(parameters.properties.idempotency_key.description:find('optional for start', 1, true), 'start_key_remains_optional')
 check(parameters.properties.idempotency_key.description:find('No key is needed for read-only actions', 1, true), 'reads_need_no_key')
@@ -21,11 +29,13 @@ check(not parameters.allOf and not parameters.oneOf and not parameters['if'], 'n
 for _, role in ipairs({'master', 'guest'}) do
   local offered = tools.all_for({subagent = true}, role)
   check(#offered == 1 and offered[1]['function'].parameters.properties.idempotency_key.description == parameters.properties.idempotency_key.description, 'profile_help_parity_' .. role)
+  check(offered[1]['function'].parameters.properties.conversation_id.description == parameters.properties.conversation_id.description, 'profile_lookup_help_parity_' .. role)
 end
 local wire = original_dofile('lua/core/subscription_wire.lua').body('gpt-6.1-sol',
   {{role = 'user', content = 'model-free serializer check'}},
   {{type = 'function', ['function'] = definition}}, {}, nil, {})
 check(wire.tools[1].description == definition.description, 'responses_preserves_tool_help')
+check(wire.tools[1].parameters.properties.conversation_id.description == parameters.properties.conversation_id.description, 'responses_preserves_lookup_field')
 check(wire.tools[1].parameters.properties.idempotency_key.description == parameters.properties.idempotency_key.description, 'responses_preserves_property_help')
 
 -- The real native engine owns durable continuation deduplication. This mock proves
@@ -65,6 +75,26 @@ dofile = function(name)
 end
 local api = original_dofile('lua/core/subagents.lua')
 local ctx = {user_id = owner, role = 'master', session_id = 'fixture-parent', run_id = 'fixture-parent-run'}
+-- Model dispatch must use the recorded exact ID once, without list/session resolution.
+local original_mock = host.subagent
+local calls = {}
+host.subagent = function(action, raw)
+  local args = json.decode(raw)
+  calls[#calls + 1] = action
+  check(args.owner_user == owner, 'model_read_owner_derived')
+  if action == 'status' then
+    check(args.id == receipt.subagent_id, 'model_status_exact_id_unchanged')
+    return json.encode(receipt)
+  end
+  check(action == 'lookup_session', 'no_registry_or_mutating_fallback')
+  check(args.conversation_id == child_sid, 'model_lookup_exact_session_unchanged')
+  return json.encode({found = true, task = receipt})
+end
+local direct = tools.dispatch(memory, 'subagent', {action = 'status', id = receipt.subagent_id}, 'master', ctx)
+check(direct.subagent_id == receipt.subagent_id and #calls == 1 and calls[1] == 'status', 'known_id_one_direct_owner_checked_lookup')
+local lookup = tools.dispatch(memory, 'subagent', {action = 'lookup_session', conversation_id = child_sid}, 'master', ctx)
+check(lookup.found and lookup.task.session_id == child_sid and lookup.subagents == nil and #calls == 2, 'model_session_lookup_no_global_array')
+host.subagent = original_mock
 for _, args in ipairs({{action = 'message', id = receipt.subagent_id, text = 'continue'},
   {action = 'message', id = receipt.subagent_id, text = 'continue', idempotency_key = ''}}) do
   check(api.control(args, ctx).error == 'idempotency_key_required', 'missing_message_key_refuses')
@@ -109,5 +139,16 @@ local before = native_calls
 check(api.control({action = 'message', id = receipt.subagent_id, idempotency_key = 'nested', text = 'no'},
   {user_id = owner, role = 'master', subagent = {depth = 1}}).error == 'subagent_recursion_forbidden', 'child_recursion_check_unchanged')
 check(native_calls == before, 'recursion_refusal_precedes_native_lookup')
+receipt.profile = 'orchestration-worker'
+for _, action in ipairs({'message', 'steer'}) do
+  check(api.control({action = action, id = receipt.subagent_id, text = 'not admitted', idempotency_key = 'active-worker'}, ctx).error == 'worker_followup_requires_report', 'active_worker_still_refused_' .. action)
+end
+receipt.profile = 'explore'
+host.subagent = real_native
+for _, session in ipairs({child_sid, 'missing-session'}) do
+  local absent = tools.dispatch(memory, 'subagent', {action = 'lookup_session', conversation_id = session}, 'master', ctx)
+  check(absent.found == false and absent.subagents == nil, 'real_native_absent_no_global_array')
+end
+check(tools.dispatch(memory, 'subagent', {action = 'lookup_session', conversation_id = ''}, 'master', ctx).error == 'conversation_id_required', 'real_native_empty_session_refusal')
 host.subagent, dofile = real_native, original_dofile
 print(string.format('subagent message contract ok (%d checks, 0 skipped)', checks))

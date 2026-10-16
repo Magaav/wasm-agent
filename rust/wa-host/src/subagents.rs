@@ -1313,6 +1313,44 @@ mod tests {
         assert_eq!(manager.continue_session(&request).unwrap()["subagent_id"], "continued");
     }
 
+    #[test]
+    fn session_lookup_keeps_queued_tail_and_exact_status_identity() {
+        let manager = Manager::with_root(temp_root("lookup-tail"), 1, 6);
+        let gate = Arc::new((Mutex::new(false), Condvar::new()));
+        let wait = gate.clone();
+        let _ = manager.runner.set(Arc::new(move |_| {
+            let mut open = wait.0.lock().unwrap();
+            while !*open { open = wait.1.wait(open).unwrap(); }
+            Ok(json!({"state":"completed"}))
+        }));
+        let original = spec("lookup-original", "alice", "");
+        manager.start(&original).unwrap();
+        manager.continue_session(&json!({"id":"lookup-original","owner_user":"alice",
+            "new_id":"lookup-tail","text":"private fixture","idempotency_key":"lookup-next"})).unwrap();
+        let session = original["session_id"].as_str().unwrap();
+        let active = manager.lookup_session("alice", session).unwrap();
+        // Release even if a later assertion fails, so the private runner cannot hang.
+        *gate.0.lock().unwrap() = true;
+        gate.1.notify_all();
+        assert_eq!(active["task"]["subagent_id"], "lookup-tail");
+        assert_eq!(active["task"]["task_id"], "lookup-tail");
+        assert_eq!(active["task"]["attempt_id"], "lookup-tail");
+        assert_eq!(active["task"]["after_id"], "lookup-original");
+        assert_eq!(active["task"]["settled"], false);
+        assert!(active.get("subagents").is_none());
+        assert_eq!(manager.lookup_session("alice", "missing-child-session").unwrap(), json!({"found":false}));
+        assert_eq!(manager.lookup_session("mallory", session).unwrap(), json!({"found":false}));
+        assert_eq!(manager.lookup_session("alice", "").unwrap_err(), "conversation_id_required");
+        manager.await_task("lookup-tail", "alice", 5000).unwrap();
+        let settled = manager.lookup_session("alice", session).unwrap();
+        assert_eq!(settled["task"]["subagent_id"], "lookup-tail");
+        assert_eq!(settled["task"]["settled"], true);
+        // A recorded exact attempt is historical access, never silently retargeted.
+        assert_eq!(manager.find("lookup-original", "alice").unwrap()["subagent_id"], "lookup-original");
+        assert!(manager.find("lookup-original", "mallory").is_err());
+        assert!(manager.find(session, "alice").is_err());
+    }
+
     /// A child session has one writer. The chain that serialized follow-ups lived
     /// only in this process's map, and that map is read once, at boot: a second
     /// boot on the same runtime home could admit a second live run for a session
