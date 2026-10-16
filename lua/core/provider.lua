@@ -17,7 +17,7 @@ local fast_policy = dofile('lua/core/openai_sub_fast_policy.lua')
 local state = dofile("lua/core/state.lua")
 
 function M.fast_mode(model, scope, inspect)
-  local preference=state.read('fast.openai-sub') or 'off'
+  local preference=(M._pinned and M._pinned.fast.preference) or state.read('fast.openai-sub') or 'off'
   if preference~='off' and preference~='on' and preference~='coding' then error('fast_mode_preference_corrupt',0) end
   local eligible=scope and scope.role=='master' and (not scope.profile or
     (scope.profile=='orchestration-worker' and preference=='coding'))

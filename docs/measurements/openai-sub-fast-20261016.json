@@ -11,8 +11,9 @@
   "paid_calls": 0,
   "account_entitlement": "unknown",
   "throughput_benefit": "unmeasured",
-  "candidate_binary_sha256": "f338689173a1f66619aad239d0555cae64b59611a0b00afb71f6afc7b99889bc",
-  "staged_screenshot_sha256": "d1697e33811f4f6b0c145bb09666180ac26ac762782aaf0227493b1e4eff8f01",
+  "pre_sync_candidate_binary_sha256": "f338689173a1f66619aad239d0555cae64b59611a0b00afb71f6afc7b99889bc",
+  "staged_screenshot_raw_sha256": "5cdfd8f0de887c3f222c50b2b759e843520e093d7d5630840b969f250d3dc59d",
+  "staged_screenshot_read_view_sha256": "d1697e33811f4f6b0c145bb09666180ac26ac762782aaf0227493b1e4eff8f01",
   "focused": {
     "integration_per_source_mode": 39,
     "restart_per_source_mode": 2,
