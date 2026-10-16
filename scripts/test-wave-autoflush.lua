@@ -111,6 +111,9 @@ on(ctx)
 check(status(ctx).wave.activity=='working','real native fixture activity, not pending flags')
 check(status(ctx).wave.children['historical-unknown']==nil and status(ctx).wave.children['operational-job']==nil,'historical unknown and active operational jobs are outside this self wave')
 check(not qualify(ctx).ok,'active required child prevents qualification')
+local waiting=wave.finalize(ctx)
+check(waiting.deferred and waiting.reason=='active_workers' and not waiting.error and queue_calls==0,'active worker is structured waiting, never an error or queue')
+check(answer(ctx)=='fixture final' and answer(ctx)=='fixture final','actual lifecycle active-worker status answers stay clean without repeated suffix')
 c.state='completed';c.settled=true
 -- Original own tip is captured before the native integration fast-forward.
 local f=wave.capture(memory,{session_id=c.session_id,user_id='master'},own,tip,base)

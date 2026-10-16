@@ -75,6 +75,52 @@ The v2 state and old v1 history are retained independently; installation does no
 activate either. Privileged out-of-band filesystem modification is outside this
 cooperative local boundary.
 
+## Closure reporting and delivery
+
+Active native workers produce `{held:true,deferred:true,state:"deferred",
+reason:"active_workers"}`. Observation still runs; readiness/queue admission does
+not. This expected wait is not an installation failure. All existing source,
+activity, ownership, unknown-effect and binary guards remain in force.
+
+Closure results are never appended to assistant prose. Changed actionable holds,
+queue transitions and native installation verification emit a concise operator
+`status` with `wave_notice_id`, and a `wave_closure` trace on the assistant row.
+Full original results (including old Lua error/source decoration) are retained in
+SQLite meta `wave-autoflush-report:v1:<parent-session>` as append-only events.
+`wave_autoflush status` retains the native wave state and original request receipts.
+Unchanged semantic state is quiet across module/process restarts; generation,
+reservation, phase or blocker changes can notify again. Expected waiting and
+no-impact observations have no notice. Guest, child, job and WhatsApp-route
+contexts cannot produce operator notices. Reporting never calls finalize/queue.
+
+The report is durably claimed before emission: notices are **at-most-once**, not
+proof that an offline reader received them. A crash between claim and stream can
+lose the live status; its original remains in the native report. Transcript
+repaint reads saved content/trace; it does not rerun closure or emit a new notice.
+The streaming server returns no answer body; the host emits a text-free `done`.
+The one `reply` uses the same message id/content as the saved assistant row.
+No marker regex strips model/user quotations or rewrites existing history.
+
+The original raw leak was the unconditional final-answer suffix for every
+non-nil closure result, including the active-child readiness assertion. A private
+baseline-agent control reproduces two markers with ONE finalize when model text
+already quotes a prior marker. This proves a possible echo mechanism, **not** the
+cause of any particular historical double suffix. Without its original wire and
+provider records, historical delivery duplication versus model echo is unresolved.
+Source inspection found one suffix site, one final-row write and one reply emit;
+the streaming return and `done` do not append a second body. No UI edits or visual
+claims are part of this backend repair.
+
+`node scripts/test-wave-closure-reporting.cjs <built-wa> <fresh-private-output>`
+checks actual agent + mock provider, source/standalone embedded, server streaming
+entrypoint, saved transcript, native report dedup/restart, quoted text and native
+role/origin/WhatsApp exclusions. It retains a failing baseline regression and an
+explicitly labelled possible-echo control. No paid inference or live worker probe.
+The existing lifecycle suite additionally checks real active-worker deferral and
+clean ordinary answers; its original installation safety assertions remain.
+`WA_WAVE_OLD_BINARY` may select a measured genuine earlier physical artifact for
+that private suite; its path/hash are retained rather than assuming a local cache.
+
 ## Focused source proof
 
 `node scripts/test-wave-autoflush.cjs <absolute-built-wa> <fresh-private-output>`
