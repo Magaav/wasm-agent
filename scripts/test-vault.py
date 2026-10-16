@@ -176,7 +176,8 @@ base = "http://127.0.0.1:%d" % upstream_port
 
 PROXY, ADMIN = free_port(), free_port()
 data_dir = tempfile.mkdtemp(prefix="wa-vault-test-")
-env = dict(os.environ, WA_VAULT_ADMIN_TOKEN=ADMIN_TOKEN, WA_VAULT_DATA=data_dir,
+clean_env={k:v for k,v in os.environ.items() if not k.startswith(('WA_','WASM_AGENT_','OPENAI_','OPENCODE_','PI_'))}
+env = dict(clean_env, WA_VAULT_ADMIN_TOKEN=ADMIN_TOKEN, WA_VAULT_DATA=data_dir,
            WA_VAULT_PROXY_PORT=str(PROXY), WA_VAULT_ADMIN_PORT=str(ADMIN), WA_VAULT_BIND="127.0.0.1",
            WA_VAULT_OPENCODE_BASE=base + "/go/v1", WA_VAULT_CHATGPT_BASE=base + "/backend",
            WA_VAULT_AUTH_BASE=base + "/auth", PYTHONDONTWRITEBYTECODE="1")

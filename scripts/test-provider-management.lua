@@ -68,6 +68,11 @@ auth.acquire_lock=acquire;previous.expires=host.now()*1000+3600000;assert(host.w
 local operation=host.uuid()
 local login,err=manager.device('begin',operation,'fixture-owner');check(login and login.state=='pending','native begin through device contract')
 check(auth.status().generation=='native-generation-1','begin retains working auth')
+local before_competing=calls
+local competing,competing_error=auth.login('browser')
+check(not competing and competing_error.code=='login_busy' and calls==before_competing,'legacy login cannot overwrite a managed pending flow')
+local imported,import_error=auth.import_from_pi()
+check(not imported and import_error.code=='login_busy' and calls==before_competing,'legacy import shares the credential lock and cannot switch account beneath managed login')
 check(auth.management_state('fixture-owner').operation==operation and auth.management_state('foreign-owner')==nil,'read-only pending recovery is operator-scoped')
 local denied,problem=manager.device('cancel',operation,'foreign-owner');check(not denied and problem.code=='login_scope_mismatch','foreign owner denied')
 local duplicate=manager.device('begin',host.uuid(),'fixture-owner');check(not duplicate,'single flight begin')

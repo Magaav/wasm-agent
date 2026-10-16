@@ -467,12 +467,23 @@ local function read_flow()
 end
 
 local function write_flow(value)
+  local release
+  if value.flow~='device_management' then
+    local lock_failure;release,lock_failure=M.acquire_lock(0)
+    if not release then return nil,lock_failure end
+    local pending=read_flow()
+    if pending and pending.flow=='device_management' then
+      release();return nil,failure('login_busy','operator device flow owns the pending login; no flow overwritten')
+    end
+  end
   value.version = 1
   value.pending = true
   if not host.write_file(flow_path(), json.encode(value)) then
+    if release then release() end
     return nil, failure("store_write_failed", "could not write " .. flow_path())
   end
   restrict_mode(flow_path())
+  if release then release() end
   return true, nil
 end
 
@@ -721,7 +732,9 @@ end
 -- `{type='oauth', access, refresh, expires, accountId}`. After this call nothing here reads Pi
 -- again - and a second import is refused rather than silently overwriting a credential that may
 -- have been refreshed since (a live token is not something to trade for a stale copy).
-function M.import_from_pi()
+local function import_from_pi_locked()
+  local pending=read_flow()
+  if pending and pending.flow=='device_management' then return nil,failure('login_busy','operator device flow owns authentication; import not performed') end
   local existing = read_store()
   if existing then
     return nil, failure("import_already_present", "wasm-agent already holds a credential for " ..
@@ -757,6 +770,15 @@ function M.import_from_pi()
   if not written then return nil, write_failure end
   return { ok = true, imported = true, account_id = account_id, store = M.store_path(),
            expires = value.expires, fingerprint = value.access_fingerprint }, nil
+end
+
+function M.import_from_pi()
+  local release,problem=M.acquire_lock(0)
+  if not release then return nil,problem end
+  local ok,result,err=pcall(import_from_pi_locked)
+  release()
+  if not ok then return nil,failure('import_failed','credential import failed; no success claimed') end
+  return result,err
 end
 
 -- --- login ----------------------------------------------------------------------------------
@@ -803,9 +825,9 @@ local function store_token_response(payload, source, operation, operation_owner)
     end
   end
   local written, write_failure = write_store(value)
-  if release then release() end
-  if not written then return nil, write_failure end
+  if not written then if release then release() end;return nil, write_failure end
   clear_flow()
+  if release then release() end
   return { ok = true, account_id = account_id, expires = value.expires, source = source,
            fingerprint = value.access_fingerprint, store = M.store_path() }, nil
 end
@@ -1108,6 +1130,8 @@ function M.manage_device(action, operation, owner)
 end
 
 function M.login(mode, opts)
+  local pending=read_flow()
+  if pending and pending.flow=='device_management' then return nil,failure('login_busy','resume or cancel the operator device flow; no competing login started') end
   opts = opts or {}
   if type(mode) == "table" then opts, mode = mode, opts end
   mode = mode or opts.mode or "device"

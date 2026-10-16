@@ -5,6 +5,8 @@ const clean=Object.fromEntries(Object.entries(process.env).filter(([key])=>!/^(W
 console.log('Evidence: '+out);
 fs.mkdirSync(out+'/scripts/lib',{recursive:true});
 for(const fixture of ['scripts/lib/openai-sub-auth-mock.mjs','scripts/openai-sub-auth-worker.lua'])fs.copyFileSync(root+'/'+fixture,out+'/'+fixture);
+fs.mkdirSync(out+'/tests/fixtures/subscription',{recursive:true});
+fs.copyFileSync(root+'/tests/fixtures/subscription/codex-context-error-sse.txt',out+'/tests/fixtures/subscription/codex-context-error-sse.txt');
 const suites=['test-provider-management.lua','test-native-subscription.lua','test-openai-sub-auth.lua','test-vault-routing.lua','test-native-disconnect-recovery.lua','test-subscription-server-recovery.lua','test-native-overflow-recovery.lua'];
 let runs=0;
 for(const embedded of [false,true])for(const script of suites){
