@@ -1215,7 +1215,7 @@ function M:run(text, images)
   local ok,result=pcall(function()
   steering.begin(self.user,self.session_id,self.steering_run_id)
   span=telemetry.start({session_id=self.session_id,run_id=self.run_id},'run',{})
-  provider.pin()
+  provider.pin({role=self.role,profile=self.subagent and (self.subagent.id or 'unknown')})
   -- A child's approved model/reasoning override applies to this interpreter only.
   -- `provider.pin()` has already snapshotted the caller's settings, so mutating
   -- the pinned copy changes this child without touching the parent or the

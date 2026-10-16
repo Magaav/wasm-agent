@@ -188,6 +188,9 @@ function M.transport_retries()
   return value
 end
 function M.complete(model, messages, tools, stream, opts, reasoning)
+  if opts and opts.fast_selection and opts.fast_selection.enabled and M.transport()~='native' then
+    error('fast_mode_requires_native_subscription_transport',0)
+  end
   if M.transport() == 'native' then
     -- Same arguments, same result. The wire owns its own deadline check but reads the same
     -- WASM_AGENT_SUBSCRIPTION_TIMEOUT bound, so the budget does not change with the transport.

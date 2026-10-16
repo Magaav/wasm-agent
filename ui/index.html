@@ -132,6 +132,13 @@
           <label class="pop-head" for="reasoning-select">reasoning</label>
           <select id="reasoning-select" class="wa-select"></select>
         </div>
+        <div id="fast-mode-controls" hidden>
+          <label class="pop-row"><span class="pop-head">Fast mode</span><input id="fast-mode-toggle" type="checkbox"></label>
+          <label class="pop-row"><span>Include coding task owners</span><input id="fast-mode-workers" type="checkbox"></label>
+          <div class="usage-note">Coding inheritance covers only the ordinary orchestration-worker profile; guests and specialized profiles stay Standard.</div>
+          <div id="fast-mode-note" class="usage-note"></div>
+          <a href="https://learn.chatgpt.com/docs/agent-configuration/speed" target="_blank" rel="noopener noreferrer">Fast usage: 2.5× included allowance / 2× purchased credits</a>
+        </div>
         <div id="settings-error" class="usage-note" role="alert"></div>
         <div id="settings-note" class="usage-note"></div>
         <div class="pop-head">context</div>

@@ -71,8 +71,7 @@ eq(json.encode(response),before,'raw counts unchanged, no premium multiplication
 eq(policy.observation(on,{service_tier='fast'}).matches_requested,true,'fast/priority alias')
 eq(policy.observation(on,{service_tier='ultrafast'}).matches_requested,false,'ultrafast distinct')
 eq(policy.observation(off,{service_tier='default'}).matches_requested,true,'standard reported')
--- Exercise the current native parser with a synthetic terminal response. Stage1
--- deliberately does NOT patch it to capture service_tier; that is a Stage2 seam.
+-- Exercise native parser actual-tier capture with a synthetic terminal response.
 response.status='completed'
 response.id='resp_synthetic_fast_stage1'
 response.output={}
@@ -84,6 +83,6 @@ eq(parsed.usage.completion_tokens,20,'native raw output unchanged')
 eq(parsed.usage.total_tokens,120,'native total unchanged')
 eq(parsed.usage.prompt_tokens_details.cached_tokens,40,'native cache unchanged')
 eq(parsed.usage.completion_tokens_details.reasoning_tokens,5,'native reasoning count unchanged')
-eq(parsed.service_tier,nil,'current parser tier capture is pending, not claimed wired')
-eq(policy.observation(on,parsed).actual_known,false,'lost metadata must remain unknown')
-print('openai-sub fast stage1 ok ('..checks..' checks; no network; source-root only)')
+eq(parsed.service_tier,'default','native parser captures actual terminal tier')
+eq(policy.observation(on,parsed).actual_known,true,'terminal metadata remains known')
+print('openai-sub fast stage1 ok ('..checks..' checks; no network)')

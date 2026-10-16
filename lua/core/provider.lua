@@ -13,11 +13,43 @@ local prefix_audit = dofile("lua/core/prefix_audit.lua")
 local M = {}
 local subscription = dofile("lua/core/openai_sub.lua")
 local vault = dofile("lua/core/vault.lua")
+local fast_policy = dofile('lua/core/openai_sub_fast_policy.lua')
+local state = dofile("lua/core/state.lua")
+
+function M.fast_mode(model, scope, inspect)
+  local preference=state.read('fast.openai-sub') or 'off'
+  if preference~='off' and preference~='on' and preference~='coding' then error('fast_mode_preference_corrupt',0) end
+  local eligible=scope and scope.role=='master' and (not scope.profile or
+    (scope.profile=='orchestration-worker' and preference=='coding'))
+  local enabled=eligible and preference~='off' or false
+  if M._pinned then enabled=M._pinned.fast.enabled;preference=M._pinned.fast.preference end
+  local ok,selection=pcall(fast_policy.selection,M.active().id,model or M.settings().model,enabled)
+  if not ok then
+    if not inspect then error(selection,0) end
+    local problem=selection
+    selection=fast_policy.selection(M.active().id,model or M.settings().model,false)
+    selection.error=problem
+  end
+  selection.preference=preference
+  return selection
+end
+
+function M.set_fast_mode(value, revision)
+  if value~='off' and value~='on' and value~='coding' then return false,'invalid_fast_mode' end
+  local result=state.mutate(function()
+    if M.active().id~='openai-sub' then return {ok=false,error='fast_mode_provider_not_applicable'} end
+    if value~='off' then
+      local ok,err=pcall(fast_policy.selection,'openai-sub',M.settings().model,true)
+      if not ok then return {ok=false,error=err} end
+    end
+    state.write('fast.openai-sub',value)
+    return {ok=true}
+  end,revision)
+  return result.ok,result.error
+end
 
 local function env(name) return host.getenv(name) end
 local function trim(value) return (value or ""):gsub("^%s+", ""):gsub("%s+$", "") end
-
-local state = dofile("lua/core/state.lua")
 
 local function state_path(name)
   return state.path(name)
@@ -814,7 +846,7 @@ end
 
 -- Selection changes apply at the next user turn, not halfway through a tool
 -- exchange on another worker. Credentials remain only in memory, never telemetry.
-function M.pin()
+function M.pin(scope)
   state.with_snapshot(function()
   local profile,settings=M.active(),M.settings()
   if vault.base(profile.id) then
@@ -824,7 +856,8 @@ function M.pin()
     profile.credential_generation = dofile('lua/core/openai_sub_auth.lua').status().generation or 'absent'
   end
   local reasoning=M.reasoning(settings.model)
-  M._pinned={provider=profile,settings=settings,reasoning=reasoning}
+  local fast=M.fast_mode(settings.model,scope)
+  M._pinned={provider=profile,settings=settings,reasoning=reasoning,fast=fast}
   M._pinned.revision=state.revision()
   end)
 end
@@ -1019,6 +1052,7 @@ function M.complete_with(model, messages, tools, stream, opts)
       request_meta.request_hash_source="bridge input; Pi assembles the provider wire request"
     end
   end
+  if provider.id=='openai-sub' then request_meta.fast_mode=fast_policy.observation(M.fast_mode(body.model),nil) end
   local span=telemetry.start(opts,opts.kind or "model_call",request_meta)
   -- Count the provider boundary, not a decision round or pre-request refusal.
   -- Transport reconnects inside a subscription call remain separate diagnostics.
@@ -1029,6 +1063,7 @@ function M.complete_with(model, messages, tools, stream, opts)
     for key,value in pairs(opts) do bridge_opts[key]=value end
     bridge_opts.max_output=effective.output_limit
     bridge_opts.credential_generation=provider.credential_generation
+    bridge_opts.fast_selection=M.fast_mode(body.model)
     return subscription.complete(body.model,messages,tools,stream,bridge_opts,effective.reasoning)
   end
   if stream then
@@ -1106,6 +1141,7 @@ function M.complete_with(model, messages, tools, stream, opts)
   local observation=telemetry.finish(span,{ok=complete,model=result.model,
     provider=provider.id,request_id=result.request_id,finish_reason=result.finish_reason,
     usage=result.usage,normalized=telemetry.normalize(result.usage,M.rates(result.model)),
+    fast_mode=result.fast_mode,
     transport_failed_attempts=result.transport_failed_attempts,
     ttft_ms=result.ttft_ms,stream_complete=result.stream_complete,
     reasoning_bytes=#(result.reasoning or ""),answer_bytes=#(result.content or ""),

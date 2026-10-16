@@ -1,5 +1,8 @@
 # OpenAI subscription Fast mode — isolated Stage1 (2026-10-16)
 
+Historical Stage1 record. The subsequent wired feature and scope are documented
+in [OPENAI-SUB-FAST.md](OPENAI-SUB-FAST.md); the original evidence below is retained.
+
 **Not installed, not wired, not integrated.** This commit adds a pure Lua policy
 and focused fixtures only. Existing provider/auth/UI/settings/serve files are
 unchanged. No credential access, account setting, paid request, benchmark change,

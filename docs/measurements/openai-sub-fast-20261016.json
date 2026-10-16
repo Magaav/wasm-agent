@@ -1,0 +1,35 @@
+{
+  "schema": 1,
+  "feature": "openai-sub-fast-mode",
+  "date": "2026-10-16",
+  "base": "72a7d8f1e56eada49490401b79dbd6991e1d15ff",
+  "self_review": true,
+  "independent_review": false,
+  "gate_verified": false,
+  "release_verified": false,
+  "live_preference_changed": false,
+  "paid_calls": 0,
+  "account_entitlement": "unknown",
+  "throughput_benefit": "unmeasured",
+  "candidate_binary_sha256": "f338689173a1f66619aad239d0555cae64b59611a0b00afb71f6afc7b99889bc",
+  "staged_screenshot_sha256": "d1697e33811f4f6b0c145bb09666180ac26ac762782aaf0227493b1e4eff8f01",
+  "focused": {
+    "integration_per_source_mode": 39,
+    "restart_per_source_mode": 2,
+    "policy_per_source_mode": 108,
+    "source_modes": ["explicit Lua source root", "standalone embedded"],
+    "real_private_http_checks": 29,
+    "chromium_positive_checks": 24,
+    "chromium_toggle_handler_removal": "fails explicit ON CAS as required",
+    "provider_recovery_process_runs": 20,
+    "provider_management_checks_per_source_mode": 38
+  },
+  "evidence_location": "owned git worktree metadata: fast-stage2-*; final required UI receipt retained separately after clean candidate commit",
+  "preserved_failures": [
+    "http-1: harness used GET /model instead of /models; corrected",
+    "http-2/http-3: concurrent loser can be known-no-effect read_capacity_busy, not only CAS conflict; corrected assertion and independently checked stale CAS",
+    "http-4: unknown foreign node selector was accepted as local; strict local target check added",
+    "runtime-final/runtime-4: broker generation refusal was present but plain failure table lost its named code; retained code/message at wire seam without weakening fence"
+  ],
+  "not_verified": ["live account entitlement", "paid Fast throughput", "installed UI", "code-mode benefit", "full release gate"]
+}

@@ -1164,6 +1164,7 @@ function wa_model(node, session, chat_session)
     usage = agentlib.usage(),
     observability=observation,
     reasoning=provider.reasoning(settings.model),
+    fast_mode=provider.fast_mode(settings.model,{role=effective_role(user)},true),
     model_error=settings.model_error or provider.unservable(settings.model),
     output_limit=tonumber(host.getenv("WASM_AGENT_LLM_MAX_OUTPUT")) or provider.capabilities(settings.model).max_output,
     compact_reserve=budget.reserve,
@@ -1202,6 +1203,20 @@ local function selection_input(body)
     return parsed.value, parsed.revision
   end
   return body or '', nil
+end
+
+function wa_set_fast_mode(body, node, session)
+  if not require_master(session) then return json.encode({error='forbidden'}) end
+  -- Cost preference is local-only; remote operator must use that node's own UI.
+  if node and node~='' and node~='local' then
+    local target=nodeslib.find(node)
+    if not target or not target.local_node then return json.encode({error='fast_mode_local_only'}) end
+  end
+  local value,revision,err=selection_input(body)
+  if err or revision==nil then return json.encode({error=err or 'settings_revision_required'}) end
+  local ok,problem=provider.set_fast_mode(value,revision)
+  if not ok then return json.encode({error=problem}) end
+  return wa_model('',session)
 end
 
 -- Switch provider/model at runtime; returns the refreshed settings payload.
