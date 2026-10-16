@@ -18,6 +18,8 @@ if(post){
  console.log(JSON.stringify({ok:true,retained_hashes:true,results:receipt.results}));
 }else{
  assert(!fs.existsSync(out),'never overwrite failed generations');fs.mkdirSync(out,{recursive:true});
+ for(const name of names){const p=path.join(out,'sources',name);fs.mkdirSync(path.dirname(p),{recursive:true});fs.copyFileSync(path.join(repo,name),p);}
+ fs.copyFileSync(binary,path.join(out,'tested-wa'+(process.platform==='win32'?'.exe':'')));
  const clean=Object.fromEntries(Object.entries(process.env).filter(([k])=>!/^(WA_|WASM_AGENT_|PI_|OPENAI_|ANTHROPIC_|OPENCODE_)/i.test(k)));
  const results=[];let ok=true;
  for(const mode of ['source','embedded']){
@@ -29,7 +31,7 @@ if(post){
    const r=cp.spawnSync(binary,['--db',path.join(home,'private.db')],{cwd:home,env:{...env,WA_PRESENTATION_PHASE:phase},encoding:'utf8',timeout:90000,maxBuffer:8*1024*1024,windowsHide:true});
    for(const stream of ['stdout','stderr'])fs.writeFileSync(path.join(home,phase+'.'+stream),r[stream]||'');
    let summary;try{summary=JSON.parse((r.stdout||'').trim().split(/\r?\n/).at(-1));}catch{}
-   const passed=r.status===0&&summary?.ok===true&&summary.checks>=(phase==='seed'?20:1);
+   const passed=r.status===0&&summary?.ok===true&&summary.checks>=(phase==='seed'?40:1);
    results.push({mode,phase,status:r.status,signal:r.signal,error:r.error?.message,summary,node_unavailable:noNode.error.code});if(!passed){ok=false;break;}
   }
   if(!ok)break;

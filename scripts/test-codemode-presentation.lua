@@ -28,6 +28,7 @@ check(r.ok and r.presentation_version==1,'actual native helper available')
 check(#r.calls==1 and #r.attempts==2,'one native batch, one pure presentation request')
 local captured=json.decode(raw(r.calls[1].evidence))
 check(captured.next_cursor~=nil,'large aggregate uses existing cached read_many cursor')
+for _,item in ipairs(captured.results)do check(item.content==text and item.eof and item.selection and item.edit_lines,'first page complete source/edit frame and final caveat')end
 local viewed=json.decode(json.encode(r.shown[1]))
 check(viewed.result and viewed.complete,'whole first captured page visible without double serialization')
 check(json.encode(viewed.result)==json.encode(captured),'every source/receipt/error field preserved')
@@ -70,7 +71,7 @@ check(#output.project('codemode',line)<=output.MAX_BYTES and (line.shown[1].resu
 -- Force presentation overflow without mutating or refetching. All unread slots
 -- have exact byte ranges into the already retained native result.
 local mock=tools.dispatch
-local payload={ok=false,failed=1,results={{content=string.rep('\\"🐋',8000),selection='exact receipt',edit_lines={start_line=1,end_line=1},version='v'}, {error='last page consequential refusal',effect='none'}},note='LATE CAVEAT',next_cursor='existing-cursor',complete=false}
+local payload={ok=false,failed=1,results={{content=string.rep('\\"🐋',8000),selection='exact receipt',edit_lines={start_line=1,end_line=1},version='v'}, {error='last page consequential refusal',effect='none'}, {type='image',image={id='private-fixture-image',mime='image/png'},source='private-fixture',note='Nontext reference, not rendered image output'}},note='LATE CAVEAT',next_cursor='existing-cursor',complete=false}
 tools.dispatch=function(m,n,a,role,c)if n=='read_many' then return payload end;return mock(m,n,a,role,c)end
 r=call('await tools.read_many({requests:[{path:"fixture"}]}); await showCall({version:1,call:1});')
 tools.dispatch=mock
@@ -83,10 +84,20 @@ check(r.presentation_partial and #json.encode(r)<=output.MAX_BYTES,'encoded over
 local shown=r.shown[1];local decoded=json.decode(json.encode(shown))
 check(decoded.metadata.note=='LATE CAVEAT' and decoded.metadata.next_cursor=='existing-cursor','late metadata and cached continuation retained')
 check(decoded.coverage[2].error=='last page consequential refusal' and decoded.coverage[2].effect=='none','unread failure/effect stays visible')
+local retrievals=0
 for i,slot in ipairs(shown.coverage)do
  if slot.visible then check(json.encode(shown.results[i])==json.encode(payload.results[i]),'whole visible item exact')
- else local original=raw(ref);local bytes=original:sub(slot.unread.offset,slot.unread.offset+slot.unread.bytes-1);check(bytes==json.encode(payload.results[i]),'unread range recovers exact source/edit frame or failure') end
+ else
+  local range=slot.unread;local offset=range.offset;local last=offset+range.bytes;local pieces={}
+  while offset<last do
+   local page=tools.dispatch(memory,'tool_result',{sha256=range.sha256,offset=offset,limit=math.min(51200,last-offset)},'master',ctx)
+   retrievals=retrievals+1;check(not page.error and page.next_offset>offset,'bounded native original retrieval advances')
+   pieces[#pieces+1]=page.content:sub(1,last-offset);offset=page.next_offset
+  end
+  check(table.concat(pieces)==json.encode(payload.results[i]),'native tool_result retrieval recovers exact source/edit frame or failure')
+ end
 end
+keep('boundary-retrieval.json',{artifact_retrievals=retrievals,partial=true,source_ref=ref,coverage=shown.coverage})
 local typed='{"results":[{"value":null,"object":{},"array":[]},{"error":"binary","effect":"none"}],"ok":false,"late":null}'
 local typedref=output.store(typed)
 local typedview=view.finish({ok=true,calls={{name='read_many',evidence=typedref}}},{1})
