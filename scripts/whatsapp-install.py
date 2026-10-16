@@ -22,12 +22,25 @@ def install(bundle, expected, prefix, state, python, models, apply=False):
     if digest(manifest_file) != expected:
         raise ValueError("manifest_hash_mismatch")
     manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
-    if manifest.get("schema") != 1 or manifest.get("platform") != "linux-amd64":
-        raise ValueError("unsupported_manifest")
+    if manifest.get("schema") != 2 or manifest.get("platform") != "linux-amd64":
+        raise ValueError("source_binding_v2_required")
+    if manifest.get('go_version')!='go1.27.2' or len(manifest.get('go_executable_sha256',''))!=64:
+        raise ValueError('pinned_sdk_binding_required')
+    source=manifest.get('source','')
+    if len(source)!=40 or any(c not in '0123456789abcdef' for c in source):
+        raise ValueError('invalid_source_commit')
+    inputs=manifest.get('source_files',{})
+    required_inputs={'connectors/whatsapp/go.mod','connectors/whatsapp/go.sum','scripts/whatsapp-stt-local.py','scripts/whatsapp-install.py','connectors/whatsapp/THIRD-PARTY-NOTICES.txt','scripts/whatsapp-build.py','scripts/build-whatsapp.sh','LICENSE'}
+    if manifest.get('source_binding')!='frozen-git-archive+pre-post-hashes' or not required_inputs.issubset(inputs):
+        raise ValueError('incomplete_source_binding')
+    if any(not isinstance(v,str) or len(v)!=64 or any(c not in '0123456789abcdef' for c in v) for v in inputs.values()):
+        raise ValueError('invalid_source_hash')
+    for source,name in [('scripts/whatsapp-stt-local.py','whatsapp-stt-local.py'),('scripts/whatsapp-install.py','whatsapp-install.py'),('connectors/whatsapp/THIRD-PARTY-NOTICES.txt','THIRD-PARTY-NOTICES.txt'),('LICENSE','LICENSE')]:
+        if inputs[source]!=manifest['files'].get(name): raise ValueError('source_member_binding_mismatch')
     tree = manifest["tree"]
     if len(tree) != 40 or any(c not in "0123456789abcdef" for c in tree):
         raise ValueError("invalid_source_tree")
-    required = {"wa-whatsapp", "whatsapp-stt-local.py", "whatsapp-install.py", "THIRD-PARTY-NOTICES.txt"}
+    required = {"wa-whatsapp", "whatsapp-stt-local.py", "whatsapp-install.py", "THIRD-PARTY-NOTICES.txt", "LICENSE"}
     if set(manifest["files"]) != required:
         raise ValueError("unexpected_bundle_members")
     for name, expected_hash in manifest["files"].items():
@@ -72,6 +85,7 @@ After=network-online.target
 Type=simple
 ExecStart="{release / 'wa-whatsapp'}" serve --state "{state}" --owners "{owners}" --python "{python}" --worker "{release / 'whatsapp-stt-local.py'}" --models "{models}"
 Restart=on-failure
+RestartPreventExitStatus=78
 RestartSec=15
 UMask=0077
 NoNewPrivileges=true

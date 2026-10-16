@@ -26,24 +26,31 @@ type Config struct {
 	Requested  bool     `json:"requested_on"`
 	Activated  int64    `json:"activated_at"`
 	Chats      []string `json:"chats"`
+	AllChats   bool     `json:"all_chats"`
 	Mode       string   `json:"mode"`
 }
 type Message struct {
-	ID          string `json:"id"`
-	Chat        string `json:"conversation_id"`
-	Sender      string `json:"sender"`
-	Body        string `json:"body"`
-	Sent        int64  `json:"sent_at"`
-	Own         bool   `json:"from_me"`
-	History     bool   `json:"history"`
-	Audio       bool   `json:"audio"`
-	Unsupported string `json:"unsupported,omitempty"`
-	Raw         []byte `json:"-"`
-	Transcript  string `json:"transcript,omitempty"`
-	AudioState  string `json:"audio_state,omitempty"`
-	AudioReason string `json:"audio_reason,omitempty"`
-	Cursor      int64  `json:"cursor"`
-	Observed    int64  `json:"observed_at"`
+	ID               string `json:"id"`
+	Chat             string `json:"conversation_id"`
+	Sender           string `json:"sender"`
+	Body             string `json:"body"`
+	Sent             int64  `json:"sent_at"`
+	Own              bool   `json:"from_me"`
+	History          bool   `json:"history"`
+	Audio            bool   `json:"audio"`
+	Unsupported      string `json:"unsupported,omitempty"`
+	Raw              []byte `json:"-"`
+	Transcript       string `json:"transcript,omitempty"`
+	AudioState       string `json:"audio_state,omitempty"`
+	AudioReason      string `json:"audio_reason,omitempty"`
+	Cursor           int64  `json:"cursor"`
+	Observed         int64  `json:"observed_at"`
+	Mutation         string `json:"-"`
+	Target           string `json:"-"`
+	MutationScope    bool   `json:"-"`
+	OwnerMutation    bool   `json:"-"`
+	OriginAccount    string `json:"-"`
+	OriginGeneration int64  `json:"-"`
 }
 type Journal struct {
 	db          *sql.DB
@@ -53,6 +60,12 @@ type Journal struct {
 	state       string
 	verified    bool
 	dir         string
+	effectMu    sync.Mutex
+	gap         bool
+	gapDurable  bool
+	fatal       chan error
+	gapWrite    func(string, []byte) error
+	sourceState string
 }
 
 func openJournal(dir string) (*Journal, error) {
@@ -63,7 +76,7 @@ func openJournal(dir string) (*Journal, error) {
 	if err != nil || info.Mode()&os.ModeSymlink != 0 {
 		return nil, errors.New("symlink_state_refused")
 	}
-	for _, name := range []string{"owner.lock", "journal.db", "journal.db-wal", "journal.db-shm", "device-keys.db", "device-keys.db-wal", "device-keys.db-shm", "api.token", "audio-work"} {
+	for _, name := range []string{"owner.lock", "journal.db", "journal.db-wal", "journal.db-shm", "device-keys.db", "device-keys.db-wal", "device-keys.db-shm", "api.token", "audio-work", "persistence-gap.json"} {
 		if info, e := os.Lstat(filepath.Join(dir, name)); e == nil && info.Mode()&os.ModeSymlink != 0 {
 			return nil, errors.New("symlink_state_file_refused")
 		}
@@ -85,19 +98,30 @@ func openJournal(dir string) (*Journal, error) {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
-	j := &Journal{db: db, lock: l, dir: dir, state: "disconnected"}
+	j := &Journal{db: db, lock: l, dir: dir, state: "disconnected", fatal: make(chan error, 1), gapWrite: writeNewSecret}
 	_, err = db.Exec(`PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000;
  CREATE TABLE IF NOT EXISTS config(id INTEGER PRIMARY KEY CHECK(id=1), value TEXT NOT NULL);
  CREATE TABLE IF NOT EXISTS messages(account TEXT NOT NULL,generation INTEGER NOT NULL,chat TEXT NOT NULL,id TEXT NOT NULL,sender TEXT NOT NULL,body TEXT NOT NULL,sent INTEGER NOT NULL,observed INTEGER NOT NULL,own INTEGER NOT NULL,history INTEGER NOT NULL,audio INTEGER NOT NULL,unsupported TEXT NOT NULL,raw BLOB,PRIMARY KEY(account,generation,chat,id));
  CREATE TABLE IF NOT EXISTS audio(account TEXT NOT NULL,generation INTEGER NOT NULL,chat TEXT NOT NULL,id TEXT NOT NULL,state TEXT NOT NULL,reason TEXT NOT NULL DEFAULT '',transcript TEXT NOT NULL DEFAULT '',language TEXT NOT NULL,next_attempt INTEGER NOT NULL DEFAULT 0,attempts INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(account,generation,chat,id));
  CREATE TABLE IF NOT EXISTS outbox(account TEXT NOT NULL,generation INTEGER NOT NULL,chat TEXT NOT NULL,source TEXT NOT NULL,part INTEGER NOT NULL,body TEXT NOT NULL,send_id TEXT NOT NULL,state TEXT NOT NULL,ack TEXT NOT NULL DEFAULT '',PRIMARY KEY(account,generation,chat,source,part),UNIQUE(account,generation,chat,send_id));
  CREATE TABLE IF NOT EXISTS events(seq INTEGER PRIMARY KEY AUTOINCREMENT,kind TEXT NOT NULL,at INTEGER NOT NULL,detail TEXT NOT NULL);
+ CREATE TABLE IF NOT EXISTS chats(account TEXT,generation INTEGER,chat TEXT,PRIMARY KEY(account,generation,chat));
+ INSERT OR IGNORE INTO chats SELECT account,generation,chat FROM messages;
+ CREATE TABLE IF NOT EXISTS excluded(account TEXT,generation INTEGER,chat TEXT,id TEXT,reason TEXT,PRIMARY KEY(account,generation,chat,id));
+ CREATE TABLE IF NOT EXISTS source_blocks(account TEXT,generation INTEGER,chat TEXT,id TEXT,reason TEXT,PRIMARY KEY(account,generation,chat,id));
+ CREATE TABLE IF NOT EXISTS chat_holds(account TEXT,generation INTEGER,chat TEXT,reason TEXT,PRIMARY KEY(account,generation,chat));
+ CREATE TABLE IF NOT EXISTS post_retry(account TEXT,generation INTEGER,chat TEXT,source TEXT,part INTEGER,next_attempt INTEGER,reason TEXT,PRIMARY KEY(account,generation,chat,source,part));
  UPDATE outbox SET state='unknown' WHERE state='reserved';`)
 	if err != nil {
 		j.Close()
 		return nil, err
 	}
 	os.Chmod(filepath.Join(dir, "journal.db"), 0600)
+	if _, e := os.Stat(filepath.Join(dir, "persistence-gap.json")); e == nil {
+		j.gap = true
+		j.gapDurable = true
+		j.state = "degraded_persistence_gap"
+	}
 	return j, nil
 }
 func (j *Journal) Close() {
@@ -130,7 +154,15 @@ func (j *Journal) fence(root, account string) error {
 }
 func validChat(s string) bool {
 	p := strings.Split(s, "@")
-	return len(p) == 2 && p[0] != "" && !strings.ContainsAny(p[0], " /\\\x00\r\n") && (p[1] == "s.whatsapp.net" || p[1] == "lid" || p[1] == "g.us")
+	if len(p) != 2 {
+		return false
+	}
+	for _, r := range p[0] {
+		if !strings.ContainsRune("0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ:._-", r) {
+			return false
+		}
+	}
+	return len(s) <= 256 && len(p) == 2 && p[0] != "" && !strings.ContainsAny(p[0], " /\\\x00\r\n") && (p[1] == "s.whatsapp.net" || p[1] == "lid" || p[1] == "g.us")
 }
 func validConfig(c Config) error {
 	if c.Account == "" || strings.ContainsAny(c.Account, "\x00\r\n") || c.Generation < 1 {
@@ -142,7 +174,7 @@ func validConfig(c Config) error {
 	if c.Mode != "transcribe" {
 		return errors.New("cross_language_translation_unsupported")
 	}
-	if len(c.Chats) == 0 {
+	if !c.AllChats && len(c.Chats) == 0 {
 		return errors.New("explicit_chat_scope_required")
 	}
 	for _, chat := range c.Chats {
@@ -186,7 +218,7 @@ func (j *Journal) scope(account string, generation int64, chat string) (Config, 
 	if c.Account != account || c.Generation != generation {
 		return c, errors.New("account_generation_mismatch")
 	}
-	if chat != "" && !contains(c.Chats, chat) {
+	if chat != "" && (!validChat(chat) || (!c.AllChats && !contains(c.Chats, chat))) {
 		return c, errors.New("chat_not_authorized")
 	}
 	return c, nil
@@ -197,7 +229,11 @@ func (j *Journal) event(kind, detail string) error {
 }
 func (j *Journal) setState(s string) {
 	j.mu.Lock()
+	j.sourceState = s
 	j.state = s
+	if j.gap {
+		j.state = "degraded_persistence_gap"
+	}
 	if s == "needs_pairing" || s == "degraded_account_mismatch" {
 		j.verified = false
 	}
@@ -238,17 +274,27 @@ func (j *Journal) status() (map[string]any, error) {
 	if err = j.db.QueryRow("SELECT COALESCE(MAX(observed),0) FROM messages WHERE account=? AND generation=?", c.Account, c.Generation).Scan(&lastObserved); err != nil {
 		return nil, err
 	}
-	return map[string]any{"ok": true, "snapshot_at": time.Now().Unix(), "last_journal_observed_at": lastObserved, "config": c, "connection": s, "audio": counts, "unknown_sends": unknown, "draft_visibility": "unsupported", "history_coverage": "partial; upstream history and redelivery are not guaranteed", "edit_delete_receipt_coverage": "events retained; no full message-state reconstruction", "translation": "unsupported; original-language recognition only"}, nil
+	var excluded int
+	if err = j.db.QueryRow("SELECT count(*) FROM excluded WHERE account=? AND generation=?", c.Account, c.Generation).Scan(&excluded); err != nil {
+		return nil, err
+	}
+	return map[string]any{"ok": true, "excluded_scope_count": excluded, "source_state": j.freshness(), "snapshot_at": time.Now().Unix(), "last_journal_observed_at": lastObserved, "config": c, "connection": s, "audio": counts, "unknown_sends": unknown, "draft_visibility": "unsupported", "history_coverage": "partial; upstream history and redelivery are not guaranteed", "edit_delete_receipt_coverage": "events retained; no full message-state reconstruction", "translation": "unsupported; original-language recognition only"}, nil
 }
 func (j *Journal) ingest(m Message) error {
 	c, err := j.Config()
 	if err != nil {
 		return err
 	}
-	if !contains(c.Chats, m.Chat) {
-		return nil
+	if !validChat(m.Chat) {
+		return j.exclude(c, m, "unsupported_chat_scope")
 	}
-	if m.ID == "" || !validChat(m.Chat) {
+	if !c.AllChats && !contains(c.Chats, m.Chat) {
+		return j.exclude(c, m, "unapproved_selected_scope")
+	}
+	if m.Mutation != "" {
+		return j.mutate(c, m)
+	}
+	if m.ID == "" || len(m.ID) > 256 || !validChat(m.Chat) {
 		return errors.New("invalid_message_identity")
 	}
 	tx, err := j.db.Begin()
@@ -261,6 +307,9 @@ func (j *Journal) ingest(m Message) error {
 		return err
 	}
 	n, _ := r.RowsAffected()
+	if _, err = tx.Exec("INSERT OR IGNORE INTO chats VALUES(?,?,?)", c.Account, c.Generation, m.Chat); err != nil {
+		return err
+	}
 	// Echoes confirm only a previously reserved exact ID/recipient/body; never create sends.
 	if m.Own {
 		_, err = tx.Exec("UPDATE outbox SET state='confirmed',ack='exact own-message echo; delivery receipt unknown' WHERE account=? AND generation=? AND chat=? AND send_id=? AND body=? AND state IN ('unknown','reserved')", c.Account, c.Generation, m.Chat, m.ID, m.Body)
@@ -281,6 +330,13 @@ func (j *Journal) ingest(m Message) error {
 		}
 		if m.Unsupported != "" {
 			state, reason = "unsupported", m.Unsupported
+		}
+		blocked, e := blockedSource(tx, c, m.Chat, m.ID)
+		if e != nil {
+			return e
+		}
+		if blocked {
+			state, reason = "blocked_source", "source_mutation_or_chat_hold"
 		}
 		_, err = tx.Exec("INSERT INTO audio(account,generation,chat,id,state,reason,language) VALUES(?,?,?,?,?,?,?)", c.Account, c.Generation, m.Chat, m.ID, state, reason, c.Language)
 		if err != nil {
@@ -327,7 +383,7 @@ func (j *Journal) processAudio(ctx context.Context, t Transport, r Recognizer) e
 	}
 	var m Message
 	var language string
-	err = j.db.QueryRow(`SELECT m.chat,m.id,m.sender,m.body,m.sent,m.own,m.raw,a.language FROM audio a JOIN messages m USING(account,generation,chat,id) WHERE a.account=? AND a.generation=? AND a.state='pending' AND a.next_attempt<=? ORDER BY a.attempts,m.observed LIMIT 1`, c.Account, c.Generation, time.Now().Unix()).Scan(&m.Chat, &m.ID, &m.Sender, &m.Body, &m.Sent, &m.Own, &m.Raw, &language)
+	err = j.db.QueryRow(`SELECT m.chat,m.id,m.sender,m.body,m.sent,m.own,m.raw,a.language FROM audio a JOIN messages m USING(account,generation,chat,id) WHERE a.account=? AND a.generation=? AND a.state='pending' AND NOT EXISTS(SELECT 1 FROM source_blocks b WHERE b.account=a.account AND b.generation=a.generation AND b.chat=a.chat AND b.id=a.id) AND NOT EXISTS(SELECT 1 FROM chat_holds h WHERE h.account=a.account AND h.generation=a.generation AND h.chat=a.chat) AND a.next_attempt<=? ORDER BY a.attempts,m.observed LIMIT 1`, c.Account, c.Generation, time.Now().Unix()).Scan(&m.Chat, &m.ID, &m.Sender, &m.Body, &m.Sent, &m.Own, &m.Raw, &language)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil
 	}
@@ -367,6 +423,17 @@ func (j *Journal) processAudio(ctx context.Context, t Transport, r Recognizer) e
 		return err
 	}
 	defer tx.Rollback()
+	blocked, e := blockedSource(tx, c, m.Chat, m.ID)
+	if e != nil {
+		return e
+	}
+	if blocked {
+		_, e = tx.Exec("UPDATE audio SET state='blocked_source',reason='source_mutation_or_chat_hold' WHERE account=? AND generation=? AND chat=? AND id=?", c.Account, c.Generation, m.Chat, m.ID)
+		if e != nil {
+			return e
+		}
+		return tx.Commit()
+	}
 	for i, body := range chunks(text) {
 		_, err = tx.Exec("INSERT OR IGNORE INTO outbox(account,generation,chat,source,part,body,send_id,state) VALUES(?,?,?,?,?,?,?,'ready')", c.Account, c.Generation, m.Chat, m.ID, i, body, t.NewID())
 		if err != nil {
@@ -380,6 +447,12 @@ func (j *Journal) processAudio(ctx context.Context, t Transport, r Recognizer) e
 	return tx.Commit()
 }
 func safeReason(err error) string {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "media_download_deadline"
+	}
+	if errors.Is(err, context.Canceled) {
+		return "processing_cancelled"
+	}
 	var p permanentError
 	if errors.As(err, &p) {
 		return string(p)
@@ -391,6 +464,9 @@ func safeReason(err error) string {
 	return "retryable_media_or_compute_failure"
 } // Never log protocol keys/URLs or recognizer paths.
 func (j *Journal) post(ctx context.Context, t Transport) error {
+	if j.hasGap() {
+		return nil
+	}
 	c, err := j.Config()
 	if err != nil {
 		return err
@@ -401,32 +477,34 @@ func (j *Journal) post(ctx context.Context, t Transport) error {
 	var source Message
 	var part int
 	var body, id string
-	err = j.db.QueryRow(`SELECT o.chat,o.source,o.part,o.body,o.send_id,m.sender,m.own FROM outbox o JOIN messages m ON m.account=o.account AND m.generation=o.generation AND m.chat=o.chat AND m.id=o.source WHERE o.account=? AND o.generation=? AND o.state='ready' AND NOT EXISTS(SELECT 1 FROM outbox p WHERE p.account=o.account AND p.generation=o.generation AND p.chat=o.chat AND p.source=o.source AND p.part<o.part AND p.state!='confirmed') ORDER BY m.observed,o.part LIMIT 1`, c.Account, c.Generation).Scan(&source.Chat, &source.ID, &part, &body, &id, &source.Sender, &source.Own)
+	err = j.db.QueryRow(`SELECT o.chat,o.source,o.part,o.body,o.send_id,m.sender,m.own FROM outbox o JOIN messages m ON m.account=o.account AND m.generation=o.generation AND m.chat=o.chat AND m.id=o.source WHERE o.account=? AND o.generation=? AND o.state='ready' AND NOT EXISTS(SELECT 1 FROM source_blocks b WHERE b.account=o.account AND b.generation=o.generation AND b.chat=o.chat AND b.id=o.source) AND NOT EXISTS(SELECT 1 FROM chat_holds h WHERE h.account=o.account AND h.generation=o.generation AND h.chat=o.chat) AND NOT EXISTS(SELECT 1 FROM post_retry r WHERE r.account=o.account AND r.generation=o.generation AND r.chat=o.chat AND r.source=o.source AND r.part=o.part AND r.next_attempt>unixepoch()) AND NOT EXISTS(SELECT 1 FROM outbox p WHERE p.account=o.account AND p.generation=o.generation AND p.chat=o.chat AND p.source=o.source AND p.part<o.part AND p.state!='confirmed') ORDER BY m.observed,o.rowid,o.part LIMIT 1`, c.Account, c.Generation).Scan(&source.Chat, &source.ID, &part, &body, &id, &source.Sender, &source.Own)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil
 	}
 	if err != nil {
 		return err
 	}
+	source.OriginAccount = c.Account
+	source.OriginGeneration = c.Generation
 	if ready, ok := t.(interface{ Ready(Config, Message) error }); ok {
 		if err := ready.Ready(c, source); err != nil {
-			_, err = j.db.Exec("UPDATE outbox SET ack='definite pre-dispatch refusal; not submitted' WHERE account=? AND generation=? AND chat=? AND source=? AND part=? AND state='ready'", c.Account, c.Generation, source.Chat, source.ID, part)
-			return err
+			return j.deferPost(c, source, part, err, false)
 		}
 	}
-	// A durable uncertainty fence BEFORE dispatch also covers a crash after submit.
-	res, err := j.db.Exec("UPDATE outbox SET state='unknown',ack='dispatch intent; reconciliation required' WHERE account=? AND generation=? AND chat=? AND source=? AND part=? AND state='ready'", c.Account, c.Generation, source.Chat, source.ID, part)
-	if err != nil {
+	// Final source/config recheck and durable uncertainty fence. Do not hold the
+	// mutation lock through Ready or an external ACK wait.
+	admitted, err := j.admitPost(c, source, part)
+	if err != nil || !admitted {
 		return err
-	}
-	n, _ := res.RowsAffected()
-	if n != 1 {
-		return errors.New("reservation_conflict")
 	}
 	ack, sendErr := t.Send(ctx, source.Chat, body, id, source)
 	if sendErr != nil {
+		var proof notSubmittedError
+		if errors.As(sendErr, &proof) {
+			return j.deferPost(c, source, part, proof.cause, true)
+		}
 		return nil
-	} // No automatic retry, including timeout/ack loss.
+	} // Only typed pre-API proof is retryable; generic SDK errors/ack loss remain unknown.
 	if ack != id {
 		return nil
 	}

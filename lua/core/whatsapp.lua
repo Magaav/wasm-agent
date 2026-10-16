@@ -303,7 +303,7 @@ local function conversation_tool(memory, args, profile, ctx)
     for _,message in ipairs(data.messages or {}) do
       if message.conversation_id~=event.conversation_id then return fail('connector_scope_mismatch') end
     end
-    return {conversation_id=event.conversation_id,title=event.conversation_id,kind='unknown',messages=data.messages,count=#(data.messages or {}),coverage=data.coverage,draft_visibility='unsupported',truncated=data.truncated}
+    return {conversation_id=event.conversation_id,title=event.conversation_id,kind='unknown',messages=data.messages,count=#(data.messages or {}),scope_kind=data.scope_kind,source_state=data.source_state,next_before=data.next_before,limit_scope=data.limit_scope,coverage=data.coverage,draft_visibility='unsupported',truncated=data.truncated}
   end
   -- Historical browser-era ledger remains readable; never imported/reposted by title or guessed IDs.
   local messages = memory.conversation(event.conversation_id, limit)

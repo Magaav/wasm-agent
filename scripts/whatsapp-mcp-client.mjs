@@ -14,6 +14,8 @@ export function readBinding(explicit={}){
   connector_url:process.env.WA_WHATSAPP_CONNECTOR_URL||profile.connector_url,
   token_file:process.env.WA_WHATSAPP_TOKEN_FILE||profile.token_file,
   ca_file:process.env.WA_WHATSAPP_CA_FILE||profile.ca_file,
+  account_wide:profile.account_wide===true&&profile.operator_account_read===true,
+  operator_account_read:profile.operator_account_read===true,
   allowed_conversations:profile.allowed_conversations,...values};
 }
 export async function callApp(method,args,binding=readBinding()){

@@ -24,9 +24,16 @@ or external exactly-once delivery. Pins, checksums and original license texts ar
   All instances must use the SAME owners directory and persistent volume. This is
   single-node fencing, not a distributed lease or protection against an OS owner
   deliberately copying keys/overriding the lock root. Never copy active keys.
-- `init` persists explicit account PN JID and exact approved chat JIDs; no display-title
-  guesses, discovery of another account or automatic legacy ID conversion. The paired
-  identity must match. Logout pauses posting, advances generation, clears activation
+- `init --all-chats` is explicit owner approval to journal/process all supported
+  current AND future chats of this exact account. It discovers new direct/group/LID
+  chats without a manually maintained list. `init --chats <IDs>` remains the narrow
+  alternative; existing configs default to selected mode, never silently widened.
+  An existing selected account can use the OFFLINE owner command `scope --all-chats`:
+  it pauses posting and requires a fresh future activation cutoff, without resetting
+  existing approved pending tasks, transcripts or unknown effects. No title guesses,
+  other-account discovery or automatic legacy ID conversion. The app journal is separate; the restricted device/session store also contains
+  the SDK's optional decrypted-event replay buffer, never exposed by the app API.
+  The paired identity must match. Logout pauses posting, advances generation, clears activation
   and reports `needs_pairing`; re-pairing needs a private human again.
 - Requested on/off is separate from `connected`, `catching_up`, `reconnecting`,
   `needs_pairing` and named degraded states. Configuration changes are offline CLI
@@ -51,9 +58,18 @@ or external exactly-once delivery. Pins, checksums and original license texts ar
   no extra backend/spend is silently selected. Queued tasks snapshot their language.
 - View-once, ephemeral audio, oversize (>20 MiB), invalid audio MIME, edited audio
   and no-speech remain visible as unsupported. Other media is journaled without STT.
-  Raw view-once/ephemeral media metadata is not retained. Downloads check declared
-  length before fetching and received length afterward; the upstream API returns a
-  byte buffer, not a guaranteed streaming memory cap. Provision disk/CPU limits.
+  Raw view-once/ephemeral media metadata is not retained. `DownloadToFile` uses the
+  pinned SDK's encrypted/plaintext SHA256, MAC and streaming CBC validation, through
+  a File wrapper that caps Write/WriteAt/Seek/Truncate and does NOT promote ReaderFrom.
+  Media HTTP also caps Content-Length/chunked actual bytes and refuses redirects.
+  Plain audio is capped at20MiB; encrypted disk/body bytes at20MiB+26 (AES padding
+  and MAC). One bounded plaintext array is allocated only after validated file size;
+  SDK working buffers are32KiB. These are payload bounds, not a total process/RSS
+  quota (including upstream history decompression/session allocations). Network downloads have a90-second context/client deadline; local kernel/disk
+  stalls are not a hard real-time guarantee. Temporary media is closed/removed on
+  overflow, timeout or validation failure. Declared/actual plaintext size mismatch
+  refuses. The media HTTP cap also refuses oversized history blobs as an explicit
+  sticky gap rather than unbounded allocation; no complete-history guarantee.
 - Transcript text is clearly labeled `🎙️ _Automated transcript_`, UTF-8/rune-safe,
   numbered and reply-linked to the source audio in the ORIGINAL chat. Text echoes
   never create audio tasks. No composer opening, read marking or general AI replies.
@@ -63,8 +79,33 @@ or external exactly-once delivery. Pins, checksums and original license texts ar
   ID/chat/body echoes can reconcile it. A successful upstream send result means server
   acceptance, NOT recipient delivery/read. Unknown earlier parts hold later parts.
   There is no command that resets unknown sends or bulk-posts old history.
-- Edit/delete/protocol/receipt events are labeled unsupported/partial; this is not a
-  complete authoritative reconstruction of edited/deleted chat state or draft state.
+- Verified source revoke/edit signals are mapped only by exact authenticated
+  account/chat/source ID and author. They block pending compute and undispatched
+  parts, including a recheck after compute and before dispatch. Unknown/confirmed
+  effects and original evidence are preserved, never reset or deleted. SDK owner
+  DeleteForMe is an exact source fence even when delivered before that source;
+  owner ClearChat/DeleteChat conservatively hold the chat, including full-sync signals.
+  An unprovable
+  mutation mapping holds that chat explicitly; no guessed ID/title merge. Final
+  dispatch admission and known mutation commits are serialized. The lock is NOT held
+  through readiness checks or an external ACK wait; the adapter rechecks source,
+  account/generation and gaps immediately before invoking the SDK. A mutation after
+  dispatch admission may already be in flight and cannot retract a submitted effect.
+  Only a typed owned-adapter proof that the SDK was NOT called can schedule safe
+  retry after intent; generic SDK errors, crash windows and ack loss remain unknown. This is not full edit/delete or
+  receipt-state reconstruction; held chats require separately approved reconciliation.
+- SDK callbacks return processing success/failure. Failed persistence returns false,
+  retains a separate fsynced sticky gap marker and blocks posting/activation; Connected
+  and OfflineSyncCompleted never erase it. Safe ingestion/retry remains possible.
+  If even the gap marker cannot be persisted, the service fails with code78; the
+  generated unit prevents automatic restart for that code. There is no gap/reset or
+  unknown-send replay command. Manual reconciliation is required, not automatic
+  certification that all lost classes were redelivered.
+- Posting readiness refusals are NOT unknown sends. Retryable pre-dispatch refusal
+  records a per-part reason and a one-minute retry time; permanent refusal blocks
+  that part. Other sources/chats continue, while multipart order remains enforced.
+  Unexpected API Serve termination is nonzero (normal requested shutdown is zero),
+  so the user service's on-failure restart is meaningful.
 
 ## Human build and installation (Linux cloud operator terminal)
 
@@ -78,13 +119,29 @@ refusal with SSH from a model tool. No model-provider credentials are required.
 
    ```sh
    export GO=/absolute/private/go/bin/go
+   # Digest of the executable extracted from the CHECKSUM-VERIFIED official SDK,
+   # recorded at provisioning; do not bootstrap trust by hashing an untrusted binary.
+   export GO_SHA256='<recorded-verified-executable-SHA256>'
+   export PYTHON3=/absolute/python3
    export GOTOOLCHAIN=local
    export GOPATH="$PWD/target/gopath" GOCACHE="$PWD/target/gocache" GOMODCACHE="$PWD/target/gomodcache"
    bash scripts/build-whatsapp.sh
    ```
 
-   This verifies pinned modules, builds Linux/amd64 with CGO disabled and writes
-   `target/whatsapp-linux-<tree>/manifest.json` plus the artifact manifest SHA256.
+   The wrapper resolves explicit `PYTHON3` or `python3` and validates Python3.9+
+   before compilation; there is no unconditional `python` dependency. It captures
+   commit/tree once, archives all Go/module/STT/installer/notices/build-helper/license
+   inputs from that immutable commit, builds with GOWORK off, readonly modules,
+   GOTOOLCHAIN local and `-buildvcs=false`, and checks frozen/member/origin hashes
+   again before emitting a schema2 manifest. Origin/frozen/member drift, missing
+   interpreter, untrusted SDK hash or reused output refuses without a success manifest.
+   The manifest binds artifact hashes AND complete frozen source hashes; commit/tree
+   are not queried again from a possibly different HEAD. Partial failed build output
+   is preserved, not advertised as a successful bundle. Linux/amd64 CGO is disabled.
+   Output is `target/whatsapp-linux-<tree>/manifest.json` plus its digest.
+   Snapshot inputs, source/SDK/module/STT/installer/license hashes and private raw
+   build logs are retained. Review logs before transferring a bundle; they are not
+   model output or a place for credentials. Schema2 is required by the installer.
    Transfer that bundle and its independently checked manifest digest through your
    authorized channel. Do not put secrets in the bundle. The installer itself must
    come from the reviewed source; a checksum printed by an untrusted bundle is not trust.
@@ -136,7 +193,7 @@ refusal with SSH from a model tool. No model-provider credentials are required.
    WA="$RELEASE/wa-whatsapp"
    STATE="$HOME/.local/state/wa-whatsapp"
    OWNERS="$HOME/.config/wa-whatsapp-owners"
-   "$WA" init --state "$STATE" --account "$ACCOUNT_PN_JID" --chats "$APPROVED_CHAT_JIDS" --language pt
+   "$WA" init --state "$STATE" --account "$ACCOUNT_PN_JID" --all-chats --language pt
    "$WA" status --state "$STATE"      # language=pt, requested_on=false
    "$WA" pair --state "$STATE" --owners "$OWNERS"
    ```
@@ -177,10 +234,24 @@ refusal with SSH from a model tool. No model-provider credentials are required.
 ## Authorized devices and existing app boundary
 
 The Go API binds numeric loopback by default, requires a private 256-bit token file,
-account + generation on EVERY operation and configured chat scope. `POST /status`,
-`/read_snapshot`, `/lookup_self`, `/inspect_chat` are scoped reads. Snapshot rows include
-transcripts/task state and stable journal cursors; `before` reads older rows, newest first.
-`truncated` is explicit. No arbitrary SQL, authentication-store or media-key access.
+account + generation on EVERY operation and an explicit read scope. Owner-wide
+service mode does not widen a child: the locally approved operator MCP/CLI binding
+must set BOTH `account_wide:true` and `operator_account_read:true`. Model arguments
+cannot set either. Native `whatsapp_read` STILL fixes one trusted-event conversation.
+A selected binding sends its exact conversations as a server-side SQL scope, never
+fetches unrelated chats and never loops once per chat. `read_snapshot`, `list_chats`
+and `posting_status` return one total page capped by limit, with `next_before`,
+`cursor_version:1`, `limit_scope:total`, connection/gap/coverage state and scoped
+last-observed freshness. Existing numeric `before` remains compatible; use cursors
+only within the same endpoint/account/generation/scope. New rows between pages do
+not change the row-ID ordering of older rows. Discovered chat listings and posting
+unknown/blocked/retry evidence are bounded/scoped too; no reset/resend endpoint.
+Malformed/status/broadcast/unapproved scope exclusions are visible as counts without
+retaining their content/keys. The updated MCP refuses old servers lacking total-page
+metadata rather than silently reverting to unbounded per-chat aggregation.
+Each selected request is limited to256
+exact IDs (or one explicit owner-wide request); arbitrary arguments cannot grant scope.
+No arbitrary SQL, authentication-store or media-key access.
 While serving, use authenticated `/status`; offline CLI `status` cannot take the owner
 lock of a running server. Offline status has no live connection observation.
 
@@ -188,11 +259,19 @@ Existing `mcp-whatsapp.mjs`, compatibility read/lookup CLIs and the Lua WhatsApp
 are repointed to `backend: linked_device`. A locally approved profile binds:
 
 ```json
-{"backend":"linked_device","account":"<exact-PN-JID>","generation":1,
+{"resources":{"backend":"linked_device","account":"<exact-PN-JID>","generation":1,
  "connector_url":"https://<approved-private-host>/",
  "token_file":"<absolute-private-token-file>","ca_file":"<optional-trusted-CA-file>",
- "allowed_conversations":["<exact-approved-chat-JID>"],"language":"pt"}
+ "account_wide":true,"operator_account_read":true,
+ "allowed_conversations":[],"language":"pt"}}
 ```
+
+For a narrower profile omit both wide flags and set `allowed_conversations` to its
+exact approved IDs. No existing/delegated profile is automatically widened. Operator
+on-demand account reads use `scripts/whatsapp-read.mjs --profile-file <private-file>`
+(or the explicitly configured read-only MCP); this does NOT remove the native
+trusted-event guard. Raw API credentials are account-owner credentials; delegated
+children receive only their scoped facade, not token values or arbitrary HTTP/FS.
 
 Token VALUES are never arguments/URLs. Provision authorized-device credential files
 through the human's approved private channel, not model output. Remote access needs
