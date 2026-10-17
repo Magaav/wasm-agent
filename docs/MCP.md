@@ -69,6 +69,10 @@ An uncertain control requires inspection and a new explicit decision.
 
 ## WhatsApp first
 
+2026-10-17: [operator-directed management](WHATSAPP-OPERATOR-MANAGEMENT.md) is a
+separate provisioned CLI/API capability, NOT generic MCP `send_message` or a
+permission widening of this read boundary. GENERAL responder sends remain refused.
+
 The built-in `mcp-whatsapp.mjs` now uses ONLY explicit linked-device account,
 generation, exact chat scope, connector URL and credential FILE references.
 Explicit operator-wide bindings can read a service account approved with --all-chats;
