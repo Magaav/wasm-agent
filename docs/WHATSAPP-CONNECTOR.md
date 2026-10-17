@@ -1,4 +1,8 @@
-# WhatsApp linked-device connector (staged replacement)
+# WhatsApp linked-device connector (source-ready; live acceptance pending)
+
+Current end-to-end operator handoff, bounded name discovery/selection/search and
+live acceptance checklist: [WHATSAPP-OPERABILITY.md](WHATSAPP-OPERABILITY.md).
+Historical first-delivery evidence is not live acceptance.
 
 Canonical implementation: `connectors/whatsapp` (`wa-whatsapp`). No Chrome/CDP,
 UI input, Sentinel tick, LLM login or hosted STT/translation is involved.

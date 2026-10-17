@@ -14,7 +14,10 @@ type readRequest struct {
 	Message       string   `json:"message_id"`
 	Limit         int      `json:"limit"`
 	Since         int64    `json:"since"`
+	SentSince     int64    `json:"sent_since"`
 	Before        int64    `json:"before"`
+	Until         int64    `json:"until"`
+	Query         string   `json:"query"`
 	Conversations []string `json:"conversations"`
 	AccountWide   bool     `json:"account_wide"`
 	Resource      string   `json:"resource"`
@@ -76,7 +79,7 @@ func (j *Journal) readPageBudget(c Config, r readRequest, kind string, budget in
 	if limit == 0 {
 		limit = 2000
 	}
-	if limit < 1 || limit > 10000 || r.Since < 0 || r.Before < 0 {
+	if limit < 1 || limit > 10000 || r.Since < 0 || r.Before < 0 || r.Until < 0 || r.SentSince < 0 || (r.Until > 0 && r.SentSince > r.Until) || len(r.Query) > 256 {
 		return nil, errors.New("invalid_window")
 	}
 	if budget > pageByteLimit || budget <= pageEnvelopeReserve {
@@ -98,6 +101,11 @@ func (j *Journal) readPageBudget(c Config, r readRequest, kind string, budget in
 	if kind == "read_snapshot" {
 		where += " AND m.observed>=?"
 		args = append(args, r.Since)
+		where += " AND (?=0 OR m.sent>=?) AND (?=0 OR m.sent<=?) AND (?='' OR instr(lower(m.body),lower(?))>0 OR instr(lower(COALESCE(a.transcript,'')),lower(?))>0)"
+		args = append(args, r.SentSince, r.SentSince, r.Until, r.Until, r.Query, r.Query, r.Query)
+	} else if kind == "list_chats" {
+		where += " AND (?='' OR instr(lower(m.chat),lower(?))>0 OR instr(lower(m.title),lower(?))>0)"
+		args = append(args, r.Query, r.Query, r.Query)
 	}
 	where += " AND (?=0 OR m.rowid<?)"
 	args = append(args, r.Before, r.Before, limit+1)

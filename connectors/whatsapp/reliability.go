@@ -79,7 +79,7 @@ func (j *Journal) mutate(c Config, m Message) error {
 		return err
 	}
 	defer tx.Rollback()
-	if _, err = tx.Exec("INSERT OR IGNORE INTO chats VALUES(?,?,?)", c.Account, c.Generation, m.Chat); err != nil {
+	if _, err = tx.Exec("INSERT OR IGNORE INTO chats(account,generation,chat) VALUES(?,?,?)", c.Account, c.Generation, m.Chat); err != nil {
 		return err
 	}
 	var sender string

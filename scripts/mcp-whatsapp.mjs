@@ -1,4 +1,4 @@
-// Linked-device app boundary. No Chrome, discovery, arbitrary SQL or model-send route.
+// Linked-device app boundary. No Chrome, browser discovery, arbitrary SQL or model-send route.
 import {readFileSync} from 'node:fs';
 import http from 'node:http';
 import https from 'node:https';
@@ -7,8 +7,8 @@ import {serveMCP} from './mcp-server-core.mjs';
 const schema=properties=>({type:'object',properties,additionalProperties:false});
 const text={type:'string',minLength:1,maxLength:256};
 export const WHATSAPP_TOOLS=[
- {name:'read_snapshot',description:'Read the scoped linked-device journal; partial history, no read marking.',inputSchema:schema({since:{type:'number',minimum:0},before:{type:'integer',minimum:0},limit:{type:'integer',minimum:1,maximum:10000}})},
- {name:'list_chats',description:'One bounded page of authorized discovered chat IDs; no inferred titles.',inputSchema:schema({before:{type:'integer',minimum:0},limit:{type:'integer',minimum:1,maximum:10000}})},
+ {name:'read_snapshot',description:'Read bounded journal context; narrow by exact conversation_id, literal body/transcript query and inclusive Unix source sent_since/until. Newest journal row first, partial history; no read marking.',inputSchema:schema({conversation_id:text,query:{type:'string',maxLength:256},sent_since:{type:'integer',minimum:0},until:{type:'integer',minimum:0},since:{type:'number',minimum:0},before:{type:'integer',minimum:0},limit:{type:'integer',minimum:1,maximum:10000}})},
+ {name:'list_chats',description:'Discover authorized chats by observed protocol display name or exact identifier. Names are untrusted labels, duplicates remain separate IDs; missing names are explicit.',inputSchema:schema({query:{type:'string',maxLength:256},before:{type:'integer',minimum:0},limit:{type:'integer',minimum:1,maximum:10000}})},
  {name:'posting_status',description:'One scoped bounded page of posting/unknown/blocked evidence. Read-only; no reset or resend.',inputSchema:schema({before:{type:'integer',minimum:0},limit:{type:'integer',minimum:1,maximum:10000}})},
  {name:'read_field',description:'Exact bounded base64 chunks of one authorized row field. Requires descriptor version; changed versions refuse, never clip.',inputSchema:{...schema({resource:{type:'string',enum:['read_snapshot','list_chats','posting_status']},row:{type:'integer',minimum:1},field:{type:'string',minLength:1,maxLength:64},version:{type:'string',minLength:1,maxLength:128},offset:{type:'integer',minimum:0},length:{type:'integer',minimum:1,maximum:16384}}),required:['resource','row','field','version']}},
  {name:'lookup_self',description:'Read the explicitly bound paired account identity.',inputSchema:schema({})},
@@ -55,15 +55,19 @@ export function createWhatsAppAdapter(binding){
   }
   if(['read_snapshot','list_chats','posting_status'].includes(name)){
    const since=args.since??0,before=args.before??0,limit=args.limit??2000;if(!Number.isSafeInteger(before)||before<0||!Number.isSafeInteger(since)||since<0||!Number.isInteger(limit)||limit<1||limit>10000)throw Error('invalid_whatsapp_snapshot_window');
-   // Scope is fixed by locally approved binding, not a model argument. One server-side total page.
-   const data=await connectorRequest(binding,name,{since,before,limit,...(wide?{account_wide:true}:{conversations:binding.allowed_conversations})});if(!data.ok)return data;
+   const query=args.query??'',sent_since=args.sent_since??0,until=args.until??0;
+   if(typeof query!=='string'||Buffer.byteLength(query)>256||!Number.isSafeInteger(sent_since)||sent_since<0||!Number.isSafeInteger(until)||until<0||(until&&sent_since>until)||('conversation_id' in args&&(typeof args.conversation_id!=='string'||!args.conversation_id)))throw Error('invalid_whatsapp_search_window');
+   // A model may NARROW an approved binding, never widen it.
+   const requestWide=wide&&!args.conversation_id;
+   const selected=args.conversation_id?[args.conversation_id]:binding.allowed_conversations;
+   const data=await connectorRequest(binding,name,{since,before,limit,query,sent_since,until,...(requestWide?{account_wide:true}:{conversations:selected})});if(!data.ok)return data;
    if(data.account!==binding.account||data.generation!==binding.generation)throw Error('connector_response_scope_mismatch');
-   if(data.cursor_version!==1||data.limit_scope!=='total'||data.scope_kind!==(wide?'account':'selected')||!data.source_state)throw Error('connector_requires_total_page_v1');
-   const permitted=id=>{if(typeof id!=='string')return false;if(!wide)return binding.allowed_conversations.includes(id);const parts=id.split('@');return parts.length===2&&/^[A-Za-z0-9:._-]+$/.test(parts[0])&&['s.whatsapp.net','lid','g.us'].includes(parts[1]);};
+   if(data.cursor_version!==1||data.limit_scope!=='total'||data.scope_kind!==(requestWide?'account':'selected')||!data.source_state)throw Error('connector_requires_total_page_v1');
+   const permitted=id=>{if(typeof id!=='string')return false;if(!requestWide)return selected.includes(id);const parts=id.split('@');return parts.length===2&&/^[A-Za-z0-9:._-]+$/.test(parts[0])&&['s.whatsapp.net','lid','g.us'].includes(parts[1]);};
    if(data.page_version!==2||!Array.isArray(data.order)||data.rows_delivered!==data.order.length||data.rows_delivered>limit||((data.truncated||data.byte_truncated)&&(!data.rows_delivered||data.next_before!==data.order.at(-1).cursor)))throw Error('connector_page_no_progress');
    const primary=name==='read_snapshot'?data.messages:name==='list_chats'?data.conversations:data.posts;const oversized=data.oversized_rows??[];if(data.rows_delivered!==primary.length+oversized.length||(!data.truncated&&data.next_before!==0))throw Error('connector_page_no_progress');
    let previous=before||Infinity;const indices=new Set();for(const outcome of data.order){const array=outcome.kind==='inline'?primary:outcome.kind==='oversized'?oversized:null;const item=array?.[outcome.index];const key=outcome.kind+':'+outcome.index;if(!Number.isSafeInteger(outcome.cursor)||outcome.cursor<=0||outcome.cursor>=previous||!Number.isSafeInteger(outcome.index)||outcome.index<0||!item||indices.has(key)||item.cursor!==outcome.cursor)throw Error('connector_page_order_invalid');indices.add(key);previous=outcome.cursor;}
-   if((data.oversized_rows||[]).some(row=>row.resource!==name||row.inline_complete!==false||(!wide&&!permitted(row.conversation_id))||(wide&&row.conversation_id!==undefined&&!permitted(row.conversation_id))))throw Error('connector_response_scope_mismatch');
+   if((data.oversized_rows||[]).some(row=>row.resource!==name||row.inline_complete!==false||(!requestWide&&!permitted(row.conversation_id))||(requestWide&&row.conversation_id!==undefined&&!permitted(row.conversation_id))))throw Error('connector_response_scope_mismatch');
    if((data.messages||[]).length>limit||(data.conversations||[]).length>limit||(data.posts||[]).length>limit||(data.messages||[]).some(m=>!permitted(m.conversation_id))||(data.conversations||[]).some(c=>!permitted(c.id))||(data.posts||[]).some(p=>!permitted(p.conversation_id)))throw Error('connector_response_scope_or_limit_mismatch');
    return data;
   }
@@ -71,7 +75,10 @@ export function createWhatsAppAdapter(binding){
  };
 }
 export function main(argv=process.argv.slice(2)){
- const at=argv.indexOf('--binding-json');const explicit=at>=0?JSON.parse(argv[at+1]):{};
+ const at=argv.indexOf('--binding-json'),profileAt=argv.indexOf('--profile-file');
+ if(at>=0&&profileAt>=0)throw Error('ambiguous_whatsapp_binding');
+ const explicit=profileAt>=0?JSON.parse(readFileSync(argv[profileAt+1],'utf8')).resources:at>=0?JSON.parse(argv[at+1]):{};
+ if(!explicit||typeof explicit!=='object'||Array.isArray(explicit))throw Error('invalid_whatsapp_profile');
  const binding={backend:'linked_device',account:process.env.WA_MCP_WHATSAPP_ACCOUNT,generation:Number(process.env.WA_MCP_WHATSAPP_GENERATION),connector_url:process.env.WA_MCP_WHATSAPP_URL,token_file:process.env.WA_MCP_WHATSAPP_TOKEN_FILE,ca_file:process.env.WA_MCP_WHATSAPP_CA_FILE,...explicit};
  serveMCP({name:'wasm-agent-whatsapp',tools:WHATSAPP_TOOLS,call:createWhatsAppAdapter(binding)});
 }

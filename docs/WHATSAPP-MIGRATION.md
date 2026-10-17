@@ -132,5 +132,8 @@ Other review/evidence/verify archives are evidence, not deployment entrypoints.
 | `docs/history/whatsapp-browser`, review/evidence/verify snapshots and original stores | evidence owner / original failures and unknowns must stay available | retention only through separately approved evidence policy; no automatic deletion |
 
 These are named staged residues, not an eternal unnamed dual stack. Production
-retirement/private pairing proof is the explicit removal condition, currently blocked
-by the worker's cloud execution boundary. No live retirement or activation is claimed.
+retirement/private pairing proof is the explicit removal condition. The worker
+cannot perform production changes; the coordinator's fresh authorized native remote
+preflight succeeds and can perform the live sequence in
+[WHATSAPP-OPERABILITY.md](WHATSAPP-OPERABILITY.md). No live retirement or activation
+is claimed by source delivery.

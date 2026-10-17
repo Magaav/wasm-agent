@@ -34,7 +34,7 @@ func layout(resource string) (pageLayout, error) {
 	case "read_snapshot":
 		return pageLayout{"messages", " LEFT JOIN audio a USING(account,generation,chat,id)", "audio", []pageField{{"chat", "m.chat", "text", 0}, {"id", "m.id", "text", 0}, {"sender", "m.sender", "text", 0}, {"body", "m.body", "text", 0}, {"unsupported", "m.unsupported", "text", 0}, {"transcript", "COALESCE(a.transcript,'')", "text", 1}, {"audio_state", "COALESCE(a.state,'')", "text", 1}, {"audio_reason", "COALESCE(a.reason,'')", "text", 1}, {"sent_at", "m.sent", "integer", 0}, {"from_me", "m.own", "bool", 0}, {"history", "m.history", "bool", 0}, {"audio", "m.audio", "bool", 0}, {"observed_at", "m.observed", "integer", 0}}}, nil
 	case "list_chats":
-		return pageLayout{"chats", " LEFT JOIN chat_holds a USING(account,generation,chat)", "chat_holds", []pageField{{"chat", "m.chat", "text", 0}, {"posting_hold_reason", "COALESCE(a.reason,'')", "text", 1}}}, nil
+		return pageLayout{"chats", " LEFT JOIN chat_holds a USING(account,generation,chat)", "chat_holds", []pageField{{"chat", "m.chat", "text", 0}, {"posting_hold_reason", "COALESCE(a.reason,'')", "text", 1}, {"title", "m.title", "text", 0}, {"title_source", "m.title_source", "text", 0}, {"title_observed_at", "m.title_observed", "integer", 0}}}, nil
 	case "posting_status":
 		return pageLayout{"outbox", " LEFT JOIN post_retry a USING(account,generation,chat,source,part)", "post_retry", []pageField{{"chat", "m.chat", "text", 0}, {"source_message_id", "m.source", "text", 0}, {"send_id", "m.send_id", "text", 0}, {"state", "m.state", "text", 0}, {"ack", "m.ack", "text", 0}, {"reason", "COALESCE(a.reason,'')", "text", 1}, {"part", "m.part", "integer", 0}, {"next_attempt", "COALESCE(a.next_attempt,0)", "integer", 1}}}, nil
 	}
@@ -137,7 +137,7 @@ func (r candidate) inline(l pageLayout, resource string) (any, bool) {
 	case "read_snapshot":
 		return Message{Chat: text["chat"], ID: text["id"], Sender: text["sender"], Body: text["body"], Unsupported: text["unsupported"], Transcript: text["transcript"], AudioState: text["audio_state"], AudioReason: text["audio_reason"], Sent: numbers["sent_at"], Own: numbers["from_me"] == 1, History: numbers["history"] == 1, Audio: numbers["audio"] == 1, Observed: numbers["observed_at"], Cursor: r.row}, true
 	case "list_chats":
-		return map[string]any{"id": text["chat"], "posting_hold_reason": text["posting_hold_reason"], "cursor": r.row}, true
+		return map[string]any{"id": text["chat"], "title": text["title"], "title_source": text["title_source"], "title_observed_at": numbers["title_observed_at"], "posting_hold_reason": text["posting_hold_reason"], "cursor": r.row}, true
 	default:
 		return map[string]any{"conversation_id": text["chat"], "source_message_id": text["source_message_id"], "part": numbers["part"], "send_id": text["send_id"], "state": text["state"], "ack": text["ack"], "reason": text["reason"], "next_attempt": numbers["next_attempt"], "cursor": r.row}, true
 	}
