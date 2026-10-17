@@ -35,6 +35,22 @@ Coordinator alone installs/provisions/tests real account; synthetic source check
 and ARM64 cross-build are not runtime proof. Self-review, focused checks only;
 `gate_verified:false`, `release_verified:false`.
 
+## WhatsApp outbound delivery/read receipts — 2026-10-17 (source; live arrival unproved)
+
+Our own outbound operator text now carries a durable, honestly-caused delivery/read
+state observed from the pinned SDK's `events.Receipt` and matched to the exact
+account/generation/chat/message-ID intent — never inferred from time, echo, body or
+display name. Only the SDK's `delivered`/`read` values advance it; `read-self` (the
+recipient disabled read receipts), `sender` (our own other device), `inactive` and
+every other type stay explicitly unknown. `/operator/send` and `/operator/status`
+report the state known AT RETURN TIME without an extra call or a longer send
+deadline; `/status` adds bounded aggregate counters. Per-intent state survives
+restart and the bounded (256) receipt audit table evicts oldest-first without ever
+dropping the per-intent fact. Receipts cannot settle/resurrect an unknown send and
+never resend. Fixture proof only: real-device receipt arrival is unproved, and the
+coordinator alone installs/provisions/uses the real account. See
+[contract/handoff](docs/WHATSAPP-OPERATOR-MANAGEMENT.md).
+
 ## Bounded read batches — 2026-10-13 (source verified; not installed)
 
 Fixed the exact harness lead from seq5193:59,723-byte independent read batch

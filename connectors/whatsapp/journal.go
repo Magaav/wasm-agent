@@ -75,6 +75,10 @@ type Journal struct {
 	fatal          chan error
 	gapWrite       func(string, []byte) error
 	sourceState    string
+	// Bounded in-memory receipt counters: visible facts, never a delivery claim.
+	receiptUnmatched int
+	receiptIgnored   int
+	receiptFailures  int
 }
 
 func openJournal(dir string) (*Journal, error) {
@@ -318,7 +322,20 @@ func (j *Journal) status() (map[string]any, error) {
 	if err = j.db.QueryRow("SELECT count(*) FROM operator_intents WHERE account=? AND state='unknown'", c.Account).Scan(&operatorUnknown); err != nil {
 		return nil, err
 	}
-	return map[string]any{"operator_unknown_sends_all_generations": operatorUnknown, "operator_text_contract": "separate provisioned selected-chat prepare/approve/send/status; no general responder grant", "coverage_status": coverage, "session_observation": observation, "ok": true, "excluded_scope_count": excluded, "source_state": j.freshness(), "snapshot_at": time.Now().Unix(), "last_journal_observed_at": lastObserved, "config": c, "connection": s, "audio": counts, "unknown_sends": unknown, "draft_visibility": "unsupported", "history_coverage": "partial; upstream history and redelivery are not guaranteed", "edit_delete_receipt_coverage": "events retained; no full message-state reconstruction", "translation": "unsupported; original-language recognition only"}, nil
+	// Recipient receipt observations for OUR OWN exact outbound message IDs.
+	// Absence stays unknown; these are observations, not expectations.
+	var receipts, deliveredReceipts, readReceipts, awaitingReceipts int
+	if err = j.db.QueryRow(`SELECT count(*),COALESCE(SUM(CASE WHEN receipt_delivered>0 THEN 1 ELSE 0 END),0),COALESCE(SUM(CASE WHEN receipt_read>0 THEN 1 ELSE 0 END),0),COALESCE(SUM(CASE WHEN receipt_delivered=0 AND receipt_read=0 AND state IN ('accepted','echo_confirmed') THEN 1 ELSE 0 END),0) FROM operator_intents WHERE account=? AND generation=?`, c.Account, c.Generation).Scan(&receipts, &deliveredReceipts, &readReceipts, &awaitingReceipts); err != nil {
+		return nil, err
+	}
+	var receiptHistory int
+	if err = j.db.QueryRow("SELECT count(*) FROM operator_receipts").Scan(&receiptHistory); err != nil {
+		return nil, err
+	}
+	j.mu.Lock()
+	receiptUnmatched, receiptIgnored, receiptFailures := j.receiptUnmatched, j.receiptIgnored, j.receiptFailures
+	j.mu.Unlock()
+	return map[string]any{"operator_unknown_sends_all_generations": operatorUnknown, "operator_recipient_receipts": map[string]any{"intents": receipts, "delivered_observed": deliveredReceipts, "read_observed": readReceipts, "accepted_awaiting_receipt": awaitingReceipts, "history_rows": receiptHistory, "history_limit": operatorReceiptHistoryLimit, "unmatched_receipts": receiptUnmatched, "ignored_receipts": receiptIgnored, "persistence_failures": receiptFailures, "basis": "recipient delivery/read observed only from exact own message-ID receipts; server acceptance is not delivery"}, "operator_text_contract": "separate provisioned selected-chat prepare/approve/send/status; no general responder grant", "coverage_status": coverage, "session_observation": observation, "ok": true, "excluded_scope_count": excluded, "source_state": j.freshness(), "snapshot_at": time.Now().Unix(), "last_journal_observed_at": lastObserved, "config": c, "connection": s, "audio": counts, "unknown_sends": unknown, "draft_visibility": "unsupported", "history_coverage": "partial; upstream history and redelivery are not guaranteed", "edit_delete_receipt_coverage": "events retained; no full message-state reconstruction", "translation": "unsupported; original-language recognition only"}, nil
 }
 
 func (j *Journal) ingest(m Message) error {

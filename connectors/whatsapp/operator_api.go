@@ -169,7 +169,11 @@ func operatorAPI(j *Journal, read http.Handler, a operatorAuthority, t operatorT
 			fail(409, operatorError(err))
 			return
 		}
-		encoded, encodeErr := json.Marshal(map[string]any{"ok": true, "intent": i, "draft_visibility": "unsupported", "recipient_identity_basis": "SDK address mapping; person identity is operator responsibility", "recipient_delivery": "unknown", "recipient_read": "unknown"})
+		// The send/status response reports the receipt state known AT RETURN TIME.
+		// It never waits for a network ACK beyond the dispatch call itself and it
+		// never upgrades acceptance into delivery.
+		delivery, read := operatorReceiptStates(i.DeliveredAt, i.ReadAt)
+		encoded, encodeErr := json.Marshal(map[string]any{"ok": true, "intent": i, "draft_visibility": "unsupported", "recipient_identity_basis": "SDK address mapping; person identity is operator responsibility", "recipient_delivery": delivery, "recipient_read": read, "recipient_receipt_basis": "observed only from an exact own message-ID recipient receipt; server acceptance is not delivery and absence stays unknown"})
 		if encodeErr != nil || len(encoded)+1 > 65536 {
 			fail(503, "operator_response_too_large")
 			return

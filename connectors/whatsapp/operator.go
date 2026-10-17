@@ -44,6 +44,12 @@ type operatorIntent struct {
 	Source     string `json:"-"`
 	Prepared   int64  `json:"prepared_at"`
 	Reason     string `json:"reason"`
+	// Recipient receipt observation for THIS intent's preallocated message ID.
+	// Zero means never observed: acceptance is not delivery and absence is not
+	// non-delivery. Filled only by observeReceipt from an exact chat/ID match.
+	DeliveredAt  int64  `json:"recipient_delivered_at"`
+	ReadAt       int64  `json:"recipient_read_at"`
+	ReceiptBasis string `json:"receipt_basis,omitempty"`
 }
 
 func digest(v any) string {
@@ -61,8 +67,14 @@ func installOperator(db *sql.DB) error {
  CREATE TRIGGER IF NOT EXISTS operator_source_block AFTER INSERT ON source_blocks BEGIN
  INSERT INTO operator_revisions VALUES(NEW.account,NEW.generation,NEW.chat,1) ON CONFLICT(account,generation,chat) DO UPDATE SET revision=revision+1; END;
  CREATE TRIGGER IF NOT EXISTS operator_chat_hold AFTER INSERT ON chat_holds BEGIN
- INSERT INTO operator_revisions VALUES(NEW.account,NEW.generation,NEW.chat,1) ON CONFLICT(account,generation,chat) DO UPDATE SET revision=revision+1; END;`)
-	return err
+ INSERT INTO operator_revisions VALUES(NEW.account,NEW.generation,NEW.chat,1) ON CONFLICT(account,generation,chat) DO UPDATE SET revision=revision+1; END;
+ CREATE TABLE IF NOT EXISTS operator_receipts(seq INTEGER PRIMARY KEY AUTOINCREMENT,intent TEXT NOT NULL,account TEXT NOT NULL,generation INTEGER NOT NULL,chat TEXT NOT NULL,send_id TEXT NOT NULL,state TEXT NOT NULL,at INTEGER NOT NULL,basis TEXT NOT NULL);
+ CREATE INDEX IF NOT EXISTS operator_receipts_intent ON operator_receipts(intent);`)
+	if err != nil {
+		return err
+	}
+	// Additive migration for journals created before receipt observation existed.
+	return migrateOperatorReceipts(db)
 }
 func canonicalOperatorChat(chat string) bool {
 	jid, err := types.ParseJID(chat)
@@ -140,7 +152,7 @@ func (j *Journal) operatorSnapshot(q rowQuery, c Config, chat, reply string) (in
 }
 func readOperator(q rowQuery, id string) (operatorIntent, error) {
 	var i operatorIntent
-	err := q.QueryRow("SELECT id,account,generation,chat,canonical,route,body,reply,send_id,digest,state,revision,source,prepared,reason FROM operator_intents WHERE id=?", id).Scan(&i.ID, &i.Account, &i.Generation, &i.Chat, &i.Canonical, &i.Route, &i.Body, &i.Reply, &i.SendID, &i.Digest, &i.State, &i.Revision, &i.Source, &i.Prepared, &i.Reason)
+	err := q.QueryRow("SELECT id,account,generation,chat,canonical,route,body,reply,send_id,digest,state,revision,source,prepared,reason,receipt_delivered,receipt_read,receipt_basis FROM operator_intents WHERE id=?", id).Scan(&i.ID, &i.Account, &i.Generation, &i.Chat, &i.Canonical, &i.Route, &i.Body, &i.Reply, &i.SendID, &i.Digest, &i.State, &i.Revision, &i.Source, &i.Prepared, &i.Reason, &i.DeliveredAt, &i.ReadAt, &i.ReceiptBasis)
 	return i, err
 }
 func intentRequest(i operatorIntent) operatorRequest {
@@ -201,7 +213,9 @@ func (j *Journal) prepareOperator(r operatorRequest, canonical, route string, ne
 	}
 	i := operatorIntent{Canonical: canonical, Route: route, ID: id, Account: r.Account, Generation: r.Generation, Chat: r.Chat, Body: r.Body, Reply: r.Reply, SendID: sendID, State: "prepared", Revision: revision, Source: source, Prepared: time.Now().Unix()}
 	i.Digest = digest([]any{"approval-v1", i.ID, i.SendID, i.Route, i.Revision, i.Source, i.Prepared, old.Digest})
-	_, err = tx.Exec(`INSERT INTO operator_intents VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET digest=excluded.digest,route=excluded.route,state='prepared',revision=excluded.revision,source=excluded.source,prepared=excluded.prepared,reason=''`, i.ID, i.Account, i.Generation, i.Chat, i.Canonical, i.Route, i.Body, i.Reply, i.SendID, i.Digest, i.State, i.Revision, i.Source, i.Prepared, "")
+	// Receipt columns are intentionally absent here: an update preserves any
+	// already-observed recipient receipt rather than resetting it.
+	_, err = tx.Exec(`INSERT INTO operator_intents(id,account,generation,chat,canonical,route,body,reply,send_id,digest,state,revision,source,prepared,reason) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET digest=excluded.digest,route=excluded.route,state='prepared',revision=excluded.revision,source=excluded.source,prepared=excluded.prepared,reason=''`, i.ID, i.Account, i.Generation, i.Chat, i.Canonical, i.Route, i.Body, i.Reply, i.SendID, i.Digest, i.State, i.Revision, i.Source, i.Prepared, "")
 	if err != nil {
 		return empty, err
 	}
