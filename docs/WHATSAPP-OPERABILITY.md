@@ -1,5 +1,13 @@
 # WhatsApp operator journey: source delivery and live acceptance
 
+2026-10-17 update: [operator management](WHATSAPP-OPERATOR-MANAGEMENT.md) adds a
+separate explicitly provisioned prepare/approve/send/status CLI, not a responder
+bypass or write grant to existing read clients. Earlier setup/live-acceptance text
+below is historical source-delivery evidence, not a command to re-pair/reactivate.
+Coordinator now reports generation2 authenticated at127.0.0.1:28787, PT/all-chats,
+activation1792254831; new worker did not independently observe that runtime.
+No recipient for Laura has been verified or message sent by this source worker.
+
 For the reconciled first live setup failure, exact pairing/authentication/status
 meanings and HUMAN-only phase-specific recovery, follow
 [WHATSAPP-LIFECYCLE.md](WHATSAPP-LIFECYCLE.md). Do not replay the original setup or

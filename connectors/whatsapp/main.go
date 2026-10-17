@@ -201,7 +201,7 @@ func pair(ctx context.Context, a *Adapter) error {
 }
 func run() error {
 	if len(os.Args) < 2 {
-		return errors.New("usage: wa-whatsapp init|pair|serve|status|activate|pause|language|scope --state PRIVATE_DIRECTORY [options]")
+		return errors.New("usage: wa-whatsapp init|pair|serve|status|activate|pause|language|scope|operator-enable|operator-inspect --state PRIVATE_DIRECTORY [options]")
 	}
 	action := os.Args[1]
 	f := flag.NewFlagSet(action, flag.ContinueOnError)
@@ -217,6 +217,8 @@ func run() error {
 	cache := f.String("models", "", "private preprovisioned model cache")
 	confirm := f.Bool("approve-transcript-posting", false, "explicit original-chat transcript policy approval after retirement check")
 	retired := f.String("retirement-receipt", "", "verified operator cutover receipt path")
+	intentID := f.String("intent-id", "", "exact durable operator intent ID for offline owner inspection")
+	operatorApproved := f.Bool("approve-operator-management", false, "offline owner provisioning of separate selected-chat approval/dispatch credentials")
 	if err := f.Parse(os.Args[2:]); err != nil {
 		return err
 	}
@@ -258,6 +260,17 @@ func run() error {
 		return errors.New("init_required")
 	}
 	switch action {
+	case "operator-inspect":
+		if len(*intentID) != 64 {
+			return errors.New("operator_exact_intent_id_required")
+		}
+		i, err := readOperator(j.db, *intentID)
+		if err != nil || i.Account != c.Account {
+			return errors.New("operator_intent_not_found")
+		}
+		return json.NewEncoder(os.Stdout).Encode(map[string]any{"ok": true, "intent": i, "offline_owner_inspection": true, "current_generation": c.Generation, "historical": i.Generation != c.Generation, "draft_visibility": "unsupported"})
+	case "operator-enable":
+		return provisionOperator(j, c, splitChats(*chats), *operatorApproved)
 	case "status":
 		value, err := j.status()
 		if err != nil {
@@ -364,7 +377,11 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	server := &http.Server{Handler: api(j, string(token)), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 30 * time.Second, MaxHeaderBytes: 8192}
+	authority, err := loadOperatorAuthority(j)
+	if err != nil {
+		return err
+	}
+	server := &http.Server{Handler: operatorAPI(j, api(j, string(token)), authority, a), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 30 * time.Second, MaxHeaderBytes: 8192}
 	defer server.Close()
 	serverErrors := make(chan error, 1)
 	go serveAPI(server, listener, ctx, cancel, serverErrors)
