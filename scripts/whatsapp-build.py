@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import runpy
 import subprocess
 import sys
 import tarfile
@@ -42,7 +43,9 @@ def files(root):
     return {p.relative_to(root).as_posix():digest(p) for p in root.rglob('*') if p.is_file()}
 
 
-def build(root, go, expected_go_sha, python):
+def build(root, go, expected_go_sha, python, target_arch="amd64"):
+    if target_arch not in ("amd64", "arm64"):
+        raise ValueError("target_must_be_amd64_or_arm64")
     root=Path(root).resolve()
     # Interpreter preflight happens BEFORE compilation, even on Linux without `python`.
     if not python or not Path(python).is_absolute() or not Path(python).is_file():
@@ -54,12 +57,12 @@ def build(root, go, expected_go_sha, python):
     if len(expected_go_sha or '')!=64 or digest(go)!=expected_go_sha:
         raise ValueError('verified_go_executable_hash_required')
     env={**os.environ,'GOTOOLCHAIN':'local','GOWORK':'off','GOFLAGS':'-mod=readonly',
-         'CGO_ENABLED':'0','GOOS':'linux','GOARCH':'amd64'}
+         'CGO_ENABLED':'0','GOOS':'linux','GOARCH':target_arch}
     if invoke([go,'version'],root,env).decode().split()[2]!='go1.27.2':
         raise ValueError('go1272_required')
     commit=source_clean(root)
     tree=invoke(['git','rev-parse',commit+'^{tree}'],root).decode().strip()
-    out=root/'target'/('whatsapp-linux-'+tree)
+    out=root/'target'/('whatsapp-linux-'+target_arch+'-'+tree)
     if out.exists(): raise ValueError('fresh_output_required_preserve_existing_generation')
     out.mkdir(parents=True,mode=0o700)
     frozen=out/'.source';frozen.mkdir(mode=0o700)
@@ -75,6 +78,14 @@ def build(root, go, expected_go_sha, python):
     invoke([go,'mod','verify'],module,env,out/'.build-logs/module-verify')
     invoke([go,'build','-mod=readonly','-buildvcs=false','-trimpath','-o',out/'wa-whatsapp','.'],module,env,out/'.build-logs/compiler')
     if files(frozen)!=inputs: raise ValueError('frozen_source_drift_detected')
+    target=runpy.run_path(str(frozen/'scripts/whatsapp-install.py'))['binary_target'](out/'wa-whatsapp')
+    if target['goarch'] != target_arch: raise ValueError('compiled_target_mismatch')
+    info=invoke([go,'version','-m',out/'wa-whatsapp'],module,env,out/'.build-logs/binary-build-info').decode()
+    settings={line.strip().split('\t',1)[1] for line in info.splitlines() if line.strip().startswith('build\t')}
+    if 'GOOS=linux' not in settings or 'GOARCH='+target_arch not in settings:
+        raise ValueError('compiled_go_target_unproven')
+    invoke([go,'list','-m','-json','all'],module,env,out/'.build-logs/module-graph')
+    if files(frozen)!=inputs: raise ValueError('frozen_source_drift_detected')
     source_clean(root,commit)
     for source,name in [('scripts/whatsapp-stt-local.py','whatsapp-stt-local.py'),
                         ('scripts/whatsapp-install.py','whatsapp-install.py'),
@@ -84,7 +95,7 @@ def build(root, go, expected_go_sha, python):
         if digest(out/name)!=inputs[source]: raise ValueError('copied_member_drift_detected')
     if files(frozen)!=inputs: raise ValueError('frozen_source_drift_detected')
     source_clean(root,commit)
-    manifest={'schema':2,'source':commit,'tree':tree,'platform':'linux-amd64',
+    manifest={'schema':3,'source':commit,'tree':tree,'platform':'linux-'+target_arch,'target':target,
               'source_files':inputs,'source_binding':'frozen-git-archive+pre-post-hashes',
               'go_executable_sha256':expected_go_sha,'go_version':'go1.27.2',
               'build_logs':files(out/'.build-logs'),
@@ -98,7 +109,8 @@ def build(root, go, expected_go_sha, python):
 if __name__=='__main__':
     try:
         print(json.dumps(build(Path(__file__).resolve().parent.parent,
-                               os.environ.get('GO'),os.environ.get('GO_SHA256'),sys.executable)))
+                               os.environ.get('GO'),os.environ.get('GO_SHA256'),sys.executable,
+                               os.environ.get('WA_WHATSAPP_GOARCH','amd64'))))
     except Exception as error:
         # Fixed failure names, no credential-bearing environment/command-line dumps.
         print(json.dumps({'ok':False,'error':str(error) if isinstance(error,ValueError) else 'source_bound_build_failed'}))

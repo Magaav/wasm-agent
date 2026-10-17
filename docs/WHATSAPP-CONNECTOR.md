@@ -1,5 +1,9 @@
 # WhatsApp linked-device connector (source-ready; live acceptance pending)
 
+Current architecture-specific deployment correction: [WHATSAPP-ARM64.md](WHATSAPP-ARM64.md).
+The authorized server is Linux/aarch64; the original AMD64 bundle is retained but
+MUST NOT be installed or relabelled there.
+
 Current end-to-end operator handoff, bounded name discovery/selection/search and
 live acceptance checklist: [WHATSAPP-OPERABILITY.md](WHATSAPP-OPERABILITY.md).
 Historical first-delivery evidence is not live acceptance.
@@ -128,6 +132,7 @@ refusal with SSH from a model tool. No model-provider credentials are required.
    export GO_SHA256='<recorded-verified-executable-SHA256>'
    export PYTHON3=/absolute/python3
    export GOTOOLCHAIN=local
+   export WA_WHATSAPP_GOARCH=arm64  # authorized aarch64 server; amd64 remains supported/default
    export GOPATH="$PWD/target/gopath" GOCACHE="$PWD/target/gocache" GOMODCACHE="$PWD/target/gomodcache"
    bash scripts/build-whatsapp.sh
    ```
@@ -137,15 +142,20 @@ refusal with SSH from a model tool. No model-provider credentials are required.
    commit/tree once, archives all Go/module/STT/installer/notices/build-helper/license
    inputs from that immutable commit, builds with GOWORK off, readonly modules,
    GOTOOLCHAIN local and `-buildvcs=false`, and checks frozen/member/origin hashes
-   again before emitting a schema2 manifest. Origin/frozen/member drift, missing
+   again before emitting a schema3 manifest with explicit Linux target, checked ELF
+   machine and exact Go build settings. Origin/frozen/member drift, missing
    interpreter, untrusted SDK hash or reused output refuses without a success manifest.
    The manifest binds artifact hashes AND complete frozen source hashes; commit/tree
    are not queried again from a possibly different HEAD. Partial failed build output
-   is preserved, not advertised as a successful bundle. Linux/amd64 CGO is disabled.
-   Output is `target/whatsapp-linux-<tree>/manifest.json` plus its digest.
+   is preserved, not advertised as a successful bundle. Linux/amd64 and Linux/arm64
+   are supported, CGO disabled; target selection is explicit, never inferred from the
+   build host. Output is `target/whatsapp-linux-<arch>-<tree>/manifest.json` plus its digest.
    Snapshot inputs, source/SDK/module/STT/installer/license hashes and private raw
    build logs are retained. Review logs before transferring a bundle; they are not
-   model output or a place for credentials. Schema2 is required by the installer.
+   model output or a place for credentials. The reviewed installer supports schema3
+   (and legacy schema2 AMD64), and refuses host OS/CPU or ELF/manifest target
+   disagreement even during dry-run, before copying. Use the current reviewed
+   installer, not the historical AMD64 bundle's old installer.
    Transfer that bundle and its independently checked manifest digest through your
    authorized channel. Do not put secrets in the bundle. The installer itself must
    come from the reviewed source; a checksum printed by an untrusted bundle is not trust.
@@ -165,7 +175,9 @@ refusal with SSH from a model tool. No model-provider credentials are required.
    credentials. It emits a systemd USER unit inside the release, not into systemd.
 
 3. Separately provision Python 3.9+ and the multilingual `small` model into that
-   PRIVATE cache. The real PyPI metadata pin is faster-whisper1.2.1 (MIT), recorded
+   PRIVATE cache. For the authorized CPython3.12 Linux/aarch64 host, use the complete
+   hash-pinned wheel closure in [WHATSAPP-ARM64.md](WHATSAPP-ARM64.md), not the
+   unconstrained transitive install example below. The real PyPI metadata pin is faster-whisper1.2.1 (MIT), recorded
    with its wheel hash in `connectors/whatsapp/python-stt-dependency.json`. These are
    HUMAN setup-time network commands, never message-time downloads:
 
@@ -183,8 +195,9 @@ refusal with SSH from a model tool. No model-provider credentials are required.
    HF_HUB_OFFLINE=1 "$PY" "$RELEASE/whatsapp-stt-local.py" --check
    ```
 
-   Native transitive Python dependencies are platform-specific and NOT fully locked
-   by this repository; freeze/review that environment under your normal supply-chain
+   Native transitive Python dependencies are platform-specific. The explicit
+   CPython3.12 Linux/arm64 closure is now hash-locked; other platforms are NOT fully
+   locked here. Review the actual environment under your normal supply-chain
    policy before production. Metadata/protocol fixtures are not a real engine/model
    quality or production Python installation proof. No provider login/credentials.
 

@@ -1,5 +1,10 @@
 # WhatsApp operator journey: source delivery and live acceptance
 
+**Architecture correction:** the authorized target is Linux/aarch64, not AMD64.
+Use [WHATSAPP-ARM64.md](WHATSAPP-ARM64.md) and its NEW ARM64 bundle/schema3/locked
+Python provisioning before the sequence below. The original AMD64 bundle and its
+Windows dry-run receipt remain historical, unchanged—not ARM64 readiness.
+
 ## Architecture and worker result
 
 One Go whatsmeow linked-device service (`connectors/whatsapp`), its private SQLite

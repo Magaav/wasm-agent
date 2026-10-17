@@ -21,8 +21,8 @@ class FrozenBuildTests(unittest.TestCase):
         if not cls.go: raise unittest.SkipTest('WA_TEST_GO absolute private SDK required')
         cls.temp=tempfile.TemporaryDirectory();cls.base=Path(cls.temp.name)
         code=cls.base/'fake.go';code.write_text('''package main
-import("fmt";"os";"path/filepath")
-func main(){a:=os.Args[1:];if len(a)>0&&a[0]=="version"{fmt.Println("go version go1.27.2 fixture/amd64");return};if len(a)>0&&a[0]=="mod"{return};var out string;for i,v:=range a{if v=="-o"{out=a[i+1]}};if out==""{os.Exit(2)};os.WriteFile(out,[]byte("synthetic cross-build artifact, not executable"),0600);if marker:=os.Getenv("WA_FIXTURE_GO_CALLED");marker!=""{os.WriteFile(marker,[]byte("called"),0600)};switch os.Getenv("WA_FIXTURE_DRIFT"){case "origin":os.WriteFile(filepath.Join(os.Getenv("WA_FIXTURE_ROOT"),"scripts","whatsapp-stt-local.py"),[]byte("changed origin fixture"),0600);case "frozen":os.WriteFile("main.go",[]byte("changed frozen fixture"),0600)}}
+import("fmt";"os";"path/filepath";"os/exec")
+func main(){a:=os.Args[1:];if len(a)==1&&a[0]=="version"{fmt.Println("go version go1.27.2 fixture/amd64");return};if len(a)>1&&a[0]=="version"&&os.Getenv("WA_FIXTURE_BAD_INFO")=="1"{fmt.Println("fixture missing build settings");return};isBuild:=len(a)>0&&a[0]=="build";if isBuild&&os.Getenv("WA_FIXTURE_WRONG_ARCH")=="1"{os.Setenv("GOARCH","amd64")};cmd:=exec.Command(os.Getenv("WA_TEST_GO"),a...);cmd.Stdout=os.Stdout;cmd.Stderr=os.Stderr;if err:=cmd.Run();err!=nil{os.Exit(2)};if !isBuild{return};if marker:=os.Getenv("WA_FIXTURE_GO_CALLED");marker!=""{os.WriteFile(marker,[]byte("called"),0600)};switch os.Getenv("WA_FIXTURE_DRIFT"){case "origin":os.WriteFile(filepath.Join(os.Getenv("WA_FIXTURE_ROOT"),"scripts","whatsapp-stt-local.py"),[]byte("changed origin fixture"),0600);case "frozen":os.WriteFile("main.go",[]byte("changed frozen fixture"),0600)}}
 ''',encoding='utf-8')
         cls.wrapper=cls.base/('fixture-go.exe' if sys.platform=='win32' else 'fixture-go')
         env={**os.environ,'GOTOOLCHAIN':'local','GOOS':'windows' if sys.platform=='win32' else 'linux','GOARCH':'amd64'}
@@ -47,13 +47,13 @@ func main(){a:=os.Args[1:];if len(a)>0&&a[0]=="version"{fmt.Println("go version 
         for args in (['init','-q'],['add','.'],['-c','user.name=Private Fixture','-c','user.email=fixture@example.invalid','commit','-qm','private fixture']):
             subprocess.run(['git',*args],cwd=root,check=True,capture_output=True)
         return root
-    def invoke(self,root,drift=''):
+    def invoke(self,root,drift='',arch='amd64'):
         from unittest.mock import patch
         with patch.dict(os.environ,{'WA_FIXTURE_DRIFT':drift,'WA_FIXTURE_ROOT':str(root)}):
-            return builder.build(root,str(self.wrapper),self.wrapper_sha,sys.executable)
+            return builder.build(root,str(self.wrapper),self.wrapper_sha,sys.executable,arch)
     def test_frozen_manifest_members_and_source_binding(self):
         root=self.fixture();result=self.invoke(root);manifest=json.loads((Path(result['bundle'])/'manifest.json').read_text())
-        self.assertEqual(manifest['schema'],2);self.assertEqual(manifest['source_binding'],'frozen-git-archive+pre-post-hashes')
+        self.assertEqual(manifest['schema'],3);self.assertEqual(manifest['source_binding'],'frozen-git-archive+pre-post-hashes')
         self.assertIn('connectors/whatsapp/go.sum',manifest['source_files'])
         self.assertEqual(manifest['source_files']['scripts/whatsapp-stt-local.py'],manifest['files']['whatsapp-stt-local.py'])
         self.assertEqual(subprocess.check_output(['git','status','--porcelain'],cwd=root).strip(),b'')
@@ -72,6 +72,25 @@ func main(){a:=os.Args[1:];if len(a)>0&&a[0]=="version"{fmt.Println("go version 
             with self.assertRaisesRegex(ValueError,'source|committed'):
                 self.invoke(root,drift)
             self.assertFalse(any((root/'target').glob('whatsapp-linux-*/manifest.json')))
+    def test_both_targets_are_actual_elf_and_bound_to_build_settings(self):
+        for arch,machine in [('amd64',62),('arm64',183)]:
+            root=self.fixture();result=self.invoke(root,arch=arch)
+            bundle=Path(result['bundle']);m=json.loads((bundle/'manifest.json').read_text())
+            self.assertEqual(m['target'],{'goos':'linux','goarch':arch,'elf_machine':machine})
+            self.assertIn('whatsapp-linux-'+arch+'-',bundle.name)
+            self.assertIn('GOARCH='+arch,(bundle/'.build-logs/binary-build-info.stdout').read_text())
+            self.assertIn('module-graph.stdout',m['build_logs'])
+            with self.assertRaisesRegex(ValueError,'fresh_output_required'):self.invoke(root,arch=arch)
+    def test_wrong_compiler_target_and_missing_build_settings_refuse(self):
+        from unittest.mock import patch
+        for variable,error in [('WA_FIXTURE_WRONG_ARCH','compiled_target_mismatch'),('WA_FIXTURE_BAD_INFO','compiled_go_target_unproven')]:
+            root=self.fixture()
+            with patch.dict(os.environ,{variable:'1'}):
+                with self.assertRaisesRegex(ValueError,error):self.invoke(root,arch='arm64')
+            self.assertFalse(any((root/'target').glob('whatsapp-linux-*/manifest.json')))
+    def test_unsupported_target_refuses_before_execution(self):
+        with self.assertRaisesRegex(ValueError,'target_must_be'):
+            builder.build('missing','missing','0'*64,'missing','386')
     def test_old_builder_causally_emits_mixed_source_bundle(self):
         root=self.fixture(old=True)
         env={**os.environ,'GO':self.wrapper.as_posix(),'GO_SHA256':self.wrapper_sha,'WA_FIXTURE_ROOT':str(root),'WA_FIXTURE_DRIFT':'origin'}
