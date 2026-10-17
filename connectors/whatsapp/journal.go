@@ -131,6 +131,10 @@ func openJournal(dir string) (*Journal, error) {
 		j.Close()
 		return nil, err
 	}
+	if err = installOperator(db); err != nil {
+		j.Close()
+		return nil, err
+	}
 	if err = installDirectory(db); err != nil {
 		j.Close()
 		return nil, err
@@ -310,8 +314,13 @@ func (j *Journal) status() (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"coverage_status": coverage, "session_observation": observation, "ok": true, "excluded_scope_count": excluded, "source_state": j.freshness(), "snapshot_at": time.Now().Unix(), "last_journal_observed_at": lastObserved, "config": c, "connection": s, "audio": counts, "unknown_sends": unknown, "draft_visibility": "unsupported", "history_coverage": "partial; upstream history and redelivery are not guaranteed", "edit_delete_receipt_coverage": "events retained; no full message-state reconstruction", "translation": "unsupported; original-language recognition only"}, nil
+	var operatorUnknown int
+	if err = j.db.QueryRow("SELECT count(*) FROM operator_intents WHERE account=? AND state='unknown'", c.Account).Scan(&operatorUnknown); err != nil {
+		return nil, err
+	}
+	return map[string]any{"operator_unknown_sends_all_generations": operatorUnknown, "operator_text_contract": "separate provisioned selected-chat prepare/approve/send/status; no general responder grant", "coverage_status": coverage, "session_observation": observation, "ok": true, "excluded_scope_count": excluded, "source_state": j.freshness(), "snapshot_at": time.Now().Unix(), "last_journal_observed_at": lastObserved, "config": c, "connection": s, "audio": counts, "unknown_sends": unknown, "draft_visibility": "unsupported", "history_coverage": "partial; upstream history and redelivery are not guaranteed", "edit_delete_receipt_coverage": "events retained; no full message-state reconstruction", "translation": "unsupported; original-language recognition only"}, nil
 }
+
 func (j *Journal) ingest(m Message) error {
 	c, err := j.Config()
 	if err != nil {

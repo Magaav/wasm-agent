@@ -217,3 +217,19 @@ The settled report names the clean source-bound ARM64 bundle, manifest/source/me
 hashes and private source/SDK/fixture evidence receipt. Source/member/SDK/ELF/host
 admission guards are unchanged. No full release gate, production deployment, profile/
 MCP/settings change, QR/real account/media access, engine/default change or new agent.
+
+### Late canonical convergence
+
+Fresh merge-tree found already-landed upstream operator-management source5ed09900
+while this task was running. Its separately provisioned explicit operator authority
+is NOT a grant from name refresh/read credentials or general responder/MCP sends.
+The owned branch merged that canonical source without modifying its operator logic;
+additive status-map and documentation conflicts retain both features. This task did
+not provision/use its authority, change its settings or send anything.
+
+Settled `op-1792257260462889-16612-595` retested the converged tree:72 Go top-level
+tests plus2 subtests, vet,10 Node tests, private unpaired/navigation/native source+
+embedded compatibility and119 shipping checks passed, zero skips. This includes
+upstream private operator fixtures, not production operator use. The pre-convergence
+name bundle/receipt remains immutable; the report identifies a FRESH clean-source
+converged ARM64 bundle and separate evidence receipt. No old artifact is relabelled.

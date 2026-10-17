@@ -1,6 +1,6 @@
 ---
 name: whatsapp-reply
-description: Scoped WhatsApp journal reads/decisions and linked-device transcription safety. Use for WhatsApp deliveries or account-sending requests. General sends fail closed while cross-device drafts are unsupported; never replay uncertain effects or revive the retired browser stack.
+description: Scoped WhatsApp journal reads/decisions and linked-device transcription safety. Use for WhatsApp deliveries or account-sending requests. General responder sends fail closed; separately provisioned operator-directed text uses prepare/approve/send/status; cross-device drafts stay unsupported; never replay uncertain effects or revive the retired browser stack.
 ---
 
 # WhatsApp app boundary
@@ -19,6 +19,18 @@ phone/linked devices is unknown/unsupported, not absent. A transcript policy doe
 not authorize arbitrary replies or bypass the app facade. Do not infer self/account
 from display titles or outgoing-only history. Historical IDs stay read-only unless
 exact identity/message mapping is independently verified.
+
+For a direct human-approved new text/reply, use the DISTINCT opt-in operator CLI
+in [operator management](../../docs/WHATSAPP-OPERATOR-MANAGEMENT.md), only from an
+authorized native operator process with separately provisioned approval/dispatch
+FILE references. No generic MCP, child/event role or existing read token grants it.
+Find/read/search exact recipients; disambiguate identities, never trust a sole
+pushname. Exact content/direct approval need not be requested twice; do not alter
+that content. Preserve the prepared intent ID, compare exact recipient/body/quote,
+approve via trusted operator authority, send once, inspect durable status after
+uncertainty. No new key/retry/reset to escape unknown effects. Missing setup is a
+functionality/provisioning blocker, not absent human permission. Installation and
+real account use belong to the coordinator; source readiness is not live success.
 
 Deterministic original-chat transcript posting is a separate human-activated policy
 in `wa-whatsapp`, for incoming AND synchronized own outgoing audio. Product default

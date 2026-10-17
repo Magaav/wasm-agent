@@ -22,6 +22,19 @@ These are two entry paths into one runtime:
 The fleet console serves these journeys. It is not the product's required first
 screen, and 32 workers are not a prerequisite for helping one customer.
 
+## WhatsApp operator-directed management — 2026-10-17 (source; live proof pending)
+
+Distinct selected-chat prepare/approve/send/status CLI/API with separate owner-
+provisioned approval/dispatch capabilities, exact content/recipient/quote binding,
+stable preallocated IDs, durable unknown/no-replay and exact echo status. Bounded
+find/read/search stays read-only; GENERAL responders and generic MCP sends remain
+refused. Historical audio holds/cutoff/PT and unknowns are retained. No bulk,
+destructive/account operations or draft/read-state controls. No Laura identity or
+real send established by worker. See [contract/handoff](docs/WHATSAPP-OPERATOR-MANAGEMENT.md).
+Coordinator alone installs/provisions/tests real account; synthetic source checks
+and ARM64 cross-build are not runtime proof. Self-review, focused checks only;
+`gate_verified:false`, `release_verified:false`.
+
 ## Bounded read batches — 2026-10-13 (source verified; not installed)
 
 Fixed the exact harness lead from seq5193:59,723-byte independent read batch

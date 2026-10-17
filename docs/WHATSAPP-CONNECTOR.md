@@ -1,9 +1,13 @@
 # WhatsApp linked-device connector (source-ready; live acceptance pending)
 
-Current dated coordinator-reported live activation/read bridge, bounded name refresh
+rrent dated coordinator-reported live activation/read bridge, bounded name refresh
 and unresolved mutation-hold coverage: [WHATSAPP-COVERAGE.md](WHATSAPP-COVERAGE.md).
 Authenticated transport/readiness does not certify fully named or unheld history.
 
+2026-10-17: distinct opt-in [operator-directed text/replies](WHATSAPP-OPERATOR-MANAGEMENT.md)
+add prepare/approve/send/status with separate selected-chat capabilities. Existing
+GENERAL responder/MCP sends still refuse; read-only credentials gain no writes.
+See that contract for current coordinator-reported live baseline and pending proof.
 Current lifecycle investigation/status meanings and no-replay recovery:
 [WHATSAPP-LIFECYCLE.md](WHATSAPP-LIFECYCLE.md). Local pairing is not authenticated
 login; the original live failure's upstream reason remains unverified.

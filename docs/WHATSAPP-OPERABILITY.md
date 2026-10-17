@@ -1,6 +1,6 @@
 # WhatsApp operator journey: source delivery and live acceptance
 
-**2026-10-17 update:** coordinator reports the existing account already authenticated,
+2026-10-17 update:** coordinator reports the existing account already authenticated,
 PT/all-chats enabled and NEW eligible transcript posting activated. The working
 on-demand route keeps the private profile/token on SERVER and uses the existing
 approved native peer → server CLI/MCP → loopback path; no local registry/HTTPS setup
@@ -9,6 +9,13 @@ sequence below is reference/new-install material, NOT a request to re-pair, repe
 retirement/activation or interrupt the running service while real samples arrive.
 36 historical holds remain unresolved; full audio/latency/coverage acceptance is pending.
 
+2026-10-17 update: [operator management](WHATSAPP-OPERATOR-MANAGEMENT.md) adds a
+separate explicitly provisioned prepare/approve/send/status CLI, not a responder
+bypass or write grant to existing read clients. Earlier setup/live-acceptance text
+below is historical source-delivery evidence, not a command to re-pair/reactivate.
+Coordinator now reports generation2 authenticated at127.0.0.1:28787, PT/all-chats,
+activation1792254831; new worker did not independently observe that runtime.
+No recipient for Laura has been verified or message sent by this source worker.
 For the reconciled first live setup failure, exact pairing/authentication/status
 meanings and HUMAN-only phase-specific recovery, follow
 [WHATSAPP-LIFECYCLE.md](WHATSAPP-LIFECYCLE.md). Do not replay the original setup or
