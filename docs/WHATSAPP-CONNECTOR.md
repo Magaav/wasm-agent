@@ -1,5 +1,9 @@
 # WhatsApp linked-device connector (source-ready; live acceptance pending)
 
+Current lifecycle investigation/status meanings and no-replay recovery:
+[WHATSAPP-LIFECYCLE.md](WHATSAPP-LIFECYCLE.md). Local pairing is not authenticated
+login; the original live failure's upstream reason remains unverified.
+
 Current architecture-specific deployment correction: [WHATSAPP-ARM64.md](WHATSAPP-ARM64.md).
 The authorized server is Linux/aarch64; the original AMD64 bundle is retained but
 MUST NOT be installed or relabelled there.

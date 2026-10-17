@@ -1,5 +1,10 @@
 # WhatsApp operator journey: source delivery and live acceptance
 
+For the reconciled first live setup failure, exact pairing/authentication/status
+meanings and HUMAN-only phase-specific recovery, follow
+[WHATSAPP-LIFECYCLE.md](WHATSAPP-LIFECYCLE.md). Do not replay the original setup or
+remove its receipt guard. Local pair exit0 alone is not continuing readiness.
+
 **Architecture correction:** the authorized target is Linux/aarch64, not AMD64.
 Use [WHATSAPP-ARM64.md](WHATSAPP-ARM64.md) and its NEW ARM64 bundle/schema3/locked
 Python provisioning before the sequence below. The original AMD64 bundle and its

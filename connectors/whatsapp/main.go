@@ -64,14 +64,20 @@ func api(j *Journal, token string) http.Handler {
 			}
 			json.NewEncoder(w).Encode(status)
 		case "/lookup_self":
+			j.identityMu.Lock()
+			defer j.identityMu.Unlock()
+			if _, err := j.scope(req.Account, req.Generation, req.Chat); err != nil {
+				fail(403, "scope_mismatch")
+				return
+			}
 			j.mu.Lock()
-			verified := j.verified
+			verified, authenticated := j.verified, j.authenticated
 			j.mu.Unlock()
 			if !verified {
 				fail(409, "paired_identity_unproven")
 				return
 			}
-			json.NewEncoder(w).Encode(map[string]any{"ok": true, "account": c.Account, "self_chat": c.Account, "generation": c.Generation})
+			json.NewEncoder(w).Encode(map[string]any{"ok": true, "account": c.Account, "self_chat": c.Account, "generation": c.Generation, "identity_basis": "local_sdk_store_match_not_live_authentication", "authenticated_event_observed": authenticated})
 		case "/inspect_chat":
 			if req.Chat == "" {
 				fail(400, "chat_required")
@@ -152,6 +158,10 @@ func pair(ctx context.Context, a *Adapter) error {
 	if a.client.Store.ID != nil {
 		return errors.New("already_paired")
 	}
+	c, err := a.journal.Config()
+	if err != nil {
+		return errors.New("pairing_configuration_unavailable")
+	}
 	ch, err := a.client.GetQRChannel(ctx)
 	if err != nil {
 		return errors.New("pairing_unavailable")
@@ -160,21 +170,34 @@ func pair(ctx context.Context, a *Adapter) error {
 		return errors.New("pairing_connection_failed")
 	}
 	defer fmt.Fprint(os.Stdout, "\033[2J\033[H")
-	for item := range ch {
-		switch item.Event {
-		case "code":
-			code, err := qrcode.New(item.Code, qrcode.Medium)
-			if err != nil {
-				return errors.New("qr_render_failed")
+	for {
+		select {
+		case <-ctx.Done():
+			return errors.New("pairing_cancelled")
+		case item, ok := <-ch:
+			if !ok {
+				if ctx.Err() != nil {
+					return errors.New("pairing_cancelled")
+				}
+				return errors.New("pairing_not_confirmed")
 			}
-			fmt.Fprint(os.Stdout, "\033[2J\033[HScan privately in WhatsApp → Linked devices. Do not record this terminal.\n", code.ToSmallString(false))
-		case "success":
-			return a.identity()
-		case "timeout":
-			return errors.New("pairing_expired")
+			switch item.Event {
+			case "code":
+				code, err := qrcode.New(item.Code, qrcode.Medium)
+				if err != nil {
+					return errors.New("qr_render_failed")
+				}
+				fmt.Fprint(os.Stdout, "\033[2J\033[HScan privately in WhatsApp → Linked devices. Do not record this terminal.\n", code.ToSmallString(false))
+			case "success":
+				if err := a.completePair(c.Generation); err != nil {
+					return a.journal.safePairCompletionError(err)
+				}
+				return nil // Local pairing only; subsequent OFF serve must prove authenticated login.
+			case "timeout", "error", "err-client-outdated", "err-scanned-without-multidevice", "err-unexpected-state":
+				return pairingTerminalError(item.Event)
+			}
 		}
 	}
-	return errors.New("pairing_not_confirmed")
 }
 func run() error {
 	if len(os.Args) < 2 {
@@ -386,8 +409,8 @@ func run() error {
 	}()
 	if a.client.Store.ID == nil {
 		j.setState("needs_pairing")
-	} else if a.identity() != nil {
-		j.setState("degraded_account_mismatch")
+	} else if !a.eventIdentity() {
+		// identityResult retains needs_pairing vs actual account mismatch.
 	} else {
 		j.setState("reconnecting")
 		if err = a.client.ConnectContext(ctx); err != nil {
@@ -419,8 +442,7 @@ func run() error {
 				j.setState("needs_pairing")
 				continue
 			}
-			if a.identity() != nil {
-				j.setState("degraded_account_mismatch")
+			if !a.eventIdentity() {
 				continue
 			}
 			if !a.client.IsConnected() {
