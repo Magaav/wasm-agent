@@ -1,5 +1,9 @@
 # WhatsApp Linux ARM64 deployment correction
 
+A live local-pair-success followed by logout investigation is tracked in
+[WHATSAPP-LIFECYCLE.md](WHATSAPP-LIFECYCLE.md); no ARM64/engine rewrite is inferred
+from that failure. Original artifacts and coordinator runtime proofs remain separate.
+
 This is a scoped correction to [operator operability](WHATSAPP-OPERABILITY.md), not
 live acceptance. Coordinator's original preflight receipt is
 `/home/ubuntu/.wasm-agent/session-scratch/66393336386465352d303934312d343835342d613762352d643736346234633738343663/whatsapp-live/preflight.receipt.json`

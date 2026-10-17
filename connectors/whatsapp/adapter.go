@@ -60,23 +60,44 @@ func newAdapter(ctx context.Context, j *Journal) (*Adapter, error) {
 	a.downloadToFile = a.client.DownloadToFile
 	a.client.SetMediaHTTPClient(mediaHTTPClient(mediaDeadline, maxEncryptedAudioBytes))
 	a.client.AddEventHandlerWithSuccessStatus(a.event)
+	j.mu.Lock()
+	j.adapterLive = true
+	j.mu.Unlock()
 	return a, nil
 }
-func (a *Adapter) Close() { a.client.Disconnect(); a.store.Close() }
+func (a *Adapter) Close() {
+	a.client.Disconnect()
+	a.store.Close()
+	a.journal.mu.Lock()
+	a.journal.authenticated = false
+	a.journal.verified = false
+	a.journal.adapterLive = false
+	a.journal.mu.Unlock()
+}
 func (a *Adapter) identity() error {
+	a.journal.identityMu.Lock()
+	defer a.journal.identityMu.Unlock()
+	return a.identityLocked()
+}
+func (a *Adapter) identityLocked() error {
 	c, err := a.journal.Config()
 	if err != nil {
 		return err
 	}
-	if a.client.Store.ID == nil {
+	a.journal.mu.Lock()
+	blocked := a.journal.pairingBlocked
+	a.journal.mu.Unlock()
+	if blocked || c.PairingRequired || a.client.Store.Deleted || a.client.Store.ID == nil {
 		a.journal.mu.Lock()
 		a.journal.verified = false
+		a.journal.authenticated = false
 		a.journal.mu.Unlock()
 		return errors.New("needs_pairing")
 	}
 	if a.client.Store.ID.ToNonAD().String() != c.Account {
 		a.journal.mu.Lock()
 		a.journal.verified = false
+		a.journal.authenticated = false
 		a.journal.mu.Unlock()
 		return errors.New("paired_account_mismatch")
 	}
@@ -85,8 +106,8 @@ func (a *Adapter) identity() error {
 	a.journal.mu.Unlock()
 	return nil
 }
-func (a *Adapter) eventIdentity() bool {
-	err := a.identity()
+func (a *Adapter) eventIdentity() bool { return a.identityResult(a.identity()) }
+func (a *Adapter) identityResult(err error) bool {
 	if err == nil {
 		return true
 	}
@@ -176,33 +197,58 @@ func (a *Adapter) event(evt any) (success bool) {
 	}
 	switch e := evt.(type) {
 	case *events.Connected:
-		if !a.eventIdentity() {
+		j.identityMu.Lock()
+		defer j.identityMu.Unlock()
+		if !a.identityResult(a.identityLocked()) {
 			return false
 		}
-		if !persist(j.event("connected", "history coverage remains partial")) {
+		j.mu.Lock()
+		j.authenticated = true
+		j.mu.Unlock()
+		if !persist(j.recordLifecycle("connected", 0, false)) {
 			return false
 		}
 		j.setState("catching_up")
 	case *events.OfflineSyncCompleted:
+		j.identityMu.Lock()
+		defer j.identityMu.Unlock()
+		if !a.identityResult(a.identityLocked()) {
+			return false
+		}
 		if !persist(j.event("catch_up", "offline sync signaled; sticky gaps are not cleared")) {
 			return false
 		}
 		j.setState("connected")
 	case *events.Disconnected:
-		j.setState("reconnecting")
-	case *events.LoggedOut:
-		j.setState("needs_pairing")
-		config, err := j.Config()
-		if err != nil {
-			return j.failPersistence()
-		}
-		config.Requested = false
-		config.Generation++
-		config.Activated = 0
-		if !persist(j.save(config)) {
+		j.mu.Lock()
+		j.authenticated = false
+		j.mu.Unlock()
+		if !persist(j.recordLifecycle("disconnected", 0, false)) {
 			return false
 		}
-		return persist(j.event("logged_out", "explicit pairing and activation required"))
+		j.setState("reconnecting")
+	case *events.LoggedOut:
+		return persist(j.loggedOut(e.Reason, e.OnConnect))
+	case *events.ConnectFailure:
+		j.mu.Lock()
+		j.authenticated = false
+		j.mu.Unlock()
+		return persist(j.recordLifecycle("connect_failure", e.Reason, true))
+	case *events.ClientOutdated:
+		j.mu.Lock()
+		j.authenticated = false
+		j.mu.Unlock()
+		return persist(j.recordLifecycle("client_outdated", events.ConnectFailureClientOutdated, true))
+	case *events.TemporaryBan:
+		j.mu.Lock()
+		j.authenticated = false
+		j.mu.Unlock()
+		return persist(j.recordLifecycle("temporary_ban", events.ConnectFailureTempBanned, true))
+	case *events.StreamReplaced:
+		j.mu.Lock()
+		j.authenticated = false
+		j.mu.Unlock()
+		return persist(j.recordLifecycle("stream_replaced", 0, false))
 	case *events.Message:
 		if !a.eventIdentity() {
 			return false
