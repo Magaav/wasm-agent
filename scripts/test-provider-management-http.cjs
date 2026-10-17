@@ -4,7 +4,7 @@ const root=path.resolve(__dirname,'..'),binary=path.resolve(process.argv[2]||'ru
 const clean=Object.fromEntries(Object.entries(process.env).filter(([key])=>!/^(WA_|WASM_AGENT_|OPENAI_|OPENCODE_|PI_)/i.test(key)));
 async function listen(server){await new Promise(r=>server.listen(0,'127.0.0.1',r));return server.address().port;}
 async function main(){console.log('Evidence: '+out);let checks=0,upstreamCalls=0;const check=(v,label)=>{checks++;assert(v,label);};
- const vault=http.createServer((req,res)=>{if(req.url!='/status'){upstreamCalls++;res.writeHead(500).end();return;}res.setHeader('Content-Type','application/json');res.end(JSON.stringify({vault_id:'11111111-1111-4111-8111-111111111111',providers:{'opencode-go':{configured:true,enabled:true,generation:'synthetic-generation'},'openai-sub':{configured:false,enabled:true,generation:'absent'}}}));});
+ const vault=http.createServer((req,res)=>{if(req.url!='/status'){upstreamCalls++;res.writeHead(500).end();return;}res.setHeader('Content-Type','application/json');res.end(JSON.stringify({vault_id:'11111111-1111-4111-8111-111111111111',providers:{'opencode-go':{configured:true,enabled:true,generation:'synthetic-generation',operation:'33333333-3333-4333-8333-333333333333'},'openai-sub':{configured:false,enabled:true,generation:'absent'}}}));});
  const vp=await listen(vault);
  try{for(const embedded of [false,true]){
   const reserve=net.createServer();const port=await listen(reserve);await new Promise(r=>reserve.close(r));
@@ -19,6 +19,7 @@ async function main(){console.log('Evidence: '+out);let checks=0,upstreamCalls=0
    check(state.status===200&&state.value.providers?.length===2,'real deterministic management route: '+JSON.stringify(state));
    check(state.value.providers[0].source==='native'&&state.value.providers[1].source==='vault','Go source preserves native subscription');
    check(state.value.providers[1].generation==='synthetic-generation','effective route readback includes opaque generation');
+   check(state.value.providers[1].operation==='33333333-3333-4333-8333-333333333333'&&state.value.providers[1].embed_url==='http://127.0.0.1:8801/embed/go'&&/^[a-f0-9]{64}$/.test(state.value.embed_scope),'native metadata advertises only bound public frame/receipt scope');
    const foreign=await call('/provider-management',undefined,{'X-WA-Node':'foreign-node'});check(foreign.value.error==='provider_management_local_only','no secret/control relay across node scope');
    const stale=await call('/provider-management',{action:'begin',operation:'synthetic-operation-123'},{Origin:'http://stale.invalid'});check(stale.status===403,'stale origin denied before auth action');
    const rejected=await call('/provider-management',{key:'synthetic-no-node-key'});check(rejected.value.error==='invalid_provider_management_field'&&!JSON.stringify(rejected).includes('synthetic-no-node-key'),'credential-shaped requests refused without echo');

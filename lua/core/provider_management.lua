@@ -15,6 +15,12 @@ end
 function M.state(owner)
   local state=dofile('lua/core/state.lua')
   local result={providers={},selected=state.read('provider') or host.getenv('WASM_AGENT_PROVIDER') or 'opencode-go',quota=M.quota,revision=state.revision()}
+  if owner then
+    local json=dofile('lua/vendor/json.lua')
+    local identity=json.decode(host.node_identity())
+    -- Hash public node/account identity only, never an authentication token or credential.
+    result.embed_scope=host.sha256('provider-embed-v1:'..tostring(identity.node_id)..':'..owner)
+  end
   for _,item in ipairs(M.routes) do
     local row={id=item.id,label=item.label,source=vault.base(item.id) and 'vault' or 'native',entitlement='unknown',operator_url=operator_url(item.id)}
     if row.source=='vault' then
@@ -23,8 +29,9 @@ function M.state(owner)
       row.vault_url=vault.url(item.id);row.vault_id=status and status.vault_id
       if row.operator_url and type(row.vault_id)=='string' and row.vault_id:match('^[%x%-]+$') and #row.vault_id==36 then
         row.operator_url=row.operator_url:gsub('/$','')..'/#vault='..row.vault_id
+        if item.id=='opencode-go' then row.embed_url=row.operator_url:gsub('/#vault=.*$','')..'/embed/go' end
       else row.operator_url=nil end
-      if type(entry)=='table' then row.configured=entry.configured;row.enabled=entry.enabled;row.error=entry.last_error and 'vault_provider_error' or nil;row.generation=entry.generation
+      if type(entry)=='table' then row.configured=entry.configured;row.enabled=entry.enabled;row.error=entry.last_error and 'vault_provider_error' or nil;row.generation=entry.generation;row.operation=entry.operation
       else row.error=problem and problem.code or 'vault_status_unknown' end
     elseif item.id=='openai-sub' then
       if dofile('lua/core/openai_sub.lua').transport()~='native' then

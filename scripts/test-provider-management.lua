@@ -51,6 +51,10 @@ assert(host.write_file(env.WASM_AGENT_OPENAI_SUB_STORE,json.encode(previous)))
 check(#state.providers==2 and state.providers[1].label=='OpenAI subscription' and state.providers[2].label=='OpenCode Go','only two friendly management routes')
 check(state.providers[1].source=='native' and state.providers[2].source=='vault','truthful separate sources')
 check(state.providers[2].generation==generation and state.providers[2].entitlement=='unknown','presence not entitlement')
+local scoped=manager.state('fixture-owner')
+check(type(scoped.embed_scope)=='string' and scoped.embed_scope:match('^[a-f0-9]+$') and #scoped.embed_scope==64,'only a public node/account scope crosses the frame boundary')
+check(manager.state('fixture-owner').embed_scope==scoped.embed_scope and manager.state('different-owner').embed_scope~=scoped.embed_scope,'frame scope is stable for reload recovery and distinct per account')
+check(scoped.providers[2].embed_url=='http://127.0.0.1:8801/embed/go','only dedicated vault-owned Go document is advertised, not a node secret endpoint')
 env.WASM_AGENT_OPENCODE_GO_VAULT_URL='native';env.WASM_AGENT_LLM_API_KEY='';env.OPENCODE_GO_API_KEY='synthetic-lower-alias'
 check(manager.state().providers[2].configured==false,'empty effective highest-precedence key is unconfigured, without silently adopting a lower alias')
 env.WASM_AGENT_OPENCODE_GO_VAULT_URL='http://127.0.0.1:9';env.WASM_AGENT_LLM_API_KEY='synthetic-legacy';env.OPENCODE_GO_API_KEY=nil

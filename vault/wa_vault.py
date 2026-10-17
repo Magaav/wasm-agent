@@ -186,6 +186,10 @@ def public_status(store, operator=False):
                   "generation": item.get("generation", "legacy" if configured(store, provider) else "absent")}
         if operator:
             status["operation"] = item.get("operation")
+        if provider == 'opencode-go':
+            # Opaque current-write receipt, not credential-derived; lets the parent verify a
+            # frame result against the effective broker rather than trusting postMessage.
+            status['operation'] = item.get('operation')
         if provider == "openai-sub":
             status["account"] = item.get("account_id")
             status["expires"] = item.get("expires")
@@ -676,6 +680,94 @@ class ProxyHandler(Handler):
 PAGE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "page")
 
 
+def embed_parent_origin():
+    """One explicit parent, never a wildcard/CORS permission. Invalid configuration disables embedding."""
+    value = os.environ.get('WA_VAULT_EMBED_PARENT_ORIGIN', '')
+    parsed = urllib.parse.urlsplit(value)
+    if (not value or parsed.username or parsed.password or parsed.query or parsed.fragment
+            or parsed.path or not parsed.hostname or value.endswith('/')
+            or parsed.scheme not in ('http', 'https')
+            or (parsed.scheme == 'http' and parsed.hostname not in ('127.0.0.1', 'localhost', '::1'))
+            or any(c.isspace() for c in value) or '*' in value):
+        return None
+    try:
+        parsed.port
+    except ValueError:
+        return None
+    return value
+
+
+def embedded_go(action, payload):
+    """Operator-only durable Go operation ledger. Never stores a proposed key before commit.
+
+    Prepared operations fence late sends after close/reload/cancel. A save is not replayable;
+    status reconciles its exact historical operation+generation, including after supersession.
+    """
+    parent = embed_parent_origin()
+    if not parent:
+        raise VaultError(503, 'vault_embed_unconfigured', 'exact operator parent origin is not configured')
+    scope = payload.get('scope')
+    operation = payload.get('operation')
+    if not isinstance(scope, str) or len(scope) != 64 or any(c not in '0123456789abcdef' for c in scope):
+        raise VaultError(400, 'vault_embed_scope', 'public node/account scope required')
+    if action != 'state':
+        try:
+            valid = isinstance(operation, str) and str(uuid.UUID(operation)) == operation and uuid.UUID(operation).version == 4
+        except (ValueError, AttributeError):
+            valid = False
+        if not valid:
+            raise VaultError(400, 'bad_operation', 'canonical UUIDv4 operation required')
+    with _store_lock:
+        store = read_store()
+        if payload.get('expected_vault_id') != store.get('_vault_id'):
+            raise VaultError(409, 'vault_instance_changed', 'vault identity changed; no write sent')
+        operations = store.setdefault('_go_operations', {})
+        item = operations.get(operation)
+        if item and (item.get('scope') != scope or item.get('parent') != parent):
+            raise VaultError(409, 'vault_operation_scope', 'operation belongs to another scope')
+        current = public_status(store)['opencode-go']
+        if action == 'prepare':
+            if not item:
+                if any(r.get('scope') == scope and r.get('parent') == parent and r.get('state') == 'prepared' for r in operations.values()):
+                    raise VaultError(409, 'vault_operation_held', 'reconcile or explicitly cancel the pending operation first')
+                if len(operations) >= 1024:
+                    raise VaultError(409, 'vault_operation_history_full', 'operator operation history requires review; no evidence deleted')
+                if payload.get('expected_generation') != current['generation']:
+                    raise VaultError(409, 'vault_stale_generation', 'credential changed; read status before saving')
+                operations[operation] = {'operation': operation, 'scope': scope, 'parent': parent,
+                    'state': 'prepared', 'expected_generation': current['generation'], 'at': now_ms()}
+                write_store(store)
+        elif action == 'save':
+            if not item or item.get('state') != 'prepared':
+                raise VaultError(409, 'vault_operation_replay', 'save not admitted; reconcile, never resend a credential write')
+            key = payload.get('key')
+            if not isinstance(key, str) or not key.strip() or len(key) > 4096 or any(c.isspace() for c in key.strip()):
+                raise VaultError(400, 'bad_key', 'one nonempty key required')
+            if item['expected_generation'] != current['generation']:
+                item['state'] = 'refused'
+                write_store(store)
+                raise VaultError(409, 'vault_stale_generation', 'credential changed; this operation is refused')
+            generation = str(uuid.uuid4())
+            store['opencode-go'] = {'key': key.strip(), 'set_at': now_ms(),
+                'enabled': entry(store, 'opencode-go').get('enabled', True), 'generation': generation, 'operation': operation}
+            item.update(state='committed', generation=generation)
+            write_store(store)
+            log('opencode-go embedded credential committed')
+        elif action == 'cancel':
+            if not item:
+                raise VaultError(409, 'vault_operation_absent', 'no prepared operation; read status')
+            if item.get('state') == 'prepared':
+                item['state'] = 'cancelled'
+                write_store(store)
+        elif action != 'state':
+            raise VaultError(404, 'vault_no_route', 'unsupported embedded operation')
+        current = public_status(store)['opencode-go']
+        rows = [{k: r[k] for k in ('operation', 'state', 'expected_generation', 'generation', 'at') if k in r}
+            for r in operations.values() if r.get('scope') == scope and r.get('parent') == parent]
+        return {'vault_id': store.get('_vault_id'), 'scope': scope, 'provider': 'opencode-go',
+            'entry': current, 'operations': sorted(rows, key=lambda r: r['at'])}
+
+
 class AdminHandler(Handler):
     def authorized(self):
         supplied = self.headers.get("X-Vault-Token") or ""
@@ -686,7 +778,7 @@ class AdminHandler(Handler):
         expected_origin = os.environ.get("WA_VAULT_ADMIN_ORIGIN", "http://127.0.0.1:" + str(self.server.server_port))
         return (not origin or origin == expected_origin) and bool(ADMIN_TOKEN) and hmac.compare_digest(supplied.encode(), ADMIN_TOKEN.encode())
 
-    def static(self, name, content_type):
+    def static(self, name, content_type, embedded=False):
         try:
             with open(os.path.join(PAGE_DIR, name), "rb") as handle:
                 body = handle.read()
@@ -698,9 +790,12 @@ class AdminHandler(Handler):
         self.send_header("Cache-Control", "no-store")
         # The page is the only thing that ever holds the admin token; keep it from being framed or
         # from loading anything it did not ship with.
-        self.send_header("Content-Security-Policy",
-                         "default-src 'self'; style-src 'self' 'unsafe-inline'; frame-ancestors 'none'")
-        self.send_header("X-Frame-Options", "DENY")
+        if embedded:
+            self.send_header('Content-Security-Policy', "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; base-uri 'none'; object-src 'none'; form-action 'none'; frame-ancestors " + embed_parent_origin())
+            self.send_header('Permissions-Policy', 'camera=(), microphone=(), geolocation=(), clipboard-read=(), clipboard-write=()')
+        else:
+            self.send_header("Content-Security-Policy", "default-src 'self'; style-src 'self' 'unsafe-inline'; frame-ancestors 'none'")
+            self.send_header("X-Frame-Options", "DENY")
         self.send_header("Referrer-Policy", "no-referrer")
         self.end_headers()
         self.wfile.write(body)
@@ -715,6 +810,18 @@ class AdminHandler(Handler):
             return self.static("manifest.webmanifest", "application/manifest+json")
         if path == "/icon.svg":
             return self.static("icon.svg", "image/svg+xml")
+        if path == '/embed/go':
+            if not embed_parent_origin():
+                return self.send_error_json(503, 'vault_embed_unconfigured', 'exact parent origin required')
+            return self.static('embed-go.html', 'text/html; charset=utf-8', embedded=True)
+        if path == '/embed-go.js':
+            return self.static('embed-go.js', 'text/javascript; charset=utf-8')
+        if path == '/embed-go.css':
+            return self.static('embed-go.css', 'text/css; charset=utf-8')
+        if path == '/embed/config':
+            if not embed_parent_origin():
+                return self.send_error_json(503, 'vault_embed_unconfigured', 'exact parent origin required')
+            return self.send_json(200, {'vault_id': read_store().get('_vault_id'), 'parent_origin': embed_parent_origin()})
         if path == '/identity':
             return self.send_json(200, {'vault_id':read_store().get('_vault_id')})
         if not path.startswith("/api/"):
@@ -753,6 +860,10 @@ class AdminHandler(Handler):
         if payload.get('expected_vault_id') is not None and payload['expected_vault_id'] != read_store().get('_vault_id'):
             return self.send_error_json(409, 'vault_instance_changed', 'operator vault instance changed; no write sent')
         try:
+            if path.startswith('/api/embed/go/') and method == 'POST':
+                if self.path != path:
+                    raise VaultError(400, 'vault_embed_query', 'query parameters are not accepted')
+                return self.send_json(200, embedded_go(path.rsplit('/', 1)[-1], payload))
             if path == "/api/opencode-go/key" and method == "POST":
                 set_opencode_key(payload.get("key"), expected=payload.get("expected_generation"), operation=payload.get("operation"))
             elif path == "/api/opencode-go/key" and method == "DELETE":

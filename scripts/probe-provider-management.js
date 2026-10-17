@@ -17,7 +17,7 @@
   check(panel.querySelectorAll('section').length===2,'only two supported routes');
   check(panel.textContent.includes('same exhausted workspace'),'monthly quota truthful');
   check(panel.querySelector('input')===null,'no chat-origin credential input');
-  const link=panel.querySelector('a');check(link.rel.includes('noopener')&&link.href==='http://127.0.0.1:8801/','separate enrolled operator surface');
+  check(!!panel.entry&&!panel.entry.frame&&panel.textContent.includes('Inline key box setup required'),'missing bound route offers truthful setup state, not a parent-owned secret input');
   check(calls.length===1&&selections===0,'opening has no inference or account/selection side effect');
   const click=(action,id)=>panel.dispatchEvent(new CustomEvent('provider-action',{detail:{action,id}}));
   click('begin','openai-sub');await tick();check(calls.length===1,'cancel confirmation sends nothing');

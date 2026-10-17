@@ -1,5 +1,8 @@
 /* wasm-agent UI. Spacing follows DESIGN.md §4: a 5px scale, 5px inner padding
    minimum, 0/5px gaps. Use the tokens, not literals. */
+wa-vault-entry { display:block; width:100%; }
+wa-vault-entry iframe { display:block; width:100%; height:380px; border:1px solid var(--line); border-radius:var(--radius); background:var(--panel); }
+wa-vault-entry p { overflow-wrap:anywhere; }
 wa-provider-manager { display:block; width:100%; max-height:60vh; overflow:auto; padding:var(--pad); background:var(--panel); color:var(--text); }
 wa-balloon.popover.provider-manager-balloon { max-height:65vh; }
 wa-provider-manager button { font:inherit; color:var(--text); background:var(--panel-2); border:1px solid var(--line); border-radius:var(--radius); padding:var(--space); }
