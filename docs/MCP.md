@@ -93,6 +93,14 @@ absence, browser/raw/backend fallback or generic owned-MCP send registration.
 Trusted event/profile scope, approvals, precedence, reservations and verification
 remain in the existing Lua boundary. Read-only profiles ship disabled/unapproved.
 
+The bounded optional `list_chats.refresh_names:true` enrichment (unfiltered max32
+observed rows/max3 group queries), SDK PN/LID label provenance and safe aggregate
+hold/name coverage are specified in [WHATSAPP-COVERAGE.md](WHATSAPP-COVERAGE.md).
+No new registered tool or profile grant is implied. The verified operator route may
+execute this same CLI/MCP on server through an already authorized native peer;
+credentials remain server-local. A local generic registry or exposed HTTPS port is
+not required by that route. Versioned refresh reports refuse old unsupported servers.
+
 The read adapter also supports observed-name/identifier `list_chats.query`,
 `read_snapshot.conversation_id` narrowing, body/transcript `query` and inclusive
 source-time `sent_since`/`until`. Exact ID disambiguation, partial coverage and

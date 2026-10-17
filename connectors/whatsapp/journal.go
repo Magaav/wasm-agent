@@ -46,6 +46,8 @@ type Message struct {
 	AudioReason      string `json:"audio_reason,omitempty"`
 	Cursor           int64  `json:"cursor"`
 	Observed         int64  `json:"observed_at"`
+	SenderAlt        string `json:"-"`
+	ScopeProof       string `json:"-"`
 	Mutation         string `json:"-"`
 	Target           string `json:"-"`
 	MutationScope    bool   `json:"-"`
@@ -64,6 +66,8 @@ type Journal struct {
 	adapterLive    bool
 	pairingBlocked bool
 	identityMu     sync.Mutex
+	namesMu        sync.Mutex
+	metadata       metadataReader
 	dir            string
 	effectMu       sync.Mutex
 	gap            bool
@@ -109,6 +113,11 @@ func openJournal(dir string) (*Journal, error) {
  CREATE TABLE IF NOT EXISTS messages(account TEXT NOT NULL,generation INTEGER NOT NULL,chat TEXT NOT NULL,id TEXT NOT NULL,sender TEXT NOT NULL,body TEXT NOT NULL,sent INTEGER NOT NULL,observed INTEGER NOT NULL,own INTEGER NOT NULL,history INTEGER NOT NULL,audio INTEGER NOT NULL,unsupported TEXT NOT NULL,raw BLOB,PRIMARY KEY(account,generation,chat,id));
  CREATE TABLE IF NOT EXISTS audio(account TEXT NOT NULL,generation INTEGER NOT NULL,chat TEXT NOT NULL,id TEXT NOT NULL,state TEXT NOT NULL,reason TEXT NOT NULL DEFAULT '',transcript TEXT NOT NULL DEFAULT '',language TEXT NOT NULL,next_attempt INTEGER NOT NULL DEFAULT 0,attempts INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(account,generation,chat,id));
  CREATE TABLE IF NOT EXISTS outbox(account TEXT NOT NULL,generation INTEGER NOT NULL,chat TEXT NOT NULL,source TEXT NOT NULL,part INTEGER NOT NULL,body TEXT NOT NULL,send_id TEXT NOT NULL,state TEXT NOT NULL,ack TEXT NOT NULL DEFAULT '',PRIMARY KEY(account,generation,chat,source,part),UNIQUE(account,generation,chat,send_id));
+ CREATE TABLE IF NOT EXISTS name_refresh(account TEXT,generation INTEGER,value TEXT NOT NULL,PRIMARY KEY(account,generation));
+ CREATE TABLE IF NOT EXISTS source_authors(account TEXT,generation INTEGER,chat TEXT,id TEXT,sender TEXT,own INTEGER,alt TEXT,ambiguous INTEGER NOT NULL DEFAULT 0,provenance TEXT,PRIMARY KEY(account,generation,chat,id));
+ CREATE TABLE IF NOT EXISTS hold_origins(account TEXT,generation INTEGER,chat TEXT,diagnostic_version INTEGER,PRIMARY KEY(account,generation,chat));
+ CREATE TABLE IF NOT EXISTS mutation_evidence(seq INTEGER PRIMARY KEY AUTOINCREMENT,account TEXT,generation INTEGER,chat TEXT,target TEXT,sender TEXT,sender_alt TEXT,own INTEGER,kind TEXT,scope_proof TEXT,author_proof TEXT,stage TEXT,decision TEXT,at INTEGER);
+ CREATE TABLE IF NOT EXISTS mutation_diagnostics(account TEXT,generation INTEGER,chat TEXT,stage TEXT,scope_proof TEXT,author_proof TEXT,decision TEXT,n INTEGER NOT NULL,PRIMARY KEY(account,generation,chat,stage,scope_proof,author_proof,decision));
  CREATE TABLE IF NOT EXISTS lifecycle(slot TEXT PRIMARY KEY,value TEXT NOT NULL);
  CREATE TABLE IF NOT EXISTS events(seq INTEGER PRIMARY KEY AUTOINCREMENT,kind TEXT NOT NULL,at INTEGER NOT NULL,detail TEXT NOT NULL);
  CREATE TABLE IF NOT EXISTS chats(account TEXT,generation INTEGER,chat TEXT,PRIMARY KEY(account,generation,chat));
@@ -293,16 +302,23 @@ func (j *Journal) status() (map[string]any, error) {
 	if err = j.db.QueryRow("SELECT count(*) FROM excluded WHERE account=? AND generation=?", c.Account, c.Generation).Scan(&excluded); err != nil {
 		return nil, err
 	}
+	coverage, err := j.coverage(c)
+	if err != nil {
+		return nil, err
+	}
 	observation, err := j.sessionObservation()
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"session_observation": observation, "ok": true, "excluded_scope_count": excluded, "source_state": j.freshness(), "snapshot_at": time.Now().Unix(), "last_journal_observed_at": lastObserved, "config": c, "connection": s, "audio": counts, "unknown_sends": unknown, "draft_visibility": "unsupported", "history_coverage": "partial; upstream history and redelivery are not guaranteed", "edit_delete_receipt_coverage": "events retained; no full message-state reconstruction", "translation": "unsupported; original-language recognition only"}, nil
+	return map[string]any{"coverage_status": coverage, "session_observation": observation, "ok": true, "excluded_scope_count": excluded, "source_state": j.freshness(), "snapshot_at": time.Now().Unix(), "last_journal_observed_at": lastObserved, "config": c, "connection": s, "audio": counts, "unknown_sends": unknown, "draft_visibility": "unsupported", "history_coverage": "partial; upstream history and redelivery are not guaranteed", "edit_delete_receipt_coverage": "events retained; no full message-state reconstruction", "translation": "unsupported; original-language recognition only"}, nil
 }
 func (j *Journal) ingest(m Message) error {
 	c, err := j.Config()
 	if err != nil {
 		return err
+	}
+	if m.OriginAccount != "" && (m.OriginAccount != c.Account || m.OriginGeneration != c.Generation) {
+		return errors.New("source_generation_changed")
 	}
 	if !validChat(m.Chat) {
 		return j.exclude(c, m, "unsupported_chat_scope")
@@ -321,6 +337,9 @@ func (j *Journal) ingest(m Message) error {
 		return err
 	}
 	defer tx.Rollback()
+	if err = storeSourceAuthor(tx, c, m, "journal_source"); err != nil {
+		return err
+	}
 	r, err := tx.Exec(`INSERT OR IGNORE INTO messages VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`, c.Account, c.Generation, m.Chat, m.ID, m.Sender, m.Body, m.Sent, time.Now().Unix(), m.Own, m.History, m.Audio, m.Unsupported, m.Raw)
 	if err != nil {
 		return err

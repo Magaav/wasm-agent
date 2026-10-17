@@ -82,13 +82,11 @@ func (j *Journal) mutate(c Config, m Message) error {
 	if _, err = tx.Exec("INSERT OR IGNORE INTO chats(account,generation,chat) VALUES(?,?,?)", c.Account, c.Generation, m.Chat); err != nil {
 		return err
 	}
-	var sender string
-	var own bool
-	err = tx.QueryRow("SELECT sender,own FROM messages WHERE account=? AND generation=? AND chat=? AND id=?", c.Account, c.Generation, m.Chat, m.Target).Scan(&sender, &own)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+	verified, authorProof, err := mutationProof(tx, c, m)
+	if err != nil {
 		return err
 	}
-	verified := m.Target != "" && len(m.Target) <= 256 && m.MutationScope && (m.OwnerMutation || (err == nil && ((m.Own && own) || (!own && !m.Own && sender == m.Sender))))
+	newHold := false
 	reason := "unproven_mutation_chat_hold"
 	if m.OwnerMutation && m.Target == "" {
 		reason = "owner_chat_clear_hold"
@@ -97,9 +95,21 @@ func (j *Journal) mutate(c Config, m Message) error {
 		reason = "verified_source_" + m.Mutation
 		_, err = tx.Exec("INSERT OR IGNORE INTO source_blocks VALUES(?,?,?,?,?)", c.Account, c.Generation, m.Chat, m.Target, reason)
 	} else {
-		_, err = tx.Exec("INSERT OR IGNORE INTO chat_holds VALUES(?,?,?,?)", c.Account, c.Generation, m.Chat, reason)
+		var result sql.Result
+		result, err = tx.Exec("INSERT OR IGNORE INTO chat_holds VALUES(?,?,?,?)", c.Account, c.Generation, m.Chat, reason)
+		if err == nil {
+			n, _ := result.RowsAffected()
+			newHold = n == 1
+		}
 	}
 	if err != nil {
+		return err
+	}
+	decision := "source_block"
+	if !verified {
+		decision = "chat_hold"
+	}
+	if err = recordMutationProof(tx, c, m, authorProof, decision, newHold); err != nil {
 		return err
 	}
 	target := m.Target

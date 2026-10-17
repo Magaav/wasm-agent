@@ -1,5 +1,9 @@
 # WhatsApp linked-device connector (source-ready; live acceptance pending)
 
+Current dated coordinator-reported live activation/read bridge, bounded name refresh
+and unresolved mutation-hold coverage: [WHATSAPP-COVERAGE.md](WHATSAPP-COVERAGE.md).
+Authenticated transport/readiness does not certify fully named or unheld history.
+
 Current lifecycle investigation/status meanings and no-replay recovery:
 [WHATSAPP-LIFECYCLE.md](WHATSAPP-LIFECYCLE.md). Local pairing is not authenticated
 login; the original live failure's upstream reason remains unverified.

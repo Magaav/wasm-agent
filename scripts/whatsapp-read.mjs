@@ -2,7 +2,7 @@
 import {callApp,readBinding} from './whatsapp-mcp-client.mjs';
 const args=process.argv.slice(2);
 const values=new Set(['--profile-file','--row','--resource','--field','--version','--offset','--length','--since','--sent-since','--until','--before','--limit','--chat','--query']);
-const flags=new Set(['--list-chats']);
+const flags=new Set(['--list-chats','--refresh-names']);
 if(args.some(a=>['--raw-store','--mcp-backend','--port','--expect-browser-endpoint'].includes(a))){console.log(JSON.stringify({ok:false,error:'browser_whatsapp_retired'}));process.exit(1);}
 try {
  const opts={};
@@ -15,8 +15,9 @@ try {
  const field=opts['--row']!==undefined;
  const method=field?'read_field':opts['--list-chats']?'list_chats':'read_snapshot';
  const request=field?{resource:opts['--resource']||'read_snapshot',row:Number(opts['--row']),field:opts['--field'],version:opts['--version'],offset:Number(opts['--offset']||0),length:Number(opts['--length']||16384)}:
-  {before:Number(opts['--before']||0),limit:Number(opts['--limit']||200),...(opts['--query']!==undefined?{query:opts['--query']}:{}),...(method==='read_snapshot'?{since:Number(opts['--since']||0),sent_since:Number(opts['--sent-since']||0),until:Number(opts['--until']||0),...(opts['--chat']?{conversation_id:opts['--chat']}:{})}:{})};
- if(opts['--chat']&&method!=='read_snapshot')throw Error('chat_requires_snapshot');
+  {before:Number(opts['--before']||0),limit:Number(opts['--limit']||(opts['--refresh-names']?32:200)),...(opts['--refresh-names']?{refresh_names:true}:{}),...(opts['--chat']?{conversation_id:opts['--chat']}:{}),...(opts['--query']!==undefined?{query:opts['--query']}:{}),...(method==='read_snapshot'?{since:Number(opts['--since']||0),sent_since:Number(opts['--sent-since']||0),until:Number(opts['--until']||0)}:{})};
+ if(opts['--chat']&&!['read_snapshot','list_chats'].includes(method))throw Error('chat_requires_context_page');
+ if(opts['--refresh-names']&&method!=='list_chats')throw Error('refresh_requires_list_chats');
  const data=await callApp(method,request,readBinding({profile_file:opts['--profile-file']}));
  // Preserve wire order/cursors verbatim; this small index provides chronological
  // presentation of inline rows in this bounded page, not all-history ordering.

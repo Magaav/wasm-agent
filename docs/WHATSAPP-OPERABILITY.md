@@ -1,5 +1,14 @@
 # WhatsApp operator journey: source delivery and live acceptance
 
+**2026-10-17 update:** coordinator reports the existing account already authenticated,
+PT/all-chats enabled and NEW eligible transcript posting activated. The working
+on-demand route keeps the private profile/token on SERVER and uses the existing
+approved native peer → server CLI/MCP → loopback path; no local registry/HTTPS setup
+was needed. See [current coverage/handoff](WHATSAPP-COVERAGE.md). The initial setup
+sequence below is reference/new-install material, NOT a request to re-pair, repeat
+retirement/activation or interrupt the running service while real samples arrive.
+36 historical holds remain unresolved; full audio/latency/coverage acceptance is pending.
+
 For the reconciled first live setup failure, exact pairing/authentication/status
 meanings and HUMAN-only phase-specific recovery, follow
 [WHATSAPP-LIFECYCLE.md](WHATSAPP-LIFECYCLE.md). Do not replay the original setup or

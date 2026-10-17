@@ -18,6 +18,7 @@ type readRequest struct {
 	Before        int64    `json:"before"`
 	Until         int64    `json:"until"`
 	Query         string   `json:"query"`
+	RefreshNames  bool     `json:"refresh_names"`
 	Conversations []string `json:"conversations"`
 	AccountWide   bool     `json:"account_wide"`
 	Resource      string   `json:"resource"`
@@ -104,8 +105,8 @@ func (j *Journal) readPageBudget(c Config, r readRequest, kind string, budget in
 		where += " AND (?=0 OR m.sent>=?) AND (?=0 OR m.sent<=?) AND (?='' OR instr(lower(m.body),lower(?))>0 OR instr(lower(COALESCE(a.transcript,'')),lower(?))>0)"
 		args = append(args, r.SentSince, r.SentSince, r.Until, r.Until, r.Query, r.Query, r.Query)
 	} else if kind == "list_chats" {
-		where += " AND (?='' OR instr(lower(m.chat),lower(?))>0 OR instr(lower(m.title),lower(?))>0)"
-		args = append(args, r.Query, r.Query, r.Query)
+		where += " AND (?='' OR instr(lower(m.chat),lower(?))>0 OR instr(lower(m.title),lower(?))>0 OR instr(lower(m.metadata_title),lower(?))>0)"
+		args = append(args, r.Query, r.Query, r.Query, r.Query)
 	}
 	where += " AND (?=0 OR m.rowid<?)"
 	args = append(args, r.Before, r.Before, limit+1)
@@ -238,6 +239,9 @@ func (j *Journal) readPageBudget(c Config, r readRequest, kind string, budget in
 			return nil, err
 		}
 		data["excluded_scope_count"] = excluded
+	}
+	if kind == "list_chats" {
+		data["names_version"] = 1
 	}
 	// Final HTTP encoding remains below the fixed budget, with no additional content fetch.
 	return data, nil
