@@ -1,0 +1,495 @@
+{
+  "schema": 1,
+  "target": "CPython3.12.3 Linux aarch64 glibc>=2.28",
+  "engine": "faster-whisper==1.2.1",
+  "recognition": "unchanged small CPU/int8 original-language transcribe; EN default/PT explicit",
+  "verification": "official PyPI hashes, wheel tags, target Requires-Python/Requires-Dist closure and ELF machine/DT_NEEDED static inspection only; no downloaded code executed; real host libraries/model/runtime unverified",
+  "dependency_edges": [
+    {
+      "from": "faster-whisper",
+      "requirement": "ctranslate2<5,>=4.0",
+      "to": "ctranslate2"
+    },
+    {
+      "from": "faster-whisper",
+      "requirement": "huggingface-hub>=0.21",
+      "to": "huggingface-hub"
+    },
+    {
+      "from": "faster-whisper",
+      "requirement": "tokenizers<1,>=0.13",
+      "to": "tokenizers"
+    },
+    {
+      "from": "faster-whisper",
+      "requirement": "onnxruntime<2,>=1.14",
+      "to": "onnxruntime"
+    },
+    {
+      "from": "faster-whisper",
+      "requirement": "av>=11",
+      "to": "av"
+    },
+    {
+      "from": "faster-whisper",
+      "requirement": "tqdm",
+      "to": "tqdm"
+    },
+    {
+      "from": "ctranslate2",
+      "requirement": "numpy",
+      "to": "numpy"
+    },
+    {
+      "from": "ctranslate2",
+      "requirement": "pyyaml<7,>=5.3",
+      "to": "pyyaml"
+    },
+    {
+      "from": "huggingface-hub",
+      "requirement": "click<9.0.0,>=8.4.2",
+      "to": "click"
+    },
+    {
+      "from": "huggingface-hub",
+      "requirement": "filelock>=3.10.0",
+      "to": "filelock"
+    },
+    {
+      "from": "huggingface-hub",
+      "requirement": "fsspec>=2023.5.0",
+      "to": "fsspec"
+    },
+    {
+      "from": "huggingface-hub",
+      "requirement": "hf-xet<2.0.0,>=1.6.0; platform_machine == \"x86_64\" or platform_machine == \"amd64\" or platform_machine == \"AMD64\" or platform_machine == \"arm64\" or platform_machine == \"ARM64\" or platform_machine == \"aarch64\"",
+      "to": "hf-xet"
+    },
+    {
+      "from": "huggingface-hub",
+      "requirement": "httpx2<3,>=2.0.0",
+      "to": "httpx2"
+    },
+    {
+      "from": "huggingface-hub",
+      "requirement": "packaging>=20.9",
+      "to": "packaging"
+    },
+    {
+      "from": "huggingface-hub",
+      "requirement": "pyyaml>=5.1",
+      "to": "pyyaml"
+    },
+    {
+      "from": "huggingface-hub",
+      "requirement": "tqdm>=4.42.1",
+      "to": "tqdm"
+    },
+    {
+      "from": "huggingface-hub",
+      "requirement": "typing-extensions>=4.1.0",
+      "to": "typing-extensions"
+    },
+    {
+      "from": "tokenizers",
+      "requirement": "huggingface-hub<3.0,>=0.16.4",
+      "to": "huggingface-hub"
+    },
+    {
+      "from": "onnxruntime",
+      "requirement": "flatbuffers",
+      "to": "flatbuffers"
+    },
+    {
+      "from": "onnxruntime",
+      "requirement": "numpy>=1.21.6",
+      "to": "numpy"
+    },
+    {
+      "from": "onnxruntime",
+      "requirement": "packaging",
+      "to": "packaging"
+    },
+    {
+      "from": "onnxruntime",
+      "requirement": "protobuf>=4.25.8",
+      "to": "protobuf"
+    },
+    {
+      "from": "httpx2",
+      "requirement": "anyio>=4.10; sys_platform != \"emscripten\"",
+      "to": "anyio"
+    },
+    {
+      "from": "httpx2",
+      "requirement": "httpcore2==2.13.1; sys_platform != \"emscripten\"",
+      "to": "httpcore2"
+    },
+    {
+      "from": "httpx2",
+      "requirement": "idna>=3.18",
+      "to": "idna"
+    },
+    {
+      "from": "httpx2",
+      "requirement": "truststore>=0.10; sys_platform != \"emscripten\"",
+      "to": "truststore"
+    },
+    {
+      "from": "httpx2",
+      "requirement": "typing-extensions>=4.5.0; python_version < \"3.13\"",
+      "to": "typing-extensions"
+    },
+    {
+      "from": "anyio",
+      "requirement": "idna>=2.8",
+      "to": "idna"
+    },
+    {
+      "from": "anyio",
+      "requirement": "typing_extensions>=4.16.0; python_version < \"3.15\"",
+      "to": "typing-extensions"
+    },
+    {
+      "from": "httpcore2",
+      "requirement": "h11>=0.16",
+      "to": "h11"
+    },
+    {
+      "from": "httpcore2",
+      "requirement": "truststore>=0.10",
+      "to": "truststore"
+    }
+  ],
+  "excluded_host_only_packages": [
+    "colorama"
+  ],
+  "native_runtime": {
+    "inspection": "ELF64 aarch64, DT_NEEDED and conservative version-tag strings; NOT a loader/import/runtime test",
+    "external_sonames": [
+      "ld-linux-aarch64.so.1",
+      "libc.so.6",
+      "libdl.so.2",
+      "libgcc_s.so.1",
+      "libm.so.6",
+      "libpthread.so.0",
+      "librt.so.1",
+      "libstdc++.so.6",
+      "libz.so.1"
+    ],
+    "maximum_version_tag_strings": {
+      "GLIBC": "2.28",
+      "GLIBCXX": "3.4.22",
+      "CXXABI": "1.3.11"
+    },
+    "host_requirement": "Coordinator must verify glibc>=2.28 and listed sonames/version tags, then pip check, imports and offline model --check on actual host before service activation."
+  },
+  "detailed_audit_sha256": "9d1ecc3448d93724585ef011b7ed9bc1875e47ce6f04846bfd4437fb3d16086c",
+  "packages": [
+    {
+      "name": "anyio",
+      "version": "4.15.1",
+      "filename": "anyio-4.15.1-py3-none-any.whl",
+      "sha256": "6152fdbbf9a77fdec97731721bebf7c4c44f7c29b424b0065826173efc7ed101",
+      "url": "https://files.pythonhosted.org/packages/12/b8/4bd346e22b28902df4d651910f5242c28d84e4a5c2435ca5c3f797ed7e2e/anyio-4.15.1-py3-none-any.whl",
+      "requires_python": ">=3.10",
+      "wheel_tags": [
+        "py3-none-any"
+      ],
+      "native_member_count": 0,
+      "elf_machine": null
+    },
+    {
+      "name": "av",
+      "version": "19.0.1",
+      "filename": "av-19.0.1-cp312-abi3-manylinux_2_28_aarch64.whl",
+      "sha256": "437d4c0d5a7d771f2c3af84cd28e6aac6e173851116c60b53e81dbf1eebe4eab",
+      "url": "https://files.pythonhosted.org/packages/10/4b/61f138fcf21e7bb50655ed21dd7fdc7a296baf72ea3c7ad8e89cb00b69c1/av-19.0.1-cp312-abi3-manylinux_2_28_aarch64.whl",
+      "requires_python": ">=3.12",
+      "wheel_tags": [
+        "cp312-abi3-manylinux_2_28_aarch64"
+      ],
+      "native_member_count": 79,
+      "elf_machine": 183
+    },
+    {
+      "name": "click",
+      "version": "8.5.0",
+      "filename": "click-8.5.0-py3-none-any.whl",
+      "sha256": "255bc9599cf7748b4b1a446ccc735421bd08a2ae529a8b88597d3de5664ee360",
+      "url": "https://files.pythonhosted.org/packages/58/50/6c0d534c5f134586a8e1ba4e330569e32f057e33372ae556463212fb4cd3/click-8.5.0-py3-none-any.whl",
+      "requires_python": ">=3.10",
+      "wheel_tags": [
+        "py3-none-any"
+      ],
+      "native_member_count": 0,
+      "elf_machine": null
+    },
+    {
+      "name": "ctranslate2",
+      "version": "4.8.3",
+      "filename": "ctranslate2-4.8.3-cp312-cp312-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl",
+      "sha256": "1b9ff80ed67ce7974cb0eafdf7ad79407678b5bea70db934c0d20aaa9db57964",
+      "url": "https://files.pythonhosted.org/packages/68/99/e08d28c28d45102c589fec3780a4410fe57d9e59a0839ad7f79dbc508cfb/ctranslate2-4.8.3-cp312-cp312-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl",
+      "requires_python": ">=3.9",
+      "wheel_tags": [
+        "cp312-cp312-manylinux_2_27_aarch64",
+        "cp312-cp312-manylinux_2_28_aarch64"
+      ],
+      "native_member_count": 3,
+      "elf_machine": 183
+    },
+    {
+      "name": "faster-whisper",
+      "version": "1.2.1",
+      "filename": "faster_whisper-1.2.1-py3-none-any.whl",
+      "sha256": "79a66ad50688c0b794dd501dc340a736992a6342f7f95e5811be60b5224a26a7",
+      "url": "https://files.pythonhosted.org/packages/05/99/49ee85903dee060d9f08297b4a342e5e0bcfca2f027a07b4ee0a38ab13f9/faster_whisper-1.2.1-py3-none-any.whl",
+      "requires_python": ">=3.9",
+      "wheel_tags": [
+        "py3-none-any"
+      ],
+      "native_member_count": 0,
+      "elf_machine": null
+    },
+    {
+      "name": "filelock",
+      "version": "4.2.0",
+      "filename": "filelock-4.2.0-py3-none-any.whl",
+      "sha256": "2ff5690882e8cdb00ef31fb3d01a3094c29f30985426c59495afb1733f3b7238",
+      "url": "https://files.pythonhosted.org/packages/8e/a3/9bc26acff301fe1aaea1cc3d82a1d57e0a34df3e1cadbfa91ac2dbcdde5c/filelock-4.2.0-py3-none-any.whl",
+      "requires_python": ">=3.11",
+      "wheel_tags": [
+        "py3-none-any"
+      ],
+      "native_member_count": 0,
+      "elf_machine": null
+    },
+    {
+      "name": "flatbuffers",
+      "version": "25.12.19",
+      "filename": "flatbuffers-25.12.19-py2.py3-none-any.whl",
+      "sha256": "7634f50c427838bb021c2d66a3d1168e9d199b0607e6329399f04846d42e20b4",
+      "url": "https://files.pythonhosted.org/packages/e8/2d/d2a548598be01649e2d46231d151a6c56d10b964d94043a335ae56ea2d92/flatbuffers-25.12.19-py2.py3-none-any.whl",
+      "requires_python": "",
+      "wheel_tags": [
+        "py2-none-any",
+        "py3-none-any"
+      ],
+      "native_member_count": 0,
+      "elf_machine": null
+    },
+    {
+      "name": "fsspec",
+      "version": "2026.9.0",
+      "filename": "fsspec-2026.9.0-py3-none-any.whl",
+      "sha256": "8dd6e646e99ea382bd85f97a45e6b526a442d79423a7dc673f1e2756d05fcb5f",
+      "url": "https://files.pythonhosted.org/packages/6c/c0/a98505f18594f1bce828bb159cec0fcf9860562f1a2c85913409fc8f3d9e/fsspec-2026.9.0-py3-none-any.whl",
+      "requires_python": ">=3.10",
+      "wheel_tags": [
+        "py3-none-any"
+      ],
+      "native_member_count": 0,
+      "elf_machine": null
+    },
+    {
+      "name": "h11",
+      "version": "0.16.0",
+      "filename": "h11-0.16.0-py3-none-any.whl",
+      "sha256": "63cf8bbe7522de3bf65932fda1d9c2772064ffb3dae62d55932da54b31cb6c86",
+      "url": "https://files.pythonhosted.org/packages/04/4b/29cac41a4d98d144bf5f6d33995617b185d14b22401f75ca86f384e87ff1/h11-0.16.0-py3-none-any.whl",
+      "requires_python": ">=3.8",
+      "wheel_tags": [
+        "py3-none-any"
+      ],
+      "native_member_count": 0,
+      "elf_machine": null
+    },
+    {
+      "name": "hf-xet",
+      "version": "1.7.0",
+      "filename": "hf_xet-1.7.0-cp38-abi3-manylinux_2_28_aarch64.whl",
+      "sha256": "fcfd6c22418e57dd5b3aea649e813b2e2cfb2aebf317b210d90f1fe4b3018b52",
+      "url": "https://files.pythonhosted.org/packages/49/0c/a2f703a5a78267556e89e03316fa0805c86b72b50829bc67665746e8ebf0/hf_xet-1.7.0-cp38-abi3-manylinux_2_28_aarch64.whl",
+      "requires_python": ">=3.8",
+      "wheel_tags": [
+        "cp38-abi3-manylinux_2_28_aarch64"
+      ],
+      "native_member_count": 1,
+      "elf_machine": 183
+    },
+    {
+      "name": "httpcore2",
+      "version": "2.13.1",
+      "filename": "httpcore2-2.13.1-py3-none-any.whl",
+      "sha256": "e1e05d4f25f7d7d496bfb96748f6f4b67657b03da069b3a68c36069f3db73d0a",
+      "url": "https://files.pythonhosted.org/packages/09/ba/a4568248771ce81957bfb7cc600264a40fbcda092391ee1c415c50be4bea/httpcore2-2.13.1-py3-none-any.whl",
+      "requires_python": ">=3.10",
+      "wheel_tags": [
+        "py3-none-any"
+      ],
+      "native_member_count": 0,
+      "elf_machine": null
+    },
+    {
+      "name": "httpx2",
+      "version": "2.13.1",
+      "filename": "httpx2-2.13.1-py3-none-any.whl",
+      "sha256": "6dff50fabc270ee5fd25d845d0b078ed20564579744d6d962850975996d2f9a4",
+      "url": "https://files.pythonhosted.org/packages/d8/9c/6fe8931fd9f381042a9e4c7d5a7b4cbf7016b252bec0c99a49fce42c3326/httpx2-2.13.1-py3-none-any.whl",
+      "requires_python": ">=3.10",
+      "wheel_tags": [
+        "py3-none-any"
+      ],
+      "native_member_count": 0,
+      "elf_machine": null
+    },
+    {
+      "name": "huggingface_hub",
+      "version": "2.2.0",
+      "filename": "huggingface_hub-2.2.0-py3-none-any.whl",
+      "sha256": "1667f145dc56dc210d60966069397df9ecfca9607a5d43db88b308c89dae56b3",
+      "url": "https://files.pythonhosted.org/packages/eb/b0/0f7b430fd100b3a3b037fdbb314878200241082e607b3383c63d91a13a72/huggingface_hub-2.2.0-py3-none-any.whl",
+      "requires_python": ">=3.10.0",
+      "wheel_tags": [
+        "py3-none-any"
+      ],
+      "native_member_count": 0,
+      "elf_machine": null
+    },
+    {
+      "name": "idna",
+      "version": "3.20",
+      "filename": "idna-3.20-py3-none-any.whl",
+      "sha256": "ab7ae7122974553370f0bdb919e1a960b2cd1bc1ef0276416d896db81c14582c",
+      "url": "https://files.pythonhosted.org/packages/58/a2/bb081bab032533a855d44de1d56f8e8426114ff1ba5d1f07a438a0a654f8/idna-3.20-py3-none-any.whl",
+      "requires_python": ">=3.9",
+      "wheel_tags": [
+        "py3-none-any"
+      ],
+      "native_member_count": 0,
+      "elf_machine": null
+    },
+    {
+      "name": "numpy",
+      "version": "2.5.4",
+      "filename": "numpy-2.5.4-cp312-cp312-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl",
+      "sha256": "fe4d21ab149f15e4e6043dfb0de87e6e5f34ac176cde83060e9802981fca2ac2",
+      "url": "https://files.pythonhosted.org/packages/dc/96/8319e2457ae4333c62c815c7006b869a4f60985c1e01024c2f8c6c040fe5/numpy-2.5.4-cp312-cp312-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl",
+      "requires_python": ">=3.12",
+      "wheel_tags": [
+        "cp312-cp312-manylinux_2_27_aarch64",
+        "cp312-cp312-manylinux_2_28_aarch64"
+      ],
+      "native_member_count": 21,
+      "elf_machine": 183
+    },
+    {
+      "name": "onnxruntime",
+      "version": "1.31.0",
+      "filename": "onnxruntime-1.31.0-cp312-cp312-manylinux_2_28_aarch64.whl",
+      "sha256": "35758d7606d578ec5b9d65f6e8a1f488013194c3f6097038a3223cb26d35ef9a",
+      "url": "https://files.pythonhosted.org/packages/53/1a/561b43ca1536d9e81d1785bb8a1a260a9e314ef6d04976ba0411c652bda1/onnxruntime-1.31.0-cp312-cp312-manylinux_2_28_aarch64.whl",
+      "requires_python": ">=3.11",
+      "wheel_tags": [
+        "cp312-cp312-manylinux_2_28_aarch64"
+      ],
+      "native_member_count": 3,
+      "elf_machine": 183
+    },
+    {
+      "name": "packaging",
+      "version": "26.3",
+      "filename": "packaging-26.3-py3-none-any.whl",
+      "sha256": "d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c",
+      "url": "https://files.pythonhosted.org/packages/63/34/ba1c580383c9eada3711951fef0795c80b829a078d72188184bcab9dd527/packaging-26.3-py3-none-any.whl",
+      "requires_python": ">=3.9",
+      "wheel_tags": [
+        "py3-none-any"
+      ],
+      "native_member_count": 0,
+      "elf_machine": null
+    },
+    {
+      "name": "protobuf",
+      "version": "7.36.2",
+      "filename": "protobuf-7.36.2-cp310-abi3-manylinux2014_aarch64.whl",
+      "sha256": "e11e1f0180583a2af89db6a2ecd9e8dc40aa6d2988ca175bfd0e6d12ea72d74e",
+      "url": "https://files.pythonhosted.org/packages/b6/ea/91fdf7c2b8bbd49cde056f00a9df6773532987e1c00fe2830b895af95c7e/protobuf-7.36.2-cp310-abi3-manylinux2014_aarch64.whl",
+      "requires_python": ">=3.10",
+      "wheel_tags": [
+        "cp310-abi3-manylinux2014_aarch64"
+      ],
+      "native_member_count": 1,
+      "elf_machine": 183
+    },
+    {
+      "name": "PyYAML",
+      "version": "6.0.3",
+      "filename": "pyyaml-6.0.3-cp312-cp312-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl",
+      "sha256": "9149cad251584d5fb4981be1ecde53a1ca46c891a79788c0df828d2f166bda28",
+      "url": "https://files.pythonhosted.org/packages/ed/23/7a778b6bd0b9a8039df8b1b1d80e2e2ad78aa04171592c8a5c43a56a6af4/pyyaml-6.0.3-cp312-cp312-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl",
+      "requires_python": ">=3.8",
+      "wheel_tags": [
+        "cp312-cp312-manylinux2014_aarch64",
+        "cp312-cp312-manylinux_2_17_aarch64",
+        "cp312-cp312-manylinux_2_28_aarch64"
+      ],
+      "native_member_count": 1,
+      "elf_machine": 183
+    },
+    {
+      "name": "tokenizers",
+      "version": "0.23.3",
+      "filename": "tokenizers-0.23.3-cp310-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl",
+      "sha256": "ec82e80e65a862275b97c3d90b7a523df8d9519ee48aeb4e9625b2cc909274e0",
+      "url": "https://files.pythonhosted.org/packages/15/fc/ae987741829b1cd547668c4c94be732ae3eefd1d74344e64c3d2ca714acd/tokenizers-0.23.3-cp310-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl",
+      "requires_python": ">=3.10",
+      "wheel_tags": [
+        "cp310-abi3-manylinux2014_aarch64",
+        "cp310-abi3-manylinux_2_17_aarch64"
+      ],
+      "native_member_count": 1,
+      "elf_machine": 183
+    },
+    {
+      "name": "tqdm",
+      "version": "4.70.1",
+      "filename": "tqdm-4.70.1-py3-none-any.whl",
+      "sha256": "c293e525e6fef9c20e8728fd4612df02a0aa31bb5fe91ecd93e123b1b7bffa73",
+      "url": "https://files.pythonhosted.org/packages/a7/03/921a3d3c75785aca9ebfbfcabfbc3a1be12e2ab5265deb026d55a5a3f83e/tqdm-4.70.1-py3-none-any.whl",
+      "requires_python": ">=3.8",
+      "wheel_tags": [
+        "py3-none-any"
+      ],
+      "native_member_count": 0,
+      "elf_machine": null
+    },
+    {
+      "name": "truststore",
+      "version": "0.10.5",
+      "filename": "truststore-0.10.5-py3-none-any.whl",
+      "sha256": "9aaaedaefaf06d8b206278cf8b5012bc897f485a874503501e12d776df78951c",
+      "url": "https://files.pythonhosted.org/packages/51/e9/3a7820be2bb0fe53b6bc9c3be26d3d1158004e4c3ab953aa6840b955b1e9/truststore-0.10.5-py3-none-any.whl",
+      "requires_python": ">= 3.10",
+      "wheel_tags": [
+        "py3-none-any"
+      ],
+      "native_member_count": 0,
+      "elf_machine": null
+    },
+    {
+      "name": "typing_extensions",
+      "version": "4.16.0",
+      "filename": "typing_extensions-4.16.0-py3-none-any.whl",
+      "sha256": "481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8",
+      "url": "https://files.pythonhosted.org/packages/49/d3/b8441a820a491ddfc024b0b0cf0393375b75ea13866d9c66727e54c2fc80/typing_extensions-4.16.0-py3-none-any.whl",
+      "requires_python": ">=3.9",
+      "wheel_tags": [
+        "py3-none-any"
+      ],
+      "native_member_count": 0,
+      "elf_machine": null
+    }
+  ]
+}

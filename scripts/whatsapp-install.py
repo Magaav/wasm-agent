@@ -5,6 +5,7 @@ import argparse
 import hashlib
 import json
 import os
+import platform
 from pathlib import Path
 import shutil
 import sys
@@ -12,6 +13,34 @@ import sys
 
 def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def binary_target(path):
+    # Inspect bytes, NEVER execute the candidate (including during dry-run).
+    with Path(path).open('rb') as stream:
+        h = stream.read(64)
+    if (len(h) != 64 or h[:7] != b'\x7fELF\x02\x01\x01' or h[7] not in (0, 3)
+            or int.from_bytes(h[16:18], 'little') not in (2, 3)
+            or int.from_bytes(h[20:24], 'little') != 1
+            or int.from_bytes(h[52:54], 'little') != 64):
+        raise ValueError('supported_elf64_binary_required')
+    machine = int.from_bytes(h[18:20], 'little')
+    arch = {62: 'amd64', 183: 'arm64'}.get(machine)
+    if not arch:
+        raise ValueError('unsupported_binary_architecture')
+    return {'goos': 'linux', 'goarch': arch, 'elf_machine': machine}
+
+
+def admit_target(manifest, binary):
+    actual = binary_target(binary)
+    if manifest.get('platform') != 'linux-' + actual['goarch']:
+        raise ValueError('manifest_binary_architecture_mismatch')
+    if manifest['schema'] == 3 and manifest.get('target') != actual:
+        raise ValueError('manifest_target_mismatch')
+    host = {'x86_64': 'amd64', 'amd64': 'amd64', 'aarch64': 'arm64', 'arm64': 'arm64'}.get(platform.machine().lower())
+    if sys.platform != 'linux' or host != actual['goarch']:
+        raise ValueError('host_target_mismatch')
+    return actual
 
 
 def install(bundle, expected, prefix, state, python, models, apply=False):
@@ -22,8 +51,9 @@ def install(bundle, expected, prefix, state, python, models, apply=False):
     if digest(manifest_file) != expected:
         raise ValueError("manifest_hash_mismatch")
     manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
-    if manifest.get("schema") != 2 or manifest.get("platform") != "linux-amd64":
-        raise ValueError("source_binding_v2_required")
+    if (manifest.get("schema") not in (2, 3) or manifest.get("platform") not in ("linux-amd64", "linux-arm64")
+            or (manifest.get("schema") == 2 and manifest.get("platform") != "linux-amd64")):
+        raise ValueError("source_binding_v2_or_v3_required")
     if manifest.get('go_version')!='go1.27.2' or len(manifest.get('go_executable_sha256',''))!=64:
         raise ValueError('pinned_sdk_binding_required')
     source=manifest.get('source','')
@@ -47,12 +77,13 @@ def install(bundle, expected, prefix, state, python, models, apply=False):
         path = bundle / name
         if path.is_symlink() or not path.is_file() or digest(path) != expected_hash:
             raise ValueError("artifact_hash_or_ownership_mismatch")
+    target = admit_target(manifest, bundle / "wa-whatsapp")
     for path in (prefix, state, Path(python), Path(models)):
         if not path.is_absolute() or any(c in str(path) for c in ('\n', '\r', '"', '%')):
             raise ValueError("unsafe_service_path")
     if state == prefix or prefix in state.parents or state in prefix.parents:
         raise ValueError("state_must_be_separate_from_releases")
-    release = prefix / "releases" / tree
+    release = prefix / "releases" / (tree if manifest["schema"] == 2 else tree + "-" + manifest["platform"])
     # Refuse redirected destination ancestors, not only the final root.
     for destination in (release, state):
         if any(p.is_symlink() for p in (destination, *destination.parents)):
@@ -60,7 +91,7 @@ def install(bundle, expected, prefix, state, python, models, apply=False):
     if release.exists():
         raise ValueError("existing_release_preserved_choose_existing_or_new_source")
     result = {"ok": True, "dry_run": not apply, "source": manifest["source"],
-              "tree": tree, "release": str(release), "state_untouched": True,
+              "tree": tree, "target": target, "host_admitted": True, "release": str(release), "state_untouched": True,
               "service_registered": False, "requested_state_unchanged": True}
     owners = Path(os.environ.get('XDG_CONFIG_HOME', str(Path.home()/'.config'))) / 'wa-whatsapp-owners'
     if not owners.is_absolute() or any(c in str(owners) for c in ('\n', '\r', '"', '%')):

@@ -20,13 +20,17 @@ installer = load('installer', ROOT/'scripts/whatsapp-install.py')
 stt = load('stt', ROOT/'scripts/whatsapp-stt-local.py')
 
 class PrivateFixtureTests(unittest.TestCase):
-    def test_installer_dry_run_and_hash_refusal_preserve_state(self):
+    @mock.patch.object(installer.sys, 'platform', 'linux')
+    @mock.patch.object(installer.platform, 'machine', return_value='x86_64')
+    def test_installer_dry_run_and_hash_refusal_preserve_state(self, machine):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             bundle = root/'bundle'; bundle.mkdir()
             files = {}
             for name in ('wa-whatsapp', 'whatsapp-stt-local.py', 'whatsapp-install.py', 'THIRD-PARTY-NOTICES.txt', 'LICENSE'):
                 (bundle/name).write_bytes(b'synthetic fixture, not executable')
+                if name == 'wa-whatsapp':
+                    h=bytearray(64);h[:7]=b'\x7fELF\x02\x01\x01';h[16:18]=(2).to_bytes(2,'little');h[18:20]=(62).to_bytes(2,'little');h[20:24]=(1).to_bytes(4,'little');h[52:54]=(64).to_bytes(2,'little');(bundle/name).write_bytes(h)
                 files[name] = installer.digest(bundle/name)
             inputs={p:'0'*64 for p in ('connectors/whatsapp/go.mod','connectors/whatsapp/go.sum','scripts/whatsapp-build.py','scripts/build-whatsapp.sh')}
             for source,name in [('scripts/whatsapp-stt-local.py','whatsapp-stt-local.py'),('scripts/whatsapp-install.py','whatsapp-install.py'),('connectors/whatsapp/THIRD-PARTY-NOTICES.txt','THIRD-PARTY-NOTICES.txt'),('LICENSE','LICENSE')]: inputs[source]=files[name]
