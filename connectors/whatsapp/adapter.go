@@ -221,12 +221,33 @@ func (a *Adapter) event(evt any) (success bool) {
 			// Do not delete server history media here. Upstream availability/redelivery is not guaranteed.
 			return persist(a.client.SendProtocolMessageReceipt(ctx, e.Info.ID, types.ReceiptTypeHistorySync))
 		}
-		return persist(j.ingest(mapMessage(e, false)))
+		if !persist(j.ingest(mapMessage(e, false))) {
+			return false
+		}
+		// A group participant's push name is NOT the group's title. Own echoes
+		// likewise must never label a remote chat with this account's name.
+		if !e.Info.IsFromMe && !e.Info.IsGroup && e.Info.Sender.ToNonAD() == e.Info.Chat.ToNonAD() {
+			return persist(j.observeTitle(e.Info.Chat.ToNonAD().String(), e.Info.PushName, "direct_sender_push_name"))
+		}
+		return true
 	case *events.HistorySync:
 		if !a.eventIdentity() {
 			return false
 		}
 		return a.persistHistory(e.Data)
+	case *events.JoinedGroup:
+		if !a.eventIdentity() {
+			return false
+		}
+		return persist(j.observeTitle(e.JID.ToNonAD().String(), e.Name, "group_metadata"))
+	case *events.GroupInfo:
+		if !a.eventIdentity() {
+			return false
+		}
+		if e.Name != nil {
+			return persist(j.observeTitle(e.JID.ToNonAD().String(), e.Name.Name, "group_metadata"))
+		}
+		return true
 	case *events.DeleteForMe:
 		if !a.eventIdentity() {
 			return false
@@ -260,6 +281,13 @@ func (a *Adapter) persistHistory(data *waHistorySync.HistorySync) bool {
 	for _, chat := range data.GetConversations() {
 		jid, err := types.ParseJID(chat.GetID())
 		if err != nil {
+			return j.failPersistence()
+		}
+		title := chat.GetDisplayName()
+		if title == "" {
+			title = chat.GetName()
+		}
+		if err = j.observeTitle(jid.ToNonAD().String(), title, "history_conversation"); err != nil {
 			return j.failPersistence()
 		}
 		for _, item := range chat.GetMessages() {

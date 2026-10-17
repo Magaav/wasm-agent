@@ -106,13 +106,17 @@ func openJournal(dir string) (*Journal, error) {
  CREATE TABLE IF NOT EXISTS outbox(account TEXT NOT NULL,generation INTEGER NOT NULL,chat TEXT NOT NULL,source TEXT NOT NULL,part INTEGER NOT NULL,body TEXT NOT NULL,send_id TEXT NOT NULL,state TEXT NOT NULL,ack TEXT NOT NULL DEFAULT '',PRIMARY KEY(account,generation,chat,source,part),UNIQUE(account,generation,chat,send_id));
  CREATE TABLE IF NOT EXISTS events(seq INTEGER PRIMARY KEY AUTOINCREMENT,kind TEXT NOT NULL,at INTEGER NOT NULL,detail TEXT NOT NULL);
  CREATE TABLE IF NOT EXISTS chats(account TEXT,generation INTEGER,chat TEXT,PRIMARY KEY(account,generation,chat));
- INSERT OR IGNORE INTO chats SELECT account,generation,chat FROM messages;
+ INSERT OR IGNORE INTO chats(account,generation,chat) SELECT account,generation,chat FROM messages;
  CREATE TABLE IF NOT EXISTS excluded(account TEXT,generation INTEGER,chat TEXT,id TEXT,reason TEXT,PRIMARY KEY(account,generation,chat,id));
  CREATE TABLE IF NOT EXISTS source_blocks(account TEXT,generation INTEGER,chat TEXT,id TEXT,reason TEXT,PRIMARY KEY(account,generation,chat,id));
  CREATE TABLE IF NOT EXISTS chat_holds(account TEXT,generation INTEGER,chat TEXT,reason TEXT,PRIMARY KEY(account,generation,chat));
  CREATE TABLE IF NOT EXISTS post_retry(account TEXT,generation INTEGER,chat TEXT,source TEXT,part INTEGER,next_attempt INTEGER,reason TEXT,PRIMARY KEY(account,generation,chat,source,part));
  UPDATE outbox SET state='unknown' WHERE state='reserved';`)
 	if err != nil {
+		j.Close()
+		return nil, err
+	}
+	if err = installDirectory(db); err != nil {
 		j.Close()
 		return nil, err
 	}
@@ -311,7 +315,7 @@ func (j *Journal) ingest(m Message) error {
 		return err
 	}
 	n, _ := r.RowsAffected()
-	if _, err = tx.Exec("INSERT OR IGNORE INTO chats VALUES(?,?,?)", c.Account, c.Generation, m.Chat); err != nil {
+	if _, err = tx.Exec("INSERT OR IGNORE INTO chats(account,generation,chat) VALUES(?,?,?)", c.Account, c.Generation, m.Chat); err != nil {
 		return err
 	}
 	// Echoes confirm only a previously reserved exact ID/recipient/body; never create sends.

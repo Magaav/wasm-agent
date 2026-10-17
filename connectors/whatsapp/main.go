@@ -84,7 +84,7 @@ func api(j *Journal, token string) http.Handler {
 			}
 			json.NewEncoder(w).Encode(map[string]any{"ok": true, "transcript_posting_hold": hold, "account": c.Account, "conversation_id": req.Chat, "generation": c.Generation, "draft_visibility": "unsupported", "draft": nil, "general_send_supported": false})
 		case "/read_snapshot", "/list_chats", "/posting_status":
-			if req.Limit < 0 || req.Limit > 10000 || req.Since < 0 || req.Before < 0 {
+			if req.Limit < 0 || req.Limit > 10000 || req.Since < 0 || req.Before < 0 || req.SentSince < 0 || req.Until < 0 || (req.Until > 0 && req.SentSince > req.Until) || len(req.Query) > 256 {
 				fail(400, "invalid_window")
 				return
 			}

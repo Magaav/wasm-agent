@@ -93,6 +93,14 @@ absence, browser/raw/backend fallback or generic owned-MCP send registration.
 Trusted event/profile scope, approvals, precedence, reservations and verification
 remain in the existing Lua boundary. Read-only profiles ship disabled/unapproved.
 
+The read adapter also supports observed-name/identifier `list_chats.query`,
+`read_snapshot.conversation_id` narrowing, body/transcript `query` and inclusive
+source-time `sent_since`/`until`. Exact ID disambiguation, partial coverage and
+same-filter cursor continuation are required. Names are observed protocol labels,
+not real-world identity verification. Private `--profile-file` stdio registration,
+local CLI examples and coordinator-only live acceptance are in
+[WHATSAPP-OPERABILITY.md](WHATSAPP-OPERABILITY.md).
+
 Deterministic original-chat transcripts for BOTH incoming and own synchronized
 outgoing audio use the separate explicitly activated connector policy, not model
 send authority. Product recognition default is EN; configure this operator PT per
