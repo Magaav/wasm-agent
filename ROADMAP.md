@@ -243,13 +243,23 @@ failed probes remain durable, changed schemas refuse before dispatch, and no too
 is automatically replayed. Credentials remain references with explicit redaction;
 no Pi runtime, recurring observer or extra inference worker.
 
-**Current WhatsApp replacement:** persistent linked-device ingestion/journal/STT and
-explicit legacy retirement are implemented in source, default-disabled. See
+**Current WhatsApp (2026-10-17; coordinator-reported live snapshot):** source45
+paired/authenticated/connected at generation2 with PT/all-chats; native peer →
+server-private CLI/MCP → loopback reads worked without a local MCP registry or
+credential copy. Approved NEW-audio posting was activated at cutoff1792254831 and
+boot service enabled; no initial-history flood, gap or unknown sends was reported.
+Metadata audit observed901 chat rows (71 named/830 unnamed) and36 preserved mutation
+holds, not complete account/history coverage. Real incoming/own audio delivery,
+warmth/latency and full reliable coverage remain pending; recovery's original phone
+error cause is unknown. The worker's subsequent bounded on-demand SDK name enrichment,
+future mutation header/order/alias proofs and aggregate warnings are SOURCE/fixture
+work, not a claim that new code is deployed or those36 historical holds are resolved.
+See [coverage/status/handoff](docs/WHATSAPP-COVERAGE.md),
 [connector setup](docs/WHATSAPP-CONNECTOR.md), [retirement inventory](docs/WHATSAPP-MIGRATION.md)
-and [source reference inventory](docs/whatsapp-reference-inventory.json). EN is the
-product recognition default; this operator must explicitly configure PT per account.
-No production installation, pairing, real posting or legacy settlement is claimed.
-The MCP/WhatsApp delivery record below is historical evidence, not the current backend.
+and [source reference inventory](docs/whatsapp-reference-inventory.json). EN remains
+the product recognition default; PT is explicit per account. General AI sends remain
+refused. Earlier installation/pairing/MCP evidence below is historical, not new-runtime
+or real transcript delivery acceptance.
 
 WhatsApp was the first profile-managed app adapter (reads, lookup, audio, verified
 store send). Existing compatibility clients route through MCP; Jobs keeps controls,

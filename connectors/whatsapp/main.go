@@ -50,6 +50,10 @@ func api(j *Journal, token string) http.Handler {
 			fail(400, "invalid_request")
 			return
 		}
+		if req.RefreshNames && r.URL.Path != "/list_chats" {
+			fail(400, "refresh_names_requires_list_chats")
+			return
+		}
 		c, err := j.scope(req.Account, req.Generation, req.Chat)
 		if err != nil {
 			fail(403, "scope_mismatch")
@@ -88,7 +92,12 @@ func api(j *Journal, token string) http.Handler {
 				fail(503, "journal_unavailable")
 				return
 			}
-			json.NewEncoder(w).Encode(map[string]any{"ok": true, "transcript_posting_hold": hold, "account": c.Account, "conversation_id": req.Chat, "generation": c.Generation, "draft_visibility": "unsupported", "draft": nil, "general_send_supported": false})
+			diagnosis, err := j.mutationCoverage(c, req.Chat)
+			if err != nil {
+				fail(503, "journal_unavailable")
+				return
+			}
+			json.NewEncoder(w).Encode(map[string]any{"mutation_coverage": diagnosis, "ok": true, "transcript_posting_hold": hold, "account": c.Account, "conversation_id": req.Chat, "generation": c.Generation, "draft_visibility": "unsupported", "draft": nil, "general_send_supported": false})
 		case "/read_snapshot", "/list_chats", "/posting_status":
 			if req.Limit < 0 || req.Limit > 10000 || req.Since < 0 || req.Before < 0 || req.SentSince < 0 || req.Until < 0 || (req.Until > 0 && req.SentSince > req.Until) || len(req.Query) > 256 {
 				fail(400, "invalid_window")
@@ -98,6 +107,32 @@ func api(j *Journal, token string) http.Handler {
 				fail(403, "read_scope_not_approved")
 				return
 			}
+			var refresh *NameRefresh
+			if req.RefreshNames {
+				if req.Limit == 0 {
+					req.Limit = nameRefreshRows
+				}
+				if req.Limit > nameRefreshRows || req.Query != "" {
+					fail(400, "refresh_requires_unfiltered_page_max32")
+					return
+				}
+				value, e := j.refreshNames(r.Context(), c, req)
+				if e != nil {
+					fail(503, "metadata_refresh_unavailable")
+					return
+				}
+				refresh = &value
+				current, scopeErr := j.scope(req.Account, req.Generation, req.Chat)
+				if scopeErr != nil {
+					fail(403, "scope_mismatch")
+					return
+				}
+				if _, _, scopeErr = j.readScope(current, req, ""); scopeErr != nil {
+					fail(403, "read_scope_not_approved")
+					return
+				}
+				c = current
+			}
 			data, err := j.readPage(c, req, strings.TrimPrefix(r.URL.Path, "/"))
 			if err != nil {
 				if errors.Is(err, errPageNoProgress) {
@@ -106,6 +141,9 @@ func api(j *Journal, token string) http.Handler {
 				}
 				fail(503, "journal_unavailable")
 				return
+			}
+			if refresh != nil {
+				data["name_refresh"] = refresh
 			}
 			encoded, err := marshalBytePage(data)
 			if err != nil {

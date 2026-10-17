@@ -30,7 +30,7 @@ func installDirectory(db *sql.DB) error {
 	if err != nil {
 		return err
 	}
-	for _, col := range []struct{ name, decl string }{{"title", "TEXT NOT NULL DEFAULT ''"}, {"title_source", "TEXT NOT NULL DEFAULT ''"}, {"title_observed", "INTEGER NOT NULL DEFAULT 0"}} {
+	for _, col := range []struct{ name, decl string }{{"title", "TEXT NOT NULL DEFAULT ''"}, {"title_source", "TEXT NOT NULL DEFAULT ''"}, {"title_observed", "INTEGER NOT NULL DEFAULT 0"}, {"metadata_title", "TEXT NOT NULL DEFAULT ''"}, {"metadata_title_source", "TEXT NOT NULL DEFAULT ''"}, {"metadata_title_observed", "INTEGER NOT NULL DEFAULT 0"}} {
 		if !columns[col.name] {
 			if _, err = db.Exec("ALTER TABLE chats ADD COLUMN " + col.name + " " + col.decl); err != nil {
 				return err

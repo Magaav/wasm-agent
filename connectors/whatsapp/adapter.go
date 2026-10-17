@@ -59,6 +59,7 @@ func newAdapter(ctx context.Context, j *Journal) (*Adapter, error) {
 	a.client.BackgroundEventCtx = ctx
 	a.downloadToFile = a.client.DownloadToFile
 	a.client.SetMediaHTTPClient(mediaHTTPClient(mediaDeadline, maxEncryptedAudioBytes))
+	j.metadata = &sdkMetadata{a}
 	a.client.AddEventHandlerWithSuccessStatus(a.event)
 	j.mu.Lock()
 	j.adapterLive = true
@@ -121,24 +122,32 @@ func (a *Adapter) identityResult(err error) bool {
 	}
 	return a.journal.failPersistence()
 }
-func mapMessage(e *events.Message, history bool) Message {
-	m := Message{ID: e.Info.ID, Chat: e.Info.Chat.ToNonAD().String(), Sender: e.Info.Sender.ToNonAD().String(), Sent: e.Info.Timestamp.Unix(), Own: e.Info.IsFromMe, History: history}
+func mapMessageHeader(e *events.Message, history bool) Message {
+	m := Message{ID: e.Info.ID, Chat: e.Info.Chat.ToNonAD().String(), Sender: e.Info.Sender.ToNonAD().String(), SenderAlt: safeAlternate(e.Info.Sender, e.Info.SenderAlt), Sent: e.Info.Timestamp.Unix(), Own: e.Info.IsFromMe, History: history}
 	p := e.Message.GetProtocolMessage()
 	if p == nil && e.SourceWebMsg != nil {
-		p = e.SourceWebMsg.GetMessage().GetProtocolMessage()
+		original := (&events.Message{RawMessage: e.SourceWebMsg.GetMessage()}).UnwrapRaw()
+		p = original.Message.GetProtocolMessage()
 	}
 	if e.IsEdit || (p != nil && (p.GetType() == waE2E.ProtocolMessage_REVOKE || p.GetType() == waE2E.ProtocolMessage_MESSAGE_EDIT)) {
 		m.Mutation = "edit"
 		m.Target = e.Info.ID
 		m.MutationScope = true
+		m.ScopeProof = "sdk_edit_envelope"
 		if p != nil {
 			if p.GetType() == waE2E.ProtocolMessage_REVOKE {
 				m.Mutation = "revoke"
 			}
 			m.Target = p.GetKey().GetID()
-			remote := p.GetKey().GetRemoteJID()
-			m.MutationScope = remote == "" || remote == m.Chat
+			m.MutationScope, m.ScopeProof = mutationScope(e, p.GetKey().GetRemoteJID())
 		}
+		return m
+	}
+	return m
+}
+func mapMessage(e *events.Message, history bool) Message {
+	m := mapMessageHeader(e, history)
+	if m.Mutation != "" {
 		return m
 	}
 	if e.Message == nil {
@@ -321,8 +330,41 @@ func (a *Adapter) persistHistory(data *waHistorySync.HistorySync) bool {
 	if data == nil {
 		return j.failPersistence()
 	}
+	c, err := j.Config()
+	if err != nil {
+		return j.failPersistence()
+	}
 	if err := j.event("history_sync", "partial history received"); err != nil {
 		return j.failPersistence()
+	}
+	// Future received batch only: index original SDK author headers BEFORE any
+	// mutations or audio tasks. No network calls, no historical replay/reset.
+	for phase := 0; phase < 2; phase++ {
+		for _, chat := range data.GetConversations() {
+			jid, err := types.ParseJID(chat.GetID())
+			if err != nil {
+				return j.failPersistence()
+			}
+			for _, item := range chat.GetMessages() {
+				e, err := a.client.ParseWebMessage(jid, item.GetMessage())
+				if err != nil {
+					return j.failPersistence()
+				}
+				m := mapMessageHeader(e, true)
+				m.OriginAccount = c.Account
+				m.OriginGeneration = c.Generation
+				if phase == 0 && m.Mutation == "" {
+					if err = j.historyAuthor(c, m); err != nil {
+						return j.failPersistence()
+					}
+				}
+				if phase == 1 && m.Mutation != "" {
+					if err = j.ingest(m); err != nil {
+						return j.failPersistence()
+					}
+				}
+			}
+		}
 	}
 	for _, chat := range data.GetConversations() {
 		jid, err := types.ParseJID(chat.GetID())
@@ -341,7 +383,13 @@ func (a *Adapter) persistHistory(data *waHistorySync.HistorySync) bool {
 			if err != nil {
 				return j.failPersistence()
 			}
-			if err = j.ingest(mapMessage(message, true)); err != nil {
+			mapped := mapMessage(message, true)
+			if mapped.Mutation != "" {
+				continue
+			}
+			mapped.OriginAccount = c.Account
+			mapped.OriginGeneration = c.Generation
+			if err = j.ingest(mapped); err != nil {
 				return j.failPersistence()
 			}
 		}
