@@ -51,14 +51,42 @@ No endpoint returns credentials. Subscription refresh remains single-flight with
 
 ## Operator enrollment and secret entry
 
-The node and chat **never receive the vault admin token or a replacement key**.
-`/provider` opens/prints a separate operator vault page URL. On that origin, enroll using its
-password admin-token input; then enter the Go key in its dedicated password field and Save.
-Neither input uses chat/composer, terminal editor, general drafts, URL fragments, localStorage,
-logs or a credential-readback endpoint. Admin authorization remains in page memory only and is
-cleared on page exit. Old persisted-token/fragment enrollment is retired, not adopted.
-CLI `/login` no longer asks for keys through the ordinary history-bearing terminal editor.
-Use the documented operator browser flow, not a shell argument containing a key/token.
+The node and parent app **never receive the vault admin token or a replacement key**.
+The GUI now embeds a vault-owned, cross-origin password/enrollment box **inside the
+OpenCode Go section of `/provider`**, replacing its former external-link-only workflow
+at the human's explicit request. CLI management still prints the separate operator-page
+URL instead of using its history-bearing terminal editor. No missing-service fallback
+accepts a key in parent DOM, chat, configuration or native environment.
+
+Only `GET /embed/go` is frameable, and only by the exact configured
+`WA_VAULT_EMBED_PARENT_ORIGIN` (HTTPS, or explicit operator loopback HTTP). The full admin
+page retains `frame-ancestors 'none'` and `X-Frame-Options: DENY`. The dedicated document
+uses a restrictive self-only CSP, `form-action 'none'`, and a script/same-origin/forms
+sandbox without navigation/popups. `allow-forms` is needed for browser submit/Enter events;
+handlers prevent default and CSP denies every navigational form submission. Writes use only
+fixed same-origin fetch endpoints. No wildcard CORS or parent-origin API credential relay exists.
+The actual iframe source must be a different HTTPS/loopback origin at `/embed/go`.
+Its bootstrap verifies the expected vault identity and exact parent against `/embed/config`
+before accepting any input. Public identity/scope/channel values in the frame fragment
+are **not credentials**; no key or admin token ever belongs in a URL or fragment.
+
+Enroll privately with the labelled password token input, then paste the operator-generated
+Go key in the labelled password key input and click **Save to vault**. Both secrets stay
+in the vault frame's transient memory, never parent events, drafts/undo, WebStorage, logs,
+model/tool arguments, clipboard helpers or credential-readback APIs. Cancel/close/scope
+change clears fields; success clears the entered key. Enrollment is memory-only and must
+be repeated after closing/reloading the frame. SOP prevents parent JS access, not a
+compromised operator browser/debugger, hostile extensions, parent phishing or unrestricted
+same-user OS access; the durable storage isolation prerequisite remains essential.
+
+The parent grants each save intent only after current node/account/master/busy checks and
+a fresh matching broker/source/identity/generation read. It validates the actual
+postMessage source window, exact origin and per-frame channel plus a stable public
+node/account scope (hash of public node ID and account ID, **not an auth token**).
+A frame's `committed` message alone is never proof: parent rereads the actual route's
+opaque current operation and generation and must match both. No message contains a key,
+admin token, provider error body or credential-derived hash. A late old-scope reply cannot
+act on a newly selected account/node. Opening/saving never selects a provider or probes inference.
 
 The vault has separate listeners:
 
@@ -77,6 +105,21 @@ proxy and operator origins identify the same durable vault before sending author
 a key. A stale/wrong instance refuses rather than becoming a different account/source.
 The ordinary node door cannot replace
 existing keys/logins or cancel an existing operator subscription login.
+
+The embedded form additionally uses `/api/embed/go/{prepare,save,state,cancel}` on the
+vault admin origin. All require operator authorization, exact vault identity and a typed
+public scope. Prepare durably fences a UUID operation **without the proposed key**; Save
+atomically commits the credential plus operation/generation under the store lock once.
+The durable nonsecret ledger survives reload/restart, so no browser storage is needed.
+Transport can redeliver a request: the backend refuses a second save for that operation.
+A conflict response alone does not prove the original outcome; exact operation readback
+is required. There is no JavaScript credential retry loop or automatic new save intent.
+Unknown sends hold Save disabled. Read status reconciles the exact historical operation;
+explicit Cancel fences late sends only if not already committed, otherwise reports commit.
+Closing does not cancel/retry a write. Superseded/stale operations are not success-looking.
+At 1024 retained operations, preparation refuses for operator review instead of deleting
+unknown evidence. The proxy exposes only the opaque *current* Go operation/generation for
+parent readback, not ledger history or credentials. This is not a credential readback API.
 
 Go Save carries an opaque operation ID and the observed credential generation. The store checks
 and mutation share one lock. A stale/concurrent save refuses; success is reconciled using the
@@ -108,10 +151,26 @@ strong isolation boundary. A local synthetic fixture is not a production deploym
 Do not reuse a disposable benchmark service/store. Live service discovery/provisioning,
 credential migration, restarts and installed UI publication belong to the coordinator.
 
-Configure the nonsecret operator URL on the node before the user test. The page says which vault
-it manages and does not secretly alter the node's auth source. Configuration alone is not proof
-that a service exists or the account has allowance. `/provider` reports setup-required/unknown
-rather than opening an unsafe secret prompt when the operator route is missing.
+Configure the nonsecret operator URL on the node and the exact parent browser origin on
+this isolated vault service before the user test. Example nonsecret configuration:
+
+```text
+# NODE service (explicitly approved Go route only)
+WASM_AGENT_OPENCODE_GO_VAULT_URL=<fixed-proxy-origin>
+WASM_AGENT_VAULT_OPERATOR_URL=<separate-operator-admin-origin>
+# VAULT service only
+WA_VAULT_ADMIN_ORIGIN=<exact-admin-origin>
+WA_VAULT_EMBED_PARENT_ORIGIN=<exact-node-browser-origin-no-trailing-slash>
+```
+
+Keep `WA_VAULT_ADMIN_TOKEN` in private vault service secret configuration, not these node
+settings or command arguments. Proxy/admin origins must independently prove the same
+persistent `/identity`; expose `/embed/go`, `/embed/config`, `/embed-go.js` and `/embed-go.css`
+through the exact admin HTTPS origin without redirects, not through the node. This supports
+one explicitly configured embedding parent per deployment. A framing/TLS/identity/source
+failure is visible and disables entry; it is not permission to relax origins or copy tokens.
+The worker does not provision/register services or bypass unavailable cloud capabilities.
+An authorized isolated/cloud operator terminal may be required for actual deployment.
 
 ## Guarded Go migration (operator-only helper)
 
@@ -152,13 +211,20 @@ Source stamps protect accidental concurrent edits, not a malicious same-user att
 ## User test after coordinator installation/setup
 
 1. Type `/provider`; verify both friendly routes and actual source/state.
-2. Select OpenCode Go only if desired; choose its operator management link.
-3. Enroll on the separate vault origin with the dedicated admin password input.
-4. Paste the operator-generated **new Go key** into its password input; Save once and confirm.
+2. In OpenCode Go's embedded private box, verify destination origin/vault identity; select Go separately only if desired.
+3. Enroll using the box's dedicated private operator-token password field.
+4. Paste the operator-generated **new Go key** into the box's password key field; click **Save to vault** once.
 5. Read the exact committed outcome; cancel entry or reconcile an unknown outcome rather than
    resubmitting. No model test is performed by Save.
 6. Return to chat and explicitly send a new turn when wanted. Same-workspace monthly quota
    may still fail. No previous failed request is automatically replayed.
+
+`python scripts/test-vault-embed.py` adds real HTTP durable prepare/save/cancel/restart,
+origin/CSP/authorization/scope/CAS and ambiguous-send proof. `node
+scripts/test-provider-inline-browser.cjs <fresh-evidence>` adds the actual staged parent plus
+real cross-origin frame/HTTP interaction, synthetic paste/save, parent non-disclosure,
+forged/stale events, scope/busy/close/reload, TLS/identity/setup refusal and old-UI causal
+negative. This is synthetic functionality proof, **not live secure provisioning**.
 
 ## Focused synthetic proof
 

@@ -7,39 +7,77 @@
 // Implements the close rule from DESIGN.md §3: it closes only when the pointer
 // *press* originates outside the overlay and its anchor. A press that starts
 // inside and is released outside keeps it open.
+class WaVaultEntry extends HTMLElement {
+  connectedCallback(){if(this._connected)return;this._connected=true;this._onMessage=event=>this.receive(event);window.addEventListener('message',this._onMessage);}
+  disconnectedCallback(){window.removeEventListener('message',this._onMessage);this.clear();this._connected=false;}
+  configure(config){
+    const key=JSON.stringify(config||{});if(key===this._key)return;this.clear();this._key=key;this._config=config;
+    const note=document.createElement('p');note.setAttribute('role','status');this.append(note);this.note=note;
+    try{
+      const url=new URL(config.url),parentOrigin=location.origin;
+      if(url.origin===parentOrigin||url.pathname!=='/embed/go'||url.search||url.hash||url.username||url.password||!(url.protocol==='https:'||(url.protocol==='http:'&&['127.0.0.1','localhost','[::1]'].includes(url.hostname)))||!config.vault?.match(/^[a-f0-9-]{36}$/)||!config.scope?.match(/^[a-f0-9]{64}$/))throw Error('unsafe destination');
+      this._origin=url.origin;this._channel=crypto.randomUUID();
+      url.hash=new URLSearchParams({vault:config.vault,scope:config.scope,channel:this._channel,parent:parentOrigin});
+      const frame=document.createElement('iframe');frame.title='Private OpenCode Go API-key entry — '+url.origin;frame.setAttribute('sandbox','allow-scripts allow-same-origin allow-forms');frame.referrerPolicy='no-referrer';frame.src=url.href;
+      this.frame=frame;this.append(frame);note.textContent='Loading vault-owned private enrollment/key box…';
+      this._timer=setTimeout(()=>{if(!this._ready&&this.note)this.note.textContent='Vault box unavailable: verify isolated service, TLS, identity and exact frame-ancestor origin. No credentials were sent by the parent.';},8000);
+    }catch(_){note.textContent='Secure inline key entry requires a different HTTPS (or operator loopback) vault origin, exact identity and node/account scope. No local secret input is substituted.';}
+  }
+  set allowed(value){this._allowed=value===true;this.control('active',{allowed:this._allowed});}
+  get config(){return this._config;}
+  control(action,extra={}){if(this.frame&&this._origin&&this._ready)this.frame.contentWindow?.postMessage({type:'wa-vault-go-control',action,channel:this._channel,scope:this._config.scope,vault_id:this._config.vault,...extra},this._origin);}
+  receive(event){
+    const value=event.data;
+    if(!this.frame||event.source!==this.frame.contentWindow||event.origin!==this._origin||!value||value.type!=='wa-vault-go'||value.channel!==this._channel||value.scope!==this._config.scope||value.vault_id!==this._config.vault)return;
+    if(value.state==='ready'){this._ready=true;clearTimeout(this._timer);this.note.textContent='Private vault form loaded. Inputs belong to '+this._origin+'.';this.control('active',{allowed:!!this._allowed});return;}
+    // Whitelist public receipt fields. No key/token, arbitrary payload, or parent auth header is relayed.
+    if(!['intent','committed','held','close'].includes(value.state))return;
+    const uuid=v=>typeof v==='string'&&/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(v);
+    if(value.state==='intent'&&(!uuid(value.request)||!uuid(value.operation)||!(uuid(value.generation)||['absent','legacy'].includes(value.generation))))return;
+    if(value.state==='committed'&&(!uuid(value.operation)||!uuid(value.generation)))return;
+    this.dispatchEvent(new CustomEvent('vault-entry',{detail:{state:value.state,request:value.request,operation:value.operation,generation:value.generation},bubbles:true}));
+  }
+  clear(){clearTimeout(this._timer);this.control('close');this.frame?.remove();this.frame=null;this._ready=false;this._key=null;this.replaceChildren();}
+}
+customElements.define('wa-vault-entry',WaVaultEntry);
+
 class WaProviderManager extends HTMLElement {
-  connectedCallback() { if (!this._ready) { this._ready=true; this.render(); } }
-  set data(value) { this._data=value; this.render(); }
-  set message(value) { this._message=value; this.render(); }
-  set pending(value) { this._pending=value; this.render(); }
-  render() {
-    this.replaceChildren(); this.className='provider-management';
-    const text=(tag,value)=>{const el=document.createElement(tag);el.textContent=value;this.append(el);return el;};
+  connectedCallback(){this.render();}
+  disconnectedCallback(){this.clearEntry();}
+  set data(value){this._data=value;this.render();}
+  set message(value){this._message=value;this.render();}
+  set pending(value){this._pending=value;this.render();}
+  set entryAllowed(value){const changed=this._entryAllowed!==value;this._entryAllowed=value;this.entry&&(this.entry.allowed=!!value&&!this._pending);if(changed&&value)this.render();}
+  clearEntry(){this.entry?.clear();}
+  render(){
+    if(!this._body){
+      this.className='provider-management';
+      this.innerHTML='<h3>Provider management</h3><p>Opening changes no account or provider and never replays a failed request. Go secrets stay inside a separate-origin vault-owned box, never chat or the node.</p><div class="provider-rows"></div><p class="provider-quota"></p><div class="provider-login"></div><p class="provider-message" role="status"></p><div class="provider-actions"></div>';
+      this._body=this.querySelector('.provider-rows');this._rows=new Map();
+    }
     const button=(parent,label,action,id)=>{const el=document.createElement('button');el.type='button';el.textContent=label;el.disabled=!!this._pending;el.addEventListener('click',()=>this.dispatchEvent(new CustomEvent('provider-action',{detail:{action,id}})));parent.append(el);};
-    text('h3','Provider management');
-    text('p','Opening changes no account or provider and never replays a failed request. Credentials are entered only on the separate operator vault page, never in chat.');
-    const data=this._data;
-    if (data?.error) text('p','Management refused: '+data.error);
-    for (const row of data?.providers || []) {
-      const section=document.createElement('section');this.append(section);
-      const title=document.createElement('strong');title.textContent=row.label+' ('+row.id+')';section.append(title);
-      const state=document.createElement('p');state.textContent='Configured: '+(row.configured ?? 'unknown')+' · Enabled: '+(row.enabled ?? 'unknown')+' · Source: '+row.source+' · Entitlement: unknown'+(row.error?' · Error present':'');section.append(state);
-      if(row.vault_url){const route=document.createElement('p');route.textContent='Broker: '+row.vault_url+' · Vault identity: '+(row.vault_id || 'unknown');section.append(route);}
-      button(section,'Select for subsequent turns','select',row.id);
-      if (row.id==='openai-sub' && row.source==='native') button(section,'Confirm re-login…','begin',row.id);
-      else if (row.operator_url) {
-        const link=document.createElement('a');link.textContent='Manage / replace on operator vault page';link.href=row.operator_url;link.target='_blank';link.rel='noopener noreferrer';section.append(link);
-        const note=document.createElement('p');note.textContent='Enroll there with its dedicated password input. This manages only that vault; it does not change this node’s credential source.';section.append(note);
-      } else { const note=document.createElement('p');note.textContent='Operator setup required: durable isolated vault + nonsecret operator page URL. See docs/VAULT.md; no credential field is opened here.';section.append(note); }
+    for(const row of this._data?.providers||[]){
+      let section=this._rows.get(row.id);
+      if(!section){section=document.createElement('section');section.innerHTML='<strong></strong><p class="provider-state"></p><p class="provider-route"></p><div class="provider-controls"></div><p class="provider-setup"></p>';this._rows.set(row.id,section);this._body.append(section);}
+      section.querySelector('strong').textContent=row.label+' ('+row.id+')';
+      section.querySelector('.provider-state').textContent='Configured: '+(row.configured??'unknown')+' · Enabled: '+(row.enabled??'unknown')+' · Source: '+row.source+' · Entitlement: unknown'+(row.error?' · Error present':'');
+      section.querySelector('.provider-route').textContent=row.vault_url?'Broker: '+row.vault_url+' · Vault identity: '+(row.vault_id||'unknown'):'';
+      const controls=section.querySelector('.provider-controls');controls.replaceChildren();button(controls,'Select for subsequent turns','select',row.id);
+      const setup=section.querySelector('.provider-setup');setup.textContent='';
+      if(row.id==='opencode-go'){
+        if(!this.entry){this.entry=document.createElement('wa-vault-entry');section.append(this.entry);}
+        if(row.source==='vault'&&row.embed_url&&this._data.embed_scope){if(this._entryAllowed||this.entry.frame)this.entry.configure({url:row.embed_url,vault:row.vault_id,scope:this._data.embed_scope,broker:row.vault_url});this.entry.allowed=!!this._entryAllowed&&!this._pending;}
+        else{this.entry.clear();setup.textContent='Inline key box setup required: durable isolated Go vault, verified same proxy/admin identity, exact parent origin and nonsecret operator URL. No plaintext/native secret fallback.';}
+      }else if(row.source==='native')button(controls,'Confirm re-login…','begin',row.id);
+      else if(row.operator_url){const link=document.createElement('a');link.textContent='Manage subscription on operator vault page';link.href=row.operator_url;link.target='_blank';link.rel='noopener noreferrer';controls.append(link);}
+      else setup.textContent='Operator vault setup required. See docs/VAULT.md.';
     }
-    if (data?.quota) text('p',data.quota);
-    if (this.login) {
-      text('p','Device login: '+this.login.state);
-      if (this.login.user_code) text('p',this.login.verification_url+' · '+this.login.user_code);
-      button(this,'Check device completion','poll');button(this,'Reconcile outcome (read only)','status');button(this,'Cancel device login','cancel');
-    }
-    if (this._message) {const note=text('p',this._message);note.setAttribute('role','status');}
-    button(this,'Read status','refresh');button(this,'Close','close');
+    if(this._data?.error){this.clearEntry();this._message='Management refused: '+this._data.error;}
+    this.querySelector('.provider-quota').textContent=this._data?.quota||'';
+    const login=this.querySelector('.provider-login');login.replaceChildren();
+    if(this.login){const note=document.createElement('p');note.textContent='Device login: '+this.login.state+' '+(this.login.user_code?this.login.verification_url+' · '+this.login.user_code:'');login.append(note);button(login,'Check device completion','poll');button(login,'Reconcile outcome (read only)','status');button(login,'Cancel device login','cancel');}
+    this.querySelector('.provider-message').textContent=this._message||'';
+    const actions=this.querySelector('.provider-actions');actions.replaceChildren();button(actions,'Read status','refresh');button(actions,'Close','close');
   }
 }
 customElements.define('wa-provider-manager',WaProviderManager);

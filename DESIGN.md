@@ -218,6 +218,25 @@ opening the card, the node is never asked and does not know, and *off* means not
 same shape, and the same rule: the row says which device the choice belongs to.
 
 
+## Secure inline Go entry (explicit human-requested exception)
+
+`/provider` embeds `<wa-vault-entry>` inside the OpenCode Go section. The actual
+password/enrollment inputs and Save to vault button belong to a **different-origin,
+vault-owned document**, not the parent light DOM or composer. This scoped exception
+to ordinary component-owned forms is required to keep both secrets out of the node
+and parent app while satisfying inline entry. There is no parent-owned substitute
+when provisioning/identity/TLS/framing fails. The full operator page stays unframeable;
+only the dedicated Go form permits the explicitly configured exact parent origin.
+
+The frame uses opaque 5px-scale surfaces, labelled password fields, wrapped destination
+identity, no unmasking or idle animation, and a bounded scrollable region. Enter submits
+only the private form, never chat; Escape/parent close destroys transient input without
+claiming cancellation of an already dispatched/uncertain write. Node/account changes
+destroy the frame; busy runs disable new intents. Re-renders preserve the live frame
+rather than discarding an in-flight operation. Cross-origin messages carry only typed
+public channel/scope/operation/generation evidence; parent verifies the actual frame,
+origin, current authority, and fresh effective-route receipt before displaying success.
+
 ## 10. Component registry
 
 | Element | Purpose | Key attributes / properties | Events |
@@ -243,7 +262,8 @@ same shape, and the same rule: the row says which device the choice belongs to.
 | `<wa-chat-actions>` | **The** row of per-message actions a chat footer carries. Steering and dedicated Cancel task buttons are removed on all chat surfaces; the shared Send/Stop is the sole submit action. One element on both surfaces, and its controls come from the shell's own `chatControl()` factory, so an action and the append-file control beside it are the same control - one class, `.chat-control`, is the whole box in `style.css`, and a change to one moves all of them. A host authors *declarations* (one child per action: `data-action`, its label as its text, and any `id`/`title`/`hidden` it addresses) and hears `chat-action`, never one particular button. | `data-slot="footer-right"` on the row, `data-action` on a declaration; `.controls`; `#steer` is the main chat's own control | `chat-action` (`{action, control}`) |
 | `<wa-mcps>` | Explicit app-capability extensions, selected tools, disabled definitions, probe/approval/errors; no scheduler. Engine topic before Jobs. | `.inventory`, `.message`, `.configureScope()`, `.busy` | `mcp-action` |
 | `<wa-jobs>` | Reviewed automation definitions, enabled state, queue/source/outcome evidence. Engine topic immediately after tools. | `.items` | `job-toggle` |
-| `<wa-provider-manager>` | Deterministic operator provider recovery; two friendly routes, source/presence/unknown, explicit selection and native device flow, separate enrolled vault page for secrets. | `.data`, `.message`, `.pending`, `.login` | `provider-action` |
+| `<wa-provider-manager>` | Deterministic operator provider recovery; two friendly routes, source/presence/unknown, explicit selection and native device flow, vault-owned cross-origin Go entry. | `.data`, `.message`, `.pending`, `.login`, `.entryAllowed`, `clearEntry()` | `provider-action`, `vault-entry` (public receipt/control only) |
+| `<wa-vault-entry>` | Cross-origin dedicated password/enrollment form; no parent/node secret access or secret events. | `configure({url,vault,scope,broker})`, `.allowed`, `clear()` | `vault-entry` (whitelisted nonsecret metadata) |
 | `<wa-hook-events>` | Read-only lifecycle inventory after Jobs: producers, boundaries, configured handlers and reliability limits; evaluated absent events are labelled, not advertised as working. | `.catalogue`, `.message` | — |
 
 Keyboard selection belongs to `<wa-menu>`, not to its caller: the highlight and the click target

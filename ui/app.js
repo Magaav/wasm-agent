@@ -175,6 +175,7 @@ function rememberSession(id) {
 function rememberNode(node) {
   if (node === activeNode) return false;
   detachConversationView();
+  invalidateProviderEntry();
   activeNode = node;
   orchestrationMode=null;
   delete messages.dataset.debug;
@@ -2691,6 +2692,7 @@ function applyRunControls() {
 // mid-run cannot reach the streaming turn - and a control that moves under it misreports what
 // that turn actually used. Locked while a run streams, with the delay stated rather than silent.
 function applySettingsSovereignty() {
+  syncProviderEntryScope();
   const locked = composerBusy();
   providerSelect.disabled = locked;
   modelSelect.disabled = locked;
@@ -3983,20 +3985,26 @@ async function toggleOrchestration() {
   orchestrationMode=r.orchestration;
   add('assistant','Orchestration '+(orchestrationMode.enabled?'on — I reason with this conversation, then delegate concrete work to native owners. Questions stay here.':'off — I handle new tasks directly. Existing workers keep running.'));
 }
+function invalidateProviderEntry(){const panel=document.querySelector('wa-provider-manager');if(panel){panel.entryAllowed=false;panel.clearEntry();}}
+function syncProviderEntryScope(){
+  const panel=document.querySelector('wa-provider-manager'),balloon=panel?.closest('wa-balloon');if(!balloon)return;
+  const current=balloon.managementNode===activeNode&&balloon.managementAccount===session&&balloon.managementUser===me.user?.id&&me.role==='master';
+  panel.entryAllowed=current&&balloon.open&&!composerBusy();if(!current)panel.clearEntry();
+}
 let providerManagementPanel=null;
 async function openProviderManagement() {
   if(providerManagementPanel){
-    if(providerManagementPanel.managementNode===activeNode && providerManagementPanel.managementAccount===session){providerManagementPanel.open=true;return;}
+    if(providerManagementPanel.managementNode===activeNode && providerManagementPanel.managementAccount===session){providerManagementPanel.open=true;await providerManagementPanel.managementRefresh();return;}
     providerManagementPanel.remove();providerManagementPanel=null;
   }
-  const target=activeNode, account=session;
+  const target=activeNode, account=session, user=me.user?.id;
   const balloon=document.createElement('wa-balloon');balloon.setAttribute('anchor',input.id);balloon.className='popover provider-manager-balloon';
   const panel=document.createElement('wa-provider-manager');balloon.append(panel);document.getElementById('status-balloon').parentElement.append(balloon);
-  providerManagementPanel=balloon;balloon.managementNode=target;balloon.managementAccount=account;balloon.open=true;
+  providerManagementPanel=balloon;balloon.managementNode=target;balloon.managementAccount=account;balloon.managementUser=user;balloon.open=true;
   let pending=false, operation=null, held=false;
   const operationKey='wa-provider-device:'+String(target)+':'+String(me.user?.id || 'operator');
   try{operation=sessionStorage.getItem(operationKey);if(operation){held=true;panel.login={state:'outcome needs reconciliation'};panel.render();}}catch(_){/* no secret storage */}
-  const current=()=>activeNode===target && session===account;
+  const current=()=>activeNode===target && session===account && me.user?.id===user;
   const read=async()=>{
     if(!current())throw new Error('Node/account changed. Close and reopen management; no action sent.');
     const response=await apiFetch('provider-management',{headers:apiHeaders()});
@@ -4004,11 +4012,30 @@ async function openProviderManagement() {
     if(!current())throw new Error('Node/account changed; stale response ignored.');
     if(value.native_login && !operation){operation=value.native_login.operation;held=value.native_login.state==='exchange_pending';sessionStorage.setItem(operationKey,operation);panel.login=value.native_login;}
     panel.data=value;
+    panel.entryAllowed=current()&&balloon.open&&!composerBusy()&&me.role==='master';
+    return value;
   };
+  balloon.managementRefresh=read;
+  panel.addEventListener('vault-entry',async event=>{
+    const message=event.detail,entry=panel.entry,channel=entry?._channel,binding=entry?.config;
+    if(!entry?.frame||!binding)return;
+    if(message.state==='close'){balloon.close();return;}
+    if(!current()||!balloon.open||composerBusy()||me.role!=='master'){entry.control('active',{allowed:false});return;}
+    if(message.state==='held'){panel.message='Vault operation held or refused. Reconcile in the private box; no automatic credential resend.';return;}
+    if(message.state==='intent')panel.message='Checking the explicit Go save intent against the effective route; no new write success claimed.';
+    try{
+      const value=await read(),row=value.providers?.find(p=>p.id==='opencode-go');
+      const matches=current()&&balloon.open&&!composerBusy()&&me.role==='master'&&entry.frame&&entry._channel===channel&&row?.source==='vault'&&row.vault_id===binding.vault&&row.vault_url===binding.broker&&value.embed_scope===binding.scope;
+      if(message.state==='intent'){entry.control('permit',{request:message.request,allowed:!!matches&&row.generation===message.generation});return;}
+      if(message.state==='committed'){
+        panel.message=matches&&row.generation===message.generation&&row.operation===message.operation?'Exact Go vault operation/generation verified on the effective route. Entitlement unknown; selection/quota unchanged.':'Vault result is stale, superseded or not verified on the effective route. No success or replay claimed.';
+      }
+    }catch(_){if(message.state==='intent'&&entry._channel===channel)entry.control('permit',{request:message.request,allowed:false});panel.message='Effective vault route readback unavailable; no verified success and no automatic replay.';}
+  });
   panel.addEventListener('provider-action',async event=>{
     if(pending)return;
     const {action,id}=event.detail;
-    if(action==='close'){balloon.open=false;return;}
+    if(action==='close'){balloon.close();return;}
     pending=true;panel.pending=true;
     try {
       if(!current())throw new Error('Node/account changed. Close and reopen management; no action sent.');
@@ -4043,7 +4070,7 @@ async function openProviderManagement() {
     } catch(error){if(operation){held=true;panel.login={state:'outcome needs reconciliation'};}panel.message=String(error.message||error)+' No automatic replay.';}
     finally{pending=false;panel.pending=false;}
   });
-  balloon.addEventListener('close',()=>{panel.message=operation?'Login may still be pending. Reopen this panel to reconcile or cancel; closing is not credential deletion.':'';});
+  balloon.addEventListener('close',()=>{panel.entryAllowed=false;panel.clearEntry();panel.message=operation?'Login may still be pending. Reopen this panel to reconcile or cancel; closing is not credential deletion.':'Closed private entry. Any already dispatched or uncertain vault write remains reconcilable on its original vault; no automatic cancellation/resend.';});
   try{await read();}catch(error){panel.message=String(error.message||error);}
 }
 const COMMANDS = [
@@ -4394,6 +4421,7 @@ function renderAvatar(name) {
 }
 
 function renderUser() {
+  syncProviderEntryScope();
   const user = me.user || { name: "guest" };
   renderAvatar(user.name || user.id);
   // The tooltip names the *node*, because that is what this window is at, and how much it may do

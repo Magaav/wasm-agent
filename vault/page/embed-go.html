@@ -1,0 +1,10 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>OpenCode Go — private vault entry</title><link rel="stylesheet" href="/embed-go.css"></head>
+<body><main>
+<p id="destination">Verifying vault destination…</p>
+<p id="status" role="status" aria-live="polite">Waiting for the exact operator parent and vault identity.</p>
+<form id="enroll" autocomplete="off"><label for="admin">Private operator enrollment token</label><input id="admin" name="vault-enrollment" type="password" autocomplete="off" spellcheck="false" disabled><button type="submit" disabled>Enroll privately</button></form>
+<form id="key-form" autocomplete="off"><label for="key">OpenCode Go API key</label><input id="key" name="vault-go-key" type="password" autocomplete="off" spellcheck="false" disabled><button id="save" type="submit" disabled>Save to vault</button><button id="cancel-entry" type="button">Cancel entry</button></form>
+<div class="actions"><button id="reconcile" type="button" disabled>Read status / reconcile</button><button id="cancel-operation" type="button" disabled>Cancel pending operation</button></div>
+<p>Key and enrollment input stay on this vault origin. No credential readback. Save does not select a provider, test inference or reset monthly workspace quota.</p>
+</main><script src="/embed-go.js"></script></body></html>
