@@ -146,7 +146,10 @@ reuse stale approval. Ordinary reads do not mark anything read.
   typed proof of SDK non-invocation becomes terminal `not_submitted`; even that has
   no automatic retry in this initial path. A crash before intent leaves the durable
   prepared/approved action; no external call has been admitted.
-* `accepted` means matching server ACK, NOT recipient delivery/read. `echo_confirmed`
+* `accepted` means matching server ACK, NOT recipient delivery/read; a separate durable
+  per-intent delivery/read state is recorded only from observed recipient receipts
+  (see "Outbound delivery/read receipts" below) and reported by send/status, while
+  absence stays explicitly unknown. `echo_confirmed`
   requires exact own ID + body + prepared chat or its independently SDK-verified
   physical route in the journal; similar text/timing is not reconciliation. No
   exactly-once/lossless protocol promise. Pinned SDK itself may retry encrypted
@@ -246,3 +249,42 @@ read used an out-of-range line and refused without effects; bounded grep/read
 then inspected the real range. Subjective improvement: keep transactional config
 reads on the supplied query handle and always inspect SDK destination rewriting,
 not only method signatures. No recursive tool fixes or forced spell were started.
+
+## Outbound delivery/read receipts — 2026-10-17 (source proof; live arrival unproved)
+
+The pinned SDK (`v0.0.0-20261016130820-0b0a1cdac3e2`) emits `events.Receipt`
+(`types.MessageSource` + `MessageIDs []types.MessageID` + `Type types.ReceiptType`;
+`types/presence.go`, `receipt.go:handleReceipt`/`parseReceipt`). Only two of its
+values are recipient delivery/read evidence for a message WE sent:
+
+* `types.ReceiptTypeDelivered` (the empty string) — the recipient device received it.
+* `types.ReceiptTypeRead` (`"read"`) — the recipient opened the chat and saw it.
+
+Every other value stays explicitly unknown and is tracked only as a bounded ignored
+counter: `sender` (one of OUR other devices, not the recipient), `read-self` (the
+reader disabled read receipts; the official apps hide it), `inactive`, `retry`,
+`played`, `server-error`, `peer_msg`, `hist_sync`. A `read` observation never by
+itself becomes a recorded `delivered` observation.
+
+`observeReceipt` matches a receipt to an existing durable intent by exact account +
+generation + exact chat (or the physical route frozen at prepare time) + the stable
+preallocated message ID. Body similarity, timing, display names and own echoes are
+never used; an unmapped ID invents no intent; and only `accepted`/`echo_confirmed`
+intents are projected, so a receipt can never settle, resurrect or replay an
+`unknown`/held send and never triggers a resend.
+
+Observed state is durable per-intent columns (`receipt_delivered`, `receipt_read`,
+`receipt_basis`) plus a bounded `operator_receipts` audit table (newest 256 rows;
+oldest audit rows are evicted inside the same transaction and the per-intent fact is
+never evicted). `/operator/send` and `/operator/status` report
+`recipient_delivery`/`recipient_read` as known AT RETURN TIME: the send deadline is
+unchanged (45 s), no extra call waits for a receipt and a timeout/resend is never
+invented. `wa-whatsapp status`/`/status` add the bounded `operator_recipient_receipts`
+counters. A projection failure is a visible counter/event, never a sticky gap and
+never a claim.
+
+This is synthetic-fixture proof (real pinned SDK types, real SQLite/HTTP/process
+boundaries). Whether a real receipt actually arrives on a real device, and how
+quickly, is UNPROVED here: this worker used no real account, send or receipt.
+Historical holds, unknown sends and the running service are untouched.
+

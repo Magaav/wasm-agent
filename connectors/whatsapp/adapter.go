@@ -319,7 +319,14 @@ func (a *Adapter) event(evt any) (success bool) {
 		}
 		return persist(j.ingest(Message{Chat: e.JID.ToNonAD().String(), Mutation: "owner_chat_delete", OwnerMutation: true}))
 	case *events.Receipt:
-		return persist(j.event("receipt", "per-recipient state not reconstructed"))
+		if !a.eventIdentity() {
+			return false
+		}
+		// Bounded local observation of recipient delivery/read for our own exact
+		// message IDs. No network wait, no sticky gap and no re-ack claim: the
+		// projection result is a durable intent column or a visible counter.
+		j.observeReceipt(e)
+		return true
 	case *events.UndecryptableMessage:
 		return persist(j.event("unsupported_message", "undecryptable or unavailable; no lossless claim"))
 	}

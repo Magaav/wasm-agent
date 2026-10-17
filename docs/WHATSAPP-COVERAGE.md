@@ -1,5 +1,19 @@
 # WhatsApp observed names and mutation-hold coverage (2026-10-17)
 
+## Outbound receipt observation added — 2026-10-17 (source fixtures only)
+
+Our own outbound operator text now has a durable, honestly-caused delivery/read
+state. It is observed only from the pinned SDK's `events.Receipt`, matched to an
+exact durable intent by account/generation/exact chat (or frozen physical route)
+and the stable preallocated message ID. Only the SDK's `delivered` and `read`
+values advance it; `read-self` (recipient disabled read receipts), `sender`,
+`inactive` and every other type stay explicitly unknown. No time/echo/body/display
+trace is used, an unmapped receipt invents no intent, and a receipt can never
+settle or replay a hold/unknown send. State is per-intent, survives restart, and
+is reported by `/operator/send`, `/operator/status` and the bounded
+`operator_recipient_receipts` counters in `/status`. Receipt arrival on a real
+device remains unproved; historical holds/cutoff/language/scope are unchanged.
+
 ## Verified coordinator snapshot — not worker production inspection
 
 Coordinator reports source45f34261170017e6927cd8c4ef02b9f65411d30c authenticated/
