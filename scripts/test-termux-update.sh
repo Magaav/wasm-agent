@@ -62,6 +62,7 @@ make_source_tree() { # <dir>
   cp "$root/scripts/termux/wa-update.sh" "$_d/scripts/termux/wa-update.sh"
   cp "$root/scripts/termux/release-lib.sh" "$_d/scripts/termux/release-lib.sh"
   cp "$root/scripts/termux/adopt-existing.sh" "$_d/scripts/termux/adopt-existing.sh"
+  cp "$root/scripts/termux/bootstrap.sh" "$_d/scripts/termux/bootstrap.sh"
   cp "$root/scripts/install-termux.sh" "$_d/scripts/install-termux.sh"
   for _a in index.html style.css app.js components.js render.wasm manifest.webmanifest service-worker.js icon-192.png icon-512.png; do
     printf 'asset %s\n' "$_a" > "$_d/ui/$_a"
@@ -98,6 +99,32 @@ set -euo pipefail
 manifest=
 for a in "$@"; do manifest=$a; done
 [ -n "$manifest" ] || { echo 'fake cargo: no manifest path' >&2; exit 1; }
+
+# How many times this fake compiler has been asked to build, so a fixture can crash the
+# first attempt and succeed on the retry. And what the build handed it, so a fixture can
+# assert the profile rather than guess at it.
+attempt=1
+if [ -n "${FAKE_CARGO_STATE:-}" ]; then
+  if [ -f "$FAKE_CARGO_STATE" ]; then attempt=$(( $(cat "$FAKE_CARGO_STATE") + 1 )); fi
+  printf '%s\n' "$attempt" > "$FAKE_CARGO_STATE"
+fi
+if [ -n "${FAKE_CARGO_RECORD:-}" ]; then
+  printf 'attempt=%s jobs=%s stack=%s flags=%s incremental=%s argv=%s\n' "$attempt" \
+    "${CARGO_BUILD_JOBS:-}" "${RUST_MIN_STACK:-}" "${RUSTFLAGS:-}" "${CARGO_INCREMENTAL:-}" "$*" \
+    >> "$FAKE_CARGO_RECORD"
+fi
+
+# The phone failure in the shape cargo reports it: rustc killed by a signal, `process
+# didn't exit successfully`, exit status 101 - and no Rust diagnostic at all.
+crash=0
+if [ "${FAKE_CARGO_CRASH_FIRST:-0}" = 1 ] && [ "$attempt" = 1 ]; then crash=1; fi
+if [ "${FAKE_CARGO_CRASH_ALWAYS:-0}" = 1 ]; then crash=1; fi
+if [ "$crash" = 1 ]; then
+  echo 'error: could not compile `wa`' >&2
+  echo "process didn't exit successfully: \`rustc --crate-name wa\` (signal: 11, SIGSEGV)" >&2
+  echo 'warning: build failed, waiting for other jobs to finish...' >&2
+  exit 101
+fi
 if [ "${FAKE_CARGO_FAIL:-0}" = 1 ]; then echo 'fake cargo: build error' >&2; exit 1; fi
 out=$(dirname "$manifest")/target/release
 mkdir -p "$out"
@@ -457,6 +484,195 @@ verify_out=$(run_update --check)
 case "$verify_out" in *'up to date'*) ok 'after the bootstrap, wa update works and reports up to date' ;;
   *) die "after adopt, wa update --check said: $verify_out" ;;
 esac
+
+# ---- 8. the phone build path: profile, crash retry, refusal -----------------
+#
+# The failure this section exists for, in the operator's own log: rustc killed by a signal
+# under memory pressure, cargo reporting `process didn't exit successfully ... (signal: 11,
+# SIGSEGV)`, and the install stopping there with nothing left to read. Four behaviours are
+# fixtures below: retry once and say why, refuse by name and keep the log when the retry
+# dies too, never override an explicit setting, and leave a host that is not a phone
+# exactly as it was.
+
+# Every build before this point ran with the default profile, and a default-profile build
+# writes no log and creates no log directory. This asserts what the suites above did.
+[ ! -e "$updated/build-logs" ] || die 'a default-profile build created a build log directory'
+ok 'no default-profile build left a build log behind'
+
+# 8a. a non-Android host is unchanged: the same cargo invocation, no profile variables, no
+#     log directory.
+#     The gate can run this suite with CARGO_BUILD_JOBS set (WA_GATE_JOBS): the fixtures
+#     that follow are about what a build does with an explicit setting, so they set their
+#     own and this one starts from none.
+unset CARGO_BUILD_JOBS RUST_MIN_STACK RUSTFLAGS CARGO_INCREMENTAL
+export FAKE_CARGO_RECORD=$work/cargo-record
+: > "$FAKE_CARGO_RECORD"
+export WA_TERMUX_BUILD_LOG_DIR=$work/logs-that-must-not-appear
+make_install "$A" "$up"
+expect_ok 'a non-Android host updates with the host profile' 'updated' update
+[ "$(rl_get "$install/installed.txt" source_commit)" = "$B" ] ||
+  die 'the host-profile update did not switch'
+grep -q 'attempt=1 jobs= stack= flags= incremental= argv=build --release --locked --manifest-path ' \
+  "$FAKE_CARGO_RECORD" ||
+  die "the non-Android invocation changed: $(cat "$FAKE_CARGO_RECORD")"
+ok 'a non-Android host gets the unchanged cargo invocation and no profile variables'
+[ ! -e "$WA_TERMUX_BUILD_LOG_DIR" ] || die 'a successful build created a log directory'
+ok 'a successful build writes no build log'
+unset WA_TERMUX_BUILD_LOG_DIR
+
+# 8b. the compiler crashes on the first attempt: the crash is named, the retry is
+#     announced with the profile it will use, and the install completes.
+export FAKE_CARGO_STATE=$work/cargo-attempts
+export FAKE_CARGO_CRASH_FIRST=1
+: > "$FAKE_CARGO_RECORD"
+rm -f "$FAKE_CARGO_STATE"
+rm -rf "$releases" "$updated"
+make_install "$A" "$up"
+before_hashes=$(state_hashes)
+set +e
+crash_once_out=$(adopt 2>&1)
+crash_once_rc=$?
+set -e
+[ "$crash_once_rc" -eq 0 ] || die "the retry did not rescue the build: $crash_once_out"
+case "$crash_once_out" in
+  *'THE COMPILER CRASHED'*) ok 'a rustc signal is reported as a compiler crash, not a build error' ;;
+  *) die "the crash was not named: $crash_once_out" ;;
+esac
+case "$crash_once_out" in
+  *'retrying ONCE with the conservative profile'*) ok 'the retry is announced, with the profile it will use' ;;
+  *) die "the retry was not announced: $crash_once_out" ;;
+esac
+case "$crash_once_out" in
+  *'adopted'*) ok 'the install completes on the retry' ;;
+  *) die "the retry did not adopt: $crash_once_out" ;;
+esac
+[ "$(rl_get "$install/installed.txt" source_commit)" = "$B" ] ||
+  die 'the retried build did not install its revision'
+[ -f "$updated/build-logs/build-attempt1.log" ] ||
+  die 'the first crash kept no build log'
+grep -q 'signal: 11' "$updated/build-logs/build-attempt1.log" ||
+  die 'the kept log does not contain the crash it was kept for'
+ok 'the crash log is kept where the operator can read and paste it'
+grep -q 'attempt=2 jobs=1 stack=33554432 flags=-C codegen-units=1 incremental=0' "$FAKE_CARGO_RECORD" ||
+  die "the retry did not use the conservative profile: $(cat "$FAKE_CARGO_RECORD")"
+ok 'the retry ran with one job, a 32 MiB compiler stack, one codegen unit and no incremental state'
+[ "$before_hashes" = "$(state_hashes)" ] || die 'the crash retry changed node state'
+ok 'node state survives a crash and its retry byte-for-byte'
+unset FAKE_CARGO_CRASH_FIRST
+
+# 8c. the compiler crashes on BOTH attempts: a named refusal that says which profile was
+#     used, where the log is, and which diagnostics to paste - and switches nothing.
+export FAKE_CARGO_CRASH_ALWAYS=1
+rm -f "$FAKE_CARGO_STATE"
+rm -rf "$releases" "$updated"
+make_install "$A" "$up"
+before_hashes=$(state_hashes)
+set +e
+crash_twice_out=$(adopt 2>&1)
+crash_twice_rc=$?
+set -e
+[ "$crash_twice_rc" -ne 0 ] || die 'a compiler that crashed twice was accepted'
+case "$crash_twice_out" in
+  *'compiler_crash_build_refused'*) ok 'a second crash is refused by name' ;;
+  *) die "the refusal did not name the crash: $crash_twice_out" ;;
+esac
+case "$crash_twice_out" in
+  *'retry profile:'*'CARGO_BUILD_JOBS=1 RUST_MIN_STACK=33554432'*)
+    ok 'the refusal names the conservative profile that was applied' ;;
+  *) die "the refusal does not name the profile: $crash_twice_out" ;;
+esac
+case "$crash_twice_out" in
+  *"build log:        $updated/build-logs/build-attempt2.log"*)
+    ok 'the refusal names the retained build log' ;;
+  *) die "the refusal does not name the log: $crash_twice_out" ;;
+esac
+case "$crash_twice_out" in
+  *'rustc -V'*'free -m | head -3'*'nproc'*) ok 'the refusal names the three diagnostics to paste' ;;
+  *) die "the refusal does not name the diagnostics: $crash_twice_out" ;;
+esac
+[ -f "$updated/build-logs/build-attempt2.log" ] || die 'the refused build kept no log'
+grep -q 'signal: 11' "$updated/build-logs/build-attempt2.log" ||
+  die 'the retained log does not contain the crash it was kept for'
+ok 'the log of the refused attempt is retained'
+[ "$(rl_get "$install/installed.txt" source_commit)" = "$A" ] ||
+  die 'a refused build still switched the installed revision'
+[ ! -e "$releases/$B" ] || die 'a refused build left a release behind'
+ok 'a refused build switched nothing and left no release behind'
+[ "$before_hashes" = "$(state_hashes)" ] || die 'the refused build changed node state'
+ok 'node state is untouched by a refused build'
+unset FAKE_CARGO_CRASH_ALWAYS
+
+# 8d. an explicit setting is never overridden, and an unknown profile is refused by name.
+export WA_TERMUX_BUILD_PROFILE=conservative
+export CARGO_BUILD_JOBS=3
+rm -f "$FAKE_CARGO_STATE"
+: > "$FAKE_CARGO_RECORD"
+make_install "$A" "$up"
+expect_ok 'an explicit CARGO_BUILD_JOBS is respected, not overridden' 'CARGO_BUILD_JOBS=3 (yours, kept)' update
+grep -q 'attempt=1 jobs=3 stack=33554432 flags=-C codegen-units=1 incremental=0' "$FAKE_CARGO_RECORD" ||
+  die "an explicit setting was overridden: $(cat "$FAKE_CARGO_RECORD")"
+ok 'the forced phone profile kept the operator job count and applied the rest'
+unset CARGO_BUILD_JOBS
+export WA_TERMUX_BUILD_PROFILE=clever
+make_install "$A" "$up"
+expect_fail 'an unknown build profile is refused by name' 'build_profile_unknown' update
+unset WA_TERMUX_BUILD_PROFILE
+
+# ---- 9. the one command: clone from a local bare repo, adopt, then update -----
+#
+# A bare upstream (so the clone is a real git clone over file:// with no network) into a
+# destination that does not exist yet, against an installation with no updater - the state
+# the operator's phone was in. The build is still the fake cargo: no Rust toolchain runs.
+git clone -q --bare "$up" "$work/upstream-bare.git"
+one_dir=$work/one-command-checkout
+one_url="file://$work/upstream-bare.git"
+rm -rf "$one_dir" "$releases" "$updated"
+make_install "$A" "$up"
+rm -f "$install/bin/wa-update"
+rl_paths
+rl_manifest "$install" "$install/installed.sha256"
+before_hashes=$(state_hashes)
+run_one() { WA_TERMUX_TEST=1 bash "$root/scripts/termux/bootstrap.sh" "$@"; }
+set +e
+one_out=$(run_one --checkout "$one_dir" --repo "$one_url" 2>&1)
+one_rc=$?
+set -e
+[ "$one_rc" -eq 0 ] || die "the one command failed: $one_out"
+case "$one_out" in
+  *'cloning'*"$one_url"*) ok 'the one command clones when the checkout is absent' ;;
+  *) die "the one command did not clone: $one_out" ;;
+esac
+case "$one_out" in
+  *'adopting the existing installation'*) ok 'the one command chooses the one-time bootstrap for a pre-updater install' ;;
+  *) die "the one command did not adopt: $one_out" ;;
+esac
+[ "$(rl_get "$install/installed.txt" source_commit)" = "$B" ] ||
+  die 'the one command did not install the checkout revision'
+[ "$(rl_get "$install/installed.txt" source_remote)" = "$one_url" ] ||
+  die "the upstream was not defaulted from the clone's own remote: $(rl_get "$install/installed.txt" source_remote)"
+ok 'the upstream defaulted to the checkout own origin - no --upstream and no hardcoded URL'
+[ "$before_hashes" = "$(state_hashes)" ] || die 'the one command changed node state'
+ok 'node state survives the one command byte-for-byte'
+
+# The same one command, run again on a node that is now on the update track, updates
+# instead of adopting: this is what makes one line enough for every later revision.
+set +e
+again_out=$(run_one --checkout "$one_dir" --check 2>&1)
+again_rc=$?
+set -e
+[ "$again_rc" -eq 0 ] || die "the second run of the one command failed: $again_out"
+case "$again_out" in
+  *'on the update track'*) ok 'the same one command switches to wa update once the node is adopted' ;;
+  *) die "the second run did not switch to wa update: $again_out" ;;
+esac
+case "$again_out" in
+  *'up to date'*) ok 'and wa update answers for it' ;;
+  *) die "the second run did not reach the updater: $again_out" ;;
+esac
+[ "$(rl_get "$install/installed.txt" source_commit)" = "$B" ] ||
+  die 'the second run changed the installed revision'
+[ "$before_hashes" = "$(state_hashes)" ] || die 'the second run changed node state'
+ok 'the second run changed neither the revision nor node state'
 
 if [ "$(uname -s)" = MINGW64_NT-10.0 ] || [[ "$(uname -s)" == MINGW* ]] || [[ "$(uname -s)" == MSYS* ]]; then
   skipf "already_adopted (a managed release link) — this host cannot create symlinks"

@@ -7,6 +7,8 @@
 #                                      before `wa update` existed
 #   scripts/termux/wa-update.sh        the installed updater (shipped as bin/wa-update,
 #                                      which sources its own copy as bin/release-lib.sh)
+#   scripts/termux/bootstrap.sh        the one command: clone if needed, then whichever
+#                                      of the three above this node actually needs
 #
 # POSIX sh: the installed copy is read by `sh`, which on Termux is bash, and the same
 # functions are read by the bash installer and the bash bootstrap. Nothing here uses
@@ -107,9 +109,189 @@ rl_write_installed() { # <dest_file> <commit> <remote> <previous_sha|-> <install
   } > "$1"
 }
 
-# Build the runtime from a source tree. The lockfile is fixed (`--locked`) and the same
-# cargo invocation as the installer's, so a release is the tree, not the tree plus
-# whatever resolution felt like that day. Echoes the built binary path.
+# ---------------------------------------------------------------------------
+# Building the runtime, on a phone
+#
+# A phone is not a CI runner, and that is the whole reason this section is not two lines.
+# Several rustc processes at once, on a device that is also running Android, Termux and
+# the UI, is more memory than the device can give. The observed failure on the operator's
+# device was rustc killed by a signal - `signal: 11, SIGSEGV`, reported by cargo as
+# `process didn't exit successfully` - which is a crash, not a Rust diagnostic and not a
+# build error, and it retried nothing and left nothing behind to read.
+#
+# So an Android host builds with a conservative resource profile. Each setting is a
+# deliberate trade and none of them is a claimed root-cause fix: this is mitigation, plus
+# a record good enough to diagnose the next crash.
+#   CARGO_BUILD_JOBS=1            one rustc at a time, so peak memory stops scaling with
+#                                 the core count (the lever that matters most)
+#   RUSTFLAGS=-C codegen-units=1  one LLVM codegen unit per crate: less peak memory inside
+#                                 each rustc, at the cost of some build time (a slower
+#                                 build beats a crashed one)
+#   RUST_MIN_STACK=33554432       32 MiB per compiler thread against the 8 MiB default, for
+#                                 a rustc that dies of its own recursion or stack rather
+#                                 than of an allocation failure
+#   CARGO_INCREMENTAL=0           no incremental state to hold or write while building
+#
+# An explicit operator setting always wins and is named as kept: a build that silently
+# ignores CARGO_BUILD_JOBS=4 is a build nobody can explain afterwards. Nothing here applies
+# on a non-Android host, and WA_TERMUX_BUILD_PROFILE=conservative|default forces the choice
+# anywhere - which is how the fixture suite drives the phone profile on a host that is not
+# a phone.
+RL_BUILD_JOBS_CONSERVATIVE=1
+RL_BUILD_MIN_STACK_CONSERVATIVE=33554432
+RL_BUILD_RUSTFLAGS_CONSERVATIVE='-C codegen-units=1'
+
+# Android/Termux, detected the way the installers already guard on it.
+rl_build_host_is_android() {
+  [ "${PREFIX:-}" = /data/data/com.termux/files/usr ] || return 1
+  [ "$(uname -o 2>/dev/null || true)" = Android ] || return 1
+  return 0
+}
+
+# conservative | default. Sets RL_BUILD_PROFILE, and refuses by name on anything else -
+# which is why the refusal is here and not in a command substitution, where `exit 1` would
+# only end the subshell and leave the caller building with no profile chosen at all.
+rl_build_profile() {
+  case "${WA_TERMUX_BUILD_PROFILE:-}" in
+    conservative|default) RL_BUILD_PROFILE=$WA_TERMUX_BUILD_PROFILE ;;
+    '') if rl_build_host_is_android; then RL_BUILD_PROFILE=conservative; else RL_BUILD_PROFILE=default; fi ;;
+    *) rl_fail "build_profile_unknown: WA_TERMUX_BUILD_PROFILE=$WA_TERMUX_BUILD_PROFILE (use 'conservative' or 'default')" ;;
+  esac
+}
+
+# Applies the profile to the environment the compiler will inherit and records exactly what
+# was applied in RL_BUILD_PROFILE_DESC. Never on stdout: rl_build_wa's stdout is the built
+# binary path, because every caller reads it with $(...).
+rl_build_apply_profile() { # <conservative|default>
+  RL_BUILD_PROFILE_DESC=''
+  if [ "$1" != conservative ]; then
+    RL_BUILD_PROFILE_DESC='unchanged (host defaults)'
+    return 0
+  fi
+  if [ -n "${CARGO_BUILD_JOBS:-}" ]; then
+    RL_BUILD_PROFILE_DESC="$RL_BUILD_PROFILE_DESC CARGO_BUILD_JOBS=$CARGO_BUILD_JOBS (yours, kept)"
+  else
+    CARGO_BUILD_JOBS=$RL_BUILD_JOBS_CONSERVATIVE
+    export CARGO_BUILD_JOBS
+    RL_BUILD_PROFILE_DESC="$RL_BUILD_PROFILE_DESC CARGO_BUILD_JOBS=$CARGO_BUILD_JOBS"
+  fi
+  if [ -n "${RUST_MIN_STACK:-}" ]; then
+    RL_BUILD_PROFILE_DESC="$RL_BUILD_PROFILE_DESC RUST_MIN_STACK=$RUST_MIN_STACK (yours, kept)"
+  else
+    RUST_MIN_STACK=$RL_BUILD_MIN_STACK_CONSERVATIVE
+    export RUST_MIN_STACK
+    RL_BUILD_PROFILE_DESC="$RL_BUILD_PROFILE_DESC RUST_MIN_STACK=$RUST_MIN_STACK"
+  fi
+  if [ -n "${RUSTFLAGS:-}" ]; then
+    RL_BUILD_PROFILE_DESC="$RL_BUILD_PROFILE_DESC RUSTFLAGS='$RUSTFLAGS' (yours, kept)"
+  else
+    RUSTFLAGS=$RL_BUILD_RUSTFLAGS_CONSERVATIVE
+    export RUSTFLAGS
+    RL_BUILD_PROFILE_DESC="$RL_BUILD_PROFILE_DESC RUSTFLAGS='$RUSTFLAGS'"
+  fi
+  if [ -n "${CARGO_INCREMENTAL:-}" ]; then
+    RL_BUILD_PROFILE_DESC="$RL_BUILD_PROFILE_DESC CARGO_INCREMENTAL=$CARGO_INCREMENTAL (yours, kept)"
+  else
+    CARGO_INCREMENTAL=0
+    export CARGO_INCREMENTAL
+    RL_BUILD_PROFILE_DESC="$RL_BUILD_PROFILE_DESC CARGO_INCREMENTAL=$CARGO_INCREMENTAL"
+  fi
+  RL_BUILD_PROFILE_DESC=${RL_BUILD_PROFILE_DESC# }
+}
+
+# The one cargo invocation this file makes. The lockfile is fixed (`--locked`) and it is the
+# same invocation as the installer's, so a release is the tree, not the tree plus whatever
+# resolution felt like that day.
+rl_build_cargo() { # <src_root>
+  if [ "${WA_TERMUX_OFFLINE:-0}" = 1 ]; then
+    "$_rl_cargo" build --release --locked --offline --manifest-path "$1/rust/Cargo.toml"
+  else
+    "$_rl_cargo" build --release --locked --manifest-path "$1/rust/Cargo.toml"
+  fi
+}
+
+# One attempt, showing the output live and keeping it for the crash check. POSIX sh has no
+# pipefail, so the status of a pipeline is tee's status and not the build's: the subshell
+# that ran cargo writes the real status to a file instead. Each subshell ends in `:`, so a
+# tee that dies (a closed stderr) cannot abort the caller under `set -e`.
+rl_build_run() { # <src_root> <logfile>; sets RL_BUILD_RC
+  _rl_status=$(mktemp) 2>/dev/null || rl_fail 'build_log_failed: cannot create a temporary status file'
+  if command -v tee >/dev/null 2>&1; then
+    ( set +e
+      ( rl_build_cargo "$1" 2>&1; printf '%s\n' "$?" > "$_rl_status" ) | tee "$2" >&2
+      : )
+  else
+    # No tee: the log is still written and the live output is lost. A phone without
+    # coreutils is unusual, and losing the live output beats losing the crash record.
+    ( set +e
+      rl_build_cargo "$1" > "$2" 2>&1
+      printf '%s\n' "$?" > "$_rl_status"
+      : )
+    cat "$2" >&2
+  fi
+  RL_BUILD_RC=$(cat "$_rl_status" 2>/dev/null || true)
+  rm -f -- "$_rl_status"
+  case "$RL_BUILD_RC" in ''|*[!0-9]*) RL_BUILD_RC=1 ;; esac
+}
+
+# A build that died because the compiler died. cargo reports that as
+#   process didn't exit successfully: `rustc ...` (signal: 11, SIGSEGV)
+# with a non-zero (usually 101) status, so these markers are a crash and not a Rust error
+# message. Sets RL_BUILD_CRASH_LINE to the first matching line.
+rl_build_log_crashed() { # <logfile>
+  RL_BUILD_CRASH_LINE=
+  [ -f "$1" ] || return 1
+  RL_BUILD_CRASH_LINE=$(grep -m 1 -e 'signal: 11' -e 'SIGSEGV' \
+    -e "process didn't exit successfully" "$1" 2>/dev/null || true)
+  [ -n "$RL_BUILD_CRASH_LINE" ] || return 1
+  return 0
+}
+
+# Where a retained build log goes. Under $RL_UPDATE, which is already this node's private
+# (mode 700) update state, and never inside a release.
+rl_build_log_dir() {
+  [ -n "${RL_UPDATE:-}" ] || rl_paths
+  RL_BUILD_LOG_DIR=${WA_TERMUX_BUILD_LOG_DIR:-$RL_UPDATE/build-logs}
+}
+
+# Keep the log of a failed attempt where the operator can find and paste it, and echo where
+# it is now. One file per attempt, overwritten by the next build, so it cannot grow on a
+# phone; on a successful build no log is written at all. The caller must not delete the
+# temporary log afterwards: it has either moved or is the returned path.
+rl_build_retain_log() { # <tmp_log> <attempt>
+  rl_build_log_dir
+  if mkdir -p -- "$RL_BUILD_LOG_DIR" 2>/dev/null; then
+    chmod 700 "$RL_BUILD_LOG_DIR" 2>/dev/null || true
+    if mv -- "$1" "$RL_BUILD_LOG_DIR/build-attempt$2.log" 2>/dev/null; then
+      printf '%s' "$RL_BUILD_LOG_DIR/build-attempt$2.log"
+      return 0
+    fi
+  fi
+  rl_warn "build_log_dir_unwritable: could not place the log in $RL_BUILD_LOG_DIR"
+  printf '%s' "$1"
+}
+
+# The refusal after both attempts: named, with the profile that was applied, the retained
+# log and the three diagnostics worth pasting. It changes nothing and claims nothing.
+rl_build_refuse() { # <crashed_again 0|1> <log> <rc> [first_crash_log]
+  if [ "$1" = 1 ]; then
+    rl_warn 'compiler_crash_build_refused: the compiler crashed again with the conservative profile'
+  else
+    rl_warn "build_failed_after_crash_retry: cargo exited $3 after the compiler crashed once"
+  fi
+  rl_warn "  retry profile:    $RL_BUILD_PROFILE_DESC"
+  rl_warn "  build log:        $2"
+  [ -z "${4:-}" ] || rl_warn "  first crash log:  $4"
+  rl_warn '  paste these three lines when reporting this:'
+  rl_warn '    rustc -V'
+  rl_warn '    free -m | head -3'
+  rl_warn '    nproc'
+  rl_warn '  no release was assembled, switched or installed, and node state was not read or written'
+  exit 1
+}
+
+# Build the runtime from a source tree, with the crash-retry above. Echoes the built binary
+# path on stdout and nothing else.
 rl_build_wa() { # <src_root>
   _rl_src=$1
   [ -f "$_rl_src/rust/Cargo.toml" ] || rl_fail "source_checkout_required: $_rl_src/rust/Cargo.toml"
@@ -118,13 +300,45 @@ rl_build_wa() { # <src_root>
     rl_fail "cargo_required: install rust through Termux (pkg install rust)"
   fi
   printf 'termux-update: building with %s... the first build can take several minutes\n' "$_rl_cargo" >&2
-  if [ "${WA_TERMUX_OFFLINE:-0}" = 1 ]; then
-    "$_rl_cargo" build --release --locked --offline --manifest-path "$_rl_src/rust/Cargo.toml" ||
-      rl_fail 'build_failed: cargo build --locked --offline exited non-zero'
-  else
-    "$_rl_cargo" build --release --locked --manifest-path "$_rl_src/rust/Cargo.toml" ||
-      rl_fail 'build_failed: cargo build --locked exited non-zero'
+  rl_build_profile
+  _rl_profile=$RL_BUILD_PROFILE
+  rl_build_apply_profile "$_rl_profile"
+  if [ "$_rl_profile" = conservative ]; then
+    printf 'termux-update: conservative build profile: %s\n' "$RL_BUILD_PROFILE_DESC" >&2
   fi
+
+  _rl_attempt=1
+  _rl_first_log=
+  while : ; do
+    _rl_log=$(mktemp) 2>/dev/null || rl_fail 'build_log_failed: cannot create a temporary build log'
+    rl_build_run "$_rl_src" "$_rl_log"
+    if [ "$RL_BUILD_RC" -eq 0 ]; then
+      rm -f -- "$_rl_log"
+      break
+    fi
+    if [ "$_rl_attempt" -eq 1 ]; then
+      if ! rl_build_log_crashed "$_rl_log"; then
+        rm -f -- "$_rl_log"
+        if [ "${WA_TERMUX_OFFLINE:-0}" = 1 ]; then
+          rl_fail 'build_failed: cargo build --locked --offline exited non-zero'
+        fi
+        rl_fail 'build_failed: cargo build --locked exited non-zero'
+      fi
+      _rl_first_log=$(rl_build_retain_log "$_rl_log" 1)
+      printf 'termux-update: THE COMPILER CRASHED (status %s), this is not a build error: %s\n' \
+        "$RL_BUILD_RC" "$RL_BUILD_CRASH_LINE" >&2
+      printf '%s\n' "termux-update: its log is kept at $_rl_first_log" >&2
+      rl_build_apply_profile conservative
+      printf 'termux-update: retrying ONCE with the conservative profile: %s\n' \
+        "$RL_BUILD_PROFILE_DESC" >&2
+      _rl_attempt=2
+      continue
+    fi
+    _rl_crashed=0
+    if rl_build_log_crashed "$_rl_log"; then _rl_crashed=1; fi
+    _rl_kept_log=$(rl_build_retain_log "$_rl_log" 2)
+    rl_build_refuse "$_rl_crashed" "$_rl_kept_log" "$RL_BUILD_RC" "$_rl_first_log"
+  done
   _rl_bin="$_rl_src/rust/target/release/wa"
   [ -f "$_rl_bin" ] || rl_fail "build_output_missing: $_rl_bin"
   printf '%s' "$_rl_bin"
