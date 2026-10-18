@@ -166,6 +166,17 @@ func (j *Journal) prepareOperator(r operatorRequest, canonical, route string, ne
 	if strings.TrimSpace(r.Body) == "" || len(r.Body) > 4096 || !utf8.ValidString(r.Body) || len(r.Reply) > 256 {
 		return empty, errors.New("operator_text_invalid_or_too_large")
 	}
+	// The signature is composed HERE, before the intent is stored, so the body the
+	// approval binds and the id below hash the exact text that will be sent. An
+	// over-budget result is refused rather than truncated.
+	signed, err := operatorSignedBody(r.Body)
+	if err != nil {
+		return empty, err
+	}
+	if len(signed) > 4096 || !utf8.ValidString(signed) {
+		return empty, errors.New("operator_text_invalid_or_too_large")
+	}
+	r.Body = signed
 	j.identityMu.Lock()
 	defer j.identityMu.Unlock()
 	j.effectMu.Lock()

@@ -119,9 +119,20 @@ reuse stale approval. Ordinary reads do not mark anything read.
 
 ## Durable semantics and precise limits
 
-* UTF-8 body maximum4096 **bytes**, no trimming, translation, prefix, clipping or
+* UTF-8 body maximum4096 **bytes**, no trimming, translation, clipping or
   malformed-surrogate normalization. HTTP request≤32768 bytes. Full exact text is
   retained privately. No long DB/identity/mutation lock is held through network ACK.
+* **Enforced signature template.** `prepare` signs every body with the single
+  constant `🤖 _Copiloto_` on its own line when the body does not already start
+  with it, and repairs only a missing line break otherwise - the text is never
+  doubled. Composition happens where the body becomes exact, so the stored body,
+  the approval digest, the duplicate-intent hash and the sent text are the same
+  bytes; a body that would exceed4096 bytes after signing is refused, not
+  truncated. This is a formatting policy of the operator path, **not** proof of
+  authorship or identity: the signature must never be presented as evidence that
+  a human wrote the message. Intents created before this rule keep their original
+  unsigned body (no backfill, no rewrite). The deterministic transcript path is
+  separate and keeps its own `🎙️ _Automated transcript_` label.
 * Stable intent identity binds normalized account/generation, canonical recipient,
   exact body and reply reference; a preallocated SDK message ID is persisted BEFORE
   any external call. Preparation/approval additionally bind physical route,
