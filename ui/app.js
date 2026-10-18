@@ -751,6 +751,7 @@ function restoreRunSteps(state, bubble) {
   if (topic) {
     const children = Array.from(topic.body.children);
     const steps = children.filter(node => node.classList.contains("seg") ||
+      node.dataset.decisionPrelude === 'true' ||
       (transcript.dataset.debug === 'true' && node.tagName === "WA-STEP")).length;
     const calls = children.filter(node => node.tagName === "WA-TRACE").reduce((sum,node) => sum + node.count, 0);
     topic.setSummary(steps, calls, topic.summary?.ms ?? null);
@@ -961,12 +962,16 @@ function appendReasoning(text, complete = false) {
   return reasoningText;
 }
 
-function appendCommentary(text, messageId, pendingId) {
+function appendCommentary(text, messageId, pendingId, decisionPrelude) {
   if (!text || (messageId && renderedMessageIds.has(String(messageId)))) return;
   const block = document.createElement("wa-commentary");
   block.open = true;
   block.setText(text);
   if(pendingId)block.dataset.pendingId=String(pendingId);
+  // A decision step's prelude is the one commentary that folds into the run topic while the run is
+  // still live. The mark lives on the node so the fold stays `collapseRun`'s single rule instead of
+  // becoming a second placement path that could drift away from it.
+  if(decisionPrelude===true)block.dataset.decisionPrelude="true";
   if (messageId) {
     block.dataset.messageId = String(messageId);
     renderedMessageIds.add(String(messageId));
@@ -974,6 +979,27 @@ function appendCommentary(text, messageId, pendingId) {
   currentBubble().body.append(block);
   anchorRunStepContent(block);
   pin();
+  return block;
+}
+
+// A step whose provider completion reason was a tool call did not answer: what it wrote before
+// choosing is a prelude to that decision. The node classifies it from the step's own
+// `finish_reason` (the subscription path reads the provider's per-item phase for the same thing),
+// and the stored row carries `phase = "commentary"`; nothing here classifies text.
+//
+// The streamed text was drawn in the answer's place, so it is moved once, not kept twice: the
+// segment goes, the commentary carries the authoritative sentence, and the fold puts it in the run
+// topic that holds the decision rows - while the run is live, not a round later. Body order is kept,
+// so the prelude still reads before the calls it explains and a repaint reconstructs the same order.
+function promoteStepToCommentary(text, messageId) {
+  const prose = stripThinking(String(text == null ? streamText : text));
+  if (streamBody) { streamBody.remove(); streamBody = null; streamText = ""; }
+  if (!prose.trim()) return;
+  const preludeTrace = (trace && trace.parentNode === currentBubble().body) ? trace : null;
+  const block = appendCommentary(prose, messageId, null, true);
+  if (!block) return;
+  if (preludeTrace) preludeTrace.parentNode.insertBefore(block, preludeTrace);
+  collapseRun();
 }
 
 function appendStreamedCommentary(text, pendingId) {
@@ -1709,7 +1735,9 @@ function collapseRun(finalStart = false, settled = false, answered = true) {
   const existing = Array.prototype.find.call(body.children, (c) => c.tagName === "WA-RUN");
   const moves = Array.prototype.filter.call(body.children,
     (c) => c !== answer && c !== existing && !c.classList.contains('chat-content-run-status') &&
-      (settled || (c.tagName !== 'WA-DIFF' && c.tagName !== 'WA-COMMENTARY' && !(c.tagName==='WA-STEERING'&&c.dataset.state==='queued'))));
+      (settled || (c.tagName !== 'WA-DIFF' &&
+        (c.tagName !== 'WA-COMMENTARY' || c.dataset.decisionPrelude === 'true') &&
+        !(c.tagName==='WA-STEERING'&&c.dataset.state==='queued'))));
   const traces = moves.filter((c) => c.tagName === "WA-TRACE");
   // A run topic is only created once something actually ran - a run that never called a tool keeps
   // its plain answer. But once a topic exists, a later reply must still fold the previous answer into
@@ -1738,7 +1766,8 @@ function collapseRun(finalStart = false, settled = false, answered = true) {
   let steps = 0;
   for (const child of run.body.children) {
     if (child.tagName === "WA-TRACE") calls += child.count || 0;
-    else if (child.classList?.contains("seg") || (transcript.dataset.debug === 'true' && child.tagName === "WA-STEP")) steps += 1;
+    else if (child.classList?.contains("seg") || child.dataset.decisionPrelude === 'true' ||
+      (transcript.dataset.debug === 'true' && child.tagName === "WA-STEP")) steps += 1;
   }
   if (finalStart || settled) run.open = false;
   const endedAt = replayingMessages ? replayMessageEndedAt : Date.now();
@@ -1817,7 +1846,7 @@ function interruptSubscriptionAttempt(saved) {
 
 function handleEvent(event) {
   if (!replayingMessages && transcript===messages && !['done','error'].includes(event.type)) markRunStreamAlive();
-  if (["round", "reasoning", "commentary", "commentary_delta", "commentary_end", "pending_delta", "decision", "tool", "tool_result", "delta", "reply", "error", "done"].includes(event.type)) {
+  if (["round", "reasoning", "commentary", "commentary_delta", "commentary_end", "pending_delta", "decision", "step_phase", "tool", "tool_result", "delta", "reply", "error", "done"].includes(event.type)) {
     if(transcript===messages)clearActiveRunNotice();
   }
   if (event.type === 'delegated') {
@@ -1888,6 +1917,11 @@ function handleEvent(event) {
     appendStreamedCommentary(event.text || "",event.pending_id);
   } else if (event.type === "commentary_end") {
     finishStreamedCommentary(event.message_id);
+  } else if (event.type === "step_phase") {
+    // The node read this step's own provider completion reason and says the step was a decision,
+    // not an answer. Only that value moves the prose; any other phase, and a step that sent none,
+    // leaves the text where it is - in the answer's place.
+    if (event.phase === "commentary") promoteStepToCommentary(event.text, event.message_id);
   } else if (event.type === "reasoning") {
     showRunStep("reasoning", "Reasoning");
     // A reasoning model can think for a long time before it says anything, and a
@@ -2348,7 +2382,16 @@ function repaintMessages(rows, options = {}) {
           if (reasoningBlock && message.id) reasoningBlock.dataset.messageId = message.id;
         }
         if (message.phase === "commentary") {
-          handleEvent({ type: "commentary", text: message.content, message_id: message.id });
+          // A commentary row that also carries tool calls is a decision step's prelude (the
+          // ordinary provider path records the prose and the calls it explains on one row). It
+          // replays through the same live event, so a repaint folds it into the run topic exactly
+          // as the live run did. A commentary row with no calls is a subscription progress update
+          // and keeps its own path.
+          if ((message.tool_calls || []).length) {
+            handleEvent({ type: "step_phase", phase: "commentary", text: message.content, message_id: message.id });
+          } else {
+            handleEvent({ type: "commentary", text: message.content, message_id: message.id });
+          }
         } else if (message.content) {
           handleEvent({ type: "reply", text: message.content, changes: message.changes, message_id: message.id });
         }

@@ -3124,6 +3124,64 @@ mod decision_stream_tests {
         assert!(decisions(&events).is_empty(), "a text answer asks for no tool: {events}");
     }
 
+    /// The reader side of the prelude rule in `lua/core/agent.lua`: a step that writes prose *and*
+    /// asks for a tool must report both, and must report `finish_reason: tool_calls` - the one
+    /// provider signal the rule is allowed to read. A reader that dropped either would leave the
+    /// rule unable to fire, and the prose outside the run topic again.
+    #[test]
+    fn a_step_that_writes_text_and_calls_a_tool_reports_both() {
+        let (result, _events) = decision_fixture(concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"Let me check the ledger.\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_p\",\"function\":{\"name\":\"read\",\"arguments\":\"{}\"}}]}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
+            "data: [DONE]\n\n"));
+        assert_eq!(result["content"], "Let me check the ledger.");
+        assert_eq!(result["finish_reason"], "tool_calls");
+        assert_eq!(result["stream_complete"], true);
+        assert_eq!(result["tool_calls"][0]["function"]["name"], "read");
+    }
+
+    /// The other half of the same pair: the same prose, no tool call, `stop`. The verdict comes
+    /// from the completion reason and nothing else, so this step stays an answer.
+    #[test]
+    fn prose_without_a_tool_call_reports_stop_and_no_calls() {
+        let (result, _events) = decision_fixture(concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"Let me check the ledger.\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n"));
+        assert_eq!(result["content"], "Let me check the ledger.");
+        assert_eq!(result["finish_reason"], "stop");
+        assert!(result["tool_calls"].as_array().unwrap().is_empty());
+    }
+
+    /// The case the rule must refuse: a stream cut right after a tool call reports no reason at
+    /// all. "No reason" is not a decision, so this step's prose stays answer text - which is the
+    /// stated failure mode of the rule, and this is the fixture that pins it.
+    #[test]
+    fn a_stream_cut_after_a_tool_call_reports_no_finish_reason() {
+        let (result, _events) = decision_fixture(concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"Checking.\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_cut\",\"function\":{\"name\":\"read\",\"arguments\":\"{\"}}]}}]}\n\n"));
+        assert!(result["finish_reason"].is_null(), "a cut stream sends no reason: {result}");
+        assert_eq!(result["saw_finish_reason"], false);
+        assert_eq!(result["stream_complete"], false);
+        assert_eq!(result["content"], "Checking.");
+    }
+
+    /// A reasoning-only step that then calls a tool has no answer text at all: there is nothing
+    /// for the rule to move, and the thinking stays in its own channel.
+    #[test]
+    fn a_reasoning_only_step_that_calls_a_tool_has_no_answer_text() {
+        let (result, _events) = decision_fixture(concat!(
+            "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"weighing it\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_r\",\"function\":{\"name\":\"read\",\"arguments\":\"{}\"}}]}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
+            "data: [DONE]\n\n"));
+        assert_eq!(result["content"], "");
+        assert_eq!(result["reasoning"], "weighing it");
+        assert_eq!(result["finish_reason"], "tool_calls");
+    }
+
     #[test]
     fn decision_preview_is_bounded_and_truncation_is_flagged() {
         let filler = "X".repeat(300);
