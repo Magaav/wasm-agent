@@ -85,7 +85,7 @@ func statusRequest(i operatorIntent) operatorRequest {
 func TestOperatorSeparateApprovalExactUnicodeAndScope(t *testing.T) {
 	j, r, f := operatorFixture(t)
 	i := preparedOperator(t, j, r, f)
-	if i.State != "prepared" || i.Body != r.Body || i.SendID == "" {
+	if i.State != "prepared" || i.Body != operatorSignature+"\n"+r.Body || i.SendID == "" {
 		t.Fatal(i)
 	}
 	unapproved, err := j.sendOperator(context.Background(), statusRequest(i), f)
