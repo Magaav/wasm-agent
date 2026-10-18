@@ -35,6 +35,27 @@ Coordinator alone installs/provisions/tests real account; synthetic source check
 and ARM64 cross-build are not runtime proof. Self-review, focused checks only;
 `gate_verified:false`, `release_verified:false`.
 
+## Termux `wa update` and the one-time bootstrap — 2026-10-18 (source; Android runtime unproved)
+
+The phone's preview can now stay current from Termux itself. `wa update --check`
+reports the installed revision against upstream and is read-only (up to date exits
+0); `wa update` fetches the exact resolved commit into a private staging directory,
+builds the locked workspace on the phone, verifies the candidate (manifest, ELF
+machine, it runs), switches, and prints `updated <from> -> <to>` plus the rollback
+path; `wa update --rollback` resolves before any network use. It refuses on an
+unknown installed revision, unknown/unreachable upstream, a non-descendant
+candidate, a modified installation, wrong ABI, failed build, concurrent update or
+an interrupted leftover release — and it never re-runs `wa setup` or asks for a key.
+Node identity, `memory.db`/history/sessions, bindings, provider env, workspace,
+instructions and unrelated files are preserved byte-for-byte, asserted with sha256
+before/after and by proving no state file reaches a release or staging area.
+Installations older than the feature are migrated once with
+`scripts/install-termux.sh --adopt-existing` (verified byte-for-byte backup as the
+rollback release), with `--recover` for an interrupted switch. Fixtures: 12+37
+passing checks on a non-Android host, which announces what it skips; a real aarch64
+cargo build, real candidate execution, real `$PREFIX` symlinks and the phone's
+actual state layout remain unproved. See the README Android section.
+
 ## WhatsApp outbound delivery/read receipts — 2026-10-17 (source; live arrival unproved)
 
 Our own outbound operator text now carries a durable, honestly-caused delivery/read

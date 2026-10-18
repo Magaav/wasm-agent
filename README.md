@@ -152,6 +152,53 @@ running. Reinstallation currently refuses an existing preview so it cannot
 overwrite a running or stateful installation silently. Agent state and credentials
 live under `~/.wasm-agent`, outside the replaceable runtime directory.
 
+### Keeping the preview current: `wa update`, and the one-time bootstrap
+
+An installation that already carries `wa update` stays current with two commands
+in Termux, and **nothing about your node state is recreated**:
+
+```sh
+wa update --check    # read-only: installed revision vs upstream; exits 0 when current
+wa update            # fetch pinned revision -> build -> verify -> switch
+wa update --rollback # back to the previous release, no network needed
+```
+
+The update fetches the exact resolved commit into a private staging directory,
+builds the locked Rust workspace on the phone, verifies the candidate (manifest,
+ELF machine, it runs), then switches and prints `updated <from> -> <to>` plus the
+rollback path. It refuses rather than guessing: unknown installed revision, unknown
+or unreachable upstream, a candidate that is not a descendant of what is installed,
+a modified installation, a wrong-ABI candidate, a failed build, a concurrent update,
+or an interrupted leftover release. **Preserved byte-for-byte** (and asserted with
+sha256 before/after in the fixture suite): the node key/identity, `memory.db` and
+history/sessions, bindings and grants, provider environment and credentials, the
+workspace path, instructions and unrelated files. No state file is ever copied into
+a release or staging area; `wa setup` is never re-run and no provider key is asked
+for again.
+
+An installation **older than this feature** has no working `wa update` by design.
+Migrate it once, from a checkout in Termux:
+
+```sh
+cd ~ && git clone https://github.com/Magaav/wasm-agent.git wa-bootstrap
+cd wa-bootstrap && git checkout main
+bash scripts/install-termux.sh --adopt-existing
+#   upstream_url_unknown -> re-run with --upstream https://github.com/Magaav/wasm-agent.git
+#   state_inside_install:<path> -> it refuses to move your state; fix the layout first
+```
+
+The bootstrap takes a verified byte-for-byte copy of the old installation as the
+rollback release, builds the checked-out revision and switches it in; the checkout
+itself is not installed into the runtime. If a switch is ever interrupted badly
+enough that `wa` is gone, run `bash scripts/install-termux.sh --recover` from that
+checkout. Restart the UI (`Ctrl-C`, then `wa ui`) to run the new runtime.
+
+**Honest limit:** this is developed and fixture-tested on a non-Android host. A real
+`pkg install rust` build, real ELF execution of the candidate, real `$PREFIX`
+symlinks and the phone's actual `~/.wasm-agent` layout are **not** proven here, and
+the Windows fixture announces the checks it skips (`WA_TERMUX_HOST_PROBES=0`,
+the symlink case).
+
 ### Bind an existing CLI to the fabric
 
 In `wa chat`, `/bind https://rendezvous.colmeio.com` inspects the managed service
