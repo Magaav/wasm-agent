@@ -54,7 +54,11 @@ local function repository(ctx)
   local runtime_common=git(runtime,'rev-parse --path-format=absolute --git-common-dir')
   local normalize=function(v) return platform.os()=='windows' and v:lower() or v end
   if normalize(common)~=normalize(runtime_common) then return nil,'other_repository' end
-  local main=git(runtime,'worktree list --porcelain'):match('^worktree ([^\r\n]+)')
+  -- Same derivation as the integrator's: from the common git dir, never from the first
+  -- line of `worktree list`, whose unbounded output is tail-clipped by host.exec once a
+  -- repository has enough worktrees (138 here, 24,644 bytes, ~24 KiB view) - which
+  -- refused a clean canonical main. The requirement below is unchanged.
+  local main=runtime_common:gsub('[/\\]%.git[/\\]?$','')
   assert(main and git(main,'branch --show-current')=='main','wave_canonical_main_missing')
   return {main=main,common=common,id=host.sha256(normalize(common)),runtime_common=runtime_common}
 end
