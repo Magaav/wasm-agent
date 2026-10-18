@@ -1814,6 +1814,10 @@ gate_run node scripts/test-command-parity.cjs
 # Explicit two-sided binding proof; private registry/CLI, no live service or inference.
 gate_run node scripts/test-binding.cjs "$BIN"
 gate_run node scripts/test-binding-runtime.cjs "$BIN"
+# The no-expiry (permanent) binding branch has its own registry fixture, because what it checks is
+# that the ordinary request keeps its 24-hour bounds while the explicit intent is refused by name
+# unless an administrator affirms it. A separate file means a failure names which half broke.
+gate_run node scripts/test-binding-permanent.cjs "$BIN"
 gate_run node scripts/test-verify-install.mjs
 gate_run node scripts/test-merge-audit.mjs
 # The boundary the audit's own verify verb answers, run at a wave's two entrypoints: a repository that

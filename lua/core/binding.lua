@@ -2,6 +2,39 @@
 local json=dofile('lua/vendor/json.lua')
 local paths=dofile('lua/core/paths.lua')
 local M={DEFAULT_SERVICE='https://rendezvous.colmeio.com'}
+-- Lifetime intent. 'standard' is the ordinary 24-hour consent and stays the default for every node;
+-- 'permanent' is the operator's explicit no-expiry choice for his own node and the only intent allowed
+-- to exceed 86400. The node asks for fifty years and the registry accepts at most a hundred
+-- (rust/wa-host/src/rendezvous/bindings.rs), so an honest request cannot be refused by ordinary clock
+-- skew and the stored value stays finite. Neither intent grants anything on its own: a registry
+-- administrator must affirm the exact intent at acceptance, and `lifetime` is carried inside the
+-- signed request, so no flag here can talk the registry into a longer grant.
+local STANDARD_CONSENT_SECONDS=86400
+local PERMANENT_CONSENT_SECONDS=50*365*24*3600
+local function lifetime_of(t)
+  if type(t)~='table' then return 'standard' end
+  local v=t.lifetime
+  if v==nil and type(t.request)=='table' then v=t.request.lifetime end
+  return v=='permanent' and 'permanent' or 'standard'
+end
+local function lifetime_valid(t)
+  if type(t)~='table' then return false end
+  return t.lifetime==nil or t.lifetime=='standard' or t.lifetime=='permanent'
+end
+local function service_supports(lifetimes,name)
+  if name=='standard' then return true end
+  if type(lifetimes)~='table' then return false end
+  for _,v in ipairs(lifetimes) do if v==name then return true end end
+  return false
+end
+function M.lifetime_of(t) return lifetime_of(t) end
+-- One wording for both status and the CLI's consent line: a permanent grant says so in words, never as
+-- a very large timestamp and never as an empty field.
+function M.lifetime_label(t)
+  if lifetime_of(t)=='permanent' then return 'no expiry (permanent binding; revoke to end it)' end
+  local at=type(t)=='table' and (t.expires_at or (type(t.request)=='table' and t.request.expires_at)) or nil
+  return 'expires '..tostring(at)..' (24-hour standard consent)'
+end
 local function decode(raw) local ok,v=pcall(json.decode,raw or '');if not ok or type(v)~='table' then return nil,'binding_reply_invalid' end;return v end
 function M.present()
   if not host.binding_state then return host.read_file(paths.config()..'/binding.json')~=nil end
@@ -16,6 +49,9 @@ function M.saved()
       or type(s.expires_at)~='number' or type(s.consent)~='boolean' or type(s.active)~='boolean'
       or type(s.phase)~='string' or (s.network_role~='master' and s.network_role~='guest')
       or s.digest~=host.sha256(s.raw_request) then return nil,'binding_state_invalid' end
+  -- The intent lives in the signed request body; a state file naming a lifetime the body does not is
+  -- corrupt and refuses rather than being read as either.
+  if not lifetime_valid(s.request) then return nil,'binding_state_lifetime_invalid' end
   local original=decode(s.raw_request);local i=decode(host.node_identity())
   if not original or json.encode(original)~=json.encode(s.request) or s.request.node_id~=i.node_id or s.request.public_key~=i.public_key
       or s.request.service~=s.service or s.request.expires_at~=s.expires_at or json.encode(s.request.operators)~=json.encode(s.operators) then return nil,'binding_state_identity_invalid' end
@@ -51,6 +87,21 @@ function M.inspect(service)
   local origin,problem=url(service or M.DEFAULT_SERVICE);if not origin then return failure(problem) end
   local v,err=http(origin,'GET','/service');if not v then return failure('binding_service_unavailable',err) end
   if v.protocol~=1 or v.binding_protocol~=1 or v.enrollment_ready~=true or type(v.operators)~='table' or #v.operators==0 or #v.operators>32 then return failure('binding_service_protocol_unsupported') end
+  -- Lifetime discovery: an older registry advertises nothing and therefore gets standard only, so a
+  -- permanent intent refuses locally with a named reason instead of failing as a raw 400 after local
+  -- consent has already been stored.
+  local lifetimes={'standard'}
+  if v.binding_lifetimes~=nil then
+    if type(v.binding_lifetimes)~='table' or #v.binding_lifetimes<1 or #v.binding_lifetimes>2 then return failure('binding_service_protocol_unsupported') end
+    local advertised={}
+    for _,name in ipairs(v.binding_lifetimes) do
+      if (name~='standard' and name~='permanent') or advertised[name] then return failure('binding_service_protocol_unsupported') end
+      advertised[name]=true
+    end
+    if not advertised['standard'] then return failure('binding_service_protocol_unsupported') end
+    lifetimes={'standard'}
+    if advertised['permanent'] then lifetimes[#lifetimes+1]='permanent' end
+  end
   local seen={};local pins={}
   for _,pin in ipairs(v.operators) do
     if type(pin.node_id)~='string' or not pin.node_id:match('^%x+$') or #pin.node_id~=32 or type(pin.public_key)~='string' or #pin.public_key~=64 or not pin.public_key:match('^%x+$') or seen[pin.node_id] then return failure('binding_operator_pins_invalid') end
@@ -58,19 +109,25 @@ function M.inspect(service)
     seen[pin.node_id]=true;pins[#pins+1]={node_id=pin.node_id,public_key=pin.public_key}
   end
   table.sort(pins,function(a,b)return a.node_id<b.node_id end)
-  return {ok=true,service=origin,operators=pins,identity=identity(),scope='user-account-tools',hours=24}
+  return {ok=true,service=origin,operators=pins,identity=identity(),scope='user-account-tools',hours=24,lifetimes=lifetimes}
 end
 local function same_pins(a,b)
   if type(a)~='table' or type(b)~='table' or #a~=#b then return false end
   for i,p in ipairs(a) do if p.node_id~=b[i].node_id or p.public_key~=b[i].public_key then return false end end
   return true
 end
-function M.begin(preview,consent,renew)
-  if consent~='BIND' then return failure('binding_consent_required') end
+function M.begin(preview,consent,renew,lifetime)
+  lifetime=lifetime or 'standard'
+  if lifetime~='standard' and lifetime~='permanent' then return failure('binding_lifetime_invalid') end
+  -- The no-expiry intent takes its own word, so the ordinary `BIND` can never carry it by accident.
+  if lifetime=='permanent' then
+    if consent~='PERMANENT' then return failure('binding_permanent_consent_required') end
+  elseif consent~='BIND' then return failure('binding_consent_required') end
   if host.getenv('WASM_AGENT_MANAGED')=='1' and not M.present() then return failure('binding_existing_managed_enrollment_preserved') end
   if not preview or not preview.ok then return failure('binding_preview_required') end
   local fresh=M.inspect(preview.service);if not fresh.ok then return fresh end
   if not same_pins(fresh.operators,preview.operators) then return failure('binding_operator_pins_changed') end
+  if not service_supports(fresh.lifetimes,lifetime) then return failure('binding_lifetime_unsupported') end
   local old,err=M.saved();if err then return failure(err) end
   if old and (old.consent or old.active or old.phase=='submitting' or old.phase=='unknown') and not renew then return failure('binding_existing_request_inspect_first') end
   if renew and old then
@@ -81,7 +138,11 @@ function M.begin(preview,consent,renew)
   local now=math.floor(host.now());local i=identity();local id=host.uuid():gsub('-','');local code=host.uuid():gsub('-',''):sub(1,12)
   local name=host.read_file(paths.config()..'/node.name') or host.getenv('WASM_AGENT_NODE_NAME') or 'bound-node'
   name=name:gsub('^%s+',''):gsub('%s+$','')
-  local request={schema=1,id=id,node_id=i.node_id,public_key=i.public_key,code=code,name=name,service=fresh.service,operators=fresh.operators,scope='user-account-tools',expires_at=now+86400,pairing_expires_at=now+600}
+  local request={schema=1,id=id,node_id=i.node_id,public_key=i.public_key,code=code,name=name,service=fresh.service,operators=fresh.operators,scope='user-account-tools',expires_at=now+(lifetime=='permanent' and PERMANENT_CONSENT_SECONDS or STANDARD_CONSENT_SECONDS),pairing_expires_at=now+600}
+  -- A standard request keeps the deployed shape byte-for-byte (eleven fields, no `lifetime`); only the
+  -- explicit permanent intent adds the twelfth. The capability asked for never grows: the scope stays
+  -- exactly 'user-account-tools' either way.
+  if lifetime=='permanent' then request.lifetime='permanent' end
   local raw_request=json.encode(request)
   local s={schema=1,request=request,raw_request=raw_request,digest=host.sha256(raw_request),active=false,consent=true,phase='submitting',network_role='guest',operators=fresh.operators,service=fresh.service,expires_at=request.expires_at}
   local written,why=cas(old,s);if not written then return failure(why) end
@@ -91,7 +152,7 @@ function M.begin(preview,consent,renew)
   s.phase='pending';s.revision=result.binding.revision;s.error=nil
   local saved,save_error=cas(written,s);if not saved then return failure(save_error) end
   local transport=decode(host.binding_transport('start'));if not transport or not transport.ok then return failure('binding_transport_unavailable',transport and transport.error) end
-  return {ok=true,state='pending',node_id=i.node_id,code=code,phrase=code:sub(1,4)..'-'..code:sub(5,8)..'-'..code:sub(9,12),pairing_expires_at=request.pairing_expires_at,expires_at=request.expires_at}
+  return {ok=true,state='pending',node_id=i.node_id,code=code,phrase=code:sub(1,4)..'-'..code:sub(5,8)..'-'..code:sub(9,12),pairing_expires_at=request.pairing_expires_at,expires_at=request.expires_at,lifetime=lifetime}
 end
 local function request_status(s) return http(s.service,'GET','/bindings/request?id='..s.request.id,'bind-status') end
 local function valid_reply(s,v)
@@ -105,7 +166,7 @@ function M.status()
   local own,lookup_error=http(s.service,'GET','/lookup?node_id='..s.request.node_id,'lookup')
   local registered=own and own.public_key==s.request.public_key and own.online==true or false
   local active=s.active==true and s.consent==true and s.expires_at>host.now() and v.binding.state=='accepted'
-  return {ok=true,state=v.binding.state,active=active,registered=registered,attached=registered and own.relay_attached==true or false,lookup_error=lookup_error,local_role_preserved=true,network_role=s.network_role,node_id=s.request.node_id,code=s.request.code,expires_at=s.expires_at,transport=transport}
+  return {ok=true,state=v.binding.state,active=active,registered=registered,attached=registered and own.relay_attached==true or false,lookup_error=lookup_error,local_role_preserved=true,network_role=s.network_role,node_id=s.request.node_id,code=s.request.code,expires_at=s.expires_at,lifetime=lifetime_of(s),consent=M.lifetime_label(s),transport=transport}
 end
 function M.profile(include_inactive)
   local s,err=M.saved();if not s then return nil,err or 'not_bound' end
@@ -143,9 +204,16 @@ function M.accept_preview(code)
   return {ok=true,service=dofile('lua/core/nodes.lua').rendezvous_url(),binding=found}
 end
 function M.accept(preview,confirmation)
-  if confirmation~='ACCEPT' or not preview or not preview.ok then return failure('binding_accept_confirmation_required') end
+  if not preview or not preview.ok then return failure('binding_accept_confirmation_required') end
   local b=preview.binding;local r=b.request
-  local v,err=http(preview.service,'POST','/bindings/accept','bind-accept',{id=r.id,node_id=r.node_id,public_key=r.public_key,code=r.code,digest=b.digest,revision=b.revision})
+  -- Accepting a no-expiry request takes its own word too, and the affirmation travels in the signed
+  -- acceptance body: the registry refuses a permanent request without it and refuses it on a standard
+  -- request, so approval cannot quietly change the lifetime in either direction.
+  local permanent=lifetime_of(r)=='permanent'
+  if confirmation~=(permanent and 'ACCEPT-PERMANENT' or 'ACCEPT') then
+    return failure(permanent and 'binding_accept_permanent_confirmation_required' or 'binding_accept_confirmation_required')
+  end
+  local v,err=http(preview.service,'POST','/bindings/accept','bind-accept',{id=r.id,node_id=r.node_id,public_key=r.public_key,code=r.code,digest=b.digest,revision=b.revision,authorize_lifetime=permanent and 'permanent' or nil})
   return v or failure('binding_accept_outcome_unconfirmed',err)
 end
 function M.target(selector)

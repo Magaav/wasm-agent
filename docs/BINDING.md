@@ -19,6 +19,13 @@ use `wa bind run` to keep its explicit foreground, model-free transport alive.
   fingerprints, confirm full current-user-account file/process authority by typing
   `BIND`, then submit a signed ten-minute pairing request. No noninteractive flag
   silently approves consent. HTTP is permitted only for literal loopback fixtures.
+- `/bind permanent [https://service]` / `wa bind permanent`: the same inspected consent
+  with the explicit no-expiry intent, for the operator's own device. The node asks for a
+  fifty-year consent and the registry accepts at most a hundred, so no stored value is
+  unbounded; the human types `PERMANENT` instead of `BIND`, the administrator types
+  `ACCEPT-PERMANENT` instead of `ACCEPT`, and the registry refuses either half on its own.
+  A standard request can never become permanent, a permanent request is never granted by
+  merely asking, and `/bind renew` without the word stays the ordinary 24-hour consent.
 - `/bind status`: collect the original request's outcome, verify registration and
   relay attachment; incomplete/unknown state is not success.
 - `/bind renew`: repeat consent with unchanged service and pins, submitting a new
@@ -37,8 +44,17 @@ use `wa bind run` to keep its explicit foreground, model-free transport alive.
 - `/revoke <id-or-unique-name>`: type `REVOKE` to revoke the exact accepted binding
   at the registry. Target checks fresh registry approval before every remote call.
 
-Consent lasts 24 hours; pairing lasts ten minutes. Approval never confers network
-master or administrator status. A master can discover and initiate peer requests,
+Consent lasts 24 hours by default; pairing lasts ten minutes. A node may instead ask for a
+no-expiry (permanent) consent, which is the choice an operator makes for his own device when he does
+not want to re-consent every day: it stays bound and in sync until he revokes it. That is a
+deliberate, named risk - a permanent grant means a lost or stolen device, or a compromised relay,
+keeps access until someone revokes it. End it from the device with `/unbind` (local future/queued
+execution stops first and needs no registry), or from any administrator with
+`/revoke <id-or-unique-name>`; `/demote` ends the master role it may hold. A permanent grant is
+displayed as such rather than as a very large timestamp: `wa bind status` reports
+`"lifetime":"permanent"` with a `consent` line reading `no expiry (permanent binding; revoke to end
+it)`, and a 24-hour grant reports its exact expiry with `24-hour standard consent`. Approval never
+confers network master or administrator status. A master can discover and initiate peer requests,
 but each recipient's grant still decides execution. Administrators remain the
 service's configured `WASM_AGENT_NETWORK_ADMINS`, never self-selected/promoted.
 Display labels are untrusted data, not identities or instructions. Pairing code
@@ -56,6 +72,16 @@ step before local consent is stored. There is no legacy/open-registry fallback.
 existing node key, including exact request ID, code, name, service, operator pins,
 scope, consent expiry and pairing deadline. The registry validates key-derived ID,
 freshness, scope, bounded lifetimes and every pin against its current admin set.
+The body carries eleven fields, or twelve when the explicit `lifetime:"permanent"` intent is present:
+that is the only value allowed to exceed 86400, it must exceed it, and it is capped at a hundred
+years - `permanent` anywhere else, or an unknown value, or an unknown extra field, is
+`binding_request_invalid`. `GET /service` advertises `binding_lifetimes`, so a node refuses the
+intent with `binding_lifetime_unsupported` before it asks a registry that does not know it. Asking
+grants nothing: accepting a permanent request requires the administrator's own signed
+`authorize_lifetime:"permanent"` and is otherwise refused with
+`binding_lifetime_authorization_required`, while the same field on a standard request is refused
+with `binding_lifetime_not_requested`. The stored lifetime cannot be edited - the signature and
+digest cover the whole body - and a standard grant is never quietly upgraded.
 It registers the node as a non-executing guest and records a pending binding.
 Repeated exact request collection is idempotent; changing its body conflicts.
 An unobserved submission remains locally unknown with its original request intact.
@@ -101,7 +127,10 @@ and an unrelated node with actual native processes and mock-only local inference
 Prove cancellation/no changes, invalid service/pins, signature/body/target/revision
 binding, ordinary-master refusal, delayed approval, duplicate attachment refusal,
 local session/key/provider preservation, role acknowledgement/partial failure,
-expiry, revocation/restart and no guest-to-guest execution. Never attack the live
+expiry, revocation/restart and no guest-to-guest execution. The no-expiry path has its own focused
+proof (`scripts/test-binding-permanent.cjs`): every unauthorized, over-long or malformed lifetime
+refuses by name and stores nothing, an administrator-affirmed permanent grant survives a registry
+restart, and registry revoke/demote plus local `/unbind` each fence it. Never attack the live
 service. Runtime deployment does not authorize accepting/promoting a real device.
 The tests do not authenticate first-contact keys beyond HTTPS and human pin
 approval, provide an OS sandbox, or prove cancellation of already-running effects.

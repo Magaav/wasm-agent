@@ -1,6 +1,16 @@
 //! Two-sided enrollment. Request data cannot grant a role or execution authority.
 use super::*;
 
+// A consent window is chosen by the applicant and validated here. The ordinary scope always fits 24
+// hours; the explicit `lifetime:"permanent"` intent is the only one that may exceed it, and it stays
+// bounded - the registry accepts at most a hundred years, so no stored value is unbounded. A node asks
+// for fifty years (`lua/core/binding.lua`), which leaves room enough that ordinary clock skew between
+// an honest node and this registry cannot refuse it. Neither value grants anything by itself: the
+// administrator's acceptance decides (see `transition`), and `/service` advertises both lifetimes so
+// a node can refuse the intent before it asks.
+const STANDARD_CONSENT_SECONDS:i64=24*60*60;
+const PERMANENT_CONSENT_SECONDS:i64=100*365*24*60*60;
+
 pub(super) fn schema(c: &Connection) -> rusqlite::Result<()> {
     c.execute_batch("CREATE TABLE IF NOT EXISTS bindings (
       id TEXT PRIMARY KEY, node_id TEXT NOT NULL, public_key TEXT NOT NULL,
@@ -79,9 +89,17 @@ fn request(c:&Connection,stream:&mut TcpStream,p:&Value,body:&[u8],header:&dyn F
     let hex=|s:&str,n:usize|s.len()==n&&s.bytes().all(|b|b.is_ascii_hexdigit()&&!b.is_ascii_uppercase());
     let ts=header("x-wa-ts").parse::<i64>().unwrap_or(0);let at=now();
     let expires=p["expires_at"].as_i64().unwrap_or(0);let pairing=p["pairing_expires_at"].as_i64().unwrap_or(0);
-    if p.as_object().map(|m|m.len()!=11).unwrap_or(true) || p["schema"]!=1 || !hex(id,32)||!hex(node_id,32)||!hex(key,64)||!hex(code,12)
+    // `lifetime` is the explicit no-expiry intent. Absent or "standard" keeps the 24-hour scope exactly
+    // as it was; "permanent" is the only other accepted value and is the whole branch: a permanent
+    // request may exceed 86400 and must exceed it, nothing may exceed the ceiling, and any third value
+    // is refused. The field count is fixed too, so an unknown extra field is not a channel.
+    let lifetime=match p.get("lifetime"){None=>"standard",Some(v)=>v.as_str().unwrap_or("")};
+    let declared=usize::from(p.get("lifetime").is_some());
+    let (floor,ceiling)=if lifetime=="permanent"{(STANDARD_CONSENT_SECONDS,PERMANENT_CONSENT_SECONDS)}else{(0,STANDARD_CONSENT_SECONDS)};
+    if p.as_object().map(|m|m.len()!=11+declared).unwrap_or(true) || p["schema"]!=1 || !hex(id,32)||!hex(node_id,32)||!hex(key,64)||!hex(code,12)
         || p["name"].as_str().map(|s|s.is_empty()||s.len()>100||s.chars().any(char::is_control)).unwrap_or(true)
-        || p["scope"]!="user-account-tools" || expires<=at || expires>at+86400 || pairing<=at || pairing>at+600 || pairing>expires
+        || p["scope"]!="user-account-tools" || !matches!(lifetime,"standard"|"permanent")
+        || expires<=at+floor || expires>at+ceiling || pairing<=at || pairing>at+600 || pairing>expires
         || p["service"].as_str().map(|s|s.len()>2048||!s.starts_with("https://")&&!s.starts_with("http://127.0.0.1:")).unwrap_or(true) {
         return respond(stream,400,"{\"error\":\"binding_request_invalid\"}");
     }
@@ -121,6 +139,16 @@ fn transition(c:&Connection,stream:&mut TcpStream,p:&Value,body:&[u8],header:&dy
     if !admin && (action!="revoke" || old["request"]["node_id"]!=from){return respond(stream,403,"{\"error\":\"administrator_required\"}");}
     if p["node_id"]!=old["request"]["node_id"]||p["public_key"]!=old["request"]["public_key"]||p["digest"]!=old["digest"]||p["revision"]!=old["revision"]
         || (action=="accept"&&p["code"]!=old["request"]["code"]){return respond(stream,409,"{\"error\":\"binding_generation_changed\"}");}
+    if action=="accept" {
+        // A no-expiry grant is the administrator's own decision, not a property of the request: the
+        // stored signed request says what was asked, and the acceptance must repeat that exact intent in
+        // its own signed body. A permanent request accepted with the ordinary word is refused, and a
+        // standard request cannot be accepted as permanent - no silent upgrade, no silent downgrade.
+        let asked=old["request"]["lifetime"].as_str().unwrap_or("standard");
+        let affirmed=p["authorize_lifetime"].as_str().unwrap_or("");
+        if asked=="permanent" && affirmed!="permanent" {return respond(stream,403,"{\"error\":\"binding_lifetime_authorization_required\"}");}
+        if asked!="permanent" && !affirmed.is_empty() {return respond(stream,409,"{\"error\":\"binding_lifetime_not_requested\"}");}
+    }
     if action=="accept" && (old["state"]!="pending"||old["request"]["pairing_expires_at"].as_i64().unwrap_or(0)<=now()||old["request"]["expires_at"].as_i64().unwrap_or(0)<=now()) {
         return respond(stream,409,"{\"error\":\"binding_not_pending_or_expired\"}");
     }

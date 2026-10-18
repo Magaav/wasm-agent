@@ -11,7 +11,7 @@ local function describe(output,r)
   output('Node: '..tostring(r.name)..' | ID: '..r.node_id)
   output('Key: '..r.public_key)
   if r.code then output('Pairing phrase: '..r.code:sub(1,4)..'-'..r.code:sub(5,8)..'-'..r.code:sub(9,12)) end
-  if r.scope then output('Scope: '..r.scope..' | consent expires: '..r.expires_at) end
+  if r.scope then output('Scope: '..r.scope..' | consent: '..binding.lifetime_label(r)) end
 end
 function M.run(command,arg,read,output)
   local repl=read~=nil
@@ -26,18 +26,28 @@ function M.run(command,arg,read,output)
       output('Outbound capability runtime active; Ctrl+C exits. No model or inbound listener.')
       while true do host.sleep(2) end
     else
-      local renew=arg=='renew';local service=arg
+      -- `permanent` is the operator's named no-expiry intent: `wa bind permanent`, `/bind permanent
+      -- <service>`. Anything else keeps the ordinary 24-hour consent, so renew never drifts into it.
+      local rest,lifetime=arg,'standard'
+      if rest=='permanent' or rest:match('^permanent%s') then lifetime='permanent';rest=rest:gsub('^permanent%s*','') end
+      local renew=rest=='renew';local service=rest
       if renew then local s,e=binding.saved();if not s then result={error=e or 'not_bound'} else service=s.service end end
       if not result then
         if service=='' then output('Fabric HTTPS URL ['..binding.DEFAULT_SERVICE..']:');service=read() or '';if service=='' then service=binding.DEFAULT_SERVICE end end
         local preview=binding.inspect(service)
         if not preview.ok then result=preview else
-          output('Fabric: '..preview.service..' | binding protocol 1')
+          output('Fabric: '..preview.service..' | binding protocol 1 | lifetimes: '..table.concat(preview.lifetimes or {'standard'},','))
           output('Existing identity: '..preview.identity.node_id..' | local conversation/model preserved')
           for _,p in ipairs(preview.operators) do output('Operator: '..p.node_id..' | key '..fingerprint(p)) end
           output('WARNING: these operators may run commands and access files with your current OS-user-account authority. This is NOT a workspace sandbox; root is not requested.')
-          output('Consent: 24 hours. Compare operator fingerprints through a trusted channel. No login service/jobs enabled.')
-          result=binding.begin(preview,confirmation(read,output,'BIND'),renew)
+          if lifetime=='permanent' then
+            output('PERMANENT: this consent has NO EXPIRY instead of the 24-hour default. It stays bound and in sync until you revoke it.')
+            output('RISK: a lost or stolen device, or a compromised relay, keeps access until you revoke it (/unbind) or an administrator revokes/demotes it.')
+            output('An administrator must affirm this separately: a standard request is never upgraded, and asking alone grants nothing.')
+          end
+          output(lifetime=='permanent' and 'Consent: no expiry (permanent binding). Compare operator fingerprints through a trusted channel. No login service/jobs enabled.'
+            or 'Consent: 24 hours. Compare operator fingerprints through a trusted channel. No login service/jobs enabled.')
+          result=binding.begin(preview,confirmation(read,output,lifetime=='permanent' and 'PERMANENT' or 'BIND'),renew,lifetime)
         end
       end
     end
@@ -48,8 +58,13 @@ function M.run(command,arg,read,output)
     local preview=binding.accept_preview(arg)
     if not preview.ok then result=preview else
       describe(output,preview.binding.request);output('Request digest: '..preview.binding.digest)
+      local permanent=binding.lifetime_of(preview.binding.request)=='permanent'
+      if permanent then
+        output('PERMANENT: this request asks for NO EXPIRY. Accepting grants a permanent binding, not a 24-hour one.')
+        output('RISK: that node keeps access until you revoke or demote it, even if the device is lost or its relay is compromised.')
+      end
       output('Compare pairing phrase on both devices. Accept as guest; NOT master or administrator.')
-      result=binding.accept(preview,confirmation(read,output,'ACCEPT'))
+      result=binding.accept(preview,confirmation(read,output,permanent and 'ACCEPT-PERMANENT' or 'ACCEPT'))
     end
   elseif command=='promote' or command=='demote' or command=='revoke' then
     local preview=binding.target(arg)
