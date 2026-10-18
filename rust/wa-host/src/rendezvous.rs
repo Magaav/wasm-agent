@@ -212,7 +212,11 @@ fn handle(db_path: &str, stream: &mut TcpStream, relay: &Arc<Mutex<RelayState>>)
         let operators: Vec<Value> = admins.iter().filter_map(|id| lookup(&connection, id)).map(|n|
             json!({"node_id": n["node_id"], "public_key": n["public_key"], "name": n["name"]})
         ).collect();
+        // `binding_lifetimes` is the discovery half of the no-expiry branch: a node asks for
+        // `permanent` only when this service says it understands it, so an older registry refuses the
+        // intent locally with a named reason instead of a raw 400 after local consent is stored.
         return respond(stream, 200, &json!({"protocol": 1, "binding_protocol":1,
+            "binding_lifetimes":["standard","permanent"],
             "enrollment_ready": !admins.is_empty() && operators.len() == admins.len(),
             "operators": operators}).to_string());
     }
