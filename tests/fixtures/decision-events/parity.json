@@ -1,0 +1,24 @@
+{
+  "note": "One tool call, written once in the ordinary OpenAI-compatible dialect (chat.completions SSE chunks) and once as subscription (Responses) events. Both must give the window the same reader-visible decision sequence; only the call id shape may differ (ordinary: the provider's call id; subscription: call_id|item_id). Read by rust/wa-host/src/host.rs (ordinary side) and scripts/test-decision-parity.lua (subscription side), so one shared meaning is pinned from both directions.",
+  "bounded_preview_chars": 256,
+  "truncation_marker": "\u2026 [preview only; complete arguments in result]",
+  "expected_reader_semantics": [
+    {"complete": false, "name": "get_time", "arguments_text": "{\"zone\""},
+    {"complete": true, "name": "get_time", "arguments_text": "{\"zone\":\"UTC\"}"}
+  ],
+  "ordinary_sse": [
+    "data: {\"id\":\"resp-parity\",\"choices\":[{\"delta\":{\"role\":\"assistant\",\"tool_calls\":[{\"index\":0,\"id\":\"call_parity\",\"type\":\"function\",\"function\":{\"name\":\"get_time\",\"arguments\":\"\"}}]}}]}\n\n",
+    "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"zone\\\"\"}}]}}]}\n\n",
+    "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\":\\\"UTC\\\"}\"}}]}}]}\n\n",
+    "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
+    "data: [DONE]\n\n"
+  ],
+  "subscription_events": [
+    {"type": "response.created", "response": {"id": "resp-parity"}},
+    {"type": "response.output_item.added", "output_index": 0, "item": {"type": "function_call", "id": "fc_parity", "call_id": "call_parity", "name": "get_time", "arguments": ""}},
+    {"type": "response.function_call_arguments.delta", "output_index": 0, "item_id": "fc_parity", "delta": "{\"zone\""},
+    {"type": "response.function_call_arguments.delta", "output_index": 0, "item_id": "fc_parity", "delta": ":\"UTC\"}"},
+    {"type": "response.output_item.done", "output_index": 0, "item": {"type": "function_call", "id": "fc_parity", "call_id": "call_parity", "name": "get_time", "arguments": "{\"zone\":\"UTC\"}"}},
+    {"type": "response.completed", "response": {"id": "resp-parity", "status": "completed", "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}}}
+  ]
+}

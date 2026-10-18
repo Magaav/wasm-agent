@@ -397,12 +397,30 @@ owns this phase transition because ureq 3 carries the preceding header timeout
 into its body timing; ordinary HTTP calls retain their existing policy.
 
 It exists because `host.http_stream` reads exactly *one* SSE dialect: OpenAI-compatible chunks whose
-content lives at `choices[0].delta`, which it maps to the UI's `delta`/`reasoning` events itself. A
-provider whose event names, phase semantics and completion rule are different cannot be expressed as
-that dialect without flattening it - and ChatGPT's subscription endpoint is that provider. So the
-capability is a **line reader**, and the protocol is the caller's: `lua/core/subscription_wire.lua`
-ows the endpoint, the headers, the SSE framing, the event mapping and the rule that a stream ending
+content lives at `choices[0].delta`, which it maps to the UI's `delta`/`commentary_delta`/`reasoning`
+events itself - and, from the same deltas, to the provisional `decision` rows the UI shows while a
+tool call is still being written. A provider whose event names, phase semantics and completion rule
+are different cannot be expressed as that dialect without flattening it - and ChatGPT's subscription
+endpoint is that provider. So the capability is a **line reader**, and the protocol is the caller's:
+`lua/core/subscription_wire.lua` owns the endpoint, the headers, the SSE framing, the event mapping
+and the rule that a stream ending
 without a terminal event is an error rather than a short answer. The line reader knows none of it.
+
+The `decision` a tool call publishes is one contract on both provider paths, not a per-provider
+rendering: `{type:"decision", call_id, name, arguments_text, complete, [previous_call_id],
+[arguments_truncated]}`. It is emitted when the model starts writing the call; `arguments_text` is a
+preview bounded to 256 code points (`subscription_wire.M.DECISION_PREVIEW_CHARS`) and trimmed with
+the same `… [preview only; complete arguments in result]` note; `complete` is true exactly once,
+after the call is finished, and never while its arguments are still streaming. A truncated ordinary
+stream (no finish reason and no `[DONE]`) or a cancelled/failed read leaves the row forming, and the
+agent's error path closes it as not executed. A changed call id is published with `previous_call_id`
+so the window moves the one row instead of stranding it, and a text-only answer emits no `decision`
+at all. The remaining provider difference is the id's shape - the subscription carries
+`call_id|item_id`, the ordinary path the provider's own call id - and the subscription alone
+re-publishes a discarded attempt's decisions from its retry row; on replay the ordinary path's rows
+are reconstructed from the durable `tool_calls`. Both readers are pinned to one expectation fixture,
+`tests/fixtures/decision-events/parity.json`, by `rust/wa-host/src/host.rs` and
+`scripts/test-decision-parity.lua`.
 
 - The callback runs while the socket is open, so a live stream reaches the UI as it arrives; nothing
   is buffered. A Lua error raised in `on_line` - a cancelled run, an expired deadline - ends the read

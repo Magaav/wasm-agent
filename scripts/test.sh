@@ -241,6 +241,11 @@ gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-ho
 # `tests/fixtures/subscription/` are what it reads, so it belongs here beside the other wa-host
 # filters and not in a report.
 gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-host sse_line_tests
+# The ordinary OpenAI-compatible stream must show a tool decision while the call is being written,
+# the way the subscription path already does. These are the reader's own events, captured from a
+# real loopback SSE body; the parity fixture is shared with `scripts/test-decision-parity.lua`
+# below, so a drift on either provider path fails one of the two readers.
+gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-host decision_stream
 # The ticker's clock is the twin of `cli_view.duration` on the Lua side: the elapsed time of a
 # call that has not finished can only be computed by the host, so both sides pin the same three
 # values and a one-sided change fails here rather than on a screen.
@@ -1880,6 +1885,10 @@ WA_SCRIPT=scripts/test-openai-sub-levels.lua "$BIN" --db "$DB.sub-levels" | grep
 # and no Node; the bytes are the endpoint's, and re-recording them is what
 # `scripts/check-subscription-wire-live.lua` does (it is not in this gate: it needs the network).
 WA_SCRIPT=scripts/test-subscription-wire.lua "$BIN" --db "$DB.sub-wire" | grep "subscription wire ok"
+# The other half of the decision contract: the subscription path is pinned to the same expectation
+# fixture the ordinary path's Rust tests read (`tests/fixtures/decision-events/parity.json`), so the
+# two dialects are checked against one reader-visible sequence rather than two descriptions of it.
+WA_SCRIPT=scripts/test-decision-parity.lua "$BIN" --db "$DB.decision-parity" | grep "decision parity ok"
 WA_SCRIPT=scripts/test-native-subscription.lua "$BIN" --db "$DB.native-sub" | grep "native subscription default ok"
 WA_SCRIPT=scripts/test-subscription-server-recovery.lua "$BIN" --db "$DB.server-recovery" | grep "subscription server recovery ok"
 WA_SCRIPT=scripts/test-native-overflow-recovery.lua "$BIN" --db "$DB.native-overflow" | grep "native overflow recovery ok"

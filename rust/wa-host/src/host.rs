@@ -1838,6 +1838,12 @@ mod ticker_tests {
 /// finish_reason, tool_calls, usage}` so the caller can continue the tool loop.
 /// Reasoning is kept apart from content: it is the model's thinking, not its
 /// answer, and conflating the two is how an unanswered run looks answered.
+///
+/// Tool calls stream as provisional `decision` events too, in the same shape the subscription path
+/// publishes (`lua/core/subscription_wire.lua`): announced when the model starts writing a call, its
+/// arguments a bounded preview, completed exactly once when the call is finished. Without them the
+/// window only showed a tool call after it had already executed. See `emit_decision` above for the
+/// per-field contract.
 pub extern "C-unwind" fn http_stream(l: *mut LuaState) -> c_int {
     let method = arg_string(l, 1).unwrap_or_else(|| "POST".into()).to_uppercase();
     let url = arg_string(l, 2).unwrap_or_default();
@@ -2058,6 +2064,164 @@ pub extern "C-unwind" fn relay(l: *mut LuaState) -> c_int {
     1
 }
 
+/// The decision preview cap the UI reads, in code points - not bytes, because the count is shown
+/// next to text a reader sees and a UTF-8 byte count overcounts every non-ASCII character.
+///
+/// Kept equal to `subscription_wire.lua`'s `M.DECISION_PREVIEW_CHARS`: the subscription wire is the
+/// reference for how a tool decision reaches the window, and the ordinary OpenAI-compatible path
+/// must bound what it shows the same way. Otherwise one huge argument would flood the stream, the
+/// run's event log and the panel, while the same call through the subscription showed a preview.
+const DECISION_PREVIEW_CHARS: usize = 256;
+
+/// Appended to a preview that hit the cap; byte-for-byte the subscription wire's note.
+const DECISION_TRUNCATION_NOTE: &str = "\u{2026} [preview only; complete arguments in result]";
+
+/// One tool call's provisional `decision` telemetry, assembled while its arguments stream.
+///
+/// This is the ordinary path's half of the `decision` event contract the subscription wire already
+/// owns (`tool_delta` and `publish_decision` in `lua/core/subscription_wire.lua`): announce once
+/// when the first argument fragment arrives, publish again only when the call is re-identified (a
+/// later id gives the row the key the `tool` event promotes) or when the preview newly truncates,
+/// and complete exactly once when the call is finished. The window's `decision` row therefore
+/// behaves the same on both paths - forming, named, then selected - and no second trace format,
+/// renderer or UI-only cache is introduced.
+#[derive(Default)]
+struct ToolDecision {
+    id: String,
+    name: String,
+    preview: String,
+    truncated: bool,
+    truncation_announced: bool,
+    announced: bool,
+    announced_id: String,
+    announced_name: String,
+    completed: bool,
+}
+
+impl ToolDecision {
+    /// The key the window's `decision` row and the later `tool` event meet on. The subscription
+    /// wire never publishes an empty id (it falls back to `wire-<index>`), and neither does this: a
+    /// row keyed by `""` could never be found again when the real id arrives.
+    fn display_id(&self, index: usize) -> String {
+        if self.id.is_empty() { format!("openai-{index}") } else { self.id.clone() }
+    }
+
+    /// Give one argument fragment to the bounded preview, exactly as `tool_delta` does.
+    fn absorb(&mut self, fragment: &str) {
+        let room = DECISION_PREVIEW_CHARS.saturating_sub(self.preview.chars().count());
+        self.preview.push_str(&preview_head(fragment, room));
+        if fragment.chars().count() > room {
+            self.truncated = true;
+        }
+    }
+
+    /// The update to publish after this delta, or None. Mirrors `publish_decision`'s rule: the
+    /// first announcement is provisional, and afterwards only a changed call id or a newly crossed
+    /// preview cap publishes again (re-emitting the whole prefix on every token is quadratic).
+    fn publish_update(&mut self, index: usize) -> Option<(String, Option<String>)> {
+        let display_id = self.display_id(index);
+        if !self.announced {
+            if self.preview.is_empty() {
+                return None;
+            }
+            self.announced = true;
+            self.announced_id = display_id.clone();
+            self.announced_name = self.name.clone();
+            self.truncation_announced = self.truncated;
+            return Some((display_id, None));
+        }
+        if self.announced_id != display_id {
+            let previous = Some(self.announced_id.clone());
+            self.announced_id = display_id.clone();
+            self.announced_name = self.name.clone();
+            return Some((display_id, previous));
+        }
+        if self.truncated && !self.truncation_announced {
+            self.truncation_announced = true;
+            return Some((display_id, None));
+        }
+        if !self.name.is_empty() && self.name != self.announced_name {
+            // The name is the row's label, and a provider that streams arguments before the name
+            // would otherwise leave the row reading "tool". One update per name, bounded.
+            self.announced_name = self.name.clone();
+            return Some((display_id, None));
+        }
+        None
+    }
+}
+
+/// The first `count` code points of `text`.
+fn preview_head(text: &str, count: usize) -> String {
+    text.chars().take(count).collect()
+}
+
+/// Emit one `decision` event in the exact shape the subscription wire publishes: `type`, `call_id`,
+/// `name`, `arguments_text`, `complete`, and the optional `previous_call_id` / `arguments_truncated`.
+fn emit_decision(decision: &ToolDecision, display_id: &str, complete: bool, previous_id: Option<&str>) {
+    let mut arguments_text = decision.preview.clone();
+    if decision.truncated {
+        arguments_text.push_str(DECISION_TRUNCATION_NOTE);
+    }
+    let mut event = serde_json::Map::new();
+    event.insert("type".into(), json!("decision"));
+    event.insert("call_id".into(), json!(display_id));
+    event.insert("name".into(), json!(decision.name));
+    event.insert("arguments_text".into(), json!(arguments_text));
+    event.insert("complete".into(), json!(complete));
+    if let Some(previous) = previous_id {
+        if previous != display_id {
+            event.insert("previous_call_id".into(), json!(previous));
+        }
+    }
+    if decision.truncated {
+        event.insert("arguments_truncated".into(), json!(true));
+    }
+    crate::serve::write_event(&Value::Object(event).to_string());
+}
+
+/// Complete every tool call that was seen, once, after a stream that actually finished.
+///
+/// Not called for a truncated stream (EOF with neither `[DONE]` nor a finish reason) or for a
+/// cancelled or failed read: those arguments are still partial, and marking them complete would
+/// claim an execution the tool loop refuses. The subscription wire marks a call complete at its own
+/// `item done`; this is the ordinary dialect's equivalent, and it runs at most once per call.
+fn complete_decisions(decisions: &mut [ToolDecision], tool_calls: &[Value]) {
+    for (index, decision) in decisions.iter_mut().enumerate() {
+        if decision.completed {
+            continue;
+        }
+        let final_text = tool_calls
+            .get(index)
+            .and_then(|call| call["function"]["arguments"].as_str())
+            .unwrap_or("");
+        // The subscription wire shows the parsed arguments re-encoded, not the raw wire text. An
+        // argument string that cannot be parsed is shown as it arrived instead of failing the read:
+        // what an unparseable call means is the tool loop's decision, not the reader's.
+        let (encoded, truncated) = match serde_json::from_str::<Value>(final_text) {
+            Ok(value) => {
+                let encoded = value.to_string();
+                let truncated = encoded.chars().count() > DECISION_PREVIEW_CHARS;
+                (encoded, truncated)
+            }
+            Err(_) => {
+                let text = if final_text.is_empty() { "{}".to_string() } else { final_text.to_string() };
+                let truncated = text.chars().count() > DECISION_PREVIEW_CHARS;
+                (text, truncated)
+            }
+        };
+        let display_id = decision.display_id(index);
+        let previous = if decision.announced && decision.announced_id != display_id {
+            Some(decision.announced_id.clone())
+        } else {
+            None
+        };
+        decision.preview = preview_head(&encoded, DECISION_PREVIEW_CHARS);
+        decision.truncated = truncated;
+        decision.completed = true;
+        emit_decision(decision, &display_id, true, previous.as_deref());
+    }
+}
+
 fn stream_completion(method: &str, url: &str, headers: &[(String, String)], body: &str) -> Result<Value, String> {
     use std::io::BufRead;
     let started = std::time::Instant::now();
@@ -2095,6 +2259,10 @@ fn stream_completion(method: &str, url: &str, headers: &[(String, String)], body
     let mut reasoning = String::new();
     let mut finish_reason: Option<String> = None;
     let mut tool_calls: Vec<Value> = Vec::new();
+    // One provisional decision per tool-call index, assembled from the same deltas that build
+    // `tool_calls`. Empty for a text-only answer, which is exactly why a text-only answer emits no
+    // `decision` event: nothing here is invented for a call the model did not ask for.
+    let mut decisions: Vec<ToolDecision> = Vec::new();
     let mut usage: Option<Value> = None;
     // Stream-termination telemetry.
     //
@@ -2208,21 +2376,43 @@ fn stream_completion(method: &str, url: &str, headers: &[(String, String)], body
                 while tool_calls.len() <= index {
                     tool_calls.push(json!({"id": "", "type": "function", "function": {"name": "", "arguments": ""}}));
                 }
+                while decisions.len() <= index {
+                    decisions.push(ToolDecision::default());
+                }
                 if let Some(id) = call["id"].as_str() {
                     tool_calls[index]["id"] = json!(id);
+                    decisions[index].id = id.to_string();
                 }
                 if let Some(name) = call["function"]["name"].as_str() {
                     tool_calls[index]["function"]["name"] = json!(name);
+                    decisions[index].name = name.to_string();
                 }
+                let mut fragment = String::new();
                 if let Some(arguments) = call["function"]["arguments"].as_str() {
-                    let previous = tool_calls[index]["function"]["arguments"].as_str().unwrap_or("").to_string();
-                    tool_calls[index]["function"]["arguments"] = json!(format!("{previous}{arguments}"));
+                    if !arguments.is_empty() {
+                        let previous = tool_calls[index]["function"]["arguments"].as_str().unwrap_or("").to_string();
+                        tool_calls[index]["function"]["arguments"] = json!(format!("{previous}{arguments}"));
+                        fragment = arguments.to_string();
+                    }
+                }
+                let decision = &mut decisions[index];
+                if !fragment.is_empty() {
+                    decision.absorb(&fragment);
+                }
+                if let Some((display_id, previous)) = decision.publish_update(index) {
+                    emit_decision(decision, &display_id, false, previous.as_deref());
                 }
             }
         }
         if chunk["usage"].is_object() {
             usage = Some(chunk["usage"].clone());
         }
+    }
+    // A finished stream completes each call it formed; a truncated one (no finish reason and no
+    // `[DONE]`) leaves its decisions forming, because those arguments are partial and the tool loop
+    // will not execute them. A cancelled or failed read returns above, so it never gets here.
+    if finish_reason.is_some() || saw_done {
+        complete_decisions(&mut decisions, &tool_calls);
     }
     Ok(json!({"status": status, "content": content, "commentary": commentary,
         "final_phase": final_phase, "reasoning": reasoning,
@@ -2836,6 +3026,225 @@ pub extern "C-unwind" fn exec_timeout(l: *mut LuaState) -> c_int {
         Err(_) => unsafe { crate::lua::lua_pushnil(l) },
     }
     1
+}
+
+/// The ordinary OpenAI-compatible path's share of the `decision` contract: what the window is shown
+/// while a tool call is still being written (and what it must never be shown). The subscription
+/// wire's own half lives in `scripts/test-subscription-wire.lua`; both read the *same* expectation
+/// fixture, `tests/fixtures/decision-events/parity.json`, so the two dialects are pinned to one
+/// reader-visible sequence instead of two descriptions of it.
+#[cfg(test)]
+mod decision_stream_tests {
+    use super::*;
+    use std::io::{Read, Write};
+
+    /// A one-shot loopback SSE endpoint, so the reader is exercised against real HTTP framing
+    /// rather than a string. Kept beside these tests rather than shared, because the existing
+    /// `stream_tests` helper is private to that module and moving it would touch tests this
+    /// change has no business rewriting.
+    fn decision_fixture(body: &str) -> (Value, String) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let body = body.to_owned();
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+            let mut headers = Vec::new();
+            while !headers.ends_with(b"\r\n\r\n") {
+                let mut byte = [0u8]; socket.read_exact(&mut byte).unwrap(); headers.push(byte[0]);
+                assert!(headers.len() < 16384);
+            }
+            let size = String::from_utf8_lossy(&headers).lines()
+                .find_map(|line| line.to_ascii_lowercase().strip_prefix("content-length:")
+                    .and_then(|n| n.trim().parse::<usize>().ok())).unwrap_or(0);
+            let mut request = vec![0; size]; socket.read_exact(&mut request).unwrap();
+            let response = format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
+            socket.write_all(response.as_bytes()).unwrap();
+        });
+        let result = std::cell::RefCell::new(Value::Null);
+        // The events the reader emits are captured in this call's own sink, which is why the
+        // assertion below sees them and an outer sink would not.
+        let events = crate::serve::capture_events(|| {
+            *result.borrow_mut() = stream_completion("POST", &format!("http://{address}/fixture"), &[], "{}").unwrap();
+        });
+        server.join().unwrap();
+        (result.into_inner(), events)
+    }
+
+    fn decisions(events: &str) -> Vec<Value> {
+        events.lines().filter_map(|line| line.strip_prefix("data: "))
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .filter(|event| event["type"] == "decision").collect()
+    }
+
+    /// The reader-visible meaning of one decision, with the dialect-specific call id left out:
+    /// the subscription ids carry `call_id|item_id` and the ordinary ones carry the provider's
+    /// call id, which is a genuine provider difference and not a semantic one.
+    fn semantics(event: &Value) -> Value {
+        json!({
+            "complete": event["complete"],
+            "name": event["name"],
+            "arguments_text": event["arguments_text"],
+            "arguments_truncated": event.get("arguments_truncated").cloned().unwrap_or(Value::Bool(false)),
+        })
+    }
+
+    const TRUNCATION_NOTE: &str = "\u{2026} [preview only; complete arguments in result]";
+
+    #[test]
+    fn ordinary_stream_announces_then_completes_one_tool_call() {
+        let (result, events) = decision_fixture(concat!(
+            "data: {\"id\":\"resp-1\",\"choices\":[{\"delta\":{\"role\":\"assistant\",\"tool_calls\":[{\"index\":0,\"id\":\"call_abc\",\"type\":\"function\",\"function\":{\"name\":\"get_time\",\"arguments\":\"\"}}]}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"zone\\\"\"}}]}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\":\\\"UTC\\\"}\"}}]}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
+            "data: [DONE]\n\n"));
+        assert_eq!(result["tool_calls"][0]["id"], "call_abc");
+        assert_eq!(result["tool_calls"][0]["function"]["name"], "get_time");
+        assert_eq!(result["tool_calls"][0]["function"]["arguments"], "{\"zone\":\"UTC\"}");
+        let seen = decisions(&events);
+        assert_eq!(seen.len(), 2, "one forming and one complete decision: {events}");
+        assert_eq!(seen[0]["complete"], false);
+        assert_eq!(seen[0]["call_id"], "call_abc");
+        assert_eq!(seen[0]["name"], "get_time");
+        assert_eq!(seen[0]["arguments_text"], "{\"zone\"");
+        assert_eq!(seen[1]["complete"], true);
+        assert_eq!(seen[1]["call_id"], "call_abc");
+        assert_eq!(seen[1]["arguments_text"], "{\"zone\":\"UTC\"}");
+        assert!(seen[0].get("arguments_truncated").is_none() && seen[1].get("arguments_truncated").is_none());
+        assert!(seen[1].get("previous_call_id").is_none(), "one stable id needs no re-identification");
+    }
+
+    #[test]
+    fn text_only_answer_emits_no_decision() {
+        let (result, events) = decision_fixture(concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"just words\"},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n"));
+        assert_eq!(result["content"], "just words");
+        assert!(decisions(&events).is_empty(), "a text answer asks for no tool: {events}");
+    }
+
+    #[test]
+    fn decision_preview_is_bounded_and_truncation_is_flagged() {
+        let filler = "X".repeat(300);
+        let first = format!("{{\"a\":\"{}", "X".repeat(280));
+        let second = format!("{}\"}}", "X".repeat(20));
+        let body = format!(concat!(
+            "data: {{\"choices\":[{{\"delta\":{{\"tool_calls\":[{{\"index\":0,\"id\":\"call_big\",\"function\":{{\"name\":\"blob\",\"arguments\":{}}}}}]}}}}]}}\n\n",
+            "data: {{\"choices\":[{{\"delta\":{{\"tool_calls\":[{{\"index\":0,\"function\":{{\"arguments\":{}}}}}]}}}}]}}\n\n",
+            "data: {{\"choices\":[{{\"delta\":{{}},\"finish_reason\":\"tool_calls\"}}]}}\n\n",
+            "data: [DONE]\n\n"),
+            json!(first), json!(second));
+        let (result, events) = decision_fixture(&body);
+        assert_eq!(result["tool_calls"][0]["function"]["arguments"].as_str().unwrap(),
+            format!("{{\"a\":\"{filler}\"}}"));
+        let seen = decisions(&events);
+        assert_eq!(seen.len(), 2, "forming then complete: {events}");
+        let bounded = format!("{{\"a\":\"{}", "X".repeat(250));
+        for (index, event) in seen.iter().enumerate() {
+            assert_eq!(event["arguments_text"], format!("{bounded}{TRUNCATION_NOTE}"),
+                "event {index} must be the capped preview plus the marker");
+            assert_eq!(event["arguments_truncated"], true, "event {index} must say it truncated");
+        }
+    }
+
+    #[test]
+    fn interrupted_stream_leaves_the_decision_forming() {
+        // Arguments are still partial at EOF with no finish reason: completing them would claim
+        // an execution the tool loop refuses.
+        let (result, events) = decision_fixture(
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_cut\",\"function\":{\"name\":\"f\",\"arguments\":\"{\\\"p\\\":1\"}}]}}]}\n\n");
+        assert_eq!(result["stream_complete"], false);
+        let seen = decisions(&events);
+        assert_eq!(seen.len(), 1, "only the forming announcement: {events}");
+        assert_eq!(seen[0]["complete"], false);
+        assert_eq!(seen[0]["call_id"], "call_cut");
+    }
+
+    #[test]
+    fn two_calls_in_one_message_complete_in_index_order() {
+        let (_, events) = decision_fixture(concat!(
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"c0\",\"function\":{\"name\":\"a\",\"arguments\":\"{\\\"x\\\":1}\"}},{\"index\":1,\"id\":\"c1\",\"function\":{\"name\":\"b\",\"arguments\":\"{\\\"y\\\":2}\"}}]}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
+            "data: [DONE]\n\n"));
+        let seen = decisions(&events);
+        let ids: Vec<&str> = seen.iter().map(|event| event["call_id"].as_str().unwrap()).collect();
+        assert_eq!(ids, vec!["c0", "c1", "c0", "c1"]);
+        assert_eq!(seen[0]["complete"], false);
+        assert_eq!(seen[1]["complete"], false);
+        assert_eq!(seen[2]["complete"], true);
+        assert_eq!(seen[3]["complete"], true);
+        assert_eq!(seen[2]["arguments_text"], "{\"x\":1}");
+        assert_eq!(seen[3]["arguments_text"], "{\"y\":2}");
+    }
+
+    #[test]
+    fn interleaved_deltas_publish_one_forming_event_per_call() {
+        let (_, events) = decision_fixture(concat!(
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"c0\",\"function\":{\"name\":\"a\",\"arguments\":\"{\\\"x\\\"\"}}]}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":1,\"id\":\"c1\",\"function\":{\"name\":\"b\",\"arguments\":\"{\\\"y\\\"\"}}]}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\":1}\"}}]}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":1,\"function\":{\"arguments\":\":2}\"}}]}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
+            "data: [DONE]\n\n"));
+        let seen = decisions(&events);
+        let forming: Vec<&str> = seen.iter().filter(|event| event["complete"] == false)
+            .map(|event| event["call_id"].as_str().unwrap()).collect();
+        assert_eq!(forming, vec!["c0", "c1"], "exactly one forming event per call: {events}");
+        let completed: Vec<&str> = seen.iter().filter(|event| event["complete"] == true)
+            .map(|event| event["call_id"].as_str().unwrap()).collect();
+        assert_eq!(completed, vec!["c0", "c1"]);
+        let final_text: Vec<&Value> = seen.iter().filter(|event| event["complete"] == true)
+            .map(|event| &event["arguments_text"]).collect();
+        assert_eq!(final_text, vec![&json!("{\"x\":1}"), &json!("{\"y\":2}")]);
+    }
+
+    #[test]
+    fn a_late_id_reidentifies_the_row_instead_of_leaving_a_second_one() {
+        // The window keys its decision row by call id, and the `tool` event promotes that same key.
+        // An id that arrives a chunk late must move the row, or the first one is stranded.
+        let (_, events) = decision_fixture(concat!(
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"type\":\"function\",\"function\":{\"name\":\"f\",\"arguments\":\"{\"}}]}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_late\",\"function\":{\"arguments\":\"\\\"k\\\":1}\"}}]}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
+            "data: [DONE]\n\n"));
+        let seen = decisions(&events);
+        assert_eq!(seen.len(), 3, "forming, re-identified, complete: {events}");
+        assert_eq!(seen[0]["call_id"], "openai-0", "the placeholder key is never empty");
+        assert_eq!(seen[1]["call_id"], "call_late");
+        assert_eq!(seen[1]["previous_call_id"], "openai-0");
+        assert_eq!(seen[1]["complete"], false);
+        assert_eq!(seen[2]["call_id"], "call_late");
+        assert_eq!(seen[2]["complete"], true);
+        assert!(seen[2].get("previous_call_id").is_none(),
+            "the final id is the same one already published");
+    }
+
+    /// The parity fixture: one tool call, written once in the ordinary dialect's SSE chunks and
+    /// once as subscription events, with the reader-visible sequence both must produce. This test
+    /// runs the ordinary side; `scripts/test-decision-parity.lua` runs the subscription side
+    /// against the same file, so a change to either path that breaks the shared meaning fails one
+    /// of them rather than passing each on its own prose.
+    #[test]
+    fn ordinary_stream_matches_the_shared_decision_parity_fixture() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/decision-events/parity.json");
+        let fixture: Value = serde_json::from_str(&std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("decision parity fixture {} is unreadable: {error}", path.display())))
+            .expect("decision parity fixture must be JSON");
+        // The cap and the marker are pinned here as well as in the Lua half, so the two constants
+        // cannot drift apart while both suites stay green.
+        assert_eq!(fixture["bounded_preview_chars"].as_u64(), Some(DECISION_PREVIEW_CHARS as u64));
+        assert_eq!(fixture["truncation_marker"].as_str(), Some(DECISION_TRUNCATION_NOTE));
+        let body: String = fixture["ordinary_sse"].as_array().unwrap().iter()
+            .map(|line| line.as_str().unwrap().to_string()).collect();
+        let (_, events) = decision_fixture(&body);
+        let produced: Vec<Value> = decisions(&events).iter().map(semantics).collect();
+        let expected: Vec<Value> = fixture["expected_reader_semantics"].as_array().unwrap()
+            .iter().map(semantics).collect();
+        assert_eq!(produced, expected, "ordinary path reader-visible decisions drifted: {events}");
+        assert!(decisions(&events).iter().all(|event| event["call_id"].as_str().is_some_and(|id| !id.is_empty())));
+    }
 }
 
 #[cfg(test)]
