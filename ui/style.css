@@ -21,6 +21,11 @@ wa-provider-manager button, wa-provider-manager a { margin-right:var(--space); }
   --accent: #4f8cff;
   --ok: #3fb950;
   --warn: #d29922;
+  /* Patch colours, defined once. A diff line is read at a glance, so every place a patch is drawn - the
+     file balloon, the promoted patch window and a tool row's own change - marks additions and removals
+     with the same two colours. */
+  --diff-add: #7ee08a;
+  --diff-del: #ff8a8a;
   --user: #1f2a44;
   --assistant: #171b24;
   /* Opaque topic/tint colors: overlapping content must never show through. */
@@ -421,6 +426,23 @@ wa-retry { display: block; width: 100%; }
 .tool-title { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: #c9d1e0; }
 .tool-title b { color: var(--text); font-weight: 600; }
 .tool-outcome { color: var(--muted); font-size: 11px; margin-left: auto; white-space: nowrap; }
+/* Which file this call acted on. Elided to its last two segments (rowPath) and never allowed to push the
+   outcome off a narrow row: the full path is the element's own title/aria-label and stays in the row's
+   hover text and in the result payload. */
+.tool-path {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; color: var(--muted);
+  flex: 0 1 auto; min-width: 0; max-width: 45%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* What the call changed, on the row itself. Additions and removals take the same classes (and so the
+   same colours) as every other patch in the window; the block is bounded by the row's caller, not by a
+   scroll region, because a tool row may not grow to the size of the file it changed. */
+.tool-diff {
+  margin: 2px 0 4px 0; padding-left: var(--space);
+  border-left: 1px solid var(--line);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; line-height: 1.45;
+  white-space: pre; overflow-x: auto;
+}
+.tool-diff .patch-note { display: block; margin-top: 0; }
 .tool-line.err .tool-outcome { color: #f85149; }
 .tool-line.unrecorded .tool-outcome { color: var(--warn); }
 .tool-output {
@@ -1075,8 +1097,8 @@ wa-balloon.file-diff .pop-head {
 .patch-line { display: block; }
 .patch-file { color: var(--muted); }
 .patch-hunk { color: #7fb2ff; }
-.patch-add { color: #7ee08a; }
-.patch-del { color: #ff8a8a; }
+.patch-add { color: var(--diff-add); }
+.patch-del { color: var(--diff-del); }
 .patch-note { display: block; margin-top: var(--gap); color: #e0b25a; }
 /* A changed file is a control now: clicking it is how you see what changed in it. */
 .diff-file {

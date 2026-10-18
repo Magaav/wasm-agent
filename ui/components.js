@@ -383,6 +383,21 @@ function topicChevron(chevron, open) {
   if (chevron) chevron.textContent = open ? "\u2304" : "\u203a";
 }
 
+// One renderer for one patch line, wherever a patch is drawn: the file balloon, the promoted patch
+// window, and the change a tool row reports. The sign is in the text and the class carries the colour,
+// so a reader can tell an addition from a removal at a glance and the same reading survives without
+// colour. `+`/`-` are the two classes that matter; everything else is the section's own furniture.
+function patchLineRow(line) {
+  const row = document.createElement("span");
+  row.className = "patch-line";
+  if (line.startsWith("+++") || line.startsWith("---")) row.classList.add("patch-file");
+  else if (line.startsWith("@@")) row.classList.add("patch-hunk");
+  else if (line.startsWith("+")) row.classList.add("patch-add");
+  else if (line.startsWith("-")) row.classList.add("patch-del");
+  row.textContent = line === "" ? " " : line;
+  return row;
+}
+
 class WaTrace extends HTMLElement {
   static get observedAttributes() { return ["open"]; }
 
@@ -463,7 +478,7 @@ class WaTrace extends HTMLElement {
       progress.className = "tool-progress";
       progress.hidden = true;
       line.append(progress);
-      decision = { line, label, output, progress, outcome };
+      decision = { line, label, output, progress, outcome, head };
       this._count += 1;
       this._body.append(line);
       this._header.classList.add("running");
@@ -486,7 +501,8 @@ class WaTrace extends HTMLElement {
   // addTool(name, title, detail, bound) -> the line element, so the caller can fill the outcome.
   // `bound` is the call's deadline in seconds, when it has one: the line can then say how long it has
   // run *of* how long it may take, which is the question "bash" alone cannot answer.
-  addTool(name, title, detail, bound, callId) {
+  // `change` is what the call says it is about to do to a file, as patch lines (see `settle`).
+  addTool(name, title, detail, bound, callId, change) {
     const decision = callId && this._decisions.get(String(callId));
     if (decision) {
       this._decisions.delete(String(callId));
@@ -501,7 +517,8 @@ class WaTrace extends HTMLElement {
       decision.outcome.textContent = "";
       this._lines.set(name, decision.line);
       this._pending.push({ line: decision.line, output: decision.output, progress: decision.progress,
-        outcome: decision.outcome, started: Date.now(), bound: bound || null, callId: String(callId) });
+        outcome: decision.outcome, head: decision.head, label: decision.label, change: change || null,
+        started: Date.now(), bound: bound || null, callId: String(callId) });
       if (!this._userToggled) this.open = true;
       this._refresh();
       this.setAge(0);
@@ -534,7 +551,8 @@ class WaTrace extends HTMLElement {
     progress.hidden = true;
     line.append(progress);
     this._lines.set(name, line);
-    this._pending.push({ line, output, progress, outcome, started: Date.now(), bound: bound || null, callId: callId || "" });
+    this._pending.push({ line, output, progress, outcome, head, label, change: change || null,
+      started: Date.now(), bound: bound || null, callId: callId || "" });
     this._body.append(line);
     this._header.classList.add("running");
     this._refresh();
@@ -572,7 +590,11 @@ class WaTrace extends HTMLElement {
 
   // Tool calls in one decision execute in order; replay adds them all before their
   // result rows, so settle the oldest pending line, not the most recently added one.
-  settle(outcome, detail, failed, cancelled = false) {
+  //
+  // `paths` and the `change` the line was created with are what the row can show beyond the tool's
+  // name: which file this call touched, and what it did to it. Both are optional, so a caller that has
+  // neither renders exactly what it rendered before.
+  settle(outcome, detail, failed, cancelled = false, paths = null) {
     const target = this._pending.shift();
     if (!target) return;
     target.progress.hidden = true;
@@ -580,6 +602,11 @@ class WaTrace extends HTMLElement {
     target.line.classList.remove("pending");
     target.line.classList.add(cancelled ? "cancelled" : failed ? "err" : "ok");
     if (detail) target.output.textContent = detail;
+    // A change is shown only for a call that applied: drawing the edit a refused call asked for would
+    // be the transcript claiming a change that is not on disk. The path is shown either way - a failed
+    // write still names the file the reader has to look at.
+    if (!failed && !cancelled) this._paintChange(target, target.change);
+    this._paintPaths(target, paths);
     if (failed && !cancelled) {
       this._errors += 1;
       // An error is never hidden inside a collapsed topic.
@@ -587,6 +614,48 @@ class WaTrace extends HTMLElement {
       this.open = true;
     }
     this._refresh();
+  }
+
+  // What this call changed, on the row itself, with the same lines and colours every other patch in the
+  // window uses. Bounded by the caller: a tool row may not grow to the size of the file it changed, and
+  // the lines that were left out are counted in the note rather than dropped silently.
+  _paintChange(target, change) {
+    const lines = (change && change.lines) || [];
+    if (!lines.length || target.changeDrawn) return;
+    target.changeDrawn = true;
+    const block = document.createElement("div");
+    block.className = "tool-diff";
+    for (const line of lines) block.append(patchLineRow(line));
+    if (change.note) {
+      const note = document.createElement("span");
+      note.className = "patch-note";
+      note.textContent = change.note;
+      block.append(note);
+    }
+    target.line.insertBefore(block, target.output);
+  }
+
+  // Which file(s) this call acted on, on the row itself. The row already shows a path for the tools
+  // whose arguments carry one (the caller puts it in the title); this is for the paths only the
+  // *result* knows, and for the names of the rest of a batch. What is drawn is elided to the tail the
+  // window can afford; the full path stays in `title` (hover) and on the element's accessibility label,
+  // and in the result payload the row carries either way.
+  _paintPaths(target, paths) {
+    const list = (paths || []).filter((entry) => entry && entry.label);
+    if (!list.length) return;
+    const shown = target.label.textContent || "";
+    target.line.title = list.map((entry) => entry.full || entry.label).join("\n");
+    const missing = list.filter((entry) => !shown.includes(entry.tail || entry.label));
+    if (!missing.length) return;
+    // Three names is as many as a row can carry before the outcome it is there to qualify is pushed
+    // off a narrow window; the rest are counted.
+    const element = document.createElement("span");
+    element.className = "tool-path";
+    element.textContent = missing.slice(0, 3).map((entry) => entry.label).join(" · ") +
+      (missing.length > 3 ? " +" + (missing.length - 3) : "");
+    element.title = missing.map((entry) => entry.full || entry.label).join("\n");
+    element.setAttribute("aria-label", element.title);
+    target.head.insertBefore(element, target.outcome);
   }
 
   // A replayed decision with no tool row is evidence of a missing result, not a live call.
