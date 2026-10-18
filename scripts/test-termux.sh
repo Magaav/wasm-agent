@@ -50,11 +50,15 @@ sh -n "$root/scripts/termux/wa"
 sh -n "$root/scripts/termux/wa-update.sh"
 sh -n "$root/scripts/termux/release-lib.sh"
 bash -n "$root/scripts/termux/adopt-existing.sh"
+bash -n "$root/scripts/termux/bootstrap.sh"
 bash -n "$root/scripts/test-termux-update.sh"
+# The Android section of the README is where the one command lives: if the script it names
+# is renamed, the documented command must not keep pointing at nothing.
+grep -q 'scripts/termux/bootstrap.sh' "$root/README.md"
 if [[ "$permission_skip" == 1 ]]; then
-  printf '%s\n' 'termux launcher: 12 passed, 1 skipped (POSIX mode semantics unavailable on Windows); Android build and runtime skipped on this non-Android host'
+  printf '%s\n' 'termux launcher: 15 passed, 1 skipped (POSIX mode semantics unavailable on Windows); Android build and runtime skipped on this non-Android host'
 else
-  printf '%s\n' 'termux launcher: 14 passed, 0 skipped; Android build and runtime skipped on this non-Android host'
+  printf '%s\n' 'termux launcher: 16 passed, 0 skipped; Android build and runtime skipped on this non-Android host'
 fi
 
 # The updater has its own fixture suite - a fake upstream, a pre-existing installation

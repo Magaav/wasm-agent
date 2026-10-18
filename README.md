@@ -136,7 +136,32 @@ APK, Play Store release, background Android service, or unrestricted controller
 of other apps. It runs with Termux's Android app authority and serves the existing
 UI only on the phone's loopback interface.
 
-Clone this repository in Termux, check out the revision you intend to run, then:
+**One command**, for a fresh phone, an older preview, or a node already on the
+update track. It clones only if `~/wasm-agent-bootstrap` is absent, then runs the
+reviewed script from that clone (there is no `curl | sh`):
+
+```sh
+d=~/wasm-agent-bootstrap; [ -d "$d/.git" ] || git clone --depth 1 https://github.com/Magaav/wasm-agent.git "$d" || exit 1; exec bash "$d/scripts/termux/bootstrap.sh"
+```
+
+`bootstrap.sh` picks the step from the installation's own state: a fresh install,
+the one-time migration of a preview older than `wa update`, or `wa update` on a node
+that already has it. Its options are `--checkout DIR`, `--repo URL`, `--upstream URL`
+and `--check` (report without changing anything). The upstream recorded for later
+updates defaults to the checkout's own `git remote`, so `upstream_url_unknown` cannot
+happen on a normal clone. Paste the same line again later to update: the clone is
+reused and the update runs.
+
+Then:
+
+```sh
+wa setup
+wa doctor
+wa ui
+```
+
+The explicit form is still supported and does the same thing by hand. A fresh
+install, from a checkout in Termux:
 
 ```sh
 bash scripts/install-termux.sh
@@ -151,6 +176,41 @@ in the foreground and opens `http://127.0.0.1:8799/`; keep that Termux session
 running. Reinstallation currently refuses an existing preview so it cannot
 overwrite a running or stateful installation silently. Agent state and credentials
 live under `~/.wasm-agent`, outside the replaceable runtime directory.
+
+#### Building on a phone: the conservative profile
+
+A phone is not a build server: several rustc processes at once, on a device that is
+also running Android and the UI, is more memory than it has. On Android/Termux the
+build therefore runs `CARGO_BUILD_JOBS=1` (peak memory stops scaling with the core
+count), `RUSTFLAGS=-C codegen-units=1` (less memory inside each rustc, at the cost of
+some build time), `RUST_MIN_STACK=33554432` (32 MiB per compiler thread, against the
+8 MiB default, for a rustc that dies of its own recursion), and
+`CARGO_INCREMENTAL=0`. These are memory-pressure mitigation, not a claimed fix for a
+named bug.
+
+A value **you** set is never overridden: the build reports it as kept, e.g.
+`CARGO_BUILD_JOBS=3 (yours, kept)`. Non-Android hosts build exactly as before, and
+`WA_TERMUX_BUILD_PROFILE=conservative` (or `default`) forces the choice anywhere.
+
+#### If the compiler crashes
+
+When the compiler dies of a signal, cargo reports it as `process didn't exit
+successfully: \`rustc ...\` (signal: 11, SIGSEGV)` and the old build called that a
+failed build and stopped. Now the script recognises that shape (`signal: 11`,
+`SIGSEGV`, `process didn't exit successfully`), prints `THE COMPILER CRASHED` instead
+of a build error, keeps the cargo log and **retries once** with the conservative
+profile. If the retry fails too it stops with a named refusal
+(`compiler_crash_build_refused`), the profile it used, the retained log
+(`$PREFIX/opt/wasm-agent-update/build-logs/build-attempt2.log`) and asks you to paste
+three lines:
+
+```sh
+rustc -V
+free -m | head -3
+nproc
+```
+
+No release is switched, nothing is installed, and node state is not read or written.
 
 ### Keeping the preview current: `wa update`, and the one-time bootstrap
 
@@ -183,10 +243,12 @@ Migrate it once, from a checkout in Termux:
 cd ~ && git clone https://github.com/Magaav/wasm-agent.git wa-bootstrap
 cd wa-bootstrap && git checkout main
 bash scripts/install-termux.sh --adopt-existing
-#   upstream_url_unknown -> re-run with --upstream https://github.com/Magaav/wasm-agent.git
+#   upstream_url_unknown -> the checkout has no remote; pass --upstream <git-url>
 #   state_inside_install:<path> -> it refuses to move your state; fix the layout first
 ```
 
+The one command above does this migration for you (`bootstrap.sh` picks it, and
+defaults `--upstream` from the clone's own remote).
 The bootstrap takes a verified byte-for-byte copy of the old installation as the
 rollback release, builds the checked-out revision and switches it in; the checkout
 itself is not installed into the runtime. If a switch is ever interrupted badly
@@ -195,9 +257,10 @@ checkout. Restart the UI (`Ctrl-C`, then `wa ui`) to run the new runtime.
 
 **Honest limit:** this is developed and fixture-tested on a non-Android host. A real
 `pkg install rust` build, real ELF execution of the candidate, real `$PREFIX`
-symlinks and the phone's actual `~/.wasm-agent` layout are **not** proven here, and
-the Windows fixture announces the checks it skips (`WA_TERMUX_HOST_PROBES=0`,
-the symlink case).
+symlinks, a real rustc crash and the phone's actual `~/.wasm-agent` layout are **not**
+proven here: the conservative profile, the crash retry and its refusal are exercised
+by fixtures with a fake compiler, and the Windows fixture announces the checks it
+skips (`WA_TERMUX_HOST_PROBES=0`, the symlink case).
 
 ### Bind an existing CLI to the fabric
 
