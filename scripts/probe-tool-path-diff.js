@@ -115,6 +115,38 @@
       check(many.querySelector('.tool-title').getClientRects().length === 1,
         'and the row still lays out on one line with the path chip beside the title');
 
+      // ---- the window is often narrow (measured 430px): the row must not push the outcome off it ----
+      // One row whose own title is longer than the window (a deep first path, elided only to its last two
+      // segments) and one whose paths come from the result: neither may overflow the line.
+      const longPath = 'src/a-very-long-subdirectory-name-here/a-very-long-file-name-that-is-unbreakable.js';
+      call('call-long', 'write_many', { requests: [
+        { path: longPath, content: 'a' }, { path: 'ui/a.js', content: 'b' }, { path: 'ui/b.js', content: 'c' },
+      ] });
+      settle('write_many', { ok: true, applied: 3, results: [
+        { ok: true, path: 'C:/Users/Victor/orca/projects/wasm-agent/' + longPath },
+        { ok: true, path: 'C:/Users/Victor/orca/projects/wasm-agent/ui/a.js' },
+        { ok: true, path: 'C:/Users/Victor/orca/projects/wasm-agent/ui/b.js' },
+      ] });
+      const longRow = rowFor(transcript, 'call-long');
+      check(!!longRow && !!longRow.querySelector('.tool-path'), 'a long-tailed batch still names its files on the row');
+      const panel = document.getElementById('panel');
+      const wide = panel.style.width;
+      panel.style.width = '430px';
+      for (const [label, row] of [['the batch row', many], ['the long-title row', longRow]]) {
+        const head = row.querySelector('.tool-head');
+        check(head.scrollWidth <= head.clientWidth + 1,
+          label + ' must not overflow its line at 430px, saw ' + head.scrollWidth + ' of ' + head.clientWidth);
+        const outcome = row.querySelector('.tool-outcome');
+        check(outcome.getBoundingClientRect().right <= head.getBoundingClientRect().right + 1,
+          label + ' must keep its outcome on the row at 430px');
+        check(row.getBoundingClientRect().right <= panel.getBoundingClientRect().right + 1,
+          label + ' must fit inside a 430px window');
+      }
+      check(longRow.querySelector('.tool-title').getClientRects().length > 1 ||
+        longRow.querySelector('.tool-title').getBoundingClientRect().width <= 430,
+        'a title too long for the row wraps inside it instead of pushing the outcome off');
+      panel.style.width = wide;
+
       // ---- a big change is bounded, and says so --------------------------------------------------
       const big = Array.from({ length: 100 }, (unused, index) => 'line ' + index).join('\n');
       call('call-big', 'write_many', { requests: [{ path: 'ui/big.js', content: big }] });

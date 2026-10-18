@@ -15,7 +15,7 @@ const hash = (file) => crypto.createHash('sha256').update(fs.readFileSync(file))
 const sources = () => Object.fromEntries(['ui/app.js', 'ui/components.js', 'ui/style.css',
   'scripts/probe-tool-path-diff.js', 'scripts/test-tool-path-diff.cjs']
   .map((file) => [file, hash(path.join(repo, file))]));
-const MIN_CHECKS = 49;
+const MIN_CHECKS = 57;
 
 if (process.argv.includes('--post')) {
   const receipt = JSON.parse(fs.readFileSync(path.join(out, 'receipt.json')));
