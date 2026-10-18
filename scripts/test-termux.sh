@@ -35,18 +35,29 @@ grep -q '^WASM_AGENT_DISPLAY_NAME=Phone agent$' "$work/home/.wasm-agent/env"
 grep -q '^WASM_AGENT_LLM_API_KEY=preserved-key$' "$work/home/.wasm-agent/env"
 mode=$(stat -c '%a' "$work/home/.wasm-agent/env")
 permission_skip=0
-if [[ "$(uname -s)" == MINGW* ]]; then
-  permission_skip=1
-else
-  [[ "$mode" == 600 ]]
-fi
+# `uname -s` on the Windows development hosts is MSYS_NT-* or CYGWIN_NT-*, not only MINGW*:
+# those hosts cannot represent a POSIX mode at all, so the 600 assertion is skipped and
+# counted rather than reported as a failure.
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*) permission_skip=1 ;;
+  *) [[ "$mode" == 600 ]] ;;
+esac
 
 ui_output=$(sh "$install/bin/wa" ui --no-open --port 18899)
 [[ "$ui_output" == *'native:serve --port 18899 --client-port 18900'* ]]
 bash -n "$root/scripts/install-termux.sh"
 sh -n "$root/scripts/termux/wa"
+sh -n "$root/scripts/termux/wa-update.sh"
+sh -n "$root/scripts/termux/release-lib.sh"
+bash -n "$root/scripts/termux/adopt-existing.sh"
+bash -n "$root/scripts/test-termux-update.sh"
 if [[ "$permission_skip" == 1 ]]; then
-  printf '%s\n' 'termux launcher: 8 passed, 1 skipped (POSIX mode semantics unavailable on Windows); Android build and runtime skipped on this non-Android host'
+  printf '%s\n' 'termux launcher: 12 passed, 1 skipped (POSIX mode semantics unavailable on Windows); Android build and runtime skipped on this non-Android host'
 else
-  printf '%s\n' 'termux launcher: 9 passed, 0 skipped; Android build and runtime skipped on this non-Android host'
+  printf '%s\n' 'termux launcher: 14 passed, 0 skipped; Android build and runtime skipped on this non-Android host'
 fi
+
+# The updater has its own fixture suite - a fake upstream, a pre-existing installation
+# carrying identity and state, and the real switch - because that behaviour is too large
+# to bolt onto the launcher contracts above.
+bash "$root/scripts/test-termux-update.sh"

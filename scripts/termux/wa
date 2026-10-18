@@ -20,7 +20,13 @@ config_value() {
 }
 
 need_runtime() {
-  [ -x "$native" ] || fail "runtime_missing: run scripts/install-termux.sh from a wasm-agent checkout"
+  [ -f "$native" ] || fail "runtime_missing: run scripts/install-termux.sh from a wasm-agent checkout"
+}
+
+# Only the commands that actually exec the runtime require it to be executable; `wa setup`,
+# `wa doctor` and `wa update` read and describe the install without running it.
+need_executable() {
+  [ -x "$native" ] || fail "runtime_not_executable: $native"
 }
 
 valid_line() {
@@ -100,6 +106,7 @@ doctor() {
 
 open_ui() {
   need_runtime
+  need_executable
   [ -f "$ui/index.html" ] || fail "ui_assets_missing"
   port=8799
   no_open=0
@@ -128,15 +135,38 @@ open_ui() {
   exec "$native" serve --port "$port" --client-port "$((port + 1))" --ui "$ui"
 }
 
+update() {
+  need_runtime
+  updater="$install_root/bin/wa-update"
+  [ -f "$updater" ] || fail "updater_missing: $updater (this install predates 'wa update'; run the one-time bootstrap: bash scripts/install-termux.sh --adopt-existing)"
+  [ -f "$install_root/bin/release-lib.sh" ] || fail "updater_incomplete: $install_root/bin/release-lib.sh"
+  # Run the updater from a private copy, not from the release it is about to replace. Two
+  # reasons, both real: a shell reading a script that is moved out from under it can lose
+  # the rest of the file, and Windows refuses to move a directory that holds an open
+  # script at all. The copy is outside every directory this command may move.
+  run_dir=$(mktemp -d "${TMPDIR:-/tmp}/wa-update.XXXXXX") || fail "cannot create a private run directory"
+  cleanup_run() { rm -rf -- "$run_dir"; }
+  trap cleanup_run EXIT HUP INT TERM
+  cp "$updater" "$run_dir/wa-update" || fail 'cannot copy the updater'
+  cp "$install_root/bin/release-lib.sh" "$run_dir/release-lib.sh" || fail 'cannot copy the updater library'
+  chmod 700 "$run_dir" 2>/dev/null || true
+  set +e
+  sh "$run_dir/wa-update" "$@"
+  code=$?
+  set -e
+  exit "$code"
+}
+
 command=${1:-help}
 [ "$#" -eq 0 ] || shift
 case "$command" in
   setup) setup "$@" ;;
   doctor) doctor "$@" ;;
+  update) update "$@" ;;
   ui) open_ui "$@" ;;
   help|--help|-h)
-    printf '%s\n' 'Termux preview: wa setup | wa doctor | wa ui [--port N] [--no-open]'
+    printf '%s\n' 'Termux preview: wa setup | wa doctor | wa ui [--port N] [--no-open] | wa update [--check|--rollback]'
     printf '%s\n' 'All other commands are passed to the native wasm-agent CLI.'
     ;;
-  *) need_runtime; exec "$native" "$command" "$@" ;;
+  *) need_runtime; need_executable; exec "$native" "$command" "$@" ;;
 esac
