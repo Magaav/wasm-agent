@@ -234,7 +234,10 @@ elseif command == "call" then
   end
   print(json.encode(nodes.remote_call(args[2], args[3], payload)))
 elseif command == 'bind' or command == 'unbind' or command == 'accept' or command == 'promote' or command == 'demote' or command == 'revoke' then
-  local result=dofile('lua/core/binding_cli.lua').run(command,args[2] or '')
+  -- The whole remainder, not args[2]: `wa bind permanent renew <service>` is one intent, and keeping
+  -- only the second word made the one-shot CLI unable to express it (it fell back to the service
+  -- prompt and to the ordinary consent word).
+  local result=dofile('lua/core/binding_cli.lua').run(command,table.concat(args,' ',2))
   if result.error or result.ok==false then os.exit(1) end
 elseif command == "network" then
   if args[2] ~= "role" or not args[3] then

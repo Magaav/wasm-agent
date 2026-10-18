@@ -236,6 +236,16 @@ function resultLine(out){return JSON.parse(out.trim().split(/\r?\n/).filter(l=>l
  ok(afterUnbind.active===false&&afterUnbind.lifetime==='permanent','the permanently bound node reports itself inactive after local revoke');
  const fenceAgain=spawnSync(binary,['status'],{cwd:phone.home,env:{...phone.env,WA_SCRIPT:localFence},encoding:'utf8',timeout:20000});
  ok(fenceAgain.status===0&&fenceAgain.stdout.includes('local revoke fences the permanent grant'),'the local boundary holds even once the registry is reachable again');
+ // The same intent in one command from the native CLI, with no REPL and no prompt: the whole
+ // remainder after `bind` has to reach the controller or `permanent renew` cannot be expressed.
+ r=cli(phone,['bind','permanent','renew'],'PERMANENT\n');
+ const oneShot=state(phone);
+ ok(r.status===0&&oneShot.request.lifetime==='permanent'&&Object.keys(oneShot.request).length===12&&!r.stdout.includes('Fabric HTTPS URL'),'the one-shot CLI can re-bind with the same no-expiry intent, in one command and with no service prompt');
+ const oneRow=(await pending()).bindings.find(x=>x.request.node_id===phone.node_id);
+ const oneAccept=JSON.stringify({id:oneShot.request.id,node_id:oneShot.request.node_id,public_key:oneShot.request.public_key,code:oneShot.request.code,digest:oneRow.digest,revision:oneRow.revision,authorize_lifetime:'permanent'});
+ x=await post(oneAccept,admin,'bind-accept');
+ ok(x.status===200&&x.value.binding.state==='accepted','the one-shot permanent re-bind is accepted with the affirmation');
+ ok(resultLine(cli(phone,['bind','status']).stdout).lifetime==='permanent','the one-shot re-bound node reports the permanent lifetime');
  // A state file naming a lifetime the signed request does not is corrupt, not a longer grant.
  const tampered=state(phone);tampered.request.lifetime='perpetual';tampered.raw_request=JSON.stringify(tampered.request);tampered.digest=hash(tampered.raw_request);
  fs.writeFileSync(path.join(phone.home,'.wasm-agent/binding.json'),JSON.stringify(tampered));
