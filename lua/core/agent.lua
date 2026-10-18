@@ -1780,6 +1780,25 @@ function M:run_body(text, images)
     local assistant = { role = "assistant", content = result.content or "" }
     reply_phase = result.final_phase or ""
     if replay_phase and reply_phase ~= "" then assistant.phase = reply_phase end
+    -- A step that ends by asking for a tool did not answer: the text it wrote before choosing is a
+    -- prelude to that decision, not the reply. The subscription path already carries exactly this
+    -- classification as the provider's own per-item phase (`commentary`, read in
+    -- lua/core/subscription_wire.lua and lua/core/openai_sub_bridge.lua). An ordinary
+    -- OpenAI-compatible endpoint has no per-item phase, but the step does have the same kind of
+    -- provider signal in its completion reason, so this rule reads the step's own `finish_reason`
+    -- and nothing else - it never inspects the text.
+    --
+    -- The rule is deliberately narrow. A step that finished normally (`stop`), one that was cut off
+    -- (`length`), and one whose provider sent no `finish_reason` at all all keep today's behaviour:
+    -- their text is answer text. So a provider that omits the reason on a tool-call step leaves that
+    -- step's prose outside the run topic - a visible miss, and never an answer swallowed. The value
+    -- stored is the one the subscription path already stores, so an existing row (`phase = ''`)
+    -- renders exactly as it always did.
+    local decision_phase = ""
+    if not replay_phase and #calls > 0
+        and (result.finish_reason == "tool_calls" or result.finish_reason == "function_call") then
+      decision_phase = "commentary"
+    end
     local assistant_id
     if replay_phase or #calls > 0 then assistant_id = host.uuid() end
     if replay_phase and assistant_id then assistant.id = assistant_id end
@@ -1926,8 +1945,20 @@ function M:run_body(text, images)
     end
     record_turn(self, {
       id = assistant_id, role = "assistant", content = result.content or "", tool_calls = calls, debug = self.debug,
-      reasoning=result.reasoning or "", phase=result.final_phase or "", reasoning_items=result.reasoning_items,
+      reasoning=result.reasoning or "", phase=decision_phase ~= "" and decision_phase or result.final_phase or "",
+      reasoning_items=result.reasoning_items,
     })
+    -- The same classification, live. The window has already drawn this step's streamed text in the
+    -- answer's place; this tells it to move that text into the run topic that holds the decision
+    -- rows, at the moment the step's completion is known - not a round later, and not only when the
+    -- run settles. `text` is the stored content, so the reader sees the same sentence before and
+    -- after a repaint. It is sent even when that content is empty: the phase is what the window
+    -- acts on, and a step whose text is only whitespace leaves no block behind rather than an
+    -- empty one.
+    if decision_phase == "commentary" then
+      self.emit({ type = "step_phase", phase = decision_phase, text = result.content or "",
+        message_id = assistant_id, round = round })
+    end
 
     local dispatch_ctx = { session_id = self.session_id, user_id = self.user, node_id = self.node,
       run_id = self.run_id, subagent = self.subagent, run_origin=self.run_origin, changes = self.changes, codemode_policy=self.codemode_policy,

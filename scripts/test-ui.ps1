@@ -3763,6 +3763,8 @@ try {
   try {
     & node scripts/agent-benchmark-ui-observe.mjs --ui $ui --probe (Join-Path $PSScriptRoot 'probe-topic-pattern.js') --out (Join-Path $tmp 'topic-pattern')
     if ($LASTEXITCODE -ne 0) { throw 'shared topic pattern browser probe failed' }
+    & node scripts/agent-benchmark-ui-observe.mjs --ui $ui --probe (Join-Path $PSScriptRoot 'probe-decision-preamble.js') --out (Join-Path $tmp 'decision-preamble')
+    if ($LASTEXITCODE -ne 0) { throw 'decision preamble browser probe failed' }
     & node scripts/test-final-answer-suite.mjs $WaExe (Join-Path $tmp 'final-answer')
     if ($LASTEXITCODE -ne 0) { throw 'final-answer focused suite failed' }
     & node scripts/test-minimal-chat.cjs (Join-Path $tmp 'minimal-chat')
