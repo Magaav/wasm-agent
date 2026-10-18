@@ -1060,6 +1060,24 @@ function shortPath(value) {
   return "…/" + parts.slice(-2).join("/");
 }
 
+// The last two segments of a path, for deciding whether a row already names this file: a result reports
+// the path it resolved (absolute), while the call's own argument may be relative, and the reader does
+// not need to be told the same file twice.
+function pathTail(value) {
+  return String(value || "").replace(/\\/g, "/").split("/").filter(Boolean).slice(-2).join("/");
+}
+
+// The form a *row* uses for a path, and the one place it differs from `shortPath`: `shortPath` elides
+// past 52 characters, which is right for a title that owns its line, but a tool row shares its line with
+// the tool's outcome and the chip beside it - and a 49-character path is as long there as a 200-character
+// one. So the row always shows the last two segments and nothing else; the full path stays in the
+// element's title/aria-label, in the row's hover text and in the result payload.
+function rowPath(value) {
+  const tail = pathTail(value);
+  const segments = String(value || "").replace(/\\/g, "/").split("/").filter(Boolean).length;
+  return segments > 2 && tail ? "…/" + tail : tail;
+}
+
 function toolTitle(name, args) {
   const a = args || {};
   const esc = escapeHtml;
@@ -1079,6 +1097,15 @@ function toolTitle(name, args) {
     case "write":
     case "edit":
       return path;
+    case "write_many":
+    case "edit_many":
+    case "read_many": {
+      // The batch forms carry their files in one `requests` list, and the row has to name them the same
+      // way the single-file forms do - one path, and how many others went with it.
+      const items = Array.isArray(a.requests) ? a.requests : [];
+      const first = items.length ? esc(shortPath((items[0] || {}).path || "")) : "";
+      return items.length > 1 ? `${first} +${items.length - 1}` : first;
+    }
     case "grep":
       return `/${esc(String(a.pattern || ""))}/${a.path ? " in " + esc(shortPath(a.path)) : ""}`;
     case "ls":
@@ -1169,6 +1196,103 @@ function toolOutcome(name, result) {
 function toolDetail(result) {
   const text = typeof result === "string" ? result : JSON.stringify(result || {}, null, 1);
   return text.length > 4000 ? text.slice(0, 4000) + "\n…(truncated)" : text;
+}
+
+// The change a call's own arguments describe, as patch lines: `-` for what the call removes, `+` for
+// what it writes. Both sides of an `edit` are in the call, so that is a real before-and-after; a `write`
+// carries only the new text, so its lines are additions and the note says so instead of inventing
+// removals the call never contained.
+//
+// Presentation only: this reads the arguments the transcript already holds, sends nothing, stores
+// nothing and is never part of what the model sees. Bounded on purpose - a tool row may not grow to the
+// size of the file it changed - and the lines past the cap are counted and said out loud, never clipped
+// silently.
+const INLINE_DIFF_LINES = 40;
+
+function toolChange(name, args) {
+  const a = args || {};
+  const lines = [];
+  let total = 0;
+  const push = (text) => { total += 1; if (lines.length < INLINE_DIFF_LINES) lines.push(text); };
+  // One trailing newline is the file's, not a line of the change.
+  const body = (text) => String(text == null ? "" : text).replace(/\r\n/g, "\n").replace(/\n$/, "");
+  const given = (text) => body(text).split("\n").forEach((line) => push("+" + line));
+  // One replacement: what it removed, then what it wrote. The lines an edit *keeps* are shown on
+  // neither side, or the two lines that moved would be buried under the block that did not. The range
+  // form carries only the new lines (its old ones live in a read receipt this page never holds), so it
+  // is shown as an addition.
+  const edit = (index, item) => {
+    const source = item || {};
+    const range = Array.isArray(source.replacement_lines);
+    if (typeof source.old_text !== "string" && !range) return;
+    const before = typeof source.old_text === "string" ? body(source.old_text).split("\n") : [];
+    const after = range ? source.replacement_lines.map(String)
+      : typeof source.new_text === "string" ? body(source.new_text).split("\n") : [];
+    let head = 0;
+    while (head < before.length && head < after.length && before[head] === after[head]) head += 1;
+    let tail = 0;
+    while (tail < before.length - head && tail < after.length - head &&
+      before[before.length - 1 - tail] === after[after.length - 1 - tail]) tail += 1;
+    const removed = before.slice(head, before.length - tail);
+    const added = after.slice(head, after.length - tail);
+    if (!removed.length && !added.length) return;
+    push("@@ edit " + index + " @@");
+    removed.forEach((line) => push("-" + line));
+    added.forEach((line) => push("+" + line));
+  };
+  if (name === "edit") {
+    if (Array.isArray(a.edits)) a.edits.forEach((item, index) => edit(index + 1, item));
+    else edit(1, a);
+  } else if (name === "edit_many") {
+    (Array.isArray(a.requests) ? a.requests : []).forEach((request) => {
+      push("@@ " + shortPath((request || {}).path) + " @@");
+      const edits = Array.isArray(request && request.edits) ? request.edits : [];
+      edits.forEach((item, index) => edit(index + 1, item));
+    });
+  } else if (name === "write") {
+    given(a.content);
+  } else if (name === "write_many") {
+    (Array.isArray(a.requests) ? a.requests : []).forEach((request) => {
+      push("@@ " + shortPath((request || {}).path) + " @@");
+      given(request && request.content);
+    });
+  } else return null;
+  if (!total) return null;
+  const change = { lines, hidden: Math.max(0, total - lines.length) };
+  const notes = [];
+  if (name === "write" || name === "write_many") notes.push("a write carries only the new lines");
+  if (change.hidden) {
+    notes.push("… " + change.hidden + " more line" + (change.hidden === 1 ? "" : "s") +
+      " not shown - the full change is in the change topic under the answer");
+  }
+  if (notes.length) change.note = notes.join(" · ");
+  return change;
+}
+
+// The file path(s) a tool result reports, so the row can name the file it acted on. `write` answers with
+// `path`, the batch forms with one entry per file under `results`/`files`, and a replayed row is the
+// stored JSON wrapped in `content` - the same shape `steeringCancellation` already unwraps. Bounded: the
+// row shows a few names, not a directory listing.
+function resultPaths(result, limit = 3) {
+  let value = result;
+  const parse = (text) => { try { return JSON.parse(text); } catch (error) { return null; } };
+  if (typeof value === "string") value = parse(value);
+  if (!value || typeof value !== "object") return [];
+  if (typeof value.content === "string" && Object.keys(value).length === 1) value = parse(value.content);
+  if (!value || typeof value !== "object") return [];
+  const found = [];
+  const collect = (candidate) => {
+    if (!candidate || typeof candidate !== "object") return;
+    for (const key of ["path", "file_path"]) {
+      const path = candidate[key];
+      if (typeof path === "string" && path && !found.includes(path)) found.push(path);
+    }
+  };
+  collect(value);
+  for (const key of ["results", "files"]) {
+    for (const item of Array.isArray(value[key]) ? value[key] : []) collect(item);
+  }
+  return found.slice(0, limit).map((path) => ({ label: rowPath(path), tail: pathTail(path), full: path }));
 }
 
 // The trace topic for the run currently running. Created on the first tool call
@@ -1407,16 +1531,9 @@ function placeFileDiff(balloon, anchor) {
 
 function renderPatch(pre, payload) {
   pre.replaceChildren();
-  for (const line of String(payload.patch || "").split("\n")) {
-    const row = document.createElement("span");
-    row.className = "patch-line";
-    if (line.startsWith("+++") || line.startsWith("---")) row.classList.add("patch-file");
-    else if (line.startsWith("@@")) row.classList.add("patch-hunk");
-    else if (line.startsWith("+")) row.classList.add("patch-add");
-    else if (line.startsWith("-")) row.classList.add("patch-del");
-    row.textContent = line === "" ? " " : line;
-    pre.append(row);
-  }
+  // One row builder for every patch in the window (components.js), so the balloon, the promoted patch
+  // window and a tool row's own change mark additions and removals identically.
+  for (const line of String(payload.patch || "").split("\n")) pre.append(patchLineRow(line));
   if (payload.truncated) {
     const note = document.createElement("span");
     note.className = "patch-note";
@@ -1456,7 +1573,7 @@ function addTool(name, args, options) {
     if (!replayingMessages) startToolTicker();
     return;
   }
-  currentTrace().addTool(name, toolTitle(name, args), null, boundMs ? Math.round(boundMs / 1000) : null, callId);
+  currentTrace().addTool(name, toolTitle(name, args), null, boundMs ? Math.round(boundMs / 1000) : null, callId, toolChange(name, args));
   lastTool = name;
   if (!replayingMessages) startToolTicker();
   pin();
@@ -1488,7 +1605,7 @@ function settleTool(result, name, failed, cancelled) {
   // replayed `ok: 0` row carries no exit code, and reading it as a success is how a failed call came
   // back after a reload as a green line.
   const notExecuted=cancelled!==false && outcome.cancelled===true;
-  trace.settle(outcome.text, toolDetail(result), notExecuted ? false : failed === undefined ? outcome.failed : failed === true, notExecuted);
+  trace.settle(outcome.text, toolDetail(result), notExecuted ? false : failed === undefined ? outcome.failed : failed === true, notExecuted, resultPaths(result));
   if ((name || lastTool) === "subagent") renderSubagentCard(result);
   if (!trace.pending) stopToolTicker();
   pin();

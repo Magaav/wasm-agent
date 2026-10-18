@@ -249,7 +249,7 @@ origin, current authority, and fresh effective-route receipt before displaying s
 | `<wa-chat-warning>` | Exception-only yellow uncertainty overlay at the shared chat viewport top; outside transcript, no scroll shift. | `.message` (empty hides), `role="status"` | — |
 | `<wa-retry>` | Shared transport-recovery topic inside the turn bubble/run history; numbered attempts, cycle, safe text reasons and reconnect countdown. Restoration is not task completion. | `.update(event)`, `.setAge()`, `.interrupt(state)`, `.freeze()`, `open` | — |
 | `<wa-tool>` | A tool-activity chip. | `name`, `.detail`, status class | — |
-| `<wa-trace>` | A step's tool trace inside a reply bubble. `.body`, and `.setAge(seconds, bound)` on the in-flight line so `bash` reads `42s of 300s`, not just `bash`. | — |
+| `<wa-trace>` | A step's tool trace inside a reply bubble. `.body`, and `.setAge(seconds, bound)` on the in-flight line so `bash` reads `42s of 300s`, not just `bash`. A row also carries the file it touched and, for a change that applied, the `-`/`+` lines it made: `addTool(…, change)` and `settle(outcome, detail, failed, cancelled, paths)`. | — |
 | `<wa-run>` | The collapsible topic a run's tool lines live in. | — | — |
 | `<wa-subagent>` | Shared topic for native/legacy delegation receipts, with a branch glyph, recorded profile/state/session and an expanded conversation link. A receipt is not task completion. | `.receipt`, `.body`, `open` | `subagent-open` (`{session}`) |
 | `<wa-diff>` | The file changes a run made, below its answer. | — | — |
@@ -266,9 +266,21 @@ origin, current authority, and fresh effective-route receipt before displaying s
 | `<wa-vault-entry>` | Cross-origin dedicated password/enrollment form; no parent/node secret access or secret events. | `configure({url,vault,scope,broker})`, `.allowed`, `clear()` | `vault-entry` (whitelisted nonsecret metadata) |
 | `<wa-hook-events>` | Read-only lifecycle inventory after Jobs: producers, boundaries, configured handlers and reliability limits; evaluated absent events are labelled, not advertised as working. | `.catalogue`, `.message` | — |
 
+**A tool row says which file, and what changed.** A row that named, wrote or read a file carries the path
+on the row itself — in the row's own title where the call's arguments state it (`read`, `write`, `edit`,
+`ls`, `grep` and the `_many` batches), and in a `.tool-path` chip when only the *result* reports it.
+The path is drawn as its last two segments (`…/ui/style.css`) whatever its length: a row shares its line
+with the outcome, and the full path belongs in the element's `title`/`aria-label`, in the row's hover text
+and in the result payload the row already holds. For `edit`, `edit_many`, `write` and `write_many` the row
+also draws the change its arguments describe, through the one `patchLineRow()` renderer the file balloon
+and the patch window use: `+` lines carry `--diff-add`, `-` lines carry `--diff-del`, and a line the call
+kept is on neither side. It is bounded at 40 lines inline and never clips silently — the lines left out are
+counted in the note, which names the change topic under the answer as the place to read the whole patch.
+A call that did not apply draws no change, a tool that touches no file is unchanged, and both hosts draw
+this through the same renderer, so a child pane shows the same row.
+
 Keyboard selection belongs to `<wa-menu>`, not to its caller: the highlight and the click target
 must be the same item, or Enter chooses something other than what the list shows.
-
 **One chat, two hosts.** `<wa-chat-shell>` is the chat surface, and the main conversation and every
 child session instantiate it rather than building a composer each. The shell owns the furniture and the
 gestures (transcript region, exception-only warning overlay, composer controls, attach/paste/drop intake, attachment chips, model strip,

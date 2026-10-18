@@ -3777,6 +3777,10 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'shared chat parity browser suite failed' }
     & node scripts/test-shared-chat.cjs (Join-Path $tmp 'shared-chat') --post
     if ($LASTEXITCODE -ne 0) { throw 'shared chat postcheck failed' }
+    & node scripts/test-tool-path-diff.cjs (Join-Path $tmp 'tool-path-diff')
+    if ($LASTEXITCODE -ne 0) { throw 'tool row path/change browser suite failed' }
+    & node scripts/test-tool-path-diff.cjs (Join-Path $tmp 'tool-path-diff') --post
+    if ($LASTEXITCODE -ne 0) { throw 'tool row path/change postcheck failed' }
     & node scripts/test-context-growth.cjs (Join-Path $tmp 'context-growth')
     if ($LASTEXITCODE -ne 0) { throw 'context growth browser suite failed' }
     & node scripts/test-context-growth.cjs (Join-Path $tmp 'context-growth') --post
