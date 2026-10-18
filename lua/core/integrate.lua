@@ -37,7 +37,12 @@ function M.run(memory,ctx)
     end
     -- Capture against fresh actual main, not the stale admission base.
     local common=git(own,'rev-parse --path-format=absolute --git-common-dir')
-    local main=git(own,'worktree list --porcelain'):match('^worktree ([^\r\n]+)')
+    -- The canonical main worktree is derived from the common git dir, never from the
+    -- first line of `worktree list`: that listing is unbounded while host.exec returns
+    -- a bounded tail view, so with many worktrees its first line is cut off and a
+    -- perfectly good repository is refused (measured: 138 worktrees, 24,644 bytes of
+    -- listing, ~24 KiB view). The checks below are unchanged.
+    local main=common:gsub('[/\\]%.git[/\\]?$','')
     if not main or git(main,'branch --show-current')~='main' then return {error='canonical_main_unavailable',effect='none'} end
     if git(main,'rev-parse --path-format=absolute --git-common-dir')~=common then return {error='canonical_repository_mismatch',effect='none'} end
     if git(main,'status --porcelain')~='' then return {error='integration_dirty_main',effect='none'} end
