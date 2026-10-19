@@ -263,6 +263,12 @@ wa-message.assistant { align-self: flex-start; background: var(--assistant); }
    different kind of thing. Its own part is the body: pre-wrap prose, capped and scrollable. */
 wa-reasoning, wa-commentary { display: block; align-self: flex-start; max-width: 760px; width: 100%; }
 wa-commentary.phase-pending .trace-label, wa-commentary.phase-incomplete .trace-label { color: var(--muted); }
+/* The provisional commentary node IS the commentary topic, held in its pending state: the box, the
+   header row and the body are present from the first token, so establishing the phase flips a
+   class/label rather than re-laying the sentence out. Its body is not capped while the phase is
+   unknown, because that same node may still resolve to a final answer and must keep growing the way
+   a streamed answer does (docs/FINAL-ANSWER-EVENT.md). */
+wa-commentary.phase-pending .commentary-body { max-height: none; overflow: visible; }
 wa-commentary.phase-incomplete .commentary { text-decoration: underline dotted; }
 .reasoning-body, .commentary-body {
   padding: var(--space); border-top: 1px solid var(--line);

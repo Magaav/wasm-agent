@@ -964,6 +964,24 @@ function appendReasoning(text, complete = false) {
 
 function appendCommentary(text, messageId, pendingId, decisionPrelude, place) {
   if (!text || (messageId && renderedMessageIds.has(String(messageId)))) return;
+  // The node that streamed this text may already BE the commentary element: the subscription
+  // bridge draws unknown-phase item text in a provisional `wa-commentary` (`pending_delta` below),
+  // because a provisional block becomes the topic it stands in (DESIGN.md section 5). Establishing
+  // the phase then flips that node's own state - same element, same parent, same box - instead of
+  // replacing a plain segment with a topic, which re-laid the sentence out under the reader.
+  if (place && place.tagName === "WA-COMMENTARY") {
+    place.classList.remove("phase-pending", "phase-incomplete");
+    place.setText(text);
+    if (pendingId) place.dataset.pendingId = String(pendingId);
+    if (decisionPrelude === true) place.dataset.decisionPrelude = "true";
+    if (messageId) {
+      place.dataset.messageId = String(messageId);
+      renderedMessageIds.add(String(messageId));
+    }
+    anchorRunStepContent(place);
+    pin();
+    return place;
+  }
   const block = document.createElement("wa-commentary");
   block.open = true;
   block.setText(text);
@@ -1984,8 +2002,14 @@ function handleEvent(event) {
     if (statusLabel) { setText(statusLabel, ''); updateRunPhase(); }
     let pending = phasePendingText.get(key);
     if (!pending) {
-      const node = document.createElement("div");
-      node.className = "seg phase-pending";
+      // The node that streams first is already the element that will become the commentary topic:
+      // the bridge has not stated this item's phase yet, so the text is drawn in the commentary
+      // element's pending state. Resolution is then an attribute/label flip on that node, not a
+      // `replaceWith` from a differently styled block - that swap is what moved the text the
+      // operator was reading. It stays provisional until the provider's per-item phase arrives.
+      const node = document.createElement("wa-commentary");
+      node.classList.add("phase-pending");
+      node.open = true;
       node.dataset.pendingId=key;
       currentBubble().body.append(node);
       anchorRunStepContent(node);
@@ -1995,8 +2019,9 @@ function handleEvent(event) {
     }
     pending.text += event.text || "";
     pending.node.rawText = pending.text;
-    pending.node.innerHTML = renderMarkdown(pending.text);
-    pending.node.style.whiteSpace = 'normal';
+    // Formatted while it streams, exactly as the provisional segment rendered it; the body is
+    // normalised back by `setText` when the phase resolves, so live and replayed rows agree.
+    pending.node.streamMarkdown(renderMarkdown(pending.text), pending.text.length);
     pin();
   } else if (event.type === "delta") {
     showRunStep("answer", "Writing response");

@@ -3297,8 +3297,9 @@ $harness = @'
   window.handleEvent({type:'pending_delta',pending_id:'fixture-commentary',text:'Checking '});
   window.handleEvent({type:'pending_delta',pending_id:'fixture-commentary',text:'the result.'});
   var provisionalCommentary=document.querySelector('.phase-pending');
-  check(!!provisionalCommentary && provisionalCommentary.textContent==='Checking the result.',
-    'pending commentary text remains visible while its phase is unknown');
+  check(!!provisionalCommentary && provisionalCommentary.tagName==='WA-COMMENTARY' &&
+    provisionalCommentary.querySelector('.commentary-body').textContent==='Checking the result.',
+    'pending commentary text is streamed inside the commentary topic itself while its phase is unknown');
   window.handleEvent({type:'commentary',pending_id:'fixture-commentary',message_id:'fixture-commentary-id',text:'Checking the result.'});
   check(document.querySelectorAll('wa-commentary').length===1 &&
     document.querySelector('wa-commentary .commentary-body').textContent==='Checking the result.' &&

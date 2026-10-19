@@ -1029,8 +1029,22 @@ class WaCommentary extends HTMLElement {
   setText(text) {
     this._build();
     const raw = String(text || "");
+    // A provisional commentary body streams Markdown with an inline `white-space: normal`; the
+    // resolved topic is plain pre-wrap text, so resolving clears that override instead of leaving
+    // the two states rendering differently.
+    this._body.style.whiteSpace = "";
     this._body.textContent = raw.replace(/\s+$/, "");
     this._meta.textContent = raw.length + " chars";
+  }
+
+  // The pending half of the same topic: Markdown while the provider has not stated the phase, with
+  // the character count the resolved state will keep. The header row is built either way, so the
+  // box is the same before and after; only the label/state flip.
+  streamMarkdown(html, chars) {
+    this._build();
+    this._body.style.whiteSpace = "normal";
+    this._body.innerHTML = html;
+    this._meta.textContent = chars + " chars";
   }
 }
 customElements.define("wa-commentary", WaCommentary);
