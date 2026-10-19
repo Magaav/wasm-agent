@@ -1592,16 +1592,29 @@ function M:run_body(text, images)
       end
       return provider.is_transient(tostring(value))
     end
-    local transient_limit, transient_attempt = provider.transient_retries(), 0
+    -- A dropped LOCAL link is retried by default, with a visible wait budget, instead of failing
+    -- the run: the request produced no answer and the network is expected to return. Every other
+    -- transient keeps the smaller, opt-in policy above.
+    local connection_lost = (not ok) and provider.is_connection_lost(tostring(result))
+    local transient_limit = connection_lost and provider.connection_retries() or provider.transient_retries()
+    local transient_attempt, waited_ms = 0, 0
+    local wait_budget_ms = connection_lost and (provider.connection_wait_seconds() * 1000) or nil
     while transient_attempt < transient_limit and retryable(result) do
       transient_attempt = transient_attempt + 1
-      local wait_ms = math.floor((2 ^ transient_attempt) * 1000 * (0.75 + math.random() * 0.5))
+      local wait_ms = connection_lost and provider.connection_backoff_ms(transient_attempt)
+        or math.floor((2 ^ transient_attempt) * 1000 * (0.75 + math.random() * 0.5))
+      if wait_budget_ms and waited_ms + wait_ms > wait_budget_ms then break end
+      waited_ms = waited_ms + wait_ms
       local reason = ok and (result.stream_complete == false and "incomplete_stream" or "empty_reply")
         or redact.text(tostring(result)):sub(1, 80)
-      self.emit({ type = "status", text = string.format("provider unavailable (%s) - retrying in %ds (%d/%d)",
-        reason, math.floor(wait_ms / 1000), transient_attempt, transient_limit) })
+      self.emit({ type = "status", text = connection_lost
+        and string.format("network appears down (%s) - retrying in %ds (%d/%d); waiting up to %ds for the link",
+          reason, math.floor(wait_ms / 1000), transient_attempt, transient_limit, provider.connection_wait_seconds())
+        or string.format("provider unavailable (%s) - retrying in %ds (%d/%d)",
+          reason, math.floor(wait_ms / 1000), transient_attempt, transient_limit) })
       telemetry.event(self.session_id,self.run_id,"","provider_retry","attempt",{
-        reason=reason,attempt=transient_attempt,limit=transient_limit,wait_ms=wait_ms,context_estimate=context_tokens})
+        reason=reason,attempt=transient_attempt,limit=transient_limit,wait_ms=wait_ms,
+        connection_lost=connection_lost and true or false,context_estimate=context_tokens})
       local waited, stop = 0, nil
       while waited < wait_ms do
         if foreground_cancelled() then stop = "run_cancelled" break end
@@ -1613,6 +1626,8 @@ function M:run_body(text, images)
       if stop then ok, result = false, stop break end
       call_opts.attempt = (call_opts.attempt or 1) + 1
       ok, result = pcall(provider.complete_with, self.model, messages, tool_list, self.stream, call_opts)
+      -- A later attempt that also reports a dead link keeps the patient policy (and the budget).
+      if not ok and provider.is_connection_lost(tostring(result)) then connection_lost = true end
     end
     -- A provider 400/413 on a request at/near the window is a context overflow even when
     -- the body says nothing - this deployment answers a too-large request with a bare

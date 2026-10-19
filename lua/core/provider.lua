@@ -955,7 +955,13 @@ end
 local TRANSIENT_STATUS = { ["408"]=true, ["409"]=true, ["425"]=true, ["429"]=true, ["500"]=true,
   ["502"]=true, ["503"]=true, ["504"]=true, ["529"]=true }
 local TRANSIENT_TEXT = { "connection reset", "connection refused", "broken pipe", "timed out", "timeout",
-  "connection closed", "unexpected eof", "dns", "temporarily unavailable", "overloaded" }
+  "connection closed", "unexpected eof", "dns", "temporarily unavailable", "overloaded",
+  -- A dropped LOCAL link is the one failure where waiting is obviously right: the request
+  -- produced no answer and the network is expected to come back. "Peer disconnected" is what
+  -- the native transport reports when the socket dies mid-read (measured: a Wi-Fi outage
+  -- ended a run that should have waited for the link).
+  "peer disconnected", "network is unreachable", "network unreachable",
+  "temporary failure in name resolution", "connection aborted" }
 
 function M.is_transient(problem)
   local text = tostring(problem or ""):lower()
@@ -983,6 +989,44 @@ function M.transient_retries()
   -- transport exception does not prove it emitted no visible stream.
   if not count then return 0 end
   return math.max(0, math.min(8, math.floor(count)))
+end
+
+-- Connectivity failures - our link, not the provider's health - are retried BY DEFAULT and
+-- for a much longer, visible budget than the opt-in inference retries: a Wi-Fi drop says
+-- nothing about the request, and dying with the network is the wrong behaviour. The billing
+-- caveat is unchanged in kind (a request may already have been served upstream), so the
+-- budget stays finite and reported, never an unbounded hang.
+local CONNECTION_TEXT = { "peer disconnected", "connection reset", "connection refused",
+  "connection closed", "broken pipe", "network is unreachable", "network unreachable",
+  "temporary failure in name resolution" }
+
+function M.is_connection_lost(problem)
+  local text = tostring(problem or ""):lower()
+  -- The subscription stream already used its own bounded pre-output retry; never compound it.
+  if text:find("subscription_stream_failure:", 1, true) or text:find("subscription_retry_", 1, true) then return false end
+  for _, pattern in ipairs(CONNECTION_TEXT) do
+    if text:find(pattern, 1, true) then return true end
+  end
+  return false
+end
+
+-- Attempts, and the total time we are willing to spend waiting for the link.
+function M.connection_retries()
+  local count = tonumber(env("WASM_AGENT_PROVIDER_CONNECT_RETRIES") or "")
+  if not count then return 20 end
+  return math.max(0, math.min(200, math.floor(count)))
+end
+
+function M.connection_wait_seconds()
+  local seconds = tonumber(env("WASM_AGENT_PROVIDER_CONNECT_WAIT_SECONDS") or "")
+  if not seconds then return 900 end
+  return math.max(0, math.min(86400, math.floor(seconds)))
+end
+
+-- 2, 4, 8, 16, then 30 s, jittered: quick when the link is a blip, patient when it is not.
+function M.connection_backoff_ms(attempt)
+  local seconds = math.min(30, 2 ^ math.max(1, tonumber(attempt) or 1))
+  return math.floor(seconds * 1000 * (0.75 + math.random() * 0.5))
 end
 
 -- `stream` forwards content deltas to the UI and still returns the whole
