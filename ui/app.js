@@ -962,21 +962,26 @@ function appendReasoning(text, complete = false) {
   return reasoningText;
 }
 
-function appendCommentary(text, messageId, pendingId, decisionPrelude) {
+function appendCommentary(text, messageId, pendingId, decisionPrelude, place) {
   if (!text || (messageId && renderedMessageIds.has(String(messageId)))) return;
   const block = document.createElement("wa-commentary");
   block.open = true;
   block.setText(text);
   if(pendingId)block.dataset.pendingId=String(pendingId);
-  // A decision step's prelude is the one commentary that folds into the run topic while the run is
-  // still live. The mark lives on the node so the fold stays `collapseRun`'s single rule instead of
-  // becoming a second placement path that could drift away from it.
+  // A decision step's prelude is a step of the run, like a tool call: the mark is what makes the run
+  // topic's summary count it as one. It is not a placement rule - the fold keeps a single rule in
+  // `collapseRun` (at the final answer), so nothing here decides *when* the text moves into the topic.
   if(decisionPrelude===true)block.dataset.decisionPrelude="true";
   if (messageId) {
     block.dataset.messageId = String(messageId);
     renderedMessageIds.add(String(messageId));
   }
-  currentBubble().body.append(block);
+  // `place` is the node whose streamed text this block is taking over. The block inherits that
+  // node's position instead of being appended at the end: the reader was reading that sentence
+  // there, and establishing its phase must not move it across the bubble.
+  const body = currentBubble().body;
+  if (place && place.parentNode === body) place.replaceWith(block);
+  else body.append(block);
   anchorRunStepContent(block);
   pin();
   return block;
@@ -987,19 +992,35 @@ function appendCommentary(text, messageId, pendingId, decisionPrelude) {
 // `finish_reason` (the subscription path reads the provider's per-item phase for the same thing),
 // and the stored row carries `phase = "commentary"`; nothing here classifies text.
 //
-// The streamed text was drawn in the answer's place, so it is moved once, not kept twice: the
-// segment goes, the commentary carries the authoritative sentence, and the fold puts it in the run
-// topic that holds the decision rows - while the run is live, not a round later. Body order is kept,
-// so the prelude still reads before the calls it explains and a repaint reconstructs the same order.
+// The streamed text was drawn in the answer's place because the provider had not yet said what the
+// step was; the phase arrives only when the step completes. So the node that already carries that
+// text becomes the commentary block, in that node's own position - the sentence the reader was
+// following is not re-drawn somewhere else, and body order is kept, so the prelude still reads before
+// the calls it explains and a repaint reconstructs the same order.
+//
+// This is a phase change, not the end of the run: the run is still stepping, so nothing is folded
+// into a run topic here. Every step stays a direct child of the bubble until the final answer
+// arrives, which is the one boundary `collapseRun` acts on for a live run.
 function promoteStepToCommentary(text, messageId) {
-  const prose = stripThinking(String(text == null ? streamText : text));
-  if (streamBody) { streamBody.remove(); streamBody = null; streamText = ""; }
-  if (!prose.trim()) return;
-  const preludeTrace = (trace && trace.parentNode === currentBubble().body) ? trace : null;
-  const block = appendCommentary(prose, messageId, null, true);
-  if (!block) return;
-  if (preludeTrace) preludeTrace.parentNode.insertBefore(block, preludeTrace);
-  collapseRun();
+  const raw = String(text == null ? streamText : text);
+  const prose = stripThinking(raw);
+  const holder = streamedTextHolder(currentBubble(), raw);
+  if (holder === streamBody) { streamBody = null; streamText = ""; }
+  if (!prose.trim()) { holder?.remove(); return; }
+  const block = appendCommentary(prose, messageId, null, true, holder);
+  // A phase whose durable row is already on screen drops the streamed copy instead of drawing it
+  // twice; that is a repaint case, and the ledger row is the authority.
+  if (!block && holder) holder.remove();
+}
+
+// Where a step's streamed text currently sits, if this window drew it: the answer segment a `delta`
+// chunk opened, or the provisional segment the subscription bridge filled before the provider's
+// per-item phase was known. Both are matched by the text that was actually streamed, so a phase that
+// resolves to commentary converts that node instead of leaving it behind and drawing a second one.
+function streamedTextHolder(bubble, raw) {
+  if (streamBody && streamBody.parentNode === bubble.body) return streamBody;
+  return Array.from(bubble.body.children).find(node =>
+    node.classList.contains("phase-pending") && String(node.rawText || "") === raw) || null;
 }
 
 function appendStreamedCommentary(text, pendingId) {
@@ -1733,10 +1754,16 @@ function collapseRun(finalStart = false, settled = false, answered = true) {
   // reuses the topic it already has: creating a second one nests the first inside it, and the
   // reader then opens topics to reach topics.
   const existing = Array.prototype.find.call(body.children, (c) => c.tagName === "WA-RUN");
+  // The final answer is the one visible outcome: everything the run did before it belongs inside the
+  // run topic above it - tool steps, thinking, commentary, retries - and only the answer stays
+  // outside. That fold happens at the answer's own boundary (its begin, its reply, or settlement),
+  // never when a step merely arrives: while the run is still stepping, every step is drawn directly
+  // in the bubble, so a commentary that resolves mid-run does not drag the tool calls it followed
+  // into a topic the reader cannot see.
+  const folding = !!answer || settled || finalStart;
   const moves = Array.prototype.filter.call(body.children,
     (c) => c !== answer && c !== existing && !c.classList.contains('chat-content-run-status') &&
-      (settled || (c.tagName !== 'WA-DIFF' &&
-        (c.tagName !== 'WA-COMMENTARY' || c.dataset.decisionPrelude === 'true') &&
+      (folding || (c.tagName !== 'WA-DIFF' && c.tagName !== 'WA-COMMENTARY' &&
         !(c.tagName==='WA-STEERING'&&c.dataset.state==='queued'))));
   const traces = moves.filter((c) => c.tagName === "WA-TRACE");
   // A run topic is only created once something actually ran - a run that never called a tool keeps
@@ -1744,7 +1771,7 @@ function collapseRun(finalStart = false, settled = false, answered = true) {
   // it even when that batch added no tool call: the guard is about *creating* the topic, not about
   // folding into one that is already there. Getting this wrong left the preamble sitting outside as
   // its own text segment, so the bubble read run,text,text instead of one run and one answer.
-  if (!existing && traces.length === 0 && !moves.some(c=>c.tagName==='WA-RETRY'||c.tagName==='WA-SUMMARY'||c.tagName==='WA-STEERING'||settled&&(c.tagName==='WA-COMMENTARY'||c.tagName==='WA-DIFF'||c.tagName==='WA-REASONING')) && !finalStart) return;
+  if (!existing && traces.length === 0 && !moves.some(c=>c.tagName==='WA-RETRY'||c.tagName==='WA-SUMMARY'||c.tagName==='WA-STEERING'||(c.tagName==='WA-COMMENTARY'&&folding)||settled&&(c.tagName==='WA-DIFF'||c.tagName==='WA-REASONING')) && !finalStart) return;
   if (moves.length === 0) {if(settled&&existing)existing.open=false;return;}
   const run = existing || document.createElement("wa-run");
   if (!existing) {
@@ -1905,13 +1932,18 @@ function handleEvent(event) {
     setStatus(note === "model" || note === "thinking" ? "" : "wasm-agent is " + note + "…");
   } else if (event.type === "commentary") {
     showRunStep("commentary", "Progress update");
-    const pending = phasePendingText.get(String(event.pending_id || ''));
+    const pendingKey = String(event.pending_id || '');
+    const pending = phasePendingText.get(pendingKey);
     if (pending?.node === answerAnchors.get(transcript)) releaseAnswerAnchor(transcript, false);
-    removePendingText(event.pending_id);
-    if(streamedCommentaryBlock && (!event.pending_id || streamedCommentaryBlock.dataset.pendingId===String(event.pending_id))) {
+    if(streamedCommentaryBlock && (!event.pending_id || streamedCommentaryBlock.dataset.pendingId===pendingKey)) {
+      removePendingText(event.pending_id);
       streamedCommentaryBlock.setText(event.text || streamedCommentaryText);
       finishStreamedCommentary(event.message_id);
-    } else appendCommentary(event.text || "", event.message_id, event.pending_id);
+    } else if (appendCommentary(event.text || "", event.message_id, event.pending_id, false, pending?.node || null)) {
+      // The resolved topic took the provisional segment's own place, so the text the reader was
+      // watching does not jump to the end of the bubble when its phase is established.
+      if (pending) phasePendingText.delete(pendingKey);
+    } else removePendingText(event.pending_id);
   } else if (event.type === "commentary_delta") {
     showRunStep("commentary", "Progress update");
     appendStreamedCommentary(event.text || "",event.pending_id);
