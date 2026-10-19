@@ -959,6 +959,10 @@ fn health_body() -> Vec<u8> {
         // here because this endpoint is the one thing every caller already looks at, and
         // "the controls are wedged" is otherwise indistinguishable from "nothing is polling".
         "client": crate::client_bridge::global_status(),
+        // What this node can do, from the one registry that registers it: the names and a sha256 of
+        // the ordered list, never the descriptions. `/health` is polled, so the long form lives in
+        // `wa capabilities --json` (and, inside a workflow, in the sandbox's `capabilities()`).
+        "capabilities": crate::capabilities::health(),
     })
     .to_string()
     .into_bytes()

@@ -466,6 +466,115 @@ permissions/effects. Prepared assets may be embedded at build time, never fetche
 by runtime. See [CODEMODE.md](CODEMODE.md) for ABI, limits, provenance, source/embedded
 Node-unavailable proofs and the separate benchmark-only Node reference host.
 
+## The capability inventory
+
+What this node can do is **data**, not prose. The live registry is
+`rust/wa-host/src/capabilities.rs`, and the interpreter is booted from it: a `host.*` function
+that is not in that list cannot be called, and one that is in it is a row below. Each entry
+carries a name, a one-line description and an effect class (`read-only`, `writes files`,
+`runs a process`, `network`, `device`), stably ordered by name so two nodes can be diffed.
+
+Four surfaces read the same registry, which is why none of them can disagree with what is
+actually registered:
+
+| surface | what it answers |
+| --- | --- |
+| `wa capabilities [--json]` | the whole list, with descriptions; `--json` is the exact text whose sha256 `/health` publishes |
+| `GET /health` -> `capabilities` | `{count, names, sha256}` - names and the digest of the list, never the descriptions, because that endpoint is polled |
+| sandbox `capabilities()` | the same array, inside a codemode workflow |
+| sandbox `describe("exec")` | one entry by exact name |
+
+Inside the sandbox `capabilities()` is this inventory, **not** the `capabilities` tool (which lists
+an account's permitted tools and is not admitted inside codemode); the name is spelled the same
+because it answers the same question - what can this node do. Both globals are asynchronous, like
+`tools.read`, and neither admits an effect: they are metadata over the registry.
+
+That digest is what makes drift visible from outside the process: two nodes agree iff their
+`sha256` agrees, and a watcher that already polls `/health` learns that the inventory changed
+without downloading it.
+
+The table below is hand-maintained **on purpose**: a test makes it agree with the registry, so a
+capability that is registered but undocumented, documented but absent, or documented with the
+wrong effect class fails `cargo test -p wa-host capabilities` with the exact names. A generated
+block would only prove that the generator ran.
+
+Adding a capability is two edits: one entry in the registry, one row here.
+
+<!-- capability-inventory:begin -->
+; One line per capability: name, then effect class. Hand-maintained; checked against the live registry in
+; rust/wa-host/src/capabilities.rs by the drift test in that module (cargo test -p wa-host capabilities).
+; Lines starting with ";" and blank lines are ignored by the checker.
+beat                 read-only
+binding_state        read-only
+binding_transport    read-only
+canonical_path       read-only
+capability_inventory read-only
+client               device
+client_status        read-only
+db_ready             read-only
+enqueue_completion   writes files
+exec                 runs a process
+exec_timeout         read-only
+getenv               read-only
+graph_caps           read-only
+graph_explain        read-only
+graph_impact         read-only
+graph_index          writes files
+graph_notify         read-only
+graph_overview       read-only
+graph_patch_audit    read-only
+graph_path           read-only
+graph_query          read-only
+graph_search         read-only
+graph_source         read-only
+graph_sources        read-only
+graph_stats          read-only
+graph_status         read-only
+grep                 read-only
+http                 network
+http_sse             network
+http_stream          network
+input_editor         device
+input_start          device
+input_stop           device
+input_take           device
+invoke               runs a process
+isatty               device
+jobs                 writes files
+list_dir             read-only
+log                  device
+mark_db_ready        writes files
+monotonic_ms         read-only
+node_identity        read-only
+now                  read-only
+operation            runs a process
+path_kind            read-only
+paths                read-only
+platform             read-only
+plugins              read-only
+quickjs              runs a process
+read_file            read-only
+read_image_base64    read-only
+relay                network
+resource             writes files
+run_cancelled        read-only
+runtime_info         read-only
+sha256               read-only
+sign                 read-only
+sleep                read-only
+sql_exec             writes files
+sql_query            read-only
+stream               device
+subagent             runs a process
+system_resources     read-only
+terminal_size        device
+terminal_write       device
+ticker               device
+uuid                 read-only
+verify               read-only
+write_file           writes files
+<!-- capability-inventory:end -->
+
 ## Adding a capability
 
 `host.operation('start', args_json)` accepts either a shell `command` or a native
