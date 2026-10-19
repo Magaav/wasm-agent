@@ -103,12 +103,36 @@ local function evaluation_packet(row,result,profile_id)
   local started,settled=tonumber(result.started_at),tonumber(result.settled_at)
   local duration=nil
   if started and settled and settled>=started then duration=tonumber(string.format("%.1f",settled-started)) end
+  -- The cause block answers the question the state alone cannot: a child that produced no report is
+  -- indistinguishable from one that crashed, was cut off by the provider, or was cancelled. Without
+  -- it a recovery decision is made blind - "unknown, no_child_report" says nothing about whether the
+  -- run died at call 2 or at call 86. Every field is a measurement or an explicit absence.
+  local inner=type(result.result)=="table" and result.result or {}
+  local report=(result.result~=nil and (inner.reply~=nil or inner.truncated~=nil)) and "present" or "absent"
+  local cause={settled=result.settled,report=report,error=result.error,detail=result.detail,
+    attempts=tonumber(result.attempts),timeout_s=tonumber(result.timeout_seconds),
+    events=tonumber(inner.events)}
+  do
+    local bits={}
+    local function add(v) bits[#bits+1]=v end
+    add("state="..tostring(result.state or "unknown"))
+    add("report="..report)
+    if cause.settled~=nil then add("settled="..tostring(cause.settled)) end
+    if cause.error then add("error="..tostring(cause.error)) end
+    if cause.detail then add("detail="..tostring(cause.detail)) end
+    if cause.attempts then add(string.format("attempts=%d",cause.attempts)) end
+    if cause.events then add(string.format("events=%d",cause.events)) end
+    if cause.timeout_s then add(string.format("timeout_s=%d",cause.timeout_s)) end
+    if duration then add("duration_s="..tostring(duration)) end
+    cause.note=table.concat(bits,"; ")
+  end
   return {
     child={id=row.target_id,profile=profile_id,state=tostring(result.state or "unknown"),
       error=result.error,model=result.model,reasoning=result.reasoning,
       served_model=accounting.model,provider=accounting.provider},
     session={id=tostring(result.session_id or ""),parent=row.parent_session,
       duration_s=duration,started_at=started,settled_at=settled},
+    cause=cause,
     usage=accounting.usage or {available=false,reason="no_child_report"},
     artifacts=artifact_facts(result.session_id),
   }

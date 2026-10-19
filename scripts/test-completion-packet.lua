@@ -205,6 +205,34 @@ check_eq(packet.artifacts.managed,false,"a session with no worktree says so inst
 tick()
 check_eq(#deliveries,before,"a skipped settlement is not dispatched on a later tick")
 
+-- 5. A child that died without a report: the state alone says nothing, so the packet must carry why.
+-- This is the case a coordinator hit for real - `unknown`, `no_child_report`, no exit reason, and a
+-- recovery decision that had to be made blind.
+completions.watch("packet-child-dead",ctx)
+statuses["packet-child-dead"]=view("packet-child-dead",child,"explore",{state="unknown",settled=true,
+  error="provider_incomplete_stream: partial response preserved",attempts=1,timeout_seconds=7200})
+tick()
+row=completions.status("packet-child-dead","master")
+packet=json.decode(row.packet)
+check_eq(packet.cause.report,"absent","a child with no final report says so instead of looking clean")
+check(packet.cause.error~=nil and packet.cause.error:find("provider_incomplete_stream",1,true)~=nil,
+  "the cause carries the error that ended it: "..tostring(packet.cause.error))
+check(packet.cause.note:find("state=unknown",1,true)~=nil,"the cause note names the state")
+check(packet.cause.note:find("report=absent",1,true)~=nil,"the cause note says the report is absent")
+check(packet.cause.note:find("attempts=1",1,true)~=nil,"the cause note carries how many destinations were asked")
+check_eq(packet.review.kind,"recovery","a lost run still owes a recovery decision")
+
+-- 6. A child that did report: the same block proves the report and how many events it recorded, so
+-- `present` is a measurement and not an assumption.
+completions.watch("packet-child-reported",ctx)
+statuses["packet-child-reported"]=view("packet-child-reported",child,"explore",
+  {result={events=1174,reply="done",truncated=false}})
+tick()
+packet=json.decode(completions.status("packet-child-reported","master").packet)
+check_eq(packet.cause.report,"present","a child that reported is reported as having reported")
+check_eq(packet.cause.events,1174,"the cause carries the recorded event count")
+check(packet.cause.note:find("events=1174",1,true)~=nil,"the cause note carries the event count")
+
 -- 5. A failure needs a recovery decision, whatever the profile says.
 completions.watch("failed-child",ctx)
 statuses["failed-child"]=view("failed-child",child,"whatsapp-responder",
