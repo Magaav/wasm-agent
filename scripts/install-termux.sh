@@ -6,6 +6,14 @@
 # scripts/termux/adopt-existing.sh - it refuses more, backs the old install up, and says
 # exactly which fact it is missing when the on-phone layout is not the documented one.
 #
+# `--bundle DIR --manifest-sha256 SHA` installs a PREBUILT Android arm64 bundle instead of
+# building here: the runtime is cross-built on a desktop with the Android NDK
+# (scripts/termux/cross-build-android.sh) for a phone whose compiler crashes on this
+# workspace, and this path needs no compiler and no network. It is not a weaker path: the
+# operator's hash pins the bundle, every member is verified, the ELF machine is read from
+# the header, the current installation is backed up byte-for-byte as the rollback release,
+# and it records build_profile=cross-android so `wa doctor` says where the runtime came from.
+#
 # `--recover` is the out-of-band repair for the one damage `wa update` cannot fix itself:
 # a switch interrupted between its two renames leaves the active path absent, and with it
 # the launcher, so the next `wa update` cannot even start. This runs from the checkout,
@@ -19,8 +27,10 @@ action=fresh
 case "${1:-}" in
   --adopt-existing) action=adopt; shift ;;
   --recover) action=recover; shift ;;
+  # --bundle is not consumed here: install-bundle.sh parses the whole option pair.
+  --bundle) action=bundle ;;
   '') : ;;
-  *) fail "unknown_install_option: $1 (the options are --adopt-existing and --recover)" ;;
+  *) fail "unknown_install_option: $1 (the options are --adopt-existing, --bundle DIR --manifest-sha256 SHA, and --recover)" ;;
 esac
 
 if [ "${WA_TERMUX_TEST:-0}" = 1 ]; then
@@ -50,6 +60,10 @@ fi
 
 if [ "$action" = adopt ]; then
   exec bash "$root/scripts/termux/adopt-existing.sh" "$@"
+fi
+
+if [ "$action" = bundle ]; then
+  exec bash "$root/scripts/termux/install-bundle.sh" "$@"
 fi
 [ "$#" -eq 0 ] || fail "unknown_install_option: $1"
 

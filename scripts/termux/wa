@@ -111,6 +111,14 @@ doctor() {
     dev|debug)
       printf 'Build: %s (unoptimized: slower, and installed because the optimized build did not finish on this device)\n' "$build_profile"
       ;;
+    cross-android)
+      # A prebuilt bundle: the runtime was cross-built on a desktop with the Android NDK and
+      # installed from bytes, because compiling this workspace on this phone crashed rustc.
+      # Saying so matters - "why is this not a build from my device" is a real question.
+      printf 'Build: cross-android (prebuilt with the Android NDK on a desktop, installed from a verified bundle; not compiled on this device)\n'
+      ndk_version=$(config_value_on "$install_root/installed.txt" ndk_version)
+      if [ -n "$ndk_version" ]; then printf 'Cross-build: NDK %s\n' "$ndk_version"; fi
+      ;;
     '') printf 'Build: unknown (no build_profile recorded; a release from before the build ladder)\n' ;;
     *) printf 'Build: %s\n' "$build_profile" ;;
   esac
