@@ -190,6 +190,7 @@ fi
   rl_fail "upstream_revision_unknown: the checkout of $upstream_commit did not land there"
 
 built=$(rl_build_wa "$staging/src")
+built_profile=$(rl_build_profile_of_bin "$built")
 [ "$(git -C "$staging/src" rev-parse HEAD)" = "$upstream_commit" ] ||
   rl_fail 'source_changed_during_build'
 if [ -n "$(git -C "$staging/src" status --porcelain --untracked-files=normal)" ]; then
@@ -199,7 +200,7 @@ fi
 stage_release="$RL_RELEASES/.stage.$$"
 mkdir -p -- "$RL_RELEASES" || rl_fail "update_failed: cannot create $RL_RELEASES"
 rl_assemble "$staging/src" "$built" "$stage_release" "$upstream_commit" "$upstream_url" \
-  "$installed_commit" 'wa-update'
+  "$installed_commit" 'wa-update' "$built_profile"
 rl_verify_release "$stage_release" ||
   rl_fail 'candidate_refused: the build did not verify (see above); nothing was switched'
 
@@ -220,6 +221,9 @@ fi
 
 rl_activate "$upstream_commit"
 
+if [ "$built_profile" = dev ]; then
+  rl_note 'termux-update: this revision was built with the debug/unoptimized profile: the optimized build did not finish on this device, so the runtime is slower. "wa doctor" reports it.'
+fi
 rl_note "termux-update: updated $installed_short -> $upstream_short"
 rl_note "termux-update: previous release kept at $RL_RELEASES/$installed_commit"
 rl_note 'termux-update: roll back with: wa update --rollback'

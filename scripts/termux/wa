@@ -19,6 +19,12 @@ config_value() {
   sed -n "s/^${key}=//p" "$config/env" | head -n 1
 }
 
+# The same one-key reader for any file of `key=value` lines (installed.txt).
+config_value_on() {
+  [ -f "$1" ] || return 0
+  sed -n "s/^$2=//p" "$1" | head -n 1
+}
+
 need_runtime() {
   [ -f "$native" ] || fail "runtime_missing: run scripts/install-termux.sh from a wasm-agent checkout"
 }
@@ -97,6 +103,17 @@ doctor() {
   need_runtime
   printf 'Runtime: %s\n' "$native"
   printf 'Architecture: %s\n' "$(uname -m)"
+  # Which rung of the build ladder produced this runtime: an unoptimized build is a real
+  # outcome on a phone that cannot optimize a crate this size, and it is worth saying out
+  # loud rather than leaving the operator to wonder why it is slow.
+  build_profile=$(config_value_on "$install_root/installed.txt" build_profile)
+  case "$build_profile" in
+    dev|debug)
+      printf 'Build: %s (unoptimized: slower, and installed because the optimized build did not finish on this device)\n' "$build_profile"
+      ;;
+    '') printf 'Build: unknown (no build_profile recorded; a release from before the build ladder)\n' ;;
+    *) printf 'Build: %s\n' "$build_profile" ;;
+  esac
   printf 'UI assets: %s\n' "$(if [ -f "$ui/index.html" ]; then printf present; else printf missing; fi)"
   printf 'Configuration: %s\n' "$(if [ -f "$config/env" ]; then printf present; else printf "missing; run wa setup"; fi)"
   printf 'ripgrep: %s\n' "$(if command -v rg >/dev/null 2>&1; then command -v rg; else printf missing; fi)"

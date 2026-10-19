@@ -21,7 +21,8 @@
 #   bin/release-lib.sh      this file, for the updater above
 #   ui/<assets>             the matching UI closure, from the same commit as the runtime
 #   LICENSE
-#   installed.txt           source_commit, source_remote, previous_commit, ...
+#   installed.txt           source_commit, source_remote, previous_commit, build_profile
+#                           (which rung of the build ladder produced the runtime), ...
 #   installed.sha256        manifest of every file above except itself
 #
 # Private state is NEVER part of a release: `~/.wasm-agent` is not read, copied or written
@@ -98,7 +99,7 @@ rl_elf_abi() { # <file>
   esac
 }
 
-rl_write_installed() { # <dest_file> <commit> <remote> <previous_sha|-> <installed_by>
+rl_write_installed() { # <dest_file> <commit> <remote> <previous_sha|-> <installed_by> [build_profile]
   {
     printf 'source_commit=%s\n' "$2"
     printf 'source_remote=%s\n' "$3"
@@ -106,6 +107,11 @@ rl_write_installed() { # <dest_file> <commit> <remote> <previous_sha|-> <install
     printf 'previous_commit=%s\n' "${4:--}"
     printf 'installed_by=%s\n' "$5"
     printf 'source_provenance=source-built-termux\n'
+    # Which rung of the build ladder produced the runtime that is in this release: a phone
+    # whose optimized build would not finish ends up running the debug/unoptimized one, and
+    # that has to be readable later (`wa doctor` reads exactly this line). Absent in a
+    # release from before this line existed, which is not an error.
+    if [ -n "${6:-}" ]; then printf 'build_profile=%s\n' "$6"; fi
   } > "$1"
 }
 
@@ -117,29 +123,66 @@ rl_write_installed() { # <dest_file> <commit> <remote> <previous_sha|-> <install
 # the UI, is more memory than the device can give. The observed failure on the operator's
 # device was rustc killed by a signal - `signal: 11, SIGSEGV`, reported by cargo as
 # `process didn't exit successfully` - which is a crash, not a Rust diagnostic and not a
-# build error, and it retried nothing and left nothing behind to read.
+# build error. The crate rustc died on, both times, was the Wasmtime engine
+# `cranelift_codegen`, and the device reported ~2.7 GB available on 8 cores with a swap
+# file already half used.
 #
-# So an Android host builds with a conservative resource profile. Each setting is a
-# deliberate trade and none of them is a claimed root-cause fix: this is mitigation, plus
-# a record good enough to diagnose the next crash.
-#   CARGO_BUILD_JOBS=1            one rustc at a time, so peak memory stops scaling with
-#                                 the core count (the lever that matters most)
-#   RUSTFLAGS=-C codegen-units=1  one LLVM codegen unit per crate: less peak memory inside
-#                                 each rustc, at the cost of some build time (a slower
-#                                 build beats a crashed one)
-#   RUST_MIN_STACK=33554432       32 MiB per compiler thread against the 8 MiB default, for
-#                                 a rustc that dies of its own recursion or stack rather
-#                                 than of an allocation failure
-#   CARGO_INCREMENTAL=0           no incremental state to hold or write while building
+# So the levers are the ones that decide how many rustc processes exist at once and how
+# much memory ONE of them holds, and each one below is kept or dropped for a stated reason:
+#   CARGO_BUILD_JOBS=1     one rustc at a time: peak memory stops scaling with the core
+#                          count. On a device this size, eight concurrent rustc processes
+#                          are the largest single claim on memory in the build, and this is
+#                          the one lever worth paying build time for. Every rung sets it.
+#   (no RUSTFLAGS)         `-C codegen-units=1` is deliberately NOT set any more. It puts a
+#                          whole crate into ONE LLVM codegen unit, which *raises* peak
+#                          memory inside that rustc - the opposite of what a memory-starved
+#                          compiler needs - and the crashing build was already running it.
+#                          Default codegen units let LLVM split a crate the size of
+#                          cranelift_codegen into several units, each finished and released
+#                          in turn. Slower in wall-clock terms is the accepted cost.
+#   RUST_MIN_STACK=33554432  32 MiB per compiler thread against the 8 MiB default, from the
+#                          second rung on. A SIGSEGV is as much the signature of a
+#                          guard-page stack overflow as of a wild pointer, and rustc's
+#                          query, trait-layout and const-eval recursion is legitimately deep
+#                          in exactly the crates that die here; a raised stack is the only
+#                          knob that addresses that shape. It costs address space, not
+#                          resident memory - thread stacks are mapped lazily and an
+#                          untouched page is never committed - so on a memory-starved device
+#                          it is close to free. It is a hypothesis about this crash and not a
+#                          claim about its cause; the third rung tests the other hypothesis
+#                          (optimizer and codegen work) directly.
+#   CARGO_INCREMENTAL=0    the third rung only, where it does something. A `--release` build
+#                          already has incremental off (cargo's default), so setting it
+#                          there would be a knob kept for the look of caution; the `dev`
+#                          profile turns incremental ON, and on a fresh build there is
+#                          nothing to reuse and a cache of compiler state to hold and write.
 #
-# An explicit operator setting always wins and is named as kept: a build that silently
-# ignores CARGO_BUILD_JOBS=4 is a build nobody can explain afterwards. Nothing here applies
-# on a non-Android host, and WA_TERMUX_BUILD_PROFILE=conservative|default forces the choice
-# anywhere - which is how the fixture suite drives the phone profile on a host that is not
-# a phone.
-RL_BUILD_JOBS_CONSERVATIVE=1
-RL_BUILD_MIN_STACK_CONSERVATIVE=33554432
-RL_BUILD_RUSTFLAGS_CONSERVATIVE='-C codegen-units=1'
+# The ladder. A memory-starved compiler gets three chances, and the third is a way through
+# rather than another mitigation:
+#   attempt 1  profile default       one job; everything else cargo's own default
+#   attempt 2  profile conservative  one job, 32 MiB compiler stack
+#   attempt 3  profile debug         `cargo build --profile dev`, one job, no incremental
+# A debug build does the type checking and borrow checking but almost none of the optimizer
+# work, so it can build a crate that `--release` cannot, and an unoptimized runtime that
+# starts is a better outcome on a phone than no install at all. It is slower at runtime, and
+# it IS the installed runtime: the rung that succeeds decides which binary is installed, and
+# installed.txt records which rung it was.
+#
+# Authorship of a setting. An explicit operator setting always wins and is never overridden,
+# and the origin of every value is recorded: a build that silently ignores CARGO_BUILD_JOBS=4
+# is a build nobody can explain afterwards. The origin is captured BEFORE any rung runs,
+# because after rung 1 this script's own export is indistinguishable from an operator's value
+# by inspection alone - which is exactly what this file used to misreport as "yours, kept".
+#
+# A host that is not a phone is untouched: there the ladder is one rung, with the host's own
+# defaults and no profile variables at all. WA_TERMUX_BUILD_PROFILE=default|conservative|
+# debug forces one rung on any host - which is how the fixture suite drives a phone rung off
+# a phone - and WA_TERMUX_TEST=1 (the fixture suite saying "pretend this is the phone")
+# selects the whole three-rung ladder. That is announced, never silent.
+RL_BUILD_JOBS=1
+RL_BUILD_MIN_STACK=33554432
+RL_BUILD_INCREMENTAL_DEBUG=0
+RL_BUILD_LADDER_PHONE='default conservative debug'
 
 # Android/Termux, detected the way the installers already guard on it.
 rl_build_host_is_android() {
@@ -148,62 +191,179 @@ rl_build_host_is_android() {
   return 0
 }
 
-# conservative | default. Sets RL_BUILD_PROFILE, and refuses by name on anything else -
-# which is why the refusal is here and not in a command substitution, where `exit 1` would
-# only end the subshell and leave the caller building with no profile chosen at all.
-rl_build_profile() {
+# Is the phone build path in play: the device itself, or the fixture suite standing in for
+# it. RL_BUILD_TEST_HOST records the second case so the caller can announce it.
+rl_build_on_phone() {
+  RL_BUILD_TEST_HOST=0
+  if rl_build_host_is_android; then return 0; fi
+  [ "${WA_TERMUX_TEST:-0}" = 1 ] || return 1
+  RL_BUILD_TEST_HOST=1
+  return 0
+}
+
+# The rungs this build will try, in order. Sets RL_BUILD_LADDER, RL_BUILD_PHONE_KNOBS (the
+# rungs' knobs are in play), RL_BUILD_LADDER_FORCED and RL_BUILD_PROFILE (the first rung,
+# descriptive until one is applied). Refuses by name on an unknown WA_TERMUX_BUILD_PROFILE
+# value - here, and not in a command substitution, where `exit 1` would only end the subshell
+# and leave the caller building with no profile chosen at all.
+rl_build_ladder() {
+  RL_BUILD_LADDER_FORCED=0
+  RL_BUILD_PHONE_KNOBS=0
   case "${WA_TERMUX_BUILD_PROFILE:-}" in
-    conservative|default) RL_BUILD_PROFILE=$WA_TERMUX_BUILD_PROFILE ;;
-    '') if rl_build_host_is_android; then RL_BUILD_PROFILE=conservative; else RL_BUILD_PROFILE=default; fi ;;
-    *) rl_fail "build_profile_unknown: WA_TERMUX_BUILD_PROFILE=$WA_TERMUX_BUILD_PROFILE (use 'conservative' or 'default')" ;;
+    default|conservative|debug)
+      RL_BUILD_LADDER=$WA_TERMUX_BUILD_PROFILE
+      RL_BUILD_LADDER_FORCED=1
+      RL_BUILD_PHONE_KNOBS=1
+      ;;
+    '')
+      if rl_build_on_phone; then
+        RL_BUILD_LADDER=$RL_BUILD_LADDER_PHONE
+        RL_BUILD_PHONE_KNOBS=1
+      else
+        RL_BUILD_LADDER=default
+      fi
+      ;;
+    *)
+      rl_fail "build_profile_unknown: WA_TERMUX_BUILD_PROFILE=$WA_TERMUX_BUILD_PROFILE (use 'default', 'conservative' or 'debug')"
+      ;;
+  esac
+  RL_BUILD_PROFILE=${RL_BUILD_LADDER%% *}
+}
+
+rl_build_rung_count() {
+  _rl_n=0
+  for _rl_r in $RL_BUILD_LADDER; do _rl_n=$((_rl_n + 1)); done
+  printf '%s' "$_rl_n"
+}
+
+# The operator's own settings, captured ONCE and before any rung can change the environment.
+# This is the fix for the misreport: after rung 1 exported CARGO_BUILD_JOBS=1, the next rung
+# found a value in the environment and called it the operator's.
+rl_build_capture_operator_knobs() {
+  RL_BUILD_OP_JOBS=
+  RL_BUILD_OP_STACK=
+  RL_BUILD_OP_FLAGS=
+  RL_BUILD_OP_INCREMENTAL=
+  if [ -n "${CARGO_BUILD_JOBS:-}" ]; then RL_BUILD_OP_JOBS=$CARGO_BUILD_JOBS; fi
+  if [ -n "${RUST_MIN_STACK:-}" ]; then RL_BUILD_OP_STACK=$RUST_MIN_STACK; fi
+  if [ -n "${RUSTFLAGS:-}" ]; then RL_BUILD_OP_FLAGS=$RUSTFLAGS; fi
+  if [ -n "${CARGO_INCREMENTAL:-}" ]; then RL_BUILD_OP_INCREMENTAL=$CARGO_INCREMENTAL; fi
+  RL_BUILD_OPERATOR_LINES=
+  if [ -n "$RL_BUILD_OP_JOBS" ]; then
+    RL_BUILD_OPERATOR_LINES="CARGO_BUILD_JOBS=$RL_BUILD_OP_JOBS"
+  fi
+  if [ -n "$RL_BUILD_OP_STACK" ]; then
+    RL_BUILD_OPERATOR_LINES="${RL_BUILD_OPERATOR_LINES}${RL_BUILD_OPERATOR_LINES:+
+}RUST_MIN_STACK=$RL_BUILD_OP_STACK"
+  fi
+  if [ -n "$RL_BUILD_OP_FLAGS" ]; then
+    RL_BUILD_OPERATOR_LINES="${RL_BUILD_OPERATOR_LINES}${RL_BUILD_OPERATOR_LINES:+
+}RUSTFLAGS='$RL_BUILD_OP_FLAGS'"
+  fi
+  if [ -n "$RL_BUILD_OP_INCREMENTAL" ]; then
+    RL_BUILD_OPERATOR_LINES="${RL_BUILD_OPERATOR_LINES}${RL_BUILD_OPERATOR_LINES:+
+}CARGO_INCREMENTAL=$RL_BUILD_OP_INCREMENTAL"
+  fi
+}
+
+rl_build_operator_value() { # <NAME>; empty when the operator did not set it
+  case "$1" in
+    CARGO_BUILD_JOBS) printf '%s' "$RL_BUILD_OP_JOBS" ;;
+    RUST_MIN_STACK) printf '%s' "$RL_BUILD_OP_STACK" ;;
+    RUSTFLAGS) printf '%s' "$RL_BUILD_OP_FLAGS" ;;
+    CARGO_INCREMENTAL) printf '%s' "$RL_BUILD_OP_INCREMENTAL" ;;
   esac
 }
 
-# Applies the profile to the environment the compiler will inherit and records exactly what
-# was applied in RL_BUILD_PROFILE_DESC. Never on stdout: rl_build_wa's stdout is the built
+rl_build_knob_value() { # <NAME>; what this environment holds right now
+  case "$1" in
+    CARGO_BUILD_JOBS) printf '%s' "${CARGO_BUILD_JOBS:-}" ;;
+    RUST_MIN_STACK) printf '%s' "${RUST_MIN_STACK:-}" ;;
+    RUSTFLAGS) printf '%s' "${RUSTFLAGS:-}" ;;
+    CARGO_INCREMENTAL) printf '%s' "${CARGO_INCREMENTAL:-}" ;;
+  esac
+}
+
+rl_build_knob_set() { # <NAME> <value>; only ever called with this script's own values
+  case "$1" in
+    CARGO_BUILD_JOBS) CARGO_BUILD_JOBS=$2; export CARGO_BUILD_JOBS ;;
+    RUST_MIN_STACK) RUST_MIN_STACK=$2; export RUST_MIN_STACK ;;
+    RUSTFLAGS) RUSTFLAGS=$2; export RUSTFLAGS ;;
+    CARGO_INCREMENTAL) CARGO_INCREMENTAL=$2; export CARGO_INCREMENTAL ;;
+  esac
+}
+
+rl_build_desc_add() { # <line>
+  if [ -n "$RL_BUILD_PROFILE_DESC" ]; then
+    RL_BUILD_PROFILE_DESC="$RL_BUILD_PROFILE_DESC
+$1"
+  else
+    RL_BUILD_PROFILE_DESC=$1
+  fi
+}
+
+# One knob for one rung. A value the operator set is kept and labelled theirs; this script's
+# own value is labelled as this script's, for the rung that set it. Nothing is ever
+# overridden without saying so.
+rl_build_knob() { # <NAME> <script_value> <rung>
+  _rl_name=$1
+  _rl_current=$(rl_build_knob_value "$_rl_name")
+  if [ -n "$_rl_current" ]; then
+    if [ -n "$(rl_build_operator_value "$_rl_name")" ]; then
+      rl_build_desc_add "$_rl_name=$_rl_current (yours, kept)"
+    else
+      rl_build_desc_add "$_rl_name=$_rl_current (this script, rung $3)"
+    fi
+    return 0
+  fi
+  rl_build_knob_set "$_rl_name" "$2"
+  rl_build_desc_add "$_rl_name=$2 (this script, rung $3)"
+}
+
+# Apply one rung to the environment the compiler will inherit: records exactly what was
+# applied in RL_BUILD_PROFILE_DESC (one knob per line) and which cargo profile the rung
+# builds with in RL_BUILD_CARGO_MODE. Never on stdout: rl_build_wa's stdout is the built
 # binary path, because every caller reads it with $(...).
-rl_build_apply_profile() { # <conservative|default>
-  RL_BUILD_PROFILE_DESC=''
-  if [ "$1" != conservative ]; then
+rl_build_apply_profile() { # <default|conservative|debug>
+  RL_BUILD_PROFILE=$1
+  RL_BUILD_PROFILE_DESC=
+  RL_BUILD_CARGO_MODE=release
+  if [ "$1" = debug ]; then RL_BUILD_CARGO_MODE=dev; fi
+  if [ "${RL_BUILD_PHONE_KNOBS:-0}" != 1 ]; then
+    # Not a phone: the host's own defaults, and not one variable of ours in the environment.
     RL_BUILD_PROFILE_DESC='unchanged (host defaults)'
     return 0
   fi
-  if [ -n "${CARGO_BUILD_JOBS:-}" ]; then
-    RL_BUILD_PROFILE_DESC="$RL_BUILD_PROFILE_DESC CARGO_BUILD_JOBS=$CARGO_BUILD_JOBS (yours, kept)"
-  else
-    CARGO_BUILD_JOBS=$RL_BUILD_JOBS_CONSERVATIVE
-    export CARGO_BUILD_JOBS
-    RL_BUILD_PROFILE_DESC="$RL_BUILD_PROFILE_DESC CARGO_BUILD_JOBS=$CARGO_BUILD_JOBS"
+  rl_build_knob CARGO_BUILD_JOBS "$RL_BUILD_JOBS" "$1"
+  case "$1" in
+    conservative|debug) rl_build_knob RUST_MIN_STACK "$RL_BUILD_MIN_STACK" "$1" ;;
+  esac
+  if [ "$1" = debug ]; then
+    rl_build_knob CARGO_INCREMENTAL "$RL_BUILD_INCREMENTAL_DEBUG" "$1"
   fi
-  if [ -n "${RUST_MIN_STACK:-}" ]; then
-    RL_BUILD_PROFILE_DESC="$RL_BUILD_PROFILE_DESC RUST_MIN_STACK=$RUST_MIN_STACK (yours, kept)"
-  else
-    RUST_MIN_STACK=$RL_BUILD_MIN_STACK_CONSERVATIVE
-    export RUST_MIN_STACK
-    RL_BUILD_PROFILE_DESC="$RL_BUILD_PROFILE_DESC RUST_MIN_STACK=$RUST_MIN_STACK"
-  fi
-  if [ -n "${RUSTFLAGS:-}" ]; then
-    RL_BUILD_PROFILE_DESC="$RL_BUILD_PROFILE_DESC RUSTFLAGS='$RUSTFLAGS' (yours, kept)"
-  else
-    RUSTFLAGS=$RL_BUILD_RUSTFLAGS_CONSERVATIVE
-    export RUSTFLAGS
-    RL_BUILD_PROFILE_DESC="$RL_BUILD_PROFILE_DESC RUSTFLAGS='$RUSTFLAGS'"
-  fi
-  if [ -n "${CARGO_INCREMENTAL:-}" ]; then
-    RL_BUILD_PROFILE_DESC="$RL_BUILD_PROFILE_DESC CARGO_INCREMENTAL=$CARGO_INCREMENTAL (yours, kept)"
-  else
-    CARGO_INCREMENTAL=0
-    export CARGO_INCREMENTAL
-    RL_BUILD_PROFILE_DESC="$RL_BUILD_PROFILE_DESC CARGO_INCREMENTAL=$CARGO_INCREMENTAL"
-  fi
-  RL_BUILD_PROFILE_DESC=${RL_BUILD_PROFILE_DESC# }
 }
 
-# The one cargo invocation this file makes. The lockfile is fixed (`--locked`) and it is the
-# same invocation as the installer's, so a release is the tree, not the tree plus whatever
-# resolution felt like that day.
-rl_build_cargo() { # <src_root>
-  if [ "${WA_TERMUX_OFFLINE:-0}" = 1 ]; then
+# Which rung produced a built binary, for the release record. The rung that succeeds decides
+# the target subdirectory cargo wrote to, so the path says which one it was.
+rl_build_profile_of_bin() { # <binary path>
+  case "$1" in
+    */target/debug/*) printf 'dev' ;;
+    *) printf 'release' ;;
+  esac
+}
+
+# The one cargo invocation this file makes, for one rung. The lockfile is fixed (`--locked`)
+# and it is the same invocation as the installer's, so a release is the tree, not the tree
+# plus whatever resolution felt like that day. `dev` is the debug rung: cargo's `dev`
+# profile, which does almost none of the optimizer and codegen work that `--release` does.
+rl_build_cargo() { # <src_root> <release|dev>
+  if [ "$2" = dev ]; then
+    if [ "${WA_TERMUX_OFFLINE:-0}" = 1 ]; then
+      "$_rl_cargo" build --profile dev --locked --offline --manifest-path "$1/rust/Cargo.toml"
+    else
+      "$_rl_cargo" build --profile dev --locked --manifest-path "$1/rust/Cargo.toml"
+    fi
+  elif [ "${WA_TERMUX_OFFLINE:-0}" = 1 ]; then
     "$_rl_cargo" build --release --locked --offline --manifest-path "$1/rust/Cargo.toml"
   else
     "$_rl_cargo" build --release --locked --manifest-path "$1/rust/Cargo.toml"
@@ -218,13 +378,13 @@ rl_build_run() { # <src_root> <logfile>; sets RL_BUILD_RC
   _rl_status=$(mktemp) 2>/dev/null || rl_fail 'build_log_failed: cannot create a temporary status file'
   if command -v tee >/dev/null 2>&1; then
     ( set +e
-      ( rl_build_cargo "$1" 2>&1; printf '%s\n' "$?" > "$_rl_status" ) | tee "$2" >&2
+      ( rl_build_cargo "$1" "$RL_BUILD_CARGO_MODE" 2>&1; printf '%s\n' "$?" > "$_rl_status" ) | tee "$2" >&2
       : )
   else
     # No tee: the log is still written and the live output is lost. A phone without
     # coreutils is unusual, and losing the live output beats losing the crash record.
     ( set +e
-      rl_build_cargo "$1" > "$2" 2>&1
+      rl_build_cargo "$1" "$RL_BUILD_CARGO_MODE" > "$2" 2>&1
       printf '%s\n' "$?" > "$_rl_status"
       : )
     cat "$2" >&2
@@ -271,17 +431,47 @@ rl_build_retain_log() { # <tmp_log> <attempt>
   printf '%s' "$1"
 }
 
-# The refusal after both attempts: named, with the profile that was applied, the retained
-# log and the three diagnostics worth pasting. It changes nothing and claims nothing.
-rl_build_refuse() { # <crashed_again 0|1> <log> <rc> [first_crash_log]
+# The crate a crash log names, if it names one cheaply. On the operator's phone this is the
+# line that identified `cranelift_codegen`: cargo prints the rustc command line it ran and
+# `crate-name <n>` is on it, and with one job at a time the LAST crate in the log is the one
+# rustc was compiling when it died.
+rl_build_log_crate() { # <logfile>
+  RL_BUILD_CRATE=
+  [ -f "$1" ] || return 1
+  RL_BUILD_CRATE=$(grep -o 'crate-name [A-Za-z0-9_-]*' "$1" 2>/dev/null | tail -n 1 |
+    sed 's/^crate-name //')
+  [ -n "$RL_BUILD_CRATE" ] || return 1
+  return 0
+}
+
+# Print a block of already-formatted lines to stderr, one per line and indented.
+rl_build_lines() { # <text> <indent>
+  printf '%s\n' "$1" | while IFS= read -r _rl_l; do
+    [ -n "$_rl_l" ] || continue
+    printf '%s%s\n' "$2" "$_rl_l" >&2
+  done
+}
+
+# The refusal after the ladder is exhausted: named, with every attempt, every retained log,
+# the crate if a log names one, the environment the last attempt ran with and where each value
+# in it came from, and the three diagnostics worth pasting. It changes nothing and claims
+# nothing.
+rl_build_refuse() { # <crashed 0|1> <last_status>
   if [ "$1" = 1 ]; then
-    rl_warn 'compiler_crash_build_refused: the compiler crashed again with the conservative profile'
+    rl_warn 'compiler_crash_build_refused: the compiler crashed on every attempt of the build ladder'
   else
-    rl_warn "build_failed_after_crash_retry: cargo exited $3 after the compiler crashed once"
+    rl_warn "build_failed_after_a_crash: cargo exited $2 after the compiler had crashed once"
   fi
-  rl_warn "  retry profile:    $RL_BUILD_PROFILE_DESC"
-  rl_warn "  build log:        $2"
-  [ -z "${4:-}" ] || rl_warn "  first crash log:  $4"
+  rl_warn '  attempts:'
+  rl_build_lines "$RL_BUILD_REPORT" 'termux-update:     '
+  rl_warn "  environment of the last attempt (profile $RL_BUILD_PROFILE):"
+  rl_build_lines "$RL_BUILD_PROFILE_DESC" 'termux-update:     '
+  if [ -n "$RL_BUILD_OPERATOR_LINES" ]; then
+    rl_warn '  you had set these yourself, and they were kept:'
+    rl_build_lines "$RL_BUILD_OPERATOR_LINES" 'termux-update:     '
+  else
+    rl_warn '  you had set none of these variables yourself, so no value above is yours'
+  fi
   rl_warn '  paste these three lines when reporting this:'
   rl_warn '    rustc -V'
   rl_warn '    free -m | head -3'
@@ -290,8 +480,8 @@ rl_build_refuse() { # <crashed_again 0|1> <log> <rc> [first_crash_log]
   exit 1
 }
 
-# Build the runtime from a source tree, with the crash-retry above. Echoes the built binary
-# path on stdout and nothing else.
+# Build the runtime from a source tree, walking the ladder above. Echoes the built binary
+# path on stdout and nothing else; `rl_build_profile_of_bin` says which rung produced it.
 rl_build_wa() { # <src_root>
   _rl_src=$1
   [ -f "$_rl_src/rust/Cargo.toml" ] || rl_fail "source_checkout_required: $_rl_src/rust/Cargo.toml"
@@ -299,55 +489,101 @@ rl_build_wa() { # <src_root>
   if ! command -v "$_rl_cargo" >/dev/null 2>&1 && [ ! -x "$_rl_cargo" ]; then
     rl_fail "cargo_required: install rust through Termux (pkg install rust)"
   fi
-  printf 'termux-update: building with %s... the first build can take several minutes\n' "$_rl_cargo" >&2
-  rl_build_profile
-  _rl_profile=$RL_BUILD_PROFILE
-  rl_build_apply_profile "$_rl_profile"
-  if [ "$_rl_profile" = conservative ]; then
-    printf 'termux-update: conservative build profile: %s\n' "$RL_BUILD_PROFILE_DESC" >&2
+  rl_build_ladder
+  rl_build_capture_operator_knobs
+  RL_BUILD_ATTEMPT_TOTAL=$(rl_build_rung_count)
+  RL_BUILD_ATTEMPT_COUNT=0
+  RL_BUILD_REPORT=
+  printf 'termux-update: building with %s... the first build can take several minutes\n' \
+    "$_rl_cargo" >&2
+  if [ "${RL_BUILD_TEST_HOST:-0}" = 1 ]; then
+    printf '%s\n' 'termux-update: WA_TERMUX_TEST=1: this host is not an Android device; driving the phone build ladder (one job at a time) for the fixture suite' >&2
   fi
-
-  _rl_attempt=1
-  _rl_first_log=
-  while : ; do
+  if [ "$RL_BUILD_LADDER_FORCED" = 1 ]; then
+    printf 'termux-update: build profile forced by WA_TERMUX_BUILD_PROFILE=%s: one attempt, no ladder\n' \
+      "$RL_BUILD_LADDER" >&2
+  else
+    printf 'termux-update: build ladder: %s (%s attempt(s); the last rung installs a debug/unoptimized runtime if it is reached)\n' \
+      "$RL_BUILD_LADDER" "$RL_BUILD_ATTEMPT_TOTAL" >&2
+  fi
+  for _rl_rung in $RL_BUILD_LADDER; do
+    RL_BUILD_ATTEMPT_COUNT=$((RL_BUILD_ATTEMPT_COUNT + 1))
+    rl_build_apply_profile "$_rl_rung"
+    if [ "$RL_BUILD_LADDER_FORCED" = 1 ]; then
+      printf 'termux-update: attempt %s/%s, profile %s:\n' \
+        "$RL_BUILD_ATTEMPT_COUNT" "$RL_BUILD_ATTEMPT_TOTAL" "$_rl_rung" >&2
+    else
+      printf 'termux-update: attempt %s/%s of the ladder, profile %s:\n' \
+        "$RL_BUILD_ATTEMPT_COUNT" "$RL_BUILD_ATTEMPT_TOTAL" "$_rl_rung" >&2
+    fi
+    rl_build_lines "$RL_BUILD_PROFILE_DESC" 'termux-update:     '
+    if [ "$RL_BUILD_CARGO_MODE" = dev ]; then
+      printf 'termux-update: this attempt builds with %s build --profile dev (debug, unoptimized)\n' \
+        "$_rl_cargo" >&2
+    fi
     _rl_log=$(mktemp) 2>/dev/null || rl_fail 'build_log_failed: cannot create a temporary build log'
     rl_build_run "$_rl_src" "$_rl_log"
     if [ "$RL_BUILD_RC" -eq 0 ]; then
+      case "$RL_BUILD_CARGO_MODE" in
+        dev) _rl_bin="$_rl_src/rust/target/debug/wa" ;;
+        *) _rl_bin="$_rl_src/rust/target/release/wa" ;;
+      esac
       rm -f -- "$_rl_log"
-      break
-    fi
-    if [ "$_rl_attempt" -eq 1 ]; then
-      if ! rl_build_log_crashed "$_rl_log"; then
-        rm -f -- "$_rl_log"
-        if [ "${WA_TERMUX_OFFLINE:-0}" = 1 ]; then
-          rl_fail 'build_failed: cargo build --locked --offline exited non-zero'
-        fi
-        rl_fail 'build_failed: cargo build --locked exited non-zero'
-      fi
-      _rl_first_log=$(rl_build_retain_log "$_rl_log" 1)
-      printf 'termux-update: THE COMPILER CRASHED (status %s), this is not a build error: %s\n' \
-        "$RL_BUILD_RC" "$RL_BUILD_CRASH_LINE" >&2
-      printf '%s\n' "termux-update: its log is kept at $_rl_first_log" >&2
-      rl_build_apply_profile conservative
-      printf 'termux-update: retrying ONCE with the conservative profile: %s\n' \
-        "$RL_BUILD_PROFILE_DESC" >&2
-      _rl_attempt=2
-      continue
+      [ -f "$_rl_bin" ] || rl_fail "build_output_missing: $_rl_bin"
+      printf 'termux-update: profile %s finished: %s\n' "$_rl_rung" "$_rl_bin" >&2
+      printf '%s' "$_rl_bin"
+      return 0
     fi
     _rl_crashed=0
     if rl_build_log_crashed "$_rl_log"; then _rl_crashed=1; fi
-    _rl_kept_log=$(rl_build_retain_log "$_rl_log" 2)
-    rl_build_refuse "$_rl_crashed" "$_rl_kept_log" "$RL_BUILD_RC" "$_rl_first_log"
+    _rl_crate=
+    if [ "$_rl_crashed" = 1 ]; then
+      if rl_build_log_crate "$_rl_log"; then _rl_crate=$RL_BUILD_CRATE; fi
+    fi
+    _rl_kept=$(rl_build_retain_log "$_rl_log" "$RL_BUILD_ATTEMPT_COUNT")
+    if [ "$_rl_crashed" = 0 ]; then
+      # A real build error is not a memory problem, and another rung would only make the
+      # message harder to read. Keep the log, say which rung it was, refuse.
+      rl_warn "cargo exited $RL_BUILD_RC at attempt $RL_BUILD_ATTEMPT_COUNT/$RL_BUILD_ATTEMPT_TOTAL (profile $_rl_rung) and that is not a compiler crash, so the ladder stops here"
+      if [ "$RL_BUILD_ATTEMPT_COUNT" -gt 1 ]; then
+        RL_BUILD_REPORT="$RL_BUILD_REPORT${RL_BUILD_REPORT:+
+}attempt $RL_BUILD_ATTEMPT_COUNT/$RL_BUILD_ATTEMPT_TOTAL, profile $_rl_rung: cargo exited $RL_BUILD_RC, not a compiler crash
+  log: $_rl_kept"
+        rl_build_refuse 0 "$RL_BUILD_RC"
+      fi
+      if [ "${WA_TERMUX_OFFLINE:-0}" = 1 ]; then
+        rl_warn 'build_failed: cargo build --locked --offline exited non-zero'
+      else
+        rl_warn 'build_failed: cargo build --locked exited non-zero'
+      fi
+      rl_warn "  build log: $_rl_kept"
+      rl_warn '  no release was assembled, switched or installed, and node state was not read or written'
+      exit 1
+    fi
+    RL_BUILD_REPORT="$RL_BUILD_REPORT${RL_BUILD_REPORT:+
+}attempt $RL_BUILD_ATTEMPT_COUNT/$RL_BUILD_ATTEMPT_TOTAL, profile $_rl_rung: THE COMPILER CRASHED (cargo exited $RL_BUILD_RC)
+  log: $_rl_kept"
+    if [ -n "$_rl_crate" ]; then
+      RL_BUILD_REPORT="$RL_BUILD_REPORT
+  last crate in the log: $_rl_crate"
+    fi
+    printf 'termux-update: THE COMPILER CRASHED (status %s), this is not a build error: %s\n' \
+      "$RL_BUILD_RC" "$RL_BUILD_CRASH_LINE" >&2
+    if [ -n "$_rl_crate" ]; then
+      printf 'termux-update: the last crate in that log is %s\n' "$_rl_crate" >&2
+    fi
+    printf 'termux-update: its log is kept at %s\n' "$_rl_kept" >&2
+    if [ "$RL_BUILD_ATTEMPT_COUNT" -lt "$RL_BUILD_ATTEMPT_TOTAL" ]; then
+      printf 'termux-update: trying the next rung of the ladder\n' >&2
+    fi
   done
-  _rl_bin="$_rl_src/rust/target/release/wa"
-  [ -f "$_rl_bin" ] || rl_fail "build_output_missing: $_rl_bin"
-  printf '%s' "$_rl_bin"
+  rl_build_refuse 1 "$RL_BUILD_RC"
 }
 
 # Assemble one release directory from a source tree. The launcher, the updater and the UI
 # all come from the SAME source tree as the runtime, which is what keeps a release's parts
 # from being different revisions of each other.
-rl_assemble() { # <src_root> <bin> <dest> <commit> <remote> <previous> <installed_by>
+rl_assemble() { # <src_root> <bin> <dest> <commit> <remote> <previous> <installed_by> [build_profile]
   _rl_src=$1
   _rl_bin=$2
   _rl_dest=$3
@@ -364,7 +600,7 @@ rl_assemble() { # <src_root> <bin> <dest> <commit> <remote> <previous> <installe
       rl_fail "ui_asset_missing: $_rl_src/ui/$_rl_a"
   done
   install -m 644 "$_rl_src/LICENSE" "$_rl_dest/LICENSE" || rl_fail "license_missing: $_rl_src/LICENSE"
-  rl_write_installed "$_rl_dest/installed.txt" "$4" "$5" "$6" "$7"
+  rl_write_installed "$_rl_dest/installed.txt" "$4" "$5" "$6" "$7" "${8:-}"
   rl_manifest "$_rl_dest" "$_rl_dest/installed.sha256"
 }
 

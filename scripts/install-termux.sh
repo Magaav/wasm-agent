@@ -77,13 +77,15 @@ pkg install -y rust clang make pkg-config git ripgrep
 
 printf '%s\n' 'Building wasm-agent for this Android device (the first build can take several minutes)...'
 built=$(rl_build_wa "$root")
+built_profile=$(rl_build_profile_of_bin "$built")
 [ "$(git -C "$root" rev-parse HEAD)" = "$source_commit" ] || fail 'source_changed_during_build'
 [ -z "$(git -C "$root" status --porcelain --untracked-files=normal)" ] || fail 'source_changed_during_build'
 
 stage="$RL_BASE/.wasm-agent-preview.$$"
 cleanup() { [ ! -d "$stage" ] || rm -rf -- "$stage"; }
 trap cleanup EXIT
-rl_assemble "$root" "$built" "$stage" "$source_commit" "$source_remote" '-' 'install-termux'
+rl_assemble "$root" "$built" "$stage" "$source_commit" "$source_remote" '-' 'install-termux' \
+  "$built_profile"
 rl_verify_release "$stage" || fail 'candidate_refused: the build did not verify (see above)'
 mkdir -p -- "$RL_RELEASES" "$RL_UPDATE" 2>/dev/null || true
 mv -- "$stage" "$RL_INSTALL"
@@ -91,6 +93,9 @@ trap - EXIT
 ln -s "$RL_INSTALL/bin/wa" "$RL_PREFIX/bin/wa"
 
 printf '%s\n' "Installed wasm-agent Termux preview in $RL_INSTALL"
+if [ "$built_profile" = dev ]; then
+  printf '%s\n' 'This runtime was built with the debug/unoptimized profile: the optimized build did not finish on this device. It works, and it is slower than a release build. "wa doctor" reports it.'
+fi
 printf '%s\n' "Next: run 'wa setup', then 'wa doctor', then 'wa ui'."
 printf '%s\n' "Later revisions are installed with 'wa update --check' then 'wa update'."
 printf '%s\n' 'This is a source-built developer preview, not a published or Play Store release.'
