@@ -74,7 +74,9 @@ running-duration row. See [SHARED-CHAT.md](SHARED-CHAT.md). Durable backend stee
 and the existing keyboard path are not removed or redesigned.
 
 Commentary with an explicit early item phase streams directly into an open
-`wa-commentary`; header characters grow on each chunk. Native Responses is the
+`wa-commentary`; header characters grow on each chunk. That marker row is drawn
+below the text, so a sentence that streamed in the answer's place keeps its own
+box when its phase resolves (DESIGN.md section 6). Native Responses is the
 default and preserves added-item phase directly, without a secondary observer or
 Pi dependency. The explicit legacy Pi path omits it from text_start, so its bridge passively reads
 only bounded added-item metadata before forwarding the original SSE bytes,

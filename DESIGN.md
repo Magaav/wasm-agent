@@ -149,8 +149,14 @@ Commentary streams inside an open `wa-commentary` topic, with character count
 updated per chunk. Only explicit per-item phase establishes commentary. Unknown
 phase stays provisional. A sentence whose phase resolves to commentary keeps the
 place it streamed in - the provisional block becomes that topic where it stands,
-so establishing the phase never moves the text. Commentary stays outside the run
-topic while the run is stepping: nothing folds into the topic until the final
+so establishing the phase never moves the text. The topic's marker row is drawn
+below that text, never above it: chrome above a streamed sentence pushes it
+down, which reads as the sentence moving into the topic. A commentary
+established on prose that streamed in the answer's place is typographically
+neutral - the bubble's font-size and line-height, no padding, no border - and
+its marker row may not widen the bubble either, so the text box keeps every
+metric it streamed with. Commentary stays outside the run topic while the run is
+stepping: nothing folds into the topic until the final
 answer, which nests the whole history (commentary included) and is the only thing
 that stays outside it. Its own manual fold survives;
 only the final answer stays outside activity topics (alongside the status row).
