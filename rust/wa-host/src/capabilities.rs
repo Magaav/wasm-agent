@@ -47,6 +47,10 @@ impl Effect {
         }
     }
 
+    /// Reads a documented effect class back. Test-only: the wire spelling is written by
+    /// [`Effect::as_str`], and only the drift test needs the inverse, so the shipped binary does
+    /// not carry a parser nothing calls.
+    #[cfg(test)]
     pub fn parse(text: &str) -> Option<Effect> {
         match text {
             "read-only" => Some(Effect::ReadOnly),
@@ -209,9 +213,17 @@ pub fn inventory_json() -> String {
     serde_json::to_string(&Value::Array(items)).expect("capability inventory is serializable")
 }
 
-/// SHA-256 of [`inventory_json`]: one field `/health` can publish instead of the whole list.
+/// SHA-256 of [`inventory_json`]. Test-only, like the parser above: [`health`] digests the text it
+/// already built, so this is the shape the tests assert rather than a second production path.
+#[cfg(test)]
 pub fn digest() -> String {
-    ring_digest(&SHA256, inventory_json().as_bytes())
+    digest_of(&inventory_json())
+}
+
+/// SHA-256 of an inventory document, so a caller that already has the text does not serialize it
+/// twice - `/health` is polled, and its digest has to be of exactly the bytes the CLI prints.
+fn digest_of(text: &str) -> String {
+    ring_digest(&SHA256, text.as_bytes())
         .as_ref()
         .iter()
         .map(|byte| format!("{byte:02x}"))
@@ -222,10 +234,11 @@ pub fn digest() -> String {
 /// descriptions. `/health` is polled, so the whole inventory would make every poll pay for text
 /// nobody read; `wa capabilities --json` is the place to ask for the long form.
 pub fn health() -> Value {
+    let text = inventory_json();
     json!({
         "count": REGISTRY.len(),
         "names": inventory().into_iter().map(|cap| cap.name).collect::<Vec<_>>(),
-        "sha256": digest(),
+        "sha256": digest_of(&text),
     })
 }
 

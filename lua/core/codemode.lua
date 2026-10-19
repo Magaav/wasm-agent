@@ -71,8 +71,13 @@ function M.run(memory,args,role,ctx,catalog,current_catalog,dispatch,execution)
    local value,success,admitted
    local attempt_span=telemetry.start(ctx,'codemode_call',{name=call.name,target=call.target,nested=true,codemode_call=call.id,arguments_hash=host.sha256(call.args or '{}')})
    if call.target=='global' then
-    local ast,err=contract.parse(call.args or '{}');if not ast then error(err)end
-    local params=json.decode(call.args or '{}')
+    -- A guest global called with no arguments sends the literal string `undefined`, not `[]`, and the
+    -- strict JSON contract refuses it: `capabilities()` - the whole point of the inventory - died
+    -- as `json_contract_invalid` before this line existed. No arguments is an empty argument list.
+    local global_args=call.args
+    if global_args==nil or global_args=='' or global_args=='undefined' then global_args='[]' end
+    local ast,err=contract.parse(global_args);if not ast then error(err)end
+    local params=json.decode(global_args)
     if call.name=='showCall' then
      value,success=presentation.select(calls,selected,params)
     elseif call.name=='searchTools' then

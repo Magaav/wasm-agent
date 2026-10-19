@@ -484,6 +484,11 @@ actually registered:
 | sandbox `capabilities()` | the same array, inside a codemode workflow |
 | sandbox `describe("exec")` | one entry by exact name |
 
+Inside the sandbox `capabilities()` is this inventory, **not** the `capabilities` tool (which lists
+an account's permitted tools and is not admitted inside codemode); the name is spelled the same
+because it answers the same question - what can this node do. Both globals are asynchronous, like
+`tools.read`, and neither admits an effect: they are metadata over the registry.
+
 That digest is what makes drift visible from outside the process: two nodes agree iff their
 `sha256` agrees, and a watcher that already polls `/health` learns that the inventory changed
 without downloading it.
