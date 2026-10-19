@@ -4,7 +4,8 @@ local json=dofile('lua/vendor/json.lua')
 local memory=dofile('lua/core/memory.lua')
 local users=dofile('lua/core/users.lua')
 local nodes=dofile('lua/core/nodes.lua')
-local platform=dofile('lua/core/platform.lua')
+local command_output=dofile('lua/core/command_output.lua')
+local git_repository=dofile('lua/core/git_repository.lua')
 local M={}
 local terminal={completed=true,failed=true,refused=true,cancelled=true,unknown=true}
 local function q(s) return "'"..tostring(s):gsub("'","'\\''").."'" end
@@ -12,12 +13,27 @@ local function decode(raw)
   local ok,v=pcall(json.decode,raw or '')
   if ok and type(v)=='table' then return v end
 end
-local function run(cmd,cwd)
-  local r=decode(host.exec(cmd,cwd or '',120))
-  assert(r and r.code==0 and r.ok~=false,'wave_command_failed: '..tostring(r and (r.stderr or r.stdout) or cmd))
-  return (r.stdout or ''):gsub('[\r\n]+$','')
+local function run_result(cmd,cwd)
+  local r,why=command_output.run(cmd,cwd or '',120)
+  assert(r,'wave_command_failed: '..tostring(why))
+  assert(r.code==0 and r.ok~=false,'wave_command_failed: '..tostring(r.stderr or r.stdout))
+  return r
 end
+-- Text read below is a token, an emptiness check or a trailer, and all of them live in the two
+-- ends the bounded exec view keeps. A listing, path set or manifest goes through `git_output`.
+local function run(cmd,cwd) return (command_output.preview(run_result(cmd,cwd)):gsub('[\r\n]+$','')) end
 local function git(root,args) return run('git -C '..q(root)..' '..args,root) end
+local function git_result(root,args) return run_result('git -C '..q(root)..' '..args,root) end
+-- A single-token fact. If the host clipped the view the refusal names the clipping instead of
+-- letting the caller report a missing value that the repository actually has.
+local function git_fact(root,args,what)
+  local r=git_result(root,args)
+  if command_output.truncated(r) then error(git_repository.TRUNCATED..': '..what..' output was clipped by the bounded exec view',0) end
+  return (command_output.preview(r):gsub('[\r\n]+$',''))
+end
+-- A whole listing, path set or manifest: complete by construction, so absence in the answer means
+-- absence from the output rather than absence from a clipped view.
+local function git_output(root,args,what) return command_output.complete(git_result(root,args),what) end
 local function hash(v) return host.sha256(json.encode(v)) end
 local function key(ctx) return 'wave-autoflush:v2:'..ctx.session_id end
 local function load(ctx)
@@ -46,28 +62,33 @@ local function repository(ctx)
     local update=dofile('lua/core/update.lua');root=update.runtime_tree(update.install_dir())
   end
   if not root or root=='' then return nil,'selected_repository_unavailable' end
-  local readable,common=pcall(git,root,'rev-parse --path-format=absolute --git-common-dir')
-  if not readable then return nil,'not_a_self_repository' end
+  local ok_identity,repository=pcall(git_repository.identity,root)
+  if not ok_identity then
+    -- A clipped view is never reported as "this is not our repository": that wrong-reason refusal
+    -- is what made the first-line parse expensive to diagnose. Only git's own answer is.
+    if tostring(repository):find(git_repository.TRUNCATED,1,true) then error(tostring(repository),0) end
+    return nil,'not_a_self_repository'
+  end
   local update=dofile('lua/core/update.lua')
   local runtime=update.runtime_tree(update.install_dir())
   assert(runtime and runtime~='','wave_runtime_identity_unavailable')
-  local runtime_common=git(runtime,'rev-parse --path-format=absolute --git-common-dir')
-  local normalize=function(v) return platform.os()=='windows' and v:lower() or v end
-  if normalize(common)~=normalize(runtime_common) then return nil,'other_repository' end
-  -- Same derivation as the integrator's: from the common git dir, never from the first
-  -- line of `worktree list`, whose unbounded output is tail-clipped by host.exec once a
-  -- repository has enough worktrees (138 here, 24,644 bytes, ~24 KiB view) - which
-  -- refused a clean canonical main. The requirement below is unchanged.
-  local main=runtime_common:gsub('[/\\]%.git[/\\]?$','')
-  assert(main and git(main,'branch --show-current')=='main','wave_canonical_main_missing')
-  return {main=main,common=common,id=host.sha256(normalize(common)),runtime_common=runtime_common}
+  local runtime_repository=git_repository.identity(runtime)
+  if repository.key~=runtime_repository.key then return nil,'other_repository' end
+  -- Same derivation as the integrator's, shared in `lua/core/git_repository.lua`: from the bounded
+  -- common-dir fact, never from the first line of `worktree list`, whose unbounded output (26 KB,
+  -- 145 worktrees here) cannot fit the bounded exec view. The requirement below is unchanged.
+  local main=runtime_repository.main
+  assert(main and git_fact(main,'branch --show-current','canonical main branch')=='main','wave_canonical_main_missing')
+  return {main=main,common=repository.common,id=host.sha256(repository.key),runtime_common=runtime_repository.common}
 end
 local function source(repo)
+  -- An emptiness check is clip-insensitive: a clipped view is never empty, so a `==''` test cannot
+  -- be fooled into calling a dirty tree clean. Tokens go through `git_fact`.
   assert(git(repo.main,'status --porcelain --untracked-files=all')=='','wave_source_dirty')
-  local sha=git(repo.main,'rev-parse HEAD')
-  assert(#sha==40 and sha==git(repo.main,'rev-parse origin/main'),'wave_source_not_published')
-  assert(sha==git(repo.main,'ls-remote origin refs/heads/main'):match('^(%x+)'),'wave_remote_source_mismatch')
-  return {sha=sha,tree=git(repo.main,'rev-parse HEAD^{tree}'),repository=repo.id}
+  local sha=git_fact(repo.main,'rev-parse HEAD','source head')
+  assert(#sha==40 and sha==git_fact(repo.main,'rev-parse origin/main','origin main'),'wave_source_not_published')
+  assert(sha==git_fact(repo.main,'ls-remote origin refs/heads/main','remote main'):match('^(%x+)'),'wave_remote_source_mismatch')
+  return {sha=sha,tree=git_fact(repo.main,'rev-parse HEAD^{tree}','source tree'),repository=repo.id}
 end
 local function same(a,b) return hash(a)==hash(b) end
 local function bound(s,scope,repo)
@@ -88,16 +109,20 @@ function M.capture(mem,ctx,root,tip,base)
   local ok,err=pcall(function()
     assert(type(base)=='string' and #base==40 and not base:find('[^%x]'),'admission_base_missing')
     assert(type(tip)=='string' and #tip==40 and not tip:find('[^%x]'),'own_tip_missing')
-    fact.repository=git(root,'rev-parse --path-format=absolute --git-common-dir')
-    fact.tree=git(root,'rev-parse '..tip..'^{tree}')
+    fact.repository=git_fact(root,'rev-parse --path-format=absolute --git-common-dir','child common dir')
+    fact.tree=git_fact(root,'rev-parse '..tip..'^{tree}','child tip tree')
+    -- Emptiness check: a clipped view is non-empty, so this cannot read dirty as clean.
     assert(git(root,'status --porcelain --untracked-files=all')=='','child_dirty')
     fact.comparison_base=base
-    fact.merge_base=git(root,'merge-base '..base..' '..tip)
+    fact.merge_base=git_fact(root,'merge-base '..base..' '..tip,'merge base')
     assert(fact.merge_base~=tip,'already_merged_own_tip_unmeasured')
-    local manifest=assert(decode(git(root,'show '..base..':scripts/deploy-shipped.json')),'shipped_rules_unreadable')
+    local manifest=assert(decode(git_output(root,'show '..base..':scripts/deploy-shipped.json','shipped rules manifest')),'shipped_rules_unreadable')
     assert(manifest.schema==1 and type(manifest.directories)=='table' and type(manifest.files)=='table' and type(manifest.globs)=='table','shipped_rules_unsupported')
     fact.rules_sha256=hash(manifest);fact.paths={};fact.shipped={}
-    for path in git(root,'diff --name-only -z '..fact.merge_base..' '..tip):gmatch('[^%z]+') do
+    -- The path set must be COMPLETE: a clipped view would silently drop paths and could turn a
+    -- `required` verdict into `none`. `git_output` reads the retained original when clipped, and
+    -- refuses by name when it cannot, so the verdict is measured instead of guessed.
+    for path in git_output(root,'diff --name-only -z '..fact.merge_base..' '..tip,'changed path set'):gmatch('[^%z]+') do
       fact.paths[#fact.paths+1]=path
       if shipped(path,manifest) then fact.shipped[#fact.shipped+1]=path end
     end
@@ -277,7 +302,7 @@ local function clean_child(child,repo,scope)
   assert(f.repository==repo.common,'wave_child_repository_mismatch')
   local w=memory.session_workspace(child.session)
   assert(w and w.worktree and git(w.worktree,'status --porcelain --untracked-files=all')=='','wave_child_dirty_or_unreadable')
-  git(repo.main,'merge-base --is-ancestor '..git(w.worktree,'rev-parse HEAD')..' HEAD')
+  git(repo.main,'merge-base --is-ancestor '..git_fact(w.worktree,'rev-parse HEAD','child head')..' HEAD')
   git(repo.main,'merge-base --is-ancestor '..f.tip..' HEAD')
   return f
 end
@@ -288,7 +313,7 @@ local function ready(s,repo)
     local f=clean_child(child,repo,s.scope)
     -- Publication is the ordinary direct-workflow acceptance fact. A child
     -- completion alone cannot supply it, nor can an evidence/ready string.
-    child.publication={tip=f.tip,impact_digest=f.digest,main=git(repo.main,'rev-parse HEAD')}
+    child.publication={tip=f.tip,impact_digest=f.digest,main=git_fact(repo.main,'rev-parse HEAD','main head')}
     if f.verdict=='required' and child.covered~=child.fingerprint then owed=true end
   end
   return owed
@@ -301,7 +326,9 @@ local function binary_ready(s,repo,current,receipt)
   local command='node '..q(repo.main..'/scripts/codemode-build.mjs')..' qualify-wave '..q(repo.main)
     ..' --receipt '..q(receipt)..' --generation '..q(s.generation.id)..' --opened-at '..q(s.generation.opened_at)
     ..' --installed-binary '..q(runtime.binary_path)
-  local result=assert(decode(run(command,repo.main)),'wave_binary_verification_unreadable')
+  -- The verification answer is a JSON receipt that must be read whole: a clipped view would fail to
+  -- decode and be reported as unreadable when it was only clipped.
+  local result=assert(decode(command_output.complete(run_result(command,repo.main),'wave build verification receipt')),'wave_binary_verification_unreadable')
   assert(result.ok==true and result.source_commit==current.sha and result.source_tree==current.tree
     and result.generation==s.generation.id and result.binary_sha256~=runtime.binary_sha256,'wave_binary_identity_mismatch')
   return result

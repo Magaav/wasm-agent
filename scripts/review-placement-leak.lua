@@ -14,6 +14,7 @@ local memory = dofile("lua/core/memory.lua")
 local nodes = dofile("lua/core/nodes.lua")
 local subagents = dofile("lua/core/subagents.lua")
 local orchestrator = dofile("lua/core/orchestrator.lua")
+local command_output = dofile("lua/core/command_output.lua")
 memory.setup()
 
 local checks = 0
@@ -58,10 +59,18 @@ local function pending_workspaces()
   return #rows("SELECT id FROM sessions WHERE workspace_required=1 AND workspace_state='pending'")
 end
 local function registrations()
-  local listed, why = shell("git -C " .. quote(destination) .. " worktree list")
-  if not listed then return -1, why end
+  -- `git worktree list` is a whole-repository listing (26 KB, 145 worktrees here) and the exec view
+  -- is bounded, so a preview can be missing registrations and undercount a leak. The count is taken
+  -- from the complete listing, or the answer is refused by name instead of guessed.
+  local ok_exec, raw = pcall(host.exec, "git -C " .. quote(destination) .. " worktree list", "", 120)
+  if not ok_exec then return -1, tostring(raw) end
+  local decoded_ok, decoded = pcall(json.decode, raw)
+  if not decoded_ok or type(decoded) ~= "table" then return -1, tostring(raw) end
+  if tonumber(decoded.code) ~= 0 then return -1, tostring(decoded.stderr or decoded.error or "git worktree list failed") end
+  local ok_text, text = pcall(command_output.complete, decoded, "git worktree list")
+  if not ok_text then return -1, tostring(text) end
   -- `git worktree list` prints the main checkout plus one line per linked worktree.
-  return lines(listed) - 1
+  return lines(text) - 1
 end
 local function task_rows()
   local out = {}

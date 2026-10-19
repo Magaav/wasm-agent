@@ -645,10 +645,69 @@ fn validate_id(id: &str) -> io::Result<()> {
         Ok(())
     }
 }
-fn tail(buffer: &mut Vec<u8>, data: &[u8]) {
-    buffer.extend_from_slice(data);
-    if buffer.len() > VIEW_BYTES {
-        buffer.drain(..buffer.len() - VIEW_BYTES);
+/// The byte budget of the in-memory view handed to a caller, per stream. It is the same total
+/// as before head retention existed; only its *split* is new.
+///
+/// Why the beginning is kept: a caller that parses the first line of a command's output used to
+/// lose it silently once the stream passed the budget, because the view was a pure tail. That
+/// refused a healthy repository over a clipped `git worktree list` twice in one day. The view now
+/// keeps the first `VIEW_HEAD_BYTES` and the last `VIEW_TAIL_BYTES` and names the elided middle,
+/// so clipping is visible in the text itself and not only in a flag a caller may not read. The
+/// complete stream is still on disk (`stdout_path`/`stderr_path`); a caller that needs *all* of
+/// an unbounded output must ask a bounded command or read that file (docs/HOST.md).
+const VIEW_HEAD_BYTES: usize = 8 * 1024;
+const VIEW_TAIL_BYTES: usize = VIEW_BYTES - VIEW_HEAD_BYTES;
+
+/// A bounded, honest view of one stream: its beginning, its end, and how much of the middle was
+/// dropped. `total` counts every accepted byte, including bytes no longer retained here.
+#[derive(Default)]
+struct View {
+    head: Vec<u8>,
+    tail: Vec<u8>,
+    total: u64,
+}
+impl View {
+    fn new() -> Self {
+        Self::default()
+    }
+    fn push(&mut self, data: &[u8]) {
+        self.total += data.len() as u64;
+        let take = (VIEW_HEAD_BYTES - self.head.len()).min(data.len());
+        self.head.extend_from_slice(&data[..take]);
+        self.push_tail(&data[take..]);
+    }
+    fn push_tail(&mut self, data: &[u8]) {
+        if data.is_empty() {
+            return;
+        }
+        self.tail.extend_from_slice(data);
+        if self.tail.len() > VIEW_TAIL_BYTES {
+            self.tail.drain(..self.tail.len() - VIEW_TAIL_BYTES);
+        }
+    }
+    fn retained(&self) -> usize {
+        self.head.len() + self.tail.len()
+    }
+    fn elided(&self) -> u64 {
+        self.total - self.retained() as u64
+    }
+    /// Render the text a caller sees. Each part is decoded on its own so a multi-byte character
+    /// cut at the head/tail splice costs one replacement character at the cut, not a mangled tail.
+    /// The elision marker is a whole line outside the byte budget and no git/porcelain output line
+    /// can start with it, so a line-oriented caller can skip it by name.
+    fn text(&self) -> String {
+        let head = String::from_utf8_lossy(&self.head);
+        if self.elided() == 0 {
+            return format!("{head}{}", String::from_utf8_lossy(&self.tail));
+        }
+        format!(
+            "{head}\n[{} bytes elided by the host: this view keeps the first {} and last {} of {} bytes, and the whole stream is in the operation's output file]\n{}",
+            self.elided(),
+            self.head.len(),
+            self.tail.len(),
+            self.total,
+            String::from_utf8_lossy(&self.tail)
+        )
     }
 }
 fn execute(spec: &Spec, dir: &Path, entry: &Entry, secrets: &[Vec<u8>]) -> io::Result<()> {
@@ -680,7 +739,7 @@ fn execute(spec: &Spec, dir: &Path, entry: &Entry, secrets: &[Vec<u8>]) -> io::R
     }
     let execution_started = Instant::now();
     entry.state.lock().unwrap()["state"] = json!("running");
-    let mut views = [Vec::new(), Vec::new()];
+    let mut views = [View::new(), View::new()];
     let mut eof = [false, false];
     let mut bytes = 0usize;
     let (mut idle_ms, mut idle_bytes) = (5u64, 0usize);
@@ -708,7 +767,7 @@ fn execute(spec: &Spec, dir: &Path, entry: &Entry, secrets: &[Vec<u8>]) -> io::R
                         let flushed = redactors[index].finish();
                         if !flushed.is_empty() {
                             files[index].write_all(&flushed)?;
-                            tail(&mut views[index], &flushed);
+                            views[index].push(&flushed);
                         }
                         eof[index] = true;
                         break;
@@ -719,7 +778,7 @@ fn execute(spec: &Spec, dir: &Path, entry: &Entry, secrets: &[Vec<u8>]) -> io::R
                         // secret, and there is no raw window on disk at all.
                         let clean = redactors[index].push(&buffer[..keep]);
                         files[index].write_all(&clean)?;
-                        tail(&mut views[index], &clean);
+                        views[index].push(&clean);
                         bytes += keep;
                         let output_at = entry.started.elapsed().as_millis() as u64;
                         let mut state = entry.state.lock().unwrap();
@@ -863,7 +922,7 @@ fn execute(spec: &Spec, dir: &Path, entry: &Entry, secrets: &[Vec<u8>]) -> io::R
         let flushed = redactor.finish();
         if !flushed.is_empty() {
             files[index].write_all(&flushed)?;
-            tail(&mut views[index], &flushed);
+            views[index].push(&flushed);
             bytes += flushed.len();
         }
     }
@@ -906,9 +965,18 @@ fn execute(spec: &Spec, dir: &Path, entry: &Entry, secrets: &[Vec<u8>]) -> io::R
         state["auxiliary_cleanup"] = json!(process.auxiliary_cleanup());
         state["cleanup"] = json!("compiler_helpers_terminated");
     }
-    state["stdout"] = json!(String::from_utf8_lossy(&views[0]));
-    state["stderr"] = json!(String::from_utf8_lossy(&views[1]));
-    state["output_truncated"] = json!(bytes > views.iter().map(Vec::len).sum());
+    let stdout_view = views[0].text();
+    let stderr_view = views[1].text();
+    state["stdout"] = json!(stdout_view);
+    state["stderr"] = json!(stderr_view);
+    // Truncation is a property of the view, not a guess from lengths: `stdout`/`stderr` keep the
+    // beginning and the end, and these fields say so. `output_truncated` keeps its old meaning for
+    // every caller that already reads it (some of a stream was not included).
+    state["stdout_truncated"] = json!(views[0].elided() > 0);
+    state["stderr_truncated"] = json!(views[1].elided() > 0);
+    state["stdout_elided_bytes"] = json!(views[0].elided());
+    state["stderr_elided_bytes"] = json!(views[1].elided());
+    state["output_truncated"] = json!(views[0].elided() > 0 || views[1].elided() > 0);
     let total_ms = entry.started.elapsed().as_millis() as u64;
     state["elapsed_ms"] = json!(total_ms);
     finish_timing(&mut state, total_ms);

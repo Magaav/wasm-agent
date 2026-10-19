@@ -955,3 +955,61 @@ fn the_substitution_sentence_names_both_directories() {
     assert!(note.contains("no fallback directory exists"), "{note}");
     assert!(!note.contains("it started in"), "{note}");
 }
+
+/// The view boundary is exact: a stream that fits keeps every byte and carries no marker, and the
+/// first byte past the budget elides exactly one byte while keeping the first line readable. This
+/// is the assertion that stops a future "just keep the tail" from silently returning.
+#[test]
+fn view_keeps_the_beginning_and_the_end_at_the_exact_boundary() {
+    let mut complete = View::new();
+    let body: Vec<u8> = (0..VIEW_BYTES).map(|i| b'0' + (i % 10) as u8).collect();
+    complete.push(&body);
+    assert_eq!(complete.elided(), 0);
+    assert_eq!(complete.head.len(), VIEW_HEAD_BYTES);
+    assert_eq!(complete.tail.len(), VIEW_TAIL_BYTES);
+    assert!(!complete.text().contains("elided by the host"));
+    assert_eq!(complete.text(), String::from_utf8(body).unwrap());
+
+    let mut clipped = View::new();
+    let first_line: &[u8] = b"worktree /canonical/main\n";
+    clipped.push(first_line);
+    clipped.push(&vec![b'.'; VIEW_BYTES - first_line.len()]);
+    assert_eq!(clipped.elided(), 0, "exactly the budget is not truncation");
+    clipped.push(b"!");
+    assert_eq!(clipped.elided(), 1, "one byte past the budget elides one byte");
+    assert_eq!(clipped.head.len(), VIEW_HEAD_BYTES);
+    assert_eq!(clipped.tail.len(), VIEW_TAIL_BYTES);
+    let text = clipped.text();
+    assert!(text.starts_with("worktree /canonical/main\n"), "the first line survives clipping");
+    assert!(text.contains(&format!("1 bytes elided by the host: this view keeps the first {VIEW_HEAD_BYTES} and last {VIEW_TAIL_BYTES} of {} bytes", VIEW_BYTES + 1)));
+    assert!(text.ends_with('!'));
+}
+
+/// A command whose output passes the view budget still shows its first line, and the state says
+/// the view was clipped: this is the measured failure (a first-line parse of a 24 KiB `git
+/// worktree list`) expressed as a test, so it cannot come back unnoticed.
+#[test]
+fn a_clipped_command_output_keeps_its_first_line_and_says_it_was_clipped() {
+    let (m, root) = fixture();
+    let id = m
+        .start(shell(
+            "printf 'FIRST-LINE\\n'; i=0; while [ $i -lt 2000 ]; do printf 'line %06d padding padding\\n' $i; i=$((i+1)); done",
+        ))
+        .unwrap();
+    let s = settled(&m, &id);
+    assert_eq!(s["output_complete"], true, "{s}");
+    assert_eq!(s["stdout_truncated"], true, "{s}");
+    assert_eq!(s["output_truncated"], true, "{s}");
+    assert_eq!(s["stderr_truncated"], false, "{s}");
+    assert!(s["stdout_elided_bytes"].as_u64().unwrap() > 0, "{s}");
+    let text = s["stdout"].as_str().unwrap();
+    assert!(text.starts_with("FIRST-LINE\n"), "the first line must survive a clipped view");
+    assert!(text.contains("bytes elided by the host"), "clipping must be visible in the text");
+    // The complete stream is still the retained original, so a caller is never left with only
+    // the clipped view: what the view dropped is readable at its recorded path.
+    let whole = fs::read_to_string(s["stdout_path"].as_str().unwrap()).unwrap();
+    assert!(whole.starts_with("FIRST-LINE\n"));
+    assert!(whole.len() > text.len());
+    drop(m);
+    remove_fixture(root);
+}

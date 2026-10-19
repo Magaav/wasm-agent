@@ -12,6 +12,7 @@ local memory = dofile("lua/core/memory.lua")
 local provider = dofile("lua/core/provider.lua")
 local paths = dofile("lua/core/paths.lua")
 local nodes = dofile("lua/core/nodes.lua")
+local command_output = dofile("lua/core/command_output.lua")
 
 local M = {}
 
@@ -89,8 +90,12 @@ function M.working_tree()
   end
   local changed = 0
   for line in tostring(result.stdout or ""):gmatch("[^\r\n]+") do
-    if line:match("%S") then changed = changed + 1 end
+    -- The elision marker is a host note, not a changed path, and must not be counted.
+    if not command_output.is_elision(line) and line:match("%S") then changed = changed + 1 end
   end
+  -- A clipped view is a lower bound, not a count: say so instead of printing a number that looks
+  -- measured. (An emptiness answer is unaffected: a clipped stream is never empty.)
+  if command_output.truncated(result) then return string.format("at least %d changed", changed) end
   if changed == 0 then return "clean" end
   return string.format("%d changed", changed)
 end

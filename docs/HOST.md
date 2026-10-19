@@ -107,6 +107,24 @@ the missing-directory fallback. Do not add a
 second shell runner with `Command::output`, `read_to_end` or detached reader threads.
 See [OPERATIONS.md](OPERATIONS.md) and [JOBS.md](JOBS.md) for contracts, platform
 limits, authority, recovery and the regression tests.
+
+### Exec output is bounded, and the clipping is visible
+
+A `host.exec` result carries a **bounded view** of each stream, not the whole stream: the first
+8 KiB and the last 16 KiB with an explicit elision-marker line between them once the middle is
+dropped. The budget is unchanged (24 KiB per stream); only the split is new, and the beginning is
+kept so a first-line parse no longer loses its answer. `output_truncated` says the view dropped
+bytes; `stdout_truncated`, `stderr_truncated`, `stdout_elided_bytes` and `stderr_elided_bytes` say
+which stream and how much; the complete stream is on disk at `stdout_path`/`stderr_path`.
+
+Two rules follow. A caller that needs the *beginning* of unbounded output must ask a bounded
+command for it - `git rev-parse --path-format=absolute --git-common-dir`, `git log -1`,
+`git branch --show-current` - rather than parse the first line of a listing that cannot fit (this
+is what refused a healthy repository over a 26 KB `git worktree list` twice in one day). And a
+guard whose input was clipped, or whose required value is missing because it was clipped, must
+refuse with `output_truncated_requires_bounded_command` - never with a message that blames the
+repository for the host's bookkeeping. `lua/core/command_output.lua` and
+`lua/core/git_repository.lua` are the shared helpers for both rules.
 ## Bounded image reads
 
 `host.read_file` remains UTF-8 text only. `host.read_image_base64(path,max_bytes)` first
