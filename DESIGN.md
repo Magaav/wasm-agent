@@ -147,8 +147,12 @@ entered context, never compliance. Main and children share this presentation.
 
 Commentary streams inside an open `wa-commentary` topic, with character count
 updated per chunk. Only explicit per-item phase establishes commentary. Unknown
-phase stays provisional. Commentary stays outside the run topic while active,
-then moves inside the collapsed run on settlement. Its own manual fold survives;
+phase stays provisional. A sentence whose phase resolves to commentary keeps the
+place it streamed in - the provisional block becomes that topic where it stands,
+so establishing the phase never moves the text. Commentary stays outside the run
+topic while the run is stepping: nothing folds into the topic until the final
+answer, which nests the whole history (commentary included) and is the only thing
+that stays outside it. Its own manual fold survives;
 only the final answer stays outside activity topics (alongside the status row).
 Run-to-answer spacing uses one5px flex gap, never an additional segment margin.
 A confirmed final answer's first visible line stays at the chat content top while

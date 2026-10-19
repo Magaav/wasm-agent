@@ -1,6 +1,13 @@
 // Focused probe: a step that ends in a tool call is a decision step, so the prose it wrote before
-// choosing is shown inside the run topic that holds the decision rows - while the run is live - and
-// the final answer stays outside it. Replayed from durable rows, the same structure comes back.
+// choosing is a step of the run, not an answer. While the run is still stepping that prose and the
+// tool rows it chose are drawn directly in the conversation bubble - nothing is folded into a run
+// topic yet; the final answer is what folds the whole history in and stays outside it. Replayed from
+// durable rows, the same structure comes back.
+//
+// The live half of this contract changed: commentary used to be moved into an open run topic as soon
+// as its phase arrived, which the operator reported as a defect (a run that is still stepping must
+// not hide its steps in a topic, and the move belongs to the final answer). The settled and repaint
+// halves are unchanged, and both are still checked below.
 //
 // Run with the disposable observer (it serves a copy of ui/ with test-fixtures.js injected, in real
 // headless Chrome, and writes screenshot.png + dom.html):
@@ -147,20 +154,19 @@
     var live = liveBubbles[liveBubbles.length - 1];
     var liveBody = live ? live.querySelector(".body") : null;
     var liveRun = liveBody ? liveBody.querySelector(":scope > wa-run") : null;
-    var livePrelude = liveRun
-      ? liveRun.querySelector("wa-commentary[data-decision-prelude='true']") : null;
+    var livePrelude = liveBody
+      ? liveBody.querySelector(":scope > wa-commentary[data-decision-prelude='true']") : null;
     check(liveBubbles.length === beforeLive + 1,
       "the live run must be its own bubble, saw " + liveBubbles.length + " from " + beforeLive);
-    check(!!liveRun, "a live run whose step chose a tool must already have a run topic");
-    check(!!liveRun && liveRun.hasAttribute("open") && liveRun.open === true,
-      "a live run topic must be open, or the reader cannot see the step they are waiting on");
-    check(!!livePrelude && livePrelude.textContent.indexOf("Checking the ledger") >= 0,
-      "while the run is live, the decision step's prose must be inside the run topic, saw: " +
+    check(!liveRun, "a run that is still stepping must not fold its steps into a run topic yet, saw: " +
       (liveRun ? liveRun.textContent.slice(0, 160) : "no run topic"));
+    check(!!livePrelude && livePrelude.textContent.indexOf("Checking the ledger") >= 0,
+      "while the run is live, the decision step's prose is drawn directly in the bubble, saw: " +
+      (liveBody ? liveBody.textContent.slice(0, 160) : "no bubble"));
     check(!!liveBody && !liveBody.querySelector(":scope > .seg"),
       "while the run is live, nothing may sit in the answer's place: the step did not answer");
-    check(!!liveRun && !!liveRun.querySelector("wa-trace .tool-line[data-call-id='probe-call-2']"),
-      "the tool the decision chose must be the row beside that prose");
+    check(!!liveBody && !!liveBody.querySelector(":scope > wa-trace .tool-line[data-call-id='probe-call-2']"),
+      "the tool the decision chose must be the row beside that prose, still in the bubble");
   } catch (error) {
     problems.push("probe threw: " + (error && error.message ? error.message : String(error)));
   }
@@ -192,7 +198,7 @@
       });
       return pane;
     }
-    caption("live decision step: the same prose is already inside the open run topic - there is no answer yet");
+    caption("live decision step: the prose and the tool row it chose are both in the bubble - no run topic yet");
     var livePane = paneFor([
       { type: "round", n: 1 },
       { type: "delta", text: "Checking the ledger before I answer." },
@@ -203,11 +209,12 @@
       { type: "tool", call_id: "stage-call-2", name: "read",
         arguments: { path: "review/ledger.json" } },
     ]);
-    var liveTopic = livePane.querySelector("wa-run");
-    check(!!liveTopic && liveTopic.open === true,
-      "stage: the live run topic must be open in the picture");
-    check(!!livePane.querySelector("wa-run wa-commentary[data-decision-prelude='true']"),
-      "stage: the live prelude must be inside the open run topic");
+    check(!livePane.querySelector("wa-run"),
+      "stage: a live run must not be drawn as a folded topic");
+    check(!!livePane.querySelector("wa-commentary[data-decision-prelude='true']"),
+      "stage: the live prelude must be drawn in the bubble, where the run is happening");
+    check(!!livePane.querySelector("wa-trace .tool-line[data-call-id='stage-call-2']"),
+      "stage: the tool row the decision chose must be beside it");
     check(!livePane.querySelector(".seg"),
       "stage: the live pane must have no answer segment - the step did not answer");
     caption("settled decision step: prelude inside the run topic, final answer below it (outside)");
@@ -266,7 +273,8 @@
     "; viewport " + window.innerWidth + "x" + window.innerHeight + "]";
   out.textContent = (problems.length
     ? "DECISION-PREAMBLE FAIL: " + problems.join(" ;; ")
-    : "DECISION-PREAMBLE PASS: decision-step prose renders inside the run topic live and on repaint, " +
+    : "DECISION-PREAMBLE PASS: a decision step's prose is drawn in the bubble while the run is " +
+      "stepping, inside the run topic once the answer folds it (live, settled and on repaint), " +
       "and a step that did not call a tool keeps its answer") + geometry;
   var host = document.getElementById("panel") || document.body;
   host.append(out);

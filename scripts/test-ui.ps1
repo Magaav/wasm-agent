@@ -3331,6 +3331,39 @@ $harness = @'
   var incompleteCommentary=document.querySelector('wa-commentary.phase-incomplete');
   check(!!incompleteCommentary && incompleteCommentary.querySelector('.commentary-body').textContent==='Partial commentary',
     'interrupted streamed commentary remains visible and marked incomplete');
+  // The run topic is the final answer's history; it is not a place a live step is moved into.
+  // A step whose phase resolves to commentary mid-run used to drag the tool calls it followed into a
+  // topic the reader could not see, and the sentence being streamed was re-drawn at the end of the
+  // bubble instead of staying where it was read. Both are checked here, in the order they happen.
+  window.__repaintMessages([]);
+  window.handleEvent({type:'round',n:1});
+  window.handleEvent({type:'tool',name:'read',call_id:'nesting-call',arguments:{path:'ui/app.js'}});
+  window.handleEvent({type:'tool_result',name:'read',call_id:'nesting-call',result:{content:'ok'}});
+  window.handleEvent({type:'delta',text:'Checking the second file.'});
+  var nestingBubble=document.querySelector('#messages wa-message[role="assistant"]').body;
+  var nestingSeg=nestingBubble.querySelector(':scope > .seg');
+  var nestingIndex=Array.prototype.indexOf.call(nestingBubble.children,nestingSeg);
+  check(!!nestingSeg&&nestingIndex>=0,'nesting: the step must stream a segment before its phase is known');
+  window.handleEvent({type:'step_phase',phase:'commentary',text:'Checking the second file.',message_id:'nesting-commentary'});
+  var nestingCommentary=nestingBubble.querySelector(':scope > wa-commentary');
+  check(!!nestingCommentary&&nestingCommentary.textContent.indexOf('Checking the second file.')>=0,
+    'nesting: a commentary phase must render its topic, saw: '+(nestingBubble.textContent.slice(0,120)));
+  check(!nestingBubble.querySelector(':scope > wa-run'),
+    'nesting: a run that is still stepping must not fold its steps into a run topic');
+  check(!!nestingBubble.querySelector(':scope > wa-trace .tool-line[data-call-id="nesting-call"]'),
+    'nesting: the tool step called before the commentary stays drawn directly in the bubble');
+  check(!!nestingCommentary&&Array.prototype.indexOf.call(nestingBubble.children,nestingCommentary)===nestingIndex,
+    'nesting: the commentary takes the streamed sentence place instead of being relocated, from '+
+    nestingIndex+' to '+Array.prototype.indexOf.call(nestingBubble.children,nestingCommentary));
+  window.handleEvent({type:'reply',message_id:'nesting-answer',text:'The second file is fine.'});
+  var nestingRun=nestingBubble.querySelector(':scope > wa-run');
+  check(!!nestingRun&&!!nestingRun.querySelector('wa-commentary'),
+    'nesting: the final answer folds the run history, commentary included, into one run topic');
+  check(!!nestingBubble.querySelector(':scope > .seg.final-answer')&&
+    !nestingRun.querySelector('.seg.final-answer'),
+    'nesting: and the final answer stays outside that topic');
+  window.handleEvent({type:'done'});
+  check(!!nestingRun&&nestingRun.open===false,'nesting: the run topic is collapsed once the run settles');
   document.title = "stage: end";
   // ---- the notification bell, and the toast only the shell can raise -----------------------------
   // What the operator asked for: a bell in the engine menu, per device, and a real OS notification
