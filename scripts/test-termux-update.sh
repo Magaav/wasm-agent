@@ -100,6 +100,14 @@ manifest=
 for a in "$@"; do manifest=$a; done
 [ -n "$manifest" ] || { echo 'fake cargo: no manifest path' >&2; exit 1; }
 
+# Which cargo profile this invocation is: `--profile dev` is the third rung of the build
+# ladder (the debug/unoptimized build), everything else is `--release`. The output directory
+# follows cargo: the `dev` profile writes target/debug, the release one target/release - and
+# the payload records the profile, so a fixture can assert which rung's binary was installed.
+mode=release
+outdir=release
+case " $* " in *" --profile dev "*) mode=dev; outdir=debug ;; esac
+
 # How many times this fake compiler has been asked to build, so a fixture can crash the
 # first attempt and succeed on the retry. And what the build handed it, so a fixture can
 # assert the profile rather than guess at it.
@@ -115,18 +123,27 @@ if [ -n "${FAKE_CARGO_RECORD:-}" ]; then
 fi
 
 # The phone failure in the shape cargo reports it: rustc killed by a signal, `process
-# didn't exit successfully`, exit status 101 - and no Rust diagnostic at all.
+# didn't exit successfully`, exit status 101 - and no Rust diagnostic at all. cargo prints the
+# rustc command line it ran on the way, which is where the crate name comes from, and the
+# last crate in the log is the one rustc was compiling when it died.
 crash=0
-if [ "${FAKE_CARGO_CRASH_FIRST:-0}" = 1 ] && [ "$attempt" = 1 ]; then crash=1; fi
-if [ "${FAKE_CARGO_CRASH_ALWAYS:-0}" = 1 ]; then crash=1; fi
+if [ -n "${FAKE_CARGO_CRASH_ATTEMPTS:-}" ]; then
+  case ",${FAKE_CARGO_CRASH_ATTEMPTS}," in
+    *",$attempt,"*) crash=1 ;;
+  esac
+fi
 if [ "$crash" = 1 ]; then
-  echo 'error: could not compile `wa`' >&2
-  echo "process didn't exit successfully: \`rustc --crate-name wa\` (signal: 11, SIGSEGV)" >&2
+  echo '   Compiling wasmtime-environ v33.0.0' >&2
+  echo '    Running `rustc --crate-name wasmtime_environ --edition=2021 crates/environ/src/lib.rs`' >&2
+  echo '   Compiling cranelift-codegen v0.121.0' >&2
+  echo '    Running `rustc --crate-name cranelift_codegen --edition=2021 crates/codegen/src/lib.rs`' >&2
+  echo 'error: could not compile `cranelift-codegen`' >&2
+  echo "process didn't exit successfully: \`rustc --crate-name cranelift_codegen --edition=2021 crates/codegen/src/lib.rs\` (signal: 11, SIGSEGV)" >&2
   echo 'warning: build failed, waiting for other jobs to finish...' >&2
   exit 101
 fi
 if [ "${FAKE_CARGO_FAIL:-0}" = 1 ]; then echo 'fake cargo: build error' >&2; exit 1; fi
-out=$(dirname "$manifest")/target/release
+out=$(dirname "$manifest")/target/$outdir
 mkdir -p "$out"
 case "${FAKE_CARGO_ABI:-aarch64}" in
   aarch64) m='\267' ;;
@@ -137,7 +154,7 @@ printf '\177ELF\002\001\001\000' > "$out/wa"
 printf '\000\000\000\000\000\000\000\000' >> "$out/wa"
 printf '\002\000' >> "$out/wa"
 printf "$m\000" >> "$out/wa"
-printf 'payload\n' >> "$out/wa"
+printf 'payload-%s\n' "$mode" >> "$out/wa"
 SH
 chmod +x "$fake_cargo"
 
@@ -485,22 +502,28 @@ case "$verify_out" in *'up to date'*) ok 'after the bootstrap, wa update works a
   *) die "after adopt, wa update --check said: $verify_out" ;;
 esac
 
-# ---- 8. the phone build path: profile, crash retry, refusal -----------------
+# ---- 8. the phone build path: the ladder, the debug rung, the refusal -------
 #
 # The failure this section exists for, in the operator's own log: rustc killed by a signal
 # under memory pressure, cargo reporting `process didn't exit successfully ... (signal: 11,
-# SIGSEGV)`, and the install stopping there with nothing left to read. Four behaviours are
-# fixtures below: retry once and say why, refuse by name and keep the log when the retry
-# dies too, never override an explicit setting, and leave a host that is not a phone
-# exactly as it was.
+# SIGSEGV)` on the Wasmtime engine crate `cranelift_codegen`, and the install stopping there
+# with nothing left to read. The fixtures below drive the ladder that replaced that: attempt
+# 1 the phone default (one job, default codegen units), attempt 2 the resource-safe profile,
+# attempt 3 a debug/unoptimized build; which rung's binary is installed; one named refusal
+# that names every attempt and every log; never overriding an explicit setting and never
+# calling this script's own values the operator's; forcing a single rung by name; and a host
+# that is not a phone staying exactly as it was.
+#
+# The ladder is the phone build path, so these fixtures make this non-Android host stand in
+# for the phone with WA_TERMUX_TEST=1, and the build announces that in its output.
 
-# Every build before this point ran with the default profile, and a default-profile build
-# writes no log and creates no log directory. This asserts what the suites above did.
-[ ! -e "$updated/build-logs" ] || die 'a default-profile build created a build log directory'
-ok 'no default-profile build left a build log behind'
+# Every build before this point ran a single host rung, and a successful build writes no log
+# and creates no log directory. This asserts what the suites above did.
+[ ! -e "$updated/build-logs" ] || die 'a successful build created a build log directory'
+ok 'no successful build left a build log behind'
 
-# 8a. a non-Android host is unchanged: the same cargo invocation, no profile variables, no
-#     log directory.
+# 8a. a non-Android host is unchanged: one rung, the same cargo invocation as before the
+#     ladder existed, no profile variables in the environment, no log directory.
 #     The gate can run this suite with CARGO_BUILD_JOBS set (WA_GATE_JOBS): the fixtures
 #     that follow are about what a build does with an explicit setting, so they set their
 #     own and this one starts from none.
@@ -509,9 +532,30 @@ export FAKE_CARGO_RECORD=$work/cargo-record
 : > "$FAKE_CARGO_RECORD"
 export WA_TERMUX_BUILD_LOG_DIR=$work/logs-that-must-not-appear
 make_install "$A" "$up"
-expect_ok 'a non-Android host updates with the host profile' 'updated' update
+set +e
+host_out=$(run_update 2>&1)
+host_rc=$?
+set -e
+[ "$host_rc" -eq 0 ] || die "a non-Android host did not update: $host_out"
+case "$host_out" in
+  *'updated'*) ok 'a non-Android host updates' ;;
+  *) die "the host update did not report: $host_out" ;;
+esac
 [ "$(rl_get "$install/installed.txt" source_commit)" = "$B" ] ||
   die 'the host-profile update did not switch'
+case "$host_out" in
+  *'build ladder: default (1 attempt(s)'*) ok 'a non-Android host runs one rung, not the phone ladder' ;;
+  *) die "the host build did not report a single rung: $host_out" ;;
+esac
+case "$host_out" in
+  *'attempt 1/1 of the ladder, profile default'*'unchanged (host defaults)'*)
+    ok 'the host rung is reported as unchanged host defaults' ;;
+  *) die "the host profile was not reported: $host_out" ;;
+esac
+case "$host_out" in
+  *'WA_TERMUX_TEST=1'*) die "the phone ladder was driven on a host that is not a phone: $host_out" ;;
+  *) ok 'no phone ladder on a host that is not a phone' ;;
+esac
 grep -q 'attempt=1 jobs= stack= flags= incremental= argv=build --release --locked --manifest-path ' \
   "$FAKE_CARGO_RECORD" ||
   die "the non-Android invocation changed: $(cat "$FAKE_CARGO_RECORD")"
@@ -520,103 +564,332 @@ ok 'a non-Android host gets the unchanged cargo invocation and no profile variab
 ok 'a successful build writes no build log'
 unset WA_TERMUX_BUILD_LOG_DIR
 
-# 8b. the compiler crashes on the first attempt: the crash is named, the retry is
-#     announced with the profile it will use, and the install completes.
+# 8b. the compiler crashes on the first rung: the crash is named with the crate that died,
+#     the ladder advances and announces the rung it moves to, and the install completes on
+#     the resource-safe profile - and it is the second rung's binary that gets installed.
 export FAKE_CARGO_STATE=$work/cargo-attempts
-export FAKE_CARGO_CRASH_FIRST=1
+export FAKE_CARGO_CRASH_ATTEMPTS=1
 : > "$FAKE_CARGO_RECORD"
 rm -f "$FAKE_CARGO_STATE"
 rm -rf "$releases" "$updated"
 make_install "$A" "$up"
 before_hashes=$(state_hashes)
 set +e
-crash_once_out=$(adopt 2>&1)
-crash_once_rc=$?
+ladder_out=$(adopt 2>&1)
+ladder_rc=$?
 set -e
-[ "$crash_once_rc" -eq 0 ] || die "the retry did not rescue the build: $crash_once_out"
-case "$crash_once_out" in
-  *'THE COMPILER CRASHED'*) ok 'a rustc signal is reported as a compiler crash, not a build error' ;;
-  *) die "the crash was not named: $crash_once_out" ;;
+[ "$ladder_rc" -eq 0 ] || die "the ladder did not rescue the build: $ladder_out"
+case "$ladder_out" in
+  *'WA_TERMUX_TEST=1: this host is not an Android device; driving the phone build ladder'*)
+    ok 'the fixture announces that it is standing in for the phone' ;;
+  *) die "the phone ladder was not announced: $ladder_out" ;;
 esac
-case "$crash_once_out" in
-  *'retrying ONCE with the conservative profile'*) ok 'the retry is announced, with the profile it will use' ;;
-  *) die "the retry was not announced: $crash_once_out" ;;
+case "$ladder_out" in
+  *'build ladder: default conservative debug (3 attempt(s)'*)
+    ok 'the ladder is default -> conservative -> debug, three attempts' ;;
+  *) die "the ladder was not reported: $ladder_out" ;;
 esac
-case "$crash_once_out" in
-  *'adopted'*) ok 'the install completes on the retry' ;;
-  *) die "the retry did not adopt: $crash_once_out" ;;
+case "$ladder_out" in
+  *'THE COMPILER CRASHED'*'the last crate in that log is cranelift_codegen'*)
+    ok 'a rustc signal is reported as a compiler crash, with the crate that died' ;;
+  *) die "the crash was not named with its crate: $ladder_out" ;;
 esac
-[ "$(rl_get "$install/installed.txt" source_commit)" = "$B" ] ||
-  die 'the retried build did not install its revision'
-[ -f "$updated/build-logs/build-attempt1.log" ] ||
-  die 'the first crash kept no build log'
+case "$ladder_out" in
+  *'attempt 1/3 of the ladder, profile default'*'attempt 2/3 of the ladder, profile conservative'*)
+    ok 'the crashed rung and the rung it advances to are both announced' ;;
+  *) die "the ladder did not advance: $ladder_out" ;;
+esac
+case "$ladder_out" in
+  *'profile conservative finished:'*'adopted'*) ok 'the install completes on the second rung' ;;
+  *) die "the second rung did not finish the install: $ladder_out" ;;
+esac
+grep -q '^attempt=1 jobs=1 stack= flags= incremental= argv=build --release --locked --manifest-path ' \
+  "$FAKE_CARGO_RECORD" ||
+  die "the first rung is not one job with default codegen units: $(cat "$FAKE_CARGO_RECORD")"
+ok 'the first rung ran one job, with default codegen units and no RUSTFLAGS'
+grep -q '^attempt=2 jobs=1 stack=33554432 flags= incremental= argv=build --release --locked --manifest-path ' \
+  "$FAKE_CARGO_RECORD" ||
+  die "the second rung is not the resource-safe profile: $(cat "$FAKE_CARGO_RECORD")"
+ok 'the second rung ran one job and a raised compiler stack, still with default codegen units'
+grep -q 'payload-release' "$install/wa" ||
+  die 'the installed runtime is not the one the second rung built'
+ok 'the installed runtime is the binary the rung that finished built'
+grep -q '^build_profile=release$' "$install/installed.txt" ||
+  die 'the release does not record which rung produced the runtime'
+ok 'the release records the rung that produced it'
+[ -f "$updated/build-logs/build-attempt1.log" ] || die 'the first crash kept no build log'
 grep -q 'signal: 11' "$updated/build-logs/build-attempt1.log" ||
   die 'the kept log does not contain the crash it was kept for'
-ok 'the crash log is kept where the operator can read and paste it'
-grep -q 'attempt=2 jobs=1 stack=33554432 flags=-C codegen-units=1 incremental=0' "$FAKE_CARGO_RECORD" ||
-  die "the retry did not use the conservative profile: $(cat "$FAKE_CARGO_RECORD")"
-ok 'the retry ran with one job, a 32 MiB compiler stack, one codegen unit and no incremental state'
-[ "$before_hashes" = "$(state_hashes)" ] || die 'the crash retry changed node state'
+[ ! -e "$updated/build-logs/build-attempt2.log" ] || die 'a rung that succeeded wrote a log'
+ok 'the crash log is kept where the operator can read and paste it, and success writes none'
+[ "$before_hashes" = "$(state_hashes)" ] || die 'the crash and its retry changed node state'
 ok 'node state survives a crash and its retry byte-for-byte'
-unset FAKE_CARGO_CRASH_FIRST
+unset FAKE_CARGO_CRASH_ATTEMPTS
 
-# 8c. the compiler crashes on BOTH attempts: a named refusal that says which profile was
-#     used, where the log is, and which diagnostics to paste - and switches nothing.
-export FAKE_CARGO_CRASH_ALWAYS=1
+# 8c. the compiler crashes on the first TWO rungs: the third rung is the debug/unoptimized
+#     build, it builds with `cargo build --profile dev`, and the runtime that is installed
+#     and reported is that debug binary - not a stale release one and not nothing.
+export FAKE_CARGO_CRASH_ATTEMPTS=1,2
 rm -f "$FAKE_CARGO_STATE"
+: > "$FAKE_CARGO_RECORD"
 rm -rf "$releases" "$updated"
 make_install "$A" "$up"
 before_hashes=$(state_hashes)
 set +e
-crash_twice_out=$(adopt 2>&1)
-crash_twice_rc=$?
+debug_out=$(adopt 2>&1)
+debug_rc=$?
 set -e
-[ "$crash_twice_rc" -ne 0 ] || die 'a compiler that crashed twice was accepted'
-case "$crash_twice_out" in
-  *'compiler_crash_build_refused'*) ok 'a second crash is refused by name' ;;
-  *) die "the refusal did not name the crash: $crash_twice_out" ;;
+[ "$debug_rc" -eq 0 ] || die "the debug rung did not rescue the build: $debug_out"
+case "$debug_out" in
+  *'attempt 3/3 of the ladder, profile debug'*) ok 'the third rung is the debug profile' ;;
+  *) die "the debug rung was not attempted: $debug_out" ;;
 esac
-case "$crash_twice_out" in
-  *'retry profile:'*'CARGO_BUILD_JOBS=1 RUST_MIN_STACK=33554432'*)
-    ok 'the refusal names the conservative profile that was applied' ;;
-  *) die "the refusal does not name the profile: $crash_twice_out" ;;
+case "$debug_out" in
+  *'build --profile dev (debug, unoptimized)'*'profile debug finished:'*)
+    ok 'the debug rung builds with cargo --profile dev, and it is the rung that finishes' ;;
+  *) die "the debug rung was not what built: $debug_out" ;;
 esac
-case "$crash_twice_out" in
-  *"build log:        $updated/build-logs/build-attempt2.log"*)
-    ok 'the refusal names the retained build log' ;;
-  *) die "the refusal does not name the log: $crash_twice_out" ;;
+grep -q '^attempt=3 jobs=1 stack=33554432 flags= incremental=0 argv=build --profile dev --locked --manifest-path ' \
+  "$FAKE_CARGO_RECORD" ||
+  die "the debug rung did not run as expected: $(cat "$FAKE_CARGO_RECORD")"
+ok 'the debug rung ran one job, a raised stack and no incremental state'
+grep -q 'payload-dev' "$install/wa" ||
+  die 'the installed runtime is not the debug binary that was built'
+ok 'the installed runtime is the debug binary the third rung built'
+grep -q '^build_profile=dev$' "$install/installed.txt" ||
+  die 'the release does not record that it is an unoptimized build'
+ok 'the release records that its runtime is the unoptimized one'
+case "$debug_out" in
+  *'the runtime was built with the debug/unoptimized profile'*)
+    ok 'the install says plainly that the runtime it installed is unoptimized' ;;
+  *) die "the install did not say what kind of runtime it installed: $debug_out" ;;
 esac
-case "$crash_twice_out" in
-  *'rustc -V'*'free -m | head -3'*'nproc'*) ok 'the refusal names the three diagnostics to paste' ;;
-  *) die "the refusal does not name the diagnostics: $crash_twice_out" ;;
+set +e
+doctor_out=$(sh "$install/bin/wa" doctor 2>&1)
+set -e
+case "$doctor_out" in
+  *'Build: dev (unoptimized'*) ok 'wa doctor reports the unoptimized runtime' ;;
+  *) die "wa doctor does not report the build profile: $doctor_out" ;;
 esac
-[ -f "$updated/build-logs/build-attempt2.log" ] || die 'the refused build kept no log'
-grep -q 'signal: 11' "$updated/build-logs/build-attempt2.log" ||
-  die 'the retained log does not contain the crash it was kept for'
-ok 'the log of the refused attempt is retained'
-[ "$(rl_get "$install/installed.txt" source_commit)" = "$A" ] ||
-  die 'a refused build still switched the installed revision'
-[ ! -e "$releases/$B" ] || die 'a refused build left a release behind'
-ok 'a refused build switched nothing and left no release behind'
-[ "$before_hashes" = "$(state_hashes)" ] || die 'the refused build changed node state'
-ok 'node state is untouched by a refused build'
-unset FAKE_CARGO_CRASH_ALWAYS
+for n in 1 2; do
+  [ -f "$updated/build-logs/build-attempt$n.log" ] || die "rung $n kept no log"
+  grep -q 'signal: 11' "$updated/build-logs/build-attempt$n.log" || die "log $n has no crash in it"
+done
+[ ! -e "$updated/build-logs/build-attempt3.log" ] || die 'the rung that succeeded wrote a log'
+ok 'each crashed rung kept its own log, and the successful one kept none'
+[ "$(rl_get "$install/installed.txt" source_commit)" = "$B" ] ||
+  die 'the debug-rung install did not install its revision'
+[ "$before_hashes" = "$(state_hashes)" ] || die 'the debug rung changed node state'
+ok 'node state is untouched by the ladder that ended in a debug build'
+unset FAKE_CARGO_CRASH_ATTEMPTS
 
-# 8d. an explicit setting is never overridden, and an unknown profile is refused by name.
+# 8d. the compiler crashes on all three rungs: ONE named refusal that names every attempt,
+#     every retained log and the crate, assembles and switches nothing, and leaves node state
+#     byte-for-byte as it was.
+export FAKE_CARGO_CRASH_ATTEMPTS=1,2,3
+rm -f "$FAKE_CARGO_STATE"
+: > "$FAKE_CARGO_RECORD"
+rm -rf "$releases" "$updated"
+make_install "$A" "$up"
+before_hashes=$(state_hashes)
+before_install=$(snapshot_install)
+set +e
+refused_out=$(adopt 2>&1)
+refused_rc=$?
+set -e
+[ "$refused_rc" -ne 0 ] || die 'a compiler that crashed on every rung was accepted'
+case "$refused_out" in
+  *'compiler_crash_build_refused: the compiler crashed on every attempt of the build ladder'*)
+    ok 'the exhausted ladder is refused by name' ;;
+  *) die "the refusal was not named: $refused_out" ;;
+esac
+for want in \
+  'attempt 1/3, profile default' \
+  'attempt 2/3, profile conservative' \
+  'attempt 3/3, profile debug'; do
+  case "$refused_out" in
+    *"$want"*) ;;
+    *) die "the refusal does not name '$want': $refused_out" ;;
+  esac
+done
+ok 'the refusal names every attempt of the ladder'
+for n in 1 2 3; do
+  [ -f "$updated/build-logs/build-attempt$n.log" ] || die "the refusal kept no log for rung $n"
+  case "$refused_out" in
+    *"build-attempt$n.log"*) ;;
+    *) die "the refusal does not name build-attempt$n.log: $refused_out" ;;
+  esac
+  grep -q 'signal: 11' "$updated/build-logs/build-attempt$n.log" ||
+    die "log $n does not contain the crash it was kept for"
+done
+ok 'the refusal names every retained log, and each one holds its crash'
+case "$refused_out" in
+  *'last crate in the log: cranelift_codegen'*)
+    ok 'the refusal names the crate the log points at' ;;
+  *) die "the refusal does not name the crate: $refused_out" ;;
+esac
+case "$refused_out" in
+  *'CARGO_BUILD_JOBS=1 (this script, rung debug)'*'CARGO_INCREMENTAL=0 (this script, rung debug)'*)
+    ok 'the refusal attributes the values it set itself to the script, not to the operator' ;;
+  *) die "the refusal does not attribute its own values: $refused_out" ;;
+esac
+case "$refused_out" in
+  *'you had set none of these variables yourself'*)
+    ok 'the refusal says plainly that none of those values were the operator own' ;;
+  *) die "the refusal does not say where the values came from: $refused_out" ;;
+esac
+case "$refused_out" in
+  *'rustc -V'*'free -m | head -3'*'nproc'*) ok 'the refusal names the three diagnostics to paste' ;;
+  *) die "the refusal does not name the diagnostics: $refused_out" ;;
+esac
+[ "$(rl_get "$install/installed.txt" source_commit)" = "$A" ] ||
+  die 'a refused ladder still switched the installed revision'
+[ "$before_install" = "$(snapshot_install)" ] || die 'a refused ladder changed the installation'
+[ ! -e "$releases/$B" ] || die 'a refused ladder left a release behind'
+[ -z "$(find "$releases" -maxdepth 1 -name '.adopt.*' 2>/dev/null)" ] ||
+  die 'a refused ladder left a staging release behind'
+ok 'a refused ladder switched nothing, assembled no release and left no staging behind'
+[ "$before_hashes" = "$(state_hashes)" ] || die 'the refused ladder changed node state'
+ok 'node state is untouched by the refused ladder'
+unset FAKE_CARGO_CRASH_ATTEMPTS
+
+# 8e. authorship: a value the operator set is theirs and is kept verbatim; a value this
+#     script set is the script's, even on the rung after the one that set it. The old
+#     wording called the script's own conservative values "yours, kept".
+export FAKE_CARGO_CRASH_ATTEMPTS=1
+export RUST_MIN_STACK=67108864
+rm -f "$FAKE_CARGO_STATE"
+: > "$FAKE_CARGO_RECORD"
+rm -rf "$releases" "$updated"
+make_install "$A" "$up"
+set +e
+kept_out=$(adopt 2>&1)
+kept_rc=$?
+set -e
+[ "$kept_rc" -eq 0 ] || die "an operator setting broke the build: $kept_out"
+case "$kept_out" in
+  *'RUST_MIN_STACK=67108864 (yours, kept)'*)
+    ok 'a value the operator set is reported as the operator own' ;;
+  *) die "the operator value was not reported as theirs: $kept_out" ;;
+esac
+case "$kept_out" in
+  *'CARGO_BUILD_JOBS=1 (this script, rung conservative)'*)
+    ok 'the value this script set on the second rung is reported as the script own' ;;
+  *) die "the script's own value was not attributed to the script: $kept_out" ;;
+esac
+case "$kept_out" in
+  *'CARGO_BUILD_JOBS=1 (yours, kept)'*) die 'the script own value was reported as the operator own' ;;
+  *) ok 'no value this script set is claimed as the operator own' ;;
+esac
+grep -q '^attempt=2 jobs=1 stack=67108864 ' "$FAKE_CARGO_RECORD" ||
+  die "the operator stack was not used verbatim: $(cat "$FAKE_CARGO_RECORD")"
+ok 'the operator value reached the compiler verbatim'
+unset RUST_MIN_STACK FAKE_CARGO_CRASH_ATTEMPTS
+
+# 8f. one rung can be forced by name, and then there is no ladder: the forced rung runs
+#     once, keeps an operator value, applies the rest of itself, and an unknown name is
+#     refused with the three choices.
 export WA_TERMUX_BUILD_PROFILE=conservative
 export CARGO_BUILD_JOBS=3
 rm -f "$FAKE_CARGO_STATE"
 : > "$FAKE_CARGO_RECORD"
+rm -rf "$releases" "$updated"
 make_install "$A" "$up"
-expect_ok 'an explicit CARGO_BUILD_JOBS is respected, not overridden' 'CARGO_BUILD_JOBS=3 (yours, kept)' update
-grep -q 'attempt=1 jobs=3 stack=33554432 flags=-C codegen-units=1 incremental=0' "$FAKE_CARGO_RECORD" ||
-  die "an explicit setting was overridden: $(cat "$FAKE_CARGO_RECORD")"
-ok 'the forced phone profile kept the operator job count and applied the rest'
+set +e
+forced_out=$(run_update 2>&1)
+forced_rc=$?
+set -e
+[ "$forced_rc" -eq 0 ] || die "the forced profile did not build: $forced_out"
+case "$forced_out" in
+  *'build profile forced by WA_TERMUX_BUILD_PROFILE=conservative: one attempt, no ladder'*)
+    ok 'a forced profile is announced as one attempt' ;;
+  *) die "the forced profile was not announced: $forced_out" ;;
+esac
+case "$forced_out" in
+  *'attempt 1/1, profile conservative'*) ok 'a forced profile runs exactly one rung' ;;
+  *) die "the forced profile did not run once: $forced_out" ;;
+esac
+case "$forced_out" in
+  *'CARGO_BUILD_JOBS=3 (yours, kept)'*)
+    ok 'an explicit CARGO_BUILD_JOBS is respected, not overridden' ;;
+  *) die "the operator job count was not kept: $forced_out" ;;
+esac
+case "$forced_out" in
+  *'RUST_MIN_STACK=33554432 (this script, rung conservative)'*)
+    ok 'the rest of the forced rung is applied, and attributed to the script' ;;
+  *) die "the forced rung was not applied: $forced_out" ;;
+esac
+grep -q '^attempt=1 jobs=3 stack=33554432 flags= incremental= argv=build --release --locked --manifest-path ' \
+  "$FAKE_CARGO_RECORD" ||
+  die "the forced rung was not applied as documented: $(cat "$FAKE_CARGO_RECORD")"
+ok 'the forced rung kept the operator job count, applied the rest, and set no codegen-units flag'
+[ ! -e "$updated/build-logs" ] || die 'a successful forced build created a log directory'
 unset CARGO_BUILD_JOBS
 export WA_TERMUX_BUILD_PROFILE=clever
 make_install "$A" "$up"
-expect_fail 'an unknown build profile is refused by name' 'build_profile_unknown' update
+set +e
+unknown_out=$(run_update 2>&1)
+unknown_rc=$?
+set -e
+[ "$unknown_rc" -ne 0 ] || die 'an unknown build profile was accepted'
+case "$unknown_out" in
+  *"build_profile_unknown: WA_TERMUX_BUILD_PROFILE=clever"*"'default', 'conservative' or 'debug'"*)
+    ok 'an unknown build profile is refused by name, naming the three choices' ;;
+  *) die "the unknown profile refusal is not by name: $unknown_out" ;;
+esac
 unset WA_TERMUX_BUILD_PROFILE
+
+# 8g. a forced rung that crashes is refused after ONE attempt: forcing a profile means
+#     forcing it, with no ladder behind it.
+export WA_TERMUX_BUILD_PROFILE=debug
+export FAKE_CARGO_CRASH_ATTEMPTS=1
+rm -f "$FAKE_CARGO_STATE"
+rm -rf "$releases" "$updated"
+make_install "$A" "$up"
+set +e
+forced_crash_out=$(run_update 2>&1)
+forced_crash_rc=$?
+set -e
+[ "$forced_crash_rc" -ne 0 ] || die 'a forced rung that crashed was accepted'
+case "$forced_crash_out" in
+  *'attempt 1/1, profile debug'*'compiler_crash_build_refused'*)
+    ok 'a forced rung that crashed is refused after one attempt' ;;
+  *) die "the forced rung did not refuse after one attempt: $forced_crash_out" ;;
+esac
+[ -f "$updated/build-logs/build-attempt1.log" ] || die 'the forced rung kept no log'
+[ ! -e "$updated/build-logs/build-attempt2.log" ] || die 'a forced profile ran a second rung'
+[ "$(rl_get "$install/installed.txt" source_commit)" = "$A" ] ||
+  die 'a refused forced rung still switched'
+ok 'a forced profile produced one log, ran no second rung and switched nothing'
+unset FAKE_CARGO_CRASH_ATTEMPTS WA_TERMUX_BUILD_PROFILE
+
+# 8h. a host that is not a phone has no ladder to walk: one rung, and a compiler crash on
+#     it is refused at once with its log. The phone's knobs exist for the phone's memory,
+#     not to be sprayed onto CI.
+unset WA_TERMUX_BUILD_PROFILE
+export FAKE_CARGO_CRASH_ATTEMPTS=1
+rm -f "$FAKE_CARGO_STATE"
+rm -rf "$releases" "$updated"
+make_install "$A" "$up"
+set +e
+host_crash_out=$(run_update 2>&1)
+host_crash_rc=$?
+set -e
+[ "$host_crash_rc" -ne 0 ] || die 'a crashed compiler on a non-Android host was accepted'
+case "$host_crash_out" in
+  *'attempt 1/1 of the ladder, profile default'*'compiler_crash_build_refused'*)
+    ok 'a non-Android host refuses after its one rung, with no phone ladder' ;;
+  *) die "the host crash path changed: $host_crash_out" ;;
+esac
+[ -f "$updated/build-logs/build-attempt1.log" ] || die 'the host crash kept no log'
+[ ! -e "$updated/build-logs/build-attempt2.log" ] || die 'a non-Android host ran a second rung'
+case "$host_crash_out" in
+  *'CARGO_BUILD_JOBS'*) die "the phone knobs were applied on a host that is not a phone: $host_crash_out" ;;
+  *) ok 'no phone knobs on a host that is not a phone' ;;
+esac
+[ "$(rl_get "$install/installed.txt" source_commit)" = "$A" ] ||
+  die 'a refused host build still switched'
+unset FAKE_CARGO_CRASH_ATTEMPTS
 
 # ---- 9. the one command: clone from a local bare repo, adopt, then update -----
 #

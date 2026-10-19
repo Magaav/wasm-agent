@@ -131,11 +131,13 @@ fi
 # ---- 2. build the checkout revision as a new release ------------------------
 
 built=$(rl_build_wa "$root")
+built_profile=$(rl_build_profile_of_bin "$built")
 [ "$(git -C "$root" rev-parse HEAD)" = "$head_commit" ] || fail 'source_changed_during_build'
 [ -z "$(git -C "$root" status --porcelain --untracked-files=normal)" ] || fail 'source_changed_during_build'
 
 stage_release="$RL_RELEASES/.adopt.$$"
-rl_assemble "$root" "$built" "$stage_release" "$head_commit" "$upstream" "$existing_commit" 'adopt-existing'
+rl_assemble "$root" "$built" "$stage_release" "$head_commit" "$upstream" "$existing_commit" \
+  'adopt-existing' "$built_profile"
 rl_verify_release "$stage_release" || fail 'candidate_refused: the build did not verify (see above); nothing was switched'
 
 if [ -d "$RL_RELEASES/$head_commit" ]; then
@@ -153,6 +155,9 @@ fi
 
 rl_activate "$head_commit"
 
+if [ "$built_profile" = dev ]; then
+  note 'the runtime was built with the debug/unoptimized profile: the optimized build did not finish on this device; it works, and it is slower'
+fi
 note "adopted: $existing_commit -> $head_commit"
 note "rollback release kept at $RL_RELEASES/$existing_commit"
 note "next: 'wa update --check' then 'wa update' for every update after this one."

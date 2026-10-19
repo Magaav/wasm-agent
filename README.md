@@ -177,32 +177,69 @@ running. Reinstallation currently refuses an existing preview so it cannot
 overwrite a running or stateful installation silently. Agent state and credentials
 live under `~/.wasm-agent`, outside the replaceable runtime directory.
 
-#### Building on a phone: the conservative profile
+#### Building on a phone: the build ladder
 
 A phone is not a build server: several rustc processes at once, on a device that is
-also running Android and the UI, is more memory than it has. On Android/Termux the
-build therefore runs `CARGO_BUILD_JOBS=1` (peak memory stops scaling with the core
-count), `RUSTFLAGS=-C codegen-units=1` (less memory inside each rustc, at the cost of
-some build time), `RUST_MIN_STACK=33554432` (32 MiB per compiler thread, against the
-8 MiB default, for a rustc that dies of its own recursion), and
-`CARGO_INCREMENTAL=0`. These are memory-pressure mitigation, not a claimed fix for a
-named bug.
+also running Android and the UI, is more memory than it has. A measured failure on an
+Android 10 arm64 phone was rustc killed by a signal while compiling
+`cranelift_codegen` (the Wasmtime engine), with ~2.7 GB available on 8 cores. So the
+Android build sets the knobs it can justify for exactly that failure, on every attempt:
+
+* `CARGO_BUILD_JOBS=1` - one rustc at a time, so peak memory stops scaling with the
+  core count. This is the lever that matters most, and the one worth losing build time
+  to.
+* **no** `RUSTFLAGS=-C codegen-units=1`. That flag puts a whole crate into one LLVM
+  codegen unit and therefore *raises* peak memory inside that rustc - the opposite of
+  what a memory-starved compiler needs - and the crashing build was already running
+  it. Default codegen units let LLVM split a crate that size into several units, each
+  finished and released in turn.
+* `RUST_MIN_STACK=33554432` from the second attempt on: a SIGSEGV is as much the
+  signature of a stack overflow as of a wild pointer, and rustc's query and const-eval
+  recursion is legitimately deep in crates like this one. It costs address space, not
+  memory - thread stacks are mapped lazily - so on a memory-starved device it is close
+  to free.
+* `CARGO_INCREMENTAL=0` only on the debug attempt, where it does something: a
+  `--release` build already has incremental off, and cargo's `dev` profile turns it on
+  for a fresh build that has nothing to reuse.
+
+If the compiler crashes, the script walks a **ladder** instead of stopping at the first
+attempt, reports each rung, and keeps one log per attempt under
+`$PREFIX/opt/wasm-agent-update/build-logs/`:
+
+| attempt | profile | what it does |
+| --- | --- | --- |
+| 1 | `default` | one job; everything else cargo's own default |
+| 2 | `conservative` | one job and a 32 MiB compiler stack |
+| 3 | `debug` | `cargo build --profile dev`: a debug, unoptimized build |
+
+The third rung is not another mitigation, it is a way through: a debug build does the
+type checking but almost none of the optimizer work, so it can build a crate the
+release build cannot, and **an unoptimized runtime that starts is better on a phone
+than no install**. It is slower to run and a larger binary on disk, and it *is* the
+installed runtime: the attempt that succeeds decides which binary is installed,
+`installed.txt` records `build_profile=dev`, and `wa doctor` reports it.
 
 A value **you** set is never overridden: the build reports it as kept, e.g.
-`CARGO_BUILD_JOBS=3 (yours, kept)`. Non-Android hosts build exactly as before, and
-`WA_TERMUX_BUILD_PROFILE=conservative` (or `default`) forces the choice anywhere.
+`CARGO_BUILD_JOBS=3 (yours, kept)`, and says where every value came from. A value the
+script sets for a rung is labelled as the script's, for that rung - never as yours.
+Non-Android hosts are untouched: one rung, host defaults, no profile variables, so CI
+and Windows build exactly as before (and a host whose compiler crashes is refused after
+that one rung, because the phone's knobs exist for the phone's memory, not to be walked
+onto CI).
+`WA_TERMUX_BUILD_PROFILE=default|conservative|debug` forces one rung anywhere (one
+attempt, no ladder); an unknown value is refused by name.
 
-#### If the compiler crashes
+#### If all three attempts fail
 
 When the compiler dies of a signal, cargo reports it as `process didn't exit
-successfully: \`rustc ...\` (signal: 11, SIGSEGV)` and the old build called that a
-failed build and stopped. Now the script recognises that shape (`signal: 11`,
-`SIGSEGV`, `process didn't exit successfully`), prints `THE COMPILER CRASHED` instead
-of a build error, keeps the cargo log and **retries once** with the conservative
-profile. If the retry fails too it stops with a named refusal
-(`compiler_crash_build_refused`), the profile it used, the retained log
-(`$PREFIX/opt/wasm-agent-update/build-logs/build-attempt2.log`) and asks you to paste
-three lines:
+successfully: \`rustc ...\` (signal: 11, SIGSEGV)` and a build that stops there says
+nothing useful. This one recognises that shape (`signal: 11`, `SIGSEGV`, `process
+didn't exit successfully`), prints `THE COMPILER CRASHED` instead of a build error, and
+moves to the next rung. If every rung fails it stops with a named refusal
+(`compiler_crash_build_refused`) that names every attempt, every retained log, the
+crate the last log points at (from its `crate-name` line - that is how
+`cranelift_codegen` was identified) and where each build setting came from, and asks
+you to paste three lines:
 
 ```sh
 rustc -V
@@ -210,7 +247,7 @@ free -m | head -3
 nproc
 ```
 
-No release is switched, nothing is installed, and node state is not read or written.
+No release is assembled, switched or installed, and node state is not read or written.
 
 ### Keeping the preview current: `wa update`, and the one-time bootstrap
 
@@ -258,9 +295,11 @@ checkout. Restart the UI (`Ctrl-C`, then `wa ui`) to run the new runtime.
 **Honest limit:** this is developed and fixture-tested on a non-Android host. A real
 `pkg install rust` build, real ELF execution of the candidate, real `$PREFIX`
 symlinks, a real rustc crash and the phone's actual `~/.wasm-agent` layout are **not**
-proven here: the conservative profile, the crash retry and its refusal are exercised
-by fixtures with a fake compiler, and the Windows fixture announces the checks it
-skips (`WA_TERMUX_HOST_PROBES=0`, the symlink case).
+proven here: the build ladder (`CARGO_BUILD_JOBS=1`, default codegen units, the raised
+compiler stack and the debug rung), which rung's binary gets installed, and the refusal
+are exercised by fixtures with a fake compiler, and the Windows fixture announces the
+checks it skips (`WA_TERMUX_HOST_PROBES=0`, the symlink case). A debug rung install has
+never been built on the phone either.
 
 ### Bind an existing CLI to the fabric
 
