@@ -984,6 +984,11 @@ function appendCommentary(text, messageId, pendingId, decisionPrelude, place) {
   }
   const block = document.createElement("wa-commentary");
   block.open = true;
+  // The text streamed in the answer's place (a `.seg`), so this topic is built where that sentence
+  // stands and must keep its typography: same font, line-height, width and padding, with the marker
+  // row below the text instead of above it (ui/style.css, `[data-in-place]`). Anything else re-lays
+  // the sentence out at the moment its phase is established, which reads as it moving into the topic.
+  if (place && place.tagName !== "WA-COMMENTARY") block.dataset.inPlace = "";
   block.setText(text);
   if(pendingId)block.dataset.pendingId=String(pendingId);
   // A decision step's prelude is a step of the run, like a tool call: the mark is what makes the run

@@ -3799,6 +3799,12 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'shared topic pattern browser probe failed' }
     & node scripts/agent-benchmark-ui-observe.mjs --ui $ui --probe (Join-Path $PSScriptRoot 'probe-decision-preamble.js') --out (Join-Path $tmp 'decision-preamble')
     if ($LASTEXITCODE -ne 0) { throw 'decision preamble browser probe failed' }
+    # Where a streamed sentence ends up when its phase resolves to commentary: measured as the text
+    # box's own geometry on every route, including the ordinary OpenAI-compatible one that states no
+    # per-item phase (delta -> step_phase). It reported that route's width delta and still passed once;
+    # it now fails on it, so it runs in the gate rather than beside it.
+    & node scripts/agent-benchmark-ui-observe.mjs --ui $ui --probe (Join-Path $PSScriptRoot 'probe-run-topic-nesting.js') --out (Join-Path $tmp 'run-topic-nesting')
+    if ($LASTEXITCODE -ne 0) { throw 'run topic nesting browser probe failed' }
     & node scripts/test-final-answer-suite.mjs $WaExe (Join-Path $tmp 'final-answer')
     if ($LASTEXITCODE -ne 0) { throw 'final-answer focused suite failed' }
     & node scripts/test-minimal-chat.cjs (Join-Path $tmp 'minimal-chat')

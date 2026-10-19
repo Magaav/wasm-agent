@@ -17,10 +17,16 @@
 //     run topic, and the answer is what stays outside it.
 //
 // WHERE IT MOVED is measured as geometry, not as element order: DOM order was preserved by
-// `replaceWith` while the operator watched the sentence re-lay out, so each resolution below keeps
-// the streaming node's `getBoundingClientRect()` and asserts the resolved topic's box (top, left,
-// width) and its parent and sibling index are the same within 1px. A structural (order-only) check
-// passed while the bug was visible; this probe is the one the complaint actually tests.
+// `replaceWith` while the operator watched the sentence re-lay out. So every resolution below keeps
+// the box of the element that CARRIES the streamed sentence - the `.seg` that streamed, or the
+// commentary body it was drawn into - and asserts that its top, left and width are the same within
+// 1px, that it has the same parent and sibling index, and that its font-size, line-height and
+// padding are unchanged. That is measured on every route: `commentary_delta` -> commentary,
+// `pending_delta` -> commentary, and `delta` -> `step_phase` (the ordinary OpenAI-compatible route,
+// which states no per-item phase at all). A structural (order-only) check passed while the bug was
+// visible; so did an element-box check that compared the topic's outer box, because the topic's
+// header sits inside it. Measuring the text box is the only version the complaint cannot pass, and
+// the marker row must therefore be outside that box without taking space from it.
 //
 // Written without await and without timers: headless virtual time does not advance, so the probe
 // runs synchronously against the DOM `handleEvent` built.
@@ -29,22 +35,52 @@
   var notes = [];
   function check(ok, label) { if (!ok) problems.push(label); }
   function indexIn(parent, node) { return Array.prototype.indexOf.call(parent.children, node); }
-  // The box the reader sees, at the precision the complaint is about.
-  function box(node) {
+  // The element whose box the reader is watching: a streamed `.seg` is its own text box, and a
+  // commentary's text is its body (the topic's outer box also holds the marker row).
+  function textNode(node) {
     if (!node) return null;
-    var rect = node.getBoundingClientRect();
-    return { top: rect.top, left: rect.left, width: rect.width,
-      parent: node.parentNode, index: indexIn(node.parentNode, node) };
+    return node.tagName === "WA-COMMENTARY" ? node.querySelector(".commentary-body") : node;
+  }
+  function textBox(node) {
+    var text = textNode(node);
+    if (!node || !text) return null;
+    var rect = text.getBoundingClientRect();
+    var style = getComputedStyle(text);
+    var parent = node.parentNode;
+    return { top: rect.top, left: rect.left, width: rect.width, fontSize: style.fontSize,
+      lineHeight: style.lineHeight, padding: style.padding, parent: parent,
+      index: parent ? indexIn(parent, node) : -1 };
   }
   function boxText(b) {
     return b ? "top=" + b.top.toFixed(2) + " left=" + b.left.toFixed(2) +
-      " width=" + b.width.toFixed(2) + " index=" + b.index : "none";
+      " width=" + b.width.toFixed(2) + " index=" + b.index + " font=" + b.fontSize +
+      " line=" + b.lineHeight + " padding=" + b.padding : "none";
   }
-  function sameBox(before, after) {
+  // Establishing the phase is typographically NEUTRAL: the text keeps the box it streamed in - same
+  // top/left/width (1px), same parent and sibling index, same font-size, line-height and padding.
+  function sameTextBox(before, after) {
     if (!before || !after) return false;
     return Math.abs(before.top - after.top) <= 1 && Math.abs(before.left - after.left) <= 1 &&
       Math.abs(before.width - after.width) <= 1 && before.parent === after.parent &&
-      before.index === after.index;
+      before.index === after.index && before.fontSize === after.fontSize &&
+      before.lineHeight === after.lineHeight && before.padding === after.padding;
+  }
+  // The marker row's own rect, for the message that shows where the chrome went.
+  function markerText(topic) {
+    var head = topic && topic.querySelector(".trace-head");
+    if (!head) return "none";
+    var r = head.getBoundingClientRect();
+    return "top=" + r.top.toFixed(2) + " left=" + r.left.toFixed(2) +
+      " width=" + r.width.toFixed(2) + " height=" + r.height.toFixed(2);
+  }
+  // The topic's chrome may appear, but not at the text box's expense: it sits above or below that
+  // box and never overlaps it, so it cannot have pushed the sentence.
+  function chromeOutside(topic) {
+    var text = textNode(topic);
+    var head = topic && topic.querySelector(".trace-head");
+    if (!text || !head) return false;
+    var t = text.getBoundingClientRect(), h = head.getBoundingClientRect();
+    return h.bottom <= t.top + 0.5 || h.top >= t.bottom - 0.5;
   }
   function lastAssistant() {
     var bubbles = document.querySelectorAll('#messages wa-message[role="assistant"]');
@@ -69,7 +105,7 @@
     var streamed = body && body.querySelector(":scope > .seg:not(.final-answer)");
     check(!!streamed, "prose must stream as a segment of the bubble");
     var streamedIndex = streamed ? indexIn(body, streamed) : -1;
-    var streamedBox = box(streamed);
+    var streamedBox = textBox(streamed);
 
     window.handleEvent({ type: "step_phase", phase: "commentary",
       text: "Checking the second file.", message_id: "probe-commentary-1" });
@@ -84,17 +120,22 @@
       "BUG B: the commentary must take the streamed sentence's own place, so it does not move; " +
       "streamed at index " + streamedIndex + ", topic at " +
       (commentary ? indexIn(body, commentary) : "none"));
-    // The ordinary OpenAI-compatible route states no per-item phase, so this node could only be
-    // recognised after the step ended. Its top/left/parent/index are preserved; the box is not
-    // identical because the topic header - which exists only once the phase is known - is wider and
-    // taller than the segment it replaces. That residual is recorded here and reported; removing it
-    // would need an early signal this route does not send (see the report for file:line evidence).
-    var commentaryBox = box(commentary);
-    check(!!streamedBox && !!commentaryBox && commentaryBox.parent === streamedBox.parent &&
-      commentaryBox.index === streamedBox.index,
-      "the promoted commentary must keep the streamed sentence's parent and sibling index");
-    notes.push("ordinary route (delta -> step_phase), no early phase: streamed [" + boxText(streamedBox) +
-      "] -> topic [" + boxText(commentaryBox) + "]");
+    // The ordinary OpenAI-compatible route states no per-item phase: the node can only say what the
+    // step was after it ended (lua/core/agent.lua:1818-1821 sets decision_phase on finish_reason,
+    // and `step_phase` is emitted after the step at :1979-1980). Nothing here may guess the phase
+    // earlier, so the resolution itself has to be neutral - the sentence keeps its box and the
+    // marker appears outside it.
+    var commentaryBox = textBox(commentary);
+    check(!!streamedBox && !!commentaryBox && sameTextBox(streamedBox, commentaryBox),
+      "the resolved commentary must keep the streamed text's own box: top/left/width within 1px, " +
+      "the same parent and sibling index, and the same font-size, line-height and padding " +
+      "(ordinary route, no early phase); streamed [" + boxText(streamedBox) + "] -> topic [" +
+      boxText(commentaryBox) + "]");
+    check(chromeOutside(commentary),
+      "the commentary's marker row must not take space from the text box it labels; text [" +
+      boxText(commentaryBox) + "], marker [" + markerText(commentary) + "]");
+    notes.push("ordinary route (delta -> step_phase), no early phase: text [" + boxText(streamedBox) +
+      "] -> [" + boxText(commentaryBox) + "]");
     check(body && body.querySelectorAll(":scope > .seg").length === 0,
       "no orphaned streamed segment may be left behind");
     check(body && !body.querySelector(":scope > wa-run"),
@@ -122,15 +163,20 @@
       "the streamed commentary keeps growing in the same topic");
     // The provider resolved this item's phase, so the topic that streamed must be the topic that
     // remains: the same element in the same box, not a second one drawn in its place.
-    var topicBox2 = box(topic2);
+    var topicBox2 = textBox(topic2);
     window.handleEvent({ type: "commentary", pending_id: "probe-oc", message_id: "probe-oc-1",
       text: "OpenCode commentary." });
     var resolved2 = streamed2 && streamed2.body.querySelector(':scope > wa-commentary[data-message-id="probe-oc-1"]');
     check(!!resolved2 && resolved2 === topic2,
       "the streamed commentary node must BE the resolved topic, not be replaced by one");
-    check(sameBox(topicBox2, box(resolved2)),
-      "the resolved commentary must occupy the streaming topic's own box within 1px; " +
-      boxText(topicBox2) + " -> " + boxText(box(resolved2)));
+    check(sameTextBox(topicBox2, textBox(resolved2)),
+      "the resolved commentary must keep the streaming text's own box: top/left/width within 1px, " +
+      "same parent and index, same font-size, line-height and padding; " +
+      boxText(topicBox2) + " -> " + boxText(textBox(resolved2)));
+    check(chromeOutside(resolved2),
+      "the commentary's marker row must not take space from the text box it labels; text [" +
+      boxText(textBox(resolved2)) + "], marker [" +
+      markerText(resolved2) + "]");
 
     // ---- 3. the route where the phase is only known at the end of the step: the text streams into
     // a provisional segment, then the node says commentary. It must resolve in place, not move.
@@ -146,16 +192,21 @@
     check(!!provisional && provisional.tagName === "WA-COMMENTARY",
       "the provisional commentary node must already BE the commentary element, saw " +
       (provisional ? provisional.tagName : "none"));
-    var provisionalBox = box(provisional);
+    var provisionalBox = textBox(provisional);
     window.handleEvent({ type: "commentary", pending_id: "probe-pending",
       message_id: "probe-commentary-2", text: "Provisional progress." });
     var resolved = bubble3 && bubble3.body.querySelector(
       ':scope > wa-commentary[data-message-id="probe-commentary-2"]');
     check(!!resolved && resolved === provisional,
       "the resolved topic must be the provisional node itself, not a replacement");
-    check(sameBox(provisionalBox, box(resolved)),
-      "resolving the phase must not move the text: the protocol box must equal the provisional box " +
-      "within 1px; " + boxText(provisionalBox) + " -> " + boxText(box(resolved)));
+    check(sameTextBox(provisionalBox, textBox(resolved)),
+      "resolving the phase must not move the text: the resolved box must equal the provisional box " +
+      "within 1px, with the same parent, index, font-size, line-height and padding; " +
+      boxText(provisionalBox) + " -> " + boxText(textBox(resolved)));
+    check(chromeOutside(resolved),
+      "the commentary's marker row must not take space from the text box it labels; text [" +
+      boxText(textBox(resolved)) + "], marker [" +
+      markerText(resolved) + "]");
     check(!!resolved && resolved.querySelector(".commentary-body").textContent ===
       "Provisional progress.",
       "a commentary resolved from provisional text must carry that text once");
@@ -246,8 +297,8 @@
       !!answerRun && !answerRun.contains(answerPane.querySelector(".seg.final-answer")),
       "stage: the answer must be outside the run topic");
 
-    var verdict = "PASS: run steps stay in the bubble until the final answer nests them, and a " +
-      "commentary phase flips the box that streamed, measured in geometry";
+    var verdict = "PASS: run steps stay in the bubble until the final answer nests them, and on every " +
+      "route a commentary phase leaves the streamed sentence in its own box, with the marker outside it";
     if (notes.length) verdict += " [" + notes.join(" ;; ") + "]";
     result = { status: problems.length ? "fail" : "pass",
       text: problems.length ? "FAIL: " + problems.join(" ;; ") : verdict };

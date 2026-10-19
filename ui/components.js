@@ -1005,7 +1005,12 @@ class WaCommentary extends HTMLElement {
     this._meta = parts.meta;
     this._chevron = parts.chevron;
     this._body = parts.body;
-    this.append(this._header, this._body);
+    // Commentary is the one topic whose prose *is* the stream: a sentence can stream in the
+    // answer's place and only afterwards be established as commentary. The chrome therefore follows
+    // the text instead of preceding it - a marker row under the sentence, the same `trace-head`
+    // every other topic uses - so establishing the phase never pushes the text down into the topic
+    // (DESIGN.md section 6). A header above the body would reflow it by exactly its own height.
+    this.append(this._body, this._header);
     this._sync();
   }
 

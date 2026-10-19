@@ -271,10 +271,32 @@ wa-commentary.phase-pending .trace-label, wa-commentary.phase-incomplete .trace-
 wa-commentary.phase-pending .commentary-body { max-height: none; overflow: visible; }
 wa-commentary.phase-incomplete .commentary { text-decoration: underline dotted; }
 .reasoning-body, .commentary-body {
-  padding: var(--space); border-top: 1px solid var(--line);
+  padding: var(--space);
   color: var(--muted); font-size: 12px; white-space: pre-wrap;
   word-break: break-word; max-height: 320px; overflow: auto;
 }
+/* A topic's body sits under its header, so the separator between them is the body's top border -
+   except for a commentary, whose marker row follows its text (see `WaCommentary._build`): there the
+   separator is drawn under the text instead, above the marker. */
+.reasoning-body { border-top: 1px solid var(--line); }
+.commentary-body { border-bottom: 1px solid var(--line); }
+/* A commentary established on a sentence that streamed in the answer's place is typographically
+   NEUTRAL: the text box keeps the metrics it streamed with - the bubble's font-size and line-height,
+   no padding, no border, no height cap - and only the marker row is added, below it. Nothing above
+   the text may take space, because that is what pushed the sentence down and made it read as having
+   moved into the topic. Its white-space stays the resolved body's pre-wrap: the streamed state
+   rendered Markdown, so the source's line structure is the closest thing to what the reader saw. */
+wa-commentary[data-in-place] {
+  border: 0; border-radius: 0; background: none;
+}
+wa-commentary[data-in-place] > .commentary-body {
+  padding: 0; border: 0; color: inherit; font-size: inherit; line-height: inherit;
+  max-height: none; overflow: visible;
+}
+/* The marker row must not widen the bubble either: a streamed sentence sizes the bubble, and a
+   marker that is wider than the sentence (a short "OK") would grow it. A zero-width row that then
+   fills the topic contributes nothing to the transcript's fit-content width. */
+wa-commentary[data-in-place] > .trace-head { width: 0; min-width: 100%; }
 .run-body > .topic { border: 0; border-left: 2px solid var(--line); border-radius: 0; background: none; }
 wa-steering[data-state="queued"] { border-style: dashed; }
 
