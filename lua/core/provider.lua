@@ -1010,6 +1010,21 @@ function M.is_connection_lost(problem)
   return false
 end
 
+-- A stream that ended WITHOUT a finish reason and had produced nothing yet is the same
+-- situation as a dropped link: no answer was shown and no tool call was formed, so retrying
+-- cannot duplicate a visible effect or a side effect (the agent's own guard already refuses
+-- to execute partial tool calls). A stream that DID emit text or a tool call is a different
+-- case and is deliberately NOT treated as a lost stream: its partial output is preserved and
+-- it is not silently re-asked.
+function M.is_lost_stream(value)
+  if type(value) ~= "table" then return false end
+  if value.stream_complete ~= false then return false end
+  if M.visible_text(value.content) ~= "" or M.visible_text(value.commentary) ~= "" then return false end
+  if tostring(value.reasoning or "") ~= "" or #(value.reasoning_items or {}) > 0 then return false end
+  if #(value.tool_calls or {}) > 0 then return false end
+  return true
+end
+
 -- Attempts, and the total time we are willing to spend waiting for the link.
 function M.connection_retries()
   local count = tonumber(env("WASM_AGENT_PROVIDER_CONNECT_RETRIES") or "")
