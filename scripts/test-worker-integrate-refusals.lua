@@ -18,8 +18,13 @@ host.exec=function(command)
  if command:find('status --porcelain',1,true) then return ok(stage=='dirty' and ' M task.txt' or '') end
  if command:find('branch --show-current',1,true) then return ok(command:find("'owned'",1,true) and 'change/worker-refusals' or 'main') end
  if command:find('show -s --format=%B',1,true) then return ok('private task\nAgent: wasm-agent session='..sid) end
- if command:find('rev-parse --path-format=absolute --git-common-dir',1,true) then return ok('private-common') end
- if command:find('worktree list',1,true) then return ok('worktree canonical\nbranch refs/heads/main\n') end
+ if command:find('rev-parse --path-format=absolute --git-common-dir',1,true) then
+  if stage=='truncated-main' then return json.encode({code=0,ok=true,stdout='',output_truncated=true,stdout_truncated=true,stdout_path='/nonexistent/wa-fixture-stdout'}) end
+  return ok('/private/fixture/main/.git')
+ end
+ -- Deliberately NO stub for `git worktree list`: neither guard may read canonical main from the
+ -- first line of that unbounded listing again. If one does, this fixture answers empty and fails,
+ -- which is the negative control for the regression.
  if command:find('merge-tree',1,true) then return stage=='conflict' and json.encode({code=1,stdout='exact private conflict'}) or ok(string.rep('a',40)) end
  if command:find('HEAD^{tree}',1,true) then return ok(string.rep('a',40)) end
  if command:find('rev-parse',1,true) then return ok(string.rep('b',40)) end
@@ -35,5 +40,12 @@ check(again.error=='integration_effect_already_recorded' and mutations==before,'
 local getenv=host.getenv;host.getenv=function(name)if name=='WASM_AGENT_PROVENANCE' then return 'child' end return getenv(name)end
 check(dofile('lua/core/update.lua').run().error=='update_coordinator_only','child /update refuses before any facts/sync/backup/request')
 host.getenv=getenv
+-- A clipped guard input must refuse by name. A one-line `rev-parse` cannot clip in reality, so the
+-- clipping is simulated exactly as the host reports it: a clipped view, a named flag, no original.
+stage='truncated-main';local before_truncation=mutations
+local clipped=integrate.run(memory,{user_id='master',session_id=sid,run_id='truncated-fixture',subagent={id='orchestration-worker'}})
+check(clipped.error=='output_truncated_requires_bounded_command','a clipped guard input refuses by name: '..json.encode(clipped))
+check(clipped.error~='canonical_main_unavailable' and clipped.error~='canonical_main_missing','the refusal never blames the repository')
+check(clipped.effect=='none' and mutations==before_truncation,'no canonical mutation before a named truncation refusal')
 host.exec=native_exec;host.resource=native_resource;host.write_file=native_write
 print('worker integrate refusals ok ('..checks..' checks, no inference)')

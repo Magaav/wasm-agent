@@ -5,6 +5,7 @@ local json = dofile("lua/vendor/json.lua")
 local paths = dofile("lua/core/paths.lua")
 local platform = dofile("lua/core/platform.lua")
 local resources = dofile("lua/core/resources.lua")
+local command_output = dofile("lua/core/command_output.lua")
 local M = {}
 
 local function quote(value)
@@ -38,6 +39,16 @@ end
 
 local function trimmed(value)
   return tostring(value or ""):gsub("^%s+", ""):gsub("%s+$", "")
+end
+
+-- `git worktree list --porcelain` is a whole-repository listing (26 KB, 145 worktrees on this
+-- repository) while the exec view is bounded, so a preview can be missing a registration the
+-- repository really has. Absence must be decided from the complete output, never from a clipped
+-- one; `complete` reads the retained original and refuses by name when it cannot.
+local function complete_listing(result, what)
+  local ok, text = pcall(command_output.complete, result, what)
+  if not ok then return nil, tostring(text) end
+  return text
 end
 
 local function wave_admission(root,phase)
@@ -489,11 +500,16 @@ function M.review_facts(memory, session_id)
   else
     absent("pushed", branch and "detached_head" or "branch_unknown")
   end
-  -- One `status` read gives both counts, because the two are one measurement of the tree.
-  local status_ok, porcelain = exec_git("status --porcelain --untracked-files=all")
-  if status_ok then
+  -- One `status` read gives both counts, because the two are one measurement of the tree. The
+  -- COUNTS are not clip-insensitive (a bounded view can hide lines), so a clipped listing is
+  -- reported as unmeasured instead of as a smaller number.
+  local status_result = run("git -C " .. destination .. " status --porcelain --untracked-files=all", "")
+  if status_result and command_output.truncated(status_result) then
+    absent("dirty", "listing_clipped_by_host_view")
+    absent("untracked", "listing_clipped_by_host_view")
+  elseif status_result and tonumber(status_result.code) == 0 then
     local dirty, untracked = 0, 0
-    for line in tostring(porcelain or ""):gmatch("[^\r\n]+") do
+    for line in tostring(status_result.stdout or ""):gmatch("[^\r\n]+") do
       if line:sub(1, 2) == "??" then untracked = untracked + 1 else dirty = dirty + 1 end
     end
     facts.dirty, facts.untracked = dirty, untracked
@@ -537,8 +553,13 @@ function M.release(memory,id,user_id,expected_head)
     if not source or source=='' then return nil,'workspace_release_source_missing' end
     local listing,list_error=run('git worktree list --porcelain',source)
     if not listing or listing.code~=0 then return nil,'workspace_release_registry_unavailable: '..tostring(list_error) end
+    local listing_text,list_why=complete_listing(listing,'git worktree list --porcelain')
+    if not listing_text then
+      if tostring(list_why):find(command_output.TRUNCATED,1,true) then return nil,command_output.TRUNCATED..': the release registry listing could not be read whole' end
+      return nil,'workspace_release_registry_unavailable: '..tostring(list_why)
+    end
     local registered=false
-    for path in tostring(listing.stdout):gmatch('worktree ([^\r\n]+)') do
+    for path in listing_text:gmatch('worktree ([^\r\n]+)') do
       if normalized(path)==normalized(expected) then registered=true end
     end
     local canonical=host.canonical_path(expected)
@@ -639,7 +660,15 @@ function M.reconcile_release(memory,id,user_id,evidence)
     if not source or source=='' then return nil,'workspace_release_source_missing' end
     local listing,why=run('git worktree list --porcelain',source)
     if not listing then return nil,'workspace_release_registry_unavailable:'..tostring(why) end
-    for path in tostring(listing.stdout):gmatch('worktree ([^\r\n]+)') do
+    -- Reconciliation decides that a registration is GONE. A clipped listing would answer that
+    -- wrongly and release a tree git still knows, so the whole listing is read or the answer is
+    -- refused by name.
+    local listing_text,list_why=complete_listing(listing,'git worktree list --porcelain')
+    if not listing_text then
+      if tostring(list_why):find(command_output.TRUNCATED,1,true) then return nil,command_output.TRUNCATED..': the release registry listing could not be read whole' end
+      return nil,'workspace_release_registry_unavailable:'..tostring(list_why)
+    end
+    for path in listing_text:gmatch('worktree ([^\r\n]+)') do
       if normalized(path)==normalized(expected) then return nil,'workspace_reconcile_still_registered' end
     end
     local branch=run('git show-ref --verify --hash '..assert(quote('refs/heads/'..branch_name)),source)
