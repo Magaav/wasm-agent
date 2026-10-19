@@ -822,6 +822,10 @@ wa-chat-shell.dropping .composer { border-color: var(--accent); }
 .icon-btn:hover { color: var(--text); border-color: var(--accent); }
 .icon-btn.active { color: white; background: var(--accent); border-color: var(--accent); }
 .icon-btn.listening { animation: pulse 1.2s ease-in-out infinite; }
+.icon-btn.speaking { color: var(--accent); border-color: var(--accent); }
+/* The voice panel explains itself when this browser has no synthesis: a dashed control and a
+   disabled "Speak replies" row, never a mic that silently does nothing. */
+.icon-btn.voice-unavailable { border-style: dashed; }
 /* A disabled icon button must look disabled and must not react to the pointer,
    or it claims an undo that does not exist yet. Reuses --line for the outline
    and uses a solid dimmed glyph rather than fading the whole surface. */

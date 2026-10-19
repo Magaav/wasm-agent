@@ -1999,6 +1999,7 @@ function handleEvent(event) {
       return;
     }
     const finalText = stripThinking(event.text || streamText);
+    if (!replayingMessages) voiceLastAnswer = finalText;
     const newlyConfirmed = !streamBody?.classList.contains('final-answer');
     if (streamBody) {
       if (event.message_id) streamBody.dataset.messageId = event.message_id;
@@ -2053,6 +2054,8 @@ function handleEvent(event) {
     finishRunStatus("failed");
     finishTrace();
     runBubble = null;
+    voiceLastAnswer = "";
+    voiceRunSettled();
   } else if (event.type === "done") {
     if(!replayingMessages&&transcript===messages)stopLiveness();
     if(answerAnchors.get(transcript)?.dataset.answerComplete!=='true')releaseAnswerAnchor();
@@ -2060,6 +2063,7 @@ function handleEvent(event) {
     markStreamedCommentaryIncomplete();
     finishRunStatus();
     flushDecision(true);
+    voiceRunSettled();
   }
   keepStatusLast();
   if(event.type==='done' && answerAnchors.has(transcript))pin();
@@ -3115,6 +3119,8 @@ function threadOfRun(health, runId, session = chatSession) {
 }
 
 async function send(text, options = {}) {
+  stopVoiceSpeech();
+  voiceLastAnswer = "";
   let runThread = options.session || chatSession;
   let runEpoch = conversationEpoch;
   const runNode = activeNode, runAccount = session;
@@ -3333,6 +3339,8 @@ async function send(text, options = {}) {
         chatShell.warning.setNotice('submission', 'Message delivery not confirmed: ' + String(payload.error) + '. Draft kept; inspect before resending.');
       } else {
         clearSubmittedDraft(); clearStatus(); add("assistant", payload.reply || "(no reply)");
+        voiceLastAnswer = payload.reply || "";
+        voiceRunSettled();
       }
     } else {
       clearSubmittedDraft();
@@ -3896,6 +3904,7 @@ function syncUndoButtons() {}
 // node acknowledges its cancel request; an early browser abort hid both refusals and the node's
 // eventual cancelled result, making Stop look inert even when the request failed.
 function cancelActiveRun() {
+  stopVoiceSpeech();
   const thread = chatSession;
   if (!busy && observedRun?.session === thread) { cancelRun(runKey(observedRun)); return; }
   if (busy && activeRunId === null && !submittedRunIds) {
@@ -4473,42 +4482,284 @@ nodeSelect.addEventListener("change", async () => {
   renderControls();
 });
 
-// ---- voice input ---------------------------------------------------------
-function setupVoice() {
-  const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-  if (!Recognition) {
-    micButton.disabled = true;
-    micButton.title = "Voice input is not available in this browser";
+// ---- voice input and reply speech ----------------------------------------
+// Push-to-talk is three device-local choices: whether replies are spoken, whether a final
+// transcript is sent and listening resumes (keep listening), and which language both the
+// recognizer and the chosen voice speak. None of them belong to the node, so they live in
+// this window's storage beside the mic. Dictation still only appends to the composer;
+// auto-send is opt-in and goes through the shell's own submit path, never a second one.
+const VOICE_MUTED_KEY = "wa-voice-muted";
+const VOICE_KEEP_KEY = "wa-voice-keep";
+const VOICE_LANG_KEY = "wa-voice-lang";
+const voiceSettingsButton = document.getElementById("voice-settings");
+const voiceBalloon = document.getElementById("voice-balloon");
+const voiceSpeak = document.getElementById("voice-speak");
+const voiceKeep = document.getElementById("voice-keep");
+const voiceLangInput = document.getElementById("voice-lang");
+const voiceNote = document.getElementById("voice-note");
+
+function voiceStorage(key, fallback) {
+  try { const value = localStorage.getItem(key); return value === null ? fallback : value; } catch (error) { return fallback; }
+}
+function voiceStorageSet(key, value) {
+  try { localStorage.setItem(key, value); } catch (error) { /* device storage is optional */ }
+}
+function defaultVoiceLanguage() { return navigator.language || "en-US"; }
+let voiceMuted = voiceStorage(VOICE_MUTED_KEY, "0") === "1";
+let voiceKeepListening = voiceStorage(VOICE_KEEP_KEY, "0") === "1";
+let voiceLanguage = voiceStorage(VOICE_LANG_KEY, "") || defaultVoiceLanguage();
+let voiceSpeaking = false;
+let voiceLastAnswer = "";
+let voiceResumeListening = false;
+let voiceSpeechGuard = null;
+let voiceControlsWired = false;
+
+function voiceSynthesis() {
+  const synth = window.speechSynthesis;
+  return synth && typeof synth.speak === "function" ? synth : null;
+}
+function voiceSpeechAvailable() {
+  return !!voiceSynthesis() && typeof window.SpeechSynthesisUtterance === "function";
+}
+
+// The one thing a reader hears is the final answer's prose. Fenced blocks are code, and a
+// link's destination or a heading's hashes are punctuation for the eye, not the ear.
+function speakableProse(text) {
+  return String(text || "")
+    .replace(/```[\s\S]*?(?:```|$)/g, " ")
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, " ")
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
+    .replace(/^\s{0,3}#{1,6}\s*/gm, "")
+    .replace(/^\s{0,3}[-*+]\s+/gm, "")
+    .replace(/`([^`]+)`/g, "$1")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/[*_~]{1,3}/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+// A voice is chosen for the configured language, never by leaving the browser's default
+// in place: speaking English prose with a French voice is a wrong answer, not a fallback.
+function voiceMatchesLanguage(voiceLang, wanted) {
+  const voice = String(voiceLang || "").toLowerCase().replace(/_/g, "-");
+  const want = String(wanted || "").toLowerCase().replace(/_/g, "-");
+  if (!voice || !want) return false;
+  return voice === want || (voice.split("-")[0] === want.split("-")[0]);
+}
+function matchingVoice() {
+  const synth = voiceSynthesis();
+  if (!synth || typeof synth.getVoices !== "function") return null;
+  try {
+    return (synth.getVoices() || []).find((voice) => voiceMatchesLanguage(voice.lang, voiceLanguage)) || null;
+  } catch (error) { return null; }
+}
+
+function renderVoiceControls() {
+  const canListen = !!recognition;
+  const canSpeak = voiceSpeechAvailable();
+  micButton.disabled = !canListen;
+  micButton.classList.toggle("listening", recognizing);
+  micButton.classList.toggle("speaking", voiceSpeaking);
+  micButton.setAttribute("aria-pressed", recognizing ? "true" : "false");
+  micButton.dataset.voiceState = voiceSpeaking ? "speaking" : recognizing ? "listening" : "idle";
+  const label = voiceSpeaking ? "Reply speaking — tap to interrupt"
+    : recognizing ? "Listening — tap to stop"
+    : canListen ? "Talk with voice" : "Voice input is not available in this browser";
+  micButton.setAttribute("aria-label", label);
+  micButton.title = label;
+  if (voiceSpeak) {
+    voiceSpeak.checked = !voiceMuted;
+    voiceSpeak.disabled = !canSpeak;
+  }
+  if (voiceKeep) {
+    voiceKeep.checked = voiceKeepListening;
+    voiceKeep.disabled = !canListen;
+  }
+  if (voiceSettingsButton) {
+    const settingsLabel = canSpeak ? "Voice settings" : "Voice settings — reply speech is unavailable in this browser";
+    voiceSettingsButton.setAttribute("aria-label", settingsLabel);
+    voiceSettingsButton.title = settingsLabel;
+    voiceSettingsButton.classList.toggle("voice-unavailable", !canSpeak);
+  }
+  if (voiceNote && !canSpeak) voiceNote.textContent = "Reply speech is not available in this browser.";
+  else if (voiceNote && canSpeak && voiceNote.textContent === "Reply speech is not available in this browser.") voiceNote.textContent = "";
+}
+
+// Speech ends one of two ways: the utterance finishes, or the guard says it has had long
+// enough (a backgrounded synthesis engine can stop without an end event). Either way the
+// resume runs once.
+function finishVoiceTurn() {
+  clearTimeout(voiceSpeechGuard);
+  voiceSpeechGuard = null;
+  if (!voiceResumeListening) return;
+  voiceResumeListening = false;
+  if (!voiceKeepListening || !recognition || voiceSpeaking) return;
+  startVoiceListening();
+}
+
+function speakReply(text) {
+  const synth = voiceSynthesis();
+  const Utterance = window.SpeechSynthesisUtterance;
+  const spoken = speakableProse(text);
+  if (!synth || typeof Utterance !== "function" || voiceMuted || !spoken) { finishVoiceTurn(); return; }
+  let voicesTried = 0;
+  const attempt = () => {
+    const voice = matchingVoice();
+    if (!voice && voicesTried++ === 0 && !(synth.getVoices?.() || []).length) {
+      // Most browsers load the voice list asynchronously; ask once when it arrives.
+      let settled = false;
+      const retry = () => {
+        if (settled) return;
+        settled = true;
+        try { synth.removeEventListener?.("voiceschanged", retry); } catch (error) { /* optional */ }
+        attempt();
+      };
+      try { synth.addEventListener?.("voiceschanged", retry); } catch (error) { /* optional */ }
+      setTimeout(retry, 1000);
+      return;
+    }
+    if (!voice) {
+      const message = "No installed voice speaks " + voiceLanguage + " — the reply was not spoken.";
+      if (voiceNote) voiceNote.textContent = message;
+      chatShell.warning.setNotice("voice", message);
+      finishVoiceTurn();
+      return;
+    }
+    try { synth.cancel(); } catch (error) { /* nothing to cancel */ }
+    const utterance = new Utterance(spoken);
+    utterance.voice = voice;
+    utterance.lang = voice.lang || voiceLanguage;
+    utterance.onstart = () => { voiceSpeaking = true; renderVoiceControls(); };
+    const end = () => {
+      if (!voiceSpeaking) return;
+      voiceSpeaking = false;
+      renderVoiceControls();
+      finishVoiceTurn();
+    };
+    utterance.onend = end;
+    utterance.onerror = end;
+    voiceSpeaking = true;
+    renderVoiceControls();
+    // A synthesis engine that never reports completion must not hold listening hostage.
+    voiceSpeechGuard = setTimeout(end, Math.max(4000, spoken.length * 90));
+    try { synth.speak(utterance); } catch (error) { end(); }
+  };
+  attempt();
+}
+
+function stopVoiceSpeech() {
+  clearTimeout(voiceSpeechGuard);
+  voiceSpeechGuard = null;
+  voiceSpeaking = false;
+  voiceResumeListening = false;
+  try { voiceSynthesis()?.cancel?.(); } catch (error) { /* nothing to cancel */ }
+  renderVoiceControls();
+}
+
+// The run's completion is the only thing that may speak. A reply event stores its final
+// prose; `done` (or a non-streamed reply) is where the run is actually complete.
+function voiceRunSettled() {
+  if (replayingMessages) return;
+  const answer = voiceLastAnswer;
+  voiceLastAnswer = "";
+  voiceResumeListening = voiceKeepListening && !!recognition;
+  if (!answer) { finishVoiceTurn(); return; }
+  speakReply(answer);
+}
+
+function startVoiceListening() {
+  if (!recognition || recognizing || voiceSpeaking) return;
+  voicePrefix = input.value ? input.value + " " : "";
+  try { recognition.start(); } catch (error) { /* already started, or the browser refused */ }
+}
+
+function submitVoiceTranscript(text) {
+  if (!text.trim()) return;
+  if (composerBusy()) {
+    setStatus("Voice text left in the composer — a run is already active");
     return;
   }
-  recognition = new Recognition();
-  recognition.continuous = false;
-  recognition.interimResults = true;
-  recognition.lang = navigator.language || "en-US";
-  recognition.onstart = () => {
-    recognizing = true;
-    micButton.classList.add("listening", "active");
+  if (input.value !== text) { input.value = text; autosize(); }
+  chatShell.form.requestSubmit();
+}
+
+function setupVoice() {
+  const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  recognition = null;
+  if (voiceLangInput) {
+    voiceLangInput.value = voiceLanguage;
+    voiceLangInput.placeholder = defaultVoiceLanguage();
+  }
+  if (Recognition) {
+    recognition = new Recognition();
+    recognition.continuous = false;
+    recognition.interimResults = true;
+    recognition.lang = voiceLanguage;
+    recognition.onstart = () => { recognizing = true; renderVoiceControls(); };
+    const stop = () => { recognizing = false; renderVoiceControls(); };
+    recognition.onend = stop;
+    recognition.onerror = (event) => {
+      stop();
+      if (event && event.error && event.error !== "aborted") {
+        setStatus("Voice input stopped: " + event.error);
+      }
+    };
+    recognition.onresult = (event) => {
+      let transcript = "";
+      let finalTranscript = "";
+      const results = event.results || [];
+      for (let index = 0; index < results.length; index++) {
+        const result = results[index];
+        const piece = result && result[0] ? String(result[0].transcript || "") : "";
+        transcript += piece;
+        if (result && result.isFinal) finalTranscript += piece;
+      }
+      input.value = voicePrefix + transcript;
+      autosize();
+      const last = results[results.length - 1];
+      if (voiceKeepListening && finalTranscript.trim() && last && last.isFinal) {
+        recognition.stop();
+        submitVoiceTranscript(voicePrefix + finalTranscript.trim());
+      }
+    };
+  }
+  // The button is the listener's toggler; assigning the handler (rather than adding one)
+  // keeps a re-setup - the UI probe does one - from stacking a second handler on it.
+  micButton.onclick = () => {
+    if (voiceSpeaking) stopVoiceSpeech();
+    if (!recognition) return;
+    if (recognizing) { recognition.stop(); return; }
+    startVoiceListening();
   };
-  const stop = () => {
-    recognizing = false;
-    micButton.classList.remove("listening", "active");
-  };
-  recognition.onend = stop;
-  recognition.onerror = stop;
-  recognition.onresult = (event) => {
-    let transcript = "";
-    for (const result of event.results) transcript += result[0].transcript;
-    input.value = voicePrefix + transcript;
-    autosize();
-  };
-  micButton.addEventListener("click", () => {
-    if (recognizing) {
-      recognition.stop();
-    } else {
-      voicePrefix = input.value ? input.value + " " : "";
-      try { recognition.start(); } catch (error) { /* already started */ }
-    }
-  });
+  if (voiceSettingsButton && voiceBalloon) {
+    voiceSettingsButton.onclick = () => {
+      voiceBalloon.toggle();
+      voiceSettingsButton.setAttribute("aria-expanded", String(voiceBalloon.open));
+    };
+    voiceBalloon.onclose = () => voiceSettingsButton.setAttribute("aria-expanded", "false");
+  }
+  if (!voiceControlsWired) {
+    voiceControlsWired = true;
+    voiceSpeak?.addEventListener("change", () => {
+      voiceMuted = !voiceSpeak.checked;
+      voiceStorageSet(VOICE_MUTED_KEY, voiceMuted ? "1" : "0");
+      if (voiceMuted) stopVoiceSpeech();
+      renderVoiceControls();
+    });
+    voiceKeep?.addEventListener("change", () => {
+      voiceKeepListening = voiceKeep.checked;
+      voiceStorageSet(VOICE_KEEP_KEY, voiceKeepListening ? "1" : "0");
+      renderVoiceControls();
+    });
+    voiceLangInput?.addEventListener("input", () => {
+      const value = voiceLangInput.value.trim();
+      voiceLanguage = value || defaultVoiceLanguage();
+      voiceStorageSet(VOICE_LANG_KEY, value);
+      if (recognition) recognition.lang = voiceLanguage;
+      renderVoiceControls();
+    });
+  }
+  renderVoiceControls();
 }
 
 // ---- file append ---------------------------------------------------------
