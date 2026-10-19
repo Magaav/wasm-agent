@@ -55,6 +55,7 @@ bash -n "$root/scripts/termux/install-bundle.sh"
 bash -n "$root/scripts/termux/cross-build-android.sh"
 bash -n "$root/scripts/test-termux-update.sh"
 bash -n "$root/scripts/test-termux-bundle.sh"
+bash -n "$root/scripts/test-termux-release-fetch.sh"
 # The Android section of the README is where the one command lives: if the script it names
 # is renamed, the documented command must not keep pointing at nothing.
 grep -q 'scripts/termux/bootstrap.sh' "$root/README.md"
@@ -72,3 +73,7 @@ bash "$root/scripts/test-termux-update.sh"
 # refusal, the byte-for-byte backup and the switch. Neither suite can prove that a
 # cross-built Android binary runs; that is the device step.
 bash "$root/scripts/test-termux-bundle.sh"
+# And so does the published-release channel `wa update` now uses first: a real local bundle
+# served from file:// URLs, a real index, the hash refusal and the loud build fallback. It
+# uses no network, so it proves the channel's own logic and not the HTTPS transport.
+bash "$root/scripts/test-termux-release-fetch.sh"

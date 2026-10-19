@@ -1,0 +1,16 @@
+{
+  "schema": "wasm-agent-release-index",
+  "schema_version": 1,
+  "doc": "docs/release/RELEASE_INDEX.md",
+  "notes": "newest release first; one entry per published Android arm64 bundle; the empty array is the bootstrap state",
+  "trust_chain": [
+    "1. this file is fetched over HTTPS from the public repository; there is no token, because a phone that needed a credential to read a release could not update itself",
+    "2. one entry pins one bundle by sha256(bundle.manifest), the same value the operator used to paste into install-termux.sh --manifest-sha256",
+    "3. the downloaded asset must be exactly the entry's size, or the transfer is refused (download_truncated)",
+    "4. sha256(downloaded bundle/bundle.manifest) must equal manifest_sha256, or the download is refused (hash_mismatch) and nothing is installed",
+    "5. the bundle then goes through the same verification a hand-installed bundle does: bundle.manifest describes installed.sha256, installed.sha256 describes every member, every artefact hash is checked, the ELF machine and the aarch64-linux-android triple are read from the bytes, and the candidate is run once before it is switched in",
+    "6. the trust anchor is the HTTPS origin of this file plus the committed history of the repository; a hash that does not match is a refusal, never a fallback to building"
+  ],
+  "generated_utc": "2026-10-19T00:00:00Z",
+  "releases": []
+}
