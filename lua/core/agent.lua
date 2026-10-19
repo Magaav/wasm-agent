@@ -1595,7 +1595,13 @@ function M:run_body(text, images)
     -- A dropped LOCAL link is retried by default, with a visible wait budget, instead of failing
     -- the run: the request produced no answer and the network is expected to return. Every other
     -- transient keeps the smaller, opt-in policy above.
-    local connection_lost = (not ok) and provider.is_connection_lost(tostring(result))
+    -- Two shapes of "the answer never arrived": a dropped link (a transport error) and a stream
+    -- that ended early having emitted nothing. They are the same situation with different
+    -- symptoms - measured: `provider_incomplete_stream` ended a run that should have retried -
+    -- so both take the patient default policy. A stream that already showed text or a tool call
+    -- does not: its partial output is preserved and it is not silently re-asked.
+    local connection_lost = ((not ok) and provider.is_connection_lost(tostring(result)))
+      or (ok and provider.is_lost_stream(result))
     local transient_limit = connection_lost and provider.connection_retries() or provider.transient_retries()
     local transient_attempt, waited_ms = 0, 0
     local wait_budget_ms = connection_lost and (provider.connection_wait_seconds() * 1000) or nil
