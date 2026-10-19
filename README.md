@@ -249,6 +249,117 @@ nproc
 
 No release is assembled, switched or installed, and node state is not read or written.
 
+#### When the phone cannot compile it: a prebuilt bundle
+
+The ladder above is the right first answer. On one measured device it ran out of answers:
+all three rungs died inside rustc with `(signal: 11, SIGSEGV: invalid memory reference)`,
+`cranelift_codegen` was the last crate in every log, and that same dependency at the same
+version had already built and installed successfully on that phone. The code did not
+change; the device's toolchain and memory state did. So the runtime can also be built **on
+a desktop** and installed **from bytes** - the phone then never compiles cranelift at all.
+
+Build the bundle on any desktop (Linux, macOS, or bash on Windows) with the Android NDK:
+
+```sh
+rustup target add aarch64-linux-android
+# Android NDK r27d (NDK 27.3.13750724). Official archive and checksum from Google's
+# repository2-3.xml: windows 781506724 bytes sha1 56607cbccd3642d4a1991f6bb3114a00f884f426,
+# linux 663956036 bytes sha1 22105e410cf29afcf163760cc95522b9fb981121. The sha256 below was
+# computed from the windows archive this repository was verified with.
+curl -LO https://dl.google.com/android/repository/android-ndk-r27d-windows.zip   # or -linux / -darwin
+printf '%s  %s\n' 82094f53e66a76b6a9ec4fc35a5076091a92de3b91d13c5d4a7cfdb226304c59 \
+  android-ndk-r27d-windows.zip | sha256sum -c -
+unzip -q android-ndk-r27d-windows.zip
+bash scripts/termux/cross-build-android.sh --ndk "$PWD/android-ndk-r27d"
+```
+
+`--check` prints the resolved toolchain and the exact command without building anything.
+The script sets exactly these variables and makes exactly this one cargo call:
+
+```
+CC_aarch64_linux_android                  <ndk>/toolchains/llvm/prebuilt/<host>/bin/clang
+CFLAGS_aarch64_linux_android              --target=aarch64-linux-android21
+AR_aarch64_linux_android                  <ndk>/toolchains/llvm/prebuilt/<host>/bin/llvm-ar
+CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER <ndk>/toolchains/llvm/prebuilt/<host>/bin/clang
+RUSTFLAGS                                 -C link-arg=--target=aarch64-linux-android21
+
+cargo build --release --locked --target aarch64-linux-android \
+  --manifest-path rust/Cargo.toml -p wa-host --bin wa
+```
+
+Three choices are deliberate. `clang --target=` is used rather than the NDK's
+`aarch64-linux-android<api>-clang` wrapper, because the wrappers are shell scripts or
+`.cmd` files that a native desktop cargo cannot exec on every host, while one clang driver
+with an explicit `--target` works the same everywhere (the NDK clang finds its own sysroot
+next to itself). None of the phone's memory knobs are set - `CARGO_BUILD_JOBS`,
+`RUST_MIN_STACK` and codegen units exist for a memory-starved compiler, and this is a
+build host, so it builds with cargo's own defaults exactly like any non-phone host in the
+ladder. `--locked` is used because a bundle must be the tree, not the tree plus whatever
+dependency resolution felt like that day. Nothing is downloaded implicitly: if the local
+rustc has no Android std the script refuses and names `rustup target add`, the Rust form of
+this repository's `GOTOOLCHAIN=local` rule.
+
+What comes out (nothing of it is versioned):
+
+```
+build/android-bundle/
+  wa-android-bundle/            the closure the phone installs:
+    wa                          the aarch64 Android runtime
+    bin/wa  bin/wa-update  bin/release-lib.sh
+    ui/index.html ... icon-512.png    the nine assets the launcher serves
+    LICENSE  installed.txt  installed.sha256
+    bundle.manifest             what produced these bytes
+  wa-android-bundle.tar.gz      the same bundle plus the installer scripts, for the phone
+  wa-android-bundle.tar.gz.sha256
+  bundle.manifest.sha256        the one hash to paste (also printed at the end)
+```
+
+`bundle.manifest` records the target triple, the ELF machine, the Android API level, the
+source commit and tree, the built-at time, the host triple, the rustc version and commit,
+the NDK version and the archive it came from, `build_profile=cross-android`, the release
+manifest's own sha256, and one `artefact <sha256> <path>` line per file. That gives one
+chain: `sha256(bundle.manifest)` -> `release_manifest_sha256` -> `installed.sha256` ->
+every byte, which is why a single pasted hash pins the whole bundle.
+
+Install it on the phone. Two lines, no compiler, no network, one `adb push` beforehand:
+
+```sh
+# from the desktop:  adb push build/android-bundle/wa-android-bundle.tar.gz /sdcard/Download/
+cd ~ && rm -rf wa-android-bundle && tar -xzf /sdcard/Download/wa-android-bundle.tar.gz
+bash ~/wa-android-bundle/scripts/install-termux.sh --bundle ~/wa-android-bundle/bundle --manifest-sha256 <sha>
+```
+
+That is the same installer and the same release rules as the source path, with the same
+guarantees as `--adopt-existing`, and it refuses by name rather than guessing:
+`manifest_sha256_invalid` (not a 64-character hex sha256), `bundle_missing`,
+`bundle_manifest_sha256_mismatch` (a partial copy, a modified bundle, or the wrong hash),
+`bundle_incomplete` (a required file is absent), `bundle_modified` (a member changed, was
+added, or was truncated), `bundle_member_mismatch` (a file disagrees with its per-artefact
+hash), `wrong_abi` and `wrong_target_triple` (the ELF machine is read from the header, not
+the filename), `bundle_manifest_mismatch` (the records contradict each other),
+`installed_release_modified`, `state_inside_install`, `backup_conflict`, and the Termux
+guards (`run this inside the Termux app`, `android_required`, arm64 only). The current
+installation is copied aside byte-for-byte, verified file by file against a manifest, and
+kept under its own commit as the rollback release, so `wa update --rollback` works offline.
+`installed.txt` records `build_profile=cross-android`, `source_provenance=cross-built-android`,
+the bundle's manifest hash, the NDK and the rustc version; `wa doctor` prints all of that.
+A release also records the name it was switched in under (`release_key`), which is what lets
+a source-built and a cross-built release **of the same revision** replace each other and roll
+back to each other instead of one being dismissed as already active. `~/.wasm-agent` is never
+read, copied or written, and `wa setup` is never run.
+
+**Honest limit:** a cross-built Android binary is verified on the desktop by hashes and by
+its ELF machine, and on the phone by the same hash chain, the same ELF check, and the
+installer's candidate probe (the new runtime is executed once against a scratch home before
+it is switched in). That it really runs is proven only when it runs **on the phone**, which
+is the coordinator's device step and not something this repository can claim from a
+fixture. The fixture suite (`scripts/test-termux-bundle.sh`) exercises the hash chain, every
+refusal above, the backup, the switch and the rollback with a fabricated ELF and announces
+what it cannot represent on a non-Android host - 41 checks plus one announced host skip on a
+Windows fixture host. One more limit is deliberate: `wa update` on
+the phone still builds locally, so until the updater learns to fetch a bundle, a
+bundle-installed node is updated by installing the next bundle.
+
 ### Keeping the preview current: `wa update`, and the one-time bootstrap
 
 An installation that already carries `wa update` stays current with two commands

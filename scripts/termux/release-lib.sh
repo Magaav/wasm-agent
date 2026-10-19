@@ -58,12 +58,23 @@ rl_sha256() { sha256sum "$1" | cut -d' ' -f1; }
 # The manifest is the file list and hashes of a release, sorted for stability. It is what
 # makes "the installed release is unmodified" and "the candidate is exactly the built
 # closure" checkable at all: without it a switcher compares a path, not bytes.
+#
+# Files that are not members of the closure it describes: the manifest itself, and anything
+# named in RL_MANIFEST_EXCLUDE. The cross-build bundle needs the second one - it ships
+# `bundle.manifest`, the envelope that describes the closure, next to the closure - and a
+# phone-built or updater-built release sets nothing here, so it hashes exactly as before.
+RL_MANIFEST_EXCLUDE=
+
 rl_manifest() { # <release_dir> <outfile>
   _rl_d=$1
   _rl_o=$2
   (
     cd "$_rl_d" || exit 1
-    find . -type f ! -name installed.sha256 -print | sed 's|^\./||' | LC_ALL=C sort |
+    set -- -type f ! -name installed.sha256
+    for _rl_x in $RL_MANIFEST_EXCLUDE; do
+      set -- "$@" ! -name "$_rl_x"
+    done
+    find . "$@" -print | sed 's|^\./||' | LC_ALL=C sort |
       while IFS= read -r _rl_f; do
         printf '%s  %s\n' "$(sha256sum "$_rl_f" | cut -d' ' -f1)" "$_rl_f"
       done
@@ -99,19 +110,25 @@ rl_elf_abi() { # <file>
   esac
 }
 
-rl_write_installed() { # <dest_file> <commit> <remote> <previous_sha|-> <installed_by> [build_profile]
+rl_write_installed() { # <dest_file> <commit> <remote> <previous_sha|-> <installed_by> [build_profile] [source_provenance] [release_key]
   {
     printf 'source_commit=%s\n' "$2"
     printf 'source_remote=%s\n' "$3"
     printf 'installed_utc=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     printf 'previous_commit=%s\n' "${4:--}"
     printf 'installed_by=%s\n' "$5"
-    printf 'source_provenance=source-built-termux\n'
+    # Where the bytes came from. `source-built-termux` is a build on this phone; a prebuilt
+    # bundle built on a desktop records `cross-built-android` instead, because "this runtime
+    # was not compiled here" is a fact the operator needs later.
+    printf 'source_provenance=%s\n' "${7:-source-built-termux}"
     # Which rung of the build ladder produced the runtime that is in this release: a phone
     # whose optimized build would not finish ends up running the debug/unoptimized one, and
     # that has to be readable later (`wa doctor` reads exactly this line). Absent in a
     # release from before this line existed, which is not an error.
     if [ -n "${6:-}" ]; then printf 'build_profile=%s\n' "$6"; fi
+    # The name this release is switched in under, when it is not simply its commit: a
+    # prebuilt bundle records it so that two releases of one commit stay distinguishable.
+    if [ -n "${8:-}" ]; then printf 'release_key=%s\n' "$8"; fi
   } > "$1"
 }
 
@@ -653,31 +670,110 @@ rl_verify_release() { # <release_dir> [strict]
   return 0
 }
 
+# Everything a PREBUILT bundle must prove before its bytes may be treated as a release.
+# The hash the operator pasted is checked by the caller (it names this bundle's
+# `bundle.manifest`); this function walks the rest of the chain and refuses on the first
+# broken link, naming it:
+#
+#   --manifest-sha256  ==  sha256(bundle.manifest)          (checked by the installer)
+#   bundle.manifest's `release_manifest_sha256` == sha256(installed.sha256)
+#   installed.sha256   ==  every file in the bundle, and nothing else
+#   every `artefact <sha256> <path>` line == the bytes of that file
+#   `wa` reads as an aarch64 ELF, and the manifest agrees about its machine and triple
+#
+# The Android/arm64 triple is required here on purpose: the phone can only run that, so a
+# bundle for another triple is not a candidate, whatever its filename says.
+rl_bundle_verify() { # <bundle_dir>
+  _rl_b=$1
+  [ -d "$_rl_b" ] || { rl_warn "bundle_missing: $_rl_b is not a directory"; return 1; }
+  for _rl_f in bundle.manifest installed.sha256 wa bin/wa bin/wa-update bin/release-lib.sh \
+                installed.txt LICENSE ui/index.html; do
+    [ -e "$_rl_b/$_rl_f" ] || { rl_warn "bundle_incomplete: missing $_rl_b/$_rl_f"; return 1; }
+  done
+  for _rl_a in $RL_UI_ASSETS; do
+    [ -e "$_rl_b/ui/$_rl_a" ] || { rl_warn "bundle_incomplete: missing $_rl_b/ui/$_rl_a"; return 1; }
+  done
+  _rl_claim_triple=$(rl_get "$_rl_b/bundle.manifest" target_triple)
+  [ -n "$_rl_claim_triple" ] ||
+    { rl_warn "bundle_manifest_incomplete: $_rl_b/bundle.manifest records no target_triple"; return 1; }
+  [ "$_rl_claim_triple" = aarch64-linux-android ] ||
+    { rl_warn "wrong_target_triple: the bundle was built for $_rl_claim_triple, this node needs aarch64-linux-android"; return 1; }
+  _rl_rm=$(rl_get "$_rl_b/bundle.manifest" release_manifest_sha256)
+  [ -n "$_rl_rm" ] ||
+    { rl_warn "bundle_manifest_incomplete: $_rl_b/bundle.manifest records no release_manifest_sha256"; return 1; }
+  _rl_actual=$(rl_sha256 "$_rl_b/installed.sha256")
+  [ "$_rl_rm" = "$_rl_actual" ] ||
+    { rl_warn "bundle_manifest_mismatch: bundle.manifest records release_manifest_sha256=$_rl_rm but installed.sha256 is $_rl_actual"; return 1; }
+  if ! rl_manifest_verify "$_rl_b"; then
+    rl_warn "bundle_modified: $_rl_b/installed.sha256 does not describe the files in this bundle (a member was changed, added or is missing)"
+    return 1
+  fi
+  _rl_seen=0
+  while read -r _rl_tag _rl_hash _rl_path; do
+    [ "$_rl_tag" = artefact ] || continue
+    _rl_seen=$((_rl_seen + 1))
+    if [ ! -f "$_rl_b/$_rl_path" ]; then
+      rl_warn "bundle_incomplete: bundle.manifest lists artefact $_rl_path but it is missing from $_rl_b"
+      return 1
+    fi
+    _rl_h=$(rl_sha256 "$_rl_b/$_rl_path")
+    [ "$_rl_h" = "$_rl_hash" ] ||
+      { rl_warn "bundle_member_mismatch: $_rl_path hashes to $_rl_h, bundle.manifest records $_rl_hash"; return 1; }
+  done < "$_rl_b/bundle.manifest"
+  [ "$_rl_seen" -gt 0 ] ||
+    { rl_warn "bundle_manifest_incomplete: $_rl_b/bundle.manifest lists no artefacts"; return 1; }
+  _rl_abi=$(rl_elf_abi "$_rl_b/wa")
+  [ "$_rl_abi" = aarch64 ] ||
+    { rl_warn "wrong_abi: $_rl_b/wa is $_rl_abi, this node needs an aarch64 ELF"; return 1; }
+  _rl_claim=$(rl_get "$_rl_b/bundle.manifest" elf_machine)
+  if [ -n "$_rl_claim" ] && [ "$_rl_claim" != "$_rl_abi" ]; then
+    rl_warn "bundle_manifest_mismatch: bundle.manifest claims elf_machine=$_rl_claim but $_rl_b/wa is $_rl_abi"
+    return 1
+  fi
+  return 0
+}
+
 # Put a release at the active path. Two same-filesystem renames with a recorded intent:
 # a crash between them is recoverable (see rl_recover), and the previous release is kept
-# under its own commit in $RL_RELEASES, which is the rollback.
-rl_activate() { # <target_sha>
+# under its own name in $RL_RELEASES, which is the rollback.
+#
+# WHICH RELEASE IS ACTIVE is the NAME it was switched in under, not just its source commit.
+# Two releases can carry the same commit and still be different bytes - one built on the
+# phone, one cross-built on a desktop and installed from a prebuilt bundle - and those must
+# be able to replace each other, and roll back to each other, without either being silently
+# thrown away as "already active". A prebuilt bundle records that name as `release_key` in
+# installed.txt; every other path records no key, and then the commit IS the key, so a
+# phone-built release behaves exactly as it did before this line existed.
+rl_activate() { # <release_key>
   _rl_target=$1
   [ -d "$RL_RELEASES/$_rl_target" ] || rl_fail "release_missing: $RL_RELEASES/$_rl_target"
   _rl_cur=$(rl_get "$RL_INSTALL/installed.txt" source_commit)
   [ -n "$_rl_cur" ] || rl_fail "installed_revision_unknown: $RL_INSTALL/installed.txt has no source_commit"
-  if [ "$_rl_cur" = "$_rl_target" ]; then rl_note "termux-update: $_rl_target is already active"; return 0; fi
+  _rl_cur_key=$(rl_get "$RL_INSTALL/installed.txt" release_key)
+  [ -n "$_rl_cur_key" ] || _rl_cur_key=$_rl_cur
+  if [ "$_rl_cur_key" = "$_rl_target" ]; then
+    rl_note "termux-update: $_rl_target is already active"
+    return 0
+  fi
   mkdir -p -- "$RL_RELEASES" "$RL_UPDATE" || rl_fail "activate_failed: cannot create $RL_RELEASES"
   chmod 700 "$RL_UPDATE" 2>/dev/null || true
-  if [ -d "$RL_RELEASES/$_rl_cur" ]; then
+  if [ -d "$RL_RELEASES/$_rl_cur_key" ]; then
     _rl_retire="$RL_UPDATE/.trash.$$"
   else
-    _rl_retire="$RL_RELEASES/$_rl_cur"
+    # The release being replaced is not in $RL_RELEASES under its own key - it was switched
+    # in from there, or it is a bundle release whose key is not its commit. Keep it under
+    # that key, so a rollback can be rolled forward again instead of destroying it.
+    _rl_retire="$RL_RELEASES/$_rl_cur_key"
   fi
-  printf '%s %s\n' "$_rl_cur" "$_rl_target" > "$RL_UPDATE/switch.intent"
-  mv -- "$RL_INSTALL" "$_rl_retire" || rl_fail "switch_failed: could not set aside $_rl_cur"
+  printf '%s %s\n' "$_rl_cur_key" "$_rl_target" > "$RL_UPDATE/switch.intent"
+  mv -- "$RL_INSTALL" "$_rl_retire" || rl_fail "switch_failed: could not set aside $_rl_cur_key"
   if ! mv -- "$RL_RELEASES/$_rl_target" "$RL_INSTALL"; then
     mv -- "$_rl_retire" "$RL_INSTALL"
     rl_fail "switch_failed: could not install $_rl_target; the previous release is back in place"
   fi
   if [ "$_rl_retire" = "$RL_UPDATE/.trash.$$" ]; then rm -rf -- "$_rl_retire"; fi
   rm -f -- "$RL_UPDATE/switch.intent"
-  rl_note "termux-update: active release $_rl_cur -> $_rl_target"
+  rl_note "termux-update: active release $_rl_cur_key -> $_rl_target"
 }
 
 # A switch that was interrupted leaves the intent behind and the active path empty. Put the

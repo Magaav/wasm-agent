@@ -56,6 +56,26 @@ passing checks on a non-Android host, which announces what it skips; a real aarc
 cargo build, real candidate execution, real `$PREFIX` symlinks and the phone's
 actual state layout remain unproved. See the README Android section.
 
+## Android prebuilt bundle install — 2026-10-19 (cross-built; device execution unproved)
+
+The phone's compiler ran out of answers: all three rungs of the on-device build ladder died
+inside rustc (`signal: 11, SIGSEGV`) with `cranelift_codegen` last in every log, at ~2.7 GB
+free, on the same dependency and version that had installed there before. The arm64 runtime
+is now cross-built on a desktop with Android NDK r27d
+(`scripts/termux/cross-build-android.sh`: `--target aarch64-linux-android`, NDK clang as
+CC/linker, `llvm-ar`, `--locked`, no implicit toolchain download) and installed on the phone
+from a bundle: `install-termux.sh --bundle DIR --manifest-sha256 SHA` verifies the pasted
+hash, the release manifest, every member and per-artefact hash, and the ELF machine; refuses
+a wrong-ABI/wrong-triple/partial/modified bundle; keeps the current installation as a
+verified byte-for-byte rollback release; switches atomically; records
+`build_profile=cross-android` so `wa doctor` says where the runtime came from; and needs no
+compiler, no network and never touches `~/.wasm-agent`. Two phone-side lines after one
+`adb push`. Fixtures: 37 checks plus 1 announced host skip. A cross-built Android binary is
+verified by hash and ELF machine here and executed only by the installer's candidate probe;
+real execution on the phone, a real `$PREFIX` symlink and the phone's own switch remain
+unproved until the coordinator's device run. `wa update` on the phone still builds locally.
+See the README Android section.
+
 ## WhatsApp outbound delivery/read receipts — 2026-10-17 (source; live arrival unproved)
 
 Our own outbound operator text now carries a durable, honestly-caused delivery/read
