@@ -288,10 +288,24 @@ elseif command == "subscription" then
   -- module, and `scripts/check-embedded-lua-closure.mjs` fails the gate if this line ever points
   -- outside the registry again.
   os.exit(dofile("lua/core/openai_sub_login.lua").run(args))
+elseif command == "capabilities" then
+  -- The node's own capability inventory, as data. The list comes from the host registry that
+  -- *registers* the capabilities (`rust/wa-host/src/capabilities.rs`), so this verb cannot disagree
+  -- with what the node can actually do; `docs/HOST.md` is checked against that registry by a test.
+  -- `--json` is the machine form (what the sandbox's capabilities() answers with), the default is
+  -- one line per capability for a reader.
+  local inventory = dofile("lua/core/capability_inventory.lua")
+  local text = inventory.json()
+  if not text then
+    print(json.encode({ error = "capability_inventory_unavailable" }))
+    os.exit(1)
+  end
+  if args[2] == "--json" then print(text) else print(inventory.text()) end
 elseif command == "help" then
   print("wa: chat [--continue|--session <id>] [prompt]  |  remember <text> | recall <query>")
   print("    memories | forget <id> | search <query> | conversation <id> | conversations")
   print("    sessions | skills | stats | status | nodes | call <node> <capability> [args-json]")
+  print("    capabilities [--json]  what this node can do: every registered host capability")
   print("    resume [--list] [--session <id>] [prompt]   see and continue an unfinished thread")
   print("    paths  where this node keeps its files, and the config file it would read")
   print('    bind [service|status|renew|run] | unbind | nodes pending | accept <pairing-code>')

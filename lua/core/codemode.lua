@@ -5,6 +5,8 @@ local contract=dofile('lua/core/json_contract.lua')
 local output=dofile('lua/core/tool_output.lua')
 local telemetry=dofile('lua/core/telemetry.lua')
 local presentation=dofile('lua/core/codemode_view.lua')
+-- The node's own capability inventory: the same registry the CLI prints and `/health` digests.
+local inventory=dofile('lua/core/capability_inventory.lua')
 local M={}
 local forbidden={wave_autoflush=true,codemode=true,tool_call=true,tool_search=true,subagent=true,integrate=true,session_worktree=true,
  session=true,sessions=true,resume_session=true,session_debug=true,session_fixture=true,session_many=true,search_messages=true,search_messages_many=true,operation=true,
@@ -27,7 +29,10 @@ function M.run(memory,args,role,ctx,catalog,current_catalog,dispatch,execution)
    descriptors[#descriptors+1]={name=f.name,jsName=js,description=f.description}
   end
  end
- local globals={{name='searchTools',spread=true},{name='describeTool',spread=false},{name='showCall',spread=false}}
+ local globals={{name='searchTools',spread=true},{name='describeTool',spread=false},{name='showCall',spread=false},
+  -- Introspection of what this node can do, for a workflow that would otherwise guess. They read
+  -- the host capability registry and nothing else: no authority moves, no effect is admitted.
+  {name='capabilities',spread=false},{name='describe',spread=false}}
  local selected={}
  local store_key='codemode-store.v1:'..scope
  local raw=memory.meta_get(store_key);local store=raw and json.decode(raw) or {}
@@ -90,6 +95,11 @@ function M.run(memory,args,role,ctx,catalog,current_catalog,dispatch,execution)
     elseif call.name=='describeTool' then
      local name=type(params)=='string' and params or params[1]
      local def=definitions[name];value=name=='showCall' and presentation.help or def and {name=def.name,description=def.schema['function'].description,parameters=def.schema['function'].parameters,execution=execution(def.name)} or nil;success=true
+    elseif call.name=='capabilities' or call.name=='describe' then
+     -- The host.* inventory, exactly as `wa capabilities --json` prints it and `/health`
+     -- digests it. Read-only metadata over the registry; it admits no call, changes no ceiling.
+     value,success=inventory.global(call.name,params)
+     if value==nil then value={error='codemode_global_not_available'};success=false end
     else value={error='codemode_global_not_available'};success=false end
    elseif call.target=='tool' then
     local def=definitions[call.name]

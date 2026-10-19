@@ -2,6 +2,7 @@
 //!
 //! The agent logic lives in Lua (`lua/`); this host only provides capabilities
 //! (sqlite, http, wasmtime, sha256, uuid, time, files). No Python anywhere.
+mod capabilities;
 mod client_bridge;
 mod graph;
 mod host;
@@ -291,82 +292,10 @@ fn main() {
     let host_ptr = (&*host) as *const Host as *mut c_void;
     let mut lua = Lua::new();
     lua.push_table();
-    lua.register_with_upvalue("sql_exec", host::sql_exec, host_ptr);
-    lua.register_with_upvalue("sql_query", host::sql_query, host_ptr);
-    lua.register("db_ready", host::db_ready);
-    lua.register("mark_db_ready", host::mark_db_ready);
-    lua.register("getenv", host::getenv);
-    lua.register("paths", host::paths);
-    lua.register("canonical_path", host::canonical_path);
-    lua.register("platform", host::platform);
-    lua.register("grep", host::grep);
-    lua.register("list_dir", host::list_dir);
-    lua.register("graph_index", graph::graph_index);
-    lua.register("graph_query", graph::graph_query);
-    lua.register("graph_search", graph::graph_search);
-    lua.register("graph_source", graph::graph_source);
-    lua.register("graph_sources", graph::graph_sources);
-    lua.register("graph_notify", graph::graph_notify);
-    lua.register("graph_explain", graph::graph_explain);
-    lua.register("graph_path", graph::graph_path);
-    lua.register("graph_caps", graph::graph_caps);
-    lua.register("graph_stats", graph::graph_stats);
-    lua.register("graph_overview", graph::graph_overview);
-    lua.register("graph_impact", graph::graph_impact);
-    lua.register("graph_status", graph::graph_status);
-    lua.register("graph_patch_audit", graph::graph_patch_audit);
-    lua.register("sha256", host::sha256);
-    lua.register("uuid", host::uuid);
-    lua.register("read_file", host::read_file);
-    lua.register("path_kind", host::path_kind);
-    lua.register("isatty", host::stream_is_terminal);
-    lua.register("read_image_base64", host::read_image_base64);
-    lua.register("write_file", host::write_file);
-    lua.register("exec", host::exec);
-    lua.register("operation", host::operation);
-    lua.register("jobs", host::jobs);
-    lua.register("subagent", host::subagent);
-    lua.register("enqueue_completion", host::enqueue_completion);
-    lua.register("resource", host::resource);
-    lua.register("quickjs", quickjs::capability);
-    lua.register("run_cancelled", host::run_cancelled);
-    lua.register("sleep", host::sleep);
-    lua.register("node_identity", host::node_identity);
-    lua.register("binding_state", host::binding_state);
-    lua.register("binding_transport", host::binding_transport);
-    lua.register("sign", host::sign);
-    lua.register("verify", host::verify);
-    lua.register_with_upvalue("client", host::client, host_ptr);
-    lua.register_with_upvalue("client_status", host::client_status, host_ptr);
-    lua.register("http", host::http);
-    lua.register("http_stream", host::http_stream);
-    // A second streaming dialect: the subscription route reads its own SSE event names in Lua,
-    // so the capability hands over response lines and the protocol stays the caller's.
-    lua.register("http_sse", host::http_sse);
-    lua.register("beat", host::beat);
-    // The one capability that draws: the CLI's status line keeps moving while the interpreter
-    // is blocked inside a call, which nothing on the Lua side can do for itself.
-    lua.register("ticker", host::ticker);
-    lua.register("relay", host::relay);
-    lua.register_with_upvalue("plugins", host::plugins, host_ptr);
-    lua.register_with_upvalue("invoke", host::invoke, host_ptr);
-    lua.register("stream", host::stream);
-    lua.register("now", host::now);
-    lua.register("monotonic_ms", host::monotonic_ms);
-    lua.register("runtime_info", host::runtime_info);
-    lua.register("system_resources", host::system_resources);
-    // The console's own size: `COLUMNS` is a shell variable and usually absent, so the width a
-    // terminal has is not something the Lua side can learn for itself.
-    lua.register("terminal_size", host::terminal_size);
-    // The reader's own input: it is read on a thread, so a line typed while a run is in flight is
-    // still there when the run ends instead of being echoed into nothing.
-    lua.register("input_start", host::input_start);
-    lua.register("input_editor", host::input_editor);
-    lua.register("terminal_write", host::terminal_write);
-    lua.register("input_take", host::input_take);
-    lua.register("input_stop", host::input_stop);
-    lua.register("exec_timeout", host::exec_timeout);
-    lua.register("log", host::log);
+    // Every `host.*` function comes from the one registry in `capabilities.rs`. Registration and
+    // the inventory are the same act: a capability this list does not name cannot be called, so
+    // the CLI, `/health` and the codemode sandbox cannot drift from what is actually registered.
+    capabilities::register(&lua, host_ptr);
     lua.set_global("host");
 
     lua.push_table();
