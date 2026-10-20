@@ -23,8 +23,8 @@ local child_tree=space..'/child'
 local install=assert(getenv('WA_INSTALL_DIR'),'scratch install required: WA_INSTALL_DIR')
 local requests_dir=paths.config()..'/sentinel/requests'
 assert(host.path_kind(space)=='missing','fresh scratch required: '..space)
-check(not requests_dir:find(getenv('LOCALAPPDATA') or '\1',1,true),'the request box is not the live one')
-check(not requests_dir:lower():find('/wasm-agent/sentinel/requests'),'the request box is the scratch home')
+check(requests_dir:sub(1,#home)==home,'the request box is inside the scratch home, never the live one')
+check(requests_dir:sub(-17)=='sentinel/requests','the request box is the sentinel drop-box path')
 
 local function write(path,text) assert(host.write_file(path,text),'write '..path) end
 local function sh(command,cwd,seconds)
