@@ -220,14 +220,20 @@ fn the_node_line_is_up_down_port_and_pid_without_the_health_document() {
 /// from exactly this text, which is why the words are asserted here.
 #[test]
 fn the_sentinel_line_is_up_down_pid_and_says_it_has_no_port() {
-    let up = sentinel_line(Some(77));
+    let up = sentinel_line(true, Some(77), "");
     assert!(up.starts_with("sentinel:  up"), "{up}");
     assert!(up.contains("watching (pid 77)"), "{up}");
     assert!(up.contains("no port of its own"), "{up}");
-    let down = sentinel_line(None);
+    let down = sentinel_line(false, None, "the lifetime lock is free and no pid answers");
     assert!(down.starts_with("sentinel:  down"), "{down}");
     assert!(down.contains("not running"), "{down}");
-    for line in [&up, &down] {
+    // The reason is the fact that was missing when six deploys refused a live watcher: "not running" alone
+    // says nothing about which evidence was absent.
+    assert!(down.contains("the lifetime lock is free"), "{down}");
+    let legacy = sentinel_line(true, Some(4242), "a build that predates the lock");
+    assert!(legacy.contains("watching (pid 4242)"), "{legacy}");
+    assert!(legacy.contains("predates the lock"), "{legacy}");
+    for line in [&up, &down, &legacy] {
         assert!(!line.contains('{'), "no JSON in a status line: {line}");
         assert_eq!(line.lines().count(), 1, "one fact, one line: {line:?}");
     }

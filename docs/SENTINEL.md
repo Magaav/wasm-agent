@@ -582,6 +582,14 @@ wa-sentinel restart  # replace the running image: the manager's restart when a u
 wa-sentinel once     # handle the box once and exit - for tests and for cron
 ```
 
+The watcher line is decided by the **lifetime lock**, not by a pid lookup: the lock is what only `watch`
+holds and what `start` already refuses a duplicate on. `status` reports `up watching (pid N)` when that
+lock is held, and appends in parentheses whatever it could not prove - `down not running (<why>)` names
+whether the lock was free or a pid failed to answer. Before 2026-10-20 the line required opening the
+watcher's process with `SYNCHRONIZE`: a deploy's own child could not, so a live watcher (pid 8528, lock
+held, requests served) read `down`, and six deploys refused with "the sentinel did not start watching"
+while it was watching.
+
 It is started by the installer. On a machine that runs a node for other people, run it under the
 service manager alongside the node — it is the thing that has to survive the node, so it should not be
 a child of it.
