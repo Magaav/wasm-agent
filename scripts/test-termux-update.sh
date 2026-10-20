@@ -212,6 +212,22 @@ export WA_TERMUX_UPDATE_DIR=$updated
 export WA_TERMUX_CARGO=$fake_cargo
 export WA_TERMUX_HOST_PROBES=0
 
+# `wa update` now looks for a PUBLISHED RELEASE first (releases/index.json on main). This
+# suite is about the other rung - the on-device build ladder, which now runs only as the
+# fallback - so it points the updater at a local, EMPTY fixture index: no release is
+# published for the fake commits below, which is exactly the condition that selects the
+# fallback, and it is the loud one (the output says the device cannot compile this
+# workspace). No network is used by this suite.
+{
+  printf '%s\n' '{'
+  printf '%s\n' '  "schema": "wasm-agent-release-index",'
+  printf '%s\n' '  "schema_version": 1,'
+  printf '%s\n' '  "releases": []'
+  printf '%s\n' '}'
+} > "$work/index.json"
+export WA_TERMUX_RELEASE_ALLOW_LOCAL=1
+export WA_TERMUX_RELEASE_INDEX_URL="file://$work/index.json"
+
 updater="$install/bin/wa-update"
 # Every update goes through the launcher, exactly as the operator runs it. The launcher is
 # a copy kept OUTSIDE the prefix: on this host a shell cannot move a directory that holds
