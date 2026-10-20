@@ -687,6 +687,32 @@ UPGRADE_HASH="$(sha256sum < "$INSTALL_DIR/scripts/upgrade.sh" 2>/dev/null | awk 
 [ -n "$UPGRADE_HASH" ] || UPGRADE_HASH=missing
 record_installed
 
+ship_file() { # source destination what
+  local source="$1" destination="$2" what="$3" staged
+  cmp -s "$source" "$destination" && return 0
+  mkdir -p "$(dirname "$destination")" || fail "node installed, but could not create $(dirname "$destination")"
+  staged="$destination.ship.$$"
+  cp -f "$source" "$staged" || { rm -f "$staged"; fail "node installed, but could not stage $what"; }
+  if mv -f "$staged" "$destination" && cmp -s "$source" "$destination"; then
+    return 0
+  fi
+  rm -f "$staged"
+  fail "node installed, but could not ship $what"
+}
+
+# Ship this script BEFORE the sentinel proof, not after it. The comment that used to sit beside this block
+# says a deploy "has to leave the next one able to run with no human at a shell" - and it was placed thirty
+# lines below the one step that can refuse. MEASURED 2026-10-20: the installed copy read the status line by
+# field position (`$2=="watching"`), the line grew an `up`, so the proof found no pid and refused AFTER the
+# node was installed; the parser that reads the line by meaning was already in the tree (7f1300df) and could
+# never arrive, because shipping it was the step the refusal skipped. Nine deploys, one afternoon. A deploy
+# that fails its proof still leaves the next one able to read the line.
+DEPLOY_SRC="$ROOT/scripts/deploy.sh"
+[ -f "$DEPLOY_SRC" ] || DEPLOY_SRC="$0"
+if [ -f "$DEPLOY_SRC" ]; then
+  ship_file "$DEPLOY_SRC" "$INSTALL_DIR/scripts/deploy.sh" "deploy.sh beside the binary"
+fi
+
 # Replacing an executable file does not replace the already-running process.
 # Even when the copy succeeds on Windows, a watcher can keep executing the old
 # image indefinitely. Respect an intentionally stopped watcher; restart only
@@ -802,18 +828,6 @@ record_installed
 # for a running binary (upgrade.sh's sentinel swap): the interpreter keeps the bytes it already opened, the
 # install gets the new file, and no reader is interrupted. MEASURED on this machine (Git bash on Windows),
 # the rename form runs the rest of the script.
-ship_file() { # source destination what
-  local source="$1" destination="$2" what="$3" staged
-  cmp -s "$source" "$destination" && return 0
-  mkdir -p "$(dirname "$destination")" || fail "node installed, but could not create $(dirname "$destination")"
-  staged="$destination.ship.$$"
-  cp -f "$source" "$staged" || { rm -f "$staged"; fail "node installed, but could not stage $what"; }
-  if mv -f "$staged" "$destination" && cmp -s "$source" "$destination"; then
-    return 0
-  fi
-  rm -f "$staged"
-  fail "node installed, but could not ship $what"
-}
 
 # Ship this script beside the binary too. The sentinel's `deploy` verb resolves `scripts/deploy.sh`
 # beside the installed binary first - that is where an install keeps the scripts it is allowed to run -
@@ -821,11 +835,8 @@ ship_file() { # source destination what
 # and failed before it reached the gate, then fell back to the watcher's cwd (a checkout it should not
 # need). Installing from the checkout's copy here is the only chance to close that: a deploy has to
 # leave the next one able to run with no human at a shell.
-DEPLOY_SRC="$ROOT/scripts/deploy.sh"
-[ -f "$DEPLOY_SRC" ] || DEPLOY_SRC="$0"
-if [ -f "$DEPLOY_SRC" ]; then
-  ship_file "$DEPLOY_SRC" "$INSTALL_DIR/scripts/deploy.sh" "deploy.sh beside the binary"
-fi
+# The self-ship that used to live here moved above the sentinel proof: a deploy that cannot prove its
+# watcher still has to install the script that reads the line. See the block before that proof.
 
 # ...and the helper that answers "where does this machine's node live", beside the copy of this script that
 # will run the next deploy. Without it the installed copy would fall back to the old expression and lose
