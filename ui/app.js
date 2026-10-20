@@ -646,23 +646,47 @@ function renderSteering(fact) {
   keepStatusLast();pin();
 }
 
+// ONE stats line, one glyph vocabulary, one joiner.
+//
+// The footer under a finished answer and a live child card's third line are the same line over the
+// same facts (`◈ tokens · ✧ model calls · ⚒ tool calls · ◷ duration`, with `✺ elapsed` in front
+// where a child is still running). They differ in exactly one thing, and the caller decides it: the
+// footer prints `?` where a fact is missing, while a card OMITS the pair entirely - an absent token
+// count says nothing, so `◈ 0` would be a measurement nobody made. `0` is a real value here and is
+// never dropped; only absent ones are.
+const runStatGlyphs={elapsed:'✺',tokens:'◈',calls:'✧',tools:'⚒',duration:'◷'};
+// The order a stats line is read in, and the only list that decides it: elapsed first (a child is
+// still running), then what the run cost.
+const runStatOrder=['elapsed','tokens','calls','tools','duration'];
+function runStatEntries(stats) { return runStatOrder.map(key=>[key,stats ? stats[key] : undefined]); }
+function runStatsLine(entries) {
+  return (entries || []).filter(entry=>entry && entry[1]!==undefined && entry[1]!==null && entry[1]!=='')
+    .map(entry=>runStatGlyphs[entry[0]]+' '+entry[1]).join(' · ');
+}
+
 function runCountsFooter(duration) {
   const prefix = replayingMessages && runCounts && !runCounts.complete ? '≥' : '';
   if (replayingMessages && runCounts?.complete && Number.isFinite(runCounts.elapsed_ms) && runCounts.elapsed_ms >= 0)
     duration = runDuration(runCounts.elapsed_ms);
-  return `◈ ${turnTokenReadout()} · ✧ ${prefix}${runCounts?.model_calls ?? '?'} · ⚒ ${prefix}${runCounts?.tool_calls ?? '?'} · ◷ ${duration}`;
+  return runStatsLine([['tokens',turnTokenReadout()],
+    ['calls',prefix+(runCounts?.model_calls ?? '?')],
+    ['tools',prefix+(runCounts?.tool_calls ?? '?')],['duration',duration]]);
 }
 
-function turnTokenReadout() {
-  const growth=runCounts?.context_growth;
+// The token readout, over any run's counts rather than only this window's own: a card reads it for
+// the child it describes. `replaying` is the caller's own replay state - the footer is the only
+// caller that has one.
+function tokenReadout(counts, replaying) {
+  const growth=counts?.context_growth;
   if(growth?.version!==1 || !growth.known || !Number.isSafeInteger(growth.added)||
     !Number.isSafeInteger(growth.baseline)||!Number.isSafeInteger(growth.current)||
     growth.baseline<0||growth.current<0||growth.added!==growth.current-growth.baseline)return '?';
-  const incomplete=growth.partial||growth.pending||replayingMessages&&!growth.complete;
+  const incomplete=growth.partial||growth.pending||replaying&&!growth.complete;
   const prefix=incomplete?'~':'';
   const number=growth.added<0?'-'+formatTokens(-growth.added):formatTokens(growth.added);
   return prefix+number;
 }
+function turnTokenReadout() { return tokenReadout(runCounts, replayingMessages); }
 function turnTokenDetail() {
   const growth=runCounts?.context_growth;
   if(turnTokenReadout()==='?')return 'Context added this turn: unavailable (no comparable provider-measured baseline/end). Historical billed/cache totals are not substituted.';
@@ -6327,12 +6351,43 @@ function namedNode(nodes, id) {
   if(!id || id===LOCAL_NODE) return nodes.find(node=>node.local_node) || null;
   return nodes.find(node=>node.id===id || node.node_id===id) || null;
 }
+// The header line of the live list: the node's name first, then one icon+count pair per count.
+//
+// These counts DO render as 0 - `0 queued` is information, because it says the node is free - which
+// is the opposite of a card's absent statistic. The glyphs are the run stats' own vocabulary, by
+// meaning: waiting for a slot is the time glyph, executing is the tools glyph, a live child with a
+// session is the activity glyph. Only `queued` keeps its word: it is the count a reader has to be
+// told about, while `2` beside `◈`-family glyphs needs no word it would have to repeat in a title.
+const subagentCountGlyphs={queued:runStatGlyphs.duration,running:runStatGlyphs.tools,active:runStatGlyphs.elapsed};
+// Each pair carries the same words in `title` and in `aria-label`: a title alone is invisible to the
+// keyboard and to a screen reader.
+const subagentCountTitles={queued:'queued: waiting for a free slot',running:'running: executing now',
+  active:'active: live children with a session'};
+const subagentCountWords={queued:' queued',running:'',active:''};
 function subagentCounts(localName, health) {
   const counts=health && health.subagents;
-  if(!counts) return localName+': the node did not report its subagent counts';
-  return localName+': '+counts.running+' running · '+counts.queued+' queued · '+counts.active+' active';
+  if(!counts) return {name:localName,pairs:[],missing:'the node did not report its subagent counts'};
+  return {name:localName,pairs:['queued','running','active'].map(key=>({key,count:counts[key],
+    glyph:subagentCountGlyphs[key],word:subagentCountWords[key],title:subagentCountTitles[key]}))};
 }
-function liveChildRows({sessions=[], dispatches=[], fleet={}, health={}, errors=[]} = {}) {
+// A card's third line describes the child's own run. The facts come from where this window already
+// has them: the child's run counts when it has painted that child (a pinned pane keeps them), and the
+// dispatch record's own accounting for what the child reported. A fact nobody measured stays absent,
+// so the line shortens instead of claiming a zero.
+function childRunStats(task, session, runs) {
+  const snapshot=(runs && task && task.session_id && runs[task.session_id]) || null;
+  const usage=(task && task.accounting && task.accounting.usage) || null;
+  const measure=task || session || {};
+  const started=Number(measure.started_at) || Number(session && session.started_at) || 0;
+  const readout=snapshot ? tokenReadout(snapshot, false) : '?';
+  return {elapsed:started>0 ? agentAge(Date.now()-started*1000) : undefined,
+    tokens:readout==='?' ? undefined : readout,
+    calls:Number.isSafeInteger(snapshot && snapshot.model_calls) ? snapshot.model_calls
+      : (usage && Number.isSafeInteger(usage.calls) ? usage.calls : undefined),
+    tools:Number.isSafeInteger(snapshot && snapshot.tool_calls) ? snapshot.tool_calls : undefined,
+    duration:Number.isFinite(snapshot && snapshot.elapsed_ms) ? runDuration(snapshot.elapsed_ms) : undefined};
+}
+function liveChildRows({sessions=[], dispatches=[], fleet={}, health={}, errors=[], runs={}} = {}) {
   const nodes=(fleet.nodes || []).filter(node=>node.kind!=='client');
   const localName=(nodes.find(node=>node.local_node) || {}).name || 'this node';
   const byId=new Map(sessions.map(session=>[session.id,session]));
@@ -6351,6 +6406,7 @@ function liveChildRows({sessions=[], dispatches=[], fleet={}, health={}, errors=
       subagent_id:task.subagent_id || '',session_id:task.session_id || '',
       title:task.title || (session && session.title) || task.prompt || 'Untitled child',
       state:task.state || 'unknown',detail:(session && session.state_detail) || '',
+      stats:runStatsLine(runStatEntries(childRunStats(task,session,runs))),
       node:id,node_name:node ? node.name : id,node_peer:node ? !node.local_node : id!==LOCAL_NODE,
       node_source:node ? 'the machine the dispatcher sent this child to'
         : 'the dispatch record names a machine this node does not know'});
@@ -6361,15 +6417,16 @@ function liveChildRows({sessions=[], dispatches=[], fleet={}, health={}, errors=
     if(!child) continue;
     rows.push({key:'session:'+session.id,source:'session',task:null,subagent_id:'',session_id:session.id,
       title:session.title || session.id,state:'running',detail:session.state_detail || '',
+      stats:runStatsLine(runStatEntries(childRunStats(null,session,runs))),
       node:LOCAL_NODE,node_name:localName,node_peer:false,node_online:true,
       node_source:'no dispatch record: read from the ledger of the node that holds this session'});
   }
-  const peers=rows.filter(row=>row.node_peer).length;
-  const note=[peers ? peers+' row(s) are on another node: this window shows the dispatcher\'s record of them, because a peer\'s own live children are not reachable from here.'
-    : 'A peer\'s own live children are not reachable from here.'];
-  note.push('History and unresolved outcomes remain in Engine → Sessions; unfinished alone is not active.');
-  if(errors.length) note.push('Not everything could be read: '+errors.join('; ')+'.');
-  return {rows,counts:subagentCounts(localName,health),note:note.join(' ')};
+  // What this view cannot see is said elsewhere: a peer's own live children are not reachable from
+  // here, and unfinished is not the same as active. Neither belongs in this panel's foot any more -
+  // the rows are the answer, and a paragraph under them was the sentence a reader skipped. Only a
+  // failed read is stated here, because an incomplete list must never look complete.
+  const note=errors.length ? 'Not everything could be read: '+errors.join('; ')+'.' : '';
+  return {rows,counts:subagentCounts(localName,health),note};
 }
 
 // ---- lanes: the checkout a child was given ------------------------------------------------
@@ -6454,6 +6511,20 @@ function taskLane(task,index) {
   return unknown;
 }
 
+// The run counts this window already holds, per child session.
+//
+// A painted child keeps its renderer state (that is what makes its pane survive a repaint), and the
+// run counts are part of it. That is the only place a card's `◈` `✧` `⚒` `◷` can come from without a
+// second transcript read per row, so a child nobody has opened simply has no numbers here - which the
+// card then omits rather than fills with zeros.
+function runCountsByPane() {
+  const runs={};
+  for(const pane of orchestratorPanel?.allPanes?.() || []) {
+    const counts=childRenderStates.get(pane.transcript)?.renderer?.runCounts;
+    if(counts && pane.task?.session_id)runs[pane.task.session_id]=counts;
+  }
+  return runs;
+}
 function orchestratorDelay() {
   const base=!uiVisible()?15000:orchestratorPanel?.activeTasks.length?2000:10000;
   return Math.max(base,orchestratorFailures?Math.min(30000,2000*2**Math.min(orchestratorFailures,4)):0);
@@ -6480,7 +6551,11 @@ async function refreshOrchestrator() {
     orchestratorPanel.data=(list.subagents || []).map(task=>({...task,lane:taskLane(task,lanes)}));
     const live=liveChildRows({sessions:sessionRows,
       dispatches:list.subagents || [],fleet,health:health.value || {},
-      errors:[sessions.error,health.error].filter(Boolean)});
+      errors:[sessions.error,health.error].filter(Boolean),
+      // Run counts this window already holds, keyed by the child's session: a pinned pane painted
+      // that child, so its own run counts are in hand and a card can state them. A child nobody has
+      // painted has none here, and its card omits those pairs rather than inventing zeros.
+      runs:runCountsByPane()});
     orchestratorPanel.live=live;
     if(!orchestratorPanel.restored) {
       orchestratorPanel.restored=true;

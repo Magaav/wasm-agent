@@ -2433,6 +2433,13 @@ function agentElapsed(ms) {
   const seconds=Math.max(0,Math.floor(ms/1000));
   return Math.floor(seconds/60)+':'+String(seconds%60).padStart(2,'0');
 }
+// How long a child has been running, in the short form a card's first statistic uses (`✺ 10s`).
+// Under a minute there is no minute to show, and `0:10` reads as a duration rather than as "ten
+// seconds in"; past that this is the one duration formatter the window already has, not a second one.
+function agentAge(ms) {
+  const seconds=Math.max(0,Math.floor(ms/1000));
+  return seconds<60 ? seconds+'s' : agentElapsed(ms);
+}
 // A session pane owns its draft and scroll position, never the execution.
 //
 // The chat inside it is the shared <wa-chat-shell>: the same transcript region, composer, attachment
@@ -2581,17 +2588,26 @@ class WaOrchestrator extends HTMLElement {
   set message(text) { this.connectedCallback(); this.querySelector('.orchestrator-status').textContent=text; }
   // Every child the node reports as not settled, from either source, with the machine it runs on.
   //
-  // `payload` is {rows, counts, note} from the host. The rows carry the state and the detail in the
-  // node's own words, the node's name (never a bare id), and the session id - which is the handle a
-  // reader needs, because a child with no dispatch record cannot be addressed by a subagent id at
-  // all. A row that came from a dispatch record is clickable, because that is a child this node can
-  // steer and cancel; a row that came from the ledger alone is not, and says so, rather than
-  // offering a control that would fail.
+  // `payload` is {rows, counts, note} from the host. Each row is drawn as exactly THREE lines, and
+  // that is a layout promise rather than a coincidence:
+  //
+  //   1. `<state> <node>` - what it is doing, and on which machine (the node's name, never a bare id)
+  //   2. `<resumed task>` - what it was asked to do, ellipsised when it does not fit
+  //   3. the run's stats, from the host's one stats line (`✺ 10s · ◈ ~62.6k · ✧ 24 · ⚒ 38 · ◷ 2:18`)
+  //
+  // A card's height must not change as runs start and finish, so lines 2 and 3 are ALWAYS there:
+  // an absent task and an absent statistic reserve their line instead of collapsing it. The session
+  // id, the recorded detail and (for a ledger-only row) the fact that there is no dispatch record
+  // are the handle and the provenance, not a line: they travel in the card's `title` and in its
+  // `aria-label`, where a reader still gets them and where a screen reader reads them out. A row
+  // that came from a dispatch record is clickable, because that is a child this node can steer and
+  // cancel; a row that came from the ledger alone is not, and says so, rather than offering a
+  // control that would fail.
   set live(payload) {
     this.connectedCallback();
-    const rows=payload?.rows || [], counts=payload?.counts || '', note=payload?.note || '';
+    const rows=payload?.rows || [], counts=payload?.counts || null, note=payload?.note || '';
     this.liveRows=rows;
-    this.querySelector('.live-children-counts').textContent=counts;
+    this.liveHeader(counts);
     this.querySelector('.live-children-foot').textContent=note;
     const list=this.querySelector('.live-children-list');
     if(!rows.length) {
@@ -2609,23 +2625,49 @@ class WaOrchestrator extends HTMLElement {
       element.dataset.node=row.node || '';
       element.dataset.source=row.source || '';
       if(row.subagent_id)element.dataset.subagent=row.subagent_id;
-      const mission=document.createElement('span');mission.className='live-child-title';
-      mission.textContent=row.title || row.session_id || 'Untitled child';
-      mission.title=mission.textContent;
       const head=document.createElement('span');head.className='live-child-head';
       const state=document.createElement('span');state.className='live-child-state';state.textContent=row.state || 'unknown';
       const node=document.createElement('span');node.className='live-child-node';
       node.textContent=row.node_name || row.node || 'node unknown';
       node.title=(row.node_peer ? 'peer' : 'local')+' · '+row.node_source;
       head.append(state,node);
-      const id=document.createElement('span');id.className='live-child-id';id.textContent=row.session_id || 'no session id';
-      id.title='session id';
-      element.append(head,mission,id);
-      if(row.detail) { const detail=document.createElement('span');detail.className='live-child-detail';detail.textContent=row.detail; element.append(detail); }
-      element.setAttribute('aria-label',`${mission.textContent} · ${state.textContent} on ${node.textContent} · ${id.textContent}`);
+      // Line 2. A row with no task still owns the line, so a card does not change height between a
+      // child that has a resumed task and one that does not.
+      const mission=document.createElement('span');mission.className='live-child-title';
+      mission.textContent=row.title || '\u00a0';
+      mission.title=row.title || 'no resumed task recorded';
+      // Line 3, from the host's one stats line: absent statistics are already omitted there, so an
+      // empty string only means "nothing measured yet" - which still reserves the line.
+      const stats=document.createElement('span');stats.className='live-child-stats';
+      stats.textContent=row.stats || '\u00a0';
+      stats.title=row.stats || 'no run statistics measured for this child yet';
+      element.append(head,mission,stats);
+      element.title=[row.session_id,row.detail].filter(Boolean).join(' · ');
+      element.setAttribute('aria-label',[mission.title,state.textContent+' on '+node.textContent,
+        row.stats || 'no run statistics measured',row.session_id || 'no session id',row.detail]
+        .filter(Boolean).join(' · '));
       if(row.task) element.addEventListener('click',()=>this.pin(row.task));
       return element;
     }));
+  }
+  // The header line: the node's name, then one icon+count pair per count.
+  //
+  // The words for each pair are the host's (`pair.title`) and are applied to BOTH `title` and
+  // `aria-label`: a title alone is invisible to the keyboard and to a screen reader, and the same
+  // words in both is the only way both readers are told the same thing.
+  liveHeader(counts) {
+    const line=this.querySelector('.live-children-counts');
+    if(!counts || typeof counts!=='object') { line.textContent=String(counts || ''); return; }
+    const parts=[document.createTextNode(counts.name || 'this node')];
+    for(const pair of counts.pairs || []) {
+      const span=document.createElement('span');span.className='live-children-count';
+      span.dataset.count=pair.key;
+      span.textContent=' · '+pair.glyph+' '+pair.count+(pair.word || '');
+      if(pair.title) { span.title=pair.title;span.setAttribute('aria-label',pair.title); }
+      parts.push(span);
+    }
+    if(counts.missing) parts.push(document.createTextNode(' · '+counts.missing));
+    line.replaceChildren(...parts);
   }
   // The window's agents, grouped by LANE.
   //

@@ -1593,14 +1593,41 @@ $harness = @'
     /openclaw/.test(liveRowFor('child-session-peer').textContent) && !/bbbbbbbb/.test(liveRowFor('child-session-peer').textContent),
     'a child on a peer must be named, not shown as its id, saw: '+(liveRowFor('child-session-peer')||{}).textContent);
   check(!!liveRowFor('child-direct-0001') && /running/.test(liveRowFor('child-direct-0001').textContent) &&
-    liveRowFor('child-direct-0001').textContent.indexOf('child-direct-0001')>=0 &&
-    /bash, 12s ago/.test(liveRowFor('child-direct-0001').textContent) && liveRowFor('child-direct-0001').tagName==='DIV',
-    'a health-confirmed child with no placement row must appear with its session id and recorded detail, saw: '+(liveRowFor('child-direct-0001')||{}).textContent);
-  check(/2 running/.test(showroom.querySelector('.live-children-counts').textContent) &&
-    /1 queued/.test(showroom.querySelector('.live-children-counts').textContent),
-    'the node own subagent counts must be shown as they were reported, saw: '+showroom.querySelector('.live-children-counts').textContent);
-  check(/not reachable/.test(showroom.querySelector('.live-children-foot').textContent),
-    'the view must say what it cannot show (a peer own live children), saw: '+showroom.querySelector('.live-children-foot').textContent);
+    liveRowFor('child-direct-0001').getAttribute('aria-label').indexOf('child-direct-0001')>=0 &&
+    /bash, 12s ago/.test(liveRowFor('child-direct-0001').getAttribute('aria-label')) &&
+    liveRowFor('child-direct-0001').tagName==='DIV',
+    'a health-confirmed child with no placement row must appear with its session id and recorded detail, saw: '+(liveRowFor('child-direct-0001')||{}).getAttribute?.('aria-label'));
+  // THREE LINES, ONE HEIGHT. A card is `<state> <node>`, the resumed task, and the run's stats; the
+  // task and stats lines reserve their box even when empty, so cards do not jump as runs start and
+  // finish. The session id and the recorded detail are the handle and the provenance, so they live in
+  // the card's title and aria-label rather than on a fourth and fifth line.
+  check(liveRows.every(function(row){return row.children.length===3 &&
+    row.children[2].className==='live-child-stats';}),
+    'each live child must be exactly three lines, saw: '+liveRows.map(function(row){return row.children.length;}).join(','));
+  var liveHeights=liveRows.map(function(row){return Math.round(row.getBoundingClientRect().height);});
+  check(liveHeights[0]>0 && liveHeights.every(function(height){return height===liveHeights[0];}),
+    'cards must keep one height whether or not a child has statistics yet, saw: '+liveHeights.join(','));
+  check(!/\u25c8/.test(liveRows.map(function(row){return row.querySelector('.live-child-stats').textContent;}).join('')),
+    'a card must not print a token statistic nobody measured, saw: '+
+      liveRows.map(function(row){return row.querySelector('.live-child-stats').textContent;}).join('|'));
+  // The header: the node's name first, then icon+count pairs from the run stats' own vocabulary.
+  // `0 queued` is information here - a node with an empty queue is free - so these counts are printed
+  // as measured, the opposite of a card's absent statistic.
+  var liveHeader=showroom.querySelector('.live-children-counts');
+  check(liveHeader.textContent==='foundation \u00b7 \u25f7 1 queued \u00b7 \u2692 2 \u00b7 \u273a 3',
+    'the node own subagent counts must be shown as they were reported: `foundation \u00b7 \u25f7 1 queued \u00b7 \u2692 2 \u00b7 \u273a 3`, saw: '+JSON.stringify(liveHeader.textContent));
+  check(['queued','running','active'].every(function(key){
+      var pair=liveHeader.querySelector('[data-count="'+key+'"]');
+      return !!pair && !!pair.title && pair.title===pair.getAttribute('aria-label');}),
+    'every header pair must say the same words in title and aria-label, saw: '+
+      Array.prototype.slice.call(liveHeader.querySelectorAll('[data-count]')).map(function(pair){return pair.title+'|'+pair.getAttribute('aria-label');}).join(' / '));
+  // The reachability notice is gone from THIS panel. The canvas keeps its own sentence about history,
+  // which is a different line on a different surface (see the check right after).
+  check(!/not reachable from here/.test(showroom.querySelector('.live-children-foot').textContent) &&
+    !/unfinished alone is not active/.test(showroom.textContent),
+    'the peer-reachability notice must be gone from the live panel, saw: '+showroom.querySelector('.live-children-foot').textContent);
+  check(showroom.querySelector('.orchestrator-empty').textContent.indexOf('History remains in Engine')>=0,
+    'the canvas keeps its own sentence about where history lives');
   // And through the app own refresh, not only the builder: the panel must be fed by the node answers.
   var sessionsFixture=window.__fixtures.sessions;
   window.__fixtures.sessions=withDirectChild;
@@ -3865,6 +3892,10 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'active-only orchestrator browser suite failed' }
     & node scripts/test-orchestrator-active.cjs (Join-Path $tmp 'orchestrator-active') --post
     if ($LASTEXITCODE -ne 0) { throw 'active-only orchestrator evidence postcheck failed' }
+    & node scripts/test-live-children-cards.cjs (Join-Path $tmp 'live-children-cards')
+    if ($LASTEXITCODE -ne 0) { throw 'live children card browser suite failed' }
+    & node scripts/test-live-children-cards.cjs (Join-Path $tmp 'live-children-cards') --post
+    if ($LASTEXITCODE -ne 0) { throw 'live children card evidence postcheck failed' }
     & node scripts/test-orchestrator-reads.cjs (Join-Path $tmp 'orchestrator-reads')
     if ($LASTEXITCODE -ne 0) { throw 'serialized incremental orchestrator browser suite failed' }
     & node scripts/test-orchestrator-reads.cjs (Join-Path $tmp 'orchestrator-reads') --post

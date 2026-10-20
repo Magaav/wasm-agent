@@ -28,7 +28,10 @@
   const live=liveChildRows({sessions,dispatches:[...history,...active],health});
   check(live.rows.length===5&&live.rows.some(row=>row.session_id==='session-direct'&&row.state==='running'),'live rows use active dispatches plus actual recordless child health');
   check(!live.rows.some(row=>['session-abandoned','session-operator'].includes(row.session_id)),'unfinished or operator worktree alone is not an active child');
-  check(!live.counts.includes('settled')&&!live.counts.includes('1000'),'healthy counts omit historical totals');
+  // The header is the node's name and one icon+count pair per count now, not one sentence: the same
+  // question - do the historical totals leak into it? - is asked of the line a reader sees.
+  const liveCountsText=live.counts.name+' '+live.counts.pairs.map(pair=>pair.glyph+' '+pair.count+(pair.word||'')).join(' ');
+  check(!liveCountsText.includes('settled')&&!liveCountsText.includes('1000'),'healthy counts omit historical totals, saw: '+liveCountsText);
   check(!liveChildRows({dispatches:data,health}).rows.some(row=>row.session_id==='one-conversation'),'live followup dedup also hides the previous active run after terminal successor');
   panel.live=live;check(panel.querySelectorAll('.live-child').length===5,'live UI agrees with active builder');
   // Production refresh: stale saved history panes are not restored; drafts survive.
