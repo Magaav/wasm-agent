@@ -68,10 +68,12 @@ build_args=(--out "$out")
 bash "$ROOT/scripts/termux/cross-build-android.sh" "${build_args[@]}" ||
   fail 'build_failed: cross-build-android.sh did not produce a bundle'
 
-manifest="$out/bundle/bundle.manifest"
-archive="$out/wa-android-bundle.tar.gz"
+manifest="$out/wa-android-bundle/bundle.manifest"
+archive_src="$out/wa-android-bundle.tar.gz"
 [ -f "$manifest" ] || fail "bundle_incomplete: $manifest is missing"
-[ -f "$archive" ] || fail "archive_missing: $archive (the bundle builder must archive)"
+[ -f "$archive_src" ] || fail "archive_missing: $archive_src (the bundle builder must archive)"
+archive="$out/$asset"
+mv -f -- "$archive_src" "$archive"
 built_commit=$(sed -n 's/^source_commit=//p' "$manifest" | head -n 1)
 [ "$built_commit" = "$commit" ] ||
   fail "release_commit_mismatch: the bundle records '$built_commit', not '$commit'"
