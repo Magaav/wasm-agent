@@ -81,6 +81,18 @@ The starvation this prevents: a request written and then followed by more tool c
 `requests: 1 waiting` while the log repeats `maintenance-deferred ... the node is busy`, so "deploy
 queued" is reported - and read - as "deployed", three times in one day.
 
+Step 2 no longer has to be remembered by a human. A wave's end - the last child settled and none
+running or queued - is the trigger: `lua/core/wave_autoflush.lua` asks `lua/core/wave_deploy.lua`
+whether `installed.txt` already names `origin/main`, and when it does not it writes the same request
+file into the sentinel's own drop-box (`<config>/sentinel/requests/<id>.json`, `verb`/`reason`/
+`queued_at`/`target_commit`, no session and no continuation), once per wave and never twice for one
+target. The wave's report line says which happened - `deploy: queued <short>`, `deploy: not needed
+(installed == main)`, or `deploy: skipped (<reason>)` naming a dirty tree's paths - and a request is
+never written mid-wave or from a dirty tree, because a deploy builds the tree it is given. So a
+merged fix no longer sits uninstalled until the operator says "go"; verify on the next turn with
+step 4, which is unchanged. `scripts/test-wave-end-deploy.lua` proves it against a scratch home and a
+fake request directory.
+
 ### Verifying a deploy without re-deriving it
 
 Two verifiers, two questions:

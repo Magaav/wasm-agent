@@ -339,6 +339,30 @@ local function recheck_binary(s,repo,qualified)
     assert(actual[field]==qualified.binary[field],'wave_qualified_binary_changed:'..field)
   end
 end
+-- The wave end is the one moment an install can be asked for: nothing of this wave is running or
+-- queued. The decision itself lives in `lua/core/wave_deploy.lua`, which is also what a test drives
+-- with a fake wave; here it is handed the facts this module already owns - the wave id, its activity
+-- count, the install record, the canonical checkout a deploy builds from, and the sentinel's own
+-- request box. A reading failure is an outcome with a line, never a crash that would replace the
+-- closure's answer with nothing.
+local function deployment(s,repo)
+  local ok,outcome=pcall(function()
+    return dofile('lua/core/wave_deploy.lua').ensure({
+      wave=s.generation and s.generation.id or nil,
+      active=s.active or 0,
+      install=dofile('lua/core/update.lua').install_dir(),
+      main=repo.main,
+      requests=dofile('lua/core/paths.lua').config()..'/sentinel/requests',
+      state=s.deploy,now=host.now(),
+    })
+  end)
+  if not ok or type(outcome)~='table' then
+    return {state='skipped',reason='install check failed',line='deploy: skipped (install check failed: '..tostring(outcome)..')'}
+  end
+  -- Persist the per-wave record so a second finalize of the same wave cannot write a second request.
+  if outcome.record then s.deploy=outcome.record;outcome.record=nil end
+  return outcome
+end
 function M.control(args,ctx)
   local scope,err=authority(ctx);if not scope then return {error=err,not_applicable=err=='wave_origin_not_applicable'} end
   local ok,result=pcall(function()
@@ -430,9 +454,15 @@ function M.finalize(ctx)
           observation={held=true,deferred=true,state='deferred',reason='active_workers'}
           return
         end
-        if not ready(s,repo) then
+        local owed=ready(s,repo)
+        if not owed then
           if s.generation then s.generation.closed=true end
-          s.obligation='none';observation={not_applicable=true,reason='no_own_install_impact'};return
+          s.obligation='none'
+          -- Nothing this wave changed needs an install of its own - but the install may still be
+          -- behind `origin/main`, and the wave has just ended. That question is asked here, after
+          -- `ready` has decided there is no reserved obligation to race with.
+          observation={not_applicable=true,reason='no_own_install_impact',deploy=deployment(s,repo)}
+          return
         end
         local current=source(repo)
         local binary=binary_ready(s,repo,current)
@@ -503,9 +533,13 @@ function M.report(ctx,ok,result)
     -- original receipt. Error identity excludes Lua source-line decoration only
     -- for deduplication; the original value below is never rewritten.
     local code=value.error and (tostring(value.error):match('(wave_[%w_]+)') or 'wave_closure_failed')
+    -- The wave end's own answer about the install travels in the same notice as the closure state:
+    -- `deploy: queued <short>` / `not needed` / `skipped (reason)`. It joins the deduplication
+    -- identity too, so a changed answer is a new line and a repeated one stays quiet.
+    local deploy=dofile('lua/core/wave_deploy.lua').line(value.deploy)
     local identity={generation=state.generation and state.generation.id,
       reservation=value.reservation or state.inflight or (last and last.id),phase=phase,
-      error=code,detail=value.error and tostring(value.error):gsub('^.-:%d+: ','')}
+      error=code,detail=value.error and tostring(value.error):gsub('^.-:%d+: ',''),deploy=deploy}
     local digest=hash(identity)
     if journal.current==digest then return end
     journal.current=digest
@@ -515,7 +549,11 @@ function M.report(ctx,ok,result)
     if phase=='held' then
       text='SELF installation held ('..(code or 'wave_request_held')..'); inspect wave_autoflush status and the native closure report.'
     elseif phase=='queued' then text='SELF installation queued; installation is not yet verified.'
-    elseif phase=='installed_verified' then text='SELF installation verified by the native installation proof.' end
+    elseif phase=='installed_verified' then text='SELF installation verified by the native installation proof.'
+    -- A wave with no install impact of its own still has an install: the wave end is where the node
+    -- asks about it, and that answer is the whole notice rather than nothing at all.
+    elseif phase=='not_applicable' then text=deploy end
+    if text and deploy and phase~='not_applicable' then text=text..' '..deploy end
     event.notice=text
     memory.meta_set(k,json.encode(journal))
     if text then return {id=event.id,text=text,phase=phase,result=value} end
