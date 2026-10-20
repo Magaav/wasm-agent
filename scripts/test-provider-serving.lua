@@ -10,6 +10,9 @@ host.getenv=function(k)
   if k=='WASM_AGENT_LLM_API_KEY' then return key end
   if k=='WASM_AGENT_LLM_MODEL' then return 'fixture' end
   if k=='WASM_AGENT_LLM_BASE_URL' then return 'http://127.0.0.1:1/private-mock' end
+  -- This fixture proves the serving seam, not the retry policy: every 429 here must cost exactly
+  -- one call so the eligibility assertions stay about the outcome that produced them.
+  if k=='WASM_AGENT_PROVIDER_RATE_LIMIT_RETRIES' then return '0' end
   return real_env(k)
 end
 local p=dofile('lua/core/provider.lua')

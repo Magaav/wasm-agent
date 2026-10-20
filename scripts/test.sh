@@ -1054,6 +1054,10 @@ WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-overflow-recovery.lua" "$BIN" --db 
 # tool effects only before a response exists, is bounded to one attempt, and remains operator-disableable
 # because an upstream inference may still have been billed even though its response was lost.
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-provider-timeout-recovery.lua" "$BIN" --db "$DB.provider-timeout" | grep 'provider timeout recovery ok'
+# A provider that answers 429/5xx refused the request - it did not lose an inference. That is the
+# ordinary shape of a busy upstream, so it retries by default (three attempts, honouring Retry-After)
+# instead of ending the run; a terminal quota 429 stays a landed outcome.
+WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-provider-rate-limit-recovery.lua" "$BIN" --db "$DB.provider-rate-limit" | grep 'provider rate-limit recovery ok'
 # A route must refuse a model it cannot serve before the first provider request - and only that.
 # A child with `gpt-6-luna` on the opencode-go route failed in 0.67s with zero tool calls on the
 # edge's `Model does not support this protocol`, and 26 child runs of `deepseek-v4.1-flash` died
