@@ -383,6 +383,28 @@ function topicChevron(chevron, open) {
   if (chevron) chevron.textContent = open ? "\u2304" : "\u203a";
 }
 
+// The pictures a turn carried. One renderer for every turn that can carry them - an ordinary sent
+// message, and the steered turn that arrives mid-run - because two renderers would be two shapes a
+// reader has to learn. `images` are the shell's own intake objects ({name, mime, data}): a file with
+// no data URL was never read as a picture, so nothing is drawn for it.
+function appendMessageImages(body, images) {
+  const visible = (Array.isArray(images) ? images : []).filter((image) =>
+    image && typeof image.data === "string" && image.data.startsWith("data:image/"));
+  if (!visible.length) return null;
+  const gallery = document.createElement("div");
+  gallery.className = "message-images";
+  for (const attachment of visible) {
+    const image = document.createElement("img");
+    image.className = "message-image";
+    image.src = attachment.data;
+    image.alt = attachment.name || "attached image";
+    if (attachment.name) image.title = attachment.name;
+    gallery.append(image);
+  }
+  body.append(gallery);
+  return gallery;
+}
+
 // One renderer for one patch line, wherever a patch is drawn: the file balloon, the promoted patch
 // window, and the change a tool row reports. The sign is in the text and the class carries the colour,
 // so a reader can tell an addition from a removal at a glance and the same reading survives without
@@ -866,10 +888,16 @@ class WaSteering extends HTMLElement {
     topicChevron(this._parts.chevron,this.open);
   }
   update(fact) {
-    this._build();this.fact={...fact};this.dataset.steeringId=fact.id;this.dataset.state=fact.state;
+    this._build();
+    // The pictures ride with the steer that carried them. A later state event (`queued` -> `read`)
+    // carries none, so what is already drawn is kept rather than replaced by nothing.
+    const images=Array.isArray(fact.images)?fact.images:(this.fact?.images || []);
+    this.fact={...fact,images};this.dataset.steeringId=fact.id;this.dataset.state=fact.state;
     this._parts.label.textContent=fact.state==='read'?'Steered':fact.state==='queued'?'Steering queued':'Steering not placed';
     this._parts.meta.textContent=fact.state==='read'?'entered context':fact.state==='queued'?'next safe boundary':fact.state;
     this._parts.body.textContent=(fact.text||'Accepted steering text is retained in the durable inbox; this receipt view contains identity and state only.')+(fact.state==='read'?' — Read into model context; not proof of compliance.':' — Not yet entered model context; in-flight effects are not undone.');
+    // After the text, and through the renderer an ordinary sent turn uses.
+    appendMessageImages(this._parts.body,images);
   }
 }
 customElements.define('wa-steering',WaSteering);

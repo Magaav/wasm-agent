@@ -808,22 +808,6 @@ function add(role, text, asHtml = false) {
   return body;
 }
 
-function appendMessageImages(body, images) {
-  const visible = images.filter((image) => typeof image.data === "string" && image.data.startsWith("data:image/"));
-  if (!visible.length) return;
-  const gallery = document.createElement("div");
-  gallery.className = "message-images";
-  for (const attachment of visible) {
-    const image = document.createElement("img");
-    image.className = "message-image";
-    image.src = attachment.data;
-    image.alt = attachment.name || "attached image";
-    if (attachment.name) image.title = attachment.name;
-    gallery.append(image);
-  }
-  body.append(gallery);
-}
-
 function setStatus(text) {
   transcript.querySelector('#empty')?.remove();
   if (!statusLine) {
@@ -4057,9 +4041,9 @@ async function steerActiveRun(textOverride, options = {}) {
     || steeringSubmission.node!==node || steeringSubmission.epoch!==epoch)
     steeringSubmission={text,thread,node,epoch,key:crypto.randomUUID()};
   const submission=steeringSubmission;
-  const images=files.filter(file=>file.kind==='image');
+  const images=files.filter(file=>file.kind==='image').map(file=>({name:file.name,mime:file.mime,data:file.data}));
   const steeringBody={action:'steer_session',session_id:thread,text:chatShell.composedText(text,files),idempotency_key:submission.key};
-  if(images.length)steeringBody.images=images.map(file=>({name:file.name,mime:file.mime,data:file.data}));
+  if(images.length)steeringBody.images=images;
   steeringPending=true;
   const steerButton=document.getElementById('steer');
   if(steerButton)steerButton.disabled=true;
@@ -4088,7 +4072,7 @@ async function steerActiveRun(textOverride, options = {}) {
       chatShell.renderAttachments();draftGeneration++;draftNow=snapshotDraft();saveDraft();
     }
     steeringSubmission=null;
-    if(viewing())renderSteering({...receipt,text});
+    if(viewing())renderSteering({...receipt,text,images});
   } catch(error) {if(viewing())setStatus('Steering not confirmed; draft kept: '+error.message);}
   finally {steeringPending=false;if(steerButton)steerButton.disabled=false;}
 }

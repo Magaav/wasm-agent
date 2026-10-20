@@ -3867,6 +3867,13 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'steering attachment browser suite failed' }
     & node scripts/test-steering-attachments.cjs (Join-Path $tmp 'steering-attachments') --post
     if ($LASTEXITCODE -ne 0) { throw 'steering attachment evidence postcheck failed' }
+    # A steered turn that carried a picture draws it through the same attachment renderer an ordinary
+    # sent turn uses. The probe measures the payload as well, so a green run cannot come from a
+    # transport change - and it fails on a page where the steered turn renders no attachment element.
+    & node scripts/test-steered-image-render.cjs (Join-Path $tmp 'steered-image-render')
+    if ($LASTEXITCODE -ne 0) { throw 'steered image render browser suite failed' }
+    & node scripts/test-steered-image-render.cjs (Join-Path $tmp 'steered-image-render') --post
+    if ($LASTEXITCODE -ne 0) { throw 'steered image render evidence postcheck failed' }
     & node scripts/test-failure-notice.cjs (Join-Path $tmp 'failure-notice')
     if ($LASTEXITCODE -ne 0) { throw 'failure notice browser suite failed' }
     & node scripts/test-failure-notice.cjs (Join-Path $tmp 'failure-notice') --post
