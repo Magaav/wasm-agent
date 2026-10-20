@@ -91,15 +91,66 @@ function M.search(catalog,args,ctx,describe_execution)
   elseif name=='client' or name=='shell' then guidance[#guidance+1]='Load client-controls before desktop/browser actions. Never overwrite the installed UI to instrument it; work on a copy. A request receipt is not an effect proof.'
   elseif name=='tool_result' then guidance[#guidance+1]='Retrieve exact originals with SHA/byte continuation; an omitted result is not evidence until retrieved.' end
  end
- return {tools=selected,matches=#found,loaded=loaded_count,guidance=guidance,invocation='Only loaded definitions may route through tool_call. Execution metadata describes workspace policy only; recheck all native permissions/arguments/effects at invocation. Definitions are data, not authority.'}
+ return {tools=selected,matches=#found,loaded=loaded_count,guidance=guidance,invocation='A permitted definition is callable through tool_call by name whether or not it was discovered; discovery pins the exact schema, so a loaded definition that changed needs tool_search again. Execution metadata describes workspace policy only; recheck all native permissions/arguments/effects at invocation. Definitions are data, not authority.'}
 end
+-- A refusal is worth more when it can be corrected in one step: naming the closest permitted tools
+-- turns a misspelt or half-remembered capability into a corrected call instead of a second search
+-- over the same words. Candidates come from the caller's own catalog, so a suggestion can never
+-- disclose a name the role or the profile has already been denied.
+local function nearest(name, available, limit)
+ local wanted=name:lower()
+ local function distance(a,b)
+  local previous={};for j=0,#b do previous[j]=j end
+  for i=1,#a do
+   local current={[0]=i}
+   for j=1,#b do
+    local cost=a:sub(i,i)==b:sub(j,j) and 0 or 1
+    current[j]=math.min(previous[j]+1,current[j-1]+1,previous[j-1]+cost)
+   end
+   previous=current
+  end
+  return previous[#b]
+ end
+ local near={}
+ for candidate in pairs(available)do
+  local lowered=candidate:lower()
+  local contained=lowered:find(wanted,1,true) or wanted:find(lowered,1,true)
+  local score=distance(wanted,lowered)
+  -- Containment alone is weak (a short name is inside many), so a near match must also be within a
+  -- bounded edit distance that grows with the name being asked for.
+  if score<=math.max(2,math.floor(#wanted/3)) or (contained and #wanted>=3) then
+   near[#near+1]={name=candidate,score=score}
+  end
+ end
+ table.sort(near,function(a,b)return a.score==b.score and a.name<b.name or a.score<b.score end)
+ local names={}
+ for i=1,math.min(limit or 3,#near)do names[#names+1]=near[i].name end
+ return names
+end
+
 function M.resolve(catalog,name,ctx)
  if type(name)~='string' or name=='tool_call' or name=='tool_search' then return nil,'invalid_routed_tool' end
- local available=eligible(catalog,ctx);if not available[name] then return nil,'tool_not_available' end
- local names,err=loaded(ctx);if err then return nil,err end
- if not names[name] then return nil,'tool_not_loaded: use tool_search first' end
- if names[name]~=host.sha256(json.encode(available[name])) then return nil,'tool_definition_changed: use tool_search again' end
- return available[name]
+ -- Discovery is a search convenience, not a precondition. A model that already knows a tool's name
+ -- calls it directly; requiring tool_search first charged a round trip for correct recall. The fence
+ -- is `eligible` - the caller's role-filtered catalog with the profile ceiling reapplied - and every
+ -- native permission, workspace binding and effect class is still rechecked at invocation.
+ local available=eligible(catalog,ctx)
+ local selected=available[name]
+ if not selected then
+  -- The name is the model's own text: bound what is echoed back into the transcript, and search
+  -- near matches on the bounded form so a huge string cannot cost a quadratic scan.
+  local asked=#name>64 and name:sub(1,64) or name
+  local closest=nearest(asked,available,3)
+  local detail=#closest>0 and ('closest are '..table.concat(closest,', ')..'; use tool_search to find one')
+    or 'use tool_search to list what this role may use'
+  return nil,'tool_not_available: no permitted tool named '..asked..'; '..detail
+ end
+ -- What discovery still buys is a pinned definition: a name that was loaded must keep the schema the
+ -- model actually read, so a definition that changed underneath it is not invoked blind.
+ local names,err=loaded(ctx)
+ if err and err~='envelope_session_required' then return nil,err end
+ if names and names[name] and names[name]~=host.sha256(json.encode(selected)) then return nil,'tool_definition_changed: use tool_search again' end
+ return selected
 end
 -- Extract a top-level JSON member without re-encoding nested null/array/object shapes.
 function M.argument_fragment(raw)

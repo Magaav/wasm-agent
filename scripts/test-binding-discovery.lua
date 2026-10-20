@@ -14,8 +14,8 @@ host.client=function() client_calls=client_calls+1;return json.encode({connected
 host.http=function()error('no network allowed')end;host.http_stream=host.http
 local phase=host.getenv('WA_BINDING_PHASE') or 'seed'
 if phase=='restart' then
- local _,prior=envelope.resolve(tools.all('master'),'client',ctx)
- check(prior and prior:find('not_loaded',1,true),'native restart retains blocked load state before rediscovery')
+ local persisted,prior=envelope.resolve(tools.all('master'),'client',ctx)
+ check(persisted~=nil and prior==nil,'a permitted definition resolves after a native restart without rediscovery')
 end
 local function entry(reply,name)for _,tool in ipairs(reply.tools or {})do if tool.name==name then return tool end end end
 local schemas=tools.envelope('master',ctx);local prefix=json.encode(schemas)
@@ -39,7 +39,9 @@ check(refused_calls==0 and client_calls==0,'binding-aware plan makes zero refuse
 check(host.read_file(data..'/bound/artifact.html')=='exact existing artifact','existing artifact remains complete')
 check(json.encode(tools.envelope('master',ctx))==prefix,'discovery never changes declaration prefix')
 local route=tools.dispatch(bound,'tool_call',{name='client',arguments={action='status'}},'master',ctx)
-check(route.error and route.error:find('tool_not_loaded',1,true),'routed blocked tool cannot acquire load authority')
+-- Discovery no longer gates the call; the workspace fence still does, with the direct call's
+-- exact named refusal.
+check(route.error=='workspace_execution_context_unsupported','routed blocked tool refuses with the same native workspace guard')
 for _,action in ipairs({'status','browser','screenshot'}) do
  local denied=tools.dispatch(bound,'client',{action=action,target='open'},'master',ctx)
  check(denied.error=='workspace_execution_context_unsupported','direct native guard remains for '..action)
@@ -75,8 +77,9 @@ check(tools.dispatch(bound,'tool_call',{name='client',arguments={action='status'
 local rediscovered=tools.dispatch(bound,'tool_search',{query='client',limit=1},'master',ctx)
 check(rediscovered.loaded==0,'rediscovery retires stale loaded client name, not the original definition evidence')
 local restored=dofile('lua/core/envelope.lua')
-local _,problem=restored.resolve(tools.all('master'),'client',ctx)
-check(problem and problem:find('not_loaded',1,true),'blocked load state survives module/process reconstruction')
+local resolved,problem=restored.resolve(tools.all('master'),'client',ctx)
+check(resolved~=nil and problem==nil,'reconstruction keeps a permitted definition callable by name')
+check(tools.dispatch(bound,'tool_call',{name='client',arguments={action='status'}},'master',ctx).error=='workspace_execution_context_unsupported','the blocked workspace guard survives reconstruction')
 state={required=true,state='failed',error='fixture failure'}
 local missing=tools.dispatch(bound,'capabilities',{},'master',ctx)
 check(missing.execution.client.reason=='session_workspace_unavailable' and missing.execution.write.status=='blocked','missing required binding never advertises writable execution')

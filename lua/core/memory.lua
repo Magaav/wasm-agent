@@ -325,7 +325,15 @@ end
 
 -- ---------------------------------------------------------------- memories
 
-function M.remember(content, scope, tags)
+-- Store a fact, or correct one in place.
+--
+-- A wrong fact is the *same* fact with new text, so `id` replaces that entry: one row, one id, and the
+-- search row rewritten in the same transaction. Correcting used to need `forget` + `remember`, which
+-- left the store holding both versions between the two calls - and a reader in that window (or a crash
+-- in it) kept the superseded text, which is exactly how a stale instruction misleads a later turn.
+-- Without `id` this is unchanged: a content-identical fact in the same scope still dedupes to its
+-- existing id.
+function M.remember(content, scope, tags, id)
   content = tostring(content or "")
   if content == "" then error("memory_empty") end
   if #content > 8000 then error("memory_too_large") end
@@ -336,6 +344,34 @@ function M.remember(content, scope, tags)
   -- the duplicate check. BEGIN IMMEDIATE takes the write lock before the check.
   return in_transaction(function()
   local hash = host.sha256(content)
+  if id ~= nil then
+    id = tostring(id)
+    if id == "" then error("memory_id_required") end
+    local rows = query("SELECT scope,content,tags,created_at FROM memories WHERE id=? AND deleted_at IS NULL", {id})
+    local row = rows[1]
+    -- A guest's scope is a boundary, not a default: a replace may not name another guest's row.
+    if not row or (scope:sub(1, 5) == "user:" and row.scope ~= scope) then return nil, "memory_not_found" end
+    local stored_tags = json.decode(row.tags) or {}
+    local same = row.content == content and #stored_tags == #tags
+    if same then
+      for i = 1, #tags do if stored_tags[i] ~= tags[i] then same = false; break end end
+    end
+    -- Re-storing the identical text is a no-op, not churn: no write, no new updated_at, no journal row.
+    if same then return id end
+    local now = host.now()
+    exec("UPDATE memories SET content=?, tags=?, content_sha256=?, updated_at=? WHERE id=? AND deleted_at IS NULL",
+         {content, json.encode(tags), hash, now, id})
+    exec("DELETE FROM memories_fts WHERE memory_id=?", {id})
+    exec("INSERT INTO memories_fts(content,tags,memory_id) VALUES(?,?,?)",
+         {content, table.concat(tags, " "), id})
+    -- The scope stays the entry's own: a caller's default scope (or a guest's bounded one) is not
+    -- permission to move a fact out of the scope that owns it.
+    M.journal("memory", id, {
+      id = id, scope = row.scope, content = content, tags = tags, source = "user",
+      created_at = row.created_at, updated_at = now, content_sha256 = hash,
+    })
+    return id
+  end
   local existing = query(
     "SELECT id FROM memories WHERE scope=? AND content_sha256=? AND deleted_at IS NULL LIMIT 1",
     {scope, hash})
@@ -345,18 +381,18 @@ function M.remember(content, scope, tags)
     local held = query("SELECT COUNT(*) AS n FROM memories WHERE scope=? AND deleted_at IS NULL", {scope})
     if (tonumber(held[1] and held[1].n) or 0) >= 500 then error("memory_scope_full") end
   end
-  local id = host.uuid()
+  local new_id = host.uuid()
   local now = host.now()
   exec("INSERT INTO memories(id,scope,content,tags,source,session_id,created_at,updated_at,content_sha256) " ..
        "VALUES(?,?,?,?,?,?,?,?,?)",
-       {id, scope, content, json.encode(tags), "user", "", now, now, hash})
+       {new_id, scope, content, json.encode(tags), "user", "", now, now, hash})
   exec("INSERT INTO memories_fts(content,tags,memory_id) VALUES(?,?,?)",
-       {content, table.concat(tags, " "), id})
-  M.journal("memory", id, {
-    id = id, scope = scope, content = content, tags = tags, source = "user",
+       {content, table.concat(tags, " "), new_id})
+  M.journal("memory", new_id, {
+    id = new_id, scope = scope, content = content, tags = tags, source = "user",
     created_at = now, updated_at = now, content_sha256 = hash,
   })
-  return id
+  return new_id
   end)
 end
 
@@ -1004,14 +1040,14 @@ in_transaction = function(fn)
   if depth > 0 then return fn() end
   exec("BEGIN IMMEDIATE")
   rawset(_G, "__wa_tx_depth", 1)
-  local ok, result = pcall(fn)
+  local ok, result, reason = pcall(fn)
   rawset(_G, "__wa_tx_depth", 0)
   if not ok then
     pcall(exec, "ROLLBACK")
     error(result)
   end
   exec("COMMIT")
-  return result
+  return result, reason
 end
 
 local function append_turn(session_id, turn)
@@ -1509,16 +1545,26 @@ function apply_entry(entry)
          {payload.deleted_at or host.now(), payload.updated_at or host.now(), payload.id})
     exec("DELETE FROM memories_fts WHERE memory_id=?", {payload.id})
   elseif entry.kind == "memory" then
-    exec("INSERT OR IGNORE INTO memories(id,scope,content,tags,source,session_id,created_at," ..
-         "updated_at,content_sha256) VALUES(?,?,?,?,?,?,?,?,?)",
+    -- A correction is journalled as a second entry for the same id, so replay has to *apply* it.
+    -- `INSERT OR IGNORE` left the row holding the old text while the search row below took the new
+    -- one: recall then matched the new text and returned a row that said something else. The search
+    -- row is rebuilt from whatever the row holds, so re-delivering an entry is still a no-op.
+    -- `updated_at` orders two entries for one id; an older entry arriving late cannot roll it back.
+    exec("INSERT INTO memories(id,scope,content,tags,source,session_id,created_at," ..
+         "updated_at,content_sha256) VALUES(?,?,?,?,?,?,?,?,?) " ..
+         "ON CONFLICT(id) DO UPDATE SET content=excluded.content,tags=excluded.tags," ..
+         "content_sha256=excluded.content_sha256,updated_at=excluded.updated_at " ..
+         "WHERE excluded.updated_at>=memories.updated_at",
          {payload.id, payload.scope or "global", payload.content or "",
           type(payload.tags) == "table" and json.encode(payload.tags) or (payload.tags or "[]"),
           payload.source or "replica", payload.session_id or "", payload.created_at or host.now(),
           payload.updated_at or host.now(), payload.content_sha256 or ""})
     exec("DELETE FROM memories_fts WHERE memory_id=?", {payload.id})
-    exec("INSERT INTO memories_fts(content,tags,memory_id) VALUES(?,?,?)",
-         {payload.content or "", type(payload.tags) == "table" and table.concat(payload.tags, " ") or (payload.tags or ""),
-          payload.id})
+    local held = query("SELECT content,tags FROM memories WHERE id=? AND deleted_at IS NULL", {payload.id})
+    if held[1] then
+      exec("INSERT INTO memories_fts(content,tags,memory_id) VALUES(?,?,?)",
+           {held[1].content, table.concat(json.decode(held[1].tags) or {}, " "), payload.id})
+    end
   elseif entry.kind == "run" then
     exec("INSERT OR REPLACE INTO runs(id,session_id,run_id,status,outcome,reply,started_at,ended_at) " ..
          "VALUES(?,?,?,?,?,?,?,?)",

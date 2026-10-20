@@ -60,8 +60,9 @@ end
 
 -- Available to everyone.
 M.shared = {
-  schema("remember", "Store a fact the user asked you to remember, so it can be recalled later. Confirm in one short sentence; do not store your own reasoning. If a stored fact turns out to be wrong, call `forget` on it and then store the corrected version once - never append a correction entry, or the store accumulates contradictions that you will later have to guess between.", {
+  schema("remember", "Store a fact the user asked you to remember, so it can be recalled later. Confirm in one short sentence; do not store your own reasoning. To correct a stored fact, call remember with that entry's `id`: it replaces the entry in place, so one row remains and the old text stops being found. Use `forget` only for a fact that should not exist at all. Never append a correction - two versions of one fact mislead a later turn.", {
     content = { type = "string", description = "The fact to remember, in full." },
+    id = { type = "string", description = "Existing memory id; replaces that entry." },
     scope = { type = "string", description = "Optional scope, e.g. global or a conversation id." },
     tags = { type = "array", items = { type = "string" } } }, { "content" }),
   schema("recall", "Look up facts the user previously asked you to remember. Call this before answering any question about the user, their preferences, names, codewords, settings, accounts, or earlier steps - and before saying you do not know. The store is small and lookup is cheap; guessing is not.", {
@@ -78,8 +79,8 @@ M.shared = {
     offset = { type = "integer", minimum = 0 },
     snapshot = { type = "string", description = "Carry the returned snapshot when continuing a metadata page." } }),
   schema("capabilities", "List permitted tools and their current workspace execution limits; permission is not executability.", {}),
-  schema('tool_search','Discover permitted definitions and workspace execution limits before invocation. Blocked tools are not loaded; discovery grants no permissions.',{query={type='string',maxLength=256},limit={type='integer',minimum=1,maximum=8}},{'query'}),
-  schema('tool_call','Invoke a loaded tool by name/arguments; checked=true validates its current JSON schema first. Or preflight 1-8 known independent pure reads in calls (serial, not a transaction). Follow cached batch cursor without replay. All target permissions/effect/workspace checks remain.',{name={type='string'},arguments={type='object'},checked={type='boolean'},calls={type='array',minItems=1,maxItems=8,items={type='object',properties={name={type='string'},arguments={type='object'}},required={'name','arguments'}}},cursor={type='string'}}),
+  schema('tool_search','Find permitted tools you do not already know, and load exact definitions plus workspace execution limits. A tool you already know by name is callable with tool_call without discovery. Blocked tools are not loaded; discovery grants no permissions.',{query={type='string',maxLength=256},limit={type='integer',minimum=1,maximum=8}},{'query'}),
+  schema('tool_call','Invoke a permitted tool by name/arguments; a known name needs no discovery first. checked=true validates its current JSON schema first. Or preflight 1-8 known independent pure reads in calls (serial, not a transaction). Follow cached batch cursor without replay. All target permissions/effect/workspace checks remain.',{name={type='string'},arguments={type='object'},checked={type='boolean'},calls={type='array',minItems=1,maxItems=8,items={type='object',properties={name={type='string'},arguments={type='object'}},required={'name','arguments'}}},cursor={type='string'}}),
   schema("subagent", "Start and supervise a child agent (a subagent), using configured node placement, that works on a bounded task with its own fresh context, its own transcript and a restricted tool profile. `start` returns a durable receipt, not a result: the child runs in the background. Use `await` (one bounded wait, never repeated model polling) or `status`/`result` to collect it, and `cancel` to stop it. A placed task's own `state` says what the placement proved: `refused` means the destination answered that it started nothing, so the task will not run and `cancel` retracts it; `unknown` means a delivery may or may not have arrived, and only `reconcile` - which asks the destination whether it holds a run for that key - may then retry or cancel it. `attempts` counts how many times a destination was asked. You may only inspect or cancel the subagents you started. A profile's tools can only narrow your own; they can never grant more than you have. Reuse the exact recorded subagent/dispatch or native attempt ID for `status` first: one direct lookup, not `list` rediscovery. Never guess or strip a `child:` session name into an ID. Only if the ID is missing and the child session is known, use read-only `lookup_session` with explicit `conversation_id`; it returns the latest owned identity/state, not permission to message an active worker. Check current ownership/state and admitted profile/model/reasoning before authorized follow-up; reconcile uncertainty explicitly. Use `list` for genuinely unknown tasks and `profiles` to see what is approved. `session` reads the original child conversation; `message` queues its next turn with the same profile and model. `message`, `steer` and `steer_session` require a non-empty `idempotency_key`; reuse that key only for the same request, never replay an unknown effect.", {
     action = { type = "string", enum = { "start", "status", "list", "lookup_session", "result", "await", "cancel", "reconcile", "profiles", "message", "steer", "steer_session", "steering_status", "session", "events", "fleet" } },
     text = { type = "string", description = "message: queue a follow-up; steer: amend active child; steer_session: amend active main session. Steering fences calls not yet admitted, never undoes in-flight effects." },
@@ -468,7 +469,7 @@ local CUES = {
   skill = "Discover procedures by query or load a full skill by name",
   capabilities = "List the tools this account may use",
   tool_search = 'Discover and load a permitted tool definition',
-  tool_call = 'Call a discovered tool without expanding permanent declarations',
+  tool_call = 'Call a permitted tool by name without expanding permanent declarations',
   web_search='Search public web sources with retained evidence',
   web_read='Read a public source or page an immutable cache ref',
   subagent = "Start and collect a child agent on a bounded task",
@@ -1031,7 +1032,12 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
   local guest_scope = not is_master(role) and ("user:" .. tostring(user_id)) or nil
   if name == "remember" then
     if not args.content or args.content == "" then return { error = "content_required" } end
-    return { ok = true, id = memory.remember(args.content, guest_scope or args.scope or "global", args.tags or {}) }
+    -- With `id`, this replaces that entry in place. A stale or unknown id refuses rather than
+    -- inserting a second copy of a fact the model believes it is correcting.
+    local id, refusal = memory.remember(args.content, guest_scope or args.scope or "global", args.tags or {}, args.id)
+    if not id then return { error = refusal or "memory_not_found" } end
+    local replaced = (args.id ~= nil and args.id ~= "") or nil
+    return { ok = true, id = id, replaced = replaced }
   elseif name == "recall" then
     if guest_scope then return memory.recall(args.query or "", args.limit or 10, guest_scope, true) end
     return memory.recall(args.query or "", args.limit or 10, args.scope)
