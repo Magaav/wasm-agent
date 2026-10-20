@@ -92,6 +92,8 @@ mod target_identity_tests;
 mod quiet_launch_tests;
 #[cfg(test)]
 mod intake_tests;
+#[cfg(test)]
+mod publish_loop_tests;
 
 // ---------------------------------------------------------------- paths
 
@@ -2023,10 +2025,20 @@ fn request(args: &[String]) -> Result<()> {
     for folder in ["requests","claimed","done","failed"] {
         if sentinel_dir().join(folder).join(format!("{stamp}.json")).exists() {bail!("request identity collision; existing evidence preserved");}
     }
+    // When it was queued, recorded for every request; and for a deploy, the commit it is asking to install.
+    // Both are written here rather than re-derived later: main moves, and a request that cannot say what it
+    // was written to install turns a later `status` into a guess.
+    fields.insert("queued_at".into(), json!(now_epoch()));
+    let mut recorded_commit: Option<String> = None;
+    if verb == "deploy" && !fields.contains_key("expected-sha") {
+        match deploy_protocol::target_commit() {
+            Some(commit) => { fields.insert("target_commit".into(), json!(commit.clone())); recorded_commit = Some(commit); }
+            None => say("no target commit recorded: origin/main of the deploy tree could not be read"),
+        }
+    }
     if let Some(sha) = fields.remove("expected-sha") {
         fields.insert("expected_sha".into(), sha);
         fields.insert("id".into(), json!(stamp));
-        fields.insert("queued_at".into(), json!(now_epoch()));
         deploy_protocol::validate(&Value::Object(fields.clone()), &stamp)?;
     }
     let path = sentinel_dir().join("requests").join(format!("{stamp}.json"));
@@ -2043,6 +2055,25 @@ fn request(args: &[String]) -> Result<()> {
     audit("request", &verb, &reason);
     say(&format!("requested {verb}: {}", path.display()));
     say("the sentinel performs it - it is the only thing that stops or starts this node");
+    if let Some(commit) = &recorded_commit {
+        // The commit is a fact about this request, not about main: main may move before it runs.
+        say(&format!("target commit {commit} recorded (origin/main now; a later move of main does not change this request)"));
+    }
+    // What the queue implies, at the moment of writing. A verb that replaces the node runs only when the node
+    // is idle - and the turn writing the request is exactly what makes the node busy, so continuing it is how
+    // a deploy starves behind its own author. Measured: three deploys in one day, each reported as "queued"
+    // and understood as "deployed".
+    if waits_for_idle(&verb) {
+        say("it replaces the node, so it runs only when the node is idle");
+        say("if this was written from inside a turn: END THE TURN HERE - no further tool calls, or it waits on you");
+        if verb == "deploy" {
+            say("next turn, verify it - installed.txt must name this commit before you say 'deployed'");
+        } else {
+            say("next turn, verify it happened - the log and the request record say - before you say it did");
+        }
+    } else {
+        say("it does not wait for an idle node: the watcher performs it on its next tick");
+    }
     Ok(())
 }
 
@@ -2495,15 +2526,152 @@ fn reap_children() {
     }
 }
 
+/// One request still waiting in the box, as `status` has to read it: what was asked, which commit it would
+/// install, and when it was queued. Facts only - reading it neither claims, performs nor retries it.
+pub(crate) struct Pending {
+    pub(crate) verb: String,
+    pub(crate) target: Option<String>,
+    pub(crate) queued_at: Option<u64>,
+}
+
+/// What a request records as the commit it will install. `expected_sha` is a protocol deploy's own target;
+/// `target_commit` is what `request deploy` wrote from `origin/main` when the file was created.
+fn recorded_target(request: &Value) -> Option<String> {
+    ["expected_sha", "target_commit"].iter()
+        .filter_map(|field| request.get(*field).and_then(Value::as_str))
+        .find(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+/// A request file is named `<epoch-nanos>-<pid>-<sequence>.json`, so the first field is when it was queued
+/// even for a request written before `queued_at` was recorded.
+fn stamp_seconds(file_stem: &str) -> Option<u64> {
+    file_stem.split('-').next()?.parse::<u128>().ok().map(|nanos| (nanos / 1_000_000_000) as u64)
+}
+
+/// Every request still waiting in `dir`, oldest first - the order the dispatcher performs them in.
+pub(crate) fn pending_requests(dir: &Path) -> Vec<Pending> {
+    let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| entry.ok().map(|e| e.path()))
+        .filter(|path| path.extension().map(|e| e == "json").unwrap_or(false))
+        .collect();
+    files.sort();
+    files
+        .iter()
+        .filter_map(|path| {
+            let queued_stamp = path.file_stem().and_then(|stem| stem.to_str()).and_then(stamp_seconds);
+            match std::fs::read(path).ok().and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok()) {
+                Some(request) => Some(Pending {
+                    verb: request.get("verb").and_then(Value::as_str).unwrap_or("(no verb recorded)").to_string(),
+                    target: recorded_target(&request),
+                    queued_at: request.get("queued_at").and_then(Value::as_u64).or(queued_stamp),
+                }),
+                // A file the sentinel cannot read is still a fact about the queue, not an empty one.
+                None => Some(Pending { verb: "(unreadable request)".to_string(), target: None, queued_at: queued_stamp }),
+            }
+        })
+        .collect()
+}
+
+/// Why a still-queued request has not run, in the same classification the dispatcher holds it for. Sharing
+/// `hold_for` is the point: a `status` that decided this a second way would eventually disagree with the
+/// deferral line in the log, and the operator would be left to pick which one to believe.
+pub(crate) fn hold_label(verb: &str, activity: Option<bool>, node_up: bool) -> String {
+    match hold_for(verb, activity, || node_up) {
+        Some(why) if why.starts_with("the node is busy") => "held: node busy".to_string(),
+        Some(why) => format!("held: {why}"),
+        None if !waits_for_idle(verb) => "does not wait for idle: the next watcher tick picks it up".to_string(),
+        None if !node_up => "ready: the node is down, so there is nothing to interrupt".to_string(),
+        None => "ready: the node is idle now, so the next watcher tick runs it".to_string(),
+    }
+}
+
+/// One line per waiting request: verb, target commit, queue time and why it is still there.
+///
+/// The count this replaces (`requests: 1 waiting`) made somebody read the log to learn what was queued and
+/// why it had not run. Every field here is either in the request file or computed by the same predicate the
+/// dispatcher uses; nothing is inferred from the writer's intent.
+pub(crate) fn pending_lines(dir: &Path, now: u64, activity: Option<bool>, node_up: bool, watching: bool) -> Vec<String> {
+    pending_requests(dir)
+        .iter()
+        .map(|pending| {
+            let target = match &pending.target {
+                Some(commit) => format!("target commit {commit}"),
+                None => "target: no commit recorded".to_string(),
+            };
+            let queued = match pending.queued_at {
+                Some(at) => format!("{} ({})", utc_stamp(at), age(now, at)),
+                None => "at an unrecorded time".to_string(),
+            };
+            let mut line = format!(
+                "  waiting  {}  {}  queued {}  {}",
+                pending.verb,
+                target,
+                queued,
+                hold_label(&pending.verb, activity, node_up)
+            );
+            if !watching {
+                line.push_str("; no watcher is running, so nothing would perform it");
+            }
+            line
+        })
+        .collect()
+}
+
+/// How long ago an epoch second was, in the coarsest unit that still says something.
+pub(crate) fn age(now: u64, at: u64) -> String {
+    let seconds = now.saturating_sub(at);
+    if seconds < 60 { format!("{seconds}s ago") }
+    else if seconds < 3_600 { format!("{}m ago", seconds / 60) }
+    else if seconds < 86_400 { format!("{}h ago", seconds / 3_600) }
+    else { format!("{}d ago", seconds / 86_400) }
+}
+
+/// `2026-10-02T19:22:31Z` from an epoch second. No dependency and no local time: the request and the log
+/// are both stamped in UTC, and a status an operator has to convert by hand is one they misread.
+pub(crate) fn utc_stamp(epoch: u64) -> String {
+    let days = (epoch / 86_400) as i64;
+    let seconds = (epoch % 86_400) as u32;
+    let (year, month, day) = civil_from_days(days);
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
+        seconds / 3_600,
+        (seconds % 3_600) / 60,
+        seconds % 60
+    )
+}
+
+/// Howard Hinnant's `civil_from_days`: days since 1970-01-01 to a proleptic Gregorian date.
+fn civil_from_days(days: i64) -> (i64, u32, u32) {
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let year = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    (if month <= 2 { year + 1 } else { year }, month, day)
+}
+
 fn status() -> Result<()> {
     let health = health();
+    // One probe answers both questions the pending requests below are reported against: whether the node
+    // answers at all, and whether it proves it is idle. Reporting them from a second probe would let the two
+    // lines of one status disagree.
+    let activity = health.as_ref().and_then(activity_of);
+    let node_up = health.is_some();
     say(&format!("node:      port {} {}", node_port(), match &health {
         Some(value) => format!("up  {}", value),
         None => "not answering".into(),
     }));
-    say(&format!("sentinel:  {}", match std::fs::read_to_string(pid_path()).ok().and_then(|t| t.trim().parse::<u32>().ok()) {
-        Some(pid) if pid_alive(pid) => format!("watching (pid {pid})"),
-        _ => "not running".into(),
+    let watched = std::fs::read_to_string(pid_path()).ok().and_then(|t| t.trim().parse::<u32>().ok()).filter(|pid| pid_alive(*pid));
+    say(&format!("sentinel:  {}", match watched {
+        Some(pid) => format!("watching (pid {pid})"),
+        None => "not running".into(),
     }));
     // Who owns this watcher's lifecycle, in the words the verbs decide from: the operator question this
     // answers is "will `stop` stop it, or is it a five-second restart", and the answer must not be
@@ -2524,6 +2692,12 @@ fn status() -> Result<()> {
     let done = std::fs::read_dir(sentinel_dir().join("done")).map(|d| d.count()).unwrap_or(0);
     let failed = std::fs::read_dir(sentinel_dir().join("failed")).map(|d| d.count()).unwrap_or(0);
     say(&format!("requests:  {pending} waiting, {done} done, {failed} failed"));
+    // A count is not a fact. Each waiting request is one line: what was asked, which commit it would install,
+    // when it was queued and why it has not run - so "1 waiting" no longer leaves the operator to read the
+    // log, or to mistake "queued" for "deployed".
+    for line in pending_lines(&sentinel_dir().join("requests"), now_epoch(), activity, node_up, watched.is_some()) {
+        say(&line);
+    }
     say(&format!("wakes:     {}/{} this hour", wakes_last_hour(),
         std::env::var("WA_SENTINEL_WAKE_BUDGET").unwrap_or_else(|_| "6".into())));
     // The one setting whose absence is invisible until a job's child sits in the queue: say it out loud,

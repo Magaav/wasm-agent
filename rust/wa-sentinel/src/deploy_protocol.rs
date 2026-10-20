@@ -399,6 +399,36 @@ fn git(root: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+/// The commit a deploy queued right now would install: `origin/main` of the tree a deploy builds from.
+///
+/// `request deploy` records this into the request file at the moment it is written, so a later `status`
+/// can say what will be installed even after main has moved. It is advisory evidence, never authority:
+/// `canonical_script` revalidates the source SHA before building and before swapping, so a stale recorded
+/// commit cannot widen what a deploy does - it can only tell an operator what was asked for and when.
+pub(crate) fn target_commit() -> Option<String> {
+    // The same override `deploy.sh` honours, so the recorded commit is the one the deploy would build.
+    let root = std::env::var("WA_DEPLOY_ROOT")
+        .ok()
+        .map(|value| PathBuf::from(value.trim()))
+        .filter(|path| path.is_dir())
+        .map(Ok)
+        .unwrap_or_else(canonical_root)
+        .ok()?;
+    target_commit_at(&root).ok()
+}
+
+/// `origin/main` as `root` sees it, or an error saying what could not be read.
+///
+/// Split from the root resolution so a fixture repository can prove that what a request recorded at
+/// request time survives a later move of main.
+pub(crate) fn target_commit_at(root: &Path) -> Result<String> {
+    let commit = git(root, &["rev-parse", "origin/main"]).context("origin/main is not readable")?;
+    if commit.len() != 40 || !commit.bytes().all(|b| b.is_ascii_hexdigit()) {
+        bail!("origin/main is not a full commit SHA: {commit}");
+    }
+    Ok(commit)
+}
+
 /// Select only the configured runtime repository's PRIMARY checkout. No request-supplied path.
 /// Revalidate at dispatch; deploy.sh revalidates the source SHA before building and before swapping.
 fn canonical_root() -> Result<PathBuf> {
