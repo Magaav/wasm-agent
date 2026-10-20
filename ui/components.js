@@ -1897,7 +1897,9 @@ customElements.define('wa-tasks', WaTasks);
 // this element's internals.
 //
 // A host may author its own children. They are distributed by `data-slot`:
-//   (none)        the transcript region - a jump control, an empty state
+//   (none)        the transcript region - an empty state
+//   float         the transcript region's own box, above the scroll (a scroll-to-latest arrow):
+//                 pinned to that box's bottom edge, so it cannot drift over the composer
 //   footer-left   before the attach control, in authored order
 //   footer-right  before the model readout
 //   balloon       inside the composer, so an author-provided <wa-balloon> keeps its anchor and its
@@ -1990,7 +1992,7 @@ customElements.define('wa-chat-warning',WaChatWarning);
 
 const CHAT_SHELL_MARKUP = `
   <wa-chat-warning data-part="warning" hidden></wa-chat-warning>
-  <div class="messages" data-part="content"></div>
+  <div class="chat-content" data-part="region"><div class="messages" data-part="content"></div></div>
   <div class="chat-host" data-part="host"></div>
   <form class="composer" data-part="composer">
     <div class="attachments" data-part="attachments"></div>
@@ -2021,6 +2023,10 @@ class WaChatShell extends HTMLElement {
     this.innerHTML = CHAT_SHELL_MARKUP;
     const part = (name) => this.querySelector('[data-part="' + name + '"]');
     this._content = part("content");
+    // The transcript's own box: the element a control pinned to "the bottom of the chat content"
+    // is positioned against. The scroll container is inside it, because an absolutely positioned
+    // child of the scroll container would scroll away with the transcript.
+    this._region = part("region");
     this._warning = part("warning");
     this._host = part("host");
     this._form = part("composer");
@@ -2044,7 +2050,8 @@ class WaChatShell extends HTMLElement {
     const left = [], right = [], balloons = [];
     for (const node of seed) {
       const slot = node.nodeType === 1 ? node.getAttribute("data-slot") : null;
-      if (slot === "footer-left") left.push(node);
+      if (slot === "float") this._region.append(node);
+      else if (slot === "footer-left") left.push(node);
       else if (slot === "footer-right") right.push(node);
       else if (slot === "balloon") balloons.push(node);
       else this._content.append(node);
@@ -2122,6 +2129,7 @@ class WaChatShell extends HTMLElement {
 
   // ---- the transcript region and the host's own rows ----------------------
   get content() { this._ensure(); return this._content; }
+  get region() { this._ensure(); return this._region; }
   get warning() { this._ensure(); return this._warning; }
   get host() { this._ensure(); return this._host; }
 

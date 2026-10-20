@@ -14,6 +14,8 @@ let transcript = messages;
 messages.setAttribute("role", "log");
 messages.setAttribute("aria-live", "polite");
 const jump = document.getElementById("jump");
+// The transcript region's own box: the chat content rect the scroll-to-latest arrow is pinned to.
+const chatRegion = chatShell.region;
 const meta = document.getElementById("meta");
 const form = chatShell.form;
 const input = chatShell.input;
@@ -410,6 +412,13 @@ function atBottom(slack = 40) {
 // event they cause cannot be mistaken for intent.
 let follow = true;
 let pinning = false;
+// The scroll-to-latest arrow's own state, beside the other scroll state because `pin` reads it.
+// `jumpMotion` is the arrow's smooth motion while it runs: the scroll events that motion causes
+// are ours, never the reader's intent. `JUMP_SLACK` is the arrow's rule for "the bottom": 8px,
+// because a control may not outlive the bottom it points at by a visible gap.
+let jumpMotion = null;
+let jumpWatch = null;
+const JUMP_SLACK = 8;
 // Anchors belong to containers, including independently painted child chats.
 const answerAnchors = new WeakMap();
 const childScrollStates = new WeakMap();
@@ -537,6 +546,8 @@ function pin(force = false) {
   const container=transcript;
   const state=container===messages ? null : scrollState(container);
   const answer = answerAnchors.get(transcript);
+  // A pin owns the bottom; the arrow's own motion is not a second owner of the same scroll.
+  cancelJumpMotion();
   if(force || answer && !container.contains(answer)) {
     answerMotions.delete(container);answerAnchors.delete(container);
     container.classList.remove('answer-reading','answer-space');container.style.removeProperty('--answer-reading-space');
@@ -548,26 +559,137 @@ function pin(force = false) {
     if (Math.abs(container.scrollTop - target) >= 1) container.scrollTop = target;
     answerScrollPositions.set(transcript, transcript.scrollTop);
     requestAnimationFrame(() => { if(state)state.pinning=false;else pinning = false; });
+    if (container === messages) syncJump();
     return;
   }
-  if (!(state ? state.follow : follow) && !force) return;
+  if (!(state ? state.follow : follow) && !force) {
+    // Not following: the transcript may still have grown under the reader, which is exactly when
+    // the arrow has to appear - so its rule is re-read here rather than waiting for a scroll.
+    if (container === messages) syncJump();
+    return;
+  }
   if(state)state.pinning=true;else pinning = true;
   transcript.scrollTop = transcript.scrollHeight;
   answerScrollPositions.set(container,container.scrollTop);
   // Release on the next frame: the scroll event fires asynchronously.
   requestAnimationFrame(() => { if(state)state.pinning=false;else pinning = false; });
+  if (container === messages) syncJump();
 }
 
 function setFollow(value) {
   follow = value;
-  jump.classList.toggle("show", !follow);
+  syncJump();
+}
+
+// ---- the scroll-to-latest arrow ---------------------------------------------------------------
+// The arrow is on screen exactly while the transcript is not at its bottom, and the rule is
+// measured rather than inferred from `follow`: follow has a 40px slack (a stream should not stop
+// for a half-line), so an arrow driven by it would still point at a bottom the reader can see.
+function jumpDistance() {
+  return messages.scrollHeight - messages.scrollTop - messages.clientHeight;
+}
+
+function reducedMotion() {
+  return !!(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
+}
+
+// The live run-status row is sticky to the bottom of the chat content while a run is stepping, so
+// the arrow's bottom edge is that row's top edge + 5px (DESIGN.md §4): the row's own measured rect,
+// because the container's 5px padding is already in it, and a row that is not in the bottom band
+// (the reader has scrolled it up into scrollback) is not in the arrow's way. The value is a CSS
+// custom property so style.css still owns the 5px it is added to.
+function jumpOffset() {
+  const row = messages.querySelector(".chat-content-run-status:not(.finished)");
+  if (!row || !row.isConnected) return "";
+  const rect = row.getBoundingClientRect();
+  if (rect.height <= 0) return "";
+  const region = chatRegion.getBoundingClientRect();
+  if (rect.bottom < region.bottom - 10) return "";
+  return Math.max(0, Math.round(region.bottom - rect.top) + 5) + "px";
+}
+
+// While the arrow is on screen the run-status row can appear, finish or go away under it. One
+// observer re-reads the offset; it reads geometry and writes the arrow's own style, and it never
+// touches the reader's scroll position.
+function watchJumpOffset() {
+  if (jumpWatch || typeof MutationObserver !== "function") return;
+  jumpWatch = new MutationObserver(() => {
+    if (jump.classList.contains("show")) positionJump();
+  });
+  jumpWatch.observe(messages, { childList: true, subtree: true, attributes: true, attributeFilter: ["class"] });
+}
+
+function positionJump() {
+  const offset = jumpOffset();
+  if (offset) jump.style.setProperty("--jump-offset", offset);
+  else jump.style.removeProperty("--jump-offset");
+}
+
+// One state, written once. A hidden control that is still focusable is a trap for a keyboard or
+// screen-reader user, so "at the bottom" means out of the tab order and out of the accessibility
+// tree as well as off the screen.
+function syncJump() {
+  const shown = jumpDistance() > JUMP_SLACK;
+  jump.classList.toggle("show", shown);
+  jump.setAttribute("aria-hidden", shown ? "false" : "true");
+  jump.tabIndex = shown ? 0 : -1;
+  if (shown) {
+    positionJump();
+    watchJumpOffset();
+  } else {
+    jump.style.removeProperty("--jump-offset");
+    if (jumpWatch) { jumpWatch.disconnect(); jumpWatch = null; }
+  }
+  return shown;
+}
+
+// The click: to the bottom, and back onto the tail. Re-arming `follow` is the half that matters -
+// without it the next streamed token drops the reader off the bottom again, which is what a button
+// that only scrolled once did. Reduced motion takes the instant path: no animation, same result.
+//
+// The motion steps on a short timer rather than on animation frames: frames stop arriving in a
+// window that is not being painted (headless observation, a minimised window), and a control whose
+// only job is to reach the bottom must reach it there too. 220ms, the same span and ease the
+// answer's own reveal uses, so the two motions read as one.
+function cancelJumpMotion() {
+  if (jumpMotion && jumpMotion.timer) clearTimeout(jumpMotion.timer);
+  jumpMotion = null;
+}
+function jumpToBottom() {
+  const instant = reducedMotion();
+  const clock = () => (typeof performance !== "undefined" && performance.now ? performance.now() : Date.now());
+  jump.dataset.motion = instant ? "instant" : "smooth";
+  cancelJumpMotion();
+  const target = messages.scrollHeight - messages.clientHeight;
+  if (instant || Math.abs(target - messages.scrollTop) < 1) {
+    messages.scrollTop = messages.scrollHeight;   // the browser clamps to the last frame
+    answerScrollPositions.set(messages, messages.scrollTop);
+    pin(true);
+    syncJump();
+    return;
+  }
+  const motion = { from: messages.scrollTop, started: clock(), timer: 0 };
+  jumpMotion = motion;
+  const step = () => {
+    if (jumpMotion !== motion) return;
+    const progress = Math.min(1, (clock() - motion.started) / 220), ease = 1 - Math.pow(1 - progress, 3);
+    const bottom = messages.scrollHeight - messages.clientHeight;
+    messages.scrollTop = motion.from + (bottom - motion.from) * ease;
+    answerScrollPositions.set(messages, messages.scrollTop);
+    if (progress < 1) { motion.timer = setTimeout(step, 16); return; }
+    jumpMotion = null;
+    messages.scrollTop = messages.scrollHeight;
+    answerScrollPositions.set(messages, messages.scrollTop);
+    syncJump();
+  };
+  motion.timer = setTimeout(step, 16);
 }
 
 messages.addEventListener("scroll", () => {
   const expected = answerScrollPositions.get(messages);
   // Scroll delivery can follow the frame that cleared pinning. A position we
   // just set is still programmatic, not a reader opting out of answer-start.
-  if (pinning || (expected != null && Math.abs(messages.scrollTop - expected) < 1)) return;
+  if (jumpMotion || pinning || (expected != null && Math.abs(messages.scrollTop - expected) < 1)) return;
   releaseAnswerAnchor();
   setFollow(atBottom());
 }, { passive: true });
@@ -588,7 +710,19 @@ messages.addEventListener("keydown", (event) => {
 if (typeof ResizeObserver === "function") {
   new ResizeObserver(() => pin()).observe(messages);
 }
-jump.addEventListener("click", () => { releaseAnswerAnchor(messages); setFollow(true); pin(true); });
+jump.addEventListener("click", () => {
+  releaseAnswerAnchor(messages);
+  setFollow(true);      // re-arm the tail first, so a token that lands mid-motion is followed too
+  jumpToBottom();
+});
+// The reader's own gesture takes the motion back, in any direction: an arrow that kept pulling
+// after a wheel tick would be fighting the hand that reached for it.
+for (const gesture of ["wheel", "touchstart"]) {
+  messages.addEventListener(gesture, cancelJumpMotion, { passive: true });
+}
+messages.addEventListener("keydown", cancelJumpMotion);
+// The arrow starts at the bottom, where it is not shown; this also states its aria state at boot.
+syncJump();
 
 // One assistant bubble per run. Decisions and their tool topics live *inside*
 // it as stacked segments: separate bubbles put a border between every step,

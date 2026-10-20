@@ -218,6 +218,10 @@ a[href]:focus-visible { outline: 2px solid #8bbcff; outline-offset: 2px; }
 .topbar-btn:hover, .collapse:hover { border-color: var(--accent); background: #1d2330; }
 .topbar-btn.active { color: #fff; background: var(--accent); border-color: var(--accent); }
 
+/* The transcript's own box - the chat content rect. It exists so a control can be pinned to that
+   rect's bottom edge (see .jump): an absolutely positioned child of the scroll container itself
+   would scroll away with the transcript. Everything else about the layout is the transcript's. */
+.chat-content { flex: 1; min-height: 0; display: flex; flex-direction: column; position: relative; }
 .messages { flex: 1; min-height: 0; overflow-y: auto; padding: var(--pad); display: flex; flex-direction: column; gap: var(--gap); position: relative; }
 .messages.answer-reading { overflow-anchor: none; }
 .messages.answer-space::after { content: ""; display: block; flex: 0 0 var(--answer-reading-space, 0px); pointer-events: none; }
@@ -500,17 +504,23 @@ wa-retry { display: block; width: 100%; }
   border-left: 1px solid var(--line);
 }
 
-/* Sticky scroll: "jump to latest" appears only when the reader has scrolled away.
-   Fixed to the window: `.messages` is the scroll container, so anything
-   absolutely positioned inside it would scroll away with the content. */
+/* Sticky scroll: the "scroll to latest" arrow appears only when the reader has scrolled away from
+   the bottom, and disappears the moment the bottom is reached again. It is pinned to the bottom
+   edge of the chat content rect - inline-end aligned, on the 5px scale - not floated over the
+   composer, where it sat on top of the field it was meant to lead back to. `--jump-offset` is the
+   only thing the app moves: while the live run-status row is showing, the arrow's own bottom is
+   that row's top edge + 5px, so the two never stack. */
 .jump {
-  position: fixed; right: 15px; bottom: 90px; z-index: 5;
-  display: none; align-items: center; gap: 4px;
-  border: 1px solid var(--line); background: var(--panel-2); color: var(--text);
-  border-radius: var(--radius); padding: 3px var(--space); font-size: 11px; cursor: pointer;
+  position: absolute; inset-inline-end: var(--space); bottom: var(--jump-offset, var(--space)); z-index: 5;
+  display: none; align-items: center; justify-content: center;
+  width: var(--control-size); height: var(--control-size); padding: 0;
+  border: 1px solid var(--line); border-radius: var(--radius);
+  background: var(--panel-2); color: var(--text); cursor: pointer;
 }
 .jump.show { display: inline-flex; }
 .jump:hover { border-color: var(--accent); }
+.jump:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.jump svg { display: block; width: 16px; height: 16px; }
 
 /* engine: expandable topics (nodes, spells, tools) */
 body.engine .messages, body.engine .composer, body.engine wa-chat-shell, body.engine .terminal, body.engine .control { display: none; }
