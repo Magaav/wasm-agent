@@ -74,9 +74,12 @@ running-duration row. See [SHARED-CHAT.md](SHARED-CHAT.md). Durable backend stee
 and the existing keyboard path are not removed or redesigned.
 
 Commentary with an explicit early item phase streams directly into an open
-`wa-commentary`; header characters grow on each chunk. That marker row is drawn
-below the text, so a sentence that streamed in the answer's place keeps its own
-box when its phase resolves (DESIGN.md section 6). Native Responses is the
+`wa-commentary`; header characters grow on each chunk. A sentence that streamed
+in the answer's place becomes that same topic where it stands, and is then an
+ordinary topic: its header row is drawn above the body (the text moves down by
+that row's height, as for every other topic) and its body sits inside the topic
+box - there is no in-place/reversed layout for it (DESIGN.md section 6). Native
+Responses is the
 default and preserves added-item phase directly, without a secondary observer or
 Pi dependency. The explicit legacy Pi path omits it from text_start, so its bridge passively reads
 only bounded added-item metadata before forwarding the original SSE bytes,

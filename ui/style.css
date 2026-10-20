@@ -279,25 +279,13 @@ wa-commentary.phase-incomplete .commentary { text-decoration: underline dotted; 
   word-break: break-word; max-height: 320px; overflow: auto;
   border-top: 1px solid var(--line);
 }
-/* A commentary established on a sentence that streamed in the answer's place is typographically
-   NEUTRAL: the text box keeps the metrics it streamed with - the bubble's font-size and line-height,
-   no padding, no border, no height cap - and nothing above the text may take space, because that is
-   what pushed the sentence down and made it read as having moved into the topic. The shared topic
-   draws its header above the body; in this one state the same two children are laid out in reverse,
-   so the marker row sits below the text without the text box moving. DOM order is header, body for
-   every topic - this is a visual state, not a second component. */
-wa-commentary[data-in-place] {
-  display: flex; flex-direction: column-reverse;
-  border: 0; border-radius: 0; background: none;
-}
-wa-commentary[data-in-place] > .commentary-body {
-  padding: 0; border: 0; color: inherit; font-size: inherit; line-height: inherit;
-  max-height: none; overflow: visible;
-}
-/* The marker row must not widen the bubble either: a streamed sentence sizes the bubble, and a
-   marker that is wider than the sentence (a short "OK") would grow it. A zero-width row that then
-   fills the topic contributes nothing to the transcript's fit-content width. */
-wa-commentary[data-in-place] > .trace-head { width: 0; min-width: 100%; }
+/* A commentary established on a sentence that streamed in the answer's place is NOT a visual state of
+   its own: it is the same topic as the thinking block above, drawn at the place the sentence already
+   occupied. The header row appears above the text and the text moves down by that row's height - what
+   every other topic does - but the sentence is not re-drawn elsewhere: same parent, same sibling
+   index, same string, filling the line it streamed on. So there is no `[data-in-place]` override,
+   and no reversed layout: a topic that only looks like a topic while the run is live is the defect
+   this replaced. */
 .run-body > .topic { border: 0; border-left: 2px solid var(--line); border-radius: 0; background: none; }
 wa-steering[data-state="queued"] { border-style: dashed; }
 
