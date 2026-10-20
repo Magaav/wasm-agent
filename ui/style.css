@@ -288,6 +288,17 @@ wa-commentary.phase-incomplete .commentary { text-decoration: underline dotted; 
    chrome-less box: a topic that only looks like a topic while the run is live is the defect this
    replaced. */
 .run-body > .topic { border: 0; border-left: 2px solid var(--line); border-radius: 0; background: none; }
+/* The answer converted out of a provisional commentary topic (ui/app.js `convertProvisionalAnswer`).
+   The prose block is that topic's own body element, moved - not copied - so its computed
+   font-size/line-height/padding and its width/height must not change across the move. The wrapper
+   restores the 1px topic border inset the body sat inside, which is the whole reason the box keeps
+   its measure; the body's cap is lifted so a tall answer overflows downward instead of scrolling
+   inside a 320px box. Only the colour brightens (colour is not a metric). */
+.seg.answer-wrap { padding: 0 1px; }
+.seg.answer-wrap > .commentary-body {
+  max-height: none; overflow: visible; color: var(--text); border-radius: 0;
+}
+
 wa-steering[data-state="queued"] { border-style: dashed; }
 
 /* The diff topic: what the run changed on disk, collapsed *after* the answer.

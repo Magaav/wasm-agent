@@ -3822,6 +3822,13 @@ try {
     # greening the probes that trust it.
     & node scripts/agent-benchmark-ui-observe.mjs --ui $ui --probe (Join-Path $PSScriptRoot 'probe-fingerprint-support.js') --out (Join-Path $tmp 'fingerprint-support')
     if ($LASTEXITCODE -ne 0) { throw 'probe-fingerprint-support browser probe failed' }
+    # Where the final answer is placed: a tool-capable request streams its first content chunk inside
+    # the commentary topic, one stop converts that same prose block into the answer outside the run
+    # topic with the box metrics unmoved (fingerprint compared before the conversion), tall answers
+    # anchor their top, and onFinalAnswer fires once and refuses a replay. It runs in the gate so a
+    # placement regression cannot hide behind the probes that replay the legacy/no-signal route.
+    & node scripts/agent-benchmark-ui-observe.mjs --ui $ui --probe (Join-Path $PSScriptRoot 'probe-final-answer-placement.js') --out (Join-Path $tmp 'final-answer-placement')
+    if ($LASTEXITCODE -ne 0) { throw 'final answer placement browser probe failed' }
     & node scripts/test-final-answer-suite.mjs $WaExe (Join-Path $tmp 'final-answer')
     if ($LASTEXITCODE -ne 0) { throw 'final-answer focused suite failed' }
     & node scripts/test-minimal-chat.cjs (Join-Path $tmp 'minimal-chat')

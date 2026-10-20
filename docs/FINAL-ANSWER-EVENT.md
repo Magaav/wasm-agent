@@ -1,6 +1,6 @@
 # Final-answer display boundary
 
-`final_answer_begin` is display telemetry, not a model control/tool or an additional generation stage. Pi-style tool/steering/followup decisions are unchanged.
+`final_answer_begin` is display telemetry, not a model control/tool or an additional generation stage. Pi-style tool/steering/followup decisions are unchanged. The identified answer also emits `onFinalAnswer` once per run (ids and lengths only) at the durable reply boundary; its payload and idempotency are in [HOOK-EVENTS.md](HOOK-EVENTS.md). Placement of the streamed prose (a tool-capable request streams it inside a provisional commentary topic, a stop converts that same block into the answer) is in DESIGN.md section 6.
 
 Native Responses emits at explicit message `output_item.added.phase=final_answer`, before first text when supplied. Identity: run_id, response_id (if known), message_id (provider item or stream/block fallback), pending_id, source. Duplicate added/done items do not duplicate display. A late explicit done phase emits with timing=late. Unknown items remain provisional; response-global stopReason cannot classify another item.
 

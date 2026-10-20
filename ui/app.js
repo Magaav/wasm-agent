@@ -420,6 +420,38 @@ function scrollState(container) {
 }
 const answerSeen = new WeakMap();
 const answerReleased = new WeakSet();
+// `onFinalAnswer`: one deterministic event per run, at the boundary where the answer is identified.
+// It carries ids and lengths only (never the text), calls no model, and runs after nothing render-
+// blocking: handlers are called synchronously from the event, and a throwing handler is recorded
+// rather than allowed to lose the answer. `finalAnswerSeen` is the idempotency gate - a replayed
+// run/message is refused instead of re-emitting.
+const finalAnswerSeen = new Set();
+const finalAnswerHooks = new Set();
+let finalAnswerHookError = "";
+function onFinalAnswerHook(handler) {
+  if (typeof handler !== "function") throw new TypeError("onFinalAnswerHook needs a function");
+  finalAnswerHooks.add(handler);
+  return () => finalAnswerHooks.delete(handler);
+}
+function finalAnswerKey(payload) {
+  return [String(payload.run_id || ""), String(payload.message_id || payload.answer_id || "")].join("|");
+}
+function emitFinalAnswer(payload) {
+  if (!payload || typeof payload !== "object") return false;
+  const key = finalAnswerKey(payload);
+  if (!payload.run_id || !payload.message_id) return false;
+  if (finalAnswerSeen.has(key)) return false;
+  finalAnswerSeen.add(key);
+  const detail = { session_id: String(payload.session_id || ""), run_id: String(payload.run_id),
+    message_id: String(payload.message_id), answer_id: String(payload.answer_id || ""),
+    text_len: Number(payload.text_len) || 0, at: Number(payload.at) || 0 };
+  for (const handler of finalAnswerHooks) {
+    try { handler(detail); } catch (error) { finalAnswerHookError = String((error && error.message) || error); }
+  }
+  try { window.dispatchEvent(new CustomEvent("wa-final-answer", { detail })); }
+  catch (error) { finalAnswerHookError = String((error && error.message) || error); }
+  return true;
+}
 const answerScrollPositions = new WeakMap();
 const answerMotions = new WeakMap();
 const answerGestures = new WeakSet();
@@ -1073,6 +1105,106 @@ function markStreamedCommentaryIncomplete() {
   streamedCommentaryBlock.classList.add("phase-incomplete");
   streamedCommentaryBlock = null;
   streamedCommentaryText = "";
+}
+
+// ---- where the final answer is placed ---------------------------------------------------------
+// The request's own tool surface decides how its content prose is labelled, because the stream
+// itself cannot say: `delta` chunks carry no per-item phase, and the provider that emits them states
+// no label (checked against the raw stream). So:
+//   * no tools offered -> the prose IS the answer, drawn in the bubble exactly as before;
+//   * tools offered    -> the prose may still be a prelude to a tool call, so it streams inside a
+//     provisional `wa-commentary` topic from the first token. A tool call for that message (a `tool`
+//     event or `step_phase=commentary`) settles the label with nothing moving. A step that ends with
+//     `stop` and no tool call is ANSWERING: one conversion folds the history into the run topic and
+//     moves the prose block out of it, directly under that topic.
+function carriesTools(bubble = runBubble) {
+  return !!bubble && bubble.dataset.runTools === "1" && bubble.dataset.answerBegan !== "1";
+}
+
+// The answer's text box, measured the one way that survives a DOM move: its own rendered box and
+// the typography the reader sees. `top`/`left` are recorded for the report; the conversion asserts
+// its own deltas so a future move that reflows the answer cannot pass silently.
+function answerBoxMetrics(node) {
+  const rect = node.getBoundingClientRect();
+  const style = getComputedStyle(node);
+  return { top: +rect.top.toFixed(2), left: +rect.left.toFixed(2),
+    width: +rect.width.toFixed(2), height: +rect.height.toFixed(2),
+    fontSize: style.fontSize, lineHeight: style.lineHeight, padding: style.padding };
+}
+
+// A step that chose a tool was commentary, and the provisional topic is already the commentary
+// topic. Settling it is a label/class flip on that node: no move, no copy, no re-wrap.
+function settleProvisionalCommentary(messageId) {
+  const block = streamedCommentaryBlock;
+  if (!block) return false;
+  if (messageId && !block.dataset.messageId) {
+    block.dataset.messageId = String(messageId);
+    renderedMessageIds.add(String(messageId));
+  }
+  block.classList.remove("phase-pending", "phase-incomplete");
+  streamedCommentaryBlock = null;
+  streamedCommentaryText = "";
+  return true;
+}
+
+// The one conversion a run gets. The body element that streamed inside the provisional topic IS
+// the answer's text box: it is moved, never copied, and its box is measured before and after. The
+// 1px wrapper inset restores the topic border the box sat inside, so width/height/font-size/
+// line-height/padding are identical across the move (a reflow here is the defect the operator
+// reported twice). Only `top` changes, and deliberately: the fold puts the run topic above the answer.
+function convertProvisionalAnswer(bubble, topic, messageId) {
+  if (!bubble || !topic || bubble.dataset.answerConverted === "1") return null;
+  const body = topic.querySelector(":scope > .commentary-body");
+  if (!body) return null;
+  const before = answerBoxMetrics(body);
+  bubble.dataset.answerConverted = "1";
+  // ONE frame: fold every earlier step AND this commentary topic into the run topic...
+  streamBody = null;
+  collapseRun(true);
+  // ...then pull the prose block back out of it, under that topic.
+  const wrap = document.createElement("div");
+  wrap.className = "seg final-answer answer-wrap";
+  if (messageId) wrap.dataset.messageId = String(messageId);
+  if (bubble.dataset.answerId) wrap.dataset.answerId = bubble.dataset.answerId;
+  wrap.append(body);
+  bubble.body.append(wrap);
+  topic.remove();
+  // A run that offered tools but called none has no earlier steps to fold: an empty run topic would
+  // read as an activity row that never happened, so the answer stands alone.
+  const run = bubble.body.querySelector(":scope > wa-run");
+  const runActivity = run && run.body.querySelector(
+    "wa-trace, wa-retry, wa-summary, wa-commentary, wa-diff, wa-steering");
+  if (run && !runActivity &&
+      Array.prototype.every.call(run.body.children, (child) => child.tagName === "WA-STEP")) {
+    // Only the hidden diagnostic step rows would be left: a run that never called a tool keeps its
+    // plain answer, exactly as a no-tool run does.
+    run.remove();
+  }
+  const after = answerBoxMetrics(body);
+  wrap.dataset.conversionMetrics = JSON.stringify({ before, after,
+    widthDelta: +(after.width - before.width).toFixed(2),
+    heightDelta: +(after.height - before.height).toFixed(2),
+    leftDelta: +(after.left - before.left).toFixed(2) });
+  streamedCommentaryBlock = null;
+  streamedCommentaryText = "";
+  streamText = "";
+  streamBody = wrap;
+  // SCROLL: follow while streaming, then at the conversion a TALL answer (>80% of this chat
+  // viewport) anchors its first line and overflows downward; a short one does not move the reader.
+  // A reader who scrolled up during the run is already released and is never pulled back.
+  const container = transcript;
+  const following = container === messages ? follow : scrollState(container).follow;
+  const released = answerReleased.has(container);
+  const view = container.clientHeight || 0;
+  const tall = view > 0 && wrap.getBoundingClientRect().height > view * 0.8;
+  if (!released && following && tall) {
+    anchorAnswer(wrap);
+    wrap.dataset.answerAnchor = "top";
+  } else {
+    wrap.dataset.answerAnchor = released ? "reader-released" : "none";
+  }
+  pin();
+  return wrap;
 }
 
 function removePendingText(id) {
@@ -1883,7 +2015,7 @@ function interruptSubscriptionAttempt(saved) {
 
 function handleEvent(event) {
   if (!replayingMessages && transcript===messages && !['done','error'].includes(event.type)) markRunStreamAlive();
-  if (["round", "reasoning", "commentary", "commentary_delta", "commentary_end", "pending_delta", "decision", "step_phase", "tool", "tool_result", "delta", "reply", "error", "done"].includes(event.type)) {
+  if (["round", "reasoning", "commentary", "commentary_delta", "commentary_end", "pending_delta", "decision", "step_phase", "tool", "tool_result", "delta", "reply", "final_answer", "error", "done"].includes(event.type)) {
     if(transcript===messages)clearActiveRunNotice();
   }
   if (event.type === 'delegated') {
@@ -1896,6 +2028,25 @@ function handleEvent(event) {
     if (!seen) {seen=new Set();answerSeen.set(bubble,seen);}
     if (seen.has(key)) return;
     seen.add(key);
+    bubble.dataset.answerBegan = "1";
+    // A tool-capable request streams its prose as provisional commentary. An explicit provider
+    // `final_answer` phase is the other way the same prose is identified as the answer; the
+    // conversion is the same one (a run cannot convert twice).
+    if (bubble.dataset.runTools === "1" && streamedCommentaryBlock &&
+        streamedCommentaryBlock.parentNode === bubble.body && bubble.dataset.answerConverted !== "1") {
+      convertProvisionalAnswer(bubble, streamedCommentaryBlock, event.message_id);
+      bubble.dataset.finalMessage = key;
+      return;
+    }
+    // A candidate that was converted and is now superseded by another provider final phase was a
+    // prelude; keep it as activity instead of re-rendering it into the new candidate.
+    if (streamBody?.classList.contains('answer-wrap')) {
+      streamBody.classList.remove('final-answer');
+      streamBody.dataset.answerComplete = 'false';
+      streamBody = null;
+      streamText = '';
+      bubble.dataset.answerConverted = '0';
+    }
     if (streamBody) flushDecision();
     bubble.dataset.finalMessage = key;
     if (!streamBody) {
@@ -1920,7 +2071,12 @@ function handleEvent(event) {
     }
   } else if (event.type === "round") {
     releaseAnswerAnchor(transcript, false);
-    // A new step begins: close the previous one (its text and its tool topic).
+    // `tools` is the request's own tool surface (lua/core/agent.lua). It is per step, so a later
+    // round of the same run resets the answer phase: its prose starts provisional again.
+    const bubble = currentBubble();
+    bubble.dataset.runTools = Number(event.tools) > 0 ? "1" : "0";
+    bubble.dataset.answerBegan = "0";
+    if (event.run_id) bubble.dataset.runId = String(event.run_id);
     if (!runStartedAt) runStartedAt = Date.now();
     markStreamedCommentaryIncomplete();
     flushDecision();
@@ -1963,7 +2119,14 @@ function handleEvent(event) {
     // The node read this step's own provider completion reason and says the step was a decision,
     // not an answer. Only that value moves the prose; any other phase, and a step that sent none,
     // leaves the text where it is - in the answer's place.
-    if (event.phase === "commentary") promoteStepToCommentary(event.text, event.message_id);
+    if (event.phase === "commentary") {
+      // A tool-capable request's prose already streams inside the commentary topic, so its phase is
+      // settled by a label flip on that node. The legacy path (prose streamed as a plain segment) is
+      // still converted in place for a run that did not declare its tool surface.
+      if (!settleProvisionalCommentary(event.message_id)) {
+        promoteStepToCommentary(event.text, event.message_id);
+      }
+    }
   } else if (event.type === "reasoning") {
     showRunStep("reasoning", "Reasoning");
     // A reasoning model can think for a long time before it says anything, and a
@@ -1975,9 +2138,30 @@ function handleEvent(event) {
     addDecision(event);
   } else if (event.type === "tool") {
     releaseAnswerAnchor(transcript, false);
+    // A tool call for the message whose prose is still provisional settles it as commentary:
+    // nothing moves and nothing is re-labelled beyond removing the pending state.
+    settleProvisionalCommentary();
+    // A candidate answer already converted and then followed by a tool call was a prelude, not the
+    // answer. It stays as activity (folded below) and the run may still convert its real answer.
+    const demoted = runBubble?.body.querySelector(":scope > .seg.final-answer.answer-wrap");
+    if (demoted) {
+      demoted.classList.remove("final-answer");
+      demoted.dataset.answerComplete = "false";
+      runBubble.dataset.answerConverted = "0";
+    }
     if (streamBody?.classList.contains('final-answer')) {
       streamBody.classList.remove('final-answer');
-      flushDecision();
+      if (streamBody.classList.contains('answer-wrap')) {
+        // A converted answer that is followed by a tool call was a candidate, not the answer: keep
+        // the prose block as activity (folded below) instead of re-rendering it from `streamText`,
+        // which is empty after the conversion.
+        streamBody.dataset.answerComplete = "false";
+        streamBody = null;
+        streamText = "";
+        flushDecision();
+      } else {
+        flushDecision();
+      }
       collapseRun();
     }
     // The bound travels with the tool event when the host enforces one (bash/shell); /health is the
@@ -2019,24 +2203,48 @@ function handleEvent(event) {
     showRunStep("answer", "Writing response");
     removePendingText(event.pending_id);
     if (statusLabel) { setText(statusLabel, ''); updateRunPhase(); }
-    // A new segment per step, inside the same bubble.
-    if (!streamBody) {
-      streamBody = document.createElement("div");
-      streamBody.className = "seg";
-      currentBubble().body.append(streamBody);
-      anchorRunStepContent(streamBody);
-      anchorAnswer(streamBody);
+    if (carriesTools(currentBubble())) {
+      // A request that carried tools has no provider label for its prose, so the first content
+      // token streams inside a provisional commentary topic. A later tool call settles that label;
+      // a `stop` with no tool call converts it into the answer (see `reply`).
+      appendStreamedCommentary(event.text || "", event.pending_id);
+      streamText += event.text || "";
+    } else {
+      // A new segment per step, inside the same bubble.
+      if (!streamBody) {
+        streamBody = document.createElement("div");
+        streamBody.className = "seg";
+        currentBubble().body.append(streamBody);
+        anchorRunStepContent(streamBody);
+        anchorAnswer(streamBody);
+      }
+      if(event.pending_id)streamBody.dataset.pendingId=String(event.pending_id);
+      streamText += event.text || "";
+      streamBody.rawText=streamText;
+      // Keep streaming observable synchronously, including background tabs where
+      // animation frames may stop. Allocation reclamation bounds renderer growth.
+      paintDelta();
     }
-    if(event.pending_id)streamBody.dataset.pendingId=String(event.pending_id);
-    streamText += event.text || "";
-    streamBody.rawText=streamText;
-    // Keep streaming observable synchronously, including background tabs where
-    // animation frames may stop. Allocation reclamation bounds renderer growth.
-    paintDelta();
   } else if (event.type === "reply") {
     if (!replayingMessages) finishRunStep();
+    const finalText = stripThinking(event.text || streamText);
+    // The provisional commentary that is still pending when its run says `reply` can only be the
+    // final answer: a tool call would have settled its label already. Capture it before the generic
+    // teardown marks it. (A replayed row renders through the normal segment path.) The ordinary
+    // provider route streams it through `delta`; a subscription route whose per-item phase never
+    // arrived streams the same prose through `pending_delta`, so that node is the same answer.
+    let provisionalAnswer = (!replayingMessages && streamedCommentaryBlock && runBubble &&
+      streamedCommentaryBlock.parentNode === runBubble.body && runBubble.dataset.runTools === "1" &&
+      runBubble.dataset.answerConverted !== "1") ? streamedCommentaryBlock : null;
+    if (!provisionalAnswer && !replayingMessages && runBubble && runBubble.dataset.runTools === "1" &&
+        runBubble.dataset.answerConverted !== "1") {
+      const pending = Array.from(phasePendingText.values()).find(
+        (item) => item.node.parentNode === runBubble.body &&
+          (stripThinking(item.text) === finalText || (finalText === "" && stripThinking(item.text) !== "")));
+      if (pending) provisionalAnswer = pending.node;
+    }
     discardPendingText();
-    markStreamedCommentaryIncomplete();
+    if (!provisionalAnswer) markStreamedCommentaryIncomplete();
     if (statusLabel) { setText(statusLabel, 'finishing…'); updateRunPhase(); }
     if (!replayingMessages && event.message_id && renderedMessageIds.has(String(event.message_id))) {
       // The durable reply can be repainted before its trailing `reply` event is replayed.
@@ -2047,14 +2255,20 @@ function handleEvent(event) {
       streamText = "";
       return;
     }
-    const finalText = stripThinking(event.text || streamText);
     if (!replayingMessages) voiceLastAnswer = finalText;
+    const converted = provisionalAnswer
+      ? !!convertProvisionalAnswer(runBubble, provisionalAnswer, event.message_id) : false;
+    const alreadyConverted = !!streamBody && streamBody.classList.contains('answer-wrap');
     const newlyConfirmed = !streamBody?.classList.contains('final-answer');
     if (streamBody) {
       if (event.message_id) streamBody.dataset.messageId = event.message_id;
-      streamBody.innerHTML = renderMarkdown(finalText);
-      streamBody.rawText=event.text || streamText;
-      streamBody.style.whiteSpace = "normal";
+      // The converted answer is already the streamed prose, moved - re-rendering it here would
+      // replace the text box whose metrics the conversion guarantees.
+      if (!converted && !alreadyConverted) {
+        streamBody.innerHTML = renderMarkdown(finalText);
+        streamBody.rawText=event.text || streamText;
+        streamBody.style.whiteSpace = "normal";
+      }
     } else {
       const segment = document.createElement("div");
       segment.className = "seg";
@@ -2085,6 +2299,15 @@ function handleEvent(event) {
     // still one run, and the run topic has to be able to span everything it did; closing the bubble
     // here was the bug - one run drew one bubble per reply. flushDecision(true) closes it, on `done`
     // or on the next user turn, which is the contract its own comment already stated.
+  } else if (event.type === "final_answer") {
+    // The node identifies this run's answer exactly once (lua/core/agent.lua) and sends only ids and
+    // lengths. The answer is already on screen or about to be; this event never blocks or re-renders
+    // it. A repeated emission for the same run/message is refused by `emitFinalAnswer`.
+    const bubble = runBubble;
+    if (bubble && event.answer_id) bubble.dataset.answerId = String(event.answer_id);
+    emitFinalAnswer({ session_id: event.session_id || chatSession, run_id: event.run_id,
+      message_id: event.message_id, answer_id: event.answer_id,
+      text_len: event.text_len, at: event.at });
   } else if (event.type === "usage") {
     if(rendererTask){updateChildContextReadouts();return;}
     settings.usage = event.total || settings.usage;

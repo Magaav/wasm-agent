@@ -1532,7 +1532,13 @@ function M:run_body(text, images)
     -- Proof of life for the node's own watchdog: the interpreter is working, so a
     -- /health check can tell this from a wedged message. Cheap (an atomic store).
     host.beat()
-    self.emit({ type = "round", n = round })
+    -- `tools` is the one fact the window cannot derive from the stream: whether this request
+    -- carried a tool surface at all. A run that carried none is answering in its first content
+    -- prose; a run that carried some may still be choosing, so its prose starts as commentary
+    -- (DESIGN.md section 6, `onFinalAnswer` in docs/HOOK-EVENTS.md). It is the count of schemas
+    -- offered on this request, not a prediction of whether one is called.
+    self.emit({ type = "round", n = round, tools = #tool_list, run_id = self.run_id,
+      session_id = self.session_id })
     self.emit({ type = "status", text = "model" })
     local llm_started = host.now()
     local agents_var = agents_env(self.role)
@@ -2179,6 +2185,21 @@ function M:run_body(text, images)
   -- the window". A reader that shows the context budget (the CLI's footer) needs the one
   -- number the provider actually measured, not an estimate.
   self.emit({ type = "usage", total = M.usage_total, model = self.model, prompt = self.last_prompt_tokens })
+
+  -- `onFinalAnswer`: the run's answer is identified at this boundary - the durable assistant row
+  -- is written, the run is about to say `reply`, and a later step cannot un-answer it. The payload
+  -- is ids and lengths only, so a hook cannot accidentally depend on answer text. It is emitted
+  -- through the same stream (`self.emit`) every other lifecycle event uses, it never calls a model,
+  -- and it cannot block or lose the answer: the emission is wrapped, and `reply` is emitted below
+  -- whatever happens here. `answer_id` is derived from the run (`<run_id>:answer`) and is stable for
+  -- a replay of the same run; one run emits this at most once.
+  if completed and not self.final_answer_emitted then
+    self.final_answer_emitted = true
+    local answer_id = tostring(self.run_id) .. ":answer"
+    pcall(self.emit, { type = "final_answer", session_id = self.session_id,
+      run_id = self.run_id, message_id = message_id, answer_id = answer_id,
+      text_len = #tostring(reply or ""), at = math.floor(host.now() * 1000) })
+  end
 
   -- The diff goes with the reply: the topic belongs to this bubble, and the reader should
   -- not need a second request to learn what the message touched.
