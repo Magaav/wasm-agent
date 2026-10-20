@@ -146,16 +146,24 @@ consumed steering becomes **Steered**, not a separate user bubble. Read means
 entered context, never compliance. Main and children share this presentation.
 
 Commentary streams inside an open `wa-commentary` topic, with character count
-updated per chunk. Only explicit per-item phase establishes commentary. Unknown
-phase stays provisional. A sentence whose phase resolves to commentary keeps the
-place it streamed in - the provisional block becomes that topic where it stands,
-so establishing the phase never moves the text. The topic's marker row is drawn
-below that text, never above it: chrome above a streamed sentence pushes it
-down, which reads as the sentence moving into the topic. A commentary
-established on prose that streamed in the answer's place is typographically
-neutral - the bubble's font-size and line-height, no padding, no border - and
-its marker row may not widen the bubble either, so the text box keeps every
-metric it streamed with. Commentary stays outside the run topic while the run is
+updated per chunk. That topic is the thinking topic: one component (`WaTopic` in
+`ui/components.js`) builds both `<wa-reasoning>` and `<wa-commentary>`, so they
+collapse/expand, count characters and render their body identically - a second
+copy would drift. A topic's body is the transcript's one Markdown renderer, the
+same HTML a reply contains (raw HTML stays escaped, so `<text>` is text); there
+is no plain-text topic body. Only explicit per-item phase establishes commentary.
+Unknown phase stays provisional. A sentence whose phase resolves to commentary
+keeps the place it streamed in - the provisional block becomes that topic where
+it stands, so establishing the phase never moves the text. In that one state the
+topic's marker row is drawn below the text, never above it: chrome above a
+streamed sentence pushes it down, which reads as the sentence moving into the
+topic. A commentary established on prose that streamed in the answer's place is
+typographically neutral - the bubble's font-size and line-height, no padding, no
+border - and its marker row may not widen the bubble either, so the text box
+keeps every metric it streamed with. Once the run settles and its topic is
+folded away, that commentary takes the shared topic's own layout (marker row
+above the body), matching what a replay of the same rows draws. Commentary stays
+outside the run topic while the run is
 stepping: nothing folds into the topic until the final
 answer, which nests the whole history (commentary included) and is the only thing
 that stays outside it. Its own manual fold survives;

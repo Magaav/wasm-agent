@@ -985,9 +985,12 @@ function appendCommentary(text, messageId, pendingId, decisionPrelude, place) {
   const block = document.createElement("wa-commentary");
   block.open = true;
   // The text streamed in the answer's place (a `.seg`), so this topic is built where that sentence
-  // stands and must keep its typography: same font, line-height, width and padding, with the marker
-  // row below the text instead of above it (ui/style.css, `[data-in-place]`). Anything else re-lays
-  // the sentence out at the moment its phase is established, which reads as it moving into the topic.
+  // stands and must keep its typography: same font, line-height, width and padding. The one thing it
+  // cannot share with the topic it is (see ui/components.js, one component for thinking and
+  // commentary) is the marker row's side: the shared topic draws its header above the body, and a
+  // header above a sentence that just streamed would push it down. `[data-in-place]` therefore lays
+  // the same two children out in reverse (ui/style.css), so establishing the phase never re-lays the
+  // sentence out, which reads as it moving into the topic.
   if (place && place.tagName !== "WA-COMMENTARY") block.dataset.inPlace = "";
   block.setText(text);
   if(pendingId)block.dataset.pendingId=String(pendingId);
@@ -1845,6 +1848,12 @@ function flushDecision(final = false) {
     // The run is over: its route folds away, and the answer is what is left to read.
     if (runBubble) {
       for (const topic of runBubble.body.querySelectorAll(":scope > wa-run")) topic.open = false;
+      // A commentary that streamed in the answer's place kept the neutral streaming layout (marker row
+      // below the text, no chrome) so that establishing its phase never moved the sentence. The run is
+      // history now and its topic is collapsed, so it can take the shared topic's own layout - the one
+      // a replayed row is drawn with - without anything moving where the reader can see it.
+      for (const topic of runBubble.body.querySelectorAll("wa-run wa-commentary[data-in-place]"))
+        topic.removeAttribute("data-in-place");
     }
     runBubble = null;
   }
@@ -2024,9 +2033,9 @@ function handleEvent(event) {
     }
     pending.text += event.text || "";
     pending.node.rawText = pending.text;
-    // Formatted while it streams, exactly as the provisional segment rendered it; the body is
-    // normalised back by `setText` when the phase resolves, so live and replayed rows agree.
-    pending.node.streamMarkdown(renderMarkdown(pending.text), pending.text.length);
+    // Rendered while it streams, through the same `setText` every topic body uses: the body is the
+    // transcript's one Markdown renderer, and the character count is the one the resolved state keeps.
+    pending.node.setText(pending.text);
     pin();
   } else if (event.type === "delta") {
     showRunStep("answer", "Writing response");

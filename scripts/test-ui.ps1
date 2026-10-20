@@ -2683,9 +2683,13 @@ $harness = @'
     check(!!body && !endsBlank(body.textContent),
       "trailing space: the thinking must not end in a blank line, saw " +
       JSON.stringify(body ? body.textContent.slice(-10) : "no body"));
-    check(!!body && body.textContent.indexOf("weighing it up" + NL + "and then") === 0,
+    // A topic body is Markdown now (the transcript's one renderer), so an interior break is a
+    // rendered <br> - the same line break a reply draws - and not a newline character in
+    // textContent. The content still has to be there, either way.
+    check(!!body && (body.textContent.indexOf("weighing it up" + NL + "and then") === 0 ||
+      body.innerHTML.indexOf("weighing it up<br>and then") === 0),
       "trailing space: an interior break is content and must stay, saw " +
-      JSON.stringify(body ? body.textContent : "no body"));
+      JSON.stringify(body ? body.innerHTML.slice(0, 80) : "no body"));
     window.handleEvent({ type: "delta", text: "Checking the file" + NL + NL + NL });
     var segs = document.querySelectorAll("wa-message .seg");
     var lastSeg = segs[segs.length - 1];
@@ -3805,6 +3809,12 @@ try {
     # it now fails on it, so it runs in the gate rather than beside it.
     & node scripts/agent-benchmark-ui-observe.mjs --ui $ui --probe (Join-Path $PSScriptRoot 'probe-run-topic-nesting.js') --out (Join-Path $tmp 'run-topic-nesting')
     if ($LASTEXITCODE -ne 0) { throw 'run topic nesting browser probe failed' }
+    # Commentary and thinking are one component and a topic's body is the transcript's own Markdown:
+    # asserted as the first chunk's ancestry and as <strong>/<code>/<pre> inside the body, with a
+    # literal <text> still text. It runs in the gate so a second topic implementation or a plain-text
+    # body cannot pass behind a green suite.
+    & node scripts/agent-benchmark-ui-observe.mjs --ui $ui --probe (Join-Path $PSScriptRoot 'probe-topic-markdown.js') --out (Join-Path $tmp 'topic-markdown')
+    if ($LASTEXITCODE -ne 0) { throw 'topic markdown browser probe failed' }
     & node scripts/test-final-answer-suite.mjs $WaExe (Join-Path $tmp 'final-answer')
     if ($LASTEXITCODE -ne 0) { throw 'final-answer focused suite failed' }
     & node scripts/test-minimal-chat.cjs (Join-Path $tmp 'minimal-chat')
