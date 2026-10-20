@@ -172,6 +172,10 @@ pub const REGISTRY: &[Capability] = &[
     // ---- plugins -----------------------------------------------------------------------------
     upvalue!("plugins", ReadOnly, crate::host::plugins, "List the registered WASM plugins and their declared parameters"),
     upvalue!("invoke", RunsProcess, crate::host::invoke, "Invoke one registered WASM plugin with JSON arguments"),
+    // ---- audio -------------------------------------------------------------------------------
+    // The contract is one entry because it is one capability with two calls: `capture` (the ear)
+    // and `play` (the mouth). Voice itself is the `voice` WASM plugin; this is only the transport.
+    plain!("audio", Device, crate::audio::capability, "The file-backed ear and mouth: capture PCM chunks from a WAV source, or play PCM into a WAV sink, both confined to the declared audio root"),
     // ---- the user's machine and the desktop client -------------------------------------------
     upvalue!("client", Device, crate::host::client, "Act on the user's machine through the outbound client bridge: screenshot, input, shell, browser/CDP"),
     upvalue!("client_status", ReadOnly, crate::host::client_status, "Whether the desktop client is connected, and what it is doing"),

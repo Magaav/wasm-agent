@@ -2,6 +2,7 @@
 //!
 //! The agent logic lives in Lua (`lua/`); this host only provides capabilities
 //! (sqlite, http, wasmtime, sha256, uuid, time, files). No Python anywhere.
+mod audio;
 mod capabilities;
 mod client_bridge;
 mod graph;

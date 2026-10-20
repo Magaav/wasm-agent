@@ -504,6 +504,7 @@ Adding a capability is two edits: one entry in the registry, one row here.
 ; One line per capability: name, then effect class. Hand-maintained; checked against the live registry in
 ; rust/wa-host/src/capabilities.rs by the drift test in that module (cargo test -p wa-host capabilities).
 ; Lines starting with ";" and blank lines are ignored by the checker.
+audio                device
 beat                 read-only
 binding_state        read-only
 binding_transport    read-only
@@ -574,6 +575,30 @@ uuid                 read-only
 verify               read-only
 write_file           writes files
 <!-- capability-inventory:end -->
+
+## Audio (`host.audio`)
+
+`host.audio(action, args_json)` is the device-effect transport for voice, and it is deliberately a
+*file-backed* null implementation: no microphone, no network, no browser API. Voice itself is the
+`voice` WASM plugin (`rust/plugins/voice`, installed as `voice.wasm`), which owns frame
+segmentation, energy/ZCR voice-activity detection, utterance events and the wake-word match
+interface; this capability only moves PCM.
+
+- `capture` takes `{path, rate, channels, chunk_ms}` and returns the next chunk of PCM as
+  `{path, pcm_base64, rate, channels, samples, offset, eof}` - `offset` is the sample index of the
+  chunk's first sample and `eof` marks the last one. It returns **nil** when there is no source (the
+  file is absent, or the source has been read to the end): a missing value is `nil`, never a zero
+  valued one. A `rate` or `channels` that disagrees with the file is refused
+  (`audio_rate_mismatch`, `audio_channels_mismatch`), never silently resampled.
+- `play` takes `{path, rate, channels, samples | pcm_base64, final}` and appends PCM to a WAV sink,
+  rewriting the complete file on every call so a reader never sees a header that disagrees with the
+  data. It returns `{path, rate, channels, samples, bytes}`.
+
+Both calls are confined to one declared root - `WASM_AGENT_AUDIO_ROOT`, or
+`<home>/.wasm-agent/audio` - and containment is checked on the *canonical* path, so a symlink or a
+`..` component that leaves the root is refused (`audio_path_outside_root:<path>`), never treated as
+`nil`. The WAV reader is hand-written (RIFF/WAVE, 16-bit PCM) so this wave adds no dependency to the
+shipped binary, and every refusal is a name: the tests pin them.
 
 ## Adding a capability
 
