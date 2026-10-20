@@ -2687,10 +2687,16 @@ pub(crate) fn node_line(port: u16, up: bool, pid: Option<u32>) -> String {
 /// The sentinel fact `status` prints. A sentinel has no port - it is a process that reads a queue and
 /// supervises the node - so the line says that instead of leaving a blank where a port would be.
 /// `scripts/verify-install.sh` and `scripts/test-sentinel-e2e.sh` read `watching (pid N)` from this line.
-pub(crate) fn sentinel_line(pid: Option<u32>) -> String {
-    match pid {
-        Some(pid) => format!("sentinel:  up    watching (pid {pid})  no port of its own"),
-        None => "sentinel:  down  not running".to_string(),
+pub(crate) fn sentinel_line(up: bool, pid: Option<u32>, why: &str) -> String {
+    // The words `watching (pid N)` are read by `scripts/deploy.sh` and `scripts/verify-install.sh`, so the up
+    // line keeps that exact shape and `why` is only ever appended. `why` is the half that was missing when a
+    // live watcher was reported as "not running" with no explanation.
+    let note = if why.is_empty() { String::new() } else { format!(" ({why})") };
+    if up {
+        let who = match pid { Some(pid) => format!("pid {pid}"), None => "pid unknown".to_string() };
+        format!("sentinel:  up    watching ({who})  no port of its own{note}")
+    } else {
+        format!("sentinel:  down  not running{note}")
     }
 }
 
@@ -2715,8 +2721,20 @@ fn status() -> Result<()> {
     // make. When the node is down there is nothing to ask.
     let node_pid = if node_up { pid_on_port(port) } else { None };
     say(&node_line(port, node_up, node_pid));
-    let watched = std::fs::read_to_string(pid_path()).ok().and_then(|t| t.trim().parse::<u32>().ok()).filter(|pid| pid_alive(*pid));
-    say(&sentinel_line(watched));
+    // WHO IS THE WATCHER, decided by the fact a stray pid cannot fake: the lifetime lock only `watch` holds.
+    // Measured 2026-10-20: a deploy's own child could not open the watcher process with SYNCHRONIZE, so a
+    // status that required that open called a live watcher (pid 8528, serving requests, lock held) "down",
+    // and six deploys refused with "the sentinel did not start watching" while it was watching. `start`
+    // already refuses a duplicate on this lock; `status` reports from the same evidence and now names what
+    // it could not prove instead of printing a bare "not running".
+    let state = watcher_state()?;
+    let recorded = std::fs::read_to_string(pid_path()).ok().and_then(|text| text.trim().parse::<u32>().ok());
+    let (watched, why) = match state {
+        WatcherState::Running => (recorded, if recorded.is_none() { "the lifetime lock is held, but no pid file names the watcher" } else { "" }),
+        WatcherState::LegacyUnverified(pid) => (Some(pid), "this pid answers but nothing holds the lifetime lock: a build that predates it"),
+        WatcherState::NotRunning => (None, "the lifetime lock is free and no pid answers"),
+    };
+    say(&sentinel_line(watched.is_some(), watched, why));
     // Who owns this watcher's lifecycle, in the words the verbs decide from: the operator question this
     // answers is "will `stop` stop it, or is it a five-second restart", and the answer must not be
     // re-derived from the log afterwards. (The line deliberately does not contain the text `sentinel:` -
