@@ -2708,6 +2708,30 @@ fn health_verb() -> Result<()> {
     Ok(())
 }
 
+/// The pid the watcher last announced for itself, read from its own audit line (`epoch\twatch\tpid N\t...`).
+///
+/// `status` needs this when the lifetime lock proves a watcher is alive but its pid file cannot be read.
+/// Measured 2026-10-20: a deploy's own child held the lock as `Running` and still printed `down`, which only
+/// that branch does, so the pid file was unreadable there and the deploy's proof refused a live watcher all
+/// afternoon. The fallback needs no process access and no second file: the watcher wrote this line itself.
+fn watched_pid_from_log(text: &str) -> Option<u32> {
+    for line in text.lines().rev() {
+        let mut fields = line.split('\t');
+        if fields.next().is_none() {
+            continue;
+        }
+        if fields.next() != Some("watch") {
+            continue;
+        }
+        if let Some(pid) = fields.next().unwrap_or("").strip_prefix("pid ") {
+            if let Ok(pid) = pid.trim().parse::<u32>() {
+                return Some(pid);
+            }
+        }
+    }
+    None
+}
+
 fn status() -> Result<()> {
     let health = health();
     // One probe answers both questions the pending requests below are reported against: whether the node
@@ -2728,20 +2752,33 @@ fn status() -> Result<()> {
     // already refuses a duplicate on this lock; `status` reports from the same evidence and now names what
     // it could not prove instead of printing a bare "not running".
     let state = watcher_state();
-    let recorded = std::fs::read_to_string(pid_path()).ok().and_then(|text| text.trim().parse::<u32>().ok());
+    let pid_read = std::fs::read_to_string(pid_path());
+    let recorded = pid_read.as_ref().ok().and_then(|text| text.trim().parse::<u32>().ok());
+    let pid_problem = match &pid_read {
+        Ok(text) if recorded.is_some() => String::new(),
+        Ok(text) => format!("{} holds {:?}, which is not a pid", pid_path().display(), text.trim()),
+        Err(error) => format!("{} could not be read ({error})", pid_path().display()),
+    };
     let (watched, why) = match &state {
-        Ok(WatcherState::Running) => (recorded, if recorded.is_none() { "the lifetime lock is held, but no pid file names the watcher".to_string() } else { String::new() }),
+        Ok(WatcherState::Running) => match recorded {
+            Some(pid) => (Some(pid), String::new()),
+            // The lock is what proves the watcher; the number comes from the watcher's own start line.
+            None => (
+                watched_pid_from_log(&std::fs::read_to_string(log_path()).unwrap_or_default()),
+                format!("the lifetime lock is held, but {pid_problem}"),
+            ),
+        },
         Ok(WatcherState::LegacyUnverified(pid)) => (Some(*pid), "this pid answers but nothing holds the lifetime lock: a build that predates it".to_string()),
         Ok(WatcherState::NotRunning) => (None, "the lifetime lock is free and no pid answers".to_string()),
         Err(error) => (None, format!("the lifetime lock could not be probed: {error:#}")),
     };
-    // Anything short of a proven Running watcher is written down, not only printed. A deploy reads this line
-    // from a shell it spawned with `2>/dev/null`, so an error here used to reach no file at all: six deploys
-    // refused with "the sentinel did not start watching" and the reason was thrown away with the stderr.
-    if !matches!(&state, Ok(WatcherState::Running)) {
+    // Anything short of a proven Running watcher with a readable pid is written down, not only printed. A
+    // deploy reads this line from a shell it spawned with `2>/dev/null`, so an error here reaches no file:
+    // six deploys refused with "the sentinel did not start watching" and the reason went with the stderr.
+    if !matches!(&state, Ok(WatcherState::Running)) || watched.is_none() {
         audit(
             "status-probe",
-            &format!("watcher={state:?} pid_file={recorded:?} stop_file={} home={}", stop_path().exists(), home().display()),
+            &format!("watcher={state:?} watched={watched:?} pid_file={recorded:?} {pid_problem} stop_file={} home={}", stop_path().exists(), home().display()),
             "",
         );
     }
