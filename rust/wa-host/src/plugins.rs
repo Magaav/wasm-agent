@@ -14,9 +14,55 @@
 //! `"surface":"internal"` keeps a deterministic plugin callable by trusted Lua
 //! without advertising it as a model tool. The default remains `"tool"`.
 use anyhow::{anyhow, Result};
+use ring::digest::{digest, SHA256};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use wasmtime::{Config, Engine, Instance, Memory, Module, Store, StoreLimits, StoreLimitsBuilder, TypedFunc};
+
+/// SHA-256 of a module, as lowercase hex: what a pin file holds.
+fn digest_hex(bytes: &[u8]) -> String {
+    digest(&SHA256, bytes)
+        .as_ref()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+/// The pin that travels with a module: `<file>.sha256`, one hex digest (a `sha256sum` line's first
+/// field is accepted too).
+///
+/// The code-mode assets are pinned by a constant compiled into the host ([`crate::quickjs`]), but a
+/// plugin is built into the plugin directory at install time, so its pin has to travel with it:
+/// `scripts/build-plugins.sh` writes it beside the module. A `*.wasm` whose pin disagrees with its
+/// bytes is refused by name (`plugin_hash_mismatch`) and skipped - the loader trusts the pin, not
+/// the directory. A module with no pin loads as before, so an existing install keeps working and
+/// pinning stays an explicit act.
+fn verify_pin(path: &Path, bytes: &[u8]) -> Result<()> {
+    let pin_path = PathBuf::from(format!("{}.sha256", path.display()));
+    let text = match std::fs::read_to_string(&pin_path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(anyhow!("plugin_pin_unreadable:{}: {error}", pin_path.display()))
+        }
+    };
+    let declared = text
+        .split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if declared.len() != 64 || !declared.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(anyhow!("plugin_pin_invalid:{}", pin_path.display()));
+    }
+    let actual = digest_hex(bytes);
+    if actual != declared {
+        return Err(anyhow!(
+            "plugin_hash_mismatch:{}: declared {declared} actual {actual}",
+            path.display()
+        ));
+    }
+    Ok(())
+}
 
 // A plugin is untrusted code. Without limits one that loops forever wedged the interpreter that called
 // it (behind the process-wide plugin lock, every interpreter), and one that reported a huge result length
@@ -97,7 +143,11 @@ impl PluginRegistry {
     }
 
     fn load_one(engine: &Engine, path: &Path) -> Result<Plugin> {
-        let module = Module::from_file(engine, path)?;
+        // One read: the pin is checked against exactly the bytes that are compiled, so a file swapped
+        // between two reads cannot pass a pin over the old contents.
+        let bytes = std::fs::read(path)?;
+        verify_pin(path, &bytes)?;
+        let module = Module::new(engine, &bytes)?;
         let mut store = Store::new(engine, StoreLimitsBuilder::new().memory_size(MEMORY_LIMIT).build());
         store.limiter(|limits| limits);
         store.set_fuel(FUEL_PER_CALL)?;
@@ -203,4 +253,44 @@ pub fn plugin_dir() -> PathBuf {
     }
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
     PathBuf::from(home).join(".wasm-agent").join("plugins")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A pin is one digest over the exact module bytes. These are the three outcomes the loader
+    /// distinguishes, and each has a name so a skipped module says which one it was.
+    #[test]
+    fn a_pin_must_match_the_module_bytes() {
+        let root = std::env::temp_dir().join(format!("wa-plugin-pin-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("pin fixture root");
+        let module = root.join("voice.wasm");
+        let bytes = b"\0asm\x01\0\0\0";
+        std::fs::write(&module, bytes).expect("write module");
+        let pin = root.join("voice.wasm.sha256");
+
+        // No pin: pinning is opt-in, so an existing plugin directory keeps working.
+        verify_pin(&module, bytes).expect("an absent pin is allowed");
+
+        // A matching pin, in `sha256sum` form, is accepted.
+        std::fs::write(&pin, format!("{}  voice.wasm\n", digest_hex(bytes))).expect("write pin");
+        verify_pin(&module, bytes).expect("a matching pin is accepted");
+
+        // A pin over different bytes refuses, and names itself.
+        std::fs::write(&pin, format!("{}\n", digest_hex(b"other"))).expect("write wrong pin");
+        let error = verify_pin(&module, bytes).expect_err("a mismatched pin must refuse");
+        assert!(
+            error.to_string().starts_with("plugin_hash_mismatch:"),
+            "{error}"
+        );
+
+        // A pin that is not a digest is not a weaker pin, it is a refusal.
+        std::fs::write(&pin, "not-a-digest\n").expect("write broken pin");
+        let error = verify_pin(&module, bytes).expect_err("a broken pin must refuse");
+        assert!(error.to_string().starts_with("plugin_pin_invalid:"), "{error}");
+
+        std::fs::remove_dir_all(&root).expect("remove pin fixture");
+    }
 }
