@@ -35,6 +35,18 @@ check(not provider.is_transient('subscription_stream_failure: stage=response_bod
   'bridge recovery is not multiplied by the generic provider retry policy')
 check(not provider.is_response_timeout('subscription_stream_failure: stage=response_headers; provider_error: timeout: receive response'),
   'bridge recovery is not multiplied by the response-timeout policy either')
+-- The operator's failure: a run died before its first token with
+-- `provider_error: timeout: connect`. Nothing had been sent, so it belonged in the patient,
+-- default-on connection bucket and was in none of them.
+local connect_timeout='lua/core/provider.lua:1191: lua/core/provider.lua:1131: provider_error: timeout: connect'
+check(provider.is_connection_lost(connect_timeout),
+  'a connect-phase timeout takes the patient connection policy: nothing was sent, so replaying is safe')
+check(not provider.is_response_timeout(connect_timeout),
+  'a connect timeout is not the pre-response bucket: it never reached the provider at all')
+check(not provider.is_connection_lost('provider_error: timeout: receive response'),
+  'a receive timeout stays in its own smaller budget: the request was sent and may have been billed')
+check(provider.connection_retries() >= 1,
+  'the patient policy for a lost link is on by default, not opt-in like the transient budget')
 
 local sid=session('provider-timeout-retry')
 local bot=agentlib.new(sid,function() end,'master','master','')
@@ -65,3 +77,21 @@ check(not ok and tostring(problem):find('timeout: receive response',1,true),
 check(disabled_calls==1,'the operator off-switch must prevent the retry')
 
 print('provider timeout recovery ok ('..checks..' checks)')
+
+-- End to end: the operator-observed failure must not end the run. A connect timeout before the
+-- first token takes the patient, default-on connection policy, so a link that returns mid-budget
+-- still produces an answer instead of a dead turn. One retry here, bounded by env.
+overrides.WASM_AGENT_PROVIDER_CONNECT_RETRIES='1'
+local connect_sid=session('provider-connect-timeout-recovery')
+local connect_bot=agentlib.new(connect_sid,function() end,'master','master','')
+local connect_calls=0
+provider.complete_with=function(_,messages,_,_,opts)
+  connect_calls=connect_calls+1
+  if connect_calls==1 then error(connect_timeout) end
+  return {content='answered after the link returned',tool_calls={},finish_reason='stop',usage=usage}
+end
+local connect_reply=connect_bot:run('answer even though the edge dropped the connect')
+check(connect_reply=='answered after the link returned',
+  'a connect-phase timeout must not end the run once the link is back')
+check(connect_calls==2,'the patient policy replays the unsatisfied connect exactly once here')
+print('provider connect-timeout recovery ok ('..checks..' checks)')

@@ -998,7 +998,15 @@ end
 -- budget stays finite and reported, never an unbounded hang.
 local CONNECTION_TEXT = { "peer disconnected", "connection reset", "connection refused",
   "connection closed", "broken pipe", "network is unreachable", "network unreachable",
-  "temporary failure in name resolution" }
+  "temporary failure in name resolution",
+  -- A CONNECT-phase timeout is the safest failure there is: the request never reached a provider that
+  -- could have answered it or billed it. It matched NONE of the three buckets - `is_response_timeout`
+  -- wants the literal "receive response", this list did not carry `timeout` at all, and the generic
+  -- transient budget is opt-in and therefore 0 by default - so an edge that answered nothing killed
+  -- the whole run (observed: `provider_error: timeout: connect` ended a turn before its first token).
+  -- A RECEIVE timeout deliberately stays out of this list: that request WAS sent, so it keeps its own
+  -- smaller, explicit pre-response budget above.
+  "timeout: connect", "connect: timeout" }
 
 function M.is_connection_lost(problem)
   local text = tostring(problem or ""):lower()
