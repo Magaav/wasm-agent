@@ -2727,14 +2727,25 @@ fn status() -> Result<()> {
     // and six deploys refused with "the sentinel did not start watching" while it was watching. `start`
     // already refuses a duplicate on this lock; `status` reports from the same evidence and now names what
     // it could not prove instead of printing a bare "not running".
-    let state = watcher_state()?;
+    let state = watcher_state();
     let recorded = std::fs::read_to_string(pid_path()).ok().and_then(|text| text.trim().parse::<u32>().ok());
-    let (watched, why) = match state {
-        WatcherState::Running => (recorded, if recorded.is_none() { "the lifetime lock is held, but no pid file names the watcher" } else { "" }),
-        WatcherState::LegacyUnverified(pid) => (Some(pid), "this pid answers but nothing holds the lifetime lock: a build that predates it"),
-        WatcherState::NotRunning => (None, "the lifetime lock is free and no pid answers"),
+    let (watched, why) = match &state {
+        Ok(WatcherState::Running) => (recorded, if recorded.is_none() { "the lifetime lock is held, but no pid file names the watcher".to_string() } else { String::new() }),
+        Ok(WatcherState::LegacyUnverified(pid)) => (Some(*pid), "this pid answers but nothing holds the lifetime lock: a build that predates it".to_string()),
+        Ok(WatcherState::NotRunning) => (None, "the lifetime lock is free and no pid answers".to_string()),
+        Err(error) => (None, format!("the lifetime lock could not be probed: {error:#}")),
     };
-    say(&sentinel_line(watched.is_some(), watched, why));
+    // Anything short of a proven Running watcher is written down, not only printed. A deploy reads this line
+    // from a shell it spawned with `2>/dev/null`, so an error here used to reach no file at all: six deploys
+    // refused with "the sentinel did not start watching" and the reason was thrown away with the stderr.
+    if !matches!(&state, Ok(WatcherState::Running)) {
+        audit(
+            "status-probe",
+            &format!("watcher={state:?} pid_file={recorded:?} stop_file={} home={}", stop_path().exists(), home().display()),
+            "",
+        );
+    }
+    say(&sentinel_line(watched.is_some(), watched, &why));
     // Who owns this watcher's lifecycle, in the words the verbs decide from: the operator question this
     // answers is "will `stop` stop it, or is it a five-second restart", and the answer must not be
     // re-derived from the log afterwards. (The line deliberately does not contain the text `sentinel:` -
