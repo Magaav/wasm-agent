@@ -11,6 +11,7 @@ import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
 import { spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 
 // Which browser to render with: an explicit --chrome wins, then WA_CHROME, then the
 // platform's standard install, then PATH - which is what the benchmark image provides.
@@ -115,9 +116,16 @@ async function main() {
   if (opts.probe) {
     const probe = path.resolve(opts.probe);
     if (!fs.statSync(probe).isFile()) throw new Error(`probe is not a file: ${probe}`);
+    // The shared comparison helper goes in before EVERY probe, so a probe never has to hand-roll
+    // tag/class comparisons (or carry a copy of them that can drift). It sits beside this file and
+    // depends on nothing else in the page, which is why it is injected here and not by a fixture.
+    const support = fileURLToPath(new URL('./wa-probe-support.js', import.meta.url));
+    if (!fs.existsSync(support)) throw new Error(`probe support script is missing: ${support}`);
+    fs.copyFileSync(support, path.join(stage, 'wa-probe-support.js'));
     fs.copyFileSync(probe, path.join(stage, 'wa-observe-probe.js'));
     if (!html.includes('</body>')) throw new Error('UI body end marker absent');
-    html = html.replace('</body>', '<script src="wa-observe-probe.js"></script>\n</body>');
+    html = html.replace('</body>',
+      '<script src="wa-probe-support.js"></script>\n<script src="wa-observe-probe.js"></script>\n</body>');
   }
   fs.writeFileSync(path.join(stage, 'index.html'), html);
 
