@@ -11,6 +11,18 @@
     "5. the bundle then goes through the same verification a hand-installed bundle does: bundle.manifest describes installed.sha256, installed.sha256 describes every member, every artefact hash is checked, the ELF machine and the aarch64-linux-android triple are read from the bytes, and the candidate is run once before it is switched in",
     "6. the trust anchor is the HTTPS origin of this file plus the committed history of the repository; a hash that does not match is a refusal, never a fallback to building"
   ],
-  "generated_utc": "2026-10-19T00:00:00Z",
-  "releases": []
+  "generated_utc": "2026-10-20T09:51:39Z",
+  "releases": [
+    {
+      "commit": "4d346ff79b4647088566bf078ec683ce080ccee9",
+      "commit_short": "4d346ff79b46",
+      "manifest_sha256": "3d72558b259116241f58d329f0e06063bc180b4e07a49e60e38526af1d817fdc",
+      "url": "https://github.com/Magaav/wasm-agent/releases/download/wa-android-4d346ff79b46/wa-android-bundle-4d346ff79b46.tar.gz",
+      "size": 8485346,
+      "target": "aarch64-linux-android",
+      "ndk": "27.3.13750724",
+      "rustc": "1.98.1 (48a229cea 2026-09-01)",
+      "built_utc": "2026-10-20T09:51:39Z"
+    }
+  ]
 }
