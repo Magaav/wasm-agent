@@ -1,9 +1,10 @@
 // Focused browser probe: a steer that carries a picture is accepted, and the appended steered turn
-// draws that picture through the same attachment renderer an ordinary sent turn uses.
+// draws that picture through the same attachment renderer an ordinary sent turn uses - compared to
+// the CONTROL this page's own ordinary send produced, with the shared fingerprint helper.
 const fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto'),assert=require('node:assert/strict'),{spawnSync}=require('node:child_process');
 const repo=path.resolve(__dirname,'..'),out=path.resolve(process.argv[2]);
 const hash=file=>crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
-const sources=()=>Object.fromEntries(['ui/app.js','ui/components.js','ui/style.css','scripts/probe-steered-image-render.js','scripts/test-steered-image-render.cjs'].map(file=>[file,hash(path.join(repo,file))]));
+const sources=()=>Object.fromEntries(['ui/app.js','ui/components.js','ui/style.css','scripts/probe-steered-image-render.js','scripts/wa-probe-support.js','scripts/agent-benchmark-ui-observe.mjs','scripts/test-steered-image-render.cjs'].map(file=>[file,hash(path.join(repo,file))]));
 if(process.argv.includes('--post')){
   const r=JSON.parse(fs.readFileSync(out+'/receipt.json'));
   assert(r.ok&&r.checks>=25&&r.skipped===0);

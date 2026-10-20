@@ -3815,6 +3815,13 @@ try {
     # body cannot pass behind a green suite.
     & node scripts/agent-benchmark-ui-observe.mjs --ui $ui --probe (Join-Path $PSScriptRoot 'probe-topic-markdown.js') --out (Join-Path $tmp 'topic-markdown')
     if ($LASTEXITCODE -ne 0) { throw 'topic markdown browser probe failed' }
+    # The shared structural-fingerprint helper (scripts/wa-probe-support.js) is what lets a probe
+    # compare the subject path to the CONTROL the same page produced, instead of asserting that an
+    # element with this tag and class exists - a lookalike renderer satisfies that. Its own probe
+    # runs here, so a helper that stops distinguishing two lookalikes fails the gate rather than
+    # greening the probes that trust it.
+    & node scripts/agent-benchmark-ui-observe.mjs --ui $ui --probe (Join-Path $PSScriptRoot 'probe-fingerprint-support.js') --out (Join-Path $tmp 'fingerprint-support')
+    if ($LASTEXITCODE -ne 0) { throw 'probe-fingerprint-support browser probe failed' }
     & node scripts/test-final-answer-suite.mjs $WaExe (Join-Path $tmp 'final-answer')
     if ($LASTEXITCODE -ne 0) { throw 'final-answer focused suite failed' }
     & node scripts/test-minimal-chat.cjs (Join-Path $tmp 'minimal-chat')
