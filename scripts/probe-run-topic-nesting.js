@@ -368,14 +368,21 @@
     // `line-height` is inherited from the hosting surface (the stage declares a smaller font for the
     // screenshot), and a topic nested in a run body deliberately loses its own top border/background
     // (`.run-body > .topic`), so neither is a property of the path: they are asserted above, where
-    // they belong. What must match across surfaces is the topic itself: body class, font-size,
-    // padding, header height, header above body, body inside the topic box, and no in-place state.
+    // they belong. What must match across surfaces is the topic itself: body class, the body's measure
+    // against its own hosting surface, padding, header height, header above body, body inside the topic
+    // box, and no in-place state. The body's font/line-height are the surface's by design - a commentary
+    // body IS the answer's text box when its step answers, so it cannot carry a size of its own - which
+    // is why the compared field is that relationship and not one absolute number two different surfaces
+    // were never meant to share; a second implementation that hard-codes a measure still fails here.
     function topicShape(topic) {
       var bodyNode = topic && topic.querySelector(":scope > .commentary-body");
       var headNode = topic && topic.querySelector(":scope > .trace-head");
       if (!bodyNode || !headNode) return null;
       var style = getComputedStyle(bodyNode);
-      return [bodyNode.className, style.fontSize, style.padding,
+      var host = bodyNode.parentElement ? getComputedStyle(bodyNode.parentElement) : null;
+      var measure = !!host && style.fontSize === host.fontSize && style.lineHeight === host.lineHeight;
+      return [bodyNode.className, measure ? "surface-measure" : (style.fontSize + "/" + style.lineHeight),
+        style.padding,
         headNode.getBoundingClientRect().height.toFixed(1),
         headerAbove(topic), bodyInsideTopic(topic),
         topic.hasAttribute("data-in-place"), topic.querySelectorAll("[data-in-place]").length].join("|");
@@ -383,9 +390,9 @@
     var mainShape = topicShape(mainTopic);
     var paneShape = topicShape(paneTopic);
     check(!!mainShape && !!paneShape && mainShape === paneShape,
-      "the main chat and a subagent pane must draw the same commentary shape (body class, font-size, " +
-      "padding, header height, header-above-body, body-inside-box, no in-place); " +
-      "main [" + mainShape + "] pane [" + paneShape + "]");
+      "the main chat and a subagent pane must draw the same commentary shape (body class, the body's " +
+      "measure against its surface, padding, header height, header-above-body, body-inside-box, no " +
+      "in-place); main [" + mainShape + "] pane [" + paneShape + "]");
     check(!!mainTopic && !mainTopic.hasAttribute("data-in-place") &&
       messages.querySelectorAll("[data-in-place]").length === 0,
       "the main chat must hold no in-place commentary state after a resolution, saw " +

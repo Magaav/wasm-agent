@@ -158,8 +158,12 @@ it stands, same parent and same sibling index, and the string is not re-created
 elsewhere in the bubble. It is then an ordinary topic, indistinguishable from the
 thinking one: the header row is drawn ABOVE the body, so the text moves DOWN by
 that row's height, exactly as it does when a tool or thinking topic appears, and
-the body carries the topic's own typography (12px, its padding, border and
-height cap), because that is what makes it the same component. There is no
+the body carries the topic's own padding, border and height cap, and the
+transcript's own text measure - a body is prose at the size the answers are read at,
+because a commentary body IS the answer's text box when its step stops without a tool
+call (below), and a smaller measure inside the topic made that conversion paint the
+answer at one typography and a later repaint of the ledger paint it again at another.
+There is no
 second visual state for a topic that only exists while the run is live, no
 reversed layout and no marker row below the text: that state is how a commentary
 was rendered with its header under its prose and its prose outside its box. The
@@ -179,7 +183,12 @@ with no tool call is answering: in one frame the run's earlier steps and comment
 run topic and that same prose block is moved out of it to sit directly under the topic as the
 answer - exactly one conversion per run. The answer's text box is measured across that move
 (`getBoundingClientRect` and computed font-size/line-height/padding); it must not change metrics,
-because a conversion that re-lays the answer out under the reader is the defect. At the conversion
+because a conversion that re-lays the answer out under the reader is the defect. That box is the
+answer's own measure - the same font-size and line-height a no-tool run's answer has - from the
+first token, so the conversion changes no typography either. A reply that has no streamed block
+draws the same shell (`answerShell`), which is how a repaint of the durable rows lands on the same
+box instead of a second one: the pass that used to re-render the answer a moment after the run is
+the same paint, or it does not happen. At the conversion
 a tall answer (more than ~80% of the chat viewport) anchors its first line and overflows downward, a
 short one does not move the reader, and a reader already in scrollback is never pulled back.
 The identified answer also emits `onFinalAnswer` once per run (ids and lengths only); see
