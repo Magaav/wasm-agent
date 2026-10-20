@@ -255,12 +255,12 @@ wa-message.assistant { align-self: flex-start; background: var(--assistant); }
 .seg.phase-pending { color: var(--muted); font-style: italic; }
 .seg.phase-incomplete { color: var(--muted); font-style: italic; text-decoration: underline dotted; }
 
-/* The model's thinking, when the provider streams it separately from the answer. It is the
-   route to the reply, not the reply, so it folds away - but it stays a visible step, because a
-   turn whose content was all reasoning must not read as a turn that only called tools.
-   It is a topic like the tool calls beside it: the same `trace-head` header (glyph, label, meta,
-   chevron) and the same border and background as <wa-trace>, so nothing about it reads as a
-   different kind of thing. Its own part is the body: pre-wrap prose, capped and scrollable. */
+/* The model's thinking, and its commentary: one topic component, drawn twice (ui/components.js).
+   Both are the route to the reply, not the reply, so they fold away - but they stay visible steps,
+   because a turn whose content was all reasoning must not read as a turn that only called tools.
+   They are a topic like the tool calls beside them: the same `trace-head` header (glyph, label, meta,
+   chevron) and the same border and background as <wa-trace>, so nothing about them reads as a
+   different kind of thing. Their own part is the body: Markdown prose, capped and scrollable. */
 wa-reasoning, wa-commentary { display: block; align-self: flex-start; max-width: 760px; width: 100%; }
 wa-commentary.phase-pending .trace-label, wa-commentary.phase-incomplete .trace-label { color: var(--muted); }
 /* The provisional commentary node IS the commentary topic, held in its pending state: the box, the
@@ -270,23 +270,24 @@ wa-commentary.phase-pending .trace-label, wa-commentary.phase-incomplete .trace-
    a streamed answer does (docs/FINAL-ANSWER-EVENT.md). */
 wa-commentary.phase-pending .commentary-body { max-height: none; overflow: visible; }
 wa-commentary.phase-incomplete .commentary { text-decoration: underline dotted; }
+/* A topic body is Markdown, rendered by the transcript's one renderer - the same HTML a reply
+   contains, so it lays out the same way: `white-space: normal`, because the renderer supplies the
+   line breaks and the blocks (<ul>, <pre>, <br>) rather than the text's own whitespace. */
 .reasoning-body, .commentary-body {
   padding: var(--space);
-  color: var(--muted); font-size: 12px; white-space: pre-wrap;
+  color: var(--muted); font-size: 12px; white-space: normal;
   word-break: break-word; max-height: 320px; overflow: auto;
+  border-top: 1px solid var(--line);
 }
-/* A topic's body sits under its header, so the separator between them is the body's top border -
-   except for a commentary, whose marker row follows its text (see `WaCommentary._build`): there the
-   separator is drawn under the text instead, above the marker. */
-.reasoning-body { border-top: 1px solid var(--line); }
-.commentary-body { border-bottom: 1px solid var(--line); }
 /* A commentary established on a sentence that streamed in the answer's place is typographically
    NEUTRAL: the text box keeps the metrics it streamed with - the bubble's font-size and line-height,
-   no padding, no border, no height cap - and only the marker row is added, below it. Nothing above
-   the text may take space, because that is what pushed the sentence down and made it read as having
-   moved into the topic. Its white-space stays the resolved body's pre-wrap: the streamed state
-   rendered Markdown, so the source's line structure is the closest thing to what the reader saw. */
+   no padding, no border, no height cap - and nothing above the text may take space, because that is
+   what pushed the sentence down and made it read as having moved into the topic. The shared topic
+   draws its header above the body; in this one state the same two children are laid out in reverse,
+   so the marker row sits below the text without the text box moving. DOM order is header, body for
+   every topic - this is a visual state, not a second component. */
 wa-commentary[data-in-place] {
+  display: flex; flex-direction: column-reverse;
   border: 0; border-radius: 0; background: none;
 }
 wa-commentary[data-in-place] > .commentary-body {

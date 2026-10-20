@@ -935,20 +935,43 @@ class WaRetry extends HTMLElement {
 }
 customElements.define('wa-retry',WaRetry);
 
-// <wa-reasoning> — the model's own thinking, as a topic like every other one.
+// <wa-reasoning> / <wa-commentary> — the model's thinking and its commentary, as ONE topic.
 //
-// It is the route to the reply, not the reply, so it folds away once the run moves on - but it stays a
-// visible step, because a turn whose content was all reasoning must not read as a turn that only
-// called tools. It used to be a bespoke <details> with its own header: taller than the tool-call topics
-// beside it, with no chevron and no glyph. Now it is the same topic as the rest.
-class WaReasoning extends HTMLElement {
+// Both are the route to the reply, not the reply, so they fold away once the run moves on - but they
+// stay visible steps, because a turn whose content was all reasoning must not read as a turn that only
+// called tools. They used to be two implementations: the thinking block was a bespoke <details> with
+// its own header (taller, no chevron, no glyph), and the commentary was a second copy that appended
+// its marker row *after* its body, so its prose did not sit inside a topic body the way thinking's
+// did. One component now builds both - same `topicParts` header (glyph, label, meta, chevron), same
+// body, same toggle, same character count, same Markdown - and only the glyph, the label and the
+// body's class name differ. A copy that has to be taught to behave like the original is the defect;
+// there is one class to change.
+const TOPIC_KINDS = {
+  "wa-reasoning": { className: "reasoning", glyph: "\u2733", label: "thinking", bodyClass: "reasoning-body" },
+  "wa-commentary": { className: "commentary", glyph: "\u2726", label: "commentary", bodyClass: "commentary-body" },
+};
+
+// One Markdown path per string: the transcript's own renderer, which app.js installs as
+// `window.renderMarkdown` (it owns the wasm module, escapes raw HTML before adding markup, and wraps
+// code fences with their copy control). This file loads before app.js, so the lookup happens when a
+// body is rendered, not when this file runs. Before that renderer exists the text stays text - a
+// fallback Markdown implementation here is exactly the second path a topic must not have.
+function topicMarkdown(text) {
+  if (typeof window.renderMarkdown === "function") return window.renderMarkdown(text);
+  const escaped = document.createElement("div");
+  escaped.textContent = text;
+  return escaped.innerHTML;
+}
+
+class WaTopic extends HTMLElement {
   static get observedAttributes() { return ["open"]; }
   connectedCallback() { this._build(); }
 
   _build() {
     if (this._body) return;
+    const kind = TOPIC_KINDS[this.localName] || TOPIC_KINDS["wa-reasoning"];
     const parts = topicParts(this, {
-      className: "reasoning", glyph: "\u2733", label: "thinking", bodyClass: "reasoning-body",
+      className: kind.className, glyph: kind.glyph, label: kind.label, bodyClass: kind.bodyClass,
     });
     this._header = parts.header;
     this._label = parts.label;
@@ -977,81 +1000,21 @@ class WaReasoning extends HTMLElement {
 
   toggle() { this.open = !this.open; }
 
-  // The body is `pre-wrap`, so a trailing newline would draw an empty line and a provider ends a chunk
-  // with them. The meta counts what the model produced, not what survives the trim.
+  // The body renders Markdown, so a provider's trailing newline would draw an extra line; the meta
+  // counts what the model produced, not what survives the trim.
   setText(text) {
     this._build();
-    const raw = String(text || "");
-    this._body.textContent = raw.replace(/\s+$/, "");
+    const raw = String(text == null ? "" : text);
+    this._body.innerHTML = topicMarkdown(raw.replace(/\s+$/, ""));
     this._meta.textContent = raw.length + " chars";
   }
 }
+// One implementation, two names: the registry allows a constructor to be used once, so each tag gets a
+// name-only subclass of the same [WaTopic]. Neither adds a line of behaviour - a change to a topic is a
+// change to one class.
+class WaReasoning extends WaTopic {}
+class WaCommentary extends WaTopic {}
 customElements.define("wa-reasoning", WaReasoning);
-
-// A Responses API commentary message is user-facing progress, not hidden
-// reasoning and not the completed answer. Keep it as its own readable topic.
-class WaCommentary extends HTMLElement {
-  get body() {this._build();return this._body;}
-  static get observedAttributes() { return ["open"]; }
-  connectedCallback() { this._build(); }
-
-  _build() {
-    if (this._body) return;
-    const parts = topicParts(this, {
-      className: "commentary", glyph: "\u2726", label: "commentary", bodyClass: "commentary-body",
-    });
-    this._header = parts.header;
-    this._label = parts.label;
-    this._meta = parts.meta;
-    this._chevron = parts.chevron;
-    this._body = parts.body;
-    // Commentary is the one topic whose prose *is* the stream: a sentence can stream in the
-    // answer's place and only afterwards be established as commentary. The chrome therefore follows
-    // the text instead of preceding it - a marker row under the sentence, the same `trace-head`
-    // every other topic uses - so establishing the phase never pushes the text down into the topic
-    // (DESIGN.md section 6). A header above the body would reflow it by exactly its own height.
-    this.append(this._body, this._header);
-    this._sync();
-  }
-
-  get open() { return this.hasAttribute("open"); }
-  set open(value) {
-    if (value) this.setAttribute("open", "");
-    else this.removeAttribute("open");
-  }
-
-  attributeChangedCallback() { this._build(); this._sync(); }
-
-  _sync() {
-    if (!this._body) return;
-    this._body.hidden = !this.open;
-    this._header.setAttribute("aria-expanded", String(this.open));
-    topicChevron(this._chevron, this.open);
-  }
-
-  toggle() { this.open = !this.open; }
-
-  setText(text) {
-    this._build();
-    const raw = String(text || "");
-    // A provisional commentary body streams Markdown with an inline `white-space: normal`; the
-    // resolved topic is plain pre-wrap text, so resolving clears that override instead of leaving
-    // the two states rendering differently.
-    this._body.style.whiteSpace = "";
-    this._body.textContent = raw.replace(/\s+$/, "");
-    this._meta.textContent = raw.length + " chars";
-  }
-
-  // The pending half of the same topic: Markdown while the provider has not stated the phase, with
-  // the character count the resolved state will keep. The header row is built either way, so the
-  // box is the same before and after; only the label/state flip.
-  streamMarkdown(html, chars) {
-    this._build();
-    this._body.style.whiteSpace = "normal";
-    this._body.innerHTML = html;
-    this._meta.textContent = chars + " chars";
-  }
-}
 customElements.define("wa-commentary", WaCommentary);
 
 // <wa-tool> — a tool-activity chip. `name` sets the label; `.detail` is writable.
