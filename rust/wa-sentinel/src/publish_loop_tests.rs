@@ -302,3 +302,22 @@ fn the_health_verb_fails_loudly_when_the_node_does_not_answer() {
         None => std::env::remove_var("WASM_AGENT_PORT"),
     }
 }
+
+/// `status` falls back to the watcher's own `watch pid N` audit line when the lifetime lock proves a watcher
+/// but its pid file cannot be read. Measured 2026-10-20: a deploy's own child was in exactly that state, and
+/// the deploy refused a live watcher for an afternoon because the line had no number in it.
+#[test]
+fn the_watcher_pid_falls_back_to_the_watchers_own_start_line() {
+    let log = "1789760643\twatch\tpid 17932\tsentinel started\n\
+               1789760666\tnode-down\tport 8799\tno answer to /health\n\
+               1789760673\tstart\tC:/wa.exe\tthe node was stopped\n";
+    assert_eq!(super::watched_pid_from_log(log), Some(17932), "the watcher's own line names it");
+    let newer = format!("{log}1789760999\twatch\tpid 4040\tsentinel started\n");
+    assert_eq!(super::watched_pid_from_log(&newer), Some(4040), "the newest watch line wins");
+    assert_eq!(super::watched_pid_from_log(""), None, "an empty log names nobody");
+    assert_eq!(
+        super::watched_pid_from_log("1789760643\twatcher\tpid 1\tx\n"),
+        None,
+        "only the `watch` verb counts - a near miss is not a pid"
+    );
+}
