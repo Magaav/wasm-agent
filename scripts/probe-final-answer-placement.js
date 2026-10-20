@@ -15,11 +15,19 @@
 //     fingerprint captured before the conversion.
 //   * scroll: a tall answer anchors its first line, a short answer does not move the reader, and a
 //     reader who scrolled up during the run is not pulled back.
+//   * the WINDOW after the conversion (section 3c): what a reader sees is not the instant the answer
+//     is moved, it is the frames and the settle/repaint passes that follow. The answer's own computed
+//     font-size/line-height/padding and its box are sampled in the conversion's frame, one animation
+//     frame later, 300ms later, after the settle passes, and after a repaint of the same ledger rows -
+//     all of them must be the same numbers, and no pass may touch the live answer's class or style.
+//     This is the gap that let a second, smaller typography ship: the conversion was measured, never
+//     the window.
 //   * `onFinalAnswer` fires once with the documented ids/lengths payload and refuses a replay of the
 //     same run/message.
 //
-// Synchronous, like the other probes: headless virtual time does not advance.
-(function () {
+// Synchronous sections run against the DOM `handleEvent` built; only section 3c awaits a real frame
+// and a real 300ms, because a window is not an instant.
+(async function () {
   var problems = [];
   function check(ok, label) { if (!ok) problems.push(label); }
   function lastBubble() {
@@ -55,6 +63,41 @@
     setFollow(true);
     document.body.classList.add("expanded");
   }
+  // The answer's own text box: the converted answer is a `.commentary-body` moved into its shell, a
+  // plain answer is its own text, so the box the reader sees is this element either way.
+  function answerTextBox(answer) {
+    if (!answer) return null;
+    return answer.querySelector(":scope > .commentary-body") || answer;
+  }
+  function windowMetrics(answer) {
+    var node = answerTextBox(answer);
+    if (!node) return null;
+    var rect = node.getBoundingClientRect();
+    var style = getComputedStyle(node);
+    return { width: rect.width, height: rect.height, left: rect.left, top: rect.top,
+      fontSize: style.fontSize, lineHeight: style.lineHeight, padding: style.padding };
+  }
+  function windowDeltas(first, other) {
+    var deltas = {};
+    for (var key of ["width", "height", "left", "top"]) {
+      deltas[key] = other ? Math.abs(other[key] - first[key]) : NaN;
+    }
+    return deltas;
+  }
+  function windowSame(first, other, when) {
+    if (!first || !other) { problems.push("the answer must be measurable " + when + ", saw none"); return false; }
+    var deltas = windowDeltas(first, other);
+    var ok = other.fontSize === first.fontSize && other.lineHeight === first.lineHeight &&
+      other.padding === first.padding &&
+      deltas.width < 0.01 && deltas.height < 0.01 && deltas.left < 0.01 && deltas.top < 0.01;
+    check(ok, "the answer must not be re-painted " + when + ": the conversion painted [" +
+      metricText(first) + "] and that paint is [" + metricText(other) + "], box delta " +
+      "w=" + deltas.width.toFixed(2) + " h=" + deltas.height.toFixed(2) +
+      " l=" + deltas.left.toFixed(2) + " t=" + deltas.top.toFixed(2));
+    return ok;
+  }
+  function frame() { return new Promise(function (resolve) { requestAnimationFrame(function () { resolve(); }); }); }
+  function wait(ms) { return new Promise(function (resolve) { setTimeout(resolve, ms); }); }
   var result = { status: "fail", text: "probe did not finish" };
 
   try {
@@ -181,6 +224,128 @@
     check(countText(pendingBubble, "The pending answer.") === 1,
       "and the answer text appears once, saw " + countText(pendingBubble, "The pending answer."));
 
+    // ---- 3c. the WINDOW: the first paint must already be the final one ----------------------------
+    // The operator's report was a window, not an instant: the answer appeared with the wrong font-size and
+    // a moment later was re-rendered at the right one. So this stage drives the ordinary route end to end,
+    // then samples the answer's OWN box and typography five times - in the conversion's frame, one animation
+    // frame later, 300ms later, after the settle passes (`done`, the trailing `final_answer`, a repeated
+    // `reply`), and after a repaint of the same durable rows (the pass `reconcile`/`watchTurn` triggers, and
+    // the one that used to be the "rerenders correctly"). Every sample must be the same number, and no pass
+    // may touch the live answer node's class or style at all.
+    fresh();
+    var windowAnswerSelector = ".seg.final-answer";
+    var windowText = "The answer is prose at the transcript's own measure.\n\nA second paragraph, so the " +
+      "block wraps and its box is worth measuring.";
+    var windowAttachments = 0;
+    var windowStyleTouches = [];
+    var liveAnswer = null;
+    var replayedAnswer = null;
+    // Only what a pass does AFTER the first paint is counted: the conversion's own records are drained
+    // once, and from then on any class/style write to the answer (or its text box) is a second paint.
+    function account(records) {
+      for (var record of records) {
+        if (record.type !== "attributes") continue;
+        if (liveAnswer && (record.target === liveAnswer || liveAnswer.contains(record.target)))
+          windowStyleTouches.push(record.attributeName + " on " +
+            (record.target.className || record.target.tagName));
+      }
+    }
+    // An attachment is counted by IDENTITY - the answer element itself arriving in the transcript - so a
+    // parent that merely carries it later cannot be mistaken for a second paint.
+    function attachmentsIn(records) {
+      var count = 0;
+      for (var record of records) {
+        if (record.type === "attributes") continue;
+        for (var added of record.addedNodes) if (added === liveAnswer || added === replayedAnswer) count += 1;
+      }
+      return count;
+    }
+    var watcher = new MutationObserver(account);
+    watcher.observe(messages, { childList: true, subtree: true, attributes: true,
+      attributeFilter: ["class", "style"] });
+    function drainWindow() { account(watcher.takeRecords()); }
+    add("user", "Read the file.");
+    handleEvent({ type: "round", n: 1, tools: 3, run_id: "window-run", session_id: "placement-session" });
+    handleEvent({ type: "delta", text: "Let me read the file." });
+    handleEvent({ type: "tool", call_id: "window-call-1", name: "read", arguments: { path: "ui/app.js" } });
+    handleEvent({ type: "tool_result", name: "read", call_id: "window-call-1", result: { content: "ok" } });
+    handleEvent({ type: "round", n: 2, tools: 3, run_id: "window-run", session_id: "placement-session" });
+    handleEvent({ type: "delta", text: windowText });
+    handleEvent({ type: "reply", message_id: "window-msg", text: windowText });
+    liveAnswer = lastBubble().body.querySelector(":scope > " + windowAnswerSelector);
+    var windowFirst = windowMetrics(liveAnswer);
+    var conversionRecords = watcher.takeRecords();
+    windowAttachments = attachmentsIn(conversionRecords);
+    check(!!liveAnswer && !!windowFirst,
+      "the conversion must place the answer before the window is measured, saw " + windowFirst);
+    check(windowAttachments === 1,
+      "the conversion must attach the answer to the transcript exactly once, saw " +
+      windowAttachments + " attachments");
+    check(windowStyleTouches.length === 0,
+      "no pass may rewrite the answer's class or style, saw " + JSON.stringify(windowStyleTouches));
+    var windowFrame = null, windowLater = null, windowSettled = null, windowReplayed = null;
+    await frame();
+    windowFrame = windowMetrics(liveAnswer);
+    drainWindow();
+    await wait(300);
+    windowLater = windowMetrics(liveAnswer);
+    drainWindow();
+    // The passes a run's own end triggers: settlement, the trailing final-answer event, and the durable
+    // reply repainted before it. None of them may move, restyle or re-render the answer.
+    handleEvent({ type: "done" });
+    handleEvent({ type: "final_answer", session_id: "placement-session", run_id: "window-run",
+      message_id: "window-msg", answer_id: "window-run:answer", text_len: windowText.length, at: 1792500000001 });
+    handleEvent({ type: "reply", message_id: "window-msg", text: windowText });
+    windowSettled = windowMetrics(liveAnswer);
+    drainWindow();
+    check(lastBubble().body.querySelector(":scope > " + windowAnswerSelector) === liveAnswer,
+      "the settle passes must leave the answer node the conversion placed in place, not replace it");
+    // And the repaint of the durable rows, which is what a window does a moment after a run ends.
+    var windowRows = [
+      { role: "user", seq: 1, id: "window-user", content: "Read the file.", created_at: 1000 },
+      { role: "assistant", seq: 2, id: "window-commentary", content: "Let me read the file.",
+        phase: "commentary", created_at: 1001, trace: [] },
+      { role: "assistant", seq: 3, id: "window-call", content: "", created_at: 1002, trace: [],
+        tool_calls: [{ id: "window-call-1", type: "function",
+          function: { name: "read", arguments: "{\"path\":\"ui/app.js\"}" } }] },
+      { role: "tool", seq: 4, id: "window-result", content: "ok", tool_name: "read",
+        tool_call_id: "window-call-1", ok: 1, created_at: 1003, trace: [] },
+      { role: "assistant", seq: 5, id: "window-msg", content: windowText, created_at: 1004, trace: [] }
+    ];
+    repaintMessages(windowRows, {});
+    replayedAnswer = lastBubble().body.querySelector(":scope > " + windowAnswerSelector);
+    windowReplayed = windowMetrics(replayedAnswer);
+    var repaintRecords = watcher.takeRecords();
+    var repaintAttachments = attachmentsIn(repaintRecords);
+    account(repaintRecords);
+    watcher.disconnect();
+    check(!!replayedAnswer, "a repaint of the same rows must draw the answer again");
+    check(repaintAttachments === 1,
+      "the repaint must draw the answer once, not twice, saw " + repaintAttachments + " attachments");
+    windowSame(windowFirst, windowFrame, "one animation frame after the conversion");
+    windowSame(windowFirst, windowLater, "300ms after the conversion");
+    windowSame(windowFirst, windowSettled, "after the settle passes");
+    windowSame(windowFirst, windowReplayed, "after a repaint of the same durable rows");
+    check(windowStyleTouches.length === 0,
+      "across the whole window no pass may rewrite the answer's class or style, saw " +
+      JSON.stringify(windowStyleTouches));
+    // The measure itself: the answer is drawn at the transcript's own typography, not at the smaller
+    // 12px a topic body used to have. A no-tool run's answer on this same page is the control.
+    fresh();
+    handleEvent({ type: "round", n: 1, tools: 0, run_id: "window-control", session_id: "placement-session" });
+    handleEvent({ type: "delta", text: "A no-tool answer." });
+    handleEvent({ type: "reply", message_id: "window-control-msg", text: "A no-tool answer." });
+    var controlAnswer = lastBubble().body.querySelector(":scope > " + windowAnswerSelector);
+    var control = windowMetrics(controlAnswer);
+    check(!!control && !!windowFirst && control.fontSize === windowFirst.fontSize &&
+      control.lineHeight === windowFirst.lineHeight,
+      "the answer's first paint must already carry the answer's own measure (a no-tool run's answer on " +
+      "this page), saw " + (windowFirst ? windowFirst.fontSize + "/" + windowFirst.lineHeight : "none") +
+      " vs control " + (control ? control.fontSize + "/" + control.lineHeight : "none"));
+    check(!!windowFirst && windowFirst.fontSize !== "12px",
+      "the answer must not be painted at the old 12px topic-body measure, saw " +
+      (windowFirst ? windowFirst.fontSize : "none"));
+
     // ---- 4. a run whose request carried NO tools: prose is the answer, as today -----------------
     handleEvent({ type: "done" });
     messages.replaceChildren(); runBubble = null; streamBody = null; streamText = "";
@@ -301,9 +466,11 @@
 
     var verdict = "PASS: thinking streams in the thinking topic; a tool-capable run streams its prose " +
       "inside commentary from the first chunk, settles a commentary label on a tool call, and converts " +
-      "the same block into the one answer outside the run topic with an unmoved text box; a no-tool run " +
-      "answers directly; tall answers anchor their top, short answers and scrolled-up readers are left " +
-      "alone; onFinalAnswer fires once and refuses a replay";
+      "the same block into the one answer outside the run topic with an unmoved text box; that first " +
+      "paint is already the final one - the answer's own measure, unchanged one frame, 300ms, the " +
+      "settle passes and a durable repaint later, with no pass touching its class or style; a no-tool " +
+      "run answers directly; tall answers anchor their top, short answers and scrolled-up readers are " +
+      "left alone; onFinalAnswer fires once and refuses a replay";
     result = { status: problems.length ? "fail" : "pass",
       text: problems.length ? "FAIL: " + problems.join(" ;; ") : verdict };
   } catch (error) {

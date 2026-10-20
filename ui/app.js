@@ -1132,6 +1132,25 @@ function answerBoxMetrics(node) {
     fontSize: style.fontSize, lineHeight: style.lineHeight, padding: style.padding };
 }
 
+// The answer's box is ONE box, whichever route drew it. The conversion does not create a new text
+// box - it MOVES the streamed `.commentary-body` into this shell - so a reply that has no streamed
+// block (a repaint of the ledger, or a run whose prose arrived with the reply) has to build the same
+// shell, or the next repaint would paint the answer with a different box: the second typography this
+// conversion exists to prevent. `.answer-wrap` is the 1px topic-border inset the body sat inside.
+function answerShell(bubble, messageId) {
+  const wrap = document.createElement("div");
+  wrap.className = "seg final-answer answer-wrap";
+  if (messageId) wrap.dataset.messageId = String(messageId);
+  if (bubble?.dataset.answerId) wrap.dataset.answerId = bubble.dataset.answerId;
+  return wrap;
+}
+function answerText(shell) {
+  const body = document.createElement("div");
+  body.className = "topic-body commentary-body";
+  shell.append(body);
+  return body;
+}
+
 // A step that chose a tool was commentary, and the provisional topic is already the commentary
 // topic. Settling it is a label/class flip on that node: no move, no copy, no re-wrap.
 function settleProvisionalCommentary(messageId) {
@@ -1162,10 +1181,7 @@ function convertProvisionalAnswer(bubble, topic, messageId) {
   streamBody = null;
   collapseRun(true);
   // ...then pull the prose block back out of it, under that topic.
-  const wrap = document.createElement("div");
-  wrap.className = "seg final-answer answer-wrap";
-  if (messageId) wrap.dataset.messageId = String(messageId);
-  if (bubble.dataset.answerId) wrap.dataset.answerId = bubble.dataset.answerId;
+  const wrap = answerShell(bubble, messageId);
   wrap.append(body);
   bubble.body.append(wrap);
   topic.remove();
@@ -2270,12 +2286,25 @@ function handleEvent(event) {
         streamBody.style.whiteSpace = "normal";
       }
     } else {
-      const segment = document.createElement("div");
-      segment.className = "seg";
-      segment.innerHTML = renderMarkdown(finalText);
-      segment.rawText=event.text || streamText;
-      if (event.message_id) segment.dataset.messageId = event.message_id;
-      currentBubble().body.append(segment);
+      // No streamed block: this reply itself is the prose. A request that carried tools has its answer
+      // drawn in the conversion's own shell (see `answerShell`), because a later repaint of the same
+      // ledger row must land on that box and not on a second, differently measured one; a request that
+      // carried no tools is answering, so its prose is the bubble's plain answer segment. `event.tools`
+      // is the request's own surface when the caller knows it (a repaint reads it from the ledger); in
+      // a live run the bubble already recorded it from the step's `round` event.
+      const bubble = currentBubble();
+      const tools = event.tools !== undefined ? Number(event.tools) > 0
+        : bubble.dataset.runTools === "1";
+      const segment = tools ? answerShell(bubble, event.message_id) : document.createElement("div");
+      if (!tools) {
+        segment.className = "seg";
+        if (event.message_id) segment.dataset.messageId = event.message_id;
+      }
+      const text = tools ? answerText(segment) : segment;
+      text.innerHTML = renderMarkdown(finalText);
+      text.rawText = event.text || streamText;
+      if (tools) text.style.whiteSpace = "normal";
+      bubble.body.append(segment);
       anchorRunStepContent(segment);
       streamBody = segment;
     }
@@ -2283,7 +2312,9 @@ function handleEvent(event) {
     // While active the diff remains below the candidate answer. Settlement folds
     // every activity topic (including commentary/diff) into one run above the final answer.
     collapseRun();
-    streamBody.classList.add('final-answer');
+    // The conversion already placed this node as the answer; re-adding a class it carries would rewrite
+    // the answer's class attribute for nothing (and it is the answer's own first paint, not a later pass).
+    if (!streamBody.classList.contains('final-answer')) streamBody.classList.add('final-answer');
     streamBody.dataset.answerComplete='true';
     if (newlyConfirmed && !answerReleased.has(transcript)) anchorAnswer(streamBody,true);
     sealReasoning();
@@ -2586,6 +2617,11 @@ function repaintMessages(rows, options = {}) {
   }
   const replayedBubbles = new Map();
   let replayUserSeq = null;
+  // The request's own tool surface, read from the ledger instead of from a live `round` event: a
+  // repaint draws the run's answer in the same shell the conversion used (a commentary row, a stored
+  // call, or a stored result all mean the request carried tools), so the pass that repaints the ledger
+  // cannot paint the answer with a second box.
+  let replayRunTools = false;
   // A repaint is a view of durable rows, not a resumed event stream. In particular, an
   // assistant tool call without a result must never inherit a live timer from this page.
   stopToolTicker();
@@ -2628,6 +2664,7 @@ function repaintMessages(rows, options = {}) {
         userBody.closest('wa-message').dataset.ledgerKey=String(message.id || message.seq);
         userBody.closest('wa-message').dataset.messageSeq=String(message.seq || "");
         replayUserSeq = Number(message.seq) || null;
+        replayRunTools = false;
         for (const item of message.trace || []) if (item.kind === 'run_counts') applyRunCounts(item);
       } else if (message.role === "summary") {
         for (const item of message.trace || []) if (item.kind === 'run_counts') applyRunCounts(item);
@@ -2643,6 +2680,7 @@ function repaintMessages(rows, options = {}) {
         if(runBubble&&!runBubble.dataset.ledgerKey)runBubble.dataset.ledgerKey=String(message.id || message.seq);
       } else if (message.role === "assistant") {
         for (const item of message.trace || []) if (item.kind === 'run_counts') applyRunCounts(item);
+        if ((message.tool_calls || []).length || message.phase === "commentary") replayRunTools = true;
         replayRunLastMessage = message;
         if (Number(message.created_at) > 0) replayMessageEndedAt = Number(message.created_at) * 1000;
         for(const span of message.trace || []) if(span.kind==='delegation' && span.ok===true && span.receipt?.subagent_id)
@@ -2669,7 +2707,8 @@ function repaintMessages(rows, options = {}) {
             handleEvent({ type: "commentary", text: message.content, message_id: message.id });
           }
         } else if (message.content) {
-          handleEvent({ type: "reply", text: message.content, changes: message.changes, message_id: message.id });
+          handleEvent({ type: "reply", text: message.content, changes: message.changes, message_id: message.id,
+            tools: replayRunTools ? 1 : 0 });
         }
         const calls = message.tool_calls || [];
         if (calls.length) {
@@ -2689,6 +2728,7 @@ function repaintMessages(rows, options = {}) {
         if (message.id) renderedMessageIds.add(String(message.id));
       } else if (message.role === "tool") {
         for (const item of message.trace || []) if (item.kind === 'run_counts') applyRunCounts(item);
+        replayRunTools = true;
         replayRunLastMessage = message;
         if (Number(message.created_at) > 0) replayMessageEndedAt = Number(message.created_at) * 1000;
         // The stored row carries the ledger's own verdict (`ok`), and a repaint that dropped it drew a
