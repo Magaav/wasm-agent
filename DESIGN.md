@@ -162,10 +162,12 @@ the body carries the topic's own typography (12px, its padding, border and
 height cap), because that is what makes it the same component. There is no
 second visual state for a topic that only exists while the run is live, no
 reversed layout and no marker row below the text: that state is how a commentary
-was rendered with its header under its prose and its prose outside its box.
-Commentary stays
-outside the run topic while the run is
-stepping: nothing folds into the topic until the final
+was rendered with its header under its prose and its prose outside its box. The
+bubble is `width: fit-content`, so a body at the topic's own measure makes the
+commentary's line narrower than the answer segment it replaced - the same width a
+replayed row of the same commentary draws, which is the point. Commentary stays
+outside the run topic while the run is stepping: nothing folds into the topic
+until the final
 answer, which nests the whole history (commentary included) and is the only thing
 that stays outside it. Its own manual fold survives;
 only the final answer stays outside activity topics (alongside the status row).

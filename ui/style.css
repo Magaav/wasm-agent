@@ -279,13 +279,14 @@ wa-commentary.phase-incomplete .commentary { text-decoration: underline dotted; 
   word-break: break-word; max-height: 320px; overflow: auto;
   border-top: 1px solid var(--line);
 }
-/* A commentary established on a sentence that streamed in the answer's place is NOT a visual state of
-   its own: it is the same topic as the thinking block above, drawn at the place the sentence already
-   occupied. The header row appears above the text and the text moves down by that row's height - what
-   every other topic does - but the sentence is not re-drawn elsewhere: same parent, same sibling
-   index, same string, filling the line it streamed on. So there is no `[data-in-place]` override,
-   and no reversed layout: a topic that only looks like a topic while the run is live is the defect
-   this replaced. */
+/* NOTE - there is deliberately NO rule here for "a commentary established on a sentence that streamed
+   in the answer's place": that sentence is NOT a visual state of its own. It is the same topic as the
+   thinking block above, drawn at the place the sentence already occupied, so it uses exactly the
+   rules above. The header row appears above the text and the text moves down by that row's height -
+   what every other topic does - but the sentence is not re-drawn elsewhere: same parent, same sibling
+   index, same string. So there is no `[data-in-place]` override, no reversed layout and no
+   chrome-less box: a topic that only looks like a topic while the run is live is the defect this
+   replaced. */
 .run-body > .topic { border: 0; border-left: 2px solid var(--line); border-radius: 0; background: none; }
 wa-steering[data-state="queued"] { border-style: dashed; }
 

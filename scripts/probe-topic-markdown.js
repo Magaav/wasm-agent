@@ -170,10 +170,11 @@
       "phase-at-end: the header row must be ABOVE the body, header [" +
       (headBox ? headBox.top.toFixed(1) + " h=" + headBox.height.toFixed(1) : "none") + "] body [" +
       (bodyBox ? bodyBox.top.toFixed(1) : "none") + "]");
-    // (c) the removed exception must be gone, not merely cleared later.
-    check(messages.querySelectorAll("[data-in-place]").length === 0,
-      "phase-at-end: no element may carry the removed in-place state, saw " +
-      messages.querySelectorAll("[data-in-place]").length);
+    // (c) the removed exception must be gone, not merely cleared later - asserted on the whole
+    // document, so an element outside the transcript cannot keep carrying it either.
+    check(document.querySelectorAll("[data-in-place]").length === 0,
+      "phase-at-end: no element in the page may carry the removed in-place state, saw " +
+      document.querySelectorAll("[data-in-place]").length);
     // The honest placement rule: the sentence is not re-created elsewhere - same parent, same
     // sibling index - and the topic takes the streamed sentence's width. It may move DOWN by exactly
     // the header row's height plus the topic's own top border, which is measured here.
@@ -224,9 +225,9 @@
     var folded = run && run.querySelector("wa-commentary");
     check(!!folded && !folded.hasAttribute("data-in-place"),
       "settled: the folded commentary must be the shared topic, with no in-place state");
-    check(messages.querySelectorAll("[data-in-place]").length === 0,
-      "settled: no element may carry the removed in-place state, saw " +
-      messages.querySelectorAll("[data-in-place]").length);
+    check(document.querySelectorAll("[data-in-place]").length === 0,
+      "settled: no element in the page may carry the removed in-place state, saw " +
+      document.querySelectorAll("[data-in-place]").length);
     if (run) run.open = true;
     var foldedHead = folded && folded.querySelector(":scope > .trace-head").getBoundingClientRect();
     var foldedBody = folded && folded.querySelector(":scope > .commentary-body").getBoundingClientRect();
