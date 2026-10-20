@@ -991,6 +991,66 @@ function M.transient_retries()
   return math.max(0, math.min(8, math.floor(count)))
 end
 
+-- A provider that *answered* with 429/5xx did not serve the request, so replaying it later cannot
+-- duplicate a tool call and cannot be billed as a second inference. That is categorically different
+-- from a missing or ambiguous response (the opt-in bucket above), and it is the ordinary shape of a
+-- busy upstream: the run should wait, not die. pi's agent retry uses the same split - rate limits and
+-- server errors retry by default, while a terminal quota/billing refusal does not.
+local RATE_LIMIT_TERMINAL = { "gousagelimiterror", "freeusagelimiterror", "monthly usage limit",
+  "available balance", "insufficient_quota", "out of budget", "quota exceeded", "billing",
+  "subscription_sharing_usage_limit_exceeded" }
+
+function M.is_rate_limited(problem)
+  local text = tostring(problem or ""):lower()
+  -- The subscription bridge owns its own visible reconnect cycles; never compound them here.
+  if text:find("subscription_", 1, true) then return false end
+  local status = text:match("provider_http_(%d+)")
+  if not status or not TRANSIENT_STATUS[status] then return false end
+  for _, pattern in ipairs(RATE_LIMIT_TERMINAL) do
+    if text:find(pattern, 1, true) then return false end
+  end
+  return true
+end
+
+-- Default three, like pi's `retry.maxRetries`. `WASM_AGENT_PROVIDER_RETRIES` still acts as the
+-- operator off-switch for every provider retry when it is set; the explicit knob wins when both are.
+function M.rate_limit_retries()
+  local raw = env("WASM_AGENT_PROVIDER_RATE_LIMIT_RETRIES")
+  if raw == nil or trim(raw) == "" then raw = env("WASM_AGENT_PROVIDER_RETRIES") end
+  if raw == nil or trim(raw) == "" then return 3 end
+  local count = tonumber(raw)
+  if not count then return 3 end
+  return math.max(0, math.min(8, math.floor(count)))
+end
+
+-- 2 s, 4 s, 8 s, ... capped at a minute - the same shape as pi's agent retry.
+function M.rate_limit_delay_ms()
+  local ms = tonumber(env("WASM_AGENT_PROVIDER_RATE_LIMIT_DELAY_MS") or "")
+  if not ms then return 2000 end
+  return math.max(0, math.min(60000, math.floor(ms)))
+end
+
+function M.rate_limit_max_delay_ms()
+  local ms = tonumber(env("WASM_AGENT_PROVIDER_RATE_LIMIT_MAX_DELAY_MS") or "")
+  if not ms then return 60000 end
+  return math.max(0, math.min(600000, math.floor(ms)))
+end
+
+-- The provider's own instruction, carried on the error as `[retry_after_ms=N]` by the HTTP error
+-- builder below. Honouring it is both politer and faster than guessing: a 429 that names a wait is
+-- telling us the earliest time it can serve us again.
+function M.retry_after_ms(problem)
+  local ms = tostring(problem or ""):match("retry_after_ms=(%d+)")
+  return ms and tonumber(ms) or nil
+end
+
+function M.rate_limit_backoff_ms(attempt, retry_after_ms)
+  local ceiling = M.rate_limit_max_delay_ms()
+  if retry_after_ms then return math.min(ceiling, retry_after_ms) end
+  local delay = math.min(ceiling, M.rate_limit_delay_ms() * 2 ^ math.max(0, (tonumber(attempt) or 1) - 1))
+  return math.floor(delay * (0.75 + math.random() * 0.5))
+end
+
 -- Connectivity failures - our link, not the provider's health - are retried BY DEFAULT and
 -- for a much longer, visible budget than the opt-in inference retries: a Wi-Fi drop says
 -- nothing about the request, and dying with the network is the wrong behaviour. The billing
@@ -1050,6 +1110,15 @@ end
 function M.connection_backoff_ms(attempt)
   local seconds = math.min(30, 2 ^ math.max(1, tonumber(attempt) or 1))
   return math.floor(seconds * 1000 * (0.75 + math.random() * 0.5))
+end
+
+-- An HTTP refusal keeps its status and body, and the server's own `Retry-After` hint when the host
+-- exposes one. The hint travels inside the message because a Lua error crosses `pcall` as a string;
+-- `M.retry_after_ms` reads it back for the rate-limit backoff.
+local function http_problem(status, body, retry_after_ms)
+  local message = "provider_http_" .. tostring(status) .. ": " .. tostring(body):sub(1, 240)
+  if retry_after_ms then message = message .. " [retry_after_ms=" .. tostring(retry_after_ms) .. "]" end
+  return redact.text(message)
 end
 
 -- `stream` forwards content deltas to the UI and still returns the whole
@@ -1138,7 +1207,7 @@ function M.complete_with(model, messages, tools, stream, opts)
     record_serving_http(provider,body.model,result,serving_request_binding)
     if result.error then error(redact.text("provider_error: " .. tostring(result.error))) end
     if result.status ~= 200 then
-      error(redact.text("provider_http_" .. tostring(result.status) .. ": " .. tostring(result.body):sub(1, 240)))
+      error(http_problem(result.status, result.body, result.retry_after_ms))
     end
     return {
       content = result.content or "",
@@ -1174,7 +1243,7 @@ function M.complete_with(model, messages, tools, stream, opts)
   record_serving_http(provider,body.model,response,serving_request_binding)
   if response.error then error(redact.text("provider_error: " .. tostring(response.error))) end
   if response.status ~= 200 then
-    error(redact.text("provider_http_" .. tostring(response.status) .. ": " .. tostring(response.body):sub(1, 240)))
+    error(http_problem(response.status, response.body, response.retry_after_ms))
   end
   local payload = json.decode(response.body)
   local message = payload.choices[1].message

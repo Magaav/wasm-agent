@@ -1336,6 +1336,21 @@ pub extern "C-unwind" fn invoke(l: *mut LuaState) -> c_int {
     1
 }
 
+/// The provider's own backoff instruction, in milliseconds.
+///
+/// `retry-after-ms` wins over `retry-after` (seconds). An HTTP-date form is deliberately not parsed:
+/// no provider we use has sent one, and guessing a clock offset is worse than returning `None`.
+/// A missing header returns `None`; the caller decides its own cap.
+fn retry_after_ms(headers: &ureq::http::HeaderMap) -> Option<u64> {
+    if let Some(value) = headers.get("retry-after-ms").and_then(|value| value.to_str().ok()) {
+        if let Ok(ms) = value.trim().parse::<u64>() {
+            return Some(ms);
+        }
+    }
+    let value = headers.get("retry-after")?.to_str().ok()?.trim();
+    value.parse::<u64>().ok().map(|seconds| seconds.saturating_mul(1000))
+}
+
 /// host.http(method, url, headers_json, body) -> {status, body} | {error}
 pub extern "C-unwind" fn http(l: *mut LuaState) -> c_int {
     let method = arg_string(l, 1).unwrap_or_else(|| "POST".into()).to_uppercase();
@@ -1370,8 +1385,13 @@ pub extern "C-unwind" fn http(l: *mut LuaState) -> c_int {
             other => return Err(format!("method_not_supported:{other}")),
         };
         let status = response.status().as_u16();
+        let retry_after = retry_after_ms(response.headers());
         let text = response.into_body().read_to_string().map_err(|e| e.to_string())?;
-        Ok(json!({"status": status, "body": text}))
+        let mut value = json!({"status": status, "body": text});
+        if let Some(ms) = retry_after {
+            value["retry_after_ms"] = json!(ms);
+        }
+        Ok(value)
     })();
     push_json(l, &outcome.unwrap_or_else(|error| json!({"error": error})));
     crate::subagents::clear_active_socket();
@@ -1936,10 +1956,15 @@ pub extern "C-unwind" fn http_sse(l: *mut LuaState) -> c_int {
     let status = response.status().as_u16();
     stream_control.received_headers();
     if status != 200 {
+        let retry_after = retry_after_ms(response.headers());
         let text = response.into_body().read_to_string().unwrap_or_default();
         crate::subagents::clear_active_socket();
         let head: String = text.chars().take(2048).collect();
-        push_json(l, &json!({"status": status, "body": head, "termination": "http_error"}));
+        let mut value = json!({"status": status, "body": head, "termination": "http_error"});
+        if let Some(ms) = retry_after {
+            value["retry_after_ms"] = json!(ms);
+        }
+        push_json(l, &value);
         return 1;
     }
     let reader = std::io::BufReader::new(response.into_body().into_reader());
@@ -2244,8 +2269,13 @@ fn stream_completion(method: &str, url: &str, headers: &[(String, String)], body
     let response = request.send(body.as_bytes()).map_err(|error| error.to_string())?;
     let status = response.status().as_u16();
     if status != 200 {
+        let retry_after = retry_after_ms(response.headers());
         let text = response.into_body().read_to_string().unwrap_or_default();
-        return Ok(json!({"status": status, "content": "", "tool_calls": [], "body": text}));
+        let mut value = json!({"status": status, "content": "", "tool_calls": [], "body": text});
+        if let Some(ms) = retry_after {
+            value["retry_after_ms"] = json!(ms);
+        }
+        return Ok(value);
     }
     let reader = std::io::BufReader::new(response.into_body().into_reader());
     let mut content = String::new();
@@ -3583,5 +3613,23 @@ mod heartbeat_tests {
             "WASM_AGENT_PROVENANCE=\n",
             "a thread with no task context must get an empty marker, not silence from the environment"
         );
+    }
+}
+
+#[cfg(test)]
+mod retry_after_tests {
+    use super::retry_after_ms;
+
+    #[test]
+    fn reads_the_providers_own_backoff_instruction() {
+        let mut headers = ureq::http::HeaderMap::new();
+        assert_eq!(retry_after_ms(&headers), None, "a provider that says nothing has no hint");
+        headers.insert("retry-after", "3".parse().unwrap());
+        assert_eq!(retry_after_ms(&headers), Some(3000), "seconds become milliseconds");
+        headers.insert("retry-after-ms", "250".parse().unwrap());
+        assert_eq!(retry_after_ms(&headers), Some(250), "the millisecond form wins");
+        headers.insert("retry-after", "Wed, 21 Oct 2015 07:28:00 GMT".parse().unwrap());
+        headers.remove("retry-after-ms");
+        assert_eq!(retry_after_ms(&headers), None, "an HTTP-date is ignored, not guessed");
     }
 }

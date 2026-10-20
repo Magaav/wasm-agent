@@ -294,14 +294,28 @@ is about 29 ms here; it cannot explain the field audit's 88.2-second bash p95 or
 The tests prove those boundaries, not universal freedom from hangs or safe
 execution of arbitrary privileged commands.
 
-## Opt-in provider retry policy
+## Provider retry policy
 
-`WASM_AGENT_PROVIDER_RETRIES=0` is the default for the new exponential-backoff
-loop; a positive integer (capped at eight) opts in. Risk: a lost inference response
-may already have been billed or partially streamed. Known returned content,
-commentary, reasoning or tool calls prohibit retry. These are inference retries,
-never permission to replay a dispatched tool, credential refresh or unknown effect.
-The existing separately bounded response-header-timeout policy is unchanged.
+There are two buckets, because they answer different questions.
+
+**An HTTP refusal (429/5xx) retries by default.** The provider *answered* and did not serve the
+request, so replaying it later cannot duplicate a tool call and cannot be billed as a second
+inference. This is the ordinary shape of a busy upstream, and ending the run there is what made a
+single `provider_http_429: ... Endpoint is unavailable.` kill a thread. The default is pi's agent
+policy: three attempts, 2 s doubling to a 60 s cap; `WASM_AGENT_PROVIDER_RATE_LIMIT_RETRIES`
+(0-8, 0 disables) and `WASM_AGENT_PROVIDER_RATE_LIMIT_DELAY_MS` /
+`WASM_AGENT_PROVIDER_RATE_LIMIT_MAX_DELAY_MS` change it. When the host exposes the provider's
+`Retry-After`/`Retry-After-Ms` header, that wait is used (capped by the max delay) instead of a
+guess. A terminal quota/billing 429 (`GoUsageLimitError` monthly, insufficient quota, billing) is
+**not** retried: it is a landed limit, and the serving eligibility seam still blocks that route.
+
+**A missing or ambiguous response remains opt-in.** `WASM_AGENT_PROVIDER_RETRIES=0` is still the
+default for that bucket; a positive integer (capped at eight) opts in. Risk: a lost inference
+response may already have been billed or partially streamed. Known returned content, commentary,
+reasoning or tool calls prohibit retry. Setting `WASM_AGENT_PROVIDER_RETRIES` also acts as the
+off-switch for the refusal bucket (used by hermetic fixtures that must spend exactly one call).
+These are inference retries, never permission to replay a dispatched tool, credential refresh or
+unknown effect. The existing separately bounded response-header-timeout policy is unchanged.
 The Pi subscription bridge has its own visible reconnect cycles, default10 retries
 via `WASM_AGENT_SUBSCRIPTION_TRANSPORT_RETRIES` (0 disables). It requires an observed
 transient cause before model output, preserves one operation deadline, records
