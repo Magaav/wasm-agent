@@ -133,29 +133,89 @@
       topic.open = true;
       return closed && !topic.body.hidden && topic.querySelector(".trace-chevron").textContent === "\u2304";
     });
-    check(toggles, "unified: the commentary collapses and expands exactly as the thinking topic does");
-
-    // ---- 3. the honest constraint, still honoured: the phase arrives at step end, the text stays ---
-    // The ordinary OpenAI-compatible route states no per-item phase (lua/core/agent.lua:1818-1821,
-    // :1979-1980), so this prose streams in the answer's place and only then resolves to commentary.
-    // That provisional state is allowed; what is not allowed is the sentence moving when it resolves.
+    // ---- 3. the phase arrives at step end: the text streams in the answer's place, then becomes ---
+    // the commentary topic where it stands. The ordinary OpenAI-compatible route states no per-item
+    // phase (lua/core/agent.lua:1818-1821, :1979-1980), so that provisional state is allowed. What is
+    // NOT allowed is a second layout for it: the topic's header belongs ABOVE the body (so the
+    // sentence may move DOWN by that row's height - measured below, not ignored) and the body belongs
+    // INSIDE the topic's box. That was the operator's complaint: a header row drawn under the prose,
+    // and prose that looked bound to a topic but sat outside its box.
     window.handleEvent({ type: "done" });
     window.handleEvent({ type: "round", n: 1 });
     window.handleEvent({ type: "delta", text: FULL });
     var provisional = lastOf(".seg");
     var provisionalBox = provisional && provisional.getBoundingClientRect();
+    var provisionalParent = provisional && provisional.parentNode;
+    var provisionalIndex = provisional ? Array.prototype.indexOf.call(provisionalParent.children, provisional) : -1;
     window.handleEvent({ type: "step_phase", phase: "commentary",
       text: FULL, message_id: "md-in-place" });
-    var inPlace = messages.querySelector('wa-commentary[data-message-id="md-in-place"]');
-    check(!!inPlace, "phase-at-end: the resolved step must be a commentary topic");
-    var inPlaceBox = inPlace && inPlace.querySelector(".commentary-body").getBoundingClientRect();
-    check(!!provisionalBox && !!inPlaceBox &&
-      Math.abs(provisionalBox.top - inPlaceBox.top) <= 1 &&
-      Math.abs(provisionalBox.width - inPlaceBox.width) <= 1,
-      "phase-at-end: resolving the phase must not move the streamed sentence, saw top/width " +
-      (provisionalBox ? provisionalBox.top.toFixed(2) + "/" + provisionalBox.width.toFixed(2) : "none") + " -> " +
-      (inPlaceBox ? inPlaceBox.top.toFixed(2) + "/" + inPlaceBox.width.toFixed(2) : "none"));
-    markdownProof(inPlace && inPlace.body, "phase-at-end commentary");
+    var resolved = messages.querySelector('wa-commentary[data-message-id="md-in-place"]');
+    check(!!resolved, "phase-at-end: the resolved step must be a commentary topic");
+    var resolvedBody = resolved && resolved.body;
+    var bodyBox = resolvedBody && resolvedBody.getBoundingClientRect();
+    var topicBox = resolved && resolved.getBoundingClientRect();
+    var headBox = resolved && resolved.querySelector(":scope > .trace-head").getBoundingClientRect();
+    // (a) the operator's actual complaint: the writing must sit inside the topic's own box.
+    check(!!topicBox && !!bodyBox && bodyBox.top >= topicBox.top - 0.5 &&
+      bodyBox.bottom <= topicBox.bottom + 0.5 && bodyBox.left >= topicBox.left - 0.5 &&
+      bodyBox.right <= topicBox.right + 0.5,
+      "phase-at-end: the commentary body must be INSIDE the commentary topic's box, body [" +
+      (bodyBox ? bodyBox.left.toFixed(1) + "," + bodyBox.top.toFixed(1) + " " + bodyBox.width.toFixed(1) +
+      "x" + bodyBox.height.toFixed(1) : "none") + "] topic [" +
+      (topicBox ? topicBox.left.toFixed(1) + "," + topicBox.top.toFixed(1) + " " +
+      topicBox.width.toFixed(1) + "x" + topicBox.height.toFixed(1) : "none") + "]");
+    // (b) header above the body - the same shape as every other topic, in the live state too.
+    check(!!headBox && !!bodyBox && headBox.height > 0 && headBox.bottom <= bodyBox.top + 0.5 &&
+      headBox.top < bodyBox.top,
+      "phase-at-end: the header row must be ABOVE the body, header [" +
+      (headBox ? headBox.top.toFixed(1) + " h=" + headBox.height.toFixed(1) : "none") + "] body [" +
+      (bodyBox ? bodyBox.top.toFixed(1) : "none") + "]");
+    // (c) the removed exception must be gone, not merely cleared later - asserted on the whole
+    // document, so an element outside the transcript cannot keep carrying it either.
+    check(document.querySelectorAll("[data-in-place]").length === 0,
+      "phase-at-end: no element in the page may carry the removed in-place state, saw " +
+      document.querySelectorAll("[data-in-place]").length);
+    // The honest placement rule: the sentence is not re-created elsewhere - same parent, same
+    // sibling index - and the topic takes the streamed sentence's width. It may move DOWN by exactly
+    // the header row's height plus the topic's own top border, which is measured here.
+    check(!!provisional && !!provisionalParent && !!resolved &&
+      resolved.parentNode === provisionalParent && provisionalIndex >= 0 &&
+      Array.prototype.indexOf.call(provisionalParent.children, resolved) === provisionalIndex,
+      "phase-at-end: the resolved topic must hold the streamed sentence's own place (same parent, " +
+      "same sibling index); streamed at index " + provisionalIndex + ", topic at " +
+      (resolved ? Array.prototype.indexOf.call(resolved.parentNode.children, resolved) : "none"));
+    // The streamed block filled the bubble's line; the topic that replaces it must still fill that
+    // same line, so the reader's measure does not jump sideways. (The body is then inset by the
+    // topic's own border, and a 12px topic body is narrower than a 14.5px answer segment: the
+    // bubble is `width: fit-content`, so its own width follows that measure - the same width a
+    // replayed commentary row draws. What must not happen is the topic floating narrower than the
+    // line it is on.)
+    var lineWidth = provisionalParent && provisionalParent.getBoundingClientRect().width;
+    check(!!topicBox && !!lineWidth && Math.abs(topicBox.width - lineWidth) <= 1,
+      "phase-at-end: the commentary topic must fill the streamed sentence's line, saw " +
+      (provisionalBox ? provisionalBox.width.toFixed(1) : "none") + " -> " +
+      (topicBox ? topicBox.width.toFixed(1) : "none") + " (line " + (lineWidth ? lineWidth.toFixed(1) : "none") + ")");
+    var topicStyle = resolved && getComputedStyle(resolved);
+    var shift = (provisionalBox && bodyBox) ? bodyBox.top - provisionalBox.top : NaN;
+    var expectedShift = (headBox ? headBox.height : NaN) +
+      (topicStyle ? parseFloat(topicStyle.borderTopWidth) || 0 : NaN);
+    check(isFinite(shift) && isFinite(expectedShift) && Math.abs(shift - expectedShift) <= 0.5,
+      "phase-at-end: the streamed sentence may move down by exactly the header row's height (plus " +
+      "the topic's top border), measured " + (isFinite(shift) ? shift.toFixed(2) : "none") +
+      " expected " + (isFinite(expectedShift) ? expectedShift.toFixed(2) : "none") +
+      " (header height " + (headBox ? headBox.height.toFixed(2) : "none") + ")");
+    // The body's typography is the topic's own - the same body the thinking topic draws - because
+    // that is what makes this the same component. (A streamed answer segment has the bubble's
+    // typography; adopting the topic's is the point of resolving into a topic, not a regression.)
+    var bodyStyle = resolvedBody && getComputedStyle(resolvedBody);
+    var thinkBodyStyle = think && getComputedStyle(think.body);
+    check(!!bodyStyle && !!thinkBodyStyle && bodyStyle.fontSize === thinkBodyStyle.fontSize &&
+      bodyStyle.lineHeight === thinkBodyStyle.lineHeight && bodyStyle.padding === thinkBodyStyle.padding,
+      "phase-at-end: the topic body must keep the shared topic's own font/line/padding, saw " +
+      (bodyStyle ? bodyStyle.fontSize + "/" + bodyStyle.lineHeight + "/" + bodyStyle.padding : "none") +
+      " vs thinking " + (thinkBodyStyle ? thinkBodyStyle.fontSize + "/" + thinkBodyStyle.lineHeight +
+      "/" + thinkBodyStyle.padding : "none"));
+    markdownProof(resolved && resolved.body, "phase-at-end commentary");
 
     // The run is over: the commentary it ran through reads as the shared topic, the way a replayed
     // row is drawn - header above the body - while the run topic is folded away.
@@ -164,7 +224,10 @@
     var run = lastOf("wa-run");
     var folded = run && run.querySelector("wa-commentary");
     check(!!folded && !folded.hasAttribute("data-in-place"),
-      "settled: the folded commentary must take the shared topic's own layout");
+      "settled: the folded commentary must be the shared topic, with no in-place state");
+    check(document.querySelectorAll("[data-in-place]").length === 0,
+      "settled: no element in the page may carry the removed in-place state, saw " +
+      document.querySelectorAll("[data-in-place]").length);
     if (run) run.open = true;
     var foldedHead = folded && folded.querySelector(":scope > .trace-head").getBoundingClientRect();
     var foldedBody = folded && folded.querySelector(":scope > .commentary-body").getBoundingClientRect();
@@ -173,9 +236,11 @@
 
     result = { status: problems.length ? "fail" : "pass",
       text: problems.length ? "FAIL: " + problems.join(" ;; ")
-        : "PASS: commentary and thinking are one topic, the topic body is the transcript's own Markdown " +
-          "(**bold**, `x`, fenced block; raw tags stay text), and a commentary's first chunk already " +
-          "streams inside its topic while the phase-at-end route still resolves without moving the text" };
+        : "PASS: commentary and thinking are one topic (header above body, body inside the topic box," +
+          " body typography = thinking's), the topic body is the transcript's own Markdown " +
+          "(**bold**, `x`, fenced block; raw tags stay text), a commentary's first chunk already " +
+          "streams inside its topic, and the phase-at-end route resolves into that same topic in " +
+          "place - moving down by the measured header height, with no in-place state left" };
   } catch (error) {
     result = { status: "fail", text: "probe threw: " + (error && (error.stack || error.message || error)) };
   }

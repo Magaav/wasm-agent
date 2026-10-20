@@ -17,16 +17,15 @@
 //     run topic, and the answer is what stays outside it.
 //
 // WHERE IT MOVED is measured as geometry, not as element order: DOM order was preserved by
-// `replaceWith` while the operator watched the sentence re-lay out. So every resolution below keeps
-// the box of the element that CARRIES the streamed sentence - the `.seg` that streamed, or the
-// commentary body it was drawn into - and asserts that its top, left and width are the same within
-// 1px, that it has the same parent and sibling index, and that its font-size, line-height and
-// padding are unchanged. That is measured on every route: `commentary_delta` -> commentary,
-// `pending_delta` -> commentary, and `delta` -> `step_phase` (the ordinary OpenAI-compatible route,
-// which states no per-item phase at all). A structural (order-only) check passed while the bug was
-// visible; so did an element-box check that compared the topic's outer box, because the topic's
-// header sits inside it. Measuring the text box is the only version the complaint cannot pass, and
-// the marker row must therefore be outside that box without taking space from it.
+// `replaceWith` while the operator watched the sentence re-lay out. The honest rule is that a
+// commentary is an ordinary topic at every instant: its header row is ABOVE its body, its body is
+// INSIDE the topic's box, and the shared topic's own chrome is drawn. So the streamed sentence may
+// move DOWN by exactly the header row's height (measured, not ignored) when the phase resolves; what
+// must not happen is the sentence being re-created somewhere else - it keeps the same parent and the
+// same sibling index - nor a second, chrome-less layout for the live state (the removed
+// `[data-in-place]` exception, which drew the header below the prose and the prose outside a box).
+// On the routes whose node was already a `wa-commentary` (same element, same box) the resolution
+// must leave width, font, line-height and padding untouched as well.
 //
 // Written without await and without timers: headless virtual time does not advance, so the probe
 // runs synchronously against the DOM `handleEvent` built.
@@ -51,21 +50,70 @@
       lineHeight: style.lineHeight, padding: style.padding, parent: parent,
       index: parent ? indexIn(parent, node) : -1 };
   }
+  function rectText(r) {
+    return r ? "l=" + r.left.toFixed(1) + " t=" + r.top.toFixed(1) + " " + r.width.toFixed(1) +
+      "x" + r.height.toFixed(1) : "none";
+  }
   function boxText(b) {
     return b ? "top=" + b.top.toFixed(2) + " left=" + b.left.toFixed(2) +
       " width=" + b.width.toFixed(2) + " index=" + b.index + " font=" + b.fontSize +
       " line=" + b.lineHeight + " padding=" + b.padding : "none";
   }
-  // Establishing the phase is typographically NEUTRAL: the text keeps the box it streamed in - same
-  // top/left/width (1px), same parent and sibling index, same font-size, line-height and padding.
-  function sameTextBox(before, after) {
+  // Establishing the phase never re-creates the sentence: it keeps the same parent and the same
+  // sibling index, so it is not drawn somewhere else in the bubble.
+  function samePlace(before, after) {
     if (!before || !after) return false;
-    return Math.abs(before.top - after.top) <= 1 && Math.abs(before.left - after.left) <= 1 &&
-      Math.abs(before.width - after.width) <= 1 && before.parent === after.parent &&
-      before.index === after.index && before.fontSize === after.fontSize &&
+    return before.parent === after.parent && before.index === after.index;
+  }
+  // Same element, same place: the resolved box is still where the reader was reading (1px).
+  function unmoved(before, after) {
+    return !!before && !!after && Math.abs(before.top - after.top) <= 1 &&
+      Math.abs(before.left - after.left) <= 1;
+  }
+  // On a route that resolves the node it already streamed into (same element), the box it carries
+  // must be untouched: same width, font, line-height and padding.
+  function sameTypography(before, after) {
+    if (!before || !after) return false;
+    return Math.abs(before.width - after.width) <= 1 && before.fontSize === after.fontSize &&
       before.lineHeight === after.lineHeight && before.padding === after.padding;
   }
-  // The marker row's own rect, for the message that shows where the chrome went.
+  // The operator's complaint, as a measurement: the prose sits inside the topic's own border box.
+  function bodyInsideTopic(topic) {
+    var text = textNode(topic);
+    if (!topic || !text) return false;
+    var t = text.getBoundingClientRect(), box = topic.getBoundingClientRect();
+    return t.top >= box.top - 0.5 && t.bottom <= box.bottom + 0.5 &&
+      t.left >= box.left - 0.5 && t.right <= box.right + 0.5;
+  }
+  // A topic draws its header ABOVE its body - the same shape as <wa-reasoning> and <wa-trace>.
+  function headerAbove(topic) {
+    var text = textNode(topic);
+    var head = topic && topic.querySelector(":scope > .trace-head");
+    if (!text || !head) return false;
+    var t = text.getBoundingClientRect(), h = head.getBoundingClientRect();
+    return h.height > 0 && h.top < t.top && h.bottom <= t.top + 0.5;
+  }
+  // A commentary is the shared topic: it must draw that topic's own box, not a chrome-less variant.
+  function sharedTopicChrome(topic) {
+    if (!topic) return false;
+    var style = getComputedStyle(topic);
+    var border = parseFloat(style.borderTopWidth) || 0;
+    var bg = style.backgroundColor;
+    var painted = style.backgroundImage !== "none" && style.backgroundImage !== "" ||
+      (!!bg && bg !== "transparent" && bg !== "rgba(0, 0, 0, 0)");
+    return border > 0 && painted;
+  }
+  // The streamed sentence may move DOWN by the header row's height plus the topic's top border, and
+  // by nothing else. Measured from the two real rects, never assumed.
+  function shiftIsHeader(before, topic) {
+    var text = textNode(topic);
+    if (!before || !text) return false;
+    var shift = text.getBoundingClientRect().top - before.top;
+    var head = topic.querySelector(":scope > .trace-head");
+    var border = parseFloat(getComputedStyle(topic).borderTopWidth) || 0;
+    var expected = (head ? head.getBoundingClientRect().height : NaN) + border;
+    return isFinite(expected) && Math.abs(shift - expected) <= 0.5;
+  }
   function markerText(topic) {
     var head = topic && topic.querySelector(".trace-head");
     if (!head) return "none";
@@ -73,15 +121,7 @@
     return "top=" + r.top.toFixed(2) + " left=" + r.left.toFixed(2) +
       " width=" + r.width.toFixed(2) + " height=" + r.height.toFixed(2);
   }
-  // The topic's chrome may appear, but not at the text box's expense: it sits above or below that
-  // box and never overlaps it, so it cannot have pushed the sentence.
-  function chromeOutside(topic) {
-    var text = textNode(topic);
-    var head = topic && topic.querySelector(".trace-head");
-    if (!text || !head) return false;
-    var t = text.getBoundingClientRect(), h = head.getBoundingClientRect();
-    return h.bottom <= t.top + 0.5 || h.top >= t.bottom - 0.5;
-  }
+  // The marker row's own rect, for the message that shows where the chrome went.
   function lastAssistant() {
     var bubbles = document.querySelectorAll('#messages wa-message[role="assistant"]');
     return bubbles[bubbles.length - 1] || null;
@@ -123,17 +163,28 @@
     // The ordinary OpenAI-compatible route states no per-item phase: the node can only say what the
     // step was after it ended (lua/core/agent.lua:1818-1821 sets decision_phase on finish_reason,
     // and `step_phase` is emitted after the step at :1979-1980). Nothing here may guess the phase
-    // earlier, so the resolution itself has to be neutral - the sentence keeps its box and the
-    // marker appears outside it.
+    // earlier. What the resolution must do is make this an ORDINARY topic: the header above the body,
+    // the body inside the topic's box, the shared chrome drawn - and the sentence may move down by
+    // exactly that header row's height. It must not be re-created elsewhere in the bubble.
     var commentaryBox = textBox(commentary);
-    check(!!streamedBox && !!commentaryBox && sameTextBox(streamedBox, commentaryBox),
-      "the resolved commentary must keep the streamed text's own box: top/left/width within 1px, " +
-      "the same parent and sibling index, and the same font-size, line-height and padding " +
-      "(ordinary route, no early phase); streamed [" + boxText(streamedBox) + "] -> topic [" +
-      boxText(commentaryBox) + "]");
-    check(chromeOutside(commentary),
-      "the commentary's marker row must not take space from the text box it labels; text [" +
+    check(!!streamedBox && !!commentaryBox && samePlace(streamedBox, commentaryBox),
+      "the resolved commentary must hold the streamed sentence's own place - same parent, same " +
+      "sibling index (ordinary route, no early phase); streamed [" + boxText(streamedBox) +
+      "] -> topic [" + boxText(commentaryBox) + "]");
+    check(bodyInsideTopic(commentary),
+      "the operator's complaint: the commentary body must be INSIDE the commentary topic's box; text [" +
+      boxText(commentaryBox) + "], topic [" + rectText(commentary && commentary.getBoundingClientRect()) + "]");
+    check(headerAbove(commentary),
+      "the commentary's header row must be ABOVE its body, like every other topic; text [" +
       boxText(commentaryBox) + "], marker [" + markerText(commentary) + "]");
+    check(sharedTopicChrome(commentary),
+      "the commentary must draw the shared topic's own box (border and background), not a chrome-less " +
+      "variant: saw border " + (commentary ? getComputedStyle(commentary).borderTopWidth : "none") +
+      " background " + (commentary ? getComputedStyle(commentary).backgroundColor : "none"));
+    check(shiftIsHeader(streamedBox, commentary),
+      "the streamed sentence may move DOWN by exactly the header row's height (plus the topic's top " +
+      "border) and no further; streamed [" + boxText(streamedBox) + "] -> topic [" +
+      boxText(commentaryBox) + "]");
     notes.push("ordinary route (delta -> step_phase), no early phase: text [" + boxText(streamedBox) +
       "] -> [" + boxText(commentaryBox) + "]");
     check(body && body.querySelectorAll(":scope > .seg").length === 0,
@@ -169,14 +220,16 @@
     var resolved2 = streamed2 && streamed2.body.querySelector(':scope > wa-commentary[data-message-id="probe-oc-1"]');
     check(!!resolved2 && resolved2 === topic2,
       "the streamed commentary node must BE the resolved topic, not be replaced by one");
-    check(sameTextBox(topicBox2, textBox(resolved2)),
-      "the resolved commentary must keep the streaming text's own box: top/left/width within 1px, " +
-      "same parent and index, same font-size, line-height and padding; " +
-      boxText(topicBox2) + " -> " + boxText(textBox(resolved2)));
-    check(chromeOutside(resolved2),
-      "the commentary's marker row must not take space from the text box it labels; text [" +
-      boxText(textBox(resolved2)) + "], marker [" +
-      markerText(resolved2) + "]");
+    var resolvedBox2 = textBox(resolved2);
+    check(samePlace(topicBox2, resolvedBox2) && sameTypography(topicBox2, resolvedBox2) &&
+      unmoved(topicBox2, resolvedBox2),
+      "the resolved commentary must keep the streaming text's own box: same parent and index, " +
+      "unmoved, and " +
+      "the same width, font-size, line-height and padding; " +
+      boxText(topicBox2) + " -> " + boxText(resolvedBox2));
+    check(bodyInsideTopic(resolved2) && headerAbove(resolved2) && sharedTopicChrome(resolved2),
+      "the resolved commentary must be an ordinary topic: body inside the box, header above it, " +
+      "shared chrome; text [" + boxText(resolvedBox2) + "], marker [" + markerText(resolved2) + "]");
 
     // ---- 3. the route where the phase is only known at the end of the step: the text streams into
     // a provisional segment, then the node says commentary. It must resolve in place, not move.
@@ -199,14 +252,16 @@
       ':scope > wa-commentary[data-message-id="probe-commentary-2"]');
     check(!!resolved && resolved === provisional,
       "the resolved topic must be the provisional node itself, not a replacement");
-    check(sameTextBox(provisionalBox, textBox(resolved)),
-      "resolving the phase must not move the text: the resolved box must equal the provisional box " +
-      "within 1px, with the same parent, index, font-size, line-height and padding; " +
-      boxText(provisionalBox) + " -> " + boxText(textBox(resolved)));
-    check(chromeOutside(resolved),
-      "the commentary's marker row must not take space from the text box it labels; text [" +
-      boxText(textBox(resolved)) + "], marker [" +
-      markerText(resolved) + "]");
+    var resolvedBox = textBox(resolved);
+    check(samePlace(provisionalBox, resolvedBox) && sameTypography(provisionalBox, resolvedBox) &&
+      unmoved(provisionalBox, resolvedBox),
+      "resolving the phase must not move the text: same parent and index, unmoved, and the same width, " +
+      "font-size, line-height and padding; " +
+      boxText(provisionalBox) + " -> " + boxText(resolvedBox));
+    check(bodyInsideTopic(resolved) && headerAbove(resolved) && sharedTopicChrome(resolved),
+      "the provisional-turned-commentary must be an ordinary topic: body inside the box, header above " +
+      "it, shared chrome; text [" + boxText(resolvedBox) + "], topic [" +
+      rectText(resolved && resolved.getBoundingClientRect()) + "]");
     check(!!resolved && resolved.querySelector(".commentary-body").textContent ===
       "Provisional progress.",
       "a commentary resolved from provisional text must carry that text once");
@@ -297,8 +352,52 @@
       !!answerRun && !answerRun.contains(answerPane.querySelector(".seg.final-answer")),
       "stage: the answer must be outside the run topic");
 
+    // ---- 6. main chat and subagent pane draw the SAME shape --------------------------------------
+    // The bug that produced this fix was a differential: the subagent pane never took the in-place
+    // branch, so it rendered correctly, while the main chat did. The same events are therefore drawn
+    // through the real transcript here and compared, field by field, with the pane's commentary.
+    window.handleEvent({ type: "done" });
+    window.handleEvent({ type: "round", n: 1 });
+    window.handleEvent({ type: "tool", call_id: "cmp-call", name: "read", arguments: { path: "ui/app.js" } });
+    window.handleEvent({ type: "tool_result", name: "read", call_id: "cmp-call", result: { content: "ok" } });
+    window.handleEvent({ type: "delta", text: "The first file is unchanged; checking the second." });
+    window.handleEvent({ type: "step_phase", phase: "commentary",
+      text: "The first file is unchanged; checking the second.", message_id: "cmp-commentary" });
+    var mainTopic = messages.querySelector('wa-commentary[data-message-id="cmp-commentary"]');
+    var paneTopic = answerPane.querySelector("wa-run wa-commentary");
+    // `line-height` is inherited from the hosting surface (the stage declares a smaller font for the
+    // screenshot), and a topic nested in a run body deliberately loses its own top border/background
+    // (`.run-body > .topic`), so neither is a property of the path: they are asserted above, where
+    // they belong. What must match across surfaces is the topic itself: body class, font-size,
+    // padding, header height, header above body, body inside the topic box, and no in-place state.
+    function topicShape(topic) {
+      var bodyNode = topic && topic.querySelector(":scope > .commentary-body");
+      var headNode = topic && topic.querySelector(":scope > .trace-head");
+      if (!bodyNode || !headNode) return null;
+      var style = getComputedStyle(bodyNode);
+      return [bodyNode.className, style.fontSize, style.padding,
+        headNode.getBoundingClientRect().height.toFixed(1),
+        headerAbove(topic), bodyInsideTopic(topic),
+        topic.hasAttribute("data-in-place"), topic.querySelectorAll("[data-in-place]").length].join("|");
+    }
+    var mainShape = topicShape(mainTopic);
+    var paneShape = topicShape(paneTopic);
+    check(!!mainShape && !!paneShape && mainShape === paneShape,
+      "the main chat and a subagent pane must draw the same commentary shape (body class, font-size, " +
+      "padding, header height, header-above-body, body-inside-box, no in-place); " +
+      "main [" + mainShape + "] pane [" + paneShape + "]");
+    check(!!mainTopic && !mainTopic.hasAttribute("data-in-place") &&
+      messages.querySelectorAll("[data-in-place]").length === 0,
+      "the main chat must hold no in-place commentary state after a resolution, saw " +
+      messages.querySelectorAll("[data-in-place]").length);
+    check(document.querySelectorAll("[data-in-place]").length === 0,
+      "no element in the page may carry the removed in-place state, saw " +
+      document.querySelectorAll("[data-in-place]").length);
+
     var verdict = "PASS: run steps stay in the bubble until the final answer nests them, and on every " +
-      "route a commentary phase leaves the streamed sentence in its own box, with the marker outside it";
+      "route a commentary is an ordinary topic - header above the body, body inside the topic box, " +
+      "the streamed sentence kept in its own place (moving only by the measured header height) - with " +
+      "no in-place state, in the main chat and in a subagent pane alike";
     if (notes.length) verdict += " [" + notes.join(" ;; ") + "]";
     result = { status: problems.length ? "fail" : "pass",
       text: problems.length ? "FAIL: " + problems.join(" ;; ") : verdict };

@@ -154,17 +154,20 @@ same HTML a reply contains (raw HTML stays escaped, so `<text>` is text); there
 is no plain-text topic body. Only explicit per-item phase establishes commentary.
 Unknown phase stays provisional. A sentence whose phase resolves to commentary
 keeps the place it streamed in - the provisional block becomes that topic where
-it stands, so establishing the phase never moves the text. In that one state the
-topic's marker row is drawn below the text, never above it: chrome above a
-streamed sentence pushes it down, which reads as the sentence moving into the
-topic. A commentary established on prose that streamed in the answer's place is
-typographically neutral - the bubble's font-size and line-height, no padding, no
-border - and its marker row may not widen the bubble either, so the text box
-keeps every metric it streamed with. Once the run settles and its topic is
-folded away, that commentary takes the shared topic's own layout (marker row
-above the body), matching what a replay of the same rows draws. Commentary stays
-outside the run topic while the run is
-stepping: nothing folds into the topic until the final
+it stands, same parent and same sibling index, and the string is not re-created
+elsewhere in the bubble. It is then an ordinary topic, indistinguishable from the
+thinking one: the header row is drawn ABOVE the body, so the text moves DOWN by
+that row's height, exactly as it does when a tool or thinking topic appears, and
+the body carries the topic's own typography (12px, its padding, border and
+height cap), because that is what makes it the same component. There is no
+second visual state for a topic that only exists while the run is live, no
+reversed layout and no marker row below the text: that state is how a commentary
+was rendered with its header under its prose and its prose outside its box. The
+bubble is `width: fit-content`, so a body at the topic's own measure makes the
+commentary's line narrower than the answer segment it replaced - the same width a
+replayed row of the same commentary draws, which is the point. Commentary stays
+outside the run topic while the run is stepping: nothing folds into the topic
+until the final
 answer, which nests the whole history (commentary included) and is the only thing
 that stays outside it. Its own manual fold survives;
 only the final answer stays outside activity topics (alongside the status row).

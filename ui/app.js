@@ -984,14 +984,14 @@ function appendCommentary(text, messageId, pendingId, decisionPrelude, place) {
   }
   const block = document.createElement("wa-commentary");
   block.open = true;
-  // The text streamed in the answer's place (a `.seg`), so this topic is built where that sentence
-  // stands and must keep its typography: same font, line-height, width and padding. The one thing it
-  // cannot share with the topic it is (see ui/components.js, one component for thinking and
-  // commentary) is the marker row's side: the shared topic draws its header above the body, and a
-  // header above a sentence that just streamed would push it down. `[data-in-place]` therefore lays
-  // the same two children out in reverse (ui/style.css), so establishing the phase never re-lays the
-  // sentence out, which reads as it moving into the topic.
-  if (place && place.tagName !== "WA-COMMENTARY") block.dataset.inPlace = "";
+  // The text may have streamed in the answer's place (a `.seg`), so this topic is built where that
+  // sentence stands: `replaceWith` below keeps the same parent and the same sibling index, and the
+  // string is carried over once - it is not re-created at the end of the bubble. What is allowed to
+  // change is the header: it appears ABOVE the body, exactly as it does on every other topic, and the
+  // sentence therefore moves down by that row's height. What is not allowed is a second layout for a
+  // topic that only exists while the run is live: there is no `data-in-place` state, no reversed
+  // column, and no chrome-less box (ui/style.css). The body's font/line-height/padding become the
+  // topic's own, which is what makes a commentary indistinguishable from the thinking topic it is.
   block.setText(text);
   if(pendingId)block.dataset.pendingId=String(pendingId);
   // A decision step's prelude is a step of the run, like a tool call: the mark is what makes the run
@@ -1848,12 +1848,6 @@ function flushDecision(final = false) {
     // The run is over: its route folds away, and the answer is what is left to read.
     if (runBubble) {
       for (const topic of runBubble.body.querySelectorAll(":scope > wa-run")) topic.open = false;
-      // A commentary that streamed in the answer's place kept the neutral streaming layout (marker row
-      // below the text, no chrome) so that establishing its phase never moved the sentence. The run is
-      // history now and its topic is collapsed, so it can take the shared topic's own layout - the one
-      // a replayed row is drawn with - without anything moving where the reader can see it.
-      for (const topic of runBubble.body.querySelectorAll("wa-run wa-commentary[data-in-place]"))
-        topic.removeAttribute("data-in-place");
     }
     runBubble = null;
   }
