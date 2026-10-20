@@ -169,6 +169,13 @@ SHIP_LINE="$(grep -n 'ship_file "$DEPLOY_SRC"' "$DEPLOY" | head -1 | cut -d: -f1
 check "$([ -n "$EARLY_LINE" ] && [ -n "$SHIP_LINE" ] && [ "$EARLY_LINE" -lt "$SHIP_LINE" ] && echo 1)" \
   "the record is written before the steps that can die after the install" \
   "record at line $EARLY_LINE, the self-ship that killed the 2026-10-02 deploy at line $SHIP_LINE"
+# ...and before the sentinel proof, which refuses on its own. Six deploys on 2026-10-20 installed correctly
+# and every one left an interim record naming the previous commit, because the record step sat below a proof
+# that kept failing: the install was right and the record lied about it.
+PROOF_LINE="$(grep -n 'did not start watching' "$DEPLOY" | head -1 | cut -d: -f1)"
+check "$([ -n "$EARLY_LINE" ] && [ -n "$PROOF_LINE" ] && [ "$EARLY_LINE" -lt "$PROOF_LINE" ] && echo 1)" \
+  "the record is written before the sentinel proof that can refuse" \
+  "record at line $EARLY_LINE, the watcher proof at line $PROOF_LINE"
 
 # 6. Atomic: the record reaches the name `installed.txt` by being RENAMED there, so a reader never sees a
 #    half-written record. This is observed, not described (finding F3 of the review of change/deploy-unbound:
