@@ -73,6 +73,21 @@ for _,scenario in ipairs({'tool','steer','followup','cancel','failure','unknown'
     check(ok,'loop succeeds '..scenario..': '..tostring(value))
     check(calls==((scenario=='tool' or scenario=='steer' or scenario=='followup') and 2 or 1),'unchanged continuation count '..scenario)
   end
+  -- `onFinalAnswer`: one deterministic emission per answered run, ids and lengths only, and no
+  -- emission for a run that produced no answer. This is the producer side of the hook; the UI
+  -- probe covers the consumer and its replay refusal.
+  local finals={}
+  for _,e in ipairs(events) do if e.type=='final_answer' then finals[#finals+1]=e end end
+  if scenario=='cancel' or scenario=='failure' or scenario=='commentary' then
+    check(#finals==0,'no onFinalAnswer without an answer: '..scenario)
+  else
+    check(#finals==1,'onFinalAnswer emitted exactly once per answered run: '..scenario..' saw '..#finals)
+    local f=finals[1]
+    check(f.session_id==sid and f.run_id==bot.run_id and type(f.message_id)=='string' and
+      f.answer_id==tostring(bot.run_id)..':answer' and f.text_len==#tostring(value or '') and
+      type(f.at)=='number' and f.at>0,'onFinalAnswer carries the documented ids and lengths: '..scenario)
+    check(f.text==nil and f.content==nil,'onFinalAnswer never carries answer text: '..scenario)
+  end
   if scenario=='commentary' then
     local deltas,resolved=0,0
     for _,e in ipairs(events) do

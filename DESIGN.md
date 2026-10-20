@@ -171,6 +171,19 @@ until the final
 answer, which nests the whole history (commentary included) and is the only thing
 that stays outside it. Its own manual fold survives;
 only the final answer stays outside activity topics (alongside the status row).
+The request's own tool surface decides where its first content prose streams: a request that
+carried no tools is answering, so its prose is the answer in the bubble as before; a request that
+carried tools has no provider label for that prose, so it streams INSIDE a provisional commentary
+topic from the first token. A tool call settles that label with nothing moving. A step that ends
+with no tool call is answering: in one frame the run's earlier steps and commentary fold into the
+run topic and that same prose block is moved out of it to sit directly under the topic as the
+answer - exactly one conversion per run. The answer's text box is measured across that move
+(`getBoundingClientRect` and computed font-size/line-height/padding); it must not change metrics,
+because a conversion that re-lays the answer out under the reader is the defect. At the conversion
+a tall answer (more than ~80% of the chat viewport) anchors its first line and overflows downward, a
+short one does not move the reader, and a reader already in scrollback is never pulled back.
+The identified answer also emits `onFinalAnswer` once per run (ids and lengths only); see
+[HOOK-EVENTS.md](docs/HOOK-EVENTS.md).
 Run-to-answer spacing uses one5px flex gap, never an additional segment margin.
 A confirmed final answer's first visible line stays at the chat content top while
 it grows, including short answers. Late-confirmed finals smoothly reveal their

@@ -33,6 +33,30 @@ text, not HTML. Target/epoch fencing prevents a delayed response painting anothe
 node's inventory. Loading/error/unsupported states never claim a successful empty
 catalogue. This view has no toggle or action controls.
 
+## onFinalAnswer: the identified answer, once per run
+
+`onFinalAnswer` is the one lifecycle event that says a run's answer has been identified. It is a
+native run event, produced at the boundary `lua/core/agent.lua` already owns: the durable assistant
+row for the answer is written and the run is about to emit `reply`, so a later step cannot un-answer
+it. It is emitted through the same host stream (`self.emit` -> `host.stream`) every other lifecycle
+event uses; it calls no model, adds no endpoint and blocks no render.
+
+Payload is ids and lengths only - never the answer text:
+
+```json
+{"type":"final_answer","session_id":"...","run_id":"...","message_id":"...",
+ "answer_id":"<run_id>:answer","text_len":1234,"at":1792500000000}
+```
+
+`answer_id` is derived from the run and stable across a replay of the same run; `at` is epoch
+milliseconds. The producer emits at most once per run (`final_answer_emitted` is set before the
+emission), and a run that produced no answer (cancel, failure, commentary-only) emits nothing. The
+window's consumer (`ui/app.js`) applies the same rule: a repeated event for the same
+`run_id`/`message_id` is refused before any handler runs, so a replayed run/message cannot fire it
+twice. Handlers are called synchronously and a throwing handler is recorded (`finalAnswerHookError`)
+rather than allowed to lose the answer; the page also dispatches a `wa-final-answer` `CustomEvent`
+with the same payload. This is notification, not task correctness, and it grants no authority.
+
 ## Reliability: what beforeFinalAnswer can mean
 
 There is no present event by that name. `final_answer_begin` is provider-phase
