@@ -82,6 +82,24 @@ if [ -n "$SOURCE_ROOT" ]; then
   if [ -z "${WA_SOURCE_UI_DIR:-}" ] && [ -d "$SOURCE_ROOT/ui" ]; then SOURCE_UI="$SOURCE_ROOT/ui"; fi
 fi
 PREVIOUS_COMMIT="$(sed -n 's/^commit=//p' "$INSTALL_DIR/installed.txt" 2>/dev/null | head -1)"
+# The record as THIS script found it, captured once. `record_install` runs twice in one upgrade (after the
+# swap, and again as the last write), and the second call used to re-read the file it had just written - so
+# its `sha256=` named the bytes being placed and the identity branch below borrowed `commit=` from the
+# PREVIOUS record, stamping the OLD commit onto the NEW bytes. Measured on the live install: five deploys
+# on 2026-10-20 left `commit=255b0790` beside `source_commit_hint=5767a31b` and a 5767a31b binary, which
+# `verify-deployed.sh` refused. A record this run wrote is not an independent witness; only the one it
+# found is, so the comparison below reads this snapshot instead of the live file.
+PREVIOUS_HASH="$(sed -n 's/^sha256=//p' "$INSTALL_DIR/installed.txt" 2>/dev/null | head -1)"
+PREVIOUS_BRANCH="$(sed -n 's/^branch=//p' "$INSTALL_DIR/installed.txt" 2>/dev/null | head -1)"
+# WHO called this upgrade is this script's business, not the node's. The node started below inherits this
+# environment and passes it to every child it ever spawns, so a deploy's caller identity outlives the deploy:
+# MEASURED 2026-10-20, the live node's environment carried `WA_UPGRADE_VIA=deploy.sh` and a 16:58 deploy's
+# reason hours later, and a hand-run upgrade under it would record itself as that deploy's interim write -
+# the very confusion `record_role` exists to prevent. It also made `scripts/test-deploy-record.sh` fail a
+# correct tree. So read the identity once, then take it out of the environment the node will inherit.
+UPGRADE_VIA_WANTED="${WA_UPGRADE_VIA:-}"
+UPGRADE_REASON_WANTED="${WA_UPGRADE_REASON:-}"
+unset WA_UPGRADE_VIA WA_UPGRADE_REASON
 if [ -n "$PREVIOUS_COMMIT" ] && [ "$PREVIOUS_COMMIT" != unknown ] \
     && [ -z "$SOURCE_COMMIT" ] && [ "${WA_ALLOW_UNVERIFIED_UPGRADE:-}" != 1 ]; then
   say "candidate has no source checkout to compare with installed commit $PREVIOUS_COMMIT; set WA_ALLOW_UNVERIFIED_UPGRADE=1 only for an intentional operator override"
@@ -113,13 +131,12 @@ record_install() {
   # file IS the built file); the wider check covers a deploy's build, which is a DIFFERENT file with
   # identical bytes - the case that used to leave `record_role=final` beside `commit=unknown`, which no
   # verifier can reconcile.
-  if [ "$(sed -n 's/^sha256=//p' "$INSTALL_DIR/installed.txt" 2>/dev/null | head -1)" = "$hash" ]; then
+  if [ -n "$PREVIOUS_HASH" ] && [ "$PREVIOUS_HASH" = "$hash" ]; then
     commit="${PREVIOUS_COMMIT:-unknown}"
-    branch="$(sed -n 's/^branch=//p' "$INSTALL_DIR/installed.txt" 2>/dev/null | head -1)"
-    branch="${branch:-unknown}"
+    branch="${PREVIOUS_BRANCH:-unknown}"
   fi
-  reason="$(printf '%s' "${WA_UPGRADE_REASON:-upgrade requested}" | tr '\r\n' '  ')"
-  via="$(printf '%s' "${WA_UPGRADE_VIA:-upgrade.sh}" | tr '\r\n' '  ')"
+  reason="$(printf '%s' "${UPGRADE_REASON_WANTED:-upgrade requested}" | tr '\r\n' '  ')"
+  via="$(printf '%s' "${UPGRADE_VIA_WANTED:-upgrade.sh}" | tr '\r\n' '  ')"
   # WHOSE record is this? This script installs bytes and can only certify the bytes: a binary built
   # somewhere else is `source_provenance=unverified-binary`, and a sentinel upgrade may not even know
   # which commit it came from (`commit=unknown`). That is honest when this *is* the final record - a

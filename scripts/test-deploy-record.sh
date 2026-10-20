@@ -31,6 +31,11 @@
 #
 # Hermetic: a temp directory per run, no cargo, no network, no sentinel, no model.
 set -uo pipefail
+# The node on this machine was STARTED by an upgrade, so it exports that upgrade's caller identity to every
+# shell it spawns - measured 2026-10-20: `WA_UPGRADE_VIA=deploy.sh` and a 16:58 deploy's reason were still in
+# the environment hours later, and they made this file's check 4 and its old-shape check assert the wrong
+# thing about correct code. Clear them here, once, so every case below sees only what it sets itself.
+unset WA_UPGRADE_VIA WA_UPGRADE_REASON
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 DEPLOY="$ROOT_DIR/scripts/deploy.sh"
@@ -60,6 +65,14 @@ grep -q 'source_provenance=clean-built-by-deploy' "$WORK/record.sh" \
 awk '/^record_install\(\) \{$/{on=1} on{print} on && /^\}$/{exit}' "$UPGRADE" > "$WORK/upgrade-record.sh"
 grep -q 'record_role=' "$WORK/upgrade-record.sh" \
   || fail "could not read upgrade.sh's record_install out of it, or it no longer writes a record_role"
+# The record's PREVIOUS identity is captured by upgrade.sh once, before record_install ever runs. Extract it
+# rather than restating it here: section 4c exists because the function used to re-read the record it had
+# just written, and a harness that supplies its own PREVIOUS_* would not be running the shipped code.
+grep -E '^(PREVIOUS_COMMIT|PREVIOUS_HASH|PREVIOUS_BRANCH|UPGRADE_VIA_WANTED|UPGRADE_REASON_WANTED)=' "$UPGRADE" > "$WORK/upgrade-previous.sh"
+grep -q '^PREVIOUS_HASH=' "$WORK/upgrade-previous.sh" \
+  || fail "upgrade.sh no longer snapshots the record's sha256 before writing (the 2026-10-20 commit regression)"
+grep -q '^UPGRADE_VIA_WANTED=' "$WORK/upgrade-previous.sh" \
+  || fail "upgrade.sh no longer takes the caller identity out of the environment the node inherits"
 awk '/^# wa-deploy-upgrade-invocation: begin$/{on=1} on{print} on && /^# wa-deploy-upgrade-invocation: end$/{exit}' \
   "$DEPLOY" > "$WORK/invocation.sh"
 grep -q 'WA_UPGRADE_VIA=deploy.sh' "$WORK/invocation.sh" \
@@ -199,19 +212,20 @@ check "$([ "$(ls "$INSTALL"/.installed.txt.deploy.* 2>/dev/null | wc -l | tr -d 
 
 # 4. upgrade.sh's side of the ownership: interim under a deploy, final on its own. Both run the real
 #    record_install out of upgrade.sh against the same fixture install.
-run_upgrade_record() { # via [new-binary] -> the record_install block's output, record in installed.txt
+run_upgrade_record() { # via [new-binary] [calls] -> the record_install block's output, record in installed.txt
   {
     echo 'set -uo pipefail'
     echo "INSTALL_DIR=\"$INSTALL\""
     echo "INSTALLED=\"$INSTALL/wa\""
     echo "NEW=\"${2:-$INSTALL/wa}\""
-    echo "PREVIOUS_COMMIT=\"$COMMIT\""
     echo "SOURCE_COMMIT=\"$(git -C "$TREE" rev-parse HEAD)\""
     if [ -n "$1" ]; then echo "WA_UPGRADE_VIA=\"$1\""; fi
     echo 'WA_UPGRADE_REASON="an upgrade request"'
     echo 'file_hash() { [ -f "$1" ] && sha256sum < "$1" 2>/dev/null | awk "{print \$1}" || true; }'
+    cat "$WORK/upgrade-previous.sh"
     cat "$WORK/upgrade-record.sh"
-    echo 'record_install'
+    local i
+    for i in $(seq 1 "${3:-1}"); do echo 'record_install'; done
   } > "$WORK/run-upgrade-record.sh"
   bash "$WORK/run-upgrade-record.sh" 2>&1
 }
@@ -267,6 +281,30 @@ check "$([ "$(field source_provenance "$INSTALL/installed.txt")" = "unverified-b
   "and the interim record claims only what upgrade.sh can prove" "source_provenance=$(field source_provenance "$INSTALL/installed.txt")"
 check "$([ "$(field commit "$INSTALL/installed.txt")" = "unknown" ] && echo 1)" \
   "the interim record does not borrow the old commit for new bytes" "commit=$(field commit "$INSTALL/installed.txt")"
+
+# 4c. The record is written TWICE in one upgrade (after the swap, then as the last write) and the second
+#     call used to re-read the file the first call had just written. Its `sha256=` then named the bytes being
+#     placed, so the identity branch borrowed `commit=` from the PREVIOUS record and stamped the OLD commit
+#     onto the NEW bytes. Measured on the live install on 2026-10-20: five deploys left
+#     `commit=255b0790` beside `source_commit_hint=5767a31b` and a 5767a31b binary, so `verify-deployed.sh`
+#     refused an install that was in fact correct. A record this run wrote is not a witness; the one it
+#     found is.
+stale_record() { # a record naming bytes that are NOT the ones about to be placed, with a real old commit
+  printf 'commit=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\nbranch=unknown\ndirty=unknown\nsha256=old-node\nsentinel_sha256=old-sentinel\nupgrade_sha256=%s\nsource_commit_hint=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\nsource_provenance=unverified-binary\nrecord_role=interim\nvia=upgrade.sh\nat=2026-10-20T16:58:40Z\nreason=the deploy before this one\n' \
+    "$UPGRADE_HASH" > "$INSTALL/installed.txt"
+}
+stale_record
+printf '\n# the next build\n' >> "$INSTALL/wa"
+NEXT_HASH="$(sha "$INSTALL/wa")"
+OUT="$(run_upgrade_record deploy.sh "$INSTALL/wa" 2)"; STATUS=$?
+[ "$STATUS" = "0" ] || fail "upgrade.sh's record path refused when writing twice: status $STATUS - $OUT"
+check "$([ "$(field commit "$INSTALL/installed.txt")" = "unknown" ] && echo 1)" \
+  "two record writes in one upgrade do not stamp the OLD commit on the NEW bytes" \
+  "commit=$(field commit "$INSTALL/installed.txt") - before the fix this read aaaaaaaa, the previous record's commit"
+check "$([ "$(field sha256 "$INSTALL/installed.txt")" = "$NEXT_HASH" ] && echo 1)" \
+  "the record still names the bytes it actually placed" "sha256=$(field sha256 "$INSTALL/installed.txt")"
+check "$([ "$(field source_commit_hint "$INSTALL/installed.txt")" != "$(field commit "$INSTALL/installed.txt")" ] && echo 1)" \
+  "the hint and the commit are distinguishable, so a stale commit cannot hide behind the hint"
 
 # 5. The caller identity reaches upgrade.sh. The invocation is read out of deploy.sh and run against a stub
 #    that prints the environment it received.

@@ -715,7 +715,19 @@ elif [ ! -f "$SENTINEL_CONFIG/sentinel/stop" ]; then
     [ -n "$SENTINEL_NEW_PID" ] && break
     sleep 0.1
   done
-  [ -n "$SENTINEL_NEW_PID" ] || fail "node installed, but the sentinel did not start watching"
+  if [ -z "$SENTINEL_NEW_PID" ]; then
+    # This proof has failed on every deploy since 2026-10-20 14:56 while a watcher was demonstrably alive
+    # (pid unchanged, `start` answering "already watching" in the same second). A refusal that names no
+    # evidence cost five deploys their diagnosis, so print what the proof actually saw: the status line it
+    # could not read, and the pid file the status binary resolved - which is `$HOME/.wasm-agent/sentinel`,
+    # the one input that can differ between the watcher's environment and this deploy's.
+    echo "deploy: the watcher proof saw no pid - last status from $INSTALL_DIR was:"
+    "$INSTALL_DIR/$SENTINEL_NAME" status 2>&1 | head -6 | sed 's/^/    /'
+    echo "    HOME=${HOME:-unset} -> ${HOME:-<unset>}/.wasm-agent/sentinel/sentinel.pid"
+    echo "    USERPROFILE=${USERPROFILE:-unset}"
+    echo "    on disk: $(cat "${HOME:-}/.wasm-agent/sentinel/sentinel.pid" 2>/dev/null || echo 'no pid file at that path')"
+    fail "node installed, but the sentinel did not start watching"
+  fi
   echo "deploy: sentinel started (pid $SENTINEL_NEW_PID)"
 else
   echo "deploy: sentinel stopped by request (stop file present) - not starting it"
