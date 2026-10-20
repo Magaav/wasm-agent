@@ -682,7 +682,7 @@ fi
 # image indefinitely. Respect an intentionally stopped watcher; restart only
 # one that was already watching, then prove its pid changed.
 SENTINEL_WATCH_PID="$("$INSTALL_DIR/$SENTINEL_NAME" status 2>/dev/null \
-  | awk '$1=="sentinel:" && $2=="watching" {gsub(/[^0-9]/,"",$4); print $4; exit}')"
+  | awk '/^[ 	]*sentinel:/ && /watching/ && match($0, /pid[ 	]+[0-9]+/) { s = substr($0, RSTART, RLENGTH); gsub(/[^0-9]/, "", s); print s; exit }')"
 if [ "$SENTINEL_SWAP_STARTED" = "1" ]; then
   # The Windows swap already loaded the candidate. A second restart would kill
   # work admitted by the fresh service for no installation benefit.
@@ -695,7 +695,7 @@ elif [ -n "$SENTINEL_WATCH_PID" ]; then
   SENTINEL_NEW_PID=""
   for _ in $(seq 1 50); do
     SENTINEL_NEW_PID="$("$INSTALL_DIR/$SENTINEL_NAME" status 2>/dev/null \
-      | awk '$1=="sentinel:" && $2=="watching" {gsub(/[^0-9]/,"",$4); print $4; exit}')"
+      | awk '/^[ 	]*sentinel:/ && /watching/ && match($0, /pid[ 	]+[0-9]+/) { s = substr($0, RSTART, RLENGTH); gsub(/[^0-9]/, "", s); print s; exit }')"
     [ -n "$SENTINEL_NEW_PID" ] && [ "$SENTINEL_NEW_PID" != "$SENTINEL_WATCH_PID" ] && break
     sleep 0.1
   done
@@ -711,7 +711,7 @@ elif [ ! -f "$SENTINEL_CONFIG/sentinel/stop" ]; then
   SENTINEL_NEW_PID=""
   for _ in $(seq 1 50); do
     SENTINEL_NEW_PID="$("$INSTALL_DIR/$SENTINEL_NAME" status 2>/dev/null \
-      | awk '$1=="sentinel:" && $2=="watching" {gsub(/[^0-9]/,"",$4); print $4; exit}')"
+      | awk '/^[ 	]*sentinel:/ && /watching/ && match($0, /pid[ 	]+[0-9]+/) { s = substr($0, RSTART, RLENGTH); gsub(/[^0-9]/, "", s); print s; exit }')"
     [ -n "$SENTINEL_NEW_PID" ] && break
     sleep 0.1
   done
