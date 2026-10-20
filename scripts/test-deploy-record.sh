@@ -176,6 +176,13 @@ PROOF_LINE="$(grep -n 'did not start watching' "$DEPLOY" | head -1 | cut -d: -f1
 check "$([ -n "$EARLY_LINE" ] && [ -n "$PROOF_LINE" ] && [ "$EARLY_LINE" -lt "$PROOF_LINE" ] && echo 1)" \
   "the record is written before the sentinel proof that can refuse" \
   "record at line $EARLY_LINE, the watcher proof at line $PROOF_LINE"
+# ...and so is the deploy's own script. Measured 2026-10-20: the installed copy parsed the status line by field
+# position, the line grew an `up`, so the proof read no pid and refused after installing the node - and the
+# fix that reads the line by meaning could never be shipped, because shipping it was the step the refusal
+# skipped. Nine deploys deadlocked on that ordering.
+check "$([ -n "$SHIP_LINE" ] && [ -n "$PROOF_LINE" ] && [ "$SHIP_LINE" -lt "$PROOF_LINE" ] && echo 1)" \
+  "deploy.sh ships itself before the sentinel proof that can refuse" \
+  "self-ship at line $SHIP_LINE, the watcher proof at line $PROOF_LINE"
 
 # 6. Atomic: the record reaches the name `installed.txt` by being RENAMED there, so a reader never sees a
 #    half-written record. This is observed, not described (finding F3 of the review of change/deploy-unbound:
