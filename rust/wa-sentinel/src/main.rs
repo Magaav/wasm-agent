@@ -24,7 +24,7 @@
 //!   request upgrade  --binary PATH [--session ID --prompt TEXT] [--reason TEXT]
 //!   request wake     --session ID --prompt TEXT [--reason TEXT]
 //!   request run      --script PATH [--reason TEXT]     (a script the operator installed)
-//!   once | watch | status | start | stop | help
+//!   once | watch | status | health | start | stop | help
 //!
 //! `request` writes the file and returns; `watch` performs it. That split is the whole point: the
 //! writer may die immediately afterwards.
@@ -423,11 +423,21 @@ fn health_agent() -> ureq::Agent {
         .into()
 }
 
-pub(crate) fn health() -> Option<Value> {
-    let url = format!("http://127.0.0.1:{}/health", node_port());
-    let response = health_agent().get(&url).call().ok()?;
+fn health_url() -> String {
+    format!("http://127.0.0.1:{}/health", node_port())
+}
+
+/// The node's report exactly as it was sent. Kept separate from [`health`] because two readers want
+/// different things from it: `status` needs it parsed into one activity answer, and `wa-sentinel health`
+/// prints it verbatim - re-serialising it there would hand out a document the node did not write.
+pub(crate) fn health_body() -> Option<String> {
+    let response = health_agent().get(&health_url()).call().ok()?;
     let text = response.into_body().read_to_string().ok()?;
-    serde_json::from_str(&text).ok()
+    (!text.trim().is_empty()).then_some(text)
+}
+
+pub(crate) fn health() -> Option<Value> {
+    serde_json::from_str(&health_body()?).ok()
 }
 
 fn node_is_up() -> bool {
@@ -2657,6 +2667,41 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
     (if month <= 2 { year + 1 } else { year }, month, day)
 }
 
+/// The node fact `status` prints: up or down, the port it should answer on and the pid that owns it.
+///
+/// One line, because the operator question this answers is "is it up", and the `/health` document that
+/// used to be inlined here is four kilobytes of JSON that the answer had to be read past. That document
+/// has its own verb now (`wa-sentinel health`); it is evidence for a machine, not a status line.
+pub(crate) fn node_line(port: u16, up: bool, pid: Option<u32>) -> String {
+    format!(
+        "node:      {}  port {port}  {}",
+        if up { "up  " } else { "down" },
+        match pid {
+            Some(pid) => format!("pid {pid}"),
+            None if up => "pid unknown: the port answers but no owner could be read".to_string(),
+            None => "no process on the port".to_string(),
+        }
+    )
+}
+
+/// The sentinel fact `status` prints. A sentinel has no port - it is a process that reads a queue and
+/// supervises the node - so the line says that instead of leaving a blank where a port would be.
+/// `scripts/verify-install.sh` and `scripts/test-sentinel-e2e.sh` read `watching (pid N)` from this line.
+pub(crate) fn sentinel_line(pid: Option<u32>) -> String {
+    match pid {
+        Some(pid) => format!("sentinel:  up    watching (pid {pid})  no port of its own"),
+        None => "sentinel:  down  not running".to_string(),
+    }
+}
+
+/// `wa-sentinel health`: the node's own `/health` report, verbatim, on stdout.
+fn health_verb() -> Result<()> {
+    let body = health_body()
+        .with_context(|| format!("the node does not answer {} (is it down?)", health_url()))?;
+    println!("{}", body.trim_end());
+    Ok(())
+}
+
 fn status() -> Result<()> {
     let health = health();
     // One probe answers both questions the pending requests below are reported against: whether the node
@@ -2664,15 +2709,14 @@ fn status() -> Result<()> {
     // lines of one status disagree.
     let activity = health.as_ref().and_then(activity_of);
     let node_up = health.is_some();
-    say(&format!("node:      port {} {}", node_port(), match &health {
-        Some(value) => format!("up  {}", value),
-        None => "not answering".into(),
-    }));
+    let port = node_port();
+    // The listener is the pid, read from the OS only when something answers on the port: a "pid" taken
+    // from a file could name the node that *was* serving this port, which is the mistake `status` must not
+    // make. When the node is down there is nothing to ask.
+    let node_pid = if node_up { pid_on_port(port) } else { None };
+    say(&node_line(port, node_up, node_pid));
     let watched = std::fs::read_to_string(pid_path()).ok().and_then(|t| t.trim().parse::<u32>().ok()).filter(|pid| pid_alive(*pid));
-    say(&format!("sentinel:  {}", match watched {
-        Some(pid) => format!("watching (pid {pid})"),
-        None => "not running".into(),
-    }));
+    say(&sentinel_line(watched));
     // Who owns this watcher's lifecycle, in the words the verbs decide from: the operator question this
     // answers is "will `stop` stop it, or is it a five-second restart", and the answer must not be
     // re-derived from the log afterwards. (The line deliberately does not contain the text `sentinel:` -
@@ -2740,7 +2784,7 @@ const HELP: &str = r#"wa-sentinel - the process outside the node.
   instance list | show <name> | remove <name> [--purge]
   instance start <name> | stop <name> | status <name>
   --instance <name>   run any verb against a named instance
-  once | watch | status | preflight | start | restart | stop | help
+  once | watch | status | health | preflight | start | restart | stop | help
 
 A node cannot restart itself: the turn doing the restarting runs on the node it is
 stopping, so the stop is the last command it ever executes. It asks instead -
@@ -2864,6 +2908,10 @@ fn main() -> Result<()> {
         "watch" => watch(),
         "once" => {let _lock=jobs::lock()?;process_requests(false,&mut Held::default()).map(|n| say(&format!("{n} request(s) handled"))) },
         "status" => status(),
+        // The `/health` document on its own verb: `status` is the operator's short read and must stay
+        // short, while this is the machine-readable body a script or a person debugging parses. A flag on
+        // `status` would have kept the four-kilobyte wall one keystroke away from the facts.
+        "health" => health_verb(),
         "preflight" => preflight(),
         "start" => start_self(),
         // Replacing the binary does not change a running process: the watcher keeps executing the image

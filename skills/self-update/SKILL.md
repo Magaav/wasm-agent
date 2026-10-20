@@ -71,8 +71,11 @@ A deploy replaces the node, so it can run only when the node is idle. The order 
    it was written against, and `wa-sentinel status` shows that request as a line of facts (verb, target
    commit, queue time, why it is still waiting) rather than a count.
 3. **End the turn.** Issue no further tool calls: the turn is the work that keeps the node busy.
-4. On the next turn, verify before saying "deployed": `installed.txt` must name that same commit and
-   the installed artefacts must hash-match (`scripts/verify-install.sh`).
+4. On the next turn, verify before saying "deployed": `bash scripts/verify-deployed.sh` must PASS. It
+   exits 0 only when `installed.txt` names `origin/main`'s commit (or `--commit SHA`), every UI asset
+   `upgrade.sh` ships is that commit's bytes, and `/health` answers `"ok":true` (add `--capability NAME`
+   to require a named capability). A FAIL names the check and prints expected vs actual, and the script
+   writes nothing - it does not advance main, deploy, or restart anything.
 
 The starvation this prevents: a request written and then followed by more tool calls sits at
 `requests: 1 waiting` while the log repeats `maintenance-deferred ... the node is busy`, so "deploy
@@ -80,10 +83,20 @@ queued" is reported - and read - as "deployed", three times in one day.
 
 ### Verifying a deploy without re-deriving it
 
-`scripts/verify-install.sh` prints one PASS/FAIL per comparison - installed vs built hashes, shipped
-scripts vs the repo, the recorded pid vs the listener, the watcher alive - and `--json` for a machine
-verdict. Run that instead of hashing binaries, diffing scripts and reading `/health` by hand: they are
-comparisons, not judgement. A deploy also writes `<install>/deploy-result.json`, and the continuation wake
+Two verifiers, two questions:
+
+* `scripts/verify-deployed.sh` answers *is the deployed state the one I would report?* - the install record
+  names the expected commit, the installed UI closure is that commit's bytes, and the live node answers
+  `/health` ok (plus an optional capability). Use it before the word "deployed" leaves your reply, with no
+  arguments for `origin/main` or `--commit SHA` for a specific published commit. It reads only: no fetch,
+  no build, no install, no restart.
+* `scripts/verify-install.sh` answers *is the install the one this tree built?* - installed vs built
+  binaries, shipped scripts vs the repo, the recorded pid vs the listener, the watcher alive - and `--json`
+  for a machine verdict. That is the post-deploy check on the machine that ran the build, not a substitute
+  for asking whether a commit is deployed.
+
+Run those instead of hashing binaries, diffing scripts and reading `/health` by hand: they are comparisons,
+not judgement. A deploy also writes `<install>/deploy-result.json`, and the continuation wake
 carries a one-line verdict, so the outcome is data you read once.
 
 If a terminal failure was delivered but the actual installed state was subsequently
