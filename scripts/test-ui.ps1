@@ -1269,7 +1269,7 @@ $harness = @'
   var mainShell=document.getElementById('chat');
   var paneShell=panes[1].querySelector('wa-chat-shell');
   var shellParts=function(shell){return Array.prototype.map.call(shell.querySelectorAll('[data-part]'),function(node){return node.dataset.part;}).join(',');};
-  check(!!mainShell && !!paneShell && shellParts(mainShell)==='warning,content,host,composer,attachments,input,send,footer-left,attach,file,footer-right,model'
+  check(!!mainShell && !!paneShell && shellParts(mainShell)==='warning,region,content,host,composer,attachments,input,send,footer-left,attach,file,footer-right,model'
     && shellParts(paneShell)===shellParts(mainShell),
     'the main conversation and a child panel must both be the same shell component, saw main: '
       + (mainShell?shellParts(mainShell):'none') + ' / child: ' + (paneShell?shellParts(paneShell):'none'));
@@ -3856,6 +3856,13 @@ try {
     # placement regression cannot hide behind the probes that replay the legacy/no-signal route.
     & node scripts/agent-benchmark-ui-observe.mjs --ui $ui --probe (Join-Path $PSScriptRoot 'probe-final-answer-placement.js') --out (Join-Path $tmp 'final-answer-placement')
     if ($LASTEXITCODE -ne 0) { throw 'final answer placement browser probe failed' }
+    # The scroll-to-latest arrow: absent at the bottom, present when the reader is away from it, pinned
+    # to the chat content rect (inline-end, on the 5px scale), 5px above the live run-status row measured
+    # with the row hidden and shown, and its click reaches the bottom and re-arms follow-the-tail. It runs
+    # in the gate so a floating arrow over the composer, or one that strands the reader on the next token,
+    # cannot pass behind a green suite.
+    & node scripts/agent-benchmark-ui-observe.mjs --ui $ui --probe (Join-Path $PSScriptRoot 'probe-scroll-to-bottom.js') --out (Join-Path $tmp 'scroll-to-bottom')
+    if ($LASTEXITCODE -ne 0) { throw 'scroll-to-latest arrow browser probe failed' }
     & node scripts/test-final-answer-suite.mjs $WaExe (Join-Path $tmp 'final-answer')
     if ($LASTEXITCODE -ne 0) { throw 'final-answer focused suite failed' }
     & node scripts/test-minimal-chat.cjs (Join-Path $tmp 'minimal-chat')

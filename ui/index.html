@@ -91,12 +91,16 @@
     </header>
 
     <!-- The conversation is the shared shell (components.js). The app authors the children only it has:
-         the jump control and the empty state (no data-slot, so they land in the transcript region), the
+         the scroll-to-latest arrow and the empty state (data-slot="float" pins the arrow to the transcript
+         region's own bottom edge; the empty state has no slot, so it lands inside the transcript), the
          account/mic/status chips, the action row (Steer) - the same component a child pane hosts its own
          Steer and Cancel task in - and the status balloon, which stays authored here because it is the
          model/harness diagnostics panel (§6), not chat furniture. -->
     <wa-chat-shell id="chat" primary>
-      <button type="button" id="jump" class="jump" title="Jump to the latest">↓ latest</button>
+      <button type="button" id="jump" class="jump" data-slot="float" title="Scroll to latest"
+              aria-label="scroll to latest" aria-hidden="true" tabindex="-1">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 10l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
       <div class="empty" id="empty">
         <h1>wasm-agent</h1>
         <p>Talk to your agent. It remembers what you tell it and can search your message ledger.</p>
