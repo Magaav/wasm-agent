@@ -74,7 +74,8 @@ CREATE TABLE IF NOT EXISTS steering_runs (
 CREATE TABLE IF NOT EXISTS steering_inbox (
   ordinal INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE,
   owner TEXT NOT NULL, session_id TEXT NOT NULL, run_id TEXT NOT NULL,
-  request_key TEXT NOT NULL, text TEXT NOT NULL, attribution TEXT NOT NULL,
+  request_key TEXT NOT NULL, text TEXT NOT NULL, images TEXT NOT NULL DEFAULT '[]',
+  attribution TEXT NOT NULL,
   state TEXT NOT NULL DEFAULT 'queued', created_at REAL NOT NULL,
   read_at REAL, message_seq INTEGER, detail TEXT NOT NULL DEFAULT '',
   UNIQUE(owner,session_id,request_key));

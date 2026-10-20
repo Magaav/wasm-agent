@@ -129,4 +129,33 @@ for _,event in ipairs(events3) do if event.type=='tool_result' and event.name=='
 assert(fenced_event and fenced_event.cancelled==true and fenced_event.failed==false and fenced_event.result.executed==false,'typed neutral cancelled event')
 local totals=dofile('lua/core/telemetry.lua').snapshot(sid3)
 assert(totals.tool_cancelled==1 and totals.tool_failures==0,'actual loop cancellation separated from failure totals')
+-- A steered turn is a turn: an attached picture must reach the transcript exactly as a normal
+-- turn's picture does, through the same content-addressed attachment store. Reusing the message id
+-- that the receipt already returns is the idempotency fence; the bytes are not copied into the inbox.
+local sid4=memory.start_session('','steering-image',{user_id='owner'})
+steering.begin('owner',sid4,'image-run')
+local png='data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg=='
+local image_receipt=steering.control({session_id=sid4,text='what is in this picture?',
+  images={{name='steer.png',mime='image/png',data=png}},idempotency_key='image-one'},ctx)
+assert(image_receipt.state=='queued' and image_receipt.images~=nil,'image steering accepted')
+local stored=dofile('lua/vendor/json.lua').decode(image_receipt.images)
+assert(#stored==1 and stored[1].mime=='image/png' and stored[1].sha256 and stored[1].name=='steer.png','receipt carries the attachment reference')
+local same=steering.control({session_id=sid4,text='what is in this picture?',
+  images={{name='steer.png',mime='image/png',data=png}},idempotency_key='image-one'},ctx)
+assert(same.deduplicated and same.id==image_receipt.id,'retry with the same picture is one steering receipt')
+assert(steering.control({session_id=sid4,text='what is in this picture?',
+  images={{name='other.png',mime='image/png',data='data:image/png;base64,AAAA'}},idempotency_key='image-one'},ctx).error=='idempotency_conflict','a different picture under the same key is refused')
+assert(steering.control({session_id=sid4,text='bad',
+  images={{name='bad.svg',mime='image/svg+xml',data='data:image/svg+xml;base64,AAAA'}},idempotency_key='image-bad'},ctx).error:match('^unsupported_image_type'),'the steering intake uses the same accepted image types as chat')
+steering.consume('owner',sid4,'image-run')
+local consumed=0
+for _,row in ipairs(memory.session_messages(sid4)) do if row.id==image_receipt.id then
+  consumed=consumed+1
+  assert(row.content=='what is in this picture?' and #row.images==1,'steering turn is stored once with its text')
+  assert(row.images[1].sha256==stored[1].sha256 and row.images[1].mime=='image/png','the exact attachment reference reaches the run')
+  local loaded=memory.load_image(row.images[1])
+  assert(loaded.b64==png:match('base64,(.*)$') and not loaded.missing,'the stored bytes resolve like a normal turn image')
+  end
+end
+assert(consumed==1,'image steering appends exactly once')
 print('durable steering ok')

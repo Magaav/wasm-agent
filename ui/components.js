@@ -1966,14 +1966,34 @@ const CHAT_ATTACH_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M
 class WaChatWarning extends HTMLElement {
   connectedCallback() { this.setAttribute('role','status'); this.setAttribute('aria-live','polite'); }
   set message(value) { this.setNotice('liveness',value); }
-  setNotice(kind,value) {
+  // `expireMs` is for notices that describe one refused action, not a state that is still true:
+  // the same kind is replaced in place (never appended) and then withdrawn on its own. A notice
+  // with no expiry keeps the existing behaviour - state warnings stay until their state changes.
+  setNotice(kind,value,expireMs) {
     this._notices ||= new Map();
+    this._noticeTimers ||= new Map();
+    const timer=this._noticeTimers.get(kind);
+    if(timer!==undefined){clearTimeout(timer);this._noticeTimers.delete(kind);}
     if(value)this._notices.set(kind,String(value));else this._notices.delete(kind);
+    const ttl=Number(expireMs);
+    if(value && Number.isFinite(ttl) && ttl>0)
+      this._noticeTimers.set(kind,setTimeout(()=>{this._noticeTimers.delete(kind);this.setNotice(kind,'');},ttl));
+    this._paintNotices();
+  }
+  _paintNotices() {
     const text=Array.from(this._notices.values()).join('\n');
     if(this.textContent!==text)this.textContent=text;
     if(this.hidden!==!text)this.hidden=!text;
   }
-  clearNotices() {this._notices?.clear();this.setNotice('liveness','');}
+  disconnectedCallback() {
+    for(const timer of this._noticeTimers?.values()||[])clearTimeout(timer);
+    this._noticeTimers?.clear();
+  }
+  clearNotices() {
+    for(const timer of this._noticeTimers?.values()||[])clearTimeout(timer);
+    this._noticeTimers?.clear();
+    this._notices?.clear();this.setNotice('liveness','');
+  }
 }
 customElements.define('wa-chat-warning',WaChatWarning);
 
@@ -2237,11 +2257,12 @@ class WaChatShell extends HTMLElement {
 
   // Text attachments are inlined into the prompt (DESIGN.md §11). One implementation, so the main
   // conversation and a delegated child message cannot disagree about what `[file: name]` means.
-  composedText(text) {
+  composedText(text, files) {
     this._ensure();
-    const files = this._attachments.filter((file) => file.kind !== "image");
-    if (files.length === 0) return text;
-    const bodies = files.map((file) => "[file: " + file.name + "]\n" + file.text);
+    const source = Array.isArray(files) ? files : this._attachments;
+    const inlined = source.filter((file) => file.kind !== "image");
+    if (inlined.length === 0) return text;
+    const bodies = inlined.map((file) => "[file: " + file.name + "]\n" + file.text);
     return bodies.join("\n\n") + (text ? "\n\n" + text : "");
   }
 

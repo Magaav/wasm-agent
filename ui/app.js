@@ -4032,16 +4032,31 @@ async function cancelRun(runId) {
 
 let steeringSubmission=null;
 let steeringPending=false;
+// One refused steering attempt is a transient event, not a state: it is shown in the chat's own
+// pinned warning (the same <wa-chat-warning> every other chat notice uses), replaced in place on a
+// retry, and withdrawn on its own so it cannot accumulate. 2500ms is long enough to read one line
+// and short enough that a stale refusal never sits over the conversation.
+const STEERING_NOTICE_MS=2500;
+function steeringNotice(message) { chatShell.warning.setNotice('steering',message,STEERING_NOTICE_MS); }
 async function steerActiveRun(textOverride, options = {}) {
   const text=typeof textOverride==='string'?textOverride.trim():input.value.trim(), thread=chatSession, node=activeNode, epoch=conversationEpoch, account=session;
   const generation=options.draftGeneration ?? draftGeneration;
+  const files=(options.files ?? attachments).slice();
   const viewing=()=>chatSession===thread && activeNode===node && conversationEpoch===epoch && session===account;
   if(!composerBusy() || !thread || !text || steeringPending)return;
-  if((options.files ?? attachments).length) {setStatus('Steering accepts text only; attachments and draft kept.');return;}
+  // Steering reuses the composer's own intake, so it must carry every representation that intake
+  // can produce: text files inline into the prompt, images ride beside it exactly as a normal turn's
+  // do. A file with no usable representation (an image whose read failed) is refused visibly rather
+  // than dropped or converted into text.
+  const unsupported=files.find(file=>file.kind!=='text'&&file.kind!=='image' || file.kind==='image'&&!file.data);
+  if(unsupported) {steeringNotice('Steering accepts text only; attachments and draft kept.');return;}
   if(!steeringSubmission || steeringSubmission.text!==text || steeringSubmission.thread!==thread
     || steeringSubmission.node!==node || steeringSubmission.epoch!==epoch)
     steeringSubmission={text,thread,node,epoch,key:crypto.randomUUID()};
   const submission=steeringSubmission;
+  const images=files.filter(file=>file.kind==='image');
+  const steeringBody={action:'steer_session',session_id:thread,text:chatShell.composedText(text,files),idempotency_key:submission.key};
+  if(images.length)steeringBody.images=images.map(file=>({name:file.name,mime:file.mime,data:file.data}));
   steeringPending=true;
   const steerButton=document.getElementById('steer');
   if(steerButton)steerButton.disabled=true;
@@ -4050,7 +4065,7 @@ async function steerActiveRun(textOverride, options = {}) {
     for(let attempt=0;attempt<2;attempt++) {
       if(!viewing())return;
       const response=await apiFetch('subagents',{method:'POST',headers:apiHeaders({'Content-Type':'application/json'}),
-        body:JSON.stringify({action:'steer_session',session_id:thread,text,idempotency_key:submission.key})});
+        body:JSON.stringify(steeringBody)});
       if(!viewing())return;
       receipt=await response.json();
       if(!viewing())return;
@@ -4065,10 +4080,12 @@ async function steerActiveRun(textOverride, options = {}) {
       break;
     }
     if(viewing() && draftGeneration===generation && input.value.trim()===text) {
-      input.value='';draftGeneration++;draftUndo=[];draftRedo=[];autosize();saveDraft();
+      input.value='';draftUndo=[];draftRedo=[];autosize();
+      for(let i=attachments.length-1;i>=0;i--)if(files.includes(attachments[i]))attachments.splice(i,1);
+      chatShell.renderAttachments();draftGeneration++;draftNow=snapshotDraft();saveDraft();
     }
     steeringSubmission=null;
-    renderSteering({...receipt,text});
+    if(viewing())renderSteering({...receipt,text});
   } catch(error) {if(viewing())setStatus('Steering not confirmed; draft kept: '+error.message);}
   finally {steeringPending=false;if(steerButton)steerButton.disabled=false;}
 }
