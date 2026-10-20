@@ -479,6 +479,26 @@ function M.review_facts(memory, session_id)
     local behind_ok, behind = exec_git("rev-list --count HEAD..origin/main")
     if behind_ok and behind ~= "" then facts.behind = tonumber(behind) else absent("behind", "not_reported_by_git") end
   end
+  -- What the commits SAY. `ahead: 2` cannot tell a coordinator whether to adopt finished work or
+  -- respawn a half-done draft, and the difference is a whole child: a worker killed after it
+  -- committed (provider cut, disk full) leaves work that only needs verification. Bounded to three
+  -- subjects so the packet stays readable.
+  local subject_ok, head_subject = exec_git("log -1 --format=%s")
+  if subject_ok and head_subject ~= "" then facts.head_subject = head_subject:sub(1, 160)
+  else absent("head_subject", "not_reported_by_git") end
+  if tonumber(facts.ahead) and tonumber(facts.ahead) > 0 then
+    local list_ok, list = exec_git("log --format=%s origin/main..HEAD")
+    if list_ok and list ~= "" then
+      local subjects = {}
+      for line in list:gmatch("[^\r\n]+") do
+        if #subjects >= 3 then break end
+        subjects[#subjects + 1] = line:sub(1, 160)
+      end
+      facts.ahead_subjects = subjects
+    else
+      absent("ahead_subjects", "not_reported_by_git")
+    end
+  end
   -- "Pushed" is the question a coordinator actually asks: is the ref this branch would push to
   -- present on the remote, and does it already contain HEAD? An absent remote ref is a definite
   -- `false` (the branch has never been published), not an unmeasured value.
