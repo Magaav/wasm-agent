@@ -574,7 +574,8 @@ normally. No other refusal, reserved effect or spawn is retried.
 ## Operating
 
 ```
-wa-sentinel status   # the node, the watcher, who owns the watcher's lifecycle, the box, the wake budget, the job lanes' reservation, the last actions
+wa-sentinel status   # one line for the node (up/down, port, pid), one for the watcher, who owns its lifecycle, the box, the wake budget, the job lanes' reservation, the last actions
+wa-sentinel health   # the node's /health report verbatim - the machine-readable document, not a status line
 wa-sentinel start    # start watching; where a unit owns the watcher this is the manager's restart of it
 wa-sentinel stop     # stop it: the manager's stop when a unit owns the watcher, the stop file otherwise
 wa-sentinel restart  # replace the running image: the manager's restart when a unit owns the watcher
