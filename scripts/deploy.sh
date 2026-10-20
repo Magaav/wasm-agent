@@ -677,6 +677,16 @@ else
   SENTINEL_HASH="$(sha256sum < "$INSTALL_DIR/$SENTINEL_NAME" 2>/dev/null | awk '{print $1}')"
 fi
 
+# The install's facts are true HERE - the node's bytes, the sentinel's bytes, the shipped upgrade.sh - so the
+# record is written here, before the sentinel proof below, which can refuse entirely on its own. Measured
+# 2026-10-20: six deploys installed correctly and every one of them left an `interim` record naming the
+# PREVIOUS commit, because this step sat forty lines under a proof that kept failing; `verify-deployed.sh`
+# then refused an install that was right, and the notice could only say "this does not establish what is
+# installed". The record describes the install; the sentinel proof has its own verdict in deploy-result.json.
+UPGRADE_HASH="$(sha256sum < "$INSTALL_DIR/scripts/upgrade.sh" 2>/dev/null | awk '{print $1}')"
+[ -n "$UPGRADE_HASH" ] || UPGRADE_HASH=missing
+record_installed
+
 # Replacing an executable file does not replace the already-running process.
 # Even when the copy succeeds on Windows, a watcher can keep executing the old
 # image indefinitely. Respect an intentionally stopped watcher; restart only
