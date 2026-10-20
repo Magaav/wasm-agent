@@ -62,6 +62,22 @@ you, naming the refusal: the request being `done` only means it was spawned, and
 before the swap leaves the node untouched and would otherwise tell nobody. A deploy run by hand passes no
 session and wakes nobody.
 
+### Publishing order
+
+A deploy replaces the node, so it can run only when the node is idle. The order that works:
+
+1. Merge the change to `main` and push it; read `origin/main` back.
+2. Queue the deploy: `wa-sentinel request deploy --reason "..."`. It records the `origin/main` commit
+   it was written against, and `wa-sentinel status` shows that request as a line of facts (verb, target
+   commit, queue time, why it is still waiting) rather than a count.
+3. **End the turn.** Issue no further tool calls: the turn is the work that keeps the node busy.
+4. On the next turn, verify before saying "deployed": `installed.txt` must name that same commit and
+   the installed artefacts must hash-match (`scripts/verify-install.sh`).
+
+The starvation this prevents: a request written and then followed by more tool calls sits at
+`requests: 1 waiting` while the log repeats `maintenance-deferred ... the node is busy`, so "deploy
+queued" is reported - and read - as "deployed", three times in one day.
+
 ### Verifying a deploy without re-deriving it
 
 `scripts/verify-install.sh` prints one PASS/FAIL per comparison - installed vs built hashes, shipped
