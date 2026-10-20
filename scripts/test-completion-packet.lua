@@ -165,6 +165,12 @@ statuses["packet-child-2"]=view("packet-child-2",child,"explore",{settled_at=170
 tick()
 packet=json.decode(completions.status("packet-child-2","master").packet)
 check_eq(packet.artifacts.ahead,1,"a commit origin/main does not have is counted")
+-- A worker killed AFTER it committed leaves work that needs verification, not a respawn. The count
+-- alone cannot tell those apart, so the packet carries what the head commit claims.
+check_eq(packet.artifacts.head_subject,"child-work",
+  "the packet says what the head commit claims, so a coordinator can decide adopt-vs-respawn")
+check(packet.artifacts.ahead_subjects~=nil and packet.artifacts.ahead_subjects[1]=="child-work",
+  "the packet lists the subjects ahead of origin/main, newest first")
 check_eq(packet.artifacts.pushed,false,"an unpushed commit leaves the branch unpushed")
 check_eq(packet.artifacts.dirty,1,"a modified tracked file is counted")
 check_eq(packet.artifacts.untracked,1,"an untracked file is counted")
