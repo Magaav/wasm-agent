@@ -1499,7 +1499,7 @@ local READ_ONLY = {
   spell_list = true, spell_get = true,
 }
 
-function M.has_effect(name) if name:sub(1,4)=='mcp_' then return not mcp.is_read(name) end;return READ_ONLY[name] ~= true end
+function M.has_effect(name) if type(name)~='string' then return true end;if name:sub(1,4)=='mcp_' then return not mcp.is_read(name) end;return READ_ONLY[name] ~= true end
 
 function M.start_parallel_bash(calls, memory, role, ctx)
   if not is_master(role) or (ctx and ctx.subagent

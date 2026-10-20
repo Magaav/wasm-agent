@@ -20,7 +20,7 @@
   };
   apiFetch=async(route,options)=>{
    if(route==='subagents'){
-    const body=JSON.parse(options.body);check(body.action==='steer_session'&&body.session_id===thread&&body.text===expected&&body.idempotency_key,'owned correction uses stable scoped key');steeringPosts++;
+    const body=JSON.parse(options.body);if(scenario==='files')check(body.action==='steer_session'&&body.text.includes('[file: keep.txt]')&&body.text.includes('private fixture')&&body.text.includes(expected),'text attachment is inlined into the steering prompt');else check(body.action==='steer_session'&&body.session_id===thread&&body.text===expected&&body.idempotency_key,'owned correction uses stable scoped key');steeringPosts++;
     if(scenario==='lost')throw Error('private lost steering response');
     if(scenario==='newer'){input.value='NEWER DRAFT';draftGeneration++;}
     return {ok:true,status:200,json:async()=>({id:'steering-'+scenario,state:'queued',run_id:'background-run',ordinal:1})};
@@ -61,7 +61,7 @@
   check(chatPosts===0&&steeringPosts===1,'Ctrl+Enter works when stale UI thought the background conversation idle');check(composerBusy()&&input.value==='','keyboard leaves follower active and clears confirmed text');
   reset('newer','ORIGINAL CORRECTION');await send(expected);check(input.value==='NEWER DRAFT','late acknowledgement cannot erase newer typing');check(steeringPosts===1,'newer draft does not trigger another effect');
   reset('lost','RECEIPT UNCERTAIN');await send(expected);check(steeringPosts===1&&input.value===expected,'uncertain steering retains draft and never auto-replays');check(!busy&&composerBusy(),'uncertainty never locks out background controls');
-  reset('files','KEEP FILES');attachments.push({kind:'text',name:'keep.txt',text:'private fixture',state:'ready'});chatShell.renderAttachments();await send(expected);check(chatPosts===0&&steeringPosts===0,'text-only steering refuses attachments without silently dropping them');check(attachments.length===1&&input.value===expected,'unsubmitted attachments and draft remain');
+  reset('files','KEEP FILES');attachments.push({kind:'text',name:'keep.txt',text:'private fixture',state:'ready'});chatShell.renderAttachments();await send(expected);check(chatPosts===0&&steeringPosts===1,'text attachment rides into steering instead of being refused');check(attachments.length===0&&input.value==='','confirmed steering clears the files it carried');
   reset('refused','KEEP REJECTED MESSAGE');await send(expected);check(chatPosts===1&&input.value===expected,'HTTP admission refusal preserves draft');check(!chatShell.warning.hidden&&chatShell.warning.textContent.includes('admission_busy'),'non-SSE refusal stays visible instead of disappearing in an SSE reader');
   reset('json-error','KEEP JSON ERROR DRAFT');await send(expected);check(chatPosts===1&&input.value===expected,'JSON error with HTTP200 is not mistaken for accepted delivery');
   reset('idle','NORMAL IDLE MESSAGE');await send(expected);check(chatPosts===1&&steeringPosts===0&&input.value==='','genuinely idle send remains normal chat');check(messages.textContent.includes('IDLE ACK'),'idle answer renders normally');

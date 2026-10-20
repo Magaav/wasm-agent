@@ -249,6 +249,10 @@ local function migrate()
   -- its wake. It is written once, when the child settles and before any model turn, and read back
   -- verbatim, so a wake delivered after a restart still starts from the evidence the child left.
   add_column("child_completions", "packet", "TEXT NOT NULL DEFAULT ''")
+  -- A queued steering message can carry the same attached images a normal turn does. The bytes live
+  -- in the same content-addressed attachments store; this column only holds the reference list, so
+  -- the inbox stays a bounded queue rather than a second copy of the pictures.
+  add_column("steering_inbox", "images", "TEXT NOT NULL DEFAULT '[]'")
   -- Rows written before the state was renamed kept the wording of the claim we used to
   -- make: "died after a tool result", "died right after a compaction". Nobody observed
   -- those deaths - a live run was reported as interrupted fourteen times in a row - so

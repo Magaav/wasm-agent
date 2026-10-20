@@ -3853,6 +3853,10 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'background coordinator handoff browser suite failed' }
     & node scripts/test-background-handoff.cjs (Join-Path $tmp 'background-handoff') --post
     if ($LASTEXITCODE -ne 0) { throw 'background coordinator handoff evidence postcheck failed' }
+    & node scripts/test-steering-attachments.cjs (Join-Path $tmp 'steering-attachments')
+    if ($LASTEXITCODE -ne 0) { throw 'steering attachment browser suite failed' }
+    & node scripts/test-steering-attachments.cjs (Join-Path $tmp 'steering-attachments') --post
+    if ($LASTEXITCODE -ne 0) { throw 'steering attachment evidence postcheck failed' }
     & node scripts/test-failure-notice.cjs (Join-Path $tmp 'failure-notice')
     if ($LASTEXITCODE -ne 0) { throw 'failure notice browser suite failed' }
     & node scripts/test-failure-notice.cjs (Join-Path $tmp 'failure-notice') --post

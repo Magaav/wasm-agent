@@ -10,6 +10,38 @@ end
 local function query(s,p) return sql('sql_query',s,p) end
 local function exec(s,p) return sql('sql_exec',s,p) end
 local function boot() return assert(json.decode(host.runtime_info()).boot_id,'steering_requires_boot_identity') end
+-- A steering message carries the same attachments a normal turn does. Text files are inlined by the
+-- UI before submission; pictures are stored here through the one attachment store and the inbox
+-- keeps only their references, exactly like `messages.images`.
+local function decode_images(value)
+  if type(value)=='table' then return value end
+  if type(value)=='string' and value~='' then
+    local ok,decoded=pcall(json.decode,value)
+    if ok and type(decoded)=='table' then return decoded end
+  end
+  return {}
+end
+local function same_image(a,b)
+  return tostring(a.sha256 or '')==tostring(b.sha256 or '') and tostring(a.mime or '')==tostring(b.mime or '')
+end
+local function same_images(a,b)
+  a,b=decode_images(a),decode_images(b)
+  if #a~=#b then return false end
+  for i=1,#a do if not same_image(a[i],b[i]) then return false end end
+  return true
+end
+local function store_images(entries)
+  if entries==nil then return {} end
+  if type(entries)~='table' then return nil,'invalid_steering_images' end
+  local references={}
+  for _,entry in ipairs(entries) do
+    if type(entry)~='table' then return nil,'invalid_steering_image' end
+    local reference,problem=memory.store_image(entry)
+    if not reference then return nil,problem end
+    references[#references+1]=reference
+  end
+  return references
+end
 local function recover(owner,sid)
   local r=query('SELECT * FROM steering_runs WHERE owner=? AND session_id=?',{owner,sid})[1]
   if r and r.state=='active' and r.boot~=boot() then
@@ -37,6 +69,11 @@ function M.control(args,ctx,target,closed)
   local owner,sid=ctx.user_id,tostring(args.session_id or '')
   local session=memory.session(sid)
   if not session or session.user_id~=owner then return {error='forbidden_steering_session'} end
+  local stored_images,image_problem
+  if args.action~='steering_status' then
+    stored_images,image_problem=store_images(args.images)
+    if not stored_images then return {error=image_problem} end
+  end
   return memory.transaction(function()
     local active=recover(owner,sid)
     if args.action=='steering_status' then
@@ -47,7 +84,8 @@ function M.control(args,ctx,target,closed)
     if text:match('^%s*$') or #text>32768 then return {error='steering_text_required_or_too_large'} end
     local old=query('SELECT * FROM steering_inbox WHERE owner=? AND session_id=? AND request_key=?',{owner,sid,key})[1]
     if old then
-      if old.text~=text or (args.run_id and old.run_id~=args.run_id) then return {error='idempotency_conflict'} end
+      if old.text~=text or (args.run_id and old.run_id~=args.run_id)
+        or not same_images(old.images,stored_images) then return {error='idempotency_conflict'} end
       old.deduplicated=true;return old
     end
     if closed then return {error='no_active_steering_target',target=active} end
@@ -59,7 +97,7 @@ function M.control(args,ctx,target,closed)
     if args.run_id and args.run_id~=rid then return {error='steering_target_changed'} end
     if query("SELECT COUNT(*) AS n FROM steering_inbox WHERE owner=? AND session_id=? AND state='queued'",{owner,sid})[1].n>=128 then return {error='steering_inbox_full'} end
     local id=host.uuid()
-    exec('INSERT INTO steering_inbox(id,owner,session_id,run_id,request_key,text,attribution,created_at) VALUES(?,?,?,?,?,?,?,?)',{id,owner,sid,rid,key,text,tostring(ctx.session_id or ''),host.now()})
+    exec('INSERT INTO steering_inbox(id,owner,session_id,run_id,request_key,text,images,attribution,created_at) VALUES(?,?,?,?,?,?,?,?,?)',{id,owner,sid,rid,key,text,json.encode(stored_images),tostring(ctx.session_id or ''),host.now()})
     return query('SELECT * FROM steering_inbox WHERE id=?',{id})[1]
   end)
 end
@@ -85,7 +123,7 @@ function M.consume(owner,sid,rid)
   return memory.transaction(function()
     local rows=query("SELECT * FROM steering_inbox WHERE owner=? AND session_id=? AND run_id=? AND state='queued' ORDER BY ordinal",{owner,sid,rid})
     for _,row in ipairs(rows) do
-      row.message_seq=memory.append_turn_in_transaction(sid,{id=row.id,role='user',content=row.text,
+      row.message_seq=memory.append_turn_in_transaction(sid,{id=row.id,role='user',content=row.text,images=decode_images(row.images),
         trace={{kind='steering',version=1,id=row.id,run_id=rid,state='read'}}})
       exec("UPDATE steering_inbox SET state='read',read_at=?,message_seq=? WHERE id=?",{host.now(),row.message_seq,row.id})
       row.state='read'
