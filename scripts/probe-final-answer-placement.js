@@ -485,57 +485,65 @@
     check(messages.scrollTop <= shortBefore + 8,
       "and the conversion must not scroll down to reveal it, saw " + shortBefore + " -> " + messages.scrollTop);
 
-    // Reader scrolled up during the run: never pulled back.
+    // ---- 5e. THE FIRST LINE WHEN THE ANSWER IS DONE (regression, 2026-10-21, second report).
+    // A reader who scrolled the thinking during the run is "released" for the whole bubble, and the answer
+    // used to stay at its end because of it. Once the answer is finished, its first line is brought to the
+    // chat content top if it overflows - unless the reader is reading something EARLIER than the answer.
+    var longAnswer = "A paragraph of readable evidence. ".repeat(200);
     handleEvent({ type: "done" });
     messages.replaceChildren(); runBubble = null; streamBody = null; streamText = "";
     setFollow(true);
-    for (var fill3 = 0; fill3 < 8; fill3++) add("user", "Earlier evidence " + ("retained text ".repeat(35)));
+    for (var fill5 = 0; fill5 < 8; fill5++) add("user", "Earlier evidence " + ("retained text ".repeat(35)));
     messages.scrollTop = messages.scrollHeight;
-    handleEvent({ type: "round", n: 1, tools: 3, run_id: "placement-run-reader", session_id: "placement-session" });
-    handleEvent({ type: "delta", text: "A long answer " + ("that keeps going.\n\n".repeat(60)) });
+    handleEvent({ type: "round", n: 1, tools: 3, run_id: "placement-run-grow", session_id: "placement-session" });
+    handleEvent({ type: "delta", text: longAnswer });
     messages.dispatchEvent(new WheelEvent("wheel", { deltaY: -1 }));
-    messages.scrollTop = Math.max(0, messages.scrollTop - 120);
+    messages.scrollTop = Math.max(0, messages.scrollTop - 60);
     messages.dispatchEvent(new Event("scroll"));
-    var readerPosition = messages.scrollTop;
-    handleEvent({ type: "reply", message_id: "placement-msg-reader", text: "A long answer" });
-    var readerAnswer = lastBubble().body.querySelector(":scope > .seg.final-answer.answer-wrap");
-    check(!!readerAnswer && readerAnswer.dataset.answerAnchor === "reader-released",
-      "a reader already in scrollback must be recorded as released, saw " +
-      (readerAnswer && readerAnswer.dataset.answerAnchor));
-    check(messages.scrollTop === readerPosition,
-      "and must not be pulled to the new answer, saw " + readerPosition + " -> " + messages.scrollTop);
+    handleEvent({ type: "reply", message_id: "placement-msg-grow", text: longAnswer });
+    var growAnswer = lastBubble().body.querySelector(":scope > .seg.final-answer.answer-wrap");
+    var grownTop = growAnswer ? growAnswer.getBoundingClientRect().top - messages.getBoundingClientRect().top : NaN;
+    check(!!growAnswer && growAnswer.dataset.answerAnchor === "top",
+      "a finished answer whose first line overflows must come to its first line even if the reader " +
+      "scrolled during the run, saw " + (growAnswer && growAnswer.dataset.answerAnchor));
+    check(!!growAnswer && Math.abs(grownTop) < 4,
+      "and that first line must sit at the chat content top, saw top " + grownTop);
 
-    // ---- 5d. a thinking topic's own life: it survives the tool topic that comes next, and is closed by
-    // the next thinking or decision topic - never by the tool step (operator, 2026-10-21).
+    // ...an answer that still fits when it is done is NOT moved.
     handleEvent({ type: "done" });
     messages.replaceChildren(); runBubble = null; streamBody = null; streamText = "";
     setFollow(true);
-    handleEvent({ type: "round", n: 1, tools: 2, run_id: "think-run", session_id: "placement-session" });
-    handleEvent({ type: "reasoning", text: "First thought. " });
-    var thinkA = lastBubble().body.querySelector("wa-reasoning");
-    // Thinking is the route: it keeps the muted weight (commentary's own colour is asserted in section 3,
-    // where a settled commentary body exists).
-    check(!!thinkA && getComputedStyle(thinkA.body).color === "rgb(139, 147, 167)",
-      "the thinking body keeps the muted route colour, saw " + (thinkA ? getComputedStyle(thinkA.body).color : "none"));
-    check(!!thinkA && thinkA.open, "a thinking topic starts open, saw " + (thinkA ? thinkA.open : "no topic"));
-    handleEvent({ type: "tool", call_id: "think-call-1", name: "read", arguments: { path: "ui/app.js" } });
-    handleEvent({ type: "tool_result", name: "read", call_id: "think-call-1", result: { content: "ok" } });
-    check(!!thinkA && thinkA.open && thinkA.isConnected,
-      "a tool step must not close the thinking topic, saw open=" + (thinkA && thinkA.open) + " connected=" + (thinkA && thinkA.isConnected));
-    handleEvent({ type: "reasoning", text: "Second thought." });
-    var thinkAfter = lastBubble().body.querySelectorAll("wa-reasoning");
-    check(thinkAfter.length === 1 && thinkAfter[0] === thinkA,
-      "later thinking must continue in the SAME topic, saw " + thinkAfter.length + " topic(s)");
-    check(!!thinkA && /First thought\. Second thought\./.test(thinkA.body.textContent.replace(/\s+/g, " ")),
-      "and that topic must hold both thoughts, saw " + JSON.stringify(thinkA && thinkA.body.textContent.slice(0, 80)));
-    handleEvent({ type: "decision", call_id: "think-call-2", name: "write", arguments_text: "{}" });
-    check(!!thinkA && thinkA.open === false,
-      "a decision topic closes the thinking topic it follows, saw open=" + (thinkA && thinkA.open));
-    handleEvent({ type: "reasoning", text: "Third thought." });
-    var thinkNew = lastBubble().body.querySelectorAll("wa-reasoning");
-    var latest = thinkNew[thinkNew.length - 1];
-    check(!!latest && latest !== thinkA && latest.open,
-      "and the next thinking starts a NEW open topic, saw " + thinkNew.length + " topics");
+    for (var fill6 = 0; fill6 < 8; fill6++) add("user", "Earlier evidence " + ("retained text ".repeat(35)));
+    messages.scrollTop = messages.scrollHeight;
+    handleEvent({ type: "round", n: 1, tools: 3, run_id: "placement-run-fits", session_id: "placement-session" });
+    handleEvent({ type: "delta", text: "A short answer that fits." });
+    var fitsBefore = messages.scrollTop;
+    handleEvent({ type: "reply", message_id: "placement-msg-fits", text: "A short answer that fits." });
+    var fitsAnswer = lastBubble().body.querySelector(":scope > .seg.final-answer.answer-wrap");
+    var fitsTop = fitsAnswer ? fitsAnswer.getBoundingClientRect().top - messages.getBoundingClientRect().top : NaN;
+    check(!!fitsAnswer && fitsAnswer.dataset.answerAnchor === "none",
+      "an answer that fits when it is done must not be anchored, saw " + (fitsAnswer && fitsAnswer.dataset.answerAnchor));
+    check(fitsTop > 0,
+      "and its first line stays visible where the stream left it, saw top " + fitsTop);
+    check(messages.scrollTop <= fitsBefore + 8,
+      "and the reader is not scrolled, saw " + fitsBefore + " -> " + messages.scrollTop);
+
+    // ...and a reader reading EARLIER content than the answer is never pulled forward into it.
+    handleEvent({ type: "done" });
+    messages.replaceChildren(); runBubble = null; streamBody = null; streamText = "";
+    setFollow(true);
+    for (var fill7 = 0; fill7 < 12; fill7++) add("user", "Earlier evidence " + ("retained text ".repeat(35)));
+    messages.scrollTop = 0;
+    messages.dispatchEvent(new Event("scroll"));
+    var earlierBefore = messages.scrollTop;
+    handleEvent({ type: "round", n: 1, tools: 3, run_id: "placement-run-earlier", session_id: "placement-session" });
+    handleEvent({ type: "delta", text: longAnswer });
+    handleEvent({ type: "reply", message_id: "placement-msg-earlier", text: longAnswer });
+    var earlierAnswer = lastBubble().body.querySelector(":scope > .seg.final-answer.answer-wrap");
+    check(messages.scrollTop === earlierBefore,
+      "a reader reading earlier content must not be pulled into the answer, saw " + earlierBefore + " -> " + messages.scrollTop);
+    check(!!earlierAnswer && earlierAnswer.dataset.answerAnchor !== "top",
+      "and that answer is not claimed as anchored, saw " + (earlierAnswer && earlierAnswer.dataset.answerAnchor));
 
     var verdict = "PASS: thinking streams in the thinking topic; a tool-capable run streams its prose " +
       "inside commentary from the first chunk, settles a commentary label on a tool call, and converts " +
