@@ -50,14 +50,21 @@ wa-provider-manager button, wa-provider-manager a { margin-right:var(--space); }
 wa-orchestrator { display:flex; flex-direction:column; width:100%; height:100%; color:var(--text); font:var(--font-size)/1.55 var(--font); }
 .orchestrator-head, .agent-pane-head { display:flex; align-items:center; gap:var(--gap); padding:var(--pad); border-bottom:1px solid var(--line); }
 .orchestrator-status, .agent-pane-head span { flex:1; min-width:0; color:var(--muted); font-size:12px; overflow-wrap:anywhere; }
+/* The header's one number: icon and count. The words it stands for are its title and aria-label, so the
+   row keeps its height and the count never wraps away from the title it belongs to. */
+.orchestrator-count { flex:none; color:var(--text); font-size:12px; white-space:nowrap; }
 .orchestrator-body { display:flex; flex:1; min-height:0; }
 .orchestrator-sidebar { width:250px; min-width:200px; max-width:40%; overflow:auto; resize:horizontal; border-right:1px solid var(--line); padding:var(--space); }
 .orchestrator-sidebar nav { display:flex; flex-direction:column; gap:var(--gap); }
+/* The left bar's topics are the house topic (`.topic` + a `trace-head` button), one per line of the
+   bar's reading order: the machines, then the children running on them. The box, the padding and the
+   disclosure are the topic's own; the bar only says how far apart two topics sit. */
+.orchestrator-sidebar > wa-orchestrator-topic { display:block; margin-bottom:var(--space); }
+.sidebar-topic-body { padding:var(--space); }
+.orchestrator-sidebar > wa-orchestrator-topic > .trace-head { font-weight:600; }
 /* The live list: what is running, by machine. A row is compact on purpose - the sidebar has to hold
    several of them next to the dispatch cards, and a reader scans the state, the node and the id. */
-.live-children { padding:var(--space); margin-bottom:var(--space); }
-.live-children summary { cursor:pointer; font-weight:600; }
-.live-children-counts { margin:var(--space) 0 0; color:var(--muted); font-size:12px; display:flex; align-items:baseline; gap:0; min-width:0; white-space:nowrap; overflow:hidden; }
+.live-children-counts { margin:0; color:var(--muted); font-size:12px; display:flex; align-items:baseline; gap:0; min-width:0; white-space:nowrap; overflow:hidden; }
 /* The counts never shrink; the node name does, with an ellipsis, so the three numbers stay on the one
    line whose whole job is stating the node's state. */
 .live-children-name { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
@@ -93,6 +100,24 @@ button.live-child:hover, button.live-child:focus-visible { background:var(--pane
 .agent-card[data-state="unknown"], .agent-card[data-state="failed"] { border-left-color:#f77; }
 .agent-card[data-state="completed"], .agent-card[data-state="cancelled"] { color:var(--muted); }
 .agent-card:hover, .agent-card:focus-visible { background:var(--panel-2); border-color:var(--accent); }
+/* The machines, one entry each, inside the `Nodes` topic. <wa-node> is the entry's two lines (name, then
+   statistics) and it is the SAME component the engine menu's node list draws; that list lays the two
+   lines out as its own row would have them (`display:contents`), which is why the entry here states its
+   own column. */
+.node-list { display:flex; flex-direction:column; gap:var(--gap); }
+.node-list-empty { margin:0; color:var(--muted); font-size:12px; }
+wa-node { display:flex; flex-direction:column; gap:2px; min-width:0; }
+.node wa-node { display:contents; }
+.node-entry .node-name, .node-entry .node-resources { overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
+.node-entry .node-resources { color:var(--muted); font-size:11px; }
+.node-topic .trace-head wa-node { flex:1; min-width:0; }
+/* The name is the entry's label and takes the label's colour: `trace-head` is muted because it holds a
+   row of meta, but a node's own name is what the reader is looking for. */
+.node-topic .node-name { color:var(--text); }
+/* What opening one node states: the rest of the record the two-line header cannot hold. */
+.node-details { display:grid; grid-template-columns:auto minmax(0,1fr); gap:2px var(--gap); margin:0; font-size:11px; color:var(--muted); }
+.node-details dt { color:var(--muted); }
+.node-details dd { margin:0; overflow-wrap:anywhere; }
 /* A lane: the checkout a child was given, the children working in it, and its end state. The
    sidebar is a list of lanes rather than a flat list of children, because "what is still owed here"
    is a question about a checkout - six children in one worktree used to be six unrelated cards. */
@@ -109,7 +134,7 @@ button.live-child:hover, button.live-child:focus-visible { background:var(--pane
 .lane-check[data-state="yes"] .lane-check-state { color:var(--ok); }
 .lane-check[data-state="no"] .lane-check-state { color:var(--warn); }
 .lane-check[data-state="unknown"] .lane-check-state { color:var(--muted); }
-.placement { padding:var(--space); margin-bottom:var(--space); color:var(--muted); font-size:12px; }
+.placement { margin-top:var(--space); color:var(--muted); font-size:12px; }
 .placement-node { display:flex; align-items:center; gap:var(--gap); padding:var(--space) 0; }
 .placement-node label { flex:1; overflow-wrap:anywhere; }
 .placement-node input { width:55px; }
@@ -141,12 +166,16 @@ wa-agent-session { min-width:0; min-height:0; display:flex; flex-direction:colum
 /* Child transcripts inherit .messages/.msg/topic rules exactly; identity has no paint override. */
 /* Chat actions live in the shared shell; no child-only cancel/steer furniture. */
 /* Child notices use the same pinned wa-chat-warning, not a raw preview/status row. */
+/* The left bar's topics are the transcript's own topic component, header button and all: a `.trace-head`
+   is excluded above for the same reason `.chat-control` is - the row it sits in is the box `.topic` and
+   `.trace-head` already draw, and a rule here that restated that box for the same element would be a
+   second header style that happens to lose today and moves the moment it wins. */
 /* The orchestrator's own buttons (sidebar cards, live children, lanes). `.chat-control` is excluded rather
    than out-specified: a composer-footer control's box is the shared factory's (`.chat-control` beside the
    append-file control), and a rule here that stated that box for the same element a second time would be a
    duplicate that happens to lose today and moves the pane's actions the moment it wins. */
-wa-orchestrator button:not(.chat-control):not(wa-chat-shell *) { cursor:pointer; color:var(--text); background:var(--panel-2); border:1px solid var(--line); border-radius:var(--radius-sm); padding:var(--space); font:inherit; }
-wa-orchestrator button:not(.chat-control):not(wa-chat-shell *):disabled { color:var(--disabled); cursor:default; }
+wa-orchestrator button:not(.chat-control):not(.trace-head):not(wa-chat-shell *) { cursor:pointer; color:var(--text); background:var(--panel-2); border:1px solid var(--line); border-radius:var(--radius-sm); padding:var(--space); font:inherit; }
+wa-orchestrator button:not(.chat-control):not(.trace-head):not(wa-chat-shell *):disabled { color:var(--disabled); cursor:default; }
 @media(max-width:700px) { .orchestrator-sidebar { width:200px; min-width:150px; } .orchestrator-canvas[data-count] { grid-template-columns:minmax(0,1fr); } }
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
@@ -674,7 +703,10 @@ body.engine .engine { display: flex; }
 .node-name { font-weight: 500; }
 .node-kind, .node-caps { color: var(--muted); font-size: 11px; }
 .node-caps { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.node-resources {
+/* In the engine's row the statistics keep the line they always had: its own, full width, under the
+   name. The class belongs to <wa-node>, so this is the row's layout of the component, not a second
+   drawing of it. */
+.node .node-resources {
   flex: 0 0 100%; padding-left: var(--space); color: var(--muted); font-size: 11px;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }

@@ -2574,16 +2574,164 @@ class WaAgentSession extends HTMLElement {
 }
 customElements.define('wa-agent-session',WaAgentSession);
 
+// ONE node, drawn once.
+//
+// The orchestrator's `Nodes` topic and the engine menu's node list are two lists of the same machines,
+// and a second drawing of them is how the two could disagree about a name or a number. `<wa-node>` is
+// that drawing and it is exactly TWO lines, in this order: the node's name, then what the node last
+// measured about itself (`CPU 52% · RAM 29%/12GB · DISK 87%/96GB`). Nothing else - a caller adds whatever
+// furniture its own list needs (the engine row's dot, kind, capabilities and buttons) as siblings, so
+// the two lines a reader compares across the two lists are the same two lines.
+function formatResourceBytes(bytes) {
+  const value = Number(bytes);
+  if (!Number.isFinite(value) || value <= 0) return "?";
+  const units = ["B", "KB", "MB", "GB", "TB", "PB"];
+  const power = Math.min(Math.floor(Math.log(value) / Math.log(1024)), units.length - 1);
+  const amount = value / Math.pow(1024, power);
+  return `${amount >= 10 || power === 0 ? amount.toFixed(0) : amount.toFixed(1)}${units[power]}`;
+}
+
+function resourcePercent(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? `${Math.round(number)}%` : "?";
+}
+
+// The node's statistics line, in the one place both node lists get it from. `online` is a fact about the
+// sample, so a node that is not online says so here instead of printing three unknown numbers.
+function nodeStatistics(resources, online) {
+  if (!online) return "resources offline";
+  if (!resources || typeof resources !== "object") return "resources pending";
+  const ram = resources.memory || {};
+  const disk = resources.disk || {};
+  return `CPU ${resourcePercent(resources.cpu?.used_percent)} · RAM ${resourcePercent(ram.used_percent)}/${formatResourceBytes(ram.total_bytes)} · DISK ${resourcePercent(disk.used_percent)}/${formatResourceBytes(disk.total_bytes)}`;
+}
+
+class WaNode extends HTMLElement {
+  connectedCallback() { this._build(); }
+
+  _build() {
+    if (this._lines) return;
+    this._lines = true;
+    this.classList.add("node-entry");
+    this._name = document.createElement("span");
+    this._name.className = "node-name";
+    this._stats = document.createElement("span");
+    this._stats.className = "node-resources";
+    // The legend the engine row's resource line has always carried: what the three numbers are.
+    this._stats.title = "Latest node sample: CPU use · RAM use/total · workspace disk use/total";
+    this.append(this._name, this._stats);
+    if (this._node) this._render();
+  }
+
+  set node(value) { this._node = value || null; this._build(); this._render(); }
+  get node() { return this._node; }
+
+  _render() {
+    const node = this._node || {};
+    this._name.textContent = node.name || "node unknown";
+    const stats = nodeStatistics(node.resources, node.online);
+    this._stats.textContent = stats;
+    // The line is one line by contract, so a narrow host ellipsises it; the words a reader would lose
+    // are the sample itself, so the line says them in its `aria-label` as well as its text.
+    this._stats.setAttribute("aria-label", stats);
+  }
+}
+customElements.define("wa-node", WaNode);
+
+// <wa-orchestrator-topic> — one topic of the orchestrator's left bar, and the SAME topic the transcript
+// draws: `topicParts` gives it the `topic` class, the `trace-head` button with `aria-expanded`, the glyph,
+// the label, the chevron and a body that stays hidden until it is opened. The bar used to build its topics
+// out of <details>/<summary>, which is a second header with its own disclosure rules and its own look - a
+// topic that is not a topic reads as a different kind of thing (see the note above `topicParts`).
+class WaOrchestratorTopic extends HTMLElement {
+  static get observedAttributes() { return ["open"]; }
+
+  connectedCallback() { this._build(); }
+
+  _build() {
+    if (this._header) return;
+    const parts = topicParts(this, {
+      className: this.getAttribute("topic-class") || "sidebar-topic",
+      glyph: this.getAttribute("glyph") || "",
+      label: this.getAttribute("label") || "",
+      bodyClass: "sidebar-topic-body",
+    });
+    this._header = parts.header;
+    this._glyph = parts.glyph;
+    this._label = parts.label;
+    this._meta = parts.meta;
+    this._chevron = parts.chevron;
+    this._body = parts.body;
+    this.append(this._header, this._body);
+    if (this._node) this._adoptNode();
+    this._sync();
+  }
+
+  // A node entry's header carries the shared <wa-node> in place of a label, because a node is two lines
+  // (its name, then its statistics) and both of them belong on the line a reader sees without opening it.
+  _adoptNode() {
+    const entry = document.createElement("wa-node");
+    entry.node = this._node;
+    this._label.remove();
+    this._meta.remove();
+    this._header.insertBefore(entry, this._chevron);
+    this._nodeEntry = entry;
+  }
+
+  set node(value) {
+    this._node = value || null;
+    if (!this._header) return;
+    if (this._nodeEntry) this._nodeEntry.node = this._node;
+    else if (this._node) this._adoptNode();
+  }
+  get node() { return this._node; }
+
+  get header() { this._build(); return this._header; }
+  get body() { this._build(); return this._body; }
+
+  get open() { return this.hasAttribute("open"); }
+  set open(value) {
+    if (value) this.setAttribute("open", "");
+    else this.removeAttribute("open");
+  }
+
+  attributeChangedCallback() { if (this._header) this._sync(); }
+
+  _sync() {
+    this._body.hidden = !this.open;
+    this._header.setAttribute("aria-expanded", String(this.open));
+    topicChevron(this._chevron, this.open);
+  }
+
+  toggle() { this.open = !this.open; }
+}
+customElements.define("wa-orchestrator-topic", WaOrchestratorTopic);
+
+// The header's one number: the active-card count as a glyph and the count.
+//
+// The glyph is the live list's own "active: a live child with a session" glyph, so the header counts the
+// same thing the live list's `active` pair counts. The words live in `title` and `aria-label` because a
+// sentence here is what the header used to be - and it is what pushed the row's controls off the line.
+const ORCHESTRATOR_ACTIVE_GLYPH = "\u273a";
+
 class WaOrchestrator extends HTMLElement {
   connectedCallback() {
     if(this.sidebar)return;
-    // The live list comes first because it is the answer to "what is running": the dispatch table
-    // below it holds the placement records, and a child with no placement record appears only here
-    // (see the note the host writes into it, and app.js's liveChildRows).
-    this.innerHTML='<header class="orchestrator-head"><strong>Orchestrator</strong><span class="orchestrator-status" role="status"></span><button type="button" data-action="refresh">Refresh</button><button type="button" data-action="close">Back to main chat</button></header><div class="orchestrator-body"><aside class="orchestrator-sidebar"><details class="live-children" open><summary>Live children</summary><p class="live-children-counts" role="status"></p><div class="live-children-list"></div><p class="live-children-foot"></p></details><details class="placement"><summary>Node order and limits</summary><p>Fill in order. A limit of 0 keeps a device out of background execution.</p><label><input type="checkbox" class="placement-enabled"> Use ordered placement</label><div class="placement-nodes"></div><button type="button" data-action="save-placement">Save placement</button></details><nav aria-label="Agents"></nav></aside><main class="orchestrator-canvas"><p class="orchestrator-empty">Select an active card to follow its conversation. History remains in Engine → Sessions.</p></main></div>';
+    // The header is the window's name and one number. It used to carry a sentence about closing the
+    // window and two buttons (Refresh, Back to main chat); the count is the only thing the header has to
+    // say, so the sentence is gone and so are the buttons and the routes that existed only for them.
+    this.innerHTML='<header class="orchestrator-head"><strong>Orchestrator</strong><span class="orchestrator-count"></span><span class="orchestrator-status" role="status"></span></header><div class="orchestrator-body"><aside class="orchestrator-sidebar"><nav aria-label="Agents"></nav></aside><main class="orchestrator-canvas"><p class="orchestrator-empty">Select an active card to follow its conversation. History remains in Engine → Sessions.</p></main></div>';
     this.sidebar=this.querySelector('nav'); this.canvas=this.querySelector('main'); this.panes=new Map(); this.drafts=new Map();
     // Promoted conversations: each is a <wa-window> reading the same task as the pane it came from.
     this.windows=new Map();
+    // The left bar is the machines first, then what runs on them: a reader asks where a child could run
+    // before it asks what is running. Both topics are the house topic, and the live list follows the
+    // nodes because it is the answer to "what is running" - a child with no placement record appears only
+    // there (see the note the host writes into it, and app.js's liveChildRows).
+    this.nodesTopic=this.sidebarTopic({label:'Nodes',glyph:'\u25a4',className:'nodes-topic'});
+    this.nodesTopic.body.append(this.nodeListElement(),this.placementElement());
+    this.liveTopic=this.sidebarTopic({label:'Live Subagents',glyph:ORCHESTRATOR_ACTIVE_GLYPH,className:'live-children',open:true});
+    this.liveTopic.body.append(...this.liveElements());
     this.querySelectorAll('[data-action]').forEach(button=>button.addEventListener('click',()=>{
       this.dispatchEvent(new CustomEvent('orchestrator-action',{bubbles:true,detail:{action:button.dataset.action}}));
     }));
@@ -2594,6 +2742,83 @@ class WaOrchestrator extends HTMLElement {
     });
   }
   set message(text) { this.connectedCallback(); this.querySelector('.orchestrator-status').textContent=text; }
+  // The header's number: icon and count only. Both `title` and `aria-label` say what the number counts,
+  // because a title alone is invisible to the keyboard and to a screen reader.
+  set activeCount(value) {
+    this.connectedCallback();
+    const count=Number.isFinite(value)?Math.max(0,Math.trunc(value)):0;
+    const element=this.querySelector('.orchestrator-count');
+    element.textContent=ORCHESTRATOR_ACTIVE_GLYPH+' '+count;
+    const words=count+' active card'+(count===1?'':'s');
+    element.title=words;
+    element.setAttribute('aria-label',words);
+  }
+  // One left-bar topic, built before the agent list so the bar reads top to bottom as machines, then
+  // children, then the dispatch cards.
+  sidebarTopic(options) {
+    const topic=document.createElement('wa-orchestrator-topic');
+    topic.setAttribute('topic-class',options.className);
+    topic.setAttribute('label',options.label);
+    topic.setAttribute('glyph',options.glyph);
+    if(options.open)topic.setAttribute('open','');
+    this.sidebar.before(topic);
+    return topic;
+  }
+  // The live topic's three elements, with the classes they already had: the host writes the node's count
+  // line, the cards and its note into exactly these, so the topic's box changed and its contract did not.
+  liveElements() {
+    const counts=document.createElement('p');
+    counts.className='live-children-counts'; counts.setAttribute('role','status');
+    const list=document.createElement('div'); list.className='live-children-list';
+    const foot=document.createElement('p'); foot.className='live-children-foot';
+    return [counts,list,foot];
+  }
+  nodeListElement() {
+    const list=document.createElement('div'); list.className='node-list';
+    return list;
+  }
+  // The placement controls, unchanged and in their own block: the ordered-placement switch, one limit
+  // per node, and the save button whose action the host already handles (`save-placement`).
+  placementElement() {
+    const block=document.createElement('div');
+    block.className='placement';
+    block.innerHTML='<p>Fill in order. A limit of 0 keeps a device out of background execution.</p><label><input type="checkbox" class="placement-enabled"> Use ordered placement</label><div class="placement-nodes"></div><button type="button" data-action="save-placement">Save placement</button>';
+    return block;
+  }
+  // Every online node, one entry each, drawn from the SAME sample the engine menu's node list draws (the
+  // host pushes `nodeList` here when it repaints that list, so there is one read and no second poller).
+  // Each entry is itself a topic; opening it states the rest of the record - the kind, what it advertises,
+  // and whether it is reachable - because the two-line header carries only the name and the statistics.
+  set nodes(value) {
+    this.connectedCallback();
+    this.nodeRows=Array.isArray(value)?value:[];
+    const list=this.querySelector('.node-list');
+    const usable=this.nodeRows.filter(node=>node && node.online===true);
+    if(!usable.length) {
+      const empty=document.createElement('p'); empty.className='node-list-empty';
+      empty.textContent='No node reported itself online.';
+      list.replaceChildren(empty);
+      return;
+    }
+    list.replaceChildren(...usable.map(node=>this.nodeEntry(node)));
+  }
+  get nodes() { return this.nodeRows || []; }
+  nodeEntry(node) {
+    const topic=document.createElement('wa-orchestrator-topic');
+    topic.setAttribute('topic-class','node-topic');
+    topic.setAttribute('glyph','\u25a4');
+    topic.node=node;
+    const details=document.createElement('dl'); details.className='node-details';
+    for(const [term,value] of [['kind',node.kind || 'unknown'],
+      ['advertises',(node.capabilities || []).join(' ') || 'nothing advertised'],
+      ['reachable',node.online===false ? 'offline' : 'online']]) {
+      const name=document.createElement('dt'); name.textContent=term;
+      const description=document.createElement('dd'); description.textContent=value;
+      details.append(name,description);
+    }
+    topic.body.append(details);
+    return topic;
+  }
   // Every child the node reports as not settled, from either source, with the machine it runs on.
   //
   // `payload` is {rows, counts, note} from the host. Each row is drawn as exactly THREE lines, and
