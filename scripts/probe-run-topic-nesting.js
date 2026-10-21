@@ -408,14 +408,15 @@
       "no element in the page may carry the removed in-place state, saw " +
       document.querySelectorAll("[data-in-place]").length);
 
-    // ---- 7. one train of thought is ONE thinking topic, and it keeps its place -------------------
-    // Operator's report: "the thinking topic in the turn bubble changes position when the next
-    // tool-call step arrives." WHY this assertion exists at all: nothing measured the *position* of
-    // the thinking topic against the step that followed it, so a fix could pass every other probe
-    // while re-creating the topic per round. The property is the document order of one run's
-    // children: it must be the order the steps happened in, at every instant, and a later thinking
-    // burst must land inside the topic the earlier one opened - the same element, in the same place
-    // - because one train of thought in a run is ONE `wa-reasoning` topic.
+    // ---- 7. the thinking topic ends when the NEXT TOPIC begins, and keeps its place ---------------
+    // Two operator reports meet here. First (2026-10-21): "the thinking topic changes position when
+    // the next tool-call step arrives" - so the node must keep its parent and its sibling index, and
+    // the next thought must be drawn beside it, not at the far end. Second (2026-10-2x): the topic
+    // stayed OPEN until another thinking or decision topic began, so a commentary or a tool step that
+    // followed it read as if the thought were still going. The property asserted here is therefore
+    // both: the topic CLOSES in place (header collapsed, body hidden, same node, same index, same
+    // top, same text - never deleted, never re-created) as soon as the next topic of any kind starts,
+    // and a thought AFTER that is a new node drawn in the same order.
     window.handleEvent({ type: "done" });
     window.handleEvent({ type: "round", n: 1, tools: 2 });
     window.handleEvent({ type: "reasoning", text: "First, read the topic component." });
@@ -427,87 +428,136 @@
     var firstThoughtTop = firstThought ? firstThought.getBoundingClientRect().top : NaN;
     var firstThoughtTextBefore = firstThought
       ? firstThought.querySelector(":scope > .reasoning-body").textContent : "";
+    function closedInPlace(topic, index, top, text, label) {
+      check(!!topic && topic.isConnected, label + ": the topic must still be the same connected node");
+      check(topic.open === false && topic.hasAttribute("open") === false && topic.body.hidden === true,
+        label + ": the topic must be collapsed - header closed and body hidden");
+      check(!!thinkBody && indexIn(thinkBody, topic) === index,
+        label + ": the topic must keep its own index; was " + index + ", now " +
+        (topic ? indexIn(thinkBody, topic) : "gone"));
+      check(Math.abs(topic.getBoundingClientRect().top - top) <= 1,
+        label + ": the topic must keep its own top; was " + top + ", now " +
+        topic.getBoundingClientRect().top);
+      check(topic.querySelector(":scope > .reasoning-body").textContent === text,
+        label + ": the topic's text must not move or change; reads " +
+        JSON.stringify(topic.querySelector(":scope > .reasoning-body").textContent));
+    }
 
-    // The step happens after the thought: a decision, then the call it chose and the call's result.
+    // A decision starts the next topic; the thinking closes where it stands, before the trace.
     window.handleEvent({ type: "decision", call_id: "topic-call-1", name: "read",
       arguments_text: '{"path":"ui/components.js"}' });
+    closedInPlace(firstThought, firstThoughtIndex, firstThoughtTop, firstThoughtTextBefore,
+      "after a decision");
     window.handleEvent({ type: "tool", call_id: "topic-call-1", name: "read",
       arguments: { path: "ui/components.js" } });
     window.handleEvent({ type: "tool_result", name: "read", call_id: "topic-call-1",
       result: { content: "ok" } });
     var step = thinkBody && thinkBody.querySelector(":scope > wa-trace");
     check(!!step, "the tool call must draw its step in the run bubble");
+    // The TOOL STEP is the next topic too: it must close the thinking, and the closed node must still
+    // precede the step it preceded (the earlier position fix is not traded away for this one).
+    closedInPlace(firstThought, firstThoughtIndex, firstThoughtTop, firstThoughtTextBefore,
+      "after a tool step");
     check(precedes(firstThought, step),
-      "the thinking topic must still be ABOVE the step it preceded once the step arrives " +
-      "(compareDocumentPosition); order was first-topic then step");
-    check(firstThoughtIndex >= 0 && indexIn(thinkBody, firstThought) === firstThoughtIndex,
-      "the thinking topic must keep its own index in the bubble when the step arrives; was " +
-      firstThoughtIndex + ", now " + (firstThought ? indexIn(thinkBody, firstThought) : "gone"));
+      "the closed thinking topic must still be ABOVE the step it preceded (compareDocumentPosition)");
 
-    // The next round thinks again. It is the same train of thought, so it continues in the same
-    // topic - the text lands INSIDE the node that already sits above the step.
+    // A thought after the step is a NEW node, drawn beside the closed one - not more text in it.
     window.handleEvent({ type: "round", n: 2, tools: 2 });
     window.handleEvent({ type: "reasoning", text: "Second, check where the header is drawn." });
-    var thoughts = thinkBody ? thinkBody.querySelectorAll(":scope > wa-reasoning") : [];
-    check(thoughts.length === 1,
-      "one train of thought in a run is ONE wa-reasoning topic, saw " + thoughts.length +
-      " after the second burst (a second topic is the reader's thinking moving below the step)");
-    check(thoughts.length === 1 && thoughts[0] === firstThought,
-      "the second burst must land in the FIRST topic - the same element - not in a re-created one");
-    check(firstThoughtIndex >= 0 && indexIn(thinkBody, firstThought) === firstThoughtIndex,
-      "the thinking topic must not move when the next step arrives; was index " + firstThoughtIndex +
-      ", now " + (firstThought ? indexIn(thinkBody, firstThought) : "gone"));
-    check(!!firstThought && Math.abs(firstThought.getBoundingClientRect().top - firstThoughtTop) <= 1,
-      "the topic's own top must not move when the next step arrives; was " + firstThoughtTop +
-      ", now " + (firstThought ? firstThought.getBoundingClientRect().top : "gone"));
-    check(precedes(firstThought, step),
-      "after the second burst the topic must still precede the step it sits above");
-    var thoughtText = firstThought
+    var thoughts = thinkBody ? Array.from(thinkBody.querySelectorAll(":scope > wa-reasoning")) : [];
+    check(thoughts.length === 2,
+      "a thought after a tool step must be a NEW topic, saw " + thoughts.length + " wa-reasoning nodes");
+    var secondThought = thoughts[1] || null;
+    check(!!secondThought && secondThought !== firstThought,
+      "the new burst must not re-use or re-create the closed topic");
+    check(!!secondThought && secondThought.open === true,
+      "the new thinking topic must be open so the text it just streamed is readable");
+    check(precedes(firstThought, secondThought),
+      "the new topic must be drawn AFTER the closed one, in the order the steps happened");
+    closedInPlace(firstThought, firstThoughtIndex, firstThoughtTop, firstThoughtTextBefore,
+      "after the next thinking topic");
+    var firstThoughtTextAfter = firstThought
       ? firstThought.querySelector(":scope > .reasoning-body").textContent : "";
-    check(firstThoughtTextBefore !== "" && thoughtText.indexOf(firstThoughtTextBefore) >= 0,
-      "the first burst must still be readable in that one topic; had " +
-      JSON.stringify(firstThoughtTextBefore) + ", now " + JSON.stringify(thoughtText));
-    check(thoughtText.indexOf("Second, check where the header is drawn.") >= 0,
-      "the second burst's text must land INSIDE the first wa-reasoning; body reads " +
-      JSON.stringify(thoughtText));
-    // The node re-sends each round's reasoning as an authoritative copy (`complete`, see
-    // lua/core/agent.lua). That copy replaces the round it belongs to and must NOT erase the earlier
-    // round of the same topic - the text-loss failure mode of folding one run's thinking into one node.
+    check(firstThoughtTextAfter.indexOf("Second, check where the header is drawn.") < 0,
+      "the new burst's text must not land in the closed topic; body reads " +
+      JSON.stringify(firstThoughtTextAfter));
+    // The node re-sends each round's reasoning as an authoritative copy (`complete`). It replaces the
+    // round it belongs to - here the NEW topic - and must not touch the closed earlier topic.
     window.handleEvent({ type: "reasoning", text: "Second, check where the header is drawn.", complete: true });
-    var afterCompleteText = firstThought
-      ? firstThought.querySelector(":scope > .reasoning-body").textContent : "";
-    check(afterCompleteText.indexOf("First, read the topic component.") >= 0 &&
-      afterCompleteText.indexOf("Second, check where the header is drawn.") >= 0,
-      "a round's authoritative copy must replace that round only, not the earlier round of the same " +
-      "topic; body reads " + JSON.stringify(afterCompleteText));
-    // A burst that has not been read yet must not arrive folded away: the decision may close the
-    // topic (it is the next thinking-shaped step), but continuing the thought reopens it - text that
-    // lands in a collapsed topic is text the reader cannot see.
-    check(!!firstThought && firstThought.open,
-      "the topic a new burst lands in must be open, so the text just arrived is readable");
+    var afterCompleteText = secondThought
+      ? secondThought.querySelector(":scope > .reasoning-body").textContent : "";
+    check(afterCompleteText.indexOf("Second, check where the header is drawn.") >= 0,
+      "the new topic must keep its own round's authoritative copy; body reads " +
+      JSON.stringify(afterCompleteText));
+    check(!!firstThought && firstThought.querySelector(":scope > .reasoning-body").textContent === firstThoughtTextBefore,
+      "the authoritative copy must not change the closed earlier topic");
 
-    // The fold: the final answer moves the topic into the run topic. A later round of the same run
-    // still has one train of thought, so it appends into the same node WHERE IT NOW SITS.
+    // The fold moves the closed topic into the run topic WITHOUT reopening it and without re-creating
+    // it: a reply is not a topic, so nothing here closes or reopens anything - the fold is a move.
     window.handleEvent({ type: "reply", message_id: "topic-answer", text: "Done reading." });
     var thinkRun = thinkBody && thinkBody.querySelector(":scope > wa-run");
     check(!!thinkRun && !!firstThought && thinkRun.contains(firstThought),
       "the final answer must fold the thinking topic into the run topic, keeping it as the same node");
+    check(!!firstThought && firstThought.open === false,
+      "the fold must not reopen a topic the next step closed");
+    // A reply is not a topic, so no seal happened: the next thought continues the OPEN topic where it
+    // now sits (inside the run topic), and the closed earlier topic is still untouched.
     window.handleEvent({ type: "round", n: 3, tools: 2 });
     window.handleEvent({ type: "reasoning", text: "Third, still thinking." });
-    check(!!thinkBody && thinkBody.querySelectorAll("wa-reasoning").length === 1,
-      "a burst after the fold must continue the same topic, not draw a second one in the bubble; saw " +
+    check(!!thinkBody && thinkBody.querySelectorAll("wa-reasoning").length === 2,
+      "no topic followed the reply, so the burst continues the open topic; saw " +
       (thinkBody ? thinkBody.querySelectorAll("wa-reasoning").length : "none"));
-    check(!!thinkRun && !!firstThought && thinkRun.contains(firstThought),
-      "a burst after the fold must append into the topic where it now sits (inside the run topic), " +
-      "so the run's own order is unchanged");
+    var thirdText = secondThought
+      ? secondThought.querySelector(":scope > .reasoning-body").textContent : "";
+    check(thirdText.indexOf("Third, still thinking.") >= 0,
+      "the burst after the fold must append into the open topic where it now sits; body reads " +
+      JSON.stringify(thirdText));
+    // The fold is the ONE move allowed: the closed topic is nested into the run topic with the rest of
+    // the route. It must still be the same node, closed, with the same text - the index/geometry
+    // property was already asserted above, where a step (not the answer) arrived.
+    check(!!firstThought && firstThought.isConnected && firstThought.open === false &&
+      firstThought.querySelector(":scope > .reasoning-body").textContent === firstThoughtTextBefore,
+      "after the fold the closed topic must still be the same node, still closed, with the same text");
+
+    // A COMMENTARY is the next topic too, and it must close the thinking exactly as a step does:
+    // the operator's "it never closes when a commentary ... follows" case.
+    window.handleEvent({ type: "done" });
+    window.handleEvent({ type: "round", n: 1, tools: 2 });
+    window.handleEvent({ type: "reasoning", text: "A thought before the progress update." });
+    var commentBubble = lastAssistant();
+    var commentBody = commentBubble && commentBubble.body;
+    var commentThought = commentBody && commentBody.querySelector(":scope > wa-reasoning");
+    var commentIndex = commentThought ? indexIn(commentBody, commentThought) : -1;
+    var commentTop = commentThought ? commentThought.getBoundingClientRect().top : NaN;
+    window.handleEvent({ type: "commentary_delta", pending_id: "close-commentary", text: "Working on it." });
+    var commentTopic = commentBody && commentBody.querySelector(":scope > wa-commentary");
+    check(!!commentTopic, "the commentary must draw its own topic");
+    check(!!commentThought && commentThought.isConnected &&
+      commentBody.querySelector(":scope > wa-reasoning") === commentThought &&
+      indexIn(commentBody, commentThought) === commentIndex &&
+      commentThought.open === false && commentThought.body.hidden === true &&
+      Math.abs(commentThought.getBoundingClientRect().top - commentTop) <= 1,
+      "a commentary must CLOSE the thinking topic in place: same node, same index, same top, body hidden");
+    check(precedes(commentThought, commentTopic),
+      "the closed thinking topic must stay above the commentary that closed it");
+    window.handleEvent({ type: "commentary_delta", pending_id: "close-commentary", text: " Still working." });
+    check(!!commentThought && commentBody.querySelector(":scope > wa-reasoning") === commentThought,
+      "more commentary must not touch the closed thinking topic");
+    window.handleEvent({ type: "reasoning", text: "A new thought after the commentary." });
+    var afterCommentary = commentBody ? commentBody.querySelectorAll(":scope > wa-reasoning") : [];
+    check(afterCommentary.length === 2 && afterCommentary[1] !== commentThought &&
+      afterCommentary[1].open === true,
+      "a thought after a commentary must be a new, open topic beside the closed one; saw " +
+      afterCommentary.length);
     window.handleEvent({ type: "done" });
 
-    var verdict = "PASS: run steps stay in the bubble until the final answer nests them; one train of " +
-      "thought in a run is ONE thinking topic that keeps its place (same node, same index, still above " +
-      "the step it preceded after the next burst and after the fold - compareDocumentPosition); and on " +
-      "every route a commentary is an ordinary topic - header above the body, body inside the topic box, " +
-      "the streamed sentence kept in its own place (moving only by the measured header height) - with " +
-      "no in-place state, in the main chat and in a subagent pane alike";
+    var verdict = "PASS: run steps stay in the bubble until the final answer nests them; a thinking " +
+      "topic CLOSES IN PLACE (same node, same index, same top, same text, body hidden - never " +
+      "deleted, never re-created) when the next topic of any kind begins - a decision, a tool step, " +
+      "or a commentary - and a thought after that is a new node drawn in the run's own order; and on " +
+      "every route a commentary is an ordinary topic - header above the body, body inside the topic " +
+      "box, the streamed sentence kept in its own place (moving only by the measured header height) " +
+      "- with no in-place state, in the main chat and in a subagent pane alike";
     if (notes.length) verdict += " [" + notes.join(" ;; ") + "]";
     result = { status: problems.length ? "fail" : "pass",
       text: problems.length ? "FAIL: " + problems.join(" ;; ") : verdict };

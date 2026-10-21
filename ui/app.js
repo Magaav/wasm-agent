@@ -1224,9 +1224,10 @@ function appendReasoning(text, complete = false) {
     reasoningRound = "";
     anchorRunStepContent(reasoningBlock);
   } else if (!reasoningBlock.open && !replayingMessages) {
-    // A decision or another thinking-shaped step may CLOSE the topic (see `addDecision`), but a burst
-    // that continues the thought reopens it: text that keeps arriving lands in a topic the reader has to
-    // open by hand otherwise, which is the same complaint one layer down.
+    // A reader who collapsed this topic by hand still gets the next chunk where it can be read: text
+    // that lands in a topic the reader has to open by hand is the same complaint one layer down. This is
+    // NOT the next-topic path - that one seals the topic and detaches it (see `sealReasoning`), so the
+    // burst after a commentary or a tool step starts a new node instead of reopening this one.
     reasoningBlock.open = true;
   }
   if (complete) {
@@ -1261,6 +1262,9 @@ function appendCommentary(text, messageId, pendingId, decisionPrelude, place) {
     pin();
     return place;
   }
+  // A commentary is the next topic, so it closes the thinking topic that preceded it (see
+  // `sealReasoning`): the thought is collapsed in place, and a later burst draws a new node beside it.
+  sealReasoning();
   const block = document.createElement("wa-commentary");
   block.open = true;
   // The text may have streamed in the answer's place (a `.seg`), so this topic is built where that
@@ -1333,6 +1337,8 @@ function appendStreamedCommentary(text, pendingId) {
   const bubble = currentBubble();
   if(streamedCommentaryBlock && pendingId && streamedCommentaryBlock.dataset.pendingId!==String(pendingId))markStreamedCommentaryIncomplete();
   if (!streamedCommentaryBlock || streamedCommentaryBlock.parentNode !== bubble.body) {
+    // A streamed commentary topic is still a new topic: the thinking it follows ends here, in place.
+    sealReasoning();
     streamedCommentaryBlock = document.createElement("wa-commentary");
     streamedCommentaryBlock.classList.add("phase-pending");
     streamedCommentaryBlock.open = true;
@@ -1525,6 +1531,21 @@ function endReasoningTopic() {
   reasoningRound = "";
 }
 
+// THE THINKING TOPIC ENDS WHEN THE NEXT TOPIC OF ANY KIND BEGINS. It used to stay open until another
+// thinking or decision topic started, so a commentary or a tool step that followed it read as if the
+// thought were still going (operator, 2026-10-2x). A topic begins -> the thinking is CLOSED where it
+// stands: header collapsed, body hidden, same node, same parent, same position - never deleted, never
+// re-created, and its text never moves. `endedReasoning` is the node the NEXT thought is drawn beside,
+// so the run's child order still reads as the order its steps happened in.
+function sealReasoning() {
+  if (!reasoningBlock) return;
+  reasoningBlock.open = false;
+  endedReasoning = reasoningBlock;
+  reasoningBlock = null;
+  reasoningText = "";
+  reasoningRound = "";
+}
+
 // Tool lines are rendered the way pi renders them in its CLI: bold lowercase
 // tool name plus the argument that matters, never a JSON blob.
 //   read src/app.js (lines 10-40)   bash $ ls -la   grep /pattern/   edit path
@@ -1557,21 +1578,25 @@ function rowPath(value) {
   return segments > 2 && tail ? "…/" + tail : tail;
 }
 
+// The row's title is TEXT, not HTML. `addTool` and `addDecision` in components.js insert it with
+// `createTextNode`, so escaping it here escaped it twice: a bash call's own command line showed
+// `&amp;&amp;`, `&quot;`, `&#39;` and `2&gt;&amp;1` where the reader must see `&&`, `"`, `'` and `2>&1`
+// (operator screenshot). This returns the characters themselves; an HTML boundary, if one is ever
+// added, escapes once at that boundary and not here.
 function toolTitle(name, args) {
   const a = args || {};
-  const esc = escapeHtml;
-  const path = esc(shortPath(a.path || a.file_path || ""));
+  const path = shortPath(a.path || a.file_path || "");
   switch (name) {
     case "bash":
     case "shell": {
       const command = String(a.command || "").replace(/\s+/g, " ").slice(0, 160);
-      return `$ ${esc(command)}`;
+      return `$ ${command}`;
     }
     case "read": {
       const range = (a.offset || a.limit)
         ? ` (lines ${a.offset || 1}-${a.limit ? (Number(a.offset || 1) + Number(a.limit) - 1) : ""})`
         : "";
-      return `${path}${esc(range)}`;
+      return `${path}${range}`;
     }
     case "write":
     case "edit":
@@ -1582,28 +1607,28 @@ function toolTitle(name, args) {
       // The batch forms carry their files in one `requests` list, and the row has to name them the same
       // way the single-file forms do - one path, and how many others went with it.
       const items = Array.isArray(a.requests) ? a.requests : [];
-      const first = items.length ? esc(shortPath((items[0] || {}).path || "")) : "";
+      const first = items.length ? shortPath((items[0] || {}).path || "") : "";
       return items.length > 1 ? `${first} +${items.length - 1}` : first;
     }
     case "grep":
-      return `/${esc(String(a.pattern || ""))}/${a.path ? " in " + esc(shortPath(a.path)) : ""}`;
+      return `/${String(a.pattern || "")}/${a.path ? " in " + shortPath(a.path) : ""}`;
     case "ls":
       return path || ".";
     case "recall":
-      return esc(String(a.query || ""));
+      return String(a.query || "");
     case "remember":
-      return esc(String(a.content || "").slice(0, 90));
+      return String(a.content || "").slice(0, 90);
     case "forget":
-      return esc(String(a.id || ""));
+      return String(a.id || "");
     case "memories":
-      return a.scope ? esc(String(a.scope)) : "all";
+      return a.scope ? String(a.scope) : "all";
     case "session":
     case "session_debug":
     case "session_fixture":
-      return esc(String(a.session_id || a.id || ""));
+      return String(a.session_id || a.id || "");
     case "search_messages":
     case "search_ledger":
-      return esc(String(a.query || ""));
+      return String(a.query || "");
     case "nodes":
     case "spells":
     case "capabilities":
@@ -1612,7 +1637,7 @@ function toolTitle(name, args) {
       const values = Object.entries(a)
         .filter(([, v]) => v !== undefined && v !== null && v !== "")
         .map(([k, v]) => `${k}=${typeof v === "string" ? v : JSON.stringify(v)}`);
-      return esc(values.join(" ").slice(0, 140));
+      return values.join(" ").slice(0, 140);
     }
   }
 }
@@ -2052,6 +2077,9 @@ function addTool(name, args, options) {
     if (!replayingMessages) startToolTicker();
     return;
   }
+  // The tool step is the next topic: the thinking topic it follows is closed in place (see
+  // `sealReasoning`), never deleted or re-created, and a thought after it is a new node.
+  sealReasoning();
   currentTrace().addTool(name, toolTitle(name, args), null, boundMs ? Math.round(boundMs / 1000) : null, callId, toolChange(name, args));
   lastTool = name;
   if (!replayingMessages) startToolTicker();
@@ -2059,12 +2087,11 @@ function addTool(name, args, options) {
 }
 
 function addDecision(event) {
-  // A decision is the next thinking-shaped step, so the thinking topic it follows is folded away - but
-  // only CLOSED, never forgotten. The node stays the append target, so a burst that continues the thought
-  // lands in the same topic in the same place instead of a new one drawn below this step (operator,
-  // 2026-10-2x: the thinking topic moved when the next tool-call step arrived). Forgetting it here was the
-  // first half of that: the next burst had no node to append to and appended a new one at the end.
-  if (reasoningBlock) reasoningBlock.open = false;
+  // A decision is the next topic, so the thinking topic it follows is CLOSED in place (see
+  // `sealReasoning`): same node, same parent, same position, body hidden - never deleted and never
+  // re-created. This keeps the earlier position fix (the closed node stays the anchor) while ending the
+  // topic, as the operator asked: a thought after a step is a new node, not more of the old one.
+  sealReasoning();
   showRunStep("decision", "Selecting tools");
   currentTrace().addDecision(event.call_id, event.name, event.arguments_text || "",
     event.complete === true, event.previous_call_id);
@@ -2485,6 +2512,8 @@ function handleEvent(event) {
       // element's pending state. Resolution is then an attribute/label flip on that node, not a
       // `replaceWith` from a differently styled block - that swap is what moved the text the
       // operator was reading. It stays provisional until the provider's per-item phase arrives.
+      // The provisional commentary node is the next topic of the run: close the thinking in place.
+      sealReasoning();
       const node = document.createElement("wa-commentary");
       node.classList.add("phase-pending");
       node.open = true;

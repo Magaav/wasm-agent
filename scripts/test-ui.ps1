@@ -2773,10 +2773,13 @@ $harness = @'
     var settled = document.querySelectorAll("wa-message .reasoning");
     var folded = settled[settled.length - 1];
     check(!!folded, "reasoning: collapsing the run must not swallow the thinking");
-    // Operator, 2026-10-21: the thinking is what they follow, so it stays readable - the RUN topic is
-    // what folds when the answer lands, and only another thinking or decision topic closes the thinking.
-    check(!!folded && folded.open === true,
-      "reasoning: it must stay open once the run answers - the run topic is what folds");
+    // Operator, 2026-10-21: the thinking is what they follow, so it is not swallowed - the RUN topic is
+    // what folds when the answer lands. Operator, 2026-10-2x: a topic that FOLLOWS the thinking must
+    // END it, so the bash step above closes this topic IN PLACE (collapsed, same node, same place) and
+    // a later thought is a new node. Asserted as the closed node still being here and inside the run -
+    // never as a deleted or re-created one.
+    check(!!folded && folded.isConnected && folded.open === false,
+      "reasoning: a tool step is the next topic, so it closes the thinking in place - the node stays");
     // It belongs *inside* the topic: it is the route, not the answer, and a long run left a wall of
     // "thinking · N chars" rows sitting outside the topics, between the reader and the answer
     // (measured live: 196 of them outside the topics in one thread).
@@ -2799,8 +2802,10 @@ $harness = @'
     var soloBlock = solo[solo.length - 1];
     check(!!soloBlock && soloBlock.closest("wa-run") === null,
       "reasoning: a run that called no tool keeps its thinking visible, outside any topic");
+    // WHY this still holds under the new rule: a reply is not a topic, so no next topic started and
+    // nothing closed the thinking; only a following commentary, decision or tool step ends it.
     check(!!soloBlock && soloBlock.open === true,
-      "reasoning: and it stays open when that run answers too - nothing closed it but a new thinking topic");
+      "reasoning: and it stays open when that run answers - no next topic started to close it");
     window.handleEvent({ type: "done" });
   })();
 
@@ -3442,7 +3447,15 @@ $harness = @'
     {id:'foreign-reply',seq:2,role:'assistant',content:'child answer',reasoning:'FOREIGN-CHILD'}],{state:'answered'});
   check(ownerStatus.isConnected&&window.__toolTickerActive(),'shared child renderer must preserve parent status DOM and live timer');
   window.handleEvent({type:'reasoning',text:'-END'});
-  check(ownerReasoning.textContent==='MAIN-BEGIN-END','shared renderer keeps parent reasoning buffer isolated from child content');
+  // WHY the two nodes: the tool step between the two reasoning events is a next topic, so it closes
+  // the first thinking topic and the second burst is a NEW node beside it (the lifecycle change). The
+  // property this check exists for is unchanged: the parent's own two bursts are intact, and the child
+  // repaint's content never leaks into either of them.
+  var parentThoughts=Array.from(document.getElementById('messages').querySelectorAll('.reasoning-body'))
+    .filter(function(n){return n.textContent==='MAIN-BEGIN'||n.textContent==='-END';});
+  check(ownerReasoning.textContent==='MAIN-BEGIN'&&parentThoughts.length===2&&
+    !parentThoughts.some(function(n){return n.textContent.indexOf('FOREIGN-CHILD')>=0;}),
+    'shared renderer keeps parent reasoning buffer isolated from child content');
   foreignSurface.remove();window.__setBusy(false);window.handleEvent({type:'done'});
   window.__repaintMessages([]);
   window.handleEvent({type:'round',n:1});
