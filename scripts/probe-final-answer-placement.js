@@ -136,6 +136,15 @@
     handleEvent({ type: "tool_result", name: "read", call_id: "placement-call-1", result: { content: "ok" } });
     check(provisional === bubble.body.querySelector("wa-commentary"),
       "a tool call settles the provisional node itself as commentary - it is not replaced or moved");
+    // Seven lines, the same cap as thinking, and it scrolls rather than hiding the rest (operator ask).
+    var cappedBody = provisional.querySelector(".commentary-body");
+    var capStyle = cappedBody && getComputedStyle(cappedBody);
+    var cap = capStyle ? parseFloat(capStyle.maxHeight) : 0;
+    check(Math.abs(cap - 7 * 1.55 * 12) < 1,
+      "a settled commentary body must cap at seven lines of its own measure, saw max-height " +
+        (capStyle && capStyle.maxHeight));
+    check(!!capStyle && capStyle.overflow === "auto",
+      "and a longer body must scroll rather than be cut, saw overflow " + (capStyle && capStyle.overflow));
     check(provisional.querySelector(".commentary-body").textContent === commentaryTextBefore,
       "and the settled commentary carries the same text once");
     check(!provisional.classList.contains("phase-pending"), "the label is settled (pending state removed)");

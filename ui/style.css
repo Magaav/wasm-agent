@@ -299,7 +299,11 @@ wa-commentary.phase-incomplete .commentary { text-decoration: underline dotted; 
 .reasoning-body, .commentary-body {
   padding: var(--space);
   color: var(--muted); white-space: normal;
-  word-break: break-word; max-height: 320px; overflow: auto;
+  /* SEVEN LINES, the same cap for commentary and thinking (operator, 2026-10-21): enough to read a
+     thought through, short enough that a long one does not push the trace off the screen - and the body
+     scrolls, so nothing is hidden. Expressed in the lines themselves (7 x 1.55 leading at 12px), not as a
+     pixel count that would drift the moment the aside measure changes. */
+  word-break: break-word; max-height: calc(7 * 1.55 * 1em); overflow: auto;
   border-top: 1px solid var(--line);
   /* 1.55 is the transcript's own leading (`font:var(--font-size)/1.55`), so an aside and an answer keep
      one rhythm and differ only in size. */
