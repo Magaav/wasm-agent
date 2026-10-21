@@ -1610,12 +1610,18 @@ $harness = @'
   check(!/\u25c8/.test(liveRows.map(function(row){return row.querySelector('.live-child-stats').textContent;}).join('')),
     'a card must not print a token statistic nobody measured, saw: '+
       liveRows.map(function(row){return row.querySelector('.live-child-stats').textContent;}).join('|'));
-  // The header: the node's name first, then icon+count pairs from the run stats' own vocabulary.
-  // `0 queued` is information here - a node with an empty queue is free - so these counts are printed
-  // as measured, the opposite of a card's absent statistic.
+  // The header: the node's name first, then icon+count pairs from the run stats' own vocabulary. The
+  // numbers are what this line exists for, so they are printed alone - a word after each number pushed the
+  // line past the panel and wrapped it, which hid the counts (operator report, 2026-10-20). The words are
+  // still said, in `title` and `aria-label` (asserted next), and the NAME gives way with an ellipsis so the
+  // three numbers cannot be pushed out of view.
   var liveHeader=showroom.querySelector('.live-children-counts');
-  check(liveHeader.textContent==='foundation \u00b7 \u25f7 1 queued \u00b7 \u2692 2 \u00b7 \u273a 3',
-    'the node own subagent counts must be shown as they were reported: `foundation \u00b7 \u25f7 1 queued \u00b7 \u2692 2 \u00b7 \u273a 3`, saw: '+JSON.stringify(liveHeader.textContent));
+  check(liveHeader.textContent==='foundation \u00b7 \u25f7 1 \u00b7 \u2692 2 \u00b7 \u273a 3',
+    'the node own subagent counts must be shown as they were reported: `foundation \u00b7 \u25f7 1 \u00b7 \u2692 2 \u00b7 \u273a 3`, saw: '+JSON.stringify(liveHeader.textContent));
+  check(!!liveHeader.querySelector('.live-children-name') &&
+      getComputedStyle(liveHeader).whiteSpace==='nowrap' &&
+      getComputedStyle(liveHeader.querySelector('.live-children-name')).textOverflow==='ellipsis',
+    'the header stays one line and the node name is the part that gives way, saw: '+liveHeader.innerHTML.slice(0,160));
   check(['queued','running','active'].every(function(key){
       var pair=liveHeader.querySelector('[data-count="'+key+'"]');
       return !!pair && !!pair.title && pair.title===pair.getAttribute('aria-label');}),

@@ -2666,11 +2666,18 @@ class WaOrchestrator extends HTMLElement {
   liveHeader(counts) {
     const line=this.querySelector('.live-children-counts');
     if(!counts || typeof counts!=='object') { line.textContent=String(counts || ''); return; }
-    const parts=[document.createTextNode(counts.name || 'this node')];
+    // The name shrinks; the counts never do. A node name that does not fit is ellipsised so the
+    // three numbers stay on the one line whose whole job is stating the node's state.
+    const name=document.createElement('span');
+    name.className='live-children-name';
+    name.textContent=counts.name || 'this node';
+    const parts=[name];
     for(const pair of counts.pairs || []) {
       const span=document.createElement('span');span.className='live-children-count';
       span.dataset.count=pair.key;
-      span.textContent=' · '+pair.glyph+' '+pair.count+(pair.word || '');
+      // Icon and number only. The words live in `title` and `aria-label`: spelled out inline they
+      // pushed the line past the panel and wrapped it, which hid the numbers the line exists for.
+      span.textContent=' · '+pair.glyph+' '+pair.count;
       if(pair.title) { span.title=pair.title;span.setAttribute('aria-label',pair.title); }
       parts.push(span);
     }
