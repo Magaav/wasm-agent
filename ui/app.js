@@ -6461,7 +6461,11 @@ async function refreshNodes() {
     nodeList = payload.nodes || [];
     // One sample, two readers: the same payload this list draws feeds the orchestrator's `Nodes` topic.
     // A second fetch inside the panel would be a second idea of which nodes are online.
-    if (orchestratorPanel) orchestratorPanel.nodes = nodeList;
+    // WHY THE GUARD: the topic's empty state now distinguishes `no nodes are known` from `N nodes known,
+    // none online`, and an error body (`{"error": ...}`) carries no `nodes` array at all. Handing that
+    // empty list to the panel would make it claim the fleet is empty when the read simply failed, so a
+    // refused or unanswered read leaves the topic with the last sample it was actually given.
+    if (orchestratorPanel && Array.isArray(payload.nodes)) orchestratorPanel.nodes = payload.nodes;
     renderNodeSelect();
     nodesBinding.textContent = payload.binding || "";
     nodesBox.replaceChildren();
