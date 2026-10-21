@@ -103,6 +103,48 @@ $harness = @'
     var viewItems = (document.getElementById("context-menu").items || []).map(function (item) { return item.label || (item.separator ? "---" : ""); });
     check(viewItems.join(",") === "Collapse to avatar,Reload window,---,Close wasm-agent",
       "and it must be the menu it held before the inspector existed, saw " + JSON.stringify(viewItems));
+    // THE NODES TOPIC IS FED BY THE APP'S ONE NODE READ. The engine panel's list and this topic are drawn
+    // from the same `refreshNodes()` sample, and nothing asserted that end to end: the topic's own probe
+    // sets its list directly, so a window that never fed it still passed while the operator read
+    // `No node reported itself online.` beside a panel that listed three machines. This is the real
+    // `?view=orchestrator` load over the shared fixture fleet, so it asserts the wiring itself.
+    var viewPanel = document.querySelector("wa-orchestrator");
+    // The mount's own read is asynchronous, so wait for the topic to be drawn before judging it: a loop that
+    // checked immediately would pass on an empty topic because nothing had answered yet.
+    for (var nodeTick = 0; nodeTick < 200 && !document.querySelector(".nodes-topic .node-list > wa-orchestrator-topic"); nodeTick++) await tick();
+    var viewTopic = viewPanel && viewPanel.querySelector(".nodes-topic");
+    var viewNames = function (selector) {
+      return Array.prototype.map.call(document.querySelectorAll(selector), function (name) { return name.textContent; });
+    };
+    var topicNames = viewNames(".nodes-topic .node-list .node-name");
+    var engineNames = viewNames("#nodes-box .node .node-name");
+    check(!!viewTopic && !viewTopic.querySelector(".node-list-empty"),
+      "the orchestrator Nodes topic must draw the fixture fleet rather than its empty state, saw: "
+      + (viewTopic ? JSON.stringify(viewTopic.textContent.slice(0, 160)) : "no panel"));
+    // THE SAME SOURCE, NAMED: every machine the engine list is read from is listed by the topic, and the
+    // topic lists nothing the node did not report.
+    check(engineNames.length > 0 && engineNames.every(function (name) { return topicNames.indexOf(name) >= 0; }),
+      "no machine in the engine list may be missing from the Nodes topic, saw topic " + JSON.stringify(topicNames)
+      + " vs engine " + JSON.stringify(engineNames));
+    check(topicNames.length === window.__fixtures.nodes.nodes.length &&
+      window.__fixtures.nodes.nodes.every(function (node) { return topicNames.indexOf(node.name) >= 0; }),
+      "and the topic lists exactly the machines the node reported, saw: " + JSON.stringify(topicNames));
+    // THE EMPTY STATE MUST BE TRUE, both halves, through the same read the window uses: machines that are
+    // known and all offline are not the same claim as no machines at all, and a list the node never sent is
+    // not a claim about the fleet either.
+    window.__fixtures.nodes = { nodes: [
+      { id: "p1", node_id: "p1", name: "openclaw", kind: "peer", online: false, local_node: false, capabilities: [] },
+      { id: "p2", node_id: "p2", name: "android", kind: "peer", online: false, local_node: false, capabilities: [] }] };
+    await window.__refreshNodes();
+    var offlineEmpty = viewTopic && viewTopic.querySelector(".node-list-empty");
+    check(!!offlineEmpty && offlineEmpty.dataset.empty === "none-online" && offlineEmpty.textContent === "2 nodes known, none online.",
+      "two known machines, none online, must be stated as that rather than as no machines, saw: "
+      + (offlineEmpty ? offlineEmpty.textContent : "no empty state"));
+    window.__fixtures.nodes = { nodes: [] };
+    await window.__refreshNodes();
+    var noNodesEmpty = viewTopic && viewTopic.querySelector(".node-list-empty");
+    check(!!noNodesEmpty && noNodesEmpty.dataset.empty === "none-known" && noNodesEmpty.textContent === "No nodes are known.",
+      "an empty fleet must say that no machines are known, saw: " + (noNodesEmpty ? noNodesEmpty.textContent : "no empty state"));
     var viewLog = document.createElement("pre");
     viewLog.id = "harness-log";
     viewLog.textContent = problems.length ? ("UI FAIL: " + problems.join(" ;; ")) : "UI PASS (view window)";
@@ -3852,6 +3894,7 @@ Add-Content -Path $app -Value "`nwindow.__resetFollow = () => { followedSeq = 0;
 Add-Content -Path $app -Value "`nwindow.__watchNow = () => checkWatchedRun && checkWatchedRun(); window.__runStanding = runStanding;"
 
 Add-Content -Path $app -Value "`nwindow.__liveChildRows = liveChildRows; window.__refreshOrchestrator = refreshOrchestrator; window.__setOrchestratorPanel = (panel) => { orchestratorPanel = panel; }; window.__paintChildTranscript = paintChildTranscript; window.__refreshAgentPane = refreshAgentPane; window.__syncLiveForAttach=syncLiveRun; window.__savedPaneReader=paneMessages; window.__setPaneReaderForAttach=fn=>{paneMessages=fn;}; window.__restorePaneReaderForAttach=()=>{paneMessages=window.__savedPaneReader;};"
+Add-Content -Path $app -Value "`nwindow.__refreshNodes = refreshNodes;"
 
 $server = $null
 $edge = @(

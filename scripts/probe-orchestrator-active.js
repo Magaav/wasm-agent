@@ -190,6 +190,57 @@
   check(engineNode.textContent===entries[0].querySelector('wa-node').textContent,'so both lists say the same two lines, saw: '+JSON.stringify([engineNode.textContent,entries[0].querySelector('wa-node').textContent]));
   const sameNode=waProbeSameAs(engineNode,entries[0].querySelector('wa-node'),{ignore:['style','id']});
   check(sameNode.equal,'and the two drawings are one structure: '+waProbeDiff(sameNode));
+  // WHY THIS IS NEW: the topic is drawn from the app's own node read (`refreshNodes`, the read the engine
+  // panel draws from), so a panel nobody feeds and a fleet with nothing online used to look identical - one
+  // sentence, `No node reported itself online.`, in a topic that could not know either way. These checks
+  // go through that read, not through a panel-only setter, so the feed itself is what they pin.
+  const savedFixtureNodes=window.__fixtures&&window.__fixtures.nodes;
+  const savedProbePanel=orchestratorPanel;
+  const savedFetch=window.fetch;
+  const nodeReads=[];
+  window.fetch=function(input){
+    const url=String((input&&input.url)||input||'');
+    if(/nodes$/.test(url.split('?')[0]))nodeReads.push(url);
+    return savedFetch.apply(this,arguments);
+  };
+  try{
+    orchestratorPanel=panel;
+    window.__fixtures.nodes={nodes:[
+      {id:'h1',node_id:'h1',name:'wasm_the_first',kind:'host',online:true,local_node:true,capabilities:[]},
+      {id:'p1',node_id:'p1',name:'openclaw',kind:'peer',online:true,local_node:false,capabilities:[]},
+      {id:'p2',node_id:'p2',name:'android',kind:'peer',online:true,local_node:false,capabilities:[]}]};
+    const readsBefore=nodeReads.length;
+    await refreshNodes();
+    const fedNames=()=>Array.from(panel.querySelectorAll('.node-list > wa-orchestrator-topic .node-name')).map(name=>name.textContent);
+    check(fedNames().join(',')==='wasm_the_first,openclaw,android','the Nodes topic lists the fleet sample the engine panel reads, saw: '+fedNames().join(','));
+    // ONE SOURCE: the panel did not read the fleet again for itself, so the engine list and this topic cannot
+    // disagree about which machines are online.
+    check(nodeReads.length===readsBefore+1,'and the topic took that one read rather than a read of its own, saw: '+(nodeReads.length-readsBefore));
+    check(!panel.querySelector('.node-list-empty'),'a fleet with online machines draws no empty state, saw: '+String(panel.querySelector('.node-list-empty')&&panel.querySelector('.node-list-empty').textContent));
+    // THE EMPTY STATE MUST BE TRUE, first half: machines the list KNOWS and are all offline is not the same
+    // claim as no machines at all, and only the first of the two was true here.
+    window.__fixtures.nodes={nodes:[
+      {id:'p1',node_id:'p1',name:'openclaw',kind:'peer',online:false,local_node:false,capabilities:[]},
+      {id:'p2',node_id:'p2',name:'android',kind:'peer',online:false,local_node:false,capabilities:[]}]};
+    await refreshNodes();
+    const offlineEmpty=panel.querySelector('.node-list-empty');
+    check(!!offlineEmpty&&offlineEmpty.dataset.empty==='none-online'&&offlineEmpty.textContent==='2 nodes known, none online.','known machines that are all offline are reported as such, saw: '+String(offlineEmpty&&offlineEmpty.textContent));
+    check(panel.querySelectorAll('.node-list > wa-orchestrator-topic').length===0,'and no entry claims an offline machine is usable, saw: '+panel.querySelectorAll('.node-list > wa-orchestrator-topic').length);
+    // THE EMPTY STATE MUST BE TRUE, second half: only a list the node actually sent may say there are no
+    // machines, and an answer that carries no list at all is not that answer.
+    window.__fixtures.nodes={nodes:[]};
+    await refreshNodes();
+    const noNodesEmpty=panel.querySelector('.node-list-empty');
+    check(!!noNodesEmpty&&noNodesEmpty.dataset.empty==='none-known'&&noNodesEmpty.textContent==='No nodes are known.','an empty fleet says so with its own sentence, saw: '+String(noNodesEmpty&&noNodesEmpty.textContent));
+    window.__fixtures.nodes={nodes:[{id:'p1',node_id:'p1',name:'openclaw',kind:'peer',online:true,local_node:false,capabilities:[]}]};
+    await refreshNodes();
+    window.__fixtures.nodes={error:'forbidden'};
+    await refreshNodes();
+    const afterRefusal=panel.querySelector('.node-list');
+    check(fedNames().join(',')==='openclaw'&&!panel.querySelector('.node-list-empty'),'a refused node read leaves the last true list instead of claiming the fleet is empty, saw: '+JSON.stringify(afterRefusal.textContent.slice(0,120)));
+  }finally{
+    window.fetch=savedFetch;window.__fixtures.nodes=savedFixtureNodes;orchestratorPanel=savedProbePanel;
+  }
   panel.nodes=[];
   // Production refresh: stale saved history panes are not restored; drafts survive.
   const oldPanel=orchestratorPanel,oldRequest=orchestratorRequest,oldRead=orchestratorRead,oldRefresh=refreshAgentPane;
