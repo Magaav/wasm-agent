@@ -40,6 +40,17 @@ du -sm ~/.wasm-agent/session-scratch ~/.wasm-agent/benchmarks \
 Per-worktree sizes are the exception, and they are slow. Ask for them only when the plan needs them,
 one directory at a time, and cap the number of samples.
 
+**The measurement is the script, not a retyped command line:** `scripts/clean-disk-report.sh` is the
+DRY RUN above as one block - free space, then `path | size | verdict` for every target this file
+names, including Docker's `RECLAIMABLE`, both `.vhdx` files with the guest's own `df -h /` beside
+them, and the worktree count. It deletes nothing and encodes the traps in section 4 (a denied
+directory prints `UNREADABLE (access denied)`, never `0 MB`; the guest command sets
+`MSYS_NO_PATHCONV=1`), so the numbers a plan is built from cannot drift from this procedure:
+
+```bash
+bash scripts/clean-disk-report.sh
+```
+
 ## 2. What is safe here, by measured size
 
 | Target | Measured | Rule |
