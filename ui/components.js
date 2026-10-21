@@ -2903,9 +2903,12 @@ class WaOrchestrator extends HTMLElement {
     block.setAttribute('topic-class','node-config');
     block.setAttribute('label','Configuration');
     block.setAttribute('no-glyph','');
-    // Open: the reader opened the node to reach these controls, so a second click to reveal the same two
-    // rows would be a disclosure nobody asked for. Every node's configuration topic is drawn this way.
-    block.setAttribute('open','');
+    // CLOSED to start, and one click away. It used to be created open on the guess that opening a node is
+    // asking for its controls; the operator's report is the opposite - an expanded Configuration topic
+    // inside every node's topic. A closed topic still opens on its own header (the house component's
+    // disclosure), so the two rows are exactly one click from the node, and the node's topic is the only
+    // thing this list expands unasked. This is the ONLY per-node inner topic built here: a node's body
+    // holds its configuration and nothing else, so no sibling needed the same correction.
     block.body.append(this.nodeLimitRow(node),this.nodePriorityRow());
     return block;
   }

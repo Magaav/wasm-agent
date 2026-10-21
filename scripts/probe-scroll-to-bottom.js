@@ -128,9 +128,19 @@
     check(Math.abs((contentRect.bottom - arrowRect.bottom) - 5) <= 1,
       'with no status row the arrow sits 5px above the chat content bottom, saw ' +
         round(contentRect.bottom - arrowRect.bottom) + 'px');
-    check(Math.abs((contentRect.right - arrowRect.right) - 5) <= 1,
-      'the arrow is inline-end aligned on the 5px scale, saw ' +
-        round(contentRect.right - arrowRect.right) + 'px from the inline end');
+    // WHY THIS REPLACED "the arrow is inline-end aligned on the 5px scale": the operator reported the arrow
+    // OVERFLOWING the scroller horizontally. It is now pinned to the horizontal CENTRE of the chat content
+    // rect (`left: 50%` + `translateX(-50%)`), not to that rect's inline end, so no offset arithmetic can
+    // put it past the content edge at any width. The property under test - where the control sits - keeps
+    // its assertion; the expected place moved from the right edge to the centre, within 1px.
+    check(Math.abs((arrowRect.left + arrowRect.right) / 2 - (contentRect.left + contentRect.right) / 2) <= 1,
+      'the arrow is centred on the chat content rect, saw its centre at ' +
+        round((arrowRect.left + arrowRect.right) / 2) + ' against a content centre of ' +
+        round((contentRect.left + contentRect.right) / 2));
+    check(arrowRect.left >= contentRect.left - 0.5 && arrowRect.right <= contentRect.right + 0.5,
+      'and its box never sits past either horizontal edge of that rect, saw arrow ' +
+        [round(arrowRect.left), round(arrowRect.right)].join(',') + ' content ' +
+        [round(contentRect.left), round(contentRect.right)].join(','));
     check(Math.abs(Math.round(arrowRect.width) % 5) === 0 && Math.abs(Math.round(arrowRect.height) % 5) === 0,
       'the arrow is a square control on the 5px scale, saw ' + round(arrowRect.width) + 'x' + round(arrowRect.height));
 
@@ -240,14 +250,92 @@
       'the instant path must already be at the bottom in the same turn, saw ' + round(immediate) + 'px short');
     check(!jump.classList.contains('show'), 'and the arrow is not left on screen at the bottom');
 
+    // ---- 6. a CHILD pane's transcript carries its OWN arrow, under the same rule -----------------
+    // The operator: a child transcript scrolled up had no way back to its bottom. The subject is the real
+    // component - a <wa-agent-session>, whose shared <wa-chat-shell> draws its own `.chat-content` box and
+    // its own transcript - so what is measured here is the arrow the production path creates, in the pane's
+    // own content rect, against the same 8px rule. One implementation, both scrollers.
+    var pane = document.createElement('wa-agent-session');
+    pane.style.cssText = 'position:fixed;left:0;top:0;width:640px;height:320px;display:flex;flex-direction:column;z-index:5';
+    document.body.append(pane);
+    var paneTask = { subagent_id: 'probe-scroll-child', session_id: 'probe-scroll-child',
+      state: 'completed', settled: true, model: 'fixture-model', profile: 'worker' };
+    pane.task = paneTask;
+    var childRows = [];
+    for (var childRow = 0; childRow < 12; childRow += 1) {
+      childRows.push({ seq: childRow + 1, id: 'child-row-' + childRow,
+        role: childRow % 2 ? 'assistant' : 'user',
+        content: 'Child evidence ' + childRow + ' ' + 'retained text '.repeat(40),
+        created_at: 1 + childRow, trace: [] });
+    }
+    paintChildTranscript(pane.transcript, childRows, { task: paneTask, state: 'answered', notify: false });
+    var child = pane.transcript;
+    var childContent = child.closest('.chat-content');
+    var childArrow = childContent && childContent.querySelector('.jump');
+    check(!!childArrow, 'a child transcript must carry its own scroll-to-latest arrow, saw ' +
+      String(childArrow) + ' in ' + (childContent ? childContent.className : 'no chat content box'));
+    if (!childArrow || !childContent) return 'FAIL: ' + problems.join(' ;; ');
+    check(child.scrollHeight - child.clientHeight > child.clientHeight,
+      'the child fixture must overflow its pane, saw ' + (child.scrollHeight - child.clientHeight) +
+        'px of range in ' + child.clientHeight + 'px');
+
+    child.scrollTop = child.scrollHeight;
+    child.dispatchEvent(new Event('scroll'));
+    await step();
+    check(!childArrow.classList.contains('show') && childArrow.getAttribute('aria-hidden') === 'true',
+      'the child arrow must be ABSENT at the child transcript\'s bottom, saw class ' +
+        JSON.stringify(String(childArrow.className)) + ' aria-hidden=' +
+        JSON.stringify(childArrow.getAttribute('aria-hidden')));
+
+    var childAway = Math.max(0, child.scrollHeight - child.clientHeight - 80);
+    child.scrollTop = childAway;
+    child.dispatchEvent(new WheelEvent('wheel', { deltaY: -1 }));
+    child.dispatchEvent(new Event('scroll'));
+    await step();
+    var childContentRect = rectOf(childContent);
+    var childArrowRect = rectOf(childArrow);
+    check(childArrow.classList.contains('show') && childArrow.tabIndex === 0,
+      'the child arrow must be PRESENT once the child transcript is away from its bottom, saw class ' +
+        JSON.stringify(String(childArrow.className)) + ' at ' +
+        round(child.scrollHeight - child.scrollTop - child.clientHeight) + 'px short of it');
+    check(childArrowRect.left >= childContentRect.left - 0.5 && childArrowRect.right <= childContentRect.right + 0.5 &&
+      childArrowRect.top >= childContentRect.top - 0.5 && childArrowRect.bottom <= childContentRect.bottom + 0.5,
+      'the child arrow must sit inside the child chat content rect: arrow ' +
+        [round(childArrowRect.left), round(childArrowRect.top), round(childArrowRect.right), round(childArrowRect.bottom)].join(',') +
+        ' content ' +
+        [round(childContentRect.left), round(childContentRect.top), round(childContentRect.right), round(childContentRect.bottom)].join(','));
+    check(Math.abs((childArrowRect.left + childArrowRect.right) / 2 -
+      (childContentRect.left + childContentRect.right) / 2) <= 1,
+      'and it must be centred on that rect, saw its centre at ' +
+        round((childArrowRect.left + childArrowRect.right) / 2) + ' against a content centre of ' +
+        round((childContentRect.left + childContentRect.right) / 2));
+
+    preference(false, function () { childArrow.click(); });
+    check(childArrow.dataset.motion === 'smooth',
+      'the child arrow must take the same smooth path as the main one, saw ' +
+        JSON.stringify(childArrow.dataset.motion));
+    for (var childFrames = 0; childFrames < 80 &&
+      child.scrollHeight - child.scrollTop - child.clientHeight > 1; childFrames++) await step();
+    await settle(2);
+    check(child.scrollHeight - child.scrollTop - child.clientHeight <= 1,
+      'the child arrow must reach the child transcript\'s bottom, saw ' +
+        round(child.scrollHeight - child.scrollTop - child.clientHeight) + 'px short');
+    check(!childArrow.classList.contains('show'),
+      'and the child arrow must be gone at that bottom, saw class ' + JSON.stringify(String(childArrow.className)));
+    check(scrollState(child).follow === true,
+      'and the click must re-arm the child transcript\'s own follow, saw follow=' + scrollState(child).follow);
+    pane.remove();
+
     if (problems.length) return 'FAIL: ' + problems.join(' ;; ');
     return 'PASS: the arrow is absent at the bottom and present when the reader is away from it by ' +
-      'more than 8px; it is pinned to the chat content rect, inline-end aligned, 5px above the content ' +
-      'bottom and 5px above the live run-status row (measured with the row hidden and shown, and it ' +
-      'follows the row both ways) without moving the reader; the click takes the smooth path to the ' +
-      'bottom, hides the arrow, sets aria-hidden/not focusable, re-arms follow so the same delta that ' +
-      'left the un-clicked reader behind keeps this one at the bottom; prefers-reduced-motion takes the ' +
-      'instant path';
+      'more than 8px; it is pinned to the chat content rect, CENTRED on it (left: 50% + translateX(-50%), ' +
+      'inside both horizontal edges), 5px above the content bottom and 5px above the live run-status row ' +
+      '(measured with the row hidden and shown, and it follows the row both ways) without moving the ' +
+      'reader; the click takes the smooth path to the bottom, hides the arrow, sets aria-hidden/not ' +
+      'focusable, re-arms follow so the same delta that left the un-clicked reader behind keeps this one at ' +
+      'the bottom; prefers-reduced-motion takes the instant path; and a CHILD pane\'s own transcript gets ' +
+      'the same arrow by the same rule - absent at its bottom, present when it is away from it, centred in ' +
+      'its own content rect, and its click reaches that bottom smoothly and re-arms that transcript\'s follow';
   }
 
   var result = { status: 'fail', text: 'probe did not finish' };

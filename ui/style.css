@@ -98,6 +98,12 @@ wa-orchestrator { display:flex; flex-direction:column; width:100%; height:100%; 
 .live-child[data-state="unknown"], .live-child[data-state="failed"] { border-left-color:#f77; }
 button.live-child:hover, button.live-child:focus-visible { background:var(--panel-2); border-color:var(--accent); }
 .live-children-foot { margin:var(--space) 0 0; color:var(--muted); font-size:11px; }
+/* An EMPTY foot is not a line. It exists for the one sentence a failed read must state, and while it has
+   nothing to say it was still a box with a 5px top margin - the operator's "~5px of dead space after the
+   last card" (measured: last card bottom to the topic body's inner edge was 10px, this margin plus the
+   body's own 5px frame). Hidden while empty, so the last card ends on the list and the frame below it is
+   the body's, while the spacing BETWEEN cards (the list's 5px gap) is untouched. */
+.live-children-foot:empty { display:none; }
 /* The machines, one entry each, inside the `Nodes` topic. <wa-node> is the entry's two lines (name, then
    statistics) and it is the SAME component the engine menu's node list draws; that list lays the two
    lines out as its own row would have them (`display:contents`), which is why the entry here states its
@@ -581,7 +587,14 @@ wa-retry { display: block; width: 100%; }
    only thing the app moves: while the live run-status row is showing, the arrow's own bottom is
    that row's top edge + 5px, so the two never stack. */
 .jump {
-  position: absolute; inset-inline-end: var(--space); bottom: var(--jump-offset, var(--space)); z-index: 5;
+  /* Horizontally CENTRED on the chat content rect, not pushed toward its inline end: the operator saw the
+     arrow overflow the scroller's right edge, and a control that can sit past the content edge is one a
+     reader can lose. `left: 50%` places its margin box at the centre and the arrow's own transform pulls it
+     back by half its width, so the centre lands exactly on the content centre at any width. The inline-end
+     value stays declared as the box's inline end; with a fixed width this is over-constrained, and in this
+     LTR document the inline-end yields to `left`. `--jump-offset` is still the only thing the app moves. */
+  position: absolute; inset-inline-end: var(--space); left: 50%; transform: translateX(-50%);
+  bottom: var(--jump-offset, var(--space)); z-index: 5;
   display: none; align-items: center; justify-content: center;
   width: var(--control-size); height: var(--control-size); padding: 0;
   border: 1px solid var(--line); border-radius: var(--radius);
