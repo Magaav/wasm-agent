@@ -120,6 +120,7 @@ let statusLine = null;
 // and three references are cheaper than three queries anyway.
 let statusLabel = null;
 let statusPhase = null;
+let statusCalls = null;
 let statusElapsed = null;
 let statusSpinner = null;
 // The body of the newest assistant bubble, tracked as it is created: the run status is
@@ -793,17 +794,23 @@ function renderSteering(fact) {
 // ONE stats line, one glyph vocabulary, one joiner.
 //
 // The footer under a finished answer and a live child row's third line are the same line over the
-// same facts (`◈tokens 👣model calls ⚒tool calls ◷duration`, with `✺elapsed` in front where a child
-// is still running). They differ in exactly one thing, and the caller decides it: the footer prints
-// `?` where a fact is missing, while a row OMITS the pair entirely - an absent token count says
-// nothing, so `◈0` would be a measurement nobody made. `0` is a real value here and is never
-// dropped; only absent ones are.
+// same facts, in one order: `👣model calls·✺elapsed ⚒tool calls ◈tokens ◷duration` (the elapsed clock
+// present wherever something is still running). They differ in exactly one thing, and the caller
+// decides it: the footer prints `?` where a fact is missing, while a row OMITS the pair entirely - an
+// absent token count says nothing, so `◈0` would be a measurement nobody made. `0` is a real value
+// here and is never dropped; only absent ones are.
 //
 // The line is COMPACT (operator, 2026-10-05): the glyph is glued to its value and the pairs are
-// separated by one space - `◈7.4k 👣5 ⚒7 ◷3:48`, not `◈ 7.4k · 👣 5 · ⚒ 7 · ◷ 3:48`. Nothing is
+// separated by one space - `👣5 ⚒7 ◈7.4k ◷3:48`, not `◈ 7.4k · 👣 5 · ⚒ 7 · ◷ 3:48`. Nothing is
 // dropped and no glyph changes meaning; the words the compact form no longer prints are said in
 // `title`/`aria-label` instead (see `runStatsWords`), so the facts stay reachable to a hover, a
 // keyboard and a screen reader.
+//
+// ONE exception to the space rule (operator, 2026-10-05): the model-call count and the elapsed clock
+// are joined by a bare `·` with NO spaces on either side - `👣22·13s` - because the clock times the
+// calls that just preceded it. That is the only `·` in the row. Where the two are not adjacent (a
+// finished footer has no clock at all) no `·` is printed, which is why the separator lives down here
+// beside the order, not in a caller.
 //
 // `👣` (operator's choice for model calls) is the one glyph in this vocabulary that Unicode ships in
 // BOTH presentations, so the line's CSS asks for the text one - see `.chat-content-run-elapsed` in
@@ -811,13 +818,23 @@ function renderSteering(fact) {
 // emoji's own colours, inside a line whose other four glyphs take the row's colour and size. The
 // glyph map stays plain characters, so every assertion and every `title` reads the same string.
 const runStatGlyphs={elapsed:'✺',tokens:'◈',calls:'👣',tools:'⚒',duration:'◷'};
-// The order a stats line is read in, and the only list that decides it: elapsed first (a child is
-// still running), then what the run cost.
-const runStatOrder=['elapsed','tokens','calls','tools','duration'];
+// The order a stats line is read in, and the only list that decides it: the model calls first, the
+// clock that elapsed while they ran glued to them, then what the run cost - tool calls, tokens, total
+// duration. Read: `👣22·13s ⚒30 ◈~71.3k ◷1:55`.
+const runStatOrder=['calls','elapsed','tools','tokens','duration'];
 function runStatEntries(stats) { return runStatOrder.map(key=>[key,stats ? stats[key] : undefined]); }
+// The one separator decision, made here so the answer footer, a live child card's third line and the
+// live row cannot disagree: `·` joins the model-call count to the elapsed clock, one space joins
+// every other pair. It belongs to the pair that SURVIVED the absent-fact filter, so a run whose
+// calls were never measured prints `✺4s`, never `·✺4s`.
+function runStatSeparator(previous,key) {
+  return previous && previous[0]==='calls' && key==='elapsed' ? '·' : ' ';
+}
 function runStatsLine(entries) {
-  return (entries || []).filter(entry=>entry && entry[1]!==undefined && entry[1]!==null && entry[1]!=='')
-    .map(entry=>runStatGlyphs[entry[0]]+entry[1]).join(' ');
+  const kept=(entries || [])
+    .filter(entry=>entry && entry[1]!==undefined && entry[1]!==null && entry[1]!=='');
+  return kept.map((entry,index)=>(index ? runStatSeparator(kept[index-1],entry[0]) : '')+
+    runStatGlyphs[entry[0]]+entry[1]).join('');
 }
 // A compact line must not make its own facts unreachable: the glyphs spell themselves out here for a
 // hover, a keyboard and a screen reader. `?` is said as "not measured" and `~` as "about", because
@@ -838,9 +855,10 @@ function runCountsFooter(duration) {
   const prefix = replayingMessages && runCounts && !runCounts.complete ? '≥' : '';
   if (replayingMessages && runCounts?.complete && Number.isFinite(runCounts.elapsed_ms) && runCounts.elapsed_ms >= 0)
     duration = runDuration(runCounts.elapsed_ms);
-  return runStatsLine([['tokens',turnTokenStat()],
-    ['calls',prefix+(runCounts?.model_calls ?? '?')],
-    ['tools',prefix+(runCounts?.tool_calls ?? '?')],['duration',duration]]);
+  // Listed in reading order, which is `runStatOrder`'s order; the ordered list decides, this is only
+  // legible.
+  return runStatsLine([['calls',prefix+(runCounts?.model_calls ?? '?')],
+    ['tools',prefix+(runCounts?.tool_calls ?? '?')],['tokens',turnTokenStat()],['duration',duration]]);
 }
 
 // The token readout, over any run's counts rather than only this window's own: a card reads it for
@@ -1062,12 +1080,19 @@ function setStatus(text) {
     statusPhase = document.createElement("span");
     statusPhase.className = "chat-content-run-phase";
     statusPhase.hidden = true;
+    statusCalls = document.createElement("span");
+    statusCalls.className = "chat-content-run-calls";
     statusElapsed = document.createElement("span");
     statusElapsed.className = "chat-content-run-elapsed";
-    // Operator, 2026-10-05: the activity glyph sits immediately before the elapsed clock (`✦4s`),
-    // then the label when there is one, then the compact facts - so the DOM order IS the reading
-    // order, and the finished footer (glyph removed, phase hidden) still reads left to right.
-    statusLine.append(statusSpinner, statusPhase, statusLabel, statusElapsed);
+    // Operator, 2026-10-05: the DOM order IS the reading order - `✳ 👣22·13s ⚒30 ◈~71.3k ◷1:55`. The
+    // live row's clock is its own element (it is the step clock, repainted every second), so the one
+    // compact line is split around it: the model-call pair and its `·` stand BEFORE the clock in
+    // `statusCalls`, every other pair follows it in `statusElapsed` (see `updateRunElapsed`). The
+    // label is a notice about the run ("finishing…"), so it stands before the measurements rather
+    // than inside them; with no notice - the ordinary case - it is hidden and the row is the glyph
+    // and the five values. The finished footer (glyph removed, phase and calls empty) still reads
+    // left to right.
+    statusLine.append(statusSpinner, statusLabel, statusCalls, statusPhase, statusElapsed);
     if (turnIsActive() && !replayingMessages) startRunStatusTicker();
   }
   setText(statusLabel, text);
@@ -1109,16 +1134,27 @@ function updateRunElapsed() {
   const duration=runDuration(endedAt - (runStartedAt || endedAt));
   // The live row is ONE compact line, built by the same stats renderer as the footer: a glyph cannot
   // mean one thing here and another under a finished answer.
-  const stats=[['tokens',turnTokenStat()],['calls',runCounts?.model_calls ?? '?'],
-    ['tools',runCounts?.tool_calls ?? '?'],['duration',duration]];
-  setText(statusElapsed,!replayingMessages && runStepState?.active ? runStatsLine(stats) : duration);
+  const stats=runStatEntries({calls:runCounts?.model_calls ?? '?',tools:runCounts?.tool_calls ?? '?',
+    tokens:turnTokenStat(),duration});
+  // The line is composed AROUND the live clock from the same order and the same separator rule, so
+  // the space before `⚒30` and the `·` after `👣22` are the line's own and not this function's: the
+  // half before the clock keeps the join `runStatsLine` prints, the half after it carries the single
+  // space the next separator would have been. A finished footer owns no clock, so the same call
+  // prints the whole line in one element - one shape, with the clock put where the row keeps it.
+  const clock=runStatOrder.indexOf('elapsed'), live=!replayingMessages && runStepState?.active;
+  const before=live ? runStatsLine(stats.slice(0,clock)) : '';
+  setText(statusCalls,before ? ' '+before+'·' : '');
+  setText(statusElapsed,live ? ' '+runStatsLine(stats.slice(clock+1)) : duration);
   if(!replayingMessages&&runCounts?.context) {
     if(rendererTask)updateChildContextReadouts();else if(transcript===messages)updateContextReadouts();
   }
   // The compact line glues glyph to value, so the words it no longer prints are said here - for the
   // mouse in `title` and for the keyboard and screen reader in `aria-label`.
+  // Both halves of the live line say the same words: the facts are spelled out once and stay
+  // reachable from whichever half a reader hovers or lands on.
   statusElapsed.title=turnTokenDetail()+' '+runStatsWords(stats);
   statusElapsed.setAttribute('aria-label',statusElapsed.title);
+  if (statusCalls) { statusCalls.title=statusElapsed.title; statusCalls.setAttribute('aria-label',statusElapsed.title); }
 }
 
 function startRunStatusTicker() {
@@ -1146,14 +1182,14 @@ function finishRunStatus(label = "completed") {
   statusLabel.textContent = label;
   updateRunElapsed();
   statusElapsed.textContent = runCountsFooter(statusElapsed.textContent);
-  statusElapsed.title = turnTokenDetail()+' Provider-call attempts (includes retries/summaries) · requested tool calls · total duration; ? means unavailable, ~ an incomplete boundary, ≥ means count lower bound.';
+  statusElapsed.title = turnTokenDetail()+' Provider-call attempts (includes retries/summaries) · requested tool calls · net context added · total duration; ? means unavailable, ~ an incomplete boundary, ≥ means count lower bound.';
   statusElapsed.setAttribute('aria-label',statusElapsed.title);
   statusLine.classList.add("finished");
   updateRunPhase();
   if (body) body.append(statusLine);
   else statusLine.remove();
   statusLine = null;
-  statusLabel = null; statusPhase = null; statusElapsed = null; statusSpinner = null;
+  statusLabel = null; statusPhase = null; statusCalls = null; statusElapsed = null; statusSpinner = null;
   if (runStatusTicker) { clearInterval(runStatusTicker); runStatusTicker = null; }
   pin();
 }
@@ -1161,7 +1197,7 @@ function finishRunStatus(label = "completed") {
 function clearStatus() {
   statusLine?.remove();
   statusLine = null;
-  statusLabel = null; statusPhase = null; statusElapsed = null; statusSpinner = null;
+  statusLabel = null; statusPhase = null; statusCalls = null; statusElapsed = null; statusSpinner = null;
   if (runStatusTicker) { clearInterval(runStatusTicker); runStatusTicker = null; }
 }
 
@@ -3192,13 +3228,13 @@ function repaintMessages(rows, options = {}) {
 // `completed`/`unfinished`/`failed` footer - which is the point: a reader looking at a child and at
 // this window's own chat is looking at one implementation, so a fix to either lands in both.
 function captureRenderer() {
-  return {transcript,runBubble,statusLine,statusLabel,statusElapsed,statusSpinner,runStepState,runCounts,
+  return {transcript,runBubble,statusLine,statusLabel,statusCalls,statusElapsed,statusSpinner,runStepState,runCounts,
     statusPhase,lastAssistantBody,runStatusTicker,toolTicker,streamBody,streamText,phasePendingText,trace,lastTool,
     reasoningBlock,reasoningText,reasoningRound,endedReasoning,streamedCommentaryBlock,streamedCommentaryText,runStartedAt,replayingMessages,
     replayMessageEndedAt,replayRunLastMessage,renderedMessageIds,rendererTask};
 }
 function restoreRenderer(value) {
-  ({transcript,runBubble,statusLine,statusLabel,statusElapsed,statusSpinner,runStepState,runCounts,
+  ({transcript,runBubble,statusLine,statusLabel,statusCalls,statusElapsed,statusSpinner,runStepState,runCounts,
     statusPhase,lastAssistantBody,runStatusTicker,toolTicker,streamBody,streamText,phasePendingText,trace,lastTool,
     reasoningBlock,reasoningText,reasoningRound,endedReasoning,streamedCommentaryBlock,streamedCommentaryText,runStartedAt,replayingMessages,
     replayMessageEndedAt,replayRunLastMessage,renderedMessageIds,rendererTask}=value);
@@ -3209,7 +3245,7 @@ function withChildRenderer(container,task,render) {
   if(retained?.key===childRenderKey(task))restoreRenderer(retained.renderer);
   else {
     transcript=container;runBubble=null;runStepState=null;runCounts=null;
-    statusLine=null;statusLabel=null;statusPhase=null;statusElapsed=null;statusSpinner=null;runStatusTicker=null;toolTicker=null;
+    statusLine=null;statusLabel=null;statusPhase=null;statusCalls=null;statusElapsed=null;statusSpinner=null;runStatusTicker=null;toolTicker=null;
     trace=null;lastTool=null;lastAssistantBody=null;streamBody=null;streamText='';phasePendingText=new Map();
     reasoningBlock=null;reasoningText='';reasoningRound='';endedReasoning=null;streamedCommentaryBlock=null;streamedCommentaryText='';runStartedAt=0;
     replayingMessages=false;replayMessageEndedAt=0;replayRunLastMessage=null;renderedMessageIds=new Set();
