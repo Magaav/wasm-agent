@@ -118,9 +118,6 @@ What the reviewer is worth, measured today rather than argued: three deliveries 
 `"report":"absent"`, one worker deleted another lane's 27-line doc section out of scope, and one lane
 was killed by a deploy restart. The reviewer is the step that reads the branch instead of the claim.
 
-**The gate stays the coordinator's**, after every rewake and every respin, on a tree merged with
-  current `main`. A skipped check is reported as skipped, never counted as green.
-
 **What a landing must carry.** A landing missing any of these is not a landing:
 
 1. the **reviewer's independent verdict** on the exact tip, from a lane that did not produce it
