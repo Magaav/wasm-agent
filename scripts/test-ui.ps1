@@ -118,7 +118,11 @@ $harness = @'
     };
     var topicNames = viewNames(".nodes-topic .node-list .node-name");
     var engineNames = viewNames("#nodes-box .node .node-name");
-    check(!!viewTopic && !viewTopic.querySelector(".node-list-empty"),
+    // WHY `topicNames.length > 0`: `!viewTopic.querySelector(".node-list-empty")` alone is also true for a
+    // topic that was NEVER fed - an untouched `.node-list` holds neither an entry nor an empty state - so the
+    // condition alone would pass on the very bug this stage exists to catch. Requiring at least one drawn
+    // entry makes "draws the fleet" mean drawn, and the names below say which fleet.
+    check(!!viewTopic && topicNames.length > 0 && !viewTopic.querySelector(".node-list-empty"),
       "the orchestrator Nodes topic must draw the fixture fleet rather than its empty state, saw: "
       + (viewTopic ? JSON.stringify(viewTopic.textContent.slice(0, 160)) : "no panel"));
     // THE SAME SOURCE, NAMED: every machine the engine list is read from is listed by the topic, and the
