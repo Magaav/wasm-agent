@@ -3962,10 +3962,22 @@ if (-not $edge) { Write-Host "  !  no Edge or Chrome found"; exit 1 }
 # markup, and the run looked like a broken test rather than a stale one.
 $busy = Get-NetTCPConnection -State Listen -LocalPort $Port -ErrorAction SilentlyContinue | Select-Object -First 1
 if ($busy) {
-  Write-Host "  !  port $Port is already in use by pid $($busy.OwningProcess)"
-  Write-Host "     that is probably a previous run's server, and it would serve an old copy of the UI"
-  Write-Host "     stop it and run again:  Stop-Process -Id $($busy.OwningProcess)"
-  exit 1
+  # A harness server left behind by an interrupted run is disposable: it serves an old Temp copy of
+  # the UI and blocks every later run. Measured three times in one afternoon - each time the refusal
+  # named a pid that served the previous run's copy. Recognise OUR leftover (a wa.exe whose command
+  # line carries a wa-ui-test directory) and stop it; a listener we cannot identify is still refused
+  # rather than killed, because that could be the real node.
+  $busyProc = Get-CimInstance Win32_Process -Filter "ProcessId=$($busy.OwningProcess)" -ErrorAction SilentlyContinue
+  if ($busyProc -and $busyProc.Name -eq 'wa.exe' -and $busyProc.CommandLine -match 'wa-ui-test') {
+    Write-Host "  ~  stopping a leftover harness server on port $Port (pid $($busy.OwningProcess))"
+    Stop-Process -Id $busy.OwningProcess -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Milliseconds 500
+  } else {
+    Write-Host "  !  port $Port is already in use by pid $($busy.OwningProcess)"
+    Write-Host "     that is probably a previous run's server, and it would serve an old copy of the UI"
+    Write-Host "     stop it and run again:  Stop-Process -Id $($busy.OwningProcess)"
+    exit 1
+  }
 }
 
 $runtimeEnvironment = @{}
