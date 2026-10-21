@@ -1150,12 +1150,18 @@ $harness = @'
   document.body.append(showroom);
   var agents=Array.from({length:4},(_,i)=>({subagent_id:'tile-'+i,session_id:'session-'+i,profile:'worker',model:'fixture',reasoning:'max',execution_node:'cloud',state:'running',created_at:i,prompt:'task '+i}));
   showroom.data=agents;
-  var card=showroom.sidebar.querySelector('.agent-card');
-  check(card?.querySelectorAll('.agent-card-mission, .agent-card-details').length===2 &&
-    card.querySelector('.agent-card-mission').textContent==='task 0' &&
-    card.querySelector('.agent-card-model').textContent==='fixture · max' &&
-    card.querySelector('.agent-card-status').textContent==='running',
-    'each sidebar card must show mission, model and running status in two rows');
+  // WHY THIS MOVED: the left bar no longer draws a card per spawned child (operator request: the
+  // `Live Subagents` topic is where children are seen and controlled, so the duplicate card list and
+  // its `<nav aria-label="Agents">` were removed). The facts the card printed - mission, `model ·
+  // reasoning`, state - are still the panel's own active-task records, so they are asserted THERE, and
+  // the bar is asserted to hold no card at all so the removed element cannot silently return.
+  var activeTile=showroom.activeTasks.find(function(task){return task.subagent_id==='tile-0';});
+  check(showroom.sidebar.querySelectorAll('.agent-card, .lane').length===0,
+    'the left bar must draw no per-child cards, saw: ' + showroom.sidebar.innerHTML.slice(0,200));
+  check(!!activeTile && activeTile.prompt==='task 0' && activeTile.model==='fixture' &&
+    activeTile.reasoning==='max' && activeTile.state==='running',
+    'the active task carries the mission, model and running status the card used to print, saw: ' +
+    JSON.stringify(activeTile));
   var linkProbe=document.createElement('div');
   linkProbe.innerHTML=window.__safeLinks('<a href="javascript:alert(1)">unsafe</a><a href="https://example.com">safe</a><code>https://code.example</code> https://bare.example.');
   document.body.append(linkProbe);
@@ -1163,12 +1169,15 @@ $harness = @'
   check([...linkProbe.querySelectorAll('a')].every(a=>a.target==='_blank' && a.rel.includes('noopener')),'links isolate external destinations');
   check(getComputedStyle(linkProbe.querySelector('a')).textDecorationLine.includes('underline') && getComputedStyle(linkProbe.querySelector('a')).color==='rgb(139, 188, 255)','links are blue-ish and underlined');
   linkProbe.remove();
-  var cardHeight=card.getBoundingClientRect().height;
-  var lineHeight=parseFloat(getComputedStyle(card).lineHeight);
-  check(cardHeight<=lineHeight*2+15,'sidebar cards must be compact two-line cards');
+  // WHY NOTHING REPLACED THESE TWO: `sidebar cards must be compact two-line cards` measured the height
+  // of a card that no longer exists - the two-line box of `<wa-agent-session>`'s lane card. There is no
+  // element left whose height that property could describe, so the assertion is gone with it rather than
+  // re-pointed at something else (reported, not silently dropped).
   showroom.data=[{...agents[0],state:'completed'},...agents.slice(1)];
-  check(!showroom.sidebar.querySelector('[data-state="completed"]') && showroom.sidebar.querySelectorAll('.agent-card').length===3,
-    'settled tasks remain history, not cards in the active orchestrator');
+  // WHY THIS MOVED: `settled tasks remain history, not cards` is asserted on the active list the bar
+  // is built from, because the cards (and the state attribute they carried) are gone.
+  check(showroom.activeTasks.length===3 && !showroom.activeTasks.some(task=>task.subagent_id==='tile-0'),
+    'settled tasks remain history, not active tasks in the active orchestrator');
   showroom.data=agents;
   agents.forEach(task=>showroom.pin(task));
   check(showroom.panes.size===4,'four pinned agents must create four session panes');
@@ -1266,14 +1275,16 @@ $harness = @'
     'closing the frame must close the promoted conversation, not the workspace pane it came from');
   promotedFrame.remove();   // leave the document as this run found it
 
-  // LANES. The claim: the cards are grouped by the child's recorded checkout - its workspace branch,
-  // else its worktree - and each lane states its end state as an outcome checklist. Driven through the
-  // app's own refresh (the dispatch list and `/sessions`), so a lane key or an outcome cannot be
-  // asserted against a shape the app does not use. The recorded shapes are the ones the node really
-  // writes, including a released checkout (`workspaces.lua`'s release KEEPS `worktree` and sets
+  // PINNED CHILD, THROUGH THE APP'S OWN REFRESH. This block used to be the LANES stage: the children
+  // below were grouped into one card per recorded checkout and each group printed a
+  // merged/retired/clean/main-only checklist. Those cards were removed (operator: `Live Subagents` is
+  // where children are seen and controlled), so what is left is the half of the stage that was never
+  // about the bar: a child pinned into the panel is painted by the app's own refresh path
+  // (`refreshAgentPane` -> `panePage` -> `paintChildTranscript`), over the node's recorded shapes -
+  // including a released checkout (`workspaces.lua`'s release KEEPS `worktree` and sets
   // `workspace_state='released'`) and a checkout with no recorded branch name
-  // (`sessions.workspace_branch TEXT NOT NULL DEFAULT ''`) - the row shape whose `main-only` outcome
-  // must still be answered from the lane's own key rather than from the branch name alone.
+  // (`sessions.workspace_branch TEXT NOT NULL DEFAULT ''`), which is what those sessions fixtures are
+  // still here for.
   var lanesPanel=document.createElement('wa-orchestrator');
   lanesPanel.style.cssText='position:fixed;inset:0;width:1200px;height:800px;z-index:9998';
   document.body.append(lanesPanel);
@@ -1298,7 +1309,7 @@ $harness = @'
       {seq:2,role:'assistant',content:'LANE-ANSWER',created_at:2,tool_calls:[]}],
     task:{subagent_id:'lane-child-a',session_id:'lane-session-a',state:'running',settled:false,profile:'worker',model:'fixture',reasoning:'max'}};
   window.__setOrchestratorPanel(lanesPanel);
-  for(var laneTry=0;laneTry<20&&lanesPanel.querySelectorAll('nav .lane').length!==4;laneTry+=1){
+  for(var laneTry=0;laneTry<20&&lanesPanel.activeTasks.length!==5;laneTry+=1){
     await window.__refreshOrchestrator();
     for(var laneTick=0;laneTick<20;laneTick+=1) await tick();
   }
@@ -1309,27 +1320,18 @@ $harness = @'
     await window.__refreshOrchestrator();
     for(var paneTick=0;paneTick<20;paneTick+=1) await tick();
   }
-  var laneGroups=[...lanesPanel.querySelectorAll('nav .lane')];
-  var laneKeys=laneGroups.map(group=>group.dataset.lane).sort();
-  var laneCounts=laneGroups.map(group=>group.dataset.lane+':'+group.querySelectorAll('.agent-card').length).sort();
-  var laneStates=key=>{var group=laneGroups.find(item=>item.dataset.lane===key);
-    return group?[...group.querySelectorAll('.lane-check')].map(item=>item.dataset.outcome+'='+item.dataset.state).join(' '):'no such lane';};
-  var lanePath=key=>{var group=laneGroups.find(item=>item.dataset.lane===key);var path=group?group.querySelector('.lane-path'):null;
-    return path?path.textContent:'';};
-  check(laneKeys.join('|')===['C:/work/wt-gamma','change/lane-alpha','change/lane-beta','main'].sort().join('|') &&
-    laneCounts.join(' ')==='C:/work/wt-gamma:1 change/lane-alpha:2 change/lane-beta:1 main:1',
-    'cards must be grouped by the child\'s recorded checkout (branch, else worktree), saw ' +
-    JSON.stringify(laneKeys) + ' ' + JSON.stringify(laneCounts));
-  check(laneStates('change/lane-alpha')==='merged=unknown retired=no clean=unknown main-only=no' &&
-    laneStates('change/lane-beta')==='merged=unknown retired=yes clean=unknown main-only=no' &&
-    laneStates('C:/work/wt-gamma')==='merged=unknown retired=no clean=unknown main-only=no' &&
-    laneStates('main')==='merged=unknown retired=unknown clean=unknown main-only=yes',
-    'each lane\'s four outcomes must come from its own recorded checkout, saw alpha[' + laneStates('change/lane-alpha') +
-    '] beta[' + laneStates('change/lane-beta') + '] gamma[' + laneStates('C:/work/wt-gamma') + '] main[' + laneStates('main') + ']');
-  check(lanePath('change/lane-beta')==='C:/work/wt-beta' && lanePath('C:/work/wt-gamma')==='C:/work/wt-gamma' &&
-    lanePath('main')==='',
-    'a lane must show the recorded worktree it is keyed or grouped by, saw ' +
-    JSON.stringify([lanePath('change/lane-beta'),lanePath('C:/work/wt-gamma'),lanePath('main')]));
+  // WHY THIS REPLACED THE LANE ASSERTIONS: the left bar used to group these children into one card
+  // per recorded checkout and print, per group, the branch, the child count, the worktree path and a
+  // merged/retired/clean/main-only checklist. That whole list was the duplicate of `Live Subagents`
+  // the operator asked to remove, so the property is now two-sided: the panel still holds exactly the
+  // five active children (the app's own refresh, not a fixture), and the bar draws none of the removed
+  // elements. THE FOUR OUTCOMES ARE NOT ASSERTED ANYWHERE ANY MORE - `main-only` in particular existed
+  // only on those cards and the app no longer computes it (see the report, not silently dropped).
+  check(lanesPanel.activeTasks.length===5 &&
+    lanesPanel.querySelectorAll('nav .lane, .lane, .lane-check, .agent-card').length===0,
+    'the bar must group and draw no cards, and the refresh must still yield the five active children, saw ' +
+    lanesPanel.activeTasks.length + ' active and ' +
+    lanesPanel.querySelectorAll('nav .lane, .lane, .lane-check, .agent-card').length + ' removed element(s)');
   check(!!lanePane && lanePane.querySelectorAll('wa-message').length===2 &&
     lanePane.transcript.textContent.includes('LANE-ANSWER') &&
     !!lanePane.transcript.querySelector('wa-message.assistant > .body.steps'),
@@ -1634,10 +1636,14 @@ $harness = @'
     'a lowered tool-output budget must cost page size, not the transcript, and the pane must say so, saw: '
     + panes[3].notice.textContent);
   showroom.unpin('tile-0');
-  check(showroom.panes.size===3 && showroom.sidebar.querySelectorAll('.agent-card').length===4 &&
-    [...showroom.sidebar.querySelectorAll('.agent-card-mission')].some(mission=>mission.textContent==='task 0'),
-    'collapse must keep the running agent\'s card in the sidebar, saw ' +
-    [...showroom.sidebar.querySelectorAll('.agent-card-mission')].map(mission=>mission.textContent).join('|'));
+  // WHY THIS MOVED: `collapse must keep the running agent's card in the sidebar` - the card is gone
+  // with the rest of the per-child list, so the property it protected (collapsing a pane does not
+  // cancel or hide the running child; it stays listed and pinnable) is asserted on the panel's active
+  // task list, which is what `Live Subagents` lists from.
+  check(showroom.panes.size===3 && showroom.activeTasks.length===4 &&
+    showroom.activeTasks.some(task=>task.subagent_id==='tile-0'),
+    'collapse must keep the running agent active and listed, saw panes ' + showroom.panes.size +
+    ' active ' + showroom.activeTasks.map(task=>task.subagent_id).join('|'));
   showroom.configure({policy:{enabled:true,nodes:[{node:'cloud',max_tasks:2},{node:'local',max_tasks:0}]},nodes:[]});
   check(showroom.policy.nodes[0].node==='cloud' && showroom.policy.nodes[1].max_tasks===0,'node order and zero-capacity devices must round trip');
   // WHAT IS RUNNING, ON WHICH MACHINE. The dispatch table is a placement record, so a child started

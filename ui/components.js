@@ -2774,8 +2774,14 @@ class WaOrchestrator extends HTMLElement {
     // The header is the window's name and one number. It used to carry a sentence about closing the
     // window and two buttons (Refresh, Back to main chat); the count is the only thing the header has to
     // say, so the sentence is gone and so are the buttons and the routes that existed only for them.
-    this.innerHTML='<header class="orchestrator-head"><strong>Orchestrator</strong><span class="orchestrator-count"></span><span class="orchestrator-status" role="status"></span></header><div class="orchestrator-body"><aside class="orchestrator-sidebar"><nav aria-label="Agents"></nav></aside><main class="orchestrator-canvas"><p class="orchestrator-empty">Select an active card to follow its conversation. History remains in Engine → Sessions.</p></main></div>';
-    this.sidebar=this.querySelector('nav'); this.canvas=this.querySelector('main'); this.panes=new Map(); this.drafts=new Map();
+    this.innerHTML='<header class="orchestrator-head"><strong>Orchestrator</strong><span class="orchestrator-count"></span><span class="orchestrator-status" role="status"></span></header><div class="orchestrator-body"><aside class="orchestrator-sidebar"></aside><main class="orchestrator-canvas"><p class="orchestrator-empty">Select a live child to follow its conversation. History remains in Engine → Sessions.</p></main></div>';
+    // The bar is its topics and nothing else. It used to end in a second, flat list of the same
+    // children - one card per spawned child (lane, child count, worktree path, mission, model, the
+    // merged/retired/clean/main-only rows) - and the `Live Subagents` topic above already answers
+    // "what is spawned, where, and how it is doing". The operator controls the children from that
+    // topic, so the duplicate list and its `<nav aria-label="Agents">` are gone; the topics are the
+    // bar's children now, in the order they are built (machines, then what runs on them).
+    this.sidebar=this.querySelector('.orchestrator-sidebar'); this.canvas=this.querySelector('main'); this.panes=new Map(); this.drafts=new Map();
     // Promoted conversations: each is a <wa-window> reading the same task as the pane it came from.
     this.windows=new Map();
     // The left bar is the machines first, then what runs on them: a reader asks where a child could run
@@ -2820,7 +2826,7 @@ class WaOrchestrator extends HTMLElement {
     topic.setAttribute('label',options.label);
     topic.setAttribute('glyph',options.glyph);
     if(options.open)topic.setAttribute('open','');
-    this.sidebar.before(topic);
+    this.sidebar.append(topic);
     return topic;
   }
   // The live topic's three elements, with the classes they already had: the host writes the node's count
@@ -3098,87 +3104,27 @@ class WaOrchestrator extends HTMLElement {
     }
     line.replaceChildren(...parts);
   }
-  // The window's agents, grouped by LANE.
+  // The window's agents, as the host hands them over.
   //
-  // A lane is the checkout a child was given, and it is the unit a reader reasons about: one
-  // worktree, the children working in it, and what is still owed on it. The lane travels on the task
-  // (`task.lane`), read by the host from the session ledger, because what a lane *is* - a recorded
-  // branch and worktree - is a fact about the node's records rather than about this element. A child
-  // with no branch of its own is in the `main` lane, which is stated, not inferred.
+  // This setter used to draw the bar's second list: one card per spawned child, grouped by the
+  // checkout it was given, each card carrying the lane key, the child count, the worktree path, the
+  // mission, `model · reasoning` and a merged/retired/clean/main-only checklist for that checkout.
+  // That duplicated the `Live Subagents` topic the operator already uses to see and control the
+  // children, so the cards are gone. What remains is the part the panel still owes its panes: the
+  // current task object behind each open conversation, which is what keeps a pinned pane reading the
+  // newest run of its session.
   set data(tasks) {
     this.connectedCallback();
-    // Follow-up tasks share a session. One card per conversation, newest run.
+    // Follow-up tasks share a session: one conversation, newest run.
     this.tasks=agentLatestTasks(tasks);
-    // Keep history for existing panes, but only positive active states create cards.
+    // Only positive active states count as active; history stays history.
     this.activeTasks=this.tasks.filter(task=>agentTaskActive(task));
-    const lanes=new Map();
-    for(const task of this.activeTasks) this.groupByLane(lanes,task);
-    this.sidebar.replaceChildren(...[...lanes.values()].map(group=>this.laneElement(group)));
     for(const task of this.tasks) {
       for(const pane of this.panes.values()) {
         if(pane.task.session_id && pane.task.session_id===task.session_id && pane.task.execution_node===task.execution_node) pane.task=task;
         else if(pane.task.subagent_id===task.subagent_id)pane.task=task;
       }
     }
-  }
-  groupByLane(lanes,task) {
-    const lane=task.lane || {key:'no recorded checkout',label:'no recorded checkout',checklist:[]};
-    const group=lanes.get(lane.key) || {lane,tasks:[]};
-    group.tasks.push(task);
-    lanes.set(lane.key,group);
-  }
-  // One lane: its key, the children it holds, and its end-state checklist. Every entry is a
-  // measurement or an explicit `unknown` carrying the host's reason (`task.lane.checklist`) - a lane
-  // drawn as merged and clean when nobody could read its checkout is the mistake that list exists to
-  // prevent, so the three states a reader can act on (`yes`, `no`, `unknown`) are attributes of the
-  // row rather than words this element invents.
-  laneElement(group) {
-    const lane=group.lane;
-    const section=document.createElement('section');
-    section.className='lane';
-    section.dataset.lane=lane.key;
-    const head=document.createElement('header');head.className='lane-head';
-    const key=document.createElement('span');key.className='lane-key';
-    key.textContent=lane.label || lane.key;key.title=key.textContent;
-    const count=document.createElement('span');count.className='lane-count';
-    count.textContent=group.tasks.length+(group.tasks.length===1 ? ' child' : ' children');
-    head.append(key,count);
-    if(lane.worktree) {
-      const path=document.createElement('span');path.className='lane-path';
-      path.textContent=lane.worktree;path.title=lane.worktree;
-      head.append(path);
-    }
-    section.append(head);
-    const children=document.createElement('div');children.className='lane-children';
-    for(const task of group.tasks) children.append(this.cardElement(task));
-    section.append(children);
-    const checklist=document.createElement('ul');checklist.className='lane-checklist';
-    for(const item of lane.checklist || []) {
-      const row=document.createElement('li');row.className='lane-check';
-      row.dataset.outcome=item.outcome;row.dataset.state=item.state;
-      const name=document.createElement('span');name.className='lane-check-name';name.textContent=item.outcome;
-      const state=document.createElement('span');state.className='lane-check-state';state.textContent=item.state;
-      row.append(name,state);
-      row.title=[item.outcome,item.state,item.detail].filter(Boolean).join(' · ');
-      checklist.append(row);
-    }
-    section.append(checklist);
-    return section;
-  }
-  cardElement(task) {
-    const card=document.createElement('button'); card.type='button'; card.className='agent-card';
-    const state=task.state || 'unknown';
-    card.dataset.state=state;
-    const mission=document.createElement('span');mission.className='agent-card-mission';
-    mission.textContent=agentTaskTitle(task);
-    mission.title=mission.textContent;
-    const details=document.createElement('span');details.className='agent-card-details';
-    const model=document.createElement('span');model.className='agent-card-model';model.textContent=[task.model || 'model unknown',task.reasoning || 'reasoning unknown'].join(' · ');
-    const status=document.createElement('span');status.className='agent-card-status';status.textContent=state;
-    details.append(model,status);card.append(mission,details);
-    card.setAttribute('aria-label',`${mission.textContent} · ${model.textContent} · ${state}`);
-    card.addEventListener('click',()=>this.pin(task));
-    return card;
   }
   // A pane must say which machine it is reading, by name. The task travels unchanged apart from that
   // one display field, so nothing downstream (steer, cancel, the model strip) sees a different task.

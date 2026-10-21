@@ -6725,94 +6725,26 @@ function liveChildRows({sessions=[], dispatches=[], fleet={}, health={}, errors=
   return {rows,counts:subagentCounts(localName,health),note};
 }
 
-// ---- lanes: the checkout a child was given ------------------------------------------------
+// ---- lanes: removed ----------------------------------------------------------------
 //
-// A lane is a *recorded* checkout, not a guess: `/sessions` selects each session's own row, so
-// `worktree`, `workspace_branch`, `workspace_state` and `workspace_error` are the child's workspace
-// as the node stored it. A dispatch row carries no checkout of its own (the runtime's task view has
-// no workspace field), so grouping by anything the dispatcher knows would group by machine rather
-// than by lane - and a lane is what the reader has to reason about: one checkout, the children
-// working in it, and whether anything is still owed on it.
+// The orchestrator bar's second list grouped the spawned children by the checkout each was given
+// (`/sessions`' `workspace_branch`, else `worktree`, else the node's own `main` checkout) and drew
+// one card per checkout with that lane's key, its child count, its worktree path and a
+// merged/retired/clean/main-only checklist folded across the lane's children. The operator sees and
+// controls those children in the `Live Subagents` topic, so the cards are gone and this module no
+// longer reads the ledger's workspace fields to group them.
 //
-// A lane's facts are folded across every child that holds its key, because a lane is one checkout:
-// "is this lane retired" is a question about all of its children, not about the first session row a
-// loop happened to see. A child with no branch of its own works in the node's own checkout: that is
-// the `main` lane, stated as such rather than as a missing key.
-const MAIN_LANE='main';
-const UNRECORDED_LANE='no recorded checkout';
-// The four outcomes a lane is read for. Each is a *measurement* or an explicit unknown with the
-// reason: `merged` and `clean` are git facts about a ref (containment in origin/main, a clean tree)
-// which this view is not given, and a check nobody made is worse than no checklist at all.
-function laneChecklist(lane, rows) {
-  // `retired` is a recorded end state, not the absence of a path: a lane whose children recorded a
-  // released checkout has been retired, a lane with a bound checkout has not, and a child that never
-  // had a checkout of its own leaves it unknown rather than answered either way.
-  const bound=rows.some(row=>String(row.worktree || '') && String(row.workspace_state || '')!=='released');
-  const released=rows.length>0 && rows.every(row=>String(row.workspace_state || '')==='released');
-  const retired=released ? 'yes' : bound ? 'no' : 'unknown';
-  // `main-only` is a statement about the *lane*, so it has to come from the same recorded facts the
-  // lane is keyed by - branch-or-worktree - and not from the branch name alone. A lane whose children
-  // recorded a worktree and no branch name is a checkout of its own (its header draws that path), and
-  // reporting it as main-only would contradict the row directly above it.
-  const checkout=lane.branch || lane.worktree;
-  const ownCheckout=!!checkout;
-  return [
-    {outcome:'merged',state:'unknown',
-      detail:'this view reads no branch tip and no origin/main ref, so containment is not measured here'},
-    {outcome:'retired',state:rows.length ? retired : 'unknown',
-      detail:released ? 'every child of this lane recorded a released checkout; the branch is retained'
-        : bound ? 'a child of this lane still holds a bound checkout'
-        : rows.length ? 'no child of this lane recorded a released checkout; nothing was retired here'
-        : 'no session record for this lane'},
-    {outcome:'clean',state:'unknown',
-      detail:"a checkout's own git status is measured by the node's settlement review, which this view is not given"},
-    {outcome:'main-only',state:ownCheckout ? 'no':'yes',
-      detail:ownCheckout ? 'this lane holds a checkout of its own ('+checkout+')'
-        : 'this lane holds no branch and no worktree of its own: its children work in the node checkout'}];
-}
-function laneRecord(key,rows) {
-  const first=rows[0] || {};
-  const branch=String(first.workspace_branch || '');
-  const worktree=rows.map(row=>String(row.worktree || '')).find(Boolean) || '';
-  const lane={key,recorded:rows.length>0,branch,worktree,children:rows.length,
-    label:branch || worktree || "main (the node's own checkout)"};
-  lane.checklist=laneChecklist(lane,rows);
-  return lane;
-}
-// One read of the session ledger grouped into lanes, indexed by session id: every card's lane comes
-// from here, and the index is what a dispatch row is joined against.
-function lanesBySession(sessions) {
-  const groups=new Map();
-  for(const session of sessions || []) {
-    if(!session || !session.id) continue;
-    const key=String(session.workspace_branch || '') || String(session.worktree || '') || MAIN_LANE;
-    if(!groups.has(key)) groups.set(key,[]);
-    groups.get(key).push(session);
-  }
-  const index=new Map();
-  for(const [key,rows] of groups) {
-    const lane=laneRecord(key,rows);
-    for(const row of rows) index.set(String(row.id),lane);
-  }
-  return index;
-}
-// A child with no session row of its own has no recorded checkout to be grouped by, and saying so is
-// the only honest grouping: inventing a lane for it would file it under somebody else's worktree.
-function taskLane(task,index) {
-  const lane=task.session_id ? index.get(String(task.session_id)) : null;
-  if(lane) return lane;
-  const unknown={key:UNRECORDED_LANE,recorded:false,worktree:'',branch:'',children:1,label:UNRECORDED_LANE};
-  unknown.checklist=['merged','retired','clean','main-only'].map(outcome=>({outcome,state:'unknown',
-    detail:'no session record for this child'}));
-  return unknown;
-}
+// The four outcomes are NOT computed anywhere else any more: `main-only` (a lane that holds no
+// branch and no worktree of its own, so its children work in the node's checkout) was answered here
+// and printed only on those cards. What survives of the ledger read is the live list's own rows
+// (`liveChildRows`), which state what is running and where, not what is owed on a checkout.
 
 // The run counts this window already holds, per child session.
 //
 // A painted child keeps its renderer state (that is what makes its pane survive a repaint), and the
-// run counts are part of it. That is the only place a card's `◈` `✧` `⚒` `◷` can come from without a
-// second transcript read per row, so a child nobody has opened simply has no numbers here - which the
-// card then omits rather than fills with zeros.
+// run counts are part of it. That is the only place a `Live Subagents` row's `◈` `✧` `⚒` `◷` can come
+// from without a second transcript read per row, so a child nobody has opened simply has no numbers
+// here - which the row then omits rather than fills with zeros.
 function runCountsByPane() {
   const runs={};
   for(const pane of orchestratorPanel?.allPanes?.() || []) {
@@ -6840,11 +6772,9 @@ async function refreshOrchestrator() {
     // node's own subagent view too, and hand the panel every child with the source of each fact.
     const [sessions,health]=await Promise.all([orchestratorRead('sessions'),orchestratorRead('health')]);
     const sessionRows=(sessions.value && sessions.value.sessions) || [];
-    // The cards are grouped by lane, so each one is handed the lane its own session recorded. This
-    // is also the only place the panel needs the ledger for: a card is a child, and its lane is a fact
-    // about where that child works.
-    const lanes=lanesBySession(sessionRows);
-    orchestratorPanel.data=(list.subagents || []).map(task=>({...task,lane:taskLane(task,lanes)}));
+    // The children, as the panel reads them: the bar no longer groups them into cards, so the task
+    // list is handed over as it is and `Live Subagents` remains the one place they are listed.
+    orchestratorPanel.data=list.subagents || [];
     const live=liveChildRows({sessions:sessionRows,
       dispatches:list.subagents || [],fleet,health:health.value || {},
       errors:[sessions.error,health.error].filter(Boolean),
