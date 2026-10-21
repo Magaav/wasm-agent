@@ -1086,7 +1086,6 @@ function currentBubble() {
     reasoningBlock = null;
     reasoningText = "";
     reasoningRound = "";
-    endedReasoning = null;
     runBubble = document.createElement("wa-message");
     runBubble.setAttribute("role", "assistant");
     transcript.append(runBubble);   // connecting is what builds .body
@@ -1261,6 +1260,15 @@ function beginReasoningRound() {
   reasoningText = reasoningText ? reasoningText + "\n\n" + reasoningRound : reasoningRound;
   reasoningRound = "";
 }
+// THE STEPS THIS RUN HAS DRAWN, IN THE ORDER THE READER SEES THEM. A topic is appended when its
+// event arrives, so the last one in document order is where the next step belongs. Document order and
+// not the bubble's direct children, because the answer's fold nests the earlier steps inside the run
+// topic while a step that arrives after the fold is still a direct child of the bubble.
+const RUN_TOPIC_SELECTOR = "wa-trace, wa-reasoning, wa-commentary, wa-retry, wa-summary, wa-steering, .seg";
+function lastRunTopic(root) {
+  const topics = root.querySelectorAll(RUN_TOPIC_SELECTOR);
+  return topics.length ? topics[topics.length - 1] : null;
+}
 function appendReasoning(text, complete = false) {
   if (!text && !complete) return reasoningBody();
   const bubble = currentBubble();
@@ -1271,17 +1279,22 @@ function appendReasoning(text, complete = false) {
     // next topic, normally a tool call - I want it to stay so I can read the trace and follow up"). The
     // connection, not the parent, is the test now, so the same topic keeps growing wherever it sits.
     //
-    // A NEW train of thought starts BESIDE the topic that ended, never at the far end of the bubble: the
-    // run's children are in the order its steps happened in, and appending here would draw the next
-    // thought below the step that followed the last one.
+    // A NEW train of thought starts AT THE POSITION THIS STEP ARRIVED IN. Every topic is appended
+    // when its event arrives, so the LAST topic in document order is the step this thought follows.
+    // It is NOT drawn beside the thought that ended: that thought's own node is earlier in the run,
+    // and the step that ended it (a tool call, a commentary) came after it, so drawing there put
+    // every later round's thinking ABOVE the steps it followed - the operator's "thinking ... stacking
+    // in the top of the tool calls topic" (one run's thinking above all five tool steps). Document
+    // order, not the bubble's direct children: the answer's fold nests the earlier steps inside the
+    // run topic while a step that arrives after the fold is still a direct child of the bubble.
+    //
     // A topic like every other one: <wa-reasoning> builds the same header as the tool calls beside it,
     // so the thinking reads as a step of the same kind rather than as a different thing.
     reasoningBlock = document.createElement("wa-reasoning");
     reasoningBlock.open = !replayingMessages;
-    const ended = endedReasoning;
-    if (ended && ended.isConnected && ended.parentNode) ended.parentNode.insertBefore(reasoningBlock, ended.nextSibling);
+    const lastTopic = lastRunTopic(bubble.body);
+    if (lastTopic && lastTopic.parentNode) lastTopic.parentNode.insertBefore(reasoningBlock, lastTopic.nextSibling);
     else bubble.body.append(reasoningBlock);
-    endedReasoning = null;
     reasoningText = "";
     reasoningRound = "";
     anchorRunStepContent(reasoningBlock);
@@ -1582,12 +1595,10 @@ function markPendingTextIncomplete() {
 
 // A train of thought ENDS here - not at a round boundary and not at a reply, only where the thought
 // really stopped (an interrupted attempt whose reasoning is preserved). The node stays exactly where it
-// is; what stops is the appending, and `endedReasoning` is where the NEXT thought starts beside, so the
-// replacement is drawn in place and the order of the run's children does not change.
-let endedReasoning = null;
+// is; what stops is the appending, so the replacement is drawn in the position it arrived in (see
+// `appendReasoning`).
 function endReasoningTopic() {
   if (!reasoningBlock) return;
-  endedReasoning = reasoningBlock;
   reasoningBlock = null;
   reasoningText = "";
   reasoningRound = "";
@@ -1597,12 +1608,12 @@ function endReasoningTopic() {
 // thinking or decision topic started, so a commentary or a tool step that followed it read as if the
 // thought were still going (operator, 2026-10-2x). A topic begins -> the thinking is CLOSED where it
 // stands: header collapsed, body hidden, same node, same parent, same position - never deleted, never
-// re-created, and its text never moves. `endedReasoning` is the node the NEXT thought is drawn beside,
-// so the run's child order still reads as the order its steps happened in.
+// re-created, and its text never moves. The topic that follows is drawn in the position its own step
+// arrived in (see `appendReasoning`), which is what keeps the run's children in the order the provider
+// sent them.
 function sealReasoning() {
   if (!reasoningBlock) return;
   reasoningBlock.open = false;
-  endedReasoning = reasoningBlock;
   reasoningBlock = null;
   reasoningText = "";
   reasoningRound = "";
@@ -2466,10 +2477,14 @@ function handleEvent(event) {
     if (event.run_id) bubble.dataset.runId = String(event.run_id);
     if (!runStartedAt) runStartedAt = Date.now();
     markStreamedCommentaryIncomplete();
-    // A new round of the same run: the thinking that streamed so far is the finished part of this train
-    // of thought, and what follows writes after it (see `beginReasoningRound`). The thinking TOPIC is not
-    // closed or re-created here - that is what used to move the reader's thinking below the next step.
-    beginReasoningRound();
+    // A new round is ONE PROVIDER STEP, and one step's thinking is ONE TOPIC: the thought that
+    // streamed so far ENDS where it stands (same node, same parent, same position - see
+    // `sealReasoning`), and this step's reasoning draws a new node after the steps that already
+    // arrived (see `appendReasoning`). This is the hole the operator reported: the round boundary
+    // only moved the text into the finished part of the SAME node, so a round's thought landed in the
+    // topic drawn for an earlier round (or every round accumulated in the one topic above all the
+    // tool steps: "thinking 2575 chars" above five "1 tool call" topics).
+    sealReasoning();
     flushDecision();
   } else if (event.type === "run_counts") {
     applyRunCounts(event.counts);
@@ -3048,7 +3063,6 @@ function repaintMessages(rows, options = {}) {
   streamText = "";
   reasoningBlock = null;
   reasoningRound = "";
-  endedReasoning = null;
   streamedCommentaryBlock = null;
   streamedCommentaryText = "";
   phasePendingText = new Map();
@@ -3256,13 +3270,13 @@ function repaintMessages(rows, options = {}) {
 function captureRenderer() {
   return {transcript,runBubble,statusLine,statusLabel,statusElapsed,statusSpinner,runStepState,runCounts,
     statusPhase,lastAssistantBody,runStatusTicker,toolTicker,streamBody,streamText,phasePendingText,trace,lastTool,
-    reasoningBlock,reasoningText,reasoningRound,endedReasoning,streamedCommentaryBlock,streamedCommentaryText,runStartedAt,replayingMessages,
+    reasoningBlock,reasoningText,reasoningRound,streamedCommentaryBlock,streamedCommentaryText,runStartedAt,replayingMessages,
     replayMessageEndedAt,replayRunLastMessage,renderedMessageIds,rendererTask};
 }
 function restoreRenderer(value) {
   ({transcript,runBubble,statusLine,statusLabel,statusElapsed,statusSpinner,runStepState,runCounts,
     statusPhase,lastAssistantBody,runStatusTicker,toolTicker,streamBody,streamText,phasePendingText,trace,lastTool,
-    reasoningBlock,reasoningText,reasoningRound,endedReasoning,streamedCommentaryBlock,streamedCommentaryText,runStartedAt,replayingMessages,
+    reasoningBlock,reasoningText,reasoningRound,streamedCommentaryBlock,streamedCommentaryText,runStartedAt,replayingMessages,
     replayMessageEndedAt,replayRunLastMessage,renderedMessageIds,rendererTask}=value);
 }
 function childRenderKey(task) {return [activeNode,session,task?.session_id,task?.attempt_id||task?.subagent_id].join('|');}
@@ -3273,7 +3287,7 @@ function withChildRenderer(container,task,render) {
     transcript=container;runBubble=null;runStepState=null;runCounts=null;
     statusLine=null;statusLabel=null;statusPhase=null;statusElapsed=null;statusSpinner=null;runStatusTicker=null;toolTicker=null;
     trace=null;lastTool=null;lastAssistantBody=null;streamBody=null;streamText='';phasePendingText=new Map();
-    reasoningBlock=null;reasoningText='';reasoningRound='';endedReasoning=null;streamedCommentaryBlock=null;streamedCommentaryText='';runStartedAt=0;
+    reasoningBlock=null;reasoningText='';reasoningRound='';streamedCommentaryBlock=null;streamedCommentaryText='';runStartedAt=0;
     replayingMessages=false;replayMessageEndedAt=0;replayRunLastMessage=null;renderedMessageIds=new Set();
   }
   rendererTask=task;
