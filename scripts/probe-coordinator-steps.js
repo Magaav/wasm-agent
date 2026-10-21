@@ -24,11 +24,15 @@
     check(bubble.querySelector('wa-step[data-state="running"]'), 'background phase is retained for debug');
     check(getComputedStyle(bubble.querySelector('wa-step')).display==='none','ordinary mode hides detailed phase rows');
     check(statusPhase.title.startsWith('Working')&&!statusPhase.hidden,'ordinary mode has a compact current phase');
-    check(statusLabel.hidden&&statusPhase.nextElementSibling===statusElapsed,'phase replaces redundant thinking label before total duration');
+    // WHY (operator, 2026-10-05): the compact row is ordered glyph, clock, label, facts - so the
+    // hidden label can no longer be the phase's next sibling. Same property: the phase IS the timed
+    // description and the facts still follow it on this one row.
+    check(statusLabel.hidden&&statusPhase.previousElementSibling===statusSpinner&&statusElapsed.previousElementSibling===statusLabel,'phase replaces redundant thinking label before total duration');
     setTranscriptDebug(transcript,'debug');
     check(getComputedStyle(bubble.querySelector('wa-step')).display!=='none','debug mode reveals phase history');
     check(bubble.body.querySelector(':scope > .chat-content-run-status'), 'live status is inside the balloon');
-    check(statusElapsed.textContent.endsWith(' · ◷ 1:05'), 'background elapsed time uses the saved start time');
+    // WHY: compact form - the total duration is `◷1:05`, glued, at the end of the same one line.
+    check(statusElapsed.textContent.endsWith(' ◷1:05'), 'background elapsed time uses the saved start time');
     check(!!runStatusTicker, 'background turns start the elapsed ticker');
     handleEvent({type:'status',text:'thinking'});
     handleEvent({type:'round',n:1});
@@ -157,15 +161,22 @@
     document.getElementById('panel').style.width='540px';
     handleEvent({type:'status',text:'model'});
     runStepState.active.started=Date.now()-9000;updateRunElapsed();
-    check(statusPhase.textContent==='9s'&&statusElapsed.textContent.endsWith(' · ◷ 1:05'),'compact screenshot has separate phase and total clocks');
+    // WHY: compact form - `✧ 1:05` style separators are gone; the two clocks are still separate
+    // elements (`9s` for the step, `◷1:05` for the run).
+    check(statusPhase.textContent==='9s'&&statusElapsed.textContent.endsWith(' ◷1:05'),'compact screenshot has separate phase and total clocks');
     const box=statusLine.getBoundingClientRect();
     for (const width of [320,540,800]) {
       document.getElementById('panel').style.width=width+'px';
       const spinnerBox=statusSpinner.getBoundingClientRect(),phaseBox=statusPhase.getBoundingClientRect(),totalBox=statusElapsed.getBoundingClientRect();
-      check(getComputedStyle(statusLine).whiteSpace==='normal','status does not inherit transcript pre-wrap at '+width);
+      // WHY (operator, 2026-10-05): the status row is ONE compact line. It is `nowrap` now (it used to
+      // be `normal` to defeat the transcript's pre-wrap), the activity glyph is glued to its clock
+      // (`✦4s`), and the facts follow that clock after two spaces instead of being pushed to the far
+      // right edge. Every fact is unchanged and still on this one 30px row.
+      check(getComputedStyle(statusLine).whiteSpace==='nowrap','status is one line, never a second row, at '+width);
       check(Math.abs(spinnerBox.width-15)<1&&Math.abs(spinnerBox.height-15)<1,'activity glyph keeps its fixed slot at '+width);
       check(Math.abs((phaseBox.top+phaseBox.bottom)/2-(totalBox.top+totalBox.bottom)/2)<1,'phase and total vertically aligned at '+width);
-      check(Math.abs(phaseBox.left-spinnerBox.right-5)<1&&phaseBox.right<=totalBox.left+1,'one spacing-scale gap before phase at '+width);
+      check(Math.abs(phaseBox.left-spinnerBox.right)<1,'the glyph is glued to its elapsed clock at '+width);
+      check(totalBox.left-phaseBox.right>=4&&totalBox.left-phaseBox.right<=12,'two spaces between the clock and the facts at '+width);
       check(statusLine.scrollWidth<=statusLine.clientWidth+1,'status fits at '+width);
     }
     document.getElementById('panel').style.width='540px';
