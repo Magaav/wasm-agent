@@ -179,6 +179,24 @@
       check(!shell.hasAttribute('title'), 'and gains no hover metadata it has no paths for');
       check(shell.querySelector('.tool-title').textContent === 'bash $ ls -la', 'its title is unchanged');
 
+      // ---- the command is TEXT, not HTML: it must not show its own escapes ---------------------------
+      // WHY: the row inserts the title with `createTextNode`, so a title escaped for HTML showed the
+      // entities themselves - an operator screenshot of a bash verdict read `cd repo &amp;&amp; echo
+      // &quot;ok&quot; 2&gt;&amp;1`. The property is the rendered textContent: the characters a human
+      // types are there, and no entity spelling of them is. Asserted on the title AND on the whole row,
+      // because the settled verdict line echoes the same text beside the outcome.
+      call('call-bash-escapes', 'bash', { command: 'cd repo && echo "ok" \'done\' 2>&1' });
+      settle('bash', { code: 0, stdout: 'ok' });
+      const escaped = rowFor(transcript, 'call-bash-escapes');
+      const escapedTitle = escaped ? escaped.querySelector('.tool-title').textContent : '';
+      const escapedRow = escaped ? escaped.textContent : '';
+      check(escapedTitle.indexOf('&&') >= 0 && escapedTitle.indexOf('"') >= 0 &&
+        escapedTitle.indexOf("'") >= 0 && escapedTitle.indexOf('2>&1') >= 0,
+        'a bash row must show the command a human reads, saw ' + JSON.stringify(escapedTitle));
+      check(['&amp;', '&quot;', '&#39;', '&gt;'].every((entity) =>
+        escapedTitle.indexOf(entity) < 0 && escapedRow.indexOf(entity) < 0),
+        'and no HTML entity spelling of those characters, saw ' + JSON.stringify(escapedRow.slice(0, 200)));
+
       // ---- the child pane is the same renderer, not a second one ---------------------------------
       const childRows = [
         { seq: 1, id: 'child-user', role: 'user', content: 'change the file', created_at: Date.now() / 1000 },
