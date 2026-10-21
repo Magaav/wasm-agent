@@ -11,16 +11,28 @@
   const active=['running','accepted','queued','placing'].map((state,i)=>task('active-'+i,state,{settled:false}));
   const data=[...history,...active,task('contradiction','running',{settled:true}),task('newest-old','running',{session_id:'one-conversation',created_at:1}),task('newest-final','completed',{session_id:'one-conversation',created_at:2,settled:true})];
   panel.data=data;
-  check(panel.sidebar.querySelectorAll('.agent-card').length===4,'only positive active states produce cards despite 1000 historical records');
+  // WHY THIS MOVED: the bar no longer draws a card per child (the operator controls children in the
+  // `Live Subagents` topic, so those cards were removed with their `<nav aria-label="Agents">`). The
+  // property under test - only POSITIVE active states count, despite 1000 historical records - is now
+  // asserted on the panel's own active list, and the bar is additionally asserted to draw no card and
+  // no lane group at all, so a resurrected card list cannot pass this probe.
+  check(panel.activeTasks.length===4&&panel.sidebar.querySelectorAll('.agent-card,.lane').length===0,'only positive active states are active despite 1000 historical records, and the bar draws no cards');
   check(panel.tasks.length===1006,'history remains in data rather than deleted');
   check(panel.activeTasks.length===4,'deduplication precedes active filtering so old runs do not resurrect');
-  check(!panel.sidebar.textContent.includes('history-'),'terminal/unknown history never clutters lane cards');
+  // WHY THIS MOVED: the words under test are the same (no historical child may reach the left bar);
+  // the element that could carry them went with the cards, so the assertion is made over the whole
+  // bar instead of over the card list inside it.
+  check(!panel.sidebar.textContent.includes('history-'),'terminal/unknown history never reaches the left bar');
   const pane=panel.pin(active[0]);pane.input.value='unsent draft';
   panel.data=[...history,...active.slice(1),task('active-0','completed',{settled:true})];
-  check(panel.sidebar.querySelectorAll('.agent-card').length===3,'settling removes card immediately');
+  // WHY THIS MOVED: `settling removes the card immediately` is asserted on the list the bar is built
+  // from now that the card itself is gone; a settled child leaves the active list in the same tick.
+  check(panel.activeTasks.length===3&&!panel.activeTasks.some(task=>task.subagent_id==='active-0'),'settling removes the child from the active list immediately');
   check(pane.isConnected&&pane.input.value==='unsent draft'&&pane.task.state==='completed','already-open settled pane and draft remain, with updated outcome');
   panel.data=history;
-  check(panel.sidebar.querySelectorAll('.agent-card,.lane').length===0,'idle history creates no cards or lane groups');
+  // WHY THIS MOVED: there are no cards or lane groups left to count; an idle history still creates no
+  // active task and leaves no such element behind, which is the property the old count stated.
+  check(panel.activeTasks.length===0&&panel.sidebar.querySelectorAll('.agent-card,.lane').length===0,'idle history creates no active tasks and no cards or lane groups');
   const sessions=[{id:'session-direct',parent_session_id:'parent',state:'unfinished',worktree:'retained'},
    {id:'session-abandoned',parent_session_id:'parent',state:'unfinished',worktree:'retained'},
    {id:'session-operator',state:'unfinished',worktree:'owned'}];
