@@ -6240,79 +6240,61 @@ async function saveNodeName(name) {
   await refreshNodes();
 }
 
-function formatResourceBytes(bytes) {
-  const value = Number(bytes);
-  if (!Number.isFinite(value) || value <= 0) return "?";
-  const units = ["B", "KB", "MB", "GB", "TB", "PB"];
-  const power = Math.min(Math.floor(Math.log(value) / Math.log(1024)), units.length - 1);
-  const amount = value / Math.pow(1024, power);
-  return `${amount >= 10 || power === 0 ? amount.toFixed(0) : amount.toFixed(1)}${units[power]}`;
-}
-
-function resourcePercent(value) {
-  const number = Number(value);
-  return Number.isFinite(number) ? `${Math.round(number)}%` : "?";
-}
-
-function formatNodeResources(resources, online) {
-  if (!online) return "resources offline";
-  if (!resources || typeof resources !== "object") return "resources pending";
-  const ram = resources.memory || {};
-  const disk = resources.disk || {};
-  return `CPU ${resourcePercent(resources.cpu?.used_percent)} · RAM ${resourcePercent(ram.used_percent)}/${formatResourceBytes(ram.total_bytes)} · DISK ${resourcePercent(disk.used_percent)}/${formatResourceBytes(disk.total_bytes)}`;
+// The node's two lines - its name, then its statistics - are `<wa-node>` (ui/components.js), the ONE
+// drawing the engine menu's node list and the orchestrator's `Nodes` topic both use; this row is that
+// component plus the list's own furniture, which the component deliberately does not draw.
+function nodeRow(node) {
+  const row = document.createElement("div");
+  row.className = "node" + (node.online ? " online" : "");
+  const dot = document.createElement("span");
+  dot.className = "node-dot";
+  // Which of these is the window talking to? Without it a list of four nodes is four
+  // names and no way to tell which one this is.
+  if (node.local_node) {
+    row.classList.add("node-local");
+    const badge = document.createElement("span");
+    badge.className = "node-this";
+    badge.textContent = "this node";
+    row.append(badge);
+  }
+  const entry = document.createElement("wa-node");
+  entry.node = node;
+  const kind = document.createElement("span");
+  kind.className = "node-kind";
+  kind.textContent = node.kind;
+  const caps = document.createElement("span");
+  caps.className = "node-caps";
+  caps.textContent = (node.capabilities || []).join(" ");
+  row.append(dot, entry, kind, caps);
+  row.append(nodeButton("talk", () => { balloon.close(); input.focus(); }));
+  if (node.kind === "peer" && node.online && me.role === "master") {
+    row.append(nodeButton("control", () => openControl(node.name)));
+  }
+  return row;
 }
 
 async function refreshNodes() {
   try {
     const payload = await (await apiFetch("nodes", { headers: apiHeaders() })).json();
     nodeList = payload.nodes || [];
+    // One sample, two readers: the same payload this list draws feeds the orchestrator's `Nodes` topic.
+    // A second fetch inside the panel would be a second idea of which nodes are online.
+    if (orchestratorPanel) orchestratorPanel.nodes = nodeList;
     renderNodeSelect();
     nodesBinding.textContent = payload.binding || "";
     nodesBox.replaceChildren();
     let desktopNode = null;
     let hostRow = null;
     for (const node of payload.nodes || []) {
-      const row = document.createElement("div");
-      row.className = "node" + (node.online ? " online" : "");
-      const dot = document.createElement("span");
-      dot.className = "node-dot";
-      const name = document.createElement("span");
-      name.className = "node-name";
-      name.textContent = node.name;
-      // Which of these is the window talking to? Without it a list of four nodes is four
-      // names and no way to tell which one this is.
       // The client executor is not a second node: it is the desktop this node's window runs
       // on, so its state belongs on this node's row rather than in a row of its own. The
       // payload still carries it, because the picker and the capability tiers read it.
       if (node.kind === "client") {
         desktopNode = node;
-        row.remove();
         continue;
       }
-      if (node.local_node) {
-        row.classList.add("node-local");
-        const badge = document.createElement("span");
-        badge.className = "node-this";
-        badge.textContent = "this node";
-        row.append(badge);
-      }
       if (node.kind === "host") updateNodeLabel(node.name, node.worktree);
-      const kind = document.createElement("span");
-      kind.className = "node-kind";
-      kind.textContent = node.kind;
-      const caps = document.createElement("span");
-      caps.className = "node-caps";
-      caps.textContent = (node.capabilities || []).join(" ");
-      row.append(dot, name, kind, caps);
-      const resources = document.createElement("span");
-      resources.className = "node-resources";
-      resources.textContent = formatNodeResources(node.resources, node.online);
-      resources.title = "Latest node sample: CPU use · RAM use/total · workspace disk use/total";
-      row.append(resources);
-      row.append(nodeButton("talk", () => { balloon.close(); input.focus(); }));
-      if (node.kind === "peer" && node.online && me.role === "master") {
-        row.append(nodeButton("control", () => openControl(node.name)));
-      }
+      const row = nodeRow(node);
       if (node.kind === "host") hostRow = row;
       nodesBox.append(row);
     }
@@ -6738,7 +6720,7 @@ async function refreshOrchestrator() {
     }
     for(const pane of orchestratorPanel.allPanes()) await refreshAgentPane(pane);
     orchestratorFailures=sessions.error||health.error?orchestratorFailures+1:0;
-    orchestratorPanel.message=`${orchestratorPanel.activeTasks.length} active card(s) · closing this window keeps work running`;
+    orchestratorPanel.activeCount=orchestratorPanel.activeTasks.length;
   } catch(error) { orchestratorFailures++;orchestratorPanel.message='Orchestration unavailable: '+error.message; }
   finally {
     orchestratorPolling=false;
@@ -7178,9 +7160,11 @@ function mountOrchestrator() {
   document.body.append(orchestratorPanel);
   if(native?.maximize)native.maximize();
   orchestratorPanel.addEventListener('input',saveOrchestratorLayout);
+  // The panel's own left-bar topics are fed from the engine's node list, so the window needs that list.
+  // This is the same read the engine menu makes, not a second poller.
+  refreshNodes();
   orchestratorPanel.addEventListener('orchestrator-action',async event=>{
     const {action}=event.detail;
-    if(action==='close') { saveOrchestratorLayout(); if(native?.closeView)native.closeView();else window.close();return; }
     if(action==='layout') {
       if(!orchestratorPanel.restoring)saveOrchestratorLayout();
       // Startup/poll already refreshes restored panes. A layout is not a reason
@@ -7193,10 +7177,6 @@ function mountOrchestrator() {
         await orchestratorRequest({action:'placement',policy:orchestratorPanel.policy});
         orchestratorPanel.fleet=null;
         orchestratorPanel.message='Node order and limits saved.';
-      } else if(action==='refresh') {
-        orchestratorPanel.fleet=null;
-        for(const pane of orchestratorPanel.allPanes()){paneJournals.delete(pane);paneRetries.delete(pane);}
-        await refreshOrchestrator();
       }
     } catch(error) { orchestratorPanel.message=error.message; }
   });
@@ -7218,11 +7198,6 @@ function mountOrchestrator() {
       } else pane.notice.setNotice('submission',action==='message' ? 'Message accepted in this session.' : 'Cancellation requested.');
     } catch(error) { pane.notice.setNotice('submission',error.message); }
     finally { if(button)button.disabled=false; }
-  });
-  document.addEventListener('keydown',event=>{
-    // Escape leaves the orchestrator window. A promoted conversation is its own window: it closes the
-    // way a window closes (its own control), not with this key (DESIGN.md §3).
-    if(event.key==='Escape') orchestratorPanel.querySelector('[data-action="close"]').click();
   });
   refreshOrchestrator();
 }
