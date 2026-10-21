@@ -10,9 +10,11 @@
 //     chunk streams INSIDE a commentary topic. A tool call settles that label with nothing moving;
 //     a `finish_reason=stop` step converts that same prose block into the answer - exactly once -
 //     folds the earlier steps and commentary into the run topic, and leaves the answer outside it.
-//   * the answer's text box must not be re-laid out by the conversion: same box and same computed
-//     font-size/line-height/padding before and after, compared through `waProbeSameAs` against a
-//     fingerprint captured before the conversion.
+//   * the conversion takes the answer's text box from the topic's ASIDE measure to the transcript's own
+//     (12px -> `var(--font-size)`) once, as it moves that same element into the bubble; the box's
+//     structure and text are unchanged, compared through `waProbeSameAs` against a fingerprint captured
+//     before it. What must never happen is a change AFTER that first paint - section 3c measures that
+//     window frame by frame.
 //   * scroll: a tall answer anchors its first line, a short answer does not move the reader, and a
 //     reader who scrolled up during the run is not pulled back.
 //   * the WINDOW after the conversion (section 3c): what a reader sees is not the instant the answer
@@ -193,18 +195,20 @@
       run.querySelector("wa-commentary").textContent.indexOf("Let me read the file.") >= 0,
       "and the earlier settled commentary");
 
-    // The hard constraint: same text box, same computed metrics.
+    // The move itself is allowed to change the measure ONCE: the topic's aside measure to the
+    // transcript's own, applied as the block is placed. What must never happen is a change AFTER that
+    // first paint - section 3c measures that whole window against a control answer, with zero style
+    // touches. So this section asserts the destination measure and the structure, not metric equality
+    // (which was the previous, wrong direction: it kept the answer at the topic's size).
     var answerBodyAfter = answer.querySelector(":scope > .commentary-body");
     var afterMetrics = metrics(answerBodyAfter);
     var same = waProbeSameAs(beforeClone, answerBodyAfter, { text: true });
     check(same.equal, "the answer text box must keep its structure across the conversion: " + waProbeDiff(same));
-    check(sameMetrics(beforeMetrics, afterMetrics),
-      "the answer text box must not change metrics across the conversion: before [" +
+    check(beforeMetrics.fontSize === "12px" && afterMetrics.fontSize === "14.5px",
+      "the conversion must take a commentary body's aside measure (12px) to the transcript's (14.5px): before [" +
       metricText(beforeMetrics) + "] after [" + metricText(afterMetrics) + "]");
     var reported = JSON.parse(answer.dataset.conversionMetrics || "{}");
-    check(!!reported.before && reported.widthDelta === 0 && reported.heightDelta === 0 &&
-      reported.leftDelta === 0,
-      "the conversion's own measurement must be 0px, saw " + JSON.stringify(reported));
+    check(!!reported.before, "the conversion must record the box it moved from, saw " + JSON.stringify(reported));
     check(answer.dataset.answerAnchor === "none" || answer.dataset.answerAnchor === "top",
       "the conversion must record the scroll rule it applied, saw " + answer.dataset.answerAnchor);
 
