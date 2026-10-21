@@ -500,18 +500,35 @@
       "the final answer must fold the thinking topic into the run topic, keeping it as the same node");
     check(!!firstThought && firstThought.open === false,
       "the fold must not reopen a topic the next step closed");
-    // A reply is not a topic, so no seal happened: the next thought continues the OPEN topic where it
-    // now sits (inside the run topic), and the closed earlier topic is still untouched.
+    // A reply is not a topic, so the thinking stays open through it. WHY THIS CHANGED (operator,
+    // 2026-10-2x): one thinking topic per PROVIDER STEP, not one per run - the operator reversed the
+    // earlier "one train of thought is one topic" rule after reporting a whole run's thinking stacked
+    // above its tool steps ("thinking 2575 chars" above five "1 tool call" topics: "in order of the
+    // received from the provider step"). This assertion used to state the opposite - "no topic followed
+    // the reply, so the burst continues the open topic" - which is exactly the accumulation now
+    // forbidden. A `round` is a topic boundary like a tool step or a commentary, so the burst after it
+    // is a NEW topic, drawn after everything the earlier steps drew, and the folded earlier topic is
+    // still untouched.
     window.handleEvent({ type: "round", n: 3, tools: 2 });
     window.handleEvent({ type: "reasoning", text: "Third, still thinking." });
-    check(!!thinkBody && thinkBody.querySelectorAll("wa-reasoning").length === 2,
-      "no topic followed the reply, so the burst continues the open topic; saw " +
-      (thinkBody ? thinkBody.querySelectorAll("wa-reasoning").length : "none"));
-    var thirdText = secondThought
-      ? secondThought.querySelector(":scope > .reasoning-body").textContent : "";
+    var afterFoldThoughts = thinkBody ? Array.from(thinkBody.querySelectorAll("wa-reasoning")) : [];
+    check(afterFoldThoughts.length === 3,
+      "the round after the fold must start its OWN thinking topic (one topic per provider step); saw " +
+      afterFoldThoughts.length + " wa-reasoning node(s)");
+    var thirdThought = afterFoldThoughts[2] || null;
+    check(!!thirdThought && thirdThought !== secondThought && thirdThought.open === true,
+      "the burst after the round boundary must be a new, open topic, not more text in the earlier one");
+    var thirdText = thirdThought
+      ? thirdThought.querySelector(":scope > .reasoning-body").textContent : "";
     check(thirdText.indexOf("Third, still thinking.") >= 0,
-      "the burst after the fold must append into the open topic where it now sits; body reads " +
-      JSON.stringify(thirdText));
+      "the new round's text must land in its own topic; body reads " + JSON.stringify(thirdText));
+    var secondTextAfterRound = secondThought
+      ? secondThought.querySelector(":scope > .reasoning-body").textContent : "";
+    check(secondTextAfterRound.indexOf("Third, still thinking.") < 0,
+      "no round's text may land in another round's topic; the earlier topic reads " +
+      JSON.stringify(secondTextAfterRound));
+    check(!!secondThought && secondThought.open === false && secondThought.body.hidden === true,
+      "the round boundary must close the previous thinking topic where it stands");
     // The fold is the ONE move allowed: the closed topic is nested into the run topic with the rest of
     // the route. It must still be the same node, closed, with the same text - the index/geometry
     // property was already asserted above, where a step (not the answer) arrived.
@@ -551,10 +568,107 @@
       afterCommentary.length);
     window.handleEvent({ type: "done" });
 
+    // ---- 8. ONE PROVIDER STEP'S THINKING IS ONE TOPIC, IN THE ORDER THE STEPS ARRIVED -------------
+    // Operator report (2026-10-2x), verbatim: "thinking is not correctly in the step by step order, it
+    // is stacking in the top of the tool calls topic. The correct behavior should be in order of the
+    // received from the provider step, not rearranging the order." Screenshot: ONE `thinking 2575 chars`
+    // topic above five `1 tool call` topics - a whole run's thinking in one block at the top.
+    //
+    // The run is driven the way the node emits it (lua/core/agent.lua): a `round`, that step's
+    // reasoning (streamed, then the step's authoritative `complete` copy), then the step's tool call and
+    // its result, then the next `round`. What must be true: every step's thinking is its OWN topic, and
+    // the topics read top to bottom in exactly the order the provider sent them - thinking, tool,
+    // thinking, tool - never stacked at the top and never merged into one topic.
+    window.handleEvent({ type: "done" });
+    window.handleEvent({ type: "round", n: 1, tools: 2 });
+    window.handleEvent({ type: "reasoning", text: "Round one: read ui/app.js." });
+    window.handleEvent({ type: "reasoning", text: "round one: the header is drawn above its body.", complete: true });
+    var ordBubble = lastAssistant();
+    var ordBody = ordBubble && ordBubble.body;
+    function ordText(topic) {
+      var node = topic && topic.querySelector(":scope > .reasoning-body");
+      return node ? node.textContent : "";
+    }
+    var roundOne = ordBody && ordBody.querySelector(":scope > wa-reasoning");
+    check(!!roundOne, "step order: the first round's thinking must draw a thinking topic");
+    check(/round one/i.test(ordText(roundOne)) && !/round two/i.test(ordText(roundOne)),
+      "step order: the first thinking topic must carry only round one's text; reads " + JSON.stringify(ordText(roundOne)));
+    var roundOneIndex = roundOne ? indexIn(ordBody, roundOne) : -1;
+    window.handleEvent({ type: "decision", call_id: "ord-call-1", name: "read",
+      arguments_text: '{"path":"ui/app.js"}' });
+    window.handleEvent({ type: "tool", call_id: "ord-call-1", name: "read",
+      arguments: { path: "ui/app.js" } });
+    window.handleEvent({ type: "tool_result", name: "read", call_id: "ord-call-1",
+      result: { content: "ok" } });
+    var ordStep1 = ordBody && ordBody.querySelector(":scope > wa-trace");
+    check(!!ordStep1, "step order: round one's tool step must draw its own step topic");
+
+    window.handleEvent({ type: "round", n: 2, tools: 2 });
+    window.handleEvent({ type: "reasoning", text: "round two: now check the second file." });
+    var ordThoughts = ordBody ? Array.from(ordBody.querySelectorAll(":scope > wa-reasoning")) : [];
+    check(ordThoughts.length === 2,
+      "step order: one topic per provider step - round two's thinking must be a SECOND topic, saw " +
+      ordThoughts.length + " wa-reasoning node(s)");
+    var roundTwo = ordThoughts[1] || null;
+    check(!!roundTwo && roundTwo !== roundOne, "step order: the second round must not re-use the first topic");
+    check(!!roundOne && !!ordStep1 && precedes(roundOne, ordStep1),
+      "step order: round one's thinking must stay ABOVE the tool step it preceded (compareDocumentPosition)");
+    check(!!ordStep1 && !!roundTwo && precedes(ordStep1, roundTwo),
+      "step order: round two's thinking must be drawn AFTER the tool step that preceded it, not stacked " +
+      "above it (compareDocumentPosition) - the operator's \"stacking in the top of the tool calls topic\"");
+    check(/round two/i.test(ordText(roundTwo)) && !/round one/i.test(ordText(roundTwo)),
+      "step order: the second thinking topic must carry only round two's text; reads " + JSON.stringify(ordText(roundTwo)));
+    check(!!roundOne && /round one/i.test(ordText(roundOne)) && !/round two/i.test(ordText(roundOne)),
+      "step order: no round's text may land in another round's topic - round one reads " + JSON.stringify(ordText(roundOne)));
+    check(!!roundOne && indexIn(ordBody, roundOne) === roundOneIndex,
+      "step order: the first thinking topic must keep its own position after the second round arrives " +
+      "(was " + roundOneIndex + ", now " + (roundOne ? indexIn(ordBody, roundOne) : "gone") + ")");
+
+    window.handleEvent({ type: "decision", call_id: "ord-call-2", name: "read",
+      arguments_text: '{"path":"ui/app.js","offset":10}' });
+    window.handleEvent({ type: "tool", call_id: "ord-call-2", name: "read",
+      arguments: { path: "ui/app.js", offset: 10 } });
+    window.handleEvent({ type: "tool_result", name: "read", call_id: "ord-call-2",
+      result: { content: "ok" } });
+    var ordSteps = ordBody ? Array.from(ordBody.querySelectorAll(":scope > wa-trace")) : [];
+    check(ordSteps.length === 2, "step order: round two's tool step must be its own step topic, saw " +
+      ordSteps.length + " wa-trace node(s)");
+    check(!!roundTwo && ordSteps[1] && precedes(roundTwo, ordSteps[1]),
+      "step order: round two's thinking must stay above round two's tool step");
+    // The order the reader sees, top to bottom: thinking, tool, thinking, tool.
+    function topicOrder(body) {
+      if (!body) return [];
+      return Array.from(body.querySelectorAll("wa-reasoning, wa-trace"))
+        .map((node) => node.tagName === "WA-REASONING" ? "thinking" : "tool");
+    }
+    check(topicOrder(ordBody).join(",") === "thinking,tool,thinking,tool",
+      "step order: the run's steps must read in the exact order the provider sent them - " +
+      "thinking, tool, thinking, tool - saw [" + topicOrder(ordBody).join(",") + "]");
+
+    // The final answer folds the route into the run topic: the same order must survive the fold, with
+    // each round's text still in its own topic.
+    window.handleEvent({ type: "reply", message_id: "ord-answer", text: "Both files are fine." });
+    var ordRun = ordBody && ordBody.querySelector(":scope > wa-run");
+    check(!!ordRun, "step order: the final answer must fold the route into a run topic");
+    check(topicOrder(ordBody).join(",") === "thinking,tool,thinking,tool",
+      "step order: after the fold the run topic's children must still read thinking, tool, thinking, " +
+      "tool - saw [" + topicOrder(ordBody).join(",") + "]");
+    check(!!ordRun && ordRun.querySelectorAll("wa-reasoning").length === 2,
+      "step order: the folded run topic must still hold exactly two thinking topics, saw " +
+      (ordRun ? ordRun.querySelectorAll("wa-reasoning").length : "none"));
+    check(/round one/i.test(ordText(roundOne)) && !/round two/i.test(ordText(roundOne)) &&
+      /round two/i.test(ordText(roundTwo)) && !/round one/i.test(ordText(roundTwo)),
+      "step order: the fold must not merge the rounds; one reads " + JSON.stringify(ordText(roundOne)) +
+      ", two reads " + JSON.stringify(ordText(roundTwo)));
+    window.handleEvent({ type: "done" });
+
     var verdict = "PASS: run steps stay in the bubble until the final answer nests them; a thinking " +
       "topic CLOSES IN PLACE (same node, same index, same top, same text, body hidden - never " +
       "deleted, never re-created) when the next topic of any kind begins - a decision, a tool step, " +
-      "or a commentary - and a thought after that is a new node drawn in the run's own order; and on " +
+      "or a commentary - and a thought after that is a new node drawn in the run's own order; " +
+      "every provider step's thinking is its OWN topic, drawn in the position that step arrived in, " +
+      "so a run of two rounds with a tool step between reads thinking, tool, thinking, tool - never " +
+      "stacked above the steps it followed and never merged into another round's topic; and on " +
       "every route a commentary is an ordinary topic - header above the body, body inside the topic " +
       "box, the streamed sentence kept in its own place (moving only by the measured header height) " +
       "- with no in-place state, in the main chat and in a subagent pane alike";
