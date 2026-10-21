@@ -180,6 +180,18 @@ $harness = @'
       document.getElementById("notify-state").textContent === "on for this device",
       "the device-local bell must survive a real reload, saw: " + localStorage.getItem("wa.notify.settlement") +
       " / " + document.getElementById("notify-state").textContent);
+    // The reviewer policy, read back after a real navigation. This page stored a 0 before it
+    // reloaded, so what comes back is a remembered choice and not the default: storage is the whole
+    // persistence, and no node call carries this.
+    var reviewerAfterReload = document.getElementById("require-reviewer");
+    check(!!reviewerAfterReload && reviewerAfterReload.checked === false && window.waRequireReviewer() === false &&
+      localStorage.getItem("wa.require-reviewer") === "0",
+      "a stored 0 must come back unchecked and published as false after a reload, saw checked=" +
+      (reviewerAfterReload ? reviewerAfterReload.checked : "no box") + " published=" +
+      (typeof window.waRequireReviewer === "function" ? window.waRequireReviewer() : "no waRequireReviewer") +
+      " stored=" + localStorage.getItem("wa.require-reviewer"));
+    // Leave the profile as the later stages expect it: this is the only place a 0 is stored.
+    localStorage.removeItem("wa.require-reviewer");
     var unrecordedCount = restored.querySelectorAll("wa-trace .tool-line.unrecorded").length;
     check(unrecordedCount === 2,
       "a real reload must close historical as well as current missing tool calls, saw " + unrecordedCount);
@@ -307,6 +319,47 @@ $harness = @'
   // Managed jobs are rules, after tools, and never optimistically reported enabled.
   check(document.querySelector('[data-target="tools-box"]').closest('.engine-topic').nextElementSibling.querySelector('[data-target="mcp-box"]'), 'MCP app capabilities follow tools in the engine');
   check(document.querySelector('[data-target="mcp-box"]').closest('.engine-topic').nextElementSibling.querySelector('[data-target="jobs-box"]'), 'Jobs follow MCP capabilities and retain automation controls');
+  // THE REVIEWER POLICY. One row in the engine panel stating the operator's policy - a worker
+  // delivery is re-read by a reviewer with fresh context before it is accepted - and nothing else:
+  // this build has no UI spawn path, so the box starts and configures no run. The default is ON, and
+  // nothing has been stored for `wa.require-reviewer` on this fresh profile, so what it shows is the
+  // default rather than a remembered choice.
+  var reviewerBox = document.querySelector("#engine .engine-policy input#require-reviewer");
+  var reviewerRow = reviewerBox && reviewerBox.closest(".engine-policy");
+  check(!!reviewerBox && !!reviewerRow && reviewerRow.parentElement.classList.contains("engine-body"),
+    "the require reviewer policy must be one row in the engine panel, saw: " +
+    (reviewerBox ? reviewerBox.outerHTML.slice(0, 90) : "no #require-reviewer"));
+  var reviewerLabel = document.querySelector('label[for="require-reviewer"]');
+  check(!!reviewerLabel && reviewerLabel.textContent === "require reviewer",
+    "the checkbox must be labelled `require reviewer`, saw: " +
+    JSON.stringify(reviewerLabel ? reviewerLabel.textContent : null));
+  check(!!reviewerBox && localStorage.getItem("wa.require-reviewer") === null && reviewerBox.checked === true &&
+    typeof window.waRequireReviewer === "function" && window.waRequireReviewer() === true,
+    "with nothing stored the reviewer policy must be ON, saw stored=" + localStorage.getItem("wa.require-reviewer") +
+    " checked=" + (reviewerBox ? reviewerBox.checked : "no box") + " published=" +
+    (typeof window.waRequireReviewer === "function" ? window.waRequireReviewer() : "no waRequireReviewer"));
+  check(!!reviewerRow && /re-read by a reviewer with fresh context/.test(reviewerRow.textContent),
+    "and the row must say what the policy means, saw: " + (reviewerRow ? reviewerRow.textContent : "no row"));
+  // Keyboard reachable, and named: a native checkbox whose label's `control` IS this box. The engine
+  // card is hidden until its mode is opened, so a `.focus()` here would assert about a display:none
+  // ancestor rather than about the control - the Tab stop and the label's own association are what the
+  // row promises, and a click below proves the change event reaches storage.
+  check(!!reviewerBox && reviewerBox.tagName === "INPUT" && reviewerBox.type === "checkbox" &&
+    reviewerBox.tabIndex >= 0 && !reviewerBox.disabled && !!reviewerLabel &&
+    reviewerLabel.control === reviewerBox,
+    "the policy checkbox must be a native checkbox with a Tab stop and the label that names it, saw tabIndex=" +
+    (reviewerBox ? reviewerBox.tabIndex : "no box") + " control=" +
+    (reviewerLabel ? !!reviewerLabel.control : "no label"));
+  // The switch is a switch: it stores 1/0 under the documented key and the published value follows.
+  reviewerBox.click();
+  check(reviewerBox.checked === false && localStorage.getItem("wa.require-reviewer") === "0" &&
+    window.waRequireReviewer() === false,
+    "unchecking must store 0 and publish false, saw stored=" + localStorage.getItem("wa.require-reviewer") +
+    " checked=" + reviewerBox.checked + " published=" + window.waRequireReviewer());
+  reviewerBox.click();
+  check(reviewerBox.checked === true && localStorage.getItem("wa.require-reviewer") === "1" &&
+    window.waRequireReviewer() === true,
+    "and checking it again must store 1 and publish true, saw stored=" + localStorage.getItem("wa.require-reviewer"));
   await refreshJobs();
   await refreshHooks();
   var hooksPanel = document.querySelector('#hooks-box wa-hook-events');
@@ -1021,6 +1074,14 @@ $harness = @'
     "a subagent result must render the shared topic with an icon");
   check(!!sub && /explore/.test(sub.textContent) && /abcdef01/.test(sub.textContent),
     "the topic must name the profile and the child session, saw " + (sub ? sub.textContent : "no topic"));
+  // THE TOPIC'S NAME. The reader sees `orchestration \u00b7 <profile>`, not the tool that started the child:
+  // the topic says what the run is for. The element, glyph and class hooks are unchanged
+  // (`wa-subagent`, `.subagent`, the `subagent-open` event), so only the one visible word moved -
+  // `subagent` in ui/components.js:795/:817 became `orchestration`.
+  check(!!sub && !!sub.querySelector(".trace-label") &&
+    sub.querySelector(".trace-label").textContent === "orchestration \u00b7 explore",
+    "the delegation topic must be named `orchestration \u00b7 <profile>`, saw: " +
+    (sub && sub.querySelector(".trace-label") ? JSON.stringify(sub.querySelector(".trace-label").textContent) : "no label"));
   check(!!sub && !!sub.body.querySelector("button"), "the child topic must link to the child session");
   // A reasoning model thinks before it speaks, and a panel that shows nothing
   // during that time is indistinguishable from a hung one. The count is also the
@@ -3696,6 +3757,7 @@ $harness = @'
     // Carry this page's verdict into a second real navigation. The next load gets an
     // unfinished session and an active /health response from fixtures.js before app.js boots.
     localStorage.setItem("wa-chat-session", "eeeeeeee-0000-0000-0000-000000000005");
+    localStorage.setItem("wa.require-reviewer", "0");
     sessionStorage.setItem("wa-ui-reload-stage", "active");
     location.reload();
     return;
