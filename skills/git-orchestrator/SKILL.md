@@ -93,6 +93,34 @@ this one has a procedure.
 - **The gate stays the coordinator's**, after every rewake and every respin, on a tree merged with
   current `main`. A skipped check is reported as skipped, never counted as green.
 
+### The reviewer, and the switch that turns it on
+
+The engine panel carries a `require reviewer` checkbox, **ON by default** (`wa.require-reviewer` in
+localStorage, defaulting to on when nothing is stored), published to the page as
+`window.waRequireReviewer()`. **This rule is what makes that switch mean something** — until it was
+written here, the checkbox was a policy nobody read.
+
+When it is **on**:
+
+1. A worker's delivery is **not accepted on the coordinator's gate alone**. Before merging, start ONE
+   reviewer child with: the worker's brief, its branch, and its report (if it made one).
+2. The reviewer is a **second implementer, not a critic**: it reads the diff, pushes the branch further
+   where it is wrong (same branch, its own commits), and answers once - `nothing required` or `changed
+   X`. There is no agree/disagree round; that is what keeps the cost one extra step.
+3. The reviewer **never merges and never deploys**. The branch is the mailbox; the coordinator lands.
+4. Acceptance says which it was: `reviewed by <child id>` or `not reviewed (require_reviewer off)`. If
+   the switch cannot be read, **review** - an unreadable policy is not permission to skip it.
+
+When it is **off**: the delivery is accepted on the coordinator's gate plus its own diff review, and
+the report line says so. That is the operator's explicit choice, not a silent default.
+
+What the reviewer is worth, measured today rather than argued: three deliveries settled with
+`"report":"absent"`, one worker deleted another lane's 27-line doc section out of scope, and one lane
+was killed by a deploy restart. The reviewer is the step that reads the branch instead of the claim.
+
+**The gate stays the coordinator's**, after every rewake and every respin, on a tree merged with
+  current `main`. A skipped check is reported as skipped, never counted as green.
+
 **What a landing must carry.** A landing missing any of these is not a landing:
 
 1. the **reviewer's independent verdict** on the exact tip, from a lane that did not produce it

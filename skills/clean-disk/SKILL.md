@@ -65,7 +65,68 @@ Release only worktrees that are **clean, inactive, and merged** (`session_worktr
 leave the rest. Report the candidates with sizes so the operator can decide; a worktree holding an
 unlanded draft is evidence, not clutter.
 
-## 4. The report
+## 4. Docker and virtual disks (tier 3 — a service stops, never silently)
+
+Measured on this machine, 2026-10-21:
+
+| item | measured | action | risk |
+| --- | --- | --- | --- |
+| Docker images | **10.34 GB** reclaimable (22 images, 1 active) | `docker image prune -a` | safe — pulled or rebuilt on demand |
+| Docker build cache | **5.52 GB** | `docker builder prune` | safe |
+| `AppData/Local/Docker/wsl/disk/docker_data.vhdx` | **30.7 GB** | compaction only (below) | needs Docker Desktop stopped |
+| `…/CanonicalGroupLimited.Ubuntu_*/LocalState/ext4.vhdx` | **39.0 GB** | compaction only (below) | **holds real work — back up first** |
+
+### The VHDX rule (the one that bites)
+
+Deleting files *inside* a distro or a Docker image frees blocks in the guest, **not** space on `C:`.
+The `.vhdx` keeps its allocated size until it is compacted. "Prune 30 GB and expect 30 GB back" is
+false; recent Docker Desktop compacts its own store, a WSL distro does not.
+
+### Docker, in order
+
+1. `docker system df` — read `RECLAIMABLE` before deleting anything.
+2. `docker image prune -a`, then `docker builder prune`. Safe: images and cache are rebuilt.
+   **Never** `docker system prune --volumes` unasked — a volume may hold data, not cache.
+3. For `docker_data.vhdx`, quit Docker Desktop first, then compact. **Never compact while the engine
+   runs**: the file is open and the result is a corrupt virtual disk.
+
+### The WSL distro: report-only unless the operator says otherwise
+
+This distro holds real work (`/local/colmeio` and its evidence), so the default is **measure and
+report, do not compact**:
+
+```bash
+wsl.exe -l -v                                        # what exists and what is running
+wsl.exe -d Ubuntu -- df -h /                         # guest usage: the only number that says what frees
+wsl.exe -d Ubuntu -- du -xh --max-depth=1 / 2>/dev/null | sort -h | tail -15
+```
+
+If the guest really uses 39 GB, compaction reclaims approximately nothing and costs an hour. Only the
+**gap** between guest usage and file size is reclaimable. Report the gap; do not act on it.
+
+When the operator does ask, this order is what makes it defensible rather than risky:
+
+1. **Prove nothing is running inside** — no build, no agent, no database, no long job. Ask; do not
+   infer it from `wsl.exe -l -v` alone: `Running` can be an idle shell, and an idle shell can hide a job.
+2. **Back up first, and keep it**: `wsl.exe --export Ubuntu <backup.tar>` (a full, restorable image;
+   `wsl.exe --import Ubuntu <dir> <backup.tar>` restores it). Verify the exit code **and** a non-trivial
+   file size before touching the disk. This is the step that makes it non-risky — the rest is recovery.
+3. **Prefer the reversible switch**: `wsl.exe --manage Ubuntu --set-sparse true` makes the disk
+   TRIM-backed, so freed blocks return as they are freed. It does not rewrite the filesystem, and
+   `wsl.exe --manage Ubuntu --set-sparse false` reverses it. Check `wsl.exe --version` first (sparse
+   needs WSL 2.0+).
+4. **Only if sparse is unavailable**, stop the distro (`wsl.exe --terminate Ubuntu`) and compact the
+   file with `Optimize-VHD -Mode Full` (Hyper-V module) or `diskpart`'s `compact vdisk`. That rewrites
+   the file; an interrupt can corrupt it. Hence step 2 is not optional.
+5. **Verify before calling it done**: `wsl.exe -d Ubuntu -- echo ok`, a known work path still answers
+   (`ls /local/colmeio`), and the `.vhdx` size actually dropped. A size that did not drop is a result
+   to report, not a step to retry blindly.
+6. Keep the export for N days (default 7) and say where it is.
+
+**Never run tier 3 in the same operation as a node deploy or any run that is mid-turn**: stopping the
+Docker engine or the distro under a model call fails the work, and the deploy needs the node idle.
+
+## 5. The report
 
 One block, and it is the deliverable:
 
