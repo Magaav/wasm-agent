@@ -56,9 +56,9 @@ bash scripts/clean-disk-report.sh
 | Target | Measured | Rule |
 | --- | --- | --- |
 | `~/.wasm-agent/session-scratch/*` | 29 GB | delete **per session**, oldest first, keeping the newest N (default 5) and any session that is still open; these are screenshots, probes and evidence copies |
-| `~/.wasm-agent/benchmarks/*` | 7.7 GB | benchmark worktrees from finished runs; delete only runs not referenced by a delivery record, oldest first |
+| `~/.wasm-agent/benchmarks/*` | 7.5 GB | **not deletable as directories.** Measured 2026-10-21: each `edit-workflow-*` run dir contains **3 REGISTERED git worktrees** (24 in total, detached HEAD `bad2cdc3`) - `rm -rf` one and the repo's worktree metadata points at nothing. Remove them only with `git worktree remove` (a repository change, so outside this skill), or leave them. `whisper-wasm` (2.5 GB) is a reusable corpus/model cache, not a finished run |
 | `rust/target/{debug,incremental,*/deps}` | 4.8 GB | `cargo clean` is **opt-in** — say the rebuild cost out loud; prefer `target/debug` before `release` |
-| `$LOCALAPPDATA/Temp/wa-*`, `wa-ui-test-*`, `ui-*`, `fa-*` | 2.8 GB | test harness output, safe anytime; check no `test-ui.ps1` is running first (the harness refuses a second instance) |
+| `$LOCALAPPDATA/Temp/wa-*`, `wa-ui-test-*`, `ui-*`, `fa-*` | 2.8 GB | test harness output, safe anytime; check no `test-ui.ps1` is running first (the harness refuses a second instance). Measured 2026-10-21: those four patterns are only ~160 MB of a 4.3 GB Temp - the bulk is other tools' directories, which are **not** this skill's to delete |
 | `~/.wasm-agent/operations/*` | 2.7 GB | per-call stdout/stderr; keep the newest N days (default 3) so a recent failure is still diagnosable |
 | `~/.wasm-agent/sentinel/deploy.out`, `deploy.log`, `sentinel.log` | 2.6 GB | rotate, keep the last ~50 MB each; **never** delete `requests/`, `done/`, `failed/`, `protocol-effect.json` |
 | images/screenshots in the above | inside their areas | they are the bulk of session-scratch and Temp; deleting the containing area covers them |
