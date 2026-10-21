@@ -2854,10 +2854,18 @@ class WaOrchestrator extends HTMLElement {
     this._capturePlacement();
     this.nodeRows=Array.isArray(value)?value:[];
     const list=this.querySelector('.node-list');
-    const usable=this.nodeRows.filter(node=>node && node.online===true);
+    const known=this.nodeRows.filter(node=>node);
+    const usable=known.filter(node=>node.online===true);
+    // WHY TWO SENTENCES: an empty list has two different causes and the reader can only fix one of them.
+    // `No node reported itself online.` was printed for both, so a fleet whose machines were all offline was
+    // told no machine exists, and a topic that had not been given the list yet said the same thing. The
+    // topic now says which of the two it knows, and the offline case says how many machines it does know.
     if(!usable.length) {
       const empty=document.createElement('p'); empty.className='node-list-empty';
-      empty.textContent='No node reported itself online.';
+      empty.dataset.empty=known.length?'none-online':'none-known';
+      empty.textContent=known.length
+        ? `${known.length} node${known.length===1?'':'s'} known, none online.`
+        : 'No nodes are known.';
       list.replaceChildren(empty);
       this._applyPlacement();
       return;
