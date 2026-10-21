@@ -417,13 +417,37 @@
     var tallText = "# Start\n\n" + ("A paragraph of readable evidence.\n\n".repeat(90));
     var tall = runToAnswer("placement-run-tall", "placement-msg-tall", tallText);
     check(!!tall && tall.dataset.answerAnchor === "top",
-      "a tall answer (>80% of the chat viewport) must anchor its top, saw " +
+      "an answer whose first line would be off-screen must anchor its top, saw " +
       (tall && tall.dataset.answerAnchor));
     check(!!tall && Math.abs(tall.getBoundingClientRect().top - messages.getBoundingClientRect().top) < 4,
       "and its first line must sit at the chat content top, saw top " +
       (tall ? tall.getBoundingClientRect().top - messages.getBoundingClientRect().top : "none"));
     check(!!tall && Math.abs(tall.getBoundingClientRect().height) > messages.clientHeight * 0.8,
       "the fixture must actually be taller than 80% of the viewport");
+
+    // ---- 5b. A wheel that cannot move the transcript is not the reader leaving it. This was the second
+    // half of the reported regression: one stray wheel at the bottom released the answer anchor for the
+    // rest of the turn, so the final answer rendered and never came back to its first line. Same fixture,
+    // one wheel pointing into the limit.
+    handleEvent({ type: "done" });
+    messages.replaceChildren(); runBubble = null; streamBody = null; streamText = "";
+    setFollow(true);
+    for (var fill4 = 0; fill4 < 8; fill4++) add("user", "Earlier evidence " + ("retained text ".repeat(35)));
+    messages.scrollTop = messages.scrollHeight;
+    handleEvent({ type: "round", n: 1, tools: 3, run_id: "placement-run-wheel", session_id: "placement-session" });
+    handleEvent({ type: "delta", text: tallText });
+    var atLimit = messages.scrollTop;
+    messages.dispatchEvent(new WheelEvent("wheel", { deltaY: 1 }));
+    check(messages.scrollTop === atLimit,
+      "the fixture's wheel must not move a transcript already at its limit, saw " + atLimit + " -> " + messages.scrollTop);
+    handleEvent({ type: "reply", message_id: "placement-msg-wheel", text: tallText });
+    var wheelAnswer = lastBubble().body.querySelector(":scope > .seg.final-answer.answer-wrap");
+    check(!!wheelAnswer && wheelAnswer.dataset.answerAnchor === "top",
+      "a wheel that could not move the transcript must not release the answer anchor, saw " +
+      (wheelAnswer && wheelAnswer.dataset.answerAnchor));
+    check(!!wheelAnswer && Math.abs(wheelAnswer.getBoundingClientRect().top - messages.getBoundingClientRect().top) < 4,
+      "and its first line must still come to the chat top, saw top " +
+      (wheelAnswer ? wheelAnswer.getBoundingClientRect().top - messages.getBoundingClientRect().top : "none"));
 
     // Short: do not scroll.
     handleEvent({ type: "done" });
