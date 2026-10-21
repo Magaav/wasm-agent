@@ -90,6 +90,19 @@ false; recent Docker Desktop compacts its own store, a WSL distro does not.
 3. For `docker_data.vhdx`, quit Docker Desktop first, then compact. **Never compact while the engine
    runs**: the file is open and the result is a corrupt virtual disk.
 
+### Tier 1-2: caches that re-download (no service stops, no elevation)
+
+| item | measured | action | note |
+| --- | --- | --- | --- |
+| **Recycle Bin** | **9.5 GB** | `Clear-RecycleBin -Force` | the probe that failed with `du`: read it with PowerShell (`Get-ChildItem -LiteralPath "C:\$Recycle.Bin"`). **Ask first** - nothing in it is restorable afterwards |
+| `~/.cargo/registry` | 731 MB | `cargo cache -a` or delete `registry/` | re-downloads on the next build |
+| Explorer thumbnail/icon cache | 327 MB | delete `…/Explorer/thumbcache_*.db` | Windows rebuilds it; needs the Explorer window closed, not the service |
+| Chrome `User Data/Default/Cache` | 58 MB | delete the `Cache` dir | never touch the profile directory itself |
+| npm cache | 34 MB | `npm cache clean --force` | |
+| pip cache | 1 MB | nothing to win | |
+| `C:\Windows\SoftwareDistribution\Download` | **0.0 MB, 0 entries** | nothing to win | genuinely empty here |
+| `C:\Windows\Temp`, `WinSxS` | **unreadable (access denied)**, 8.9 GB when read | needs elevation | see the traps below |
+
 ### The WSL distro: report-only unless the operator says otherwise
 
 This distro holds real work (`/local/colmeio` and its evidence), so the default is **measure and
@@ -101,8 +114,18 @@ wsl.exe -d Ubuntu -- df -h /                         # guest usage: the only num
 wsl.exe -d Ubuntu -- du -xh --max-depth=1 / 2>/dev/null | sort -h | tail -15
 ```
 
-If the guest really uses 39 GB, compaction reclaims approximately nothing and costs an hour. Only the
-**gap** between guest usage and file size is reclaimable. Report the gap; do not act on it.
+**Measured on this machine (2026-10-21): the distro's `ext4.vhdx` is 39.0 GB on disk and the guest uses
+13 GB** (`df -h /` → 14 G used of 1007 G; `du -xh --max-depth=1 /` → 13 G total). The gap is therefore
+**~26 GB reclaimable** — this is the case where compaction *is* worth it. The rule is the shape, not a
+fixed verdict: only the gap between guest usage and file size is reclaimable, and it must be measured,
+never assumed in either direction.
+
+From Git Bash the guest command needs path conversion OFF, or the guest receives a Windows path:
+`df: 'C:/Program Files/Git/': No such file or directory` is what this looks like (measured here).
+
+```bash
+MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' wsl.exe -d Ubuntu -- df -h /
+```
 
 When the operator does ask, this order is what makes it defensible rather than risky:
 
@@ -125,6 +148,16 @@ When the operator does ask, this order is what makes it defensible rather than r
 
 **Never run tier 3 in the same operation as a node deploy or any run that is mid-turn**: stopping the
 Docker engine or the distro under a model call fails the work, and the deploy needs the node idle.
+
+### Measurement traps that have already produced wrong answers here
+
+- **`0.0 MB` from PowerShell with `-ErrorAction SilentlyContinue` means "unreadable", not "empty".**
+  `C:\Windows\Temp` reports 0.0 MB that way and is in fact denied; measure with `-ErrorAction Stop`
+  and a `catch` that says `UNREADABLE`, or do not report a number at all.
+- **`du` cannot read per-user ACL directories** like `$Recycle.Bin`; use the shell's own API.
+- **Git Bash rewrites guest paths** (`MSYS_NO_PATHCONV=1` above), so a "the distro has no df" error is
+  usually the host's path conversion, not a broken distro.
+- A size that did not change after a cleanup is a **result to report**, never a cue to retry harder.
 
 ## 5. The report
 
