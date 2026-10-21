@@ -87,7 +87,10 @@
   const entryLines=entry=>Array.from(entry.querySelector('wa-node').children).map(child=>child.className).join('|');
   check(entryLines(entries[0])==='node-name|node-resources','a node entry is exactly two lines: the name, then its statistics, saw: '+entryLines(entries[0]));
   check(entries[0].querySelector('.node-name').textContent==='near','line 1 is the node name, saw: '+entries[0].querySelector('.node-name').textContent);
-  check(entries[0].querySelector('.node-resources').textContent==='\u25c8 52%\u00b7\u25a4 29%/12GB\u00b7\u25a7 87%/96GB','line 2 is the compact statistics line, saw: '+entries[0].querySelector('.node-resources').textContent);
+  // WHY THE EXPECTED TEXT MOVED (compaction): the line is still one glyph per metric with the same three
+  // numbers, and it now follows the shape used everywhere else here - each glyph GLUED to its value and
+  // ONE space between pairs, no `·` separator. The property under test is unchanged.
+  check(entries[0].querySelector('.node-resources').textContent==='\u25c852% \u25a429%/12GB \u25a787%/96GB','line 2 is the compact statistics line, saw: '+entries[0].querySelector('.node-resources').textContent);
   // WHY THIS MOVED: the line is one glyph per metric now - the same sample, one character per name, and
   // the `·` separator with no spaces around it - so the expected text moved with the format. The property
   // under test is unchanged: the node's own sample, formatted by the one formatter.
@@ -150,7 +153,10 @@
    // title/aria-label. The property under test is unchanged - the header counts ACTIVE cards, not the
    // 1000 historical dispatches - so it is asserted on the element that now carries it, and the old
    // sentence is asserted absent rather than merely untested.
-   check(panel.querySelector('.orchestrator-count').textContent==='✺ 4','the header shows the active-card count as icon and count, saw: '+panel.querySelector('.orchestrator-count').textContent);
+   // WHY THE EXPECTED TEXT MOVED (compaction): still the active-card count as icon and count, with the
+   // words in `title`/`aria-label` (asserted next) - the glyph is now GLUED to the number (`✺4`), because
+   // the space between them was width the header did not have to spend.
+   check(panel.querySelector('.orchestrator-count').textContent==='✺4','the header shows the active-card count as icon and count, saw: '+panel.querySelector('.orchestrator-count').textContent);
    check(panel.querySelector('.orchestrator-count').getAttribute('aria-label')==='4 active cards','and the number is named in aria-label, saw: '+panel.querySelector('.orchestrator-count').getAttribute('aria-label'));
    check(panel.querySelector('.orchestrator-status').textContent==='','and no sentence takes its place, saw: '+JSON.stringify(panel.querySelector('.orchestrator-status').textContent));
   }finally{orchestratorPanel=oldPanel;orchestratorRequest=oldRequest;orchestratorRead=oldRead;refreshAgentPane=oldRefresh;if(oldSaved===null)localStorage.removeItem(storage);else localStorage.setItem(storage,oldSaved);}
