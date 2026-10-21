@@ -309,6 +309,11 @@ wa-commentary.phase-incomplete .commentary { text-decoration: underline dotted; 
      one rhythm and differ only in size. */
   font-size: 12px; line-height: 1.55;
 }
+/* COMMENTARY IS FOR READING BACK; THINKING IS THE ROUTE. The two share one body rule (one component), but
+   they do not carry the same weight for the reader: a commentary is the milestone prose of a run, and the
+   operator follows it up, so it takes the transcript's own text colour. Thinking stays muted - it is the
+   route to the answer, read when something needs explaining, not the thing to keep in view. */
+.commentary-body { color: var(--text); }
 /* NOTE - there is deliberately NO rule here for "a commentary established on a sentence that streamed
    in the answer's place": that sentence is NOT a visual state of its own. It is the same topic as the
    thinking block above, drawn at the place the sentence already occupied, so it uses exactly the
