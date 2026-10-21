@@ -2512,7 +2512,13 @@ $harness = @'
     type("/");
     check(menu.open, "commands: `/` must open the list");
     var items = Array.prototype.slice.call(menu.querySelectorAll(".menu-item"));
-    check(items.length === 8 && items[6]?.textContent.includes('/provider') && items[7]?.textContent.includes('/login'), "commands: `/` must preserve six established commands plus provider management/login, got " + items.length);
+    // `/clean disk` was appended after /login on purpose, so the eight established positions are untouched;
+    // the count moves 8 -> 9 and the new entry is asserted by name below. The property is "every
+    // established command survives", not "there are eight of them".
+    check(items.length === 9 && items[6]?.textContent.includes('/provider') && items[7]?.textContent.includes('/login') &&
+      items[8]?.textContent.includes('/clean disk'),
+      "commands: `/` must preserve the eight established commands plus /clean disk last, got " + items.length +
+      " last: " + (items[items.length-1] && items[items.length-1].textContent));
     check(items[5]?.textContent.includes('/orchestration') && /unknown|ON|OFF/.test(items[5]?.textContent), 'orchestration command shows observed on/off or unavailable state');
     check(items[0] && items[0].textContent.indexOf("/new") >= 0,
       "commands: the list must offer /new first, got: " + (items[0] && items[0].textContent));
