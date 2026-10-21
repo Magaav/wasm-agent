@@ -6,9 +6,29 @@ try {
  const snapshot=(extra={})=>({version:1,run_id:'minimal',model_calls:26,tool_calls:82,tokens_reported:12000,context_growth:{version:1,baseline:600000,current:610000,added:10000,known:true,pending:true,partial:false,complete:false,compactions:0},usage_calls:25,usage_unknown:0,pending_input:1000,context:{tokens:260000,capacity:1000000,estimated:true},...extra});
  runStartedAt=Date.now()-144000;handleEvent({type:'run_counts',counts:snapshot()});handleEvent({type:'status',text:'model'});runStepState.active.started=Date.now()-6000;updateRunElapsed();
  check(statusPhase.textContent==='6s'&&statusPhase.title==='Reasoning','only phase seconds; phase retained as tooltip');
- // WHY (operator, 2026-10-05): the live strip is ONE compact line - `✦` then the clock, then the
- // glued facts (`◈~10k 👣26 ⚒82 ◷2:24`); the pending `~` mark and every count are unchanged.
- check(statusElapsed.textContent==='◈~10k 👣26 ⚒82 ◷2:24','requested compact live strip with pending usage marked');
+ // WHY (operator, 2026-10-05): the live row is ONE compact line in ONE order - the activity glyph,
+ // the model calls, the clock glued to them by a bare `·`, then tools, tokens and the run's total
+ // duration: `✳ 👣26·6s ⚒82 ◈~10k ◷2:24`. The counts and the pending `~` mark are unchanged; only
+ // the order moved and the one `·` is new. The glyph is read from the row itself because it is the
+ // animated frame, not a fixed character.
+ const liveRow=statusLine.textContent;
+ check(liveRow===statusSpinner.textContent+' 👣26·6s ⚒82 ◈~10k ◷2:24',
+   'requested compact live strip with pending usage marked, saw: '+JSON.stringify(liveRow));
+ // WHY THIS IS NEW: an exact string cannot say whether a future edit re-ordered the row and edited
+ // the expectation with it, so the SHAPE is pinned - glyph, then five facts, single spaces between
+ // them, and the calls/clock pair as one `·`-joined token.
+ check(/^\S \S+·\S+ \S+ \S+ \S+$/.test(liveRow),
+   'the live row must read `<glyph> <calls>·<elapsed> <tools> <tokens> <duration>`, saw: '+JSON.stringify(liveRow));
+ // ...and the ORDER, as positions, so a passing shape cannot hide a swapped pair:
+ // calls -> elapsed -> tools -> tokens -> duration.
+ const facts=liveRow.slice(statusSpinner.textContent.length).trimStart();
+ check(facts.indexOf('👣')===0&&facts.indexOf('👣')<facts.indexOf('6s')&&facts.indexOf('6s')<facts.indexOf('⚒')&&
+   facts.indexOf('⚒')<facts.indexOf('◈')&&facts.indexOf('◈')<facts.indexOf('◷'),
+   'the facts run calls -> elapsed -> tools -> tokens -> duration, saw: '+JSON.stringify(liveRow));
+ // ...and the `·` is the ONLY one in the facts (`·` is also the smallest activity frame, so the glyph
+ // is excluded rather than counted).
+ check(facts.indexOf('·')===facts.lastIndexOf('·'),
+   'exactly one `·`, joining the model calls to the clock, saw: '+JSON.stringify(liveRow));
  handleEvent({type:'reasoning',text:'x'.repeat(40)});updateRunElapsed();check(turnTokenReadout()==='~10k','text characters never fabricate exact billed tokens');
  handleEvent({type:'reasoning',text:'x'.repeat(200),complete:true});check(turnTokenReadout()==='~10k','authoritative full copy never counts as usage');
  handleEvent({type:'run_counts',counts:snapshot({tokens_reported:13000,context_growth:{version:1,baseline:600000,current:613000,added:13000,known:true,pending:false,partial:false,complete:true,compactions:0},usage_calls:26,pending_input:null,context:{tokens:261000,capacity:1000000,estimated:false}})});

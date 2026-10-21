@@ -24,15 +24,17 @@
     check(bubble.querySelector('wa-step[data-state="running"]'), 'background phase is retained for debug');
     check(getComputedStyle(bubble.querySelector('wa-step')).display==='none','ordinary mode hides detailed phase rows');
     check(statusPhase.title.startsWith('Working')&&!statusPhase.hidden,'ordinary mode has a compact current phase');
-    // WHY (operator, 2026-10-05): the compact row is ordered glyph, clock, label, facts - so the
-    // hidden label can no longer be the phase's next sibling. Same property: the phase IS the timed
-    // description and the facts still follow it on this one row.
-    check(statusLabel.hidden&&statusPhase.previousElementSibling===statusSpinner&&statusElapsed.previousElementSibling===statusLabel,'phase replaces redundant thinking label before total duration');
+    // WHY (operator, 2026-10-05): the compact row is ordered glyph, [label], model calls, clock, rest -
+    // so the hidden label can no longer be the phase's next sibling: the model-call pair stands
+    // between the label and the clock, and the remaining facts follow the clock. Same property: the
+    // phase IS the timed description, the row still carries it, and the facts sandwich it on one row.
+    check(statusLabel.hidden&&statusPhase.previousElementSibling===statusCalls&&statusCalls.previousElementSibling===statusLabel&&statusElapsed.previousElementSibling===statusPhase,'model calls lead the clock, the remaining facts follow it');
     setTranscriptDebug(transcript,'debug');
     check(getComputedStyle(bubble.querySelector('wa-step')).display!=='none','debug mode reveals phase history');
     check(bubble.body.querySelector(':scope > .chat-content-run-status'), 'live status is inside the balloon');
-    // WHY: compact form - the total duration is `◷1:05`, glued, at the end of the same one line.
-    check(statusElapsed.textContent.endsWith(' ◷1:05'), 'background elapsed time uses the saved start time');
+    // WHY (operator, 2026-10-05): compact form - the total duration is `◷1:05`, glued, at the end of
+    // the same one line, and that line's second half now begins with the tool pair.
+    check(statusElapsed.textContent.endsWith(' ◷1:05')&&/^ ⚒(?:\?|≥?\d)/.test(statusElapsed.textContent), 'background elapsed time uses the saved start time');
     check(!!runStatusTicker, 'background turns start the elapsed ticker');
     handleEvent({type:'status',text:'thinking'});
     handleEvent({type:'round',n:1});
@@ -161,22 +163,31 @@
     document.getElementById('panel').style.width='540px';
     handleEvent({type:'status',text:'model'});
     runStepState.active.started=Date.now()-9000;updateRunElapsed();
-    // WHY: compact form - `✧ 1:05` style separators are gone; the two clocks are still separate
-    // elements (`9s` for the step, `◷1:05` for the run).
-    check(statusPhase.textContent==='9s'&&statusElapsed.textContent.endsWith(' ◷1:05'),'compact screenshot has separate phase and total clocks');
+    // WHY (operator, 2026-10-05): compact form - `✧ 1:05` style separators are gone; the two clocks
+    // are still separate elements (`9s` for the step, `◷1:05` for the run), and the step clock now
+    // stands BETWEEN the two halves of the facts, after the model calls it times.
+    check(statusPhase.textContent==='9s'&&statusCalls.textContent.endsWith('·')&&statusElapsed.textContent.endsWith(' ◷1:05'),'compact screenshot has separate phase and total clocks');
     const box=statusLine.getBoundingClientRect();
+    // The row's separators are CHARACTERS, and a flex item's box starts at its first character, so a
+    // separating space is measured as the rendered width of that element's leading character - the ink
+    // a reader sees. Measured, not assumed from the string.
+    const leadSpace = node => { const range=document.createRange(); range.setStart(node.firstChild,0); range.setEnd(node.firstChild,1); return range.getBoundingClientRect().width; };
     for (const width of [320,540,800]) {
       document.getElementById('panel').style.width=width+'px';
       const spinnerBox=statusSpinner.getBoundingClientRect(),phaseBox=statusPhase.getBoundingClientRect(),totalBox=statusElapsed.getBoundingClientRect();
-      // WHY (operator, 2026-10-05): the status row is ONE compact line. It is `nowrap` now (it used to
-      // be `normal` to defeat the transcript's pre-wrap), the activity glyph is glued to its clock
-      // (`✦4s`), and the facts follow that clock after two spaces instead of being pushed to the far
-      // right edge. Every fact is unchanged and still on this one 30px row.
+      const callsBox=statusCalls.getBoundingClientRect();
+      // WHY (operator, 2026-10-05): the status row is ONE compact line. It stays `nowrap` (it used to
+      // be `normal` to defeat the transcript's pre-wrap), and it reads `✳ 👣22·13s ⚒30 ◈~71.3k ◷1:55`:
+      // one space after the glyph, the model calls glued to their clock by the line's own `·`, then the
+      // remaining facts after that clock. Those separators are characters in the row, so what is
+      // measured is that each pair of pieces is separated (never overlapped, never touching) on this
+      // one 30px row. Every fact is unchanged.
       check(getComputedStyle(statusLine).whiteSpace==='nowrap','status is one line, never a second row, at '+width);
       check(Math.abs(spinnerBox.width-15)<1&&Math.abs(spinnerBox.height-15)<1,'activity glyph keeps its fixed slot at '+width);
       check(Math.abs((phaseBox.top+phaseBox.bottom)/2-(totalBox.top+totalBox.bottom)/2)<1,'phase and total vertically aligned at '+width);
-      check(Math.abs(phaseBox.left-spinnerBox.right)<1,'the glyph is glued to its elapsed clock at '+width);
-      check(totalBox.left-phaseBox.right>=4&&totalBox.left-phaseBox.right<=12,'two spaces between the clock and the facts at '+width);
+      check(leadSpace(statusCalls)>=4&&leadSpace(statusCalls)<=12&&Math.abs(callsBox.left-spinnerBox.right)<1,'one space between the glyph and the model calls at '+width);
+      check(Math.abs(callsBox.right-phaseBox.left)<1,'the `·` glues the model calls to the clock at '+width);
+      check(leadSpace(statusElapsed)>=4&&leadSpace(statusElapsed)<=12&&Math.abs(totalBox.left-phaseBox.right)<1,'one space between the clock and the remaining facts at '+width);
       check(statusLine.scrollWidth<=statusLine.clientWidth+1,'status fits at '+width);
     }
     document.getElementById('panel').style.width='540px';

@@ -45,12 +45,19 @@ try{await rendererLoaded;for(let i=0;i<200&&!transcriptReady;i++)await new Promi
  for(const width of [320,540,800]) {
    document.getElementById('panel').style.width=width+'px';busy=true;runBubble=null;runStepState=null;clearStatus();runStartedAt=Date.now()-96000;
    handleEvent({type:'status',text:'model'});handleEvent({type:'run_counts',counts:{version:1,run_id:'flex-'+width,model_calls:6,tool_calls:19,usage_calls:6,context_growth:{version:1,known:true,baseline:600000,current:636200,added:36200,pending:true}}});
-   const bar=statusLine.getBoundingClientRect(),counters=statusElapsed.getBoundingClientRect(),phase=statusPhase.getBoundingClientRect(),bubble=runBubble.getBoundingClientRect();
-   // WHY (operator, 2026-10-05): the live counters are compact and glued (`◈~36.2k 👣6 ...`) and the
-   // row reads left to right - they are no longer pinned to the bar's right edge, they follow the
-   // clock after two spaces. Same property: one 30px row, no separator dot, no second line.
-   check(statusElapsed.textContent.startsWith('◈~36.2k')&&!statusElapsed.textContent.startsWith(' ·'),'no leading dot before compact live counters');
-   check(counters.left-phase.right>=4&&counters.right<=bar.right&&bar.height===30,'clock, two spaces, counters: one 30px row at '+width);
+   const bar=statusLine.getBoundingClientRect(),counters=statusElapsed.getBoundingClientRect(),phase=statusPhase.getBoundingClientRect(),calls=statusCalls.getBoundingClientRect(),bubble=runBubble.getBoundingClientRect();
+   // WHY (operator, 2026-10-05): the live facts are compact and glued and the row reads left to right
+   // in ONE order - `✳ 👣6·<step clock> ⚒19 ◈~36.2k ◷1:36` - so the model calls now precede the clock and the
+   // slowest half (tools, tokens, duration) follows it. Same property: one 30px row, one `·` and only
+   // between the calls and the clock, no second line, counters not pinned to the bar's right edge.
+   check(statusCalls.textContent===' 👣6·'&&statusElapsed.textContent.startsWith(' ⚒19 ◈~36.2k ◷'),'model calls lead the row, the rest follows the clock');
+   // WHY (operator, 2026-10-05): the row's pieces now run calls, clock, then the rest, each separated
+   // by the single space the line itself prints - measured as adjacency, not assumed from the string.
+   // WHY (operator, 2026-10-05): the separators are CHARACTERS in the row, and a flex item's box starts
+   // at its first character - so each separating space is measured as the rendered width of that
+   // element's leading character (the ink a reader sees), never as a gap between boxes.
+   const leadSpace=node=>{const range=document.createRange();range.setStart(node.firstChild,0);range.setEnd(node.firstChild,1);return range.getBoundingClientRect().width;};
+   check(leadSpace(statusCalls)>=4&&leadSpace(statusElapsed)>=4&&calls.right<=phase.left+0.5&&counters.left>=phase.right&&counters.right<=bar.right&&bar.height===30,'one space after the glyph and after the clock: one 30px row at '+width);
    check(Math.abs(bubble.width-Math.min(760,transcript.clientWidth-10))<1,'active bubble fills available width up to existing760px readable cap at '+width);
  }
  busy=false;runBubble=null;runStepState=null;clearStatus();transcript.replaceChildren();add('user','Observe active summarization and queued steering.').closest('wa-message').dataset.messageSeq='1';busy=true;handleEvent({type:'status',text:'model'});handleEvent({type:'run_counts',counts:{...counts,run_id:'screenshot',summary_step:{...fact,id:'picture',state:'running'}}});handleEvent({type:'steering',...queued});document.getElementById('panel').style.width='540px';

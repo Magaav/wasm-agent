@@ -1,7 +1,7 @@
 // The model-calls glyph: `👣` in the compact stats line, and it must read as a CIPHER.
 //
 // WHY THIS PROBE EXISTS. `◈` tokens, `⚒` tools, `◷` duration and `✺` elapsed are monochrome text
-// symbols: they take the row's colour and its font size, so `◈7.4k ✧5 ⚒7 ◷3:48` reads as one line
+// symbols: they take the row's colour and its font size, so `👣5 ⚒7 ◈7.4k ◷3:48` reads as one line
 // of counters. The glyph the operator asked for in the model-calls slot, `👣`, is the ONE character
 // in that vocabulary that Unicode also ships as a colour emoji - and a browser left to itself picks
 // the colour presentation: a pictograph in its own red/blue, at emoji size, inside a muted monospace
@@ -9,7 +9,7 @@
 //
 //   1. THE LINE. The production renderer (`runStatsLine`, the ONLY stats-line builder) puts `👣` in
 //      the model-calls slot, glued to its value, one space between pairs - the operator's own
-//      example, `◈7.4k 👣5 ⚒7 ◷3:48`.
+//      example, `👣5 ⚒7 ◈7.4k ◷3:48` (in today's order, see `runStatOrder`).
 //   2. THE PRESENTATION REQUEST, on the element that actually holds the glyph: `getComputedStyle`
 //      must report `font-variant-emoji: text` (inherited from the row; the browser default is the
 //      colour emoji), and the computed font stack must name a MONOCHROME font - so the glyph has a
@@ -36,8 +36,11 @@
     // 1. THE LINE, from the one renderer that builds it. `7.4k` as the token readout (the `~` is the
     // incomplete-boundary mark and belongs to the token pair, not to this test) and the operator's own
     // numbers, so the expected string is the one the operator wrote.
+    // WHY (operator, 2026-10-05): the line's order moved - the model-calls slot now LEADS it and the
+    // tokens pair is third (`👣5 ⚒7 ◈7.4k ◷3:48`). The slot this probe is about is unchanged: `👣`,
+    // glued to its value, one space between pairs.
     const line = runStatsLine(runStatEntries({ tokens: '7.4k', calls: 5, tools: 7, duration: '3:48' }));
-    check(line === '◈7.4k 👣5 ⚒7 ◷3:48', 'the model-calls slot reads `◈7.4k 👣5 ⚒7 ◷3:48`, saw: ' + line);
+    check(line === '👣5 ⚒7 ◈7.4k ◷3:48', 'the model-calls slot reads `👣5 ⚒7 ◈7.4k ◷3:48`, saw: ' + line);
     check(runStatGlyphs.calls === '👣', 'the glyph map names the feet for model calls, saw: ' + runStatGlyphs.calls);
     // The other four are untouched: a change here would be a second, silent vocabulary change.
     check([runStatGlyphs.elapsed, runStatGlyphs.tokens, runStatGlyphs.tools, runStatGlyphs.duration].join('') === '✺◈⚒◷',
@@ -58,8 +61,14 @@
     handleEvent({ type: 'status', text: 'model' });
     check(!!statusElapsed && statusElapsed.classList.contains('chat-content-run-elapsed'),
       'the live run-status row was built by the app, saw: ' + String(statusElapsed && statusElapsed.className));
-    check(statusElapsed.textContent.includes('👣5'),
-      'the live row carries the feet glyph in its model-calls pair, saw: ' + statusElapsed.textContent);
+    // WHY (operator, 2026-10-05): the live row's model-calls pair stands BEFORE its clock, so the feet
+    // glyph lives in `.chat-content-run-calls` and not in `.chat-content-run-elapsed` any more. The
+    // claim is the same: the glyph is on the live row, glued to its value.
+    check(!!statusCalls && statusCalls.textContent === ' 👣5·',
+      'the live row carries the feet glyph in its model-calls pair, saw: ' + String(statusCalls && statusCalls.textContent));
+    const callsStyle = getComputedStyle(statusCalls);
+    check(ciphers(callsStyle), 'the live stats row asks for the TEXT presentation of its glyphs, saw font-variant-emoji: ' +
+      callsStyle.fontVariantEmoji + ' and font-family: ' + callsStyle.fontFamily);
     const elapsedStyle = getComputedStyle(statusElapsed);
     check(ciphers(elapsedStyle), 'the live stats row asks for the TEXT presentation of its glyphs, saw font-variant-emoji: ' +
       elapsedStyle.fontVariantEmoji + ' and font-family: ' + elapsedStyle.fontFamily);
@@ -125,8 +134,11 @@
       'px against line-height ' + rowLine + 'px');
     check(statusElapsed.scrollWidth > statusElapsed.clientWidth, 'and its facts are ellipsised rather than wrapped, saw ' +
       statusElapsed.scrollWidth + 'px of content in ' + statusElapsed.clientWidth + 'px');
-    check(getComputedStyle(statusElapsed).whiteSpace === 'nowrap' && getComputedStyle(statusElapsed).textOverflow === 'ellipsis',
-      'the row keeps `nowrap` + `ellipsis`, saw ' + getComputedStyle(statusElapsed).whiteSpace + '/' + getComputedStyle(statusElapsed).textOverflow);
+    // WHY (operator, 2026-10-05): the live halves of the compact line are `white-space: pre` so the
+    // single space that separates a half from its neighbour survives inside a flex item; `pre` and
+    // `nowrap` both mean "one line, never wrapped", so the property under test is unchanged.
+    check(['nowrap','pre'].includes(getComputedStyle(statusElapsed).whiteSpace) && getComputedStyle(statusElapsed).textOverflow === 'ellipsis',
+      'the row keeps one-line + `ellipsis`, saw ' + getComputedStyle(statusElapsed).whiteSpace + '/' + getComputedStyle(statusElapsed).textOverflow);
 
     for (let t = 1; t < 10000; t++) { clearTimeout(t); clearInterval(t); }
     report.dataset.status = 'pass';

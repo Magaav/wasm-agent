@@ -454,12 +454,22 @@ wa-diff { display: block; align-self: flex-start; max-width: 760px; width: 100%;
         around it stay in the row's own monospace face and keep their tabular figures.
    Both are measured in `scripts/probe-run-stats-glyph.js`, which fails if either stops applying. */
 .chat-content-run-elapsed { font-variant-emoji: text; font-family: var(--font), var(--glyph-font); }
-/* Live row: `✦4s` then two spaces then the compact facts, read left to right - the clock is not
-   pushed to the left edge and the counters are not pushed to the right one. `.6em` is two spaces at
-   the row's own font size, so the separation survives the narrow-pane font step below. A pane too
-   narrow for all of it ellipsises the facts rather than wrapping the row onto a second line. */
+/* The model-call pair now stands BEFORE the clock (`✳ 👣22·13s`), so it is an element of its own and
+   needs the same text-presentation rules the rest of the line has: `👣` is the one glyph Unicode also
+   ships as a colour emoji. It keeps its own space in its text (see below), so it needs no margin. */
+.chat-content-run-calls { flex: 0 0 auto; min-width: 0; font-variant-numeric: tabular-nums;
+  font-variant-emoji: text; font-family: var(--font), var(--glyph-font); white-space: nowrap; }
+/* Live row: `✳ 👣22·13s ⚒30 ◈~71.3k ◷1:55` - one line, and the clock is in the middle of it. The
+   two halves of the compact line carry the single space that separates them from their neighbour
+   (`✳ ` before the model calls, ` ⚒30` after the clock), and the space is a CHARACTER rather than a
+   margin so the row's text is the line a reader and an assertion both see. `white-space: pre` is
+   what preserves a leading space inside a flex item, which would otherwise be trimmed as the start
+   of a line; it is not a second separator. A pane too narrow for all of it ellipsises the facts
+   rather than wrapping the row onto a second line. */
+.chat-content-run-status:not(.finished) .chat-content-run-calls,
+.chat-content-run-status:not(.finished) .chat-content-run-elapsed { white-space: pre; }
 .chat-content-run-status:not(.finished) .chat-content-run-elapsed {
-  margin-left: .6em; overflow: hidden; text-overflow: ellipsis;
+  overflow: hidden; text-overflow: ellipsis;
 }
 /* Live bubble uses the available width: the compact row is left-aligned within it. */
 .msg:has(> .body > .chat-content-run-status:not(.finished)) { width: 100%; }

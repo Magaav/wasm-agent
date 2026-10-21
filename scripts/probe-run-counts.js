@@ -14,13 +14,15 @@
     handleEvent({type:'run_counts',counts:snapshot(1,0)});
     handleEvent({type:'status',text:'model'});
     // WHY (operator, 2026-10-05): the run status is ONE compact line - glyph glued to its value and a
-    // single space between pairs, not ` · ` and not `◈ 7.7k`. The property is unchanged: one provider
-    // attempt, zero tool calls, one clock.
-    check(statusPhase.textContent==='0s'&&statusElapsed.textContent.includes(' 👣1 ⚒0 ◷'),'one provider attempt live');
-    // WHY (new beside the compact move): the shape itself, asserted once and exactly - one glyph glued
-    // to one value per fact, exactly one space between them, and `~?` when the token boundary was
-    // never measured. A wrapped or ` · `-separated row fails here, not just in a screenshot.
-    check(/^◈[~≥]?\S+ 👣[~≥]?(?:\d+|\?) ⚒[~≥]?(?:\d+|\?) ◷[~≥]?\d+:\d{2}$/.test(statusElapsed.textContent),'live line is one compact glued row');
+    // single space between pairs, not ` · ` and not `◈ 7.7k` - and the model calls now LEAD it, glued
+    // to the clock by a bare `·` (`👣1·0s`), with tools, tokens and duration after it. The property is
+    // unchanged: one provider attempt, zero tool calls, one clock.
+    check(statusPhase.textContent==='0s'&&statusCalls.textContent===' 👣1·'&&statusElapsed.textContent.includes(' ⚒0 ◈~? ◷'),'one provider attempt live');
+    // WHY (new beside the compact move): the shape itself, asserted once and exactly on the ROW - the
+    // animated glyph, the calls/clock pair as one `·`-joined token, then tools, tokens and duration
+    // one space apart, with `~?` when the token boundary was never measured. A row that re-orders
+    // itself, wraps, or prints a second `·` fails here, not just in a screenshot.
+    check(/^\S 👣1·0s ⚒0 ◈~\? ◷\d+:\d{2}$/.test(statusLine.textContent),'live line is one compact glued row in the calls-clock-tools-tokens-duration order, saw: '+JSON.stringify(statusLine.textContent));
     handleEvent({type:'round',n:1});handleEvent({type:'round',n:1});
     check(runCounts.model_calls===1,'round events never count model attempts');
     handleEvent({type:'run_counts',counts:snapshot(2,0)});
@@ -28,8 +30,10 @@
     handleEvent({type:'run_counts',counts:snapshot(1,0)});
     check(runCounts.model_calls===2,'retry snapshot counted once; stale snapshot cannot roll back');
     handleEvent({type:'decision',call_id:'read',name:'read_many',arguments_text:'source',complete:true});
-    // WHY: compact form - the second provider attempt is `👣2`, not `👣 2` inside a ` · ` list.
-    check(statusPhase.textContent==='0s'&&statusPhase.title==='Selecting tools'&&statusElapsed.textContent.includes(' 👣2 '),'count precedes selection phase');
+    // WHY (operator, 2026-10-05): compact form - the second provider attempt is `👣2`, not `👣 2` inside
+    // a ` · ` list, and the pair now stands BEFORE the clock, glued to it by that one `·`, instead of
+    // after it.
+    check(statusPhase.textContent==='0s'&&statusPhase.title==='Selecting tools'&&statusCalls.textContent===' 👣2·','count precedes selection phase');
     const calls={id:'calls',seq:101,role:'assistant',content:'',created_at:now/1000,
       tool_calls:[{id:'read',function:{name:'read_many',arguments:'{}'}}],trace:[snapshot(2,1)]};
     handleEvent({type:'run_counts',counts:snapshot(2,1)});
@@ -48,15 +52,19 @@
     handleEvent({type:'reply',text:'Answer.',message_id:'answer'});handleEvent({type:'done'});
     const footer=transcript.querySelector('.finished');
     check(footer.querySelector('.chat-content-run-label').textContent==='completed','completion stays left');
-    // WHY: compact form - glyphs are glued to their values and the pairs are single-space separated.
-    // An unmeasured token boundary is `◈~?` ("estimate, not measured"): the one quality mark sits in
-    // the pair itself, never a bare `?` that reads like a number.
-    check(footer.querySelector('.chat-content-run-elapsed').textContent==='◈~? 👣3 ⚒1 ◷1:08','model/tool/time totals preserved');
+    // WHY (operator, 2026-10-05): compact form - glyphs are glued to their values and the pairs are
+    // single-space separated, in the row's own order: model calls, tool calls, tokens, total duration
+    // (`👣3 ⚒1 ◈~? ◷1:08`). Tokens moved from first to third because the elapsed clock they used to
+    // lead no longer exists in a finished footer. An unmeasured token boundary is still `◈~?`
+    // ("estimate, not measured"): the one quality mark sits in the pair itself, never a bare `?` that
+    // reads like a number.
+    check(footer.querySelector('.chat-content-run-elapsed').textContent==='👣3 ⚒1 ◈~? ◷1:08','model/tool/time totals preserved');
     const answer={id:'answer',seq:102,role:'assistant',content:'Answer.',created_at:now/1000,trace:[snapshot(3,1,{complete:true,elapsed_ms:68000})]};
     observedRun=null;runCounts=null;
     repaintMessages([user,calls,answer],{state:'answered',notify:false});
-    // WHY: same compact string as the live footer - a durable replay must restore the same shape.
-    check(transcript.querySelector('.finished .chat-content-run-elapsed').textContent==='◈~? 👣3 ⚒1 ◷1:08','durable replay restores exact totals after reload');
+    // WHY (operator, 2026-10-05): same compact string as the live footer, in the same new order - a
+    // durable replay must restore the same shape, not the old one.
+    check(transcript.querySelector('.finished .chat-content-run-elapsed').textContent==='👣3 ⚒1 ◈~? ◷1:08','durable replay restores exact totals after reload');
     repaintMessages([{...user,trace:[]},{...answer,trace:[]}],{state:'answered',notify:false});
     // WHY: compact form - history nobody measured still reads `?`, now beside its glued glyph.
     check(transcript.querySelector('.finished .chat-content-run-elapsed').textContent.includes('👣? ⚒?'),'historical missing counts remain unknown');
