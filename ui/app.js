@@ -6292,8 +6292,7 @@ function nodeRow(node) {
     badge.textContent = "this node";
     row.append(badge);
   }
-  const entry = document.createElement("wa-node");
-  entry.node = node;
+  const entry = nodeElement(node);
   const kind = document.createElement("span");
   kind.className = "node-kind";
   kind.textContent = node.kind;
