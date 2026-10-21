@@ -134,7 +134,16 @@ wa-node { display:flex; flex-direction:column; gap:2px; min-width:0; }
 .lane-check[data-state="yes"] .lane-check-state { color:var(--ok); }
 .lane-check[data-state="no"] .lane-check-state { color:var(--warn); }
 .lane-check[data-state="unknown"] .lane-check-state { color:var(--muted); }
-.placement { margin-top:var(--space); color:var(--muted); font-size:12px; }
+/* A node's configuration, inside its own topic: how many subagents may run on it and where it sits in
+   the fill order. The row is the same `.placement-node` the placement block used to hold, so the input
+   and the two arrows are styled once for both places. */
+.node-config { margin-top:var(--space); }
+.node-config .placement-node { color:var(--muted); font-size:12px; }
+.node-config-head { margin:0; color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.04em; }
+.node-priority { display:block; color:var(--muted); font-size:11px; }
+/* The placement block is the top of the `Nodes` body now: the switch and Save act on the per-node rows
+   that live in the node topics below them. */
+.placement { margin:0 0 var(--space); color:var(--muted); font-size:12px; }
 .placement-node { display:flex; align-items:center; gap:var(--gap); padding:var(--space) 0; }
 .placement-node label { flex:1; overflow-wrap:anywhere; }
 .placement-node input { width:55px; }
