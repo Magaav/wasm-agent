@@ -2475,7 +2475,10 @@ class WaAgentSession extends HTMLElement {
     // The header holds the two controls that act on the *panel*: an x closes it, a squared button
     // promotes this conversation into its own window. The topbar's controls - engine, shell,
     // orchestrator window, collapse-to-avatar - belong to the window, not to a conversation inside it.
-    this.innerHTML = '<header class="agent-pane-head"><strong></strong><span></span>'
+    // The header is the task name and the pane's two controls. The old meta line (profile · model ·
+    // reasoning · node · state) is gone: the task title is free to use the whole width, and the model
+    // reads at the pane's bottom-right, where every chat keeps its one model label.
+    this.innerHTML = '<header class="agent-pane-head"><strong></strong>'
       + '<button type="button" class="icon-btn" data-action="expand" title="Open this conversation in its own window" aria-label="Open in its own window">'
       + '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5h14v14H5z" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg></button>'
       + '<button type="button" class="icon-btn" data-action="collapse" title="Close this panel" aria-label="Close this panel">'
@@ -2565,10 +2568,16 @@ class WaAgentSession extends HTMLElement {
     const previous=this._task;
     this._task=value;
     this.querySelector('strong').textContent=agentTaskTitle(value);
-    this.querySelector('.agent-pane-head span').textContent=[value.profile,value.model,value.reasoning || 'reasoning unknown',value.node_name || value.execution_node || 'local',value.state].filter(Boolean).join(' · ');
-    // The model strip is the shared one: the readout every shell has, plus a picker built from facts,
-    // because a child runs with the model it was delegated rather than one this panel can choose.
-    this.shell.modelEl.hidden=true;
+    // WHAT: the shared shell's model readout shows this child's model, at the pane's bottom-right.
+    // WHY: the header no longer carries profile/model/reasoning/node/state, so the model's one home
+    // is the composer row's far edge - the same place the main chat shows its model. Nothing else
+    // from the old meta line belongs here.
+    var childModel=value.model || 'model unknown';
+    this.shell.modelEl.hidden=false;
+    if(this.shell.modelEl.textContent!==childModel)this.shell.modelEl.textContent=childModel;
+    this.shell.modelEl.title='Model this child runs with: '+childModel;
+    // The rest of the shared strip is the picker built from facts, because a child runs with the
+    // model it was delegated rather than one this panel can choose.
     if(!this.shell.modelChip)this.shell.setModelPicker([{label:'model',value:value.model || 'model unknown'},
       {label:'reasoning',value:value.reasoning || 'reasoning unknown'}],value.context_readout || '▤ ??%/?M');
     this.shell.busy=!value.settled && /^(running|accepted|queued|placing)$/.test(value.state);
