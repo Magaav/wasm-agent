@@ -609,6 +609,9 @@ body.engine .engine { display: flex; }
 .engine-title { font-size: 12.5px; color: var(--text); text-transform: uppercase; letter-spacing: .6px; }
 .engine-sub { flex: 1; font-size: 11px; color: var(--muted); }
 .engine-body { flex: 1; min-height: 0; overflow-y: auto; padding: var(--pad); display: flex; flex-direction: column; gap: var(--gap); }
+/* A house topic (<wa-orchestrator-topic>) put in the engine's body is a panel-shaped block that does
+   not shrink away under the topics below it, exactly like the hand-built `.engine-topic` boxes. */
+.engine-body > wa-orchestrator-topic { flex: 0 0 auto; }
 .engine-topic { border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; flex: 0 0 auto; }
 .engine-head {
   display: flex; align-items: center; gap: var(--gap); width: 100%; cursor: pointer;

@@ -324,11 +324,29 @@ $harness = @'
   // this build has no UI spawn path, so the box starts and configures no run. The default is ON, and
   // nothing has been stored for `wa.require-reviewer` on this fresh profile, so what it shows is the
   // default rather than a remembered choice.
+  // WHY THIS CHANGED: the row is still the engine panel's policy row and still one row, but it now
+  // sits inside a topic labelled `Orchestrator` instead of loose in `.engine-body`. The property under
+  // test - one policy row in the engine panel carrying the box and the meaning line - is unchanged; the
+  // shape around it is, and the shape is what this check is for: a house topic (`wa-orchestrator-topic`)
+  // that is open by default, with the checkbox and its description inside the topic's body.
   var reviewerBox = document.querySelector("#engine .engine-policy input#require-reviewer");
   var reviewerRow = reviewerBox && reviewerBox.closest(".engine-policy");
-  check(!!reviewerBox && !!reviewerRow && reviewerRow.parentElement.classList.contains("engine-body"),
-    "the require reviewer policy must be one row in the engine panel, saw: " +
-    (reviewerBox ? reviewerBox.outerHTML.slice(0, 90) : "no #require-reviewer"));
+  var reviewerTopic = reviewerRow && reviewerRow.closest("wa-orchestrator-topic");
+  var reviewerTopicBody = reviewerRow && reviewerRow.closest(".topic-body");
+  var reviewerTopicLabel = reviewerTopic && reviewerTopic.querySelector(".trace-label");
+  var reviewerEngineBody = reviewerTopic && reviewerTopic.parentElement;
+  check(!!reviewerBox && !!reviewerRow && !!reviewerTopic && !!reviewerTopicBody &&
+    !!reviewerEngineBody && reviewerEngineBody.classList.contains("engine-body") &&
+    reviewerEngineBody.firstElementChild === reviewerTopic &&
+    !!reviewerTopicLabel && reviewerTopicLabel.textContent === "Orchestrator" &&
+    reviewerTopic.hasAttribute("open") && reviewerTopicBody.hidden === false &&
+    reviewerTopicBody.contains(reviewerBox) &&
+    reviewerTopicBody.textContent.indexOf("re-read by a reviewer with fresh context") >= 0,
+    "the require reviewer policy must be one row inside the open `Orchestrator` topic of the engine panel, saw: " +
+    (reviewerBox ? reviewerBox.outerHTML.slice(0, 90) : "no #require-reviewer") + " in " +
+    (reviewerTopic ? "topic " + JSON.stringify(reviewerTopicLabel ? reviewerTopicLabel.textContent : null) +
+      " open=" + reviewerTopic.hasAttribute("open") + " body-hidden=" +
+      (reviewerTopicBody ? reviewerTopicBody.hidden : "no body") : "no wa-orchestrator-topic"));
   var reviewerLabel = document.querySelector('label[for="require-reviewer"]');
   check(!!reviewerLabel && reviewerLabel.textContent === "require reviewer",
     "the checkbox must be labelled `require reviewer`, saw: " +
