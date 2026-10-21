@@ -11,16 +11,28 @@
   const active=['running','accepted','queued','placing'].map((state,i)=>task('active-'+i,state,{settled:false}));
   const data=[...history,...active,task('contradiction','running',{settled:true}),task('newest-old','running',{session_id:'one-conversation',created_at:1}),task('newest-final','completed',{session_id:'one-conversation',created_at:2,settled:true})];
   panel.data=data;
-  check(panel.sidebar.querySelectorAll('.agent-card').length===4,'only positive active states produce cards despite 1000 historical records');
+  // WHY THIS MOVED: the bar no longer draws a card per child (the operator controls children in the
+  // `Live Subagents` topic, so those cards were removed with their `<nav aria-label="Agents">`). The
+  // property under test - only POSITIVE active states count, despite 1000 historical records - is now
+  // asserted on the panel's own active list, and the bar is additionally asserted to draw no card and
+  // no lane group at all, so a resurrected card list cannot pass this probe.
+  check(panel.activeTasks.length===4&&panel.sidebar.querySelectorAll('.agent-card,.lane').length===0,'only positive active states are active despite 1000 historical records, and the bar draws no cards');
   check(panel.tasks.length===1006,'history remains in data rather than deleted');
   check(panel.activeTasks.length===4,'deduplication precedes active filtering so old runs do not resurrect');
-  check(!panel.sidebar.textContent.includes('history-'),'terminal/unknown history never clutters lane cards');
+  // WHY THIS MOVED: the words under test are the same (no historical child may reach the left bar);
+  // the element that could carry them went with the cards, so the assertion is made over the whole
+  // bar instead of over the card list inside it.
+  check(!panel.sidebar.textContent.includes('history-'),'terminal/unknown history never reaches the left bar');
   const pane=panel.pin(active[0]);pane.input.value='unsent draft';
   panel.data=[...history,...active.slice(1),task('active-0','completed',{settled:true})];
-  check(panel.sidebar.querySelectorAll('.agent-card').length===3,'settling removes card immediately');
+  // WHY THIS MOVED: `settling removes the card immediately` is asserted on the list the bar is built
+  // from now that the card itself is gone; a settled child leaves the active list in the same tick.
+  check(panel.activeTasks.length===3&&!panel.activeTasks.some(task=>task.subagent_id==='active-0'),'settling removes the child from the active list immediately');
   check(pane.isConnected&&pane.input.value==='unsent draft'&&pane.task.state==='completed','already-open settled pane and draft remain, with updated outcome');
   panel.data=history;
-  check(panel.sidebar.querySelectorAll('.agent-card,.lane').length===0,'idle history creates no cards or lane groups');
+  // WHY THIS MOVED: there are no cards or lane groups left to count; an idle history still creates no
+  // active task and leaves no such element behind, which is the property the old count stated.
+  check(panel.activeTasks.length===0&&panel.sidebar.querySelectorAll('.agent-card,.lane').length===0,'idle history creates no active tasks and no cards or lane groups');
   const sessions=[{id:'session-direct',parent_session_id:'parent',state:'unfinished',worktree:'retained'},
    {id:'session-abandoned',parent_session_id:'parent',state:'unfinished',worktree:'retained'},
    {id:'session-operator',state:'unfinished',worktree:'owned'}];
@@ -106,11 +118,39 @@
   const entryHead=entries[0].querySelector(':scope > .trace-head');
   check(!entryHead.querySelector('.trace-glyph')&&!entryHead.querySelector('.trace-label'),'a node header has no glyph in front of the name, saw: '+entryHead.innerHTML.slice(0,160));
   check(topics[0].querySelector(':scope > .trace-head > .trace-glyph').textContent==='\u25a4'&&topics[1].querySelector(':scope > .trace-head > .trace-glyph').textContent==='\u273a','the Nodes and Live Subagents topics keep their own glyphs');
-  // PER-NODE CONFIGURATION: opening a node states that machine's limit and its place in the priority
-  // order, in its own topic. The row is the same `.placement-node` the placement block used to hold.
+  // A NODE'S BODY NO LONGER STATES THE RECORD: the kind/advertises/reachable rows were removed, so what
+  // opening a node states is its configuration. The statistics line in the header is still where online /
+  // offline is read, so nothing about reachability is lost - and the removed terms are asserted absent,
+  // not merely untested.
+  const nearBody=entries[0].querySelector(':scope > .topic-body');
+  check(!nearBody.querySelector('.node-details')&&!/advertises|nothing advertised|reachable/.test(nearBody.textContent),'the node body states no kind/advertises/reachable rows, saw: '+JSON.stringify(nearBody.textContent));
+  // PER-NODE CONFIGURATION: that configuration is an INNER TOPIC of the node's topic, built by the house
+  // topic component, so it opens and reads like every other topic here rather than as loose rows.
   const config=entries[0].querySelector('.node-config');
-  check(!!config&&!!config.querySelector('.placement-node input')&&!!config.querySelector('.placement-node button'),'opening a node states its own configuration, saw: '+String(config&&config.innerHTML.slice(0,200)));
-  check(entries.map(entry=>entry.querySelector('.node-priority').textContent).join(',')==='priority 1 of 2,priority 2 of 2','and its position in the priority order, saw: '+entries.map(entry=>entry.querySelector('.node-priority').textContent).join(','));
+  check(!!config&&config.localName==='wa-orchestrator-topic'&&config.classList.contains('topic')&&config.querySelector(':scope > .trace-head').tagName==='BUTTON'&&config.open,'the configuration is a house topic inside the node topic, saw: '+String(config&&config.outerHTML.slice(0,200)));
+  // Its body is TWO compact rows: `max subagents` with the limit input, then `priority` with the two
+  // arrows - label left, control pinned to the far right. The limit row keeps `.placement-node`, so
+  // `policy` and the host's save handler still read it where it is.
+  const configRows=config.querySelectorAll('.node-config .node-config-row');
+  check(configRows.length===2,'the configuration topic has exactly two rows, saw: '+configRows.length);
+  const limitRow=configRows[0],priorityRow=configRows[1];
+  const limitInput=limitRow.querySelector('.placement-node input');
+  const limitLabel=limitRow.querySelector('label');
+  check(!!limitInput&&limitRow.classList.contains('placement-node')&&limitLabel.textContent.trim()==='max subagents','row 1 is the max-subagents label with the one limit input, saw: '+limitRow.textContent);
+  // WHY THE ARROWS MOVED: they used to share the limit's row; the compact layout gives them the priority
+  // row, where the position text is their label. Same two buttons, same titles, same `_movePlacement` call.
+  const arrows=priorityRow.querySelectorAll('button');
+  check(!!priorityRow.querySelector('.node-priority')&&arrows.length===2&&arrows[0].title==='Higher priority'&&arrows[1].title==='Lower priority','row 2 is the priority text with the same two arrows, saw: '+priorityRow.innerHTML);
+  // LABEL LEFT, CONTROL FAR RIGHT: measured, not assumed - the control's right edge is the row's own right
+  // edge, which is what "pinned to the far right" means in the layout the reader asked for.
+  entries[0].open=true;
+  const inputRect=limitInput.getBoundingClientRect();
+  check(Math.abs(limitRow.getBoundingClientRect().right-inputRect.right)<=1,'the limit input is pinned to the right of its row, saw: '+(limitRow.getBoundingClientRect().right-inputRect.right));
+  check(Math.abs(priorityRow.getBoundingClientRect().right-arrows[1].getBoundingClientRect().right)<=1,'and the arrows are pinned to the right of the priority row, saw: '+(priorityRow.getBoundingClientRect().right-arrows[1].getBoundingClientRect().right));
+  // WHY THE EXPECTED TEXT MOVED: the wording lost its words - `priority 2/3`, one slash and no spaces -
+  // because the row now shares its line with the arrows. The property is unchanged: each machine states
+  // its place in the fill order.
+  check(entries.map(entry=>entry.querySelector('.node-priority').textContent).join(',')==='priority 1/2,priority 2/2','and its position in the priority order, saw: '+entries.map(entry=>entry.querySelector('.node-priority').textContent).join(','));
   // The saved policy fills the per-node rows where they now live, and a machine the list does not show
   // still keeps its limit and its place in the placement block's own container.
   panel.configure({policy:{enabled:true,nodes:[{node:'n-far',max_tasks:5}]},nodes:[

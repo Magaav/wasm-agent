@@ -44,6 +44,12 @@ wa-provider-manager button, wa-provider-manager a { margin-right:var(--space); }
   --radius-lg: var(--radius);
   /* The terminal face pi uses (VS Code/PowerShell ship Consolas on Windows). */
   --font: Consolas, "Cascadia Mono", "Cascadia Code", "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  /* The face a stats glyph falls back to when the row's own (monospace) font has no picture of it.
+     These are MONOCHROME symbol/emoji fonts, named in this order on purpose: `Noto Emoji` and
+     `Segoe UI Symbol` draw a text-presentation outline, while `Segoe UI Emoji` draws a colour bitmap.
+     A colour emoji font is deliberately NOT in this list: the only glyph that needs it (`👣`) must
+     read as a cipher, not as a pictograph. */
+  --glyph-font: "Noto Emoji", "Segoe UI Symbol", "Noto Sans Symbols 2";
   --font-size: 14.5px;
 }
 
@@ -55,15 +61,16 @@ wa-orchestrator { display:flex; flex-direction:column; width:100%; height:100%; 
 .orchestrator-count { flex:none; color:var(--text); font-size:12px; white-space:nowrap; }
 .orchestrator-body { display:flex; flex:1; min-height:0; }
 .orchestrator-sidebar { width:250px; min-width:200px; max-width:40%; overflow:auto; resize:horizontal; border-right:1px solid var(--line); padding:var(--space); }
-.orchestrator-sidebar nav { display:flex; flex-direction:column; gap:var(--gap); }
 /* The left bar's topics are the house topic (`.topic` + a `trace-head` button), one per line of the
    bar's reading order: the machines, then the children running on them. The box, the padding and the
-   disclosure are the topic's own; the bar only says how far apart two topics sit. */
+   disclosure are the topic's own; the bar only says how far apart two topics sit. There is nothing
+   else IN the bar: the per-child cards and their lane groups were removed, so the topics are its only
+   children and no `nav` rule is needed here. */
 .orchestrator-sidebar > wa-orchestrator-topic { display:block; margin-bottom:var(--space); }
 .sidebar-topic-body { padding:var(--space); }
 .orchestrator-sidebar > wa-orchestrator-topic > .trace-head { font-weight:600; }
 /* The live list: what is running, by machine. A row is compact on purpose - the sidebar has to hold
-   several of them next to the dispatch cards, and a reader scans the state, the node and the id. */
+   several of them under the `Live Subagents` topic, and a reader scans the state, the node and the id. */
 .live-children-counts { margin:0; color:var(--muted); font-size:12px; display:flex; align-items:baseline; gap:0; min-width:0; white-space:nowrap; overflow:hidden; }
 /* The counts never shrink; the node name does, with an ellipsis, so the three numbers stay on the one
    line whose whole job is stating the node's state. A pair's ONE leading space is in its own text and is
@@ -84,7 +91,7 @@ wa-orchestrator { display:flex; flex-direction:column; width:100%; height:100%; 
    <div> card's 18px - two heights for the same card, for a reason no reader could see. */
 .live-child-head, .live-child-title, .live-child-stats { line-height:18px; min-height:18px; }
 .live-child-title, .live-child-stats { display:block; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
-.live-child-stats { color:var(--muted); font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }
+.live-child-stats { color:var(--muted); font-family:ui-monospace,SFMono-Regular,Menlo,monospace,var(--glyph-font); font-variant-emoji:text; }
 .live-child[data-state="running"], .live-child[data-state="accepted"] { border-left-color:var(--ok); }
 .live-child[data-state="queued"], .live-child[data-state="placing"] { border-left-color:var(--warn); }
 .live-child[data-state="unfinished"] { border-left-color:#f0a; }
@@ -92,16 +99,6 @@ wa-orchestrator { display:flex; flex-direction:column; width:100%; height:100%; 
 button.live-child:hover, button.live-child:focus-visible { background:var(--panel-2); border-color:var(--accent); }
 .live-children-empty { margin:0; color:var(--muted); font-size:12px; }
 .live-children-foot { margin:var(--space) 0 0; color:var(--muted); font-size:11px; }
-.agent-card { display:flex; flex-direction:column; gap:0; width:100%; min-width:0; text-align:left; padding:var(--space); border:1px solid var(--line); border-left:3px solid var(--muted); border-radius:var(--radius-sm); background:var(--panel); color:var(--text); }
-.agent-card-mission { display:block; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; font-weight:600; }
-.agent-card-details { display:flex; align-items:center; gap:var(--gap); min-width:0; color:var(--muted); font-size:12px; }
-.agent-card-model { flex:1; min-width:0; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
-.agent-card-status { flex:none; text-transform:capitalize; }
-.agent-card[data-state="running"], .agent-card[data-state="accepted"] { border-left-color:var(--ok); }
-.agent-card[data-state="queued"] { border-left-color:var(--warn); }
-.agent-card[data-state="unknown"], .agent-card[data-state="failed"] { border-left-color:#f77; }
-.agent-card[data-state="completed"], .agent-card[data-state="cancelled"] { color:var(--muted); }
-.agent-card:hover, .agent-card:focus-visible { background:var(--panel-2); border-color:var(--accent); }
 /* The machines, one entry each, inside the `Nodes` topic. <wa-node> is the entry's two lines (name, then
    statistics) and it is the SAME component the engine menu's node list draws; that list lays the two
    lines out as its own row would have them (`display:contents`), which is why the entry here states its
@@ -116,33 +113,17 @@ wa-node { display:flex; flex-direction:column; gap:2px; min-width:0; }
 /* The name is the entry's label and takes the label's colour: `trace-head` is muted because it holds a
    row of meta, but a node's own name is what the reader is looking for. */
 .node-topic .node-name { color:var(--text); }
-/* What opening one node states: the rest of the record the two-line header cannot hold. */
-.node-details { display:grid; grid-template-columns:auto minmax(0,1fr); gap:2px var(--gap); margin:0; font-size:11px; color:var(--muted); }
-.node-details dt { color:var(--muted); }
-.node-details dd { margin:0; overflow-wrap:anywhere; }
-/* A lane: the checkout a child was given, the children working in it, and its end state. The
-   sidebar is a list of lanes rather than a flat list of children, because "what is still owed here"
-   is a question about a checkout - six children in one worktree used to be six unrelated cards. */
-.lane { display:flex; flex-direction:column; gap:var(--gap); padding:var(--space); border:1px solid var(--line); border-radius:var(--radius-sm); background:var(--panel); }
-.lane-head { display:flex; align-items:baseline; gap:var(--gap); flex-wrap:wrap; min-width:0; }
-.lane-key { flex:1; min-width:0; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; font-weight:600; }
-.lane-count { flex:none; color:var(--muted); font-size:11px; }
-.lane-path { flex-basis:100%; min-width:0; color:var(--muted); font-size:11px; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }
-.lane-children { display:flex; flex-direction:column; gap:var(--gap); }
-.lane-checklist { display:flex; flex-direction:column; gap:2px; margin:0; padding:0; list-style:none; }
-.lane-check { display:flex; align-items:baseline; gap:var(--gap); color:var(--muted); font-size:11px; }
-.lane-check-name { min-width:75px; }
-.lane-check-state { flex:none; margin-left:auto; text-align:right; text-transform:uppercase; letter-spacing:.04em; }
-.lane-check[data-state="yes"] .lane-check-state { color:var(--ok); }
-.lane-check[data-state="no"] .lane-check-state { color:var(--warn); }
-.lane-check[data-state="unknown"] .lane-check-state { color:var(--muted); }
-/* A node's configuration, inside its own topic: how many subagents may run on it and where it sits in
-   the fill order. The row is the same `.placement-node` the placement block used to hold, so the input
-   and the two arrows are styled once for both places. */
+/* A node's configuration is an inner topic of that node's topic, and its body is two compact rows:
+   `max subagents` then the numeric limit, `priority 2/3` then the two arrows - label left, control pinned
+   to the far right. Both lanes that met here removed something: the spawned-agent cards took `.lane*`
+   with them, and the node description block took `.node-details` with it. Neither rule is restored -
+   there is no element left to style. The limit row stays the same `.placement-node` the placement
+   block's fallback row uses, so the input and the arrows are styled once for both places. */
 .node-config { margin-top:var(--space); }
-.node-config .placement-node { color:var(--muted); font-size:12px; }
-.node-config-head { margin:0; color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.04em; }
-.node-priority { display:block; color:var(--muted); font-size:11px; }
+.node-config-row { display:flex; align-items:center; gap:var(--gap); padding:var(--space) 0; color:var(--muted); font-size:12px; }
+.node-config-row > label { display:flex; align-items:center; gap:var(--gap); flex:1; min-width:0; color:var(--muted); }
+.node-config-row input { margin-left:auto; }
+.node-priority-row .node-priority { flex:1; min-width:0; color:var(--muted); font-size:12px; }
 /* The placement block is the top of the `Nodes` body now: the switch and Save act on the per-node rows
    that live in the node topics below them. */
 .placement { margin:0 0 var(--space); color:var(--muted); font-size:12px; }
@@ -181,7 +162,7 @@ wa-agent-session { min-width:0; min-height:0; display:flex; flex-direction:colum
    is excluded above for the same reason `.chat-control` is - the row it sits in is the box `.topic` and
    `.trace-head` already draw, and a rule here that restated that box for the same element would be a
    second header style that happens to lose today and moves the moment it wins. */
-/* The orchestrator's own buttons (sidebar cards, live children, lanes). `.chat-control` is excluded rather
+/* The orchestrator's own buttons (live children, node actions, the promotion controls). `.chat-control` is excluded rather
    than out-specified: a composer-footer control's box is the shared factory's (`.chat-control` beside the
    append-file control), and a rule here that stated that box for the same element a second time would be a
    duplicate that happens to lose today and moves the pane's actions the moment it wins. */
@@ -456,6 +437,18 @@ wa-diff { display: block; align-self: flex-start; max-width: 760px; width: 100%;
 /* Detailed phase history is diagnostic-only; the compact current phase stays in the footer. */
 .messages:not([data-debug="true"]) wa-step, .agent-transcript:not([data-debug="true"]) wa-step { display: none; }
 .chat-content-run-elapsed { flex: 0 1 auto; min-width: 0; font-variant-numeric: tabular-nums; white-space: nowrap; }
+/* The stats row is TEXT, and every glyph in it is a text symbol that takes the row's colour and size:
+   `◈` tokens, `👣` model calls, `⚒` tools, `◷` duration (and `✺` elapsed while a child runs).
+   `👣` is the one of those that Unicode also ships as a COLOUR emoji, and a browser left to choose
+   picks the colour one - a pictograph in the emoji's own colours, at emoji size, in a muted
+   monospace line. Two declarations keep it a cipher here:
+     1. `font-variant-emoji: text` asks for the TEXT presentation. It is inherited, so every glyph in
+        the row (and the same line's copy in a `Live Subagents` row, below) gets it.
+     2. the row's font stack reaches a monochrome font (`--glyph-font`) before any colour emoji font.
+        Fallback is per character, so only the glyph takes that font: the digits and the letters
+        around it stay in the row's own monospace face and keep their tabular figures.
+   Both are measured in `scripts/probe-run-stats-glyph.js`, which fails if either stops applying. */
+.chat-content-run-elapsed { font-variant-emoji: text; font-family: var(--font), var(--glyph-font); }
 /* Live row: `✦4s` then two spaces then the compact facts, read left to right - the clock is not
    pushed to the left edge and the counters are not pushed to the right one. `.6em` is two spaces at
    the row's own font size, so the separation survives the narrow-pane font step below. A pane too

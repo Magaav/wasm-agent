@@ -2774,8 +2774,14 @@ class WaOrchestrator extends HTMLElement {
     // The header is the window's name and one number. It used to carry a sentence about closing the
     // window and two buttons (Refresh, Back to main chat); the count is the only thing the header has to
     // say, so the sentence is gone and so are the buttons and the routes that existed only for them.
-    this.innerHTML='<header class="orchestrator-head"><strong>Orchestrator</strong><span class="orchestrator-count"></span><span class="orchestrator-status" role="status"></span></header><div class="orchestrator-body"><aside class="orchestrator-sidebar"><nav aria-label="Agents"></nav></aside><main class="orchestrator-canvas"><p class="orchestrator-empty">Select an active card to follow its conversation. History remains in Engine → Sessions.</p></main></div>';
-    this.sidebar=this.querySelector('nav'); this.canvas=this.querySelector('main'); this.panes=new Map(); this.drafts=new Map();
+    this.innerHTML='<header class="orchestrator-head"><strong>Orchestrator</strong><span class="orchestrator-count"></span><span class="orchestrator-status" role="status"></span></header><div class="orchestrator-body"><aside class="orchestrator-sidebar"></aside><main class="orchestrator-canvas"><p class="orchestrator-empty">Select a live child to follow its conversation. History remains in Engine → Sessions.</p></main></div>';
+    // The bar is its topics and nothing else. It used to end in a second, flat list of the same
+    // children - one card per spawned child (lane, child count, worktree path, mission, model, the
+    // merged/retired/clean/main-only rows) - and the `Live Subagents` topic above already answers
+    // "what is spawned, where, and how it is doing". The operator controls the children from that
+    // topic, so the duplicate list and its `<nav aria-label="Agents">` are gone; the topics are the
+    // bar's children now, in the order they are built (machines, then what runs on them).
+    this.sidebar=this.querySelector('.orchestrator-sidebar'); this.canvas=this.querySelector('main'); this.panes=new Map(); this.drafts=new Map();
     // Promoted conversations: each is a <wa-window> reading the same task as the pane it came from.
     this.windows=new Map();
     // The left bar is the machines first, then what runs on them: a reader asks where a child could run
@@ -2820,7 +2826,7 @@ class WaOrchestrator extends HTMLElement {
     topic.setAttribute('label',options.label);
     topic.setAttribute('glyph',options.glyph);
     if(options.open)topic.setAttribute('open','');
-    this.sidebar.before(topic);
+    this.sidebar.append(topic);
     return topic;
   }
   // The live topic's three elements, with the classes they already had: the host writes the node's count
@@ -2849,9 +2855,8 @@ class WaOrchestrator extends HTMLElement {
   }
   // Every online node, one entry each, drawn from the SAME sample the engine menu's node list draws (the
   // host pushes `nodeList` here when it repaints that list, so there is one read and no second poller).
-  // Each entry is itself a topic; opening it states the rest of the record - the kind, what it advertises,
-  // whether it is reachable - and that machine's own configuration, because the two-line header carries
-  // only the name and the statistics.
+  // Each entry is itself a topic; opening it states that machine's own configuration, because the
+  // two-line header carries only the name and the statistics.
   set nodes(value) {
     this.connectedCallback();
     // A repaint must not discard what the reader has typed into a limit: the limits are kept on the panel
@@ -2880,15 +2885,9 @@ class WaOrchestrator extends HTMLElement {
     topic.setAttribute('no-glyph','');
     topic.dataset.placementNode=this.placementId(node);
     topic.node=node;
-    const details=document.createElement('dl'); details.className='node-details';
-    for(const [term,value] of [['kind',node.kind || 'unknown'],
-      ['advertises',(node.capabilities || []).join(' ') || 'nothing advertised'],
-      ['reachable',node.online===false ? 'offline' : 'online']]) {
-      const name=document.createElement('dt'); name.textContent=term;
-      const description=document.createElement('dd'); description.textContent=value;
-      details.append(name,description);
-    }
-    topic.body.append(details);
+    // The record rows that used to sit here (kind, the capabilities it advertised, reachability) are
+    // gone: they answered a question opening a node is not about, and the statistics line already says
+    // whether the machine is online. What opening a node states is that machine's configuration.
     // The desktop this window runs on is not a machine a child can be placed on, so it gets no limits.
     if(node.kind!=='client')topic.body.append(this.nodeConfigElement(node));
     return topic;
@@ -2897,33 +2896,65 @@ class WaOrchestrator extends HTMLElement {
   // the node id - the same two spellings `fleet.policy.nodes` uses, so a limit edited here is the limit
   // the dispatcher reads back.
   placementId(node) { return node.local_node ? 'local' : (node.node_id || node.id); }
-  // ONE machine's configuration, inside its own topic: how many subagents may run on it (the same
-  // `max_tasks` input the placement block used to hold) and where it sits in the fill order (the two
-  // arrows and the position they change). The row is the same `.placement-node` element, so `policy`
-  // reads it and the host's `save-placement` handler saves it without knowing where it was edited.
+  // ONE machine's configuration, drawn as an inner topic of that machine's topic: the house topic
+  // component (`wa-orchestrator-topic`), so it opens and reads like every other topic in this bar rather
+  // than as loose rows. Its body is two compact rows - the limit, then the place in the fill order - with
+  // each label on the left and its control on the far right.
   nodeConfigElement(node) {
-    const block=document.createElement('div'); block.className='node-config';
-    const head=document.createElement('p'); head.className='node-config-head'; head.textContent='Configuration';
-    const row=this.placementRow({node:this.placementId(node),label:'max subagents ',
-      aria:(node.name || 'this node')+' max subagents'});
-    const position=document.createElement('span'); position.className='node-priority';
-    block.append(head,row,position);
+    const block=document.createElement('wa-orchestrator-topic');
+    block.setAttribute('topic-class','node-config');
+    block.setAttribute('label','Configuration');
+    block.setAttribute('no-glyph','');
+    // Open: the reader opened the node to reach these controls, so a second click to reveal the same two
+    // rows would be a disclosure nobody asked for. Every node's configuration topic is drawn this way.
+    block.setAttribute('open','');
+    block.body.append(this.nodeLimitRow(node),this.nodePriorityRow());
     return block;
   }
-  // One machine's limit and its place in the fill order. The arrows move whichever unit that row lives in:
-  // inside a node's own topic it is the whole topic, so what a reader arranges is the list they are
-  // reading; inside the placement block's container it is the row.
-  placementRow({node,label,aria}) {
-    const row=document.createElement('div'); row.className='placement-node'; row.dataset.node=node;
-    const text=document.createElement('label'); text.textContent=label;
+  // Row 1: `max subagents` on the left, the numeric limit pinned to the far right. The input stays inside
+  // the row's `<label>` (that is its accessible name) and stays the one `.placement-node input`, so
+  // `policy` reads it and the host's `save-placement` handler saves it without knowing where it was edited.
+  nodeLimitRow(node) {
+    const row=document.createElement('div'); row.className='placement-node node-config-row';
+    row.dataset.node=this.placementId(node);
+    const label=document.createElement('label'); label.textContent='max subagents';
+    label.append(this.limitInput(this.placementId(node),(node.name || 'this node')+' max subagents'));
+    row.append(label);
+    return row;
+  }
+  // Row 2: `priority 2/3` on the left, the two arrows pinned to the far right. The arrows are the same
+  // two buttons (same titles, same `_movePlacement` call) and they move the node topic they now sit inside.
+  nodePriorityRow() {
+    const row=document.createElement('div'); row.className='node-config-row node-priority-row';
+    const position=document.createElement('span'); position.className='node-priority';
+    row.append(position,...this.moveButtons(row));
+    return row;
+  }
+  // The one numeric limit input, whoever draws it: a machine's own topic and the placement block's
+  // fallback row are the same control, so a limit is edited the same way in both places.
+  limitInput(node,aria) {
     const input=document.createElement('input');input.type='number';input.min='0';input.max='128';input.step='1';
     input.value=String(this.placementLimits?.get(node) ?? 0);
-    input.setAttribute('aria-label',aria); text.append(input);
+    input.setAttribute('aria-label',aria);
+    return input;
+  }
+  // The two fill-order arrows, bound to the row they belong to: `_movePlacement` finds the unit to move
+  // from that row, so the buttons need not know whether the unit is a topic or a row.
+  moveButtons(row) {
     const up=document.createElement('button');up.type='button';up.textContent='↑';up.title='Higher priority';
     const down=document.createElement('button');down.type='button';down.textContent='↓';down.title='Lower priority';
     up.onclick=()=>this._movePlacement(row,-1);
     down.onclick=()=>this._movePlacement(row,1);
-    row.append(text,up,down);
+    return [up,down];
+  }
+  // One machine's limit and its place in the fill order, as the placement block's fallback container draws
+  // it (a machine the node list does not show). The arrows move whichever unit the row lives in: inside a
+  // node's own topic it is the whole node topic; here it is the row.
+  placementRow({node,label,aria}) {
+    const row=document.createElement('div'); row.className='placement-node'; row.dataset.node=node;
+    const text=document.createElement('label'); text.textContent=label;
+    text.append(this.limitInput(node,aria));
+    row.append(text,...this.moveButtons(row));
     return row;
   }
   // The reader's edits so far, so a repaint of the list does not discard them.
@@ -2972,7 +3003,9 @@ class WaOrchestrator extends HTMLElement {
     const topics=[...this.querySelectorAll('.node-list > wa-orchestrator-topic')];
     topics.forEach((topic,index)=>{
       const position=topic.querySelector('.node-priority');
-      if(position)position.textContent=topics.length>1?`priority ${index+1} of ${topics.length}`:'priority 1 of 1';
+      // `priority 2/3`: one slash, no spaces, because the row shares its line with the two arrows and the
+      // long spelling pushed them off it.
+      if(position)position.textContent=`priority ${index+1}/${topics.length}`;
     });
     // What the reader arranged is what Save sends, so the saved order is read back off the list. An empty
     // list keeps the order it had: a repaint that happens to show no machine yet must not turn Save into
@@ -2985,7 +3018,9 @@ class WaOrchestrator extends HTMLElement {
   // The arrows move one machine one place up or down. Inside a node's topic the unit is the topic itself,
   // so what a reader arranges is the list they are reading; in the fallback container it is the row.
   _movePlacement(row,delta) {
-    const unit=row.closest('wa-orchestrator-topic') || row;
+    // The arrows of a node's configuration sit inside that configuration's own topic; the unit they
+    // arrange is the NODE topic around it, so the `.node-topic` is asked for first.
+    const unit=row.closest('.node-topic') || row.closest('wa-orchestrator-topic') || row;
     const parent=unit.parentElement;
     if(!parent)return;
     const units=[...parent.children].filter(child=>child.localName===unit.localName);
@@ -3006,7 +3041,7 @@ class WaOrchestrator extends HTMLElement {
   //
   //   1. `<state> <node>` - what it is doing, and on which machine (the node's name, never a bare id)
   //   2. `<resumed task>` - what it was asked to do, ellipsised when it does not fit
-  //   3. the run's stats, from the host's one stats line (`✺10s ◈~62.6k ✧24 ⚒38 ◷2:18`)
+  //   3. the run's stats, from the host's one stats line (`✺10s ◈~62.6k 👣24 ⚒38 ◷2:18`)
   //
   // A card's height must not change as runs start and finish, so lines 2 and 3 are ALWAYS there:
   // an absent task and an absent statistic reserve their line instead of collapsing it. The session
@@ -3098,87 +3133,27 @@ class WaOrchestrator extends HTMLElement {
     }
     line.replaceChildren(...parts);
   }
-  // The window's agents, grouped by LANE.
+  // The window's agents, as the host hands them over.
   //
-  // A lane is the checkout a child was given, and it is the unit a reader reasons about: one
-  // worktree, the children working in it, and what is still owed on it. The lane travels on the task
-  // (`task.lane`), read by the host from the session ledger, because what a lane *is* - a recorded
-  // branch and worktree - is a fact about the node's records rather than about this element. A child
-  // with no branch of its own is in the `main` lane, which is stated, not inferred.
+  // This setter used to draw the bar's second list: one card per spawned child, grouped by the
+  // checkout it was given, each card carrying the lane key, the child count, the worktree path, the
+  // mission, `model · reasoning` and a merged/retired/clean/main-only checklist for that checkout.
+  // That duplicated the `Live Subagents` topic the operator already uses to see and control the
+  // children, so the cards are gone. What remains is the part the panel still owes its panes: the
+  // current task object behind each open conversation, which is what keeps a pinned pane reading the
+  // newest run of its session.
   set data(tasks) {
     this.connectedCallback();
-    // Follow-up tasks share a session. One card per conversation, newest run.
+    // Follow-up tasks share a session: one conversation, newest run.
     this.tasks=agentLatestTasks(tasks);
-    // Keep history for existing panes, but only positive active states create cards.
+    // Only positive active states count as active; history stays history.
     this.activeTasks=this.tasks.filter(task=>agentTaskActive(task));
-    const lanes=new Map();
-    for(const task of this.activeTasks) this.groupByLane(lanes,task);
-    this.sidebar.replaceChildren(...[...lanes.values()].map(group=>this.laneElement(group)));
     for(const task of this.tasks) {
       for(const pane of this.panes.values()) {
         if(pane.task.session_id && pane.task.session_id===task.session_id && pane.task.execution_node===task.execution_node) pane.task=task;
         else if(pane.task.subagent_id===task.subagent_id)pane.task=task;
       }
     }
-  }
-  groupByLane(lanes,task) {
-    const lane=task.lane || {key:'no recorded checkout',label:'no recorded checkout',checklist:[]};
-    const group=lanes.get(lane.key) || {lane,tasks:[]};
-    group.tasks.push(task);
-    lanes.set(lane.key,group);
-  }
-  // One lane: its key, the children it holds, and its end-state checklist. Every entry is a
-  // measurement or an explicit `unknown` carrying the host's reason (`task.lane.checklist`) - a lane
-  // drawn as merged and clean when nobody could read its checkout is the mistake that list exists to
-  // prevent, so the three states a reader can act on (`yes`, `no`, `unknown`) are attributes of the
-  // row rather than words this element invents.
-  laneElement(group) {
-    const lane=group.lane;
-    const section=document.createElement('section');
-    section.className='lane';
-    section.dataset.lane=lane.key;
-    const head=document.createElement('header');head.className='lane-head';
-    const key=document.createElement('span');key.className='lane-key';
-    key.textContent=lane.label || lane.key;key.title=key.textContent;
-    const count=document.createElement('span');count.className='lane-count';
-    count.textContent=group.tasks.length+(group.tasks.length===1 ? ' child' : ' children');
-    head.append(key,count);
-    if(lane.worktree) {
-      const path=document.createElement('span');path.className='lane-path';
-      path.textContent=lane.worktree;path.title=lane.worktree;
-      head.append(path);
-    }
-    section.append(head);
-    const children=document.createElement('div');children.className='lane-children';
-    for(const task of group.tasks) children.append(this.cardElement(task));
-    section.append(children);
-    const checklist=document.createElement('ul');checklist.className='lane-checklist';
-    for(const item of lane.checklist || []) {
-      const row=document.createElement('li');row.className='lane-check';
-      row.dataset.outcome=item.outcome;row.dataset.state=item.state;
-      const name=document.createElement('span');name.className='lane-check-name';name.textContent=item.outcome;
-      const state=document.createElement('span');state.className='lane-check-state';state.textContent=item.state;
-      row.append(name,state);
-      row.title=[item.outcome,item.state,item.detail].filter(Boolean).join(' · ');
-      checklist.append(row);
-    }
-    section.append(checklist);
-    return section;
-  }
-  cardElement(task) {
-    const card=document.createElement('button'); card.type='button'; card.className='agent-card';
-    const state=task.state || 'unknown';
-    card.dataset.state=state;
-    const mission=document.createElement('span');mission.className='agent-card-mission';
-    mission.textContent=agentTaskTitle(task);
-    mission.title=mission.textContent;
-    const details=document.createElement('span');details.className='agent-card-details';
-    const model=document.createElement('span');model.className='agent-card-model';model.textContent=[task.model || 'model unknown',task.reasoning || 'reasoning unknown'].join(' · ');
-    const status=document.createElement('span');status.className='agent-card-status';status.textContent=state;
-    details.append(model,status);card.append(mission,details);
-    card.setAttribute('aria-label',`${mission.textContent} · ${model.textContent} · ${state}`);
-    card.addEventListener('click',()=>this.pin(task));
-    return card;
   }
   // A pane must say which machine it is reading, by name. The task travels unchanged apart from that
   // one display field, so nothing downstream (steer, cancel, the model strip) sees a different task.
