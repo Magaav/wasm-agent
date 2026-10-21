@@ -66,6 +66,33 @@ change lands first because that is the shortest path to unblocking the rest.
 is for `main`'s own change (a document, a version bump), and it carries the trailer like any other
 commit. The guard enforces this case and no other.
 
+### Parallel lanes on one area, and the unmergeable tree (default)
+
+The default is **many lanes at once, from empty contexts**, even when their concerns overlap in the
+same files. Overlap is expected; the merge queue resolves it. This supersedes "one unlanded editor
+per hot file" for the operator-selected direct workflow: that rule assumed a hand-merged queue, and
+this one has a procedure.
+
+- **A worker commits only.** Never merges, never deploys, never pushes `main`. Its branch is its
+  delivery and its report is evidence, not verification.
+- **First green lands first.** The first lane that passes the coordinator's own gate on a tree merged
+  with current `origin/main` is merged and pushed; everything behind it waits.
+- **A rebased branch is not green.** Every later lane is rebased onto the new `main` in a `tmp/`
+  branch and re-gated. A receipt from before the rebase covers a tree that no longer exists.
+- **An unmergeable tree is a routing decision, not a failure.** Two ways out, chosen by the conflict:
+  - **rewake** (`subagent message`, `idempotency_key` required) when the conflict is *mechanical*: the
+    same file with different hunks, or two assertions that need each other's strings. The child keeps
+    its worktree, branch, diff and context; the brief is one line each - the new base SHA and the other
+    lane's landing - then "rebase, re-run your focused checks, report".
+  - **respin** (`subagent start`, new branch) when the conflict is *semantic*: both lanes changed the
+    same logic, the new base invalidates the child's premise, or the same conflict already survived one
+    rewake. A rewoken child defends its earlier reasoning; a fresh one holding both diffs does not.
+    Preserve the old branch as `archive/<branch>`; never delete it.
+- **Say which you chose, and why,** per case. "Rewoken because it was two probe strings" and "respun
+  because its lifecycle change assumed the old fold" are different facts for the next reader.
+- **The gate stays the coordinator's**, after every rewake and every respin, on a tree merged with
+  current `main`. A skipped check is reported as skipped, never counted as green.
+
 **What a landing must carry.** A landing missing any of these is not a landing:
 
 1. the **reviewer's independent verdict** on the exact tip, from a lane that did not produce it
