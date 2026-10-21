@@ -202,6 +202,10 @@
   }finally{orchestratorPanel=oldPanel;orchestratorRequest=oldRequest;orchestratorRead=oldRead;refreshAgentPane=oldRefresh;if(oldSaved===null)localStorage.removeItem(storage);else localStorage.setItem(storage,oldSaved);}
   // Leave a compact active-only real screenshot; no fixture timers repaint it.
   panel.data=[...history,...active];panel.live={rows:[],counts:'Active tasks are listed below.',note:'History remains in Engine → Sessions.'};
+  // WHY THIS IS NEW: the empty-state sentence `No active children reported.` is removed - an empty list is
+  // already visible as an empty list - so the property that survives is asserted instead: an empty list
+  // draws nothing at all, and the sentence is gone rather than merely untested.
+  check(panel.querySelector('.live-children-list').children.length===0&&panel.querySelector('.live-children-list').textContent===''&&!panel.textContent.includes('No active children reported.'),'the empty live list draws nothing and states no sentence, saw: '+JSON.stringify(panel.querySelector('.live-children-list').textContent));
   panel.activeCount=panel.activeTasks.length;
   panel.unpin('active-0');panel.unpin('active-1');
   for(let t=1;t<10000;t++){clearTimeout(t);clearInterval(t);}

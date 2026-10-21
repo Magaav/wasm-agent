@@ -97,7 +97,6 @@ wa-orchestrator { display:flex; flex-direction:column; width:100%; height:100%; 
 .live-child[data-state="unfinished"] { border-left-color:#f0a; }
 .live-child[data-state="unknown"], .live-child[data-state="failed"] { border-left-color:#f77; }
 button.live-child:hover, button.live-child:focus-visible { background:var(--panel-2); border-color:var(--accent); }
-.live-children-empty { margin:0; color:var(--muted); font-size:12px; }
 .live-children-foot { margin:var(--space) 0 0; color:var(--muted); font-size:11px; }
 /* The machines, one entry each, inside the `Nodes` topic. <wa-node> is the entry's two lines (name, then
    statistics) and it is the SAME component the engine menu's node list draws; that list lays the two

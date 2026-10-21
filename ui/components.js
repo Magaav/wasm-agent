@@ -3059,9 +3059,9 @@ class WaOrchestrator extends HTMLElement {
     this.querySelector('.live-children-foot').textContent=note;
     const list=this.querySelector('.live-children-list');
     if(!rows.length) {
-      const empty=document.createElement('p'); empty.className='live-children-empty';
-      empty.textContent='No active children reported.';
-      list.replaceChildren(empty);
+      // An empty list is already visible as an empty list: the sentence that said so is gone, and so is
+      // the element that existed only to render it.
+      list.replaceChildren();
       return;
     }
     list.replaceChildren(...rows.map(row=>{
