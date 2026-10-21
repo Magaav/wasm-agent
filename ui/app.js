@@ -1012,7 +1012,13 @@ function currentBubble() {
   if (!runBubble) {
     transcript.querySelector('#empty')?.remove();
     answerReleased.delete(transcript);
-    sealedReasoning = null;
+    // A RUN is what a thinking topic belongs to, so a new bubble starts a fresh one. The reference is
+    // kept across rounds and replies - that is exactly what keeps the topic in its place while the run
+    // steps - and dropped only here, where the previous run's node must not be appended into.
+    reasoningBlock = null;
+    reasoningText = "";
+    reasoningRound = "";
+    endedReasoning = null;
     runBubble = document.createElement("wa-message");
     runBubble.setAttribute("role", "assistant");
     transcript.append(runBubble);   // connecting is what builds .body
@@ -1162,34 +1168,72 @@ function clearStatus() {
 // swallowed is a run that called no tool at all: no topic is created for one, so its thinking stays
 // visible instead of reading as a run that only called tools.
 let reasoningBlock = null;
+// ONE TRAIN OF THOUGHT IS ONE TOPIC, AND THE TOPIC KEEPS ITS PLACE. The node is kept across rounds,
+// replies and the final answer's fold, so the next burst appends into the same element wherever it
+// now sits (a moved node is still the same node; only a disconnected one has to be replaced).
+//
+// The two buffers are the two halves of that one topic: the rounds already finished, and the round
+// still streaming. They cannot be one string, because the node re-sends each round's own reasoning as
+// an authoritative copy (`complete`, lua/core/agent.lua) - that copy replaces the round it belongs to,
+// and everything the earlier rounds of the SAME topic wrote has to survive it.
 let reasoningText = "";
-let streamedCommentaryBlock = null;
-let streamedCommentaryText = "";
+let reasoningRound = "";
+// The paragraph mark between two rounds of one topic: the node's own part boundary uses the same two
+// newlines (lua/core/subscription_wire.lua), so two thoughts that are not one sentence read as two.
+function reasoningBody() {
+  if (!reasoningText) return reasoningRound;
+  if (!reasoningRound) return reasoningText;
+  return reasoningText + "\n\n" + reasoningRound;
+}
+// A ROUND BOUNDARY: what this round streamed becomes the finished part of the topic, so the next round
+// writes after it and a `complete` can only ever replace its own round. Without this the rounds of one
+// topic shared one buffer, and the round's authoritative copy erased the round before it.
+function beginReasoningRound() {
+  if (!reasoningRound) return;
+  reasoningText = reasoningText ? reasoningText + "\n\n" + reasoningRound : reasoningRound;
+  reasoningRound = "";
+}
 function appendReasoning(text, complete = false) {
-  if (!text && !complete) return reasoningText;
+  if (!text && !complete) return reasoningBody();
   const bubble = currentBubble();
   if (!reasoningBlock || !reasoningBlock.isConnected) {
     // A THINKING TOPIC KEEPS ITS OWN LIFE. It used to be re-created as soon as a tool step moved it into
     // the run topic (`parentNode` was no longer the bubble), which split one train of thought into one
     // topic per step and folded the earlier half away (operator, 2026-10-21: "the thinking closes on the
     // next topic, normally a tool call - I want it to stay so I can read the trace and follow up"). The
-    // connection, not the parent, is the test now, so the same topic keeps growing wherever it sits - and
-    // the topic it replaces is closed HERE, by the next thinking topic, which is the only thing that
-    // should close it.
-    if (sealedReasoning) { sealedReasoning.open = false; sealedReasoning = null; }
+    // connection, not the parent, is the test now, so the same topic keeps growing wherever it sits.
+    //
+    // A NEW train of thought starts BESIDE the topic that ended, never at the far end of the bubble: the
+    // run's children are in the order its steps happened in, and appending here would draw the next
+    // thought below the step that followed the last one.
     // A topic like every other one: <wa-reasoning> builds the same header as the tool calls beside it,
     // so the thinking reads as a step of the same kind rather than as a different thing.
     reasoningBlock = document.createElement("wa-reasoning");
     reasoningBlock.open = !replayingMessages;
-    bubble.body.append(reasoningBlock);
-    anchorRunStepContent(reasoningBlock);
+    const ended = endedReasoning;
+    if (ended && ended.isConnected && ended.parentNode) ended.parentNode.insertBefore(reasoningBlock, ended.nextSibling);
+    else bubble.body.append(reasoningBlock);
+    endedReasoning = null;
     reasoningText = "";
+    reasoningRound = "";
+    anchorRunStepContent(reasoningBlock);
+  } else if (!reasoningBlock.open && !replayingMessages) {
+    // A decision or another thinking-shaped step may CLOSE the topic (see `addDecision`), but a burst
+    // that continues the thought reopens it: text that keeps arriving lands in a topic the reader has to
+    // open by hand otherwise, which is the same complaint one layer down.
+    reasoningBlock.open = true;
   }
-  reasoningText = complete ? text : reasoningText + text;
-  reasoningBlock.setText(reasoningText);
+  if (complete) {
+    // This round's authoritative copy - it replaces what THIS round streamed, and only that.
+    reasoningRound = String(text == null ? "" : text);
+    beginReasoningRound();
+  } else reasoningRound += text;
+  reasoningBlock.setText(reasoningBody());
   pin();
-  return reasoningText;
+  return reasoningBody();
 }
+let streamedCommentaryBlock = null;
+let streamedCommentaryText = "";
 
 function appendCommentary(text, messageId, pendingId, decisionPrelude, place) {
   if (!text || (messageId && renderedMessageIds.has(String(messageId)))) return;
@@ -1462,14 +1506,17 @@ function markPendingTextIncomplete() {
   phasePendingText.clear();
 }
 
-// A round is over: this thinking topic is finished, but the reader may still be reading it, so it stays
-// OPEN and readable through the steps that follow. What closes it is another thinking topic (see
-// `appendReasoning`) or a decision topic (see `addDecision`) - never the tool topic that merely came next.
-let sealedReasoning = null;
-function sealReasoning() {
-  if (reasoningBlock) sealedReasoning = reasoningBlock;
+// A train of thought ENDS here - not at a round boundary and not at a reply, only where the thought
+// really stopped (an interrupted attempt whose reasoning is preserved). The node stays exactly where it
+// is; what stops is the appending, and `endedReasoning` is where the NEXT thought starts beside, so the
+// replacement is drawn in place and the order of the run's children does not change.
+let endedReasoning = null;
+function endReasoningTopic() {
+  if (!reasoningBlock) return;
+  endedReasoning = reasoningBlock;
   reasoningBlock = null;
   reasoningText = "";
+  reasoningRound = "";
 }
 
 // Tool lines are rendered the way pi renders them in its CLI: bold lowercase
@@ -2006,12 +2053,12 @@ function addTool(name, args, options) {
 }
 
 function addDecision(event) {
-  // A decision is the next thinking-shaped step, so it closes the thinking topic it follows - the same
-  // rule that closes it when another thinking topic starts. It closes the LIVE one too: a decision can
-  // arrive while that topic is still the one reasoning would append to, and leaving it open would leave
-  // two thinking-shaped topics open at once.
-  if (sealedReasoning) { sealedReasoning.open = false; sealedReasoning = null; }
-  if (reasoningBlock) { reasoningBlock.open = false; reasoningBlock = null; reasoningText = ""; }
+  // A decision is the next thinking-shaped step, so the thinking topic it follows is folded away - but
+  // only CLOSED, never forgotten. The node stays the append target, so a burst that continues the thought
+  // lands in the same topic in the same place instead of a new one drawn below this step (operator,
+  // 2026-10-2x: the thinking topic moved when the next tool-call step arrived). Forgetting it here was the
+  // first half of that: the next burst had no node to append to and appended a new one at the end.
+  if (reasoningBlock) reasoningBlock.open = false;
   showRunStep("decision", "Selecting tools");
   currentTrace().addDecision(event.call_id, event.name, event.arguments_text || "",
     event.complete === true, event.previous_call_id);
@@ -2201,7 +2248,6 @@ function flushDecision(final = false) {
     streamBody = null;
     streamText = "";
   }
-  sealReasoning();
   finishTrace();
   if (final) {
     // The run is over: its route folds away, and the answer is what is left to read.
@@ -2241,6 +2287,9 @@ function interruptSubscriptionAttempt(saved) {
   if (saved.reasoning) {
     appendReasoning(saved.reasoning,true);
     reasoningBlock?.classList.add('phase-incomplete');
+    // The preserved attempt is a finished train of thought: the regenerated response's reasoning starts
+    // a new topic beside it, in place, instead of appending to the attempt that was thrown away.
+    endReasoningTopic();
   }
   if (!trace && saved.decisions.length) {
     for (const item of saved.decisions) currentTrace().addDecision(item.call_id,item.name,item.arguments_text,item.complete,item.previous_call_id);
@@ -2322,6 +2371,10 @@ function handleEvent(event) {
     if (event.run_id) bubble.dataset.runId = String(event.run_id);
     if (!runStartedAt) runStartedAt = Date.now();
     markStreamedCommentaryIncomplete();
+    // A new round of the same run: the thinking that streamed so far is the finished part of this train
+    // of thought, and what follows writes after it (see `beginReasoningRound`). The thinking TOPIC is not
+    // closed or re-created here - that is what used to move the reader's thinking below the next step.
+    beginReasoningRound();
     flushDecision();
   } else if (event.type === "run_counts") {
     applyRunCounts(event.counts);
@@ -2491,8 +2544,9 @@ function handleEvent(event) {
     if (statusLabel) { setText(statusLabel, 'finishing…'); updateRunPhase(); }
     if (!replayingMessages && event.message_id && renderedMessageIds.has(String(event.message_id))) {
       // The durable reply can be repainted before its trailing `reply` event is replayed.
-      // Keep the saved bubble and let `done` settle it without appending the answer twice.
-      sealReasoning();
+      // Keep the saved bubble and let `done` settle it without appending the answer twice. The thinking
+      // topic is NOT sealed here: a run's thinking is one topic that keeps its place, and forgetting the
+      // node would draw the next burst as a second topic below the step that followed this reply.
       finishTrace();
       streamBody = null;
       streamText = "";
@@ -2579,7 +2633,8 @@ function handleEvent(event) {
         streamBody.dataset.answerAnchor='top';
       }
     }
-    sealReasoning();
+    // No `sealReasoning()` here either: the answer arriving is not the end of the thought, and the topic
+    // it would have forgotten is the one the next burst belongs in (see `appendReasoning`).
     const diff = renderDiff(currentBubble(), event.changes);
     if (diff) {
       diff.dataset.messageId = event.message_id || "";
@@ -2895,6 +2950,8 @@ function repaintMessages(rows, options = {}) {
   streamBody = null;
   streamText = "";
   reasoningBlock = null;
+  reasoningRound = "";
+  endedReasoning = null;
   streamedCommentaryBlock = null;
   streamedCommentaryText = "";
   phasePendingText = new Map();
@@ -3102,13 +3159,13 @@ function repaintMessages(rows, options = {}) {
 function captureRenderer() {
   return {transcript,runBubble,statusLine,statusLabel,statusElapsed,statusSpinner,runStepState,runCounts,
     statusPhase,lastAssistantBody,runStatusTicker,toolTicker,streamBody,streamText,phasePendingText,trace,lastTool,
-    reasoningBlock,reasoningText,streamedCommentaryBlock,streamedCommentaryText,runStartedAt,replayingMessages,
+    reasoningBlock,reasoningText,reasoningRound,endedReasoning,streamedCommentaryBlock,streamedCommentaryText,runStartedAt,replayingMessages,
     replayMessageEndedAt,replayRunLastMessage,renderedMessageIds,rendererTask};
 }
 function restoreRenderer(value) {
   ({transcript,runBubble,statusLine,statusLabel,statusElapsed,statusSpinner,runStepState,runCounts,
     statusPhase,lastAssistantBody,runStatusTicker,toolTicker,streamBody,streamText,phasePendingText,trace,lastTool,
-    reasoningBlock,reasoningText,streamedCommentaryBlock,streamedCommentaryText,runStartedAt,replayingMessages,
+    reasoningBlock,reasoningText,reasoningRound,endedReasoning,streamedCommentaryBlock,streamedCommentaryText,runStartedAt,replayingMessages,
     replayMessageEndedAt,replayRunLastMessage,renderedMessageIds,rendererTask}=value);
 }
 function childRenderKey(task) {return [activeNode,session,task?.session_id,task?.attempt_id||task?.subagent_id].join('|');}
@@ -3119,7 +3176,7 @@ function withChildRenderer(container,task,render) {
     transcript=container;runBubble=null;runStepState=null;runCounts=null;
     statusLine=null;statusLabel=null;statusPhase=null;statusElapsed=null;statusSpinner=null;runStatusTicker=null;toolTicker=null;
     trace=null;lastTool=null;lastAssistantBody=null;streamBody=null;streamText='';phasePendingText=new Map();
-    reasoningBlock=null;reasoningText='';streamedCommentaryBlock=null;streamedCommentaryText='';runStartedAt=0;
+    reasoningBlock=null;reasoningText='';reasoningRound='';endedReasoning=null;streamedCommentaryBlock=null;streamedCommentaryText='';runStartedAt=0;
     replayingMessages=false;replayMessageEndedAt=0;replayRunLastMessage=null;renderedMessageIds=new Set();
   }
   rendererTask=task;
