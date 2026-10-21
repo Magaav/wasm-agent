@@ -2771,10 +2771,8 @@ function handleEvent(event) {
   } else if (event.type === "usage") {
     if(rendererTask){updateChildContextReadouts();return;}
     settings.usage = event.total || settings.usage;
-    if (event.model) {
-      lastUsedModel = event.model;
-      composerModel.hidden = true;
-    }
+    // The model a turn actually ran with is the composer label's fact; `updateChip()` paints it.
+    if (event.model) lastUsedModel = event.model;
     updateChip();
     if (balloon.open) { renderUsage(); renderControls(); }
   } else if (event.type === "error") {
@@ -4206,7 +4204,13 @@ function updateChip() {
   setText(chipModel,contextReadout(context));
   const detail=contextDetail(context);
   if(chipModel.title!==detail)chipModel.title=detail;
-  composerModel.hidden=true;
+  // WHAT: show the main chat's one model label in the composer status row, right-aligned by CSS.
+  // WHY: the model was removed from the topbar header; the composer footer is its only home, and
+  // this is the element the far-right assertion pins - no second copy is added anywhere.
+  const model=lastUsedModel||context.model||settings.model||'model unknown';
+  if(composerModel.textContent!==model)composerModel.textContent=model;
+  composerModel.hidden=false;
+  composerModel.title='Model used for the latest request: '+model;
   setText(chipUsage,'');
 }
 function updateChildContextReadouts() {
@@ -5782,7 +5786,10 @@ async function refreshMetaOnce() {
     // A timed-out write can apply after the immediate reconciliation read.
     // Keep its note tied to the newly observed state on later refreshes too.
     renderSettingsReconciliation(true);
-    setText(meta, [activeNode,settings.model].filter(Boolean).join(' · '));
+    // WHAT: the topbar header names the node, never the model.
+    // WHY: every chat keeps exactly one model label and it lives at the composer row's far-right;
+    // the main chat's header used to repeat it here (node · model).
+    setText(meta, activeNode || '');
     return true;
   } catch (error) {
     if (chatSession !== target || conversationEpoch !== epoch || activeNode !== node) return false;

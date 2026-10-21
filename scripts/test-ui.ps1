@@ -1640,6 +1640,20 @@ $harness = @'
   livePane.task={...agents[1],title:'Verify live worker chat',started_at:liveStart,preview:{status:'running bash',tool:{name:'bash',call_id:'live-call',arguments:{command:'slow check'},started_at:liveStart}}};
   await window.__refreshAgentPane(livePane);
   check(livePane.querySelector('.agent-pane-head strong').textContent==='Verify live worker chat','worker heading names its task rather than profile');
+  var liveHead=livePane.querySelector('.agent-pane-head'), liveHeadText=liveHead.textContent.trim();
+  // WHAT: the worker header is the task name and nothing else - no profile/model/reasoning/node/state.
+  // WHY: that meta line was removed from every chat header; the model now reads at the pane's bottom.
+  check(liveHeadText==='Verify live worker chat' && liveHeadText.indexOf('fixture')<0 &&
+    liveHeadText.indexOf(' · ')<0 && !liveHead.querySelector('span'),
+    'the worker header must hold the task name only, saw: ' + liveHeadText);
+  var paneModel=livePane.shell.modelEl, paneFooter=livePane.querySelector('.composer-footer');
+  // WHAT: the child's own model, right-aligned in its own composer row. WHY: it used to be hidden
+  // while the header carried it; now this is the pane's only model label and it must sit far right.
+  check(!paneModel.hidden && paneModel.textContent.trim()==='fixture',
+    'the worker pane must show its own model at its bottom row, saw: ' + (paneModel?paneModel.textContent:'none'));
+  check(!!paneFooter && Math.abs(paneModel.getBoundingClientRect().right - paneFooter.getBoundingClientRect().right)<=2,
+    'the worker model label right edge must sit within 2px of its composer row right edge, saw ' +
+      paneModel.getBoundingClientRect().right + ' vs ' + paneFooter.getBoundingClientRect().right);
   check(!!livePane.querySelector('wa-trace')?.open && livePane.querySelectorAll('.tool-line.pending').length===1,
     'running worker tool is open and deduplicated before settlement, saw trace=' + !!livePane.querySelector('wa-trace') +
     ' open=' + (livePane.querySelector('wa-trace') ? livePane.querySelector('wa-trace').open : 'n/a') +
@@ -2632,10 +2646,22 @@ $harness = @'
     function type(value) { window.__typeCommand(value); }
 
     var composerModel = document.getElementById("composer-model");
-    check(!!composerModel && composerModel.hidden,
-      "composer status: model name is hidden; context trigger retains the balloon");
-    check(!!composerModel && getComputedStyle(composerModel.parentElement).justifyContent === "flex-end",
-      "composer status: the model label must sit at the far-right edge");
+    // WHAT: the main chat's one model label is shown in the composer status row, not hidden in a
+    // header. WHY: the operator moved the model out of every chat header; the composer row's far
+    // edge is where the main chat reads it, so visibility and the measured right edge both matter.
+    check(!!composerModel && !composerModel.hidden && composerModel.textContent.trim().length > 0,
+      "composer status: the main chat's model label must be shown, not hidden");
+    var composerFooter = composerModel && composerModel.closest(".composer-footer");
+    check(!!composerModel && !!composerFooter &&
+      Math.abs(composerModel.getBoundingClientRect().right - composerFooter.getBoundingClientRect().right) <= 2,
+      "composer status: the model label's right edge must sit within 2px of its composer row's right edge, saw " +
+        (composerModel ? composerModel.getBoundingClientRect().right : "none") + " vs " +
+        (composerFooter ? composerFooter.getBoundingClientRect().right : "none"));
+    // WHAT: the main chat header carries no model. WHY: it used to repeat the model in `#meta`
+    // (`node · model`); there is exactly one model label and it is the composer one measured above.
+    var mainHeaderText = document.querySelector(".topbar").textContent;
+    check(mainHeaderText.indexOf(composerModel.textContent.trim()) < 0,
+      "the main chat header must not list the model, saw: " + mainHeaderText.slice(0, 120));
 
     type("/");
     check(menu.open, "commands: `/` must open the list");

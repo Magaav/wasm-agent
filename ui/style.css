@@ -152,11 +152,11 @@ wa-chat-warning { position:absolute; top:var(--space); left:var(--space); right:
 wa-agent-session { min-width:0; min-height:0; display:flex; flex-direction:column; background:var(--panel); border:1px solid var(--line); border-radius:var(--radius); overflow:hidden; }
 .agent-pane-head { padding:var(--space); flex-wrap:nowrap; max-height:44px; overflow:hidden; }
 /* The pane's header is a fixed strip, never a growing one. It holds the two controls that act on the
-   panel and one line naming the child, so a long title or a long model/reasoning/node list
-   ellipsizes instead of pushing the conversation down. The cap is the row itself - 2 x 5px padding,
-   a 30px control, its border - and it is stated here rather than left to whatever text arrives. */
-.agent-pane-head strong { flex:none; max-width:45%; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
-.agent-pane-head span { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+   panel and the task name. The model/reasoning/node/state line is gone, so the title takes the whole
+   width between the controls and ellipsizes there instead of reserving room for that string. The
+   cap is the row itself - 2 x 5px padding, a 30px control, its border - and it is stated here rather
+   than left to whatever text arrives. */
+.agent-pane-head strong { flex:1 1 auto; min-width:0; max-width:none; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
 /* The pane's header controls are strokes: `.icon-btn svg { fill:currentColor }` would turn the squared
    outline into a solid block. */
 .agent-pane-head .icon-btn svg { fill:none; }

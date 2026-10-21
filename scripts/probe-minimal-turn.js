@@ -13,7 +13,14 @@ try {
  handleEvent({type:'reasoning',text:'x'.repeat(200),complete:true});check(turnTokenReadout()==='~10k','authoritative full copy never counts as usage');
  handleEvent({type:'run_counts',counts:snapshot({tokens_reported:13000,context_growth:{version:1,baseline:600000,current:613000,added:13000,known:true,pending:false,partial:false,complete:true,compactions:0},usage_calls:26,pending_input:null,context:{tokens:261000,capacity:1000000,estimated:false}})});
  check(turnTokenReadout()==='13k','reported usage replaces pending lower bound');
- check(chipModel.textContent==='▤ 26%/1M'&&composerModel.hidden&&!statusBtn.textContent.includes('fixture-model'),'context only, no model footer');
+ // WHAT: the context chip keeps its readout, and the chat's one model label is shown at the composer
+ // row's far right. WHY (operator): the model moved out of every chat header into the footer, so
+ // hiding the footer label would leave the model unstated; the chip must still not carry a model.
+ const minimalFooter=document.querySelector('.composer-footer');
+ check(chipModel.textContent==='▤ 26%/1M'&&!statusBtn.textContent.includes('fixture-model')&&!composerModel.hidden&&
+   composerModel.textContent.trim().length>0&&minimalFooter&&
+   Math.abs(composerModel.getBoundingClientRect().right-minimalFooter.getBoundingClientRect().right)<=2,
+   'context readout retained and model shown at the composer row right edge');
  handleEvent({type:'run_counts',counts:snapshot({tokens_reported:13000,context_growth:{version:1,baseline:600000,current:613000,added:13000,known:true,pending:false,partial:true,complete:true,compactions:0},usage_calls:26,usage_unknown:1})});check(turnTokenReadout()==='~13k','unknown prior usage never invents a zero');
  const style=getComputedStyle(statusBtn),composerStyle=getComputedStyle(document.querySelector('.composer'));check(style.backgroundColor===composerStyle.backgroundColor&&style.borderTopColor===composerStyle.backgroundColor&&style.borderRadius==='5px','minimal trigger opaque resting style blends into composer');
  statusBtn.click();check(balloon.open,'minimal trigger still opens balloon');balloon.close();
