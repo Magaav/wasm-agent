@@ -42,7 +42,9 @@
     let controlStats = null;
     try { controlStats = runCountsFooter('2:18'); }
     finally { runCounts = savedCounts; replayingMessages = savedReplaying; }
-    check(controlStats === '◈ ~62.6k · ✧ 24 · ⚒ 38 · ◷ 2:18',
+    // WHY (operator, 2026-10-05): the shared stats line is compact - glyph glued to value, one space
+    // between pairs. This is still the PRODUCTION footer over this stat set, control intact.
+    check(controlStats === '◈~62.6k ✧24 ⚒38 ◷2:18',
       'control (the answer footer over this stat set) reads: ' + controlStats);
 
     // --- the cards, through the host builder the panel is actually fed by ------------------------
@@ -69,16 +71,16 @@
       card('session-stats').querySelector('.live-child-node').textContent === 'wasm_the_first',
       'line 1 is `<status> <node>`, saw: ' + card('session-stats').querySelector('.live-child-head').textContent);
 
-    // 2. Line 3 IS the footer renderer's line, with `✺ elapsed` in front.
-    check(stats.textContent === '✺ 10s · ' + controlStats,
+    // 2. Line 3 IS the footer renderer's line, with the compact `✺elapsed` glued in front.
+    check(stats.textContent === '✺10s ' + controlStats,
       'the card stats line must be the footer stats line plus elapsed, saw: ' + stats.textContent);
 
     // 3. An absent statistic is omitted - glyph and all. `session-bare` has no run counts at all.
     check(!bare.textContent.includes('◈'), 'a card with no measured tokens must show NO ◈, saw: ' + bare.textContent);
     check(!bare.textContent.includes('✧') && !bare.textContent.includes('⚒') && !bare.textContent.includes('◷'),
       'and no model/tool/duration pair either, saw: ' + bare.textContent);
-    check(bare.textContent === '✺ 10s', 'the one fact it does have is stated, saw: ' + bare.textContent);
-    check(!/\b0\b/.test(stats.textContent.replace('✺ 10s', '')),
+    check(bare.textContent === '✺10s', 'the one fact it does have is stated, saw: ' + bare.textContent);
+    check(!/\b0\b/.test(stats.textContent.replace('✺10s', '')),
       'no absent statistic is printed as 0, saw: ' + stats.textContent);
 
     // 4. STABLE HEIGHT: the card with five statistics and the card with one are the same height, and

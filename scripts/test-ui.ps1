@@ -2673,7 +2673,7 @@ $harness = @'
     window.handleEvent({ type: "done" });
     check(!!runStatus && runStatus.classList.contains("finished") && runStatus.closest("wa-message"),
       "run status: on completion, the same status becomes the assistant bubble footer");
-    check(!!runStatus && /◷ \d+:\d{2}$/.test(runStatus.querySelector(".chat-content-run-elapsed").textContent),
+    check(!!runStatus && /◷\d+:\d{2}$/.test(runStatus.querySelector(".chat-content-run-elapsed").textContent),
       "run status: the completed footer keeps the run duration");
   })();
 

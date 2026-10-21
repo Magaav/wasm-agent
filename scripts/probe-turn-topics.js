@@ -41,8 +41,11 @@ try{await rendererLoaded;for(let i=0;i<200&&!transcriptReady;i++)await new Promi
    document.getElementById('panel').style.width=width+'px';busy=true;runBubble=null;runStepState=null;clearStatus();runStartedAt=Date.now()-96000;
    handleEvent({type:'status',text:'model'});handleEvent({type:'run_counts',counts:{version:1,run_id:'flex-'+width,model_calls:6,tool_calls:19,usage_calls:6,context_growth:{version:1,known:true,baseline:600000,current:636200,added:36200,pending:true}}});
    const bar=statusLine.getBoundingClientRect(),counters=statusElapsed.getBoundingClientRect(),phase=statusPhase.getBoundingClientRect(),bubble=runBubble.getBoundingClientRect();
-   check(statusElapsed.textContent.startsWith('◈ ~36.2k')&&!statusElapsed.textContent.startsWith(' ·'),'no leading dot before live counters');
-   check(Math.abs(counters.right-(bar.right-6))<0.1&&counters.left-phase.right>=5&&bar.height===30,'phase left/counters right same30px row at '+width);
+   // WHY (operator, 2026-10-05): the live counters are compact and glued (`◈~36.2k ✧6 ...`) and the
+   // row reads left to right - they are no longer pinned to the bar's right edge, they follow the
+   // clock after two spaces. Same property: one 30px row, no separator dot, no second line.
+   check(statusElapsed.textContent.startsWith('◈~36.2k')&&!statusElapsed.textContent.startsWith(' ·'),'no leading dot before compact live counters');
+   check(counters.left-phase.right>=4&&counters.right<=bar.right&&bar.height===30,'clock, two spaces, counters: one 30px row at '+width);
    check(Math.abs(bubble.width-Math.min(760,transcript.clientWidth-10))<1,'active bubble fills available width up to existing760px readable cap at '+width);
  }
  busy=false;runBubble=null;runStepState=null;clearStatus();transcript.replaceChildren();add('user','Observe active summarization and queued steering.').closest('wa-message').dataset.messageSeq='1';busy=true;handleEvent({type:'status',text:'model'});handleEvent({type:'run_counts',counts:{...counts,run_id:'screenshot',summary_step:{...fact,id:'picture',state:'running'}}});handleEvent({type:'steering',...queued});document.getElementById('panel').style.width='540px';
