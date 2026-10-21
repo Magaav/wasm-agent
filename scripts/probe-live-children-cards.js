@@ -113,11 +113,31 @@
     check(same.equal, 'two cards differ only in their text: ' + waProbeDiff(same));
 
     // 6. The header line, verbatim: name first, then icon+count pairs the vocabulary already has.
+    //    NO inline word: the words live in title/aria (checked next), because spelling them out
+    //    pushed the line past the panel and wrapped it - hiding the counts it exists for.
     panel.live = built;
     const header = panel.querySelector('.live-children-counts');
-    check(header.textContent === 'wasm_the_first · ◷ 0 queued · ⚒ 2 · ✺ 2',
-      'the header must read `wasm_the_first · ◷ 0 queued · ⚒ 2 · ✺ 2`, saw: '
+    check(header.textContent === 'wasm_the_first · ◷ 0 · ⚒ 2 · ✺ 2',
+      'the header must read `wasm_the_first · ◷ 0 · ⚒ 2 · ✺ 2`, saw: '
         + JSON.stringify(header.textContent));
+
+    // 6b. One line, and the NAME gives way to the counts: a node name that does not fit is
+    //     ellipsised instead of wrapping the line or pushing the numbers out of view.
+    const headerName = header.querySelector('.live-children-name');
+    check(!!headerName, 'the node name is its own element so it can ellipsise, saw: '
+      + header.innerHTML.slice(0, 160));
+    check(getComputedStyle(header).whiteSpace === 'nowrap',
+      'the header is one line, saw white-space ' + getComputedStyle(header).whiteSpace);
+    const savedName = headerName.textContent;
+    headerName.textContent = 'wasm_the_first_with_a_node_name_far_too_long_to_fit_the_panel_width';
+    check(header.querySelectorAll('[data-count]').length === 3,
+      'a long node name keeps all three counts in the header');
+    check(header.scrollWidth <= header.clientWidth + 1,
+      'a long node name must not push the counts out of the header, saw '
+        + header.scrollWidth + ' > ' + header.clientWidth);
+    check(getComputedStyle(headerName).textOverflow === 'ellipsis',
+      'the node name ellipsises, saw text-overflow ' + getComputedStyle(headerName).textOverflow);
+    headerName.textContent = savedName;
 
     // 7. Each pair says the same words in `title` and in `aria-label` - a title alone is invisible to
     //    the keyboard and to a screen reader.
