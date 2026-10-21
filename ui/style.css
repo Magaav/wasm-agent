@@ -587,7 +587,14 @@ wa-retry { display: block; width: 100%; }
    only thing the app moves: while the live run-status row is showing, the arrow's own bottom is
    that row's top edge + 5px, so the two never stack. */
 .jump {
-  position: absolute; inset-inline-end: var(--space); bottom: var(--jump-offset, var(--space)); z-index: 5;
+  /* Horizontally CENTRED on the chat content rect, not pushed toward its inline end: the operator saw the
+     arrow overflow the scroller's right edge, and a control that can sit past the content edge is one a
+     reader can lose. `left: 50%` places its margin box at the centre and the arrow's own transform pulls it
+     back by half its width, so the centre lands exactly on the content centre at any width. The inline-end
+     value stays declared as the box's inline end; with a fixed width this is over-constrained, and in this
+     LTR document the inline-end yields to `left`. `--jump-offset` is still the only thing the app moves. */
+  position: absolute; inset-inline-end: var(--space); left: 50%; transform: translateX(-50%);
+  bottom: var(--jump-offset, var(--space)); z-index: 5;
   display: none; align-items: center; justify-content: center;
   width: var(--control-size); height: var(--control-size); padding: 0;
   border: 1px solid var(--line); border-radius: var(--radius);

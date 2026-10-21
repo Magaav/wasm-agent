@@ -413,11 +413,16 @@ function atBottom(slack = 40) {
 let follow = true;
 let pinning = false;
 // The scroll-to-latest arrow's own state, beside the other scroll state because `pin` reads it.
-// `jumpMotion` is the arrow's smooth motion while it runs: the scroll events that motion causes
-// are ours, never the reader's intent. `JUMP_SLACK` is the arrow's rule for "the bottom": 8px,
-// because a control may not outlive the bottom it points at by a visible gap.
-let jumpMotion = null;
-let jumpWatch = null;
+// A transcript's smooth motion while it runs lives in `jumpMotions`: the scroll events that motion
+// causes are ours, never the reader's intent. `JUMP_SLACK` is the arrow's rule for "the bottom":
+// 8px, because a control may not outlive the bottom it points at by a visible gap.
+// ONE arrow implementation for EVERY transcript scroller: the window's own conversation and each
+// child pane's transcript. A transcript's arrow, its smooth motion and its offset observer live in
+// these maps, keyed by the scroller they belong to, so a child pane's arrow can never borrow - or
+// cancel - the main chat's motion, and the rule below is written once instead of once per surface.
+const jumpControls = new WeakMap();
+const jumpMotions = new WeakMap();
+const jumpWatches = new WeakMap();
 const JUMP_SLACK = 8;
 // Anchors belong to containers, including independently painted child chats.
 const answerAnchors = new WeakMap();
@@ -552,12 +557,14 @@ function anchorAnswer(node, smooth = false) {
   if(smooth)smoothAnswerStart(container,node);else pin();
 }
 
-function pin(force = false) {
-  const container=transcript;
+// `container` defaults to the transcript a render is aimed at, so the existing callers keep their
+// meaning; the arrow's own click pins the scroller it was shown for, which is what lets one pin
+// serve a child pane (`pin(true, paneContainer)`) without telling the main chat where to scroll.
+function pin(force = false, container = transcript) {
   const state=container===messages ? null : scrollState(container);
-  const answer = answerAnchors.get(transcript);
+  const answer = answerAnchors.get(container);
   // A pin owns the bottom; the arrow's own motion is not a second owner of the same scroll.
-  cancelJumpMotion();
+  cancelJumpMotion(container);
   if(force || answer && !container.contains(answer)) {
     answerMotions.delete(container);answerAnchors.delete(container);
     container.classList.remove('answer-reading','answer-space');container.style.removeProperty('--answer-reading-space');
@@ -567,23 +574,23 @@ function pin(force = false) {
     if(answerMotions.has(container))return;
     if (state) state.pinning=true; else pinning = true;
     if (Math.abs(container.scrollTop - target) >= 1) container.scrollTop = target;
-    answerScrollPositions.set(transcript, transcript.scrollTop);
+    answerScrollPositions.set(container, container.scrollTop);
     requestAnimationFrame(() => { if(state)state.pinning=false;else pinning = false; });
-    if (container === messages) syncJump();
+    syncJump(container);
     return;
   }
   if (!(state ? state.follow : follow) && !force) {
     // Not following: the transcript may still have grown under the reader, which is exactly when
     // the arrow has to appear - so its rule is re-read here rather than waiting for a scroll.
-    if (container === messages) syncJump();
+    syncJump(container);
     return;
   }
   if(state)state.pinning=true;else pinning = true;
-  transcript.scrollTop = transcript.scrollHeight;
+  container.scrollTop = container.scrollHeight;
   answerScrollPositions.set(container,container.scrollTop);
   // Release on the next frame: the scroll event fires asynchronously.
   requestAnimationFrame(() => { if(state)state.pinning=false;else pinning = false; });
-  if (container === messages) syncJump();
+  syncJump(container);
 }
 
 function setFollow(value) {
@@ -592,15 +599,26 @@ function setFollow(value) {
 }
 
 // ---- the scroll-to-latest arrow ---------------------------------------------------------------
-// The arrow is on screen exactly while the transcript is not at its bottom, and the rule is
-// measured rather than inferred from `follow`: follow has a 40px slack (a stream should not stop
-// for a half-line), so an arrow driven by it would still point at a bottom the reader can see.
-function jumpDistance() {
-  return messages.scrollHeight - messages.scrollTop - messages.clientHeight;
+// ONE arrow for EVERY transcript: the window's own conversation and each child pane's transcript.
+// It is on screen exactly while ITS transcript is not at its bottom, and the rule is measured
+// rather than inferred from `follow`: follow has a 40px slack (a stream should not stop for a
+// half-line), so an arrow driven by it would still point at a bottom the reader can see. Every
+// function here takes the scroller it acts on, which is what makes a child pane the same rule
+// rather than a second copy of it: a scrolled-up child transcript used to have no way back down.
+function jumpDistance(container = messages) {
+  return container.scrollHeight - container.scrollTop - container.clientHeight;
 }
 
 function reducedMotion() {
   return !!(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
+}
+
+// The chat content rect an arrow is pinned to: the window's own region, or the `.chat-content` box
+// the shared <wa-chat-shell> draws around a child pane's transcript. Read from the DOM rather than
+// remembered, because the panel rebuilds panes and the box is the thing that must be current.
+function chatContentRect(container) {
+  const region = container === messages ? chatRegion : container.closest(".chat-content");
+  return (region || container).getBoundingClientRect();
 }
 
 // The live run-status row is sticky to the bottom of the chat content while a run is stepping, so
@@ -608,47 +626,121 @@ function reducedMotion() {
 // because the container's 5px padding is already in it, and a row that is not in the bottom band
 // (the reader has scrolled it up into scrollback) is not in the arrow's way. The value is a CSS
 // custom property so style.css still owns the 5px it is added to.
-function jumpOffset() {
-  const row = messages.querySelector(".chat-content-run-status:not(.finished)");
+function jumpOffset(container) {
+  const row = container.querySelector(".chat-content-run-status:not(.finished)");
   if (!row || !row.isConnected) return "";
   const rect = row.getBoundingClientRect();
   if (rect.height <= 0) return "";
-  const region = chatRegion.getBoundingClientRect();
+  const region = chatContentRect(container);
   if (rect.bottom < region.bottom - 10) return "";
   return Math.max(0, Math.round(region.bottom - rect.top) + 5) + "px";
 }
 
 // While the arrow is on screen the run-status row can appear, finish or go away under it. One
-// observer re-reads the offset; it reads geometry and writes the arrow's own style, and it never
-// touches the reader's scroll position.
-function watchJumpOffset() {
-  if (jumpWatch || typeof MutationObserver !== "function") return;
-  jumpWatch = new MutationObserver(() => {
-    if (jump.classList.contains("show")) positionJump();
+// observer per transcript re-reads the offset; it reads geometry and writes the arrow's own style,
+// and it never touches the reader's scroll position.
+function watchJumpOffset(container) {
+  if (jumpWatches.has(container) || typeof MutationObserver !== "function") return;
+  const watch = new MutationObserver(() => positionJump(container));
+  watch.observe(container, { childList: true, subtree: true, attributes: true, attributeFilter: ["class"] });
+  jumpWatches.set(container, watch);
+}
+
+function positionJump(container = messages) {
+  const element = jumpControl(container);
+  const offset = jumpOffset(container);
+  if (offset) element.style.setProperty("--jump-offset", offset);
+  else element.style.removeProperty("--jump-offset");
+}
+
+// The arrow's DOM for a transcript. The window's own arrow is authored in index.html and slotted
+// into its region; a child pane's is built here with the SAME markup - one factory, so the two
+// cannot drift into two controls - and appended to that transcript's own `.chat-content` box.
+const JUMP_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 10l6 6 6-6" fill="none"'
+  + ' stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+function jumpControl(container) {
+  const known = jumpControls.get(container);
+  if (known) return known;
+  let element = container === messages ? jump : null;
+  if (!element) {
+    element = document.createElement("button");
+    element.type = "button";
+    element.className = "jump";
+    element.title = "Scroll to latest";
+    element.setAttribute("aria-label", "scroll to latest");
+    element.setAttribute("aria-hidden", "true");
+    element.tabIndex = -1;
+    element.innerHTML = JUMP_ICON;
+    const region = container.closest(".chat-content");
+    (region || container.parentElement || container).append(element);
+  }
+  jumpControls.set(container, element);
+  bindJump(container, element);
+  return element;
+}
+
+// The one wiring every transcript gets: the arrow's rule on scroll, the reader's gestures and keys
+// taking the motion back, growth re-read while following, and the click that reaches the bottom and
+// re-arms the tail. A child pane is bound by the same function the moment its transcript is drawn,
+// so "the arrow appears while this transcript is not at its bottom" is one rule on both surfaces.
+function bindJump(container, element) {
+  const shortOfBottom = (slack) => container.scrollHeight - container.scrollTop - container.clientHeight < slack;
+  const followFor = (value) => { if (container === messages) setFollow(value); else scrollState(container).follow = value; };
+  element.addEventListener("click", () => {
+    releaseAnswerAnchor(container);
+    followFor(true);      // re-arm the tail first, so a token that lands mid-motion is followed too
+    jumpToBottom(container);
   });
-  jumpWatch.observe(messages, { childList: true, subtree: true, attributes: true, attributeFilter: ["class"] });
+  container.addEventListener("scroll", () => {
+    const expected = answerScrollPositions.get(container);
+    const pinningThis = container === messages ? pinning : scrollState(container).pinning;
+    // Scroll delivery can follow the frame that cleared pinning. A position we
+    // just set is still programmatic, not a reader opting out of answer-start.
+    if (jumpMotions.has(container) || pinningThis || (expected != null && Math.abs(container.scrollTop - expected) < 1)) return;
+    releaseAnswerAnchor(container);
+    followFor(shortOfBottom(40));
+    syncJump(container);
+  }, { passive: true });
+  // The reader's intent, not just the scroll position: a wheel tick or a drag upwards should release
+  // the follow even before the bottom is out of view - and it takes the motion back, in any direction:
+  // an arrow that kept pulling after a wheel tick would be fighting the hand that reached for it.
+  for (const gesture of ["wheel", "touchstart"]) {
+    container.addEventListener(gesture, () => {
+      cancelJumpMotion(container);
+      followFor(shortOfBottom(4));
+      syncJump(container);
+    }, { passive: true });
+  }
+  container.addEventListener("keydown", (event) => {
+    cancelJumpMotion(container);
+    if (["PageUp", "PageDown", "ArrowUp", "ArrowDown", "Home", "End", " "].includes(event.key)) releaseAnswerAnchor(container);
+    if (["PageUp", "ArrowUp", "Home"].includes(event.key)) followFor(false);
+    if (["PageDown", "ArrowDown", "End"].includes(event.key)) followFor(shortOfBottom(40));
+    syncJump(container);
+  });
+  // Content can grow without an append (markdown re-render, a topic opening,
+  // images): re-read the rule whenever this transcript's box changes, if we are following.
+  if (typeof ResizeObserver === "function") {
+    new ResizeObserver(() => pin(false, container)).observe(container);
+  }
 }
 
-function positionJump() {
-  const offset = jumpOffset();
-  if (offset) jump.style.setProperty("--jump-offset", offset);
-  else jump.style.removeProperty("--jump-offset");
-}
-
-// One state, written once. A hidden control that is still focusable is a trap for a keyboard or
-// screen-reader user, so "at the bottom" means out of the tab order and out of the accessibility
-// tree as well as off the screen.
-function syncJump() {
-  const shown = jumpDistance() > JUMP_SLACK;
-  jump.classList.toggle("show", shown);
-  jump.setAttribute("aria-hidden", shown ? "false" : "true");
-  jump.tabIndex = shown ? 0 : -1;
+// One state, written once, on the arrow that belongs to `container`. A hidden control that is still
+// focusable is a trap for a keyboard or screen-reader user, so "at the bottom" means out of the tab
+// order and out of the accessibility tree as well as off the screen.
+function syncJump(container = messages) {
+  const element = jumpControl(container);
+  const shown = jumpDistance(container) > JUMP_SLACK;
+  element.classList.toggle("show", shown);
+  element.setAttribute("aria-hidden", shown ? "false" : "true");
+  element.tabIndex = shown ? 0 : -1;
   if (shown) {
-    positionJump();
-    watchJumpOffset();
+    positionJump(container);
+    watchJumpOffset(container);
   } else {
-    jump.style.removeProperty("--jump-offset");
-    if (jumpWatch) { jumpWatch.disconnect(); jumpWatch = null; }
+    element.style.removeProperty("--jump-offset");
+    const watch = jumpWatches.get(container);
+    if (watch) { watch.disconnect(); jumpWatches.delete(container); }
   }
   return shown;
 }
@@ -661,78 +753,48 @@ function syncJump() {
 // window that is not being painted (headless observation, a minimised window), and a control whose
 // only job is to reach the bottom must reach it there too. 220ms, the same span and ease the
 // answer's own reveal uses, so the two motions read as one.
-function cancelJumpMotion() {
-  if (jumpMotion && jumpMotion.timer) clearTimeout(jumpMotion.timer);
-  jumpMotion = null;
+function cancelJumpMotion(container = messages) {
+  const motion = jumpMotions.get(container);
+  if (motion && motion.timer) clearTimeout(motion.timer);
+  jumpMotions.delete(container);
 }
-function jumpToBottom() {
+function jumpToBottom(container = messages) {
+  const element = jumpControl(container);
   const instant = reducedMotion();
   const clock = () => (typeof performance !== "undefined" && performance.now ? performance.now() : Date.now());
-  jump.dataset.motion = instant ? "instant" : "smooth";
-  cancelJumpMotion();
-  const target = messages.scrollHeight - messages.clientHeight;
-  if (instant || Math.abs(target - messages.scrollTop) < 1) {
-    messages.scrollTop = messages.scrollHeight;   // the browser clamps to the last frame
-    answerScrollPositions.set(messages, messages.scrollTop);
-    pin(true);
-    syncJump();
+  element.dataset.motion = instant ? "instant" : "smooth";
+  cancelJumpMotion(container);
+  const target = container.scrollHeight - container.clientHeight;
+  if (instant || Math.abs(target - container.scrollTop) < 1) {
+    container.scrollTop = container.scrollHeight;   // the browser clamps to the last frame
+    answerScrollPositions.set(container, container.scrollTop);
+    pin(true, container);
+    syncJump(container);
     return;
   }
-  const motion = { from: messages.scrollTop, started: clock(), timer: 0 };
-  jumpMotion = motion;
+  const motion = { from: container.scrollTop, started: clock(), timer: 0 };
+  jumpMotions.set(container, motion);
   const step = () => {
-    if (jumpMotion !== motion) return;
+    if (jumpMotions.get(container) !== motion) return;
     const progress = Math.min(1, (clock() - motion.started) / 220), ease = 1 - Math.pow(1 - progress, 3);
-    const bottom = messages.scrollHeight - messages.clientHeight;
-    messages.scrollTop = motion.from + (bottom - motion.from) * ease;
-    answerScrollPositions.set(messages, messages.scrollTop);
+    const bottom = container.scrollHeight - container.clientHeight;
+    container.scrollTop = motion.from + (bottom - motion.from) * ease;
+    answerScrollPositions.set(container, container.scrollTop);
     if (progress < 1) { motion.timer = setTimeout(step, 16); return; }
-    jumpMotion = null;
-    messages.scrollTop = messages.scrollHeight;
-    answerScrollPositions.set(messages, messages.scrollTop);
-    syncJump();
+    jumpMotions.delete(container);
+    container.scrollTop = container.scrollHeight;
+    answerScrollPositions.set(container, container.scrollTop);
+    syncJump(container);
   };
   motion.timer = setTimeout(step, 16);
 }
 
-messages.addEventListener("scroll", () => {
-  const expected = answerScrollPositions.get(messages);
-  // Scroll delivery can follow the frame that cleared pinning. A position we
-  // just set is still programmatic, not a reader opting out of answer-start.
-  if (jumpMotion || pinning || (expected != null && Math.abs(messages.scrollTop - expected) < 1)) return;
-  releaseAnswerAnchor();
-  setFollow(atBottom());
-}, { passive: true });
-
-// The reader's intent, not just the scroll position: a wheel tick or a drag
-// upwards should release the follow even before the bottom is out of view.
-for (const event of ["wheel", "touchstart"]) {
-  messages.addEventListener(event, () => setFollow(atBottom(4)), { passive: true });
-}
-messages.addEventListener("keydown", (event) => {
-  if (["PageUp", "PageDown", "ArrowUp", "ArrowDown", "Home", "End", " "].includes(event.key)) releaseAnswerAnchor();
-  if (["PageUp", "ArrowUp", "Home"].includes(event.key)) setFollow(false);
-  if (["PageDown", "ArrowDown", "End"].includes(event.key)) setFollow(atBottom());
-});
-
-// Content can grow without an append (markdown re-render, a topic opening,
-// images): re-pin whenever the scroll height changes, if we are following.
-if (typeof ResizeObserver === "function") {
-  new ResizeObserver(() => pin()).observe(messages);
-}
-jump.addEventListener("click", () => {
-  releaseAnswerAnchor(messages);
-  setFollow(true);      // re-arm the tail first, so a token that lands mid-motion is followed too
-  jumpToBottom();
-});
-// The reader's own gesture takes the motion back, in any direction: an arrow that kept pulling
-// after a wheel tick would be fighting the hand that reached for it.
-for (const gesture of ["wheel", "touchstart"]) {
-  messages.addEventListener(gesture, cancelJumpMotion, { passive: true });
-}
-messages.addEventListener("keydown", cancelJumpMotion);
-// The arrow starts at the bottom, where it is not shown; this also states its aria state at boot.
-syncJump();
+// The window's own transcript is bound here, once: its arrow is the one authored in index.html. A
+// child pane's transcript is bound by the same call the first time that transcript is drawn (its
+// repaint pins it, and the pin syncs the arrow), so no child transcript can be left without a way
+// back to its own bottom. The arrow starts at the bottom, where it is not shown; this also states
+// its aria state at boot.
+syncJump(messages);
 
 // One assistant bubble per run. Decisions and their tool topics live *inside*
 // it as stacked segments: separate bubbles put a border between every step,
