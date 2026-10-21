@@ -2609,8 +2609,9 @@ function resourcePercent(value) {
 // UI's own vocabulary rather than invented here: `◈` is the dense diamond the run stats use for a
 // measured consumption, `▤` is the occupancy box the context footer prints (`▤ 26%/1M`), and `▧`
 // is that same box part-filled - a workspace volume holding data. The line is the compact one a reader
-// scans down a list: one character, one space, then the number, and the `·` separator with NO spaces
-// around it. The words each glyph stands for are in the line's tooltip (`nodeStatisticsWords`).
+// scans down a list, in the same shape every other compact line in this UI uses: the glyph GLUED to its
+// value, ONE space between pairs, no separator characters. The words each glyph stands for are in the
+// line's tooltip (`nodeStatisticsWords`).
 const NODE_CPU_GLYPH = "\u25c8";
 const NODE_RAM_GLYPH = "\u25a4";
 const NODE_DISK_GLYPH = "\u25a7";
@@ -2633,8 +2634,8 @@ function nodeStatistics(resources, online) {
   if (!online) return "resources offline";
   if (!resources || typeof resources !== "object") return "resources pending";
   const metrics = nodeMetrics(resources);
-  return `${NODE_CPU_GLYPH} ${metrics.cpu}·${NODE_RAM_GLYPH} ${metrics.ram.used}/${metrics.ram.total}`
-    + `·${NODE_DISK_GLYPH} ${metrics.disk.used}/${metrics.disk.total}`;
+  return `${NODE_CPU_GLYPH}${metrics.cpu} ${NODE_RAM_GLYPH}${metrics.ram.used}/${metrics.ram.total}`
+    + ` ${NODE_DISK_GLYPH}${metrics.disk.used}/${metrics.disk.total}`;
 }
 
 // The same sample spelled out, for the line's tooltip and its `aria-label`: a reader who hovers a
@@ -2673,7 +2674,8 @@ class WaNode extends HTMLElement {
     this._stats.textContent = stats;
     // The line is one line by contract, so a narrow host ellipsises it. The compact line is unreadable
     // on its own - three glyphs and three numbers - so the words it stands for (`CPU 52% · RAM 29% of
-    // 12GB · DISK 87% of 96GB`) are the tooltip and the accessible name of the same element.
+    // 12GB · DISK 87% of 96GB`) are the tooltip and the accessible name of the same element. Those words
+    // are the spelled form and keep the `·` separator: this line is `◈52% ▤29%/12GB ▧87%/96GB`.
     const words = nodeStatisticsWords(node.resources, node.online);
     this._stats.title = words;
     this._stats.setAttribute("aria-label", words);
@@ -2803,7 +2805,9 @@ class WaOrchestrator extends HTMLElement {
     this.connectedCallback();
     const count=Number.isFinite(value)?Math.max(0,Math.trunc(value)):0;
     const element=this.querySelector('.orchestrator-count');
-    element.textContent=ORCHESTRATOR_ACTIVE_GLYPH+' '+count;
+    // Glyph GLUED to the number: `✺0` is one token, the same shape as every other compact count line
+    // here. The words that say what the number counts are `title`/`aria-label`, below.
+    element.textContent=ORCHESTRATOR_ACTIVE_GLYPH+count;
     const words=count+' active card'+(count===1?'':'s');
     element.title=words;
     element.setAttribute('aria-label',words);
@@ -3076,13 +3080,22 @@ class WaOrchestrator extends HTMLElement {
     for(const pair of counts.pairs || []) {
       const span=document.createElement('span');span.className='live-children-count';
       span.dataset.count=pair.key;
-      // Icon and number only. The words live in `title` and `aria-label`: spelled out inline they
-      // pushed the line past the panel and wrapped it, which hid the numbers the line exists for.
-      span.textContent=' · '+pair.glyph+' '+pair.count;
+      // Glyph and number only, GLUED (`◷0`). The words live in `title` and `aria-label`: spelled out
+      // inline they pushed the line past the panel and wrapped it, which hid the numbers the line exists
+      // for. The ONE space before the pair is part of the text and is rendered because the pair is
+      // `white-space:pre` (a leading space in a `nowrap` box is collapsed away); a `·` between the pairs
+      // was a second separator for a line that already has its spaces.
+      span.textContent=' '+pair.glyph+pair.count;
       if(pair.title) { span.title=pair.title;span.setAttribute('aria-label',pair.title); }
       parts.push(span);
     }
-    if(counts.missing) parts.push(document.createTextNode(' · '+counts.missing));
+    // The absence of a count is still said, in the same shape and for the same reason: one space, not
+    // a separator, and its own element so it can keep that space.
+    if(counts.missing) {
+      const span=document.createElement('span');span.className='live-children-missing';
+      span.textContent=' '+counts.missing;
+      parts.push(span);
+    }
     line.replaceChildren(...parts);
   }
   // The window's agents, grouped by LANE.

@@ -8145,10 +8145,14 @@ function setRequireReviewerPreference(on) {
   catch (error) { /* device storage is optional; the row still shows the choice */ }
 }
 
-// One row in the engine panel's own body, above the topics rather than inside one: the topics are the
-// machine's inventory and this is the operator's policy about work. The `<label for>` gives the native
-// checkbox its accessible name and its Tab stop, and `aria-describedby` attaches the meaning line as
-// its description, so a screen reader hears what the switch does and not only what it is called.
+// The operator's policy about work, in a topic of its own at the top of the engine panel: the topics
+// below it are the machine's inventory, and a policy about how a delivery is accepted is a different
+// kind of thing, so it says so in its header instead of sitting loose above them. It is the house topic
+// (`<wa-orchestrator-topic>`, built on `topicParts`) so it opens, chevrons and reads like every other
+// topic here, and it is OPEN by default because a switch nobody can see is a switch nobody knows about.
+// The `<label for>` gives the native checkbox its accessible name and its Tab stop, and
+// `aria-describedby` attaches the meaning line as its description, so a screen reader hears what the
+// switch does and not only what it is called.
 const requireReviewerRow = document.createElement("div");
 requireReviewerRow.className = "engine-policy";
 const requireReviewerBox = document.createElement("input");
@@ -8166,8 +8170,14 @@ requireReviewerDetail.textContent =
   "a worker delivery is re-read by a reviewer with fresh context before it is accepted";
 requireReviewerBox.setAttribute("aria-describedby", "require-reviewer-detail");
 requireReviewerRow.append(requireReviewerBox, requireReviewerLabel, requireReviewerDetail);
+const requireReviewerTopic = document.createElement("wa-orchestrator-topic");
+requireReviewerTopic.setAttribute("topic-class", "engine-policy-topic");
+requireReviewerTopic.setAttribute("label", "Orchestrator");
+requireReviewerTopic.setAttribute("glyph", "\u273a");
+requireReviewerTopic.setAttribute("open", "");
+requireReviewerTopic.body.append(requireReviewerRow);
 const enginePanelBody = engineView.querySelector(".engine-body");
-if (enginePanelBody) enginePanelBody.prepend(requireReviewerRow);
+if (enginePanelBody) enginePanelBody.prepend(requireReviewerTopic);
 requireReviewerBox.addEventListener("change", () => setRequireReviewerPreference(requireReviewerBox.checked));
 
 // The policy, published so a page-level consumer can read it without scraping the DOM. It answers with

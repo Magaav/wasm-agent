@@ -117,11 +117,35 @@
     // 6. The header line, verbatim: name first, then icon+count pairs the vocabulary already has.
     //    NO inline word: the words live in title/aria (checked next), because spelling them out
     //    pushed the line past the panel and wrapped it - hiding the counts it exists for.
+    //    WHY THIS CHANGED (compaction): the same counts in the same order, but each glyph is GLUED to
+    //    its number and the pairs are separated by ONE SPACE instead of ` · ` - the separator's own
+    //    spaces were width the counts could have had.
     panel.live = built;
     const header = panel.querySelector('.live-children-counts');
-    check(header.textContent === 'wasm_the_first · ◷ 0 · ⚒ 2 · ✺ 2',
-      'the header must read `wasm_the_first · ◷ 0 · ⚒ 2 · ✺ 2`, saw: '
+    check(header.textContent === 'wasm_the_first ◷0 ⚒2 ✺2',
+      'the header must read `wasm_the_first ◷0 ⚒2 ✺2`, saw: '
         + JSON.stringify(header.textContent));
+    check(header.textContent.indexOf('·') < 0,
+      'the header pairs must be separated by a space, not by a separator character, saw: '
+        + JSON.stringify(header.textContent));
+    // 6a. The space between the name and the first pair is RENDERED, not only present in the text: a
+    //     leading space at the start of a `nowrap` box is collapsed away, so the pair's own
+    //     `white-space:pre` is what makes one space the whole separator. Measured as the glyph's own
+    //     offset inside its pair against a space's advance - the pair's box starts at the name's edge.
+    const firstPair = header.querySelector('[data-count]');
+    const spaceAdvance = (() => {
+      const ctx = document.createElement('canvas').getContext('2d');
+      ctx.font = getComputedStyle(firstPair).font;
+      return ctx.measureText(' ').width;
+    })();
+    const glyphRange = document.createRange();
+    glyphRange.setStart(firstPair.firstChild, 1);
+    glyphRange.setEnd(firstPair.firstChild, 2);
+    const glyphOffset = glyphRange.getBoundingClientRect().left
+      - firstPair.getBoundingClientRect().left;
+    check(firstPair.textContent.charAt(0) === ' ' && glyphOffset >= spaceAdvance - 1 && spaceAdvance > 2,
+      'one rendered space separates the name from the counts, saw offset ' + glyphOffset
+        + ' against a space of ' + spaceAdvance);
 
     // 6b. One line, and the NAME gives way to the counts: a node name that does not fit is
     //     ellipsised instead of wrapping the line or pushing the numbers out of view.

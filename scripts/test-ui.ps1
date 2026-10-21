@@ -324,11 +324,29 @@ $harness = @'
   // this build has no UI spawn path, so the box starts and configures no run. The default is ON, and
   // nothing has been stored for `wa.require-reviewer` on this fresh profile, so what it shows is the
   // default rather than a remembered choice.
+  // WHY THIS CHANGED: the row is still the engine panel's policy row and still one row, but it now
+  // sits inside a topic labelled `Orchestrator` instead of loose in `.engine-body`. The property under
+  // test - one policy row in the engine panel carrying the box and the meaning line - is unchanged; the
+  // shape around it is, and the shape is what this check is for: a house topic (`wa-orchestrator-topic`)
+  // that is open by default, with the checkbox and its description inside the topic's body.
   var reviewerBox = document.querySelector("#engine .engine-policy input#require-reviewer");
   var reviewerRow = reviewerBox && reviewerBox.closest(".engine-policy");
-  check(!!reviewerBox && !!reviewerRow && reviewerRow.parentElement.classList.contains("engine-body"),
-    "the require reviewer policy must be one row in the engine panel, saw: " +
-    (reviewerBox ? reviewerBox.outerHTML.slice(0, 90) : "no #require-reviewer"));
+  var reviewerTopic = reviewerRow && reviewerRow.closest("wa-orchestrator-topic");
+  var reviewerTopicBody = reviewerRow && reviewerRow.closest(".topic-body");
+  var reviewerTopicLabel = reviewerTopic && reviewerTopic.querySelector(".trace-label");
+  var reviewerEngineBody = reviewerTopic && reviewerTopic.parentElement;
+  check(!!reviewerBox && !!reviewerRow && !!reviewerTopic && !!reviewerTopicBody &&
+    !!reviewerEngineBody && reviewerEngineBody.classList.contains("engine-body") &&
+    reviewerEngineBody.firstElementChild === reviewerTopic &&
+    !!reviewerTopicLabel && reviewerTopicLabel.textContent === "Orchestrator" &&
+    reviewerTopic.hasAttribute("open") && reviewerTopicBody.hidden === false &&
+    reviewerTopicBody.contains(reviewerBox) &&
+    reviewerTopicBody.textContent.indexOf("re-read by a reviewer with fresh context") >= 0,
+    "the require reviewer policy must be one row inside the open `Orchestrator` topic of the engine panel, saw: " +
+    (reviewerBox ? reviewerBox.outerHTML.slice(0, 90) : "no #require-reviewer") + " in " +
+    (reviewerTopic ? "topic " + JSON.stringify(reviewerTopicLabel ? reviewerTopicLabel.textContent : null) +
+      " open=" + reviewerTopic.hasAttribute("open") + " body-hidden=" +
+      (reviewerTopicBody ? reviewerTopicBody.hidden : "no body") : "no wa-orchestrator-topic"));
   var reviewerLabel = document.querySelector('label[for="require-reviewer"]');
   check(!!reviewerLabel && reviewerLabel.textContent === "require reviewer",
     "the checkbox must be labelled `require reviewer`, saw: " +
@@ -1676,9 +1694,18 @@ $harness = @'
   // line past the panel and wrapped it, which hid the counts (operator report, 2026-10-20). The words are
   // still said, in `title` and `aria-label` (asserted next), and the NAME gives way with an ellipsis so the
   // three numbers cannot be pushed out of view.
+  // WHY THIS CHANGED (compaction): the same three counts are still on the one line in the right order, but
+  // each glyph is now GLUED to its number and the pairs are separated by ONE SPACE rather than by a `·`,
+  // whose two surrounding spaces were width the counts could have had. The property under test - the node's
+  // own reported counts, in the run stats' vocabulary, on one line, name first - is unchanged.
   var liveHeader=showroom.querySelector('.live-children-counts');
-  check(liveHeader.textContent==='foundation \u00b7 \u25f7 1 \u00b7 \u2692 2 \u00b7 \u273a 3',
-    'the node own subagent counts must be shown as they were reported: `foundation \u00b7 \u25f7 1 \u00b7 \u2692 2 \u00b7 \u273a 3`, saw: '+JSON.stringify(liveHeader.textContent));
+  var gluedHeader='foundation '+String.fromCharCode(0x25f7)+'1 '+String.fromCharCode(0x2692)+'2 '
+    +String.fromCharCode(0x273a)+'3';
+  check(liveHeader.textContent===gluedHeader,
+    'the node own subagent counts must be shown as they were reported: with each glyph glued to its number, saw: '+JSON.stringify(liveHeader.textContent));
+  // And nothing separates the pairs any more: one space is the whole separator.
+  check(liveHeader.textContent.indexOf('\u00b7')<0,
+    'the header pairs must be separated by a space, not by a separator character, saw: '+JSON.stringify(liveHeader.textContent));
   check(!!liveHeader.querySelector('.live-children-name') &&
       getComputedStyle(liveHeader).whiteSpace==='nowrap' &&
       getComputedStyle(liveHeader.querySelector('.live-children-name')).textOverflow==='ellipsis',
@@ -2297,11 +2324,11 @@ $harness = @'
   check(controlButtons === 2, "local and remote desktops must each offer control, saw " + controlButtons + " button(s)");
   var resourceLines = document.querySelectorAll("#nodes-box .node-resources");
   check(resourceLines.length === 2, "every machine node must have a resource line, saw " + resourceLines.length);
-  // WHY THIS MOVED: the resource line is one glyph per metric now, with no spaces around the `·`
-  // separator - the same three numbers, one character per name instead of the letters CPU/RAM/DISK.
+  // WHY THIS MOVED: the resource line is one glyph per metric, and it now follows the compact shape used
+  // everywhere else here - each glyph GLUED to its value, ONE space between pairs, no `·` separator.
   // The property under test (the node card formats live CPU, RAM and workspace disk) is unchanged, so
   // only the expected text moved with the format.
-  check(resourceLines[0]?.textContent === "\u25c8 13%\u00b7\u25a4 41%/32GB\u00b7\u25a7 30%/2.0TB",
+  check(resourceLines[0]?.textContent === "\u25c8" + "13% " + "\u25a4" + "41%/32GB " + "\u25a7" + "30%/2.0TB",
     "the node card must format live CPU, RAM and workspace disk, saw: " + (resourceLines[0]?.textContent || "nothing"));
   // WHY THIS IS NEW: a one-glyph-per-metric line cannot be read on its own, so the words it stands for
   // are its tooltip and its accessible name - the full sample, not a legend about what the format means.
