@@ -68,6 +68,27 @@
     check(getComputedStyle(foot).display!=='none'&&foot.getBoundingClientRect().height>0,'a foot that states a failed read is still drawn, saw display '+getComputedStyle(foot).display);
     panel.live={rows:live.rows,counts:live.counts,note:live.note||''};
   }
+  // OPERATOR REPORT: once a node's slots are full, the next delegated children read `accepted` - the
+  // host's word for a receipt whose run has not started - instead of `queued`. Two children, one
+  // executing and one only accepted: the cards must read Running and Queued, in that rank order (the
+  // executing child first regardless of the order the records arrive in), and the accepted child must
+  // still count as work the node owes - a fix that made the card look right by dropping the child from
+  // the active set would be the bug this asserts against.
+  const slotPanel=document.createElement('wa-orchestrator');
+  document.body.append(slotPanel);
+  const waiter=task('slot-waiter','accepted',{settled:false,started_at:null,created_at:2});
+  const holder=task('slot-holder','running',{settled:false,started_at:1,created_at:1});
+  const drawSlots=dispatches=>{slotPanel.live=liveChildRows({dispatches});};
+  const slotWord=id=>{const card=slotPanel.querySelector('.live-child[data-session="session-'+id+'"] .live-child-state');return card?card.textContent:'<no card>';};
+  drawSlots([waiter,holder]);
+  check(slotWord('slot-holder')==='running'&&slotWord('slot-waiter')==='queued','an accepted child waiting for a slot reads Queued, not accepted, saw: '+slotWord('slot-waiter'));
+  check(Array.prototype.map.call(slotPanel.querySelectorAll('.live-child'),card=>card.dataset.state).join(',')==='running,queued','cards are ranked: the executing child, then the one waiting for a slot, saw: '+Array.prototype.map.call(slotPanel.querySelectorAll('.live-child'),card=>card.dataset.state).join(','));
+  check(agentTaskActive(waiter)===true,'a child waiting for a slot still keeps the node busy (it is work still owed)');
+  // The same panel, the same child, the next read: accepted -> running flips the card in place (no
+  // reload, no second row), which is what a reader watching a queue drain sees.
+  drawSlots([{...waiter,state:'running',started_at:2},holder]);
+  check(slotWord('slot-waiter')==='running'&&slotPanel.querySelectorAll('.live-child').length===2,'a child whose run starts flips its card from Queued to Running without a reload, saw: '+slotWord('slot-waiter'));
+  slotPanel.remove();
   // THE HEADER IS ONE NUMBER. It used to read `0 active card(s) · closing this window keeps work running`
   // beside a `Refresh` and a `Back to main chat` button. The sentence and both buttons are removed, so the
   // question this stage asks is the one that survives: does the header state the active-card count, and only

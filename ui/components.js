@@ -1861,7 +1861,7 @@ class WaTasks extends HTMLElement {
       const controls=[['Open conversation','open',{session:task.session_id}],['Inspect result','result',{id:task.subagent_id}]];
       if (task.parent_session_id) controls.push(['Open parent','open',{session:task.parent_session_id}]);
       if (!task.settled && task.state!=='unknown') controls.push(['Cancel task','cancel',{id:task.subagent_id}]);
-      add(task.prompt || `${task.profile} · ${task.subagent_id}`,task.state,
+      add(task.prompt || `${task.profile} · ${task.subagent_id}`,agentDisplayState(task),
         `Parent: ${titles.get(task.parent_session_id) || task.parent_session_id || 'none'}${task.error ? ' · '+task.error : ''}`,controls);
     }
     for (const conversation of sessions) {
@@ -1875,8 +1875,11 @@ class WaTasks extends HTMLElement {
           run.state==='not_started' ? 'This request did not start. Inspect it before submitting again.' : `Run ${run.run_key ?? run.run_id}`,controls);
       }
     }
-    const rank={running:0,accepted:0,queued:1,unknown:2,not_started:2,failed:3};
-    cards.sort((a,b)=>(rank[a.dataset.state] ?? 4)-(rank[b.dataset.state] ?? 4));
+    // WHY THE RANK OF `accepted` CHANGED: it was ranked with `running`, which is how a child waiting for
+    // a slot sorted as if it were at work. `accepted` is the record's word for `queued` (see
+    // `agentDisplayState`), and it is ranked and displayed as one, so the old entry stays only as the
+    // honest place for a node that still sends that word.
+    cards.sort((a,b)=>agentStateRank(a.dataset.state)-agentStateRank(b.dataset.state));
     const history=cards.filter(card=>['completed','cancelled'].includes(card.dataset.state));
     const currentCards=cards.filter(card=>!history.includes(card));
     if (!currentCards.length) { const empty=document.createElement('p'); empty.textContent='No delegated tasks or runs needing attention.'; currentCards.push(empty); }
@@ -2428,9 +2431,36 @@ class WaChatActions extends HTMLElement {
 customElements.define("wa-chat-actions", WaChatActions);
 
 // Positive execution evidence only; unfinished/unknown is not proof of activity.
+//
+// This asks about WORK THE NODE OWES, not about what a card says, so it keeps reading the record's own
+// word: `accepted` is a receipt whose run has not started, and it still means a child is coming. The
+// displayed word is `agentDisplayState` below - a fix that made the card read right by taking `accepted`
+// out of this list would let an accepted child fall out of the active set and the window go idle while
+// the node still had work queued.
 function agentTaskActive(task) {
   return !!task && task.settled !== true && task.settled !== 1
     && ['running','accepted','queued','placing'].includes(task.state);
+}
+// The word a card shows for a child, which is not always the record's word.
+//
+// The native record answers `accepted` for a receipt that is admitted and whose run has not started: the
+// child is waiting for a slot on its node (rust/wa-host/src/subagents.rs acquires capacity in the child's
+// own thread, after admission) or for the predecessor in its session. That is exactly what the same
+// runtime's own summary counts under `queued` (`accepted` -> `queued` there), so a card printing the
+// record's word for it disagreed with the node's own counts about one and the same child - the operator
+// report: "once the slots are full ... instead of showing queued ... show accepted". One mapping, here,
+// and every card surface prints what it returns; no card decides for itself.
+function agentDisplayState(task) {
+  const state=String((task && task.state) || '').trim();
+  if (state==='accepted') return 'queued';
+  return state || 'unknown';
+}
+// Where a state's work stands, for the ordering of both card lists: what is executing, what is only
+// waiting for a slot (`queued`, `placing`) or for its run to begin (`accepted`), what cannot be said, what
+// failed, and then history. `accepted` ranks with `queued` for the same reason it displays as one: it is
+// not evidence of a child at work.
+function agentStateRank(state) {
+  return ({running:0,queued:1,placing:1,accepted:1,unknown:2,not_started:2,failed:3})[state] ?? 4;
 }
 function agentLatestTasks(tasks) {
   const sessions=new Map();

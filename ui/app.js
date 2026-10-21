@@ -6807,6 +6807,11 @@ function liveChildRows({sessions=[], dispatches=[], fleet={}, health={}, errors=
   const claimed=new Set(dispatches.map(task=>task.session_id).filter(Boolean));
   const running=runningSessions(health);
   const rows=[];
+  // The card's word comes from `agentDisplayState` (components.js) and nowhere else. The task here is the
+  // merge of both facts a row needs: the host's own record (`state` = `accepted`/`running`) and the
+  // dispatch ledger under it (`dispatch_state`). The activity test below deliberately reads the raw
+  // record - an accepted child is work still owed - while what a reader is told about it is the one
+  // mapping: a receipt without a run is Queued, and the same child reads Running when its run starts.
   for(const task of agentLatestTasks(dispatches)) {
     if(!agentTaskActive(task)) continue;
     const session=byId.get(task.session_id);
@@ -6816,7 +6821,7 @@ function liveChildRows({sessions=[], dispatches=[], fleet={}, health={}, errors=
     rows.push({key:'dispatch:'+task.subagent_id,source:'dispatch',task,
       subagent_id:task.subagent_id || '',session_id:task.session_id || '',
       title:task.title || (session && session.title) || task.prompt || 'Untitled child',
-      state:task.state || 'unknown',detail:(session && session.state_detail) || '',
+      state:agentDisplayState(task),detail:(session && session.state_detail) || '',
       stats:runStatsLine(runStatEntries(childRunStats(task,session,runs))),
       node:id,node_name:node ? node.name : id,node_peer:node ? !node.local_node : id!==LOCAL_NODE,
       node_source:node ? 'the machine the dispatcher sent this child to'
@@ -6832,6 +6837,10 @@ function liveChildRows({sessions=[], dispatches=[], fleet={}, health={}, errors=
       node:LOCAL_NODE,node_name:localName,node_peer:false,node_online:true,
       node_source:'no dispatch record: read from the ledger of the node that holds this session'});
   }
+  // Rank, then arrival: a reader looking for what is working finds it first, and a child waiting for a
+  // slot - Queued - sorts behind the children that hold one, instead of ahead of them because its
+  // receipt is newer. Equal ranks keep the order the records arrived in.
+  rows.sort((a,b)=>agentStateRank(a.state)-agentStateRank(b.state));
   // What this view cannot see is said elsewhere: a peer's own live children are not reachable from
   // here, and unfinished is not the same as active. Neither belongs in this panel's foot any more -
   // the rows are the answer, and a paragraph under them was the sentence a reader skipped. Only a

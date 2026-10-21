@@ -1800,6 +1800,29 @@ $harness = @'
     'the peer-reachability notice must be gone from the live panel, saw: '+showroom.querySelector('.live-children-foot').textContent);
   check(showroom.querySelector('.orchestrator-empty').textContent.indexOf('History remains in Engine')>=0,
     'the canvas keeps its own sentence about where history lives');
+  // OPERATOR REPORT: once the slots are full, the other delegated children read `accepted` instead of
+  // `queued`. `accepted` is the host's word for a receipt whose run has not started - the same children
+  // the node's own header counts as queued - so the card said one thing while the header said another.
+  // Two children, one executing and one waiting for a slot, handed over in the order a newer receipt
+  // arrives (the waiting one first): the cards must read Running then Queued, so the rank decides their
+  // order and not the arrival. And the waiting child must still be work the node owes - a fix that made
+  // the card read right by dropping it from the active set would let the window go idle with work queued.
+  var slotHolder={subagent_id:'slot-holder',session_id:'slot-holder-session',profile:'worker',
+    execution_node:'local',state:'running',settled:false,started_at:1,created_at:1,title:'holds a slot'};
+  var slotWaiter={subagent_id:'slot-waiter',session_id:'slot-waiter-session',profile:'worker',
+    execution_node:'local',state:'accepted',settled:false,created_at:2,title:'waits for a slot'};
+  var drawSlots=function(dispatches){showroom.live=window.__liveChildRows({sessions:[],dispatches:dispatches,
+    fleet:window.__fixtures.fleet,health:window.__fixtures.health});};
+  var slotWords=function(){return Array.prototype.map.call(showroom.querySelectorAll('.live-child'),
+    function(card){return card.dataset.session+'='+card.querySelector('.live-child-state').textContent;}).join(',');};
+  drawSlots([slotWaiter,slotHolder]);
+  check(slotWords()==='slot-holder-session=running,slot-waiter-session=queued',
+    'a child waiting for a slot must read Queued (never accepted) behind the running child, saw: '+slotWords());
+  check(window.agentTaskActive(slotWaiter)===true,
+    'a child waiting for a slot is still work the node owes: it must stay in the active set');
+  drawSlots([Object.assign({},slotWaiter,{state:'running',started_at:3}),slotHolder]);
+  check(slotWords()==='slot-waiter-session=running,slot-holder-session=running',
+    'a child whose run starts must flip its one card from Queued to Running without a reload, saw: '+slotWords());
   // And through the app own refresh, not only the builder: the panel must be fed by the node answers.
   var sessionsFixture=window.__fixtures.sessions;
   window.__fixtures.sessions=withDirectChild;
