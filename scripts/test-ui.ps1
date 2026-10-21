@@ -1309,7 +1309,9 @@ $harness = @'
       {seq:2,role:'assistant',content:'LANE-ANSWER',created_at:2,tool_calls:[]}],
     task:{subagent_id:'lane-child-a',session_id:'lane-session-a',state:'running',settled:false,profile:'worker',model:'fixture',reasoning:'max'}};
   window.__setOrchestratorPanel(lanesPanel);
-  for(var laneTry=0;laneTry<20&&lanesPanel.activeTasks.length!==5;laneTry+=1){
+  // The panel's active list exists only after the first refresh, so the wait asks for it rather than
+  // assuming it: five running children, all still active.
+  for(var laneTry=0;laneTry<20&&(!lanesPanel.activeTasks||lanesPanel.activeTasks.length!==5);laneTry+=1){
     await window.__refreshOrchestrator();
     for(var laneTick=0;laneTick<20;laneTick+=1) await tick();
   }
