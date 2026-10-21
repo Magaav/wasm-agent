@@ -158,8 +158,15 @@ $probe = @'
       var actions = pane.querySelector(".chat-actions");
       var bubble = transcript ? transcript.querySelector("wa-message.assistant") : null;
       var body = bubble ? bubble.querySelector(".body") : null;
+      var headerModel = pane.querySelector(".composer-model"), headerFooter = pane.querySelector(".composer-footer");
       headers.push({ child: n, height: head ? Math.round(head.getBoundingClientRect().height) : -1,
-        text: head ? head.textContent.length : -1 });
+        text: head ? head.textContent.length : -1,
+        // WHAT: whether the model string still sits in the header, and how far the pane's bottom-right
+        // model label is from its composer row's right edge. WHY: the model moved out of every chat
+        // header into the composer row's far edge, so both are measured, not eyeballed.
+        headerHasModel: /fixture-model-/.test(head ? head.textContent : ""),
+        modelRightGap: headerModel && headerFooter && !headerModel.hidden
+          ? Math.abs(headerModel.getBoundingClientRect().right - headerFooter.getBoundingClientRect().right) : -1 });
       readable.push({ child: n, transcript: transcript ? transcript.clientHeight : -1,
         messages: transcript ? transcript.querySelectorAll("wa-message").length : -1,
         answer: !!(transcript && transcript.textContent.indexOf("CHILD-" + n + "-ANSWER") >= 0) });
@@ -181,7 +188,11 @@ $probe = @'
     check(headers.length === 6 && headers.every(function (h) { return h.height > 0 && h.height <= 44; }),
       "every pane header must measure at most 44px, saw " + JSON.stringify(headers));
     check(headers.every(function (h) { return h.text > 60; }),
-      "each header must still carry the long mission and model text the cap is holding in, saw " + JSON.stringify(headers));
+      "each header must still carry its long mission line, ellipsized by the fixed cap, saw " + JSON.stringify(headers));
+    check(headers.every(function (h) { return h.headerHasModel === false; }),
+      "no pane header may carry the model string, saw " + JSON.stringify(headers));
+    check(headers.every(function (h) { return h.modelRightGap >= 0 && h.modelRightGap <= 2; }),
+      "each pane's model label must sit within 2px of its composer row's right edge, saw " + JSON.stringify(headers));
 
     // (1) Six open boxes, each with a transcript that can actually be read.
     check(readable.length === 6 && readable.every(function (r) { return r.transcript >= 120; }),
