@@ -87,7 +87,10 @@
   const entryLines=entry=>Array.from(entry.querySelector('wa-node').children).map(child=>child.className).join('|');
   check(entryLines(entries[0])==='node-name|node-resources','a node entry is exactly two lines: the name, then its statistics, saw: '+entryLines(entries[0]));
   check(entries[0].querySelector('.node-name').textContent==='near','line 1 is the node name, saw: '+entries[0].querySelector('.node-name').textContent);
-  check(entries[0].querySelector('.node-resources').textContent==='\u25c8 52%\u00b7\u25a4 29%/12GB\u00b7\u25a7 87%/96GB','line 2 is the compact statistics line, saw: '+entries[0].querySelector('.node-resources').textContent);
+  // WHY THE EXPECTED TEXT MOVED (compaction): the line is still one glyph per metric with the same three
+  // numbers, and it now follows the shape used everywhere else here - each glyph GLUED to its value and
+  // ONE space between pairs, no `·` separator. The property under test is unchanged.
+  check(entries[0].querySelector('.node-resources').textContent==='\u25c852% \u25a429%/12GB \u25a787%/96GB','line 2 is the compact statistics line, saw: '+entries[0].querySelector('.node-resources').textContent);
   // WHY THIS MOVED: the line is one glyph per metric now - the same sample, one character per name, and
   // the `·` separator with no spaces around it - so the expected text moved with the format. The property
   // under test is unchanged: the node's own sample, formatted by the one formatter.

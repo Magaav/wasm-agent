@@ -2324,11 +2324,11 @@ $harness = @'
   check(controlButtons === 2, "local and remote desktops must each offer control, saw " + controlButtons + " button(s)");
   var resourceLines = document.querySelectorAll("#nodes-box .node-resources");
   check(resourceLines.length === 2, "every machine node must have a resource line, saw " + resourceLines.length);
-  // WHY THIS MOVED: the resource line is one glyph per metric now, with no spaces around the `·`
-  // separator - the same three numbers, one character per name instead of the letters CPU/RAM/DISK.
+  // WHY THIS MOVED: the resource line is one glyph per metric, and it now follows the compact shape used
+  // everywhere else here - each glyph GLUED to its value, ONE space between pairs, no `·` separator.
   // The property under test (the node card formats live CPU, RAM and workspace disk) is unchanged, so
   // only the expected text moved with the format.
-  check(resourceLines[0]?.textContent === "\u25c8 13%\u00b7\u25a4 41%/32GB\u00b7\u25a7 30%/2.0TB",
+  check(resourceLines[0]?.textContent === "\u25c8" + "13% " + "\u25a4" + "41%/32GB " + "\u25a7" + "30%/2.0TB",
     "the node card must format live CPU, RAM and workspace disk, saw: " + (resourceLines[0]?.textContent || "nothing"));
   // WHY THIS IS NEW: a one-glyph-per-metric line cannot be read on its own, so the words it stands for
   // are its tooltip and its accessible name - the full sample, not a legend about what the format means.

@@ -2609,8 +2609,9 @@ function resourcePercent(value) {
 // UI's own vocabulary rather than invented here: `◈` is the dense diamond the run stats use for a
 // measured consumption, `▤` is the occupancy box the context footer prints (`▤ 26%/1M`), and `▧`
 // is that same box part-filled - a workspace volume holding data. The line is the compact one a reader
-// scans down a list: one character, one space, then the number, and the `·` separator with NO spaces
-// around it. The words each glyph stands for are in the line's tooltip (`nodeStatisticsWords`).
+// scans down a list, in the same shape every other compact line in this UI uses: the glyph GLUED to its
+// value, ONE space between pairs, no separator characters. The words each glyph stands for are in the
+// line's tooltip (`nodeStatisticsWords`).
 const NODE_CPU_GLYPH = "\u25c8";
 const NODE_RAM_GLYPH = "\u25a4";
 const NODE_DISK_GLYPH = "\u25a7";
@@ -2633,8 +2634,8 @@ function nodeStatistics(resources, online) {
   if (!online) return "resources offline";
   if (!resources || typeof resources !== "object") return "resources pending";
   const metrics = nodeMetrics(resources);
-  return `${NODE_CPU_GLYPH} ${metrics.cpu}·${NODE_RAM_GLYPH} ${metrics.ram.used}/${metrics.ram.total}`
-    + `·${NODE_DISK_GLYPH} ${metrics.disk.used}/${metrics.disk.total}`;
+  return `${NODE_CPU_GLYPH}${metrics.cpu} ${NODE_RAM_GLYPH}${metrics.ram.used}/${metrics.ram.total}`
+    + ` ${NODE_DISK_GLYPH}${metrics.disk.used}/${metrics.disk.total}`;
 }
 
 // The same sample spelled out, for the line's tooltip and its `aria-label`: a reader who hovers a
@@ -2673,7 +2674,8 @@ class WaNode extends HTMLElement {
     this._stats.textContent = stats;
     // The line is one line by contract, so a narrow host ellipsises it. The compact line is unreadable
     // on its own - three glyphs and three numbers - so the words it stands for (`CPU 52% · RAM 29% of
-    // 12GB · DISK 87% of 96GB`) are the tooltip and the accessible name of the same element.
+    // 12GB · DISK 87% of 96GB`) are the tooltip and the accessible name of the same element. Those words
+    // are the spelled form and keep the `·` separator: this line is `◈52% ▤29%/12GB ▧87%/96GB`.
     const words = nodeStatisticsWords(node.resources, node.online);
     this._stats.title = words;
     this._stats.setAttribute("aria-label", words);
