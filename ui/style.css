@@ -97,7 +97,6 @@ wa-orchestrator { display:flex; flex-direction:column; width:100%; height:100%; 
 .live-child[data-state="unfinished"] { border-left-color:#f0a; }
 .live-child[data-state="unknown"], .live-child[data-state="failed"] { border-left-color:#f77; }
 button.live-child:hover, button.live-child:focus-visible { background:var(--panel-2); border-color:var(--accent); }
-.live-children-empty { margin:0; color:var(--muted); font-size:12px; }
 .live-children-foot { margin:var(--space) 0 0; color:var(--muted); font-size:11px; }
 /* The machines, one entry each, inside the `Nodes` topic. <wa-node> is the entry's two lines (name, then
    statistics) and it is the SAME component the engine menu's node list draws; that list lays the two
@@ -117,16 +116,16 @@ wa-node { display:flex; flex-direction:column; gap:2px; min-width:0; }
    `max subagents` then the numeric limit, `priority 2/3` then the two arrows - label left, control pinned
    to the far right. Both lanes that met here removed something: the spawned-agent cards took `.lane*`
    with them, and the node description block took `.node-details` with it. Neither rule is restored -
-   there is no element left to style. The limit row stays the same `.placement-node` the placement
-   block's fallback row uses, so the input and the arrows are styled once for both places. */
+   there is no element left to style. The limit row keeps `.placement-node`, the one row shape a limit and
+   its arrows are drawn in. */
 .node-config { margin-top:var(--space); }
 .node-config-row { display:flex; align-items:center; gap:var(--gap); padding:var(--space) 0; color:var(--muted); font-size:12px; }
 .node-config-row > label { display:flex; align-items:center; gap:var(--gap); flex:1; min-width:0; color:var(--muted); }
 .node-config-row input { margin-left:auto; }
 .node-priority-row .node-priority { flex:1; min-width:0; color:var(--muted); font-size:12px; }
-/* The placement block is the top of the `Nodes` body now: the switch and Save act on the per-node rows
-   that live in the node topics below them. */
-.placement { margin:0 0 var(--space); color:var(--muted); font-size:12px; }
+/* A limit is edited in ONE place now: the machine's own topic. The `.placement` block that used to sit at
+   the top of the `Nodes` body - its explanation, the ordered-placement switch, the duplicated row list
+   and its Save button - is gone with its rule, because there is no element left to style. */
 .placement-node { display:flex; align-items:center; gap:var(--gap); padding:var(--space) 0; }
 .placement-node label { flex:1; overflow-wrap:anywhere; }
 .placement-node input { width:55px; }

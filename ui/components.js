@@ -2789,10 +2789,11 @@ class WaOrchestrator extends HTMLElement {
     // nodes because it is the answer to "what is running" - a child with no placement record appears only
     // there (see the note the host writes into it, and app.js's liveChildRows).
     this.nodesTopic=this.sidebarTopic({label:'Nodes',glyph:'\u25a4',className:'nodes-topic'});
-    // The placement block (the global switch and Save) sits at the TOP of the topic, because it is the
-    // action that saves the per-node rows below it; each machine's own limit and position are inside
-    // that machine's topic (see `nodeEntry`).
-    this.nodesTopic.body.append(this.placementElement(),this.nodeListElement());
+    // The topic is the machine list and nothing else: the global placement block that used to sit above
+    // it (its explanation, the `Use ordered placement` switch, the duplicated `.placement-nodes` row
+    // list and its `Save placement` button) is removed, because each machine's own topic states that
+    // machine's configuration and now saves it itself (see `nodeConfigElement` and `limitInput`).
+    this.nodesTopic.body.append(this.nodeListElement());
     this.liveTopic=this.sidebarTopic({label:'Live Subagents',glyph:ORCHESTRATOR_ACTIVE_GLYPH,className:'live-children',open:true});
     this.liveTopic.body.append(...this.liveElements());
     this.querySelectorAll('[data-action]').forEach(button=>button.addEventListener('click',()=>{
@@ -2841,17 +2842,6 @@ class WaOrchestrator extends HTMLElement {
   nodeListElement() {
     const list=document.createElement('div'); list.className='node-list';
     return list;
-  }
-  // The placement controls that are NOT about one machine: the ordered-placement switch and the save
-  // button whose action the host already handles (`save-placement`). Each machine's limit and its place
-  // in the fill order live in that machine's own topic; `.placement-nodes` keeps the rows of a machine
-  // the list does not show (offline, or a fleet read that arrived before the node list), so no policy
-  // entry can be lost just because its machine is not in the list today.
-  placementElement() {
-    const block=document.createElement('div');
-    block.className='placement';
-    block.innerHTML='<p>Fill in order. A limit of 0 keeps a device out of background execution.</p><label><input type="checkbox" class="placement-enabled"> Use ordered placement</label><div class="placement-nodes"></div><button type="button" data-action="save-placement">Save placement</button>';
-    return block;
   }
   // Every online node, one entry each, drawn from the SAME sample the engine menu's node list draws (the
   // host pushes `nodeList` here when it repaints that list, so there is one read and no second poller).
@@ -2930,12 +2920,15 @@ class WaOrchestrator extends HTMLElement {
     row.append(position,...this.moveButtons(row));
     return row;
   }
-  // The one numeric limit input, whoever draws it: a machine's own topic and the placement block's
-  // fallback row are the same control, so a limit is edited the same way in both places.
+  // The one numeric limit input, drawn in the only place a limit is edited now: the machine's own topic.
+  // It saves itself - there is no global Save button any more - on `change`, debounced, through the same
+  // `save-placement` action the host already handles (ui/app.js), so the payload sent is the one this
+  // panel has always sent.
   limitInput(node,aria) {
     const input=document.createElement('input');input.type='number';input.min='0';input.max='128';input.step='1';
     input.value=String(this.placementLimits?.get(node) ?? 0);
     input.setAttribute('aria-label',aria);
+    input.onchange=()=>{ this._capturePlacement(); this._requestPlacementSave(400); };
     return input;
   }
   // The two fill-order arrows, bound to the row they belong to: `_movePlacement` finds the unit to move
@@ -2947,15 +2940,21 @@ class WaOrchestrator extends HTMLElement {
     down.onclick=()=>this._movePlacement(row,1);
     return [up,down];
   }
-  // One machine's limit and its place in the fill order, as the placement block's fallback container draws
-  // it (a machine the node list does not show). The arrows move whichever unit the row lives in: inside a
-  // node's own topic it is the whole node topic; here it is the row.
-  placementRow({node,label,aria}) {
-    const row=document.createElement('div'); row.className='placement-node'; row.dataset.node=node;
-    const text=document.createElement('label'); text.textContent=label;
-    text.append(this.limitInput(node,aria));
-    row.append(text,...this.moveButtons(row));
-    return row;
+  // The per-node controls save themselves. The global `Save placement` button is gone, so a limit edit
+  // (debounced by 400ms) or an arrow click dispatches the SAME `save-placement` action the host already
+  // handles in ui/app.js, which reads `policy` off this panel and sends it unchanged.
+  //
+  // `enabled` - the ordered-placement flag the removed checkbox used to set - is NOT silently switched
+  // off: an edit here IS the operator using ordered placement, so the flag is set true the first time a
+  // limit or the order is edited and the saved policy says so. Nothing sets it back to false; a policy
+  // saved as disabled stays disabled (and is applied as saved in `configure`) until the operator edits a
+  // machine.
+  _requestPlacementSave(delay=0) {
+    this.placementEnabled=true;
+    clearTimeout(this._placementSaveTimer);
+    const dispatch=()=>this.dispatchEvent(new CustomEvent('orchestrator-action',{bubbles:true,detail:{action:'save-placement'}}));
+    if(delay>0)this._placementSaveTimer=setTimeout(dispatch,delay);
+    else dispatch();
   }
   // The reader's edits so far, so a repaint of the list does not discard them.
   _capturePlacement() {
@@ -2975,30 +2974,18 @@ class WaOrchestrator extends HTMLElement {
       if(input&&this.placementLimits?.has(id))input.value=String(this.placementLimits.get(id));
     }
     // The list order IS the fill order: the saved policy's order first, then anything the policy has never
-    // seen, so the numbers and the arrows agree with what `Save` would send.
+    // seen, so the numbers and the arrows agree with what the next save sends.
     if(this.placementOrder) {
       const rank=id=>{const index=this.placementOrder.indexOf(id);return index<0?this.placementOrder.length:index;};
       topics.map((topic,index)=>({topic,index}))
         .sort((a,b)=>rank(a.topic.dataset.placementNode)-rank(b.topic.dataset.placementNode)||a.index-b.index)
         .forEach(({topic})=>list.append(topic));
     }
-    this._fallbackPlacementRows();
     this.refreshNodePriority();
   }
-  // A machine the fleet knows but this list does not show (offline, or a fleet read that arrived first)
-  // still keeps its limit and its place, in the placement block's own container.
-  _fallbackPlacementRows() {
-    const container=this.querySelector('.placement-nodes');
-    if(!container)return;
-    const shown=new Set([...this.querySelectorAll('.node-list > wa-orchestrator-topic')]
-      .map(topic=>topic.dataset.placementNode));
-    container.replaceChildren(...(this.placementOrder || []).filter(id=>id&&!shown.has(id))
-      .map(id=>this.placementRow({node:id,label:(this.nodeNames?.get(id) || id)+' ',
-        aria:(this.nodeNames?.get(id) || id)+' task limit'})));
-  }
   // Where each machine sits in the fill order, stated where its limit is edited. The numbers count the
-  // list the reader sees; the machines only in `.placement-nodes` follow it and have no number, because
-  // they are not in this list to compare against.
+  // list the reader sees; a machine the list does not show keeps the place it had in `placementOrder`
+  // and has no number, because it is not in this list to compare against.
   refreshNodePriority() {
     const topics=[...this.querySelectorAll('.node-list > wa-orchestrator-topic')];
     topics.forEach((topic,index)=>{
@@ -3007,16 +2994,17 @@ class WaOrchestrator extends HTMLElement {
       // long spelling pushed them off it.
       if(position)position.textContent=`priority ${index+1}/${topics.length}`;
     });
-    // What the reader arranged is what Save sends, so the saved order is read back off the list. An empty
-    // list keeps the order it had: a repaint that happens to show no machine yet must not turn Save into
-    // a payload that drops every limit.
-    const order=[...topics.map(topic=>topic.dataset.placementNode),
-      ...[...this.querySelectorAll('.placement-nodes .placement-node')].map(row=>row.dataset.node)]
-      .filter(Boolean);
+    // What the reader arranged is what gets saved, so the saved order is read back off the list. A machine
+    // the list does not show (offline, or a fleet read that arrived before the node list) keeps the place
+    // it had: it is carried over from `placementOrder`, which is all that is left of it now that the
+    // duplicated rows under the old placement block are gone. An empty list keeps the order it had: a
+    // repaint that happens to show no machine yet must not drop every limit.
+    const listed=topics.map(topic=>topic.dataset.placementNode).filter(Boolean);
+    const order=[...listed,...(this.placementOrder || []).filter(id=>id&&!listed.includes(id))];
     if(order.length)this.placementOrder=order;
   }
-  // The arrows move one machine one place up or down. Inside a node's topic the unit is the topic itself,
-  // so what a reader arranges is the list they are reading; in the fallback container it is the row.
+  // The arrows move one machine one place up or down, and that is the whole edit: the unit they arrange is
+  // the machine's own topic, because the node's configuration topic sits inside it.
   _movePlacement(row,delta) {
     // The arrows of a node's configuration sit inside that configuration's own topic; the unit they
     // arrange is the NODE topic around it, so the `.node-topic` is asked for first.
@@ -3033,6 +3021,8 @@ class WaOrchestrator extends HTMLElement {
     // saved order would sort the topic the reader just moved straight back where it came from.
     this.refreshNodePriority();
     this._applyPlacement();
+    // The move is the edit: there is no Save button to press afterwards.
+    this._requestPlacementSave();
   }
   // Every child the node reports as not settled, from either source, with the machine it runs on.
   //
@@ -3059,9 +3049,9 @@ class WaOrchestrator extends HTMLElement {
     this.querySelector('.live-children-foot').textContent=note;
     const list=this.querySelector('.live-children-list');
     if(!rows.length) {
-      const empty=document.createElement('p'); empty.className='live-children-empty';
-      empty.textContent='No active children reported.';
-      list.replaceChildren(empty);
+      // An empty list is already visible as an empty list: the sentence that said so is gone, and so is
+      // the element that existed only to render it.
+      list.replaceChildren();
       return;
     }
     list.replaceChildren(...rows.map(row=>{
@@ -3226,7 +3216,9 @@ class WaOrchestrator extends HTMLElement {
   // fill order.
   configure(fleet) {
     if(this.configured)return;
-    this.configured=true; this.querySelector('.placement-enabled').checked=!!fleet.policy?.enabled;
+    // The saved ordered-placement flag, kept on the panel: the switch that used to show it is gone with
+    // the global placement block, so the panel holds the value it must send back (`get policy`).
+    this.configured=true; this.placementEnabled=!!fleet.policy?.enabled;
     // The machine a child runs on is a name, not an id: a peer's 32-hex id told a reader nothing.
     // Kept here so a pane that this panel opens can name its node too.
     this.nodeNames=new Map([['local',(fleet.nodes||[]).find(node=>node.local_node)?.name || 'local']]);
@@ -3245,12 +3237,20 @@ class WaOrchestrator extends HTMLElement {
     }
     this._applyPlacement();
   }
-  // The policy the host saves: the switch, then every row in fill order. Rows are read where they are - a
-  // machine's own topic first, because that is the list the reader arranged, then the machines only the
-  // placement block shows - so the payload is the same one this panel has always sent.
+  // The policy the host saves: the flag, then every row in fill order. Rows are read where they are - a
+  // machine's own topic, the only place a limit is edited now - and a machine the list does not show
+  // follows in the order it was saved with the limit last saved for it, so a machine that is merely
+  // offline does not lose its entry when another machine is edited. Same shape and same order as before.
   get policy() {
-    const rows=[...this.querySelectorAll('.node-list .placement-node'),...this.querySelectorAll('.placement-nodes .placement-node')];
-    return {enabled:this.querySelector('.placement-enabled').checked,nodes:rows.map(row=>({node:row.dataset.node,max_tasks:Number(row.querySelector('input').value)}))};
+    const nodes=[...this.querySelectorAll('.node-list .placement-node')]
+      .map(row=>({node:row.dataset.node,max_tasks:Number(row.querySelector('input').value)}));
+    const listed=new Set(nodes.map(item=>item.node));
+    for(const id of this.placementOrder || []) {
+      if(!id || listed.has(id))continue;
+      listed.add(id);
+      nodes.push({node:id,max_tasks:Number(this.placementLimits?.get(id)) || 0});
+    }
+    return {enabled:this.placementEnabled===true,nodes};
   }
 }
 customElements.define('wa-orchestrator',WaOrchestrator);
