@@ -2236,8 +2236,18 @@ $harness = @'
   check(controlButtons === 2, "local and remote desktops must each offer control, saw " + controlButtons + " button(s)");
   var resourceLines = document.querySelectorAll("#nodes-box .node-resources");
   check(resourceLines.length === 2, "every machine node must have a resource line, saw " + resourceLines.length);
-  check(/CPU 13%.*RAM 41%\/32GB.*DISK 30%\/2\.0TB/.test(resourceLines[0]?.textContent || ""),
+  // WHY THIS MOVED: the resource line is one glyph per metric now, with no spaces around the `·`
+  // separator - the same three numbers, one character per name instead of the letters CPU/RAM/DISK.
+  // The property under test (the node card formats live CPU, RAM and workspace disk) is unchanged, so
+  // only the expected text moved with the format.
+  check(resourceLines[0]?.textContent === "\u25c8 13%\u00b7\u25a4 41%/32GB\u00b7\u25a7 30%/2.0TB",
     "the node card must format live CPU, RAM and workspace disk, saw: " + (resourceLines[0]?.textContent || "nothing"));
+  // WHY THIS IS NEW: a one-glyph-per-metric line cannot be read on its own, so the words it stands for
+  // are its tooltip and its accessible name - the full sample, not a legend about what the format means.
+  check(resourceLines[0]?.title === "CPU 13% \u00b7 RAM 41% of 32GB \u00b7 DISK 30% of 2.0TB",
+    "and its tooltip must spell that same sample out, saw: " + (resourceLines[0]?.title || "nothing"));
+  check(resourceLines[0]?.getAttribute("aria-label") === resourceLines[0]?.title,
+    "and the accessible name must say the same thing as the tooltip, saw: " + (resourceLines[0]?.getAttribute("aria-label") || "nothing"));
   // Keep it: the engine re-renders when its topics change, and the nodes rows are gone by the
   // time the control view is opened further down.
   var controlButton = null;
