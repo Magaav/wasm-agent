@@ -2466,7 +2466,6 @@ function handleEvent(event) {
     const converted = provisionalAnswer
       ? !!convertProvisionalAnswer(runBubble, provisionalAnswer, event.message_id) : false;
     const alreadyConverted = !!streamBody && streamBody.classList.contains('answer-wrap');
-    const newlyConfirmed = !streamBody?.classList.contains('final-answer');
     if (streamBody) {
       if (event.message_id) streamBody.dataset.messageId = event.message_id;
       // The converted answer is already the streamed prose, moved - re-rendering it here would
@@ -2506,8 +2505,44 @@ function handleEvent(event) {
     // The conversion already placed this node as the answer; re-adding a class it carries would rewrite
     // the answer's class attribute for nothing (and it is the answer's own first paint, not a later pass).
     if (!streamBody.classList.contains('final-answer')) streamBody.classList.add('final-answer');
-    streamBody.dataset.answerComplete='true';
+    // A LATE answer - the node created by its own confirmation rather than by a conversion - is still brought
+    // to its beginning, exactly as it was. The geometric rule below covers the ordinary case; this covers the
+    // one where the node itself is new, which is also the path the smooth-motion and reduced-motion contracts
+    // are written against.
+    const newlyConfirmed = !streamBody.classList.contains('answer-wrap');
     if (newlyConfirmed && !answerReleased.has(transcript)) anchorAnswer(streamBody,true);
+    streamBody.dataset.answerComplete='true';
+    // THE FIRST LINE, MEASURED WHEN THE ANSWER IS DONE - and by GEOMETRY, not by `answerReleased`.
+    //
+    // The conversion decides at the first chunk; `answerReleased` latches for the whole bubble the moment the
+    // wheel moves once. Since the thinking topic now stays open and readable, the operator scrolls it during
+    // the run - so by the time the answer lands the anchor was already released and the answer stayed at its
+    // end, needing a manual scroll (operator, 2026-10-21: the second report of this regression).
+    //
+    // The rule is theirs, and it is geometric: bring the first line to the chat content top only when it
+    // overflows above it, and never when the reader is reading something EARLIER than this answer (they are
+    // above its first line entirely, and pulling them forward would take the page out from under them).
+    // An answer that fits is left exactly where the reader already has it.
+    {
+      const box=transcript.getBoundingClientRect();
+      const rect=streamBody.getBoundingClientRect();
+      const answerTop=transcript.scrollTop+(rect.top-box.top);
+      const readingEarlier=transcript.scrollTop+transcript.clientHeight<answerTop;
+      // "Shown" is the whole test: a first line above the content top (scrolled past) OR below its bottom (a
+      // late answer appended out of view) is not shown, so it is brought into view; one already visible is
+      // left exactly where the reader has it.
+      const shown=rect.top>=box.top-1 && rect.top<=box.bottom-1;
+      if (!shown && !readingEarlier) {
+        // Claimed directly, not through `anchorAnswer`: that gate refuses when the reader is not following,
+        // and the whole point of this rule is the reader who scrolled the thinking and is therefore released.
+        answerReleased.delete(transcript);
+        answerAnchors.set(transcript, streamBody);
+        // The house motion, not a jump: the same 220ms glide every other answer uses, which collapses to an
+        // instant alignment for a reader who prefers reduced motion or is already there.
+        smoothAnswerStart(transcript, streamBody);
+        streamBody.dataset.answerAnchor='top';
+      }
+    }
     sealReasoning();
     const diff = renderDiff(currentBubble(), event.changes);
     if (diff) {
