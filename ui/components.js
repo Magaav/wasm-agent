@@ -3012,7 +3012,7 @@ class WaOrchestrator extends HTMLElement {
   //
   //   1. `<state> <node>` - what it is doing, and on which machine (the node's name, never a bare id)
   //   2. `<resumed task>` - what it was asked to do, ellipsised when it does not fit
-  //   3. the run's stats, from the host's one stats line (`✺10s ◈~62.6k ✧24 ⚒38 ◷2:18`)
+  //   3. the run's stats, from the host's one stats line (`✺10s ◈~62.6k 👣24 ⚒38 ◷2:18`)
   //
   // A card's height must not change as runs start and finish, so lines 2 and 3 are ALWAYS there:
   // an absent task and an absent statistic reserve their line instead of collapsing it. The session

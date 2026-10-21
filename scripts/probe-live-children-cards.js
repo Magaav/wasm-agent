@@ -44,7 +44,7 @@
     finally { runCounts = savedCounts; replayingMessages = savedReplaying; }
     // WHY (operator, 2026-10-05): the shared stats line is compact - glyph glued to value, one space
     // between pairs. This is still the PRODUCTION footer over this stat set, control intact.
-    check(controlStats === '◈~62.6k ✧24 ⚒38 ◷2:18',
+    check(controlStats === '◈~62.6k 👣24 ⚒38 ◷2:18',
       'control (the answer footer over this stat set) reads: ' + controlStats);
 
     // --- the cards, through the host builder the panel is actually fed by ------------------------
@@ -77,7 +77,7 @@
 
     // 3. An absent statistic is omitted - glyph and all. `session-bare` has no run counts at all.
     check(!bare.textContent.includes('◈'), 'a card with no measured tokens must show NO ◈, saw: ' + bare.textContent);
-    check(!bare.textContent.includes('✧') && !bare.textContent.includes('⚒') && !bare.textContent.includes('◷'),
+    check(!bare.textContent.includes('👣') && !bare.textContent.includes('⚒') && !bare.textContent.includes('◷'),
       'and no model/tool/duration pair either, saw: ' + bare.textContent);
     check(bare.textContent === '✺10s', 'the one fact it does have is stated, saw: ' + bare.textContent);
     check(!/\b0\b/.test(stats.textContent.replace('✺10s', '')),

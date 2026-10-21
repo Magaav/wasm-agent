@@ -792,19 +792,25 @@ function renderSteering(fact) {
 
 // ONE stats line, one glyph vocabulary, one joiner.
 //
-// The footer under a finished answer and a live child card's third line are the same line over the
-// same facts (`◈tokens ✧model calls ⚒tool calls ◷duration`, with `✺elapsed` in front where a child
+// The footer under a finished answer and a live child row's third line are the same line over the
+// same facts (`◈tokens 👣model calls ⚒tool calls ◷duration`, with `✺elapsed` in front where a child
 // is still running). They differ in exactly one thing, and the caller decides it: the footer prints
-// `?` where a fact is missing, while a card OMITS the pair entirely - an absent token count says
+// `?` where a fact is missing, while a row OMITS the pair entirely - an absent token count says
 // nothing, so `◈0` would be a measurement nobody made. `0` is a real value here and is never
 // dropped; only absent ones are.
 //
 // The line is COMPACT (operator, 2026-10-05): the glyph is glued to its value and the pairs are
-// separated by one space - `◈~7.7k ✧2 ⚒1 ◷0:41`, not `◈ ~7.7k · ✧ 2 · ⚒ 1 · ◷ 0:41`. Nothing is
+// separated by one space - `◈7.4k 👣5 ⚒7 ◷3:48`, not `◈ 7.4k · 👣 5 · ⚒ 7 · ◷ 3:48`. Nothing is
 // dropped and no glyph changes meaning; the words the compact form no longer prints are said in
 // `title`/`aria-label` instead (see `runStatsWords`), so the facts stay reachable to a hover, a
 // keyboard and a screen reader.
-const runStatGlyphs={elapsed:'✺',tokens:'◈',calls:'✧',tools:'⚒',duration:'◷'};
+//
+// `👣` (operator's choice for model calls) is the one glyph in this vocabulary that Unicode ships in
+// BOTH presentations, so the line's CSS asks for the text one - see `.chat-content-run-elapsed` in
+// style.css. Left to itself the browser picks the colour emoji: a pictograph at emoji size and in the
+// emoji's own colours, inside a line whose other four glyphs take the row's colour and size. The
+// glyph map stays plain characters, so every assertion and every `title` reads the same string.
+const runStatGlyphs={elapsed:'✺',tokens:'◈',calls:'👣',tools:'⚒',duration:'◷'};
 // The order a stats line is read in, and the only list that decides it: elapsed first (a child is
 // still running), then what the run cost.
 const runStatOrder=['elapsed','tokens','calls','tools','duration'];
@@ -6742,7 +6748,7 @@ function liveChildRows({sessions=[], dispatches=[], fleet={}, health={}, errors=
 // The run counts this window already holds, per child session.
 //
 // A painted child keeps its renderer state (that is what makes its pane survive a repaint), and the
-// run counts are part of it. That is the only place a `Live Subagents` row's `◈` `✧` `⚒` `◷` can come
+// run counts are part of it. That is the only place a `Live Subagents` row's `◈` `👣` `⚒` `◷` can come
 // from without a second transcript read per row, so a child nobody has opened simply has no numbers
 // here - which the row then omits rather than fills with zeros.
 function runCountsByPane() {

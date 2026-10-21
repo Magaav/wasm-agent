@@ -7,8 +7,8 @@ try {
  runStartedAt=Date.now()-144000;handleEvent({type:'run_counts',counts:snapshot()});handleEvent({type:'status',text:'model'});runStepState.active.started=Date.now()-6000;updateRunElapsed();
  check(statusPhase.textContent==='6s'&&statusPhase.title==='Reasoning','only phase seconds; phase retained as tooltip');
  // WHY (operator, 2026-10-05): the live strip is ONE compact line - `✦` then the clock, then the
- // glued facts (`◈~10k ✧26 ⚒82 ◷2:24`); the pending `~` mark and every count are unchanged.
- check(statusElapsed.textContent==='◈~10k ✧26 ⚒82 ◷2:24','requested compact live strip with pending usage marked');
+ // glued facts (`◈~10k 👣26 ⚒82 ◷2:24`); the pending `~` mark and every count are unchanged.
+ check(statusElapsed.textContent==='◈~10k 👣26 ⚒82 ◷2:24','requested compact live strip with pending usage marked');
  handleEvent({type:'reasoning',text:'x'.repeat(40)});updateRunElapsed();check(turnTokenReadout()==='~10k','text characters never fabricate exact billed tokens');
  handleEvent({type:'reasoning',text:'x'.repeat(200),complete:true});check(turnTokenReadout()==='~10k','authoritative full copy never counts as usage');
  handleEvent({type:'run_counts',counts:snapshot({tokens_reported:13000,context_growth:{version:1,baseline:600000,current:613000,added:13000,known:true,pending:false,partial:false,complete:true,compactions:0},usage_calls:26,pending_input:null,context:{tokens:261000,capacity:1000000,estimated:false}})});

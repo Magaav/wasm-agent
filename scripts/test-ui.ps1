@@ -3983,6 +3983,14 @@ try {
     # cannot pass behind a green suite.
     & node scripts/agent-benchmark-ui-observe.mjs --ui $ui --probe (Join-Path $PSScriptRoot 'probe-scroll-to-bottom.js') --out (Join-Path $tmp 'scroll-to-bottom')
     if ($LASTEXITCODE -ne 0) { throw 'scroll-to-latest arrow browser probe failed' }
+    # The model-calls glyph is `👣`, the one character in the stats vocabulary that Unicode also ships
+    # as a COLOUR emoji. A browser left to itself would put a colour pictograph in a line of monochrome
+    # text ciphers, so this probe asserts the production line itself and, on both elements that print
+    # it, `font-variant-emoji: text` plus a font stack that names a monochrome face and no colour emoji
+    # font - then MEASURES the glyph's ink through that stack (monochrome, against a colour-emoji
+    # control that does have colour ink), and that a narrow pane still ellipsises the one-line row.
+    & node scripts/agent-benchmark-ui-observe.mjs --ui $ui --probe (Join-Path $PSScriptRoot 'probe-run-stats-glyph.js') --out (Join-Path $tmp 'run-stats-glyph')
+    if ($LASTEXITCODE -ne 0) { throw 'run-stats glyph browser probe failed' }
     & node scripts/test-final-answer-suite.mjs $WaExe (Join-Path $tmp 'final-answer')
     if ($LASTEXITCODE -ne 0) { throw 'final-answer focused suite failed' }
     & node scripts/test-minimal-chat.cjs (Join-Path $tmp 'minimal-chat')

@@ -215,8 +215,9 @@ sections, in order:
 2. **context** — last measured request input and selected model capacity. Never
    substitute a whole run's cumulative input for one request's context;
    bubble `◈` separately shows **net context added this turn**, not cache rereads
-   or billed usage, before `✧ ⚒ ◷` both live and completed (one compact line, each glyph
-   glued to its value). Exact measured
+   or billed usage, before `👣 ⚒ ◷` both live and completed (one compact line, each glyph
+   glued to its value; `👣` is drawn in its TEXT presentation - monochrome, in the row's colour and
+   size - so the model-calls pair reads as one more cipher, not as a colour emoji). Exact measured
    post-request endpoints remain in details; missing historical baselines stay unknown;
 3. **limits** — the provider's rolling windows: `5h` (`rolling`), `7d`
    (`weekly`), `30d` (`monthly`), each a percent with a meter and a reset

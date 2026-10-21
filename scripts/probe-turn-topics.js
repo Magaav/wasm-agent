@@ -41,7 +41,7 @@ try{await rendererLoaded;for(let i=0;i<200&&!transcriptReady;i++)await new Promi
    document.getElementById('panel').style.width=width+'px';busy=true;runBubble=null;runStepState=null;clearStatus();runStartedAt=Date.now()-96000;
    handleEvent({type:'status',text:'model'});handleEvent({type:'run_counts',counts:{version:1,run_id:'flex-'+width,model_calls:6,tool_calls:19,usage_calls:6,context_growth:{version:1,known:true,baseline:600000,current:636200,added:36200,pending:true}}});
    const bar=statusLine.getBoundingClientRect(),counters=statusElapsed.getBoundingClientRect(),phase=statusPhase.getBoundingClientRect(),bubble=runBubble.getBoundingClientRect();
-   // WHY (operator, 2026-10-05): the live counters are compact and glued (`◈~36.2k ✧6 ...`) and the
+   // WHY (operator, 2026-10-05): the live counters are compact and glued (`◈~36.2k 👣6 ...`) and the
    // row reads left to right - they are no longer pinned to the bar's right edge, they follow the
    // clock after two spaces. Same property: one 30px row, no separator dot, no second line.
    check(statusElapsed.textContent.startsWith('◈~36.2k')&&!statusElapsed.textContent.startsWith(' ·'),'no leading dot before compact live counters');

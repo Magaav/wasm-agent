@@ -44,6 +44,12 @@ wa-provider-manager button, wa-provider-manager a { margin-right:var(--space); }
   --radius-lg: var(--radius);
   /* The terminal face pi uses (VS Code/PowerShell ship Consolas on Windows). */
   --font: Consolas, "Cascadia Mono", "Cascadia Code", "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  /* The face a stats glyph falls back to when the row's own (monospace) font has no picture of it.
+     These are MONOCHROME symbol/emoji fonts, named in this order on purpose: `Noto Emoji` and
+     `Segoe UI Symbol` draw a text-presentation outline, while `Segoe UI Emoji` draws a colour bitmap.
+     A colour emoji font is deliberately NOT in this list: the only glyph that needs it (`👣`) must
+     read as a cipher, not as a pictograph. */
+  --glyph-font: "Noto Emoji", "Segoe UI Symbol", "Noto Sans Symbols 2";
   --font-size: 14.5px;
 }
 
@@ -85,7 +91,7 @@ wa-orchestrator { display:flex; flex-direction:column; width:100%; height:100%; 
    <div> card's 18px - two heights for the same card, for a reason no reader could see. */
 .live-child-head, .live-child-title, .live-child-stats { line-height:18px; min-height:18px; }
 .live-child-title, .live-child-stats { display:block; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
-.live-child-stats { color:var(--muted); font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }
+.live-child-stats { color:var(--muted); font-family:ui-monospace,SFMono-Regular,Menlo,monospace,var(--glyph-font); font-variant-emoji:text; }
 .live-child[data-state="running"], .live-child[data-state="accepted"] { border-left-color:var(--ok); }
 .live-child[data-state="queued"], .live-child[data-state="placing"] { border-left-color:var(--warn); }
 .live-child[data-state="unfinished"] { border-left-color:#f0a; }
@@ -431,6 +437,18 @@ wa-diff { display: block; align-self: flex-start; max-width: 760px; width: 100%;
 /* Detailed phase history is diagnostic-only; the compact current phase stays in the footer. */
 .messages:not([data-debug="true"]) wa-step, .agent-transcript:not([data-debug="true"]) wa-step { display: none; }
 .chat-content-run-elapsed { flex: 0 1 auto; min-width: 0; font-variant-numeric: tabular-nums; white-space: nowrap; }
+/* The stats row is TEXT, and every glyph in it is a text symbol that takes the row's colour and size:
+   `◈` tokens, `👣` model calls, `⚒` tools, `◷` duration (and `✺` elapsed while a child runs).
+   `👣` is the one of those that Unicode also ships as a COLOUR emoji, and a browser left to choose
+   picks the colour one - a pictograph in the emoji's own colours, at emoji size, in a muted
+   monospace line. Two declarations keep it a cipher here:
+     1. `font-variant-emoji: text` asks for the TEXT presentation. It is inherited, so every glyph in
+        the row (and the same line's copy in a `Live Subagents` row, below) gets it.
+     2. the row's font stack reaches a monochrome font (`--glyph-font`) before any colour emoji font.
+        Fallback is per character, so only the glyph takes that font: the digits and the letters
+        around it stay in the row's own monospace face and keep their tabular figures.
+   Both are measured in `scripts/probe-run-stats-glyph.js`, which fails if either stops applying. */
+.chat-content-run-elapsed { font-variant-emoji: text; font-family: var(--font), var(--glyph-font); }
 /* Live row: `✦4s` then two spaces then the compact facts, read left to right - the clock is not
    pushed to the left edge and the counters are not pushed to the right one. `.6em` is two spaces at
    the row's own font size, so the separation survives the narrow-pane font step below. A pane too
