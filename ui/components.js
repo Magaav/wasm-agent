@@ -786,13 +786,17 @@ customElements.define("wa-run", WaRun);
 
 // Delegation is a topic, not a separate card pattern. The receipt is launch evidence;
 // opening the conversation is a host action, never a claim that the child finished.
+// The NAME the reader sees is `orchestration` - it says what the run is *for*, not which tool
+// started it. The element, glyph, class hooks (`wa-subagent`, `.subagent`) and the
+// `subagent-open` event keep their names: this is a rename of the visible word, not a new
+// component, so a selector that addresses the topic still addresses the same thing.
 class WaSubagent extends HTMLElement {
   static get observedAttributes() { return ["open"]; }
   connectedCallback() { this._build(); }
   _build() {
     if (this._parts) return;
     this._parts = topicParts(this, {
-      className: "subagent", glyph: "⑂", label: "subagent", bodyClass: "reasoning-body",
+      className: "subagent", glyph: "⑂", label: "orchestration", bodyClass: "reasoning-body",
     });
     this.append(this._parts.header, this._parts.body);
     this._sync();
@@ -814,7 +818,7 @@ class WaSubagent extends HTMLElement {
     const facts = [];
     if (payload.state) facts.push(String(payload.state));
     if (payload.settled === true) facts.push("settled");
-    this._parts.label.textContent = "subagent · " + profile;
+    this._parts.label.textContent = "orchestration · " + profile;
     this._parts.label.title = this._parts.label.textContent;
     this._parts.meta.textContent = [...facts, ...(session ? [session.slice(0, 8)] : [])].join(" · ");
     const details = document.createElement("div");

@@ -1021,6 +1021,14 @@ $harness = @'
     "a subagent result must render the shared topic with an icon");
   check(!!sub && /explore/.test(sub.textContent) && /abcdef01/.test(sub.textContent),
     "the topic must name the profile and the child session, saw " + (sub ? sub.textContent : "no topic"));
+  // THE TOPIC'S NAME. The reader sees `orchestration \u00b7 <profile>`, not the tool that started the child:
+  // the topic says what the run is for. The element, glyph and class hooks are unchanged
+  // (`wa-subagent`, `.subagent`, the `subagent-open` event), so only the one visible word moved -
+  // `subagent` in ui/components.js:795/:817 became `orchestration`.
+  check(!!sub && !!sub.querySelector(".trace-label") &&
+    sub.querySelector(".trace-label").textContent === "orchestration \u00b7 explore",
+    "the delegation topic must be named `orchestration \u00b7 <profile>`, saw: " +
+    (sub && sub.querySelector(".trace-label") ? JSON.stringify(sub.querySelector(".trace-label").textContent) : "no label"));
   check(!!sub && !!sub.body.querySelector("button"), "the child topic must link to the child session");
   // A reasoning model thinks before it speaks, and a panel that shows nothing
   // during that time is indistinguishable from a hung one. The count is also the
