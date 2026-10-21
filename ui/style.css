@@ -620,6 +620,14 @@ body.engine .engine { display: flex; }
 .engine-name { font-weight: 500; }
 .engine-note { margin-left: auto; color: var(--muted); font-size: 11px; }
 .engine-content { padding: var(--pad); border-top: 1px solid var(--line); max-height: 46vh; overflow-y: auto; }
+/* The reviewer policy: ONE row of the engine panel, above the topics and not a topic of its own -
+   the topics are the machine's inventory, this is the operator's policy about work. The checkbox,
+   the name it belongs to and the one line saying what the policy means share the row; nothing else
+   in the panel moves. */
+.engine-policy { display: flex; align-items: center; gap: var(--gap); flex-wrap: wrap; flex: 0 0 auto; }
+.engine-policy input { flex: none; margin: 0; }
+.engine-policy .policy-name { color: var(--text); font-size: 12.5px; }
+.engine-policy .policy-detail { color: var(--muted); font-size: 11px; }
 
 /* The notification bell: a device-local switch, and the same shape as a job toggle (§10) rather
    than a third kind of switch on a third surface. The bell itself carries the state as well as the

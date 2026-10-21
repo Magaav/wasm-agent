@@ -8101,6 +8101,60 @@ notifyTestEl.addEventListener("click", async () => {
 });
 paintNotifyState();
 
+// ---- engine: the reviewer policy (the operator's stated policy, not a dispatch path) ---------
+//
+// A worker delivery is re-read by a reviewer with fresh context before it is accepted. That is the
+// operator's policy, and this row is where it is stated: one line beside the checkbox says what it
+// means, and the agent reads it from here. This build has no UI spawn path - children are started by
+// the agent through its `subagent` tool - so the checkbox starts nothing, configures nothing and is
+// wired to no dispatch: it is a statement about acceptance, not a control over a child.
+//
+// The value is device-local, in this window's own storage, under the one key **`wa.require-reviewer`**,
+// stored as `1` or `0`. Absent means ON: a window that has never been told otherwise asks for a
+// reviewer, which is the policy this build ships with. Unreadable storage reads as ON too - a device
+// that cannot remember the choice has not been told to drop it.
+const REQUIRE_REVIEWER_KEY = "wa.require-reviewer";
+
+function requireReviewerPreference() {
+  try { return localStorage.getItem(REQUIRE_REVIEWER_KEY) !== "0"; }
+  catch (error) { return true; }
+}
+
+function setRequireReviewerPreference(on) {
+  try { localStorage.setItem(REQUIRE_REVIEWER_KEY, on ? "1" : "0"); }
+  catch (error) { /* device storage is optional; the row still shows the choice */ }
+}
+
+// One row in the engine panel's own body, above the topics rather than inside one: the topics are the
+// machine's inventory and this is the operator's policy about work. The `<label for>` gives the native
+// checkbox its accessible name and its Tab stop, and `aria-describedby` attaches the meaning line as
+// its description, so a screen reader hears what the switch does and not only what it is called.
+const requireReviewerRow = document.createElement("div");
+requireReviewerRow.className = "engine-policy";
+const requireReviewerBox = document.createElement("input");
+requireReviewerBox.type = "checkbox";
+requireReviewerBox.id = "require-reviewer";
+requireReviewerBox.checked = requireReviewerPreference();
+const requireReviewerLabel = document.createElement("label");
+requireReviewerLabel.className = "policy-name";
+requireReviewerLabel.htmlFor = "require-reviewer";
+requireReviewerLabel.textContent = "require reviewer";
+const requireReviewerDetail = document.createElement("span");
+requireReviewerDetail.className = "policy-detail";
+requireReviewerDetail.id = "require-reviewer-detail";
+requireReviewerDetail.textContent =
+  "a worker delivery is re-read by a reviewer with fresh context before it is accepted";
+requireReviewerBox.setAttribute("aria-describedby", "require-reviewer-detail");
+requireReviewerRow.append(requireReviewerBox, requireReviewerLabel, requireReviewerDetail);
+const enginePanelBody = engineView.querySelector(".engine-body");
+if (enginePanelBody) enginePanelBody.prepend(requireReviewerRow);
+requireReviewerBox.addEventListener("change", () => setRequireReviewerPreference(requireReviewerBox.checked));
+
+// The policy, published so a page-level consumer can read it without scraping the DOM. It answers with
+// what the row shows - the same value the change handler just stored - and it moves with the checkbox,
+// because the box is the one state there is.
+window.waRequireReviewer = () => requireReviewerBox.checked;
+
 function setEngine(open) {
   document.body.classList.toggle("engine", open);
   engineView.hidden = !open;
