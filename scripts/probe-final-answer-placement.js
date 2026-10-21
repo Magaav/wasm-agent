@@ -145,6 +145,10 @@
         (capStyle && capStyle.maxHeight));
     check(!!capStyle && capStyle.overflow === "auto",
       "and a longer body must scroll rather than be cut, saw overflow " + (capStyle && capStyle.overflow));
+    // COMMENTARY IS FOR READING BACK; THINKING IS THE ROUTE (operator, 2026-10-21): the commentary carries
+    // the transcript's own text colour so a run's milestone prose stands out, while thinking stays muted.
+    check(!!capStyle && capStyle.color === "rgb(231, 235, 243)",
+      "a settled commentary body must take the transcript's own text colour, saw " + (capStyle && capStyle.color));
     check(provisional.querySelector(".commentary-body").textContent === commentaryTextBefore,
       "and the settled commentary carries the same text once");
     check(!provisional.classList.contains("phase-pending"), "the label is settled (pending state removed)");
@@ -501,13 +505,45 @@
     check(messages.scrollTop === readerPosition,
       "and must not be pulled to the new answer, saw " + readerPosition + " -> " + messages.scrollTop);
 
+    // ---- 5d. a thinking topic's own life: it survives the tool topic that comes next, and is closed by
+    // the next thinking or decision topic - never by the tool step (operator, 2026-10-21).
+    handleEvent({ type: "done" });
+    messages.replaceChildren(); runBubble = null; streamBody = null; streamText = "";
+    setFollow(true);
+    handleEvent({ type: "round", n: 1, tools: 2, run_id: "think-run", session_id: "placement-session" });
+    handleEvent({ type: "reasoning", text: "First thought. " });
+    var thinkA = lastBubble().body.querySelector("wa-reasoning");
+    // Thinking is the route: it keeps the muted weight (commentary's own colour is asserted in section 3,
+    // where a settled commentary body exists).
+    check(!!thinkA && getComputedStyle(thinkA.body).color === "rgb(139, 147, 167)",
+      "the thinking body keeps the muted route colour, saw " + (thinkA ? getComputedStyle(thinkA.body).color : "none"));
+    check(!!thinkA && thinkA.open, "a thinking topic starts open, saw " + (thinkA ? thinkA.open : "no topic"));
+    handleEvent({ type: "tool", call_id: "think-call-1", name: "read", arguments: { path: "ui/app.js" } });
+    handleEvent({ type: "tool_result", name: "read", call_id: "think-call-1", result: { content: "ok" } });
+    check(!!thinkA && thinkA.open && thinkA.isConnected,
+      "a tool step must not close the thinking topic, saw open=" + (thinkA && thinkA.open) + " connected=" + (thinkA && thinkA.isConnected));
+    handleEvent({ type: "reasoning", text: "Second thought." });
+    var thinkAfter = lastBubble().body.querySelectorAll("wa-reasoning");
+    check(thinkAfter.length === 1 && thinkAfter[0] === thinkA,
+      "later thinking must continue in the SAME topic, saw " + thinkAfter.length + " topic(s)");
+    check(!!thinkA && /First thought\. Second thought\./.test(thinkA.body.textContent.replace(/\s+/g, " ")),
+      "and that topic must hold both thoughts, saw " + JSON.stringify(thinkA && thinkA.body.textContent.slice(0, 80)));
+    handleEvent({ type: "decision", call_id: "think-call-2", name: "write", arguments_text: "{}" });
+    check(!!thinkA && thinkA.open === false,
+      "a decision topic closes the thinking topic it follows, saw open=" + (thinkA && thinkA.open));
+    handleEvent({ type: "reasoning", text: "Third thought." });
+    var thinkNew = lastBubble().body.querySelectorAll("wa-reasoning");
+    var latest = thinkNew[thinkNew.length - 1];
+    check(!!latest && latest !== thinkA && latest.open,
+      "and the next thinking starts a NEW open topic, saw " + thinkNew.length + " topics");
+
     var verdict = "PASS: thinking streams in the thinking topic; a tool-capable run streams its prose " +
       "inside commentary from the first chunk, settles a commentary label on a tool call, and converts " +
       "the same block into the one answer outside the run topic with an unmoved text box; that first " +
       "paint is already the final one - the answer's own measure, unchanged one frame, 300ms, the " +
       "settle passes and a durable repaint later, with no pass touching its class or style; a no-tool " +
       "run answers directly; tall answers anchor their top, short answers and scrolled-up readers are " +
-      "left alone; onFinalAnswer fires once and refuses a replay";
+      "left alone; onFinalAnswer fires once and refuses a replay; a thinking topic survives the tool step that follows it and is closed by the next thinking or decision topic; the settled commentary body takes the transcript speech colour while thinking keeps the muted route colour";
     result = { status: problems.length ? "fail" : "pass",
       text: problems.length ? "FAIL: " + problems.join(" ;; ") : verdict };
   } catch (error) {

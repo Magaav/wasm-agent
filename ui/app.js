@@ -986,6 +986,7 @@ function currentBubble() {
   if (!runBubble) {
     transcript.querySelector('#empty')?.remove();
     answerReleased.delete(transcript);
+    sealedReasoning = null;
     runBubble = document.createElement("wa-message");
     runBubble.setAttribute("role", "assistant");
     transcript.append(runBubble);   // connecting is what builds .body
@@ -1131,7 +1132,15 @@ let streamedCommentaryText = "";
 function appendReasoning(text, complete = false) {
   if (!text && !complete) return reasoningText;
   const bubble = currentBubble();
-  if (!reasoningBlock || reasoningBlock.parentNode !== bubble.body) {
+  if (!reasoningBlock || !reasoningBlock.isConnected) {
+    // A THINKING TOPIC KEEPS ITS OWN LIFE. It used to be re-created as soon as a tool step moved it into
+    // the run topic (`parentNode` was no longer the bubble), which split one train of thought into one
+    // topic per step and folded the earlier half away (operator, 2026-10-21: "the thinking closes on the
+    // next topic, normally a tool call - I want it to stay so I can read the trace and follow up"). The
+    // connection, not the parent, is the test now, so the same topic keeps growing wherever it sits - and
+    // the topic it replaces is closed HERE, by the next thinking topic, which is the only thing that
+    // should close it.
+    if (sealedReasoning) { sealedReasoning.open = false; sealedReasoning = null; }
     // A topic like every other one: <wa-reasoning> builds the same header as the tool calls beside it,
     // so the thinking reads as a step of the same kind rather than as a different thing.
     reasoningBlock = document.createElement("wa-reasoning");
@@ -1417,9 +1426,12 @@ function markPendingTextIncomplete() {
   phasePendingText.clear();
 }
 
-// A round is over: the thinking it produced is history, and the block folds away.
+// A round is over: this thinking topic is finished, but the reader may still be reading it, so it stays
+// OPEN and readable through the steps that follow. What closes it is another thinking topic (see
+// `appendReasoning`) or a decision topic (see `addDecision`) - never the tool topic that merely came next.
+let sealedReasoning = null;
 function sealReasoning() {
-  if (reasoningBlock) reasoningBlock.open = false;
+  if (reasoningBlock) sealedReasoning = reasoningBlock;
   reasoningBlock = null;
   reasoningText = "";
 }
@@ -1958,6 +1970,12 @@ function addTool(name, args, options) {
 }
 
 function addDecision(event) {
+  // A decision is the next thinking-shaped step, so it closes the thinking topic it follows - the same
+  // rule that closes it when another thinking topic starts. It closes the LIVE one too: a decision can
+  // arrive while that topic is still the one reasoning would append to, and leaving it open would leave
+  // two thinking-shaped topics open at once.
+  if (sealedReasoning) { sealedReasoning.open = false; sealedReasoning = null; }
+  if (reasoningBlock) { reasoningBlock.open = false; reasoningBlock = null; reasoningText = ""; }
   showRunStep("decision", "Selecting tools");
   currentTrace().addDecision(event.call_id, event.name, event.arguments_text || "",
     event.complete === true, event.previous_call_id);

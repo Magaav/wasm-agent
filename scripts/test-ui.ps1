@@ -2661,7 +2661,10 @@ $harness = @'
     var settled = document.querySelectorAll("wa-message .reasoning");
     var folded = settled[settled.length - 1];
     check(!!folded, "reasoning: collapsing the run must not swallow the thinking");
-    check(!!folded && folded.open === false, "reasoning: it must fold away once the run answers");
+    // Operator, 2026-10-21: the thinking is what they follow, so it stays readable - the RUN topic is
+    // what folds when the answer lands, and only another thinking or decision topic closes the thinking.
+    check(!!folded && folded.open === true,
+      "reasoning: it must stay open once the run answers - the run topic is what folds");
     // It belongs *inside* the topic: it is the route, not the answer, and a long run left a wall of
     // "thinking · N chars" rows sitting outside the topics, between the reader and the answer
     // (measured live: 196 of them outside the topics in one thread).
@@ -2684,8 +2687,8 @@ $harness = @'
     var soloBlock = solo[solo.length - 1];
     check(!!soloBlock && soloBlock.closest("wa-run") === null,
       "reasoning: a run that called no tool keeps its thinking visible, outside any topic");
-    check(!!soloBlock && soloBlock.open === false,
-      "reasoning: and it still folds away when that run answers");
+    check(!!soloBlock && soloBlock.open === true,
+      "reasoning: and it stays open when that run answers too - nothing closed it but a new thinking topic");
     window.handleEvent({ type: "done" });
   })();
 
