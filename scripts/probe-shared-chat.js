@@ -10,8 +10,10 @@ try {await rendererLoaded;for(let i=0;i<200&&!transcriptReady;i++)await new Prom
  check(!pane.querySelector('[data-action="cancel"],[data-action="steer"]'),'no child Cancel task or Steer button');
  check(!pane.querySelector('.agent-preview')&&!pane.shell.host.children.length,'no separate raw preview/status host');
  // WHY (operator, 2026-10-05): the shared strip is compact - glyph glued to value, one space between
- // pairs. Same property: the child uses the one full run strip inside its own bubble.
- const line=pane.statusLine;check(line?.closest('wa-message')&&line.querySelector('.chat-content-run-elapsed').textContent.includes('◈250k 👣3 ⚒8 ◷0:47'),'child uses full shared run strip inside its bubble');
+ // pairs - and it keeps the one order the footer uses (`👣3 ⚒8 ◈250k ◷0:47`), with the model calls
+ // before the clock and the clock glued to them by a bare `·`. Same property: the child uses the one
+ // full run strip inside its own bubble, so the halves are read from the row, not from one element.
+ const line=pane.statusLine;check(line?.closest('wa-message')&&line.querySelector('.chat-content-run-calls').textContent===' 👣3·'&&line.querySelector('.chat-content-run-elapsed').textContent===' ⚒8 ◈250k ◷0:47','child uses full shared run strip inside its bubble');
  check(line.querySelector('.run-activity-glyph')&&!line.querySelector('.spinner'),'same grow/shrink glyph, not legacy spinner');
  check(pane.shell.modelChip.textContent==='▤ 42%/1.05M'&&!pane.querySelector('#user-btn'),'child context readout without node menu');
  pane.shell.modelChip.click();check(pane.shell._modelBalloon.textContent.includes('436,800')&&pane.shell._modelBalloon.textContent.includes('1,050,000'),'child balloon exact shared context facts');pane.shell._modelBalloon.close();
@@ -41,8 +43,10 @@ try {await rendererLoaded;for(let i=0;i<200&&!transcriptReady;i++)await new Prom
  const retainedView=childRenderStates.get(pane.transcript);pane.task={...task,state:'completed',settled:true,settled_at:now/1000};
  check(!pane.transcript.querySelector('.chat-content-run-status:not(.finished)'),'terminal task observation stops retained strip even before rows refresh');
  const settled={...task,state:'completed',settled:true,settled_at:now/1000};paintChildTranscript(pane.transcript,[...rows,{seq:5,id:'answer',role:'assistant',content:'Parity verified.',created_at:now/1000,trace:[{...counts,complete:true,usage_calls:3,elapsed_ms:47000}]}],{task:settled,active:false,state:'answered',notify:false});
- // WHY: compact form - the terminal footer keeps every fact, now glued (`👣3 ⚒8 ◷0:47`).
- check(!pane.transcript.querySelector('.chat-content-run-status:not(.finished)')&&pane.statusLine?.textContent.includes('👣3 ⚒8 ◷0:47'),'same terminal footer with no duplicate running status');
+ // WHY (operator, 2026-10-05): compact form - the terminal footer keeps every fact, now glued and in
+ // the shared order (`👣3 ⚒8 ◈250k ◷0:47`); the tokens pair belongs in it, so the assertion names the
+ // pair after the tools rather than ending the line at the duration.
+ check(!pane.transcript.querySelector('.chat-content-run-status:not(.finished)')&&pane.statusLine?.textContent.includes('👣3 ⚒8 ◈250k ◷0:47'),'same terminal footer with no duplicate running status');
  check(pane.transcript.querySelector('wa-commentary').open,'commentary default stays open after child settlement');
  // A read-only warning has the same pinned component, independent causes and no transcript shift.
  const before=pane.transcript.getBoundingClientRect().top;pane.notice.setNotice('journal','Conversation refresh unavailable; outcome unconfirmed');
