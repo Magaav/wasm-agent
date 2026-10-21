@@ -145,9 +145,21 @@
   const nearBody=entries[0].querySelector(':scope > .topic-body');
   check(!nearBody.querySelector('.node-details')&&!/advertises|nothing advertised|reachable/.test(nearBody.textContent),'the node body states no kind/advertises/reachable rows, saw: '+JSON.stringify(nearBody.textContent));
   // PER-NODE CONFIGURATION: that configuration is an INNER TOPIC of the node's topic, built by the house
-  // topic component, so it opens and reads like every other topic here rather than as loose rows.
+  // topic component, so it opens and reads like every other topic here rather than as loose rows. It is
+  // COLLAPSED by default (see the two assertions below its structure).
   const config=entries[0].querySelector('.node-config');
-  check(!!config&&config.localName==='wa-orchestrator-topic'&&config.classList.contains('topic')&&config.querySelector(':scope > .trace-head').tagName==='BUTTON'&&config.open,'the configuration is a house topic inside the node topic, saw: '+String(config&&config.outerHTML.slice(0,200)));
+  check(!!config&&config.localName==='wa-orchestrator-topic'&&config.classList.contains('topic')&&config.querySelector(':scope > .trace-head').tagName==='BUTTON','the configuration is a house topic inside the node topic, saw: '+String(config&&config.outerHTML.slice(0,200)));
+  // WHY THE `&&config.open` HERE IS REPLACED (operator report): this assertion used to REQUIRE the topic to
+  // render expanded, which is exactly what the operator reported as wrong - an open Configuration topic
+  // inside every node's topic. The property now asked is the collapsed start (no `open` attribute, header
+  // aria-expanded="false", body hidden) AND that it is still one click away, so neither half can regress.
+  {
+    const configHead=config.querySelector(':scope > .trace-head');
+    const configBody=config.querySelector(':scope > .topic-body');
+    check(!config.hasAttribute('open')&&config.open===false&&configHead.getAttribute('aria-expanded')==='false'&&configBody.hidden===true,'the per-node configuration topic starts CLOSED, saw open='+config.open+' aria-expanded='+JSON.stringify(configHead.getAttribute('aria-expanded'))+' hidden='+configBody.hidden);
+    configHead.click();
+    check(config.open===true&&configHead.getAttribute('aria-expanded')==='true'&&configBody.hidden===false,'and clicking its header opens it as every other topic here does, saw open='+config.open+' hidden='+configBody.hidden);
+  }
   // Its body is TWO compact rows: `max subagents` with the limit input, then `priority` with the two
   // arrows - label left, control pinned to the far right. The limit row keeps `.placement-node`, so
   // `policy` and the host's save handler still read it where it is.
