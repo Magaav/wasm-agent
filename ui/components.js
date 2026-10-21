@@ -2849,9 +2849,8 @@ class WaOrchestrator extends HTMLElement {
   }
   // Every online node, one entry each, drawn from the SAME sample the engine menu's node list draws (the
   // host pushes `nodeList` here when it repaints that list, so there is one read and no second poller).
-  // Each entry is itself a topic; opening it states the rest of the record - the kind, what it advertises,
-  // whether it is reachable - and that machine's own configuration, because the two-line header carries
-  // only the name and the statistics.
+  // Each entry is itself a topic; opening it states that machine's own configuration, because the
+  // two-line header carries only the name and the statistics.
   set nodes(value) {
     this.connectedCallback();
     // A repaint must not discard what the reader has typed into a limit: the limits are kept on the panel
@@ -2880,15 +2879,9 @@ class WaOrchestrator extends HTMLElement {
     topic.setAttribute('no-glyph','');
     topic.dataset.placementNode=this.placementId(node);
     topic.node=node;
-    const details=document.createElement('dl'); details.className='node-details';
-    for(const [term,value] of [['kind',node.kind || 'unknown'],
-      ['advertises',(node.capabilities || []).join(' ') || 'nothing advertised'],
-      ['reachable',node.online===false ? 'offline' : 'online']]) {
-      const name=document.createElement('dt'); name.textContent=term;
-      const description=document.createElement('dd'); description.textContent=value;
-      details.append(name,description);
-    }
-    topic.body.append(details);
+    // The record rows that used to sit here (kind, the capabilities it advertised, reachability) are
+    // gone: they answered a question opening a node is not about, and the statistics line already says
+    // whether the machine is online. What opening a node states is that machine's configuration.
     // The desktop this window runs on is not a machine a child can be placed on, so it gets no limits.
     if(node.kind!=='client')topic.body.append(this.nodeConfigElement(node));
     return topic;
@@ -2897,33 +2890,65 @@ class WaOrchestrator extends HTMLElement {
   // the node id - the same two spellings `fleet.policy.nodes` uses, so a limit edited here is the limit
   // the dispatcher reads back.
   placementId(node) { return node.local_node ? 'local' : (node.node_id || node.id); }
-  // ONE machine's configuration, inside its own topic: how many subagents may run on it (the same
-  // `max_tasks` input the placement block used to hold) and where it sits in the fill order (the two
-  // arrows and the position they change). The row is the same `.placement-node` element, so `policy`
-  // reads it and the host's `save-placement` handler saves it without knowing where it was edited.
+  // ONE machine's configuration, drawn as an inner topic of that machine's topic: the house topic
+  // component (`wa-orchestrator-topic`), so it opens and reads like every other topic in this bar rather
+  // than as loose rows. Its body is two compact rows - the limit, then the place in the fill order - with
+  // each label on the left and its control on the far right.
   nodeConfigElement(node) {
-    const block=document.createElement('div'); block.className='node-config';
-    const head=document.createElement('p'); head.className='node-config-head'; head.textContent='Configuration';
-    const row=this.placementRow({node:this.placementId(node),label:'max subagents ',
-      aria:(node.name || 'this node')+' max subagents'});
-    const position=document.createElement('span'); position.className='node-priority';
-    block.append(head,row,position);
+    const block=document.createElement('wa-orchestrator-topic');
+    block.setAttribute('topic-class','node-config');
+    block.setAttribute('label','Configuration');
+    block.setAttribute('no-glyph','');
+    // Open: the reader opened the node to reach these controls, so a second click to reveal the same two
+    // rows would be a disclosure nobody asked for. Every node's configuration topic is drawn this way.
+    block.setAttribute('open','');
+    block.body.append(this.nodeLimitRow(node),this.nodePriorityRow());
     return block;
   }
-  // One machine's limit and its place in the fill order. The arrows move whichever unit that row lives in:
-  // inside a node's own topic it is the whole topic, so what a reader arranges is the list they are
-  // reading; inside the placement block's container it is the row.
-  placementRow({node,label,aria}) {
-    const row=document.createElement('div'); row.className='placement-node'; row.dataset.node=node;
-    const text=document.createElement('label'); text.textContent=label;
+  // Row 1: `max subagents` on the left, the numeric limit pinned to the far right. The input stays inside
+  // the row's `<label>` (that is its accessible name) and stays the one `.placement-node input`, so
+  // `policy` reads it and the host's `save-placement` handler saves it without knowing where it was edited.
+  nodeLimitRow(node) {
+    const row=document.createElement('div'); row.className='placement-node node-config-row';
+    row.dataset.node=this.placementId(node);
+    const label=document.createElement('label'); label.textContent='max subagents';
+    label.append(this.limitInput(this.placementId(node),(node.name || 'this node')+' max subagents'));
+    row.append(label);
+    return row;
+  }
+  // Row 2: `priority 2/3` on the left, the two arrows pinned to the far right. The arrows are the same
+  // two buttons (same titles, same `_movePlacement` call) and they move the node topic they now sit inside.
+  nodePriorityRow() {
+    const row=document.createElement('div'); row.className='node-config-row node-priority-row';
+    const position=document.createElement('span'); position.className='node-priority';
+    row.append(position,...this.moveButtons(row));
+    return row;
+  }
+  // The one numeric limit input, whoever draws it: a machine's own topic and the placement block's
+  // fallback row are the same control, so a limit is edited the same way in both places.
+  limitInput(node,aria) {
     const input=document.createElement('input');input.type='number';input.min='0';input.max='128';input.step='1';
     input.value=String(this.placementLimits?.get(node) ?? 0);
-    input.setAttribute('aria-label',aria); text.append(input);
+    input.setAttribute('aria-label',aria);
+    return input;
+  }
+  // The two fill-order arrows, bound to the row they belong to: `_movePlacement` finds the unit to move
+  // from that row, so the buttons need not know whether the unit is a topic or a row.
+  moveButtons(row) {
     const up=document.createElement('button');up.type='button';up.textContent='↑';up.title='Higher priority';
     const down=document.createElement('button');down.type='button';down.textContent='↓';down.title='Lower priority';
     up.onclick=()=>this._movePlacement(row,-1);
     down.onclick=()=>this._movePlacement(row,1);
-    row.append(text,up,down);
+    return [up,down];
+  }
+  // One machine's limit and its place in the fill order, as the placement block's fallback container draws
+  // it (a machine the node list does not show). The arrows move whichever unit the row lives in: inside a
+  // node's own topic it is the whole node topic; here it is the row.
+  placementRow({node,label,aria}) {
+    const row=document.createElement('div'); row.className='placement-node'; row.dataset.node=node;
+    const text=document.createElement('label'); text.textContent=label;
+    text.append(this.limitInput(node,aria));
+    row.append(text,...this.moveButtons(row));
     return row;
   }
   // The reader's edits so far, so a repaint of the list does not discard them.
@@ -2972,7 +2997,9 @@ class WaOrchestrator extends HTMLElement {
     const topics=[...this.querySelectorAll('.node-list > wa-orchestrator-topic')];
     topics.forEach((topic,index)=>{
       const position=topic.querySelector('.node-priority');
-      if(position)position.textContent=topics.length>1?`priority ${index+1} of ${topics.length}`:'priority 1 of 1';
+      // `priority 2/3`: one slash, no spaces, because the row shares its line with the two arrows and the
+      // long spelling pushed them off it.
+      if(position)position.textContent=`priority ${index+1}/${topics.length}`;
     });
     // What the reader arranged is what Save sends, so the saved order is read back off the list. An empty
     // list keeps the order it had: a repaint that happens to show no machine yet must not turn Save into
@@ -2985,7 +3012,9 @@ class WaOrchestrator extends HTMLElement {
   // The arrows move one machine one place up or down. Inside a node's topic the unit is the topic itself,
   // so what a reader arranges is the list they are reading; in the fallback container it is the row.
   _movePlacement(row,delta) {
-    const unit=row.closest('wa-orchestrator-topic') || row;
+    // The arrows of a node's configuration sit inside that configuration's own topic; the unit they
+    // arrange is the NODE topic around it, so the `.node-topic` is asked for first.
+    const unit=row.closest('.node-topic') || row.closest('wa-orchestrator-topic') || row;
     const parent=unit.parentElement;
     if(!parent)return;
     const units=[...parent.children].filter(child=>child.localName===unit.localName);

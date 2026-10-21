@@ -116,10 +116,6 @@ wa-node { display:flex; flex-direction:column; gap:2px; min-width:0; }
 /* The name is the entry's label and takes the label's colour: `trace-head` is muted because it holds a
    row of meta, but a node's own name is what the reader is looking for. */
 .node-topic .node-name { color:var(--text); }
-/* What opening one node states: the rest of the record the two-line header cannot hold. */
-.node-details { display:grid; grid-template-columns:auto minmax(0,1fr); gap:2px var(--gap); margin:0; font-size:11px; color:var(--muted); }
-.node-details dt { color:var(--muted); }
-.node-details dd { margin:0; overflow-wrap:anywhere; }
 /* A lane: the checkout a child was given, the children working in it, and its end state. The
    sidebar is a list of lanes rather than a flat list of children, because "what is still owed here"
    is a question about a checkout - six children in one worktree used to be six unrelated cards. */
@@ -136,13 +132,15 @@ wa-node { display:flex; flex-direction:column; gap:2px; min-width:0; }
 .lane-check[data-state="yes"] .lane-check-state { color:var(--ok); }
 .lane-check[data-state="no"] .lane-check-state { color:var(--warn); }
 .lane-check[data-state="unknown"] .lane-check-state { color:var(--muted); }
-/* A node's configuration, inside its own topic: how many subagents may run on it and where it sits in
-   the fill order. The row is the same `.placement-node` the placement block used to hold, so the input
-   and the two arrows are styled once for both places. */
+/* A node's configuration is an inner topic of that node's topic, and its body is two compact rows:
+   `max subagents` then the numeric limit, `priority 2/3` then the two arrows - label left, control pinned
+   to the far right. The limit row is still the same `.placement-node` the placement block's fallback row
+   uses, so the input and the arrows are styled once for both places; only this row's layout is here. */
 .node-config { margin-top:var(--space); }
-.node-config .placement-node { color:var(--muted); font-size:12px; }
-.node-config-head { margin:0; color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.04em; }
-.node-priority { display:block; color:var(--muted); font-size:11px; }
+.node-config-row { display:flex; align-items:center; gap:var(--gap); padding:var(--space) 0; color:var(--muted); font-size:12px; }
+.node-config-row > label { display:flex; align-items:center; gap:var(--gap); flex:1; min-width:0; color:var(--muted); }
+.node-config-row input { margin-left:auto; }
+.node-priority-row .node-priority { flex:1; min-width:0; color:var(--muted); font-size:12px; }
 /* The placement block is the top of the `Nodes` body now: the switch and Save act on the per-node rows
    that live in the node topics below them. */
 .placement { margin:0 0 var(--space); color:var(--muted); font-size:12px; }
