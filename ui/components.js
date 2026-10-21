@@ -352,8 +352,12 @@ customElements.define("wa-step", WaStep);
 // fourth - the thinking block - built a different one: taller, with its own padding, no chevron and no
 // glyph, so it read as a different kind of thing rather than as another topic. The header *is* the
 // standard, so it lives here and every topic asks for it.
+// A topic's header may carry no glyph at all - `noGlyph` omits the glyph element rather than leaving an
+// empty one in the row. That is a supported shape, not a trick: a node entry's header is the shared
+// <wa-node> and its name is the whole header width, so a glyph in front of it would be a column of empty
+// space between the chevron and the name it was supposed to label.
 function topicParts(host, options) {
-  const { className, glyph, label, bodyTag = "div", bodyClass } = options;
+  const { className, glyph, label, bodyTag = "div", bodyClass, noGlyph = false } = options;
   host.classList.add("topic", className);
   const header = document.createElement("button");
   header.type = "button";
@@ -370,12 +374,13 @@ function topicParts(host, options) {
   const chevron = document.createElement("span");
   chevron.className = "trace-chevron";
   chevron.textContent = "\u203a";
-  header.append(glyphEl, labelEl, metaEl, chevron);
+  if (noGlyph) header.append(labelEl, metaEl, chevron);
+  else header.append(glyphEl, labelEl, metaEl, chevron);
   const body = document.createElement(bodyTag);
   body.className = "topic-body " + bodyClass;
   body.hidden = true;
   header.addEventListener("click", () => host.toggle());
-  return { header, glyph: glyphEl, label: labelEl, meta: metaEl, chevron, body };
+  return { header, glyph: noGlyph ? null : glyphEl, label: labelEl, meta: metaEl, chevron, body };
 }
 
 // The chevron is the whole of "this opens": it points right when closed and down when open.
@@ -2441,7 +2446,7 @@ function agentElapsed(ms) {
   const seconds=Math.max(0,Math.floor(ms/1000));
   return Math.floor(seconds/60)+':'+String(seconds%60).padStart(2,'0');
 }
-// How long a child has been running, in the short form a card's first statistic uses (`✺ 10s`).
+// How long a child has been running, in the short form a card's first statistic uses (`✺10s`).
 // Under a minute there is no minute to show, and `0:10` reads as a duration rather than as "ten
 // seconds in"; past that this is the one duration formatter the window already has, not a second one.
 function agentAge(ms) {
@@ -2579,7 +2584,7 @@ customElements.define('wa-agent-session',WaAgentSession);
 // The orchestrator's `Nodes` topic and the engine menu's node list are two lists of the same machines,
 // and a second drawing of them is how the two could disagree about a name or a number. `<wa-node>` is
 // that drawing and it is exactly TWO lines, in this order: the node's name, then what the node last
-// measured about itself (`CPU 52% · RAM 29%/12GB · DISK 87%/96GB`). Nothing else - a caller adds whatever
+// measured about itself (`◈ 52%·▤ 29%/12GB·▧ 87%/96GB`). Nothing else - a caller adds whatever
 // furniture its own list needs (the engine row's dot, kind, capabilities and buttons) as siblings, so
 // the two lines a reader compares across the two lists are the same two lines.
 function formatResourceBytes(bytes) {
@@ -2596,14 +2601,46 @@ function resourcePercent(value) {
   return Number.isFinite(number) ? `${Math.round(number)}%` : "?";
 }
 
+// ONE GLYPH PER STATISTIC, and a glyph always means the same metric. The three are taken from this
+// UI's own vocabulary rather than invented here: `◈` is the dense diamond the run stats use for a
+// measured consumption, `▤` is the occupancy box the context footer prints (`▤ 26%/1M`), and `▧`
+// is that same box part-filled - a workspace volume holding data. The line is the compact one a reader
+// scans down a list: one character, one space, then the number, and the `·` separator with NO spaces
+// around it. The words each glyph stands for are in the line's tooltip (`nodeStatisticsWords`).
+const NODE_CPU_GLYPH = "\u25c8";
+const NODE_RAM_GLYPH = "\u25a4";
+const NODE_DISK_GLYPH = "\u25a7";
+
+// The three measurements one sample carries, read once so the compact line and its tooltip cannot
+// disagree about a number.
+function nodeMetrics(resources) {
+  const ram = resources.memory || {};
+  const disk = resources.disk || {};
+  return {
+    cpu: resourcePercent(resources.cpu?.used_percent),
+    ram: { used: resourcePercent(ram.used_percent), total: formatResourceBytes(ram.total_bytes) },
+    disk: { used: resourcePercent(disk.used_percent), total: formatResourceBytes(disk.total_bytes) },
+  };
+}
+
 // The node's statistics line, in the one place both node lists get it from. `online` is a fact about the
 // sample, so a node that is not online says so here instead of printing three unknown numbers.
 function nodeStatistics(resources, online) {
   if (!online) return "resources offline";
   if (!resources || typeof resources !== "object") return "resources pending";
-  const ram = resources.memory || {};
-  const disk = resources.disk || {};
-  return `CPU ${resourcePercent(resources.cpu?.used_percent)} · RAM ${resourcePercent(ram.used_percent)}/${formatResourceBytes(ram.total_bytes)} · DISK ${resourcePercent(disk.used_percent)}/${formatResourceBytes(disk.total_bytes)}`;
+  const metrics = nodeMetrics(resources);
+  return `${NODE_CPU_GLYPH} ${metrics.cpu}·${NODE_RAM_GLYPH} ${metrics.ram.used}/${metrics.ram.total}`
+    + `·${NODE_DISK_GLYPH} ${metrics.disk.used}/${metrics.disk.total}`;
+}
+
+// The same sample spelled out, for the line's tooltip and its `aria-label`: a reader who hovers a
+// single-glyph line gets the metric's name and the word the `/` stands for, not a legend about the
+// format. A sample that is not there says the same thing in both forms.
+function nodeStatisticsWords(resources, online) {
+  if (!online) return "resources offline";
+  if (!resources || typeof resources !== "object") return "resources pending";
+  const metrics = nodeMetrics(resources);
+  return `CPU ${metrics.cpu} · RAM ${metrics.ram.used} of ${metrics.ram.total} · DISK ${metrics.disk.used} of ${metrics.disk.total}`;
 }
 
 class WaNode extends HTMLElement {
@@ -2617,8 +2654,7 @@ class WaNode extends HTMLElement {
     this._name.className = "node-name";
     this._stats = document.createElement("span");
     this._stats.className = "node-resources";
-    // The legend the engine row's resource line has always carried: what the three numbers are.
-    this._stats.title = "Latest node sample: CPU use · RAM use/total · workspace disk use/total";
+    // No legend here: the title is the node's OWN sample, spelled out, and it is set per render.
     this.append(this._name, this._stats);
     if (this._node) this._render();
   }
@@ -2631,12 +2667,24 @@ class WaNode extends HTMLElement {
     this._name.textContent = node.name || "node unknown";
     const stats = nodeStatistics(node.resources, node.online);
     this._stats.textContent = stats;
-    // The line is one line by contract, so a narrow host ellipsises it; the words a reader would lose
-    // are the sample itself, so the line says them in its `aria-label` as well as its text.
-    this._stats.setAttribute("aria-label", stats);
+    // The line is one line by contract, so a narrow host ellipsises it. The compact line is unreadable
+    // on its own - three glyphs and three numbers - so the words it stands for (`CPU 52% · RAM 29% of
+    // 12GB · DISK 87% of 96GB`) are the tooltip and the accessible name of the same element.
+    const words = nodeStatisticsWords(node.resources, node.online);
+    this._stats.title = words;
+    this._stats.setAttribute("aria-label", words);
   }
 }
 customElements.define("wa-node", WaNode);
+
+// The one way a node entry is constructed. The engine menu's row (app.js's `nodeRow`) and the
+// orchestrator's `Nodes` topic both ask for it, so there is one drawing path used twice: a change to
+// `<wa-node>` shows up in both lists, and neither list can grow its own idea of the two lines.
+function nodeElement(node) {
+  const entry = document.createElement("wa-node");
+  entry.node = node || null;
+  return entry;
+}
 
 // <wa-orchestrator-topic> — one topic of the orchestrator's left bar, and the SAME topic the transcript
 // draws: `topicParts` gives it the `topic` class, the `trace-head` button with `aria-expanded`, the glyph,
@@ -2653,6 +2701,7 @@ class WaOrchestratorTopic extends HTMLElement {
     const parts = topicParts(this, {
       className: this.getAttribute("topic-class") || "sidebar-topic",
       glyph: this.getAttribute("glyph") || "",
+      noGlyph: this.hasAttribute("no-glyph"),
       label: this.getAttribute("label") || "",
       bodyClass: "sidebar-topic-body",
     });
@@ -2670,8 +2719,7 @@ class WaOrchestratorTopic extends HTMLElement {
   // A node entry's header carries the shared <wa-node> in place of a label, because a node is two lines
   // (its name, then its statistics) and both of them belong on the line a reader sees without opening it.
   _adoptNode() {
-    const entry = document.createElement("wa-node");
-    entry.node = this._node;
+    const entry = nodeElement(this._node);
     this._label.remove();
     this._meta.remove();
     this._header.insertBefore(entry, this._chevron);
@@ -2729,7 +2777,10 @@ class WaOrchestrator extends HTMLElement {
     // nodes because it is the answer to "what is running" - a child with no placement record appears only
     // there (see the note the host writes into it, and app.js's liveChildRows).
     this.nodesTopic=this.sidebarTopic({label:'Nodes',glyph:'\u25a4',className:'nodes-topic'});
-    this.nodesTopic.body.append(this.nodeListElement(),this.placementElement());
+    // The placement block (the global switch and Save) sits at the TOP of the topic, because it is the
+    // action that saves the per-node rows below it; each machine's own limit and position are inside
+    // that machine's topic (see `nodeEntry`).
+    this.nodesTopic.body.append(this.placementElement(),this.nodeListElement());
     this.liveTopic=this.sidebarTopic({label:'Live Subagents',glyph:ORCHESTRATOR_ACTIVE_GLYPH,className:'live-children',open:true});
     this.liveTopic.body.append(...this.liveElements());
     this.querySelectorAll('[data-action]').forEach(button=>button.addEventListener('click',()=>{
@@ -2777,8 +2828,11 @@ class WaOrchestrator extends HTMLElement {
     const list=document.createElement('div'); list.className='node-list';
     return list;
   }
-  // The placement controls, unchanged and in their own block: the ordered-placement switch, one limit
-  // per node, and the save button whose action the host already handles (`save-placement`).
+  // The placement controls that are NOT about one machine: the ordered-placement switch and the save
+  // button whose action the host already handles (`save-placement`). Each machine's limit and its place
+  // in the fill order live in that machine's own topic; `.placement-nodes` keeps the rows of a machine
+  // the list does not show (offline, or a fleet read that arrived before the node list), so no policy
+  // entry can be lost just because its machine is not in the list today.
   placementElement() {
     const block=document.createElement('div');
     block.className='placement';
@@ -2788,9 +2842,13 @@ class WaOrchestrator extends HTMLElement {
   // Every online node, one entry each, drawn from the SAME sample the engine menu's node list draws (the
   // host pushes `nodeList` here when it repaints that list, so there is one read and no second poller).
   // Each entry is itself a topic; opening it states the rest of the record - the kind, what it advertises,
-  // and whether it is reachable - because the two-line header carries only the name and the statistics.
+  // whether it is reachable - and that machine's own configuration, because the two-line header carries
+  // only the name and the statistics.
   set nodes(value) {
     this.connectedCallback();
+    // A repaint must not discard what the reader has typed into a limit: the limits are kept on the panel
+    // (not read back from the DOM at save time) for exactly this rebuild.
+    this._capturePlacement();
     this.nodeRows=Array.isArray(value)?value:[];
     const list=this.querySelector('.node-list');
     const usable=this.nodeRows.filter(node=>node && node.online===true);
@@ -2798,15 +2856,21 @@ class WaOrchestrator extends HTMLElement {
       const empty=document.createElement('p'); empty.className='node-list-empty';
       empty.textContent='No node reported itself online.';
       list.replaceChildren(empty);
+      this._applyPlacement();
       return;
     }
     list.replaceChildren(...usable.map(node=>this.nodeEntry(node)));
+    this._applyPlacement();
   }
   get nodes() { return this.nodeRows || []; }
+  // A node entry's header is the shared <wa-node> (the name, then the statistics) and it takes the whole
+  // header: `no-glyph` is the supported "this topic has no glyph" shape, because a glyph in front of a
+  // node's name would be an empty column between the chevron and the name.
   nodeEntry(node) {
     const topic=document.createElement('wa-orchestrator-topic');
     topic.setAttribute('topic-class','node-topic');
-    topic.setAttribute('glyph','\u25a4');
+    topic.setAttribute('no-glyph','');
+    topic.dataset.placementNode=this.placementId(node);
     topic.node=node;
     const details=document.createElement('dl'); details.className='node-details';
     for(const [term,value] of [['kind',node.kind || 'unknown'],
@@ -2817,7 +2881,115 @@ class WaOrchestrator extends HTMLElement {
       details.append(name,description);
     }
     topic.body.append(details);
+    // The desktop this window runs on is not a machine a child can be placed on, so it gets no limits.
+    if(node.kind!=='client')topic.body.append(this.nodeConfigElement(node));
     return topic;
+  }
+  // How the placement policy names a machine: `local` for the node this window's host runs on, otherwise
+  // the node id - the same two spellings `fleet.policy.nodes` uses, so a limit edited here is the limit
+  // the dispatcher reads back.
+  placementId(node) { return node.local_node ? 'local' : (node.node_id || node.id); }
+  // ONE machine's configuration, inside its own topic: how many subagents may run on it (the same
+  // `max_tasks` input the placement block used to hold) and where it sits in the fill order (the two
+  // arrows and the position they change). The row is the same `.placement-node` element, so `policy`
+  // reads it and the host's `save-placement` handler saves it without knowing where it was edited.
+  nodeConfigElement(node) {
+    const block=document.createElement('div'); block.className='node-config';
+    const head=document.createElement('p'); head.className='node-config-head'; head.textContent='Configuration';
+    const row=this.placementRow({node:this.placementId(node),label:'max subagents ',
+      aria:(node.name || 'this node')+' max subagents'});
+    const position=document.createElement('span'); position.className='node-priority';
+    block.append(head,row,position);
+    return block;
+  }
+  // One machine's limit and its place in the fill order. The arrows move whichever unit that row lives in:
+  // inside a node's own topic it is the whole topic, so what a reader arranges is the list they are
+  // reading; inside the placement block's container it is the row.
+  placementRow({node,label,aria}) {
+    const row=document.createElement('div'); row.className='placement-node'; row.dataset.node=node;
+    const text=document.createElement('label'); text.textContent=label;
+    const input=document.createElement('input');input.type='number';input.min='0';input.max='128';input.step='1';
+    input.value=String(this.placementLimits?.get(node) ?? 0);
+    input.setAttribute('aria-label',aria); text.append(input);
+    const up=document.createElement('button');up.type='button';up.textContent='↑';up.title='Higher priority';
+    const down=document.createElement('button');down.type='button';down.textContent='↓';down.title='Lower priority';
+    up.onclick=()=>this._movePlacement(row,-1);
+    down.onclick=()=>this._movePlacement(row,1);
+    row.append(text,up,down);
+    return row;
+  }
+  // The reader's edits so far, so a repaint of the list does not discard them.
+  _capturePlacement() {
+    if(!this.placementLimits)return;
+    for(const row of this.querySelectorAll('.placement-node')) {
+      if(row.dataset.node)this.placementLimits.set(row.dataset.node,Number(row.querySelector('input')?.value) || 0);
+    }
+  }
+  // The saved policy applied to the list the reader is looking at. Either side can arrive first - the host
+  // pushes the node list from the engine read and the fleet from the dispatch read - so both call this.
+  _applyPlacement() {
+    const list=this.querySelector('.node-list');
+    const topics=[...list.querySelectorAll(':scope > wa-orchestrator-topic')];
+    for(const topic of topics) {
+      const input=topic.querySelector('.placement-node input');
+      const id=topic.dataset.placementNode;
+      if(input&&this.placementLimits?.has(id))input.value=String(this.placementLimits.get(id));
+    }
+    // The list order IS the fill order: the saved policy's order first, then anything the policy has never
+    // seen, so the numbers and the arrows agree with what `Save` would send.
+    if(this.placementOrder) {
+      const rank=id=>{const index=this.placementOrder.indexOf(id);return index<0?this.placementOrder.length:index;};
+      topics.map((topic,index)=>({topic,index}))
+        .sort((a,b)=>rank(a.topic.dataset.placementNode)-rank(b.topic.dataset.placementNode)||a.index-b.index)
+        .forEach(({topic})=>list.append(topic));
+    }
+    this._fallbackPlacementRows();
+    this.refreshNodePriority();
+  }
+  // A machine the fleet knows but this list does not show (offline, or a fleet read that arrived first)
+  // still keeps its limit and its place, in the placement block's own container.
+  _fallbackPlacementRows() {
+    const container=this.querySelector('.placement-nodes');
+    if(!container)return;
+    const shown=new Set([...this.querySelectorAll('.node-list > wa-orchestrator-topic')]
+      .map(topic=>topic.dataset.placementNode));
+    container.replaceChildren(...(this.placementOrder || []).filter(id=>id&&!shown.has(id))
+      .map(id=>this.placementRow({node:id,label:(this.nodeNames?.get(id) || id)+' ',
+        aria:(this.nodeNames?.get(id) || id)+' task limit'})));
+  }
+  // Where each machine sits in the fill order, stated where its limit is edited. The numbers count the
+  // list the reader sees; the machines only in `.placement-nodes` follow it and have no number, because
+  // they are not in this list to compare against.
+  refreshNodePriority() {
+    const topics=[...this.querySelectorAll('.node-list > wa-orchestrator-topic')];
+    topics.forEach((topic,index)=>{
+      const position=topic.querySelector('.node-priority');
+      if(position)position.textContent=topics.length>1?`priority ${index+1} of ${topics.length}`:'priority 1 of 1';
+    });
+    // What the reader arranged is what Save sends, so the saved order is read back off the list. An empty
+    // list keeps the order it had: a repaint that happens to show no machine yet must not turn Save into
+    // a payload that drops every limit.
+    const order=[...topics.map(topic=>topic.dataset.placementNode),
+      ...[...this.querySelectorAll('.placement-nodes .placement-node')].map(row=>row.dataset.node)]
+      .filter(Boolean);
+    if(order.length)this.placementOrder=order;
+  }
+  // The arrows move one machine one place up or down. Inside a node's topic the unit is the topic itself,
+  // so what a reader arranges is the list they are reading; in the fallback container it is the row.
+  _movePlacement(row,delta) {
+    const unit=row.closest('wa-orchestrator-topic') || row;
+    const parent=unit.parentElement;
+    if(!parent)return;
+    const units=[...parent.children].filter(child=>child.localName===unit.localName);
+    const target=units.indexOf(unit)+delta;
+    if(target<0||target>=units.length)return;
+    if(delta<0)parent.insertBefore(unit,units[target]);
+    else parent.insertBefore(units[target],unit);
+    this._capturePlacement();
+    // The move IS the new order: read it off the list before applying anything back to it, or the
+    // saved order would sort the topic the reader just moved straight back where it came from.
+    this.refreshNodePriority();
+    this._applyPlacement();
   }
   // Every child the node reports as not settled, from either source, with the machine it runs on.
   //
@@ -2826,7 +2998,7 @@ class WaOrchestrator extends HTMLElement {
   //
   //   1. `<state> <node>` - what it is doing, and on which machine (the node's name, never a bare id)
   //   2. `<resumed task>` - what it was asked to do, ellipsised when it does not fit
-  //   3. the run's stats, from the host's one stats line (`✺ 10s · ◈ ~62.6k · ✧ 24 · ⚒ 38 · ◷ 2:18`)
+  //   3. the run's stats, from the host's one stats line (`✺10s ◈~62.6k ✧24 ⚒38 ◷2:18`)
   //
   // A card's height must not change as runs start and finish, so lines 2 and 3 are ALWAYS there:
   // an absent task and an absent statistic reserve their line instead of collapsing it. The session
@@ -3056,6 +3228,10 @@ class WaOrchestrator extends HTMLElement {
     this.querySelector('.orchestrator-empty').hidden=this.panes.size>0;
     this.canvas.dataset.count=String(this.panes.size);
   }
+  // The saved placement policy, read once. What arrives here is the same payload it always was; what the
+  // reader edits has moved (each machine's limit and position are in that machine's own topic now), but
+  // `policy` still sends the same shape back: the switch, then one `{node, max_tasks}` per machine in
+  // fill order.
   configure(fleet) {
     if(this.configured)return;
     this.configured=true; this.querySelector('.placement-enabled').checked=!!fleet.policy?.enabled;
@@ -3064,26 +3240,25 @@ class WaOrchestrator extends HTMLElement {
     this.nodeNames=new Map([['local',(fleet.nodes||[]).find(node=>node.local_node)?.name || 'local']]);
     for(const node of fleet.nodes || []) { this.nodeNames.set(node.node_id || node.id,node.name); if(node.id)this.nodeNames.set(node.id,node.name); }
     const selected=fleet.policy?.nodes || [];
-    const nodes=selected.map(item=>({...item,name:fleet.nodes?.find(n=>n.node_id===item.node)?.name || item.node}));
+    this.placementOrder=[]; this.placementLimits=new Map();
+    for(const item of selected) {
+      this.placementOrder.push(item.node);
+      this.placementLimits.set(item.node,Number(item.max_tasks) || 0);
+    }
     for(const node of fleet.nodes || []) {
       const id=node.local_node ? 'local' : node.node_id;
-      if(!nodes.some(item=>item.node===id))nodes.push({node:id,name:node.name,max_tasks:0});
+      if(!id || this.placementLimits.has(id))continue;
+      this.placementOrder.push(id);
+      this.placementLimits.set(id,0);
     }
-    const container=this.querySelector('.placement-nodes');
-    for(const node of nodes) {
-      const row=document.createElement('div'); row.className='placement-node'; row.dataset.node=node.node;
-      const label=document.createElement('label'); label.textContent=node.name+' ';
-      const input=document.createElement('input');input.type='number';input.min='0';input.max='128';input.step='1';input.value=node.max_tasks;
-      input.setAttribute('aria-label',node.name+' task limit'); label.append(input);
-      const up=document.createElement('button');up.type='button';up.textContent='↑';up.title='Higher priority';
-      const down=document.createElement('button');down.type='button';down.textContent='↓';down.title='Lower priority';
-      up.onclick=()=>{if(row.previousElementSibling)container.insertBefore(row,row.previousElementSibling);};
-      down.onclick=()=>{if(row.nextElementSibling)container.insertBefore(row.nextElementSibling,row);};
-      row.append(label,up,down);container.append(row);
-    }
+    this._applyPlacement();
   }
+  // The policy the host saves: the switch, then every row in fill order. Rows are read where they are - a
+  // machine's own topic first, because that is the list the reader arranged, then the machines only the
+  // placement block shows - so the payload is the same one this panel has always sent.
   get policy() {
-    return {enabled:this.querySelector('.placement-enabled').checked,nodes:[...this.querySelectorAll('.placement-node')].map(row=>({node:row.dataset.node,max_tasks:Number(row.querySelector('input').value)}))};
+    const rows=[...this.querySelectorAll('.node-list .placement-node'),...this.querySelectorAll('.placement-nodes .placement-node')];
+    return {enabled:this.querySelector('.placement-enabled').checked,nodes:rows.map(row=>({node:row.dataset.node,max_tasks:Number(row.querySelector('input').value)}))};
   }
 }
 customElements.define('wa-orchestrator',WaOrchestrator);

@@ -134,7 +134,16 @@ wa-node { display:flex; flex-direction:column; gap:2px; min-width:0; }
 .lane-check[data-state="yes"] .lane-check-state { color:var(--ok); }
 .lane-check[data-state="no"] .lane-check-state { color:var(--warn); }
 .lane-check[data-state="unknown"] .lane-check-state { color:var(--muted); }
-.placement { margin-top:var(--space); color:var(--muted); font-size:12px; }
+/* A node's configuration, inside its own topic: how many subagents may run on it and where it sits in
+   the fill order. The row is the same `.placement-node` the placement block used to hold, so the input
+   and the two arrows are styled once for both places. */
+.node-config { margin-top:var(--space); }
+.node-config .placement-node { color:var(--muted); font-size:12px; }
+.node-config-head { margin:0; color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.04em; }
+.node-priority { display:block; color:var(--muted); font-size:11px; }
+/* The placement block is the top of the `Nodes` body now: the switch and Save act on the per-node rows
+   that live in the node topics below them. */
+.placement { margin:0 0 var(--space); color:var(--muted); font-size:12px; }
 .placement-node { display:flex; align-items:center; gap:var(--gap); padding:var(--space) 0; }
 .placement-node label { flex:1; overflow-wrap:anywhere; }
 .placement-node input { width:55px; }
@@ -429,19 +438,32 @@ wa-diff { display: block; align-self: flex-start; max-width: 760px; width: 100%;
 
 .chat-content-run-status {
   position: sticky; bottom: 0; z-index: 2; align-self: stretch; display: flex; align-items: center;
-  gap: var(--gap); color: var(--muted); font-size: 13px; line-height: 18px; min-height: 30px; padding: var(--space); white-space: normal;
+  /* ONE line (operator, 2026-10-05). No gap between the flex items: the row spaces itself pair by
+     pair, because the glyph is glued to the value it belongs to and not to its neighbour. It never
+     wraps - in the narrow subagent pane it ellipsises. */
+  gap: 0; color: var(--muted); font-size: 13px; line-height: 18px; min-height: 30px; padding: var(--space); white-space: nowrap;
   background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius-sm);
 }
 /* The existing one-second status clock changes a tiny glyph; no CSS or extra animation loop. */
 .run-activity-glyph { flex: 0 0 15px; width: 15px; height: 15px; display: inline-flex; align-items: center; justify-content: center; color: var(--accent); line-height: 1; }
 .chat-content-run-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* The label describes the clock it stands beside, so it keeps its own separation now that the row's
+   flex gap is gone - the gap the glyph lost, not the one the words lost. */
+.chat-content-run-status:not(.finished) .chat-content-run-label { margin-left: var(--space); }
 .chat-content-run-phase { flex: 0 0 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-variant-numeric: tabular-nums; }
 /* Detailed phase history is diagnostic-only; the compact current phase stays in the footer. */
 .messages:not([data-debug="true"]) wa-step, .agent-transcript:not([data-debug="true"]) wa-step { display: none; }
-.chat-content-run-elapsed { margin-left: auto; flex: 0 1 auto; min-width: 0; font-variant-numeric: tabular-nums; white-space: nowrap; }
-/* Live bubble uses the available width: phase left, measured counters right. */
+.chat-content-run-elapsed { flex: 0 1 auto; min-width: 0; font-variant-numeric: tabular-nums; white-space: nowrap; }
+/* Live row: `✦4s` then two spaces then the compact facts, read left to right - the clock is not
+   pushed to the left edge and the counters are not pushed to the right one. `.6em` is two spaces at
+   the row's own font size, so the separation survives the narrow-pane font step below. A pane too
+   narrow for all of it ellipsises the facts rather than wrapping the row onto a second line. */
+.chat-content-run-status:not(.finished) .chat-content-run-elapsed {
+  margin-left: .6em; overflow: hidden; text-overflow: ellipsis;
+}
+/* Live bubble uses the available width: the compact row is left-aligned within it. */
 .msg:has(> .body > .chat-content-run-status:not(.finished)) { width: 100%; }
-/* Tight windows retain all numbers and separators, never clip a counter. */
+/* Tight windows keep the whole compact line: it steps down a size before it has to ellipsise. */
 @media (max-width: 400px) { .chat-content-run-status:not(.finished) { font-size: 11px; } }
 .finished .chat-content-run-elapsed { margin-left: auto; flex: 0 0 auto; }
 wa-step.run-step { display: flex; align-items: center; gap: var(--gap); padding: var(--space); color: var(--muted); font-size: 13px; }

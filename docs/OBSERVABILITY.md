@@ -68,8 +68,8 @@ with an explicit timestamp. See [LIGHTWEIGHT-UI.md](LIGHTWEIGHT-UI.md).
 ## Compact chat phases and debug history
 
 Ordinary chat shows the compact strip in the existing sticky footer:
-`✦ 6s      ◈ ~250k · ✧ 26 · ⚒ 82 · ◷ 2:24`. Flexible space pushes counters
-right across the live bubble, not a separator/newline before `◈`. The left clock measures the current
+`✦6s  ◈~250k ✧26 ⚒82 ◷2:24`. One line, read left to right: the glyph is glued
+to the phase clock, the facts follow it after two spaces. Not a separator/newline before `◈`. The left clock measures the current
 phase (description in tooltip/debug); the last clock is total turn duration.
 Token estimate/reporting and compact context occupancy are defined in
 [MINIMAL-CHAT.md](MINIMAL-CHAT.md). The phase replaces the
@@ -77,14 +77,15 @@ redundant `thinking…`/`responding…` label. Debug output labels omit `Receivi
 output`, `Progress update`); other surfaces retain spaces around `·`. `Reasoning` is the requested
 UI name for model wait/reasoning, not proof of provider-internal reasoning activity.
 Selecting/executing tools and output replace that phase, never stack completed rows.
-Live status uses normal whitespace rather than inheriting transcript pre-wrap;
+Live status is `nowrap` rather than inheriting transcript pre-wrap: the row is one
+line that ellipsises instead of wrapping in a narrow pane, and
 its 15px glyph slot keeps the phase and total timer still. A deterministic
 `· • ✧ ✦ ✶ ✳ ✺ ✳ ✶ ✦ ✧ •` cycle grows from 7px to 13px then shrinks back;
 the next frame returns to the dot. The existing once-per-second status clock advances it;
 there is no CSS rotation/pulse, new timer, blur or full-window effect. Hidden
 surfaces do not tick it; settlement removes it.
 Settlement hides the current phase and preserves totals in the footer:
-`completed            ◈ 250k · ✧ 5 · ⚒ 8 · ◷ 1:08`. `✧` counts provider-call
+`completed  ◈250k ✧5 ⚒8 ◷1:08`. `✧` counts provider-call
 attempts at the prepared-request boundary (including failed/retried requests and
 summaries), not decision rounds, billed inferences or internal transport reconnects.
 Pre-request refusals do not count. `⚒` counts requested tool dispatches, including

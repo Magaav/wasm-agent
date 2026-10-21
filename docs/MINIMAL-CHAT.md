@@ -1,9 +1,10 @@
 # Minimal chat readouts and commentary
 
-Live run strip: `✦ 6s      ◈ ~250k · ✧ 26 · ⚒ 82 · ◷ 2:24`.
-Phase stays left; flexible space pushes counters right in a full-width active
-bubble. No leading dot separator/newline before `◈`; counter dots retain spaces.
-Completed: `completed · ◈ 250k · ✧ 4 · ⚒ 3 · ◷ 0:45`. The growing glyph
+Live run strip: `✦6s  ◈~250k ✧26 ⚒82 ◷2:24`. It is ONE compact line read left
+to right: the activity glyph is glued to the phase clock, and the facts follow
+that clock after two spaces - glyph and value glued, one space between pairs. No
+leading dot separator/newline before `◈`.
+Completed: `completed  ◈250k ✧4 ⚒3 ◷0:45`. The growing glyph
 and clock reuse the existing once-per-second ticker. Phase text stays in its
 tooltip/debug history. Provider/tool totals retain their documented meanings.
 `◈` is **net context added by the turn**, not billed provider usage or uncached
