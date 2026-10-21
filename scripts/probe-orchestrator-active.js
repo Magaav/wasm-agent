@@ -150,7 +150,10 @@
    // title/aria-label. The property under test is unchanged - the header counts ACTIVE cards, not the
    // 1000 historical dispatches - so it is asserted on the element that now carries it, and the old
    // sentence is asserted absent rather than merely untested.
-   check(panel.querySelector('.orchestrator-count').textContent==='✺ 4','the header shows the active-card count as icon and count, saw: '+panel.querySelector('.orchestrator-count').textContent);
+   // WHY THE EXPECTED TEXT MOVED (compaction): still the active-card count as icon and count, with the
+   // words in `title`/`aria-label` (asserted next) - the glyph is now GLUED to the number (`✺4`), because
+   // the space between them was width the header did not have to spend.
+   check(panel.querySelector('.orchestrator-count').textContent==='✺4','the header shows the active-card count as icon and count, saw: '+panel.querySelector('.orchestrator-count').textContent);
    check(panel.querySelector('.orchestrator-count').getAttribute('aria-label')==='4 active cards','and the number is named in aria-label, saw: '+panel.querySelector('.orchestrator-count').getAttribute('aria-label'));
    check(panel.querySelector('.orchestrator-status').textContent==='','and no sentence takes its place, saw: '+JSON.stringify(panel.querySelector('.orchestrator-status').textContent));
   }finally{orchestratorPanel=oldPanel;orchestratorRequest=oldRequest;orchestratorRead=oldRead;refreshAgentPane=oldRefresh;if(oldSaved===null)localStorage.removeItem(storage);else localStorage.setItem(storage,oldSaved);}

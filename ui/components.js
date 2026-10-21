@@ -2803,7 +2803,9 @@ class WaOrchestrator extends HTMLElement {
     this.connectedCallback();
     const count=Number.isFinite(value)?Math.max(0,Math.trunc(value)):0;
     const element=this.querySelector('.orchestrator-count');
-    element.textContent=ORCHESTRATOR_ACTIVE_GLYPH+' '+count;
+    // Glyph GLUED to the number: `✺0` is one token, the same shape as every other compact count line
+    // here. The words that say what the number counts are `title`/`aria-label`, below.
+    element.textContent=ORCHESTRATOR_ACTIVE_GLYPH+count;
     const words=count+' active card'+(count===1?'':'s');
     element.title=words;
     element.setAttribute('aria-label',words);
