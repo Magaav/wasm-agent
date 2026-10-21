@@ -520,8 +520,18 @@ function anchorAnswer(node, smooth = false) {
   answerAnchors.set(container, node);
   if(!answerGestures.has(container)) {
     answerGestures.add(container);
+    // A wheel is the reader taking over only when the transcript CAN move where it points. At a limit the
+    // wheel cannot move anything - releasing there left the final answer at its end for the rest of the
+    // turn, which is the reported "it does not scroll to the first sentence" (2026-10-21). A touch is
+    // always a takeover: a finger on the surface is intent, not an overflow event.
     for (const gesture of ['wheel', 'touchstart']) {
-      container.addEventListener(gesture, () => releaseAnswerAnchor(container), {passive:true});
+      container.addEventListener(gesture, (event) => {
+        const atTop=container.scrollTop<=0;
+        const atBottom=container.scrollTop+container.clientHeight>=container.scrollHeight-1;
+        const deltaY=event&&typeof event.deltaY==='number'?event.deltaY:0;
+        if(gesture==='wheel'&&((deltaY>0&&atBottom)||(deltaY<0&&atTop)))return;
+        releaseAnswerAnchor(container);
+      }, {passive:true});
     }
     container.addEventListener('pointerdown',()=>{
       if(answerMotions.has(container))releaseAnswerAnchor(container);
@@ -1370,8 +1380,13 @@ function convertProvisionalAnswer(bubble, topic, messageId) {
   const following = container === messages ? follow : scrollState(container).follow;
   const released = answerReleased.has(container);
   const view = container.clientHeight || 0;
-  const tall = view > 0 && wrap.getBoundingClientRect().height > view * 0.8;
-  if (!released && following && tall) {
+  // THE POSITION OF THE FIRST LINE, NOT THE ANSWER'S HEIGHT. This used to anchor only when the answer
+  // exceeded 80% of the viewport, so an ordinary answer under that size was placed with no scroll and its
+  // first sentence stayed above the fold (operator report, 2026-10-21). The reader's question is not "how
+  // tall is this" but "can I see where it starts".
+  const firstLineOffscreen = view > 0 &&
+    wrap.getBoundingClientRect().top < container.getBoundingClientRect().top - 1;
+  if (!released && following && firstLineOffscreen) {
     anchorAnswer(wrap);
     wrap.dataset.answerAnchor = "top";
   } else {

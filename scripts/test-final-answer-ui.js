@@ -50,8 +50,16 @@
   check(!!answer.querySelector('h1') && !!answer.querySelector('strong'), 'streaming Markdown');
   check(!answer.closest('wa-run'), 'answer outside activity topic');
   check(answerAnchors.get(messages)===answer, 'start anchor active');
+  // A wheel is the reader taking over only when it MOVES the transcript. Already at its limit, a wheel
+  // cannot move it, and releasing there was how a final answer never came back to its first line
+  // (operator report, 2026-10-21). Both halves are checked: unmoved keeps the anchor, moved releases it.
+  messages.scrollTop = messages.scrollHeight;
   messages.dispatchEvent(new WheelEvent('wheel', {deltaY:1}));
-  check(!answerAnchors.has(messages), 'wheel releases anchor');
+  check(answerAnchors.has(messages), 'a wheel that moves nothing keeps the anchor');
+  messages.dispatchEvent(new WheelEvent('wheel', {deltaY:-1}));
+  messages.scrollTop = Math.max(0, messages.scrollTop - 60);
+  messages.dispatchEvent(new Event('scroll'));
+  check(!answerAnchors.has(messages), 'a wheel that moves the reader releases the anchor');
   handleEvent({type:'tool', name:'read', arguments:{path:'continuation'}});
   check(!answer.classList.contains('final-answer') && answer.isConnected, 'text then tool preserves candidate as activity');
   handleEvent({type:'round', n:2});
