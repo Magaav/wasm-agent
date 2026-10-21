@@ -75,19 +75,17 @@
   check(topics[0].open===false&&topics[1].open===true,'Nodes starts closed and the live list keeps the open state it had');
   topics[0].querySelector(':scope > .trace-head').click();
   check(topics[0].open===true&&topics[0].querySelector(':scope > .topic-body').hidden===false,'clicking a topic header opens it');
-  // The placement controls moved INTO the Nodes topic, and their own topic is gone; the control and its
-  // route (`save-placement`) are the same ones, so the host's handler still receives them.
-  check(!aside.textContent.includes('Node order and limits'),'the standalone Node order and limits topic is gone');
-  const placement=topics[0].querySelector('.sidebar-topic-body .placement');
-  // WHY THIS MOVED: the per-node limit rows are now inside each node's own topic (see below), so the
-  // placement block holds only the two things that are not about one machine - the global switch and
-  // the Save button - and the assertion asks for exactly those at the top of the Nodes body.
-  check(!!placement&&!!placement.querySelector('.placement-enabled')&&!!placement.querySelector('[data-action="save-placement"]'),'the ordered-placement switch and Save live at the top of the Nodes body');
-  check(topics[0].querySelector(':scope > .topic-body').firstElementChild===placement,'and they stay above the machines they apply to');
-  let placementAction=null;
-  panel.addEventListener('orchestrator-action',event=>{if(event.detail.action==='save-placement')placementAction=event.detail.action;},{once:true});
-  placement.querySelector('[data-action="save-placement"]').click();
-  check(placementAction==='save-placement','Save placement still dispatches the action the host already handles');
+  // WHY THIS REPLACED "the switch and Save live at the top of the Nodes body": the global placement block
+  // is removed - its explanation, the `Use ordered placement` switch, the duplicated `.placement-nodes`
+  // row list and its `Save placement` button - because each machine's own topic states and saves that
+  // machine's configuration. The property under test is that the `Nodes` body holds the machine list and
+  // no second copy of those controls, so that is what is asked, plus the absent controls themselves.
+  check(!aside.querySelector('.placement')&&!aside.textContent.includes('Node order and limits')&&!aside.textContent.includes('Use ordered placement')&&!aside.querySelector('[data-action="save-placement"]'),'the global placement block is gone: no switch, no duplicate row list, no Save button, saw: '+topics[0].querySelector(':scope > .topic-body').innerHTML.slice(0,240));
+  // WHY THIS REPLACED "and they stay above the machines they apply to": there is no block left to sit
+  // above them, so the same question - is the topic's body the machine list and nothing else? - is asked
+  // of its children, which must be that one list.
+  const nodesBody=topics[0].querySelector(':scope > .topic-body');
+  check(nodesBody.children.length===1&&nodesBody.firstElementChild.classList.contains('node-list'),'the Nodes body is the machine list and nothing else, saw: '+[...nodesBody.children].map(child=>child.className).join(',')+':'+nodesBody.innerHTML.slice(0,240));
   // NODES: every usable node, one entry each, exactly two lines - the name, then its statistics - and each
   // entry is a topic of its own. The statistics are the node's own sample, formatted by the one formatter.
   const sample=(name,online,resources,id)=>({id,node_id:id,name,kind:'peer',online,resources,capabilities:['talk']});
@@ -151,21 +149,38 @@
   // because the row now shares its line with the arrows. The property is unchanged: each machine states
   // its place in the fill order.
   check(entries.map(entry=>entry.querySelector('.node-priority').textContent).join(',')==='priority 1/2,priority 2/2','and its position in the priority order, saw: '+entries.map(entry=>entry.querySelector('.node-priority').textContent).join(','));
-  // The saved policy fills the per-node rows where they now live, and a machine the list does not show
-  // still keeps its limit and its place in the placement block's own container.
+  // The saved policy fills the per-node rows where they now live. A machine the list does not show keeps
+  // its limit and its place in the saved payload, which is the only place that still carries it now that
+  // the duplicated row container is gone.
   panel.configure({policy:{enabled:true,nodes:[{node:'n-far',max_tasks:5}]},nodes:[
     {id:'n-near',node_id:'n-near',name:'near',kind:'peer',local_node:false,online:true},
     {id:'n-far',node_id:'n-far',name:'far',kind:'peer',local_node:false,online:true},
     {id:'n-off',node_id:'n-off',name:'offline',kind:'peer',local_node:false,online:false}]});
-  check(placement.querySelector('.placement-enabled').checked,'the saved ordered-placement switch is applied');
+  // WHY THIS REPLACED "the saved ordered-placement switch is applied": the switch element is gone with the
+  // global block, so "applied" is asserted where the flag now lives - the panel keeps the flag it was
+  // saved with and reports it back unchanged, which is the property the checkbox used to state.
+  check(panel.policy.enabled===true,'the saved ordered-placement flag is kept and reported, saw: '+panel.policy.enabled);
   check(entries[0].querySelector('.node-config input').value==='0'&&entries[1].querySelector('.node-config input').value==='5','each node topic shows its own saved limit, saw: '+entries.map(entry=>entry.querySelector('.node-config input').value).join(','));
   check(Array.from(topics[0].querySelectorAll('.node-list > wa-orchestrator-topic')).map(entry=>entry.querySelector('.node-name').textContent).join(',')==='far,near','the saved priority order is the list order, saw: '+Array.from(topics[0].querySelectorAll('.node-list .node-name')).map(name=>name.textContent).join(','));
-  check(/offline/.test(placement.querySelector('.placement-nodes .placement-node')?.textContent||''),'a machine the list does not show keeps its row in the placement block, saw: '+String(placement.querySelector('.placement-nodes')?.textContent));
-  check(JSON.stringify(panel.policy.nodes)==='[{"node":"n-far","max_tasks":5},{"node":"n-near","max_tasks":0},{"node":"n-off","max_tasks":0}]','the payload Save sends is the same shape and the same order, saw: '+JSON.stringify(panel.policy));
-  // Editing a limit and moving a machine up the hierarchy happens in the node's topic, and it changes what
-  // is saved: the list order IS the fill order.
+  // WHY THIS REPLACED "a machine the list does not show keeps its row in the placement block": that
+  // container was the duplicate list and is gone, so the surviving property - an offline machine keeps its
+  // limit and its place instead of being dropped from the saved policy - is asserted on the payload.
+  check(JSON.stringify(panel.policy.nodes.at(-1))==='{"node":"n-off","max_tasks":0}','a machine the list does not show keeps its entry in the saved policy, saw: '+JSON.stringify(panel.policy));
+  check(JSON.stringify(panel.policy.nodes)==='[{"node":"n-far","max_tasks":5},{"node":"n-near","max_tasks":0},{"node":"n-off","max_tasks":0}]','the saved payload is the same shape and the same order, saw: '+JSON.stringify(panel.policy));
+  // WHY THIS IS NEW: the global Save button is gone, so a machine's own controls must reach the host's
+  // `save-placement` handler themselves or the edit would never be persisted. The limit input (debounced)
+  // and the arrows are asserted to dispatch that exact action - the one ui/app.js handles - and moving a
+  // machine up the hierarchy still happens in the node's topic: the list order IS the fill order.
+  let saved=0;const onSaved=event=>{if(event.detail.action==='save-placement')saved++;};
+  panel.addEventListener('orchestrator-action',onSaved);
   entries[0].querySelector('.node-config input').value='3';
+  entries[0].querySelector('.node-config input').dispatchEvent(new Event('change',{bubbles:true}));
+  await new Promise(done=>setTimeout(done,480));
+  check(saved===1,'editing a machine limit in its own topic saves itself through save-placement, saw: '+saved+' save(s)');
   entries[0].querySelector('.node-config button[title="Higher priority"]').click();
+  check(saved===2,'and an arrow click saves the new order at once, saw: '+saved+' save(s)');
+  panel.removeEventListener('orchestrator-action',onSaved);
+  check(panel.policy.enabled===true,'and neither edit switches ordered placement off, saw: '+panel.policy.enabled);
   check(Array.from(topics[0].querySelectorAll('.node-list > wa-orchestrator-topic')).map(entry=>entry.querySelector('.node-name').textContent).join(',')==='near,far','the priority arrow moves the machine up the list, saw: '+Array.from(topics[0].querySelectorAll('.node-list .node-name')).map(name=>name.textContent).join(','));
   check(JSON.stringify(panel.policy.nodes)==='[{"node":"n-near","max_tasks":3},{"node":"n-far","max_tasks":5},{"node":"n-off","max_tasks":0}]','and the edit is what the host would save, saw: '+JSON.stringify(panel.policy));
   // ONE COMPONENT, TWICE: the engine menu's node row and this entry are the same <wa-node>, not two drawings
