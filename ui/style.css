@@ -66,9 +66,11 @@ wa-orchestrator { display:flex; flex-direction:column; width:100%; height:100%; 
    several of them next to the dispatch cards, and a reader scans the state, the node and the id. */
 .live-children-counts { margin:0; color:var(--muted); font-size:12px; display:flex; align-items:baseline; gap:0; min-width:0; white-space:nowrap; overflow:hidden; }
 /* The counts never shrink; the node name does, with an ellipsis, so the three numbers stay on the one
-   line whose whole job is stating the node's state. */
+   line whose whole job is stating the node's state. A pair's ONE leading space is in its own text and is
+   rendered because the pair is `white-space:pre`: a lead-in space in a `nowrap` box is collapsed away, and
+   the line separated its pairs with a `·` only until the spaces themselves could do that job. */
 .live-children-name { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.live-children-count[data-count] { white-space:nowrap; flex:none; }
+.live-children-count[data-count], .live-children-missing { white-space:pre; flex:none; }
 .live-children-list { display:flex; flex-direction:column; gap:var(--gap); margin-top:var(--space); }
 .live-child { display:flex; flex-direction:column; gap:2px; width:100%; min-width:0; text-align:left; padding:var(--space); border:1px solid var(--line); border-left:3px solid var(--muted); border-radius:var(--radius-sm); background:var(--panel); color:var(--text); font-size:12px; line-height:18px; }
 .live-child-head { display:flex; align-items:baseline; gap:var(--gap); min-width:0; min-height:18px; }

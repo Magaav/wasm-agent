@@ -3078,13 +3078,22 @@ class WaOrchestrator extends HTMLElement {
     for(const pair of counts.pairs || []) {
       const span=document.createElement('span');span.className='live-children-count';
       span.dataset.count=pair.key;
-      // Icon and number only. The words live in `title` and `aria-label`: spelled out inline they
-      // pushed the line past the panel and wrapped it, which hid the numbers the line exists for.
-      span.textContent=' · '+pair.glyph+' '+pair.count;
+      // Glyph and number only, GLUED (`◷0`). The words live in `title` and `aria-label`: spelled out
+      // inline they pushed the line past the panel and wrapped it, which hid the numbers the line exists
+      // for. The ONE space before the pair is part of the text and is rendered because the pair is
+      // `white-space:pre` (a leading space in a `nowrap` box is collapsed away); a `·` between the pairs
+      // was a second separator for a line that already has its spaces.
+      span.textContent=' '+pair.glyph+pair.count;
       if(pair.title) { span.title=pair.title;span.setAttribute('aria-label',pair.title); }
       parts.push(span);
     }
-    if(counts.missing) parts.push(document.createTextNode(' · '+counts.missing));
+    // The absence of a count is still said, in the same shape and for the same reason: one space, not
+    // a separator, and its own element so it can keep that space.
+    if(counts.missing) {
+      const span=document.createElement('span');span.className='live-children-missing';
+      span.textContent=' '+counts.missing;
+      parts.push(span);
+    }
     line.replaceChildren(...parts);
   }
   // The window's agents, grouped by LANE.

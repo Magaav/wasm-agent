@@ -1694,9 +1694,18 @@ $harness = @'
   // line past the panel and wrapped it, which hid the counts (operator report, 2026-10-20). The words are
   // still said, in `title` and `aria-label` (asserted next), and the NAME gives way with an ellipsis so the
   // three numbers cannot be pushed out of view.
+  // WHY THIS CHANGED (compaction): the same three counts are still on the one line in the right order, but
+  // each glyph is now GLUED to its number and the pairs are separated by ONE SPACE rather than by a `·`,
+  // whose two surrounding spaces were width the counts could have had. The property under test - the node's
+  // own reported counts, in the run stats' vocabulary, on one line, name first - is unchanged.
   var liveHeader=showroom.querySelector('.live-children-counts');
-  check(liveHeader.textContent==='foundation \u00b7 \u25f7 1 \u00b7 \u2692 2 \u00b7 \u273a 3',
-    'the node own subagent counts must be shown as they were reported: `foundation \u00b7 \u25f7 1 \u00b7 \u2692 2 \u00b7 \u273a 3`, saw: '+JSON.stringify(liveHeader.textContent));
+  var gluedHeader='foundation '+String.fromCharCode(0x25f7)+'1 '+String.fromCharCode(0x2692)+'2 '
+    +String.fromCharCode(0x273a)+'3';
+  check(liveHeader.textContent===gluedHeader,
+    'the node own subagent counts must be shown as they were reported: with each glyph glued to its number, saw: '+JSON.stringify(liveHeader.textContent));
+  // And nothing separates the pairs any more: one space is the whole separator.
+  check(liveHeader.textContent.indexOf('\u00b7')<0,
+    'the header pairs must be separated by a space, not by a separator character, saw: '+JSON.stringify(liveHeader.textContent));
   check(!!liveHeader.querySelector('.live-children-name') &&
       getComputedStyle(liveHeader).whiteSpace==='nowrap' &&
       getComputedStyle(liveHeader.querySelector('.live-children-name')).textOverflow==='ellipsis',
