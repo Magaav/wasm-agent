@@ -46,6 +46,28 @@
   check(!liveCountsText.includes('settled')&&!liveCountsText.includes('1000'),'healthy counts omit historical totals, saw: '+liveCountsText);
   check(!liveChildRows({dispatches:data,health}).rows.some(row=>row.session_id==='one-conversation'),'live followup dedup also hides the previous active run after terminal successor');
   panel.live=live;check(panel.querySelectorAll('.live-child').length===5,'live UI agrees with active builder');
+  // WHY THIS IS NEW (operator report): ~5px of dead space after the LAST card in `Live Subagents`. The
+  // space between cards is the list's own 5px gap and is asserted UNCHANGED; what must not exist is
+  // anything after the last card, so the last card ends on the list and the only space below it is the
+  // topic body's own frame. The measured cause was the empty `.live-children-foot`: a paragraph with a
+  // 5px top margin and nothing to say, so the last card sat 5px above the body's padding.
+  {
+    const list=panel.querySelector('.live-children-list');
+    const cards=Array.from(panel.querySelectorAll('.live-child'));
+    const last=cards[cards.length-1], foot=panel.querySelector('.live-children-foot');
+    const body=foot.parentElement, pad=parseFloat(getComputedStyle(body).paddingBottom)||0;
+    const cardGap=cards[1].getBoundingClientRect().top-cards[0].getBoundingClientRect().bottom;
+    const afterLast=body.getBoundingClientRect().bottom-last.getBoundingClientRect().bottom;
+    check(Math.abs(last.getBoundingClientRect().bottom-list.getBoundingClientRect().bottom)<=1,'the last live card ends on the list itself, saw '+(list.getBoundingClientRect().bottom-last.getBoundingClientRect().bottom)+'px past its end');
+    check(foot.textContent===''&&getComputedStyle(foot).display==='none','an EMPTY live-list foot draws no box, so nothing is stacked after the last card, saw display '+getComputedStyle(foot).display+' for '+JSON.stringify(foot.textContent));
+    check(Math.abs(afterLast-pad)<=1,'the only space below the last card is the topic body\'s own frame, saw '+afterLast+'px for a '+pad+'px padding');
+    check(Math.abs(cardGap-5)<=1,'while the spacing BETWEEN cards is unchanged, saw '+cardGap+'px');
+    // The foot is hidden only while it has nothing to say: a failed read must still be stated, and the
+    // `:empty` rule must not silence it.
+    panel.live={rows:live.rows,counts:live.counts,note:'Not everything could be read: sessions.'};
+    check(getComputedStyle(foot).display!=='none'&&foot.getBoundingClientRect().height>0,'a foot that states a failed read is still drawn, saw display '+getComputedStyle(foot).display);
+    panel.live={rows:live.rows,counts:live.counts,note:live.note||''};
+  }
   // THE HEADER IS ONE NUMBER. It used to read `0 active card(s) · closing this window keeps work running`
   // beside a `Refresh` and a `Back to main chat` button. The sentence and both buttons are removed, so the
   // question this stage asks is the one that survives: does the header state the active-card count, and only

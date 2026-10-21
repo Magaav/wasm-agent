@@ -1740,6 +1740,30 @@ $harness = @'
   var liveHeights=liveRows.map(function(row){return Math.round(row.getBoundingClientRect().height);});
   check(liveHeights[0]>0 && liveHeights.every(function(height){return height===liveHeights[0];}),
     'cards must keep one height whether or not a child has statistics yet, saw: '+liveHeights.join(','));
+  // WHY THIS IS NEW (operator report): ~5px of dead space after the LAST card in `Live Subagents`. The
+  // spacing BETWEEN cards is the list's own 5px gap and is asserted unchanged; what must not exist is
+  // anything after the last card - measured as the last card ending on the list, and the distance from it
+  // to the topic body's bottom equalling that body's own padding. The cause was the empty
+  // `.live-children-foot`: a paragraph with a 5px top margin and nothing to say, which comes straight
+  // after the list, so it drew a 5px band under the last card.
+  var liveList=showroom.querySelector('.live-children-list');
+  var liveFoot=showroom.querySelector('.live-children-foot');
+  var liveBody=liveFoot.parentElement;
+  var livePadding=parseFloat(getComputedStyle(liveBody).paddingBottom)||0;
+  var lastLiveCard=liveRows[liveRows.length-1];
+  var afterLastCard=liveBody.getBoundingClientRect().bottom-lastLiveCard.getBoundingClientRect().bottom;
+  check(lastLiveCard.getBoundingClientRect().bottom-liveList.getBoundingClientRect().bottom<=0.5 &&
+    lastLiveCard.getBoundingClientRect().bottom-liveList.getBoundingClientRect().bottom>=-1,
+    'the last live card must end on the list, saw '+
+      (liveList.getBoundingClientRect().bottom-lastLiveCard.getBoundingClientRect().bottom)+'px of list after it');
+  check(liveFoot.textContent==='' && getComputedStyle(liveFoot).display==='none',
+    'an empty live-list foot must draw no box, saw display '+getComputedStyle(liveFoot).display+
+      ' for '+JSON.stringify(liveFoot.textContent));
+  check(Math.abs(afterLastCard-livePadding)<=1,
+    'and the only space below the last card must be the topic body own frame, saw '+afterLastCard+
+      'px for a '+livePadding+'px padding');
+  var liveCardGap=liveRows[1].getBoundingClientRect().top-liveRows[0].getBoundingClientRect().bottom;
+  check(Math.abs(liveCardGap-5)<=1,'while the spacing between cards stays the 5px scale, saw '+liveCardGap+'px');
   check(!/\u25c8/.test(liveRows.map(function(row){return row.querySelector('.live-child-stats').textContent;}).join('')),
     'a card must not print a token statistic nobody measured, saw: '+
       liveRows.map(function(row){return row.querySelector('.live-child-stats').textContent;}).join('|'));
