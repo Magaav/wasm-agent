@@ -793,11 +793,17 @@ function renderSteering(fact) {
 // ONE stats line, one glyph vocabulary, one joiner.
 //
 // The footer under a finished answer and a live child card's third line are the same line over the
-// same facts (`◈ tokens · ✧ model calls · ⚒ tool calls · ◷ duration`, with `✺ elapsed` in front
-// where a child is still running). They differ in exactly one thing, and the caller decides it: the
-// footer prints `?` where a fact is missing, while a card OMITS the pair entirely - an absent token
-// count says nothing, so `◈ 0` would be a measurement nobody made. `0` is a real value here and is
-// never dropped; only absent ones are.
+// same facts (`◈tokens ✧model calls ⚒tool calls ◷duration`, with `✺elapsed` in front where a child
+// is still running). They differ in exactly one thing, and the caller decides it: the footer prints
+// `?` where a fact is missing, while a card OMITS the pair entirely - an absent token count says
+// nothing, so `◈0` would be a measurement nobody made. `0` is a real value here and is never
+// dropped; only absent ones are.
+//
+// The line is COMPACT (operator, 2026-10-05): the glyph is glued to its value and the pairs are
+// separated by one space - `◈~7.7k ✧2 ⚒1 ◷0:41`, not `◈ ~7.7k · ✧ 2 · ⚒ 1 · ◷ 0:41`. Nothing is
+// dropped and no glyph changes meaning; the words the compact form no longer prints are said in
+// `title`/`aria-label` instead (see `runStatsWords`), so the facts stay reachable to a hover, a
+// keyboard and a screen reader.
 const runStatGlyphs={elapsed:'✺',tokens:'◈',calls:'✧',tools:'⚒',duration:'◷'};
 // The order a stats line is read in, and the only list that decides it: elapsed first (a child is
 // still running), then what the run cost.
@@ -805,14 +811,28 @@ const runStatOrder=['elapsed','tokens','calls','tools','duration'];
 function runStatEntries(stats) { return runStatOrder.map(key=>[key,stats ? stats[key] : undefined]); }
 function runStatsLine(entries) {
   return (entries || []).filter(entry=>entry && entry[1]!==undefined && entry[1]!==null && entry[1]!=='')
-    .map(entry=>runStatGlyphs[entry[0]]+' '+entry[1]).join(' · ');
+    .map(entry=>runStatGlyphs[entry[0]]+entry[1]).join(' ');
+}
+// A compact line must not make its own facts unreachable: the glyphs spell themselves out here for a
+// hover, a keyboard and a screen reader. `?` is said as "not measured" and `~` as "about", because
+// that is what they mean; `≥` keeps its own words.
+const runStatWords={elapsed:'elapsed',tokens:'net context added',calls:'provider-call attempts',
+  tools:'requested tool calls',duration:'total duration'};
+function runStatsWords(entries) {
+  return (entries || []).filter(entry=>entry && entry[1]!==undefined && entry[1]!==null && entry[1]!=='')
+    .map(entry=>{
+      const value=String(entry[1]);
+      const said=value==='?' || value==='~?' ? 'not measured'
+        : value.replace(/^≥/,'at least ').replace(/^~/,'about ');
+      return runStatWords[entry[0]]+' '+said;
+    }).join('; ');
 }
 
 function runCountsFooter(duration) {
   const prefix = replayingMessages && runCounts && !runCounts.complete ? '≥' : '';
   if (replayingMessages && runCounts?.complete && Number.isFinite(runCounts.elapsed_ms) && runCounts.elapsed_ms >= 0)
     duration = runDuration(runCounts.elapsed_ms);
-  return runStatsLine([['tokens',turnTokenReadout()],
+  return runStatsLine([['tokens',turnTokenStat()],
     ['calls',prefix+(runCounts?.model_calls ?? '?')],
     ['tools',prefix+(runCounts?.tool_calls ?? '?')],['duration',duration]]);
 }
@@ -831,6 +851,12 @@ function tokenReadout(counts, replaying) {
   return prefix+number;
 }
 function turnTokenReadout() { return tokenReadout(runCounts, replayingMessages); }
+// The token pair is the one fact that carries a quality mark, and the compact line shows that mark in
+// the pair itself: `~` while the boundary is still incomplete, `≥` when a replay is a lower bound,
+// and `~?` when nothing was measured - an unmeasured estimate, never a bare `?` that would read like
+// a number. Exactly one mark: the readout already carries its own, so this never makes `◈~~` or
+// `◈~≥`.
+function turnTokenStat() { const value=turnTokenReadout(); return value==='?' ? '~?' : value; }
 function turnTokenDetail() {
   const growth=runCounts?.context_growth;
   if(turnTokenReadout()==='?')return 'Context added this turn: unavailable (no comparable provider-measured baseline/end). Historical billed/cache totals are not substituted.';
@@ -1026,7 +1052,10 @@ function setStatus(text) {
     statusPhase.hidden = true;
     statusElapsed = document.createElement("span");
     statusElapsed.className = "chat-content-run-elapsed";
-    statusLine.append(statusSpinner, statusLabel, statusPhase, statusElapsed);
+    // Operator, 2026-10-05: the activity glyph sits immediately before the elapsed clock (`✦4s`),
+    // then the label when there is one, then the compact facts - so the DOM order IS the reading
+    // order, and the finished footer (glyph removed, phase hidden) still reads left to right.
+    statusLine.append(statusSpinner, statusPhase, statusLabel, statusElapsed);
     if (turnIsActive() && !replayingMessages) startRunStatusTicker();
   }
   setText(statusLabel, text);
@@ -1066,12 +1095,18 @@ function updateRunElapsed() {
   // mistake the run topic's own summary avoids by reading replayMessageEndedAt.
   const endedAt = replayingMessages && replayMessageEndedAt ? replayMessageEndedAt : Date.now();
   const duration=runDuration(endedAt - (runStartedAt || endedAt));
-  setText(statusElapsed,!replayingMessages && runStepState?.active
-    ? `◈ ${turnTokenReadout()} · ✧ ${runCounts?.model_calls ?? '?'} · ⚒ ${runCounts?.tool_calls ?? '?'} · ◷ ${duration}` : duration);
+  // The live row is ONE compact line, built by the same stats renderer as the footer: a glyph cannot
+  // mean one thing here and another under a finished answer.
+  const stats=[['tokens',turnTokenStat()],['calls',runCounts?.model_calls ?? '?'],
+    ['tools',runCounts?.tool_calls ?? '?'],['duration',duration]];
+  setText(statusElapsed,!replayingMessages && runStepState?.active ? runStatsLine(stats) : duration);
   if(!replayingMessages&&runCounts?.context) {
     if(rendererTask)updateChildContextReadouts();else if(transcript===messages)updateContextReadouts();
   }
-  statusElapsed.title=turnTokenDetail();
+  // The compact line glues glyph to value, so the words it no longer prints are said here - for the
+  // mouse in `title` and for the keyboard and screen reader in `aria-label`.
+  statusElapsed.title=turnTokenDetail()+' '+runStatsWords(stats);
+  statusElapsed.setAttribute('aria-label',statusElapsed.title);
 }
 
 function startRunStatusTicker() {
@@ -1099,7 +1134,8 @@ function finishRunStatus(label = "completed") {
   statusLabel.textContent = label;
   updateRunElapsed();
   statusElapsed.textContent = runCountsFooter(statusElapsed.textContent);
-  statusElapsed.title = turnTokenDetail()+' Provider-call attempts (includes retries/summaries) · requested tool calls · total duration; ? means unavailable, ≥ means count lower bound.';
+  statusElapsed.title = turnTokenDetail()+' Provider-call attempts (includes retries/summaries) · requested tool calls · total duration; ? means unavailable, ~ an incomplete boundary, ≥ means count lower bound.';
+  statusElapsed.setAttribute('aria-label',statusElapsed.title);
   statusLine.classList.add("finished");
   updateRunPhase();
   if (body) body.append(statusLine);
