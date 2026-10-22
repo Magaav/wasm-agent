@@ -4091,21 +4091,23 @@ function applySentinelQueue(health) {
   if (!box) return;
   const queue = health && health.sentinel;
   const rows = queue && Array.isArray(queue.requests) ? queue.requests : [];
-  if (!rows.length) { box.hidden = true; box.replaceChildren(); return; }
+  // The overlay is for work that is still happening. A completed or failed request is evidence in
+  // `wa-sentinel status` and `/health`, but it must not sit in front of the chat after the queue is ready.
+  const active = rows.filter(row => ['queued', 'waiting', 'running'].includes(String(row.state || '')));
+  if (!active.length) { box.hidden = true; box.replaceChildren(); return; }
   const head = document.createElement('div');
   head.className = 'sentinel-queue-head';
   const title = document.createElement('b');
   title.textContent = 'sentinel queue';
   const counts = document.createElement('span');
   counts.textContent = [
-    queue.active ? queue.active + ' active' : '',
-    queue.failed ? queue.failed + ' failed' : '',
+    active.length + ' active',
     queue.stale ? 'watcher not reporting' : '',
   ].filter(Boolean).join(' · ');
   head.append(title, counts);
   const list = document.createElement('ul');
   list.className = 'sentinel-queue-items';
-  for (const row of rows) {
+  for (const row of active) {
     const item = document.createElement('li');
     item.dataset.state = String(row.state || '');
     const verb = document.createElement('span');
