@@ -1034,6 +1034,10 @@ function showRunStep(key, label) {
   runStepState.active = step;
   currentBubble().body.append(node);
   node.setStep(label, "running", 0);
+  // In the debug view a plain step row is VISIBLE, so it is this step's shape and it takes the
+  // prepainted placeholder's place. Outside debug `wa-step` is `display:none` (ui/style.css): the
+  // placeholder stays the shape the reader sees until the step's first real topic arrives.
+  if (transcript.dataset.debug === 'true') placeStepTopic(node);
   if (!runStartedAt) runStartedAt = Date.now();
   if (turnIsActive()) setStatus('');
   updateRunPhase();
@@ -1046,6 +1050,9 @@ function anchorRunSteps(callId) {
 }
 function anchorRunStepContent(node) {
   if (replayingMessages || !node) return;
+  // The step's own topic is here: it takes the prepainted placeholder's place (same parent, same
+  // sibling index) rather than landing after it, and the placeholder is gone (see `placeStepTopic`).
+  placeStepTopic(node);
   const position = Array.from(currentBubble().querySelectorAll(node.tagName)).indexOf(node);
   for (const step of runStepState?.steps || []) if (!step.beforeCall && !step.beforeContent) {
     step.beforeContent = {node,position};
@@ -1319,8 +1326,103 @@ function beginReasoningRound() {
 // topic while a step that arrives after the fold is still a direct child of the bubble.
 const RUN_TOPIC_SELECTOR = "wa-trace, wa-reasoning, wa-commentary, wa-retry, wa-summary, wa-steering, .seg";
 function lastRunTopic(root) {
-  const topics = root.querySelectorAll(RUN_TOPIC_SELECTOR);
+  // A prepainted step placeholder is not a topic (see `beginStepPlaceholder`): the step that is still
+  // waiting for its topic must not become the anchor its own topic is inserted after.
+  const topics = Array.from(root.querySelectorAll(RUN_TOPIC_SELECTOR))
+    .filter(node => node.dataset.stepPlaceholder !== "true");
   return topics.length ? topics[topics.length - 1] : null;
+}
+
+// ---- THE STEP PLACEHOLDER: the shape of a step that has not said what it is yet ------------------
+//
+// A provider step announces itself - the run's `round` event, and the `model`/`thinking` status note -
+// before it has a topic of its own: the reasoning burst, the decision, the tool call, the commentary.
+// Until one of them arrives the transcript shows a vacuum exactly where the step will be, and the
+// reader watches nothing happen. The operator asked for it filled (2026-10-2x): "right together a new
+// step begins, we can go ahead and prepaint a topic named <reasoning_icon> reasoning...
+// <seconds_count> which we swap to the step topic seamlessly ... once the new step topic arrives, we
+// place in the place of the reasoning topic".
+//
+// So the step is prepainted with the reasoning topic's own shape - glyph, label, live age - in the
+// place its real topic will take (after the last run topic, the anchor rule `appendReasoning` uses),
+// and the first real topic of that step REPLACES it in place (see `placeStepTopic`): same parent, same
+// sibling index, so the reader sees a shape BECOME the step instead of a gap filling at the end of the
+// bubble.
+//
+// It is not a topic of its own and it is never history:
+//   * `data-step-placeholder` marks it and `lastRunTopic` skips it; no fold, ledger key, answer anchor
+//     or reasoning round is ever attached to it;
+//   * the answer, a reply, an error and `done` REMOVE it (`dropStepPlaceholders`): a ghost
+//     `reasoning...` left behind is worse than the vacuum it filled;
+//   * a replayed transcript draws none - history has its own topics.
+const STEP_PLACEHOLDER_MARK = "data-step-placeholder";
+const STEP_PLACEHOLDER_LABEL = "reasoning\u2026";
+function isStepPlaceholder(node) {
+  return !!node && node.dataset && node.dataset.stepPlaceholder === "true";
+}
+function stepPlaceholders(root) {
+  return root ? Array.from(root.querySelectorAll("[" + STEP_PLACEHOLDER_MARK + "='true']")) : [];
+}
+function retireStepPlaceholder(node) {
+  if (!node) return;
+  if (node._stepClock) { clearInterval(node._stepClock); node._stepClock = null; }
+  node.remove();
+}
+// The seconds count is what says the step is still waiting for its topic, so it is a live count and
+// not the `0s` the shape was drawn with.
+function paintStepAge(node) {
+  if (!node) return;
+  const started = Number(node.dataset.stepStartedAt) || Date.now();
+  node.setMeta(Math.max(0, Math.floor((Date.now() - started) / 1000)) + "s");
+}
+function startStepClock(node) {
+  if (!node || node._stepClock) return;
+  node._stepClock = setInterval(() => {
+    if (!node.isConnected || !isStepPlaceholder(node)) {
+      clearInterval(node._stepClock);
+      node._stepClock = null;
+      return;
+    }
+    paintStepAge(node);
+  }, 1000);
+}
+function beginStepPlaceholder() {
+  if (replayingMessages) return;
+  // The bubble's own node, never a new one: a placeholder drawn for a step that has no bubble yet
+  // would be a bubble of its own.
+  const bubble = runBubble;
+  if (!bubble || !bubble.body) return;
+  const existing = stepPlaceholders(bubble.body);
+  // One step is prepainted once: the `round` event and the status note that follow each other must not
+  // draw two shapes, and the second one must not restart the count of the step already announced.
+  if (existing.some(node => node.parentNode === bubble.body)) return;
+  // Anything else is a leftover of an earlier step (folded into the run topic, or repainted away).
+  for (const stale of existing) retireStepPlaceholder(stale);
+  const node = document.createElement("wa-reasoning");
+  node.dataset.stepPlaceholder = "true";
+  node.dataset.stepStartedAt = String(Date.now());
+  node.open = false;   // the shape of a topic, not an empty body
+  node.setLabel(STEP_PLACEHOLDER_LABEL);
+  paintStepAge(node);
+  const lastTopic = lastRunTopic(bubble.body);
+  if (lastTopic && lastTopic.parentNode) lastTopic.parentNode.insertBefore(node, lastTopic.nextSibling);
+  else bubble.body.append(node);
+  startStepClock(node);
+  pin();
+}
+// THE SWAP. The step's real topic takes the placeholder's own place - same parent, same sibling index,
+// inserted in one DOM operation - and the placeholder is gone, so one step never leaves two topics.
+function placeStepTopic(topic) {
+  const parent = topic ? topic.parentNode : null;
+  if (!parent) return topic;
+  const anchor = Array.prototype.find.call(parent.children, isStepPlaceholder);
+  if (!anchor || anchor === topic) return topic;
+  parent.insertBefore(topic, anchor);
+  retireStepPlaceholder(anchor);
+  return topic;
+}
+function dropStepPlaceholders(bubble = runBubble) {
+  for (const node of stepPlaceholders(bubble && bubble.body)) retireStepPlaceholder(node);
 }
 function appendReasoning(text, complete = false, round = null) {
   if (!text && !complete) return reasoningBody();
@@ -2216,6 +2318,9 @@ function currentTrace() {
   if (!trace) {
     trace = document.createElement("wa-trace");
     currentBubble().body.append(trace);
+    // A tool or decision step is this step's own topic: it takes the prepainted placeholder's place
+    // (see `beginStepPlaceholder`), so the calls do not jump below the shape that announced them.
+    placeStepTopic(trace);
   }
   return trace;
 }
@@ -2534,6 +2639,9 @@ function handleEvent(event) {
       streamBody.className = 'seg final-answer';
       bubble.body.append(streamBody);
     }
+    // The answer is the step's own outcome, so the prepainted step shape has served its purpose - and
+    // it must not be folded into the run topic this answer creates.
+    dropStepPlaceholders();
     collapseRun(true);
     if (!answerReleased.has(transcript)) anchorAnswer(streamBody);
   } else if (event.type === "retry") {
@@ -2569,6 +2677,10 @@ function handleEvent(event) {
     // tool steps: "thinking 2575 chars" above five "1 tool call" topics).
     sealReasoning();
     flushDecision();
+    // ONE PROVIDER STEP BEGINS HERE and it has not said what it is yet: fill the vacuum with the shape
+    // of the topic that is coming (see `beginStepPlaceholder`). The `model`/`thinking` status note does
+    // the same; whichever reaches the renderer first prepaints the step, and the second is a no-op.
+    beginStepPlaceholder();
   } else if (event.type === "run_counts") {
     applyRunCounts(event.counts);
   } else if (event.type === 'steering') {
@@ -2585,6 +2697,9 @@ function handleEvent(event) {
     showRunStep(note === "model" ? "model" : note === "thinking" ? "preparing" : "status:" + note,
       note === "model" ? "Reasoning" : note === "thinking" ? "Preparing turn" : note);
     setStatus(note === "model" || note === "thinking" ? "" : "wasm-agent is " + note + "…");
+    // A step that has just said it is starting has no topic of its own yet, so the shape of the one
+    // that is coming is drawn where it will be (see `beginStepPlaceholder`).
+    if (note === "model" || note === "thinking") beginStepPlaceholder();
   } else if (event.type === "commentary") {
     showRunStep("commentary", "Progress update");
     const pendingKey = String(event.pending_id || '');
@@ -2718,6 +2833,9 @@ function handleEvent(event) {
       paintDelta();
     }
   } else if (event.type === "reply") {
+    // A reply with no step of its own leaves nothing to wait for: the step shape is not a topic and
+    // must not outlive the reply that ended the step.
+    dropStepPlaceholders();
     if (!replayingMessages) finishRunStep();
     const finalText = stripThinking(event.text || streamText);
     // The provisional commentary that is still pending when its run says `reply` can only be the
@@ -2860,6 +2978,7 @@ function handleEvent(event) {
     updateChip();
     if (balloon.open) { renderUsage(); renderControls(); }
   } else if (event.type === "error") {
+    dropStepPlaceholders();
     if(!replayingMessages&&transcript===messages)stopLiveness();
     releaseAnswerAnchor();
     markPendingTextIncomplete();
@@ -2871,6 +2990,9 @@ function handleEvent(event) {
     voiceLastAnswer = "";
     voiceRunSettled();
   } else if (event.type === "done") {
+    // Drained before the footer folds anything: a placeholder folded into the run topic would leave an
+    // empty run topic behind it, which is worse than the vacuum it filled.
+    dropStepPlaceholders();
     if(!replayingMessages&&transcript===messages)stopLiveness();
     if(answerAnchors.get(transcript)?.dataset.answerComplete!=='true')releaseAnswerAnchor();
     markPendingTextIncomplete();

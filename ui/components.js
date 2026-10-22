@@ -1045,6 +1045,22 @@ class WaTopic extends HTMLElement {
     this._body.innerHTML = topicMarkdown(raw.replace(/\s+$/, ""));
     this._meta.textContent = raw.length + " chars";
   }
+
+  // The header's own two words, settable through the component that built them. A topic can be drawn
+  // before it has any text to count - the step placeholder in app.js says what the coming topic will
+  // be (`reasoning…`) and how long the step has been waiting (`4s`) - and reaching into the header's
+  // parts from outside is how a second, half-taught copy of this component starts.
+  setLabel(text) {
+    this._build();
+    const label = String(text == null ? "" : text);
+    if (this._label.textContent !== label) this._label.textContent = label;
+  }
+
+  setMeta(text) {
+    this._build();
+    const meta = String(text == null ? "" : text);
+    if (this._meta.textContent !== meta) this._meta.textContent = meta;
+  }
 }
 // One implementation, two names: the registry allows a constructor to be used once, so each tag gets a
 // name-only subclass of the same [WaTopic]. Neither adds a line of behaviour - a change to a topic is a
