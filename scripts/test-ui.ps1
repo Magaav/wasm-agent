@@ -4178,6 +4178,10 @@ try {
     # with the row hidden and shown, and its click reaches the bottom and re-arms follow-the-tail. It runs
     # in the gate so a floating arrow over the composer, or one that strands the reader on the next token,
     # cannot pass behind a green suite.
+    # The answer's first line must HOLD: a repaint or a continued round that lands a frame or two after
+    # the answer used to release the start anchor and send the transcript back to its end.
+    & node scripts/agent-benchmark-ui-observe.mjs --ui $ui --probe (Join-Path $PSScriptRoot 'probe-answer-anchor-hold.js') --out (Join-Path $tmp 'answer-anchor-hold')
+    if ($LASTEXITCODE -ne 0) { throw 'answer anchor hold probe failed' }
     & node scripts/agent-benchmark-ui-observe.mjs --ui $ui --probe (Join-Path $PSScriptRoot 'probe-scroll-to-bottom.js') --out (Join-Path $tmp 'scroll-to-bottom')
     if ($LASTEXITCODE -ne 0) { throw 'scroll-to-latest arrow browser probe failed' }
     # The model-calls glyph is `👣`, the one character in the stats vocabulary that Unicode also ships
