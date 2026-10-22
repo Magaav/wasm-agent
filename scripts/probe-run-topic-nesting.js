@@ -408,15 +408,17 @@
       "no element in the page may carry the removed in-place state, saw " +
       document.querySelectorAll("[data-in-place]").length);
 
-    // ---- 7. the thinking topic ends when the NEXT TOPIC begins, and keeps its place ---------------
-    // Two operator reports meet here. First (2026-10-21): "the thinking topic changes position when
-    // the next tool-call step arrives" - so the node must keep its parent and its sibling index, and
-    // the next thought must be drawn beside it, not at the far end. Second (2026-10-2x): the topic
-    // stayed OPEN until another thinking or decision topic began, so a commentary or a tool step that
-    // followed it read as if the thought were still going. The property asserted here is therefore
-    // both: the topic CLOSES in place (header collapsed, body hidden, same node, same index, same
-    // top, same text - never deleted, never re-created) as soon as the next topic of any kind starts,
-    // and a thought AFTER that is a new node drawn in the same order.
+    // ---- 7. the thinking topic NEVER closes by itself, and keeps its place ------------------------
+    // Operator rule (2026-10-2x), which INVERTS the one this section used to pin: a thinking topic
+    // behaves like a commentary - it is OPEN by default, and the only thing that closes it is the
+    // reader. The app used to fold it in place as soon as the next topic of any kind began (a
+    // decision, a tool step, a commentary, a round boundary, the final answer's fold); that is what
+    // this section now forbids, for every one of those boundaries.
+    //
+    // Two earlier operator reports still hold and are asserted alongside it: the topic keeps its
+    // parent and its sibling index (2026-10-21: "the thinking topic changes position when the next
+    // tool-call step arrives"), and the next provider step's thought is a NEW node drawn in the order
+    // the steps arrived. So: same node, same index, same top, same text - and still OPEN.
     window.handleEvent({ type: "done" });
     window.handleEvent({ type: "round", n: 1, tools: 2 });
     window.handleEvent({ type: "reasoning", text: "First, read the topic component." });
@@ -428,10 +430,16 @@
     var firstThoughtTop = firstThought ? firstThought.getBoundingClientRect().top : NaN;
     var firstThoughtTextBefore = firstThought
       ? firstThought.querySelector(":scope > .reasoning-body").textContent : "";
-    function closedInPlace(topic, index, top, text, label) {
+    // The property this section pins, measured rather than assumed: the SAME node, in the same place,
+    // with the same text, and still OPEN. WHY: a thinking topic is a commentary-shaped topic - open
+    // unless the reader closed it (operator rule, 2026-10-2x). Every boundary below used to assert the
+    // opposite ("collapsed - header closed and body hidden").
+    function openInPlace(topic, index, top, text, label) {
       check(!!topic && topic.isConnected, label + ": the topic must still be the same connected node");
-      check(topic.open === false && topic.hasAttribute("open") === false && topic.body.hidden === true,
-        label + ": the topic must be collapsed - header closed and body hidden");
+      check(!!topic && topic.open === true && topic.hasAttribute("open") === true &&
+        topic.body.hidden === false,
+        label + ": the topic must still be OPEN - header open and body visible; nothing in the app " +
+        "closes it, only the reader can (operator rule, 2026-10-2x)");
       check(!!thinkBody && indexIn(thinkBody, topic) === index,
         label + ": the topic must keep its own index; was " + index + ", now " +
         (topic ? indexIn(thinkBody, topic) : "gone"));
@@ -443,10 +451,10 @@
         JSON.stringify(topic.querySelector(":scope > .reasoning-body").textContent));
     }
 
-    // A decision starts the next topic; the thinking closes where it stands, before the trace.
+    // A decision starts the next topic; the thinking stays open where it stands, before the trace.
     window.handleEvent({ type: "decision", call_id: "topic-call-1", name: "read",
       arguments_text: '{"path":"ui/components.js"}' });
-    closedInPlace(firstThought, firstThoughtIndex, firstThoughtTop, firstThoughtTextBefore,
+    openInPlace(firstThought, firstThoughtIndex, firstThoughtTop, firstThoughtTextBefore,
       "after a decision");
     window.handleEvent({ type: "tool", call_id: "topic-call-1", name: "read",
       arguments: { path: "ui/components.js" } });
@@ -454,14 +462,14 @@
       result: { content: "ok" } });
     var step = thinkBody && thinkBody.querySelector(":scope > wa-trace");
     check(!!step, "the tool call must draw its step in the run bubble");
-    // The TOOL STEP is the next topic too: it must close the thinking, and the closed node must still
+    // The TOOL STEP is the next topic too: it must leave the thinking OPEN, and the node must still
     // precede the step it preceded (the earlier position fix is not traded away for this one).
-    closedInPlace(firstThought, firstThoughtIndex, firstThoughtTop, firstThoughtTextBefore,
+    openInPlace(firstThought, firstThoughtIndex, firstThoughtTop, firstThoughtTextBefore,
       "after a tool step");
     check(precedes(firstThought, step),
-      "the closed thinking topic must still be ABOVE the step it preceded (compareDocumentPosition)");
+      "the still-open thinking topic must stay ABOVE the step it preceded (compareDocumentPosition)");
 
-    // A thought after the step is a NEW node, drawn beside the closed one - not more text in it.
+    // A thought after the step is a NEW node, drawn beside the earlier one - not more text in it.
     window.handleEvent({ type: "round", n: 2, tools: 2 });
     window.handleEvent({ type: "reasoning", text: "Second, check where the header is drawn." });
     var thoughts = thinkBody ? Array.from(thinkBody.querySelectorAll(":scope > wa-reasoning")) : [];
@@ -469,20 +477,20 @@
       "a thought after a tool step must be a NEW topic, saw " + thoughts.length + " wa-reasoning nodes");
     var secondThought = thoughts[1] || null;
     check(!!secondThought && secondThought !== firstThought,
-      "the new burst must not re-use or re-create the closed topic");
+      "the new burst must not re-use or re-create the earlier topic");
     check(!!secondThought && secondThought.open === true,
       "the new thinking topic must be open so the text it just streamed is readable");
     check(precedes(firstThought, secondThought),
-      "the new topic must be drawn AFTER the closed one, in the order the steps happened");
-    closedInPlace(firstThought, firstThoughtIndex, firstThoughtTop, firstThoughtTextBefore,
+      "the new topic must be drawn AFTER the earlier one, in the order the steps happened");
+    openInPlace(firstThought, firstThoughtIndex, firstThoughtTop, firstThoughtTextBefore,
       "after the next thinking topic");
     var firstThoughtTextAfter = firstThought
       ? firstThought.querySelector(":scope > .reasoning-body").textContent : "";
     check(firstThoughtTextAfter.indexOf("Second, check where the header is drawn.") < 0,
-      "the new burst's text must not land in the closed topic; body reads " +
+      "the new burst's text must not land in the earlier topic; body reads " +
       JSON.stringify(firstThoughtTextAfter));
     // The node re-sends each round's reasoning as an authoritative copy (`complete`). It replaces the
-    // round it belongs to - here the NEW topic - and must not touch the closed earlier topic.
+    // round it belongs to - here the NEW topic - and must not touch the earlier topic.
     window.handleEvent({ type: "reasoning", text: "Second, check where the header is drawn.", complete: true });
     var afterCompleteText = secondThought
       ? secondThought.querySelector(":scope > .reasoning-body").textContent : "";
@@ -490,16 +498,17 @@
       "the new topic must keep its own round's authoritative copy; body reads " +
       JSON.stringify(afterCompleteText));
     check(!!firstThought && firstThought.querySelector(":scope > .reasoning-body").textContent === firstThoughtTextBefore,
-      "the authoritative copy must not change the closed earlier topic");
+      "the authoritative copy must not change the earlier topic");
 
-    // The fold moves the closed topic into the run topic WITHOUT reopening it and without re-creating
-    // it: a reply is not a topic, so nothing here closes or reopens anything - the fold is a move.
+    // The fold moves the open topic into the run topic WITHOUT closing it and without re-creating it:
+    // a reply is not a topic, and the fold is a move - the route folds, this topic does not.
     window.handleEvent({ type: "reply", message_id: "topic-answer", text: "Done reading." });
     var thinkRun = thinkBody && thinkBody.querySelector(":scope > wa-run");
     check(!!thinkRun && !!firstThought && thinkRun.contains(firstThought),
       "the final answer must fold the thinking topic into the run topic, keeping it as the same node");
-    check(!!firstThought && firstThought.open === false,
-      "the fold must not reopen a topic the next step closed");
+    check(!!firstThought && firstThought.open === true,
+      "the final answer's fold must not close the thinking topic: it MOVES the topic into the run " +
+      "topic, and only the reader closes it (operator rule, 2026-10-2x)");
     // A reply is not a topic, so the thinking stays open through it. WHY THIS CHANGED (operator,
     // 2026-10-2x): one thinking topic per PROVIDER STEP, not one per run - the operator reversed the
     // earlier "one train of thought is one topic" rule after reporting a whole run's thinking stacked
@@ -527,17 +536,18 @@
     check(secondTextAfterRound.indexOf("Third, still thinking.") < 0,
       "no round's text may land in another round's topic; the earlier topic reads " +
       JSON.stringify(secondTextAfterRound));
-    check(!!secondThought && secondThought.open === false && secondThought.body.hidden === true,
-      "the round boundary must close the previous thinking topic where it stands");
+    check(!!secondThought && secondThought.open === true && secondThought.body.hidden === false,
+      "the round boundary must NOT close the previous thinking topic: a new round starts a new " +
+      "topic and leaves the earlier one open, exactly like a commentary followed by another");
     // The fold is the ONE move allowed: the closed topic is nested into the run topic with the rest of
     // the route. It must still be the same node, closed, with the same text - the index/geometry
     // property was already asserted above, where a step (not the answer) arrived.
-    check(!!firstThought && firstThought.isConnected && firstThought.open === false &&
+    check(!!firstThought && firstThought.isConnected && firstThought.open === true &&
       firstThought.querySelector(":scope > .reasoning-body").textContent === firstThoughtTextBefore,
-      "after the fold the closed topic must still be the same node, still closed, with the same text");
+      "after the fold the topic must still be the same node, still OPEN, with the same text");
 
-    // A COMMENTARY is the next topic too, and it must close the thinking exactly as a step does:
-    // the operator's "it never closes when a commentary ... follows" case.
+    // A COMMENTARY is the next topic too, and it must NOT close the thinking - the same rule as for a
+    // tool step, because "behaves like a commentary topic" is exactly the operator's request here.
     window.handleEvent({ type: "done" });
     window.handleEvent({ type: "round", n: 1, tools: 2 });
     window.handleEvent({ type: "reasoning", text: "A thought before the progress update." });
@@ -552,21 +562,89 @@
     check(!!commentThought && commentThought.isConnected &&
       commentBody.querySelector(":scope > wa-reasoning") === commentThought &&
       indexIn(commentBody, commentThought) === commentIndex &&
-      commentThought.open === false && commentThought.body.hidden === true &&
+      commentThought.open === true && commentThought.body.hidden === false &&
       Math.abs(commentThought.getBoundingClientRect().top - commentTop) <= 1,
-      "a commentary must CLOSE the thinking topic in place: same node, same index, same top, body hidden");
+      "a commentary must leave the thinking topic OPEN in place: same node, same index, same top, " +
+      "body visible - only the reader closes this topic");
     check(precedes(commentThought, commentTopic),
-      "the closed thinking topic must stay above the commentary that closed it");
+      "the thinking topic must stay above the commentary that followed it");
     window.handleEvent({ type: "commentary_delta", pending_id: "close-commentary", text: " Still working." });
-    check(!!commentThought && commentBody.querySelector(":scope > wa-reasoning") === commentThought,
-      "more commentary must not touch the closed thinking topic");
+    check(!!commentThought && commentBody.querySelector(":scope > wa-reasoning") === commentThought &&
+      commentThought.open === true,
+      "more commentary must not touch the thinking topic - same node, still open");
     window.handleEvent({ type: "reasoning", text: "A new thought after the commentary." });
     var afterCommentary = commentBody ? commentBody.querySelectorAll(":scope > wa-reasoning") : [];
     check(afterCommentary.length === 2 && afterCommentary[1] !== commentThought &&
       afterCommentary[1].open === true,
-      "a thought after a commentary must be a new, open topic beside the closed one; saw " +
+      "a thought after a commentary must be a new, open topic beside the earlier one; saw " +
       afterCommentary.length);
+    check(!!commentThought && commentThought.open === true && commentThought.isConnected,
+      "the topic before the commentary must still be open after the new thought arrives");
     window.handleEvent({ type: "done" });
+    check(!!commentThought && commentThought.open === true,
+      "the thinking topic stays open once the run settles too - settlement folds the ROUTE, not " +
+      "this topic (flushDecision closes wa-run topics only)");
+
+    // ---- 7b. the reader's own collapse is the ONLY thing that closes it --------------------------
+    // The app used to reopen a thinking topic on the next chunk of the same round (`appendReasoning`:
+    // `if (!reasoningBlock.open && !replayingMessages) reasoningBlock.open = true`). Under the
+    // operator's rule that is the app overruling the reader. A chunk of the SAME round must land in
+    // the topic the reader closed WITHOUT opening it again; a NEW round still draws its own topic
+    // (asserted above, and not traded away here).
+    window.handleEvent({ type: "done" });
+    window.handleEvent({ type: "round", n: 1, tools: 2 });
+    window.handleEvent({ type: "reasoning", text: "A thought the reader will fold." });
+    var readerBubble = lastAssistant();
+    var readerBody = readerBubble && readerBubble.body;
+    var readerTopic = readerBody && readerBody.querySelector(":scope > wa-reasoning");
+    check(!!readerTopic && readerTopic.open === true,
+      "reader fold: a streamed thinking topic must arrive open");
+    readerTopic.open = false;   // the reader closes it by hand
+    window.handleEvent({ type: "reasoning", text: " More of the same round." });
+    var readerThoughts = readerBody ?
+      Array.from(readerBody.querySelectorAll(":scope > wa-reasoning")) : [];
+    check(readerThoughts.length === 1 && readerThoughts[0] === readerTopic,
+      "reader fold: the same round's next chunk must stay in the same topic, saw " +
+      readerThoughts.length + " topic(s)");
+    check(!!readerTopic && readerTopic.open === false && readerTopic.body.hidden === true,
+      "reader fold: a topic the READER closed must stay closed while the same round keeps " +
+      "streaming - the app must not reopen it");
+    var readerText = readerTopic
+      ? readerTopic.querySelector(":scope > .reasoning-body").textContent : "";
+    check(readerText.indexOf("More of the same round.") >= 0,
+      "reader fold: the chunk is still content - it accumulates while the topic is closed; reads " +
+      JSON.stringify(readerText));
+    window.handleEvent({ type: "reply", message_id: "reader-answer", text: "Folded it." });
+    window.handleEvent({ type: "done" });
+    check(!!readerTopic && readerTopic.open === false,
+      "reader fold: the final answer's settlement must not reopen a topic the reader closed");
+    var readerRun = readerBody && readerBody.querySelector(":scope > wa-run");
+    check(!!readerRun && !!readerTopic && readerRun.contains(readerTopic),
+      "reader fold: and that closed topic is still folded into the run topic, not dropped");
+
+    // ---- 7c. a REPLAYED transcript draws it open too --------------------------------------------
+    // The repaint is history, but this topic is not: it used to be created `open = !replayingMessages`,
+    // so a reload (and a child pane, which repaints through the same renderer) drew it folded - the one
+    // topic whose default state depended on where the rows came from. A commentary is created open on
+    // replay (`appendCommentary`: `block.open = true`, no replay condition); this topic must match, so
+    // the route asserted here is `paintChildTranscript`, which is what a reload and a child pane use.
+    var replayHost = document.createElement("div");
+    stage.append(replayHost);
+    paintChildTranscript(replayHost, [
+      { id: "replay-q", seq: 1, role: "user", content: "Why?", created_at: 1 },
+      { id: "replay-a", seq: 2, role: "assistant", content: "", created_at: 2,
+        reasoning: "Replayed thinking, open by default." },
+    ], { state: "idle" });
+    var replayTopic = replayHost.querySelector("wa-reasoning");
+    check(!!replayTopic, "replay: the stored thinking must be repainted as a thinking topic");
+    check(!!replayTopic && replayTopic.open === true && replayTopic.body.hidden === false,
+      "replay: a repainted thinking topic must be OPEN, exactly like a commentary - a repaint is " +
+      "history, but this topic does not start closed");
+    var replayText = replayTopic
+      ? replayTopic.querySelector(":scope > .reasoning-body").textContent : "";
+    check(replayText.indexOf("Replayed thinking, open by default.") >= 0,
+      "replay: the repainted topic must carry the stored text, saw " + JSON.stringify(replayText));
+    replayHost.remove();
 
     // ---- 8. ONE PROVIDER STEP'S THINKING IS ONE TOPIC, IN THE ORDER THE STEPS ARRIVED -------------
     // Operator report (2026-10-2x), verbatim: "thinking is not correctly in the step by step order, it
@@ -663,15 +741,17 @@
     window.handleEvent({ type: "done" });
 
     var verdict = "PASS: run steps stay in the bubble until the final answer nests them; a thinking " +
-      "topic CLOSES IN PLACE (same node, same index, same top, same text, body hidden - never " +
-      "deleted, never re-created) when the next topic of any kind begins - a decision, a tool step, " +
-      "or a commentary - and a thought after that is a new node drawn in the run's own order; " +
-      "every provider step's thinking is its OWN topic, drawn in the position that step arrived in, " +
-      "so a run of two rounds with a tool step between reads thinking, tool, thinking, tool - never " +
-      "stacked above the steps it followed and never merged into another round's topic; and on " +
-      "every route a commentary is an ordinary topic - header above the body, body inside the topic " +
-      "box, the streamed sentence kept in its own place (moving only by the measured header height) " +
-      "- with no in-place state, in the main chat and in a subagent pane alike";
+      "topic NEVER closes by itself - it stays OPEN (same node, same index, same top, same text, body " +
+      "visible) after a decision, after a tool step, after a commentary, across a round boundary and " +
+      "through the final answer's fold, and a thought after that is a new node drawn in the run's own " +
+      "order - a topic the READER closed stays closed while the same round keeps streaming (the app " +
+      "no longer reopens it), and a replayed transcript draws it open too; every provider step's " +
+      "thinking is its OWN topic, drawn in the position that step arrived in, so a run of two rounds " +
+      "with a tool step between reads thinking, tool, thinking, tool - never stacked above the steps " +
+      "it followed and never merged into another round's topic; and on every route a commentary is an " +
+      "ordinary topic - header above the body, body inside the topic box, the streamed sentence kept " +
+      "in its own place (moving only by the measured header height) - with no in-place state, in the " +
+      "main chat and in a subagent pane alike";
     if (notes.length) verdict += " [" + notes.join(" ;; ") + "]";
     result = { status: problems.length ? "fail" : "pass",
       text: problems.length ? "FAIL: " + problems.join(" ;; ") : verdict };

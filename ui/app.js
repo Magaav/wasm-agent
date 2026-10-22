@@ -1264,7 +1264,9 @@ function clearStatus() {
 
 // The model's own thinking, when the provider streams it in a field of its own instead of
 // leaking it into the answer. It is the route to the reply, not the reply, so it lives in a
-// collapsible block: open while the run is still thinking, folded away once the run moves on.
+// collapsible block - but it is OPEN by default and the only thing that closes it is the reader
+// (operator rule, 2026-10-2x): a thinking topic behaves like a commentary topic. Nothing here folds it
+// when the next step, the next round or the final answer arrives.
 // It is folded into the run topic along with the tool calls it belongs to - it *is* the route, and
 // leaving it outside left a wall of "thinking · N chars" rows between the reader and the answer
 // (measured live: 196 of them sitting outside the topics in one thread). The case that must not be
@@ -1348,7 +1350,10 @@ function appendReasoning(text, complete = false, round = null) {
     // A topic like every other one: <wa-reasoning> builds the same header as the tool calls beside it,
     // so the thinking reads as a step of the same kind rather than as a different thing.
     reasoningBlock = document.createElement("wa-reasoning");
-    reasoningBlock.open = !replayingMessages;
+    // OPEN, including when this is a repaint. It used to be `open = !replayingMessages`, so a reloaded
+    // transcript drew this one topic folded while a commentary (`appendCommentary`) is created open on
+    // replay; the same rule now holds here: only the reader closes it (operator rule, 2026-10-2x).
+    reasoningBlock.open = true;
     // Which live round this topic streamed, so its authoritative copy can find it (see above). A
     // replayed topic gets no mark: its rows carry no round, and a stale mark would let a later live
     // run write into history.
@@ -1361,13 +1366,12 @@ function appendReasoning(text, complete = false, round = null) {
     reasoningText = "";
     reasoningRound = "";
     anchorRunStepContent(reasoningBlock);
-  } else if (!reasoningBlock.open && !replayingMessages) {
-    // A reader who collapsed this topic by hand still gets the next chunk where it can be read: text
-    // that lands in a topic the reader has to open by hand is the same complaint one layer down. This is
-    // NOT the next-topic path - that one seals the topic and detaches it (see `sealReasoning`), so the
-    // burst after a commentary or a tool step starts a new node instead of reopening this one.
-    reasoningBlock.open = true;
   }
+  // NO AUTO-REOPEN HERE. The round's next chunk writes into this topic whether it is open or closed:
+  // a reader who closed it by hand keeps it closed (operator rule, 2026-10-2x). The app used to force
+  // `open = true` on the next chunk, overruling that choice. This is NOT the next-topic path - that one
+  // detaches the topic (see `sealReasoning`), so the burst after a commentary or a tool step starts a
+  // new node instead of reopening this one.
   if (complete) {
     // This round's authoritative copy - it replaces what THIS round streamed, and only that.
     reasoningRound = String(text == null ? "" : text);
@@ -1400,8 +1404,9 @@ function appendCommentary(text, messageId, pendingId, decisionPrelude, place) {
     pin();
     return place;
   }
-  // A commentary is the next topic, so it closes the thinking topic that preceded it (see
-  // `sealReasoning`): the thought is collapsed in place, and a later burst draws a new node beside it.
+  // A commentary is the next topic, so it detaches the thinking topic that preceded it (see
+  // `sealReasoning`): the thought stays OPEN in place - only the reader closes it - and a later burst
+  // draws a new node beside it.
   sealReasoning();
   const block = document.createElement("wa-commentary");
   block.open = true;
@@ -1475,7 +1480,8 @@ function appendStreamedCommentary(text, pendingId) {
   const bubble = currentBubble();
   if(streamedCommentaryBlock && pendingId && streamedCommentaryBlock.dataset.pendingId!==String(pendingId))markStreamedCommentaryIncomplete();
   if (!streamedCommentaryBlock || streamedCommentaryBlock.parentNode !== bubble.body) {
-    // A streamed commentary topic is still a new topic: the thinking it follows ends here, in place.
+    // A streamed commentary topic is still a new topic: the thinking it follows is detached here, in
+    // place, and stays open.
     sealReasoning();
     streamedCommentaryBlock = document.createElement("wa-commentary");
     streamedCommentaryBlock.classList.add("phase-pending");
@@ -1667,16 +1673,16 @@ function endReasoningTopic() {
   reasoningRound = "";
 }
 
-// THE THINKING TOPIC ENDS WHEN THE NEXT TOPIC OF ANY KIND BEGINS. It used to stay open until another
-// thinking or decision topic started, so a commentary or a tool step that followed it read as if the
-// thought were still going (operator, 2026-10-2x). A topic begins -> the thinking is CLOSED where it
-// stands: header collapsed, body hidden, same node, same parent, same position - never deleted, never
-// re-created, and its text never moves. The topic that follows is drawn in the position its own step
-// arrived in (see `appendReasoning`), which is what keeps the run's children in the order the provider
-// sent them.
+// THE THINKING TOPIC IS DETACHED WHEN THE NEXT TOPIC OF ANY KIND BEGINS - but it is NOT CLOSED.
+// It used to be collapsed in place here, so a commentary or a tool step that followed it read as if the
+// thought had been folded away; the operator's rule (2026-10-2x) is that a thinking topic behaves like a
+// commentary: open by default, and only the reader closes it. What still ends here is the *train of
+// thought*: the node stays exactly where it is (same parent, same position, same text, same open state -
+// never deleted, never re-created, never folded), and the next burst draws a new node in the position its
+// own step arrived in (see `appendReasoning`). That is what keeps the run's children in the order the
+// provider sent them while every finished topic stays readable.
 function sealReasoning() {
   if (!reasoningBlock) return;
-  reasoningBlock.open = false;
   reasoningBlock = null;
   reasoningText = "";
   reasoningRound = "";
@@ -2213,8 +2219,9 @@ function addTool(name, args, options) {
     if (!replayingMessages) startToolTicker();
     return;
   }
-  // The tool step is the next topic: the thinking topic it follows is closed in place (see
-  // `sealReasoning`), never deleted or re-created, and a thought after it is a new node.
+  // The tool step is the next topic: the thinking topic it follows is detached in place (see
+  // `sealReasoning`) and stays OPEN - never deleted, never folded, never re-created; a thought after it
+  // is a new node.
   sealReasoning();
   currentTrace().addTool(name, toolTitle(name, args), null, boundMs ? Math.round(boundMs / 1000) : null, callId, toolChange(name, args));
   lastTool = name;
@@ -2223,9 +2230,10 @@ function addTool(name, args, options) {
 }
 
 function addDecision(event) {
-  // A decision is the next topic, so the thinking topic it follows is CLOSED in place (see
-  // `sealReasoning`): same node, same parent, same position, body hidden - never deleted and never
-  // re-created. This keeps the earlier position fix (the closed node stays the anchor) while ending the
+  // A decision is the next topic, so the thinking topic it follows is detached in place (see
+  // `sealReasoning`) and stays OPEN: same node, same parent, same position, body visible - never
+  // deleted, never folded and never re-created. This keeps the earlier position fix (the open node
+  // stays the anchor) while ending the
   // topic, as the operator asked: a thought after a step is a new node, not more of the old one.
   sealReasoning();
   showRunStep("decision", "Selecting tools");
@@ -2542,8 +2550,8 @@ function handleEvent(event) {
     if (!runStartedAt) runStartedAt = Date.now();
     markStreamedCommentaryIncomplete();
     // A new round is ONE PROVIDER STEP, and one step's thinking is ONE TOPIC: the thought that
-    // streamed so far ENDS where it stands (same node, same parent, same position - see
-    // `sealReasoning`), and this step's reasoning draws a new node after the steps that already
+    // streamed so far is detached where it stands - same node, same parent, same position, still OPEN
+    // (see `sealReasoning`) - and this step's reasoning draws a new node after the steps that already
     // arrived (see `appendReasoning`). This is the hole the operator reported: the round boundary
     // only moved the text into the finished part of the SAME node, so a round's thought landed in the
     // topic drawn for an earlier round (or every round accumulated in the one topic above all the

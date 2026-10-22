@@ -245,8 +245,13 @@ $harness = @'
     check(!!restoredReasoning && restoredReasoning.textContent.indexOf("EARLIER-REASONING") >= 0,
       "a reload must repaint the stored thinking, saw: " +
       (restoredReasoning ? restoredReasoning.textContent : "nothing"));
-    check(!!restoredReasoning && restoredReasoning.open === false,
-      "and the repainted thinking must be folded away, not flooding the transcript");
+    // Operator rule, 2026-10-2x (REVERSING the rule this check used to pin: "folded away, not flooding
+    // the transcript"): a thinking topic behaves like a commentary - it is OPEN by default and the only
+    // thing that closes it is the reader, on a replayed transcript exactly as on a live one. A repaint
+    // used to create it `open = !replayingMessages`, which was the one topic whose default depended on
+    // where its rows came from; that is what this asserts is gone.
+    check(!!restoredReasoning && restoredReasoning.open === true,
+      "and a repainted thinking topic must be OPEN like a commentary - only the reader closes it");
     check(!restored.querySelector(".unfinished-notice button"),
       "an active turn must not offer a duplicate continuation");
     check(!window.__calls.some(function (call) { return call.url === "chat" && call.method === "POST"; }),
@@ -2893,12 +2898,12 @@ $harness = @'
     var folded = settled[settled.length - 1];
     check(!!folded, "reasoning: collapsing the run must not swallow the thinking");
     // Operator, 2026-10-21: the thinking is what they follow, so it is not swallowed - the RUN topic is
-    // what folds when the answer lands. Operator, 2026-10-2x: a topic that FOLLOWS the thinking must
-    // END it, so the bash step above closes this topic IN PLACE (collapsed, same node, same place) and
-    // a later thought is a new node. Asserted as the closed node still being here and inside the run -
-    // never as a deleted or re-created one.
-    check(!!folded && folded.isConnected && folded.open === false,
-      "reasoning: a tool step is the next topic, so it closes the thinking in place - the node stays");
+    // what folds when the answer lands. Operator, 2026-10-2x, which REVERSES the rule this check used to
+    // pin: a thinking topic behaves like a commentary - it stays OPEN, and only the reader closes it. The
+    // bash step above is the next topic and must NOT fold this one; the node stays, open, in place (same
+    // node, same position) and inside the run topic - never collapsed, deleted or re-created.
+    check(!!folded && folded.isConnected && folded.open === true && folded.body.hidden === false,
+      "reasoning: a tool step is the next topic and must NOT close the thinking - it stays open in place");
     // It belongs *inside* the topic: it is the route, not the answer, and a long run left a wall of
     // "thinking · N chars" rows sitting outside the topics, between the reader and the answer
     // (measured live: 196 of them outside the topics in one thread).
@@ -2921,10 +2926,11 @@ $harness = @'
     var soloBlock = solo[solo.length - 1];
     check(!!soloBlock && soloBlock.closest("wa-run") === null,
       "reasoning: a run that called no tool keeps its thinking visible, outside any topic");
-    // WHY this still holds under the new rule: a reply is not a topic, so no next topic started and
-    // nothing closed the thinking; only a following commentary, decision or tool step ends it.
+    // WHY this holds under the new rule: nothing in the app closes this topic any more - not a reply,
+    // not the next commentary/decision/tool step, not the round boundary, not the final answer's fold.
+    // Only the reader can (operator rule, 2026-10-2x).
     check(!!soloBlock && soloBlock.open === true,
-      "reasoning: and it stays open when that run answers - no next topic started to close it");
+      "reasoning: and it stays open when that run answers - no next topic can close the thinking");
     window.handleEvent({ type: "done" });
   })();
 
