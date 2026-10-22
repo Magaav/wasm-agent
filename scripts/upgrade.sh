@@ -322,8 +322,20 @@ idle_ticks=0
 # fails. `WA_IDLE_MAX_SECONDS` (default 0 = no cap) is an operator's hard wall-clock bound.
 progress_at=0
 IDLE_MAX="${WA_IDLE_MAX_SECONDS:-0}"
+polls=0
 while :; do
   state="$(health)"
+  # Every poll is recorded to a FILE, never to stdout. Measured twice on 2026-10-22: an installer logged
+  # one line and then went silent for 40 minutes, and a wait and a wedge were indistinguishable because
+  # the only channel was the parent's pipe. This trail names the poll the run died on.
+  polls=$((polls + 1))
+  printf '%s poll=%s waited=%ss idle_ticks=%s node_state=%s bytes=%s\n' "$(date -u +%H:%M:%SZ)" "$polls" "$waited" "$idle_ticks" \
+    "$(printf '%s' "$state" | sed -n 's/.*"node_state":{"state":"\([a-z]*\)".*/\1/p' | head -1)" "${#state}" \
+    >> "${WAIT_LOG:-$INSTALL_DIR/upgrade-wait.log}" 2>/dev/null
+  if [ "$polls" -gt "${WA_IDLE_MAX_POLLS:-1440}" ]; then
+    say "gave up after $polls polls (WA_IDLE_MAX_POLLS); not upgrading. Trail: ${WAIT_LOG:-$INSTALL_DIR/upgrade-wait.log}"
+    exit 1
+  fi
   if [ -z "$state" ]; then say "the node is not answering - nothing to wait for"; break; fi
   if node_is_idle "$state"; then
     # A debounce, not a delay for its own sake: a turn that starts a moment after the previous one ended
