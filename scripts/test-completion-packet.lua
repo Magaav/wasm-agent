@@ -147,6 +147,13 @@ check_eq(packet.artifacts.untracked,0,"a fresh worktree has nothing untracked")
 check(packet.artifacts.head~=nil and #packet.artifacts.head==40,"the packet carries the checkout's head")
 check_eq(packet.review.needs_wake,true,"the delivery still needs judgement")
 check_eq(packet.review.kind,"evaluation","a completed delivery is an evaluation")
+-- A delivery that carries NO account of itself is a different judgement, and the packet says so in a
+-- field instead of leaving it to be inferred from the note: this child settled `completed` with no
+-- result, so there is nothing to weigh and the coordinator has to open its own transcript/checkout.
+check_eq(packet.cause.report,"absent","this fixture child handed back no report")
+check_eq(packet.cause.delivery,"unreported","a reportless delivery is marked unreported, not merely noted")
+check_eq(packet.review.reason,"delivery_unreported",
+  "the wake names the reportless delivery as its own reason, saw "..tostring(packet.review.reason))
 check_eq(deliveries[1].packet,row.packet,"the packet travels with the wake, not behind a fetch")
 check_eq(deliveries[1].id,"packet-child","the wake names the child it is about")
 tick()
@@ -236,6 +243,9 @@ statuses["packet-child-reported"]=view("packet-child-reported",child,"explore",
 tick()
 packet=json.decode(completions.status("packet-child-reported","master").packet)
 check_eq(packet.cause.report,"present","a child that reported is reported as having reported")
+check_eq(packet.cause.delivery,"reported","a delivery that reports itself is not marked unreported")
+check_eq(packet.review.reason,"delivery_ready_to_evaluate",
+  "a reported delivery keeps the ordinary evaluation reason, saw "..tostring(packet.review.reason))
 check_eq(packet.cause.events,1174,"the cause carries the recorded event count")
 check(packet.cause.note:find("events=1174",1,true)~=nil,"the cause note carries the event count")
 
