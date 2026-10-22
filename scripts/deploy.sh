@@ -685,7 +685,11 @@ fi
 # installed". The record describes the install; the sentinel proof has its own verdict in deploy-result.json.
 UPGRADE_HASH="$(sha256sum < "$INSTALL_DIR/scripts/upgrade.sh" 2>/dev/null | awk '{print $1}')"
 [ -n "$UPGRADE_HASH" ] || UPGRADE_HASH=missing
-record_installed
+# NOT recorded here. `record_installed` is DEFINED about a hundred lines below, and bash resolves a
+# function name at CALL time: this call ran as `record_installed: command not found`, which is how a
+# successful install on 2026-10-22 recorded commit=unknown / branch=unknown / dirty=unknown and silently
+# disabled every later staleness check. Nothing between here and the definition has a side effect, so the
+# call immediately after the definition writes exactly the same facts.
 
 ship_file() { # source destination what
   local source="$1" destination="$2" what="$3" staged
@@ -797,6 +801,14 @@ record_installed() {
     "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$reason_line" \
     > "$record_tmp" && mv -f "$record_tmp" "$INSTALL_DIR/installed.txt" \
     || fail "node installed, but installed.txt could not be committed atomically"
+  # A record nobody can act on is worse than no record: `unknown` is exactly what a staleness check reads
+  # as "nothing to do". Measured 2026-10-22 - the install succeeded and the record said commit=unknown, so
+  # nothing downstream could tell what was running. Refuse to commit such a record instead.
+  local recorded_commit
+  recorded_commit="$(sed -n 's/^commit=//p' "$INSTALL_DIR/installed.txt" 2>/dev/null | head -1)"
+  case "$recorded_commit" in
+    ''|unknown) fail "installed.txt would record commit=unknown; refusing to write a record no check can use" ;;
+  esac
 }
 
 # Record what is installed HERE, not only at the end. Every fact this record names - the exact commit, the
@@ -922,7 +934,7 @@ if [ -d "$ROOT/jobs" ] && [ -d "$ROOT/scripts" ]; then
       || fail "node installed, but could not ship $(basename "$source")"
     PIPELINE=$((PIPELINE + 1))
   done
-  for source in "$ROOT"/jobs/whatsapp-*.json "$ROOT"/jobs/on-subagent-return.json "$ROOT"/jobs/subagent-return-observe.json "$ROOT"/jobs/on-sentinel-return.json "$ROOT"/jobs/sentinel-return-observe.json; do
+  for source in "$ROOT"/jobs/whatsapp-*.json "$ROOT"/jobs/on-subagent-return.json "$ROOT"/jobs/subagent-return-observe.json "$ROOT"/jobs/on-sentinel-return.json "$ROOT"/jobs/sentinel-return-observe.json "$ROOT"/jobs/on-stale.json; do
     [ -f "$source" ] || continue
     JOB_NAME="$(basename "$source" .json)"
     # The job files name their script as PREPARED_BY_INSTALL/... so one file works from a checkout and from

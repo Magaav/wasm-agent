@@ -871,6 +871,45 @@ fn health_body() -> Vec<u8> {
         "running": subagent_running,
         "active": subagent_active,
     });
+    // ONE derived answer to "is this node working?", computed from THIS snapshot and published, so no
+    // consumer re-derives it from separate reads. scripts/upgrade.sh did exactly that - four string
+    // matches that could each pass while another field was busy - and on 2026-10-22 it read "idle" with a
+    // turn in flight and stopped the node under it ("lost the local node mid-run"). The sentinel's onStale
+    // event reads this same field, so the upgrade gate and the event agree by construction.
+    let deploy_state_value = (|| -> Option<serde_json::Value> {
+        let exe = std::env::current_exe().ok()?;
+        let text = std::fs::read_to_string(exe.parent()?.join("deploy-state.json")).ok()?;
+        serde_json::from_str(&text).ok()
+    })();
+    let installing = deploy_state_value
+        .as_ref()
+        .and_then(|value| value.get("state"))
+        .and_then(|value| value.as_str())
+        == Some("upgrading");
+    let busy_threads = node_threads
+        .iter()
+        .filter(|thread| thread.get("label").map(|label| !label.is_null()).unwrap_or(false))
+        .count();
+    let queued_now = QUEUED.load(Ordering::Relaxed);
+    let node_state = if installing {
+        serde_json::json!({"state": "upgrading"})
+    } else if busy_threads > 0 || subagent_running > 0 || subagent_queued > 0 || queued_now > 0 {
+        serde_json::json!({
+            "state": "busy",
+            "busy_threads": busy_threads,
+            "subagents_running": subagent_running,
+            "subagents_queued": subagent_queued,
+            "queue": queued_now,
+        })
+    } else {
+        serde_json::json!({
+            "state": "idle",
+            "busy_threads": 0,
+            "subagents_running": 0,
+            "subagents_queued": 0,
+            "queue": 0,
+        })
+    };
     // Built with serde_json rather than a hand-escaped format string: the escaping
     // is exactly the kind of thing that silently produces invalid JSON, and this is
     // the one endpoint that must never be the thing that lies.
@@ -943,6 +982,13 @@ fn health_body() -> Vec<u8> {
         // with `active == queued + running`; `subagents_detail` carries the runtime's own view. Neither
         // contains a prompt or a credential.
         "subagents": subagent_counts,
+        // See the derivation above: one snapshot, one word. `idle` is the only value that permits stopping
+        // this node, and it is false whenever any thread, run, queue entry or subagent is working.
+        "node_state": node_state,
+        // The install's own phase record, written by scripts/upgrade.sh next to the binary. Absent means no
+        // install has run from this directory; `state: upgrading` lets a client draw progress instead of
+        // reporting a lost node, and after a restart it is the last install's outcome.
+        "upgrading": deploy_state_value,
         "subagents_detail": subagent_health,
         "node_threads_spawned": POOL.get().map(|pool| pool.spawned.load(Ordering::Relaxed)).unwrap_or(0),
         "node_threads_retired": POOL.get().map(|pool| pool.retired.load(Ordering::Relaxed)).unwrap_or(0),

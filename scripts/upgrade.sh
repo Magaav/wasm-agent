@@ -276,9 +276,43 @@ say "it answers"
 fi
 
 # --- 2. wait for the node to be idle, so no turn is interrupted ----------------------------------
+# --- the upgrade's own state, readable while it happens -------------------------------------------
+# /health publishes this file as `upgrading`, so the window can draw a progress bar and say "restarting"
+# instead of "lost the local node" - and a reader can tell an install in progress from a dead node.
+UPGRADE_PHASE=waiting
+phase() {
+  UPGRADE_PHASE="$1"
+  printf '{"state":"%s","phase":"%s","at":"%s","from":"%s","to":"%s"}\n' \
+    "$1" "$2" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${PREVIOUS_COMMIT:-unknown}" "${COMMIT:-unknown}" \
+    > "$INSTALL_DIR/deploy-state.json.tmp" 2>/dev/null \
+    && mv -f "$INSTALL_DIR/deploy-state.json.tmp" "$INSTALL_DIR/deploy-state.json" 2>/dev/null
+}
+finish() {
+  _rc=$?
+  if [ "$_rc" -eq 0 ]; then phase done complete; else phase failed "$UPGRADE_PHASE"; fi
+}
+trap finish EXIT
+phase upgrading waiting
 say "waiting for the running node to finish what it is doing"
 waited=0
 FINE_TICKS=0
+
+# ONE predicate from ONE snapshot. /health publishes `node_state`, derived from a single read of runs,
+# queue, subagents and workers. The four independent greps this replaces could each pass while a different
+# field was busy, and on 2026-10-22 that stopped a node under a live turn (`lost the local node mid-run`).
+node_is_idle() {
+  case "$1" in
+    *'"node_state":"idle"'*) return 0 ;;
+    *'"node_state":'*) return 1 ;;   # busy / upgrading / restarting are never idle
+  esac
+  # A node older than node_state: require every fact to hold in the SAME payload.
+  printf '%s' "$1" | grep -q '"runs":\[\]' || return 1
+  printf '%s' "$1" | grep -q '"queue":0' || return 1
+  printf '%s' "$1" | grep -q '"subagents":{"active":0,"queued":0,"running":0}' || return 1
+  if printf '%s' "$1" | grep -q '"label":"POST /chat'; then return 1; fi
+  return 0
+}
+idle_ticks=0
 # When the node was last seen making progress. The deadline below is measured from here, not from the
 # start, so a long turn that is still alive is waited on and only a worker that has stopped reporting
 # fails. `WA_IDLE_MAX_SECONDS` (default 0 = no cap) is an operator's hard wall-clock bound.
@@ -286,13 +320,15 @@ progress_at=0
 IDLE_MAX="${WA_IDLE_MAX_SECONDS:-0}"
 while :; do
   state="$(health)"
-  case "$state" in
-    *'"current":null'*)
-      # Older nodes report current=null while secondary workers are busy.
-      # Inspect every worker too, before trusting that it is safe to stop.
-      if ! printf '%s' "$state" | grep -q '"label":"POST /chat' && printf '%s' "$state" | grep -q '"queue":0'; then break; fi ;;
-    "") say "the node is not answering - nothing to wait for"; break ;;
-  esac
+  if [ -z "$state" ]; then say "the node is not answering - nothing to wait for"; break; fi
+  if node_is_idle "$state"; then
+    # A debounce, not a delay for its own sake: a turn that starts a moment after the previous one ended
+    # must not be killed in the gap. Three consecutive idle polls is a stable quiet, not one lucky read.
+    idle_ticks=$((idle_ticks + 1))
+    [ "$idle_ticks" -ge 3 ] && break
+  else
+    idle_ticks=0
+  fi
   # A long turn is not a wedged one. Waiting is bounded by *lack of progress*, not by wall time: a run
   # whose worker is still reporting is doing work, and interrupting it because fifteen minutes passed
   # is how a legitimate 40-minute turn made every queued upgrade wait 900s, fail, and be retried while
@@ -330,6 +366,7 @@ done
 
 # --- 3. swap, restart, verify, roll back if the new one does not come up -------------------------
 OLD_PID="$(pid_on_port)"
+phase upgrading stopping
 [ -n "$OLD_PID" ] && say "stopping the node (pid $OLD_PID, by pid - never by image name)"
 BACKUP="$INSTALLED.pre-upgrade"
 cp -f "$INSTALLED" "$BACKUP" 2>/dev/null && cmp -s "$INSTALLED" "$BACKUP" || { say "cannot verify recovery binary; not stopping the node"; exit 1; }
@@ -400,6 +437,7 @@ elif cmp -s "$NEW" "$INSTALLED"; then
 else
   # Copied next to the target and renamed over it: a crash mid-copy used to leave a torn binary at the
   # installed path, while a rename is all-or-nothing.
+  phase upgrading installing
   { cp -f "$NEW" "$INSTALLED.new" && mv -f "$INSTALLED.new" "$INSTALLED"; } || { rm -f "$INSTALLED.new"; SWAP_OK=0; }
   say "installed $(basename "$NEW") over $INSTALLED"
 fi
@@ -443,6 +481,7 @@ if [ "$UI_OK" = "1" ] && wait_health; then
       fi
     done
     record_install || { say "node upgraded, but final installed.txt could not be recorded"; exit 3; }
+    phase upgrading verifying
     say "upgraded and recorded: $(health)"
     # Keep this one binary/UI backup for recovery after the deployment verdict.
     exit 0

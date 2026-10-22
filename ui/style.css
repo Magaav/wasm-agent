@@ -1324,3 +1324,29 @@ wa-tasks summary { cursor: pointer; padding: var(--space); }
 .task-card[data-state="unknown"] .task-state, .task-card[data-state="failed"] .task-state { color: var(--warn); }
 .task-actions { display: flex; flex-wrap: wrap; gap: var(--gap); }
 .task-evidence { white-space: pre-wrap; overflow-wrap: anywhere; padding: var(--pad); background: var(--panel-2); }
+
+/* --- install progress ------------------------------------------------------------------------------
+   The node publishes the install's own phase record (deploy-state.json) as `upgrading`. This bar is the
+   visible half: it names the phase, fills as the install advances, and stays drawn across the moment the
+   node stops - so a deliberate restart cannot be mistaken for a dead node. Everything is opaque; the
+   animation is opacity on a text row, not a compositor layer over the transcript. */
+#upgrade-bar {
+  position: fixed; inset: 0 0 auto 0; z-index: 60;
+  display: flex; align-items: center; gap: var(--space, 8px);
+  padding: 4px var(--space, 8px);
+  background: var(--panel, #141414); color: var(--text, #e8e8e8);
+  font: 12px/1.4 var(--font-mono, ui-monospace, monospace);
+}
+#upgrade-bar[hidden] { display: none; }
+.upgrade-bar-label { flex: none; white-space: nowrap; }
+.upgrade-bar-track {
+  position: relative; flex: 1; height: 3px; overflow: hidden;
+  background: var(--line, #2a2a2a); border-radius: 2px;
+}
+.upgrade-bar-fill {
+  position: absolute; inset: 0 auto 0 0; width: var(--upgrade-progress, 10%);
+  background: currentColor; transition: width 400ms ease;
+}
+/* A slow pulse says "still working" while a phase is long (a build can take a minute). */
+body.upgrading #upgrade-bar { animation: upgrade-pulse 1400ms ease-in-out infinite; }
+@keyframes upgrade-pulse { 0%, 100% { opacity: .72 } 50% { opacity: 1 } }

@@ -65,6 +65,13 @@
   </script>
 </head>
 <body class="expanded">
+  <!-- The install is a visible event. /health publishes the phase record upgrade.sh writes; while it says
+       upgrading this bar shows the phase and stays up across the restart, so a deliberate stop never reads
+       as a crash. Hidden by default: no node, no install, no bar. -->
+  <div id="upgrade-bar" hidden role="progressbar" aria-label="Installing a new build">
+    <span class="upgrade-bar-label">installing…</span>
+    <div class="upgrade-bar-track"><div class="upgrade-bar-fill"></div></div>
+  </div>
   <div id="orb" class="orb" title="wasm-agent">
     <span class="orb-ring"></span>
     <span class="orb-core"></span>

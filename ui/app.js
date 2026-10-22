@@ -3665,6 +3665,7 @@ function markRunStreamAlive() {
   if (livenessWarningKind === 'connection') setLiveness(null);
 }
 function observeRunHealth(health) {
+  applyUpgradeState(health);
   const id = busy ? runKey(activeRunId) : runKey(observedRun);
   const scope = runStepScope() + ':' + (id || 'unidentified');
   if (livenessSample?.scope !== scope) {
@@ -3779,9 +3780,45 @@ function isConnectionLoss(error) {
 }
 
 function connectionMessage() {
+  // An install stops the node on purpose. Reporting that as a lost node was the misdiagnosis that made a
+  // deliberate restart look like a crash; while the install's own record says "upgrading", say so.
+  if (upgradeState) {
+    return "the node is restarting to install " + (upgradeState.to || "a new build") +
+      " (phase " + (upgradeState.phase || "waiting") + "). This run is recorded as unfinished, and" +
+      " `wa resume --list` will offer to continue it once the node answers again.";
+  }
   return "lost the local node mid-run (nothing is serving " + location.origin + ")." +
     " Start it with `wa ui` - this run is recorded as unfinished, and" +
     " `wa resume --list` will offer to continue it.";
+}
+
+// The install is observable while it happens. /health publishes the phase record upgrade.sh writes, so the
+// window draws progress and says "restarting" across the gap when nothing is serving - the bar stays up
+// through the outage because a null health reading during a known install is the expected state, not a loss.
+let upgradeState = null;
+function applyUpgradeState(health) {
+  const bar = document.getElementById('upgrade-bar');
+  if (!bar) return;
+  const up = health && health.upgrading;
+  if (up && up.state === 'upgrading') {
+    upgradeState = up;
+  } else if (health) {
+    // A real answer with no install in progress: the bar comes down. A null health does NOT clear it.
+    upgradeState = null;
+  }
+  document.body.classList.toggle('upgrading', !!upgradeState);
+  if (!upgradeState) { bar.hidden = true; bar.removeAttribute('data-phase'); return; }
+  const order = ['waiting', 'stopping', 'installing', 'verifying'];
+  const at = Math.max(0, order.indexOf(upgradeState.phase));
+  const pct = Math.min(92, 10 + at * 26);
+  bar.hidden = false;
+  bar.dataset.phase = upgradeState.phase || 'waiting';
+  bar.style.setProperty('--upgrade-progress', pct + '%');
+  const label = bar.querySelector('.upgrade-bar-label');
+  if (label) {
+    label.textContent = (health ? 'installing ' + (upgradeState.to || 'a new build') + ' · ' + (upgradeState.phase || 'waiting')
+      : 'node restarting · ' + (upgradeState.phase || 'installing'));
+  }
 }
 
 // The window should not sit there looking fine while its node is gone: after a
@@ -3790,7 +3827,8 @@ function connectionMessage() {
 let nodeWatch = null;
 function nodeOffline(offline) {
   document.body.classList.toggle("node-offline", offline);
-  if (offline) setStatus("the local node is not answering - start it with `wa ui`");
+  if (offline && upgradeState) setStatus("the node is restarting to install " + (upgradeState.to || "a new build") + " - it will answer again shortly");
+  else if (offline) setStatus("the local node is not answering - start it with `wa ui`");
   else clearStatus();
 }
 function watchNode() {

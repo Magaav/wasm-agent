@@ -1,0 +1,10 @@
+{
+  "id": "on-stale",
+  "name": "onStale",
+  "trigger": { "kind": "schedule", "every_seconds": 30 },
+  "action": {
+    "kind": "run",
+    "script": "PREPARED_BY_INSTALL/scripts/on-stale.sh",
+    "timeout_seconds": 900
+  }
+}
