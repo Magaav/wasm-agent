@@ -9,7 +9,8 @@ host.getenv=function(k)
   if k=='WASM_AGENT_MODEL_LIMITS' then return '{"deepseek-v4.1-flash":{"context":1050000,"reserve":84000}}' end
   return getenv(k)
 end
-host.http=function() error('no network permitted') end;host.http_stream=host.http
+local summary_attempts=0
+host.http=function() summary_attempts=summary_attempts+1;error('no network permitted') end;host.http_stream=host.http
 local memory=dofile('lua/core/memory.lua');memory.setup()
 local agent=dofile('lua/core/agent.lua')
 local meter=dofile('lua/core/context_usage.lua')
@@ -42,12 +43,12 @@ local suffix=telemetry.estimate_messages({messages[4]})
 check(fresh:context_tokens(messages)==567352+suffix,'only unmeasured suffix is estimated, including ciphertext conservatively')
 fresh.role='guest';check(fresh:context_tokens(messages)>966000 and fresh.context_measurement_reason=='measurement_scope_changed','warm cached count stays scope fenced')
 fresh.role='master'
-check(not fresh:maybe_compact(messages),'no summary around54% despite inflated raw JSON')
+check(not fresh:maybe_compact(messages) and summary_attempts==0,'no summary around54% despite inflated raw JSON, and no request was attempted')
 local limits=provider.budget(bot.model)
 check(limits.trigger==966000 and limits.trigger/limits.context==.92,'existing actual provider policy remains92%')
 local high=agent.new(sid,function()end,'master','high','');high.model=bot.model;high.tool_list=tools
 check(meter.remember(high,{messages[1]},tools,{known=true,prompt=966000,output=0}),'high-water measurement')
-check(high:context_tokens({messages[1]})==966000 and not high:maybe_compact({messages[1]}),'threshold equality retains original policy')
+check(high:context_tokens({messages[1]})==966000 and not high:maybe_compact({messages[1]}) and summary_attempts==0,'threshold equality retains original policy without spending a summary request')
 local above={messages[1],{role='user',content=string.rep('z',400)}}
 check(high:context_tokens(above)>966000,'tail crosses92% threshold')
 -- Missing rows mean nothing to summarize; prove the predicate without spending inference.
@@ -98,7 +99,7 @@ for i=1,12 do memory.append_turn(threshold_sid,{role=i%2==1 and 'user' or 'assis
 local threshold=agent.new(threshold_sid,function()end,'master','master','')
 local threshold_context=threshold:build_context()
 check(meter.remember(threshold,threshold_context,threshold.tool_list,{known=true,prompt=966000,output=0}),'actual transcript calibrated at92%')
-check(not threshold:maybe_compact(threshold_context),'no actual summary at threshold equality')
+check(not threshold:maybe_compact(threshold_context) and summary_attempts==0,'no actual summary, and no attempted request, at threshold equality')
 memory.append_turn(threshold_sid,{role='user',content='new tail crosses the trigger'})
 local summary_calls=0
 host.http=function(_,_,_,body)

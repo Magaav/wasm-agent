@@ -949,6 +949,13 @@ function M:compact_now(messages, opts)
   local measurement_reason, budget, trigger = opts.measurement_reason, opts.budget, opts.trigger
   local force = opts.force
 
+  -- The threshold decision lives in the one wrapper, not in a caller: maybe_compact
+  -- measures and hands over `trigger` but never compares it, so without this line
+  -- any caller that reaches here summarises no matter how small the context -- an
+  -- unrequested prefix rewrite, and a cold provider cache, for no gain. `force` is
+  -- overflow recovery, which must compact whatever the measured size.
+  if not force and trigger and before and before <= trigger then return false end
+
   local session = memory.session(self.session_id) or {}
   local rows = memory.session_messages(self.session_id, {
     after_seq = session.summarized_until or 0, all = true,exclude_summaries=true,
