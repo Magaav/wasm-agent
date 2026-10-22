@@ -1271,6 +1271,10 @@ function clearStatus() {
 // swallowed is a run that called no tool at all: no topic is created for one, so its thinking stays
 // visible instead of reading as a run that only called tools.
 let reasoningBlock = null;
+// The live run's own round number, so an authoritative copy can find the topic that streamed ITS round
+// (see `appendReasoning`). Set by the `round` event and never while a transcript is replayed: a
+// repainted topic was drawn from durable rows, and those carry no round to belong to.
+let liveReasoningRound = 0;
 // ONE TRAIN OF THOUGHT IS ONE TOPIC, AND THE TOPIC KEEPS ITS PLACE. The node is kept across rounds,
 // replies and the final answer's fold, so the next burst appends into the same element wherever it
 // now sits (a moved node is still the same node; only a disconnected one has to be replaced).
@@ -1305,9 +1309,26 @@ function lastRunTopic(root) {
   const topics = root.querySelectorAll(RUN_TOPIC_SELECTOR);
   return topics.length ? topics[topics.length - 1] : null;
 }
-function appendReasoning(text, complete = false) {
+function appendReasoning(text, complete = false, round = null) {
   if (!text && !complete) return reasoningBody();
   const bubble = currentBubble();
+  // THE AUTHORITATIVE COPY BELONGS TO THE TOPIC THAT STREAMED ITS ROUND. A step's own prose is the next
+  // topic, so it seals this topic before the round ends (`sealReasoning`); the copy the node emits at
+  // the round's end then found no current topic and built a second one, drawing the same thought twice
+  // (operator screenshot, 2026-10-22: two blocks labelled `thinking 2525 chars`, one ledger row).
+  // The identity is the ROUND, never the text: dropping "the same text again" is what once discarded
+  // the replayed half of a streamed block. So write the copy into that round's own topic, in place,
+  // and create nothing - the topic keeps its position and its folded state, and its body becomes the
+  // node's whole copy of the round.
+  if (complete && round != null && !replayingMessages) {
+    const own = Array.from(bubble.body.querySelectorAll("wa-reasoning"))
+      .find(node => node.dataset.reasoningRound === String(round));
+    if (own && own !== reasoningBlock) {
+      own.setText(String(text == null ? "" : text));
+      pin();
+      return own;
+    }
+  }
   if (!reasoningBlock || !reasoningBlock.isConnected) {
     // A THINKING TOPIC KEEPS ITS OWN LIFE. It used to be re-created as soon as a tool step moved it into
     // the run topic (`parentNode` was no longer the bubble), which split one train of thought into one
@@ -1328,6 +1349,12 @@ function appendReasoning(text, complete = false) {
     // so the thinking reads as a step of the same kind rather than as a different thing.
     reasoningBlock = document.createElement("wa-reasoning");
     reasoningBlock.open = !replayingMessages;
+    // Which live round this topic streamed, so its authoritative copy can find it (see above). A
+    // replayed topic gets no mark: its rows carry no round, and a stale mark would let a later live
+    // run write into history.
+    if (!replayingMessages && liveReasoningRound > 0) {
+      reasoningBlock.dataset.reasoningRound = String(liveReasoningRound);
+    }
     const lastTopic = lastRunTopic(bubble.body);
     if (lastTopic && lastTopic.parentNode) lastTopic.parentNode.insertBefore(reasoningBlock, lastTopic.nextSibling);
     else bubble.body.append(reasoningBlock);
@@ -2505,6 +2532,7 @@ function handleEvent(event) {
     }
   } else if (event.type === "round") {
     releaseAnswerAnchor(transcript, false);
+    if (!replayingMessages) liveReasoningRound = Number(event.n) || liveReasoningRound + 1;
     // `tools` is the request's own tool surface (lua/core/agent.lua). It is per step, so a later
     // round of the same run resets the answer phase: its prose starts provisional again.
     const bubble = currentBubble();
@@ -2574,7 +2602,8 @@ function handleEvent(event) {
     // A reasoning model can think for a long time before it says anything, and a
     // silent panel is indistinguishable from a hung one. Keep the reasoning
     // topic; the compact measured phase provides the live "not hung" signal.
-    appendReasoning(event.text || "", event.complete === true);
+    appendReasoning(event.text || "", event.complete === true,
+      event.round == null ? null : Number(event.round));
     if (!replayingMessages) setStatus("");
   } else if (event.type === "decision") {
     addDecision(event);
