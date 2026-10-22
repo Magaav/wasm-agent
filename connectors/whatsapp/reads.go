@@ -102,8 +102,8 @@ func (j *Journal) readPageBudget(c Config, r readRequest, kind string, budget in
 	if kind == "read_snapshot" {
 		where += " AND m.observed>=?"
 		args = append(args, r.Since)
-		where += " AND (?=0 OR m.sent>=?) AND (?=0 OR m.sent<=?) AND (?='' OR instr(lower(m.body),lower(?))>0 OR instr(lower(COALESCE(a.transcript,'')),lower(?))>0)"
-		args = append(args, r.SentSince, r.SentSince, r.Until, r.Until, r.Query, r.Query, r.Query)
+		where += " AND (?=0 OR m.sent>=?) AND (?=0 OR m.sent<=?) AND (?='' OR instr(lower(m.body),lower(?))>0 OR instr(lower(COALESCE(a.transcript,'')),lower(?))>0 OR instr(lower(m.media_text),lower(?))>0)"
+		args = append(args, r.SentSince, r.SentSince, r.Until, r.Until, r.Query, r.Query, r.Query, r.Query)
 	} else if kind == "list_chats" {
 		where += " AND (?='' OR instr(lower(m.chat),lower(?))>0 OR instr(lower(m.title),lower(?))>0 OR instr(lower(m.metadata_title),lower(?))>0)"
 		args = append(args, r.Query, r.Query, r.Query, r.Query)

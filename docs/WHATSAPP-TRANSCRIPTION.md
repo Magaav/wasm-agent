@@ -5,9 +5,11 @@ Mandatory cutover: [WHATSAPP-MIGRATION.md](WHATSAPP-MIGRATION.md).
 
 The linked-device service journals incoming AND synchronized own outgoing audio.
 Ingestion, independent durable compute tasks and held/confirmed outbox parts are
-separate. One failure does not block ingestion, and downtime backlog after the
-explicit first activation cutoff is not expired after ten minutes. Initial history
-is never bulk-posted. No general AI responder, read marking or composer action.
+separate. Only **incoming** audio is posted when transcript posting is enabled;
+own outgoing audio is transcribed for the journal and is not replied to. One failure
+does not block ingestion, and downtime backlog after the explicit first activation
+cutoff is not expired after ten minutes. Initial history is never bulk-posted. No
+general AI responder, read marking or composer action.
 
 A persistent private local `faster-whisper` worker loads multilingual `small`,
 CPU/int8, beam5/VAD once. Model cache provisioning is separate; message processing
@@ -21,9 +23,16 @@ per account (`wa-whatsapp init ... --language pt`, or stop service then
 cross-language translation; translation mode is unsupported, not silently rerouted
 to another language/provider. Queued tasks retain their language snapshot.
 
-Marked UTF-8/rune-safe numbered transcripts reply-link to the source audio in the
-original chat. Reserve/dispatch uncertainty is persisted before posting; unknown
-sends never auto-retry. Server acceptance is not a recipient delivery/read receipt.
+Marked UTF-8/rune-safe numbered transcripts are `🤖 _Copiloto_` followed by the text
+and reply-link to the source audio in the original chat. `transcript_posting` is a
+separate toggle, default **off**; enable/disable offline with
+`wa-whatsapp posting --state <private-path> --set enable|disable`. Reserve/dispatch
+uncertainty is persisted before posting; unknown sends never auto-retry. Server
+acceptance is not a recipient delivery/read receipt.
+
+Pin `av==18.1.0`: PyAV 19 removed `metadata_errors`, which faster-whisper 1.2.1 still
+passes. The model cache must contain the full multilingual `small` snapshot.
+Image OCR is separate: see [WHATSAPP-OCR.md](WHATSAPP-OCR.md).
 No live STT quality, media compatibility or message delivery is claimed from fixtures.
 
 Former browser pipeline documentation is retained as

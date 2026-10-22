@@ -253,6 +253,10 @@ func run() error {
 	python := f.String("python", "", "absolute private Python executable")
 	worker := f.String("worker", "", "absolute whatsapp-stt-local.py")
 	cache := f.String("models", "", "private preprovisioned model cache")
+	ocrPython := f.String("ocr-python", "", "absolute private OCR Python executable (defaults to --python)")
+	ocrWorker := f.String("ocr-worker", "", "absolute whatsapp-ocr-local.py (defaults next to the executable)")
+	ocrModels := f.String("ocr-models", "", "optional private OCR model cache")
+	posting := f.String("set", "", "posting toggle: enable|disable")
 	confirm := f.Bool("approve-transcript-posting", false, "explicit original-chat transcript policy approval after retirement check")
 	retired := f.String("retirement-receipt", "", "verified operator cutover receipt path")
 	intentID := f.String("intent-id", "", "exact durable operator intent ID for offline owner inspection")
@@ -323,6 +327,12 @@ func run() error {
 		c.Chats = nil
 		c.Requested = false
 		c.Activated = 0
+		return j.save(c)
+	case "posting":
+		if *posting != "enable" && *posting != "disable" {
+			return errors.New("posting_set_enable_or_disable_required")
+		}
+		c.TranscriptPosting = *posting == "enable"
 		return j.save(c)
 	case "pause":
 		c.Requested = false
@@ -425,8 +435,20 @@ func run() error {
 	go serveAPI(server, listener, ctx, cancel, serverErrors)
 	w := &Worker{Python: *python, Script: *worker, Cache: *cache}
 	defer w.Close()
+	ocrExe := *ocrPython
+	if ocrExe == "" {
+		ocrExe = *python
+	}
+	ocrScript := *ocrWorker
+	if ocrScript == "" {
+		if exe, e := os.Executable(); e == nil {
+			ocrScript = filepath.Join(filepath.Dir(exe), "whatsapp-ocr-local.py")
+		}
+	}
+	o := &OCRWorker{Python: ocrExe, Script: ocrScript, Cache: *ocrModels}
+	defer o.Close()
 	var workers sync.WaitGroup
-	workers.Add(2)
+	workers.Add(3)
 	defer func() { cancel(); workers.Wait() }()
 	go func() {
 		defer workers.Done()
@@ -457,6 +479,23 @@ func run() error {
 				if a.client.IsConnected() {
 					if err := j.post(ctx, a); err != nil {
 						j.setState("degraded_post_journal")
+					}
+				}
+			}
+		}
+	}()
+	go func() {
+		defer workers.Done()
+		ticker := time.NewTicker(time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if a.client.IsConnected() {
+					if err := j.processMedia(ctx, a, o); err != nil {
+						j.setState("degraded_media_journal")
 					}
 				}
 			}

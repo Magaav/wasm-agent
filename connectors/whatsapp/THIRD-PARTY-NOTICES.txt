@@ -1,3 +1,10 @@
+Separately provisioned Python compute (not part of this release bundle):
+- faster-whisper 1.2.1 (MIT), ctranslate2 (MIT), PyAV 18.1.0 (BSD-3-Clause)
+- RapidOCR 1.4.4 (Apache-2.0), ONNX Runtime 1.31.0 (MIT), OpenCV 5.0.0.93 (Apache-2.0)
+- NumPy (BSD-3-Clause), Pillow (HPND), Shapely (BSD-3-Clause), pyclipper (MIT)
+These packages are installed in private virtual environments; the release ships only
+the local worker scripts. Their license files remain in the provisioned environment.
+
 WhatsApp connector dependency notices
 Pinned graph: go.mod/go.sum. Unmodified upstream modules.
 Whatsmeow MPL-2.0 source: https://github.com/tulir/whatsmeow/tree/0b0a1cdac3e2

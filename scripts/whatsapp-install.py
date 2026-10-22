@@ -43,8 +43,9 @@ def admit_target(manifest, binary):
     return actual
 
 
-def install(bundle, expected, prefix, state, python, models, apply=False):
-    if any(not Path(p).is_absolute() for p in (bundle, prefix, state, python, models)):
+def install(bundle, expected, prefix, state, python, models, apply=False, ocr_python=None, ocr_models=None):
+    ocr_python = ocr_python or python
+    if any(not Path(p).is_absolute() for p in (bundle, prefix, state, python, models, ocr_python)):
         raise ValueError("absolute_install_paths_required")
     bundle, prefix, state = map(Path, (bundle, prefix, state))
     manifest_file = bundle / "manifest.json"
@@ -60,17 +61,17 @@ def install(bundle, expected, prefix, state, python, models, apply=False):
     if len(source)!=40 or any(c not in '0123456789abcdef' for c in source):
         raise ValueError('invalid_source_commit')
     inputs=manifest.get('source_files',{})
-    required_inputs={'connectors/whatsapp/go.mod','connectors/whatsapp/go.sum','scripts/whatsapp-stt-local.py','scripts/whatsapp-install.py','connectors/whatsapp/THIRD-PARTY-NOTICES.txt','scripts/whatsapp-build.py','scripts/build-whatsapp.sh','LICENSE'}
+    required_inputs={'connectors/whatsapp/go.mod','connectors/whatsapp/go.sum','scripts/whatsapp-stt-local.py','scripts/whatsapp-ocr-local.py','scripts/whatsapp-install.py','connectors/whatsapp/THIRD-PARTY-NOTICES.txt','scripts/whatsapp-build.py','scripts/build-whatsapp.sh','LICENSE'}
     if manifest.get('source_binding')!='frozen-git-archive+pre-post-hashes' or not required_inputs.issubset(inputs):
         raise ValueError('incomplete_source_binding')
     if any(not isinstance(v,str) or len(v)!=64 or any(c not in '0123456789abcdef' for c in v) for v in inputs.values()):
         raise ValueError('invalid_source_hash')
-    for source,name in [('scripts/whatsapp-stt-local.py','whatsapp-stt-local.py'),('scripts/whatsapp-install.py','whatsapp-install.py'),('connectors/whatsapp/THIRD-PARTY-NOTICES.txt','THIRD-PARTY-NOTICES.txt'),('LICENSE','LICENSE')]:
+    for source,name in [('scripts/whatsapp-stt-local.py','whatsapp-stt-local.py'),('scripts/whatsapp-ocr-local.py','whatsapp-ocr-local.py'),('scripts/whatsapp-install.py','whatsapp-install.py'),('connectors/whatsapp/THIRD-PARTY-NOTICES.txt','THIRD-PARTY-NOTICES.txt'),('LICENSE','LICENSE')]:
         if inputs[source]!=manifest['files'].get(name): raise ValueError('source_member_binding_mismatch')
     tree = manifest["tree"]
     if len(tree) != 40 or any(c not in "0123456789abcdef" for c in tree):
         raise ValueError("invalid_source_tree")
-    required = {"wa-whatsapp", "whatsapp-stt-local.py", "whatsapp-install.py", "THIRD-PARTY-NOTICES.txt", "LICENSE"}
+    required = {"wa-whatsapp", "whatsapp-stt-local.py", "whatsapp-ocr-local.py", "whatsapp-install.py", "THIRD-PARTY-NOTICES.txt", "LICENSE"}
     if set(manifest["files"]) != required:
         raise ValueError("unexpected_bundle_members")
     for name, expected_hash in manifest["files"].items():
@@ -78,9 +79,11 @@ def install(bundle, expected, prefix, state, python, models, apply=False):
         if path.is_symlink() or not path.is_file() or digest(path) != expected_hash:
             raise ValueError("artifact_hash_or_ownership_mismatch")
     target = admit_target(manifest, bundle / "wa-whatsapp")
-    for path in (prefix, state, Path(python), Path(models)):
+    for path in (prefix, state, Path(python), Path(models), Path(ocr_python)):
         if not path.is_absolute() or any(c in str(path) for c in ('\n', '\r', '"', '%')):
             raise ValueError("unsafe_service_path")
+    if ocr_models and (not Path(ocr_models).is_absolute() or any(c in ocr_models for c in ('\n', '\r', '"', '%'))):
+        raise ValueError("unsafe_service_path")
     if state == prefix or prefix in state.parents or state in prefix.parents:
         raise ValueError("state_must_be_separate_from_releases")
     release = prefix / "releases" / (tree if manifest["schema"] == 2 else tree + "-" + manifest["platform"])
@@ -109,12 +112,13 @@ def install(bundle, expected, prefix, state, python, models, apply=False):
         (release / name).chmod(0o700 if name == "wa-whatsapp" else 0o600)
     shutil.copyfile(manifest_file, release / "manifest.json")
     # No state initialization, migration, chmod, volume removal, systemctl or firewall command.
+    ocr_models_arg = f' --ocr-models "{ocr_models}"' if ocr_models else ''
     unit = f'''[Unit]
 Description=Private WhatsApp linked-device connector ({tree})
 After=network-online.target
 [Service]
 Type=simple
-ExecStart="{release / 'wa-whatsapp'}" serve --state "{state}" --owners "{owners}" --python "{python}" --worker "{release / 'whatsapp-stt-local.py'}" --models "{models}"
+ExecStart="{release / 'wa-whatsapp'}" serve --state "{state}" --owners "{owners}" --python "{python}" --worker "{release / 'whatsapp-stt-local.py'}" --models "{models}" --ocr-python "{ocr_python}" --ocr-worker "{release / 'whatsapp-ocr-local.py'}"{ocr_models_arg}
 Restart=on-failure
 RestartPreventExitStatus=78
 RestartSec=15
@@ -140,10 +144,12 @@ def main():
     p.add_argument("--state", required=True)
     p.add_argument("--python", required=True)
     p.add_argument("--models", required=True)
+    p.add_argument("--ocr-python", default=None)
+    p.add_argument("--ocr-models", default="")
     p.add_argument("--apply", action="store_true")
     a = p.parse_args()
     print(json.dumps(install(a.bundle, a.manifest_sha256, a.prefix, a.state,
-                             a.python, a.models, a.apply), sort_keys=True))
+                             a.python, a.models, a.apply, a.ocr_python, a.ocr_models), sort_keys=True))
 
 
 if __name__ == "__main__":

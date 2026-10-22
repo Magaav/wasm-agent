@@ -284,7 +284,7 @@ func TestRefusedSourceFairnessUnknownAndScopedPostingDiagnosis(t *testing.T) {
 	j := wideFixture(t)
 	activate(t, j)
 	a := audio("refused", false, 110)
-	b := audio("healthy", true, 120)
+	b := audio("healthy", false, 120)
 	b.Chat = "300@s.whatsapp.net"
 	j.ingest(a)
 	j.ingest(b)

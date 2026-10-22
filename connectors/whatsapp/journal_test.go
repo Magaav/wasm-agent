@@ -38,6 +38,7 @@ func activate(t *testing.T, j *Journal) {
 	c, _ := j.Config()
 	c.Requested = true
 	c.Activated = 100
+	c.TranscriptPosting = true
 	j.save(c)
 }
 func audio(id string, own bool, sent int64) Message {
@@ -169,16 +170,16 @@ func TestHistoryBothDirectionsDedupIndependentCompute(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		j.post(context.Background(), f)
 	}
-	if f.sent != 2 {
-		t.Fatal("both directions not posted", f.sent)
+	if f.sent != 1 {
+		t.Fatal("incoming audio not posted exactly once", f.sent)
 	}
-	if !strings.HasPrefix(f.bodies[0], "🎙️ _Automated transcript_") {
+	if !strings.HasPrefix(f.bodies[0], "🤖 _Copiloto_") {
 		t.Fatal("missing marker")
 	}
 	c, _ := j.Config()
 	c.Requested = false
 	j.save(c)
-	j.ingest(audio("paused-backlog", true, 150))
+	j.ingest(audio("paused-backlog", false, 150))
 	j.processAudio(context.Background(), f, r)
 	if r.calls != 2 {
 		t.Fatal("explicit off ignored")
@@ -238,7 +239,7 @@ func TestCrashIntentSurvivesRestart(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	j.save(Config{Account: "100@s.whatsapp.net", Generation: 1, Language: "en", Mode: "transcribe", Chats: []string{"200@s.whatsapp.net"}, Activated: 100, Requested: true})
+	j.save(Config{Account: "100@s.whatsapp.net", Generation: 1, Language: "en", Mode: "transcribe", Chats: []string{"200@s.whatsapp.net"}, Activated: 100, Requested: true, TranscriptPosting: true})
 	j.ingest(audio("a", false, 110))
 	f := &fakeTransport{}
 	j.processAudio(context.Background(), f, &recognizer{text: "fixture"})
@@ -356,5 +357,88 @@ func TestPrivatePairingRefusesCapturedTTY(t *testing.T) {
 	}
 	if e := pair(context.Background(), nil); e == nil || !strings.Contains(e.Error(), "no_capture") {
 		t.Fatal("captured QR permitted", e)
+	}
+}
+
+type ocrFixture struct {
+	calls int
+	text  string
+	fail  bool
+}
+
+func (o *ocrFixture) Recognize(ctx context.Context, path, language string) (string, error) {
+	o.calls++
+	if o.fail {
+		return "", errors.New("fixture_ocr_failure")
+	}
+	return o.text, nil
+}
+
+func TestImageMediaIsOcredAndSearchable(t *testing.T) {
+	j := fixture(t)
+	activate(t, j)
+	j.ingest(Message{ID: "image-1", Chat: "200@s.whatsapp.net", Sender: "200@s.whatsapp.net", Sent: 130, MediaKind: "image", Raw: []byte("fixture image")})
+	f := &fakeTransport{}
+	o := &ocrFixture{text: "Texto do exame: colangiopancreatografia"}
+	if err := j.processMedia(context.Background(), f, o); err != nil {
+		t.Fatal(err)
+	}
+	if o.calls != 1 || f.downloads != 1 {
+		t.Fatal("image was not downloaded and recognized exactly once", o.calls, f.downloads)
+	}
+	var state, text string
+	if err := j.db.QueryRow("SELECT media_state,media_text FROM messages WHERE id='image-1'").Scan(&state, &text); err != nil {
+		t.Fatal(err)
+	}
+	if state != "ocr_done" || !strings.Contains(text, "colangiopancreatografia") {
+		t.Fatal("OCR text not journaled", state, text)
+	}
+	c, _ := j.Config()
+	p, err := j.readPage(c, readRequest{Conversations: []string{"200@s.whatsapp.net"}, Query: "exame"}, "read_snapshot")
+	if err != nil || !strings.Contains(fmt.Sprint(p), "colangiopancreatografia") {
+		t.Fatal("OCR text not searchable through the read page", err)
+	}
+}
+
+func TestTranscriptPostingToggleAndIncomingOnly(t *testing.T) {
+	j := fixture(t)
+	activate(t, j)
+	c, _ := j.Config()
+	c.TranscriptPosting = false
+	if err := j.save(c); err != nil {
+		t.Fatal(err)
+	}
+	j.ingest(audio("in-off", false, 130))
+	j.ingest(audio("own-off", true, 130))
+	f := &fakeTransport{}
+	r := &recognizer{text: "fixture"}
+	for i := 0; i < 4; i++ {
+		if err := j.processAudio(context.Background(), f, r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if count(t, j, "SELECT count(*) FROM outbox") != 0 {
+		t.Fatal("posting toggle off still queued a reply")
+	}
+	if count(t, j, "SELECT count(*) FROM audio WHERE state='transcribed'") != 2 {
+		t.Fatal("toggle off must still transcribe for the journal")
+	}
+	c, _ = j.Config()
+	c.TranscriptPosting = true
+	if err := j.save(c); err != nil {
+		t.Fatal(err)
+	}
+	j.ingest(audio("in-on", false, 140))
+	j.ingest(audio("own-on", true, 140))
+	for i := 0; i < 4; i++ {
+		if err := j.processAudio(context.Background(), f, r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if count(t, j, "SELECT count(*) FROM outbox WHERE source='in-on'") != 1 {
+		t.Fatal("incoming audio was not queued when posting is enabled")
+	}
+	if count(t, j, "SELECT count(*) FROM outbox WHERE source='own-on'") != 0 {
+		t.Fatal("own outgoing audio was posted")
 	}
 }

@@ -47,11 +47,11 @@ func TestPersistedPortugueseTaskLanguageReachesRecognitionAndBothDirectionPosts(
 	if !reflect.DeepEqual(recognition.languages, []string{"pt", "pt"}) {
 		t.Fatal("persisted PT did not reach recognizer", recognition.languages)
 	}
-	if transport.sent != 2 {
-		t.Fatal("both directions not posted", transport.sent)
+	if transport.sent != 1 {
+		t.Fatal("incoming audio not posted exactly once", transport.sent)
 	}
 	for _, body := range transport.bodies {
-		if !strings.Contains(body, "áudio português original (pt)") || !strings.HasPrefix(body, "🎙️ _Automated transcript_") {
+		if !strings.Contains(body, "áudio português original (pt)") || !strings.HasPrefix(body, "🤖 _Copiloto_") {
 			t.Fatal("original-language text or marker changed", body)
 		}
 	}
