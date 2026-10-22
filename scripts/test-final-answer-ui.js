@@ -111,6 +111,12 @@
         text:(i===0?'Read this answer from the beginning.\n\n':'')+'Paragraph '+i+' '+('readable evidence '.repeat(8))+'\n\n'});
       await new Promise(resolve=>setTimeout(resolve,25));
       const node=mode==='pending'?phasePendingText.get('grow-'+mode).node:streamBody;
+      // CHANGE 2 (operator rule): the provisional commentary - the node an unclassified stream writes into -
+      // is CREATED COLLAPSED now (only thinking and decision topics print expanded). This stage is about a
+      // reader following the answer as it grows, which is exactly what opening the topic is for: the probe
+      // does what that reader does, once, and every geometry claim below then measures the same thing it
+      // always did (the box of the streaming text), not a folded header.
+      if(mode==='pending'&&node&&!node.open)node.toggle();
       rows.push({top:node.getBoundingClientRect().top-messages.getBoundingClientRect().top,
         height:node.getBoundingClientRect().height,view:messages.clientHeight,
         scroll:messages.scrollTop,anchored:answerAnchors.get(messages)===node});
@@ -283,8 +289,12 @@
   readingFixture();
   document.getElementById('panel').style.width='540px';
   handleEvent({type:'pending_delta',pending_id:'visual-reading',text:'# Read from the beginning\n\n**Markdown renders while output arrives**, before final phase or completion.\n\n- Formatted lists\n- `Inline code`\n\n```js\nconst live = true;\n```\n\n'+('Additional output grows below the viewport; scroll down when you are ready.\n\n'.repeat(30))});
-  pin();
+  // Same rule for the picture: the provisional commentary is created collapsed, so the probe opens it the
+  // way a reader does - BEFORE the pin, because the reading position is computed from this node's own box -
+  // and then asserts where its first line sits and that its Markdown is drawn.
   const visualAnswer=phasePendingText.get('visual-reading').node;
+  if(visualAnswer&&!visualAnswer.open)visualAnswer.toggle();
+  pin();
   check(Math.abs(visualAnswer.getBoundingClientRect().top-messages.getBoundingClientRect().top)<3,'narrow-window answer starts at top');
   check(!!visualAnswer.querySelector('h1')&&!!visualAnswer.querySelector('strong')&&!!visualAnswer.querySelector('pre'),'narrow-window provisional Markdown visible before reply');
   const log=document.createElement('pre'); log.id='wa-probe';log.hidden=true;

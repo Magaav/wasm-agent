@@ -1570,7 +1570,9 @@ function appendCommentary(text, messageId, pendingId, decisionPrelude, place) {
   // draws a new node beside it.
   sealReasoning();
   const block = document.createElement("wa-commentary");
-  block.open = true;
+  // CREATED COLLAPSED (operator rule): only THINKING and DECISION topics print expanded; a commentary
+  // is a topic the reader opens. It used to be `block.open = true` - "the same rule as the thinking" -
+  // which printed every commentary expanded and pushed the steps that followed it off the screen.
   // The text may have streamed in the answer's place (a `.seg`), so this topic is built where that
   // sentence stands: `replaceWith` below keeps the same parent and the same sibling index, and the
   // string is carried over once - it is not re-created at the end of the bubble. What is allowed to
@@ -1646,7 +1648,8 @@ function appendStreamedCommentary(text, pendingId) {
     sealReasoning();
     streamedCommentaryBlock = document.createElement("wa-commentary");
     streamedCommentaryBlock.classList.add("phase-pending");
-    streamedCommentaryBlock.open = true;
+    // Collapsed from its first chunk, like every other commentary: the header says it is streaming and
+    // the reader opens it. It used to open here, which made a live run a wall of expanded prose.
     if(pendingId)streamedCommentaryBlock.dataset.pendingId=String(pendingId);
     bubble.body.append(streamedCommentaryBlock);
     anchorRunStepContent(streamedCommentaryBlock);
@@ -1749,6 +1752,14 @@ function convertProvisionalAnswer(bubble, topic, messageId) {
   if (!bubble || !topic || bubble.dataset.answerConverted === "1") return null;
   const body = topic.querySelector(":scope > .commentary-body");
   if (!body) return null;
+  // A COMMENTARY IS CREATED COLLAPSED (operator rule: only thinking and decision topics print
+  // expanded), so its body carries `hidden` while the topic is folded - and the prose this conversion
+  // turns into the ANSWER must not inherit that folded state: the answer is what the reader is here
+  // for, and a body left hidden would draw an EMPTY answer. The box is unfolded before it is measured
+  // and moved, so the "before" reading below is the box the text really had inside the topic; a 0x0
+  // reading would make every delta recorded here meaningless. No separate paint: this all runs in one
+  // task, and the topic the body came out of is removed before the frame ends.
+  if (body.hidden) body.hidden = false;
   const before = answerBoxMetrics(body);
   bubble.dataset.answerConverted = "1";
   // ONE frame: fold every earlier step AND this commentary topic into the run topic...
@@ -2387,7 +2398,20 @@ function addTool(name, args, options) {
   // `sealReasoning`) and stays OPEN - never deleted, never folded, never re-created; a thought after it
   // is a new node.
   sealReasoning();
-  currentTrace().addTool(name, toolTitle(name, args), null, boundMs ? Math.round(boundMs / 1000) : null, callId, toolChange(name, args));
+  const topic = currentTrace();
+  // A STEP WHOSE PROSE ENDED IN A TOOL CALL IS A DECISION STEP, and a decision topic prints expanded
+  // (operator rule; every other topic prints collapsed). The provider route that states no per-item
+  // phase sends no `decision` event at all, so the fact is read from what the bubble already holds: this
+  // step's own prose is the element that stands immediately before the topic the call is drawn in (a
+  // commentary, or the streamed answer segment this step wrote first). The debug-only `wa-step` rows sit
+  // between them and are skipped - they are phase history, not prose. A call with NO prose before it - a
+  // second call in the same step, a retry, a call this window did not see written - leaves a plain
+  // tool-call topic, which is created collapsed. The fact is set on the element, never by tag name: a
+  // <wa-trace> is also what a step that only called a tool looks like.
+  let prior = topic.previousElementSibling;
+  while (prior && prior.tagName === "WA-STEP") prior = prior.previousElementSibling;
+  if (prior && (prior.classList.contains("seg") || prior.tagName === "WA-COMMENTARY")) topic.markDecision();
+  topic.addTool(name, toolTitle(name, args), null, boundMs ? Math.round(boundMs / 1000) : null, callId, toolChange(name, args));
   lastTool = name;
   if (!replayingMessages) startToolTicker();
   pin();
@@ -2840,7 +2864,9 @@ function handleEvent(event) {
       sealReasoning();
       const node = document.createElement("wa-commentary");
       node.classList.add("phase-pending");
-      node.open = true;
+      // Collapsed while provisional too: the phase is not known yet, and the rule does not depend on it
+      // (only a DECISION topic prints expanded, and a decision is a fact of the element, not a guess
+      // made before the provider says what the step was).
       node.dataset.pendingId=key;
       currentBubble().body.append(node);
       anchorRunStepContent(node);
@@ -3272,6 +3298,16 @@ async function refreshNotifySupport() {
   paintNotifyState();
 }
 
+// WHAT A TOOL-CALL TOPIC IS, ACROSS A REPAINT: the calls it holds. The element is recreated from the
+// rows, but the call ids inside it are the ledger's own, so they name the same step; the topic's own
+// `ledgerKey` is the fallback for one whose call ids are empty. This is the key a repaint uses to keep
+// the reader's fold choice (see `repaintMessages`), the way the summary and steering topics already do.
+function traceChoiceKey(node) {
+  const calls=Array.from(node.querySelectorAll('.tool-line[data-call-id]')).map(line=>line.dataset.callId).filter(Boolean);
+  if(calls.length)return 'calls:'+calls.join('|');
+  return node.dataset.ledgerKey?'segment:'+node.dataset.ledgerKey:'';
+}
+
 function repaintMessages(rows, options = {}) {
   // Was the reader parked on a settled answer's first line when this repaint began? The redraw below
   // replaces every node, so that node (and the WeakMap entry naming it) is gone by the time the motion
@@ -3284,6 +3320,12 @@ function repaintMessages(rows, options = {}) {
   const savedSteering=Array.from(runBubble?.querySelectorAll('wa-steering')||[]).filter(node=>node.fact?.state==='queued').map(node=>({node,fact:node.fact}));
   const topicChoices=Array.from(transcript.querySelectorAll('wa-summary,wa-steering')).map(node=>({id:node.dataset.summaryId||node.dataset.steeringId,open:node.open}));
   const commentaryChoices=Array.from(transcript.querySelectorAll('wa-commentary')).map(node=>({id:node.dataset.messageId,pending:node.dataset.pendingId,text:node.body.textContent,open:node.open}));
+  // A TOOL-CALL TOPIC IS CREATED COLLAPSED NOW, so its open state is only ever the reader's: a repaint
+  // that rebuilt it collapsed would overrule a reader who opened it. The topic is named by the CALLS it
+  // holds (the ledger's own ids, so they survive the redraw) and its fold choice is re-applied below.
+  const traceChoices=Array.from(transcript.querySelectorAll('wa-trace'))
+    .map(node=>({key:traceChoiceKey(node),open:node.open,toggled:node._userToggled===true}))
+    .filter(choice=>choice.key);
   const savedCountUser = Number(Array.from(transcript.querySelectorAll('wa-message[role="user"]')).at(-1)?.dataset.messageSeq) || null;
   const changedRun = savedSteps?.id && runStepId() && savedSteps.id !== runStepId();
   if (changedRun && savedSteps.active) {
@@ -3504,6 +3546,14 @@ function repaintMessages(rows, options = {}) {
   for(const node of transcript.querySelectorAll('wa-commentary')) {
     const choice=commentaryChoices.find(old=>old.id&&old.id===node.dataset.messageId || old.pending&&old.pending===node.dataset.pendingId || !old.id&&!node.dataset.messageId&&old.text===node.body.textContent);
     if(choice)node.open=choice.open;
+  }
+  for(const node of transcript.querySelectorAll('wa-trace')) {
+    const choice=traceChoices.find(old=>old.key===traceChoiceKey(node));
+    if(!choice)continue;
+    node.open=choice.open;
+    // Only a choice the READER made is remembered as one, so a later fold still folds a topic they never
+    // touched - and never folds one they did.
+    if(choice.toggled)node._userToggled=true;
   }
   const redrawnAnswer = priorAnchoredAnswer
     ? Array.from(transcript.querySelectorAll('.seg.final-answer')).pop() : null;

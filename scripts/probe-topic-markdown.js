@@ -151,6 +151,15 @@
       text: FULL, message_id: "md-in-place" });
     var resolved = messages.querySelector('wa-commentary[data-message-id="md-in-place"]');
     check(!!resolved, "phase-at-end: the resolved step must be a commentary topic");
+    // CHANGE 2 (operator rule): a commentary is CREATED COLLAPSED - only thinking and decision topics
+    // print expanded - so its body has no box at all until the reader opens it. Every geometry claim
+    // below is about the topic as the reader sees it OPENED, so the collapsed default is asserted here
+    // and then the topic is opened the way a reader opens it: the shape is still measured, and the new
+    // rule cannot be skipped silently.
+    check(!!resolved && resolved.open === false,
+      "phase-at-end: a commentary must be CREATED COLLAPSED now - only thinking and decision topics " +
+      "print expanded - saw open=" + (resolved ? resolved.open : "no topic"));
+    if (resolved) resolved.toggle();
     var resolvedBody = resolved && resolved.body;
     var bodyBox = resolvedBody && resolvedBody.getBoundingClientRect();
     var topicBox = resolved && resolved.getBoundingClientRect();
@@ -229,6 +238,9 @@
       "settled: no element in the page may carry the removed in-place state, saw " +
       document.querySelectorAll("[data-in-place]").length);
     if (run) run.open = true;
+    // The folded commentary is opened before it is measured, for the same reason as above: it is created
+    // collapsed now, and "the marker row sits above the body" is a claim about the opened topic.
+    if (folded && !folded.open) folded.toggle();
     var foldedHead = folded && folded.querySelector(":scope > .trace-head").getBoundingClientRect();
     var foldedBody = folded && folded.querySelector(":scope > .commentary-body").getBoundingClientRect();
     check(!!foldedHead && !!foldedBody && foldedHead.top < foldedBody.top,
