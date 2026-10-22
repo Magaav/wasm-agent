@@ -3002,6 +3002,50 @@ $harness = @'
     window.handleEvent({ type: "done" });
   })();
 
+  // ---- one round's thought is one topic, even after its own prose sealed it --------------------
+  // Operator screenshot, 2026-10-22: one turn drew TWO blocks, each labelled "thinking 2525 chars",
+  // while the ledger held ONE row carrying that reasoning (session 84a76ce0, seq 1769, phase
+  // commentary) - so it was drawn twice, not stored twice. A step's prose is the next topic, so it
+  // seals the thinking topic before the round ends; the node's authoritative copy of that round
+  // (`complete`) then found no open topic and built a second one with the same text. The identity is
+  // the ROUND, never the text: the second half of this check is the replayed two-half stream that a
+  // text-equality dedupe once dropped, and both halves are content.
+  (function () {
+    window.handleEvent({ type: "round", n: 1, tools: 3 });
+    window.handleEvent({ type: "reasoning", text: "half one ", chars: 9 });
+    window.handleEvent({ type: "reasoning", text: "half two", chars: 17 });
+    window.handleEvent({ type: "pending_delta", pending_id: "dedupe-a", text: "Checking." });
+    window.handleEvent({ type: "reasoning", text: "half one half two", round: 1, complete: true });
+    var topics = document.querySelectorAll("wa-message wa-reasoning");
+    var bubble = topics.length ? topics[topics.length - 1].closest("wa-message") : null;
+    var inBubble = bubble ? bubble.querySelectorAll("wa-reasoning").length : -1;
+    check(inBubble === 1,
+      "thinking identity: one round must draw ONE thinking topic, saw " + inBubble);
+    var topic = topics.length ? topics[topics.length - 1] : null;
+    var body = topic ? topic.querySelector(".reasoning-body") : null;
+    var text = body ? body.textContent : "";
+    check(text.indexOf("half one half two") >= 0,
+      "thinking identity: the authoritative copy must be present whole, saw " + JSON.stringify(text));
+    check(text.split("half one half two").length - 1 === 1,
+      "thinking identity: the round's thought must be drawn once, saw " + JSON.stringify(text));
+    // Replayed from two durable rows that each carry part of one streamed block, with no
+    // authoritative copy: both halves are content and must concatenate into that one topic.
+    var beforeReplay = document.querySelectorAll("wa-message wa-reasoning").length;
+    window.handleEvent({ type: "round", n: 2, tools: 3 });
+    window.handleEvent({ type: "reasoning", text: "replay half, ", chars: 13 });
+    window.handleEvent({ type: "reasoning", text: "second half.", chars: 26 });
+    var replayed = document.querySelectorAll("wa-message wa-reasoning");
+    check(replayed.length === beforeReplay + 1,
+      "thinking identity: a replayed stream in two halves is ONE topic, saw " +
+      (replayed.length - beforeReplay));
+    var lastReplay = replayed.length ? replayed[replayed.length - 1] : null;
+    var replayBody = lastReplay ? lastReplay.querySelector(".reasoning-body") : null;
+    check(!!replayBody && replayBody.textContent.indexOf("replay half, second half.") >= 0,
+      "thinking identity: both halves of a replayed stream must be present, saw " +
+      JSON.stringify(replayBody ? replayBody.textContent : ""));
+    window.handleEvent({ type: "done" });
+  })();
+
   // ---- the route stays open while the run is going --------------------------------------------
   // Measured with a probe on a two-round run: after the first answer the run topic CLOSED, and the
   // thinking and the tool lines went with it - so a reader watching a long run saw a folded topic and
