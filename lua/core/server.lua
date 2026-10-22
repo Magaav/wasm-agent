@@ -342,8 +342,13 @@ function wa_whatsapp_posting(body, session)
     local headers=json.encode({['Authorization']='Bearer '..token,['Content-Type']='application/json'})
     local ok,raw=pcall(host.http,'POST',base..path,headers,json.encode(payload or {}))
     if not ok or type(raw)~='string' then return nil,'whatsapp_posting_transport_failed' end
-    local decoded,value=pcall(json.decode,raw)
-    if not decoded or type(value)~='table' then return nil,'whatsapp_posting_response_invalid' end
+    -- host.http returns {status, body} or {error}; the connector's JSON is inside body.
+    local decoded,envelope=pcall(json.decode,raw)
+    if not decoded or type(envelope)~='table' then return nil,'whatsapp_posting_response_invalid' end
+    if envelope.error then return nil,'whatsapp_posting_transport_failed' end
+    if type(envelope.body)~='string' then return nil,'whatsapp_posting_response_invalid' end
+    local body_ok,value=pcall(json.decode,envelope.body)
+    if not body_ok or type(value)~='table' then return nil,'whatsapp_posting_response_invalid' end
     return value
   end
   if action=='status' then
