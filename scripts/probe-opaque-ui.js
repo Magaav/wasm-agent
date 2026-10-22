@@ -83,7 +83,10 @@
     const queue = document.getElementById('sentinel-queue');
     applySentinelQueue({sentinel:{active:1,failed:0,stale:false,requests:[{state:'running',verb:'deploy',phase:'installing',detail:'fixture'}]}});
     check(!queue.hidden && queue.textContent.includes('deploy') && queue.textContent.includes('installing'), 'sentinel queue shows active work');
-    applySentinelQueue({sentinel:{active:0,failed:1,stale:false,requests:[{state:'failed',verb:'restart',phase:'failed',detail:'fixture'}]}});
+    // A detached deploy is state=done/phase=spawned while /health.upgrading is queued; it is still active.
+    applySentinelQueue({upgrading:{state:'queued'},sentinel:{active:0,failed:0,stale:false,requests:[{state:'done',phase:'spawned',verb:'deploy',age_seconds:10,detail:'fixture deploy'}]}});
+    check(!queue.hidden && queue.textContent.includes('fixture deploy'), 'sentinel queue shows a spawned deploy while upgrading');
+    applySentinelQueue({upgrading:{state:'done'},sentinel:{active:0,failed:1,stale:false,requests:[{state:'failed',verb:'restart',phase:'failed',detail:'fixture'}]}});
     check(queue.hidden, 'sentinel queue closes when no work is active');
     report.dataset.status = 'pass'; report.textContent = JSON.stringify({ checks, skipped: 0 });
   } catch (error) {

@@ -4093,7 +4093,19 @@ function applySentinelQueue(health) {
   const rows = queue && Array.isArray(queue.requests) ? queue.requests : [];
   // The overlay is for work that is still happening. A completed or failed request is evidence in
   // `wa-sentinel status` and `/health`, but it must not sit in front of the chat after the queue is ready.
-  const active = rows.filter(row => ['queued', 'waiting', 'running'].includes(String(row.state || '')));
+  // A detached deploy is recorded by the sentinel as state=done/phase=spawned: the sentinel has
+  // finished spawning it, but the deploy itself is still installing. Do not treat that receipt as
+  // "idle" while /health.upgrading says an install is queued/running; otherwise the queue screen
+  // disappears exactly while the deploy is doing work.
+  const upgrade = health && health.upgrading;
+  const deploying = upgrade && !['done', 'failed', 'idle', ''].includes(String(upgrade.state || ''));
+  const active = rows.filter(row => {
+    if (['queued', 'waiting', 'running'].includes(String(row.state || ''))) return true;
+    if (String(row.verb || '') === 'deploy' && String(row.phase || '') === 'spawned') {
+      return deploying || Number(row.age_seconds || 0) < 120;
+    }
+    return false;
+  });
   if (!active.length) { box.hidden = true; box.replaceChildren(); return; }
   const head = document.createElement('div');
   head.className = 'sentinel-queue-head';
