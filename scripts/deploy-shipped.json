@@ -17,6 +17,7 @@
     "scripts/codemode-build.mjs",
     "scripts/check-embedded-runtime.lua",
     "scripts/upgrade.sh",
+    "scripts/on-stale.sh",
     "scripts/lib/service-target.sh",
     "scripts/deploy-shipped.json",
     "scripts/verify-install.sh",

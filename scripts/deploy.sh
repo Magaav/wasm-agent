@@ -928,7 +928,7 @@ if [ -d "$ROOT/jobs" ] && [ -d "$ROOT/scripts" ]; then
   # is put: a definition installed ahead of its script is a job that fails on the machine it was installed
   # on. They import only Node builtins, so there is no `./lib/...` closure to derive here - unlike the
   # WhatsApp pipeline above, whose modules are found from the imports it writes.
-  for source in "$ROOT"/scripts/subagent-return-* "$ROOT"/scripts/sentinel-return-* "$ROOT"/scripts/deploy-shipped.json; do
+  for source in "$ROOT"/scripts/subagent-return-* "$ROOT"/scripts/sentinel-return-* "$ROOT"/scripts/on-stale.sh "$ROOT"/scripts/deploy-shipped.json; do
     [ -f "$source" ] || continue
     cp -f "$source" "$INSTALL_DIR/scripts/" \
       || fail "node installed, but could not ship $(basename "$source")"
