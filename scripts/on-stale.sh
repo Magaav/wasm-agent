@@ -56,7 +56,7 @@ if [ -z "$health" ]; then
   exit 0
 fi
 
-node_state="$(printf '%s' "$health" | field state)"
+node_state="$(printf '%s' "$health" | sed -n 's/.*"node_state":{[^}]*"state":"\([a-z]*\)".*/\1/p' | head -1)"
 case "$node_state" in
   idle) ;;
   upgrading|restarting)
