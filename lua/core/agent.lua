@@ -936,7 +936,18 @@ function M:maybe_compact(messages, force)
   if budget <= 0 then budget = limit - reserve end
   if budget<=0 then budget=limit-reserve end
   local trigger = math.min(limit - reserve, budget)
-  if not force and before <= trigger then return false end
+  return self:compact_now(messages, {limit=limit,reserve=reserve,keep=keep,before=before,estimate_source=estimate_source,measurement_reason=measurement_reason,budget=budget,trigger=trigger,force=force})
+end
+
+-- ONE WRAPPER for every compaction. The in-run trigger (maybe_compact) and the idle route both call
+-- this; neither summarises on its own. Two summary paths would disagree about the watermark and emit
+-- two `compact` events for one rewrite, and every compaction invalidates the provider cache, so it has
+-- to happen once, in one place, with one before/after measurement.
+function M:compact_now(messages, opts)
+  local limit, reserve, keep = opts.limit, opts.reserve, opts.keep
+  local before, estimate_source = opts.before, opts.estimate_source
+  local measurement_reason, budget, trigger = opts.measurement_reason, opts.budget, opts.trigger
+  local force = opts.force
 
   local session = memory.session(self.session_id) or {}
   local rows = memory.session_messages(self.session_id, {
