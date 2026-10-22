@@ -174,3 +174,31 @@ func serveAPI(server *http.Server, listener net.Listener, ctx context.Context, c
 	cancel()
 	_ = err // All unexpected Serve returns (including external Close) are failure, never success.
 }
+
+// releaseHold removes one reviewed chat fence. It is an offline operator command:
+// the caller must have reviewed the exact mutation evidence, and the service must
+// not be running. It preserves mutation evidence, source blocks and every already
+// blocked audio/outbox row; nothing is replayed. Only future audio in that chat can
+// become pending again.
+func (j *Journal) releaseHold(c Config, chat, reason string) error {
+	if !validChat(chat) || strings.TrimSpace(reason) == "" || len(reason) > 500 {
+		return errors.New("reviewed_hold_release_required")
+	}
+	tx, err := j.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	result, err := tx.Exec("DELETE FROM chat_holds WHERE account=? AND generation=? AND chat=?", c.Account, c.Generation, chat)
+	if err != nil {
+		return err
+	}
+	changed, _ := result.RowsAffected()
+	if changed != 1 {
+		return errors.New("chat_hold_not_found")
+	}
+	if _, err = tx.Exec("INSERT INTO events(kind,at,detail) VALUES('hold_released',?,?)", time.Now().Unix(), "chat="+chat+" reason="+reason); err != nil {
+		return err
+	}
+	return tx.Commit()
+}

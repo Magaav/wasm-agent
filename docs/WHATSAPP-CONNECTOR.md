@@ -91,8 +91,8 @@ or external exactly-once delivery. Pins, checksums and original license texts ar
   refuses. The media HTTP cap also refuses oversized history blobs as an explicit
   sticky gap rather than unbounded allocation; no complete-history guarantee.
 - Transcript text is clearly labeled `🤖 _Copiloto_`, UTF-8/rune-safe,
-  numbered and reply-linked to the source audio in the ORIGINAL chat; only incoming
-  audio is posted when `transcript_posting` is enabled. Text echoes never create
+  numbered and reply-linked to the source audio in the ORIGINAL chat; incoming and
+  synchronized own outgoing audio are posted when `transcript_posting` is enabled. Text echoes never create
   audio tasks. No composer opening, read marking or general AI replies.
 - Image messages are journaled with their raw protobuf and optionally OCRed by the
   local RapidOCR worker into `messages.media_text` (see [WHATSAPP-OCR.md](WHATSAPP-OCR.md)).
@@ -119,6 +119,11 @@ or external exactly-once delivery. Pins, checksums and original license texts ar
   Only a typed owned-adapter proof that the SDK was NOT called can schedule safe
   retry after intent; generic SDK errors, crash windows and ack loss remain unknown. This is not full edit/delete or
   receipt-state reconstruction; held chats require separately approved reconciliation.
+  A reviewed hold can be released offline, with the service stopped:
+  `wa-whatsapp release-hold --state <private-path> --chat <exact-jid> --reason "<review>" --confirm`.
+  It removes only that `chat_holds` row and records `hold_released`; mutation
+  evidence, source blocks, blocked audio and blocked outbox rows are preserved and
+  nothing is replayed. New audio after the release can become pending.
 - SDK callbacks return processing success/failure. Failed persistence returns false,
   retains a separate fsynced sticky gap marker and blocks posting/activation; Connected
   and OfflineSyncCompleted never erase it. Safe ingestion/retry remains possible.

@@ -542,7 +542,7 @@ func (j *Journal) processAudio(ctx context.Context, t Transport, r Recognizer) e
 		return tx.Commit()
 	}
 	for i, body := range chunks(text) {
-		if m.Own || !c.TranscriptPosting {
+		if !c.TranscriptPosting {
 			continue
 		}
 		_, err = tx.Exec("INSERT OR IGNORE INTO outbox(account,generation,chat,source,part,body,send_id,state) VALUES(?,?,?,?,?,?,?,'ready')", c.Account, c.Generation, m.Chat, m.ID, i, body, t.NewID())

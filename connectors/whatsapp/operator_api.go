@@ -118,7 +118,7 @@ func operatorAPI(j *Journal, read http.Handler, a operatorAuthority, t operatorT
 		}
 		// Approval is separate from preparation/status/dispatch. Read credentials never match.
 		key := a.Dispatch
-		if r.URL.Path == "/operator/approve" {
+		if r.URL.Path == "/operator/approve" || r.URL.Path == "/operator/posting" {
 			key = a.Approval
 		}
 		if key == "" || subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), []byte("Bearer "+key)) != 1 {
@@ -129,6 +129,41 @@ func operatorAPI(j *Journal, read http.Handler, a operatorAuthority, t operatorT
 		raw, readErr := io.ReadAll(io.LimitReader(r.Body, 32769))
 		if readErr != nil || len(raw) > 32768 || !exactOperatorJSON(raw) {
 			fail(400, "operator_invalid_exact_json")
+			return
+		}
+		// The transcript-posting policy is a separate operator control, not an AI
+		// send: it changes whether deterministic transcripts are queued, and never
+		// dispatches text itself. The approval token is required just like approve.
+		if r.URL.Path == "/operator/posting" {
+			var request struct {
+				Enabled *bool `json:"enabled"`
+			}
+			decoder := json.NewDecoder(bytes.NewReader(raw))
+			decoder.DisallowUnknownFields()
+			if decoder.Decode(&request) != nil || decoder.Decode(new(any)) != io.EOF || request.Enabled == nil {
+				fail(400, "operator_invalid_posting_request")
+				return
+			}
+			c, err := j.Config()
+			if err != nil {
+				fail(503, "journal_unavailable")
+				return
+			}
+			if c.Account != a.Account || c.Generation != a.Generation {
+				fail(403, "operator_scope_mismatch")
+				return
+			}
+			c.TranscriptPosting = *request.Enabled
+			if err = j.save(c); err != nil {
+				fail(503, "posting_configuration_failed")
+				return
+			}
+			detail := "disabled"
+			if *request.Enabled {
+				detail = "enabled"
+			}
+			_ = j.event("transcript_posting", detail)
+			json.NewEncoder(w).Encode(map[string]any{"ok": true, "enabled": *request.Enabled})
 			return
 		}
 		decoder := json.NewDecoder(bytes.NewReader(raw))

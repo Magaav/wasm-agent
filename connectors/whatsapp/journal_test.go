@@ -170,8 +170,8 @@ func TestHistoryBothDirectionsDedupIndependentCompute(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		j.post(context.Background(), f)
 	}
-	if f.sent != 1 {
-		t.Fatal("incoming audio not posted exactly once", f.sent)
+	if f.sent != 2 {
+		t.Fatal("both directions not posted", f.sent)
 	}
 	if !strings.HasPrefix(f.bodies[0], "🤖 _Copiloto_") {
 		t.Fatal("missing marker")
@@ -400,7 +400,7 @@ func TestImageMediaIsOcredAndSearchable(t *testing.T) {
 	}
 }
 
-func TestTranscriptPostingToggleAndIncomingOnly(t *testing.T) {
+func TestTranscriptPostingToggleAndBothDirections(t *testing.T) {
 	j := fixture(t)
 	activate(t, j)
 	c, _ := j.Config()
@@ -438,7 +438,39 @@ func TestTranscriptPostingToggleAndIncomingOnly(t *testing.T) {
 	if count(t, j, "SELECT count(*) FROM outbox WHERE source='in-on'") != 1 {
 		t.Fatal("incoming audio was not queued when posting is enabled")
 	}
-	if count(t, j, "SELECT count(*) FROM outbox WHERE source='own-on'") != 0 {
-		t.Fatal("own outgoing audio was posted")
+	if count(t, j, "SELECT count(*) FROM outbox WHERE source='own-on'") != 1 {
+		t.Fatal("own outgoing audio was not posted when posting is enabled")
+	}
+}
+
+func TestReleaseHoldPreservesBlockedEvidenceAndProcessesNewAudio(t *testing.T) {
+	j := fixture(t)
+	activate(t, j)
+	if _, err := j.db.Exec("INSERT INTO chat_holds VALUES(?,?,?,?)", "100@s.whatsapp.net", 1, "200@s.whatsapp.net", "unproven_mutation_chat_hold"); err != nil {
+		t.Fatal(err)
+	}
+	j.ingest(audio("blocked", false, 130))
+	if count(t, j, "SELECT count(*) FROM audio WHERE id='blocked' AND state='blocked_source'") != 1 {
+		t.Fatal("held audio was not fenced")
+	}
+	c, _ := j.Config()
+	if err := j.releaseHold(c, "200@s.whatsapp.net", "reviewed unproven revoke"); err != nil {
+		t.Fatal(err)
+	}
+	if count(t, j, "SELECT count(*) FROM chat_holds") != 0 {
+		t.Fatal("hold was not released")
+	}
+	if count(t, j, "SELECT count(*) FROM audio WHERE id='blocked' AND state='blocked_source'") != 1 {
+		t.Fatal("blocked evidence was replayed or rewritten")
+	}
+	if count(t, j, "SELECT count(*) FROM events WHERE kind='hold_released'") != 1 {
+		t.Fatal("hold release was not recorded")
+	}
+	j.ingest(audio("after-release", false, 140))
+	if count(t, j, "SELECT count(*) FROM audio WHERE id='after-release' AND state='pending'") != 1 {
+		t.Fatal("new audio after release was not made pending")
+	}
+	if err := j.releaseHold(c, "200@s.whatsapp.net", "again"); err == nil || !strings.Contains(err.Error(), "chat_hold_not_found") {
+		t.Fatal("missing hold was not refused", err)
 	}
 }

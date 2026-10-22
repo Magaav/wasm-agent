@@ -471,3 +471,48 @@ func TestOperatorProvisioningIsExplicitPrivateAndSeparate(t *testing.T) {
 		t.Fatal("missing token file")
 	}
 }
+
+func TestOperatorPostingToggleRequiresApprovalAndUpdatesConfig(t *testing.T) {
+	j, r, f := operatorFixture(t)
+	a := operatorAuthority{Account: r.Account, Generation: r.Generation, Chats: []string{r.Chat}, Dispatch: strings.Repeat("d", 64), Approval: strings.Repeat("a", 64)}
+	server := httptest.NewServer(operatorAPI(j, api(j, "read-only"), a, f))
+	defer server.Close()
+	call := func(key string, body string) (int, map[string]any) {
+		t.Helper()
+		req, _ := http.NewRequest("POST", server.URL+"/operator/posting", strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+key)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		var out map[string]any
+		if err = json.NewDecoder(resp.Body).Decode(&out); err != nil {
+			t.Fatal(err)
+		}
+		return resp.StatusCode, out
+	}
+	if code, _ := call(a.Dispatch, `{"enabled":true}`); code != 403 {
+		t.Fatal("dispatch credential toggled the posting policy", code)
+	}
+	if code, out := call(a.Approval, `{"enabled":true}`); code != 200 || out["enabled"] != true {
+		t.Fatal("approval did not enable posting", code, out)
+	}
+	c, _ := j.Config()
+	if !c.TranscriptPosting {
+		t.Fatal("posting toggle was not persisted")
+	}
+	if code, _ := call(a.Approval, `{"enabled":false,"extra":1}`); code != 400 {
+		t.Fatal("unknown posting field accepted", code)
+	}
+	if code, out := call(a.Approval, `{"enabled":false}`); code != 200 || out["enabled"] != false {
+		t.Fatal("approval did not disable posting", code, out)
+	}
+	c, _ = j.Config()
+	if c.TranscriptPosting {
+		t.Fatal("posting disable was not persisted")
+	}
+	if count(t, j, "SELECT count(*) FROM events WHERE kind='transcript_posting'") != 2 {
+		t.Fatal("posting changes were not recorded")
+	}
+}
