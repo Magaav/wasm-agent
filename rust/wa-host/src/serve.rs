@@ -2877,6 +2877,9 @@ fn dispatch(
         "/tools" => (200, "application/json", call("wa_tools", &[session]).into_bytes()),
         "/mcp" if method == "GET" => (200,"application/json",call("wa_mcp", &["{}",session]).into_bytes()),
         "/mcp" if method == "POST" => (200,"application/json",call("wa_mcp", &[body,session]).into_bytes()),
+        // A narrow operator control: read the connector's posting policy or toggle it through the
+        // separate approval credential. It never sends text; the Lua handler holds both token files.
+        "/whatsapp/posting" if method == "POST" => (200,"application/json",call("wa_whatsapp_posting", &[body,session]).into_bytes()),
         "/jobs" if method == "GET" => (200,"application/json",call("wa_jobs", &["{}",session]).into_bytes()),
         "/jobs" if method == "POST" => (200,"application/json",call("wa_jobs", &[body,session]).into_bytes()),
         "/operations" if method == "GET" => (200,"application/json",call("wa_operation", &["{}",session]).into_bytes()),

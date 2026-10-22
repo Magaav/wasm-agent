@@ -258,8 +258,11 @@ refusal with SSH from a model tool. No model-provider credentials are required.
 
    ```sh
    "$WA" activate --state "$STATE" --approve-transcript-posting --retirement-receipt "$PRIVATE_RECEIPT"
-   "$WA" posting --state "$STATE" --set enable   # separate incoming-audio reply toggle
+   "$WA" posting --state "$STATE" --set enable   # separate audio reply toggle (incoming and own outgoing)
    "$WA" status --state "$STATE"
+   # The node UI exposes the same policy as one checkbox. Its master-only
+   # `/whatsapp/posting` route proxies the read status and the separate approval-token
+   # operator control using private token files; the read-only MCP gains no send authority.
    # Start manually OR, after reviewing the generated unit, install it yourself:
    mkdir -p "$HOME/.config/systemd/user"
    cp "$RELEASE/wa-whatsapp.service" "$HOME/.config/systemd/user/wa-whatsapp.service"

@@ -1723,6 +1723,16 @@ class WaMcps extends HTMLElement {
     this.drafts=new Map();this.notice=document.createElement('p');this.notice.setAttribute('role','status');
     this.retry=document.createElement('button');this.retry.type='button';this.retry.textContent='Refresh MCPs';this.retry.onclick=()=>this.emit('list',{},this.retry);
     this.list=document.createElement('div');this.list.className='mcp-list';
+    // One policy control, deliberately separate from the read-only MCP: it toggles the
+    // connector's deterministic transcript replies; it cannot send arbitrary text.
+    this.posting=document.createElement('section');this.posting.className='job-row';
+    const postingLabel=document.createElement('label');postingLabel.className='job-toggle';
+    this.postingToggle=document.createElement('input');this.postingToggle.type='checkbox';this.postingToggle.setAttribute('aria-label','Reply to audio with a transcript');
+    const postingName=document.createElement('strong');postingName.textContent='WhatsApp audio transcripts';
+    postingLabel.append(this.postingToggle,postingName);
+    this.postingStatus=document.createElement('p');this.postingStatus.textContent='Reading connector policy…';
+    this.posting.append(postingLabel,this.postingStatus);
+    this.postingToggle.addEventListener('change',()=>this.setPosting(this.postingToggle.checked));
     const details=document.createElement('details'),summary=document.createElement('summary');summary.textContent='Add or edit a trusted MCP';
     this.editor=document.createElement('textarea');this.editor.rows=8;this.editor.className='mcp-editor';this.editor.setAttribute('aria-label','Reviewed MCP definition JSON');
     this.template=document.createElement('button');this.template.type='button';this.template.textContent='WhatsApp read-only template';
@@ -1730,14 +1740,34 @@ class WaMcps extends HTMLElement {
     this.save=document.createElement('button');this.save.type='button';this.save.textContent='Save disabled definition';
     this.save.onclick=()=>{try{const definition=JSON.parse(this.editor.value);this.emit('put',{definition},this.save);}catch(error){this.message='Invalid JSON: '+String(error.message||error);}};
     const warning=document.createElement('p');warning.textContent='Trusted executable code, not a sandbox. Credentials are environment-variable references. Tools need local read/write approval; server hints grant nothing. Saving/probing leaves the connector disabled. Jobs alone own triggers and wakes.';
-    details.append(summary,warning,this.template,this.editor,this.save);this.append(this.retry,this.notice,this.list,details);
+    details.append(summary,warning,this.template,this.editor,this.save);this.append(this.retry,this.notice,this.list,this.posting,details);
   }
   emit(action,args,control){this.dispatchEvent(new CustomEvent('mcp-action',{bubbles:true,detail:{action,args,control}}));}
+  async postingCall(payload){
+    const response=await fetch('/whatsapp/posting',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+    if(!response.ok)throw Error('HTTP '+response.status);
+    const value=await response.json();
+    if(!value||value.ok!==true)throw Error(value&&value.error||'posting_unavailable');
+    return value;
+  }
+  async loadPosting(){
+    if(!this.postingToggle)return;
+    this.postingStatus.textContent='Reading connector policy…';
+    try{const value=await this.postingCall({action:'status'});this.postingToggle.checked=value.enabled===true;this.postingStatus.textContent=value.connection==='connected'?'Incoming and your own outgoing audio.':'Connector '+String(value.connection||'unknown')+'.';}
+    catch(error){this.postingToggle.disabled=true;this.postingStatus.textContent='Posting control unavailable: '+String(error.message||error);}
+  }
+  async setPosting(enabled){
+    if(!this.postingToggle)return;
+    this.postingToggle.disabled=true;const previous=!enabled;
+    try{const value=await this.postingCall({action:'set',enabled});this.postingToggle.checked=value.enabled===true;this.postingStatus.textContent=value.enabled?'Transcript replies enabled for incoming and own outgoing audio.':'Transcript replies disabled.';}
+    catch(error){this.postingToggle.checked=previous;this.postingStatus.textContent='Posting change refused: '+String(error.message||error);}
+    finally{this.postingToggle.disabled=false;}
+  }
   set message(value){this.notice.textContent=String(value||'');}
   set busy(value){this.pending=!!value;this.querySelectorAll('button').forEach(button=>button.disabled=!!value||button.dataset.approvalRequired==='true');}
   configureScope(scope){
     if(this.scope===scope)return;this.connectedCallback();if(this.scope!==undefined)this.drafts.set(this.scope,this.editor.value);
-    this.scope=scope;this.editor.value=this.drafts.get(scope)||'';this.data=null;this.list.replaceChildren();this.message='MCP inventory not yet loaded for this node/account';this.busy=false;
+    this.scope=scope;this.editor.value=this.drafts.get(scope)||'';this.data=null;this.list.replaceChildren();this.message='MCP inventory not yet loaded for this node/account';this.postingLoaded=false;this.postingToggle.disabled=false;this.postingStatus.textContent='Reading connector policy…';this.busy=false;
   }
   set inventory(data){
     this.connectedCallback();this.data=data;this.list.replaceChildren();
@@ -1756,6 +1786,7 @@ class WaMcps extends HTMLElement {
       for(const tool of server.probe?.tools||[]){const item=document.createElement('li');item.textContent=`${tool.name} · ${server.definition.tools?.[tool.name]||'not approved'} — ${tool.description||''}`;tools.append(item);}row.append(tools);this.list.append(row);
     }
     this.message=`${(data.servers||[]).length} configured MCPs · registry revision ${data.revision}. Inventory does not probe or connect.`;
+    if(!this.postingLoaded){this.postingLoaded=true;this.loadPosting();}
   }
 }
 customElements.define('wa-mcps',WaMcps);

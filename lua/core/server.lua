@@ -316,6 +316,47 @@ function wa_mcp(body, session)
   return json.encode(result)
 end
 
+function wa_whatsapp_posting(body, session)
+  local user=require_master(session)
+  if not user then return json.encode({error='forbidden'}) end
+  local ok,args=pcall(json.decode,body or '{}')
+  if not ok or type(args)~='table' then return json.encode({error='invalid_posting_request'}) end
+  local action=args.action or 'status'
+  if action~='status' and action~='set' then return json.encode({error='invalid_posting_action'}) end
+  local base=host.getenv('WA_WHATSAPP_POSTING_URL') or ''
+  local account=host.getenv('WA_WHATSAPP_ACCOUNT') or ''
+  local generation=tonumber(host.getenv('WA_WHATSAPP_GENERATION') or '') or 0
+  if base=='' or account=='' or generation<1 then return json.encode({error='whatsapp_posting_not_configured'}) end
+  local function secret(path)
+    if not path or path=='' then return nil end
+    local ok,value=pcall(host.read_file,path)
+    if not ok or type(value)~='string' then return nil end
+    value=value:gsub('%s+$','')
+    if #value~=64 then return nil end
+    return value
+  end
+  local read_token=secret(host.getenv('WA_WHATSAPP_READ_TOKEN_FILE'))
+  local approval=secret(host.getenv('WA_WHATSAPP_APPROVAL_TOKEN_FILE'))
+  if not read_token or not approval then return json.encode({error='whatsapp_posting_credentials_unavailable'}) end
+  local function request(path, token, payload)
+    local headers=json.encode({['Authorization']='Bearer '..token,['Content-Type']='application/json'})
+    local ok,raw=pcall(host.http,'POST',base..path,headers,json.encode(payload or {}))
+    if not ok or type(raw)~='string' then return nil,'whatsapp_posting_transport_failed' end
+    local decoded,value=pcall(json.decode,raw)
+    if not decoded or type(value)~='table' then return nil,'whatsapp_posting_response_invalid' end
+    return value
+  end
+  if action=='status' then
+    local value,problem=request('/status',read_token,{account=account,generation=generation})
+    if not value then return json.encode({error=problem}) end
+    return json.encode({ok=value.ok==true,enabled=value.config and value.config.transcript_posting==true,connection=value.connection,error=value.error})
+  end
+  if type(args.enabled)~='boolean' then return json.encode({error='posting_enabled_boolean_required'}) end
+  local value,problem=request('/operator/posting',approval,{enabled=args.enabled})
+  if not value then return json.encode({error=problem}) end
+  return json.encode({ok=value.ok==true,enabled=value.enabled,error=value.error})
+end
+
 function wa_jobs(body, session)
   if not require_master(session) then return json.encode({error="forbidden"}) end
   local ok, args = pcall(json.decode, body or "{}")
