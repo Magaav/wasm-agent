@@ -140,6 +140,15 @@ if [ "$DRY" = "1" ]; then
   exit 0
 fi
 
+# Share the build lock with deploy.sh: a deploy and onStale must never build into the same
+# rust/target/release at the same time. Hold it only for this build/request, and release on exit.
+LOCK="$STATE_DIR/.deploy.lock"
+if ! mkdir "$LOCK" 2>/dev/null; then
+  say "onStale: another deploy/build holds $LOCK - standing down"
+  exit 0
+fi
+trap 'rmdir "$LOCK" 2>/dev/null || true' EXIT
+
 # The candidate must come from a source checkout: upgrade.sh refuses one it cannot compare with the
 # installed commit, which is exactly the refusal that made the first real deploy fail in 12 seconds.
 #

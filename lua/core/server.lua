@@ -366,6 +366,7 @@ local compacting=false
 function wa_compact(body, session)
   local user=require_master(session)
   if not user then return json.encode({error='forbidden'}) end
+  if agent and agent.run_id then return json.encode({ok=false,error='node_busy'}) end
   if compacting then return json.encode({ok=false,error='compaction_in_progress'}) end
   local ok,args=pcall(json.decode,body or '{}')
   if not ok or type(args)~='table' then return json.encode({error='invalid_compact_request'}) end

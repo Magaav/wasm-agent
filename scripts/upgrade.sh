@@ -152,6 +152,9 @@ record_install() {
   # commit was unknown. With the role on disk, a verifier reads "a deploy was in flight and did not
   # finish" instead of "nobody knows".
   if [ "$via" = "deploy.sh" ]; then role=interim; else role=final; fi
+  # A final record must name a commit. An upgrade that cannot name the source (or the
+  # previous bytes) stays interim; the deploy is the party that writes the proved final record.
+  if [ "$commit" = "unknown" ] || [ "$source_hint" = "unknown" ]; then role=interim; fi
   provenance=unverified-binary
   # MONOTONE, and this is finding F4 of the review of change/deploy-unbound: an interim write may not
   # DOWNGRADE a record that is still true. A deploy whose build is byte-identical to what is installed

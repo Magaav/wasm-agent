@@ -485,6 +485,31 @@ case "${WA_DEPLOY_SENTINEL_SUDO:-0}" in
 esac
 command -v cargo >/dev/null 2>&1 || fail "refused(cargo_unavailable): cargo is not on PATH (PATH=${PATH:-unset}); this step builds the tree with 'cargo build --release --offline --manifest-path rust/Cargo.toml', so a deploy without it cannot build what it would install. Install Rust (https://rustup.rs), or run the deploy on the tree that has the toolchain (the cloud tree builds this repository). Nothing was built and nothing was installed. To build or test without installing, use the gate's own command instead: bash scripts/test.sh."
 
+# A deploy and onStale both build into rust/target/release. They must not do it at the same time:
+# on 2026-10-22 onStale's build overwrote the deploy's proved candidate between proof and install, and
+# the deploy correctly refused an installed binary that was not the proved one. This lock is shared
+# with on-stale.sh and held until this deploy exits.
+DEPLOY_LOCK="$INSTALL_DIR/.deploy.lock"
+if ! mkdir "$DEPLOY_LOCK" 2>/dev/null; then
+  fail "another deploy/onStale build holds $DEPLOY_LOCK; nothing built"
+fi
+printf '%s
+' "$$" > "$DEPLOY_LOCK/pid" 2>/dev/null || true
+trap 'rmdir "$DEPLOY_LOCK" 2>/dev/null || true' EXIT
+
+# A queued/running upgrade and a deploy both install the same binary and record. Refuse a deploy
+# while an upgrade is active; onStale stands down on the shared lock for the build phase.
+QUEUE_DIR="${WA_SENTINEL_DIR:-$HOME/.wasm-agent/sentinel}/queue"
+UPGRADE_ACTIVE=0
+for qf in "$QUEUE_DIR"/*.json; do
+  [ -f "$qf" ] || continue
+  grep -q '"verb":"upgrade"' "$qf" 2>/dev/null || continue
+  if grep -q '"state":"running"' "$qf" 2>/dev/null || grep -q '"state":"queued"' "$qf" 2>/dev/null; then
+    UPGRADE_ACTIVE=1; break
+  fi
+done
+[ "$UPGRADE_ACTIVE" = "0" ] || fail "an upgrade request is active; refusing a second install"
+
 # BEGIN native code-mode shipping build (also exercised without any installer).
 command -v node >/dev/null 2>&1 || fail "codemode_build:node_build_tool_unavailable; nothing installed"
 CODEMODE_BUILD_SCRIPT="$ROOT/scripts/codemode-build.mjs"; CODEMODE_BUILD_ROOT="$ROOT"
@@ -545,6 +570,15 @@ rm -rf "$SCRATCH_HOME"
 [ "$ANSWERED" = "1" ] || fail "the new binary did not answer /health on the scratch port; not installing it"
 echo "deploy: the new binary answers on a scratch port"
 
+# The proved bytes are copied to an immutable, hash-named candidate before upgrade.sh sees them.
+# A concurrent build can overwrite rust/target/release/wa.exe, but it cannot overwrite this file.
+CANDIDATE_HASH="$(sha256sum < "$NEW" 2>/dev/null | awk '{print $1}')"
+[ -n "$CANDIDATE_HASH" ] || fail "cannot hash the proved binary"
+CANDIDATE="$ROOT/rust/target/release/wa-deploy-$CANDIDATE_HASH"
+case "$(uname -s 2>/dev/null)" in MINGW*|MSYS*|CYGWIN*) CANDIDATE="$CANDIDATE.exe" ;; esac
+cp -f "$NEW" "$CANDIDATE" || fail "cannot preserve the proved candidate"
+chmod +x "$CANDIDATE" 2>/dev/null || true
+
 # 6. Install and restart, through the script that owns that job.
 UPGRADE="$ROOT/scripts/upgrade.sh"
 [ -f "$UPGRADE" ] || fail "no scripts/upgrade.sh to perform the install"
@@ -590,7 +624,7 @@ export WA_RUNTIME_WORKTREE="$RUNTIME_PATH"
 # that was missing: the failure was reported and nothing could say why.
 WA_INSTALL_DIR="$INSTALL_DIR" WA_PORT="$PORT" WA_CLIENT_PORT="$CLIENT_PORT" \
   WA_UPGRADE_REASON="$REASON" WA_UPGRADE_VIA=deploy.sh \
-  bash "$UPGRADE" "$(cd "$(dirname "$NEW")" && pwd)/$(basename "$NEW")" > "$INSTALL_DIR/deploy-upgrade.log" 2>&1
+  bash "$UPGRADE" "$CANDIDATE" > "$INSTALL_DIR/deploy-upgrade.log" 2>&1
 # wa-deploy-upgrade-invocation: end
 UPGRADE_STATUS=$?
 # Reporting must never fail the deploy: with stdout gone, `sed` dies of EPIPE and pipefail would then report
@@ -618,7 +652,7 @@ fi
 # The recorded child owning this listener is the current startup verdict; a
 # historical string is not evidence about that process. Also verify its artifact.
 INSTALLED_NODE="$INSTALL_DIR/$(basename "$NEW")"
-cmp -s "$NEW" "$INSTALLED_NODE" || fail "installed binary differs from the proved build"
+cmp -s "$CANDIDATE" "$INSTALLED_NODE" || fail "installed binary differs from the proved build"
 
 # 8. Record what is installed, so "what is running" is answerable.
 HASH="$(sha256sum < "$INSTALLED_NODE" 2>/dev/null | awk '{print $1}')"
