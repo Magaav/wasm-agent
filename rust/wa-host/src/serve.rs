@@ -881,11 +881,24 @@ fn health_body() -> Vec<u8> {
         let text = std::fs::read_to_string(exe.parent()?.join("deploy-state.json")).ok()?;
         serde_json::from_str(&text).ok()
     })();
+    // A marker left by an installer that died must not freeze this node's state forever: measured
+    // 2026-10-22, an install wrote `upgrading` and then waited for the node to go idle - while this very
+    // field told the gate it was upgrading, so idle never came and the window showed a bar that never
+    // moved. The phase record is authoritative only while it is recent.
+    let deploy_state_fresh = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.join("deploy-state.json")))
+        .and_then(|path| std::fs::metadata(path).ok())
+        .and_then(|meta| meta.modified().ok())
+        .and_then(|mtime| mtime.elapsed().ok())
+        .map(|age| age.as_secs() < 900)
+        .unwrap_or(false);
     let installing = deploy_state_value
         .as_ref()
         .and_then(|value| value.get("state"))
         .and_then(|value| value.as_str())
-        == Some("upgrading");
+        == Some("upgrading")
+        && deploy_state_fresh;
     let busy_threads = node_threads
         .iter()
         .filter(|thread| thread.get("label").map(|label| !label.is_null()).unwrap_or(false))

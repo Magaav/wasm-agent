@@ -292,7 +292,11 @@ finish() {
   if [ "$_rc" -eq 0 ]; then phase done complete; else phase failed "$UPGRADE_PHASE"; fi
 }
 trap finish EXIT
-phase upgrading waiting
+# The marker is `queued`, NOT `upgrading`, until the stop actually begins. Writing `upgrading` here was a
+# self-deadlock, measured on 2026-10-22: the node derives node_state from this file, the idle gate reads
+# node_state, so the installer announced an install the gate would then wait forever to see finish - and
+# the window drew a "waiting" bar that never moved. `upgrading` starts at the stop, when it is true.
+phase queued waiting
 say "waiting for the running node to finish what it is doing"
 waited=0
 FINE_TICKS=0
