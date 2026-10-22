@@ -14,7 +14,17 @@ ARM64 host during a real recognition test. RapidOCR recognized a 1000x260 Portug
 fixture in ~4.5 s on two ARM cores, including accents and `R$ 1.234,56`; PaddleOCR
 did not complete recognition.
 
+The recognition model is the **Latin PP-OCRv5 mobile** ONNX model, not RapidOCR's
+default Chinese/English recognizer. With
+`WA_WHATSAPP_OCR_REC_MODEL=…/latin/inference.onnx` and
+`WA_WHATSAPP_OCR_REC_KEYS=…/latin/keys.txt`, the same fixture recognized
+`Convênio` correctly and improved confidence from 0.976 to 0.994; run time was
+4.21 s versus 4.41 s for the default model. If the env pair is unset the worker
+uses the bundled default recognizer; if only one is set, or a path is missing, it
+fails as `offline_model_unavailable` instead of silently falling back.
+
 - package: `rapidocr_onnxruntime==1.4.4`
+- recognition: `PaddlePaddle/latin_PP-OCRv5_mobile_rec_onnx` (`inference.onnx` + `keys.txt`)
 - runtime: ONNX Runtime 1.31.0 (already present for the STT VAD stack)
 - engine: one warm Python worker, newline JSON, no network at message time
 - language: the Latin/Portuguese script; `pt` is the configured hint, not translation
@@ -26,8 +36,17 @@ message time):
 ```sh
 python3 -m venv /home/ubuntu/.local/wa-ocr-rapid
 /home/ubuntu/.local/wa-ocr-rapid/bin/pip install "rapidocr_onnxruntime==1.4.4"
-/home/ubuntu/.local/wa-ocr-rapid/bin/python \
-  /path/to/whatsapp-ocr-local.py --check
+# Latin recognition model and its 836-character dictionary
+mkdir -p /home/ubuntu/.local/wa-ocr-rapid/latin
+curl -L -o /home/ubuntu/.local/wa-ocr-rapid/latin/inference.onnx \
+  https://huggingface.co/PaddlePaddle/latin_PP-OCRv5_mobile_rec_onnx/resolve/main/inference.onnx
+curl -L -o /home/ubuntu/.local/wa-ocr-rapid/latin/inference.yml \
+  https://huggingface.co/PaddlePaddle/latin_PP-OCRv5_mobile_rec_onnx/resolve/main/inference.yml
+python3 - <<'PY'
+import yaml
+chars = yaml.safe_load(open('/home/ubuntu/.local/wa-ocr-rapid/latin/inference.yml'))['PostProcess']['character_dict']
+open('/home/ubuntu/.local/wa-ocr-rapid/latin/keys.txt', 'w', encoding='utf-8').write('\n'.join(chars) + '\n')
+PY
 ```
 
 ## Connector pipeline
