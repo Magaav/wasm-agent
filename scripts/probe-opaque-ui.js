@@ -78,6 +78,13 @@
     check(getComputedStyle(popup).backgroundColor === before, 'popup fill independent of underlying content');
     document.querySelector('.composer').style.removeProperty('background'); popup.close();
     root.remove(); input.blur(); popup.show();
+    // Sentinel queue overlay: active work is visible; once nothing is active it closes itself instead of
+    // sitting in front of the chat. Failures remain in status and /health.
+    const queue = document.getElementById('sentinel-queue');
+    applySentinelQueue({sentinel:{active:1,failed:0,stale:false,requests:[{state:'running',verb:'deploy',phase:'installing',detail:'fixture'}]}});
+    check(!queue.hidden && queue.textContent.includes('deploy') && queue.textContent.includes('installing'), 'sentinel queue shows active work');
+    applySentinelQueue({sentinel:{active:0,failed:1,stale:false,requests:[{state:'failed',verb:'restart',phase:'failed',detail:'fixture'}]}});
+    check(queue.hidden, 'sentinel queue closes when no work is active');
     report.dataset.status = 'pass'; report.textContent = JSON.stringify({ checks, skipped: 0 });
   } catch (error) {
     report.dataset.status = 'fail'; report.textContent = JSON.stringify({ checks, error: error.message });

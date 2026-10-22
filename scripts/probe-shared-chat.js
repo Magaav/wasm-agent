@@ -47,7 +47,7 @@ try {await rendererLoaded;for(let i=0;i<200&&!transcriptReady;i++)await new Prom
  // the shared order (`👣3 ⚒8 ◈250k ◷0:47`); the tokens pair belongs in it, so the assertion names the
  // pair after the tools rather than ending the line at the duration.
  check(!pane.transcript.querySelector('.chat-content-run-status:not(.finished)')&&pane.statusLine?.textContent.includes('👣3 ⚒8 ◈250k ◷0:47'),'same terminal footer with no duplicate running status');
- check(pane.transcript.querySelector('wa-commentary').open,'commentary default stays open after child settlement');
+ const commentary=pane.transcript.querySelector('wa-commentary');check(!commentary.open,'commentary default stays collapsed after child settlement');commentary.open=true;check(commentary.open,'commentary opens on demand');
  // A read-only warning has the same pinned component, independent causes and no transcript shift.
  const before=pane.transcript.getBoundingClientRect().top;pane.notice.setNotice('journal','Conversation refresh unavailable; outcome unconfirmed');
  check(!pane.transcript.contains(pane.notice)&&pane.notice.tagName==='WA-CHAT-WARNING'&&pane.transcript.getBoundingClientRect().top===before,'same pinned warning outside child content geometry');
