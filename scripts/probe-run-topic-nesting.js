@@ -101,6 +101,18 @@
     return h.height > 0 && h.top < t.top && h.bottom <= t.top + 0.5;
   }
   // A commentary is the shared topic: it must draw that topic's own box, not a chrome-less variant.
+  // CHANGE 2 (operator rule): a commentary is CREATED COLLAPSED now - only thinking and decision
+  // topics print expanded - so its text has no box at all until the reader opens it. The shape claims
+  // below are about the topic the reader sees, so each of them opens the topic the way a reader does
+  // (its own toggle) and asserts the collapsed default FIRST: the new rule cannot be skipped silently,
+  // and the shape it measures is the one the same element draws once opened.
+  function openAsReader(topic, label) {
+    check(!!topic && topic.open === false,
+      label + ': a commentary must be CREATED COLLAPSED - only thinking and decision topics print ' +
+      'expanded - saw open=' + (topic ? topic.open : 'no topic'));
+    if (topic) topic.toggle();
+    return topic;
+  }
   function sharedTopicChrome(topic) {
     if (!topic) return false;
     var style = getComputedStyle(topic);
@@ -173,7 +185,7 @@
     // earlier. What the resolution must do is make this an ORDINARY topic: the header above the body,
     // the body inside the topic's box, the shared chrome drawn - and the sentence may move down by
     // exactly that header row's height. It must not be re-created elsewhere in the bubble.
-    var commentaryBox = textBox(commentary);
+    var commentaryBox = textBox(openAsReader(commentary, 'resolved commentary'));
     check(!!streamedBox && !!commentaryBox && samePlace(streamedBox, commentaryBox),
       "the resolved commentary must hold the streamed sentence's own place - same parent, same " +
       "sibling index (ordinary route, no early phase); streamed [" + boxText(streamedBox) +
@@ -219,6 +231,9 @@
     window.handleEvent({ type: "commentary_delta", pending_id: "probe-oc", text: "commentary." });
     check(!!topic2 && topic2.querySelector(".commentary-body").textContent === "OpenCode commentary.",
       "the streamed commentary keeps growing in the same topic");
+    // Opened by the reader before its box is measured (see `openAsReader`): a collapsed topic has no
+    // text box, and every claim below is about the topic as the reader sees it opened.
+    openAsReader(topic2, 'streamed commentary');
     // The provider resolved this item's phase, so the topic that streamed must be the topic that
     // remains: the same element in the same box, not a second one drawn in its place.
     var topicBox2 = textBox(topic2);
@@ -252,6 +267,9 @@
     check(!!provisional && provisional.tagName === "WA-COMMENTARY",
       "the provisional commentary node must already BE the commentary element, saw " +
       (provisional ? provisional.tagName : "none"));
+    // Opened by the reader before its box is measured: a provisional commentary is created collapsed
+    // too, and "the text does not move" can only be measured on a box that exists.
+    openAsReader(provisional, 'provisional commentary');
     var provisionalBox = textBox(provisional);
     window.handleEvent({ type: "commentary", pending_id: "probe-pending",
       message_id: "probe-commentary-2", text: "Provisional progress." });
@@ -394,6 +412,12 @@
         headerAbove(topic), bodyInsideTopic(topic),
         topic.hasAttribute("data-in-place"), topic.querySelectorAll("[data-in-place]").length].join("|");
     }
+    // Both sides are opened before they are measured: a commentary is created collapsed now, and the
+    // shape compared here is the shape each surface draws when its topic is opened. The pane's topic was
+    // ALREADY opened by this probe's own stage loop (the picture opens every topic so it can be read),
+    // so only the main-chat topic still has a creation default to assert.
+    openAsReader(mainTopic, 'main chat commentary');
+    if (paneTopic && !paneTopic.open) paneTopic.toggle();
     var mainShape = topicShape(mainTopic);
     var paneShape = topicShape(paneTopic);
     check(!!mainShape && !!paneShape && mainShape === paneShape,
@@ -625,9 +649,10 @@
     // ---- 7c. a REPLAYED transcript draws it open too --------------------------------------------
     // The repaint is history, but this topic is not: it used to be created `open = !replayingMessages`,
     // so a reload (and a child pane, which repaints through the same renderer) drew it folded - the one
-    // topic whose default state depended on where the rows came from. A commentary is created open on
-    // replay (`appendCommentary`: `block.open = true`, no replay condition); this topic must match, so
-    // the route asserted here is `paintChildTranscript`, which is what a reload and a child pane use.
+    // topic whose default state depended on where the rows came from. A commentary is created COLLAPSED
+    // now (change 2), and the thinking topic is still created OPEN everywhere, because the rule names
+    // thinking explicitly; a repaint must draw it open, so the route asserted here is
+    // `paintChildTranscript`, which is what a reload and a child pane use.
     var replayHost = document.createElement("div");
     stage.append(replayHost);
     paintChildTranscript(replayHost, [

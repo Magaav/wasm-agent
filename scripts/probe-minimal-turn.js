@@ -12,19 +12,22 @@ try {
  // the order moved and the one `·` is new. The glyph is read from the row itself because it is the
  // animated frame, not a fixed character.
  const liveRow=statusLine.textContent;
- check(liveRow===statusSpinner.textContent+' 👣26·6s ⚒82 ◈~10k ◷2:24',
-   'requested compact live strip with pending usage marked, saw: '+JSON.stringify(liveRow));
+ // WHY THE TURN COUNTER LEADS THE FACTS NOW (change 1): the row begins with the session's turn counter,
+ // immediately after the activity glyph and before the first measurement - `↻1` here, because the
+ // snapshot above names one run (`minimal`). Everything after it is the same line it was.
+ check(liveRow===statusSpinner.textContent+' ↻1 👣26·6s ⚒82 ◈~10k ◷2:24',
+   'requested compact live strip with the turn counter and pending usage marked, saw: '+JSON.stringify(liveRow));
  // WHY THIS IS NEW: an exact string cannot say whether a future edit re-ordered the row and edited
- // the expectation with it, so the SHAPE is pinned - glyph, then five facts, single spaces between
- // them, and the calls/clock pair as one `·`-joined token.
- check(/^\S \S+·\S+ \S+ \S+ \S+$/.test(liveRow),
-   'the live row must read `<glyph> <calls>·<elapsed> <tools> <tokens> <duration>`, saw: '+JSON.stringify(liveRow));
+ // the expectation with it, so the SHAPE is pinned - glyph, then the turn counter, then five facts,
+ // single spaces between them, and the calls/clock pair as one `·`-joined token.
+ check(/^\S ↻\S+ \S+·\S+ \S+ \S+ \S+$/.test(liveRow),
+   'the live row must read `<glyph> ↻<turns> <calls>·<elapsed> <tools> <tokens> <duration>`, saw: '+JSON.stringify(liveRow));
  // ...and the ORDER, as positions, so a passing shape cannot hide a swapped pair:
- // calls -> elapsed -> tools -> tokens -> duration.
+ // turns -> calls -> elapsed -> tools -> tokens -> duration.
  const facts=liveRow.slice(statusSpinner.textContent.length).trimStart();
- check(facts.indexOf('👣')===0&&facts.indexOf('👣')<facts.indexOf('6s')&&facts.indexOf('6s')<facts.indexOf('⚒')&&
+ check(facts.indexOf('↻')===0&&facts.indexOf('↻')<facts.indexOf('👣')&&facts.indexOf('👣')===facts.indexOf('👣')&&facts.indexOf('👣')<facts.indexOf('6s')&&facts.indexOf('6s')<facts.indexOf('⚒')&&
    facts.indexOf('⚒')<facts.indexOf('◈')&&facts.indexOf('◈')<facts.indexOf('◷'),
-   'the facts run calls -> elapsed -> tools -> tokens -> duration, saw: '+JSON.stringify(liveRow));
+   'the facts run turns -> calls -> elapsed -> tools -> tokens -> duration, saw: '+JSON.stringify(liveRow));
  // ...and the `·` is the ONLY one in the facts (`·` is also the smallest activity frame, so the glyph
  // is excluded rather than counted).
  check(facts.indexOf('·')===facts.lastIndexOf('·'),
@@ -49,17 +52,23 @@ try {
  const child=document.createElement('wa-agent-session');document.body.append(child);child.task={subagent_id:'minimal-child',session_id:'minimal-child',state:'running',profile:'worker',model:'test-model'};
  check(!child.querySelector('[data-action="steer"],[data-action="cancel"]'),'child uses shared Send/Stop only');child.remove();
  handleEvent({type:'commentary_delta',pending_id:'c1',text:'Checking '});const topic=streamedCommentaryBlock;
- check(topic.open&&topic.body.textContent==='Checking'&&topic.querySelector('.trace-meta').textContent==='9 chars'&&!topic.closest('wa-run'),'first commentary chunk already in open topic');
+ // CHANGE 2 (operator rule): a commentary is CREATED COLLAPSED now - only thinking and decision topics
+ // print expanded - so what this pins is that the first chunk already streams INSIDE its topic and that
+ // the body is the reader's to open. The old expectation (`open` by default) is the behaviour reversed.
+ check(!topic.open&&topic.body.textContent==='Checking'&&topic.querySelector('.trace-meta').textContent==='9 chars'&&!topic.closest('wa-run'),'first commentary chunk already in its COLLAPSED topic');
  handleEvent({type:'commentary_delta',pending_id:'c1',text:'the result.'});check(topic.querySelector('.trace-meta').textContent==='20 chars','header grows live');
- topic.toggle();check(!topic.open,'reader closes explicitly');
- handleEvent({type:'commentary',pending_id:'c1',message_id:'c1-id',text:'Checking the result.'});check(topic.isConnected&&!topic.open&&transcript.querySelectorAll('wa-commentary').length===1,'resolution keeps same topic and manual state');
+ topic.toggle();check(topic.open,'reader opens it explicitly');
+ handleEvent({type:'commentary',pending_id:'c1',message_id:'c1-id',text:'Checking the result.'});check(topic.isConnected&&topic.open&&transcript.querySelectorAll('wa-commentary').length===1,'resolution keeps same topic and the reader\'s open choice');
+ topic.toggle();check(!topic.open,'reader closes it explicitly');
  handleEvent({type:'commentary_delta',pending_id:'c2',text:'Verified.'});const second=streamedCommentaryBlock;
+ check(second!==topic&&!second.open,'the next commentary is its own topic and starts collapsed');
+ second.toggle();   // the reader opens this one: that choice must survive the fold and a repaint
  handleEvent({type:'commentary',pending_id:'c2',message_id:'c2-id',text:'Verified.'});
  handleEvent({type:'tool',name:'read',call_id:'minimal-read',arguments:{path:'evidence'}});handleEvent({type:'tool_result',name:'read',result:{ok:true}});
  handleEvent({type:'final_answer_begin',message_id:'a1'});handleEvent({type:'delta',text:'The change is verified.'});handleEvent({type:'reply',message_id:'a1',text:'The change is verified.'});handleEvent({type:'done'});
- check(second.open&&second.closest('wa-run')&&!second.closest('wa-run').open,'commentary joins closed settled run while retaining own open choice');
+ check(second.open&&second.closest('wa-run')&&!second.closest('wa-run').open,'commentary joins the closed settled run while retaining the reader\'s open choice');
  const rows=[{seq:1,id:'minimal',role:'user',content:'Minimal chat',created_at:Date.now()/1000},{seq:2,id:'c1-id',role:'assistant',phase:'commentary',content:'Checking the result.'},{seq:3,id:'c2-id',role:'assistant',phase:'commentary',content:'Verified.'},{seq:4,id:'a1',role:'assistant',content:'The change is verified.'}];
- busy=false;repaintMessages(rows,{state:'answered',notify:false});check(!transcript.querySelector('[data-message-id="c1-id"]').open&&transcript.querySelector('[data-message-id="c2-id"]').open,'checkpoint repaint keeps explicit closure and open default');
+ busy=false;repaintMessages(rows,{state:'answered',notify:false});check(!transcript.querySelector('[data-message-id="c1-id"]').open&&transcript.querySelector('[data-message-id="c2-id"]').open,'checkpoint repaint keeps the reader\'s closure and the reader\'s opening');
  chatShell.warning.setNotice('transcript','transcript not loaded - retrying in 30s');setLiveness({working:false,kind:'worker',seconds:55});setLiveness({working:true});check(chatShell.warning.textContent.includes('retrying'),'healthy heartbeat cannot erase transcript warning');
  chatShell.warning.setNotice('active','no result is recorded yet. A run is in progress on the node; this page will check again when it becomes idle.');
  check(!transcript.contains(chatShell.warning)&&Math.abs(chatShell.warning.getBoundingClientRect().top-chatShell.getBoundingClientRect().top-5)<1,'shared warning is 5px below chat header, outside status/transcript');

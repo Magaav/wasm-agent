@@ -1659,8 +1659,13 @@ $harness = @'
   check(!!paneFooter && Math.abs(paneModel.getBoundingClientRect().right - paneFooter.getBoundingClientRect().right)<=2,
     'the worker model label right edge must sit within 2px of its composer row right edge, saw ' +
       paneModel.getBoundingClientRect().right + ' vs ' + paneFooter.getBoundingClientRect().right);
-  check(!!livePane.querySelector('wa-trace')?.open && livePane.querySelectorAll('.tool-line.pending').length===1,
-    'running worker tool is open and deduplicated before settlement, saw trace=' + !!livePane.querySelector('wa-trace') +
+  // WHY THIS READS `!open` NOW (change 2): only THINKING and DECISION topics print expanded; a step that
+  // only called a tool is created COLLAPSED and stays collapsed until the reader opens it. The property this
+  // check was written for - the running call is deduplicated and drawn as ONE topic, not one row per
+  // notification - is unchanged. The reader's own fold is asserted on the next line, which sets `open=false`
+  // by hand and then requires a live task update not to rebuild the transcript under them.
+  check(livePane.querySelector('wa-trace')?.open===false && livePane.querySelectorAll('.tool-line.pending').length===1,
+    'running worker tool topic is created collapsed (only thinking and decision topics print expanded) and deduplicated before settlement, saw trace=' + !!livePane.querySelector('wa-trace') +
     ' open=' + (livePane.querySelector('wa-trace') ? livePane.querySelector('wa-trace').open : 'n/a') +
     ' pending=' + livePane.querySelectorAll('.tool-line.pending').length +
     ' lines=' + livePane.querySelectorAll('.tool-line').length +

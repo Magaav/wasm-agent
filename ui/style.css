@@ -459,6 +459,15 @@ wa-diff { display: block; align-self: flex-start; max-width: 760px; width: 100%;
    ships as a colour emoji. It keeps its own space in its text (see below), so it needs no margin. */
 .chat-content-run-calls { flex: 0 0 auto; min-width: 0; font-variant-numeric: tabular-nums;
   font-variant-emoji: text; font-family: var(--font), var(--glyph-font); white-space: nowrap; }
+/* The turn counter (`↻2`) stands between the activity glyph and the first measurement, in the live
+   row and in the finished footer. It carries its own leading space in its TEXT, like both halves of
+   the stats line, so the row reads `\u2733 \u21bb2 \ud83d\udc63\u2026`; `white-space: pre` is what keeps a leading space inside a
+   flex item (otherwise it is trimmed as the start of a line). */
+.chat-content-run-turns { flex: 0 0 auto; min-width: 0; font-variant-numeric: tabular-nums; white-space: pre; }
+/* In the finished footer the counter stands before the outcome notice (`completed`), which is a
+   different kind of fact from a count: the row's one space between them is a margin here because the
+   live row's counter is followed by the measurements, whose first half carries that space itself. */
+.chat-content-run-status.finished .chat-content-run-turns { margin-right: var(--space); }
 /* Live row: `✳ 👣22·13s ⚒30 ◈~71.3k ◷1:55` - one line, and the clock is in the middle of it. The
    two halves of the compact line carry the single space that separates them from their neighbour
    (`✳ ` before the model calls, ` ⚒30` after the clock), and the space is a CHARACTER rather than a

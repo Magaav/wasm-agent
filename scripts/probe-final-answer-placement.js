@@ -161,6 +161,14 @@
     var answerTopic = bubble.body.querySelector(":scope > wa-commentary.phase-pending");
     var answerBody = answerTopic && answerTopic.querySelector(".commentary-body");
     check(!!answerBody, "the answer's first chunk also streams inside its commentary topic");
+    // CHANGE 2 (operator rule): that topic PRINTS COLLAPSED now - only thinking and decision topics
+    // print expanded - so the probe opens it the way a reader following the prose does, before the
+    // conversion. The claims below are about the block the conversion moves (same element, same
+    // structure, same text), and a folded body has no box to compare: opening it here asserts the
+    // shape the reader sees and keeps every structural claim in this section intact.
+    if (answerTopic && !answerTopic.open) answerTopic.toggle();
+    check(!!answerTopic && answerTopic.open === true,
+      "the probe opened the answer's prose the way a reader does, saw open=" + (answerTopic && answerTopic.open));
     handleEvent({ type: "delta", text: "is 42." });
     var beforeMetrics = metrics(answerBody);
     var beforeClone = answerBody.cloneNode(true);
@@ -492,14 +500,30 @@
     var longAnswer = "A paragraph of readable evidence. ".repeat(200);
     handleEvent({ type: "done" });
     messages.replaceChildren(); runBubble = null; streamBody = null; streamText = "";
+    // Scroll bookkeeping belongs to a stage, not to the page. An anchor, a release mark or an expected
+    // position left by an earlier stage decides the next one's scroll (measured: this stage began at
+    // the top of its own transcript and its answer never left the fold, so the anchor it asserts could
+    // not be produced). The state under test here is this reader's scroll, so it starts clean.
+    answerAnchors.delete(messages); answerReleased.delete(messages);
+    answerScrollPositions.delete(messages); answerMotions.delete(messages);
     setFollow(true);
     for (var fill5 = 0; fill5 < 8; fill5++) add("user", "Earlier evidence " + ("retained text ".repeat(35)));
     messages.scrollTop = messages.scrollHeight;
     handleEvent({ type: "round", n: 1, tools: 3, run_id: "placement-run-grow", session_id: "placement-session" });
     handleEvent({ type: "delta", text: longAnswer });
     messages.dispatchEvent(new WheelEvent("wheel", { deltaY: -1 }));
-    messages.scrollTop = Math.max(0, messages.scrollTop - 60);
+    // CHANGE 2 (operator rule): the run's prose prints inside a COLLAPSED commentary now, so the stream no
+    // longer carries the reader down the transcript - their own scroll is the only one left, and it is what
+    // this stage is about. The wheel above is what RELEASES them for the bubble; the scroll below is the
+    // reader's own position when the run ends. The assertion that follows is unchanged: a released reader
+    // still gets the answer's FIRST line.
+    messages.scrollTop = messages.scrollHeight;
     messages.dispatchEvent(new Event("scroll"));
+    check(answerReleased.has(messages),
+      "this stage must measure a RELEASED reader (the scroll during the run is what released them)");
+    check(messages.scrollTop >= messages.scrollHeight - messages.clientHeight - 1,
+      "and that reader is at the end of the run when the answer lands, saw " + messages.scrollTop +
+      "/" + (messages.scrollHeight - messages.clientHeight));
     handleEvent({ type: "reply", message_id: "placement-msg-grow", text: longAnswer });
     var growAnswer = lastBubble().body.querySelector(":scope > .seg.final-answer.answer-wrap");
     var grownTop = growAnswer ? growAnswer.getBoundingClientRect().top - messages.getBoundingClientRect().top : NaN;
