@@ -305,14 +305,20 @@ FINE_TICKS=0
 # queue, subagents and workers. The four independent greps this replaces could each pass while a different
 # field was busy, and on 2026-10-22 that stopped a node under a live turn (`lost the local node mid-run`).
 node_is_idle() {
-  case "$1" in
-    *'"node_state":"idle"'*) return 0 ;;
-    *'"node_state":'*) return 1 ;;   # busy / upgrading / restarting are never idle
-  esac
-  # A node older than node_state: require every fact to hold in the SAME payload.
+  # `serde_json` sorts object keys, so the field is an OBJECT whose "state" is not first:
+  #   "node_state":{"busy_threads":0,"queue":0,"state":"idle",...}
+  # Grepping for `"node_state":"idle"` can never match, and neither can an ordered
+  # `"subagents":{"active":0,"queued":0,"running":0}`. Both were wrong, which made this gate blind to
+  # idle on every deploy since node_state was added - measured 2026-10-22 in upgrade-wait.log: 266 polls,
+  # idle_ticks=0, node_state empty. Match the KEY, never its position.
+  if printf '%s' "$1" | grep -q '"node_state":{[^}]*"state":"idle"'; then return 0; fi
+  if printf '%s' "$1" | grep -q '"node_state":'; then return 1; fi   # busy / upgrading / restarting
+  # A node older than node_state: require every fact to hold in the SAME payload, order-independent.
   printf '%s' "$1" | grep -q '"runs":\[\]' || return 1
   printf '%s' "$1" | grep -q '"queue":0' || return 1
-  printf '%s' "$1" | grep -q '"subagents":{"active":0,"queued":0,"running":0}' || return 1
+  printf '%s' "$1" | grep -q '"subagents":{[^}]*"active":0' || return 1
+  printf '%s' "$1" | grep -q '"subagents":{[^}]*"running":0' || return 1
+  printf '%s' "$1" | grep -q '"subagents":{[^}]*"queued":0' || return 1
   if printf '%s' "$1" | grep -q '"label":"POST /chat'; then return 1; fi
   return 0
 }
@@ -330,7 +336,7 @@ while :; do
   # the only channel was the parent's pipe. This trail names the poll the run died on.
   polls=$((polls + 1))
   printf '%s poll=%s waited=%ss idle_ticks=%s node_state=%s bytes=%s\n' "$(date -u +%H:%M:%SZ)" "$polls" "$waited" "$idle_ticks" \
-    "$(printf '%s' "$state" | sed -n 's/.*"node_state":{"state":"\([a-z]*\)".*/\1/p' | head -1)" "${#state}" \
+    "$(printf '%s' "$state" | sed -n 's/.*"node_state":{[^}]*"state":"\([a-z]*\)".*/\1/p' | head -1)" "${#state}" \
     >> "${WAIT_LOG:-$INSTALL_DIR/upgrade-wait.log}" 2>/dev/null
   if [ "$polls" -gt "${WA_IDLE_MAX_POLLS:-1440}" ]; then
     say "gave up after $polls polls (WA_IDLE_MAX_POLLS); not upgrading. Trail: ${WAIT_LOG:-$INSTALL_DIR/upgrade-wait.log}"
