@@ -5,8 +5,8 @@ Mandatory cutover: [WHATSAPP-MIGRATION.md](WHATSAPP-MIGRATION.md).
 
 The linked-device service journals incoming AND synchronized own outgoing audio.
 Ingestion, independent durable compute tasks and held/confirmed outbox parts are
-separate. Only **incoming** audio is posted when transcript posting is enabled;
-own outgoing audio is transcribed for the journal and is not replied to. One failure
+separate. Incoming audio **and synchronized own outgoing audio** are posted when transcript
+posting is enabled; both are transcribed for the journal and reply-linked. One failure
 does not block ingestion, and downtime backlog after the explicit first activation
 cutoff is not expired after ten minutes. Initial history is never bulk-posted. No
 general AI responder, read marking or composer action.

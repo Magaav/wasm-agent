@@ -257,6 +257,9 @@ func run() error {
 	ocrWorker := f.String("ocr-worker", "", "absolute whatsapp-ocr-local.py (defaults next to the executable)")
 	ocrModels := f.String("ocr-models", "", "optional private OCR model cache")
 	posting := f.String("set", "", "posting toggle: enable|disable")
+	holdChat := f.String("chat", "", "exact chat whose reviewed hold is released")
+	holdReason := f.String("reason", "", "operator review reason for the hold release")
+	holdConfirm := f.Bool("confirm", false, "confirm the reviewed hold release")
 	confirm := f.Bool("approve-transcript-posting", false, "explicit original-chat transcript policy approval after retirement check")
 	retired := f.String("retirement-receipt", "", "verified operator cutover receipt path")
 	intentID := f.String("intent-id", "", "exact durable operator intent ID for offline owner inspection")
@@ -334,6 +337,14 @@ func run() error {
 		}
 		c.TranscriptPosting = *posting == "enable"
 		return j.save(c)
+	case "release-hold":
+		if !*holdConfirm {
+			return errors.New("explicit_reviewed_hold_release_confirmation_required")
+		}
+		if err = j.releaseHold(c, *holdChat, *holdReason); err != nil {
+			return err
+		}
+		return json.NewEncoder(os.Stdout).Encode(map[string]any{"ok": true, "chat": *holdChat, "released": true, "replayed": false})
 	case "pause":
 		c.Requested = false
 		return j.save(c)

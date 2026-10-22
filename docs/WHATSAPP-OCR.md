@@ -73,7 +73,7 @@ change; stop the owned service before changing it.
 `transcript_posting` is separate from transcription. Audio is always transcribed for
 the journal when the worker is healthy. A reply is queued only when all of these hold:
 
-- the source audio is **incoming** (`own=false`); own outgoing audio is indexed but not posted;
+- the source audio is incoming or own outgoing (`own` is not a reason to skip it);
 - `transcript_posting` is enabled;
 - the audio is at/after the activation cutoff, not view-once/ephemeral and its chat is not held.
 
