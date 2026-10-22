@@ -42,6 +42,9 @@ mod jobs;
 mod script_runner;
 mod cdp;
 mod instance;
+// Observation of the request queue: status, progress and failure, kept where `status`, `/health` and the
+// window can read them. Dispatch never consults it.
+mod queue;
 
 // Who owns the watcher's role: the supervisor a deploy must not fight, and the one a kill switch must ask.
 // The decision is a pure function over facts about *the watcher* - the supervisor it was told about, its
@@ -92,6 +95,8 @@ mod target_identity_tests;
 mod quiet_launch_tests;
 #[cfg(test)]
 mod intake_tests;
+#[cfg(test)]
+mod queue_tests;
 #[cfg(test)]
 mod publish_loop_tests;
 
@@ -803,6 +808,7 @@ fn stop_child(pid: u32) -> Result<()> {
 pub(crate) fn stop_node_verified(reason: &str, probe_identity: bool) -> Result<()> {
     let port = node_port();
     let pid = verify_target(port, probe_identity)?;
+    queue::step("stopping", &format!("stopping node pid {pid}"));
     say(&format!("stopping node pid {pid} (by pid and identity, never by image name)"));
     if cfg!(windows) {
         // Win32 directly, rather than `taskkill`: a spawned helper costs ~138ms and, worse, is a
@@ -843,6 +849,7 @@ fn start_node(binary: &Path, reason: &str) -> Result<()> {
         .map(|value| !value.trim().is_empty())
         .unwrap_or(false);
     let sanitize = named && selected.is_guest();
+    queue::step("starting", &format!("starting {} on port {port}", binary.display()));
     say(&format!("starting {} on port {port}", binary.display()));
     let args = vec![
         "serve".to_string(),
@@ -935,6 +942,7 @@ fn start_node(binary: &Path, reason: &str) -> Result<()> {
 }
 
 fn wait_up(seconds: u64) -> bool {
+    queue::step("verifying", "waiting for the node to answer /health");
     let deadline = Instant::now() + Duration::from_secs(seconds);
     while Instant::now() < deadline {
         if node_is_up() {
@@ -976,6 +984,7 @@ fn wake_notice(prompt: &str) -> String {
 }
 
 fn verb_wake(session: &str, prompt: &str, reason: &str) -> Result<String> {
+    queue::step("waking", "waking the model in the requested session");
     if session.is_empty() {
         bail!("wake needs --session");
     }
@@ -1087,6 +1096,7 @@ fn wakes_last_hour() -> u32 {
 }
 
 pub(crate) fn verb_restart(reason: &str) -> Result<String> {
+    queue::step("restarting", "stopping and starting the node");
     let binary = installed_binary();
     if !binary.exists() {
         bail!("nothing installed at {}", binary.display());
@@ -1210,6 +1220,7 @@ fn run_bounded(command: std::process::Command, limit: Duration) -> Result<std::p
 }
 
 pub(crate) fn verb_upgrade(binary: &str, reason: &str) -> Result<String> {
+    queue::step("installing", "running upgrade.sh against the candidate binary");
     if binary.is_empty() {
         bail!("upgrade needs --binary");
     }
@@ -1270,6 +1281,7 @@ pub(crate) fn verb_deploy(session: &str, prompt: &str, reason: &str) -> Result<S
 /// The deploy itself, with the script and the capture named by the caller - which is what lets the evidence
 /// be proved on a machine that does not deploy (`deploy_visibility_tests`).
 pub(crate) fn verb_deploy_script(script: &Path, session: &str, prompt: &str, reason: &str, capture: &Path) -> Result<String> {
+    queue::step("deploying", "running deploy.sh detached");
     let (interpreter, script_arg) = shell_for(script);
     let mut args = vec![script_arg, "--reason".to_string(), reason.to_string()];
     if !session.is_empty() {
@@ -1549,6 +1561,7 @@ fn run_script_command(path:&Path)->Result<(String,Vec<String>)> {
 }
 
 fn verb_run(script: &str, reason: &str) -> Result<String> {
+    queue::step("running", "running the allow-listed script");
     let path=approved_script(script)?;
     let (program,args)=run_script_command(&path)?;
     let manager=wa_operation::Manager::new(sentinel_dir().join("operations"));
@@ -1561,6 +1574,7 @@ fn verb_run(script: &str, reason: &str) -> Result<String> {
 }
 
 fn verb_recover(reason:&str)->Result<String> {
+    queue::step("recovering", "interrupting and restarting the node");
     let binary=installed_binary();if !binary.is_file() {bail!("installed binary missing")}
     // Recovery asks the OS, never the interpreter and never image names. It is an explicit
     // interruption, so it does not wait for idle - but it still proves the listener is ours, and
@@ -1688,6 +1702,8 @@ fn admission_read_contention(detail:&str)->bool {
 
 fn finish_request(claim: &Path, request: &Value) {
     let id=claim.file_stem().and_then(|s|s.to_str()).unwrap_or("");
+    // Progress is attached on this thread, for exactly the duration of this request.
+    let _performing=queue::begin_scope(request,id);
     if deploy_protocol::reserved(id) {
         if let Err(error)=deploy_protocol::validate(request,id) {
             let _=deploy_protocol::intake(request,id);
@@ -1709,6 +1725,7 @@ fn finish_request(claim: &Path, request: &Value) {
         if let Ok(_lock)=queue_lock() {
         if !back.exists() && std::fs::rename(claim,&back).is_ok() {
             let _=deploy_protocol::record(request,id,"held",&detail);
+            queue::observe(request,id,"waiting","deferred",&detail);
             audit("owner-read-deferred",id,&detail);
             drop(_lock);
             std::thread::sleep(Duration::from_secs(1));
@@ -1722,11 +1739,15 @@ fn finish_request(claim: &Path, request: &Value) {
     if !ok && detail.starts_with("wake-budget") {
         let back = sentinel_dir().join("requests").join(claim.file_name().unwrap_or_default());
         if std::fs::rename(claim, &back).is_ok() {
+            queue::observe(request, id, "waiting", "deferred", &detail);
             audit("wake-deferred", &back.display().to_string(), &detail);
             return;
         }
     }
     let phase = if ok && request["verb"] == "deploy" { "spawned" } else if ok { "completed" } else { "failed" };
+    // The durable answer to "what happened to the thing I queued?": state, final step and the detail the
+    // verb returned. A failure is red in the window and stays visible for a week; it is never only a log line.
+    queue::observe(request, id, if ok { "done" } else { "failed" }, phase, &detail);
     if let Err(error) = deploy_protocol::record(request, claim.file_stem().and_then(|s|s.to_str()).unwrap_or(""), phase, &detail) {
         audit("protocol-record-failed", &claim.display().to_string(), &error.to_string());
     }
@@ -1790,6 +1811,10 @@ fn announce_hold(held: &mut Held, key: &str, verb: &str, why: &str, asked: &str)
             if let Err(error) = deploy_protocol::record(&request, key.trim_end_matches(".json"), "held", why) {
                 audit("protocol-record-failed", key, &error.to_string());
             }
+            // The hold is the state an operator most needs to see: the request exists, nothing is wrong with
+            // it, and it is waiting for a named reason. It is written every time the reason changes, which is
+            // exactly when `status` would otherwise still show the previous reason.
+            queue::observe(&request, key.trim_end_matches(".json"), "waiting", "held", why);
         }
     }
     if let Some(line) = held.announcement(key, verb, why, asked) {
@@ -1812,8 +1837,13 @@ fn process_requests(background: bool, held: &mut Held) -> Result<u32> {
     for path in &entries {
         let id=path.file_stem().and_then(|s|s.to_str()).unwrap_or("");
         match std::fs::read(path).and_then(|b|serde_json::from_slice::<Value>(&b).map_err(std::io::Error::other)) {
-            Ok(request) => { if let Err(error)=deploy_protocol::intake(&request,id) { audit("intake-problem",id,&error.to_string()); } },
+            Ok(request) => { if let Err(error)=deploy_protocol::intake(&request,id) { audit("intake-problem",id,&error.to_string()); }
+                // Observed, not yet performed. A request that is superseded, held or rejected below keeps
+                // this record and gains the reason; none of those states are silent.
+                queue::ensure_queued(&request,id); },
             Err(error) => { audit("intake-malformed",id,&error.to_string());
+                queue::observe(&json!({"verb":"(unreadable)","queued_at":now_epoch()}),id,"failed","malformed",
+                    &format!("request file could not be read: {error}"));
                 let target=sentinel_dir().join("intake-problems");std::fs::create_dir_all(&target)?;
                 let nonce=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos();
                 wa_operation::atomic_json(&target.join(format!("malformed-{}-{nonce}.json",std::process::id())),&json!({"path":path,"raw_bytes":std::fs::read(path).ok(),"detail":error.to_string(),"at":now_epoch()}))?;
@@ -1844,6 +1874,8 @@ fn process_requests(background: bool, held: &mut Held) -> Result<u32> {
                     "detail":"superseded by a newer upgrade request","at":now_epoch()});
                 let target=sentinel_dir().join("done").join(claim.file_name().unwrap_or_default());
                 if wa_operation::atomic_json(&target,&record).is_ok() {let _=std::fs::remove_file(&claim);}
+                queue::observe(&preview, path.file_stem().and_then(|s|s.to_str()).unwrap_or(""), "done", "superseded",
+                    "superseded by a newer upgrade request; nothing was installed for it");
                 audit("upgrade-superseded",&path.display().to_string(),"a newer upgrade request exists");
                 handled+=1;
             }
@@ -1862,6 +1894,7 @@ fn process_requests(background: bool, held: &mut Held) -> Result<u32> {
         }
         if let Err(error) = deploy_protocol::validate(&preview, protocol_id) {
             deploy_protocol::record(&preview, protocol_id, "rejected", &error.to_string())?;
+            queue::observe(&preview, protocol_id, "failed", "rejected", &error.to_string());
             let claim = sentinel_dir().join("claimed").join(&key);
             if claim_request(&path, &claim)? {
                 let target = sentinel_dir().join("failed").join(&key);
@@ -1871,6 +1904,7 @@ fn process_requests(background: bool, held: &mut Held) -> Result<u32> {
             continue;
         }
         deploy_protocol::record(&preview, protocol_id, "accepted", "watcher observed request; installation not complete")?;
+        queue::ensure_queued(&preview, protocol_id);
         let capacity=if verb=="recover" {5}else{4};
         if background && REQUEST_ACTIVE.load(Ordering::Acquire)>=capacity {
             announce_hold(held,&key,verb,"the watcher is at its request capacity",asked);
@@ -1904,6 +1938,9 @@ fn process_requests(background: bool, held: &mut Held) -> Result<u32> {
             Ok(value) => value,
             Err(error) => {
                 audit("bad-request", &claim.display().to_string(), &error.to_string());
+                queue::observe(&json!({"verb":"(unreadable)","queued_at":now_epoch()}),
+                    claim.file_stem().and_then(|s|s.to_str()).unwrap_or(""), "failed", "malformed",
+                    &format!("claimed request could not be read: {error}"));
                 let _ = std::fs::rename(&claim, sentinel_dir().join("failed").join(claim.file_name().unwrap_or_default()));
                 continue;
             }
@@ -1916,6 +1953,10 @@ fn process_requests(background: bool, held: &mut Held) -> Result<u32> {
                 continue;
             }
         }
+        // Claimed means this runner owns the effect from here on. The record says so before the first step,
+        // so a request that hangs or kills the watcher is visible as "running", never as "queued".
+        let claimed_id = claim.file_stem().and_then(|s|s.to_str()).unwrap_or("");
+        queue::observe(&request, claimed_id, "running", "claimed", &format!("performing {}", request["verb"].as_str().unwrap_or("request")));
         if background {
             REQUEST_ACTIVE.fetch_add(1,Ordering::AcqRel);
             if management {MAINTENANCE_ACTIVE.store(true,Ordering::Release);}
@@ -2060,8 +2101,11 @@ fn request(args: &[String]) -> Result<()> {
         std::fs::create_dir_all(&dir)?;
         wa_operation::atomic_json(&dir.join("intent.json"), &Value::Object(fields.clone()))?;
     }
-    wa_operation::atomic_json(&path,&Value::Object(fields))
+    wa_operation::atomic_json(&path,&Value::Object(fields.clone()))
         .with_context(|| format!("write {}", path.display()))?;
+    // The request is now durable. Record the same fact where the queue is observable, before any watcher
+    // tick: "I wrote it" and "it is queued" must not be separated by an unreadable gap.
+    queue::ensure_queued(&Value::Object(fields), &stamp);
     audit("request", &verb, &reason);
     say(&format!("requested {verb}: {}", path.display()));
     say("the sentinel performs it - it is the only thing that stops or starts this node");
@@ -2807,6 +2851,16 @@ fn status() -> Result<()> {
     // log, or to mistake "queued" for "deployed".
     for line in pending_lines(&sentinel_dir().join("requests"), now_epoch(), activity, node_up, watched.is_some()) {
         say(&line);
+    }
+    // What became of the requests that are no longer in the box. The lines above answer "why not yet";
+    // these answer "what happened" - the step it reached, and the error when it failed. A failure is the row
+    // an operator must not have to dig out of the log, so it is printed here until its week is up.
+    let observed = queue::lines(now_epoch(), 8);
+    if !observed.is_empty() {
+        say("queue:");
+        for line in observed {
+            say(&line);
+        }
     }
     say(&format!("wakes:     {}/{} this hour", wakes_last_hour(),
         std::env::var("WA_SENTINEL_WAKE_BUDGET").unwrap_or_else(|_| "6".into())));

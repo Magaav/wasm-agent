@@ -792,6 +792,75 @@ fn stall_exit_seconds() -> u64 {
     env_seconds("WASM_AGENT_WORKER_STALL_EXIT_SECONDS", 900)
 }
 
+/// The sentinel's own record of every request it has been asked to perform: queued, held (and why),
+/// running (and which step), done, or failed. The watcher writes one small file per request; this reads
+/// them so the window can show the queue and its failures instead of the operator having to read
+/// sentinel.log. Reading is the node's job here because /health is the one endpoint every client polls.
+fn sentinel_queue_health() -> serde_json::Value {
+    fn text(value: Option<&serde_json::Value>) -> String {
+        value.and_then(|v| v.as_str()).unwrap_or("").chars().take(240).collect()
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let dir = std::path::Path::new(&crate::resolve_home()).join(".wasm-agent/sentinel/queue");
+    let mut entries: Vec<serde_json::Value> = Vec::new();
+    if let Ok(read) = std::fs::read_dir(&dir) {
+        for entry in read.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("json") { continue; }
+            let Ok(bytes) = std::fs::read(&path) else { continue };
+            let Ok(record) = serde_json::from_slice::<serde_json::Value>(&bytes) else { continue };
+            let state = text(record.get("state"));
+            let updated_at = record.get("updated_at").and_then(|v| v.as_u64()).unwrap_or(0);
+            let age = now.saturating_sub(updated_at);
+            // Active requests are always shown. A failure is evidence and stays for a week; a completed
+            // request is only news for an hour, so an old queue cannot grow into the whole panel.
+            let keep = match state.as_str() {
+                "queued" | "waiting" | "running" => true,
+                "failed" => age < 7 * 86_400,
+                _ => age < 3_600,
+            };
+            if !keep { continue; }
+            entries.push(serde_json::json!({
+                "id": text(record.get("id")),
+                "verb": text(record.get("verb")),
+                "state": state,
+                "phase": text(record.get("phase")),
+                "detail": text(record.get("detail")),
+                "reason": text(record.get("reason")),
+                "queued_at": record.get("queued_at").and_then(|v| v.as_u64()),
+                "updated_at": updated_at,
+                "age_seconds": age,
+            }));
+        }
+    }
+    // Active first (oldest first, so queue order is the reading order), then failures, then the rest.
+    let rank = |state: &str| match state { "running" => 0, "waiting" => 1, "queued" => 2, "failed" => 3, _ => 4 };
+    entries.sort_by(|a, b| {
+        let (ra, rb) = (rank(a["state"].as_str().unwrap_or("")), rank(b["state"].as_str().unwrap_or("")));
+        ra.cmp(&rb)
+            .then_with(|| a["queued_at"].as_u64().unwrap_or(0).cmp(&b["queued_at"].as_u64().unwrap_or(0)))
+            .then_with(|| b["updated_at"].as_u64().unwrap_or(0).cmp(&a["updated_at"].as_u64().unwrap_or(0)))
+    });
+    let active = entries.iter().filter(|e| matches!(e["state"].as_str(), Some("queued" | "waiting" | "running"))).count();
+    let failed = entries.iter().filter(|e| e["state"].as_str() == Some("failed")).count();
+    let newest = entries.iter().filter_map(|e| e["updated_at"].as_u64()).max().unwrap_or(0);
+    // A watcher that died stops updating these files; a queue that claims to be active and has not moved
+    // in three minutes is a fact about the watcher, not about the request.
+    let stale = active > 0 && newest > 0 && now.saturating_sub(newest) > 180;
+    let mut shown: Vec<serde_json::Value> = entries.into_iter().take(12).collect();
+    let mut position = 0;
+    for entry in shown.iter_mut() {
+        if matches!(entry["state"].as_str(), Some("queued" | "waiting" | "running")) {
+            position += 1;
+            entry["position"] = serde_json::json!(position);
+        }
+    }
+    serde_json::json!({"active": active, "failed": failed, "stale": stale, "updated_at": newest, "requests": shown})
+}
+
 /// The honest health body. `ok` is false when the interpreter has stopped reporting,
 /// which is the one thing this endpoint is uniquely placed to say.
 fn health_body() -> Vec<u8> {
@@ -926,6 +995,13 @@ fn health_body() -> Vec<u8> {
     // Built with serde_json rather than a hand-escaped format string: the escaping
     // is exactly the kind of thing that silently produces invalid JSON, and this is
     // the one endpoint that must never be the thing that lies.
+    let codemode_setting = std::env::var("WASM_AGENT_CODEMODE").unwrap_or_default();
+    let codemode_setting = if codemode_setting.is_empty() { "default".to_string() } else { codemode_setting };
+    let codemode_assets = crate::quickjs::asset_status();
+    let codemode_ready = codemode_assets["embedded"].as_bool().unwrap_or(false);
+    // An external override is a deliberate operator act; name it here so "ready" is not read as "the
+    // embedded bytes are in use" when they are not.
+    let codemode_override = std::env::var("WASM_AGENT_CODEMODE_ASSETS").ok().filter(|value| !value.is_empty());
     serde_json::json!({
         // Versioned execution surface: a client that sees schema 1 may rely on the fields below
         // (`subagents`, `runs`, `run_ids`, `current`, `queue`, `node_threads`) existing. A client that does
@@ -1022,6 +1098,18 @@ fn health_body() -> Vec<u8> {
         // the ordered list, never the descriptions. `/health` is polled, so the long form lives in
         // `wa capabilities --json` (and, inside a workflow, in the sandbox's `capabilities()`).
         "capabilities": crate::capabilities::health(),
+        // The code-mode setting this process was started with, and whether its embedded sandbox can
+        // actually run. `native` + `ready:false` is the exact state that made every turn fail on
+        // 2026-10-22; it must be visible here, before a run, and not only in a failed run's log.
+        "codemode": {
+            "setting": codemode_setting,
+            "ready": codemode_ready,
+            "assets": codemode_assets,
+            "assets_override": codemode_override,
+        },
+        // The sentinel queue: every request it was asked to perform, its state, its current step and
+        // its failures. Without this the only account of a queued restart was a log line.
+        "sentinel": sentinel_queue_health(),
     })
     .to_string()
     .into_bytes()

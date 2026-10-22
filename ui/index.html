@@ -72,6 +72,10 @@
     <span class="upgrade-bar-label">installing…</span>
     <div class="upgrade-bar-track"><div class="upgrade-bar-fill"></div></div>
   </div>
+  <!-- The sentinel queue is a fact about the supervisor, not about this run. /health carries the watcher's
+       own per-request records; this panel shows state, the step it reached and failures in red. Hidden
+       while the queue has nothing to say, so a quiet node has no chrome. -->
+  <div id="sentinel-queue" hidden role="status" aria-live="polite" aria-label="Sentinel request queue"></div>
   <div id="orb" class="orb" title="wasm-agent">
     <span class="orb-ring"></span>
     <span class="orb-core"></span>

@@ -3955,6 +3955,7 @@ function markRunStreamAlive() {
 }
 function observeRunHealth(health) {
   applyUpgradeState(health);
+  applySentinelQueue(health);
   const id = busy ? runKey(activeRunId) : runKey(observedRun);
   const scope = runStepScope() + ':' + (id || 'unidentified');
   if (livenessSample?.scope !== scope) {
@@ -4079,6 +4080,50 @@ function connectionMessage() {
   return "lost the local node mid-run (nothing is serving " + location.origin + ")." +
     " Start it with `wa ui` - this run is recorded as unfinished, and" +
     " `wa resume --list` will offer to continue it.";
+}
+
+// The sentinel queue is a fact about the supervisor, not about the current run, so it is rendered from the
+// same /health poll even while this window is idle. Rows carry verb, state, the step reached and the detail
+// the verb returned; failure is red, held amber, running blue. Text is set with textContent: a request
+// reason is operator text, never markup.
+function applySentinelQueue(health) {
+  const box = document.getElementById('sentinel-queue');
+  if (!box) return;
+  const queue = health && health.sentinel;
+  const rows = queue && Array.isArray(queue.requests) ? queue.requests : [];
+  if (!rows.length) { box.hidden = true; box.replaceChildren(); return; }
+  const head = document.createElement('div');
+  head.className = 'sentinel-queue-head';
+  const title = document.createElement('b');
+  title.textContent = 'sentinel queue';
+  const counts = document.createElement('span');
+  counts.textContent = [
+    queue.active ? queue.active + ' active' : '',
+    queue.failed ? queue.failed + ' failed' : '',
+    queue.stale ? 'watcher not reporting' : '',
+  ].filter(Boolean).join(' · ');
+  head.append(title, counts);
+  const list = document.createElement('ul');
+  list.className = 'sentinel-queue-items';
+  for (const row of rows) {
+    const item = document.createElement('li');
+    item.dataset.state = String(row.state || '');
+    const verb = document.createElement('span');
+    verb.className = 'sq-verb';
+    verb.textContent = row.verb || '?';
+    const state = document.createElement('span');
+    state.className = 'sq-state';
+    state.textContent = [row.position ? '#' + row.position : '', row.state || ''].filter(Boolean).join(' ');
+    const detail = document.createElement('span');
+    detail.className = 'sq-detail';
+    detail.textContent = [row.phase, row.detail || row.reason || ''].filter(Boolean).join(': ');
+    item.title = [row.id, row.reason].filter(Boolean).join(' — ');
+    item.append(verb, state, detail);
+    list.append(item);
+  }
+  box.dataset.stale = queue.stale ? '1' : '0';
+  box.replaceChildren(head, list);
+  box.hidden = false;
 }
 
 // The install is observable while it happens. /health publishes the phase record upgrade.sh writes, so the
@@ -7248,7 +7293,7 @@ function runCountsByPane() {
   return runs;
 }
 function orchestratorDelay() {
-  const base=!uiVisible()?15000:orchestratorPanel?.activeTasks.length?2000:10000;
+  const base=!uiVisible()?15000:orchestratorPanel?.activeTasks?.length?2000:10000;
   return Math.max(base,orchestratorFailures?Math.min(30000,2000*2**Math.min(orchestratorFailures,4)):0);
 }
 // A dispatch THIS WINDOW has just been told is accepted, before any read has returned it.

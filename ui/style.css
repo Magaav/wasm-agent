@@ -1338,7 +1338,7 @@ wa-tasks summary { cursor: pointer; padding: var(--space); }
    The node publishes the install's own phase record (deploy-state.json) as `upgrading`. This bar is the
    visible half: it names the phase, fills as the install advances, and stays drawn across the moment the
    node stops - so a deliberate restart cannot be mistaken for a dead node. Everything is opaque; the
-   animation is opacity on a text row, not a compositor layer over the transcript. */
+   animation is a solid fill pulse, not a compositor layer over the transcript. */
 #upgrade-bar {
   position: fixed; inset: 0 0 auto 0; z-index: 60;
   display: flex; align-items: center; gap: var(--space, 8px);
@@ -1356,6 +1356,43 @@ wa-tasks summary { cursor: pointer; padding: var(--space); }
   position: absolute; inset: 0 auto 0 0; width: var(--upgrade-progress, 10%);
   background: currentColor; transition: width 400ms ease;
 }
-/* A slow pulse says "still working" while a phase is long (a build can take a minute). */
-body.upgrading #upgrade-bar { animation: upgrade-pulse 1400ms ease-in-out infinite; }
-@keyframes upgrade-pulse { 0%, 100% { opacity: .72 } 50% { opacity: 1 } }
+/* A slow solid-fill pulse says "still working" while a phase is long (a build can take a minute).
+   It is not a whole-element opacity fade: the opaque-UI contract rejects those. */
+body.upgrading .upgrade-bar-fill { animation: upgrade-pulse 1400ms ease-in-out infinite; }
+@keyframes upgrade-pulse { 0%, 100% { background-color: #3b82f6 } 50% { background-color: #93c5fd } }
+
+/* --- sentinel queue --------------------------------------------------------------------------------
+   Every request the watcher was asked to perform is one row: verb, state, the step it reached and the
+   detail it ended with. Failure is red, held is amber, running is blue - so "queued" can no longer look
+   like "deployed" and a failed restart cannot hide in the log. The panel only exists while the queue has
+   something to say. */
+#sentinel-queue {
+  position: fixed; top: 44px; right: 8px; z-index: 59; max-width: min(520px, 60vw);
+  padding: 6px 8px; background: var(--panel, #141414); color: var(--text, #e8e8e8);
+  border: 1px solid var(--line, #2a2a2a); border-radius: var(--radius-sm, 6px);
+  font: 11px/1.45 var(--font-mono, ui-monospace, monospace);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, .35);
+}
+#sentinel-queue[hidden] { display: none; }
+.sentinel-queue-head {
+  display: flex; justify-content: space-between; gap: 8px; margin-bottom: 2px;
+  color: var(--muted, #999);
+}
+.sentinel-queue-head b { color: inherit; font-weight: 600; }
+.sentinel-queue-items {
+  list-style: none; margin: 0; padding: 0; display: grid; gap: 2px;
+  max-height: 40vh; overflow: auto;
+}
+.sentinel-queue-items li {
+  display: grid; grid-template-columns: auto auto 1fr; gap: 6px; align-items: baseline;
+}
+.sentinel-queue-items .sq-verb { font-weight: 600; }
+.sentinel-queue-items .sq-state { text-transform: uppercase; letter-spacing: .04em; }
+.sentinel-queue-items .sq-detail { color: var(--muted, #999); overflow-wrap: anywhere; }
+.sentinel-queue-items li[data-state="failed"] { color: #ff6b6b; }
+.sentinel-queue-items li[data-state="failed"] .sq-detail { color: #ff9d9d; }
+.sentinel-queue-items li[data-state="waiting"],
+.sentinel-queue-items li[data-state="queued"] { color: #e6b450; }
+.sentinel-queue-items li[data-state="running"] { color: #63b3ed; }
+.sentinel-queue-items li[data-state="done"] { color: #68d391; }
+#sentinel-queue[data-stale="1"] .sentinel-queue-head { color: #ff6b6b; }
