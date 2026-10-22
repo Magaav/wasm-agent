@@ -180,13 +180,35 @@ func mapMessage(e *events.Message, history bool) Message {
 			m.Raw, _ = proto.Marshal(e.Message)
 		}
 	}
+	image := e.Message.GetImageMessage()
+	if image != nil {
+		m.MediaKind = "image"
+		if m.Body == "" {
+			m.Body = image.GetCaption()
+		}
+		if image.GetFileLength() > 20*1024*1024 {
+			m.Unsupported = "image_too_large"
+		}
+		if mime := image.GetMimetype(); mime != "" && !strings.HasPrefix(mime, "image/") {
+			m.Unsupported = "image_mimetype_unsupported"
+		}
+		if image.GetViewOnce() || e.IsViewOnce {
+			m.Unsupported = "view_once"
+		}
+		if e.IsEphemeral {
+			m.Unsupported = "ephemeral_media_not_retained"
+		}
+		if m.Unsupported == "" {
+			m.Raw, _ = proto.Marshal(e.Message)
+		}
+	}
 	if e.IsViewOnce {
 		m.Unsupported = "view_once"
 	}
 	if e.IsEphemeral {
 		m.Unsupported = "ephemeral_media_not_retained"
 	}
-	if !m.Audio && m.Body == "" && m.Unsupported == "" {
+	if !m.Audio && m.MediaKind == "" && m.Body == "" && m.Unsupported == "" {
 		m.Unsupported = "unsupported_non_audio_message"
 	}
 	return m
@@ -411,11 +433,13 @@ func (a *Adapter) Download(ctx context.Context, m Message) ([]byte, error) {
 	if err := proto.Unmarshal(m.Raw, &p); err != nil {
 		return nil, permanentError("media_metadata_unavailable")
 	}
-	audio := p.GetAudioMessage()
-	if audio == nil || audio.GetViewOnce() {
-		return nil, permanentError("unsupported_media")
+	if audio := p.GetAudioMessage(); audio != nil && !audio.GetViewOnce() {
+		return boundedMedia(ctx, a.journal.dir, audio, a.downloadToFile, mediaDeadline)
 	}
-	return boundedMedia(ctx, a.journal.dir, audio, a.downloadToFile, mediaDeadline)
+	if image := p.GetImageMessage(); image != nil && !image.GetViewOnce() {
+		return boundedMedia(ctx, a.journal.dir, image, a.downloadToFile, mediaDeadline)
+	}
+	return nil, permanentError("unsupported_media")
 }
 func (a *Adapter) Ready(expected Config, source Message) error {
 	if a.journal.hasGap() {

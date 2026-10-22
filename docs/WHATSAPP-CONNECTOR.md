@@ -90,9 +90,14 @@ or external exactly-once delivery. Pins, checksums and original license texts ar
   overflow, timeout or validation failure. Declared/actual plaintext size mismatch
   refuses. The media HTTP cap also refuses oversized history blobs as an explicit
   sticky gap rather than unbounded allocation; no complete-history guarantee.
-- Transcript text is clearly labeled `🎙️ _Automated transcript_`, UTF-8/rune-safe,
-  numbered and reply-linked to the source audio in the ORIGINAL chat. Text echoes
-  never create audio tasks. No composer opening, read marking or general AI replies.
+- Transcript text is clearly labeled `🤖 _Copiloto_`, UTF-8/rune-safe,
+  numbered and reply-linked to the source audio in the ORIGINAL chat; only incoming
+  audio is posted when `transcript_posting` is enabled. Text echoes never create
+  audio tasks. No composer opening, read marking or general AI replies.
+- Image messages are journaled with their raw protobuf and optionally OCRed by the
+  local RapidOCR worker into `messages.media_text` (see [WHATSAPP-OCR.md](WHATSAPP-OCR.md)).
+  View-once/ephemeral images are never downloaded; images received before this path
+  have no retained payload and cannot be OCRed retroactively.
 - Each account/generation/chat/source/part has a unique outbox key and preallocated
   send ID. Dispatch intent is persisted as **unknown before the external call**.
   A crash/timeout/ack loss is held, never automatically resent. Later exact own-message
@@ -239,13 +244,16 @@ refusal with SSH from a model tool. No model-provider credentials are required.
 
    ```sh
    "$WA" serve --state "$STATE" --owners "$OWNERS" --python "$HOME/.local/wa-stt/bin/python" \
-     --worker "$RELEASE/whatsapp-stt-local.py" --models "$HOME/.local/share/wa-stt/models"
+     --worker "$RELEASE/whatsapp-stt-local.py" --models "$HOME/.local/share/wa-stt/models" \
+     --ocr-python "$HOME/.local/wa-ocr-rapid/bin/python" \
+     --ocr-worker "$RELEASE/whatsapp-ocr-local.py"
    ```
 
    Stop that foreground instance, then activate only after the human's verified retirement receipt:
 
    ```sh
    "$WA" activate --state "$STATE" --approve-transcript-posting --retirement-receipt "$PRIVATE_RECEIPT"
+   "$WA" posting --state "$STATE" --set enable   # separate incoming-audio reply toggle
    "$WA" status --state "$STATE"
    # Start manually OR, after reviewing the generated unit, install it yourself:
    mkdir -p "$HOME/.config/systemd/user"

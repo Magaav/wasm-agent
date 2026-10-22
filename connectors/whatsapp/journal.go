@@ -20,15 +20,17 @@ import (
 )
 
 type Config struct {
-	Account         string   `json:"account"`
-	Generation      int64    `json:"generation"`
-	Language        string   `json:"language"`
-	Requested       bool     `json:"requested_on"`
-	Activated       int64    `json:"activated_at"`
-	Chats           []string `json:"chats"`
-	AllChats        bool     `json:"all_chats"`
-	Mode            string   `json:"mode"`
-	PairingRequired bool     `json:"pairing_required"`
+	Account           string   `json:"account"`
+	Generation        int64    `json:"generation"`
+	Language          string   `json:"language"`
+	Requested         bool     `json:"requested_on"`
+	Activated         int64    `json:"activated_at"`
+	Chats             []string `json:"chats"`
+	AllChats          bool     `json:"all_chats"`
+	Mode              string   `json:"mode"`
+	PairingRequired   bool     `json:"pairing_required"`
+	TranscriptPosting bool     `json:"transcript_posting"`
+	OCRDisabled       bool     `json:"ocr_disabled"`
 }
 type Message struct {
 	ID               string `json:"id"`
@@ -44,6 +46,10 @@ type Message struct {
 	Transcript       string `json:"transcript,omitempty"`
 	AudioState       string `json:"audio_state,omitempty"`
 	AudioReason      string `json:"audio_reason,omitempty"`
+	MediaKind        string `json:"media_kind,omitempty"`
+	MediaState       string `json:"media_state,omitempty"`
+	MediaReason      string `json:"media_reason,omitempty"`
+	MediaText        string `json:"media_text,omitempty"`
 	Cursor           int64  `json:"cursor"`
 	Observed         int64  `json:"observed_at"`
 	SenderAlt        string `json:"-"`
@@ -114,7 +120,7 @@ func openJournal(dir string) (*Journal, error) {
 	j := &Journal{db: db, lock: l, dir: dir, state: "disconnected", fatal: make(chan error, 1), gapWrite: writeNewSecret}
 	_, err = db.Exec(`PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000;
  CREATE TABLE IF NOT EXISTS config(id INTEGER PRIMARY KEY CHECK(id=1), value TEXT NOT NULL);
- CREATE TABLE IF NOT EXISTS messages(account TEXT NOT NULL,generation INTEGER NOT NULL,chat TEXT NOT NULL,id TEXT NOT NULL,sender TEXT NOT NULL,body TEXT NOT NULL,sent INTEGER NOT NULL,observed INTEGER NOT NULL,own INTEGER NOT NULL,history INTEGER NOT NULL,audio INTEGER NOT NULL,unsupported TEXT NOT NULL,raw BLOB,PRIMARY KEY(account,generation,chat,id));
+ CREATE TABLE IF NOT EXISTS messages(account TEXT NOT NULL,generation INTEGER NOT NULL,chat TEXT NOT NULL,id TEXT NOT NULL,sender TEXT NOT NULL,body TEXT NOT NULL,sent INTEGER NOT NULL,observed INTEGER NOT NULL,own INTEGER NOT NULL,history INTEGER NOT NULL,audio INTEGER NOT NULL,unsupported TEXT NOT NULL,raw BLOB,media_kind TEXT NOT NULL DEFAULT '',media_state TEXT NOT NULL DEFAULT '',media_reason TEXT NOT NULL DEFAULT '',media_text TEXT NOT NULL DEFAULT '',media_attempts INTEGER NOT NULL DEFAULT 0,media_next_attempt INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(account,generation,chat,id));
  CREATE TABLE IF NOT EXISTS audio(account TEXT NOT NULL,generation INTEGER NOT NULL,chat TEXT NOT NULL,id TEXT NOT NULL,state TEXT NOT NULL,reason TEXT NOT NULL DEFAULT '',transcript TEXT NOT NULL DEFAULT '',language TEXT NOT NULL,next_attempt INTEGER NOT NULL DEFAULT 0,attempts INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(account,generation,chat,id));
  CREATE TABLE IF NOT EXISTS outbox(account TEXT NOT NULL,generation INTEGER NOT NULL,chat TEXT NOT NULL,source TEXT NOT NULL,part INTEGER NOT NULL,body TEXT NOT NULL,send_id TEXT NOT NULL,state TEXT NOT NULL,ack TEXT NOT NULL DEFAULT '',PRIMARY KEY(account,generation,chat,source,part),UNIQUE(account,generation,chat,send_id));
  CREATE TABLE IF NOT EXISTS name_refresh(account TEXT,generation INTEGER,value TEXT NOT NULL,PRIMARY KEY(account,generation));
@@ -132,6 +138,10 @@ func openJournal(dir string) (*Journal, error) {
  CREATE TABLE IF NOT EXISTS post_retry(account TEXT,generation INTEGER,chat TEXT,source TEXT,part INTEGER,next_attempt INTEGER,reason TEXT,PRIMARY KEY(account,generation,chat,source,part));
  UPDATE outbox SET state='unknown' WHERE state='reserved';`)
 	if err != nil {
+		j.Close()
+		return nil, err
+	}
+	if err = installMediaColumns(db); err != nil {
 		j.Close()
 		return nil, err
 	}
@@ -366,7 +376,7 @@ func (j *Journal) ingest(m Message) error {
 	if err = storeSourceAuthor(tx, c, m, "journal_source"); err != nil {
 		return err
 	}
-	r, err := tx.Exec(`INSERT OR IGNORE INTO messages VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`, c.Account, c.Generation, m.Chat, m.ID, m.Sender, m.Body, m.Sent, time.Now().Unix(), m.Own, m.History, m.Audio, m.Unsupported, m.Raw)
+	r, err := tx.Exec(`INSERT OR IGNORE INTO messages VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, c.Account, c.Generation, m.Chat, m.ID, m.Sender, m.Body, m.Sent, time.Now().Unix(), m.Own, m.History, m.Audio, m.Unsupported, m.Raw, "", "", "", "", 0, 0)
 	if err != nil {
 		return err
 	}
@@ -407,6 +417,35 @@ func (j *Journal) ingest(m Message) error {
 			return err
 		}
 	}
+	if n > 0 && m.MediaKind != "" {
+		state, reason := "journal_only", "before_activation"
+		if c.Activated > 0 && m.Sent >= c.Activated {
+			state, reason = "pending", ""
+		}
+		if c.OCRDisabled {
+			state, reason = "journal_only", "ocr_disabled"
+		}
+		if m.Sent <= 0 {
+			state, reason = "unsupported", "timestamp_unknown"
+		}
+		if m.Sent > time.Now().Unix()+300 {
+			state, reason = "unsupported", "future_timestamp_untrusted"
+		}
+		if m.Unsupported != "" {
+			state, reason = "unsupported", m.Unsupported
+		}
+		blocked, e := blockedSource(tx, c, m.Chat, m.ID)
+		if e != nil {
+			return e
+		}
+		if blocked {
+			state, reason = "blocked_source", "source_mutation_or_chat_hold"
+		}
+		_, err = tx.Exec("UPDATE messages SET media_state=?,media_reason=? WHERE account=? AND generation=? AND chat=? AND id=?", state, reason, c.Account, c.Generation, m.Chat, m.ID)
+		if err != nil {
+			return err
+		}
+	}
 	return tx.Commit()
 }
 
@@ -433,7 +472,11 @@ func chunks(s string) []string {
 		rs = rs[n:]
 	}
 	for i := range out {
-		out[i] = fmt.Sprintf("🎙️ _Automated transcript_ (%d/%d)\n%s", i+1, len(out), out[i])
+		if len(out) == 1 {
+			out[i] = fmt.Sprintf("🤖 _Copiloto_\n%s", out[i])
+		} else {
+			out[i] = fmt.Sprintf("🤖 _Copiloto_ (%d/%d)\n%s", i+1, len(out), out[i])
+		}
 	}
 	return out
 }
@@ -499,6 +542,9 @@ func (j *Journal) processAudio(ctx context.Context, t Transport, r Recognizer) e
 		return tx.Commit()
 	}
 	for i, body := range chunks(text) {
+		if m.Own || !c.TranscriptPosting {
+			continue
+		}
 		_, err = tx.Exec("INSERT OR IGNORE INTO outbox(account,generation,chat,source,part,body,send_id,state) VALUES(?,?,?,?,?,?,?,'ready')", c.Account, c.Generation, m.Chat, m.ID, i, body, t.NewID())
 		if err != nil {
 			return err

@@ -10,7 +10,7 @@ import subprocess
 import sys
 import tarfile
 
-PATHS = ['connectors/whatsapp', 'scripts/whatsapp-stt-local.py',
+PATHS = ['connectors/whatsapp', 'scripts/whatsapp-stt-local.py', 'scripts/whatsapp-ocr-local.py',
          'scripts/whatsapp-install.py', 'scripts/whatsapp-build.py',
          'scripts/build-whatsapp.sh', 'LICENSE']
 
@@ -88,6 +88,7 @@ def build(root, go, expected_go_sha, python, target_arch="amd64"):
     if files(frozen)!=inputs: raise ValueError('frozen_source_drift_detected')
     source_clean(root,commit)
     for source,name in [('scripts/whatsapp-stt-local.py','whatsapp-stt-local.py'),
+                        ('scripts/whatsapp-ocr-local.py','whatsapp-ocr-local.py'),
                         ('scripts/whatsapp-install.py','whatsapp-install.py'),
                         ('connectors/whatsapp/THIRD-PARTY-NOTICES.txt','THIRD-PARTY-NOTICES.txt'),
                         ('LICENSE','LICENSE')]:
@@ -99,7 +100,7 @@ def build(root, go, expected_go_sha, python, target_arch="amd64"):
               'source_files':inputs,'source_binding':'frozen-git-archive+pre-post-hashes',
               'go_executable_sha256':expected_go_sha,'go_version':'go1.27.2',
               'build_logs':files(out/'.build-logs'),
-              'files':{n:digest(out/n) for n in ['wa-whatsapp','whatsapp-stt-local.py','whatsapp-install.py','THIRD-PARTY-NOTICES.txt','LICENSE']}}
+              'files':{n:digest(out/n) for n in ['wa-whatsapp','whatsapp-stt-local.py','whatsapp-ocr-local.py','whatsapp-install.py','THIRD-PARTY-NOTICES.txt','LICENSE']}}
     target=out/'manifest.json'
     with target.open('x',encoding='utf-8',newline='\n') as f:
         json.dump(manifest,f,sort_keys=True,indent=2);f.write('\n')
