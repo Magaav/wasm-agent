@@ -1289,6 +1289,14 @@ end
 
 function M:run_body(text, images)
   self.codemode_policy=nil -- configuration is pinned afresh per run, not per inference round
+  -- Pin the node capability here, before the first model call, and say it out loud when it cannot be
+  -- honoured. The pin already degrades to ordinary tools; the notice is what stops "code mode is broken"
+  -- from looking exactly like "the agent ignored me" (2026-10-22: seven queued turns failed silently).
+  local codemode=dofile('lua/core/codemode_policy.lua')
+  self.codemode_policy=codemode.pin(memory,self.role,{session_id=self.session_id,user_id=self.user,role=self.role,subagent=self.subagent})
+  if self.codemode_policy.unavailable then
+    self.emit({ type = 'status', text = 'code mode unavailable ('..tostring(self.codemode_policy.unavailable):sub(1,160)..') - this run uses ordinary tools' })
+  end
   self.model=provider.settings().model
   -- One overflow recovery per run, not per session: a provider rejection is retried once
   -- with a compacted context, and a second failure is surfaced rather than looped.

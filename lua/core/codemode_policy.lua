@@ -27,13 +27,22 @@ function M.pin(memory,role,ctx)
  ctx=ctx or {}
  if ctx.codemode_policy then return ctx.codemode_policy end
  local mode=M.setting();local policy={mode=mode,enabled=false}
+ -- Code mode is a capability of the node, not a property of the turn. When the node cannot honour it, the
+ -- honest outcome is ordinary tools plus a visible reason, not a fatal error before the first model call:
+ -- that error left the conversation silent while the operator saw a finished run (measured 2026-10-22).
+ local function unavailable(reason)
+  policy.unavailable=tostring(reason);ctx.codemode_policy=policy;return policy
+ end
  if mode=='off' or not M.eligible(memory,role,ctx,mode) then ctx.codemode_policy=policy;return policy end
- if not host.quickjs then error('codemode_not_ready:native_host_unavailable; use WASM_AGENT_CODEMODE=off for ordinary tools') end
+ if not host.quickjs then return unavailable('native_host_unavailable') end
  local assets=host.getenv('WASM_AGENT_CODEMODE_ASSETS')
  if assets and assets~='' then policy.wasm_path=assets..'/quickjs.wasm';policy.prelude_path=assets..'/prelude.js' end
- local ready=json.decode(host.quickjs('ready',json.encode(policy)))
- if not ready.ok then error('codemode_not_ready:'..tostring(ready.error)..'; use WASM_AGENT_CODEMODE=off for ordinary tools') end
- policy.enabled=true;policy.backend=ready.backend;ctx.codemode_policy=policy
+ local called,ready=pcall(host.quickjs,'ready',json.encode(policy))
+ if not called then return unavailable('readiness_error: '..tostring(ready)) end
+ local decoded_ok,decoded=pcall(json.decode,ready)
+ if not decoded_ok or type(decoded)~='table' then return unavailable('readiness_malformed') end
+ if not decoded.ok then return unavailable(decoded.error or 'readiness_refused') end
+ policy.enabled=true;policy.backend=decoded.backend;ctx.codemode_policy=policy
  return policy
 end
 function M.admit(memory,role,ctx)
