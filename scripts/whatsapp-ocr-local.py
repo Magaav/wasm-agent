@@ -20,8 +20,18 @@ def load_engine():
         from rapidocr_onnxruntime import RapidOCR
     except ImportError as error:
         raise RuntimeError("rapidocr_missing") from error
+    model = os.environ.get("WA_WHATSAPP_OCR_REC_MODEL", "")
+    keys = os.environ.get("WA_WHATSAPP_OCR_REC_KEYS", "")
+    if bool(model) != bool(keys):
+        raise RuntimeError("offline_model_unavailable")
+    kwargs = {}
+    if model:
+        if not os.path.isfile(model) or not os.path.isfile(keys):
+            raise RuntimeError("offline_model_unavailable")
+        kwargs["rec_model_path"] = model
+        kwargs["rec_keys_path"] = keys
     try:
-        return RapidOCR()
+        return RapidOCR(**kwargs)
     except Exception as error:
         raise RuntimeError("offline_model_unavailable") from error
 
@@ -81,7 +91,9 @@ def main():
     engine = load_engine()
     if args.check:
         emit({"ok": True, "model": "rapidocr", "local_only": True,
-              "language": os.environ.get("WA_WHATSAPP_OCR_LANGUAGE", "pt"), "mode": "ocr"})
+              "language": os.environ.get("WA_WHATSAPP_OCR_LANGUAGE", "pt"),
+              "recognition": "latin" if os.environ.get("WA_WHATSAPP_OCR_REC_MODEL") else "default",
+              "mode": "ocr"})
     else:
         emit(recognize(engine, {"input": args.input,
                                "language": os.environ.get("WA_WHATSAPP_OCR_LANGUAGE", "pt")}))
