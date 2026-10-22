@@ -7024,6 +7024,65 @@ function orchestratorDelay() {
   const base=!uiVisible()?15000:orchestratorPanel?.activeTasks.length?2000:10000;
   return Math.max(base,orchestratorFailures?Math.min(30000,2000*2**Math.min(orchestratorFailures,4)):0);
 }
+// A dispatch THIS WINDOW has just been told is accepted, before any read has returned it.
+//
+// `subagents start` already answers with the dispatcher's own durable receipt - `subagent_id`,
+// `title`, `model`, `profile`, `dispatch_state: queued` - and `subagents list` returns that same record
+// on the next read. So the card's facts are in hand at acceptance time; what the operator experienced
+// as "the dispatch card appears late" was the wait for the poll, not the placement. Measured on this
+// node: a receipt recorded at 1792674347.03 with `dispatch_state: queued` was admitted at
+// 1792674352.12 (5.1s of placement, one attempt), while this panel's next read was up to
+// `orchestratorDelay()` 10000ms away - chosen from the PREVIOUS, empty, state - and only re-armed
+// after a whole poll had finished. The admit time is not the gap; the poll wait is.
+//
+// This is not a second source of truth. The receipt is the record the read will return, keyed by the
+// same `subagent_id`, so it is kept only until a read's own list carries that id and then dropped for
+// good: one child keeps one row through queued -> running -> settled, and a stale receipt can never
+// redraw a settled child as queued.
+const acceptedDispatches=new Map();
+// The children this panel draws, from the facts of its last read plus the dispatches accepted since.
+// Both the poll and a fresh acceptance come through here, so a card cannot be drawn two ways.
+function drawOrchestratorChildren() {
+  if(!orchestratorPanel) return null;
+  const polled=Array.isArray(orchestratorPanel.polled) ? orchestratorPanel.polled : [];
+  const read=orchestratorPanel.read || {};
+  // A dispatch the read has now answered for is the read's to draw; the receipt copy is dropped and
+  // never re-added, which is what keeps one row per child across every later state.
+  const answered=new Set(polled.map(task=>task && task.subagent_id).filter(Boolean));
+  for(const id of [...acceptedDispatches.keys()]) if(answered.has(id)) acceptedDispatches.delete(id);
+  // The children, as the panel reads them: the bar no longer groups them into cards, so the task
+  // list is handed over as it is and `Live Subagents` remains the one place they are listed. One
+  // local list feeds both setters: `data` is write-only on the element (it has no getter), so
+  // reading it back would hand `liveChildRows` an undefined dispatch list and it would draw nothing.
+  const dispatches=[...acceptedDispatches.values(),...polled];
+  orchestratorPanel.data=dispatches;
+  // The dispatches are not the whole truth about what is running: the session ledger and the node's
+  // own subagent view are handed over too, with the source of each fact.
+  orchestratorPanel.live=liveChildRows({sessions:read.sessions || [],dispatches,
+    fleet:orchestratorPanel.fleet || {},health:read.health || {},errors:read.errors || [],
+    // Run counts this window already holds, keyed by the child's session: a pinned pane painted
+    // that child, so its own run counts are in hand and a card can state them. A child nobody has
+    // painted has none here, and its card omits those pairs rather than inventing zeros.
+    runs:runCountsByPane()});
+  return orchestratorPanel.live;
+}
+// The dispatch card exists at the moment the dispatch is accepted, not at the next read.
+//
+// Reading again here (rather than shortening `orchestratorDelay`'s global interval, which is a
+// battery/wake cost and not a latency fix) is the second half: the timer in flight was armed from the
+// previous, idle state, so it is re-armed from the state that just changed.
+function acceptDispatch(receipt) {
+  if(!orchestratorPanel || !receipt || !receipt.subagent_id) return false;
+  acceptedDispatches.set(receipt.subagent_id,receipt);
+  // Before the panel's first read there are no sessions or counts to draw a list against, and a card
+  // whose header says the node never reported its counts would be worse than a card a read away.
+  if(orchestratorPanel.read) drawOrchestratorChildren();
+  if(!orchestratorPolling) {
+    clearTimeout(orchestratorTimer);
+    orchestratorTimer=setTimeout(refreshOrchestrator,orchestratorPanel.read ? orchestratorDelay() : 0);
+  }
+  return true;
+}
 async function refreshOrchestrator() {
   if(!orchestratorPanel || orchestratorPolling)return;
   clearTimeout(orchestratorTimer);
@@ -7039,17 +7098,12 @@ async function refreshOrchestrator() {
     // node's own subagent view too, and hand the panel every child with the source of each fact.
     const [sessions,health]=await Promise.all([orchestratorRead('sessions'),orchestratorRead('health')]);
     const sessionRows=(sessions.value && sessions.value.sessions) || [];
-    // The children, as the panel reads them: the bar no longer groups them into cards, so the task
-    // list is handed over as it is and `Live Subagents` remains the one place they are listed.
-    orchestratorPanel.data=list.subagents || [];
-    const live=liveChildRows({sessions:sessionRows,
-      dispatches:list.subagents || [],fleet,health:health.value || {},
-      errors:[sessions.error,health.error].filter(Boolean),
-      // Run counts this window already holds, keyed by the child's session: a pinned pane painted
-      // that child, so its own run counts are in hand and a card can state them. A child nobody has
-      // painted has none here, and its card omits those pairs rather than inventing zeros.
-      runs:runCountsByPane()});
-    orchestratorPanel.live=live;
+    // What this read answered, kept so an acceptance between two reads draws from the same facts the
+    // poll's own rows are built from rather than from an invented one.
+    orchestratorPanel.polled=list.subagents || [];
+    orchestratorPanel.read={sessions:sessionRows,health:health.value || {},
+      errors:[sessions.error,health.error].filter(Boolean)};
+    drawOrchestratorChildren();
     if(!orchestratorPanel.restored) {
       orchestratorPanel.restored=true;
       let saved={};try { saved=JSON.parse(localStorage.getItem('wa-orchestrator-layout:'+session) || '{}'); } catch(error) { /* layout only */ }
@@ -8178,6 +8232,9 @@ document.getElementById('tasks-box').addEventListener('task-action',async event=
       const receipt=await taskRequest('subagents',{action:'start',thread:detail.parent,profile:detail.profile,
         prompt:detail.prompt,idempotency_key:detail.key});
       showEvidence(receipt); panel.prompt.value=''; panel.submission=null;
+      // Drawn now, from the receipt this window was just handed, rather than on the panel's next read
+      // (`acceptDispatch`); the read reconciles the same `subagent_id` into queued -> running.
+      acceptDispatch(receipt);
       await refreshTasks();
     } else if(action==='result') showEvidence(await taskRequest('subagents',{action:'result',subagent_id:detail.id}));
     else if(action==='cancel') {

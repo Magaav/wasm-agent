@@ -329,6 +329,94 @@
   check(panel.querySelector('.live-children-list').children.length===0&&panel.querySelector('.live-children-list').textContent===''&&!panel.textContent.includes('No active children reported.'),'the empty live list draws nothing and states no sentence, saw: '+JSON.stringify(panel.querySelector('.live-children-list').textContent));
   panel.activeCount=panel.activeTasks.length;
   panel.unpin('active-0');panel.unpin('active-1');
+  // OPERATOR REPORT: "the dispatch card appears late after `subagent start` returns".
+  //
+  // Measured on this node: the durable receipt was recorded at 1792674347.03 with
+  // `dispatch_state: queued` and the child was ADMITTED at 1792674352.12 - 5.1s of placement, one
+  // attempt - but the card could not appear before the panel's NEXT read, which `orchestratorDelay()`
+  // puts up to 10000ms away while no child is active and re-arms only after a whole read finished.
+  // `subagents list` already returns queued dispatches (lua/core/orchestrator.lua) and `liveChildRows`
+  // already draws them, so the gap is the WAIT, not the data. This stage therefore starts a child
+  // through the window's own dispatch form and asks for the card with ZERO panel reads in between, then
+  // follows the same child through queued -> running -> settled and requires exactly one row each time.
+  {
+   const oldPanel=orchestratorPanel,oldRequest=orchestratorRequest,oldRead=orchestratorRead,
+     oldRefresh=refreshAgentPane,oldFetch=apiFetch,oldPoll=refreshOrchestrator,oldNode=activeNode;
+   try {
+    orchestratorPanel=panel;panel.restored=true;orchestratorPolling=false;activeNode='';
+    const title='queued child drawn at acceptance';
+    const id='dispatch:accepted-at-once';
+    const receipt={subagent_id:id,execution_node:'local',dispatch_state:'queued',state:'queued',
+      settled:false,profile:'explore',model:'fixture-model',title:title,prompt:title,created_at:1};
+    let polled=[];
+    orchestratorRequest=async args=>args.action==='fleet'?{nodes:[],policy:{}}:{subagents:polled};
+    orchestratorRead=async route=>({value:route==='sessions'?{sessions:[]}
+      :{subagents:{queued:0,running:0,active:0}}});
+    refreshAgentPane=async()=>{};
+    let polls=0;const realRefresh=refreshOrchestrator;
+    refreshOrchestrator=async()=>{polls++;return realRefresh();};
+    await refreshOrchestrator();clearTimeout(orchestratorTimer);
+    const card=()=>panel.querySelector('.live-child[data-subagent="'+id+'"]');
+    const stateWord=()=>{const element=card();
+      return element?element.querySelector('.live-child-state').textContent:'<no card>';};
+    check(!card()&&panel.querySelectorAll('.live-child').length===0,'no card exists for a dispatch that has not been accepted yet, saw '+panel.querySelectorAll('.live-child').length+' rows');
+    // The window's own dispatch route, answered with the receipt the dispatcher really returns. The
+    // reply is a plain response object on purpose: `Response.json()` settles on a task, which this
+    // probe cannot advance, and what is under test is the DRAW, not the transport.
+    const sent=[];
+    const reply=value=>({ok:true,status:200,json:async()=>value});
+    apiFetch=async(route,options={})=>{
+      const body=route==='subagents'&&options.body?JSON.parse(options.body):{};
+      sent.push(route+':'+(body.action||''));
+      if(route==='subagents'&&body.action==='start')return reply(receipt);
+      if(route==='sessions')return reply({sessions:[]});
+      if(route==='subagents'&&body.action==='profiles')return reply({profiles:[]});
+      if(route==='runs')return reply({runs:[]});
+      return reply({subagents:[]});
+    };
+    const form=document.querySelector('#tasks-box wa-tasks');
+    check(!!form,'the window has the dispatch form this stage starts a child from');
+    const readsBefore=polls;
+    form.dispatchEvent(new CustomEvent('task-action',{bubbles:true,
+      detail:{action:'start',parent:'parent-session',profile:'explore',prompt:title,key:'probe-accepted'}}));
+    for(let i=0;i<500;i++)await Promise.resolve();
+    check(sent.indexOf('subagents:start')>=0,'the window really sent the dispatch start request, saw: '+sent.join(','));
+    check(polls===readsBefore,'the dispatch was not drawn by a panel read, saw '+(polls-readsBefore));
+    check(!!card(),'an accepted dispatch is drawn as a card AT ACCEPTANCE, before any read returns it, saw '+panel.querySelectorAll('.live-child').length+' rows; liveChildRows over the same receipt alone yields '+liveChildRows({dispatches:[receipt]}).rows.length+' row(s)');
+    check(stateWord()==='queued','the accepted card reads queued, saw: '+stateWord());
+    check(card().querySelector('.live-child-title').textContent.indexOf(title)>=0,'the card carries the dispatch title, saw: '+JSON.stringify(card().querySelector('.live-child-title').textContent));
+    check(card().dataset.session==='','a child with no session yet is drawn from its dispatch record, saw session '+JSON.stringify(card().dataset.session));
+    check(orchestratorDelay()===2000,'an accepted child makes the next read the active two-second one, saw '+orchestratorDelay());
+    // The next read answers for the SAME child, as its run starts: still one row, now running.
+    polled=[Object.assign({},receipt,{state:'running',session_id:'child-accepted',started_at:2})];
+    await refreshOrchestrator();clearTimeout(orchestratorTimer);
+    check(panel.querySelectorAll('.live-child').length===1,'queued -> running leaves exactly ONE row for the child, saw '+panel.querySelectorAll('.live-child').length);
+    check(stateWord()==='running','and that one row now reads running, saw: '+stateWord());
+    check(!acceptedDispatches.has(id),'the read that answered for the child retires the receipt copy');
+    polled=[{subagent_id:id,execution_node:'local',dispatch_state:'admitted',state:'completed',settled:true,
+      session_id:'child-accepted',title:title,profile:'explore',model:'fixture-model',created_at:1}];
+    await refreshOrchestrator();clearTimeout(orchestratorTimer);
+    check(panel.querySelectorAll('.live-child').length===0,'a settled child leaves no row behind, saw '+panel.querySelectorAll('.live-child').length);
+    // The regression an optimistic row invites: the child settled, and then a READ FAILS. A receipt copy
+    // that outlived the read would redraw this child as queued. It must not, in any form.
+    orchestratorRequest=async args=>{if(args.action==='list')throw Error('read_capacity_busy');
+      return {nodes:[],policy:{}};};
+    await refreshOrchestrator();clearTimeout(orchestratorTimer);
+    check(panel.querySelectorAll('.live-child').length===0&&panel.textContent.indexOf(title)<0,'a stale accepted receipt is never redrawn as queued after that child settled, saw '+panel.querySelectorAll('.live-child').length+' rows');
+    orchestratorRequest=async args=>args.action==='fleet'?{nodes:[],policy:{}}:{subagents:[]};
+    orchestratorFailures=0;panel.message='';
+    // The image the observer retains is this state on purpose: one child accepted and not yet placed,
+    // drawn by the acceptance itself. The receipt map is emptied first so the image holds only it.
+    acceptedDispatches.clear();
+    acceptDispatch(Object.assign({},receipt,{subagent_id:'dispatch:accepted-for-the-image'}));
+    check(!!panel.querySelector('.live-child[data-subagent="dispatch:accepted-for-the-image"]'),'the retained screenshot carries the queued card this stage measured');
+    clearTimeout(orchestratorTimer);
+   } finally {
+    orchestratorPanel=oldPanel;orchestratorRequest=oldRequest;orchestratorRead=oldRead;
+    refreshAgentPane=oldRefresh;apiFetch=oldFetch;refreshOrchestrator=oldPoll;activeNode=oldNode;
+    clearTimeout(orchestratorTimer);
+   }
+  }
   for(let t=1;t<10000;t++){clearTimeout(t);clearInterval(t);}
   report.dataset.status='pass';report.textContent=JSON.stringify({checks,skipped:0});
  }catch(e){report.dataset.status='fail';report.textContent=String(e.stack||e);}
