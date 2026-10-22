@@ -514,6 +514,17 @@ function releaseAnswerAnchor(container = transcript, manual = true) {
     else scrollState(container).follow=false;
   }
 }
+// A step event ends a PROVISIONAL anchor - never the one on an answer that has already landed. The
+// reader may be parked on that answer's first line, and a `round`/`tool` event arriving just after the
+// reply used to release it; the next `pin()` (a status row, a run count, the turn's `done`) then sent
+// the transcript back to its END. That is the reported bounce, one or two frames after the answer had
+// been brought up (operator, 2026-10-22). A settled answer is recognised by `answerComplete`, the same
+// mark the `done` handler uses.
+function releaseProvisionalAnchor(container = transcript) {
+  const anchor = answerAnchors.get(container);
+  if (!anchor || anchor.dataset.answerComplete === 'true') return;
+  releaseAnswerAnchor(container, false);
+}
 function anchorAnswer(node, smooth = false) {
   if (replayingMessages || answerReleased.has(transcript)) return;
   const container = transcript;
@@ -2539,7 +2550,7 @@ function handleEvent(event) {
       setStatus('Retry '+event.index+'/'+event.limit+' — '+(event.reason || event.state));
     }
   } else if (event.type === "round") {
-    releaseAnswerAnchor(transcript, false);
+    releaseProvisionalAnchor(transcript);
     if (!replayingMessages) liveReasoningRound = Number(event.n) || liveReasoningRound + 1;
     // `tools` is the request's own tool surface (lua/core/agent.lua). It is per step, so a later
     // round of the same run resets the answer phase: its prose starts provisional again.
@@ -2616,7 +2627,7 @@ function handleEvent(event) {
   } else if (event.type === "decision") {
     addDecision(event);
   } else if (event.type === "tool") {
-    releaseAnswerAnchor(transcript, false);
+    releaseProvisionalAnchor(transcript);
     // A tool call for the message whose prose is still provisional settles it as commentary:
     // nothing moves and nothing is re-labelled beyond removing the pending state.
     settleProvisionalCommentary();
@@ -3092,6 +3103,12 @@ async function refreshNotifySupport() {
 }
 
 function repaintMessages(rows, options = {}) {
+  // Was the reader parked on a settled answer's first line when this repaint began? The redraw below
+  // replaces every node, so that node (and the WeakMap entry naming it) is gone by the time the motion
+  // would resume; the answer the repaint draws has to inherit the anchor, or the reader is sent back to
+  // the bottom (operator, 2026-10-22: "it goes to the first line, then bounces to the end").
+  const priorAnchor = answerAnchors.get(transcript);
+  const priorAnchoredAnswer = !!(priorAnchor && priorAnchor.dataset.answerComplete === 'true');
   const savedSteps = runStepState?.scope === runStepScope() ? runStepState : null;
   const savedCounts = runCounts?.scope === runStepScope() ? runCounts : null;
   const savedSteering=Array.from(runBubble?.querySelectorAll('wa-steering')||[]).filter(node=>node.fact?.state==='queued').map(node=>({node,fact:node.fact}));
@@ -3311,7 +3328,15 @@ function repaintMessages(rows, options = {}) {
     const choice=commentaryChoices.find(old=>old.id&&old.id===node.dataset.messageId || old.pending&&old.pending===node.dataset.pendingId || !old.id&&!node.dataset.messageId&&old.text===node.body.textContent);
     if(choice)node.open=choice.open;
   }
-  pin(true);
+  const redrawnAnswer = priorAnchoredAnswer
+    ? Array.from(transcript.querySelectorAll('.seg.final-answer')).pop() : null;
+  if (redrawnAnswer) {
+    // Same reading position, new nodes: the anchor moves to the answer this repaint drew.
+    redrawnAnswer.dataset.answerAnchor = 'top';
+    answerAnchors.set(transcript, redrawnAnswer);
+    smoothAnswerStart(transcript, redrawnAnswer);
+    syncJump(transcript);
+  } else pin(true);
   if (failed) {
     add("assistant", `repaint: ${rendered} of ${rows.length} messages drawn, ${failed} failed — first: ${firstFailure}`);
   }
