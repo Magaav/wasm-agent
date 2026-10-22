@@ -31,6 +31,12 @@ while IFS= read -r variable; do
   esac
 done < <(compgen -e)
 
+# The gate builds test artifacts, not shippable ones. `wa-host`'s build script refuses to embed empty
+# code-mode assets unless this is set by name, because that is the exact defect that shipped on
+# 2026-10-22 (a plain `cargo build` produced a native-default binary that failed every run). The real
+# shipping build is proven separately by scripts/test-codemode-shipping.mjs and by deploy.sh.
+export WA_CODEMODE_ALLOW_EMPTY=1
+
 # Build/test parallelism is the repository's knob, not whatever cargo happens to do. With it
 # unset - the default - every `cargo` below compiles one job per logical core (16 on the machine
 # this was measured on), so two concurrent gate runs each claim the whole box and the second one

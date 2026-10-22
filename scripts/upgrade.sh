@@ -275,6 +275,34 @@ fi
 say "it answers"
 fi
 
+# --- 1b. prove the candidate can run native code mode before it replaces the node ------------------
+# `/health` answering says the process starts; it says nothing about the embedded sandbox. The binary this
+# refused to check on 2026-10-22 answered health perfectly and then failed every run with
+# `codemode_not_ready`, because it had been built without assets. The proof is the same one deploy.sh runs:
+# the candidate executes the pinned guest and returns 42, or it is not installed.
+CODEMODE_CHECK="$SOURCE_ROOT/scripts/check-embedded-runtime.lua"
+if [ -z "$SOURCE_ROOT" ] || [ ! -f "$CODEMODE_CHECK" ]; then
+  say "warning: no check-embedded-runtime.lua beside the candidate's source checkout; its embedded code mode is not proven"
+else
+  CHECK_HOME="$(mktemp -d)"
+  CHECK_ROOT="$SOURCE_ROOT"; CHECK_SCRIPT="$CODEMODE_CHECK"; CHECK_HOME_ARG="$CHECK_HOME"
+  if command -v cygpath >/dev/null 2>&1; then
+    CHECK_ROOT="$(cygpath -w "$CHECK_ROOT")"; CHECK_SCRIPT="$(cygpath -w "$CHECK_SCRIPT")"; CHECK_HOME_ARG="$(cygpath -w "$CHECK_HOME")"
+  fi
+  say "proving the candidate runs embedded native code mode"
+  if WASM_AGENT_HOME="$CHECK_HOME_ARG" WASM_AGENT_LUA_ROOT='' \
+    WA_EMBEDDED_SOURCE_ROOT="$CHECK_ROOT" WA_SCRIPT="$CHECK_SCRIPT" \
+    "$NEW" --db "$CHECK_HOME_ARG/embedded.db" >"$CHECK_HOME/check.log" 2>&1; then
+    say "native code-mode assets proven"
+  else
+    tail -6 "$CHECK_HOME/check.log" 2>/dev/null | sed 's/^/    /'
+    rm -rf "$CHECK_HOME"
+    say "the candidate cannot run embedded native code mode - not installing it"
+    exit 1
+  fi
+  rm -rf "$CHECK_HOME"
+fi
+
 # --- 2. wait for the node to be idle, so no turn is interrupted ----------------------------------
 # --- the upgrade's own state, readable while it happens -------------------------------------------
 # /health publishes this file as `upgrading`, so the window can draw a progress bar and say "restarting"

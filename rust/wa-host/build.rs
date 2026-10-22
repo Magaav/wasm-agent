@@ -40,19 +40,51 @@ fn main() {
 
 // Build-time only: prepared, integrity-pinned assets may be embedded for an offline,
 // Node-free runtime. No downloader or package manager runs in the production host.
+//
+// An empty embed is not a neutral default. `WASM_AGENT_CODEMODE=native` is the shipped default, and a
+// binary built without these bytes starts every run with `codemode_not_ready` before its first model
+// call, leaving the conversation silent (measured 2026-10-22: `on-stale.sh` rebuilt with plain
+// `cargo build`, installed it, and every turn failed). So a host release build that is not explicitly
+// exempted refuses to produce an artifact it cannot honour. Exemptions are named, never ambient:
+//
+//   WA_CODEMODE_BUILD_ASSETS=<dir>  build with these verified assets (the shipping path)
+//   WA_CODEMODE_ALLOW_EMPTY=1      this artifact is not meant to run code mode (gate/cross builds)
 fn generate_codemode_assets() {
     println!("cargo:rerun-if-env-changed=WA_CODEMODE_BUILD_ASSETS");
+    println!("cargo:rerun-if-env-changed=WA_CODEMODE_ALLOW_EMPTY");
     let out = std::path::PathBuf::from(std::env::var_os("OUT_DIR").unwrap());
     let dir = std::env::var_os("WA_CODEMODE_BUILD_ASSETS").map(std::path::PathBuf::from);
+    let allow_empty = std::env::var("WA_CODEMODE_ALLOW_EMPTY").map(|v| v == "1").unwrap_or(false);
+    let host = std::env::var("HOST").unwrap_or_default();
+    let target = std::env::var("TARGET").unwrap_or_default();
+    // A cross build is not the artifact this platform serves; it stays allowed to build without the
+    // runtime so Android and packaging lanes do not silently acquire a host dependency. Host releases
+    // are the case that reaches operators, and they fail by name instead. Debug/test profiles are not
+    // shippable, so they stay cheap: a `cargo test` must not need a provisioned asset directory.
+    let cross = !host.is_empty() && !target.is_empty() && host != target;
+    let release = std::env::var("PROFILE").map(|profile| profile == "release").unwrap_or(false);
+    let enforce = release && !cross && !allow_empty;
     for name in ["quickjs.wasm", "prelude.js"] {
         let bytes = match &dir {
             Some(dir) => {
                 let path = dir.join(name);
                 println!("cargo:rerun-if-changed={}", path.display());
-                std::fs::read(path).expect("prepared code-mode asset; provision first")
+                std::fs::read(&path)
+                    .unwrap_or_else(|error| panic!("code-mode asset {} unreadable: {error}", path.display()))
             }
-            None => Vec::new(),
+            None if !enforce => Vec::new(),
+            None => panic!(
+                "code-mode assets required: set WA_CODEMODE_BUILD_ASSETS to a prepared, verified asset \
+                 directory (scripts/codemode-build.mjs build does this), or set WA_CODEMODE_ALLOW_EMPTY=1 \
+                 for an artifact that is not meant to run code mode"
+            ),
         };
+        if bytes.is_empty() && enforce {
+            panic!("code-mode asset {name} is empty; refusing to embed a native-default binary that cannot run code mode");
+        }
+        if !bytes.is_empty() && name.ends_with(".wasm") && !bytes.starts_with(b"\0asm") {
+            panic!("code-mode asset {name} is not a WebAssembly module; provision and verify it first");
+        }
         std::fs::write(out.join(name), bytes).expect("write code-mode build asset");
     }
 }

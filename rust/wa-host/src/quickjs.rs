@@ -18,6 +18,20 @@ struct Sandbox {store:Store<Data>, instance:Instance, memory:Memory, api:i32, se
 thread_local! {static SESSIONS:RefCell<HashMap<String,Sandbox>>=RefCell::new(HashMap::new());}
 fn engine()->Result<Engine> {static ENGINE:OnceLock<Engine>=OnceLock::new();if let Some(e)=ENGINE.get(){return Ok(e.clone())}let mut c=Config::new();c.consume_fuel(true);let e=Engine::new(&c)?;let _=ENGINE.set(e);Ok(ENGINE.get().expect("engine initialized").clone())}
 fn module(engine:&Engine,bytes:&[u8])->Result<Module>{static MODULE:OnceLock<Module>=OnceLock::new();if let Some(m)=MODULE.get(){return Ok(m.clone())}let m=Module::new(engine,bytes)?;let _=MODULE.set(m);Ok(MODULE.get().expect("module initialized").clone())}
+/// What this binary can actually honour, without starting wasmtime or a sandbox. `/health` publishes this
+/// so a node that advertises native code mode and cannot run it is visible *before* a turn fails, instead
+/// of the operator discovering it as seven silent turns (2026-10-22).
+pub(crate) fn asset_status()->Value {
+ static STATUS:OnceLock<Value>=OnceLock::new();
+ STATUS.get_or_init(||{
+  let wasm_ok=!EMBEDDED_WASM.is_empty()&&hash(EMBEDDED_WASM)==WASM_SHA;
+  let prelude_ok=!EMBEDDED_PRELUDE.is_empty()&&hash(EMBEDDED_PRELUDE)==PRELUDE_SHA;
+  let embedded=wasm_ok&&prelude_ok;
+  json!({"embedded":embedded,"wasm_bytes":EMBEDDED_WASM.len(),"prelude_bytes":EMBEDDED_PRELUDE.len(),
+   "wasm_sha256":WASM_SHA,"prelude_sha256":PRELUDE_SHA,
+   "error":if embedded{Value::Null}else{json!("embedded code-mode assets are missing or are not the pinned bytes; this build cannot run code mode")}})
+ }).clone()
+}
 fn mem(c:&mut Caller<'_,Data>)->Result<Memory>{c.get_export("memory").and_then(|e|e.into_memory()).ok_or_else(||anyhow!("guest memory absent"))}
 fn read(c:&mut Caller<'_,Data>,ptr:i32,len:usize)->Result<Vec<u8>> {let m=mem(c)?;let p=usize::try_from(ptr)?;let end=p.checked_add(len).context("guest range overflow")?;Ok(m.data(&*c).get(p..end).context("guest range outside memory")?.to_vec())}
 fn write(c:&mut Caller<'_,Data>,ptr:i32,b:&[u8])->Result<()> {let m=mem(c)?;m.write(c,usize::try_from(ptr)?,b)?;Ok(())}

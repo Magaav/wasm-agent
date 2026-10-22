@@ -129,8 +129,18 @@ fi
 
 # The candidate must come from a source checkout: upgrade.sh refuses one it cannot compare with the
 # installed commit, which is exactly the refusal that made the first real deploy fail in 12 seconds.
-cargo build --release --manifest-path "$tree/rust/Cargo.toml" >/dev/null 2>&1 || {
-  say "onStale: build failed; not requesting an install from a binary that does not exist"
+#
+# Build it with the shipping contract, never with plain `cargo build`: on 2026-10-22 this line built and
+# installed a wa.exe with empty embedded code-mode assets, and every turn after the restart failed with
+# `codemode_not_ready` before the first model call. The contract verifies the pinned assets and proves the
+# candidate actually runs a sandbox before it is allowed to become the thing the sentinel installs.
+command -v node >/dev/null 2>&1 || { say "onStale: node is unavailable; the native code-mode shipping build cannot be verified, so nothing was built"; exit 2; }
+CODEMODE_BUILD_SCRIPT="$tree/scripts/codemode-build.mjs"; CODEMODE_BUILD_ROOT="$tree"
+if command -v cygpath >/dev/null 2>&1; then
+  CODEMODE_BUILD_SCRIPT="$(cygpath -w "$CODEMODE_BUILD_SCRIPT")"; CODEMODE_BUILD_ROOT="$(cygpath -w "$CODEMODE_BUILD_ROOT")"
+fi
+node "$CODEMODE_BUILD_SCRIPT" build "$CODEMODE_BUILD_ROOT" >/dev/null 2>&1 || {
+  say "onStale: the native code-mode shipping build failed; not requesting an install from a binary that cannot run code mode"
   exit 2
 }
 candidate="$tree/rust/target/release/wa.exe"

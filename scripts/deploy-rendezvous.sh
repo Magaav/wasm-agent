@@ -30,7 +30,14 @@ i=args.index(b'--db');print(args[i+1].decode())
 PY
 )"
 [ -f "$DB" ] || fail 'exact service registry database unavailable'
-CARGO_BUILD_JOBS=2 cargo build --release --offline --locked --manifest-path "$ROOT/rust/Cargo.toml" -p wa-host || fail 'canonical native build failed before installation'
+# Build with the shipping contract, not plain cargo: an artifact without embedded code-mode assets
+# answers health and then fails every run with `codemode_not_ready` (measured 2026-10-22).
+command -v node >/dev/null 2>&1 || fail 'node is unavailable; the native code-mode shipping build cannot be verified'
+CODEMODE_BUILD_SCRIPT="$ROOT/scripts/codemode-build.mjs"; CODEMODE_BUILD_ROOT="$ROOT"
+if command -v cygpath >/dev/null 2>&1; then
+  CODEMODE_BUILD_SCRIPT="$(cygpath -w "$CODEMODE_BUILD_SCRIPT")"; CODEMODE_BUILD_ROOT="$(cygpath -w "$CODEMODE_BUILD_ROOT")"
+fi
+node "$CODEMODE_BUILD_SCRIPT" build "$CODEMODE_BUILD_ROOT" || fail 'canonical native code-mode build failed; nothing installed'
 [ -f "$ROOT/rust/target/release/wa" ] || fail 'canonical build produced no binary'
 NEW="$ROOT/rust/target/release/wa"
 DIR="$(dirname "$TARGET")"; EVIDENCE="$DIR/rendezvous-deploy-$EXPECTED"

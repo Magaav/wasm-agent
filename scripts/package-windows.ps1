@@ -54,6 +54,16 @@ try {
   New-Item -ItemType Directory -Path $stage | Out-Null
   $cargo = (& cargo --version)
   if ($LASTEXITCODE -ne 0) { throw 'cargo_unavailable' }
+  # The host must embed the verified code-mode assets. A packaged binary without them answers health
+  # and then fails every run with `codemode_not_ready` (measured 2026-10-22). Use the contract's prepared
+  # location (it is integrity-pinned) and prove the packaged host below; `assets-path` is used instead of
+  # `preflight` so packaging does not acquire a ripgrep dependency it never needed.
+  $codemodeScript = Join-Path $root 'scripts/codemode-build.mjs'
+  $codemodeAssets = (& node $codemodeScript assets-path $root | Select-Object -Last 1)
+  if ($LASTEXITCODE -ne 0 -or -not $codemodeAssets -or -not (Test-Path -LiteralPath $codemodeAssets -PathType Container)) {
+    throw 'codemode_assets_unavailable'
+  }
+  $env:WA_CODEMODE_BUILD_ASSETS = $codemodeAssets.Trim()
   $crates = @(
     @{ name = 'host'; manifest = 'rust/Cargo.toml'; binary = 'wa.exe' },
     @{ name = 'sentinel'; manifest = 'rust/wa-sentinel/Cargo.toml'; binary = 'wa-sentinel.exe' },
@@ -74,6 +84,20 @@ try {
       $_.FullName -match '[\\/]out[\\/]x64[\\/]WebView2Loader\.dll$'
     })
   if ($loaders.Count -ne 1) { throw 'expected_one_x64_webview_loader' }
+  # Answering health is not code-mode readiness: prove the packaged host executes the pinned guest
+  # (returns 42) under its own embedded assets, exactly as deploy.sh does before an install.
+  $checkHome = Join-Path $build 'codemode-home'
+  New-Item -ItemType Directory -Force -Path $checkHome | Out-Null
+  $env:WASM_AGENT_HOME = $checkHome
+  $env:WASM_AGENT_LUA_ROOT = ''
+  $env:WA_EMBEDDED_SOURCE_ROOT = $root
+  $env:WA_SCRIPT = (Join-Path $root 'scripts/check-embedded-runtime.lua')
+  & (Join-Path $build 'wa.exe') --db (Join-Path $checkHome 'embedded.db') 2>&1 |
+    Tee-Object -FilePath (Join-Path $build 'codemode-check.log') | Out-Null
+  if ($LASTEXITCODE -ne 0) { throw 'codemode_check_failed: the packaged host cannot run embedded native code mode' }
+  foreach ($name in @('WASM_AGENT_HOME', 'WASM_AGENT_LUA_ROOT', 'WA_EMBEDDED_SOURCE_ROOT', 'WA_SCRIPT', 'WA_CODEMODE_BUILD_ASSETS')) {
+    Remove-Item "Env:$name" -ErrorAction SilentlyContinue
+  }
   Copy-Asset $loaders[0].FullName 'WebView2Loader.dll'
   foreach ($asset in @('ui/index.html', 'ui/style.css', 'ui/app.js', 'ui/components.js',
                        'ui/render.wasm', 'ui/manifest.webmanifest', 'ui/service-worker.js',
