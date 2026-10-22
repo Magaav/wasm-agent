@@ -2880,6 +2880,10 @@ fn dispatch(
         // A narrow operator control: read the connector's posting policy or toggle it through the
         // separate approval credential. It never sends text; the Lua handler holds both token files.
         "/whatsapp/posting" if method == "POST" => (200,"application/json",call("wa_whatsapp_posting", &[body,session]).into_bytes()),
+        // Idle-only maintenance: onStale calls this after the node has been idle and quiet. The
+        // Lua handler rechecks the 40% threshold and refuses a subagent session; it is never an
+        // in-run compaction path (in-run compaction keeps its own 90-95% trigger).
+        "/compact" if method == "POST" => (200,"application/json",call("wa_compact", &[body,session]).into_bytes()),
         "/jobs" if method == "GET" => (200,"application/json",call("wa_jobs", &["{}",session]).into_bytes()),
         "/jobs" if method == "POST" => (200,"application/json",call("wa_jobs", &[body,session]).into_bytes()),
         "/operations" if method == "GET" => (200,"application/json",call("wa_operation", &["{}",session]).into_bytes()),

@@ -362,6 +362,43 @@ function wa_whatsapp_posting(body, session)
   return json.encode({ok=value.ok==true,enabled=value.enabled,error=value.error})
 end
 
+local compacting=false
+function wa_compact(body, session)
+  local user=require_master(session)
+  if not user then return json.encode({error='forbidden'}) end
+  if compacting then return json.encode({ok=false,error='compaction_in_progress'}) end
+  local ok,args=pcall(json.decode,body or '{}')
+  if not ok or type(args)~='table' then return json.encode({error='invalid_compact_request'}) end
+  local min=tonumber(args.min_percent) or 40
+  if min<1 or min>95 then return json.encode({error='invalid_compact_percent'}) end
+  local record
+  if type(args.session_id)=='string' and args.session_id~='' then record=memory.session(args.session_id)
+  else record=memory.latest_session(user.id,nodeslib.node_name()) end
+  if not record then return json.encode({error='session_not_found'}) end
+  if record.objective=='subagent' then return json.encode({error='subagent_compaction_refused'}) end
+  compacting=true
+  local a=agentlib.new(record.id,nil,users.normalize(user.role),user.id,'')
+  a.run_id='compact:'..host.uuid()
+  local done,result=pcall(function()
+    local messages=a:build_context()
+    local limits=provider.budget(a.model)
+    local limit=limits.context or 0
+    if limit<=0 then return {ok=false,error='context_window_unknown'} end
+    local before=a:context_tokens(messages)
+    local percent=before/limit*100
+    if percent<min then return {ok=true,compacted=false,percent=percent,before=before,capacity=limit} end
+    local trigger=math.floor(limit*min/100)
+    local compacted=a:compact_now(messages,{limit=limit,reserve=limits.reserve,keep=limits.keep,before=before,
+      estimate_source=a.context_measurement_reason or 'estimate',measurement_reason=a.context_measurement_reason,
+      budget=trigger,trigger=trigger,force=false})
+    return {ok=true,compacted=compacted==true,percent=percent,before=before,capacity=limit,trigger=trigger}
+  end)
+  pcall(a.close,a)
+  compacting=false
+  if not done then return json.encode({ok=false,error='compact_failed',detail=tostring(result)}) end
+  return json.encode(result)
+end
+
 function wa_jobs(body, session)
   if not require_master(session) then return json.encode({error="forbidden"}) end
   local ok, args = pcall(json.decode, body or "{}")

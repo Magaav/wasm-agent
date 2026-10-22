@@ -80,6 +80,19 @@ if [ "$quiet_for" -lt "$QUIET" ]; then
   exit 0
 fi
 
+# Idle summarization: the in-run compactor keeps its measured 90-95% trigger because early
+# rewrites invalidate the provider prefix cache. On an idle, quiet node the operator asked for
+# one additional maintenance path at 40%: summarize the latest main session now, while no turn
+# is using it. The route rechecks the 40% threshold; it never summarizes a subagent.
+if [ "${WA_STALE_COMPACT:-1}" != "0" ]; then
+  compact="$(curl -s -m 180 -X POST -H 'Content-Type: application/json' -d '{"min_percent":40}' "http://127.0.0.1:$PORT/compact" 2>/dev/null)"
+  if [ -n "$compact" ]; then
+    say "onStale: idle compaction $compact"
+  else
+    say "onStale: idle compaction returned no response (the request may still be running; not retried here)"
+  fi
+fi
+
 tree="$(cat "$STATE_DIR/runtime-worktree.txt" 2>/dev/null | tr -d '\r\n')"
 if [ -z "$tree" ]; then
   say "onStale: no runtime worktree recorded in $STATE_DIR/runtime-worktree.txt - refusing to guess"
