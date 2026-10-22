@@ -109,7 +109,12 @@ local function evaluation_packet(row,result,profile_id)
   -- run died at call 2 or at call 86. Every field is a measurement or an explicit absence.
   local inner=type(result.result)=="table" and result.result or {}
   local report=(result.result~=nil and (inner.reply~=nil or inner.truncated~=nil)) and "present" or "absent"
-  local cause={settled=result.settled,report=report,error=result.error,detail=result.detail,
+  -- The marker a consumer branches on without parsing the note. A child that settled with NO report is
+  -- `unreported`: the coordinator still owes a judgement, but not the same one - there is no account of
+  -- itself to weigh, so it has to open the child's own transcript and checkout instead of reading a
+  -- summary. Written here because this is the only place that measures it; `classify` names the wake.
+  local cause={settled=result.settled,report=report,delivery=(report=="absent" and "unreported" or "reported"),
+    error=result.error,detail=result.detail,
     attempts=tonumber(result.attempts),timeout_s=tonumber(result.timeout_seconds),
     events=tonumber(inner.events)}
   do
@@ -142,7 +147,7 @@ end
 -- a completed delivery needs evaluating unless its own profile recorded the decision and no
 -- artifact of the run is left to review; a cancellation was a decision already taken, so it wakes
 -- only when the checkout still holds something (partial commits, uncommitted files).
-local function classify(state,profile_id,settlement,facts)
+local function classify(state,profile_id,settlement,facts,report)
   local current=tostring(state or "")
   if current=="failed" or current=="unknown" then
     return true,"recovery","child_"..current.."_needs_recovery_decision"
@@ -164,6 +169,12 @@ local function classify(state,profile_id,settlement,facts)
   if settlement=="self_reported" then
     return true,"evaluation","self_reported_but_artifacts_need_review: "..why
   end
+  -- A completed delivery with no report is still owed a judgement - just a different one. `report` is
+  -- the packet's own measurement ("present" only when the child handed back a reply or a truncated
+  -- result, see `evaluation_packet`); a packet whose evidence could not be assembled has no proven
+  -- report either, so the caller passes "absent" for it. Named, so the wake says which kind it is and
+  -- no consumer has to infer it from a paragraph.
+  if report=="absent" then return true,"evaluation","delivery_unreported" end
   return true,"evaluation","delivery_ready_to_evaluate"
 end
 
@@ -219,7 +230,8 @@ local function settle(row,api,boot)
   if profile=='orchestration-worker' then
     packet.install=dofile('lua/core/wave_autoflush.lua').settlement(result,row.owner,row.parent_session)
   end
-  local needs,kind,why=classify(packet.child.state,profile,settlement_of(profile,api),packet.artifacts)
+  local needs,kind,why=classify(packet.child.state,profile,settlement_of(profile,api),packet.artifacts,
+    (packet.cause and packet.cause.report) or "absent")
   packet.review={needs_wake=needs,kind=kind,reason=why}
   local encoded=json.encode(packet)
   local detail=json.encode({state=result.state,session_id=result.session_id,error=result.error})
