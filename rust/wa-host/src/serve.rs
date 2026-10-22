@@ -863,6 +863,19 @@ fn sentinel_queue_health() -> serde_json::Value {
 
 /// The honest health body. `ok` is false when the interpreter has stopped reporting,
 /// which is the one thing this endpoint is uniquely placed to say.
+/// `/compact` is idle-only maintenance. The Lua handler can only see the agent object owned by its
+/// own node-thread, so a request handled on another thread saw no active run and could summarize
+/// under a live turn. The scheduler is node-wide; only queued/running runs block compaction.
+fn compact_blocks_on(state: scheduler::RunState) -> bool {
+    matches!(state, scheduler::RunState::Queued | scheduler::RunState::Running)
+}
+
+fn compact_is_busy() -> bool {
+    scheduler::global()
+        .map(|scheduler| scheduler.run_ids().into_iter().any(|(_, _, state)| compact_blocks_on(state)))
+        .unwrap_or(false)
+}
+
 fn health_body() -> Vec<u8> {
     // The aggregate answers one question: *can this node do work?* Work happens on node-thread 0 - runs and
     // every route that changes something - so the aggregate is node-thread 0's age, and a wedged run node-thread is
@@ -2883,7 +2896,13 @@ fn dispatch(
         // Idle-only maintenance: onStale calls this after the node has been idle and quiet. The
         // Lua handler rechecks the 40% threshold and refuses a subagent session; it is never an
         // in-run compaction path (in-run compaction keeps its own 90-95% trigger).
-        "/compact" if method == "POST" => (200,"application/json",call("wa_compact", &[body,session]).into_bytes()),
+        "/compact" if method == "POST" => {
+            if compact_is_busy() {
+                (200, "application/json", b"{\"ok\":false,\"error\":\"node_busy\"}".to_vec())
+            } else {
+                (200, "application/json", call("wa_compact", &[body, session]).into_bytes())
+            }
+        }
         "/jobs" if method == "GET" => (200,"application/json",call("wa_jobs", &["{}",session]).into_bytes()),
         "/jobs" if method == "POST" => (200,"application/json",call("wa_jobs", &[body,session]).into_bytes()),
         "/operations" if method == "GET" => (200,"application/json",call("wa_operation", &["{}",session]).into_bytes()),
@@ -3314,7 +3333,7 @@ mod peer_conversation_tests {
 
 #[cfg(test)]
 mod origin_tests {
-    use super::{admit_origin, scheduler, Request};
+    use super::{admit_origin, compact_blocks_on, scheduler, Request};
 
     fn request(method: &str, path: &str, headers: &[(&str, &str)]) -> Request {
         Request {
@@ -3331,6 +3350,16 @@ mod origin_tests {
             node_headers: headers.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
             body: Vec::new(),
             accept_sse: false,
+        }
+    }
+
+    #[test]
+    fn only_a_queued_or_running_run_blocks_idle_compaction() {
+        for state in [scheduler::RunState::Queued, scheduler::RunState::Running] {
+            assert!(compact_blocks_on(state), "{state:?} must block /compact");
+        }
+        for state in [scheduler::RunState::Completed, scheduler::RunState::Cancelled, scheduler::RunState::Unknown, scheduler::RunState::NotStarted] {
+            assert!(!compact_blocks_on(state), "{state:?} must not block /compact");
         }
     }
 

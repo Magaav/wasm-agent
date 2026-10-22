@@ -374,7 +374,17 @@ function wa_compact(body, session)
   if min<1 or min>95 then return json.encode({error='invalid_compact_percent'}) end
   local record
   if type(args.session_id)=='string' and args.session_id~='' then record=memory.session(args.session_id)
-  else record=memory.latest_session(user.id,nodeslib.node_name()) end
+  else
+    -- A session created without a node binding has node_id ''; latest_session(user, node_name)
+    -- cannot find it, so the default /compact from onStale returned session_not_found. Find the
+    -- newest main session on this node (bound or unbound), skipping subagent threads.
+    local rows=memory.list_sessions(user.id,50)
+    for _,row in ipairs(rows) do
+      if row.objective~='subagent' and (row.node_id==nodeslib.node_name() or row.node_id=='' or row.node_id==nil) then
+        record=row; break
+      end
+    end
+  end
   if not record then return json.encode({error='session_not_found'}) end
   if record.objective=='subagent' then return json.encode({error='subagent_compaction_refused'}) end
   compacting=true
