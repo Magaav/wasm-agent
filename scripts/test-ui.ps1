@@ -4153,6 +4153,13 @@ try {
     # it now fails on it, so it runs in the gate rather than beside it.
     & node scripts/agent-benchmark-ui-observe.mjs --ui $ui --probe (Join-Path $PSScriptRoot 'probe-run-topic-nesting.js') --out (Join-Path $tmp 'run-topic-nesting')
     if ($LASTEXITCODE -ne 0) { throw 'run topic nesting browser probe failed' }
+    # A step that has begun has no topic yet: the vacuum where it will be is prepainted with the
+    # reasoning topic's shape (glyph, `reasoning…`, a live seconds count), and the step's own topic -
+    # thinking, tool or decision - REPLACES it in place (same parent, same sibling index, one topic).
+    # A reply, an error and `done` remove it. It runs in the gate so a ghost placeholder or a shape
+    # that is never swapped cannot pass behind a green suite.
+    & node scripts/agent-benchmark-ui-observe.mjs --ui $ui --probe (Join-Path $PSScriptRoot 'probe-step-placeholder.js') --out (Join-Path $tmp 'step-placeholder')
+    if ($LASTEXITCODE -ne 0) { throw 'step placeholder browser probe failed' }
     # Commentary and thinking are one component and a topic's body is the transcript's own Markdown:
     # asserted as the first chunk's ancestry and as <strong>/<code>/<pre> inside the body, with a
     # literal <text> still text. It runs in the gate so a second topic implementation or a plain-text
