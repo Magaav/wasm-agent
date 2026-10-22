@@ -22,7 +22,12 @@
     // animated glyph, the calls/clock pair as one `·`-joined token, then tools, tokens and duration
     // one space apart, with `~?` when the token boundary was never measured. A row that re-orders
     // itself, wraps, or prints a second `·` fails here, not just in a screenshot.
-    check(/^\S 👣1·0s ⚒0 ◈~\? ◷\d+:\d{2}$/.test(statusLine.textContent),'live line is one compact glued row in the calls-clock-tools-tokens-duration order, saw: '+JSON.stringify(statusLine.textContent));
+    // WHY THE TURN COUNTER IS IN THE PATTERN NOW: the row gained a counter of its own immediately after
+    // the activity glyph and before the first measurement - `↻1` here, because `counted-run` is the one
+    // run this transcript has been told about (its own row's `run_counts` trace names it). The counter
+    // is a SEPARATE element, not a stats pair, and the rest of the line is unchanged, which is what
+    // this regex still says. Its own contract lives in scripts/probe-run-status-turns.js.
+    check(/^\S ↻1 👣1·0s ⚒0 ◈~\? ◷\d+:\d{2}$/.test(statusLine.textContent),'live line is one compact glued row in the calls-clock-tools-tokens-duration order, saw: '+JSON.stringify(statusLine.textContent));
     handleEvent({type:'round',n:1});handleEvent({type:'round',n:1});
     check(runCounts.model_calls===1,'round events never count model attempts');
     handleEvent({type:'run_counts',counts:snapshot(2,0)});

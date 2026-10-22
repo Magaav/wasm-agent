@@ -123,6 +123,8 @@ let statusPhase = null;
 let statusCalls = null;
 let statusElapsed = null;
 let statusSpinner = null;
+// The turn counter's own element (`↻<n>`): created with the row, kept by every state.
+let statusTurns = null;
 // The body of the newest assistant bubble, tracked as it is created: the run status is
 // attached to it when a run finishes, and finding it by querying the transcript would be
 // the same dependency in another place.
@@ -817,6 +819,14 @@ let runBubble = null;
 let runStartedAt = 0;
 let runStepState = null;
 let runCounts = null;
+// THE TURN COUNTER. A turn is ONE RUN of the agent, and one run is one `run_id` - never a user
+// message and never a provider step (one turn is many steps, and a retry is still one turn). Both
+// halves of that identity are read, because a transcript has to count itself the same way whether it
+// is streaming or repainted: the live `round` event carries `run_id`, and the durable `run_counts`
+// facts attached to a row's `trace` carry it too (lua/core/subscription_wire.lua). The set is the
+// count - DISTINCT ids, so a run that reports counts twice is still one turn - and it belongs to the
+// transcript that drew them (the main chat or one child pane: this is the one renderer).
+let turnRunIds = new Set();
 const measuredContexts = new WeakMap();
 let rendererTask=null;
 const childRenderStates=new WeakMap();
@@ -825,6 +835,9 @@ function applyRunCounts(counts) {
   if (counts?.version !== 1 || typeof counts.run_id !== 'string' || !counts.run_id ||
       !Number.isSafeInteger(counts.model_calls) || counts.model_calls < 0 ||
       !Number.isSafeInteger(counts.tool_calls) || counts.tool_calls < 0) return;
+  // Counted before the stale-snapshot guard below: that guard only ever drops a SECOND report of a
+  // run this transcript has already seen, so the counter is complete without it.
+  noteTurnRunId(counts.run_id);
   if (runCounts?.run_id === counts.run_id &&
       (counts.model_calls < runCounts.model_calls || counts.tool_calls < runCounts.tool_calls ||
        (counts.usage_calls ?? 0)<(runCounts.usage_calls ?? 0))) return;
@@ -1144,6 +1157,29 @@ function add(role, text, asHtml = false) {
   return body;
 }
 
+// WHAT THE COUNTER SAYS. `↻<n>` is the number of distinct runs this transcript has shown, and `↻?`
+// when nothing has named a run yet - an unknown count is not `0`, which would be a measurement the
+// window never made (the same rule the stats pairs follow). It paints into its own element rather
+// than into a stats half: the live row is composed AROUND its clock (see `updateRunElapsed`), so the
+// counter must not be inside either half.
+function noteTurnRunId(id) {
+  if (id == null) return;
+  const key = String(id);
+  if (!key || turnRunIds.has(key)) return;
+  turnRunIds.add(key);
+  paintRunTurns();
+}
+function paintRunTurns() {
+  if (!statusTurns) return;
+  const turns = turnRunIds.size;
+  setText(statusTurns, ' ↻' + (turns || '?'));
+  // The glyph is compact on the row, so the words it stands for are here for a hover, a keyboard and
+  // a screen reader - the same courtesy every other pair in the line gets.
+  statusTurns.title = turns ? turns + (turns === 1 ? ' turn' : ' turns') + ' in this transcript'
+    : 'turn count unknown';
+  statusTurns.setAttribute('aria-label', statusTurns.title);
+}
+
 function setStatus(text) {
   transcript.querySelector('#empty')?.remove();
   if (!statusLine) {
@@ -1154,6 +1190,13 @@ function setStatus(text) {
     statusSpinner.setAttribute('aria-hidden', 'true');
     statusSpinner.textContent = runActivityFrames[0].glyph;
     statusSpinner.style.fontSize = runActivityFrames[0].size + 'px';
+    // THE TURN COUNTER IS ITS OWN ELEMENT, immediately after the activity glyph and before the first
+    // measurement, in the live row and in the finished footer alike. It is not a stats pair: the row's
+    // measurements are composed AROUND the live clock and split between `statusCalls` and
+    // `statusElapsed` (see `updateRunElapsed`), and a turn count is neither of them - it counts runs,
+    // not calls, so string-appending it into a stats half would make that half lie about what it holds.
+    statusTurns = document.createElement("span");
+    statusTurns.className = "chat-content-run-turns";
     statusLabel = document.createElement("span");
     statusLabel.className = "chat-content-run-label";
     statusPhase = document.createElement("span");
@@ -1163,15 +1206,15 @@ function setStatus(text) {
     statusCalls.className = "chat-content-run-calls";
     statusElapsed = document.createElement("span");
     statusElapsed.className = "chat-content-run-elapsed";
-    // Operator, 2026-10-05: the DOM order IS the reading order - `✳ 👣22·13s ⚒30 ◈~71.3k ◷1:55`. The
+    // Operator, 2026-10-05: the DOM order IS the reading order - `✳ ↻2 👣22·13s ⚒30 ◈~71.3k ◷1:55`. The
     // live row's clock is its own element (it is the step clock, repainted every second), so the one
     // compact line is split around it: the model-call pair and its `·` stand BEFORE the clock in
     // `statusCalls`, every other pair follows it in `statusElapsed` (see `updateRunElapsed`). The
-    // label is a notice about the run ("finishing…"), so it stands before the measurements rather
-    // than inside them; with no notice - the ordinary case - it is hidden and the row is the glyph
-    // and the five values. The finished footer (glyph removed, phase and calls empty) still reads
-    // left to right.
-    statusLine.append(statusSpinner, statusLabel, statusCalls, statusPhase, statusElapsed);
+    // turn counter follows the glyph and precedes every measurement; the label is a notice about the
+    // run ("finishing…"), so it stands after the counter and before the measurements; with no notice
+    // - the ordinary case - it is hidden and the row is the glyph, the counter and the five values.
+    // The finished footer (glyph removed, phase and calls empty) still reads left to right.
+    statusLine.append(statusSpinner, statusTurns, statusLabel, statusCalls, statusPhase, statusElapsed);
     if (turnIsActive() && !replayingMessages) startRunStatusTicker();
   }
   setText(statusLabel, text);
@@ -1202,6 +1245,9 @@ function updateRunElapsed() {
   if (step && transcript.dataset.debug === 'true') step.node.setStep(step.label, "running", Date.now() - step.started);
   updateRunPhase();
   if (!statusElapsed) return;
+  // The counter is painted before the replay clock's own guard: a repaint that cannot work out a
+  // duration still knows how many turns the rows hold.
+  paintRunTurns();
   if (replayingMessages && (!runStartedAt || !replayMessageEndedAt)) {
     statusElapsed.textContent = "duration unknown";
     return;
@@ -1269,6 +1315,7 @@ function finishRunStatus(label = "completed") {
   else statusLine.remove();
   statusLine = null;
   statusLabel = null; statusPhase = null; statusCalls = null; statusElapsed = null; statusSpinner = null;
+  statusTurns = null;
   if (runStatusTicker) { clearInterval(runStatusTicker); runStatusTicker = null; }
   pin();
 }
@@ -1277,6 +1324,7 @@ function clearStatus() {
   statusLine?.remove();
   statusLine = null;
   statusLabel = null; statusPhase = null; statusCalls = null; statusElapsed = null; statusSpinner = null;
+  statusTurns = null;
   if (runStatusTicker) { clearInterval(runStatusTicker); runStatusTicker = null; }
 }
 
@@ -2665,7 +2713,7 @@ function handleEvent(event) {
     const bubble = currentBubble();
     bubble.dataset.runTools = Number(event.tools) > 0 ? "1" : "0";
     bubble.dataset.answerBegan = "0";
-    if (event.run_id) bubble.dataset.runId = String(event.run_id);
+    if (event.run_id) { bubble.dataset.runId = String(event.run_id); noteTurnRunId(event.run_id); }
     if (!runStartedAt) runStartedAt = Date.now();
     markStreamedCommentaryIncomplete();
     // A new round is ONE PROVIDER STEP, and one step's thinking is ONE TOPIC: the thought that
@@ -3276,8 +3324,15 @@ function repaintMessages(rows, options = {}) {
   streamedCommentaryBlock = null;
   streamedCommentaryText = "";
   phasePendingText = new Map();
+  // The turn counter is rebuilt from THIS transcript's rows, so it is reset with the rest of the
+  // render state rather than accumulated across conversations. The run in flight is not in the rows
+  // yet on every repaint (its counts arrive later), so its id is carried over from the bubble the
+  // repaint is about to replace: a reload mid-run must not lose the turn it is part of.
+  const liveTurnRunId = runBubble?.dataset.runId || '';
   runStartedAt = 0;
   runCounts = null;
+  turnRunIds = new Set();
+  if (liveTurnRunId) noteTurnRunId(liveTurnRunId);
   replayMessageEndedAt = 0;
   replayRunLastMessage = null;
   renderedMessageIds = new Set();
@@ -3486,13 +3541,13 @@ function repaintMessages(rows, options = {}) {
 // `completed`/`unfinished`/`failed` footer - which is the point: a reader looking at a child and at
 // this window's own chat is looking at one implementation, so a fix to either lands in both.
 function captureRenderer() {
-  return {transcript,runBubble,statusLine,statusLabel,statusCalls,statusElapsed,statusSpinner,runStepState,runCounts,
+  return {transcript,runBubble,statusLine,statusLabel,statusCalls,statusElapsed,statusSpinner,statusTurns,runStepState,runCounts,turnRunIds,
     statusPhase,lastAssistantBody,runStatusTicker,toolTicker,streamBody,streamText,phasePendingText,trace,lastTool,
     reasoningBlock,reasoningText,reasoningRound,streamedCommentaryBlock,streamedCommentaryText,runStartedAt,replayingMessages,
     replayMessageEndedAt,replayRunLastMessage,renderedMessageIds,rendererTask};
 }
 function restoreRenderer(value) {
-  ({transcript,runBubble,statusLine,statusLabel,statusCalls,statusElapsed,statusSpinner,runStepState,runCounts,
+  ({transcript,runBubble,statusLine,statusLabel,statusCalls,statusElapsed,statusSpinner,statusTurns,runStepState,runCounts,turnRunIds,
     statusPhase,lastAssistantBody,runStatusTicker,toolTicker,streamBody,streamText,phasePendingText,trace,lastTool,
     reasoningBlock,reasoningText,reasoningRound,streamedCommentaryBlock,streamedCommentaryText,runStartedAt,replayingMessages,
     replayMessageEndedAt,replayRunLastMessage,renderedMessageIds,rendererTask}=value);
@@ -3502,8 +3557,8 @@ function withChildRenderer(container,task,render) {
   const parent=captureRenderer(),retained=childRenderStates.get(container);
   if(retained?.key===childRenderKey(task))restoreRenderer(retained.renderer);
   else {
-    transcript=container;runBubble=null;runStepState=null;runCounts=null;
-    statusLine=null;statusLabel=null;statusPhase=null;statusCalls=null;statusElapsed=null;statusSpinner=null;runStatusTicker=null;toolTicker=null;
+    transcript=container;runBubble=null;runStepState=null;runCounts=null;turnRunIds=new Set();
+    statusLine=null;statusLabel=null;statusPhase=null;statusCalls=null;statusElapsed=null;statusSpinner=null;statusTurns=null;runStatusTicker=null;toolTicker=null;
     trace=null;lastTool=null;lastAssistantBody=null;streamBody=null;streamText='';phasePendingText=new Map();
     reasoningBlock=null;reasoningText='';reasoningRound='';streamedCommentaryBlock=null;streamedCommentaryText='';runStartedAt=0;
     replayingMessages=false;replayMessageEndedAt=0;replayRunLastMessage=null;renderedMessageIds=new Set();
