@@ -276,4 +276,26 @@ assert(saw_start, "the parent transcript must record the start receipt")
 assert(saw_await, "the parent transcript must record the awaited child result")
 print("MARK ok-parent-run")
 
+-- 10. A placement (`dispatch:`) await is bounded work too: it beats while it
+--     polls and returns the queued dispatch view at its bound. This is the path
+--     a coordinator uses when orchestration placement is enabled.
+host.sql_exec("DELETE FROM orchestration_tasks WHERE id=?", json.encode({ "dispatch:beat" }))
+host.sql_exec("INSERT INTO orchestration_tasks(id,owner,request_key,args,context,state,destination,receipt,detail,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+  json.encode({ "dispatch:beat", "alice", "beat-key", json.encode({ prompt = "queued dispatch" }),
+    json.encode(ctx("alice")), "queued", "", "{}", "", host.now() }))
+local real_beat = host.beat
+local beats = 0
+host.beat = function(...) beats = beats + 1; return real_beat(...) end
+local fleet_started = host.now()
+local fleet_view = control({ action = "await", id = "dispatch:beat", wait_ms = 250 }, ctx("alice"))
+local fleet_elapsed = host.now() - fleet_started
+host.beat = real_beat
+host.sql_exec("DELETE FROM orchestration_tasks WHERE id=?", json.encode({ "dispatch:beat" }))
+assert(type(fleet_view) == "table" and fleet_view.dispatch_state == "queued",
+  "a dispatch wait returns the queued view at its bound: " .. json.encode(fleet_view))
+assert(fleet_elapsed >= 0.15 and fleet_elapsed < 2,
+  "a dispatch wait is bounded, took " .. string.format("%.2f", fleet_elapsed))
+assert(beats >= 2, "a dispatch wait must beat while it polls; beats=" .. tostring(beats))
+print("MARK ok-dispatch-await")
+
 print("SUBAGENTS_INTEGRATION_OK")
