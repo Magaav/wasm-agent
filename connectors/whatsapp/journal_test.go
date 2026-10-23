@@ -487,10 +487,12 @@ func TestReadSnapshotUnionsTheSameDirectContactAcrossItsAlternateID(t *testing.T
 		t.Fatal(err)
 	}
 	lid, pn := "900@lid", "200@s.whatsapp.net"
-	if err := j.ingest(Message{ID: "lid-1", Chat: lid, Sender: lid, SenderAlt: pn, Body: "today", Sent: 200}); err != nil {
+	// The older PN message is observed first; the newer LID message is observed
+	// second, so the page's row cursor still puts the newest first.
+	if err := j.ingest(Message{ID: "pn-1", Chat: pn, Sender: pn, Body: "old", Sent: 100}); err != nil {
 		t.Fatal(err)
 	}
-	if err := j.ingest(Message{ID: "pn-1", Chat: pn, Sender: pn, Body: "old", Sent: 100}); err != nil {
+	if err := j.ingest(Message{ID: "lid-1", Chat: lid, Sender: lid, SenderAlt: pn, Body: "today", Sent: 200}); err != nil {
 		t.Fatal(err)
 	}
 	page, err := j.readPage(c, readRequest{Chat: pn, Limit: 10}, "read_snapshot")
