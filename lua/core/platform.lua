@@ -25,6 +25,43 @@ function M.os() return M.info().os end
 function M.shell() return M.info().shell end
 function M.cwd() return M.info().cwd or "." end
 
+-- The node's own OS clock, not UTC.
+--
+-- `os.date` is the C runtime's localtime, which is the zone the user's OS shows; `%z`/`%Z` name its
+-- offset and zone. A platform whose `strftime` does not implement `%z` still gets a numeric offset:
+-- `os.time` of a broken-down local time is that instant, while `os.time` of the same fields read as
+-- UTC is the instant shifted by the offset, so the difference is the offset. The fallback is written
+-- out because "no offset" must not silently read as "UTC" - that is the defect this answers.
+local function offset_text(minutes)
+  local sign = minutes < 0 and "-" or "+"
+  minutes = math.abs(minutes)
+  return string.format("%s%02d:%02d", sign, math.floor(minutes / 60), minutes % 60)
+end
+
+function M.local_clock(epoch)
+  local stamp = math.floor(tonumber(epoch) or os.time())
+  local offset = tostring(os.date("%z", stamp) or "")
+  local zone = tostring(os.date("%Z", stamp) or "")
+  local minutes
+  local sign, hours, mins = offset:match("^([+-])(%d%d)(%d%d)$")
+  if sign then
+    minutes = (tonumber(hours) * 60 + tonumber(mins)) * (sign == "-" and -1 or 1)
+  else
+    local local_t, utc_t = os.date("*t", stamp), os.date("!*t", stamp)
+    minutes = math.floor((os.time(local_t) - os.time(utc_t)) / 60 + 0.5)
+    offset = offset_text(minutes)
+  end
+  return {
+    epoch = stamp,
+    local_iso = os.date("%Y-%m-%dT%H:%M:%S", stamp) .. offset_text(minutes),
+    utc_iso = os.date("!%Y-%m-%dT%H:%M:%SZ", stamp),
+    utc_offset_minutes = minutes,
+    utc_offset = offset_text(minutes),
+    zone = zone ~= "" and zone or nil,
+    weekday = os.date("%A", stamp),
+  }
+end
+
 -- The terminal's width in columns: the console's own answer, then `$COLUMNS`, then 80.
 --
 -- The order is the point. `COLUMNS` is a *shell* variable on most machines and is not exported to
@@ -66,7 +103,9 @@ function M.describe()
   else
     hint = "shell commands run through " .. shell
   end
-  return string.format("%s (%s); %s", info.os, info.arch, hint)
+  local clock = M.local_clock()
+  return string.format("%s (%s); %s; local time %s (%s)", info.os, info.arch, hint,
+    clock.utc_offset, clock.zone or "zone name unknown")
 end
 
 function M.shell_name()

@@ -47,7 +47,7 @@ PORT="${WA_PORT:-8799}"
 DRY="${WA_STALE_DRY_RUN:-0}"
 now="$(date +%s)"
 
-say() { printf '%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >> "$LOG" 2>/dev/null; printf '%s\n' "$*"; }
+say() { printf '%s\t%s\n' "$(date +%Y-%m-%dT%H:%M:%S%z)" "$*" >> "$LOG" 2>/dev/null; printf '%s\n' "$*"; }
 field() { sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p" | head -1; }
 state_field() { sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\\([0-9]*\\).*/\\1/p" | head -1; }
 read_state() { sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\\([^,}]*\\).*/\\1/p" "$STATE" 2>/dev/null | tr -d '"' | head -1; }

@@ -1003,6 +1003,9 @@ WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-context-growth.lua" "$BIN" --db "$D
 # (compact_admission tests); Lua must not re-decide it. Master auth, the threshold and the
 # subagent exclusion are asserted here so removing that guard did not remove them too.
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-compact-idle-route.lua" "$BIN" --db "$DB.compact-idle" | grep 'compact idle route ok'
+# The node clock is its OS local time with a numeric offset, not a bare UTC value; the model must
+# be able to ask for it (`time`) and see the zone in its environment line.
+WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-time.lua" "$BIN" --db "$DB.time" | grep 'node local time ok'
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-telemetry-incremental.lua" "$BIN" --db "$DB.telemetry-incremental" | grep 'telemetry incremental ok'
 # The prompt index is an authored cue, not a slice of the schema description. Without this,
 # the same text is sent twice and nothing in the suite notices when the slicing returns.
