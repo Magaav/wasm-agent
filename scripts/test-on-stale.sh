@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Test the onStale decision, not the schedule. Every case feeds a fixed /health payload (WA_HEALTH_FILE)
 # and a fixed installed.txt, because the thing being asserted is: WHEN may this node act, and when must it
-# refuse. A test that races a live node's own state would prove nothing about the decision.
+# refuse or hold. A test that races a live node's own state would prove nothing about the decision.
 set -uo pipefail
 cd "$(dirname "$0")/.."
 ROOT="$(pwd)"
@@ -11,10 +11,32 @@ fail=0; checks=0
 
 ok()   { checks=$((checks+1)); printf '  ok   %s\n' "$1"; }
 bad()  { checks=$((checks+1)); fail=$((fail+1)); printf '  FAIL %s\n' "$1"; }
-run()  { WA_INSTALL_DIR="$TMP/install" WA_HEALTH_FILE="$TMP/health.json" WA_STALE_QUIET_S=0 WA_STALE_DRY_RUN=1 \
-          bash scripts/on-stale.sh >"$TMP/out" 2>&1; printf '%s' "$?"; }
+run()  { env -u WA_COORDINATOR_SESSION WA_INSTALL_DIR="$TMP/install" WA_HEALTH_FILE="$TMP/health.json" WA_STALE_QUIET_S=0 WA_STALE_DRY_RUN=1 \
+          WA_STALE_COMPACT=0 bash scripts/on-stale.sh >"$TMP/out" 2>&1; printf '%s' "$?"; }
+# A non-dry run with its own PATH/owner fixture and a sentinel stub that records its arguments. It never
+# installs anything: the stub only writes the argv it was given.
+run_stale() {
+  env -u WA_COORDINATOR_SESSION \
+      WA_INSTALL_DIR="$TMP/install" WA_HEALTH_FILE="$TMP/health.json" WA_STALE_QUIET_S=0 \
+      WA_STALE_DRY_RUN=0 WA_STALE_COMPACT=0 WA_SENTINEL_BIN="$TMP/sentinel-stub" \
+      PATH="$TMP/bin:$PATH" "$@" bash scripts/on-stale.sh >"$TMP/out" 2>&1
+  printf '%s' "$?"
+}
 
-mkdir -p "$TMP/install"
+mkdir -p "$TMP/install" "$TMP/bin"
+# A fake curl: the script disables idle compaction for these cases, so the only curl is the owner read.
+cat > "$TMP/bin/curl" <<EOF
+#!/usr/bin/env bash
+cat "$TMP/owner.json" 2>/dev/null
+EOF
+# The sentinel stub records the request argv; it is never a real installer.
+cat > "$TMP/sentinel-stub" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" > "$TMP/request-args"
+printf 'requested deploy: %s\n' "\$*"
+EOF
+chmod +x "$TMP/bin/curl" "$TMP/sentinel-stub"
+
 # A CLEAN fixture tree with its own origin: the script refuses a dirty worktree by design, so testing it
 # against this repository (which its author is editing) could only ever test the refusal.
 git init -q --bare "$TMP/origin.git" || exit 1
@@ -26,6 +48,7 @@ git -C "$TMP/tree" push -q origin main || exit 1
 git -C "$TMP/tree" fetch -q origin
 printf '%s\n' "$TMP/tree" > "$TMP/install/runtime-worktree.txt"
 head8="$(git -C "$TMP/tree" rev-parse --short=8 origin/main)"
+head40="$(git -C "$TMP/tree" rev-parse origin/main)"
 
 # 1. busy: never act.
 printf '{"node_state":{"state":"busy","busy_threads":1,"subagents_running":0,"subagents_queued":0,"queue":0}}' > "$TMP/health.json"
@@ -52,17 +75,54 @@ rm -f "$TMP/install/on-stale-state.json"
 rc="$(run)"
 [ "$rc" = 0 ] && grep -q 'nothing to do' "$TMP/out" && ok "up-to-date install does nothing ($rc)" || bad "up to date: rc=$rc out=$(cat "$TMP/out")"
 
-# 5. idle and behind: STALE, and in dry run it stops before building.
+# 5. idle and behind: STALE, and in dry run it stops before proving a deploy target or building.
 printf 'commit=deadbee1\nsha256=x\n' > "$TMP/install/installed.txt"
 rm -f "$TMP/install/on-stale-state.json"
 rc="$(run)"
-[ "$rc" = 0 ] && grep -q 'STALE' "$TMP/out" && grep -q 'dry run' "$TMP/out" && ok "behind + idle is the one case that acts ($rc)" || bad "stale: rc=$rc out=$(cat "$TMP/out")"
+[ "$rc" = 0 ] && grep -q 'STALE' "$TMP/out" && grep -q 'would be HELD' "$TMP/out" && ok "behind + idle is the one case that acts, and dry run names the held prerequisite ($rc)" || bad "stale: rc=$rc out=$(cat "$TMP/out")"
 
 # 6. the edge is remembered: the same (installed -> head) pair does not act twice.
 printf 'commit=deadbee1\nsha256=x\n' > "$TMP/install/installed.txt"
 printf '{"last_busy_at":0,"acted_key":"deadbee1->%s","head":"%s","at":1}\n' "$head8" "$head8" > "$TMP/install/on-stale-state.json"
 rc="$(run)"
 [ "$rc" = 0 ] && grep -q 'already acted' "$TMP/out" && ok "one edge, one request ($rc)" || bad "dedupe: rc=$rc out=$(cat "$TMP/out")"
+
+# 7. stale but no proved parent session: a visible hold, not a guessed session and not a request.
+printf 'commit=deadbee1\nsha256=x\n' > "$TMP/install/installed.txt"
+rm -f "$TMP/install/on-stale-state.json" "$TMP/install/on-stale-held.json" "$TMP/request-args"
+printf '{"session":{"id":"parent-fixture","user_id":"owner-fixture"}}\n' > "$TMP/owner.json"
+rc="$(run_stale)"
+[ "$rc" = 2 ] && grep -q 'HELD (deploy_parent_session_unproved)' "$TMP/out" \
+  && grep -q '"code":"deploy_parent_session_unproved"' "$TMP/install/on-stale-held.json" \
+  && [ ! -e "$TMP/request-args" ] \
+  && ok "an unproved parent session is held visibly, with no request ($rc)" \
+  || bad "session hold: rc=$rc out=$(cat "$TMP/out") held=$(cat "$TMP/install/on-stale-held.json" 2>/dev/null) args=$(cat "$TMP/request-args" 2>/dev/null)"
+
+# 8. stale with a session the node cannot prove an owner for: another visible hold, still no request.
+printf 'commit=deadbee1\nsha256=x\n' > "$TMP/install/installed.txt"
+rm -f "$TMP/install/on-stale-state.json" "$TMP/install/on-stale-held.json" "$TMP/request-args"
+printf '{"error":"unknown_session"}\n' > "$TMP/owner.json"
+rc="$(run_stale WA_COORDINATOR_SESSION=parent-fixture)"
+[ "$rc" = 2 ] && grep -q 'HELD (deploy_owner_unproved)' "$TMP/out" \
+  && grep -q '"code":"deploy_owner_unproved"' "$TMP/install/on-stale-held.json" \
+  && [ ! -e "$TMP/request-args" ] \
+  && ok "an unproved owner is held visibly, with no request ($rc)" \
+  || bad "owner hold: rc=$rc out=$(cat "$TMP/out") held=$(cat "$TMP/install/on-stale-held.json" 2>/dev/null) args=$(cat "$TMP/request-args" 2>/dev/null)"
+
+# 9. stale with a proved source/session/owner: exactly one deploy request, never upgrade and never a build.
+printf 'commit=deadbee1\nsha256=x\n' > "$TMP/install/installed.txt"
+rm -f "$TMP/install/on-stale-state.json" "$TMP/install/on-stale-held.json" "$TMP/request-args"
+printf '{"session":{"id":"parent-fixture","user_id":"owner-fixture"}}\n' > "$TMP/owner.json"
+rc="$(run_stale WA_COORDINATOR_SESSION=parent-fixture)"
+args="$(cat "$TMP/request-args" 2>/dev/null)"
+[ "$rc" = 0 ] && grep -q 'deploy requested' "$TMP/out" \
+  && grep -Fq -- "request deploy --expected-sha $head40 --owner owner-fixture --session parent-fixture" "$TMP/request-args" \
+  && ! grep -Fq -- "upgrade" "$TMP/request-args" \
+  && ! grep -Fq -- "--binary" "$TMP/request-args" \
+  && [ ! -e "$TMP/install/on-stale-held.json" ] \
+  && grep -q "\"acted_key\":\"deadbee1->$head8\"" "$TMP/install/on-stale-state.json" \
+  && ok "proved values request deploy with the full SHA and no installer in onStale ($rc)" \
+  || bad "deploy request: rc=$rc out=$(cat "$TMP/out") args=$args state=$(cat "$TMP/install/on-stale-state.json" 2>/dev/null)"
 
 printf '\n%s checks, %s failed\n' "$checks" "$fail"
 [ "$fail" -eq 0 ] && { printf 'ok onStale decision\n'; exit 0; }

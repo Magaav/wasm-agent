@@ -7,7 +7,7 @@
 //!
 //! So this is a small process that lives outside, watches, and acts on *declared* requests:
 //!
-//!   * it is the only thing that starts, stops or upgrades a node
+//!   * it is the only thing that starts, stops or installs a node
 //!   * it never holds a conversation, a model or the ledger — it executes a fixed verb list
 //!   * every action is logged with its reason, and nothing happens silently
 //!   * waking a model is budgeted, because that is the only thing here that costs money
@@ -21,7 +21,7 @@
 //! your agent can talk into anything):
 //!
 //!   request restart  [--reason TEXT]
-//!   request upgrade  --binary PATH [--session ID --prompt TEXT] [--reason TEXT]
+//!   request deploy   --expected-sha FULL_SHA --owner OWNER --session ID [--reason TEXT]
 //!   request wake     --session ID --prompt TEXT [--reason TEXT]
 //!   request run      --script PATH [--reason TEXT]     (a script the operator installed)
 //!   once | watch | status | health | start | stop | help
@@ -1157,18 +1157,6 @@ fn shell_for(script: &Path) -> (String, String) {
     ("bash".into(), script.display().to_string())
 }
 
-/// The binary argument, in the form the script's own `[ -x "$NEW" ]` test understands. That test
-/// runs under the shell we just chose, so the same rule applies: a POSIX path for a MSYS bash.
-fn shell_for_binary(binary: &str) -> String {
-    if !cfg!(windows) {
-        return binary.to_string();
-    }
-    if binary.len() > 2 && binary.as_bytes()[1] == b':' && binary.as_bytes()[2] == b'/' {
-        return to_msys_path(Path::new(binary));
-    }
-    binary.to_string()
-}
-
 /// `C:/dir/file` -> `/c/dir/file`. Only the drive form needs it; anything else is passed through
 /// unchanged rather than mangled into something worse.
 fn to_msys_path(path: &Path) -> String {
@@ -1183,87 +1171,9 @@ fn to_msys_path(path: &Path) -> String {
     text
 }
 
-/// How long `upgrade` may run before it is killed (WA_SENTINEL_UPGRADE_TIMEOUT_SECONDS, default 30 min).
-fn upgrade_timeout() -> Duration {
-    Duration::from_secs(
-        std::env::var("WA_SENTINEL_UPGRADE_TIMEOUT_SECONDS").ok().and_then(|v| v.parse().ok()).unwrap_or(1800),
-    )
-}
-
-/// Run a command to completion or until `limit`, then kill it. Returns its output either way; a killed
-/// command has a failing status and says so in stderr.
-fn run_bounded(command: std::process::Command, limit: Duration) -> Result<std::process::Output> {
-    // Use the existing owned process-tree supervisor, not Child::kill (only the
-    // shell) and shared temp filenames. Original output/state remain durable.
-    let manager=wa_operation::Manager::new(sentinel_dir().join("operations"));
-    let mut spec=wa_operation::Spec::command(command.get_program().to_string_lossy(),
-        command.get_args().map(|v|v.to_string_lossy().into_owned()).collect());
-    spec.timeout=limit;spec.owner="sentinel:upgrade".into();
-    spec.cwd=command.get_current_dir().map(|p|p.display().to_string()).unwrap_or_default();
-    for (key,value) in command.get_envs() {
-        let value=value.context("bounded command cannot remove inherited environment")?;
-        spec.env.push((key.to_string_lossy().into_owned(),value.to_string_lossy().into_owned()));
-    }
-    let id=manager.start(spec)?;
-    let state=manager.wait(&id,limit+Duration::from_secs(2))?;
-    if state["settled"]!=true || state["cleanup"]=="unknown" {
-        bail!("upgrade operation {id} outcome unknown; retained originals require inspection; no replay");
-    }
-    let root=sentinel_dir().join("operations").join(&id);
-    let stdout=std::fs::read(root.join("stdout"))?;
-    let mut stderr=std::fs::read(root.join("stderr"))?;
-    if state["ok"]!=true {stderr.extend_from_slice(format!("\n[sentinel] operation {id} failed: {}\n",state["error"]).as_bytes());}
-    let code=if state["ok"]==true {0} else {state["code"].as_i64().filter(|v|*v!=0).unwrap_or(1) as i32};
-    #[cfg(windows)] let status={use std::os::windows::process::ExitStatusExt;std::process::ExitStatus::from_raw(code as u32)};
-    #[cfg(unix)] let status={use std::os::unix::process::ExitStatusExt;std::process::ExitStatus::from_raw((code & 255)<<8)};
-    Ok(std::process::Output { status, stdout, stderr })
-}
-
-pub(crate) fn verb_upgrade(binary: &str, reason: &str) -> Result<String> {
-    queue::step("installing", "running upgrade.sh against the candidate binary");
-    if binary.is_empty() {
-        bail!("upgrade needs --binary");
-    }
-    let script = resolve_upgrade_script()?;
-    let (interpreter, script_arg) = shell_for(&script);
-    let mut command = std::process::Command::new(&interpreter);
-    command
-        // The path is passed to the interpreter as its first argument. Git Bash does not accept a
-        // `C:/...` path there, and WSL's bash cannot see `/c/...` at all, so both the interpreter
-        // *and* the path form have to agree (`shell_for`).
-        .arg(&script_arg)
-        .arg(shell_for_binary(binary))
-        .env("WA_UPGRADE_VIA", "sentinel")
-        .env("WA_UPGRADE_REASON", reason)
-        // The script locates the repo from its own path (`dirname $0/..`), so the working
-        // directory does not matter to it. This used to pin cwd to the sentinel's own, which was
-        // the install directory - a directory with no `scripts/` in it, which is exactly why the
-        // relative default could never be found from a detached watcher.
-        .current_dir(std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-    // Bounded. `output()` waited forever: a hung upgrade.sh (waiting for an idle node that never
-    // came) left MAINTENANCE_ACTIVE set and held every later restart. Output goes to files rather than
-    // pipes so a chatty script cannot fill a pipe and deadlock against the wait.
-    let output = run_bounded(command, upgrade_timeout()).context("run the upgrade script")?;
-    let log = sentinel_dir().join("upgrade.log");
-    let mut record = format!("{}\t{}\t{}\n", now_epoch(), binary, reason);
-    record.push_str(&String::from_utf8_lossy(&output.stdout));
-    record.push_str(&String::from_utf8_lossy(&output.stderr));
-    record.push('\n');
-    use std::io::Write;
-    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&log) {
-        let _ = file.write_all(record.as_bytes());
-    }
-    if output.status.success() {
-        audit("upgrade", binary, reason);
-        Ok(format!("upgraded; install record refreshed; transcript at {}", log.display()))
-    } else {
-        audit("upgrade-failed", binary, reason);
-        bail!("the upgrade script failed (exit {}); inspect {} and the live node before assuming rollback", output.status, log.display())
-    }
-}
-
-/// Install everything that needs installing - the node, the UI **and the sentinel** - which is the one
-/// thing `upgrade` cannot do, because `upgrade.sh` never copies a sentinel.
+/// Install everything that needs installing - the node, the UI **and the sentinel**. `deploy.sh` is the
+/// only installer path: it builds the tree itself and installs the sentinel too, which the retired
+/// `upgrade --binary` path never did.
 ///
 /// Detached, on purpose, and this is the opposite of how every other verb works. Every other verb is a
 /// supervised child whose output is evidence; this one has to outlive its parent, because the parent
@@ -1463,18 +1373,18 @@ fn watch_deploy_exit(mut child: std::process::Child, capture: PathBuf, started: 
     });
 }
 
-/// Where `scripts/upgrade.sh` is.
+/// Where a shipped script is.
 ///
-/// The default used to be the bare relative path `scripts/upgrade.sh`, checked against the
+/// The default used to be a bare relative path, checked against the
 /// sentinel's own working directory. The sentinel is *detached* - started by `Start-Process`, which
 /// does not inherit the launcher's environment or its cwd - so its cwd is the install directory
 /// (e.g. `%LOCALAPPDATA%\wasm-agent`), which contains no `scripts/`. The check therefore failed on
-/// every upgrade, the audit line was still written, and the operator saw an "upgrade" entry with no
+/// every request, the audit line was still written, and the operator saw an entry with no
 /// swap and no explanation. It happened twice before this was traced.
 ///
-/// Resolution order, so an upgrade works from a detached watcher:
-///   1. the explicit override (`WA_UPGRADE_SCRIPT`, `WA_SENTINEL_DEPLOY`).
-///   2. `scripts/<file>` beside the *installed binary* (the upgrade target's directory) - this
+/// Resolution order, so a request works from a detached watcher:
+///   1. the explicit override (`WA_SENTINEL_DEPLOY`).
+///   2. `scripts/<file>` beside the *installed binary* (the install directory) - this
 ///      is where an install that ships the script puts it.
 ///   3. `scripts/<file>` under the current directory, for a watcher started from a checkout.
 fn resolve_script(file: &str, override_env: &str) -> Result<PathBuf> {
@@ -1512,13 +1422,8 @@ fn resolve_script(file: &str, override_env: &str) -> Result<PathBuf> {
     )
 }
 
-fn resolve_upgrade_script() -> Result<PathBuf> {
-    resolve_script("upgrade.sh", "WA_UPGRADE_SCRIPT")
-}
-
-/// The deploy script, which is a different job from the upgrade script: `upgrade.sh` installs the node
-/// and the UI, while only `deploy.sh` installs a **sentinel**. That distinction is the whole reason the
-/// `deploy` verb exists - without it, a sentinel fix could only be installed by a human at a shell.
+/// The deploy script: the one installer path. It installs the node, the UI and the **sentinel**, so a
+/// sentinel fix can be installed by a request rather than only by a human at a shell.
 fn resolve_deploy_script() -> Result<PathBuf> {
     resolve_script("deploy.sh", "WA_SENTINEL_DEPLOY")
 }
@@ -1526,7 +1431,7 @@ fn resolve_deploy_script() -> Result<PathBuf> {
 /// Verbs that change what the node is running. One at a time: two of these interleaved would fight over
 /// the same binary and the same pid file.
 fn is_management_verb(verb: &str) -> bool {
-    matches!(verb, "restart" | "recover" | "upgrade" | "spell" | "deploy")
+    matches!(verb, "restart" | "recover" | "spell" | "deploy")
 }
 
 /// Verbs that stop or replace the node, which therefore must not start while a turn is running: the run
@@ -1535,7 +1440,7 @@ fn is_management_verb(verb: &str) -> bool {
 /// child deadline turns that deadlock into a kill. Kept as a named predicate so the next verb that
 /// stops the node has somewhere to be right, and `tests` below fail if it is forgotten.
 fn waits_for_idle(verb: &str) -> bool {
-    matches!(verb, "restart" | "upgrade" | "spell" | "deploy")
+    matches!(verb, "restart" | "spell" | "deploy")
 }
 
 fn approved_script(script: &str) -> Result<PathBuf> {
@@ -1591,31 +1496,23 @@ fn perform(request: &Value) -> Result<String> {
     }
     let verb = request.get("verb").and_then(Value::as_str).unwrap_or("");
     let reason = request.get("reason").and_then(Value::as_str).unwrap_or("(no reason given)");
+    // The second installer path is gone: `upgrade` used to run upgrade.sh under a supervised
+    // operation, which killed the node it had just started. Refused by name, before any effect,
+    // wherever a legacy request or a direct caller reaches this function.
+    if verb == "upgrade" {
+        bail!("upgrade_disabled_use_deploy: `upgrade` is retired; `deploy` is the only installer. Request deploy --expected-sha <full main SHA> --owner <owner> --session <session>");
+    }
     match verb {
         "restart" => verb_restart(reason),
         "recover" => verb_recover(reason),
-        "upgrade" => {
-            let session = request.get("session").and_then(Value::as_str).unwrap_or("");
-            let prompt = request.get("prompt").and_then(Value::as_str).unwrap_or("");
-            if session.is_empty() != prompt.is_empty() {
-                bail!("upgrade continuation requires both --session and --prompt");
-            }
-            let detail = verb_upgrade(request.get("binary").and_then(Value::as_str).unwrap_or(""), reason)?;
-            if session.is_empty() {
-                Ok(detail)
-            } else {
-                let wake=verb_wake(session,prompt,reason)?;
-                Ok(format!("{detail}; continuation {wake}"))
-            }
-        },
         "wake" => {
             let session = request.get("session").and_then(Value::as_str).unwrap_or("");
             let prompt = request.get("prompt").and_then(Value::as_str).unwrap_or("");
             // process_requests owns this worker until completion; even `once` cannot lose a spawned wake.
             verb_wake(session,prompt,reason)
         }
-        // The change a plain `upgrade` cannot make: only `deploy.sh` installs a *sentinel*, and this is
-        // how a run asks for one without a human at a shell. Spawned **detached**, because the process
+        // Only `deploy.sh` installs a *sentinel*, and this is how a run asks for one without a human at
+        // a shell. Spawned **detached**, because the process
         // being replaced is the one that would otherwise be its parent - a child of ours would be
         // stopped together with the watcher mid-swap. The idle wait has already happened by the time this
         // runs (`waits_for_idle`), so the script's budget is spent installing rather than waiting.
@@ -1763,17 +1660,6 @@ fn finish_request(claim: &Path, request: &Value) {
     say(&format!("{}: {detail}",if ok {"ok"}else{"failed"}));
 }
 
-/// The newest `upgrade` request in a sorted request box, if any. Only it is performed: an upgrade
-/// installs one binary, so every older upgrade is moot. Superseding them is what stops several
-/// agents' upgrades from running in turn - each stopping and starting the node - while a long turn
-/// keeps the node busy.
-fn newest_upgrade_in(entries: &[PathBuf]) -> Option<PathBuf> {
-    entries.iter()
-        .filter(|p| std::fs::read(p).ok().and_then(|b|serde_json::from_slice::<Value>(&b).ok())
-            .map(|v| v["verb"]=="upgrade").unwrap_or(false))
-        .max().cloned()
-}
-
 /// The deferral announcements already made, so a held request is announced once and not once per tick.
 ///
 /// It is re-announced when the *reason* changes, because "busy" becoming "cannot prove it is idle" is a
@@ -1850,8 +1736,6 @@ fn process_requests(background: bool, held: &mut Held) -> Result<u32> {
             }
         }
     }
-    // The newest upgrade in the box, if any. Only it is performed; every older one is superseded.
-    let newest_upgrade = newest_upgrade_in(&entries);
     for path in entries {
         use std::sync::atomic::Ordering;
         if background && (stop_path().exists() || service_stopping()) {break;}
@@ -1862,35 +1746,32 @@ fn process_requests(background: bool, held: &mut Held) -> Result<u32> {
                 continue; // reserved identity cannot downgrade into any legacy verb
             }
         }
-        // Only the newest upgrade matters. An upgrade installs one binary, so an older request for an
-        // older build is superseded, not queued behind it: without this, several agents' upgrades ran
-        // in turn - each stopping and starting the node, each able to fail and be retried while a long
-        // turn kept the node busy. `deploy` is not coalesced: it carries a session to wake and a reason
-        // that differ per request, so each one is a distinct intent.
-        if preview["verb"]=="upgrade" && newest_upgrade.as_deref()!=Some(path.as_path()) {
-            let claim=sentinel_dir().join("claimed").join(path.file_name().unwrap_or_default());
-            if claim_request(&path,&claim)? {
-                let record=json!({"request":preview,"ok":true,
-                    "detail":"superseded by a newer upgrade request","at":now_epoch()});
-                let target=sentinel_dir().join("done").join(claim.file_name().unwrap_or_default());
-                if wa_operation::atomic_json(&target,&record).is_ok() {let _=std::fs::remove_file(&claim);}
-                queue::observe(&preview, path.file_stem().and_then(|s|s.to_str()).unwrap_or(""), "done", "superseded",
-                    "superseded by a newer upgrade request; nothing was installed for it");
-                audit("upgrade-superseded",&path.display().to_string(),"a newer upgrade request exists");
-                handled+=1;
-            }
-            continue;
-        }
         let verb=preview["verb"].as_str().unwrap_or("");
         // One key per request file, so the announcement below is made once per request and not once per
         // tick - the watcher ticks every 200ms, and a line per tick would bury the log it exists to make
         // readable.
         let key=path.file_name().unwrap_or_default().to_string_lossy().to_string();
         let asked=preview["reason"].as_str().unwrap_or("(no reason given)");
+        // The retired installer is not replayed. Historical upgrade request files are retained exactly
+        // where they are and held by name: no claim, no install, no rewrite, and the reason is visible in
+        // the queue and the log. Deploy is the only installer.
+        if verb=="upgrade" {
+            announce_hold(held,&key,verb,
+                "upgrade_disabled_use_deploy: `upgrade` is retired; request deploy with an exact source SHA",
+                asked);
+            continue;
+        }
         let protocol_id = key.trim_end_matches(".json");
         if preview.get("expected_sha").is_some() {
             if let Err(error)=deploy_protocol::intake(&preview,protocol_id) { audit("intake-problem",protocol_id,&error.to_string());continue; }
-            if !deploy_protocol::ready() {continue;}
+            // A not-ready protocol must be visible: a bare `continue` left the request looking merely
+            // queued, with no reason an operator could act on.
+            if !deploy_protocol::ready() {
+                let why=deploy_protocol::not_ready_reason()
+                    .unwrap_or_else(|| "deploy_protocol_not_ready: readiness refused without a detail".to_string());
+                announce_hold(held,&key,verb,&why,asked);
+                continue;
+            }
         }
         if let Err(error) = deploy_protocol::validate(&preview, protocol_id) {
             deploy_protocol::record(&preview, protocol_id, "rejected", &error.to_string())?;
@@ -1925,8 +1806,8 @@ fn process_requests(background: bool, held: &mut Held) -> Result<u32> {
         // Claim before working, not after. This used to read the request, do the work, and only then
         // remove the file - so a second runner (the watcher and a stray `once`, which is exactly what
         // happened) could pick up the same file while the first was still inside it, and run the
-        // upgrade twice. Two `upgrade` lines appeared in the log for one request, and only the
-        // request record showed it had been performed once. The rename is the claim: it is atomic, so
+        // same maintenance verb twice. Two installer lines appeared in the log for one request, and only
+        // the request record showed it had been performed once. The rename is the claim: it is atomic, so
         // whichever runner calls it first owns the file, and the other sees it gone.
         let claim = sentinel_dir().join("claimed").join(path.file_name().unwrap_or_default());
         if !claim_request(&path, &claim)? {
@@ -1991,7 +1872,7 @@ fn deploy_requests_in(dir: &Path) -> Result<Vec<PathBuf>> {
 /// The verbs `request` accepts - the same set `perform` knows how to carry out. It lives here, next to the
 /// parser, because `request` is what must refuse a verb it does not recognise: a request file whose only
 /// possible outcome is `unknown verb` is durable state created by a question.
-const REQUEST_VERBS: [&str; 7] = ["restart", "recover", "upgrade", "wake", "deploy", "run", "spell"];
+const REQUEST_VERBS: [&str; 6] = ["restart", "recover", "wake", "deploy", "run", "spell"];
 
 fn print_request_help() {
     println!("wa-sentinel request <verb> [options]");
@@ -2001,13 +1882,14 @@ fn print_request_help() {
     }
     println!();
     println!("  --reason <text>                  why, recorded in the audit log");
-    println!("  --session <id> --prompt <text>   wake that session when the request is done (upgrade, deploy, run, wake)");
+    println!("  --session <id> --prompt <text>   wake that session when the request is done (deploy, run, wake)");
     println!("  --expected-sha <full SHA>        deploy protocol: exact published canonical main source");
-    println!("  --binary <path>                  the binary to install (upgrade)");
+    println!("  --owner <user_id>                deploy protocol: the owner /session/owner proves for --session");
     println!("  --script <path>                  the allow-listed script to run (run)");
     println!("  --file <path>                    the exported spell plan (spell)");
     println!("  --if-no-pending                  deploy only: write nothing when a deploy request is already queued");
     println!();
+    println!("`upgrade` is retired: deploy is the only installer, and `request upgrade` is refused by name.");
     println!("Nothing is written for a verb this list does not name, and `request --help` writes nothing at all.");
 }
 
@@ -2024,6 +1906,11 @@ fn request(args: &[String]) -> Result<()> {
     if verb.is_empty() || verb == "help" || verb == "--help" || verb == "-h" {
         print_request_help();
         return Ok(());
+    }
+    // The retired installer is refused by its own name, before any file exists. `unknown request verb`
+    // would hide the migration: the caller must know the replacement, not just that the word is gone.
+    if verb == "upgrade" {
+        bail!("upgrade_disabled_use_deploy: `upgrade` is retired; deploy is the only installer. Request deploy --expected-sha <full main SHA> --owner <owner> --session <session>");
     }
     // ... and neither is a verb this sentinel cannot perform. Refused HERE, by name, before any file
     // exists: a `failed` record is evidence about an effect that was attempted, and no effect is attempted
@@ -2042,7 +1929,7 @@ fn request(args: &[String]) -> Result<()> {
         if args[index]=="--if-no-pending" {dedupe_deploy=true;index+=1;continue;}
         if !args[index].starts_with("--") { bail!("request option must start with --; no request written"); }
         let key = args[index].trim_start_matches("--").to_string();
-        if !["reason","session","owner","prompt","binary","script","file","expected-sha"].contains(&key.as_str()) {
+        if !["reason","session","owner","prompt","script","file","expected-sha"].contains(&key.as_str()) {
             bail!("unknown request option {}; no request written",args[index]);
         }
         if fields.contains_key(&key) { bail!("duplicate request option; no request written"); }
@@ -2891,10 +2778,10 @@ const HELP: &str = r#"wa-sentinel - the process outside the node.
 
   request restart  [--reason TEXT]     (graceful; queued while busy)
   request deploy   [--if-no-pending] [--reason TEXT] (optionally deduplicate deploys)
+  request deploy   --expected-sha FULL_SHA --owner OWNER --session ID [--reason TEXT]
   request recover  [--reason TEXT]     (explicit interruption; never waits for idle)
   job list | history | put <file.json> | enable <id> | disable <id>
   job emit <topic> <stable-event-id> <payload.json>
-  request upgrade  --binary PATH [--session ID --prompt TEXT] [--reason TEXT]
   request wake     --session ID --prompt TEXT [--reason TEXT]
   request run      --script PATH [--reason TEXT]
   request spell    --file PATH [--reason TEXT]
@@ -3120,10 +3007,8 @@ mod self_update_tests {
     }
 
     #[test]
-    fn continuation_requires_both_fields_before_any_upgrade() {
+    fn continuation_requires_both_fields_before_any_effect() {
         for request in [
-            json!({"verb":"upgrade","binary":"not-a-binary","session":"thread"}),
-            json!({"verb":"upgrade","binary":"not-a-binary","prompt":"continue"}),
             // The deploy path has the same rule: half a continuation is a wake nobody can receive.
             json!({"verb":"deploy","session":"thread"}),
             json!({"verb":"deploy","prompt":"continue"}),
@@ -3141,7 +3026,7 @@ mod self_update_tests {
     /// that asked for it to end.
     #[test]
     fn verbs_that_replace_the_node_wait_for_idle_and_are_serialised() {
-        for verb in ["restart", "upgrade", "spell", "deploy"] {
+        for verb in ["restart", "spell", "deploy"] {
             assert!(waits_for_idle(verb), "{verb} must wait for idle");
             assert!(is_management_verb(verb), "{verb} must not run beside another maintenance verb");
         }
@@ -3150,26 +3035,61 @@ mod self_update_tests {
         }
     }
 
-    /// Only the newest upgrade is performed. Superseding the older ones is what turns several
-    /// agents' upgrades from a queue that stops and starts the node once each - and can fail and
-    /// retry - into one swap. A `deploy` is not coalesced: its session and reason are per-request.
+    /// The public request door refuses `upgrade` by name, before a request file exists. The old path
+    /// ran upgrade.sh under a supervised operation; that operation killed the node upgrade.sh had just
+    /// started and recorded a correct install as a failure, so there is nothing here to preserve.
     #[test]
-    fn only_the_newest_upgrade_survives_the_queue() {
-        let dir = std::env::temp_dir().join(format!("wa-coalesce-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("temp dir");
-        let mut entries = Vec::new();
-        for (name, verb) in [("100-a.json", "upgrade"), ("200-b.json", "deploy"), ("300-c.json", "upgrade")] {
-            let path = dir.join(name);
-            std::fs::write(&path, serde_json::to_vec(&json!({"verb": verb})).expect("encode")).expect("write");
-            entries.push(path);
-        }
-        entries.sort();
-        assert_eq!(newest_upgrade_in(&entries), Some(dir.join("300-c.json")),
-            "the newest upgrade is the one performed");
-        assert_eq!(newest_upgrade_in(&[dir.join("200-b.json")]), None,
-            "a box with no upgrade has nothing to coalesce");
-        let _ = std::fs::remove_dir_all(&dir);
+    fn retired_upgrade_request_is_refused_by_name_and_writes_nothing() {
+        let _alone = ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let home = std::env::temp_dir().join(format!("wa-upgrade-retired-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).expect("temp home");
+        let previous_home = std::env::var_os("WASM_AGENT_HOME");
+        let previous_provenance = std::env::var_os("WASM_AGENT_PROVENANCE");
+        std::env::set_var("WASM_AGENT_HOME", &home);
+        std::env::set_var("WASM_AGENT_PROVENANCE", "operator");
+        let error = request(&["upgrade".into(), "--binary".into(), "not-a-binary".into(),
+            "--reason".into(), "fixture".into()]).unwrap_err().to_string();
+        assert!(error.contains("upgrade_disabled_use_deploy"), "{error}");
+        assert_eq!(std::fs::read_dir(sentinel_dir().join("requests")).expect("request box").count(), 0,
+            "a refused upgrade must not write a request");
+        assert!(!sentinel_dir().join("upgrade.log").exists(), "no installer transcript may be written");
+        match previous_home { Some(value)=>std::env::set_var("WASM_AGENT_HOME",value), None=>std::env::remove_var("WASM_AGENT_HOME") }
+        match previous_provenance { Some(value)=>std::env::set_var("WASM_AGENT_PROVENANCE",value), None=>std::env::remove_var("WASM_AGENT_PROVENANCE") }
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// A historical `upgrade` request is retained byte-for-byte and held by name. It is never claimed,
+    /// never moved to failed/done, and never reaches an installer.
+    #[test]
+    fn historical_upgrade_request_is_held_without_replay() {
+        let _alone = ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let home = std::env::temp_dir().join(format!("wa-upgrade-history-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).expect("temp home");
+        let previous_home = std::env::var_os("WASM_AGENT_HOME");
+        std::env::set_var("WASM_AGENT_HOME", &home);
+        let path = sentinel_dir().join("requests").join("100-upgrade.json");
+        let bytes = serde_json::to_vec(&json!({"verb":"upgrade","binary":"not-a-binary",
+            "reason":"historical request"})).expect("encode");
+        std::fs::write(&path, &bytes).expect("request");
+        let mut held = Held::default();
+        assert_eq!(process_requests(false, &mut held).expect("the box is readable"), 0);
+        assert_eq!(std::fs::read(&path).expect("retained request"), bytes,
+            "the historical request must be retained exactly where it was");
+        assert!(!sentinel_dir().join("claimed").join("100-upgrade.json").exists());
+        assert!(!sentinel_dir().join("failed").join("100-upgrade.json").exists());
+        assert!(!sentinel_dir().join("done").join("100-upgrade.json").exists());
+        let queue: Value = serde_json::from_slice(&std::fs::read(
+            sentinel_dir().join("queue").join("100-upgrade.json")).expect("queue record")).expect("queue json");
+        assert_eq!(queue["state"], "waiting");
+        assert_eq!(queue["phase"], "held");
+        assert!(queue["detail"].as_str().unwrap_or("").contains("upgrade_disabled_use_deploy"),
+            "{}", queue["detail"]);
+        let log = std::fs::read_to_string(sentinel_dir().join("sentinel.log")).unwrap_or_default();
+        assert!(log.contains("upgrade_disabled_use_deploy"), "the hold must be audited: {log}");
+        match previous_home { Some(value)=>std::env::set_var("WASM_AGENT_HOME",value), None=>std::env::remove_var("WASM_AGENT_HOME") }
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     /// A deploy request reaches a script and returns without blocking: the script is detached, because
@@ -3477,22 +3397,4 @@ mod reap_tests {
         let _ = child.wait();
     }
 
-    /// The regression: `upgrade` waited on its script forever, holding maintenance mode.
-    #[test]
-    fn a_hung_script_is_killed_at_its_limit() {
-        let _alone=super::ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
-        let root=std::env::temp_dir().join(format!("wa-bounded-upgrade-{}-{}",std::process::id(),super::now_epoch()));
-        let old=std::env::var_os("WASM_AGENT_HOME");std::env::set_var("WASM_AGENT_HOME",&root);
-        #[cfg(windows)] let mut command={let mut c=std::process::Command::new(std::path::PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32/cmd.exe"));c.args(["/C","echo started & ping -n 30 127.0.0.1 >nul"]);c};
-        #[cfg(not(windows))] let mut command={let mut c=std::process::Command::new("sh");c.args(["-c","echo started; sleep 30"]);c};
-        command.current_dir(std::env::temp_dir());
-        let started = std::time::Instant::now();
-        let output = super::run_bounded(command, std::time::Duration::from_secs(1)).expect("run");
-        assert!(started.elapsed() < std::time::Duration::from_secs(5), "killed near the limit");
-        assert!(!output.status.success());
-        assert!(String::from_utf8_lossy(&output.stdout).contains("started"));
-        assert!(String::from_utf8_lossy(&output.stderr).contains("deadline"));
-        match old{Some(v)=>std::env::set_var("WASM_AGENT_HOME",v),None=>std::env::remove_var("WASM_AGENT_HOME")};
-        std::fs::remove_dir_all(root).unwrap();
-    }
 }
