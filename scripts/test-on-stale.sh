@@ -16,17 +16,41 @@ run()  { env -u WA_COORDINATOR_SESSION WA_INSTALL_DIR="$TMP/install" WA_HEALTH_F
 # A non-dry run with its own PATH/owner fixture and a sentinel stub that records its arguments. It never
 # installs anything: the stub only writes the argv it was given.
 run_stale() {
-  env -u WA_COORDINATOR_SESSION \
+  env -u WA_COORDINATOR_SESSION -u WA_JOB_EVENT_FILE \
       WA_INSTALL_DIR="$TMP/install" WA_HEALTH_FILE="$TMP/health.json" WA_STALE_QUIET_S=0 \
       WA_STALE_DRY_RUN=0 WA_STALE_COMPACT=0 WA_SENTINEL_BIN="$TMP/sentinel-stub" \
       PATH="$TMP/bin:$PATH" "$@" bash scripts/on-stale.sh >"$TMP/out" 2>&1
   printf '%s' "$?"
 }
+# Idle-compaction cases: the same clean/idle fixture, but compaction is on and the fake curl records
+# the request body. WA_JOB_EVENT_FILE is passed per case (or deliberately unset) so the event seam is
+# the only thing that varies.
+run_compact() {
+  env -u WA_COORDINATOR_SESSION -u WA_JOB_EVENT_FILE \
+      WA_INSTALL_DIR="$TMP/install" WA_HEALTH_FILE="$TMP/health.json" WA_STALE_QUIET_S=0 \
+      WA_STALE_DRY_RUN=1 WA_STALE_COMPACT=1 PATH="$TMP/bin:$PATH" "$@" \
+      bash scripts/on-stale.sh >"$TMP/out" 2>&1
+  printf '%s' "$?"
+}
 
 mkdir -p "$TMP/install" "$TMP/bin"
-# A fake curl: the script disables idle compaction for these cases, so the only curl is the owner read.
+# A fake curl. The decision cases disable idle compaction, so their only curl is the owner read.
+# A POST is answered with a fixed compaction reply and its body recorded, so the idle-compaction cases
+# can assert what was *sent* without a node. Nothing here reaches the network.
 cat > "$TMP/bin/curl" <<EOF
 #!/usr/bin/env bash
+for arg in "\$@"; do
+  case "\$arg" in
+    -X) : ;;
+    POST) post=1 ;;
+  esac
+done
+prev=""
+for arg in "\$@"; do
+  if [ "\$prev" = "-d" ]; then printf '%s' "\$arg" > "$TMP/compact-body"; fi
+  prev="\$arg"
+done
+if [ -n "\${post:-}" ]; then cat "$TMP/compact-reply.json" 2>/dev/null; exit 0; fi
 cat "$TMP/owner.json" 2>/dev/null
 EOF
 # The sentinel stub records the request argv; it is never a real installer.
@@ -129,6 +153,77 @@ args="$(cat "$TMP/request-args" 2>/dev/null)"
 
 # 10. the observer is event-triggered, not a 30-second schedule.
 grep -q '"topic": "node.run_finished"' jobs/on-stale.json   && ok "onStale is triggered by a main-run completion event"   || bad "onStale job trigger is not node.run_finished: $(cat jobs/on-stale.json)"
+
+# 11-14. The idle compaction targets the session the event names, not the newest main session.
+# The event seam is the whole point: with several main threads, "newest on this node" is another
+# thread, so these cases assert the request body, and that a malformed event posts nothing at all.
+printf '{"node_state":{"state":"idle","busy_threads":0,"subagents_running":0,"subagents_queued":0,"queue":0}}' > "$TMP/health.json"
+printf 'commit=%s\nsha256=x\n' "$head8" > "$TMP/install/installed.txt"
+printf '{"ok":true,"compacted":false,"percent":12.5}\n' > "$TMP/compact-reply.json"
+rm -f "$TMP/install/on-stale-state.json"
+
+event_session='70963391-e2ff-44ed-8187-00cc77afcddc'
+printf '{"session":"%s","run_id":41,"at":1792780000}\n' "$event_session" > "$TMP/event-good.json"
+rm -f "$TMP/compact-body"
+rc="$(run_compact WA_JOB_EVENT_FILE="$TMP/event-good.json")"
+posted="$(cat "$TMP/compact-body" 2>/dev/null)"
+[ "$rc" = 0 ] && [ -e "$TMP/compact-body" ] \
+  && grep -Fq "\"session_id\":\"$event_session\"" "$TMP/compact-body" \
+  && grep -Fq '"min_percent":40' "$TMP/compact-body" \
+  && grep -q "targeted at the event session $event_session" "$TMP/out" \
+  && grep -q 'idle compaction' "$TMP/out" \
+  && ok "the event's own session id is forwarded to /compact with the 40 threshold ($rc)" \
+  || bad "event-targeted compact: rc=$rc body=$posted out=$(cat "$TMP/out")"
+
+# 12. serde writes the event's keys sorted, so the id must not depend on "session" coming first.
+printf '{"at":1792780000,"run_id":7,"session":"%s"}\n' "$event_session" > "$TMP/event-sorted.json"
+rm -f "$TMP/compact-body"
+rc="$(run_compact WA_JOB_EVENT_FILE="$TMP/event-sorted.json")"
+[ "$rc" = 0 ] && grep -Fq "\"session_id\":\"$event_session\"" "$TMP/compact-body" \
+  && ok "a reordered event payload still names its session ($rc)" \
+  || bad "sorted event: rc=$rc body=$(cat "$TMP/compact-body" 2>/dev/null) out=$(cat "$TMP/out")"
+
+# 13. An event with no top-level session id is NOT a reason to let the route pick the newest
+#     session: skip, and say which event could not be trusted. The unrelated staleness check still runs.
+printf '{"run_id":9,"at":1792780000}\n' > "$TMP/event-missing.json"
+rm -f "$TMP/compact-body"
+rc="$(run_compact WA_JOB_EVENT_FILE="$TMP/event-missing.json")"
+[ "$rc" = 0 ] && [ ! -e "$TMP/compact-body" ] \
+  && grep -q 'MALFORMED EVENT' "$TMP/out" && grep -q "$TMP/event-missing.json" "$TMP/out" \
+  && grep -q 'nothing to do' "$TMP/out" \
+  && ok "a missing event session skips /compact visibly and the stale observation still runs ($rc)" \
+  || bad "missing session: rc=$rc body=$(cat "$TMP/compact-body" 2>/dev/null) out=$(cat "$TMP/out")"
+
+# 14. Event text is data: an id outside the safe set is refused for the request, not interpolated.
+printf '{"session":"bad id; touch %s/pwned","run_id":9,"at":1792780000}\n' "$TMP" > "$TMP/event-hostile.json"
+rm -f "$TMP/compact-body" "$TMP/pwned"
+rc="$(run_compact WA_JOB_EVENT_FILE="$TMP/event-hostile.json")"
+[ "$rc" = 0 ] && [ ! -e "$TMP/compact-body" ] && [ ! -e "$TMP/pwned" ] \
+  && grep -q 'MALFORMED EVENT' "$TMP/out" && grep -q 'safe id set' "$TMP/out" \
+  && ok "an unsafe event session id is refused and never executed ($rc)" \
+  || bad "hostile session: rc=$rc body=$(cat "$TMP/compact-body" 2>/dev/null) out=$(cat "$TMP/out")"
+
+# 15. No event file (a manual/direct run) keeps the route's latest-main selection, and the log says
+#     that is a fallback rather than event targeting.
+rm -f "$TMP/compact-body"
+rc="$(run_compact)"
+[ "$rc" = 0 ] && grep -Fq '{"min_percent":40}' "$TMP/compact-body" \
+  && ! grep -q 'session_id' "$TMP/compact-body" \
+  && grep -q 'latest-main fallback' "$TMP/out" && grep -q 'not event-targeted' "$TMP/out" \
+  && ok "a manual run keeps the documented latest-main fallback and says so ($rc)" \
+  || bad "manual fallback: rc=$rc body=$(cat "$TMP/compact-body" 2>/dev/null) out=$(cat "$TMP/out")"
+
+# 16. The hook inventory must describe the event path truthfully: the event session is used, with
+#     the manual fallback, and never the old "latest main session only" claim. Also a shell syntax check.
+bash -n scripts/on-stale.sh && bash -n scripts/test-on-stale.sh && ok "on-stale and its test parse as shell" || bad "bash -n failed for on-stale/test-on-stale"
+! grep -q 'latest main session only' lua/core/hook_events.lua && grep -q 'event.*session' lua/core/hook_events.lua \
+  && grep -q 'latest-main fallback' lua/core/hook_events.lua \
+  && ok "the hook inventory names the event session and the manual fallback" \
+  || bad "hook inventory still claims latest-main-only: $(grep -n 'run_finished' -A 3 lua/core/hook_events.lua | head -8)"
+! grep -q 'summarizes the latest main session' docs/CONTEXT-COMPACTION.md \
+  && grep -q 'session_id' docs/CONTEXT-COMPACTION.md \
+  && ok "the compaction doc no longer claims the idle path only takes the latest session" \
+  || bad "docs/CONTEXT-COMPACTION.md still claims latest-main-only selection"
 
 printf '\n%s checks, %s failed\n' "$checks" "$fail"
 [ "$fail" -eq 0 ] && { printf 'ok onStale decision\n'; exit 0; }
