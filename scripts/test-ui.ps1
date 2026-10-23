@@ -3963,6 +3963,84 @@ $harness = @'
   reloadedPane.remove();attachPane.remove();window.__restorePaneReaderForAttach();window.fetch=attachFetch;
   Date.now=attachDateNow;
 
+  // CONTEXT COMPACTION IS VISIBLE. A compaction rewrites the provider prefix; the reader used to see
+  // nothing because the summary row only applied run counts. The topic must be rebuilt from the stored
+  // row (the idle /compact route and a reload both arrive this way) and drawn by the live `compact`
+  // event, with the trace's own numbers and the row's clock in the browser's local time.
+  var savedCompactionSession = window.__fixtures.session;
+  var savedCompactionSessions = window.__fixtures.sessions;
+  var compactionThread = window.__chatThread() || "aaaaaaaa-0000-0000-0000-000000000001";
+  var compactionAt = Math.floor(Date.now() / 1000) - 3600;
+  var standaloneAt = compactionAt + 60;
+  window.__fixtures.sessions = { sessions: [ { id: compactionThread, title: "compaction proof", mode: "chat", message_count: 6, updated_at: standaloneAt, state: "answered", state_detail: "the last message is a reply" } ] };
+  window.__fixtures.session = {
+    session: { id: compactionThread, title: "compaction proof" },
+    state: { state: "answered", detail: "the last message is a reply" },
+    messages: [
+      { seq: 1, role: "user", content: "COMPACTION-QUESTION", created_at: compactionAt - 10, ok: 1, tool_calls: [] },
+      { seq: 2, role: "assistant", content: "COMPACTION-BEFORE", created_at: compactionAt - 9, ok: 1, tool_calls: [] },
+      // Mid-run: the run bubble is current, so the topic belongs in it.
+      { seq: 3, role: "summary", content: "checkpoint", created_at: compactionAt, ok: 1, tool_calls: [],
+        trace: [ { kind: "compact", tokens_before: 127473, tokens_after: 21430, messages: 83,
+          summarized_until: 1676, summary_model: "minimax-m3.1-flash" } ] },
+      { seq: 4, role: "user", content: "COMPACTION-QUESTION-2", created_at: standaloneAt - 10, ok: 1, tool_calls: [] },
+      // Between runs: no run bubble is current, so this is a standalone notice, not part of a turn.
+      { seq: 5, role: "summary", content: "checkpoint", created_at: standaloneAt, ok: 1, tool_calls: [],
+        trace: [ { kind: "compact", tokens_before: 5000, tokens_after: 900, messages: 4,
+          summarized_until: 4, summary_model: "fixture-summary-model" } ] },
+      { seq: 6, role: "assistant", content: "COMPACTION-ANSWER", created_at: standaloneAt + 1, ok: 1, tool_calls: [] },
+    ],
+  };
+  window.__setBusy(false);
+  await window.__restoreSession();
+  for (var cp = 0; cp < 30; cp++) { await tick(); }
+  var compactionTopics = document.querySelectorAll("wa-compaction");
+  check(compactionTopics.length === 2,
+    "a stored role=summary row with a compact trace must draw a visible compaction topic, saw " + compactionTopics.length);
+  var bubbleCompaction = document.querySelector("wa-message.assistant wa-compaction");
+  var standaloneCompaction = document.querySelector("#messages > wa-compaction");
+  check(!!bubbleCompaction && !!standaloneCompaction,
+    "one topic in the run bubble it compacted, one standalone where no run bubble was current, saw bubble=" + !!bubbleCompaction + " standalone=" + !!standaloneCompaction);
+  check(!!bubbleCompaction && bubbleCompaction.textContent.indexOf("Context compacted") >= 0,
+    "the compaction topic must be labelled, saw: " + (bubbleCompaction ? bubbleCompaction.textContent.slice(0, 80) : "nothing"));
+  check(!!bubbleCompaction && bubbleCompaction.textContent.indexOf("127,473 → 21,430 tokens") >= 0,
+    "and show the trace's tokens before → after, saw: " + (bubbleCompaction ? bubbleCompaction.textContent.slice(0, 120) : "nothing"));
+  check(!!bubbleCompaction && /83 messages summarized through seq 1676/.test(bubbleCompaction.textContent),
+    "and how many messages were summarized through which seq, saw: " + (bubbleCompaction ? bubbleCompaction.textContent.slice(0, 160) : "nothing"));
+  check(!!bubbleCompaction && /original transcript is retained/i.test(bubbleCompaction.textContent) && /provider context was rebuilt from the summary/i.test(bubbleCompaction.textContent),
+    "and say the original transcript is retained and the provider context was rebuilt, saw: " + (bubbleCompaction ? bubbleCompaction.textContent.slice(0, 220) : "nothing"));
+  check(!!bubbleCompaction && bubbleCompaction.textContent.indexOf("minimax-m3.1-flash") >= 0,
+    "and name the summary model, saw: " + (bubbleCompaction ? bubbleCompaction.textContent.slice(0, 220) : "nothing"));
+  check(!!bubbleCompaction && bubbleCompaction.textContent.indexOf(new Date(compactionAt * 1000).toLocaleString()) >= 0,
+    "and show the row's created_at in the browser's local time, saw: " + (bubbleCompaction ? bubbleCompaction.textContent.slice(0, 220) : "nothing"));
+  check(!!bubbleCompaction && bubbleCompaction.open === true && bubbleCompaction.body && !bubbleCompaction.body.hidden,
+    "the compaction fact must be open where it lands, not hidden behind a collapsed topic");
+  check(!!standaloneCompaction && /4 messages summarized through seq 4/.test(standaloneCompaction.textContent) && standaloneCompaction.textContent.indexOf(new Date(standaloneAt * 1000).toLocaleString()) >= 0,
+    "the between-runs notice must carry its own row's facts and clock, saw: " + (standaloneCompaction ? standaloneCompaction.textContent.slice(0, 200) : "nothing"));
+
+  // The live `compact` event: same topic, in the current run bubble, updating rather than stacking.
+  window.__repaintMessages([]);
+  var liveCompactionAt = Math.floor(Date.now() / 1000) - 30;
+  window.handleEvent({ type: "compact", through: 1677, tokens_before: 9000, tokens_after: 1200,
+    messages: 7, summary_model: "live-model", created_at: liveCompactionAt });
+  var liveCompaction = document.querySelector("wa-message.assistant wa-compaction");
+  check(!!liveCompaction && liveCompaction.textContent.indexOf("Context compacted") >= 0 && liveCompaction.textContent.indexOf("9,000 → 1,200 tokens") >= 0,
+    "a live compact event must draw the topic in the current run bubble, saw: " + (liveCompaction ? liveCompaction.textContent.slice(0, 120) : "nothing"));
+  check(!!liveCompaction && /7 messages summarized through seq 1677/.test(liveCompaction.textContent) && liveCompaction.textContent.indexOf("live-model") >= 0 && liveCompaction.textContent.indexOf(new Date(liveCompactionAt * 1000).toLocaleString()) >= 0,
+    "and carry the live messages, model and recorded time, saw: " + (liveCompaction ? liveCompaction.textContent.slice(0, 220) : "nothing"));
+  window.handleEvent({ type: "compact", through: 1677, tokens_before: 9000, tokens_after: 1100,
+    messages: 7, summary_model: "live-model", created_at: liveCompactionAt });
+  check(document.querySelectorAll("wa-message.assistant wa-compaction").length === 1 &&
+    document.querySelector("wa-message.assistant wa-compaction").textContent.indexOf("9,000 → 1,100 tokens") >= 0,
+    "a repeated compact event must update its topic instead of stacking another");
+  window.handleEvent({ type: "compact", through: 1678, tokens_before: 100 });
+  var partialCompaction = Array.from(document.querySelectorAll("wa-compaction")).find(function (node) { return node.dataset.compactionKey === "through:1678"; });
+  check(!!partialCompaction && partialCompaction.textContent.indexOf("100 → unknown tokens") >= 0 && /message count is unknown/.test(partialCompaction.textContent) && partialCompaction.textContent.indexOf("Summary model: unknown") >= 0,
+    "an absent trace value must say unknown rather than invent a zero, saw: " + (partialCompaction ? partialCompaction.textContent.slice(0, 220) : "nothing"));
+  window.__fixtures.session = savedCompactionSession;
+  window.__fixtures.sessions = savedCompactionSessions;
+  window.__repaintMessages([]);
+
   // THE `inspect` MENU ITEM. The main window draws its own right-click menu, and the inspector is asked for
   // immediately after `Reload window`. Its action asks the shell for ONE named view: the name is what the
   // shell keys a view by, so a second invocation reuses the window that is already open instead of stacking

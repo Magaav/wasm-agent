@@ -877,6 +877,25 @@ function renderSteering(fact) {
   keepStatusLast();pin();
 }
 
+// A compaction is a fact about the conversation, not a step of the run. It is drawn where it happened -
+// the current run bubble live, the bubble the summary row followed on replay - and it is never folded
+// into the run topic: a collapsed run topic would hide the one visible record of a prefix rewrite. A
+// summary row that follows a user turn has no run bubble to belong to (a run can compact before its
+// first assistant row, and the idle /compact route starts that way), so it is a standalone notice in
+// the transcript rather than a turn the reader never took.
+function renderCompaction(fact, host) {
+  const key=compactionTopicKey(fact);
+  let topic=Array.from(transcript.querySelectorAll('wa-compaction')).find(node=>node.dataset.compactionKey===key);
+  if(!topic) {
+    topic=document.createElement('wa-compaction');
+    if(host===transcript) topic.dataset.standalone='true';
+    host.append(topic);
+  }
+  topic.update(fact);
+  keepStatusLast();pin();
+  return topic;
+}
+
 // ONE stats line, one glyph vocabulary, one joiner.
 //
 // The footer under a finished answer and a live child row's third line are the same line over the
@@ -1372,7 +1391,7 @@ function beginReasoningRound() {
 // event arrives, so the last one in document order is where the next step belongs. Document order and
 // not the bubble's direct children, because the answer's fold nests the earlier steps inside the run
 // topic while a step that arrives after the fold is still a direct child of the bubble.
-const RUN_TOPIC_SELECTOR = "wa-trace, wa-reasoning, wa-commentary, wa-retry, wa-summary, wa-steering, .seg";
+const RUN_TOPIC_SELECTOR = "wa-trace, wa-reasoning, wa-commentary, wa-retry, wa-summary, wa-steering, wa-compaction, .seg";
 function lastRunTopic(root) {
   // A prepainted step placeholder is not a topic (see `beginStepPlaceholder`): the step that is still
   // waiting for its topic must not become the anchor its own topic is inserted after.
@@ -2566,8 +2585,12 @@ function collapseRun(finalStart = false, settled = false, answered = true) {
   // in the bubble, so a commentary that resolves mid-run does not drag the tool calls it followed
   // into a topic the reader cannot see.
   const folding = !!answer || settled || finalStart;
+  // A COMPACTION IS NOT A STEP. It reports a conversation-level rewrite, not work this run performed,
+  // and the run topic closes as soon as the answer lands - folding it in would hide the one visible
+  // record of the rewrite behind a collapsed topic. It stays a direct child of the bubble.
   const moves = Array.prototype.filter.call(body.children,
-    (c) => c !== answer && c !== existing && !c.classList.contains('chat-content-run-status') &&
+    (c) => c !== answer && c !== existing && c.tagName !== 'WA-COMPACTION' &&
+      !c.classList.contains('chat-content-run-status') &&
       (folding || (c.tagName !== 'WA-DIFF' && c.tagName !== 'WA-COMMENTARY' &&
         !(c.tagName==='WA-STEERING'&&c.dataset.state==='queued'))));
   const traces = moves.filter((c) => c.tagName === "WA-TRACE");
@@ -2765,6 +2788,10 @@ function handleEvent(event) {
     applyRunCounts(event.counts);
   } else if (event.type === 'steering') {
     renderSteering(event);
+  } else if (event.type === 'compact') {
+    // The rewrite the run just performed: the provider context was rebuilt from the summary and the
+    // original transcript is still in the ledger. It belongs to the run that compacted, in its bubble.
+    renderCompaction(event, currentBubble().body);
   } else if (event.type === "checkpoint") {
     if (runStepState && !runStepState.userSeq && !trace) runStepState.userSeq = Number(event.seq) || null;
   } else if (event.type === "node") {
@@ -3326,7 +3353,7 @@ function repaintMessages(rows, options = {}) {
   const savedSteps = runStepState?.scope === runStepScope() ? runStepState : null;
   const savedCounts = runCounts?.scope === runStepScope() ? runCounts : null;
   const savedSteering=Array.from(runBubble?.querySelectorAll('wa-steering')||[]).filter(node=>node.fact?.state==='queued').map(node=>({node,fact:node.fact}));
-  const topicChoices=Array.from(transcript.querySelectorAll('wa-summary,wa-steering')).map(node=>({id:node.dataset.summaryId||node.dataset.steeringId,open:node.open}));
+  const topicChoices=Array.from(transcript.querySelectorAll('wa-summary,wa-steering,wa-compaction')).map(node=>({id:node.dataset.summaryId||node.dataset.steeringId||node.dataset.compactionKey,open:node.open}));
   const commentaryChoices=Array.from(transcript.querySelectorAll('wa-commentary')).map(node=>({id:node.dataset.messageId,pending:node.dataset.pendingId,text:node.body.textContent,open:node.open}));
   // A TOOL/DECISION TOPIC IS CREATED COLLAPSED NOW, so an open state it carries is the reader's own
   // choice (or the one failed-call opening): a repaint that rebuilt it collapsed would overrule the
@@ -3413,7 +3440,13 @@ function repaintMessages(rows, options = {}) {
         replayRunTools = false;
         for (const item of message.trace || []) if (item.kind === 'run_counts') applyRunCounts(item);
       } else if (message.role === "summary") {
-        for (const item of message.trace || []) if (item.kind === 'run_counts') applyRunCounts(item);
+        for (const item of message.trace || []) {
+          if (item.kind === 'run_counts') applyRunCounts(item);
+          // The idle /compact route and a reload both arrive as this stored row: draw the same topic
+          // the live `compact` event drew, from the trace, with the row's own clock. A row between
+          // runs has no bubble to belong to, so it is a standalone notice rather than a turn.
+          else if (item.kind === 'compact') renderCompaction({...item, created_at: message.created_at}, runBubble?.body || transcript);
+        }
       } else if (message.role === "retry") {
         const event=JSON.parse(message.content || '{}');
         if(event.type!=='retry')throw Error('invalid retry ledger row');
@@ -3549,8 +3582,8 @@ function repaintMessages(rows, options = {}) {
     const existing=runBubble?.querySelector('wa-steering[data-steering-id="'+CSS.escape(item.fact.id)+'"]');
     if(!existing){currentBubble().body.append(item.node);keepStatusLast();}
   }
-  for(const node of transcript.querySelectorAll('wa-summary,wa-steering')) {
-    const choice=topicChoices.find(old=>old.id===(node.dataset.summaryId||node.dataset.steeringId));if(choice)node.open=choice.open;
+  for(const node of transcript.querySelectorAll('wa-summary,wa-steering,wa-compaction')) {
+    const choice=topicChoices.find(old=>old.id===(node.dataset.summaryId||node.dataset.steeringId||node.dataset.compactionKey));if(choice)node.open=choice.open;
   }
   for(const node of transcript.querySelectorAll('wa-commentary')) {
     const choice=commentaryChoices.find(old=>old.id&&old.id===node.dataset.messageId || old.pending&&old.pending===node.dataset.pendingId || !old.id&&!node.dataset.messageId&&old.text===node.body.textContent);
