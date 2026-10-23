@@ -1611,20 +1611,17 @@ function M:run_body(text, images)
     -- replayed with exponential backoff. A stream that ended early *after* visible text or with tool
     -- calls is not: that text already reached the reader, and partial tool calls never run.
     -- An empty reply that is not an output-limit stop (nothing visible, no tool call, finished
-    -- normally) is also asked again, once: it is usually an upstream hiccup, not the model's answer.
-    local empty_retried = false
+    -- normally) is its own bucket with its own default-on, short budget (`provider.empty_reply_retries`).
+    -- It used to ride the OPT-IN transient budget, which defaults to 0: measured in session
+    -- 8497eecc-6084-4ffe-a65f-d04c550522bb, a `finish_reason=stop` reply with no text and no tool
+    -- call ended the run with `empty_reply` on the first attempt and never asked again.
     local function retryable(value)
-      if ok then
-        if type(value) ~= "table" or provider.visible_text(value.content) ~= "" or
-            provider.visible_text(value.commentary)~='' or tostring(value.reasoning or '')~='' or
-            #(value.reasoning_items or {})>0 or #(value.tool_calls or {}) > 0 then
-          return false
-        end
-        if value.stream_complete == false then return true end
-        if value.finish_reason ~= "length" and not empty_retried then empty_retried = true return true end
-        return false
-      end
-      return provider.is_transient(tostring(value))
+      if not ok then return provider.is_transient(tostring(value)) end
+      if type(value) ~= "table" then return false end
+      -- An interrupted stream (`stream_complete=false`) is the lost-stream case below, which has
+      -- its own patient budget; it must not also consume this short empty-reply budget.
+      if value.stream_complete == false then return true end
+      return provider.is_empty_reply(value)
     end
     -- A dropped LOCAL link is retried by default, with a visible wait budget, instead of failing
     -- the run: the request produced no answer and the network is expected to return. Every other
@@ -1641,8 +1638,13 @@ function M:run_body(text, images)
     -- The ambiguous failures keep the opt-in budget above; a terminal quota refusal is excluded by
     -- `is_rate_limited` and keeps its landed outcome.
     local rate_limited = (not ok) and provider.is_rate_limited(tostring(result))
+    -- An empty stop (a reply with no text, no reasoning and no tool call) is its own bucket: it is
+    -- not an ambiguous transport failure, it is the turn failing to produce anything at all, and it
+    -- is default-on with a short budget so a hiccup costs a second and not a run.
+    local empty_reply = provider.is_empty_reply(result)
     local transient_limit = connection_lost and provider.connection_retries()
       or rate_limited and provider.rate_limit_retries()
+      or empty_reply and provider.empty_reply_retries()
       or provider.transient_retries()
     local transient_attempt, waited_ms = 0, 0
     local wait_budget_ms = connection_lost and (provider.connection_wait_seconds() * 1000) or nil
@@ -1651,6 +1653,7 @@ function M:run_body(text, images)
       local retry_after = (not ok) and provider.retry_after_ms(result) or nil
       local wait_ms = connection_lost and provider.connection_backoff_ms(transient_attempt)
         or rate_limited and provider.rate_limit_backoff_ms(transient_attempt, retry_after)
+        or empty_reply and provider.empty_reply_backoff_ms(transient_attempt)
         or math.floor((2 ^ transient_attempt) * 1000 * (0.75 + math.random() * 0.5))
       if wait_budget_ms and waited_ms + wait_ms > wait_budget_ms then break end
       waited_ms = waited_ms + wait_ms
@@ -1662,12 +1665,16 @@ function M:run_body(text, images)
         or rate_limited and string.format("provider refused the request (%s) - retrying in %ds (%d/%d)%s",
           reason, math.floor(wait_ms / 1000), transient_attempt, transient_limit,
           retry_after and " as the provider asked" or "")
+        or empty_reply and string.format(
+          "the provider returned an empty message (%s) - asking again in %dms (%d/%d)",
+          reason, wait_ms, transient_attempt, transient_limit)
         or string.format("provider unavailable (%s) - retrying in %ds (%d/%d)",
           reason, math.floor(wait_ms / 1000), transient_attempt, transient_limit) })
       telemetry.event(self.session_id,self.run_id,"","provider_retry","attempt",{
         reason=reason,attempt=transient_attempt,limit=transient_limit,wait_ms=wait_ms,
         connection_lost=connection_lost and true or false,
-        rate_limited=rate_limited and true or false,retry_after_ms=retry_after,
+        rate_limited=rate_limited and true or false,empty_reply=empty_reply and true or false,
+        retry_after_ms=retry_after,
         context_estimate=context_tokens})
       local waited, stop = 0, nil
       while waited < wait_ms do
@@ -1689,6 +1696,14 @@ function M:run_body(text, images)
         end
       end
       if not ok and provider.is_rate_limited(tostring(result)) then rate_limited = true end
+      -- The bucket follows the reply, not only the first attempt's outcome: a transient failure
+      -- that is answered with an empty stop still gets the empty-reply budget instead of dying on
+      -- the opt-in transient one (which defaults to 0).
+      if ok and provider.is_empty_reply(result) and not empty_reply
+          and transient_limit < provider.empty_reply_retries() then
+        empty_reply = true
+        transient_limit = provider.empty_reply_retries()
+      end
     end
     -- A provider 400/413 on a request at/near the window is a context overflow even when
     -- the body says nothing - this deployment answers a too-large request with a bare
@@ -1911,6 +1926,14 @@ function M:run_body(text, images)
       -- limits do not eliminate this failure; detect it even with Pi-style caps.
       if provider.visible_text(reply) == "" then
         local reason = provider.empty_reply_reason(result)
+        -- Say how hard we tried. Without this the reader sees the same sentence whether the turn
+        -- gave up immediately or asked the provider twice more, and the second case is a different
+        -- diagnosis (the provider keeps returning nothing, not that it hiccupped once).
+        if transient_attempt > 0 then
+          reason = reason .. string.format("; %d retr%s of the same turn also returned nothing, " ..
+            "so the turn is failed rather than finished empty",
+            transient_attempt, transient_attempt == 1 and "y" or "ies")
+        end
         local span = trace[#trace]
         if type(span) == "table" and span.kind == "model_call" then
           span.ok = false

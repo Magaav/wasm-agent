@@ -1106,6 +1106,69 @@ function M.is_lost_stream(value)
   return true
 end
 
+-- The one predicate the retry loop and the failure message agree on: a reply that carries nothing
+-- a reader can use, that was neither cut off (`length`) nor interrupted (`stream_complete=false` -
+-- those keep their own handling), and that asked for no tool. Commentary is read item by item: a
+-- table of items must not be stringified into `table: 0x...` and counted as content.
+function M.is_empty_reply(value)
+  if type(value) ~= "table" then return false end
+  if value.stream_complete == false then return false end
+  if value.finish_reason == "length" then return false end
+  if M.visible_text(value.content) ~= "" then return false end
+  local commentary = value.commentary
+  if type(commentary) == "table" then
+    for _, item in ipairs(commentary) do
+      local text = type(item) == "string" and item
+        or type(item) == "table" and (item.content or item.text) or ""
+      if M.visible_text(text) ~= "" then return false end
+    end
+  elseif M.visible_text(commentary) ~= "" then
+    return false
+  end
+  if tostring(value.reasoning or "") ~= "" or #(value.reasoning_items or {}) > 0 then return false end
+  if #(value.tool_calls or {}) > 0 then return false end
+  return true
+end
+
+-- An EMPTY STOP is the provider finishing a turn with nothing in it: `finish_reason=stop`, no text,
+-- no reasoning, no tool call. That is not a decision the model made and not an answer a reader can
+-- use - it is the turn failing to produce one, usually at the provider's edge. The agent used to
+-- re-ask it at most once and only inside the opt-in transient budget, which defaults to 0, so in
+-- practice the run died on the first empty stop: measured in session
+-- 8497eecc-6084-4ffe-a65f-d04c550522bb, a `finish_reason=stop` reply with 59 output tokens and 0
+-- answer bytes ended the run with `empty_reply` and no retry at all.
+--
+-- Unlike the ambiguous transport buckets above, an empty stop returned nothing: no tool call can
+-- have run and no visible text was replaced, so asking again cannot duplicate a side effect or
+-- swallow a stream. It does cost a second inference, so the budget is small and bounded.
+function M.empty_reply_retries()
+  local raw = env("WASM_AGENT_PROVIDER_EMPTY_RETRIES")
+  if raw == nil or trim(raw) == "" then
+    -- `WASM_AGENT_PROVIDER_RETRIES=0` stays the documented off-switch for every provider retry.
+    local off = env("WASM_AGENT_PROVIDER_RETRIES")
+    if off ~= nil and trim(off) == "0" then return 0 end
+    return 2
+  end
+  local count = tonumber(raw)
+  if not count then return 2 end
+  return math.max(0, math.min(4, math.floor(count)))
+end
+
+-- Short on purpose: an empty stop is a hiccup, and the reader is waiting for the turn to continue.
+function M.empty_reply_delay_ms()
+  local ms = tonumber(env("WASM_AGENT_PROVIDER_EMPTY_DELAY_MS") or "")
+  if not ms then return 500 end
+  return math.max(0, math.min(30000, math.floor(ms)))
+end
+
+-- 0.5 s then 1 s (jittered, capped at 5 s): both attempts land inside a couple of seconds.
+function M.empty_reply_backoff_ms(attempt)
+  local base = M.empty_reply_delay_ms()
+  if base == 0 then return 0 end
+  local delay = math.min(5000, base * 2 ^ math.max(0, (tonumber(attempt) or 1) - 1))
+  return math.floor(delay * (0.75 + math.random() * 0.5))
+end
+
 -- Attempts, and the total time we are willing to spend waiting for the link.
 function M.connection_retries()
   local count = tonumber(env("WASM_AGENT_PROVIDER_CONNECT_RETRIES") or "")
