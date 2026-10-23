@@ -46,6 +46,10 @@ static STALL_LOGGED_MS: AtomicU64 = AtomicU64::new(0);
 static IN_FLIGHT: Mutex<Option<(String, u64)>> = Mutex::new(None);
 /// Requests waiting for the node-thread. Housekeeping waits until this is zero.
 static QUEUED: AtomicUsize = AtomicUsize::new(0);
+/// One idle-only compaction at a time. A run admission and `/compact` take this gate before
+/// deciding, so a run cannot slip between "the node is idle" and the compaction call.
+static COMPACT_GATE: Mutex<()> = Mutex::new(());
+static COMPACT_ACTIVE: AtomicBool = AtomicBool::new(false);
 // A non-run request reserves its destination before enqueue. Busy labels alone
 // leave a gap between selection and dequeue, admitting a burst behind one read.
 static READ_RESERVED: OnceLock<Vec<AtomicBool>> = OnceLock::new();
@@ -917,19 +921,66 @@ fn compact_admission(busy: bool) -> Option<Reply> {
     busy.then(|| (200, "application/json", COMPACT_BUSY_BODY.to_vec()))
 }
 
-fn compact_busy_from(runs: &[(String, u64, scheduler::RunState)], subagents: &serde_json::Value) -> bool {
-    if runs.iter().any(|(_, _, state)| compact_blocks_on(*state)) {
-        return true;
-    }
-    let queued = subagents.get("queued").and_then(|value| value.as_u64()).unwrap_or(0);
-    let running = subagents.get("running").and_then(|value| value.as_u64()).unwrap_or(0);
-    let active = subagents.get("active").and_then(|value| value.as_u64()).unwrap_or(queued + running);
-    active > 0
+/// Subagents are deliberately excluded: compaction only ever selects the latest main session,
+/// and a working child is not a reason to leave that session above 40%.
+fn compact_busy_from(runs: &[(String, u64, scheduler::RunState)]) -> bool {
+    runs.iter().any(|(_, _, state)| compact_blocks_on(*state))
 }
 
 fn compact_is_busy() -> bool {
     let runs = scheduler::global().map(|scheduler| scheduler.run_ids()).unwrap_or_default();
-    compact_busy_from(&runs, &crate::subagents::health())
+    compact_busy_from(&runs)
+}
+
+/// Take the maintenance gate for a run admission. If a compaction owns it, wait for the
+/// compaction to finish rather than starting a run under it.
+fn compact_gate_for_run(deadline: std::time::Instant) -> Option<std::sync::MutexGuard<'static, ()>> {
+    loop {
+        let guard = match COMPACT_GATE.lock() {
+            Ok(guard) => guard,
+            Err(poison) => poison.into_inner(),
+        };
+        if !COMPACT_ACTIVE.load(Ordering::SeqCst) {
+            return Some(guard);
+        }
+        drop(guard);
+        if std::time::Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
+/// Reserve compaction while holding the same gate a run admission takes. A run cannot begin
+/// between the busy check and the reservation; a later run waits for `compact_end`.
+fn compact_begin() -> bool {
+    let _guard = match COMPACT_GATE.lock() {
+        Ok(guard) => guard,
+        Err(poison) => poison.into_inner(),
+    };
+    if COMPACT_ACTIVE.load(Ordering::SeqCst) || compact_is_busy() {
+        return false;
+    }
+    COMPACT_ACTIVE.store(true, Ordering::SeqCst);
+    true
+}
+
+fn compact_end() {
+    COMPACT_ACTIVE.store(false, Ordering::SeqCst);
+}
+
+/// A main run finished. The Sentinel job `on-stale` is event-triggered on this topic; it checks
+/// /health and calls /compact once. Subagent runs are not emitted here.
+fn emit_run_finished(session: &str, run_id: u64) {
+    let home = crate::resolve_home();
+    let store = wa_jobs::Store::new(
+        std::path::Path::new(&home).join(".wasm-agent").join("sentinel").join("jobs.db"),
+    );
+    let now = (now_ms() / 1000) as i64;
+    let payload = serde_json::json!({"session": session, "run_id": run_id, "at": now});
+    if let Err(error) = store.emit("node.run_finished", &format!("run-{run_id}"), &payload, now) {
+        eprintln!("[serve] run-finished event failed: {error}");
+    }
 }
 
 fn health_body() -> Vec<u8> {
@@ -1939,11 +1990,22 @@ fn dispatch_http(
             && request.run_class == scheduler::RunClass::Interactive
             && serde_json::from_slice::<serde_json::Value>(&request.body).ok()
                 .and_then(|body| body.get("if_idle").and_then(serde_json::Value::as_bool)) == Some(true);
+        // A maintenance compaction owns the node briefly after a run. Wait for it before admitting
+        // the next run; the gate is released after admission.
+        let maintenance_gate = compact_gate_for_run(
+            std::time::Instant::now() + std::time::Duration::from_secs(30),
+        );
+        if maintenance_gate.is_none() {
+            let _ = respond(&mut stream, 503, "application/json",
+                b"{\"error\":\"maintenance_busy\",\"hint\":\"idle compaction is in progress; retry shortly\"}");
+            return;
+        }
         let admission = if if_idle {
             scheduler::admit_if_idle(&request.routing_session, &request.owner, request.run_class, pick_run_node_thread)
         } else {
             scheduler::admit(&request.routing_session, &request.owner, request.run_class, pick_run_node_thread)
         };
+        drop(maintenance_gate);
         match admission {
             scheduler::Decision::Run { run_id, node_thread, cancel, sockets }
             | scheduler::Decision::Behind { run_id, node_thread, cancel, sockets } => {
@@ -2235,6 +2297,9 @@ fn node_thread_loop(
                 // `cancelled`, not `completed` - the state is only reported after it actually stopped.
                 if is_run_route(&request) {
                     scheduler::complete_run(request.run_id);
+                    if split_path(&request.path).0 == "/chat" {
+                        emit_run_finished(&request.routing_session, request.run_id);
+                    }
                 }
                 if let Some(slots) = NODE_THREAD_SESSION.get() {
                     if let Some(slot) = slots.get(index) {
@@ -2324,7 +2389,16 @@ fn node_thread_loop(
             };
             let conversation = relay_conversation(&job, &verified.0);
             let owner = verified.0.clone();
-            match scheduler::admit(&conversation, &owner, scheduler::RunClass::Background, pick_run_node_thread) {
+            let relay_gate = compact_gate_for_run(
+                std::time::Instant::now() + std::time::Duration::from_secs(30),
+            );
+            if relay_gate.is_none() {
+                let _ = job.reply.send((503, "{\"error\":\"maintenance_busy\",\"hint\":\"idle compaction is in progress; retry shortly\"}".into()));
+                continue;
+            }
+            let relay_admission = scheduler::admit(&conversation, &owner, scheduler::RunClass::Background, pick_run_node_thread);
+            drop(relay_gate);
+            match relay_admission {
                 scheduler::Decision::Run { run_id, node_thread, cancel, sockets }
                 | scheduler::Decision::Behind { run_id, node_thread, cancel, sockets } => {
                     if let Some(scheduler) = scheduler::global() {
@@ -2968,11 +3042,15 @@ fn dispatch(
         // Lua handler rechecks the 40% threshold and refuses a subagent session; it is never an
         // in-run compaction path (in-run compaction keeps its own 90-95% trigger).
         "/compact" if method == "POST" => {
-            // Rechecked at dequeue, not only at admission: a run or subagent admitted while this
-            // request was queued is a live turn, so refuse instead of compacting under it.
-            match compact_admission(compact_is_busy()) {
-                Some((status, content_type, body)) => (status, content_type, body),
-                None => (200, "application/json", call("wa_compact", &[body, session]).into_bytes()),
+            // Reserve under the same gate run admission uses, so no new run can start between the
+            // idle check and the compaction call. A run that was already admitted makes
+            // compact_begin refuse. Subagents are not part of this gate.
+            if !compact_begin() {
+                (200, "application/json", COMPACT_BUSY_BODY.to_vec())
+            } else {
+                let reply = call("wa_compact", &[body, session]).into_bytes();
+                compact_end();
+                (200, "application/json", reply)
             }
         }
         "/jobs" if method == "GET" => (200,"application/json",call("wa_jobs", &["{}",session]).into_bytes()),
@@ -3391,10 +3469,6 @@ mod compact_admission_tests {
         }
     }
 
-    fn idle_subagents() -> serde_json::Value {
-        serde_json::json!({"queued": 0, "running": 0, "active": 0})
-    }
-
     fn never_consulted_for_other_routes() -> bool {
         panic!("the compact guard must not be consulted for another route")
     }
@@ -3412,19 +3486,19 @@ mod compact_admission_tests {
             panic!("the fixture run must be admitted");
         };
         assert!(!is_run_route(&request("POST", "/compact")), "idle compaction is never a run");
-        assert!(compact_busy_from(&scheduler.run_ids(), &idle_subagents()), "a queued run blocks compaction");
+        assert!(compact_busy_from(&scheduler.run_ids()), "a queued run blocks compaction");
 
         let compact = request("POST", "/compact");
         assert_eq!(
-            admission_for(&compact, || compact_busy_from(&scheduler.run_ids(), &idle_subagents())),
+            admission_for(&compact, || compact_busy_from(&scheduler.run_ids())),
             Admission::CompactBusy,
             "a queued run must be answered on the listener path"
         );
 
         scheduler.mark_running(run_id);
-        assert!(compact_busy_from(&scheduler.run_ids(), &idle_subagents()), "a running run blocks compaction");
+        assert!(compact_busy_from(&scheduler.run_ids()), "a running run blocks compaction");
         assert_eq!(
-            admission_for(&compact, || compact_busy_from(&scheduler.run_ids(), &idle_subagents())),
+            admission_for(&compact, || compact_busy_from(&scheduler.run_ids())),
             Admission::CompactBusy,
             "a running run must not hide the guard behind its lane"
         );
@@ -3439,7 +3513,7 @@ mod compact_admission_tests {
         );
 
         scheduler.complete_run(run_id);
-        assert!(!compact_busy_from(&scheduler.run_ids(), &idle_subagents()), "a settled run does not block");
+        assert!(!compact_busy_from(&scheduler.run_ids()), "a settled run does not block");
     }
 
     /// A second run admitted for the same conversation stays queued behind its writer. The node is
@@ -3459,13 +3533,13 @@ mod compact_admission_tests {
         let runs = scheduler.run_ids();
         assert_eq!(runs.len(), 2);
         assert!(runs.iter().all(|(_, _, state)| *state == scheduler::RunState::Queued));
-        assert!(compact_busy_from(&runs, &idle_subagents()));
+        assert!(compact_busy_from(&runs));
         assert_eq!(
-            admission_for(&request("POST", "/compact"), || compact_busy_from(&runs, &idle_subagents())),
+            admission_for(&request("POST", "/compact"), || compact_busy_from(&runs)),
             Admission::CompactBusy
         );
         scheduler.mark_running(first);
-        assert!(compact_busy_from(&scheduler.run_ids(), &idle_subagents()));
+        assert!(compact_busy_from(&scheduler.run_ids()));
     }
 
     /// Idle compaction is not a run and is not diverted to a control thread: it proceeds to the
@@ -3478,33 +3552,19 @@ mod compact_admission_tests {
         assert!(is_compact_route(&compact));
         assert!(!is_run_route(&compact));
         assert_eq!(
-            admission_for(&compact, || compact_busy_from(&scheduler.run_ids(), &idle_subagents())),
+            admission_for(&compact, || compact_busy_from(&scheduler.run_ids())),
             Admission::Direct,
             "the idle request keeps the existing dispatch path to the handler"
         );
         assert_eq!(compact_admission(false), None, "no busy reply: dispatch calls wa_compact");
     }
 
-    /// A native subagent is a live agent of this node even when it has no scheduler run yet, so it
-    /// keeps idle compaction off until it settles.
+    /// Subagents are out by default: compaction is for the latest main session, and a working
+    /// child never keeps that session over 40%. Only scheduler runs block the idle gate.
     #[test]
-    fn an_active_subagent_keeps_idle_compaction_off() {
+    fn an_active_subagent_does_not_block_main_compaction() {
         let no_runs: &[(String, u64, scheduler::RunState)] = &[];
-        assert!(!compact_busy_from(no_runs, &idle_subagents()));
-        for active in [
-            serde_json::json!({"queued": 1, "running": 0, "active": 1}),
-            serde_json::json!({"queued": 0, "running": 1, "active": 1}),
-            serde_json::json!({"queued": 1, "running": 1, "active": 2}),
-        ] {
-            assert!(compact_busy_from(no_runs, &active), "{active} must block compaction");
-        }
-        // The older `{queued, running}` shape is read correctly even without `active`.
-        assert!(compact_busy_from(no_runs, &serde_json::json!({"queued": 0, "running": 1})));
-        // Settled children are not active work.
-        assert!(!compact_busy_from(no_runs, &serde_json::json!({
-            "queued": 0, "running": 0, "active": 0,
-            "settled": {"completed": 3, "failed": 0}
-        })));
+        assert!(!compact_busy_from(no_runs), "no scheduler run means the main session may compact");
     }
 
     /// The fix must not move any other route: runs still go through the scheduler, reads/control

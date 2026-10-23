@@ -1,7 +1,7 @@
 {
   "id": "on-stale",
   "name": "onStale",
-  "trigger": { "kind": "schedule", "every_seconds": 30 },
+  "trigger": { "kind": "event", "topic": "node.run_finished" },
   "action": {
     "kind": "run",
     "script": "PREPARED_BY_INSTALL/scripts/on-stale.sh",

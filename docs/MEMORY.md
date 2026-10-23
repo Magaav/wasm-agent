@@ -185,7 +185,7 @@ reserve (Pi's defaults: 16,384 reserved, 20,000 recent tokens kept), an older pr
 `summarized_until` moves forward. The summary is produced by
 `WASM_AGENT_LLM_SUMMARY_MODEL` if set, otherwise by the main model.
 
-On an **idle** node, `onStale` also posts `/compact` with a 40% threshold and
+After a **main run finishes**, `onStale` posts `/compact` with a 40% threshold and
 summarizes the latest main session (never a subagent). That is a separate idle
 maintenance path; the in-run trigger remains at capacity minus reserve (about
 90–95%). A `WA_STALE_COMPACT=0` disables only the idle path.

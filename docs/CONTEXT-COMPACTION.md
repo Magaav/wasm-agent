@@ -4,20 +4,21 @@ The operator requested compaction at90–95% instead of observed50–60%, unless
 
 ## Idle maintenance (40%)
 
-`onStale` runs only after the node has been idle and quiet. It posts `/compact`
-with `min_percent:40`; the route summarizes the latest main session, never a
-subagent, and the ordinary in-run trigger stays at capacity minus reserve
-(about90–95%). This is an additional idle path, not a lower in-run default; it
-exists so an idle conversation does not sit at 75% until the next turn reaches
-the capacity trigger. `WA_STALE_COMPACT=0` disables it.
+`onStale` is triggered once by `node.run_finished` after a **main** run settles; it is not
+a 30-second schedule. It posts `/compact` with `min_percent:40`. The route atomically
+reserves an idle node against the next run, summarizes the latest main session, and
+returns `node_busy` if another main run is still queued or running. Subagents are out of
+scope: they neither trigger nor block this path, and are never summarized here. The
+ordinary in-run trigger stays at capacity minus reserve (about 90–95%). This is an
+additional idle path, not a lower in-run default. `WA_STALE_COMPACT=0` disables it.
 
 `POST /compact` is admitted by the listener before any run or control lane: if the
-scheduler has a queued/running run, or the subagent runtime has a queued/running
-child, it returns `200 {"ok":false,"error":"node_busy"}` without selecting a
-session or calling a model. On an idle node the request keeps the existing writer
-lane, so a run admitted while it executes queues behind it instead of overlapping
-it; the handler rechecks the same node-wide guard immediately before
-`wa_compact`. Master authorization and the 40% threshold remain in Lua.
+scheduler has a queued/running main run, it returns
+`200 {"ok":false,"error":"node_busy"}` without selecting a session or calling a
+model. Subagents are excluded: they do not block and are never summarized. The
+route reserves the idle gate before calling `wa_compact`; a run admitted while it
+executes waits for the reservation. Master authorization and the 40% threshold
+remain in Lua.
 
 ## Observed defect
 

@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
-# onStale - the node's "nothing is working here" transition, and the one place it may act on it.
+# onStale - the main run-finished observer, and the one place it may act on it.
 #
-# WHAT. This is a deterministic observer, run by the sentinel on a schedule. It answers one question:
-#   has this node gone from WORKING to IDLE, stayed idle, and is its install behind its own source?
-# and, only when all of that is true, it writes ONE deploy request carrying the exact full origin/main
-# SHA and the parent session/owner the node itself proves.
+# WHAT. This is a deterministic observer, run by the sentinel once per `node.run_finished` event.
+# It asks whether a main run just finished, whether /compact can atomically reserve the idle node,
+# and whether the install is behind its own source. On that event it checks the 40% idle compaction,
+# then (if needed) writes ONE deploy request from the exact full origin/main SHA and the parent
+# session/owner the node itself proves.
 #
 # WHY IT LOOKS LIKE THIS.
-#   * The idle test is the node's own `node_state` - one value derived from one snapshot of runs, queue,
-#     threads and subagents. It is NOT re-derived here from four fields: the upgrade gate did that on
-#     2026-10-22 and read "idle" with a turn in flight, stopping the node under it.
-#   * It is EDGE-triggered via a state file. A level test would fire on every tick and fight every new run.
+#   * The /compact route is the authority on whether a main run is still active. Aggregate health
+#     state is not used here: it counts subagents, which are out of scope for main compaction.
+#   * The trigger is the node's own run-finished event, so it does not poll or race a 30s tick.
 #   * It never stops, starts, builds or installs anything. Deploy is the only installer path, and the
 #     sentinel performs the request when the node is idle. A failure here is a failed *request*, which is
 #     visible, not a half-done install.
@@ -20,7 +20,6 @@
 #
 # ENV
 #   WA_INSTALL_DIR          install directory (default: the platform's wasm-agent install)
-#   WA_STALE_QUIET_S        required quiet seconds before the node counts as stale (default 10)
 #   WA_STALE_DRY_RUN        1 = compute and report, write no request
 #   WA_COORDINATOR_SESSION  parent session for the deploy protocol (required to request a deploy)
 set -uo pipefail
@@ -36,7 +35,6 @@ STATE="$STATE_DIR/on-stale-state.json"
 HELD="$STATE_DIR/on-stale-held.json"
 LOG="$STATE_DIR/on-stale.log"
 PORT="${WA_PORT:-8799}"
-QUIET="${WA_STALE_QUIET_S:-10}"
 DRY="${WA_STALE_DRY_RUN:-0}"
 now="$(date +%s)"
 
@@ -72,41 +70,30 @@ if [ -z "$health" ]; then
   exit 0
 fi
 
-node_state="$(printf '%s' "$health" | sed -n 's/.*"node_state":{[^}]*"state":"\([a-z]*\)".*/\1/p' | head -1)"
-case "$node_state" in
-  idle) ;;
-  upgrading|restarting)
-    say "onStale: install already in progress (node_state=$node_state) - not stacking a second one"
-    exit 0 ;;
-  busy|unknown|'')
-    write_state "$now" "$(read_state acted_key)" "$(read_state head)"
-    say "onStale: node is $node_state - not stale"
-    exit 0 ;;
-  *)
-    write_state "$now" "$(read_state acted_key)" "$(read_state head)"
-    say "onStale: unrecognised node_state=$node_state - treating as busy"
-    exit 0 ;;
-esac
-
-busy_at="$(read_state last_busy_at)"
-[ -n "$busy_at" ] || busy_at=0
-quiet_for=$((now - busy_at))
-if [ "$quiet_for" -lt "$QUIET" ]; then
-  say "onStale: idle for ${quiet_for}s < ${QUIET}s - waiting for a stable edge"
+# The /compact route is the authority on whether a main run is still active. Do not gate on the
+# aggregate node_state here: that field also counts subagents, which are deliberately out of scope
+# for main-session compaction. The route ignores subagents and returns node_busy for a real run.
+if printf '%s' "$health" | grep -q '"upgrading":{[^}]*"state":"upgrading"'; then
+  say "onStale: install already in progress - not stacking a second one"
   exit 0
 fi
 
 # Idle summarization: the in-run compactor keeps its measured 90-95% trigger because early
-# rewrites invalidate the provider prefix cache. On an idle, quiet node the operator asked for
-# one additional maintenance path at 40%: summarize the latest main session now, while no turn
-# is using it. The route rechecks the 40% threshold; it never summarizes a subagent.
+# rewrites invalidate the provider prefix cache. After a main run has finished, with no other
+# run queued, the operator asked for one maintenance check at 40%: summarize the latest main
+# session once. The route atomically reserves the idle node; subagents are ignored, and it never
+# summarizes a subagent.
 if [ "${WA_STALE_COMPACT:-1}" != "0" ]; then
   compact="$(curl -s -m 180 -X POST -H 'Content-Type: application/json' -d '{"min_percent":40}' "http://127.0.0.1:$PORT/compact" 2>/dev/null)"
-  if [ -n "$compact" ]; then
-    say "onStale: idle compaction $compact"
-  else
-    say "onStale: idle compaction returned no response (the request may still be running; not retried here)"
-  fi
+  case "$compact" in
+    *'"error":"node_busy"'*)
+      say "onStale: a main run is still active - compaction deferred to its run-finished event"
+      exit 0 ;;
+    '')
+      say "onStale: idle compaction returned no response (the request may still be running; not retried here)" ;;
+    *)
+      say "onStale: idle compaction $compact" ;;
+  esac
 fi
 
 tree="$(cat "$STATE_DIR/runtime-worktree.txt" 2>/dev/null | tr -d '\r\n')"
@@ -140,6 +127,9 @@ case "$head_sha" in
 esac
 [ "${#head_sha}" -eq 40 ] || hold deploy_source_sha_unproved "origin/main in $tree is not a 40-character source SHA (got '${head_sha:-<empty>}')"
 head_commit="${head_sha:0:8}"
+
+busy_at="$(read_state last_busy_at)"
+[ -n "$busy_at" ] || busy_at=0
 
 if [ "${installed:0:8}" = "$head_commit" ]; then
   rm -f "$HELD"
@@ -185,7 +175,7 @@ sentinel="${WA_SENTINEL_BIN:-$STATE_DIR/wa-sentinel.exe}"
 [ -f "$sentinel" ] || sentinel="$(command -v wa-sentinel 2>/dev/null || true)"
 [ -n "$sentinel" ] && [ -e "$sentinel" ] || hold deploy_sentinel_unavailable "no sentinel binary to request a deploy"
 
-reason="onStale: installed ${installed:0:8} is behind origin/main $head_sha; the node went idle, so this is the moment to deploy it"
+reason="onStale: installed ${installed:0:8} is behind origin/main $head_sha; the main run finished, so this is the moment to deploy it"
 args=(request deploy --expected-sha "$head_sha" --owner "$OWNER" --session "$SESSION" --reason "$reason")
 
 if request_out="$("$sentinel" "${args[@]}" 2>&1)"; then

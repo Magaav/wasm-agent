@@ -50,11 +50,14 @@ printf '%s\n' "$TMP/tree" > "$TMP/install/runtime-worktree.txt"
 head8="$(git -C "$TMP/tree" rev-parse --short=8 origin/main)"
 head40="$(git -C "$TMP/tree" rev-parse origin/main)"
 
-# 1. busy: never act.
+# 1. aggregate busy (including subagents) is not a veto here: /compact is the authority on a
+# real main run. With compaction disabled for the fixture, no install request is made.
 printf '{"node_state":{"state":"busy","busy_threads":1,"subagents_running":0,"subagents_queued":0,"queue":0}}' > "$TMP/health.json"
-printf 'commit=%s\nsha256=x\n' "$head8" > "$TMP/install/installed.txt"
+printf 'commit=%s
+sha256=x
+' "$head8" > "$TMP/install/installed.txt"
 rc="$(run)"
-[ "$rc" = 0 ] && grep -q 'not stale' "$TMP/out" && ok "busy node is not acted on ($rc)" || bad "busy node: rc=$rc out=$(cat "$TMP/out")"
+[ "$rc" = 0 ] && grep -q 'nothing to do' "$TMP/out" && ok "busy/subagent state does not block the maintenance check ($rc)" || bad "busy node: rc=$rc out=$(cat "$TMP/out")"
 
 # 2. upgrading: never stack a second install.
 printf '{"node_state":{"state":"upgrading"},"upgrading":{"state":"upgrading","phase":"stopping"}}' > "$TMP/health.json"
@@ -123,6 +126,9 @@ args="$(cat "$TMP/request-args" 2>/dev/null)"
   && grep -q "\"acted_key\":\"deadbee1->$head8\"" "$TMP/install/on-stale-state.json" \
   && ok "proved values request deploy with the full SHA and no installer in onStale ($rc)" \
   || bad "deploy request: rc=$rc out=$(cat "$TMP/out") args=$args state=$(cat "$TMP/install/on-stale-state.json" 2>/dev/null)"
+
+# 10. the observer is event-triggered, not a 30-second schedule.
+grep -q '"topic": "node.run_finished"' jobs/on-stale.json   && ok "onStale is triggered by a main-run completion event"   || bad "onStale job trigger is not node.run_finished: $(cat jobs/on-stale.json)"
 
 printf '\n%s checks, %s failed\n' "$checks" "$fail"
 [ "$fail" -eq 0 ] && { printf 'ok onStale decision\n'; exit 0; }
