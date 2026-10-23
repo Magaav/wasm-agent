@@ -12,14 +12,43 @@ remain. There is no new cumulative task-time/token cap; provider/operation safet
 bounds and the existing native concurrency/queue ceiling remain.
 
 On: the coordinator first assesses the request with its ordinary conversation
-context. Questions and status checks stay here; a short continuation such as
-“go” is resolved against the pending task, or clarified if genuinely ambiguous.
-Concrete implementation is then delegated explicitly through the native subagent
-facade with its resolved goal, relevant context, acceptance criteria and requested
-model/reasoning. No pre-inference router may turn the raw continuation into a fresh
-child task. The exact original user row and the coordinator's tool/receipt remain
-in the parent ledger; the child receives only the authored bounded handoff, not
-automatic parent-history or memory injection.
+context and routes the turn before it changes anything. Three routes, decided by the
+coordinator - not by a router and not by the harness:
+
+- a quick conversational exchange is answered here directly, with no child;
+- a read-only inspection or a short one-step task is done here, after
+  `route_task` records route="direct" with the task in the coordinator's own words;
+- a concrete implementation or multi-step change is routed "delegate" and handed to
+  the native subagent facade with its resolved goal, relevant context, acceptance
+  criteria and requested model/reasoning.
+
+A short continuation such as “go” is resolved against the pending task, or clarified
+if genuinely ambiguous. No pre-inference router may turn the raw continuation into a
+fresh child task, and nothing here starts a child: the route is a decision and the
+child is authored by the coordinator. Blind delegation is a failure, not the goal, and
+a concrete implementation routed "direct" is a misroute rather than a shortcut. The
+exact original user row and the coordinator's tool/receipt remain in the parent ledger;
+the child receives only the authored bounded handoff, not automatic parent-history or
+memory injection. In this mode `subagent` and `route_task` are declared in the
+coordinator's own tool list from the start (no `tool_search` discovery); a child has
+neither.
+
+Mode also has a hard floor, checked in the tool dispatch path rather than in the
+prompt. A direct effect that is the work itself - `write`/`edit` and their batch
+forms, a mutating `bash`/`shell` command, `operation` start, `spell_run`, a worktree
+change, `integrate` - is refused with `orchestration_route_required` until the turn
+has a recorded route, and with `orchestration_delegate_required` after route="delegate"
+until the child is admitted. Both refusals carry no effect and name the required
+next step (the route, or the `subagent` `start` handoff with the `orchestration-worker`
+profile, bounded prompt and context). Read-only assessment stays allowed and needs no
+route: reads, search, graph, diagnosis and a shell command the mode classifies as
+read-only are not effects. The floor reads the mode state, the route record and the
+admission record only - never the user's text - so it is not a router and never
+creates a child. A route or an admission lifts the floor for that turn (the run id and
+the newest user row both identify it, so a steering note or a resumed run does not
+revoke it); a new user turn requires a new decision. The route is recorded durably and
+emitted as an `orchestration_route` telemetry event, so a misroute can be audited.
+Direct mode is unchanged: with the mode off the floor does not apply at all.
 
 The reserved `orchestration-worker` profile cannot be overridden or used from a
 mode-off/foreign/guest/remote context. After admission the parent returns without
@@ -56,10 +85,19 @@ self-review never becomes independent review. See [EXECUTION.md](EXECUTION.md),
 and [SENTINEL.md](SENTINEL.md) for the existing ownership and effect boundaries.
 
 Focused proof: `test-orchestration-mode.lua` tests defaults, owner/guest/child/CAS
-and corrupt-state refusal; `test-orchestration-routing.cjs <built-wa> <evidence>`
+and corrupt-state refusal, and the routing floor itself - the three routes (a question
+answered with reads and no child, a short direct task after route="direct", a concrete
+implementation refused after route="delegate" and handed on), a direct `write` and a
+mutating `bash` refused with `orchestration_route_required` before any route, `read` and
+read-only shell commands never refused, the floor lifted by a recorded route or an
+admission, a new user row re-arming it, a child's own dispatch never refused, `subagent`
+and `route_task` declared from the start in mode-on and absent without it, and direct
+mode unchanged; `test-orchestration-routing.cjs <built-wa> <evidence>`
 uses actual native worker execution, a local mock provider and private linked Git/
-bare remote to prove contextual coordinator inference precedes native child
-admission, a raw “go” stays in the original ledger, and the child receives a resolved
+bare remote to prove contextual coordinator inference across all three routes, that the
+coordinator's first `write` is refused before it routes, that route="delegate" then
+refuses the same `write` until the child exists,
+that the same `write` succeeds after the receipt, that a raw “go” stays in the original ledger, and that the child receives a resolved
 task. The coordinator returns while held child work continues independently. `test-worker-integrate.cjs` checks real remote
 readback/clean trees; `test-worker-integrate-refusals.lua` proves no-effect dirty/
 conflict refusal and held unknown post-merge push, without replay. Native shell

@@ -687,9 +687,13 @@ function M.start(args, ctx)
     -- shell it is the admitted run's own session, and closing it would end a live child's thread.
     if not shell then pcall(memory.finish_session, session_id) end
     dofile('lua/core/completions.lua').watch(receipt.subagent_id,{user_id=ctx.user_id,role=ctx.role,remote=ctx.remote,session_id=receipt.parent_session_id})
+    dofile('lua/core/orchestration_mode.lua').record_admission(ctx,receipt)
     return receipt
   end
   receipt.profile = profile.id
+  -- The mode's floor lifts only on a real admission, and it lifts for this user turn: the
+  -- coordinator may act after it has delegated, and a resumed run of the same turn still may.
+  dofile('lua/core/orchestration_mode.lua').record_admission(ctx,receipt)
   dofile('lua/core/completions.lua').watch(receipt.subagent_id,ctx)
   return receipt
 end
