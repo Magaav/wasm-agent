@@ -526,6 +526,42 @@ fn is_run_route(request: &Request) -> bool {
     request.method == "POST" && matches!(split_path(&request.path).0.as_str(), "/chat" | "/node/chat")
 }
 
+/// `/compact` is idle-only maintenance, never a run. Its admission is decided before any lane is
+/// chosen: a POST pinned to the writer waited in the active chat run's queue, so the node-wide
+/// busy guard could not run (the 2026-10-22 incident: 30s and 5s with zero bytes).
+fn is_compact_route(request: &Request) -> bool {
+    request.method == "POST" && split_path(&request.path).0 == "/compact"
+}
+
+/// Where the listener hands a request, decided before a node-thread is selected.
+#[derive(Debug, PartialEq)]
+enum Admission {
+    /// `/compact` while any run or subagent is queued/running: answer on the listener path.
+    CompactBusy,
+    /// A model turn; only the scheduler may admit it.
+    Run,
+    /// A read or control call; the bounded read/control dispatcher answers it.
+    ReadControl,
+    /// A write or other request; `dispatch_http` chooses the writer lane.
+    Direct,
+}
+
+/// Classify admission without changing any other route's lane. `compact_busy` is called only for
+/// `/compact`, so reads, runs and writes pay nothing for the idle-only guard.
+fn admission_for(request: &Request, compact_busy: impl FnOnce() -> bool) -> Admission {
+    if is_compact_route(request) {
+        return if compact_busy() { Admission::CompactBusy } else { Admission::Direct };
+    }
+    if is_run_route(request) || (request.method == "POST"
+        && matches!(split_path(&request.path).0.as_str(), "/runs" | "/run-events")) {
+        Admission::Run
+    } else if is_read_route(request) || is_control_route(request) {
+        Admission::ReadControl
+    } else {
+        Admission::Direct
+    }
+}
+
 /// Choose a node-thread for a run. `class` picks the lane and `claimed` are node-threads already reserved by
 /// another admitted run, so a node-thread reserved for a run that has not started is not offered twice.
 ///
@@ -865,15 +901,35 @@ fn sentinel_queue_health() -> serde_json::Value {
 /// which is the one thing this endpoint is uniquely placed to say.
 /// `/compact` is idle-only maintenance. The Lua handler can only see the agent object owned by its
 /// own node-thread, so a request handled on another thread saw no active run and could summarize
-/// under a live turn. The scheduler is node-wide; only queued/running runs block compaction.
+/// under a live turn. The scheduler is node-wide; only queued/running runs block compaction, and a
+/// queued/running subagent is a live agent of the same node, so it blocks too.
 fn compact_blocks_on(state: scheduler::RunState) -> bool {
     matches!(state, scheduler::RunState::Queued | scheduler::RunState::Running)
 }
 
+/// The established refusal body. `onStale` reads `ok:false` as "not now", not as a transport error.
+const COMPACT_BUSY_BODY: &[u8] = b"{\"ok\":false,\"error\":\"node_busy\"}";
+
+/// The idle-only decision, as a pure function of node-wide state: `Some` is the complete reply,
+/// meaning no session was selected and no model was called; `None` means the existing handler may
+/// run. The listener path and the dequeue recheck both call this, so they cannot disagree.
+fn compact_admission(busy: bool) -> Option<Reply> {
+    busy.then(|| (200, "application/json", COMPACT_BUSY_BODY.to_vec()))
+}
+
+fn compact_busy_from(runs: &[(String, u64, scheduler::RunState)], subagents: &serde_json::Value) -> bool {
+    if runs.iter().any(|(_, _, state)| compact_blocks_on(*state)) {
+        return true;
+    }
+    let queued = subagents.get("queued").and_then(|value| value.as_u64()).unwrap_or(0);
+    let running = subagents.get("running").and_then(|value| value.as_u64()).unwrap_or(0);
+    let active = subagents.get("active").and_then(|value| value.as_u64()).unwrap_or(queued + running);
+    active > 0
+}
+
 fn compact_is_busy() -> bool {
-    scheduler::global()
-        .map(|scheduler| scheduler.run_ids().into_iter().any(|(_, _, state)| compact_blocks_on(state)))
-        .unwrap_or(false)
+    let runs = scheduler::global().map(|scheduler| scheduler.run_ids()).unwrap_or_default();
+    compact_busy_from(&runs, &crate::subagents::health())
 }
 
 fn health_body() -> Vec<u8> {
@@ -1774,29 +1830,34 @@ pub fn run(first: Lua, factory: Box<dyn Fn() -> Lua + Send + Sync>, port: u16, u
         // Only resolver-dependent requests enter this bounded FIFO. The accept thread keeps
         // serving unrelated reads and static replies while authentication waits on Lua/SQLite.
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(admission_timeout_ms());
-        if is_run_route(&request) || (request.method == "POST"
-            && matches!(split_path(&request.path).0.as_str(), "/runs" | "/run-events")) {
-            match admission_tx.try_send((stream, request, deadline)) {
+        // Admission is decided before a node-thread exists. `/compact` is answered here while any
+        // run or subagent is queued/running: putting it in the writer's queue is what made the
+        // node-wide busy guard unreachable behind an active chat run.
+        match admission_for(&request, compact_is_busy) {
+            Admission::CompactBusy => {
+                let _ = respond(&mut stream, 200, "application/json", COMPACT_BUSY_BODY);
+            }
+            Admission::Run => match admission_tx.try_send((stream, request, deadline)) {
                 Ok(()) => {},
                 Err(std::sync::mpsc::TrySendError::Full((mut stream, _, _)))
                 | Err(std::sync::mpsc::TrySendError::Disconnected((mut stream, _, _))) => {
                     let _ = respond(&mut stream, 503, "application/json",
                         b"{\"error\":\"admission_busy\",\"hint\":\"the admission queue is full or unavailable; retry shortly\"}");
                 }
-            }
-        } else if is_read_route(&request) || is_control_route(&request) {
-            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(read_admission_ms());
-            READ_WAITING.fetch_add(1, Ordering::Relaxed);
-            match read_admission_tx.try_send((stream, request, deadline)) {
-                Ok(()) => {},
-                Err(std::sync::mpsc::TrySendError::Full((mut stream, _, _)))
-                | Err(std::sync::mpsc::TrySendError::Disconnected((mut stream, _, _))) => {
-                    READ_WAITING.fetch_sub(1, Ordering::Relaxed);
-                    let _ = respond(&mut stream, 503, "application/json", b"{\"error\":\"read_capacity_busy\",\"hint\":\"read/control admission queue is full or unavailable\"}");
+            },
+            Admission::ReadControl => {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_millis(read_admission_ms());
+                READ_WAITING.fetch_add(1, Ordering::Relaxed);
+                match read_admission_tx.try_send((stream, request, deadline)) {
+                    Ok(()) => {},
+                    Err(std::sync::mpsc::TrySendError::Full((mut stream, _, _)))
+                    | Err(std::sync::mpsc::TrySendError::Disconnected((mut stream, _, _))) => {
+                        READ_WAITING.fetch_sub(1, Ordering::Relaxed);
+                        let _ = respond(&mut stream, 503, "application/json", b"{\"error\":\"read_capacity_busy\",\"hint\":\"read/control admission queue is full or unavailable\"}");
+                    }
                 }
             }
-        } else {
-            dispatch_http(stream, request, &resolve_tx, deadline);
+            Admission::Direct => dispatch_http(stream, request, &resolve_tx, deadline),
         }
     }
 }
@@ -1823,6 +1884,16 @@ fn dispatch_http(
         let (status, content_type, body) = handle_run_events(&request, resolve_tx, deadline);
         let _ = respond(&mut stream, status, content_type, &body);
         return;
+    }
+    // Defense in depth for `/compact`: the listener already answers a busy node before this
+    // function, but a direct caller (or a run admitted after that check) must not queue the
+    // request behind the run. Idle compaction uses the writer lane below, so a run admitted
+    // later is serialized behind it instead of executing concurrently on a control thread.
+    if is_compact_route(&request) {
+        if let Some((status, content_type, body)) = compact_admission(compact_is_busy()) {
+            let _ = respond(&mut stream, status, content_type, &body);
+            return;
+        }
     }
     // Admission. A run goes through the scheduler, which owns its conversation from admission
     // through completion and picks its lane; everything else keeps the old routing. The scheduler
@@ -2897,10 +2968,11 @@ fn dispatch(
         // Lua handler rechecks the 40% threshold and refuses a subagent session; it is never an
         // in-run compaction path (in-run compaction keeps its own 90-95% trigger).
         "/compact" if method == "POST" => {
-            if compact_is_busy() {
-                (200, "application/json", b"{\"ok\":false,\"error\":\"node_busy\"}".to_vec())
-            } else {
-                (200, "application/json", call("wa_compact", &[body, session]).into_bytes())
+            // Rechecked at dequeue, not only at admission: a run or subagent admitted while this
+            // request was queued is a live turn, so refuse instead of compacting under it.
+            match compact_admission(compact_is_busy()) {
+                Some((status, content_type, body)) => (status, content_type, body),
+                None => (200, "application/json", call("wa_compact", &[body, session]).into_bytes()),
             }
         }
         "/jobs" if method == "GET" => (200,"application/json",call("wa_jobs", &["{}",session]).into_bytes()),
@@ -3291,6 +3363,164 @@ mod read_route_tests {
         assert!(is_read_route(&request("POST", "/mcp")));
         assert!(is_read_route(&request("POST", "/jobs")));
         assert!(is_read_route(&request("POST", "/provider-management")));
+    }
+}
+
+#[cfg(test)]
+mod compact_admission_tests {
+    use super::{
+        admission_for, compact_admission, compact_busy_from, is_compact_route, is_run_route,
+        scheduler, Admission, Request, COMPACT_BUSY_BODY,
+    };
+
+    fn request(method: &str, path: &str) -> Request {
+        Request {
+            method: method.into(),
+            path: path.into(),
+            session: String::new(),
+            routing_session: String::new(),
+            run_class: scheduler::RunClass::Interactive,
+            run_id: 0,
+            owner: String::new(),
+            run_cancel: None,
+            peer_verified: None,
+            run_sockets: None,
+            node_headers: Vec::new(),
+            body: Vec::new(),
+            accept_sse: false,
+        }
+    }
+
+    fn idle_subagents() -> serde_json::Value {
+        serde_json::json!({"queued": 0, "running": 0, "active": 0})
+    }
+
+    fn never_consulted_for_other_routes() -> bool {
+        panic!("the compact guard must not be consulted for another route")
+    }
+
+    /// The incident: a live chat run on node-thread 0 made the old POST /compact wait in that
+    /// thread's queue, so the node-wide guard never ran. The admission decision must be the
+    /// established node_busy reply, made before any session or lane is chosen, for both a queued
+    /// and a running run.
+    #[test]
+    fn a_live_run_answers_compact_before_any_lane() {
+        let scheduler = scheduler::Scheduler::new(scheduler::Config::default());
+        let scheduler::Decision::Run { run_id, .. } =
+            scheduler.admit("thread-0", "alice", scheduler::RunClass::Interactive, |_, _| Some(0))
+        else {
+            panic!("the fixture run must be admitted");
+        };
+        assert!(!is_run_route(&request("POST", "/compact")), "idle compaction is never a run");
+        assert!(compact_busy_from(&scheduler.run_ids(), &idle_subagents()), "a queued run blocks compaction");
+
+        let compact = request("POST", "/compact");
+        assert_eq!(
+            admission_for(&compact, || compact_busy_from(&scheduler.run_ids(), &idle_subagents())),
+            Admission::CompactBusy,
+            "a queued run must be answered on the listener path"
+        );
+
+        scheduler.mark_running(run_id);
+        assert!(compact_busy_from(&scheduler.run_ids(), &idle_subagents()), "a running run blocks compaction");
+        assert_eq!(
+            admission_for(&compact, || compact_busy_from(&scheduler.run_ids(), &idle_subagents())),
+            Admission::CompactBusy,
+            "a running run must not hide the guard behind its lane"
+        );
+
+        let reply = compact_admission(true).expect("a busy node is answered here");
+        assert_eq!(reply.0, 200);
+        assert_eq!(reply.1, "application/json");
+        assert_eq!(reply.2.as_slice(), COMPACT_BUSY_BODY, "the established ok:false/error:node_busy shape");
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&reply.2).unwrap(),
+            serde_json::json!({"ok": false, "error": "node_busy"})
+        );
+
+        scheduler.complete_run(run_id);
+        assert!(!compact_busy_from(&scheduler.run_ids(), &idle_subagents()), "a settled run does not block");
+    }
+
+    /// A second run admitted for the same conversation stays queued behind its writer. The node is
+    /// still busy, so compaction must not summarize under either run.
+    #[test]
+    fn a_queued_run_also_answers_compact_before_any_lane() {
+        let scheduler = scheduler::Scheduler::new(scheduler::Config::default());
+        let first = match scheduler.admit("thread-0", "alice", scheduler::RunClass::Interactive, |_, _| Some(0)) {
+            scheduler::Decision::Run { run_id, .. } => run_id,
+            other => panic!("the first run must be admitted, got {other:?}"),
+        };
+        let second = match scheduler.admit("thread-0", "alice", scheduler::RunClass::Interactive, |_, _| Some(0)) {
+            scheduler::Decision::Behind { run_id, .. } => run_id,
+            other => panic!("the second run must queue behind its writer, got {other:?}"),
+        };
+        assert!(second > first);
+        let runs = scheduler.run_ids();
+        assert_eq!(runs.len(), 2);
+        assert!(runs.iter().all(|(_, _, state)| *state == scheduler::RunState::Queued));
+        assert!(compact_busy_from(&runs, &idle_subagents()));
+        assert_eq!(
+            admission_for(&request("POST", "/compact"), || compact_busy_from(&runs, &idle_subagents())),
+            Admission::CompactBusy
+        );
+        scheduler.mark_running(first);
+        assert!(compact_busy_from(&scheduler.run_ids(), &idle_subagents()));
+    }
+
+    /// Idle compaction is not a run and is not diverted to a control thread: it proceeds to the
+    /// existing POST handler. That keeps the Lua 40% threshold and latest-main selection, keeps
+    /// master authorization, and serializes the write with any run admitted later on the writer.
+    #[test]
+    fn idle_compaction_proceeds_to_the_existing_handler() {
+        let scheduler = scheduler::Scheduler::new(scheduler::Config::default());
+        let compact = request("POST", "/compact");
+        assert!(is_compact_route(&compact));
+        assert!(!is_run_route(&compact));
+        assert_eq!(
+            admission_for(&compact, || compact_busy_from(&scheduler.run_ids(), &idle_subagents())),
+            Admission::Direct,
+            "the idle request keeps the existing dispatch path to the handler"
+        );
+        assert_eq!(compact_admission(false), None, "no busy reply: dispatch calls wa_compact");
+    }
+
+    /// A native subagent is a live agent of this node even when it has no scheduler run yet, so it
+    /// keeps idle compaction off until it settles.
+    #[test]
+    fn an_active_subagent_keeps_idle_compaction_off() {
+        let no_runs: &[(String, u64, scheduler::RunState)] = &[];
+        assert!(!compact_busy_from(no_runs, &idle_subagents()));
+        for active in [
+            serde_json::json!({"queued": 1, "running": 0, "active": 1}),
+            serde_json::json!({"queued": 0, "running": 1, "active": 1}),
+            serde_json::json!({"queued": 1, "running": 1, "active": 2}),
+        ] {
+            assert!(compact_busy_from(no_runs, &active), "{active} must block compaction");
+        }
+        // The older `{queued, running}` shape is read correctly even without `active`.
+        assert!(compact_busy_from(no_runs, &serde_json::json!({"queued": 0, "running": 1})));
+        // Settled children are not active work.
+        assert!(!compact_busy_from(no_runs, &serde_json::json!({
+            "queued": 0, "running": 0, "active": 0,
+            "settled": {"completed": 3, "failed": 0}
+        })));
+    }
+
+    /// The fix must not move any other route: runs still go through the scheduler, reads/control
+    /// still use the read dispatch, and writes stay on the writer lane.
+    #[test]
+    fn other_routes_keep_their_existing_admission() {
+        assert_eq!(admission_for(&request("POST", "/chat"), never_consulted_for_other_routes), Admission::Run);
+        assert_eq!(admission_for(&request("POST", "/node/chat"), never_consulted_for_other_routes), Admission::Run);
+        assert_eq!(admission_for(&request("POST", "/runs"), never_consulted_for_other_routes), Admission::Run);
+        assert_eq!(admission_for(&request("POST", "/run-events"), never_consulted_for_other_routes), Admission::Run);
+        assert_eq!(admission_for(&request("GET", "/sessions"), never_consulted_for_other_routes), Admission::ReadControl);
+        assert_eq!(admission_for(&request("POST", "/operation"), never_consulted_for_other_routes), Admission::ReadControl);
+        assert_eq!(admission_for(&request("POST", "/subagents"), never_consulted_for_other_routes), Admission::ReadControl);
+        assert_eq!(admission_for(&request("POST", "/shell"), never_consulted_for_other_routes), Admission::Direct);
+        assert_eq!(admission_for(&request("POST", "/session/fork"), never_consulted_for_other_routes), Admission::Direct);
+        assert!(!is_compact_route(&request("GET", "/compact")), "/compact is a POST-only control");
     }
 }
 
