@@ -26,6 +26,24 @@ Use [WHATSAPP-ARM64.md](WHATSAPP-ARM64.md) and its NEW ARM64 bundle/schema3/lock
 Python provisioning before the sequence below. The original AMD64 bundle and its
 Windows dry-run receipt remain historical, unchanged—not ARM64 readiness.
 
+## Local tunnel keepalive (Windows)
+
+The MCP binding reaches the rendezvous connector at a numeric loopback URL. On a
+Windows node that is an SSH forward, and a dead forward makes every read fail with
+`connector_transport_failed`. Register the keepalive once per node:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/whatsapp-tunnel-setup.ps1
+```
+
+It writes `%LOCALAPPDATA%\wasm-agent\whatsapp-tunnel.cmd`, backs up an existing
+`wa-whatsapp-tunnel` task XML, creates or updates the task to run
+`scripts/whatsapp-tunnel.sh`, starts it and checks `127.0.0.1:28787`. The shell
+script loops `ssh -N` with `ServerAliveInterval=30`; when ssh exits it reconnects
+after 5 seconds. The task is machine state, not repository state; the script and
+this setup are the reproducible part. Overrides in the generated `.cmd`:
+`WA_WHATSAPP_TUNNEL_HOST`, `_LOCAL_PORT`, `_REMOTE_PORT`, `_RETRY_SECONDS`.
+
 ## Architecture and worker result
 
 One Go whatsmeow linked-device service (`connectors/whatsapp`), its private SQLite
