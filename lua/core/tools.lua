@@ -60,6 +60,7 @@ end
 
 -- Available to everyone.
 M.shared = {
+  schema("time", "The node's own OS clock: the current local date/time with its numeric UTC offset, zone name, weekday and epoch. Call it when you need the current time; present times in this node's local zone with that offset, never as UTC unless the value is UTC.", {}),
   schema("remember", "Store a fact the user asked you to remember, so it can be recalled later. Confirm in one short sentence; do not store your own reasoning. To correct a stored fact, call remember with that entry's `id`: it replaces the entry in place, so one row remains and the old text stops being found. Use `forget` only for a fact that should not exist at all. Never append a correction - two versions of one fact mislead a later turn.", {
     content = { type = "string", description = "The fact to remember, in full." },
     id = { type = "string", description = "Existing memory id; replaces that entry." },
@@ -462,6 +463,7 @@ end
 -- explanation) is a poor cue. A tool with no cue here (a plugin) is listed by name alone.
 -- scripts/test-tool-cues.lua guards that every built-in has one and that none is stale.
 local CUES = {
+  time = "Ask this node's OS clock (local time with its offset)",
   remember = "Store a fact the user asked you to keep",
   recall = "Look up stored facts before answering about the user",
   memories = "List stored facts, with their ids",
@@ -1021,6 +1023,9 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
     local ok, raw = pcall(host.operation, args.action or "status", json.encode(args))
     if not ok then return {error=tostring(raw)} end
     return json.decode(raw)
+  end
+  if name == "time" then
+    return platform.local_clock()
   end
   if name=="tool_result" then
     if not is_master(role) then return {error="forbidden_for_role:"..role} end

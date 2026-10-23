@@ -366,7 +366,7 @@ while :; do
   # one line and then went silent for 40 minutes, and a wait and a wedge were indistinguishable because
   # the only channel was the parent's pipe. This trail names the poll the run died on.
   polls=$((polls + 1))
-  printf '%s poll=%s waited=%ss idle_ticks=%s node_state=%s bytes=%s\n' "$(date -u +%H:%M:%SZ)" "$polls" "$waited" "$idle_ticks" \
+  printf '%s poll=%s waited=%ss idle_ticks=%s node_state=%s bytes=%s\n' "$(date +%H:%M:%S%z)" "$polls" "$waited" "$idle_ticks" \
     "$(printf '%s' "$state" | sed -n 's/.*"node_state":{[^}]*"state":"\([a-z]*\)".*/\1/p' | head -1)" "${#state}" \
     >> "${WAIT_LOG:-$INSTALL_DIR/upgrade-wait.log}" 2>/dev/null
   if [ "$polls" -gt "${WA_IDLE_MAX_POLLS:-1440}" ]; then

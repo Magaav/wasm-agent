@@ -134,7 +134,7 @@ write_result() { # ok detail
 # <install>/deploy.log with the time, what it was about, and why.
 fail() {
   echo "deploy: $*" >&2
-  printf '%s\t%s\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${COMMIT:-unknown}" "${BRANCH:-unknown}" "$*" \
+  printf '%s\t%s\t%s\t%s\n' "$(date +%Y-%m-%dT%H:%M:%S%z)" "${COMMIT:-unknown}" "${BRANCH:-unknown}" "$*" \
     >> "$INSTALL_DIR/deploy.log" 2>/dev/null
   write_result false "$*"
   # A requested deploy is answered, including when the answer is no. This is the other half of the wake
@@ -165,7 +165,7 @@ fail() {
 # `note:` marker, so "was the gate blind that day?" is answerable from the same file.
 note() {
   echo "deploy: $*"
-  printf '%s\t%s\t%s\tnote: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${COMMIT:-unknown}" "${BRANCH:-unknown}" "$*" \
+  printf '%s\t%s\t%s\tnote: %s\n' "$(date +%Y-%m-%dT%H:%M:%S%z)" "${COMMIT:-unknown}" "${BRANCH:-unknown}" "$*" \
     >> "$INSTALL_DIR/deploy.log" 2>/dev/null
 }
 

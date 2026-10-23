@@ -89,6 +89,10 @@ local SYSTEM = table.concat({
   "different one. Match their language even when your instructions are in English.",
   "",
   "Style: keep replies short, never invent facts, and say what you did not do.",
+  "",
+  "Time: this node's OS local timezone is named in the environment line below. Call the `time`",
+  "tool when you need the current time, and present times in that local zone with its numeric",
+  "offset - a UTC value is labelled UTC, never passed off as local time.",
 }, "\n")
 
 -- The environment line is built at load time so the model never guesses the

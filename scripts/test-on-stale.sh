@@ -225,6 +225,18 @@ bash -n scripts/on-stale.sh && bash -n scripts/test-on-stale.sh && ok "on-stale 
   && ok "the compaction doc no longer claims the idle path only takes the latest session" \
   || bad "docs/CONTEXT-COMPACTION.md still claims latest-main-only selection"
 
+# 17. The log line carries the node's OS local time with a numeric offset, not a bare UTC "Z":
+#     the reader compares it with their own clock. TZ is pinned so the check is machine-independent.
+printf '{"node_state":{"state":"idle","busy_threads":0,"subagents_running":0,"subagents_queued":0,"queue":0}}' > "$TMP/health.json"
+printf 'commit=%s\nsha256=x\n' "$head8" > "$TMP/install/installed.txt"
+rm -f "$TMP/install/on-stale.log" "$TMP/install/on-stale-state.json"
+TZ=UTC0 env -u WA_COORDINATOR_SESSION WA_INSTALL_DIR="$TMP/install" WA_HEALTH_FILE="$TMP/health.json" \
+  WA_STALE_QUIET_S=0 WA_STALE_DRY_RUN=1 WA_STALE_COMPACT=0 bash scripts/on-stale.sh >/dev/null 2>&1 || true
+stamp="$(head -1 "$TMP/install/on-stale.log" 2>/dev/null | cut -f1)"
+[ -n "$stamp" ] && printf '%s' "$stamp" | grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\+0000$' \
+  && ok "the log timestamp is local time with a numeric offset ($stamp under TZ=UTC0)" \
+  || bad "log timestamp is not local-with-offset: '$stamp'"
+
 printf '\n%s checks, %s failed\n' "$checks" "$fail"
 [ "$fail" -eq 0 ] && { printf 'ok onStale decision\n'; exit 0; }
 printf 'FAIL onStale decision\n'; exit 1

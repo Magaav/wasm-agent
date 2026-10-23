@@ -77,6 +77,17 @@ to the C runtime's `getenv` — the UCRT caches the environment at startup — s
 `os.getenv` returns what the process was launched with, not what the host
 resolved. That silently disabled the entire configuration file.
 
+## The clock
+
+The clock is the **node's own OS clock**, not UTC. `platform.local_clock()` (and the shared
+`time` tool the model calls) returns `local_iso` with a numeric offset, `utc_offset_minutes`,
+the zone name and the UTC instant; the environment line the model reads names that offset, so
+it never has to guess the zone. Human-readable log lines (`on-stale.log`, `deploy.log`, the
+upgrade poll line) are stamped in local time **with the numeric offset**, because an operator
+reading them is comparing them with their own OS clock. Machine values that are compared or
+protocol-bound (`installed.txt`'s `at=`, `deploy-result.json`) stay UTC so a string comparison
+does not depend on the machine's zone.
+
 ## Redaction
 
 `host.log(message)` masks credential-shaped text before printing, and the Lua
