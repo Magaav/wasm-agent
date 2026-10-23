@@ -286,6 +286,17 @@ function M.control(args, ctx, api)
     if action=="await" then
       local deadline=host.now()+math.min(60000,math.max(0,tonumber(args.wait_ms or args.timeout_ms) or 60000))/1000
       while (row.state=="queued" or row.state=="placing") and host.now()<deadline do
+        -- A placement wait is bounded work, not a wedged interpreter. Without the beat this
+        -- loop held the parent's node-thread silent for up to a minute, and the window's own
+        -- liveness rule (5s without a beat) called the worker unresponsive while it was working.
+        host.beat()
+        if host.run_cancelled then
+          local ok,cancelled=pcall(host.run_cancelled)
+          if ok then
+            local decoded_ok,state=pcall(json.decode,cancelled or "{}")
+            if decoded_ok and type(state)=="table" and state.cancelled==true then break end
+          end
+        end
         host.sleep(100)
         row=query("SELECT * FROM orchestration_tasks WHERE id=? AND owner=?",{id,ctx.user_id})[1]
       end
