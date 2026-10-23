@@ -495,7 +495,7 @@ if ! mkdir "$DEPLOY_LOCK" 2>/dev/null; then
 fi
 printf '%s
 ' "$$" > "$DEPLOY_LOCK/pid" 2>/dev/null || true
-trap 'rmdir "$DEPLOY_LOCK" 2>/dev/null || true' EXIT
+trap 'rm -rf "$DEPLOY_LOCK"' EXIT
 
 # A queued/running upgrade and a deploy both install the same binary and record. Refuse a deploy
 # while an upgrade is active; onStale stands down on the shared lock for the build phase.
