@@ -244,3 +244,62 @@ fn a_busy_or_undecidable_node_is_announced_and_nothing_is_dispatched() {
     }
 }
 
+/// A protocol deploy whose return hook is not ready must be visible as held. The defect this pins: a bare
+/// `continue` left the request looking merely queued, with no durable reason anywhere, so an operator could
+/// not tell a blocked protocol from one the watcher had not reached yet.
+#[test]
+fn a_not_ready_deploy_protocol_is_held_with_a_named_reason() {
+    let _alone = ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut fixture = Fixture::new("protocol-not-ready");
+    let install = fixture.dir.join("install");
+    std::fs::create_dir_all(&install).expect("fixture install");
+    std::fs::write(install.join("runtime-worktree.txt"), fixture.dir.display().to_string())
+        .expect("runtime worktree record");
+    fixture.set("WA_INSTALL_DIR", install.display().to_string());
+    // The real hook, disabled: the one prerequisite the fixture does not satisfy is the hook readiness.
+    let store = jobs::store();
+    let definition: Value = serde_json::from_str(include_str!("../../../jobs/on-sentinel-return.json"))
+        .expect("the shipped return hook");
+    store.put(&definition).expect("store the return hook");
+    store.enable("onSentinelReturn", false).expect("disable the return hook");
+    // A deploy that somehow got dispatched would leave this marker; a held request must not.
+    let marker = fixture.dir.join("dispatched.txt");
+    let stub = fixture.dir.join("deploy-stub.sh");
+    std::fs::write(&stub, format!("#!/bin/sh\nprintf 'ran\\n' > '{}'\n", marker.display()))
+        .expect("stub deploy");
+    fixture.set("WA_SENTINEL_DEPLOY", stub.display().to_string());
+
+    let id = "100-protocol-deploy";
+    let request = json!({"verb":"deploy","id":id,"expected_sha":"a".repeat(40),
+        "queued_at":now_epoch(),"session":"parent","owner":"owner",
+        "reason":"the operator asked for it"});
+    let path = fixture.state().join("requests").join(format!("{id}.json"));
+    std::fs::write(&path, serde_json::to_vec(&request).expect("encode")).expect("request");
+
+    let mut held = Held::default();
+    assert_eq!(process_requests(false, &mut held).expect("the box is readable"), 0,
+        "a not-ready protocol request is held, not handled");
+    assert!(path.exists(), "the request must stay in the box to be retried");
+    assert!(!marker.exists(), "nothing may be dispatched while the protocol is not ready");
+    assert!(!fixture.state().join("claimed").join(format!("{id}.json")).exists());
+    assert!(!fixture.state().join("done").join(format!("{id}.json")).exists());
+    assert!(!fixture.state().join("failed").join(format!("{id}.json")).exists());
+
+    let queue: Value = serde_json::from_slice(&std::fs::read(
+        fixture.state().join("queue").join(format!("{id}.json"))).expect("queue record"))
+        .expect("queue json");
+    assert_eq!(queue["state"], "waiting");
+    assert_eq!(queue["phase"], "held");
+    assert!(queue["detail"].as_str().unwrap_or("").contains("deploy_protocol_not_ready"),
+        "the queue record must name the reason: {}", queue["detail"]);
+    let state: Value = serde_json::from_slice(&std::fs::read(
+        fixture.state().join("deploy-protocol").join(id).join("state.json"))
+        .expect("protocol state")).expect("protocol state json");
+    assert_eq!(state["phase"], "held");
+    assert!(state["detail"].as_str().unwrap_or("").contains("deploy_protocol_not_ready"),
+        "the protocol state must name the reason: {}", state["detail"]);
+    let log = std::fs::read_to_string(fixture.state().join("sentinel.log")).unwrap_or_default();
+    assert!(log.contains("maintenance-deferred"), "a hold must be audited:\n{log}");
+    assert!(log.contains("deploy_protocol_not_ready"), "the audit line must name the reason:\n{log}");
+}
+

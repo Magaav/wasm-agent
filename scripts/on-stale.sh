@@ -3,23 +3,26 @@
 #
 # WHAT. This is a deterministic observer, run by the sentinel on a schedule. It answers one question:
 #   has this node gone from WORKING to IDLE, stayed idle, and is its install behind its own source?
-# and, only when all of that is true, it prepares a candidate and writes ONE upgrade request.
+# and, only when all of that is true, it writes ONE deploy request carrying the exact full origin/main
+# SHA and the parent session/owner the node itself proves.
 #
 # WHY IT LOOKS LIKE THIS.
 #   * The idle test is the node's own `node_state` - one value derived from one snapshot of runs, queue,
 #     threads and subagents. It is NOT re-derived here from four fields: the upgrade gate did that on
 #     2026-10-22 and read "idle" with a turn in flight, stopping the node under it.
 #   * It is EDGE-triggered via a state file. A level test would fire on every tick and fight every new run.
-#   * It never stops, starts, or installs anything. Only the sentinel may, and it does that from the request
-#     this writes - so a failure here is a failed *request*, which is visible, not a half-done install.
+#   * It never stops, starts, builds or installs anything. Deploy is the only installer path, and the
+#     sentinel performs the request when the node is idle. A failure here is a failed *request*, which is
+#     visible, not a half-done install.
 #   * Failure is loud: an install record it cannot trust (`commit=unknown`) is a refusal with a reason, not
-#     a quiet exit.
+#     a quiet exit. A required deploy value it cannot prove is a durable HELD state with that exact reason -
+#     never a guessed source, owner or session, and never an install.
 #
 # ENV
-#   WA_INSTALL_DIR    install directory (default: the platform's wasm-agent install)
-#   WA_STALE_QUIET_S  required quiet seconds before the node counts as stale (default 10)
-#   WA_STALE_DRY_RUN  1 = compute and report, write no request
-#   WA_COORDINATOR_SESSION  session to wake on a deploy outcome (optional)
+#   WA_INSTALL_DIR          install directory (default: the platform's wasm-agent install)
+#   WA_STALE_QUIET_S        required quiet seconds before the node counts as stale (default 10)
+#   WA_STALE_DRY_RUN        1 = compute and report, write no request
+#   WA_COORDINATOR_SESSION  parent session for the deploy protocol (required to request a deploy)
 set -uo pipefail
 
 STATE_DIR="${WA_INSTALL_DIR:-}"
@@ -30,6 +33,7 @@ if [ -z "$STATE_DIR" ]; then
   esac
 fi
 STATE="$STATE_DIR/on-stale-state.json"
+HELD="$STATE_DIR/on-stale-held.json"
 LOG="$STATE_DIR/on-stale.log"
 PORT="${WA_PORT:-8799}"
 QUIET="${WA_STALE_QUIET_S:-10}"
@@ -43,6 +47,18 @@ read_state() { sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\\([^,}]*\\).*/\\1/p" 
 write_state() { # busy_at acted_key head
   printf '{"last_busy_at":%s,"acted_key":"%s","head":"%s","at":%s}\n' \
     "${1:-0}" "${2:-}" "${3:-}" "$now" > "$STATE.tmp" 2>/dev/null && mv -f "$STATE.tmp" "$STATE" 2>/dev/null
+}
+json_escape() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr '\r\n' '  '; }
+hold() { # code detail
+  # A required value could not be proved. Record it where an operator and the status surface can read it,
+  # with the exact reason, and stop without writing a request. The stale key is deliberately not marked as
+  # acted: once the operator supplies the missing fact the next tick may request the deploy.
+  local code="$1" detail="$2"
+  printf '{"phase":"held","code":"%s","reason":"%s","installed":"%s","head":"%s","at":%s}\n' \
+    "$(json_escape "$code")" "$(json_escape "$detail")" "$(json_escape "${installed:-}")" \
+    "$(json_escape "${head_sha:-}")" "$now" > "$HELD.tmp" 2>/dev/null && mv -f "$HELD.tmp" "$HELD" 2>/dev/null
+  say "onStale: HELD ($code) - $detail; no deploy was requested and nothing was installed"
+  exit 2
 }
 
 # WA_HEALTH_FILE is a test seam: the decision below is what needs testing, and a fixed JSON is the only
@@ -118,10 +134,15 @@ if [ -n "$(git -C "$tree" status --porcelain 2>/dev/null | head -1)" ]; then
 fi
 
 git -C "$tree" fetch --quiet origin 2>/dev/null
-head_commit="$(git -C "$tree" rev-parse --short=8 origin/main 2>/dev/null)"
-[ -n "$head_commit" ] || { say "onStale: cannot read origin/main in $tree - refusing to guess"; exit 2; }
+head_sha="$(git -C "$tree" rev-parse origin/main 2>/dev/null)"
+case "$head_sha" in
+  ''|*[!0-9a-fA-F]*) hold deploy_source_sha_unproved "origin/main in $tree is not a full source SHA (got '${head_sha:-<empty>}')" ;;
+esac
+[ "${#head_sha}" -eq 40 ] || hold deploy_source_sha_unproved "origin/main in $tree is not a 40-character source SHA (got '${head_sha:-<empty>}')"
+head_commit="${head_sha:0:8}"
 
 if [ "${installed:0:8}" = "$head_commit" ]; then
+  rm -f "$HELD"
   write_state "$busy_at" "" "$head_commit"
   say "onStale: installed ${installed:0:8} == origin/main $head_commit - nothing to do"
   exit 0
@@ -130,58 +151,50 @@ fi
 acted="$(read_state acted_key)"
 key="$installed->$head_commit"
 if [ "$acted" = "$key" ]; then
+  rm -f "$HELD"
   say "onStale: already acted for $key; waiting for a new commit or an install"
   exit 0
 fi
 
 say "onStale: STALE - installed ${installed:0:8}, origin/main $head_commit"
 if [ "$DRY" = "1" ]; then
-  say "onStale: dry run - would build and request the upgrade"
+  if [ -n "${WA_COORDINATOR_SESSION:-}" ]; then
+    say "onStale: dry run - would prove the owner for $WA_COORDINATOR_SESSION and request deploy for $head_sha (onStale never builds or installs)"
+  else
+    say "onStale: dry run - would be HELD (deploy_parent_session_unproved: WA_COORDINATOR_SESSION is unset); no request would be written"
+  fi
   exit 0
 fi
 
-# Share the build lock with deploy.sh: a deploy and onStale must never build into the same
-# rust/target/release at the same time. Hold it only for this build/request, and release on exit.
-LOCK="$STATE_DIR/.deploy.lock"
-if ! mkdir "$LOCK" 2>/dev/null; then
-  say "onStale: another deploy/build holds $LOCK - standing down"
-  exit 0
+# The deploy protocol requires an exact source SHA, a parent session and the owner the node proves for
+# that session. None of them is guessed: if a value is missing or does not match what the node says, this
+# is a visible hold, not a request and not an install.
+SESSION="${WA_COORDINATOR_SESSION:-}"
+if [ -z "$SESSION" ]; then
+  hold deploy_parent_session_unproved "WA_COORDINATOR_SESSION is unset; the deploy protocol requires the parent session"
 fi
-trap 'rmdir "$LOCK" 2>/dev/null || true' EXIT
 
-# The candidate must come from a source checkout: upgrade.sh refuses one it cannot compare with the
-# installed commit, which is exactly the refusal that made the first real deploy fail in 12 seconds.
-#
-# Build it with the shipping contract, never with plain `cargo build`: on 2026-10-22 this line built and
-# installed a wa.exe with empty embedded code-mode assets, and every turn after the restart failed with
-# `codemode_not_ready` before the first model call. The contract verifies the pinned assets and proves the
-# candidate actually runs a sandbox before it is allowed to become the thing the sentinel installs.
-command -v node >/dev/null 2>&1 || { say "onStale: node is unavailable; the native code-mode shipping build cannot be verified, so nothing was built"; exit 2; }
-CODEMODE_BUILD_SCRIPT="$tree/scripts/codemode-build.mjs"; CODEMODE_BUILD_ROOT="$tree"
-if command -v cygpath >/dev/null 2>&1; then
-  CODEMODE_BUILD_SCRIPT="$(cygpath -w "$CODEMODE_BUILD_SCRIPT")"; CODEMODE_BUILD_ROOT="$(cygpath -w "$CODEMODE_BUILD_ROOT")"
+owner_json="$(curl -s -m 4 -G --data-urlencode "id=$SESSION" "http://127.0.0.1:$PORT/session/owner" 2>/dev/null)"
+OWNER="$(printf '%s' "$owner_json" | field user_id)"
+owner_id="$(printf '%s' "$owner_json" | field id)"
+if [ -z "$OWNER" ] || [ "$owner_id" != "$SESSION" ]; then
+  hold deploy_owner_unproved "GET /session/owner?id=$SESSION did not prove session id and user_id (response: ${owner_json:0:300})"
 fi
-node "$CODEMODE_BUILD_SCRIPT" build "$CODEMODE_BUILD_ROOT" >/dev/null 2>&1 || {
-  say "onStale: the native code-mode shipping build failed; not requesting an install from a binary that cannot run code mode"
-  exit 2
-}
-candidate="$tree/rust/target/release/wa.exe"
-[ -x "$candidate" ] || candidate="$tree/rust/target/release/wa"
-[ -f "$candidate" ] || { say "onStale: no candidate binary after a successful build"; exit 2; }
 
 sentinel="${WA_SENTINEL_BIN:-$STATE_DIR/wa-sentinel.exe}"
 [ -f "$sentinel" ] || sentinel="$(command -v wa-sentinel 2>/dev/null || true)"
-[ -n "$sentinel" ] && [ -e "$sentinel" ] || { say "onStale: no sentinel binary to request an upgrade"; exit 2; }
+[ -n "$sentinel" ] && [ -e "$sentinel" ] || hold deploy_sentinel_unavailable "no sentinel binary to request a deploy"
 
-args=(request upgrade --binary "$candidate" --reason "onStale: installed ${installed:0:8} is behind origin/main $head_commit; the node went idle, so this is the moment to install it")
-if [ -n "${WA_COORDINATOR_SESSION:-}" ]; then
-  args+=(--session "$WA_COORDINATOR_SESSION" --prompt "onStale requested an install (installed ${installed:0:8} -> $head_commit). Verify from installed.txt and the served ui/app.js, not from the request: if the request failed, read failed/*.json and upgrade.log, FIX the root cause, then re-request. Do not report a launch receipt as a result.")
-fi
+reason="onStale: installed ${installed:0:8} is behind origin/main $head_sha; the node went idle, so this is the moment to deploy it"
+args=(request deploy --expected-sha "$head_sha" --owner "$OWNER" --session "$SESSION" --reason "$reason")
 
-if "$sentinel" "${args[@]}" >>"$LOG" 2>&1; then
+if request_out="$("$sentinel" "${args[@]}" 2>&1)"; then
+  printf '%s\n' "$request_out" >> "$LOG"
+  rm -f "$HELD"
   write_state "$busy_at" "$key" "$head_commit"
-  say "onStale: upgrade requested for $key"
+  say "onStale: deploy requested for $key (source $head_sha)"
 else
-  say "onStale: the request itself was refused (see $LOG); no install was attempted"
-  exit 2
+  rc=$?
+  printf '%s\n' "$request_out" >> "$LOG"
+  hold deploy_request_refused "the sentinel refused the deploy request (exit $rc): $(printf '%s' "$request_out" | tail -n 1)"
 fi

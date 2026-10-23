@@ -85,9 +85,28 @@ pub(crate) fn intake(request: &Value, id: &str) -> Result<()> {
     Ok(())
 }
 
+/// Whether a protocol deploy may be dispatched. The reason it may not is a named value, because a
+/// silent `continue` made a blocked protocol request look merely queued: the request stayed in the box
+/// with no durable statement of what was missing, and nobody could act on it.
 pub(crate) fn ready() -> bool {
-    installed_binary().parent().map(|p|p.join("runtime-worktree.txt").is_file()).unwrap_or(false)
-        && jobs::store().get("onSentinelReturn").map(|j|hook_ready(&j)).unwrap_or(false)
+    not_ready_reason().is_none()
+}
+
+/// Why a protocol deploy is not dispatchable right now, or `None` when it is. Both prerequisites are
+/// local facts the watcher can prove: the installed runtime source record, and the return hook that
+/// carries the install result back to the parent session.
+pub(crate) fn not_ready_reason() -> Option<String> {
+    let binary=installed_binary();
+    let record=binary.parent().map(|parent|parent.join("runtime-worktree.txt"));
+    if !record.as_deref().is_some_and(Path::is_file) {
+        return Some(format!("deploy_protocol_not_ready: {} is missing; the exact-source deploy cannot resolve its runtime tree",
+            record.map(|path|path.display().to_string()).unwrap_or_else(||"(no install parent)".into())));
+    }
+    match jobs::store().get("onSentinelReturn") {
+        Ok(job) if hook_ready(&job) => None,
+        Ok(_) => Some("deploy_protocol_not_ready: the onSentinelReturn hook is present but disabled or not an enabled sentinel.return event wake".into()),
+        Err(error) => Some(format!("deploy_protocol_not_ready: the onSentinelReturn hook store is unreadable ({error})")),
+    }
 }
 
 pub(crate) fn hook_ready(job:&Value) -> bool {
