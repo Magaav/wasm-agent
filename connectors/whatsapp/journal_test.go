@@ -474,3 +474,41 @@ func TestReleaseHoldPreservesBlockedEvidenceAndProcessesNewAudio(t *testing.T) {
 		t.Fatal("missing hold was not refused", err)
 	}
 }
+
+// The same person can appear under a phone-number JID and a LID. The journal
+// already records the alternate on each incoming message; a direct read must use
+// that evidence to keep the person's messages together, and must still respect a
+// narrow selected-chat scope.
+func TestReadSnapshotUnionsTheSameDirectContactAcrossItsAlternateID(t *testing.T) {
+	j := fixture(t)
+	c, _ := j.Config()
+	c.AllChats, c.Chats = true, nil
+	if err := j.save(c); err != nil {
+		t.Fatal(err)
+	}
+	lid, pn := "900@lid", "200@s.whatsapp.net"
+	if err := j.ingest(Message{ID: "lid-1", Chat: lid, Sender: lid, SenderAlt: pn, Body: "today", Sent: 200}); err != nil {
+		t.Fatal(err)
+	}
+	if err := j.ingest(Message{ID: "pn-1", Chat: pn, Sender: pn, Body: "old", Sent: 100}); err != nil {
+		t.Fatal(err)
+	}
+	page, err := j.readPage(c, readRequest{Chat: pn, Limit: 10}, "read_snapshot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := page["messages"].([]Message); len(got) != 2 || got[0].Body != "today" || got[1].Body != "old" {
+		t.Fatalf("alternate identity was not read together: %+v", got)
+	}
+	c.AllChats, c.Chats = false, []string{pn}
+	if err := j.save(c); err != nil {
+		t.Fatal(err)
+	}
+	narrow, err := j.readPage(c, readRequest{Chat: pn, Limit: 10}, "read_snapshot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := narrow["messages"].([]Message); len(got) != 1 || got[0].Body != "old" {
+		t.Fatalf("narrow scope widened to the unapproved alternate: %+v", got)
+	}
+}

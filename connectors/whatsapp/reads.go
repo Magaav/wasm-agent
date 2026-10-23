@@ -5,6 +5,8 @@ import (
 	"errors"
 	"strings"
 	"time"
+
+	"go.mau.fi/whatsmeow/types"
 )
 
 type readRequest struct {
@@ -46,7 +48,7 @@ func (j *Journal) readScope(c Config, r readRequest, alias string) (string, []an
 		if len(chats) > 0 {
 			return "", nil, errors.New("ambiguous_read_scope")
 		}
-		chats = []string{r.Chat}
+		chats = append([]string{r.Chat}, j.contactAliases(c, r.Chat)...)
 	}
 	// Original selected-chat API compatibility; an account-wide service does NOT implicitly widen reads.
 	if len(chats) == 0 {
@@ -72,6 +74,46 @@ func (j *Journal) readScope(c Config, r readRequest, alias string) (string, []an
 	}
 	return where + " AND " + alias + "chat IN (" + strings.Join(slots, ",") + ")", args, nil
 }
+
+// contactAliases returns the other direct-chat ids that the journal's own
+// message-author evidence proves to be the same person: the sender alternate
+// recorded on an incoming message, or a chat whose incoming sender alternate is
+// this chat. A direct chat has at most one such pair; groups are never joined to
+// a member's direct chat. A narrow scope only expands to chats it already
+// allows, so this cannot widen a guest or selected-chat binding.
+func (j *Journal) contactAliases(c Config, chat string) []string {
+	jid, err := types.ParseJID(chat)
+	if err != nil || jid.Server == types.GroupServer {
+		return nil
+	}
+	rows, err := j.db.Query(`SELECT DISTINCT alt FROM source_authors WHERE account=? AND generation=? AND chat=? AND own=0 AND alt!='' UNION SELECT DISTINCT chat FROM source_authors WHERE account=? AND generation=? AND alt=? AND own=0 AND chat!=''`, c.Account, c.Generation, chat, c.Account, c.Generation, chat)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	seen := map[string]bool{chat: true}
+	out := []string{}
+	for rows.Next() {
+		var value string
+		if rows.Scan(&value) != nil {
+			return out
+		}
+		alternate, err := types.ParseJID(value)
+		if err != nil || !validChat(value) || seen[value] {
+			continue
+		}
+		if alternate.Server != types.DefaultUserServer && alternate.Server != types.HiddenUserServer {
+			continue
+		}
+		if !c.AllChats && !contains(c.Chats, value) {
+			continue
+		}
+		seen[value] = true
+		out = append(out, value)
+	}
+	return out
+}
+
 func (j *Journal) readPage(c Config, r readRequest, kind string) (map[string]any, error) {
 	return j.readPageBudget(c, r, kind, pageByteLimit)
 }
