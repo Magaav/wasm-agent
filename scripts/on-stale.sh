@@ -11,6 +11,15 @@
 #   * The /compact route is the authority on whether a main run is still active. Aggregate health
 #     state is not used here: it counts subagents, which are out of scope for main compaction.
 #   * The trigger is the node's own run-finished event, so it does not poll or race a 30s tick.
+#   * The event names the session that just finished, and that is the session this posts: with more
+#     than one main thread, 'the newest main session on this node' is a different thread often
+#     enough that the idle pass compacted the wrong one. The id is read from the retained event file
+#     and validated against a strict character set before it is put in a JSON body - event text is
+#     data, never shell, and never trusted to be well formed.
+#   * A run with no event file (a manual/direct invocation) keeps the route's own latest-main
+#     selection, and says so: that fallback is the route's, not this script's, and it is not
+#     event-targeted. A run WITH an event file whose session is missing or malformed does not fall
+#     back at all - it names the event it could not trust and skips the idle summary.
 #   * It never stops, starts, builds or installs anything. Deploy is the only installer path, and the
 #     sentinel performs the request when the node is idle. A failure here is a failed *request*, which is
 #     visible, not a half-done install.
@@ -47,6 +56,42 @@ write_state() { # busy_at acted_key head
     "${1:-0}" "${2:-}" "${3:-}" "$now" > "$STATE.tmp" 2>/dev/null && mv -f "$STATE.tmp" "$STATE" 2>/dev/null
 }
 json_escape() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr '\r\n' '  '; }
+# event_session - the top-level "session" string of a retained job event, or nothing.
+# Reads JSON as data with awk's string scanner: one top-level object, quoted keys, escapes skipped.
+# It never evaluates the event, and it stops when that object ends, so a nested "session" (a field
+# of an unrelated object) is never mistaken for the event's own id.
+event_session() { # file
+  [ -f "$1" ] || return 0
+  awk '
+    { buf = buf $0 "\n" }
+    END {
+      n = length(buf); if (n == 0) exit 0
+      depth = 0; i = 1; want = 0
+      while (i <= n) {
+        c = substr(buf, i, 1)
+        if (c == "{" || c == "[") { depth++; i++; continue }
+        if (c == "}" || c == "]") { depth--; if (depth <= 0) exit 0; i++; continue }
+        if (c != "\"") { i++; continue }
+        j = i + 1; s = ""; closed = 0
+        while (j <= n) {
+          d = substr(buf, j, 1)
+          if (d == "\\") { s = s substr(buf, j, 2); j += 2; continue }
+          if (d == "\"") { closed = 1; j++; break }
+          s = s d; j++
+        }
+        if (!closed) exit 0
+        k = j
+        while (k <= n) {
+          e = substr(buf, k, 1)
+          if (e != " " && e != "\t" && e != "\n" && e != "\r") break
+          k++
+        }
+        if (depth == 1 && substr(buf, k, 1) == ":") { want = (s == "session") ? 1 : 0; i = k + 1; continue }
+        if (depth == 1 && want == 1) { print s; exit 0 }
+        i = j
+      }
+    }' "$1" 2>/dev/null | head -1
+}
 hold() { # code detail
   # A required value could not be proved. Record it where an operator and the status surface can read it,
   # with the exact reason, and stop without writing a request. The stale key is deliberately not marked as
@@ -80,11 +125,38 @@ fi
 
 # Idle summarization: the in-run compactor keeps its measured 90-95% trigger because early
 # rewrites invalidate the provider prefix cache. After a main run has finished, with no other
-# run queued, the operator asked for one maintenance check at 40%: summarize the latest main
-# session once. The route atomically reserves the idle node; subagents are ignored, and it never
+# run queued, the operator asked for one maintenance check at 40% on the session that just
+# finished. The route atomically reserves the idle node; subagents are ignored, and it never
 # summarizes a subagent.
-if [ "${WA_STALE_COMPACT:-1}" != "0" ]; then
-  compact="$(curl -s -m 180 -X POST -H 'Content-Type: application/json' -d '{"min_percent":40}' "http://127.0.0.1:$PORT/compact" 2>/dev/null)"
+compact_body='{"min_percent":40}'
+compact_skip=""
+event_sid=""
+if [ -n "${WA_JOB_EVENT_FILE:-}" ]; then
+  event_sid="$(event_session "$WA_JOB_EVENT_FILE")"
+  if [ -z "$event_sid" ]; then
+    compact_skip="$WA_JOB_EVENT_FILE has no top-level \"session\" string; skipping the idle compaction rather than letting the route pick some other main session"
+  else
+    case "$event_sid" in
+      *[!A-Za-z0-9._:-]*) compact_skip="$WA_JOB_EVENT_FILE has a session id outside the safe id set ([A-Za-z0-9._:-]); skipping the idle compaction rather than posting it" ;;
+      *) compact_body="{\"min_percent\":40,\"session_id\":\"$event_sid\"}" ;;
+    esac
+  fi
+  [ -z "$compact_skip" ] || event_sid=""
+fi
+
+if [ "${WA_STALE_COMPACT:-1}" = "0" ]; then
+  : # idle compaction disabled by the operator: nothing to target, nothing to post
+elif [ -n "$compact_skip" ]; then
+  say "onStale: MALFORMED EVENT - $compact_skip; nothing was summarized"
+elif [ -z "${WA_JOB_EVENT_FILE:-}" ]; then
+  say "onStale: no WA_JOB_EVENT_FILE (manual or direct run) - posting min_percent:40 with no session_id, so the route uses its latest-main fallback; this request is not event-targeted"
+else
+  say "onStale: idle compaction targeted at the event session $event_sid"
+fi
+
+# One POST for both shapes: what differs is the body, and whether the fallback was named above.
+if [ "${WA_STALE_COMPACT:-1}" != "0" ] && [ -z "$compact_skip" ]; then
+  compact="$(curl -s -m 180 -X POST -H 'Content-Type: application/json' -d "$compact_body" "http://127.0.0.1:$PORT/compact" 2>/dev/null)"
   case "$compact" in
     *'"error":"node_busy"'*)
       say "onStale: a main run is still active - compaction deferred to its run-finished event"

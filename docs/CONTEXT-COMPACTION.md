@@ -5,12 +5,26 @@ The operator requested compaction at90–95% instead of observed50–60%, unless
 ## Idle maintenance (40%)
 
 `onStale` is triggered once by `node.run_finished` after a **main** run settles; it is not
-a 30-second schedule. It posts `/compact` with `min_percent:40`. The route atomically
-reserves an idle node against the next run, summarizes the latest main session, and
-returns `node_busy` if another main run is still queued or running. Subagents are out of
-scope: they neither trigger nor block this path, and are never summarized here. The
-ordinary in-run trigger stays at capacity minus reserve (about 90–95%). This is an
+a 30-second schedule. The event is `{"session","run_id","at"}`: onStale reads the top-level
+`session` from the retained event JSON (`WA_JOB_EVENT_FILE`) and posts `/compact` with
+`min_percent:40` **and that `session_id`**, so idle compaction targets the main session whose
+run just finished. With several main threads, "the newest main session on this node" is a
+different thread often enough that a session-less request compacted the wrong one. The id is
+validated against a strict character set (`A-Za-z0-9._:-`) before it is put into the JSON body;
+event text is data and is never interpolated as shell. The route atomically reserves an idle
+node against the next run and returns `node_busy` if another main run is still queued or running.
+Subagents are out of scope: they neither trigger nor block this path, and are never summarized
+here. The ordinary in-run trigger stays at capacity minus reserve (about 90–95%). This is an
 additional idle path, not a lower in-run default. `WA_STALE_COMPACT=0` disables it.
+
+Two non-event cases are distinct. If a delivered event has **no valid top-level session id**
+(missing, empty, or outside the safe set), onStale logs a `MALFORMED EVENT` line naming that
+event file and skips the idle compaction: it does not fall back to `/compact`'s newest-session
+selection, and the unrelated staleness/deploy observation still proceeds. If
+`WA_JOB_EVENT_FILE` is **absent** (a manual or direct run), onStale keeps the route's
+documented behavior and posts `{"min_percent":40}` with no `session_id`, whose selection is
+the route's latest-main fallback; the log says so. That fallback is not event-targeted and is
+not the installed job's path.
 
 `POST /compact` is admitted by the listener before any run or control lane: if the
 scheduler has a queued/running main run, it returns

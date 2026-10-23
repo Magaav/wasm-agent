@@ -975,7 +975,8 @@ fn compact_end() {
 }
 
 /// A main run finished. The Sentinel job `on-stale` is event-triggered on this topic; it checks
-/// /health and calls /compact once. Subagent runs are not emitted here.
+/// /health, then posts /compact once for the session in this payload - the session that finished,
+/// which is not necessarily the node's newest main session. Subagent runs are not emitted here.
 fn emit_run_finished(session: &str, run_id: u64) {
     let home = crate::resolve_home();
     let store = wa_jobs::Store::new(
