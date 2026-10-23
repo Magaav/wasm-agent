@@ -110,6 +110,13 @@
     check(!document.body.classList.contains('node-offline'), 'health recovery clears the offline class');
     check(statusLine === null, 'health recovery clears the stale restart status');
     check(upgradeBar.hidden && !document.body.classList.contains('upgrading'), 'health recovery hides the upgrade bar');
+    // A live run does not make a restart/offline claim true; the health answer still clears it.
+    busy = true;
+    applyUpgradeState({upgrading:{state:'upgrading',phase:'installing',to:'fixture build'}});
+    nodeOffline(true);
+    applyUpgradeState({upgrading:{state:'done'}});
+    check(!document.body.classList.contains('node-offline') && statusLine === null, 'health recovery clears restart status while a run is busy');
+    busy = false;
     // A pending restore can hang forever after a restart. It must be abandoned by its
     // generation/deadline so a watch retry starts a fresh request instead of reusing it.
     conversationEpoch += 1;

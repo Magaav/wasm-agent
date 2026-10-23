@@ -4274,7 +4274,8 @@ function clearNodeRestartStatus() {
   document.body.classList.remove("node-offline");
   if (nodeWatch) { clearInterval(nodeWatch); nodeWatch = null; }
   const status = statusLine && String(statusLine.textContent || "");
-  if (!busy && status && /restart|offline|not answering|installing/i.test(status)) clearStatus();
+  // The install/restart claim is stale once health answers, whether or not a run is live.
+  if (status && /restart|offline|not answering|installing/i.test(status)) clearStatus();
 }
 async function recoverAfterNodeReturn(healthHint) {
   if (ownStreamActive()) return false;
