@@ -98,3 +98,18 @@ fn a_request_keeps_its_state_progress_and_failure() {
     std::env::remove_var("WASM_AGENT_HOME");
     let _ = std::fs::remove_dir_all(home);
 }
+
+#[test]
+fn a_budget_deferral_parks_the_request_and_is_cleared_at_settlement() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let home = isolated_home("deferral");
+    let id = "1792786064979548800-7080-00000000000000000000";
+    let now = now_epoch();
+    assert!(deferred_until(id).is_none());
+    defer_request(id, now + 60);
+    assert_eq!(deferred_until(id), Some(now + 60));
+    clear_deferral(id);
+    assert!(deferred_until(id).is_none(), "settlement must not leave a park behind");
+    std::env::remove_var("WASM_AGENT_HOME");
+    let _ = std::fs::remove_dir_all(home);
+}

@@ -1095,6 +1095,49 @@ fn wakes_last_hour() -> u32 {
         .count() as u32
 }
 
+/// A request parked by the hourly wake budget. The request file stays exactly where it is; this
+/// sidecar only says "do not re-claim before this epoch". The deferred attempt is not a failure and
+/// must not spin on the 200ms watcher tick: without it a budget refusal was retried about four times
+/// a second, each attempt auditing a line, until the hour rolled over.
+fn deferred_path(id: &str) -> PathBuf {
+    sentinel_dir().join("deferred").join(format!("{id}.json"))
+}
+
+fn deferred_until(id: &str) -> Option<u64> {
+    let bytes = std::fs::read(deferred_path(id)).ok()?;
+    serde_json::from_slice::<Value>(&bytes).ok()?.get("until")?.as_u64()
+}
+
+fn defer_request(id: &str, until: u64) {
+    let _ = std::fs::create_dir_all(sentinel_dir().join("deferred"));
+    let _ = wa_operation::atomic_json(&deferred_path(id), &json!({"id": id, "until": until}));
+}
+
+fn clear_deferral(id: &str) {
+    let _ = std::fs::remove_file(deferred_path(id));
+}
+
+/// The first moment the hourly wake budget can admit another wake: the oldest wake-start still inside
+/// the window ages out at +3600s. Clamped so a clock jump cannot park a request for longer than the
+/// window itself or wake it immediately.
+fn next_wake_slot() -> u64 {
+    let now = now_epoch();
+    let Ok(text) = std::fs::read_to_string(log_path()) else { return now + 60 };
+    let cutoff = now.saturating_sub(3600);
+    let oldest = text
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split('\t');
+            let at: u64 = fields.next()?.parse().ok()?;
+            (at >= cutoff && fields.next() == Some("wake-start")).then_some(at)
+        })
+        .min();
+    oldest
+        .map(|at| at.saturating_add(3601))
+        .unwrap_or(now + 60)
+        .clamp(now + 30, now + 3600)
+}
+
 pub(crate) fn verb_restart(reason: &str) -> Result<String> {
     queue::step("restarting", "stopping and starting the node");
     let binary = installed_binary();
@@ -1635,6 +1678,7 @@ fn finish_request(claim: &Path, request: &Value) {
     // into a `failed` record - so the run that asked for the deploy was never woken and nobody was told.
     if !ok && detail.starts_with("wake-budget") {
         let back = sentinel_dir().join("requests").join(claim.file_name().unwrap_or_default());
+        defer_request(id, next_wake_slot());
         if std::fs::rename(claim, &back).is_ok() {
             queue::observe(request, id, "waiting", "deferred", &detail);
             audit("wake-deferred", &back.display().to_string(), &detail);
@@ -1645,6 +1689,7 @@ fn finish_request(claim: &Path, request: &Value) {
     // The durable answer to "what happened to the thing I queued?": state, final step and the detail the
     // verb returned. A failure is red in the window and stays visible for a week; it is never only a log line.
     queue::observe(request, id, if ok { "done" } else { "failed" }, phase, &detail);
+    clear_deferral(id);
     if let Err(error) = deploy_protocol::record(request, claim.file_stem().and_then(|s|s.to_str()).unwrap_or(""), phase, &detail) {
         audit("protocol-record-failed", &claim.display().to_string(), &error.to_string());
     }
@@ -1752,6 +1797,14 @@ fn process_requests(background: bool, held: &mut Held) -> Result<u32> {
         // readable.
         let key=path.file_name().unwrap_or_default().to_string_lossy().to_string();
         let asked=preview["reason"].as_str().unwrap_or("(no reason given)");
+        // A wake parked by the hourly budget is not work yet, and the watcher ticks every 200ms: without
+        // this skip each tick re-claimed the request, ran `wake`, and wrote another `wake-deferred` line.
+        if let Some(until) = deferred_until(key.trim_end_matches(".json")) {
+            if until > now_epoch() {
+                continue;
+            }
+            clear_deferral(key.trim_end_matches(".json"));
+        }
         // The retired installer is not replayed. Historical upgrade request files are retained exactly
         // where they are and held by name: no claim, no install, no rewrite, and the reason is visible in
         // the queue and the log. Deploy is the only installer.
