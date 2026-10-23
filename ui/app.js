@@ -3737,31 +3737,91 @@ let transcriptReady = false;
 let transcriptRetryAt = 0;
 let transcriptFailures = 0;
 let transcriptFailure = "";
-async function restoreSession(target = chatSession, retry = false) {
+// A restore is a bounded attempt, not a promise anyone may await forever. A node restart can
+// leave one request chain unsettled even though /version answers again; handing that same
+// promise to every watch retry is how the transcript stayed frozen until a manual reload.
+// An attempt is abandoned by its deadline, by a watch retry that waited behind it without
+// progress, or by node recovery. The saved view and the epoch guards are unchanged.
+const RESTORE_ATTEMPT_DEADLINE_MS = 30000;
+const RESTORE_STALL_MS = 12000;
+function abandonRestoreSession(pending, reason) {
+  if (!pending || pending.abandoned) return false;
+  pending.abandoned = true;
+  pending.abandonedReason = reason;
+  // Abort the reads where the browser honours it; the generation check is still the
+  // authority, so a request that ignores the signal cannot paint after the view moved.
+  try { pending.controller?.abort(new DOMException("restore abandoned: " + reason, "AbortError")); } catch (error) { /* best effort */ }
+  if (restoringSession === pending) restoringSession = null;
+  return true;
+}
+function restoreAttemptStale(pending, force) {
+  if (!pending || pending.abandoned) return true;
+  if (force) return true; // /version recovery: reads from before the restart are suspect.
+  if (Date.now() - pending.startedAt >= RESTORE_ATTEMPT_DEADLINE_MS) return true;
+  // One watch retry may legitimately join a slow read. A later retry that has seen no
+  // progress for RESTORE_STALL_MS is looking at a wedged chain, not a slow transcript.
+  return pending.retryWaits >= 1 && Date.now() - pending.progressAt >= RESTORE_STALL_MS;
+}
+// Keep the per-read deadline apiFetch applies to ordinary reads even though the attempt
+// supplies an abort signal: the attempt signal is for abandonment, not the only bound.
+function restoreReadSignal(attempt) {
+  if (!attempt) return undefined;
+  const signal = attempt.controller.signal;
+  if (typeof AbortSignal !== "undefined" && typeof AbortSignal.any === "function"
+    && typeof AbortSignal.timeout === "function") {
+    return AbortSignal.any([signal, AbortSignal.timeout(apiTimeout)]);
+  }
+  return signal;
+}
+function restoreSession(target = chatSession, retry = false, force = false) {
   const epoch = conversationEpoch;
   const node = activeNode;
   const submission = submissionEpoch;
-  if (ownStreamActive()) return false;
-  if (restoringSession && restoringSession.target === target && restoringSession.epoch === epoch && restoringSession.node === node && restoringSession.submission === submission) {
-    return restoringSession.promise;
+  if (ownStreamActive()) return Promise.resolve(false);
+  const pending = restoringSession;
+  const same = pending && pending.target === target && pending.epoch === epoch
+    && pending.node === node && pending.submission === submission;
+  if (same && !restoreAttemptStale(pending, force)) {
+    if (retry) pending.retryWaits += 1;
+    return pending.promise;
   }
-  if (retry && Date.now() < transcriptRetryAt) return false;
-  const pending = { target, epoch, node, submission, promise: restoreSessionOnce(target, epoch, node) };
-  restoringSession = pending;
-  try { return await pending.promise; }
-  finally { if (restoringSession === pending) restoringSession = null; }
+  if (same) abandonRestoreSession(pending, force ? "node recovery" : "stale attempt");
+  if (retry && !force && Date.now() < transcriptRetryAt) return Promise.resolve(false);
+  const attempt = { target, epoch, node, submission, startedAt: Date.now(), progressAt: Date.now(),
+    retryWaits: 0, abandoned: false, controller: new AbortController(), promise: null, deadline: null };
+  restoringSession = attempt;
+  attempt.deadline = new Promise((resolve, reject) => {
+    attempt.timer = setTimeout(() => {
+      abandonRestoreSession(attempt, "deadline");
+      reject(new DOMException("restore attempt deadline", "AbortError"));
+    }, RESTORE_ATTEMPT_DEADLINE_MS);
+  });
+  attempt.promise = (async () => {
+    try {
+      return await Promise.race([restoreSessionOnce(target, epoch, node, attempt), attempt.deadline]);
+    } catch (error) {
+      return false; // the attempt owns its own notice; this only releases the caller
+    } finally {
+      clearTimeout(attempt.timer);
+      if (restoringSession === attempt) restoringSession = null;
+    }
+  })();
+  return attempt.promise;
 }
 
-async function restoreSessionOnce(target, epoch, node = activeNode) {
+async function restoreSessionOnce(target, epoch, node = activeNode, attempt = null) {
   const submission = submissionEpoch;
   if (ownStreamActive()) return false;
   let phase = "session discovery";
-  const viewing = () => chatSession === target && conversationEpoch === epoch && activeNode === node
+  const viewing = () => (!attempt || (!attempt.abandoned && restoringSession === attempt))
+    && chatSession === target && conversationEpoch === epoch && activeNode === node
     && submissionEpoch === submission && !ownStreamActive();
   try {
     // A known thread is already enough to read its authorized ledger. Discovery
     // is only needed for a new window, never a prerequisite on every reconnect.
-    const payload = target && blankSession !== target ? {sessions:[{id:target}]} : await (await apiFetch("sessions", { headers: apiHeaders() })).json();
+    const payload = target && blankSession !== target ? {sessions:[{id:target}]}
+      : await (await apiFetch("sessions", { headers: apiHeaders(), signal: restoreReadSignal(attempt) })).json();
+    if (attempt) attempt.progressAt = Date.now();
     const sessions = payload.sessions || [];
     if (payload.error) throw new Error(payload.error);
     if (!viewing()) return false;
@@ -3795,16 +3855,18 @@ async function restoreSessionOnce(target, epoch, node = activeNode) {
     // Health is listener-owned; native lookup shares the transcript's read
     // capacity. Read history first so recovery cannot overload its own slot.
     let [full, health] = await Promise.all([
-      apiFetch(route, { headers: apiHeaders() }).then((response) => response.json()),
+      apiFetch(route, { headers: apiHeaders(), signal: restoreReadSignal(attempt) }).then((response) => response.json()),
       nodeHealth(),
     ]);
     if (!viewing()) return false;
+    if (attempt) attempt.progressAt = Date.now();
     if (!full || full.error || !Array.isArray(full.messages)) {
       throw new Error(full?.error || "invalid session response");
     }
     phase = "native session lookup";
-    const child = await nativeSessionTask(wanted.id);
+    const child = await nativeSessionTask(wanted.id, restoreReadSignal(attempt));
     if (!viewing()) return false;
+    if (attempt) attempt.progressAt = Date.now();
     if (health) observedRun = activeRun(health, wanted.id);
     applyRunControls();
     phase = route;
@@ -3813,8 +3875,9 @@ async function restoreSessionOnce(target, epoch, node = activeNode) {
     // reread once before declaring a run unfinished; otherwise a completed answer could
     // briefly be displayed as a lost tool call.
     if (outcome.name === "unfinished" && health && !activeRun(health, wanted.id)) {
-      const latest = await (await apiFetch(route, { headers: apiHeaders() })).json();
+      const latest = await (await apiFetch(route, { headers: apiHeaders(), signal: restoreReadSignal(attempt) })).json();
       if (!viewing()) return false;
+      if (attempt) attempt.progressAt = Date.now();
       if (latest && !latest.error && Array.isArray(latest.messages)) {
         full = latest;
         outcome = sessionOutcome(full);
@@ -4151,11 +4214,19 @@ function applyUpgradeState(health) {
   if (up && up.state === 'upgrading') {
     upgradeState = up;
   } else if (health) {
-    // A real answer with no install in progress: the bar comes down. A null health does NOT clear it.
+    // A real answer with no install in progress - done, failed or absent - ends the install
+    // claim. A null health does NOT clear it: that is the expected gap while the node is down
+    // for the install.
     upgradeState = null;
   }
   document.body.classList.toggle('upgrading', !!upgradeState);
-  if (!upgradeState) { bar.hidden = true; bar.removeAttribute('data-phase'); return; }
+  if (!upgradeState) {
+    bar.hidden = true; bar.removeAttribute('data-phase');
+    // The node answered, so a restart/offline claim is stale even if it was set while the bar
+    // was up. Never leave the page saying the node is away while it is answering.
+    if (health) clearNodeRestartStatus();
+    return;
+  }
   const order = ['waiting', 'stopping', 'installing', 'verifying'];
   const at = Math.max(0, order.indexOf(upgradeState.phase));
   const pct = Math.min(92, 10 + at * 26);
@@ -4177,7 +4248,7 @@ function nodeOffline(offline) {
   document.body.classList.toggle("node-offline", offline);
   if (offline && upgradeState) setStatus("the node is restarting to install " + (upgradeState.to || "a new build") + " - it will answer again shortly");
   else if (offline) setStatus("the local node is not answering - start it with `wa ui`");
-  else clearStatus();
+  else clearNodeRestartStatus();
 }
 function watchNode() {
   if (nodeWatch) return;
@@ -4185,9 +4256,40 @@ function watchNode() {
   nodeWatch = setInterval(async () => {
     try {
       const health = await nodeHealth(1000);
-      if (health) { clearInterval(nodeWatch); nodeWatch = null; nodeOffline(false); refreshMeta(); }
+      if (health) {
+        clearInterval(nodeWatch); nodeWatch = null;
+        nodeOffline(false);
+        // A health answer also proves any install record is finished or gone.
+        applyUpgradeState(health);
+        refreshMeta();
+      }
     } catch (error) { /* still down */ }
   }, 3000);
+}
+// A node that answers /version again after an outage is a recovery edge: an install bar
+// and a restart/offline claim are stale, and a transcript read pending across the restart
+// may never settle. This is the one place that acts on that edge, so recovery never needs
+// a reload and the watch loop keeps a single path.
+function clearNodeRestartStatus() {
+  document.body.classList.remove("node-offline");
+  if (nodeWatch) { clearInterval(nodeWatch); nodeWatch = null; }
+  const status = statusLine && String(statusLine.textContent || "");
+  if (!busy && status && /restart|offline|not answering|installing/i.test(status)) clearStatus();
+}
+async function recoverAfterNodeReturn(healthHint) {
+  if (ownStreamActive()) return false;
+  const health = healthHint === undefined ? await nodeHealth(0) : healthHint;
+  if (health) {
+    applyUpgradeState(health);
+    clearNodeRestartStatus();
+  }
+  if (!openingView) {
+    // A pending attempt from before the restart (or a transcript that never loaded) must get
+    // a fresh bounded attempt; the old promise is abandoned instead of being reused.
+    if (restoringSession || !transcriptReady) await restoreSession(chatSession, true, true);
+    if (health && synced) void ensureMeta(true);
+  }
+  return !!health;
 }
 // A notice the page put up about this run, so it can take it down again. A span that stays after the
 // thing it described has gone is not a record, it is litter - and it grows the transcript with every
@@ -6373,14 +6475,15 @@ function applyUiVersion(next) {
 // belongs there: it was always the liveness signal, it just never said so. Nothing here keeps a
 // retry timer of its own - one recovery path, not two.
 let synced = false;
+let nodeReachable = true;
 let syncRunning = false;
 let syncAttempts = 0;
 let metaReady = false;
 let metaRunning = false;
 
-async function ensureMeta() {
+async function ensureMeta(force = false) {
   const interval=!uiVisible() ? 60000 : composerBusy() || balloon.open ? 5000 : 30000;
-  if (metaRunning || Date.now() < metadataRetryAt || (metaReady && Date.now() - metadataRefreshedAt < interval)) return;
+  if (metaRunning || (!force && (Date.now() < metadataRetryAt || (metaReady && Date.now() - metadataRefreshedAt < interval)))) return;
   metaRunning = true;
   try { metaReady = await refreshMeta(); }
   finally { metaRunning = false; }
@@ -6518,6 +6621,12 @@ async function watch() {
     const response = await apiFetch("version");
     const payload = await response.json();
     applyUiVersion(payload.version);
+    // /version is the one read that always runs, so a node that answers again after an
+    // outage is observed here. Recover once on that edge: stale install/offline claims come
+    // down and a transcript restore left hanging by the restart is replaced, never reused.
+    const recovered = !nodeReachable;
+    nodeReachable = true;
+    if (recovered) void recoverAfterNodeReturn();
     // The node answered, so finish the first sync if it never finished. This loop always runs.
     if (openingView) { /* component owns recovery; no hidden main-chat reads */ }
     else if (!synced) sync("watch");
@@ -6532,7 +6641,7 @@ async function watch() {
         if (Date.now() - reconciledAt > 5000) { reconciledAt = Date.now(); reconcile(); }
       }
     }
-  } catch (error) { /* keep polling: the deadline is what keeps this loop alive */ }
+  } catch (error) { nodeReachable = false; /* keep polling: the deadline is what keeps this loop alive */ }
   setTimeout(watch, uiVisible() ? 3000 : 5000);
 }
 
@@ -7517,10 +7626,10 @@ async function attachSessionJournalOnce(thread, readHistory) {
   }
   return {rows,events,state:current.state,runKey:runKey(current)};
 }
-async function nativeSessionTask(thread) {
+async function nativeSessionTask(thread, signal) {
   if(!thread)return null;
   const response=await apiFetch('subagents',{method:'POST',headers:apiHeaders({'Content-Type':'application/json'}),
-    body:JSON.stringify({action:'lookup_session',conversation_id:thread})});
+    body:JSON.stringify({action:'lookup_session',conversation_id:thread}),signal});
   const result=await response.json();
   if(!response.ok || result.error)throw Error(result.error||'native_session_discovery_unavailable');
   if (result.found === false && result.task == null) return null;

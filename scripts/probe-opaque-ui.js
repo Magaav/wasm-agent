@@ -88,6 +88,59 @@
     check(!queue.hidden && queue.textContent.includes('fixture deploy'), 'sentinel queue shows a spawned deploy while upgrading');
     applySentinelQueue({upgrading:{state:'done'},sentinel:{active:0,failed:1,stale:false,requests:[{state:'failed',verb:'restart',phase:'failed',detail:'fixture'}]}});
     check(queue.hidden, 'sentinel queue closes when no work is active');
+    // --- restart recovery: install bar, offline status, and a hung transcript restore ---
+    // The bar is retained across the null-health gap of an install, but a health answer that
+    // reports done/failed/absent must take it down instead of leaving 'node restarting' forever.
+    const upgradeBar = document.getElementById('upgrade-bar');
+    applyUpgradeState({upgrading:{state:'upgrading',phase:'installing',to:'fixture build'}});
+    check(!upgradeBar.hidden && upgradeBar.dataset.phase === 'installing', 'upgrade bar shows a live install');
+    applyUpgradeState(null);
+    check(!upgradeBar.hidden, 'upgrade bar survives the null-health gap of a restart');
+    applyUpgradeState({upgrading:{state:'failed'}});
+    check(upgradeBar.hidden && !document.body.classList.contains('upgrading'), 'upgrade bar hides when upgrading.state is failed');
+    applyUpgradeState({upgrading:{state:'done'}});
+    check(upgradeBar.hidden && !document.body.classList.contains('upgrading'), 'upgrade bar hides when upgrading.state is done');
+    // A recovery /version read must clear the restart claim, not just the bar.
+    applyUpgradeState({upgrading:{state:'upgrading',phase:'installing',to:'fixture build'}});
+    nodeOffline(true);
+    check(document.body.classList.contains('node-offline'), 'a restart marks the node offline');
+    check(/restart/i.test((statusLine && statusLine.textContent) || ''), 'the restart status is visible');
+    const recovered = await recoverAfterNodeReturn(Object.assign({}, window.__fixtures.health, {upgrading:{state:'done'}}));
+    check(recovered === true, 'recovery reads health when the node answers');
+    check(!document.body.classList.contains('node-offline'), 'health recovery clears the offline class');
+    check(statusLine === null, 'health recovery clears the stale restart status');
+    check(upgradeBar.hidden && !document.body.classList.contains('upgrading'), 'health recovery hides the upgrade bar');
+    // A pending restore can hang forever after a restart. It must be abandoned by its
+    // generation/deadline so a watch retry starts a fresh request instead of reusing it.
+    conversationEpoch += 1;
+    const stalledBefore = window.__stalledSessionReads || 0;
+    window.__stallSession = true;
+    const hung = restoreSession(chatSession);
+    for (let i = 0; i < 100 && (window.__stalledSessionReads || 0) === stalledBefore; i++) await Promise.resolve();
+    const stalled = restoringSession;
+    check(!!stalled && stalled.promise === hung, 'a hung restore is tracked as one pending attempt');
+    check((window.__stalledSessionReads || 0) === stalledBefore + 1, 'the hung restore started its transcript read');
+    const joined = restoreSession(chatSession, true);
+    check(joined === hung, 'a watch retry joins the pending attempt once');
+    check(restoringSession === stalled && !stalled.abandoned, 'the first retry does not abandon a live attempt');
+    check(restoreAttemptStale({startedAt: Date.now() - RESTORE_ATTEMPT_DEADLINE_MS - 1, progressAt: Date.now(), retryWaits: 0, abandoned: false}, false), 'an attempt past its deadline is stale');
+    stalled.progressAt = Date.now() - RESTORE_STALL_MS - 1;
+    const fresh = restoreSession(chatSession, true);
+    check(stalled.abandoned && stalled.controller.signal.aborted, 'an expired attempt is abandoned and aborted');
+    check(fresh !== joined, 'an expired attempt is never handed to a later retry');
+    check((window.__stalledSessionReads || 0) === stalledBefore + 2, 'the retry starts a fresh transcript request');
+    check(restoringSession && restoringSession !== stalled, 'a fresh attempt is pending after the retry');
+    // Recovery releases the new pending attempt too, then completes against the live node.
+    window.__stallSession = false;
+    const sessionReads = () => (window.__calls || []).filter(call => String(call.url).startsWith('session?')).length;
+    const readsBeforeRecovery = sessionReads();
+    const recoveredRestore = await restoreSession(chatSession, true, true);
+    check(recoveredRestore === true, 'a forced restore after recovery completes');
+    check(transcriptReady === true && restoringSession === null, 'recovery leaves no pending restore');
+    check(sessionReads() === readsBeforeRecovery + 1, 'the forced restore issues one more fresh transcript read');
+    check((window.__stalledSessionReads || 0) === stalledBefore + 2, 'recovery did not replay the stalled reads');
+    check(Number(followedSeq) === 4, 'the restored cursor still covers every saved row');
+    check(messages.textContent.includes('legacy fallback'), 'the recovered transcript repaints the saved history');
     report.dataset.status = 'pass'; report.textContent = JSON.stringify({ checks, skipped: 0 });
   } catch (error) {
     report.dataset.status = 'fail'; report.textContent = JSON.stringify({ checks, error: error.message });

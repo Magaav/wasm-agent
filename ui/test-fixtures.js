@@ -369,6 +369,13 @@ window.fetch = function (input, init) {
   if (path === 'render.wasm' && window.__stallRenderer) {
     return new Promise(() => {});
   }
+  // The transcript read can be made to hang, not just fail: a node restart can leave a fetch
+  // unsettled forever. The recovery probe uses this to prove one pending restore cannot block
+  // every later retry, and that the stalled attempt is abandoned by generation/deadline.
+  if (path === 'session' && window.__stallSession) {
+    window.__stalledSessionReads = (window.__stalledSessionReads || 0) + 1;
+    return new Promise(() => {});
+  }
   // A transcript read can fail after `/sessions` has already advertised its new sequence. The
   // follower must retry that same sequence rather than marking it seen and waiting for another row.
   if (path === 'session' && Number(window.__failSessionReads) > 0) {
