@@ -3,6 +3,10 @@ local json=dofile('lua/vendor/json.lua')
 local M={}
 local CLASSIC={remember=true,recall=true,skill=true,capabilities=true,tool_search=true,tool_call=true,read=true,read_many=true,write=true,edit=true,bash=true,tool_result=true,session_worktree=true}
 local LEAN={remember=true,recall=true,skill=true,tool_search=true,tool_call=true,read=true,read_many=true,write=true,edit=true,bash=true,session_worktree=true}
+-- Declared from the start in orchestration mode, never discovered: the handoff facade and the
+-- routing decision that precedes it. A child never receives either: its envelope mode is 'full'
+-- and its profile does not allow them.
+local ORCHESTRATION_FIRST_CLASS={subagent=true,route_task=true}
 function M.bootstrap_mode()
  local mode=host.getenv('WASM_AGENT_BOOTSTRAP_MODE') or 'lean';if mode=='' then mode='lean' end
  if mode~='lean' and mode~='classic' then error('invalid_bootstrap_mode') end;return mode
@@ -36,11 +40,17 @@ function M.mode(ctx)
  insert(k,#existing>0 and 'full' or 'progressive')
  r=rows('SELECT value FROM meta WHERE key=?',{k});return r[1].value
 end
-function M.bootstrap(catalog)
+function M.bootstrap(catalog,ctx)
  local core=M.bootstrap_mode()=='lean' and LEAN or CLASSIC
- local out={};for _,item in ipairs(catalog)do local name=item['function'].name;if core[name] or name=='codemode' then out[#out+1]=item end end;return out
+ local orchestration=false
+ if ctx and not ctx.subagent then
+  local ok,mode=pcall(dofile,'lua/core/orchestration_mode.lua')
+  if ok then local probed,on=pcall(mode.mode_on,ctx);orchestration=probed and on==true end
+ end
+ local out={};for _,item in ipairs(catalog)do local name=item['function'].name
+  if core[name] or name=='codemode' or (orchestration and ORCHESTRATION_FIRST_CLASS[name]) then out[#out+1]=item end end;return out
 end
-function M.schemas(catalog,ctx)return M.mode(ctx)=='progressive' and M.bootstrap(catalog) or catalog end
+function M.schemas(catalog,ctx)return M.mode(ctx)=='progressive' and M.bootstrap(catalog,ctx) or catalog end
 local function eligible(catalog,ctx)
  local out={};for _,item in ipairs(catalog)do local name=item['function'].name
   if name~='tool_search' and name~='tool_call' and (not ctx.subagent or (ctx.subagent.allowed or {})[name]) then out[name]=item end

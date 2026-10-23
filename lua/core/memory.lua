@@ -1173,6 +1173,14 @@ function M.session_message_bounds(session_id)
   return query("SELECT MIN(seq) AS first_seq,MAX(seq) AS last_seq FROM messages WHERE session_id=?",{session_id})[1] or {}
 end
 
+-- The newest user row's seq: the boundary of the user turn the agent is answering. Callers that
+-- are scoped to "this turn" (the orchestration routing floor) compare against it rather than
+-- against a count of rows, which a steering note would move mid-run.
+function M.latest_user_seq(session_id)
+  local rows=query("SELECT MAX(seq) AS seq FROM messages WHERE session_id=? AND role='user'",{session_id})
+  return tonumber((rows[1] or {}).seq) or 0
+end
+
 -- One turn, by id, with its `changes` decoded the same way session_messages decodes it.
 --
 -- Undo works from a turn id rather than from a position: the reader clicks a topic in the

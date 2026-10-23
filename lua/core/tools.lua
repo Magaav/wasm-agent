@@ -475,6 +475,7 @@ local CUES = {
   web_search='Search public web sources with retained evidence',
   web_read='Read a public source or page an immutable cache ref',
   subagent = "Start and collect a child agent on a bounded task",
+  route_task = "Record whether this turn is done here or delegated (orchestration mode)",
   sessions = "List your past sessions",
   session = "Read a session, paging earlier evidence",
   search_messages = "Search your own past sessions for text",
@@ -544,6 +545,14 @@ function M.catalog(role)
     list[#list+1]=schema("tool_result","Retrieve an exact byte range of a full tool result saved after output truncation. Use the full_result.sha256 from the result, then follow next_offset until eof.",{
       sha256={type="string"},offset={type="integer",minimum=1},limit={type="integer",minimum=1,maximum=51200}
     },{"sha256"})
+    -- Orchestration mode's routing decision. It stays in the catalog so its definition and cue
+    -- are registered, but `M.all` shows it only to a coordinator whose conversation has the mode
+    -- on (and dispatch re-checks). Recording a route is not an action: nothing starts or runs.
+    list[#list+1]=schema('route_task','Orchestration mode only: record how this user turn is routed before any effect runs. `direct` for a quick answer, a read-only inspection or a short one-step task you will do here; `delegate` for a concrete implementation or multi-step change, which you then hand to a subagent with the bounded prompt and context. State the task in your own words (never a copy of the raw user text) and a one-line reason. A concrete implementation routed direct is a misroute, not a shortcut, and blind delegation is a failure too. Recording a route starts no child and executes nothing.',{
+      route={type='string',enum={'direct','delegate'}},
+      task={type='string',description='One sentence: the task as you understood it, in your own words.'},
+      reason={type='string',description='One line: why this route - a quick answer, read-only or short one-step work, or a concrete implementation or multi-step change.'}
+    },{'route','task'})
     for _, item in ipairs(M.admin) do list[#list + 1] = item end
     if host.quickjs then
       list[#list+1]=schema('codemode','Preferred programmatic coding path when admitted for this run: Node-free JavaScript sandbox calling approved native tools. Use await tools.<name>(args), text(value), return, searchTools and describeTool. Native permissions/workspace/type/effect checks apply per call. Scripts may filter results; complete nested originals remain hash-addressed. No filesystem/network/Node or implicit models API. Unawaited calls are not admitted; effectful calls are serial.',{code={type='string'},timeout_ms={type='integer',minimum=1,maximum=300000}},{'code'})
@@ -567,6 +576,17 @@ end
 local PROMPT_HIDDEN = {}
 for name,value in pairs(WHATSAPP_TOOLS) do PROMPT_HIDDEN[name]=value end
 PROMPT_HIDDEN.integrate=true -- Task-owner-only; parent cannot execute it. Child all_for reads catalog.
+PROMPT_HIDDEN.route_task=true -- Orchestration-mode-only; `M.all` re-adds it for that coordinator.
+
+-- The mode's own coordinator surface. `subagent` is declared from the start in orchestration
+-- mode (no tool_search discovery), and `route_task` records the turn's routing decision. Both
+-- stay absent when the mode is off, and a child never sees either.
+local function orchestration_surface(role,ctx)
+  if not is_master(role or 'guest') then return false end
+  if not ctx or ctx.subagent then return false end
+  local ok,mode=pcall(dofile,'lua/core/orchestration_mode.lua')
+  return ok and mode.mode_on(ctx) or false
+end
 
 -- The schemas a role's prompt shows, and what `capabilities` reports.
 local codemode_policy=dofile('lua/core/codemode_policy.lua')
@@ -578,9 +598,12 @@ end
 function M.all(role,ctx,memory)
   local shown = {}
   local code=show_codemode(role,ctx,memory)
+  local orchestration=orchestration_surface(role,ctx)
   for _, item in ipairs(M.catalog(role)) do
     local name=item['function'].name
-    if not PROMPT_HIDDEN[name] and (name~='codemode' or code) then shown[#shown + 1] = item end
+    local visible=not PROMPT_HIDDEN[name] and (name~='codemode' or code)
+    if name=='route_task' then visible=orchestration end
+    if visible then shown[#shown + 1] = item end
   end
   return shown
 end
@@ -921,6 +944,16 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
     if name == "subagent" then return { error = "subagent_recursion_forbidden" } end
   end
   if not is_master(role) and admin_names()[name] then return { error = "forbidden_for_role:" .. role } end
+  -- Orchestration mode's floor: a direct effect is the work itself, so it is refused until this
+  -- turn has a recorded route ('direct' allows short work here, 'delegate' hands it to a child)
+  -- or a child admitted for the turn. The floor reads the mode, route and admission records only -
+  -- never the user's text - and it starts nothing: the route and the child are the model's.
+  local delegation = dofile('lua/core/orchestration_mode.lua').guard(name, args, ctx)
+  if delegation then return delegation end
+  if name=='route_task' then
+    if not is_master(role) then return {error='forbidden_for_role:'..role} end
+    return dofile('lua/core/orchestration_mode.lua').record_route(args,ctx)
+  end
   local routed_catalog=ctx.subagent and M.all_for(ctx.subagent.allowed or {},role,ctx,memory) or M.all(role,ctx,memory)
   if name=='tool_search' then
     local describe=M.discovery_execution(memory,ctx)

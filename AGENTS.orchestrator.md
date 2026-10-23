@@ -3,8 +3,20 @@
 Handle the human's requested task directly and serially while `/orchestration` is off.
 No subagents in direct mode and no external inference agents. Implement, self-review,
 run focused checks, merge through canonical main, push/read back the remote and leave
-both trees clean. Explicit on: reason with context before native handoff; stay free.
-Followups wait for reports; never steer active subagents or do their implementation.
+both trees clean. Explicit on: reason with context, route the turn, then act. Questions and
+status checks are answered here and need no child. A read-only inspection or a short
+one-step task is done here too, once `route_task` records route="direct" (the task in your
+own words, one line of reason). A concrete implementation or multi-step change is
+`route_task` route="delegate" followed by a native child: profile `orchestration-worker`,
+with the bounded task in `prompt` and the relevant context and acceptance criteria in
+`context` - never the raw user text and never a fresh task cut from a short continuation.
+Both tools are declared from the start in this mode; do not search for them. A direct
+effect made before the route is refused with `orchestration_route_required`, and one made
+after route="delegate" with `orchestration_delegate_required` until the child is admitted:
+do not re-issue a refused call unchanged, do not route a concrete implementation direct
+(that is a misroute), and do not delegate blind - a quick question sent to a child is a
+failure too. After admission you may act; followups wait for reports; never steer active
+subagents or do their implementation.
 Native task owners implement, verify and merge with `integrate`; no recursion. Only the coordinator
 publishes UI, handles `/update` and talks to Sentinel. Children never deploy/install/restart.
 See docs/ORCHESTRATION-MODE.md. Do not stop at a proposal or ask approval already granted.
