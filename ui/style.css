@@ -19,6 +19,10 @@ wa-provider-manager button, wa-provider-manager a { margin-right:var(--space); }
   --text: #e7ebf3;
   --muted: #8b93a7;
   --accent: #4f8cff;
+  /* One cap for every leaf transcript topic body (thinking, commentary, tool, diff). The run
+     topic is the container of those bodies, so it is not capped separately. Seven lines at the
+     transcript's 12px/1.55 measure, matching the original thinking cap. */
+  --topic-body-max-height: calc(7 * 1.55 * 12px);
   --ok: #3fb950;
   --warn: #d29922;
   /* Patch colours, defined once. A diff line is read at a glance, so every place a patch is drawn - the
@@ -329,7 +333,7 @@ wa-commentary.phase-incomplete .commentary { text-decoration: underline dotted; 
      thought through, short enough that a long one does not push the trace off the screen - and the body
      scrolls, so nothing is hidden. Expressed in the lines themselves (7 x 1.55 leading at 12px), not as a
      pixel count that would drift the moment the aside measure changes. */
-  word-break: break-word; max-height: calc(7 * 1.55 * 1em); overflow: auto;
+  word-break: break-word; max-height: var(--topic-body-max-height); overflow: auto;
   border-top: 1px solid var(--line);
   /* 1.55 is the transcript's own leading (`font:var(--font-size)/1.55`), so an aside and an answer keep
      one rhythm and differ only in size. */
@@ -396,7 +400,7 @@ wa-diff { display: block; align-self: flex-start; max-width: 760px; width: 100%;
   border-top: 1px solid var(--line);
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px;
   /* The path is not shortened, so the row scrolls sideways instead of hiding where the file is. */
-  overflow-x: auto;
+  overflow-x: auto; max-height: var(--topic-body-max-height); overflow-y: auto;
 }
 .diff-file { display: flex; align-items: center; gap: var(--gap); min-width: max-content; }
 /* No ellipsis: this topic exists to say *which* file changed, and a truncated path does not say it. */
@@ -552,6 +556,7 @@ wa-retry { display: block; width: 100%; }
 .trace-body {
   list-style: none; margin: 0; padding: 0 0 var(--space) 0;
   border-top: 1px solid var(--line);
+  max-height: var(--topic-body-max-height); overflow-y: auto;
 }
 .tool-line { padding: 2px var(--space) 2px var(--gap); border-left: 2px solid transparent; }
 .tool-line.ok { border-left-color: var(--ok); }
@@ -587,7 +592,7 @@ wa-retry { display: block; width: 100%; }
 .tool-output {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px;
   color: #9aa4b2; white-space: pre-wrap; word-break: break-word;
-  max-height: 220px; overflow: auto; margin: 2px 0 4px 0; padding-left: var(--space);
+  max-height: none; overflow: visible; margin: 2px 0 4px 0; padding-left: var(--space);
   border-left: 1px solid var(--line);
 }
 /* The running operation's newest line. One line, elided: a preview that grows the row would

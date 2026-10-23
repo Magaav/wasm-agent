@@ -148,6 +148,44 @@
     check((window.__stalledSessionReads || 0) === stalledBefore + 2, 'recovery did not replay the stalled reads');
     check(Number(followedSeq) === 4, 'the restored cursor still covers every saved row');
     check(messages.textContent.includes('legacy fallback'), 'the recovered transcript repaints the saved history');
+    // --- topic collapse, character-array details, and one max-height cap ---
+    check(toolDetail(['l', 'u', 'a']) === 'lua', 'a character array is shown as one string, not one character per line');
+    const nestedDetail = toolDetail({ error: ['p', 'r', 'o', 'v', 'i', 'd', 'e', 'r'] });
+    check(nestedDetail.includes('"error": "provider"'), 'a character array inside a result is normalised too');
+    const topicStage = document.createElement('div');
+    topicStage.className = 'msg body steps';
+    topicStage.style.cssText = 'width:700px;';
+    document.body.append(topicStage);
+    const plain = make('wa-trace', '', topicStage);
+    plain.addTool('tool_call', 'arguments={...}', null, 149, 'plain-call', null);
+    check(!plain.open, 'a plain tool-call topic is collapsed in the shared component');
+    const decision = make('wa-trace', '', topicStage);
+    decision.addDecision('decision-call', 'tool_call', '{}', true);
+    check(decision.open, 'a decision topic still opens');
+    const running = make('wa-trace', '', topicStage);
+    running.addTool('bash', 'run', null, 300, 'running-call', null);
+    check(running.querySelector('.trace-label').textContent === 'running…', 'a pending tool call is running, not deciding');
+    for (const [tag, bodyClass] of [['wa-trace', 'trace-body'], ['wa-reasoning', 'reasoning-body'], ['wa-commentary', 'commentary-body'], ['wa-diff', 'diff-body']]) {
+      const topic = make(tag, '', topicStage);
+      const body = topic.querySelector('.' + bodyClass);
+      check(body && getComputedStyle(body).maxHeight !== 'none', tag + ' topic body has a max-height');
+      check(body && getComputedStyle(body).maxHeight.endsWith('px'), tag + ' topic body resolves to one pixel cap');
+    }
+    const traceCap = getComputedStyle(plain.querySelector('.trace-body')).maxHeight;
+    const reasoningCap = getComputedStyle(make('wa-reasoning', '', topicStage).querySelector('.reasoning-body')).maxHeight;
+    check(traceCap === reasoningCap, 'tool and thinking topic bodies share one max-height cap');
+    plain.addTool('tool_call', 'failed', null, 149, 'failed-call', null);
+    plain.settle('failed', toolDetail(['f', 'a', 'i', 'l']), true);
+    check(plain.querySelector('.tool-output').textContent === 'fail', 'failed detail is not rendered as a vertical character column');
+    check(getComputedStyle(plain.querySelector('.tool-output')).maxHeight === 'none', 'the tool row does not impose a second nested cap');
+    // The main-chat path: a tool call after commentary used to be promoted by the app's `prior`
+    // heuristic. Exercise the real event path, not just the component.
+    busy = true; runBubble = null; runStepState = null; clearStatus();
+    repaintMessages([], { active: true, notify: false });
+    handleEvent({ type: 'commentary_delta', pending_id: 'collapse-step', text: 'Checking the next step.' });
+    handleEvent({ type: 'tool', name: 'bash', call_id: 'collapse-tool', arguments: { command: 'true' } });
+    const appTrace = runBubble && runBubble.querySelector('wa-trace');
+    check(appTrace && !appTrace.open, 'a main-chat tool call after commentary is created collapsed');
     report.dataset.status = 'pass'; report.textContent = JSON.stringify({ checks, skipped: 0 });
   } catch (error) {
     report.dataset.status = 'fail'; report.textContent = JSON.stringify({ checks, error: error.message });

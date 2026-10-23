@@ -731,7 +731,7 @@ class WaTrace extends HTMLElement {
     // The step is over. A tool-call topic was collapsed all along and stays collapsed; a DECISION topic
     // (the element's own fact) printed expanded and stays expanded, because nothing folds what the
     // reader is meant to read. Only a fold of a topic the reader never opened did this before.
-    if (!this._userToggled && this.dataset.decision !== 'true') this.open = false;
+    if (!this._userToggled && this._errors === 0 && this.dataset.decision !== 'true') this.open = false;
     this._elapsed = Date.now() - this._started;
     this._refresh();
   }
@@ -745,7 +745,7 @@ class WaTrace extends HTMLElement {
       this._glyph.textContent = this._errors ? "\u26a0" : "\u2699";
     } else {
       const last = names[names.length - 1] || "starting";
-      this._label.textContent = `deciding…`;
+      this._label.textContent = this.dataset.decision === "true" ? "deciding…" : "running…";
       this._meta.textContent = `${this._count} call${this._count === 1 ? "" : "s"} · ${last}`;
     }
     this.classList.toggle("has-error", this._errors > 0);

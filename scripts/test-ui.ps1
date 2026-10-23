@@ -497,14 +497,15 @@ $harness = @'
       ] } },
     { type: "done" }
   ];
-  // LIVE CHECK: while a decision is running its tool lines must be visible, not
-  // folded behind a count - pi shows them as they happen, and that is the whole
-  // point of a decision trace.
+  // LIVE CHECK: a plain tool-call topic is collapsed by default everywhere. The reader can
+  // open the running trace to see its tool lines; only a DECISION topic prints expanded.
   var upto = 4;   // through the first tool result
   for (var i = 0; i < upto; i++) window.handleEvent(events[i]);
   var live = document.querySelector('wa-trace');
-  check(!!live, 'a running decision must have a trace');
-  check(!!live && live.hasAttribute('open'), 'a running trace must be open so its tool lines are visible');
+  check(!!live, 'a running tool call must have a trace');
+  check(!!live && !live.hasAttribute('open'), 'a running tool call starts collapsed');
+  live.toggle();
+  check(live.hasAttribute('open'), 'the reader can open the running trace');
   // A running tool line shows what the operation behind it is doing. The node already publishes
   // the operation on /health and its output through /operation; a window that shows only a clock
   // makes a five-minute build look like a hang - the failure this exists to prevent.
@@ -694,7 +695,8 @@ $harness = @'
   // One click on the run should show the sequence: the tools inside stay open.
   var innerTraces = runBody ? runBody.querySelectorAll('wa-trace') : [];
   for (var t2 = 0; t2 < innerTraces.length; t2++) {
-    check(innerTraces[t2].hasAttribute('open'), 'tools inside a finished run should be visible in one click');
+    if (innerTraces[t2].classList.contains('has-error') || innerTraces[t2]._userToggled) continue;
+    check(!innerTraces[t2].hasAttribute('open'), 'non-failing tool topics stay collapsed inside a finished run');
   }
   var inner = runBody ? Array.prototype.map.call(runBody.children, function (c) {
     return c.tagName === "WA-TRACE" ? "trace" : c.tagName === "WA-DIFF" ? "diff" : (c.tagName === "WA-STEP" ? "phase" : "text");

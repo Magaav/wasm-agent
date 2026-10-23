@@ -2012,7 +2012,24 @@ function toolOutcome(name, result) {
 }
 
 function toolDetail(result) {
-  const text = typeof result === "string" ? result : JSON.stringify(result || {}, null, 1);
+  // A provider can hand back a failed result as an array of characters (the Lua error path does
+  // this). Pretty-printing that array put one character on every line, which is the broken vertical
+  // tool topic operators saw. Normalise character arrays anywhere in the displayed payload to one
+  // string; this only changes the view, never the stored result or the model's context.
+  const isCharacterArray = (value) => Array.isArray(value) && value.length > 1
+    && value.every((item) => typeof item === "string" && item.length <= 1);
+  const normalise = (value, depth = 0) => {
+    if (isCharacterArray(value)) return value.join("");
+    if (Array.isArray(value)) return depth < 8 ? value.map((item) => normalise(item, depth + 1)) : value;
+    if (value && typeof value === "object" && depth < 8) {
+      const copy = {};
+      for (const [key, item] of Object.entries(value)) copy[key] = normalise(item, depth + 1);
+      return copy;
+    }
+    return value;
+  };
+  const value = normalise(result);
+  const text = typeof value === "string" ? value : JSON.stringify(value || {}, null, 1);
   return text.length > 4000 ? text.slice(0, 4000) + "\n…(truncated)" : text;
 }
 
@@ -2399,18 +2416,11 @@ function addTool(name, args, options) {
   // is a new node.
   sealReasoning();
   const topic = currentTrace();
-  // A STEP WHOSE PROSE ENDED IN A TOOL CALL IS A DECISION STEP, and a decision topic prints expanded
-  // (operator rule; every other topic prints collapsed). The provider route that states no per-item
-  // phase sends no `decision` event at all, so the fact is read from what the bubble already holds: this
-  // step's own prose is the element that stands immediately before the topic the call is drawn in (a
-  // commentary, or the streamed answer segment this step wrote first). The debug-only `wa-step` rows sit
-  // between them and are skipped - they are phase history, not prose. A call with NO prose before it - a
-  // second call in the same step, a retry, a call this window did not see written - leaves a plain
-  // tool-call topic, which is created collapsed. The fact is set on the element, never by tag name: a
-  // <wa-trace> is also what a step that only called a tool looks like.
-  let prior = topic.previousElementSibling;
-  while (prior && prior.tagName === "WA-STEP") prior = prior.previousElementSibling;
-  if (prior && (prior.classList.contains("seg") || prior.tagName === "WA-COMMENTARY")) topic.markDecision();
+  // A tool call is never promoted by the prose before it. The provider's own `decision` event is the
+  // one fact that makes a decision topic; a preceding commentary or answer segment is just the previous
+  // step. This heuristic promoted only the main-chat trace (the child pane has no such sibling), so the
+  // same tool call opened in chat and stayed collapsed in a subagent. A plain tool-call topic is now
+  // created collapsed everywhere; only addDecision/markDecision can open a decision.
   topic.addTool(name, toolTitle(name, args), null, boundMs ? Math.round(boundMs / 1000) : null, callId, toolChange(name, args));
   lastTool = name;
   if (!replayingMessages) startToolTicker();
