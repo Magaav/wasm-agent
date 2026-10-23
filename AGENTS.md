@@ -71,6 +71,14 @@ The v8 plugin is reference only. Read it; never modify it.
 These files are consumed by Linux and by `sh`/`lua`; `core.autocrlf=false` stores bytes as they are.
 The `pre-commit` hook enforces it - that hook is the contract, this line is the pointer.
 
+## Reports
+
+- **Evaluation notes are exception-only.** Include a `harness evaluation` block only when a
+  harness/tool limitation actually hurt reasoning or added steps. Keep it brief: what hurt, the
+  proposed fix, and the step delta before → after (for example `5 → 2`, `4 → 1`). Omit it when
+  tools worked normally; do not append a routine `harness: used` section. This is the default for
+  every empty context, so the reader sees the limitation and the fix rather than a ritual.
+
 ## Conventions
 
 - **The host is capabilities, not logic.** Agent logic is Lua; platform capabilities
