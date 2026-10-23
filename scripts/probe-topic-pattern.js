@@ -118,8 +118,14 @@
       busy=true;observedRun=null;runBubble=null;runStepState=null;runCounts=null;clearStatus();runStartedAt=Date.now()-45000;
       handleEvent({type:'run_counts',counts:count});handleEvent({type:'status',text:'model'});
       const topic=document.createElement('wa-commentary');runBubble.body.append(topic);topic.setText('Row height');keepStatusLast();
+      // A commentary prints OPEN now (operator, 2026-10-23: "must display opened and stay opened").
+      // The row the status line shares geometry with is the COMPACT one, so this samples the topic with
+      // its body hidden - closing it here is a measurement, not the state the product draws.
+      check(topic.open===true,'a commentary topic prints open at '+width);
+      topic.open=false;
       const line=statusLine,target=topic.getBoundingClientRect().height;
-      check(line.getBoundingClientRect().height===target&&target===30,'live status matches closed topic at '+width);
+      check(line.getBoundingClientRect().height===target&&target===30,'live status matches the closed topic row at '+width);
+      topic.open=true;
       handleEvent({type:'reply',text:'Height matched.'});handleEvent({type:'done'});busy=false;
       check(line.getBoundingClientRect().height===30&&line.scrollWidth<=line.clientWidth+1,'settled status matches topic and retains counters at '+width);
       const task={session_id:'height-child',subagent_id:'height-child',state:'running',settled:false,profile:'worker'};

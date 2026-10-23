@@ -146,7 +146,12 @@ consumed steering becomes **Steered**, not a separate user bubble. Read means
 entered context, never compliance. Main and children share this presentation.
 
 Commentary streams inside an open `wa-commentary` topic, with character count
-updated per chunk. That topic is the thinking topic: one component (`WaTopic` in
+updated per chunk. Open is the component's own default for that kind
+(`TOPIC_KINDS` in `ui/components.js`), set once for every creation site - live,
+provisional and repainted alike - so a commentary prints expanded from its first
+chunk and stays open; only the reader closes it (operator, 2026-10-23: a
+commentary is a thinking topic, so it "must display opened and stay opened").
+That topic is the thinking topic: one component (`WaTopic` in
 `ui/components.js`) builds both `<wa-reasoning>` and `<wa-commentary>`, so they
 collapse/expand, count characters and render their body identically - a second
 copy would drift. A topic's body is the transcript's one Markdown renderer, the

@@ -1,7 +1,7 @@
 // Focused probe: ONLY thinking topics print expanded.
 //
 // Operator's rule (2026-10-23): a thinking topic (`wa-reasoning`) stays open unless the reader folds it;
-// EVERY other topic - a tool-call step, a decision step, commentary, `wa-diff`, `wa-summary`,
+// EVERY other topic - a tool-call step, a decision step, `wa-diff`, `wa-summary`,
 // `wa-steering` - is created collapsed and stays collapsed until the reader opens it. The final answer
 // is exempt (it is not a topic). A failed tool call may open its topic once so the error is visible.
 //
@@ -18,7 +18,8 @@
 //   node scripts/agent-benchmark-ui-observe.mjs --out "$TEMP/ui-topics" \
 //     --probe scripts/probe-topic-expansion.js
 //
-// The probe ends with a live stage: thinking open; commentary, decision and tool-call topics collapsed;
+// The probe ends with a live stage: thinking and commentary open; decision and tool-call topics
+// collapsed;
 // a failed tool topic open once. The main-chat route is exercised through `handleEvent`, the child-pane
 // route through `withChildRenderer` - the same renderer and the same component.
 (async function () {
@@ -169,8 +170,8 @@
     check(failed.open === false,
       'the fold does not reopen a failed topic the reader closed, saw open=' + failed.open);
     var commentary = bubble.querySelector('wa-commentary');
-    check(!!commentary && commentary.open === false,
-      'a commentary is created COLLAPSED and stays collapsed, saw open=' + (commentary && commentary.open));
+    check(!!commentary && commentary.open === true,
+      'a commentary is created OPEN like a thinking topic and stays open, saw open=' + (commentary && commentary.open));
     check(!!thinking && thinking.open === true,
       'and the thinking is still open after the fold, saw open=' + (thinking && thinking.open));
 
@@ -271,8 +272,8 @@
       'stage: the child pane leaves every decision topic COLLAPSED');
     check(!!stagePlain && stagePlain.open === false,
       'stage: the tool-call topic is drawn collapsed');
-    check(!!stageCommentary && stageCommentary.open === false,
-      'stage: the commentary is drawn collapsed');
+    check(!!stageCommentary && stageCommentary.open === true,
+      'stage: the commentary is drawn open, like the thinking beside it');
     // Collapsed means only the header is shown: every decision body and the plain tool body are hidden.
     var collapsedBodies = stageDecisions.map(function (node) { return node.querySelector('.trace-body'); });
     collapsedBodies.push(stagePlain && stagePlain.querySelector('.trace-body'));

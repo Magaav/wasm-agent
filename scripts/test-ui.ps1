@@ -3641,11 +3641,21 @@ $harness = @'
   check(!!provisionalCommentary && provisionalCommentary.tagName==='WA-COMMENTARY' &&
     provisionalCommentary.querySelector('.commentary-body').textContent==='Checking the result.',
     'pending commentary text is streamed inside the commentary topic itself while its phase is unknown');
+  // Operator, 2026-10-23: a commentary is a thinking topic - it "must display opened and stay opened".
+  // It used to be created collapsed at every creation site, which is what made a child bubble's
+  // commentary read as closed rows beside open thinking rows.
+  check(!!provisionalCommentary && provisionalCommentary.open === true &&
+    provisionalCommentary.querySelector('.commentary-body').hidden === false,
+    'a commentary topic must be created open, like a thinking topic - not a closed row the reader opens');
   window.handleEvent({type:'commentary',pending_id:'fixture-commentary',message_id:'fixture-commentary-id',text:'Checking the result.'});
   check(document.querySelectorAll('wa-commentary').length===1 &&
     document.querySelector('wa-commentary .commentary-body').textContent==='Checking the result.' &&
     !document.querySelector('.phase-pending'),
     'commentary resolution removes provisional text and retains it once in its own phase');
+  var resolvedCommentary=document.querySelector('wa-commentary');
+  check(!!resolvedCommentary && resolvedCommentary.open === true &&
+    resolvedCommentary.body.hidden === false,
+    'the resolved commentary keeps that open box when its phase is established');
   window.handleEvent({type:'pending_delta',pending_id:'fixture-answer',text:'The answer '});
   window.handleEvent({type:'pending_delta',pending_id:'fixture-answer',text:'is complete.'});
   window.handleEvent({type:'delta',pending_id:'fixture-answer',text:'The answer is complete.'});
@@ -3673,6 +3683,11 @@ $harness = @'
   var incompleteCommentary=document.querySelector('wa-commentary.phase-incomplete');
   check(!!incompleteCommentary && incompleteCommentary.querySelector('.commentary-body').textContent==='Partial commentary',
     'interrupted streamed commentary remains visible and marked incomplete');
+  // Only the reader closes it. The resolved commentary above has since been through further chunks and
+  // a reply's fold into the run topic, and neither may have shut it (operator, 2026-10-23: "stay opened").
+  check(!!resolvedCommentary && resolvedCommentary.isConnected && resolvedCommentary.open === true &&
+    resolvedCommentary.body.hidden === false,
+    'a commentary stays open through later steps and the answer fold - nothing but the reader closes it');
   // The run topic is the final answer's history; it is not a place a live step is moved into.
   // A step whose phase resolves to commentary mid-run used to drag the tool calls it followed into a
   // topic the reader could not see, and the sentence being streamed was re-drawn at the end of the

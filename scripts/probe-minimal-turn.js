@@ -52,18 +52,17 @@ try {
  const child=document.createElement('wa-agent-session');document.body.append(child);child.task={subagent_id:'minimal-child',session_id:'minimal-child',state:'running',profile:'worker',model:'test-model'};
  check(!child.querySelector('[data-action="steer"],[data-action="cancel"]'),'child uses shared Send/Stop only');child.remove();
  handleEvent({type:'commentary_delta',pending_id:'c1',text:'Checking '});const topic=streamedCommentaryBlock;
- // CHANGE 2 (operator rule): a commentary is CREATED COLLAPSED now - only thinking topics print
- // expanded; commentary and tool/decision steps are collapsed - so what this pins is that the first
- // chunk already streams INSIDE its topic and that
- // the body is the reader's to open. The old expectation (`open` by default) is the behaviour reversed.
- check(!topic.open&&topic.body.textContent==='Checking'&&topic.querySelector('.trace-meta').textContent==='9 chars'&&!topic.closest('wa-run'),'first commentary chunk already in its COLLAPSED topic');
+ // CHANGE 2 (operator, 2026-10-23, REVERSING the "created collapsed" rule this pinned): a commentary
+ // IS a thinking topic - it prints expanded from its first chunk and stays open, and only the reader
+ // closes it. What this pins is that the first chunk already streams INSIDE its own open topic.
+ check(topic.open&&topic.body.textContent==='Checking'&&topic.querySelector('.trace-meta').textContent==='9 chars'&&!topic.closest('wa-run'),'first commentary chunk already in its OPEN topic');
  handleEvent({type:'commentary_delta',pending_id:'c1',text:'the result.'});check(topic.querySelector('.trace-meta').textContent==='20 chars','header grows live');
- topic.toggle();check(topic.open,'reader opens it explicitly');
+ topic.toggle();check(!topic.open,'reader closes it explicitly');
+ topic.toggle();check(topic.open,'reader reopens it explicitly');
  handleEvent({type:'commentary',pending_id:'c1',message_id:'c1-id',text:'Checking the result.'});check(topic.isConnected&&topic.open&&transcript.querySelectorAll('wa-commentary').length===1,'resolution keeps same topic and the reader\'s open choice');
  topic.toggle();check(!topic.open,'reader closes it explicitly');
  handleEvent({type:'commentary_delta',pending_id:'c2',text:'Verified.'});const second=streamedCommentaryBlock;
- check(second!==topic&&!second.open,'the next commentary is its own topic and starts collapsed');
- second.toggle();   // the reader opens this one: that choice must survive the fold and a repaint
+ check(second!==topic&&second.open,'the next commentary is its own topic and starts open, like a thinking topic');
  handleEvent({type:'commentary',pending_id:'c2',message_id:'c2-id',text:'Verified.'});
  handleEvent({type:'tool',name:'read',call_id:'minimal-read',arguments:{path:'evidence'}});handleEvent({type:'tool_result',name:'read',result:{ok:true}});
  handleEvent({type:'final_answer_begin',message_id:'a1'});handleEvent({type:'delta',text:'The change is verified.'});handleEvent({type:'reply',message_id:'a1',text:'The change is verified.'});handleEvent({type:'done'});
