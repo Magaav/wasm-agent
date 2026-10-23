@@ -1570,8 +1570,9 @@ function appendCommentary(text, messageId, pendingId, decisionPrelude, place) {
   // draws a new node beside it.
   sealReasoning();
   const block = document.createElement("wa-commentary");
-  // CREATED COLLAPSED (operator rule): only THINKING and DECISION topics print expanded; a commentary
-  // is a topic the reader opens. It used to be `block.open = true` - "the same rule as the thinking" -
+  // CREATED COLLAPSED (operator rule): only THINKING topics print expanded; a commentary and a
+  // tool/decision step are collapsed, and the final answer is exempt. A commentary is a topic the reader
+  // opens. It used to be `block.open = true` - "the same rule as the thinking" -
   // which printed every commentary expanded and pushed the steps that followed it off the screen.
   // The text may have streamed in the answer's place (a `.seg`), so this topic is built where that
   // sentence stands: `replaceWith` below keeps the same parent and the same sibling index, and the
@@ -1752,8 +1753,9 @@ function convertProvisionalAnswer(bubble, topic, messageId) {
   if (!bubble || !topic || bubble.dataset.answerConverted === "1") return null;
   const body = topic.querySelector(":scope > .commentary-body");
   if (!body) return null;
-  // A COMMENTARY IS CREATED COLLAPSED (operator rule: only thinking and decision topics print
-  // expanded), so its body carries `hidden` while the topic is folded - and the prose this conversion
+  // A COMMENTARY IS CREATED COLLAPSED (operator rule: only thinking topics print expanded; commentary
+  // and tool/decision steps are collapsed, and the final answer is exempt), so its body carries `hidden`
+  // while the topic is folded - and the prose this conversion
   // turns into the ANSWER must not inherit that folded state: the answer is what the reader is here
   // for, and a body left hidden would draw an EMPTY answer. The box is unfolded before it is measured
   // and moved, so the "before" reading below is the box the text really had inside the topic; a 0x0
@@ -2417,10 +2419,11 @@ function addTool(name, args, options) {
   sealReasoning();
   const topic = currentTrace();
   // A tool call is never promoted by the prose before it. The provider's own `decision` event is the
-  // one fact that makes a decision topic; a preceding commentary or answer segment is just the previous
+  // one fact that makes a decision step; a preceding commentary or answer segment is just the previous
   // step. This heuristic promoted only the main-chat trace (the child pane has no such sibling), so the
-  // same tool call opened in chat and stayed collapsed in a subagent. A plain tool-call topic is now
-  // created collapsed everywhere; only addDecision/markDecision can open a decision.
+  // same tool call opened in chat and stayed collapsed in a subagent. A tool/decision topic is now
+  // created collapsed everywhere and opened only by the reader; the shared component may open a failed
+  // call once so its error is visible. No event and no preceding prose opens a tool/decision topic.
   topic.addTool(name, toolTitle(name, args), null, boundMs ? Math.round(boundMs / 1000) : null, callId, toolChange(name, args));
   lastTool = name;
   if (!replayingMessages) startToolTicker();
@@ -2433,6 +2436,8 @@ function addDecision(event) {
   // deleted, never folded and never re-created. This keeps the earlier position fix (the open node
   // stays the anchor) while ending the
   // topic, as the operator asked: a thought after a step is a new node, not more of the old one.
+  // The decision topic itself is created COLLAPSED, like a tool step: the `decision` event labels the
+  // step (its header says "deciding…"), it does not open it.
   sealReasoning();
   showRunStep("decision", "Selecting tools");
   currentTrace().addDecision(event.call_id, event.name, event.arguments_text || "",
@@ -2875,8 +2880,9 @@ function handleEvent(event) {
       const node = document.createElement("wa-commentary");
       node.classList.add("phase-pending");
       // Collapsed while provisional too: the phase is not known yet, and the rule does not depend on it
-      // (only a DECISION topic prints expanded, and a decision is a fact of the element, not a guess
-      // made before the provider says what the step was).
+      // (only a THINKING topic prints expanded; a commentary and a tool/decision step are collapsed,
+      // and a decision is a fact of the element, not a guess made before the provider says what the
+      // step was).
       node.dataset.pendingId=key;
       currentBubble().body.append(node);
       anchorRunStepContent(node);
@@ -3330,9 +3336,10 @@ function repaintMessages(rows, options = {}) {
   const savedSteering=Array.from(runBubble?.querySelectorAll('wa-steering')||[]).filter(node=>node.fact?.state==='queued').map(node=>({node,fact:node.fact}));
   const topicChoices=Array.from(transcript.querySelectorAll('wa-summary,wa-steering')).map(node=>({id:node.dataset.summaryId||node.dataset.steeringId,open:node.open}));
   const commentaryChoices=Array.from(transcript.querySelectorAll('wa-commentary')).map(node=>({id:node.dataset.messageId,pending:node.dataset.pendingId,text:node.body.textContent,open:node.open}));
-  // A TOOL-CALL TOPIC IS CREATED COLLAPSED NOW, so its open state is only ever the reader's: a repaint
-  // that rebuilt it collapsed would overrule a reader who opened it. The topic is named by the CALLS it
-  // holds (the ledger's own ids, so they survive the redraw) and its fold choice is re-applied below.
+  // A TOOL/DECISION TOPIC IS CREATED COLLAPSED NOW, so an open state it carries is the reader's own
+  // choice (or the one failed-call opening): a repaint that rebuilt it collapsed would overrule the
+  // reader who opened it. The topic is named by the CALLS it holds (the ledger's own ids, so they
+  // survive the redraw) and its fold choice is re-applied below.
   const traceChoices=Array.from(transcript.querySelectorAll('wa-trace'))
     .map(node=>({key:traceChoiceKey(node),open:node.open,toggled:node._userToggled===true}))
     .filter(choice=>choice.key);

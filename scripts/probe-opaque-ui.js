@@ -161,7 +161,9 @@
     check(!plain.open, 'a plain tool-call topic is collapsed in the shared component');
     const decision = make('wa-trace', '', topicStage);
     decision.addDecision('decision-call', 'tool_call', '{}', true);
-    check(decision.open, 'a decision topic still opens');
+    check(!decision.open, 'a decision topic is created collapsed in the shared component');
+    decision.toggle();
+    check(decision.open, 'the reader can open a decision topic');
     const running = make('wa-trace', '', topicStage);
     running.addTool('bash', 'run', null, 300, 'running-call', null);
     check(running.querySelector('.trace-label').textContent === 'running…', 'a pending tool call is running, not deciding');

@@ -112,7 +112,8 @@
       await new Promise(resolve=>setTimeout(resolve,25));
       const node=mode==='pending'?phasePendingText.get('grow-'+mode).node:streamBody;
       // CHANGE 2 (operator rule): the provisional commentary - the node an unclassified stream writes into -
-      // is CREATED COLLAPSED now (only thinking and decision topics print expanded). This stage is about a
+      // is CREATED COLLAPSED now (only thinking topics print expanded; commentary and tool/decision
+      // steps are collapsed). This stage is about a
       // reader following the answer as it grows, which is exactly what opening the topic is for: the probe
       // does what that reader does, once, and every geometry claim below then measures the same thing it
       // always did (the box of the streaming text), not a folded header.

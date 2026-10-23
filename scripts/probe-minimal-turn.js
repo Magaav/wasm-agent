@@ -52,8 +52,9 @@ try {
  const child=document.createElement('wa-agent-session');document.body.append(child);child.task={subagent_id:'minimal-child',session_id:'minimal-child',state:'running',profile:'worker',model:'test-model'};
  check(!child.querySelector('[data-action="steer"],[data-action="cancel"]'),'child uses shared Send/Stop only');child.remove();
  handleEvent({type:'commentary_delta',pending_id:'c1',text:'Checking '});const topic=streamedCommentaryBlock;
- // CHANGE 2 (operator rule): a commentary is CREATED COLLAPSED now - only thinking and decision topics
- // print expanded - so what this pins is that the first chunk already streams INSIDE its topic and that
+ // CHANGE 2 (operator rule): a commentary is CREATED COLLAPSED now - only thinking topics print
+ // expanded; commentary and tool/decision steps are collapsed - so what this pins is that the first
+ // chunk already streams INSIDE its topic and that
  // the body is the reader's to open. The old expectation (`open` by default) is the behaviour reversed.
  check(!topic.open&&topic.body.textContent==='Checking'&&topic.querySelector('.trace-meta').textContent==='9 chars'&&!topic.closest('wa-run'),'first commentary chunk already in its COLLAPSED topic');
  handleEvent({type:'commentary_delta',pending_id:'c1',text:'the result.'});check(topic.querySelector('.trace-meta').textContent==='20 chars','header grows live');

@@ -101,15 +101,16 @@
     return h.height > 0 && h.top < t.top && h.bottom <= t.top + 0.5;
   }
   // A commentary is the shared topic: it must draw that topic's own box, not a chrome-less variant.
-  // CHANGE 2 (operator rule): a commentary is CREATED COLLAPSED now - only thinking and decision
-  // topics print expanded - so its text has no box at all until the reader opens it. The shape claims
-  // below are about the topic the reader sees, so each of them opens the topic the way a reader does
-  // (its own toggle) and asserts the collapsed default FIRST: the new rule cannot be skipped silently,
-  // and the shape it measures is the one the same element draws once opened.
+  // CHANGE 2 (operator rule): a commentary is CREATED COLLAPSED now - only thinking topics print
+  // expanded; commentary and tool/decision steps are collapsed - so its text has no box at all until
+  // the reader opens it. The shape claims below are about the topic the reader sees, so each of them
+  // opens the topic the way a reader does (its own toggle) and asserts the collapsed default FIRST:
+  // the new rule cannot be skipped silently, and the shape it measures is the one the same element
+  // draws once opened.
   function openAsReader(topic, label) {
     check(!!topic && topic.open === false,
-      label + ': a commentary must be CREATED COLLAPSED - only thinking and decision topics print ' +
-      'expanded - saw open=' + (topic ? topic.open : 'no topic'));
+      label + ': a commentary must be CREATED COLLAPSED - only thinking topics print expanded; ' +
+      'commentary and tool/decision steps are collapsed - saw open=' + (topic ? topic.open : 'no topic'));
     if (topic) topic.toggle();
     return topic;
   }
