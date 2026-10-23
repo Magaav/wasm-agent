@@ -906,6 +906,69 @@ class WaSummary extends HTMLElement {
 }
 customElements.define('wa-summary',WaSummary);
 
+// A COMPACTION IS A CONVERSATION FACT, NOT A MODEL REQUEST. `wa-summary` above reports the summary
+// request while it runs; this topic reports the rewrite it produced: the provider context was rebuilt
+// from a summary, the summarized prefix no longer travels in the request, and every original row is
+// still in the ledger. The facts are the stored row's own `compact` trace, so the idle `/compact`
+// route and a reload draw the same topic as the live event - and a value the trace does not carry is
+// said to be unknown rather than filled with a zero nobody measured.
+function compactionTopicKey(fact) {
+  const through = fact && (fact.summarized_until ?? fact.through);
+  if (through != null && through !== '') return 'through:' + through;
+  return 'tokens:' + String(fact?.tokens_before ?? '?') + ':' + String(fact?.tokens_after ?? '?');
+}
+class WaCompaction extends HTMLElement {
+  static get observedAttributes() {return ['open'];}
+  connectedCallback() {this._build();}
+  _build() {
+    if(this._parts)return;
+    this._parts=topicParts(this,{className:'compaction',glyph:'⇥',label:'Context compacted',bodyClass:'reasoning-body'});
+    this.append(this._parts.header,this._parts.body);
+    this._sync();
+    // The fact is the point, so the topic opens where it lands; a reader who closes it keeps that
+    // choice across a repaint (repaintMessages restores topic fold choices by key).
+    this.open=true;
+  }
+  get body() {this._build();return this._parts.body;}
+  get open() {return this.hasAttribute('open');}
+  set open(value) {this.toggleAttribute('open',Boolean(value));}
+  toggle() {this.open=!this.open;}
+  attributeChangedCallback() {this._build();this._sync();}
+  _sync() {
+    if(!this._parts)return;
+    this._parts.body.hidden=!this.open;
+    this._parts.header.setAttribute('aria-expanded',String(this.open));
+    topicChevron(this._parts.chevron,this.open);
+  }
+  update(fact) {
+    this._build();
+    this.fact={...fact};
+    this.dataset.compactionKey=compactionTopicKey(fact);
+    const count=(value)=>value==null||value===''||!Number.isFinite(Number(value))?null:Number(value);
+    const shown=(value)=>count(value)==null?'unknown':count(value).toLocaleString('en-US');
+    const before=shown(fact.tokens_before),after=shown(fact.tokens_after);
+    this._parts.meta.textContent=before==='unknown'&&after==='unknown'?'tokens unknown':before+' → '+after+' tokens';
+    const messages=count(fact.messages),through=count(fact.summarized_until ?? fact.through);
+    // A seq is an identifier, not a quantity: thousands separators would make `1,676` read as a
+    // different number than the ledger row it names. Counts are quantities and are grouped.
+    const summarized=messages!=null&&through!=null
+      ? shown(messages)+' messages summarized through seq '+through+'.'
+      : messages!=null
+        ? shown(messages)+' messages summarized; the through-seq is unknown.'
+        : through!=null
+          ? 'The summarized message count is unknown; summarized through seq '+through+'.'
+          : 'The summarized message count and through-seq are unknown.';
+    const createdAt=count(fact.created_at);
+    const recorded=createdAt!=null&&createdAt>0
+      ? 'Recorded '+new Date(createdAt*1000).toLocaleString()+'.'
+      : 'Recorded at unknown time.';
+    this._parts.body.textContent=summarized+
+      ' The original transcript is retained; the provider context was rebuilt from the summary.'+
+      ' Summary model: '+(fact.summary_model?String(fact.summary_model):'unknown')+'. '+recorded;
+  }
+}
+customElements.define('wa-compaction',WaCompaction);
+
 class WaSteering extends HTMLElement {
   static get observedAttributes() {return ['open'];}
   connectedCallback() {this._build();}

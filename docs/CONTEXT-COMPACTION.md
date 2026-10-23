@@ -56,6 +56,17 @@ Risk: this trusts a consistent provider count for an unchanged request and estim
 
 The bubble's `◈` is a different, provider-derived arithmetic metric: latest task input+output minus the pre-turn task input+output baseline. An observed168494 input +1563 output −42864 baseline =127193 (127.2k). It is not168.5k current input and does not use bytes/4. Its `~` currently marks pending/incomplete observation, not estimated tokenization; current in-flight usage remains unknown until reported. Exact endpoints live in the tooltip/checkpoint evidence. See [MINIMAL-CHAT.md](MINIMAL-CHAT.md). No counter/UI behavior was changed for this estimator fix.
 
+## Visible in the chat
+
+A compaction is a conversation fact, not invisible maintenance: `compact_now` stores the summary row
+with its `compact` trace and emits the same facts (`through`, `tokens_before`, `tokens_after`,
+`messages`, `summary_model`, `created_at`) as a live `compact` event. `wa-compaction` (ui/components.js)
+draws it open in the run bubble while a run streams, and `repaintMessages` rebuilds the same topic from
+a stored `role="summary"` row — the idle `/compact` route and a reload both arrive that way — as a
+standalone notice when no run bubble is current. It prints the stored numbers, the row's `created_at`
+in the reader's local time, and says `unknown` for a value the trace does not carry. Nothing sent to
+the model changes.
+
 ## Verification
 
 Run `node scripts/test-context-usage.cjs <built-wa> <fresh-evidence>`, then the same arguments with `--post` first. It runs the source/embedded seed/restart and focused regressions, retains original logs/hashes and requires a causal old-policy failure. This sequence is recorded as the on-demand `context-usage-proof` spell; required workspaces use the verified direct CLI, not unsupported spell replay.

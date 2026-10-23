@@ -1117,7 +1117,7 @@ function M:compact_now(messages, opts)
   local after = self:context_tokens()
   -- Record it in the transcript so a compaction (and the cache invalidation it
   -- causes) is visible in the session view instead of being invisible work.
-  record_turn(self, {
+  local summary_seq = record_turn(self, {
     role = "summary", content = merged, tokens = estimate_tokens(merged), debug = self.debug,
     ms = math.floor((host.now() - started) * 1000),
     trace = { {
@@ -1137,7 +1137,16 @@ function M:compact_now(messages, opts)
     before=before,after_estimate=after,summary_bytes=#merged,invalidates_cache=true,
     capacity=limit,trigger=trigger,reserve=reserve,forced=force==true,
     estimate_source=estimate_source,measurement_reason=measurement_reason})
-  self.emit({ type = "compact", through = cut.seq, tokens_before = before, tokens_after = after })
+  -- The live topic must carry the same facts the replayed row will: the row's own clock is read back
+  -- by the sequence `record_turn` returned rather than sampled a second time, and this display read
+  -- must never turn a successful compaction into a failure.
+  local recorded_at = nil
+  if type(summary_seq) == "number" then
+    local ok_rows, rows = pcall(memory.session_messages, self.session_id, {after_seq = summary_seq - 1, limit = 1})
+    if ok_rows and type(rows) == "table" and type(rows[1]) == "table" then recorded_at = rows[1].created_at end
+  end
+  self.emit({ type = "compact", through = cut.seq, tokens_before = before, tokens_after = after,
+    messages = cut_index, summary_model = self:summary_model(), created_at = recorded_at })
   return true
 end
 
