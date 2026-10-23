@@ -366,7 +366,12 @@ local compacting=false
 function wa_compact(body, session)
   local user=require_master(session)
   if not user then return json.encode({error='forbidden'}) end
-  if agent and agent.run_id then return json.encode({ok=false,error='node_busy'}) end
+  -- Idle admission is node-wide and owned by the Rust listener (compact_begin), which checks
+  -- queued/running runs before calling this handler and again takes the same gate a run
+  -- admission does. This function's cached `agent` is only the object this node-thread built;
+  -- its run_id is the identity of the last run and stays set after that run settles. Treating
+  -- it as liveness refused every /compact after the first chat (the onStale node_busy report).
+  -- Do not re-add a local busy check here: the scheduler is the authority.
   if compacting then return json.encode({ok=false,error='compaction_in_progress'}) end
   local ok,args=pcall(json.decode,body or '{}')
   if not ok or type(args)~='table' then return json.encode({error='invalid_compact_request'}) end

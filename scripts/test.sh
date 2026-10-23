@@ -997,6 +997,12 @@ WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-orchestration-mode.lua" "$BIN" --db
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-observability.lua" "$BIN" --db "$DB.observability" | grep 'observability ok'
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-run-counts.lua" "$BIN" --db "$DB.run-counts" | grep 'run counts ok'
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-context-growth.lua" "$BIN" --db "$DB.context-growth" | grep 'context growth ok'
+# Idle /compact after a main run settles. The cached agent keeps that run's id as the run's
+# identity; treating it as liveness answered node_busy forever after the first chat and is why
+# onStale never compacted an idle node. The queued/running refusal is the Rust listener's
+# (compact_admission tests); Lua must not re-decide it. Master auth, the threshold and the
+# subagent exclusion are asserted here so removing that guard did not remove them too.
+WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-compact-idle-route.lua" "$BIN" --db "$DB.compact-idle" | grep 'compact idle route ok'
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-telemetry-incremental.lua" "$BIN" --db "$DB.telemetry-incremental" | grep 'telemetry incremental ok'
 # The prompt index is an authored cue, not a slice of the schema description. Without this,
 # the same text is sent twice and nothing in the suite notices when the slicing returns.
