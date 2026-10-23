@@ -961,7 +961,11 @@ local TRANSIENT_TEXT = { "connection reset", "connection refused", "broken pipe"
   -- the native transport reports when the socket dies mid-read (measured: a Wi-Fi outage
   -- ended a run that should have waited for the link).
   "peer disconnected", "network is unreachable", "network unreachable",
-  "temporary failure in name resolution", "connection aborted" }
+  "temporary failure in name resolution", "connection aborted",
+  -- The same host-side abort the patient connection bucket below carries. It belongs in BOTH lists
+  -- on purpose: the agent replays only a failure that is also retryable, so a connection pattern
+  -- present in one list alone silently disables the retry it was added for.
+  "connection was aborted", "os error 10053" }
 
 function M.is_transient(problem)
   local text = tostring(problem or ""):lower()
@@ -1059,6 +1063,15 @@ end
 local CONNECTION_TEXT = { "peer disconnected", "connection reset", "connection refused",
   "connection closed", "broken pipe", "network is unreachable", "network unreachable",
   "temporary failure in name resolution",
+  -- A host-side abort of a socket the OS considered ESTABLISHED is a lost local link, not an
+  -- answer from the provider: no response was produced and no tool call could have been returned.
+  -- Windows reports it as WSAECONNABORTED, and the observed turn died mid-outage with
+  -- `provider_error: io: An established connection was aborted by the software in your host
+  -- machine. (os error 10053).` - it matched none of the three buckets ("connection aborted" is
+  -- not a substring of "connection was aborted"), so the run ended instead of waiting for the
+  -- link. Both spellings are listed because transports elide the "was"; the numeric errno is
+  -- listed so a transport that drops the wording still classifies.
+  "connection was aborted", "connection aborted", "os error 10053",
   -- A CONNECT-phase timeout is the safest failure there is: the request never reached a provider that
   -- could have answered it or billed it. It matched NONE of the three buckets - `is_response_timeout`
   -- wants the literal "receive response", this list did not carry `timeout` at all, and the generic

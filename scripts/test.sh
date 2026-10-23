@@ -1064,6 +1064,12 @@ WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-provider-timeout-recovery.lua" "$BI
 # ordinary shape of a busy upstream, so it retries by default (three attempts, honouring Retry-After)
 # instead of ending the run; a terminal quota 429 stays a landed outcome.
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-provider-rate-limit-recovery.lua" "$BIN" --db "$DB.provider-rate-limit" | grep 'provider rate-limit recovery ok'
+# A Windows host can abort an established socket (WSAECONNABORTED, os error 10053) when the network
+# drops. That is a lost local link: the request produced no answer, so it takes the patient,
+# default-on connection policy. Observed: a mid-run internet outage ended the turn with
+# `provider_error: io: An established connection was aborted ... (os error 10053)` because
+# neither spelling was in the connection bucket; only a manual Continue resumed the run.
+WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-provider-connection-abort-recovery.lua" "$BIN" --db "$DB.provider-connection-abort" | grep 'provider connection abort recovery ok'
 # A route must refuse a model it cannot serve before the first provider request - and only that.
 # A child with `gpt-6-luna` on the opencode-go route failed in 0.67s with zero tool calls on the
 # edge's `Model does not support this protocol`, and 26 child runs of `deepseek-v4.1-flash` died
