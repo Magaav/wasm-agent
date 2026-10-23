@@ -187,6 +187,11 @@ bound. These are controlled fixture measurements, not production latency promise
    demotes a run into the background lane. Every other value, including `interactive`, is
    ignored and the run keeps the default. **No header value grants reserved capacity**, so
    an untrusted caller cannot promote itself.
+6. **Idle-only maintenance is admitted before a lane.** `POST /compact` is not a run and not
+   a read/control call: the listener answers `node_busy` from the scheduler's queued/running
+   run states and the subagent runtime's active counts before any node-thread is chosen, so
+   an active chat run cannot hide the guard behind its own queue. An idle request keeps the
+   writer lane, so a run admitted later is serialized behind it rather than overlapping it.
 
 `/health` reports `runs[]` (conversation, node-thread, lane, pending), `run_ids[]`
 (conversation, run_id, state), `run_limits` (session backlog, background bounds,

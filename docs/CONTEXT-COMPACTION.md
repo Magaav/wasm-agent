@@ -11,6 +11,14 @@ subagent, and the ordinary in-run trigger stays at capacity minus reserve
 exists so an idle conversation does not sit at 75% until the next turn reaches
 the capacity trigger. `WA_STALE_COMPACT=0` disables it.
 
+`POST /compact` is admitted by the listener before any run or control lane: if the
+scheduler has a queued/running run, or the subagent runtime has a queued/running
+child, it returns `200 {"ok":false,"error":"node_busy"}` without selecting a
+session or calling a model. On an idle node the request keeps the existing writer
+lane, so a run admitted while it executes queues behind it instead of overlapping
+it; the handler rechecks the same node-wide guard immediately before
+`wa_compact`. Master authorization and the 40% threshold remain in Lua.
+
 ## Observed defect
 
 Eight recent applied compactions in the same native subscription session compared the complete request's bytes/4 estimate against a1050000-token configured window. The configured reply reserve is84000, so its trigger is966000 (92%). The latest compaction recorded966734 estimated tokens while its preceding successful task request reported567352 input +492 output (567844 total,54.1% of the configured window). Other paired boundaries were464138–573650 (44.2–54.6%). These are task-provider counts, not the separate summary's usage or cumulative spend.
