@@ -149,6 +149,17 @@ while waited < 5000 do
   host.sleep(50)
   waited = waited + 50
 end
+-- A child that has not settled returns a deferred receipt at the bound. It must not
+-- start a second child or make the parent wait for the child's own timeout.
+local deferred_started = host.now()
+local silent_early = control({ action = "await", subagent_id = silent.subagent_id, wait_ms = 250 }, ctx("alice"))
+assert(silent_early.settled == false and silent_early.deferred == true and silent_early.bounded == true,
+  "an expired wait must be a deferred receipt: " .. json.encode(silent_early))
+assert(host.now() - deferred_started < 2, "a bounded wait must return at its bound")
+local silent_same = control({ action = "status", subagent_id = silent.subagent_id }, ctx("alice"))
+assert(silent_same.subagent_id == silent.subagent_id and silent_same.state == "running",
+  "a deferred wait must not replace or restart the child: " .. json.encode(silent_same))
+print("MARK ok-deferred-await")
 local started_at = host.now()
 control({ action = "cancel", subagent_id = silent.subagent_id }, ctx("alice"))
 local silent_final = control({ action = "await", subagent_id = silent.subagent_id, timeout_ms = 15000 }, ctx("alice"))
@@ -162,8 +173,15 @@ print("MARK ok-silent-cancel")
 --     transport polls no faster than the request's own budget.
 local delayed = control({ action = "start", profile = "explore", prompt = "DELAYED first token", idempotency_key = "delayed" }, ctx("alice"))
 assert(not delayed.error, "delayed start: " .. json.encode(delayed))
+-- The wait may expire before a slow child settles; that is a deferred receipt, not a
+-- failure, and the same child must still be collectable afterwards.
+local delayed_early = control({ action = "await", subagent_id = delayed.subagent_id, wait_ms = 250 }, ctx("alice"))
+assert(delayed_early.settled == false and delayed_early.deferred == true,
+  "a wait that expires before a slow child settles is deferred: " .. json.encode(delayed_early))
+assert(delayed_early.subagent_id == delayed.subagent_id, "the deferred receipt must name the same child")
 local delayed_final = control({ action = "await", subagent_id = delayed.subagent_id, timeout_ms = 30000 }, ctx("alice"))
 assert(delayed_final.state == "completed", "delayed state=" .. tostring(delayed_final.state) .. " " .. json.encode(delayed_final))
+assert(delayed_final.subagent_id == delayed.subagent_id, "the settled view must be the same child")
 assert(tostring(delayed_final.result.reply):find("child-answer", 1, true), "delayed reply: " .. tostring(delayed_final.result.reply))
 print("MARK ok-delayed-ttft")
 

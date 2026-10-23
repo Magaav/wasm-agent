@@ -219,6 +219,11 @@ pub(crate) fn test_mark_turn(value: bool) {
     IN_RUN.with(|flag| flag.set(value));
 }
 
+#[cfg(test)]
+pub(crate) fn test_set_run_cancel(flag: Option<Arc<AtomicBool>>) {
+    set_current_run_cancel(flag);
+}
+
 fn env_usize(name: &str, fallback: usize) -> usize {
     std::env::var(name).ok().and_then(|value| value.parse().ok()).unwrap_or(fallback)
 }

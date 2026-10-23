@@ -730,20 +730,42 @@ impl Manager {
             if task.settled {
                 return Ok(task.view(true));
             }
+            // A run cancel is a request to stop this parent. An await is bounded work, so answer
+            // it now with a visible interrupted receipt instead of holding the thread for the rest
+            // of the caller's wait. The child is deliberately not cancelled: it is independently
+            // supervised, and its idempotency/cancellation rules stay its own.
+            if crate::host::run_cancel_requested() {
+                let mut view = task.view(false);
+                view["waited_ms"] = json!(started.elapsed().as_millis() as u64);
+                view["deferred"] = json!(true);
+                view["bounded"] = json!(true);
+                view["outcome"] = json!("still_running");
+                view["error"] = json!("await_interrupted");
+                view["note"] = json!("The wait was interrupted by this run's cancellation; the independently supervised child was not cancelled and may still settle. Do not start it again.");
+                return Ok(view);
+            }
             let elapsed = started.elapsed();
             if elapsed >= limit {
                 let mut view = task.view(false);
                 view["waited_ms"] = json!(elapsed.as_millis() as u64);
-                view["note"] = json!("Still running. This is not failure and never permission to start it again.");
+                view["deferred"] = json!(true);
+                view["bounded"] = json!(true);
+                view["wait_ms"] = json!(limit.as_millis() as u64);
+                view["note"] = json!("Still running after the bounded wait. This is a deferred receipt, not failure and never permission to start it again; collect it later with status/result or from the completion notice.");
                 return Ok(view);
             }
-            let remaining = limit - elapsed;
+            // Wake at least every 250ms so the run's own cancel is observed and the node-thread
+            // keeps reporting progress. A bounded wait is not a wedged interpreter: `host.exec`,
+            // `host.http` and the operation await already beat, and a silent subagent await made a
+            // healthy node look stalled to the window and to `/health`.
+            let remaining = (limit - elapsed).min(Duration::from_millis(250));
             let (guard, _) = self
                 .inner
                 .changed
                 .wait_timeout(tasks, remaining)
                 .map_err(|_| "subagent_state_poisoned".to_string())?;
             tasks = guard;
+            crate::serve::beat();
         }
     }
 
@@ -1596,6 +1618,116 @@ mod tests {
         assert_eq!(manager.find("owner-child", "erin").unwrap_err(), "forbidden_subagent");
         assert_eq!(manager.cancel("owner-child", "erin").unwrap_err(), "forbidden_subagent");
         assert_eq!(manager.await_task("owner-child", "erin", 10).unwrap_err(), "forbidden_subagent");
+    }
+
+    fn wait_for_state(manager: &Manager, id: &str, owner: &str, wanted: &str) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            if manager.find(id, owner).expect("status")["state"] == wanted { return; }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        panic!("child {id} did not reach {wanted}: {}", manager.find(id, owner).expect("status"));
+    }
+
+    /// A wait that reaches its bound is a visible deferred receipt, not a failure and not a
+    /// reason to start the child again. The sampler proves the wait keeps the node-thread
+    /// beating: a silent bounded host call is what made the window call a working node
+    /// unresponsive and what `/health` then reported as stalled.
+    #[test]
+    fn a_wait_that_expires_is_deferred_and_never_starts_a_second_child() {
+        let gate = Arc::new((Mutex::new(false), Condvar::new()));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let manager = Manager::with_root(temp_root("deferred-wait"), 2, 6);
+        let _ = manager.runner.set({
+            let gate = gate.clone();
+            let calls = calls.clone();
+            Arc::new(move |_receipt: &str| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                let (lock, cond) = &*gate;
+                let mut open = lock.lock().unwrap();
+                while !*open { open = cond.wait(open).unwrap(); }
+                Ok(json!({"state":"completed","result":{"reply":"late-child"}}))
+            })
+        });
+        manager.start(&spec("deferred-child", "alice", "")).expect("start");
+        wait_for_state(&manager, "deferred-child", "alice", "running");
+        crate::serve::beat();
+        let sampler = std::thread::spawn(|| {
+            let mut worst = 0u64;
+            for _ in 0..8 {
+                std::thread::sleep(Duration::from_millis(100));
+                worst = worst.max(crate::serve::beat_age_ms());
+            }
+            worst
+        });
+        let view = manager.await_task("deferred-child", "alice", 900).expect("await");
+        let worst = sampler.join().unwrap();
+        assert_eq!(view["settled"], false);
+        assert_eq!(view["deferred"], true);
+        assert_eq!(view["bounded"], true);
+        assert_eq!(view["wait_ms"], 900);
+        assert!(view["waited_ms"].as_u64().unwrap_or(0) >= 800, "the wait must spend its bound: {view}");
+        assert_eq!(view["subagent_id"], "deferred-child");
+        assert!(worst < 700, "the await must keep the node-thread beating; worst age {worst}ms");
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "a deferred wait must not start the child again");
+        assert_eq!(manager.list("alice")["count"], 1, "a deferred wait must not create another child");
+        {
+            let (lock, cond) = &*gate;
+            *lock.lock().unwrap() = true;
+            cond.notify_all();
+        }
+        let settled = manager.await_task("deferred-child", "alice", 5_000).expect("settle");
+        assert_eq!(settled["state"], "completed");
+        assert_eq!(settled["result"]["reply"], "late-child");
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "collection must not start another child");
+    }
+
+    /// A parent stop must not stay stuck behind a long child wait. The child is independently
+    /// supervised: interrupting the parent's wait is not a request to cancel it, and the child
+    /// keeps its id and can still be collected afterwards.
+    #[test]
+    fn a_parent_run_cancel_interrupts_the_wait_without_cancelling_the_child() {
+        let gate = Arc::new((Mutex::new(false), Condvar::new()));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let manager = Manager::with_root(temp_root("cancel-wait"), 2, 6);
+        let _ = manager.runner.set({
+            let gate = gate.clone();
+            let calls = calls.clone();
+            Arc::new(move |_receipt: &str| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                let (lock, cond) = &*gate;
+                let mut open = lock.lock().unwrap();
+                while !*open { open = cond.wait(open).unwrap(); }
+                Ok(json!({"state":"completed","result":{"reply":"still-here"}}))
+            })
+        });
+        manager.start(&spec("cancel-wait", "alice", "")).expect("start");
+        wait_for_state(&manager, "cancel-wait", "alice", "running");
+        // Production serve registers this probe before running a turn; the test sets the
+        // same thread-local flag the probe reads, so it exercises the real host check.
+        crate::host::set_run_cancel_probe(crate::serve::run_cancel_requested);
+        crate::serve::test_set_run_cancel(Some(Arc::new(AtomicBool::new(true))));
+        let started = Instant::now();
+        let view = manager.await_task("cancel-wait", "alice", 10_000).expect("await");
+        let elapsed = started.elapsed();
+        crate::serve::test_set_run_cancel(None);
+        assert!(elapsed < Duration::from_secs(2), "a cancelled wait must answer promptly, took {elapsed:?}");
+        assert_eq!(view["error"], "await_interrupted");
+        assert_eq!(view["outcome"], "still_running");
+        assert_eq!(view["settled"], false);
+        assert_eq!(view["deferred"], true);
+        assert_eq!(view["subagent_id"], "cancel-wait");
+        assert_eq!(manager.find("cancel-wait", "alice").expect("status")["state"], "running",
+            "a parent cancellation is not the child's cancellation");
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "an interrupted wait must not start the child again");
+        {
+            let (lock, cond) = &*gate;
+            *lock.lock().unwrap() = true;
+            cond.notify_all();
+        }
+        let settled = manager.await_task("cancel-wait", "alice", 5_000).expect("settle");
+        assert_eq!(settled["state"], "completed");
+        assert_eq!(settled["result"]["reply"], "still-here");
     }
 
     #[test]

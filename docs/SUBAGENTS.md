@@ -32,7 +32,7 @@ host.subagent(action, args_json) -> JSON
   status   -> one task view (owner-scoped)
   list     -> {subagents:[...]} for the caller (owner-scoped)
   result   -> terminal view with result, or the non-settled view
-  await    -> bounded native wait; terminal view, or the still-running view
+  await    -> bounded native wait; terminal view, or a deferred still-running view
   cancel   -> a request; the view is not necessarily settled yet
   self     -> {cancelled, cancel_requested, deadline_exceeded} for the child thread
   resolve  -> the child an idempotency key already owns, without a second run
@@ -234,7 +234,9 @@ No transcript is summarized, deleted or rewritten by inspection.
   the model poll. A caller waits on its own worker while the child runs on the
   subagent pool, so a parent waiting for a child does not hold the capacity that
   runs the child. Because children do not spawn children by default, there is no
-  nested-wait deadlock.
+  nested-wait deadlock. The wait reports progress to the node-thread heartbeat and
+  returns a deferred receipt at its bound; a parent run cancellation interrupts it
+  as `await_interrupted` without cancelling the independently supervised child.
 - **A child session has one writer, durably.** A `message` continues *its* child's
   session: the new task chains to the tail (`after_id`) and waits for that task to
   settle before it takes an execution slot, so a queued follow-up inherits the
