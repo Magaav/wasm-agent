@@ -186,6 +186,51 @@
     handleEvent({ type: 'tool', name: 'bash', call_id: 'collapse-tool', arguments: { command: 'true' } });
     const appTrace = runBubble && runBubble.querySelector('wa-trace');
     check(appTrace && !appTrace.open, 'a main-chat tool call after commentary is created collapsed');
+    // --- status balloon context: session cache hit, not the last call's reuse ---
+    const cacheBox = document.getElementById('context-box');
+    const usageBox = document.getElementById('usage-box');
+    const savedObservation = { available: settings.observability.available, total: settings.observability.total };
+    const contextPair = index => Array.from(cacheBox.children).slice(index * 2, index * 2 + 2).map(node => node.textContent);
+    const paintContext = total => {
+      settings.observability.total = total;
+      cacheBox.replaceChildren();
+      renderContext();
+      return contextPair(3);
+    };
+    settings.observability.available = true;
+    let cachePair = paintContext({ ...savedObservation.total, prompt: 1000000, cacheRead: 957200, cache_known: true, missing_usage: 0 });
+    check(contextPair(0)[0] === 'last measured input' && contextPair(1)[0] === 'selected capacity'
+      && contextPair(2)[0] === 'occupancy', 'the context section keeps its three measured rows');
+    check(cachePair[0] === 'cache hit' && cachePair[1] === '95.72%',
+      'session cache hit follows occupancy with two decimals: ' + JSON.stringify(cachePair));
+    cachePair = paintContext({ ...savedObservation.total, prompt: 1000000, cacheRead: 957200, cache_known: false });
+    check(cachePair[1] === 'unknown / partial', 'cache hit says unknown / partial without a cache split: ' + JSON.stringify(cachePair));
+    cachePair = paintContext({ ...savedObservation.total, prompt: 0, cacheRead: 0, cache_known: true });
+    check(cachePair[1] === 'unknown', 'cache hit stays unknown at a zero prompt: ' + JSON.stringify(cachePair));
+    check(cacheHitReadout({ prompt: 1000000, cache_read: 957200, cache_known: true }) === '95.72%',
+      'child accounting cache_read feeds the same session readout');
+    check(childCacheHit({ accounting: { usage: { available: false, partial: true } } }) === 'unknown / partial',
+      'a partial child total is not shown as a number');
+    const childPane = document.createElement('wa-agent-session');
+    document.body.append(childPane);
+    childPane.task = { subagent_id: 'cache-child', session_id: 'cache-child', state: 'running', profile: 'worker',
+      model: 'child-model', accounting: { usage: { available: true, cache_known: true, prompt: 1000000, cache_read: 957200 } } };
+    const mainTranscript = transcript, mainRendererTask = rendererTask;
+    transcript = childPane.transcript; rendererTask = childPane.task;
+    updateChildContextReadouts();
+    const childBalloon = childPane.querySelector('wa-balloon');
+    check(childBalloon.textContent.includes('cache hit') && childBalloon.textContent.includes('95.72%'),
+      'a child pane facts list carries the same cache hit when accounting has it: ' + childBalloon.textContent);
+    childPane.task = { ...childPane.task, accounting: { usage: { available: false, partial: true } } };
+    updateChildContextReadouts();
+    check(childBalloon.textContent.includes('cache hit') && childBalloon.textContent.includes('unknown / partial'),
+      'a child pane without a complete cache split does not show a number: ' + childBalloon.textContent);
+    transcript = mainTranscript; rendererTask = mainRendererTask; childPane.remove();
+    settings.observability.available = savedObservation.available;
+    settings.observability.total = savedObservation.total;
+    cacheBox.replaceChildren(); renderContext(); renderUsage();
+    check(usageBox.textContent.includes('cache reuse') && usageBox.textContent.includes('83.3%'),
+      'the tokens section keeps its cache reuse row');
     report.dataset.status = 'pass'; report.textContent = JSON.stringify({ checks, skipped: 0 });
   } catch (error) {
     report.dataset.status = 'fail'; report.textContent = JSON.stringify({ checks, error: error.message });

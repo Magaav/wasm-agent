@@ -4697,6 +4697,23 @@ function formatContextCapacity(value) {
   const n=Number(value);
   return n>0&&Number.isFinite(n)?(n/1e6).toFixed(6).replace(/0+$/,'').replace(/\.$/,'')+'M':'?M';
 }
+// Session cache hit: observed cache reads over observed prompt tokens. This is the session's
+// total, not the last call's reuse; a missing cache split or an empty prompt stays unknown so a
+// partial observation never reads as a measured 0%. Child accounting names the same fact
+// `cache_read`, so both shapes feed this one readout.
+function cacheHitReadout(total) {
+  if(!total)return 'unknown';
+  if(total.cache_known!==true)return 'unknown / partial';
+  const prompt=Number(total.prompt),read=Number(total.cacheRead??total.cache_read);
+  return Number.isSafeInteger(prompt)&&prompt>0&&Number.isSafeInteger(read)&&read>=0
+    ? (100*read/prompt).toFixed(2)+'%' : 'unknown';
+}
+function childCacheHit(task) {
+  const usage=task?.accounting?.usage;
+  if(!usage)return 'unknown';
+  if(usage.available===false)return usage.partial===true?'unknown / partial':'unknown';
+  return cacheHitReadout(usage);
+}
 
 function activeProvider() {
   return (settings.providers || []).find((provider) => provider.id === settings.provider) || null;
@@ -4753,6 +4770,7 @@ function updateChildContextReadouts() {
   const context=contextFacts(),facts=[{label:'last measured input',value:context.tokens==null?'unknown':formatTokens(context.tokens)},
     {label:'selected capacity',value:formatContextCapacity(context.capacity)},
     {label:'occupancy',value:contextReadout(context).replace(/^▤ /,'')},
+    {label:'cache hit',value:childCacheHit(pane.task)},
     {label:'exact counts',value:contextDetail(context)},
     {label:'model',value:rendererTask.model||context.model||'unknown'},
     {label:'reasoning',value:rendererTask.reasoning||'unknown'}];
@@ -4882,11 +4900,13 @@ function formatReset(iso) {
 // budget of zero is a fact worth stating - "taken 12K, budget -" reads like a
 // missing value rather than a configured absence.
 function renderContext() {
-  const context=contextFacts(),key=JSON.stringify([runStepScope(),context.tokens,context.capacity,context.model]);
+  const context=contextFacts(),cacheHit=cacheHitReadout(settings.observability?.total);
+  const key=JSON.stringify([runStepScope(),context.tokens,context.capacity,context.model,cacheHit]);
   if(contextPaintKey===key&&contextBox.childElementCount)return;
   contextPaintKey=key;contextBox.replaceChildren();
   contextBox.append(grid([['last measured input',context.tokens==null?'unknown':formatTokens(context.tokens)],
-    ['selected capacity',formatContextCapacity(context.capacity)],['occupancy',contextReadout(context).replace(/^▤ /,'')]]));
+    ['selected capacity',formatContextCapacity(context.capacity)],['occupancy',contextReadout(context).replace(/^▤ /,'')],
+    ['cache hit',cacheHit]]));
   const raw=document.createElement('span');raw.className='usage-note';
   raw.textContent=contextDetail(context);contextBox.append(raw);
   if(context.tokens!=null&&context.capacity>0)contextBox.append(meter(context.tokens/context.capacity*100));
