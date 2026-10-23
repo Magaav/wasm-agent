@@ -498,7 +498,7 @@ $harness = @'
     { type: "done" }
   ];
   // LIVE CHECK: a plain tool-call topic is collapsed by default everywhere. The reader can
-  // open the running trace to see its tool lines; only a DECISION topic prints expanded.
+  // open the running trace to see its tool lines; a tool/decision topic is collapsed by default.
   var upto = 4;   // through the first tool result
   for (var i = 0; i < upto; i++) window.handleEvent(events[i]);
   var live = document.querySelector('wa-trace');
@@ -1661,13 +1661,13 @@ $harness = @'
   check(!!paneFooter && Math.abs(paneModel.getBoundingClientRect().right - paneFooter.getBoundingClientRect().right)<=2,
     'the worker model label right edge must sit within 2px of its composer row right edge, saw ' +
       paneModel.getBoundingClientRect().right + ' vs ' + paneFooter.getBoundingClientRect().right);
-  // WHY THIS READS `!open` NOW (change 2): only THINKING and DECISION topics print expanded; a step that
+  // WHY THIS READS `!open` NOW (change 2): only THINKING topics print expanded; a step that
   // only called a tool is created COLLAPSED and stays collapsed until the reader opens it. The property this
   // check was written for - the running call is deduplicated and drawn as ONE topic, not one row per
   // notification - is unchanged. The reader's own fold is asserted on the next line, which sets `open=false`
   // by hand and then requires a live task update not to rebuild the transcript under them.
   check(livePane.querySelector('wa-trace')?.open===false && livePane.querySelectorAll('.tool-line.pending').length===1,
-    'running worker tool topic is created collapsed (only thinking and decision topics print expanded) and deduplicated before settlement, saw trace=' + !!livePane.querySelector('wa-trace') +
+    'running worker tool topic is created collapsed (only thinking topics print expanded) and deduplicated before settlement, saw trace=' + !!livePane.querySelector('wa-trace') +
     ' open=' + (livePane.querySelector('wa-trace') ? livePane.querySelector('wa-trace').open : 'n/a') +
     ' pending=' + livePane.querySelectorAll('.tool-line.pending').length +
     ' lines=' + livePane.querySelectorAll('.tool-line').length +
@@ -4160,6 +4160,12 @@ try {
     # it now fails on it, so it runs in the gate rather than beside it.
     & node scripts/agent-benchmark-ui-observe.mjs --ui $ui --probe (Join-Path $PSScriptRoot 'probe-run-topic-nesting.js') --out (Join-Path $tmp 'run-topic-nesting')
     if ($LASTEXITCODE -ne 0) { throw 'run topic nesting browser probe failed' }
+    # Only THINKING topics print expanded. A tool or decision topic is created COLLAPSED and never
+    # auto-opens after spawning: the decision event, the addTool promotion and finish() leave `open`
+    # alone, a reader's own toggle survives, and a failed tool opens once (the one shared exception).
+    # Runs in the gate so the operator's 2026-10-23 expand-after-spawning regression cannot return.
+    & node scripts/agent-benchmark-ui-observe.mjs --ui $ui --probe (Join-Path $PSScriptRoot 'probe-topic-expansion.js') --out (Join-Path $tmp 'topic-expansion')
+    if ($LASTEXITCODE -ne 0) { throw 'topic expansion browser probe failed' }
     # A step that has begun has no topic yet: the vacuum where it will be is prepainted with the
     # reasoning topic's shape (glyph, `reasoning…`, a live seconds count), and the step's own topic -
     # thinking, tool or decision - REPLACES it in place (same parent, same sibling index, one topic).

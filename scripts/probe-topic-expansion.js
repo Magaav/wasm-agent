@@ -1,15 +1,16 @@
-// Focused probe: ONLY thinking and decision topics print expanded.
+// Focused probe: ONLY thinking topics print expanded.
 //
-// Operator's rule: a thinking topic (`wa-reasoning`) stays open unless the reader folds it, a DECISION
-// topic - a step whose prose ended in a tool call - prints expanded, and EVERY other topic (tool-call
-// topics, commentary, `wa-diff`, `wa-summary`, `wa-steering`) is created collapsed and stays collapsed
-// unless the reader opens it. The reader's own fold wins in both directions, in every later pass.
+// Operator's rule (2026-10-23): a thinking topic (`wa-reasoning`) stays open unless the reader folds it;
+// EVERY other topic - a tool-call step, a decision step, commentary, `wa-diff`, `wa-summary`,
+// `wa-steering` - is created collapsed and stays collapsed until the reader opens it. The final answer
+// is exempt (it is not a topic). A failed tool call may open its topic once so the error is visible.
 //
-// WHY IT IS CARRIED BY A FACT, NOT A TAG NAME. A decision and the calls it chose live in the SAME
+// WHY IT IS CARRIED BY A FACT, NOT A TAG NAME. A decision step and the calls it chose live in the SAME
 // `<wa-trace>` element (`addDecision`/`addTool`), so "is this a decision topic?" cannot be answered by
 // looking at the element's name - the element is also what a step that ONLY called a tool looks like.
-// The element carries `data-decision="true"` when it took a decision; `addTool`, `settle` and `finish`
-// read that fact, and a repaint re-applies the reader's own choice.
+// The element carries `data-decision="true"` when it took a decision; that fact labels the step
+// ("deciding…") and is never used to open it. `markDecision`, the `addTool` promotion and `finish` all
+// leave `open` alone; only the reader's toggle (and the one failed-call opening in `settle`) moves it.
 //
 // Run with the disposable observer (it serves a copy of ui/ with test-fixtures.js injected, in real
 // headless Chrome, and writes screenshot.png + dom.html):
@@ -17,8 +18,9 @@
 //   node scripts/agent-benchmark-ui-observe.mjs --out "$TEMP/ui-topics" \
 //     --probe scripts/probe-topic-expansion.js
 //
-// The probe ends with a live stage, so the image shows the rule itself: thinking open, commentary
-// collapsed, decision topic expanded, tool-call topic collapsed.
+// The probe ends with a live stage: thinking open; commentary, decision and tool-call topics collapsed;
+// a failed tool topic open once. The main-chat route is exercised through `handleEvent`, the child-pane
+// route through `withChildRenderer` - the same renderer and the same component.
 (async function () {
   var report = document.createElement('pre');
   report.id = 'wa-probe';
@@ -26,72 +28,116 @@
   document.body.append(report);
   var checks = 0;
   function check(ok, label) { if (!ok) throw Error(label); checks++; }
-  function topics(node, selector) { return Array.prototype.slice.call(node.querySelectorAll(selector)); }
+  function tick() { return Promise.resolve(); }
   try {
     await window.rendererLoaded;
-    for (var i = 0; i < 200 && !transcriptReady; i++) await new Promise(function (resolve) { setTimeout(resolve, 10); });
+    for (var i = 0; i < 200 && !transcriptReady; i++) await tick();
     check(transcriptReady, 'startup ready');
     var now = Date.now();
-    var run = 'expansion-run';
+    var run = 'collapse-run';
     busy = false; activeRunId = null; observedRun = { session: chatSession, run_id: 911 };
     repaintMessages([], { active: true, notify: false });
 
-    // ---- A. THE LIVE RUN: ONE STEP OF EACH KIND ------------------------------------------------
-    // A step that streams thinking and then calls a tool with NO decision before it: this is the
-    // tool-call topic the rule is about, and the FIRST thing this probe asks about it.
+    // ---- A. THE LIVE MAIN CHAT: EVERY TOOL/DECISION STEP STARTS AND STAYS COLLAPSED -------------
+    // 1. A step that only calls a tool: collapsed at spawn, through the result, and at finish.
     handleEvent({ type: 'round', n: 1, run_id: run });
     handleEvent({ type: 'reasoning', text: 'Weighing the options before deciding.', chars: 37 });
     handleEvent({ type: 'tool', call_id: 'plain-call', name: 'bash', arguments: { command: 'ls' } });
     var bubble = runBubble;
     check(!!bubble, 'the live run has a bubble');
+    function traceOf(callId) {
+      return Array.prototype.slice.call(bubble.querySelectorAll('wa-trace')).filter(function (node) {
+        return !!node.querySelector('[data-call-id="' + callId + '"]');
+      })[0] || null;
+    }
     var thinking = bubble.querySelector('wa-reasoning');
-    var plain = bubble.querySelector('wa-trace');
     check(!!thinking && thinking.open === true,
       'a thinking topic prints expanded and only the reader closes it, saw open=' + (thinking && thinking.open));
+    var plain = traceOf('plain-call');
     check(!!plain && plain.dataset.decision !== 'true',
-      'a tool-call topic carries no decision fact, saw data-decision=' + (plain && JSON.stringify(plain.dataset.decision)));
+      'a plain tool-call topic carries no decision fact, saw data-decision=' + (plain && JSON.stringify(plain.dataset.decision)));
     check(!!plain && plain.open === false,
       'a live tool-call topic is created COLLAPSED, saw open=' + (plain && plain.open));
     handleEvent({ type: 'tool_result', name: 'bash', result: { code: 0, stdout: 'done' } });
-    // The step ends (a round boundary flushes the trace): it is still collapsed.
+    check(!!plain && plain.open === false,
+      'a tool-call topic stays collapsed through tool_result, saw open=' + (plain && plain.open));
     handleEvent({ type: 'round', n: 2, run_id: run });
     check(!!plain && plain.open === false,
-      'a tool-call topic stays collapsed when its step ends, saw open=' + (plain && plain.open));
+      'a tool-call topic stays collapsed through finish, saw open=' + (plain && plain.open));
+    check(!!plain && plain._userToggled !== true,
+      'no automatic opening pretends to be the reader choice on a tool topic');
 
-    // A decision: prose, then the call the step chose. The call is promoted from "forming" to
-    // "running" in the SAME element - it must not flip the topic closed.
+    // 2. A decision step: prose, the provider's `decision` event, then the call it chose. The same
+    // element is promoted from "forming" to "running"; none of those events may open it.
     handleEvent({ type: 'commentary', text: 'Checking the ledger first.', message_id: 'commentary-1' });
     handleEvent({ type: 'decision', call_id: 'chosen-call', name: 'read',
       arguments_text: '{"path":"review/ledger.json"}', complete: false });
+    var decision = bubble.querySelector('wa-trace[data-decision="true"]');
+    check(!!decision, 'the decision step carries the fact on the element, saw none');
+    check(decision !== plain, 'a decision after a settled step is a topic of its own');
+    check(decision.open === false,
+      'a decision topic is created COLLAPSED, saw open=' + decision.open);
     handleEvent({ type: 'decision', call_id: 'chosen-call', name: 'read',
       arguments_text: '{"path":"review/ledger.json"}', complete: true });
+    check(decision.open === false,
+      'a second decision event for the same call does not open it, saw open=' + decision.open);
     handleEvent({ type: 'tool', call_id: 'chosen-call', name: 'read',
       arguments: { path: 'review/ledger.json' } });
-    var commentary = bubble.querySelector('wa-commentary');
-    var decision = bubble.querySelector('wa-trace[data-decision="true"]');
-    check(!!commentary && commentary.open === false,
-      'a commentary is created COLLAPSED, saw open=' + (commentary && commentary.open));
-    check(!!decision, 'the decision topic carries the fact on the element, saw none');
-    check(decision !== plain, 'a decision after a settled step is a topic of its own');
-    check(!!decision && decision.open === true,
-      'a decision topic prints expanded, saw open=' + (decision && decision.open));
+    check(decision.open === false,
+      'promoting the chosen call to a running one does not open the decision topic, saw open=' + decision.open);
     handleEvent({ type: 'tool_result', name: 'read', result: { code: 0, stdout: 'ok' } });
-    check(!!decision && decision.open === true,
-      'promoting the chosen call to a running one does not close the decision topic');
-    // The step ends (a round boundary flushes the trace): the decision topic stays expanded.
+    check(decision.open === false,
+      'a decision topic stays collapsed through tool_result, saw open=' + decision.open);
     handleEvent({ type: 'round', n: 3, run_id: run });
-    check(!!decision && decision.open === true,
-      'a decision topic stays expanded when its step ends, saw open=' + (decision && decision.open));
+    check(decision.open === false,
+      'a decision topic stays collapsed through finish, saw open=' + decision.open);
+
+    // 3. A decision event with no tool call: it is still a collapsed topic, before and after finish.
+    handleEvent({ type: 'decision', call_id: 'decision-only', name: 'bash',
+      arguments_text: '{"command":"true"}', complete: true });
+    var decisionOnly = traceOf('decision-only');
+    check(!!decisionOnly && decisionOnly !== decision,
+      'a decision event with no tool call is a topic of its own');
+    check(decisionOnly.dataset.decision === 'true',
+      'a decision-only step still carries its decision fact');
+    check(decisionOnly.open === false,
+      'a decision event with no tool call does not auto-open its topic, saw open=' + decisionOnly.open);
+    handleEvent({ type: 'round', n: 4, run_id: run });
+    check(decisionOnly.open === false,
+      'a decision-only topic stays collapsed through finish, saw open=' + decisionOnly.open);
+
+    // 4. The one automatic opening left: a failed call makes its own error visible once. It is shared
+    // by the main chat and a child pane because both call this same `settle`; the reader still wins,
+    // and finish() does not re-open anything.
+    handleEvent({ type: 'tool', call_id: 'failed-call', name: 'bash', arguments: { command: 'false' } });
+    var failed = traceOf('failed-call');
+    check(!!failed && failed.open === false, 'a failed call starts as a collapsed tool topic');
+    handleEvent({ type: 'tool_result', name: 'bash', result: { code: 1, stderr: 'boom' }, failed: true });
+    check(!!failed && failed.open === true,
+      'a failed tool opens its topic once so the error is visible, saw open=' + (failed && failed.open));
+    handleEvent({ type: 'round', n: 5, run_id: run });
+    check(!!failed && failed.open === true,
+      'finish keeps a failed topic open, saw open=' + (failed && failed.open));
 
     // ---- B. THE READER'S OWN CHOICE, IN BOTH DIRECTIONS, THROUGH LATER PASSES -------------------
     plain.toggle();
     check(plain.open === true, 'the reader can open a tool-call topic');
     handleEvent({ type: 'status', text: 'model' });
-    handleEvent({ type: 'round', n: 4, run_id: run });
+    handleEvent({ type: 'round', n: 6, run_id: run });
     check(plain.open === true,
       'a later pass keeps the tool topic the reader opened open, saw open=' + plain.open);
     decision.toggle();
-    check(decision.open === false, 'the reader can close a decision topic');
+    check(decision.open === true, 'the reader can open a decision topic');
+    handleEvent({ type: 'status', text: 'model' });
+    handleEvent({ type: 'round', n: 7, run_id: run });
+    check(decision.open === true,
+      'a later pass keeps the decision topic the reader opened open, saw open=' + decision.open);
+    decisionOnly.toggle();
+    check(decisionOnly.open === true, 'the reader can open a decision-only topic');
+    decisionOnly.toggle();
+    check(decisionOnly.open === false, 'the reader can close a decision-only topic');
+    failed.toggle();
+    check(failed.open === false, 'the reader can close the failed topic');
 
     // ---- B2. THE OTHER TOPICS THE RULE NAMES ARE CREATED COLLAPSED ------------------------------
     handleEvent({ type: 'steering', id: 'steer-1', state: 'queued', text: 'Use the corrected requirement' });
@@ -110,16 +156,21 @@
 
     // The fold at the answer is the pass that used to open everything it swallowed (`reveal()`).
     handleEvent({ type: 'delta', text: 'The answer.' });
-    handleEvent({ type: 'reply', text: 'The answer.', message_id: 'expansion-answer' });
+    handleEvent({ type: 'reply', text: 'The answer.', message_id: 'collapse-answer' });
     handleEvent({ type: 'done' });
     var runTopic = bubble.querySelector('wa-run');
     check(!!runTopic && runTopic.open === false, 'the run topic itself still folds at the answer');
-    check(decision.open === false,
-      'the fold does not reopen a decision topic the reader closed, saw open=' + decision.open);
     check(plain.open === true,
-      'and does not close the tool topic the reader opened, saw open=' + plain.open);
+      'the fold does not close the tool topic the reader opened, saw open=' + plain.open);
+    check(decision.open === true,
+      'the fold does not close the decision topic the reader opened, saw open=' + decision.open);
+    check(decisionOnly.open === false,
+      'the fold does not reopen a decision topic the reader closed, saw open=' + decisionOnly.open);
+    check(failed.open === false,
+      'the fold does not reopen a failed topic the reader closed, saw open=' + failed.open);
+    var commentary = bubble.querySelector('wa-commentary');
     check(!!commentary && commentary.open === false,
-      'a commentary is still collapsed after the fold, saw open=' + (commentary && commentary.open));
+      'a commentary is created COLLAPSED and stays collapsed, saw open=' + (commentary && commentary.open));
     check(!!thinking && thinking.open === true,
       'and the thinking is still open after the fold, saw open=' + (thinking && thinking.open));
 
@@ -158,8 +209,11 @@
   }
 
   // ---- D. THE STAGE THE IMAGE IS READ FROM -----------------------------------------------------
-  // Live, so the picture shows the rule rather than a folded run: thinking open, commentary collapsed,
-  // a decision topic expanded, a tool-call topic collapsed.
+  // Main chat is section A (the real `handleEvent` route); this stage draws the same events through
+  // the child-pane renderer (`withChildRenderer`). Both use the same <wa-trace> component and the
+  // same decision event leaves the topic collapsed in both. Live, so the picture shows the rule rather
+  // than a folded run: thinking open; commentary, decision and tool-call topics collapsed; the failed
+  // tool topic open once.
   try {
     var stage = document.createElement('div');
     stage.id = 'wa-stage';
@@ -190,33 +244,52 @@
           { type: 'tool', call_id: 'stage-chosen', name: 'read', arguments: { path: 'review/ledger.json' } },
           { type: 'tool_result', name: 'read', result: { code: 0, stdout: 'ok' } },
           { type: 'round', n: 2, run_id: 'stage-run' },
-          { type: 'tool', call_id: 'stage-plain', name: 'bash', arguments: { command: 'ls' } }
+          { type: 'decision', call_id: 'stage-only', name: 'bash',
+            arguments_text: '{"command":"true"}', complete: true },
+          { type: 'round', n: 3, run_id: 'stage-run' },
+          { type: 'tool', call_id: 'stage-plain', name: 'bash', arguments: { command: 'ls' } },
+          { type: 'round', n: 4, run_id: 'stage-run' },
+          { type: 'tool', call_id: 'stage-failed', name: 'bash', arguments: { command: 'false' } },
+          { type: 'tool_result', name: 'bash', result: { code: 1, stderr: 'boom' }, failed: true }
         ];
         for (var index = 0; index < events.length; index++) window.handleEvent(events[index]);
       });
     var stageThinking = pane.querySelector('wa-reasoning');
     var stageCommentary = pane.querySelector('wa-commentary');
-    var stageDecision = pane.querySelector('wa-trace[data-decision="true"]');
-    var stagePlain = Array.prototype.slice.call(pane.querySelectorAll('wa-trace'))
-      .filter(function (node) { return node !== stageDecision; })[0] || null;
-    check(!!stageDecision && stageDecision.open === true,
-      'stage: the decision topic is drawn expanded');
+    var stageTraces = Array.prototype.slice.call(pane.querySelectorAll('wa-trace'));
+    var stageDecisions = stageTraces.filter(function (node) { return node.dataset.decision === 'true'; });
+    var stagePlain = stageTraces.filter(function (node) { return node.dataset.decision !== 'true'; })[0] || null;
+    var stageFailed = null;
+    for (var t = 0; t < stageTraces.length; t++) {
+      if (stageTraces[t].querySelector('[data-call-id="stage-failed"]')) stageFailed = stageTraces[t];
+    }
+    check(!!stageThinking && stageThinking.open === true,
+      'stage: the thinking is drawn open');
+    check(stageDecisions.length === 2,
+      'stage: both decision steps carry the fact in the child pane, saw ' + stageDecisions.length);
+    check(stageDecisions.every(function (node) { return node.open === false; }),
+      'stage: the child pane leaves every decision topic COLLAPSED');
     check(!!stagePlain && stagePlain.open === false,
       'stage: the tool-call topic is drawn collapsed');
     check(!!stageCommentary && stageCommentary.open === false,
       'stage: the commentary is drawn collapsed');
-    check(!!stageThinking && stageThinking.open === true,
-      'stage: the thinking is drawn open');
-    // The image is only evidence if the topics are really laid out: a collapsed topic shows its header
-    // and hides its body, so the decision's body (its arguments) is the only step text in the picture.
-    var stageDecisionBody = stageDecision && stageDecision.querySelector('.trace-body');
-    var stagePlainBody = stagePlain && stagePlain.querySelector('.trace-body');
-    check(!!stageDecisionBody && !!stagePlainBody && stageDecisionBody.hidden === false && stagePlainBody.hidden === true,
-      'stage: expanded means the body is shown, collapsed means only the header is, saw decision=' +
-      (stageDecisionBody && stageDecisionBody.hidden) + ' tool=' + (stagePlainBody && stagePlainBody.hidden));
+    // Collapsed means only the header is shown: every decision body and the plain tool body are hidden.
+    var collapsedBodies = stageDecisions.map(function (node) { return node.querySelector('.trace-body'); });
+    collapsedBodies.push(stagePlain && stagePlain.querySelector('.trace-body'));
+    check(collapsedBodies.every(function (body) { return !!body && body.hidden === true; }),
+      'stage: collapsed topics show their header and hide their body');
+    // The one automatic opening is shared: the child pane's failed tool topic is open once, and its
+    // body is really visible, not merely an `open` attribute on a hidden body.
+    var stageFailedBody = stageFailed && stageFailed.querySelector('.trace-body');
+    check(!!stageFailed && stageFailed.open === true && !!stageFailedBody && stageFailedBody.hidden === false,
+      'stage: the child pane opens a failed tool topic once so its error is visible');
+    // Same component, same reader choice: opening a child decision topic does not fold it again.
+    var stageReader = stageDecisions[0];
+    stageReader.toggle();
+    check(stageReader.open === true, 'stage: the reader can open a child decision topic');
     caption('thinking ' + stamp(stageThinking) + ' open \u00b7 commentary ' + stamp(stageCommentary) +
-      ' collapsed \u00b7 decision ' + stamp(stageDecision) + ' expanded \u00b7 tool-call topic ' +
-      stamp(stagePlain) + ' collapsed');
+      ' collapsed \u00b7 decision ' + stamp(stageDecisions[0]) + ' collapsed \u00b7 tool-call topic ' +
+      stamp(stagePlain) + ' collapsed \u00b7 failed tool ' + stamp(stageFailed) + ' open once');
   } catch (error) {
     report.dataset.status = 'fail';
     report.textContent = 'TOPIC-EXPANSION FAIL (stage): ' + String(error && error.stack ? error.stack : error) +

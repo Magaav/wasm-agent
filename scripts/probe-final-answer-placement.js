@@ -161,8 +161,9 @@
     var answerTopic = bubble.body.querySelector(":scope > wa-commentary.phase-pending");
     var answerBody = answerTopic && answerTopic.querySelector(".commentary-body");
     check(!!answerBody, "the answer's first chunk also streams inside its commentary topic");
-    // CHANGE 2 (operator rule): that topic PRINTS COLLAPSED now - only thinking and decision topics
-    // print expanded - so the probe opens it the way a reader following the prose does, before the
+    // CHANGE 2 (operator rule): that topic PRINTS COLLAPSED now - only thinking topics print expanded;
+    // commentary and tool/decision steps are collapsed - so the probe opens it the way a reader
+    // following the prose does, before the
     // conversion. The claims below are about the block the conversion moves (same element, same
     // structure, same text), and a folded body has no box to compare: opening it here asserts the
     // shape the reader sees and keeps every structural claim in this section intact.

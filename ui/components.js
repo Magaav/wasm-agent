@@ -475,24 +475,25 @@ class WaTrace extends HTMLElement {
 
   // One click on a finished run used to call this to open every topic it swallowed ("show the
   // sequence, not another row of collapsed headers"). The operator's rule is the opposite now: only
-  // THINKING and DECISION topics print expanded, and every other topic stays collapsed until the reader
-  // opens it. So a fold is not an opening, and this must not touch `open` either - it also used to clear
-  // `_userToggled`, which let a later fold overrule a reader who had closed the topic by hand. The
-  // method stays because `collapseRun` asks each child for it (and <wa-reasoning> has no such hook).
+  // THINKING topics print expanded; a tool/decision step is collapsed, and every other topic stays
+  // collapsed until the reader opens it. So a fold is not an opening, and this must not touch `open`
+  // either - it also used to clear `_userToggled`, which let a later fold overrule a reader who had
+  // closed the topic by hand. The method stays because `collapseRun` asks each child for it (and
+  // <wa-reasoning> has no such hook).
   reveal() {}
 
   // A streamed model decision is provisional until the matching `tool` event. Keep one row by
   // call id, then promote it in addTool() so selection appears before execution without duplication.
-  // A DECISION TOPIC PRINTS EXPANDED (operator rule). The page is what knows whether this element took a
-  // decision - a `decision` event, or (on the provider route that states no per-item phase) the prose
-  // element that stands immediately before this topic - so that knowledge arrives through this call and
-  // the fact lives on the ELEMENT (`data-decision`), never in the tag name: the same <wa-trace> also
-  // holds a step that only called a tool, and that one is a collapsed topic. addTool(), settle() and
-  // finish() read this fact, and `markDecision` is idempotent because a call is promoted from "forming"
-  // to "running" in the same element.
+  // A DECISION/TOOL TOPIC IS COLLAPSED LIKE EVERY OTHER STEP (operator rule: only THINKING topics print
+  // expanded; commentary is collapsed too, and the final answer is exempt). The page is what knows
+  // whether this element took a decision - the provider's `decision` event - so that knowledge arrives
+  // through this call and the fact lives on the ELEMENT (`data-decision`), never in the tag name: the
+  // same <wa-trace> also holds a step that only called a tool. The fact is used for the header label
+  // ("deciding…" while a call is still being selected), never to open the topic; `markDecision` is
+  // idempotent because a call is promoted from "forming" to "running" in the same element. Nothing
+  // here may overrule `_userToggled`.
   markDecision() {
     this.dataset.decision = 'true';
-    if (!this._userToggled) this.open = true;
   }
 
   addDecision(callId, name, argumentsText, complete, previousCallId) {
@@ -559,17 +560,17 @@ class WaTrace extends HTMLElement {
       this._pending.push({ line: decision.line, output: decision.output, progress: decision.progress,
         outcome: decision.outcome, head: decision.head, label: decision.label, change: change || null,
         started: Date.now(), bound: bound || null, callId: String(callId) });
-      // The chosen call RUNS in the topic that chose it, so the element is still a decision topic and
-      // keeps the state it has - open, unless the reader closed it (their fold wins).
-      if (!this._userToggled && this.dataset.decision === 'true') this.open = true;
+      // The chosen call RUNS in the topic that chose it, so the element is still the same decision
+      // topic. It keeps the state it already has: created collapsed, and opened only by the reader.
+      // This promotion used to force it open, which is the expand-after-spawning the operator saw.
       this._refresh();
       this.setAge(0);
       return decision.line;
     }
-    // NOT opened: a tool-call topic is CREATED COLLAPSED and stays that way until the reader opens it
-    // (operator rule: only THINKING and DECISION topics print expanded). This used to say `live: show
-    // the lines, not a count`, which opened the topic on every step and then folded it when the step
-    // ended - the expand-then-collapse the operator saw.
+    // NOT opened: a tool/decision topic is CREATED COLLAPSED and stays that way until the reader opens
+    // it (operator rule: only THINKING topics print expanded; commentary is collapsed too, and the final
+    // answer is exempt). This used to say `live: show the lines, not a count`, which opened the topic on
+    // every step and then folded it when the step ended - the expand-then-collapse the operator saw.
     this._count += 1;
     const line = document.createElement("li");
     line.className = "tool-line pending";
@@ -657,7 +658,9 @@ class WaTrace extends HTMLElement {
       // An error is never hidden inside a collapsed topic: a failed call the reader never sees is a
       // run that looks fine. So the failing row's own output is shown when the topic is opened, the
       // topic opens itself once - and even that yields to the reader, because a topic they closed by
-      // hand stays closed (its header carries the warning glyph and the outcome).
+      // hand stays closed (its header carries the warning glyph and the outcome). This is the only
+      // automatic opening the component still does, and both the main chat and a child pane arrive
+      // here through this same shared method.
       target.output.hidden = false;
       if (!this._userToggled) this.open = true;
     }
@@ -728,10 +731,11 @@ class WaTrace extends HTMLElement {
     this._decisions.clear();
     this._header.classList.remove("running");
     this._done = true;
-    // The step is over. A tool-call topic was collapsed all along and stays collapsed; a DECISION topic
-    // (the element's own fact) printed expanded and stays expanded, because nothing folds what the
-    // reader is meant to read. Only a fold of a topic the reader never opened did this before.
-    if (!this._userToggled && this._errors === 0 && this.dataset.decision !== 'true') this.open = false;
+    // The step is over. A tool/decision topic was collapsed all along and stays collapsed; only a topic
+    // with a failed call stays open after settle() opened it once (the reader's own choice still wins
+    // both ways). A decision fact no longer exempts the topic from this fold: the rule is the same for
+    // a step that only called a tool and one the provider announced as a decision.
+    if (!this._userToggled && this._errors === 0) this.open = false;
     this._elapsed = Date.now() - this._started;
     this._refresh();
   }
