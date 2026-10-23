@@ -151,16 +151,13 @@
       text: FULL, message_id: "md-in-place" });
     var resolved = messages.querySelector('wa-commentary[data-message-id="md-in-place"]');
     check(!!resolved, "phase-at-end: the resolved step must be a commentary topic");
-    // CHANGE 2 (operator rule): a commentary is CREATED COLLAPSED - only thinking topics print
-    // expanded; commentary and tool/decision steps are collapsed - so its body has no box at all until
-    // the reader opens it. Every geometry claim
-    // below is about the topic as the reader sees it OPENED, so the collapsed default is asserted here
-    // and then the topic is opened the way a reader opens it: the shape is still measured, and the new
-    // rule cannot be skipped silently.
-    check(!!resolved && resolved.open === false,
-      "phase-at-end: a commentary must be CREATED COLLAPSED now - only thinking topics print " +
-      "expanded, commentary and tool/decision steps are collapsed - saw open=" + (resolved ? resolved.open : "no topic"));
-    if (resolved) resolved.toggle();
+    // CHANGE 2 (operator, 2026-10-23, REVERSING the created-collapsed rule this pinned): a commentary
+    // IS a thinking topic - it prints expanded from its first chunk and stays open, and only the reader
+    // closes it. Every geometry claim below therefore measures the topic as it is drawn, with no toggle:
+    // the default is asserted first so the rule cannot regress silently.
+    check(!!resolved && resolved.open === true,
+      "phase-at-end: a commentary must be CREATED OPEN like a thinking topic - it prints expanded and " +
+      "stays open - saw open=" + (resolved ? resolved.open : "no topic"));
     var resolvedBody = resolved && resolved.body;
     var bodyBox = resolvedBody && resolvedBody.getBoundingClientRect();
     var topicBox = resolved && resolved.getBoundingClientRect();

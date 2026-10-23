@@ -1570,18 +1570,10 @@ function appendCommentary(text, messageId, pendingId, decisionPrelude, place) {
   // draws a new node beside it.
   sealReasoning();
   const block = document.createElement("wa-commentary");
-  // CREATED COLLAPSED (operator rule): only THINKING topics print expanded; a commentary and a
-  // tool/decision step are collapsed, and the final answer is exempt. A commentary is a topic the reader
-  // opens. It used to be `block.open = true` - "the same rule as the thinking" -
-  // which printed every commentary expanded and pushed the steps that followed it off the screen.
-  // The text may have streamed in the answer's place (a `.seg`), so this topic is built where that
-  // sentence stands: `replaceWith` below keeps the same parent and the same sibling index, and the
-  // string is carried over once - it is not re-created at the end of the bubble. What is allowed to
-  // change is the header: it appears ABOVE the body, exactly as it does on every other topic, and the
-  // sentence therefore moves down by that row's height. What is not allowed is a second layout for a
-  // topic that only exists while the run is live: there is no `data-in-place` state, no reversed
-  // column, and no chrome-less box (ui/style.css). The body's font/line-height/padding become the
-  // topic's own, which is what makes a commentary indistinguishable from the thinking topic it is.
+  // A COMMENTARY IS CREATED OPEN, by the component's own rule (ui/components.js `TOPIC_KINDS`), because
+  // it is a thinking topic: it prints expanded and stays open, and only the reader closes it (operator,
+  // 2026-10-23 - the "created collapsed" rule this comment used to state is what made a child bubble's
+  // commentary read as closed rows). Nothing here sets `open`, so there is one default and not two.
   block.setText(text);
   if(pendingId)block.dataset.pendingId=String(pendingId);
   // A decision step's prelude is a step of the run, like a tool call: the mark is what makes the run
@@ -1649,8 +1641,9 @@ function appendStreamedCommentary(text, pendingId) {
     sealReasoning();
     streamedCommentaryBlock = document.createElement("wa-commentary");
     streamedCommentaryBlock.classList.add("phase-pending");
-    // Collapsed from its first chunk, like every other commentary: the header says it is streaming and
-    // the reader opens it. It used to open here, which made a live run a wall of expanded prose.
+    // OPEN from its first chunk, like the thinking topic beside it (the component's `expanded` default):
+    // a provisional commentary is the same topic the phase will confirm, so it must not arrive as a
+    // closed row and then need the reader to open it a second time.
     if(pendingId)streamedCommentaryBlock.dataset.pendingId=String(pendingId);
     bubble.body.append(streamedCommentaryBlock);
     anchorRunStepContent(streamedCommentaryBlock);
@@ -2879,10 +2872,9 @@ function handleEvent(event) {
       sealReasoning();
       const node = document.createElement("wa-commentary");
       node.classList.add("phase-pending");
-      // Collapsed while provisional too: the phase is not known yet, and the rule does not depend on it
-      // (only a THINKING topic prints expanded; a commentary and a tool/decision step are collapsed,
-      // and a decision is a fact of the element, not a guess made before the provider says what the
-      // step was).
+      // Open while provisional too: the phase is not known yet but the box is (the component's
+      // `expanded` default), and a topic that is open when its phase resolves is one node the reader
+      // was already reading, not a closed row that pops open later.
       node.dataset.pendingId=key;
       currentBubble().body.append(node);
       anchorRunStepContent(node);

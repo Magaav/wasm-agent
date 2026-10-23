@@ -1013,7 +1013,7 @@ customElements.define('wa-retry',WaRetry);
 // there is one class to change.
 const TOPIC_KINDS = {
   "wa-reasoning": { className: "reasoning", glyph: "\u2733", label: "thinking", bodyClass: "reasoning-body" },
-  "wa-commentary": { className: "commentary", glyph: "\u2726", label: "commentary", bodyClass: "commentary-body" },
+  "wa-commentary": { className: "commentary", glyph: "\u2726", label: "commentary", bodyClass: "commentary-body", expanded: true },
 };
 
 // One Markdown path per string: the transcript's own renderer, which app.js installs as
@@ -1044,6 +1044,15 @@ class WaTopic extends HTMLElement {
     this._chevron = parts.chevron;
     this._body = parts.body;
     this.append(this._header, this._body);
+    // A COMMENTARY IS A THINKING TOPIC: it prints expanded from its first chunk and stays open - only
+    // the reader closes it (operator, 2026-10-23: "commentaries are appearing closed in the subagent
+    // chat bubble, they are just like thinking topics, must display opened and stay opened"). The
+    // default lives HERE, once, because it used to be re-decided at each creation site
+    // (`appendCommentary`, `appendStreamedCommentary`, `pending_delta`) and every one of them created
+    // it collapsed: a fourth call site could reintroduce the same defect. `_defaultedOpen` keeps the
+    // default to the first build, so an explicit `open = false` (a repaint restoring a topic the reader
+    // closed) is never overruled by a later attribute change.
+    if (kind.expanded && !this._defaultedOpen) { this._defaultedOpen = true; this.open = true; }
     this._sync();
   }
 
