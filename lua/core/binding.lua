@@ -1,7 +1,16 @@
 -- Two-sided binding controller. No provider, shell, credentials or conversation changes.
 local json=dofile('lua/vendor/json.lua')
 local paths=dofile('lua/core/paths.lua')
-local M={DEFAULT_SERVICE='https://rendezvous.colmeio.com'}
+local M={}
+-- No built-in fabric: a node joins the service its operator names, never one baked into the code.
+-- The suggestion is the one this node already uses - its saved binding, else WASM_AGENT_RENDEZVOUS.
+function M.default_service()
+  local raw=host.binding_state and host.binding_state('read','{}')
+  local ok,v=pcall(json.decode,raw or '')
+  if ok and type(v)=='table' and type(v.state)=='table' and type(v.state.service)=='string' and v.state.service~='' then return v.state.service end
+  local env=host.getenv and host.getenv('WASM_AGENT_RENDEZVOUS') or ''
+  return env or ''
+end
 -- Lifetime intent. 'standard' is the ordinary 24-hour consent and stays the default for every node;
 -- 'permanent' is the operator's explicit no-expiry choice for his own node and the only intent allowed
 -- to exceed 86400. The node asks for fifty years and the registry accepts at most a hundred
@@ -84,7 +93,8 @@ local function http(service,method,path,action,payload)
   if not v then return nil,'binding_reply_invalid' end;return v
 end
 function M.inspect(service)
-  local origin,problem=url(service or M.DEFAULT_SERVICE);if not origin then return failure(problem) end
+  if not service or service=='' then return failure('binding_service_required') end
+  local origin,problem=url(service);if not origin then return failure(problem) end
   local v,err=http(origin,'GET','/service');if not v then return failure('binding_service_unavailable',err) end
   if v.protocol~=1 or v.binding_protocol~=1 or v.enrollment_ready~=true or type(v.operators)~='table' or #v.operators==0 or #v.operators>32 then return failure('binding_service_protocol_unsupported') end
   -- Lifetime discovery: an older registry advertises nothing and therefore gets standard only, so a

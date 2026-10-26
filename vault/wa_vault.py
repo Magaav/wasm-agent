@@ -17,9 +17,9 @@ Two listeners, two audiences:
          /openai-sub/wham/usage         -> https://chatgpt.com/backend-api/wham/usage    (OAuth)
          /status                        -> which providers are configured/enabled; no values
          /login, /login/<provider>      -> the CLI's `/login` (pi-style): start the ChatGPT device
-                                           login, or store an opencode-go key. Write-only, like the
-                                           admin API: a first login/key can be stored, not replaced, and
-                                           neither answer carries a stored value.
+                                           login, or store/replace the opencode-go key (keys/opencode-go.key).
+                                           Write-only, like the admin API: a first ChatGPT login can be
+                                           started, a key can be placed, and no answer carries a value.
   admin  (WA_VAULT_ADMIN_PORT, default 8801) - the operator's side: the page and its API. Every API
          call needs the admin token (`X-Vault-Token`), which is given to this process only and lives
          on the host, outside anything the agent can mount.
@@ -30,8 +30,8 @@ Rules this file is built around:
      the proxy, not an error message. The admin API is write/replace/delete/status only. A stolen admin
      token can overwrite or delete a key; it cannot read one. The node-side `/login` routes need no
      token - they are how a person signs in from `wa chat` - so the agent can reach them too: it can
-     start a first device login (which only a human with the ChatGPT account can complete) or store the
-     opencode-go key only when none is configured, and it still cannot read one. Removing a credential stays on the admin page.
+     start a first device login (which only a human with the ChatGPT account can complete) or place the
+     opencode-go key (`<data>/keys/opencode-go.key`, never mounted by the agent), and it still cannot read one. Removing a credential stays on the admin page.
   2. **The upstream is fixed per route.** The node chooses a path under a route, never a host. No Host
      header passthrough, no redirect following (a redirect would carry the credential to wherever it
      points), and a path allowlist for the subscription route, so the OAuth token reaches only the two
@@ -73,6 +73,10 @@ OPENCODE_BASE = os.environ.get("WA_VAULT_OPENCODE_BASE", "https://opencode.ai/ze
 
 DATA_DIR = os.environ.get("WA_VAULT_DATA", "/data")
 STORE_PATH = os.path.join(DATA_DIR, "vault.json")
+# API keys are files: `<provider>.key`, one line, mode 600, in a directory only this process opens.
+# vault.json keeps what may be said about a key (when, enabled, generation) and never the key itself.
+KEYS_DIR = os.path.join(DATA_DIR, "keys")
+KEY_PROVIDERS = ("opencode-go",)
 ADMIN_TOKEN = os.environ.get("WA_VAULT_ADMIN_TOKEN", "")
 PROXY_PORT = int(os.environ.get("WA_VAULT_PROXY_PORT", "8810"))
 ADMIN_PORT = int(os.environ.get("WA_VAULT_ADMIN_PORT", "8801"))
@@ -160,6 +164,70 @@ def update_store(mutate):
         return value
 
 
+# --- key files ---------------------------------------------------------------------------------
+
+def key_path(provider):
+    if provider not in KEY_PROVIDERS:
+        raise VaultError(404, "vault_no_route", "no key file for " + str(provider))
+    return os.path.join(KEYS_DIR, provider + ".key")
+
+
+def read_key(provider):
+    """The key, for the one header that carries it upstream. Never logged, never returned."""
+    try:
+        with open(key_path(provider), "r", encoding="utf-8") as handle:
+            value = handle.read().strip()
+        return value or None
+    except FileNotFoundError:
+        return None
+
+
+def write_key(provider, value):
+    # Same rule as the store: a private temp file in the same directory, fsync, then a rename.
+    os.makedirs(KEYS_DIR, mode=0o700, exist_ok=True)
+    fd, temp = tempfile.mkstemp(prefix=".key-", dir=KEYS_DIR)
+    try:
+        os.chmod(temp, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(value.strip() + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp, key_path(provider))
+    except BaseException:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        try:
+            os.unlink(temp)
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def delete_key(provider):
+    try:
+        os.unlink(key_path(provider))
+    except FileNotFoundError:
+        pass
+
+
+def migrate_keys(store):
+    """A key from before key files moves out of vault.json into its file, once."""
+    for provider in KEY_PROVIDERS:
+        item = entry(store, provider)
+        if item.get("key"):
+            if not read_key(provider):
+                write_key(provider, item["key"])
+            item.pop("key", None)
+            store[provider] = item
+            log(provider + " key moved to its key file")
+
+
+def valid_key(key):
+    return isinstance(key, str) and key.strip() and len(key) <= 4096 and not any(c.isspace() for c in key.strip())
+
+
 def entry(store, provider):
     value = store.get(provider)
     return value if isinstance(value, dict) else {}
@@ -167,8 +235,8 @@ def entry(store, provider):
 
 def configured(store, provider):
     item = entry(store, provider)
-    if provider == "opencode-go":
-        return bool(item.get("key"))
+    if provider in KEY_PROVIDERS:
+        return read_key(provider) is not None
     return bool(item.get("access") and item.get("refresh"))
 
 
@@ -454,16 +522,18 @@ def public_snapshot(operator=False):
         return {'providers':public_status(store, operator=operator), 'login':dict(_login), 'vault_id':store.get('_vault_id')}
 
 
-def set_opencode_key(key, first_only=False, expected=None, operation=None):
-    if not isinstance(key, str) or not key.strip() or len(key) > 4096 or any(c.isspace() for c in key.strip()):
+def set_opencode_key(key, first_only=False, expected=None, operation=None, door=False):
+    """Store the key in opencode-go.key. `door` is the node-side `/login` (a person pasting in `wa chat`):
+    it may replace a key and turns the provider on; the admin API keeps its generation check."""
+    if not valid_key(key):
         raise VaultError(400, "bad_key", "paste the key on its own, one line")
 
     def put(store):
         previous = entry(store, "opencode-go")
-        if first_only and previous.get("key"):
+        if first_only and configured(store, "opencode-go"):
             raise VaultError(409, "vault_key_exists", "wa-vault already holds an opencode-go key - replace it on the vault page")
-        generation = previous.get("generation", "legacy" if previous.get("key") else "absent")
-        if not first_only:
+        generation = previous.get("generation", "legacy" if configured(store, "opencode-go") else "absent")
+        if not first_only and not door:
             try:
                 valid_operation = isinstance(operation, str) and str(uuid.UUID(operation)) == operation and uuid.UUID(operation).version == 4
             except (ValueError, AttributeError):
@@ -472,11 +542,12 @@ def set_opencode_key(key, first_only=False, expected=None, operation=None):
                 raise VaultError(400, "bad_operation", "a canonical opaque UUIDv4 operation id is required")
             if expected != generation:
                 raise VaultError(409, "vault_stale_generation", "credential changed; reconcile status before a new explicit save")
-        store["opencode-go"] = {"key": key.strip(), "set_at": now_ms(),
-            "enabled": previous.get("enabled", True), "generation": str(uuid.uuid4()),
+        write_key("opencode-go", key)
+        store["opencode-go"] = {"set_at": now_ms(),
+            "enabled": True if door else previous.get("enabled", True), "generation": str(uuid.uuid4()),
             "operation": operation or str(uuid.uuid4())}
     update_store(put)
-    log("opencode-go key stored")
+    log("opencode-go key stored in its key file" + (" (from wa chat)" if door else ""))
 
 
 def cancel_login(expected_operation=None):
@@ -601,11 +672,11 @@ class ProxyHandler(Handler):
                     payload = json.loads(body) if body else {}
                 except ValueError:
                     raise VaultError(400, "bad_json", "the body is not JSON")
-                # The agent's own door may store a first key, never replace one: an injected agent could
-                # otherwise swap in a key for an account someone else reads, and every prompt would go
-                # there. Replacing a key is the operator's, on the token-gated vault page.
-                # Check and mutation share _store_lock; concurrent first logins cannot replace.
-                set_opencode_key(payload.get("key") if isinstance(payload, dict) else None, first_only=True)
+                # `/login` in `wa chat` pastes here, and may replace the key: placing a key and turning the
+                # provider on is the whole of that flow. Named risk: this door is reachable by the agent
+                # too, so an injected agent could swap in a key of its own; it still can never read one.
+                # Check and mutation share _store_lock.
+                set_opencode_key(payload.get("key") if isinstance(payload, dict) else None, door=True)
                 return self.send_json(200, {"providers": public_status(read_store())})
         except VaultError as error:
             return self.send_error_json(error.status, error.code, error.message)
@@ -633,7 +704,7 @@ class ProxyHandler(Handler):
                                      "wa-vault holds no opencode-go key - paste it on the vault page")
                 if not enabled(store, provider):
                     raise VaultError(403, "vault_provider_disabled", "opencode-go is disabled on the vault page")
-                headers["Authorization"] = "Bearer " + entry(store, provider)["key"]
+                headers["Authorization"] = "Bearer " + read_key(provider)
             else:
                 access, account_id = subscription_credential(self.headers.get("X-Wa-Vault-Generation"))
                 headers["Authorization"] = "Bearer " + access
@@ -741,14 +812,15 @@ def embedded_go(action, payload):
             if not item or item.get('state') != 'prepared':
                 raise VaultError(409, 'vault_operation_replay', 'save not admitted; reconcile, never resend a credential write')
             key = payload.get('key')
-            if not isinstance(key, str) or not key.strip() or len(key) > 4096 or any(c.isspace() for c in key.strip()):
+            if not valid_key(key):
                 raise VaultError(400, 'bad_key', 'one nonempty key required')
             if item['expected_generation'] != current['generation']:
                 item['state'] = 'refused'
                 write_store(store)
                 raise VaultError(409, 'vault_stale_generation', 'credential changed; this operation is refused')
             generation = str(uuid.uuid4())
-            store['opencode-go'] = {'key': key.strip(), 'set_at': now_ms(),
+            write_key('opencode-go', key)
+            store['opencode-go'] = {'set_at': now_ms(),
                 'enabled': entry(store, 'opencode-go').get('enabled', True), 'generation': generation, 'operation': operation}
             item.update(state='committed', generation=generation)
             write_store(store)
@@ -871,6 +943,7 @@ class AdminHandler(Handler):
                     current = public_status(store)["opencode-go"]["generation"]
                     if payload.get("expected_generation") != current:
                         raise VaultError(409, "vault_stale_generation", "credential changed; read status")
+                    delete_key("opencode-go")
                     store["opencode-go"] = {"generation": str(uuid.uuid4()), "enabled": False}
                 update_store(remove_go)
                 log("opencode-go key removed")
@@ -915,7 +988,7 @@ def test_provider(provider):
             if not configured(store, provider):
                 return {"ok": False, "detail": "no key stored"}
             status, body = http_request("GET", OPENCODE_BASE + "/models", {
-                "Authorization": "Bearer " + entry(store, provider)["key"], "Accept": "application/json",
+                "Authorization": "Bearer " + read_key(provider), "Accept": "application/json",
                 "User-Agent": "wasm-agent/0.1 wa-vault"})
             detail = "HTTP %d" % status
             if status == 200:
@@ -952,6 +1025,7 @@ def main():
         return 2
     os.makedirs(DATA_DIR, mode=0o700, exist_ok=True)
     update_store(lambda store: store.setdefault('_vault_id', str(uuid.uuid4())))
+    update_store(migrate_keys)
     proxy = serve(PROXY_PORT, ProxyHandler, "proxy")
     admin = serve(ADMIN_PORT, AdminHandler, "admin", ADMIN_BIND)
     threading.Thread(target=admin.serve_forever, daemon=True).start()

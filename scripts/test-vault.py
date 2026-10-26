@@ -221,7 +221,11 @@ try:
     status, payload = admin("POST", "/api/opencode-go/key", {"key": "two words"})
     ok(status == 400, "a key with whitespace inside is refused")
     with open(os.path.join(data_dir, "vault.json")) as handle:
-        ok(OPENCODE_KEY in handle.read(), "the store holds the trimmed key")
+        ok(OPENCODE_KEY not in handle.read(), "vault.json never holds the key")
+    key_file = os.path.join(data_dir, "keys", "opencode-go.key")
+    with open(key_file) as handle:
+        ok(handle.read().strip() == OPENCODE_KEY, "the trimmed key is opencode-go.key, one line")
+    ok(os.name != "posix" or (os.stat(key_file).st_mode & 0o777) == 0o600, "and the key file is private (600)")
     if os.name == "posix":
         ok(os.stat(os.path.join(data_dir, "vault.json")).st_mode & 0o777 == 0o600, "the store is mode 600")
     else:
@@ -363,12 +367,16 @@ try:
     status, payload = request(PROXY, "POST", "/login/opencode-go", {"key": "sk-opencode-SECRET-cli-9999"},
                               {"Content-Type": "application/json"})
     SECRETS.append("sk-opencode-SECRET-cli-9999")
-    ok(status == 409 and b"vault_key_exists" in payload, "/login cannot replace an existing key")
+    ok(status == 200 and json.loads(payload)["providers"]["opencode-go"]["configured"],
+       "/login places the pasted key, replacing the one stored")
     no_secret(payload, "the /login store answer")
     seen.clear()
     request(PROXY, "GET", "/opencode-go/v1/models")
-    ok({k.lower(): v for k, v in seen[-1][1].items()}.get("authorization") == "Bearer " + REPLACEMENT_KEY,
-       "the operator replacement key remains after refused node replacement")
+    ok({k.lower(): v for k, v in seen[-1][1].items()}.get("authorization") == "Bearer " + SECRETS[-1],
+       "the key pasted in wa chat is the one the next request carries")
+    admin("POST", "/api/opencode-go/key", {"key": REPLACEMENT_KEY,
+        "expected_generation": json.loads(admin("GET", "/api/status")[1])["providers"]["opencode-go"]["generation"],
+        "operation": str(uuid.uuid4())})
     admin("DELETE", "/api/opencode-go/key")
     status, payload = request(PROXY, "POST", "/login/opencode-go", {"key": ""}, {"Content-Type": "application/json"})
     ok(status == 400, "/login refuses an empty first key")
@@ -424,7 +432,9 @@ try:
     first_threads=[threading.Thread(target=first_login) for _ in range(2)]
     for t in first_threads: t.start()
     for t in first_threads: t.join()
-    ok(sorted(first_results)==[200,409],"concurrent first-key login has exactly one mutation")
+    ok(sorted(first_results)==[200,200],"concurrent pastes both land, one after the other under the store lock")
+    with open(os.path.join(data_dir, "keys", "opencode-go.key")) as handle:
+        ok(handle.read().strip()==OPENCODE_KEY,"and the key file holds one whole key")
 
     # --- migration runs only with private synthetic files and real fixture HTTP
     spec=importlib.util.spec_from_file_location('migration',os.path.join(ROOT,'scripts','migrate-go-vault.py'))

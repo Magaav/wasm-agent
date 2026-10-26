@@ -1423,6 +1423,8 @@ struct TickerSpec {
     /// what a caller with no frame has - and the row the reader may be typing on.
     row: Option<u16>,
     width: Option<usize>,
+    /// When the current step began, for `{s}`; the run's start (`started`) when absent.
+    step_started: Option<f64>,
 }
 
 struct Ticker {
@@ -1465,6 +1467,19 @@ fn ticker_duration(seconds: f64) -> String {
     }
 }
 
+/// The step clock (`{s}`), the twin of `cli_view.step_clock`: whole seconds, then minutes.
+fn ticker_step(seconds: f64) -> String {
+    let value = if seconds.is_finite() && seconds > 0.0 { seconds.floor() as u64 } else { 0 };
+    if value < 60 { format!("{value}s") } else { format!("{}m{:02}s", value / 60, value % 60) }
+}
+
+/// The run clock (`{T}`), the twin of `cli_view.run_clock`: `m:ss`, `h:mm:ss` past an hour.
+fn ticker_clock(seconds: f64) -> String {
+    let value = if seconds.is_finite() && seconds > 0.0 { seconds.floor() as u64 } else { 0 };
+    if value < 3600 { format!("{}:{:02}", value / 60, value % 60) }
+    else { format!("{}:{:02}:{:02}", value / 3600, (value % 3600) / 60, value % 60) }
+}
+
 /// One frame of the animated line: `{m}` becomes the next mark, `{t}` the clock.
 fn ticker_render(spec: &TickerSpec, ticks: usize) -> String {
     let mark = if spec.marks.is_empty() {
@@ -1472,8 +1487,11 @@ fn ticker_render(spec: &TickerSpec, ticks: usize) -> String {
     } else {
         spec.marks[(spec.frame.wrapping_add(ticks)) % spec.marks.len()].as_str()
     };
-    let clock = ticker_duration(ticker_seconds() - spec.started);
-    let text = spec.line.replace("{m}", mark).replace("{t}", &clock);
+    let now = ticker_seconds();
+    let clock = ticker_duration(now - spec.started);
+    let text = spec.line.replace("{m}", mark).replace("{t}", &clock)
+        .replace("{s}", &ticker_step(now - spec.step_started.unwrap_or(spec.started)))
+        .replace("{T}", &ticker_clock(now - spec.started));
     let width = spec.width.map(|width| console_size().map(|(cols, _)| width.min(cols as usize)).unwrap_or(width));
     match width {
         Some(width) if visible_width(&text) > width => {
@@ -1564,6 +1582,9 @@ fn ticker_frame(text: &str, drawn: usize, row: Option<u16>) -> (String, usize) {
     for _ in cols..drawn {
         frame.push(' ');
     }
+    // A row of its own is the status line's alone: erase what a wider frame (an emoji counts one
+    // character here and draws two cells) may have left at its end.
+    if row.is_some() { frame.push_str("\u{1b}[K"); }
     frame.push_str("\u{1b}[u\u{1b}[?25h");
     (frame, drawn.max(cols))
 }
@@ -1626,6 +1647,7 @@ fn start_ticker(spec: TickerSpec) -> bool {
                 let spec_row = refresh_editor_size().map(|rows| rows as u16).or(spec_row);
                 let (frame, cols) = ticker_frame(&text, drawn, spec_row);
                 drawn = cols;
+                if panel_open() || !status_visible() { ticks = ticks.wrapping_add(1); std::thread::sleep(std::time::Duration::from_millis(TICKER_INTERVAL_MS)); continue; }
                 // Never erase to the end of the row: the reader's own typing starts one column
                 // after this line ends, and erasing from the cursor to the right takes it with it.
                 // Flushed every time: this text has no newline to flush it.
@@ -1713,7 +1735,8 @@ fn parse_ticker_spec(text: &str) -> Option<TickerSpec> {
     // A row is 1-based and positive; anything else is "no row", not row zero.
     let row = value.get("row").and_then(Value::as_u64).filter(|row| *row > 0).map(|row| row as u16);
     let width = value.get("width").and_then(Value::as_u64).filter(|width| *width > 0).map(|width| width as usize);
-    Some(TickerSpec { line, marks, started, frame, row, width })
+    let step_started = value.get("step_started").and_then(Value::as_f64);
+    Some(TickerSpec { line, marks, started, frame, row, width, step_started })
 }
 
 #[cfg(test)]
@@ -1721,11 +1744,11 @@ mod ticker_tests {
     use super::*;
 
     fn spec(line: &str, frame: usize) -> TickerSpec {
-        TickerSpec { line: line.to_string(), marks: vec!["one ".to_string(), "two ".to_string()], started: ticker_seconds(), frame, row: None, width: None }
+        TickerSpec { line: line.to_string(), marks: vec!["one ".to_string(), "two ".to_string()], started: ticker_seconds(), frame, row: None, width: None, step_started: None }
     }
 
     fn rowed(line: &str, row: u16) -> TickerSpec {
-        TickerSpec { line: line.to_string(), marks: vec!["one ".to_string()], started: ticker_seconds(), frame: 0, row: Some(row), width: None }
+        TickerSpec { line: line.to_string(), marks: vec!["one ".to_string()], started: ticker_seconds(), frame: 0, row: Some(row), width: None, step_started: None }
     }
 
     /// The same three values `scripts/test-cli-view.lua` pins for `cli_view.duration`:
@@ -2757,6 +2780,14 @@ struct ConsoleInput {
     running: bool,
     raw: Option<crate::terminal_editor::RawMode>,
     editor: Option<crate::terminal_editor::Editor>,
+    /// An open panel (`host.panel`): it owns the keys and the bottom of the screen until closed.
+    panel: Option<crate::terminal_editor::Panel>,
+    /// The output region's last row as this process last set it; 0 = the view's own layout.
+    region: usize,
+    /// The chat as blocks (crate::transcript), drawn into the output region by this process.
+    transcript: crate::transcript::Transcript,
+    /// While the transcript has focus (Up on an empty draft), its key decoder.
+    nav: Option<crate::transcript::NavDecoder>,
 }
 
 static CONSOLE_INPUT: OnceLock<(Mutex<ConsoleInput>, std::sync::Condvar)> = OnceLock::new();
@@ -2767,84 +2798,232 @@ fn console_input() -> &'static (Mutex<ConsoleInput>, std::sync::Condvar) {
 
 /// A saved cursor can move when ConPTY scrolls output. Finish every view/ticker
 /// write at the editor's actual draft cursor, under the same input/output locks.
+///
+/// The view names rows it does not own by token - `{O}` the output region's last row, `{S}` the status
+/// row - because the slash menu and panels move them while Lua is blocked; they are filled in here,
+/// under the input lock, so a write can never land on a row that has just become the box.
 fn write_at_editor(text: &str) -> std::io::Result<()> {
     let state = console_input().0.lock().unwrap_or_else(|e| e.into_inner());
     match state.editor.as_ref().filter(|editor| editor.row > 0) {
-        Some(editor) => crate::terminal_editor::write(&format!("\x1b[?25l{}{}\x1b[?25h",
-            text.replace("\x1b[?25h", ""), editor.cursor_frame())),
+        Some(editor) => {
+            if (state.panel.is_some() || !editor.status) && text.contains("{S}") { return Ok(()); }
+            let text = if text.contains("\x1b[{") {
+                text.replace("{O}", &current_region(&state, editor).to_string())
+                    .replace("{S}", &editor.status_row().to_string())
+            } else { text.to_string() };
+            if state.panel.is_some() { return crate::terminal_editor::write(&text); }
+            crate::terminal_editor::write(&format!("\x1b[?25l{}{}\x1b[?25h",
+                text.replace("\x1b[?25h", ""), editor.cursor_frame()))
+        }
         None => crate::terminal_editor::write(text),
     }
+}
+
+fn current_region(state: &ConsoleInput, editor: &crate::terminal_editor::Editor) -> usize {
+    if state.region == 0 { editor.row.saturating_sub(6) } else { state.region }
+}
+
+/// The rows the bottom of the screen needs now, applied, and that bottom drawn: the box (with the
+/// slash menu or the footer under it), or an open panel. Growing scrolls the output up first - a
+/// newline at the old region's last row - so nothing already written is drawn over; shrinking blanks
+/// the rows it hands back to the output.
+fn layout_frame(state: &mut ConsoleInput) -> String {
+    let Some(editor) = state.editor.as_ref().filter(|editor| editor.row > 0) else { return String::new() };
+    let rows = editor.row + 1;
+    let want = match state.panel.as_ref() {
+        Some(panel) => rows.saturating_sub(panel.height().max(7)),
+        None => editor.out_bottom(),
+    };
+    let have = current_region(state, editor);
+    let width = editor.width;
+    let mut frame = String::from("\x1b[?25l");
+    if want >= 1 && want != have {
+        frame.push_str(&format!("\x1b[1;{want}r"));
+        for row in want + 1..=rows { frame.push_str(&format!("\x1b[{row};1H\x1b[2K")); }
+        state.transcript.dirty = true;
+    }
+    if state.transcript.dirty && want >= 1 {
+        frame.push_str(&state.transcript.render(width, want));
+        state.transcript.dirty = false;
+    }
+    let Some(editor) = state.editor.as_ref() else { return frame };
+    let frame = frame + &match state.panel.as_ref() { Some(panel) => panel.render(), None => editor.render() };
+    state.region = want.max(1);
+    frame
+}
+
+fn status_visible() -> bool {
+    console_input().0.lock().map(|state| state.editor.as_ref().map(|e| e.row == 0 || e.status).unwrap_or(true)).unwrap_or(true)
+}
+
+fn panel_open() -> bool {
+    console_input().0.lock().map(|state| state.panel.is_some()).unwrap_or(false)
 }
 
 /// Keep the raw editor's rows attached to the current viewport while Lua is
 /// blocked. All redraws take the input lock before the shared output lock.
 fn refresh_editor_size() -> Option<usize> {
     let (columns, rows) = console_size()?;
-    if rows < 7 { return None; }
+    if rows < EDITOR_MIN_ROWS { return None; }
     let (lock, _) = console_input();
     let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
-    let editor = state.editor.as_mut()?;
-    if editor.row == 0 { return None; }
-    resize_editor(editor, columns as usize, rows as usize);
-    Some(rows as usize)
+    if state.editor.as_ref()?.row == 0 { return None; }
+    resize_console(&mut state, columns as usize, rows as usize);
+    Some(state.editor.as_ref()?.status_row())
 }
 
-fn resize_editor(editor: &mut crate::terminal_editor::Editor, columns: usize, rows: usize) {
+/// The framed layout, bottom up (the twin of `cli_view.screen_rows` with an editor):
+/// footer on the last row, the input box's bottom border above it, `height` draft rows and the
+/// top border above that, then the status line, and the output region above everything.
+const EDITOR_MIN_ROWS: i32 = 10;
+
+fn resize_console(state: &mut ConsoleInput, columns: usize, rows: usize) {
+    let Some(editor) = state.editor.as_mut() else { return };
     if editor.row == rows - 1 && editor.width == columns { return; }
+    let old_rows = editor.row + 1;
     let mut frame = String::from("\x1b[?25l");
-    for row in editor.row.saturating_sub(editor.height - 1)..=editor.row.min(rows) {
-        frame.push_str(&format!("\x1b[{row};1H\x1b[2K"));
-    }
+    for row in (state.region + 1).max(1)..=old_rows.min(rows) { frame.push_str(&format!("\x1b[{row};1H\x1b[2K")); }
     editor.row = rows - 1;
     editor.width = columns;
-    frame.push_str(&format!("\x1b[1;{}r{}", rows - 4, editor.render()));
+    if let Some(panel) = state.panel.as_mut() { panel.width = columns; panel.rows = rows; }
+    state.transcript.dirty = true;
+    let want = match state.panel.as_ref() { Some(panel) => rows.saturating_sub(panel.height().max(7)), None => editor.out_bottom() };
+    frame.push_str(&format!("\x1b[1;{}r", want.max(1)));
+    state.region = want.max(1);
+    frame.push_str(&layout_frame(state));
     let _ = crate::terminal_editor::write(&frame);
 }
+
+/// One read of what the terminal sent - a keystroke, or a whole escape sequence or paste at once.
+/// Unbuffered on Unix, so "nothing follows this Esc" can be asked of the terminal itself.
+#[cfg(unix)]
+fn read_chunk(_handle: &mut std::io::StdinLock<'_>, buffer: &mut [u8]) -> std::io::Result<usize> {
+    let n = unsafe { libc::read(0, buffer.as_mut_ptr() as *mut libc::c_void, buffer.len()) };
+    if n < 0 { Err(std::io::Error::last_os_error()) } else { Ok(n as usize) }
+}
+#[cfg(not(unix))]
+fn read_chunk(handle: &mut std::io::StdinLock<'_>, buffer: &mut [u8]) -> std::io::Result<usize> {
+    use std::io::Read;
+    handle.read(&mut buffer[..1])
+}
+/// Whether another byte arrives within `ms`: an Esc with nothing after it is the Esc key. Where this
+/// cannot be asked (Windows), Esc pressed twice does the same.
+#[cfg(unix)]
+fn byte_ready(ms: i32) -> bool {
+    let mut fd = libc::pollfd { fd: 0, events: libc::POLLIN, revents: 0 };
+    unsafe { libc::poll(&mut fd, 1, ms) > 0 }
+}
+#[cfg(not(unix))]
+fn byte_ready(_ms: i32) -> bool { true }
 
 /// Read lines forever, waking anyone waiting each time one lands.
 ///
 /// One reader per process: a second would split the reader's typing between two queues and
 /// neither caller would see the whole of it. The stdin lock is taken once, for the same reason.
 fn console_reader() {
-    use std::io::{BufRead, Read};
+    use std::io::BufRead;
     let stdin = std::io::stdin();
     let mut handle = stdin.lock();
     let mut line = String::new();
     let editor = console_input().0.lock().unwrap_or_else(|e| e.into_inner()).editor.is_some();
     loop {
         if editor {
-            let mut byte = [0u8; 1];
-            let read = handle.read(&mut byte);
+            let mut chunk = [0u8; 512];
+            let read = read_chunk(&mut handle, &mut chunk);
             let (lock, wake) = console_input();
             let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
             if state.stop { state.running = false; wake.notify_all(); return; }
             match read {
                 Ok(0) | Err(_) => { state.eof = true; state.running = false; wake.notify_all(); return; }
-                Ok(_) => {
-                    if let Some(input) = state.editor.as_mut() {
-                        if input.row > 0 {
-                            if let Some((columns, rows)) = console_size().filter(|(_, rows)| *rows >= 7) {
-                                resize_editor(input, columns as usize, rows as usize);
-                            }
+                Ok(n) => {
+                    if state.editor.as_ref().is_some_and(|input| input.row > 0) {
+                        if let Some((columns, rows)) = console_size().filter(|(_, rows)| *rows >= EDITOR_MIN_ROWS) {
+                            resize_console(&mut state, columns as usize, rows as usize);
                         }
-                        let action = input.feed(byte[0]);
-                        let frame = input.render();
-                        if !frame.is_empty() { let _ = crate::terminal_editor::write(&frame); }
-                        match action {
+                    }
+                    for &byte in &chunk[..n] {
+                        if let Some(panel) = state.panel.as_mut() { panel.feed(byte); continue; }
+                        if let Some(nav) = state.nav.as_mut() {
+                            use crate::transcript::NavKey;
+                            let key = nav.feed(byte);
+                            match &key {
+                                NavKey::None => {}
+                                NavKey::Up => { state.transcript.focus_prev(); }
+                                NavKey::Down => { if !state.transcript.focus_next() { state.transcript.sync(); state.nav = None; } }
+                                NavKey::Right => state.transcript.set_expanded(true),
+                                NavKey::Left => state.transcript.set_expanded(false),
+                                NavKey::PageUp | NavKey::PageDown => {
+                                    let page = state.editor.as_ref().map(|e| e.out_bottom().saturating_sub(1).max(1)).unwrap_or(10) as isize;
+                                    state.transcript.page(if matches!(key, NavKey::PageUp) { page } else { -page });
+                                }
+                                NavKey::Exit | NavKey::Bottom => { state.transcript.sync(); state.nav = None; }
+                                NavKey::Other(bytes) => {
+                                    // Typing goes back to the draft (synced to the bottom), keystroke included.
+                                    state.transcript.sync(); state.nav = None;
+                                    if let Some(input) = state.editor.as_mut() { for &b in bytes.iter() { let _ = input.feed(b); } }
+                                }
+                            }
+                            continue;
+                        }
+                        let Some(input) = state.editor.as_mut() else { break };
+                        match input.feed(byte) {
+                            crate::terminal_editor::Action::Nav => {
+                                // Navigating freezes the view where it is; output keeps arriving below.
+                                if state.transcript.topics().is_empty() { continue; }
+                                state.transcript.hold();
+                                state.transcript.focus_prev();
+                                state.nav = Some(Default::default());
+                            }
+                            crate::terminal_editor::Action::Bottom => state.transcript.sync(),
+                            action @ (crate::terminal_editor::Action::PageUp | crate::terminal_editor::Action::PageDown) => {
+                                // A screen at a time, keeping one row of the previous screen for context.
+                                let page = state.editor.as_ref().map(|e| e.out_bottom().saturating_sub(1).max(1)).unwrap_or(10) as isize;
+                                let up = action == crate::terminal_editor::Action::PageUp;
+                                state.transcript.page(if up { page } else { -page });
+                            }
                             crate::terminal_editor::Action::Submit(text) => {
                                 CLI_INTERRUPT.store(false, std::sync::atomic::Ordering::SeqCst);
+                                state.transcript.to_bottom();
                                 state.lines.push(text)
                             }
-                            crate::terminal_editor::Action::Eof => { state.eof = true; state.running = false; },
+                            crate::terminal_editor::Action::Eof => { state.eof = true; state.running = false; break; }
                             crate::terminal_editor::Action::Interrupt => {
                                 CLI_INTERRUPT.store(true, std::sync::atomic::Ordering::SeqCst);
-                                let _ = crate::terminal_editor::write("\r\n[interrupting - Ctrl+C again to quit]\r\n");
+                                // On the footer row, under the box: a newline here would land inside the box.
+                                let _ = crate::terminal_editor::write(&format!(
+                                    "\x1b[?25l\x1b[{};1H\x1b[2K  \x1b[38;2;215;119;87mInterrupting\u{2026}\x1b[0m \x1b[38;2;153;153;153m(ctrl+c again to quit)\x1b[0m{}\x1b[?25h",
+                                    input.row + 1, input.cursor_frame()));
                             }
                             crate::terminal_editor::Action::None => {}
                         }
-                        wake.notify_all();
-                        if state.eof { return; }
                     }
+                    // A lone Esc: the terminal sent nothing after it.
+                    // Never inside a paste: `docker exec` and slow links split a paste anywhere, and an Esc
+                    // that is really the start of its end marker would leave the draft stuck in paste mode.
+                    let pasting = state.panel.as_ref().map(|panel| panel.pasting())
+                        .or_else(|| state.editor.as_ref().map(|input| input.pasting())).unwrap_or(false);
+                    if !state.eof && chunk[n - 1] == 0x1b && !pasting && !byte_ready(120) {
+                        if let Some(panel) = state.panel.as_mut() { panel.escape(); }
+                        else if let Some(nav) = state.nav.as_mut() {
+                            if nav.lone_escape() { state.transcript.sync(); state.nav = None; }
+                        }
+                        else if let Some(input) = state.editor.as_mut() {
+                            // Esc closes the slash menu first; with nothing to close and a run in flight
+                            // (the status row is up) it interrupts the run, as Ctrl+C does.
+                            let menu_open = input.menu_rows() > 0;
+                            input.escape();
+                            if !menu_open && input.status {
+                                CLI_INTERRUPT.store(true, std::sync::atomic::Ordering::SeqCst);
+                                let _ = crate::terminal_editor::write(&format!(
+                                    "\x1b[?25l\x1b[{};1H\x1b[2K\x1b[38;2;215;119;87mInterrupting\u{2026}\x1b[0m{}\x1b[?25h",
+                                    input.row + 1, input.cursor_frame()));
+                            }
+                        }
+                    }
+                    let frame = layout_frame(&mut state);
+                    if !frame.is_empty() { let _ = crate::terminal_editor::write(&frame); }
+                    wake.notify_all();
+                    if state.eof { return; }
                 }
             }
             continue;
@@ -2931,8 +3110,136 @@ pub extern "C-unwind" fn input_editor(l: *mut LuaState) -> c_int {
         editor.row = row;
         editor.width = width;
         editor.height = height;
-        crate::terminal_editor::write(&format!("\x1b[?2004h{}", editor.render())).is_ok()
+        let frame = layout_frame(&mut state);
+        crate::terminal_editor::write(&format!("\x1b[?2004h{frame}")).is_ok()
     } else { false };
+    unsafe { crate::lua::lua_pushboolean(l, if ok { 1 } else { 0 }) };
+    1
+}
+
+/// `host.panel(spec_json)` -> `{action, index?|text?}`; `host.panel()` closes it.
+///
+/// Opens (or replaces) the panel and blocks until the reader confirms (`select` with a 1-based
+/// `index`, `submit` with `text`), presses Esc (`cancel`), or `timeout_ms` passes (`timeout`). The
+/// panel stays on screen after an answer, so a flow of several panels does not flicker back to the
+/// box between them; closing hands the bottom of the screen back to the box. `unsupported` when
+/// there is no raw editor (a pipe, `WASM_AGENT_CLI_EDITOR=off`).
+pub extern "C-unwind" fn panel(l: *mut LuaState) -> c_int {
+    let spec = arg_string(l, 1).and_then(|text| serde_json::from_str::<Value>(&text).ok()).filter(|v| v.is_object());
+    let (lock, wake) = console_input();
+    let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
+    let Some((width, rows)) = state.editor.as_ref().filter(|editor| editor.row > 0).map(|e| (e.width, e.row + 1)) else {
+        drop(state);
+        push_json(l, &json!({"action": "unsupported"}));
+        return 1;
+    };
+    let Some(spec) = spec else {
+        if state.panel.take().is_some() {
+            let frame = layout_frame(&mut state);
+            let _ = crate::terminal_editor::write(&frame);
+        }
+        drop(state);
+        push_json(l, &json!({"action": "closed"}));
+        return 1;
+    };
+    let deadline = spec.get("timeout_ms").and_then(|v| v.as_u64())
+        .map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms));
+    state.panel = Some(crate::terminal_editor::Panel::from_spec(&spec, width, rows));
+    let frame = layout_frame(&mut state);
+    let _ = crate::terminal_editor::write(&frame);
+    let answer = loop {
+        if let Some(result) = state.panel.as_mut().and_then(|panel| panel.result.take()) { break result; }
+        if state.eof || state.stop || state.panel.is_none() { break json!({"action": "cancel"}); }
+        match deadline {
+            Some(at) => {
+                let left = at.saturating_duration_since(std::time::Instant::now());
+                if left.is_zero() { break json!({"action": "timeout"}); }
+                state = match wake.wait_timeout(state, left) { Ok((s, _)) => s, Err(p) => p.into_inner().0 };
+            }
+            None => { state = match wake.wait(state) { Ok(s) => s, Err(p) => p.into_inner() }; }
+        }
+    };
+    drop(state);
+    push_json(l, &answer);
+    1
+}
+
+/// `host.editor_footer(text[, right])`: the hint row under the input (plain text, drawn dim) and,
+/// right-aligned on the same row, `right` - the model in use. `right` omitted keeps the last one.
+pub extern "C-unwind" fn editor_footer(l: *mut LuaState) -> c_int {
+    let text = arg_string(l, 1).unwrap_or_default();
+    let right = arg_string(l, 2);
+    let (lock, _) = console_input();
+    let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
+    let ok = if let Some(editor) = state.editor.as_mut() {
+        editor.footer = text;
+        if let Some(right) = right { editor.footer_right = right; }
+        if editor.row > 0 && state.panel.is_none() {
+            let frame = layout_frame(&mut state);
+            crate::terminal_editor::write(&frame).is_ok()
+        } else { true }
+    } else { false };
+    unsafe { crate::lua::lua_pushboolean(l, if ok { 1 } else { 0 }) };
+    1
+}
+
+/// `host.transcript_write(text)`: append to the chat's current block (the host draws it).
+pub extern "C-unwind" fn transcript_write(l: *mut LuaState) -> c_int {
+    let text = arg_string(l, 1).unwrap_or_default();
+    let (lock, _) = console_input();
+    let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
+    state.transcript.write(&text);
+    let ok = if state.editor.as_ref().is_some_and(|e| e.row > 0) && state.panel.is_none() {
+        let frame = layout_frame(&mut state);
+        crate::terminal_editor::write(&frame).is_ok()
+    } else { true };
+    unsafe { crate::lua::lua_pushboolean(l, if ok { 1 } else { 0 }) };
+    1
+}
+
+/// `host.transcript_block(topic)`: start a new block; `topic` = collapsible (thinking, a tool call).
+pub extern "C-unwind" fn transcript_block(l: *mut LuaState) -> c_int {
+    let topic = unsafe { crate::lua::lua_toboolean(l, 1) } != 0;
+    let (lock, _) = console_input();
+    let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
+    state.transcript.block(topic);
+    unsafe { crate::lua::lua_pushboolean(l, 1) };
+    1
+}
+
+/// `host.editor_status(on)`: whether the status line row exists. It is there only while a run is in
+/// flight, so between runs the chat sits directly on the input.
+pub extern "C-unwind" fn editor_status(l: *mut LuaState) -> c_int {
+    let on = unsafe { crate::lua::lua_toboolean(l, 1) } != 0;
+    let (lock, _) = console_input();
+    let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
+    let ok = if let Some(editor) = state.editor.as_mut() {
+        if editor.status != on {
+            editor.status = on;
+            if editor.row > 0 && state.panel.is_none() {
+                let frame = layout_frame(&mut state);
+                let _ = crate::terminal_editor::write(&frame);
+            }
+        }
+        true
+    } else { false };
+    unsafe { crate::lua::lua_pushboolean(l, if ok { 1 } else { 0 }) };
+    1
+}
+
+/// `host.input_commands(json)`: what the slash menu offers, `[{name, args, hint}]`.
+pub extern "C-unwind" fn input_commands(l: *mut LuaState) -> c_int {
+    let list: Vec<crate::terminal_editor::Command> = arg_string(l, 1)
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        .and_then(|value| value.as_array().cloned()).unwrap_or_default().iter()
+        .filter_map(|item| Some(crate::terminal_editor::Command {
+            name: item.get("name")?.as_str()?.to_string(),
+            args: item.get("args").and_then(|v| v.as_bool()).unwrap_or(false),
+            hint: item.get("hint").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        })).collect();
+    let (lock, _) = console_input();
+    let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
+    let ok = if let Some(editor) = state.editor.as_mut() { editor.commands = list; true } else { false };
     unsafe { crate::lua::lua_pushboolean(l, if ok { 1 } else { 0 }) };
     1
 }
@@ -2996,6 +3303,10 @@ pub fn restore_input() {
         state.stop = true;
         if state.editor.is_some() { let _ = crate::terminal_editor::write("\x1b[?2004l"); }
         state.editor = None;
+        state.panel = None;
+        state.region = 0;
+        state.transcript = Default::default();
+        state.nav = None;
         state.raw = None; // Drop restores the original console mode and input codepage.
         wake.notify_all();
     }

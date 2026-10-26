@@ -170,13 +170,54 @@ function M.secrets(value)
   return text, hits
 end
 
+-- Credential shapes in a tool result. Stricter than VALUE_PATTERNS above: the prefix must start a
+-- token and the whole token must be long, because tool output is ordinary text (`task-runner`
+-- contains `sk-`). These catch keys this node was never configured with - a pasted `sk-...` in a
+-- file the agent read - which the exact-value pass cannot know about.
+local RESULT_PREFIXES = { "sk%-", "sk_live_", "sk_test_", "rk_live_", "gsk_", "hf_", "ghp_", "gho_",
+  "ghs_", "github_pat_", "glpat%-", "xoxb%-", "xoxp%-", "npm_", "AKIA", "AIza" }
+local function mask_shapes(text, hits)
+  for _, prefix in ipairs(RESULT_PREFIXES) do
+    text = text:gsub("%f[%w_]" .. prefix .. "[%w_%-]+", function(token)
+      if #token < 20 then return token end
+      hits.KEY_SHAPE = (hits.KEY_SHAPE or 0) + 1
+      return mask(token)
+    end)
+  end
+  return text
+end
+
+-- A call that touched a `*.key` file - `read` of one, a shell command naming one - has every long
+-- token in its result masked: what such a file holds is a key, whatever its shape. (wa-vault keeps
+-- its own key files where the agent cannot reach them; this is for any other `.key` on disk.)
+local function touches_key_file(ctx)
+  if type(ctx) ~= "table" then return false end
+  local args = type(ctx.args) == "table" and ctx.args or {}
+  for _, field in ipairs({ "path", "file_path", "command", "pattern" }) do
+    local value = args[field]
+    if type(value) == "string" and value:find("%.key%f[^%w_]") then return true end
+  end
+  return false
+end
+M.touches_key_file = touches_key_file
+
+local function mask_key_file(text, hits)
+  return (text:gsub("[%w_%-%.%+=]+", function(token)
+    if #token < 16 or token:find("^[%a_%.%-]+$") then return token end
+    hits.KEY_FILE = (hits.KEY_FILE or 0) + 1
+    return "<redacted .key content>"
+  end))
+end
+
 -- Redact every string in a tool result, tables included, so the value is gone before the
 -- result is projected, stored, journalled or sent to the provider - not only before it is
 -- displayed. Tables are copied; the caller's table is left alone. Returns the copy and the
 -- aggregated `{NAME = count, ...}` of what was found.
-function M.value(v)
+-- `ctx` (optional) is `{tool = name, args = table}`: the call the result came from.
+function M.value(v, ctx)
   local secrets = M.secret_values()
   local hits = {}
+  local key_file = touches_key_file(ctx)
   local function walk(x)
     if type(x) == "string" then
       for _, secret in ipairs(secrets) do
@@ -185,6 +226,10 @@ function M.value(v)
           x = replaced
           hits[secret.name] = (hits[secret.name] or 0) + count
         end
+      end
+      if ctx then
+        x = mask_shapes(x, hits)
+        if key_file then x = mask_key_file(x, hits) end
       end
       return x
     elseif type(x) == "table" then

@@ -319,8 +319,15 @@ local function layout(tokens, width, indent)
           col = col + columns(piece)
           if col >= room then flush() end
         end
+      elseif col + size > room and #current > 0 then
+        -- The line is full. A space that overflows is the line break itself: it must not open
+        -- the next line (that is the ` needed.` a wrapped paragraph used to start with).
+        flush()
+        if not token.glue then
+          current[#current + 1] = token
+          col = col + size
+        end
       else
-        if col + size > room and #current > 0 then flush() end
         current[#current + 1] = token
         col = col + size
       end

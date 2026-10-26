@@ -49,9 +49,11 @@ M.commands = {
   {
     name = "/login",
     usage = "/login",
-    hint = "open deterministic provider management (alias of /provider); never paste a key into chat",
+    hint = "sign in to a provider: ChatGPT by device code, or paste an API key (kept in wa-vault)",
   },
-  { name = "/provider", usage = "/provider", hint = "manage/select OpenAI subscription or OpenCode Go without inference; credentials stay on the operator vault page" },
+  { name = "/model", usage = "/model", hint = "pick the model from what the active provider serves" },
+  { name = "/reasoning", usage = "/reasoning", alias = { "/thinking" }, hint = "set how much the model reasons (low, high, max...)" },
+  { name = "/provider", usage = "/provider", hint = "switch between OpenAI subscription and OpenCode Go for the next turns" },
   { name = "/stats", usage = "/stats", hint = "database counts" },
   { name = "/console", usage = "/console", hint = "toggle the console: every event and a tool's whole output, unclipped" },
   {
@@ -65,7 +67,7 @@ M.commands = {
   { name = "/merge all", usage = "/merge all", hint = "include all open PRs after review and required checks" },
   { name = "/bind", usage = "/bind [service]", hint = "two-sided fabric consent; permanent asks for no expiry; status/renew/run stay local" },
   { name = "/unbind", usage = "/unbind", hint = "revoke remote access; retain local identity and history" },
-  { name = "/nodes", usage = "/nodes [pending]", hint = "peer inventory or administrator pairing requests" },
+  { name = "/nodes", usage = "/nodes [pending]", hint = "browse the cluster's nodes, or administrator pairing requests" },
   { name = "/accept", usage = "/accept <code>", hint = "confirm exact pairing request as network guest" },
   { name = "/promote", usage = "/promote <node>", hint = "confirm network master, never administrator" },
   { name = "/demote", usage = "/demote <node>", hint = "confirm network guest; preserve local CLI" },
@@ -88,15 +90,25 @@ function M.help()
   for _, row in ipairs(M.commands) do width = math.max(width, #row.usage) end
   local lines = { M.usage, "", "sessions:" }
   for _, row in ipairs(M.sessions) do
-    lines[#lines + 1] = string.format("  %-" .. width .. "s%s", row[1], row[2])
+    lines[#lines + 1] = string.format("%-" .. width .. "s%s", row[1], row[2])
   end
   lines[#lines + 1] = ""
   lines[#lines + 1] = "commands:"
   for _, row in ipairs(M.commands) do
-    lines[#lines + 1] = string.format("  %-" .. width .. "s%s", row.usage, row.hint)
+    lines[#lines + 1] = string.format("%-" .. width .. "s%s", row.usage, row.hint)
   end
   lines[#lines + 1] = "anything else is sent to the model."
   return table.concat(lines, "\n")
+end
+
+-- What the editor's slash menu offers (`host.input_commands`): the same rows, with whether a command
+-- takes arguments (so Tab completes it with a space rather than running it).
+function M.menu()
+  local list = {}
+  for _, row in ipairs(M.commands) do
+    list[#list + 1] = { name = row.name, args = row.usage ~= row.name, hint = row.hint }
+  end
+  return list
 end
 
 -- Every name this file promises, with its aliases: the list `chat.lua` must have an arm for.

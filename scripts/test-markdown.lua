@@ -202,4 +202,13 @@ if failed > 0 then
   print(string.format("markdown: %d failed of %d checks", failed, checks))
   os.exit(1)
 end
+-- A wrapped line never starts with the space it broke on.
+do
+  local wrapped = md.render("aaaa bbbb cccc dddd", { width = 9, indent = "" })
+  for line in (wrapped .. "\n"):gmatch("([^\n]*)\n") do
+    if line:sub(1, 1) == " " then error("a wrapped line starts with a space: [" .. line .. "]") end
+  end
+  checks = checks + 1
+end
+
 print(string.format("markdown ok (%d checks)", checks))

@@ -22,6 +22,7 @@ mod subagents;
 mod resources;
 mod serve;
 mod terminal_editor;
+mod transcript;
 mod ripgrep;
 
 use host::Host;
@@ -389,6 +390,20 @@ fn main() {
     }
 
     let command = lua_args.first().map(String::as_str).unwrap_or("");
+    // A server command asked for help must answer and exit, never start: `wa rendezvous --help`
+    // used to bind its port and block in accept() forever - and an agent reading usage before using a
+    // command (which is what it should do) then hung its own run on a tool call that never returns.
+    if (command == "serve" || command == "rendezvous")
+        && lua_args.iter().skip(1).any(|arg| arg == "--help" || arg == "-h")
+    {
+        if command == "serve" {
+            println!("usage: wa serve [--port 8799] [--ui <dir>] [--client-port 8800]\n  run this node's HTTP server and web UI (blocks until stopped)");
+        } else {
+            println!("usage: wa rendezvous [--port 8890] [--bind 127.0.0.1] [--db <path>]\n  run a rendezvous server that nodes register with (blocks until stopped)");
+        }
+        return;
+    }
+
     if command == "serve" {
         if let Err(error) = lua.do_string(&core_source("lua/core/server.lua"), "lua/core/server.lua") {
             eprintln!("lua error: {error}");

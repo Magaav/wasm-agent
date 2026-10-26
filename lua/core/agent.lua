@@ -1784,6 +1784,9 @@ function M:run_body(text, images)
       end
       -- The provider's own count for this request is the true context size.
       self.last_prompt_tokens = prompt
+      -- Live usage after every model call, not only when the run ends: a long run otherwise shows
+      -- `↑0 ↓0` for as long as it lasts (readers only refresh counters on this event).
+      pcall(self.emit, { type = "usage", total = M.usage_total, model = self.model, prompt = prompt, live = true })
       if not result.model or result.model=="" or result.model==self.model then
         context_usage.remember(self,messages,tool_list,normalized,context_usage.route(provider))
       end
@@ -2120,7 +2123,7 @@ function M:run_body(text, images)
       -- redactor covered logs and errors but not tool results. Exact-value replacement, before
       -- projection, storage and the provider view - and the hit is named, so the operator hears
       -- about it even though the value itself is gone.
-      local redacted_output, secret_hits = redact.value(output)
+      local redacted_output, secret_hits = redact.value(output, { tool = function_.name, args = args })
       if next(secret_hits) ~= nil then
         telemetry.event(self.session_id, self.run_id, tool_span and tool_span.id or "",
           "secret_redacted", "redacted", { tool = function_.name, names = secret_hits })

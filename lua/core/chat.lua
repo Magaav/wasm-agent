@@ -128,18 +128,18 @@ function M.run(argv)
   local session
   if session_id then
     if session_id == "" then
-      print("  --session needs an id; list them with: wa sessions")
+      print("--session needs an id; list them with: wa sessions")
       return 2
     end
     session = memory.session(session_id)
     if not session then
-      print("  no such session: " .. session_id)
-      print("  list them with: wa sessions")
+      print("no such session: " .. session_id)
+      print("list them with: wa sessions")
       return 2
     end
   elseif resume_last then
     session = memory.latest_session(USER, NODE)
-    if not session then print("  nothing to continue; starting a new session") end
+    if not session then print("nothing to continue; starting a new session") end
   end
   if not session then
     local id = memory.start_session(NODE, "chat", { user_id = USER, node_id = NODE, title = "chat" })
@@ -185,6 +185,19 @@ function M.run(argv)
   -- hardware cursor (which now belongs to the native editor). The view writer is
   -- serialized with the input thread and the ticker by host.terminal_write.
   local function print(text) view:line(text or "") end
+  -- The model in use, shown at the right of the footer under the input; read again after /login
+  -- and /provider, which can change it.
+  local function refresh_model()
+    local current = provider.settings()
+    local level = (function()
+      local ok, value = pcall(provider.reasoning, current.model)
+      if not ok or type(value) ~= "table" or not value.supported then return "" end
+      return (value.selected == "provider" or not value.selected) and "" or value.selected
+    end)()
+    view.model = provider.configured() and (tostring(current.model) .. (level ~= "" and ("\194\183" .. level) or ""))
+      or "no model"
+  end
+  refresh_model()
   local agent = agentlib.new(session.id, printer(view), "master", USER, NODE)
   -- The host reads complete lines while the interpreter is in a provider/tool call.
   -- Give the next model round any waiting messages; slash commands still belong to
@@ -193,15 +206,19 @@ function M.run(argv)
   local input = cli_input.new({ editor = view.live and view.stdout and height and height >= 7
     and host.getenv("WASM_AGENT_CLI_FRAME") ~= "off" })
   view.editor = input.editor
+  -- The slash menu: typing `/` lists these under the box, the way Claude Code does.
+  if input.editor and host.input_commands then pcall(host.input_commands, json.encode(commands.menu())) end
   agent.steer = function()
     local lines = input:take_steering()
     for _, line in ipairs(lines) do view:accepted(line) end
     return lines
   end
 
-  print("")
+  -- The screen first, so the welcome block is output like any other and sits right above the input.
+  view:screen_on()
   print(cli_view.banner({
     live = view.live,
+    limit = (view.live and cli_view.terminal_columns()) or view.limit,
     version = "0.1.0",
     model = mode .. (reasoning ~= "" and ("  \194\183  reasoning " .. reasoning) or ""),
     database = host.getenv("WASM_AGENT_DB") or "~/.wasm-agent/memory.db",
@@ -218,7 +235,6 @@ function M.run(argv)
       return nil
     end)(),
   }))
-  print("")
 
   local function turn(line)
     view:run_started()
@@ -232,14 +248,14 @@ function M.run(argv)
     end
   end
 
-  if prompt ~= "" then view:prompt("wa> "); turn(prompt) end
+  if prompt ~= "" then view:prompt(); turn(prompt) end
 
   -- The input, and where the prompt is drawn. Both matter to the same thing: a reader who can see
   -- where they are typing, and who is not locked out while the agent works. The prompt is drawn
   -- once per wait rather than in a loop, because the prompt and the reader's typing share a row -
   -- a redraw on a timeout would erase what they have typed so far.
   local function read_line()
-    view:prompt("wa> ")
+    view:prompt()
     while true do
       local line, eof = input:poll(cli_input.WAIT_MS)
       if line ~= nil then
@@ -273,7 +289,18 @@ function M.run(argv)
       dofile('lua/core/binding_cli.lua').run('bind',line:sub(7),read_line,print)
     elseif line == "/unbind" then
       dofile('lua/core/binding_cli.lua').run('unbind','',read_line,print)
-    elseif line == "/nodes" or line:sub(1, 7) == "/nodes " then
+    elseif line == "/nodes" then
+      -- The cluster as a panel to move through, like /login; `/nodes pending` stays a binding command.
+      local panel = dofile('lua/core/cli_panel.lua')
+      local panels = view.editor and view.stdout and panel.available()
+      local done, problem = pcall(dofile('lua/core/nodes_cli.lua').run, {
+        print = print,
+        panel = panels and panel.open or nil,
+        paint = function(text, role) return cli_view.paint(text, role, view.live) end,
+      })
+      if panels then panel.close() end
+      if not done then print(redact.text(tostring(problem))) end
+    elseif line:sub(1, 7) == "/nodes " then
       dofile('lua/core/binding_cli.lua').run('nodes',line:sub(8),read_line,print)
     elseif line == "/accept" or line:sub(1, 8) == "/accept " then
       dofile('lua/core/binding_cli.lua').run('accept',line:sub(9),read_line,print)
@@ -298,9 +325,25 @@ function M.run(argv)
         return lines
       end
       print(redact.text(notice))
+    elseif line == "/model" or line == "/reasoning" or line == "/thinking" then
+      local panel = dofile('lua/core/cli_panel.lua')
+      local panels = view.editor and view.stdout and panel.available()
+      local picker = dofile('lua/core/model_cli.lua')
+      local done, problem = pcall(line == "/model" and picker.model or picker.reasoning, {
+        print = print,
+        ask = function(text) view:prompt(text); while true do
+          local answer, eof = input:poll(cli_input.WAIT_MS)
+          if answer ~= nil then view:accepted(answer); view:submitted(); return answer end
+          if eof then return nil end end end,
+        panel = panels and panel.open or nil,
+        paint = function(text, role) return cli_view.paint(text, role, view.live) end,
+      })
+      if panels then panel.close() end
+      refresh_model()
+      if not done then print(redact.text(tostring(problem))) end
     elseif line == "/login" or line == "/provider" then
-      -- Credentials are entered only on the separate operator vault origin. No secret is
-      -- accepted by this REPL/editor, whose ordinary lines have recall history.
+      -- Credentials never pass through this REPL/editor, whose lines have recall history: a ChatGPT
+      -- login is a device code entered in the browser, an API key is pasted on the vault page.
       local function ask(text)
         view:prompt(text)
         while true do
@@ -313,9 +356,17 @@ function M.run(argv)
           if eof then return nil end
         end
       end
-      dofile('lua/core/provider_management.lua').cli({
+      local manager = dofile('lua/core/provider_management.lua')
+      local flow = line == "/login" and manager.login_cli or manager.provider_cli
+      local panel = dofile('lua/core/cli_panel.lua')
+      local panels = view.editor and view.stdout and panel.available()
+      local done, problem = pcall(flow, {
         print = print,
         ask = ask,
+        -- A panel over the bottom of the screen (Esc closes it); nil where there is no raw editor,
+        -- and the flow falls back to numbered questions.
+        panel = panels and panel.open or nil,
+        paint = function(text, role) return cli_view.paint(text, role, view.live) end,
         wait = function(ms)
           local deadline = host.monotonic_ms() + ms
           while host.monotonic_ms() < deadline do
@@ -324,8 +375,10 @@ function M.run(argv)
           end
           return nil
         end,
-        select = function(id) return provider.set_provider(id) end,
       })
+      if panels then panel.close() end
+      refresh_model()
+      if not done then print(redact.text(tostring(problem))) end
     elseif line == "/stats" then
       print(json.encode(memory.stats()))
     elseif line == "/console" then
@@ -348,7 +401,7 @@ function M.run(argv)
         session_id = agent.session_id,
       })
       print(redact.text(report.message or json.encode(report)))
-      if report.next then print(redact.text("  next: " .. report.next)) end
+      if report.next then print(redact.text("next: " .. report.next)) end
     elseif line == "/merge" then
       -- Not a node operation: the merge runs outside this process, in the worktrees. The command
       -- is the agent's brief, and it names the skill that holds the procedure.

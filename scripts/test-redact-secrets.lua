@@ -37,6 +37,22 @@ ok(redacted.stdout:find("<redacted>", 1, true) ~= nil, "the value is replaced wi
 ok(redacted.stdout:find("WASM_AGENT_LLM_MODEL=deepseek", 1, true) ~= nil, "the rest is kept")
 ok(redacted.code == 0, "non-string fields are untouched")
 
+-- Shapes and key files, for a result whose call is known.
+local pasted = "sk-" .. string.rep("Ab1", 12)
+local shaped, shape_hits = redact.value({ stdout = "token " .. pasted .. " in task-runner and sk-short" },
+  { tool = "bash", args = { command = "cat notes.txt" } })
+ok(not shaped.stdout:find(pasted, 1, true) and shape_hits.KEY_SHAPE == 1, "an sk- key nobody configured is masked")
+ok(shaped.stdout:find("task-runner", 1, true) and shaped.stdout:find("sk-short", 1, true),
+  "ordinary words and short sk- strings are left alone")
+local file_value = "q8Zr2LmN0pXyT4vB7cD1eF6g"
+local from_file, file_hits = redact.value({ stdout = file_value .. "\n" },
+  { tool = "bash", args = { command = "cat ~/keys/opencode-go.key" } })
+ok(not from_file.stdout:find(file_value, 1, true) and file_hits.KEY_FILE == 1, "a .key file's content is masked whatever its shape")
+local read_back = redact.value({ content = file_value }, { tool = "read", args = { path = "/tmp/x/opencode-go.key" } })
+ok(not read_back.content:find(file_value, 1, true), "reading a .key file returns it masked")
+local untouched = redact.value({ stdout = file_value }, { tool = "bash", args = { command = "cat keyboard.txt" } })
+ok(untouched.stdout == file_value, "a file that is not a .key file is not mangled")
+
 -- Detection without modification: `scan` never returns the value.
 local found = redact.scan("line\nkey=" .. SECRET .. " and again " .. SECRET)
 ok(found.WASM_AGENT_LLM_API_KEY == 2, "scan counts the occurrences")

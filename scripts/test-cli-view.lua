@@ -165,8 +165,8 @@ ok(not has(plain_text, "\27"), "a captured transcript carries no escape sequence
 ok(not has(plain_text, view_lib.spinner(0)), "and no spinner: a moving frame is not a transcript")
 ok(has(plain_text, "Thinking"), "the captured transcript says the run was thinking")
 ok(has(plain_text, "Running bash"), "and what it ran")
-ok(has(plain_text, "$ echo hi"), "with the command it was given")
-ok(has(plain_text, "ok \194\183 exit 0"), "and whether it worked")
+ok(has(plain_text, "\226\143\186 Bash(echo hi)"), "with the command it was given, as a call heading")
+ok(has(plain_text, "\226\142\191 hi") and has(plain_text, "exit 0"), "and what it returned, and whether it worked")
 ok(has(plain_text, "hi"), "and what it printed")
 ok(has(plain_text, "done: one command ran."), "the answer is in the transcript")
 ok(select(2, plain_text:gsub("done: one command ran%.", "")) == 1, "the answer appears exactly once")
@@ -263,11 +263,11 @@ ok(has(live.text(), "of 5m00s"), "and the deadline it is running against is visi
 clock.value = 21
 live_view:event({ type = "tool_result", name = "bash", result = { code = 0, stdout = "hi\n" } })
 ok(has(live.text(), "1.0s"), "a step reports how long it took")
-ok(has(live.text(), view_lib.style("success") .. "ok"), "success is marked as success")
+ok(has(live.text(), view_lib.style("success") .. view_lib.DOT), "success is marked as success")
 local before_answer = #live.text()
 live_view:event({ type = "tool", name = "read", arguments = { path = "ui/app.js" } })
 live_view:event({ type = "tool_result", name = "read", result = { error = "no such file" } })
-ok(has(live.text(), view_lib.style("error") .. "failed"), "a failed call is marked as failed, with its reason")
+ok(has(live.text(), view_lib.style("error") .. view_lib.DOT), "a failed call is marked as failed, with its reason")
 ok(has(live.text(), "no such file"), "and the reason is shown")
 clock.value = 30
 live_view:event({ type = "usage", total = { prompt = 1200, completion = 800, cached = 1100, cost = 0.0021 },
@@ -292,8 +292,16 @@ error_view:run_started()
 error_view:event({ type = "tool", name = "bash", arguments = { command = "false" } })
 error_view:event({ type = "tool_result", name = "bash", result = { code = 1, stderr = "nope" } })
 error_view:failed("provider_http_500: boom")
-ok(has(errored.text(), "! provider_http_500: boom"), "a failed run says so in one line")
-ok(has(errored.text(), "failed \194\183 exit 1"), "and the step that failed still reads as failed")
+ok(has(errored.text(), "\226\143\186 Error: provider_http_500: boom"), "a failed run says so in one line")
+ok(has(errored.text(), "\226\143\186 Bash(false)") and has(errored.text(), "nope") and has(errored.text(), "exit 1"),
+  "and the step that failed still reads as failed")
+
+-- An interrupt is said as one, not as a stack of file positions.
+local cancelled = recorder()
+local cancel_view = view_lib.new({ out = cancelled.out, live = false, now = function() return 5 end })
+cancel_view:run_started()
+cancel_view:failed("lua/core/agent.lua:1285: lua/core/agent.lua:1528: run_cancelled")
+ok(has(cancelled.text(), "Interrupted by user") and not has(cancelled.text(), "agent.lua"), "an interrupt reads as one")
 
 -- A bug in the renderer must not kill the run it describes, and must not be silent.
 local warned = recorder()
@@ -332,7 +340,7 @@ ok(#handed == 1 and handed[1].kind == "start", "a starting run hands its line to
 local spec = handed[1].spec
 ok(type(spec) == "table" and type(spec.line) == "string", "and what it hands over is a line")
 ok(spec.line == animated:status_template(), "the layout, with its two tokens still in it")
-ok(spec.marks[1] == "\226\160\139 ", "this view's marks, in this view's order")
+ok(spec.marks[1] == view_lib.paint(view_lib.spinner(0), "accent", true) .. " ", "this view's marks, in this view's order")
 ok(spec.started == animated.turn.started, "and the origin of the clock, so a redraw does not restart it")
 ok(not has(spec.line, view_lib.spinner(0)), "no frame is baked into the layout")
 
@@ -346,8 +354,8 @@ ok(filled == animated:status_text(true), "and the host's frame is word for word 
 ticker_clock.value = 130
 animated:event({ type = "round", n = 1 })
 animated:event({ type = "tool", name = "bash", arguments = { command = "echo hi" } })
-ok(has(ticker_out.text(), "$ echo hi"), "the tool line is written while the host is not drawing")
 animated:event({ type = "tool_result", name = "bash", result = { code = 0, stdout = "hi\n" } })
+ok(has(ticker_out.text(), "(echo hi)"), "the tool line is written while the host is not drawing")
 animated:answered("done: one command ran.")
 
 -- The invariant: nothing is written to that line between the moment the host is given it and
@@ -385,19 +393,17 @@ host.ticker = real_ticker
 ok(degraded == true and has(quiet.text(), "still answered"),
   "a host without the ticker still finishes the run")
 
--- ---- pi's palette, per component -------------------------------------------------
+-- ---- the palette, per component ---------------------------------------------------
 
--- The roles are pi's own and the colours are pi's own
--- (`dist/modes/interactive/theme/dark.json` in `@earendil-works/pi-coding-agent`). Asserting
--- the exact sequence is the point: "coloured" is not the property, "coloured the way pi
--- colours it" is, and a role renamed to a different colour would pass any weaker check.
-ok(view_lib.PALETTE.accent == "8abeb7", "the accent is pi's accent")
-ok(view_lib.PALETTE.success == "b5bd68" and view_lib.PALETTE.error == "cc6666",
-  "success and error are pi's green and red")
-ok(view_lib.style("success") == "\27[38;2;181;189;104m", "a role becomes its own 24-bit colour")
+-- The roles are pi's names; the colours are Claude Code's dark terminal look. Asserting the exact
+-- sequence is the point: a role renamed to a different colour would pass any weaker check.
+ok(view_lib.PALETTE.accent == "d77757", "the accent is the warm spinner accent")
+ok(view_lib.PALETTE.success == "4eba65" and view_lib.PALETTE.error == "ff6b80",
+  "success and error are the green and red of a tool's dot")
+ok(view_lib.style("success") == "\27[38;2;78;186;101m", "a role becomes its own 24-bit colour")
 ok(view_lib.style("red") == view_lib.style("error"),
   "the old names are the same roles, not a second palette")
-ok(view_lib.style("mdHeading") == "\27[38;2;240;198;116m", "and the markdown roles are pi's too")
+ok(view_lib.style("mdHeading") == "\27[38;2;255;255;255m", "and the markdown roles follow it too")
 
 -- The status line carries the colour, and the colour is a rendering decision: the same line
 -- is plain when the output is captured, and plain again on a terminal too narrow for it -
@@ -444,7 +450,7 @@ local thought = recorder()
 local think_view = view_lib.new({ out = thought.out, live = false, now = function() return 7 end, limit = 80 })
 think_view:run_started()
 think_view:event({ type = "reasoning", text = "the reader wants the view fixed, so I will read cli_view.lua first" })
-ok(has(thought.text(), "\226\156\187 thinking"), "the reasoning is announced as thinking")
+ok(has(thought.text(), "\226\156\187 Thinking\226\128\166"), "the reasoning is announced as thinking")
 ok(has(thought.text(), "read cli_view.lua first"), "and printed in full rather than summarised")
 ok(view_lib.columns(thought.text():match("[^\n]*read[^\n]*") or "") <= 80, "and wrapped to the terminal")
 
@@ -584,11 +590,11 @@ ok(has(since(screen_out, mark), "\27[11;1H"), "the status line is drawn on the s
 -- The reader's line is moved into the transcript before the input row is reused.
 mark = #screen_out + 1
 screen_view:accepted("is this lost?")
-ok(has(visible(since(screen_out, mark)), "wa> is this lost?"),
+ok(has(visible(since(screen_out, mark)), "> is this lost?"),
   "an accepted line is committed to the transcript")
 mark = #screen_out + 1
 screen_view:submitted()
-ok(has(since(screen_out, mark), "\27[12;1H\27[2Kwa> "),
+ok(has(since(screen_out, mark), "\27[12;1H\27[2K> "),
   "a submitted line is cleared from the input row before the run begins")
 
 -- Counters persist across turns in this process instead of restarting with each answer.
@@ -609,25 +615,40 @@ editor_view.editor = true
 editor_view:prompt("wa> ")
 ok(#editor_calls == 1 and editor_calls[1][1] == 11 and editor_calls[1][2] == 80
   and editor_calls[1][3] == 3, "the live view gives the editor three rows and its width")
-ok(has(table.concat(editor_out), "\27[1;8r") and has(table.concat(editor_out), "\27[12;1H"),
+ok(has(table.concat(editor_out), "\27[1;5r") and has(table.concat(editor_out), "\27[12;1H"),
   "the ticker and editor do not share the output scroll region")
 editor_view:run_started()
 editor_view:event({ type = "round", n = 6 })
 editor_view:event({ type = "tool", name = "bash", arguments = { command = "true" } })
-editor_view:event({ type = "usage", total = { prompt = 120400, completion = 1000, cached = 90540 }, prompt = 27200 })
+local session_total = { prompt = 120400, completion = 1000, cached = 90540 }
+editor_view:event({ type = "usage", total = session_total, prompt = 27200 })
 local running = table.concat(editor_out)
-ok(has(running, "6 rounds") and has(running, "1 tool") and has(running, "120.4k"),
-  "the bottom footer shows usage before the run finishes")
+ok(has(running, "\240\159\145\1636\194\183") and has(running, "\226\154\146\239\184\1431")
+  and has(running, "\226\134\14527.2k \226\134\1471.0k"),
+  "the status line shows the step, the run's tools, what it added to the context and its output")
 editor_view:answered("## Done")
 local summary = editor_view.last_summary
-ok(summary and has(summary, "6 rounds"), "completion keeps the last run summary")
+ok(summary and has(summary, "\226\134\1871 ") and has(summary, "\226\151\13575.20%"),
+  "completion leaves the session's numbers: runs, and the cache hit rate")
 local idle_mark = #editor_out + 1
 editor_view:prompt()
-ok(has(since(editor_out, idle_mark), "6 rounds") and has(since(editor_out, idle_mark), "\27[12;1H"),
-  "the summary remains pinned below the composer while idle")
+ok(has(since(editor_out, idle_mark), "\226\134\1871 ") and has(since(editor_out, idle_mark), "\27[12;1H"),
+  "the session summary stays in the footer while idle")
 local before_submit = #editor_out
 editor_view:submitted()
 ok(#editor_out == before_submit, "the submitted draft was already cleared by the editor")
+-- The agent adds to one session-totals table in place: the next run's baseline must be a copy
+-- of it, or the run's numbers diff against themselves and stay at zero.
+local second_mark = #editor_out + 1
+editor_view:run_started()
+editor_view:event({ type = "round", n = 1 })
+session_total.prompt = session_total.prompt + 30000
+session_total.completion = session_total.completion + 450
+editor_view:event({ type = "usage", total = session_total, prompt = 30000 })
+local second = table.concat(editor_out, "", second_mark)
+ok(has(second, "\226\134\1452.8k \226\134\147450"),
+  "a later run counts its own context growth and output, not zero")
+editor_view:answered("ok")
 editor_view:screen_off()
 host.input_editor = real_editor
 
@@ -676,10 +697,10 @@ ok(view_lib.rows(function() return "24" end) == 24,
   "and a height that arrives as text (the shape JSON would give) is still a height")
 ok(view_lib.screen_rows(24).input == 24 and view_lib.screen_rows(24).status == 23
   and view_lib.screen_rows(24).bottom == 22, "a 24-row console gives the screen its three zones")
-ok(view_lib.screen_rows(12, true).bottom == 8 and view_lib.screen_rows(12, true).status == 12
-  and view_lib.screen_rows(12, true).input_top == 9,
-  "a live editor reserves three rows above the bottom footer")
-ok(view_lib.screen_rows(6, true) == nil, "a short console cannot host a three-row editor")
+local boxed = view_lib.screen_rows(12, true)
+ok(boxed.bottom == 5 and boxed.status == 6 and boxed.input_top == 7 and boxed.input == 11 and boxed.footer == 12,
+  "a live editor: output, status above the box, the box (two borders, three rows), and a footer")
+ok(view_lib.screen_rows(9, true) == nil, "a short console cannot host the boxed editor")
 ok(view_lib.screen_rows(3) == nil, "a 3-row console gives it none")
 ok(view_lib.screen_rows(nil) == nil, "an unknown height gives it none")
 

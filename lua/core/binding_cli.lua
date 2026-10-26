@@ -33,7 +33,11 @@ function M.run(command,arg,read,output)
       local renew=rest=='renew';local service=rest
       if renew then local s,e=binding.saved();if not s then result={error=e or 'not_bound'} else service=s.service end end
       if not result then
-        if service=='' then output('Fabric HTTPS URL ['..binding.DEFAULT_SERVICE..']:');service=read() or '';if service=='' then service=binding.DEFAULT_SERVICE end end
+        if service=='' then
+          local suggested=binding.default_service()
+          output(suggested~='' and ('Fabric HTTPS URL ['..suggested..']:') or 'Fabric HTTPS URL (e.g. https://fabric.example.com):')
+          service=(read() or ''):gsub('^%s+',''):gsub('%s+$','');if service=='' then service=suggested end
+        end
         local preview=binding.inspect(service)
         if not preview.ok then result=preview else
           output('Fabric: '..preview.service..' | binding protocol 1 | lifetimes: '..table.concat(preview.lifetimes or {'standard'},','))

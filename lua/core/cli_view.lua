@@ -47,11 +47,10 @@ local M = {}
 
 -- ---- styling -------------------------------------------------------------------
 
--- pi's dark theme, role for role. The names are pi's own
--- (`@earendil-works/pi-coding-agent/dist/modes/interactive/theme/dark.json`), so a component
--- here is coloured by what it *is* rather than by a literal at the call site: a tool that
--- succeeded is `success` on both surfaces, and a reader who knows pi's colours already knows
--- where to look in this one. The hex values are pi's, unchanged.
+-- Roles named after pi's theme (`@earendil-works/pi-coding-agent/.../theme/dark.json`), so a
+-- component is coloured by what it *is* rather than by a literal at the call site. The values
+-- follow Claude Code's dark terminal look: the warm accent for the spinner and the welcome mark,
+-- grey borders and secondary text, green/red for a tool that worked or failed.
 --
 -- Truecolor is the point: these roles are 24-bit colours, and the terminals this runs in
 -- (Windows Terminal, Orca's terminal, xterm-256color) render them. A terminal that does not
@@ -60,13 +59,13 @@ local M = {}
 -- `WASM_AGENT_CLI_VIEW=plain` turns colour off for a captured transcript.
 local RESET = "\27[0m"
 local PALETTE = {
-  accent = "8abeb7", border = "5f87ff", borderAccent = "00d7ff", borderMuted = "505050",
-  success = "b5bd68", error = "cc6666", warning = "ffff00", muted = "808080",
-  dim = "666666", text = "d4d4d4", thinkingText = "808080",
-  mdHeading = "f0c674", mdLink = "81a2be", mdLinkUrl = "666666", mdCode = "8abeb7",
-  mdCodeBlock = "b5bd68", mdCodeBlockBorder = "808080", mdQuote = "808080",
-  mdQuoteBorder = "808080", mdHr = "808080", mdListBullet = "8abeb7",
-  toolDiffAdded = "b5bd68", toolDiffRemoved = "cc6666", toolDiffContext = "808080",
+  accent = "d77757", border = "888888", borderAccent = "b1b9f9", borderMuted = "505050",
+  success = "4eba65", error = "ff6b80", warning = "ffc107", muted = "999999",
+  dim = "777777", text = "ffffff", thinkingText = "999999",
+  mdHeading = "ffffff", mdLink = "b1b9f9", mdLinkUrl = "777777", mdCode = "b1b9f9",
+  mdCodeBlock = "d4d4d4", mdCodeBlockBorder = "777777", mdQuote = "999999",
+  mdQuoteBorder = "777777", mdHr = "777777", mdListBullet = "999999",
+  toolDiffAdded = "4eba65", toolDiffRemoved = "ff6b80", toolDiffContext = "999999",
   syntaxComment = "6a9955", syntaxKeyword = "569cd6", syntaxFunction = "dcdcaa",
   syntaxString = "ce9178", syntaxNumber = "b5cea8", syntaxType = "4ec9b0",
   -- The reasoning ramp, darkest to brightest: how much thinking the model was asked for.
@@ -107,23 +106,31 @@ local function paint(text, style, live)
 end
 M.paint = paint
 
--- Braille, the same frames pi uses. Only ever emitted in the live rendering.
-local SPINNER = { "\226\160\139", "\226\160\153", "\226\160\185", "\226\160\184",
-                  "\226\160\188", "\226\160\180", "\226\160\166", "\226\160\167",
-                  "\226\160\135", "\226\160\143" }
+-- A star that grows, then shrinks: · • ✧ ✦ ✶ ✳ ✷ ✸ ✹ ✺ and back. It starts mid-cycle (✶) so the
+-- first frame is never `·`, which is also this view's separator. Each frame is held for two of the
+-- host's ticks, so the cycle breathes rather than flickers.
+local SPINNER = { "\226\156\182", "\226\156\179", "\226\156\183", "\226\156\184", "\226\156\185",
+  "\226\156\186", "\226\156\185", "\226\156\184", "\226\156\183", "\226\156\179", "\226\156\182",
+  "\226\156\166", "\226\156\167", "\226\128\162", "\194\183", "\226\128\162", "\226\156\167", "\226\156\166" }
+local HOLD = 2
+M.SPINNER = SPINNER
 
 function M.spinner(frame)
-  return SPINNER[(math.max(0, math.floor(frame or 0)) % #SPINNER) + 1]
+  return SPINNER[(math.floor(math.max(0, math.floor(frame or 0)) / HOLD) % #SPINNER) + 1]
 end
 
 -- The marks the animated line cycles, each carrying the space that separates it from the
 -- phase. They travel to the host rather than being rebuilt there, so the frames on screen are
 -- the same characters in the same order as the ones this module prints for itself.
-function M.marks()
+function M.marks(live)
   local list = {}
-  for index = 1, #SPINNER do list[index] = SPINNER[index] .. " " end
+  for index = 1, #SPINNER * HOLD do list[index] = paint(M.spinner(index - 1), "accent", live) .. " " end
   return list
 end
+
+-- The marks the transcript uses: a step (`⏺`), what it returned (`⎿`), and the welcome glyph.
+local DOT, RESULT, STAR = "\226\143\186", "\226\142\191", "\226\156\187"
+M.DOT, M.RESULT = DOT, RESULT
 
 -- ---- text ----------------------------------------------------------------------
 
@@ -181,6 +188,33 @@ function M.duration(seconds)
   local s = tonumber(seconds) or 0
   if s < 60 then return string.format("%.1fs", s) end
   return string.format("%dm%02ds", math.floor(s / 60), math.floor(s % 60))
+end
+
+-- The status line's clocks, twins of `ticker_step` / `ticker_clock` in rust/wa-host/src/host.rs:
+-- the current step in whole seconds (`5s`, `1m05s`), the whole run as `m:ss`.
+function M.step_clock(seconds)
+  local s = math.max(0, math.floor(tonumber(seconds) or 0))
+  if s < 60 then return s .. "s" end
+  return string.format("%dm%02ds", math.floor(s / 60), s % 60)
+end
+function M.run_clock(seconds)
+  local s = math.max(0, math.floor(tonumber(seconds) or 0))
+  if s < 3600 then return string.format("%d:%02d", math.floor(s / 60), s % 60) end
+  return string.format("%d:%02d:%02d", math.floor(s / 3600), math.floor(s % 3600 / 60), s % 60)
+end
+
+-- The footer's session numbers: `↻runs ⚒️tools ↑in ↓out ◔ctx%/window ◇cache-hit%`.
+function M.session_summary(t)
+  t = t or {}
+  local parts = { "\226\134\187" .. (t.runs or 0), "\226\154\146\239\184\143" .. (t.tools or 0),
+    "\226\134\145" .. M.tokens(t.prompt) .. " \226\134\147" .. M.tokens(t.completion) }
+  if (tonumber(t.budget) or 0) > 0 then
+    parts[#parts + 1] = string.format("\226\151\148%.1f%%/%s", 100 * (t.context or 0) / t.budget, M.tokens(t.budget))
+  end
+  if (tonumber(t.prompt) or 0) > 0 then
+    parts[#parts + 1] = string.format("\226\151\135%.2f%%", 100 * (t.cached or 0) / t.prompt)
+  end
+  return table.concat(parts, " ")
 end
 
 -- How long a step took: milliseconds below a second, seconds above it. The unit is
@@ -261,6 +295,30 @@ function M.call_line(name, args, limit)
   return clip(table.concat(parts, " "), limit)
 end
 
+-- The call as a heading, the way Claude Code writes one: a capitalised tool name and what it was
+-- given in parentheses - `Bash(npm test)`, `Read(src/main.rs)`, `Search(pattern: "foo")`.
+local TITLE = {
+  bash = "Bash", shell = "Bash", read = "Read", write = "Write", edit = "Update", grep = "Search",
+  ls = "List", subagent = "Task", skill = "Skill", recall = "Recall", remember = "Remember",
+  search_messages = "Search", conversation = "Conversation", remote = "Remote", client = "Client",
+}
+function M.tool_title(name, args, limit)
+  name = tostring(name or "?")
+  local label = TITLE[name] or (name:sub(1, 1):upper() .. name:sub(2))
+  local a = (type(args) == "table") and args or {}
+  limit = math.max(8, (limit or 96) - #label - 2)
+  local inside
+  if name == "bash" or name == "shell" then
+    inside = clip(a.command or "", limit)
+  elseif name == "grep" then
+    inside = clip('pattern: "' .. tostring(a.pattern or "") .. '"'
+      .. (a.path and (', path: "' .. tostring(a.path) .. '"') or ""), limit)
+  else
+    inside = M.call_line(name, args, limit)
+  end
+  return label, inside
+end
+
 -- Whether the call worked, in the caller's terms: `ok` is false when the tool returned
 -- an error or a non-zero exit code, and the second value is what to say about it.
 function M.outcome(name, result)
@@ -316,15 +374,19 @@ function M.preview(name, result, lines)
   elseif r.error then
     text = tostring(r.error)
   end
-  local out, kept = {}, 0
+  -- The second value is how many non-blank lines were left out, for the `… +N lines` marker.
+  local out, kept, hidden = {}, 0, 0
   for line in tostring(text):gmatch("[^\r\n]+") do
     if line:gsub("%s", "") ~= "" then
-      out[#out + 1] = line
-      kept = kept + 1
-      if kept >= (lines or 2) then break end
+      if kept < (lines or 2) then
+        out[#out + 1] = line
+        kept = kept + 1
+      else
+        hidden = hidden + 1
+      end
     end
   end
-  return out
+  return out, hidden
 end
 
 -- ---- the footer -----------------------------------------------------------------
@@ -407,15 +469,34 @@ function M.rows(probe)
   return math.floor(rows)
 end
 
+-- The console's width, asked the same way; nil when there is no console or it will not answer. The
+-- welcome box is drawn before the screen exists, and a box laid out for a guessed width wraps on
+-- every row of a narrower terminal.
+function M.terminal_columns()
+  if not (host and host.terminal_size) then return nil end
+  local ok, raw = pcall(host.terminal_size)
+  if not ok or type(raw) ~= "string" then return nil end
+  local decoded
+  if not pcall(function() decoded = json.decode(raw) end) or type(decoded) ~= "table" then return nil end
+  local columns = tonumber(decoded.columns)
+  return columns and columns > 0 and math.floor(columns) or nil
+end
+
 -- The rows a screen owns, from a height: the output region scrolls, and the two rows below it are
 -- the status line and the reader's input row. `nil` when the console is too short to hold one - an
 -- output row is not optional - and the caller then draws the way it did before this existed.
+-- With the native editor the layout is Claude Code's, bottom up: a footer of hints on the last row,
+-- the input box (bottom border, up to three draft rows, top border) above it, the status line above
+-- the box, and the output region above that. `rust/wa-host/src/host.rs` (`editor_status_row`,
+-- `resize_editor`) keeps the same rows while Lua is blocked, so the two must change together.
+M.EDITOR_ROWS = 3
 local function screen_rows(rows, editor)
   rows = tonumber(rows)
-  if not rows or rows < (editor and 7 or 4) then return nil end
+  if not rows or rows < (editor and 10 or 4) then return nil end
   rows = math.floor(rows)
   if editor then
-    return { top = 1, bottom = rows - 4, status = rows, input_top = rows - 3, input = rows - 1 }
+    return { top = 1, bottom = rows - 7, status = rows - 6, input_top = rows - 5, input = rows - 1,
+             footer = rows }
   end
   return { top = 1, bottom = rows - 2, status = rows - 1, input = rows }
 end
@@ -518,18 +599,46 @@ function M.new(opts)
   return setmetatable(view, METHODS)
 end
 
+-- The row to address for `kind` ("O" output's last row, "S" status): a token when the host's editor
+-- is drawing the bottom of the screen - the slash menu and panels move those rows while Lua is
+-- blocked, and the host fills the token in under its lock - and the number otherwise.
+function METHODS:row(kind)
+  if self.editor and self.editor_ready and self.stdout and host and host.panel then return "{" .. kind .. "}" end
+  return tostring(kind == "O" and self.screen.bottom or self.screen.status)
+end
+
+-- Whether output goes to the host's transcript (blocks it draws, folds and focuses) rather than
+-- being streamed into the terminal.
+function METHODS:transcript()
+  return self.editor and self.editor_ready and self.stdout and host and host.transcript_write ~= nil
+end
+
+-- Start a transcript block: `topic` = collapsible (the model's thinking, a tool call). A no-op
+-- outside the transcript.
+function METHODS:topic(topic)
+  if self:transcript() and host.transcript_block then pcall(host.transcript_block, topic and true or false) end
+end
+
 function METHODS:write(text)
   -- Output - the transcript, a tool line, an answer - belongs in the region above the status and
   -- input rows, and this is the one place that knows where that region is. Every caller of the
   -- plain writer keeps working unchanged, and the reader's cursor comes back to the row they were
   -- typing on: a write that left the cursor in the output region would send their next keystroke
   -- into the middle of the transcript.
+  if self.screen and self:transcript() then
+    pcall(host.transcript_write, text)
+    return
+  end
   if self.screen then
     self:screen_on()
     text = text:gsub("\r?\n", "\r\n")
-    self.out(CURSOR_SAVE .. "\27[" .. self.screen.bottom .. ";1H" .. text .. CURSOR_RESTORE)
+    self.out(CURSOR_SAVE .. "\27[" .. self:row("O") .. ";1H" .. text .. CURSOR_RESTORE)
     return
   end
+  -- The native editor puts the terminal in raw mode before the welcome box is printed, and a raw
+  -- terminal does not return the carriage on a newline: without `\r` every line starts where the
+  -- previous one ended.
+  if self.live and self.editor then text = text:gsub("\r?\n", "\r\n") end
   self.out(text)
 end
 
@@ -549,14 +658,24 @@ end
 -- itself, and `host.ticker` fills them on a timer while this process is blocked. The second
 -- value is when the timed thing started, which is what the clock counts from either way.
 function METHODS:status_template()
+  local boxed = self.screen and self.screen.footer
   if self.screen and not self.turn and self.last_summary then
-    return paint("  " .. clip(self.last_summary, self.limit - 2), "dim", self.live), nil
+    -- Boxed, the numbers live in the footer under the box and the status row is empty between runs.
+    if boxed then return "", nil end
+    return paint(clip(self.last_summary, self.limit), "dim", self.live), nil
   end
   local phase = self.pending and M.phase(self.pending.name) or self.phase
   local started = self.screen and self.turn and self.turn.started
     or (self.pending and self.pending.started) or (self.turn and self.turn.started)
-  local function compose(shown)
-    local line = "  {m}" .. shown
+  local step = self.turn and (self.turn.step_started or self.turn.started)
+  local function compose(shown, live)
+    if boxed and self.turn then
+      -- `✶ 👣2·5s ⚒️3 ↑12.4k ↓310 ◷1:51`: the step this run is on and how long it has taken, the
+      -- run's tool calls, its input and output tokens, and its whole time. `{s}` and `{T}` are
+      -- clocks the host keeps moving while Lua is blocked.
+      return "{m}" .. paint(self:run_numbers("{s}", "{T}"), "muted", live)
+    end
+    local line = "{m}" .. shown
     if not self.turn then return line end
     if self.screen then
       local run, base, totals = self.turn, self.turn.baseline or {}, self.totals or {}
@@ -572,13 +691,13 @@ function METHODS:status_template()
     local bound = self.pending and self.pending.bound and (" of " .. M.duration(self.pending.bound)) or ""
     return line .. " \194\183 {t}" .. bound .. " \194\183 run " .. self.runs .. step
   end
-  local plain = compose(phase)
-  -- The phase word carries the colour and nothing else does: the host's ticker draws this
-  -- same line, and the mark and the clock are its own. A terminal too narrow for the plain
-  -- line gets the plain line, because `clip` counts columns and an escape sequence is not
-  -- one - a coloured line clipped by width loses its reset and bleeds into the next line.
+  local plain = compose(phase, false)
+  -- The phase word carries the colour: the host's ticker draws this same line, and the mark and
+  -- the clock are its own. A terminal too narrow for the plain line gets the plain line, because
+  -- `clip` counts columns and an escape sequence is not one - a coloured line clipped by width
+  -- loses its reset and bleeds into the next line.
   if columns(plain) + 10 > self.limit then return plain, started end
-  return compose(paint(phase, "accent", self.live)), started
+  return compose(paint(phase, "accent", self.live), self.live), started
 end
 
 -- The status line, and the only thing on screen that is rewritten. `with_spinner` is
@@ -586,12 +705,18 @@ end
 -- transcript is not one.
 function METHODS:status_text(with_spinner)
   local template, started = self:status_template()
-  local mark = with_spinner and (M.spinner(self.frame) .. " ") or ""
+  -- Coloured only when the line fits: a clipped line must not cut through a colour.
+  local fits = visible_columns(template) + 10 <= self.limit
+  local mark = with_spinner and (paint(M.spinner(self.frame), "accent", self.live and fits) .. " ") or ""
   -- Through a function, so a mark or a clock containing a `%` is inserted as itself.
   local text = template:gsub("{m}", function() return mark end)
   if started then
-    local elapsed = M.duration(self.now() - started)
+    local now = self.now()
+    local elapsed = M.duration(now - started)
     text = text:gsub("{t}", function() return elapsed end)
+    local step = M.step_clock(now - ((self.turn and self.turn.step_started) or started))
+    local total = M.run_clock(now - started)
+    text = text:gsub("{s}", function() return step end):gsub("{T}", function() return total end)
   end
   return text
 end
@@ -606,9 +731,11 @@ function METHODS:animate()
   if not self.live or not self.stdout then return end
   if not (host and host.ticker) then return end
   local template, started = self:status_template()
+  if template == "" then return end
   if not started and not (self.screen and self.last_summary) then return end
   local ok = pcall(host.ticker, json.encode({
-    line = template, marks = started and M.marks() or {}, started = started or self.now(), frame = self.frame,
+    line = template, marks = started and M.marks(self.live) or {}, started = started or self.now(), frame = self.frame,
+    step_started = self.turn and self.turn.step_started or nil,
     -- A row of its own while there is a screen: the ticker draws on the status row and hands the
     -- cursor back, which is what lets the reader keep typing on the input row at the same time.
     row = self.screen and self.screen.status or nil,
@@ -656,8 +783,8 @@ function METHODS:status_draw(text)
     -- A row of its own: the reader's cursor stays on the input row, so this neither commits a line
     -- nor is bounded by what the reader may have typed - the row belongs to the status line and
     -- nothing else writes on it.
-    self:control(CURSOR_SAVE .. "\27[" .. self.screen.status .. ";1H" .. text
-      .. string.rep(" ", pad) .. CURSOR_RESTORE)
+    self:control(CURSOR_SAVE .. "\27[" .. self:row("S") .. ";1H" .. text
+      .. string.rep(" ", pad) .. (self.screen.footer and "\27[K" or "") .. CURSOR_RESTORE)
     self.shown_cols = math.max(self.shown_cols, cols)
     return
   end
@@ -669,6 +796,46 @@ function METHODS:status_draw(text)
   end
   self:control(CURSOR_SAVE .. "\r" .. text .. string.rep(" ", pad) .. CURSOR_RESTORE)
   self.shown_cols = math.max(self.shown_cols, cols)
+end
+
+-- The hint row under the input box: the last run's numbers, or what to type. Boxed screens only.
+function METHODS:footer_draw()
+  if not (self.live and self.screen and self.screen.footer) then return end
+  local text = (self.last_summary and self.last_summary ~= "") and self.last_summary
+    or "/ for commands \194\183 /login to sign in \194\183 ctrl+c twice to quit"
+  -- The editor owns that row (the slash menu uses it), so it is handed the text, not drawn on.
+  if self.editor and self.stdout and host and host.editor_footer then
+    pcall(host.editor_footer, clip(text, math.max(10, self.limit - 1)), self.model or "")
+    return
+  end
+  self:control(CURSOR_SAVE .. "\27[" .. self.screen.footer .. ";1H\27[2K"
+    .. paint(clip(text, math.max(10, self.limit - 1)), "dim", self.live) .. CURSOR_RESTORE)
+end
+
+-- The footer's session numbers, now: refreshed while a run is in flight (on usage and tool events)
+-- so they move together with the status line, and left there when it ends.
+function METHODS:live_footer()
+  if not (self.screen and self.screen.footer) then return end
+  local totals = self.totals or {}
+  self.last_summary = M.session_summary({ runs = self.runs, tools = self.session_tools or 0,
+    prompt = totals.prompt, completion = totals.completion, cached = totals.cached,
+    context = self.context, budget = self.budget })
+  self:footer_draw()
+end
+
+-- `👣steps·step-time ⚒️tools ↑input ↓output ◷run-time` for the current run: input is what the run
+-- added to the context (the last call's prompt against the one the run started on), not the sum
+-- of every call's prompt, which re-counts the whole context each step. The two clocks are
+-- passed in (tokens for the host's ticker, or the stopped values once the run has ended). With no
+-- step clock (the line left under a finished run) the step count stands alone: `👣8`.
+function METHODS:run_numbers(step_clock, run_clock)
+  local run, base, totals = self.turn or {}, (self.turn and self.turn.baseline) or {}, self.totals or {}
+  local input = math.max(0, (self.context or 0) - (run.context or 0))
+  local output = math.max(0, (totals.completion or 0) - (base.completion or 0))
+  return "\240\159\145\163" .. math.max(1, run.rounds or 0) .. (step_clock and ("\194\183" .. step_clock) or "")
+    .. " \226\154\146\239\184\143" .. (run.tools or 0)
+    .. " \226\134\145" .. M.tokens(input) .. " \226\134\147" .. M.tokens(output)
+    .. " \226\151\183" .. run_clock
 end
 
 -- Called on every event: a new frame, and a repaint. In the plain rendering the line is
@@ -711,7 +878,7 @@ function METHODS:clear()
   self:unanimate()
   if self.screen then
     -- Its own row, erased: nothing else is on it, so there is no bound to keep.
-    self:control(CURSOR_SAVE .. "\27[" .. self.screen.status .. ";1H\27[2K" .. CURSOR_RESTORE)
+    self:control(CURSOR_SAVE .. "\27[" .. self:row("S") .. ";1H\27[2K" .. CURSOR_RESTORE)
     self.shown_cols = 0
     self.shown = nil
     return
@@ -756,13 +923,19 @@ function METHODS:screen_on()
   self:control("\27[1;" .. screen.bottom .. "r")
   self:control("\27[" .. screen.bottom .. ";1H\r\n")
   self:control("\27[" .. screen.status .. ";1H\27[2K")
-  for row = screen.input_top or screen.input, screen.input do
+  for row = screen.input_top or screen.input, screen.footer or screen.input do
     self:control("\27[" .. row .. ";1H\27[2K")
   end
   if resized and self.editor then
-    assert(host.input_editor(screen.input, self.limit, screen.input - screen.input_top + 1),
+    assert(host.input_editor(screen.input, self.limit, M.EDITOR_ROWS),
       "terminal editor could not resize")
+  elseif self.editor and self.stdout and host.input_editor and not self.editor_ready then
+    -- Hand the editor its rows now, before anything is written: from here on output goes through
+    -- the host's row tokens, which is what lets it put the chat back after the slash menu closes.
+    pcall(host.input_editor, screen.input, self.limit, M.EDITOR_ROWS)
   end
+  if self.editor and self.stdout then self.editor_ready = true end
+  self:footer_draw()
   return screen
 end
 
@@ -774,13 +947,13 @@ function METHODS:screen_off()
   local screen = self.screen
   self.screen = nil
   if not screen then return end
-  if self.editor and host.input_editor then pcall(host.input_editor, 0, self.limit, 3) end
+  if self.editor and host.input_editor then pcall(host.input_editor, 0, self.limit, M.EDITOR_ROWS) end
   self:control("\27[" .. screen.status .. ";1H\27[2K")
-  for row = screen.input_top or screen.input, screen.input do
+  for row = screen.input_top or screen.input, screen.footer or screen.input do
     self:control("\27[" .. row .. ";1H\27[2K")
   end
   self:control("\27[r")
-  self:control("\27[" .. math.max(screen.input, screen.status) .. ";1H\r\n")
+  self:control("\27[" .. math.max(screen.footer or screen.input, screen.status) .. ";1H\r\n")
 end
 
 -- A framed terminal gives its input rows to the native editor; captured/plain
@@ -790,25 +963,31 @@ end
 function METHODS:submitted()
   if self.editor then return end -- the native editor cleared the row on Enter
   if self.screen then
-    self:control("\27[" .. self.screen.input .. ";1H\27[2Kwa> ")
+    self:control("\27[" .. self.screen.input .. ";1H\27[2K> ")
   end
 end
 
+-- `text` is the prompt: `> ` for a chat line, or a question (`/login` asking which provider). The
+-- boxed editor has its own `> `, so a question is written into the transcript above the box -
+-- otherwise the reader is asked something they cannot see.
 function METHODS:prompt(text)
-  text = text or "wa> "
+  local question = text and text ~= "> " and text ~= "wa> " and text or nil
+  text = text or "> "
   local screen = self:screen_on()
   if not screen then
     self:clear()
     return self:control(text)
   end
   self:unanimate()
-  if self.last_summary then
-    self:status_draw(paint("  " .. clip(self.last_summary, self.limit - 2), "dim", self.live))
+  if self.last_summary and not screen.footer then
+    self:status_draw(paint(clip(self.last_summary, self.limit), "dim", self.live))
   end
   -- A native editor, when available, owns the bottom row and redraws it on every
   -- keystroke even when Lua is blocked. No terminal echo or Enter newline is involved.
   if self.editor then
-    assert(host.input_editor(screen.input, self.limit, screen.input - screen.input_top + 1),
+    if question then self:write(paint((question:gsub("%s+$", "")), "text", self.live) .. "\n") end
+    self:footer_draw()
+    assert(host.input_editor(screen.input, self.limit, M.EDITOR_ROWS),
       "terminal editor could not draw")
   else
     self:control("\27[" .. screen.input .. ";1H\27[2K" .. text)
@@ -825,7 +1004,19 @@ function METHODS:accepted(text)
   text = tostring(text or "")
   if text == "" or not self.screen then return end
   self:clear() -- the host ticker must not write while this line is committed
-  self:write(paint("wa> " .. clip(text, math.max(10, self.limit - 4)), "accent", self.live) .. "\n")
+  -- `> what you typed`, greyed, the way Claude Code keeps your message in the transcript.
+  -- White on a grey bar the width of the screen, the way the message stands out from the replies.
+  local shown, first = {}, true
+  for line in (text .. "\n"):gmatch("([^\n]*)\n") do
+    local body = (first and "> " or "") .. clip(line, math.max(10, self.limit - 2))
+    if self.live then
+      body = "\27[38;2;255;255;255m\27[48;2;68;68;68m" .. body .. string.rep(" ", math.max(0, self.limit - columns(body))) .. RESET
+    end
+    shown[#shown + 1] = body
+    first = false
+  end
+  self:topic(false)
+  self:write(table.concat(shown, "\n") .. "\n\n")
   if self.turn then self:paint(true) end
 end
 
@@ -856,9 +1047,15 @@ function METHODS:run_started()
   -- The usage event carries the *session's* running totals, so a run's own numbers are
   -- the difference across it. The first run's baseline is zero, not nil: a footer with
   -- no numbers on the first turn is a footer that looks broken.
+  if self.editor and self.stdout and host and host.editor_status then pcall(host.editor_status, true) end
+  -- A copy, never the totals table itself: the agent adds to that table in place, so a
+  -- baseline that *is* it moves with it and every run after the first diffs to zero.
+  local totals = self.totals or {}
   self.turn = {
-    started = self.now(), rounds = 0, tools = 0,
-    baseline = self.totals or { prompt = 0, completion = 0, cached = 0, cost = 0 },
+    started = self.now(), step_started = self.now(), rounds = 0, tools = 0,
+    baseline = { prompt = totals.prompt or 0, completion = totals.completion or 0,
+      cached = totals.cached or 0, cost = totals.cost or 0 },
+    context = self.context or 0,
   }
   self:set_title()
   self:paint(true)
@@ -882,21 +1079,66 @@ function METHODS:run_finished()
   end
   local text = M.footer(run, { context = self.context, budget = self.budget })
   self.last_summary = text
+  if self.screen and self.screen.footer and self.turn then
+    -- The run's own numbers, left under it in the transcript: the status line, stopped.
+    local now = self.now()
+    self:topic(false)
+    self:write(paint(self:run_numbers(nil, M.run_clock(now - self.turn.started)), "dim", self.live) .. "\n\n")
+  end
+  if self.screen and self.screen.footer then
+    local totals = self.totals or {}
+    self.last_summary = M.session_summary({ runs = self.runs, tools = self.session_tools or 0,
+      prompt = totals.prompt, completion = totals.completion, cached = totals.cached,
+      context = self.context, budget = self.budget })
+  end
   if text ~= "" and not self.screen then
     -- One line, clipped to the width: a footer that wraps puts its own tail at column
     -- zero, which reads as a second, unrelated line. The workspace and the branch are in
     -- the banner, where there is room for them.
-    self:line(paint("  " .. clip(text, math.max(20, self.limit - 2)), "dim", self.live))
+    self:line(paint(clip(text, math.max(20, self.limit)), "dim", self.live))
   end
   self.turn = nil
   self.pending = nil
   self.phase = ""
-  if self.screen and text ~= "" then
-    self:status_draw(paint("  " .. clip(text, self.limit - 2), "dim", self.live))
+  if self.screen and self.screen.footer then
+    if self.editor and self.stdout and host and host.editor_status then pcall(host.editor_status, false) end
+    self:footer_draw()
+  elseif self.screen and text ~= "" then
+    self:status_draw(paint(clip(text, self.limit), "dim", self.live))
     self:animate()
   end
   self:set_title()
 end
+
+-- A call whose result never arrived (a second call started, or the run ended) still gets its
+-- heading, with a neutral dot: what was asked must not vanish from the transcript.
+function METHODS:flush_call()
+  local pending = self.pending
+  if not pending or pending.shown then return end
+  pending.shown = true
+  self:topic(true)
+  self:line(paint(DOT, "muted", self.live) .. " " .. self:call_heading(pending.label, pending.inside))
+  self:topic(false)
+end
+
+function METHODS:call_heading(label, inside)
+  return paint(label or "?", "bold", self.live) .. ((inside and inside ~= "") and ("(" .. inside .. ")") or "")
+end
+
+-- `⏺ ` in front of the first line of a block: the answer's bullet.
+local function bulletize(text, mark)
+  local lead = text:match("^[\r\n]*") or ""
+  local rest = text:sub(#lead + 1)
+  local codes = ""
+  while true do
+    local code = rest:match("^\27%[[%d;]*m")
+    if not code then break end
+    codes = codes .. code
+    rest = rest:sub(#code + 1)
+  end
+  return lead .. codes .. mark .. " " .. rest
+end
+M.bulletize = bulletize
 
 -- The answer, then the numbers for the run that produced it. A reply that already
 -- streamed (a peer or a window run reaching this printer) is not printed twice.
@@ -905,28 +1147,39 @@ function METHODS:answered(reply)
   if self.deltas == 0 and reply and tostring(reply) ~= "" then
     -- After a page of tool lines the answer has to be findable, and the reader's eye is
     -- what has to find it.
+    self:flush_call()
+    self:topic(false)
     if self.turn and (self.turn.tools or 0) > 0 then self:write("\n") end
     local text = tostring(reply)
     -- Markdown, because that is what the model wrote: a heading is a heading, a fence is a
     -- block, and the width is the terminal's rather than the line's.
     local rendered = markdown.render(text, {
       paint = function(plain, style) return paint(plain, style, self.live) end,
-      width = self.limit,
-      indent = "  ",
+      width = self.limit - 2,
+      indent = "",
     })
     -- The renderer is the nicer rendering, never the only one: a reply it produces nothing
     -- for is printed raw. A view that swallowed an answer because its parser did not
     -- recognise it would be the worst bug in this file.
     if rendered ~= "" then text = rendered end
+    text = bulletize(text, paint(DOT, "text", self.live))
     if text:sub(-1) ~= "\n" then text = text .. "\n" end
-    self:write(text)
+    self:write(text .. "\n")
   end
   self:run_finished()
 end
 
 function METHODS:failed(problem)
   self:clear()
-  self:line(paint("  ! " .. tostring(problem or "error"), "red", self.live))
+  self:flush_call()
+  -- An interrupt (Esc, Ctrl+C) is the reader's own choice, not an error: say so plainly.
+  if tostring(problem or ""):find("run_cancelled", 1, true) then
+    self:topic(false)
+    self:line(paint(RESULT .. " Interrupted by user", "warning", self.live))
+    self:run_finished()
+    return
+  end
+  self:line(paint(DOT .. " Error: " .. tostring(problem or "error"), "red", self.live))
   self:run_finished()
 end
 
@@ -937,7 +1190,7 @@ function METHODS:warn(problem)
   if self.warned then return end
   self.warned = true
   self:clear()
-  self:line(paint("  ! the run view failed: " .. tostring(problem), "red", self.live))
+  self:line(paint("! the run view failed: " .. tostring(problem), "red", self.live))
 end
 
 -- What the model thought before it acted. A CLI run has no SSE sink, so nothing else in this
@@ -952,14 +1205,19 @@ function METHODS:reasoning_block(text)
   if body:gsub("%s", "") == "" then return end
   if (host.getenv("WASM_AGENT_CLI_THINKING") or ""):lower() == "off" then return end
   self:clear()
-  local mark = paint("\226\156\187 thinking", "thinkingText", self.live)
-  self:write("  " .. mark .. "\n")
+  local mark = paint(STAR .. " Thinking\226\128\166", { "italic", "thinkingText" }, self.live)
+  self:topic(true)
+  self:write(mark .. "\n")
   self:write(markdown.render(body, {
     paint = function(plain, style) return paint(plain, style, self.live) end,
-    width = self.limit,
-    indent = "      ",
+    -- Two columns narrower: a focused topic is drawn inside a border, and text wrapped here must
+    -- not be wrapped a second time there.
+    width = self:transcript() and (self.limit - 2) or self.limit,
+    indent = "",
     style = "thinkingText",
   }) .. "\n")
+  self:topic(false)
+  self:write("\n")
   self:paint(true)
 end
 
@@ -982,7 +1240,7 @@ end
 function METHODS:console_event(event)
   local kind = tostring(event.type or "?")
   local since = self.turn and self.turn.started or self.now()
-  local head = "  " .. paint(M.duration(math.max(0, self.now() - since)), "dim", self.live)
+  local head = paint(M.duration(math.max(0, self.now() - since)), "dim", self.live)
     .. " " .. paint(kind, "accent", self.live)
   self:clear()
   if kind == "tool_result" then
@@ -996,13 +1254,13 @@ function METHODS:console_event(event)
       if type(text) == "string" and text ~= "" then
         shown = true
         for line in (text .. "\n"):gmatch("([^\n]*)\n") do
-          self:write("      " .. line .. "\n")
+          self:write(line .. "\n")
         end
       end
     end
     if not shown then
       for line in (json.encode(result) .. "\n"):gmatch("([^\n]*)\n") do
-        self:write("      " .. line .. "\n")
+        self:write(line .. "\n")
       end
     end
   else
@@ -1030,39 +1288,62 @@ function METHODS:event(event)
     elseif text ~= "" then
       -- Compaction, recovery, a guard, a storage failure: not a phase, and worth a line
       -- of its own - these are exactly the events that used to be invisible here.
-      self:line(paint("  ! " .. M.clip(text, self.limit), "yellow", self.live))
+      self:line(paint("! " .. M.clip(text, self.limit), "yellow", self.live))
     end
   elseif kind == "round" then
     local previous = self.round
     self.round = tonumber(event.n) or (self.round + 1)
     self.total_rounds = self.total_rounds + math.max(0, self.round - previous)
-    if self.turn then self.turn.rounds = self.round end
+    if self.turn then self.turn.rounds = self.round; self.turn.step_started = self.now() end
     self:paint()
   elseif kind == "tool" then
-    self.pending = { name = event.name or "?", started = self.now() }
+    -- The heading is printed when the result arrives, so its dot can say how it went (green or
+    -- red, as Claude Code does); until then the status line names the call.
+    self:flush_call()
+    local label, inside = M.tool_title(event.name, event.arguments, self.limit - 4)
+    self.pending = { name = event.name or "?", started = self.now(), label = label, inside = inside }
     if event.timeout_ms then self.pending.bound = tonumber(event.timeout_ms) / 1000 end
     self.phase = M.phase(self.pending.name)
     if self.turn then self.turn.tools = self.turn.tools + 1 end
-    self:line("  " .. paint("\226\151\143", "accent", self.live) .. " " .. paint(self.pending.name or "?", "bold", self.live)
-      .. "  " .. paint(M.call_line(event.name, event.arguments, self.limit - 12), "dim", self.live))
+    self.session_tools = (self.session_tools or 0) + 1
     self:paint(true)
+    self:live_footer()
   elseif kind == "tool_result" then
     local name = event.name or (self.pending and self.pending.name) or "?"
     local ms = self.pending and ((self.now() - self.pending.started) * 1000) or nil
     local ok, note = M.outcome(name, event.result)
-    local marks = {}
-    marks[#marks + 1] = paint(ok and "ok" or "failed", ok and "green" or "red", self.live)
-    if note ~= "" then marks[#marks + 1] = note end
-    if ms then marks[#marks + 1] = M.elapsed(ms) end
-    self:line("  " .. paint("\226\148\148", "dim", self.live) .. " " .. table.concat(marks, " \194\183 "))
-    for _, text in ipairs(M.preview(name, event.result, 2)) do
-      -- A diff line reads as a diff: added, removed, context - pi's three diff roles.
-      local style = "dim"
-      if text:sub(1, 1) == "+" then style = "toolDiffAdded"
-      elseif text:sub(1, 1) == "-" then style = "toolDiffRemoved"
-      elseif text:sub(1, 2) == "@@" then style = "toolDiffContext" end
-      self:write("      " .. paint(M.clip(text, self.limit - 6), style, self.live) .. "\n")
+    local pending = self.pending
+    if not pending or pending.shown or pending.name ~= name then
+      local label = M.tool_title(name, nil, self.limit - 4)
+      pending = { label = label, inside = "" }
     end
+    self:topic(true)
+    self:line(paint(DOT, ok and "success" or "error", self.live) .. " " .. self:call_heading(pending.label, pending.inside))
+    -- In the transcript a tool call is a topic that folds to three rows, so it keeps more of the
+    -- output for when it is expanded.
+    local preview, hidden = M.preview(name, event.result, self:transcript() and 200 or 3)
+    local facts = {}
+    if note ~= "" then facts[#facts + 1] = note end
+    if ms then facts[#facts + 1] = M.elapsed(ms) end
+    local summary = table.concat(facts, " \194\183 ")
+    local lead = paint(RESULT, "muted", self.live) .. " "
+    if #preview == 0 then
+      self:write(lead .. paint(summary ~= "" and summary or (ok and "done" or "failed"), ok and "dim" or "error", self.live) .. "\n")
+    else
+      for index, text in ipairs(preview) do
+        -- A diff line reads as a diff: added, removed, context.
+        local style = ok and "dim" or "error"
+        if text:sub(1, 1) == "+" then style = "toolDiffAdded"
+        elseif text:sub(1, 1) == "-" then style = "toolDiffRemoved"
+        elseif text:sub(1, 2) == "@@" then style = "toolDiffContext" end
+        self:write((index == 1 and lead or "") .. paint(M.clip(text, self.limit - 2), style, self.live) .. "\n")
+      end
+      if hidden > 0 then
+        self:write(paint("\226\128\166 +" .. hidden .. " lines (/console shows all)", "dim", self.live) .. "\n")
+      end
+      if summary ~= "" then self:write(paint(summary, ok and "dim" or "error", self.live) .. "\n") end
+    end
+    self:topic(false)
     self.pending = nil
     self.phase = "Thinking"
     self:paint(true)
@@ -1074,8 +1355,9 @@ function METHODS:event(event)
     -- `total.prompt` is the session's running sum and would grow without bound.
     self.context = tonumber(event.prompt) or self.context
     self:paint()
+    self:live_footer()
   elseif kind == "compact" then
-    self:line(paint("  ! compacted through seq " .. tostring(event.through or "?"), "dim", self.live))
+    self:line(paint("! compacted through seq " .. tostring(event.through or "?"), "dim", self.live))
   elseif kind == "delta" then
     -- A CLI run has no sink, so this normally never fires; if it does (a peer or a window
     -- run printing here) the text is already the answer and must not be swallowed.
@@ -1084,37 +1366,39 @@ function METHODS:event(event)
     self:write(event.text or "")
   elseif kind == "error" then
     self:clear()
-    self:line(paint("  ! " .. tostring(event.error or "error"), "red", self.live))
+    self:line(paint("! " .. tostring(event.error or "error"), "red", self.live))
   end
 end
 
--- The startup lines: where this is running and what it is running with. pi puts the
--- workspace and the branch in front of the reader, and so does this - a chat in the
--- wrong worktree is a mistake that costs an hour to notice otherwise.
+-- The welcome box: where this is running and what it is running with, the way Claude Code opens.
+-- The workspace and branch come first after the greeting - a chat in the wrong worktree is a
+-- mistake that costs an hour to notice otherwise.
 function M.banner(opts)
   opts = opts or {}
-  local lines = {}
-  lines[#lines + 1] = string.format("  %s %s",
-    paint("wasm-agent", { "bold", "accent" }, opts.live), opts.version or "")
-  lines[#lines + 1] = string.format("  %s %s",
-    paint("model     ", "muted", opts.live), opts.model or "local mode (no model configured)")
-  lines[#lines + 1] = string.format("  %s %s",
-    paint("memory    ", "muted", opts.live), opts.database or "")
-  lines[#lines + 1] = string.format("  %s %s%s",
-    paint("session   ", "muted", opts.live), opts.session or "",
-    opts.continued and "  (continued)" or "")
-  if opts.workspace and opts.workspace ~= "" then
-    lines[#lines + 1] = string.format("  %s %s%s", paint("workspace ", "muted", opts.live),
-      opts.workspace,
-      opts.branch and opts.branch ~= "" and ("  (" .. opts.branch .. ")") or "")
+  local live = opts.live
+  local limit = math.max(24, tonumber(opts.limit) or 80)
+  local function fit(text) return columns(text) <= limit and text or clip(text, limit) end
+  local function fact(label, value)
+    if value and value ~= "" then return paint(fit(label .. ": " .. value), "muted", live) end
   end
+  local divider = paint(string.rep("\226\148\128", limit), "border", live)
+  local lines = { divider,
+    paint(STAR, "accent", live) .. " Welcome to " .. paint("wasm-agent", "bold", live) .. "!"
+      .. ((opts.version and opts.version ~= "") and paint(" v" .. opts.version, "muted", live) or ""),
+    "",
+    paint(fit("/help for help, /login to sign in to a provider"), "muted", live),
+    "" }
+  local function add(line) if line then lines[#lines + 1] = line end end
+  add(fact("cwd", (opts.workspace or "") .. ((opts.branch and opts.branch ~= "") and (" (" .. opts.branch .. ")") or "")))
+  add(fact("model", opts.model or "local mode (no model configured)"))
+  add(fact("session", (opts.session or "") .. (opts.continued and " (continued)" or "")))
+  add(fact("memory", opts.database))
   if opts.unfinished then
-    lines[#lines + 1] = paint("  !          unfinished " .. opts.unfinished, "warning", opts.live)
-    lines[#lines + 1] = "             recovering: wa resume --session " .. tostring(opts.session or "")
+    add("")
+    add(paint(fit("! unfinished " .. opts.unfinished), "warning", live))
+    add(paint(fit("recovering: wa resume --session " .. tostring(opts.session or "")), "warning", live))
   end
-  lines[#lines + 1] = string.format("  %s", paint("the status line shows what a run is doing while it runs",
-    "dim", opts.live))
-  lines[#lines + 1] = string.format("  %s", paint("/help for commands, /exit to quit", "dim", opts.live))
+  -- No closing divider: the input's own top divider sits right under the block.
   return table.concat(lines, "\n")
 end
 

@@ -368,6 +368,18 @@ round-boundary steering, not per-keystroke interruption.
 - On a real console with a live frame, `input_start(1)` switches stdin into raw mode and
   returns `editor:true`. The host reader edits and redraws a three-row input area while Lua
   is blocked; `input_editor(row,width,height)` places it after the view sets its scroll region.
+  The input area is a rounded box with a status line above and a footer below
+  (`editor_footer(text, model)`, the model right-aligned); the status row exists only while a run
+  is in flight (`editor_status(on)`); typing `/` opens the slash menu under the box from the list given to
+  `input_commands(json)` (arrows move, Tab completes, Enter runs, Esc closes). `panel(spec)`
+  opens a Claude Code-style panel over the bottom of the screen - a list, a text or `secret`
+  field, or a timed wait - and blocks until the reader answers or presses Esc; `panel()` closes
+  it. A secret field draws bullets only and its text goes only to the caller, never to history.
+  The chat itself is a transcript the host draws (`transcript_block(topic)`,
+  `transcript_write(text)`): topics (thinking, tool calls) fold to three rows; Ctrl+Up from the
+  draft focuses them, Up/Down move, Right/Left expand/fold, Esc returns to the draft.
+  The view addresses the rows the menu and panels move by token (`{O}` output, `{S}` status);
+  the host fills them in under its input lock.
   Enter clears the draft immediately and queues a complete line without terminal echo or a
   newline on the bottom row. Ctrl+J/Shift+Enter inserts a newline; arrows, Home/End,
   Backspace/Delete, history, Ctrl+A/E/K/U/W, bracketed paste and UTF-8 are handled locally.
@@ -524,6 +536,8 @@ capability_inventory read-only
 client               device
 client_status        read-only
 db_ready             read-only
+editor_footer        device
+editor_status        device
 enqueue_completion   writes files
 exec                 runs a process
 exec_timeout         read-only
@@ -546,6 +560,7 @@ grep                 read-only
 http                 network
 http_sse             network
 http_stream          network
+input_commands       device
 input_editor         device
 input_start          device
 input_stop           device
@@ -560,6 +575,7 @@ monotonic_ms         read-only
 node_identity        read-only
 now                  read-only
 operation            runs a process
+panel                device
 path_kind            read-only
 paths                read-only
 platform             read-only
@@ -582,6 +598,8 @@ system_resources     read-only
 terminal_size        device
 terminal_write       device
 ticker               device
+transcript_block     device
+transcript_write     device
 uuid                 read-only
 verify               read-only
 write_file           writes files
