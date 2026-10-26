@@ -1,7 +1,23 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import assert from 'node:assert/strict';
+import realAssert from 'node:assert/strict';
+// The gate's proof wrapper parses `N checks` out of the terminal verdict (scripts/lib/proof-verdict.cjs),
+// and this proof printed a prose sentence with no count - so the gate refused it with "missing or
+// malformed checks" on every run (measured 2026-10-26, lane #242). The count is now MEASURED: one per
+// assertion actually executed, wrapped here instead of hand-counted at 30 call sites, so it cannot
+// drift from what ran.
+let checks = 0;
+const assert = Object.assign(
+  (...args) => { checks += 1; return realAssert(...args); },
+  {
+    equal: (...a) => { checks += 1; return realAssert.equal(...a); },
+    notEqual: (...a) => { checks += 1; return realAssert.notEqual(...a); },
+    deepEqual: (...a) => { checks += 1; return realAssert.deepEqual(...a); },
+    match: (...a) => { checks += 1; return realAssert.match(...a); },
+    rejects: (...a) => { checks += 1; return realAssert.rejects(...a); },
+  },
+);
 import {spawnSync} from 'node:child_process';
 import {evaluate} from './delivery-admission.mjs';
 import {hash} from './gate-check.mjs';
@@ -95,5 +111,5 @@ try {
     assert(!verifyFocused(root,synthetic).admission_verified,'matching-hash browser log must independently carry terminal proof');
   }
   if(process.platform!=='win32')console.log('SKIP: browser receipt log contract requires Windows focused plan');
-  console.log(`producer admission ok (routine shared source and declared local case executed; independent scope review and strict pre-release refusal; ${process.platform==='win32'?0:1} skipped; browser logs validate contract only)`);
+  console.log(`producer admission ok (${checks} checks, ${process.platform==='win32'?0:1} skipped; routine shared source and declared local case executed; independent scope review and strict pre-release refusal; browser logs validate contract only)`);
 } finally {fs.rmSync(root,{recursive:true,force:true});}
