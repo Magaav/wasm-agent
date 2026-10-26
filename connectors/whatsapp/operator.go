@@ -20,30 +20,35 @@ import (
 )
 
 type operatorRequest struct {
-	Account    string `json:"account"`
-	Generation int64  `json:"generation"`
-	Chat       string `json:"conversation_id"`
-	Body       string `json:"body"`
-	Reply      string `json:"reply_to,omitempty"`
-	Intent     string `json:"intent_id,omitempty"`
-	Digest     string `json:"approval_digest,omitempty"`
+	Account    string   `json:"account"`
+	Generation int64    `json:"generation"`
+	Chat       string   `json:"conversation_id"`
+	Body       string   `json:"body"`
+	Reply      string   `json:"reply_to,omitempty"`
+	Mentions   []string `json:"mentions,omitempty"`
+	Intent     string   `json:"intent_id,omitempty"`
+	Digest     string   `json:"approval_digest,omitempty"`
+	// resolved carries the transport-proven mention entries for THIS request.
+	// It is never decoded from JSON: an operator cannot supply its own proof.
+	resolved []operatorMention
 }
 type operatorIntent struct {
-	Canonical  string `json:"canonical_recipient"`
-	Route      string `json:"protocol_recipient"`
-	ID         string `json:"intent_id"`
-	Account    string `json:"account"`
-	Generation int64  `json:"generation"`
-	Chat       string `json:"conversation_id"`
-	Body       string `json:"body"`
-	Reply      string `json:"reply_to"`
-	SendID     string `json:"message_id"`
-	Digest     string `json:"approval_digest"`
-	State      string `json:"state"`
-	Revision   int64  `json:"mutation_revision"`
-	Source     string `json:"-"`
-	Prepared   int64  `json:"prepared_at"`
-	Reason     string `json:"reason"`
+	Canonical  string            `json:"canonical_recipient"`
+	Route      string            `json:"protocol_recipient"`
+	ID         string            `json:"intent_id"`
+	Account    string            `json:"account"`
+	Generation int64             `json:"generation"`
+	Chat       string            `json:"conversation_id"`
+	Body       string            `json:"body"`
+	Reply      string            `json:"reply_to"`
+	Mentions   []operatorMention `json:"mentions,omitempty"`
+	SendID     string            `json:"message_id"`
+	Digest     string            `json:"approval_digest"`
+	State      string            `json:"state"`
+	Revision   int64             `json:"mutation_revision"`
+	Source     string            `json:"-"`
+	Prepared   int64             `json:"prepared_at"`
+	Reason     string            `json:"reason"`
 	// Recipient receipt observation for THIS intent's preallocated message ID.
 	// Zero means never observed: acceptance is not delivery and absence is not
 	// non-delivery. Filled only by observeReceipt from an exact chat/ID match.
@@ -60,7 +65,7 @@ func digest(v any) string {
 func installOperator(db *sql.DB) error {
 	_, err := db.Exec(`CREATE TABLE IF NOT EXISTS operator_intents(
  id TEXT PRIMARY KEY,account TEXT NOT NULL,generation INTEGER NOT NULL,chat TEXT NOT NULL,canonical TEXT NOT NULL,route TEXT NOT NULL,
- body TEXT NOT NULL,reply TEXT NOT NULL,send_id TEXT NOT NULL UNIQUE,digest TEXT NOT NULL,
+ body TEXT NOT NULL,reply TEXT NOT NULL,mentions TEXT NOT NULL DEFAULT '',send_id TEXT NOT NULL UNIQUE,digest TEXT NOT NULL,
  state TEXT NOT NULL,revision INTEGER NOT NULL,source TEXT NOT NULL,prepared INTEGER NOT NULL,reason TEXT NOT NULL);
  CREATE INDEX IF NOT EXISTS operator_hold_account_state ON operator_intents(account,state);
  CREATE TABLE IF NOT EXISTS operator_revisions(account TEXT,generation INTEGER,chat TEXT,revision INTEGER NOT NULL,PRIMARY KEY(account,generation,chat));
@@ -73,7 +78,10 @@ func installOperator(db *sql.DB) error {
 	if err != nil {
 		return err
 	}
-	// Additive migration for journals created before receipt observation existed.
+	// Additive migrations for journals created before these features existed.
+	if err = migrateOperatorMentions(db); err != nil {
+		return err
+	}
 	return migrateOperatorReceipts(db)
 }
 func canonicalOperatorChat(chat string) bool {
@@ -152,11 +160,18 @@ func (j *Journal) operatorSnapshot(q rowQuery, c Config, chat, reply string) (in
 }
 func readOperator(q rowQuery, id string) (operatorIntent, error) {
 	var i operatorIntent
-	err := q.QueryRow("SELECT id,account,generation,chat,canonical,route,body,reply,send_id,digest,state,revision,source,prepared,reason,receipt_delivered,receipt_read,receipt_basis FROM operator_intents WHERE id=?", id).Scan(&i.ID, &i.Account, &i.Generation, &i.Chat, &i.Canonical, &i.Route, &i.Body, &i.Reply, &i.SendID, &i.Digest, &i.State, &i.Revision, &i.Source, &i.Prepared, &i.Reason, &i.DeliveredAt, &i.ReadAt, &i.ReceiptBasis)
-	return i, err
+	var mentions string
+	err := q.QueryRow("SELECT id,account,generation,chat,canonical,route,body,reply,send_id,digest,state,revision,source,prepared,reason,receipt_delivered,receipt_read,receipt_basis,COALESCE(mentions,'') FROM operator_intents WHERE id=?", id).Scan(&i.ID, &i.Account, &i.Generation, &i.Chat, &i.Canonical, &i.Route, &i.Body, &i.Reply, &i.SendID, &i.Digest, &i.State, &i.Revision, &i.Source, &i.Prepared, &i.Reason, &i.DeliveredAt, &i.ReadAt, &i.ReceiptBasis, &mentions)
+	if err != nil || mentions == "" {
+		return i, err
+	}
+	if err = json.Unmarshal([]byte(mentions), &i.Mentions); err != nil {
+		return i, errors.New("operator_mention_record_unreadable")
+	}
+	return i, nil
 }
 func intentRequest(i operatorIntent) operatorRequest {
-	return operatorRequest{Account: i.Account, Generation: i.Generation, Chat: i.Chat, Body: i.Body, Reply: i.Reply}
+	return operatorRequest{Account: i.Account, Generation: i.Generation, Chat: i.Chat, Body: i.Body, Reply: i.Reply, Mentions: requestedMentionList(i.Mentions)}
 }
 func (j *Journal) prepareOperator(r operatorRequest, canonical, route string, newID func() string) (operatorIntent, error) {
 	var empty operatorIntent
@@ -166,6 +181,22 @@ func (j *Journal) prepareOperator(r operatorRequest, canonical, route string, ne
 	if strings.TrimSpace(r.Body) == "" || len(r.Body) > 4096 || !utf8.ValidString(r.Body) || len(r.Reply) > 256 {
 		return empty, errors.New("operator_text_invalid_or_too_large")
 	}
+	// Mentions are proven by the transport and normalized into the text HERE, so
+	// the token every reader sees, the id below, the approval digest and the sent
+	// bytes are the same text. A named person missing from the text is refused,
+	// never injected.
+	mentions, err := resolvedOperatorMentions(r)
+	if err != nil {
+		return empty, err
+	}
+	body, err := normalizeOperatorMentions(r.Body, mentions)
+	if err != nil {
+		return empty, err
+	}
+	if len(body) > 4096 || !utf8.ValidString(body) {
+		return empty, errors.New("operator_text_invalid_or_too_large")
+	}
+	r.Body = body
 	// The signature is composed HERE, before the intent is stored, so the body the
 	// approval binds and the id below hash the exact text that will be sent. An
 	// over-budget result is refused rather than truncated.
@@ -190,7 +221,7 @@ func (j *Journal) prepareOperator(r operatorRequest, canonical, route string, ne
 	if err != nil {
 		return empty, err
 	}
-	id := digest([]any{"operator-text-v1", r.Account, r.Generation, canonical, r.Body, r.Reply})
+	id := operatorIntentID(r, canonical, mentions)
 	old, err := readOperator(tx, id)
 	if err == nil && old.Chat != r.Chat {
 		return empty, errors.New("operator_alias_intent_exists_use_original_chat")
@@ -222,11 +253,21 @@ func (j *Journal) prepareOperator(r operatorRequest, canonical, route string, ne
 	if sendID == "" || len(sendID) > 256 {
 		return empty, errors.New("operator_message_id_unavailable")
 	}
-	i := operatorIntent{Canonical: canonical, Route: route, ID: id, Account: r.Account, Generation: r.Generation, Chat: r.Chat, Body: r.Body, Reply: r.Reply, SendID: sendID, State: "prepared", Revision: revision, Source: source, Prepared: time.Now().Unix()}
-	i.Digest = digest([]any{"approval-v1", i.ID, i.SendID, i.Route, i.Revision, i.Source, i.Prepared, old.Digest})
+	i := operatorIntent{Canonical: canonical, Route: route, ID: id, Account: r.Account, Generation: r.Generation, Chat: r.Chat, Body: r.Body, Reply: r.Reply, Mentions: mentions, SendID: sendID, State: "prepared", Revision: revision, Source: source, Prepared: time.Now().Unix()}
+	// The digest tag is versioned by feature, so an intent prepared before
+	// mentions existed keeps the exact digest it was approved under.
+	if len(mentions) == 0 {
+		i.Digest = digest([]any{"approval-v1", i.ID, i.SendID, i.Route, i.Revision, i.Source, i.Prepared, old.Digest})
+	} else {
+		i.Digest = digest([]any{"approval-v2", i.ID, i.SendID, i.Route, i.Revision, i.Source, i.Prepared, old.Digest, requestedMentionList(mentions), protocolMentionList(mentions)})
+	}
+	record, err := operatorMentionRecord(mentions)
+	if err != nil {
+		return empty, err
+	}
 	// Receipt columns are intentionally absent here: an update preserves any
 	// already-observed recipient receipt rather than resetting it.
-	_, err = tx.Exec(`INSERT INTO operator_intents(id,account,generation,chat,canonical,route,body,reply,send_id,digest,state,revision,source,prepared,reason) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET digest=excluded.digest,route=excluded.route,state='prepared',revision=excluded.revision,source=excluded.source,prepared=excluded.prepared,reason=''`, i.ID, i.Account, i.Generation, i.Chat, i.Canonical, i.Route, i.Body, i.Reply, i.SendID, i.Digest, i.State, i.Revision, i.Source, i.Prepared, "")
+	_, err = tx.Exec(`INSERT INTO operator_intents(id,account,generation,chat,canonical,route,body,reply,mentions,send_id,digest,state,revision,source,prepared,reason) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET digest=excluded.digest,route=excluded.route,mentions=excluded.mentions,state='prepared',revision=excluded.revision,source=excluded.source,prepared=excluded.prepared,reason=''`, i.ID, i.Account, i.Generation, i.Chat, i.Canonical, i.Route, i.Body, i.Reply, record, i.SendID, i.Digest, i.State, i.Revision, i.Source, i.Prepared, "")
 	if err != nil {
 		return empty, err
 	}
@@ -260,8 +301,9 @@ func (j *Journal) approveOperator(r operatorRequest) (operatorIntent, error) {
 	if err != nil {
 		return i, errors.New("operator_intent_not_found")
 	}
-	// Approval must echo the exact account, generation, recipient, Unicode body and quote.
-	if intentRequest(i) != (operatorRequest{Account: r.Account, Generation: r.Generation, Chat: r.Chat, Body: r.Body, Reply: r.Reply}) || i.Digest != r.Digest {
+	// Approval must echo the exact account, generation, recipient, Unicode body,
+	// quote and mention audience.
+	if !sameOperatorBinding(intentRequest(i), operatorRequest{Account: r.Account, Generation: r.Generation, Chat: r.Chat, Body: r.Body, Reply: r.Reply, Mentions: r.Mentions}) || i.Digest != r.Digest {
 		return i, errors.New("operator_approval_binding_mismatch")
 	}
 	if i.State != "prepared" && i.State != "approved" {
@@ -280,6 +322,7 @@ func (j *Journal) approveOperator(r operatorRequest) (operatorIntent, error) {
 
 type operatorTransport interface {
 	ResolveOperator(context.Context, string) (string, string, error)
+	ResolveMentions(context.Context, string, []string) ([]operatorMention, error)
 	NewID() string
 	SendOperator(context.Context, operatorIntent) (string, error)
 }

@@ -16,9 +16,14 @@ export function operatorConfig(path,action){
 }
 export async function operatorCall(config,action,request){
  if(!['prepare','approve','send','status'].includes(action))throw Error('operator_action_unsupported');
- const common=['conversation_id'];const fields=action==='prepare'?[...common,'body','reply_to']:action==='approve'?[...common,'body','reply_to','intent_id','approval_digest']:[...common,'intent_id'];
+ const common=['conversation_id'];const fields=action==='prepare'?[...common,'body','reply_to','mentions']:action==='approve'?[...common,'body','reply_to','intent_id','approval_digest','mentions']:[...common,'intent_id'];
  if(!request||typeof request!=='object'||Array.isArray(request)||Object.keys(request).some(key=>!fields.includes(key)))throw Error('operator_request_fields_invalid');
  if(!config.conversations.includes(request.conversation_id))throw Error('operator_conversation_not_provisioned');
+ // A mention list is an AUDIENCE: bounded, exact ids only. The connector proves
+ // each id against the group's own participant list, writes the proven identity
+ // into the exact body at prepare, and binds it into the approval. Dispatch and
+ // status cannot carry one.
+ if('mentions' in request&&(!Array.isArray(request.mentions)||request.mentions.length>8||request.mentions.some(id=>typeof id!=='string'||!id||Buffer.byteLength(id)>256)))throw Error('operator_mention_list_invalid');
  if(['prepare','approve'].includes(action)&&(typeof request.body!=='string'||!request.body.trim()||Buffer.byteLength(request.body)>4096||Buffer.from(request.body,'utf8').toString('utf8')!==request.body))throw Error('operator_exact_text_required');
  if(action!=='prepare'&&(!/^[0-9a-f]{64}$/.test(request.intent_id??'')))throw Error('operator_intent_id_required');
  if(action==='approve'&&!/^[0-9a-f]{64}$/.test(request.approval_digest??''))throw Error('operator_exact_approval_digest_required');
