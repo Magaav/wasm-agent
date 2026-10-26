@@ -14,6 +14,17 @@
   document.body.append(report);
   let checks = 0;
   const check = (ok, label) => { if (!ok) throw Error(label); checks++; };
+  // `content-visibility: auto` (ui/style.css, "Browser-native render virtualization") gives an OFF-SCREEN
+  // bubble no layout at all, so `getClientRects()` on a row inside one is empty - and a check about "one
+  // line" would be measuring a line the browser deliberately never laid out. Bring the row on screen and
+  // let two frames pass; the assertion itself is not weakened, it finally has geometry to read.
+  const layOut = (node) => {
+    node.scrollIntoView({ block: 'center' });
+    // Reading geometry forces the skipped subtree to lay out. No requestAnimationFrame here: this page
+    // runs under a virtual-time budget where rAF never fires, and a probe that waits for a frame waits
+    // forever (measured: the report came back empty).
+    void node.getBoundingClientRect().height;
+  };
   const rowsOf = (root, selector) => Array.from(root.querySelectorAll(selector));
   const rowFor = (root, callId) => rowsOf(root, 'wa-trace .tool-line').find((line) => line.dataset.callId === callId);
   const rowAbout = (root, text) => rowsOf(root, 'wa-trace .tool-line').find((line) => line.textContent.includes(text));
@@ -112,6 +123,14 @@
         'the rest of the batch is named on the row, elided to the project convention, saw ' + (manyChip ? manyChip.textContent : 'nothing'));
       check(!manyChip.textContent.includes('C:/Users') && !many.querySelector('.tool-head').textContent.includes('C:/Users'),
         'no absolute path is drawn on the row, so it cannot push the outcome off a narrow line');
+      // The row lives inside a `<wa-trace>` topic, whose body is hidden until a reader opens it - that is
+      // the component's stated contract (`ui/components.js`: "hidden until the reader opens it. Failures are
+      // the exception"), so measuring it while folded measures nothing. Open it first: the same state a
+      // reader sees when they ask what the step did.
+      const traceOfRow = many.closest('wa-trace');
+      if (traceOfRow && typeof traceOfRow.show === 'function') traceOfRow.show();
+      else if (traceOfRow) traceOfRow.open = true;
+      await layOut(many);
       check(many.querySelector('.tool-title').getClientRects().length === 1,
         'and the row still lays out on one line with the path chip beside the title');
 

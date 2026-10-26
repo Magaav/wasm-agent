@@ -346,6 +346,11 @@ if git rev-parse --verify -q origin/main >/dev/null; then
     || fail "this tree's commit $(git rev-parse --short HEAD) is not on origin/main; merge it to main and deploy from there - an unmerged deploy leaves main behind the live node"
 fi
 COMMIT="$(git rev-parse --short HEAD)"
+# The release this commit IS, when it is one. Recorded at install so the node can answer "am I behind?"
+# without resolving a tag back to a commit over the network: `lua/core/release.lua` compares tags, and
+# an install with no tag answers `unknown` rather than "up to date". Empty is a fact (a commit that was
+# never released), so the line is omitted rather than written as `release=`.
+RELEASE="$(git describe --tags --exact-match "$COMMIT" 2>/dev/null | sed 's/^v//' || true)"
 if [ -n "$EXPECTED_SHA" ]; then
   case "$REQUEST_ID" in ''|*[!a-zA-Z0-9-]*) fail "invalid protocol request id" ;; esac
   [ "$(git rev-parse HEAD)" = "$EXPECTED_SHA" ] || fail "source changed from expected SHA before build"
@@ -833,7 +838,13 @@ record_installed() {
   printf 'commit=%s\nbranch=%s\ndirty=%s\nsha256=%s\nsentinel_sha256=%s\nupgrade_sha256=%s\ninstall_dir=%s\nservice_install_dir=%s\nsource_provenance=clean-built-by-deploy\nrecord_role=final\nvia=deploy.sh\nat=%s\nreason=%s\n' \
     "$COMMIT" "$BRANCH" "$DIRTY" "$HASH" "$SENTINEL_HASH" "$UPGRADE_HASH" "$INSTALL_DIR" "${WA_SERVICE_DIR:-unverified}" \
     "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$reason_line" \
-    > "$record_tmp" && mv -f "$record_tmp" "$INSTALL_DIR/installed.txt" \
+    > "$record_tmp" || fail "node installed, but installed.txt could not be written"
+  # Appended as its own line, only when this commit is a release: a command substitution would strip the
+  # newline and leave `reason=` and `release=` sharing a line, which no reader parses.
+  if [ -n "$RELEASE" ]; then
+    printf 'release=%s\n' "$RELEASE" >> "$record_tmp" || fail "node installed, but the release line could not be written"
+  fi
+  mv -f "$record_tmp" "$INSTALL_DIR/installed.txt" \
     || fail "node installed, but installed.txt could not be committed atomically"
   # A record nobody can act on is worse than no record: `unknown` is exactly what a staleness check reads
   # as "nothing to do". Measured 2026-10-22 - the install succeeded and the record said commit=unknown, so

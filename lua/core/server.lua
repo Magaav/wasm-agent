@@ -505,7 +505,15 @@ function wa_update(payload, session)
   -- after replacement. The continuation prompt itself is fixed in update.lua, so a browser cannot
   -- turn the maintenance route into an arbitrary delayed prompt.
   local thread = type(request.thread) == "string" and request.thread or ""
-  local report = updater.run({ reason = request.reason, session_id = thread })
+  -- `check` is the read-only question the window asks on load: report the published release and this
+  -- install's relation to it, without queueing, synchronizing or backing anything up. A browser may ask
+  -- it; it cannot use it to install.
+  local report = updater.run({
+    reason = request.reason,
+    session_id = thread,
+    check = request.check == true,
+    fresh = request.fresh == true,
+  })
   return json.encode(report)
 end
 

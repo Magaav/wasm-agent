@@ -5700,9 +5700,40 @@ function updateNotice(payload) {
   if (!payload || typeof payload !== "object") return "/update: the node did not answer with a report.";
   const message = payload.message || "";
   const tail = payload.next ? " " + payload.next : "";
-  if (message) return "/update — " + message + tail;
-  if (payload.queued) return "/update — queued: the sentinel will install it once this node is idle." + tail;
-  return "/update — refused: " + (payload.observed || payload.error || "no reason given") + tail;
+  // The release line is separate from the deploy verdict on purpose: "queued a deploy" and "that deploy
+  // would take you from v0.1.0 to v0.2.0" are two facts, and the second one is what the reader wanted.
+  const release = payload.release && payload.release.state === "behind" ? " " + payload.release.message : "";
+  if (message) return "/update — " + message + release + tail;
+  if (payload.queued) return "/update — queued: the sentinel will install it once this node is idle." + release + tail;
+  return "/update — refused: " + (payload.observed || payload.error || "no reason given") + release + tail;
+}
+
+// Ask once whether a newer release is published, and draw the same banner Pi draws: a bounded,
+// warning-coloured block that names the version and the command that acts on it. Nothing is queued
+// here - the check route is read-only - so a window reload can never install anything.
+async function showReleaseBanner() {
+  if (!chatSession) return;
+  try {
+    const response = await apiFetch("update", {
+      method: "POST",
+      headers: apiHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ check: true }),
+    });
+    const payload = await response.json();
+    const release = payload && payload.release;
+    if (!release || release.state !== "behind") return;
+    if (document.querySelector("[data-release-banner]")) return;
+    const banner = document.createElement("div");
+    banner.className = "thread-notice";
+    banner.dataset.state = "behind";
+    banner.dataset.releaseBanner = release.latest || "newer";
+    banner.textContent = "Update Available — " + release.message + ". Run /update to install it.";
+    messages.append(banner);
+    pin();
+  } catch (error) {
+    // Never a visible error: an unreachable feed is `unknown`, and a banner that turns a failed check
+    // into a fault trains the reader to ignore banners.
+  }
 }
 
 // `/efficiency_report`: what the last model call sent and cost, read from the harness ledger.
@@ -9132,6 +9163,10 @@ const openingView = !!viewMode() && !inspectWindow;
 if (!openingView) {
   sync("boot");
   setTimeout(openFromQuery, 400);
+  // One release check per load, after the first paint rather than in front of it - the same shape as
+  // Pi's startup version check, which is started and not awaited. It draws a banner only when this
+  // node is actually behind, and never turns a failed check into a visible fault.
+  setTimeout(() => { void showReleaseBanner(); }, 1200);
 }
 // Views can wait for the renderer. Chat first draws readable fallback text;
 // later transcript updates use Markdown once the renderer is ready.

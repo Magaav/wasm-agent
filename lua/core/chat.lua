@@ -275,6 +275,19 @@ function M.run(argv)
     end
   end
 
+  -- Ask once, on start, and say one line only when this node is actually behind. Pi's version check
+  -- is the model (see its `version-check.js`): the answer is cached, a failure is silent rather than
+  -- an error on every start, and `unknown` - no recorded release, unreachable feed - prints nothing,
+  -- because "I could not ask" repeated at every prompt is noise, not information.
+  if not host.getenv("WA_SKIP_UPDATE_CHECK") then
+    local seen = dofile("lua/core/release.lua").check({
+      installed = dofile("lua/core/release.lua").installed(updater.installed_record()),
+    })
+    if seen.state == "behind" then
+      print(redact.text("update available: " .. (seen.message or "a newer release is published") .. " - /update installs it"))
+    end
+  end
+
   while true do
     local line = read_line()
     if line == nil then break end
@@ -401,6 +414,9 @@ function M.run(argv)
         session_id = agent.session_id,
       })
       print(redact.text(report.message or json.encode(report)))
+      if report.release and report.release.state == "behind" then
+        print(redact.text("release: " .. report.release.message))
+      end
       if report.next then print(redact.text("next: " .. report.next)) end
     elseif line == "/merge" then
       -- Not a node operation: the merge runs outside this process, in the worktrees. The command

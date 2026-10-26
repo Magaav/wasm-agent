@@ -22,7 +22,12 @@ function run(name,program,args,env={},terminal) {
 run('verdict-contract',process.execPath,['scripts/test-final-answer-verdict.cjs'],{},'PASS final-answer verdict contract (8 checks, 0 skips)');
 const env={WASM_AGENT_HOME:path.join(out,'home'),WASM_AGENT_LUA_ROOT:root,WA_FINAL_EVENTS:path.join(out,'events.json'),WASM_AGENT_RELAY:'',WASM_AGENT_RENDEZVOUS:''};
 run('wire',exe,['--db',path.join(out,'wire-'+Date.now()+'.db')],{...env,WA_SCRIPT:path.join(root,'scripts/test-final-answer.lua')},'final-answer wire causal checks pass (9 checks; synthetic; no inference)');
-run('loop',exe,['--db',path.join(out,'loop-'+Date.now()+'.db')],{...env,WA_SCRIPT:path.join(root,'scripts/test-final-answer-loop.lua')},'final-answer production loop ok (83 checks, 0 skips; fake HTTP, no inference)');
+// The loop's own count moved 83 -> 85 on 2026-10-26 with the CLI/panel and empty-stop landings: two
+// more asserted rounds run through the same script (unchanged since ba3e9e81). That was checked before
+// the number was edited - main at 1d18c157 without the release change also prints 85 - so this is a
+// stale expectation, not a hidden failure. A count that moves again without a landing that explains
+// it is still the signal this line exists for.
+run('loop',exe,['--db',path.join(out,'loop-'+Date.now()+'.db')],{...env,WA_SCRIPT:path.join(root,'scripts/test-final-answer-loop.lua')},'final-answer production loop ok (85 checks, 0 skips; fake HTTP, no inference)');
 const pi=run('pi',process.execPath,['scripts/test-openai-sub.cjs',exe],{},'PASS OpenAI subscription bridge: messages, images, tools, stream, usage, limits and visible failures');
 if(pi.split(/\r?\n/).filter(line=>line==='native subscription operations ok (15 checks)').length!==1)throw Error('native Pi adapter own verdict absent or duplicated');
 const browser=run('browser',process.execPath,['scripts/test-final-answer-browser.mjs',path.join(out,'events.json'),path.join(out,'browser')]);

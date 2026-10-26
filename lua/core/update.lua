@@ -25,6 +25,7 @@ local M = {}
 local json = dofile("lua/vendor/json.lua")
 local platform = dofile("lua/core/platform.lua")
 local paths = dofile("lua/core/paths.lua")
+local release = dofile("lua/core/release.lua")
 
 -- The sentinel owns the other side of replacement, so it is also the only actor that can prove the
 -- new node came back before resuming the conversation. Keep this server-owned: a browser may choose
@@ -149,6 +150,13 @@ local function installed_record(install)
     if key then record[trim(key)] = trim(value) end
   end
   return record
+end
+
+-- Exported for the release check: what this install *says* it is (`commit=`, and `release=` since the
+-- release feed landed). It stays the one reader of `installed.txt`, so the version a check compares
+-- and the version a deploy writes cannot drift apart.
+function M.installed_record(install)
+  return installed_record(install or M.install_dir())
 end
 
 -- ---- what was observed ------------------------------------------------------
@@ -408,6 +416,11 @@ local function decorate(verdict, facts)
   verdict.candidate = facts.candidate
   verdict.installed_sha256 = facts.installed_sha256
   verdict.installed_at = facts.installed_at
+  -- Read from the cache only: a deploy request is the wrong place to wait on GitHub.
+  verdict.release = release.check({
+    installed = release.installed(installed_record(facts.install)),
+    cache_only = true,
+  })
   return verdict
 end
 
@@ -415,6 +428,26 @@ function M.run(options)
   if host.getenv('WASM_AGENT_PROVENANCE')=='child' then return {ok=false,error='update_coordinator_only',status='refused',message='Workers merge/report; only coordinator requests installation.'} end
   options = options or {}
   local facts = M.facts(options)
+  -- A release check is a question, not a deploy. `/update` with `check` never writes a request, never
+  -- synchronizes the tree and never takes a backup: it is the one path a window calls on load, and a
+  -- read-only question that can queue an install is not read-only.
+  if options.check then
+    return {
+      ok = true,
+      status = "release_check",
+      release = release.check({
+        installed = release.installed(installed_record(facts.install)),
+        fresh = options.fresh == true,
+        -- A test (and a future caller with its own feed) can point the check at a fixture or take it
+        -- offline without owning the process environment.
+        fixture = options.feed_fixture,
+        url = options.feed_url,
+        offline = options.offline,
+        cache_path = options.cache_path,
+      }),
+      installed_commit = facts.installed_commit,
+    }
+  end
   -- Asked before the tree is synchronized: a request no watcher can perform is refused without moving
   -- the runtime worktree for it, and without writing anything.
   local blocked = M.preconditions(facts)
