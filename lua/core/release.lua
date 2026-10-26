@@ -21,7 +21,12 @@ local paths = dofile("lua/core/paths.lua")
 
 -- GitHub's own "newest non-draft release" endpoint. It is one request, it needs no token for a
 -- public repository, and its body names the tag. `WA_RELEASE_FEED` overrides it (a mirror, or `off`).
-M.DEFAULT_FEED = "https://api.github.com/repos/Magaav/wasm-agent/releases/latest"
+-- The list, not `/latest`: every Android bundle is published as its own release with the tag
+-- `wa-android-<commit>` (releases/index.json + scripts/termux/cross-build-android.sh), so the newest
+-- release on this repository is usually NOT a desktop version - taking `/latest` would hand a node a
+-- tag it cannot compare and the check would answer `unknown` forever. The answer is the newest release
+-- whose tag is a version this module understands.
+M.DEFAULT_FEED = "https://api.github.com/repos/Magaav/wasm-agent/releases?per_page=20"
 
 -- Ten minutes. The UI asks on load and after an update; a check that costs a request every time the
 -- window reloads is a request per reload for an answer that changes a few times a week.
@@ -121,23 +126,41 @@ end
 
 -- ---- the published side -----------------------------------------------------
 
--- The body of `/releases/latest`. Kept separate from the request so a fixture can be a file.
+-- The body of the release feed. Accepts either one release object (what a fixture usually is) or the
+-- list the endpoint returns, and picks the newest entry whose tag parses as a version. Kept separate
+-- from the request so a fixture can be a file.
 function M.parse_release(text)
   local ok, body = pcall(json.decode, tostring(text or ""))
   if not ok or type(body) ~= "table" then return nil, "feed_invalid" end
-  local tag = trim(body.tag_name)
-  if tag == "" then return nil, "feed_invalid" end
+  local chosen, reason = body, "feed_invalid"
+  if body[1] ~= nil then
+    chosen = nil
+    reason = "no_versioned_release"
+    for _, entry in ipairs(body) do
+      local tag = type(entry) == "table" and trim(entry.tag_name) or ""
+      -- Drafts and pre-releases are skipped, because that is exactly what `/releases/latest` did: a
+      -- node must not be told to move to a pre-release the publisher has not made the latest.
+      if tag ~= "" and entry.draft ~= true and entry.prerelease ~= true
+        and M.parse_version(tag:gsub("^[vV]", "")) then
+        chosen = entry
+        break
+      end
+    end
+    if not chosen then return nil, reason end
+  end
+  local tag = trim(chosen.tag_name)
+  if tag == "" then return nil, reason end
   local version = tag:gsub("^[vV]", "")
-  if not M.parse_version(version) then return nil, "feed_invalid" end
-  local notes = trim(body.body):gsub("\r", "")
+  if not M.parse_version(version) then return nil, reason end
+  local notes = trim(chosen.body):gsub("\r", "")
   if #notes > 400 then notes = notes:sub(1, 400):gsub("%s*[^%s]*$", "") .. "..." end
   return {
     tag = tag,
     version = version,
-    name = trim(body.name),
-    url = trim(body.html_url),
-    published_at = trim(body.published_at),
-    prerelease = body.prerelease == true,
+    name = trim(chosen.name),
+    url = trim(chosen.html_url),
+    published_at = trim(chosen.published_at),
+    prerelease = chosen.prerelease == true,
     notes = notes,
   }
 end

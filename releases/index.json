@@ -14,6 +14,16 @@
   "generated_utc": "2026-10-20T09:51:39Z",
   "releases": [
     {
+      "commit": "a7bbcda92b762ca16947cf303b6e6afb86382f0e",
+      "commit_short": "a7bbcda92b76",
+      "manifest_sha256": "fd5c165a9e469963a8e56dbce7f062fb09064fe23f111ffa962f9af9f1511c32",
+      "url": "https://github.com/Magaav/wasm-agent/releases/download/wa-android-a7bbcda92b76/wa-android-bundle-a7bbcda92b76.tar.gz",
+      "size": 8652225,
+      "target": "aarch64-linux-android",
+      "ndk": "27.3.13750724",
+      "rustc": "1.98.1 (48a229cea 2026-09-01)"
+    },
+    {
       "commit": "4d346ff79b4647088566bf078ec683ce080ccee9",
       "commit_short": "4d346ff79b46",
       "manifest_sha256": "3d72558b259116241f58d329f0e06063bc180b4e07a49e60e38526af1d817fdc",

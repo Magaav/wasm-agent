@@ -10,7 +10,7 @@ implementation gets four things right that a hand-rolled check usually gets wron
 
 | Pi does | here |
 | --- | --- |
-| one tiny JSON endpoint (`/api/latest-version`) | one GitHub endpoint: `GET /repos/Magaav/wasm-agent/releases/latest` |
+| one tiny JSON endpoint (`/api/latest-version`) | one GitHub endpoint: `GET /repos/Magaav/wasm-agent/releases?per_page=20`, newest **versioned, non-draft, non-prerelease** tag |
 | compares with `semver` and reports `1.0.0-beta` below `1.0.0` | `release.compare` implements prerelease precedence (numbers numeric, release above its prereleases) |
 | checks on start without blocking, and swallows every error | one cached check on start / on load; a failure is silent and the state is `unknown` |
 | "already up to date (vX)" when it is | `current` says so; `unknown` never says "up to date" |
@@ -75,8 +75,11 @@ second. If a future editor moves this onto a hot route, that measurement is the 
   an existing install ("use the external upgrade procedure"), and that procedure takes a binary, not a
   published package. Closing this needs a release artifact + a sentinel verb that fetches, verifies
   and installs it - `docs/release/RELEASE_INDEX.md` calls the publisher side a manual step today.
-- **It does not pick a channel.** There is no stable/beta split; whichever release GitHub marks latest
-  is the answer. `prerelease` is carried in the parsed release and unused.
+- **It does not pick a channel.** There is no stable/beta split; the answer is the newest release whose
+tag is a version and that is not a draft or a pre-release. Android bundles are published as releases of
+their own (`wa-android-<commit>`, see `releases/index.json`), so they are filtered out by exactly that
+rule - `/releases/latest` would have handed a desktop node a commit name and the check would have
+answered `unknown` forever.
 - **It is not a security boundary.** The feed is GitHub over HTTPS and its body is only rendered as
   text; nothing is installed from it, so a forged body can annoy a reader but cannot place a byte.
 

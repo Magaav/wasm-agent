@@ -69,6 +69,30 @@ eq(parse_error, nil, "a parse that succeeded reports no error")
 local long = release.parse_release('{"tag_name":"v1.0.0","body":"' .. string.rep("word ", 200) .. '"}')
 ok(long ~= nil and #long.notes <= 404, "long notes are bounded")
 
+-- ---- the feed is a list, because Android bundles are releases too ----------------------------
+-- Published Android bundles carry `wa-android-<commit>` tags and are usually the newest release on
+-- the repository. The desktop check must skip them and answer with the newest VERSIONED tag, or a
+-- node would compare itself to a commit name and be told nothing forever.
+local LIST = '[' ..
+  '{"tag_name":"wa-android-a7bbcda92b76","name":"wa-android-a7bbcda92b76","html_url":"https://example.invalid/android","published_at":"2026-10-26T17:48:42Z","body":"Android arm64 release"},' ..
+  '{"tag_name":"v0.2.0","name":"wasm-agent 0.2.0","html_url":"https://example.invalid/v020","published_at":"2026-10-26T18:00:00Z","body":"First major release."}' ..
+  ']'
+local from_list = release.parse_release(LIST)
+ok(from_list ~= nil, "a feed list parses")
+eq(from_list and from_list.version, "0.2.0", "the newest versioned tag wins, not the newest release")
+eq(from_list and from_list.tag, "v0.2.0", "and its tag is kept as published")
+eq((select(2, release.parse_release('[{"tag_name":"wa-android-a7bbcda92b76"}]'))), "no_versioned_release",
+   "a feed with no versioned release says so instead of inventing one")
+local newer_first = release.parse_release('[{"tag_name":"v0.3.0"},{"tag_name":"v0.2.0"}]')
+eq(newer_first and newer_first.version, "0.3.0", "the first versioned entry in a newest-first list is the answer")
+eq((release.parse_release('[{"tag_name":"v0.2.0"}]') or {}).version, "0.2.0", "a one-entry list is a list")
+eq((release.parse_release('[{"tag_name":"v0.9.0","prerelease":true},{"tag_name":"v0.2.0"}]') or {}).version, "0.2.0",
+   "a pre-release is skipped, as /releases/latest would skip it")
+eq((select(2, release.parse_release('[{"tag_name":"v0.9.0","draft":true}]'))), "no_versioned_release",
+   "a draft-only feed publishes nothing")
+local verdict_from_list = release.verdict("0.1.0", from_list)
+eq(verdict_from_list.state, "behind", "and the list feeds the same verdict")
+
 -- ---- the verdict ------------------------------------------------------------
 
 local behind = release.verdict("0.1.0", parsed)
