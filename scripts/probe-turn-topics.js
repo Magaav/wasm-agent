@@ -38,7 +38,24 @@ const precedes=(a,b)=>!!(a&&b&&(a.compareDocumentPosition(b)&Node.DOCUMENT_POSIT
  check(Array.from(finishedBubble.body.children).every(node=>node===finishedRun||node===final||node.classList.contains('chat-content-run-status')),'only final answer and status outside settled run');
  check(Math.abs(final.getBoundingClientRect().top-finishedRun.getBoundingClientRect().bottom-5)<0.1&&getComputedStyle(final).marginTop==='0px','run-to-answer gap exactly5px, not flex gap plus margin10px');
  const foldedRows=[{id:'fold-user',seq:1,role:'user',content:'Layout'},{id:'fold-comment-id',seq:2,role:'assistant',phase:'commentary',content:'Inspecting the requested layout.'},{id:'fold-answer',seq:3,role:'assistant',content:'Final answer.',changes:{added:1,removed:0,files:[{path:'ui/app.js',added:1,removed:0}]}}];
- repaintMessages(foldedRows,{state:'answered',notify:false});check(transcript.querySelector('wa-run wa-commentary')&&!transcript.querySelector('wa-run').open&&transcript.querySelector('wa-commentary').open,'fresh replay uses same folding and draws the commentary open');
+ repaintMessages(foldedRows,{state:'answered',notify:false});// Two promises used to share this one assertion, and the second made the first unmeasurable:
+//  (a) a commentary nobody has closed is drawn OPEN on replay, inside the run - measured;
+//  (b) a repaint does not reopen the commentary the READER closed above (`commentary.open=false`).
+// The old line demanded (a) about the very node (b) had just closed, so it could only pass by
+// overruling the reader - and "only the reader closes it" cuts both ways.
+check(transcript.querySelector('wa-run wa-commentary')&&!transcript.querySelector('wa-run').open,
+  'fresh replay folds the commentary inside the closed run');
+check(transcript.querySelector('wa-commentary').open===false,
+  'and a repaint does not reopen the commentary the reader closed');
+// (a), on a row that was never streamed live: the same folding, and the topic open.
+const freshRows=[{id:'fresh-user',seq:1,role:'user',content:'Layout'},
+  {id:'fresh-comment',seq:2,role:'assistant',phase:'commentary',content:'A commentary nobody streamed live.'},
+  {id:'fresh-answer',seq:3,role:'assistant',content:'Final answer.'}];
+repaintMessages(freshRows,{state:'answered',notify:false});
+const freshCommentary=transcript.querySelector('wa-run wa-commentary');
+const freshRun=transcript.querySelector('wa-run');
+check(freshCommentary&&freshRun&&!freshRun.open&&freshCommentary.open,
+  'a commentary nobody closed is drawn open, folded inside the closed run');
  const foldedChild=document.createElement('wa-agent-session');document.body.append(foldedChild);foldedChild.task={session_id:'folded-child',subagent_id:'folded-child',state:'completed',settled:true,profile:'worker'};
  paintChildTranscript(foldedChild.transcript,foldedRows,{task:foldedChild.task,state:'answered',notify:false});check(foldedChild.transcript.querySelector('wa-run wa-commentary')&&foldedChild.transcript.querySelector('wa-run wa-diff')&&!foldedChild.transcript.querySelector('wa-run').open,'child settled folding identical');foldedChild.remove();
  const fixtureModels=window.__fixtures.models;window.__fixtures.models={...fixtureModels,provider:'fixture-provider',providers:[{id:'fixture-provider',label:'Fixture provider',configured:true,models:['fixture-model']}]};await refreshMeta();renderControls();// WHAT: the main header carries no model (and no provider decoration); the model is the

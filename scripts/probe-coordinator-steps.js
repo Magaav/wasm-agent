@@ -185,7 +185,22 @@
       check(getComputedStyle(statusLine).whiteSpace==='nowrap','status is one line, never a second row, at '+width);
       check(Math.abs(spinnerBox.width-15)<1&&Math.abs(spinnerBox.height-15)<1,'activity glyph keeps its fixed slot at '+width);
       check(Math.abs((phaseBox.top+phaseBox.bottom)/2-(totalBox.top+totalBox.bottom)/2)<1,'phase and total vertically aligned at '+width);
-      check(leadSpace(statusCalls)>=4&&leadSpace(statusCalls)<=12&&Math.abs(callsBox.left-spinnerBox.right)<1,'one space between the glyph and the model calls at '+width);
+      // The turn counter (`↻2`) now stands between the glyph and the first measurement, by design
+      // (app.js: "immediately after the activity glyph and before the first measurement"). So the
+      // separator is measured against the element the calls actually follow, and the reading order the
+      // row promises is asserted as an order - glyph, counter, calls, phase, elapsed - instead of
+      // pinning the calls to the glyph and then failing because a documented element is in between.
+      // The label slot is always in the DOM and is `hidden` when the run has no notice, so the neighbour
+      // that is actually drawn is the previous VISIBLE sibling, not the previous element node.
+      const visibleBefore = node => { let p = node.previousElementSibling; while (p && p.hidden) p = p.previousElementSibling; return p; };
+      const beforeCalls = visibleBefore(statusCalls);
+      const beforeCallsBox = beforeCalls.getBoundingClientRect();
+      const order = Array.from(statusLine.children).filter(node => !node.hidden);
+      check(leadSpace(statusCalls)>=4&&leadSpace(statusCalls)<=12&&Math.abs(callsBox.left-beforeCallsBox.right)<1,
+        'one space between the turn counter and the model calls at '+width);
+      check(order.indexOf(statusSpinner)<order.indexOf(statusTurns)&&order.indexOf(statusTurns)<order.indexOf(statusCalls)&&
+        order.indexOf(statusCalls)<order.indexOf(statusPhase)&&order.indexOf(statusPhase)<order.indexOf(statusElapsed),
+        'the row reads glyph, turn counter, model calls, clock, remaining facts at '+width);
       check(Math.abs(callsBox.right-phaseBox.left)<1,'the `·` glues the model calls to the clock at '+width);
       check(leadSpace(statusElapsed)>=4&&leadSpace(statusElapsed)<=12&&Math.abs(totalBox.left-phaseBox.right)<1,'one space between the clock and the remaining facts at '+width);
       check(statusLine.scrollWidth<=statusLine.clientWidth+1,'status fits at '+width);
