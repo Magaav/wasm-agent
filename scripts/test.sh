@@ -207,10 +207,14 @@ gate_run cargo build --release --offline --manifest-path rust/Cargo.toml >"$ACTU
 CARGO_BUILD_JOBS=2 gate_run cargo test --offline --manifest-path rust/wa-sentinel/Cargo.toml -- --test-threads=2
 if [ "${OS:-}" = "Windows_NT" ]; then
 CARGO_BUILD_JOBS=2 gate_run cargo build --offline --manifest-path rust/wa-sentinel/Cargo.toml
-SERVICE_PROOF="$(git rev-parse --git-path "service-gate-$(date +%s)-$$")"
+# ABSOLUTE, from `--absolute-git-dir`: `--git-path` prints `.git/<name>` relative to the cwd, and these
+# paths are handed to a NATIVE Windows process (`cygpath -w` of a relative path stays relative). The
+# installer refuses a non-rooted scratch (`absolute existing install/home required`) and the whole gate
+# dies on a proof directory it created itself - measured 2026-10-26, gate lane #238 and #239.
+SERVICE_PROOF="$(git rev-parse --absolute-git-dir)/service-gate-$(date +%s)-$$"
 gate_run node scripts/test-sentinel-service.cjs "$PWD/rust/wa-sentinel/target/debug/wa-sentinel.exe" "$(cygpath -w "$SERVICE_PROOF/cli")"
 gate_run powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$(cygpath -w "$PWD/scripts/test-sentinel-service-installer.ps1")" -Scratch "$(cygpath -w "$SERVICE_PROOF/installer")"
-INTAKE_PROOF="$(git rev-parse --git-path "intake-gate-$(date +%s)-$$")"
+INTAKE_PROOF="$(git rev-parse --absolute-git-dir)/intake-gate-$(date +%s)-$$"
 run_proof_fixture sentinelIntake 10 python scripts/test-sentinel-intake-cli.py --sentinel "$PWD/rust/wa-sentinel/target/debug/wa-sentinel.exe" --evidence "$INTAKE_PROOF/cli"
 run_proof_fixture sentinelIntakeMutants 2 python scripts/test-sentinel-intake-mutants.py --repo "$PWD" --evidence "$INTAKE_PROOF/mutants"
 else

@@ -9,7 +9,12 @@ for label in ['serial','mutable']:
   shutil.copytree(repo/'rust'/crate,tree/'rust'/crate,ignore=shutil.ignore_patterns('target'))
  main=tree/'rust/wa-sentinel/src/main.rs';protocol=tree/'rust/wa-sentinel/src/deploy_protocol.rs'
  if label=='serial':
-  source=main.read_text();start=source.index('    // Intake ALL identities');end=source.index('    // The newest upgrade',start)
+  source=main.read_text();start=source.index('    // Intake ALL identities')
+  # The block runs to the dispatch loop that follows it. It used to end at a `// The newest upgrade`
+  # comment that no longer exists (the intake pass was split in two), and this mutation test failed with
+  # `substring not found` for every gate run after that - measured 2026-10-26. The loop start is the
+  # boundary the mutation actually needs: everything before it is the pre-pass it removes.
+  end=source.index('    for path in entries {',start)
   # Restore serial dependency: each protocol intake waits behind slow health too.
   source=source[:start]+source[end:];source=source.replace('if preview.get("expected_sha").is_some() {','if preview.get("expected_sha").is_some() {\n            let _=node_activity();')
   source=source.replace('deploy_protocol::scan_intake()','Ok::<(),anyhow::Error>(())')
