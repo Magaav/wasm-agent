@@ -22,6 +22,7 @@ import http from 'node:http';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import tls from 'node:tls';
 
 const AUTH_URL = 'https://accounts.google.com/o/oauth2/v2/auth';
 const TOKEN_URL = 'https://oauth2.googleapis.com/token';
@@ -71,16 +72,127 @@ async function postForm(url, form) {
   return { status: res.status, json, text };
 }
 
+// An App Password is the only "login and password" Gmail still accepts: username+password alone was removed
+// for personal accounts in 2022 and for Workspace accounts in January 2025. Verify the pair against the SMTP
+// server before storing it - a typo should fail here, not at the first send three days later.
+async function smtpVerify(user, password, { host = 'smtp.gmail.com', port = 465, timeoutMs = 20000 } = {}) {
+  const exchanges = [];
+  const socket = tls.connect({ host, port, servername: host, rejectUnauthorized: true });
+  socket.setTimeout(timeoutMs);
+  let buffer = '';
+  let lines = [];
+  const waiters = [];
+  const pump = () => {
+    let index;
+    while ((index = buffer.indexOf('\n')) >= 0) {
+      const line = buffer.slice(0, index).replace(/\r$/, '');
+      buffer = buffer.slice(index + 1);
+      lines.push(line);
+      if (/^\d{3} /.test(line) && waiters.length) waiters.shift()(lines.splice(0, lines.length));
+    }
+  };
+  const next = () => new Promise((resolve) => { waiters.push(resolve); pump(); });
+  const send = (line) => { socket.write(line + '\r\n'); };
+  socket.on('data', (chunk) => { buffer += chunk.toString('utf8'); pump(); });
+  const closed = new Promise((resolve) => {
+    socket.once('error', (error) => resolve({ ok: false, error: 'tls:' + error.message }));
+    socket.once('timeout', () => resolve({ ok: false, error: 'timeout' }));
+    socket.once('close', () => resolve({ ok: false, error: 'closed' }));
+  });
+  try {
+    const greeting = await Promise.race([next(), closed]);
+    if (!Array.isArray(greeting) || !greeting[0].startsWith('220')) return { ok: false, error: 'greeting:' + JSON.stringify(greeting) };
+    send('EHLO accounts.google.com');
+    const ehlo = await Promise.race([next(), closed]);
+    exchanges.push(ehlo[ehlo.length - 1]);
+    if (!ehlo[0].startsWith('250')) return { ok: false, error: 'ehlo:' + JSON.stringify(ehlo) };
+    send('AUTH LOGIN');
+    const auth = await Promise.race([next(), closed]);
+    exchanges.push(auth[0]);
+    if (!auth[0].startsWith('334')) return { ok: false, error: 'auth_not_offered:' + JSON.stringify(auth) };
+    send(Buffer.from(user, 'utf8').toString('base64'));
+    await Promise.race([next(), closed]);
+    send(Buffer.from(password, 'utf8').toString('base64'));
+    const verdict = await Promise.race([next(), closed]);
+    exchanges.push(verdict[0]);
+    try { send('QUIT'); } catch { /* the server may already have closed */ }
+    if (verdict[0].startsWith('235')) return { ok: true, detail: 'smtp auth accepted' };
+    return { ok: false, error: 'auth_rejected', detail: verdict.join(' ').slice(0, 300) };
+  } finally {
+    socket.destroy();
+  }
+}
+
+function readStdin() {
+  return new Promise((resolve) => {
+    let data = '';
+    if (process.stdin.isTTY) { resolve(null); return; }
+    process.stdin.setEncoding('utf8');
+    process.stdin.on('data', (chunk) => { data += chunk; });
+    process.stdin.on('end', () => resolve(data.replace(/[\r\n]+$/, '')));
+  });
+}
+
+function writeSecretFile(file, lines) {
+  const target = path.resolve(file);
+  fs.mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(target, lines.join('\n') + '\n', { mode: 0o600 });
+  fs.chmodSync(target, 0o600);
+  return target;
+}
+
+async function appPasswordFlow(segment) {
+  const user = arg('user');
+  if (!user) throw new Error('--user <you@gmail.com> is required with --app-password');
+  const password = await readStdin();
+  if (!password) {
+    throw new Error('no App Password on stdin. Pipe it in, never as an argument - argv is visible to every ' +
+      'process on many systems:  read -r -s APP; echo "$APP" | node scripts/mail-auth.mjs --app-password --user you@gmail.com');
+  }
+  console.log('checking the App Password against smtp.gmail.com (AUTH LOGIN)...');
+  const verdict = await smtpVerify(user, password);
+  if (!verdict.ok) {
+    console.error('not accepted: ' + verdict.error + (verdict.detail ? ' - ' + verdict.detail : ''));
+    console.error('An App Password needs 2-Step Verification and is generated at https://myaccount.google.com/apppasswords; ' +
+      'the account password itself is refused by Google (username+password sign-in was retired).');
+    console.error('nothing was written.');
+    process.exitCode = 1;
+    return;
+  }
+  console.log('smtp auth accepted for ' + user);
+  const lines = [
+    `MAIL_IMAP_${segment}_HOST=imap.gmail.com`,
+    `MAIL_IMAP_${segment}_USER=${user}`,
+    `MAIL_IMAP_${segment}_PASS=${password}`,
+    `MAIL_IMAP_${segment}_PORT=993`,
+    `MAIL_IMAP_${segment}_SECURE=true`,
+    `MAIL_SMTP_${segment}_HOST=smtp.gmail.com`,
+    `MAIL_SMTP_${segment}_USER=${user}`,
+    `MAIL_SMTP_${segment}_PASS=${password}`,
+    `MAIL_SMTP_${segment}_PORT=465`,
+  ];
+  const secretFile = arg('secret-file');
+  if (secretFile) {
+    const written = writeSecretFile(secretFile, lines);
+    console.log('wrote:        ' + written + ' (0600, ' + lines.length + ' keys for ' + segment + ')');
+  } else {
+    console.log('\nadd these to the env you give mail-mcp (nothing was written):');
+    for (const line of lines) console.log(line.replace(/(_PASS=).*/, '$1<redacted>'));
+  }
+}
+
 async function main() {
   const segment = (arg('segment', 'DEFAULT') || '').toUpperCase();
   if (!/^[A-Z0-9_]{1,32}$/.test(segment)) throw new Error('--segment must be A-Z, 0-9 or _ (max 32)');
+  if (process.argv.includes('--app-password')) { await appPasswordFlow(segment); return; }
   const clientFile = arg('client');
-  if (!clientFile) throw new Error('--client <client_secret.json> is required');
+  if (!clientFile) throw new Error('--client <client_secret.json> is required (or use --app-password)');
   const { client, kind } = loadClient(clientFile);
   const requestedRedirect = arg('redirect');
   const redirect = resolveRedirect(kind, client, requestedRedirect);
   const timeoutSeconds = Number(arg('timeout', '300'));
   const writeEnv = arg('write-env');
+  const secretFile = arg('secret-file');
 
   // RFC 7636 S256. The verifier is the secret; only its hash travels in the URL.
   const verifier = b64url(crypto.randomBytes(32));
@@ -200,7 +312,10 @@ async function main() {
 
   console.log('\naccount:      ' + (email || 'unknown (profile call failed; the token is still valid)'));
   console.log('refresh token received and NOT printed.');
-  if (writeEnv) {
+  if (secretFile) {
+    const written = writeSecretFile(secretFile, lines);
+    console.log('wrote:        ' + written + ' (0600, ' + lines.length + ' keys for ' + segment + ')');
+  } else if (writeEnv) {
     const file = path.resolve(writeEnv);
     const existing = fs.existsSync(file) ? fs.readFileSync(file, 'utf8').split('\n') : [];
     const kept = existing.filter((line) => line && !line.startsWith(`MAIL_OAUTH2_${segment}_`) && !line.startsWith(`MAIL_IMAP_${segment}_`) && !line.startsWith(`MAIL_SMTP_${segment}_`));
