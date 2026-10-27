@@ -162,6 +162,41 @@ else
   warn "scripts/upgrade.sh was not installed - the sentinel can restart but not upgrade until it is"
 fi
 
+# The MCP runtime: `lua/core/mcp.lua` and `lua/core/web.lua` spawn these Node scripts for every
+# `web_search`/`web_read` call and for the WhatsApp connector. `deploy.sh` ships them when it upgrades a
+# running install; a *fresh* install shipped only `upgrade.sh`, so on a brand-new node every web tool
+# answered `web_adapter_not_installed` and the connector answered `mcp_script_directory_unbound`. The Lua
+# core is compiled into the binary - these files are not, and nothing put them on disk.
+#
+# Two destinations, on purpose. `<install>/scripts` is where `WA_INSTALL_DIR` points when the sentinel
+# starts the service; `<home>/.wasm-agent/scripts` is the node's own data directory, the one path
+# `host.paths()` always reports with no environment variable and no install layout involved. A node
+# started by hand, or a node in a brand-new cluster, therefore finds the runtime too.
+if [ "$HAVE_LIB" = "1" ]; then
+  MCP_DATA_DIR="$(wa_config_dir)"
+else
+  MCP_DATA_DIR="${WASM_AGENT_HOME:-$HOME}/.wasm-agent"
+fi
+MCP_RUNTIME="mcp-client.mjs mcp-client-core.mjs mcp-server-core.mjs mcp-session.mjs mcp-web.mjs mcp-whatsapp.mjs web-core.mjs web-http-outcomes.mjs"
+MCP_MISSING=""
+for MCP_TARGET in "$SCRIPTS_DIR" "$MCP_DATA_DIR/scripts"; do
+  mkdir -p "$MCP_TARGET" || { MCP_MISSING="$MCP_MISSING $MCP_TARGET"; continue; }
+  for MCP_FILE in $MCP_RUNTIME; do
+    if [ -n "$ROOT" ] && [ -f "$ROOT/scripts/$MCP_FILE" ]; then
+      if cp -f "$ROOT/scripts/$MCP_FILE" "$MCP_TARGET/$MCP_FILE"; then continue; fi
+    elif command -v curl >/dev/null 2>&1; then
+      if curl -fsSL "https://raw.githubusercontent.com/Magaav/wasm-agent/main/scripts/$MCP_FILE" \
+        -o "$MCP_TARGET/$MCP_FILE" 2>/dev/null; then continue; fi
+    fi
+    MCP_MISSING="$MCP_MISSING $MCP_TARGET/$MCP_FILE"
+  done
+done
+if [ -z "$MCP_MISSING" ]; then
+  ok "MCP runtime: mcp-web.mjs, mcp-whatsapp.mjs and their imports"
+else
+  warn "MCP runtime incomplete (missing:$MCP_MISSING) - web_search, web_read and the WhatsApp connector refuse until it is installed"
+fi
+
 # The skills the node needs to know how to update itself. Delivered as a skill rather than a
 # paragraph in AGENTS.md: only `name` and `description` enter the prompt, and the body loads when the
 # task matches, so the procedure costs nothing per turn and can be as long as it needs to be.

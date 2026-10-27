@@ -261,6 +261,42 @@ if ($haveSentinel) {
   Warn "no wa-sentinel.exe found (build it with: cargo build --release --manifest-path rust/wa-sentinel/Cargo.toml)"
 }
 
+# The MCP runtime: `lua/core/mcp.lua` and `lua/core/web.lua` spawn these Node scripts for every
+# `web_search`/`web_read` call and for the WhatsApp connector. deploy.sh ships them when it upgrades
+# a running install; a *fresh* install shipped only `upgrade.sh`, so on a brand-new node every web
+# tool answered `web_adapter_not_installed` and the connector `mcp_script_directory_unbound`. The Lua
+# core is compiled into the binary - these files are not, and nothing put them on disk.
+#
+# Two destinations on purpose: `$nodeDir\scripts` is where WA_INSTALL_DIR points when the sentinel
+# starts the service, and `$waHome\scripts` is the node's own data directory - the one path the host
+# always reports, with no environment variable and no install layout involved.
+$mcpRuntime = @(
+  "mcp-client.mjs", "mcp-client-core.mjs", "mcp-server-core.mjs", "mcp-session.mjs",
+  "mcp-web.mjs", "mcp-whatsapp.mjs", "web-core.mjs", "web-http-outcomes.mjs"
+)
+$mcpMissing = @()
+foreach ($mcpTarget in @((Join-Path $nodeDir "scripts"), (Join-Path $waHome "scripts"))) {
+  New-Item -ItemType Directory -Force -Path $mcpTarget | Out-Null
+  foreach ($mcpFile in $mcpRuntime) {
+    $mcpDest = Join-Path $mcpTarget $mcpFile
+    $mcpGot = $false
+    $mcpLocal = Join-Path $root "scripts\$mcpFile"
+    if (Test-Path $mcpLocal) { Copy-Item $mcpLocal $mcpDest -Force; $mcpGot = $true }
+    if (-not $mcpGot) {
+      try {
+        Invoke-WebRequest -UseBasicParsing "https://raw.githubusercontent.com/Magaav/wasm-agent/main/scripts/$mcpFile" -OutFile $mcpDest -ErrorAction Stop
+        $mcpGot = $true
+      } catch { }
+    }
+    if (-not $mcpGot) { $mcpMissing += $mcpDest }
+  }
+}
+if ($mcpMissing.Count -eq 0) {
+  Ok "MCP runtime: mcp-web.mjs, mcp-whatsapp.mjs and their imports"
+} else {
+  Warn "MCP runtime incomplete (missing: $($mcpMissing -join ', ')) - web_search, web_read and the WhatsApp connector refuse until it is installed"
+}
+
 # Skills the node must have to know how to update itself. A skill is how this is delivered rather
 # than a paragraph in AGENTS.md: only its `name` and `description` sit in the prompt, and the body
 # loads when the task matches - so the procedure costs nothing until it is needed, and can then be

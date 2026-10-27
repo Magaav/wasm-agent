@@ -29,12 +29,40 @@ local function mutate(expected,change)
  if not ok then return fail(tostring(value)) end;return value
 end
 local function absolute(value)return type(value)=='string' and (value:sub(1,1)=='/' or value:match('^%a:[/\\]')) end
+-- Where the MCP runtime (`mcp-*.mjs`, `web-*.mjs`) lives on disk. The Lua core is embedded in the
+-- binary; these files are not. A node that cannot name their directory answers every MCP tool with
+-- `mcp_script_directory_unbound` (and `web_adapter_not_installed` from the web facade), which is what a
+-- fresh install did: the installer shipped `upgrade.sh` and nothing else.
+--
+-- Order: the explicit override, the checkout root used in development, the install directory, then the
+-- node's own data directory. The last one needs no environment variable and no install layout - the host
+-- always reports it - so a new node, or a node in a brand-new cluster, finds the runtime without being
+-- told where it is.
+local function script_candidates()
+ local list={}
+ local function add(dir)if type(dir)=='string' and dir~='' and absolute(dir) then list[#list+1]=dir end end
+ add(host.getenv('WA_MCP_SCRIPT_DIR'))
+ local root=host.getenv('WASM_AGENT_LUA_ROOT');if root and root~='' then add(root..'/scripts') end
+ local install=host.getenv('WA_INSTALL_DIR');if install and install~='' then add(install..'/scripts') end
+ local okdata,data=pcall(paths.data);if okdata and type(data)=='string' then add(data..'/scripts') end
+ if platform.os()=='windows' then local localapp=host.getenv('LOCALAPPDATA');if localapp then add(localapp..'/wasm-agent/scripts') end end
+ return list
+end
+function M.script_candidates()return script_candidates() end
 function M.script_dir()
+ for _,dir in ipairs(script_candidates()) do
+  if host.read_file(dir..'/mcp-client.mjs') then return dir end
+ end
+ -- Nothing holds the runtime. An operator's explicit override is still returned, so the error that follows
+ -- names the directory they chose instead of a generic "not installed".
  local override=host.getenv('WA_MCP_SCRIPT_DIR');if override and override~='' then return override end
- local root=host.getenv('WASM_AGENT_LUA_ROOT');if root and root~='' then return root..'/scripts' end
- local install=host.getenv('WA_INSTALL_DIR');if install and install~='' then return install..'/scripts' end
- if platform.os()=='windows' then local localapp=host.getenv('LOCALAPPDATA');if localapp then return localapp..'/wasm-agent/scripts' end end
  return nil
+end
+-- The failure a missing runtime must produce: the code callers already check, plus what was searched and the
+-- one-line fix. Losing that detail is what made the original report look like a permission refusal.
+function M.scripts_missing()
+ return fail('mcp_scripts_not_found',{searched=script_candidates(),tool_call_issued=false,outcome='not_submitted',
+  fix='install the MCP runtime beside the node (scripts/install.sh does this) or set WA_MCP_SCRIPT_DIR'})
 end
 local function valid_id(id)return type(id)=='string' and #id<=24 and id:match('^[a-z][a-z0-9_-]*$') end
 local function dense(list,maximum)if type(list)~='table' or #list>maximum then return false end;for key,value in pairs(list)do if type(key)~='number' or key<1 or key>#list or key%1~=0 or type(value)~='string' then return false end end;return true end
@@ -85,7 +113,7 @@ function M.invoke(input,ctx)
   if not directory or not host.read_file(directory..'/mcp-session.mjs') then return fail('mcp_session_not_installed',{outcome='not_submitted',tool_call_issued=false}) end
   return read_sessions.invoke(input,ctx,directory)
  end
- local directory=M.script_dir();if not directory then return fail('mcp_script_directory_unbound',{tool_call_issued=false,outcome='not_submitted'}) end
+ local directory=M.script_dir();if not directory then local missing=M.scripts_missing();missing.error='mcp_script_directory_unbound';return missing end
  local client=directory..'/mcp-client.mjs';if not host.read_file(client)then return fail('mcp_client_not_installed',{tool_call_issued=false,outcome='not_submitted'}) end
  local request=paths.data()..'/mcp/requests/'..host.uuid()..'.json'
  input.result_file=request..'.result.json'
