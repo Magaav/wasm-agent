@@ -5,9 +5,17 @@
 // around it is scripted here - PKCE, the loopback redirect, the code exchange, identifying WHICH account
 // consented, and writing the `MAIL_OAUTH2_<SEG>_*` lines mail-mcp reads. No token is ever printed.
 //
-//   node scripts/mail-auth.mjs --segment WORK --client client_secret.json [--write-env <file>] [--timeout 300]
+//   node scripts/mail-auth.mjs --segment WORK --client client_secret.json [--redirect http://localhost:8080]
+//                              [--write-env <file>] [--timeout 300]
 //
-// `client_secret.json` is the "Desktop app" OAuth client downloaded from Google Cloud console. The scope is
+// Both Google client kinds work, because both run the same authorization-code flow:
+//
+//   "Desktop app"  (`installed`) - loopback redirect, any port, no redirect URI to register first.
+//   "Web application" (`web`)     - the redirect URI must already be registered, exactly, on the client;
+//                                   pass it as `--redirect` (Google documents http://localhost:8080).
+//
+// This is also what "Sign in with Google" (Google Identity Services `initCodeClient`) ends in: the browser
+// half hands the backend a code, and the backend exchanges it for access and refresh tokens. The scope is
 // https://mail.google.com/, which Google documents as the scope for IMAP, POP and SMTP access.
 'use strict';
 import http from 'node:http';
@@ -32,10 +40,22 @@ function arg(name, fallback) {
 
 function loadClient(file) {
   const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
+  const kind = raw.installed ? 'installed' : raw.web ? 'web' : null;
   const client = raw.installed || raw.web;
   if (!client || !client.client_id) throw new Error('client json has no installed/web client_id');
-  if (raw.web) throw new Error('this is a "Web application" client; a "Desktop app" client is needed for the loopback flow');
-  return client;
+  return { client, kind };
+}
+// A web client's redirect is a fixed, pre-registered URL, so the port is the operator's choice and has to be
+// one Google already knows. Refusing an unregistered value here is the difference between a clear message
+// now and a `redirect_uri_mismatch` after the consent screen.
+function resolveRedirect(kind, client, requested) {
+  if (kind === 'web') {
+    if (!requested) throw new Error('a "Web application" client needs --redirect <registered uri>, e.g. --redirect http://localhost:8080');
+    const registered = client.redirect_uris || [];
+    if (!registered.includes(requested)) throw new Error('--redirect ' + requested + ' is not registered on this client; registered: ' + (registered.join(', ') || '(none)'));
+    return requested;
+  }
+  return requested || null;
 }
 
 async function postForm(url, form) {
@@ -56,7 +76,9 @@ async function main() {
   if (!/^[A-Z0-9_]{1,32}$/.test(segment)) throw new Error('--segment must be A-Z, 0-9 or _ (max 32)');
   const clientFile = arg('client');
   if (!clientFile) throw new Error('--client <client_secret.json> is required');
-  const client = loadClient(clientFile);
+  const { client, kind } = loadClient(clientFile);
+  const requestedRedirect = arg('redirect');
+  const redirect = resolveRedirect(kind, client, requestedRedirect);
   const timeoutSeconds = Number(arg('timeout', '300'));
   const writeEnv = arg('write-env');
 
@@ -93,9 +115,19 @@ async function main() {
     settle();
   });
 
-  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  await new Promise((resolve, reject) => {
+    if (redirect) {
+      const target = new URL(redirect);
+      // localhost is what Google's examples register; bind the loopback address, not a name that may resolve
+      // elsewhere on this machine.
+      server.once('error', reject);
+      server.listen(Number(target.port || 80), '127.0.0.1', resolve);
+    } else {
+      server.listen(0, '127.0.0.1', resolve);
+    }
+  });
   const port = server.address().port;
-  const redirectUri = `http://127.0.0.1:${port}`;
+  const redirectUri = redirect || `http://127.0.0.1:${port}`;
 
   const authUrl = new URL(AUTH_URL);
   authUrl.searchParams.set('client_id', client.client_id);
@@ -109,6 +141,7 @@ async function main() {
   authUrl.searchParams.set('code_challenge_method', 'S256');
 
   console.log(`segment:      ${segment}`);
+  console.log(`client:       ${kind}`);
   console.log(`redirect:     ${redirectUri}`);
   console.log(`scope:        ${SCOPE}`);
   console.log('\nOpen this URL and approve the account you want to connect:\n');
