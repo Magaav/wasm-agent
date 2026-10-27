@@ -11,6 +11,7 @@ local M = {}
 
 local CACHE_TTL = 15
 local cache, cache_at = nil, 0
+local operator_cache = {} -- node_id -> { at, value }: see M.operator_status
 
 function M.rendezvous_url()
   local binding=dofile('lua/core/binding.lua')
@@ -261,6 +262,7 @@ end
 
 function M.invalidate()
   cache, cache_at = nil, 0
+  operator_cache = {}
 end
 
 -- Local host node + every other peer the rendezvous knows about.
@@ -399,12 +401,19 @@ function M.request(node, path, body, inner_headers)
   local headers = normalize_headers(inner_headers)
   headers["Content-Type"] = headers["Content-Type"] or "application/json"
   local endpoint = M.endpoint(node)
+  local direct = nil
   if endpoint then
     local response = json.decode(host.http("POST", endpoint:gsub("/+$", "") .. path,
       json.encode(headers), body or ""))
-    if response and tonumber(response.status) == 200 then return response end
+    if response and tonumber(response.status) == 200 then response.transport = "direct"; return response end
+    direct = response
   end
   local relay = M.relay_url()
+  -- No relay to fall back to: the node's own non-200 answer is the evidence, not `no_route`.
+  if relay == "" and type(direct) == "table" and tonumber(direct.status) then
+    direct.transport = "direct"
+    return direct
+  end
   local last_error = nil
   if relay ~= "" and node and node.node_id then
     -- One request id for the whole retry loop: the relay queues the action at
@@ -427,7 +436,7 @@ function M.request(node, path, body, inner_headers)
       if response and tonumber(response.status) == 200 then
         local decoded = json.decode(response.body)
         if decoded and decoded.ok then
-          return { status = decoded.status, body = decoded.body, rid = rid }
+          return { status = decoded.status, body = decoded.body, rid = rid, transport = "relay" }
         end
         -- relay_timeout is retryable too: the relay keeps the result for two
         -- minutes and the id is stable, so a retry re-fetches it.
@@ -447,6 +456,15 @@ function M.request(node, path, body, inner_headers)
         if decoded and decoded.retry_after_ms then
           host.sleep(tonumber(decoded.retry_after_ms) / 1000)
         end
+      elseif response and tonumber(response.status) == 409 and M.relay_code(response.body) == "request_in_flight" then
+        -- The same rid is still running at the target: waiting re-collects it.
+        last_error = "request_in_flight"
+      elseif response and (tonumber(response.status) or 0) >= 400 then
+        -- The relay itself refused (401/403/404/400/409/413): retrying the same request cannot
+        -- change that answer, and reporting it as `relay_timeout` hid the reason.
+        local status = tonumber(response.status)
+        return { error = "relay_refused", relay_status = status,
+          reason = M.relay_code(response.body) or "unrecognized", rid = rid }
       end
       if (host.now() - started) > DEADLINE then break end
       if attempt < 3 then host.sleep(750 * attempt) end
@@ -458,15 +476,171 @@ function M.request(node, path, body, inner_headers)
   return { error = "no_route" }
 end
 
+-- Refusals a peer sends BEFORE it has authenticated the caller. They cannot be signed - the reply
+-- signature binds an answer to a verified request, and these answer an unverified one - so the relay
+-- (or anything on a plain-HTTP hop) could forge or alter them. The caller therefore reports them as a
+-- diagnosis, `verified=false`, never as a result, and keeps only an allow-listed code: no other byte
+-- of the unsigned body reaches the model. Every code `wa_node_call`/`verify_peer` (server.lua), the
+-- bound runtime (binding.lua `tick`) and the node's relay dispatch (serve.rs) can send is mapped;
+-- a code outside this table still passes the pattern check and gets the generic hint.
+M.NODE_REFUSALS = {
+  unknown_caller = "this node is not a pinned operator of %s's binding (or %s's binding is inactive/expired, or the rendezvous does not vouch for this node's key). Check `nodes`: operator_of_peer and peer_operators say who %s accepts; an administrator must bind %s with this node as an operator (docs/BINDING.md). Do not sign as another node.",
+  forbidden_role = "%s sees this node as a guest; only masters may call a peer. An administrator must /promote this node (docs/BINDING.md).",
+  bad_signature = "%s could not verify this node's call signature (body altered in transit, or a peer on an older signing protocol). Retry once; if it repeats, compare versions.",
+  stale_request = "%s judged the call older than 120 s: the clocks differ or the call was delayed. Compare `date -u` on both nodes.",
+  replayed_request = "%s already answered this exact signed request. A new `remote` call is signed afresh; if this repeats, something on the path is replaying.",
+  wrong_target = "the call reached a node other than %s, the one it was signed for (stale node list or a redirecting relay). Re-run `nodes` and address the peer by node_id.",
+  bad_request = "%s could not read the call (missing caller header or an unreadable body). Nothing ran.",
+  remote_cannot_recurse = "`remote` cannot be relayed through %s; call the final node directly.",
+  binding_route_not_granted = "%s's bound runtime only serves /node/call over the relay.",
+  relay_route_forbidden = "%s refuses that route over the relay; only /node/call, /node/chat and /sync/push are served.",
+  not_found = "%s has no such route (an older node?).",
+}
+-- Refusals from the relay itself, keyed by code; `unknown_node` differs by status (401: the relay does
+-- not know THIS node; 404: it does not know the target).
+M.RELAY_REFUSALS = {
+  forbidden_role = "the rendezvous lists this node as a guest; only masters may send through the relay. An administrator must /promote it.",
+  binding_not_accepted = "this node's or %s's binding is not accepted (pending, revoked or expired) at the registry: `wa bind status` here; an administrator checks %s.",
+  bad_signature = "the relay rejected this node's signature: this node's key differs from the one registered for its id.",
+  stale_request = "the relay judged this node's request stale: check this node's clock.",
+  unknown_node_401 = "the relay does not know THIS node: it is not registered or its heartbeat stopped (check WASM_AGENT_RENDEZVOUS / `wa bind status`).",
+  unknown_node_404 = "%s is not registered at the rendezvous. Re-run `nodes`.",
+  node_id_required = "this node sent no identity header; it has no node key.",
+  to_required = "no target node id was sent.",
+  request_id_conflict = "the relay holds a different request under this rid; send a new call.",
+  request_too_large = "the request exceeds the relay's body limit; send less (split the call).",
+}
+local UNSIGNED_NOTE = "Unsigned: a peer cannot sign a refusal of a caller it has not verified, so the relay or the network path could have forged or altered this. Diagnostic only; nothing here is a result."
+
+local function refusal_code(value)
+  if type(value) ~= "string" or #value == 0 or #value > 64 then return nil end
+  if not value:match("^[a-z][a-z0-9_%.%-]*$") then return nil end
+  return value
+end
+
+-- The `error` code of an unsigned JSON body, allow-listed by pattern; nil when there is none.
+function M.relay_code(body)
+  local ok, value = pcall(json.decode, body or "")
+  if not ok or type(value) ~= "table" then return nil end
+  return refusal_code(value.error)
+end
+
+local function fill(text, name)
+  name = tostring(name or "the peer")
+  return (text:gsub("%%s", function() return name end))
+end
+
+-- The model-facing form of an unsigned refusal. `layer` says who answered: the peer node itself
+-- (`node`, carrying the node's HTTP status) or the relay in front of it (`relay`).
+function M.refusal(layer, reason, status, node)
+  local name = node and (node.name or node.node_id) or nil
+  local out = { error = layer == "relay" and "relay_refused" or "remote_refused", reason = reason or "unrecognized",
+    layer = layer, verified = false, node = name, note = UNSIGNED_NOTE }
+  local hint
+  if layer == "relay" then
+    out.relay_status = status
+    hint = M.RELAY_REFUSALS[reason .. "_" .. tostring(status)] or M.RELAY_REFUSALS[reason]
+  else
+    out.node_status = status
+    hint = M.NODE_REFUSALS[reason]
+  end
+  out.hint = fill(hint or ("the " .. (layer == "relay" and "relay" or "peer") .. " refused with `" .. tostring(out.reason)
+    .. "` before authorizing the call; see docs/BINDING.md and docs/RENDEZVOUS.md."), name)
+  return out
+end
+
 -- Only target-authenticated bytes are a result (also used for sync acknowledgments).
+-- Returns the decoded reply, or nil plus a code plus (for a pre-authorization refusal) its detail.
 function M.verified_reply(node, headers, body)
   local ok,envelope=pcall(json.decode,body)
-  if not ok or type(envelope)~='table' or type(envelope.reply)~='string' then return nil,'unsigned_reply' end
+  if not ok or type(envelope)~='table' then return nil,'unsigned_reply' end
+  if type(envelope.reply)~='string' then
+    -- A refusal the peer could not sign. Keep only its code; never the rest of the body.
+    if envelope.error ~= nil then
+      local refusal=M.refusal('node',refusal_code(envelope.error) or 'unrecognized',200,node)
+      return nil,'remote_refused',refusal
+    end
+    return nil,'unsigned_reply'
+  end
   local message=table.concat({'reply',node.node_id,headers['X-WA-Ts'],host.sha256(headers['X-WA-Sig']..'\n'..envelope.reply)},'|')
   if not node.public_key or not host.verify(node.public_key,message,envelope.reply_sig or '') then return nil,'remote_reply_unverified' end
   local decoded_ok,decoded=pcall(json.decode,envelope.reply)
   if not decoded_ok or type(decoded)~='table' then return nil,'bad_reply' end
   return decoded
+end
+
+-- Is THIS node one of the operators pinned in a peer's binding? Read from the rendezvous `/lookup`
+-- (the accepted binding request carries the exact operator pins the peer's `binding.authorize`
+-- checks), cached per peer so `nodes` is not one lookup per peer per call.
+--
+--   true    pinned in the peer's accepted, unexpired registry binding
+--   false   the peer has a binding and this node is not pinned, or the binding is not accepted /
+--           expired - either way the peer answers `unknown_caller`
+--   unknown no binding on record (the peer trusts the rendezvous role or a local enrollment this
+--           node cannot see), or the lookup failed
+--
+-- `true` is the registry's view, not a promise: the peer also needs its own local consent active.
+local OPERATOR_TTL = 60
+
+local function lookup_record(node_id)
+  local url = M.rendezvous_url()
+  if url == "" then return nil, "no_rendezvous" end
+  if not tostring(node_id):match("^%x+$") then return nil, "bad_node_id" end
+  local ok, response = pcall(function()
+    local headers = json.encode(M.signed_headers("lookup") or {})
+    return json.decode(host.http("GET", url:gsub("/+$", "") .. "/lookup?node_id=" .. node_id, headers, ""))
+  end)
+  if not ok or type(response) ~= "table" then return nil, "lookup_failed" end
+  if tonumber(response.status) ~= 200 then
+    return nil, "lookup_http_" .. tostring(response.status) .. (M.relay_code(response.body) and (":" .. M.relay_code(response.body)) or "")
+  end
+  local decoded_ok, record = pcall(json.decode, response.body)
+  if not decoded_ok or type(record) ~= "table" then return nil, "lookup_unreadable" end
+  return record
+end
+
+local function short_id(id) return tostring(id or ""):sub(1, 12) end
+
+function M.operator_status(node, opts)
+  if type(node) ~= "table" or node.local_node then return nil end
+  local id = tostring(node.node_id or "")
+  local now = host.now()
+  local cached = operator_cache[id]
+  if cached and not (type(opts) == "table" and opts.fresh) and (now - cached.at) < OPERATOR_TTL then return cached.value end
+  local value = { operator_of_peer = "unknown" }
+  local record, problem = lookup_record(id)
+  local me = M.identity() or {}
+  if not record then
+    value.operator_basis = problem
+  elseif node.public_key and record.public_key ~= node.public_key then
+    value.operator_basis = "peer_identity_changed"
+  elseif type(record.binding) ~= "table" or type(record.binding.request) ~= "table" then
+    value.peer_binding = "none"
+    value.operator_basis = "no_binding_on_record"
+  else
+    local b = record.binding
+    local pins = type(b.request.operators) == "table" and b.request.operators or {}
+    local expires = tonumber(b.request.expires_at)
+    local state = refusal_code(b.state) or "unknown"
+    if state == "accepted" and expires and expires <= now then state = "expired" end
+    value.peer_binding = state
+    local names, pinned = {}, false
+    local known = {}
+    for _, peer in ipairs(cache or {}) do if type(peer) == "table" and peer.node_id then known[peer.node_id] = peer.name end end
+    if me.node_id then known[me.node_id] = M.node_name() end
+    for _, pin in ipairs(pins) do
+      if type(pin) == "table" then
+        if pin.node_id == me.node_id and pin.public_key == me.public_key then pinned = true end
+        names[#names + 1] = known[pin.node_id] or short_id(pin.node_id)
+      end
+    end
+    value.peer_operators = names
+    value.operator_of_peer = (pinned and state == "accepted") and true or false
+    value.operator_basis = pinned and (state == "accepted" and "pinned" or "pinned_but_binding_" .. state)
+      or "not_pinned"
+  end
+  operator_cache[id] = { at = now, value = value }
+  return value
 end
 
 -- Call a capability on a peer: direct when possible, else through the relay.
@@ -489,16 +663,30 @@ function M.remote_call(selector, capability, args)
   if not headers then return { error = problem } end
   local response = M.request(node, "/node/call", body, headers)
   if not response then return { error = "remote_unreachable", node = node.name } end
-  if response.error then return { error = "remote_error", detail = tostring(response.error) } end
-  if tonumber(response.status) ~= 200 then
-    return {
-      error = "remote_http_" .. tostring(response.status),
-      detail = tostring(response.body):sub(1, 240),
-      node = node.name,
-    }
+  if response.error == "relay_refused" then
+    local refusal = M.refusal("relay", response.reason, response.relay_status, node)
+    refusal.rid = response.rid
+    return refusal
   end
-  local decoded,problem=M.verified_reply(node,headers,response.body)
-  if not decoded then return {error=problem,node=node.name} end
+  if response.error then
+    return { error = "remote_error", detail = tostring(response.error), node = node.name,
+      retryable = response.retryable, rid = response.rid }
+  end
+  if tonumber(response.status) ~= 200 then
+    -- The node answered, but not 200. Its body is unsigned: keep the allow-listed code only.
+    local code = M.relay_code(response.body)
+    if code then
+      local refusal = M.refusal("node", code, tonumber(response.status), node)
+      refusal.transport = response.transport
+      return refusal
+    end
+    return { error = "remote_http_" .. tostring(response.status), layer = "node", node_status = tonumber(response.status),
+      verified = false, body_bytes = #tostring(response.body or ""), transport = response.transport, node = node.name,
+      note = UNSIGNED_NOTE }
+  end
+  local decoded,problem,refusal=M.verified_reply(node,headers,response.body)
+  if refusal then refusal.transport = response.transport; return refusal end
+  if not decoded then return {error=problem,node=node.name,layer='node',verified=false,transport=response.transport} end
   decoded.node = node.name
   return decoded
 end

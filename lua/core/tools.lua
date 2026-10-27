@@ -57,6 +57,16 @@ local function sorted_keys(value)
   return keys
 end
 
+-- The next step for each remote refusal the model can act on. Paired with `online_nodes` so the
+-- model can pick another peer instead of probing the same refusal again.
+local REMOTE_REFUSALS = {
+  not_peer_operator = "Pick a peer whose `nodes` entry says operator_of_peer: true, or ask an administrator to bind the peer with this node as an operator. Do not retry this peer, and never sign as another node.",
+  remote_refused = "Act on `hint`; the same call will be refused again until that changes. Run `nodes` to see operator_of_peer before retrying.",
+  relay_refused = "Act on `hint`; the relay refuses before the peer sees the call, so retrying unchanged will not help.",
+  unsigned_reply = "The peer's answer was neither signed nor a readable refusal: treat it as a transport fault, not a result. Retry once; if it repeats, check the peer's version.",
+  remote_reply_unverified = "The answer's signature did not verify against the peer's registered key: do not trust it. Re-run `nodes` (the key may have changed) and retry once.",
+}
+
 local function online_nodes()
   local ok, list = pcall(nodeslib.list)
   local names = {}
@@ -1629,13 +1639,22 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
   elseif name == "nodes" then
     local list = {}
     for _, node in ipairs(nodeslib.list()) do
-      list[#list + 1] = {
+      local entry = {
         name = node.name, role = node.role, online = node.online,
         local_node = node.local_node, capabilities = node.capabilities,
         endpoints = node.endpoints, node_id = node.node_id,
       }
+      -- Whether this node may call the peer at all: read from the peer's registry binding (cached),
+      -- so a refusal is visible before a call is spent on it.
+      if not node.local_node then
+        local ok, status = pcall(nodeslib.operator_status, node)
+        if ok and type(status) == "table" then for key, value in pairs(status) do entry[key] = value end
+        else entry.operator_of_peer = "unknown"; entry.operator_basis = "lookup_failed" end
+      end
+      list[#list + 1] = entry
     end
-    return { nodes = list }
+    return { nodes = list,
+      note = "operator_of_peer: true = this node is pinned in the peer's accepted binding; false = the peer will refuse it (unknown_caller); unknown = no binding on record or the lookup failed. Registry view, cached 60 s." }
   elseif name == "remote" then
     local call, refusal = M.remote_arguments(args, function() return M.catalog(role) end)
     if not call then return refusal end
@@ -1649,7 +1668,26 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
     if node.local_node then
       result=M.dispatch(memory, call.capability, call.args, role)
     else
-      result=nodeslib.remote_call(call.node, call.capability, call.args)
+      -- Fail fast when the registry already says the peer will refuse this node: a cached `false`
+      -- is re-read once, fresh, before it refuses, so a binding granted a moment ago is not denied.
+      local ok, status = pcall(nodeslib.operator_status, node)
+      if ok and type(status) == "table" and status.operator_of_peer == false then
+        ok, status = pcall(nodeslib.operator_status, node, { fresh = true })
+      end
+      if ok and type(status) == "table" and status.operator_of_peer == false then
+        result = nodeslib.refusal("node", "unknown_caller", nil, node)
+        result.error = "not_peer_operator"
+        result.verified = nil
+        result.source = "rendezvous /lookup of " .. tostring(node.name) .. "'s binding (nothing was sent to the peer)"
+        result.note = nil
+        result.peer_binding, result.peer_operators, result.operator_basis = status.peer_binding, status.peer_operators, status.operator_basis
+      else
+        result=nodeslib.remote_call(call.node, call.capability, call.args)
+      end
+      if type(result) == "table" and REMOTE_REFUSALS[result.error] then
+        result.online_nodes = online_nodes()
+        result.next = REMOTE_REFUSALS[result.error]
+      end
     end
     if carries_local_images(result) then
       return {error="remote_image_transport_unsupported",capability=call.capability,

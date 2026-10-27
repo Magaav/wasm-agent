@@ -106,6 +106,21 @@ current local CLI merely because registration defaults to guest. Guest chat/sync
 forwarding remain disabled on the bound surface; no transcript replication or
 remote provider configuration is granted by binding.
 
+## Caller-side refusal reporting
+
+A peer refuses an unauthenticated call (`unknown_caller`, `forbidden_role`, `bad_signature`,
+`stale_request`, `replayed_request`, `wrong_target`, `bad_request`) before it can sign anything, so
+the refusal is unsigned and the relay could forge it. The caller reports it as
+`remote_refused` with `reason`, `layer:"node"`, `node_status`, `verified:false` and a hint, keeping
+only an allow-listed code from the body; the relay's own refusals (`forbidden_role`,
+`binding_not_accepted`, `unknown_node`, ...) are `relay_refused` with `relay_status` and are not
+retried as timeouts. `unsigned_reply` is left for bodies that are neither signed nor a readable
+refusal. The `nodes` tool shows, per peer, `operator_of_peer` (`true`/`false`/`unknown`),
+`peer_binding` and `peer_operators`, read from the peer's registry binding via `/lookup` and cached
+for 60 seconds; `remote` refuses with `not_peer_operator` without sending when that is already
+`false` (re-read fresh once first). The table lives in `lua/core/nodes.lua`
+(`NODE_REFUSALS`, `RELAY_REFUSALS`); `scripts/test-remote-refusals.lua` is its proof.
+
 ## Runtime and recovery
 
 The host provides private atomic compare-and-swap state and one OS-leased outbound

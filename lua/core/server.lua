@@ -1185,11 +1185,12 @@ function wa_sync_tick()
           if response and tonumber(response.status) == 200 then
             -- A 200 carrying an error body is a REJECTION: do not advance the
             -- cursor, or the batch would be lost silently.
-            local decoded,problem=nodeslib.verified_reply(target,headers,response.body)
+            local decoded,problem,refusal=nodeslib.verified_reply(target,headers,response.body)
             if decoded and decoded.ok==true and decoded.error==nil and type(decoded.applied)=='number' then
               applied = true
             else
-              last_error = problem or (decoded and decoded.error) or 'bad_response'
+              -- An unsigned refusal names its (allow-listed) reason; it never counts as an ack.
+              last_error = (refusal and (problem .. ':' .. tostring(refusal.reason))) or problem or (decoded and decoded.error) or 'bad_response'
             end
           else
             last_error = response and (response.error or response.status) or "no_response"
