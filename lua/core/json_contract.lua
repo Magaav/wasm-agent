@@ -58,6 +58,34 @@ function M.at(root,path)
  return root
 end
 function M.raw(text,node)return node and text:sub(node.first,node.last) or nil end
+-- Strict balanced-closer completion for a tool-argument text that stopped early: the ONLY repair
+-- is appending the `}`/`]` still open, in nesting order. Refused (nil, reason) when the text ends
+-- inside a string, after `,`, `:` or an opener (a value is missing, not a closer), when a closer
+-- does not match its opener, when nothing is open, or when the completed text is not a JSON
+-- object. The caller must still validate the result against the tool's schema before using it.
+function M.close_truncated(text)
+ if type(text)~='string' or text=='' then return nil,'empty' end
+ local stack,in_string,escaped,last={},false,false,nil
+ for i=1,#text do local c=text:sub(i,i)
+  if in_string then
+   if escaped then escaped=false elseif c=='\\' then escaped=true elseif c=='"' then in_string=false end
+  elseif c=='"' then in_string=true
+  elseif c=='{' or c=='[' then stack[#stack+1]=c
+  elseif c=='}' or c==']' then
+   local open=stack[#stack];if not open or (open=='{')~=(c=='}') then return nil,'closer_mismatch' end
+   stack[#stack]=nil
+  end
+  if not c:match('%s') then last=c end
+ end
+ if in_string then return nil,'ends_inside_string' end
+ if #stack==0 then return nil,'nothing_open' end
+ if last==',' or last==':' or last=='{' or last=='[' then return nil,'value_missing' end
+ local closers={};for i=#stack,1,-1 do closers[#closers+1]=stack[i]=='{' and '}' or ']' end
+ local completed=text..table.concat(closers)
+ local node,problem=M.parse(completed);if not node then return nil,problem end
+ if node.kind~='object' then return nil,'not_an_object' end
+ return completed,table.concat(closers)
+end
 function M.compact(node)
  if node.kind=='object' then local parts={};for _,key in ipairs(node.keys)do parts[#parts+1]=json.encode(key)..':'..M.compact(node.children[key])end;return '{'..table.concat(parts,',')..'}' end
  if node.kind=='array' then local parts={};for _,item in ipairs(node.children)do parts[#parts+1]=M.compact(item)end;return '['..table.concat(parts,',')..']' end

@@ -25,6 +25,19 @@ Name/arguments, calls and cursor forms are exclusive. Large group replies page
 captured originals using tool_call(cursor); they cannot cross read_many cursor
 ownership, accounts or workspace/profile scope. Cursor retention has no TTL/quota.
 
+Call shapes weaker models get wrong are repaired only where one reading exists, and
+every repair is reported in the result's `normalized` field (`scripts/test-remote-call-shape.lua`).
+`tool_call` parses `arguments` sent as a JSON-object string, unwraps a doubled
+`{name, arguments}` wrapper, and moves parameters placed beside `name` into
+`arguments`; the same key in both places with different values is refused. `remote`
+is flat - `{node, capability, command|path|...}` - and still accepts the nested `args`
+form; a `node`/`capability` missing at the top but present exactly once inside `args`
+is hoisted, unless the target declares that key itself. Argument text that only lacks
+trailing `}`/`]` is completed (`json_contract.close_truncated`) when the result
+validates against the tool's schema (and, for `tool_call`, the target's);
+`WASM_AGENT_ARGUMENT_REPAIR=0` disables that. Refusals name what arrived (type and
+keys, never values), the online nodes where relevant, and a minimal correct call.
+
 The first system message and declaration array do not grow when optional tools
 are discovered. The transcript does grow by selected definitions and results.
 Optional skills, including WhatsApp, are discovered with `skill(query="<task>")`;

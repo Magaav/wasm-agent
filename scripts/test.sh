@@ -1006,6 +1006,7 @@ WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-subscription-pending-output.lua" "$
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-worker-integrate-refusals.lua" "$BIN" --db "$DB.integration-refusals" | grep 'worker integrate refusals ok'
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-orchestration-mode.lua" "$BIN" --db "$DB.orchestration-mode" | grep 'orchestration mode ok'
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-observability.lua" "$BIN" --db "$DB.observability" | grep 'observability ok'
+WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-remote-call-shape.lua" "$BIN" --db "$DB.remote-call-shape" | grep 'remote call shape ok'
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-run-counts.lua" "$BIN" --db "$DB.run-counts" | grep 'run counts ok'
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-context-growth.lua" "$BIN" --db "$DB.context-growth" | grep 'context growth ok'
 # Idle /compact after a main run settles. The cached agent keeps that run's id as the run's

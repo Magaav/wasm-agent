@@ -36,6 +36,141 @@ local function carries_local_images(result)
   return false
 end
 
+-- `remote` arguments, flattened. The canonical form is ONE level:
+-- {node, capability, <the capability's own params>}; the older nested form
+-- {node, capability, args={...}} still works. Measured on a DeepSeek session: 38 of 114 routed
+-- calls closed a brace early and sent {args={command, capability, node}}, then read the bare
+-- `unknown_node:nil` as a flaky network. Two repairs, both deterministic:
+--  * a missing `node`/`capability` found exactly once inside `args` (or `args.args`) is hoisted,
+--    unless the target capability declares that name as its own parameter - then the key could
+--    belong to either call, and the call is refused with both readings named;
+--  * a key given both at the top level and inside `args` with different values is refused.
+-- A refusal says what arrived (keys, never values), where a misplaced key was found, which nodes
+-- are online, and a minimal correct call, so the retry differs from the failed call.
+local REMOTE_OWN = { node = true, capability = true, args = true }
+local REMOTE_EXAMPLE = '{"node":"<name>","capability":"bash","command":"ls -la"}'
+
+local function sorted_keys(value)
+  local keys = {}
+  if type(value) == "table" then for key in pairs(value) do keys[#keys + 1] = tostring(key) end end
+  table.sort(keys)
+  return keys
+end
+
+local function online_nodes()
+  local ok, list = pcall(nodeslib.list)
+  local names = {}
+  if ok and type(list) == "table" then
+    for _, node in ipairs(list) do
+      if node.online ~= false then names[#names + 1] = tostring(node.name or node.node_id) end
+    end
+  end
+  return names
+end
+
+local function declares_param(catalog, capability, key)
+  if type(capability) ~= "string" then return false end
+  if type(catalog) == "function" then
+    -- An unreadable catalogue cannot prove the key is not the capability's own: refuse the hoist.
+    local ok, list = pcall(catalog)
+    if not ok or type(list) ~= "table" then return true end
+    catalog = list
+  end
+  for _, item in ipairs(catalog or {}) do
+    local fn = item["function"] or {}
+    if fn.name == capability then
+      local properties = (fn.parameters or {}).properties
+      return type(properties) == "table" and properties[key] ~= nil
+    end
+  end
+  return false
+end
+
+function M.remote_arguments(args, catalog)
+  if type(args) ~= "table" then args = {} end
+  local inner = args.args
+  if type(inner) == "string" then
+    local ok, decoded = pcall(json.decode, inner)
+    if ok and type(decoded) == "table" then inner = decoded
+    else return nil, { error = "remote_args_object_required", received_type = "string",
+      note = "`args` must be an object; or leave it out and pass the capability's parameters at the top level.",
+      example = REMOTE_EXAMPLE } end
+  elseif inner ~= nil and type(inner) ~= "table" then
+    return nil, { error = "remote_args_object_required", received_type = type(inner), example = REMOTE_EXAMPLE }
+  end
+  local params = {}
+  for key, value in pairs(inner or {}) do params[key] = value end
+  local node, capability = args.node, args.capability
+  local hoisted = {}
+  for _, key in ipairs({ "capability", "node" }) do
+    if args[key] == nil then
+      local places = {}
+      if params[key] ~= nil then places[#places + 1] = { "args", params } end
+      if type(params.args) == "table" and params.args[key] ~= nil then places[#places + 1] = { "args.args", params.args } end
+      if #places > 1 then
+        return nil, { error = "remote_" .. key .. "_ambiguous", found_in = { places[1][1], places[2][1] },
+          note = "`" .. key .. "` is missing at the top level and appears more than once inside args; nothing was run. Put it at the top level, once.",
+          example = REMOTE_EXAMPLE }
+      end
+      if #places == 1 then
+        local where, holder = places[1][1], places[1][2]
+        local value = holder[key]
+        if type(value) ~= "string" or value == "" then
+          return nil, { error = "remote_" .. key .. "_required", found_in = where, found_type = type(value),
+            note = "`" .. key .. "` must be a non-empty string at the top level.", example = REMOTE_EXAMPLE }
+        end
+        local target = key == "node" and capability or value
+        if declares_param(catalog, target, key) then
+          return nil, { error = "remote_" .. key .. "_ambiguous", found_in = where,
+            note = "`" .. key .. "` is missing at the top level, and " .. tostring(target)
+              .. " has its own `" .. key .. "` parameter, so the key inside " .. where
+              .. " could mean either. Nothing was run; put the remote " .. key .. " at the top level.",
+            example = REMOTE_EXAMPLE }
+        end
+        if holder ~= params then
+          local copy = {}
+          for k, v in pairs(holder) do copy[k] = v end
+          params.args, holder = copy, copy
+        end
+        holder[key] = nil
+        if key == "node" then node = value else capability = value end
+        hoisted[#hoisted + 1] = key .. " from " .. where
+      end
+    end
+  end
+  -- What is left of an args.args emptied by a hoist is the same misplaced object one level down.
+  if #hoisted > 0 and type(params.args) == "table" and next(params) == "args" and next(params, "args") == nil then
+    params = params.args
+  end
+  if node == nil or node == "" then
+    return nil, { error = "remote_node_required",
+      received = { top_level_keys = sorted_keys(args), args_keys = sorted_keys(args.args) },
+      online_nodes = online_nodes(),
+      note = "Name the peer in `node`, at the top level next to `capability`; the capability's own parameters go at that same level.",
+      example = REMOTE_EXAMPLE }
+  end
+  if type(node) ~= "string" then
+    return nil, { error = "remote_node_required", received_type = type(node), online_nodes = online_nodes(), example = REMOTE_EXAMPLE }
+  end
+  if type(capability) ~= "string" or capability == "" then
+    return nil, { error = "remote_capability_required",
+      received = { top_level_keys = sorted_keys(args), args_keys = sorted_keys(args.args) },
+      note = "Name the tool to run on " .. node .. " in `capability` (for example bash or read), at the top level.",
+      example = REMOTE_EXAMPLE }
+  end
+  for key, value in pairs(args) do
+    if not REMOTE_OWN[key] then
+      if params[key] ~= nil and json.encode(params[key]) ~= json.encode(value) then
+        return nil, { error = "remote_argument_conflict", key = tostring(key),
+          note = "`" .. tostring(key) .. "` was given at the top level and inside args with different values; nothing was run. Give it once, at the top level.",
+          example = REMOTE_EXAMPLE }
+      end
+      params[key] = value
+    end
+  end
+  return { node = node, capability = capability, args = params, hoisted = #hoisted > 0 and hoisted or nil }
+end
+
 local function schema(name, description, properties, required)
   -- An empty Lua table encodes as `[]`, which providers reject as a schema, so
   -- only emit `properties`/`required` when they actually have entries.
@@ -289,10 +424,12 @@ M.admin = {
     params = { type = "object", description = "Values for the spell's declared parameters." },
     binary = { type = "string", description = "For an `upgrade` step: the wa binary to install. Defaults to the step's own value." },
     path = { type = "string", description = "Where to write the plan. Defaults to <state>/spell-plans/<name>.json." } }, { "name" }),
-  schema("remote", "Run a capability on another wasm-agent node (peer). Nodes are discovered by ed25519 key through the rendezvous, so the name or node_id is enough. Text reads work; image results are refused until the node protocol has bounded binary transfer.", {
-    node = { type = "string", description = "Peer name or node_id (use the nodes panel for the list)." },
+  schema("remote", "Run a capability on another wasm-agent node (peer). Nodes are discovered by ed25519 key through the rendezvous, so the name or node_id is enough. Put the capability's own parameters at this same level, flat: {\"node\":\"<name>\",\"capability\":\"bash\",\"command\":\"ls\"} or {\"node\":\"<name>\",\"capability\":\"read\",\"path\":\"/etc/hosts\"}. Text reads work; image results are refused until the node protocol has bounded binary transfer.", {
+    node = { type = "string", description = "Peer name or node_id (the nodes tool lists them)." },
     capability = { type = "string", description = "Tool to run on that node, e.g. bash, read, client, shell." },
-    args = { type = "object", description = "Arguments for that tool." } }, { "node", "capability" }),
+    command = { type = "string", description = "For bash/shell: the command." },
+    path = { type = "string", description = "For read/ls/write/edit: the path on that node." },
+    args = { type = "object", description = "Optional older form: the capability's parameters nested here. Prefer the flat form." } }, { "node", "capability" }),
   schema("nodes", "List this node and every peer known to the rendezvous.", {}),
   schema("session_debug", "Set a session's recording mode. debug keeps every turn verbatim and forever, so a failing task can be reproduced and exported as a fixture.", {
     session_id = { type = "string", description = "Defaults to the current session." },
@@ -1500,18 +1637,28 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
     end
     return { nodes = list }
   elseif name == "remote" then
-    if args.capability == "remote" then return { error = "remote_cannot_recurse" } end
-    local node = nodeslib.find(args.node)
-    if not node then return { error = "unknown_node:" .. tostring(args.node) } end
+    local call, refusal = M.remote_arguments(args, function() return M.catalog(role) end)
+    if not call then return refusal end
+    if call.capability == "remote" then return { error = "remote_cannot_recurse" } end
+    local node = nodeslib.find(call.node)
+    if not node then
+      return { error = "unknown_node:" .. tostring(call.node), online_nodes = online_nodes(),
+        note = "No peer is named " .. tostring(call.node) .. ". Use one of online_nodes (or a node_id from the nodes tool)." }
+    end
     local result
     if node.local_node then
-      result=M.dispatch(memory, args.capability, args.args or {}, role)
+      result=M.dispatch(memory, call.capability, call.args, role)
     else
-      result=nodeslib.remote_call(args.node, args.capability, args.args or {})
+      result=nodeslib.remote_call(call.node, call.capability, call.args)
     end
     if carries_local_images(result) then
-      return {error="remote_image_transport_unsupported",capability=args.capability,
+      return {error="remote_image_transport_unsupported",capability=call.capability,
         note="The image was not returned as text or as a path on the wrong machine."}
+    end
+    -- Say what was repaired, so the model learns the shape instead of relying on the repair.
+    if call.hoisted and type(result) == "table" then
+      result.normalized = "remote: moved " .. table.concat(call.hoisted, ", ")
+        .. " to the top level. Canonical shape: " .. REMOTE_EXAMPLE
     end
     return result
   end
