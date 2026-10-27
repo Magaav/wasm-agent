@@ -141,13 +141,13 @@ mod tests {
     use super::*;
 
     fn secret() -> Vec<u8> {
-        b"sk-live-SECRETVALUE-0123456789abcdef".to_vec()
+        b"sk-FAKE-SECRETVALUE-0123456789abcdef".to_vec()
     }
 
     #[test]
     fn replaces_a_whole_secret_in_one_chunk() {
         let mut redactor = Redactor::new(&[secret()]);
-        let mut out = redactor.push(b"before sk-live-SECRETVALUE-0123456789abcdef after");
+        let mut out = redactor.push(b"before sk-FAKE-SECRETVALUE-0123456789abcdef after");
         out.extend(redactor.finish());
         assert_eq!(String::from_utf8_lossy(&out), "before <redacted> after");
     }
@@ -156,7 +156,7 @@ mod tests {
     #[test]
     fn replaces_a_secret_split_across_chunks() {
         let mut redactor = Redactor::new(&[secret()]);
-        let whole = b"key=sk-live-SECRETVALUE-0123456789abcdef\n";
+        let whole = b"key=sk-FAKE-SECRETVALUE-0123456789abcdef\n";
         let (first, second) = whole.split_at(12);
         let mut out = redactor.push(first);
         out.extend(redactor.push(second));
@@ -171,7 +171,7 @@ mod tests {
     #[test]
     fn replaces_a_secret_split_across_many_single_byte_chunks() {
         let mut redactor = Redactor::new(&[secret()]);
-        let whole = b"a sk-live-SECRETVALUE-0123456789abcdef b";
+        let whole = b"a sk-FAKE-SECRETVALUE-0123456789abcdef b";
         let mut out = Vec::new();
         for byte in whole {
             out.extend(redactor.push(&[*byte]));
@@ -193,8 +193,8 @@ mod tests {
     #[test]
     fn a_secret_prefix_at_the_end_waits_for_the_next_chunk() {
         let mut redactor = Redactor::new(&[secret()]);
-        // `sk-live-` is a prefix of the secret, so the tail is held; `key=` is not.
-        assert_eq!(redactor.push(b"key=sk-live-"), b"key=");
+        // `sk-FAKE-` is a prefix of the secret, so the tail is held; `key=` is not.
+        assert_eq!(redactor.push(b"key=sk-FAKE-"), b"key=");
         let mut out = redactor.push(b"SECRETVALUE-0123456789abcdef");
         out.extend(redactor.finish());
         assert_eq!(String::from_utf8_lossy(&out), "<redacted>");
