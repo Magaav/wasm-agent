@@ -123,6 +123,12 @@ func (a *Adapter) identityResult(err error) bool {
 	return a.journal.failPersistence()
 }
 func mapMessageHeader(e *events.Message, history bool) Message {
+	return mapMessageHeaderResolved(e, history, nil)
+}
+
+// mapMessageHeaderResolved also consults the device store's LID map (resolve may
+// be nil) for a mutation whose scope or author alias the envelope did not carry.
+func mapMessageHeaderResolved(e *events.Message, history bool, resolve aliasResolver) Message {
 	m := Message{ID: e.Info.ID, Chat: e.Info.Chat.ToNonAD().String(), Sender: e.Info.Sender.ToNonAD().String(), SenderAlt: safeAlternate(e.Info.Sender, e.Info.SenderAlt), Sent: e.Info.Timestamp.Unix(), Own: e.Info.IsFromMe, History: history}
 	p := e.Message.GetProtocolMessage()
 	if p == nil && e.SourceWebMsg != nil {
@@ -139,14 +145,25 @@ func mapMessageHeader(e *events.Message, history bool) Message {
 				m.Mutation = "revoke"
 			}
 			m.Target = p.GetKey().GetID()
-			m.MutationScope, m.ScopeProof = mutationScope(e, p.GetKey().GetRemoteJID())
+			m.MutationScope, m.ScopeProof = mutationScopeResolved(e, p.GetKey().GetRemoteJID(), resolve)
+		}
+		if m.SenderAlt == "" && resolve != nil {
+			// Author proof compares the original's stored sender/alt with this one;
+			// only a reciprocal device-store mapping counts.
+			sender := e.Info.Sender.ToNonAD()
+			if alt := resolve(sender); !alt.IsEmpty() && resolve(alt).ToNonAD() == sender {
+				m.SenderAlt = safeAlternate(sender, alt)
+			}
 		}
 		return m
 	}
 	return m
 }
 func mapMessage(e *events.Message, history bool) Message {
-	m := mapMessageHeader(e, history)
+	return mapMessageResolved(e, history, nil)
+}
+func mapMessageResolved(e *events.Message, history bool, resolve aliasResolver) Message {
+	m := mapMessageHeaderResolved(e, history, resolve)
 	if m.Mutation != "" {
 		return m
 	}
@@ -298,7 +315,7 @@ func (a *Adapter) event(evt any) (success bool) {
 			// Do not delete server history media here. Upstream availability/redelivery is not guaranteed.
 			return persist(a.client.SendProtocolMessageReceipt(ctx, e.Info.ID, types.ReceiptTypeHistorySync))
 		}
-		if !persist(j.ingest(mapMessage(e, false))) {
+		if !persist(j.ingest(mapMessageResolved(e, false, a.alias))) {
 			return false
 		}
 		// A group participant's push name is NOT the group's title. Own echoes
@@ -379,7 +396,7 @@ func (a *Adapter) persistHistory(data *waHistorySync.HistorySync) bool {
 				if err != nil {
 					return j.failPersistence()
 				}
-				m := mapMessageHeader(e, true)
+				m := mapMessageHeaderResolved(e, true, a.alias)
 				m.OriginAccount = c.Account
 				m.OriginGeneration = c.Generation
 				if phase == 0 && m.Mutation == "" {
@@ -412,7 +429,7 @@ func (a *Adapter) persistHistory(data *waHistorySync.HistorySync) bool {
 			if err != nil {
 				return j.failPersistence()
 			}
-			mapped := mapMessage(message, true)
+			mapped := mapMessageResolved(message, true, a.alias)
 			if mapped.Mutation != "" {
 				continue
 			}
@@ -424,6 +441,30 @@ func (a *Adapter) persistHistory(data *waHistorySync.HistorySync) bool {
 		}
 	}
 	return true
+}
+
+// alias resolves one exact user's PN<->LID counterpart from the device store.
+// Lookup errors and unknown users are an empty JID: unproven stays unproven.
+func (a *Adapter) alias(user types.JID) types.JID {
+	if a == nil || a.client == nil || a.client.Store == nil || a.client.Store.LIDs == nil {
+		return types.EmptyJID
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	var other types.JID
+	var err error
+	switch user.Server {
+	case types.HiddenUserServer:
+		other, err = a.client.Store.LIDs.GetPNForLID(ctx, user)
+	case types.DefaultUserServer:
+		other, err = a.client.Store.LIDs.GetLIDForPN(ctx, user)
+	default:
+		return types.EmptyJID
+	}
+	if err != nil {
+		return types.EmptyJID
+	}
+	return other
 }
 func (a *Adapter) Download(ctx context.Context, m Message) ([]byte, error) {
 	if err := a.identity(); err != nil {

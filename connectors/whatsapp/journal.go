@@ -13,7 +13,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-	"unicode/utf8"
 
 	"github.com/gofrs/flock"
 	_ "modernc.org/sqlite"
@@ -85,6 +84,7 @@ type Journal struct {
 	receiptUnmatched int
 	receiptIgnored   int
 	receiptFailures  int
+	queue            audioQueue
 }
 
 func openJournal(dir string) (*Journal, error) {
@@ -95,7 +95,7 @@ func openJournal(dir string) (*Journal, error) {
 	if err != nil || info.Mode()&os.ModeSymlink != 0 {
 		return nil, errors.New("symlink_state_refused")
 	}
-	for _, name := range []string{"owner.lock", "journal.db", "journal.db-wal", "journal.db-shm", "device-keys.db", "device-keys.db-wal", "device-keys.db-shm", "api.token", "audio-work", "persistence-gap.json"} {
+	for _, name := range []string{"owner.lock", "journal.db", "journal.db-wal", "journal.db-shm", "device-keys.db", "device-keys.db-wal", "device-keys.db-shm", "api.token", "audio-work", "audio-work-express", "persistence-gap.json"} {
 		if info, e := os.Lstat(filepath.Join(dir, name)); e == nil && info.Mode()&os.ModeSymlink != 0 {
 			return nil, errors.New("symlink_state_file_refused")
 		}
@@ -138,6 +138,10 @@ func openJournal(dir string) (*Journal, error) {
  CREATE TABLE IF NOT EXISTS post_retry(account TEXT,generation INTEGER,chat TEXT,source TEXT,part INTEGER,next_attempt INTEGER,reason TEXT,PRIMARY KEY(account,generation,chat,source,part));
  UPDATE outbox SET state='unknown' WHERE state='reserved';`)
 	if err != nil {
+		j.Close()
+		return nil, err
+	}
+	if err = installAudioQueue(db); err != nil {
 		j.Close()
 		return nil, err
 	}
@@ -391,6 +395,7 @@ func (j *Journal) ingest(m Message) error {
 			return err
 		}
 	}
+	wake := false
 	if n > 0 && m.Audio {
 		state, reason := "journal_only", "before_activation"
 		if c.Activated > 0 && m.Sent >= c.Activated {
@@ -405,13 +410,16 @@ func (j *Journal) ingest(m Message) error {
 		if m.Unsupported != "" {
 			state, reason = "unsupported", m.Unsupported
 		}
-		blocked, e := blockedSource(tx, c, m.Chat, m.ID)
+		// Compute fence only: a posting-only hold (unproven revoke with a fenced
+		// target ID) no longer blocks the rest of the chat's transcription.
+		blocked, e := blockedCompute(tx, c, m.Chat, m.ID)
 		if e != nil {
 			return e
 		}
 		if blocked {
 			state, reason = "blocked_source", "source_mutation_or_chat_hold"
 		}
+		wake = wake || state == "pending"
 		_, err = tx.Exec("INSERT INTO audio(account,generation,chat,id,state,reason,language) VALUES(?,?,?,?,?,?,?)", c.Account, c.Generation, m.Chat, m.ID, state, reason, c.Language)
 		if err != nil {
 			return err
@@ -434,7 +442,7 @@ func (j *Journal) ingest(m Message) error {
 		if m.Unsupported != "" {
 			state, reason = "unsupported", m.Unsupported
 		}
-		blocked, e := blockedSource(tx, c, m.Chat, m.ID)
+		blocked, e := blockedCompute(tx, c, m.Chat, m.ID)
 		if e != nil {
 			return e
 		}
@@ -446,7 +454,13 @@ func (j *Journal) ingest(m Message) error {
 			return err
 		}
 	}
-	return tx.Commit()
+	if err = tx.Commit(); err != nil {
+		return err
+	}
+	if wake {
+		j.wakeAudio() // event-driven pickup; the lane poll is only a safety net
+	}
+	return nil
 }
 
 type Transport interface {
@@ -480,81 +494,11 @@ func chunks(s string) []string {
 	}
 	return out
 }
+
+// processAudio runs at most one pending audio on the main lane.
 func (j *Journal) processAudio(ctx context.Context, t Transport, r Recognizer) error {
-	c, err := j.Config()
-	if err != nil {
-		return err
-	}
-	if !c.Requested {
-		return nil
-	}
-	var m Message
-	var language string
-	err = j.db.QueryRow(`SELECT m.chat,m.id,m.sender,m.body,m.sent,m.own,m.raw,a.language FROM audio a JOIN messages m USING(account,generation,chat,id) WHERE a.account=? AND a.generation=? AND a.state='pending' AND NOT EXISTS(SELECT 1 FROM source_blocks b WHERE b.account=a.account AND b.generation=a.generation AND b.chat=a.chat AND b.id=a.id) AND NOT EXISTS(SELECT 1 FROM chat_holds h WHERE h.account=a.account AND h.generation=a.generation AND h.chat=a.chat) AND a.next_attempt<=? ORDER BY a.attempts,m.observed LIMIT 1`, c.Account, c.Generation, time.Now().Unix()).Scan(&m.Chat, &m.ID, &m.Sender, &m.Body, &m.Sent, &m.Own, &m.Raw, &language)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	b, err := t.Download(ctx, m)
-	if err == nil && len(b) > 20*1024*1024 {
-		err = permanentError("audio_too_large")
-	}
-	var text string
-	if err == nil {
-		path := filepath.Join(j.dir, "audio-work")
-		err = os.WriteFile(path, b, 0600)
-		if err == nil {
-			text, err = r.Transcribe(ctx, path, language)
-		}
-		os.Remove(path)
-	}
-	if err == nil && (!utf8.ValidString(text) || len([]rune(text)) > 12000) {
-		err = permanentError("transcript_invalid_or_too_long")
-	}
-	if err == nil && strings.TrimSpace(text) == "" {
-		err = permanentError("no_speech")
-	}
-	if err != nil {
-		state := "pending"
-		var p permanentError
-		if errors.As(err, &p) {
-			state = "unsupported"
-		}
-		_, e := j.db.Exec("UPDATE audio SET state=?,reason=?,attempts=attempts+1,next_attempt=? WHERE account=? AND generation=? AND chat=? AND id=?", state, safeReason(err), time.Now().Add(time.Minute).Unix(), c.Account, c.Generation, m.Chat, m.ID)
-		return e
-	}
-	tx, err := j.db.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	blocked, e := blockedSource(tx, c, m.Chat, m.ID)
-	if e != nil {
-		return e
-	}
-	if blocked {
-		_, e = tx.Exec("UPDATE audio SET state='blocked_source',reason='source_mutation_or_chat_hold' WHERE account=? AND generation=? AND chat=? AND id=?", c.Account, c.Generation, m.Chat, m.ID)
-		if e != nil {
-			return e
-		}
-		return tx.Commit()
-	}
-	for i, body := range chunks(text) {
-		if !c.TranscriptPosting {
-			continue
-		}
-		_, err = tx.Exec("INSERT OR IGNORE INTO outbox(account,generation,chat,source,part,body,send_id,state) VALUES(?,?,?,?,?,?,?,'ready')", c.Account, c.Generation, m.Chat, m.ID, i, body, t.NewID())
-		if err != nil {
-			return err
-		}
-	}
-	_, err = tx.Exec("UPDATE audio SET state='transcribed',reason='',transcript=? WHERE account=? AND generation=? AND chat=? AND id=?", text, c.Account, c.Generation, m.Chat, m.ID)
-	if err != nil {
-		return err
-	}
-	return tx.Commit()
+	_, err := j.processAudioLane(ctx, t, r, mainLane)
+	return err
 }
 func safeReason(err error) string {
 	if errors.Is(err, context.DeadlineExceeded) {
@@ -568,7 +512,7 @@ func safeReason(err error) string {
 		return string(p)
 	}
 	switch err.Error() {
-	case "local_worker_not_configured", "local_model_cache_missing", "WA_WHATSAPP_STT_MODELS_required", "faster_whisper_missing", "offline_model_unavailable", "worker_compute_failed", "worker_timeout", "worker_eof", "worker_protocol":
+	case "local_worker_not_configured", "local_model_cache_missing", "WA_WHATSAPP_STT_MODELS_required", "faster_whisper_missing", "offline_model_unavailable", "fallback_model_unavailable", "worker_compute_failed", "worker_timeout", "worker_stalled", "worker_eof", "worker_protocol":
 		return err.Error()
 	}
 	return "retryable_media_or_compute_failure"

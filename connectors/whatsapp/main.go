@@ -239,7 +239,7 @@ func pair(ctx context.Context, a *Adapter) error {
 }
 func run() error {
 	if len(os.Args) < 2 {
-		return errors.New("usage: wa-whatsapp init|pair|serve|status|activate|pause|language|scope|operator-enable|operator-inspect --state PRIVATE_DIRECTORY [options]")
+		return errors.New("usage: wa-whatsapp init|pair|serve|status|activate|pause|language|scope|release-hold|requeue-held-audio|operator-enable|operator-inspect --state PRIVATE_DIRECTORY [options]")
 	}
 	action := os.Args[1]
 	f := flag.NewFlagSet(action, flag.ContinueOnError)
@@ -260,6 +260,9 @@ func run() error {
 	holdChat := f.String("chat", "", "exact chat whose reviewed hold is released")
 	holdReason := f.String("reason", "", "operator review reason for the hold release")
 	holdConfirm := f.Bool("confirm", false, "confirm the reviewed hold release")
+	apply := f.Bool("apply", false, "requeue-held-audio: write the changes (default is a dry run)")
+	requeueLimit := f.Int("limit", 0, "requeue-held-audio: requeue at most N newest rows (0 = all)")
+	includeLegacy := f.Bool("include-legacy-holds", false, "requeue-held-audio: also requeue audio that arrived after a legacy hold with no recorded target")
 	confirm := f.Bool("approve-transcript-posting", false, "explicit original-chat transcript policy approval after retirement check")
 	retired := f.String("retirement-receipt", "", "verified operator cutover receipt path")
 	intentID := f.String("intent-id", "", "exact durable operator intent ID for offline owner inspection")
@@ -337,6 +340,17 @@ func run() error {
 		}
 		c.TranscriptPosting = *posting == "enable"
 		return j.save(c)
+	case "requeue-held-audio":
+		// Offline (the journal owner lock refuses a running service). Dry run unless
+		// --apply; counts only, no chat/message IDs. See WHATSAPP-TRANSCRIPTION.md.
+		if *requeueLimit < 0 {
+			return errors.New("requeue_limit_must_be_non_negative")
+		}
+		report, err := j.requeueHeldAudio(c, *requeueLimit, *includeLegacy, *apply)
+		if err != nil {
+			return err
+		}
+		return json.NewEncoder(os.Stdout).Encode(map[string]any{"ok": true, "report": report, "holds_released": false, "posts_replayed": false})
 	case "release-hold":
 		if !*holdConfirm {
 			return errors.New("explicit_reviewed_hold_release_confirmation_required")
@@ -444,8 +458,22 @@ func run() error {
 	defer server.Close()
 	serverErrors := make(chan error, 1)
 	go serveAPI(server, listener, ctx, cancel, serverErrors)
-	w := &Worker{Python: *python, Script: *worker, Cache: *cache}
+	// Warm STT: the main worker loads its model now, not on the first voice note.
+	stall := time.Duration(envInt("WA_WHATSAPP_STT_STALL_SECONDS", 0, 10, 3600)) * time.Second
+	w := &Worker{Python: *python, Script: *worker, Cache: *cache, Stall: stall}
 	defer w.Close()
+	go w.Start()
+	// Express lane (default on; WA_WHATSAPP_STT_LANES=1 disables): a second warm
+	// worker that runs only while the main one decodes long audio, and only takes
+	// audio declared <= 90 s. On a 2-core host the two decodes share the CPU, so the
+	// long one slows by at most about half while it overlaps, and a short voice note
+	// lands in seconds instead of after the long one. Costs one more model in RAM.
+	var express *Worker
+	if envInt("WA_WHATSAPP_STT_LANES", 2, 1, 2) == 2 {
+		express = &Worker{Python: *python, Script: *worker, Cache: *cache, Stall: stall}
+		defer express.Close()
+		go express.Start()
+	}
 	ocrExe := *ocrPython
 	if ocrExe == "" {
 		ocrExe = *python
@@ -461,36 +489,52 @@ func run() error {
 	var workers sync.WaitGroup
 	workers.Add(3)
 	defer func() { cancel(); workers.Wait() }()
-	go func() {
+	// Audio lanes are event-driven: ingest wakes them the moment a pending task
+	// commits, and each drains its queue before sleeping. The 10 s tick is only a
+	// safety net (backoff expiry, reconnect, a missed wake).
+	audioLoop := func(lane audioLane, rec Recognizer) {
 		defer workers.Done()
-		ticker := time.NewTicker(time.Second)
+		wake := j.audioSignal()
+		ticker := time.NewTicker(10 * time.Second)
 		defer ticker.Stop()
 		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				if a.client.IsConnected() {
-					if err := j.processAudio(ctx, a, w); err != nil {
-						j.setState("degraded_compute_journal")
-					}
+			for ctx.Err() == nil && a.client.IsConnected() {
+				worked, err := j.processAudioLane(ctx, a, rec, lane)
+				if err != nil {
+					j.setState("degraded_compute_journal")
+				}
+				if err != nil || !worked {
+					break
 				}
 			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-wake:
+			case <-ticker.C:
+			}
 		}
-	}()
+	}
+	go audioLoop(mainLane, w)
+	if express != nil {
+		workers.Add(1)
+		go audioLoop(audioLane{Express: true, MaxSeconds: expressSeconds, Work: "audio-work-express"}, express)
+	}
 	go func() {
 		defer workers.Done()
+		wake := j.postSignal()
 		ticker := time.NewTicker(time.Second)
 		defer ticker.Stop()
 		for {
 			select {
 			case <-ctx.Done():
 				return
+			case <-wake:
 			case <-ticker.C:
-				if a.client.IsConnected() {
-					if err := j.post(ctx, a); err != nil {
-						j.setState("degraded_post_journal")
-					}
+			}
+			if a.client.IsConnected() {
+				if err := j.post(ctx, a); err != nil {
+					j.setState("degraded_post_journal")
 				}
 			}
 		}
@@ -592,4 +636,13 @@ func main() {
 		}
 		os.Exit(1)
 	}
+}
+
+// envInt reads a bounded integer knob; unset or invalid keeps the default.
+func envInt(name string, def, low, high int) int {
+	v, err := strconv.Atoi(os.Getenv(name))
+	if err != nil {
+		return def
+	}
+	return min(max(v, low), high)
 }
