@@ -64,6 +64,23 @@ function M.scripts_missing()
  return fail('mcp_scripts_not_found',{searched=script_candidates(),tool_call_issued=false,outcome='not_submitted',
   fix='install the MCP runtime beside the node (scripts/install.sh does this) or set WA_MCP_SCRIPT_DIR'})
 end
+-- The Node program that runs the MCP runtime. An explicit `WA_NODE` wins; after that, the copy the
+-- installer provisions beside the node (`<install>/node`, `<data>/node`, `node.exe` on Windows), because a
+-- device whose PATH has no Node was a device where every MCP tool refused. `path_kind` is a stat, never a
+-- read: this must not load a hundred megabytes of binary into Lua to answer a path question.
+local function node_program()
+ local override=host.getenv('WA_NODE');if override and override~='' then return override end
+ local relative=platform.os()=='windows' and '/node/node.exe' or '/node/bin/node'
+ local bases={}
+ local install=host.getenv('WA_INSTALL_DIR');if install and install~='' then bases[#bases+1]=install end
+ local okdata,data=pcall(paths.data);if okdata and type(data)=='string' then bases[#bases+1]=data end
+ for _,base in ipairs(bases) do
+  local program=base..relative
+  if host.path_kind(program)=='file' then return program end
+ end
+ return 'node'
+end
+function M.node_program()return node_program() end
 local function valid_id(id)return type(id)=='string' and #id<=24 and id:match('^[a-z][a-z0-9_-]*$') end
 local function dense(list,maximum)if type(list)~='table' or #list>maximum then return false end;for key,value in pairs(list)do if type(key)~='number' or key<1 or key>#list or key%1~=0 or type(value)~='string' then return false end end;return true end
 function M.validate(def)
@@ -119,7 +136,7 @@ function M.invoke(input,ctx)
  input.result_file=request..'.result.json'
  if not host.write_file(request,json.encode(input))then return fail('mcp_request_not_written',{tool_call_issued=false,outcome='not_submitted'}) end
  local timeout=input.server.timeout_seconds or 30
- local start=decode(host.operation('start',json.encode({program=host.getenv('WA_NODE') or 'node',args={client,'--request-file',request},cwd=ctx.cwd or platform.cwd(),timeout_seconds=math.min(86400,timeout+3),owner=ctx.session_id or 'mcp-control'})))
+ local start=decode(host.operation('start',json.encode({program=node_program(),args={client,'--request-file',request},cwd=ctx.cwd or platform.cwd(),timeout_seconds=math.min(86400,timeout+3),owner=ctx.session_id or 'mcp-control'})))
  if not start or start.error or not start.operation_id then return fail('mcp_operation_not_started',{detail=start,tool_call_issued=false,outcome='not_submitted',request=request}) end
  local id=start.operation_id
  local settled=decode(host.operation('await',json.encode({id=id,wait_for='settled'})))
@@ -146,7 +163,7 @@ end
 function M.close_read_sessions()return read_sessions.close() end
 function M.default_whatsapp()
  local directory=M.script_dir() or '<installed scripts directory>'
- return {id='whatsapp',name='WhatsApp',transport='stdio',program=host.getenv('WA_NODE') or 'node',args={directory..'/mcp-whatsapp.mjs','--binding-json',json.encode({backend='linked_device',allowed_conversations=json.decode('[]')})},
+ return {id='whatsapp',name='WhatsApp',transport='stdio',program=node_program(),args={directory..'/mcp-whatsapp.mjs','--binding-json',json.encode({backend='linked_device',allowed_conversations=json.decode('[]')})},
   env={WA_MCP_WHATSAPP_ACCOUNT='WA_WHATSAPP_ACCOUNT',WA_MCP_WHATSAPP_GENERATION='WA_WHATSAPP_GENERATION',WA_MCP_WHATSAPP_URL='WA_WHATSAPP_CONNECTOR_URL',WA_MCP_WHATSAPP_TOKEN_FILE='WA_WHATSAPP_TOKEN_FILE'},
   timeout_seconds=60,tools={read_snapshot='read',lookup_self='read',inspect_chat='read'}}
 end
@@ -243,7 +260,7 @@ end
 function M.whatsapp(method,args,binding,ctx)
  local directory=M.script_dir();if not directory then return fail('mcp_script_directory_unbound') end
  binding=binding or {}
- local server={transport='stdio',program=host.getenv('WA_NODE') or 'node',args={directory..'/mcp-whatsapp.mjs','--binding-json',json.encode(binding)},timeout_seconds=120}
+ local server={transport='stdio',program=node_program(),args={directory..'/mcp-whatsapp.mjs','--binding-json',json.encode(binding)},timeout_seconds=120}
  local input={action='call',server=server,tool=method};if next(args or {})then input.arguments=args end
  local answer=M.invoke(input,ctx);local data=native_data(answer)
  if data and not answer.error then data.mcp_operation_id=answer.operation_id;return data end

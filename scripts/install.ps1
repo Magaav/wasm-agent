@@ -297,6 +297,70 @@ if ($mcpMissing.Count -eq 0) {
   Warn "MCP runtime incomplete (missing: $($mcpMissing -join ', ')) - web_search, web_read and the WhatsApp connector refuse until it is installed"
 }
 
+# Node is the runtime those scripts need. Shipping the scripts without it is the same half-fix one
+# level down: the Lua core is compiled into the binary, the `.mjs` files are on disk, and both are
+# inert if nothing can execute them - which is what a device with no Node on its PATH produced.
+#
+# Pinned, not `latest`: an installer that silently changes a runtime under a working node is a worse
+# surprise than an old one. The build is checked against the SHA256 Node publishes for that release,
+# unpacked beside the binary, and named in `<home>/.wasm-agent/env` as WA_NODE - the file the host
+# reads at startup - so the node's tools never depend on the PATH a service happened to inherit.
+$nodeVersion = "24.22.1"
+$nodeMinMajor = 18
+$nodeBin = $null
+$nodeExplicit = $env:WA_NODE
+if ($nodeExplicit -and (Test-Path $nodeExplicit)) {
+  $nodeBin = $nodeExplicit
+  Ok "node: $nodeBin (WA_NODE)"
+} else {
+  $nodeExisting = (Get-Command node -ErrorAction SilentlyContinue)
+  if ($nodeExisting) {
+    $nodeMajor = 0
+    try { $nodeMajor = [int](((& $nodeExisting.Source --version) -replace '^v', '').Split('.')[0]) } catch { $nodeMajor = 0 }
+    if ($nodeMajor -ge $nodeMinMajor) { $nodeBin = $nodeExisting.Source }
+  }
+  if ($nodeBin) {
+    Ok "node: $nodeBin ($(& $nodeBin --version))"
+  } else {
+    if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") { $nodeArch = "arm64" } else { $nodeArch = "x64" }
+    $nodeArchive = "node-v$nodeVersion-win-$nodeArch.zip"
+    $nodeTmp = Join-Path ([System.IO.Path]::GetTempPath()) ("wa-node-" + [guid]::NewGuid().ToString("N"))
+    New-Item -ItemType Directory -Force -Path $nodeTmp | Out-Null
+    try {
+      Invoke-WebRequest -UseBasicParsing "https://nodejs.org/dist/v$nodeVersion/$nodeArchive" -OutFile (Join-Path $nodeTmp $nodeArchive) -ErrorAction Stop
+      Invoke-WebRequest -UseBasicParsing "https://nodejs.org/dist/v$nodeVersion/SHASUMS256.txt" -OutFile (Join-Path $nodeTmp "SHASUMS256.txt") -ErrorAction Stop
+      $nodeExpected = ((Select-String -Path (Join-Path $nodeTmp "SHASUMS256.txt") -Pattern ([regex]::Escape($nodeArchive) + '$') | Select-Object -First 1).Line -split ' +')[0]
+      $nodeActual = (Get-FileHash -Algorithm SHA256 (Join-Path $nodeTmp $nodeArchive)).Hash.ToLower()
+      if (-not $nodeExpected -or $nodeExpected.ToLower() -ne $nodeActual) { throw "sha256 mismatch for $nodeArchive" }
+      Expand-Archive -Path (Join-Path $nodeTmp $nodeArchive) -DestinationPath $nodeTmp -Force
+      $nodeTarget = Join-Path $nodeDir "node"
+      if (Test-Path $nodeTarget) { Remove-Item -Recurse -Force $nodeTarget }
+      Move-Item (Join-Path $nodeTmp "node-v$nodeVersion-win-$nodeArch") $nodeTarget
+      $nodeBin = Join-Path $nodeTarget "node.exe"
+      Ok "node: $nodeBin (v$nodeVersion, checksum verified)"
+    } catch {
+      Warn "node: could not provision Node $nodeVersion ($($_.Exception.Message)) - install Node $nodeMinMajor+ or set WA_NODE, or web_search, web_read and the WhatsApp connector will refuse"
+    } finally {
+      Remove-Item -Recurse -Force $nodeTmp -ErrorAction SilentlyContinue
+    }
+  }
+}
+if ($nodeBin) {
+  $nodeEnvFile = Join-Path $waHome "env"
+  $nodeRecorded = $false
+  if (Test-Path $nodeEnvFile) { $nodeRecorded = (Select-String -Path $nodeEnvFile -Pattern '^WA_NODE=' -Quiet) }
+  if (-not $nodeRecorded) {
+    New-Item -ItemType Directory -Force -Path $waHome | Out-Null
+    Add-Content -Path $nodeEnvFile -Value "WA_NODE=$nodeBin" -Encoding ASCII
+    Ok "node: WA_NODE=$nodeBin in $nodeEnvFile"
+  }
+  $nodeProbe = Join-Path $nodeDir "scripts\mcp-web.mjs"
+  if (Test-Path $nodeProbe) {
+    & $nodeBin --check $nodeProbe 2>$null | Out-Null
+    if ($LASTEXITCODE -eq 0) { Ok "node: parses the MCP runtime" } else { Warn "node: $nodeBin cannot parse $nodeProbe - web_search, web_read and the WhatsApp connector will refuse" }
+  }
+}
+
 # Skills the node must have to know how to update itself. A skill is how this is delivered rather
 # than a paragraph in AGENTS.md: only its `name` and `description` sit in the prompt, and the body
 # loads when the task matches - so the procedure costs nothing until it is needed, and can then be
