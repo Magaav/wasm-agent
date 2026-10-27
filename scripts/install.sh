@@ -278,6 +278,79 @@ ensure_node() {
 }
 ensure_node || true
 
+# mail-mcp is the server that speaks Gmail over IMAP/SMTP. It is a Rust binary, so it ships as a pinned,
+# checksum-verified release asset rather than needing a toolchain on the device - except on a platform
+# upstream publishes nothing for (linux aarch64 today), where this says so instead of installing a binary
+# for the wrong architecture.
+MAIL_MCP_VERSION="0.6.1"
+MAIL_MCP_BIN=""
+mail_mcp_extract() { # <archive> <dir> -> 0 when the tree was unpacked
+  archive="$1"; into="$2"
+  if tar -xJf "$archive" -C "$into" 2>/dev/null; then return 0; fi
+  if command -v xz >/dev/null 2>&1 && xz -dc "$archive" 2>/dev/null | tar -xf - -C "$into" 2>/dev/null; then return 0; fi
+  if command -v python3 >/dev/null 2>&1 \
+    && python3 -c 'import lzma,sys;sys.stdout.buffer.write(lzma.open(sys.argv[1]).read())' "$archive" 2>/dev/null \
+    | tar -xf - -C "$into" 2>/dev/null; then return 0; fi
+  return 1
+}
+ensure_mail_mcp() {
+  exe="$DIR/bin/mail-mcp"
+  if [ -n "${WA_MAIL_MCP_BIN:-}" ] && [ -x "${WA_MAIL_MCP_BIN}" ]; then
+    MAIL_MCP_BIN="$WA_MAIL_MCP_BIN"; ok "mail-mcp: $MAIL_MCP_BIN (WA_MAIL_MCP_BIN)"; return 0
+  fi
+  if [ -x "$exe" ] && "$exe" --help >/dev/null 2>&1; then
+    MAIL_MCP_BIN="$exe"; ok "mail-mcp: $exe (already installed)"; return 0
+  fi
+  mail_pair="$(node_platform)" || {
+    warn "mail-mcp: cannot tell this platform's architecture - install it by hand and set WA_MAIL_MCP_BIN"
+    return 1
+  }
+  case "$mail_pair" in
+    linux-x64) mail_asset="mail-mcp-x86_64-unknown-linux-gnu.tar.xz" ;;
+    linux-arm64) warn "mail-mcp: upstream publishes no linux aarch64 build (v$MAIL_MCP_VERSION ships x86_64 Linux, x86_64/aarch64 macOS, x86_64 Windows) - build it with cargo on this host, or run mail on an x86_64 node, then set WA_MAIL_MCP_BIN"; return 1 ;;
+    darwin-x64) mail_asset="mail-mcp-x86_64-apple-darwin.tar.xz" ;;
+    darwin-arm64) mail_asset="mail-mcp-aarch64-apple-darwin.tar.xz" ;;
+    *) warn "mail-mcp: no release asset for $mail_pair - install it by hand and set WA_MAIL_MCP_BIN"; return 1 ;;
+  esac
+  mail_base="https://github.com/tecnologicachile/mail-mcp/releases/download/v$MAIL_MCP_VERSION"
+  mail_tmp="$(mktemp -d)"
+  if ! curl -fsSL "$mail_base/$mail_asset" -o "$mail_tmp/$mail_asset" 2>/dev/null \
+    || ! curl -fsSL "$mail_base/$mail_asset.sha256" -o "$mail_tmp/$mail_asset.sha256" 2>/dev/null; then
+    warn "mail-mcp: could not download v$MAIL_MCP_VERSION from GitHub"; rm -rf "$mail_tmp"; return 1
+  fi
+  mail_expected="$(awk '{print $1}' "$mail_tmp/$mail_asset.sha256")"
+  mail_actual="$(node_sha256 "$mail_tmp/$mail_asset")"
+  if [ -z "$mail_expected" ] || [ "$mail_expected" != "$mail_actual" ]; then
+    warn "mail-mcp: checksum mismatch for $mail_asset - refusing to install an unverified binary"
+    rm -rf "$mail_tmp"; return 1
+  fi
+  if ! mail_mcp_extract "$mail_tmp/$mail_asset" "$mail_tmp"; then
+    warn "mail-mcp: cannot decompress $mail_asset - install xz-utils (or python3) and re-run the installer"
+    rm -rf "$mail_tmp"; return 1
+  fi
+  mail_found="$(find "$mail_tmp" -type f -name mail-mcp | head -1)"
+  if [ -z "$mail_found" ]; then
+    warn "mail-mcp: $mail_asset did not contain a mail-mcp executable"; rm -rf "$mail_tmp"; return 1
+  fi
+  mkdir -p "$DIR/bin"
+  cp -f "$mail_found" "$exe" && chmod 755 "$exe"
+  rm -rf "$mail_tmp"
+  if ! "$exe" --help >/dev/null 2>&1; then
+    warn "mail-mcp: $exe does not run on this machine - wrong architecture?"; return 1
+  fi
+  MAIL_MCP_BIN="$exe"
+  ok "mail-mcp: $exe (v$MAIL_MCP_VERSION, checksum verified)"
+  if [ "$HAVE_LIB" = "1" ]; then MAIL_ENV_FILE="$(wa_config_dir)/env"; else MAIL_ENV_FILE="${WASM_AGENT_HOME:-$HOME}/.wasm-agent/env"; fi
+  if [ -f "$MAIL_ENV_FILE" ] && grep -q '^MAIL_MCP_BIN=' "$MAIL_ENV_FILE" 2>/dev/null; then
+    :
+  else
+    mkdir -p "$(dirname "$MAIL_ENV_FILE")"
+    printf 'MAIL_MCP_BIN=%s\n' "$MAIL_MCP_BIN" >> "$MAIL_ENV_FILE"
+    ok "mail-mcp: MAIL_MCP_BIN=$MAIL_MCP_BIN in $MAIL_ENV_FILE"
+  fi
+}
+ensure_mail_mcp || true
+
 # The skills the node needs to know how to update itself. Delivered as a skill rather than a
 # paragraph in AGENTS.md: only `name` and `description` enter the prompt, and the body loads when the
 # task matches, so the procedure costs nothing per turn and can be as long as it needs to be.

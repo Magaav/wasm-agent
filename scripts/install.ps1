@@ -361,8 +361,55 @@ if ($nodeBin) {
   }
 }
 
-# Skills the node must have to know how to update itself. A skill is how this is delivered rather
-# than a paragraph in AGENTS.md: only its `name` and `description` sit in the prompt, and the body
+# mail-mcp is the server that speaks Gmail over IMAP/SMTP: a pinned, checksum-verified Rust release
+# asset, so the device needs no toolchain. Upstream publishes x86_64 Windows only; an ARM64 host is
+# told plainly instead of being given the wrong architecture.
+$mailMcpVersion = "0.6.1"
+$mailMcpBin = $null
+$mailMcpExe = Join-Path $nodeDir "bin\mail-mcp.exe"
+$mailMcpExplicit = $env:WA_MAIL_MCP_BIN
+if ($mailMcpExplicit -and (Test-Path $mailMcpExplicit)) {
+  $mailMcpBin = $mailMcpExplicit
+  Ok "mail-mcp: $mailMcpBin (WA_MAIL_MCP_BIN)"
+} elseif ((Test-Path $mailMcpExe) -and $null -ne (& $mailMcpExe --help 2>$null)) {
+  $mailMcpBin = $mailMcpExe
+  Ok "mail-mcp: $mailMcpExe (already installed)"
+} elseif ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") {
+  Warn "mail-mcp: upstream publishes no windows arm64 build (v$mailMcpVersion ships x86_64 Windows) - build it with cargo on this host, or set WA_MAIL_MCP_BIN"
+} else {
+  $mailMcpAsset = "mail-mcp-x86_64-pc-windows-msvc.zip"
+  $mailMcpBase = "https://github.com/tecnologicachile/mail-mcp/releases/download/v$mailMcpVersion"
+  $mailMcpTmp = Join-Path ([System.IO.Path]::GetTempPath()) ("wa-mailmcp-" + [guid]::NewGuid().ToString("N"))
+  New-Item -ItemType Directory -Force -Path $mailMcpTmp | Out-Null
+  try {
+    Invoke-WebRequest -UseBasicParsing "$mailMcpBase/$mailMcpAsset" -OutFile (Join-Path $mailMcpTmp $mailMcpAsset) -ErrorAction Stop
+    Invoke-WebRequest -UseBasicParsing "$mailMcpBase/$mailMcpAsset.sha256" -OutFile (Join-Path $mailMcpTmp "$mailMcpAsset.sha256") -ErrorAction Stop
+    $mailMcpExpected = ((Get-Content (Join-Path $mailMcpTmp "$mailMcpAsset.sha256") -TotalCount 1) -split ' +')[0]
+    $mailMcpActual = (Get-FileHash -Algorithm SHA256 (Join-Path $mailMcpTmp $mailMcpAsset)).Hash.ToLower()
+    if (-not $mailMcpExpected -or $mailMcpExpected.ToLower() -ne $mailMcpActual) { throw "sha256 mismatch for $mailMcpAsset" }
+    Expand-Archive -Path (Join-Path $mailMcpTmp $mailMcpAsset) -DestinationPath $mailMcpTmp -Force
+    $mailMcpFound = (Get-ChildItem -Path $mailMcpTmp -Recurse -Filter "mail-mcp.exe" | Select-Object -First 1)
+    if (-not $mailMcpFound) { throw "$mailMcpAsset did not contain mail-mcp.exe" }
+    New-Item -ItemType Directory -Force -Path (Split-Path $mailMcpExe) | Out-Null
+    Copy-Item $mailMcpFound.FullName $mailMcpExe -Force
+    $mailMcpBin = $mailMcpExe
+    Ok "mail-mcp: $mailMcpExe (v$mailMcpVersion, checksum verified)"
+  } catch {
+    Warn "mail-mcp: could not install v$mailMcpVersion ($($_.Exception.Message)) - set WA_MAIL_MCP_BIN to an existing binary"
+  } finally {
+    Remove-Item -Recurse -Force $mailMcpTmp -ErrorAction SilentlyContinue
+  }
+}
+if ($mailMcpBin) {
+  $mailEnvFile = Join-Path $waHome "env"
+  $mailRecorded = $false
+  if (Test-Path $mailEnvFile) { $mailRecorded = (Select-String -Path $mailEnvFile -Pattern '^MAIL_MCP_BIN=' -Quiet) }
+  if (-not $mailRecorded) {
+    New-Item -ItemType Directory -Force -Path $waHome | Out-Null
+    Add-Content -Path $mailEnvFile -Value "MAIL_MCP_BIN=$mailMcpBin" -Encoding ASCII
+    Ok "mail-mcp: MAIL_MCP_BIN=$mailMcpBin in $mailEnvFile"
+  }
+}
 # loads when the task matches - so the procedure costs nothing until it is needed, and can then be
 # as long as it has to be.
 #
