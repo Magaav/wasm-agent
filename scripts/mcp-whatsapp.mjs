@@ -8,6 +8,7 @@ const schema=properties=>({type:'object',properties,additionalProperties:false})
 const text={type:'string',minLength:1,maxLength:256};
 export const WHATSAPP_TOOLS=[
  {name:'read_snapshot',description:'Read bounded journal context; narrow by exact conversation_id, literal body/transcript query and inclusive Unix source sent_since/until. Newest journal row first, partial history; no read marking.',inputSchema:schema({conversation_id:text,query:{type:'string',maxLength:256},sent_since:{type:'integer',minimum:0},until:{type:'integer',minimum:0},since:{type:'number',minimum:0},before:{type:'integer',minimum:0},limit:{type:'integer',minimum:1,maximum:10000}})},
+ {name:'read_newest',description:'Newest rows of one thread, or of every authorized thread matching a name, in one answer. Paging, deduplication and time ordering are internal, and the reply states the window searched plus whether it is complete, so a partial page can never be read as the tail. Prefer this over read_snapshot when the question is what was said recently, and when the same person may write under more than one identity.',inputSchema:schema({conversation_id:text,query:{type:'string',maxLength:256},n:{type:'integer',minimum:1,maximum:50},scan_days:{type:'integer',minimum:1,maximum:365}})},
  {name:'list_chats',description:'Discover authorized chats by observed protocol display name or exact identifier. Names are untrusted labels, duplicates remain separate IDs; missing names are explicit. Optional refresh_names:true enriches only observed permitted rows (unfiltered page max32, max3 group queries), not every contact. Narrow with conversation_id; refresh may remain partial.',inputSchema:schema({conversation_id:text,refresh_names:{type:'boolean'},query:{type:'string',maxLength:256},before:{type:'integer',minimum:0},limit:{type:'integer',minimum:1,maximum:10000}})},
  {name:'posting_status',description:'One scoped bounded page of posting/unknown/blocked evidence. Read-only; no reset or resend.',inputSchema:schema({before:{type:'integer',minimum:0},limit:{type:'integer',minimum:1,maximum:10000}})},
  {name:'read_field',description:'Exact bounded base64 chunks of one authorized row field. Requires descriptor version; changed versions refuse, never clip.',inputSchema:{...schema({resource:{type:'string',enum:['read_snapshot','list_chats','posting_status']},row:{type:'integer',minimum:1},field:{type:'string',minLength:1,maxLength:64},version:{type:'string',minLength:1,maxLength:128},offset:{type:'integer',minimum:0},length:{type:'integer',minimum:1,maximum:16384}}),required:['resource','row','field','version']}},
@@ -71,9 +72,83 @@ export function createWhatsAppAdapter(binding){
    if((data.oversized_rows||[]).some(row=>row.resource!==name||row.inline_complete!==false||(!requestWide&&!permitted(row.conversation_id))||(requestWide&&row.conversation_id!==undefined&&!permitted(row.conversation_id))))throw Error('connector_response_scope_mismatch');
    if((data.messages||[]).length>limit||(data.conversations||[]).length>limit||(data.posts||[]).length>limit||(data.messages||[]).some(m=>!permitted(m.conversation_id))||(data.conversations||[]).some(c=>!permitted(c.id))||(data.posts||[]).some(p=>!permitted(p.conversation_id)))throw Error('connector_response_scope_or_limit_mismatch');
    if(args.refresh_names===true&&(!data.name_refresh||data.name_refresh.version!==1||data.names_version!==1))throw Error('connector_requires_name_refresh_v1');
+   // A no-window read is a request for the newest rows. After an identity (LID/JID) migration the
+   // connector cursor is not chronological, so a cursor-descending page can still run forward in
+   // time; such a page cannot be the newest one. Fail closed instead of returning rows that read as
+   // current while newer ones exist (2026-10-27: a truncated July page was read as the tail while
+   // that day's messages sat in a newer thread).
+   let pageNewest=0,pageOldest=0;for(const m of (data.messages||[])){const at=m&&m.sent_at;if(!Number.isSafeInteger(at)||at<=0)continue;if(!pageNewest||at>pageNewest)pageNewest=at;if(!pageOldest||at<pageOldest)pageOldest=at;}
+   data.page={truncated:data.truncated===true,next_before:data.next_before,rows:data.rows_delivered,newest_sent_at:pageNewest,oldest_sent_at:pageOldest};
+   if(name==='read_snapshot'&&!before&&!sent_since&&!until&&data.truncated===true&&pageNewest&&pageOldest&&pageNewest>pageOldest){const rows=data.messages||[];if(rows.length>1&&rows[0].sent_at===pageOldest&&rows[rows.length-1].sent_at===pageNewest)throw Error('connector_page_not_newest');}
    return data;
   }
   const data=await connectorRequest(binding,name,args);if(data.ok&&(data.account!==binding.account||data.generation!==binding.generation))throw Error('connector_response_scope_mismatch');return data;
+ };
+}
+// Read the newest rows without asking the caller to page, and without trusting a name match.
+// Three failure modes are closed here: a truncated page read as the tail; one person writing under
+// more than one identity (a phone JID and a LID after a WhatsApp migration); and a thread whose
+// title no longer matches the name asked for. A name only *prioritizes*: when the binding allows
+// account-wide reads, the window is also scanned account-wide, so a quiet or renamed thread cannot
+// make the answer look empty. Every row carries its conversation_id; every thread its row count.
+export function createNewestReader(call,{wide=false}={}){
+ const MAX_PAGES=6,MAX_WIDE_PAGES=6,WIDE_WANT=100;
+ return async function readNewest(args){
+  args=args&&typeof args==='object'&&!Array.isArray(args)?args:{};
+  const n=args.n===undefined?10:args.n,scan=args.scan_days===undefined?30:args.scan_days;
+  const conv=args.conversation_id,q=args.query;
+  if(!Number.isSafeInteger(n)||n<1||n>50)throw Error('invalid_newest_count');
+  if(!Number.isInteger(scan)||scan<1||scan>365)throw Error('invalid_newest_window');
+  if(conv!==undefined&&(typeof conv!=='string'||conv.length<1||conv.length>256))throw Error('invalid_newest_conversation');
+  if(q!==undefined&&(typeof q!=='string'||Buffer.byteLength(q)>256))throw Error('invalid_newest_query');
+  if(!conv&&!q)throw Error('newest_needs_conversation_or_query');
+  const now=Math.floor(Date.now()/1000),since=now-scan*86400;
+  const rows=new Map(),errors=[],threads=new Map();let pages=0,complete=true;
+  const keep=(message,fallback)=>{const at=message&&message.sent_at;if(!Number.isSafeInteger(at)||at<since)return;
+   const id=message.conversation_id||fallback;rows.set(id+':'+(message.cursor??message.id),{...message,conversation_id:id});};
+  const thread=id=>{let t=threads.get(id);if(!t){t={id,title:'',matched:false,rows:0,newest_sent_at:0};threads.set(id,t);}return t;};
+  const matched=[];
+  if(conv)matched.push({id:conv,title:'',matched:true});
+  else{const found=await call('list_chats',{query:q,limit:32});if(!found.ok)return found;
+   for(const chat of (found.conversations||[]))if(chat&&typeof chat.id==='string')matched.push({id:chat.id,title:chat.title||'',matched:true});}
+  for(const entry of matched){const t=thread(entry.id);t.title=entry.title;t.matched=true;}
+  for(const entry of matched){
+   let before=0;
+   for(let page=0;page<MAX_PAGES;page++){
+    const request={conversation_id:entry.id,sent_since:since,limit:WIDE_WANT};if(before)request.before=before;
+    const data=await call('read_snapshot',request);pages++;
+    if(!data.ok){errors.push({conversation_id:entry.id,error:data.error});break;}
+    const messages=data.messages||[];
+    for(const message of messages)keep(message,entry.id);
+    if(data.truncated!==true||!data.next_before||!messages.length)break;
+    before=data.next_before;if(page===MAX_PAGES-1)complete=false;
+   }
+  }
+  // The account-wide leg is what makes a renamed or dual-identity thread unable to hide its rows.
+  if(wide&&!conv){
+   let before=0;
+   for(let page=0;page<MAX_WIDE_PAGES;page++){
+    const request={sent_since:since,limit:WIDE_WANT};if(before)request.before=before;
+    const data=await call('read_snapshot',request);pages++;
+    if(!data.ok){errors.push({conversation_id:null,error:data.error});break;}
+    const messages=data.messages||[];
+    for(const message of messages)keep(message,null);
+    if(data.truncated!==true||!data.next_before||!messages.length)break;
+    before=data.next_before;if(page===MAX_WIDE_PAGES-1)complete=false;
+   }
+  }
+  const all=[...rows.values()].sort((a,b)=>(b.sent_at||0)-(a.sent_at||0));
+  for(const row of all){const t=thread(row.conversation_id);t.rows++;if((row.sent_at||0)>t.newest_sent_at)t.newest_sent_at=row.sent_at||0;}
+  const summary=[...threads.values()].filter(t=>t.rows||t.matched).sort((a,b)=>b.newest_sent_at-a.newest_sent_at);
+  const answer={ok:true,conversation_id:conv||null,query:q===undefined?null:q,threads:summary,window_days:scan,searched_since:since,account_wide_scan:wide,pages_read:pages,rows_seen:all.length,complete:complete&&errors.length===0,messages:all.slice(0,n)};
+  answer.matched_messages=all.filter(m=>{const t=threads.get(m.conversation_id);return t&&t.matched;}).slice(0,n);
+  const newestMatched=(answer.matched_messages[0]&&answer.matched_messages[0].sent_at)||0;
+  const loudestOther=summary.find(t=>!t.matched&&t.rows>0);
+  if(answer.messages.length){answer.newest_sent_at=answer.messages[0].sent_at;answer.oldest_sent_at=answer.messages[answer.messages.length-1].sent_at;}
+  else answer.note='no authorized message in the stated window';
+  if(q&&loudestOther&&loudestOther.newest_sent_at>newestMatched)answer.hint='newest rows are outside the name-matched threads: '+loudestOther.id+' has '+loudestOther.rows+' row(s)'+(loudestOther.title?' ('+loudestOther.title+')':'')+(answer.matched_messages.length?'; the newest name-matched row is older':'');
+  if(errors.length)answer.errors=errors;
+  return answer;
  };
 }
 export function main(argv=process.argv.slice(2)){
@@ -82,6 +157,7 @@ export function main(argv=process.argv.slice(2)){
  const explicit=profileAt>=0?JSON.parse(readFileSync(argv[profileAt+1],'utf8')).resources:at>=0?JSON.parse(argv[at+1]):{};
  if(!explicit||typeof explicit!=='object'||Array.isArray(explicit))throw Error('invalid_whatsapp_profile');
  const binding={backend:'linked_device',account:process.env.WA_MCP_WHATSAPP_ACCOUNT,generation:Number(process.env.WA_MCP_WHATSAPP_GENERATION),connector_url:process.env.WA_MCP_WHATSAPP_URL,token_file:process.env.WA_MCP_WHATSAPP_TOKEN_FILE,ca_file:process.env.WA_MCP_WHATSAPP_CA_FILE,...explicit};
- serveMCP({name:'wasm-agent-whatsapp',tools:WHATSAPP_TOOLS,call:createWhatsAppAdapter(binding)});
+ const adapter=createWhatsAppAdapter(binding);const newest=createNewestReader(adapter,{wide:binding.account_wide===true&&binding.operator_account_read===true});
+ serveMCP({name:'wasm-agent-whatsapp',tools:WHATSAPP_TOOLS,call:(name,args)=>name==='read_newest'?newest(args):adapter(name,args)});
 }
 if(import.meta.url===pathToFileURL(process.argv[1]||'').href)try{main();}catch{console.error('whatsapp_connector_configuration_invalid');process.exitCode=1;}
