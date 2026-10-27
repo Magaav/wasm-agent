@@ -56,7 +56,8 @@ PY
 2. `ingest` sets `media_kind='image'` and a `media_state`:
    `pending` at/after the activation cutoff, `journal_only` before it,
    `unsupported` for view-once/ephemeral/oversized/mime failures, or
-   `blocked_source` for a held chat.
+   `blocked_source` for a source/target fence or a compute hold (a posting-only
+   hold from an unproven targeted revoke does not block OCR).
 3. `processMedia` downloads the exact image with the same bounded media client,
    writes a private temp file, calls the OCR worker, deletes the temp file and stores
    the text in `messages.media_text`.

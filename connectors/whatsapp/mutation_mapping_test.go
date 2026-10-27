@@ -38,8 +38,11 @@ func TestHistoryMutationBeforeSourceUsesActualSDKHeadersBeforeAnyAudioTasks(t *t
 			t.Fatal(err)
 		}
 	}
-	if count(t, old, "SELECT count(*) FROM chat_holds") != 1 || count(t, old, "SELECT count(*) FROM audio WHERE state='blocked_source'") != 2 {
-		t.Fatal("old sequential order did not reproduce broad hold")
+	// Old order still cannot prove the author (the revoke precedes its source), so
+	// the chat is held for POSTING, but only the exact target ID is fenced from
+	// transcription: the unrelated audio is no longer swept into the hold.
+	if count(t, old, "SELECT count(*) FROM chat_holds WHERE reason='unproven_mutation_chat_hold'") != 1 || count(t, old, "SELECT count(*) FROM target_fences WHERE id='source'") != 1 || count(t, old, "SELECT count(*) FROM audio WHERE state='blocked_source' AND id='source'") != 1 || count(t, old, "SELECT count(*) FROM audio WHERE state='pending' AND id='unrelated'") != 1 {
+		t.Fatal("unproven revoke did not fence exactly its target")
 	}
 	j := fixture(t)
 	activate(t, j)

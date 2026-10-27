@@ -20,7 +20,16 @@ func safeAlternate(primary, alternate types.JID) string {
 	}
 	return a.String()
 }
+
+// aliasResolver returns the other address (PN<->LID) of one exact user from the
+// SDK device store's LID map, or an empty JID. It is the same authenticated
+// mapping whatsmeow itself uses for sessions; names/titles never participate.
+type aliasResolver func(types.JID) types.JID
+
 func mutationScope(e *events.Message, remote string) (bool, string) {
+	return mutationScopeResolved(e, remote, nil)
+}
+func mutationScopeResolved(e *events.Message, remote string, resolve aliasResolver) (bool, string) {
 	if remote == "" {
 		return true, "sdk_envelope"
 	}
@@ -40,6 +49,15 @@ func mutationScope(e *events.Message, remote string) (bool, string) {
 		}
 		if alt != "" && r.String() == alt {
 			return true, "sdk_dm_alias"
+		}
+		// The envelope carried no alternate (common for a revoke keyed by the PN
+		// while the DM is journaled under its LID, or the reverse): ask the
+		// device store, in both directions, for this exact user only.
+		// Both directions must agree (reciprocal), as for metadata names.
+		if resolve != nil && validUserID(chat.String()) && validUserID(r.String()) && chat.Server != r.Server {
+			if a, b := resolve(chat), resolve(r); !a.IsEmpty() && !b.IsEmpty() && a.ToNonAD() == r && b.ToNonAD() == chat {
+				return true, "sdk_lid_store"
+			}
 		}
 	}
 	return false, "remote_mismatch"
@@ -161,7 +179,7 @@ func mutationProof(tx *sql.Tx, c Config, m Message) (bool, string, error) {
 func recordMutationProof(tx *sql.Tx, c Config, m Message, author, decision string, newHold bool) error {
 	scope := m.ScopeProof
 	switch scope {
-	case "sdk_edit_envelope", "sdk_envelope", "normalized_remote", "sdk_dm_alias", "remote_mismatch":
+	case "sdk_edit_envelope", "sdk_envelope", "normalized_remote", "sdk_dm_alias", "sdk_lid_store", "remote_mismatch":
 	default:
 		scope = "caller_scoped"
 		if !m.MutationScope {

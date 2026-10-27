@@ -446,7 +446,8 @@ func TestTranscriptPostingToggleAndBothDirections(t *testing.T) {
 func TestReleaseHoldPreservesBlockedEvidenceAndProcessesNewAudio(t *testing.T) {
 	j := fixture(t)
 	activate(t, j)
-	if _, err := j.db.Exec("INSERT INTO chat_holds VALUES(?,?,?,?)", "100@s.whatsapp.net", 1, "200@s.whatsapp.net", "unproven_mutation_chat_hold"); err != nil {
+	// A compute hold (owner clear); posting-only holds are covered in audio_queue_test.go.
+	if _, err := j.db.Exec("INSERT INTO chat_holds VALUES(?,?,?,?)", "100@s.whatsapp.net", 1, "200@s.whatsapp.net", "owner_chat_clear_hold"); err != nil {
 		t.Fatal(err)
 	}
 	j.ingest(audio("blocked", false, 130))

@@ -68,7 +68,8 @@ type rowQuery interface{ QueryRow(string, ...any) *sql.Row }
 
 func blockedSource(q rowQuery, c Config, chat, id string) (bool, error) {
 	var n int
-	err := q.QueryRow(`SELECT EXISTS(SELECT 1 FROM source_blocks WHERE account=? AND generation=? AND chat=? AND id=?) OR EXISTS(SELECT 1 FROM chat_holds WHERE account=? AND generation=? AND chat=?)`, c.Account, c.Generation, chat, id, c.Account, c.Generation, chat).Scan(&n)
+	// Posting fence: exact source block, fenced revoke target ID, or ANY chat hold.
+	err := q.QueryRow(`SELECT EXISTS(SELECT 1 FROM source_blocks WHERE account=? AND generation=? AND chat=? AND id=?) OR EXISTS(SELECT 1 FROM target_fences WHERE account=? AND generation=? AND id=?) OR EXISTS(SELECT 1 FROM chat_holds WHERE account=? AND generation=? AND chat=?)`, c.Account, c.Generation, chat, id, c.Account, c.Generation, id, c.Account, c.Generation, chat).Scan(&n)
 	return n != 0, err
 }
 func (j *Journal) mutate(c Config, m Message) error {
@@ -87,7 +88,16 @@ func (j *Journal) mutate(c Config, m Message) error {
 		return err
 	}
 	newHold := false
-	reason := "unproven_mutation_chat_hold"
+	// An unproven mutation that still names an exact target ID fences THAT ID in
+	// every chat of the account (a DM's PN/LID alias may differ from this chat) and
+	// holds this chat for POSTING only (postingOnlyHold). Without a target ID, or for
+	// an owner clear/delete, nothing narrower is provable: the chat stays held for
+	// compute too, as before.
+	targeted := !verified && !m.OwnerMutation && m.Target != "" && len(m.Target) <= 256
+	reason := postingOnlyHold
+	if !verified && !targeted {
+		reason = "untargeted_mutation_chat_hold"
+	}
 	if m.OwnerMutation && m.Target == "" {
 		reason = "owner_chat_clear_hold"
 	}
@@ -95,11 +105,20 @@ func (j *Journal) mutate(c Config, m Message) error {
 		reason = "verified_source_" + m.Mutation
 		_, err = tx.Exec("INSERT OR IGNORE INTO source_blocks VALUES(?,?,?,?,?)", c.Account, c.Generation, m.Chat, m.Target, reason)
 	} else {
-		var result sql.Result
-		result, err = tx.Exec("INSERT OR IGNORE INTO chat_holds VALUES(?,?,?,?)", c.Account, c.Generation, m.Chat, reason)
-		if err == nil {
-			n, _ := result.RowsAffected()
-			newHold = n == 1
+		if targeted {
+			if _, err = tx.Exec("INSERT OR IGNORE INTO target_fences VALUES(?,?,?,?)", c.Account, c.Generation, m.Target, "unproven_"+m.Mutation+"_target"); err != nil {
+				return err
+			}
+		}
+		var existing string
+		err = tx.QueryRow("SELECT reason FROM chat_holds WHERE account=? AND generation=? AND chat=?", c.Account, c.Generation, m.Chat).Scan(&existing)
+		switch {
+		case errors.Is(err, sql.ErrNoRows):
+			_, err = tx.Exec("INSERT INTO chat_holds VALUES(?,?,?,?)", c.Account, c.Generation, m.Chat, reason)
+			newHold = err == nil
+		case err == nil && existing == postingOnlyHold && reason != postingOnlyHold:
+			// A broader mutation strengthens a posting-only hold into a compute hold.
+			_, err = tx.Exec("UPDATE chat_holds SET reason=? WHERE account=? AND generation=? AND chat=?", reason, c.Account, c.Generation, m.Chat)
 		}
 	}
 	if err != nil {
@@ -116,7 +135,12 @@ func (j *Journal) mutate(c Config, m Message) error {
 	if !verified {
 		target = ""
 	}
-	_, err = tx.Exec("UPDATE audio SET state='blocked_source',reason=? WHERE account=? AND generation=? AND chat=? AND (?='' OR id=?) AND state IN ('pending','transcribed')", reason, c.Account, c.Generation, m.Chat, target, target)
+	if targeted {
+		// The fenced ID only, wherever it was journaled; the chat's other audio continues.
+		_, err = tx.Exec("UPDATE audio SET state='blocked_source',reason=? WHERE account=? AND generation=? AND id=? AND state IN ('pending','transcribed','failed')", reason, c.Account, c.Generation, m.Target)
+	} else {
+		_, err = tx.Exec("UPDATE audio SET state='blocked_source',reason=? WHERE account=? AND generation=? AND chat=? AND (?='' OR id=?) AND state IN ('pending','transcribed','failed')", reason, c.Account, c.Generation, m.Chat, target, target)
+	}
 	if err != nil {
 		return err
 	}
