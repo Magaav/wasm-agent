@@ -4,8 +4,13 @@ local users=dofile('lua/core/users.lua')
 local M={}
 function M.setting()
  local value=host.getenv('WASM_AGENT_CODEMODE') or ''
- if value=='' then return 'default' end
- if value~='native' and value~='off' then error('invalid_codemode_setting:'..value) end
+ -- Code mode is the default of every node, not an opt-in. Unset used to mean the fenced 'default'
+ -- mode, which required an allocated session worktree and therefore stayed invisible in every
+ -- ordinary run: the capability existed, nothing advertised it, and it read as "code mode only
+ -- works inside code mode" (measured 2026-10-27). Unset now means native; an operator who wants
+ -- the worktree fence back asks for it by name.
+ if value=='' then return 'native' end
+ if value~='native' and value~='off' and value~='default' then error('invalid_codemode_setting:'..value) end
  return value
 end
 function M.eligible(memory,role,ctx,mode)

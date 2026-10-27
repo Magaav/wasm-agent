@@ -78,10 +78,19 @@ check(not policy.admit(memory,'master',unknown),'profile authority drift denied 
 local role_ctx=context();policy.pin(memory,'master',role_ctx)
 check(not policy.admit(memory,'guest',role_ctx),'role drift denied despite prior MASTER pin')
 local unbound=memory.start_session('','unbound',{user_id='master'})
-check(not policy.pin(memory,'master',{session_id=unbound}).enabled,'unbound session not silently classified as coding')
+-- The default of a node is code mode on. An unbound session is offered the capability rather than
+-- silently classified as coding: the VM carries no authority, so naming a session does not grant it.
+local unpinned=policy.pin(memory,'master',{session_id=unbound})
+check(unpinned.enabled and unpinned.mode=='native','unbound session gets code mode by default')
+setting='default'
+check(not policy.pin(memory,'master',{session_id=unbound}).enabled,'explicit default mode still fences an unbound session')
+setting=nil
 asset_override=root..'/missing'
-local ok,err=pcall(policy.pin,memory,'master',context());check(not ok and tostring(err):find('codemode_not_ready',1,true),'missing assets fail readiness before advertising')
+local missing=policy.pin(memory,'master',context())
+check(not missing.enabled and tostring(missing.unavailable):find('codemode_sandbox',1,true),'missing assets refuse visibly before advertising')
 assert(host.write_file(root..'/corrupt/quickjs.wasm','corrupt'));assert(host.write_file(root..'/corrupt/prelude.js','corrupt'))
-asset_override=root..'/corrupt';ok,err=pcall(policy.pin,memory,'master',context());check(not ok and tostring(err):find('hash mismatch',1,true),'corrupt assets fail readiness')
+asset_override=root..'/corrupt'
+local corrupt=policy.pin(memory,'master',context())
+check(not corrupt.enabled and tostring(corrupt.unavailable):find('hash mismatch',1,true),'corrupt assets fail readiness with the reason kept')
 asset_override=nil
 print(json.encode({ok=true,checks=checks,rounds=rounds,backend=nested.backend,paid_calls=0}))
