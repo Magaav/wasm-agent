@@ -764,9 +764,9 @@ fn a_secret_in_operation_output_is_redacted_on_disk_and_in_the_view() {
         std::process::id(),
         SEQUENCE.fetch_add(1, Ordering::Relaxed)
     ));
-    let secret = "sk-live-SECRETVALUE-0123456789abcdef";
+    let secret = "sk-FAKE-SECRETVALUE-0123456789abcdef";
     let m = Manager::new(&root).with_secrets(vec![secret.into()]);
-    let id = m.start(shell("printf 'key=sk-live-SECRETVALUE-0123456789abcdef'")).unwrap();
+    let id = m.start(shell("printf 'key=sk-FAKE-SECRETVALUE-0123456789abcdef'")).unwrap();
     let s = settled(&m, &id);
     assert_eq!(s["stdout"], "key=<redacted>", "{s}");
     let on_disk = fs::read_to_string(root.join(&id).join("stdout")).unwrap();
@@ -785,7 +785,7 @@ fn a_secret_split_across_the_read_buffer_is_redacted() {
         std::process::id(),
         SEQUENCE.fetch_add(1, Ordering::Relaxed)
     ));
-    let secret = "sk-live-SECRETVALUE-0123456789abcdef";
+    let secret = "sk-FAKE-SECRETVALUE-0123456789abcdef";
     let m = Manager::new(&root).with_secrets(vec![secret.into()]);
     // 8186 filler bytes put "key=<secret>" across the 8192 read boundary.
     let command = format!("printf '%*s' 8186 '' | tr ' ' x; printf 'key={secret}'");

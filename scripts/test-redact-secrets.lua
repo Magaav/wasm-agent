@@ -16,7 +16,7 @@ local function ok(value, label)
   if not value then error(label) end
 end
 
-local SECRET = "sk-live-SECRETVALUE-0123456789abcdef"
+local SECRET = "sk-FAKE-SECRETVALUE-0123456789abcdef"
 local SECOND = "opencode-SECONDVALUE-4d5e6f7890abcdef"
 local real_getenv = host.getenv
 host.getenv = function(key)
