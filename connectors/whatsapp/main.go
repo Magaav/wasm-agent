@@ -465,9 +465,9 @@ func run() error {
 	go w.Start()
 	// Express lane (default on; WA_WHATSAPP_STT_LANES=1 disables): a second warm
 	// worker that runs only while the main one decodes long audio, and only takes
-	// audio declared <= 90 s. On a 2-core host the two decodes share the CPU, so the
-	// long one slows by at most about half while it overlaps, and a short voice note
-	// lands in seconds instead of after the long one. Costs one more model in RAM.
+	// audio declared <= 90 s. On a 2-core host the two decodes share the CPU while
+	// they overlap (the long one slows for that time), and a short voice note lands
+	// in seconds instead of after the long one. Costs one more model in RAM.
 	var express *Worker
 	if envInt("WA_WHATSAPP_STT_LANES", 2, 1, 2) == 2 {
 		express = &Worker{Python: *python, Script: *worker, Cache: *cache, Stall: stall}

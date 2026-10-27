@@ -68,7 +68,9 @@ or external exactly-once delivery. Pins, checksums and original license texts ar
   Future timestamps >5 minutes ahead are visibly unsupported, not permission to post.
 - Each audio has an independent durable compute task. Failures retain a reason and
   retry time; ingestion does not wait for STT. A warm Python worker loads multilingual
-  `small` CPU/int8 once, beam 5, VAD. Successful transcripts/outbox parts are cached in
+  `small` CPU/int8 once at service start, greedy (beam 1, configurable), VAD; pickup is
+  event-driven with a progress watchdog and bounded fallback tiers
+  ([WHATSAPP-TRANSCRIPTION.md](WHATSAPP-TRANSCRIPTION.md)). Successful transcripts/outbox parts are cached in
   SQLite before posting. Missing cache, interpreter, library or media is visible;
   there is no runtime model download/provider fallback.
 - EN (`en`) is the shipped recognition default. This account must explicitly use PT
@@ -111,7 +113,11 @@ or external exactly-once delivery. Pins, checksums and original license texts ar
   DeleteForMe is an exact source fence even when delivered before that source;
   owner ClearChat/DeleteChat conservatively hold the chat, including full-sync signals.
   An unprovable
-  mutation mapping holds that chat explicitly; no guessed ID/title merge. Final
+  mutation mapping holds that chat explicitly for posting; no guessed ID/title merge.
+  A DM PN/LID alias may be proven through the SDK device store's reciprocal LID map.
+  If the unproven mutation names an exact target ID, that ID is fenced from compute in
+  every chat and the hold is posting-only: the chat's other audio is still transcribed
+  into the journal, never posted while held (WHATSAPP-TRANSCRIPTION.md). Final
   dispatch admission and known mutation commits are serialized. The lock is NOT held
   through readiness checks or an external ACK wait; the adapter rechecks source,
   account/generation and gaps immediately before invoking the SDK. A mutation after
@@ -124,6 +130,8 @@ or external exactly-once delivery. Pins, checksums and original license texts ar
   It removes only that `chat_holds` row and records `hold_released`; mutation
   evidence, source blocks, blocked audio and blocked outbox rows are preserved and
   nothing is replayed. New audio after the release can become pending.
+  Audio blocked only by a posting-only hold can be requeued offline with
+  `wa-whatsapp requeue-held-audio` (dry run by default; see WHATSAPP-TRANSCRIPTION.md).
 - SDK callbacks return processing success/failure. Failed persistence returns false,
   retains a separate fsynced sticky gap marker and blocks posting/activation; Connected
   and OfflineSyncCompleted never erase it. Safe ingestion/retry remains possible.

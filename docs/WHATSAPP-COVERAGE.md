@@ -147,7 +147,10 @@ bulk compute/post, gap/unknown reset, expiry or general AI sends were added.
 
 ## Historical holds remain unresolved; aggregate status is not a new gate
 
-No code clears/reclassifies an existing hold or reopens blocked_source audio.
+No code clears/reclassifies an existing hold or reopens blocked_source audio on its
+own. Since 2026-10-27 the offline, operator-run `requeue-held-audio` (dry run by
+default) can requeue audio held only by a posting-only hold; legacy-hold audio needs
+an explicit flag (WHATSAPP-TRANSCRIPTION.md).
 Future exact mutation evidence and fixed proof/decision enums are retained in the
 private journal. New hold-origin markers are created ONLY when this code actually
 inserts a new hold; later observations cannot fabricate an origin for an old hold.
