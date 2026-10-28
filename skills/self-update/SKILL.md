@@ -33,6 +33,15 @@ node starts (`rust/wa-host/src/binding_runtime.rs`). So:
 
 - **Never stop, kill or "hand over from" a reader's CLI** to restart, start or replace the node. A
   `request restart` / `request deploy` works with the CLI open. A script that `pkill`s `wa` is a bug.
+- **Where your turn runs decides how you deploy.** In the node (`wa serve`, the window, a wake): only
+  `wa-sentinel request deploy`, then end the turn. In a `wa` CLI: `bash scripts/deploy.sh --reason ...`
+  may run in the turn when a sentinel supervises the node - `upgrade.sh` swaps the files and asks the
+  sentinel to restart the node, and the CLI restarts itself afterwards. `scripts/lib/turn-guard.sh`
+  decides from the process tree, so wrapping a deploy in `setsid nohup env ...` changes nothing: it is
+  refused from a node turn either way, and is not needed from a CLI turn.
+- **Never start or kill the node yourself while a sentinel watches it** (`wa-sentinel status`:
+  `sentinel: up`). Two supervisors race: it autostarts a node that is down and owns the lifecycle
+  record (`sentinel/node.json`) that restarts are verified against.
 - An open CLI restarts itself into the same session when the binary it runs is replaced (at its next
   idle moment), and draws turns another process added to its session - a sentinel wake's report reaches
   the reader there too. `touch ~/.wasm-agent/cli-restart.request` (text = reason) asks for that restart.

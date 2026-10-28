@@ -72,3 +72,14 @@ echo 'binding_transport_already_owned' >&2\nsleep 1\nexit 2\n").unwrap();
     assert!(log.contains("sentinel start:") && log.contains("(test)"), "the header says who started it and why: {log}");
     let _ = std::fs::remove_dir_all(&home);
 }
+
+#[test]
+fn a_busy_session_refusal_is_a_wait_and_costs_no_budget() {
+    let refusal = r#"the turn failed: lua/core/agent.lua:1258: run_resource_refused: {"error":"resource_busy","ok":false}"#;
+    assert!(super::wake_refused_busy(refusal));
+    assert!(!super::wake_refused_busy("the turn failed: provider_unavailable"));
+    let now = 10_000u64;
+    let log = format!("{a}\twake-start\ts\tr\n{a}\twake-unstarted\ts\tr\n{b}\twake-start\ts\tr\n{old}\twake-start\ts\tr\n",
+        a = now - 10, b = now - 5, old = now - 4000);
+    assert_eq!(super::wakes_in_window(&log, now), 1);
+}

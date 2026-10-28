@@ -1209,7 +1209,18 @@ fn verb_wake(session: &str, prompt: &str, reason: &str) -> Result<String> {
                 }
                 // Read to the end of the turn: `done` is the node saying it finished. Anything shorter is
                 // reported, so a wake that half-happened is never recorded as a success.
-                let events = consume_wake(std::io::BufReader::new(response.into_body().into_reader()))?;
+                let events = match consume_wake(std::io::BufReader::new(response.into_body().into_reader())) {
+                    Ok(events) => events,
+                    // The session is held by another turn (a reader's CLI in a turn, the window): the node
+                    // refused before starting anything, so this is "not yet", exactly like a node that is
+                    // down. Dropping it is how a deploy's failure report never reached the agent waiting
+                    // in that very session (28/10, twice). Not counted against the hourly budget.
+                    Err(error) if wake_refused_busy(&error.to_string()) => {
+                        unstarted_wake(session, reason);
+                        bail!("wake-wait: session {session} is busy with another turn - the wake is kept and retried when it is free");
+                    }
+                    Err(error) => return Err(error),
+                };
                 audit("wake", session, &format!("{reason} ({events} events, done=true)"));
                 return Ok(format!("{events} events, done=true"));
             }
@@ -1238,16 +1249,40 @@ pub(crate) fn wake_wait_retry(queued_at: u64, now: u64, limit: u64) -> Option<u6
     (now.saturating_sub(queued_at) < limit).then_some(now + WAKE_RETRY_SECS)
 }
 
+/// A wake the node refused before starting a turn because the session was held by another one.
+pub(crate) fn wake_refused_busy(detail: &str) -> bool {
+    detail.contains("run_resource_refused") && detail.contains("resource_busy")
+}
+
+/// Record that a `wake-start` never became a turn, so it does not count against the budget.
+fn unstarted_wake(session: &str, reason: &str) {
+    use std::io::Write;
+    if let Ok(mut log) = std::fs::OpenOptions::new().create(true).append(true).open(log_path()) {
+        let _ = writeln!(log, "{}\twake-unstarted\t{}\t{}", now_epoch(),
+            session.replace(['\n', '\r', '\t'], " "), reason.replace(['\n', '\r', '\t'], " "));
+    }
+}
+
 fn wakes_last_hour() -> u32 {
     let Ok(text) = std::fs::read_to_string(log_path()) else { return 0 };
-    let cutoff = now_epoch().saturating_sub(3600);
-    text.lines()
-        .filter(|line| {
-            let mut fields = line.split('\t');
-            let at: u64 = fields.next().and_then(|v| v.parse().ok()).unwrap_or(0);
-            at >= cutoff && fields.next() == Some("wake-start")
-        })
-        .count() as u32
+    wakes_in_window(&text, now_epoch())
+}
+
+/// Wakes that became turns in the hour before `now`: every `wake-start` minus the `wake-unstarted`.
+pub(crate) fn wakes_in_window(text: &str, now: u64) -> u32 {
+    let cutoff = now.saturating_sub(3600);
+    let (mut started, mut unstarted) = (0u32, 0u32);
+    for line in text.lines() {
+        let mut fields = line.split('\t');
+        let at: u64 = fields.next().and_then(|v| v.parse().ok()).unwrap_or(0);
+        if at < cutoff { continue; }
+        match fields.next() {
+            Some("wake-start") => started += 1,
+            Some("wake-unstarted") => unstarted += 1,
+            _ => {}
+        }
+    }
+    started.saturating_sub(unstarted)
 }
 
 /// A request parked by the hourly wake budget. The request file stays exactly where it is; this

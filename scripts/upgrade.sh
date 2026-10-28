@@ -26,10 +26,14 @@ done
 say() { printf '  %s\n' "$*"; }
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-if [ "${WASM_AGENT_IN_TURN:-}" = "1" ]; then
-  echo "upgrade: refused inside a running turn; request the external sentinel instead" >&2
-  exit 2
-fi
+# A node cannot replace itself; a CLI turn may, through the sentinel (scripts/lib/turn-guard.sh).
+. "$ROOT/scripts/lib/turn-guard.sh" 2>/dev/null || . "$(dirname "$0")/lib/turn-guard.sh"
+TURN_OWNER="$(turn_owner)"
+case "$TURN_OWNER" in
+  node|unknown)
+    echo "upgrade: refused inside a turn running on the node it would replace; request the external sentinel instead" >&2
+    exit 2 ;;
+esac
 PORT="${WA_PORT:-8799}"
 CLIENT_PORT="${WA_CLIENT_PORT:-8800}"
 IDLE_TIMEOUT="${WA_IDLE_TIMEOUT:-900}"
@@ -453,6 +457,34 @@ while :; do
 done
 
 # --- 3. swap, restart, verify, roll back if the new one does not come up -------------------------
+# One supervisor. When a sentinel watches this node it is the one that stops and starts it: it holds the
+# node's lifecycle record (sentinel/node.json), restarts a node that is down, and hands the binding
+# transport over from an open CLI. This script starting its own node beside it raced the sentinel's
+# autostart and verified the wrong pid (serve.pid vs node.json) - every self-deploy rolled back
+# (2026-10-28, three times). Supervised, this script swaps the files and asks for the restart.
+SUPERVISED=0
+if [ "$WINDOWS" != "1" ] && sentinel_supervises "$INSTALL_DIR"; then SUPERVISED=1; fi
+[ "$TURN_OWNER" = "cli" ] && [ "$SUPERVISED" = "0" ] && { say "refused: an upgrade from a CLI turn needs a sentinel supervising the node (wa-sentinel start)"; exit 2; }
+SENTINEL_DIR=""
+# Ask the sentinel to restart the node and wait for its record. 0 = it is back.
+sentinel_restart() {
+  local out id rec=""
+  out="$("$INSTALL_DIR/wa-sentinel" request restart --reason "$1" 2>&1)" || { say "the sentinel refused the restart: $out"; return 1; }
+  id="$(printf '%s\n' "$out" | sed -n 's#.*/requests/\([^/ ]*\)\.json.*#\1#p' | head -1)"
+  SENTINEL_DIR="$(printf '%s\n' "$out" | sed -n 's#.*[: ]\(/[^ ]*\)/requests/[^/ ]*\.json.*#\1#p' | head -1)"
+  [ -n "$id" ] && [ -n "$SENTINEL_DIR" ] || { say "could not read the restart request: $out"; return 1; }
+  say "the sentinel restarts the node (request $id)"
+  for _ in $(seq 1 1200); do
+    for folder in done failed; do
+      [ -f "$SENTINEL_DIR/$folder/$id.json" ] && { rec="$SENTINEL_DIR/$folder/$id.json"; break 2; }
+    done
+    sleep 0.25
+  done
+  [ -n "$rec" ] || { say "the sentinel did not settle the restart within 300s"; return 1; }
+  grep -q '"ok":true' "$rec" || { say "the sentinel's restart failed: $(sed -n 's/.*"detail":"\([^"]*\)".*/\1/p' "$rec")"; return 1; }
+  return 0
+}
+sentinel_node_pid() { sed -n 's/.*"pid":\([0-9]*\).*/\1/p' "$SENTINEL_DIR/node.json" 2>/dev/null | head -1; }
 OLD_PID="$(pid_on_port)"
 phase upgrading stopping
 [ -n "$OLD_PID" ] && say "stopping the node (pid $OLD_PID, by pid - never by image name)"
@@ -464,7 +496,7 @@ if [ -d "$SOURCE_UI" ] && [ "$SOURCE_UI" != "$UI_DIR" ]; then
     [ ! -f "$UI_DIR/$asset" ] || cp -f "$UI_DIR/$asset" "$UI_DIR/$asset.pre-upgrade" || exit 1
   done
 fi
-if [ -n "$OLD_PID" ]; then
+if [ -n "$OLD_PID" ] && [ "$SUPERVISED" = "0" ]; then
   if [ "$WINDOWS" = "1" ]; then
     powershell.exe -NoProfile -Command "Stop-Process -Id $OLD_PID -Force" 2>/dev/null
   else
@@ -553,10 +585,16 @@ if [ -d "$SOURCE_UI" ] && [ "$SOURCE_UI" != "$UI_DIR" ]; then
     cmp -s "$SOURCE_UI/$asset" "$UI_DIR/$asset" || cp -f "$SOURCE_UI/$asset" "$UI_DIR/$asset" || UI_OK=0
   done
 fi
-start_node "$INSTALLED"
-if [ "$UI_OK" = "1" ] && wait_health; then
+if [ "$SUPERVISED" = "1" ]; then
+  STARTED=0
+  [ "$UI_OK" = "1" ] && sentinel_restart "upgrade: $(basename "$NEW")" && STARTED=1
+else
+  start_node "$INSTALLED"; STARTED=1
+fi
+if [ "$STARTED" = "1" ] && [ "$UI_OK" = "1" ] && wait_health; then
   LISTENER="$(pid_on_port)"
-  RECORDED="$(tr -d '[:space:]' < "$INSTALL_DIR/serve.pid" 2>/dev/null)"
+  if [ "$SUPERVISED" = "1" ]; then RECORDED="$(sentinel_node_pid)"
+  else RECORDED="$(tr -d '[:space:]' < "$INSTALL_DIR/serve.pid" 2>/dev/null)"; fi
   if [ -n "$LISTENER" ] && [ "$LISTENER" = "$RECORDED" ]; then
     # Record the new binary before shipping companion files. If a companion
     # copy fails, installed.txt must still name the binary actually serving.
@@ -593,6 +631,19 @@ if [ "$UI_OK" = "1" ] && wait_health; then
 fi
 
 say "the new binary did not come up - putting the previous one back"
+if [ "$SUPERVISED" = "1" ]; then
+  if [ -f "$BACKUP" ]; then
+    cp -f "$BACKUP" "$INSTALLED.new" && mv -f "$INSTALLED.new" "$INSTALLED"
+    for asset in $UI_FILES; do
+      [ ! -f "$UI_DIR/$asset.pre-upgrade" ] || cp -f "$UI_DIR/$asset.pre-upgrade" "$UI_DIR/$asset"
+    done
+    if sentinel_restart "upgrade rollback" && wait_health; then say "rolled back: $(health)"
+    else say "the previous binary did not come up either - see wa-sentinel status and $HOME_DIR/serve.log"; fi
+  else
+    say "no backup to roll back to"
+  fi
+  exit 1
+fi
 FAILED_PID="$(pid_on_port)"
 EXPECTED_PID="$(tr -d '[:space:]' < "$INSTALL_DIR/serve.pid" 2>/dev/null)"
 if [ -n "$FAILED_PID" ] && [ "$FAILED_PID" = "$EXPECTED_PID" ]; then

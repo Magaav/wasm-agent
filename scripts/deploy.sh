@@ -219,9 +219,16 @@ sweep_stale_staging() {
   return 0
 }
 
-if [ "${WASM_AGENT_IN_TURN:-}" = "1" ]; then
-  fail "cannot deploy from a running turn: it cannot become idle while this command waits. Build, then request an upgrade through wa-sentinel; see skills/self-update/SKILL.md"
-fi
+# A node cannot replace itself; a CLI turn may have the sentinel replace the node (scripts/lib/turn-guard.sh).
+. "$(dirname "$0")/lib/turn-guard.sh"
+case "$(turn_owner)" in
+  node|unknown)
+    fail "cannot deploy from a turn running on the node it would replace: it cannot become idle while this command waits. Build, then request it through wa-sentinel (request deploy); see skills/self-update/SKILL.md" ;;
+  cli)
+    sentinel_supervises "$INSTALL_DIR" \
+      || fail "deploying from a CLI turn needs a sentinel supervising the node (wa-sentinel start); none is watching"
+    note "deploying from a CLI turn: the sentinel replaces the node; this CLI restarts itself into its session when idle" ;;
+esac
 
 # 0a. The preconditions of running this at all: the platform's own shell, and an install directory that
 #     exists. Each one refuses BY NAME, before anything is written, because the failure it replaces is a
