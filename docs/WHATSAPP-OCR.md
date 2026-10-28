@@ -6,6 +6,24 @@ The linked-device connector journals text, audio transcripts and image OCR text
 locally. It does not send images, does not expose media keys and does not use a
 hosted OCR/STT provider.
 
+## A chat hold gates posting, not indexing
+
+Indexing an image (and transcribing audio) is a **local derive with no external
+effect**, so a `chat_holds` row annotates the queued task instead of fencing it:
+`media_reason = source_hold_index_only` / `audio.reason = source_hold_transcription_only`.
+Before this, one unproven mutation in a chat marked every later image
+`media_state = blocked_source` and the OCR worker never saw it; Fernanda's two
+27 Oct screenshots were lost that way. A **proven per-message fence** is different
+and still absolute: a `source_blocks` row (revoke/edit/delete naming that exact ID)
+stops the media before indexing, and the outbox/`Ready`/`Send` path keeps refusing
+to post anything from a held chat.
+
+History is recoverable on request, not silently: `wa-whatsapp reindex --state
+<private-dir> [--chat <exact-id>] --confirm` re-queues faded audio/media rows in one
+transaction, skips every row with a `source_blocks` entry, releases no hold, writes
+no outbox row, and records one `hold_rederive` event with the counts. It is an
+offline owner command: stop the service, run it, start again.
+
 ## OCR choice
 
 **RapidOCR (PP-OCR ONNX)** is the local OCR stack. It was chosen over Tesseract for
