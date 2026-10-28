@@ -114,19 +114,30 @@ pub fn transport(action:&str)->Result<Value,String>{
     *started=true;
     let state=if lease.is_some(){"starting"}else{"standby"};
     if let Ok(mut status)=STATUS.lock(){*status=Some(json!({"state":state,"owner":if lease.is_some(){"this process"}else{"another process"}}));}
-    std::thread::Builder::new().name("wa-binding-transport".into()).spawn(move||{
-        let mut lease=lease;let lua=factory();
-        loop{
-            if !server {
-                // A server wants it: let go now, the next server tick takes over.
+    // The lease lives apart from the tick. A tick is network I/O and can block for as long as a peer
+    // takes to answer; a yield checked between ticks then arrived after the starting node had given up
+    // waiting, and the node stayed down behind an open CLI (28/10, every autostart for an hour).
+    let lease=Arc::new(Mutex::new(lease));
+    if !server {
+        let held=lease.clone();
+        std::thread::Builder::new().name("wa-binding-yield".into()).spawn(move||loop{
+            if let Ok(mut lease)=held.lock(){
+                // A server wants it: let go now; it takes the lease on its next try.
                 if lease.is_some() && yield_requested(){
-                    lease=None;
+                    *lease=None;
                     if let Ok(mut status)=STATUS.lock(){*status=Some(json!({"state":"standby","owner":"the node","note":"yielded to the node that started"}));}
                 }
                 // Nobody serves this ledger any more (the node stopped or is restarting): take it back.
-                if lease.is_none() && !yield_requested() && attachment_preflight().is_ok(){ lease=take_lease().ok(); }
+                if lease.is_none() && !yield_requested() && attachment_preflight().is_ok(){ *lease=take_lease().ok(); }
             }
-            if lease.is_some(){
+            std::thread::sleep(Duration::from_millis(250));
+        }).map_err(|e|e.to_string())?;
+    }
+    std::thread::Builder::new().name("wa-binding-transport".into()).spawn(move||{
+        let lua=factory();
+        loop{
+            let owned=lease.lock().map(|lease|lease.is_some()).unwrap_or(false);
+            if owned{
                 let result=lua.call_string("wa_binding_tick",&[]);
                 let view=match result{Ok(text)=>serde_json::from_str(&text).unwrap_or(json!({"state":"unknown","error":"binding_tick_invalid"})),Err(e)=>json!({"state":"unknown","error":e})};
                 if let Ok(mut status)=STATUS.lock(){*status=Some(view);}
