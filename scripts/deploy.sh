@@ -528,6 +528,18 @@ CODEMODE_BUILD_SCRIPT="$ROOT/scripts/codemode-build.mjs"; CODEMODE_BUILD_ROOT="$
 if command -v cygpath >/dev/null 2>&1; then
   CODEMODE_BUILD_SCRIPT="$(cygpath -w "$CODEMODE_BUILD_SCRIPT")"; CODEMODE_BUILD_ROOT="$(cygpath -w "$CODEMODE_BUILD_ROOT")"
 fi
+# A tree that has never built a shipping binary has no prepared assets in its git common dir, and the
+# build then failed on a missing receipt.json - openclaw on 26/10 and 28/10, so that node could not update
+# itself at all. Provisioning is pinned and checksum-verified (scripts/provision-codemode-assets.mjs, the
+# same step up.sh and the coordinator preflight use); a failure is reported and installs nothing.
+CODEMODE_ASSETS="$(git -C "$ROOT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)/codemode-assets/pi-1.2.0-quickjs-3.6.2"
+if [ ! -f "$CODEMODE_ASSETS/receipt.json" ]; then
+  note "code-mode assets not prepared at $CODEMODE_ASSETS; provisioning the pinned, checksum-verified packages"
+  PROVISION_DIR="$CODEMODE_ASSETS"; command -v cygpath >/dev/null 2>&1 && PROVISION_DIR="$(cygpath -w "$CODEMODE_ASSETS")"
+  mkdir -p "$(dirname "$CODEMODE_ASSETS")" \
+    && node "$ROOT/scripts/provision-codemode-assets.mjs" "$PROVISION_DIR" >/dev/null \
+    || fail "codemode_assets_unprovisioned: scripts/provision-codemode-assets.mjs could not prepare $CODEMODE_ASSETS (network to the npm registry?); nothing installed"
+fi
 node "$CODEMODE_BUILD_SCRIPT" build "$CODEMODE_BUILD_ROOT" || fail "native code-mode shipping build/readiness failed; nothing installed"
 # END native code-mode shipping build.
 # The sentinel is its own crate, outside the `rust/` workspace (which lists only `wa-host`), so it is
