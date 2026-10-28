@@ -515,13 +515,17 @@ wait_new_listener() {
   local old="$1" pid
   for _ in $(seq 1 900); do
     pid="$(pid_on_port)"
-    if [ -n "$pid" ] && [ "$pid" != "$old" ]; then case "$(health)" in *'"ok":true'*) printf '%s' "$pid"; return 0 ;; esac; fi
+    # Only a number is a pid: while the new process is binding, the probe can print the socket's own
+    # address ("0.0.0.0:*"), and that was recorded as the pid and failed the check (openclaw, 28/10).
+    case "$pid" in ''|*[!0-9]*) sleep 0.1; continue ;; esac
+    if [ "$pid" != "$old" ]; then case "$(health)" in *'"ok":true'*) printf '%s' "$pid"; return 0 ;; esac; fi
     sleep 0.1
   done
   return 1
 }
 phase upgrading stopping
 if [ "$SUPERVISED" = "1" ]; then [ -n "$OLD_PID" ] && say "the sentinel will stop the node (pid $OLD_PID) once the files are swapped"
+elif [ -n "$MANAGED_UNIT" ]; then say "pid $OLD_PID is ended after the swap; $MANAGED_UNIT starts the new binary"
 else [ -n "$OLD_PID" ] && say "stopping the node (pid $OLD_PID, by pid - never by image name)"; fi
 BACKUP="$INSTALLED.pre-upgrade"
 cp -f "$INSTALLED" "$BACKUP" 2>/dev/null && cmp -s "$INSTALLED" "$BACKUP" || { say "cannot verify recovery binary; not stopping the node"; exit 1; }

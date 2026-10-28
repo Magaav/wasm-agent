@@ -1,0 +1,6 @@
+{
+  "id": "whatsapp-transcript-watchdog",
+  "name": "WhatsApp automatic-transcript watchdog: reads the connector journal and messages the account owner's own chat when posting stops, an audio is stuck or the connector is down",
+  "trigger": {"kind": "schedule", "every_seconds": 600},
+  "action": {"kind": "run", "script": "PREPARED_BY_INSTALL/scripts/whatsapp-transcript-watchdog.mjs", "timeout_seconds": 180}
+}
