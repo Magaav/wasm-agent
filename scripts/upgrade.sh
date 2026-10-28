@@ -487,7 +487,8 @@ sentinel_restart() {
 sentinel_node_pid() { sed -n 's/.*"pid":\([0-9]*\).*/\1/p' "$SENTINEL_DIR/node.json" 2>/dev/null | head -1; }
 OLD_PID="$(pid_on_port)"
 phase upgrading stopping
-[ -n "$OLD_PID" ] && say "stopping the node (pid $OLD_PID, by pid - never by image name)"
+if [ "$SUPERVISED" = "1" ]; then [ -n "$OLD_PID" ] && say "the sentinel will stop the node (pid $OLD_PID) once the files are swapped"
+else [ -n "$OLD_PID" ] && say "stopping the node (pid $OLD_PID, by pid - never by image name)"; fi
 BACKUP="$INSTALLED.pre-upgrade"
 cp -f "$INSTALLED" "$BACKUP" 2>/dev/null && cmp -s "$INSTALLED" "$BACKUP" || { say "cannot verify recovery binary; not stopping the node"; exit 1; }
 if [ -d "$SOURCE_UI" ] && [ "$SOURCE_UI" != "$UI_DIR" ]; then
