@@ -446,12 +446,22 @@ func (j *Journal) ingest(m Message) error {
 		if m.Unsupported != "" {
 			state, reason = "unsupported", m.Unsupported
 		}
-		blocked, e := blockedSource(tx, c, m.Chat, m.ID)
+		blocked, e := sourceBlocked(tx, c, m.Chat, m.ID)
 		if e != nil {
 			return e
 		}
 		if blocked {
 			state, reason = "blocked_source", "source_mutation_or_chat_hold"
+		} else if state == "pending" {
+			// Same rule as audio: indexing an image is a local derive, so a chat hold
+			// annotates the task instead of throwing the content away.
+			held, e := chatHeld(tx, c, m.Chat)
+			if e != nil {
+				return e
+			}
+			if held {
+				reason = "source_hold_index_only"
+			}
 		}
 		_, err = tx.Exec("UPDATE messages SET media_state=?,media_reason=? WHERE account=? AND generation=? AND chat=? AND id=?", state, reason, c.Account, c.Generation, m.Chat, m.ID)
 		if err != nil {
