@@ -277,9 +277,20 @@ wa_service_install_dir() {
   # when there is no witness: `wa_read_service_claim` reads line one as the directory and line two as the
   # sentence that came with it, so an answer and its source are never emitted apart.
   pid="$(wa_port_pid "${WA_PORT:-8799}")"
-  [ -n "$pid" ] || return 0
-  image="$(wa_pid_image "$pid")"
-  [ -n "$image" ] || return 0
+  [ -n "$pid" ] && image="$(wa_pid_image "$pid")"
+  if [ -z "${image:-}" ]; then
+    # No node answering (down, or restarting): the supervisor's own lifecycle record still names the binary
+    # it runs. Without this a deploy while the node was down fell through to the historical default
+    # (~/.local/share/wasm-agent) and would have installed where nothing runs (28/10).
+    local record="${WASM_AGENT_HOME:-$(wa_home_dir)}/.wasm-agent/sentinel/node.json"
+    image="$(sed -n 's/.*"binary":"\([^"]*\)".*/\1/p' "$record" 2>/dev/null | head -1)"
+    [ -n "$image" ] && [ -f "$image" ] || return 0
+    dir="${image%/*}"
+    [ -d "$dir" ] || return 0
+    printf '%s\n' "$dir"
+    printf '%s\n' "the sentinel's node record names $image"
+    return 0
+  fi
   image="$(wa_posix_path "$image")"
   dir="${image%/*}"
   [ -n "$dir" ] && [ "$dir" != "$image" ] && [ -d "$dir" ] || return 0
