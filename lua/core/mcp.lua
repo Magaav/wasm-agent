@@ -46,6 +46,11 @@ local function script_candidates()
  local install=host.getenv('WA_INSTALL_DIR');if install and install~='' then add(install..'/scripts') end
  -- The install a sentinel started this node from (it exports it): where every deploy ships the runtime.
  local operator=host.getenv('WA_INSTANCE_OPERATOR_INSTALL');if operator and operator~='' then add(operator..'/scripts') end
+ -- The default install every installer and deploy targets: a node started by its own service unit
+ -- (openclaw's wa-serve.service) carries neither variable above, and searched only <data>/scripts - absent
+ -- there - so every federated WhatsApp read answered mcp_session_not_installed (28/10).
+ if platform.os()=='windows' then local base=host.getenv('LOCALAPPDATA');if base and base~='' then add((base:gsub('\\','/'))..'/wasm-agent/scripts') end
+ else local okhome,home=pcall(paths.home);if okhome and type(home)=='string' then add(home..'/.local/bin/scripts') end end
  local okdata,data=pcall(paths.data);if okdata and type(data)=='string' then add(data..'/scripts') end
  if platform.os()=='windows' then local localapp=host.getenv('LOCALAPPDATA');if localapp then add(localapp..'/wasm-agent/scripts') end end
  return list

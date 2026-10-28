@@ -61,5 +61,13 @@ host.getenv=function(k)
 end
 for _,file in ipairs(mcp.RUNTIME) do assert(host.write_file(data..'/whole-install/scripts/'..file,'// fixture\n')) end
 check(mcp.script_dir()==data..'/whole-install/scripts','a complete runtime wins over a partial one listed first: '..tostring(mcp.script_dir()))
+-- A node started by its own service unit has no install variable at all: the default install is searched.
+local home=dofile('lua/core/paths.lua').home()
+for _,file in ipairs(mcp.RUNTIME) do assert(host.write_file(home..'/.local/bin/scripts/'..file,'// fixture\n')) end
+host.getenv=function(k)
+  if k=='WA_MCP_SCRIPT_DIR' or k=='WA_INSTANCE_OPERATOR_INSTALL' or k=='WA_INSTALL_DIR' or k=='WA_NODE' or k=='WASM_AGENT_LUA_ROOT' then return nil end
+  return env(k)
+end
+check(mcp.script_dir()==home..'/.local/bin/scripts','with no install variable the default install is found: '..tostring(mcp.script_dir()))
 host.getenv=env
 print(json.encode({ok=true,checks=checks}))
