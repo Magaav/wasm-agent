@@ -81,6 +81,21 @@ local function node_program()
  return 'node'
 end
 function M.node_program()return node_program() end
+-- The mail-mcp binary the installer provisions (`<install>/bin/mail-mcp`, `mail-mcp.exe` on Windows).
+-- `MAIL_MCP_BIN` wins, because that is what the installer records and what an operator overrides by hand.
+local function mail_program()
+ local override=host.getenv('MAIL_MCP_BIN');if override and override~='' then return override end
+ local relative=platform.os()=='windows' and '/bin/mail-mcp.exe' or '/bin/mail-mcp'
+ local bases={}
+ local install=host.getenv('WA_INSTALL_DIR');if install and install~='' then bases[#bases+1]=install end
+ local okdata,data=pcall(paths.data);if okdata and type(data)=='string' then bases[#bases+1]=data end
+ for _,base in ipairs(bases) do
+  local binary=base..relative
+  if host.path_kind(binary)=='file' then return binary end
+ end
+ return nil
+end
+function M.mail_program()return mail_program() end
 local function valid_id(id)return type(id)=='string' and #id<=24 and id:match('^[a-z][a-z0-9_-]*$') end
 local function dense(list,maximum)if type(list)~='table' or #list>maximum then return false end;for key,value in pairs(list)do if type(key)~='number' or key<1 or key>#list or key%1~=0 or type(value)~='string' then return false end end;return true end
 function M.validate(def)

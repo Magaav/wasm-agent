@@ -3,7 +3,9 @@ import { spawn } from 'node:child_process';
 import { TextDecoder } from 'node:util';
 import { createHash, randomUUID } from 'node:crypto';
 
-export const VERSIONS=['2025-11-25','2025-06-18','2024-11-05'];
+// 2025-03-26 is a published revision and the one mail-mcp answers with (measured 2026-10-28: it replies 2025-03-26 to any
+// client version). Our calls are initialize / tools/list / tools/call, which that revision already defines.
+export const VERSIONS=['2025-11-25','2025-06-18','2025-03-26','2024-11-05'];
 const MAX_BYTES=32*1024*1024,MAX_LINE=24*1024*1024;
 export function canonical(value){if(Array.isArray(value))return '['+value.map(canonical).join(',')+']';if(value&&typeof value==='object')return '{'+Object.keys(value).sort().map(k=>JSON.stringify(k)+':'+canonical(value[k])).join(',')+'}';return JSON.stringify(value);}
 export const schemaHash=tools=>createHash('sha256').update(canonical(tools.map(t=>({name:t.name,inputSchema:t.inputSchema})).sort((a,b)=>a.name<b.name?-1:a.name>b.name?1:0))).digest('hex');
