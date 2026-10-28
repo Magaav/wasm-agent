@@ -443,15 +443,26 @@ func TestTranscriptPostingToggleAndBothDirections(t *testing.T) {
 	}
 }
 
-func TestReleaseHoldPreservesBlockedEvidenceAndProcessesNewAudio(t *testing.T) {
+func TestHoldKeepsTranscriptionAndReleaseDoesNotPostIt(t *testing.T) {
 	j := fixture(t)
 	activate(t, j)
 	if _, err := j.db.Exec("INSERT INTO chat_holds VALUES(?,?,?,?)", "100@s.whatsapp.net", 1, "200@s.whatsapp.net", "unproven_mutation_chat_hold"); err != nil {
 		t.Fatal(err)
 	}
 	j.ingest(audio("blocked", false, 130))
-	if count(t, j, "SELECT count(*) FROM audio WHERE id='blocked' AND state='blocked_source'") != 1 {
-		t.Fatal("held audio was not fenced")
+	// An unproven chat hold gates posting, not the local transcript: losing the
+	// transcript is what made a held voice note permanently unreadable.
+	if count(t, j, "SELECT count(*) FROM audio WHERE id='blocked' AND state='pending' AND reason='source_hold_transcription_only'") != 1 {
+		t.Fatal("held audio was not queued for transcription")
+	}
+	if err := j.processAudio(context.Background(), &fakeTransport{}, &recognizer{text: "held transcript"}); err != nil {
+		t.Fatal(err)
+	}
+	if count(t, j, "SELECT count(*) FROM audio WHERE id='blocked' AND state='transcribed' AND transcript='held transcript'") != 1 {
+		t.Fatal("held audio lost its transcript")
+	}
+	if count(t, j, "SELECT count(*) FROM outbox") != 0 {
+		t.Fatal("held audio was posted")
 	}
 	c, _ := j.Config()
 	if err := j.releaseHold(c, "200@s.whatsapp.net", "reviewed unproven revoke"); err != nil {
@@ -460,8 +471,14 @@ func TestReleaseHoldPreservesBlockedEvidenceAndProcessesNewAudio(t *testing.T) {
 	if count(t, j, "SELECT count(*) FROM chat_holds") != 0 {
 		t.Fatal("hold was not released")
 	}
-	if count(t, j, "SELECT count(*) FROM audio WHERE id='blocked' AND state='blocked_source'") != 1 {
-		t.Fatal("blocked evidence was replayed or rewritten")
+	if err := j.processAudio(context.Background(), &fakeTransport{}, &recognizer{text: "held transcript"}); err != nil {
+		t.Fatal(err)
+	}
+	if count(t, j, "SELECT count(*) FROM audio WHERE id='blocked' AND state='transcribed' AND transcript='held transcript'") != 1 {
+		t.Fatal("released hold rewrote the retained transcript")
+	}
+	if count(t, j, "SELECT count(*) FROM outbox") != 0 {
+		t.Fatal("hold release replayed a posting for already-computed audio")
 	}
 	if count(t, j, "SELECT count(*) FROM events WHERE kind='hold_released'") != 1 {
 		t.Fatal("hold release was not recorded")
@@ -472,6 +489,27 @@ func TestReleaseHoldPreservesBlockedEvidenceAndProcessesNewAudio(t *testing.T) {
 	}
 	if err := j.releaseHold(c, "200@s.whatsapp.net", "again"); err == nil || !strings.Contains(err.Error(), "chat_hold_not_found") {
 		t.Fatal("missing hold was not refused", err)
+	}
+}
+
+// A chat hold only annotates audio that is otherwise transcribable, and it never
+// overrides a fence the SDK proved for one exact message ID.
+func TestHoldDoesNotRescueUnprocessableOrFencedAudio(t *testing.T) {
+	j := fixture(t)
+	activate(t, j)
+	if _, err := j.db.Exec("INSERT INTO chat_holds VALUES(?,?,?,?)", "100@s.whatsapp.net", 1, "200@s.whatsapp.net", "unproven_mutation_chat_hold"); err != nil {
+		t.Fatal(err)
+	}
+	j.ingest(audio("future", false, time.Now().Unix()+3600))
+	if count(t, j, "SELECT count(*) FROM audio WHERE id='future' AND state='unsupported' AND reason='future_timestamp_untrusted'") != 1 {
+		t.Fatal("a chat hold made an untrusted timestamp transcribable")
+	}
+	if _, err := j.db.Exec("INSERT INTO source_blocks VALUES(?,?,?,?,?)", "100@s.whatsapp.net", 1, "200@s.whatsapp.net", "deleted", "verified_source_revoke"); err != nil {
+		t.Fatal(err)
+	}
+	j.ingest(audio("deleted", false, 130))
+	if count(t, j, "SELECT count(*) FROM audio WHERE id='deleted' AND state='blocked_source'") != 1 {
+		t.Fatal("proven source fence was bypassed by the chat hold")
 	}
 }
 

@@ -71,6 +71,24 @@ func blockedSource(q rowQuery, c Config, chat, id string) (bool, error) {
 	err := q.QueryRow(`SELECT EXISTS(SELECT 1 FROM source_blocks WHERE account=? AND generation=? AND chat=? AND id=?) OR EXISTS(SELECT 1 FROM chat_holds WHERE account=? AND generation=? AND chat=?)`, c.Account, c.Generation, chat, id, c.Account, c.Generation, chat).Scan(&n)
 	return n != 0, err
 }
+
+// sourceBlocked is the proven fence for ONE message ID: the SDK showed a revoke,
+// edit or delete that names it. A source block outlives hold release and is never
+// replayed, so the audio bytes are not even transcribed.
+func sourceBlocked(q rowQuery, c Config, chat, id string) (bool, error) {
+	var n int
+	err := q.QueryRow(`SELECT EXISTS(SELECT 1 FROM source_blocks WHERE account=? AND generation=? AND chat=? AND id=?)`, c.Account, c.Generation, chat, id).Scan(&n)
+	return n != 0, err
+}
+
+// chatHeld is the UNPROVEN fence for a whole chat. It gates posting, not local
+// transcription: a hold means "we cannot prove what changed here", and losing the
+// transcript of a normal voice note is what made an unreadable audio permanent.
+func chatHeld(q rowQuery, c Config, chat string) (bool, error) {
+	var n int
+	err := q.QueryRow(`SELECT EXISTS(SELECT 1 FROM chat_holds WHERE account=? AND generation=? AND chat=?)`, c.Account, c.Generation, chat).Scan(&n)
+	return n != 0, err
+}
 func (j *Journal) mutate(c Config, m Message) error {
 	j.effectMu.Lock()
 	defer j.effectMu.Unlock()
@@ -116,9 +134,14 @@ func (j *Journal) mutate(c Config, m Message) error {
 	if !verified {
 		target = ""
 	}
-	_, err = tx.Exec("UPDATE audio SET state='blocked_source',reason=? WHERE account=? AND generation=? AND chat=? AND (?='' OR id=?) AND state IN ('pending','transcribed')", reason, c.Account, c.Generation, m.Chat, target, target)
-	if err != nil {
-		return err
+	// Only a proven per-ID fence rewrites audio state. An unproven chat hold keeps
+	// the transcript and blocks the outbox below: the audio row must not become
+	// unreadable evidence for a message that was never itself mutated.
+	if verified {
+		_, err = tx.Exec("UPDATE audio SET state='blocked_source',reason=? WHERE account=? AND generation=? AND chat=? AND (?='' OR id=?) AND state IN ('pending','transcribed')", reason, c.Account, c.Generation, m.Chat, target, target)
+		if err != nil {
+			return err
+		}
 	}
 	_, err = tx.Exec("UPDATE outbox SET state='blocked',ack=? WHERE account=? AND generation=? AND chat=? AND (?='' OR source=?) AND state='ready'", reason, c.Account, c.Generation, m.Chat, target, target)
 	if err != nil {
