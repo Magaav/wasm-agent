@@ -239,7 +239,7 @@ func pair(ctx context.Context, a *Adapter) error {
 }
 func run() error {
 	if len(os.Args) < 2 {
-		return errors.New("usage: wa-whatsapp init|pair|serve|status|activate|pause|language|scope|operator-enable|operator-inspect --state PRIVATE_DIRECTORY [options]")
+		return errors.New("usage: wa-whatsapp init|pair|serve|status|activate|pause|language|scope|operator-enable|operator-inspect|reindex --state PRIVATE_DIRECTORY [options]")
 	}
 	action := os.Args[1]
 	f := flag.NewFlagSet(action, flag.ContinueOnError)
@@ -345,6 +345,18 @@ func run() error {
 			return err
 		}
 		return json.NewEncoder(os.Stdout).Encode(map[string]any{"ok": true, "chat": *holdChat, "released": true, "replayed": false})
+	case "reindex":
+		// Re-derive local work a chat hold had fenced: transcripts and OCR text are
+		// derives, not effects. The hold, the outbox and every proven per-message
+		// fence are untouched, and posting stays refused where it is dispatched.
+		if !*holdConfirm {
+			return errors.New("explicit_hold_rederive_confirmation_required")
+		}
+		counts, err := j.rederiveHeldSources(c)
+		if err != nil {
+			return err
+		}
+		return json.NewEncoder(os.Stdout).Encode(map[string]any{"ok": true, "rederived": counts, "posted": false, "replayed": false})
 	case "pause":
 		c.Requested = false
 		return j.save(c)

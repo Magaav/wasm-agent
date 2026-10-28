@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"os"
@@ -203,6 +204,44 @@ func serveAPI(server *http.Server, listener net.Listener, ctx context.Context, c
 // not be running. It preserves mutation evidence, source blocks and every already
 // blocked audio/outbox row; nothing is replayed. Only future audio in that chat can
 // become pending again.
+// rederiveHeldSources re-queues local derives (transcript, OCR text) that a chat hold
+// had fenced, so an unproven mutation cannot make a normal voice note or screenshot
+// permanently unreadable. Nothing is posted or replayed: the hold stays, the outbox is
+// untouched, and a proven per-message fence (source_blocks) still wins.
+func (j *Journal) rederiveHeldSources(c Config) (map[string]int, error) {
+	j.effectMu.Lock()
+	defer j.effectMu.Unlock()
+	tx, err := j.db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	audioRows, err := tx.Exec(`UPDATE audio SET state='pending',reason='source_hold_transcription_only',attempts=0,next_attempt=0
+		WHERE account=? AND generation=? AND state='blocked_source'
+		AND NOT EXISTS(SELECT 1 FROM source_blocks b WHERE b.account=audio.account AND b.generation=audio.generation AND b.chat=audio.chat AND b.id=audio.id)`, c.Account, c.Generation)
+	if err != nil {
+		return nil, err
+	}
+	mediaRows, err := tx.Exec(`UPDATE messages SET media_state='pending',media_reason='source_hold_index_only',media_attempts=0,media_next_attempt=0
+		WHERE account=? AND generation=? AND media_state='blocked_source'
+		AND NOT EXISTS(SELECT 1 FROM source_blocks b WHERE b.account=messages.account AND b.generation=messages.generation AND b.chat=messages.chat AND b.id=messages.id)`, c.Account, c.Generation)
+	if err != nil {
+		return nil, err
+	}
+	audio, _ := audioRows.RowsAffected()
+	media, _ := mediaRows.RowsAffected()
+	if audio == 0 && media == 0 {
+		return map[string]int{"audio": 0, "media": 0}, nil
+	}
+	if _, err = tx.Exec("INSERT INTO events(kind,at,detail) VALUES('hold_rederive',?,?)", time.Now().Unix(), fmt.Sprintf("audio=%d media=%d", audio, media)); err != nil {
+		return nil, err
+	}
+	if err = tx.Commit(); err != nil {
+		return nil, err
+	}
+	return map[string]int{"audio": int(audio), "media": int(media)}, nil
+}
+
 func (j *Journal) releaseHold(c Config, chat, reason string) error {
 	if !validChat(chat) || strings.TrimSpace(reason) == "" || len(reason) > 500 {
 		return errors.New("reviewed_hold_release_required")
