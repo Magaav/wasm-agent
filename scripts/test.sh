@@ -1106,7 +1106,7 @@ MCP_NODE="$(command -v node)"
 if command -v cygpath >/dev/null 2>&1; then MCP_NODE="$(cygpath -m "$MCP_NODE")"; fi
 MCP_TEST_SOURCE="$WASM_AGENT_LUA_ROOT" WA_NODE="$MCP_NODE" WA_MCP_SCRIPT_DIR="$WASM_AGENT_LUA_ROOT/scripts" \
   WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-mcp.lua" "$BIN" --db "$DB.mcp" | grep 'mcp native ok'
-gate_run node --test --test-reporter=tap scripts/test-mcp.mjs scripts/test-mcp-whatsapp.mjs scripts/test-mcp-session.mjs scripts/test-web.mjs
+gate_run node --test --test-reporter=tap scripts/test-mcp.mjs scripts/test-mcp-whatsapp.mjs scripts/test-mcp-session.mjs scripts/test-web.mjs scripts/test-mcp-runtime-closure.mjs
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-envelope.lua" "$BIN" --db "$DB.envelope" | grep 'envelope ok'
 MCP_RECOVERY_BIN="$BIN"
 if command -v cygpath >/dev/null 2>&1; then MCP_RECOVERY_BIN="$(cygpath -m "$BIN")"; fi

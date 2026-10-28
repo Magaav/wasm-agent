@@ -931,6 +931,16 @@ ship_file "$ROOT/scripts/measure-sentinel-io.ps1" "$INSTALL_DIR/scripts/measure-
 ship_file "$ROOT/scripts/install-sentinel-service.ps1" "$INSTALL_DIR/scripts/install-sentinel-service.ps1" "explicit external Windows SCM installer"
 ship_file "$ROOT/scripts/web-core.mjs" "$INSTALL_DIR/scripts/web-core.mjs" "read-only web adapter core"
 ship_file "$ROOT/scripts/web-http-outcomes.mjs" "$INSTALL_DIR/scripts/web-http-outcomes.mjs" "recoverable web HTTP evidence and pending handles"
+# The MCP runtime also lives in <data>/scripts, where scripts/install.sh puts it and where a node started
+# without its install dir in the environment looks. A deploy that refreshed only the install copy left that
+# one stale - mcp-client.mjs without web-core.mjs - and every web_search died at import (28/10).
+MCP_RUNTIME="mcp-client.mjs mcp-client-core.mjs mcp-server-core.mjs mcp-session.mjs mcp-web.mjs mcp-whatsapp.mjs mcp-mail.mjs web-core.mjs web-http-outcomes.mjs"
+MCP_DATA_SCRIPTS="${WASM_AGENT_HOME:-$HOME}/.wasm-agent/scripts"
+if [ -d "$MCP_DATA_SCRIPTS" ]; then
+  for MCP_FILE in $MCP_RUNTIME; do
+    ship_file "$ROOT/scripts/$MCP_FILE" "$MCP_DATA_SCRIPTS/$MCP_FILE" "MCP runtime ($MCP_FILE) in the data directory"
+  done
+fi
 
 # Ship the WhatsApp pipeline with the node it belongs to. `upgrade.sh` installs the binary, the UI and the
 # self-update skill, and has never carried these: the scripts that read the inbox, the job files that

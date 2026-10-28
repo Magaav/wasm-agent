@@ -44,12 +44,28 @@ local function script_candidates()
  add(host.getenv('WA_MCP_SCRIPT_DIR'))
  local root=host.getenv('WASM_AGENT_LUA_ROOT');if root and root~='' then add(root..'/scripts') end
  local install=host.getenv('WA_INSTALL_DIR');if install and install~='' then add(install..'/scripts') end
+ -- The install a sentinel started this node from (it exports it): where every deploy ships the runtime.
+ local operator=host.getenv('WA_INSTANCE_OPERATOR_INSTALL');if operator and operator~='' then add(operator..'/scripts') end
  local okdata,data=pcall(paths.data);if okdata and type(data)=='string' then add(data..'/scripts') end
  if platform.os()=='windows' then local localapp=host.getenv('LOCALAPPDATA');if localapp then add(localapp..'/wasm-agent/scripts') end end
  return list
 end
 function M.script_candidates()return script_candidates() end
+-- The MCP runtime the node spawns: these files and nothing else they import. scripts/install.sh,
+-- scripts/install.ps1 and scripts/deploy.sh ship exactly this list, and
+-- scripts/test-mcp-runtime-closure.mjs fails when any of them, or the real import graph, disagrees.
+M.RUNTIME={'mcp-client.mjs','mcp-client-core.mjs','mcp-server-core.mjs','mcp-session.mjs','mcp-web.mjs',
+ 'mcp-whatsapp.mjs','mcp-mail.mjs','web-core.mjs','web-http-outcomes.mjs'}
+local function complete(dir)
+ for _,file in ipairs(M.RUNTIME) do if host.path_kind(dir..'/'..file)~='file' then return false end end
+ return true
+end
 function M.script_dir()
+ -- A directory holding only part of the runtime is skipped: a stale copy with mcp-client.mjs but without
+ -- web-core.mjs answered first and every web_search/web_read died at import (mcp_stdio_eof, 28/10).
+ for _,dir in ipairs(script_candidates()) do
+  if complete(dir) then return dir end
+ end
  for _,dir in ipairs(script_candidates()) do
   if host.read_file(dir..'/mcp-client.mjs') then return dir end
  end

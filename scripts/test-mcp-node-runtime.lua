@@ -48,5 +48,18 @@ for _,entry in ipairs(listing.entries or {}) do
       'lua/core/'..name..' launches a bare node instead of mcp.node_program()')
   end
 end
+-- A partial copy of the runtime is never chosen over a complete one (28/10: a stale <data>/scripts with
+-- mcp-client.mjs but no web-core.mjs answered first, and web_search died at import).
+local partial=data..'/partial-scripts';local whole=data..'/whole-scripts'
+assert(host.write_file(partial..'/mcp-client.mjs','// stale\n'))
+for _,file in ipairs(mcp.RUNTIME) do assert(host.write_file(whole..'/'..file,'// fixture\n')) end
+host.getenv=function(k)
+  if k=='WA_MCP_SCRIPT_DIR' then return partial end
+  if k=='WA_INSTANCE_OPERATOR_INSTALL' then return data..'/whole-install' end
+  if k=='WA_NODE' or k=='WA_INSTALL_DIR' or k=='WASM_AGENT_LUA_ROOT' then return nil end
+  return env(k)
+end
+for _,file in ipairs(mcp.RUNTIME) do assert(host.write_file(data..'/whole-install/scripts/'..file,'// fixture\n')) end
+check(mcp.script_dir()==data..'/whole-install/scripts','a complete runtime wins over a partial one listed first: '..tostring(mcp.script_dir()))
 host.getenv=env
 print(json.encode({ok=true,checks=checks}))
