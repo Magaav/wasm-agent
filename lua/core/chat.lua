@@ -322,14 +322,18 @@ function M.run(argv)
     end)
     if torn then io.write(redact.text(message) .. "\n"); os.exit(1) end
     print(redact.text(message))
-    restart_refused = reason
+    -- Remembered with its time: the loop guard refuses for its window only, and a refusal kept forever
+    -- left a CLI on a replaced binary for hours after the churn that tripped it (28/10).
+    restart_refused = { reason = reason, at = host.now() }
   end
   local function restart_if_due()
     local now = host.now()
     if now - restart_checked < cli_restart.CHECK_SECONDS then return end
     restart_checked = now
     local reason = cli_restart.reason()
-    if reason and reason ~= restart_refused and cli_restart.idle() then restart(reason) end
+    local refused = restart_refused
+    local settled = not refused or refused.reason ~= reason or now - refused.at > cli_restart.WINDOW
+    if reason and settled and cli_restart.idle() then restart(reason) end
   end
 
   -- Turns another process adds to this session - a sentinel wake runs on the node, the window may
