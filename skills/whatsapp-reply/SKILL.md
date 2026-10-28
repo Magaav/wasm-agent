@@ -17,6 +17,22 @@ it means it lives on a peer. Before answering that you cannot read or send:
    (the "verified operator route" in docs/WHATSAPP-OPERABILITY.md). Credentials stay on the peer.
 3. Only if no peer holds it, say so - naming the nodes you checked.
 
+Federation (lua/core/federation.lua) lists a peer's connector tools as `peer_<peer>__<tool>`: the reads
+(`..._mcp_whatsapp_list_chats_...`, `read_newest`, `inspect_chat`, ...) and, where the peer has operator
+configs, `peer_<peer>__whatsapp_operator` - the operator-directed send. To send a text the human asked for:
+
+1. Resolve the exact chat id with the reads. Several matches ("Laura" can be a person, a group and a
+   business): ask the human which one; never pick by name. The chat must be in the chosen profile's list
+   (the tool's description names each profile's chats).
+2. `prepare` with that id and the human's exact text (unchanged; the connector adds its signature line).
+3. `approve` with the same fields plus the returned `intent_id` and `approval_digest`. The human's direct
+   request is the content approval - do not ask twice - but if the prepared body or recipient differs from
+   what they asked, stop and show them.
+4. `send` once. Then `status` with the same intent_id. After a timeout or unknown outcome: `status`,
+   never a second `send`.
+
+`whatsapp_send` (the general reply tool) is not this path: it has no recipient and refuses by design.
+
 On 28/10 an agent answered "no send path exists in this runtime" while the bound peer `openclaw` held
 the connector one `remote` call away.
 

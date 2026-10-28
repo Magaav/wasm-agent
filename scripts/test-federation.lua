@@ -54,4 +54,27 @@ dofile=real_dofile
 local tools=dofile('lua/core/tools.lua')
 check(tools.dispatch(memory,'peer_openclaw__whatsapp_read',{},'guest',{}).error:find('forbidden_for_role',1,true),'a guest cannot use federated tools')
 check(tools.has_effect('peer_openclaw__whatsapp_send') and not tools.has_effect('peer_openclaw__whatsapp_read'),'effects follow the peer tier')
+-- Operator-directed send: exported only where configs and the CLI exist; profile and chat scope enforced.
+local paths=dofile('lua/core/paths.lua')
+local opdir=paths.data()..'/operator-fixture'
+assert(host.write_file(opdir..'/operator-management-laura-1.json',json.encode({kind='whatsapp-operator-v1',generation=2,
+  conversations={'5500000000001@s.whatsapp.net'},dispatch_token_file='/nonexistent/d',approval_token_file='/nonexistent/a'})))
+assert(host.write_file(opdir..'/operator-read-1.json','{"kind":"other"}'))
+local scripts=paths.data()..'/op-scripts'
+local mcp=dofile('lua/core/mcp.lua')
+for _,file in ipairs(mcp.RUNTIME) do assert(host.write_file(scripts..'/'..file,'// fixture\n')) end
+assert(host.write_file(scripts..'/whatsapp-operator.mjs','// fixture\n'))
+local env=host.getenv
+host.getenv=function(k) if k=='WA_WHATSAPP_OPERATOR_DIR' then return opdir end if k=='WA_MCP_SCRIPT_DIR' then return scripts end return env(k) end
+local profiles=federation.operator_profiles()
+check(profiles['laura-1'] and profiles['read-1']==nil,'only operator-management configs are profiles')
+local exported={};for _,t in ipairs(federation.exported()) do exported[t.name]=t end
+check(exported.whatsapp_operator and exported.whatsapp_operator.effect=='write','the operator send is exported as a write')
+check(exported.whatsapp_operator.description:find('5500000000001@s.whatsapp.net',1,true),'the description names each profile scope')
+check(federation.operator_call({action='prepare',profile='nobody',request={}}).error=='operator_profile_unknown','an unknown profile refuses')
+check(federation.operator_call({action='delete',profile='laura-1',request={conversation_id='5500000000001@s.whatsapp.net'}}).error=='operator_action_unsupported','only the four actions')
+check(federation.operator_call({action='prepare',profile='laura-1',request={conversation_id='5599999999999@s.whatsapp.net',body='x'}}).error=='operator_conversation_outside_profile','a chat outside the profile refuses before the CLI runs')
+local called
+check(federation.serve({action='call',name='whatsapp_operator',args={action='status',profile='nobody'}},{role='master'},function() called=true end).error=='operator_profile_unknown' and not called,'served through the operator path, never the generic dispatch')
+host.getenv=env
 print(json.encode({ok=true,checks=checks}))

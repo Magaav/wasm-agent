@@ -49,8 +49,100 @@ function M.exported()
         effect = fn.name == 'whatsapp_send' and 'write' or 'read' }
     end
   end
+  if next(M.operator_profiles()) and M.operator_script() then tools[#tools + 1] = M.operator_schema(M.operator_profiles()) end
   table.sort(tools, function(a, b) return a.name < b.name end)
   return tools
+end
+
+-- ---------------------------------------------------------------- operator-directed WhatsApp send
+--
+-- docs/WHATSAPP-OPERATOR-MANAGEMENT.md: a node holding provisioned operator configs
+-- (`<config>/operator-management-<profile>.json`, each scoped to exact chats, tokens as FILE references)
+-- runs `scripts/whatsapp-operator.mjs prepare|approve|send|status` as the trusted operator process. It
+-- was reachable only from a shell on that machine; a bound master now reaches it the same way it reaches
+-- the reads. Nothing about its authority changes: the connector re-checks scope, exact recipient, the
+-- approval digest and the durable intent; the CLI makes one call and never retries.
+local function operator_dir()
+  local override = host.getenv('WA_WHATSAPP_OPERATOR_DIR')
+  if override and override ~= '' then return override end
+  local ok, home = pcall(function() return dofile('lua/core/paths.lua').home() end)
+  return ok and home and (home .. '/.config/wa-whatsapp') or nil
+end
+
+-- {profile = {conversations = {...}}} for every operator config here; non-secret fields only.
+function M.operator_profiles()
+  local dir = operator_dir(); if not dir then return {} end
+  local ok, listing = pcall(function() return json.decode(host.list_dir(dir)) end)
+  local profiles = {}
+  for _, entry in ipairs(ok and type(listing) == 'table' and listing.entries or {}) do
+    local name = entry.kind == 'file' and tostring(entry.name):match('^operator%-management%-([%w_%-]+)%.json$')
+    if name then
+      local raw = host.read_file(dir .. '/' .. entry.name)
+      local parsed, config = pcall(json.decode, raw or '')
+      if parsed and type(config) == 'table' and config.kind == 'whatsapp-operator-v1' and type(config.conversations) == 'table' then
+        profiles[name] = { file = dir .. '/' .. entry.name, conversations = config.conversations }
+      end
+    end
+  end
+  return profiles
+end
+
+local function operator_script()
+  local ok, mcp = pcall(dofile, 'lua/core/mcp.lua')
+  local dir = ok and mcp.script_dir and mcp.script_dir()
+  local script = dir and (dir .. '/whatsapp-operator.mjs')
+  return (script and host.path_kind(script) == 'file') and script or nil, ok and mcp.node_program and mcp.node_program() or nil
+end
+
+local function operator_schema(profiles)
+  local names, lines = {}, {}
+  for name, profile in pairs(profiles) do
+    names[#names + 1] = name
+    lines[#lines + 1] = name .. ': ' .. table.concat(profile.conversations, ', ')
+  end
+  table.sort(names); table.sort(lines)
+  return { name = 'whatsapp_operator', effect = 'write',
+    description = 'Operator-directed WhatsApp text (docs/WHATSAPP-OPERATOR-MANAGEMENT.md): prepare -> approve -> send -> status, ONE call each, never retried. '
+      .. 'The human\'s exact request is the content approval; YOU must resolve the exact recipient id first (ask the human when several chats match) and never change their text. '
+      .. 'prepare {conversation_id, body, reply_to?, mentions?} returns intent_id and approval_digest; approve repeats conversation_id/body/reply_to/mentions plus intent_id and approval_digest; '
+      .. 'send/status take {conversation_id, intent_id}. After a timeout use status with the same intent_id, never a second send. Profiles and the chats each may write to: ' .. table.concat(lines, '; '),
+    parameters = { type = 'object', required = { 'action', 'profile', 'request' }, properties = {
+      action = { type = 'string', enum = { 'prepare', 'approve', 'send', 'status' } },
+      profile = { type = 'string', enum = names },
+      request = { type = 'object', description = 'The request for that action, exactly as above.' } } } }
+end
+
+M.operator_script, M.operator_schema = operator_script, operator_schema
+
+-- Run one operator action here (peer side, for a verified master).
+function M.operator_call(args)
+  args = args or {}
+  local profiles = M.operator_profiles()
+  local profile = profiles[tostring(args.profile or '')]
+  if not profile then return { ok = false, error = 'operator_profile_unknown' } end
+  local action = tostring(args.action or '')
+  if action ~= 'prepare' and action ~= 'approve' and action ~= 'send' and action ~= 'status' then
+    return { ok = false, error = 'operator_action_unsupported' }
+  end
+  local request = type(args.request) == 'table' and args.request or {}
+  local allowed = false
+  for _, id in ipairs(profile.conversations) do if id == request.conversation_id then allowed = true end end
+  if not allowed then return { ok = false, error = 'operator_conversation_outside_profile', profile = args.profile } end
+  local script, node = operator_script()
+  if not script or not node then return { ok = false, error = 'operator_cli_not_installed' } end
+  local dir = operator_dir() .. '/requests'
+  local file = dir .. '/federated-' .. host.uuid() .. '.json'
+  if not host.write_file(file, json.encode(request)) then return { ok = false, error = 'operator_request_not_written' } end
+  local quote = function(text) return "'" .. tostring(text):gsub("'", "'\\''") .. "'" end
+  local command = 'umask 077; chmod 600 ' .. quote(file) .. '; ' .. quote(node) .. ' ' .. quote(script) .. ' ' .. action
+    .. ' --authority-file ' .. quote(profile.file) .. ' --request-file ' .. quote(file)
+  local ok, raw = pcall(host.exec, command, '')
+  local result = ok and (type(raw) == 'string' and json.decode(raw) or raw) or { code = -1, stderr = tostring(raw) }
+  local parsed, answer = pcall(json.decode, tostring(result.stdout or ''))
+  return { ok = (tonumber(result.code) == 0) and parsed and type(answer) == 'table' and answer.ok ~= false,
+    action = action, profile = args.profile, request_file = file,
+    result = parsed and answer or nil, stderr = result.stderr and tostring(result.stderr):sub(1, 400) or nil,
+    note = 'One call, no retry. After a timeout or unknown outcome use status with the same intent_id.' }
 end
 
 -- `caller` is the verified peer (server.lua). Only a master may use another node's connectors.
@@ -66,6 +158,7 @@ function M.serve(args, caller, dispatch)
     local exported = false
     for _, tool in ipairs(M.exported()) do if tool.name == name then exported = true break end end
     if not exported then return { ok = false, error = 'federation_tool_not_exported', name = name } end
+    if name == 'whatsapp_operator' then return M.operator_call(args.args) end
     return dispatch(name, type(args.args) == 'table' and args.args or {})
   end
   return { ok = false, error = 'unknown_federation_action' }
