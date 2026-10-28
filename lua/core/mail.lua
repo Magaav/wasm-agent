@@ -65,7 +65,7 @@ function M.call(mcp, method, args, ctx)
       outcome = 'not_submitted', fix = 'writes are off; set WA_MAIL_WRITES=enabled to allow this tool' }
   end
   local binding = { binary = binary, secret_file = secret, writes = writes and 'enabled' or 'disabled' }
-  local node = mcp.node_program and mcp.node_program() or (host.getenv('WA_NODE') or 'node')
+  local node = mcp.node_program()
   local input = {
     action = 'call',
     server = {

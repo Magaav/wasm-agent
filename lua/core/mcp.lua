@@ -81,6 +81,10 @@ local function node_program()
  return 'node'
 end
 function M.node_program()return node_program() end
+-- The read sessions launch the same runtime: they used `WA_NODE or 'node'`, so on a node with no
+-- system Node (the sandbox image) every reused read failed `program_not_found_on_path` while a probe,
+-- which comes through here, passed (28/10).
+read_sessions.node_program=node_program
 -- The mail-mcp binary the installer provisions (`<install>/bin/mail-mcp`, `mail-mcp.exe` on Windows).
 -- `MAIL_MCP_BIN` wins, because that is what the installer records and what an operator overrides by hand.
 local function mail_program()

@@ -26,7 +26,9 @@ function M.invoke(input,ctx,directory)
   local id=host.uuid();local seed_file=request_dir..'/'..id..'.seed.json';local ready_file=seed_file..'.ready.json'
   local seed={server=input.server,read_tools=input.read_tools,token=host.uuid()..host.uuid(),ready_file=ready_file,request_dir=request_dir,credential_hashes=refs,idle_ms=30000}
   if not host.write_file(seed_file,json.encode(seed)) then return failure('mcp_seed_not_written') end
-  local start=decode(host.operation('start',json.encode({program=host.getenv('WA_NODE') or 'node',args={directory..'/mcp-session.mjs','--seed-file',seed_file},cwd=ctx.cwd or platform.cwd(),timeout_seconds=3600,owner=ctx.session_id or 'mcp-read-session'})))
+  -- The runtime is the one mcp.lua resolves (it sets M.node_program); never a guess at `node` on PATH.
+  if not M.node_program then return failure('mcp_node_runtime_unresolved') end
+  local start=decode(host.operation('start',json.encode({program=M.node_program(),args={directory..'/mcp-session.mjs','--seed-file',seed_file},cwd=ctx.cwd or platform.cwd(),timeout_seconds=3600,owner=ctx.session_id or 'mcp-read-session'})))
   if not start or start.error or not start.operation_id then return failure('mcp_session_not_started',{detail=start}) end
   slot={operation_id=start.operation_id,seed_file=seed_file,ready_file=ready_file,token=seed.token};pool[key]=slot
   for _=1,math.min(36000,20+math.ceil((input.server.timeout_seconds or 30)*10)) do
