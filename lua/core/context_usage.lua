@@ -36,8 +36,7 @@ local function load(bot)
 end
 function M.route(provider)
   local active=provider.active() or {}
-  return host.sha256(json.encode({active.id or '',active.base_url or '',
-    active.id=='openai-sub' and (host.getenv('WASM_AGENT_SUBSCRIPTION_TRANSPORT') or 'native') or ''}))
+  return host.sha256(json.encode({active.id or '',active.base_url or '',''}))
 end
 function M.estimate(bot,messages,tools,route)
   local anchor,reason=load(bot)

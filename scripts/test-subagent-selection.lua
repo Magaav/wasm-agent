@@ -3,7 +3,7 @@ local original_dofile = dofile
 local json = original_dofile('lua/vendor/json.lua')
 local checks = 0
 local function check(ok, label) assert(ok, label); checks=checks+1 end
-local route = 'openai-sub'
+local route = 'opencode-go'
 local mock_provider = {
   active=function() return {id=route} end,
   settings=function() return {model='gpt-6.1-sol'} end,
@@ -27,10 +27,10 @@ dofile=function(path)
 end
 local api=dofile('lua/core/subagents.lua')
 local ctx={user_id='selection-owner',role='master',session_id='parent',run_id='parent-run',model='gpt-6.1-sol',reasoning='xhigh'}
-local profile={model='gpt-6.1-sol',reasoning='low',provider='openai-sub',approved_models={'alternate','unsupported'}}
+local profile={model='gpt-6.1-sol',reasoning='low',provider='opencode-go',approved_models={'alternate','unsupported'}}
 local selected=assert(api.selection({},ctx,profile))
-check(selected.model=='gpt-6.1-sol' and selected.reasoning=='low' and selected.provider=='openai-sub','omitted all selects Sol LOW')
-selected=assert(api.selection({model='alternate',reasoning='high',provider='openai-sub'},ctx,profile))
+check(selected.model=='gpt-6.1-sol' and selected.reasoning=='low' and selected.provider=='opencode-go','omitted all selects Sol LOW')
+selected=assert(api.selection({model='alternate',reasoning='high',provider='opencode-go'},ctx,profile))
 check(selected.model=='alternate' and selected.reasoning=='high','explicit approved override')
 selected=assert(api.selection({model='alternate'},ctx,profile))
 check(selected.model=='alternate' and selected.reasoning=='low','omitted reasoning uses profile')
@@ -46,8 +46,8 @@ _,err=api.selection({provider='other'},ctx,profile)
 check(err=='provider_route_unavailable:other','explicit unavailable route refused')
 route='other'
 _,err=api.selection({},ctx,profile)
-check(err=='provider_route_unavailable:openai-sub','profile unavailable route refused')
-route='openai-sub'
+check(err=='provider_route_unavailable:opencode-go','profile unavailable route refused')
+route='opencode-go'
 _,err=api.selection({reasoning='invalid'},ctx,profile)
 check(err=='reasoning_not_approved:invalid','unsupported reasoning refused')
 local paths=original_dofile('lua/core/paths.lua')
@@ -60,10 +60,10 @@ local receipt=fleet.enqueue({prompt='fixture',profile='selection-fixture',idempo
 check(receipt.subagent_id~=nil and receipt.reasoning=='low','queue resolves profile before serialization')
 local rows=json.decode(host.sql_query('SELECT args,context FROM orchestration_tasks WHERE owner=?',json.encode({ctx.user_id})))
 local args,parent=json.decode(rows[1].args),json.decode(rows[1].context)
-check(args.model==profile.model and args.reasoning=='low' and args.provider=='openai-sub','durable remote selection')
+check(args.model==profile.model and args.reasoning=='low' and args.provider=='opencode-go','durable remote selection')
 check(parent.reasoning=='xhigh' and ctx.reasoning=='xhigh','parent unchanged')
 fleet.tick(api)
-check(remote_args and remote_args.reasoning=='low' and remote_args.provider=='openai-sub','remote placement sends resolved selection')
+check(remote_args and remote_args.reasoning=='low' and remote_args.provider=='opencode-go','remote placement sends resolved selection')
 -- Local placement uses the same serialized fields and does not derive parent overrides.
 fleet.control({action='placement',policy={enabled=true,nodes={{node='local',max_tasks=1}}}},ctx,api)
 local local_receipt=fleet.enqueue({prompt='fixture',profile='selection-fixture',idempotency_key='selection-local'},ctx)
@@ -101,7 +101,7 @@ local _,missing=fleet.control({action='lookup_session'},ctx,
   {control=function() return {error='conversation_id_required'} end})
 check(missing.error=='conversation_id_required','missing session id stays visible')
 check(lookup.task.parent_session_id=='parent' and lookup.task.parent_run_id=='parent-run' and lookup.task.after_id=='local-child','mapping fields retained')
-local stored=json.encode({subagent_id='next-child',session_id='local-session',result={raw='historical'},accounting={provider='openai-sub'},completion={packet='original'}})
+local stored=json.encode({subagent_id='next-child',session_id='local-session',result={raw='historical'},accounting={provider='opencode-go'},completion={packet='original'}})
 assert(host.sql_exec('UPDATE orchestration_tasks SET receipt=? WHERE id=?',json.encode({stored,local_receipt.subagent_id})))
 local tail_api={control=function(a)
   if a.action=='lookup_session' then return {found=true,task={subagent_id='newer-tail',session_id='local-session',after_id='next-child',created_at=999999999999}} end

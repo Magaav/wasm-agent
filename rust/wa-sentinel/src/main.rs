@@ -78,6 +78,8 @@ mod sentinel_return;
 #[cfg(test)]
 mod sentinel_return_tests;
 #[cfg(test)]
+mod supervision_tests;
+#[cfg(test)]
 mod return_engine_tests;
 #[cfg(test)]
 mod observation_io_tests;
@@ -619,7 +621,11 @@ pub(crate) fn hold_for<F: FnOnce() -> bool>(verb: &str, activity: Option<bool>, 
 pub(crate) fn pid_on_port(port: u16) -> Option<u32> {
     #[cfg(windows)] {return winproc::listener_pid(port);}
     #[cfg(not(windows))] {
-    let output = std::process::Command::new("ss").args(["-ltnp"]).output().ok()?;
+    // `ss` is not everywhere (the debian-slim sandbox image has no iproute2): without it every port read
+    // as free, so a restart could not find the node it had to stop. /proc says the same thing.
+    let Ok(output) = std::process::Command::new("ss").args(["-ltnp"]).output() else {
+        return proc_listener_pid(port);
+    };
     let text = String::from_utf8_lossy(&output.stdout);
     for line in text.lines() {
         if line.contains(&format!(":{port} ")) {
@@ -634,11 +640,62 @@ pub(crate) fn pid_on_port(port: u16) -> Option<u32> {
     }
 }
 
+/// The pid listening on TCP `port` (IPv4 or IPv6), from /proc: the socket inode of the LISTEN row, then
+/// the process holding that inode. Only processes this user can read are seen, which is every node this
+/// sentinel can stop.
+#[cfg(not(windows))]
+fn proc_listener_pid(port: u16) -> Option<u32> {
+    let inode = ["/proc/net/tcp", "/proc/net/tcp6"].iter()
+        .filter_map(|path| std::fs::read_to_string(path).ok())
+        .find_map(|table| listen_inode(&table, port))?;
+    let target = format!("socket:[{inode}]");
+    for entry in std::fs::read_dir("/proc").ok()?.flatten() {
+        let Some(pid) = entry.file_name().to_str().and_then(|name| name.parse::<u32>().ok()) else { continue };
+        let Ok(fds) = std::fs::read_dir(entry.path().join("fd")) else { continue };
+        for fd in fds.flatten() {
+            if std::fs::read_link(fd.path()).map(|link| link.to_string_lossy() == target).unwrap_or(false) {
+                return Some(pid);
+            }
+        }
+    }
+    None
+}
+
+/// The inode of the socket listening on `port` in a /proc/net/tcp{,6} table (state 0A = LISTEN).
+pub(crate) fn listen_inode(table: &str, port: u16) -> Option<String> {
+    let wanted = format!("{port:04X}");
+    table.lines().skip(1).find_map(|line| {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        let local_port = fields.get(1)?.rsplit(':').next()?;
+        (local_port.eq_ignore_ascii_case(&wanted) && *fields.get(3)? == "0A")
+            .then(|| fields.get(9).map(|inode| inode.to_string()))?
+    })
+}
+
 /// The node id a listener on `port` announces. `/sync/head` is unauthenticated and carries the
 /// identity, so this is the one probe that distinguishes "our node" from "some program on our
 /// port". It is best-effort: a wedged node may not answer, which is why `recover` does not require
 /// it (the pid, creation time and image are still proved).
 fn node_id_on_port(port: u16) -> Result<String> {
+    // `read_capacity_busy` is the node saying "retry with backoff": its read lane is spawned on demand
+    // and is briefly full after a start or under a burst of window polls. A restart refused on the
+    // first 503 failed for that reason alone (28/10, live). Retried for WA_SENTINEL_IDENTITY_WAIT
+    // seconds (30 by default) before it becomes the refusal it used to be at once.
+    let wait = std::env::var("WA_SENTINEL_IDENTITY_WAIT").ok().and_then(|v| v.parse().ok()).unwrap_or(30u64);
+    let deadline = Instant::now() + Duration::from_secs(wait);
+    let mut pause = Duration::from_millis(250);
+    loop {
+        match node_id_on_port_once(port) {
+            Err(error) if error.to_string().starts_with("node_identity_read_capacity_busy") && Instant::now() < deadline => {
+                std::thread::sleep(pause);
+                pause = (pause * 2).min(Duration::from_secs(4));
+            }
+            other => return other,
+        }
+    }
+}
+
+fn node_id_on_port_once(port: u16) -> Result<String> {
     let url = format!("http://127.0.0.1:{port}/sync/head");
     let response = health_agent().get(&url).call().context("node_identity_http_unavailable")?;
     let status=response.status().as_u16();
@@ -832,7 +889,87 @@ pub(crate) fn stop_node_verified(reason: &str, probe_identity: bool) -> Result<(
     bail!("pid {pid} is still listening on {port} or still alive")
 }
 
-fn start_node(binary: &Path, reason: &str) -> Result<()> {
+/// Where a node this sentinel starts writes its stdout and stderr: `<home>/.wasm-agent/serve.log`, the
+/// same file a hand-run `wa serve` is usually pointed at. It used to be `Stdio::null()`, so a node that
+/// exited at once (`binding_transport_already_owned`, measured 2026-10-28) left "check the node log"
+/// with no log to check.
+pub(crate) fn node_log_path() -> PathBuf {
+    config_dir().join("serve.log")
+}
+
+/// The last `count` non-empty lines of a log, oldest first, each trimmed and clipped.
+pub(crate) fn log_tail(text: &str, count: usize) -> Vec<String> {
+    let mut lines: Vec<String> = text.lines().rev()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .take(count)
+        .map(|line| line.chars().take(240).collect())
+        .collect();
+    lines.reverse();
+    lines
+}
+
+/// The node log's tail as one line for a failure detail, which is what the queue record, the window and
+/// the agent read.
+fn node_log_tail() -> String {
+    let text = std::fs::read(node_log_path()).map(|bytes| {
+        // Only the end matters, and a node log can be large.
+        let start = bytes.len().saturating_sub(16 * 1024);
+        String::from_utf8_lossy(&bytes[start..]).into_owned()
+    }).unwrap_or_default();
+    let tail = log_tail(&text, 5);
+    if tail.is_empty() {
+        format!("{} is empty", node_log_path().display())
+    } else {
+        format!("{}: {}", node_log_path().display(), tail.join(" | "))
+    }
+}
+
+/// How long a start or restart waits for `/health` before reporting failure (`WA_SENTINEL_START_WAIT`
+/// seconds, 180 by default). A node that exits earlier is reported when it exits, not at the deadline.
+fn start_wait_secs() -> u64 {
+    std::env::var("WA_SENTINEL_START_WAIT").ok().and_then(|value| value.trim().parse().ok())
+        .filter(|value: &u64| *value > 0).unwrap_or(180)
+}
+
+/// Whether a node this sentinel spawned has exited, and with which code (`Some(None)`: killed by a
+/// signal). `None` while it runs, or when it is not one of ours.
+fn child_exit(pid: u32) -> Option<Option<i32>> {
+    #[cfg(not(windows))]
+    {
+        if let Ok(mut children) = CHILDREN.lock() {
+            if let Some(child) = children.iter_mut().find(|child| child.id() == pid) {
+                return match child.try_wait() { Ok(Some(status)) => Some(status.code()), _ => None };
+            }
+        }
+        None
+    }
+    #[cfg(windows)]
+    { if pid_alive(pid) { None } else { Some(None) } }
+}
+
+/// Start the installed node and wait for it to answer, failing early - with its exit code and the end
+/// of its log - when it exits before answering.
+fn start_and_verify(binary: &Path, reason: &str) -> Result<()> {
+    let pid = start_node(binary, reason)?;
+    let seconds = start_wait_secs();
+    queue::step("verifying", "waiting for the node to answer /health");
+    let deadline = Instant::now() + Duration::from_secs(seconds);
+    while Instant::now() < deadline {
+        if node_is_up() {
+            return Ok(());
+        }
+        if let Some(code) = child_exit(pid) {
+            reap_children();
+            let code = code.map(|c| c.to_string()).unwrap_or_else(|| "signal".into());
+            bail!("the node (pid {pid}) exited with code {code} before answering /health - {}", node_log_tail());
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    bail!("the node did not come up within {seconds}s - {}", node_log_tail())
+}
+
+fn start_node(binary: &Path, reason: &str) -> Result<u32> {
     let ui = ui_dir();
     let port = node_port();
     let cport = client_port();
@@ -869,12 +1006,31 @@ fn start_node(binary: &Path, reason: &str) -> Result<()> {
     };
     #[cfg(not(windows))]
     let child_pid = {
+        // The node's output goes to its log, after a header saying who started it and why.
+        let (stdout, stderr) = {
+            use std::io::Write;
+            let path = node_log_path();
+            match std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+                Ok(mut log) => {
+                    let _ = writeln!(log, "\n--- {} sentinel start: {} serve --port {port} ({})", now_epoch(),
+                        binary.display(), reason.replace(['\n', '\r'], " "));
+                    match (log.try_clone(), log.try_clone()) {
+                        (Ok(out), Ok(err)) => (std::process::Stdio::from(out), std::process::Stdio::from(err)),
+                        _ => (std::process::Stdio::null(), std::process::Stdio::null()),
+                    }
+                }
+                Err(error) => {
+                    audit("node-log-unavailable", &path.display().to_string(), &error.to_string());
+                    (std::process::Stdio::null(), std::process::Stdio::null())
+                }
+            }
+        };
         let mut command = std::process::Command::new(binary);
         command
             .args(&args)
             .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null());
+            .stdout(stdout)
+            .stderr(stderr);
         if sanitize {
             command.env_clear();
             command.envs(instance::guest_env(&selected));
@@ -938,19 +1094,7 @@ fn start_node(binary: &Path, reason: &str) -> Result<()> {
         }
     }
     audit("start", &binary.display().to_string(), reason);
-    Ok(())
-}
-
-fn wait_up(seconds: u64) -> bool {
-    queue::step("verifying", "waiting for the node to answer /health");
-    let deadline = Instant::now() + Duration::from_secs(seconds);
-    while Instant::now() < deadline {
-        if node_is_up() {
-            return true;
-        }
-        std::thread::sleep(Duration::from_millis(500));
-    }
-    false
+    Ok(child_pid)
 }
 
 // ---------------------------------------------------------------- verbs
@@ -1004,17 +1148,13 @@ fn verb_wake(session: &str, prompt: &str, reason: &str) -> Result<String> {
         audit("wake-deferred", session, &format!("{reason} (budget {budget}/hour used)"));
         bail!("wake-budget: {used}/{budget} in the last hour - deferred, not dropped");
     }
-    // Wait for the node to be listening. A wake is usually written *beside* a restart, and a node that
-    // has just been started takes seconds to bind - so a wake that fires immediately loses the race and
-    // does nothing. It happened on the first end-to-end run: the log said "the node did not accept the
-    // wake" seven seconds after the restart, which is a supervisor failing at the one job it has.
-    let deadline = Instant::now() + Duration::from_secs(120);
-    while !node_is_up() {
-        if Instant::now() >= deadline {
-            audit("wake-failed", session, &format!("{reason} (the node never came up)"));
-            bail!("the node is not answering after 120s - not waking it");
-        }
-        std::thread::sleep(Duration::from_millis(500));
+    // The node must be listening. A wake is usually written *beside* a restart, and a node that has just
+    // been started takes a while to answer. This used to wait here for 120s and then fail the wake for
+    // good - measured 2026-10-28: the node answered 3s after the wake was dropped. A wake for a node that
+    // is down is not a failure, it is "not yet": `wake-wait:` puts it back in the box (finish_request),
+    // retried every few seconds until WA_SENTINEL_WAKE_WAIT has passed since it was queued.
+    if !node_is_up() {
+        bail!("wake-wait: the node is not answering yet - the wake is kept and retried when it is");
     }
     let url = format!("http://127.0.0.1:{}/chat", node_port());
     let body = json!({ "text": wake_notice(prompt), "thread": session }).to_string();
@@ -1081,6 +1221,21 @@ fn verb_wake(session: &str, prompt: &str, reason: &str) -> Result<String> {
     }
     audit("wake-failed", session, &format!("{reason} ({last})"));
     bail!("wake outcome unknown after submission: {last}; not automatically replayed")
+}
+
+/// How often a wake waiting for its node is retried.
+const WAKE_RETRY_SECS: u64 = 15;
+
+/// How long a wake may wait for its node to answer (`WA_SENTINEL_WAKE_WAIT` seconds, 1800 by default).
+fn wake_wait_secs() -> u64 {
+    std::env::var("WA_SENTINEL_WAKE_WAIT").ok().and_then(|value| value.trim().parse().ok())
+        .filter(|value: &u64| *value > 0).unwrap_or(1800)
+}
+
+/// When to retry a wake whose node is not answering, or `None` once it has waited `limit` seconds since
+/// it was queued.
+pub(crate) fn wake_wait_retry(queued_at: u64, now: u64, limit: u64) -> Option<u64> {
+    (now.saturating_sub(queued_at) < limit).then_some(now + WAKE_RETRY_SECS)
 }
 
 fn wakes_last_hour() -> u32 {
@@ -1154,11 +1309,8 @@ pub(crate) fn verb_restart(reason: &str) -> Result<String> {
     } else {
         say("the node was not running; starting it");
     }
-    start_node(&binary, reason)?;
-    if wait_up(60) {
-        return Ok("the node is back".into());
-    }
-    bail!("the node did not come up within 60s - check the node log")
+    start_and_verify(&binary, reason)?;
+    Ok("the node is back".into())
 }
 
 /// Upgrade by running the operator's script, which already proves the binary, waits for idle, swaps,
@@ -1528,8 +1680,7 @@ fn verb_recover(reason:&str)->Result<String> {
     // interruption, so it does not wait for idle - but it still proves the listener is ours, and
     // does not require the identity probe a wedged node may be unable to answer.
     if pid_on_port(node_port()).is_some() {stop_node_verified(reason,false)?;}
-    start_node(&binary,reason)?;
-    if !wait_up(60) {bail!("recovery started node but health was not confirmed")}
+    start_and_verify(&binary,reason).map_err(|error|anyhow::anyhow!("recovery started the node but health was not confirmed: {error}"))?;
     Ok("node recovered; interrupted effects must be reconciled".into())
 }
 
@@ -1636,6 +1787,79 @@ fn queue_run_continuation(claim:&Path,request:&Value,record:&Value)->Result<()> 
 static REQUEST_ACTIVE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 static MAINTENANCE_ACTIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+// ---------------------------------------------------------------- autostart
+
+static AUTOSTART_ACTIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static AUTOSTART_FAILURES: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+/// The epoch before which no autostart is attempted (the backoff after a failed one).
+static AUTOSTART_NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn autostart_path() -> PathBuf {
+    sentinel_dir().join("autostart")
+}
+
+/// Whether the watcher brings a down node back by itself, and why: `WA_SENTINEL_AUTOSTART=1` (a launcher
+/// that owns the machine, like the sandbox's entrypoint) or the `autostart` file (`wa-sentinel autostart
+/// on`). Off by default: on a workstation an operator stops nodes on purpose, and a supervisor that
+/// fights them is worse than one that only reports.
+pub(crate) fn autostart_setting() -> (bool, &'static str) {
+    match std::env::var("WA_SENTINEL_AUTOSTART").as_deref().map(str::trim) {
+        Ok("1" | "on" | "true") => return (true, "env WA_SENTINEL_AUTOSTART"),
+        Ok("0" | "off" | "false") => return (false, "env WA_SENTINEL_AUTOSTART"),
+        _ => {}
+    }
+    if autostart_path().exists() { (true, "file") } else { (false, "default") }
+}
+
+/// Seconds to wait after the `failures`-th failed autostart: 15, 30, 60 ... capped at five minutes.
+pub(crate) fn autostart_backoff(failures: u32) -> u64 {
+    if failures == 0 { return 0; }
+    15u64.saturating_mul(1u64 << (failures - 1).min(16)).min(300)
+}
+
+/// A restart, deploy, recover or spell waiting in the box or being performed: those decide the node's
+/// lifecycle themselves, and an autostart racing them is two starts for one port.
+fn lifecycle_request_pending() -> bool {
+    ["requests", "claimed"].iter().any(|folder| {
+        std::fs::read_dir(sentinel_dir().join(folder)).map(|entries| entries.flatten().any(|entry| {
+            std::fs::read(entry.path()).ok()
+                .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+                .map(|request| is_management_verb(request["verb"].as_str().unwrap_or("")))
+                .unwrap_or(false)
+        })).unwrap_or(false)
+    })
+}
+
+/// One autostart attempt, on its own thread so the watcher keeps serving the box while the node boots.
+/// Holds the maintenance slot for its duration, so a restart that arrives meanwhile waits for it.
+fn spawn_autostart() {
+    use std::sync::atomic::Ordering;
+    if MAINTENANCE_ACTIVE.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_err() {
+        return;
+    }
+    AUTOSTART_ACTIVE.store(true, Ordering::Release);
+    let attempt = AUTOSTART_FAILURES.load(Ordering::Acquire) + 1;
+    let binary = installed_binary();
+    audit("autostart", &binary.display().to_string(), &format!("the node is down; starting it (attempt {attempt})"));
+    std::thread::spawn(move || {
+        let result = if !binary.is_file() {
+            Err(anyhow::anyhow!("nothing installed at {}", binary.display()))
+        } else if let Some(holder) = pid_on_port(node_port()) {
+            Err(anyhow::anyhow!("port {} is held by pid {holder}, which does not answer /health; not starting a second node", node_port()))
+        } else {
+            start_and_verify(&binary, "autostart: the node was down")
+        };
+        if let Err(error) = result {
+            let failures = AUTOSTART_FAILURES.fetch_add(1, Ordering::AcqRel) + 1;
+            let wait = autostart_backoff(failures);
+            AUTOSTART_NEXT.store(now_epoch() + wait, Ordering::Release);
+            audit("autostart-failed", &format!("attempt {attempt}"), &format!("{error:#} - next attempt in {wait}s"));
+        }
+        AUTOSTART_ACTIVE.store(false, Ordering::Release);
+        MAINTENANCE_ACTIVE.store(false, Ordering::Release);
+    });
+}
+
 fn admission_read_contention(detail:&str)->bool {
     detail.starts_with("parent_owner_read_capacity_busy") || detail.starts_with("protocol_native_target_not_owned: node_identity_read_capacity_busy")
 }
@@ -1676,6 +1900,33 @@ fn finish_request(claim: &Path, request: &Value) {
     // A wake deferred for budget is neither a failure nor a completion: the request goes back to the queue
     // and is retried when the allowance rolls over. Before this, the budget turned a deploy's continuation
     // into a `failed` record - so the run that asked for the deploy was never woken and nobody was told.
+    // A wake for a node that is not answering yet waits for it, up to WA_SENTINEL_WAKE_WAIT after it was
+    // queued; past that it fails with a detail that says how long and why, plus the node log's tail.
+    let mut detail = detail;
+    if !ok && detail.starts_with("wake-wait") {
+        let queued_at = request.get("queued_at").and_then(Value::as_u64).unwrap_or_else(now_epoch);
+        match wake_wait_retry(queued_at, now_epoch(), wake_wait_secs()) {
+            Some(retry_at) => {
+                let back = sentinel_dir().join("requests").join(claim.file_name().unwrap_or_default());
+                defer_request(id, retry_at);
+                if std::fs::rename(claim, &back).is_ok() {
+                    queue::observe(request, id, "waiting", "deferred", &detail);
+                    // Once, not every retry: the retries are every few seconds for up to half an hour.
+                    if now_epoch().saturating_sub(queued_at) < WAKE_RETRY_SECS + 2 {
+                        audit("wake-waiting", &back.display().to_string(), "the node is not answering yet; the wake is kept");
+                    }
+                    return;
+                }
+            }
+            None => {
+                let waited = now_epoch().saturating_sub(queued_at);
+                audit("wake-failed", request.get("session").and_then(Value::as_str).unwrap_or(""),
+                    &format!("the node did not answer for {waited}s after the wake was queued"));
+                detail = format!("the node did not answer for {waited}s after this wake was queued (WA_SENTINEL_WAKE_WAIT={}) - the wake was not delivered; {}",
+                    wake_wait_secs(), node_log_tail());
+            }
+        }
+    }
     if !ok && detail.starts_with("wake-budget") {
         let back = sentinel_dir().join("requests").join(claim.file_name().unwrap_or_default());
         defer_request(id, next_wake_slot());
@@ -2316,18 +2567,34 @@ fn watch() -> Result<()> {
         // operator every time they stop a node on purpose. The outage is reported; restarting is a
         // request.
         reap_children();
+        // With autostart on (see `autostart_setting`), a node down for more than ten seconds is started
+        // again, with a backoff after failures; off, the old behaviour stands and the outage is only reported.
         if node_is_up() {
             if down_since.take().is_some() {
                 audit("node-up", &format!("port {}", node_port()), "the node is answering again");
                 say("the node is answering again");
             }
             announced = false;
+            AUTOSTART_FAILURES.store(0, std::sync::atomic::Ordering::Release);
+            AUTOSTART_NEXT.store(0, std::sync::atomic::Ordering::Release);
         } else {
             let since = *down_since.get_or_insert_with(Instant::now);
             if !announced && since.elapsed() > Duration::from_secs(10) {
                 audit("node-down", &format!("port {}", node_port()), "no answer to /health");
-                say("the node is not answering - request a restart with: wa-sentinel request restart");
+                say(if autostart_setting().0 { "the node is not answering - autostart will start it" }
+                    else { "the node is not answering - request a restart with: wa-sentinel request restart" });
                 announced = true;
+            }
+            use std::sync::atomic::Ordering;
+            if since.elapsed() > Duration::from_secs(10)
+                && autostart_setting().0
+                && !stop_path().exists()
+                && !AUTOSTART_ACTIVE.load(Ordering::Acquire)
+                && !MAINTENANCE_ACTIVE.load(Ordering::Acquire)
+                && now_epoch() >= AUTOSTART_NEXT.load(Ordering::Acquire)
+                && !lifecycle_request_pending()
+            {
+                spawn_autostart();
             }
         }
         std::thread::sleep(Duration::from_millis(200));
@@ -2802,6 +3069,10 @@ fn status() -> Result<()> {
             say(&line);
         }
     }
+    {
+        let (on, source) = autostart_setting();
+        say(&format!("autostart: {} ({source})", if on { "on" } else { "off" }));
+    }
     say(&format!("wakes:     {}/{} this hour", wakes_last_hour(),
         std::env::var("WA_SENTINEL_WAKE_BUDGET").unwrap_or_else(|_| "6".into())));
     // The one setting whose absence is invisible until a job's child sits in the queue: say it out loud,
@@ -2844,6 +3115,7 @@ const HELP: &str = r#"wa-sentinel - the process outside the node.
   instance list | show <name> | remove <name> [--purge]
   instance start <name> | stop <name> | status <name>
   --instance <name>   run any verb against a named instance
+  autostart [on|off]   start the node by itself when it is down (WA_SENTINEL_AUTOSTART=1 forces on)
   once | watch | status | health | preflight | start | restart | stop | help
 
 A node cannot restart itself: the turn doing the restarting runs on the node it is
@@ -2966,6 +3238,23 @@ fn main() -> Result<()> {
         "instance" => instance::cli(rest),
         "recover" => verb_recover(rest.first().map(String::as_str).unwrap_or("explicit operator recovery")).map(|s|say(&s)),
         "watch" => watch(),
+        "autostart" => match rest.first().map(String::as_str) {
+            Some("on") => {
+                std::fs::write(autostart_path(), format!("{}\n", now_epoch()))?;
+                audit("autostart-setting", "on", "wa-sentinel autostart on");
+                say("autostart on: the watcher starts the node when it has been down for 10s");
+                Ok(())
+            }
+            Some("off") => {
+                let _ = std::fs::remove_file(autostart_path());
+                audit("autostart-setting", "off", "wa-sentinel autostart off");
+                let (on, source) = autostart_setting();
+                say(&if on { format!("autostart file removed, but it stays on: {source}") } else { "autostart off: a down node is only reported".to_string() });
+                Ok(())
+            }
+            None => { let (on, source) = autostart_setting(); say(&format!("autostart: {} ({source})", if on {"on"} else {"off"})); Ok(()) }
+            Some(other) => bail!("autostart takes on or off, not {other:?}"),
+        },
         "once" => {let _lock=jobs::lock()?;process_requests(false,&mut Held::default()).map(|n| say(&format!("{n} request(s) handled"))) },
         "status" => status(),
         // The `/health` document on its own verb: `status` is the operator's short read and must stay

@@ -762,7 +762,8 @@ mod image_file_tests {
 /// window). Anything else keeps the umask default, so a script or web asset the agent writes is not
 /// silently made private.
 fn secret_file(name: &str) -> bool {
-    matches!(name, "credentials.json" | "auth.json" | "node.key" | "env" | "vault.env")
+    // `*.key` includes the `/vault` keys (lua/core/keys.lua): one secret per file, owner-only.
+    matches!(name, "credentials.json" | "auth.json" | "env" | "vault.env") || name.ends_with(".key")
 }
 
 fn write_atomic(path: &str, text: &str) -> bool {
@@ -972,6 +973,8 @@ pub extern "C-unwind" fn binding_state(l:*mut LuaState)->c_int {
 }
 pub extern "C-unwind" fn binding_transport(l:*mut LuaState)->c_int {
     let action=arg_string(l,1).unwrap_or_default();
+    // `serve` is the node's own claim at startup (main.rs), never a script's.
+    if action=="serve"{push_json(l,&json!({"ok":false,"error":"binding_transport_action_invalid"}));return 1;}
     push_json(l,&crate::binding_runtime::transport(&action).unwrap_or_else(|error|json!({"ok":false,"error":error})));1
 }
 
@@ -2775,6 +2778,8 @@ pub extern "C-unwind" fn terminal_write(l: *mut LuaState) -> c_int {
 #[derive(Default)]
 struct ConsoleInput {
     lines: Vec<String>,
+    /// Lines Lua took from `lines` but holds for later (`input_held`): still queued on screen.
+    held: Vec<String>,
     eof: bool,
     stop: bool,
     running: bool,
@@ -2788,6 +2793,70 @@ struct ConsoleInput {
     transcript: crate::transcript::Transcript,
     /// While the transcript has focus (Up on an empty draft), its key decoder.
     nav: Option<crate::transcript::NavDecoder>,
+    /// A mouse report split across two reads: its start, waiting for the rest (crate::selection).
+    mouse_pending: Vec<u8>,
+    /// The chat text being selected with the mouse; Ctrl+C copies it (OSC 52).
+    selection: Option<Selection>,
+    /// `host.transcript_hold(true)`: writes are kept, not drawn, until the hold ends (a replay).
+    transcript_held: bool,
+    /// The `/status` panel as Lua last described it (`host.status_snapshot`), shown by this thread when
+    /// `/status` is submitted during a run - Lua is blocked in the model call then and cannot open it.
+    status_snapshot: Option<Value>,
+    /// The open panel is that one: this thread owns it and closes it itself, no Lua call waits on it.
+    host_panel: bool,
+}
+
+/// A mouse selection over the chat area: where the drag started and where it is, in screen cells, the
+/// plain rows on screen when it started (the view is frozen while it lasts, so they stay true), and
+/// whether the view was following the bottom - it goes back to following when the selection ends.
+struct Selection { anchor: (usize, usize), head: (usize, usize), rows: Vec<String>, following: bool }
+
+fn clear_selection(state: &mut ConsoleInput) {
+    if let Some(selection) = state.selection.take() {
+        if selection.following { state.transcript.sync(); }
+        state.transcript.dirty = true;
+    }
+}
+
+/// One mouse report from the terminal. Ignored while a panel is open (it owns the screen's bottom).
+fn handle_mouse(state: &mut ConsoleInput, event: crate::selection::Mouse) {
+    use crate::selection::Mouse;
+    if state.panel.is_some() { return; }
+    let Some(editor) = state.editor.as_ref().filter(|editor| editor.row > 0) else { return };
+    let (width, rows) = (editor.width, output_rows(None, editor));
+    match event {
+        Mouse::WheelUp => { clear_selection(state); state.transcript.page(3); }
+        Mouse::WheelDown => { clear_selection(state); state.transcript.page(-3); }
+        Mouse::Press(row, col) => {
+            clear_selection(state);
+            if row > rows || state.nav.is_some() { return; }
+            let following = state.transcript.following();
+            state.transcript.page(0); // freeze: what is selected must not scroll away under the pointer
+            let shown: Vec<String> = state.transcript.view(width, rows).iter().map(|r| crate::selection::plain(r)).collect();
+            state.selection = Some(Selection { anchor: (row, col), head: (row, col), rows: shown, following });
+            state.transcript.dirty = true;
+        }
+        Mouse::Drag(row, col) | Mouse::Release(row, col) => {
+            let Some(selection) = state.selection.as_mut() else { return };
+            selection.head = (row.clamp(1, selection.rows.len().max(1)), col);
+            if matches!(event, Mouse::Release(..)) && selection.head == selection.anchor { clear_selection(state); return; }
+            state.transcript.dirty = true;
+        }
+        Mouse::Other => {}
+    }
+}
+
+/// Ctrl+C with a selection: copy it to the terminal's clipboard and say so in the footer.
+fn copy_selection(state: &mut ConsoleInput) -> bool {
+    let Some(selection) = state.selection.as_ref() else { return false };
+    let text = crate::selection::text(&selection.rows, selection.anchor, selection.head);
+    let _ = crate::terminal_editor::write(&crate::selection::osc52(&text));
+    let count = text.chars().count();
+    clear_selection(state);
+    if let Some(editor) = state.editor.as_mut() {
+        editor.notice = format!("Copied {count} character{}", if count == 1 { "" } else { "s" });
+    }
+    true
 }
 
 static CONSOLE_INPUT: OnceLock<(Mutex<ConsoleInput>, std::sync::Condvar)> = OnceLock::new();
@@ -2823,6 +2892,22 @@ fn current_region(state: &ConsoleInput, editor: &crate::terminal_editor::Editor)
     if state.region == 0 { editor.row.saturating_sub(6) } else { state.region }
 }
 
+/// The rows the chat occupies on screen now (`1..=` this): the terminal minus the bottom - the
+/// input box with its status, menu and footer rows, or an open panel.
+fn output_rows(panel: Option<&crate::terminal_editor::Panel>, editor: &crate::terminal_editor::Editor) -> usize {
+    match panel {
+        Some(panel) => (editor.row + 1).saturating_sub(panel.height().max(7)),
+        None => editor.out_bottom(),
+    }
+}
+
+/// How far one PageUp/PageDown moves the chat: a third of the rows it occupies at the key press.
+fn page_rows(state: &ConsoleInput) -> isize {
+    let area = state.editor.as_ref().filter(|editor| editor.row > 0).map(|editor| output_rows(state.panel.as_ref(), editor));
+    // No framed screen (cannot happen while keys page; kept total): the old ten-row step.
+    crate::transcript::page_step(area.unwrap_or(30))
+}
+
 /// The rows the bottom of the screen needs now, applied, and that bottom drawn: the box (with the
 /// slash menu or the footer under it), or an open panel. Growing scrolls the output up first - a
 /// newline at the old region's last row - so nothing already written is drawn over; shrinking blanks
@@ -2830,10 +2915,7 @@ fn current_region(state: &ConsoleInput, editor: &crate::terminal_editor::Editor)
 fn layout_frame(state: &mut ConsoleInput) -> String {
     let Some(editor) = state.editor.as_ref().filter(|editor| editor.row > 0) else { return String::new() };
     let rows = editor.row + 1;
-    let want = match state.panel.as_ref() {
-        Some(panel) => rows.saturating_sub(panel.height().max(7)),
-        None => editor.out_bottom(),
-    };
+    let want = output_rows(state.panel.as_ref(), editor);
     let have = current_region(state, editor);
     let width = editor.width;
     let mut frame = String::from("\x1b[?25l");
@@ -2844,6 +2926,9 @@ fn layout_frame(state: &mut ConsoleInput) -> String {
     }
     if state.transcript.dirty && want >= 1 {
         frame.push_str(&state.transcript.render(width, want));
+        if let Some(selection) = state.selection.as_ref() {
+            frame.push_str(&crate::selection::overlay(&selection.rows, selection.anchor, selection.head));
+        }
         state.transcript.dirty = false;
     }
     let Some(editor) = state.editor.as_ref() else { return frame };
@@ -2887,7 +2972,7 @@ fn resize_console(state: &mut ConsoleInput, columns: usize, rows: usize) {
     editor.width = columns;
     if let Some(panel) = state.panel.as_mut() { panel.width = columns; panel.rows = rows; }
     state.transcript.dirty = true;
-    let want = match state.panel.as_ref() { Some(panel) => rows.saturating_sub(panel.height().max(7)), None => editor.out_bottom() };
+    let want = output_rows(state.panel.as_ref(), editor);
     frame.push_str(&format!("\x1b[1;{}r", want.max(1)));
     state.region = want.max(1);
     frame.push_str(&layout_frame(state));
@@ -2928,6 +3013,16 @@ fn console_reader() {
     let editor = console_input().0.lock().unwrap_or_else(|e| e.into_inner()).editor.is_some();
     loop {
         if editor {
+            // No key yet: a resize (a maximised window, a split) still redraws now, not at the next
+            // key. While a run is live the ticker does the same; this covers an idle chat.
+            #[cfg(unix)]
+            while !byte_ready(150) {
+                let (lock, wake) = console_input();
+                let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
+                if state.stop { state.running = false; wake.notify_all(); return; }
+                drop(state);
+                let _ = refresh_editor_size();
+            }
             let mut chunk = [0u8; 512];
             let read = read_chunk(&mut handle, &mut chunk);
             let (lock, wake) = console_input();
@@ -2941,8 +3036,19 @@ fn console_reader() {
                             resize_console(&mut state, columns as usize, rows as usize);
                         }
                     }
-                    for &byte in &chunk[..n] {
+                    // Mouse reports (crate::selection) are taken out first; the rest is keys, as before.
+                    let mut data = std::mem::take(&mut state.mouse_pending);
+                    data.extend_from_slice(&chunk[..n]);
+                    let (keys, mice, pending) = crate::selection::take(&data);
+                    state.mouse_pending = pending;
+                    for event in mice { handle_mouse(&mut state, event); }
+                    for &byte in &keys {
                         if let Some(panel) = state.panel.as_mut() { panel.feed(byte); continue; }
+                        // Ctrl+C with a selection copies it; any other key ends the selection first.
+                        if state.selection.is_some() {
+                            if byte == 3 && copy_selection(&mut state) { continue; }
+                            clear_selection(&mut state);
+                        }
                         if let Some(nav) = state.nav.as_mut() {
                             use crate::transcript::NavKey;
                             let key = nav.feed(byte);
@@ -2953,7 +3059,7 @@ fn console_reader() {
                                 NavKey::Right => state.transcript.set_expanded(true),
                                 NavKey::Left => state.transcript.set_expanded(false),
                                 NavKey::PageUp | NavKey::PageDown => {
-                                    let page = state.editor.as_ref().map(|e| e.out_bottom().saturating_sub(1).max(1)).unwrap_or(10) as isize;
+                                    let page = page_rows(&state);
                                     state.transcript.page(if matches!(key, NavKey::PageUp) { page } else { -page });
                                 }
                                 NavKey::Exit | NavKey::Bottom => { state.transcript.sync(); state.nav = None; }
@@ -2976,24 +3082,31 @@ fn console_reader() {
                             }
                             crate::terminal_editor::Action::Bottom => state.transcript.sync(),
                             action @ (crate::terminal_editor::Action::PageUp | crate::terminal_editor::Action::PageDown) => {
-                                // A screen at a time, keeping one row of the previous screen for context.
-                                let page = state.editor.as_ref().map(|e| e.out_bottom().saturating_sub(1).max(1)).unwrap_or(10) as isize;
+                                let page = page_rows(&state);
                                 let up = action == crate::terminal_editor::Action::PageUp;
                                 state.transcript.page(if up { page } else { -page });
                             }
                             crate::terminal_editor::Action::Submit(text) => {
+                                // `/status` while a run is in flight: shown now, over the box, from the
+                                // last snapshot - never queued behind the run, never interrupting it.
+                                let running = state.editor.as_ref().is_some_and(|e| e.status);
+                                if running && text.trim() == "/status" {
+                                    let dims = state.editor.as_ref().map(|e| (e.width, e.row + 1));
+                                    if let (Some(spec), Some((width, rows))) = (state.status_snapshot.clone(), dims) {
+                                        state.panel = Some(crate::terminal_editor::Panel::from_spec(&spec, width, rows));
+                                        state.host_panel = true;
+                                        continue;
+                                    }
+                                }
                                 CLI_INTERRUPT.store(false, std::sync::atomic::Ordering::SeqCst);
                                 state.transcript.to_bottom();
-                                state.lines.push(text)
+                                state.lines.push(text);
+                                sync_queued(&mut state);
                             }
                             crate::terminal_editor::Action::Eof => { state.eof = true; state.running = false; break; }
-                            crate::terminal_editor::Action::Interrupt => {
-                                CLI_INTERRUPT.store(true, std::sync::atomic::Ordering::SeqCst);
-                                // On the footer row, under the box: a newline here would land inside the box.
-                                let _ = crate::terminal_editor::write(&format!(
-                                    "\x1b[?25l\x1b[{};1H\x1b[2K  \x1b[38;2;215;119;87mInterrupting\u{2026}\x1b[0m \x1b[38;2;153;153;153m(ctrl+c again to quit)\x1b[0m{}\x1b[?25h",
-                                    input.row + 1, input.cursor_frame()));
-                            }
+                            // The editor put its own notice (`Interrupting…`) in the footer's place; the
+                            // frame below draws it. The draft is never touched by Ctrl+C.
+                            crate::terminal_editor::Action::Interrupt => CLI_INTERRUPT.store(true, std::sync::atomic::Ordering::SeqCst),
                             crate::terminal_editor::Action::None => {}
                         }
                     }
@@ -3002,7 +3115,7 @@ fn console_reader() {
                     // that is really the start of its end marker would leave the draft stuck in paste mode.
                     let pasting = state.panel.as_ref().map(|panel| panel.pasting())
                         .or_else(|| state.editor.as_ref().map(|input| input.pasting())).unwrap_or(false);
-                    if !state.eof && chunk[n - 1] == 0x1b && !pasting && !byte_ready(120) {
+                    if !state.eof && keys.last() == Some(&0x1b) && !pasting && !byte_ready(120) {
                         if let Some(panel) = state.panel.as_mut() { panel.escape(); }
                         else if let Some(nav) = state.nav.as_mut() {
                             if nav.lone_escape() { state.transcript.sync(); state.nav = None; }
@@ -3010,15 +3123,20 @@ fn console_reader() {
                         else if let Some(input) = state.editor.as_mut() {
                             // Esc closes the slash menu first; with nothing to close and a run in flight
                             // (the status row is up) it interrupts the run, as Ctrl+C does.
-                            let menu_open = input.menu_rows() > 0;
+                            // Bash mode is left the same way, never interrupting the run.
+                            let menu_open = input.menu_rows() > 0 || input.bash;
                             input.escape();
                             if !menu_open && input.status {
                                 CLI_INTERRUPT.store(true, std::sync::atomic::Ordering::SeqCst);
-                                let _ = crate::terminal_editor::write(&format!(
-                                    "\x1b[?25l\x1b[{};1H\x1b[2K\x1b[38;2;215;119;87mInterrupting\u{2026}\x1b[0m{}\x1b[?25h",
-                                    input.row + 1, input.cursor_frame()));
+                                input.notice = "Interrupting\u{2026}".into();
                             }
                         }
+                    }
+                    // The host's own `/status` panel closes itself on its answer (Esc, Left, Enter).
+                    if state.host_panel && state.panel.as_ref().map_or(true, |panel| panel.result.is_some()) {
+                        state.panel = None;
+                        state.host_panel = false;
+                        state.transcript.dirty = true;
                     }
                     let frame = layout_frame(&mut state);
                     if !frame.is_empty() { let _ = crate::terminal_editor::write(&frame); }
@@ -3111,7 +3229,7 @@ pub extern "C-unwind" fn input_editor(l: *mut LuaState) -> c_int {
         editor.width = width;
         editor.height = height;
         let frame = layout_frame(&mut state);
-        crate::terminal_editor::write(&format!("\x1b[?2004h{frame}")).is_ok()
+        crate::terminal_editor::write(&format!("\x1b[?2004h{}{frame}", crate::selection::ENABLE)).is_ok()
     } else { false };
     unsafe { crate::lua::lua_pushboolean(l, if ok { 1 } else { 0 }) };
     1
@@ -3134,6 +3252,7 @@ pub extern "C-unwind" fn panel(l: *mut LuaState) -> c_int {
         return 1;
     };
     let Some(spec) = spec else {
+        state.host_panel = false;
         if state.panel.take().is_some() {
             let frame = layout_frame(&mut state);
             let _ = crate::terminal_editor::write(&frame);
@@ -3145,6 +3264,7 @@ pub extern "C-unwind" fn panel(l: *mut LuaState) -> c_int {
     let deadline = spec.get("timeout_ms").and_then(|v| v.as_u64())
         .map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms));
     state.panel = Some(crate::terminal_editor::Panel::from_spec(&spec, width, rows));
+    state.host_panel = false;
     let frame = layout_frame(&mut state);
     let _ = crate::terminal_editor::write(&frame);
     let answer = loop {
@@ -3189,11 +3309,39 @@ pub extern "C-unwind" fn transcript_write(l: *mut LuaState) -> c_int {
     let (lock, _) = console_input();
     let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
     state.transcript.write(&text);
-    let ok = if state.editor.as_ref().is_some_and(|e| e.row > 0) && state.panel.is_none() {
+    let ok = if state.editor.as_ref().is_some_and(|e| e.row > 0) && state.panel.is_none() && !state.transcript_held {
         let frame = layout_frame(&mut state);
         crate::terminal_editor::write(&frame).is_ok()
     } else { true };
     unsafe { crate::lua::lua_pushboolean(l, if ok { 1 } else { 0 }) };
+    1
+}
+
+/// `host.status_snapshot(spec_json)`: the panel `/status` shows if it is submitted while a run is in
+/// flight (`{title, lines}`, as `host.panel` takes it). Replaced on every call; never opened here.
+pub extern "C-unwind" fn status_snapshot(l: *mut LuaState) -> c_int {
+    let spec = arg_string(l, 1).and_then(|text| serde_json::from_str::<Value>(&text).ok()).filter(|v| v.is_object());
+    let (lock, _) = console_input();
+    let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
+    state.status_snapshot = spec;
+    unsafe { crate::lua::lua_pushboolean(l, 1) };
+    1
+}
+
+/// `host.transcript_hold(on)`: while on, `transcript_write` keeps what it is given without drawing it;
+/// turning it off draws the result once. A resumed session's replay is thousands of writes, and a
+/// frame per write is thousands of full redraws for a picture nobody sees until the last one.
+pub extern "C-unwind" fn transcript_hold(l: *mut LuaState) -> c_int {
+    let on = unsafe { crate::lua::lua_toboolean(l, 1) } != 0;
+    let (lock, _) = console_input();
+    let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
+    let was = std::mem::replace(&mut state.transcript_held, on);
+    if was && !on && state.editor.as_ref().is_some_and(|e| e.row > 0) && state.panel.is_none() {
+        state.transcript.dirty = true;
+        let frame = layout_frame(&mut state);
+        let _ = crate::terminal_editor::write(&frame);
+    }
+    unsafe { crate::lua::lua_pushboolean(l, 1) };
     1
 }
 
@@ -3216,6 +3364,7 @@ pub extern "C-unwind" fn editor_status(l: *mut LuaState) -> c_int {
     let ok = if let Some(editor) = state.editor.as_mut() {
         if editor.status != on {
             editor.status = on;
+            editor.notice.clear();
             if editor.row > 0 && state.panel.is_none() {
                 let frame = layout_frame(&mut state);
                 let _ = crate::terminal_editor::write(&frame);
@@ -3241,6 +3390,37 @@ pub extern "C-unwind" fn input_commands(l: *mut LuaState) -> c_int {
     let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
     let ok = if let Some(editor) = state.editor.as_mut() { editor.commands = list; true } else { false };
     unsafe { crate::lua::lua_pushboolean(l, if ok { 1 } else { 0 }) };
+    1
+}
+
+/// What the editor lists above the status line as queued: the lines Lua took but holds (a slash
+/// command waits for the run's end; `input_held`), then the lines not taken yet. True if it changed.
+fn sync_queued(state: &mut ConsoleInput) -> bool {
+    let queued: Vec<String> = state.held.iter().chain(state.lines.iter()).cloned().collect();
+    match state.editor.as_mut() {
+        Some(editor) if editor.queued != queued => { editor.queued = queued; true }
+        _ => false,
+    }
+}
+
+/// Redraw the bottom of the screen (and the chat, when its region moved) outside a keystroke.
+fn redraw_bottom(state: &mut ConsoleInput) {
+    if state.editor.as_ref().is_some_and(|e| e.row > 0) && state.panel.is_none() {
+        let frame = layout_frame(state);
+        if !frame.is_empty() { let _ = crate::terminal_editor::write(&frame); }
+    }
+}
+
+/// `host.input_held(json)`: the lines Lua took from the queue but has not used yet (`[text]`), so
+/// the editor keeps listing them as queued. `[]` once they are used.
+pub extern "C-unwind" fn input_held(l: *mut LuaState) -> c_int {
+    let held: Vec<String> = arg_string(l, 1)
+        .and_then(|text| serde_json::from_str::<Vec<String>>(&text).ok()).unwrap_or_default();
+    let (lock, _) = console_input();
+    let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
+    state.held = held;
+    if sync_queued(&mut state) { redraw_bottom(&mut state); }
+    unsafe { crate::lua::lua_pushboolean(l, if state.editor.is_some() { 1 } else { 0 }) };
     1
 }
 
@@ -3286,6 +3466,7 @@ pub extern "C-unwind" fn input_take(l: *mut LuaState) -> c_int {
     let mut state = wait_for_input(wake, state, deadline);
     let lines: Vec<String> = state.lines.drain(..).collect();
     let (eof, running) = (state.eof, state.running);
+    if !lines.is_empty() && sync_queued(&mut state) { redraw_bottom(&mut state); }
     drop(state);
     push_json(l, &json!({"lines": lines, "eof": eof, "running": running}));
     1
@@ -3301,7 +3482,9 @@ pub fn restore_input() {
     let (lock, wake) = console_input();
     if let Ok(mut state) = lock.lock() {
         state.stop = true;
-        if state.editor.is_some() { let _ = crate::terminal_editor::write("\x1b[?2004l"); }
+        if state.editor.is_some() { let _ = crate::terminal_editor::write(&format!("\x1b[?2004l{}", crate::selection::DISABLE)); }
+        state.selection = None;
+        state.mouse_pending.clear();
         state.editor = None;
         state.panel = None;
         state.region = 0;
@@ -3309,6 +3492,98 @@ pub fn restore_input() {
         state.nav = None;
         state.raw = None; // Drop restores the original console mode and input codepage.
         wake.notify_all();
+    }
+}
+
+/// `host.input_idle()` -> `{idle, draft_empty, panel, queued, selection}`: whether the CLI can restart
+/// now without throwing away anything the reader is doing.
+pub extern "C-unwind" fn input_idle(l: *mut LuaState) -> c_int {
+    let (lock, _) = console_input();
+    let state = lock.lock().unwrap_or_else(|e| e.into_inner());
+    let draft_empty = state.editor.as_ref().map(|e| e.draft_empty()).unwrap_or(true);
+    let queued = state.lines.len() + state.held.len();
+    let panel = state.panel.is_some();
+    let selection = state.selection.is_some();
+    push_json(l, &json!({"idle": draft_empty && !panel && queued == 0 && !selection,
+        "draft_empty": draft_empty, "panel": panel, "queued": queued, "selection": selection}));
+    1
+}
+
+/// The binary this process runs, as found on disk at the first ask: `(path, inode, mtime, len)`.
+static BINARY_AT_START: OnceLock<Option<(std::path::PathBuf, u64, Option<std::time::SystemTime>, u64)>> = OnceLock::new();
+
+/// This process's own binary, by its path (a replaced file shows as `<path> (deleted)` on Linux).
+fn binary_path() -> Option<(std::path::PathBuf, bool)> {
+    let path = std::env::current_exe().ok()?;
+    let text = path.to_string_lossy().to_string();
+    match text.strip_suffix(" (deleted)") { Some(clean) => Some((clean.into(), true)), None => Some((path, false)) }
+}
+
+fn binary_identity(path: &std::path::Path) -> (u64, Option<std::time::SystemTime>, u64) {
+    let meta = std::fs::metadata(path).ok();
+    #[cfg(unix)] let inode = { use std::os::unix::fs::MetadataExt; meta.as_ref().map(|m| m.ino()).unwrap_or(0) };
+    #[cfg(not(unix))] let inode = 0u64;
+    (inode, meta.as_ref().and_then(|m| m.modified().ok()), meta.map(|m| m.len()).unwrap_or(0))
+}
+
+/// `host.binary_changed()` -> `{changed, path, reason?}`. The first call records what is on disk; a
+/// later one says whether the file at that path is another binary now (an install replaced it: a new
+/// inode, or the running file shows as deleted, or the same file was rewritten). The CLI asks this
+/// between runs to restart itself into the build a deploy installed (lua/core/cli_restart.lua).
+pub extern "C-unwind" fn binary_changed(l: *mut LuaState) -> c_int {
+    let start = BINARY_AT_START.get_or_init(|| binary_path().map(|(path, _)| {
+        let (inode, mtime, len) = binary_identity(&path);
+        (path, inode, mtime, len)
+    }));
+    let Some((path, inode, mtime, len)) = start.as_ref() else {
+        push_json(l, &json!({"changed": false, "error": "binary_path_unknown"}));
+        return 1;
+    };
+    let deleted = binary_path().map(|(_, deleted)| deleted).unwrap_or(false);
+    let (now_inode, now_mtime, now_len) = binary_identity(path);
+    let reason = if !path.exists() { None }
+        else if deleted { Some("the running binary was replaced") }
+        else if now_inode != *inode { Some("a new binary was installed at this path") }
+        else if now_mtime != *mtime || now_len != *len { Some("the binary was rewritten") }
+        else { None };
+    push_json(l, &json!({"changed": reason.is_some(), "path": path.to_string_lossy(), "reason": reason}));
+    1
+}
+
+/// `host.cli_reexec(args_json, env_json)`: give the terminal back (raw mode, scroll region, mouse,
+/// paste mode - everything `input_stop` restores) and replace this process with the wa binary at
+/// this process's own path, run with `args` and these extra environment values. Only returns on
+/// failure: `{error}`. `WA_REEXEC_BINARY` names another binary (tests).
+pub extern "C-unwind" fn cli_reexec(l: *mut LuaState) -> c_int {
+    let args: Vec<String> = arg_string(l, 1).and_then(|raw| serde_json::from_str(&raw).ok()).unwrap_or_default();
+    let env: serde_json::Map<String, Value> = arg_string(l, 2).and_then(|raw| serde_json::from_str(&raw).ok()).unwrap_or_default();
+    let binary = std::env::var("WA_REEXEC_BINARY").ok().filter(|b| !b.is_empty()).map(std::path::PathBuf::from)
+        .or_else(|| binary_path().map(|(path, _)| path));
+    let Some(binary) = binary.filter(|path| path.exists()) else {
+        push_json(l, &json!({"error": "binary_not_found"}));
+        return 1;
+    };
+    restore_input();
+    let mut command = std::process::Command::new(&binary);
+    // The same database this process resolved (main.rs exports it), or a `wa --db x` session would
+    // come back looking for its thread in the default ledger.
+    if let Ok(db) = std::env::var("WASM_AGENT_DB") { if !db.is_empty() { command.arg("--db").arg(db); } }
+    command.args(&args);
+    for (key, value) in env { command.env(key, value.as_str().map(str::to_string).unwrap_or_else(|| value.to_string())); }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        let error = command.exec(); // returns only on failure
+        push_json(l, &json!({"error": format!("exec_failed: {error}"), "binary": binary.to_string_lossy()}));
+        return 1;
+    }
+    #[cfg(not(unix))]
+    {
+        // No exec on Windows: run the new process in this console and leave with its status.
+        match command.status() {
+            Ok(status) => std::process::exit(status.code().unwrap_or(0)),
+            Err(error) => { push_json(l, &json!({"error": format!("spawn_failed: {error}")})); return 1; }
+        }
     }
 }
 
@@ -3321,6 +3596,47 @@ pub extern "C-unwind" fn input_stop(l: *mut LuaState) -> c_int {
 #[cfg(test)]
 mod terminal_tests {
     use super::usable_size;
+
+    /// A line sent during a run is listed above the status line until Lua takes it; a line Lua
+    /// holds for after the run (`input_held`) stays listed; taking it hands the rows back to the chat.
+    #[test]
+    fn a_steer_is_listed_until_it_is_taken() {
+        let mut state = super::ConsoleInput::default();
+        let mut editor = crate::terminal_editor::Editor::default();
+        editor.row = 39; editor.width = 80; editor.height = 3; editor.status = true;
+        state.editor = Some(editor);
+        let bottom = state.editor.as_ref().unwrap().out_bottom();
+        state.lines.push("use the new requirement".into());
+        assert!(super::sync_queued(&mut state));
+        assert!(!super::sync_queued(&mut state), "nothing new: no redraw");
+        assert_eq!(state.editor.as_ref().unwrap().out_bottom(), bottom - 1, "one row above the status line");
+        state.lines.clear();
+        state.held = vec!["/model".into()];
+        assert!(super::sync_queued(&mut state));
+        assert_eq!(state.editor.as_ref().unwrap().queued, vec!["/model".to_string()], "a held command stays listed");
+        state.held.clear();
+        assert!(super::sync_queued(&mut state));
+        assert_eq!(state.editor.as_ref().unwrap().out_bottom(), bottom, "used: the row goes back to the chat");
+    }
+
+    /// PageUp/PageDown move a third of the rows the chat occupies at the key press - the terminal
+    /// minus the input box, status and footer - so a taller draft or a run's status row pages less.
+    #[test]
+    fn a_page_is_a_third_of_the_chat_rows_on_screen() {
+        let mut state = super::ConsoleInput::default();
+        let mut editor = crate::terminal_editor::Editor::default();
+        editor.row = 39; editor.width = 80; editor.height = 3;
+        state.editor = Some(editor);
+        let area = state.editor.as_ref().unwrap().out_bottom();
+        assert_eq!(area, 36, "a 40-row terminal: footer, box borders and one draft row below the chat");
+        assert_eq!(super::page_rows(&state), 12);
+        state.editor.as_mut().unwrap().status = true;
+        assert_eq!(super::page_rows(&state), 11, "a run's status row is not chat: 35 rows, a third is 11");
+        state.editor.as_mut().unwrap().row = 9;
+        let small = state.editor.as_ref().unwrap().out_bottom();
+        assert!(small < 6, "a 10-row terminal leaves under six chat rows: {small}");
+        assert_eq!(super::page_rows(&state), 1, "and a page there is still one row, never zero");
+    }
 
     /// The rule that keeps a detached console from blanking the screen, and the values a real
     /// terminal reports. Written as the three cases because the middle one is the whole point:

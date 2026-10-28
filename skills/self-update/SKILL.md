@@ -25,6 +25,22 @@ that, and every one of them was learned by failing at them:
 
 So the shape is always the same: **you write a request; something outside the node performs it.**
 
+## The reader's `wa` CLI beside the node
+
+A `wa` chat in a terminal and the node (`wa serve`, supervised by the sentinel) share one home. The
+binding transport is the node's: a CLI holds it only while no node runs and yields within seconds when a
+node starts (`rust/wa-host/src/binding_runtime.rs`). So:
+
+- **Never stop, kill or "hand over from" a reader's CLI** to restart, start or replace the node. A
+  `request restart` / `request deploy` works with the CLI open. A script that `pkill`s `wa` is a bug.
+- An open CLI restarts itself into the same session when the binary it runs is replaced (at its next
+  idle moment), and draws turns another process added to its session - a sentinel wake's report reaches
+  the reader there too. `touch ~/.wasm-agent/cli-restart.request` (text = reason) asks for that restart.
+- The node's output is `~/.wasm-agent/serve.log`; a failed start's record carries its last lines. Read
+  them before guessing why a node did not come up.
+- A wake for a node that is down is held and retried until the node answers (`WA_SENTINEL_WAKE_WAIT`),
+  so write the continuation with the restart and end the turn; do not poll for the node yourself.
+
 ## From inside a run
 
 Build and test the candidate, then write one durable request. Use an absolute

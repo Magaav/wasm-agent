@@ -78,7 +78,11 @@ check(not policy.admit(memory,'master',unknown),'profile authority drift denied 
 local role_ctx=context();policy.pin(memory,'master',role_ctx)
 check(not policy.admit(memory,'guest',role_ctx),'role drift denied despite prior MASTER pin')
 local unbound=memory.start_session('','unbound',{user_id='master'})
-check(not policy.pin(memory,'master',{session_id=unbound}).enabled,'unbound session not silently classified as coding')
+check(policy.pin(memory,'master',{session_id=unbound}).enabled,'an ordinary operator session gets code mode by default')
+check(not policy.pin(memory,'guest',{session_id=unbound}).enabled,'a guest session never does')
+local pending=memory.start_session('','pending',{user_id='master'})
+memory.set_session_workspace(pending,{required=true,state='requested'})
+check(not policy.pin(memory,'master',{session_id=pending}).enabled,'a required but unallocated worktree holds it back')
 asset_override=root..'/missing'
 local ok,err=pcall(policy.pin,memory,'master',context());check(not ok and tostring(err):find('codemode_not_ready',1,true),'missing assets fail readiness before advertising')
 assert(host.write_file(root..'/corrupt/quickjs.wasm','corrupt'));assert(host.write_file(root..'/corrupt/prelude.js','corrupt'))

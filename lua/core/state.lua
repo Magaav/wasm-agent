@@ -47,7 +47,7 @@ local function legacy_read(name)
 end
 
 local function selection_key(name)
-  return name == 'provider' or name == 'fast.openai-sub' or name:match('^model%.') or name:match('^reasoning%.')
+  return name == 'provider' or name:match('^model%.') or name:match('^reasoning%.')
 end
 
 local function sql(verb, statement, params)

@@ -140,6 +140,139 @@ function M.lines()
   return lines
 end
 
+-- `/status` in the chat: this session's id, the model, and every provider's usage - the same numbers
+-- the window's status balloon shows (`wa_model` in server.lua): the provider's own rolling limits
+-- (5h / 7d / 30d) and this session's measured tokens and cost from the harness ledger. One network
+-- call per configured provider, cached 30 s by `provider.limits`; a provider that does not answer
+-- says so on its own line instead of failing the command.
+local function tokens(n)
+  n = tonumber(n)
+  if not n then return "unknown" end
+  if n >= 1e6 then return string.format("%.2fM", n / 1e6) end
+  if n >= 1e3 then return string.format("%.1fk", n / 1e3) end
+  return tostring(math.floor(n))
+end
+
+-- Epoch seconds of an ISO-8601 UTC stamp (`2026-11-02T00:00:00.000Z`), the shape providers send.
+local function iso_seconds(text)
+  local y, mo, d, h, mi, se = tostring(text or ""):match("^(%d%d%d%d)%-(%d%d)%-(%d%d)T(%d%d):(%d%d):(%d%d)")
+  if not y then return nil end
+  y, mo = tonumber(y), tonumber(mo)
+  if mo <= 2 then y = y - 1 end
+  local era = math.floor(y / 400)
+  local yoe = y - era * 400
+  local doy = math.floor((153 * (mo + (mo > 2 and -3 or 9)) + 2) / 5) + tonumber(d) - 1
+  local doe = yoe * 365 + math.floor(yoe / 4) - math.floor(yoe / 100) + doy
+  local days = era * 146097 + doe - 719468
+  return days * 86400 + tonumber(h) * 3600 + tonumber(mi) * 60 + tonumber(se)
+end
+
+local function resets(value)
+  local at = tonumber(value) or iso_seconds(value)
+  if not at then return value and (" resets " .. tostring(value)) or "" end
+  if at > 1e12 then at = at / 1000 end
+  local left = at - host.now()
+  if left <= 0 then return " resets now" end
+  if left < 3600 then return string.format(" resets in %dm", math.ceil(left / 60)) end
+  if left < 172800 then return string.format(" resets in %.1fh", left / 3600) end
+  return string.format(" resets in %.1fd", left / 86400)
+end
+
+-- A bar of `width` cells for `percent` (0-100), eighths for the partial cell. Coloured by how close
+-- the window is to its limit when `color` is set (the CLI's panel); plain text otherwise.
+local PARTS = { "", "\226\150\143", "\226\150\142", "\226\150\141", "\226\150\140",
+  "\226\150\139", "\226\150\138", "\226\150\137" }
+local FULL, EMPTY = "\226\150\136", "\226\150\145"
+function M.bar(percent, width, color)
+  percent = math.max(0, math.min(100, tonumber(percent) or 0))
+  width = width or 24
+  local eighths = math.floor(percent / 100 * width * 8 + 0.5)
+  local full, part = math.floor(eighths / 8), eighths % 8
+  local filled = string.rep(FULL, full) .. PARTS[part + 1]
+  local cells = full + (part > 0 and 1 or 0)
+  local rest = string.rep(EMPTY, width - cells)
+  if not color then return filled .. rest end
+  local tone = percent >= 80 and "\27[38;2;240;113;120m" or percent >= 50 and "\27[38;2;229;192;123m"
+    or "\27[38;2;152;195;121m"
+  return tone .. filled .. "\27[38;2;68;68;68m" .. rest .. "\27[0m"
+end
+
+-- The providers `/status` reports: the configured ones (an unconfigured provider has nothing to say),
+-- the active one first.
+local function reported_providers(active)
+  local list = {}
+  for _, item in ipairs(provider.providers()) do
+    local configured = item.id == active or (type(item.api_key) == "string" and item.api_key ~= "")
+    if configured then list[#list + 1] = item end
+  end
+  table.sort(list, function(a, b)
+    if (a.id == active) ~= (b.id == active) then return a.id == active end
+    return a.id < b.id
+  end)
+  return list
+end
+
+-- The limits last read per provider, so a `/status` built during a run (`opts.cached`) never waits on
+-- the network: the run is what the reader is waiting on.
+M._limits = {}
+local function limits_of(id, opts)
+  local seen = M._limits[id]
+  local now = host.now()
+  if seen and (opts.cached or now - seen.at < (opts.max_age or 30)) then return seen.limits, seen.problem end
+  if opts.cached then return nil, "read on the next /status between runs" end
+  local limits, problem = provider.limits(id)
+  M._limits[id] = { at = now, limits = limits, problem = problem }
+  return limits, problem
+end
+
+-- `/status`: rows for the CLI's panel (or printed where there is none). `opts.color` paints the bars;
+-- `opts.cached` uses the limits already read instead of asking the provider; `opts.max_age` (seconds,
+-- default 30) is how old a reading may be before it is asked for again.
+function M.session_lines(session_id, opts)
+  opts = opts or {}
+  local dim = function(text) return opts.color and ("\27[38;2;119;119;119m" .. text .. "\27[0m") or text end
+  local bold = function(text) return opts.color and ("\27[1m" .. text .. "\27[0m") or text end
+  local settings = provider.settings()
+  local lines = {
+    dim("Session  ") .. tostring(session_id or "none"),
+    dim("Resume   ") .. "wa --resume " .. tostring(session_id or "<id>"),
+    dim("Model    ") .. tostring(settings.model) .. dim("  \194\183  " .. tostring(settings.provider)),
+  }
+  local ok_snapshot, observed = pcall(function() return dofile("lua/core/telemetry.lua").snapshot(session_id) end)
+  local total = ok_snapshot and type(observed) == "table" and observed.available and observed.total
+  if total then
+    local parts = { "in " .. tokens(total.prompt), "out " .. tokens(total.output) }
+    if total.cache_known and tonumber(total.prompt) and total.prompt > 0 then
+      parts[#parts + 1] = string.format("cache %.0f%%", 100 * (total.cacheRead or 0) / total.prompt)
+    end
+    parts[#parts + 1] = total.cost_known and string.format("$%.4f", tonumber(total.cost) or 0) or "cost unknown"
+    lines[#lines + 1] = dim("Usage    ") .. table.concat(parts, dim("  \194\183  "))
+  else
+    lines[#lines + 1] = dim("Usage    ") .. "not yet observed in this session"
+  end
+  for _, item in ipairs(reported_providers(settings.provider)) do
+    lines[#lines + 1] = ""
+    lines[#lines + 1] = bold(item.id) .. (item.id == settings.provider and dim("  (in use)") or "")
+    local limits, problem = limits_of(item.id, opts)
+    local shown = 0
+    for _, window in ipairs({ { "5h", "rolling" }, { "7d", "weekly" }, { "30d", "monthly" } }) do
+      local entry = type(limits) == "table" and limits[window[2]]
+      if type(entry) == "table" then
+        local percent = tonumber(entry.percent) or 0
+        lines[#lines + 1] = string.format("  %-4s %s %4s%%  %s", window[1], M.bar(percent, 24, opts.color),
+          string.format("%.0f", percent), dim((resets(entry.resetsAt):gsub("^ ", ""))))
+        shown = shown + 1
+      end
+    end
+    if shown == 0 then lines[#lines + 1] = dim("  limits unavailable" .. (problem and (": " .. problem) or "")) end
+  end
+  return lines
+end
+
+function M.session_report(session_id, opts)
+  return table.concat(M.session_lines(session_id, opts), "\n")
+end
+
 function M.report()
   local lines = M.lines()
   for _, text in ipairs(lines) do print(text) end

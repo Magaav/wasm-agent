@@ -395,7 +395,8 @@ fn spawn_delivery(source: wa_jobs::Store, delivery: Value) {
         // the queue and runs when the allowance rolls over. Recording it as `failed` is what turned a
         // busy inbox into a wall of failures while every message in it was fine.
         if let Ok(Err(error)) = &result {
-            if error.to_string().contains("wake-budget") {
+            // A node that is not answering yet (`wake-wait`) is the same "not yet", not a failure.
+            if error.to_string().contains("wake-budget") || error.to_string().contains("wake-wait") {
                 let detail = error.to_string();
                 if let Err(record) = source.defer(delivery["id"].as_i64().unwrap(), &detail) {
                     audit(

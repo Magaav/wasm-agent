@@ -576,7 +576,18 @@ pub fn process_image(pid: u32) -> Option<PathBuf> {
     }
     #[cfg(not(windows))]
     {
-        std::fs::read_link(format!("/proc/{pid}/exe")).ok()
+        std::fs::read_link(format!("/proc/{pid}/exe")).ok().map(|path| strip_deleted(&path))
+    }
+}
+
+/// `/proc/<pid>/exe` of a process whose binary was replaced on disk reads `<path> (deleted)` - which is
+/// every node at the moment an upgrade wants to stop it. The path it was started from is still the
+/// path; the pid, its creation time and the announced node id are what prove it is ours.
+pub fn strip_deleted(path: &Path) -> PathBuf {
+    let text = path.to_string_lossy();
+    match text.strip_suffix(" (deleted)") {
+        Some(original) => PathBuf::from(original),
+        None => path.to_path_buf(),
     }
 }
 
@@ -1535,5 +1546,15 @@ mod tests {
         std::fs::create_dir_all(owned.join(".wasm-agent")).unwrap();
         write_owned_marker(&owned, "x").unwrap();
         validate_purge_target("x", &owned).expect("an owned home may be purged");
+    }
+}
+
+#[cfg(test)]
+mod replaced_binary_tests {
+    #[test]
+    fn a_replaced_binary_is_still_the_path_it_was_started_from() {
+        use std::path::{Path, PathBuf};
+        assert_eq!(super::strip_deleted(Path::new("/home/a/.local/bin/wa (deleted)")), PathBuf::from("/home/a/.local/bin/wa"));
+        assert_eq!(super::strip_deleted(Path::new("/home/a/.local/bin/wa")), PathBuf::from("/home/a/.local/bin/wa"));
     }
 }

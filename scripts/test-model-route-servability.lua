@@ -1,8 +1,8 @@
 -- A route must refuse, before the first provider request, a model it cannot serve - and only
 -- that. Two failures motivated this file. A child with `gpt-6-luna` on the opencode-go route died
 -- in 0.67s with zero tool calls on the edge's `Model does not support this protocol`, and 26
--- child runs of `deepseek-v4.1-flash` died on the subscription route's `Model is absent from Pi
--- catalog`. The first version of the check then refused five ids the subscription route *does*
+-- child runs of `deepseek-v4.1-flash` died on a route's `Model is absent from Pi
+-- catalog`. The first version of the check then refused five ids a route *does*
 -- serve, because it decided from a hardcoded picker list. So the catalogue here is a fixture of
 -- pi's own store (same keys, same `api` per id), the deciding fact is the protocol, and an id the
 -- catalogue does not mention must stay unknown and allowed. Hermetic: HTTP is a counter, so a
@@ -59,18 +59,7 @@ assert(written, 'the catalogue fixture must be written')
 overrides.WASM_AGENT_PI_MODELS_STORE = store_path
 
 local original_dofile = dofile
-local subscription = original_dofile('lua/core/openai_sub.lua')
-local bridge_calls = 0
-subscription.complete = function(model)
-  bridge_calls = bridge_calls + 1
-  return {content='bridge answer', tool_calls={}, finish_reason='stop', model=model}
-end
-dofile = function(path)
-  if path == 'lua/core/openai_sub.lua' then return subscription end
-  return original_dofile(path)
-end
 local provider = dofile('lua/core/provider.lua')
-dofile = original_dofile
 -- The route under test is pinned in-memory rather than by a state file: the suite shares one home,
 -- and which provider a previous gate step left selected must not decide what this proves.
 provider.provider_override = 'opencode-go'
@@ -81,26 +70,21 @@ local function profile(id)
     if candidate.id == id then return candidate end
   end
 end
-local sub, public_api = profile('openai-sub'), profile('gpt')
-check(sub ~= nil and public_api ~= nil, 'the shipped routes must be discoverable')
+check(profile('opencode-go') ~= nil, 'the shipped route must be discoverable')
+check(profile('openai-sub') == nil and profile('gpt') == nil, 'the removed GPT routes stay removed')
+-- A route this node does not ship, to ask the "only another route lists it" question.
+local other = {id='other', transport='openai-completions'}
 check(provider.active().id == 'opencode-go', 'this test drives the opencode-go route, got ' .. tostring(provider.active().id))
 local messages = {{role='user', content='hi'}}
 
--- The catalogue decides by protocol. Every id the subscription route serves is served here, even
--- the five a hardcoded picker list used to refuse; and an id the store does not mention is not a
--- refusal at all.
-for _, id in ipairs(codex) do
-  check(provider.serves(id, sub) == true, 'the subscription route serves ' .. id)
-end
-check(provider.serves('deepseek-v4.1-flash', sub) == false,
-  "the subscription route does not serve a chat-completions id")
+-- The catalogue decides by protocol, and an id the store does not mention is not a refusal at all.
 check(provider.serves('deepseek-v4.1-flash') == true, 'opencode-go serves its own chat-completions model')
 check(provider.serves('gpt-6-luna') == false, 'opencode-go does not serve a responses-only id')
 check(provider.serves('gpt-5.6-luna') == false, 'and refuses the whole family, not one name in it')
 check(provider.serves('minimax-m3') == false, 'nor an id the edge serves over anthropic-messages')
 check(provider.serves('no-such-model-anywhere') == nil, 'an id the catalogue is silent about is unknown')
-check(provider.serves('gpt-4.1', public_api) == nil, 'an id no catalogue mentions is unknown on any route')
-check(provider.serves('deepseek-v4.1-flash', public_api) == nil,
+check(provider.serves('gpt-4.1', other) == nil, 'an id no catalogue mentions is unknown on any route')
+check(provider.serves('deepseek-v4.1-flash', other) == nil,
   "an id only another route lists is unknown here, not claimed and not refused")
 
 -- The refusal: before the wire, naming route, model and the true reason.
@@ -131,35 +115,8 @@ check(#sent == 0, 'still nothing on the wire')
 check(provider.unservable(nil) == nil and provider.unservable('') == nil, 'no model means nothing to check')
 overrides.WASM_AGENT_LLM_MODEL = 'deepseek-v4.1-flash'
 
--- The subscription route and its own ids: the request path must let them through rather than
--- refuse them. Pi's bridge is stood in for above.
-sent = {}
-provider.provider_override = 'openai-sub'
-local bridge_ok, bridge_result = pcall(provider.complete_with, 'gpt-5.6-terra', messages, nil, false, {})
-check(bridge_ok, 'gpt-5.6-terra must not be refused on the subscription route: ' .. tostring(bridge_result))
-check(bridge_result and bridge_result.content == 'bridge answer',
-  'and the subscription route must reach its transport: ' .. json.encode(bridge_result or {}))
-check(bridge_calls == 1, 'the subscription route serves the id, got ' .. bridge_calls .. ' transport call(s)')
-check(provider.unservable('gpt-5.5', sub) == nil and provider.unservable('gpt-6-sol', sub) == nil,
-  'every id in the route catalogue passes the preflight')
-
--- "sol 6.1" is the owner's name for `gpt-6.1-sol`, the id the catalogue publishes: the name and
--- the id are not the same string, and only the id routes. Serving it takes both halves - the
--- route must *offer* it (the picker, this repository's file) and the catalogue must publish it
--- over this route's protocol (pi's store, the live config). Either half alone is a model that
--- looks configured and fails: a picked id nothing catalogs, or a catalogued id nothing offers.
-local offered = false
-for _, id in ipairs(subscription.models or {}) do if id == 'gpt-6.1-sol' then offered = true end end
-check(offered, 'the subscription picker must offer gpt-6.1-sol: ' ..
-  table.concat(subscription.models or {}, ','))
-check(provider.serves('gpt-6.1-sol', sub) == true and provider.unservable('gpt-6.1-sol', sub) == nil,
-  'and this route must serve it: ' .. tostring(provider.unservable('gpt-6.1-sol', sub)))
-check(provider.serves('sol 6.1', sub) == false and provider.unservable('sol 6.1', sub)~=nil,
-  'native route requires a published exact model id, no spoken-name mapping or guessed metadata')
-
--- The wrong route still refuses it, and still for the true reason: opencode-go posts
--- /chat/completions and this id is served over openai-codex-responses. An id that is reachable
--- on the right route must not become reachable everywhere.
+-- An id published only over openai-codex-responses is refused on opencode-go, for the true reason:
+-- opencode-go posts /chat/completions.
 provider.provider_override = 'opencode-go'
 local wrong_route = provider.unservable('gpt-6.1-sol')
 check(wrong_route ~= nil and wrong_route:find('model_not_servable', 1, true) ~= nil and
@@ -168,8 +125,8 @@ check(wrong_route ~= nil and wrong_route:find('model_not_servable', 1, true) ~= 
   wrong_route:find('openai-codex-responses', 1, true) ~= nil,
   'gpt-6.1-sol must stay refused on the opencode-go route: ' .. tostring(wrong_route))
 check(#sent == 0, 'and that refusal costs no request')
-check(provider.serves('gpt-6.1-sol', public_api) == false,
-  'the public-API route cannot serve a subscription id either, and says so')
+check(provider.serves('gpt-6.1-sol', other) == false,
+  'another chat-completions route cannot serve a responses-only id either, and says so')
 
 -- A model the route can serve still runs unchanged: same model, same route, one request.
 sent = {}
@@ -221,11 +178,6 @@ check(launch_error:find('provider=opencode-go', 1, true) ~= nil and
   'and name the route and the model: ' .. launch_error)
 check(launch_error:find('serves this id over ', 1, true) ~= nil,
   'and give the true reason: ' .. launch_error)
--- The mirror: a chat-completions id on the subscription route names both protocols too.
-local mirror_error = tostring(provider.unservable('deepseek-v4.1-flash', sub))
-check(mirror_error:find('native subscription catalogue does not publish this id',1,true)~=nil and
-  mirror_error:find('provider=openai-sub',1,true)~=nil,
-  'native refusal uses owned catalogue, not third-party store: '..mirror_error)
 local latest_after = memory.latest_session('master', '')
 check(latest_after and latest_before and latest_after.id == latest_before.id,
   'no child session may be created for a pair that cannot run')
@@ -244,8 +196,8 @@ local state = dofile('lua/core/state.lua')
 -- This home is shared with every other gate step, so whatever selection it had is
 -- restored before this file ends. A suite that leaves `provider` changed makes a later
 -- suite's route depend on gate step order: this section's first version wrote
--- `provider=opencode-go` and broke `scripts/test-openai-sub-levels.lua`, which resolves
--- its route from this file before its own env override.
+-- `provider=opencode-go` and broke a later suite that resolved its route from this file
+-- before its own env override.
 local prior_provider, prior_go_model = state.read('provider'), state.read('model.opencode-go')
 provider.provider_override = 'opencode-go'
 provider.overrides = nil

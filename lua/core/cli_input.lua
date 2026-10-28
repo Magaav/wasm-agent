@@ -97,6 +97,22 @@ end
 
 local METHODS = {}
 
+-- Tell the host which taken lines are still waiting here (`host.input_held`), so the editor keeps
+-- listing them above the status line as queued until they are used. Absent capability: nothing.
+function METHODS:held()
+  local hold = self.deps.held or host_fn("input_held")
+  if not hold or not self.supported then return end
+  local count = #self.pending
+  if count == 0 and (self.shown_held or 0) == 0 then return end
+  self.shown_held = count
+  -- A queued `/vault <name> <value>` is listed by name only (lua/core/keys.lua).
+  local shown = {}
+  for index, line in ipairs(self.pending) do
+    shown[index] = line:match("^%s*/vault%s") and dofile("lua/core/keys.lua").masked(line:gsub("^%s+", "")) or line
+  end
+  pcall(hold, json.encode(shown))
+end
+
 -- One line, or nil at the end of input. Empty lines are lines: a reader who presses Enter sends
 -- one, and the REPL has always treated that as "keep prompting" rather than as an exit.
 --
@@ -119,7 +135,11 @@ end
 -- Wait for the next line. Returns `line` on a line, and `nil, true` when the input has ended.
 -- A wait that produces nothing returns `nil, false`, which is not the end of anything.
 function METHODS:poll(timeout_ms)
-  if #self.pending > 0 then return table.remove(self.pending, 1), self.eof end
+  if #self.pending > 0 then
+    local line = table.remove(self.pending, 1)
+    self:held()
+    return line, self.eof
+  end
   if self.eof then return nil, true end
   if not self.supported then
     -- No reader thread: the blocking read this module replaced, so an older binary is exactly
@@ -142,12 +162,16 @@ function METHODS:poll(timeout_ms)
   -- the caller comes back for it.
   for _, line in ipairs(lines) do self.pending[#self.pending + 1] = line end
   if eof then self.eof = true end
-  if #self.pending > 0 then return table.remove(self.pending, 1), self.eof end
+  if #self.pending > 0 then
+    local line = table.remove(self.pending, 1)
+    self:held()
+    return line, self.eof
+  end
   return nil, self.eof
 end
 
 -- Take complete, ordinary messages for the current run at a model-round boundary.
--- A slash command is REPL control, not model input: leave it and everything behind
+-- A slash command (or a `!` bash line) is REPL control, not model input: leave it and everything behind
 -- it in the queue so ordering is preserved. Never block the model waiting for a key.
 function METHODS:take_steering()
   if self.supported and not self.eof then
@@ -162,10 +186,14 @@ function METHODS:take_steering()
   local steering = {}
   while #self.pending > 0 do
     local text = self.pending[1]:gsub("^%s+", ""):gsub("%s+$", "")
-    if text:sub(1, 1) == "/" then break end
+    -- `!command` (bash mode) is the reader's own, run after the turn like a slash command.
+    local lead = text:sub(1, 1)
+    if lead == "/" or lead == "!" then break end
     table.remove(self.pending, 1)
     if text ~= "" then steering[#steering + 1] = text end
   end
+  -- What stays (a slash command and what follows it) is still queued on screen.
+  self:held()
   return steering
 end
 

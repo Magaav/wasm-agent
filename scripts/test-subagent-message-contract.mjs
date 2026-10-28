@@ -24,7 +24,7 @@ if (post) {
 } else {
   assert(!fs.existsSync(out), 'fresh evidence required'); fs.mkdirSync(out, {recursive: true});
   const files = [describe(binary), ...['lua/core/tools.lua', 'lua/core/subagents.lua', 'lua/core/steering.lua',
-    'lua/core/subscription_wire.lua', 'scripts/test-subagent-message-contract.lua',
+    'scripts/test-subagent-message-contract.lua',
     'scripts/test-subagent-message-contract.mjs'].map(file => describe(path.join(repo, file)))];
   const modes = [];
   function run(label, executable, source) {

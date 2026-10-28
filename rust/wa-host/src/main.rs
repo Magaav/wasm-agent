@@ -23,6 +23,7 @@ mod resources;
 mod serve;
 mod terminal_editor;
 mod transcript;
+mod selection;
 mod ripgrep;
 
 use host::Host;
@@ -423,7 +424,7 @@ fn main() {
             .unwrap_or(8800);
         client_bridge::serve(client_port, bridge.clone());
         if binding_runtime::present() {
-            if let Err(error)=binding_runtime::transport("start"){eprintln!("binding_transport:{error}");std::process::exit(2);}
+            if let Err(error)=binding_runtime::transport("serve"){eprintln!("binding_transport:{error}");std::process::exit(2);}
         }
         if let Ok(rendezvous_url) = std::env::var("WASM_AGENT_RENDEZVOUS") {
             if !rendezvous_url.is_empty() {

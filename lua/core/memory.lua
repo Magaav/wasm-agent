@@ -769,6 +769,20 @@ function M.latest_session(user_id, node_id)
   return rows[1]
 end
 
+-- The newest chat thread that has a turn in it: what `wa --continue` goes back to. Every `wa`
+-- opens a session before anything is typed, so the newest row is usually the empty one a
+-- just-closed window left behind (`latest_session` returns it, and callers that just created a
+-- session rely on that); continuing it would bring back nothing. Subagent threads are not the
+-- conversation the reader was having.
+function M.latest_thread(user_id, node_id)
+  local rows = query(
+    "SELECT * FROM sessions WHERE user_id=? AND node_id=? AND COALESCE(objective,'')<>'subagent' " ..
+    "AND EXISTS (SELECT 1 FROM messages m WHERE m.session_id=sessions.id) " ..
+    "ORDER BY updated_at DESC, started_at DESC LIMIT 1",
+    { user_id or "master", node_id or "" })
+  return rows[1]
+end
+
 -- `opts.states` adds each session's derived state (see "interruptions" below) to
 -- the row: the engine view lists threads, and a thread that died mid-answer must
 -- be distinguishable from a settled one without opening it.
@@ -1255,6 +1269,8 @@ end
 
 function classify(last)
   if not last then return "empty" end
+  -- A `!command` the reader ran (lua/core/bash_mode.lua) is context, not a question waiting for an answer.
+  if last.role == "user" and last.phase == "bash" then return "answered" end
   if last.role == "assistant" then
     if last.ok == 0 or last.ok == false then return "failed" end
     if last.phase == "commentary" then return "unfinished" end

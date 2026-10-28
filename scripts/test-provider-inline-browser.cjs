@@ -32,9 +32,9 @@ async function main(){
    const status=await(await fetch(info.proxy+'/status')).json(),entry=status.providers['opencode-go'];
    const id=routeMode==='mismatch'?'22222222-2222-4222-8222-222222222222':status.vault_id;
    const origin=routeMode==='same-origin'?'http://'+req.headers.host:routeMode==='tls'?info.admin.replace('http:','https:'):info.admin;
-   const data={selected:'openai-sub',embed_scope:SCOPE,providers:[{id:'openai-sub',label:'OpenAI subscription',source:'native',configured:true,enabled:true},{id:'opencode-go',label:'OpenCode Go',source:'vault',configured:entry.configured,enabled:entry.enabled,generation:entry.generation,operation:entry.operation,vault_id:id,vault_url:info.proxy,embed_url:origin+'/embed/go',operator_url:info.admin+'/#vault='+id}],quota:'Monthly workspace quota is not reset by changing a key.'};
-   if(routeMode==='missing'){delete data.providers[1].embed_url;}
-   if(routeMode==='wrong-source'){data.providers[1].source='legacy environment';}
+   const data={selected:'opencode-go',embed_scope:SCOPE,providers:[{id:'opencode-go',label:'OpenCode Go',source:'vault',configured:entry.configured,enabled:entry.enabled,generation:entry.generation,operation:entry.operation,vault_id:id,vault_url:info.proxy,embed_url:origin+'/embed/go',operator_url:info.admin+'/#vault='+id}],quota:'Monthly workspace quota is not reset by changing a key.'};
+   if(routeMode==='missing'){delete data.providers[0].embed_url;}
+   if(routeMode==='wrong-source'){data.providers[0].source='legacy environment';}
    res.setHeader('Content-Type','application/json');res.end(JSON.stringify(data));return;
   }
   if(req.url==='/chat'){chatCalls++;res.writeHead(500).end();return;}
@@ -125,10 +125,10 @@ async function main(){
   check(await cdp.eval("(window.__calls||[]).length>0"),'parent fixture captures are active, not an empty oracle');
   check(await cdp.eval("!(window.__calls||[]).some(call=>call.method==='POST'&&/(^|\\/)chat(?:\\?|$)/.test(String(call.url)))"),'private Enter never submits even through the parent chat fixture');
   check(await cdp.eval("!["+[KEY1,KEY2,TOKEN].map(v=>JSON.stringify(v)).join(',')+"].some(secret=>JSON.stringify(window.__calls||[]).includes(secret)||JSON.stringify(localStorage).includes(secret)||JSON.stringify(sessionStorage).includes(secret)||input.value.includes(secret))"),'parent model/tool/session captures, drafts and storage contain no credential material');
-  check(!parentCalls.some(r=>/^\/(provider|model|reasoning)$/.test(r.url)||(r.url==='/provider-management'&&r.body)), 'opening/saving never changes provider/model or initiates subscription login');
+  check(!parentCalls.some(r=>/^\/(provider|model|reasoning)$/.test(r.url)||(r.url==='/provider-management'&&r.body)), 'opening/saving never changes provider/model');
   check(!parentCalls.some(r=>[KEY1,KEY2,TOKEN].some(s=>(r.url+r.body+r.headers).includes(s))),'parent/node HTTP never receives key or enrollment token');
   check(!cdp.console.some(r=>[KEY1,KEY2,TOKEN].some(s=>r.includes(s))),'console captures contain no secret');
-  stats=await command({action:'stats'});check(!stats.secrets_in_log_or_journal&&!stats.providers['openai-sub'].configured,'no log/journal leak or subscription credential side effect');
+  stats=await command({action:'stats'});check(!stats.secrets_in_log_or_journal,'no log/journal leak');
   const foreign=http.createServer((req,res)=>{const foreignOrigin='http://'+req.headers.host,src=info.admin+'/embed/go#'+new URLSearchParams({vault:info.vault_id,parent:foreignOrigin,scope:SCOPE,channel:crypto.randomUUID()});res.setHeader('Content-Type','text/html');res.end('<!doctype html><title>Unauthorized frame fixture</title><iframe src="'+src+'"></iframe>');});
   await new Promise(r=>foreign.listen(0,'127.0.0.1',r));const securityBefore=cdp.security.length;
   try{await cdp.send('Page.navigate',{url:'http://127.0.0.1:'+foreign.address().port});for(let i=0;i<100&&!cdp.security.slice(securityBefore).some(t=>t.includes('frame-ancestors'));i++)await wait(30);check(cdp.security.slice(securityBefore).some(t=>t.includes('frame-ancestors')),'real browser CSP refuses an unconfigured parent origin');await cdp.shot('foreign-parent-denied');check((await command({action:'stats'})).writes===2,'unauthorized parent cannot enroll or save');}finally{await cdp.send('Page.navigate',{url:'about:blank'});foreign.closeAllConnections();await new Promise(r=>foreign.close(r));}

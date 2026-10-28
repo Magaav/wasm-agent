@@ -1307,7 +1307,7 @@ mod tests {
         original["allowed_tools"] = json!(["read"]);
         original["model"] = json!("approved-model");
         original["reasoning"] = json!("low");
-        original["provider"] = json!("openai-sub");
+        original["provider"] = json!("approved-provider");
         manager.start(&original).unwrap();
         manager.await_task("original", "alice", 5000).unwrap();
         let mut request = json!({"id":"original","owner_user":"mallory","new_id":"continued",
@@ -1321,7 +1321,7 @@ mod tests {
         assert_eq!(record["spec"]["allowed_tools"], json!(["read"]));
         assert_eq!(record["spec"]["model"], "approved-model");
         assert_eq!(record["spec"]["reasoning"], "low");
-        assert_eq!(record["spec"]["provider"], "openai-sub");
+        assert_eq!(record["spec"]["provider"], "approved-provider");
         let lookup = manager.lookup_session("alice", original["session_id"].as_str().unwrap()).unwrap();
         assert_eq!(lookup["task"]["subagent_id"], "continued");
         assert_eq!(lookup["task"]["freshness"], "native_snapshot");

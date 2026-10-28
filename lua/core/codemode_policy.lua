@@ -17,11 +17,15 @@ function M.eligible(memory,role,ctx,mode)
   if child.id~='orchestration-worker' then return false end
  end
  if mode=='native' then return true end -- historical MASTER opt-in, still native-fenced
- if not memory or not ctx.session_id or not memory.session_worktree then return false end
- local path=memory.session_worktree(ctx.session_id)
- if type(path)~='string' or path=='' then return false end
+ -- On by default for every MASTER run on every node (first install, a new cluster, a plain CLI in its
+ -- home): code mode used to need a session worktree binding, so an ordinary operator session - the
+ -- common case - silently ran without it while /health said `ready`. The one remaining refusal is a
+ -- session whose binding demands a worktree that is not allocated (or is another path) yet.
+ if not memory or not ctx.session_id then return true end
  local workspace=memory.session_workspace and memory.session_workspace(ctx.session_id)
- return not workspace or not workspace.required or workspace.state=='allocated' and workspace.worktree==path
+ if type(workspace)~='table' or not workspace.required then return true end
+ local path=memory.session_worktree and memory.session_worktree(ctx.session_id)
+ return workspace.state=='allocated' and type(path)=='string' and path~='' and workspace.worktree==path
 end
 function M.pin(memory,role,ctx)
  ctx=ctx or {}

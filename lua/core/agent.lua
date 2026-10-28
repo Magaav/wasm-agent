@@ -480,6 +480,12 @@ local function system_sections(role, agents, agents_path, tool_list, envelope_mo
   end
   local environment=sections.section('environment','Running on: '..ENVIRONMENT)
   local session=environment..'\n\n<role name="'..sections.escape(role or 'master')..'"/>\n<workdir path="'..sections.escape(dofile('lua/core/platform.lua').cwd())..'"/>'
+  -- `/vault` keys, by name only, for the master: the one line that lets the model use a key by
+  -- reference instead of asking the reader to paste it into the chat.
+  if (role or 'master')=='master' then
+    local ok,line=pcall(function() return dofile('lua/core/keys.lua').prompt_line() end)
+    if ok and line then session=session..'\n'..sections.section('keys',line) end
+  end
   return {
     generic=sections.section('generic',generic),
     stack=sections.section('stack',stack,{name='wasm-agent'}),
@@ -810,7 +816,6 @@ function M:build_context()
   local rows = memory.session_messages(self.session_id, {
     after_seq = session.summarized_until or 0, all = true,exclude_summaries=true,
   })
-  local replay_phase = provider.active().id == "openai-sub"
   -- A window that begins with a tool result is missing the tool call it answers
   -- (it was summarised away, or the boundary was cut mid-exchange). Providers
   -- reject an orphan tool result with a 400, so drop leading tool messages until
@@ -827,21 +832,9 @@ function M:build_context()
     elseif row.role == "assistant" then
       started = true
       local message = { role = "assistant", content = row.content or "" }
-      if replay_phase then
-        message.id = row.id
-        if row.phase and row.phase ~= "" then message.phase = row.phase end
-      end
       -- Full text or nothing. `provider.reasoning` documents why a partial replay (a
       -- "window") is a cache-hostile change to a message already sent, not an option.
       if replay_reasoning then message.reasoning_content = row.reasoning or "" end
-      -- Encrypted Responses reasoning is only valid for the model that produced it.
-      if row.reasoning_items and row.reasoning_items ~= "" then
-        local ok_items, stored = pcall(json.decode, row.reasoning_items)
-        if ok_items and type(stored) == "table" and stored.model == self.model and type(stored.items) == "table"
-            and (provider.active() or {}).id == "openai-sub" then
-          message.reasoning_items = stored.items
-        end
-      end
       if type(row.tool_calls) == "table" and #row.tool_calls > 0 then
         message.tool_calls = row.tool_calls
       end
@@ -1408,7 +1401,6 @@ function M:run_body(text, images)
   end
 
   local messages = self:build_context()
-  local replay_phase = provider.active().id == "openai-sub"
   local trace = {}
   local reply = ""
   local reply_reasoning, reply_phase, reply_message_id, completed = "", "", nil, false
@@ -1932,10 +1924,6 @@ function M:run_body(text, images)
       record_turn(self, { id = commentary_id, role = "assistant", content = item.content,
         phase = "commentary", debug = self.debug })
       local commentary_message = { role = "assistant", content = item.content }
-      if replay_phase then
-        commentary_message.phase = "commentary"
-        commentary_message.id = commentary_id
-      end
       messages[#messages + 1] = commentary_message
       if result.commentary_streamed == "delta" then
         -- The OpenCode-compatible host already streamed the text chunks. Close that
@@ -1950,33 +1938,24 @@ function M:run_body(text, images)
     local calls = result.tool_calls or {}
     local assistant = { role = "assistant", content = result.content or "" }
     reply_phase = result.final_phase or ""
-    if replay_phase and reply_phase ~= "" then assistant.phase = reply_phase end
     -- A step that ends by asking for a tool did not answer: the text it wrote before choosing is a
-    -- prelude to that decision, not the reply. The subscription path already carries exactly this
-    -- classification as the provider's own per-item phase (`commentary`, read in
-    -- lua/core/subscription_wire.lua and lua/core/openai_sub_bridge.lua). An ordinary
-    -- OpenAI-compatible endpoint has no per-item phase, but the step does have the same kind of
-    -- provider signal in its completion reason, so this rule reads the step's own `finish_reason`
-    -- and nothing else - it never inspects the text.
+    -- prelude to that decision, not the reply. An OpenAI-compatible endpoint has no per-item phase,
+    -- but the step does have a provider signal in its completion reason, so this rule reads the
+    -- step's own `finish_reason` and nothing else - it never inspects the text.
     --
     -- The rule is deliberately narrow. A step that finished normally (`stop`), one that was cut off
     -- (`length`), and one whose provider sent no `finish_reason` at all all keep today's behaviour:
     -- their text is answer text. So a provider that omits the reason on a tool-call step leaves that
-    -- step's prose outside the run topic - a visible miss, and never an answer swallowed. The value
-    -- stored is the one the subscription path already stores, so an existing row (`phase = ''`)
-    -- renders exactly as it always did.
+    -- step's prose outside the run topic - a visible miss, and never an answer swallowed. An existing
+    -- row (`phase = ''`) renders exactly as it always did.
     local decision_phase = ""
-    if not replay_phase and #calls > 0
+    if #calls > 0
         and (result.finish_reason == "tool_calls" or result.finish_reason == "function_call") then
       decision_phase = "commentary"
     end
     local assistant_id
-    if replay_phase or #calls > 0 then assistant_id = host.uuid() end
-    if replay_phase and assistant_id then assistant.id = assistant_id end
+    if #calls > 0 then assistant_id = host.uuid() end
     if provider.reasoning(self.model).replay then assistant.reasoning_content=result.reasoning or "" end
-    if type(result.reasoning_items)=='table' and result.reasoning_items.model==self.model then
-      assistant.reasoning_items=result.reasoning_items.items
-    end
     if result.finish_reason=="length" or result.stream_complete==false then
       local reason=result.stream_complete==false and "incomplete_stream" or "output_limit"
       local problem=reason=="output_limit" and provider.visible_text(result.content)=="" and provider.empty_reply_reason(result)

@@ -73,6 +73,7 @@ ok(kept == "" and closed == false, "an empty line is a line, not the end of inpu
 -- A running model only takes complete ordinary lines. Commands remain for the
 -- REPL, and nothing behind a command is allowed to jump ahead of it.
 local supplied = 0
+local held_reports = {}
 local steering = cli_input.new({ deps = {
   start = function() return '{"started":true}' end,
   take = function()
@@ -80,11 +81,30 @@ local steering = cli_input.new({ deps = {
     if supplied == 1 then return '{"lines":["first note","  ","/new","after command"],"eof":false,"running":true}' end
     return '{"lines":[],"eof":false,"running":true}'
   end,
+  held = function(text) held_reports[#held_reports + 1] = text end,
 } })
 local notes = steering:take_steering()
 ok(#notes == 1 and notes[1] == "first note", "a waiting message steers the next model round")
+-- The editor lists what is still queued above the status line; what Lua took but holds is told back.
+ok(held_reports[1] == '["/new","after command"]', "the held command stays listed as queued: " .. tostring(held_reports[1]))
 ok(steering:poll(0) == "/new" and steering:poll(0) == "after command",
   "commands and later text stay ordered for the REPL")
+ok(held_reports[#held_reports] == "[]", "and once used, nothing is listed: " .. tostring(held_reports[#held_reports]))
+
+-- A `!command` typed during a run is the reader's own (bash mode): it waits for the run, like a
+-- slash command, and is never handed to the model as a steer.
+local bang_supplied = 0
+local bang = cli_input.new({ deps = {
+  start = function() return '{"started":true}' end,
+  take = function()
+    bang_supplied = bang_supplied + 1
+    if bang_supplied == 1 then return '{"lines":["!git status","later"],"eof":false,"running":true}' end
+    return '{"lines":[],"eof":false,"running":true}'
+  end,
+  held = function() end,
+} })
+ok(#bang:take_steering() == 0, "a ! line is not steered into the run")
+ok(bang:poll(0) == "!git status", "it stays queued for the REPL, in order")
 
 -- An older binary: no capability, no reader thread, and the blocking read this replaced. The
 -- condition is not an error, and it must not hang waiting for something that will never answer.

@@ -31,6 +31,10 @@ pub struct Transcript { pub blocks: Vec<Block>, pub focus: Option<usize>, pub di
     /// Navigating topics (Ctrl+Up): the view stays frozen even at the bottom.
     pub nav: bool }
 
+/// One PageUp/PageDown step for a chat that occupies `area` screen rows: a third of it, at least one
+/// row. A whole screen jumped past what the reader was following; a third keeps two thirds in view.
+pub fn page_step(area: usize) -> isize { (area / 3).max(1) as isize }
+
 impl Transcript {
     /// Start a new block (`topic` = collapsible). An empty current block is reused.
     pub fn block(&mut self, topic: bool) {
@@ -90,6 +94,8 @@ impl Transcript {
         self.focus = None; self.dirty = true;
     }
     pub fn to_bottom(&mut self) { if self.top.is_some() || self.freeze { self.sync(); } }
+    /// Following the bottom (nothing frozen, not paged back): what a mouse selection restores.
+    pub fn following(&self) -> bool { self.top.is_none() && !self.freeze && !self.nav }
 
     /// The screen rows of one block at `width`: folded, or boxed in a heavy white border when focused.
     fn rows_of(&self, index: usize, width: usize) -> Vec<String> {
@@ -123,6 +129,23 @@ impl Transcript {
     /// The rows `1..=height` show: bottom-anchored while following, fixed while frozen, and always
     /// keeping a focused topic on screen.
     pub fn view(&mut self, width: usize, height: usize) -> Vec<String> {
+        // Following the bottom with nothing focused (the usual case, and every write of a replay):
+        // only the blocks that reach the screen are wrapped, newest first. Wrapping the whole chat
+        // on every frame made each write cost the length of the chat - a resumed session of a few
+        // thousand rows drew for over a minute.
+        if self.focus.is_none() && self.top.is_none() && !self.freeze && self.page_delta == 0 {
+            let mut tail: Vec<String> = Vec::new();
+            for index in (0..self.blocks.len()).rev() {
+                let mut rows = self.rows_of(index, width);
+                rows.extend(tail);
+                tail = rows;
+                if tail.len() >= height { break; }
+            }
+            let skip = tail.len().saturating_sub(height);
+            let mut shown = vec![String::new(); height.saturating_sub(tail.len())];
+            shown.extend(tail.into_iter().skip(skip));
+            return shown;
+        }
         let mut rows = Vec::new();
         let mut focus_range = None;
         for index in 0..self.blocks.len() {
@@ -254,6 +277,23 @@ impl NavDecoder {
 mod tests {
     use super::*;
     #[test]
+    fn following_the_bottom_wraps_only_what_is_on_screen_and_draws_the_same() {
+        let mut t = Transcript::default();
+        for n in 0..400 {
+            t.block(n % 3 == 0);
+            t.write(&format!("block {n} {}\nsecond\nthird\nfourth\nfifth\n", "word ".repeat(n % 17)));
+        }
+        let all: Vec<String> = (0..t.blocks.len()).flat_map(|i| t.rows_of(i, 30)).collect();
+        for height in [1, 5, 40] {
+            let expected: Vec<String> = all[all.len() - height..].to_vec();
+            assert_eq!(t.view(30, height), expected, "height {height}");
+        }
+        // Shorter than the screen: blank rows above, as before.
+        let mut short = Transcript::default();
+        short.write("one\ntwo\n");
+        assert_eq!(short.view(30, 4), vec!["", "", "one", "two"]);
+    }
+    #[test]
     fn a_topic_folds_to_three_rows_and_expands() {
         let mut t = Transcript::default();
         t.write("> hello\n\n");
@@ -305,6 +345,22 @@ mod tests {
         assert_eq!(t.view(40, 10).last().unwrap(), "line 29", "and back at the bottom");
         t.write("line 30\n");
         assert_eq!(t.view(40, 10).last().unwrap(), "line 30", "paged to the end, the view follows again");
+    }
+    #[test]
+    fn a_page_is_a_third_of_the_chat_area() {
+        assert_eq!(page_step(30), 10);
+        assert_eq!(page_step(31), 10, "rounded down");
+        assert_eq!(page_step(2), 1, "never zero on a tiny area");
+        assert_eq!(page_step(0), 1);
+        // One step on a 10-row area moves the view three rows, not a screen.
+        let mut t = Transcript::default();
+        for n in 0..30 { t.write(&format!("line {n}\n")); }
+        let bottom = t.view(40, 10)[0].clone();
+        t.page(page_step(10));
+        let up = t.view(40, 10);
+        assert_eq!((bottom.as_str(), up[0].as_str()), ("line 20", "line 17"), "{up:?}");
+        t.page(-page_step(10));
+        assert_eq!(t.view(40, 10)[0], "line 20", "PageDown undoes PageUp");
     }
     #[test]
     fn a_frozen_view_does_not_move_while_output_arrives() {

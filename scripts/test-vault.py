@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
 """wa-vault, offline: the agent can use a stored credential and cannot read one back.
 
-Runs the real vault/wa_vault.py as a child process against local fake upstreams (opencode, chatgpt,
-auth.openai.com) and asserts, from the outside, what the boundary claims:
+Runs the real vault/wa_vault.py as a child process against a local fake opencode upstream and asserts, from the outside, what the boundary claims:
 
   * a stored key/token reaches the upstream, and the node's placeholder never does;
   * no endpoint on either listener returns a stored value (status, admin API, errors, 404s);
   * the admin API refuses without the token; the proxy refuses paths outside its routes;
-  * SSE is streamed through; a hard-expired token is refreshed once for N concurrent requests;
-  * the device-code login stores a credential that the next request uses.
+  * SSE is streamed through, and an upstream redirect is passed back, never followed.
 
 Usage: python3 scripts/test-vault.py   (exit 0 = all checks passed)
 """
@@ -32,8 +30,6 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ADMIN_TOKEN = "t" * 40
 OPENCODE_KEY = "sk-opencode-SECRET-0123456789"
 REPLACEMENT_KEY = "sk-opencode-SECRET-replacement-5555"
-REFRESH_1 = "rt-SECRET-first"
-REFRESH_2 = "rt-SECRET-second"
 
 checks = 0
 failures = 0
@@ -53,21 +49,9 @@ def free_port():
         return sock.getsockname()[1]
 
 
-def jwt(account, marker):
-    def part(value):
-        return base64.urlsafe_b64encode(json.dumps(value).encode()).rstrip(b"=").decode()
-    return part({"alg": "none"}) + "." + part({"https://api.openai.com/auth": {"chatgpt_account_id": account},
-                                                "m": marker}) + ".sig"
-
-
-ACCESS_1 = jwt("acct-123", "SECRET-access-1")
-ACCESS_2 = jwt("acct-123", "SECRET-access-2")
-SECRETS = [OPENCODE_KEY, REPLACEMENT_KEY, REFRESH_1, REFRESH_2, ACCESS_1, ACCESS_2, ADMIN_TOKEN]
+SECRETS = [OPENCODE_KEY, REPLACEMENT_KEY, ADMIN_TOKEN]
 
 seen = []          # (path, headers) of every upstream request
-refreshes = []     # refresh_token values the fake auth server received
-reject_refresh = False
-device_polls = []
 
 
 class Upstream(BaseHTTPRequestHandler):
@@ -92,9 +76,7 @@ class Upstream(BaseHTTPRequestHandler):
         seen.append((self.path, dict(self.headers)))
         if self.path == "/go/v1/models":
             return self.reply(200, {"data": [{"id": "m1"}, {"id": "m2"}]})
-        if self.path == "/backend/wham/usage":
-            return self.reply(200, {"rate_limits": {}})
-        if self.path == "/backend/codex/redirect":
+        if self.path == "/go/v1/redirect":
             self.send_response(302)
             self.send_header("Location", "http://127.0.0.1:1/steal")
             self.send_header("Content-Length", "0")
@@ -107,7 +89,7 @@ class Upstream(BaseHTTPRequestHandler):
         seen.append((self.path, dict(self.headers)))
         if self.path == "/go/v1/chat/completions":
             return self.reply(200, {"echo": json.loads(payload or b"{}")})
-        if self.path == "/backend/codex/responses":
+        if self.path == "/go/v1/stream":
             # Streamed in pieces, so a buffering proxy would show up as one late write.
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
@@ -118,23 +100,6 @@ class Upstream(BaseHTTPRequestHandler):
                 time.sleep(0.05)
             self.close_connection = True
             return
-        if self.path == "/auth/oauth/token":
-            form = dict(pair.split("=", 1) for pair in payload.decode().split("&"))
-            if form.get("grant_type") == "refresh_token":
-                refreshes.append(form.get("refresh_token"))
-                time.sleep(0.2)  # long enough for concurrent callers to pile up behind the lock
-                if reject_refresh:
-                    return self.reply(401,{"error":"rejected " + REFRESH_1})
-                return self.reply(200, {"access_token": ACCESS_2, "refresh_token": REFRESH_2, "expires_in": 3600})
-            if form.get("grant_type") == "authorization_code":
-                return self.reply(200, {"access_token": ACCESS_1, "refresh_token": REFRESH_1, "expires_in": -1})
-        if self.path == "/auth/api/accounts/deviceauth/usercode":
-            return self.reply(200, {"device_auth_id": "dev-1", "user_code": "ABCD-1234", "interval": "0"})
-        if self.path == "/auth/api/accounts/deviceauth/token":
-            device_polls.append(1)
-            if len(device_polls) < 2:
-                return self.reply(403, {"error": {"code": "deviceauth_authorization_pending"}})
-            return self.reply(200, {"authorization_code": "code-1", "code_verifier": "ver-1"})
         self.reply(404, {"error": "nope"})
 
 
@@ -155,12 +120,6 @@ def admin(method, path, body=None, token=ADMIN_TOKEN):
     if path == '/api/opencode-go/key' and method in ('POST','DELETE') and token == ADMIN_TOKEN and (body is None or isinstance(body,dict)):
         generation = json.loads(request(ADMIN,'GET','/api/status',headers=headers)[1])['providers']['opencode-go']['generation']
         body = dict(body or {}, expected_generation=generation, operation=str(uuid.uuid4()))
-    if path == '/api/openai-sub/login' and method=='POST' and token==ADMIN_TOKEN:
-        generation=json.loads(request(ADMIN,'GET','/api/status',headers=headers)[1])['providers']['openai-sub']['generation']
-        body=dict(body or {},expected_generation=generation)
-    if path == '/api/openai-sub/login' and method=='DELETE' and token==ADMIN_TOKEN:
-        login=json.loads(request(ADMIN,'GET','/api/status',headers=headers)[1])['login']
-        body=dict(body or {},operation=login.get('operation','no-pending-operation'))
     return request(ADMIN, method, path, body, headers)
 
 
@@ -179,8 +138,7 @@ data_dir = tempfile.mkdtemp(prefix="wa-vault-test-")
 clean_env={k:v for k,v in os.environ.items() if not k.startswith(('WA_','WASM_AGENT_','OPENAI_','OPENCODE_','PI_'))}
 env = dict(clean_env, WA_VAULT_ADMIN_TOKEN=ADMIN_TOKEN, WA_VAULT_DATA=data_dir,
            WA_VAULT_PROXY_PORT=str(PROXY), WA_VAULT_ADMIN_PORT=str(ADMIN), WA_VAULT_BIND="127.0.0.1",
-           WA_VAULT_OPENCODE_BASE=base + "/go/v1", WA_VAULT_CHATGPT_BASE=base + "/backend",
-           WA_VAULT_AUTH_BASE=base + "/auth", PYTHONDONTWRITEBYTECODE="1")
+           WA_VAULT_OPENCODE_BASE=base + "/go/v1", PYTHONDONTWRITEBYTECODE="1")
 log_file = tempfile.TemporaryFile()
 child = subprocess.Popen([sys.executable, os.path.join(ROOT, "vault", "wa_vault.py")], env=env,
                          stdout=log_file, stderr=subprocess.STDOUT)
@@ -206,7 +164,7 @@ try:
     ok(not seen, "an absent key makes no upstream call")
 
     # --- the admin API needs the token
-    for method, path in (("GET", "/api/status"), ("POST", "/api/opencode-go/key"), ("DELETE", "/api/openai-sub")):
+    for method, path in (("GET", "/api/status"), ("POST", "/api/opencode-go/key"), ("DELETE", "/api/opencode-go/key")):
         status, _ = admin(method, path, {"key": "x"}, token=None)
         ok(status == 401, "%s %s without the token is refused" % (method, path))
         status, _ = admin(method, path, {"key": "x"}, token="wrong" * 10)
@@ -291,7 +249,7 @@ try:
     status, payload = admin("GET", "/api/status")
     no_secret(payload, "the admin status")
     status, _ = request(PROXY, "GET", "/openai-sub/accounts/me")
-    ok(status == 404, "the subscription route refuses paths outside codex/ and wham/usage")
+    ok(status == 404, "there is no ChatGPT route")
     status, _ = request(PROXY, "GET", "/opencode-go/v1/../../backend/wham/usage")
     ok(status == 404, "a dot-dot path is refused")
 
@@ -304,43 +262,11 @@ try:
     ok(status == 200, "re-enabled, it works again")
     status, payload = request(PROXY, "GET", "/status")
     state = json.loads(payload)["providers"]
-    ok(state["opencode-go"]["configured"] and not state["openai-sub"]["configured"], "/status reports presence only")
-
-    # --- openai-sub: device login, then an expired token is refreshed once for many callers
-    status, payload = admin("POST", "/api/openai-sub/login")
-    login = json.loads(payload)["login"]
-    ok(status == 200 and login["user_code"] == "ABCD-1234" and login["verification_url"].endswith("/codex/device"),
-       "the device login shows the code and the URL")
-    for _ in range(100):
-        state = json.loads(admin("GET", "/api/status")[1])
-        if state["login"].get("state") != "pending":
-            break
-        time.sleep(0.1)
-    ok(state["login"].get("state") == "done" and state["providers"]["openai-sub"]["configured"],
-       "the device login completes and stores a credential")
-    ok(state["providers"]["openai-sub"]["account"] == "acct-123", "the account id is shown")
-    no_secret(json.dumps(state), "the status after login")
-
-    seen.clear()
-    results = []
-
-    def call():
-        results.append(request(PROXY, "GET", "/openai-sub/wham/usage", headers={
-            "Authorization": "Bearer wa-vault-brokered", "chatgpt-account-id": "wa-vault-brokered"})[0])
-    threads = [threading.Thread(target=call) for _ in range(5)]
-    for thread in threads:
-        thread.start()
-    for thread in threads:
-        thread.join()
-    ok(results == [200] * 5, "five concurrent requests with an expired token all succeed")
-    ok(refreshes == [REFRESH_1], "one refresh POST for five concurrent callers (got %d)" % len(refreshes))
-    usage_headers = [{k.lower(): v for k, v in h.items()} for p, h in seen if p == "/backend/wham/usage"]
-    ok(all(h.get("authorization") == "Bearer " + ACCESS_2 for h in usage_headers), "the refreshed token is used")
-    ok(all(h.get("chatgpt-account-id") == "acct-123" for h in usage_headers), "the real account id replaces the placeholder")
+    ok(state["opencode-go"]["configured"] and "openai-sub" not in state, "/status reports presence only, for the one provider")
 
     # --- SSE streams through
     connection = http.client.HTTPConnection("127.0.0.1", PROXY, timeout=30)
-    connection.request("POST", "/openai-sub/codex/responses", body=b"{}", headers={"Content-Type": "application/json"})
+    connection.request("POST", "/opencode-go/v1/stream", body=b"{}", headers={"Content-Type": "application/json"})
     response = connection.getresponse()
     started = time.monotonic()
     first = response.read1(4096)
@@ -353,10 +279,11 @@ try:
 
     # --- redirects are not followed (they would carry the credential elsewhere)
     before = len(seen)
-    status, _ = request(PROXY, "GET", "/openai-sub/codex/redirect")
-    ok(status == 404 and len(seen) == before, "an unallowlisted redirect endpoint is refused before upstream")
-    for path in ("/openai-sub/codex/responses/extra", "/openai-sub/codex/%72esponses",
-                 "/openai-sub/codex/../wham/usage", "/opencode-go/v1/%2e%2e/keys",
+    status, _ = request(PROXY, "GET", "/opencode-go/v1/redirect")
+    ok(status == 302 and len(seen) == before + 1 and seen[-1][0] == "/go/v1/redirect",
+       "an upstream redirect is passed back to the node, never followed")
+    before = len(seen)
+    for path in ("/openai-sub/codex/responses", "/opencode-go/v1/%2e%2e/keys",
                  "/opencode-go/v1//models", "/opencode-go/v1/./models"):
         status, _ = request(PROXY, "GET", path)
         ok(status == 404 and len(seen) == before, "allowlist refuses " + path)
@@ -390,37 +317,6 @@ try:
         no_secret(payload, "%s %s" % (method, path))
     status, _ = request(PROXY, "DELETE", "/login/opencode-go")
     ok(status == 404, "/login cannot delete a key (that stays on the admin page)")
-    device_polls.clear()
-    status, payload = request(PROXY, "POST", "/login/openai-sub")
-    ok(status == 409, "node-side device login cannot replace stored credentials")
-    admin("DELETE", "/api/openai-sub")
-    status, payload = request(PROXY, "POST", "/login/openai-sub")
-    ok(status == 200 and json.loads(payload)["login"]["user_code"] == "ABCD-1234", "/login starts the device login")
-    for _ in range(100):
-        state = json.loads(request(PROXY, "GET", "/login")[1])
-        if state["login"].get("state") != "pending":
-            break
-        time.sleep(0.1)
-    ok(state["login"].get("state") == "done", "the device login started from /login completes")
-    no_secret(json.dumps(state), "the /login state after login")
-    status, payload = request(PROXY, "DELETE", "/login/openai-sub")
-    ok(status == 409, "node-side cancellation cannot manage a configured operator login")
-
-    # --- failed rotation is held, not replayed; provider errors cannot echo credentials
-    reject_refresh = True
-    admin("DELETE", "/api/openai-sub")
-    admin("POST", "/api/openai-sub/login")
-    for _ in range(100):
-        state=json.loads(admin("GET", "/api/status")[1])
-        if state["login"].get("state") != "pending": break
-        time.sleep(0.1)
-    before_refresh=len(refreshes)
-    status,payload=request(PROXY,"GET","/openai-sub/wham/usage")
-    ok(status==401 and len(refreshes)==before_refresh+1,"one rejected refresh dispatch")
-    no_secret(payload,"rejected refresh response")
-    status,payload=request(PROXY,"GET","/openai-sub/wham/usage")
-    ok(status==409 and len(refreshes)==before_refresh+1,"rejected refresh cannot earn automatic replay")
-    no_secret(admin("GET","/api/status")[1],"held-refresh status")
     status,_=admin("POST","/api/opencode-go/key",[])
     ok(status==400,"admin JSON must be an object")
     admin("DELETE", "/api/opencode-go/key")

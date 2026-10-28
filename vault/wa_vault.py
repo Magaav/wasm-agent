@@ -13,13 +13,10 @@ Two listeners, two audiences:
 
   proxy  (WA_VAULT_PROXY_PORT, default 8810) - the node's side. Fixed routes to fixed upstreams:
          /opencode-go/v1/<path>         -> https://opencode.ai/zen/go/v1/<path>   (API key)
-         /openai-sub/codex/responses    -> https://chatgpt.com/backend-api/codex/responses (OAuth)
-         /openai-sub/wham/usage         -> https://chatgpt.com/backend-api/wham/usage    (OAuth)
          /status                        -> which providers are configured/enabled; no values
-         /login, /login/<provider>      -> the CLI's `/login` (pi-style): start the ChatGPT device
-                                           login, or store/replace the opencode-go key (keys/opencode-go.key).
-                                           Write-only, like the admin API: a first ChatGPT login can be
-                                           started, a key can be placed, and no answer carries a value.
+         /login/opencode-go             -> the CLI's `/login`: store/replace the opencode-go key
+                                           (keys/opencode-go.key). Write-only, like the admin API: a
+                                           key can be placed, and no answer carries a value.
   admin  (WA_VAULT_ADMIN_PORT, default 8801) - the operator's side: the page and its API. Every API
          call needs the admin token (`X-Vault-Token`), which is given to this process only and lives
          on the host, outside anything the agent can mount.
@@ -30,24 +27,16 @@ Rules this file is built around:
      the proxy, not an error message. The admin API is write/replace/delete/status only. A stolen admin
      token can overwrite or delete a key; it cannot read one. The node-side `/login` routes need no
      token - they are how a person signs in from `wa chat` - so the agent can reach them too: it can
-     start a first device login (which only a human with the ChatGPT account can complete) or place the
-     opencode-go key (`<data>/keys/opencode-go.key`, never mounted by the agent), and it still cannot read one. Removing a credential stays on the admin page.
+     place the opencode-go key (`<data>/keys/opencode-go.key`, never mounted by the agent), and it still cannot read one. Removing a credential stays on the admin page.
   2. **The upstream is fixed per route.** The node chooses a path under a route, never a host. No Host
-     header passthrough, no redirect following (a redirect would carry the credential to wherever it
-     points), and a path allowlist for the subscription route, so the OAuth token reaches only the two
-     endpoints wasm-agent uses and not the rest of the account surface.
+     header passthrough, and no redirect following (a redirect would carry the credential to wherever
+     it points).
   3. **The node's own credential headers are dropped**, and the vault's are set. The placeholder the
      node sends is never forwarded.
-  4. **The refresh token rotates on every refresh**, so a refresh is single-flight under one lock and
-     the store is re-read under it (the same rule as lua/core/openai_sub_auth.lua). A rejected refresh
-     is never retried.
 
-The OAuth constants and the device-code flow are the ones lua/core/openai_sub_auth.lua measured from
-Pi 0.87.1 (MIT); see that file for the provenance. Standard library only, so the image is the
-interpreter and this file.
+Standard library only, so the image is the interpreter and this file.
 """
 
-import base64
 import hmac
 import uuid
 import http.client
@@ -60,15 +49,7 @@ import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-# --- the measured contract (Pi 0.87.1, MIT; see lua/core/openai_sub_auth.lua) -----------------
-CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
-JWT_CLAIM_PATH = "https://api.openai.com/auth"
-DEVICE_CODE_TIMEOUT_SECONDS = 900
-PENDING_CODES = {"deviceauth_authorization_pending", "authorization_pending"}
-
 # Upstreams. Overridable only so a test can aim the vault at a local fixture.
-AUTH_BASE = os.environ.get("WA_VAULT_AUTH_BASE", "https://auth.openai.com").rstrip("/")
-CHATGPT_BASE = os.environ.get("WA_VAULT_CHATGPT_BASE", "https://chatgpt.com/backend-api").rstrip("/")
 OPENCODE_BASE = os.environ.get("WA_VAULT_OPENCODE_BASE", "https://opencode.ai/zen/go/v1").rstrip("/")
 
 DATA_DIR = os.environ.get("WA_VAULT_DATA", "/data")
@@ -86,7 +67,7 @@ BIND = os.environ.get("WA_VAULT_BIND", "0.0.0.0")
 ADMIN_BIND = os.environ.get("WA_VAULT_ADMIN_BIND", BIND)
 UPSTREAM_TIMEOUT = float(os.environ.get("WA_VAULT_UPSTREAM_TIMEOUT", "3600"))
 
-PROVIDERS = ("opencode-go", "openai-sub")
+PROVIDERS = ("opencode-go",)
 
 # Headers never forwarded upstream: hop-by-hop, the node's own credential and identity, and anything
 # that could steer the request to another host.
@@ -102,9 +83,6 @@ DROP_RESPONSE = {
 }
 
 _store_lock = threading.Lock()      # every read-modify-write of the store
-_refresh_lock = threading.Lock()    # single-flight OAuth refresh
-_login = {"state": "idle"}          # the device flow in progress; no secrets in it
-_login_lock = threading.Lock()
 
 
 def log(message):
@@ -234,10 +212,7 @@ def entry(store, provider):
 
 
 def configured(store, provider):
-    item = entry(store, provider)
-    if provider in KEY_PROVIDERS:
-        return read_key(provider) is not None
-    return bool(item.get("access") and item.get("refresh"))
+    return provider in KEY_PROVIDERS and read_key(provider) is not None
 
 
 def enabled(store, provider):
@@ -258,15 +233,11 @@ def public_status(store, operator=False):
             # Opaque current-write receipt, not credential-derived; lets the parent verify a
             # frame result against the effective broker rather than trusting postMessage.
             status['operation'] = item.get('operation')
-        if provider == "openai-sub":
-            status["account"] = item.get("account_id")
-            status["expires"] = item.get("expires")
-            status["last_error"] = item.get("last_error")
         out[provider] = status
     return out
 
 
-# --- OAuth (openai-sub) ------------------------------------------------------------------------
+# --- upstream ------------------------------------------------------------------------------------
 
 def http_request(method, url, headers=None, body=None, timeout=30):
     """One upstream request, no redirects followed. Returns (status, body_bytes)."""
@@ -282,224 +253,6 @@ def http_request(method, url, headers=None, body=None, timeout=30):
         connection.close()
 
 
-def post_json(url, value):
-    return http_request("POST", url, {"Content-Type": "application/json", "Accept": "application/json"},
-                        json.dumps(value).encode())
-
-
-def post_form(url, fields):
-    return http_request("POST", url, {"Content-Type": "application/x-www-form-urlencoded",
-                                      "Accept": "application/json"},
-                        urllib.parse.urlencode(fields).encode())
-
-
-def oauth_error(body):
-    # A provider's error body can quote the request, so only the documented OAuth fields are reported.
-    try:
-        payload = json.loads(body)
-    except ValueError:
-        return "body of %d bytes with no OAuth error field" % len(body)
-    code = None
-    description = None
-    if isinstance(payload, dict):
-        raw = payload.get("error")
-        if isinstance(raw, str):
-            code = raw
-        elif isinstance(raw, dict) and isinstance(raw.get("code"), str):
-            code = raw["code"]
-        if isinstance(payload.get("error_description"), str):
-            description = payload["error_description"][:160]
-        if not code and isinstance(payload.get("code"), str):
-            code = payload["code"]
-    # Never return provider-controlled strings: an error can echo a token.
-    return code if code in PENDING_CODES or code == "slow_down" else "oauth_error"
-
-
-def account_id_from_access(access):
-    try:
-        encoded = access.split(".")[1]
-        encoded += "=" * (-len(encoded) % 4)
-        payload = json.loads(base64.urlsafe_b64decode(encoded))
-        account = payload.get(JWT_CLAIM_PATH, {}).get("chatgpt_account_id")
-        return account if isinstance(account, str) and account else None
-    except (IndexError, ValueError, AttributeError):
-        return None
-
-
-def store_token_response(payload, source, first_only=False, refreshing=False, expected=None):
-    access, refresh, expires_in = payload.get("access_token"), payload.get("refresh_token"), payload.get("expires_in")
-    if not (isinstance(access, str) and access and isinstance(refresh, str) and refresh
-            and isinstance(expires_in, (int, float))):
-        raise RuntimeError("invalid_response: the token exchange answered without access_token/refresh_token/expires_in")
-    account_id = account_id_from_access(access)
-    if not account_id:
-        raise RuntimeError("invalid_response: the access token carries no chatgpt_account_id claim")
-
-    def mutate(store):
-        previous = entry(store, "openai-sub")
-        if first_only and configured(store,"openai-sub"):
-            raise VaultError(409,"vault_key_exists","replace existing credentials on the operator page")
-        if expected is not None and public_status(store)["openai-sub"]["generation"] != expected:
-            raise VaultError(409, "vault_stale_generation", "subscription login changed during device flow")
-        store["openai-sub"] = {"access": access, "refresh": refresh, "account_id": account_id,
-                               "generation": previous.get("generation", "legacy") if refreshing else str(uuid.uuid4()),
-                               "expires": now_ms() + int(expires_in * 1000), "set_at": now_ms(),
-                               "source": source, "enabled": previous.get("enabled", True)}
-    update_store(mutate)
-    return account_id
-
-
-def subscription_credential(expected=None):
-    """(access, account_id) for an upstream request, refreshing on hard expiry; raises VaultError."""
-    store = read_store()
-    item = entry(store, "openai-sub")
-    if expected is not None and public_status(store)["openai-sub"]["generation"] != expected:
-        raise VaultError(409, "vault_stale_generation", "credential changed since run start; request not sent")
-    if not configured(store, "openai-sub"):
-        raise VaultError(401, "vault_credential_absent",
-                         "wa-vault holds no ChatGPT login - log in from the vault page")
-    if not enabled(store, "openai-sub"):
-        raise VaultError(403, "vault_provider_disabled", "openai-sub is disabled on the vault page")
-    if now_ms() < int(item.get("expires") or 0):
-        return item["access"], item["account_id"]
-    with _refresh_lock:
-        # Re-read under the lock: the holder before us may have refreshed, and that token is the one.
-        locked_store = read_store()
-        item = entry(locked_store, "openai-sub")
-        if expected is not None and public_status(locked_store)["openai-sub"]["generation"] != expected:
-            raise VaultError(409, "vault_stale_generation", "credential changed since run start; request not sent")
-        if not configured(locked_store, "openai-sub") or not enabled(locked_store, "openai-sub"):
-            raise VaultError(403, "vault_provider_unavailable", "provider removed or disabled")
-        if item.get("refresh_pending"):
-            raise VaultError(409, "vault_refresh_unresolved", "previous refresh outcome held; operator login required")
-        if now_ms() < int(item.get("expires") or 0):
-            return item["access"], item["account_id"]
-        # Persist before the external rotation. A failed/ambiguous response cannot
-        # earn a second POST with the same refresh token, including after restart.
-        update_store(lambda store: entry(store, "openai-sub").update(refresh_pending=True))
-        try:
-            status, body = post_form(AUTH_BASE + "/oauth/token", {
-                "grant_type": "refresh_token", "refresh_token": item.get("refresh", ""), "client_id": CLIENT_ID})
-        except OSError:
-            raise VaultError(502, "vault_refresh_unresolved", "refresh response unavailable; operator login required")
-        if status < 200 or status >= 300:
-            detail = "refresh_rejected:%d (%s)" % (status, oauth_error(body))
-
-            def mark(store):
-                entry(store, "openai-sub")["last_error"] = detail
-            update_store(mark)
-            log("openai-sub refresh rejected: %d" % status)
-            raise VaultError(401, "refresh_rejected:%d" % status,
-                             "the token endpoint refused the refresh - log in again from the vault page")
-        try:
-            payload = json.loads(body)
-            store_token_response(payload, item.get("source") or "login", refreshing=True)
-        except (ValueError, RuntimeError) as error:
-            raise VaultError(502, "invalid_response", str(error).split(":")[0])
-        log("openai-sub refreshed")
-        final_store=read_store()
-        if not enabled(final_store,"openai-sub"):
-            raise VaultError(403,"vault_provider_disabled","provider disabled during refresh")
-        item = entry(final_store, "openai-sub")
-        return item["access"], item["account_id"]
-
-
-def start_device_login(first_only=False, requested_generation=None):
-    """Ask for a device code, then poll for it on a thread. Returns what the page shows the human."""
-    with _login_lock:
-        if _login.get("state") in ("starting", "pending") and now_ms() < _login.get("expires_at", 0):
-            return dict(_login)
-        operation = str(uuid.uuid4())
-        expected = public_status(read_store())["openai-sub"]["generation"]
-        if not first_only and requested_generation != expected:
-            raise VaultError(409, "vault_stale_generation", "subscription changed; read status before explicit re-login")
-        _login.clear()
-        _login.update(state="starting", operation=operation, first_only=first_only, expires_at=now_ms() + DEVICE_CODE_TIMEOUT_SECONDS * 1000)
-    status, body = post_json(AUTH_BASE + "/api/accounts/deviceauth/usercode", {"client_id": CLIENT_ID})
-    if status == 404:
-        raise VaultError(502, "flow_failed:404", "device-code login is not enabled for " + AUTH_BASE)
-    if status < 200 or status >= 300:
-        raise VaultError(502, "flow_failed:%d" % status, "the device-code request was refused: " + oauth_error(body))
-    payload = json.loads(body)
-    device_auth_id, user_code = payload.get("device_auth_id"), payload.get("user_code")
-    try:
-        interval = float(payload.get("interval") or 5)
-    except (TypeError, ValueError):
-        interval = 5.0
-    if not (isinstance(device_auth_id, str) and device_auth_id and isinstance(user_code, str) and user_code):
-        raise VaultError(502, "invalid_response", "the device-code response carried no device_auth_id/user_code")
-    with _login_lock:
-        if _login.get("operation") != operation:
-            raise VaultError(409, "vault_login_cancelled", "login cancelled while starting")
-        _login.clear()
-        _login.update({"state": "pending", "first_only": first_only, "operation": operation, "user_code": user_code,
-                       "verification_url": AUTH_BASE + "/codex/device",
-                       "expires_at": now_ms() + DEVICE_CODE_TIMEOUT_SECONDS * 1000})
-        public = dict(_login)
-    threading.Thread(target=poll_device_login, args=(device_auth_id, user_code, interval, first_only, operation, expected), daemon=True).start()
-    log("openai-sub device login started")
-    return public
-
-
-def poll_device_login(device_auth_id, user_code, interval, first_only=False, operation=None, expected=None):
-    def finish(state, **fields):
-        with _login_lock:
-            if _login.get("operation") == operation:
-                _login.update({"state": state, **fields})
-
-    deadline = time.monotonic() + DEVICE_CODE_TIMEOUT_SECONDS
-    while time.monotonic() < deadline:
-        with _login_lock:
-            if _login.get("operation") != operation or _login.get("state") != "pending":
-                return  # cancelled or superseded
-        time.sleep(max(1.0, interval))
-        try:
-            status, body = post_json(AUTH_BASE + "/api/accounts/deviceauth/token",
-                                     {"device_auth_id": device_auth_id, "user_code": user_code})
-        except OSError as error:
-            finish("error", error="unreachable: " + type(error).__name__)
-            return
-        if 200 <= status < 300:
-            try:
-                payload = json.loads(body)
-                code, verifier = payload.get("authorization_code"), payload.get("code_verifier")
-                if not (isinstance(code, str) and code and isinstance(verifier, str) and verifier):
-                    raise RuntimeError("invalid_response: no authorization_code/code_verifier")
-                status, body = post_form(AUTH_BASE + "/oauth/token", {
-                    "grant_type": "authorization_code", "code": code, "code_verifier": verifier,
-                    "client_id": CLIENT_ID, "redirect_uri": AUTH_BASE + "/deviceauth/callback"})
-                if status < 200 or status >= 300:
-                    raise RuntimeError("flow_failed:%d: %s" % (status, oauth_error(body)))
-                with _login_lock:
-                    if _login.get("operation") != operation or _login.get("state") != "pending":
-                        return  # cancelled during the exchange: do not resurrect credentials
-                    with _refresh_lock:
-                        account = store_token_response(json.loads(body), "login:device", first_only=first_only, expected=expected)
-            except (ValueError, RuntimeError, VaultError) as error:
-                finish("error", error=type(error).__name__)
-                log("openai-sub device login failed")
-                return
-            finish("done", account=account)
-            log("openai-sub logged in")
-            return
-        try:
-            payload = json.loads(body)
-        except ValueError:
-            payload = {}
-        error_code = None
-        if isinstance(payload, dict):
-            raw = payload.get("error")
-            error_code = payload.get("code") or (raw.get("code") if isinstance(raw, dict) else raw)
-        if status in (403, 404) or error_code in PENDING_CODES:
-            continue
-        if error_code == "slow_down":
-            interval += 5
-            continue
-        finish("error", error="flow_failed:%d: %s" % (status, oauth_error(body)))
-        return
-    finish("error", error="flow_expired: the code was not entered in time")
-
-
 MAX_BODY = 8 * 1024 * 1024
 
 
@@ -507,19 +260,6 @@ class VaultError(Exception):
     def __init__(self, status, code, message):
         super().__init__(message)
         self.status, self.code, self.message = status, code, message
-
-
-def login_snapshot():
-    with _login_lock:
-        return dict(_login)
-
-
-def public_snapshot(operator=False):
-    # Login commit/cancel share this lock: never combine pre-commit presence with a
-    # post-commit `done` outcome from a second read.
-    with _login_lock:
-        store=read_store()
-        return {'providers':public_status(store, operator=operator), 'login':dict(_login), 'vault_id':store.get('_vault_id')}
 
 
 def set_opencode_key(key, first_only=False, expected=None, operation=None, door=False):
@@ -550,20 +290,7 @@ def set_opencode_key(key, first_only=False, expected=None, operation=None, door=
     log("opencode-go key stored in its key file" + (" (from wa chat)" if door else ""))
 
 
-def cancel_login(expected_operation=None):
-    with _login_lock:
-        if expected_operation is not None and _login.get('operation') != expected_operation:
-            raise VaultError(409, 'vault_stale_login', 'login changed; reconcile status before cancellation')
-        _login.clear()
-        _login["state"] = "idle"
-
-
 # --- the proxy (the node's side) ---------------------------------------------------------------
-
-# The only ChatGPT endpoints the node uses. The OAuth bearer is attached to whatever this proxy forwards,
-# so it forwards exactly these and nothing else on that host.
-OPENAI_SUB_PATHS = ("/openai-sub/codex/responses", "/openai-sub/wham/usage")
-
 
 def route(path):
     """(upstream_url, provider) for a proxy path, or None. The upstream host is never the caller's."""
@@ -578,8 +305,6 @@ def route(path):
         return None
     if parsed.path.startswith("/opencode-go/v1/"):
         return OPENCODE_BASE + parsed.path[len("/opencode-go/v1"):] + query, "opencode-go"
-    if parsed.path in OPENAI_SUB_PATHS:
-        return CHATGPT_BASE + parsed.path[len("/openai-sub"):] + query, "openai-sub"
     return None
 
 
@@ -595,7 +320,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def send_json(self, status, value, extra=None):
         if isinstance(value, dict) and 'providers' in value:
-            value = public_snapshot(operator=self.server.name=='admin') if 'login' in value else dict(value, vault_id=read_store().get('_vault_id'))
+            value = dict(value, vault_id=read_store().get('_vault_id'))
         body = json.dumps(value).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
@@ -639,8 +364,6 @@ class ProxyHandler(Handler):
     def do_GET(self):
         if self.path == "/status":
             return self.send_json(200, {"providers": public_status(read_store())})
-        if self.path == "/login":
-            return self.send_json(200, {"providers": public_status(read_store()), "login": login_snapshot()})
         self.proxy()
 
     def do_POST(self):
@@ -649,24 +372,13 @@ class ProxyHandler(Handler):
         self.proxy()
 
     def do_DELETE(self):
-        if self.path == "/login/openai-sub":
-            self.read_body()
-            if configured(read_store(), "openai-sub") or login_snapshot().get("first_only") is not True:
-                return self.send_error_json(409, "vault_operator_login", "cancel this login on the operator page")
-            cancel_login()
-            return self.send_json(200, {"providers": public_status(read_store()), "login": login_snapshot()})
         self.read_body()
         self.send_error_json(404, "vault_no_route", "wa-vault has no route for " + self.path.split("?")[0])
 
     def login(self):
-        """The CLI's door: start the device login, or store a key. Never answers with a value."""
+        """The CLI's door: store a key. Never answers with a value."""
         try:
             body = self.read_body()
-            if self.path == "/login/openai-sub":
-                if configured(read_store(), "openai-sub"):
-                    raise VaultError(409, "vault_key_exists", "replace the existing login on the operator page")
-                login = start_device_login(first_only=True)
-                return self.send_json(200, {"providers": public_status(read_store()), "login": login})
             if self.path == "/login/opencode-go":
                 try:
                     payload = json.loads(body) if body else {}
@@ -694,21 +406,16 @@ class ProxyHandler(Handler):
             return self.send_error_json(error.status, error.code, error.message)
         headers = {name: value for name, value in self.headers.items() if name.lower() not in DROP_REQUEST}
         try:
-            if provider == "opencode-go":
-                store = read_store()
-                expected = self.headers.get("X-Wa-Vault-Generation")
-                if expected is not None and public_status(store)[provider]["generation"] != expected:
-                    raise VaultError(409, "vault_stale_generation", "credential changed since run start; request not sent")
-                if not configured(store, provider):
-                    raise VaultError(401, "vault_credential_absent",
-                                     "wa-vault holds no opencode-go key - paste it on the vault page")
-                if not enabled(store, provider):
-                    raise VaultError(403, "vault_provider_disabled", "opencode-go is disabled on the vault page")
-                headers["Authorization"] = "Bearer " + read_key(provider)
-            else:
-                access, account_id = subscription_credential(self.headers.get("X-Wa-Vault-Generation"))
-                headers["Authorization"] = "Bearer " + access
-                headers["ChatGPT-Account-Id"] = account_id
+            store = read_store()
+            expected = self.headers.get("X-Wa-Vault-Generation")
+            if expected is not None and public_status(store)[provider]["generation"] != expected:
+                raise VaultError(409, "vault_stale_generation", "credential changed since run start; request not sent")
+            if not configured(store, provider):
+                raise VaultError(401, "vault_credential_absent",
+                                 "wa-vault holds no opencode-go key - paste it on the vault page")
+            if not enabled(store, provider):
+                raise VaultError(403, "vault_provider_disabled", "opencode-go is disabled on the vault page")
+            headers["Authorization"] = "Bearer " + read_key(provider)
         except VaultError as error:
             return self.send_error_json(error.status, error.code, error.message)
 
@@ -901,7 +608,7 @@ class AdminHandler(Handler):
         if not self.authorized():
             return self.send_error_json(401, "vault_admin_token", "the admin token is missing or wrong")
         if path == "/api/status":
-            return self.send_json(200, {"providers": public_status(read_store(), operator=True), "login": login_snapshot()})
+            return self.send_json(200, {"providers": public_status(read_store(), operator=True)})
         return self.send_error_json(404, "not_found", path)
 
     def do_POST(self):
@@ -947,18 +654,6 @@ class AdminHandler(Handler):
                     store["opencode-go"] = {"generation": str(uuid.uuid4()), "enabled": False}
                 update_store(remove_go)
                 log("opencode-go key removed")
-            elif path == "/api/openai-sub/login" and method == "POST":
-                login = start_device_login(requested_generation=payload.get("expected_generation"))
-                return self.send_json(200, {"login": login, "providers": public_status(read_store())})
-            elif path == "/api/openai-sub/login" and method == "DELETE":
-                if not isinstance(payload.get('operation'), str):
-                    raise VaultError(400, 'vault_login_operation_required', 'read status before cancellation')
-                cancel_login(payload['operation'])
-            elif path == "/api/openai-sub" and method == "DELETE":
-                cancel_login()
-                with _refresh_lock:
-                    update_store(lambda store: store.pop("openai-sub", None))
-                log("openai-sub login removed")
             elif path.endswith("/enabled") and method == "POST" and path.split("/")[2] in PROVIDERS:
                 provider = path.split("/")[2]
                 if not isinstance(payload.get("enabled"), bool):
@@ -976,32 +671,25 @@ class AdminHandler(Handler):
                 return self.send_error_json(404, "not_found", path)
         except VaultError as error:
             return self.send_error_json(error.status, error.code, error.message)
-        self.send_json(200, {"providers": public_status(read_store(), operator=True), "login": login_snapshot()})
+        self.send_json(200, {"providers": public_status(read_store(), operator=True)})
 
 
 def test_provider(provider):
     """One cheap upstream call with the stored credential; the answer is a status, never a body."""
     started = time.monotonic()
     try:
-        if provider == "opencode-go":
-            store = read_store()
-            if not configured(store, provider):
-                return {"ok": False, "detail": "no key stored"}
-            status, body = http_request("GET", OPENCODE_BASE + "/models", {
-                "Authorization": "Bearer " + read_key(provider), "Accept": "application/json",
-                "User-Agent": "wasm-agent/0.1 wa-vault"})
-            detail = "HTTP %d" % status
-            if status == 200:
-                try:
-                    detail += ", %d models" % len(json.loads(body).get("data") or [])
-                except (ValueError, AttributeError):
-                    pass
-        else:
-            access, account_id = subscription_credential()
-            status, _ = http_request("GET", CHATGPT_BASE + "/wham/usage", {
-                "Authorization": "Bearer " + access, "ChatGPT-Account-Id": account_id,
-                "Accept": "application/json", "User-Agent": "codex-cli"})
-            detail = "HTTP %d" % status
+        store = read_store()
+        if not configured(store, provider):
+            return {"ok": False, "detail": "no key stored"}
+        status, body = http_request("GET", OPENCODE_BASE + "/models", {
+            "Authorization": "Bearer " + read_key(provider), "Accept": "application/json",
+            "User-Agent": "wasm-agent/0.1 wa-vault"})
+        detail = "HTTP %d" % status
+        if status == 200:
+            try:
+                detail += ", %d models" % len(json.loads(body).get("data") or [])
+            except (ValueError, AttributeError):
+                pass
     except VaultError as error:
         return {"ok": False, "detail": error.code + ": " + error.message}
     except OSError as error:

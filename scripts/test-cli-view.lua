@@ -404,6 +404,23 @@ ok(view_lib.style("success") == "\27[38;2;78;186;101m", "a role becomes its own 
 ok(view_lib.style("red") == view_lib.style("error"),
   "the old names are the same roles, not a second palette")
 ok(view_lib.style("mdHeading") == "\27[38;2;255;255;255m", "and the markdown roles follow it too")
+-- Thinking is the view's one blue (inline code's and links'), commentary plain white; both
+-- headings are the same grey.
+ok(view_lib.style("thinkingText") == view_lib.style("borderAccent"),
+  "thinking's body is the view's blue")
+do
+  local out = recorder()
+  local v = view_lib.new({ out = out.out, live = true, now = function() return 1 end, limit = 100 })
+  v:reasoning_block("weighing it")
+  v:commentary_block("reading it")
+  local text = out.text()
+  ok(has(text, view_lib.style("muted") .. "\226\156\187 Thinking") and has(text, view_lib.style("muted") .. "\226\156\166 Commentary"),
+    "the thinking heading is the same grey as commentary's")
+  ok(has(text, view_lib.style("thinkingText") .. "weighing"), "and its body is blue")
+end
+ok(view_lib.style("commentaryText") == "\27[38;2;255;255;255m", "commentary is white")
+ok(view_lib.PROMPT == "\226\157\175 " and view_lib.columns(view_lib.PROMPT) == 2,
+  "the prompt glyph is Claude Code's U+276F, one cell plus a space")
 
 -- The status line carries the colour, and the colour is a rendering decision: the same line
 -- is plain when the output is captured, and plain again on a terminal too narrow for it -
@@ -453,6 +470,59 @@ think_view:event({ type = "reasoning", text = "the reader wants the view fixed, 
 ok(has(thought.text(), "\226\156\187 Thinking\226\128\166"), "the reasoning is announced as thinking")
 ok(has(thought.text(), "read cli_view.lua first"), "and printed in full rather than summarised")
 ok(view_lib.columns(thought.text():match("[^\n]*read[^\n]*") or "") <= 80, "and wrapped to the terminal")
+local blue = recorder()
+local blue_view = view_lib.new({ out = blue.out, live = true, now = function() return 7 end, limit = 80 })
+blue_view:run_started()
+blue_view:event({ type = "reasoning", text = "plain words to read" })
+local tint = view_lib.style("thinkingText")
+ok(has(blue.text(), "\27[3m" .. view_lib.style("muted") .. "\226\156\187 Thinking"), "live: the thinking heading is grey italic")
+ok(has(blue.text(), tint .. "plain\27[0m " .. tint .. "words"), "and its body is blue, word by word")
+
+-- ---- the commentary, as its own block, like the UI's ✦ commentary topic ----------------
+
+local said = recorder()
+local said_view = view_lib.new({ out = said.out, live = false, now = function() return 7 end, limit = 80 })
+said_view:run_started()
+said_view:event({ type = "commentary", text = "I'll read the config before changing it", message_id = "c1" })
+ok(has(said.text(), "\226\156\166 Commentary"), "commentary is announced as commentary, with the UI's glyph")
+ok(not has(said.text(), "\226\156\187 Thinking\226\128\166"), "and is not drawn as thinking")
+ok(has(said.text(), "read the config before changing it"), "and printed in full")
+local white = recorder()
+local white_view = view_lib.new({ out = white.out, live = true, now = function() return 7 end, limit = 80 })
+white_view:run_started()
+white_view:event({ type = "commentary", text = "said to the reader", message_id = "w1" })
+ok(has(white.text(), view_lib.style("commentaryText") .. "said\27[0m " .. view_lib.style("commentaryText") .. "to"),
+  "live: the commentary body is white")
+ok(not has(white.text(), "\27[34msaid"), "and never thinking's blue")
+local streamed = recorder()
+local streamed_view = view_lib.new({ out = streamed.out, live = false, now = function() return 7 end, limit = 80 })
+streamed_view:run_started()
+streamed_view:event({ type = "commentary_delta", pending_id = "p1", text = "checking " })
+streamed_view:event({ type = "commentary_delta", pending_id = "p1", text = "the logs" })
+ok(not has(streamed.text(), "checking"), "streamed commentary waits for its item to close")
+streamed_view:event({ type = "commentary_end", message_id = "c2" })
+ok(has(streamed.text(), "checking the logs"), "and is printed once, whole")
+streamed_view:event({ type = "commentary_end", message_id = "c2" })
+local _, count = streamed.text():gsub("checking the logs", "")
+ok(count == 1, "never twice")
+-- A chat-completions provider's commentary is the step's `content` beside its tool calls, and it
+-- arrives as `step_phase` (agent.lua); a DeepSeek run printed none of it before this.
+local chat = recorder()
+local chat_view = view_lib.new({ out = chat.out, live = false, now = function() return 7 end, limit = 80 })
+chat_view:run_started()
+chat_view:event({ type = "step_phase", phase = "commentary", text = "I'll list /work/bin first.", message_id = "a1" })
+ok(has(chat.text(), "\226\156\166 Commentary") and has(chat.text(), "list /work/bin first"),
+  "a chat provider's step commentary is printed as commentary")
+chat_view:event({ type = "step_phase", phase = "commentary", text = "  ", message_id = "a2" })
+local _, blocks = chat.text():gsub("Commentary", "")
+ok(blocks == 1, "an empty step leaves no block behind")
+local peer = recorder()
+local peer_view = view_lib.new({ out = peer.out, live = false, now = function() return 7 end, limit = 80 })
+peer_view:run_started()
+peer_view:event({ type = "delta", text = "streamed already" })
+peer_view:event({ type = "step_phase", phase = "commentary", text = "streamed already", message_id = "a3" })
+local _, peer_count = peer.text():gsub("streamed already", "")
+ok(peer_count == 1, "text a peer already streamed is not printed again")
 
 -- ---- the console -------------------------------------------------------------------
 
@@ -590,11 +660,17 @@ ok(has(since(screen_out, mark), "\27[11;1H"), "the status line is drawn on the s
 -- The reader's line is moved into the transcript before the input row is reused.
 mark = #screen_out + 1
 screen_view:accepted("is this lost?")
-ok(has(visible(since(screen_out, mark)), "> is this lost?"),
-  "an accepted line is committed to the transcript")
+ok(has(visible(since(screen_out, mark)), "\226\157\175 is this lost?"),
+  "an accepted line is committed to the transcript, after the `❯` user-turn mark")
+mark = #screen_out + 1
+screen_view:accepted("two\nlines")
+local turn_rows = visible(since(screen_out, mark))
+ok(has(turn_rows, "\226\157\175 two") and has(turn_rows, "  lines"), "a second line sits under the first one's text")
+local bar = since(screen_out, mark):match("\27%[48;2;68;68;68m([^\27]*)") or ""
+ok(view_lib.columns(bar) == screen_view.limit, "the grey bar counts `❯` as one cell, not three bytes: " .. view_lib.columns(bar))
 mark = #screen_out + 1
 screen_view:submitted()
-ok(has(since(screen_out, mark), "\27[12;1H\27[2K> "),
+ok(has(since(screen_out, mark), "\27[12;1H\27[2K\226\157\175 "),
   "a submitted line is cleared from the input row before the run begins")
 
 -- Counters persist across turns in this process instead of restarting with each answer.
@@ -703,6 +779,103 @@ ok(boxed.bottom == 5 and boxed.status == 6 and boxed.input_top == 7 and boxed.in
 ok(view_lib.screen_rows(9, true) == nil, "a short console cannot host the boxed editor")
 ok(view_lib.screen_rows(3) == nil, "a 3-row console gives it none")
 ok(view_lib.screen_rows(nil) == nil, "an unknown height gives it none")
+
+-- ---- routed calls: `tool_call` and `remote` --------------------------------------
+-- The generic wrapper used to read `tool_call name=remote`: a call happened, nothing about what it
+-- ran or what came back. These are the events agent.lua emits for it (`tool` with the wrapper's
+-- decoded arguments, then `tool_result` with the wrapper's name and the inner tool's result).
+local function routed(arguments, result, limit)
+  local out = recorder()
+  local v = view_lib.new({ out = out.out, live = false, now = function() return 100 end, limit = limit or 100 })
+  v:run_started()
+  v:event({ type = "tool", call_id = "c1", name = "tool_call", arguments = arguments })
+  local phase = v.phase
+  v:event({ type = "tool_result", name = "tool_call", result = result,
+    failed = type(result) == "table" and result.error ~= nil, cancelled = false })
+  return out.text(), phase
+end
+
+local remote_args = { name = "remote", arguments = { node = "openclaw", capability = "bash",
+  args = { command = "git status --short" } } }
+local remote_text, remote_phase = routed(remote_args, { code = 0, stdout = " M lua/core/cli_view.lua\n?? notes.md\n" })
+ok(has(remote_text, "\226\143\186 Remote openclaw \194\183 Bash(git status --short)"),
+  "a routed remote call names the peer, the inner tool and its command: " .. remote_text)
+ok(not has(remote_text, "name=remote") and not has(remote_text, "Tool_call") and not has(remote_text, "tool_call"),
+  "and not the wrapper, in the heading or the status line")
+ok(remote_phase == "Running bash", "the status line says what runs, not `tool_call`: " .. tostring(remote_phase))
+ok(has(remote_text, "\226\142\191  M lua/core/cli_view.lua") and has(remote_text, "?? notes.md"),
+  "the inner command's output is shown, as a direct bash call shows it")
+ok(has(remote_text, "exit 0"), "with its exit code")
+
+local failed_text = routed(remote_args, { code = 2, stdout = "", stderr = "fatal: not a git repository\n" })
+ok(has(failed_text, "fatal: not a git repository") and has(failed_text, "exit 2"),
+  "a remote command that fails shows its stderr and exit code")
+ok(view_lib.outcome("tool_call", { code = 2 }, remote_args) == false, "and is judged a failure")
+
+local error_text = routed(remote_args, { error = "remote_error", detail = "connection refused" })
+ok(has(error_text, "remote_error: connection refused"), "an `{error}` result says why it failed: " .. error_text)
+ok(view_lib.outcome("tool_call", { error = "unknown_node:x" }, remote_args) == false, "and is a failure")
+ok(view_lib.outcome("tool_call", '{"error":"capability_not_granted"}', remote_args) == false,
+  "even when the peer's error arrives as JSON text")
+
+local local_text = routed({ name = "read", arguments = { path = "lua/core/agent.lua", offset = 10, limit = 5 } },
+  { content = "a\nb\nc\n" })
+ok(has(local_text, "Read(lua/core/agent.lua (lines 10-14))") and has(local_text, "3 lines"),
+  "a routed local tool reads exactly as the direct one: " .. local_text)
+
+-- `remote` called directly is unwrapped the same way.
+local label, inside = view_lib.tool_title("remote", remote_args.arguments, 96)
+ok(label == "Remote openclaw \194\183 Bash" and inside == "git status --short", "a direct remote names its inner call")
+ok(view_lib.outcome("remote", { code = 1 }, remote_args.arguments) == false, "and judges it by its exit code")
+
+-- Bounded: a long command is clipped in the heading, as a direct one is.
+local long_label, long_inside = view_lib.tool_title("tool_call", { name = "remote", arguments = {
+  node = "openclaw", capability = "bash", args = { command = string.rep("x", 400) } } }, 60)
+ok(view_lib.columns(long_label .. "(" .. long_inside .. ")") <= 62 and has(long_inside, "\226\128\166"),
+  "a long routed command is clipped to the line")
+
+-- The batch form: each call and what it returned, one line each.
+local batch_args = { calls = {
+  { name = "read", arguments = { path = "a.lua" } },
+  { name = "grep", arguments = { pattern = "TODO", path = "lua" } },
+  { name = "read", arguments = { path = "missing.lua" } } } }
+local batch_text = routed(batch_args, { ok = false, failed = 1, executed = 3, typed = true, serial = true, results = {
+  { content = "1\n2\n" }, { count = 4 }, { error = "no such file" } } })
+ok(has(batch_text, "Batch(Read(a.lua) \194\183 Search(pattern: \"TODO\", path: \"lua\") \194\183 Read(missing.lua))"),
+  "a batch heading lists its calls: " .. batch_text)
+ok(has(batch_text, "Read(a.lua) \226\134\146 2 lines") and has(batch_text, "4 matches")
+  and has(batch_text, "Read(missing.lua) \226\134\146 failed: no such file"), "each call says what it returned")
+ok(has(batch_text, "3 calls; 1 failed"), "and the batch counts its failures")
+ok(view_lib.outcome("tool_call", { ok = true, failed = 0, results = { {}, {} } }, batch_args) == true,
+  "a batch with no failures is a success")
+
+-- `wa --continue` / `wa --resume <id>`: the stored thread is drawn again, in order, with the same
+-- marks a live run uses - the reader's turn, commentary, the tool call and its result, the answer.
+do
+  local replay_view, replay_written = capture({ live = false, limit = 100 })
+  replay_view:replay({
+    { role = "user", content = "list the files" },
+    { role = "assistant", content = "Looking first.", phase = "commentary", reasoning = "",
+      tool_calls = '[{"id":"c1","type":"function","function":{"name":"bash","arguments":"{\\"command\\":\\"ls\\"}"}}]' },
+    { role = "tool", tool_call_id = "c1", tool_name = "bash", ok = 1, ms = 1200,
+      content = '{"code":0,"stdout":"a.md\\nb.md\\n"}' },
+    { role = "assistant", content = "Two files: a.md and b.md.", tool_calls = "[]", reasoning = "" },
+  }, { skipped = 7 })
+  local text = table.concat(replay_written)
+  local function at(needle) return text:find(needle, 1, true) or 0 end
+  ok(at("7 earlier messages") > 0, "a replay says how much it left out")
+  ok(at("list the files") > 0 and at("Looking first.") > 0, "the reader's turn and the commentary are drawn")
+  ok(at("a.md") > 0, "the tool's result is drawn")
+  ok(at("Two files") > at("a.md") and at("a.md") > at("list the files"), "in the order they happened")
+  ok(at("continued here") > at("Two files"), "and a rule marks where the new turns begin")
+  -- A recorded `!command` comes back as the command and its output, never as raw tags.
+  local bash_view, bash_written = capture({ live = false, limit = 100 })
+  bash_view:replay({ { role = "user", phase = "bash",
+    content = "<bash-input>git status</bash-input>\n<bash-stdout>clean tree</bash-stdout><bash-stderr></bash-stderr>" } })
+  local drawn = table.concat(bash_written)
+  ok(drawn:find("!git status", 1, true) and drawn:find("clean tree", 1, true), "a bash row is replayed as its command and output")
+  ok(not drawn:find("<bash-input>", 1, true), "without its tags")
+end
 
 if failed > 0 then
   print(string.format("cli view: %d failed of %d checks", failed, checks))

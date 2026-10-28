@@ -7,7 +7,7 @@
   window.fetch=async(url,options)=>{check(url==='/identity'&&!options.headers,'binding check sends no operator authorization');return{ok:true,json:async()=>({vault_id:'right-vault'})};};
   check(!await bindVault('wrong-vault')&&document.getElementById('auth').hidden,'wrong vault identity refuses enrollment before secret input');
   check(await bindVault('right-vault')&&!document.getElementById('auth').hidden,'matching public vault identity permits explicit enrollment');
-  const state={providers:{'opencode-go':{configured:true,enabled:true,generation:'generation-1'},'openai-sub':{configured:true,enabled:true}},login:{state:'idle'}};
+  const state={providers:{'opencode-go':{configured:true,enabled:true,generation:'generation-1'}}};
   let calls=[],resolveWrite=null;window.confirm=()=>true;
   window.fetch=async(url,options)=>{calls.push({url,options});
    if(options.method==='POST'&&url==='/api/opencode-go/key')return new Promise(resolve=>{resolveWrite=resolve;});

@@ -52,7 +52,7 @@ class WaProviderManager extends HTMLElement {
   render(){
     if(!this._body){
       this.className='provider-management';
-      this.innerHTML='<h3>Provider management</h3><p>Opening changes no account or provider and never replays a failed request. Go secrets stay inside a separate-origin vault-owned box, never chat or the node.</p><div class="provider-rows"></div><p class="provider-quota"></p><div class="provider-login"></div><p class="provider-message" role="status"></p><div class="provider-actions"></div>';
+      this.innerHTML='<h3>Provider management</h3><p>Opening changes no account or provider and never replays a failed request. Go secrets stay inside a separate-origin vault-owned box, never chat or the node.</p><div class="provider-rows"></div><p class="provider-quota"></p><p class="provider-message" role="status"></p><div class="provider-actions"></div>';
       this._body=this.querySelector('.provider-rows');this._rows=new Map();
     }
     const button=(parent,label,action,id)=>{const el=document.createElement('button');el.type='button';el.textContent=label;el.disabled=!!this._pending;el.addEventListener('click',()=>this.dispatchEvent(new CustomEvent('provider-action',{detail:{action,id}})));parent.append(el);};
@@ -68,14 +68,10 @@ class WaProviderManager extends HTMLElement {
         if(!this.entry){this.entry=document.createElement('wa-vault-entry');section.append(this.entry);}
         if(row.source==='vault'&&row.embed_url&&this._data.embed_scope){if(this._entryAllowed||this.entry.frame)this.entry.configure({url:row.embed_url,vault:row.vault_id,scope:this._data.embed_scope,broker:row.vault_url});this.entry.allowed=!!this._entryAllowed&&!this._pending;}
         else{this.entry.clear();setup.textContent='Inline key box setup required: durable isolated Go vault, verified same proxy/admin identity, exact parent origin and nonsecret operator URL. No plaintext/native secret fallback.';}
-      }else if(row.source==='native')button(controls,'Confirm re-login…','begin',row.id);
-      else if(row.operator_url){const link=document.createElement('a');link.textContent='Manage subscription on operator vault page';link.href=row.operator_url;link.target='_blank';link.rel='noopener noreferrer';controls.append(link);}
-      else setup.textContent='Operator vault setup required. See docs/VAULT.md.';
+      }else setup.textContent='Operator vault setup required. See docs/VAULT.md.';
     }
     if(this._data?.error){this.clearEntry();this._message='Management refused: '+this._data.error;}
     this.querySelector('.provider-quota').textContent=this._data?.quota||'';
-    const login=this.querySelector('.provider-login');login.replaceChildren();
-    if(this.login){const note=document.createElement('p');note.textContent='Device login: '+this.login.state+' '+(this.login.user_code?this.login.verification_url+' · '+this.login.user_code:'');login.append(note);button(login,'Check device completion','poll');button(login,'Reconcile outcome (read only)','status');button(login,'Cancel device login','cancel');}
     this.querySelector('.provider-message').textContent=this._message||'';
     const actions=this.querySelector('.provider-actions');actions.replaceChildren();button(actions,'Read status','refresh');button(actions,'Close','close');
   }

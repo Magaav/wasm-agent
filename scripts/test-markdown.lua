@@ -64,7 +64,7 @@ end
 -- ---- the components ----------------------------------------------------------------
 
 local _, head = render("# A heading\n\nsome words")
-ok(head.role_of("heading") == "bold+mdHeading", "a first-level heading is bold in pi's heading colour")
+ok(head.role_of("heading") == "bold+underline+mdHeading", "a first-level heading is bold and underlined, as Claude Code draws it")
 ok(head.role_of("words") == "-", "an ordinary paragraph is left in the terminal's own text colour")
 
 local _, second = render("## A smaller heading")
@@ -153,6 +153,22 @@ for _, sample in ipairs({ "plain", "\194\183\194\183\194\183", "caf\195\169 \226
   ok(md.columns(sample) == view_lib.columns(sample), "the two column counts agree on " .. #sample .. " bytes")
 end
 
+-- Width is cells, not characters: an emoji is two, an emoji-presented `❤️` is two, a combining
+-- accent is none. One-per-character shifted every border after `🏡` in a table by a cell.
+ok(md.columns("\240\159\143\161") == 2, "an emoji is two cells")
+ok(md.columns("\226\157\164\239\184\143") == 2, "a heart with the emoji selector is two cells")
+ok(md.columns("e\204\129") == 1, "a combining accent shares its letter's cell")
+ok(md.columns("\228\184\173") == 2, "a CJK character is two cells")
+do
+  local wide = md.render("| a | b |\n|---|---|\n| casa \240\159\143\161 | x |\n| plain | y |\n| love \226\157\164\239\184\143 | z |", { width = 40, indent = "" })
+  local sizes = {}
+  for line in (wide .. "\n"):gmatch("([^\n]*)\n") do sizes[md.columns(line)] = true end
+  local n = 0
+  for _ in pairs(sizes) do n = n + 1 end
+  ok(n == 1, "every row of a table with emoji is the same width, so its borders line up: " .. wide)
+  ok(md.columns(view_lib.clip("ab\240\159\143\161cd", 4)) <= 4, "a clip counts the emoji as two")
+end
+
 -- ---- nothing is lost ---------------------------------------------------------------
 
 -- The property that matters most: whatever the model wrote comes out. A renderer that
@@ -209,6 +225,42 @@ do
     if line:sub(1, 1) == " " then error("a wrapped line starts with a space: [" .. line .. "]") end
   end
   checks = checks + 1
+end
+
+
+-- ---- tables, task items, nested bullets ------------------------------------------------
+
+do
+  local source = "| Name | Count |\n|:-----|------:|\n| **alpha** | 1 |\n| beta | 22 |\n"
+  local text, rec = render(source, { width = 40, indent = "" })
+  ok(has(text, "\226\148\140") and has(text, "\226\148\152"), "a table is drawn in a box")
+  ok(not has(text, "|:-----|"), "the alignment row is not printed")
+  ok(rec.role_of("Name") == "bold+mdHeading", "the header row is bold")
+  ok(rec.role_of("alpha") == "bold+text", "inline marks work inside a cell")
+  ok(has(text, "\226\148\130    22 \226\148\130"), "a right-aligned column is padded on the left")
+  local widest = 0
+  for line in (text .. "\n"):gmatch("([^\n]*)\n") do widest = math.max(widest, md.columns(line)) end
+  ok(widest <= 40, "and the box fits the width")
+  local long = "| a | b |\n|---|---|\n| " .. string.rep("word ", 30) .. "| x |\n"
+  local narrow = md.render(long, { width = 30, indent = "" })
+  local over = false
+  for line in (narrow .. "\n"):gmatch("([^\n]*)\n") do if md.columns(line) > 30 then over = true end end
+  ok(not over and select(2, narrow:gsub("word", "")) == 30, "a long cell wraps inside its column and loses no word")
+  local tiny = md.render("| one | two | three | four |\n|---|---|---|---|\n| 1 | 2 | 3 | 4 |\n", { width = 20, indent = "" })
+  ok(has(tiny, "three: 3") and not has(tiny, "\226\148\140"), "a table too wide even wrapped becomes header: value lines")
+  ok(has(md.render("a | b without a separator row", { indent = "" }), "a | b without"), "a pipe in prose is not a table")
+end
+
+do
+  local text = md.render("- [x] done\n- [ ] todo\n- top\n  - nested\n    - deeper", { indent = "" })
+  ok(has(text, "\226\152\145 done") and has(text, "\226\152\144 todo"), "task items show a box, not brackets")
+  ok(has(text, "  \226\151\166 nested") and has(text, "    \226\150\170 deeper"), "nested bullets change mark per depth")
+end
+
+do
+  local _, tinted = render("grey words and **marked** ones", { style = "thinkingText" })
+  ok(tinted.role_of("grey") == "thinkingText", "a block's own style colours its plain words")
+  ok(tinted.role_of("marked") == "bold+text", "and marked-up words keep their own style")
 end
 
 print(string.format("markdown ok (%d checks)", checks))

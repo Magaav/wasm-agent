@@ -25,17 +25,26 @@ local M = {}
 -- The session-selecting flags, and the usage line above them. Kept here with the commands so
 -- `M.help()` aligns the whole block once; the parser for them is in `chat.lua`, and the parity check
 -- asserts every flag named below is a flag `chat.lua` actually accepts.
-M.usage = "usage: wa chat [--continue | --session <id>] [prompt]"
+M.usage = "usage: wa [chat] [--continue | --resume <id> | --session <id>] [prompt]"
 M.sessions = {
   { "(default)", "start a new session" },
-  { "--continue, -c", "continue the most recent session" },
-  { "--session <id>", "continue exactly that session (see: wa sessions)" },
+  { "--continue, -c", "continue the most recent thread with messages, its transcript printed again" },
+  { "--resume <id>", "continue exactly that session, its transcript printed again (see: wa sessions)" },
+  { "--session <id>", "the same as --resume" },
+}
+
+-- Input modes: what the first character of a line does. Not `/` commands, so not in the slash menu or
+-- the window's list; `chat.lua` handles them before the commands.
+M.modes = {
+  { "!<command>", "bash mode: run it here, show the output, keep it as context for the next turn (no model turn)" },
 }
 
 -- The `/` commands, in the order the help lists them. `alias` holds a second spelling the REPL
 -- accepts and the parity check therefore also requires an arm for.
 M.commands = {
-  { name = "/session", usage = "/session", hint = "print the session id (resume with --session)" },
+  { name = "/session", usage = "/session", hint = "print the session id (resume with wa --resume <id>)" },
+  { name = "/status", usage = "/status", hint = "this session's id, the model, and each provider's usage and limits" },
+  { name = "/vault", usage = "/vault <name> <value>", hint = "store a key as <name>.key: the agent uses it by name, never sees it" },
   {
     name = "/new",
     usage = "/new",
@@ -53,7 +62,7 @@ M.commands = {
   },
   { name = "/model", usage = "/model", hint = "pick the model from what the active provider serves" },
   { name = "/reasoning", usage = "/reasoning", alias = { "/thinking" }, hint = "set how much the model reasons (low, high, max...)" },
-  { name = "/provider", usage = "/provider", hint = "switch between OpenAI subscription and OpenCode Go for the next turns" },
+  { name = "/provider", usage = "/provider", hint = "pick the provider for the next turns" },
   { name = "/stats", usage = "/stats", hint = "database counts" },
   { name = "/console", usage = "/console", hint = "toggle the console: every event and a tool's whole output, unclipped" },
   {
@@ -72,6 +81,7 @@ M.commands = {
   { name = "/promote", usage = "/promote <node>", hint = "confirm network master, never administrator" },
   { name = "/demote", usage = "/demote <node>", hint = "confirm network guest; preserve local CLI" },
   { name = "/revoke", usage = "/revoke <node>", hint = "confirm exact binding revocation" },
+  { name = "/restart", usage = "/restart", hint = "restart wa into this session (also automatic when a new build is installed)" },
   { name = "/help", usage = "/help", hint = "this help" },
   { name = "/exit", usage = "/exit", alias = { "/quit" }, hint = "quit" },
 }
@@ -96,6 +106,11 @@ function M.help()
   lines[#lines + 1] = "commands:"
   for _, row in ipairs(M.commands) do
     lines[#lines + 1] = string.format("%-" .. width .. "s%s", row.usage, row.hint)
+  end
+  lines[#lines + 1] = ""
+  lines[#lines + 1] = "modes:"
+  for _, row in ipairs(M.modes) do
+    lines[#lines + 1] = string.format("%-" .. width .. "s%s", row[1], row[2])
   end
   lines[#lines + 1] = "anything else is sent to the model."
   return table.concat(lines, "\n")
@@ -150,7 +165,7 @@ function M.started_notice(id, previous)
   if previous and previous ~= "" then
     message = message .. string.format(
       "\n  the session you left (%s) is unchanged and still listed by `wa sessions`:" ..
-      "\n  resume it with `wa chat --session %s`", previous, previous)
+      "\n  resume it with `wa --resume %s`", previous, previous)
   end
   return message
 end

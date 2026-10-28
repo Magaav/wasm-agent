@@ -26,6 +26,14 @@ local merger = dofile("lua/core/merge.lua")
 -- last call sent, what it cost, and which part did not come from the provider's prefix cache. No
 -- model call, so it can be run mid-session without spending anything or changing the thread.
 local efficiency = dofile("lua/core/efficiency.lua")
+-- `/vault`: keys the agent uses by reference and never sees (see that module).
+local keys = dofile("lua/core/keys.lua")
+-- `!command`: Claude Code's bash mode (see that module).
+local bash_mode = dofile("lua/core/bash_mode.lua")
+-- Restarting into the same session when a new build is installed or a restart is asked for.
+local cli_restart = dofile("lua/core/cli_restart.lua")
+-- `/status`: the session, its usage and every provider's limits, as bars.
+local status = dofile("lua/core/status.lua")
 
 local M = {}
 
@@ -106,8 +114,8 @@ function M.run(argv)
   local index = 2
   while argv[index] do
     local arg = argv[index]
-    if arg == "--session" then
-      session_id = argv[index + 1]
+    if arg == "--session" or arg == "--resume" then
+      session_id = argv[index + 1] or ""
       index = index + 2
     elseif arg == "--continue" or arg == "-c" then
       resume_last = true
@@ -128,7 +136,7 @@ function M.run(argv)
   local session
   if session_id then
     if session_id == "" then
-      print("--session needs an id; list them with: wa sessions")
+      print("--resume needs an id; list them with: wa sessions")
       return 2
     end
     session = memory.session(session_id)
@@ -138,7 +146,7 @@ function M.run(argv)
       return 2
     end
   elseif resume_last then
-    session = memory.latest_session(USER, NODE)
+    session = memory.latest_thread(USER, NODE)
     if not session then print("nothing to continue; starting a new session") end
   end
   if not session then
@@ -199,6 +207,8 @@ function M.run(argv)
   end
   refresh_model()
   local agent = agentlib.new(session.id, printer(view), "master", USER, NODE)
+  -- What is on disk now is the build this process runs: a later change is a new install.
+  if host.binary_changed then pcall(host.binary_changed) end
   -- The host reads complete lines while the interpreter is in a provider/tool call.
   -- Give the next model round any waiting messages; slash commands still belong to
   -- the REPL and remain queued for after the run.
@@ -208,7 +218,10 @@ function M.run(argv)
   view.editor = input.editor
   -- The slash menu: typing `/` lists these under the box, the way Claude Code does.
   if input.editor and host.input_commands then pcall(host.input_commands, json.encode(commands.menu())) end
+  -- Set once the view is up (below): the `/status` snapshot refreshed at every round of a run.
+  local refresh_status
   agent.steer = function()
+    if refresh_status then refresh_status() end
     local lines = input:take_steering()
     for _, line in ipairs(lines) do view:accepted(line) end
     return lines
@@ -223,7 +236,7 @@ function M.run(argv)
     model = mode .. (reasoning ~= "" and ("  \194\183  reasoning " .. reasoning) or ""),
     database = host.getenv("WASM_AGENT_DB") or "~/.wasm-agent/memory.db",
     session = agent.session_id,
-    continued = resume_last,
+    continued = resume_last or session_id ~= nil,
     workspace = view.workspace,
     branch = view.branch,
     -- The banner is the last place a user can be told before they type: a thread
@@ -236,7 +249,52 @@ function M.run(argv)
     end)(),
   }))
 
+  -- A continued thread (`--continue`, `--resume <id>`) is drawn again under the banner, so the reader
+  -- picks up where the window was closed instead of in front of an empty screen. The newest messages
+  -- only: a day-long thread is hundreds of rows, and the window or `wa conversation` has the rest.
+  if resume_last or session_id then
+    local REPLAY = tonumber(host.getenv("WASM_AGENT_CLI_REPLAY")) or 400
+    if REPLAY > 0 then
+      local rows = memory.session_messages(agent.session_id, { all = true }) or {}
+      local skipped = math.max(0, #rows - REPLAY)
+      if skipped > 0 then
+        local newest = {}
+        for index = skipped + 1, #rows do newest[#newest + 1] = rows[index] end
+        rows = newest
+      end
+      -- Drawn once, at the end: a frame per row is what made a long thread take a minute to appear.
+      local hold = host.transcript_hold
+      if hold then pcall(hold, true) end
+      local replayed, problem = pcall(view.replay, view, rows, { skipped = skipped })
+      if hold then pcall(hold, false) end
+      if not replayed then view:warn(redact.text("could not draw the earlier transcript: " .. tostring(problem))) end
+    end
+  end
+  -- Started by a restart (lua/core/cli_restart.lua): say why, under the transcript it drew again.
+  local restarted = host.getenv("WA_CLI_RESTARTED")
+  if restarted and restarted ~= "" then
+    print(cli_view.paint("  \226\134\187 restarted: " .. redact.text(restarted), "dim", view.live))
+  end
+
+  -- `/status` as a panel spec. One module instance for the chat, so the limits it read are reused.
+  local function status_panel(opts)
+    local rows = {}
+    for _, row in ipairs(status.session_lines(agent.session_id, opts)) do rows[#rows + 1] = redact.text(row) end
+    return { title = "Status", lines = rows }
+  end
+  -- What the host shows if `/status` is submitted while a run is in flight (Lua is blocked in the model
+  -- call then): refreshed at the start of a run and at every round, from limits already read - the
+  -- provider is asked at most every five minutes, at a run's start, never in the middle of one.
+  local function snapshot_status(opts)
+    if not (host.status_snapshot and view.editor and view.stdout) then return end
+    local built, spec = pcall(status_panel, opts)
+    if built then pcall(host.status_snapshot, json.encode(spec)) end
+  end
+
+  refresh_status = function() snapshot_status({ color = view.live, cached = true }) end
+
   local function turn(line)
+    snapshot_status({ color = view.live, max_age = 300 })
     view:run_started()
     local ok, reply = pcall(agent.run, agent, line)
     if not ok then
@@ -254,15 +312,69 @@ function M.run(argv)
   -- where they are typing, and who is not locked out while the agent works. The prompt is drawn
   -- once per wait rather than in a loop, because the prompt and the reader's typing share a row -
   -- a redraw on a timeout would erase what they have typed so far.
+  -- Restart between runs, never over anything the reader is doing; a refusal is said once.
+  local restart_checked, restart_refused = 0, nil
+  local function restart(reason)
+    local message, torn = cli_restart.restart(agent.session_id, reason, function()
+      print("  restarting: " .. reason .. " - session " .. agent.session_id .. " continues")
+      input:stop()
+      view:screen_off()
+    end)
+    if torn then io.write(redact.text(message) .. "\n"); os.exit(1) end
+    print(redact.text(message))
+    restart_refused = reason
+  end
+  local function restart_if_due()
+    local now = host.now()
+    if now - restart_checked < cli_restart.CHECK_SECONDS then return end
+    restart_checked = now
+    local reason = cli_restart.reason()
+    if reason and reason ~= restart_refused and cli_restart.idle() then restart(reason) end
+  end
+
+  -- Turns another process adds to this session - a sentinel wake runs on the node, the window may
+  -- continue the same thread - are drawn here as they land, so what the sentinel reports back reaches
+  -- the reader in this terminal too. Only at the idle prompt (the same 2 s wake as the restart check)
+  -- and only beyond what this CLI has already shown; its own turns are marked seen as they end.
+  local seen_seq, last_caught = 0, nil
+  local function mark_seen()
+    local ok, bounds = pcall(memory.session_message_bounds, agent.session_id)
+    seen_seq = ok and tonumber(bounds and bounds.last_seq) or seen_seq
+  end
+  mark_seen()
+  local function catch_up()
+    if not (view.editor and view.stdout) then return end
+    local ok, bounds = pcall(memory.session_message_bounds, agent.session_id)
+    local last = ok and tonumber(bounds and bounds.last_seq) or 0
+    if last <= seen_seq then return end
+    local fetched, rows = pcall(memory.session_messages, agent.session_id, { all = true, after_seq = seen_seq })
+    seen_seq = last
+    if not fetched or type(rows) ~= "table" or #rows == 0 then return end
+    -- One header per burst: a wake lands as its prompt, then its reply a few seconds later.
+    if host.now() - (last_caught or 0) > 60 then
+      view:line(cli_view.paint("  \226\134\187 added to this session elsewhere (the node, a sentinel wake):", "dim", view.live))
+    end
+    last_caught = host.now()
+    local hold = host.transcript_hold
+    if hold then pcall(hold, true) end
+    pcall(view.replay, view, rows, { rule = false })
+    if hold then pcall(hold, false) end
+  end
+
   local function read_line()
     view:prompt()
     while true do
-      local line, eof = input:poll(cli_input.WAIT_MS)
+      restart_if_due()
+      catch_up()
+      -- Woken every CHECK_SECONDS (not WAIT_MS, half an hour) so an install is noticed at an idle
+      -- prompt; the prompt is drawn once, above, so a wake that brings no line redraws nothing.
+      local line, eof = input:poll(math.min(cli_input.WAIT_MS, cli_restart.CHECK_SECONDS * 1000))
       if line ~= nil then
         -- The reader's own line, into the transcript, before the input row is reused: the echo of
         -- it lives only on that row, and a message that vanishes when it is sent is one its author
         -- cannot check. See `cli_view.accepted`.
-        view:accepted(line)
+        -- A `/vault` line is echoed by name only: its value is never written to the transcript.
+        view:accepted(line:match("^%s*/vault%s") and keys.masked(line:gsub("^%s+", "")) or line)
         -- The terminal echoes a submitted line on the input row. Reclaim it before
         -- the synchronous run starts; otherwise it stays there for the entire run.
         view:submitted()
@@ -289,6 +401,8 @@ function M.run(argv)
   end
 
   while true do
+    -- Whatever the last command wrote (a turn, a `!` line, /new) is this CLI's own: already shown.
+    mark_seen()
     local line = read_line()
     if line == nil then break end
     line = line:gsub("^%s+", ""):gsub("%s+$", "")
@@ -325,6 +439,59 @@ function M.run(argv)
       dofile('lua/core/binding_cli.lua').run('revoke',line:sub(9),read_line,print)
     elseif line == "/session" then
       print(agent.session_id)
+    elseif line == "/status" then
+      -- A panel, like /model: Esc, Left or Enter goes back to the chat. Printed where there is none.
+      -- During a run the host shows it by itself (see `status_snapshot` above); this arm is between runs.
+      local panel = dofile('lua/core/cli_panel.lua')
+      if view.editor and view.stdout and panel.available() then
+        panel.open(status_panel({ color = view.live }))
+        panel.close()
+      else
+        print(redact.text(status.session_report(agent.session_id)))
+      end
+    elseif line == "/restart" then
+      restart_refused = nil
+      restart("restart requested from the chat")
+    elseif line:sub(1, 1) == "!" then
+      -- Bash mode: run here, show it, record it as context; no model turn (lua/core/bash_mode.lua).
+      local command = bash_mode.command(line)
+      if not command then print("  ! needs a command, e.g. !git status")
+      else
+        local done, problem = pcall(bash_mode.run, command, { session_id = agent.session_id, cwd = platform.cwd(), view = view })
+        if not done then print(redact.text("  ! failed: " .. tostring(problem))) end
+      end
+    elseif line == "/vault" or line:sub(1, 7) == "/vault " then
+      -- Handled here and nowhere else: the line never reaches `turn`, so the value never reaches a
+      -- model, a transcript row or the ledger. Without a value, the value is asked for in a secret
+      -- panel (bullets, no history) where the editor has one.
+      local name, value = keys.parse(line)
+      if not name or name == "" then
+        local stored = keys.names()
+        print("usage: /vault <name> <value>   (stored: " .. (#stored > 0 and table.concat(stored, ", ") or "none") .. ")")
+      else
+        if not value or value == "" then
+          local panel = dofile('lua/core/cli_panel.lua')
+          if view.editor and view.stdout and panel.available() then
+            local answer = panel.open({ title = "Key " .. name, input = "secret",
+              lines = { "Stored as " .. keys.path(name) .. " (0600). The agent uses it by name; its value is redacted everywhere." },
+              placeholder = "value" })
+            panel.close()
+            value = type(answer) == "table" and answer.action == "submit" and answer.text or nil
+          end
+        end
+        if not value or value == "" then
+          print("usage: /vault " .. name .. " <value>")
+        else
+          local result = keys.set(name, value)
+          value = nil
+          if result.ok then
+            print(string.format("  %s %s - %s (0600). Use it as \"$(cat %s)\"; its value is redacted in every output.",
+              result.replaced and "replaced" or "stored", name, result.path, result.path))
+          else
+            print("  vault: " .. result.error .. (result.note and (" - " .. result.note) or ""))
+          end
+        end
+      end
     elseif line == "/new" then
       -- The window's `/new`, in the REPL. The session being left is not closed: `M:close` finishes a
       -- session, and this thread is not finished, only left - `wa chat --session <id>` comes back to
@@ -333,6 +500,7 @@ function M.run(argv)
       local id, notice = commands.new_session({ previous = previous, user = USER, node = NODE })
       agent = agentlib.new(id, printer(view), "master", USER, NODE)
       agent.steer = function()
+        if refresh_status then refresh_status() end
         local lines = input:take_steering()
         for _, text in ipairs(lines) do view:accepted(text) end
         return lines

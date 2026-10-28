@@ -8,8 +8,6 @@
 -- credential.
 local vault = dofile("lua/core/vault.lua")
 local provider = dofile("lua/core/provider.lua")
-local wire = dofile("lua/core/subscription_wire.lua")
-local subscription = dofile("lua/core/openai_sub.lua")
 
 local failed, checks = 0, 0
 local function ok(condition, label)
@@ -37,22 +35,16 @@ if url then
   local rule = provider.attribution_rule(go)
   ok(rule and rule.host == "opencode.ai" and rule.session == "x-opencode-session",
      "the vaulted route keeps opencode's session header rule")
-  ok(wire.ENDPOINT == url .. "/openai-sub/codex/responses", "the subscription wire posts to the vault")
-  ok(wire.USAGE_ENDPOINT == url .. "/openai-sub/wham/usage", "the usage endpoint goes through the vault")
-  ok(wire.CREDENTIAL_MODULE == "lua/core/vault.lua", "the subscription seam is the vault")
-  ok(subscription.transport() == "native", "a vaulted node uses the native wire")
-  local credential, failure = wire.credential()
-  ok(credential == nil and type(failure) == "table" and failure.code == "vault_unreachable",
-     "an unreachable vault is a vault_unreachable failure, not a credential (got " ..
+  local status, failure = vault.status("opencode-go")
+  ok(status == nil and type(failure) == "table" and failure.code == "vault_unreachable",
+     "an unreachable vault is a vault_unreachable failure, not a status (got " ..
      tostring(failure and failure.code) .. ")")
-  ok(subscription.configured() == false, "an unreachable vault leaves openai-sub unconfigured")
+  ok(vault.base("openai-sub") == nil, "the vault has no ChatGPT route")
 else
   ok(go.api_key ~= vault.PLACEHOLDER, "without a vault, opencode-go never carries the placeholder")
   ok(not tostring(go.base_url):find("/opencode-go/v1", 1, true), "without a vault, the base URL is the provider's")
-  ok(wire.ENDPOINT == "https://chatgpt.com/backend-api/codex/responses", "without a vault, the wire is chatgpt.com")
-  ok(wire.CREDENTIAL_MODULE == "lua/core/openai_sub_auth.lua", "without a vault, the seam is the local store")
-  local credential, failure = vault.token()
-  ok(credential == nil and failure.code == "vault_unset", "the vault seam refuses when no vault is set")
+  local status, failure = vault.status("opencode-go")
+  ok(status == nil and failure.code == "vault_unset", "the vault refuses when no vault is set")
 end
 
 print(string.format("vault routing (%s): %d checks, %d failed", url and "vaulted" or "direct", checks, failed))

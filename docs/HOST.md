@@ -378,11 +378,22 @@ round-boundary steering, not per-keystroke interruption.
   The chat itself is a transcript the host draws (`transcript_block(topic)`,
   `transcript_write(text)`): topics (thinking, tool calls) fold to three rows; Ctrl+Up from the
   draft focuses them, Up/Down move, Right/Left expand/fold, Esc returns to the draft.
+  `transcript_hold(on)` keeps writes undrawn until it is released, then draws once (a resumed
+  session's replay); while the chat follows the bottom only the rows on screen are wrapped.
+  `status_snapshot(spec)` stores the `/status` panel; `/status` submitted while a run is in
+  flight is shown from it by the input thread at once (Esc/Left/Enter close it) instead of
+  being queued behind the run.
   The view addresses the rows the menu and panels move by token (`{O}` output, `{S}` status);
   the host fills them in under its input lock.
   Enter clears the draft immediately and queues a complete line without terminal echo or a
   newline on the bottom row. Ctrl+J/Shift+Enter inserts a newline; arrows, Home/End,
   Backspace/Delete, history, Ctrl+A/E/K/U/W, bracketed paste and UTF-8 are handled locally.
+  Ctrl+Z undoes the last draft edit and Ctrl+Y (or Ctrl+Shift+Z where the terminal reports it)
+  redoes it, cursor included: typing is one step per word, a paste is one step, and each delete,
+  kill, completion or history recall is its own (raw mode clears `ISIG`, so Ctrl+Z is a key here,
+  not SIGTSTP). A line sent while a run is in flight is listed above the status line
+  (`↪ Steering queued · next safe boundary: …`, the web UI's words) until Lua takes it, and lines
+  Lua takes but holds for after the run (a slash command) stay listed through `input_held(json)`.
   `terminal_write` serializes view, local slash-command output and ticker output with the
   editor's frames. `input_stop()`
   restores terminal input mode and codepage, and the CLI host also restores them on Lua errors.
@@ -392,8 +403,9 @@ round-boundary steering, not per-keystroke interruption.
   binary) by falling back to the blocking read it replaced.
 
 Risk/limits: the editor uses a three-row viewport; long drafts remain intact but older
-rows scroll out of that viewport. Ctrl+C clears the draft (it does not cancel a blocked
-provider request); Ctrl+D on an empty draft ends input. A terminal resize during a blocked
+rows scroll out of that viewport. Ctrl+C never discards the draft: during a run it interrupts
+the turn, idle with a draft it only shows a hint, and on an empty draft a second press within a
+second quits; Ctrl+D on an empty draft ends input. A terminal resize during a blocked
 run is applied to the frame on the next prompt, not on the next keystroke. Complex emoji
 ZWJ/grapheme widths are approximate. `WASM_AGENT_CLI_EDITOR=off` disables raw mode and
 `WASM_AGENT_CLI_FRAME=off` disables the pinned frame if a terminal needs canonical input.
@@ -403,6 +415,32 @@ for the same reason: the reader is a thread, so the only honest evidence is that
 behaviour. Its producer on stdin writes the second line **while the script is asleep**, which is
 the one arrangement that distinguishes a reader thread from a read in the REPL: with `io.read`
 that line would have arrived to nobody.
+
+## The CLI owns the mouse, bash mode, and restarting itself
+
+The chat is painted by this process into a scroll region (`crate::transcript`), so the terminal's own
+scrollback never holds it and its native selection only ever covered what was on screen. The editor
+therefore turns on SGR mouse reports (`?1002h ?1006h`, off again with the paste mode in
+`input_stop`): a drag over the chat area selects (reverse video, the view frozen while it lasts), and
+**Ctrl+C with a selection copies it** through OSC 52 - the terminal's clipboard, also over ssh and
+`docker exec`. Without a selection Ctrl+C is unchanged (interrupt; twice to quit). The wheel pages
+the chat. Shift+drag still makes the terminal's own selection where the terminal honours it (foot,
+xterm). The pure part - decoding reports, slicing cells, the copied text - is `src/selection.rs`.
+
+`!` as the first character of an empty draft is bash mode (Claude Code's): the prompt and dividers
+turn pink, Backspace on the empty draft, Esc or Ctrl+C leave it, and the line is submitted as
+`!<command>`. `lua/core/bash_mode.lua` runs it with `host.exec`, draws it as a tool result and records
+`<bash-input>…</bash-input>` + `<bash-stdout>…</bash-stdout><bash-stderr>…</bash-stderr>` as one user
+message (`phase = "bash"`, redacted) for the next turn. No model turn is started.
+
+`host.binary_changed()` records the binary this process runs at the first ask and later says whether
+the file at that path is another one (an install replaced it). `host.input_idle()` says whether a
+restart would lose anything (draft, panel, queued line, selection). `host.cli_reexec(args, env)`
+restores the console and execs the binary at this process's own path. `lua/core/cli_restart.lua`
+uses the three between runs: a new build, `/restart`, or a request file
+(`~/.wasm-agent/cli-restart.request`, its text the reason - an agent can write it) restarts the CLI as
+`wa chat --resume <session>`, which draws the transcript again. More than three restarts in five
+minutes (`WA_CLI_RESTARTS`) are refused. A crash is not restarted: that needs a parent process.
 
 ## The console's size
 
@@ -441,27 +479,23 @@ It exists because `host.http_stream` reads exactly *one* SSE dialect: OpenAI-com
 content lives at `choices[0].delta`, which it maps to the UI's `delta`/`commentary_delta`/`reasoning`
 events itself - and, from the same deltas, to the provisional `decision` rows the UI shows while a
 tool call is still being written. A provider whose event names, phase semantics and completion rule
-are different cannot be expressed as that dialect without flattening it - and ChatGPT's subscription
-endpoint is that provider. So the capability is a **line reader**, and the protocol is the caller's:
-`lua/core/subscription_wire.lua` owns the endpoint, the headers, the SSE framing, the event mapping
-and the rule that a stream ending
-without a terminal event is an error rather than a short answer. The line reader knows none of it.
+are different cannot be expressed as that dialect without flattening it. So the capability is a
+**line reader**, and the protocol is the caller's: the caller owns the endpoint, the headers, the
+SSE framing, the event mapping and the rule that a stream ending without a terminal event is an
+error rather than a short answer. The line reader knows none of it. (Its only caller, the
+ChatGPT-subscription wire, was removed on 2026-10-28; the capability stays for the next such
+provider.)
 
-The `decision` a tool call publishes is one contract on both provider paths, not a per-provider
-rendering: `{type:"decision", call_id, name, arguments_text, complete, [previous_call_id],
+The `decision` a tool call publishes is one contract, not a per-provider rendering: `{type:"decision", call_id, name, arguments_text, complete, [previous_call_id],
 [arguments_truncated]}`. It is emitted when the model starts writing the call; `arguments_text` is a
-preview bounded to 256 code points (`subscription_wire.M.DECISION_PREVIEW_CHARS`) and trimmed with
+preview bounded to 256 code points and trimmed with
 the same `… [preview only; complete arguments in result]` note; `complete` is true exactly once,
 after the call is finished, and never while its arguments are still streaming. A truncated ordinary
 stream (no finish reason and no `[DONE]`) or a cancelled/failed read leaves the row forming, and the
 agent's error path closes it as not executed. A changed call id is published with `previous_call_id`
 so the window moves the one row instead of stranding it, and a text-only answer emits no `decision`
-at all. The remaining provider difference is the id's shape - the subscription carries
-`call_id|item_id`, the ordinary path the provider's own call id - and the subscription alone
-re-publishes a discarded attempt's decisions from its retry row; on replay the ordinary path's rows
-are reconstructed from the durable `tool_calls`. Both readers are pinned to one expectation fixture,
-`tests/fixtures/decision-events/parity.json`, by `rust/wa-host/src/host.rs` and
-`scripts/test-decision-parity.lua`.
+at all. On replay the rows are reconstructed from the durable `tool_calls`. The reader is pinned to
+the expectation fixture `tests/fixtures/decision-events/parity.json` by `rust/wa-host/src/host.rs`.
 
 - The callback runs while the socket is open, so a live stream reaches the UI as it arrives; nothing
   is buffered. A Lua error raised in `on_line` - a cancelled run, an expired deadline - ends the read
@@ -476,7 +510,7 @@ are reconstructed from the durable `tool_calls`. Both readers are pinned to one 
   `http_error`, `request_failed`, `read_failed`, `line_callback_failed`, `callback_stopped`); EOF is not an error here,
   because only the protocol's owner can say which event completes a response.
 - A line ending at EOF is still a line: the recorded fixture in `tests/fixtures/subscription/` shows
-  this endpoint ends at EOF with no `data: [DONE]` sentinel, so a reader waiting for one would call a
+  a Responses endpoint ending at EOF with no `data: [DONE]` sentinel, so a reader waiting for one would call a
   finished stream truncated.
 
 ## Node-free QuickJS reactor
@@ -529,10 +563,12 @@ Adding a capability is two edits: one entry in the registry, one row here.
 ; Lines starting with ";" and blank lines are ignored by the checker.
 audio                device
 beat                 read-only
+binary_changed       read-only
 binding_state        read-only
 binding_transport    read-only
 canonical_path       read-only
 capability_inventory read-only
+cli_reexec           runs a process
 client               device
 client_status        read-only
 db_ready             read-only
@@ -562,6 +598,8 @@ http_sse             network
 http_stream          network
 input_commands       device
 input_editor         device
+input_held           device
+input_idle           device
 input_start          device
 input_stop           device
 input_take           device
@@ -592,6 +630,7 @@ sign                 read-only
 sleep                read-only
 sql_exec             writes files
 sql_query            read-only
+status_snapshot      device
 stream               device
 subagent             runs a process
 system_resources     read-only
@@ -599,6 +638,7 @@ terminal_size        device
 terminal_write       device
 ticker               device
 transcript_block     device
+transcript_hold      device
 transcript_write     device
 uuid                 read-only
 verify               read-only
@@ -635,8 +675,8 @@ shipped binary, and every refusal is a name: the tests pin them.
 `program` with an `args` string array. Native program names resolve through PATH;
 explicit paths must be native absolute paths. These forms are mutually exclusive.
 Both retain the same deadline, cancellation, process-tree containment and durable
-operation evidence. The subscription adapter launches Node directly, so a shell
-launcher cannot become the reported completion boundary for its response.
+operation evidence. A native `program` launch means a shell launcher cannot become the
+reported completion boundary for a response.
 
 The same capability exposes indexed `relevant {cwd,after?,limit?}` lookup,
 explicit legacy `index {evidence}` import, and exact-state `reconcile` with owner

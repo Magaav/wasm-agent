@@ -7,8 +7,7 @@
 // `embedded module missing: <name>`. That is exactly how `wa subscription login` shipped broken:
 // `lua/core/init.lua` loaded `scripts/openai-sub-login.lua`, the table carries `lua/` and nothing under
 // `scripts/`, and no test could see it because `scripts/test.sh` exports a Lua root for everything it
-// runs. The login CLI now lives in `lua/core/openai_sub_login.lua` and this check is what notices the
-// next one.
+// runs. (That login and its provider have since been removed.) This check is what notices the next one.
 //
 // What it checks, mechanically: the `EMBEDDED` keys are the registry; starting from them, follow every
 // *literal* `dofile("x")` reachable in the tree, and fail naming each target that is not a registry key.
@@ -49,7 +48,7 @@ let dynamic = 0;
 
 // Comments are not calls. A comment that *names* a `dofile` target (as this delivery's own explanation
 // does, and as any future author's will) must not fail the gate: the first run of this check reported
-// the path out of a comment in `lua/core/openai_sub_login.lua`, which is a false positive and would
+// the path out of a comment in a `lua/core` module, which is a false positive and would
 // train the next reader to ignore the check. Strings are tracked so that a `--` inside one does not
 // start a comment; long `[[ ]]` blocks are removed whole.
 function stripComments(text) {

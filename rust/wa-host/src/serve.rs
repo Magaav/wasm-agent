@@ -274,7 +274,7 @@ fn run_capacity() -> usize {
 /// `/subagents` is the one that can block for seconds, so it must never use node-thread 0.
 fn is_control_route(request: &Request) -> bool {
     let path = split_path(&request.path).0;
-    path == "/subagents" || (request.method == "POST" && matches!(path.as_str(), "/provider" | "/model" | "/reasoning" | "/fast-mode"))
+    path == "/subagents" || (request.method == "POST" && matches!(path.as_str(), "/provider" | "/model" | "/reasoning"))
 }
 
 /// The admission deadline, including queue residence and resolver wait. It never holds the listener.
@@ -1690,11 +1690,21 @@ fn subagent_reply(lua: &Lua, body: &str, session: &str) -> Reply {
     }
 }
 
+/// The address the node listens on: `WASM_AGENT_BIND` (e.g. `0.0.0.0` inside a container whose port is
+/// published only to the host's loopback), else `127.0.0.1`.
+pub fn bind_address() -> String {
+    std::env::var("WASM_AGENT_BIND").ok().map(|v| v.trim().to_string()).filter(|v| !v.is_empty())
+        .unwrap_or_else(|| "127.0.0.1".to_string())
+}
+
 pub fn run(first: Lua, factory: Box<dyn Fn() -> Lua + Send + Sync>, port: u16, ui: PathBuf) {
-    let listener = match TcpListener::bind(("127.0.0.1", port)) {
+    // Loopback unless `WASM_AGENT_BIND` says otherwise: a container publishes its port to the host's
+    // loopback, and that forward never reaches a listener on the container's own 127.0.0.1.
+    let address = bind_address();
+    let listener = match TcpListener::bind((address.as_str(), port)) {
         Ok(listener) => listener,
         Err(error) => {
-            eprintln!("[serve] bind 127.0.0.1:{port} failed: {error}");
+            eprintln!("[serve] bind {address}:{port} failed: {error}");
             return;
         }
     };
@@ -3096,12 +3106,14 @@ fn dispatch(
         // file for *another process*, and the two must not be confusable.
         "/spell/export" if method == "POST" => (200, "application/json", call("wa_spell_export", &[body.trim(), session]).into_bytes()),
         "/update" if method == "POST" => (200, "application/json", call("wa_update", &[body.trim(), session]).into_bytes()),
+        // `/vault` in the window: store one key file (lua/core/keys.lua). The body carries the value,
+        // so it is handed to Lua and never logged; the answer names the key and never echoes it.
+        "/vault/key" if method == "POST" => (200, "application/json", call("wa_vault_key", &[body, session]).into_bytes()),
         "/spell" if method == "POST" => (200, "application/json", call("wa_spell_run", &[body.trim(), session]).into_bytes()),
         "/provider-management" if method == "GET" => (200,"application/json",call("wa_provider_management", &["{}", node.as_str(), session]).into_bytes()),
         "/provider-management" if method == "POST" => (200,"application/json",call("wa_provider_management", &[body, node.as_str(), session]).into_bytes()),
         "/provider" if method == "POST" => (200, "application/json", call("wa_set_provider", &[body.trim(), node.as_str(), session]).into_bytes()),
         "/model" if method == "POST" => (200, "application/json", call("wa_set_model", &[body.trim(), node.as_str(), session]).into_bytes()),
-        "/fast-mode" if method == "POST" => (200,"application/json",call("wa_set_fast_mode",&[body.trim(),node.as_str(),session]).into_bytes()),
         "/reasoning" if method == "POST" => (200,"application/json",call("wa_set_reasoning",&[body.trim(),node.as_str(),session]).into_bytes()),
         "/chat" if method == "POST" => (200, "application/json", call("wa_reply", &[body, session, node.as_str()]).into_bytes()),
         // The module system: `/modules/` is its own page and `/modules/index.json` the listing beside

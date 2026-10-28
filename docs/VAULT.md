@@ -3,10 +3,13 @@
 ## Deterministic recovery: `/provider`
 
 Both `wa chat` and the window accept bare `/provider` (`/login` is an alias).
-No inference/classifier is used. Only these management routes are listed:
+No inference/classifier is used. One management route is listed:
 
-- **OpenAI subscription** (`openai-sub`): explicit selection, or confirmed device re-login.
 - **OpenCode Go** (`opencode-go`): explicit selection, or operator vault key replacement.
+
+(The ChatGPT-subscription route, `openai-sub`, and the plain `gpt` route were removed on
+2026-10-28: neither was used. A `vault.json` entry or `~/.wasm-agent/.../openai-sub/credentials.json`
+left by an older build is ignored, and the node still redacts that file's values while it exists.)
 
 Opening management changes neither account nor provider and never replays a failed turn.
 Selection uses the existing persisted settings revision; subsequent turns see the change.
@@ -27,27 +30,20 @@ new keys, not an inference agent. Existing provider-serving recovery remains exp
 
 | Variable | Meaning |
 | --- | --- |
-| `WASM_AGENT_OPENCODE_GO_VAULT_URL` | Broker origin for Go only, or `native` to use its legacy environment route |
-| `WASM_AGENT_OPENAI_SUB_VAULT_URL` | Broker origin for subscription only, or `native` to retain native auth |
-| `WASM_AGENT_VAULT_URL` | Backward-compatible default for **both** routes when no per-provider override is present |
+| `WASM_AGENT_OPENCODE_GO_VAULT_URL` | Broker origin for Go, or `native` to use its legacy environment route |
+| `WASM_AGENT_VAULT_URL` | Default broker origin when no per-provider override is present |
 | `WASM_AGENT_VAULT_OPERATOR_URL` | Nonsecret browser operator-page origin; never a token-bearing URL |
-| `WASM_AGENT_OPENCODE_GO_OPERATOR_URL`, `WASM_AGENT_OPENAI_SUB_OPERATOR_URL` | Optional per-provider operator-page origins |
+| `WASM_AGENT_OPENCODE_GO_OPERATOR_URL` | Optional Go operator-page origin |
 
-Moving Go does not require changing the global variable or copying subscription tokens.
-Without a global vault setting, configuring only Go leaves subscription native. If a global
-setting already exists, explicitly set the subscription override to `native` only as an
-operator-directed source choice. Do not change a working subscription source implicitly.
 Source configuration is service/operator-owned and becomes effective through the normal
 idle-safe service update, not an in-turn environment edit. Errors never authorize fallback.
 
 Vaulted requests use `wa-vault-brokered`, not a key. Fixed routes:
 
 - `/opencode-go/v1` -> `https://opencode.ai/zen/go/v1`
-- `/openai-sub/codex/responses`, `/openai-sub/wham/usage` -> exact ChatGPT backend paths
 
 Caller credential/Host/cookie/forwarding headers are dropped, redirects are not followed.
-No endpoint returns credentials. Subscription refresh remains single-flight with its durable
-`refresh_pending` no-replay fence. A vaulted subscription refuses the legacy Pi transport.
+No endpoint returns credentials.
 
 ## Operator enrollment and secret entry
 
@@ -90,7 +86,7 @@ act on a newly selected account/node. Opening/saving never selects a provider or
 
 The vault has separate listeners:
 
-- proxy (`:8810`): fixed upstreams, presence/generation `/status`, **first-login only** `/login`;
+- proxy (`:8810`): fixed upstreams, presence/generation `/status`, write-only `/login/opencode-go`;
 - admin (`:8801`): page plus token-authorized write-only API. At least 24 token characters are
   required at startup. No admin token belongs in the node/model environment or configuration.
 
@@ -103,8 +99,8 @@ the operator page checks its public `/identity` against that expected vault. Ope
 requests bind the observed instance as well as origin/generation. Migration verifies that
 proxy and operator origins identify the same durable vault before sending authorization or
 a key. A stale/wrong instance refuses rather than becoming a different account/source.
-The ordinary node door cannot replace
-existing keys/logins or cancel an existing operator subscription login.
+The ordinary node door (`POST /login/opencode-go`) can place or replace the Go key and can
+never read one; removing a key stays on the operator page.
 
 The embedded form additionally uses `/api/embed/go/{prepare,save,state,cancel}` on the
 vault admin origin. All require operator authorization, exact vault identity and a typed
@@ -127,18 +123,30 @@ and mutation share one lock. A stale/concurrent save refuses; success is reconci
 status reconciles that operation. An unresolved/superseded result is not success and is never
 automatically replayed. Removal is generation-checked and leaves an opaque tombstone.
 
-Subscription re-login retains the existing usable credential until fresh human-completed login
-commits. Cancellation/failure does not delete it; cancelled/superseded flows cannot resurrect.
-Native UI/CLI use the existing device endpoints via an operator-scoped nonblocking flow with
-single-flight locking, an authorization-exchange fence and opaque outcome reconciliation.
-Use **Check device completion**, **Reconcile outcome**, or **Cancel device login** explicitly.
-Closing the panel is not cancellation. The pending opaque operation survives a page reload in
-sessionStorage; credentials do not. Native and vault auth stores are never copied between one
-another. A source transition requires an explicit operator configuration plus fresh login.
-
 Node management is master-only and local-target-only. Open a remote node's own UI directly;
 there is no secret relay to whatever node the picker happens to select. Node/account changes
 invalidate the panel's action scope. Guest/child inference has no admin enrollment authority.
+
+## Keys the agent uses but never sees: `/vault <name> <value>`
+
+Provider credentials live in wa-vault, behind proxy routes. Any other key a task needs (a GitHub
+token, a service API key) is stored with `/vault`, in the CLI or the window:
+
+- `/vault github ghp_...` in the CLI, or `/vault github` to type the value in a secret panel;
+  `/vault` in the window opens a dialog with a password field (`POST /vault/key`, master only).
+- The value is written to `~/.wasm-agent/keys/<name>.key`, mode 0600 (`lua/core/keys.lua`;
+  `WASM_AGENT_KEYS_DIR` moves the store).
+- The model is told the names and the path, never a value, and uses a key by reference:
+  `curl -H "Authorization: Bearer $(cat ~/.wasm-agent/keys/github.key)" ...`.
+- Every stored value is an exact-value secret for `lua/core/redact.lua`: a tool result that carries
+  it (a `cat`, an `env` dump, a verbose curl) is redacted before it is stored, shown or sent.
+- The line itself never reaches a model turn, the transcript (the CLI echoes `/vault <name> ••••`),
+  the editor's history, steering, or the window's saved draft.
+
+This is not wa-vault's isolation: the agent's shell runs as the same user and *can* read the file.
+The redaction is exact-value, so the value as stored never reaches a transcript or a provider; a
+transformed copy (base64, split, reversed) would not be recognised, and a command can still send
+the key wherever the command sends it. Keys that need real isolation belong behind a wa-vault route.
 
 ## Production prerequisites (coordinator/operator only)
 

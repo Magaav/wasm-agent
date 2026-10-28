@@ -20,8 +20,13 @@
 -- worst case is the plain rendering it replaced; `scripts/test-markdown.lua` asserts that
 -- the visible text of a nasty reply survives the round trip.
 --
+-- Tables are drawn the way Claude Code draws them: a box with a bold header row, each column as
+-- wide as it needs or, when the terminal is narrower, wrapped inside its cell; a table that cannot
+-- fit even wrapped is printed one row per block (`header: value`), never cut. Task items show a
+-- box (☐ / ☑) and nested bullets change their mark per depth.
+--
 -- What is deliberately not here, because a wrong rendering is worse than a plain one:
--- tables, images, footnotes, nested-list re-indentation, and multi-line strings inside a
+-- images, footnotes, nested-list re-indentation, and multi-line strings inside a
 -- fence (the highlighter keeps no state between lines, so a `[[` string spanning lines is
 -- coloured to the end of its first line and no further).
 
@@ -31,18 +36,43 @@ local M = {}
 
 -- Columns, not bytes: `·` is two bytes and one column, so a byte count makes a line that
 -- fits look like it does not, and lets a wrap land inside a character - a rendering bug
--- rather than a cosmetic one. This is the same rule as `cli_view.columns`; the two are
--- pinned against each other in `scripts/test-markdown.lua` so they cannot drift apart.
+-- rather than a cosmetic one. Nor is it one column per character: an emoji (`🏡`) or a CJK
+-- character takes two cells, and a combining mark or a zero-width joiner takes none. The emoji
+-- selector U+FE0F (`❤️` is `❤` + it) widens its one-cell base to two in the terminals this runs in
+-- (foot, kitty, Windows Terminal), so it counts as the second cell. Counting those as one shifted every border after them in a
+-- table. The ranges are `cell_width` in rust/wa-host/src/terminal_editor.rs, which wraps the
+-- transcript: the two must agree or a line Lua fitted is wrapped again there. `cli_view.columns`
+-- is this function; `scripts/test-markdown.lua` pins both.
+local function cell(cp)
+  if (cp >= 0x300 and cp <= 0x36f) or (cp >= 0x1ab0 and cp <= 0x1aff)
+    or (cp >= 0xfe00 and cp <= 0xfe0e) or (cp >= 0x200b and cp <= 0x200d) then return 0 end
+  if (cp >= 0x1100 and cp <= 0x115f) or (cp >= 0x2e80 and cp <= 0xa4cf)
+    or (cp >= 0xac00 and cp <= 0xd7a3) or (cp >= 0xf900 and cp <= 0xfaff)
+    or (cp >= 0xfe10 and cp <= 0xfe6f) or (cp >= 0xff01 and cp <= 0xff60)
+    or (cp >= 0x1f300 and cp <= 0x1faff) then return 2 end
+  return 1
+end
+
+-- The character at `index`: its byte length and its width in cells.
+local function char_at(text, index)
+  local byte = text:byte(index)
+  local size = (byte >= 240 and 4) or (byte >= 224 and 3) or (byte >= 192 and 2) or 1
+  local cp = size == 1 and byte or (byte % (2 ^ (7 - size)))
+  for k = 1, size - 1 do cp = cp * 64 + ((text:byte(index + k) or 128) % 64) end
+  return size, cell(math.floor(cp))
+end
+
 local function columns(text)
   local count, index = 0, 1
   while index <= #text do
-    local byte = text:byte(index)
-    index = index + ((byte >= 240 and 4) or (byte >= 224 and 3) or (byte >= 192 and 2) or 1)
-    count = count + 1
+    local size, width = char_at(text, index)
+    index = index + size
+    count = count + width
   end
   return count
 end
 M.columns = columns
+M.char_at = char_at
 
 -- Break a string into pieces of at most `width` columns, never inside a character. Only
 -- reached by a word too long to fit on a line of its own (a URL, a base64 blob).
@@ -50,14 +80,13 @@ local function chop(text, width)
   local pieces, current, col = {}, {}, 0
   local index = 1
   while index <= #text do
-    local byte = text:byte(index)
-    local size = (byte >= 240 and 4) or (byte >= 224 and 3) or (byte >= 192 and 2) or 1
-    if col >= width then
+    local size, cells = char_at(text, index)
+    if col + cells > width and col > 0 then
       pieces[#pieces + 1] = table.concat(current)
       current, col = {}, 0
     end
     current[#current + 1] = text:sub(index, index + size - 1)
-    col = col + 1
+    col = col + cells
     index = index + size
   end
   if #current > 0 then pieces[#pieces + 1] = table.concat(current) end
@@ -300,8 +329,8 @@ end
 
 -- Greedy wrapping, and the only place a width is spent. A line that ends on a space drops
 -- it: a trailing space is invisible on screen and is not free in a diff.
-local function layout(tokens, width, indent)
-  local room = math.max(8, width - columns(indent))
+local function layout(tokens, width, indent, least)
+  local room = math.max(least or 8, width - columns(indent))
   local lines, current, col = {}, {}, 0
   local function flush()
     while #current > 0 and current[#current].glue do current[#current] = nil end
@@ -338,6 +367,134 @@ local function layout(tokens, width, indent)
   return lines
 end
 
+-- ---- tables ----------------------------------------------------------------------
+
+-- `| a | b |` -> { "a", "b" }. An escaped `\|` is a pipe inside a cell, not a border.
+local function cells_of(line)
+  local text = line:gsub("\\|", "\0"):gsub("^%s*|", ""):gsub("|%s*$", "")
+  local cells = {}
+  for cell in (text .. "|"):gmatch("([^|]*)|") do
+    cells[#cells + 1] = (cell:gsub("%z", "|"):gsub("^%s+", ""):gsub("%s+$", ""))
+  end
+  return cells
+end
+
+-- The `|---|:---:|---:|` row under a header: the alignment of each column, or nil.
+local function aligns_of(line)
+  if not line or not line:find("-", 1, true) then return nil end
+  if not line:match("^%s*|?%s*:?%-+:?%s*[|%s:%-]*$") then return nil end
+  local aligns = {}
+  for _, cell in ipairs(cells_of(line)) do
+    if not cell:match("^:?%-+:?$") then return nil end
+    local left, right = cell:sub(1, 1) == ":", cell:sub(-1) == ":"
+    aligns[#aligns + 1] = (left and right) and "center" or right and "right" or "left"
+  end
+  return aligns
+end
+
+-- A table starts at a row with a pipe whose next line is the alignment row.
+local function table_at(lines, index)
+  local line = lines[index]
+  if not line or not line:find("|", 1, true) then return nil end
+  local aligns = aligns_of(lines[index + 1])
+  if not aligns or #cells_of(line) < 1 then return nil end
+  return aligns
+end
+
+local function segments_width(segments)
+  local n = 0
+  for _, segment in ipairs(segments) do n = n + columns(segment.text or "") end
+  return n
+end
+
+-- Column widths that fit `width`: each column as wide as its widest cell, then the widest column
+-- given up one column at a time until the box fits. Nil when even narrow columns do not fit.
+local function fit_columns(natural, width)
+  local n = #natural
+  local chrome = 3 * n + 1
+  local widths, total = {}, chrome
+  for i, w in ipairs(natural) do widths[i] = math.max(1, w); total = total + widths[i] end
+  local least = 6
+  while total > width do
+    local widest, at = 0, nil
+    for i, w in ipairs(widths) do if w > widest then widest, at = w, i end end
+    if not at or widest <= least then return nil end
+    widths[at] = widths[at] - 1
+    total = total - 1
+  end
+  return widths
+end
+
+local function render_table(rows, aligns, opts)
+  local paint, width, indent, base = opts.paint, opts.width, opts.indent, opts.base
+  local n = #aligns
+  for _, row in ipairs(rows) do n = math.max(n, #row) end
+  local header_style = { "bold", "mdHeading" }
+  local parsed, natural = {}, {}
+  for r, row in ipairs(rows) do
+    parsed[r] = {}
+    for c = 1, n do
+      local segments = inline(row[c] or "", r == 1 and header_style or base)
+      parsed[r][c] = segments
+      natural[c] = math.max(natural[c] or 0, segments_width(segments))
+    end
+  end
+  local widths = fit_columns(natural, width - columns(indent))
+  local out = {}
+  local border = function(text) return paint(text, "mdCodeBlockBorder") end
+  if not widths then
+    -- Too many columns for this terminal even wrapped: each row as `header: value` lines.
+    for r = 2, #parsed do
+      for c = 1, n do
+        local head = (rows[1][c] or "") ~= "" and rows[1][c] or ("#" .. c)
+        local segments = { { text = head .. ":", style = header_style }, { text = " ", style = base } }
+        for _, segment in ipairs(parsed[r][c]) do segments[#segments + 1] = segment end
+        for _, line in ipairs(layout(tokens_of(segments), width, indent)) do
+          local parts = { indent }
+          for _, token in ipairs(line) do parts[#parts + 1] = paint(token.text, token.style) end
+          out[#out + 1] = table.concat(parts)
+        end
+      end
+      if r < #parsed then out[#out + 1] = "" end
+    end
+    return out
+  end
+  local function rule(left, mid, right)
+    local parts = {}
+    for c = 1, n do parts[c] = string.rep("\226\148\128", widths[c] + 2) end
+    return indent .. border(left .. table.concat(parts, mid) .. right)
+  end
+  out[#out + 1] = rule("\226\148\140", "\226\148\172", "\226\148\144")
+  for r, row in ipairs(parsed) do
+    local wrapped, height = {}, 1
+    for c = 1, n do
+      wrapped[c] = layout(tokens_of(row[c]), widths[c], "", 1)
+      if #row[c] == 0 or segments_width(row[c]) == 0 then wrapped[c] = { {} } end
+      height = math.max(height, #wrapped[c])
+    end
+    for h = 1, height do
+      local parts = { indent, border("\226\148\130") }
+      for c = 1, n do
+        local line = wrapped[c][h] or {}
+        local used, painted = 0, {}
+        for _, token in ipairs(line) do
+          used = used + columns(token.text)
+          painted[#painted + 1] = paint(token.text, token.style)
+        end
+        local gap = math.max(0, widths[c] - used)
+        local align = aligns[c] or "left"
+        local before = align == "right" and gap or align == "center" and math.floor(gap / 2) or 0
+        parts[#parts + 1] = " " .. string.rep(" ", before) .. table.concat(painted)
+          .. string.rep(" ", gap - before) .. " " .. border("\226\148\130")
+      end
+      out[#out + 1] = table.concat(parts)
+    end
+    if r == 1 then out[#out + 1] = rule("\226\148\156", "\226\148\188", "\226\148\164") end
+  end
+  out[#out + 1] = rule("\226\148\148", "\226\148\180", "\226\148\152")
+  return out
+end
+
 -- ---- the renderer -----------------------------------------------------------------
 
 -- `opts`: paint(text, style) -> string, width (columns, default 80), indent (default "  ").
@@ -347,6 +504,8 @@ function M.render(text, opts)
   local paint = opts.paint or function(plain) return plain end
   local width = tonumber(opts.width) or 80
   local indent = opts.indent or "  "
+  -- The block's own colour (thinking is grey): plain words take it, marked-up words keep theirs.
+  local base = opts.style
   local lines = split_lines(text)
   local out = {}
 
@@ -376,7 +535,22 @@ function M.render(text, opts)
     local trimmed = line:gsub("^%s+", ""):gsub("%s+$", "")
 
     local fence_indent, marks, lang = fence_of(line)
-    if marks then
+    local aligns = not marks and table_at(lines, index)
+    if aligns then
+      local rows = { cells_of(line) }
+      index = index + 2
+      while index <= #lines and lines[index]:find("|", 1, true)
+        and lines[index]:gsub("^%s+", "") ~= "" do
+        rows[#rows + 1] = cells_of(lines[index])
+        index = index + 1
+      end
+      blank()
+      for _, row in ipairs(render_table(rows, aligns, { paint = paint, width = width, indent = indent, base = base })) do
+        out[#out + 1] = row
+      end
+      out[#out + 1] = ""
+      index = index - 1   -- the outer loop advances by one
+    elseif marks then
       -- A fenced block: a bordered card, the way pi draws one, with the language named on
       -- the border so a reader knows what they are looking at.
       local body = {}
@@ -409,7 +583,8 @@ function M.render(text, opts)
     elseif heading_of(trimmed) then
       local level, rest = heading_of(trimmed)
       blank()
-      local style = level <= 2 and { "bold", "mdHeading" } or "mdHeading"
+      local style = level == 1 and { "bold", "underline", "mdHeading" }
+        or level == 2 and { "bold", "mdHeading" } or "mdHeading"
       push(inline(rest, style), indent, style)
       out[#out + 1] = ""
     elseif trimmed:match("^>") then
@@ -430,8 +605,16 @@ function M.render(text, opts)
       local item_indent, mark, rest = list_of(line)
       -- The view's indent, then the item's own: a bullet at column zero under an indented
       -- paragraph reads as a different block rather than as part of this one.
-      local prefix = indent .. item_indent .. (mark:match("^%d") and mark or "\226\128\162") .. " "
-      push(inline(rest, nil), prefix, "mdListBullet")
+      -- Nested bullets change their mark per depth (• ◦ ▪), as Claude Code does; `[ ]` / `[x]`
+      -- task items get a box instead of the brackets.
+      local depth = math.floor(#item_indent:gsub("\t", "  ") / 2) % 3
+      local bullet = mark:match("^%d") and mark or ({ "\226\128\162", "\226\151\166", "\226\150\170" })[depth + 1]
+      local done, task = rest:match("^%[([ xX])%]%s+(.*)$")
+      if done then
+        bullet = done == " " and "\226\152\144" or "\226\152\145"
+        rest = task
+      end
+      push(inline(rest, base), indent .. item_indent .. bullet .. " ", "mdListBullet")
     else
       -- A paragraph: consecutive ordinary lines joined, because a hard-wrapped source line
       -- is not a hard-wrapped screen line.
@@ -441,13 +624,14 @@ function M.render(text, opts)
         local next_line = lines[index]
         local next_trimmed = next_line:gsub("^%s+", ""):gsub("%s+$", "")
         if next_trimmed == "" or fence_of(next_line) or is_hr(next_trimmed)
-          or heading_of(next_trimmed) or list_of(next_line) or next_trimmed:match("^>") then
+          or heading_of(next_trimmed) or list_of(next_line) or next_trimmed:match("^>")
+          or table_at(lines, index) then
           break
         end
         gathered[#gathered + 1] = next_trimmed
         index = index + 1
       end
-      push(inline(table.concat(gathered, " "), nil), indent, nil)
+      push(inline(table.concat(gathered, " "), base), indent, nil)
       index = index - 1
     end
     index = index + 1

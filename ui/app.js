@@ -39,19 +39,6 @@ nodeSelect.className = "wa-select";
 const providerSelect = document.getElementById("provider-select");
 const modelSelect = document.getElementById("model-select");
 const reasoningSelect = document.getElementById("reasoning-select");
-const fastToggle=document.getElementById('fast-mode-toggle');
-const fastWorkers=document.getElementById('fast-mode-workers');
-function paintFastMode() {
-  const fast=settings.fast_mode || {};
-  document.getElementById('fast-mode-controls').hidden=settings.provider!=='openai-sub';
-  fastToggle.checked=fast.preference==='on'||fast.preference==='coding';
-  fastWorkers.checked=fast.preference==='coding';
-  const locked=composerBusy()||settingsChanging||me.role!=='master'||(!!activeNode&&activeNode!=='local');
-  fastToggle.disabled=locked||(!fastToggle.checked&&!['documented','advertised'].includes(fast.model_support));
-  fastWorkers.disabled=locked||!fastToggle.checked;
-  const observed=settings.observability?.last?.fast_mode || settings.observability?.last_request?.fast_mode;
-  document.getElementById('fast-mode-note').textContent=`${fast.error||''} ${observed?.matches_requested===false?'Provider tier differs. ':''}Next turn · model support: ${fast.model_support||'unknown'} · account entitlement unknown. Requested: ${observed?.requested||'unknown'} · actual: ${observed?.actual||'unknown'}. Raw tokens unchanged. Not Ultrafast.`;
-}
 const settingsNote = document.getElementById("settings-note");
 const harnessStatus = document.getElementById("harness-status");
 const settingsError = document.getElementById("settings-error");
@@ -200,7 +187,8 @@ function rememberBlankSession(id) {
 }
 
 function saveDraft() {
-  try { localStorage.setItem(DRAFT_KEY, input.value || ""); } catch (error) { /* private mode */ }
+  // A `/vault <name> <value>` being typed is a key: it is never kept in the browser's storage.
+  try { localStorage.setItem(DRAFT_KEY, isVaultLine(input.value) ? "" : (input.value || "")); } catch (error) { /* private mode */ }
 }
 
 function clearDraft() {
@@ -4031,7 +4019,6 @@ function applySettingsSovereignty() {
   providerSelect.disabled = locked;
   modelSelect.disabled = locked;
   reasoningSelect.disabled = locked || !(settings.reasoning || {}).supported || me.role !== "master";
-  paintFastMode();
   settingsNote.textContent = locked
     ? "a run is in flight \u2014 a change here applies at the next turn" : "";
 }
@@ -4426,6 +4413,8 @@ function threadOfRun(health, runId, session = chatSession) {
 }
 
 async function send(text, options = {}) {
+  // `/vault` is never a message: the key goes to the node's /vault/key, not to the model.
+  if (isVaultLine(text)) { vaultFromComposer(text); return; }
   stopVoiceSpeech();
   voiceLastAnswer = "";
   let runThread = options.session || chatSession;
@@ -4849,8 +4838,7 @@ function renderControls() {
   for (const provider of providers) {
     const option = document.createElement("option");
     option.value = provider.id;
-    option.textContent = provider.configured ? provider.label : provider.label +
-      (provider.auth === "subscription" ? " (login in Pi)" : " (no key)");
+    option.textContent = provider.configured ? provider.label : provider.label + " (no key)";
     if (provider.id === settings.provider) option.selected = true;
     providerSelect.append(option);
   }
@@ -5006,7 +4994,6 @@ function renderPopFoot() {
 const SETTING_VALUE = {
   provider: (payload) => payload.provider,
   model: (payload) => payload.model,
-  'fast-mode': (payload) => payload.fast_mode?.preference,
   reasoning: (payload) => (payload.reasoning || {}).selected,
 };
 
@@ -5314,6 +5301,7 @@ async function steerActiveRun(textOverride, options = {}) {
   const generation=options.draftGeneration ?? draftGeneration;
   const files=(options.files ?? attachments).slice();
   const viewing=()=>chatSession===thread && activeNode===node && conversationEpoch===epoch && session===account;
+  if(isVaultLine(text)){vaultFromComposer(text);return;}
   if(!composerBusy() || !thread || !text || steeringPending)return;
   // Steering reuses the composer's own intake, so it must carry every representation that intake
   // can produce: text files inline into the prompt, images ride beside it exactly as a normal turn's
@@ -5531,16 +5519,13 @@ async function openProviderManagement() {
   const balloon=document.createElement('wa-balloon');balloon.setAttribute('anchor',input.id);balloon.className='popover provider-manager-balloon';
   const panel=document.createElement('wa-provider-manager');balloon.append(panel);document.getElementById('status-balloon').parentElement.append(balloon);
   providerManagementPanel=balloon;balloon.managementNode=target;balloon.managementAccount=account;balloon.managementUser=user;balloon.open=true;
-  let pending=false, operation=null, held=false;
-  const operationKey='wa-provider-device:'+String(target)+':'+String(me.user?.id || 'operator');
-  try{operation=sessionStorage.getItem(operationKey);if(operation){held=true;panel.login={state:'outcome needs reconciliation'};panel.render();}}catch(_){/* no secret storage */}
+  let pending=false;
   const current=()=>activeNode===target && session===account && me.user?.id===user;
   const read=async()=>{
     if(!current())throw new Error('Node/account changed. Close and reopen management; no action sent.');
     const response=await apiFetch('provider-management',{headers:apiHeaders()});
     const value=await response.json();
     if(!current())throw new Error('Node/account changed; stale response ignored.');
-    if(value.native_login && !operation){operation=value.native_login.operation;held=value.native_login.state==='exchange_pending';sessionStorage.setItem(operationKey,operation);panel.login=value.native_login;}
     panel.data=value;
     panel.entryAllowed=current()&&balloon.open&&!composerBusy()&&me.role==='master';
     return value;
@@ -5574,33 +5559,10 @@ async function openProviderManagement() {
         if(busy)throw new Error('Run active: selection not sent. Try after settlement.');
         await setProvider(id);await read();return;
       }
-      if(!['begin','poll','cancel','status'].includes(action))return;
-      if(busy)throw new Error('Run active: authentication action not sent. Try after settlement.');
-      if(action==='begin'){
-        if(operation || held)throw new Error('Reconcile/cancel the existing operation before a new login.');
-        if(!confirm('Explicitly re-login OpenAI subscription on this node? Existing authentication is retained until fresh human login commits. Provider selection is unchanged.'))return;
-        operation=crypto.randomUUID();
-        sessionStorage.setItem(operationKey,operation);
-      }
-      if(!operation)throw new Error('No device login operation.');
-      if(held && action==='poll')throw new Error('Outcome held: no replay. Cancel explicitly or reconcile with the operator.');
-      const response=await apiFetch('provider-management',{method:'POST',headers:apiHeaders({'Content-Type':'application/json'}),body:JSON.stringify({action,operation})},35000);
-      const value=await response.json();
-      if(!current())throw new Error('Scope changed; login outcome must be reconciled on its original node/account.');
-      if(value.error){
-        if(action==='begin' && ['login_busy','locked','invalid_login_operation','vault_login_required','explicit_legacy_source'].includes(value.error)){
-          operation=null;sessionStorage.removeItem(operationKey);
-        }
-        held=value.error==='login_outcome_unknown';throw new Error(value.error);
-      }
-      if(action==='status' && value.state==='pending')held=false;
-      panel.login=value;panel.message=value.state==='done'?'Fresh login committed; entitlement unknown. Selection unchanged.':value.state==='cancelled'?'Cancelled; previous credential retained.':value.state==='not_pending'?'No matching pending/local committed login for this operation. No replay; a fresh login requires explicit confirmation.':'Complete the human step, then check completion. No automatic inference/probe.';
-      if(['done','cancelled','not_pending'].includes(value.state)){operation=null;panel.login=null;held=false;sessionStorage.removeItem(operationKey);}
-      await read();
-    } catch(error){if(operation){held=true;panel.login={state:'outcome needs reconciliation'};}panel.message=String(error.message||error)+' No automatic replay.';}
+    } catch(error){panel.message=String(error.message||error)+' No automatic replay.';}
     finally{pending=false;panel.pending=false;}
   });
-  balloon.addEventListener('close',()=>{panel.entryAllowed=false;panel.clearEntry();panel.message=operation?'Login may still be pending. Reopen this panel to reconcile or cancel; closing is not credential deletion.':'Closed private entry. Any already dispatched or uncertain vault write remains reconcilable on its original vault; no automatic cancellation/resend.';});
+  balloon.addEventListener('close',()=>{panel.entryAllowed=false;panel.clearEntry();panel.message='Closed private entry. Any already dispatched or uncertain vault write remains reconcilable on its original vault; no automatic cancellation/resend.';});
   try{await read();}catch(error){panel.message=String(error.message||error);}
 }
 const COMMANDS = [
@@ -5645,7 +5607,104 @@ const COMMANDS = [
     hint: "reclaim disk safely - dry run first, then a subagent deletes only what skills/clean-disk names",
     run: () => { send(CLEAN_DISK_BRIEF); },
   },
+  {
+    name: "/vault",
+    hint: "store a key as <name>.key — the agent uses it by name, never sees it",
+    run: () => openVault(""),
+  },
 ];
+
+// `/vault`: a key the agent uses by reference and never sees (lua/core/keys.lua). The value is typed
+// in a password field and posted to the node's /vault/key; it never enters the composer's draft, the
+// transcript or a model turn. Typed in the composer as `/vault <name> <value>`, the line is taken out
+// of the composer before anything else sees it and posted the same way.
+const VAULT_LINE = /^\s*\/vault(?:\s|$)/;
+function isVaultLine(text) { return VAULT_LINE.test(String(text || "")); }
+function vaultNotice(text, state) {
+  const notice = document.createElement("div");
+  notice.className = "thread-notice";
+  notice.dataset.state = state;
+  notice.textContent = text;
+  messages.append(notice);
+  pin();
+}
+async function storeVaultKey(name, value) {
+  try {
+    const response = await apiFetch("vault/key", {
+      method: "POST",
+      headers: apiHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ name, value }),
+    });
+    const result = await response.json();
+    if (result && result.ok) {
+      vaultNotice(`/vault — ${result.replaced ? "replaced" : "stored"} ${result.name} as ${result.path} (0600). The agent uses it by name; its value is redacted in every output.`, "current");
+    } else {
+      vaultNotice("/vault — not stored: " + String((result && (result.note || result.error)) || "no answer"), "refused");
+    }
+    return result;
+  } catch (error) {
+    vaultNotice("/vault — not stored: " + String(error), "refused");
+    return null;
+  }
+}
+function vaultFromComposer(text) {
+  const match = String(text).trim().match(/^\/vault(?:\s+(\S+))?(?:\s+([\s\S]+))?$/);
+  input.value = "";
+  draftNow = snapshotDraft();
+  clearDraft();
+  autosize();
+  commandMenu.close();
+  if (match && match[1] && match[2]) void storeVaultKey(match[1], match[2].trim());
+  else openVault(match && match[1] ? match[1] : "");
+}
+function openVault(name) {
+  const dialog = document.createElement("dialog");
+  dialog.className = "vault-dialog";
+  dialog.style.cssText = "max-width:420px;width:calc(100% - 32px);border-radius:10px;padding:16px;";
+  const form = document.createElement("form");
+  form.method = "dialog";
+  form.style.cssText = "display:grid;gap:8px;";
+  const title = document.createElement("strong");
+  title.textContent = "Store a key";
+  const note = document.createElement("span");
+  note.className = "usage-note";
+  note.textContent = "Saved as ~/.wasm-agent/keys/<name>.key on the node. The agent can use it by name; it never sees the value.";
+  const nameInput = document.createElement("input");
+  nameInput.placeholder = "name (e.g. github)";
+  nameInput.autocomplete = "off";
+  nameInput.spellcheck = false;
+  nameInput.value = name || "";
+  const valueInput = document.createElement("input");
+  valueInput.type = "password";
+  valueInput.placeholder = "value";
+  valueInput.autocomplete = "new-password";
+  const row = document.createElement("div");
+  row.style.cssText = "display:flex;gap:8px;justify-content:flex-end;";
+  const cancel = document.createElement("button");
+  cancel.type = "button";
+  cancel.textContent = "Cancel";
+  const save = document.createElement("button");
+  save.type = "submit";
+  save.textContent = "Save";
+  row.append(cancel, save);
+  form.append(title, note, nameInput, valueInput, row);
+  dialog.append(form);
+  document.body.append(dialog);
+  const close = () => { valueInput.value = ""; dialog.close(); dialog.remove(); };
+  cancel.addEventListener("click", close);
+  dialog.addEventListener("cancel", close);
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const keyName = nameInput.value.trim(), value = valueInput.value.trim();
+    if (!keyName || !value) { note.textContent = "Both a name and a value are needed."; return; }
+    save.disabled = true;
+    const result = await storeVaultKey(keyName, value);
+    if (result && result.ok) close();
+    else { save.disabled = false; note.textContent = "Not stored: " + String((result && (result.note || result.error)) || "no answer"); }
+  });
+  dialog.showModal();
+  (name ? valueInput : nameInput).focus();
+}
 
 // A thread is named by whoever starts it. The id is made here rather than asked for, so the name
 // the window holds is the name the node stores, with no round trip in which the node could answer
@@ -5849,9 +5908,6 @@ providerSelect.addEventListener("change", () => setProvider(providerSelect.value
 modelSelect.addEventListener("change", () => setModel(modelSelect.value)
   .catch((error) => { settingsError.textContent = "the change could not be sent: " + String(error); }));
 reasoningSelect.addEventListener('change',()=>post('reasoning',reasoningSelect.value).catch(error=>{settingsError.textContent=String(error);}));
-const saveFastMode=()=>post('fast-mode',!fastToggle.checked?'off':fastWorkers.checked?'coding':'on').catch(error=>{settingsError.textContent=String(error);});
-fastToggle.addEventListener('change',saveFastMode);
-fastWorkers.addEventListener('change',saveFastMode);
 harnessStatus.addEventListener('export',async event=>{
   settingsError.textContent='Exporting recorded events…';
   try {
@@ -6343,7 +6399,6 @@ function renderMetadataParts() {
   ];
   if(balloon.open) parts.push(
     ['controls',[settings.providers,settings.provider,settings.model,settings.reasoning,settings.model_error,me.role],renderControls],
-    ['fast',[settings.provider,settings.fast_mode,settings.observability?.last?.fast_mode,settings.observability?.last_request?.fast_mode,me.role,activeNode,composerBusy(),settingsChanging],paintFastMode],
     ['context',[runStepScope(),contextFacts()],renderContext],
     ['limits',[settings.limits,settings.limits_error,Math.floor(Date.now()/60000)],renderLimits],
     ['usage',[settings.observability,settings.provider,settings.model,settings.output_limit,settings.compact_trigger,settings.compact_reserve,settings.compact_keep,settings.reasoning],renderUsage],

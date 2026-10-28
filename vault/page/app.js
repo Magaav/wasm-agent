@@ -3,7 +3,7 @@
 const $ = id => document.getElementById(id);
 const expectedVaultId=(location.hash.match(/^#vault=([a-f0-9-]{36})$/)||[])[1] || '';
 let bindingReady=!expectedVaultId;
-let adminToken = "", snapshot = null, busy = false, polling = null;
+let adminToken = "", snapshot = null, busy = false;
 // Retire the old page's persisted-token/fragment enrollment, without reading it.
 try{localStorage.removeItem('wa-vault-admin-token');}catch(_){/* no persisted enrollment */}
 if(location.hash)history.replaceState(null,'',location.pathname);
@@ -11,7 +11,6 @@ let uncertain = sessionStorage.getItem("wa-vault-pending-operation") || "";
 const showError = text => { $("err").textContent = text || ""; };
 function showAuth(needed) {
   $("auth").hidden = !needed || !bindingReady;
-  $("openai-sub").hidden = needed;
   $("opencode-go").hidden = needed;
 }
 async function api(method, path, body) {
@@ -34,20 +33,10 @@ async function bindVault(expected) {
 function render(value) {
   snapshot = value;
   showAuth(false);
-  const sub = value.providers?.["openai-sub"] || {}, go = value.providers?.["opencode-go"] || {}, login = value.login || {};
-  $("sub-state").textContent = sub.configured ? (sub.enabled ? "login configured" : "configured · disabled") : "not configured";
+  const go = value.providers?.["opencode-go"] || {};
   $("ocg-state").textContent = go.configured ? (go.enabled ? "key configured" : "configured · disabled") : "not configured";
-  $("sub-enabled").checked = sub.enabled !== false;
   $("ocg-enabled").checked = go.enabled !== false;
-  $("sub-note").textContent = "Vault source only. Presence is not entitlement verification." + (login.state === "error" ? " Login failed: " + login.error : "");
   $("ocg-note").textContent = "Monthly GoUsageLimitError is account/workspace quota, not proof of an invalid key. A new key from the same exhausted workspace may still fail. No automatic retry or provider switch.";
-  const pending = login.state === "pending" || login.state === "starting";
-  $("sub-flow").hidden = !pending;
-  $("sub-code").textContent = pending ? login.user_code || "" : "";
-  $("sub-url").textContent = pending ? login.verification_url || "" : "";
-  $("sub-url").href = pending ? login.verification_url || "#" : "#";
-  if (pending && !polling) polling = setInterval(refresh, 3000);
-  if (!pending && polling) { clearInterval(polling); polling = null; }
   if (uncertain) {
     if (go.operation === uncertain) {
       uncertain = ""; sessionStorage.removeItem("wa-vault-pending-operation");
@@ -60,7 +49,6 @@ function lock() {
   document.querySelectorAll("button,input").forEach(el => { if (!el.closest("#auth")) el.disabled = busy; });
   $("ocg-form").querySelector("button").disabled = busy || !!uncertain;
   $("ocg-remove").disabled = busy || !!uncertain;
-  $("sub-login").disabled = busy || ['pending','starting'].includes(snapshot?.login?.state);
 }
 async function run(action) {
   if (busy) return;
@@ -75,13 +63,6 @@ async function refresh() {
 $("auth-form").addEventListener("submit", event => {
   event.preventDefault(); if(!bindingReady)return;adminToken = $("auth-token").value.trim(); $("auth-token").value = ""; refresh();
 });
-$("sub-login").addEventListener("click", () => {
-  if (confirm("Start an explicit ChatGPT device re-login on this vault? The current credential is retained until fresh login completes. This does not change the node's authentication source."))
-    run(() => api("POST", "/api/openai-sub/login", {expected_generation:snapshot.providers['openai-sub'].generation}));
-});
-$("sub-cancel").addEventListener("click", () => run(() => api("DELETE", "/api/openai-sub/login", {operation:snapshot.login.operation})));
-$("sub-logout").addEventListener("click", () => { if (confirm("Remove the vault ChatGPT login?")) run(() => api("DELETE", "/api/openai-sub")); });
-$("sub-enabled").addEventListener("change", event => run(() => api("POST", "/api/openai-sub/enabled", {enabled:event.target.checked})));
 $("ocg-form").addEventListener("submit", event => {
   event.preventDefault(); if (busy || uncertain || !snapshot) return;
   let key = $("ocg-key").value.trim(); $("ocg-key").value = "";
@@ -101,7 +82,7 @@ $("ocg-remove").addEventListener("click", () => {
 });
 $("ocg-enabled").addEventListener("change", event => run(() => api("POST", "/api/opencode-go/enabled", {enabled:event.target.checked})));
 // No model probes on this recovery surface.
-$("sub-test").hidden = true; $("ocg-test").hidden = true;
+$("ocg-test").hidden = true;
 window.addEventListener("pagehide", () => { adminToken = ""; $("ocg-key").value = ""; $("auth-token").value = ""; });
 showAuth(true);
 if(expectedVaultId)bindVault(expectedVaultId);

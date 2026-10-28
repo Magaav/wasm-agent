@@ -24,14 +24,14 @@ const parse=s=>JSON.parse(s.split(/\r?\n/).at(-1));
     const init=parse(await run('init')); assert.equal(init.provider,'opencode-go');
     const held=run('hold');
     for(let i=0;!fs.existsSync(path.join(root,'pinned'));i++){assert.ok(i<200,'pin readiness');await new Promise(r=>setTimeout(r,20));}
-    const switched=parse(await run('switch')); assert.equal(switched.model,'gpt-6.1-sol');
+    const switched=parse(await run('switch')); assert.equal(switched.model,'deepseek-v4.1-flash');
     fs.writeFileSync(path.join(root,'release'),'observed switch');assert.match(await held,/pin held/);
-    const outcomes=await Promise.all(['gpt-6-sol','gpt-6-astra'].map(model=>run('cas',{WA_SELECTION_REVISION:String(switched.revision),WA_SELECTION_MODEL:model}).then(parse)));
+    const outcomes=await Promise.all(['cas-model-a','cas-model-b'].map(model=>run('cas',{WA_SELECTION_REVISION:String(switched.revision),WA_SELECTION_MODEL:model}).then(parse)));
     assert.equal(outcomes.filter(o=>o.ok).length,1,'exactly one racing CAS succeeds');
     assert.equal(outcomes.filter(o=>o.error==='settings_conflict').length,1,'loser refuses rather than overwriting');
     const observed=parse(await run('read'));
-    assert.equal(observed.revision,switched.revision+1);assert.equal(observed.provider,'openai-sub');
-    assert.ok(['gpt-6-sol','gpt-6-astra'].includes(observed.model));
+    assert.equal(observed.revision,switched.revision+1);assert.equal(observed.provider,'opencode-go');
+    assert.ok(['cas-model-a','cas-model-b'].includes(observed.model));
     console.log('selection state ok (9 checks, 0 skipped; real concurrent processes, pinned run, version conflict)');
   } finally {
     await Promise.all(children.map(async c=>{

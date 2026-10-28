@@ -118,10 +118,19 @@ local function file_secret_values()
       local key=host.read_file(override)
       if type(key)=='string' then key=key:gsub('%s+','');if #key>=32 then out[#out+1]={name='NODE_KEY',escape=escape_pattern(key),value=key} end end
     end
-    local auth_ok, auth = pcall(dofile, "lua/core/openai_sub_auth.lua")
-    if auth_ok and type(auth) == "table" then
-      if auth.store_path then json_secrets(auth.store_path(), "OPENAI_SUB_CREDENTIAL", out) end
-      if auth.pi_auth_path then json_secrets(auth.pi_auth_path(), "PI_AUTH_CREDENTIAL", out) end
+    -- `/vault` keys (lua/core/keys.lua): stored precisely so the agent can use them without the
+    -- value ever reaching a transcript, so each is an exact-value secret here.
+    for _, key in ipairs(dofile("lua/core/keys.lua").values()) do
+      out[#out + 1] = { name = key.name, escape = escape_pattern(key.value), value = key.value }
+    end
+    -- A ChatGPT login left on disk by an older build (the provider is gone; the file may not be),
+    -- and Pi's own auth file: still exact-value secrets while they exist.
+    local paths_ok, paths = pcall(dofile, "lua/core/paths.lua")
+    if paths_ok and type(paths) == "table" then
+      json_secrets(host.getenv("WASM_AGENT_OPENAI_SUB_STORE") or (paths.data() .. "/openai-sub/credentials.json"),
+        "OPENAI_SUB_CREDENTIAL", out)
+      json_secrets(host.getenv("WASM_AGENT_PI_AUTH")
+        or ((host.getenv("PI_CODING_AGENT_DIR") or (paths.home() .. "/.pi/agent")) .. "/auth.json"), "PI_AUTH_CREDENTIAL", out)
     end
   end)
   return out

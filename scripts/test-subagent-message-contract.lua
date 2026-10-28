@@ -31,12 +31,6 @@ for _, role in ipairs({'master', 'guest'}) do
   check(#offered == 1 and offered[1]['function'].parameters.properties.idempotency_key.description == parameters.properties.idempotency_key.description, 'profile_help_parity_' .. role)
   check(offered[1]['function'].parameters.properties.conversation_id.description == parameters.properties.conversation_id.description, 'profile_lookup_help_parity_' .. role)
 end
-local wire = original_dofile('lua/core/subscription_wire.lua').body('gpt-6.1-sol',
-  {{role = 'user', content = 'model-free serializer check'}},
-  {{type = 'function', ['function'] = definition}}, {}, nil, {})
-check(wire.tools[1].description == definition.description, 'responses_preserves_tool_help')
-check(wire.tools[1].parameters.properties.conversation_id.description == parameters.properties.conversation_id.description, 'responses_preserves_lookup_field')
-check(wire.tools[1].parameters.properties.idempotency_key.description == parameters.properties.idempotency_key.description, 'responses_preserves_property_help')
 
 -- The real native engine owns durable continuation deduplication. This mock proves
 -- facade key forwarding and pre-dispatch refusals without admitting paid children.

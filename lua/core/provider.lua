@@ -11,42 +11,8 @@ local windowlib = dofile("lua/core/model_window.lua")
 local telemetry = dofile("lua/core/telemetry.lua")
 local prefix_audit = dofile("lua/core/prefix_audit.lua")
 local M = {}
-local subscription = dofile("lua/core/openai_sub.lua")
 local vault = dofile("lua/core/vault.lua")
-local fast_policy = dofile('lua/core/openai_sub_fast_policy.lua')
 local state = dofile("lua/core/state.lua")
-
-function M.fast_mode(model, scope, inspect)
-  local preference=(M._pinned and M._pinned.fast.preference) or state.read('fast.openai-sub') or 'off'
-  if preference~='off' and preference~='on' and preference~='coding' then error('fast_mode_preference_corrupt',0) end
-  local eligible=scope and scope.role=='master' and (not scope.profile or
-    (scope.profile=='orchestration-worker' and preference=='coding'))
-  local enabled=eligible and preference~='off' or false
-  if M._pinned then enabled=M._pinned.fast.enabled;preference=M._pinned.fast.preference end
-  local ok,selection=pcall(fast_policy.selection,M.active().id,model or M.settings().model,enabled)
-  if not ok then
-    if not inspect then error(selection,0) end
-    local problem=selection
-    selection=fast_policy.selection(M.active().id,model or M.settings().model,false)
-    selection.error=problem
-  end
-  selection.preference=preference
-  return selection
-end
-
-function M.set_fast_mode(value, revision)
-  if value~='off' and value~='on' and value~='coding' then return false,'invalid_fast_mode' end
-  local result=state.mutate(function()
-    if M.active().id~='openai-sub' then return {ok=false,error='fast_mode_provider_not_applicable'} end
-    if value~='off' then
-      local ok,err=pcall(fast_policy.selection,'openai-sub',M.settings().model,true)
-      if not ok then return {ok=false,error=err} end
-    end
-    state.write('fast.openai-sub',value)
-    return {ok=true}
-  end,revision)
-  return result.ok,result.error
-end
 
 local function env(name) return host.getenv(name) end
 local function trim(value) return (value or ""):gsub("^%s+", ""):gsub("%s+$", "") end
@@ -94,29 +60,8 @@ function M.providers()
       -- over other apis - gpt-6-luna is `openai-responses`, minimax-m3 is
       -- `anthropic-messages` - and those are refused below rather than sent.
       transport = "openai-completions",
-      -- The key pi's store publishes this route's ids under. Absent on `gpt` below: nothing here
-      -- enumerates api.openai.com, so an id only another route lists stays unknown there.
+      -- The key pi's store publishes this route's ids under.
       pi_provider = "opencode-go",
-    },
-    {
-      id = "gpt",
-      label = "gpt",
-      base_url = env("OPENAI_BASE_URL") or "https://api.openai.com/v1",
-      api_key = env("OPENAI_API_KEY") or "",
-      default_model = "gpt-4.1",
-      transport = "openai-completions",
-    },
-    {
-      id = "openai-sub", label = "OpenAI subscription",
-      base_url = "https://chatgpt.com/backend-api",
-      api_key = "", auth = "subscription", configured = subscription.present(),
-      default_model = "gpt-6-luna",
-      -- Pi's bridge speaks the codex responses transport; this route has no catalogue here.
-      -- `subscription.models` is a three-id *picker* list, not this route's catalogue, and
-      -- refusing everything it omits blocked five ids the route serves (gpt-5.5, gpt-5.6-luna,
-      -- gpt-5.6-sol, gpt-5.6-terra, gpt-5.3-codex-spark). Never derive a refusal from it again.
-      transport = "openai-codex-responses",
-      pi_provider = "openai-codex",
     },
   }
 end
@@ -154,8 +99,8 @@ function M.settings()
   local model, from_env = remembered_model(provider)
   -- A model the active route cannot serve is reported and not used. Presenting it would make
   -- every reader - the picker, the reasoning levels, the next request - describe the route the
-  -- selection came from, which is how "switched to opencode-go" still showed a subscription
-  -- model and reasoning. The route falls back to its own default, and `model_error` names the
+  -- selection came from, which is how a route switch once still showed the previous
+  -- route's model and reasoning. The route falls back to its own default, and `model_error` names the
   -- value that was refused so the operator can see and repair it.
   local model_error
   if model and not from_env and M.serves(model, provider) == false then
@@ -175,7 +120,6 @@ function M.settings()
 end
 
 function M.configured()
-  if M.active().id == "openai-sub" then return subscription.configured() end
   local settings = M.settings()
   return settings.base_url ~= "" and settings.api_key ~= "" and settings.model ~= ""
 end
@@ -221,13 +165,12 @@ end
 -- *and* openai-codex, and on the opencode-go route its `api` is `openai-responses` while this
 -- client posts /chat/completions - which is precisely what the edge answered in 0.67s,
 -- `Model does not support this protocol`. The first version of this check instead asked which
--- route "owns" an id, which is false on its face, and it read that ownership from
--- `subscription.models` - a three-id picker list this file does not own - so it refused five ids
--- the subscription route serves. A catalogue re-listed here is the defect; there is none below.
+-- route "owns" an id, which is false on its face, and it read that ownership from a picker list
+-- this file does not own, so it refused ids a route served. A catalogue re-listed here is the
+-- defect; there is none below.
 --
 -- The catalogue is read where it actually lives: pi's local model store
--- (~/.pi/agent/models-store.json, the file M.capabilities already reads and the one the
--- subscription bridge resolves ids against - `models.getModel('openai-codex', id)`). Every entry
+-- (~/.pi/agent/models-store.json, the file M.capabilities already reads). Every entry
 -- carries the `api` that id is served over. This client speaks exactly one transport per route:
 -- the route's `transport` below.
 --
@@ -278,11 +221,6 @@ end
 -- What this client actually sends over each transport, for the refusal to name.
 local TRANSPORT_WIRE = {
   ["openai-completions"] = "POST /chat/completions",
-  -- The subscription route's transport is wasm-agent's own Responses wire
-  -- (lua/core/subscription_wire.lua) unless WASM_AGENT_SUBSCRIPTION_TRANSPORT=pi, in which case it
-  -- is still Pi's adapter. The refusal names the wire, because which client speaks a protocol is
-  -- part of the reason a model was refused.
-  ["openai-codex-responses"] = "the subscription Responses wire (codex/responses)",
 }
 
 -- Can `provider` (default: the active route) serve `model`? `true` = this route's own catalogue
@@ -294,10 +232,6 @@ function M.serves(model, provider)
   provider = provider or M.active()
   model = trim(model or "")
   if model == "" then return nil end
-  if provider.id=='openai-sub' then
-    -- Native route metadata is ours; no Pi store read decides request admission.
-    return subscription.catalogue().serves(model)
-  end
   local protocols = catalogue_protocols(model)
   if #protocols == 0 then return nil end
   local own_published, reachable_elsewhere = false, false
@@ -440,10 +374,6 @@ function M.unservable(model, provider)
   provider = provider or M.active()
   model = trim(model or "")
   if model == "" or M.serves(model, provider) ~= false then return nil end
-  if provider.id=='openai-sub' then
-    return 'model_not_servable: provider=openai-sub cannot serve model='..model..
-      '; the native subscription catalogue does not publish this id; refused before request, nothing substituted'
-  end
   local served_over, seen = {}, {}
   for _, entry in ipairs(catalogue_protocols(model)) do
     local where = (provider.pi_provider ~= nil and entry.provider == provider.pi_provider)
@@ -490,10 +420,10 @@ local ATTRIBUTION = {
   {
     -- OpenAI routes a conversation with the `prompt_cache_key` body field, which
     -- cache_params already sends per conversation, and has no session header.
-    -- Declared so the absence is a decision a reader can see, not an oversight.
+    -- Declared so the absence is a decision a reader can see, not an oversight
+    -- (an operator can still point WASM_AGENT_LLM_BASE_URL at it).
     host = "api.openai.com",
   },
-  { host = "chatgpt.com" }, -- Pi's subscription adapter owns its account/session headers.
 }
 
 -- The authority of a base URL, lowercased: "https://opencode.ai/zen/go/v1" gives
@@ -566,7 +496,6 @@ function M.list_models(id)
     end
   end
   provider = provider or M.active()
-  if provider.id == "openai-sub" then return subscription.models end
   M._cache = M._cache or {}
   local now = (host and host.now and host.now()) or 0
   local entry = M._cache[provider.id]
@@ -600,37 +529,36 @@ end
 
 -- Rolling usage limits from the provider (`rolling` = 5h, `weekly` = 7d,
 -- `monthly` = 30d), each `{status, percent, resetsAt}`. Cached briefly.
-function M.limits()
+-- `provider_id` asks about one provider rather than the active one (`/status` lists them all).
+function M.limits(provider_id)
   local provider = M.active()
-  local configured = provider.id == "openai-sub" and subscription.configured() or provider.api_key ~= ""
+  if provider_id and provider_id ~= provider.id then
+    provider = nil
+    for _, item in ipairs(M.providers()) do if item.id == provider_id then provider = item end end
+    if not provider then return {}, "unknown provider" end
+  end
+  local configured = provider.api_key ~= ""
   if not configured then return {}, "provider not configured" end
   local now = (host and host.now and host.now()) or 0
   local cache_key = provider.id .. "\n" .. provider.base_url
-  if M._limits and M._limits_key == cache_key and (now - (M._limits_at or 0)) < 30 then
-    return M._limits, M._limits_error
-  end
+  M._limits_by = M._limits_by or {}
+  local cached = M._limits_by[cache_key]
+  if cached and (now - cached.at) < 30 then return cached.limits, cached.error end
   local limits = {}
   local ok, err = pcall(function()
-    if provider.id == "openai-sub" then
-      limits = subscription.limits()
-    else
-      local url = provider.base_url:gsub("/+$", "") .. "/usage"
-      local headers = headers_for(provider)
-      local response = json.decode(host.http("GET", url, json.encode(headers), ""))
-      if response and tonumber(response.status) == 200 then
-        local ok, payload = pcall(json.decode, response.body)
-        if ok and type(payload) == "table" and type(payload.usage) == "table" then
-          limits = payload.usage
-        end
+    local url = provider.base_url:gsub("/+$", "") .. "/usage"
+    local headers = headers_for(provider)
+    local response = json.decode(host.http("GET", url, json.encode(headers), ""))
+    if response and tonumber(response.status) == 200 then
+      local ok, payload = pcall(json.decode, response.body)
+      if ok and type(payload) == "table" and type(payload.usage) == "table" then
+        limits = payload.usage
       end
     end
   end)
-  M._limits = limits
-  M._limits_error = nil
-  if not ok then M._limits_error = redact.text(tostring(err)) end
-  M._limits_key = cache_key
-  M._limits_at = now
-  return limits, M._limits_error
+  local failure = (not ok) and redact.text(tostring(err)) or nil
+  M._limits_by[cache_key] = { at = now, limits = limits, error = failure }
+  return limits, failure
 end
 
 -- Prompt-cache routing. Providers cache the *prefix* of a request (system +
@@ -677,11 +605,7 @@ end
 -- WASM_AGENT_MODEL_LIMITS still overrides everything, and the old global is kept as the
 -- last-resort fallback so no existing deployment changes behaviour by surprise.
 function M.budget(model)
-  local window
-  if M.active().id=='openai-sub' then
-    local entry=subscription.catalogue().window(model)
-    window={context=entry and entry.context_window or 0,output=entry and entry.max_output or 0,source='openai-sub-catalogue'}
-  else window=windowlib.for_model(model) end
+  local window = windowlib.for_model(model)
   local budget = {
     context = window.context,
     source = window.source,
@@ -733,36 +657,6 @@ end
 -- Only public model metadata is read from Pi's local store, never credentials.
 function M.capabilities(model)
   local provider_id = M.active().id
-  if provider_id == "openai-sub" then
-    -- The route's shipped declaration, and what the catalogue publishes for this id on top of
-    -- it. Both, not the catalogue alone: Pi marks a level an id does not honour with `null` in
-    -- the map, and this decoder drops a null (lua/vendor/json.lua: literal_map null=nil), so a
-    -- `null` mapping is indistinguishable here from a level the map simply does not list - which
-    -- Pi honours by passing it through. Deciding from the map alone would refuse levels this
-    -- route accepts today (gpt-5.6-luna publishes only {minimal,xhigh,max} and honours the
-    -- rest). The union cannot refuse a level either source names, and it can never come out
-    -- empty - an empty set is what refuses *every* level a child can be given, and a child
-    -- always carries one. The store is read, never written, and the same file the bridge
-    -- resolves ids against and the preflight decides servability from.
-    local levels={low="low",medium="medium",high="high",xhigh="xhigh",max="max"}
-    if model~="gpt-6-astra" then levels.off="none" end
-    local published = subscription.thinking_level_map(model)
-    -- The windows come from the same catalogue, per id: an id the route serves at a different
-    -- output ceiling must not be described by the route's largest one.
-    local window = subscription.catalogue().window(model)
-    local max_output = window and window.max_output or 128000
-    if published then
-      for level, value in pairs(published) do
-        if type(value)=="string" then levels[level]=value end
-      end
-      return {reasoning=true, levels=levels, compat={}, max_output=max_output,
-        source="openai-sub-catalogue"}
-    end
-    -- nil from the catalogue is "cannot answer", not "no levels": the shipped declaration stands,
-    -- so a route that cannot describe an id still describes itself.
-    return {reasoning=true, levels=levels, compat={}, max_output=max_output,
-      source="openai-sub-route"}
-  end
   local store = pi_store()
   local profile = store and store[provider_id]
   if type(profile)=="table" then
@@ -852,12 +746,9 @@ function M.pin(scope)
   if vault.base(profile.id) then
     local status = vault.status(profile.id)
     profile.credential_generation = status and status.providers[profile.id] and status.providers[profile.id].generation or 'unknown'
-  elseif profile.id == 'openai-sub' then
-    profile.credential_generation = dofile('lua/core/openai_sub_auth.lua').status().generation or 'absent'
   end
   local reasoning=M.reasoning(settings.model)
-  local fast=M.fast_mode(settings.model,scope)
-  M._pinned={provider=profile,settings=settings,reasoning=reasoning,fast=fast}
+  M._pinned={provider=profile,settings=settings,reasoning=reasoning}
   M._pinned.revision=state.revision()
   end)
 end
@@ -936,7 +827,6 @@ end
 -- retry count is explicit and operator-disableable rather than a general retry policy.
 function M.is_response_timeout(problem)
   local text=tostring(problem or ""):lower()
-  if text:find("subscription_stream_failure:",1,true) or text:find("subscription_retry_",1,true) then return false end
   return text:find("provider_error: timeout: receive response", 1, true) ~= nil
 end
 
@@ -971,13 +861,9 @@ function M.is_transient(problem)
   local text = tostring(problem or ""):lower()
   -- Lost response headers have their own, deliberately smaller budget (`response_timeout_retries`).
   if M.is_response_timeout(text) then return false end
-  -- The observed Pi stream already used its bounded pre-output retry inside one
-  -- supervised request. Never compound it through this broader opt-in policy.
-  if text:find("subscription_stream_failure:",1,true) or text:find("subscription_retry_",1,true) then return false end
   -- Errors arrive with Lua's `file:line:` prefixes, so the markers are found, not anchored.
-  local status = text:match("provider_http_(%d+)") or text:match("subscription_http_(%d+)")
+  local status = text:match("provider_http_(%d+)")
   if status then return TRANSIENT_STATUS[status] == true end
-  if text:find("subscription_transport_", 1, true) then return true end
   if text:find("provider_error:", 1, true) then
     for _, pattern in ipairs(TRANSIENT_TEXT) do
       if text:find(pattern, 1, true) then return true end
@@ -1001,13 +887,10 @@ end
 -- busy upstream: the run should wait, not die. pi's agent retry uses the same split - rate limits and
 -- server errors retry by default, while a terminal quota/billing refusal does not.
 local RATE_LIMIT_TERMINAL = { "gousagelimiterror", "freeusagelimiterror", "monthly usage limit",
-  "available balance", "insufficient_quota", "out of budget", "quota exceeded", "billing",
-  "subscription_sharing_usage_limit_exceeded" }
+  "available balance", "insufficient_quota", "out of budget", "quota exceeded", "billing" }
 
 function M.is_rate_limited(problem)
   local text = tostring(problem or ""):lower()
-  -- The subscription bridge owns its own visible reconnect cycles; never compound them here.
-  if text:find("subscription_", 1, true) then return false end
   local status = text:match("provider_http_(%d+)")
   if not status or not TRANSIENT_STATUS[status] then return false end
   for _, pattern in ipairs(RATE_LIMIT_TERMINAL) do
@@ -1083,8 +966,6 @@ local CONNECTION_TEXT = { "peer disconnected", "connection reset", "connection r
 
 function M.is_connection_lost(problem)
   local text = tostring(problem or ""):lower()
-  -- The subscription stream already used its own bounded pre-output retry; never compound it.
-  if text:find("subscription_stream_failure:", 1, true) or text:find("subscription_retry_", 1, true) then return false end
   for _, pattern in ipairs(CONNECTION_TEXT) do
     if text:find(pattern, 1, true) then return true end
   end
@@ -1225,8 +1106,7 @@ function M.complete_with(model, messages, tools, stream, opts)
   end
   for key, value in pairs(M.cache_params(opts)) do body[key] = value end
   if stream then body.stream=true; body.stream_options={include_usage=true} end
-  local url = provider.base_url:gsub("/+$", "") ..
-    (provider.id=="openai-sub" and "/codex/responses" or "/chat/completions")
+  local url = provider.base_url:gsub("/+$", "") .. "/chat/completions"
   local headers, attribution = headers_for(provider, opts.session_id)
   local serialized=json.encode(body)
   local audit_started=telemetry.clock()
@@ -1253,31 +1133,10 @@ function M.complete_with(model, messages, tools, stream, opts)
     context_tokens_estimate=opts.context_tokens or telemetry.estimate_messages(messages)+math.ceil(#json.encode(tools or {})/4),
     estimation="text bytes/4 + 1200 per image estimate; provider usage is authoritative",
     runtime=telemetry.runtime(),context=opts.context}
-  if provider.id=="openai-sub" then
-    -- Which client assembled the wire request, recorded per request: a hash of the body means
-    -- something different when the body is ours and when Pi built it from the same input.
-    if subscription.transport()=="native" then
-      request_meta.transport="native-codex-responses"
-      request_meta.request_hash_source="lua/core/subscription_wire.lua builds the provider request"
-    else
-      request_meta.transport="pi-openai-codex-responses"
-      request_meta.request_hash_source="bridge input; Pi assembles the provider wire request"
-    end
-  end
-  if provider.id=='openai-sub' then request_meta.fast_mode=fast_policy.observation(M.fast_mode(body.model),nil) end
   local span=telemetry.start(opts,opts.kind or "model_call",request_meta)
   -- Count the provider boundary, not a decision round or pre-request refusal.
-  -- Transport reconnects inside a subscription call remain separate diagnostics.
   if opts.on_call_start then opts.on_call_start(opts.kind or "model_call",request_meta,M.budget(body.model).context) end
   local ok,result=pcall(function()
-  if provider.id=="openai-sub" then
-    local bridge_opts={}
-    for key,value in pairs(opts) do bridge_opts[key]=value end
-    bridge_opts.max_output=effective.output_limit
-    bridge_opts.credential_generation=provider.credential_generation
-    bridge_opts.fast_selection=M.fast_mode(body.model)
-    return subscription.complete(body.model,messages,tools,stream,bridge_opts,effective.reasoning)
-  end
   if stream then
     local result = json.decode(host.http_stream("POST", url, json.encode(headers), serialized))
     record_serving_http(provider,body.model,result,serving_request_binding)
@@ -1347,13 +1206,12 @@ function M.complete_with(model, messages, tools, stream, opts)
   local has_tools=#(result.tool_calls or {})>0
   local meaningful=has_tools or visible~=""
   local complete=result.finish_reason~="length" and result.stream_complete~=false and meaningful
-  if complete and (provider.auth=='subscription' or provider.api_key~='') then
+  if complete and provider.api_key~='' then
     record_serving_success(provider,body.model,serving_request_binding,result)
   end
   local observation=telemetry.finish(span,{ok=complete,model=result.model,
     provider=provider.id,request_id=result.request_id,finish_reason=result.finish_reason,
     usage=result.usage,normalized=telemetry.normalize(result.usage,M.rates(result.model)),
-    fast_mode=result.fast_mode,
     transport_failed_attempts=result.transport_failed_attempts,
     ttft_ms=result.ttft_ms,stream_complete=result.stream_complete,
     reasoning_bytes=#(result.reasoning or ""),answer_bytes=#(result.content or ""),

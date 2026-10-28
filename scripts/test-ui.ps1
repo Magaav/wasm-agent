@@ -837,15 +837,15 @@ $harness = @'
     "context must show measured last request and selected capacity, saw: " + contextText);
   window.renderUsage(); renderControls();
   var savedModelSettings = settings;
-  settings = Object.assign({}, settings, {provider:'openai-sub',model:'gpt-6-luna',
-    providers:[{id:'openai-sub',label:'OpenAI subscription',auth:'subscription',configured:true,
+  settings = Object.assign({}, settings, {provider:'other-route',model:'gpt-6-luna',
+    providers:[{id:'other-route',label:'Other route',configured:true,
       models:['gpt-6-luna','gpt-6-sol','gpt-6-astra']}]});
   renderControls();
-  check(document.getElementById('provider-select').selectedOptions[0].textContent==='OpenAI subscription',
-    'a configured subscription is shown without an API-key requirement');
+  check(document.getElementById('provider-select').selectedOptions[0].textContent==='Other route',
+    'a configured route is shown by its label');
   check(document.getElementById('model-select').value==='gpt-6-luna' &&
     document.getElementById('model-select').options.length===3,
-    'the subscription picker offers the GPT-6 family and selects Luna');
+    'the picker offers the route models and selects the current one');
   var statusBalloon=document.getElementById('status-balloon');
   var statusButton=document.getElementById('status-btn');
   statusButton.click();
@@ -864,8 +864,8 @@ $harness = @'
   delete window.__fixtures.model;
   settings.providers[0].configured=false;
   renderControls();
-  check(document.getElementById('provider-select').textContent.includes('login in Pi'),
-    'a missing subscription login points to Pi');
+  check(document.getElementById('provider-select').textContent.includes('(no key)'),
+    'a route without a credential says so');
   settings=savedModelSettings;
   renderControls();
   // A stale Go model must remain visible, not masquerade as the first choice.
@@ -4305,8 +4305,6 @@ try {
     # control that does have colour ink), and that a narrow pane still ellipsises the one-line row.
     & node scripts/agent-benchmark-ui-observe.mjs --ui $ui --probe (Join-Path $PSScriptRoot 'probe-run-stats-glyph.js') --out (Join-Path $tmp 'run-stats-glyph')
     if ($LASTEXITCODE -ne 0) { throw 'run-stats glyph browser probe failed' }
-    & node scripts/test-final-answer-suite.mjs $WaExe (Join-Path $tmp 'final-answer')
-    if ($LASTEXITCODE -ne 0) { throw 'final-answer focused suite failed' }
     & node scripts/test-minimal-chat.cjs (Join-Path $tmp 'minimal-chat')
     if ($LASTEXITCODE -ne 0) { throw 'minimal chat browser suite failed' }
     & node scripts/test-minimal-chat.cjs (Join-Path $tmp 'minimal-chat') --post

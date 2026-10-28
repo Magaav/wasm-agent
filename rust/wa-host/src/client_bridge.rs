@@ -279,7 +279,7 @@ pub fn serve(port: u16, bridge: Arc<Bridge>) {
     let _ = PORT.set(port);
     spawn_self_probe(port, bridge.clone());
     std::thread::spawn(move || loop {
-        let listener = match TcpListener::bind(("127.0.0.1", port)) {
+        let listener = match TcpListener::bind((crate::serve::bind_address().as_str(), port)) {
             Ok(listener) => listener,
             Err(error) => {
                 eprintln!("[client] bind 127.0.0.1:{port} failed ({error}); retrying in 2s");

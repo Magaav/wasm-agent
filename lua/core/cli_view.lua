@@ -61,7 +61,9 @@ local RESET = "\27[0m"
 local PALETTE = {
   accent = "d77757", border = "888888", borderAccent = "b1b9f9", borderMuted = "505050",
   success = "4eba65", error = "ff6b80", warning = "ffc107", muted = "999999",
-  dim = "777777", text = "ffffff", thinkingText = "999999",
+  -- Thinking is the view's one blue (`borderAccent`, the colour of inline code and links), so it
+  -- reads as the agent's own work; commentary is said *to* the reader, so it is plain white.
+  dim = "777777", text = "ffffff", thinkingText = "b1b9f9", commentaryText = "ffffff",
   mdHeading = "ffffff", mdLink = "b1b9f9", mdLinkUrl = "777777", mdCode = "b1b9f9",
   mdCodeBlock = "d4d4d4", mdCodeBlockBorder = "777777", mdQuote = "999999",
   mdQuoteBorder = "777777", mdHr = "777777", mdListBullet = "999999",
@@ -74,12 +76,16 @@ local PALETTE = {
   thinkingMax = "ff5fff",
 }
 
+-- A role is a 24-bit colour (`rrggbb`), or `ansi:<n>` for one of the terminal's own palette slots,
+-- which its theme decides.
 local function fg(hex)
+  local sgr = hex:match("^ansi:(%d+)$")
+  if sgr then return "\27[" .. sgr .. "m" end
   return string.format("\27[38;2;%d;%d;%dm",
     tonumber(hex:sub(1, 2), 16), tonumber(hex:sub(3, 4), 16), tonumber(hex:sub(5, 6), 16))
 end
 
-local STYLE = { bold = "\27[1m", italic = "\27[3m", faint = "\27[2m" }
+local STYLE = { bold = "\27[1m", italic = "\27[3m", faint = "\27[2m", underline = "\27[4m" }
 for role, hex in pairs(PALETTE) do STYLE[role] = fg(hex) end
 -- The names the earlier view used, kept because callers and tests use them: each is now a
 -- role rather than a literal, so `green` and `success` cannot drift apart.
@@ -130,6 +136,11 @@ end
 
 -- The marks the transcript uses: a step (`⏺`), what it returned (`⎿`), and the welcome glyph.
 local DOT, RESULT, STAR = "\226\143\186", "\226\142\191", "\226\156\187"
+-- The prompt glyph, Claude Code's `❯` (U+276F: three bytes, one cell), on the input row and on the
+-- reader's own turn in the transcript. `rust/wa-host/src/terminal_editor.rs` (`PROMPT`) is its twin.
+local PROMPT = "\226\157\175 "
+M.PROMPT = PROMPT
+local SPARKLE = "\226\156\166" -- ✦, the UI's commentary glyph
 M.DOT, M.RESULT = DOT, RESULT
 
 -- ---- text ----------------------------------------------------------------------
@@ -138,15 +149,7 @@ M.DOT, M.RESULT = DOT, RESULT
 -- `·` is two bytes and one column, `↑` three and one, so a byte limit makes a line that
 -- fits look like it does not - and it is also what keeps a cut from landing inside a
 -- character, which is a rendering bug rather than a cosmetic one.
-local function columns(text)
-  local count, index = 0, 1
-  while index <= #text do
-    local byte = text:byte(index)
-    index = index + ((byte >= 240 and 4) or (byte >= 224 and 3) or (byte >= 192 and 2) or 1)
-    count = count + 1
-  end
-  return count
-end
+local columns = markdown.columns -- cells, not characters: the one rule (see markdown.lua)
 M.columns = columns
 
 -- The same count over text that carries escape sequences: what a terminal actually shows. The
@@ -168,10 +171,11 @@ local function clip(text, limit)
   text = tostring(text or ""):gsub("%s+", " ")
   if not limit or limit <= 0 or columns(text) <= limit then return text end
   local index, kept = 1, 0
-  while index <= #text and kept < limit - 1 do
-    local byte = text:byte(index)
-    index = index + ((byte >= 240 and 4) or (byte >= 224 and 3) or (byte >= 192 and 2) or 1)
-    kept = kept + 1
+  while index <= #text do
+    local size, cells = markdown.char_at(text, index)
+    if kept + cells > limit - 1 then break end
+    index = index + size
+    kept = kept + cells
   end
   return text:sub(1, index - 1) .. "\226\128\166"   -- …
 end
@@ -239,7 +243,7 @@ local PHASE = {
   subagent = "Waiting on a subagent", nodes = "Asking the fabric", remote = "Asking a peer",
   spell_run = "Running a spell", spell_save = "Saving a spell", operation = "Supervising an operation",
   client = "Driving the machine", diagnose = "Diagnosing", graph = "Walking the graph",
-  capabilities = "Listing capabilities",
+  capabilities = "Listing capabilities", tool_call = "Running a batch:",
 }
 
 function M.phase(name)
@@ -302,10 +306,51 @@ local TITLE = {
   ls = "List", subagent = "Task", skill = "Skill", recall = "Recall", remember = "Remember",
   search_messages = "Search", conversation = "Conversation", remote = "Remote", client = "Client",
 }
+
+-- The tool that actually ran. `tool_call` routes a call to another tool by name, and `remote` runs
+-- one on a peer; a line that named the wrapper (`tool_call name=remote`) said a call happened and
+-- nothing about what it did. So both are unwrapped to the inner tool and its arguments, plus the
+-- peer for `remote`, and that tool's own summariser and outcome describe it. The batch form
+-- (`tool_call{calls}`) and a page cursor are not one tool, and stay `tool_call`.
+function M.target(name, args)
+  local a = (type(args) == "table") and args or {}
+  local node
+  if name == "tool_call" and type(a.name) == "string" and a.calls == nil and a.cursor == nil then
+    name, a = a.name, (type(a.arguments) == "table") and a.arguments or {}
+  end
+  if name == "remote" and type(a.capability) == "string" and a.capability ~= "" then
+    node = tostring(a.node or "?")
+    name, a = a.capability, (type(a.args) == "table") and a.args or {}
+  end
+  return name, a, node
+end
+
+-- A batch's calls as one heading: each inner call as its own title would read, in order.
+local function batch_inside(a, limit)
+  if a.cursor ~= nil then return "next page" end
+  local parts = {}
+  for _, call in ipairs(type(a.calls) == "table" and a.calls or {}) do
+    local label, inside = M.tool_title(type(call) == "table" and call.name or "?",
+      type(call) == "table" and call.arguments or nil, 48)
+    parts[#parts + 1] = label .. ((inside ~= "") and ("(" .. inside .. ")") or "")
+  end
+  return clip(table.concat(parts, " \194\183 "), limit)
+end
+
 function M.tool_title(name, args, limit)
   name = tostring(name or "?")
-  local label = TITLE[name] or (name:sub(1, 1):upper() .. name:sub(2))
   local a = (type(args) == "table") and args or {}
+  if name == "tool_call" and (a.calls ~= nil or a.cursor ~= nil) then
+    return "Batch", batch_inside(a, math.max(8, (limit or 96) - 7))
+  end
+  local inner, inner_args, node = M.target(name, a)
+  if inner ~= name then
+    -- `Remote openclaw · Bash(git status)`: the peer in the heading, the call as it would read here.
+    local peer = node and ("Remote " .. clip(node, 24) .. " \194\183 ") or ""
+    local label, inside = M.tool_title(inner, inner_args, (limit or 96) - columns(peer))
+    return peer .. label, inside
+  end
+  local label = TITLE[name] or (name:sub(1, 1):upper() .. name:sub(2))
   limit = math.max(8, (limit or 96) - #label - 2)
   local inside
   if name == "bash" or name == "shell" then
@@ -321,7 +366,48 @@ end
 
 -- Whether the call worked, in the caller's terms: `ok` is false when the tool returned
 -- an error or a non-zero exit code, and the second value is what to say about it.
-function M.outcome(name, result)
+-- A routed result is the inner tool's own result, and a peer's can arrive as JSON text.
+local function routed_result(result)
+  if type(result) == "string" and result:match("^%s*{") then
+    local decoded_ok, decoded = pcall(json.decode, result)
+    if decoded_ok and type(decoded) == "table" then return decoded end
+  end
+  return result
+end
+
+-- One routed batch item, as a line: the call, then what it returned or why it failed.
+local function batch_line(call, item)
+  local name = type(call) == "table" and call.name or "?"
+  local label, inside = M.tool_title(name, type(call) == "table" and call.arguments or nil, 48)
+  local ok, note = M.outcome(name, item)
+  if item == nil then ok, note = false, "not in this page" end
+  return label .. ((inside ~= "") and ("(" .. inside .. ")") or "") .. " \226\134\146 "
+    .. (ok and (note ~= "" and note or "done") or ("failed: " .. (note ~= "" and note or "?"))), ok
+end
+
+-- `args` is what the call was given: with it, `tool_call` and `remote` are judged as the tool that
+-- ran (`exit 1` is a failure whichever wrapper carried it). Without it, a routed result is still
+-- read for the facts every tool shares: an error, `ok: false`, an exit code.
+function M.outcome(name, result, args)
+  if name == "tool_call" or name == "remote" then
+    result = routed_result(result)
+    local r = (type(result) == "table") and result or {}
+    if r.error then
+      return false, clip(tostring(r.error) .. (r.detail and (": " .. tostring(r.detail)) or ""), 80)
+    end
+    local a = (type(args) == "table") and args or {}
+    if name == "tool_call" and (a.calls ~= nil or a.cursor ~= nil or type(r.results) == "table") then
+      local total = tonumber(r.total) or #(type(r.results) == "table" and r.results or {})
+      local failed = tonumber(r.failed) or 0
+      return r.ok ~= false and failed == 0, string.format("%d call%s; %d failed%s", total,
+        total == 1 and "" or "s", failed, r.has_more and "; more pages" or "")
+    end
+    local inner = M.target(name, a)
+    if inner ~= name then return M.outcome(inner, result) end
+    if r.code ~= nil then return M.outcome("bash", result) end
+    if r.ok == false then return false, "failed" end
+    return true, ""
+  end
   local r = (type(result) == "table") and result or {}
   if r.error then return false, clip(r.error, 80) end
   if type(name)=='string' and name:match('_many$') and type(r.results)=='table' then
@@ -365,7 +451,31 @@ end
 -- own words, or why it failed. A file's contents, a memory, a page of grep matches are
 -- not repeated here - they are in the transcript, and repeating them is how a terminal
 -- becomes a wall.
-function M.preview(name, result, lines)
+function M.preview(name, result, lines, args)
+  if name == "tool_call" or name == "remote" then
+    result = routed_result(result)
+    local a = (type(args) == "table") and args or {}
+    local r = (type(result) == "table") and result or {}
+    if name == "tool_call" and not r.error and type(r.results) == "table" then
+      -- A batch: one line per call, so each says what it was and what came back.
+      local calls = type(a.calls) == "table" and a.calls or {}
+      local first = math.floor(tonumber(r.first_index) or 1)
+      local out, hidden = {}, 0
+      for index, item in ipairs(r.results) do
+        if #out < (lines or 2) then
+          local call = calls[first + index - 1] or { name = "?" }
+          out[#out + 1] = (batch_line(call, item))
+        else
+          hidden = hidden + 1
+        end
+      end
+      return out, hidden
+    end
+    local inner, inner_args = M.target(name, a)
+    if inner ~= name then return M.preview(inner, result, lines, inner_args) end
+    -- Unknown inner tool: a command-shaped result still shows its output.
+    if r.stdout or r.stderr then name = "bash" end
+  end
   local r = (type(result) == "table") and result or {}
   local text = ""
   if name == "bash" or name == "shell" then
@@ -664,7 +774,7 @@ function METHODS:status_template()
     if boxed then return "", nil end
     return paint(clip(self.last_summary, self.limit), "dim", self.live), nil
   end
-  local phase = self.pending and M.phase(self.pending.name) or self.phase
+  local phase = self.pending and M.phase((M.target(self.pending.name, self.pending.arguments))) or self.phase
   local started = self.screen and self.turn and self.turn.started
     or (self.pending and self.pending.started) or (self.turn and self.turn.started)
   local step = self.turn and (self.turn.step_started or self.turn.started)
@@ -963,16 +1073,16 @@ end
 function METHODS:submitted()
   if self.editor then return end -- the native editor cleared the row on Enter
   if self.screen then
-    self:control("\27[" .. self.screen.input .. ";1H\27[2K> ")
+    self:control("\27[" .. self.screen.input .. ";1H\27[2K" .. PROMPT)
   end
 end
 
--- `text` is the prompt: `> ` for a chat line, or a question (`/login` asking which provider). The
--- boxed editor has its own `> `, so a question is written into the transcript above the box -
+-- `text` is the prompt: `❯ ` for a chat line, or a question (`/login` asking which provider). The
+-- boxed editor has its own `❯ `, so a question is written into the transcript above the box -
 -- otherwise the reader is asked something they cannot see.
 function METHODS:prompt(text)
-  local question = text and text ~= "> " and text ~= "wa> " and text or nil
-  text = text or "> "
+  local question = text and text ~= PROMPT and text ~= "> " and text ~= "wa> " and text or nil
+  text = text or PROMPT
   local screen = self:screen_on()
   if not screen then
     self:clear()
@@ -1004,11 +1114,11 @@ function METHODS:accepted(text)
   text = tostring(text or "")
   if text == "" or not self.screen then return end
   self:clear() -- the host ticker must not write while this line is committed
-  -- `> what you typed`, greyed, the way Claude Code keeps your message in the transcript.
+  -- `❯ what you typed`, greyed, the way Claude Code keeps your message in the transcript.
   -- White on a grey bar the width of the screen, the way the message stands out from the replies.
   local shown, first = {}, true
   for line in (text .. "\n"):gmatch("([^\n]*)\n") do
-    local body = (first and "> " or "") .. clip(line, math.max(10, self.limit - 2))
+    local body = (first and PROMPT or "  ") .. clip(line, math.max(10, self.limit - 2))
     if self.live then
       body = "\27[38;2;255;255;255m\27[48;2;68;68;68m" .. body .. string.rep(" ", math.max(0, self.limit - columns(body))) .. RESET
     end
@@ -1062,6 +1172,7 @@ function METHODS:run_started()
 end
 
 function METHODS:run_finished()
+  self:commentary_flush()
   self:clear()
   local run, baseline = nil, self.turn and self.turn.baseline
   if self.turn then
@@ -1143,6 +1254,7 @@ M.bulletize = bulletize
 -- The answer, then the numbers for the run that produced it. A reply that already
 -- streamed (a peer or a window run reaching this printer) is not printed twice.
 function METHODS:answered(reply)
+  self:commentary_flush()
   self:clear()
   if self.deltas == 0 and reply and tostring(reply) ~= "" then
     -- After a page of tool lines the answer has to be findable, and the reader's eye is
@@ -1200,21 +1312,53 @@ end
 -- It is not folded. The reason to show reasoning is to read it, and a view that summarised it
 -- would be the thing it exists to fix; `WASM_AGENT_CLI_THINKING=off` is how a reader who does
 -- not want it turns it off. Nothing else hides it, and nothing here shortens it.
+-- The heading is grey like commentary's (a label, not content) and italic; the body is blue.
 function METHODS:reasoning_block(text)
+  if (host.getenv("WASM_AGENT_CLI_THINKING") or ""):lower() == "off" then return end
+  self:topic_block(STAR .. " Thinking\226\128\166", { "italic", "muted" }, text, "thinkingText")
+end
+
+-- What the model told the reader on the way, before or between tool calls ("I'll read the config
+-- first"). The UI draws it as its own topic, `✦ commentary`, beside thinking (ui/components.js,
+-- TOPIC_KINDS): the same block with another glyph and label. Here too: same block as thinking, but
+-- it is said *to* the reader, so it is printed in white (`commentaryText`), not thinking's blue.
+-- It is not the answer and is never counted as one.
+function METHODS:commentary_block(text)
+  self:topic_block(SPARKLE .. " Commentary", { "bold", "muted" }, text, "commentaryText")
+end
+
+-- Commentary streamed in chunks (a host that streams) is gathered per item and printed once, when
+-- its item closes - a block drawn chunk by chunk would interleave with the status line.
+function METHODS:commentary_piece(event)
+  local id = tostring(event.pending_id or event.message_id or "")
+  self.commentary_open = self.commentary_open or {}
+  self.commentary_open[id] = (self.commentary_open[id] or "") .. tostring(event.text or "")
+end
+
+function METHODS:commentary_flush()
+  local open = self.commentary_open
+  self.commentary_open = nil
+  if not open then return end
+  local ids = {}
+  for id in pairs(open) do ids[#ids + 1] = id end
+  table.sort(ids)
+  for _, id in ipairs(ids) do self:commentary_block(open[id]) end
+end
+
+-- One block for thinking and commentary: a heading, the Markdown body, an empty line after.
+function METHODS:topic_block(heading, heading_style, text, body_style)
   local body = tostring(text or "")
   if body:gsub("%s", "") == "" then return end
-  if (host.getenv("WASM_AGENT_CLI_THINKING") or ""):lower() == "off" then return end
   self:clear()
-  local mark = paint(STAR .. " Thinking\226\128\166", { "italic", "thinkingText" }, self.live)
   self:topic(true)
-  self:write(mark .. "\n")
+  self:write(paint(heading, heading_style, self.live) .. "\n")
   self:write(markdown.render(body, {
     paint = function(plain, style) return paint(plain, style, self.live) end,
     -- Two columns narrower: a focused topic is drawn inside a border, and text wrapped here must
     -- not be wrapped a second time there.
     width = self:transcript() and (self.limit - 2) or self.limit,
     indent = "",
-    style = "thinkingText",
+    style = body_style,
   }) .. "\n")
   self:topic(false)
   self:write("\n")
@@ -1299,11 +1443,17 @@ function METHODS:event(event)
   elseif kind == "tool" then
     -- The heading is printed when the result arrives, so its dot can say how it went (green or
     -- red, as Claude Code does); until then the status line names the call.
+    self:commentary_flush()
     self:flush_call()
     local label, inside = M.tool_title(event.name, event.arguments, self.limit - 4)
-    self.pending = { name = event.name or "?", started = self.now(), label = label, inside = inside }
+    self.pending = { name = event.name or "?", started = self.now(), label = label, inside = inside,
+      arguments = event.arguments }
     if event.timeout_ms then self.pending.bound = tonumber(event.timeout_ms) / 1000 end
-    self.phase = M.phase(self.pending.name)
+    -- `quiet`: a `!command` the reader ran outside any run (lua/core/bash_mode.lua) - drawn like a
+    -- tool, but with no run there is no status line to name it on, and none must be started.
+    if event.quiet then return end
+    -- A routed call is phrased as the tool that runs (`Running bash`), not as `tool_call`.
+    self.phase = M.phase((M.target(self.pending.name, event.arguments)))
     if self.turn then self.turn.tools = self.turn.tools + 1 end
     self.session_tools = (self.session_tools or 0) + 1
     self:paint(true)
@@ -1311,17 +1461,17 @@ function METHODS:event(event)
   elseif kind == "tool_result" then
     local name = event.name or (self.pending and self.pending.name) or "?"
     local ms = self.pending and ((self.now() - self.pending.started) * 1000) or nil
-    local ok, note = M.outcome(name, event.result)
     local pending = self.pending
     if not pending or pending.shown or pending.name ~= name then
       local label = M.tool_title(name, nil, self.limit - 4)
       pending = { label = label, inside = "" }
     end
+    local ok, note = M.outcome(name, event.result, pending.arguments)
     self:topic(true)
     self:line(paint(DOT, ok and "success" or "error", self.live) .. " " .. self:call_heading(pending.label, pending.inside))
     -- In the transcript a tool call is a topic that folds to three rows, so it keeps more of the
     -- output for when it is expanded.
-    local preview, hidden = M.preview(name, event.result, self:transcript() and 200 or 3)
+    local preview, hidden = M.preview(name, event.result, self:transcript() and 200 or 3, pending.arguments)
     local facts = {}
     if note ~= "" then facts[#facts + 1] = note end
     if ms then facts[#facts + 1] = M.elapsed(ms) end
@@ -1344,11 +1494,30 @@ function METHODS:event(event)
       if summary ~= "" then self:write(paint(summary, ok and "dim" or "error", self.live) .. "\n") end
     end
     self:topic(false)
+    -- One empty line after the call, as after a thinking block, so steps do not run together.
+    self:write("\n")
     self.pending = nil
+    if event.quiet then return end
     self.phase = "Thinking"
     self:paint(true)
   elseif kind == "reasoning" then
     self:reasoning_block(event.text)
+  elseif kind == "commentary" then
+    self:commentary_flush()
+    self:commentary_block(event.text)
+  elseif kind == "commentary_delta" then
+    self:commentary_piece(event)
+  elseif kind == "commentary_end" then
+    self:commentary_flush()
+  elseif kind == "step_phase" then
+    -- A chat-completions provider (DeepSeek, OpenCode) carries the step's commentary as the
+    -- `content` beside its tool calls; agent.lua classifies it and sends it here as `step_phase`,
+    -- not as `commentary`. A CLI run has no delta sink, so unless a peer already streamed it
+    -- (`deltas`), this is the only place that sentence can reach the reader.
+    if event.phase == "commentary" and self.deltas == 0 then
+      self:commentary_flush()
+      self:commentary_block(event.text)
+    end
   elseif kind == "usage" then
     self.totals = event.total or self.totals
     -- The context in use is the last model call's prompt, measured by the provider;
@@ -1368,6 +1537,89 @@ function METHODS:event(event)
     self:clear()
     self:line(paint("! " .. tostring(event.error or "error"), "red", self.live))
   end
+end
+
+-- `wa --continue` / `wa --resume <id>`: the stored transcript drawn again, through the same
+-- methods a live run uses, so a continued thread looks the way it did when the window was closed:
+-- the reader's turns, thinking, commentary, each tool call with its result, and the answers.
+-- `rows` are `memory.session_messages` rows in seq order. Tool results were redacted before they
+-- were stored; user text and reasoning go through `redact` here, as the live printer does.
+-- Nothing is sent anywhere and nothing is written: this only draws.
+function METHODS:replay(rows, opts)
+  opts = opts or {}
+  local json = dofile("lua/vendor/json.lua")
+  local redact = dofile("lua/core/redact.lua")
+  local function text_of(value) return redact.text(tostring(value or "")) end
+  if opts.skipped and opts.skipped > 0 then
+    self:line(paint("\226\128\166 " .. opts.skipped .. " earlier messages not shown (wa conversation / the window has them)", "dim", self.live))
+    self:line("")
+  end
+  local names = {}
+  for _, row in ipairs(rows or {}) do
+    local role = row.role
+    if role == "summary" then
+      self:topic_block(STAR .. " Summary of earlier turns", { "italic", "muted" }, text_of(row.content), "dim")
+    elseif role == "user" and row.phase == "bash" and dofile("lua/core/bash_mode.lua").parse(row.content) then
+      -- A `!command` the reader ran: drawn as it was, the line and then its output.
+      local command, stdout, stderr = dofile("lua/core/bash_mode.lua").parse(text_of(row.content))
+      if self.screen then self:accepted("!" .. command) else self:line("!" .. command) end
+      self:flush_call()
+      local label, inside = M.tool_title("bash", { command = command }, self.limit - 4)
+      self.pending = { name = "bash", started = self.now(), label = label, inside = inside, arguments = { command = command } }
+      self:event({ type = "tool_result", name = "bash", result = { code = 0, stdout = stdout, stderr = stderr }, quiet = true })
+    elseif role == "user" then
+      local text = text_of(row.content)
+      if self.screen then self:accepted(text)
+      else self:line(PROMPT .. text); self:line("") end
+    elseif role == "assistant" then
+      if (row.reasoning or "") ~= "" then self:reasoning_block(text_of(row.reasoning)) end
+      local ok, calls = pcall(json.decode, row.tool_calls or "[]")
+      calls = (ok and type(calls) == "table") and calls or {}
+      local content = tostring(row.content or "")
+      if #calls > 0 or row.phase == "commentary" then
+        if content ~= "" then self:commentary_block(text_of(content)) end
+      elseif content ~= "" then
+        local rendered = markdown.render(text_of(content), {
+          paint = function(plain, style) return paint(plain, style, self.live) end,
+          width = self.limit - 2, indent = "",
+        })
+        if rendered == "" then rendered = text_of(content) end
+        rendered = bulletize(rendered, paint(DOT, "text", self.live))
+        if rendered:sub(-1) ~= "\n" then rendered = rendered .. "\n" end
+        self:topic(false)
+        self:write(rendered .. "\n")
+      end
+      for _, call in ipairs(calls) do
+        local fn = type(call) == "table" and type(call["function"]) == "table" and call["function"] or {}
+        local decoded, args = pcall(json.decode, fn.arguments or "{}")
+        args = (decoded and type(args) == "table") and args or {}
+        names[tostring(call.id or "")] = fn.name
+        self:flush_call()
+        local label, inside = M.tool_title(fn.name, args, self.limit - 4)
+        self.pending = { name = fn.name or "?", started = self.now(), label = label, inside = inside, arguments = args }
+      end
+    elseif role == "tool" then
+      local name = (row.tool_name ~= "" and row.tool_name) or names[tostring(row.tool_call_id or "")] or "?"
+      -- The heading belongs to this result's own call, which may not be the last one announced.
+      local pending = self.pending
+      if not pending or pending.name ~= name then
+        self:flush_call()
+        local label = M.tool_title(name, nil, self.limit - 4)
+        self.pending = { name = name, label = label, inside = "" }
+      end
+      self.pending.started = self.now() - (tonumber(row.ms) or 0) / 1000
+      local decoded, result = pcall(json.decode, row.content or "")
+      if not decoded or result == nil then result = tostring(row.content or "") end
+      if row.ok == 0 and type(result) == "table" and result.ok == nil and result.error == nil then result.ok = false end
+      -- The live path, quiet: a replay is not a run, so no status line is started for it.
+      self:event({ type = "tool_result", name = name, result = result, quiet = true })
+    end
+  end
+  self:flush_call()
+  self.pending, self.phase = nil, ""
+  if opts.rule == false then return end
+  self:line(paint(string.rep("\226\148\128", 3) .. " continued here " .. string.rep("\226\148\128", 3), "dim", self.live))
+  self:line("")
 end
 
 -- The welcome box: where this is running and what it is running with, the way Claude Code opens.

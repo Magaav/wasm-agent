@@ -580,7 +580,30 @@ wa-sentinel start    # start watching; where a unit owns the watcher this is the
 wa-sentinel stop     # stop it: the manager's stop when a unit owns the watcher, the stop file otherwise
 wa-sentinel restart  # replace the running image: the manager's restart when a unit owns the watcher
 wa-sentinel once     # handle the box once and exit - for tests and for cron
+wa-sentinel autostart [on|off]   # start the node by itself when it is down (see below)
 ```
+
+### The node log, start waits, autostart and waiting wakes
+
+- **Node log.** A node the sentinel starts writes its stdout and stderr to `~/.wasm-agent/serve.log`
+  (appended, after a `--- <epoch> sentinel start: <binary> serve --port N (<reason>)` header). Every failed
+  start, restart, recover or autostart carries the last five lines of that log in its detail, so the queue
+  record the window and the agent read says *why* (`binding_transport_already_owned`, a panic, a port) and not
+  "check the node log". Until 2026-10-28 the node's output went to `/dev/null`.
+- **Start wait.** A start waits up to `WA_SENTINEL_START_WAIT` seconds (180) for `/health`, and fails as
+  soon as the child exits, with its exit code, rather than sitting out the deadline.
+- **Waiting wakes.** A wake whose node is not answering is not failed: it goes back to the box (`wake-wait:`,
+  the same "not yet" as the wake budget) and is retried every 15 s until `WA_SENTINEL_WAKE_WAIT` seconds
+  (1800) have passed since it was queued; only then does it fail, saying how long it waited. Measured
+  2026-10-28: the old 120 s wait dropped a wake three seconds before its node answered.
+- **Autostart.** Off by default. With `WA_SENTINEL_AUTOSTART=1` in the watcher's environment (a launcher that
+  owns the machine, such as a container entrypoint) or the `autostart` file (`wa-sentinel autostart on`),
+  a node down for more than 10 s is started from the installed binary, on a thread of its own, audited as
+  `autostart`. Failed attempts back off 15 s, 30 s, 60 s ... up to 5 min, reset when the node answers. It
+  does not start while the stop file exists, while a restart, deploy, recover or spell is queued or running,
+  or while another process holds the port. `status` prints `autostart: on|off (<source>)`.
+- **Listener without `ss`.** Where `ss` is missing (a slim container), the pid on the port is read from
+  `/proc/net/tcp{,6}` and `/proc/<pid>/fd`, so a restart still finds the node it has to stop.
 
 The watcher line is decided by the **lifetime lock**, not by a pid lookup: the lock is what only `watch`
 holds and what `start` already refuses a duplicate on. `status` reports `up watching (pid N)` when that
@@ -627,8 +650,9 @@ watcher nothing outside owns (a `nohup`, a logon task); use `wa-sentinel stop` f
 
 - **No model, no Lua, no ledger.** It executes declared intents; it does not converse, decide, or write
   to the transcript. It is a supervisor, not a second agent.
-- **No automatic node restarts.** An auto-restart nobody asked for fights the operator every time they stop
-  a node on purpose. It reports an outage and waits to be asked. Explicitly configured OS recovery may
+- **No automatic node restarts unless asked to.** An auto-restart nobody asked for fights the operator every
+  time they stop a node on purpose. By default it reports an outage and waits to be asked; autostart (above)
+  is the explicit opt-in for a machine where nobody stops the node by hand. Explicitly configured OS recovery may
   restart the Sentinel itself after an unexpected failure; intentional stops remain respected.
 - **No shell verbs.** A verb list, not a command line.
 
