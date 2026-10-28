@@ -31,5 +31,10 @@ turn_owner() {
 sentinel_supervises() {
   local sentinel="$1/wa-sentinel"
   [ -x "$sentinel" ] || return 1
-  "$sentinel" status 2>/dev/null | grep -q '^ *sentinel: *up'
+  # Read whole, then matched: `status | grep -q` lets grep exit at the first match, the sentinel dies of
+  # SIGPIPE mid-write, and under the callers' `pipefail` the pipeline then reads as "not supervised" -
+  # which made upgrade.sh start a second node beside the sentinel's (28/10).
+  local report
+  report="$("$sentinel" status 2>/dev/null)" || true
+  printf '%s\n' "$report" | grep '^ *sentinel: *up' >/dev/null
 }

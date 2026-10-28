@@ -654,9 +654,17 @@ case "$(uname -s)" in
   MINGW*|MSYS*|CYGWIN*)
     LISTENER="$(netstat -ano -p TCP 2>/dev/null | awk -v p=":$PORT" '$1=="TCP" && $2 ~ p"$" && $4=="LISTENING" { print $5; exit }' | tr -d '\r')" ;;
   *)
-    LISTENER="$(ss -ltnp 2>/dev/null | awk -v p=":$PORT" '$4 ~ p"$" { if (match($0,/pid=[0-9]+/)) { print substr($0,RSTART+4,RLENGTH-4); exit } }')" ;;
+    # The shared probe (ss, netstat, then /proc): `ss` alone is missing from slim images, where this read
+    # "pid " and failed a deploy that had worked (28/10).
+    LISTENER="$(wa_port_pid "$PORT")" ;;
 esac
-RECORDED="$(tr -d '[:space:]' < "$INSTALL_DIR/serve.pid" 2>/dev/null)"
+# Who started the node is who recorded it: the sentinel (sentinel/node.json) when it supervises, else
+# upgrade.sh's own serve.pid.
+if sentinel_supervises "$INSTALL_DIR"; then
+  RECORDED="$(sed -n 's/.*"pid":\([0-9]*\).*/\1/p' "${WASM_AGENT_HOME:-$HOME}/.wasm-agent/sentinel/node.json" 2>/dev/null | head -1)"
+else
+  RECORDED="$(tr -d '[:space:]' < "$INSTALL_DIR/serve.pid" 2>/dev/null)"
+fi
 if [ -z "$RECORDED" ] || [ -z "$LISTENER" ] || [ "$RECORDED" != "$LISTENER" ]; then
   fail "the node answering on $PORT is pid $LISTENER, not the pid $RECORDED the install recorded - two nodes, one port"
 fi
@@ -911,6 +919,8 @@ LIB_SRC="$WA_LIB"
 if [ -f "$LIB_SRC" ]; then
   ship_file "$LIB_SRC" "$INSTALL_DIR/scripts/lib/service-target.sh" "scripts/lib/service-target.sh beside deploy.sh"
 fi
+# deploy.sh and upgrade.sh source it: an installed copy run by the sentinel needs it beside them.
+ship_file "$ROOT/scripts/lib/turn-guard.sh" "$INSTALL_DIR/scripts/lib/turn-guard.sh" "scripts/lib/turn-guard.sh beside deploy.sh"
 
 ship_file "$ROOT/scripts/codemode-build.mjs" "$INSTALL_DIR/scripts/codemode-build.mjs" "offline native shipping build contract"
 ship_file "$ROOT/scripts/check-embedded-runtime.lua" "$INSTALL_DIR/scripts/check-embedded-runtime.lua" "embedded source and native asset readiness checker"
