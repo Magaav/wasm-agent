@@ -486,6 +486,29 @@ sentinel_restart() {
 }
 sentinel_node_pid() { sed -n 's/.*"pid":\([0-9]*\).*/\1/p' "$SENTINEL_DIR/node.json" 2>/dev/null | head -1; }
 OLD_PID="$(pid_on_port)"
+# A node that is a systemd unit of its own with Restart=always (openclaw: wa-serve.service, User=ubuntu):
+# killing it before the swap makes systemd start the OLD binary again at once, and the port this script
+# then waits on never frees; starting a second node beside it collides. So the swap comes first and the
+# old process is then ended - systemd starts the new binary. Read from the process's own cgroup.
+MANAGED_UNIT=""
+if [ "$SUPERVISED" = "0" ] && [ "$WINDOWS" != "1" ] && [ -n "$OLD_PID" ] && [ -r "/proc/$OLD_PID/cgroup" ]; then
+  unit="$(sed -n 's#^0::.*/\([^/]*\.service\)$#\1#p' "/proc/$OLD_PID/cgroup" | head -1)"
+  case "$(sed -n 's#^0::/\(user\)\.slice/.*#\1#p' "/proc/$OLD_PID/cgroup")" in user) scope="--user" ;; *) scope="" ;; esac
+  if [ -n "$unit" ] && [ "$(systemctl $scope show -p Restart --value "$unit" 2>/dev/null)" = "always" ]; then
+    MANAGED_UNIT="$unit"
+    say "the node is $unit (Restart=always): swap first, then end pid $OLD_PID and let systemd start the new binary"
+  fi
+fi
+# Wait for a listener that is not $1 and answers /health; prints its pid.
+wait_new_listener() {
+  local old="$1" pid
+  for _ in $(seq 1 900); do
+    pid="$(pid_on_port)"
+    if [ -n "$pid" ] && [ "$pid" != "$old" ]; then case "$(health)" in *'"ok":true'*) printf '%s' "$pid"; return 0 ;; esac; fi
+    sleep 0.1
+  done
+  return 1
+}
 phase upgrading stopping
 if [ "$SUPERVISED" = "1" ]; then [ -n "$OLD_PID" ] && say "the sentinel will stop the node (pid $OLD_PID) once the files are swapped"
 else [ -n "$OLD_PID" ] && say "stopping the node (pid $OLD_PID, by pid - never by image name)"; fi
@@ -497,7 +520,7 @@ if [ -d "$SOURCE_UI" ] && [ "$SOURCE_UI" != "$UI_DIR" ]; then
     [ ! -f "$UI_DIR/$asset" ] || cp -f "$UI_DIR/$asset" "$UI_DIR/$asset.pre-upgrade" || exit 1
   done
 fi
-if [ -n "$OLD_PID" ] && [ "$SUPERVISED" = "0" ]; then
+if [ -n "$OLD_PID" ] && [ "$SUPERVISED" = "0" ] && [ -z "$MANAGED_UNIT" ]; then
   if [ "$WINDOWS" = "1" ]; then
     powershell.exe -NoProfile -Command "Stop-Process -Id $OLD_PID -Force" 2>/dev/null
   else
@@ -589,6 +612,11 @@ fi
 if [ "$SUPERVISED" = "1" ]; then
   STARTED=0
   [ "$UI_OK" = "1" ] && sentinel_restart "upgrade: $(basename "$NEW")" && STARTED=1
+elif [ -n "$MANAGED_UNIT" ]; then
+  STARTED=0
+  if [ "$UI_OK" = "1" ] && kill "$OLD_PID" 2>/dev/null; then
+    NEW_LISTENER="$(wait_new_listener "$OLD_PID")" && { printf '%s\n' "$NEW_LISTENER" > "$INSTALL_DIR/serve.pid"; STARTED=1; }
+  fi
 else
   start_node "$INSTALLED"; STARTED=1
 fi
@@ -632,6 +660,21 @@ if [ "$STARTED" = "1" ] && [ "$UI_OK" = "1" ] && wait_health; then
 fi
 
 say "the new binary did not come up - putting the previous one back"
+if [ -n "$MANAGED_UNIT" ]; then
+  if [ -f "$BACKUP" ]; then
+    cp -f "$BACKUP" "$INSTALLED.new" && mv -f "$INSTALLED.new" "$INSTALLED"
+    for asset in $UI_FILES; do
+      [ ! -f "$UI_DIR/$asset.pre-upgrade" ] || cp -f "$UI_DIR/$asset.pre-upgrade" "$UI_DIR/$asset"
+    done
+    FAILED_PID="$(pid_on_port)"
+    [ -n "$FAILED_PID" ] && kill "$FAILED_PID" 2>/dev/null
+    if BACK="$(wait_new_listener "${FAILED_PID:-none}")"; then printf '%s\n' "$BACK" > "$INSTALL_DIR/serve.pid"; say "rolled back: $(health)"
+    else say "the previous binary did not come up either - see systemctl status $MANAGED_UNIT"; fi
+  else
+    say "no backup to roll back to"
+  fi
+  exit 1
+fi
 if [ "$SUPERVISED" = "1" ]; then
   if [ -f "$BACKUP" ]; then
     cp -f "$BACKUP" "$INSTALLED.new" && mv -f "$INSTALLED.new" "$INSTALLED"

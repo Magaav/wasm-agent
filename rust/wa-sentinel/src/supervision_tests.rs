@@ -83,3 +83,10 @@ fn a_busy_session_refusal_is_a_wait_and_costs_no_budget() {
         a = now - 10, b = now - 5, old = now - 4000);
     assert_eq!(super::wakes_in_window(&log, now), 1);
 }
+
+#[test]
+fn a_privilege_refusal_is_told_apart_from_a_unit_problem() {
+    assert!(crate::role::refused_for_privilege("Failed to start transient service unit: Interactive authentication required."));
+    assert!(crate::role::refused_for_privilege("Failed to restart wa-sentinel.service: Access denied"));
+    assert!(!crate::role::refused_for_privilege("Unit wa-sentinel.service not found."));
+}

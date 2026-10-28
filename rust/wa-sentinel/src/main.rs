@@ -2639,7 +2639,18 @@ fn watch() -> Result<()> {
 /// Hand a lifecycle verb to the manager, which is the one thing that can stop or replace a unit-owned
 /// watcher. The audit line and the sentence both name the unit, so "who answered" is never a guess.
 fn ask_manager(command: &[String], unit: &str, what: &str) -> Result<()> {
-    role::run_command(command)?;
+    if let Err(error) = role::run_command(command) {
+        // A restart this user may not ask for (a system unit with `User=`): the unit's own Restart=always
+        // brings the watcher back on the installed image once its process ends. Only for restart/start.
+        let user = command.iter().any(|arg| arg == "--user");
+        if what != "stop" && role::refused_for_privilege(&error.to_string()) {
+            let done = role::restart_by_exit(unit, user).with_context(|| format!("{error}"))?;
+            audit(&format!("supervisor-{what}"), unit, &done);
+            say(&done);
+            return Ok(());
+        }
+        return Err(error);
+    }
     audit(&format!("supervisor-{what}"), unit, &format!("sentinel {what} went to the unit manager"));
     say(&format!("{unit} {what}ed by its manager (the manager owns this watcher)"));
     Ok(())

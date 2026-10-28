@@ -394,6 +394,59 @@ fn deploy_environment() -> Vec<String> {
     passed
 }
 
+/// Did a manager refuse for lack of privilege (polkit), rather than for a reason about the unit?
+pub(crate) fn refused_for_privilege(detail: &str) -> bool {
+    detail.contains("Interactive authentication required") || detail.contains("Access denied")
+        || detail.contains("authentication is required")
+}
+
+/// This process's user id, without a libc binding: the owner of `/proc/self`.
+#[cfg(unix)]
+pub(crate) fn current_uid() -> Option<u32> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata("/proc/self").ok().map(|meta| meta.uid())
+}
+#[cfg(not(unix))]
+pub(crate) fn current_uid() -> Option<u32> { None }
+
+/// The user manager's runtime directory, when this user has one (lingering, or a session). A system unit
+/// runs without `XDG_RUNTIME_DIR`, which is why `systemctl --user` answered "No medium found" from it.
+pub(crate) fn user_runtime_dir() -> Option<String> {
+    let uid = current_uid()?;
+    let dir = format!("/run/user/{uid}");
+    std::path::Path::new(&format!("{dir}/bus")).exists().then_some(dir)
+}
+
+/// `systemctl show -p <property> --value <unit>`: readable without privilege.
+pub(crate) fn unit_property(unit: &str, user: bool, property: &str) -> Option<String> {
+    let mut command = std::process::Command::new("systemctl");
+    if user { command.arg("--user"); if let Some(dir) = user_runtime_dir() { command.env("XDG_RUNTIME_DIR", dir); } }
+    let output = command.args(["show", "-p", property, "--value", unit]).output().ok()?;
+    output.status.success().then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+/// Restart a unit this user may not ask the manager to restart: end its main process and let
+/// `Restart=always` bring it back on the installed image. Only for `Restart=always` - any weaker policy
+/// would leave the unit down - and only with a main pid that changes, which is the proof it came back.
+pub(crate) fn restart_by_exit(unit: &str, user: bool) -> Result<String> {
+    let policy = unit_property(unit, user, "Restart").unwrap_or_default();
+    if policy != "always" {
+        bail!("{unit} cannot be restarted by this user and has Restart={policy}, so ending it would leave it down");
+    }
+    let old = unit_property(unit, user, "MainPID").and_then(|pid| pid.parse::<u32>().ok()).filter(|pid| *pid > 0)
+        .with_context(|| format!("{unit} has no main process to end"))?;
+    let status = std::process::Command::new("kill").args(["-TERM", &old.to_string()]).status()
+        .with_context(|| format!("signal {unit}'s main process {old}"))?;
+    if !status.success() { bail!("could not signal {unit}'s main process {old}"); }
+    for _ in 0..120 {
+        std::thread::sleep(std::time::Duration::from_millis(250));
+        if let Some(new) = unit_property(unit, user, "MainPID").and_then(|pid| pid.parse::<u32>().ok()) {
+            if new > 0 && new != old { return Ok(format!("{unit} restarted by its Restart=always policy (pid {old} -> {new})")); }
+        }
+    }
+    bail!("{unit}'s main process {old} was ended but no new one appeared within 30s")
+}
+
 /// Start the deploy script as a transient unit of its own and return the unit's name.
 ///
 /// The caller names the unit so that the capture's header can be written *before* the deploy says anything:
@@ -410,6 +463,23 @@ pub(crate) fn start_deploy_unit(
     let command = deploy_unit_command(name, capture, interpreter, args, user, supervisor);
     // Non-blocking by design, so this only proves the manager accepted the unit; the capture file is the
     // evidence of what the script then did, and `systemctl status <name>` of how it ended.
-    run_command(&command).with_context(|| format!("start {name} with systemd-run"))?;
-    Ok(name.to_string())
+    match run_command(&command) {
+        Ok(_) => Ok(name.to_string()),
+        // A system unit run as an ordinary user (`User=` in the unit) may not create transient system
+        // units; its user manager may, and a unit there is just as far outside the watcher's control
+        // group. On 28/10 every deploy of such a node was refused here, so it could never update itself.
+        Err(error) if !user && refused_for_privilege(&error.to_string()) && current_uid() != Some(0) => {
+            let dir = user_runtime_dir().with_context(|| format!(
+                "start {name} with systemd-run: the system manager refused ({error}) and this user has no user manager to start it in instead"))?;
+            let fallback = deploy_unit_command(name, capture, interpreter, args, true, supervisor);
+            let output = std::process::Command::new(&fallback[0]).args(&fallback[1..]).env("XDG_RUNTIME_DIR", &dir).output()
+                .with_context(|| format!("start {name} with systemd-run --user"))?;
+            if !output.status.success() {
+                bail!("start {name}: the system manager refused ({error}) and the user manager too: {}",
+                    String::from_utf8_lossy(&output.stderr).trim());
+            }
+            Ok(format!("{name} (user manager: the system manager needs privilege this user does not have)"))
+        }
+        Err(error) => Err(error).with_context(|| format!("start {name} with systemd-run")),
+    }
 }
