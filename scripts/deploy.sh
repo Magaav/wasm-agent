@@ -682,10 +682,12 @@ case "$(uname -s)" in
 esac
 # Who started the node is who recorded it: the sentinel (sentinel/node.json) when it supervises, else
 # upgrade.sh's own serve.pid.
+# A watching sentinel is not always the node's owner (openclaw: wa-serve.service owns it and upgrade.sh
+# records the new pid in serve.pid), so the listener must match whichever record names it.
+RECORDED="$(tr -d '[:space:]' < "$INSTALL_DIR/serve.pid" 2>/dev/null)"
 if sentinel_supervises "$INSTALL_DIR"; then
-  RECORDED="$(sed -n 's/.*"pid":\([0-9]*\).*/\1/p' "${WASM_AGENT_HOME:-$HOME}/.wasm-agent/sentinel/node.json" 2>/dev/null | head -1)"
-else
-  RECORDED="$(tr -d '[:space:]' < "$INSTALL_DIR/serve.pid" 2>/dev/null)"
+  SENTINEL_RECORDED="$(sed -n 's/.*"pid":\([0-9]*\).*/\1/p' "${WASM_AGENT_HOME:-$HOME}/.wasm-agent/sentinel/node.json" 2>/dev/null | head -1)"
+  [ -n "$SENTINEL_RECORDED" ] && [ "$SENTINEL_RECORDED" = "$LISTENER" ] && RECORDED="$SENTINEL_RECORDED"
 fi
 if [ -z "$RECORDED" ] || [ -z "$LISTENER" ] || [ "$RECORDED" != "$LISTENER" ]; then
   fail "the node answering on $PORT is pid $LISTENER, not the pid $RECORDED the install recorded - two nodes, one port"
