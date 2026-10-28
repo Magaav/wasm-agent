@@ -522,6 +522,16 @@ for qf in "$QUEUE_DIR"/*.json; do
 done
 [ "$UPGRADE_ACTIVE" = "0" ] || fail "an upgrade request is active; refusing a second install"
 
+# The builds below are --offline --locked on purpose: exactly the lockfile, no network while building. A
+# machine that never built these crates has nothing in its cargo cache for them, so the lockfile's exact
+# crates are fetched first (--locked: no resolution, no newer version). No network is not fatal here: the
+# offline build then proves whether the cache already holds them. 28/10, openclaw: "failed to download
+# cc v1.4.7" for the sentinel.
+for manifest in rust/Cargo.toml rust/wa-sentinel/Cargo.toml; do
+  ( cd "$ROOT" && cargo fetch --locked --manifest-path "$manifest" >/dev/null 2>&1 ) \
+    || note "cargo fetch for $manifest did not complete; the offline build uses what the cache already has"
+done
+
 # BEGIN native code-mode shipping build (also exercised without any installer).
 command -v node >/dev/null 2>&1 || fail "codemode_build:node_build_tool_unavailable; nothing installed"
 CODEMODE_BUILD_SCRIPT="$ROOT/scripts/codemode-build.mjs"; CODEMODE_BUILD_ROOT="$ROOT"
