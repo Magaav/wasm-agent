@@ -702,7 +702,7 @@ function M.catalog(role)
     },{'route','task'})
     for _, item in ipairs(M.admin) do list[#list + 1] = item end
     if host.quickjs then
-      list[#list+1]=schema('codemode','Preferred programmatic coding path when admitted for this run: Node-free JavaScript sandbox calling approved native tools. Use await tools.<name>(args), text(value), return, searchTools and describeTool. Native permissions/workspace/type/effect checks apply per call. Scripts may filter results; complete nested originals remain hash-addressed. No filesystem/network/Node or implicit models API. Unawaited calls are not admitted; effectful calls are serial.',{code={type='string'},timeout_ms={type='integer',minimum=1,maximum=300000}},{'code'})
+      list[#list+1]=schema('codemode','Preferred programmatic coding path when admitted for this run: Node-free JavaScript sandbox calling approved native tools. Use await tools.<name>(args), text(value), return, searchTools and describeTool (searchTools("text") or searchTools({query, limit}); searchTools("*") lists the whole catalogue). Native permissions/workspace/type/effect checks apply per call. Scripts may filter results; complete nested originals remain hash-addressed. No filesystem/network/Node or implicit models API. Unawaited calls are not admitted; effectful calls are serial.',{code={type='string'},timeout_ms={type='integer',minimum=1,maximum=300000}},{'code'})
     end
     for _, item in ipairs(mcp.schemas()) do list[#list+1]=item end
     for _, item in ipairs(whatsapp_schemas()) do list[#list + 1] = item end

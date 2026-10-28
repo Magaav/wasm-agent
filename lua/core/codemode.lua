@@ -81,8 +81,29 @@ function M.run(memory,args,role,ctx,catalog,current_catalog,dispatch,execution)
     if call.name=='showCall' then
      value,success=presentation.select(calls,selected,params)
     elseif call.name=='searchTools' then
-     local query=params[1];local options=params[2];local limit=type(options)=='table' and options.limit or 8
-     if type(query)~='string' or #query>256 or not query:find('%S') then value={error='tool_search_query_required'};success=false
+     -- Both shapes the model knows: searchTools("text", {limit}) and the tool_search shape
+     -- searchTools({query, limit}). The object form used to be refused (`tool_search_query_required`),
+     -- and "" or "*" could not list anything, so the guest could not see its own catalogue (28/10).
+     local query=params[1];local options=params[2]
+     if type(query)=='table' then options=query;query=options.query end
+     options=type(options)=='table' and options or {}
+     local listing=query==nil or query=='*' or (type(query)=='string' and not query:find('%S'))
+     local limit=options.limit or (listing and 50 or 8)
+     local offset=options.offset or 0
+     if listing then
+      if type(limit)~='number' or limit%1~=0 or limit<1 or limit>200 or type(offset)~='number' or offset%1~=0 or offset<0 then value={error='invalid_tool_search_limit'};success=false
+      else
+       -- The whole guest catalogue, names and one-line descriptions only; describeTool(name) gives a schema.
+       local names={};for _,descriptor in ipairs(descriptors)do names[#names+1]=descriptor.name end
+       table.sort(names)
+       local page={};for i=offset+1,math.min(#names,offset+limit)do
+        local def=definitions[names[i]];local text=tostring(def.schema['function'].description or '')
+        page[#page+1]={name=def.name,description=text:match('^[^\n]*'):sub(1,200),execution=execution(def.name)}
+       end
+       value={tools=page,matches=#names,offset=offset,has_more=offset+limit<#names,
+        invocation='The whole guest catalogue, paged; describeTool(name) gives the full schema. Native checks apply to each call.'};success=true
+      end
+     elseif type(query)~='string' or #query>256 then value={error='tool_search_query_required'};success=false
      elseif type(limit)~='number' or limit%1~=0 or limit<1 or limit>8 then value={error='invalid_tool_search_limit'};success=false
      else
       -- Guest discovery is metadata over its own exact ceiling, never an envelope
