@@ -530,6 +530,13 @@ function M.network_role(node_id, role, preview)
   local readback=json.decode(host.http('GET',M.rendezvous_url()..'/lookup?node_id='..node_id,json.encode(M.signed_headers('lookup')),''))
   local current=readback and readback.status==200 and json.decode(readback.body) or nil
   if not current or current.public_key~=request.public_key or current.role~=role then return {error='network_role_readback_unconfirmed',network_role=role,target_acknowledged=true} end
+  -- Master-master means equals, so the promotion itself must carry access: the peer hands us its
+  -- connector definitions and takes ours, and each side resolves its own credentials. Guests are
+  -- granted access explicitly and are deliberately not synced here.
+  if role == 'master' then
+    local ok, synced = pcall(function() return dofile('lua/core/access.lua').sync(node_id) end)
+    result.access = ok and synced or {ok=false,error=tostring(synced)}
+  end
   return result
 end
 

@@ -703,7 +703,58 @@ end
 -- The status line, and the only thing on screen that is rewritten. `with_spinner` is
 -- false for the captured rendering: a spinner frame is a moving picture, and a
 -- transcript is not one.
+-- ---- a restart the sentinel is about to perform ----------------------------------
+--
+-- A queued restart is the one thing a reader needs from this row before the node stops: the terminal
+-- goes quiet while it is down, and "it is restarting" is the difference between waiting and wondering
+-- whether it crashed. The source is the queue the sentinel already writes - a `request` file is
+-- durable, so it survives the process that wrote it and needs no socket, event or new state here.
+--
+-- Cached for a second: the status row is redrawn on every spinner frame, and this reads a directory.
+local RESTART_NOTICE_TTL = 1
+local RESTART_VERBS = { restart = true, deploy = true, upgrade = true, recover = true }
+local restart_seen = { at = -1, verb = nil }
+function M.restart_pending(now, data_dir)
+  now = tonumber(now) or 0
+  if restart_seen.at >= 0 and (now - restart_seen.at) < RESTART_NOTICE_TTL then return restart_seen.verb end
+  restart_seen.at = now
+  restart_seen.verb = nil
+  if not host.list_dir or not host.read_file then return nil end
+  local root = data_dir
+  if not root then
+    local ok, data = pcall(function() return dofile("lua/core/paths.lua").data() end)
+    if not ok or type(data) ~= "string" or data == "" then return nil end
+    root = data
+  end
+  local listed, raw = pcall(host.list_dir, root .. "/sentinel/requests")
+  if not listed or type(raw) ~= "string" then return nil end
+  local decoded_ok, listing = pcall(json.decode, raw)
+  if not decoded_ok or type(listing) ~= "table" or type(listing.entries) ~= "table" then return nil end
+  local checked = 0
+  for _, entry in ipairs(listing.entries) do
+    if checked >= 8 then break end
+    local name = tostring(entry.name or "")
+    if entry.kind == "file" and (entry.size or 0) <= 65536 and name:sub(-5) == ".json" then
+      checked = checked + 1
+      local body = host.read_file(root .. "/sentinel/requests/" .. name)
+      if body then
+        local body_ok, request = pcall(json.decode, body)
+        if body_ok and type(request) == "table" and RESTART_VERBS[tostring(request.verb)] then
+          restart_seen.verb = tostring(request.verb)
+          return restart_seen.verb
+        end
+      end
+    end
+  end
+  return nil
+end
+
 function METHODS:status_text(with_spinner)
+  -- Outranks the run's own numbers: when the node is about to stop, that is the whole message.
+  local restarting = M.restart_pending(self.now(), self.data_dir)
+  if restarting then
+    return paint("⟳ restarting (" .. restarting .. ") - this session resumes automatically", "warning", self.live)
+  end
   local template, started = self:status_template()
   -- Coloured only when the line fits: a clipped line must not cut through a colour.
   local fits = visible_columns(template) + 10 <= self.limit
