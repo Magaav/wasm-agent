@@ -153,14 +153,46 @@ wa_service_pid() {
 
 # --- the running node --------------------------------------------------------------------------
 # The pid listening on a TCP port, empty when nothing is or when this machine cannot be asked. `ss` first
-# because it names the pid directly; `netstat -ano` on Windows, matching the *local* address only.
+# because it names the pid directly; `netstat -ano` on Windows, matching the *local* address only; and
+# `/proc` last, because a container image often carries none of the tools and answered "nothing is
+# listening" about a node that was.
+#
+# That empty answer was not inert. On 2026-10-28 this node's own deploy read it as "the restart will be
+# the only node on :8799", installed over the running binary, started a second node that could not bind
+# the port, read health from the *old* process, and rolled back claiming the new build "did not come up" -
+# while leaving the live pid unrecorded in serve.pid. The tools were simply absent from the image
+# (`ss`, `lsof`, `netstat` and `fuser` all missing), and the kernel had the answer in /proc the whole time.
+#
+# `/proc/net/tcp{,6}` names the listening socket by inode; the inode is then matched against every
+# process's open descriptors. `WA_PROC_ROOT` is the same seam `wa_pid_image` uses, so a fixture tree can
+# answer without a real listener. Nothing here needs a program that a minimal image may not ship.
 wa_port_pid() {
-  local port="$1" pid=""
+  local port="$1" pid="" root="${WA_PROC_ROOT:-/proc}" hex inodes inode fd target found
   if command -v ss >/dev/null 2>&1; then
     pid="$(ss -ltnp 2>/dev/null | awk -v p=":$port" '$4 ~ p"$" { if (match($0,/pid=[0-9]+/)) { print substr($0,RSTART+4,RLENGTH-4); exit } }')"
   fi
   if [ -z "$pid" ] && command -v netstat >/dev/null 2>&1; then
     pid="$(netstat -ano -p TCP 2>/dev/null | awk -v p=":$port" '$1=="TCP" && $2 ~ p"$" && $4=="LISTENING" { print $5; exit }' | tr -d '\r')"
+  fi
+  if [ -z "$pid" ] && [ -d "$root/net" ]; then
+    # The local port is the second half of the 8-hex-digit address, uppercase and zero padded.
+    hex="$(printf '%04X' "$port" 2>/dev/null)"
+    if [ -n "$hex" ]; then
+      inodes="$(awk -v want="$hex" 'FNR>1 { split($2, addr, ":"); if (addr[2]==want && $4=="0A") print $10 }' \
+        "$root/net/tcp" "$root/net/tcp6" 2>/dev/null | sort -u)"
+      for inode in $inodes; do
+        [ -n "$inode" ] || continue
+        for fd in "$root"/*/fd/*; do
+          [ -L "$fd" ] || continue
+          target="$(readlink "$fd" 2>/dev/null)" || continue
+          [ "$target" = "socket:[$inode]" ] || continue
+          found="${fd#"$root"/}"
+          pid="${found%%/*}"
+          printf '%s' "$pid"
+          return 0
+        done
+      done
+    fi
   fi
   printf '%s' "$pid"
 }

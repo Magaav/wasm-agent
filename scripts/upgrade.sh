@@ -182,6 +182,7 @@ record_install() {
 health() { curl -s -m 5 "http://127.0.0.1:$PORT/health" 2>/dev/null || true; }
 
 pid_on_port() {
+  local pid="" root="${WA_PROC_ROOT:-/proc}" hex inodes inode fd target found
   if [ "$WINDOWS" = "1" ]; then
     # `netstat -ano` rather than `Get-NetTCPConnection`. Both answer the same question, but PowerShell
     # costs ~600ms to start while netstat costs ~40ms - and this is called in a poll loop, so the
@@ -189,20 +190,54 @@ pid_on_port() {
     # *local* address only: a row whose remote port happens to match is a different connection.
     netstat -ano -p TCP 2>/dev/null | awk -v p=":$PORT" '
       $1 == "TCP" && $2 ~ p"$" && $4 == "LISTENING" { print $5; exit }' | tr -d '\r'
-  else
-    (command -v ss >/dev/null 2>&1 && ss -ltnp 2>/dev/null | awk -v p=":$PORT" '$4 ~ p {print $NF}' | sed 's/.*pid=\([0-9]*\).*/\1/' | head -1) || true
+    return 0
   fi
+  if command -v ss >/dev/null 2>&1; then
+    pid="$(ss -ltnp 2>/dev/null | awk -v p=":$PORT" '$4 ~ p {print $NF}' | sed 's/.*pid=\([0-9]*\).*/\1/' | head -1)"
+    if [ -n "$pid" ]; then printf '%s' "$pid"; return 0; fi
+  fi
+  # The kernel's own answer, for an image that ships no `ss`: /proc/net/tcp{,6} names the listening
+  # socket by inode, and the inode is matched against each process's descriptors. Without this, an
+  # upgrade on such a machine found no listener, never stopped the old node, started a second one that
+  # could not bind :$PORT, read health from the process it had failed to stop, and rolled back saying
+  # the new binary "did not come up" (2026-10-28 on this node's own deploy).
+  hex="$(printf '%04X' "$PORT" 2>/dev/null)"
+  if [ -n "$hex" ] && [ -d "$root/net" ]; then
+    inodes="$(awk -v want="$hex" 'FNR>1 { split($2, addr, ":"); if (addr[2]==want && $4=="0A") print $10 }' \
+      "$root/net/tcp" "$root/net/tcp6" 2>/dev/null | sort -u)"
+    for inode in $inodes; do
+      [ -n "$inode" ] || continue
+      for fd in "$root"/*/fd/*; do
+        [ -L "$fd" ] || continue
+        target="$(readlink "$fd" 2>/dev/null)" || continue
+        [ "$target" = "socket:[$inode]" ] || continue
+        found="${fd#"$root"/}"
+        printf '%s' "${found%%/*}"
+        return 0
+      done
+    done
+  fi
+  printf ''
 }
 
 # Is anything listening on a port? The same question `pid_on_port` answers, but it must be cheap: this
 # one is polled while waiting for a port to come free or answer, and a PowerShell spawn per poll made
 # the wait longer than the thing being waited for.
 port_busy() {
+  local root="${WA_PROC_ROOT:-/proc}" hex
   if [ "$WINDOWS" = "1" ]; then
     netstat -ano -p TCP 2>/dev/null | awk -v p=":$1" '$1 == "TCP" && $2 ~ p"$" && $4 == "LISTENING" { found = 1 } END { exit !found }'
-  else
-    (command -v ss >/dev/null 2>&1 && ss -ltn 2>/dev/null | grep -q ":$1 ") || return 1
+    return 0
   fi
+  if command -v ss >/dev/null 2>&1; then
+    ss -ltn 2>/dev/null | grep -q ":$1 " && return 0
+  fi
+  # Same gap as `pid_on_port`: without `ss` this answered "free" about a port the old node held, which is
+  # how an upgrade installed over a running process and then failed to bind behind it.
+  hex="$(printf '%04X' "$1" 2>/dev/null)"
+  [ -n "$hex" ] && [ -d "$root/net" ] || return 1
+  awk -v want="$hex" 'FNR>1 { split($2, addr, ":"); if (addr[2]==want && $4=="0A") { found = 1 } } END { exit !found }' \
+    "$root/net/tcp" "$root/net/tcp6" 2>/dev/null
 }
 
 # The scratch port must be one nothing else is using. 8800 is the client bridge of the node already
