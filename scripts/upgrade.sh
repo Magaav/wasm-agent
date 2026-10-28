@@ -478,6 +478,15 @@ if [ -n "$OLD_PID" ]; then
     sleep 0.05
   done
   if port_busy "$PORT"; then say "port $PORT is still occupied; refusing to overwrite or kill another listener"; exit 1; fi
+  # The same process holds a *second* listener, and a node that starts while it is still taken spends two
+  # seconds per retry waiting for it. Measured on this node's own deploy (2026-10-28): twelve retries on
+  # /proc/net/tcp's 127.0.0.1:8800, printed as "[client] bind ... Address already in use", and the health
+  # deadline below ran out while the node was in fact about to answer. Waiting for the port frees the
+  # start; the deadline change below covers the ownership handover that follows it.
+  for _ in $(seq 1 400); do
+    port_busy "$CLIENT_PORT" || break
+    sleep 0.05
+  done
 fi
 
 start_node() {
@@ -505,8 +514,14 @@ start_node() {
 
 wait_health() {
   # Tenths, not halves: the measured cold start is ~55ms, so this loop's own tick was the longest part
-  # of bringing the node back. The deadline is unchanged in wall-clock terms (40 * 0.5s == 200 * 0.1s).
-  for _ in $(seq 1 200); do
+  # of bringing the node back. The deadline is 90s (900 * 0.1s), not the old 20s (200 * 0.1s), because
+  # 20s declared failure exactly when the node was about to answer. A start behind a dying predecessor
+  # waits on two things that are the node's own, not this script's: its client-port bind retries (2s each,
+  # twelve of them observed) and `binding_transport_already_owned: the owner did not yield within 20s`,
+  # its documented ownership handover. Both together outlast 20s, so the upgrade rolled a working binary
+  # back and told the operator it 'did not come up' (2026-10-28). A node that is genuinely dead still
+  # fails, only 70s later; a node that is coming up is no longer called dead.
+  for _ in $(seq 1 900); do
     case "$(health)" in *'"ok":true'*) return 0 ;; esac
     sleep 0.1
   done
