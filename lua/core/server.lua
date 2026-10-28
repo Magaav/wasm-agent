@@ -674,6 +674,13 @@ local function node_capability(capability, args, caller)
   if capability == "set_role" then
     if not enrollment.managed() then return { error = "not_managed" } end
     return enrollment.set_role(args.role)
+  elseif capability == "federation" then
+    -- Connector federation (lua/core/federation.lua): a master peer lists and runs this node's connector
+    -- tools here, under this node's own guards. The dispatch is the same one the fallthrough below uses.
+    return dofile("lua/core/federation.lua").serve(args, caller, function(name, tool_args)
+      return toolslib.dispatch(memory, name, tool_args, users.normalize(caller.role),
+        { user_id = author, node_id = nodeslib.node_name() })
+    end)
   elseif capability == "access" then
     -- Same-rank access handoff (see lua/core/access.lua). Definitions and approved tiers travel;
     -- credential values never do, and a guest is refused on both ends.

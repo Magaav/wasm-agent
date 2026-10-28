@@ -724,6 +724,11 @@ function M.network_role(node_id, role, preview)
   if role == 'master' then
     local ok, synced = pcall(function() return dofile('lua/core/access.lua').sync(node_id) end)
     result.access = ok and synced or {ok=false,error=tostring(synced)}
+    -- And the peer's connectors are usable from here at once, run where they live (lua/core/federation.lua).
+    local fok, catalog = pcall(function() return dofile('lua/core/federation.lua').refresh() end)
+    local peers = 0
+    if fok and type(catalog) == 'table' then for _ in pairs(catalog.peers or {}) do peers = peers + 1 end end
+    result.federation = fok and {ok=true,peers=peers} or {ok=false,error=tostring(catalog)}
   end
   return result
 end

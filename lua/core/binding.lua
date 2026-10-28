@@ -264,6 +264,8 @@ function M.tick()
       local checked=M.inspect(s.service);if not checked.ok or not same_pins(checked.operators,s.operators) then return failure('binding_service_authority_changed') end
       local next={};for k,x in pairs(s) do next[k]=x end;next.active=true;next.phase='accepted';next.revision=v.binding.revision
       s,problem=cas(s,next);if not s then return failure(problem) end
+      -- Bound: the cluster's connectors are usable from this node at once (lua/core/federation.lua).
+      pcall(function() return dofile('lua/core/federation.lua').refresh() end)
     elseif v.binding.state~='pending' then return {state=v.binding.state}
     elseif s.request.pairing_expires_at<=host.now() then return {state='pairing_expired'}
     else return {state='pending',code=s.request.code} end

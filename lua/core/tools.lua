@@ -561,7 +561,7 @@ function M.tiers(role)
   local groups = {}
   for _, item in ipairs(M.all(role)) do
     local name = item["function"].name
-    local tier = name:sub(1,4)=='mcp_' and 'mcp' or M.tier_of[name] or "plugins"
+    local tier = (name:sub(1,4)=='mcp_' or name:sub(1,5)=='peer_') and 'mcp' or M.tier_of[name] or "plugins"
     groups[tier] = groups[tier] or {}
     table.insert(groups[tier], {
       name = name,
@@ -705,6 +705,11 @@ function M.catalog(role)
       list[#list+1]=schema('codemode','Preferred programmatic coding path when admitted for this run: Node-free JavaScript sandbox calling approved native tools. Use await tools.<name>(args), text(value), return, searchTools and describeTool (searchTools("text") or searchTools({query, limit}); searchTools("*") lists the whole catalogue). Native permissions/workspace/type/effect checks apply per call. Scripts may filter results; complete nested originals remain hash-addressed. No filesystem/network/Node or implicit models API. Unawaited calls are not admitted; effectful calls are serial.',{code={type='string'},timeout_ms={type='integer',minimum=1,maximum=300000}},{'code'})
     end
     for _, item in ipairs(mcp.schemas()) do list[#list+1]=item end
+    -- Every online peer's connectors, run on that peer (lua/core/federation.lua). Masters only.
+    if is_master(role) then
+      local fok, federated = pcall(function() return dofile('lua/core/federation.lua').schemas() end)
+      for _, item in ipairs(fok and federated or {}) do list[#list+1]=item end
+    end
     for _, item in ipairs(whatsapp_schemas()) do list[#list + 1] = item end
     local plugins=wasm_plugins()
     table.sort(plugins,function(a,b)return tostring(a.name)<tostring(b.name) end)
@@ -878,6 +883,7 @@ local function workspace_effectful(name,args)
   return WORKSPACE_FIXED[name] or WORKSPACE_UNSUPPORTED[name]
     or name=='mcp' and args.action=='probe'
     or name:sub(1,4)=='mcp_' and not mcp.is_read(name)
+    or name:sub(1,5)=='peer_' and not dofile('lua/core/federation.lua').is_read(name)
     or name=='operation' and (args.action or '')=='start'
 end
 
@@ -894,7 +900,7 @@ function M.discovery_execution(memory,ctx)
     state=unreadable and 'unknown' or required and (workspace.state or 'unknown') or 'not_required'}
   if unreadable then summary.required=nil end
   local function describe(name)
-    local conditional=name=='operation' or name=='mcp' or name:sub(1,4)=='mcp_'
+    local conditional=name=='operation' or name=='mcp' or name:sub(1,4)=='mcp_' or name:sub(1,5)=='peer_'
     local affected=WORKSPACE_FIXED[name] or WORKSPACE_UNSUPPORTED[name] or conditional
     local binding=WORKSPACE_UNSUPPORTED[name] and 'unsupported'
       or conditional and 'action_dependent' or WORKSPACE_FIXED[name] and 'supported' or 'not_applicable'
@@ -935,7 +941,7 @@ local function required_workspace_error(memory, ctx, name, args)
     return {error="session_workspace_unavailable",state=workspace.state or "unknown",
       detail=workspace.error or "required workspace has no durable binding"}
   end
-  if WORKSPACE_UNSUPPORTED[name] or name=='mcp' or name:sub(1,4)=='mcp_' then
+  if WORKSPACE_UNSUPPORTED[name] or name=='mcp' or name:sub(1,4)=='mcp_' or name:sub(1,5)=='peer_' then
     return {error="workspace_execution_context_unsupported",tool=name,
       detail="this capability does not yet accept an enforced session worktree binding"}
   end
@@ -1182,6 +1188,10 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
   if name=='mcp' then
     local control={role=role,subagent=ctx.subagent,session_id=ctx.session_id,cwd=session_cwd(memory,ctx)}
     return mcp.control(args,control)
+  end
+  if name:sub(1,5)=='peer_' then
+    if not is_master(role) then return {error='forbidden_for_role:'..role} end
+    return dofile('lua/core/federation.lua').call(name,args)
   end
   if name:sub(1,4)=='mcp_' then
     if not is_master(role) then return {error='forbidden_for_role:'..role} end
@@ -1728,7 +1738,7 @@ local READ_ONLY = {
   spell_list = true, spell_get = true,
 }
 
-function M.has_effect(name) if type(name)~='string' then return true end;if name:sub(1,4)=='mcp_' then return not mcp.is_read(name) end;return READ_ONLY[name] ~= true end
+function M.has_effect(name) if type(name)~='string' then return true end;if name:sub(1,4)=='mcp_' then return not mcp.is_read(name) end;if name:sub(1,5)=='peer_' then return not dofile('lua/core/federation.lua').is_read(name) end;return READ_ONLY[name] ~= true end
 
 function M.start_parallel_bash(calls, memory, role, ctx)
   if not is_master(role) or (ctx and ctx.subagent

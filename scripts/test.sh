@@ -1441,6 +1441,7 @@ WA_SCRIPT=scripts/test-session-title.lua "$BIN" --db "$DB.title" | grep "session
 WASM_AGENT_KEYS_DIR="$DB.keys" WA_SCRIPT=scripts/test-vault-keys.lua "$BIN" --db "$DB.keys.db" | grep "vault keys ok"
 WASM_AGENT_KEYS_DIR="$DB.bash-keys" WA_SCRIPT=scripts/test-cli-bash-restart.lua "$BIN" --db "$DB.bash.db" | grep "cli bash restart ok"
 WA_SCRIPT=scripts/test-mcp-node-runtime.lua "$BIN" --db "$DB.mcp-node.db" | grep '"ok":true'
+WA_SCRIPT=scripts/test-federation.lua "$BIN" --db "$DB.federation.db" | grep '"ok":true'
 
 # The CLI's answer is markdown: the renderer decides what a heading, a bullet, a fence, a
 # link and a bare url become, and - the property that matters most - that nothing in the

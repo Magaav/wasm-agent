@@ -67,6 +67,18 @@ Refresh. Controls are single flight, revision fenced and never automatically
 replayed. Stale/foreign reads cannot repaint a new scope or overwrite a mutation.
 An uncertain control requires inspection and a new explicit decision.
 
+## Federation: every master uses every peer's connectors
+
+A connector belongs to the machine that holds it (a linked WhatsApp device, a mail credential file, a
+loopback service), so a copied definition cannot run elsewhere. `lua/core/federation.lua` leaves each
+connector where it is: a master lists each online peer's enabled connector tools (its MCP tools and its
+WhatsApp facade) as `peer_<peer>__<tool>` and a call runs ON that peer through the signed node call, under
+that peer's own guards - its write gates, approvals and refusals still decide. Nothing secret moves and no
+node is configured by hand. The catalog refreshes when a node is bound (the binding tick that reaches
+`accepted`), when a peer is promoted to master, and when it is older than ten minutes; listing tools reads
+the cache and never waits on the network. A peer on an older build (no `federation` capability) is kept in
+the catalog with its reason and no tools. Guests neither list nor call. Proof: `scripts/test-federation.lua`.
+
 ## WhatsApp first
 
 2026-10-17: [operator-directed management](WHATSAPP-OPERATOR-MANAGEMENT.md) is a
