@@ -208,7 +208,7 @@ func serveAPI(server *http.Server, listener net.Listener, ctx context.Context, c
 // had fenced, so an unproven mutation cannot make a normal voice note or screenshot
 // permanently unreadable. Nothing is posted or replayed: the hold stays, the outbox is
 // untouched, and a proven per-message fence (source_blocks) still wins.
-func (j *Journal) rederiveHeldSources(c Config) (map[string]int, error) {
+func (j *Journal) rederiveHeldSources(c Config, chat string) (map[string]int, error) {
 	j.effectMu.Lock()
 	defer j.effectMu.Unlock()
 	tx, err := j.db.Begin()
@@ -216,15 +216,25 @@ func (j *Journal) rederiveHeldSources(c Config) (map[string]int, error) {
 		return nil, err
 	}
 	defer tx.Rollback()
-	audioRows, err := tx.Exec(`UPDATE audio SET state='pending',reason='source_hold_transcription_only',attempts=0,next_attempt=0
-		WHERE account=? AND generation=? AND state='blocked_source'
-		AND NOT EXISTS(SELECT 1 FROM source_blocks b WHERE b.account=audio.account AND b.generation=audio.generation AND b.chat=audio.chat AND b.id=audio.id)`, c.Account, c.Generation)
+	// An empty chat means every chat of this account/generation; a named chat is a
+	// bounded pass over one conversation.
+	scope := ""
+	args := []any{c.Account, c.Generation}
+	if chat != "" {
+		scope = " AND chat=?"
+		args = append(args, chat)
+	}
+	audioQuery := `UPDATE audio SET state='pending',reason='source_hold_transcription_only',attempts=0,next_attempt=0
+		WHERE account=? AND generation=? AND state='blocked_source'` + scope + `
+		AND NOT EXISTS(SELECT 1 FROM source_blocks b WHERE b.account=audio.account AND b.generation=audio.generation AND b.chat=audio.chat AND b.id=audio.id)`
+	audioRows, err := tx.Exec(audioQuery, args...)
 	if err != nil {
 		return nil, err
 	}
-	mediaRows, err := tx.Exec(`UPDATE messages SET media_state='pending',media_reason='source_hold_index_only',media_attempts=0,media_next_attempt=0
-		WHERE account=? AND generation=? AND media_state='blocked_source'
-		AND NOT EXISTS(SELECT 1 FROM source_blocks b WHERE b.account=messages.account AND b.generation=messages.generation AND b.chat=messages.chat AND b.id=messages.id)`, c.Account, c.Generation)
+	mediaQuery := `UPDATE messages SET media_state='pending',media_reason='source_hold_index_only',media_attempts=0,media_next_attempt=0
+		WHERE account=? AND generation=? AND media_state='blocked_source'` + scope + `
+		AND NOT EXISTS(SELECT 1 FROM source_blocks b WHERE b.account=messages.account AND b.generation=messages.generation AND b.chat=messages.chat AND b.id=messages.id)`
+	mediaRows, err := tx.Exec(mediaQuery, args...)
 	if err != nil {
 		return nil, err
 	}

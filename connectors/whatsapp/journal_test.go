@@ -579,7 +579,7 @@ func TestImageIndexingSurvivesAHoldAndReindexRespectsProvenFences(t *testing.T) 
 	if count(t, j, "SELECT count(*) FROM messages WHERE id='deleted-image' AND media_state='blocked_source'") != 1 {
 		t.Fatal("proven fence did not block the deleted image")
 	}
-	rederived, err := j.rederiveHeldSources(c)
+	rederived, err := j.rederiveHeldSources(c, "")
 	if err != nil {
 		t.Fatal(err)
 	}

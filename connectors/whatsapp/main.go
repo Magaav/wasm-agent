@@ -352,7 +352,7 @@ func run() error {
 		if !*holdConfirm {
 			return errors.New("explicit_hold_rederive_confirmation_required")
 		}
-		counts, err := j.rederiveHeldSources(c)
+		counts, err := j.rederiveHeldSources(c, *holdChat)
 		if err != nil {
 			return err
 		}
