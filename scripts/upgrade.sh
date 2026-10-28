@@ -486,6 +486,17 @@ sentinel_restart() {
 }
 sentinel_node_pid() { sed -n 's/.*"pid":\([0-9]*\).*/\1/p' "$SENTINEL_DIR/node.json" 2>/dev/null | head -1; }
 OLD_PID="$(pid_on_port)"
+# Supervising the watcher is not owning the node: on openclaw the node is wa-serve.service and the sentinel
+# only watches it, so a restart handed to the sentinel was refused ("refusing to adopt pid ... serve.pid
+# records ...") and the deploy rolled back (28/10). The sentinel takes the restart only when its own record
+# names the running node (or nothing runs).
+if [ "$SUPERVISED" = "1" ] && [ -n "$OLD_PID" ]; then
+  OWNED="$(sed -n 's/.*"pid":\([0-9]*\).*/\1/p' "${WASM_AGENT_HOME:-$HOME}/.wasm-agent/sentinel/node.json" 2>/dev/null | head -1)"
+  if [ "$OWNED" != "$OLD_PID" ]; then
+    say "the sentinel watches this node but did not start it (its record: ${OWNED:-none}, running: $OLD_PID) - not handing it the restart"
+    SUPERVISED=0
+  fi
+fi
 # A node that is a systemd unit of its own with Restart=always (openclaw: wa-serve.service, User=ubuntu):
 # killing it before the swap makes systemd start the OLD binary again at once, and the port this script
 # then waits on never frees; starting a second node beside it collides. So the swap comes first and the
