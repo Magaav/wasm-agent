@@ -67,8 +67,9 @@ function snapshot() {
     WHERE a.state='transcribed' AND coalesce(a.reason,'')='' AND m.sent >= ?
       AND NOT EXISTS (SELECT 1 FROM outbox o WHERE o.account=a.account AND o.generation=a.generation AND o.chat=a.chat AND o.source=a.id)`,
     Number(config.activated_at || 0)).filter((row) => !heldSet.has(row.chat)) : [];
+  const lastConnected = at('connected'), lastDisconnected = at('disconnected');
   db.close();
-  return { config, lastConnected: at('connected'), lastDisconnected: at('disconnected'), pending, held, unposted };
+  return { config, lastConnected, lastDisconnected, pending, held, unposted };
 }
 
 // The operator profile that writes only to the account's own chat.
@@ -117,9 +118,11 @@ export function main() {
   // Forget what cleared (so a recurrence is reported again); remember what was just reported.
   const current = new Set(problems.map((p) => p.key));
   const reported = Object.fromEntries(Object.entries(memory.reported).filter(([key]) => current.has(key)));
-  if (delivery || process.env.WA_WATCHDOG_DRY_RUN === '1') for (const p of fresh) reported[p.key] = now;
-  fs.writeFileSync(memoryFile, JSON.stringify({ reported, held: snap.held, at: now }), { mode: 0o600 });
-  const result = { ok: true, problems: problems.length, reported: delivery ? fresh.length : 0, held: snap.held.length, pending: snap.pending.length, delivery };
+  if (delivery) for (const p of fresh) reported[p.key] = now;
+  // A dry run reports and remembers nothing, so it never mutes the first real alert.
+  if (process.env.WA_WATCHDOG_DRY_RUN !== '1') fs.writeFileSync(memoryFile, JSON.stringify({ reported, held: snap.held, at: now }), { mode: 0o600 });
+  const result = { ok: true, problems: problems.length, reported: delivery ? fresh.length : 0, held: snap.held.length, pending: snap.pending.length, delivery,
+    lines: process.env.WA_WATCHDOG_DRY_RUN === '1' ? fresh.map((p) => p.line) : undefined };
   console.log(JSON.stringify(result));
   return result;
 }
