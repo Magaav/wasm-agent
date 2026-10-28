@@ -38,7 +38,7 @@ func TestHistoryMutationBeforeSourceUsesActualSDKHeadersBeforeAnyAudioTasks(t *t
 			t.Fatal(err)
 		}
 	}
-	if count(t, old, "SELECT count(*) FROM chat_holds") != 1 || count(t, old, "SELECT count(*) FROM audio WHERE state='blocked_source'") != 2 {
+	if count(t, old, "SELECT count(*) FROM chat_holds") != 1 || count(t, old, "SELECT count(*) FROM audio WHERE state='pending' AND reason='source_hold_transcription_only'") != 2 {
 		t.Fatal("old sequential order did not reproduce broad hold")
 	}
 	j := fixture(t)

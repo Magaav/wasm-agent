@@ -405,12 +405,24 @@ func (j *Journal) ingest(m Message) error {
 		if m.Unsupported != "" {
 			state, reason = "unsupported", m.Unsupported
 		}
-		blocked, e := blockedSource(tx, c, m.Chat, m.ID)
+		blocked, e := sourceBlocked(tx, c, m.Chat, m.ID)
 		if e != nil {
 			return e
 		}
 		if blocked {
 			state, reason = "blocked_source", "source_mutation_or_chat_hold"
+		} else if state == "pending" {
+			// Only an otherwise processable audio is annotated: unlikely timestamps,
+			// unsupported types and pre-activation history keep their own reason.
+			// Transcription is a local derive with no external effect, so a chat hold
+			// must not lose it; posting stays gated when the task settles.
+			held, e := chatHeld(tx, c, m.Chat)
+			if e != nil {
+				return e
+			}
+			if held {
+				reason = "source_hold_transcription_only"
+			}
 		}
 		_, err = tx.Exec("INSERT INTO audio(account,generation,chat,id,state,reason,language) VALUES(?,?,?,?,?,?,?)", c.Account, c.Generation, m.Chat, m.ID, state, reason, c.Language)
 		if err != nil {
@@ -490,7 +502,7 @@ func (j *Journal) processAudio(ctx context.Context, t Transport, r Recognizer) e
 	}
 	var m Message
 	var language string
-	err = j.db.QueryRow(`SELECT m.chat,m.id,m.sender,m.body,m.sent,m.own,m.raw,a.language FROM audio a JOIN messages m USING(account,generation,chat,id) WHERE a.account=? AND a.generation=? AND a.state='pending' AND NOT EXISTS(SELECT 1 FROM source_blocks b WHERE b.account=a.account AND b.generation=a.generation AND b.chat=a.chat AND b.id=a.id) AND NOT EXISTS(SELECT 1 FROM chat_holds h WHERE h.account=a.account AND h.generation=a.generation AND h.chat=a.chat) AND a.next_attempt<=? ORDER BY a.attempts,m.observed LIMIT 1`, c.Account, c.Generation, time.Now().Unix()).Scan(&m.Chat, &m.ID, &m.Sender, &m.Body, &m.Sent, &m.Own, &m.Raw, &language)
+	err = j.db.QueryRow(`SELECT m.chat,m.id,m.sender,m.body,m.sent,m.own,m.raw,a.language FROM audio a JOIN messages m USING(account,generation,chat,id) WHERE a.account=? AND a.generation=? AND a.state='pending' AND NOT EXISTS(SELECT 1 FROM source_blocks b WHERE b.account=a.account AND b.generation=a.generation AND b.chat=a.chat AND b.id=a.id) AND a.next_attempt<=? ORDER BY a.attempts,m.observed LIMIT 1`, c.Account, c.Generation, time.Now().Unix()).Scan(&m.Chat, &m.ID, &m.Sender, &m.Body, &m.Sent, &m.Own, &m.Raw, &language)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil
 	}
@@ -530,7 +542,7 @@ func (j *Journal) processAudio(ctx context.Context, t Transport, r Recognizer) e
 		return err
 	}
 	defer tx.Rollback()
-	blocked, e := blockedSource(tx, c, m.Chat, m.ID)
+	blocked, e := sourceBlocked(tx, c, m.Chat, m.ID)
 	if e != nil {
 		return e
 	}
@@ -541,8 +553,12 @@ func (j *Journal) processAudio(ctx context.Context, t Transport, r Recognizer) e
 		}
 		return tx.Commit()
 	}
+	held, e := chatHeld(tx, c, m.Chat)
+	if e != nil {
+		return e
+	}
 	for i, body := range chunks(text) {
-		if !c.TranscriptPosting {
+		if !c.TranscriptPosting || held {
 			continue
 		}
 		_, err = tx.Exec("INSERT OR IGNORE INTO outbox(account,generation,chat,source,part,body,send_id,state) VALUES(?,?,?,?,?,?,?,'ready')", c.Account, c.Generation, m.Chat, m.ID, i, body, t.NewID())
@@ -550,7 +566,11 @@ func (j *Journal) processAudio(ctx context.Context, t Transport, r Recognizer) e
 			return err
 		}
 	}
-	_, err = tx.Exec("UPDATE audio SET state='transcribed',reason='',transcript=? WHERE account=? AND generation=? AND chat=? AND id=?", text, c.Account, c.Generation, m.Chat, m.ID)
+	state, reason := "transcribed", ""
+	if held {
+		state, reason = "transcribed", "source_hold_transcription_only"
+	}
+	_, err = tx.Exec("UPDATE audio SET state=?,reason=?,transcript=? WHERE account=? AND generation=? AND chat=? AND id=?", state, reason, text, c.Account, c.Generation, m.Chat, m.ID)
 	if err != nil {
 		return err
 	}
