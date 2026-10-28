@@ -90,3 +90,10 @@ fn a_privilege_refusal_is_told_apart_from_a_unit_problem() {
     assert!(crate::role::refused_for_privilege("Failed to restart wa-sentinel.service: Access denied"));
     assert!(!crate::role::refused_for_privilege("Unit wa-sentinel.service not found."));
 }
+
+#[cfg(unix)]
+#[test]
+fn unix_scripts_run_with_bash_when_there_is_one() {
+    let (shell, _) = crate::shell_for(std::path::Path::new("/tmp/deploy.sh"));
+    if std::path::Path::new("/bin/bash").exists() { assert!(shell.ends_with("bash"), "{shell}"); }
+}

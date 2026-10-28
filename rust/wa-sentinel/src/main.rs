@@ -1370,6 +1370,11 @@ pub(crate) fn verb_restart(reason: &str) -> Result<String> {
 /// test can actually stat. `sh` on Unix, unchanged.
 fn shell_for(script: &Path) -> (String, String) {
     if !cfg!(windows) {
+        // bash: the scripts are bash (`set -o pipefail`, arrays). `sh` is dash on Debian/Ubuntu and
+        // stopped every deploy on line 30 (openclaw, 28/10). `sh` only where there is no bash at all.
+        for candidate in ["/bin/bash", "/usr/bin/bash", "/usr/local/bin/bash"] {
+            if Path::new(candidate).exists() { return (candidate.into(), script.display().to_string()); }
+        }
         return ("sh".into(), script.display().to_string());
     }
     for candidate in [
@@ -1620,6 +1625,20 @@ fn watch_deploy_exit(mut child: std::process::Child, capture: PathBuf, started: 
 fn resolve_script(file: &str, override_env: &str) -> Result<PathBuf> {
     if let Ok(explicit) = std::env::var(override_env) {
         if Path::new(&explicit).exists() {
+            // Every deploy ships a fresh copy beside the binary; a pin set once in a unit file (openclaw:
+            // a root-owned /usr/local/bin/scripts/deploy.sh from 29/09) is never updated by anyone, so
+            // a sentinel that obeyed it ran a month-old installer for ever. The pin still wins when it is
+            // at least as new as the shipped copy.
+            if let Some(shipped) = std::env::current_exe().ok().and_then(|me| me.parent().map(|d| d.join("scripts").join(file))) {
+                let newer = |a: &Path, b: &Path| -> bool {
+                    match (std::fs::metadata(a).and_then(|m| m.modified()), std::fs::metadata(b).and_then(|m| m.modified())) {
+                        (Ok(x), Ok(y)) => x > y, _ => false }
+                };
+                if shipped.exists() && newer(&shipped, Path::new(&explicit)) {
+                    audit("script-pin-stale", &explicit, &format!("using the newer shipped {} instead", shipped.display()));
+                    return Ok(shipped);
+                }
+            }
             return Ok(PathBuf::from(explicit));
         }
         bail!("{override_env} points at {explicit}, which does not exist");
