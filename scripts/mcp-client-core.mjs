@@ -3,7 +3,9 @@ import { spawn } from 'node:child_process';
 import { TextDecoder } from 'node:util';
 import { createHash, randomUUID } from 'node:crypto';
 
-export const VERSIONS=['2025-11-25','2025-06-18','2024-11-05'];
+// 2025-03-26 is a published revision and the one mail-mcp answers with (measured 2026-10-28: it replies 2025-03-26 to any
+// client version). Our calls are initialize / tools/list / tools/call, which that revision already defines.
+export const VERSIONS=['2025-11-25','2025-06-18','2025-03-26','2024-11-05'];
 const MAX_BYTES=32*1024*1024,MAX_LINE=24*1024*1024;
 export function canonical(value){if(Array.isArray(value))return '['+value.map(canonical).join(',')+']';if(value&&typeof value==='object')return '{'+Object.keys(value).sort().map(k=>JSON.stringify(k)+':'+canonical(value[k])).join(',')+'}';return JSON.stringify(value);}
 export const schemaHash=tools=>createHash('sha256').update(canonical(tools.map(t=>({name:t.name,inputSchema:t.inputSchema})).sort((a,b)=>a.name<b.name?-1:a.name>b.name?1:0))).digest('hex');
@@ -152,6 +154,18 @@ export async function openMCP(server){
   async close(){poisoned=true;timer=setTimeout(()=>controller.abort(),3000);try{await transport.close();}finally{clearTimeout(timer);}},
  };
 }
+// A JSON-RPC error *reply* is a decision, not an unknown effect: the server parsed the request and
+// refused it, so nothing ran. The difference is not cosmetic - the dispatcher holds an "unknown"
+// submission durably and refuses that connector for the rest of the process (lua/core/mcp_session.lua
+// returns mcp_connection_uncertain), so one wrong argument would cost the session. Measured
+// 2026-10-28: `imap_get_message` without `message_id` answered -32602 and wedged a working mailbox.
+// Only protocol-level codes qualify; an error raised *inside* a tool arrives as `result.isError`
+// and is handled above, never here.
+const REJECTION_CODES = new Set([-32700, -32600, -32601, -32602]);
+function rpc_rejection(rpc_error) {
+  return !!rpc_error && REJECTION_CODES.has(Number(rpc_error.code));
+}
+
 export async function requestMCP(input){
  let transport,issued=false,phase='preflight',answer,credentials;const stats={notifications:0};const controller=new AbortController();let timer;
  try{
@@ -180,7 +194,7 @@ export async function requestMCP(input){
   const unsupported_content_types=[...new Set(result.content.filter(item=>!object(item)||item.type!=='text').map(item=>item?.type||'invalid'))];
   answer={ok:result.isError!==true,result,...metadata,tool_call_issued:true,...(unsupported_content_types.length?{unsupported_content_types,content_delivery:'raw evidence only; no image/resource materialization'}:{})};
   }
- }catch(error){answer={ok:false,error:String(error.message||error),rpc_error:error.rpc_error,phase,tool_call_issued:issued,outcome:issued?'unknown':'not_submitted'};}
+ }catch(error){const rejected=rpc_rejection(error.rpc_error);answer={ok:false,error:String(error.message||error),rpc_error:error.rpc_error,phase,tool_call_issued:issued&&!rejected,outcome:(issued&&!rejected)?'unknown':'not_submitted'};}
  finally{if(transport)try{await transport.close();}catch(error){answer={...answer,ok:false,error:'mcp_cleanup_failed:'+String(error.message||error),tool_call_issued:issued,outcome:issued?'unknown':'not_submitted'};}clearTimeout(timer);}
  if(answer.ok===false&&stats.stderr)answer.server_stderr_tail=stats.stderr;
  if(stats.server_exit_code!==undefined)answer.server_exit_code=stats.server_exit_code;

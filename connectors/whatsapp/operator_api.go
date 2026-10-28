@@ -172,6 +172,24 @@ func operatorAPI(j *Journal, read http.Handler, a operatorAuthority, t operatorT
 			fail(400, "operator_invalid_request")
 			return
 		}
+		// A mention set is bounded and exactly identified here; the transport
+		// proves it against the group's participant list during prepare. Send and
+		// status cannot add one: an audience is frozen by preparation, never at
+		// dispatch.
+		if len(req.Mentions) > operatorMentionLimit {
+			fail(400, "operator_invalid_request")
+			return
+		}
+		for _, mention := range req.Mentions {
+			if len(mention) > 256 || !canonicalOperatorChat(mention) {
+				fail(400, "operator_invalid_request")
+				return
+			}
+		}
+		if r.URL.Path != "/operator/prepare" && r.URL.Path != "/operator/approve" && len(req.Mentions) != 0 {
+			fail(400, "operator_invalid_request")
+			return
+		}
 		if req.Account != a.Account || req.Generation != a.Generation || !contains(a.Chats, req.Chat) {
 			fail(403, "operator_scope_mismatch")
 			return
@@ -187,7 +205,7 @@ func operatorAPI(j *Journal, read http.Handler, a operatorAuthority, t operatorT
 			canonical, route, resolveErr := t.ResolveOperator(r.Context(), req.Chat)
 			if resolveErr != nil {
 				err = resolveErr
-			} else {
+			} else if req.resolved, err = t.ResolveMentions(r.Context(), req.Chat, req.Mentions); err == nil {
 				i, err = j.prepareOperator(req, canonical, route, t.NewID)
 			}
 		case "/operator/approve":

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"os"
@@ -70,6 +71,24 @@ func blockedSource(q rowQuery, c Config, chat, id string) (bool, error) {
 	var n int
 	// Posting fence: exact source block, fenced revoke target ID, or ANY chat hold.
 	err := q.QueryRow(`SELECT EXISTS(SELECT 1 FROM source_blocks WHERE account=? AND generation=? AND chat=? AND id=?) OR EXISTS(SELECT 1 FROM target_fences WHERE account=? AND generation=? AND id=?) OR EXISTS(SELECT 1 FROM chat_holds WHERE account=? AND generation=? AND chat=?)`, c.Account, c.Generation, chat, id, c.Account, c.Generation, id, c.Account, c.Generation, chat).Scan(&n)
+	return n != 0, err
+}
+
+// sourceBlocked is the proven fence for ONE message ID: the SDK showed a revoke,
+// edit or delete that names it. A source block outlives hold release and is never
+// replayed, so the audio bytes are not even transcribed.
+func sourceBlocked(q rowQuery, c Config, chat, id string) (bool, error) {
+	var n int
+	err := q.QueryRow(`SELECT EXISTS(SELECT 1 FROM source_blocks WHERE account=? AND generation=? AND chat=? AND id=?)`, c.Account, c.Generation, chat, id).Scan(&n)
+	return n != 0, err
+}
+
+// chatHeld is the UNPROVEN fence for a whole chat. It gates posting, not local
+// transcription: a hold means "we cannot prove what changed here", and losing the
+// transcript of a normal voice note is what made an unreadable audio permanent.
+func chatHeld(q rowQuery, c Config, chat string) (bool, error) {
+	var n int
+	err := q.QueryRow(`SELECT EXISTS(SELECT 1 FROM chat_holds WHERE account=? AND generation=? AND chat=?)`, c.Account, c.Generation, chat).Scan(&n)
 	return n != 0, err
 }
 func (j *Journal) mutate(c Config, m Message) error {
@@ -204,6 +223,54 @@ func serveAPI(server *http.Server, listener net.Listener, ctx context.Context, c
 // not be running. It preserves mutation evidence, source blocks and every already
 // blocked audio/outbox row; nothing is replayed. Only future audio in that chat can
 // become pending again.
+// rederiveHeldSources re-queues local derives (transcript, OCR text) that a chat hold
+// had fenced, so an unproven mutation cannot make a normal voice note or screenshot
+// permanently unreadable. Nothing is posted or replayed: the hold stays, the outbox is
+// untouched, and a proven per-message fence (source_blocks) still wins.
+func (j *Journal) rederiveHeldSources(c Config, chat string) (map[string]int, error) {
+	j.effectMu.Lock()
+	defer j.effectMu.Unlock()
+	tx, err := j.db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	// An empty chat means every chat of this account/generation; a named chat is a
+	// bounded pass over one conversation.
+	scope := ""
+	args := []any{c.Account, c.Generation}
+	if chat != "" {
+		scope = " AND chat=?"
+		args = append(args, chat)
+	}
+	audioQuery := `UPDATE audio SET state='pending',reason='source_hold_transcription_only',attempts=0,next_attempt=0
+		WHERE account=? AND generation=? AND state='blocked_source'` + scope + `
+		AND NOT EXISTS(SELECT 1 FROM source_blocks b WHERE b.account=audio.account AND b.generation=audio.generation AND b.chat=audio.chat AND b.id=audio.id)`
+	audioRows, err := tx.Exec(audioQuery, args...)
+	if err != nil {
+		return nil, err
+	}
+	mediaQuery := `UPDATE messages SET media_state='pending',media_reason='source_hold_index_only',media_attempts=0,media_next_attempt=0
+		WHERE account=? AND generation=? AND media_state='blocked_source'` + scope + `
+		AND NOT EXISTS(SELECT 1 FROM source_blocks b WHERE b.account=messages.account AND b.generation=messages.generation AND b.chat=messages.chat AND b.id=messages.id)`
+	mediaRows, err := tx.Exec(mediaQuery, args...)
+	if err != nil {
+		return nil, err
+	}
+	audio, _ := audioRows.RowsAffected()
+	media, _ := mediaRows.RowsAffected()
+	if audio == 0 && media == 0 {
+		return map[string]int{"audio": 0, "media": 0}, nil
+	}
+	if _, err = tx.Exec("INSERT INTO events(kind,at,detail) VALUES('hold_rederive',?,?)", time.Now().Unix(), fmt.Sprintf("audio=%d media=%d", audio, media)); err != nil {
+		return nil, err
+	}
+	if err = tx.Commit(); err != nil {
+		return nil, err
+	}
+	return map[string]int{"audio": int(audio), "media": int(media)}, nil
+}
+
 func (j *Journal) releaseHold(c Config, chat, reason string) error {
 	if !validChat(chat) || strings.TrimSpace(reason) == "" || len(reason) > 500 {
 		return errors.New("reviewed_hold_release_required")

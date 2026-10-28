@@ -94,7 +94,7 @@ node "$SOURCE/scripts/whatsapp-operator.mjs" prepare \
 
 Request shapes (no account/generation/role overrides):
 
-* `prepare`: `{"conversation_id":"<exact-ID>","body":"<exact-approved-text>","reply_to":"<optional-exact-message-ID>"}`.
+* `prepare`: `{"conversation_id":"<exact-ID>","body":"<exact-approved-text>","reply_to":"<optional-exact-message-ID>","mentions":["<optional-exact-person-ID>"]}`.
 * `approve`: same recipient/body/reply plus returned `intent_id` and
   `approval_digest`. The trusted operator compares the returned exact body,
   account/generation, canonical/protocol recipients and quote with the actual
@@ -116,6 +116,49 @@ an exact current SAME-chat plain-text row (≤4096 bytes), sender/timestamp,
 source/chat mutation proof and no later observed own reply. Media/unsupported or
 unmapped/stale quotes refuse; reprepare/reapprove changed context, never silently
 reuse stale approval. Ordinary reads do not mark anything read.
+
+## Mentions (2026-10-26)
+
+A mention is an AUDIENCE, so it is prepared and approved like the text itself:
+
+```json
+{"conversation_id":"<exact-group-ID>","body":"fala @5512988210131, olha isso","mentions":["5512988210131@s.whatsapp.net"]}
+```
+
+* Groups only. A direct chat's mention list would notify nobody; it refuses with
+  `operator_mention_requires_group` rather than dropping it silently.
+* Bounded: at most 8 exact ids, each ≤256 bytes, canonical, numeric user part.
+  Duplicates refuse; the same participant named by phone number and by LID is a
+  duplicate, never merged silently.
+* **Identity is proven, not guessed.** Each id must match exactly one entry of
+  that group's own participant list as the pinned SDK reports it (primary JID,
+  phone number or LID). Missing, ambiguous or unmapped ids refuse. Display
+  names, caller flags and id shapes are never identity evidence. That evidence is
+  fetched by one bounded (2s) query for the exact group during prepare; nothing
+  queries membership at dispatch.
+* **The text must name the person.** At prepare the connector rewrites the
+  requested token (`@<user of the id you named>`) to the proven participant
+  identity, so the exact body carries the token a client renders, and
+  `ContextInfo.MentionedJID` carries the same proven JIDs. A requested mention
+  whose token is absent from the text refuses (`operator_mention_token_missing`):
+  this path never notifies someone the message does not name.
+* The rewrite happens where the body becomes exact - before the signature, the
+  intent id, the approval digest and the durable row - so the approved bytes are
+  the sent bytes. Nothing rewrites text at dispatch, and `send`/`status` cannot
+  carry a mention list (`operator_invalid_request`).
+* The mention set is part of intent identity and of the approval binding: the same
+  text to a different audience is a different intent, and an approval that drops
+  or changes the audience refuses with `operator_approval_binding_mismatch`.
+* A dispatch re-checks, without any network, that every frozen mention still has
+  its token in the exact body (`operator_mention_token_unproven`).
+
+Known limits, stated rather than papered over: the stored body carries the
+participant identity the server reports (a LID in LID-addressed groups), so a
+recipient client that does not resolve that identity shows the raw token instead
+of the contact name. Rendering has not been measured live; no live send was made
+while adding this. A member who leaves between preparation and dispatch is still
+in the frozen list - harmless, WhatsApp simply does not notify them - and group
+membership is not re-queried at dispatch.
 
 ## Durable semantics and precise limits
 

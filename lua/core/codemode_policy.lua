@@ -4,8 +4,13 @@ local users=dofile('lua/core/users.lua')
 local M={}
 function M.setting()
  local value=host.getenv('WASM_AGENT_CODEMODE') or ''
- if value=='' then return 'default' end
- if value~='native' and value~='off' then error('invalid_codemode_setting:'..value) end
+ -- Code mode is the default of every node, not an opt-in. Unset used to mean the fenced 'default'
+ -- mode, which required an allocated session worktree and therefore stayed invisible in every
+ -- ordinary run: the capability existed, nothing advertised it, and it read as "code mode only
+ -- works inside code mode" (measured 2026-10-27). Unset now means native; an operator who wants
+ -- the worktree fence back asks for it by name.
+ if value=='' then return 'native' end
+ if value~='native' and value~='off' and value~='default' then error('invalid_codemode_setting:'..value) end
  return value
 end
 function M.eligible(memory,role,ctx,mode)
@@ -17,15 +22,11 @@ function M.eligible(memory,role,ctx,mode)
   if child.id~='orchestration-worker' then return false end
  end
  if mode=='native' then return true end -- historical MASTER opt-in, still native-fenced
- -- On by default for every MASTER run on every node (first install, a new cluster, a plain CLI in its
- -- home): code mode used to need a session worktree binding, so an ordinary operator session - the
- -- common case - silently ran without it while /health said `ready`. The one remaining refusal is a
- -- session whose binding demands a worktree that is not allocated (or is another path) yet.
- if not memory or not ctx.session_id then return true end
+ if not memory or not ctx.session_id or not memory.session_worktree then return false end
+ local path=memory.session_worktree(ctx.session_id)
+ if type(path)~='string' or path=='' then return false end
  local workspace=memory.session_workspace and memory.session_workspace(ctx.session_id)
- if type(workspace)~='table' or not workspace.required then return true end
- local path=memory.session_worktree and memory.session_worktree(ctx.session_id)
- return workspace.state=='allocated' and type(path)=='string' and path~='' and workspace.worktree==path
+ return not workspace or not workspace.required or workspace.state=='allocated' and workspace.worktree==path
 end
 function M.pin(memory,role,ctx)
  ctx=ctx or {}

@@ -418,6 +418,18 @@ func (j *Journal) ingest(m Message) error {
 		}
 		if blocked {
 			state, reason = "blocked_source", "source_mutation_or_chat_hold"
+		} else if state == "pending" {
+			// Only an otherwise processable audio is annotated: unlikely timestamps,
+			// unsupported types and pre-activation history keep their own reason.
+			// Transcription is a local derive with no external effect, so a chat hold
+			// must not lose it; posting stays gated when the task settles.
+			held, e := chatHeld(tx, c, m.Chat)
+			if e != nil {
+				return e
+			}
+			if held {
+				reason = "source_hold_transcription_only"
+			}
 		}
 		wake = wake || state == "pending"
 		_, err = tx.Exec("INSERT INTO audio(account,generation,chat,id,state,reason,language) VALUES(?,?,?,?,?,?,?)", c.Account, c.Generation, m.Chat, m.ID, state, reason, c.Language)
@@ -448,6 +460,16 @@ func (j *Journal) ingest(m Message) error {
 		}
 		if blocked {
 			state, reason = "blocked_source", "source_mutation_or_chat_hold"
+		} else if state == "pending" {
+			// Same rule as audio: indexing an image is a local derive, so a chat hold
+			// annotates the task instead of throwing the content away.
+			held, e := chatHeld(tx, c, m.Chat)
+			if e != nil {
+				return e
+			}
+			if held {
+				reason = "source_hold_index_only"
+			}
 		}
 		_, err = tx.Exec("UPDATE messages SET media_state=?,media_reason=? WHERE account=? AND generation=? AND chat=? AND id=?", state, reason, c.Account, c.Generation, m.Chat, m.ID)
 		if err != nil {

@@ -3,10 +3,16 @@ local json=dofile('lua/vendor/json.lua')
 local paths=dofile('lua/core/paths.lua')
 local M={}
 function M.call(mcp,method,args,ctx)
- local directory=mcp.script_dir();if not directory then return {ok=false,error='web_adapter_not_installed'} end
+ local directory=mcp.script_dir()
+ if not directory then
+  local missing=mcp.scripts_missing and mcp.scripts_missing() or {ok=false,searched={}}
+  missing.error='web_adapter_not_installed'
+  missing.reason='mcp_scripts_not_found'
+  return missing
+ end
  local script=host.getenv('WA_WEB_ADAPTER_SCRIPT') or directory..'/mcp-web.mjs'
  local binding={cache_dir=paths.cache()..'/web/'..host.sha256(tostring(ctx.user_id or 'master')..'\0'..tostring(ctx.session_id or ''))}
- local input={action='call',persistent_read=true,read_tools={'read','search'},server={transport='stdio',program=host.getenv('WA_NODE') or 'node',args={script,'--binding-json',json.encode(binding)},timeout_seconds=30},tool=method}
+ local input={action='call',persistent_read=true,read_tools={'read','search'},server={transport='stdio',program=mcp.node_program and mcp.node_program() or host.getenv('WA_NODE') or 'node',args={script,'--binding-json',json.encode(binding)},timeout_seconds=30},tool=method}
  input.arguments_json=ctx.tool_arguments_json or (next(args)==nil and '{}' or json.encode(args))
  local answer=mcp.invoke(input,ctx)
  if answer.outcome=='unknown' then return mcp.project(answer) end

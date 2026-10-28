@@ -476,6 +476,27 @@ func TestReleaseHoldPreservesBlockedEvidenceAndProcessesNewAudio(t *testing.T) {
 	}
 }
 
+// A chat hold only annotates audio that is otherwise transcribable, and it never
+// overrides a fence the SDK proved for one exact message ID.
+func TestHoldDoesNotRescueUnprocessableOrFencedAudio(t *testing.T) {
+	j := fixture(t)
+	activate(t, j)
+	if _, err := j.db.Exec("INSERT INTO chat_holds VALUES(?,?,?,?)", "100@s.whatsapp.net", 1, "200@s.whatsapp.net", "unproven_mutation_chat_hold"); err != nil {
+		t.Fatal(err)
+	}
+	j.ingest(audio("future", false, time.Now().Unix()+3600))
+	if count(t, j, "SELECT count(*) FROM audio WHERE id='future' AND state='unsupported' AND reason='future_timestamp_untrusted'") != 1 {
+		t.Fatal("a chat hold made an untrusted timestamp transcribable")
+	}
+	if _, err := j.db.Exec("INSERT INTO source_blocks VALUES(?,?,?,?,?)", "100@s.whatsapp.net", 1, "200@s.whatsapp.net", "deleted", "verified_source_revoke"); err != nil {
+		t.Fatal(err)
+	}
+	j.ingest(audio("deleted", false, 130))
+	if count(t, j, "SELECT count(*) FROM audio WHERE id='deleted' AND state='blocked_source'") != 1 {
+		t.Fatal("proven source fence was bypassed by the chat hold")
+	}
+}
+
 // The same person can appear under a phone-number JID and a LID. The journal
 // already records the alternate on each incoming message; a direct read must use
 // that evidence to keep the person's messages together, and must still respect a
@@ -513,5 +534,52 @@ func TestReadSnapshotUnionsTheSameDirectContactAcrossItsAlternateID(t *testing.T
 	}
 	if got := narrow["messages"].([]Message); len(got) != 1 || got[0].Body != "old" {
 		t.Fatalf("narrow scope widened to the unapproved alternate: %+v", got)
+	}
+}
+
+// An unproven chat hold must not make a screenshot unreadable, and the offline
+// reindex must re-queue history without ever overriding a proven per-ID fence.
+func TestImageIndexingSurvivesAHoldAndReindexRespectsProvenFences(t *testing.T) {
+	j := fixture(t)
+	activate(t, j)
+	if _, err := j.db.Exec("INSERT INTO chat_holds VALUES(?,?,?,?)", "100@s.whatsapp.net", 1, "200@s.whatsapp.net", "unproven_mutation_chat_hold"); err != nil {
+		t.Fatal(err)
+	}
+	image := Message{ID: "image-1", Chat: "200@s.whatsapp.net", Sender: "200@s.whatsapp.net", Sent: 130, MediaKind: "image", Raw: []byte("fixture image")}
+	if err := j.ingest(image); err != nil {
+		t.Fatal(err)
+	}
+	if count(t, j, "SELECT count(*) FROM messages WHERE id='image-1' AND media_state='pending' AND media_reason='source_hold_index_only'") != 1 {
+		t.Fatal("held image was not queued for indexing")
+	}
+	c, _ := j.Config()
+	if _, err := j.db.Exec("INSERT INTO source_blocks VALUES(?,?,?,?,?)", c.Account, c.Generation, "200@s.whatsapp.net", "deleted-image", "verified_source_revoke"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := j.db.Exec("UPDATE messages SET media_state='blocked_source',media_reason='source_mutation_or_chat_hold' WHERE id='image-1'"); err != nil {
+		t.Fatal(err)
+	}
+	j.ingest(Message{ID: "deleted-image", Chat: "200@s.whatsapp.net", Sender: "200@s.whatsapp.net", Sent: 130, MediaKind: "image", Raw: []byte("fixture image")})
+	if count(t, j, "SELECT count(*) FROM messages WHERE id='deleted-image' AND media_state='blocked_source'") != 1 {
+		t.Fatal("proven fence did not block the deleted image")
+	}
+	rederived, err := j.rederiveHeldSources(c, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rederived["media"] != 1 {
+		t.Fatalf("reindex touched the wrong media rows: %v", rederived)
+	}
+	if count(t, j, "SELECT count(*) FROM messages WHERE id='image-1' AND media_state='pending' AND media_reason='source_hold_index_only'") != 1 {
+		t.Fatal("reindex did not re-queue the held image")
+	}
+	if count(t, j, "SELECT count(*) FROM messages WHERE id='deleted-image' AND media_state='blocked_source'") != 1 {
+		t.Fatal("reindex overrode a proven per-message fence")
+	}
+	if count(t, j, "SELECT count(*) FROM events WHERE kind='hold_rederive'") != 1 {
+		t.Fatal("reindex was not recorded")
+	}
+	if count(t, j, "SELECT count(*) FROM chat_holds") != 1 {
+		t.Fatal("reindex released the hold instead of deriving under it")
 	}
 }

@@ -13,7 +13,7 @@ export function serveMCP({name,version='1',tools,call}){
    if(initialized){error(message.id,-32600,'Already initialized');return;}
    const protocol=message.params?.protocolVersion;
    if(typeof protocol!=='string'||!/^\d{4}-\d{2}-\d{2}$/.test(protocol)){error(message.id,-32602,'Unsupported protocol');return;}
-   const selected=['2025-11-25','2025-06-18','2024-11-05'].includes(protocol)?protocol:'2025-11-25';
+   const selected=['2025-11-25','2025-06-18','2025-03-26','2024-11-05'].includes(protocol)?protocol:'2025-11-25';
    initialized=true;send({jsonrpc:'2.0',id:message.id,result:{protocolVersion:selected,capabilities:{tools:{}},serverInfo:{name,version}}});return;
   }
   if(message.method==='ping'){send({jsonrpc:'2.0',id:message.id,result:{}});return;}

@@ -34,6 +34,18 @@ func (f *operatorFake) ResolveOperator(_ context.Context, chat string) (string, 
 	}
 	return chat, chat, nil
 }
+
+// operatorFakeGroup is the synthetic participant list the fake proves mentions
+// against: 200 is present with the protocol identity 999@lid, 777 only as a
+// phone number. No real group, member or phone number appears here.
+var operatorFakeGroup = []types.GroupParticipant{
+	{JID: types.NewJID("999", types.HiddenUserServer), PhoneNumber: types.NewJID("200", types.DefaultUserServer), LID: types.NewJID("999", types.HiddenUserServer)},
+	{JID: types.NewJID("777", types.DefaultUserServer), PhoneNumber: types.NewJID("777", types.DefaultUserServer)},
+}
+
+func (f *operatorFake) ResolveMentions(_ context.Context, chat string, requested []string) ([]operatorMention, error) {
+	return operatorMentionsFromGroup(chat, operatorFakeGroup, requested)
+}
 func (f *operatorFake) SendOperator(_ context.Context, i operatorIntent) (string, error) {
 	f.calls.Add(1)
 	if f.entered != nil {

@@ -16,6 +16,16 @@ CPU/int8, greedy (beam 1)/VAD once, at service start. Model cache provisioning i
 is offline/local-files-only with NO hosted fallback. Missing cache/media, unsupported
 view-once/ephemeral/large audio and no-speech remain visible.
 
+A hold on a whole chat (`chat_holds`: an unproven mutation or an owner clear) gates
+**posting, not the local derive**. Audio arriving in a held chat is transcribed and
+retained with state `transcribed` and reason `source_hold_transcription_only`; the
+outbox is not written, `Ready`/`Send`/admission still refuse, and releasing the hold
+neither rewrites the retained transcript nor replays a posting for it. A chat hold
+used to leave the audio in `blocked_source` forever, so one unproven mutation made
+every later voice note in that chat unreadable. A **proven per-message fence** is
+different and stays absolute: `source_blocks` (a revoke/edit/delete the SDK names for
+that exact ID) stops the audio before transcription, and it is never replayed.
+
 Product default: **EN (`en`)**. This operator must explicitly persist **PT (`pt`)**
 per account (`wa-whatsapp init ... --language pt`, or stop service then
 `wa-whatsapp language --state <private-path> --language pt`). Status exposes the setting.

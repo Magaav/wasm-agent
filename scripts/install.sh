@@ -162,6 +162,195 @@ else
   warn "scripts/upgrade.sh was not installed - the sentinel can restart but not upgrade until it is"
 fi
 
+# The MCP runtime: `lua/core/mcp.lua` and `lua/core/web.lua` spawn these Node scripts for every
+# `web_search`/`web_read` call and for the WhatsApp connector. `deploy.sh` ships them when it upgrades a
+# running install; a *fresh* install shipped only `upgrade.sh`, so on a brand-new node every web tool
+# answered `web_adapter_not_installed` and the connector answered `mcp_script_directory_unbound`. The Lua
+# core is compiled into the binary - these files are not, and nothing put them on disk.
+#
+# Two destinations, on purpose. `<install>/scripts` is where `WA_INSTALL_DIR` points when the sentinel
+# starts the service; `<home>/.wasm-agent/scripts` is the node's own data directory, the one path
+# `host.paths()` always reports with no environment variable and no install layout involved. A node
+# started by hand, or a node in a brand-new cluster, therefore finds the runtime too.
+if [ "$HAVE_LIB" = "1" ]; then
+  MCP_DATA_DIR="$(wa_config_dir)"
+else
+  MCP_DATA_DIR="${WASM_AGENT_HOME:-$HOME}/.wasm-agent"
+fi
+MCP_RUNTIME="mcp-client.mjs mcp-client-core.mjs mcp-server-core.mjs mcp-session.mjs mcp-web.mjs mcp-whatsapp.mjs mcp-mail.mjs web-core.mjs web-http-outcomes.mjs"
+MCP_MISSING=""
+for MCP_TARGET in "$SCRIPTS_DIR" "$MCP_DATA_DIR/scripts"; do
+  mkdir -p "$MCP_TARGET" || { MCP_MISSING="$MCP_MISSING $MCP_TARGET"; continue; }
+  for MCP_FILE in $MCP_RUNTIME; do
+    if [ -n "$ROOT" ] && [ -f "$ROOT/scripts/$MCP_FILE" ]; then
+      if cp -f "$ROOT/scripts/$MCP_FILE" "$MCP_TARGET/$MCP_FILE"; then continue; fi
+    elif command -v curl >/dev/null 2>&1; then
+      if curl -fsSL "https://raw.githubusercontent.com/Magaav/wasm-agent/main/scripts/$MCP_FILE" \
+        -o "$MCP_TARGET/$MCP_FILE" 2>/dev/null; then continue; fi
+    fi
+    MCP_MISSING="$MCP_MISSING $MCP_TARGET/$MCP_FILE"
+  done
+done
+if [ -z "$MCP_MISSING" ]; then
+  ok "MCP runtime: mcp-web.mjs, mcp-whatsapp.mjs and their imports"
+else
+  warn "MCP runtime incomplete (missing:$MCP_MISSING) - web_search, web_read and the WhatsApp connector refuse until it is installed"
+fi
+
+# Node is the runtime those scripts need. Shipping the scripts without it is the same half-fix one level
+# down: the Lua core is in the binary, the `.mjs` files are on disk, and both are inert if nothing can
+# execute them, which is what a device with no Node on its PATH produced.
+#
+# Pinned, not "latest": an installer that silently changes a runtime under a working node is a worse
+# surprise than an old one. The build is verified against the checksums Node publishes for that release,
+# extracted beside the binary, and named in `<config>/env` as WA_NODE - the file the host reads at startup
+# - so the node's tools never depend on the PATH a service happened to inherit.
+NODE_VERSION="24.22.1"
+NODE_MIN_MAJOR="18"
+NODE_BIN=""
+node_major() { "$1" --version 2>/dev/null | sed 's/^v//' | cut -d. -f1; }
+node_sha256() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'; else shasum -a 256 "$1" | awk '{print $1}'; fi; }
+node_platform() {
+  node_os="$(uname -s 2>/dev/null)"; node_arch="$(uname -m 2>/dev/null)"
+  case "$node_os" in Linux) node_os=linux ;; Darwin) node_os=darwin ;; *) return 1 ;; esac
+  case "$node_arch" in x86_64|amd64) node_arch=x64 ;; arm64|aarch64) node_arch=arm64 ;; *) return 1 ;; esac
+  printf '%s-%s' "$node_os" "$node_arch"
+}
+ensure_node() {
+  if [ -n "${WA_NODE:-}" ] && [ -x "${WA_NODE}" ]; then
+    NODE_BIN="$WA_NODE"; ok "node: $NODE_BIN (WA_NODE)"
+  elif [ -x "$DIR/node/bin/node" ]; then
+    # Re-running the installer must not re-download a runtime that is already there and working.
+    NODE_BIN="$DIR/node/bin/node"; ok "node: $NODE_BIN ($("$NODE_BIN" --version 2>/dev/null), already installed)"
+  else
+    node_existing="$(command -v node 2>/dev/null || true)"
+    node_existing_major=""
+    if [ -n "$node_existing" ]; then node_existing_major="$(node_major "$node_existing")"; fi
+    if [ -n "$node_existing" ] && [ -n "$node_existing_major" ] && [ "$node_existing_major" -ge "$NODE_MIN_MAJOR" ]; then
+      NODE_BIN="$node_existing"
+      ok "node: $NODE_BIN ($("$NODE_BIN" --version 2>/dev/null))"
+    else
+      node_pair="$(node_platform)" || {
+        warn "node: no pinned build for this platform - install Node $NODE_MIN_MAJOR+ and set WA_NODE"
+        return 1
+      }
+      node_archive="node-v$NODE_VERSION-$node_pair.tar.gz"
+      node_tmp="$(mktemp -d)"
+      if command -v curl >/dev/null 2>&1 \
+        && curl -fsSL "https://nodejs.org/dist/v$NODE_VERSION/$node_archive" -o "$node_tmp/$node_archive" 2>/dev/null \
+        && curl -fsSL "https://nodejs.org/dist/v$NODE_VERSION/SHASUMS256.txt" -o "$node_tmp/SHASUMS256.txt" 2>/dev/null; then
+        node_expected="$(awk -v f="$node_archive" '$2==f {print $1}' "$node_tmp/SHASUMS256.txt")"
+        node_actual="$(node_sha256 "$node_tmp/$node_archive")"
+        if [ -z "$node_expected" ] || [ "$node_expected" != "$node_actual" ]; then
+          warn "node: checksum mismatch for $node_archive - refusing to install an unverified runtime"
+          rm -rf "$node_tmp"; return 1
+        fi
+        rm -rf "$DIR/node"; mkdir -p "$DIR/node"
+        if tar -xzf "$node_tmp/$node_archive" -C "$DIR/node" --strip-components=1 2>/dev/null; then
+          NODE_BIN="$DIR/node/bin/node"
+          ok "node: $NODE_BIN (v$NODE_VERSION, checksum verified)"
+        else
+          warn "node: could not extract $node_archive"; rm -rf "$node_tmp"; return 1
+        fi
+      else
+        warn "node: could not download v$NODE_VERSION from nodejs.org - install Node $NODE_MIN_MAJOR+ and set WA_NODE"
+        rm -rf "$node_tmp"; return 1
+      fi
+      rm -rf "$node_tmp"
+    fi
+  fi
+  if [ "$HAVE_LIB" = "1" ]; then NODE_ENV_FILE="$(wa_config_dir)/env"; else NODE_ENV_FILE="${WASM_AGENT_HOME:-$HOME}/.wasm-agent/env"; fi
+  if [ -f "$NODE_ENV_FILE" ] && grep -q '^WA_NODE=' "$NODE_ENV_FILE" 2>/dev/null; then
+    node_recorded="$(sed -n 's/^WA_NODE=//p' "$NODE_ENV_FILE" | tail -1)"
+    if [ ! -x "$node_recorded" ]; then
+      warn "node: $NODE_ENV_FILE names WA_NODE=$node_recorded, which is not executable - fix or remove that line"
+    fi
+  else
+    mkdir -p "$(dirname "$NODE_ENV_FILE")"
+    printf 'WA_NODE=%s\n' "$NODE_BIN" >> "$NODE_ENV_FILE"
+    ok "node: WA_NODE=$NODE_BIN in $NODE_ENV_FILE"
+  fi
+  if [ -f "$SCRIPTS_DIR/mcp-web.mjs" ] && "$NODE_BIN" --check "$SCRIPTS_DIR/mcp-web.mjs" 2>/dev/null; then
+    ok "node: parses the MCP runtime"
+  else
+    warn "node: $NODE_BIN cannot parse $SCRIPTS_DIR/mcp-web.mjs - web_search, web_read and the WhatsApp connector will refuse"
+  fi
+}
+ensure_node || true
+
+# mail-mcp is the server that speaks Gmail over IMAP/SMTP. It is a Rust binary, so it ships as a pinned,
+# checksum-verified release asset rather than needing a toolchain on the device - except on a platform
+# upstream publishes nothing for (linux aarch64 today), where this says so instead of installing a binary
+# for the wrong architecture.
+MAIL_MCP_VERSION="0.6.1"
+MAIL_MCP_BIN=""
+mail_mcp_extract() { # <archive> <dir> -> 0 when the tree was unpacked
+  archive="$1"; into="$2"
+  if tar -xJf "$archive" -C "$into" 2>/dev/null; then return 0; fi
+  if command -v xz >/dev/null 2>&1 && xz -dc "$archive" 2>/dev/null | tar -xf - -C "$into" 2>/dev/null; then return 0; fi
+  if command -v python3 >/dev/null 2>&1 \
+    && python3 -c 'import lzma,sys;sys.stdout.buffer.write(lzma.open(sys.argv[1]).read())' "$archive" 2>/dev/null \
+    | tar -xf - -C "$into" 2>/dev/null; then return 0; fi
+  return 1
+}
+ensure_mail_mcp() {
+  exe="$DIR/bin/mail-mcp"
+  if [ -n "${WA_MAIL_MCP_BIN:-}" ] && [ -x "${WA_MAIL_MCP_BIN}" ]; then
+    MAIL_MCP_BIN="$WA_MAIL_MCP_BIN"; ok "mail-mcp: $MAIL_MCP_BIN (WA_MAIL_MCP_BIN)"; return 0
+  fi
+  if [ -x "$exe" ] && "$exe" --help >/dev/null 2>&1; then
+    MAIL_MCP_BIN="$exe"; ok "mail-mcp: $exe (already installed)"; return 0
+  fi
+  mail_pair="$(node_platform)" || {
+    warn "mail-mcp: cannot tell this platform's architecture - install it by hand and set WA_MAIL_MCP_BIN"
+    return 1
+  }
+  case "$mail_pair" in
+    linux-x64) mail_asset="mail-mcp-x86_64-unknown-linux-gnu.tar.xz" ;;
+    linux-arm64) warn "mail-mcp: upstream publishes no linux aarch64 build (v$MAIL_MCP_VERSION ships x86_64 Linux, x86_64/aarch64 macOS, x86_64 Windows) - build it with cargo on this host, or run mail on an x86_64 node, then set WA_MAIL_MCP_BIN"; return 1 ;;
+    darwin-x64) mail_asset="mail-mcp-x86_64-apple-darwin.tar.xz" ;;
+    darwin-arm64) mail_asset="mail-mcp-aarch64-apple-darwin.tar.xz" ;;
+    *) warn "mail-mcp: no release asset for $mail_pair - install it by hand and set WA_MAIL_MCP_BIN"; return 1 ;;
+  esac
+  mail_base="https://github.com/tecnologicachile/mail-mcp/releases/download/v$MAIL_MCP_VERSION"
+  mail_tmp="$(mktemp -d)"
+  if ! curl -fsSL "$mail_base/$mail_asset" -o "$mail_tmp/$mail_asset" 2>/dev/null \
+    || ! curl -fsSL "$mail_base/$mail_asset.sha256" -o "$mail_tmp/$mail_asset.sha256" 2>/dev/null; then
+    warn "mail-mcp: could not download v$MAIL_MCP_VERSION from GitHub"; rm -rf "$mail_tmp"; return 1
+  fi
+  mail_expected="$(awk '{print $1}' "$mail_tmp/$mail_asset.sha256")"
+  mail_actual="$(node_sha256 "$mail_tmp/$mail_asset")"
+  if [ -z "$mail_expected" ] || [ "$mail_expected" != "$mail_actual" ]; then
+    warn "mail-mcp: checksum mismatch for $mail_asset - refusing to install an unverified binary"
+    rm -rf "$mail_tmp"; return 1
+  fi
+  if ! mail_mcp_extract "$mail_tmp/$mail_asset" "$mail_tmp"; then
+    warn "mail-mcp: cannot decompress $mail_asset - install xz-utils (or python3) and re-run the installer"
+    rm -rf "$mail_tmp"; return 1
+  fi
+  mail_found="$(find "$mail_tmp" -type f -name mail-mcp | head -1)"
+  if [ -z "$mail_found" ]; then
+    warn "mail-mcp: $mail_asset did not contain a mail-mcp executable"; rm -rf "$mail_tmp"; return 1
+  fi
+  mkdir -p "$DIR/bin"
+  cp -f "$mail_found" "$exe" && chmod 755 "$exe"
+  rm -rf "$mail_tmp"
+  if ! "$exe" --help >/dev/null 2>&1; then
+    warn "mail-mcp: $exe does not run on this machine - wrong architecture?"; return 1
+  fi
+  MAIL_MCP_BIN="$exe"
+  ok "mail-mcp: $exe (v$MAIL_MCP_VERSION, checksum verified)"
+  if [ "$HAVE_LIB" = "1" ]; then MAIL_ENV_FILE="$(wa_config_dir)/env"; else MAIL_ENV_FILE="${WASM_AGENT_HOME:-$HOME}/.wasm-agent/env"; fi
+  if [ -f "$MAIL_ENV_FILE" ] && grep -q '^MAIL_MCP_BIN=' "$MAIL_ENV_FILE" 2>/dev/null; then
+    :
+  else
+    mkdir -p "$(dirname "$MAIL_ENV_FILE")"
+    printf 'MAIL_MCP_BIN=%s\n' "$MAIL_MCP_BIN" >> "$MAIL_ENV_FILE"
+    ok "mail-mcp: MAIL_MCP_BIN=$MAIL_MCP_BIN in $MAIL_ENV_FILE"
+  fi
+}
+ensure_mail_mcp || true
+
 # The skills the node needs to know how to update itself. Delivered as a skill rather than a
 # paragraph in AGENTS.md: only `name` and `description` enter the prompt, and the body loads when the
 # task matches, so the procedure costs nothing per turn and can be as long as it needs to be.

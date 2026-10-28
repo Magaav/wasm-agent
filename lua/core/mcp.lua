@@ -29,13 +29,73 @@ local function mutate(expected,change)
  if not ok then return fail(tostring(value)) end;return value
 end
 local function absolute(value)return type(value)=='string' and (value:sub(1,1)=='/' or value:match('^%a:[/\\]')) end
+-- Where the MCP runtime (`mcp-*.mjs`, `web-*.mjs`) lives on disk. The Lua core is embedded in the
+-- binary; these files are not. A node that cannot name their directory answers every MCP tool with
+-- `mcp_script_directory_unbound` (and `web_adapter_not_installed` from the web facade), which is what a
+-- fresh install did: the installer shipped `upgrade.sh` and nothing else.
+--
+-- Order: the explicit override, the checkout root used in development, the install directory, then the
+-- node's own data directory. The last one needs no environment variable and no install layout - the host
+-- always reports it - so a new node, or a node in a brand-new cluster, finds the runtime without being
+-- told where it is.
+local function script_candidates()
+ local list={}
+ local function add(dir)if type(dir)=='string' and dir~='' and absolute(dir) then list[#list+1]=dir end end
+ add(host.getenv('WA_MCP_SCRIPT_DIR'))
+ local root=host.getenv('WASM_AGENT_LUA_ROOT');if root and root~='' then add(root..'/scripts') end
+ local install=host.getenv('WA_INSTALL_DIR');if install and install~='' then add(install..'/scripts') end
+ local okdata,data=pcall(paths.data);if okdata and type(data)=='string' then add(data..'/scripts') end
+ if platform.os()=='windows' then local localapp=host.getenv('LOCALAPPDATA');if localapp then add(localapp..'/wasm-agent/scripts') end end
+ return list
+end
+function M.script_candidates()return script_candidates() end
 function M.script_dir()
+ for _,dir in ipairs(script_candidates()) do
+  if host.read_file(dir..'/mcp-client.mjs') then return dir end
+ end
+ -- Nothing holds the runtime. An operator's explicit override is still returned, so the error that follows
+ -- names the directory they chose instead of a generic "not installed".
  local override=host.getenv('WA_MCP_SCRIPT_DIR');if override and override~='' then return override end
- local root=host.getenv('WASM_AGENT_LUA_ROOT');if root and root~='' then return root..'/scripts' end
- local install=host.getenv('WA_INSTALL_DIR');if install and install~='' then return install..'/scripts' end
- if platform.os()=='windows' then local localapp=host.getenv('LOCALAPPDATA');if localapp then return localapp..'/wasm-agent/scripts' end end
  return nil
 end
+-- The failure a missing runtime must produce: the code callers already check, plus what was searched and the
+-- one-line fix. Losing that detail is what made the original report look like a permission refusal.
+function M.scripts_missing()
+ return fail('mcp_scripts_not_found',{searched=script_candidates(),tool_call_issued=false,outcome='not_submitted',
+  fix='install the MCP runtime beside the node (scripts/install.sh does this) or set WA_MCP_SCRIPT_DIR'})
+end
+-- The Node program that runs the MCP runtime. An explicit `WA_NODE` wins; after that, the copy the
+-- installer provisions beside the node (`<install>/node`, `<data>/node`, `node.exe` on Windows), because a
+-- device whose PATH has no Node was a device where every MCP tool refused. `path_kind` is a stat, never a
+-- read: this must not load a hundred megabytes of binary into Lua to answer a path question.
+local function node_program()
+ local override=host.getenv('WA_NODE');if override and override~='' then return override end
+ local relative=platform.os()=='windows' and '/node/node.exe' or '/node/bin/node'
+ local bases={}
+ local install=host.getenv('WA_INSTALL_DIR');if install and install~='' then bases[#bases+1]=install end
+ local okdata,data=pcall(paths.data);if okdata and type(data)=='string' then bases[#bases+1]=data end
+ for _,base in ipairs(bases) do
+  local program=base..relative
+  if host.path_kind(program)=='file' then return program end
+ end
+ return 'node'
+end
+function M.node_program()return node_program() end
+-- The mail-mcp binary the installer provisions (`<install>/bin/mail-mcp`, `mail-mcp.exe` on Windows).
+-- `MAIL_MCP_BIN` wins, because that is what the installer records and what an operator overrides by hand.
+local function mail_program()
+ local override=host.getenv('MAIL_MCP_BIN');if override and override~='' then return override end
+ local relative=platform.os()=='windows' and '/bin/mail-mcp.exe' or '/bin/mail-mcp'
+ local bases={}
+ local install=host.getenv('WA_INSTALL_DIR');if install and install~='' then bases[#bases+1]=install end
+ local okdata,data=pcall(paths.data);if okdata and type(data)=='string' then bases[#bases+1]=data end
+ for _,base in ipairs(bases) do
+  local binary=base..relative
+  if host.path_kind(binary)=='file' then return binary end
+ end
+ return nil
+end
+function M.mail_program()return mail_program() end
 local function valid_id(id)return type(id)=='string' and #id<=24 and id:match('^[a-z][a-z0-9_-]*$') end
 local function dense(list,maximum)if type(list)~='table' or #list>maximum then return false end;for key,value in pairs(list)do if type(key)~='number' or key<1 or key>#list or key%1~=0 or type(value)~='string' then return false end end;return true end
 function M.validate(def)
@@ -85,13 +145,13 @@ function M.invoke(input,ctx)
   if not directory or not host.read_file(directory..'/mcp-session.mjs') then return fail('mcp_session_not_installed',{outcome='not_submitted',tool_call_issued=false}) end
   return read_sessions.invoke(input,ctx,directory)
  end
- local directory=M.script_dir();if not directory then return fail('mcp_script_directory_unbound',{tool_call_issued=false,outcome='not_submitted'}) end
+ local directory=M.script_dir();if not directory then local missing=M.scripts_missing();missing.error='mcp_script_directory_unbound';return missing end
  local client=directory..'/mcp-client.mjs';if not host.read_file(client)then return fail('mcp_client_not_installed',{tool_call_issued=false,outcome='not_submitted'}) end
  local request=paths.data()..'/mcp/requests/'..host.uuid()..'.json'
  input.result_file=request..'.result.json'
  if not host.write_file(request,json.encode(input))then return fail('mcp_request_not_written',{tool_call_issued=false,outcome='not_submitted'}) end
  local timeout=input.server.timeout_seconds or 30
- local start=decode(host.operation('start',json.encode({program=host.getenv('WA_NODE') or 'node',args={client,'--request-file',request},cwd=ctx.cwd or platform.cwd(),timeout_seconds=math.min(86400,timeout+3),owner=ctx.session_id or 'mcp-control'})))
+ local start=decode(host.operation('start',json.encode({program=node_program(),args={client,'--request-file',request},cwd=ctx.cwd or platform.cwd(),timeout_seconds=math.min(86400,timeout+3),owner=ctx.session_id or 'mcp-control'})))
  if not start or start.error or not start.operation_id then return fail('mcp_operation_not_started',{detail=start,tool_call_issued=false,outcome='not_submitted',request=request}) end
  local id=start.operation_id
  local settled=decode(host.operation('await',json.encode({id=id,wait_for='settled'})))
@@ -118,7 +178,7 @@ end
 function M.close_read_sessions()return read_sessions.close() end
 function M.default_whatsapp()
  local directory=M.script_dir() or '<installed scripts directory>'
- return {id='whatsapp',name='WhatsApp',transport='stdio',program=host.getenv('WA_NODE') or 'node',args={directory..'/mcp-whatsapp.mjs','--binding-json',json.encode({backend='linked_device',allowed_conversations=json.decode('[]')})},
+ return {id='whatsapp',name='WhatsApp',transport='stdio',program=node_program(),args={directory..'/mcp-whatsapp.mjs','--binding-json',json.encode({backend='linked_device',allowed_conversations=json.decode('[]')})},
   env={WA_MCP_WHATSAPP_ACCOUNT='WA_WHATSAPP_ACCOUNT',WA_MCP_WHATSAPP_GENERATION='WA_WHATSAPP_GENERATION',WA_MCP_WHATSAPP_URL='WA_WHATSAPP_CONNECTOR_URL',WA_MCP_WHATSAPP_TOKEN_FILE='WA_WHATSAPP_TOKEN_FILE'},
   timeout_seconds=60,tools={read_snapshot='read',lookup_self='read',inspect_chat='read'}}
 end
@@ -215,7 +275,7 @@ end
 function M.whatsapp(method,args,binding,ctx)
  local directory=M.script_dir();if not directory then return fail('mcp_script_directory_unbound') end
  binding=binding or {}
- local server={transport='stdio',program=host.getenv('WA_NODE') or 'node',args={directory..'/mcp-whatsapp.mjs','--binding-json',json.encode(binding)},timeout_seconds=120}
+ local server={transport='stdio',program=node_program(),args={directory..'/mcp-whatsapp.mjs','--binding-json',json.encode(binding)},timeout_seconds=120}
  local input={action='call',server=server,tool=method};if next(args or {})then input.arguments=args end
  local answer=M.invoke(input,ctx);local data=native_data(answer)
  if data and not answer.error then data.mcp_operation_id=answer.operation_id;return data end

@@ -674,6 +674,10 @@ local function node_capability(capability, args, caller)
   if capability == "set_role" then
     if not enrollment.managed() then return { error = "not_managed" } end
     return enrollment.set_role(args.role)
+  elseif capability == "access" then
+    -- Same-rank access handoff (see lua/core/access.lua). Definitions and approved tiers travel;
+    -- credential values never do, and a guest is refused on both ends.
+    return dofile("lua/core/access.lua").call(args, caller)
   elseif capability == "status" then
     if args.serving_identity_only then
       local identity,problem=provider.serving_identity(args.model,args.provider)
