@@ -45,23 +45,81 @@ pub fn manager() -> &'static Manager {
 }
 // The preserved draft used script files. A named refusal is the narrower safe route:
 // no script with changed $0 semantics or credential-bearing command artifact is executed.
-fn command_preflight(program: &str, flag: &str, command: &str) -> Result<(), String> {
-    let escaped = |s: &str| s.encode_utf16().map(|c| if c == 34 || c == 92 { 2 } else { 1 }).sum::<usize>();
-    if cfg!(windows) && escaped(program) + escaped(flag) + escaped(command) + 520 > 8192 {
-        return Err(format!("shell_command_too_long: {} bytes; command-line launch refused before execution; use write path=<session_worktree>/command.sh (or the session-owned scratch root named in allowed_writes), then bash on that exact path", command.len()));
-    }
-    Ok(())
+//
+// The inline bound is not a style rule. Git-Bash on Windows silently CUTS a `-c` string at
+// 8192 bytes: a 9000-byte command ran, did nothing and exited 0, so the refusal has to stay
+// below that. What changes here is that an over-long command is no longer refused - it is
+// staged to a private file and executed as `bash <file>`, the exact route the refusal used
+// to tell the caller to take by hand. Bytes are preserved verbatim, and the result says
+// `staged_script` so the one semantic difference ($0 is the script path, not "bash") is
+// visible rather than implied.
+const WINDOWS_INLINE_COMMAND_BUDGET: usize = 8192;
+// Still bounded: a staged script is a real file, not an unbounded dump.
+const STAGED_COMMAND_LIMIT: usize = 1 << 20;
+
+pub(crate) struct Launch {
+    pub program: String,
+    pub args: Vec<String>,
+    pub staged: Option<std::path::PathBuf>,
 }
-fn spec(
-    program: &str,
-    flag: &str,
-    command: &str,
-    cwd: &str,
-    seconds: u64,
-    owner: String,
-    promote: bool,
-) -> Spec {
-    configure_spec(Spec::command(program, vec![flag.into(), command.into()]), cwd, seconds, owner, promote)
+
+fn command_line_overflow(program: &str, flag: &str, command: &str) -> bool {
+    let escaped = |s: &str| s.encode_utf16().map(|c| if c == 34 || c == 92 { 2 } else { 1 }).sum::<usize>();
+    cfg!(windows) && escaped(program) + escaped(flag) + escaped(command) + 520 > WINDOWS_INLINE_COMMAND_BUDGET
+}
+
+fn commands_dir() -> std::path::PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    std::path::PathBuf::from(home).join(".wasm-agent/commands")
+}
+
+fn stage_command(command: &str) -> Result<std::path::PathBuf, String> {
+    stage_command_in(&commands_dir(), command)
+}
+
+fn stage_command_in(dir: &std::path::Path, command: &str) -> Result<std::path::PathBuf, String> {
+    use std::io::Write;
+    std::fs::create_dir_all(dir).map_err(|e| format!("shell_command_stage_failed: {e}"))?;
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let path = dir.join(format!("command-{}-{stamp}.sh", std::process::id()));
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&path).map_err(|e| format!("shell_command_stage_failed: {e}"))?;
+    file.write_all(command.as_bytes())
+        .map_err(|e| format!("shell_command_stage_failed: {e}"))?;
+    Ok(path)
+}
+
+// Inline when it fits; otherwise the same bytes run from a staged script file.
+fn command_launch(program: &str, flag: &str, command: &str) -> Result<Launch, String> {
+    if command.len() > STAGED_COMMAND_LIMIT {
+        return Err(format!(
+            "shell_command_too_long: {} bytes; a staged script is capped at {STAGED_COMMAND_LIMIT} bytes - write the script yourself and run it by path",
+            command.len()
+        ));
+    }
+    if !command_line_overflow(program, flag, command) {
+        return Ok(Launch { program: program.into(), args: vec![flag.into(), command.into()], staged: None });
+    }
+    let path = stage_command(command)?;
+    Ok(Launch { program: program.into(), args: vec![path.to_string_lossy().into_owned()], staged: Some(path) })
+}
+fn spec(launch: &Launch, cwd: &str, seconds: u64, owner: String, promote: bool) -> Spec {
+    configure_spec(
+        Spec::command(launch.program.clone(), launch.args.clone()),
+        cwd,
+        seconds,
+        owner,
+        promote,
+    )
 }
 fn configure_spec(mut spec: Spec, cwd: &str, seconds: u64, owner: String, promote: bool) -> Spec {
     spec.cwd = cwd.into();
@@ -110,12 +168,11 @@ pub fn foreground(
     seconds: u64,
     context: &Value,
 ) -> Result<Value, String> {
-    command_preflight(program, flag, command)?;
+    let launch = command_launch(program, flag, command)?;
+    let staged = launch.staged.clone();
     let id = manager()
         .start(launch_context(spec(
-            program,
-            flag,
-            command,
+            &launch,
             cwd,
             seconds,
             format!("worker:{}", crate::serve::node_thread_id()),
@@ -131,6 +188,13 @@ pub fn foreground(
                 let stderr = state["stderr"].as_str().unwrap_or("");
                 state["stderr"] = json!(format!("{stderr}\n{}", deadline_note(seconds, &state)));
             }
+            if let Some(path) = staged.as_ref() {
+                state["staged_script"] = json!(path.to_string_lossy());
+                state["staged_script_note"] = json!("the command was too long for the Windows command line and ran from this staged file; $0 is the file path");
+                // Settled means the shell has finished, so the staged bytes can go. A failure
+                // here is not the caller's problem: the file stays under ~/.wasm-agent/commands.
+                let _ = std::fs::remove_file(path);
+            }
             return Ok(state);
         }
         // The shell exited leaving live descendants, so they were adopted rather than
@@ -142,6 +206,11 @@ pub fn foreground(
                     >= wa_operation::COMMAND_OUTPUT_IDLE_MS)
         {
             state["foreground_return_elapsed_ms"] = state["elapsed_ms"].clone();
+            if let Some(path) = staged.as_ref() {
+                // Still running: the shell may read this file again, so it stays until settled.
+                state["staged_script"] = json!(path.to_string_lossy());
+                state["staged_script_note"] = json!("the command was too long for the Windows command line and ran from this staged file; $0 is the file path, and the file is kept while the operation runs");
+            }
             return Ok(command_result(manager(), &id, state));
         }
         if state["overdue"] == true {
@@ -182,6 +251,7 @@ pub fn control(action: &str, args: &Value, shell: &(String, String)) -> Result<V
                 .as_u64()
                 .unwrap_or(crate::host::exec_timeout_seconds());
             let cwd=args["cwd"].as_str().unwrap_or("");
+            let mut staged_script: Option<std::path::PathBuf> = None;
             let launch=if let Some(program)=args["program"].as_str() {
                 if args.get("command").is_some() {return Err("program_and_command_are_exclusive".into());}
                 let name=if cfg!(windows) && !program.ends_with(".exe") {format!("{program}.exe")} else {program.to_string()};
@@ -198,11 +268,10 @@ pub fn control(action: &str, args: &Value, shell: &(String, String)) -> Result<V
                 configure_spec(Spec::command(executable,argv),cwd,seconds,owner,false)
             } else {
                 let command=args["command"].as_str().filter(|s|!s.is_empty()).ok_or("command_required")?;
-                command_preflight(&shell.0, &shell.1, command)?;
+                let prepared = command_launch(&shell.0, &shell.1, command)?;
+                staged_script = prepared.staged.clone();
                 spec(
-                    &shell.0,
-                    &shell.1,
-                    command,
+                    &prepared,
                     cwd,
                     seconds,
                     owner,
@@ -214,6 +283,10 @@ pub fn control(action: &str, args: &Value, shell: &(String, String)) -> Result<V
                 .map_err(|e| e.to_string())?;
             let state = manager().snapshot(&id).map_err(|e| e.to_string())?;
             let mut receipt = json!({"operation_id":id,"state":"accepted","settled":false,"note":"Launch receipt, not execution success. Observe this operation; do not launch it again. Keep background commands in the foreground of this shell (or use wait)."});
+            if let Some(path) = staged_script.as_ref() {
+                receipt["staged_script"] = json!(path.to_string_lossy());
+                receipt["staged_script_note"] = json!("the command was too long for the Windows command line and ran from this staged file; $0 is the file path, the script is not removed while the operation may still read it");
+            }
             for key in ["cwd", "cwd_requested", "cwd_source", "effective_cwd", "cwd_substitution", "cwd_note"] {
                 if let Some(value) = state.get(key) { receipt[key] = value.clone(); }
             }
@@ -381,5 +454,69 @@ mod deadline_note_tests {
             "the command did not finish within 4s; its operation was terminated after 5000ms \
              (no phase breakdown was recorded)."
         );
+    }
+}
+
+#[cfg(test)]
+mod command_launch_tests {
+    use super::{
+        command_launch, command_line_overflow, stage_command_in, STAGED_COMMAND_LIMIT,
+        WINDOWS_INLINE_COMMAND_BUDGET,
+    };
+
+    #[test]
+    fn short_commands_stay_inline() {
+        let launch = command_launch("bash", "-c", "echo short").expect("short command launches");
+        assert!(launch.staged.is_none());
+        assert_eq!(launch.args, vec!["-c".to_string(), "echo short".to_string()]);
+    }
+
+    // The measured trap: Git-Bash cuts a `-c` string at 8192 bytes, so a 10 KB command
+    // must run from a staged file instead of being put on the command line.
+    #[test]
+    fn a_multi_kb_command_is_staged_instead_of_refused() {
+        let command = format!("#{}\necho REACHED\n", "x".repeat(10_000));
+        assert_eq!(command_line_overflow("bash", "-c", &command), cfg!(windows));
+        let launch = command_launch("bash", "-c", &command).expect("a 10 KB command must launch");
+        if cfg!(windows) {
+            let path = launch.staged.as_ref().expect("over-long command must be staged");
+            assert_eq!(std::fs::read_to_string(path).unwrap(), command, "staged bytes are exact");
+            assert_eq!(launch.args, vec![path.to_string_lossy().into_owned()], "bash <file>");
+            let _ = std::fs::remove_file(path);
+        } else {
+            assert!(launch.staged.is_none(), "no command-line limit to work around");
+        }
+    }
+
+    #[test]
+    fn staged_bytes_are_exact_and_private() {
+        let dir = std::env::temp_dir().join(format!("wa-command-stage-{}", std::process::id()));
+        let body = "echo 'aspas \" e $VAR'\r\necho segunda linha\n";
+        let path = stage_command_in(&dir, body).expect("stage");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), body);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        }
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn absurd_scripts_are_still_refused_by_name() {
+        let command = "x".repeat(STAGED_COMMAND_LIMIT + 1);
+        let error = match command_launch("bash", "-c", &command) {
+            Ok(_) => panic!("a 1 MiB command must refuse"),
+            Err(error) => error,
+        };
+        assert!(error.contains("shell_command_too_long"), "{error}");
+    }
+
+    // `\` and `"` escape to two units, so a quote-heavy command reaches the bound sooner.
+    #[test]
+    fn counts_quoting_overhead_towards_the_bound() {
+        let command = "\"".repeat(WINDOWS_INLINE_COMMAND_BUDGET / 2 + 10);
+        assert_eq!(command_line_overflow("bash", "-c", &command), cfg!(windows));
     }
 }
