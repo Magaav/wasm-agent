@@ -177,7 +177,7 @@ if [ "$HAVE_LIB" = "1" ]; then
 else
   MCP_DATA_DIR="${WASM_AGENT_HOME:-$HOME}/.wasm-agent"
 fi
-MCP_RUNTIME="mcp-client.mjs mcp-client-core.mjs mcp-server-core.mjs mcp-session.mjs mcp-web.mjs mcp-whatsapp.mjs web-core.mjs web-http-outcomes.mjs"
+MCP_RUNTIME="mcp-client.mjs mcp-client-core.mjs mcp-server-core.mjs mcp-session.mjs mcp-web.mjs mcp-whatsapp.mjs mcp-mail.mjs web-core.mjs web-http-outcomes.mjs"
 MCP_MISSING=""
 for MCP_TARGET in "$SCRIPTS_DIR" "$MCP_DATA_DIR/scripts"; do
   mkdir -p "$MCP_TARGET" || { MCP_MISSING="$MCP_MISSING $MCP_TARGET"; continue; }

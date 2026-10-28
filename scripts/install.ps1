@@ -272,7 +272,7 @@ if ($haveSentinel) {
 # always reports, with no environment variable and no install layout involved.
 $mcpRuntime = @(
   "mcp-client.mjs", "mcp-client-core.mjs", "mcp-server-core.mjs", "mcp-session.mjs",
-  "mcp-web.mjs", "mcp-whatsapp.mjs", "web-core.mjs", "web-http-outcomes.mjs"
+  "mcp-web.mjs", "mcp-whatsapp.mjs", "mcp-mail.mjs", "web-core.mjs", "web-http-outcomes.mjs"
 )
 $mcpMissing = @()
 foreach ($mcpTarget in @((Join-Path $nodeDir "scripts"), (Join-Path $waHome "scripts"))) {
