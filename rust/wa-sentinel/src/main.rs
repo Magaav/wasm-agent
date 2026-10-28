@@ -1674,7 +1674,24 @@ fn resolve_script(file: &str, override_env: &str) -> Result<PathBuf> {
 /// The deploy script: the one installer path. It installs the node, the UI and the **sentinel**, so a
 /// sentinel fix can be installed by a request rather than only by a human at a shell.
 fn resolve_deploy_script() -> Result<PathBuf> {
+    // The tree being deployed carries the installer that matches it. The copy beside the binary is the
+    // PREVIOUS deploy's, so a fix to deploy.sh could only arrive through a deploy that ran without it: on
+    // openclaw (28/10) the old copy's final check failed every deploy that would have shipped the new one.
+    if let Some(tree) = runtime_tree() {
+        let script = tree.join("scripts").join("deploy.sh");
+        if script.exists() {
+            return Ok(script);
+        }
+    }
     resolve_script("deploy.sh", "WA_SENTINEL_DEPLOY")
+}
+
+/// The runtime worktree a deploy recorded (`<install>/runtime-worktree.txt`), when it still exists.
+fn runtime_tree() -> Option<PathBuf> {
+    let install = std::env::current_exe().ok()?.parent()?.to_path_buf();
+    let text = std::fs::read_to_string(install.join("runtime-worktree.txt")).ok()?;
+    let path = PathBuf::from(text.trim());
+    (path.is_dir() && path.join(".git").exists()).then_some(path)
 }
 
 /// Verbs that change what the node is running. One at a time: two of these interleaved would fight over
