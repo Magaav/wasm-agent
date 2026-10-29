@@ -278,7 +278,7 @@ if curl -fsS -m 3 "http://127.0.0.1:$port/health" >/dev/null 2>&1; then
 elif [ "$service" = 1 ]; then
   say "node not answering yet - check: $prefix/wa-sentinel status ; journalctl --user -u wa-sentinel"
 else
-  say "installed (no service): start it with  WA_INSTALL_DIR=$prefix WASM_AGENT_PORT=$port $prefix/wa-sentinel start"
+  say "installed (no service): start it with  WA_SENTINEL_AUTOSTART=1 WA_INSTALL_DIR=$prefix WASM_AGENT_PORT=$port WASM_AGENT_CLIENT_PORT=$cport $prefix/wa-sentinel start"
 fi
 node_id=$("$prefix/wa" node 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin).get("node_id",""))' 2>/dev/null || true)
 cat <<NEXT
