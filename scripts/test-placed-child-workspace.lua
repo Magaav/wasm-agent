@@ -222,6 +222,14 @@ if scenario == "prepared" then
   local never = subagents.control({ action = "resolve", idempotency_key = "never-used-key" }, destination_ctx)
   ok(never.found == false and never.unadmitted == true,
     "a key with no run there is reported as not admitted: " .. json.encode(never))
+  -- Children started above point at a dead model endpoint and settle only after the provider retries
+  -- (1, 2, 4 s since 7944a4d1); a one-slot placement admits only once they have (v0.1.0-alpha.12 gate,
+  -- 29/10: node_full). Bounded: 30 s, then the check below reports whatever is still live.
+  for _ = 1, 120 do
+    local usage = (json.decode(host.subagent("capacity", "{}")) or {}).usage or {}
+    if (tonumber(usage.active) or 0) == 0 then break end
+    host.sleep(250)
+  end
   local admitted = attempts_with("placed-resolve", 1)
   ok(admitted.subagent_id, "a keyed start is admitted: " .. json.encode(admitted))
   local found = subagents.control({ action = "resolve", idempotency_key = "placed-resolve" }, destination_ctx)
