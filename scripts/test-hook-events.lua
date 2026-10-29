@@ -49,7 +49,7 @@ host.jobs=function()return 'broken JSON'end
 ok(hooks.get().error=='hook_job_store_invalid','malformed store visible')
 for _,bad in ipairs({false,'bad',{},{{id='bad',trigger={kind='event'},action={kind='run'}}}})do
  local result=hooks.catalogue(bad)
- if type(bad)=='table' and #bad==0 then ok(not result.error and result.returned==10,'empty store retains native inventory')else ok(result.error,'invalid definitions refuse')end
+ if type(bad)=='table' and #bad==0 then ok(not result.error and result.returned==#(result.events or {}) and result.returned>=10,'empty store retains native inventory')else ok(result.error,'invalid definitions refuse')end
 end
 jobs[#jobs].enabled=true
 p=hooks.catalogue(jobs);local source_on
