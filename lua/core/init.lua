@@ -75,7 +75,7 @@ end
 if command == "init" then
   print(json.encode({ schema = "ok" }))
 elseif command == "remember" then
-  print(memory.remember(args[2], "global", {}))
+  print((memory.remember(args[2], "global", {})))
 elseif command == "recall" then
   each(memory.recall(args[2], limit_of(args[3], 10)))
 elseif command == "memories" then

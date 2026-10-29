@@ -616,7 +616,7 @@ function M.run(argv)
     elseif line == "/memories" then
       each(memory.memories(nil, 50), memory_line, print)
     elseif line:sub(1, 10) == "/remember " then
-      print(memory.remember(line:sub(11)))
+      print((memory.remember(line:sub(11))))
     elseif line:sub(1, 8) == "/recall " then
       each(memory.recall(line:sub(9), 10), memory_line, print)
     elseif line:match("^/[%w_-]+$") or line:match("^/[%w_-]+%s") then
