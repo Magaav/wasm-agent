@@ -54,6 +54,8 @@ function M.run(memory,args,role,ctx,catalog,current_catalog,dispatch,execution)
  local raw=memory.meta_get(store_key);local store=raw and json.decode(raw) or {}
  local spec={owner=scope,tools=descriptors,globals=globals,store=store,code=args.code,timeout_ms=args.timeout_ms or 30000}
  spec.wasm_path=policy.wasm_path;spec.prelude_path=policy.prelude_path
+ local cached,cache=pcall(function()return dofile('lua/core/paths.lua').cache()end)
+ if cached and type(cache)=='string' then spec.module_cache=cache..'/codemode' end
  local response=json.decode(host.quickjs('start',json.encode(spec)))
  if not response.ok then
   response.items={};response.unexecuted={}

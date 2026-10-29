@@ -17,7 +17,20 @@ struct Data { events:Vec<Value>, clock_origin:Instant, deadline:Instant, limits:
 struct Sandbox {store:Store<Data>, instance:Instance, memory:Memory, api:i32, settle:i32, stalled:i32, owner:String}
 thread_local! {static SESSIONS:RefCell<HashMap<String,Sandbox>>=RefCell::new(HashMap::new());}
 fn engine()->Result<Engine> {static ENGINE:OnceLock<Engine>=OnceLock::new();if let Some(e)=ENGINE.get(){return Ok(e.clone())}let mut c=Config::new();c.consume_fuel(true);let e=Engine::new(&c)?;let _=ENGINE.set(e);Ok(ENGINE.get().expect("engine initialized").clone())}
-fn module(engine:&Engine,bytes:&[u8])->Result<Module>{static MODULE:OnceLock<Module>=OnceLock::new();if let Some(m)=MODULE.get(){return Ok(m.clone())}let m=Module::new(engine,bytes)?;let _=MODULE.set(m);Ok(MODULE.get().expect("module initialized").clone())}
+// Compiling QuickJS with Cranelift is ~2.6 s, paid by every process on its first script (measured 29/10:
+// each node restart, deploy and CLI). The compiled module is kept in the node's cache, named by the wasm
+// hash and the engine's compatibility hash; a file that does not match this engine fails to deserialize
+// and is rebuilt. Deserializing trusts the file: it lives in the node's own data home, which only the
+// node's user can write - the same boundary as the installed binary itself.
+fn cached_module(engine:&Engine,bytes:&[u8],dir:&str)->Result<Module>{
+ use std::hash::{Hash,Hasher};let mut h=std::collections::hash_map::DefaultHasher::new();engine.precompile_compatibility_hash().hash(&mut h);
+ let path=std::path::Path::new(dir).join(format!("quickjs-{}-{:016x}.cwasm",&hash(bytes)[..16],h.finish()));
+ if path.is_file(){if let Ok(m)=unsafe{Module::deserialize_file(engine,&path)}{return Ok(m)}}
+ let m=Module::new(engine,bytes)?;
+ if std::fs::create_dir_all(dir).is_ok(){if let Ok(b)=m.serialize(){let tmp=path.with_extension(format!("tmp{}",std::process::id()));if std::fs::write(&tmp,&b).is_ok(){let _=std::fs::rename(&tmp,&path);}}}
+ Ok(m)
+}
+fn module(engine:&Engine,bytes:&[u8],cache:Option<&str>)->Result<Module>{static MODULE:OnceLock<Module>=OnceLock::new();if let Some(m)=MODULE.get(){return Ok(m.clone())}let m=match cache{Some(dir)=>cached_module(engine,bytes,dir)?,None=>Module::new(engine,bytes)?};let _=MODULE.set(m);Ok(MODULE.get().expect("module initialized").clone())}
 /// What this binary can actually honour, without starting wasmtime or a sandbox. `/health` publishes this
 /// so a node that advertises native code mode and cannot run it is visible *before* a turn fails, instead
 /// of the operator discovering it as seven silent turns (2026-10-22).
@@ -64,7 +77,7 @@ impl Sandbox {
  fn start(args:&Value)->Result<Self>{
   let wasm=match args["wasm_path"].as_str(){Some(path)=>std::fs::read(path)?,None=>EMBEDDED_WASM.to_vec()};if wasm.is_empty(){bail!("code-mode assets unavailable; provision and embed at build time")};if hash(&wasm)!=WASM_SHA{bail!("QuickJS artifact hash mismatch")}
   let prelude=match args["prelude_path"].as_str(){Some(path)=>std::fs::read(path)?,None=>EMBEDDED_PRELUDE.to_vec()};if hash(&prelude)!=PRELUDE_SHA{bail!("Pi prelude hash mismatch")}
-  let e=engine()?;let module=module(&e,&wasm)?;let mut linker=Linker::new(&e);
+  let e=engine()?;let module=module(&e,&wasm,args["module_cache"].as_str().filter(|d|!d.is_empty()))?;let mut linker=Linker::new(&e);
   linker.func_wrap("env","host_get_timezone_offset",|_:i32,_:i32|->i32{0})?;
   linker.func_wrap("env","host_interrupt",|c:Caller<'_,Data>|->i32{(Instant::now()>c.data().deadline||crate::host::run_cancel_requested())as i32})?;
   linker.func_wrap("env","host_module_normalize",|_:i32,_:i32|->i32{0})?;
@@ -94,3 +107,21 @@ impl Sandbox {
 }
 fn control(action:&str,args:&Value)->Result<Value>{if action=="ready"{let wasm=match args["wasm_path"].as_str(){Some(p)=>std::fs::read(p)?,None=>EMBEDDED_WASM.to_vec()};let prelude=match args["prelude_path"].as_str(){Some(p)=>std::fs::read(p)?,None=>EMBEDDED_PRELUDE.to_vec()};if wasm.is_empty(){bail!("code-mode assets unavailable; provision and embed at build time")}if hash(&wasm)!=WASM_SHA{bail!("QuickJS artifact hash mismatch")}if hash(&prelude)!=PRELUDE_SHA{bail!("Pi prelude hash mismatch")}return Ok(json!({"ok":true,"backend":"rust-wasmtime-quickjs-wasi","wasm_sha256":WASM_SHA,"prelude_sha256":PRELUDE_SHA}))}if action=="info"{return Ok(json!({"ok":true,"backend":"rust-wasmtime-quickjs-wasi","embedded_assets":!EMBEDDED_WASM.is_empty(),"wasm_sha256":WASM_SHA,"prelude_sha256":PRELUDE_SHA,"licenses":LICENSES,"node_required":false}))}SESSIONS.with(|cell|{let mut map=cell.borrow_mut();if action=="start"{if map.len()>=4{bail!("sandbox session capacity")}let mut s=Sandbox::start(args)?;let result=match s.run(args["code"].as_str().context("code required")?).and_then(|_|s.drain()){Ok(v)=>v,Err(e)=>return Ok(json!({"ok":false,"error":format!("codemode_sandbox: {e:#}"),"events":std::mem::take(&mut s.store.data_mut().events),"effect":"none"}))};let id=format!("{:x}-{}",SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos(),map.len());map.insert(id.clone(),s);return Ok(json!({"ok":true,"id":id,"events":result["events"],"backend":"rust-wasmtime-quickjs-wasi","node_required":false}))}let id=args["id"].as_str().context("sandbox id")?;let s=map.get_mut(id).context("sandbox unavailable")?;if args["owner"].as_str()!=Some(&s.owner){bail!("sandbox owner mismatch")}match action{"admit"=>{if Instant::now()>s.store.data().deadline||crate::host::run_cancel_requested(){bail!("sandbox deadline or cancellation before admission")}Ok(json!({"ok":true}))},"deliver"=>match s.deliver(args){Ok(v)=>Ok(v),Err(e)=>Ok(json!({"ok":false,"error":format!("codemode_sandbox: {e:#}"),"events":std::mem::take(&mut s.store.data_mut().events)}))},"close"=>{map.remove(id);Ok(json!({"ok":true}))},_=>bail!("unknown sandbox action")}})}
 pub extern "C-unwind" fn capability(l:*mut crate::lua::LuaState)->c_int{let action=crate::lua::arg_string(l,1).unwrap_or_default();let raw=crate::lua::arg_string(l,2).unwrap_or_default();let result=(||{let args:Value=serde_json::from_str(&raw)?;control(&action,&args)})();let out=match result{Ok(v)=>v,Err(e)=>json!({"ok":false,"error":format!("codemode_sandbox: {e:#}")})}.to_string();unsafe{crate::lua::lua_pushlstring(l,out.as_ptr()as *const c_char,out.len())};1}
+#[cfg(test)]
+mod module_cache_tests {
+ use super::*;
+ const EMPTY:&[u8]=b"\0asm\x01\0\0\0";
+ #[test]
+ fn a_compiled_module_is_kept_and_a_foreign_file_is_rebuilt(){
+  let dir=std::env::temp_dir().join(format!("wa-module-cache-{}",std::process::id()));let _=std::fs::remove_dir_all(&dir);let d=dir.to_str().unwrap();
+  let e=engine().unwrap();
+  cached_module(&e,EMPTY,d).unwrap();
+  let files:Vec<_>=std::fs::read_dir(&dir).unwrap().map(|f|f.unwrap().path()).collect();
+  assert_eq!(files.len(),1,"one cwasm per wasm and engine");assert!(files[0].extension().unwrap()=="cwasm");
+  let kept=std::fs::read(&files[0]).unwrap();cached_module(&e,EMPTY,d).unwrap();
+  assert_eq!(std::fs::read(&files[0]).unwrap(),kept,"a matching file is loaded, not rewritten");
+  std::fs::write(&files[0],b"not a module").unwrap();cached_module(&e,EMPTY,d).unwrap();
+  assert_ne!(std::fs::read(&files[0]).unwrap(),b"not a module".to_vec(),"a file this engine cannot load is rebuilt");
+  let _=std::fs::remove_dir_all(&dir);
+ }
+}
