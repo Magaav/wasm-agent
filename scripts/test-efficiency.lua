@@ -362,6 +362,8 @@ local ordering=json.encode(tools.all('master'))
 host.plugins=function()return json.encode({{name='a-fixture'},{name='z-fixture'}})end
 check(json.encode(tools.all('master'))==ordering,'plugin discovery order cannot shuffle schemas')
 host.plugins=plugins
-local available=tools.all('master');local cap=tools.dispatch(memory,'capabilities',{},'master')
+-- The same run context dispatch builds: without one, tools.all is the schema-only view that shows
+-- codemode whenever the setting is native, while a run is pinned (v0.1.0-alpha.12 gate, 29/10).
+local available=tools.all('master',{role='master'},memory);local cap=tools.dispatch(memory,'capabilities',{},'master')
 check(#available==#cap.capabilities,'capabilities exactly match full advertised surface')
 print('efficiency ok ('..checks..' checks)')
