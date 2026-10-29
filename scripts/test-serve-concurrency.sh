@@ -16,6 +16,7 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 BIN="${WA_BIN:-rust/target/release/wa}"
+case "$BIN" in /*) ;; *) BIN="$ROOT/$BIN" ;; esac  # absolute: the pool server below starts from $WORK
 PORT="${1:-8891}"
 CLIENT_PORT=$((PORT + 1))
 WORK="$(mktemp -d /tmp/wa-conc-XXXXXX)"
@@ -212,11 +213,14 @@ echo "  ok: a stalled worker is visible, and survivable"
 # grows to meet the load and shrinks back.
 POOL_PORT=$((PORT + 20))
 POOL_CLIENT=$((POOL_PORT + 1))
+# Started from the empty work dir: from the repository root the new read interpreter first indexed the
+# whole tree for the graph, and on a 2-core host (openclaw, 29/10) the read missed its admission deadline
+# (read_capacity_busy). This test is about the pool, not about indexing.
 WASM_AGENT_TEST_STALL_WORKER=1 \
 WASM_AGENT_WORKER_STALL_SECONDS=1 \
 WASM_AGENT_WORKER_STALL_EXIT_SECONDS=0 \
 WASM_AGENT_WORKERS_IDLE_SECONDS=2 \
-  "$BIN" --db "$WORK/pool.db" serve --port "$POOL_PORT" --client-port "$POOL_CLIENT" --ui "$ROOT/ui" > "$WORK/pool.log" 2>&1 &
+  bash -c 'cd "$1" && shift && exec "$@"' _ "$WORK" "$BIN" --db "$WORK/pool.db" serve --port "$POOL_PORT" --client-port "$POOL_CLIENT" --ui "$ROOT/ui" > "$WORK/pool.log" 2>&1 &
 POOL=$!
 
 for _ in $(seq 1 40); do
