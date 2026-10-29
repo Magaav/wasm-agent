@@ -11,7 +11,8 @@
 -- runs them. Looking never installs anything, and `ensure` prints what it is about to run as it
 -- runs it, because an install is a visible act on somebody's machine and not a side effect of a
 -- build. Every tool carries the reason it is wanted: a node missing a toolchain should be able to
--- say what it therefore cannot do.
+-- say what it therefore cannot do. A deploy checks the same list without running anything, from the files the
+-- toolchains leave (scripts/lib/build-requirements.sh, 29/10), and fetches cargo/node there when build.env asks.
 local platform = dofile("lua/core/platform.lua")
 
 local M = {}
