@@ -9,7 +9,9 @@ for await(const line of readline.createInterface({input:process.stdin})){const m
  else if(m.method==='tools/list')send({jsonrpc:'2.0',id:m.id,result:{tools:tools()}});
  else if(m.method==='tools/call'){
   if(mode==='eof'){process.exit(0);}
-  send({jsonrpc:'2.0',id:m.id,result:{content:[{type:'text',text:JSON.stringify(m.params.arguments)}],structuredContent:m.params.arguments}});
+  // The change is notified before the answer: sent after it, a slow host (openclaw, 29/10) let the client
+  // issue the second call before it had read the notification, and the 'notified' case raced.
   if(mode==='change'&&!changed){changed=true;send({jsonrpc:'2.0',method:'notifications/tools/list_changed'});}
+  send({jsonrpc:'2.0',id:m.id,result:{content:[{type:'text',text:JSON.stringify(m.params.arguments)}],structuredContent:m.params.arguments}});
  }
 }
