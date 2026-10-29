@@ -75,9 +75,16 @@ cleanup() {
 }
 trap cleanup EXIT
 
-mkdir -p "$S/install" "$S/home"
+mkdir -p "$S/install" "$S/home" "$S/bin"
+# The narrowed PATH below keeps cargo out, so a case that gets past the check reaches the build and stops.
+# ripgrep is a requirement checked first; where it lives outside /usr/bin (openclaw: ~/.local/bin) every
+# case was refused as rg_unavailable instead, so link just that one tool in.
+! command -v rg >/dev/null 2>&1 || ln -s "$(command -v rg)" "$S/bin/rg"
 
-NEWER="$(printf 'fixture: an install ahead of this tree\n' | git commit-tree "$(git rev-parse HEAD^{tree})" -p HEAD)"
+# An explicit identity: a host with no git user.email (openclaw, 29/10) made commit-tree fail, NEWER came
+# back empty and every "ahead" case read as a record that names no commit.
+NEWER="$(printf 'fixture: an install ahead of this tree\n' | GIT_AUTHOR_NAME=fixture GIT_AUTHOR_EMAIL=fixture@invalid \
+  GIT_COMMITTER_NAME=fixture GIT_COMMITTER_EMAIL=fixture@invalid git commit-tree "$(git rev-parse HEAD^{tree})" -p HEAD)"
 git update-ref "$FIXTURE_REF" "$NEWER"
 HEAD_COMMIT="$(git rev-parse --short HEAD)"
 ANCESTOR="$(git rev-parse HEAD~1 2>/dev/null || git rev-parse HEAD)"
@@ -100,7 +107,7 @@ last_out=""
 # No service, whatever this machine runs: on a host whose wa-serve.service runs a real node (openclaw, 29/10)
 # deploy.sh stopped at "the service runs the node from ..." before the downgrade check and 10 cases failed.
 run_deploy() {
-  ( cd "$ROOT" && env -u WASM_AGENT_IN_TURN PATH="$(dirname "$(command -v git)"):/usr/bin:/bin" \
+  ( cd "$ROOT" && env -u WASM_AGENT_IN_TURN PATH="$(dirname "$(command -v git)"):$S/bin:/usr/bin:/bin" \
       WA_SERVICE_UNIT_FILE="$S/no-such-service.unit" WA_SERVICE_PID=0 \
       WA_INSTALL_DIR="$S/install" WASM_AGENT_HOME="$S/home" WA_PORT=18991 WA_CLIENT_PORT=18992 \
       bash "$DEPLOY" --reason "downgrade gate test" ) >"$S/out.txt" 2>&1
