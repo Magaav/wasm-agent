@@ -115,7 +115,9 @@ check(host.read_file(history_view.full_result.path)==json.encode(history_page),
   'full session page is exactly retrievable from the artifact')
 local write=host.write_file
 host.write_file=function() return false end
-local read=host.read_file; host.read_file=function() return 'old text' end
+-- Only the edited file reads as 'old text': a stub for every path also fed the modules dispatch loads
+-- lazily (orchestration_mode.lua) and failed as a syntax error (v0.1.0-alpha.12 gate, 29/10).
+local read=host.read_file; host.read_file=function(path) if path=='test' then return 'old text' end return read(path) end
 check(tools.dispatch(memory,'edit',{path='test',old_text='old',new_text='new'},'master').error=='write_failed','failed edit cannot report success')
 host.read_file=read; host.write_file=write
 check(tools.dispatch(memory,'edit',{path='test',old_text='',new_text='new'},'master').error=='old_text_required','empty edit cannot mutate by accident')
