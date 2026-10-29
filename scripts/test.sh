@@ -474,7 +474,7 @@ UUID='[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
 # `/new` notice names the same one). Both searches are for the full id, so a shortened one cannot pass.
 UUID='[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
 BEFORE="$(printf '%s\n' "$CLI_CMD_OUT" | grep -oE "$UUID" | head -1)"
-AFTER="$(printf '%s\n' "$CLI_CMD_OUT" | grep -E '^wa> ' | grep -oE "$UUID" | head -1)"
+AFTER="$(printf '%s\n' "$CLI_CMD_OUT" | grep -E '^(wa>|❯) ' | grep -oE "$UUID" | head -1)"
 if [ -z "$BEFORE" ] || [ -z "$AFTER" ] || [ "$BEFORE" = "$AFTER" ]; then
   echo "FAIL: /new must move /session to a different session (before='$BEFORE' after='$AFTER')" >&2
   printf '%s\n' "$CLI_CMD_OUT" >&2
