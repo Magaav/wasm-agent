@@ -38,6 +38,10 @@ This collector does not prove arbitrary descendant drain or run a full gate.
 
 ### Gate parallelism
 
+> **Release-only (29/10).** The gate described here runs only when a human asks for a release;
+> routine landing is focused checks plus `integrate` (`gate_verified:false`, see `AGENTS.md`). These
+> numbers are not the cost of landing a wave and must not be used to price one.
+
 `scripts/test.sh` compiled with whatever cargo does by default: one job per logical core. On a
 16-core machine a single gate run peaks at 16 `rustc.exe`, and that is wrong for the pool's normal
 case of two children, because each gate claims the whole box and the second only makes the first

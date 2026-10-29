@@ -1,3 +1,7 @@
+> **Release-only (29/10).** The gate described here runs only when a human asks for a release;
+> routine landing is focused checks plus `integrate` (`gate_verified:false`, see `AGENTS.md`). These
+> numbers are not the cost of landing a wave and must not be used to price one.
+
 > Current execution/admission changes and equivalent-workload evidence are in
 > [RECOVERY-THROUGHPUT.md](RECOVERY-THROUGHPUT.md). Historical phase costs below are
 > not individual-check timings or evidence for a whole-pipeline speedup; the missing

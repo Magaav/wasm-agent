@@ -5449,8 +5449,8 @@ commandMenu.addEventListener("close", () => { chatShell.enterLocked = false; });
 const ORCHESTRATOR_BRIEF = "Act as the git orchestrator for this repository. " +
   "Load skills/git-orchestrator and run its deterministic audit before merging. " +
   "Integrate every in-scope committed local and remote branch tip, including actor branches and local-only work, into main. " +
-  "Review the changes, gate the combined result, push, then re-fetch and repeat until the audit proves convergence. " +
-  "After the final gate and audit, delete every integrated non-main branch ref from origin; completion requires origin to contain only main. Preserve active or dirty local worktrees and report them separately. " +
+  "Review the changes, run focused checks on the combined result (the full gate is release-only), push, then re-fetch and repeat until the audit proves convergence. " +
+  "After the final audit, delete every integrated non-main branch ref from origin; completion requires origin to contain only main. Preserve active or dirty local worktrees and report them separately. " +
   "The AGENTS.md hand-off rule is suspended: you are the integrator and may merge to main. " +
   "Preserve uncommitted work and active checkouts. Resolve understood conflicts without losing either intent; escalate an unresolved decision, never force it. " +
   "Scope: internal branches only. Open PR work is excluded; use /merge all to explicitly include PRs.";
@@ -5468,8 +5468,8 @@ const CLEAN_DISK_BRIEF = "Reclaim disk on this machine, safely, following the sk
 const ORCHESTRATOR_ALL_BRIEF = "Act as the git orchestrator for this repository. " +
   "Load skills/git-orchestrator and run its deterministic audit before merging. " +
   "Integrate every in-scope committed local and remote branch tip, including actor branches and local-only work, into main. " +
-  "Review the changes, gate the combined result, push, then re-fetch and repeat until the audit proves convergence. " +
-  "After the final gate and audit, delete every integrated non-main branch ref from origin; completion requires origin to contain only main. Preserve active or dirty local worktrees and report them separately. " +
+  "Review the changes, run focused checks on the combined result (the full gate is release-only), push, then re-fetch and repeat until the audit proves convergence. " +
+  "After the final audit, delete every integrated non-main branch ref from origin; completion requires origin to contain only main. Preserve active or dirty local worktrees and report them separately. " +
   "The AGENTS.md hand-off rule is suspended: you are the integrator and may merge to main. " +
   "Preserve uncommitted work and active checkouts. Resolve understood conflicts without losing either intent; escalate an unresolved decision, never force it. " +
   "Scope: /merge all explicitly includes every open PR head, including forks. Review each PR and honor required checks and approvals before integration.";

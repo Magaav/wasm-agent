@@ -1,7 +1,8 @@
 ---
 name: gate-lifecycle
 description: >-
-  Inspect a queued, stuck, cancelled or nested test gate; recover only after
+  The full gate is release-only (run on a human's request; routine landing is focused
+  checks plus integrate). Inspect a queued, stuck, cancelled or nested release gate; recover only after
   proving process/lease ownership and drain. Use before a gate reservation,
   when a cancelled worker leaves gate work alive, or when gate reports disagree.
 ---

@@ -1,3 +1,7 @@
+> **Release-only (29/10).** The gate described here runs only when a human asks for a release;
+> routine landing is focused checks plus `integrate` (`gate_verified:false`, see `AGENTS.md`). These
+> numbers are not the cost of landing a wave and must not be used to price one.
+
 # The factory — running a batch of delegated work to landed code
 
 This records how this repository's changes were actually produced and landed during the

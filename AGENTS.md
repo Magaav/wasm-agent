@@ -8,6 +8,15 @@ owners implement/verify/merge via `integrate` and report. No recursion or mid-ta
 Only the coordinator owns `/update`, UI publication and Sentinel.
 No watchers or gates; full release gates require a human request.
 
+**The gate is release-only (29/10).** "The gate" means the full release gate
+(`scripts/test.sh`, `finish.mjs gate`, `scripts/wave-release.mjs`) and it runs
+only when a human asks for a release. Landing work - a wave, a worker's branch,
+your own change - is focused checks plus `integrate`, reporting
+`gate_verified:false`. Never gate a landing, never wait for a gate before
+merging, and never cost a landing by gate timings (`docs/MERGE-SPEED.md`
+measures the release gate, not landing). Older docs that say "gate the merged
+tree" for routine landing predate this rule.
+
 The coordinator may review and merge its own changes; an independent reviewer is
 not required in this mode. This operator-selected rule overrides conflicting
 independent-review, mandatory-delegation and parallel-lane procedures in this file,

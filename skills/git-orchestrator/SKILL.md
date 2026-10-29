@@ -8,11 +8,15 @@ description: >-
   current with origin/main, is landed without asking - and /merge and /merge all are
   manual entry points into the same procedure that widen its input scope, /merge all
   explicitly including open PRs and outside contributions. Discover exact tips,
-  review, integrate, gate, push and re-audit in one run. Preserve live, dirty, unmerged and uncertain work; close an authorized wave through
+  review, integrate, run focused checks, push and re-audit in one run. The full gate is release-only. Preserve live, dirty, unmerged and uncertain work; close an authorized wave through
   durable main-only convergence and verify the next-wave baseline.
 ---
 
 # The git orchestrator - the merge lane's runbook
+
+> **The gate is release-only (29/10).** Wherever this runbook says a lane "gates" a tree for a
+> routine landing, read *runs its focused checks*: the full gate (`scripts/test.sh`, `finish.mjs gate`,
+> `scripts/wave-release.mjs`) runs only when a human asks for a release. See `AGENTS.md`.
 
 ## Active operator-selected direct workflow
 
@@ -75,10 +79,10 @@ this one has a procedure.
 
 - **A worker commits only.** Never merges, never deploys, never pushes `main`. Its branch is its
   delivery and its report is evidence, not verification.
-- **First green lands first.** The first lane that passes the coordinator's own gate on a tree merged
+- **First green lands first.** The first lane that passes the coordinator's focused checks on a tree merged
   with current `origin/main` is merged and pushed; everything behind it waits.
 - **A rebased branch is not green.** Every later lane is rebased onto the new `main` in a `tmp/`
-  branch and re-gated. A receipt from before the rebase covers a tree that no longer exists.
+  branch and its focused checks re-run. A receipt from before the rebase covers a tree that no longer exists.
 - **An unmergeable tree is a routing decision, not a failure.** Two ways out, chosen by the conflict:
   - **rewake** (`subagent message`, `idempotency_key` required) when the conflict is *mechanical*: the
     same file with different hunks, or two assertions that need each other's strings. The child keeps
@@ -90,7 +94,7 @@ this one has a procedure.
     Preserve the old branch as `archive/<branch>`; never delete it.
 - **Say which you chose, and why,** per case. "Rewoken because it was two probe strings" and "respun
   because its lifecycle change assumed the old fold" are different facts for the next reader.
-- **The gate stays the coordinator's**, after every rewake and every respin, on a tree merged with
+- **The checks stay the coordinator's**, after every rewake and every respin, on a tree merged with
   current `main`. A skipped check is reported as skipped, never counted as green.
 
 ### The reviewer, and the switch that turns it on
@@ -102,7 +106,7 @@ written here, the checkbox was a policy nobody read.
 
 When it is **on**:
 
-1. A worker's delivery is **not accepted on the coordinator's gate alone**. Before merging, start ONE
+1. A worker's delivery is **not accepted on the coordinator's focused checks alone**. Before merging, start ONE
    reviewer child with: the worker's brief, its branch, and its report (if it made one).
 2. The reviewer is a **second implementer, not a critic**: it reads the diff, pushes the branch further
    where it is wrong (same branch, its own commits), and answers once - `nothing required` or `changed
@@ -111,7 +115,7 @@ When it is **on**:
 4. Acceptance says which it was: `reviewed by <child id>` or `not reviewed (require_reviewer off)`. If
    the switch cannot be read, **review** - an unreadable policy is not permission to skip it.
 
-When it is **off**: the delivery is accepted on the coordinator's gate plus its own diff review, and
+When it is **off**: the delivery is accepted on the coordinator's focused checks plus its own diff review, and
 the report line says so. That is the operator's explicit choice, not a silent default.
 
 What the reviewer is worth, measured today rather than argued: three deliveries settled with
@@ -164,8 +168,8 @@ provenance trailer and pushed. Its branch is its deliverable.
   attack the claim on the exact tree, re-run what proves it, and report what it broke.
 - **accept** - the delivery carries evidence bound to one exact tree: the reviewer's verdict plus a
   producer receipt naming that tree. `finish.mjs admit <repo> <head>` produces the focused receipt; `delivery-admission.mjs check/admit --producer-proof <receipt>` validates it. It records `admission_verified=true`, `gate_verified=false`, and `requires_combined_gate=true`; admission never claims full verification. Activate this policy only after its bootstrap combined tree passes the prior full gate.
-- **land** - the merge lane: merge the reviewed tip onto the sanctioned tree, gate the **merged**
-  tree, push `origin/main` under the sole lock, read the ref back, prove integration, then clean up.
+- **land** - the merge lane: merge the reviewed tip onto the sanctioned tree, run focused checks on the
+  **merged** tree (the full gate only for a release), push `origin/main` under the sole lock, read the ref back, prove integration, then clean up.
 - **deploy** - the sentinel, queued from inside a run and never run in that run's own turn:
   `wa-sentinel request upgrade` for the node and UI, `wa-sentinel request deploy` when the change is
   in the sentinel itself, each with `--session`/`--prompt`, then read `installed.txt` and
@@ -176,10 +180,10 @@ provenance trailer and pushed. Its branch is its deliverable.
 
 | lane | it may | it may not |
 | --- | --- | --- |
-| producer | edit, commit, push `change/<name>`, run the gate on its own tree, ask to be landed | move `main`, merge, deploy, accept or review its own delivery, move another actor's tree or ref |
-| reviewer | read the diff and the tree, re-run fixtures and the gate, falsify the claim, report | change the producer's branch, land, accept its own work |
-| gate | run `scripts/test.sh` / `finish.mjs gate` on one tree at a time and record the receipt | run against the same tree as another gate, or claim evidence for a tree it did not test |
-| merge | merge reviewed tips, gate the merged tree, push `origin/main`, read the ref back, prove integration, retire explicitly handed-over settled wave inputs | force-push, merge an unreviewed or unverified tip, move an active actor's tree, deploy, move `main` from a producer's tree |
+| producer | edit, commit, push `change/<name>`, run the gate on its own tree, ask to be landed (never the full gate) | move `main`, merge, deploy, accept or review its own delivery, move another actor's tree or ref |
+| reviewer | read the diff and the tree, re-run fixtures and focused checks, falsify the claim, report | change the producer's branch, land, accept its own work |
+| gate (release only, on a human's request) | run `scripts/test.sh` / `finish.mjs gate` on one tree at a time and record the receipt | run against the same tree as another gate, or claim evidence for a tree it did not test |
+| merge | merge reviewed tips, run focused checks on the merged tree, push `origin/main`, read the ref back, prove integration, retire explicitly handed-over settled wave inputs | force-push, merge an unreviewed or unverified tip, move an active actor's tree, deploy, move `main` from a producer's tree |
 
 How many lanes run at once, and why the gate is a reserved serial resource, is
 `docs/CONCURRENCY.md` ("Lane reservations and the serial gate"): the target is 16-32 lanes with a

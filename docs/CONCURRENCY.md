@@ -227,6 +227,9 @@ visibility and queued-cancellation view recovery. No live user input is replayed
 
 ## Lane reservations and the serial gate
 
+> **Release-only (29/10).** The serial gate below runs only when a human asks for a release; routine
+> landing does not reserve it (focused checks plus `integrate`, see `AGENTS.md`).
+
 The lanes above are the runtime's: node-thread index ranges, the interactive reserve, and
 `WASM_AGENT_SUBAGENT_CONCURRENCY` (the node's env sets **4**; the pool clamps 1..16). The
 **integration lanes** - producer, reviewer, gate, merge - are roles a *run* takes, and what each may
