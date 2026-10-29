@@ -657,6 +657,7 @@ local CUES = {
   shell = "Run a shell command on the client machine",
   wave_autoflush = "Control coordinator acceptance and durable wave-end installation obligation",
   integrate = "Land an orchestration worker's tested tip; never deploy",
+  mcp = "List and manage MCP connectors; new or edited ones stay disabled until enabled",
   spell_save = "Save a verified command sequence as a reusable spell",
   spell_run = "Replay a saved spell",
   spell_compose = "Combine a verified spell sequence with its checks intact",
