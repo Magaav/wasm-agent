@@ -19,7 +19,10 @@ it means it lives on a peer. Before answering that you cannot read or send:
 
 Federation (lua/core/federation.lua) lists a peer's connector tools as `peer_<peer>__<tool>`: the reads
 (`..._mcp_whatsapp_list_chats_...`, `read_newest`, `inspect_chat`, ...) and, where the peer has operator
-configs, `peer_<peer>__whatsapp_operator` - the operator-directed send. To send a text the human asked for:
+configs, `peer_<peer>__whatsapp_operator` - the operator-directed send. Connector tools (`mcp_whatsapp_*`
+on this node, `peer_*` on a peer) run only inside code mode: one `codemode` script calls
+`await tools.<name>(args)` (`searchTools("whatsapp")` gives the exact names); `tool_call` refuses them.
+To send a text the human asked for:
 
 1. Resolve the exact chat id with the reads. Several matches ("Laura" can be a person, a group and a
    business): ask the human which one; never pick by name. The chat must be in the chosen profile's list
