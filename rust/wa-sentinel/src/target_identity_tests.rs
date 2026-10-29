@@ -18,3 +18,9 @@ fn a_busy_read_lane_is_retried_until_the_node_answers(){
  }});
  assert_eq!(node_id_on_port(port).unwrap(),"expected");worker.join().unwrap();
 }
+
+#[test]
+fn a_busy_or_unreachable_node_is_retried_and_a_wrong_answer_is_not(){
+ for e in ["node_identity_read_capacity_busy; no target authority","node_identity_http_unavailable","node_identity_http_status:503","node_identity_body_unavailable"]{assert!(super::retryable_identity_error(e),"{e}");}
+ for e in ["node_identity_http_status:404","node_identity_missing","node_identity_body_invalid"]{assert!(!super::retryable_identity_error(e),"{e}");}
+}

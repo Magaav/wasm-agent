@@ -685,13 +685,21 @@ fn node_id_on_port(port: u16) -> Result<String> {
     let mut pause = Duration::from_millis(250);
     loop {
         match node_id_on_port_once(port) {
-            Err(error) if error.to_string().starts_with("node_identity_read_capacity_busy") && Instant::now() < deadline => {
+            // A transport failure or a 5xx is the same "not now" from a node that is busy or still
+            // binding: a deploy's restart refused on one `node_identity_http_unavailable` and rolled a
+            // good build back (29/10, live). A wrong identity or a 4xx still refuses at once.
+            Err(error) if retryable_identity_error(&error.to_string()) && Instant::now() < deadline => {
                 std::thread::sleep(pause);
                 pause = (pause * 2).min(Duration::from_secs(4));
             }
             other => return other,
         }
     }
+}
+
+fn retryable_identity_error(error: &str) -> bool {
+    error.starts_with("node_identity_read_capacity_busy") || error.starts_with("node_identity_http_unavailable")
+        || error.starts_with("node_identity_body_unavailable") || error.starts_with("node_identity_http_status:5")
 }
 
 fn node_id_on_port_once(port: u16) -> Result<String> {
