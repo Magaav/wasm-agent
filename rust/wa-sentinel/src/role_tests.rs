@@ -381,8 +381,13 @@ fn a_deploy_under_a_supervisor_is_refused_rather_than_become_our_child() {
     std::fs::write(&stub, format!("#!/bin/sh\nprintf 'ran\\n' > '{}'\n", marker.display()))
         .expect("stub deploy");
     std::env::set_var("WA_SENTINEL_SUPERVISOR", "watch-the-node.service");
+    // "No systemd-run" is made true here rather than assumed: from a login session with a user manager
+    // (29/10, the release gate on openclaw) the real one started the stub as a unit and this test failed.
+    let path = std::env::var_os("PATH");
+    std::env::set_var("PATH", &fixture.dir);
     let capture = deploy_capture_path();
     let outcome = verb_deploy_script(&stub, "", "", "role fixture", &capture);
+    match path { Some(path) => std::env::set_var("PATH", path), None => std::env::remove_var("PATH") }
     std::env::remove_var("WA_SENTINEL_SUPERVISOR");
 
     let error = outcome
