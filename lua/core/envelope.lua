@@ -1,8 +1,10 @@
 -- Stable bootstrap declarations; definitions expand in the transcript, not the prefix.
+-- web_search/web_read are declared from the start on every node (29/10): public web is a
+-- baseline capability, also callable inside code mode.
 local json=dofile('lua/vendor/json.lua')
 local M={}
-local CLASSIC={remember=true,recall=true,skill=true,capabilities=true,tool_search=true,tool_call=true,read=true,read_many=true,write=true,edit=true,bash=true,tool_result=true,session_worktree=true}
-local LEAN={remember=true,recall=true,skill=true,tool_search=true,tool_call=true,read=true,read_many=true,write=true,edit=true,bash=true,session_worktree=true}
+local CLASSIC={remember=true,recall=true,skill=true,capabilities=true,tool_search=true,tool_call=true,read=true,read_many=true,write=true,edit=true,bash=true,tool_result=true,session_worktree=true,web_search=true,web_read=true}
+local LEAN={remember=true,recall=true,skill=true,tool_search=true,tool_call=true,read=true,read_many=true,write=true,edit=true,bash=true,session_worktree=true,web_search=true,web_read=true}
 -- Declared from the start in orchestration mode, never discovered: the handoff facade and the
 -- routing decision that precedes it. A child never receives either: its envelope mode is 'full'
 -- and its profile does not allow them.

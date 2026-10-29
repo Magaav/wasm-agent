@@ -21,11 +21,11 @@ local ctx={session_id=sid,user_id='master'}
 local root=dofile('lua/core/paths.lua').data()..'/iteration'
 local function call(name,args,raw,c) c=c or ctx;c.tool_arguments_json=raw;local r=tools.dispatch(memory,name,args,'master',c);c.tool_arguments_json=nil;return r end
 local schemas=tools.envelope('master',ctx)
-check(#schemas==11,'lean eleven declarations; read_many is immediate')
+check(#schemas==14,'lean thirteen declarations plus codemode; read_many and web are immediate')
 local all=tools.all('master');local names={};for _,s in ipairs(schemas)do names[s['function'].name]=true end
 check(names.recall and names.remember and names.session_worktree and names.read_many and not names.capabilities and not names.tool_result,'measured optional helpers deferred; memory and workspace remain immediate')
 local env=host.getenv;host.getenv=function(k)if k=='WASM_AGENT_BOOTSTRAP_MODE' then return 'classic' end;return env(k)end
-check(#envelope.bootstrap(all)==13,'classic bootstrap rollback')
+check(#envelope.bootstrap(all)==16,'classic bootstrap rollback')
 host.getenv=function(k)if k=='WASM_AGENT_BOOTSTRAP_MODE' then return 'invalid' end;return env(k)end
 check(not pcall(envelope.bootstrap,all),'invalid bootstrap visible');host.getenv=env
 local system=agent.system_prompt('master','PRESERVE PROJECT POLICY','fixture/AGENTS.md',schemas,'progressive')

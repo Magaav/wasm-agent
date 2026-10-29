@@ -5,7 +5,7 @@ host.http=function()error('network forbidden')end
 local checks=0;local function check(v,why)assert(v,why);checks=checks+1 end
 local sid=memory.start_session('','layers',{user_id='master'});local ctx={session_id=sid,user_id='master',role='master'}
 local schemas=tools.envelope('master',ctx);local names={};for _,s in ipairs(schemas)do names[s['function'].name]=true end
-check(#schemas==11 and names.read_many,'read_many is native main-loop bootstrap')
+check(#schemas==14 and names.read_many and names.web_search and names.web_read,'read_many is native main-loop bootstrap')
 check(not names.capabilities and not names.tool_result,'only catalog/evidence helpers remain deferred')
 local one=agent.system_sections('master','PROJECT_KEEP','a"&<.md',schemas,'progressive')
 local two=agent.system_sections('master','OTHER_PROJECT','b.md',schemas,'progressive',{orchestration_enabled=true})

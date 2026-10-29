@@ -8,7 +8,7 @@ local function session(title)return memory.start_session('',title,{user_id='mast
 local sid=session('empty');local ctx={session_id=sid,user_id='master',role='master'}
 local all=tools.all('master');local bootstrap,mode=tools.envelope('master',ctx)
 check(mode=='progressive','empty session progressive')
-check(#bootstrap==11 and #all>#bootstrap,'lean bootstrap with all capabilities retained')
+check(#bootstrap==14 and #all>#bootstrap,'lean bootstrap with all capabilities retained')
 local before=json.encode(bootstrap)
 local unknown=tools.dispatch(memory,'tool_call',{name='web_searchd',arguments={}},'master',ctx)
 check(unknown.error:find('tool_not_available',1,true)==1 and unknown.error:find('web_search',1,true)~=nil,'an unknown name refuses and lists the closest permitted name')
