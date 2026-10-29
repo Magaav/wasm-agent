@@ -152,6 +152,11 @@ cleanup_nodes() {
     port="$OP_PORT"
     [ "$name" != guest1 ] || port="$GUEST_PORT"
     "$SENTINEL" instance stop "$name" >"$BASE/cleanup-$name.stdout" 2>"$BASE/cleanup-$name.stderr" || true
+    # A stopped (or just purged) node lets go of its port when it has exited, not when the verb returns:
+    # on a 2-core host (openclaw, 29/10) the guest was still exiting at the first look and free a moment
+    # later. Wait a bounded 10 s for that; a port still held after it is a real failure, reported as before.
+    local waited=0
+    while port_in_use "$port" && [ "$waited" -lt 20 ]; do sleep 0.5; waited=$((waited + 1)); done
     if port_in_use "$port"; then
       cleanup_failed=1
       printf 'cleanup could not prove/stop test instance %s on port %s; no unrelated process was killed\n' "$name" "$port" >>"$BASE/cleanup-warning.log"
