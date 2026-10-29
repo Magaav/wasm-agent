@@ -14,14 +14,28 @@ local function run(code)return tools.dispatch(memory,'codemode',{code=code},'mas
 local function first_error(r)local a=r.attempts and r.attempts[1];return a and json.encode(r) or json.encode(r)end
 
 -- Read-only control data is reachable from a script.
-local open=run('const r=["sessions","search_messages","session","spell_list","spell_get","nodes","operation","resource","web_search","web_read"].map(n=>n in tools); return JSON.stringify(r);')
-check(open.ok and tostring(open.value):find('[true,true,true,true,true,true,true,true,true,true]',1,true),'read-only and web tools visible inside: '..json.encode(open):sub(1,300))
+local open=run('const r=["sessions","search_messages","session","spell_list","spell_get","nodes","operation","resource","web_search","web_read","remote"].map(n=>n in tools); return JSON.stringify(r);')
+check(open.ok and tostring(open.value):find('[true,true,true,true,true,true,true,true,true,true,true]',1,true),'read-only, web and remote visible inside: '..json.encode(open):sub(1,300))
 local listed=run('const r=await tools.sessions({limit:5}); return Array.isArray(r.sessions||r)||typeof r==="object";')
 check(listed.ok,'sessions runs inside code mode: '..json.encode(listed):sub(1,300))
 
 -- Control plane stays out.
-local closed=run('return JSON.stringify(["subagent","spell_run","spell_save","remote","client","shell","session_worktree","resume_session","integrate","tool_call"].map(n=>n in tools));')
-check(closed.ok and tostring(closed.value):find('[false,false,false,false,false,false,false,false,false,false]',1,true),'control plane absent inside: '..json.encode(closed):sub(1,300))
+local closed=run('return JSON.stringify(["subagent","spell_run","spell_save","client","shell","session_worktree","resume_session","integrate","tool_call"].map(n=>n in tools));')
+check(closed.ok and tostring(closed.value):find('[false,false,false,false,false,false,false,false,false]',1,true),'control plane absent inside: '..json.encode(closed):sub(1,300))
+-- ...but discoverable, with its route (29/10): never indistinguishable from "does not exist".
+local found=run('const s=await searchTools("subagent"); const d=await describeTool("client"); const all=await searchTools("*",{limit:200}); return JSON.stringify({s:s.tools.find(t=>t.name==="subagent"),d,listed:all.tools.filter(t=>t.callable===false).map(t=>t.name)});')
+local fv=found.value;for _=1,2 do if type(fv)=='string' then fv=json.decode(fv) end end;fv=type(fv)=='table' and fv or {}
+check(fv.s and fv.s.callable==false and tostring(fv.s.route):find('outside codemode',1,true) and fv.s.schema,'searchTools finds an outside tool with schema and route: '..json.encode(found):sub(1,400))
+check(fv.d and fv.d.callable==false and fv.d.parameters and tostring(fv.d.route):find('ordinary tool',1,true),'describeTool gives an outside tool its schema and route')
+local listed_outside={};for _,n in ipairs(fv.listed or {}) do listed_outside[n]=true end
+check(listed_outside.subagent and listed_outside.tool_call and not listed_outside.remote,'the full listing marks outside tools; remote is callable')
+local rd=run('return JSON.stringify(await describeTool("remote"));').value;for _=1,2 do if type(rd)=='string' then rd=json.decode(rd) end end
+check(type(rd)=='table' and rd.callable==true and rd.parameters.properties.calls,'remote is described as callable with its batch form')
+-- A remote effect from a script is refused before any network, with the route.
+local eff=run('return await tools.remote({node:"nowhere",capability:"write",path:"/x",content:"y"});')
+check(json.encode(eff):find('remote_effect_outside_codemode',1,true),'remote write refused inside: '..json.encode(eff):sub(1,300))
+local rb=run('return await tools.remote({node:"nowhere",capability:"bash",command:"git status --short"});')
+check(not json.encode(rb):find('remote_effect_outside_codemode',1,true),'remote read-only bash passes the fence (then meets the network)')
 
 -- Per-action fences: effects refused with no admission, reads admitted.
 local start=run('return await tools.operation({action:"start",command:"true"});')

@@ -62,4 +62,10 @@ local legacy=session('legacy');memory.append_turn(legacy,{role='assistant',conte
 local _,legacyMode=tools.envelope('master',{session_id=legacy,user_id='master',role='master'})
 check(legacyMode=='full','existing conversation retains full surface')
 check(envelope.mode({session_id=legacy,subagent={}})=='full','child exact declarations unchanged')
+-- Peers are discoverable outside with how to reach them from a script (29/10).
+local peers=tools.dispatch(memory,'tool_search',{query='remote',limit=1},'master',ctx)
+check(peers.tools[1] and peers.tools[1].name=='remote' and peers.tools[1].schema['function'].parameters.properties.calls,'tool_search finds remote with its batch schema')
+check(table.concat(peers.guidance,' '):find('tools.remote',1,true) and table.concat(peers.guidance,' '):find('take node',1,true),'remote guidance names the script route and peer history')
+local history=tools.dispatch(memory,'tool_search',{query='search_messages',limit=1},'master',ctx)
+check(history.tools[1].schema['function'].parameters.properties.node,'search_messages declares node')
 print('envelope ok ('..checks..' checks)')

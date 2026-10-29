@@ -658,8 +658,21 @@ function M.list_sessions(user_id, limit, opts)
     sql = sql .. " LEFT JOIN messages l ON l.session_id=s.id " ..
                  "AND l.seq=(SELECT MAX(seq) FROM messages WHERE session_id=s.id)"
   end
-  local params = {}
-  if user_id and user_id ~= "" then sql = sql .. " WHERE s.user_id=?"; params[#params + 1] = user_id end
+  local params, where = {}, {}
+  if user_id and user_id ~= "" then where[#where + 1] = "s.user_id=?"; params[#params + 1] = user_id end
+  -- "The last agent session on that repo" (29/10): a session bound to a worktree/source under the
+  -- path, or one whose recorded file changes (`messages.changes`, written by every edit/write) name a
+  -- file under it. The ledger is the artifact; nothing is written into the repository.
+  if type(opts.path) == "string" and opts.path ~= "" then
+    local path = opts.path:gsub("/+$", "")
+    if path == "" then path = "/" end
+    local under = path == "/" and "/" or path .. "/"
+    local quoted = json.encode(path)
+    where[#where + 1] = "(s.worktree=? OR instr(s.worktree,?)=1 OR s.workspace_source_path=? OR instr(s.workspace_source_path,?)=1 " ..
+      "OR EXISTS (SELECT 1 FROM messages c WHERE c.session_id=s.id AND c.changes<>'{}' AND (instr(c.changes,?)>0 OR instr(c.changes,?)>0)))"
+    for _, value in ipairs({ path, under, path, under, quoted, json.encode(under):sub(1, -2) }) do params[#params + 1] = value end
+  end
+  if #where > 0 then sql = sql .. " WHERE " .. table.concat(where, " AND ") end
   sql = sql .. " ORDER BY s.updated_at DESC LIMIT ?"
   params[#params + 1] = limit
   local rows = query(sql, params)

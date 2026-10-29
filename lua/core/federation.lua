@@ -211,6 +211,17 @@ function M.catalog()
   return cache
 end
 
+-- Peer names from the last refresh, cache only (never waits on the network): the code-mode hint names
+-- them so an empty-context model knows other nodes exist before it calls `nodes` (29/10).
+function M.cached_peers()
+  local names = {}
+  for _, peer in pairs(load_cache().peers or {}) do
+    if peer.name and not peer.error then names[#names + 1] = tostring(peer.name) end
+  end
+  table.sort(names)
+  return names
+end
+
 function M.schemas()
   local out = {}
   for _, peer in pairs(M.catalog().peers or {}) do

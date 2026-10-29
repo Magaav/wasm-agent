@@ -679,8 +679,25 @@ local function node_capability(capability, args, caller)
     -- tools here, under this node's own guards. The dispatch is the same one the fallthrough below uses.
     return dofile("lua/core/federation.lua").serve(args, caller, function(name, tool_args)
       return toolslib.dispatch(memory, name, tool_args, users.normalize(caller.role),
-        { user_id = author, node_id = nodeslib.node_name() })
+        { user_id = author, node_id = nodeslib.node_name(), peer_call = true })
     end)
+  elseif capability == "batch" then
+    -- Up to eight reads in one signed round trip (29/10, tools.lua remote calls). Read-only here too,
+    -- whatever the caller checked: each entry is the same node_capability call a single one would be.
+    local calls = type(args.calls) == "table" and args.calls or {}
+    if #calls < 1 or #calls > 8 then return { error = "remote_calls_1_to_8" } end
+    for index, entry in ipairs(calls) do
+      local name = type(entry) == "table" and entry.capability
+      if type(name) ~= "string" or name == "batch" or name == "remote" then return { error = "remote_calls_entry_invalid", index = index } end
+      local fenced = toolslib.remote_read_refusal(name, entry.args)
+      if fenced then fenced.index = index; return fenced end
+    end
+    local results = {}
+    for index, entry in ipairs(calls) do
+      local ran, value = pcall(node_capability, entry.capability, type(entry.args) == "table" and entry.args or {}, caller)
+      results[index] = ran and value or { error = tostring(value) }
+    end
+    return { batch = 1, results = results }
   elseif capability == "access" then
     -- Same-rank access handoff (see lua/core/access.lua). Definitions and approved tiers travel;
     -- credential values never do, and a guest is refused on both ends.
@@ -734,6 +751,7 @@ local function node_capability(capability, args, caller)
   return toolslib.dispatch(memory, capability, args, users.normalize(caller.role), {
     user_id = author,
     node_id = nodeslib.node_name(),
+    peer_call = true,
   })
 end
 

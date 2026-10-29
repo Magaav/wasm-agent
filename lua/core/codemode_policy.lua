@@ -101,12 +101,22 @@ end
 M.guidance=table.concat({
  'Code mode is the preferred programmatic coding path for this run: one `codemode` call runs a JavaScript script that calls tools as `await tools.<name>(args)` and returns only what you need.',
  'Default to code mode for any work a script can do: every tool except the control plane below is callable inside it, so prefer one script over a sequence of ordinary calls. That covers (1) connectors - WhatsApp, mail and every other MCP or peer connector exist only inside code mode; (2) web research - await tools.web_search({query,limit}) returns results with cache refs, await tools.web_read({url}) or ({ref}) reads a page; prefer them over curl for public pages, keep curl in bash for authenticated APIs, POST or local hosts; (3) two or more dependent calls, loops, or searching and filtering large output (history, logs, many files); (4) read -> edit -> verify sequences.',
- 'Use ordinary tools for: a single quick call whose whole output you need (one read, edit, bash or web_search); and control-plane actions, which code mode refuses: subagent, session_worktree, resume_session, integrate, operation start/cancel, resource reconcile, spell save/run, client, shell, remote.',
+ 'Use ordinary tools for: a single quick call whose whole output you need (one read, edit, bash or web_search); and control-plane actions, which code mode refuses: subagent, session_worktree, resume_session, integrate, operation start/cancel, resource reconcile, spell save/run, client, shell, and any remote call that changes a peer.',
+ 'Peers: other wasm-agent nodes hold their own files, repositories and history; await tools.nodes() lists them. From a script, await tools.remote({node, capability:"read", path}) reads a peer; capability may be read, read_many, ls, grep, sessions, session, search_messages, recall or bash with a read-only command (git status/log/diff, ls, cat, rg; pass cwd, not cd). One call is ~0.35 s; tools.remote({node, capability:"batch", calls:[{capability:"read",path},{capability:"bash",command:"git log -1",cwd}]}) runs up to 8 reads in one round trip. Writes, edits and effectful bash on a peer are ordinary remote calls outside the script.',
+ 'History is per node: work done on a peer is in that peer\'s history, not yours. search_messages({query, node}) searches a peer; sessions({node, all_owners:true, path:"/repo"}) lists the sessions on that peer that worked in that repository, newest first - the first row is the last agent session there; session({node, session_id}) reads one.',
  'WhatsApp is the linked-device connector (mcp_whatsapp_*, or peer_<node>__* where another node holds it): read and send through it from a script.',
  'Inside a script, searchTools("text") finds tools (searchTools("*") lists all) and describeTool(name) gives a schema. Filtered output can hide relevant evidence: inspect complete nested originals when needed. Never replay a failed effectful script; unknown effects require explicit reconciliation. WASM_AGENT_CODEMODE=off disables code mode for a new run. The VM is not the OS security boundary for bash/write.',
 },'\n')
+-- The peers the last federation refresh saw, one line; cache only, so the prompt never waits on them.
+function M.peer_index()
+ local ok,names=pcall(function()return dofile('lua/core/federation.lua').cached_peers()end)
+ if not ok or type(names)~='table' or #names==0 then return nil end
+ return 'Peers seen online at the last refresh (tools.nodes() is current): '..table.concat(names,', ',1,math.min(#names,12))..(#names>12 and (', +'..(#names-12)..' more') or '')
+end
 function M.prompt(catalog)
- local index=M.connector_index(catalog)
- return index and (M.guidance..'\n'..index) or M.guidance
+ local lines={M.guidance}
+ local index=M.connector_index(catalog);if index then lines[#lines+1]=index end
+ local peers=M.peer_index();if peers then lines[#lines+1]=peers end
+ return table.concat(lines,'\n')
 end
 return M

@@ -8,13 +8,22 @@ local presentation=dofile('lua/core/codemode_view.lua')
 -- The node's own capability inventory: the same registry the CLI prints and `/health` digests.
 local inventory=dofile('lua/core/capability_inventory.lua')
 local M={}
--- Control plane stays ordinary: delegation, authority, recursion, the user's machine, other nodes,
--- replays and session-shaping actions. Read-only history, spell lookups and the peer list are data a
--- script filters well, so they are open inside (29/10).
+-- Control plane stays ordinary: delegation, authority, recursion, the user's machine, replays and
+-- session-shaping actions. Read-only history, spell lookups and the peer list are data a script filters
+-- well, so they are open inside (29/10). `remote` is open too, fenced to reads in tools.lua
+-- (remote_read_refusal): a peer is read from a script and changed only by an ordinary call.
 local forbidden={wave_autoflush=true,codemode=true,tool_call=true,tool_search=true,subagent=true,integrate=true,session_worktree=true,
  resume_session=true,session_debug=true,session_fixture=true,
- remote=true,client=true,shell=true,mcp=true,capabilities=true,spell_run=true,spell_export=true,
+ client=true,shell=true,mcp=true,capabilities=true,spell_run=true,spell_export=true,
  spell_save=true,spell_compose=true,spell_forget=true}
+-- What a tool that is not callable here is for, so discovery never reads as "does not exist" (29/10).
+local function route_of(name,status)
+ if name=='codemode' then return 'You are inside codemode; scripts do not nest.' end
+ if name=='tool_search' or name=='tool_call' then return 'Outer facade: inside a script use searchTools/describeTool and call await tools.<name>(args) directly.' end
+ if name=='capabilities' then return 'Outer tool; inside a script call the capabilities() global.' end
+ if status and (status.status=='blocked' or status.status=='unknown') then return 'Not callable in this run: '..tostring(status.reason or status.status)..'. '..tostring(status.next or '') end
+ return 'Control plane: call '..name..' as an ordinary tool, outside codemode (end the script, then call it directly). Inside a script it is refused.'
+end
 -- Multi-action tools whose read actions belong inside and whose effects do not: a script may watch an
 -- operation or list resource claims, never start, cancel or reconcile one.
 local read_actions={
@@ -34,10 +43,12 @@ function M.run(memory,args,role,ctx,catalog,current_catalog,dispatch,execution)
  if type(args.code)~='string' or args.code=='' then return {error='codemode_source_required'} end
  local workspace=memory.session_workspace and memory.session_workspace(ctx.session_id) or nil
  local scope=host.sha256(json.encode({session=ctx.session_id,user=ctx.user_id,role=role,workspace=workspace,profile=ctx.subagent and ctx.subagent.allowed or nil}))
- local descriptors,definitions={},{}
+ local descriptors,definitions,outside={},{},{}
  for _,schema in ipairs(catalog)do
   local f=schema['function'];local status=execution(f.name)
-  if not forbidden[f.name] and status.status~='blocked' and status.status~='unknown' then
+  if forbidden[f.name] or status.status=='blocked' or status.status=='unknown' then
+   outside[f.name]={name=f.name,schema=schema,route=route_of(f.name,status)}
+  else
    local js=f.name:gsub('[^%w_]','_')
    if definitions[js] and definitions[js].name~=f.name then return {error='codemode_identifier_collision'} end
    definitions[f.name]={name=f.name,schema=schema,hash=host.sha256(json.encode(schema))}
@@ -113,13 +124,14 @@ function M.run(memory,args,role,ctx,catalog,current_catalog,dispatch,execution)
       else
        -- The whole guest catalogue, names and one-line descriptions only; describeTool(name) gives a schema.
        local names={};for _,descriptor in ipairs(descriptors)do names[#names+1]=descriptor.name end
+       for name in pairs(outside)do names[#names+1]=name end
        table.sort(names)
        local page={};for i=offset+1,math.min(#names,offset+limit)do
-        local def=definitions[names[i]];local text=tostring(def.schema['function'].description or '')
-        page[#page+1]={name=def.name,description=text:match('^[^\n]*'):sub(1,200),execution=execution(def.name)}
+        local def=definitions[names[i]] or outside[names[i]];local text=tostring(def.schema['function'].description or '')
+        page[#page+1]={name=def.name,description=text:match('^[^\n]*'):sub(1,200),execution=execution(def.name),callable=outside[def.name]==nil,route=outside[def.name] and outside[def.name].route or nil}
        end
        value={tools=page,matches=#names,offset=offset,has_more=offset+limit<#names,
-        invocation='The whole guest catalogue, paged; describeTool(name) gives the full schema. Native checks apply to each call.'};success=true
+        invocation='The whole catalogue, paged; describeTool(name) gives the full schema. callable:false entries run outside the script: their route says how. Native checks apply to each call.'};success=true
       end
      elseif type(query)~='string' or #query>256 then value={error='tool_search_query_required'};success=false
      elseif type(limit)~='number' or limit%1~=0 or limit<1 or limit>8 then value={error='invalid_tool_search_limit'};success=false
@@ -127,18 +139,22 @@ function M.run(memory,args,role,ctx,catalog,current_catalog,dispatch,execution)
       -- Guest discovery is metadata over its own exact ceiling, never an envelope
       -- facade invocation or a new delegation/load authority.
       local matches={}
-      for _,descriptor in ipairs(descriptors)do
-       local def=definitions[descriptor.name];local hay=(def.name..' '..tostring(def.schema['function'].description)):lower();local score=0
+      local function consider(def,route)
+       local hay=(def.name..' '..tostring(def.schema['function'].description)):lower();local score=0
        for term in query:lower():gmatch('[%w_]+')do if hay:find(term,1,true)then score=score+1 end end
-       if score>0 then matches[#matches+1]={name=def.name,schema=def.schema,execution=execution(def.name),score=score} end
+       if score>0 then matches[#matches+1]={name=def.name,schema=def.schema,execution=execution(def.name),score=score,callable=route==nil,route=route} end
       end
+      for _,descriptor in ipairs(descriptors)do consider(definitions[descriptor.name]) end
+      for _,def in pairs(outside)do consider(def,def.route) end
       table.sort(matches,function(a,b)return a.score==b.score and a.name<b.name or a.score>b.score end)
       local found={};for i=1,math.min(limit,#matches)do found[i]=matches[i];found[i].score=nil end
-      value={tools=found,matches=#matches,invocation='Guest-local metadata only; native current-catalog/profile/type/effect checks apply to each call.'};success=true
+      value={tools=found,matches=#matches,invocation='Guest-local metadata only; callable:false entries run outside the script (see route). Native current-catalog/profile/type/effect checks apply to each call.'};success=true
      end
     elseif call.name=='describeTool' then
      local name=type(params)=='string' and params or params[1]
-     local def=definitions[name];value=name=='showCall' and presentation.help or def and {name=def.name,description=def.schema['function'].description,parameters=def.schema['function'].parameters,execution=execution(def.name)} or nil;success=true
+     local def=definitions[name];local out=type(name)=='string' and outside[name]
+     value=name=='showCall' and presentation.help or def and {name=def.name,description=def.schema['function'].description,parameters=def.schema['function'].parameters,execution=execution(def.name),callable=true}
+      or out and {name=out.name,description=out.schema['function'].description,parameters=out.schema['function'].parameters,callable=false,route=out.route} or nil;success=true
     elseif call.name=='capabilities' or call.name=='describe' then
      -- The host.* inventory, exactly as `wa capabilities --json` prints it and `/health`
      -- digests it. Read-only metadata over the registry; it admits no call, changes no ceiling.
@@ -146,8 +162,12 @@ function M.run(memory,args,role,ctx,catalog,current_catalog,dispatch,execution)
      if value==nil then value={error='codemode_global_not_available'};success=false end
     else value={error='codemode_global_not_available'};success=false end
    elseif call.target=='tool' then
+    -- tools.nodes() with no argument sends `undefined`, as a global does: no arguments is {} (29/10).
+    if call.args=='undefined' or call.args=='' then call.args='{}' end
     local def=definitions[call.name]
-    if not def or forbidden[call.name] then value={error='codemode_target_not_available'};success=false
+    if not def or forbidden[call.name] then
+     local out=outside[call.name]
+     value=out and {error='codemode_target_not_available: '..call.name..' runs outside code mode',route=out.route,effect='none'} or {error='codemode_target_not_available'};success=false
     else
      local current
      for _,schema in ipairs(current_catalog())do if schema['function'].name==def.name then current=schema;break end end

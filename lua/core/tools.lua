@@ -78,6 +78,27 @@ local function online_nodes()
   return names
 end
 
+-- What a peer may be asked for where no effect is allowed: inside code mode and in a `calls` batch
+-- (29/10). Reads, history and discovery on the peer; bash only when the orchestration classifier
+-- calls the whole command read-only. Anything else names its route instead of running.
+local REMOTE_READ = { read = true, read_many = true, ls = true, grep = true, grep_many = true, graph = true,
+  symbol_source_many = true, tool_result = true, diagnose = true, capabilities = true, nodes = true,
+  sessions = true, session = true, session_many = true, search_messages = true, search_messages_many = true,
+  recall = true, memories = true, spell_list = true, spell_get = true, skill = true }
+M.REMOTE_READ = REMOTE_READ
+function M.remote_read_refusal(capability, args)
+  if REMOTE_READ[capability] then return nil end
+  if capability == "bash" then
+    local command = type(args) == "table" and args.command or nil
+    if dofile("lua/core/orchestration_mode.lua").read_only_command(command) then return nil end
+    return { error = "remote_effect_outside_codemode", capability = "bash", effect = "none",
+      note = "Only read-only bash (ls/cat/grep/rg/git status|log|diff|show..., no redirection or substitution; use cwd instead of cd or git -C) runs on a peer from a script or a calls batch. Run this command as an ordinary remote call, outside code mode." }
+  end
+  return { error = "remote_effect_outside_codemode", capability = tostring(capability), effect = "none",
+    note = "remote " .. tostring(capability) .. " can change the peer, so it runs as an ordinary remote call outside code mode (and never in a calls batch). Read-only here: "
+      .. "read, read_many, ls, grep, grep_many, graph, sessions, session, session_many, search_messages, search_messages_many, recall, memories, tool_result, read-only bash." }
+end
+
 local function declares_param(catalog, capability, key)
   if type(capability) ~= "string" then return false end
   if type(catalog) == "function" then
@@ -254,10 +275,16 @@ M.shared = {
     delivery_id = { type = "string", description = "Job delivery this child belongs to, when a job starts it." },
     idempotency_key = { type = "string", description = "Required, non-empty for message, steer and steer_session; optional for start. Reuse the same key for the same request to collect its receipt without a second effect. No key is needed for read-only actions." },
   }, { "action" }),
-  schema("sessions", "List your own past sessions (resumable threads), most recent first.", {
-    limit = { type = "integer", minimum = 1, maximum = 100 } }),
-  schema("session", "Read a session. Defaults to newest messages; pass next_before_seq back as before_seq to retrieve earlier evidence. For failure diagnosis use view=full and a small limit or exact message_id; oversized rows keep a last-failure excerpt and exact-original pointer.", {
+  -- `node` (29/10): history lives on the node that did the work, so the same read runs on a peer
+  -- through `remote` under that peer's own authorization; read-only, never forwarded a second hop.
+  schema("sessions", "List your own past sessions (resumable threads), most recent first. node=<peer> lists that peer's sessions instead. all_owners (master) lists every owner's sessions, e.g. the peer's own agent work; path keeps the sessions bound to that repository/worktree or whose recorded file changes are under it - newest first, so the first row answers \"what was the last agent session on that repo\".", {
+    limit = { type = "integer", minimum = 1, maximum = 100 },
+    node = { type = "string", description = "Peer name or node_id (from nodes): run this read on that node." },
+    all_owners = { type = "boolean", description = "Master only: every owner's sessions, not only yours." },
+    path = { type = "string", description = "Absolute repository or directory path on that node." } }),
+  schema("session", "Read a session. Defaults to newest messages; pass next_before_seq back as before_seq to retrieve earlier evidence. For failure diagnosis use view=full and a small limit or exact message_id; oversized rows keep a last-failure excerpt and exact-original pointer. node=<peer> reads a session held by that peer.", {
     session_id = { type = "string" },
+    node = { type = "string", description = "Peer name or node_id (from nodes): read the session on that node." },
     before_seq = { type = "integer", minimum = 1 },
     around_seq = { type = "integer", minimum = 1, description = "Centre on a search hit; includes nonmatching neighbours in chronological order." },
     before = { type = "integer", minimum = 0, maximum = 20 },
@@ -268,8 +295,9 @@ M.shared = {
     byte_limit = { type = "integer", minimum = 4, maximum = 20000 }, message_version = {type="string"},
     view = { type = "string", enum = {"full", "compact", "tool_calls"}, description = "Full is default; tool_calls returns exact calls/arguments and tool outcomes without loading encrypted reasoning. Projections retain full-original references; compact omits diagnostics." },
     limit = { type = "integer", minimum = 1, maximum = 1000 } }, { "session_id" }),
-  schema("search_messages", "Search history locally: dialogue-first exact excerpts with original evidence references. Use scope=evidence for execution/tool results, all for unrestricted history including retrieval echoes. Filters apply before ranking. session around_seq reads neighbouring context.", {
+  schema("search_messages", "Search history: dialogue-first exact excerpts with original evidence references. Local by default; node=<peer> searches that peer's history (work done on another node lives there). Use scope=evidence for execution/tool results, all for unrestricted history including retrieval echoes. Filters apply before ranking. session around_seq reads neighbouring context.", {
     query = { type = "string", maxLength = 4096 },
+    node = { type = "string", description = "Peer name or node_id (from nodes): search that node's history instead of this one." },
     scope = { type = "string", enum = {"dialogue", "evidence", "all"} },
     view = { type = "string", enum = {"snippets", "full", "compact"}, description = "Snippets default: exact matching excerpts, not generated summaries. Full/compact explicit; originals always accessible." },
     roles = { type = "array", minItems = 1, maxItems = 6, items = {type="string",enum={"user","assistant","tool","summary","retry","system"}} },
@@ -425,12 +453,14 @@ M.admin = {
     params = { type = "object", description = "Values for the spell's declared parameters." },
     binary = { type = "string", description = "For an `upgrade` step: the wa binary to install. Defaults to the step's own value." },
     path = { type = "string", description = "Where to write the plan. Defaults to <state>/spell-plans/<name>.json." } }, { "name" }),
-  schema("remote", "Run a capability on another wasm-agent node (peer). Nodes are discovered by ed25519 key through the rendezvous, so the name or node_id is enough. Put the capability's own parameters at this same level, flat: {\"node\":\"<name>\",\"capability\":\"bash\",\"command\":\"ls\"} or {\"node\":\"<name>\",\"capability\":\"read\",\"path\":\"/etc/hosts\"}. Text reads work; image results are refused until the node protocol has bounded binary transfer.", {
+  schema("remote", "Run a capability on another wasm-agent node (peer). Nodes are discovered by ed25519 key through the rendezvous, so the name or node_id is enough. Put the capability's own parameters at this same level, flat: {\"node\":\"<name>\",\"capability\":\"bash\",\"command\":\"ls\"} or {\"node\":\"<name>\",\"capability\":\"read\",\"path\":\"/etc/hosts\"}. Text reads work; image results are refused until the node protocol has bounded binary transfer. Inside codemode tools.remote runs the read-only capabilities (read, read_many, ls, grep, sessions, session, search_messages, recall, read-only bash ...); effects run here, outside. capability:\"batch\" with calls:[{capability,...},...] runs up to 8 reads in one round trip.", {
     node = { type = "string", description = "Peer name or node_id (the nodes tool lists them)." },
     capability = { type = "string", description = "Tool to run on that node, e.g. bash, read, client, shell." },
     command = { type = "string", description = "For bash/shell: the command." },
     path = { type = "string", description = "For read/ls/write/edit: the path on that node." },
-    args = { type = "object", description = "Optional older form: the capability's parameters nested here. Prefer the flat form." } }, { "node", "capability" }),
+    args = { type = "object", description = "Optional older form: the capability's parameters nested here. Prefer the flat form." },
+    calls = { type = "array", minItems = 1, maxItems = 8, description = "With capability \"batch\": 1-8 read-only entries {capability, <its params>} run on the peer in ONE signed round trip, ordered results. Reads, history and read-only bash only.",
+      items = { type = "object", properties = { capability = { type = "string" } }, required = { "capability" } } } }, { "node", "capability" }),
   schema("nodes", "List this node and every peer known to the rendezvous.", {}),
   schema("session_debug", "Set a session's recording mode. debug keeps every turn verbatim and forever, so a failing task can be reproduced and exported as a fixture.", {
     session_id = { type = "string", description = "Defaults to the current session." },
@@ -469,6 +499,7 @@ local function add_batches(list)
     if original then
       local properties={}
       for key,value in pairs(original.properties or {}) do properties[key]=value end
+      properties.node=nil -- a batch runs where it was sent; route a whole batch with remote (29/10)
       local required=original.required
       if name=='symbol_source_many' then
         properties={}
@@ -671,7 +702,7 @@ function M.catalog(role)
     },{'route','task'})
     for _, item in ipairs(M.admin) do list[#list + 1] = item end
     if host.quickjs then
-      list[#list+1]=schema('codemode','Preferred programmatic coding path when admitted for this run: Node-free JavaScript sandbox calling approved native tools. Connectors (MCP servers such as mail and WhatsApp, and peer connectors) are callable only here. Use await tools.<name>(args), text(value), return, searchTools and describeTool (searchTools("text") or searchTools({query, limit}); searchTools("*") lists the whole catalogue). Native permissions/workspace/type/effect checks apply per call. Scripts may filter results; complete nested originals remain hash-addressed. No filesystem/network/Node or implicit models API. Unawaited calls are not admitted; effectful calls are serial.',{code={type='string'},timeout_ms={type='integer',minimum=1,maximum=300000}},{'code'})
+      list[#list+1]=schema('codemode','Preferred programmatic coding path when admitted for this run: Node-free JavaScript sandbox calling approved native tools. Connectors (MCP servers such as mail and WhatsApp, and peer connectors) are callable only here; peers are read with tools.remote (read-only inside), and history search takes node. Use await tools.<name>(args), text(value), return, searchTools and describeTool (searchTools("text") or searchTools({query, limit}); searchTools("*") lists the whole catalogue). Native permissions/workspace/type/effect checks apply per call. Scripts may filter results; complete nested originals remain hash-addressed. No filesystem/network/Node or implicit models API. Unawaited calls are not admitted; effectful calls are serial.',{code={type='string'},timeout_ms={type='integer',minimum=1,maximum=300000}},{'code'})
     end
     for _, item in ipairs(mcp.schemas()) do list[#list+1]=item end
     -- Every online peer's connectors, run on that peer (lua/core/federation.lua). Masters only.
@@ -1050,6 +1081,72 @@ local function graph_sources(memory,args,ctx)
   return {ok=failed==0,results=results,failed=failed,succeeded=#requests-failed,graph_snapshots=snapshots}
 end
 
+local HISTORY_ON_NODE = { sessions = true, session = true, search_messages = true }
+
+-- `remote` with capability "batch" and calls:[...] (29/10): up to eight reads on one peer in ONE signed round trip (~350 ms
+-- each measured against openclaw), so a script or an outer turn pays one hop, not N. Read-only on both
+-- ends: this side fences every entry, the peer's `batch` capability fences again under its own
+-- authorization. A peer that predates `batch` gets the same entries one call each, said in the answer.
+local REMOTE_TRANSPORT = { remote_unreachable = true, remote_error = true, bad_reply = true, not_peer_operator = true,
+  unsigned_reply = true, remote_reply_unverified = true, relay_refused = true, remote_refused = true }
+local function remote_batch(memory, args, role, ctx)
+  local calls = args.calls
+  if type(calls) ~= "table" or #calls < 1 or #calls > 8 then
+    return { error = "remote_calls_1_to_8", effect = "none", example = '{"node":"<name>","capability":"batch","calls":[{"capability":"read","path":"/etc/hostname"},{"capability":"bash","command":"git status --short","cwd":"/repo"}]}' }
+  end
+  if args.capability ~= nil and args.capability ~= "batch" then return { error = "remote_calls_or_capability", effect = "none", note = "calls goes with capability \"batch\"; a single call names its capability and no calls." } end
+  if type(args.node) ~= "string" or args.node == "" then return { error = "remote_node_required", online_nodes = online_nodes(), effect = "none" } end
+  local entries = {}
+  for index, entry in ipairs(calls) do
+    if type(entry) ~= "table" or type(entry.capability) ~= "string" or entry.capability == "" then
+      return { error = "remote_calls_entry_invalid", index = index, effect = "none" }
+    end
+    local params = {}
+    if type(entry.args) == "table" then for key, value in pairs(entry.args) do params[key] = value end end
+    for key, value in pairs(entry) do if key ~= "capability" and key ~= "args" then params[key] = value end end
+    if entry.capability == "remote" or entry.capability == "batch" then return { error = "remote_cannot_recurse", index = index, effect = "none" } end
+    local fenced = M.remote_read_refusal(entry.capability, params)
+    if fenced then fenced.index = index; return fenced end
+    entries[#entries + 1] = { capability = entry.capability, args = params }
+  end
+  local node = nodeslib.find(args.node)
+  if not node then return { error = "unknown_node:" .. tostring(args.node), online_nodes = online_nodes(), effect = "none" } end
+  local function one(entry)
+    if node.local_node then return M.dispatch(memory, entry.capability, entry.args, role, ctx) end
+    return nodeslib.remote_call(node.node_id or args.node, entry.capability, entry.args)
+  end
+  local results, round_trips, fallback = {}, 0, nil
+  if node.local_node then
+    for index, entry in ipairs(entries) do results[index] = one(entry) end
+  else
+    local ok, status = pcall(nodeslib.operator_status, node)
+    if ok and type(status) == "table" and status.operator_of_peer == false then
+      return { error = "not_peer_operator", node = node.name, online_nodes = online_nodes(), next = REMOTE_REFUSALS.not_peer_operator, effect = "none" }
+    end
+    local answer = nodeslib.remote_call(node.node_id or args.node, "batch", { calls = entries })
+    round_trips = 1
+    if type(answer) == "table" and answer.batch == 1 and type(answer.results) == "table" then
+      results = answer.results
+    elseif type(answer) == "table" and answer.error and (REMOTE_TRANSPORT[answer.error] or tostring(answer.error):match("^remote_http_")) then
+      if REMOTE_REFUSALS[answer.error] then answer.online_nodes = online_nodes(); answer.next = REMOTE_REFUSALS[answer.error] end
+      return answer
+    else
+      fallback = "peer_has_no_batch: " .. tostring(type(answer) == "table" and answer.error or "unrecognized_answer")
+      for index, entry in ipairs(entries) do results[index] = one(entry); round_trips = round_trips + 1 end
+    end
+  end
+  local failed = 0
+  for index, entry in ipairs(entries) do
+    local value = results[index]
+    if carries_local_images(value) then
+      value = { error = "remote_image_transport_unsupported", capability = entry.capability }; results[index] = value
+    end
+    if type(value) ~= "table" or value.error or value.ok == false then failed = failed + 1 end
+  end
+  return { ok = failed == 0, node = node.name, results = results, failed = failed, round_trips = round_trips, fallback = fallback,
+    note = "Ordered per-entry results; every entry was a read." }
+end
+
 function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
   args = args or {}
   local requested_cwd = args.cwd
@@ -1081,6 +1178,23 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
   if name=='route_task' then
     if not is_master(role) then return {error='forbidden_for_role:'..role} end
     return dofile('lua/core/orchestration_mode.lua').record_route(args,ctx)
+  end
+  -- History on a peer (29/10): the same read, run there through `remote` and its refusals. A peer that
+  -- receives one never forwards it again (`peer_call`), so a node cannot be used as a hop.
+  if HISTORY_ON_NODE[name] and type(args)=='table' and args.node~=nil and args.node~='' then
+    if ctx.peer_call then return {error='history_node_not_forwarded',effect='none',note='A peer answers history reads about itself only.'} end
+    local target=nodeslib.find(args.node)
+    local forwarded={};for key,value in pairs(args)do if key~='node' then forwarded[key]=value end end
+    if not target or not target.local_node then
+      local result=M.dispatch(memory,'remote',{node=args.node,capability=name,args=forwarded},role,ctx)
+      -- An older peer ignores the filters it does not know and answers with only the caller's own rows.
+      if name=='sessions' and type(result)=='table' and not result.error and result.filter==nil and (forwarded.path or forwarded.all_owners) then
+        result.filter_ignored=true
+        result.note='This peer predates sessions path/all_owners: the list is unfiltered and only your own sessions there. Use search_messages {node, query:"<repo path>", scope:"evidence", sort:"newest"} to find the latest work on that repo.'
+      end
+      return result
+    end
+    args=forwarded
   end
   local routed_catalog=ctx.subagent and M.all_for(ctx.subagent.allowed or {},role,ctx,memory) or M.all(role,ctx,memory)
   if name=='tool_search' then
@@ -1510,7 +1624,14 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
   elseif name == "spell_export" then
     return spellslib.export_to_file(args.name, args.params, args.binary, args.path)
   elseif name == "sessions" then
-    return { sessions = memory.list_sessions(user_id, args.limit or 30) }
+    local owner = user_id
+    if args.all_owners == true then
+      if not is_master(role) then return { error = "forbidden_for_role:" .. tostring(role) } end
+      owner = nil
+    end
+    local path = type(args.path) == "string" and args.path ~= "" and args.path or nil
+    return { sessions = memory.list_sessions(owner, args.limit or 30, { path = path }),
+      filter = { all_owners = owner == nil, path = path } }
   elseif name == "session" then
     local session = memory.session(args.session_id)
     if not session then return { error = "unknown_session" } end
@@ -1615,9 +1736,15 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
     return { nodes = list,
       note = "operator_of_peer: true = this node is pinned in the peer's accepted binding; false = the peer will refuse it (unknown_caller); unknown = no binding on record or the lookup failed. Registry view, cached 60 s." }
   elseif name == "remote" then
+    if type(args) == "table" and (args.capability == "batch" or args.calls ~= nil) then return remote_batch(memory, args, role, ctx) end
     local call, refusal = M.remote_arguments(args, function() return M.catalog(role) end)
     if not call then return refusal end
     if call.capability == "remote" then return { error = "remote_cannot_recurse" } end
+    -- Inside a script a peer is read, never changed: the effect runs as an ordinary call (29/10).
+    if ctx.codemode_nested then
+      local fenced = M.remote_read_refusal(call.capability, call.args)
+      if fenced then return fenced end
+    end
     local node = nodeslib.find(call.node)
     if not node then
       return { error = "unknown_node:" .. tostring(call.node), online_nodes = online_nodes(),

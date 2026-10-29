@@ -77,4 +77,69 @@ check(federation.operator_call({action='prepare',profile='laura-1',request={conv
 local called
 check(federation.serve({action='call',name='whatsapp_operator',args={action='status',profile='nobody'}},{role='master'},function() called=true end).error=='operator_profile_unknown' and not called,'served through the operator path, never the generic dispatch')
 host.getenv=env
+
+-- Peers in the code-mode hint, from the cache only (29/10).
+local policy=dofile('lua/core/codemode_policy.lua')
+check(policy.prompt({}):find('Peers seen online at the last refresh',1,true) and policy.prompt({}):find('openclaw',1,true),'the hint names cached peers')
+check(not table.concat(federation.cached_peers(),','):find('old-build',1,true),'a peer that did not answer is not advertised')
+check(policy.guidance:find('search_messages({query, node})',1,true) and policy.guidance:find('capability:"batch", calls:[',1,true),'the hint teaches peer history and the read batch')
+
+-- History on a peer and the read-only remote batch, against stubbed peers (29/10).
+local sent={}
+nodes.find=function(sel) for _,n in ipairs(nodes.list()) do if n.name==sel or n.node_id==sel then return n end end end
+nodes.operator_status=function() return {operator_of_peer=true} end
+nodes.remote_call=function(id,capability,args)
+  local named=nodes.find(id);id=named and named.node_id or id
+  sent[#sent+1]={id=id,capability=capability,args=args}
+  if capability=='batch' then
+    if id=='peer-2' then return {error='plugin_not_found:batch'} end
+    local results={};for i,e in ipairs(args.calls) do results[i]={ok=true,ran=e.capability} end
+    return {batch=1,results=results}
+  end
+  if capability=='sessions' and id=='peer-2' then return {sessions={}} end
+  return {ok=true,ran=capability,on=id,args=args,filter=capability=='sessions' and {} or nil}
+end
+dofile=function(path) if path=='lua/core/nodes.lua' then return nodes end return real_dofile(path) end
+local ptools=dofile('lua/core/tools.lua')
+dofile=real_dofile
+local mctx={user_id='master'}
+local hit=ptools.dispatch(memory,'search_messages',{query='app',node='openclaw'},'master',mctx)
+check(hit.ok and hit.on=='peer-1' and hit.ran=='search_messages' and hit.args.node==nil and hit.args.query=='app','search_messages node= runs on the peer, node not forwarded: '..json.encode(hit))
+check(ptools.dispatch(memory,'sessions',{node='openclaw'},'guest',{user_id='g'}).error:find('forbidden_for_role',1,true),'a guest cannot route history to a peer')
+check(ptools.dispatch(memory,'search_messages',{query='x',node='openclaw'},'master',{user_id='master',peer_call=true}).error=='history_node_not_forwarded','a peer never forwards a history read')
+local old=ptools.dispatch(memory,'sessions',{node='old-build',all_owners=true,path='/repo'},'master',mctx)
+check(old.filter_ignored and old.note:find('search_messages',1,true),'an older peer that ignores the filter is named, with the fallback')
+local n0=#sent
+local batch=ptools.dispatch(memory,'remote',{node='openclaw',capability='batch',calls={{capability='read',path='/a'},{capability='bash',command='git log -1',cwd='/r'},{capability='sessions',all_owners=true}}},'master',mctx)
+check(batch.ok and batch.round_trips==1 and #batch.results==3 and #sent==n0+1 and sent[#sent].capability=='batch','three reads, one round trip: '..json.encode(batch))
+check(sent[#sent].args.calls[2].args.command=='git log -1' and sent[#sent].args.calls[2].args.cwd=='/r','flat entry params travel as args')
+local eff=ptools.dispatch(memory,'remote',{node='openclaw',capability='batch',calls={{capability='read',path='/a'},{capability='bash',command='rm -rf /x'}}},'master',mctx)
+check(eff.error=='remote_effect_outside_codemode' and eff.index==2 and #sent==n0+1,'an effect in a batch refuses the whole batch before anything is sent')
+check(ptools.dispatch(memory,'remote',{node='openclaw',capability='batch',calls={{capability='write',path='/a',content='x'}}},'master',mctx).error=='remote_effect_outside_codemode','write is never batched')
+local fb=ptools.dispatch(memory,'remote',{node='old-build',capability='batch',calls={{capability='read',path='/a'},{capability='ls',path='/'}}},'master',mctx)
+check(fb.ok and fb.round_trips==3 and fb.fallback:find('peer_has_no_batch',1,true) and fb.results[2].ran=='ls','an older peer gets the same reads one call each, said')
+-- Inside a script (codemode_nested) remote reads pass and effects are refused with the route.
+local nested={user_id='master',codemode_nested=true}
+check(ptools.dispatch(memory,'remote',{node='openclaw',capability='read',path='/a'},'master',nested).ran=='read','a nested remote read runs')
+check(ptools.dispatch(memory,'remote',{node='openclaw',capability='bash',command='git status --short',cwd='/r'},'master',nested).ran=='bash','a nested read-only bash runs')
+local w=ptools.dispatch(memory,'remote',{node='openclaw',capability='edit',path='/a'},'master',nested)
+check(w.error=='remote_effect_outside_codemode' and w.note:find('outside code mode',1,true),'a nested remote edit names its route')
+check(ptools.dispatch(memory,'remote',{node='openclaw',capability='bash',command='git status > /tmp/x'},'master',nested).error=='remote_effect_outside_codemode','redirection is an effect')
+check(ptools.dispatch(memory,'remote',{node='openclaw',capability='bash',command='touch /x'},'master',{user_id='master'}).ran=='bash','outside a script remote keeps its effects')
+
+-- Peer side: `batch` reruns the fence under the peer's own rules.
+check(ptools.remote_read_refusal('search_messages_many',{})==nil and ptools.remote_read_refusal('client',{})~=nil,'the read set is explicit')
+
+-- "Last agent session on that repo": bound worktree or recorded file changes under the path.
+local a=memory.start_session('','repo work',{user_id='peer-agent'})
+memory.set_session_workspace(a,{worktree='/local/projects/app/.wt/a',state='allocated'})
+local b=memory.start_session('','edit only',{user_id='peer-agent'})
+memory.append_turn(b,{role='assistant',content='edited',changes={files={{path='/local/projects/app/src/x.js',added=1,removed=0}}}})
+local c=memory.start_session('','sibling repo',{user_id='peer-agent'})
+memory.append_turn(c,{role='assistant',content='edited',changes={files={{path='/local/projects/app-old/y.js',added=1,removed=0}}}})
+local listed=ptools.dispatch(memory,'sessions',{all_owners=true,path='/local/projects/app/'},'master',{user_id='master'})
+local ids={};for _,row in ipairs(listed.sessions) do ids[row.id]=true end
+check(ids[a] and ids[b] and not ids[c] and listed.filter.path=='/local/projects/app/','path filter: worktree and changes match, a sibling prefix does not: '..json.encode(listed.filter))
+check(#ptools.dispatch(memory,'sessions',{path='/local/projects/app'},'master',{user_id='master'}).sessions==0,'without all_owners only your own sessions')
+check(ptools.dispatch(memory,'sessions',{all_owners=true},'guest',{user_id='g'}).error,'all_owners is master only')
 print(json.encode({ok=true,checks=checks}))
