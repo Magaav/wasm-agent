@@ -163,7 +163,10 @@ This mode is the current attempt and is not reliable yet; this section is the pl
 - The parallel factory (worker → reviewer → merge lane → gate) was retired on 05/10 (`b3003d54`, no
   reason in the commit). Its landing ceiling (~4/hour) was the gate, which is now release-only.
 
-Hypotheses from reading the code, not yet confirmed by data (the runs happened on the `openclaw` node):
+Hypotheses from reading the code, not yet confirmed by data. Neither the sandbox node nor `openclaw`
+holds the 10/10 - 23/10 coordinator records (checked 29/10: no route, admission or completion rows on
+either; openclaw's database ends 02/10), so the coordinator database that produced those worker
+merges is still to be found:
 
 1. A child's completion notice is stored as a user row (`completions.lua:300-303`), and the route floor
    keys on the newest user row (`memory.lua:1050`, `orchestration_mode.lua:119`), so every child report
