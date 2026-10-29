@@ -21,7 +21,16 @@ local ctx={session_id=sid,user_id='master'}
 local root=dofile('lua/core/paths.lua').data()..'/iteration'
 local function call(name,args,raw,c) c=c or ctx;c.tool_arguments_json=raw;local r=tools.dispatch(memory,name,args,'master',c);c.tool_arguments_json=nil;return r end
 local schemas=tools.envelope('master',ctx)
-check(#schemas==14,'lean thirteen declarations plus codemode; read_many and web are immediate')
+-- By name, not count: the lean set grew to 13 with web_search/web_read (7703ce23), codemode only when admitted.
+local LEAN_NAMES={'remember','recall','skill','tool_search','tool_call','read','read_many','write','edit','bash','session_worktree','web_search','web_read'}
+local function lean_exact(list)
+  local declared={};for _,item in ipairs(list)do declared[(item['function'] or item).name or '']=true end
+  for _,name in ipairs(LEAN_NAMES)do if not declared[name] then return false end end
+  local known={codemode=true};for _,name in ipairs(LEAN_NAMES)do known[name]=true end
+  for name in pairs(declared)do if not known[name] then return false end end
+  return true
+end
+check(lean_exact(schemas),'lean declarations (plus codemode when admitted); read_many and web are immediate')
 local all=tools.all('master');local names={};for _,s in ipairs(schemas)do names[s['function'].name]=true end
 check(names.recall and names.remember and names.session_worktree and names.read_many and not names.capabilities and not names.tool_result,'measured optional helpers deferred; memory and workspace remain immediate')
 local env=host.getenv;host.getenv=function(k)if k=='WASM_AGENT_BOOTSTRAP_MODE' then return 'classic' end;return env(k)end
