@@ -1,7 +1,7 @@
 //! Portable automation artifacts: a versioned, machine-independent form of a job definition.
 //!
 //! An installed job binds to this machine: an absolute trigger directory, an absolute script, an
-//! explicit CDP page websocket, an operator's session, a phone number. A **portable artifact** carries
+//! an operator's session, a phone number. A **portable artifact** carries
 //! the *intent* and a list of **named resource slots** instead, so it can be exported from one node and
 //! imported into another without dragging a path, a machine address, a session id or a credential with
 //! it. Importing requires an explicit local binding for every required slot and an explicit approval;
@@ -192,7 +192,7 @@ fn scan_machine_binding(text: &str) -> bool {
 }
 
 /// A portable artifact is an allowlist, not a denylist: only the known portable fields are accepted, so a
-/// raw `trigger.path`, `trigger.websocket_url` or `action.script` cannot ride alongside the resource slots
+/// raw `trigger.path` or `action.script` cannot ride alongside the resource slots
 /// and bypass the binding step, and an unrecognised authority field cannot arrive at all.
 fn ensure_keys(value: &Value, allowed: &[&str], where_: &str) -> super::Result<()> {
     if let Some(map) = value.as_object() {
@@ -230,11 +230,10 @@ fn validate_portable_shape(artifact: &Value) -> super::Result<()> {
                 "event" => &["kind", "topic"],
                 "schedule" => &["kind", "every_seconds"],
                 "file" => &["kind", "pattern"],
-                "cdp" => &["kind", "binding", "setup_expression"],
                 _ => &["kind"],
             };
             if !allowed.contains(&key.as_str()) {
-                if matches!(key.as_str(), "path" | "websocket_url") {
+                if key.as_str() == "path" {
                     return fail(&format!("artifact_contains_raw_binding:trigger.{key}"));
                 }
                 return fail(&format!("unknown_artifact_field:trigger.{key}"));
@@ -265,7 +264,7 @@ fn validate_portable_shape(artifact: &Value) -> super::Result<()> {
     }
     ensure_keys(
         &artifact["requirements"],
-        &["child_capacity", "browser", "network", "elevation"],
+        &["child_capacity", "network", "elevation"],
         "requirements",
     )?;
     ensure_keys(&artifact["scope"], &["owner", "role", "guest_owned"], "scope")?;
@@ -313,7 +312,6 @@ fn validate_exportable_shape(job: &Value) -> super::Result<()> {
                 "event" => &["kind", "topic"],
                 "schedule" => &["kind", "every_seconds"],
                 "file" => &["kind", "path", "pattern"],
-                "cdp" => &["kind", "websocket_url", "binding", "setup_expression"],
                 _ => &["kind"],
             };
             if !allowed.contains(&key.as_str()) {
@@ -374,15 +372,12 @@ pub fn export_artifact(job: &Value) -> super::Result<Value> {
             "event" => &["kind", "topic"],
             "schedule" => &["kind", "every_seconds"],
             "file" => &["kind", "pattern"],
-            "cdp" => &["kind", "binding", "setup_expression"],
             _ => &["kind"],
         },
     );
     match trigger_kind {
         "file" => resources.push(json!({"slot":"trigger_path","kind":"file_directory","required":true,
             "description":"Local directory the file trigger observes."})),
-        "cdp" => resources.push(json!({"slot":"page","kind":"cdp_page","required":true,
-            "description":"Explicit loopback DevTools page websocket for this machine."})),
         _ => {}
     }
     let action_kind = job["action"]["kind"].as_str().unwrap_or("");
@@ -413,7 +408,6 @@ pub fn export_artifact(job: &Value) -> super::Result<Value> {
     };
     let mut bounds = Map::new();
     bounds.insert("child_capacity".into(), json!(child_capacity));
-    bounds.insert("browser".into(), json!(trigger["kind"] == "cdp"));
     bounds.insert("network".into(), json!(action["kind"] == "wake" || action["kind"] == "subagent"));
     bounds.insert("elevation".into(), json!(false));
     artifact.insert("trigger".into(), trigger);
@@ -523,15 +517,6 @@ pub fn import_artifact(
                 }
                 trigger["path"] = json!(path);
             }
-            "cdp_page" => {
-                let loopback = path.starts_with("ws://127.0.0.1:")
-                    || path.starts_with("ws://localhost:")
-                    || path.starts_with("ws://[::1]:");
-                if !loopback || !path.contains("/devtools/page/") {
-                    return fail(&format!("resource_needs_loopback_devtools_page:{slot}"));
-                }
-                trigger["websocket_url"] = json!(path);
-            }
             "script_path" => {
                 if !Path::new(path).is_absolute() {
                     return fail(&format!("resource_needs_absolute_path:{slot}"));
@@ -605,8 +590,8 @@ mod tests {
     }
 
     fn wake_job() -> Value {
-        json!({"id":"received","name":"Review incoming","trigger":{"kind":"event","topic":"whatsapp.message"},
-            "action":{"kind":"subagent","profile":"whatsapp-responder","prompt":"Decide; do not send without approval."}})
+        json!({"id":"received","name":"Review incoming","trigger":{"kind":"event","topic":"inbox.message"},
+            "action":{"kind":"subagent","profile":"reviewer","prompt":"Decide; do not send without approval."}})
     }
     fn file_job() -> Value {
         let trigger_path = fixture_path("approved/incoming");
@@ -615,12 +600,6 @@ mod tests {
             "trigger":{"kind":"file","path":trigger_path,"pattern":".json"},
             "action":{"kind":"run","script":script,"timeout_seconds":60}})
     }
-    fn page_job() -> Value {
-        json!({"id":"page","name":"Page events",
-            "trigger":{"kind":"cdp","websocket_url":"ws://127.0.0.1:9222/devtools/page/ABC","binding":"wa_event"},
-            "action":{"kind":"subagent","profile":"whatsapp-responder","prompt":"Decide."}})
-    }
-
     #[test]
     fn export_strips_absolute_bindings_into_slots() {
         let job = file_job();
@@ -643,18 +622,15 @@ mod tests {
     }
 
     #[test]
-    fn export_refuses_credentials_and_page_bindings() {
-        let artifact = export_artifact(&page_job()).unwrap();
-        assert!(artifact["trigger"].get("websocket_url").is_none());
-        assert_eq!(artifact["requirements"]["browser"], true);
-        let mut leaky = page_job();
+    fn export_refuses_credentials_and_machine_bindings() {
+        let mut leaky = wake_job();
         leaky["action"]["prompt"] = json!("use token sk-abc123");
         // The value is a credential-shaped word but not a binding; the *key* rule is what is structural.
         // A credential in a value is still caught when it is shaped like a key, and a machine address is
         // always caught.
-        leaky["action"]["prompt"] = json!("post to ws://127.0.0.1:9999/devtools/page/X");
+        leaky["action"]["prompt"] = json!("post to ws://127.0.0.1:9999/hook");
         assert_eq!(export_artifact(&leaky).unwrap_err().to_string(), "artifact_contains_machine_binding");
-        let mut keyed = page_job();
+        let mut keyed = wake_job();
         keyed["action"]["api_key"] = json!("sk-abc");
         assert_eq!(export_artifact(&keyed).unwrap_err().to_string(), "unknown_job_field:action.api_key");
     }
@@ -680,7 +656,7 @@ mod tests {
             "resource_needs_absolute_path:trigger_path"
         );
         // A binding for a slot the artifact never declared is refused, not silently ignored.
-        let extra = json!({"trigger_path":fixture_path("approved/incoming"),"script":fixture_path("approved/procedures/validate.sh"),"endpoint":"ws://127.0.0.1:1/devtools/page/X"});
+        let extra = json!({"trigger_path":fixture_path("approved/incoming"),"script":fixture_path("approved/procedures/validate.sh"),"endpoint":"ws://127.0.0.1:1/hook"});
         assert_eq!(
             import_artifact(&artifact, &extra, true, "operator").unwrap_err().to_string(),
             "unknown_binding_slot:endpoint"
@@ -689,19 +665,6 @@ mod tests {
         assert_eq!(rebuilt["definition"]["trigger"]["path"], bindings["trigger_path"]);
         assert_eq!(rebuilt["definition"]["action"]["script"], bindings["script"]);
         assert_eq!(rebuilt["definition"]["imported_by"], "operator");
-    }
-
-    #[test]
-    fn cdp_page_binding_must_be_loopback_and_explicit() {
-        let artifact = export_artifact(&page_job()).unwrap();
-        let remote = json!({"page":"ws://example.com:9222/devtools/page/ABC"});
-        assert_eq!(
-            import_artifact(&artifact, &remote, true, "operator").unwrap_err().to_string(),
-            "resource_needs_loopback_devtools_page:page"
-        );
-        let loopback = json!({"page":"ws://127.0.0.1:9222/devtools/page/ABC"});
-        let loopback = json!({"page":"ws://127.0.0.1:9222/devtools/page/ABC"});
-        assert!(import_artifact(&artifact, &loopback, true, "operator").is_ok());
     }
 
     /// A deterministic job's controls travel with it. Exporting a job and importing it elsewhere must not
@@ -757,7 +720,7 @@ mod tests {
         assert_eq!(export_artifact(&bearer).unwrap_err().to_string(), "artifact_contains_credential");
         // A relative prompt path is not a machine binding, and an ordinary word is not a token.
         let mut relative = wake_job();
-        relative["action"]["prompt"] = json!("run scripts/whatsapp-reply.mjs --send; task-force review");
+        relative["action"]["prompt"] = json!("run scripts/review.mjs --check; task-force review");
         assert!(export_artifact(&relative).is_ok());
     }
 
@@ -884,12 +847,13 @@ mod tests {
     /// in on import either. Both are refused before anything is bound.
     #[test]
     fn import_refuses_raw_bindings_unknown_fields_and_credentials() {
-        let artifact = export_artifact(&page_job()).unwrap();
+        let artifact = export_artifact(&file_job()).unwrap();
+        let bound = json!({"trigger_path":fixture_path("approved/incoming"),"script":fixture_path("approved/procedures/validate.sh")});
         let mut raw = artifact.clone();
-        raw["trigger"]["websocket_url"] = json!("ws://127.0.0.1:9222/devtools/page/ABC");
+        raw["trigger"]["path"] = json!(fixture_path("approved/incoming"));
         assert_eq!(
-            import_artifact(&raw, &json!({"page":"ws://127.0.0.1:9222/devtools/page/ABC"}), true, "operator").unwrap_err().to_string(),
-            "artifact_contains_raw_binding:trigger.websocket_url"
+            import_artifact(&raw, &bound, true, "operator").unwrap_err().to_string(),
+            "artifact_contains_raw_binding:trigger.path"
         );
         let mut raw_script = artifact.clone();
         let script = fixture_path("approved/x.sh");
@@ -903,13 +867,13 @@ mod tests {
         let mut unknown = artifact.clone();
         unknown["authority"] = json!("operator");
         assert_eq!(
-            import_artifact(&unknown, &json!({"page":"ws://127.0.0.1:9222/devtools/page/ABC"}), true, "operator").unwrap_err().to_string(),
+            import_artifact(&unknown, &bound, true, "operator").unwrap_err().to_string(),
             "unknown_artifact_field:artifact.authority"
         );
-        let mut credential = artifact.clone();
+        let mut credential = export_artifact(&wake_job()).unwrap();
         credential["action"]["prompt"] = json!("use sk-abcdefghijklmnop");
         assert_eq!(
-            import_artifact(&credential, &json!({"page":"ws://127.0.0.1:9222/devtools/page/ABC"}), true, "operator").unwrap_err().to_string(),
+            import_artifact(&credential, &json!({}), true, "operator").unwrap_err().to_string(),
             "artifact_contains_credential"
         );
     }

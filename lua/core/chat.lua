@@ -607,14 +607,6 @@ function M.run(argv)
       print(memory.remember(line:sub(11)))
     elseif line:sub(1, 8) == "/recall " then
       each(memory.recall(line:sub(9), 10), memory_line, print)
-    elseif line:sub(1, 8) == "/search " then
-      each(memory.search_ledger(line:sub(9), nil, 20), function(row)
-        return string.format("%s  %s  %s", row.conversation_id, row.sender_id or "-", row.body)
-      end, print)
-    elseif line:sub(1, 14) == "/conversation " then
-      each(memory.conversation(line:sub(15), 50), function(row)
-        return string.format("%s  %s  %s", row.conversation_id, row.sender_id or "-", row.body)
-      end, print)
     elseif line:match("^/[%w_-]+$") or line:match("^/[%w_-]+%s") then
       -- A slash word that is not a command (a typo like /hlep, or a command missing its argument) used to
       -- start a full agent run with tools. A path ("/home/x ...") has a second slash and still goes through.

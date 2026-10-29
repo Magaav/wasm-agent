@@ -37,7 +37,7 @@ service restrictions also passed the small-model --check. These are coordinator-
 reported original-source observations, not worker-executed production proof.
 Actual incoming/own outgoing audio delivery, warmth/latency and full reliable
 coverage remain unverified in this source report; user samples may arrive meanwhile.
-Do NOT rerun pairing/retirement/activation or change that running service from a worker.
+Do NOT rerun pairing/activation or change that running service from a worker.
 
 The already-proved on-demand route is approved native peer → SERVER-side Node CLI
 → stdio MCP → numeric loopback Go API on127.0.0.1:28787, with the private profile

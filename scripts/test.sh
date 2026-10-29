@@ -743,35 +743,6 @@ WA_BIN="$BIN" bash scripts/test-update.sh 8874 | grep "the real sentinel's reque
 # The idle wait before an upgrade is bounded by *lack of progress*, not wall time. A legitimate
 # 40-minute turn must not make every queued upgrade wait, fail, and retry while the node stays busy.
 gate_run bash scripts/test-upgrade-idle.sh | grep 'upgrade idle-wait ok'
-# The ledger ingest path, on a scratch database. An observer (WhatsApp's own store, a mail sync, a
-# bot) is exactly the caller that has a message with no reply target and sometimes no send time, and
-# that caller used to crash inside the encoder: a nil in the SQL parameter list makes the JSON array
-# sparse, and the encoder refuses holes outright rather than writing a NULL. The columns have a
-# defined shape now; this is what keeps them that way.
-cat > "$DB.ledger.lua" <<'LUA'
-local memory = dofile('lua/core/memory.lua')
-memory.setup()
-memory.record_message({ conversation_id = 'c1', message_id = 'm1', body = 'hello' })
-memory.record_message({ conversation_id = 'c1', message_id = 'm1', body = 'hello' })
-memory.record_message({ conversation_id = 'c1', message_id = 'm1', body = 'hello again' })
-memory.record_conversation({ id = 'c2', title = 'no messages yet', kind = 'direct' })
-local rows = memory.conversation('c1', 10)
-assert(#rows == 1, 'one message must be one row, got ' .. #rows)
-assert(rows[1].body == 'hello again', 'a changed body must update in place, got ' .. tostring(rows[1].body))
-assert(rows[1].sent_at and rows[1].sent_at > 0, 'an unknown send time must take a defined shape')
-assert(rows[1].reply_to == '', 'a missing reply target must not be a hole in the parameters')
-local conversations = memory.conversations(50)
-local titles = {}
-for _, row in ipairs(conversations) do titles[row.id] = row.title end
-assert(titles['c2'] == 'no messages yet', 'a conversation with no messages must still be known')
-memory.meta_set('test_cursor', 42)
-assert(tonumber(memory.meta_get('test_cursor')) == 42, 'a cursor must round-trip through meta')
-local hits = memory.search_ledger('again', nil, 5)
-assert(#hits >= 1 and hits[1].conversation_id == 'c1', 'the ledger must be findable by its words')
-print('ledger ingest ok')
-LUA
-WA_SCRIPT="$DB.ledger.lua" "$BIN" --db "$DB.ledger" | grep "ledger ingest ok"
-rm -f "$DB.ledger.lua"
 # Context budget is per model (provider.budget), and it is NOT the same thing as
 # provider.limits, which fetches the account's rate limits for the UI. Confusing
 # the two silently disabled compaction once: the window came back nil, so
@@ -1998,8 +1969,7 @@ node scripts/test-sentinel-quarantine.mjs || exit 1
 node scripts/test-sentinel-install-proof.mjs || exit 1
 node scripts/test-install-speed.mjs || exit 1
 run_proof_fixture orchestration 33 node scripts/test-orchestration-e2e.cjs "$BIN"
-# The browser WhatsApp proofs are historical, not connector acceptance.
-# Canonical private connector/retirement checks; no real account or paid inference.
+# Private connector checks; no real account or paid inference.
 gate_run node --test --test-reporter=tap scripts/test-mcp-whatsapp.mjs
 gate_run python scripts/test-whatsapp-local.py
 if command -v go >/dev/null 2>&1; then
@@ -2008,7 +1978,6 @@ else
   echo 'SKIP WhatsApp Go connector: provision pinned Go SDK (docs/WHATSAPP-CONNECTOR.md)'
   SKIPPED=$((SKIPPED + 1))
 fi
-# Generic pipeline behavior remains independent of the retired WhatsApp source.
 run_proof_fixture pipeline 19 node scripts/test-job-pipeline.cjs
 gate_run bash scripts/test-deploy-ship.sh
 

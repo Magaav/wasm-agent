@@ -161,7 +161,7 @@ const CHILDREN = [
   { id: "child-no-merge-base", state: "completed", changed: "rust/wa-sentinel/src/main.rs", orphan: true,
     verdict: "cannot be computed", instruction: "NOT established" },
   // The two classes the hand-written predicate missed (the reviewer's findings 1 and 2).
-  { id: "child-job-definition", state: "completed", changed: "jobs/whatsapp-copilot.json",
+  { id: "child-job-definition", state: "completed", changed: "jobs/disk-reclaim.json",
     verdict: "deploy required at the wave's end", instruction: "exactly ONE deploy" },
   { id: "child-upgrade-script", state: "completed", changed: "scripts/upgrade.sh",
     verdict: "deploy required at the wave's end", instruction: "exactly ONE deploy" },
@@ -354,7 +354,7 @@ async function main() {
     "a branch with no merge base names that as the reason");
   check(blockFor("child-dirty-unmeasurable").includes("uncommitted_work_reported_but_not_measurable"),
     "recorded uncommitted work the pass could not see is named, not ignored");
-  check(blockFor("child-job-definition").includes("jobs/whatsapp-copilot.json"),
+  check(blockFor("child-job-definition").includes("jobs/disk-reclaim.json"),
     "a job definition is deploy impact end to end");
   check(blockFor("child-upgrade-script").includes("scripts/upgrade.sh"),
     "upgrade.sh is deploy impact end to end");

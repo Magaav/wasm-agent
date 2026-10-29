@@ -124,9 +124,9 @@ local function rename_index(from, to, definition)
 end
 
 local function migrate_shape()
-  -- 1. The external inbox/ledger frees the word first: it holds `messages`, and the transcript needs
-  --    it. Recognised by its own column, so this cannot fire on an already-migrated database, where
-  --    `messages` is the transcript and has no `conversation_id`.
+  -- 1. A database from before the transcript owned the name `messages` used it for another table;
+  --    move that one aside. Recognised by its own column, so this cannot fire on a migrated database,
+  --    where `messages` is the transcript and has no `conversation_id`.
   if table_exists("messages") and not table_exists("ledger_messages")
      and has_column("messages", "conversation_id") then
     exec("ALTER TABLE messages RENAME TO ledger_messages")
@@ -470,33 +470,7 @@ function M.forget(memory_id)
   end)
 end
 
--- ------------------------------------------------------------------ ledger
-
-function M.ingest_observation(source, payload, device_id)
-  local raw = type(payload) == "string" and payload or json.encode(payload)
-  local hash = host.sha256(raw)
-  exec("INSERT OR IGNORE INTO observations(id,source,device_id,observed_at,payload_sha256,payload,ingested_at) " ..
-       "VALUES(?,?,?,?,?,?,?)",
-       {hash, source or "unknown", device_id or "", host.now(), hash, raw, host.now()})
-  return hash
-end
-
-function M.record_conversation(conversation)
-  local id = tostring(conversation.id or "")
-  if id == "" then error("conversation_identity_required") end
-  local now = conversation.updated_at or host.now()
-  -- A conversation is known even when none of its messages are new, which is why this exists
-  -- separately from `record_message`: an inbox that only knows about chats that just spoke is an
-  -- inbox that forgets everyone else.
-  exec("INSERT INTO conversations(id,kind,title,created_at,updated_at) VALUES(?,?,?,?,?) " ..
-       "ON CONFLICT(id) DO UPDATE SET kind=excluded.kind, title=excluded.title, updated_at=excluded.updated_at",
-       {id, conversation.kind or "unknown", conversation.title or "", now, now})
-end
-
--- `meta` is the key/value table beside the ledger, and a cursor belongs there: it is the position
--- this database has read to in an external source, so it has to move in the same transaction as the
--- rows it describes. A cursor in a separate file drifts from the ledger the first time one write
--- succeeds and the other does not.
+-- `meta` is the node's key/value table.
 function M.meta_get(key)
   return meta_get(key)
 end
@@ -505,126 +479,7 @@ function M.meta_set(key, value)
   return meta_set(key, value)
 end
 
-local record_message, apply_entry
-function M.record_message(message)
-  return in_transaction(function() return record_message(message) end)
-end
-
-function record_message(message)
-  local conversation_id = tostring(message.conversation_id or "")
-  local message_id = tostring(message.message_id or "")
-  if conversation_id == "" or message_id == "" then error("message_identity_required") end
-  local body = tostring(message.body or "")
-  local now = message.observed_at or host.now()
-  exec("INSERT INTO conversations(id,kind,title,created_at,updated_at) VALUES(?,?,?,?,?) " ..
-       "ON CONFLICT(id) DO UPDATE SET updated_at=excluded.updated_at",
-       {conversation_id, message.kind or "unknown", message.title or "", now, now})
-  local existing = query("SELECT body_sha256, sent_at, reply_to FROM ledger_messages " ..
-                         "WHERE conversation_id=? AND message_id=?",
-                         {conversation_id, message_id})
-  local hash = host.sha256(body)
-  -- A SQL parameter list cannot carry NULL here: the JSON encoder refuses a table with holes, so a nil
-  -- parameter is a hard error ("invalid table: sparse array") rather than a NULL - which is how a
-  -- message with no reply target crashed the first WhatsApp ingest, and how the *update* branch kept
-  -- crashing after the insert branch was fixed. Every nullable column therefore gets a concrete value:
-  -- an unknown send time becomes the observation time on insert and stays what it was on update, and
-  -- "no reply target" is the empty string.
-  if #existing == 0 then
-    local sent_at = message.sent_at or now
-    local reply_to = message.reply_to or ""
-    exec("INSERT INTO ledger_messages(conversation_id,message_id,sender_id,direction,sent_at,observed_at," ..
-         "body,reply_to,media,source,body_sha256) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-         {conversation_id, message_id, message.sender_id or "", message.direction or "incoming",
-          sent_at, now, body, reply_to, json.encode(message.media or {}),
-          message.source or "observer", hash})
-    exec("INSERT INTO ledger_messages_fts(body,conversation_id,message_id) VALUES(?,?,?)",
-         {body, conversation_id, message_id})
-  elseif existing[1].body_sha256 ~= hash then
-    -- "Keep whatever is there" is read and passed rather than expressed as COALESCE(?, column): a nil
-    -- parameter is impossible in this list, so the value it would have protected has to come from here.
-    local sent_at = message.sent_at or existing[1].sent_at or now
-    local reply_to = message.reply_to or existing[1].reply_to or ""
-    exec("UPDATE ledger_messages SET body=?, body_sha256=?, sender_id=?, direction=?, " ..
-         "sent_at=?, observed_at=?, reply_to=?, media=?, source=? " ..
-         "WHERE conversation_id=? AND message_id=?",
-         {body, hash, message.sender_id or "", message.direction or "incoming", sent_at, now,
-          reply_to, json.encode(message.media or {}), message.source or "observer",
-          conversation_id, message_id})
-    exec("DELETE FROM ledger_messages_fts WHERE conversation_id=? AND message_id=?",
-         {conversation_id, message_id})
-    exec("INSERT INTO ledger_messages_fts(body,conversation_id,message_id) VALUES(?,?,?)",
-         {body, conversation_id, message_id})
-  end
-end
-
-function M.search_ledger(text, conversation_id, limit)
-  limit = limit or 20
-  local match = M.fts_query(text)
-  if match == "" then return {} end
-  local sql = "SELECT msg.*, bm25(ledger_messages_fts) AS rank FROM ledger_messages_fts " ..
-              "JOIN ledger_messages msg ON msg.conversation_id=ledger_messages_fts.conversation_id " ..
-              "AND msg.message_id=ledger_messages_fts.message_id WHERE ledger_messages_fts MATCH ?"
-  local params = {match}
-  if conversation_id then sql = sql .. " AND msg.conversation_id=?"; params[#params + 1] = conversation_id end
-  sql = sql .. " ORDER BY rank LIMIT ?"
-  params[#params + 1] = limit
-  return query(sql, params)
-end
-
-function M.conversation(conversation_id, limit)
-  limit = limit or 50
-  local rows = query("SELECT * FROM ledger_messages WHERE conversation_id=? " ..
-                     "ORDER BY COALESCE(sent_at,observed_at) DESC LIMIT ?", {conversation_id, limit})
-  local out = {}
-  for index = #rows, 1, -1 do out[#out + 1] = rows[index] end
-  return out
-end
-
-function M.conversations(limit)
-  limit = limit or 50
-  return query("SELECT c.*, (SELECT COUNT(*) FROM ledger_messages m WHERE m.conversation_id=c.id) AS message_count " ..
-               "FROM conversations c ORDER BY c.updated_at DESC LIMIT ?", {limit})
-end
-
--- The newest message the operator sent in one conversation *after* a given moment, or nil.
---
--- It exists so a responder can ask the one question the ledger alone can answer: "has the operator already
--- taken this conversation over?" - asked all the way through the run, not only at the moment the message was
--- picked up. Bounded to one row and one index seek, so asking it again before an external effect costs
--- nothing next to the effect itself. An unreadable ledger answers nil exactly like an unanswered
--- conversation does, which is why the caller must treat "no proof" and "no answer" together (fail closed)
--- rather than reading nil as permission.
-function M.newest_outgoing_after(conversation_id, since)
-  local id = tostring(conversation_id or "")
-  local at = tonumber(since)
-  if id == "" or not at or at <= 0 then return nil end
-  local rows = query("SELECT message_id, body, sent_at, observed_at FROM ledger_messages " ..
-                     "WHERE conversation_id=? AND direction='outgoing' AND COALESCE(sent_at,observed_at) > ? " ..
-                     "ORDER BY COALESCE(sent_at,observed_at) DESC LIMIT 1", {id, at})
-  return rows[1]
-end
-
--- One conversation record - its kind and its title - for a scoped tool that must name the
--- conversation it is bound to instead of guessing a label from message content. A responder child
--- that could only see message bodies reported a group as "futebol/bet" when its title was
--- "A Casa Lar | 🏠", because nothing it was given carried the name.
-function M.conversation_record(conversation_id)
-  local id = tostring(conversation_id or "")
-  if id == "" then return nil end
-  local rows = query("SELECT * FROM conversations WHERE id=? LIMIT 1", {id})
-  return rows[1]
-end
-
--- One ledger row by its message id, for resolving a trusted event. Returns nil
--- when the id is absent OR names more than one conversation: an ambiguous id is
--- not an identity, and picking one would let an event choose its own scope.
-function M.ledger_message(message_id)
-  message_id = tostring(message_id or "")
-  if message_id == "" then return nil end
-  local rows = query("SELECT * FROM ledger_messages WHERE message_id=? LIMIT 2", {message_id})
-  if #rows ~= 1 then return nil end
-  return rows[1]
-end
+local apply_entry
 
 function M.stats()
   local function count(sql)
@@ -633,9 +488,6 @@ function M.stats()
   end
   return {
     memories = count("SELECT COUNT(*) FROM memories WHERE deleted_at IS NULL"),
-    conversations = count("SELECT COUNT(*) FROM conversations"),
-    ledger_messages = count("SELECT COUNT(*) FROM ledger_messages"),
-    observations = count("SELECT COUNT(*) FROM observations"),
     sessions = count("SELECT COUNT(*) FROM sessions"),
     messages = count("SELECT COUNT(*) FROM messages"),
     runs = count("SELECT COUNT(*) FROM runs"),

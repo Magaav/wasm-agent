@@ -170,7 +170,7 @@ async function main() {
   const noop = stepScript(home, "noop.sh", `printf '%s' '{"events":[]}'`);
   const nokey = stepScript(home, "nokey.sh", `printf '%s' '{"events":[{"conversation_id":"c@c.us"}]}'`);
   const foreach = (max = 8) => ({ kind: "foreach", from: "events", key: "message_id", max,
-    step: { kind: "subagent", profile: "whatsapp-responder", prompt: "Decide; never send without approval.", timeout_seconds: 6 } });
+    step: { kind: "subagent", profile: "reviewer", prompt: "Decide; never send without approval.", timeout_seconds: 6 } });
 
   const withList = job(home, env, "pipeline-list", [{ kind: "run", script: list, returns: "events", timeout_seconds: 30 }, foreach()]);
   const withEmpty = job(home, env, "pipeline-empty", [{ kind: "run", script: empty, returns: "events", timeout_seconds: 30 }]);
@@ -188,7 +188,7 @@ async function main() {
   const keys = fixture.state.starts.map((start) => start.idempotency_key).sort();
   check(keys.join(",") === `pipeline-list:${withList.revision}:m1,pipeline-list:${withList.revision}:m2`,
     `each child's idempotency key is the item's own id: ${keys.join(",")}`);
-  check(fixture.state.starts.every((start) => start.profile === "whatsapp-responder"), "each child carries the profile");
+  check(fixture.state.starts.every((start) => start.profile === "reviewer"), "each child carries the profile");
   check(fixture.state.starts.map((start) => start.event && start.event.message_id).sort().join(",") === "m1,m2",
     "each child's trusted event names its own item, not the pipeline's event");
 

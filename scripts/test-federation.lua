@@ -26,8 +26,8 @@ nodes.remote_call=function(id,capability,args)
   calls[#calls+1]={id=id,capability=capability,args=args}
   if id=='peer-2' then return {error='plugin_not_found:federation'} end
   if args.action=='catalog' then return {ok=true,tools={
-    {name='whatsapp_read',description='Read a chat',parameters={type='object',properties={chat={type='string'}}},effect='read'},
-    {name='whatsapp_send',description='Send',parameters={type='object',properties={}},effect='write'}}} end
+    {name='chat_read',description='Read a chat',parameters={type='object',properties={chat={type='string'}}},effect='read'},
+    {name='chat_send',description='Send',parameters={type='object',properties={}},effect='write'}}} end
   if args.action=='call' then return {ok=true,ran_on=id,tool=args.name,args=args.args} end
 end
 package.loaded=package.loaded or {}
@@ -39,10 +39,10 @@ check(cache.peers['peer-1'] and #cache.peers['peer-1'].tools==2,'the online peer
 check(cache.peers['peer-2'] and cache.peers['peer-2'].error,'an older peer is recorded with its reason, not dropped silently')
 check(cache.peers['peer-3']==nil,'an offline peer is not asked')
 local names={}; for _,s in ipairs(federation.schemas()) do names[s['function'].name]=s['function'].description end
-check(names['peer_openclaw__whatsapp_read'] and names['peer_openclaw__whatsapp_read']:find('on peer openclaw',1,true),'the peer tool is listed under the peer name')
-check(federation.is_read('peer_openclaw__whatsapp_read') and not federation.is_read('peer_openclaw__whatsapp_send'),'the peer-approved tier travels')
-local answer=federation.call('peer_openclaw__whatsapp_read',{chat='x'})
-check(answer.ok and answer.ran_on=='peer-1' and answer.tool=='whatsapp_read' and answer.args.chat=='x','a call runs on the peer that holds it')
+check(names['peer_openclaw__chat_read'] and names['peer_openclaw__chat_read']:find('on peer openclaw',1,true),'the peer tool is listed under the peer name')
+check(federation.is_read('peer_openclaw__chat_read') and not federation.is_read('peer_openclaw__chat_send'),'the peer-approved tier travels')
+local answer=federation.call('peer_openclaw__chat_read',{chat='x'})
+check(answer.ok and answer.ran_on=='peer-1' and answer.tool=='chat_read' and answer.args.chat=='x','a call runs on the peer that holds it')
 check(federation.call('peer_nobody__thing',{}).error=='federation_tool_unknown','an unknown peer tool is refused locally')
 check(#federation.local_name(string.rep('n',40),string.rep('t',40))<=64,'names stay within the 64-character limit')
 
@@ -52,8 +52,8 @@ local before=#calls; federation.schemas(); check(#calls==before,'a fresh cache a
 -- The tool layer exposes and routes them for a master only.
 dofile=real_dofile
 local tools=dofile('lua/core/tools.lua')
-check(tools.dispatch(memory,'peer_openclaw__whatsapp_read',{},'guest',{}).error:find('forbidden_for_role',1,true),'a guest cannot use federated tools')
-check(tools.has_effect('peer_openclaw__whatsapp_send') and not tools.has_effect('peer_openclaw__whatsapp_read'),'effects follow the peer tier')
+check(tools.dispatch(memory,'peer_openclaw__chat_read',{},'guest',{}).error:find('forbidden_for_role',1,true),'a guest cannot use federated tools')
+check(tools.has_effect('peer_openclaw__chat_send') and not tools.has_effect('peer_openclaw__chat_read'),'effects follow the peer tier')
 -- Operator-directed send: exported only where configs and the CLI exist; profile and chat scope enforced.
 local paths=dofile('lua/core/paths.lua')
 local opdir=paths.data()..'/operator-fixture'

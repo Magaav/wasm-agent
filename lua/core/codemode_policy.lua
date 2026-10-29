@@ -102,7 +102,7 @@ M.guidance=table.concat({
  'Code mode is the preferred programmatic coding path for this run: one `codemode` call runs a JavaScript script that calls tools as `await tools.<name>(args)` and returns only what you need.',
  'Use code mode for: (1) connectors - WhatsApp, mail and every other MCP or peer connector exist only inside code mode; (2) two or more dependent calls, loops, or searching and filtering large output (history, logs, many files); (3) read -> edit -> verify sequences.',
  'Use ordinary tools for: one quick read, edit or bash call; and control-plane actions, which code mode refuses: subagent, session_worktree, resume_session, integrate, operation start/cancel, resource reconcile, spell save/run, client, shell, remote.',
- 'WhatsApp: the linked-device connector for recent messages; search_ledger, conversation and list_conversations for the older ledger - all callable from a script.',
+ 'WhatsApp is the linked-device connector (mcp_whatsapp_*, or peer_<node>__* where another node holds it): read and send through it from a script.',
  'Inside a script, searchTools("text") finds tools (searchTools("*") lists all) and describeTool(name) gives a schema. Filtered output can hide relevant evidence: inspect complete nested originals when needed. Never replay a failed effectful script; unknown effects require explicit reconciliation. WASM_AGENT_CODEMODE=off disables code mode for a new run. The VM is not the OS security boundary for bash/write.',
 },'\n')
 function M.prompt(catalog)

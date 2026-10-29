@@ -230,13 +230,13 @@ impl Runner {
             .as_array()
             .unwrap()
             .iter()
-            .filter(|j| j["enabled"] == true && !wa_jobs::retired_whatsapp_job(j["id"].as_str().unwrap_or("")))
+            .filter(|j| j["enabled"] == true)
         {
             let id = job["id"].as_str().unwrap();
             let rev = job["revision"].as_i64().unwrap();
             let kind = job["trigger"]["kind"].as_str().unwrap_or("");
             let key = format!("{id}:{rev}");
-            if matches!(kind, "cdp" | "file")
+            if kind == "file"
                 && !self.observers.contains_key(&key)
                 && self.observers.len() >= 8
             {
@@ -246,17 +246,6 @@ impl Runner {
                 continue;
             }
             match kind {
-                "cdp" => {
-                    let key = format!("{id}:{rev}");
-                    if !self.observers.contains_key(&key) && self.observers.len() < 8 {
-                        let job = job.clone();
-                        let source = s.clone();
-                        self.observers.insert(
-                            key,
-                            std::thread::spawn(move || crate::cdp::watch(source, job)),
-                        );
-                    }
-                }
                 "file" => {
                     if !self.observers.contains_key(&key) {
                         let job = job.clone();

@@ -1,6 +1,6 @@
 # WhatsApp linked-device connector (source-ready; live acceptance pending)
 
-rrent dated coordinator-reported live activation/read bridge, bounded name refresh
+Current dated coordinator-reported live activation/read bridge, bounded name refresh
 and unresolved mutation-hold coverage: [WHATSAPP-COVERAGE.md](WHATSAPP-COVERAGE.md).
 Authenticated transport/readiness does not certify fully named or unheld history.
 
@@ -23,8 +23,8 @@ Historical first-delivery evidence is not live acceptance.
 Canonical implementation: `connectors/whatsapp` (`wa-whatsapp`). No Chrome/CDP,
 UI input, Sentinel tick, LLM login or hosted STT/translation is involved.
 **Not deployed or paired by the implementation worker.** Cloud execution and a
-private human terminal are required for activation. Follow [migration](WHATSAPP-MIGRATION.md)
-first; do not run a second sender alongside an old installation.
+private human terminal are required for activation. Do not run a second sender for
+the same account alongside an existing installation.
 
 This uses the unofficial whatsmeow multi-device protocol, not an official Meta API.
 Account-policy/blocking risk, upstream protocol changes, incomplete initial history,
@@ -51,7 +51,7 @@ or external exactly-once delivery. Pins, checksums and original license texts ar
   An existing selected account can use the OFFLINE owner command `scope --all-chats`:
   it pauses posting and requires a fresh future activation cutoff, without resetting
   existing approved pending tasks, transcripts or unknown effects. No title guesses,
-  other-account discovery or automatic legacy ID conversion. The app journal is separate; the restricted device/session store also contains
+  other-account discovery or automatic ID conversion. The app journal is separate; the restricted device/session store also contains
   the SDK's optional decrypted-event replay buffer, never exposed by the app API.
   The paired identity must match. Logout pauses posting, advances generation, clears activation
   and reports `needs_pairing`; re-pairing needs a private human again.
@@ -231,9 +231,7 @@ refusal with SSH from a model tool. No model-provider credentials are required.
    policy before production. Metadata/protocol fixtures are not a real engine/model
    quality or production Python installation proof. No provider login/credentials.
 
-4. Complete the legacy check/apply/settlement and verified identity mapping in
-   [WHATSAPP-MIGRATION.md](WHATSAPP-MIGRATION.md). Preserve unknowns and historical
-   stores separately. Then initialize the new state **OFF**, with explicit PT for
+4. Initialize the new state **OFF**, with explicit PT for
    this operator. Replace variables privately; no real account config is committed:
 
    ```sh
@@ -262,10 +260,10 @@ refusal with SSH from a model tool. No model-provider credentials are required.
      --ocr-worker "$RELEASE/whatsapp-ocr-local.py"
    ```
 
-   Stop that foreground instance, then activate only after the human's verified retirement receipt:
+   Stop that foreground instance, then activate:
 
    ```sh
-   "$WA" activate --state "$STATE" --approve-transcript-posting --retirement-receipt "$PRIVATE_RECEIPT"
+   "$WA" activate --state "$STATE" --approve-transcript-posting
    "$WA" posting --state "$STATE" --set enable   # separate audio reply toggle (incoming and own outgoing)
    "$WA" status --state "$STATE"
    # The node UI exposes the same policy as one checkbox. Its master-only
@@ -290,7 +288,7 @@ The Go API binds numeric loopback by default, requires a private 256-bit token f
 account + generation on EVERY operation and an explicit read scope. Owner-wide
 service mode does not widen a child: the locally approved operator MCP/CLI binding
 must set BOTH `account_wide:true` and `operator_account_read:true`. Model arguments
-cannot set either. Native `whatsapp_read` STILL fixes one trusted-event conversation.
+cannot set either.
 A selected binding sends its exact conversations as a server-side SQL scope, never
 fetches unrelated chats and never loops once per chat. `read_snapshot`, `list_chats`
 and `posting_status` return one total **row AND byte** bounded page:4MiB encoded
@@ -312,8 +310,8 @@ No arbitrary SQL, authentication-store or media-key access.
 While serving, use authenticated `/status`; offline CLI `status` cannot take the owner
 lock of a running server. Offline status has no live connection observation.
 
-Existing `mcp-whatsapp.mjs`, compatibility read/lookup CLIs and the Lua WhatsApp facade
-are repointed to `backend: linked_device`. A locally approved profile binds:
+`mcp-whatsapp.mjs` and the read-only `scripts/whatsapp-read.mjs` CLI use
+`backend: linked_device`. A locally approved profile binds:
 
 ```json
 {"resources":{"backend":"linked_device","account":"<exact-PN-JID>","generation":1,
@@ -326,9 +324,11 @@ are repointed to `backend: linked_device`. A locally approved profile binds:
 For a narrower profile omit both wide flags and set `allowed_conversations` to its
 exact approved IDs. No existing/delegated profile is automatically widened. Operator
 on-demand account reads use `scripts/whatsapp-read.mjs --profile-file <private-file>`
-(or the explicitly configured read-only MCP); this does NOT remove the native
-trusted-event guard. Raw API credentials are account-owner credentials; delegated
-children receive only their scoped facade, not token values or arbitrary HTTP/FS.
+(or the explicitly configured read-only MCP). The agent sees that MCP as
+`mcp_whatsapp_*` tools (or federated `peer_<node>__*` tools where another node holds
+the connector) and calls them only from code mode: `await tools.<name>(args)`.
+Raw API credentials are account-owner credentials; delegated children receive only
+their scoped MCP binding, not token values or arbitrary HTTP/FS.
 
 Token VALUES are never arguments/URLs. Provision authorized-device credential files
 through the human's approved private channel, not model output. Remote access needs
@@ -337,12 +337,10 @@ transport); the connector does not configure it. Plain exposed ports, insecure T
 credential URLs and redirects are refused by the client. Loopback HTTP is allowed only
 for numeric loopback. Network proxy/install proof is an operator responsibility.
 
-The existing generic owned-MCP-send denial, trusted event/profile scope, approval,
-precedence, reservations and verification code are retained. GENERAL model sends
+The generic owned-MCP-send denial is retained. GENERAL model sends
 are refused BEFORE reservation because cross-device draft visibility is **unsupported**,
 not “no draft.” This deliberately does not weaken that safety rule. Deterministic
 transcripts are a separate human-activated policy, not an unrestricted model tool.
-Historical ledger reads stay read-only; no new responder/wake is enabled.
 
 ## Backup, upgrade and rollback
 
@@ -363,8 +361,8 @@ held across rollback; never restore an old “ready” outbox over a later dispa
 compilation/event mappings, fake WhatsApp transport, real HTTP handlers and private
 process fixtures. Set `WA_TEST_PYTHON` for the warm-process fixture; missing it is a skip.
 `node --test --test-reporter=tap scripts/test-mcp.mjs scripts/test-mcp-whatsapp.mjs`,
-`python scripts/test-whatsapp-local.py`, Rust wa-jobs tests and source/embedded Lua
-checks cover the boundary/retirement behavior. These are deterministic fixtures, NOT
+`python scripts/test-whatsapp-local.py` and Rust wa-jobs tests cover the boundary
+behavior. These are deterministic fixtures, NOT
 recognition-quality measurements or proof of real pairing/send/reconnect behavior.
 Windows execution and Linux cross-build do NOT prove Linux runtime/systemd support.
 Production install, human pairing, real identity mapping, history coverage, media

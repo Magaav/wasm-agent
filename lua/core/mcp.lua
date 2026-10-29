@@ -147,7 +147,7 @@ function M.validate(def)
  if type(def.tools)~='table' then return 'mcp_tool_permissions_required' end
  for name,effect in pairs(def.tools)do if type(name)~='string' or name=='' or #name>128 or (effect~='read' and effect~='write')then return 'invalid_mcp_tool_permission' end end
  if def.tools.send_message and def.transport=='stdio' then
-  for _,arg in ipairs(def.args)do if arg:gsub('\\','/'):lower():match('[/]mcp%-whatsapp%.mjs$') or arg:lower()=='mcp-whatsapp.mjs' then return 'whatsapp_send_requires_scoped_facade' end end
+  for _,arg in ipairs(def.args)do if arg:gsub('\\','/'):lower():match('[/]mcp%-whatsapp%.mjs$') or arg:lower()=='mcp-whatsapp.mjs' then return 'whatsapp_send_uses_operator_route' end end
  end
  return nil
 end

@@ -147,9 +147,8 @@ fn open_db(path: &str) -> Connection {
     let connection = Connection::open_with_flags(&database, flags).expect("open database");
     connection
         .execute_batch(
-            // FULL, not NORMAL: `effect_sends` is the durable reservation taken before a WhatsApp send,
-            // and in WAL mode NORMAL can lose the last commits on power loss - the send would then be
-            // replayed after reboot. Every other store here already uses FULL.
+            // FULL, not NORMAL: in WAL mode NORMAL can lose the last commits on power loss, and the
+            // node's durable records (claims, operations, receipts) must survive a reboot.
             "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;\
              PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;",
         )
@@ -157,8 +156,8 @@ fn open_db(path: &str) -> Connection {
     connection
 }
 
-/// Create the node's state directory readable by its owner only. It holds transcripts, the WhatsApp
-/// ledger, the node key and credentials; with a default umask those were readable by every local user.
+/// Create the node's state directory readable by its owner only. It holds transcripts, the node key
+/// and credentials; with a default umask those were readable by every local user.
 /// An existing directory is tightened only if it is the node's own `.wasm-agent`.
 pub(crate) fn private_dir(path: &std::path::Path) {
     let existed = path.exists();

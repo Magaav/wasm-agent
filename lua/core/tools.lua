@@ -285,17 +285,8 @@ M.shared = {
     limit = { type = "integer", minimum = 1, maximum = 100 } }, { "session_id" }),
 }
 
--- Admin only: the ledger and the pi-style environment tools.
+-- Admin only: the pi-style environment tools.
 M.admin = {
-  schema("search_ledger", "Search the historical external ledger for literal text. New linked-device WhatsApp messages use scoped connector reads; no automatic legacy import.", {
-    query = { type = "string" },
-    conversation_id = { type = "string" },
-    limit = { type = "integer", minimum = 1, maximum = 50 } }, { "query" }),
-  schema("conversation", "Read the most recent messages of one conversation, oldest first.", {
-    conversation_id = { type = "string" },
-    limit = { type = "integer", minimum = 1, maximum = 200 } }, { "conversation_id" }),
-  schema("list_conversations", "List conversations known to the ledger, most recently active first.", {
-    limit = { type = "integer", minimum = 1, maximum = 200 } }),
   -- Master only: deleting is destructive, and memory is shared across roles, so a
   -- guest must not be able to erase the operator's stored facts. Without this
   -- tool the agent could only ever accumulate - it said so itself, and left a
@@ -543,17 +534,15 @@ M.tier_of = {
   edit = "environment", ls = "environment", grep = "environment", graph = "environment",
   edit_many="environment",write_many="environment",grep_many="environment",symbol_source_many="environment",
   shell = "shell",
-  search_ledger = "ledger", conversation = "ledger", list_conversations = "ledger",
   client = "client",
   spell_save = "spells", spell_run = "spells", spell_list = "spells",
   spell_get = "spells", spell_forget = "spells", spell_export = "spells", spell_compose = "spells",
-  whatsapp_read = "whatsapp", whatsapp_conversation = "whatsapp", whatsapp_decide = "whatsapp", whatsapp_send = "whatsapp",
   nodes = "nodes", remote = "nodes",
 }
 
 local TIER_ORDER = {
-  "memory", "sessions", "capabilities", "subagents", "environment", "shell", "ledger",
-  "client", "spells", "nodes", "whatsapp", "mcp", "plugins",
+  "memory", "sessions", "capabilities", "subagents", "environment", "shell",
+  "client", "spells", "nodes", "mcp", "plugins",
 }
 
 -- The advertised tool surface, grouped by tier (not a complete model request).
@@ -580,20 +569,6 @@ local function wasm_plugins()
   local ok, raw = pcall(host.plugins)
   if not ok or not raw then return {} end
   return json.decode(raw) or {}
-end
-
--- The scoped WhatsApp responder tools. Their schemas live in
--- lua/core/whatsapp.lua; they are offered only to a master turn, and dispatch
--- re-checks the profile ceiling before calling the module. A missing module (an
--- older deployment) yields no schemas rather than a broken tool list.
-local WHATSAPP_TOOLS = { whatsapp_read = true, whatsapp_conversation = true, whatsapp_decide = true, whatsapp_send = true }
-
-local function whatsapp_schemas()
-  local ok, module = pcall(dofile, "lua/core/whatsapp.lua")
-  if not ok or type(module) ~= "table" or type(module.schemas) ~= "function" then return {} end
-  local listed, list = pcall(module.schemas)
-  if not listed or type(list) ~= "table" then return {} end
-  return list
 end
 
 local function admin_names()
@@ -631,9 +606,6 @@ local CUES = {
   session_fixture = "Export a session as a reproducible fixture",
   session_worktree = "Point this session's tools at their own checkout",
   resource = "Inspect resource ownership and reconcile interrupted effects",
-  search_ledger = "Search the historical external ledger",
-  conversation = "Read one conversation's recent messages",
-  list_conversations = "List conversations in the ledger",
   bash = "Run a shell command on this machine",
   operation = "Run or collect a supervised long command",
   read = "Read a file (text or image), paged",
@@ -664,9 +636,6 @@ local CUES = {
   remote = "Run a capability on another node",
   nodes = "List this node and its peers",
   tool_result = "Read an exact byte range of a truncated tool result",
-  whatsapp_read = "Read the incoming conversation for this run",
-  whatsapp_decide = "Record reply/no_reply for this message",
-  whatsapp_send = "General replies refused: cross-device drafts unsupported",
 }
 
 function M.snippet(name) return CUES[name] end
@@ -710,7 +679,6 @@ function M.catalog(role)
       local fok, federated = pcall(function() return dofile('lua/core/federation.lua').schemas() end)
       for _, item in ipairs(fok and federated or {}) do list[#list+1]=item end
     end
-    for _, item in ipairs(whatsapp_schemas()) do list[#list + 1] = item end
     local plugins=wasm_plugins()
     table.sort(plugins,function(a,b)return tostring(a.name)<tostring(b.name) end)
     for _, plugin in ipairs(plugins) do
@@ -720,13 +688,9 @@ function M.catalog(role)
   return list
 end
 
--- Tools the prompt must not offer, though the catalog keeps them executable. The scoped
--- WhatsApp responder tools run only from an approved child: `dispatch` refuses them
--- without `ctx.subagent`, so a parent that sees them can only ever get
--- `whatsapp_requires_subagent`. Hiding them removes a dead choice and the schemas it
--- costs; the child still receives them through `all_for`, which reads the catalog.
+-- Tools the prompt must not offer, though the catalog keeps them executable; a child still
+-- receives them through `all_for`, which reads the catalog.
 local PROMPT_HIDDEN = {}
-for name,value in pairs(WHATSAPP_TOOLS) do PROMPT_HIDDEN[name]=value end
 PROMPT_HIDDEN.integrate=true -- Task-owner-only; parent cannot execute it. Child all_for reads catalog.
 PROMPT_HIDDEN.route_task=true -- Orchestration-mode-only; `M.all` re-adds it for that coordinator.
 
@@ -1316,32 +1280,6 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
       return page
     end
     return result
-  elseif WHATSAPP_TOOLS[name] then
-    -- The scoped responder tools. They are only reachable from a subagent whose
-    -- approved profile names them, and the trusted profile/event/effects snapshot
-    -- arrives on ctx, never from the arguments.
-    if not ctx.subagent then return { error = "whatsapp_requires_subagent" } end
-    local module = dofile("lua/core/whatsapp.lua")
-    if type(module) ~= "table" or type(module.dispatch) ~= "function" then
-      return { error = "whatsapp_module_unavailable" }
-    end
-    return module.dispatch(memory, name, args, {
-      profile = ctx.subagent.profile,
-      event = ctx.subagent.event,
-      effects = ctx.subagent.effects,
-      sends = ctx.subagent.sends,
-      -- The ledger handle, so a send can ask the one question only the ledger can answer: has the operator
-      -- replied in this conversation since the message this run was woken for? It is passed here
-      -- deliberately - the child's own tools cannot reach the ledger, and this is not the ledger, it is one
-      -- yes/no question asked at the moment of the effect.
-      memory = memory,
-    })
-  elseif name == "search_ledger" then
-    return memory.search_ledger(args.query or "", args.conversation_id, args.limit or 20)
-  elseif name == "conversation" then
-    return memory.conversation(args.conversation_id or "", args.limit or 50)
-  elseif name == "list_conversations" then
-    return memory.conversations(args.limit or 50)
   elseif name == "bash" then
     if not args.command or args.command == "" then return { error = "command_required" } end
     local timeout = args.timeout_seconds
@@ -1745,7 +1683,7 @@ local READ_ONLY = {
   search_messages_many=true,symbol_source_many=true, ls = true, tool_result = true, skill = true,
   graph = true, diagnose = true, capabilities = true, tool_search=true, web_search=true,web_read=true,nodes = true,
   recall = true, memories = true, sessions = true, session = true,
-  search_messages = true, search_ledger = true, conversation = true, list_conversations = true,
+  search_messages = true,
   spell_list = true, spell_get = true,
 }
 

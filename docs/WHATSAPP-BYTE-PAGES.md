@@ -1,7 +1,7 @@
 # WhatsApp byte-bounded pages and exact fields (page contract v2)
 
 This corrects the remaining count-only read defect against9be5376e. It changes only
-read construction/transport, not pairing, scope grants, posting, gaps or legacy cleanup.
+read construction/transport, not pairing, scope grants, posting or gaps.
 No activation/live-account acceptance is implied.
 
 ## Wire contract
@@ -65,10 +65,11 @@ node scripts/whatsapp-read.mjs --profile-file "$PRIVATE_OPERATOR_PROFILE" \
   --offset 0 --length 16384
 ```
 
-Repeat with next_offset until complete. Native `whatsapp_read` also accepts row,
-field, version, offset and length, ALWAYS scoped to its immutable trusted-event chat.
-It propagates ordered oversized outcomes rather than pretending the conversation
-is empty. Historical-ledger profiles explicitly refuse this linked-device field API.
+Repeat with next_offset until complete. The agent reaches the same exact field read
+through the connector's MCP `read_field` tool, called from code mode
+(`await tools.<name>(args)`; `searchTools("whatsapp")` gives the exact name). Paged
+`read_snapshot`/`list_chats`/`posting_status` replies propagate ordered oversized
+outcomes rather than pretending the conversation is empty.
 Operator-wide approval and selected/delegated limits are unchanged; a row reference
 or cursor never grants authority.
 
@@ -98,7 +99,7 @@ and encoding the whole unbounded result before a downstream rejection.
 
 Settled `op-1792191864289472-18092-1075`, exit0, complete output: Go35 top-level
 connector tests plus2 mutation subtests passed; vet passed; Node6 passed with zero
-skips; native byte facade6 checks in BOTH source/embedded modes passed; MCP44 per
+skips; MCP44 per
 mode plus retained postcheck passed; shipping closure and119 checks passed.
 The actual old clean artifact reproduced28,129,906 bytes and
 connector_response_too_large in the new private fixture. The new process delivered
@@ -113,7 +114,7 @@ A second fresh process generation, `op-1792191995686077-18092-1078` (exit0), inc
 that individual body to5,500,000 bytes—larger than an entire page—and reconstructed
 it exactly through336 chunks. The original first-generation68-chunk result remains
 preserved, not overwritten. The700-row/escaping/transcript/chat/posting/version/
-authority/no-progress and both native-mode checks also passed in that generation.
+authority/no-progress checks also passed in that generation.
 
 Coordinator generation2 receipt was read, not rerun or overwritten; its original
 28,136,911-byte result remains separate (synthetic IDs/metadata differ). Generation1's
@@ -125,9 +126,7 @@ local evidence manifest.
 
 Harness: used. Graph: not-used in this continuation (active graph/Cargo/host-graph
 owner respected; no source edits in those seams). Code mode: used for exact-read
-structural page/fixture edits. Native Rust was built only from this owned checkout's
-unchanged host source to verify the changed WhatsApp Lua facade; no graph repair,
-Cargo source change, gate or other owner's source edits. Original cumulative
+structural page/fixture edits. No graph repair, Cargo source change, gate or other owner's source edits. Original cumulative
 feedback remains in WHATSAPP-DELIVERY.md and WHATSAPP-REVIEW.md.
 
 The coordinator's real reproduction exposed a genuine missing byte bound; row caps
@@ -148,9 +147,8 @@ page resources. A new private real-server+MCP stdio/HTTP fixture reproduces the 
 700x40000-byte failure and delivers all700 exact rows once through bounded new pages,
 while inserting a new higher row between older pages. It also retrieves oversized
 body/transcript/chat-hold/post-ack bytes exactly, checks narrow/foreign/stale scopes,
-read-only field whitelist and no-progress refusal, and exercises source+embedded
-native event reads. Exact results/logs/source hashes are retained in the new evidence
+read-only field whitelist and no-progress refusal. Exact results/logs/source hashes are retained in the new evidence
 manifest; original coordinator generations and prior successful manifests are untouched.
 No real WhatsApp account, QR, send, engine weights, service installation, cloud/SSH,
-Linux runtime or broad gate. Existing safe legacy cutover/private pairing blockers
+Linux runtime or broad gate. Existing private pairing blockers
 remain. No general send, unknown-send/gap reset or permission widening was added.

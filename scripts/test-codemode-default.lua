@@ -60,7 +60,7 @@ check(not visible('guest',context()).codemode,'guest not promoted')
 check(not visible('master',context({id='explore',allowed={read=true,codemode=true}})).codemode,'read-only profile not promoted')
 local allowed={codemode=true,read=true,write=true,edit=true,bash=true,integrate=true,session_worktree=true}
 check(not visible('master',context({id='specialized',allowed=allowed})).codemode,'specialized profile not promoted')
-check(not visible('master',context({id='whatsapp-responder',allowed=allowed})).codemode,'WhatsApp profile not promoted')
+check(not visible('master',context({id='self-reporter',allowed=allowed})).codemode,'other specialist profile not promoted')
 local worker=context({id='orchestration-worker',allowed=allowed})
 check(visible('master',worker).codemode,'authorized coding-worker gets default')
 local bounded=tools.dispatch(memory,'codemode',{code='return ("grep" in tools)+"/"+("integrate" in tools)+"/"+("session_worktree" in tools);'},'master',worker)

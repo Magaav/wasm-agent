@@ -1,18 +1,11 @@
 # Pipelines, spells and jobs — a proposal
 
-**WhatsApp migration notice:** WhatsApp examples below are historical pipeline-design
-evidence, NOT current setup or enable instructions. The browser copilot owners are
-retired. Use [linked-device setup](WHATSAPP-CONNECTOR.md) and mandatory
-[retirement](WHATSAPP-MIGRATION.md); no new responder or wake is enabled.
-
-**Status: slices 2 and 3 are implemented; slice 1 and artifact portability are not.** What landed:
+**Status: slice 2 is implemented; slice 1 and artifact portability are not.** What landed:
 
 - a job action may be a **`pipeline`**: `run` (with `returns`), `subagent` and `foreach` steps, at most 32 of
   them; a `foreach`'s inner step must be a `subagent` and a `wake` step is refused, because one budget is
   spent in one place. `rust/wa-jobs` validates it and the sentinel runs the chain in one delivery, keeping
   the four fan-out guarantees below.
-- the copilot is **one job** (`whatsapp-copilot`): its reader prints its eligible messages as JSON instead
-  of a one-line report, and the `foreach` starts one child per message.
 - `scripts/test-job-pipeline.cjs` is the seam's own test - a real sentinel, an isolated home, a mock store,
   no model: a `returns` list reaches the `foreach`; a `returns` step that produced nothing **fails** the
   delivery; a no-op run is distinguishable from a dropped result (`pipeline completed 1 step(s), handed on
@@ -35,16 +28,16 @@ inference step, with one construct for fan-out.
 
 ```json
 {
-  "id": "whatsapp-copilot",
-  "name": "WhatsApp Copilot",
+  "id": "inbox-review",
+  "name": "Inbox review",
   "trigger": { "kind": "schedule", "every_seconds": 300 },
   "action": {
     "kind": "pipeline",
     "steps": [
-      { "kind": "run",     "script": "<install>/scripts/whatsapp-ingest.sh", "returns": "events" },
+      { "kind": "run",     "script": "<install>/scripts/inbox-read.sh", "returns": "events" },
       { "kind": "foreach", "from": "events", "key": "message_id", "max": 8,
-        "step": { "kind": "subagent", "profile": "whatsapp-responder", "prompt": "..." } },
-      { "kind": "run",     "script": "<install>/scripts/whatsapp-report.sh" }
+        "step": { "kind": "subagent", "profile": "reviewer", "prompt": "..." } },
+      { "kind": "run",     "script": "<install>/scripts/inbox-report.sh" }
     ]
   }
 }
@@ -97,12 +90,11 @@ half of a skill: prose for the judgement, a spell for the part that never needed
 | installed field | artifact slot | kind |
 | --- | --- | --- |
 | `trigger.path` (file) | `trigger_path` | `file_directory` |
-| `trigger.websocket_url` (cdp) | `page` | `cdp_page` |
 | `action.script` (run) | `script` | `script_path` |
 | `action.session` (wake/subagent) | kept as a logical name | — |
 
 Import installs **disabled**, needs `--bindings` + `--approve`, refuses an unknown/future
-`schema_version`, refuses credentials and page bindings in the export, and refuses a guest subagent
+`schema_version`, refuses credentials and machine bindings in the export, and refuses a guest subagent
 import outright. So the pipeline inherits all of that, with three additions:
 
 1. **A spell travels inlined.** Spells are local (`~/.wasm-agent/spells.json`) and master-only, so a job
@@ -116,8 +108,8 @@ import outright. So the pipeline inherits all of that, with three additions:
 
 ## What the fan-out step must preserve
 
-The `foreach` step replaces the event seam the copilot uses today, so it has to carry the three
-guarantees that seam provides. Each has a test today; each needs one after:
+The `foreach` step replaces a two-job event seam (one job emits an event per item, another job consumes
+each), so it has to carry the guarantees that seam provides. Each has a test today; each needs one after:
 
 | guarantee | today | in a pipeline |
 | --- | --- | --- |
@@ -131,9 +123,7 @@ guarantees that seam provides. Each has a test today; each needs one after:
 1. **`run` step for spells** (+ `expect`, + the refusal of a non-deterministic step). Small, additive, and
    it is what makes a spell the deterministic half of a skill. `spell_save` / `spell_run` / tests.
 2. **`pipeline` job action with `foreach`.** The job schema, the sentinel runner, the artifact export /
-   import, and the four guarantees above with tests. This is the change that makes the copilot one job.
-3. **The copilot migrated to it** — `whatsapp-ingest` + `whatsapp-message` become one `whatsapp-copilot`,
-   with the reader printing its new eligible messages as JSON instead of a one-line report.
+   import, and the four guarantees above with tests. This is the change that lets a read-then-judge flow be one job.
 
-Slices 1 and 2 are independent; 3 depends on both. The existing two-job form keeps working throughout, so
-nothing migrates by force.
+Slices 1 and 2 are independent. The existing two-job form keeps working throughout, so nothing migrates by
+force.

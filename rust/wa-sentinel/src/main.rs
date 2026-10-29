@@ -40,7 +40,6 @@ use std::time::{Duration, Instant};
 mod spell;
 mod jobs;
 mod script_runner;
-mod cdp;
 mod instance;
 // Observation of the request queue: status, progress and failure, kept where `status`, `/health` and the
 // window can read them. Dispatch never consults it.

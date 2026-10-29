@@ -156,22 +156,9 @@ end
 -- completion has nothing left to judge and waking a model for it is paying for noise. A failure or a
 -- run whose evidence was lost is never covered by this: it still wakes its coordinator.
 --
--- Declared in two places on purpose: the module that owns a specialist profile names it here, so the
--- shipped template cannot drift from the code, and a profile file an operator wrote may say
--- `"settlement": "self_reported"` for itself. An unrecognised or unreadable value is read as
--- `coordinator`, because the conservative direction is to wake.
+-- A profile file an operator wrote may say `"settlement": "self_reported"` for itself. An
+-- unrecognised or unreadable value is read as `coordinator`, because the conservative direction is to wake.
 local SELF_REPORTED_SETTLEMENT = "self_reported"
-local function self_reported_profiles()
-  local declared = {}
-  local ok, whatsapp = pcall(dofile, "lua/core/whatsapp.lua")
-  if ok and type(whatsapp) == "table" and tostring(whatsapp.PROFILE_ID or "") ~= "" then
-    -- It reads one conversation, records a decision per message and proves the send: the
-    -- coordinator has no judgement left to make about a completed run of it.
-    declared[tostring(whatsapp.PROFILE_ID)] = true
-  end
-  return declared
-end
-
 function M.settlement(profile_id)
   local id = tostring(profile_id or "")
   if id == "" then return "coordinator" end
@@ -180,7 +167,6 @@ function M.settlement(profile_id)
   if type(profile) == "table" and tostring(profile.settlement or "") == SELF_REPORTED_SETTLEMENT then
     return SELF_REPORTED_SETTLEMENT
   end
-  if self_reported_profiles()[id] then return SELF_REPORTED_SETTLEMENT end
   return "coordinator"
 end
 
@@ -293,7 +279,7 @@ function M.resolve(id, ctx)
   end
 
   -- Pass every declared limit through so a specialist profile's own budget
-  -- names (context_messages, body_bytes, sends_per_run) survive to the child;
+  -- names survive to the child;
   -- clamp only the fields this runtime owns. A malformed, negative or NaN budget
   -- on a field this runtime enforces is refused, not silently coerced.
   for _, key in ipairs({ "max_depth", "timeout_seconds", "max_output_bytes", "max_tokens",
@@ -428,8 +414,7 @@ end
 
 local function truthy_limits(profile)
   -- Copy every declared limit: the child loop enforces the generic budgets, and a
-  -- specialist module (whatsapp) reads its own. A dropped field is a budget that
-  -- silently does not apply.
+  -- specialist profile may read its own. A dropped field is a budget that silently does not apply.
   local limits = {}
   for key, value in pairs(profile.limits or {}) do limits[key] = value end
   return limits
@@ -454,54 +439,6 @@ local function bounded_text(value, maximum)
     text = text:sub(1, math.max(0, maximum - #marker)) .. marker
   end
   return text
-end
-
--- Is this conversation in the profile's approved scope?
-local function scope_has(profile, conversation_id)
-  local resources = profile.resources or {}
-  if type(resources.allowed_conversations) == "table" then
-    for _, value in ipairs(resources.allowed_conversations) do
-      if value == conversation_id then return true end
-    end
-  end
-  if resources.conversation == conversation_id then return true end
-  return resources.allowed_conversation == conversation_id
-end
-
-local function profile_is_scoped(profile)
-  local resources = profile.resources or {}
-  return resources.conversation ~= nil or resources.allowed_conversation ~= nil
-    or type(resources.allowed_conversations) == "table"
-end
-
--- Resolve the trusted event from the ledger: the caller may name a message id,
--- and nothing else. The conversation is read off the row, so an event cannot
--- choose its own scope, and a scoped profile refuses a message outside it. A raw
--- event field like a script, path or endpoint is ignored entirely.
-local function resolve_event(profile, args)
-  local requested = args.event
-  local scoped = profile_is_scoped(profile)
-  if type(requested) ~= "table" then
-    if scoped then return nil, "event_context_required" end
-    return nil, nil
-  end
-  local message_id = tostring(requested.message_id or "")
-  if message_id == "" then
-    if scoped then return nil, "event_context_required" end
-    return nil, nil
-  end
-  local row = memory.ledger_message(message_id)
-  if not row then return nil, "event_message_unknown_or_ambiguous" end
-  if scoped and not scope_has(profile, row.conversation_id) then
-    return nil, "event_conversation_not_in_profile"
-  end
-  -- The ledger's own two clocks for the trigger travel with the event. They are not decoration: a scoped
-  -- responder proves the operator has not answered the conversation since this message arrived before it
-  -- sends anything, and that proof needs the arrival as this node recorded it (`observed_at`) with the
-  -- sender's claim (`sent_at`) as the fallback. Both are copied from the row that was just resolved, so the
-  -- comparison is against the same ledger the reply is read from, never against a caller's argument.
-  return { conversation_id = row.conversation_id, message_id = row.message_id,
-    sent_at = tonumber(row.sent_at) or 0, observed_at = tonumber(row.observed_at) or 0 }, nil
 end
 
 -- Start one child. Ownership, depth and the allowed set are derived here; the
@@ -544,8 +481,6 @@ function M.start(args, ctx)
   -- created, so an oversized payload is refused rather than queued.
   local prompt = bounded_text(raw_prompt, limits.max_prompt_bytes)
   local context = bounded_text(args.context, limits.max_prompt_bytes)
-  local event, event_error = resolve_event(profile, args)
-  if event_error then return { error = event_error } end
   -- A dollar cap is only meaningful when the model's rates are known. Fail
   -- closed: an unpriceable model cannot promise a dollar bound.
   if limits.max_cost_usd and not provider.rates(effective_model) then
@@ -665,7 +600,6 @@ function M.start(args, ctx)
     timeout_seconds = limits.timeout_seconds,
     idempotency_key = idempotency,
     resources = profile.resources,
-    event = event,
     admission_limit = ctx.placement and ctx.placement.max_tasks,
   }
   local receipt = memory.transaction(function()
@@ -957,9 +891,8 @@ function wa_subagent_run(receipt_json)
   local allowed = as_set(profile.allowed_tools)
   local child_role = tostring(receipt.role or "master")
   local events = 0
-  -- The approved profile is snapshotted here, immutably: a specialist tool
-  -- (whatsapp) must see the resources and limits the operator approved, not a
-  -- re-derived or caller-supplied subset.
+  -- The approved profile is snapshotted here, immutably: a specialist tool must see the
+  -- resources and limits the operator approved, not a re-derived or caller-supplied subset.
   local profile_snapshot = {
     schema_version = 1,
     id = profile.id,
@@ -968,10 +901,6 @@ function wa_subagent_run(receipt_json)
     resources = profile.resources,
     limits = profile.limits,
   }
-  -- Durable effects and the persistent per-child send budget, bound to this
-  -- child's session.
-  local effects = dofile("lua/core/effects.lua").new(receipt.session_id)
-  local sends = { count = effects.count(), limit = tonumber(limits.sends_per_run) or 1 }
   local child_ok, child = pcall(agentlib.new, receipt.session_id, function(event)
     -- Events stay local: a child must never write into the parent's stream.
     events = events + 1
@@ -983,9 +912,6 @@ function wa_subagent_run(receipt_json)
       model = profile.model, reasoning = profile.reasoning,
       resources = profile.resources,
       profile = profile_snapshot,
-      event = receipt.event,
-      effects = effects,
-      sends = sends,
       depth = tonumber(receipt.depth) or 1,
     },
   })

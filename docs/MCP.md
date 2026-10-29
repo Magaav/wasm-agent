@@ -71,8 +71,8 @@ An uncertain control requires inspection and a new explicit decision.
 
 A connector belongs to the machine that holds it (a linked WhatsApp device, a mail credential file, a
 loopback service), so a copied definition cannot run elsewhere. `lua/core/federation.lua` leaves each
-connector where it is: a master lists each online peer's enabled connector tools (its MCP tools and its
-WhatsApp facade) as `peer_<peer>__<tool>` and a call runs ON that peer through the signed node call, under
+connector where it is: a master lists each online peer's enabled connector tools (its MCP tools and, where
+an operator profile is installed, `whatsapp_operator`) as `peer_<peer>__<tool>` and a call runs ON that peer through the signed node call, under
 that peer's own guards - its write gates, approvals and refusals still decide. Nothing secret moves and no
 node is configured by hand. The catalog refreshes when a node is bound (the binding tick that reaches
 `accepted`), when a peer is promoted to master, and when it is older than ten minutes; listing tools reads
@@ -96,8 +96,10 @@ marking or chat opening. Remote access requires authenticated trusted-CA HTTPS;
 numeric loopback HTTP is allowed locally. Redirects, insecure TLS and credential
 URLs refuse. Protocol probing does not prove app identity or authorize effects.
 
-The eight read/refusal tool names are read_snapshot, list_chats, posting_status,
-read_field, lookup_self, inspect_chat, download_audio and send_message. Page-v2
+The nine read/refusal tool names are read_snapshot, read_newest, list_chats,
+posting_status, read_field, lookup_self, inspect_chat, download_audio and send_message.
+The agent sees them as `mcp_whatsapp_*` (or `peer_<node>__*` where another node holds
+the connector) and calls them only inside code mode: `await tools.<name>(args)`. Page-v2
 responses have an incremental4MiB JSON budget and explicit ordered oversized
 references, not silent text clipping. Exact field reads are16KiB base64 chunks with
 optimistic versions; cursors are live scoped keyset windows, not pinned snapshots
@@ -105,9 +107,7 @@ or cryptographic scope tokens. See [byte contract](WHATSAPP-BYTE-PAGES.md).
 Download_audio and
 send_message explicitly refuse: media belongs to the private deterministic worker,
 and GENERAL model sends cannot prove cross-device draft safety. No invented draft
-absence, browser/raw/backend fallback or generic owned-MCP send registration.
-Trusted event/profile scope, approvals, precedence, reservations and verification
-remain in the existing Lua boundary. Read-only profiles ship disabled/unapproved.
+absence, raw/backend fallback or generic owned-MCP send registration.
 
 The bounded optional `list_chats.refresh_names:true` enrichment (unfiltered max32
 observed rows/max3 group queries), SDK PN/LID label provenance and safe aggregate
@@ -129,12 +129,10 @@ Deterministic original-chat transcripts for BOTH incoming and own synchronized
 outgoing audio use the separate explicitly activated connector policy, not model
 send authority. Product recognition default is EN; configure this operator PT per
 account. No initial-history posting, hosted fallback or fake translation. Jobs
-does not run this connector/STT or enable a responder. Old WhatsApp owners are
-retired, not source-health repair targets. Generic Jobs/CDP features are unchanged.
+does not run this connector/STT or enable a responder.
 
-See [connector/setup](WHATSAPP-CONNECTOR.md), [migration](WHATSAPP-MIGRATION.md)
-and the named retained artifacts/removal conditions. Production pairing/retirement
-and real posting are separate unperformed operator proofs.
+See [connector/setup](WHATSAPP-CONNECTOR.md). Production pairing and real posting
+are separate unperformed operator proofs.
 
 
 ## Web research
@@ -150,7 +148,7 @@ for exact cache, permission, paging and shadow-benchmark limits.
 
 - `node --test --test-reporter=tap scripts/test-mcp.mjs scripts/test-mcp-whatsapp.mjs`
   uses private stdio/HTTP peers, credentials, malformed output, schema change,
-  timeout/no replay, linked-device scope/auth and explicit browser/model-send retirement.
+  timeout/no replay, linked-device scope/auth and explicit model-send refusal.
   Go connector fixtures separately cover fake transport/STT/posting against real SQLite.
   No real WhatsApp messages or paid model.
 - `node scripts/test-mcp-native.cjs <built-wa> <fresh-evidence>` and `--post`
@@ -158,7 +156,7 @@ for exact cache, permission, paging and shadow-benchmark limits.
 - `node scripts/test-mcp-ui.cjs <fresh-evidence>` and `--post` verify real Chromium
   inventory, controls, retained drafts/errors and scope/child isolation. A private
   guard-removal mutation must fail. Also run `scripts/test-ui.ps1`.
-- WhatsApp connector/retirement/durable-effects, batch-tool, profile and
+- WhatsApp connector, batch-tool, profile and
   instruction checks remain focused regressions. Verify embedded module freshness
   and actual installed script closure separately. Self-review, ordinary canonical
   main merge and remote readback; gate_verified:false / release_verified:false.

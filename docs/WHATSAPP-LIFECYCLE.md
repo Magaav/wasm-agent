@@ -160,9 +160,7 @@ New behavior:
 
 Settled `op-1792249050145977-4420-88` passed44 Go tests plus2 mutation subtests
 with `-count=1`, vet, a fresh Windows executable, real unpaired HTTP/process checks,
-CLI/MCP navigation and source/embedded native event-scope compatibility. The native
-wa host was not rebuilt; unchanged facade modules were exercised against the new
-connector. Six new Go tests cover retained-ID resurrection, durable restart fence,
+CLI/MCP navigation. The native wa host was not rebuilt. Six new Go tests cover retained-ID resurrection, durable restart fence,
 actual SDK Disconnect/local persistence without authentication, raw-content/unknown-
 enum non-disclosure, exact/nondeleted pair identity and atomic failure/gap handling.
 

@@ -200,15 +200,18 @@ check_eq(packet.artifacts.untracked,0,"a clean checkout reports nothing untracke
 
 -- 4. A child whose own profile decided: no worktree, nothing to review, no model turn - and the
 -- reason is written down where a reader will find it.
-check_eq(subagents.settlement("whatsapp-responder"),"self_reported","the scoped responder profile reports its own settlement")
+assert(host.write_file(dofile("lua/core/paths.lua").config().."/subagent-profiles/self-reporter.json",json.encode({
+  schema_version=1,id="self-reporter",description="Records its own decision durably.",allowed_tools={"recall"},
+  settlement="self_reported"})))
+check_eq(subagents.settlement("self-reporter"),"self_reported","a profile file can declare its own settlement")
 check_eq(subagents.settlement("explore"),"coordinator","a read-only investigator still answers to its coordinator")
 completions.watch("responder-child",ctx)
-statuses["responder-child"]=view("responder-child",responder_session,"whatsapp-responder")
+statuses["responder-child"]=view("responder-child",responder_session,"self-reporter")
 local before=#deliveries
 tick()
 row=completions.status("responder-child","master")
 check_eq(row.state,"skipped","a self-reported settlement is skipped")
-check(row.detail:find("profile_self_reported:whatsapp-responder",1,true)~=nil,
+check(row.detail:find("profile_self_reported:self-reporter",1,true)~=nil,
   "the skip records which profile decided: "..tostring(row.detail))
 check_eq(#deliveries,before,"a skipped settlement dispatches no model turn")
 packet=json.decode(row.packet)
@@ -251,7 +254,7 @@ check(packet.cause.note:find("events=1174",1,true)~=nil,"the cause note carries 
 
 -- 5. A failure needs a recovery decision, whatever the profile says.
 completions.watch("failed-child",ctx)
-statuses["failed-child"]=view("failed-child",child,"whatsapp-responder",
+statuses["failed-child"]=view("failed-child",child,"self-reporter",
   {state="failed",error="runaway_guard",settled_at=1700000300.0})
 tick()
 row=completions.status("failed-child","master")

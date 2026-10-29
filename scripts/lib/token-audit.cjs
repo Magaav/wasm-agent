@@ -15,7 +15,7 @@ const timingSummary = values => ({samples:values.length,total_ms:values.length?t
 // Built-in names are public capabilities. Unknown/plugin names are aggregated so an
 // offline metadata report cannot disclose a private integration merely by naming it.
 const PUBLIC_TOOL_NAMES = new Set(['remember','recall','memories','skill','capabilities','sessions','session',
-  'search_messages','resume_session','search_ledger','conversation','list_conversations','forget','bash',
+  'search_messages','resume_session','forget','bash',
   'operation','read','read_many','write','edit','ls','grep','diagnose','client','shell','spell_save','spell_run',
   'spell_list','spell_get','spell_forget','spell_export','remote','nodes','session_debug','session_fixture','tool_result',
   'subagent','graph']);

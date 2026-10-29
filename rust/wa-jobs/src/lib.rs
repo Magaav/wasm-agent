@@ -53,9 +53,8 @@ fn ident_str(s: &str) -> bool {
 /// that is not here is refused by `validate_controls` rather than accepted and ignored.
 pub const JOB_CONTROLS: &[&str] = &["grace_seconds", "max_age_seconds"];
 
-/// The environment name one control arrives in. The sentinel is not the WhatsApp pipeline: it passes
-/// `WA_JOB_CONTROL_<NAME>` to every deterministic step, and a step's own script decides what that number
-/// means. `scripts/whatsapp-read.mjs` is the reader of these two.
+/// The environment name one control arrives in. The sentinel passes `WA_JOB_CONTROL_<NAME>` to every
+/// deterministic step, and a step's own script decides what that number means.
 pub fn control_env_name(control: &str) -> String {
     format!("WA_JOB_CONTROL_{}", control.to_ascii_uppercase())
 }
@@ -121,12 +120,6 @@ pub fn validate_controls(job: &Value) -> Result<()> {
     Ok(())
 }
 
-/// Browser WhatsApp automation has no runtime successor in Jobs. Keep rows/history,
-/// but never re-enable, observe, enqueue or claim these retired owners.
-pub fn retired_whatsapp_job(id: &str) -> bool {
-    matches!(id, "whatsapp-copilot" | "whatsapp-events" | "whatsapp-wake-selftest" | "whatsapp-ingest" | "whatsapp-message" | "whatsapp-source" | "whatsapp-transcribe")
-}
-
 pub fn validate(job: &Value) -> Result<()> {
     if !ident(job["id"].as_str().unwrap_or("")) {
         return fail("invalid_job_id");
@@ -152,17 +145,6 @@ pub fn validate(job: &Value) -> Result<()> {
         "file" => {
             if !Path::new(trigger["path"].as_str().unwrap_or("")).is_absolute() {
                 return fail("file_trigger_needs_absolute_directory");
-            }
-        }
-        "cdp" => {
-            let url = trigger["websocket_url"].as_str().unwrap_or("");
-            if !(url.starts_with("ws://127.0.0.1:") || url.starts_with("ws://localhost:"))
-                || !url.contains("/devtools/page/")
-            {
-                return fail("cdp_requires_explicit_loopback_page_websocket");
-            }
-            if !ident(trigger["binding"].as_str().unwrap_or("")) {
-                return fail("cdp_binding_required");
             }
         }
         _ => return fail("unknown_job_trigger"),
@@ -410,7 +392,6 @@ impl Store {
         Ok(json!(values))
     }
     pub fn enable(&self, id: &str, enabled: bool) -> Result<Value> {
-        if enabled && retired_whatsapp_job(id) { return fail("browser_whatsapp_job_retired"); }
         let mut db = self.db()?;
         let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         if tx.execute("UPDATE jobs SET enabled=?, revision=revision+1,next_at=0,source_status='not observed' WHERE id=?",params![enabled,id])?!=1 {return fail("job_not_found")}
@@ -454,7 +435,6 @@ impl Store {
         payload: &Value,
         now: i64,
     ) -> Result<bool> {
-        if retired_whatsapp_job(id) { return fail("browser_whatsapp_job_retired"); }
         if event_id.is_empty() || event_id.len() > 256 || payload.to_string().len() > 16384 {
             return fail("invalid_event_size_or_id");
         }
@@ -521,7 +501,7 @@ impl Store {
     pub fn schedule(&self, now: i64) -> Result<u64> {
         let mut count = 0;
         for job in self.list()?.as_array().unwrap() {
-            if retired_whatsapp_job(job["id"].as_str().unwrap_or("")) || job["enabled"] != true || job["trigger"]["kind"] != "schedule" {
+            if job["enabled"] != true || job["trigger"]["kind"] != "schedule" {
                 continue;
             }
             let id = job["id"].as_str().unwrap();
@@ -553,7 +533,7 @@ impl Store {
                     // job_queue_full` every second and retried forever; skipping one interval
                     // lets the queue drain and the next interval enqueue again. An external
                     // `emit` is different - it must not be silently dropped, so it still errors
-                    // and its source backs off (cdp.rs).
+                    // and its source backs off.
                     Err(error) if error.to_string().starts_with("job_queue_full") => {
                         let _ = self.source_status(
                             id,
@@ -636,7 +616,6 @@ impl Store {
             .collect::<std::result::Result<Vec<_>, _>>()?;
         drop(statement);
         for (id, job_id, revision, event_id, payload, definition) in rows {
-            if retired_whatsapp_job(&job_id) { continue; }
             let job: Value = serde_json::from_str(&definition)?;
             let action = &job["action"];
             // Classified from the action, not from its kind name: a pipeline that starts a child is

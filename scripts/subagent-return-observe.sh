@@ -3,8 +3,8 @@
 #
 # A sentinel `run` step executes the file it names through a shell (`shell_for` in
 # rust/wa-sentinel/src/main.rs hands it to Git Bash on Windows), so the file a job points at has to be a
-# shell script that starts the program - the same shape `scripts/delivery-trigger.sh` and
-# `scripts/whatsapp-copilot-read.sh` already use.
+# shell script that starts the program - the same shape `scripts/delivery-trigger.sh` already
+# uses.
 #
 # No arguments are needed: a job's run step has no argument list, and none is wanted. The node's port comes
 # from WASM_AGENT_PORT, the authentication session from WA_SENTINEL_AUTH_SESSION, the sentinel binary used

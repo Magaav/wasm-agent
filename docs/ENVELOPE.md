@@ -56,14 +56,6 @@ UI terminal uses the same path
 | --- | --- | --- |
 | `shell` | `command`, `shell?` (`cmd`\|`powershell`), `cwd?` | run a command on the client |
 
-**ledger**
-
-| Tool | Args | Does |
-| --- | --- | --- |
-| `search_messages` | `query`, `conversation_id?`, `limit?` | search the message ledger |
-| `conversation` | `conversation_id`, `limit?` | read one conversation |
-| `list_conversations` | `limit?` | list conversations |
-
 **client** — one tool, many actions; each runs on the client machine
 
 | Action | Args | Returns |

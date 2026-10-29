@@ -598,35 +598,6 @@ WA_BIN="$BIN" bash scripts/test-update.sh 8874 | grep "the real sentinel's reque
 # The idle wait before an upgrade is bounded by *lack of progress*, not wall time. A legitimate
 # 40-minute turn must not make every queued upgrade wait, fail, and retry while the node stays busy.
 bash scripts/test-upgrade-idle.sh | grep 'upgrade idle-wait ok'
-# The ledger ingest path, on a scratch database. An observer (WhatsApp's own store, a mail sync, a
-# bot) is exactly the caller that has a message with no reply target and sometimes no send time, and
-# that caller used to crash inside the encoder: a nil in the SQL parameter list makes the JSON array
-# sparse, and the encoder refuses holes outright rather than writing a NULL. The columns have a
-# defined shape now; this is what keeps them that way.
-cat > "$DB.ledger.lua" <<'LUA'
-local memory = dofile('lua/core/memory.lua')
-memory.setup()
-memory.record_message({ conversation_id = 'c1', message_id = 'm1', body = 'hello' })
-memory.record_message({ conversation_id = 'c1', message_id = 'm1', body = 'hello' })
-memory.record_message({ conversation_id = 'c1', message_id = 'm1', body = 'hello again' })
-memory.record_conversation({ id = 'c2', title = 'no messages yet', kind = 'direct' })
-local rows = memory.conversation('c1', 10)
-assert(#rows == 1, 'one message must be one row, got ' .. #rows)
-assert(rows[1].body == 'hello again', 'a changed body must update in place, got ' .. tostring(rows[1].body))
-assert(rows[1].sent_at and rows[1].sent_at > 0, 'an unknown send time must take a defined shape')
-assert(rows[1].reply_to == '', 'a missing reply target must not be a hole in the parameters')
-local conversations = memory.conversations(50)
-local titles = {}
-for _, row in ipairs(conversations) do titles[row.id] = row.title end
-assert(titles['c2'] == 'no messages yet', 'a conversation with no messages must still be known')
-memory.meta_set('test_cursor', 42)
-assert(tonumber(memory.meta_get('test_cursor')) == 42, 'a cursor must round-trip through meta')
-local hits = memory.search_ledger('again', nil, 5)
-assert(#hits >= 1 and hits[1].conversation_id == 'c1', 'the ledger must be findable by its words')
-print('ledger ingest ok')
-LUA
-WA_SCRIPT="$DB.ledger.lua" "$BIN" --db "$DB.ledger" | grep "ledger ingest ok"
-rm -f "$DB.ledger.lua"
 # Context budget is per model (provider.budget), and it is NOT the same thing as
 # provider.limits, which fetches the account's rate limits for the UI. Confusing
 # the two silently disabled compaction once: the window came back nil, so
@@ -1700,24 +1671,9 @@ done
 WA_SCRIPT="scripts/test-completion-packet.lua" "$BIN" --db "$DB.completion-packet"
 run_proof_fixture jobs 37 node scripts/test-job-subagents.cjs
 run_proof_fixture orchestration 33 node scripts/test-orchestration-e2e.cjs "$BIN"
-run_proof_fixture whatsapp 40 node scripts/test-whatsapp-subagent-e2e.cjs
-# The reader's acted cursor: a message may be consumed only when a durable decision exists for it, the
-# attempt count is bounded, and media is reported instead of handed to a child. Mock store, real ingest.
-run_proof_fixture cursor 47 node scripts/test-whatsapp-cursor.cjs "$BIN"
-# Local audio bytes, WASM formatting, durable reservation, and exactly-once
-# verified sends. These use fake WhatsApp/STT adapters and no paid model.
-node scripts/test-whatsapp-audio.mjs
-# Staged here, at its use, for the same reason as the plugin loop above: this module is read about
-# ninety sections after it was built, and the section does not assume the staging directory it
-# created earlier is still there. The copy is still fatal if the module cannot be staged.
-stage_plugin "$(ls rust/plugins/whatsapp-transcript/target/wasm32-unknown-unknown/release/*.wasm | head -1)" whatsapp-transcript
-node scripts/test-whatsapp-transcribe.cjs "$BIN" "$PLUGINS/whatsapp-transcript.wasm"
 # The pipeline seam: a `returns` list reaches the foreach, a step that produced nothing fails the
 # delivery, and a no-op run is distinguishable from a dropped result. Real sentinel, mock store, no model.
 run_proof_fixture pipeline 19 node scripts/test-job-pipeline.cjs
-# The source keeper's categorical refusals, hermetically: a port held by something that is not the agent
-# browser is refused and left alone, and a missing logon task is named with the command that registers it.
-node scripts/test-source-ensure.cjs
 # The deploy's own ship list, run for real on a scratch tree: the modules a shipped script imports must
 # be installed beside it, and both a missing module and an import this deploy cannot satisfy must be
 # refused by name. The block under test is read out of deploy.sh, so this cannot pass while the real

@@ -19,35 +19,6 @@ CREATE UNIQUE INDEX IF NOT EXISTS memories_dedupe_idx
 CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
   content, tags, memory_id UNINDEXED, tokenize = 'unicode61 remove_diacritics 2');
 
-CREATE TABLE IF NOT EXISTS observations (
-  id TEXT PRIMARY KEY, source TEXT NOT NULL, device_id TEXT NOT NULL DEFAULT '',
-  observed_at REAL NOT NULL, payload_sha256 TEXT NOT NULL, payload TEXT NOT NULL,
-  ingested_at REAL NOT NULL);
-CREATE INDEX IF NOT EXISTS observations_time_idx ON observations(observed_at);
-
-CREATE TABLE IF NOT EXISTS conversations (
-  id TEXT PRIMARY KEY, kind TEXT NOT NULL DEFAULT 'unknown', title TEXT NOT NULL DEFAULT '',
-  created_at REAL NOT NULL, updated_at REAL NOT NULL);
-
--- The external inbox/ledger (WhatsApp, mail). It is `ledger_messages`, not `messages`: the naming
--- contract (ARCHITECTURE.md section 6) gives "message" to the agent's own transcript rows, which are the
--- `messages` table further down. Two tables cannot share one name, and this is the ledger - the word
--- docs/MEMORY.md already used for it, and the one its tools are named after (`search_messages`).
-CREATE TABLE IF NOT EXISTS ledger_messages (
-  conversation_id TEXT NOT NULL, message_id TEXT NOT NULL,
-  sender_id TEXT NOT NULL DEFAULT '', direction TEXT NOT NULL DEFAULT 'incoming',
-  sent_at REAL, observed_at REAL NOT NULL, body TEXT NOT NULL DEFAULT '',
-  reply_to TEXT, media TEXT NOT NULL DEFAULT '[]', source TEXT NOT NULL DEFAULT 'observer',
-  body_sha256 TEXT NOT NULL,
-  PRIMARY KEY (conversation_id, message_id));
-CREATE INDEX IF NOT EXISTS ledger_messages_conversation_idx ON ledger_messages(conversation_id, observed_at);
-CREATE INDEX IF NOT EXISTS ledger_messages_time_idx ON ledger_messages(observed_at);
--- `ledger_message(id)` filters on message_id alone, the second column of the primary key: a scan without this.
-CREATE INDEX IF NOT EXISTS ledger_messages_message_idx ON ledger_messages(message_id);
-CREATE VIRTUAL TABLE IF NOT EXISTS ledger_messages_fts USING fts5(
-  body, conversation_id UNINDEXED, message_id UNINDEXED,
-  tokenize = 'unicode61 remove_diacritics 2');
-
 CREATE TABLE IF NOT EXISTS sessions (
   id TEXT PRIMARY KEY, route_id TEXT NOT NULL DEFAULT '', objective TEXT NOT NULL DEFAULT '',
   parent_session_id TEXT, started_at REAL NOT NULL, ended_at REAL);
@@ -83,7 +54,7 @@ CREATE INDEX IF NOT EXISTS steering_target ON steering_inbox(owner,session_id,ru
 
 -- ---------------------------------------------------------------- transcript
 -- The agent's OWN dialogue: one row per stored message (a user turn, an assistant turn, a tool
--- result, a summary). Deliberately separate from `ledger_messages`, which is the external inbox.
+-- result, a summary).
 -- `runs` stays an effect/settlement record; `messages` is the conversation, and `trace` on each
 -- assistant message is the observability payload.
 --
@@ -133,36 +104,6 @@ CREATE TABLE IF NOT EXISTS sync_cursors (
   cursor     INTEGER NOT NULL DEFAULT 0,
   updated_at REAL NOT NULL
 );
-
--- ---------------------------------------------------------- subagent effects
--- A child's side effects (a WhatsApp send and its decision) need a durable
--- reservation BEFORE the effect and a confirmation after it, so a crash leaves a
--- pending record rather than a replayable message. `effect_sends` is keyed by the
--- source message id: one send per incoming message, ever. `effect_decisions` is a
--- separate table so recording a decision can never erase a pending or sent send.
-CREATE TABLE IF NOT EXISTS effect_sends (
-  message_id      TEXT PRIMARY KEY,
-  session_id      TEXT NOT NULL,
-  conversation_id TEXT NOT NULL DEFAULT '',
-  body            TEXT NOT NULL DEFAULT '',
-  state           TEXT NOT NULL DEFAULT 'pending',
-  message         TEXT NOT NULL DEFAULT '{}',
-  detail          TEXT NOT NULL DEFAULT '',
-  created_at      REAL NOT NULL,
-  updated_at      REAL NOT NULL
-);
-CREATE INDEX IF NOT EXISTS effect_sends_session_idx ON effect_sends(session_id, state);
-
-CREATE TABLE IF NOT EXISTS effect_decisions (
-  message_id      TEXT PRIMARY KEY,
-  session_id      TEXT NOT NULL,
-  conversation_id TEXT NOT NULL DEFAULT '',
-  decision        TEXT NOT NULL DEFAULT '',
-  reason          TEXT NOT NULL DEFAULT '',
-  created_at      REAL NOT NULL,
-  updated_at      REAL NOT NULL
-);
-CREATE INDEX IF NOT EXISTS effect_decisions_session_idx ON effect_decisions(session_id);
 
 -- Placement belongs to the node, never to a window. A destination is written
 -- before dispatch so an uncertain delivery can only retry that same node/key.

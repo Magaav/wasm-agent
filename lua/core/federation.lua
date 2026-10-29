@@ -40,15 +40,6 @@ function M.exported()
     tools[#tools + 1] = { name = fn.name, description = fn.description, parameters = fn.parameters,
       effect = mcp.is_read(fn.name) and 'read' or 'write' }
   end
-  local wok, whatsapp = pcall(dofile, 'lua/core/whatsapp.lua')
-  if wok and type(whatsapp) == 'table' and type(whatsapp.schemas) == 'function' then
-    local listed, list = pcall(whatsapp.schemas)
-    for _, schema in ipairs(listed and list or {}) do
-      local fn = schema['function']
-      tools[#tools + 1] = { name = fn.name, description = fn.description, parameters = fn.parameters,
-        effect = fn.name == 'whatsapp_send' and 'write' or 'read' }
-    end
-  end
   if next(M.operator_profiles()) and M.operator_script() then tools[#tools + 1] = M.operator_schema(M.operator_profiles()) end
   table.sort(tools, function(a, b) return a.name < b.name end)
   return tools

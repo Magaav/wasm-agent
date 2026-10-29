@@ -1943,7 +1943,6 @@ function toolTitle(name, args) {
     case "session_fixture":
       return String(a.session_id || a.id || "");
     case "search_messages":
-    case "search_ledger":
       return String(a.query || "");
     case "nodes":
     case "spells":

@@ -12,7 +12,7 @@
 # The action is a launcher .cmd beside the binary, not `wa-sentinel.exe watch` directly, because a
 # scheduled task does not let you set child environment and the sentinel reads its `run` allow-list from
 # WA_SENTINEL_SCRIPTS - a task that cannot execute an allow-listed script is a supervisor that silently
-# refuses every `run` job (the failure that made whatsapp-ingest red).
+# refuses every `run` job.
 param([switch]$Remove)
 
 $ErrorActionPreference = 'Stop'

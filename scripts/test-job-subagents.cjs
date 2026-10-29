@@ -15,8 +15,7 @@
 //   * the reservation is a property of the installation, not of the process that started the watcher: a
 //     start that never saw the launcher's environment still reserves capacity, because the value is also
 //     recorded durably and an explicit environment value (including `0`) still wins;
-//   * a guest import is refused even when the artifact claims `owner: operator`;
-//   * the scoped WhatsApp tools deny reads/sends outside the profile's scope.
+//   * a guest import is refused even when the artifact claims `owner: operator`.
 //
 // Only processes started by this fixture are stopped, and never by image name.
 const fs = require("node:fs");
@@ -151,7 +150,7 @@ function artifactFixture(home, env, id) {
     id,
     name: "Answer a message",
     trigger: { kind: "event", topic: "fixture.message" },
-    action: { kind: "subagent", profile: "whatsapp-responder", prompt: "Decide; never send without approval.", timeout_seconds: 6 },
+    action: { kind: "subagent", profile: "reviewer", prompt: "Decide; never send without approval.", timeout_seconds: 6 },
   };
   const jobFile = path.join(home, `${id}.json`);
   fs.writeFileSync(jobFile, JSON.stringify(job));
@@ -192,7 +191,7 @@ async function main() {
 
   // Export never carries a machine binding or credential, and the subagent action survives the round trip.
   check(artifact.schema === "wasm-agent/automation" && artifact.schema_version === 1, "artifact is versioned");
-  check(artifact.action.kind === "subagent" && artifact.action.profile === "whatsapp-responder", "subagent profile survives export");
+  check(artifact.action.kind === "subagent" && artifact.action.profile === "reviewer", "subagent profile survives export");
   check(!JSON.stringify(artifact).includes("C:/") && !JSON.stringify(artifact).includes("ws://127.0.0.1"), "artifact carries no machine binding");
 
   const imported = cli(envA, "import", artifactFile, "--bindings", bindingsFile, "--approve");
@@ -211,7 +210,7 @@ async function main() {
   const expectedKey = `responder:${revision}:m1`;
   await until(() => fixtureA.state.starts.some((s) => s.idempotency_key === expectedKey), "subagent start posted while the node reports busy");
   const start = fixtureA.state.starts.find((s) => s.idempotency_key === expectedKey);
-  check(start.profile === "whatsapp-responder", "start carries the profile");
+  check(start.profile === "reviewer", "start carries the profile");
   check(typeof start.prompt === "string" && start.prompt.includes("never send"), "start carries the approved prompt");
   check(start.event && start.event.message_id === "m1", "start names only the trusted event message id");
   check(!("context" in start), "the raw event is not forwarded as context");
@@ -317,15 +316,6 @@ async function main() {
   check(fixtureC.state.starts.length === startsBefore, "an explicit 0 overrides the file: the lane is idle-gated again");
   fixtureC.state.busy = false;
   await until(() => fixtureC.state.starts.length === startsBefore + 1, "the idle-gated delivery runs once the node is idle");
-
-  // ---- scoped tools deny reads/sends outside the profile -----------------------------------------
-  const scoped = spawnSync(wa, ["--db", path.join(root, "scoped.db")], {
-    env: { ...envFor(homeA, fixtureA.port), WASM_AGENT_LUA_ROOT: repo, WA_SCRIPT: path.join(repo, "tests", "whatsapp-scoped.lua") },
-    encoding: "utf8",
-    timeout: 30000,
-    windowsHide: true,
-  });
-  check(scoped.stdout.includes("whatsapp scoped ok"), `scoped WhatsApp denial suite runs in the isolated home: ${scoped.stderr.slice(0, 200)}`);
 
   void watcherA; void watcherB; void watcherC;
   console.log(`subagent integration ok (${checked} checks; real sentinel, protocol fixture, no paid inference)`);

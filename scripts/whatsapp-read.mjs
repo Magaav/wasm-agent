@@ -1,9 +1,8 @@
-// Read-only compatibility entrypoint, linked-device MCP only. Credentials stay in files.
+// Read-only WhatsApp reads through the linked-device MCP. Credentials stay in files.
 import {callApp,readBinding} from './whatsapp-mcp-client.mjs';
 const args=process.argv.slice(2);
 const values=new Set(['--profile-file','--row','--resource','--field','--version','--offset','--length','--since','--sent-since','--until','--before','--limit','--chat','--query']);
 const flags=new Set(['--list-chats','--refresh-names']);
-if(args.some(a=>['--raw-store','--mcp-backend','--port','--expect-browser-endpoint'].includes(a))){console.log(JSON.stringify({ok:false,error:'browser_whatsapp_retired'}));process.exit(1);}
 try {
  const opts={};
  for(let i=0;i<args.length;i++) {

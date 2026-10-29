@@ -4,7 +4,7 @@
 # A sentinel `run` step executes the script it names through a shell (`shell_for` in
 # rust/wa-sentinel/src/main.rs hands it to Git Bash on Windows), so the file a job points at has to be a
 # shell script that starts the program - which is also how this repository's other jobs do it
-# (`scripts/delivery-trigger.sh`, `scripts/whatsapp-copilot-read.sh` and friends). The pass itself is
+# (`scripts/delivery-trigger.sh` and friends). The pass itself is
 # Node, where the walks, the session store and the JSON live.
 #
 # No arguments are needed: a job's run step has no argument list, and none is wanted. `--apply` is *not*

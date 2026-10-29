@@ -1,11 +1,7 @@
 # Jobs: events to deliberate automation
 
-**WhatsApp replacement:** [wa-whatsapp](WHATSAPP-CONNECTOR.md) now owns persistent
-linked-device ingestion, audio tasks and deterministic transcripts. The browser jobs,
-Chrome keeper/task/hooks and copilot responder pipeline are [retired](WHATSAPP-MIGRATION.md).
-WhatsApp-specific browser examples/window measurements below are historical design
-context, not commands to enable or repair. Their ten-minute reply rule does NOT
-apply to post-cutover transcript backlog. Generic Jobs/CDP behavior is unchanged.
+**WhatsApp:** [wa-whatsapp](WHATSAPP-CONNECTOR.md) owns persistent linked-device
+ingestion, audio tasks and deterministic transcripts; Jobs does not.
 
 A **job** is a durable automation definition: trigger + action + enabled state.
 A **trigger** matches an event or schedule. A **delivery** is one queued occurrence,
@@ -18,9 +14,9 @@ script need not start a run or call a model. See ARCHITECTURE.md section 6 and
 
 MCP connectors expose app/store operations; they do not own triggers, schedules,
 eligibility, cursors/deduplication, STT, delivery state or wakes. Engine lists MCPs
-separately and opening that inventory never probes an app. WhatsApp's compatibility
-clients now use the linked-device boundary; deterministic STT/journaling/posting lives
-in that service, not Jobs. No job is enabled by connector configuration. See [MCP.md](MCP.md).
+separately and opening that inventory never probes an app. WhatsApp uses the
+linked-device connector; deterministic STT/journaling/posting lives in that service,
+not Jobs. No job is enabled by connector configuration. See [MCP.md](MCP.md).
 
 ## Ownership and scope
 
@@ -51,7 +47,7 @@ a submitted agent wake is not undone. Cancelled work is not replayed on re-enabl
 The watcher must be running (`wa-sentinel watch` / the installed service).
 
 This release is for an operator's own trusted local node. It is not a new customer
-unattended-access grant. Broad local shell and CDP authority is still broad access.
+unattended-access grant. Broad local shell authority is still broad access.
 No job is installed/enabled automatically and no real messaging account is touched
 by the tests. The event sources never grant authority to their content.
 
@@ -61,7 +57,7 @@ by the tests. The event sources never grant authority to their content.
 {
   "id": "received-message",
   "name": "Review incoming messages",
-  "trigger": {"kind": "event", "topic": "whatsapp.message"},
+  "trigger": {"kind": "event", "topic": "inbox.message"},
   "action": {
     "kind": "wake",
     "session": "the-agent-conversation-id",
@@ -74,7 +70,7 @@ by the tests. The event sources never grant authority to their content.
 An adapter writes a JSON data file and submits it with its stable source id:
 
 ```
-wa-sentinel job emit whatsapp.message message-unique-id payload.json
+wa-sentinel job emit inbox.message message-unique-id payload.json
 ```
 
 The sentinel puts the data in an explicitly untrusted block after the approved
@@ -114,26 +110,26 @@ check its own postconditions.
 ## Controls: a named number a job carries
 
 A deterministic step sometimes needs one number that is the operator's choice rather than the script's -
-how old a message may be and still be answered, say. That is a **control**: a top-level `controls` object
+how old an item may be and still be handled, say. That is a **control**: a top-level `controls` object
 on the definition, validated when the job is installed, and passed to every `run` step of the delivery as
 an environment variable.
 
 ```json
 {
-  "id": "whatsapp-copilot",
-  "name": "WhatsApp Copilot",
+  "id": "inbox-triage",
+  "name": "Inbox triage",
   "controls": {"grace_seconds": 300, "max_age_seconds": 600},
   "trigger": {"kind": "schedule", "every_seconds": 30},
   "action": {"kind": "pipeline", "steps": [
-    {"kind": "run", "script": "<install>/scripts/whatsapp-copilot-read.sh", "timeout_seconds": 300}
+    {"kind": "run", "script": "<install>/scripts/inbox-read.sh", "timeout_seconds": 300}
   ]}
 }
 ```
 
-| control | whole seconds | floor | what it means to the WhatsApp pipeline |
+| control | whole seconds | floor | what a step may use it for |
 | --- | --- | --- | --- |
-| `grace_seconds` | 0–86400 | 0 | the operator's own answer window: how long a direct message is held before the copilot may take a turn (0 answers immediately), and the band after the prompt window in which a direct message the operator has not answered is still eligible |
-| `max_age_seconds` | 1–86400 | 1 | the hard bound: past it nothing is answered and nothing is transcribed |
+| `grace_seconds` | 0–86400 | 0 | a hold window: how long an item waits before the step may act on it (0 acts immediately) |
+| `max_age_seconds` | 1–86400 | 1 | the hard bound: past it the step acts on nothing |
 
 How it works, in four facts:
 
@@ -147,7 +143,7 @@ How it works, in four facts:
 - **The values are validated, not trusted.** A whole number in range, and `grace_seconds` may not exceed
   `max_age_seconds`: the prompt window is derived as what is left of the bound, so a grace band wider than
   the bound would make it silently empty. `max_age_seconds` of 0 is refused because a bound of zero refuses
-  every message - a job that does nothing wearing the shape of one that works.
+  every item - a job that does nothing wearing the shape of one that works.
 - **A delivery pins them with its revision.** The controls are carried in the delivery (`claimed["controls"]`),
   from the same definition row it was claimed against. Reading the current definition at execution time
   would apply a number that was never approved for that delivery.
@@ -159,7 +155,7 @@ They are portable with the job: `controls` survives export and import, and is re
 
 A control is the one part of a definition meant to be tuned, so the panel that lists jobs shows each
 declared name with its value and a **Set controls** button, and
-`POST /jobs` with `{"id":"whatsapp-copilot","action":"controls","controls":{...}}` moves them. Four rules
+`POST /jobs` with `{"id":"inbox-triage","action":"controls","controls":{...}}` moves them. Four rules
 keep that surface from becoming a second, weaker way to edit a job:
 
 - **The store is the only judge.** The panel sends what a field holds and copies no rule of its own: whole
@@ -188,60 +184,6 @@ keep that surface from becoming a second, weaker way to edit a job:
   observer threads, never on the control loop. A blocked OS read remains visibly
   `reading directory since ...` and consumes a source slot; safely replacing that
   thread requires an executor-process boundary not implemented here.
-* **cdp**: an explicit loopback **page** WebSocket and a named Runtime binding:
-
-```json
-{
-  "id": "page-events",
-  "name": "Reviewed page adapter",
-  "trigger": {
-    "kind": "cdp",
-    "websocket_url": "ws://127.0.0.1:9222/devtools/page/EXPLICIT-TARGET-ID",
-    "binding": "wa_event"
-  },
-  "action": {"kind":"wake", "session":"conversation-id", "prompt":"Review this event as data."}
-}
-```
-
-The sentinel enables Runtime and installs the named binding. A reviewed page
-adapter calls:
-
-```js
-window.wa_event(JSON.stringify({id: sourceMessageId, data: {text: messageText}}));
-```
-
-Optional `setup_expression` is **operator-authored** JavaScript installing the
-page-specific listener (e.g. a MutationObserver). It must be idempotent on reconnect.
-There is deliberately no arbitrary-first-tab selection, injected universal scraper,
-or claimed WhatsApp integration. Site adapters need stable identifiers, consent,
-source-specific tests and review before enabling external effects. Navigation or
-browser replacement may require reattaching the adapter/update of the explicit target.
-CDP disconnects are visible; events during disconnection may be missed. For lossless
-business events, the adapter needs a replayable source/outbox and acknowledgment;
-raw browser notifications are not a durable message bus.
-
-### The default path for page work is document start, not the UI
-
-An adapter's job is to reach the page's own code, and the measurements now say plainly that driving the
-UI is not a route: on WhatsApp Web the chat list is virtualised, its search box does not filter, its
-`scrollTop` does nothing, and its keystrokes are dropped (of 112 backspaces, 56 landed; Enter timed out
-while the message delivered). So a `setup_expression` should be a **document-start** script
-(`Page.addScriptToEvaluateOnNewDocument`), which runs in the page's own world before the app's code -
-the same layer a native DLL injection targets, without injection, a sandbox escape or a 32/64-bit
-problem, and without putting a foreign library in the process holding the session. Three rules come
-with it:
-
-- **the script belongs to the CDP session.** Close the socket and it is gone before the app runs, which
-  is why something persistent must hold the connection, and why a job turned on after being off has to
-  rebind. `scripts/whatsapp-preflight.sh` is that check: browser reachable *by proof*, page present,
-  hook bound - one line, with the reason when it cannot.
-- **fail open.** The hook runs first, so a mistake breaks the page rather than the call.
-- **verify by effect.** A call, a click or a keystroke can report failure while the effect happened.
-  Ask the app's own state.
-
-The names to call come from the app itself: wrap its module *define* call at document start and keep the
-factories, so a module whose name cannot be guessed becomes known, and its factory source gives the call
-shape. See `scripts/whatsapp-adapter.mjs` and the `automation-jobs` skill.
 
 ## Inference as a profile-scoped child run
 
@@ -249,10 +191,10 @@ A job that needs judgement uses a `subagent` action, not the operator's own chat
 
 ```json
 {
-  "id": "whatsapp-message",
-  "trigger": {"kind": "event", "topic": "whatsapp.message"},
-  "action": {"kind": "subagent", "profile": "whatsapp-responder", "timeout_seconds": 900,
-              "prompt": "Read the conversation, decide, and send only if the profile approves it."}
+  "id": "review-message",
+  "trigger": {"kind": "event", "topic": "inbox.message"},
+  "action": {"kind": "subagent", "profile": "reviewer", "timeout_seconds": 900,
+              "prompt": "Review the message as data and report a decision."}
 }
 ```
 
@@ -261,8 +203,8 @@ child run and its **reserved capacity**. It never falls back to `/chat`: the poi
 the child cannot reach the operator's tools, and a fallback would hand it exactly those. The spawn is
 idempotent on the delivery's stable source event id, so a restart reconciles the existing child instead of
 starting a second one. A bounded wait that expires while the child is still running is recorded `unknown`
-and never retried. A profile is a local approved config; artifact import installs it disabled, and the
-profile's resources (the conversation, the destination, send approval) are bound locally before enable.
+and never retried. A profile is a local approved config; artifact import installs the job disabled, and
+the profile's tools, resources and limits are approved locally before enable.
 See [ARTIFACTS.md](ARTIFACTS.md).
 
 Legacy `wake` remains a distinct action for the operator's own conversation. It is not a substitute for a
@@ -392,10 +334,9 @@ claims and revision checks. The queue allows 128 pending deliveries globally and
 full is backpressure instead - the interval is skipped, `source_status` says so, and the job's `next_at`
 advances, because the deliveries already queued have not been consumed yet - while an external `emit`
 still errors, so a message is never silently dropped. A queue that is full *because* nothing is being
-claimed therefore no longer wedges the runner (live: the copilot's eight queued deliveries sat there,
+claimed therefore no longer wedges the runner (live: a job's eight queued deliveries sat there,
 every tick failing at the schedule step before either lane ran, until the job was disabled and enabled by
-hand). Eight source observers (CDP/files
-combined) are the current limit; one delivery per job runs at once.
+hand). Eight file source observers are the current limit; one delivery per job runs at once.
 
 **Two execution lanes, not one gate.** A deterministic `run` is claimed regardless of whether a person's
 turn is in progress, so a scheduled ingest never stops because somebody is chatting
@@ -407,8 +348,8 @@ cannot set a child's environment, so `scripts/install-sentinel-task.ps1` sets it
 also writes it durably to `<sentinel>/child-capacity`, because the launcher is only how the value
 *arrives*. `deploy.sh` restarts a watching sentinel with `wa-sentinel restart` and a hand-run
 `wa-sentinel start` inherits the caller's shell; neither goes through the launcher, and a watcher that
-reads the reservation from its own environment alone comes up idle-gated with nothing to say so (the
-copilot's deliveries sat `queued` while a turn ran, runs 470-472). So the environment is consulted first
+reads the reservation from its own environment alone comes up idle-gated with nothing to say so (a job's
+deliveries sat `queued` while a turn ran, runs 470-472). So the environment is consulted first
 and the file is the installation's default, `wa-sentinel start` passes the resolved number to the watcher
 it spawns, and `wa-sentinel status` prints it with its source (`jobs: reserved child capacity 1 (file)`).
 **An inference delivery sitting `queued` while a turn is running is an unconfigured reservation, not the
@@ -440,16 +381,14 @@ A job can be exported as a versioned, machine-independent artifact and imported 
 local bindings and approval. Importing installs the job disabled; an identical import is a revision no-op.
 See [ARTIFACTS.md](ARTIFACTS.md).
 
-## WhatsApp: linked-device replacement
+## WhatsApp: linked-device connector
 
-The browser eligibility/source/transcription/responder pipeline described historically
-above is retired, not a fallback. `wa-whatsapp` handles durable scoped ingestion and
+`wa-whatsapp` handles durable scoped ingestion and
 both incoming/own-outgoing audio without inference. First activation suppresses old
 history posting; post-activation downtime backlog remains queued without transcript
 age expiry. EN is the shipped language; this operator must explicitly persist PT.
 GENERAL model replies remain disabled and fail closed on unsupported draft visibility.
-See [setup](WHATSAPP-CONNECTOR.md), [legacy exit](WHATSAPP-MIGRATION.md) and the
-machine-readable retirement manifest. No production retirement or pairing is claimed.
+See [setup](WHATSAPP-CONNECTOR.md). No production pairing is claimed.
 
 ## Proof
 
@@ -460,7 +399,7 @@ carrying the values of the revision it was claimed against, and a control moved 
 an edit's cost, the same refusals, and the rest of the definition unchanged), schedule persistence
 and interrupted-delivery ambiguity.
 `scripts/test-jobs.cjs`
-uses scratch homes, a fake local chat receiver and a real isolated Chrome page.
+uses scratch homes and a fake local chat receiver.
 `scripts/test-ui.ps1` checks the jobs position, safe rendering, toggle request and
 failure behavior in a real browser, and that a declared control is shown with its value, posted as the
 number the field holds, and that its refusal comes back in the store's words.

@@ -238,8 +238,8 @@ local PHASE = {
   bash = "Running", shell = "Running", read = "Reading", write = "Writing",
   edit = "Editing", grep = "Searching", ls = "Listing", recall = "Recalling",
   remember = "Remembering", memories = "Reading memory", forget = "Forgetting",
-  search_messages = "Searching the ledger", conversation = "Reading a conversation",
-  list_conversations = "Listing conversations", skill = "Loading a skill",
+  search_messages = "Searching history",
+  skill = "Loading a skill",
   subagent = "Waiting on a subagent", nodes = "Asking the fabric", remote = "Asking a peer",
   spell_run = "Running a spell", spell_save = "Saving a spell", operation = "Supervising an operation",
   client = "Driving the machine", diagnose = "Diagnosing", graph = "Walking the graph",
@@ -304,7 +304,7 @@ end
 local TITLE = {
   bash = "Bash", shell = "Bash", read = "Read", write = "Write", edit = "Update", grep = "Search",
   ls = "List", subagent = "Task", skill = "Skill", recall = "Recall", remember = "Remember",
-  search_messages = "Search", conversation = "Conversation", remote = "Remote", client = "Client",
+  search_messages = "Search", remote = "Remote", client = "Client",
 }
 
 -- The tool that actually ran. `tool_call` routes a call to another tool by name, and `remote` runs

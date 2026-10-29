@@ -188,7 +188,7 @@ and cancellation remain available. No failed call or external effect is auto-rep
   absent measurement says so (`available: false` with a reason).
 - A settlement is woken only where a judgement is still owed: a completed delivery to evaluate, or a
   failure/lost run needing a recovery decision. A child whose profile recorded its own decision
-  (`"settlement": "self_reported"`, as the scoped responder does) and which left nothing to review is
+  (`"settlement": "self_reported"`, declared in the profile file) and which left nothing to review is
   **skipped, with the reason written on its outbox row** - a silent skip would be indistinguishable
   from a lost wake. A failure is never skipped, whatever the profile says.
 
@@ -279,8 +279,7 @@ and never as an automatic retry.
 - `node scripts/test-subagents-policy.cjs [wa-binary]` — isolated profile
   validation (including empty `allowed_tools` and malformed/negative limits),
   caller clamping, the empty-ceiling rule, operator authorization, schema/dispatch
-  parity, the durable effect adapter, the WhatsApp dispatch shapes, trusted-event
-  resolution and the lean prompt. Includes `scripts/test-subagent-selection.lua`
+  parity and the lean prompt. Includes `scripts/test-subagent-selection.lua`
   for omitted/explicit/partial selection, legacy fallback, compatibility refusals,
   durable local/remote placement fields and follow-up routing. Model-free.
 - `node scripts/test-subagents.cjs <wa>` — mock-inference integration: start,
@@ -352,52 +351,3 @@ cancellation that has been requested but whose execution has not stopped is stil
 active. `recovery_error` is non-null when a durable record could not be read; in
 that state new admission is refused (a lost record also lost the idempotency key
 that prevents a replay). No prompts, transcripts or credentials are included.
-
-## WhatsApp responder seam (with the automation worker)
-
-The specialist profile is `whatsapp-responder`, and `lua/core/whatsapp.lua` is
-embedded in the host. Its advertised tools are `whatsapp_read`,
-`whatsapp_decide` and `whatsapp_send`; the schemas are added to `tools.all(role)`
-and filtered by the profile's exact `allowed_tools`, with `tools.dispatch`
-re-checking the ceiling before routing to `whatsapp.dispatch`.
-
-The runtime passes the module the trusted snapshot the child already holds:
-`ctx.subagent` (the immutable resolved profile, with its `resources` and every
-declared limit), `ctx.event` (only `{conversation_id, message_id}`, resolved from
-the ledger - a raw event cannot supply a script, path, endpoint or wider scope),
-and `ctx.effects` (the durable SQLite adapter built by `lua/core/effects.lua` for
-this child session). `ctx.send` is for tests only.
-
-`ctx.effects` satisfies the contract the module documents:
-
-```
-effects.reserve({message_id, conversation_id, body, limit})
-  -> {status="reserved"|"already_sent"|"ambiguous"|"budget_exceeded", record?}
-effects.confirm({message_id, conversation_id, message})
-  -> boolean   -- only advances a pending reservation
-effects.record(decision_record)
-  -> boolean   -- separate table; can never erase a send reservation
-effects.reconcile({message_id, ...}) -> {status="sent"|"not_sent"|"unknown", record?}
-effects.release({message_id}) -> boolean   -- only when no effect happened
-effects.unknown({message_id, detail}) -> boolean   -- ambiguous, never replayed
-effects.find(message_id) -> record|nil
-effects.count() -> n   -- this child's persistent send budget used
-```
-
-`reserve` is one atomic `INSERT .. SELECT`: a new reservation is created only
-when no send record exists for the message and this child's pending+sent+unknown
-count is below `limit`. A crash between reserve and confirm therefore leaves a
-pending row, and the next attempt returns `ambiguous` (`reconcile` is read-only
-and returns `unknown`, never `not_sent`, because this adapter cannot see the
-app's store). A send whose confirmation cannot be written is reported as
-not-success, not as sent. Decisions live in their own table, keyed by the message
-id, so recording one never erases a reservation.
-
-Drafting and sending remain different capabilities. For the current WhatsApp
-linked-device backend, GENERAL sends fail closed BEFORE reservation because
-cross-device draft visibility is unsupported. `store`/`ui` are retired, not fallbacks.
-Profiles ship read-only and no responder job is newly enabled. Deterministic
-original-chat audio transcripts are a separate explicit policy with EN default/PT
-account configuration; they do not grant model sends or use a child/idle inference.
-See [connector](WHATSAPP-CONNECTOR.md) and [migration](WHATSAPP-MIGRATION.md).
-Historical ledgers/effects retain the contracts above and must not be reset.

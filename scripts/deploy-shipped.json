@@ -13,7 +13,6 @@
   "files": [
     "scripts/deploy.sh",
     "scripts/build-whatsapp.sh",
-    "scripts/install-whatsapp-chrome-task.ps1",
     "scripts/codemode-build.mjs",
     "scripts/check-embedded-runtime.lua",
     "scripts/upgrade.sh",

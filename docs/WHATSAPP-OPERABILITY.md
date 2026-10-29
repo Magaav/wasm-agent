@@ -6,7 +6,7 @@ on-demand route keeps the private profile/token on SERVER and uses the existing
 approved native peer → server CLI/MCP → loopback path; no local registry/HTTPS setup
 was needed. See [current coverage/handoff](WHATSAPP-COVERAGE.md). The initial setup
 sequence below is reference/new-install material, NOT a request to re-pair, repeat
-retirement/activation or interrupt the running service while real samples arrive.
+activation or interrupt the running service while real samples arrive.
 36 historical holds remain unresolved; full audio/latency/coverage acceptance is pending.
 
 2026-10-17 update: [operator management](WHATSAPP-OPERATOR-MANAGEMENT.md) adds a
@@ -48,8 +48,8 @@ this setup are the reproducible part. Overrides in the generated `.cmd`:
 
 One Go whatsmeow linked-device service (`connectors/whatsapp`), its private SQLite
 journal/outbox, one warm offline Python faster-whisper worker, and the existing
-read-only MCP/CLI/Lua boundary. This is NOT the old formatter plugin, Chrome/CDP,
-a second sender, or a WASI rewrite. No arbitrary model replies are authorized.
+read-only MCP/CLI boundary. This is NOT the formatter plugin, a second sender,
+or a WASI rewrite. No arbitrary model replies are authorized.
 
 The pre-existing implementation already covered all-chat/current/future direct,
 group and LID ingestion, independent durable incoming AND own synchronized outgoing
@@ -82,40 +82,34 @@ The actual missing journey seams were names, selected-chat narrowing and search:
   not globally sorted source chronology. CLI `chronological_inline_cursors` gives
   chronological presentation of inline messages WITHIN that bounded page; order
   by sent_at/cursor. Resolve oversized outcomes separately before claiming full context.
-- CLI exposes discovery, selection and filters. Native event Lua exposes query/time
-  filters but stays fixed to its trusted-event chat; historical-ledger filters refuse.
-  MCP now accepts a private `--profile-file`, avoiding embedded account config in
+- CLI exposes discovery, selection and filters. The agent calls the same MCP tools
+  only from code mode (`await tools.<name>(args)`). MCP now accepts a private `--profile-file`, avoiding embedded account config in
   registry arguments. `whatsapp-readiness.mjs` is one-shot/read-only and distinguishes
   connected/account/PT policy from **unverified** Whisper/service/live-delivery proof.
 
 ## Focused worker evidence (not live acceptance)
 
 All fixture accounts/messages are synthetic; requested-on remains false in process
-proof. Windows Go execution, real SQLite/HTTP/MCP stdio/CLI and source-root native
-Lua were exercised. Go tests/vet, MCP scope/navigation tests, Python local/installer
+proof. Windows Go execution and real SQLite/HTTP/MCP stdio/CLI
+were exercised. Go tests/vet, MCP scope/navigation tests, Python local/installer
 and frozen-builder tests are the focused checks. Final matrix:38 top-level Go tests
 plus2 mutation subtests, vet;7 Node tests;4 Python local/installer and4 frozen-builder
 tests, all passed with zero skips. Settled operation `op-1792244159012944-13792-319`
 ran the final Go/Node/unpaired-process/navigation-process/shipping closure checks
-(exit0). Source-root native navigation includes3 causal assertions; private profile
-MCP and honest unpaired readiness refusal are exercised too. Python's separate
+(exit0). Private profile MCP and honest unpaired readiness refusal are exercised too. Python's separate
 settled `op-1792244017475789-13792-313` exited0. Exact final logs, source hashes,
 Windows binary, Linux cross-build bundle and manifest digest are retained under the
 owned checkout's `target/`; the settled worker report identifies the immutable
 bundle and evidence receipt. No old mutable artifact is advertised as freshly built.
 
-Source-root Lua execution does not certify a newly built embedded wa binary.
 Linux cross-compilation does not certify Linux runtime/systemd. No real engine
 weights, cloud execution, production service install/start/registration, real keys,
 account/profile edits, pairing, QR capture, private media or live sends were used.
 Self-review only; no independent reviewer or full release gate. gate_verified:false;
 release_verified:false. Production E2E is **not yet complete**.
 
-First synthetic process generation exposed a Lua reserved-word error (`until`);
-quoted table keys fixed it before the passing generation. The failed generation is
-retained, not relabelled success. Self-review also caught a narrowed owner binding's
-oversized descriptor validation, stale-history title overwrite, and historical
-ledger filters silently ignoring unsupported arguments; all now fail/behave explicitly.
+Self-review caught a narrowed owner binding's oversized descriptor validation and
+stale-history title overwrite; both now fail/behave explicitly.
 
 ## Coordinator execution sequence (source is owned/delivered by worker)
 
@@ -133,13 +127,7 @@ all following production effects; do not ask another worker to finish this sourc
    `systemctl --user is-enabled wa-whatsapp.service`, `loginctl show-user "$USER" -p Linger`.
    Nonexistence is a result, not a reason for broad process termination. Inspect exact
    owned process/service metadata, NOT keys, raw media or chat databases via shell.
-2. **Freeze/inventory/retire old owner safely.** Follow every exact-match supported
-   job/task/custom-trigger/process/identity/unknown-send checkpoint in
-   [migration](WHATSAPP-MIGRATION.md). Preserve original inventories/hashes and
-   histories. Disable is not settlement. An unsupported custom trigger or unknown
-   ownership is a real activation blocker, NOT permission to edit runtime DBs or
-   broadly kill/delete. Do not run the old copilot to test source health.
-3. **Install immutable bundle, still OFF.** Independently check the delivered manifest
+2. **Install immutable bundle, still OFF.** Independently check the delivered manifest
    digest and reviewed installer against the recorded source. Transfer only the
    synthetic-free Linux release bundle, not `target` caches/evidence/state. Existing
    [frozen build and installer commands](WHATSAPP-CONNECTOR.md#human-build-and-installation-linux-cloud-operator-terminal)
@@ -149,7 +137,7 @@ all following production effects; do not ask another worker to finish this sourc
    readback separately from service readiness. Installer registers/starts nothing.
    Record `"$GO" version -m "$BUNDLE/wa-whatsapp"` when a verified Go toolchain exists.
    The manifest's source_files binds Go/module closure, worker, notices and installer.
-4. **Provision offline STT.** Follow the pinned Python wheel/cache setup in connector
+3. **Provision offline STT.** Follow the pinned Python wheel/cache setup in connector
    docs in a private virtualenv; audit/freeze platform-specific transitive packages.
    Setup-time model download is explicit; runtime remains offline. Record package
    versions, model inventory/hashes and host CPU/RAM. Run:
@@ -158,7 +146,7 @@ all following production effects; do not ask another worker to finish this sourc
    ```
    `--check` actually loads the local model, but does not prove service worker warmth,
    language accuracy or audio transport. Missing model/library must remain a refusal.
-5. **Explicit account policy and PRIVATE human pairing.** Initialize OFF with the
+4. **Explicit account policy and PRIVATE human pairing.** Initialize OFF with the
    exact operator PN JID, `--all-chats --language pt` as documented. For existing state,
    stop only its exact service; inspect config; use supported offline scope/language
    commands, never re-init/wipe or reset unknowns. State/owners directories must exist
@@ -174,15 +162,13 @@ all following production effects; do not ask another worker to finish this sourc
    public endpoints or a synthesized TTY. Coordinator must not execute/capture pair.
    Stop pair before serve; both share the same state/account locks. Confirm paired
    account via supported read-only lookup, not key-store inspection.
-6. **Observe OFF, then activate/start once.** Serve OFF and inspect partial history,
-   account/generation/PT, sticky gaps and exclusions. After legacy settlement and
-   exact identity mapping, create the private retirement attestation (migration docs),
-   stop foreground serve, activate with explicit transcript-posting approval, inspect
+5. **Observe OFF, then activate/start once.** Serve OFF and inspect partial history,
+   account/generation/PT, sticky gaps and exclusions. Stop foreground serve, activate with explicit transcript-posting approval, inspect
    cutoff, then register/start only the reviewed exact systemd user unit. No initial
    history flood, ten-minute expiry or historical unknown-send reset. Read back unit,
    MainPID/ExecStart/artifact hashes, config and authenticated status. Verify lingering
    if boot persistence is required; neither worker nor installer changes it.
-7. **Expose only approved authenticated reads.** Keep Go listening on127.0.0.1:8787.
+6. **Expose only approved authenticated reads.** Keep Go listening on127.0.0.1:8787.
    Use the existing authorized private HTTPS gateway/trusted CA; do not expose8787
    or disable TLS checks. A dedicated approved Caddy host template is:
    ```caddy
@@ -211,7 +197,7 @@ all following production effects; do not ask another worker to finish this sourc
    approved private secret channel, never chat output. No credential-free native peer
    integration is claimed by this worker. Without gateway/credentials, local on-demand
    reads are genuinely pending, not satisfied by a hidden cloud journal.
-8. **Approve local operator read binding, no delegated widening.** Use the private
+7. **Approve local operator read binding, no delegated widening.** Use the private
    profile shape in connector docs with exact account/generation, BOTH owner-read
    flags, HTTPS URL and token/CA FILE paths. Do not modify shipped narrow profiles.
    For local conversation tool access, coordinator can explicitly put/probe/enable
@@ -226,8 +212,8 @@ all following production effects; do not ask another worker to finish this sourc
    ```
    Retain current revision, put/probe readback and explicitly enable only those six
    reads. A probe is not account health/permission to send. No generic send/media
-   registration. Discovery namespaced tools then support this operator conversation;
-   native event child facade remains narrow. Registry changes belong to coordinator.
+   registration. Discovery namespaced tools then support this operator conversation
+   from code mode. Registry changes belong to coordinator.
 
 ## Practical bounded navigation after authorized setup
 
@@ -258,7 +244,7 @@ unverified. Worker synthetic evidence does not change any row below to live-test
 
 | step | actual acceptance |
 |---|---|
-| install/ownership | exact release hash/source, one owned service/sender, legacy settlement, boot policy |
+| install/ownership | exact release hash/source, one owned service/sender, boot policy |
 | pairing/account | human-only scan complete, lookup exact PN account/generation, PT/all-chats explicit |
 | sync | supported existing direct/group/LID and a newly observed direct/group chat visible; honest partial history |
 | incoming audio | fresh known PT recording → independent task → local transcript → labeled reply-linked ORIGINAL-chat post |
@@ -295,7 +281,7 @@ cp -a -- "$STATE/." "$FRESH_PRIVATE_BACKUP/"
 ```
 
 Never copy active device keys or start a backup as a second owner. Preserve the
-original volume and historical drafts/ledgers/transcripts. Repoint only the exact
+original volume and historical drafts/transcripts. Repoint only the exact
 reviewed unit to a compatible immutable older executable after a stopped-state
 backup and unit diff. This directory migration is additive, not permission to drop
 columns. **Pre-directory connector releases use positional INSERTs into chats and
@@ -304,4 +290,4 @@ against it.** Retain the newer stopped state read-only and deploy a compatible f
 release; never swap in an old ready-outbox backup to bypass this incompatibility.
 Never restore an older ready outbox over a later unknown dispatch; retain
 newer unknown effects for reconciliation and keep posting OFF if compatibility or
-settlement is uncertain. No blind reset/replay or fabricated retirement attestation.
+settlement is uncertain. No blind reset/replay.

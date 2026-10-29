@@ -288,8 +288,7 @@ Standing-authorized notes-to-self report confirmed as `3EB0F9F9B32C28720ABB22`;
 no third-party message or deployment replay. This completion record is documentation
 only, not another runtime installation.
 `gate_verified:false`, `release_verified:false`; see `docs/GRAPH.md` and
-`docs/HISTORY-SEARCH.md`. Previous drafts, disabled WhatsApp jobs and responder
-binding remain untouched.
+`docs/HISTORY-SEARCH.md`. Previous drafts remain untouched.
 
 ## MCP extension boundary — 2026-10-12 (installed and verified)
 
@@ -311,38 +310,25 @@ warmth/latency and full reliable coverage remain pending; recovery's original ph
 error cause is unknown. The worker's subsequent bounded on-demand SDK name enrichment,
 future mutation header/order/alias proofs and aggregate warnings are SOURCE/fixture
 work, not a claim that new code is deployed or those36 historical holds are resolved.
-See [coverage/status/handoff](docs/WHATSAPP-COVERAGE.md),
-[connector setup](docs/WHATSAPP-CONNECTOR.md), [retirement inventory](docs/WHATSAPP-MIGRATION.md)
-and [source reference inventory](docs/whatsapp-reference-inventory.json). EN remains
+See [coverage/status/handoff](docs/WHATSAPP-COVERAGE.md)
+and [connector setup](docs/WHATSAPP-CONNECTOR.md). EN remains
 the product recognition default; PT is explicit per account. General AI sends remain
 refused. Earlier installation/pairing/MCP evidence below is historical, not new-runtime
 or real transcript delivery acceptance.
 
-WhatsApp was the first profile-managed app adapter (reads, lookup, audio, verified
-store send). Existing compatibility clients route through MCP; Jobs keeps controls,
-eligibility, cursor/dedupe, deterministic STT and delivery/wake ownership. Existing
-profile/reservation/budget/verification remains the send authority. No third-party
-send, existing-job enable or new unattended wake performed.
-
 Focused evidence: real private stdio/HTTP and app CDP peers; native source/embedded
 42+42 checks; Chromium MCP24 checks and causal guard-removal refusal; required UI
-suite; WhatsApp durable-effects42, cursor/transcription/audio-loss regressions;
-batch-tool regression and62-module embedded freshness. Read-only live MCP self
-identity was proven; no live third-party send. The retained responder profile still selects
-the retired UI route and has no page/store-send binding: it was not silently
-rewritten or activated. Self-review, not independent review. Merged/pushed runtime
+suite; batch-tool regression and62-module embedded freshness. Read-only live MCP self
+identity was proven; no live third-party send. Self-review, not independent review. Merged/pushed runtime
 source `ac05d9c9a5ff10965fa8ba98377e8ad81aa63ab6`; actual request-bound Sentinel
 installation `1791812098410392200-2968-00000000000000000000` verified at13:37 UTC:
 76 checks, failed0, skipped0, exit0; installed node/scripts/UI/source/listener/watcher
-identities match. Native `mcp{action:'list'}` confirms the profile-managed WhatsApp
-adapter and disabled read-only template, with0 generically configured connectors.
+identities match. Native `mcp{action:'list'}` confirms the
+disabled read-only template, with0 generically configured connectors.
 Standing-authorized notes-to-self report confirmed as `3EB038D05822CCE6CC5657`;
 no third-party message or deployment replay. This completion record is documentation
 only, not another runtime installation.
 `gate_verified:false`, `release_verified:false`. See `docs/MCP.md`.
-
-Last read-only live job inventory: `whatsapp-copilot` revision21 and
-`whatsapp-events` revision13 disabled, queued0; no definition changes requested.
 
 ## Windows Sentinel service preparation — 2026-10-07
 
@@ -387,9 +373,7 @@ to restart parallel production.
 - Operation-index import preserved historical originals. Safe execution-claim
   recovery does **not** release workspace bindings or prove task completion.
   Delivery records now carry additive source-disposition observations while
-  retaining original reviews, findings, admissions and landing records. The
-  scheduled WhatsApp copilot was paused via `job disable` (revision 21, queued
-  zero); it must not silently restart responder delegation during direct work.
+  retaining original reviews, findings, admissions and landing records.
 - Runtime closure remains **blocked**, not ready: 76 historical operation unknowns
   lack sufficient identity/drain proof; two newer operation records also need
   recovery. The 46 attempted workspace retirements remain held (36 operation
@@ -826,7 +810,7 @@ memory; resumable sessions and compaction; tool evidence; tracked diffs and
 conflict-aware undo; signed nodes, rendezvous and relay; master/guest roles;
 skills, spells and plugins; external sentinel; on-demand workers; supervised shell
 operations and managed automation jobs. Jobs (Engine, after tools) queue wakes or
-allow-listed deterministic actions from event/schedule/file/explicit CDP bindings.
+allow-listed deterministic actions from event/schedule/file bindings.
 See [operation contract](docs/OPERATIONS.md) and [jobs contract](docs/JOBS.md) for
 the precise implemented boundaries, tests and remaining platform/adapter limits.
 
@@ -948,9 +932,8 @@ not a growing prompt or a reason to grant every customer every tool.
 - Use skills to explain procedures, spells to execute deterministic steps and
   plugins/native adapters for capabilities. Reuse these before adding a framework.
 - Managed jobs now provide default-off definitions, revision invalidation, durable
-  bounded delivery queues and source/action evidence. Site-specific adapters
-  (including WhatsApp), replayable browser event delivery, customer unattended
-  grants and immutable procedure packages remain work, not implicit guarantees.
+  bounded delivery queues and source/action evidence. Site-specific adapters,
+  customer unattended grants and immutable procedure packages remain work, not implicit guarantees.
 - Promote a successful task into a versioned automation with inputs,
   preconditions, postconditions, authority requirements and failure behavior.
 - Keep customer secrets and identifiers out of shared templates and fixtures.

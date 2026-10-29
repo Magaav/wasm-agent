@@ -6,18 +6,17 @@ subsequent reliability findings and current completion are recorded in
 
 ## Scope and readiness
 
-Self-review, not independent review. The linked-device replacement is implemented
-in `connectors/whatsapp`, existing scoped MCP/Lua read boundaries and explicit
-legacy retirement fences/tombstones. Source is staged/default-off, NOT installed,
-paired or live-accepted. No real WhatsApp QR, account session, media, message,
-provider login, hosted inference, cloud workaround, service registration or runtime
-legacy cleanup was used. The reporting/wave fix already on main is preserved;
+Self-review, not independent review. The linked-device connector is implemented
+in `connectors/whatsapp` with a scoped MCP read boundary. Source is staged/default-off,
+NOT installed, paired or live-accepted. No real WhatsApp QR, account session, media,
+message, provider login, hosted inference, cloud workaround or service registration
+was used. The reporting/wave fix already on main is preserved;
 its installation is not installation of this WhatsApp delivery.
 
 The service has separate device-key and message/audio/outbox SQLite stores;
 per-state and per-account OS ownership locks; exact account/generation/chat scope;
 private-TTY-only pairing; reconnect and partial-history reporting; durable off/on,
-cutover and language settings; independent audio tasks and a warm offline worker;
+activation cutoff and language settings; independent audio tasks and a warm offline worker;
 source-linked, marked multipart posts for incoming AND own outgoing audio;
 pre-dispatch uncertainty fences and exact echo reconciliation without auto-resend.
 EN is the product default; PT is an explicit account setting, never a global
@@ -26,7 +25,7 @@ GENERAL model sends remain refused because cross-device drafts are unsupported.
 
 Review followed lifecycle, transport identity/events, ingestion/task transactions,
 account/generation/auth scope, language propagation, worker protocol, outbox crash
-windows, private pairing, packaging and retirement. A new focused test proves that
+windows, private pairing and packaging. A new focused test proves that
 persisted PT task language reaches recognition AND both-direction posted text,
 even after the account default is subsequently changed to EN. Installer review
 found and fixed relative-path acceptance and redirected destination ancestors;
@@ -45,9 +44,8 @@ was reconciled, not blindly replayed. That exact operation passed:
   cross-build. The actual pinned adapter and SQLite implementation compile.
 - Real unpaired executable/HTTP/SQLite process checks: EN/PT persistence, auth,
   generation, second-owner refusal and captured/non-TTY pairing refusal.
-- Native WhatsApp boundary: source + embedded (6 boundary checks and 12 scoped
-  retirement negatives per mode). Native MCP: 44 checks per mode plus retained post.
-- Python: 4 tests; Node MCP/retirement: 16 passed, zero skips. Import-closure positive
+- Native MCP: 44 checks per mode plus retained post.
+- Python: 4 tests; Node MCP: 16 passed, zero skips. Import-closure positive
   and missing-module negatives; deployment-shipped checker: 119 checks.
 
 Continuation focused proof: `op-1792185725857315-18092-4`, settled exit0:
@@ -66,14 +64,6 @@ license texts and native receipts. The binaries were built from a DIRTY candidat
 based on476ccb75, not a clean final release. Source hashes bind that fact honestly.
 Coordinator performs the final clean canonical build before any approved install.
 
-The private enable-guard-removal Rust negative is retained in
-`target/wa-retirement-mutation/enable.stdout` and `.stderr`: removing the guard
-allowed enabling the retired job, and the intended `unwrap_err` assertion FAILED.
-The outer collector exited1 because it incorrectly looked for the panic text in
-stdout (Rust wrote it to stderr). It is NOT a failed positive suite and NOT a
-successful collector receipt. The claim-removal second case did not run; no result
-is invented for it. No production state was modified by the private mutation.
-
 Upstream pin: whatsmeow `v0.0.0-20261016130820-0b0a1cdac3e2`, full origin
 `0b0a1cdac3e2a20d1436127d860bfe0c2b8ac9de`, MPL-2.0, unmodified.
 Go module graph/sums are pinned and `go mod verify` passed. License/notice texts
@@ -87,32 +77,11 @@ fully locked or production-installed by this worker.
 Complete human commands, private QR precautions, PT configuration, warm-cache
 provisioning, user service setup, backup and rollback:
 [WHATSAPP-CONNECTOR.md](WHATSAPP-CONNECTOR.md).
-Exact check/apply and retained object owners/removal conditions:
-[WHATSAPP-MIGRATION.md](WHATSAPP-MIGRATION.md),
-[whatsapp-retirement.json](whatsapp-retirement.json),
-[source reference enumeration](whatsapp-reference-inventory.json).
-
-The coordinator/human must freshly inventory/disable/settle the exact old jobs
-(copilot, events, wake-selftest, ingest, message, source, transcribe), Windows
-`wasm-agent-whatsapp-chrome` task/wrapper and any custom triggers/launchers through
-supported ownership/hash-matched procedures. Old installed copies/active owners
-remain unverified; this worker did not touch them. Legacy triggers with no narrow
-supported retirement API are explicit blockers, not permission to edit runtime DBs.
-Preserve ledgers, transcripts, drafts, browser profile and unknown sends. Unverified
-identity/message-ID mapping stays read-only/quarantined, never auto-imported/reposted.
-
-Source tombstones and the retired job template remain to overwrite/refuse old
-entrypoints during cutover; coordinator removes them and their shipping reachability
-only after installed references and private paired cutover are proved retired.
-The scoped facade/effects and historical ledger remain for safety/evidence. The pure
-Rust formatter remains source-only historical ABI compatibility, not a second stack.
-Original documents/test texts remain explicit unshipped history, not executable fallback.
 
 The worker still has no supported cloud execution context. Human authorized terminal
 installation, private phone QR, exact account/chat binding, HTTPS proxy/authorized-device
 credential provisioning, actual Linux runtime and real original-chat delivery proof
-remain separate. No remote refusal was bypassed. The cutover receipt is a human
-attestation, not a cryptographic or automatic production-retirement certificate.
+remain separate. No remote refusal was bypassed.
 `gate_verified:false`; `release_verified:false`.
 
 ## evaluation: cumulative session, including interrupted run
@@ -138,13 +107,13 @@ attestation, not a cryptographic or automatic production-retirement certificate.
   updated; actual119-check shipping proof passed. Existing Rust dead-code/unused
   warnings and the effective PS1 CRLF-attribute warning remain visible; no unrelated
   files/global line-ending settings were normalized or warnings concealed.
-- **graph: used.** `search_symbols(resolve_route)` helped locate the live Lua
+- **graph: used.** `search_symbols(resolve_route)` helped locate the live
   boundary but also returned a historical duplicate. `impact` returned zero changed
   symbols and coverage gaps for the shell-heavy patch; Go writes reported
   `not_indexable_source`. It was NOT used as complete impact/correctness proof.
   Subjective/untested improvement: clearer staged/unstaged/top-level coverage and Go
   indexing would make this task's graph review more useful. No graph fix was started.
-- **code mode: used.** Native serial writes/reads supported the bounded retirement
+- **code mode: used.** Native serial writes/reads supported the bounded
   edits; original nested outcomes were retained. The initial aggregated doc read was
   truncated (result `fdc036444af5eddc93b96f238872f11ff9c2ff8509899762955b248031dfe6ee`);
   all four required original docs were subsequently read in complete bounded pages.
@@ -152,8 +121,7 @@ attestation, not a cryptographic or automatic production-retirement certificate.
   and exact replacements avoided guessing. Some batch receipts were verbose.
   Subjective improvement: smaller content-budgeted document batches and reading
   after formatters change whitespace. No claimed token/speed/quality saving.
-- The negative collector's stdout/stderr assumption is recorded above rather than
-  relabelled as positive success. This continuation found a real installer issue and
+- This continuation found a real installer issue and
   added causal language-flow coverage; Python4 + focused Go1 passed. The ancestor
   symlink test is synthetic, not a claim of Linux filesystem/apply verification.
 - Continuation graph `impact(source=git)` returned changed_lines0 after the full

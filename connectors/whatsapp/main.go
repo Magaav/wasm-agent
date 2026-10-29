@@ -263,8 +263,7 @@ func run() error {
 	apply := f.Bool("apply", false, "requeue-held-audio: write the changes (default is a dry run)")
 	requeueLimit := f.Int("limit", 0, "requeue-held-audio: requeue at most N newest rows (0 = all)")
 	includeLegacy := f.Bool("include-legacy-holds", false, "requeue-held-audio: also requeue audio that arrived after a legacy hold with no recorded target")
-	confirm := f.Bool("approve-transcript-posting", false, "explicit original-chat transcript policy approval after retirement check")
-	retired := f.String("retirement-receipt", "", "verified operator cutover receipt path")
+	confirm := f.Bool("approve-transcript-posting", false, "explicit original-chat transcript policy approval")
 	intentID := f.String("intent-id", "", "exact durable operator intent ID for offline owner inspection")
 	operatorApproved := f.Bool("approve-operator-management", false, "offline owner provisioning of separate selected-chat approval/dispatch credentials")
 	if err := f.Parse(os.Args[2:]); err != nil {
@@ -381,11 +380,8 @@ func run() error {
 		if j.hasGap() {
 			return errors.New("persistence_gap_requires_reconciliation")
 		}
-		if !*confirm || *retired == "" {
-			return errors.New("explicit_transcript_approval_and_retirement_receipt_required")
-		}
-		if err = validateRetirement(*retired, c.Account); err != nil {
-			return err
+		if !*confirm {
+			return errors.New("explicit_transcript_approval_required")
 		}
 		paired, err := newAdapter(context.Background(), j)
 		if err != nil {
@@ -611,23 +607,6 @@ func run() error {
 			}
 		}
 	}
-}
-func validateRetirement(path, account string) error {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return errors.New("retirement_receipt_unreadable")
-	}
-	var r struct {
-		Schema            int    `json:"schema"`
-		Account           string `json:"account"`
-		LegacyDisabled    bool   `json:"legacy_disabled"`
-		UnknownsPreserved bool   `json:"unknowns_preserved"`
-		IdentityVerified  bool   `json:"identity_verified"`
-	}
-	if json.Unmarshal(b, &r) != nil || r.Schema != 1 || r.Account != account || !r.LegacyDisabled || !r.UnknownsPreserved || !r.IdentityVerified {
-		return errors.New("retirement_not_verified")
-	}
-	return nil
 }
 func writeNewSecret(path string, data []byte) error {
 	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)

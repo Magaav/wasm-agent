@@ -34,12 +34,11 @@ The trigger and action keep their normal shape, minus the bindings that became s
 | installed job field | becomes |
 | --- | --- |
 | `trigger.path` (file) | the `trigger_path` resource of kind `file_directory` |
-| `trigger.websocket_url` (cdp) | the `page` resource of kind `cdp_page` |
 | `action.script` (run) | the `script` resource of kind `script_path` |
 | `action.session` (wake/subagent) | kept as a logical name, not a machine binding |
 
 `requirements` is what the artifact says it needs from the host or the operator: reserved child capacity
-for an inference action, a browser for a CDP trigger, network for a model call, elevation for anything
+for an inference action, network for a model call, elevation for anything
 that would need more authority than the importing role holds.
 
 ## Export and import
@@ -62,13 +61,13 @@ wa-sentinel job import documents.artifact.json --bindings bindings.json --approv
 The rules, and why each exists:
 
 - **Every required slot must be bound**, and the value must be the right kind: a file path must be
-  absolute, a page must be an explicit loopback DevTools page. A missing or wrong-shaped binding is a
+  absolute. A missing or wrong-shaped binding is a
   refusal, not a default.
 - **Bindings need explicit approval.** `--approve` authorises the *binding*; it does not enable the job.
   An artifact cannot approve itself, so the approval is an argument from the operator, never a field the
   artifact carries. A binding for a slot the artifact did not declare is refused, not ignored.
 - **The artifact is an allowlist, checked on import too.** Only the known portable fields are accepted: a
-  raw `trigger.path`, `trigger.websocket_url` or `action.script` is refused (`artifact_contains_raw_binding`)
+  raw `trigger.path` or `action.script` is refused (`artifact_contains_raw_binding`)
   rather than allowed to bypass the resource slots, and an unrecognised field is refused
   (`unknown_artifact_field`). The same credential/machine-binding scans that guard export guard import.
 - **The importer's role is explicit.** `--as-role operator|master|guest` (default `operator`) is the
@@ -96,7 +95,7 @@ that still contains:
   (`ws://127.0.0.1`, `ws://localhost`, `ws://[::1]`).
 
 The scan is deliberately blunt, and it is defence-in-depth behind the allowlist - it is not claimed to be
-a total secret detector. A relative path (`scripts/reply.mjs`) is not a binding and passes.
+a total secret detector. A relative path (`scripts/validate.sh`) is not a binding and passes.
 
 ## Guest scope is not a smaller operator scope
 
@@ -123,92 +122,31 @@ not by asking the model to behave.
 A portable job's inference action is a `subagent`:
 
 ```json
-{ "kind": "subagent", "profile": "whatsapp-responder", "prompt": "...", "timeout_seconds": 900 }
+{ "kind": "subagent", "profile": "reviewer", "prompt": "...", "timeout_seconds": 900 }
 ```
 
 The profile is a **local, approved** config at `<config>/subagent-profiles/<id>.json`
-(`schema_version 1`, `id`, `instructions`, `allowed_tools`, `resources`, `limits`). It is where machine
-bindings live, so the artifact stays portable:
+(`schema_version 1`, `id`, `instructions`, `allowed_tools`, `resources`, `limits`). It stays on the
+importing machine, so the artifact stays portable:
 
 - `allowed_tools` is the approved tool allow-list, not the entire model-request envelope. The runtime registry exposes only these; a tool outside the list
   is refused even if the registry is wrong.
-- `resources` binds the things the run may touch: the conversation, the self destination, the account,
-  the browser endpoint, the send path and whether sending is approved.
-- `limits` bounds context, body size and sends per run.
+- `resources` may name `exclusive` shared resources the run must hold while it executes.
+- `limits` bounds depth, time, output, prompt size and tokens per run.
 
-An event can **narrow** what a run does; it can never widen it. There is no argument that grants send
-approval or reaches another conversation.
-
-The `whatsapp-responder` profile ships as a template in `jobs/profiles/whatsapp-responder.json`. Its
-scope is empty and sending is unapproved, so its default is "read nothing, send nothing".
-
-### Scope is an account allow-list, narrowed by a trusted event
-
-A profile may permit several *direct* conversations (`conversation`, `allowed_conversations`, or a single
-`allowed_conversation`), and it gates the two capabilities separately with `actions`
-(`["read","send"]`): a profile that may read a conversation is not thereby allowed to send. The run never
-chooses the conversation from a model argument: the runtime resolves `ctx.event = {conversation_id,
-message_id}` from the ledger, and the tool refuses a foreign `conversation_id` argument, a conversation
-outside the profile's scope, or a ledger row that belongs to a different conversation. So the scope is
-locally approved, and the event can only narrow it to the one conversation it actually names.
-
-### Trusted context, not the event body
-
-The tools read only trusted context, never the event payload beyond identity:
-
-| seam | meaning |
-| --- | --- |
-| `ctx.event` | `{conversation_id, message_id}`, resolved by the runtime from the ledger |
-| `ctx.effects` | the durable effect store: `reserve({message_id,conversation_id,body,limit})`, `confirm({message_id,conversation_id,message})`, and `record(decision)` for decisions, plus optional read-only `reconcile`/`release`/`unknown` |
-| `ctx.subagent` | the runtime's resolved snapshot (`id`, `allowed_tools`, `resources`, `limits`); the tool reads this instead of re-reading a file a child could change |
-| `ctx.profile` / `ctx.profile_path` | the local approved profile (tests/direct callers) |
-
-The event's other fields are ignored: an event cannot supply a `reply_script`, a `store_send_script`, a
-browser endpoint or a capability. A decision is written through `ctx.effects.record` (durable, keyed by the
-message id, and it must not clobber a send reservation). A send is gated by an **atomic reservation**:
-`effects.reserve` persists the pending effect and consumes the per-run budget **before** the send, so a
-crash in the send/confirm window cannot replay. `reserve` returns `already_sent` (do not send), `ambiguous`
-(a prior pending send may have happened - reconcile read-only or refuse, never send) or `budget_exceeded`.
-After a store-verified send, `effects.confirm` must persist; if it does not, the tool reports
-`send_not_confirmed`, not success. A missing effect store or capability is a refusal, not "unlimited".
-
-### Linked-device WhatsApp binding and retirement
-
-The WhatsApp template is now read-only, unapproved and explicitly linked-device.
-Bind account PN JID, generation, exact approved chat IDs, HTTPS connector URL and
-private credential FILE/CA references locally. Product recognition default is EN;
-this operator's private account setting must be PT. Import never enables a job or
-grants transcript posting permission. Never export keys or token values.
-
-`send_path=store` and `ui` are retired. GENERAL model sends fail closed before
-reservation because drafts across linked devices are unsupported, not absent.
-Deterministic incoming + own-outgoing audio transcripts have a separate explicit
-activation policy in `wa-whatsapp`, not the responder profile or a generic MCP tool.
-No browser/page/raw fallback, job repair, initial-history repost or unknown-send reset.
-
-Old browser-era IDs/account bindings/ledgers remain historical read-only evidence;
-do not infer a new account or protocol ID mapping from titles/phone-like strings.
-Unknown mappings are quarantined. Verify exact identity/message IDs before any
-separately approved importer; no replay/backfill importer is included here.
-See [connector setup](WHATSAPP-CONNECTOR.md) and mandatory
-[migration/retirement](WHATSAPP-MIGRATION.md).
+A job, an event or the artifact itself cannot widen what the profile allows: the artifact names a profile
+id, and the local approved profile decides the tools and limits.
 
 ## Proof
 
 - `cargo test --manifest-path rust/Cargo.toml -p wa-jobs --offline` covers export stripping, the field allowlist (unknown fields
   refused), credential/machine-binding refusal (including nested params, prompts and context, POSIX paths
   and value credentials), raw-binding refusal on import, unknown binding slots, required and approved
-  bindings, loopback page bindings, importer-role allowlisting and normalization, owner spoofing and
+  bindings, importer-role allowlisting and normalization, owner spoofing and
   inconsistent scope, unknown schema versions, and the store-level install-disabled and revision-safety
   round trip.
-- `tests/whatsapp-scoped.lua` covers trusted event/profile/chat scope, approval and
-  current linked-device/store/UI general-send refusals BEFORE reservation/dispatch.
-  Go connector tests separately cover durable transcript reservations, crash windows,
-  independent ingestion and exact echo reconciliation. Former browser suites are
-  archived under `docs/history/whatsapp-browser/`, not current acceptance.
 - `scripts/test-job-subagents.cjs` (run with `node scripts/test-job-subagents.cjs`) starts a real sentinel against
   an isolated home and a local `/subagents` protocol fixture: it imports an artifact through the public
   CLI, proves import-disabled, reserved-capacity execution while the node is busy, exact start payload and
   idempotency key, settlement only on a settled child, `unknown` without retry, waiting without reserved
-  capacity, guest import denial, and the scoped-tool denial suite. No paid inference.
-- `docs/WHATSAPP-PROOF.md` distinguishes local fixtures from unperformed live cutover/pairing/posting proof.
+  capacity and guest import denial. No paid inference.

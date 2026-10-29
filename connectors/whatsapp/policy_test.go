@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http/httptest"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -115,16 +114,7 @@ func TestSnapshotTranscriptCursorAndNoRawKeys(t *testing.T) {
 		t.Fatal("cursor lost history")
 	}
 }
-func TestPrivateModelCacheAndRetirementAttestationRefusals(t *testing.T) {
-	dir := t.TempDir()
-	file := filepath.Join(dir, "receipt.json")
-	os.WriteFile(file, []byte(`{"schema":1,"account":"fixture","legacy_disabled":true,"unknowns_preserved":true,"identity_verified":false}`), 0600)
-	if validateRetirement(file, "fixture") == nil {
-		t.Fatal("unverified identity accepted")
-	}
-	if validateRetirement(file, "foreign") == nil {
-		t.Fatal("foreign account accepted")
-	}
+func TestUnsupportedModeAndLanguageRefused(t *testing.T) {
 	for _, bad := range []Config{{Account: "fixture", Generation: 1, Language: "pt", Mode: "translate", Chats: []string{"200@s.whatsapp.net"}}, {Account: "fixture", Generation: 1, Language: "de", Mode: "transcribe", Chats: []string{"200@s.whatsapp.net"}}} {
 		if validConfig(bad) == nil {
 			t.Fatal("unsupported mode/language")

@@ -60,7 +60,6 @@ alias for `master`. Binding between nodes is `master:master` or `master:guest`.
 | capabilities | `capabilities` (list what this role may call) | everyone |
 | environment (pi) | `bash`, `read`, `write`, `edit`, `ls`, `grep` | master |
 | shell | `shell` (shell on the client host, also the UI terminal) | master |
-| ledger | `search_messages`, `conversation`, `list_conversations` | master |
 | client | `client` (screenshot, frame, mouse, keyboard, shell, CDP) | master |
 | nodes | `nodes`, `remote` | master |
 | spells | `spell_save`, `spell_run`, `spell_list`, `spell_get`, `spell_forget` (crystallized macros) | master |

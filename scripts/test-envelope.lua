@@ -33,8 +33,8 @@ local guest={session_id=session('guest'),user_id='guest',role='guest'}
 local denied=tools.dispatch(memory,'tool_search',{query='web_search',limit=1},'guest',guest)
 check(denied.loaded==0,'guest cannot discover operator web tools')
 check(tools.dispatch(memory,'tool_call',{name='web_search',arguments={query='x'}},'guest',guest).error:find('tool_not_available',1,true)==1,'guest cannot route privileged tools')
-local hidden=tools.dispatch(memory,'tool_search',{query='whatsapp_send',limit=1},'master',ctx)
-check(hidden.loaded==0,'parent cannot load child-only send facade')
+local hidden=tools.dispatch(memory,'tool_search',{query='integrate',limit=1},'master',ctx)
+check(hidden.loaded==0,'parent cannot load a task-owner-only tool')
 local child={session_id=sid,user_id='master',role='master',subagent={allowed={tool_call=true,tool_search=true,web_read=true}}}
 check(tools.dispatch(memory,'tool_call',{name='web_search',arguments={query='x'}},'master',child).error:find('tool_not_available',1,true)==1,'profile ceiling rechecked on target')
 check(tools.dispatch(memory,'tool_search',{query='',limit=1},'master',ctx).error=='tool_search_query_required','invalid discovery visible')

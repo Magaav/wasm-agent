@@ -85,9 +85,9 @@ else
 fi
 SENTINEL_CONFIG="${WASM_AGENT_HOME:-${USERPROFILE:-$HOME}}/.wasm-agent"
 
-# The sentinel executes `run` scripts only from directories named here, and the install's own scripts (the
-# whatsapp hooks, the preflight) live in <install>/scripts. Without this, every job whose action is `run`
-# fails with "run is disabled: set WA_SENTINEL_SCRIPTS" - which is exactly how whatsapp-ingest was failing.
+# The sentinel executes `run` scripts only from directories named here, and the install's own scripts
+# live in <install>/scripts. Without this, every job whose action is `run` fails with "run is disabled:
+# set WA_SENTINEL_SCRIPTS".
 # Export it so the watcher this deploy starts or restarts inherits it; the service unit and the logon task
 # set it too, because a watcher not started by this script must still have it.
 #
@@ -975,10 +975,6 @@ fi
 # directory is not deployed, so it is deployed here.
 if [ -d "$ROOT/jobs" ] && [ -d "$ROOT/scripts" ]; then
   PIPELINE=0
-  # Linked-device transcripts are formatted by the connector. The legacy pure
-  # formatter remains source-history compatibility only, not a shipped runtime.
-  cp -f "$ROOT/scripts/install-whatsapp-chrome-task.ps1" "$INSTALL_DIR/scripts/" \
-    || fail "could not ship the retired WhatsApp task-installer refusal"
   for source in "$ROOT"/scripts/whatsapp-* "$ROOT"/scripts/mcp-*.mjs; do
     [ -f "$source" ] || continue
     cp -f "$source" "$INSTALL_DIR/scripts/" || fail "node installed, but could not ship $(basename "$source")"

@@ -44,8 +44,6 @@ local function line(item)
     local tags = ""
     if item.tags and #item.tags > 0 then tags = " [" .. table.concat(item.tags, ", ") .. "]" end
     return string.format("%s  %s%s  %s", item.id, item.scope or "", tags, item.content)
-  elseif item.body then
-    return string.format("%s  %s  %s", item.conversation_id, item.sender_id or "-", item.body)
   end
   return json.encode(item)
 end
@@ -84,12 +82,6 @@ elseif command == "memories" then
   each(memory.memories(nil, limit_of(args[2], 50)))
 elseif command == "forget" then
   print(json.encode({ forgotten = memory.forget(args[2]) }))
-elseif command == "search" then
-  each(memory.search_ledger(args[2], args[3], limit_of(args[4], 20)))
-elseif command == "conversation" then
-  each(memory.conversation(args[2], limit_of(args[3], 50)))
-elseif command == "conversations" then
-  each(memory.conversations(limit_of(args[2], 50)))
 elseif command == "skills" then
   local skills = dofile("lua/core/skills.lua").list(true)
   if #skills == 0 then print("(no skills found)") end
@@ -271,7 +263,7 @@ elseif command == "capabilities" then
   if args[2] == "--json" then print(text) else print(inventory.text()) end
 elseif command == "help" then
   print("wa [chat] [--continue|-c|--resume <id>] [prompt]  |  remember <text> | recall <query>")
-  print("    memories | forget <id> | search <query> | conversation <id> | conversations")
+  print("    memories | forget <id>")
   print("    sessions | skills | stats | status | nodes | call <node> <capability> [args-json]")
   print("    capabilities [--json]  what this node can do: every registered host capability")
   print("    resume [--list] [--session <id>] [prompt]   see and continue an unfinished thread")

@@ -1,6 +1,6 @@
 ---
 name: automation-jobs
-description: Create or diagnose scheduled, file, event, desktop or Chrome/CDP automations, especially when choosing between simulated input and a direct app action. Prefer APIs/in-process execution over mouse or keyboard simulation. Use when asked to wake the agent from an event, apply a skill automatically, run a deterministic procedure, or enable/disable an Engine job.
+description: Create or diagnose scheduled, file, event or desktop automations, especially when choosing between simulated input and a direct app action. Prefer APIs/in-process execution over mouse or keyboard simulation. Use when asked to wake the agent from an event, apply a skill automatically, run a deterministic procedure, or enable/disable an Engine job.
 ---
 
 # Build an automation deliberately
@@ -19,8 +19,7 @@ description: Create or diagnose scheduled, file, event, desktop or Chrome/CDP au
 4. Write a JSON definition with `id`, `name`, `trigger`, `action`:
    - trigger `event`: `{kind:"event",topic:"app.message"}`;
    - trigger `schedule`: `{kind:"schedule",every_seconds:3600}`;
-   - trigger `file`: `{kind:"file",path:"absolute directory",pattern:".json"}`;
-   - trigger `cdp`: `{kind:"cdp",websocket_url:"ws://127.0.0.1:PORT/devtools/page/EXPLICIT-ID",binding:"wa_event"}`.
+   - trigger `file`: `{kind:"file",path:"absolute directory",pattern:".json"}`.
    - wake action: `{kind:"wake",session:"conversation-id",skill:"reviewed-skill",prompt:"approved instruction"}`;
    - deterministic action: `{kind:"run",script:"absolute script",timeout_seconds:60}`.
      The operator must allow its canonical directory through `WA_SENTINEL_SCRIPTS`.
@@ -30,17 +29,12 @@ description: Create or diagnose scheduled, file, event, desktop or Chrome/CDP au
 6. Test with synthetic input first. `wa-sentinel job emit <topic> <stable-id>
    <absolute-payload.json>` enqueues an explicit event. Deterministic scripts read
    the JSON file named by `WA_JOB_EVENT_FILE`; never interpolate event text as shell.
-   CDP adapters emit `wa_event(JSON.stringify({id:stableSourceId,data:payload}))`.
-   An optional operator-authored `setup_expression` may install the page listener;
-   it must be idempotent. Do not choose the user's first tab or invent a universal
-   WhatsApp scraper. Use an explicitly approved page/profile and test its adapter.
 7. Verify source state, delivery outcome and real effects. A launch/queue receipt
    is not completion; exit zero is not proof of business correctness. Never test
    an auto-reply with a real recipient before validating a draft-only fixture.
 8. Disable through the Engine or `job disable <id>`. Pending deliveries are
    cancelled; admitted effects cannot be undone. Unknown outcomes after interruption
-   require reconciliation, not an automatic retry. Browser disconnects can miss events;
-   lossless delivery needs a replayable source, not just CDP notifications.
+   require reconciliation, not an automatic retry.
 
 ## Verify hook catalogue changes
 
@@ -83,17 +77,10 @@ For a web app, resolve its current models and invoke its own semantic action usi
 CDP document-start script (`Page.addScriptToEvaluateOnNewDocument`) when a persistent hook is needed; use
 `Runtime.evaluate` for a bound one-shot action. Do not synthesize user input when an app action exists.
 
-For WhatsApp specifically, do NOT use browser-module/CDP inspection, hooks or
-source keepers. That connector is retired, including its formerly recommended
-store action. Use the [linked-device service](../../docs/WHATSAPP-CONNECTOR.md) and
-[exact-match retirement](../../docs/WHATSAPP-MIGRATION.md). No general reply job
-is newly enabled. Original browser measurements/instructions remain historical
-in `docs/history/whatsapp-browser/automation-jobs-SKILL.md.txt`, not a fallback.
-
-For OTHER explicitly approved web applications, document-start setup and semantic
-app actions remain available under the generic authority/verification rules above.
-Keep any target-specific code reviewed, scoped, idempotent and fail-open; retain
-setup identifiers for removal, never infer send success from a click/ack alone.
+Only for explicitly approved web applications, under the authority/verification rules above. Keep any
+target-specific code reviewed, scoped, idempotent and fail-open; retain setup identifiers for removal,
+never infer send success from a click/ack alone. WhatsApp is not a web app here: it is the
+[linked-device connector](../../docs/WHATSAPP-CONNECTOR.md), reached through code mode.
 
 ## Deterministic first: a rule for every job you write
 

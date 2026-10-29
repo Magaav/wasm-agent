@@ -53,8 +53,6 @@ M.commands = {
   { name = "/remember", usage = "/remember <text>", hint = "store a memory" },
   { name = "/recall", usage = "/recall <query>", hint = "search memories" },
   { name = "/memories", usage = "/memories", hint = "list recent memories" },
-  { name = "/search", usage = "/search <query>", hint = "search the message ledger" },
-  { name = "/conversation", usage = "/conversation <id>", hint = "read a conversation" },
   {
     name = "/login",
     usage = "/login",

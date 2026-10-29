@@ -3,7 +3,7 @@ local json=dofile('lua/vendor/json.lua')
 local output=dofile('lua/core/tool_output.lua')
 local evidence=dofile('lua/core/evidence_view.lua')
 local M={}
-local retrieval={'search_messages','search_messages_many','session','session_many','sessions','resume_session','recall','memories','search_ledger','conversation','list_conversations','tool_result'}
+local retrieval={'search_messages','search_messages_many','session','session_many','sessions','resume_session','recall','memories','tool_result'}
 local roles={user=true,assistant=true,tool=true,summary=true,retry=true,system=true}
 local function query(sql,params)
   local result=host.sql_query(sql,json.encode(params or {}))

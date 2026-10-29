@@ -19,31 +19,8 @@ fn store() -> Store {
         SEQ.fetch_add(1, Ordering::Relaxed)
     )))
 }
-#[test]
-fn retired_whatsapp_owners_cannot_enable_schedule_enqueue_or_claim() {
-    let s = store();
-    let mut job = definition();
-    job["id"] = json!("whatsapp-copilot");
-    job["trigger"] = json!({"kind":"schedule","every_seconds":30});
-    s.put(&job).unwrap();
-    assert!(s.enable("whatsapp-copilot", true).unwrap_err().to_string().contains("retired"));
-    // Private fixture of an older enabled installation, NOT production database surgery.
-    s.db().unwrap().execute("UPDATE jobs SET enabled=1,next_at=1 WHERE id='whatsapp-copilot'", []).unwrap();
-    let revision = s.get("whatsapp-copilot").unwrap()["revision"].as_i64().unwrap();
-    assert_eq!(s.schedule(100).unwrap(), 0);
-    assert!(s.enqueue("whatsapp-copilot",revision,"fixture",&json!({}),100).is_err());
-    s.put(&definition()).unwrap();s.enable("messages",true).unwrap();
-    let rev=s.get("messages").unwrap()["revision"].as_i64().unwrap();
-    s.enqueue("messages",rev,"prior",&json!({}),100).unwrap();
-    s.db().unwrap().execute("UPDATE deliveries SET job_id='whatsapp-copilot',revision=?",[revision]).unwrap();
-    assert!(s.claim(101,6).unwrap().is_none());
-    let retained:i64=s.db().unwrap().query_row("SELECT count(*) FROM deliveries WHERE job_id='whatsapp-copilot'",[],|r|r.get(0)).unwrap();
-    assert_eq!(retained,1);
-    assert!(s.enable("whatsapp-copilot",false).is_ok());
-    assert!(!retired_whatsapp_job("unrelated-browser-job"));
-}
 fn definition() -> Value {
-    json!({"id":"messages","name":"Message received","trigger":{"kind":"event","topic":"whatsapp.message"},"action":{"kind":"wake","session":"thread-id","prompt":"Apply the reviewed response policy.","skill":"reply-policy"}})
+    json!({"id":"messages","name":"Message received","trigger":{"kind":"event","topic":"inbox.message"},"action":{"kind":"wake","session":"thread-id","prompt":"Apply the reviewed response policy.","skill":"reply-policy"}})
 }
 #[test]
 fn exact_event_receipt_reconciles_enqueue_and_refuses_stale_or_different_effects() {
@@ -94,10 +71,10 @@ fn history_does_not_force_queue_and_budget_table_scans() {
 fn default_off_and_revision_invalidates_pending() {
     let s = store();
     assert_eq!(s.put(&definition()).unwrap()["enabled"], false);
-    assert_eq!(s.emit("whatsapp.message", "m1", &json!({}), 10).unwrap(), 0);
+    assert_eq!(s.emit("inbox.message", "m1", &json!({}), 10).unwrap(), 0);
     let job = s.enable("messages", true).unwrap();
-    assert_eq!(s.emit("whatsapp.message", "m1", &json!({}), 10).unwrap(), 1);
-    assert_eq!(s.emit("whatsapp.message", "m1", &json!({}), 10).unwrap(), 0);
+    assert_eq!(s.emit("inbox.message", "m1", &json!({}), 10).unwrap(), 1);
+    assert_eq!(s.emit("inbox.message", "m1", &json!({}), 10).unwrap(), 0);
     s.enable("messages", false).unwrap();
     assert!(s.claim(11, 6).unwrap().is_none());
     assert!(!s
@@ -110,7 +87,7 @@ fn changed_instruction_requires_reapproval() {
     let s = store();
     s.put(&definition()).unwrap();
     s.enable("messages", true).unwrap();
-    s.emit("whatsapp.message", "m1", &json!({}), 10).unwrap();
+    s.emit("inbox.message", "m1", &json!({}), 10).unwrap();
     let mut job = definition();
     job["action"]["prompt"] = json!("new instruction");
     assert_eq!(s.put(&job).unwrap()["enabled"], false);
@@ -126,7 +103,7 @@ fn identical_put_is_a_no_op_and_keeps_pending_deliveries() {
     s.put(&definition()).unwrap();
     s.enable("messages", true).unwrap();
     let enabled = s.get("messages").unwrap();
-    assert_eq!(s.emit("whatsapp.message", "m1", &json!({}), 10).unwrap(), 1);
+    assert_eq!(s.emit("inbox.message", "m1", &json!({}), 10).unwrap(), 1);
     let again = s.put(&definition()).unwrap();
     // `enable` legitimately bumps the revision, so the no-op is measured against the state just before it.
     assert_eq!(again["revision"], enabled["revision"]);
@@ -142,7 +119,7 @@ fn defer_requeues_without_spending_the_budget() {
     let s = store();
     s.put(&definition()).unwrap();
     s.enable("messages", true).unwrap();
-    s.emit("whatsapp.message", "m1", &json!({}), 10).unwrap();
+    s.emit("inbox.message", "m1", &json!({}), 10).unwrap();
     let claimed = s.claim(11, 1).unwrap().unwrap();
     assert!(s.claim(11, 1).unwrap().is_none());
     s.defer(claimed["id"].as_i64().unwrap(), "wake budget reached")
@@ -158,7 +135,7 @@ fn exclusive_claim_budget_and_unknown_recovery() {
     s.put(&definition()).unwrap();
     s.enable("messages", true).unwrap();
     for n in 0..3 {
-        s.emit("whatsapp.message", &format!("m{n}"), &json!({}), 10)
+        s.emit("inbox.message", &format!("m{n}"), &json!({}), 10)
             .unwrap();
     }
     let first = s.claim(11, 1).unwrap().unwrap();
@@ -182,11 +159,11 @@ fn queue_is_bounded_and_not_silently_dropped() {
     s.put(&definition()).unwrap();
     s.enable("messages", true).unwrap();
     for n in 0..8 {
-        s.emit("whatsapp.message", &format!("m{n}"), &json!({}), 10)
+        s.emit("inbox.message", &format!("m{n}"), &json!({}), 10)
             .unwrap();
     }
     assert!(s
-        .emit("whatsapp.message", "overflow", &json!({}), 10)
+        .emit("inbox.message", "overflow", &json!({}), 10)
         .is_err());
 }
 #[test]
@@ -243,9 +220,6 @@ fn rejects_ambient_authority_and_invalid_inputs() {
     assert!(s.put(&job).is_err());
     job["action"] = json!({"kind":"run","script":"relative.sh"});
     assert!(s.put(&job).is_err());
-    job = definition();
-    job["trigger"] = json!({"kind":"cdp","websocket_url":"ws://example.com/devtools/page/123","binding":"wa_event"});
-    assert!(s.put(&job).is_err());
 }
 #[test]
 fn deterministic_action_requires_no_wake_budget() {
@@ -254,7 +228,7 @@ fn deterministic_action_requires_no_wake_budget() {
     job["action"] = json!({"kind":"run","script":std::env::temp_dir().join("reviewed.sh")});
     s.put(&job).unwrap();
     s.enable("messages", true).unwrap();
-    s.emit("whatsapp.message", "m1", &json!({}), 10).unwrap();
+    s.emit("inbox.message", "m1", &json!({}), 10).unwrap();
     let d = s.claim(11, 0).unwrap().unwrap();
     assert_eq!(d["action"]["kind"], "run");
     s.finish(d["id"].as_i64().unwrap(), "completed", "verified", 12)
@@ -266,7 +240,7 @@ fn two_consumers_cannot_claim_one_delivery() {
     let s = store();
     s.put(&definition()).unwrap();
     s.enable("messages", true).unwrap();
-    s.emit("whatsapp.message", "m1", &json!({}), 10).unwrap();
+    s.emit("inbox.message", "m1", &json!({}), 10).unwrap();
     let a = s.clone();
     let b = s.clone();
     let one = std::thread::spawn(move || a.claim(11, 6).unwrap());
@@ -291,7 +265,7 @@ fn deterministic_and_inference_lanes_are_separate() {
     run_job["action"] = json!({"kind":"run","script":std::env::temp_dir().join("ingest.sh")});
     s.put(&run_job).unwrap();
     s.enable("ingest", true).unwrap();
-    s.emit("whatsapp.message", "s1", &json!({}), 10).unwrap();
+    s.emit("inbox.message", "s1", &json!({}), 10).unwrap();
 
     let deterministic = s.claim_next(11, 0, false).unwrap().unwrap();
     assert_eq!(deterministic["action"]["kind"], "run");
@@ -302,7 +276,7 @@ fn deterministic_and_inference_lanes_are_separate() {
 
     s.put(&definition()).unwrap();
     s.enable("messages", true).unwrap();
-    s.emit("whatsapp.message", "m1", &json!({}), 10).unwrap();
+    s.emit("inbox.message", "m1", &json!({}), 10).unwrap();
     assert!(
         s.claim_next(11, 6, false).unwrap().is_none(),
         "a wake must not be claimed on the deterministic lane"
@@ -318,14 +292,14 @@ fn deterministic_and_inference_lanes_are_separate() {
 fn subagent_action_validates_and_is_inference() {
     let s = store();
     let job = json!({"id":"respond","name":"Respond as operator",
-        "trigger":{"kind":"event","topic":"whatsapp.message"},
-        "action":{"kind":"subagent","profile":"whatsapp-responder","prompt":"Decide; never send without approval.","timeout_seconds":900}});
+        "trigger":{"kind":"event","topic":"inbox.message"},
+        "action":{"kind":"subagent","profile":"reviewer","prompt":"Decide; never send without approval.","timeout_seconds":900}});
     s.put(&job).unwrap();
     s.enable("respond", true).unwrap();
-    s.emit("whatsapp.message", "m1", &json!({}), 10).unwrap();
+    s.emit("inbox.message", "m1", &json!({}), 10).unwrap();
     assert!(s.claim_next(11, 6, false).unwrap().is_none());
     let claimed = s.claim_next(11, 6, true).unwrap().unwrap();
-    assert_eq!(claimed["action"]["profile"], "whatsapp-responder");
+    assert_eq!(claimed["action"]["profile"], "reviewer");
     let mut bad = job;
     bad["action"] = json!({"kind":"subagent","prompt":"no profile"});
     assert_eq!(s.put(&bad).unwrap_err().to_string(), "subagent_needs_profile");
@@ -376,7 +350,7 @@ fn a_pipeline_validates_its_steps_and_lands_on_the_inference_lane() {
         "action": {"kind": "pipeline", "steps": [
             {"kind": "run", "script": read, "returns": "events"},
             {"kind": "foreach", "from": "events", "key": "message_id", "max": 8,
-             "step": {"kind": "subagent", "profile": "whatsapp-responder", "prompt": "decide"}},
+             "step": {"kind": "subagent", "profile": "reviewer", "prompt": "decide"}},
             {"kind": "run", "script": report}
         ]}
     });
@@ -559,7 +533,7 @@ fn job_controls_are_two_named_validated_numbers() {
     refuse(json!({"grace_seconds":900,"max_age_seconds":600}), "job_control_grace_exceeds_max_age_seconds");
     // A control on an action whose steps cannot read an environment is a knob nobody can observe.
     let wake_with_controls = json!({"id":"noisy","name":"Wake",
-        "trigger":{"kind":"event","topic":"whatsapp.message"},
+        "trigger":{"kind":"event","topic":"inbox.message"},
         "controls":{"grace_seconds":60},
         "action":{"kind":"wake","session":"thread-id","prompt":"Decide."}});
     assert_eq!(

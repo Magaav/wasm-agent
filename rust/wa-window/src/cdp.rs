@@ -1251,7 +1251,7 @@ mod tests {
     #[test]
     fn json_new_needs_a_bare_encoded_query() {
         // `?url=https://x` yields about:blank: the URL is the whole query.
-        assert_eq!(urlencode("https://web.whatsapp.com"), "https%3A%2F%2Fweb.whatsapp.com");
+        assert_eq!(urlencode("https://example.com"), "https%3A%2F%2Fexample.com");
         assert_eq!(urlencode("https://a/b?c=d#e"), "https%3A%2F%2Fa%2Fb%3Fc%3Dd%23e");
         assert!(!urlencode("https://x.com").starts_with("url="));
     }
@@ -1286,7 +1286,7 @@ mod tests {
 
     #[test]
     fn reuse_matches_the_page_we_meant() {
-        assert!(same_page("https://web.whatsapp.com/", "https://web.whatsapp.com"));
+        assert!(same_page("https://example.com/", "https://example.com"));
         assert!(same_page("https://x.com/a#frag", "https://x.com/a"));
         assert!(!same_page("https://x.com/a", "https://x.com/b"));
         assert!(!same_page("https://chatgpt.com/", "https://chatgpt.com/share/abc"));

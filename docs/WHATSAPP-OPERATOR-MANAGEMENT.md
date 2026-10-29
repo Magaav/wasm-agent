@@ -9,8 +9,8 @@ find/read/search tools remain the navigation surface. No autonomous responder,
 bulk send, media send, delete/block/group-membership operation, archive/mute/read
 state control or cross-device draft inspection is added. Unsupported stays unsupported.
 
-This is not a force flag for `whatsapp_send` or MCP `send_message`. Those GENERAL,
-guest/child/event responder paths still refuse before reservation. Existing read
+This is not a force flag for MCP `send_message`. That GENERAL model send path
+still refuses before dispatch. Existing read
 profiles, read tokens, scope ceilings, activation cutoff/PT language and transcript
 outbox/unknowns are unchanged. No new native model tool or generic MCP registration
 is introduced. Host remains capabilities, Lua remains the native agent-policy
@@ -82,7 +82,9 @@ native tool/MCP. On a server with the approved private config and native executi
 the assistant/coordinator can run this CLI there without a Windows secret copy.
 Another node without that authority/transport cannot send. Coding workspaces and
 lower profiles gain no remote/account grant. No shell/remote workaround is allowed
-when the actual native context refuses execution.
+when the actual native context refuses execution. A master on another node reaches
+the same four actions through the federated `peer_<node>__whatsapp_operator` tool,
+called from code mode; it runs this CLI on the node holding the operator profile.
 
 For each action write a bounded private JSON request, then perform ONE call:
 
@@ -286,8 +288,7 @@ final passing generations are identified separately in the report.
 
 Final focused closure `op-1792256785622798-16612-328` passed59 Go top-level
 fixtures +2 mutation subtests, vet, fresh Windows build, real unpaired operator
-and original lifecycle processes, source-root/embedded unchanged Lua boundary
-(9+12 checks per mode), and all7 frozen-builder tests. The earlier Python builder
+and original lifecycle processes, and all7 frozen-builder tests. The earlier Python builder
 run had one explicit-WA_TEST_BASH skip; this closure supplied the admitted local
 Bash path and exercised it, without relabelling that skipped generation. Separate
 settled `op-1792256718584476-16612-316` passed19 Node tests,4 Python local/installer

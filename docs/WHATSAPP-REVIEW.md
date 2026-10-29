@@ -17,15 +17,14 @@ are in [WHATSAPP-CONNECTOR.md](WHATSAPP-CONNECTOR.md). No live activation is cla
    activation; existing approved queued work/unknown evidence is not reset. Newly
    observed supported chats are journaled/listed. Excluded malformed/status/broadcast/
    unapproved scopes have visible counters, without retaining their content/keys.
-   Private PT setup now uses --all-chats. Native trusted-event scope is unchanged.
+   Private PT setup now uses --all-chats.
 2. **One total page.** The operator's explicit private profile has resources containing
    BOTH account_wide and operator_account_read. Neither is a model argument. Narrow
    bindings send only their exact IDs to a server-side scoped query; there is no
    unrelated fetch/filter or per-chat network loop. Messages, discovered chats and
    posting diagnostics have bounded total pages, stable row-ID before/next_before,
    scope_kind, limit_scope:total, cursor_version1 and actual connection/gap/scoped
-   observation metadata. The native event facade still asks for just its event chat,
-   even when its profile contains operator-wide flags. Cursors are resource/scope/
+   observation metadata. Cursors are resource/scope/
    account/generation specific; new insertions do not reorder older row IDs.
 3. **Durable callback contract.** The real adapter registers
    AddEventHandlerWithSuccessStatus. Journal/read/parse/panic failures return false,
@@ -151,12 +150,10 @@ MCP assertion and old-version fanout control passed (one focused Node test, no s
 
 EN default/PT override and original-language task=transcribe remain unchanged.
 No hosted translation/provider fallback, general AI reply, initial-history bulk post,
-ten-minute expiry, draft visibility invention, browser fallback or unknown-send reset.
+ten-minute expiry, draft visibility invention or unknown-send reset.
 No agent.lua/wave_autoflush.lua or reporting-fix edits. No SSH/cloud/VM/container
 workaround, service registration, real QR capture, messages, credentials copying,
-Sentinel/runtime cleanup or installed UI change. The old production jobs/task/wrapper/
-custom triggers, unknown sends and identity mappings retain the exact coordinator/
-human cutover/removal conditions in WHATSAPP-MIGRATION.md. Source readiness is NOT
+Sentinel/runtime cleanup or installed UI change. Source readiness is NOT
 activation approval. Gaps/holds lack a blind reset path; actual reconciliation and
 unsupported/live behavior remain explicit operational limitations.
 

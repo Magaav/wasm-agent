@@ -65,7 +65,7 @@ check(row.probe.ok==false and row.probe.error~=nil,'failed probe durably retaine
 check(row.enabled==false and row.observed_status=='last probe failed','failed probe disables')
 check(control('enable',{id='fixture'}).error=='mcp_probe_required','failed probe cannot enable')
 local template=mcp.default_whatsapp();template.tools.send_message='write'
-check(mcp.validate(template)=='whatsapp_send_requires_scoped_facade','generic WhatsApp send cannot bypass facade')
+check(mcp.validate(template)=='whatsapp_send_uses_operator_route','a WhatsApp MCP server cannot carry a send tool')
 check(mcp.validate({id='bad',transport='stdio',program='node',args={},tools={},env={TOKEN='inline-secret-value'}})=='mcp_credentials_require_environment_references','inline credentials refused')
 check(mcp.namespace('fixture','same/x')~=mcp.namespace('fixture','same_x'),'sanitized names cannot collide')
 print('mcp native ok ('..checks..' checks)')

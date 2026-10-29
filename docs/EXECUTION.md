@@ -217,32 +217,3 @@ retry an ambiguous model submission or external effect.
 
 See [JOBS.md](JOBS.md), [OPERATIONS.md](OPERATIONS.md), and [MEMORY.md](MEMORY.md) for
 existing queue, process-lifetime and transcript evidence contracts.
-
-## Historical browser automation proving case (retired WhatsApp backend)
-
-The case below records the previous boundary design, not current operating instructions.
-The replacement is [linked-device](WHATSAPP-CONNECTOR.md); [retirement](WHATSAPP-MIGRATION.md)
-is mandatory. GENERAL sends now refuse unknown cross-device draft state; transcript
-posting is a separate deterministic, explicitly activated policy, with no responder wake.
-
-```text
-WhatsApp ingest -> eligibility -> durable delivery -> scoped responder subagent
-                -> validated decision -> permitted send -> verified effect
-```
-
-Eligibility uses actual IDs and adapter metadata: direct chats; groups only when the
-operator is mentioned; archived/left conversations excluded. Unknown metadata must
-be reported rather than guessed. A responder's description of a group is not its title.
-
-Drafting and sending have different permissions. The send capability validates the
-recipient and exact body, protects human drafts and unread state, coordinates the
-shared browser resource, and retains message-level effect evidence. Concurrent
-reasoning is allowed; concurrent conflicting edits of one composer are not.
-
-The release proof must show background processing while **two** interactive sessions
-make independent progress and inspect it. Live proof may send to the operator's own
-notes-to-self freely - that destination is standing-authorized by the operator and
-needs no separate authorization - and to any third party only once explicit
-third-party authorization is established. Fixtures
-and live tests must be labelled separately; an unavailable browser is a blocker, not
-permission to substitute a mock and call it a live demonstration.

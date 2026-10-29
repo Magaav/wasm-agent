@@ -1,7 +1,6 @@
 # WhatsApp original-language audio transcription
 
 Canonical service/setup: [WHATSAPP-CONNECTOR.md](WHATSAPP-CONNECTOR.md).
-Mandatory cutover: [WHATSAPP-MIGRATION.md](WHATSAPP-MIGRATION.md).
 
 The linked-device service journals incoming AND synchronized own outgoing audio.
 Ingestion, independent durable compute tasks and held/confirmed outbox parts are
@@ -53,8 +52,7 @@ voice note is picked up the moment it is journaled.
 - **Event-driven pickup.** `ingest` wakes the audio lanes right after the pending
   task commits; each lane drains its queue before sleeping. The 10 s tick is only a
   safety net (backoff expiry, reconnect). A finished transcript wakes the poster too.
-  The old browser-era `whatsapp-transcribe` 30 s job is retired and was not in this
-  path; the previous connector polled every second, one task per tick.
+  The previous connector polled every second, one task per tick.
 - **Queue order.** Never-failed tasks first. Among them, audio sent in the last 15
   minutes runs oldest-first (conversation order), then older backlog newest-first, so
   a requeued or downtime backlog never delays a live voice note. Tasks that genuinely
@@ -148,6 +146,3 @@ hold is requeued only with `--include-legacy-holds`, an explicit operator decisi
 (the small residual risk: a revoke delivered before its own original, out of order).
 New audio arriving in a legacy-held chat after this version is transcribed (not
 posted) without that flag, because a revoke targets an earlier message.
-
-Former browser pipeline documentation is retained as
-[historical evidence](history/whatsapp-browser/WHATSAPP-TRANSCRIPTION.md), not current setup.
