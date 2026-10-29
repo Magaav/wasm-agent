@@ -977,7 +977,7 @@ end
 -- cannot duplicate a visible effect or a side effect (the agent's own guard already refuses
 -- to execute partial tool calls). A stream that DID emit text or a tool call is a different
 -- case and is deliberately NOT treated as a lost stream: its partial output is preserved and
--- it is not silently re-asked.
+-- it is not silently re-asked (it is re-driven with a notice: `M.stream_cut_retries`).
 function M.is_lost_stream(value)
   if type(value) ~= "table" then return false end
   if value.stream_complete ~= false then return false end
@@ -1067,6 +1067,24 @@ end
 function M.connection_backoff_ms(attempt)
   local seconds = math.min(30, 2 ^ math.max(1, tonumber(attempt) or 1))
   return math.floor(seconds * 1000 * (0.75 + math.random() * 0.5))
+end
+
+-- A stream cut AFTER visible text (or a partial tool call) is not a lost stream: re-sending the same
+-- request would re-show what the reader already saw. It is re-driven instead - the partial reply stays
+-- in context, the model is told it was cut and continues (agent.lua). No effect is at stake: partial
+-- tool calls never run. Default-on, short: measured 29/10, session 2f458650, a deepseek-v4.1-flash
+-- stream through opencode-go died 72 bytes into "Limpo. Última checagem..." and ended the run
+-- (`provider_incomplete_stream`) with no retry, because this case only had the opt-in budget (0).
+-- WASM_AGENT_PROVIDER_STREAM_CUT_RETRIES=0 restores the old fail-fast.
+function M.stream_cut_retries()
+  local count = tonumber(env("WASM_AGENT_PROVIDER_STREAM_CUT_RETRIES") or "")
+  if not count then return 3 end
+  return math.max(0, math.min(10, math.floor(count)))
+end
+
+-- 1, 2, 4, 8 s: a cut is usually a gateway hiccup, and the next request rarely needs a long wait.
+function M.stream_cut_backoff_ms(attempt)
+  return math.floor(math.min(8, 2 ^ (math.max(1, tonumber(attempt) or 1) - 1)) * 1000)
 end
 
 -- An HTTP refusal keeps its status and body, and the server's own `Retry-After` hint when the host

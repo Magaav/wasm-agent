@@ -406,6 +406,25 @@ The process-kill fixture `scripts/test-run-recovery.cjs` proves restart, no auto
 queued request preservation, stable IDs/cursors, ownership denial and duplicate-server refusal with
 real processes and mock inference.
 
+### Interrupted runs are re-driven, never replayed (29/10)
+
+Measured 29/10, session 2f458650, 16:10:53Z: the provider (deepseek-v4.1-flash via opencode-go) cut a
+stream 72 bytes into a visible reply and the run died with `provider_incomplete_stream`: that case
+had only the opt-in retry budget (0). Two recoveries now share one rule: re-drive the model turn from
+the recorded transcript with a notice, never re-execute a recorded or partial tool call.
+
+- **In run** (`agent.lua`, `provider.stream_cut_retries`, default 3, `WASM_AGENT_PROVIDER_STREAM_CUT_RETRIES=0`
+  restores fail-fast): the partial reply is kept as an `ok=0` row, handed back to the model with a
+  harness notice ("cut off ... not executed ... continue"), and the step is asked again after 1/2/4 s.
+- **On CLI start** (`run_recovery.lua`, `chat.lua`): a continued thread whose tail is `unfinished`
+  (the process died mid-run) or `failed` by a transport cause is re-driven once with an
+  `[Automatic recovery]` prompt; `note_interruption` adds its notice. The session claim
+  (`resources.begin`) refuses while the owning process lives. One attempt per interruption, tails
+  younger than 6 h (`WASM_AGENT_AUTO_RECOVER_MAX_AGE_SECONDS`), off with `WASM_AGENT_AUTO_RECOVER=0`.
+  Not covered yet: a node-served run left `unknown` by a node restart still waits for `inspect`.
+
+Proof: `scripts/test-stream-cut-recovery.lua`.
+
 ## Subagents are a control call
 
 `POST /subagents` calls the runtime's global `wa_subagents(body, session)`. It is served by

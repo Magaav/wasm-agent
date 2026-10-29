@@ -1376,6 +1376,7 @@ function M:run_body(text, images)
   -- One overflow recovery per run, not per session: a provider rejection is retried once
   -- with a compacted context, and a second failure is surfaced rather than looped.
   self.overflow_recovery_attempted = false
+  self.stream_cuts = 0 -- re-drives of a cut stream in this run (provider.stream_cut_retries)
   self:note_interruption()
   self.emit({ type = "status", text = "thinking" })
   -- A full disk fails in the middle of a turn (SQLITE_FULL, a torn write). Say so before it does, but do
@@ -1704,7 +1705,8 @@ function M:run_body(text, images)
     -- that ended early having emitted nothing. They are the same situation with different
     -- symptoms - measured: `provider_incomplete_stream` ended a run that should have retried -
     -- so both take the patient default policy. A stream that already showed text or a tool call
-    -- does not: its partial output is preserved and it is not silently re-asked.
+    -- does not: its partial output is preserved and it is not silently re-asked - it is re-driven
+    -- below, with the partial handed back and a notice (29/10, provider.stream_cut_retries).
     local connection_lost = ((not ok) and provider.is_connection_lost(tostring(result)))
       or (ok and provider.is_lost_stream(result))
     -- An HTTP refusal (429/5xx) is its own default-on bucket: the provider answered and did not
@@ -1973,6 +1975,42 @@ function M:run_body(text, images)
       record_turn(self,{role="assistant",content=result.content or "",reasoning=result.reasoning or "",
         phase=result.final_phase or "",ok=false,trace=trace})
       telemetry.event(self.session_id,self.run_id,"","step","end",{outcome=reason})
+      -- 29/10: a cut stream re-drives the step instead of ending the run. The partial row above stays
+      -- as evidence (ok=0); the model gets its own partial text back plus a notice, and continues.
+      -- Nothing is replayed: partial tool calls were never executed, and the notice says so, so a
+      -- call it still wants is re-decided from the recorded state. An output-limit stop keeps its
+      -- own handling (re-asking would hit the same cap).
+      if reason=="incomplete_stream" and self.stream_cuts<provider.stream_cut_retries() then
+        self.stream_cuts=self.stream_cuts+1
+        local wait_ms=provider.stream_cut_backoff_ms(self.stream_cuts)
+        local partial=provider.visible_text(result.content or "")
+        self.emit({type="status",text=string.format(
+          "the provider cut the reply mid-stream - asking it to continue in %ds (%d/%d); no partial tool call was run",
+          math.floor(wait_ms/1000),self.stream_cuts,provider.stream_cut_retries())})
+        telemetry.event(self.session_id,self.run_id,"","provider_retry","attempt",{
+          reason="stream_cut",attempt=self.stream_cuts,limit=provider.stream_cut_retries(),wait_ms=wait_ms,
+          partial_bytes=#partial,partial_tool_calls=#calls,context_estimate=context_tokens})
+        local waited=0
+        while waited<wait_ms do
+          if foreground_cancelled() then error("run_cancelled") end
+          local cut_child=child_status()
+          if cut_child and cut_child.cancelled then error("subagent_cancelled") end
+          host.sleep(math.min(250,wait_ms-waited)); waited=waited+250
+        end
+        -- Same shape build_context gives an ok=0 row (content, reasoning when replayed, no calls), so
+        -- a later rebuild of this run's context reads exactly what this request sends.
+        if partial~="" then
+          local cut={role="assistant",content=result.content or ""}
+          if provider.reasoning(self.model).replay then cut.reasoning_content=result.reasoning or "" end
+          messages[#messages+1]=cut
+        end
+        messages[#messages+1]={role="user",content="[Harness notice] Your previous reply was cut off by the "
+          .."provider mid-stream"..(partial~="" and " (the text above is everything that arrived)" or "")
+          ..(#calls>0 and "; the tool call(s) it was forming were NOT executed" or "")
+          ..". This is not a new request. Continue the same task from where it stopped without repeating "
+          .."what was already said; re-issue any tool call you still need."}
+        goto next_round
+      end
       error(problem)
     end
     if #calls > 0 then assistant.tool_calls = calls end
@@ -2274,6 +2312,7 @@ function M:run_body(text, images)
     -- older part and rebuild the context, then keep going in the same message. The
     -- alternative - stopping the message to protect the window - throws away the
     -- agent's momentum and leaves the work uncommitted.
+    ::next_round::
   end
 
   if not completed then

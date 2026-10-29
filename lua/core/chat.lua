@@ -308,6 +308,18 @@ function M.run(argv)
 
   if prompt ~= "" then view:prompt(); turn(prompt) end
 
+  -- 29/10: a continued thread whose last run stopped without an answer (the CLI was killed mid-run, or
+  -- the provider cut the stream past its retries) is re-driven now, from the recorded state, instead
+  -- of waiting for the reader to notice and type. One attempt per interruption; the host's session
+  -- claim refuses it while another live process still owns the thread (lua/core/run_recovery.lua).
+  if prompt == "" and (resume_last or session_id) then
+    local found, recovery = pcall(function() return dofile("lua/core/run_recovery.lua").due(agent.session_id) end)
+    if found and recovery then
+      print(cli_view.paint("  \226\134\187 resuming the interrupted run: " .. redact.text(recovery.reason), "dim", view.live))
+      view:prompt(); turn(recovery.prompt)
+    end
+  end
+
   -- The input, and where the prompt is drawn. Both matter to the same thing: a reader who can see
   -- where they are typing, and who is not locked out while the agent works. The prompt is drawn
   -- once per wait rather than in a loop, because the prompt and the reader's typing share a row -
