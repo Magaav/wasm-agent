@@ -13,6 +13,7 @@
 -- build. Every tool carries the reason it is wanted: a node missing a toolchain should be able to
 -- say what it therefore cannot do. A deploy checks the same list without running anything, from the files the
 -- toolchains leave (scripts/lib/build-requirements.sh, 29/10), and fetches cargo/node there when build.env asks.
+-- `bash scripts/lib/build-requirements.sh check` prints that view for this tree.
 local platform = dofile("lua/core/platform.lua")
 
 local M = {}
