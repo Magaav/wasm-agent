@@ -1,6 +1,6 @@
 //! A sandbox rebuild, shown in `wa chat` as one row above the input box (29/10). The build script
 //! writes `$WASM_AGENT_DATA/build-status.json` (else `~/.wasm-agent`) atomically:
-//! `{state: building|installed|failed, phase: context|compiling|packaging|installing|done|"exit N",
+//! `{state: building|installed|failed, phase: preflight|provisioning|fetching|compiling|proving|installing|done|...,
 //! done, total, crate, commit, started_at, at}` (on `installed`, `crate` holds the elapsed time).
 //! Drawn by the host, not Lua: Lua is blocked in a run and while idle on input, and the host already
 //! wakes every 150 ms idle (`console_reader`) and every tick during a run (`refresh_editor_size`).
@@ -42,7 +42,7 @@ pub fn line(status: &Value, now: f64, width: usize) -> Option<String> {
             let (done, total) = (num("done").unwrap_or(0.0).max(0.0), num("total").unwrap_or(0.0));
             // `total` is an upper bound (the cargo cache skips most crates): clamp, and past compiling
             // the crates are all built.
-            let fraction = match phase { "packaging" | "installing" | "done" => 1.0, "compiling" if total > 0.0 => (done / total).min(1.0), _ => 0.0 };
+            let fraction = match phase { "packaging" | "proving" | "installing" | "done" => 1.0, "compiling" if total > 0.0 => (done / total).min(1.0), _ => 0.0 };
             let filled = (fraction * BAR as f64).round() as usize;
             let bar = format!("\u{2595}{}{}\u{258f} ", "\u{2588}".repeat(filled), "\u{2591}".repeat(BAR - filled));
             let what = match phase {
@@ -109,6 +109,8 @@ mod tests {
         assert!(plain(&line(&over, 10.0, 100).unwrap()).contains("412/412"));
         let pack: Value = serde_json::from_str(r#"{"state":"building","phase":"packaging","at":10}"#).unwrap();
         assert!(plain(&line(&pack, 10.0, 100).unwrap()).contains(&format!("{}\u{258f} packaging", "\u{2588}".repeat(BAR))));
+        let proving: Value = serde_json::from_str(r#"{"state":"building","phase":"proving","done":1,"total":319,"at":10}"#).unwrap();
+        assert!(plain(&line(&proving, 10.0, 100).unwrap()).contains(&format!("{}\u{258f} proving", "\u{2588}".repeat(BAR))), "past compiling the crates are built");
     }
     #[test]
     fn installed_and_failed_show_for_a_while() {
