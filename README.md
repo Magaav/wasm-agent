@@ -92,9 +92,31 @@ Remote assistance will be opt-in. There will be no silent enrollment, copied
 operator credentials, hidden control, or fallback to unrestricted access when
 a provider or authorization service is unavailable.
 
+## Linux node
+
+A fresh Linux machine (Ubuntu or any glibc distribution; aarch64 or x86_64) becomes a node from the
+published prebuilt bundle, with no compiler, in one command:
+
+```sh
+d=~/wasm-agent-bootstrap; [ -d "$d/.git" ] || git clone --depth 1 https://github.com/Magaav/wasm-agent.git "$d" || exit 1; exec bash "$d/scripts/linux/bootstrap.sh"
+```
+
+Prerequisites: `git curl ca-certificates tar python3` (present on Ubuntu server/cloud images) and a
+systemd user session (an SSH login). `scripts/linux/bootstrap.sh` reads `releases/index-linux.json`,
+verifies the bundle (size, `sha256(bundle.manifest)` against the index, every member, the ELF machine,
+one run of the candidate), installs `wa`, `wa-sentinel`, `ui/` and the MCP runtime into `~/.local/bin`
+with the pinned Node, writes `installed.txt` (`release=`, `via=linux-bootstrap`), and installs a
+`systemd --user` unit for `wa-sentinel`, which starts and supervises `wa serve`. The node announces
+itself to the rendezvous; pin the masters allowed to drive it with `WASM_AGENT_TRUSTED_MASTERS` in
+`~/.wasm-agent/env` (the installer prints its node id and the exact step). Paste the same line again to
+update; `--check` verifies without changing anything, `--help` lists the options. Bundles are built and
+published with `scripts/release-linux.sh` on a host of each architecture; `scripts/test-linux-release-fetch.sh`
+is its fixture suite.
+
 ## Running the developer preview
 
-There are currently no published release assets. `scripts/install.ps1` and
+Published assets are the Linux bundles above, the Android bundles (`releases/index.json`) and the
+Windows pilot. `scripts/install.ps1` and
 `scripts/install.sh` are **legacy operator provisioning scripts** tied to the
 maintainers' infrastructure; they are not public installation instructions.
 Do not use them to onboard customers.
