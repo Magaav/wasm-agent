@@ -127,6 +127,9 @@ naming() { # naming <tree> <id>
     file="${file#./}"
     case "$file" in
       "modules/$id/"*) continue ;;
+      # Archived evidence records which files existed during a past run; naming the module there is
+      # history, not a dependency, and deleting the module would not edit it (29/10).
+      review/*|docs/reviews/*/evidence/*) continue ;;
     esac
     hits=$((hits + 1))
     echo "  names the module: $file"
