@@ -116,6 +116,14 @@ start_node() { # start_node <name> <ask>
     tail -5 "$WORK/$name.log" >&2
     return 1
   fi
+  # /health answers before the node threads have beaten once; until then a route is a retryable 503
+  # (serve.rs, node_thread_stalled). A slow host (openclaw, 29/10) put the first checked request in that
+  # window. Wait, bounded, for a route to answer as itself.
+  for _ in $(seq 1 40); do
+    code="$(curl -s -o /dev/null -m 2 -w '%{http_code}' "http://127.0.0.1:$PORT/modules/" 2>/dev/null)"
+    [ "$code" != "503" ] && [ "$code" != "000" ] && break
+    sleep 0.25
+  done
 }
 
 FAILED=0
