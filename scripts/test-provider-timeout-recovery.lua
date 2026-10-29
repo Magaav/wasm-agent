@@ -31,10 +31,7 @@ check(not provider.is_response_timeout('provider_error: timeout: receive body'),
 check(not provider.is_response_timeout('provider_http_503: unavailable'),
   'an HTTP response is not the no-response case')
 check(provider.response_timeout_retries()==1,'the configured retry count must be visible')
-check(not provider.is_transient('subscription_stream_failure: stage=response_body cause=ECONNRESET; provider_error: connection reset'),
-  'bridge recovery is not multiplied by the generic provider retry policy')
-check(not provider.is_response_timeout('subscription_stream_failure: stage=response_headers; provider_error: timeout: receive response'),
-  'bridge recovery is not multiplied by the response-timeout policy either')
+-- The subscription-bridge exclusions went with the bridge itself (ef56eca6, 28/10: opencode-go only).
 -- The operator's failure: a run died before its first token with
 -- `provider_error: timeout: connect`. Nothing had been sent, so it belonged in the patient,
 -- default-on connection bucket and was in none of them.

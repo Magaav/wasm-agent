@@ -73,11 +73,7 @@ check(not provider.is_connection_lost('provider_error: timeout: receive response
 check(not provider.is_response_timeout(incident),
   'the abort keeps the pre-response timeout budget out of it')
 check(not provider.is_rate_limited(incident),'the abort is not misread as an HTTP refusal')
-local subscription_abort='subscription_stream_failure: stage=response_body cause=ECONNABORTED; ' .. incident
-check(not provider.is_connection_lost(subscription_abort),
-  'the subscription bridge keeps its own reconnect cycle')
-check(not provider.is_transient(subscription_abort),
-  'the subscription exclusion is unchanged in the transient classifier too')
+-- The subscription-bridge exclusions went with the bridge itself (ef56eca6, 28/10: opencode-go only).
 
 -- 3. The patient defaults the incident must inherit: bounded, not a new scheduler.
 check(provider.connection_retries()==20,'the patient default is 20 attempts')
