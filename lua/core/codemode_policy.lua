@@ -57,5 +57,56 @@ function M.admit(memory,role,ctx)
  if not M.eligible(memory,role,ctx,p.mode) then return nil,'codemode_context_changed' end
  return p
 end
-M.guidance='Native code mode is the preferred programmatic coding path for this run. Use codemode for appropriate multi-step read/edit/verification workflows; keep trivial calls and control-plane operations (sessions, subagents, worktrees, integration) ordinary. Direct read/edit/write/read_many/Bash remain the ordinary-tools escape; WASM_AGENT_CODEMODE=off disables code mode for a new run. Filtered output can hide relevant evidence: inspect complete nested originals when needed. Never replay a failed effectful script; unknown effects require explicit reconciliation. The VM is not the OS security boundary for Bash/write.'
+-- Connector tools - every MCP server (mail, the WhatsApp linked device, ...) and every peer's
+-- connectors - run only inside code mode when the run has it. Their results are large, paged and
+-- usually filtered before they are worth reading, which is exactly what a script does; offering them
+-- on two routes left an empty-context model choosing between them and missing both (29/10).
+function M.connector(name)
+ return type(name)=='string' and (name:sub(1,4)=='mcp_' or name:sub(1,5)=='peer_')
+end
+function M.enforced(ctx)
+ local p=ctx and ctx.codemode_policy
+ return type(p)=='table' and p.enabled==true
+end
+function M.js_name(name) return (tostring(name):gsub('[^%w_]','_')) end
+function M.connector_refusal(name)
+ return {error='codemode_only: '..tostring(name)..' is a connector tool; call it inside codemode: const r = await tools.'..M.js_name(name)..'({...}); return r',effect='none'}
+end
+-- One compact line per connector: what the model needs to route a request such as "look at
+-- WhatsApp" or "check my mail" to code mode from an empty context, without the schemas.
+function M.connector_index(catalog)
+ local groups,order={},{}
+ for _,item in ipairs(catalog or {})do
+  local f=item['function'] or {};local name=f.name
+  if M.connector(name) then
+   local text=tostring(f.description or '')
+   local server,tool=text:match('^MCP (%S+) / ([^:]+):')
+   if not server then server=text:match('^%[on peer ([^%]]+)%]');if server then server='peer '..server;tool=name:match('__(.+)$') end end
+   server=server or name;tool=tool or name
+   if not groups[server] then groups[server]={};order[#order+1]=server end
+   local list=groups[server];list[#list+1]=tool
+  end
+ end
+ if #order==0 then return nil end
+ table.sort(order)
+ local lines={}
+ for _,server in ipairs(order)do
+  local list=groups[server];table.sort(list)
+  local shown=table.concat(list,', ',1,math.min(#list,8))
+  if #list>8 then shown=shown..', +'..(#list-8)..' more' end
+  lines[#lines+1]='- '..server..': '..shown
+ end
+ return 'Connectors on this node (code mode only; searchTools("<connector>") inside a script gives exact names and schemas):\n'..table.concat(lines,'\n')
+end
+M.guidance=table.concat({
+ 'Code mode is the preferred programmatic coding path for this run: one `codemode` call runs a JavaScript script that calls tools as `await tools.<name>(args)` and returns only what you need.',
+ 'Use code mode for: (1) connectors - WhatsApp, mail and every other MCP or peer connector exist only inside code mode; (2) two or more dependent calls, loops, or searching and filtering large output (history, logs, many files); (3) read -> edit -> verify sequences.',
+ 'Use ordinary tools for: one quick read, edit or bash call; and control-plane actions, which code mode refuses: subagent, session_worktree, resume_session, integrate, operation start/cancel, resource reconcile, spell save/run, client, shell, remote.',
+ 'WhatsApp: the linked-device connector for recent messages; search_ledger, conversation and list_conversations for the older ledger - all callable from a script.',
+ 'Inside a script, searchTools("text") finds tools (searchTools("*") lists all) and describeTool(name) gives a schema. Filtered output can hide relevant evidence: inspect complete nested originals when needed. Never replay a failed effectful script; unknown effects require explicit reconciliation. WASM_AGENT_CODEMODE=off disables code mode for a new run. The VM is not the OS security boundary for bash/write.',
+},'\n')
+function M.prompt(catalog)
+ local index=M.connector_index(catalog)
+ return index and (M.guidance..'\n'..index) or M.guidance
+end
 return M

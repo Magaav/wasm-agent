@@ -702,7 +702,7 @@ function M.catalog(role)
     },{'route','task'})
     for _, item in ipairs(M.admin) do list[#list + 1] = item end
     if host.quickjs then
-      list[#list+1]=schema('codemode','Preferred programmatic coding path when admitted for this run: Node-free JavaScript sandbox calling approved native tools. Use await tools.<name>(args), text(value), return, searchTools and describeTool (searchTools("text") or searchTools({query, limit}); searchTools("*") lists the whole catalogue). Native permissions/workspace/type/effect checks apply per call. Scripts may filter results; complete nested originals remain hash-addressed. No filesystem/network/Node or implicit models API. Unawaited calls are not admitted; effectful calls are serial.',{code={type='string'},timeout_ms={type='integer',minimum=1,maximum=300000}},{'code'})
+      list[#list+1]=schema('codemode','Preferred programmatic coding path when admitted for this run: Node-free JavaScript sandbox calling approved native tools. Connectors (MCP servers such as mail and WhatsApp, and peer connectors) are callable only here. Use await tools.<name>(args), text(value), return, searchTools and describeTool (searchTools("text") or searchTools({query, limit}); searchTools("*") lists the whole catalogue). Native permissions/workspace/type/effect checks apply per call. Scripts may filter results; complete nested originals remain hash-addressed. No filesystem/network/Node or implicit models API. Unawaited calls are not admitted; effectful calls are serial.',{code={type='string'},timeout_ms={type='integer',minimum=1,maximum=300000}},{'code'})
     end
     for _, item in ipairs(mcp.schemas()) do list[#list+1]=item end
     -- Every online peer's connectors, run on that peer (lua/core/federation.lua). Masters only.
@@ -762,7 +762,14 @@ end
 
 function M.envelope(role,ctx)
   ctx=ctx or {};ctx.role=role or 'guest'
-  return envelope.schemas(M.all(role,ctx,dofile('lua/core/memory.lua')),ctx),envelope.mode(ctx)
+  local list=M.all(role,ctx,dofile('lua/core/memory.lua'))
+  -- With code mode on, connectors are reached through it alone; the prompt names them in its hint.
+  if codemode_policy.enforced(ctx) then
+    local outer={}
+    for _,item in ipairs(list) do if not codemode_policy.connector(item['function'].name) then outer[#outer+1]=item end end
+    list=outer
+  end
+  return envelope.schemas(list,ctx),envelope.mode(ctx)
 end
 
 -- Tool schemas restricted to an exact allowed set (a subagent profile). The
@@ -1097,6 +1104,10 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
     if name == "subagent" then return { error = "subagent_recursion_forbidden" } end
   end
   if not is_master(role) and admin_names()[name] then return { error = "forbidden_for_role:" .. role } end
+  -- Connectors run only inside code mode when this run has it; a direct or routed call is pointed there.
+  if codemode_policy.connector(name) and codemode_policy.enforced(ctx) and not ctx.codemode_nested then
+    return codemode_policy.connector_refusal(name)
+  end
   -- Orchestration mode's floor: a direct effect is the work itself, so it is refused until this
   -- turn has a recorded route ('direct' allows short work here, 'delegate' hands it to a child)
   -- or a child admitted for the turn. The floor reads the mode, route and admission records only -
@@ -1270,8 +1281,8 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
     return dofile('lua/core/codemode.lua').run(memory,args,role,ctx,catalog,function()
       return ctx.subagent and M.all_for(ctx.subagent.allowed or {},role,ctx,memory) or M.all(role,ctx,memory)
     end,function(target,parameters,fragment)
-      local old=ctx.tool_arguments_json;ctx.tool_arguments_json=fragment
-      local ok,value=pcall(M.dispatch,memory,target,parameters,role,ctx);ctx.tool_arguments_json=old
+      local old,nested=ctx.tool_arguments_json,ctx.codemode_nested;ctx.tool_arguments_json=fragment;ctx.codemode_nested=true
+      local ok,value=pcall(M.dispatch,memory,target,parameters,role,ctx);ctx.tool_arguments_json=old;ctx.codemode_nested=nested
       if not ok then error(value) end;return value
     end,execution)
   elseif name == "capabilities" then

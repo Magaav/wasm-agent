@@ -8,10 +8,26 @@ local presentation=dofile('lua/core/codemode_view.lua')
 -- The node's own capability inventory: the same registry the CLI prints and `/health` digests.
 local inventory=dofile('lua/core/capability_inventory.lua')
 local M={}
+-- Control plane stays ordinary: delegation, authority, recursion, the user's machine, other nodes,
+-- replays and session-shaping actions. Read-only history, spell lookups and the peer list are data a
+-- script filters well, so they are open inside (29/10).
 local forbidden={wave_autoflush=true,codemode=true,tool_call=true,tool_search=true,subagent=true,integrate=true,session_worktree=true,
- session=true,sessions=true,resume_session=true,session_debug=true,session_fixture=true,session_many=true,search_messages=true,search_messages_many=true,operation=true,
- remote=true,nodes=true,client=true,shell=true,mcp=true,capabilities=true,spell_run=true,spell_export=true,
- spell_save=true,spell_compose=true,spell_list=true,spell_get=true,spell_forget=true,resource=true}
+ resume_session=true,session_debug=true,session_fixture=true,
+ remote=true,client=true,shell=true,mcp=true,capabilities=true,spell_run=true,spell_export=true,
+ spell_save=true,spell_compose=true,spell_forget=true}
+-- Multi-action tools whose read actions belong inside and whose effects do not: a script may watch an
+-- operation or list resource claims, never start, cancel or reconcile one.
+local read_actions={
+ operation={list=true,status=true,read=true,wait=true,await=true},
+ resource={list=true},
+}
+local function action_refusal(name,args)
+ local allowed=read_actions[name];if not allowed then return nil end
+ local action=type(args)=='table' and args.action or nil
+ if allowed[action] then return nil end
+ local names={};for key in pairs(allowed)do names[#names+1]=key end;table.sort(names)
+ return {error='codemode_action_not_available: '..name..' action '..tostring(action)..' runs outside code mode; inside a script use '..table.concat(names,'/'),effect='none'}
+end
 function M.run(memory,args,role,ctx,catalog,current_catalog,dispatch,execution)
  local policy,refusal=dofile('lua/core/codemode_policy.lua').admit(memory,role,ctx)
  if not policy then return {ok=false,error=refusal,calls={},attempts={}} end
@@ -139,6 +155,8 @@ function M.run(memory,args,role,ctx,catalog,current_catalog,dispatch,execution)
       if err then value={error=err};success=false
       else
        local params=json.decode(call.args or '{}')
+       local fenced=action_refusal(def.name,params)
+       if fenced then value=fenced;success=false else
        local span=telemetry.start(ctx,'tool',{name=def.name,nested=true,codemode_call=call.id,arguments_hash=host.sha256(call.args or '{}')})
        local called,result=pcall(dispatch,def.name,params,call.args);admitted=true
        if called then
@@ -147,6 +165,7 @@ function M.run(memory,args,role,ctx,catalog,current_catalog,dispatch,execution)
        local encoded=json.encode(value);local reference=output.store(encoded)
        calls[#calls+1]={id=call.id,name=def.name,ok=success,evidence=reference}
        telemetry.finish(span,{ok=success,name=def.name,nested=true,codemode_call=call.id,result_bytes=#encoded,result_hash=host.sha256(encoded)})
+       end
       end
      end
     end

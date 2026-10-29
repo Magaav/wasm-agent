@@ -63,6 +63,8 @@ local function loaded(ctx)
  for name,value in pairs(names)do if type(name)~='string' or type(value)~='string' or not value:match('^%x+$') or #value~=64 then error('envelope_loadout_corrupt') end end
  return names,nil,k,raw
 end
+local policy=dofile('lua/core/codemode_policy.lua')
+local function codemode_only(name,ctx)return policy.connector(name) and policy.enforced(ctx) end
 function M.search(catalog,args,ctx,describe_execution)
  ctx=ctx or {};local query=args.query
  if type(query)~='string' or #query>256 or not query:find('%S') then return {error='tool_search_query_required'} end
@@ -80,6 +82,7 @@ function M.search(catalog,args,ctx,describe_execution)
  for i=1,math.min(limit,#found)do
   local item=found[i];local execution=describe_execution and describe_execution(item.name)
   local loadable=not execution or execution.status~='blocked' and execution.status~='unknown'
+  if codemode_only(item.name,ctx) then loadable=false end
   if loadable then names[item.name]=host.sha256(json.encode(item.schema));loaded_count=loaded_count+1
   else names[item.name]=nil end
   selected[#selected+1]={name=item.name,schema=item.schema,execution=execution,loaded=loadable}
@@ -94,7 +97,9 @@ function M.search(catalog,args,ctx,describe_execution)
  local guidance={}
  for _,item in ipairs(selected)do
   local name=item.name
-  if item.execution and (item.execution.status=='blocked' or item.execution.status=='unknown') then
+  if codemode_only(name,ctx) then
+   guidance[#guidance+1]='Code mode only: call '..name..' inside codemode, e.g. codemode(code="return await tools.'..policy.js_name(name)..'({...})"); tool_call refuses it.'
+  elseif item.execution and (item.execution.status=='blocked' or item.execution.status=='unknown') then
    guidance[#guidance+1]='Do not invoke '..name..': '..tostring(item.execution.reason)..'. '..tostring(item.execution.next or 'Resolve the stated limitation through a supported authorized procedure, not another executor.')
   elseif name=='read_many' then guidance[#guidance+1]='Batch only already-known independent ranges; preserve every result/error/receipt and follow cached next_cursor with read_many.'
   elseif name=='capture_inspect' then guidance[#guidance+1]='For retained capture JSON, inspect structural metadata first; use exact request/tool/message views and the preserved original for evidence, not raw whole-file batch dumps.'
