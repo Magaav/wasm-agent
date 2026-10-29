@@ -119,6 +119,29 @@ journaled under its `@lid` while the revoke key carried the phone-number JID.
   block transcription. A broader mutation upgrades a posting-only hold; nothing
   weakens one.
 
+### Re-proving a posting hold from the journal (operator, offline, 29/10)
+
+On openclaw a DM journaled under its `@lid` had carried a posting-only hold since
+21/10 (one revoke, `remote_mismatch`): every voice note from that contact was
+transcribed (`source_hold_transcription_only`) and never posted. The 27/10
+`sdk_lid_store` proof only helps mutations that arrive after it is deployed.
+
+`reprove-holds` re-checks each `unproven_mutation_chat_hold` against the journal.
+A hold is replaced by exact source fences (`verified_source_<kind>_journal_reproof`)
+only when it has recorded evidence (`hold_origins`) and EVERY `chat_hold` mutation
+recorded for that chat is a revoke/edit naming a message journaled in that same chat
+by the same author (the `mutationProof` author rules, alias and ambiguity included).
+Legacy holds without evidence, untargeted or owner mutations, a target never seen in
+the chat, a mismatched or ambiguous author, and compute holds stay. The revoked
+message stays fenced; nothing is replayed (already-held transcripts remain unposted);
+only later audio in the chat is posted. Dry run unless `--apply`, counts only, event
+`hold_reproved`, idempotent. Service stopped (owner lock):
+
+```sh
+"$WA" reprove-holds --state "$STATE"           # dry run
+"$WA" reprove-holds --state "$STATE" --apply
+```
+
 ### Re-queueing audio blocked only by a chat hold (operator, offline)
 
 Existing `blocked_source` rows are NOT reopened automatically. With the service

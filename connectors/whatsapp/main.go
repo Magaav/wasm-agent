@@ -239,7 +239,7 @@ func pair(ctx context.Context, a *Adapter) error {
 }
 func run() error {
 	if len(os.Args) < 2 {
-		return errors.New("usage: wa-whatsapp init|pair|serve|status|activate|pause|language|scope|release-hold|requeue-held-audio|operator-enable|operator-inspect|reindex --state PRIVATE_DIRECTORY [options]")
+		return errors.New("usage: wa-whatsapp init|pair|serve|status|activate|pause|language|scope|release-hold|requeue-held-audio|reprove-holds|operator-enable|operator-inspect|reindex --state PRIVATE_DIRECTORY [options]")
 	}
 	action := os.Args[1]
 	f := flag.NewFlagSet(action, flag.ContinueOnError)
@@ -260,7 +260,7 @@ func run() error {
 	holdChat := f.String("chat", "", "exact chat whose reviewed hold is released")
 	holdReason := f.String("reason", "", "operator review reason for the hold release")
 	holdConfirm := f.Bool("confirm", false, "confirm the reviewed hold release")
-	apply := f.Bool("apply", false, "requeue-held-audio: write the changes (default is a dry run)")
+	apply := f.Bool("apply", false, "requeue-held-audio/reprove-holds: write the changes (default is a dry run)")
 	requeueLimit := f.Int("limit", 0, "requeue-held-audio: requeue at most N newest rows (0 = all)")
 	includeLegacy := f.Bool("include-legacy-holds", false, "requeue-held-audio: also requeue audio that arrived after a legacy hold with no recorded target")
 	confirm := f.Bool("approve-transcript-posting", false, "explicit original-chat transcript policy approval")
@@ -350,6 +350,15 @@ func run() error {
 			return err
 		}
 		return json.NewEncoder(os.Stdout).Encode(map[string]any{"ok": true, "report": report, "holds_released": false, "posts_replayed": false})
+	case "reprove-holds":
+		// Offline (29/10): replace posting-only holds the journal itself proves (every
+		// recorded mutation names a message of that chat by the same author) with
+		// exact source fences. Dry run unless --apply; counts only; nothing replayed.
+		report, err := j.reproveHolds(c, *apply)
+		if err != nil {
+			return err
+		}
+		return json.NewEncoder(os.Stdout).Encode(map[string]any{"ok": true, "report": report, "posts_replayed": false})
 	case "release-hold":
 		if !*holdConfirm {
 			return errors.New("explicit_reviewed_hold_release_confirmation_required")
