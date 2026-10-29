@@ -509,7 +509,7 @@ M.admin[#M.admin+1]=schema('capture_inspect','Inspect retained JSON model-reques
  offset={type='integer',minimum=0},limit={type='integer',minimum=1,maximum=8},snapshot={type='string'},
  request_index={type='integer',minimum=1},item_index={type='integer',minimum=1}},{'path'})
 
-M.admin[#M.admin+1]=schema('web_search','Search public web sources; keep complete search evidence behind a cache ref. Use this and web_read, not curl, for public pages. No browser actions or paid credentials; for authenticated APIs, POST, or local/private hosts use curl in bash.',{query={type='string',maxLength=512},limit={type='integer',minimum=1,maximum=10}},{'query'})
+M.admin[#M.admin+1]=schema('web_search','Search public web sources; keep complete search evidence behind a cache ref. Use this and web_read, not curl, for public pages. No browser actions or paid credentials; for authenticated APIs, POST, or local/private hosts use curl in bash.',{query={type='string',maxLength=512},limit={type='integer',minimum=1,maximum=10},refresh={type='boolean'}},{'query'})
 M.admin[#M.admin+1]=schema('web_read','Read static public HTTPS text or an immutable cache ref; pending_ref reads one documented async monitor, never replaying the original request. Challenges return a human handoff (do not retry the page with curl). No browser actions, automatic polling or paid credentials.',{url={type='string'},ref={type='string'},pending_ref={type='string'},offset={type='integer',minimum=0},limit={type='integer',minimum=4,maximum=16384},refresh={type='boolean'}})
 
 function M.batch_base(name)return BATCH[name] and BATCH[name].base end

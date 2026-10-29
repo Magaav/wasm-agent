@@ -42,7 +42,7 @@ export function parseSearchHTML(raw){
  if(!results.length)throw Error('web_search_no_results');return results;
 }
 function utf8(bytes){return new TextDecoder('utf-8',{fatal:true}).decode(bytes);}
-export function createWebAdapter({cacheDir,fetch=fetchPublic,clock=()=>new Date().toISOString(),searchURL}={}){
+export function createWebAdapter({cacheDir,fetch=fetchPublic,clock=()=>new Date().toISOString(),searchURL,fallback=true}={}){
  if(typeof cacheDir!=='string'||!isAbsolute(cacheDir))throw Error('web_cache_requires_absolute_path');mkdirSync(cacheDir,{recursive:true,mode:0o700});
  const put=record=>{const bytes=Buffer.from(JSON.stringify(record)),ref=hash(bytes),file=join(cacheDir,ref+'.json');if(!existsSync(file))writeFileSync(file,bytes,{flag:'wx',mode:0o600});return ref;};
  const get=ref=>{if(typeof ref!=='string'||!/^[a-f0-9]{64}$/.test(ref))throw Error('invalid_web_ref');const raw=readFileSync(join(cacheDir,ref+'.json'));if(hash(raw)!==ref)throw Error('web_cache_changed');return JSON.parse(utf8(raw));};
@@ -57,12 +57,29 @@ export function createWebAdapter({cacheDir,fetch=fetchPublic,clock=()=>new Date(
   return {ref:put({url:reply.url,title:parsed.title,source_kind:kind,fetched_at:clock(),raw,raw_sha256:hash(reply.bytes),text:parsed.text,http_response_ref:evidence.response_ref,limitations:kind==='text/html'?'Static HTML text only; scripts, styles and templates excluded from the view. Exact raw source retained. JavaScript rendering/PDF not supported.':null})};
  }
  function view(ref,offset=0,limit=4096){if(!Number.isInteger(offset)||offset<0||!Number.isInteger(limit)||limit<4||limit>16384)throw Error('invalid_web_page');const record=get(ref);if(record.source_kind==='web-pending')throw Error('web_pending_requires_pending_ref');const bytes=Buffer.from(record.text);if(offset>bytes.length||offset<bytes.length&&(bytes[offset]&0xc0)===0x80)throw Error('web_offset_not_utf8_boundary');let end=Math.min(bytes.length,offset+limit);while(end>offset&&end<bytes.length&&(bytes[end]&0xc0)===0x80)end--;return {ok:true,ref,url:record.url,title:record.title,source_kind:record.source_kind,fetched_at:record.fetched_at,content:utf8(bytes.subarray(offset,end)),offset,next_offset:end,eof:end===bytes.length,total_bytes:bytes.length,raw_sha256:record.raw_sha256,http_response_ref:record.http_response_ref,limitations:record.limitations};}
+ // Providers in order (29/10): DuckDuckGo HTML throttles bursts with a 202 challenge - exactly what a
+ // code-mode fan-out produces - so a challenged or empty provider hands the query to Bing RSS. A
+ // repeated query inside five minutes answers from the cache and issues no request.
+ const providers=searchURL?[{name:'fixture-rss',url:searchURL,parse:parseRSS}]:[
+  {name:'duckduckgo-html',url:q=>'https://html.duckduckgo.com/html/?q='+encodeURIComponent(q),parse:parseSearchHTML},
+  {name:'bing-rss',url:q=>'https://www.bing.com/search?format=rss&q='+encodeURIComponent(q),parse:parseRSS}].slice(0,fallback?2:1);
+ const answer=(args,record,ref,limit,extra)=>{const all=JSON.parse(record.text);return {ok:true,query:args.query,provider:record.source_kind.replace(/^search-/,''),results:all.slice(0,limit),returned:Math.min(limit,all.length),total_cached:all.length,ref,fetched_at:record.fetched_at,...extra};};
  async function search(args){if(typeof args.query!=='string'||!args.query.trim()||args.query.length>512)throw Error('web_query_required');const limit=args.limit??5;if(!Number.isInteger(limit)||limit<1||limit>10)throw Error('invalid_web_search_limit');
-  const url=searchURL?searchURL(args.query):'https://html.duckduckgo.com/html/?q='+encodeURIComponent(args.query);const reply=await http(url),evidence=outcomes.retain(reply),state=outcomes.classify(reply,evidence);if(state)return state;
-  const raw=evidence.raw,provider=searchURL?'fixture-rss':'duckduckgo-html';let all;
-  try{all=searchURL?parseRSS(raw):parseSearchHTML(raw);}catch(error){return {ok:false,state:'failed',error:error.message,response_ref:evidence.response_ref,status:reply.status,url:reply.url};}
-  const record={source_kind:'search-'+provider,url:reply.url,title:args.query,fetched_at:clock(),raw,raw_sha256:hash(reply.bytes),http_response_ref:evidence.response_ref,text:JSON.stringify(all),limitations:'Public search results; ranking/coverage is not a quality guarantee.'},ref=put(record);
-  return {ok:true,query:args.query,provider,results:all.slice(0,limit),returned:Math.min(limit,all.length),total_cached:all.length,ref,fetched_at:record.fetched_at};
+  const index=join(cacheDir,'search-'+hash(args.query.trim().toLowerCase())+'.json');
+  if(!args.refresh&&existsSync(index)){const row=JSON.parse(readFileSync(index,'utf8'));if(Date.now()-row.saved_at<300000)return answer(args,get(row.ref),row.ref,limit,{cache_hit:true,request_issued:false});}
+  let first=null;const skipped=[];
+  for(const p of providers){
+   const reply=await http(p.url(args.query)),evidence=outcomes.retain(reply),state=outcomes.classify(reply,evidence);
+   let failure=state;let all;
+   if(!failure){try{all=p.parse(evidence.raw);}catch(error){failure={ok:false,state:'failed',error:error.message,response_ref:evidence.response_ref,status:reply.status,url:reply.url};}}
+   // An accepted async job carries its own continuation; only a refusal moves to the next provider.
+   if(failure&&failure.pending_ref)return skipped.length?{...failure,fallback_from:skipped}:failure;
+   if(failure){first=first||failure;skipped.push({provider:p.name,error:failure.error||failure.state});continue;}
+   const record={source_kind:'search-'+p.name,url:reply.url,title:args.query,fetched_at:clock(),raw:evidence.raw,raw_sha256:hash(reply.bytes),http_response_ref:evidence.response_ref,text:JSON.stringify(all),limitations:'Public search results; ranking/coverage is not a quality guarantee.'},ref=put(record);
+   writeFileSync(index,JSON.stringify({ref,saved_at:Date.now()}),{mode:0o600});
+   return answer(args,record,ref,limit,skipped.length?{fallback_from:skipped}:{});
+  }
+  return skipped.length>1?{...first,providers_tried:skipped}:first;
  }
  async function read(args){
   if(args.pending_ref){
@@ -83,5 +100,5 @@ export function createWebAdapter({cacheDir,fetch=fetchPublic,clock=()=>new Date(
  }
  return {search,read,get};
 }
-export const WEB_TOOLS=[{name:'search',description:'Search public web sources. Full search response is retained behind ref.',inputSchema:{type:'object',properties:{query:{type:'string'},limit:{type:'integer',minimum:1,maximum:10}},required:['query']},annotations:{readOnlyHint:true}},
+export const WEB_TOOLS=[{name:'search',description:'Search public web sources. Full search response is retained behind ref; a repeated query within five minutes is answered from the cache unless refresh is set.',inputSchema:{type:'object',properties:{query:{type:'string'},limit:{type:'integer',minimum:1,maximum:10},refresh:{type:'boolean'}},required:['query']},annotations:{readOnlyHint:true}},
  {name:'read',description:'Read static public HTTPS text, page an immutable ref, or read pending_ref for one async monitor GET (never replay the original query). Challenges require human action; no browser actions or automatic polling.',inputSchema:{type:'object',properties:{url:{type:'string'},ref:{type:'string'},pending_ref:{type:'string'},offset:{type:'integer',minimum:0},limit:{type:'integer',minimum:4,maximum:16384},refresh:{type:'boolean'}}},annotations:{readOnlyHint:true}}];

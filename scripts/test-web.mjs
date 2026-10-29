@@ -15,3 +15,15 @@ test('repeat read uses immutable cached original',async()=>{const {api,calls}=ad
 test('UTF8 pagination recovers exact late detail',async()=>{const {api}=adapter(),first=await api.read({url:'https://fixture.test/a',limit:7});let at=0,out='';while(true){const r=await api.read({ref:first.ref,offset:at,limit:7});out+=r.content;at=r.next_offset;if(r.eof)break;}assert.equal(out,api.get(first.ref).text);assert(out.includes('notifications/initialized'));assert(out.includes('café 🌍'));});
 test('changed cache refuses instead of stale success',async()=>{const {api,cacheDir}=adapter(),r=await api.read({url:'https://fixture.test/a'});writeFileSync(join(cacheDir,r.ref+'.json'),'changed');await assert.rejects(api.read({ref:r.ref}),/web_cache_changed/);});
 test('bounds and conflicting arguments',async()=>{const {api}=adapter();await assert.rejects(api.search({query:'',limit:1}),/query/);await assert.rejects(api.search({query:'x',limit:11}),/limit/);await assert.rejects(api.read({ref:'../escape'}),/invalid_web_ref/);await assert.rejects(api.read({ref:'a'.repeat(64),url:'https://example.org'}),/conflicts/);});
+test('challenged provider falls back to Bing RSS, repeat query answers from cache',async()=>{const cacheDir=mkdtempSync(join(root,'web-')),calls=[];
+ const fetch=async url=>{calls.push(url);if(url.includes('duckduckgo'))return {status:202,url,headers:{'content-type':'text/html'},bytes:Buffer.from('<html><body>anomaly</body></html>')};return {status:200,url,headers:{'content-type':'application/rss+xml'},bytes:Buffer.from(rss)};};
+ const api=createWebAdapter({cacheDir,fetch});const r=await api.search({query:'MCP',limit:1});
+ assert.equal(r.ok,true);assert.equal(r.provider,'bing-rss');assert.equal(r.fallback_from[0].provider,'duckduckgo-html');assert.equal(r.results[0].url,'https://fixture.test/a');assert.equal(calls.length,2);
+ const again=await api.search({query:' mcp ',limit:2});assert.equal(again.cache_hit,true);assert.equal(again.request_issued,false);assert.equal(again.returned,2);assert.equal(calls.length,2);
+ const fresh=await api.search({query:'MCP',limit:1,refresh:true});assert.equal(fresh.cache_hit,undefined);assert.equal(calls.length,4);});
+test('every provider challenged returns the first challenge state',async()=>{const cacheDir=mkdtempSync(join(root,'web-'));
+ const fetch=async url=>({status:202,url,headers:{'content-type':'text/html'},bytes:Buffer.from('<html>anomaly</html>')});
+ const r=await createWebAdapter({cacheDir,fetch}).search({query:'x'});assert.equal(r.ok,false);assert.match(r.url,/duckduckgo/);assert.equal(r.providers_tried.length,2);});
+test('accepted async search keeps its continuation instead of falling back',async()=>{const cacheDir=mkdtempSync(join(root,'web-')),calls=[];
+ const fetch=async url=>{calls.push(url);return {status:202,url,headers:{'content-type':'application/json'},bytes:Buffer.from('{"monitorUrl":"/monitor"}')};};
+ const r=await createWebAdapter({cacheDir,fetch}).search({query:'x'});assert(r.pending_ref);assert.equal(calls.length,1);});
