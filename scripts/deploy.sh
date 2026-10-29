@@ -658,7 +658,15 @@ if command -v cygpath >/dev/null 2>&1; then
   EMBEDDED_ROOT="$(cygpath -w "$EMBEDDED_ROOT")"; EMBEDDED_SCRIPT="$(cygpath -w "$EMBEDDED_SCRIPT")"
   EMBEDDED_HOME="$(cygpath -w "$EMBEDDED_HOME")"
 fi
-if ! WASM_AGENT_HOME="$EMBEDDED_HOME" WASM_AGENT_LUA_ROOT='' \
+# The shipping build (codemode-build.mjs) already ran this check, stricter, on these exact bytes; its receipt
+# names their hash. Run once, not three times (here and upgrade.sh 1b took ~1.5 s each; 29/10).
+NEW_HASH="$(sha256sum < "$NEW" 2>/dev/null | awk '{print $1}')"
+EMBEDDED_PROVEN=""
+if [ -n "$NEW_HASH" ] && grep -q '"native_checked":true' "${BUILD_LOGS:-/nonexistent}/wa-host.receipt.json" 2>/dev/null \
+  && grep -q "\"binary_sha256\":\"$NEW_HASH\"" "$BUILD_LOGS/wa-host.receipt.json" 2>/dev/null; then
+  EMBEDDED_PROVEN="$NEW_HASH"
+  echo "deploy: embedded native code mode proven by the shipping build on these bytes (${NEW_HASH:0:12})"
+elif ! WASM_AGENT_HOME="$EMBEDDED_HOME" WASM_AGENT_LUA_ROOT='' \
   WA_EMBEDDED_SOURCE_ROOT="$EMBEDDED_ROOT" WA_SCRIPT="$EMBEDDED_SCRIPT" \
   "$NEW" --db "$EMBEDDED_HOME/embedded.db"; then
   rm -rf "$SCRATCH_HOME"
@@ -677,6 +685,11 @@ wait "$SCRATCH_PID" 2>/dev/null
 rm -rf "$SCRATCH_HOME"
 [ "$ANSWERED" = "1" ] || fail "the new binary did not answer /health on the scratch port; not installing it"
 echo "deploy: the new binary answers on a scratch port"
+# upgrade.sh skips its own scratch proof for a hash in this file (its cache of builds that answered): this one did.
+if [ -n "$NEW_HASH" ]; then
+  { tail -19 "$INSTALL_DIR/.upgrade-proof" 2>/dev/null; echo "$NEW_HASH"; } > "$INSTALL_DIR/.upgrade-proof.tmp" 2>/dev/null \
+    && mv -f "$INSTALL_DIR/.upgrade-proof.tmp" "$INSTALL_DIR/.upgrade-proof" 2>/dev/null
+fi
 
 # The proved bytes are copied to an immutable, hash-named candidate before upgrade.sh sees them.
 # A concurrent build can overwrite rust/target/release/wa.exe, but it cannot overwrite this file.
@@ -734,7 +747,7 @@ export WA_RUNTIME_WORKTREE="$RUNTIME_PATH"
 # upgrade.sh died with exit 141 before it could say what it was doing. That transcript is also the evidence
 # that was missing: the failure was reported and nothing could say why.
 WA_INSTALL_DIR="$INSTALL_DIR" WA_PORT="$PORT" WA_CLIENT_PORT="$CLIENT_PORT" \
-  WA_UPGRADE_REASON="$REASON" WA_UPGRADE_VIA=deploy.sh \
+  WA_UPGRADE_REASON="$REASON" WA_UPGRADE_VIA=deploy.sh WA_UPGRADE_EMBEDDED_PROVEN="$EMBEDDED_PROVEN" \
   bash "$UPGRADE" "$CANDIDATE" > "$INSTALL_DIR/deploy-upgrade.log" 2>&1
 # wa-deploy-upgrade-invocation: end
 UPGRADE_STATUS=$?
@@ -885,6 +898,11 @@ if [ "$SENTINEL_SWAP_STARTED" = "1" ]; then
   [ -n "$SENTINEL_WATCH_PID" ] || fail "sentinel swap start answered but no watcher is proven"
   SENTINEL_NEW_PID="$SENTINEL_WATCH_PID"
   echo "deploy: sentinel swap already started the installed image (pid $SENTINEL_NEW_PID)"
+elif [ -n "$SENTINEL_WATCH_PID" ] && [ -r "/proc/$SENTINEL_WATCH_PID/exe" ] \
+  && cmp -s "/proc/$SENTINEL_WATCH_PID/exe" "$INSTALL_DIR/$SENTINEL_NAME"; then
+  # The watcher already runs these exact bytes (a node-only change): a restart would load nothing (29/10).
+  SENTINEL_NEW_PID="$SENTINEL_WATCH_PID"
+  echo "deploy: the watching sentinel (pid $SENTINEL_WATCH_PID) already runs the installed image - not restarting it"
 elif [ -n "$SENTINEL_WATCH_PID" ]; then
   echo "deploy: restarting the watching sentinel to load the installed image"
   sentinel_restart || fail "node installed, but the sentinel could not restart"

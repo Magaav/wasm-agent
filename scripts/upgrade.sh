@@ -322,8 +322,12 @@ fi
 # refused to check on 2026-10-22 answered health perfectly and then failed every run with
 # `codemode_not_ready`, because it had been built without assets. The proof is the same one deploy.sh runs:
 # the candidate executes the pinned guest and returns 42, or it is not installed.
+# deploy.sh hands over the hash of bytes its shipping build already ran this exact check on
+# (WA_UPGRADE_EMBEDDED_PROVEN, 29/10): the same bytes answer the same way, so they are not run a third time.
 CODEMODE_CHECK="$SOURCE_ROOT/scripts/check-embedded-runtime.lua"
-if [ -z "$SOURCE_ROOT" ] || [ ! -f "$CODEMODE_CHECK" ]; then
+if [ -n "$NEW_HASH" ] && [ "${WA_UPGRADE_EMBEDDED_PROVEN:-}" = "$NEW_HASH" ]; then
+  say "native code-mode assets already proven on these bytes by the deploy's shipping build"
+elif [ -z "$SOURCE_ROOT" ] || [ ! -f "$CODEMODE_CHECK" ]; then
   say "warning: no check-embedded-runtime.lua beside the candidate's source checkout; its embedded code mode is not proven"
 else
   CHECK_HOME="$(mktemp -d)"
