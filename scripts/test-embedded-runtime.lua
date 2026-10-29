@@ -12,5 +12,11 @@ local real_load=load
 load=function(text,chunk,...) if chunk=='@'..name then return nil,'invalid Lua negative control' end return real_load(text,chunk,...) end
 ok,err=pcall(check);assert(not ok and tostring(err):find('invalid Lua negative control',1,true))
 load=real_load
-check()
+-- The gate builds a test artifact with empty code-mode assets on purpose (test.sh: WA_CODEMODE_ALLOW_EMPTY=1).
+-- It passed only where the cargo target kept assets from an earlier shipping build (29/10). An assetless
+-- binary must be refused by name; a shipping one must pass the whole check.
+local info=dofile('lua/vendor/json.lua').decode(host.quickjs('info','{}'))
+if info.embedded_assets then check() else
+  ok,err=pcall(check);assert(not ok and tostring(err):find('embedded native assets required',1,true),tostring(err))
+end
 print('embedded runtime regression ok (missing, stale, invalid controls)')
