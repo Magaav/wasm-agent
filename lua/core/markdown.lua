@@ -497,12 +497,16 @@ end
 
 -- ---- the renderer -----------------------------------------------------------------
 
--- `opts`: paint(text, style) -> string, width (columns, default 80), indent (default "  ").
+-- `opts`: paint(text, style) -> string, width (columns, default 80), indent (default "  "),
+-- reflow (true = prose is one line per paragraph/item/quote line, for the host transcript to wrap
+-- at whatever width the window has when it draws - so a resize reflows it (29/10). Tables, fences
+-- and rules are still laid out at `width`).
 -- Returns the rendered text, one line per `\n`, with no trailing newline.
 function M.render(text, opts)
   opts = opts or {}
   local paint = opts.paint or function(plain) return plain end
   local width = tonumber(opts.width) or 80
+  local prose_width = opts.reflow and math.huge or width
   local indent = opts.indent or "  "
   -- The block's own colour (thinking is grey): plain words take it, marked-up words keep theirs.
   local base = opts.style
@@ -510,7 +514,7 @@ function M.render(text, opts)
   local out = {}
 
   local function push(segments, prefix, prefix_style)
-    local body = layout(tokens_of(segments), width, prefix)
+    local body = layout(tokens_of(segments), prose_width, prefix)
     for index, line in ipairs(body) do
       local parts = {}
       if index == 1 and prefix ~= "" then

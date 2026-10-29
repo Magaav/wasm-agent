@@ -211,32 +211,82 @@ pub fn visible(text: &str) -> usize {
 
 /// Split one line into the rows a `width`-column screen wraps it into. Colour carries over: each
 /// continuation row starts with the colour that was active where the previous one was cut.
+/// Prose arrives unwrapped (markdown.lua `reflow`) and is wrapped here at draw time, so a resize
+/// reflows it (29/10): rows break at a space when there is one, and continuation rows hang under
+/// the text after the line's indent and marker (`  • `, `1. `, `│ `, `⏺ `), as Lua's layout did.
 pub fn wrap_rows(line: &str, width: usize) -> Vec<String> {
     let width = width.max(1);
-    let (mut rows, mut row, mut cols, mut sgr) = (Vec::new(), String::new(), 0usize, String::new());
+    // The printable characters, each with the escape sequences just before it; `esc` = after the last.
+    let (mut cells, mut esc): (Vec<(String, char, usize)>, String) = (Vec::new(), String::new());
     let mut chars = line.chars().peekable();
     while let Some(ch) = chars.next() {
         if ch == '\x1b' {
-            let mut seq = String::from(ch);
+            esc.push(ch);
             if chars.peek() == Some(&'[') {
-                seq.push(chars.next().unwrap());
-                for c in chars.by_ref() { seq.push(c); if ('@'..='~').contains(&c) { break; } }
+                esc.push(chars.next().unwrap());
+                for c in chars.by_ref() { esc.push(c); if ('@'..='~').contains(&c) { break; } }
             }
-            if seq.ends_with('m') { if seq == "\x1b[0m" || seq == "\x1b[m" { sgr.clear(); } else { sgr.push_str(&seq); } }
-            row.push_str(&seq);
             continue;
         }
-        let w = cell_width_of(ch);
-        if cols + w > width && cols > 0 {
-            rows.push(std::mem::take(&mut row) + RESET);
-            row.push_str(&sgr);
-            cols = 0;
-        }
-        row.push(ch);
-        cols += w;
+        cells.push((std::mem::take(&mut esc), ch, cell_width_of(ch)));
     }
+    let total: usize = cells.iter().map(|c| c.2).sum();
+    if total <= width { return vec![line.to_string()]; }
+    let (hang_at, hang) = hanging_indent(&cells);
+    // An indent that leaves no room hangs nothing (and one wider than the screen is not kept whole).
+    let hang_at = if hang >= width { 0 } else { hang_at };
+    let hang = if width.saturating_sub(hang) < 8 { 0 } else { hang };
+    let (mut rows, mut row, mut sgr) = (Vec::new(), String::new(), String::new());
+    let (mut i, mut start, mut cols) = (0usize, 0usize, 0usize);
+    while i < cells.len() {
+        let w = cells[i].2;
+        let content = if start == 0 { hang_at } else { start };
+        if cols + w > width && i > content {
+            // Break at the last space of this row past its indent; none (one long word) = cut here.
+            let space = (content + 1..i).rev().find(|&k| cells[k].1 == ' ');
+            let (end, next) = match (cells[i].1 == ' ', space) { (true, _) => (i, i), (_, Some(k)) => (k, k), _ => (i, i) };
+            for cell in &cells[start..end] { row.push_str(&cell.0); row.push(cell.1); track(&cell.0, &mut sgr); }
+            // The spaces the break swallows: their escapes still count (and still close the row).
+            let mut next = next;
+            while next < cells.len() && cells[next].1 == ' ' { row.push_str(&cells[next].0); track(&cells[next].0, &mut sgr); next += 1; }
+            rows.push(std::mem::take(&mut row) + RESET);
+            row.push_str(&" ".repeat(hang));
+            row.push_str(&sgr);
+            start = next; i = next; cols = hang;
+            continue;
+        }
+        cols += w;
+        i += 1;
+    }
+    for cell in &cells[start..] { row.push_str(&cell.0); row.push(cell.1); }
+    row.push_str(&esc);
     rows.push(row);
     rows
+}
+
+/// Follow the SGR state through `esc` (escape sequences only): a reset clears it, colours add up.
+fn track(esc: &str, sgr: &mut String) {
+    for seq in esc.split_inclusive(|c: char| c != '\x1b' && c != '[' && ('@'..='~').contains(&c)) {
+        let seq = &seq[seq.find('\x1b').unwrap_or(0)..];
+        if !seq.ends_with('m') { continue; }
+        if seq == "\x1b[0m" || seq == "\x1b[m" { sgr.clear(); } else { sgr.push_str(seq); }
+    }
+}
+
+/// Where a line's text starts after its indent and list/quote markers: (cell index, columns).
+fn hanging_indent(cells: &[(String, char, usize)]) -> (usize, usize) {
+    let (mut at, mut cols) = (0usize, 0usize);
+    loop {
+        while at < cells.len() && cells[at].1 == ' ' { cols += 1; at += 1; }
+        let mut end = at;
+        while end < cells.len() && cells[end].1.is_ascii_digit() { end += 1; }
+        let marker = if end > at { (end < cells.len() && matches!(cells[end].1, '.' | ')')).then_some(end + 1) }
+            else { (at < cells.len() && matches!(cells[at].1, '\u{2022}' | '\u{25e6}' | '\u{25aa}' | '\u{2610}' | '\u{2611}' | '\u{2502}' | '\u{23fa}' | '\u{23bf}')).then_some(at + 1) };
+        match marker {
+            Some(m) if m < cells.len() && cells[m].1 == ' ' => { cols += cells[at..m].iter().map(|c| c.2).sum::<usize>(); at = m; }
+            _ => return (at, cols),
+        }
+    }
 }
 
 /// Keys while the transcript has focus.
@@ -422,6 +472,32 @@ mod tests {
         let rows = wrap_rows("\x1b[31mabcdef\x1b[0m", 3);
         assert_eq!(rows.len(), 2);
         assert!(rows[1].starts_with("\x1b[31m"), "{rows:?}");
+    }
+    #[test]
+    fn widening_reflows_a_wrapped_paragraph_to_fewer_rows() {
+        // One logical line (markdown.lua `reflow`), drawn at 30 then at 80 columns (29/10).
+        let mut t = Transcript::default();
+        let para = "The quick brown fox jumps over the lazy dog and keeps running across the field";
+        t.write(&format!("{para}\n"));
+        let narrow: Vec<String> = t.view(30, 6).iter().map(|r| crate::selection::plain(r)).filter(|r| !r.is_empty()).collect();
+        assert!(narrow.len() == 3 && narrow.iter().all(|r| visible(r) <= 30), "{narrow:?}");
+        assert!(narrow.iter().all(|r| !r.starts_with(' ') && !r.ends_with(' ')), "breaks at spaces, none left over: {narrow:?}");
+        assert_eq!(narrow.join(" "), para, "no word cut");
+        let wide: Vec<String> = t.view(80, 6).into_iter().filter(|r| !r.is_empty()).collect();
+        assert_eq!(wide, vec![para.to_string()]);
+    }
+    #[test]
+    fn narrowing_rewraps_a_list_item_with_a_hanging_indent() {
+        let item = "  \x1b[36m\u{2022} \x1b[0malpha beta gamma delta epsilon zeta eta theta";
+        let rows = wrap_rows(item, 20);
+        let plain: Vec<String> = rows.iter().map(|r| crate::selection::plain(r)).collect();
+        assert_eq!(plain, vec!["  \u{2022} alpha beta gamma", "    delta epsilon", "    zeta eta theta"], "{rows:?}");
+        // Numbered, quoted and answered lines hang under their text too; a long word is still cut.
+        let second = |line: &str| crate::selection::plain(&wrap_rows(line, 16)[1]);
+        assert_eq!(second("12. one two three four five"), "    three four");
+        assert_eq!(second("\u{2502} quoted words wrap under the bar"), "  wrap under the");
+        assert_eq!(second("\u{23fa} the answer wraps under its dot"), "  wraps under");
+        assert_eq!(wrap_rows("abcdefghij", 4), vec![format!("abcd{RESET}"), format!("efgh{RESET}"), "ij".to_string()]);
     }
     #[test]
     fn nav_keys() {

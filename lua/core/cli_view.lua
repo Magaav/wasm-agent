@@ -1319,7 +1319,7 @@ function METHODS:answered(reply)
     local rendered = markdown.render(text, {
       paint = function(plain, style) return paint(plain, style, self.live) end,
       width = self.limit - 2,
-      indent = "",
+      indent = "", reflow = self:transcript(),
     })
     -- The renderer is the nicer rendering, never the only one: a reply it produces nothing
     -- for is printed raw. A view that swallowed an answer because its parser did not
@@ -1408,7 +1408,7 @@ function METHODS:topic_block(heading, heading_style, text, body_style)
     -- Two columns narrower: a focused topic is drawn inside a border, and text wrapped here must
     -- not be wrapped a second time there.
     width = self:transcript() and (self.limit - 2) or self.limit,
-    indent = "",
+    indent = "", reflow = self:transcript(),
     style = body_style,
   }) .. "\n")
   self:topic(false)
@@ -1632,7 +1632,7 @@ function METHODS:replay(rows, opts)
       elseif content ~= "" then
         local rendered = markdown.render(text_of(content), {
           paint = function(plain, style) return paint(plain, style, self.live) end,
-          width = self.limit - 2, indent = "",
+          width = self.limit - 2, indent = "", reflow = self:transcript(),
         })
         if rendered == "" then rendered = text_of(content) end
         rendered = bulletize(rendered, paint(DOT, "text", self.live))

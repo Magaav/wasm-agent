@@ -263,4 +263,19 @@ do
   ok(tinted.role_of("marked") == "bold+text", "and marked-up words keep their own style")
 end
 
+do
+  -- `reflow` (the host transcript, 29/10): prose stays one line per paragraph/item/quote line, so
+  -- the host wraps it at the window's width when it draws; tables are still laid out at `width`.
+  local words = string.rep("word ", 30)
+  local text = md.render(words .. "\n\n- " .. words .. "\n\n> " .. words .. "\n\n| a |\n|---|\n| b |", { width = 30, indent = "", reflow = true })
+  local lines = {}
+  for line in (text .. "\n"):gmatch("([^\n]*)\n") do lines[#lines + 1] = line end
+  ok(md.columns(lines[1]) > 30 and select(2, lines[1]:gsub("word", "")) == 30, "reflow: a paragraph is one line")
+  ok(lines[3]:sub(1, 4) == "\226\128\162 " and select(2, lines[3]:gsub("word", "")) == 30, "reflow: a list item is one line")
+  ok(lines[5]:sub(1, 4) == "\226\148\130 " and select(2, lines[5]:gsub("word", "")) == 30, "reflow: a quote line is one line")
+  ok(has(text, "\226\148\140"), "reflow: a table is still a box")
+  local wrapped = md.render(words, { width = 30, indent = "" })
+  ok(select(2, wrapped:gsub("\n", "")) > 0, "without reflow the paragraph is wrapped as before")
+end
+
 print(string.format("markdown ok (%d checks)", checks))
