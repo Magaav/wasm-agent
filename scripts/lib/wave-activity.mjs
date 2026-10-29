@@ -189,7 +189,12 @@ export function processProbe() {
   }
   const ps = spawnSync('ps', ['-eo', 'pid,args'], {encoding: 'utf8', windowsHide: true, timeout: 60000, maxBuffer: 64 * 1024 * 1024});
   if (ps.status !== 0) return {available: false, why: 'ps failed', text: []};
-  const text = ps.stdout.split('\n').map(line => line.replaceAll('\\', '/').replace(/^\/\/\?\//, '').toLowerCase());
+  // Case is folded exactly as key() folds the needle: only on Windows. Lowercasing here on Linux made every
+  // path with a capital letter (a mkdtemp suffix, most real worktrees) invisible to holderOf.
+  const text = ps.stdout.split('\n').map(line => {
+    const slashed = line.replaceAll('\\', '/').replace(/^\/\/\?\//, '');
+    return process.platform === 'win32' ? slashed.toLowerCase() : slashed;
+  });
   return {available: true, checked: text.length, text};
 }
 
