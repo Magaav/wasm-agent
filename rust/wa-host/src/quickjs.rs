@@ -22,13 +22,25 @@ fn engine()->Result<Engine> {static ENGINE:OnceLock<Engine>=OnceLock::new();if l
 // hash and the engine's compatibility hash; a file that does not match this engine fails to deserialize
 // and is rebuilt. Deserializing trusts the file: it lives in the node's own data home, which only the
 // node's user can write - the same boundary as the installed binary itself.
+#[cfg(unix)] fn private(path:&std::path::Path)->bool{use std::os::unix::fs::MetadataExt;std::fs::metadata(path).map(|m|m.mode()&0o022==0&&m.uid()==unsafe{libc::getuid()}).unwrap_or(false)}
+#[cfg(not(unix))] fn private(_:&std::path::Path)->bool{true}
 fn cached_module(engine:&Engine,bytes:&[u8],dir:&str)->Result<Module>{
  use std::hash::{Hash,Hasher};let mut h=std::collections::hash_map::DefaultHasher::new();engine.precompile_compatibility_hash().hash(&mut h);
  let path=std::path::Path::new(dir).join(format!("quickjs-{}-{:016x}.cwasm",&hash(bytes)[..16],h.finish()));
- if path.is_file(){if let Ok(m)=unsafe{Module::deserialize_file(engine,&path)}{return Ok(m)}}
+ if path.is_file()&&private(&path){if let Ok(m)=unsafe{Module::deserialize_file(engine,&path)}{return Ok(m)}}
+ let _=std::fs::remove_file(&path);
  let m=Module::new(engine,bytes)?;
- if std::fs::create_dir_all(dir).is_ok(){if let Ok(b)=m.serialize(){let tmp=path.with_extension(format!("tmp{}",std::process::id()));if std::fs::write(&tmp,&b).is_ok(){let _=std::fs::rename(&tmp,&path);}}}
+ if std::fs::create_dir_all(dir).is_ok(){if let Ok(b)=m.serialize(){let tmp=path.with_extension(format!("tmp{}",std::process::id()));if write_private(&tmp,&b).is_ok(){let _=std::fs::rename(&tmp,&path);}}}
  Ok(m)
+}
+// Owner-only, whatever the umask: a deserialized module is trusted code, so nobody else may write it
+// (the sandbox's umask left the first cache file world-writable, 29/10).
+fn write_private(path:&std::path::Path,bytes:&[u8])->std::io::Result<()>{
+ use std::io::Write;let mut o=std::fs::OpenOptions::new();o.write(true).create_new(true);
+ #[cfg(unix)]{use std::os::unix::fs::OpenOptionsExt;o.mode(0o600);}
+ let mut f=o.open(path)?;f.write_all(bytes)?;
+ #[cfg(unix)]{use std::os::unix::fs::PermissionsExt;f.set_permissions(std::fs::Permissions::from_mode(0o600))?;}
+ Ok(())
 }
 fn module(engine:&Engine,bytes:&[u8],cache:Option<&str>)->Result<Module>{static MODULE:OnceLock<Module>=OnceLock::new();if let Some(m)=MODULE.get(){return Ok(m.clone())}let m=match cache{Some(dir)=>cached_module(engine,bytes,dir)?,None=>Module::new(engine,bytes)?};let _=MODULE.set(m);Ok(MODULE.get().expect("module initialized").clone())}
 /// What this binary can actually honour, without starting wasmtime or a sandbox. `/health` publishes this
@@ -120,6 +132,9 @@ mod module_cache_tests {
   assert_eq!(files.len(),1,"one cwasm per wasm and engine");assert!(files[0].extension().unwrap()=="cwasm");
   let kept=std::fs::read(&files[0]).unwrap();cached_module(&e,EMPTY,d).unwrap();
   assert_eq!(std::fs::read(&files[0]).unwrap(),kept,"a matching file is loaded, not rewritten");
+  #[cfg(unix)]{use std::os::unix::fs::PermissionsExt;assert_eq!(std::fs::metadata(&files[0]).unwrap().permissions().mode()&0o777,0o600,"owner-only");
+   std::fs::set_permissions(&files[0],std::fs::Permissions::from_mode(0o666)).unwrap();cached_module(&e,EMPTY,d).unwrap();
+   assert_eq!(std::fs::metadata(&files[0]).unwrap().permissions().mode()&0o777,0o600,"a file others can write is replaced, not loaded");}
   std::fs::write(&files[0],b"not a module").unwrap();cached_module(&e,EMPTY,d).unwrap();
   assert_ne!(std::fs::read(&files[0]).unwrap(),b"not a module".to_vec(),"a file this engine cannot load is rebuilt");
   let _=std::fs::remove_dir_all(&dir);
