@@ -204,7 +204,9 @@ if start_node enabled "$ID"; then
   # below pins, and `scripts/test-modules.lua` pins it inside the interpreter.
   status="$(http "/modules/$ID/C:/Windows/win.ini")"
   verdict "a path a module may not reach is refused by the route" "400" "$status"
-  verdict "and says why" "true" "$(grep -q 'bad_path' "$WORK/body" && echo true || echo false)"
+  # The accept thread's static_reply refuses a ':' path too (ui_file, like '..' above), so the route may
+  # never see it; either refusal names the reason (29/10, openclaw).
+  verdict "and says why" "true" "$(grep -qE 'bad_path|bad path' "$WORK/body" && echo true || echo false)"
 
   status="$(http "/modules/no-such-module-in-this-tree/index.html")"
   verdict "a module that does not exist is a 404" "404" "$status"
