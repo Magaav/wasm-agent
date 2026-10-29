@@ -86,6 +86,18 @@ host.exec = function(command)
     return json.encode({code=0,stdout="diff --git a/source.lua b/source.lua\n--- a/source.lua\n+++ b/source.lua\n@@ -1,3 +1,3 @@\n"})
   elseif command:find("ls-files",1,true) then
     return json.encode({code=0,stdout=""})
+  -- The audit reads the staged change the way c59eaaa8 binds it: raw and name-status, NUL-separated.
+  -- Unanswered, these fell through to "committed" and the commit ran unaudited (v0.1.0-alpha.12 gate, 29/10).
+  elseif command:find("git show ':",1,true) then
+    return json.encode({code=0,stdout="local M = {}\nfunction M.source() return 2 end\nreturn M\n"})
+  elseif command:find("--unified=0",1,true) then
+    return json.encode({code=0,stdout="diff --git a/source.lua b/source.lua\n--- a/source.lua\n+++ b/source.lua\n@@ -1,3 +1,3 @@\n"})
+  elseif command:find("--cached --raw",1,true) then
+    return json.encode({code=0,stdout=":100644 100644 "..string.rep("1",40).." "..string.rep("2",40).." M\0source.lua\0"})
+  elseif command:find("--cached --name-status",1,true) then
+    return json.encode({code=0,stdout="M\0source.lua\0"})
+  elseif command:find("--name-status",1,true) then
+    return json.encode({code=0,stdout=""})
   end
   committed=committed+1
   return json.encode({code=0,stdout="committed"})
