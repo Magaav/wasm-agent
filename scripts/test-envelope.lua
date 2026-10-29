@@ -6,7 +6,9 @@ local agent=dofile('lua/core/agent.lua')
 local checks=0;local function check(v,label)assert(v,label);checks=checks+1 end
 local function session(title)return memory.start_session('',title,{user_id='master',node_id='',title=title})end
 local sid=session('empty');local ctx={session_id=sid,user_id='master',role='master'}
-local all=tools.all('master');local bootstrap,mode=tools.envelope('master',ctx)
+-- The run's own surface: without a context tools.all is the schema-only view (codemode whenever the
+-- setting is native), which capabilities and tool_call, run with this ctx, never see (29/10).
+local all=tools.all('master',ctx,memory);local bootstrap,mode=tools.envelope('master',ctx)
 check(mode=='progressive','empty session progressive')
 -- The lean set by name (13 since web_search/web_read joined it, 7703ce23), plus codemode only when
 -- this run admits it: a fixed count broke on that addition (v0.1.0-alpha.12 gate, 29/10).
