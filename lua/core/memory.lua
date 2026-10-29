@@ -135,9 +135,14 @@ local function migrate_shape()
      and (has_column("messages_fts", "conversation_id") or table_exists("turns")) then
     exec("ALTER TABLE messages_fts RENAME TO ledger_messages_fts")
   end
-  rename_index("messages_conversation_idx", "ledger_messages_conversation_idx",
-               "ledger_messages(conversation_id, observed_at)")
-  rename_index("messages_time_idx", "ledger_messages_time_idx", "ledger_messages(observed_at)")
+  -- Only a database that still holds the old ledger: on a current one `messages_time_idx` is the
+  -- transcript's own index, and moving it onto a ledger the schema no longer creates broke every
+  -- second open of a fresh database (`no such table: main.ledger_messages`, 29/10).
+  if table_exists("ledger_messages") then
+    rename_index("messages_conversation_idx", "ledger_messages_conversation_idx",
+                 "ledger_messages(conversation_id, observed_at)")
+    rename_index("messages_time_idx", "ledger_messages_time_idx", "ledger_messages(observed_at)")
+  end
 
   -- 2. The transcript is `messages`: one stored row per message (user turn, assistant turn, tool
   --    result, summary).
