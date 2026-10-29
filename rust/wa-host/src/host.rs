@@ -2840,6 +2840,18 @@ fn handle_mouse(state: &mut ConsoleInput, event: crate::selection::Mouse) {
             let Some(selection) = state.selection.as_mut() else { return };
             selection.head = (row.clamp(1, selection.rows.len().max(1)), col);
             if matches!(event, Mouse::Release(..)) && selection.head == selection.anchor { clear_selection(state); return; }
+            // Copy on release (29/10): Omarchy's Super+C sends Ctrl+Insert to a terminal, and foot keeps
+            // that chord to copy *its own* selection - empty while wa owns the mouse - so Super+C never
+            // reached wa. The selection is on the clipboard the moment the button comes up; Super+C then
+            // finds it there, and Ctrl+C still copies and clears as before.
+            if matches!(event, Mouse::Release(..)) {
+                let text = crate::selection::text(&selection.rows, selection.anchor, selection.head);
+                let _ = crate::terminal_editor::write(&crate::selection::osc52(&text));
+                let count = text.chars().count();
+                if let Some(editor) = state.editor.as_mut() {
+                    editor.notice = format!("Copied {count} character{}", if count == 1 { "" } else { "s" });
+                }
+            }
             state.transcript.dirty = true;
         }
         Mouse::Other => {}
