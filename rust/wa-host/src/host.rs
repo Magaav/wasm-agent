@@ -2954,7 +2954,19 @@ fn refresh_editor_size() -> Option<usize> {
     let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
     if state.editor.as_ref()?.row == 0 { return None; }
     resize_console(&mut state, columns as usize, rows as usize);
+    refresh_build(&mut state);
     Some(state.editor.as_ref()?.status_row())
+}
+
+/// The rebuild row (crate::build_status) as it reads now; redrawn only when its text changed - a
+/// row coming or going moves the status line and the chat's last row, which `layout_frame` applies.
+fn refresh_build(state: &mut ConsoleInput) {
+    let Some(editor) = state.editor.as_mut() else { return };
+    let build = crate::build_status::current(editor.width);
+    if build == editor.build { return; }
+    editor.build = build;
+    let frame = layout_frame(state);
+    let _ = crate::terminal_editor::write(&frame);
 }
 
 /// The framed layout, bottom up (the twin of `cli_view.screen_rows` with an editor):

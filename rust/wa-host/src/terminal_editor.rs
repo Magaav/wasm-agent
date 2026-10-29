@@ -136,6 +136,9 @@ pub struct Editor {
     pub footer: String, pub footer_right: String,
     /// Whether the status line has its row (only while a run is in flight).
     pub status: bool,
+    /// A sandbox rebuild in progress (crate::build_status), one row right above the box (and its
+    /// menu); "" = no row, so the chat keeps it (29/10).
+    pub build: String,
     /// Lines submitted during the run that the agent has not taken yet: drawn above the status line
     /// (`Steering queued`), never into the chat, so a steer is not printed twice. The host sets it.
     pub queued: Vec<String>,
@@ -338,7 +341,8 @@ impl Editor {
     /// Bottom up: footer, bottom divider, the draft, top divider, the slash menu (opening upward),
     /// the status line while a run is in flight, then the output. Nothing is reserved that is not
     /// drawn, so the chat sits right on top of the input.
-    pub fn status_row(&self) -> usize { self.top().saturating_sub(self.menu_rows() + 1) }
+    pub fn status_row(&self) -> usize { self.top().saturating_sub(self.menu_rows() + 1 + self.build_rows()) }
+    fn build_rows(&self) -> usize { usize::from(!self.build.is_empty()) }
     pub fn out_bottom(&self) -> usize {
         self.status_row().saturating_sub(if self.status { 1 + self.queued_count() } else { 0 })
     }
@@ -536,6 +540,7 @@ impl Editor {
         for row in self.status_row() + 1..top {
             frame.push_str(&format!("\x1b[{row};1H\x1b[2K"));
         }
+        if !self.build.is_empty() { frame.push_str(&format!("\x1b[{};1H{}", self.status_row() + 1, self.build)); }
         let border = if self.bash { BASH } else { BORDER };
         frame.push_str(&format!("\x1b[{top};1H\x1b[2K{border}{}{RESET}", "\u{2500}".repeat(self.width)));
         for visual in 0..shown {
@@ -797,7 +802,7 @@ const PANEL: &str = "\x1b[38;2;177;185;249m";
 pub fn cell_width_of(ch: char) -> usize { cell_width(ch) }
 
 /// `text` cut to `room` terminal cells, ending in `…` when it was cut.
-fn clip_cells(text: &str, room: usize) -> String {
+pub fn clip_cells(text: &str, room: usize) -> String {
     let total: usize = text.chars().map(cell_width).sum();
     if total <= room { return text.to_string(); }
     let mut out = String::new(); let mut used = 0;
@@ -1052,6 +1057,16 @@ mod tests {
         assert!(two.contains("\x1b[17;1H\x1b[2K\x1b[38;2;136;136;136m\u{2500}"), "two rows: the top divider moves up one");
         assert_eq!(e.out_bottom(), 16, "and the output ends right above it: nothing reserved");
         assert!(!two.contains(PLACEHOLDER), "no hint once there is a draft");
+    }
+    #[test]
+    fn a_rebuild_row_sits_above_the_box_only_while_there_is_one() {
+        let mut e = Editor::default(); e.row = 29; e.width = 60; e.height = 3;
+        assert_eq!(e.out_bottom(), 26, "no build: the chat ends right on the input");
+        e.build = "\u{27f3} building".into();
+        assert_eq!((e.status_row(), e.out_bottom()), (25, 25), "a build takes the row above the top divider");
+        assert!(e.render().contains("\x1b[26;1H\u{27f3} building"), "and is drawn there");
+        e.status = true;
+        assert_eq!((e.status_row(), e.out_bottom()), (25, 24), "a run's status line goes above it");
     }
     fn commands() -> Vec<Command> {
         ["/help", "/login", "/logout-all", "/remember"].iter().map(|name| Command {

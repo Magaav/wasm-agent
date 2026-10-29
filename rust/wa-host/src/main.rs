@@ -23,6 +23,7 @@ mod resources;
 mod serve;
 mod terminal_editor;
 mod transcript;
+mod build_status;
 mod selection;
 mod ripgrep;
 
