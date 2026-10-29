@@ -32,7 +32,10 @@ check(treatment:find('per-file errors',1,true) and treatment:find('continuation/
 check(treatment:find('never recursively inventory retained solver worktrees',1,true),'discovery noise is scoped out')
 check(not treatment:find('When multiple tool actions are independent',1,true),'old and new batching guidance not duplicated')
 local read_only=agent.system_prompt('master',nil,nil,tools.all_for({read=true},'master'))
-check(not read_only:find('read_many',1,true) and not read_only:find('Scope shell discovery',1,true),'guidance names only available readers/shell')
+-- The guidance, not the skills listing: a skill's own description (codemode-output names read_many)
+-- is authored metadata shown as-is, and it failed this check on the v0.1.0-alpha.12 gate (29/10).
+local read_only_guidance=read_only:gsub('<available_skills>.-</available_skills>','')
+check(not read_only_guidance:find('read_many',1,true) and not read_only_guidance:find('Scope shell discovery',1,true),'guidance names only available readers/shell')
 local none=agent.subagent_system_prompt(bot,{})
 check(not none:find(mark,1,true) and not none:find('Before requesting tools',1,true),'no unavailable tools on reasoning-only profile')
 check(json.encode(list)==original_schemas,'treatment does not alter any schemas')
