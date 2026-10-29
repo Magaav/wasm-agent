@@ -458,7 +458,7 @@ echo "cli ok"
 # handled, and asserts the two halves of the promise: the REPL moved to another session, and the
 # session it left is still in the ledger (the ledger is append-only, so "unchanged" is a claim this
 # can check). Which commands the two surfaces share is `scripts/test-command-parity.cjs`'s half.
-"$BIN" --db "$DB" chat --help | grep -q '^  /new ' \
+"$BIN" --db "$DB" chat --help | grep -qE '^ */new ' \
   || { echo "FAIL: /help must offer /new" >&2; exit 1; }
 CLI_CMD_DB="$DB.cli-commands"
 CLI_CMD_STATUS=0
