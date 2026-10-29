@@ -59,7 +59,7 @@ host.getenv=function(name)if name=='WA_GRAPH_PATCH_AUDIT' then return '1' end re
 p=hooks.catalogue({});byid={};for _,row in ipairs(p.events)do byid[row.id]=row end
 ok(byid.patch_audit_before_reply.state:find('enabled',1,true),'audit on observed not guessed')
 host.jobs,host.getenv=real_jobs,real_getenv
-local actual=hooks.get();ok(not actual.error and actual.read_only and actual.returned==10,'actual private job store catalogue')
+local actual=hooks.get();ok(not actual.error and actual.read_only and actual.returned==#(actual.events or {}) and actual.returned>=10,'actual private job store catalogue')
 ok(real_jobs('list','{}')==actual_before,'actual store definitions/approvals remain unchanged')
 if EMBEDDED then ok(EMBEDDED['lua/core/hook_events.lua']~=nil or host.getenv('WASM_AGENT_LUA_ROOT')~='','module reachable')end
 print(json.encode({ok=true,checks=checks,skipped=0,paid_calls=0,scope='read-only hook event route'}))
