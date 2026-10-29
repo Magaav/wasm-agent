@@ -25,7 +25,7 @@ end
 
 -- The `wide` facts: the first function each of the twelve files defines.
 local EXPECT = {
-  { path = "lua/core/agent.lua", name = "record_turn" },
+  { path = "lua/core/agent.lua", name = "schema_of" },
   { path = "lua/core/memory.lua", name = "decode" },
   { path = "lua/core/provider.lua", name = "env" },
   { path = "lua/core/subagents.lua", name = "profile_dir" },
@@ -61,7 +61,7 @@ local function lines(pairs)
   return table.concat(out, "\n")
 end
 local correct = lines({
-  "lua/core/agent.lua: record_turn", "lua/core/memory.lua: decode",
+  "lua/core/agent.lua: schema_of", "lua/core/memory.lua: decode",
   "lua/core/provider.lua: env", "lua/core/subagents.lua: profile_dir",
   "lua/core/tools.lua: is_master", "lua/core/tool_output.lua: M.slice",
   "lua/core/graph.lua: capability", "lua/core/skills.lua: read",
@@ -98,7 +98,7 @@ local conflict = verify.verify({ { path = "lua/core/skills.lua", name = "read" }
 ok(not conflict.complete and #conflict.conflicts == 1, "conflicting answers must be reported")
 
 -- A wrong function name is wrong, not missing, and only the wrong fact is flagged.
-local one_wrong = verify.verify(EXPECT, correct:gsub("record_turn", "record"))
+local one_wrong = verify.verify(EXPECT, correct:gsub("schema_of", "schema"))
 ok(not one_wrong.complete, "a wrong function name must fail")
 ok(#one_wrong.wrong == 1 and #one_wrong.missing == 0, "only the wrong fact is flagged")
 

@@ -64,7 +64,7 @@ local TASKS = {
     -- scripts/lib/experiment-verify.lua is what says so. The names are the first function
     -- each file defines; scripts/test-experiment-verify.lua asserts they still match source.
     expect = {
-      { path = "lua/core/agent.lua", name = "record_turn" },
+      { path = "lua/core/agent.lua", name = "schema_of" },
       { path = "lua/core/memory.lua", name = "decode" },
       { path = "lua/core/provider.lua", name = "env" },
       { path = "lua/core/subagents.lua", name = "profile_dir" },
