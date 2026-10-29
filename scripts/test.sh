@@ -329,11 +329,11 @@ mkdir -p "$GUARD_HOME/install"
 if WASM_AGENT_IN_TURN=1 WA_INSTALL_DIR="$GUARD_HOME/install" bash scripts/deploy.sh --reason guard >"$GUARD_HOME/deploy.log" 2>&1; then
   echo "FAIL: deploy.sh accepted a running-turn invocation" >&2; exit 1
 fi
-grep -q 'cannot deploy from a running turn' "$GUARD_HOME/deploy.log"
+grep -q 'cannot deploy from a turn running on the node' "$GUARD_HOME/deploy.log"
 if WASM_AGENT_IN_TURN=1 bash scripts/upgrade.sh "$BIN" >"$GUARD_HOME/upgrade.log" 2>&1; then
   echo "FAIL: upgrade.sh accepted a running-turn invocation" >&2; exit 1
 fi
-grep -q 'refused inside a running turn' "$GUARD_HOME/upgrade.log"
+grep -q 'refused inside a turn running on the node' "$GUARD_HOME/upgrade.log"
 # `deploy.sh` now records a machine-readable result beside the install, so the temp home is not empty of
 # files after the guard fires; remove the whole tree rather than a fixed list, or the smoke gate aborts
 # here and never reaches the tests that matter.
