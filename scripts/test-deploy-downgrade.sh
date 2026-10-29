@@ -97,8 +97,11 @@ write_record() { printf 'commit=%s\nbranch=fixture\nsha256=deadbeef\nat=1970-01-
 # they must reach the build, not complete it.
 last_exit=0
 last_out=""
+# No service, whatever this machine runs: on a host whose wa-serve.service runs a real node (openclaw, 29/10)
+# deploy.sh stopped at "the service runs the node from ..." before the downgrade check and 10 cases failed.
 run_deploy() {
   ( cd "$ROOT" && env -u WASM_AGENT_IN_TURN PATH="$(dirname "$(command -v git)"):/usr/bin:/bin" \
+      WA_SERVICE_UNIT_FILE="$S/no-such-service.unit" WA_SERVICE_PID=0 \
       WA_INSTALL_DIR="$S/install" WASM_AGENT_HOME="$S/home" WA_PORT=18991 WA_CLIENT_PORT=18992 \
       bash "$DEPLOY" --reason "downgrade gate test" ) >"$S/out.txt" 2>&1
   last_exit=$?
