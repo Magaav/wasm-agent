@@ -345,6 +345,19 @@ does not run its node from. They are paid for: a node behind main served a diff 
 `unknown_action:patch`; a gate that stopped one of
 two listeners reported success because the *other* node answered `/health`.
 
+**Before it builds (29/10).** `scripts/lib/build-requirements.sh` checks the toolchain from the files it
+leaves - rustc's version from rustup's manifest, node, cc, rg, the code-mode assets, the disk - with no cargo
+run and no network (`bash scripts/lib/build-requirements.sh check` prints the same lines). Missing code-mode
+assets are provisioned as before; cargo and node only where `<home>/.wasm-agent/build.env` says
+`WA_BUILD_PROVISION=1`, otherwise they are refused by name. That file is data, read for a whitelist of keys
+(`WA_BUILD_PATH`, `CARGO_INCREMENTAL`, `CARGO_BUILD_JOBS`, `CARGO_PROFILE_RELEASE_*`, `WA_UPGRADE_IDLE_POLL`).
+**While it builds** it writes `<home>/.wasm-agent/build-status.json` (preflight, provisioning, fetching,
+compiling n/total crate, proving, installing, then installed/failed), which `wa chat` draws above its input,
+and prints `deploy: [phase] <name> <seconds>` for each phase; cargo's output stays in `<home>/.wasm-agent/build-logs`.
+**Another main.** A checkout may name a second source of main with `git config --add wa.deployRemote <remote>`
+(the laptop sandbox's `host`, a bundle of the operator's main): HEAD may then be on that main as well as on
+`origin/main`, and behind either is still refused.
+
 `installed.txt` after a deploy is the **deploy's own** record: `source_provenance=clean-built-by-deploy` and
 `record_role=final`, naming the exact commit, the installed binary's hash and the hash of the sentinel the
 deploy installed. `upgrade.sh` records the bytes it places with `source_provenance=unverified-binary` and,

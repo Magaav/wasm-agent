@@ -440,10 +440,17 @@ pub(crate) fn target_commit() -> Option<String> {
 ///
 /// Split from the root resolution so a fixture repository can prove that what a request recorded at
 /// request time survives a later move of main.
+///
+/// A checkout that names another source of main (`git config wa.deployRemote <remote>`, deploy.sh rule 2 -
+/// the laptop sandbox's host bundle, 29/10) deploys that remote's main, so that is the commit recorded.
 pub(crate) fn target_commit_at(root: &Path) -> Result<String> {
-    let commit = git(root, &["rev-parse", "origin/main"]).context("origin/main is not readable")?;
+    let named = git(root, &["config", "--get-all", "wa.deployRemote"]).unwrap_or_default();
+    let main = named.lines().map(|remote| format!("{}/main", remote.trim()))
+        .find(|main| git(root, &["rev-parse", "--verify", "-q", main]).is_ok())
+        .unwrap_or_else(|| "origin/main".into());
+    let commit = git(root, &["rev-parse", &main]).with_context(|| format!("{main} is not readable"))?;
     if commit.len() != 40 || !commit.bytes().all(|b| b.is_ascii_hexdigit()) {
-        bail!("origin/main is not a full commit SHA: {commit}");
+        bail!("{main} is not a full commit SHA: {commit}");
     }
     Ok(commit)
 }

@@ -184,6 +184,25 @@ fn the_recorded_commit_survives_a_later_main_move() {
     assert!(!lines[0].contains(&second), "status must not re-read main: {}", lines[0]);
 }
 
+/// 3b. A checkout that names another source of main (`wa.deployRemote`, the sandbox's host bundle) records
+/// that main - it is what deploy.sh builds - and falls back to origin/main when the named ref is absent.
+#[test]
+fn a_named_deploy_remote_is_the_recorded_main() {
+    let scratch = Scratch::new("deploy-remote");
+    let repo = scratch.dir.join("repo");
+    std::fs::create_dir_all(&repo).expect("repo directory");
+    git(&repo, &["init", "-q"]);
+    git(&repo, &["-c", "commit.gpgsign=false", "commit", "--allow-empty", "-q", "-m", "published"]);
+    let published = git(&repo, &["rev-parse", "HEAD"]);
+    git(&repo, &["update-ref", "refs/remotes/origin/main", &published]);
+    git(&repo, &["config", "wa.deployRemote", "host"]);
+    assert_eq!(deploy_protocol::target_commit_at(&repo).unwrap(), published, "no host/main yet: origin/main");
+    git(&repo, &["-c", "commit.gpgsign=false", "commit", "--allow-empty", "-q", "-m", "unpushed"]);
+    let unpushed = git(&repo, &["rev-parse", "HEAD"]);
+    git(&repo, &["update-ref", "refs/remotes/host/main", &unpushed]);
+    assert_eq!(deploy_protocol::target_commit_at(&repo).unwrap(), unpushed, "the named remote's main");
+}
+
 /// The timestamp an operator reads is UTC and unambiguous, and it is the queue time, not "now".
 #[test]
 fn queue_times_are_utc_stamps() {

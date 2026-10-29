@@ -68,6 +68,12 @@ INSTALL_DIR=""
 # different source of truth than the machine runs is the whole failure this rule exists for.
 WA_LIB="$(cd "$(dirname "$0")" 2>/dev/null && pwd)/lib/service-target.sh"
 [ -f "$WA_LIB" ] && . "$WA_LIB"
+# The build's progress file and its requirement check (29/10): the sentinel owns the one rebuild path, so
+# whoever asked for it sees the same progress, and a missing toolchain is named (or fetched) before a build.
+for wa_lib_part in build-status build-requirements; do
+  [ -f "$(dirname "$0")/lib/$wa_lib_part.sh" ] && . "$(dirname "$0")/lib/$wa_lib_part.sh"
+done
+command -v wa_status >/dev/null 2>&1 || { wa_status() { :; }; wa_status_follow() { :; }; wa_status_unfollow() { :; }; wa_status_compiled() { :; }; wa_phase() { :; }; }
 EXPLICIT_INSTALL="${WA_INSTALL_DIR:-}"
 PORT="${WA_PORT:-8799}"
 CLIENT_PORT="${WA_CLIENT_PORT:-8800}"
@@ -134,6 +140,8 @@ write_result() { # ok detail
 # <install>/deploy.log with the time, what it was about, and why.
 fail() {
   echo "deploy: $*" >&2
+  wa_status_unfollow
+  wa_status failed "${WA_STATUS_PHASE:-preflight}: $(printf '%s' "$*" | cut -c1-90)"
   printf '%s\t%s\t%s\t%s\n' "$(date +%Y-%m-%dT%H:%M:%S%z)" "${COMMIT:-unknown}" "${BRANCH:-unknown}" "$*" \
     >> "$INSTALL_DIR/deploy.log" 2>/dev/null
   write_result false "$*"
@@ -321,6 +329,13 @@ fi
 [ -n "$ROOT" ] || fail "cannot tell which worktree to deploy from: run this script from one, set WA_DEPLOY_ROOT, or record it in $INSTALL_DIR/runtime-worktree.txt - a deploy that cannot say what it builds does not build"
 [ -d "$ROOT" ] || fail "the worktree to deploy from does not exist: $ROOT"
 cd "$ROOT" || fail "cannot enter the worktree to deploy from: $ROOT"
+# From here a failure is drawn as a failed build: the rules below (clean, current, not a downgrade, the
+# port, the toolchain) are the build's preflight, and each phase after it says how long it took.
+command -v wa_build_env >/dev/null 2>&1 && wa_build_env
+if command -v wa_status_begin >/dev/null 2>&1; then
+  wa_status_begin "$ROOT" "$(git rev-parse HEAD 2>/dev/null)"
+  wa_phase preflight
+fi
 
 # Protocol identity must be safe before any refusal writes per-request evidence.
 if [ -n "$REQUEST_ID" ]; then
@@ -334,10 +349,28 @@ DIRTY="$(git status --porcelain | wc -l | tr -d ' ')"
 
 # 2. Current. Behind main is the failure this project has paid for repeatedly.
 BRANCH="$(git rev-parse --abbrev-ref HEAD)"
-git fetch -q origin 2>/dev/null || true
-if git rev-parse --verify -q origin/main >/dev/null; then
-  BEHIND="$(git rev-list --count HEAD..origin/main 2>/dev/null || echo 0)"
-  [ "$BEHIND" = "0" ] || fail "this tree is $BEHIND commit(s) behind origin/main; merge main first (a node that cannot see main cannot see its own fixes)"
+# Which main. origin/main always; and a checkout may name another remote as a source of main with
+# `git config wa.deployRemote <remote>` - the laptop sandbox does (29/10): its operator's main arrives as a
+# git bundle (remote `host`) before it is pushed anywhere, and the sentinel deploys it. The rules are the
+# same against every named main: behind ANY of them refuses, and HEAD must be ON one of them. A tree behind
+# origin/main is still refused when the other remote is ahead, so a stale laptop cannot undo GitHub's main.
+MAIN_REFS=""
+for MAIN_REMOTE in origin $(git config --get-all wa.deployRemote 2>/dev/null); do
+  case " $MAIN_REFS " in *" $MAIN_REMOTE/main "*) continue ;; esac
+  git fetch -q "$MAIN_REMOTE" 2>/dev/null || true
+  git rev-parse --verify -q "$MAIN_REMOTE/main" >/dev/null && MAIN_REFS="$MAIN_REFS $MAIN_REMOTE/main"
+done
+MAIN_REFS="${MAIN_REFS# }"
+DEPLOY_MAIN_REF=origin/main
+for MAIN_REF in $MAIN_REFS; do
+  [ "$(git rev-parse "$MAIN_REF")" = "$(git rev-parse HEAD)" ] && { DEPLOY_MAIN_REF="$MAIN_REF"; break; }
+done
+export WA_DEPLOY_MAIN_REF="$DEPLOY_MAIN_REF"
+if [ -n "$MAIN_REFS" ]; then
+  for MAIN_REF in $MAIN_REFS; do
+    BEHIND="$(git rev-list --count "HEAD..$MAIN_REF" 2>/dev/null || echo 0)"
+    [ "$BEHIND" = "0" ] || fail "this tree is $BEHIND commit(s) behind $MAIN_REF; merge main first (a node that cannot see main cannot see its own fixes)"
+  done
   # ... and a tree AHEAD of main is the other half of the same failure. An unmerged `change/`
   # branch deploys fine, and then main lags the live binary, so the next main-side deploy is
   # refused as a downgrade - measured twice in one day (8c13f19, 4d4753f). The live install
@@ -349,8 +382,10 @@ if git rev-parse --verify -q origin/main >/dev/null; then
   # the review of change/deploy-unbound). It is unconditional now. `--require-main` is still accepted, as a
   # no-op kept for callers that pass it; the *rule* has its own test (scripts/test-deploy-on-main.sh)
   # rather than an exemption any caller can take.
-  git merge-base --is-ancestor HEAD origin/main 2>/dev/null \
-    || fail "this tree's commit $(git rev-parse --short HEAD) is not on origin/main; merge it to main and deploy from there - an unmerged deploy leaves main behind the live node"
+  ON_MAIN=0
+  for MAIN_REF in $MAIN_REFS; do git merge-base --is-ancestor HEAD "$MAIN_REF" 2>/dev/null && ON_MAIN=1; done
+  [ "$ON_MAIN" = 1 ] \
+    || fail "this tree's commit $(git rev-parse --short HEAD) is not on $(printf '%s' "$MAIN_REFS" | sed 's/ / or /g'); merge it to main and deploy from there - an unmerged deploy leaves main behind the live node"
 fi
 COMMIT="$(git rev-parse --short HEAD)"
 # The release this commit IS, when it is one. Recorded at install so the node can answer "am I behind?"
@@ -495,7 +530,39 @@ case "${WA_DEPLOY_SENTINEL_SUDO:-0}" in
   1) command -v sudo >/dev/null 2>&1 && sudo -n true || fail 'explicit sentinel sudo restart requested but noninteractive authority is unavailable; nothing installed' ;;
   *) fail 'WA_DEPLOY_SENTINEL_SUDO must be 0 or 1; nothing installed' ;;
 esac
-command -v cargo >/dev/null 2>&1 || fail "refused(cargo_unavailable): cargo is not on PATH (PATH=${PATH:-unset}); this step builds the tree with 'cargo build --release --offline --manifest-path rust/Cargo.toml', so a deploy without it cannot build what it would install. Install Rust (https://rustup.rs), or run the deploy on the tree that has the toolchain (the cloud tree builds this repository). Nothing was built and nothing was installed. To build or test without installing, use the gate's own command instead: bash scripts/test.sh."
+CARGO_REFUSAL="refused(cargo_unavailable): cargo is not on PATH (PATH=${PATH:-unset}); this step builds the tree with 'cargo build --release --offline --manifest-path rust/Cargo.toml', so a deploy without it cannot build what it would install. Install Rust (https://rustup.rs), or run the deploy on the tree that has the toolchain (the cloud tree builds this repository). Nothing was built and nothing was installed. To build or test without installing, use the gate's own command instead: bash scripts/test.sh."
+# Every requirement of the build, from the files the toolchains leave behind - no cargo run, no network
+# (scripts/lib/build-requirements.sh; ~40 ms when all is present). A missing one is provisioned when it can
+# be (the code-mode assets always, as before; cargo and node when WA_BUILD_PROVISION=1 says this machine
+# wants the sentinel to fetch them), and otherwise refused by the name a caller already reads.
+deploy_requirements() {
+  local check id detail
+  if ! command -v wa_build_check >/dev/null 2>&1; then
+    command -v cargo >/dev/null 2>&1 || fail "$CARGO_REFUSAL"
+    return 0
+  fi
+  check="$(wa_build_check "$ROOT")" && { printf '%s\n' "$check" | grep '^low' | sed 's/^/deploy: requirement /'; return 0; }
+  printf '%s\n' "$check" | grep -v '^ok' | sed 's/^/deploy: requirement /'
+  WA_BUILD_MISSING="$(printf '%s\n' "$check" | awk '$1 == "missing" { printf " %s", $2 }')"
+  for id in $WA_BUILD_MISSING; do
+    detail="$(printf '%s\n' "$check" | sed -n "s/^missing $id *//p" | head -1)"
+    case "$id:${WA_BUILD_PROVISION:-0}" in
+      cargo:1|node:1|assets:*)
+        [ "$id" = assets ] && note "code-mode assets not prepared; provisioning the pinned, checksum-verified packages"
+        wa_phase provisioning "$id"
+        wa_build_provision "$ROOT" "$id" || case "$id" in
+          assets) fail "codemode_assets_unprovisioned: scripts/provision-codemode-assets.mjs could not prepare $(wa_codemode_assets_dir "$ROOT") (network to the npm registry?); nothing installed" ;;
+          *) fail "refused(${id}_unprovisioned): $detail, and fetching it failed; nothing installed" ;;
+        esac ;;
+      cargo:*) fail "$CARGO_REFUSAL" ;;
+      node:*) fail "codemode_build:node_build_tool_unavailable; nothing installed" ;;
+      *) fail "refused(${id}_unavailable): $detail; nothing installed" ;;
+    esac
+  done
+  wa_build_check "$ROOT" >/dev/null || fail "refused(requirements_unmet): still missing after provisioning:$WA_BUILD_MISSING; nothing installed"
+  wa_phase preflight
+}
+deploy_requirements
 
 # A deploy and onStale both build into rust/target/release. They must not do it at the same time:
 # on 2026-10-22 onStale's build overwrote the deploy's proved candidate between proof and install, and
@@ -527,35 +594,41 @@ done
 # crates are fetched first (--locked: no resolution, no newer version). No network is not fatal here: the
 # offline build then proves whether the cache already holds them. 28/10, openclaw: "failed to download
 # cc v1.4.7" for the sentinel.
+wa_phase fetching
 for manifest in rust/Cargo.toml rust/wa-sentinel/Cargo.toml; do
   ( cd "$ROOT" && cargo fetch --locked --manifest-path "$manifest" >/dev/null 2>&1 ) \
     || note "cargo fetch for $manifest did not complete; the offline build uses what the cache already has"
 done
 
 # BEGIN native code-mode shipping build (also exercised without any installer).
-command -v node >/dev/null 2>&1 || fail "codemode_build:node_build_tool_unavailable; nothing installed"
 CODEMODE_BUILD_SCRIPT="$ROOT/scripts/codemode-build.mjs"; CODEMODE_BUILD_ROOT="$ROOT"
 if command -v cygpath >/dev/null 2>&1; then
   CODEMODE_BUILD_SCRIPT="$(cygpath -w "$CODEMODE_BUILD_SCRIPT")"; CODEMODE_BUILD_ROOT="$(cygpath -w "$CODEMODE_BUILD_ROOT")"
 fi
-# A tree that has never built a shipping binary has no prepared assets in its git common dir, and the
-# build then failed on a missing receipt.json - openclaw on 26/10 and 28/10, so that node could not update
-# itself at all. Provisioning is pinned and checksum-verified (scripts/provision-codemode-assets.mjs, the
-# same step up.sh and the coordinator preflight use); a failure is reported and installs nothing.
-CODEMODE_ASSETS="$(git -C "$ROOT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)/codemode-assets/pi-1.2.0-quickjs-3.6.2"
-if [ ! -f "$CODEMODE_ASSETS/receipt.json" ]; then
-  note "code-mode assets not prepared at $CODEMODE_ASSETS; provisioning the pinned, checksum-verified packages"
-  PROVISION_DIR="$CODEMODE_ASSETS"; command -v cygpath >/dev/null 2>&1 && PROVISION_DIR="$(cygpath -w "$CODEMODE_ASSETS")"
-  mkdir -p "$(dirname "$CODEMODE_ASSETS")" \
-    && node "$ROOT/scripts/provision-codemode-assets.mjs" "$PROVISION_DIR" >/dev/null \
-    || fail "codemode_assets_unprovisioned: scripts/provision-codemode-assets.mjs could not prepare $CODEMODE_ASSETS (network to the npm registry?); nothing installed"
-fi
-node "$CODEMODE_BUILD_SCRIPT" build "$CODEMODE_BUILD_ROOT" || fail "native code-mode shipping build/readiness failed; nothing installed"
+# The assets a tree that never built a shipping binary lacks (openclaw 26/10 and 28/10: a missing
+# receipt.json, so that node could not update itself) are provisioned by deploy_requirements above.
+# cargo's stderr goes to a file this deploy follows (WA_BUILD_CARGO_LOG), so `Compiling <crate>` reaches
+# build-status.json while it happens; the last build's log stays in <data>/build-logs for a failure.
+BUILD_LOGS="${WASM_AGENT_DATA:-${WASM_AGENT_HOME:-$HOME}/.wasm-agent}/build-logs"
+mkdir -p "$BUILD_LOGS" 2>/dev/null || BUILD_LOGS="$(mktemp -d)"
+: > "$BUILD_LOGS/wa-host.log"
+CARGO_LOG_ARG="$BUILD_LOGS/wa-host.log"; command -v cygpath >/dev/null 2>&1 && CARGO_LOG_ARG="$(cygpath -w "$CARGO_LOG_ARG")"
+wa_phase compiling
+wa_status_follow "$BUILD_LOGS/wa-host.log" compiling
+WA_BUILD_CARGO_LOG="$CARGO_LOG_ARG" node "$CODEMODE_BUILD_SCRIPT" build "$CODEMODE_BUILD_ROOT" > "$BUILD_LOGS/wa-host.receipt.json" \
+  || { tail -25 "$BUILD_LOGS/wa-host.log" 2>/dev/null | sed 's/^/  cargo: /' >&2; fail "native code-mode shipping build/readiness failed; nothing installed"; }
 # END native code-mode shipping build.
+wa_status_unfollow
+WA_STATUS_DONE="$(wa_status_compiled "$BUILD_LOGS/wa-host.log")"
 # The sentinel is its own crate, outside the `rust/` workspace (which lists only `wa-host`), so it is
 # built with its own manifest. Asking the workspace for `-p wa-sentinel` fails - "package ID
 # specification did not match any packages" - and that is how it came to be installed by hand at all.
-( cd rust && cargo build --release --offline --locked --manifest-path wa-sentinel/Cargo.toml ) || fail "the sentinel build failed"
+: > "$BUILD_LOGS/wa-sentinel.log"
+wa_status_follow "$BUILD_LOGS/wa-sentinel.log" compiling
+( cd rust && cargo build --release --offline --locked --manifest-path wa-sentinel/Cargo.toml ) 2> "$BUILD_LOGS/wa-sentinel.log" \
+  || { tail -25 "$BUILD_LOGS/wa-sentinel.log" 2>/dev/null | sed 's/^/  cargo: /' >&2; fail "the sentinel build failed"; }
+wa_status_unfollow
+echo "deploy: compiled $WA_STATUS_DONE + $(wa_status_compiled "$BUILD_LOGS/wa-sentinel.log") crate(s) (logs in $BUILD_LOGS)"
 NEW="rust/target/release/wa.exe"
 [ -f "$NEW" ] || NEW="rust/target/release/wa"
 [ -x "$NEW" ] || fail "no built binary at $NEW"
@@ -577,6 +650,7 @@ esac
 
 # 5. Prove it answers before it goes near the running node. A build that cannot start must not replace one
 #    that is serving.
+wa_phase proving
 SCRATCH=$((PORT + 40))
 SCRATCH_HOME="$(mktemp -d)"
 EMBEDDED_ROOT="$ROOT"; EMBEDDED_SCRIPT="$ROOT/scripts/check-embedded-runtime.lua"; EMBEDDED_HOME="$SCRATCH_HOME"
@@ -620,6 +694,9 @@ if [ -n "$EXPECTED_SHA" ]; then
   [ "$(git rev-parse HEAD)" = "$EXPECTED_SHA" ] && [ -z "$(git status --porcelain)" ] || fail "source changed from expected SHA before install"
 fi
 echo "deploy: installing through upgrade.sh"
+wa_phase installing
+# No log to follow: the heartbeat keeps the row alive through upgrade.sh's wait for an idle node.
+wa_status_follow /dev/null installing
 # Default runtime source is canonical main, not the producer/integration lane that
 # happened to build this release. Selection is read-only and refuses dirty/stale
 # canonical state; explicit overrides remain deliberate active-wave knobs.
@@ -661,6 +738,7 @@ WA_INSTALL_DIR="$INSTALL_DIR" WA_PORT="$PORT" WA_CLIENT_PORT="$CLIENT_PORT" \
   bash "$UPGRADE" "$CANDIDATE" > "$INSTALL_DIR/deploy-upgrade.log" 2>&1
 # wa-deploy-upgrade-invocation: end
 UPGRADE_STATUS=$?
+wa_status_unfollow
 # Reporting must never fail the deploy: with stdout gone, `sed` dies of EPIPE and pipefail would then report
 # its status instead of upgrade.sh's.
 sed "s/^/  upgrade: /" "$INSTALL_DIR/deploy-upgrade.log" 2>/dev/null | tail -20 || true
@@ -945,6 +1023,9 @@ if [ -f "$LIB_SRC" ]; then
 fi
 # deploy.sh and upgrade.sh source it: an installed copy run by the sentinel needs it beside them.
 ship_file "$ROOT/scripts/lib/turn-guard.sh" "$INSTALL_DIR/scripts/lib/turn-guard.sh" "scripts/lib/turn-guard.sh beside deploy.sh"
+# ...and the build's progress file and requirement check, which it sources too (29/10).
+ship_file "$ROOT/scripts/lib/build-status.sh" "$INSTALL_DIR/scripts/lib/build-status.sh" "scripts/lib/build-status.sh beside deploy.sh"
+ship_file "$ROOT/scripts/lib/build-requirements.sh" "$INSTALL_DIR/scripts/lib/build-requirements.sh" "scripts/lib/build-requirements.sh beside deploy.sh"
 
 ship_file "$ROOT/scripts/codemode-build.mjs" "$INSTALL_DIR/scripts/codemode-build.mjs" "offline native shipping build contract"
 ship_file "$ROOT/scripts/check-embedded-runtime.lua" "$INSTALL_DIR/scripts/check-embedded-runtime.lua" "embedded source and native asset readiness checker"
@@ -1086,6 +1167,8 @@ if [ -n "$EXPECTED_SHA" ]; then
     || fail "final source/artifact/script/UI/process identity recording failed"
 fi
 write_result true "installed $COMMIT; watcher ${SENTINEL_NEW_PID:-${SENTINEL_WATCH_PID:-none}}"
+wa_phase ""
+wa_status installed done "" "$(( $(wa_status_now 2>/dev/null || date +%s) - ${WA_STATUS_STARTED:-0} ))s"
 VERDICT="[deploy result] ok commit=$COMMIT node_sha=$HASH sentinel_sha=$SENTINEL_HASH watcher=${SENTINEL_WATCH_PID:-none}->${SENTINEL_NEW_PID:-none}. Evidence: $INSTALL_DIR/deploy-result.json and installed.txt; run scripts/verify-install.sh for the checks."
 
 # The continuation, and the reason this script takes --session/--prompt at all: the deploy is performed

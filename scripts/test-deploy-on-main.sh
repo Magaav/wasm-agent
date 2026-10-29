@@ -95,4 +95,27 @@ grep -q 'refused(cargo_unavailable)' "$RUN_OUT" \
   || fail "the control run did not get past the on-main check: $(tail -3 "$RUN_OUT")"
 ok "a HEAD that IS origin/main gets past the check" "it stops later, at refused(cargo_unavailable)"
 
+# 3. A second source of main (29/10): a checkout that names `git config wa.deployRemote host` (the laptop
+#    sandbox, whose operator's main arrives as a bundle before it is pushed) deploys a HEAD on host/main that
+#    is ahead of origin/main - and the rules still hold against BOTH mains.
+git -C "$TREE" config wa.deployRemote host
+git -C "$TREE" update-ref refs/remotes/host/main "$FEATURE_SHA" || fail "cannot pin host/main"
+run_deploy host-main "$FEATURE_SHA"
+grep -q "commit [0-9a-f]* is not on " "$RUN_OUT" && fail "a HEAD equal to host/main was refused for not being on main"
+grep -q 'refused(cargo_unavailable)' "$RUN_OUT" \
+  || fail "a HEAD on host/main did not get past the rules: $(tail -3 "$RUN_OUT")"
+ok "a HEAD that IS the named remote's main (ahead of origin/main) gets past the check" "wa.deployRemote=host"
+run_deploy behind-host "$MAIN_SHA"
+[ "$RUN_STATUS" -ne 0 ] || fail "a HEAD behind host/main was allowed"
+grep -q 'behind host/main' "$RUN_OUT" || fail "the refusal does not name host/main: $(tail -3 "$RUN_OUT")"
+ok "a HEAD behind the named remote's main is refused by name"
+git -C "$TREE" checkout -q --detach "$MAIN_SHA"
+printf 'published elsewhere\n' > "$TREE/OTHER"; git -C "$TREE" add OTHER
+git -C "$TREE" commit -qm "fixture: origin moved on" || fail "cannot commit the origin move"
+git -C "$TREE" update-ref refs/remotes/origin/main "$(git -C "$TREE" rev-parse HEAD)"
+run_deploy behind-origin "$FEATURE_SHA"
+[ "$RUN_STATUS" -ne 0 ] || fail "a HEAD on host/main but behind origin/main was allowed"
+grep -q 'behind origin/main' "$RUN_OUT" || fail "the refusal does not name origin/main: $(tail -3 "$RUN_OUT")"
+ok "a named remote cannot undo origin/main: behind it is still refused" "the stale-laptop case"
+
 echo "test-deploy-on-main: ALL PASS ($checks checks; the rule is not waivable by WA_INSTALL_DIR)"

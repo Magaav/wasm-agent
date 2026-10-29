@@ -76,7 +76,11 @@ export function build(root,dir=assetPath(root),waveGeneration=null){
   const env={...process.env,WA_CODEMODE_BUILD_ASSETS:fs.realpathSync(snapshot),CARGO_TARGET_DIR:path.join(root,'rust/target'),WA_BUILD_SOURCE_COMMIT:before.source_commit,WA_BUILD_SOURCE_TREE:before.source_tree,WA_BUILD_WAVE_GENERATION:waveGeneration||''};
   const args=['build','--release','--offline','--locked','-p','wa-host'];
   receipt.cargo_args=args;receipt.cargo_env={WA_CODEMODE_BUILD_ASSETS:env.WA_CODEMODE_BUILD_ASSETS,CARGO_TARGET_DIR:env.CARGO_TARGET_DIR};
-  const result=cp.spawnSync('cargo',args,{cwd:path.join(root,'rust'),env,encoding:'utf8',windowsHide:true,timeout:1800000,maxBuffer:32*1024*1024});
+  // WA_BUILD_CARGO_LOG (29/10): cargo's stderr goes to that file as it is written, so deploy.sh can draw
+  // `Compiling <crate>` live; it is read back afterwards, so the evidence below is the same bytes.
+  const live=process.env.WA_BUILD_CARGO_LOG,liveFd=live?fs.openSync(live,'w'):null;
+  const result=cp.spawnSync('cargo',args,{cwd:path.join(root,'rust'),env,encoding:'utf8',windowsHide:true,timeout:1800000,maxBuffer:32*1024*1024,stdio:['ignore','pipe',liveFd??'pipe']});
+  if(liveFd!==null){fs.closeSync(liveFd);result.stderr=fs.readFileSync(live,'utf8');}
   for(const stream of ['stdout','stderr'])fs.writeFileSync(path.join(evidence,'cargo.'+stream),result[stream]||'');
   requireValue(result.status===0,'cargo_failed:'+String(result.error||result.stderr));
   const binary=path.join(root,'rust/target/release',process.platform==='win32'?'wa.exe':'wa');

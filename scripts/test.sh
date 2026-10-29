@@ -1896,6 +1896,7 @@ gate_run bash scripts/test-deploy-self-ship.sh
 # script stop saying the same thing about a deploy's release proof.
 gate_run bash scripts/test-deploy-on-main.sh
 gate_run bash scripts/test-deploy-staging-sweep.sh
+gate_run bash scripts/test-deploy-build-status.sh
 gate_run node scripts/check-deploy-docs.mjs
 gate_run node scripts/test-delivery-refresh.mjs
 env -u GATE_LANE_HELD node scripts/test-gate-lane-wiring.cjs

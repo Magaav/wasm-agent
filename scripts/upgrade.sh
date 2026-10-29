@@ -393,6 +393,11 @@ node_is_idle() {
   return 0
 }
 idle_ticks=0
+# The coarse tick, whole seconds. 5 by default; a machine whose deploys are an edit loop (the laptop sandbox,
+# through <home>/.wasm-agent/build.env) may shorten it: three idle polls are still the debounce, so an idle
+# node is entered after 2 ticks instead of 10 s (29/10).
+IDLE_POLL="${WA_UPGRADE_IDLE_POLL:-5}"
+case "$IDLE_POLL" in ''|*[!0-9]*|0) IDLE_POLL=5 ;; esac
 # When the node was last seen making progress. The deadline below is measured from here, not from the
 # start, so a long turn that is still alive is waited on and only a worker that has stopped reporting
 # fails. `WA_IDLE_MAX_SECONDS` (default 0 = no cap) is an operator's hard wall-clock bound.
@@ -451,8 +456,8 @@ while :; do
     FINE_TICKS=$((FINE_TICKS + 1))
     if [ $((FINE_TICKS % 2)) -eq 0 ]; then waited=$((waited + 1)); fi
   else
-    sleep 5
-    waited=$((waited + 5))
+    sleep "$IDLE_POLL"
+    waited=$((waited + IDLE_POLL))
   fi
 done
 
