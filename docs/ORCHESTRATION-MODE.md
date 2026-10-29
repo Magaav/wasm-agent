@@ -106,3 +106,113 @@ requests/jobs/service effects. `test-orchestration-ui.cjs <evidence>`, then
 `--post`, verifies the command balloon, alias, target/single-flight, preserved
 worker drafts and evidence hashes; the required UI suite includes it. Private
 mock fixtures are not live paid-model or installation proof.
+
+## Toward the master chat (plan, 29/10)
+
+**Status: plan (29/10).** Nothing here is implemented by this document. Each step below lands with
+its own measurement; a step that does not move its number is not kept.
+
+The goal: one `wa` conversation, reachable from any device, that turns what the operator says into
+parallel work - evolving this repository, evolving other repositories, and the general loops (web,
+mail, WhatsApp, search) - across subagents and peer nodes, without the operator managing any of it.
+This mode is the current attempt and is not reliable yet; this section is the plan to make it so.
+
+### Words, fixed
+
+- **Gate** means the full release gate (`scripts/test.sh`, `finish.mjs gate`, `wave-release.mjs`). It
+  runs only when a human asks for a release. Landing work is **focused checks plus `integrate`**
+  (`gate_verified:false`). See `AGENTS.md`. Gate timings (`MERGE-SPEED.md`, `FACTORY.md`) are not the
+  cost of landing and must not be used to plan waves.
+- **Wave**: the set of subagents one operator request fans out into.
+- **Deploy**: the sentinel installing a build of clean `main` (`wa-sentinel request deploy`, which runs
+  `scripts/deploy.sh`). It is the only way a build reaches a node - no hand builds, no hot copies.
+
+### Who owns what
+
+| part | owns | never does |
+| --- | --- | --- |
+| master chat (the node, orchestration mode) | understanding the request, routing (direct / delegate), authoring child briefs, choosing repo, task class and device, accepting results | build, land or deploy itself; wait on a child |
+| subagent | one scoped task in its own worktree (or none, for general loops), focused checks, a report | merge `main`, deploy, edit outside its scope |
+| sentinel (`wa-sentinel`) | everything serial, everything that must outlive or replace the node: requirement checks and provisioning, incremental builds, deploy with proof and rollback, the worktree pool, reaping, the heavy-build slot | decide what work to do |
+| peers (rendezvous) | executing work placed on them; their own sentinel does their local mechanics | accept work from anything but an authenticated master |
+
+### Task classes
+
+| class | workspace | done means |
+| --- | --- | --- |
+| self-evolution (this repo) | pooled worktree | focused checks, `integrate` to `main`, sentinel deploy |
+| other own repositories | pooled worktree | focused checks, `integrate`, that repository's own deploy |
+| repositories whose `main` is someone else's production | pooled worktree | a **draft PR**; the master chat never merges there |
+| general loops (web, mail, WhatsApp, search) | none | sentinel jobs (schedule/event/file) start subagents in code mode; outward effects go through the operator approval route |
+
+### What the first attempt taught (wasm_the_first lineage, 18/09 - 23/10)
+
+633 commits carry `Agent: wasm-agent node=wasm_the_first`. Verified from source:
+
+- **Children die with the node.** "one lane was killed by a deploy restart"; a child running at a
+  restart "reads `unknown`, with no replay" (`SUBAGENTS.md:257`); a deploy waited behind the
+  coordinator's own turn ("busy after 60s", `FACTORY.md:363`).
+- **Reports cannot be trusted as text.** Three deliveries settled `report: absent`; one worker deleted
+  27 lines of another lane's doc out of scope; "Four of eight concerns were changed by verification"
+  (`FACTORY.md:383`).
+- **State leaks.** The 01/10 audit: 72 worktrees (36 dirty), 1,374 of 1,380 bindings still allocated
+  (`WAVE-CONVERGENCE.md:554`); a run died at 1.9 GB free disk.
+- **"Runs do not record why they ended"** (`ORCHESTRATION.md:132`).
+- **A mode in prose does nothing.** Before `a32cca16` the coordinator could do the whole task itself;
+  a bare "go" was once delegated with no coordinator inference (`ef1a7196`).
+- The parallel factory (worker → reviewer → merge lane → gate) was retired on 05/10 (`b3003d54`, no
+  reason in the commit). Its landing ceiling (~4/hour) was the gate, which is now release-only.
+
+Hypotheses from reading the code, not yet confirmed by data (the runs happened on the `openclaw` node):
+
+1. A child's completion notice is stored as a user row (`completions.lua:300-303`), and the route floor
+   keys on the newest user row (`memory.lua:1050`, `orchestration_mode.lua:119`), so every child report
+   may force a new `route_task` before the coordinator can act - a loop that grows with parallelism.
+2. After admission the floor lifts for the whole turn (`subagents.lua:624,630`), so the coordinator can
+   edit the files its running child owns.
+3. The mode is a per-session flag with no `enabled_at` or build commit, so "it did not orchestrate"
+   cannot be told apart from "the mode was off" or "the binary predated the mode".
+
+### Plan, in order
+
+Each step names the number it must move.
+
+1. **One rebuild path through the sentinel** (in flight). Host syncs `main` into the node's clone by git
+   bundle (fast-forward only), then `request deploy --expected-sha`. The sentinel checks requirements in
+   well under a second (stat/version files, no cargo, no network), provisions what is missing (pinned
+   toolchain, Node, code-mode assets), builds incrementally on the persistent target, proves on a
+   scratch port, installs `wa`, `wa-sentinel`, `ui/` and the MCP runtime scripts, restarts gracefully,
+   rolls back on failure, and writes `build-status.json` (the CLI draws it). *Number:* edit-to-running
+   time for a one-line Lua change and a one-line Rust change.
+2. **Children survive deploys.** Blue/green node: the sentinel starts the new build as a second
+   instance (`INSTANCES.md`), moves the chat and new runs to it, and lets the old one drain its live
+   children before it exits. Until then, a deploy waits for running children. *Number:* children lost
+   to a deploy (target 0) and deploy wait while a wave runs.
+3. **Child reports handled by data.** A completion notice never counts as a user turn for the route
+   floor (fix hypothesis 1 once the data confirms it). Acceptance reads the deterministic packet
+   (`completions.lua:96`: branch, pushed, ahead, dirty) and the diff, never the prose; a missing report
+   is a settled state with that packet, not a hang. *Number:* route calls per child report; reports
+   absent.
+4. **Scope locks.** A child's declared paths are locked until it settles: the coordinator and other
+   children get a refusal naming the owner. *Number:* out-of-scope edits.
+5. **Resources are reserved and reaped.** One heavy-build slot per node (revive the lease queue in
+   `scripts/gate-lane.mjs`), a disk floor (`check-disk-floor.sh`, `jobs/disk-reclaim.json` - built,
+   not shipped), and a sentinel reaper for merged/abandoned worktrees and bindings. *Number:* leaked
+   worktrees and bindings after a wave (target 0).
+6. **Observable mode and outcomes.** Record `enabled_at` and the build commit with the mode; emit a
+   toggle event; every run records why it ended; a test that a mode-on session sends `subagent` and
+   `route_task` in its tool list. *Number:* unexplained run ends (target 0).
+7. **Warm worktree pool.** The sentinel keeps per-repository worktrees with warm build caches and hands
+   one out in milliseconds; a fresh worktree's first `cargo test` otherwise compiles everything.
+   *Number:* time from spawn to a child's first focused check.
+8. **Placement across devices.** The master chat places work on peers through the rendezvous; each
+   peer's sentinel runs its own mechanics. *Number:* waves completed per hour across nodes.
+
+### Speed already measured on this node (29/10)
+
+- Code mode: the first script in a process cost ~2.6 s (Cranelift compiling QuickJS); later scripts
+  ~115 ms. Fixed by caching the compiled module (`52e6a17a`); to be re-measured after deploy.
+- Web search: DuckDuckGo answers bursts with a 202 challenge, which a code-mode fan-out produces;
+  fixed by falling back to Bing RSS and caching repeated queries (`0f793908`).
+- Image builds compiled every dependency each time (no cache); BuildKit cache mounts added in the
+  sandbox Dockerfile, and normal rebuilds move to the sentinel path (step 1).
