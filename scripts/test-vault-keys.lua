@@ -37,8 +37,15 @@ local stored = keys.set("service_x", secret)
 ok(stored.ok and not stored.replaced, "stored", json.encode(stored))
 ok(not json.encode(stored):find(secret, 1, true), "the answer never carries the value")
 ok(host.read_file(keys.path("service_x")) == secret, "the file holds exactly the value")
-local mode = json.decode(host.exec("stat -c %a '" .. keys.path("service_x") .. "'", ""))
-ok(mode and tostring(mode.stdout or ""):match("^600"), "written 0600", mode and mode.stdout)
+-- Mode bits are POSIX: the host sets 0600 under #[cfg(unix)] (secret_file, rust/wa-host/src/host.rs). On
+-- Windows the key is protected by the user profile's ACL and MSYS stat reports a synthetic 644, so the
+-- check is Unix-only and says so (wasm_the_first gate, 30/10) - not a silent pass.
+if package.config:sub(1, 1) == "/" then
+  local mode = json.decode(host.exec("stat -c %a '" .. keys.path("service_x") .. "'", ""))
+  ok(mode and tostring(mode.stdout or ""):match("^600"), "written 0600", mode and mode.stdout)
+else
+  io.stderr:write("vault keys: 0600 mode check skipped on Windows (no POSIX mode bits; the profile ACL applies)\n")
+end
 ok(keys.set("service_x", secret).replaced == true, "a second /vault replaces")
 local listed = keys.names()
 ok(table.concat(listed, ","):find("service_x", 1, true) ~= nil, "listed by name", table.concat(listed, ","))
