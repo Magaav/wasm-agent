@@ -106,8 +106,10 @@ git -C "$REPO" config core.hooksPath "$HOOKS"
 # so the check compares the two spellings of the same directory rather than the literal string.
 configured_hooks="$(git -C "$REPO" config core.hooksPath)"
 [ -n "$configured_hooks" ] || fail "the fixture did not arm core.hooksPath"
-command -v cygpath >/dev/null 2>&1 && configured_hooks="$(cygpath -u "$configured_hooks")"
-[ "${configured_hooks%/}" = "${HOOKS%/}" ] || fail "the fixture armed core.hooksPath as '$configured_hooks', not '$HOOKS'"
+expected_hooks="$HOOKS"
+# Both sides in one spelling: HOOKS itself may already be the C:/ form (30/10, wasm_the_first).
+command -v cygpath >/dev/null 2>&1 && { configured_hooks="$(cygpath -u "$configured_hooks")"; expected_hooks="$(cygpath -u "$HOOKS")"; }
+[ "${configured_hooks%/}" = "${expected_hooks%/}" ] || fail "the fixture armed core.hooksPath as '$configured_hooks', not '$HOOKS'"
 # Commits that touch `main` are made with the hook path emptied for that one command: the commit guards
 # are pinned by scripts/test-main-guard.sh and would refuse a child's commit on main (this process has
 # WASM_AGENT_PROVENANCE=child), while the subject here is the PUSH side.
