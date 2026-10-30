@@ -66,7 +66,10 @@ function state(n){const f=path.join(n.home,'.wasm-agent/binding.json');return fs
  ok((await lookup()).value.role==='guest','acceptance does not promote');
  r=cli(app,['bind',service],'BIND\n');ok(r.status===1&&r.stdout.includes('existing_request'),'duplicate binding requires inspection not new submission');
  ok((await request(service+'/bindings/accept','POST',raw,headers(other,'bind-accept',raw))).status===409,'stale second acceptance refuses');
- r=cli(app,['bind','run']);ok(r.status===1&&r.stdout.includes('already_owned'),'second process attachment fails OS lease');
+ // Since ef56eca6 (28/10) a second process stands by beside the owner instead of refusing (`already_owned`
+// made every sentinel restart fail behind an open CLI): it must not take the lease, and it says so. It runs
+// until stopped, so it is read for a few seconds, not awaited (30/10).
+r=spawnSync(binary,['bind','run'],{cwd:app.home,env:app.env,encoding:'utf8',timeout:5000,windowsHide:true});ok(/"state":"standby"/.test(r.stdout||'')&&!/"state":"starting"/.test(r.stdout||''),'second process attachment stands by: the OS lease stays with the first');
  async function call(author,capability,args={},to=app.node_id){const body=JSON.stringify({to_node_id:to,capability,args,request_id:crypto.randomUUID()});const envelope=JSON.stringify({rid:crypto.randomUUID(),to:app.node_id,method:'POST',path:'/node/call',headers:headers(author,'call',body),body});return request(service+'/relay/send','POST',envelope,headers(author,'relay-send'));}
  const target=path.join(app.home,'approved-effect.txt');let effect=await call(admin,'write',{path:target,content:'approved'});
  ok(effect.status===200&&fs.readFileSync(target,'utf8')==='approved','signed approved native effect via outbound CLI');
