@@ -90,6 +90,17 @@ function assignmentValue(text, name) {
   return tree ? tree[1] : value;
 }
 
+/// The literal items a `for VAR in $LIST` loop walks, from `LIST="a b c"` in the same file; null when the
+/// loop or its list is not a literal this can read.
+function loopItems(text, variable) {
+  const loop = text.match(new RegExp(`for\\s+${variable}\\s+in\\s+"?\\$\\{?([A-Za-z_][A-Za-z0-9_]*)\\}?"?\\s*;`));
+  if (!loop) return null;
+  const list = text.match(new RegExp(`^\\s*${loop[1]}="([^"$]*)"`, 'm'));
+  if (!list) return null;
+  const items = list[1].split(/\s+/).filter(Boolean);
+  return items.length ? items : null;
+}
+
 function installerSources(file) {
   const text = fs.readFileSync(file, 'utf8');
   const name = path.basename(file);
@@ -101,7 +112,19 @@ function installerSources(file) {
   for (const raw of text.split(/\r?\n/)) {
     const line = stripComment(raw);
     if (line === '' || !(COPY_LINE.test(line) || LOOP_LINE.test(line))) continue;
-    for (const match of line.matchAll(TREE_PATH)) add(match[1], `copied by ${name}`);
+    for (const match of line.matchAll(TREE_PATH)) {
+      // A path that ends at a loop variable (`"$ROOT/scripts/$MCP_FILE"`, 28/10) is not the directory it
+      // stops at: read as `scripts/` it claimed every script was shipped. The variable is expanded from
+      // its loop's literal list (`for MCP_FILE in $MCP_RUNTIME` + `MCP_RUNTIME="a b"`), one rule per item.
+      // A list computed at deploy time (`scripts/lib/$module`, from the imports) keeps the directory rule (30/10).
+      const tail = line.slice(match.index + match[0].length).match(/^\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?/);
+      const items = tail && match[1].endsWith('/') ? loopItems(text, tail[1]) : null;
+      if (items) {
+        for (const item of items) add(match[1] + item, `copied by ${name} (via $${tail[1]})`);
+        continue;
+      }
+      add(match[1], `copied by ${name}`);
+    }
   }
   const variables = file.endsWith('upgrade.sh') ? INSTALLER_VARIABLES.upgrade : INSTALLER_VARIABLES.deploy;
   for (const [variable, entry] of Object.entries(variables)) {
