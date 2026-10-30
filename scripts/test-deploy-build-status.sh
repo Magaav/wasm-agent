@@ -78,6 +78,7 @@ if command -v cygpath >/dev/null 2>&1; then
     for t in cargo node cc gcc rg rustc; do [ -e "$sysdir/$t" ] || [ -e "$sysdir/$t.exe" ] && fail "$sysdir holds $t; this fixture cannot run here"; done
     case "$SYS_PATH:" in *":$sysdir:"*) ;; *) SYS_PATH="$SYS_PATH:$sysdir" ;; esac
   done
+  rm -f "$BIN/git" "$BIN/git.exe"  # the broken copy would shadow the real one
 fi
 stub() { printf '#!/bin/sh\necho "%s"\n' "$2" > "$1"; chmod +x "$1"; }
 mkdir -p "$H/.cargo/bin" "$H/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/lib/rustlib" "$H/.wasm-agent/node/bin"
