@@ -85,7 +85,12 @@ function git(...args) {
 }
 // The same shell `shell_for` in rust/wa-sentinel/src/main.rs hands a job's script to.
 function jobShell() {
-  if (process.platform !== "win32") return { program: "sh", args: [] };
+  // The sentinel's own choice (shell_for in rust/wa-sentinel/src/main.rs): bash where it exists, `sh` only
+  // without one. `sh` is dash on Debian/Ubuntu and refuses the scripts' `set -o pipefail` (openclaw, 30/10).
+  if (process.platform !== "win32") {
+    for (const candidate of ["/bin/bash", "/usr/bin/bash", "/usr/local/bin/bash"]) if (fs.existsSync(candidate)) return { program: candidate, args: [] };
+    return { program: "sh", args: [] };
+  }
   for (const candidate of ["C:\\Program Files\\Git\\bin\\bash.exe", "C:\\Program Files\\Git\\usr\\bin\\bash.exe", "C:\\Program Files (x86)\\Git\\bin\\bash.exe"]) {
     if (fs.existsSync(candidate)) return { program: candidate, args: [] };
   }
