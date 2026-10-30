@@ -6,6 +6,15 @@ import crypto from 'node:crypto';
 import {spawnSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 
+// The ripgrep the node itself provisions (<home>/.wasm-agent/bin, rust/wa-host/src/ripgrep.rs), then PATH: a
+// node without a system rg - Windows, a fresh Linux install - otherwise failed every discovery with
+// `spawnSync rg ENOENT` (wasm_the_first gate, 30/10).
+export function ripgrepCandidates(env=process.env) {
+  const name=process.platform==='win32' ? 'rg.exe' : 'rg';
+  const homes=[env.WASM_AGENT_HOME, env.HOME, env.USERPROFILE].filter(home=>home && path.isAbsolute(home));
+  return [...new Set([...homes.map(home=>path.join(home,'.wasm-agent','bin',name)).filter(file=>fs.existsSync(file)), 'rg'])];
+}
+
 export function discoverFiles({root, scopes, match, offset=0, maxBytes=8192, snapshot}) {
   if (!root || !Array.isArray(scopes) || !scopes.length || scopes.length>8)
     throw Error('root and 1-8 explicit relative scopes are required');
@@ -24,8 +33,12 @@ export function discoverFiles({root, scopes, match, offset=0, maxBytes=8192, sna
     return relative.replaceAll('\\','/') || '.';
   });
   const matcher=match ? new RegExp(match,'i') : null;
-  const result=spawnSync('rg',['--files','--null','--color','never','--',...normalized],
-    {cwd:root,encoding:'utf8',windowsHide:true,timeout:30000,maxBuffer:16*1024*1024});
+  let result;
+  for (const rg of ripgrepCandidates()) {
+    result=spawnSync(rg,['--files','--null','--color','never','--',...normalized],
+      {cwd:root,encoding:'utf8',windowsHide:true,timeout:30000,maxBuffer:16*1024*1024});
+    if (result.error?.code!=='ENOENT') break;
+  }
   if (result.error || ![0,1].includes(result.status) || result.stderr.trim())
     throw Error('rg discovery failed: '+(result.error?.message || result.stderr || result.status));
   const inventory=[...new Set(result.stdout.split('\0').filter(Boolean)
