@@ -51,8 +51,10 @@ const names = [
 let scanned = 0, hits = 0;
 const files = execFileSync('git', ['ls-files', '-z'], { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 }).split('\0').filter(Boolean);
 for (const file of files) {
+  // `reviews/*/evidence/` is archived, verbatim source a review ran against: a record of what was there, like
+  // ARCHITECTURE.md's table, and rewriting it would falsify the evidence (30/10).
   if (['scripts/check-naming.sh', 'ARCHITECTURE.md', 'tests/naming-migration.lua'].includes(file)
-      || file.includes('target') || /\.(wasm|png|ico|bmp)$/.test(file)) continue;
+      || file.includes('target') || /\.(wasm|png|ico|bmp)$/.test(file) || /^reviews\/[^/]+\/evidence\//.test(file)) continue;
   if (!fs.existsSync(file) || !fs.statSync(file).isFile()) continue;
   const lines = fs.readFileSync(file, 'utf8').split('\n');
   let inside = false;
@@ -68,6 +70,10 @@ for (const file of files) {
   }
   scanned++;
   for (const name of names) {
+    // A connector is its own program: the WhatsApp connector's `worker` is its speech-to-text worker
+    // process, not a node-thread, and `stt_exhausted_worker_stalled` is a reason already persisted in its
+    // journal (30/10). The node-thread spellings are wa's vocabulary; they are not checked there.
+    if (file.startsWith('connectors/') && /worker|WORKER/.test(name)) continue;
     const found = visible.filter(line => line.text.includes(name));
     if (found.length) {
       hits++;
