@@ -24,7 +24,7 @@ async function until(f,label){const end=Date.now()+12000;while(Date.now()<end){c
  })});await new Promise(r=>provider.listen(0,'127.0.0.1',r));const modelPort=provider.address().port;
  const reserve=http.createServer();await new Promise(r=>reserve.listen(0,'127.0.0.1',r));const port=reserve.address().port;await new Promise(r=>reserve.close(r));const base='http://127.0.0.1:'+port;
  const env={...process.env,WASM_AGENT_HOME:root,WASM_AGENT_NODE_KEY:path.join(root,'node.key'),WASM_AGENT_NODE_NAME:'operation-control',WASM_AGENT_MANAGED:'0',WASM_AGENT_RELAY:'',WASM_AGENT_RENDEZVOUS:'',WASM_AGENT_LLM_BASE_URL:'http://127.0.0.1:'+modelPort,WASM_AGENT_LLM_API_KEY:'fixture-not-a-credential',WASM_AGENT_LLM_MODEL:'fixture'};delete env.WA_SCRIPT;delete env.WASM_AGENT_LUA_ROOT;
- const fd=fs.openSync(path.join(root,'host.log'),'a');child=spawn(wa,['--db',path.join(root,'memory.db'),'serve','--port',String(port),'--client-port','0','--ui',path.join(repo,'ui')],{env,stdio:['ignore',fd,fd],windowsHide:true});
+ const fd=fs.openSync(path.join(root,'host.log'),'a');child=spawn(wa,['--db',path.join(root,'memory.db'),'serve','--port',String(port),'--client-port','0','--ui',path.join(repo,'ui')],{cwd:root,env,stdio:['ignore',fd,fd],windowsHide:true});
  const get=async route=>(await fetch(base+route,{signal:AbortSignal.timeout(2000)})).json();
  const control=async args=>(await fetch(base+'/operation',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(args),signal:AbortSignal.timeout(2000)})).json();
  await until(async()=>{try{return await get('/health')}catch{return false}},'host ready');

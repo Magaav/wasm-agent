@@ -669,11 +669,10 @@ fn choose_read_destination_until(request: &Request, deadline: std::time::Instant
         if std::time::Instant::now() >= deadline { return None; }
         if let Some(index) = choose_node_thread(request) {
             drop(ready);
-            // Interpreter construction can consume the admission budget too.
-            if std::time::Instant::now() >= deadline {
-                release_read_destination(index);
-                return None;
-            }
+            // The deadline bounds the wait for capacity, not interpreter construction: once a read node-thread
+            // exists it serves this request. Refusing it here threw away a just-built interpreter and failed
+            // every first read on a cold pool (~350 ms construction vs the 250 ms budget, 30/10), so a
+            // one-shot client such as `/operations` during a run always saw read_capacity_busy.
             return Some(index);
         }
         let remaining = deadline.checked_duration_since(std::time::Instant::now())?;

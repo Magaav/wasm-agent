@@ -35,7 +35,7 @@ class El {
     this.files = [];
     this.textContent = "";
     this.className = "";
-    this.style = {};
+    this.dataset = {}; this.style = { setProperty(k, v) { this[k] = v; }, removeProperty(k) { delete this[k]; } };
     this.width = 0;
     this.height = 0;
   }
@@ -44,6 +44,7 @@ class El {
   toDataURL() { return "data:image/png;base64,"; }
   addEventListener(type, fn) { (this.listeners[type] ||= []).push(fn); }
   removeEventListener() {}
+  closest(selector) { let node = this; while (node) { if (node.tagName === String(selector).toUpperCase()) return node; node = node.parentNode || node.parentElement || null; } return null; }
   remove() {}
   append(...nodes) { this.children.push(...nodes); this._html = undefined; }
   replaceChildren() { this.children = []; this._html = undefined; }
@@ -105,6 +106,9 @@ class WaChatShellStub extends El {
     this.file = byId("file");
     this.attachmentsEl = byId("attachments");
     this.modelEl = byId("composer-model");
+    // The shell's liveness/notice strip (`wa-chat-warning`, ui/components.js): app.js sets its message and
+    // named notices; the stub records them.
+    this.warning = { message: "", notices: {}, setNotice(key, text) { this.notices[key] = text; }, clearNotices() { this.notices = {}; } };
     this.busy = false;
     this.enterLocked = false;
     this.attachments = [];
@@ -244,7 +248,8 @@ const byId = (id) => {
 
 const documentStub = {
   getElementById: byId,
-  createElement: (tag) => new El(tag),
+  // A `wa-*` component exposes its container as `.body` (ui/components.js), as the engine panel uses.
+  createElement: (tag) => { const el = new El(tag); if (String(tag).toLowerCase().startsWith("wa-")) el.body = new El("div"); return el; },
   addEventListener: () => {},
   querySelector: () => null,
   querySelectorAll: () => [],
@@ -277,6 +282,8 @@ class FileReaderStub {
 // ---- sandbox -------------------------------------------------------------
 const source = fs.readFileSync("ui/app.js", "utf8");
 const sandbox = {
+  // A global from ui/components.js, which the page loads before app.js; send() calls it for every user bubble.
+  appendMessageImages: () => {},
   document: documentStub,
   window: { addEventListener: () => {}, location: { reload: () => {} } },
   File: FileStub,

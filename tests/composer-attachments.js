@@ -23,7 +23,7 @@ check(/CHAT_IMAGE_TYPES\s*=\s*\["image\/png"/.test(shellSource), "the shared she
 
 // The inlining rule, out of the shell: the method text is wrapped in an object literal so it can be
 // evaluated on its own, with the attachment list as `this._attachments`.
-const shellMethod = shellSource.match(/\n  composedText\(text\) \{[\s\S]*?\n  \}/)[0];
+const shellMethod = shellSource.match(/\n  composedText\(text(?:, files)?\) \{[\s\S]*?\n  \}/)[0];
 const makeShell = new Function("attachments", `
   const self = { _attachments: attachments, _ensure() {} };
   const method = ({ ${shellMethod} }).composedText;
@@ -65,8 +65,10 @@ check(!parsed.text.includes("base64"), "base64 is NOT inlined into the text");
 // ---- no attachments: stays plain text (back-compat) ----------------------
 attachmentsRef.current.length = 0;
 body = API.composedBody("just words");
-check(body.contentType.startsWith("text/plain"), "no attachments keeps the plain-text body");
-check(body.body === "just words", "the plain body is the raw text");
+// Every UI send is a JSON start-if-idle body since ef1a7196 (15/10); the plain-text body is gone.
+const plain = JSON.parse(body.body);
+check(body.contentType === "application/json" && plain.if_idle === true, "no attachments is still a start-if-idle JSON body");
+check(plain.text === "just words" && plain.images === undefined, "the text is the raw text, with no images");
 
 // ---- mixed: text inlined, image structured ------------------------------
 attachmentsRef.current.length = 0;
@@ -104,8 +106,9 @@ check(JSON.parse(body.body).thread === "turn-specific", "an explicit session win
 
 API.setThread("");
 body = API.composedBody("just words");
-check(body.contentType.startsWith("text/plain"), "no thread and no attachments keeps the plain-text body");
-check(body.body === "just words", "and the plain body is still the raw text");
+const bare = JSON.parse(body.body);
+check(body.contentType === "application/json" && bare.thread === undefined, "no thread and no attachments names no thread");
+check(bare.text === "just words" && bare.images === undefined, "and the text is still the raw text");
 
 console.log("---");
 console.log(failures === 0 ? "ALL PASS" : failures + " FAILURE(S)");

@@ -53,7 +53,7 @@ function answer(res, label) {
       WASM_AGENT_LLM_API_KEY:'fixture-only',WASM_AGENT_LLM_MODEL:'fixture',WASM_AGENT_AGENTS_MD:path.join(config,'AGENTS.md'),
       WASM_AGENT_SUBAGENT_CONCURRENCY:'2',WASM_AGENT_SUBAGENT_QUEUE_DEPTH:'4'};
     hostLog=fs.openSync(path.join(root,'node.log'),'a');
-    child=spawn(wa,['--db',path.join(config,'memory.db'),'serve','--port',String(port),'--client-port','0','--ui',path.join(repo,'ui')],{env,stdio:['ignore',hostLog,hostLog],windowsHide:true});
+    child=spawn(wa,['--db',path.join(config,'memory.db'),'serve','--port',String(port),'--client-port','0','--ui',path.join(repo,'ui')],{cwd:root,env,stdio:['ignore',hostLog,hostLog],windowsHide:true});
     child.on('error',error=>console.error(error));
     const base=`http://127.0.0.1:${port}`;
     const api=async(body,headers={})=>{

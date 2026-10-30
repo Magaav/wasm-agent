@@ -1919,8 +1919,12 @@ gate_run node scripts/test-wave-gate-wiring.mjs
 # so the gate is that verdict rather than a fixed string.
 gate_phase_begin fixtures
 for t in tests/*.lua; do
+  # Harness-driven, not self-contained: each needs the environment its own runner gives it, and that
+  # runner is in this gate (voice: the voice block above; peer-sync-ack: scripts/test-peer-sync.cjs).
+  case "$t" in tests/voice-fixture.lua|tests/peer-sync-ack.lua) continue ;; esac
   fixture_status=0
-  out=$(WA_SCRIPT="$t" "$BIN" --db "$DB.attach" 2>&1) || fixture_status=$?
+  # A private credential store: redact-file-secrets.lua writes one and refuses to run without it.
+  out=$(WASM_AGENT_OPENAI_SUB_STORE="$DB.attach.sub-store.json" WA_SCRIPT="$t" "$BIN" --db "$DB.attach" 2>&1) || fixture_status=$?
   # Both pieces of evidence matter: a verdict printed before a crash is not success.
   if ! printf '%s' "$out" | node scripts/lib/test-verdict.cjs lua "$fixture_status"; then
     echo "FAIL $t (exit $fixture_status)"; printf '%s\n' "$out" | tail -6; exit 1
@@ -1956,7 +1960,7 @@ done
 # woken with, who is woken at all (a self-reported profile is skipped with its reason recorded), and
 # the wake that must never be replayed. Model-free: the scheduler seam is counted, not driven.
 WA_SCRIPT="scripts/test-completion-packet.lua" "$BIN" --db "$DB.completion-packet"
-run_proof_fixture jobs 37 node scripts/test-job-subagents.cjs
+run_proof_fixture jobs 36 node scripts/test-job-subagents.cjs
 # The `onSubagentReturn` hook: every settled child, in every state, woken with a deterministically
 # measured deploy verdict and its operating instruction. A real sentinel, real git checkouts, no model.
 run_proof_fixture subagentReturn 206 node scripts/test-subagent-return-hook.cjs
