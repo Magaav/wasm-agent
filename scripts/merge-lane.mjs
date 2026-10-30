@@ -66,6 +66,7 @@ import {checkWaveAdmission} from './lib/wave-guard.mjs';
 import {findFullProof,retainFullProof} from './lib/full-gate-proof.mjs';
 import {evaluate} from './delivery-admission.mjs';
 import {readRecord} from './lib/delivery-store.mjs';
+import {procUse, procUseNote} from './lib/proc-use.mjs';
 const here = path.dirname(fileURLToPath(import.meta.url));
 const AUDIT = process.env.WA_MERGE_LANE_AUDIT || path.join(here, '..', 'skills', 'git-orchestrator', 'scripts', 'audit.mjs');
 // A named identity, because an automatic merge has to be attributable. It is not the
@@ -200,35 +201,18 @@ function holderProbe(dir) {
   }
   // On POSIX a rename is metadata-only and is allowed with a process working inside, so there it proves
   // nothing: a live build's clone was pruned under it (Linux, v0.1.0-alpha.12 gate, 30/10). /proc is the
-  // evidence there - a process whose cwd or open file is inside. Processes this user cannot read (another
-  // user's) are not inspected and the evidence says how many: a blind spot named, like the MSYS one above.
+  // evidence there - a process whose cwd or open file is inside - under the one rule for processes /proc
+  // will not show (scripts/lib/proc-use.mjs, shared with reclaim-disk.mjs): another user's and this user's
+  // privileged ones are skipped and counted; an ordinary one of this user keeps the clone, unproven.
   if (process.platform !== 'win32') {
-    const held = procHolder(dir);
-    if (held.holder) return {gone: false, in_use: true, evidence: held.holder};
-    return {gone: false, in_use: false, evidence: `rename allowed; no readable process works in it${held.unreadable ? ` (${held.unreadable} process(es) not readable)` : ''}`};
+    const use = procUse(dir);
+    const note = procUseNote(use);
+    if (use.holder) return {gone: false, in_use: true, evidence: use.holder.why};
+    if (use.error) return {gone: false, in_use: true, evidence: `liveness unproven: ${use.error}`};
+    if (use.unreadableOwn) return {gone: false, in_use: true, evidence: `liveness unproven: ${note}`};
+    return {gone: false, in_use: false, evidence: `rename allowed; no readable process works in it${note ? ` (${note})` : ''}`};
   }
   return {gone: false, in_use: false, evidence: 'rename allowed'};
-}
-
-function procHolder(dir) {
-  let target;
-  try { target = fs.realpathSync(dir); } catch { return {holder: null, unreadable: 0}; }
-  const inside = link => link === target || link.startsWith(`${target}/`);
-  let pids = [];
-  try { pids = fs.readdirSync('/proc').filter(name => /^\d+$/.test(name)); } catch { return {holder: null, unreadable: 0}; }
-  let unreadable = 0;
-  for (const pid of pids) {
-    try { const cwd = fs.readlinkSync(`/proc/${pid}/cwd`); if (inside(cwd)) return {holder: `pid ${pid} works in it (cwd ${cwd})`}; }
-    catch { unreadable += 1; continue; }
-    let fds = [];
-    try { fds = fs.readdirSync(`/proc/${pid}/fd`); } catch { continue; }
-    for (const fd of fds) {
-      let link = '';
-      try { link = fs.readlinkSync(`/proc/${pid}/fd/${fd}`); } catch { continue; }
-      if (inside(link)) return {holder: `pid ${pid} holds ${link} open`};
-    }
-  }
-  return {holder: null, unreadable};
 }
 
 // The sweep. Best effort and never fatal: a directory it cannot remove is recorded, and the merge

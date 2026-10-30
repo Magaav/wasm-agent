@@ -48,6 +48,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
+import { procUse as procEvidence, procUseNote } from './lib/proc-use.mjs';
 
 const require = createRequire(import.meta.url);
 // A managed session worktree's name is derived from the session id by `lua/core/workspaces.lua`: the id
@@ -263,43 +264,35 @@ function pidNaming(dir, procs) {
   return hit ? { pid: hit.pid, cmd: hit.cmd.trim().slice(0, 160) } : null;
 }
 
-// The POSIX evidence source: a live process's cwd or any open file inside the family. UNEXERCISED on
-// this node - it is Windows, where this branch is not reached - and labelled as such rather than
-// claimed. A /proc entry that cannot be inspected makes the answer unproven, never clean.
-function procUse(dir) {
-  let target;
-  try { target = fs.realpathSync(dir); } catch { return { unproven: `cannot resolve ${dir}` }; }
-  let pids;
-  try { pids = fs.readdirSync('/proc').filter(n => /^\d+$/.test(n)); } catch { return { unproven: 'no /proc on this platform' }; }
-  let unreadable = 0;
-  for (const pid of pids) {
-    let cwd;
-    try { cwd = fs.readlinkSync(`/proc/${pid}/cwd`); } catch { unreadable += 1; continue; }
-    if (cwd === target || cwd.startsWith(`${target}/`)) return { inUse: `pid ${pid} works in it (cwd ${cwd})` };
-    let fds = [];
-    try { fds = fs.readdirSync(`/proc/${pid}/fd`); } catch { unreadable += 1; continue; }
-    for (const fd of fds) {
-      let link = '';
-      try { link = fs.readlinkSync(`/proc/${pid}/fd/${fd}`); } catch { continue; }
-      if (link === target || link.startsWith(`${target}/`)) return { inUse: `pid ${pid} holds ${link} open` };
-    }
-  }
-  if (unreadable) return { unproven: `${unreadable} process(es) could not be inspected` };
-  return { clean: true };
-}
-
+// The POSIX evidence source is scripts/lib/proc-use.mjs: a live process's cwd or any open file inside the
+// family, with its rule for processes /proc will not show (another user's are skipped and counted; one of
+// this user's makes the answer unproven). Exercised on Linux since 30/10 (openclaw, v0.1.0-alpha.12).
 // The decision for one aged candidate. `null` means removal is allowed; anything else is the record's
 // reason for staying, with the evidence that decided it.
-function inUseEvidence(full, isDir, procs) {
+function inUseEvidence(full, isDir, procs, scan) {
   const named = pidNaming(full, procs);
   if (named) return { kind: 'in_use', pid: named.pid, source: 'process command line', why: `in use: a live process names this family - pid ${named.pid} (${named.cmd})` };
   if (!isDir) return { kind: 'liveness_unproven', pid: null, source: null, why: 'liveness unproven: the entry is not a directory, so the directory probe cannot answer for the open handles inside it' };
   const code = renameProbe(full);
   if (code) return { kind: 'in_use', pid: null, source: 'rename probe', why: `in use: the OS refused an exclusive rename of the family (${code}) - a process holds the directory or a file inside it` };
   if (process.platform === 'win32') return null;
-  const proc = procUse(full);
-  if (proc.inUse) return { kind: 'in_use', pid: null, source: '/proc', why: `in use: ${proc.inUse}` };
-  if (proc.unproven) return { kind: 'liveness_unproven', pid: null, source: '/proc', why: `liveness unproven: ${proc.unproven}` };
+  return posixEvidence(full, scan);
+}
+
+// /proc's answer for one family, folded into the run's scan summary (the report names how many other-user
+// processes were skipped, so the rule is visible, not silent).
+function posixEvidence(full, scan) {
+  const use = procEvidence(full);
+  if (scan) {
+    scan.decided += 1;
+    scan.processes = Math.max(scan.processes, use.scanned);
+    scan.skippedOtherUser = Math.max(scan.skippedOtherUser, use.skippedOtherUser);
+    scan.unreadableOwn = Math.max(scan.unreadableOwn, use.unreadableOwn);
+    scan.skippedPrivileged = Math.max(scan.skippedPrivileged, use.skippedPrivileged);
+  }
+  if (use.error) return { kind: 'liveness_unproven', pid: null, source: '/proc', why: `liveness unproven: ${use.error}` };
+  if (use.holder) return { kind: 'in_use', pid: use.holder.pid, source: '/proc', why: `in use: ${use.holder.why}` };
+  if (use.unreadableOwn) return { kind: 'liveness_unproven', pid: null, source: '/proc', why: `liveness unproven: ${procUseNote(use)} - one of them could be working in it` };
   return null;
 }
 
@@ -331,15 +324,18 @@ function tempPass(opts) {
   // about who is still using it. This runs in report mode too, so a report cannot call a live family
   // "would expire" and then be believed.
   const procs = candidates.length ? liveProcesses() : null;
+  const scan = process.platform === 'win32' ? null : { source: '/proc (cwd and open files)', processes: 0, skippedOtherUser: 0, skippedPrivileged: 0, unreadableOwn: 0, decided: 0 };
   for (const { full, record } of candidates) {
     record.bytes = dirBytes(full).bytes;
-    const use = inUseEvidence(full, record.isDir, procs);
+    const use = inUseEvidence(full, record.isDir, procs, scan);
     if (use) { record.why = use.why; record.kind = use.kind; record.pid = use.pid ?? null; record.source = use.source || null; kept.push(record); continue; }
     if (opts.apply && expired.length < opts.limit) {
       // The proof is re-read at the moment of removal: a family that came into use between the
       // decision and this line is refused here, not deleted and apologised for afterwards.
       const again = renameProbe(full);
       if (again) { record.removed = false; record.kind = 'in_use'; record.why = `in use: it came into use between the decision and the removal (the OS refused an exclusive rename: ${again})`; kept.push(record); continue; }
+      const late = process.platform === 'win32' ? null : posixEvidence(full, null);
+      if (late) { record.removed = false; record.kind = late.kind; record.pid = late.pid; record.source = late.source; record.why = `${late.why} (re-read at the moment of removal)`; kept.push(record); continue; }
       try {
         // A refusal is a result: a file another process holds is reported, not forced.
         fs.rmSync(full, { recursive: true, force: false, maxRetries: 1 });
@@ -348,7 +344,7 @@ function tempPass(opts) {
     } else if (!opts.apply) record.removed = false;
     expired.push(record);
   }
-  return { families, candidates: families.candidates.size, expired, kept, unknown, protectedFamilies, cutoff, procs, decided: candidates.length };
+  return { families, candidates: families.candidates.size, expired, kept, unknown, protectedFamilies, cutoff, procs, scan, decided: candidates.length };
 }
 
 // ── the session store: whose tree is it, and has that session ended ──────────────────────────────
@@ -529,7 +525,8 @@ function main() {
     }
     const evidence = temps.kept.filter(r => r.kind);
     const rest = temps.kept.filter(r => !r.kind);
-    say(`   live-process scan (the pid evidence): ${temps.procs && temps.procs.rows ? `${temps.procs.source}, ${temps.procs.rows.length} processes` : (temps.decided ? `unavailable - ${(temps.procs && temps.procs.error) || 'unknown reason'}` : 'no aged candidate to decide')}`);
+    if (temps.scan) say(`   live-process scan (the pid evidence): ${temps.scan.decided ? `${temps.scan.source}, ${temps.scan.processes} processes${procUseNote(temps.scan) ? ` (${procUseNote(temps.scan)})` : ''}` : 'no aged candidate to decide'}`);
+    else say(`   live-process scan (the pid evidence): ${temps.procs && temps.procs.rows ? `${temps.procs.source}, ${temps.procs.rows.length} processes` : (temps.decided ? `unavailable - ${(temps.procs && temps.procs.error) || 'unknown reason'}` : 'no aged candidate to decide')}`);
     say(`   LEFT, in use or liveness unproven (evidence, not age): ${evidence.length} entries`);
     for (const record of evidence.slice(0, 20)) say(`     LEFT   ${record.name}  — ${record.why}${record.bytes ? `  ${human(record.bytes)}` : ''}`);
     if (evidence.length > 20) say(`     ... and ${evidence.length - 20} more in use or unproven`);
@@ -595,7 +592,8 @@ function main() {
       kept: temps.kept.map(r => ({ name: r.name, family: r.family || null, why: r.why })),
       leftInUse: temps.kept.filter(r => r.kind === 'in_use').map(r => ({ name: r.name, family: r.family || null, pid: r.pid ?? null, source: r.source || null, bytes: r.bytes, why: r.why })),
       livenessUnproven: temps.kept.filter(r => r.kind === 'liveness_unproven').map(r => ({ name: r.name, family: r.family || null, why: r.why })),
-      liveProcessScan: temps.procs && temps.procs.rows ? { source: temps.procs.source, processes: temps.procs.rows.length } : { error: (temps.procs && temps.procs.error) || null, candidatesDecided: temps.decided },
+      liveProcessScan: temps.scan ? { source: temps.scan.source, processes: temps.scan.processes, skippedOtherUser: temps.scan.skippedOtherUser, skippedPrivileged: temps.scan.skippedPrivileged, unreadableOwn: temps.scan.unreadableOwn, candidatesDecided: temps.scan.decided }
+        : temps.procs && temps.procs.rows ? { source: temps.procs.source, processes: temps.procs.rows.length } : { error: (temps.procs && temps.procs.error) || null, candidatesDecided: temps.decided },
       protected: temps.protectedFamilies.filter(g => g.hits).map(g => ({ prefix: g.prefix, n: g.hits, why: g.why })),
       unknown: temps.unknown,
     },

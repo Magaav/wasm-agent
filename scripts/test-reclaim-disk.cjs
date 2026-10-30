@@ -49,7 +49,10 @@ const count = () => { checks += 1; };
 
 const run = (...args) => spawnSync(process.execPath, [path.join(__dirname, 'reclaim-disk.mjs'), ...args], { cwd: repo, encoding: 'utf8', timeout: 120000 });
 const sleep = ms => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
-const alive = pid => { try { process.kill(pid, 0); return true; } catch { return false; } };
+// A killed child this test never reaps (the waits below are synchronous) stays a zombie on POSIX and still
+// answers signal 0; it has no cwd and no open files, so it holds nothing (Linux, 30/10).
+const zombie = pid => { try { return /^State:\s+[ZX]/m.test(fs.readFileSync(`/proc/${pid}/status`, 'utf8')); } catch { return false; } };
+const alive = pid => { try { process.kill(pid, 0); } catch { return false; } return !zombie(pid); };
 
 try {
   mkdir(stateDir); mkdir(tempDir);
@@ -165,6 +168,11 @@ CREATE TABLE runs (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, ended_at REAL)
   assert.ok(held, `the family is not in the report's leftInUse: ${JSON.stringify(liveJson.temp.leftInUse)}`); count();
   assert.equal(held.pid, holder.pid, 'the report must name the pid that decided the refusal'); count();
   assert.ok(liveJson.temp.liveProcessScan.processes > 0, 'the pid evidence comes from the live-process scan'); count();
+  if (process.platform !== 'win32') {
+    // POSIX: the pid came from /proc, and the unreadable processes are counted rather than hidden.
+    assert.equal(held.source, '/proc', 'on POSIX the pid evidence is /proc'); count();
+    assert.equal(typeof liveJson.temp.liveProcessScan.skippedOtherUser, 'number', 'the report names how many other-user processes were skipped'); count();
+  }
 
   // ── the same `df` line, read with the same anchored rule as check-disk-floor.sh ───────────────
   // Every path on this machine is on `C:/Program Files/Git`, so the positional parse reported free

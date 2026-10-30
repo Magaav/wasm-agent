@@ -1828,6 +1828,7 @@ gate_run node scripts/test-temp-retention-check.cjs
 # lane's are kept with the reason printed. Also the refusal that matters - a tree with no session row is
 # refused, because ownership unproven is not permission.
 gate_run node scripts/test-reclaim-disk.cjs
+gate_run node scripts/test-proc-use.mjs
 # The disk floor's refusal, the numbers it must name, the `--json` shape an alarm would read, and that
 # the gate calls it before its first build rather than after one has failed.
 gate_run node scripts/test-disk-floor.cjs
