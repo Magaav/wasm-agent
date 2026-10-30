@@ -48,7 +48,8 @@ check(not pcall(mode.read,other),'corrupt mode fails instead of guessed off')
 -- The floor is a routing decision, not blind deferral. Mode is still on for `sid`, no route is
 -- recorded and no child exists, so the coordinator may assess here but not run the work itself.
 local tools=dofile('lua/core/tools.lua')
-local scratch=host.getenv('TEMP') or host.getenv('TMP') or '.'
+-- TMPDIR before the cwd: Linux sets neither TEMP nor TMP, and '.' left one file per run in the repository root.
+local scratch=host.getenv('TEMP') or host.getenv('TMP') or host.getenv('TMPDIR') or (package.config:sub(1,1)=='/' and '/tmp') or '.'
 local function slot() return scratch:gsub('[/\\]+$','')..'/wa-orchestration-floor-'..host.uuid()..'.txt' end
 check(mode.admission(sid)==nil and mode.routing(sid)==nil,'no route and no child before any decision')
 local target=slot()
