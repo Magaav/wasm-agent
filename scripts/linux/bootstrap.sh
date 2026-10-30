@@ -233,7 +233,7 @@ fi
 node_dir="$prefix/node"
 [ -e "$node_dir" ] && [ ! -d "$node_dir" ] && node_dir="$HOME/.wasm-agent/node"
 if [ "$node_flavor" = musl ] && [ "$("$node_dir/bin/node" --version 2>/dev/null)" != "v$node_version" ] \
-   && ! ls /usr/lib/libstdc++.so.6* /lib/libstdc++.so.6* >/dev/null 2>&1; then
+   && ! for f in /usr/lib/libstdc++.so.6* /lib/libstdc++.so.6* /usr/local/lib/libstdc++.so.6*; do [ -e "$f" ] && break; done; then
   node_flavor=none; node_why='the musl Node build needs libstdc++ (Alpine: apk add libstdc++), then re-run'
 fi
 if [ "$node_flavor" = none ]; then
