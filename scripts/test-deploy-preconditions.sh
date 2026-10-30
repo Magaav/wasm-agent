@@ -177,10 +177,14 @@ done
 #    exists. The preconditions must NOT fire, and the run must get past them (it stops later, at the
 #    fixture's stub build - which is not what this test is about). A check that refuses everything is not
 #    a check.
+#    The toolchain keeps its own home: a rustup `cargo` on PATH finds its toolchain through RUSTUP_HOME
+#    (default $HOME/.rustup), so under the private HOME it looked uninstalled and the control was refused
+#    with cargo_unavailable on a host that has one (openclaw, 30/10).
 INSTALL="$WORK/install-control"
 mkdir -p "$INSTALL"
 env -u LOCALAPPDATA -u APPDATA -u USERPROFILE \
   HOME="$WORK/home-control" WASM_AGENT_HOME="$WORK/home-control" PATH="$PATH" \
+  RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}" CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}" \
   WA_DEPLOY_ROOT="$SCRATCH" WA_PORT="$PORT" WA_CLIENT_PORT="$CLIENT_PORT" \
   WA_INSTALL_DIR="$INSTALL" \
   bash "$DEPLOY" --reason "test-deploy-preconditions control" > "$WORK/out-control.txt" 2>&1
