@@ -97,7 +97,9 @@ check() { env -i HOME="$H" PATH="$BIN$SYS_PATH" bash -c ". '$ROOT_DIR/scripts/li
   echo \"took \$(( (end - start) / 1000 ))ms\"; echo \"missing:\$WA_BUILD_MISSING\"; exit \$rc"; }
 OUT="$(check)" || fail "everything present was not ok: $OUT"
 printf '%s\n' "$OUT" | grep -q 'ok      cargo     rustc 1.99.1 (needs >= 1.89)' || fail "rustc's version was not read from rustup's manifest: $OUT"
-printf '%s\n' "$OUT" | grep -q "ok      cc        $TOOLS/cc" || fail "WA_BUILD_PATH did not reach PATH: $OUT"
+# Windows does not probe cc (MSVC is not on PATH by design), so there the same stub dir is proven by rg.
+if [ -n "$SYS_PATH" ]; then printf '%s\n' "$OUT" | grep -q "ok      rg        $TOOLS/rg" || fail "WA_BUILD_PATH did not reach PATH: $OUT"
+else printf '%s\n' "$OUT" | grep -q "ok      cc        $TOOLS/cc" || fail "WA_BUILD_PATH did not reach PATH: $OUT"; fi
 printf '%s\n' "$OUT" | grep -q 'env CARGO_INCREMENTAL=1 LD_PRELOAD=$' || fail "build.env's whitelist leaked or dropped a key: $OUT"
 ms="$(printf '%s\n' "$OUT" | sed -n 's/^took \([0-9]*\)ms/\1/p')"
 [ "${ms:-9999}" -lt 1000 ] || fail "the check took ${ms}ms; it must be stats, not runs"
