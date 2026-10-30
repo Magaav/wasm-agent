@@ -68,6 +68,15 @@ H="$WORK/home"; BIN="$WORK/bin"; TOOLS="$WORK/tools"; mkdir -p "$H" "$BIN" "$TOO
 for t in bash sh git sed awk grep sort head tail tr cut uname dirname df cat mkdir mv rm date wc find env basename; do
   p="$(command -v "$t")" && ln -s "$p" "$BIN/$t"
 done
+# MSYS `ln -s` copies, and a copied bash.exe cannot load msys-2.0.dll away from /usr/bin (wasm_the_first,
+# 30/10): there the system directory itself stays on PATH, once it is shown to hold none of the tools
+# this check must not find there.
+SYS_PATH=
+if command -v cygpath >/dev/null 2>&1; then
+  sysdir=$(dirname "$(command -v bash)")
+  for t in cargo node cc gcc rg rustc; do [ -e "$sysdir/$t" ] || [ -e "$sysdir/$t.exe" ] && fail "$sysdir holds $t; this fixture cannot run here"; done
+  SYS_PATH=":$sysdir"
+fi
 stub() { printf '#!/bin/sh\necho "%s"\n' "$2" > "$1"; chmod +x "$1"; }
 mkdir -p "$H/.cargo/bin" "$H/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/lib/rustlib" "$H/.wasm-agent/node/bin"
 stub "$H/.cargo/bin/cargo" "cargo 9.9.9"
@@ -79,7 +88,7 @@ stub "$H/.wasm-agent/node/bin/node" "v22.23.4"
 stub "$TOOLS/cc" "cc"; stub "$TOOLS/rg" "ripgrep 14"
 printf 'WA_BUILD_PATH=%s\nCARGO_INCREMENTAL=1\nLD_PRELOAD=/evil.so\nPATH=/evil\n' "$TOOLS" > "$H/.wasm-agent/build.env"
 git -C "$TREE" init -q && mkdir -p "$TREE/.git/codemode-assets/pi-1.2.0-quickjs-3.6.2" && echo '{}' > "$TREE/.git/codemode-assets/pi-1.2.0-quickjs-3.6.2/receipt.json"
-check() { env -i HOME="$H" PATH="$BIN" bash -c ". '$ROOT_DIR/scripts/lib/build-requirements.sh'; wa_build_env
+check() { env -i HOME="$H" PATH="$BIN$SYS_PATH" bash -c ". '$ROOT_DIR/scripts/lib/build-requirements.sh'; wa_build_env
   echo \"env CARGO_INCREMENTAL=\${CARGO_INCREMENTAL:-} LD_PRELOAD=\${LD_PRELOAD:-}\"
   start=\${EPOCHREALTIME/./}; wa_build_check '$TREE'; rc=\$?; end=\${EPOCHREALTIME/./}
   echo \"took \$(( (end - start) / 1000 ))ms\"; echo \"missing:\$WA_BUILD_MISSING\"; exit \$rc"; }

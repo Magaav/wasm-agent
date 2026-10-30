@@ -76,6 +76,11 @@ run_deploy() { # label [--without-cargo] [--wsl] [--uname <dir>] [--install-dir 
       mkdir -p "$WORK/nocargo-node" && ln -sf "$(command -v node)" "$WORK/nocargo-node/node"
       path="$WORK/nocargo-node:$path"
     fi
+    # git as well: Git for Windows keeps it in /mingw64/bin (or /cmd), not /usr/bin, so the case was refused
+    # shell_environment_missing:git before it reached cargo (wasm_the_first, 30/10). Its directory is added
+    # only when it holds no cargo.
+    gitdir=$(dirname "$(command -v git)")
+    case ":$path:" in *":$gitdir:"*) ;; *) [ -e "$gitdir/cargo" ] || [ -e "$gitdir/cargo.exe" ] || path="$path:$gitdir" ;; esac
   fi
   if [ -n "$uname_stub" ]; then path="$uname_stub:$path"; fi
   [ "$wsl" = 1 ] && env_cmd+=(WSL_DISTRO_NAME=Ubuntu WSL_INTEROP=/run/WSL/7_interop)
