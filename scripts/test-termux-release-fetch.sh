@@ -512,7 +512,10 @@ set -e
 expect_out_has 'an empty index parses as the bootstrap state' '0 releases: this is the bootstrap index' "$empty_check"
 ok 'the committed bootstrap state (releases: []) is a valid index'
 
-# ---- 11. the repository's own index is the committed bootstrap state -------
+# ---- 11. the repository's own index is valid as committed --------------------
+# It was the bootstrap state (releases: []) until a63076f4/6b04dfc1 published the first Android bundles;
+# what must hold for every committed state is that a phone's updater reads it, with every entry complete
+# (6b04dfc1's entry had no built_utc, so every phone got index_invalid - found 30/10).
 
 repo_index=$root/releases/index.json
 [ -f "$repo_index" ] || die 'releases/index.json is not committed'
@@ -520,7 +523,13 @@ set +e
 repo_out=$(run_update --check --commit "$commit_b" --index "file://$repo_index" 2>&1)
 repo_rc=$?
 set -e
-expect_out_has 'the committed index carries its schema version' '0 releases' "$repo_out"
+repo_count=$(grep -c '"manifest_sha256"' "$repo_index" || true)
+if [ "$repo_count" = 0 ]; then
+  expect_out_has 'the committed index carries its schema version' '0 releases' "$repo_out"
+else
+  expect_out_has 'the committed index is read whole by the updater' "$repo_count release(s); newest" "$repo_out"
+fi
+case "$repo_out" in *index_invalid*) die "the committed index is refused by the updater: $repo_out" ;; esac
 grep -q '"schema_version": 1' "$repo_index" || die 'the committed index has no schema_version 1'
 grep -q '"schema": "wasm-agent-release-index"' "$repo_index" || die 'the committed index has no schema name'
 grep -q '"trust_chain"' "$repo_index" || die 'the committed index does not document its trust chain'
