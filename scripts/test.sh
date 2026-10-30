@@ -1960,7 +1960,7 @@ done
 # woken with, who is woken at all (a self-reported profile is skipped with its reason recorded), and
 # the wake that must never be replayed. Model-free: the scheduler seam is counted, not driven.
 WA_SCRIPT="scripts/test-completion-packet.lua" "$BIN" --db "$DB.completion-packet"
-run_proof_fixture jobs 37 node scripts/test-job-subagents.cjs
+run_proof_fixture jobs 36 node scripts/test-job-subagents.cjs
 # The `onSubagentReturn` hook: every settled child, in every state, woken with a deterministically
 # measured deploy verdict and its operating instruction. A real sentinel, real git checkouts, no model.
 run_proof_fixture subagentReturn 206 node scripts/test-subagent-return-hook.cjs
