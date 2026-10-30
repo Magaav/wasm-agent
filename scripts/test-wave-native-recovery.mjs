@@ -144,4 +144,9 @@ try{
  }
  const report={kind:'private-actual-native-recovery-consumer',checks,skipped:0,binary_sha256:digest(fs.readFileSync(binary)),supplied_binary:{path:suppliedBinary,sha256:suppliedBinarySha256},staged_binary:binary,source:actual,positive:positive.home,production_authority:false,remote_publication:false};write(path.join(root,'report.json'),report);
  console.log(`native wave recovery ok (${checks} checks, 0 skipped; source-root native parent, actual private canonical Git/store/effect)`);
-}catch(error){console.error(error.stack);process.exitCode=1;}finally{for(const child of children)if(child.exitCode===null&&child.signalCode===null){const exit=once(child,'exit');child.kill();await exit;}console.log('evidence: '+root);}
+}catch(error){console.error(error.stack);process.exitCode=1;}finally{for(const child of children)if(child.exitCode===null&&child.signalCode===null){const exit=once(child,'exit');child.kill();await exit;}console.log('evidence: '+root);
+ // A passing run leaves nothing: this root held ~5 GB of fixture builds and was never removed, which on a
+ // shared 2-core host (openclaw, 30/10) took free space from 7.8 to 2.4 GB in one gate and made the later
+ // disk floor refuse. A failing run keeps its evidence but not the cargo output under it.
+ if(process.exitCode){const drop=d=>{for(const e of fs.readdirSync(d,{withFileTypes:true})){if(!e.isDirectory()||e.isSymbolicLink())continue;const p=path.join(d,e.name);if(e.name==='target')fs.rmSync(p,{recursive:true,force:true});else drop(p);}};try{drop(root);}catch{}}
+ else fs.rmSync(root,{recursive:true,force:true});}

@@ -158,7 +158,6 @@ const DEFERRED = [
   'scripts/test-turn-ownership.cjs',
   'scripts/test-wave-current-ref-transaction.mjs',
   'scripts/test-wave-current-source.mjs',
-  'scripts/test-wave-native-recovery.mjs',
   'scripts/test-wave-truncated-registry.cjs',
   'scripts/test-web-http-outcomes.mjs',
   'scripts/test-web.mjs',
