@@ -7,6 +7,7 @@ import {spawnSync} from 'node:child_process';
 
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'wa-verify-install-'));
 const tree=path.join(root,'source'),install=path.join(root,'install'),home=path.join(root,'home'),mock=path.join(root,'mock-bin');
+const procRoot=path.join(root,'proc');
 const verifier=path.resolve('scripts/verify-install.sh');
 let checks=0;
 function check(value,label){assert.ok(value,label);checks++;}
@@ -14,7 +15,11 @@ function run(program,args,cwd=tree,env=process.env){const r=spawnSync(program,ar
 const git=(...args)=>run('git',args);
 const writeExec=(file,content)=>{fs.mkdirSync(path.dirname(file),{recursive:true});fs.writeFileSync(file,content);fs.chmodSync(file,0o755);};
 function verify(){
+  // The host's own service never answers for the fixture: a host running a real node (openclaw, 30/10) or any
+  // process that happens to be pid 1234 was read through /proc and the systemd unit. The synthetic /proc
+  // says pid 1234 (the mocked listener) runs this fixture's install; no unit is installed.
   const env={...process.env,HOME:home,USERPROFILE:home,WA_INSTALL_DIR:install,WA_DEPLOY_ROOT:tree,WASM_AGENT_HOME:undefined,
+    WA_PROC_ROOT:procRoot,WA_SERVICE_UNIT_FILE:path.join(mock,'no-such.service'),WA_SERVICE_PID:'0',
     PATH:`${mock}${path.delimiter}${process.env.PATH}`};
   env.PATH=`${mock}${path.delimiter}${process.env.PATH}`;
   const r=spawnSync('bash',[verifier,'--json'],{cwd:tree,env,encoding:'utf8',windowsHide:true});
@@ -52,6 +57,7 @@ try {
   fs.writeFileSync(VERDICT,verdict('2026-10-02T19:31:00Z',true,'installed the fixture node'));
   fs.writeFileSync(path.join(install,'serve.pid'),'1234');
 
+  fs.mkdirSync(path.join(procRoot,'1234'),{recursive:true});fs.writeFileSync(path.join(procRoot,'1234','exe'),path.join(install,'wa')+'\n');
   writeExec(path.join(mock,'curl'),'#!/usr/bin/env bash\necho \'{"ok":true}\'\n');
   writeExec(path.join(mock,'ss'),'#!/usr/bin/env bash\necho \'LISTEN 0 4096 127.0.0.1:8799 0.0.0.0:* users:(("wa",pid=1234,fd=3))\'\n');
   writeExec(path.join(mock,'powershell.exe'),'#!/usr/bin/env bash\necho 1234\n');
