@@ -314,7 +314,10 @@ try {
 
   // ---------------------------------------------------------------- retirement stays one command
   const scripts=fs.readdirSync('scripts');
-  const retirementImplementations=scripts.filter(name=>/retire/i.test(name) && /\.(mjs|js|cjs|sh)$/.test(name) && !/^test-/.test(name));
+  // Wave retirement stays one command. The operator-pinned quarantined retirement (db6bf0d2, 06/10) is a
+  // different act - archive and risk-accept exact stuck operations, claims and workspaces - not a second
+  // way to retire a wave, and matching it by the word made this check fail on every host since (30/10).
+  const retirementImplementations=scripts.filter(name=>/retire/i.test(name) && /\.(mjs|js|cjs|sh)$/.test(name) && !/^test-/.test(name) && !/quarantined-retirement/.test(name));
   check(retirementImplementations.length===1 && retirementImplementations[0]==='wave-retire.mjs',
     `exactly one retirement implementation in scripts/ (found ${retirementImplementations.join(', ')})`);
   const remoteDeleters=[];
