@@ -27,6 +27,10 @@ for(const name of names){const from=path.join(actual,name);if(!fs.statSync(from)
 write(path.join(seed,'tests/native-repair-fixture.js'),"console.log('ALL PASS');\n");commit(seed,'fixture-base');
 const mutant=process.argv.includes('--mutant-owner');
 if(mutant){const file=path.join(seed,'scripts/lib/wave-recovery.mjs'),before=fs.readFileSync(file,'utf8'),after=before.replace(/need\(source&&native\.receipt\?\.principal[^\n]+,'current_native_owner_binding'\);/,'/* causal mutant: remove native owner binding */');assert.notEqual(after,before,'exact production check found');write(file,after);commit(seed,'fixture-mutant-source');}
+// A looped scenario's fixture (~270 MB of checkouts) is freed once its checks pass: kept, the run peaked near
+// 5 GB, which took a shared 2-core host (openclaw, 30/10) under 3 GB free. A failing check throws first, so a
+// failure keeps its fixture as evidence.
+const drop=f=>fs.rmSync(f.home,{recursive:true,force:true});
 async function fixture(label,{foreign=false,used=false,dirty=false,snapshot=false,missing=false,external=false}={}){
  const home=path.join(root,label),repo=path.join(home,'canonical'),source=path.join(home,'producer'),reviewRoot=path.join(home,'reviewer'),meta=path.join(home,'operator');fs.mkdirSync(home);
  git(root,'clone','--quiet','--no-hardlinks',seed,repo);git(repo,'config','user.name','Fixture');git(repo,'config','user.email','fixture@invalid');git(repo,'config','core.autocrlf','false');
@@ -110,7 +114,7 @@ try{
   const external=await fixture('external-custody',{external:true}),externalResult=await result(external,launch(external));check(externalResult.ok,'current external custody can land exact reviewed author source');check(externalResult.custody.producer.kind==='external-author-tree','external custody is not relabeled native');const bindings=new DatabaseSync(path.join(external.home,'sessions.sqlite'),{readOnly:true});check(bindings.prepare('SELECT count(*) AS n FROM sessions').get().n===0,'external author acceptance never manufactures native bindings');bindings.close();
   for(const [name,options,reason] of [['foreign',{foreign:true},'native_owner_binding'],['missing',{missing:true},'current_issuer_binding'],['dirty',{dirty:true},'clean_canonical'],['snapshot',{snapshot:true},'snapshot_moved'],['nonce',{used:true},'already_consumed']]){
    const f=await fixture(name,options),child=launch(f),r=await result(f,child);check(!r.ok&&JSON.stringify(r).includes(reason),name+' refuses: '+JSON.stringify(r));check(git(f.repo,'rev-parse','main')===f.main,name+' leaves main unchanged');
-   if(name==='dirty')check(fs.readFileSync(path.join(f.repo,'concurrent.txt'),'utf8')==='preserve me\n','dirty bytes preserved');
+   if(name==='dirty')check(fs.readFileSync(path.join(f.repo,'concurrent.txt'),'utf8')==='preserve me\n','dirty bytes preserved');   drop(f);
   }
   for(const name of ['replaced','uncertain','incomplete','scope']){
    const f=await fixture(name),child=launch(f,5),facts=await paused(f),db=new DatabaseSync(path.join(f.home,'.wasm-agent/resources/claims.sqlite'));
@@ -118,7 +122,7 @@ try{
    else if(name==='uncertain')db.prepare('UPDATE claims SET uncertain=1 WHERE key=?').run(facts.receipt.key);
    else {const old=db.prepare('SELECT identity FROM claim_identity WHERE key=?').get(facts.receipt.key),identity=JSON.parse(old.identity);if(name==='scope')identity.scope.ref='refs/heads/foreign';else identity.process_id=1;db.prepare('UPDATE claim_identity SET identity=? WHERE key=?').run(JSON.stringify(identity),facts.receipt.key);}
    db.close();write(path.join(f.home,'continue'),'go');const r=await result(f,child);check(!r.ok,name+' native effect refused');check(git(f.repo,'rev-parse','main')===f.main,name+' preserved main');
-   const consumed=new DatabaseSync(path.join(f.store,'recovery-consumption.sqlite'),{readOnly:true});check(consumed.prepare('SELECT state FROM consumed WHERE nonce=?').get(f.entry.nonce).state==='uncertain',name+' nonce remains uncertain');consumed.close();
+   const consumed=new DatabaseSync(path.join(f.store,'recovery-consumption.sqlite'),{readOnly:true});check(consumed.prepare('SELECT state FROM consumed WHERE nonce=?').get(f.entry.nonce).state==='uncertain',name+' nonce remains uncertain');consumed.close();   drop(f);
   }
   for(const name of ['source','ref','remote','channel']){
    const f=await fixture(name);
@@ -126,7 +130,7 @@ try{
    if(name==='ref')git(f.repo,'update-ref','refs/heads/main',f.tip,f.main);
    if(name==='remote')git(f.repo,'remote','set-url','origin',path.join(f.home,'foreign.git'));
    if(name==='channel'){const held=path.join(f.home,'forged');write(held+'.parent.json',{schema:1,kind:'native-recovery-channel',nonce:'f'.repeat(64),receipt:success.native_receipt,runtime:{process_id:success.native_receipt.process_id}});assert.throws(()=>connectNativeRecovery(held,f.repo,JSON.parse(fs.readFileSync(path.join(f.home,'source.json')))),/parent_mismatch/);checks++;continue;}
-   const r=await result(f,launch(f));check(!r.ok,name+' refuses');check(git(f.repo,'rev-parse','main')===(name==='ref'?f.tip:f.main),name+' does not move the selected ref');
+   const r=await result(f,launch(f));check(!r.ok,name+' refuses');check(git(f.repo,'rev-parse','main')===(name==='ref'?f.tip:f.main),name+' does not move the selected ref');   drop(f);
   }
   assert.throws(()=>landRecovery(positive.repo,{},success.native_receipt),/control_required/);checks++;
   const held=await fixture('publication-held'),lease=new DatabaseSync(path.join(held.store,'recovery-target-lease.sqlite'));
