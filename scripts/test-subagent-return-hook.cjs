@@ -430,7 +430,10 @@ async function main() {
   fs.mkdirSync(noBuildDir, { recursive: true });
   for (const name of ["deploy.sh", "upgrade.sh"]) fs.copyFileSync(path.join(repo, "scripts", name), path.join(noBuildDir, name));
   const pluginBuild = 'cargo build --manifest-path "$ROOT/rust/plugins/whatsapp-transcript/Cargo.toml"';
-  const deployText = fs.readFileSync(path.join(noBuildDir, "deploy.sh"), "utf8");
+  // deploy.sh stopped building this plugin in e1361075 (16/10), so the line the mutation removes is put into
+  // this private copy first; both directions are still asserted against the real checker (30/10).
+  const realDeploy = fs.readFileSync(path.join(noBuildDir, "deploy.sh"), "utf8");
+  const deployText = realDeploy.includes(pluginBuild) ? realDeploy : `${realDeploy}\n${pluginBuild}\n`;
   check(deployText.includes(pluginBuild), "the plugin build line is where this mutation expects it");
   // Use a synthetic absent output so an already-built ignored artifact cannot
   // make this negative case pass by the checker's legitimate exists-in-tree path.
