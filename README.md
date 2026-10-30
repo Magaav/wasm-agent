@@ -98,7 +98,7 @@ A fresh Linux machine (Ubuntu or any glibc distribution; aarch64 or x86_64) beco
 published prebuilt bundle, with no compiler, in one command:
 
 ```sh
-d=~/wasm-agent-bootstrap; [ -d "$d/.git" ] || git clone --depth 1 https://github.com/Magaav/wasm-agent.git "$d" || exit 1; exec bash "$d/scripts/linux/bootstrap.sh"
+d=~/wasm-agent-bootstrap; ( [ -d "$d/.git" ] || git clone --depth 1 https://github.com/Magaav/wasm-agent.git "$d" ) && bash "$d/scripts/linux/bootstrap.sh"
 ```
 
 Prerequisites: `git curl ca-certificates tar python3` (present on Ubuntu server/cloud images) and a
@@ -163,7 +163,7 @@ update track. It clones only if `~/wasm-agent-bootstrap` is absent, then runs th
 reviewed script from that clone (there is no `curl | sh`):
 
 ```sh
-d=~/wasm-agent-bootstrap; [ -d "$d/.git" ] || git clone --depth 1 https://github.com/Magaav/wasm-agent.git "$d" || exit 1; exec bash "$d/scripts/termux/bootstrap.sh"
+d=~/wasm-agent-bootstrap; ( [ -d "$d/.git" ] || git clone --depth 1 https://github.com/Magaav/wasm-agent.git "$d" ) && bash "$d/scripts/termux/bootstrap.sh"
 ```
 
 `bootstrap.sh` picks the step from the installation's own state: a fresh install,

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Make this Linux machine a wasm-agent node from a published prebuilt bundle - one command, no compiler.
 #
-#   d=~/wasm-agent-bootstrap; [ -d "$d/.git" ] || git clone --depth 1 https://github.com/Magaav/wasm-agent.git "$d" || exit 1; exec bash "$d/scripts/linux/bootstrap.sh"
+#   d=~/wasm-agent-bootstrap; ( [ -d "$d/.git" ] || git clone --depth 1 https://github.com/Magaav/wasm-agent.git "$d" ) && bash "$d/scripts/linux/bootstrap.sh"
 #
 # Paste the same line again later to update: the run is idempotent (same bundle: nothing replaced).
 #
