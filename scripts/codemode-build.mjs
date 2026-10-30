@@ -62,7 +62,7 @@ export function preflight(root,dir=assetPath(root),target=null){
  requireValue(cargo.status===0,'cargo_unavailable:'+String(cargo.error||cargo.stderr));
  if(target){
   requireValue(Object.hasOwn(CROSS_TARGETS,target),'cross_target_unsupported:'+target);
-  const zig=cp.spawnSync('cargo',['zigbuild','--version'],{encoding:'utf8',windowsHide:true});
+  const zig=cp.spawnSync('cargo-zigbuild',['--version'],{encoding:'utf8',windowsHide:true});
   requireValue(zig.status===0,'cargo_zigbuild_unavailable:'+String(zig.error||zig.stderr));
  }
  const ripgrep=resolveRipgrep();

@@ -69,7 +69,7 @@ if [ -n "$cross" ]; then
     *) fail "target_unsupported: $cross (aarch64|x86_64-unknown-linux-musl|gnu)" ;;
   esac
   triple=$cross
-  cargo zigbuild --version >/dev/null 2>&1 || fail 'cargo_zigbuild_missing: --target builds with cargo-zigbuild (cargo install cargo-zigbuild, and zig on PATH)'
+  cargo-zigbuild --version >/dev/null 2>&1 || fail 'cargo_zigbuild_missing: --target builds with cargo-zigbuild (cargo install cargo-zigbuild, and zig on PATH)'
 fi
 fi
 [ "$local_only" = 1 ] && [ -n "$tag" ] && fail 'local_not_publishable: a --local bundle is a test artefact; drop --local to publish'
