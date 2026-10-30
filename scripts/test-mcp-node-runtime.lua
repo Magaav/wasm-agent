@@ -12,7 +12,8 @@ local function check(v,label) checks=checks+1; if not v then error('MCP NODE RUN
 
 -- A provisioned runtime under <data>/node and nothing else: no WA_NODE, no install dir.
 local data=dofile('lua/core/paths.lua').data()
-local runtime=data..'/node/bin/node'
+-- The layout the resolver reads on this platform: Node's Windows archive puts node.exe at its root (30/10).
+local runtime=data..(dofile('lua/core/platform.lua').os()=='windows' and '/node/node.exe' or '/node/bin/node')
 assert(host.write_file(runtime,'#!/bin/sh\n'))
 local env=host.getenv
 host.getenv=function(k) if k=='WA_NODE' or k=='WA_INSTALL_DIR' then return nil end return env(k) end
