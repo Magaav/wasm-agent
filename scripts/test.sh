@@ -1977,8 +1977,10 @@ node scripts/test-install-speed.mjs || exit 1
 run_proof_fixture orchestration 33 node scripts/test-orchestration-e2e.cjs "$BIN"
 # Private connector checks; no real account or paid inference.
 gate_run node --test --test-reporter=tap scripts/test-mcp-whatsapp.mjs
-# python3 first: a Linux host commonly has no `python` (openclaw, 30/10); Windows has no `python3`.
-gate_run "$(command -v python3 || command -v python)" scripts/test-whatsapp-local.py
+# The first Python that RUNS: a Linux host commonly has no `python` (openclaw, 30/10), and Windows has a
+# `python3` that is only the Microsoft Store stub - present on PATH, failing when run (wasm_the_first, 30/10).
+GATE_PYTHON="$(for p in python3 python; do command -v "$p" >/dev/null 2>&1 && "$p" -c 'import sys' >/dev/null 2>&1 && { echo "$p"; break; }; done)"
+gate_run "${GATE_PYTHON:-python3}" scripts/test-whatsapp-local.py
 # The connector pins its Go in go.mod and GOTOOLCHAIN=local never downloads one: a host Go older than the
 # pin cannot build it at all, which says nothing about the connector, so it is the same SKIP as no Go.
 GO_WANT="$(sed -n 's/^go //p' connectors/whatsapp/go.mod)"
