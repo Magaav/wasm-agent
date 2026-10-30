@@ -10,6 +10,8 @@ const cases=[
   ['lua',0,'session contract ok\n',true],['lua',0,'true\n',true],
   ['lua',1,'session contract ok\n',false],['lua',0,'probably ok but not done\n',false],
   ['lua',0,'FAIL dropped assertion\nsession contract ok\n',false],
+  ['lua',0,'retention preservation ok (6 checks, 0 skipped)\n',true],['lua',1,'retention preservation ok (6 checks, 0 skipped)\n',false],
+  ['lua',0,'probably ok (but not done)\n',false],['lua',0,'FAIL x\nretention ok (6 checks, 0 skipped)\n',false],
   ['unknown',0,'ALL PASS\n',false],
 ];
 let checks=0;

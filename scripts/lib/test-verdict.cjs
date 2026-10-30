@@ -2,7 +2,9 @@
 // Kept pure so the negative cases (including success text followed by exit 1) are testable.
 const patterns = {
   js: /^ALL PASS[ \t]*\r?$/m,
-  lua: /^(?:ALL PASS[ \t]*|true|[^\r\n]*\bok)\r?$/m,
+  // `<name> ok (N checks, M skipped...)` is the suite's own verdict line (every proof prints it); the
+  // count makes it a verdict rather than prose, so 'probably ok (not done)' still fails (30/10).
+  lua: /^(?:ALL PASS[ \t]*|true|[^\r\n]*\bok|[^\r\n]*\bok \(\d+ checks?\b[^\r\n]*\))\r?$/m,
 };
 function verdict(kind, status, output) {
   if (!Object.hasOwn(patterns, kind)) return {ok:false, reason:'unknown_fixture_kind'};
