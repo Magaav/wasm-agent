@@ -52,6 +52,8 @@ class El {
   requestSubmit() { this.submitted = true; } focus() {}
   async fire(type, event = {}) { for (const fn of this.listeners[type] || []) await fn(event); }
 }
+const { installQuery, upgrade } = require('./lib/stub-dom-query.js');
+installQuery(El);
 const reg = new Map();
 const byId = (id) => {
   if (!reg.has(id)) reg.set(id, id === "chat" ? new WaChatShellStub() : (MENU_IDS.has(id) ? new WaMenuStub(id) : new El("div", id)));
@@ -201,7 +203,7 @@ const documentStub = {
   // A `wa-*` component exposes its container as `.body` (ui/components.js); the engine panel appends
   // into `wa-orchestrator-topic`.body since 45e4467b.
   createElement: (t) => { const tag = String(t).toLowerCase(); if (tag === "wa-message") return new WaMessageStub();
-    const el = new El(t); if (tag.startsWith("wa-")) el.body = new El("div"); return el; },
+    const el = new El(t); if (tag.startsWith("wa-")) el.body = new El("div"); return upgrade(el); },
   addEventListener(){},
   querySelector: () => null, querySelectorAll: () => [], body: new El("body"), documentElement: new El("html"),
 };

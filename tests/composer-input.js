@@ -70,6 +70,8 @@ class El {
     for (const fn of this.listeners[type] || []) await fn(event);
   }
 }
+const { installQuery, upgrade } = require('./lib/stub-dom-query.js');
+installQuery(El);
 
 const registry = new Map();
 // `wa-menu` is a custom element app.js opens and closes; a bare div has no `close`, so the stub
@@ -249,7 +251,7 @@ const byId = (id) => {
 const documentStub = {
   getElementById: byId,
   // A `wa-*` component exposes its container as `.body` (ui/components.js), as the engine panel uses.
-  createElement: (tag) => { const el = new El(tag); if (String(tag).toLowerCase().startsWith("wa-")) el.body = new El("div"); return el; },
+  createElement: (tag) => { const el = new El(tag); if (String(tag).toLowerCase().startsWith("wa-")) el.body = new El("div"); return upgrade(el); },
   addEventListener: () => {},
   querySelector: () => null,
   querySelectorAll: () => [],
