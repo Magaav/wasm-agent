@@ -194,11 +194,41 @@ function holderProbe(dir) {
   }
   try {
     fs.renameSync(probePath, dir);
-    return {gone: false, in_use: false, evidence: 'rename allowed'};
   } catch (error) {
     return {gone: false, in_use: true, probe_path: probePath,
       evidence: `rename allowed but the name could not be restored (${error.code})`};
   }
+  // On POSIX a rename is metadata-only and is allowed with a process working inside, so there it proves
+  // nothing: a live build's clone was pruned under it (Linux, v0.1.0-alpha.12 gate, 30/10). /proc is the
+  // evidence there - a process whose cwd or open file is inside. Processes this user cannot read (another
+  // user's) are not inspected and the evidence says how many: a blind spot named, like the MSYS one above.
+  if (process.platform !== 'win32') {
+    const held = procHolder(dir);
+    if (held.holder) return {gone: false, in_use: true, evidence: held.holder};
+    return {gone: false, in_use: false, evidence: `rename allowed; no readable process works in it${held.unreadable ? ` (${held.unreadable} process(es) not readable)` : ''}`};
+  }
+  return {gone: false, in_use: false, evidence: 'rename allowed'};
+}
+
+function procHolder(dir) {
+  let target;
+  try { target = fs.realpathSync(dir); } catch { return {holder: null, unreadable: 0}; }
+  const inside = link => link === target || link.startsWith(`${target}/`);
+  let pids = [];
+  try { pids = fs.readdirSync('/proc').filter(name => /^\d+$/.test(name)); } catch { return {holder: null, unreadable: 0}; }
+  let unreadable = 0;
+  for (const pid of pids) {
+    try { const cwd = fs.readlinkSync(`/proc/${pid}/cwd`); if (inside(cwd)) return {holder: `pid ${pid} works in it (cwd ${cwd})`}; }
+    catch { unreadable += 1; continue; }
+    let fds = [];
+    try { fds = fs.readdirSync(`/proc/${pid}/fd`); } catch { continue; }
+    for (const fd of fds) {
+      let link = '';
+      try { link = fs.readlinkSync(`/proc/${pid}/fd/${fd}`); } catch { continue; }
+      if (inside(link)) return {holder: `pid ${pid} holds ${link} open`};
+    }
+  }
+  return {holder: null, unreadable};
 }
 
 // The sweep. Best effort and never fatal: a directory it cannot remove is recorded, and the merge

@@ -291,7 +291,8 @@ try {
   ok(fs.existsSync(heldOld),
     'a pre-lease clone a live process is WORKING IN is not pruned, whatever its age',
     JSON.stringify(family('wa-merge-lane-')));
-  ok(evidenceSweep.in_use.some(entry => entry.path.includes('Held09') && /EBUSY|EPERM/.test(entry.evidence)),
+  // The evidence is the OS refusing the rename (Windows) or /proc naming the pid inside (POSIX, 30/10).
+  ok(evidenceSweep.in_use.some(entry => entry.path.includes('Held09') && /EBUSY|EPERM|works in it|holds .* open/.test(entry.evidence)),
     'and the record names the evidence instead of the clock',
     JSON.stringify(evidenceSweep.in_use.map(entry => entry.evidence)));
   try { worker.kill(); } catch { /* it is a probe */ }
