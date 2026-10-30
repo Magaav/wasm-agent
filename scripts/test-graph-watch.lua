@@ -8,7 +8,7 @@ local before=status.committed_revision
 local script=paths.data()..'/external-graph-writer.cjs'
 assert(host.write_file(script,"require('node:fs').writeFileSync("..json.encode(root..'/a.lua')..","..json.encode('function external() return 2 end\n')..");console.log('external write done');\n"))
 local written=json.decode(host.exec('node "'..script..'"',nil,10));assert(written.code==0 and written.stdout:find('external write done',1,true),'external writer must settle')
-local command=dofile('lua/core/platform.lua').os()=='windows' and 'ping -n 2 127.0.0.1 >NUL' or 'sleep 1'
+local command=dofile('lua/core/platform.lua').os()=='windows' and 'ping -n 2 127.0.0.1' or 'sleep 1'
 assert(json.decode(host.exec(command,nil,5)).code==0)
 -- Status verifies only. No query admission may repair a missed hint before this assertion.
 local after=json.decode(host.graph_status(options));assert(after.ready and after.committed_revision>before,'OS event must actually publish the changed graph in the background')

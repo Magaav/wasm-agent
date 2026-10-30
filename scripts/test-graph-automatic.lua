@@ -19,7 +19,7 @@ local outside=json.decode(host.graph_notify(json.encode({root=root,path=root..'-
 assert(outside.ok and outside.queued==false and outside.reason=='outside_indexed_root','only the selected root owns its mutation hints')
 local first=call('write_many',{requests={{path='a.lua',content='function alpha() return 1 end\n'},{path='b.lua',content='function beta() return alpha() end\n'}}})
 check(first.ok and first.applied==2 and first.results[1].graph_index.ok and first.results[2].graph_index.queued,'writes queue owned-root indexing')
-local wait_command=dofile('lua/core/platform.lua').os()=='windows' and 'ping -n 2 127.0.0.1 >NUL' or 'sleep 1'
+local wait_command=dofile('lua/core/platform.lua').os()=='windows' and 'ping -n 2 127.0.0.1' or 'sleep 1'
 local waited=json.decode(host.exec(wait_command,nil,5));assert(waited.code==0,'bounded fixture wait')
 local background=json.decode(host.graph_status(json.encode({root=root})))
 assert(background.ready and background.committed_revision>0,'successful native writes must really commit before any query admission')
