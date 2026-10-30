@@ -1999,6 +1999,10 @@ gate_run bash scripts/test-deploy-ship.sh
 # are hermetic: setup preserves an existing secret, keeps the env private, UI
 # arguments reach the native runtime, and both shell entrypoints parse.
 gate_run bash scripts/test-termux.sh
+# The Linux release channel's installer (scripts/linux/bootstrap.sh): index pick, libc detection, hash and
+# ELF refusals, Node choice, idempotent re-run - fixtures only, no network. Linux only: it installs ELF files.
+if [ "$(uname -s)" = Linux ]; then gate_run bash scripts/test-linux-release-fetch.sh
+else echo 'SKIP: Linux release channel fixture (needs a Linux host)'; SKIPPED=$((SKIPPED + 1)); fi
 case "$(uname -o 2>/dev/null || true)" in
   Android) ;;
   *) SKIPPED=$((SKIPPED + 1)) ;;
