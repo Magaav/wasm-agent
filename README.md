@@ -94,24 +94,31 @@ a provider or authorization service is unavailable.
 
 ## Linux node
 
-A fresh Linux machine (Ubuntu or any glibc distribution; aarch64 or x86_64) becomes a node from the
-published prebuilt bundle, with no compiler, in one command:
+A fresh Linux machine (aarch64 or x86_64; any distribution and any libc - Ubuntu 18.04 to 24.04, Debian,
+Alpine, a container or a small VPS) becomes a node from the published prebuilt bundle, with no compiler,
+in one command:
 
 ```sh
 d=~/wasm-agent-bootstrap; ( [ -d "$d/.git" ] || git clone --depth 1 https://github.com/Magaav/wasm-agent.git "$d" ) && bash "$d/scripts/linux/bootstrap.sh"
 ```
 
-Prerequisites: `git curl ca-certificates tar python3` (present on Ubuntu server/cloud images) and a
-systemd user session (an SSH login). `scripts/linux/bootstrap.sh` reads `releases/index-linux.json`,
-verifies the bundle (size, `sha256(bundle.manifest)` against the index, every member, the ELF machine,
-one run of the candidate), installs `wa`, `wa-sentinel`, `ui/` and the MCP runtime into `~/.local/bin`
-with the pinned Node, writes `installed.txt` (`release=`, `via=linux-bootstrap`), and installs a
+Prerequisites: `git curl ca-certificates tar python3` (present on Ubuntu server/cloud images; Alpine:
+`apk add bash git curl ca-certificates tar coreutils python3 libstdc++`) and, for the service, a systemd
+user session (an SSH login; `--no-service` otherwise). `wa` and `wa-sentinel` are fully static (musl), so
+they run whatever the C library is. `scripts/linux/bootstrap.sh` prints what it detected (architecture,
+libc and its version) and what it chose, reads `releases/index-linux.json`, verifies the bundle (size,
+`sha256(bundle.manifest)` against the index, every member, the ELF machine, one run of the candidate),
+installs `wa`, `wa-sentinel`, `ui/` and the MCP runtime into `~/.local/bin`, and the pinned Node the MCP
+connectors run on: the official build on glibc >= 2.28, the unofficial-builds musl build on musl, none
+(said by name; the node still runs) on an older glibc. It writes `installed.txt` (`release=`,
+`via=linux-bootstrap`), and installs a
 `systemd --user` unit for `wa-sentinel`, which starts and supervises `wa serve`. The node announces
 itself to the rendezvous; pin the masters allowed to drive it with `WASM_AGENT_TRUSTED_MASTERS` in
 `~/.wasm-agent/env` (the installer prints its node id and the exact step). Paste the same line again to
-update; `--check` verifies without changing anything, `--help` lists the options. Bundles are built and
-published with `scripts/release-linux.sh` on a host of each architecture; `scripts/test-linux-release-fetch.sh`
-is its fixture suite.
+update; `--check` verifies without changing anything, `--help` lists the options. Bundles are built with
+`scripts/release-linux.sh --target <arch>-unknown-linux-musl` (cargo-zigbuild, from any Linux host; the
+candidate is executed - through binfmt emulation for a foreign architecture - before it is bundled) and
+published with `--publish-bundle`; `scripts/test-linux-release-fetch.sh` is the installer's fixture suite.
 
 ## Running the developer preview
 
