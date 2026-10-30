@@ -49,6 +49,18 @@ check(#federation.local_name(string.rep('n',40),string.rep('t',40))<=64,'names s
 -- Listing never waits on the network while the cache is fresh.
 local before=#calls; federation.schemas(); check(#calls==before,'a fresh cache answers without asking peers')
 
+-- A refresh is bounded: a peer the relay reports as not attached is not asked (a relayed call to it waits
+-- out the relay hold), and once the budget is spent the rest wait for the next refresh.
+nodes.reachable=function(node) if node.node_id=='peer-2' then return false,'not_attached' end return true end
+before=#calls; cache=federation.refresh()
+local asked={}; for i=before+1,#calls do asked[calls[i].id]=true end
+check(asked['peer-1'] and not asked['peer-2'],'a peer that is not relay-attached is not asked')
+check(cache.peers['peer-2'] and cache.peers['peer-2'].error=='not_attached','the skipped peer is recorded with why')
+local budget=federation.BUDGET; federation.BUDGET=-1
+before=#calls; cache=federation.refresh(); federation.BUDGET=budget
+check(#calls==before and cache.peers['peer-1'].error=='refresh_budget_spent','a spent budget asks no more peers and says so')
+nodes.reachable=nil; cache=federation.refresh()
+
 -- The tool layer exposes and routes them for a master only.
 dofile=real_dofile
 local tools=dofile('lua/core/tools.lua')

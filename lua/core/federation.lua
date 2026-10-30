@@ -174,14 +174,33 @@ end
 
 -- Ask every online peer for its catalog and keep the answers. A peer that does not answer (down, or an
 -- older build without federation) keeps no tools here and says why in `peers[id].error`.
+--
+-- This runs inside a turn, before its first model call, so it is bounded: a peer the relay reports as not
+-- attached is not asked (a relayed call to it waits out the relay hold, up to a minute), and once BUDGET
+-- seconds are spent the remaining peers are left for the next refresh. A registered peer whose process
+-- had stopped held a master's first turn for minutes (v0.1.0-alpha.12 gate on openclaw, 30/10).
+M.BUDGET = 15
 function M.refresh()
   local nodes = dofile('lua/core/nodes.lua')
   local cache = { at = host.now(), peers = {} }
+  local started = host.now()
   local ok, list = pcall(nodes.list)
   for _, node in ipairs(ok and list or {}) do
     if not node.local_node and node.online ~= false then
-      local answer = nodes.remote_call(node.node_id or node.id, 'federation', { action = 'catalog' })
       local entry = { name = node.name or node.node_id, node_id = node.node_id or node.id, at = host.now() }
+      local reachable, why = true, nil
+      if nodes.reachable then
+        local rok, r, reason = pcall(nodes.reachable, node)
+        if rok and r == false then reachable, why = false, reason or 'not_reachable' end
+      end
+      local answer
+      if not reachable then
+        answer = { error = why }
+      elseif host.now() - started > M.BUDGET then
+        answer = { error = 'refresh_budget_spent' }
+      else
+        answer = nodes.remote_call(entry.node_id, 'federation', { action = 'catalog' })
+      end
       if type(answer) == 'table' and answer.ok and type(answer.tools) == 'table' then
         entry.tools = answer.tools
       else

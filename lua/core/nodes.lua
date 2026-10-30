@@ -770,6 +770,19 @@ function M.remote_chat(selector, text)
     detail = response and (response.error or response.status) or nil }
 end
 
+-- Can a call reach this peer without waiting out the relay hold? A peer with a direct endpoint, or one
+-- the rendezvous reports as relay-attached, can. A registered peer that is not polling the relay cannot:
+-- every relayed call to it is held ~20 s per attempt, up to the 60 s retry deadline. `nil` means the
+-- rendezvous did not say (lookup failed, or an older rendezvous without `relay_attached`).
+function M.reachable(node)
+  if not node then return false, "unknown_node" end
+  if M.endpoint(node) then return true end
+  local record = lookup_node(node.node_id or node.id)
+  if type(record) ~= "table" or record.relay_attached == nil then return nil end
+  if record.relay_attached == true then return true end
+  return false, "not_attached"
+end
+
 function M.endpoint(node)
   local list = (node and node.endpoints) or {}
   local endpoint = list[1]
