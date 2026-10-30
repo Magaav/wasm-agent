@@ -29,6 +29,10 @@ fail() { echo "test-deploy-preconditions: $*" >&2; exit 1; }
 [ -f "$DEPLOY" ] || fail "no $DEPLOY to test"
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/wa-deploy-preconditions-XXXXXX")" || fail "no scratch directory"
+# A fixture deploy never reads the host's service. On a machine whose wa-serve.service runs a node
+# (openclaw, 30/10) deploy.sh refused every case as "different installs" before the refusal under test
+# could be reached. Same seam as test-deploy-downgrade.sh: no unit file, no service pid.
+export WA_SERVICE_UNIT_FILE="$WORK/no-such-service.unit" WA_SERVICE_PID=0
 trap 'chmod -R u+rwX "$WORK" 2>/dev/null; rm -rf "$WORK"' EXIT
 
 # A scratch tree that is a real Git repository with a commit and a stub Rust workspace, so anything that

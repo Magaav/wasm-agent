@@ -32,6 +32,10 @@ ok() { checks=$((checks + 1)); echo "ok   $1${2:+ - $2}"; }
 [ -f "$DEPLOY" ] || fail "no $DEPLOY to test"
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/wa-deploy-on-main-XXXXXX")" || fail "no scratch directory"
+# A fixture deploy never reads the host's service. On a machine whose wa-serve.service runs a node
+# (openclaw, 30/10) deploy.sh refused every case as "different installs" before the refusal under test
+# could be reached. Same seam as test-deploy-downgrade.sh: no unit file, no service pid.
+export WA_SERVICE_UNIT_FILE="$WORK/no-such-service.unit" WA_SERVICE_PID=0
 trap 'rm -rf "$WORK"' EXIT
 
 # A scratch repository: `main` at A, `feature` at B (a child of A), origin/main pinned at A. B is therefore
