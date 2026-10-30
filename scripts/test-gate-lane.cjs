@@ -81,7 +81,15 @@ const pidAlive = pid => {
 };
 function killTree(pid) {
   if (process.platform === 'win32') spawnSync('taskkill', ['/F', '/T', '/PID', String(pid)], {windowsHide: true});
-  else { try { process.kill(-pid, 'SIGKILL'); } catch { try { process.kill(pid, 'SIGKILL'); } catch {} } }
+  else {
+    // The holder is not a group leader (spawned without `detached`), so `-pid` named no group and only the
+    // holder died: its gate lived on as `orphaned` and the waiter never ran (Linux, 30/10). Descendants
+    // first, read from ps, then the process itself - what `taskkill /T` does.
+    const kids = (spawnSync('ps', ['-o', 'pid=', '--ppid', String(pid)], {encoding: 'utf8'}).stdout || '')
+      .split(/\s+/).filter(Boolean).map(Number);
+    for (const kid of kids) killTree(kid);
+    try { process.kill(-pid, 'SIGKILL'); } catch { try { process.kill(pid, 'SIGKILL'); } catch {} }
+  }
 }
 // The kill the reported defect is about: one process, no tree (no `/T`).
 const killOne = pid => (process.platform === 'win32'
