@@ -521,6 +521,10 @@ const settle = () => new Promise((resolve) => setTimeout(resolve, 5));
   await input.fire("input", {});
   vm.runInContext("typingTimer = null;", sandbox);
   await form.fire("submit", { preventDefault() {} });
+  // send() keeps the draft until the node confirms admission (ef1a7196, 15/10: a busy refusal or a lost
+  // response must not erase what the person is delivering), and the chat-send handler does not await it,
+  // so the clear happens when the stubbed reply lands - wait for it, bounded, rather than read it at once.
+  for (let i = 0; i < 200 && input.value !== ""; i++) await new Promise((resolve) => setTimeout(resolve, 10));
   check(input.value === "", "a send clears the input");
   check(canUndo() === false, "a send clears undo (an already-sent draft must not come back)");
   check(canRedo() === false, "a send clears redo");
