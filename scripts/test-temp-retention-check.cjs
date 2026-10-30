@@ -41,6 +41,8 @@ const count = () => { checks += 1; };
 try {
   git('init', '-q');
   git('config', 'core.autocrlf', 'false');
+  // The fixture's own identity: a host with no global git identity (openclaw, 30/10) refused the commit.
+  git('config', 'user.name', 'wa fixture'); git('config', 'user.email', 'fixture@wa.invalid');
   put('scripts/check-temp-retention.mjs', fs.readFileSync(path.join(__dirname, 'check-temp-retention.mjs')));
 
   // 1. a mint with no mention of it anywhere else in the file: the leak that happened here
