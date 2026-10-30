@@ -123,7 +123,7 @@ CREATE TABLE IF NOT EXISTS requests(
   created_at INTEGER NOT NULL, started_at INTEGER, ended_at INTEGER,
   exit_code INTEGER, gate_ms INTEGER, waited_ms INTEGER, log_path TEXT, log_sha256 TEXT,
   skipped INTEGER, verdict TEXT, verdict_found INTEGER NOT NULL DEFAULT 0, cpu TEXT,
-  drain_required INTEGER NOT NULL DEFAULT 0);
+  drain_required INTEGER NOT NULL DEFAULT 0, observed TEXT);
 CREATE TABLE IF NOT EXISTS history(
   id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, request INTEGER NOT NULL,
   action TEXT NOT NULL, detail TEXT NOT NULL);
@@ -152,6 +152,9 @@ function openLane(dir) {
   try {
     if (!db.prepare('PRAGMA table_info(requests)').all().some(c=>c.name==='drain_required')) {
       db.exec('ALTER TABLE requests ADD COLUMN drain_required INTEGER NOT NULL DEFAULT 0');
+    }
+    if (!db.prepare('PRAGMA table_info(requests)').all().some(c=>c.name==='observed')) {
+      db.exec('ALTER TABLE requests ADD COLUMN observed TEXT');
     }
     db.exec('COMMIT');
   } catch(error) { db.exec('ROLLBACK'); throw error; }
@@ -237,7 +240,8 @@ const holderText = entry => `#${entry.id} (${entry.label}, pid ${entry.pid}, hel
 // row without one - every `acquire` row - is decided by the one question this lane can ask from
 // any process: does a process the dead holder started for this slot still exist? Windows keeps a
 // process's parent link after the parent is gone, so an empty answer there is proof; POSIX
-// reparents an orphan to init, so there the lane cannot prove anything and does not guess.
+// reparents an orphan to init, so there the lane names what it saw the holder start while it lived
+// (`observed`, below) and otherwise does not guess.
 const CONSOLE_HOSTS = /^(conhost|openconsole|conhostv2)\.exe$/i;
 const survivorText = list => list.map(child => `pid ${child.pid} (${child.name})`).join(', ');
 function win32HolderChildren(holderPid) {
@@ -272,11 +276,7 @@ function survivorsOf(entry) {
   if (!Number.isInteger(holderPid) || holderPid <= 0) {
     return {authoritative: false, survivors: [], note: `row #${entry.id} records no holder pid to check`};
   }
-  if (process.platform !== 'win32') {
-    return {authoritative: false, survivors: [], note: 'this platform reparents an orphan as soon as'
-      + ' its holder dies, so the parent link is gone with the holder and the lane cannot ask here'
-      + ' whether what the holder started is still running'};
-  }
+  if (process.platform !== 'win32') return posixSurvivorsOf(entry, holderPid);
   const listed = win32HolderChildren(holderPid);
   if (!listed.ok) {
     return {authoritative: false, survivors: [],
@@ -289,6 +289,84 @@ function survivorsOf(entry) {
   return {authoritative: true, survivors, note: survivors.length
     ? `process(es) the holder started for this slot are still alive: ${survivorText(survivors)}`
     : 'nothing the holder started for this slot is still running'};
+}
+// POSIX (30/10). The parent link is there only while the holder lives: an orphan is reparented the
+// moment its holder dies. So the holder's children are read while it is alive - by the acquirer's own
+// watchdog every 250 ms and by every lane call that sees the row - and kept in `observed` as pid plus
+// kernel start time, which a recycled pid cannot match. While the holder lives its children are the
+// answer, as on Windows. Once it is dead, a recorded child still alive is named and holds the slot;
+// an empty record proves nothing (the holder may have started something between two looks), so the
+// lane still does not guess and the row waits for `reconcile --evidence`.
+let bootAndTicks = null;
+function posixStartEpoch(start) {
+  if (!bootAndTicks) {
+    let btime = 0;
+    try { btime = Number((/^btime (\d+)$/m.exec(fs.readFileSync('/proc/stat', 'utf8')) || [])[1]) || 0; } catch {}
+    const ticks = Number(spawnSync('getconf', ['CLK_TCK'], {encoding: 'utf8', windowsHide: true}).stdout) || 100;
+    bootAndTicks = {btime, ticks};
+  }
+  return bootAndTicks.btime + start / bootAndTicks.ticks;
+}
+// The holder's direct children, or null when its process cannot be read (gone, or not this user's).
+// `/proc/<pid>/task/<tid>/children` is one small read per thread; a kernel without it gets the walk.
+function posixChildrenOf(pid) {
+  let tasks;
+  try { tasks = fs.readdirSync(`/proc/${pid}/task`); } catch { return null; }
+  const pids = new Set();
+  let readable = false;
+  for (const tid of tasks) {
+    try {
+      for (const child of fs.readFileSync(`/proc/${pid}/task/${tid}/children`, 'utf8').trim().split(/\s+/)) {
+        if (/^\d+$/.test(child)) pids.add(Number(child));
+      }
+      readable = true;
+    } catch { /* that thread ended, or the kernel has no children file */ }
+  }
+  if (!readable) {
+    for (const name of fs.readdirSync('/proc')) {
+      if (/^\d+$/.test(name) && posixStat(Number(name))?.ppid === pid) pids.add(Number(name));
+    }
+  }
+  const children = [];
+  for (const child of pids) {
+    const stat = posixStat(child);
+    if (stat && stat.ppid === pid) children.push({pid: child, name: stat.name, start: stat.start});
+  }
+  return children;
+}
+// Same filter as the Windows answer: not this lane (the asker, the row's own lane process), created no
+// earlier than the row asked for a slot.
+function posixWork(entry, children) {
+  return children.filter(child => child.pid !== process.pid && child.pid !== entry.pid
+    && posixStartEpoch(child.start) >= entry.created_at - 1);
+}
+function observeHolder(db, entry) {
+  if (process.platform === 'win32' || entry.mode !== 'acquire') return;
+  const holderPid = entry.holder || entry.pid;
+  const children = pidAlive(holderPid) ? posixChildrenOf(holderPid) : null;
+  if (!children) return;
+  const known = JSON.parse(entry.observed || '[]');
+  const seen = new Set(known.map(child => `${child.pid}:${child.start}`));
+  const added = posixWork(entry, children).filter(child => !seen.has(`${child.pid}:${child.start}`));
+  if (!added.length) return;
+  entry.observed = JSON.stringify(known.concat(added));
+  db.prepare('UPDATE requests SET observed=? WHERE id=?').run(entry.observed, entry.id);
+}
+function posixSurvivorsOf(entry, holderPid) {
+  const children = pidAlive(holderPid) ? posixChildrenOf(holderPid) : null;
+  if (children) {
+    const survivors = posixWork(entry, children);
+    return {authoritative: true, survivors, note: survivors.length
+      ? `process(es) the holder started for this slot are still alive: ${survivorText(survivors)}`
+      : 'nothing the holder started for this slot is still running'};
+  }
+  const survivors = JSON.parse(entry.observed || '[]')
+    .filter(child => posixStat(child.pid)?.start === child.start);
+  return {authoritative: false, survivors, note: survivors.length
+    ? `process(es) the holder started for this slot are still alive: ${survivorText(survivors)}`
+      + ' (seen as its children while it lived)'
+    : 'this platform reparents an orphan as soon as its holder dies, and none of the holder\'s children'
+      + ' seen while it lived is still running - which is not proof that nothing it started is'};
 }
 // One decision, used by the reconciler, by the acquirer's own watchdog and by `reconcile`, so the
 // three cannot drift apart: is the gate this row was granted for still running? The pid that
@@ -335,6 +413,7 @@ function abandonedReason(entry, live) {
 function reconcileHolders(db, dir) {
   const moved = [];
   for (const entry of rows(db, "SELECT * FROM requests WHERE state IN ('running','waiting','orphaned')")) {
+    if (entry.state !== 'waiting') observeHolder(db, entry);
     if (held.has(entry.lease) || leaseHeld(dir, entry.lease)) continue;
     const holderAlive = pidAlive(entry.pid);
     if (entry.state === 'waiting') {
@@ -543,7 +622,7 @@ function posixStat(pid) {
     const close = text.lastIndexOf(')');
     const fields = text.slice(close + 2).split(' ');
     return {name: text.slice(open + 1, close), ppid: Number(fields[1]),
-      ticks: Number(fields[11]) + Number(fields[12])};
+      ticks: Number(fields[11]) + Number(fields[12]), start: Number(fields[19])};
   } catch { return null; }
 }
 function posixSampler(root, intervalMs, stop) {
@@ -786,7 +865,16 @@ async function commandAcquire(options) {
   console.error(`gate lane: acquire #${id} granted to holder pid ${holderPid}; this process now`
     + ` holds the slot and blocks. Run your own gate, then: gate-lane.mjs release --id ${id}`);
   for (;;) {
-    await sleep(2000);
+    if (process.platform === 'win32') await sleep(2000);
+    else {
+      // POSIX: look at the holder's children while it lives; the parent link dies with it (30/10).
+      for (let look = 0; look < 8; look++) {
+        await sleep(250);
+        const live = row(db, id);
+        if (!live || !/^(running|orphaned)$/.test(live.state) || !pidAlive(holderPid)) break;
+        observeHolder(db, live);
+      }
+    }
     const entry = row(db, id);
     if (!entry || !/^(running|orphaned)$/.test(entry.state)) break;
     if (pidAlive(holderPid)) continue;
