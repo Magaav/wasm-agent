@@ -30,7 +30,7 @@ class El {
   constructor(tag = "div", id = "") {
     this.tagName = tag.toUpperCase(); this.id = id; this.children = [];
     this.listeners = {}; this.value = ""; this.files = []; this.textContent = "";
-    this.className = ""; this.style = {}; this.width = 0; this.height = 0;
+    this.className = ""; this.dataset = {}; this.style = { setProperty(k, v) { this[k] = v; }, removeProperty(k) { delete this[k]; } }; this.width = 0; this.height = 0;
     this.disabled = false;
     this.classList = {
       _set: new Set(),
@@ -39,6 +39,7 @@ class El {
       toggle(c, force) { const on = force === undefined ? !this._set.has(c) : force; if (on) this._set.add(c); else this._set.delete(c); return on; },
     };
   }
+  closest(selector) { let node = this; while (node) { if (node.tagName === String(selector).toUpperCase()) return node; node = node.parentNode || node.parentElement || null; } return null; }
   getContext() { return { drawImage(){}, clearRect(){}, putImageData(){}, createImageData: () => ({ data: [] }), setTransform(){}, scale(){}, fillRect(){} }; }
   getBoundingClientRect() { return { top:0,left:0,right:0,bottom:0,width:100,height:100 }; }
   toDataURL() { return "data:image/png;base64,"; }
@@ -105,6 +106,9 @@ class WaChatShellStub extends El {
     this.file = byId("file");
     this.attachmentsEl = byId("attachments");
     this.modelEl = byId("composer-model");
+    // The shell's liveness/notice strip (`wa-chat-warning`, ui/components.js): app.js sets its message and
+    // named notices; the stub records them.
+    this.warning = { message: "", notices: {}, setNotice(key, text) { this.notices[key] = text; }, clearNotices() { this.notices = {}; } };
     this.busy = false;
     this.enterLocked = false;
     this.attachments = [];
@@ -194,7 +198,10 @@ class WaChatShellStub extends El {
 const MENU_IDS = new Set(["user-menu", "context-menu", "command-menu"]);
 const documentStub = {
   getElementById: byId,
-  createElement: (t) => (String(t).toLowerCase() === "wa-message" ? new WaMessageStub() : new El(t)),
+  // A `wa-*` component exposes its container as `.body` (ui/components.js); the engine panel appends
+  // into `wa-orchestrator-topic`.body since 45e4467b.
+  createElement: (t) => { const tag = String(t).toLowerCase(); if (tag === "wa-message") return new WaMessageStub();
+    const el = new El(t); if (tag.startsWith("wa-")) el.body = new El("div"); return el; },
   addEventListener(){},
   querySelector: () => null, querySelectorAll: () => [], body: new El("body"), documentElement: new El("html"),
 };
@@ -208,6 +215,8 @@ class FileReaderStub {
 
 const source = fs.readFileSync("ui/app.js", "utf8");
 const sandbox = {
+  // A global from ui/components.js, which the page loads before app.js; send() calls it for every user bubble.
+  appendMessageImages: () => {},
   document: documentStub,
   window: { addEventListener(){}, location: { reload(){} } },
   File: FileStub, FileReader: FileReaderStub, setTimeout, clearTimeout, console,
