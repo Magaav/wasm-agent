@@ -75,6 +75,7 @@ host.getenv=function(k)
   if k=='LOCALAPPDATA' and windows then return localapp end
   return env(k)
 end
-check(mcp.script_dir()==default,'with no install variable the default install is found: '..tostring(mcp.script_dir()))
+local slash=function(p) return (tostring(p):gsub('\\','/')) end -- the resolver writes LOCALAPPDATA with '/'
+check(slash(mcp.script_dir())==slash(default),'with no install variable the default install is found: '..tostring(mcp.script_dir()))
 host.getenv=env
 print(json.encode({ok=true,checks=checks}))
