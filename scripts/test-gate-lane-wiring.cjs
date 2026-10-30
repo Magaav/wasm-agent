@@ -333,7 +333,7 @@ async function main() {
   // merge-lane.mjs's whole relative import closure: a module missing here kills the copy before it prints a
   // verdict, and the skew case then reads empty stdout (lib/delivery-local and lib/delivery-producer-proof
   // were added to the closure after this list was written; found 30/10).
-  for(const file of ['delivery-admission.mjs','producer-admission.mjs','gate-check.mjs','gate-checks.mjs','lib/full-gate-proof.mjs','lib/delivery-store.mjs','lib/delivery-local.mjs','lib/delivery-producer-proof.mjs','lib/test-verdict.cjs','lib/wave-guard.mjs'])
+  for(const file of ['delivery-admission.mjs','producer-admission.mjs','gate-check.mjs','gate-checks.mjs','lib/full-gate-proof.mjs','lib/delivery-store.mjs','lib/delivery-local.mjs','lib/delivery-producer-proof.mjs','lib/test-verdict.cjs','lib/wave-guard.mjs','lib/proc-use.mjs'])
     fs.copyFileSync(path.join(repo,'scripts',file),path.join(broken,'scripts',file));
   fs.writeFileSync(path.join(broken, 'scripts', 'gate-lane.mjs'),
     'process.stderr.write("gate lane: unknown option --holder-pid\\n");\nprocess.exit(76);\n');
