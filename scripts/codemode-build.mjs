@@ -50,12 +50,21 @@ export function resolveRipgrep(env=process.env,spawn=cp.spawnSync){
  }
  throw Error('codemode_build:ripgrep_offline_startup_unavailable:'+JSON.stringify(attempts));
 }
-export function preflight(root,dir=assetPath(root)){
+// A cross target (30/10): a static Linux bundle for another architecture or libc, built with cargo-zigbuild on
+// any Linux host. The candidate still runs before it earns a receipt - natively, or through the host's binfmt
+// emulation for a foreign architecture - so a cross build is proven by execution, never by trust.
+export const CROSS_TARGETS={'aarch64-unknown-linux-musl':0xb7,'x86_64-unknown-linux-musl':0x3e,'aarch64-unknown-linux-gnu':0xb7,'x86_64-unknown-linux-gnu':0x3e};
+export function preflight(root,dir=assetPath(root),target=null){
  const assets=verifyAssets(root,dir);
  requireValue(fs.existsSync(path.join(root,'scripts/check-embedded-runtime.lua')),'embedded_checker_missing');
  requireValue(fs.existsSync(path.join(root,'rust/Cargo.toml')),'cargo_manifest_missing');
  const cargo=cp.spawnSync('cargo',['--version'],{encoding:'utf8',windowsHide:true});
  requireValue(cargo.status===0,'cargo_unavailable:'+String(cargo.error||cargo.stderr));
+ if(target){
+  requireValue(Object.hasOwn(CROSS_TARGETS,target),'cross_target_unsupported:'+target);
+  const zig=cp.spawnSync('cargo',['zigbuild','--version'],{encoding:'utf8',windowsHide:true});
+  requireValue(zig.status===0,'cargo_zigbuild_unavailable:'+String(zig.error||zig.stderr));
+ }
  const ripgrep=resolveRipgrep();
  return {ok:true,ripgrep,root:fs.realpathSync(root),source_commit:git(root,'rev-parse','HEAD'),source_tree:git(root,'rev-parse','HEAD^{tree}'),source_dirty:git(root,'status','--porcelain')!=='',cargo:cargo.stdout.trim(),assets};
 }
@@ -64,8 +73,8 @@ function waveChecker(root,evidence,commit,tree,generation){
  const prefix=`do local j=dofile('lua/vendor/json.lua');local i=j.decode(host.runtime_info());assert(i.build_source_commit==${JSON.stringify(commit)},'native compiled source mismatch');assert(i.build_source_tree==${JSON.stringify(tree)},'native compiled tree mismatch');assert(i.build_wave_generation==${JSON.stringify(generation||'')},'native compiled generation mismatch');print('native compiled source/tree/wave identity ok') end\n`;
  fs.writeFileSync(file,prefix+fs.readFileSync(path.join(root,'scripts/check-embedded-runtime.lua'),'utf8'));return file;
 }
-export function build(root,dir=assetPath(root),waveGeneration=null){
- const before=preflight(root,dir);
+export function build(root,dir=assetPath(root),waveGeneration=null,target=null){
+ const before=preflight(root,dir,target);
  const evidence=fs.mkdtempSync(path.join(git(root,'rev-parse','--path-format=absolute','--git-dir'),'codemode-build-'));
  const snapshot=path.join(evidence,'assets');fs.mkdirSync(snapshot);
  const receipt={...before,build_schema:1,kind:'codemode-offline-build',source_common:git(root,'rev-parse','--path-format=absolute','--git-common-dir'),platform:process.platform,arch:process.arch,wave_generation:waveGeneration,started_at:Date.now()/1000,ok:false,evidence,build_assets:snapshot};
@@ -74,8 +83,8 @@ export function build(root,dir=assetPath(root),waveGeneration=null){
   for(const f of before.assets.files)fs.copyFileSync(path.join(dir,f.name),path.join(snapshot,f.name),fs.constants.COPYFILE_EXCL);
   receipt.snapshot=verifyAssets(root,snapshot);
   const env={...process.env,WA_CODEMODE_BUILD_ASSETS:fs.realpathSync(snapshot),CARGO_TARGET_DIR:path.join(root,'rust/target'),WA_BUILD_SOURCE_COMMIT:before.source_commit,WA_BUILD_SOURCE_TREE:before.source_tree,WA_BUILD_WAVE_GENERATION:waveGeneration||''};
-  const args=['build','--release','--offline','--locked','-p','wa-host'];
-  receipt.cargo_args=args;receipt.cargo_env={WA_CODEMODE_BUILD_ASSETS:env.WA_CODEMODE_BUILD_ASSETS,CARGO_TARGET_DIR:env.CARGO_TARGET_DIR};
+  const args=target?['zigbuild','--release','--offline','--locked','-p','wa-host','--target',target]:['build','--release','--offline','--locked','-p','wa-host'];
+  receipt.target=target;receipt.cargo_args=args;receipt.cargo_env={WA_CODEMODE_BUILD_ASSETS:env.WA_CODEMODE_BUILD_ASSETS,CARGO_TARGET_DIR:env.CARGO_TARGET_DIR};
   // WA_BUILD_CARGO_LOG (29/10): cargo's stderr goes to that file as it is written, so deploy.sh can draw
   // `Compiling <crate>` live; it is read back afterwards, so the evidence below is the same bytes.
   const live=process.env.WA_BUILD_CARGO_LOG,liveFd=live?fs.openSync(live,'w'):null;
@@ -83,7 +92,13 @@ export function build(root,dir=assetPath(root),waveGeneration=null){
   if(liveFd!==null){fs.closeSync(liveFd);result.stderr=fs.readFileSync(live,'utf8');}
   for(const stream of ['stdout','stderr'])fs.writeFileSync(path.join(evidence,'cargo.'+stream),result[stream]||'');
   requireValue(result.status===0,'cargo_failed:'+String(result.error||result.stderr));
-  const binary=path.join(root,'rust/target/release',process.platform==='win32'?'wa.exe':'wa');
+  const binary=target?path.join(root,'rust/target',target,'release','wa'):path.join(root,'rust/target/release',process.platform==='win32'?'wa.exe':'wa');
+  if(target){
+   const head=fs.readFileSync(binary).subarray(0,20);
+   requireValue(head.subarray(0,4).equals(Buffer.from([127,69,76,70]))&&head.readUInt16LE(18)===CROSS_TARGETS[target],'cross_candidate_wrong_machine:'+target);
+   const hostMachine={arm64:0xb7,x64:0x3e}[process.arch];
+   receipt.cross_runner=hostMachine===CROSS_TARGETS[target]?'native':'binfmt';
+  }
   const home=path.join(evidence,'runtime-home');fs.mkdirSync(home);
   const rg=path.join(home,'.wasm-agent/bin',process.platform==='win32'?'rg.exe':'rg');
   fs.mkdirSync(path.dirname(rg),{recursive:true});fs.copyFileSync(before.ripgrep.path,rg,fs.constants.COPYFILE_EXCL);
@@ -97,6 +112,7 @@ export function build(root,dir=assetPath(root),waveGeneration=null){
   Object.assign(runtimeEnv,{WASM_AGENT_HOME:home,WASM_AGENT_LUA_ROOT:'',WASM_AGENT_CODEMODE_ASSETS:'',WA_EMBEDDED_SOURCE_ROOT:root,WA_EMBEDDED_EXPECT_COMMIT:before.source_commit,WA_EMBEDDED_EXPECT_TREE:before.source_tree,WA_EMBEDDED_EXPECT_GENERATION:waveGeneration||'',WA_SCRIPT:path.join(root,'scripts/check-embedded-runtime.lua'),WA_GRAPH_WATCH:'0',WASM_AGENT_MANAGED:'0'});
   const runtime=cp.spawnSync(binary,['--db',path.join(home,'private.db')],{cwd:home,env:{...runtimeEnv,WA_SCRIPT:waveChecker(root,evidence,before.source_commit,before.source_tree,waveGeneration)},encoding:'utf8',windowsHide:true,timeout:60000,maxBuffer:8*1024*1024});
   for(const stream of ['stdout','stderr'])fs.writeFileSync(path.join(evidence,'embedded.'+stream),runtime[stream]||'');
+  if(target&&runtime.error?.code==='ENOEXEC')requireValue(false,'cross_candidate_cannot_run:'+target+' needs binfmt emulation on this host (qemu-user registered with the F flag), not a skipped proof');
   requireValue(runtime.status===0&&runtime.stdout.includes('embedded native codemode ok'),'embedded_candidate_failed:'+String(runtime.error||runtime.stdout+runtime.stderr));
   requireValue(!/ripgrep missing; installing|ripgrep_unavailable:/.test(runtime.stderr||''),'unexpected_ripgrep_provisioning_or_failure');
   verifyAssets(root,snapshot); // changed snapshot never earns a ready receipt
@@ -106,7 +122,7 @@ export function build(root,dir=assetPath(root),waveGeneration=null){
  finally{
   receipt.logs=Object.fromEntries(['cargo.stdout','cargo.stderr','embedded.stdout','embedded.stderr'].filter(name=>fs.existsSync(path.join(evidence,name))).map(name=>[name,sha(fs.readFileSync(path.join(evidence,name)))]));
   let published=false;
-  if(receipt.ok&&!receipt.source_dirty&&process.env.WA_JOB_EVENT_FILE===undefined&&process.env.WA_JOB_DELIVERY_ID===undefined){
+  if(receipt.ok&&!receipt.target&&!receipt.source_dirty&&process.env.WA_JOB_EVENT_FILE===undefined&&process.env.WA_JOB_DELIVERY_ID===undefined){
    try{published=git(root,'status','--porcelain')===''&&git(root,'branch','--show-current')==='main'
     &&git(root,'rev-parse','HEAD')===before.source_commit&&git(root,'rev-parse','origin/main')===before.source_commit
     &&git(root,'ls-remote','origin','refs/heads/main').split(/\s+/)[0]===before.source_commit;}
@@ -165,8 +181,9 @@ if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.ur
   }
   else if(action==='preflight'||action==='build'){
    let generation=null;const gi=extra.indexOf('--wave-generation');if(gi>=0){requireValue(action==='build'&&gi+1<extra.length,'wave_generation_required');generation=extra[gi+1];extra.splice(gi,2);}
+   let target=null;const ti=extra.indexOf('--target');if(ti>=0){requireValue(ti+1<extra.length,'target_required');target=extra[ti+1];extra.splice(ti,2);requireValue(generation===null,'cross_target_is_not_a_wave_candidate');}
    requireValue(extra.length===0||extra.length===2&&extra[0]==='--assets'&&path.isAbsolute(extra[1]),'usage');
-   const result=action==='preflight'?preflight(root,extra[1]):build(root,extra[1],generation);if(action==='preflight')console.log(JSON.stringify(result));
-  }else throw Error('usage: codemode-build.mjs assets-path|prepare|preflight|build <absolute-root> [prepare-input | --assets <private-build-input>]');
+   const result=action==='preflight'?preflight(root,extra[1],target):build(root,extra[1],generation,target);if(action==='preflight')console.log(JSON.stringify(result));
+  }else throw Error('usage: codemode-build.mjs assets-path|prepare|preflight|build <absolute-root> [prepare-input | --assets <private-build-input>] [--target <triple>]');
  }catch(error){console.error(String(error)+(error.evidence?' evidence='+error.evidence:''));process.exitCode=1;}
 }

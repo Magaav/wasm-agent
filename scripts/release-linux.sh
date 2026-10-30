@@ -16,7 +16,7 @@
 # without a target filter, and a glibc bundle must never be offered to it.
 #
 # Usage: bash scripts/release-linux.sh [--commit SHA] [--out DIR] [--publish TAG] [--reason TEXT]
-#                                      [--local] [--check]
+#                                      [--local] [--check] [--target TRIPLE] [--publish-bundle TARBALL]
 #   --commit SHA   source commit (default HEAD; must be the checked-out, clean HEAD, on origin/main)
 #   --out DIR      build directory (default: <repo>/build/linux-release, not versioned)
 #   --publish TAG  upload the archive as an asset of GitHub release TAG (created as a pre-release when
@@ -24,11 +24,16 @@
 #   --reason TEXT  recorded in the release notes
 #   --local        a test bundle from any clean commit (not required on main); refuses --publish
 #   --check        print what would be built and published; build nothing
+#   --target TRIPLE  cross-build for TRIPLE with cargo-zigbuild (aarch64|x86_64-unknown-linux-musl: a static
+#                  bundle that runs on any Linux libc); the candidate is still executed - natively, or through
+#                  the host's binfmt emulation - before it is bundled. Default: this host's gnu triple, natively.
+#   --publish-bundle TARBALL  publish a bundle this script already built (any host with gh, e.g. the
+#                  Windows tree whose gh is signed in): re-verify it, then do only the --publish step
 set -euo pipefail
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 INDEX="$ROOT/releases/index-linux.json"
 REPO="Magaav/wasm-agent"
-commit=; out="$ROOT/build/linux-release"; tag=; reason=; local_only=0; check=0
+commit=; out="$ROOT/build/linux-release"; tag=; reason=; local_only=0; check=0; cross=; prebuilt=
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --commit)  [ "$#" -ge 2 ] || { echo 'release-linux: commit_value_required' >&2; exit 1; }; commit=$2; shift 2 ;;
@@ -37,6 +42,8 @@ while [ "$#" -gt 0 ]; do
     --reason)  [ "$#" -ge 2 ] || { echo 'release-linux: reason_value_required' >&2; exit 1; }; reason=$2; shift 2 ;;
     --local)   local_only=1; shift ;;
     --check)   check=1; shift ;;
+    --target)  [ "$#" -ge 2 ] || { echo 'release-linux: target_value_required' >&2; exit 1; }; cross=$2; shift 2 ;;
+    --publish-bundle) [ "$#" -ge 2 ] || { echo 'release-linux: bundle_value_required' >&2; exit 1; }; prebuilt=$2; shift 2 ;;
     -h|--help) sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "release-linux: unknown_option: $1" >&2; exit 1 ;;
   esac
@@ -45,15 +52,46 @@ done
 say()  { printf 'release-linux: %s\n' "$*"; }
 fail() { printf 'release-linux: %s\n' "$*" >&2; exit 1; }
 
-[ "$(uname -s)" = Linux ] || fail "not_linux: $(uname -s); the bundle is built natively on a Linux host of its architecture"
+if [ -n "$prebuilt" ]; then
+  [ -n "$tag" ] || fail 'publish_tag_required: --publish-bundle publishes; give --publish TAG'
+  [ -f "$prebuilt" ] || fail "bundle_missing: $prebuilt"
+else
+[ "$(uname -s)" = Linux ] || fail "not_linux: $(uname -s); a bundle is built on Linux (natively, or --target with cargo-zigbuild)"
 case "$(uname -m)" in
   aarch64|arm64) arch=arm64; triple=aarch64-unknown-linux-gnu ;;
   x86_64|amd64)  arch=x64;   triple=x86_64-unknown-linux-gnu ;;
   *) fail "arch_unsupported: $(uname -m)" ;;
 esac
+if [ -n "$cross" ]; then
+  case "$cross" in
+    aarch64-unknown-linux-musl|aarch64-unknown-linux-gnu) arch=arm64 ;;
+    x86_64-unknown-linux-musl|x86_64-unknown-linux-gnu)   arch=x64 ;;
+    *) fail "target_unsupported: $cross (aarch64|x86_64-unknown-linux-musl|gnu)" ;;
+  esac
+  triple=$cross
+  cargo zigbuild --version >/dev/null 2>&1 || fail 'cargo_zigbuild_missing: --target builds with cargo-zigbuild (cargo install cargo-zigbuild, and zig on PATH)'
+fi
+fi
 [ "$local_only" = 1 ] && [ -n "$tag" ] && fail 'local_not_publishable: a --local bundle is a test artefact; drop --local to publish'
 case "$tag" in ''|v[0-9]*) ;; *) fail "tag_invalid: '$tag' (a release tag is v<semver>, e.g. v0.1.0-alpha.12)" ;; esac
 
+if [ -n "$prebuilt" ]; then
+  # Re-verify what is about to be published, from its own bytes: one directory, files.sha256 matches the
+  # manifest, every member matches files.sha256. The commit it names must be this checkout's HEAD.
+  pre_tmp=$(mktemp -d); trap 'rm -rf "$pre_tmp"' EXIT
+  tar -xzf "$prebuilt" -C "$pre_tmp" || fail 'bundle_unreadable'
+  name=$(cd "$pre_tmp" && ls); [ "$(printf '%s\n' "$name" | wc -l)" = 1 ] && [ -d "$pre_tmp/$name" ] || fail 'bundle_layout_invalid'
+  stage="$pre_tmp/$name"
+  mval() { sed -n "s/^$1=//p" "$stage/bundle.manifest" | head -1; }
+  [ "$(sha256sum "$stage/files.sha256" | cut -d' ' -f1)" = "$(mval files_sha256)" ] || fail 'bundle_hash_mismatch: files.sha256'
+  ( cd "$stage" && sha256sum --quiet --strict -c files.sha256 ) >/dev/null 2>&1 || fail 'bundle_hash_mismatch: a member'
+  [ -z "$commit" ] || [ "$(git -C "$ROOT" rev-parse "$commit")" = "$(mval source_commit)" ] || fail 'commit_mismatch: --commit is not the bundle source_commit'
+  commit=$(mval source_commit); triple=$(mval target_triple); arch=$(mval arch); built_utc=$(mval built_utc); pre_node=$(mval node_version)
+  [ -n "$commit" ] && [ -n "$triple" ] && [ -n "$arch" ] && [ -n "$built_utc" ] || fail 'bundle_manifest_incomplete'
+  [ "$(mval local_only)" = 0 ] || fail 'local_not_publishable: the bundle was built with --local'
+  out=$(cd "$(dirname "$prebuilt")" && pwd); asset=$(basename "$prebuilt")
+  [ "$asset" = "$name.tar.gz" ] || fail "bundle_name_mismatch: $asset holds $name/"
+fi
 head_sha=$(git -C "$ROOT" rev-parse HEAD)
 commit=${commit:-$head_sha}
 commit=$(git -C "$ROOT" rev-parse --verify -q "$commit^{commit}") || fail "commit_unknown: $commit"
@@ -65,13 +103,16 @@ if [ "$local_only" = 0 ]; then
     || fail "not_on_main: $commit is not on origin/main; releases are cut from main only (--local for a test bundle)"
 fi
 short=$(printf '%.12s' "$commit")
-name="wa-linux-$arch-$short"
-asset="$name.tar.gz"
 node_version=$(sed -n 's/^NODE_VERSION="\([0-9.]*\)"/\1/p' "$ROOT/scripts/install.sh" | head -n 1)
 [ -n "$node_version" ] || fail 'node_pin_missing: scripts/install.sh has no NODE_VERSION'
+[ -z "$prebuilt" ] || node_version=${pre_node:-$node_version}
+if [ -z "$prebuilt" ]; then
+# A musl bundle names its libc: it sits beside the glibc-linked one in the same release.
+case "$triple" in *-musl) name="wa-linux-$arch-musl-$short" ;; *) name="wa-linux-$arch-$short" ;; esac
+asset="$name.tar.gz"
 
 if [ "$check" = 1 ]; then
-  say "would build   $commit ($triple) natively"
+  say "would build   $commit ($triple) ${cross:+cross (cargo-zigbuild)}${cross:-natively}"
   say "would write   $out/$asset (bundle $name/: wa, wa-sentinel, ui/, scripts/ MCP runtime, bundle.manifest, files.sha256)"
   [ -n "$tag" ] && say "would publish asset to $REPO release $tag (pre-release when created) and add an entry to releases/index-linux.json (not committed)"
   exit 0
@@ -94,15 +135,22 @@ for manifest in rust/Cargo.toml rust/wa-sentinel/Cargo.toml; do
     || say "cargo fetch for $manifest did not complete; the offline build uses the cache"
 done
 mkdir -p "$out"
-say "building wa ($triple) - native code-mode shipping build"
-node "$ROOT/scripts/codemode-build.mjs" build "$ROOT" > "$out/wa-host.receipt.json" 2> "$out/wa-host.log" \
+say "building wa ($triple) - ${cross:+cross }code-mode shipping build"
+node "$ROOT/scripts/codemode-build.mjs" build "$ROOT" ${cross:+--target "$cross"} > "$out/wa-host.receipt.json" 2> "$out/wa-host.log" \
   || { tail -25 "$out/wa-host.log" >&2; fail 'build_failed: wa (codemode-build.mjs)'; }
 say 'building wa-sentinel'
+if [ -n "$cross" ]; then
+  ( cd "$ROOT/rust" && cargo zigbuild --release --offline --locked --manifest-path wa-sentinel/Cargo.toml --target "$cross" ) 2> "$out/wa-sentinel.log" \
+    || { tail -25 "$out/wa-sentinel.log" >&2; fail 'build_failed: wa-sentinel'; }
+  wa_bin="$ROOT/rust/target/$cross/release/wa"
+  sentinel_bin="$ROOT/rust/wa-sentinel/target/$cross/release/wa-sentinel"
+else
 ( cd "$ROOT/rust" && cargo build --release --offline --locked --manifest-path wa-sentinel/Cargo.toml ) 2> "$out/wa-sentinel.log" \
   || { tail -25 "$out/wa-sentinel.log" >&2; fail 'build_failed: wa-sentinel'; }
 wa_bin="$ROOT/rust/target/release/wa"
 sentinel_bin="$ROOT/rust/wa-sentinel/target/release/wa-sentinel"
 [ -x "$sentinel_bin" ] || sentinel_bin="$ROOT/rust/target/release/wa-sentinel"
+fi
 [ -x "$wa_bin" ] || fail "no built binary at $wa_bin"
 [ -x "$sentinel_bin" ] || fail 'no built wa-sentinel'
 
@@ -125,7 +173,15 @@ if find "$stage" \( -name 'env' -o -name '*.env' -o -name '*.db' -o -name '*.db-
      -o -name 'node.key' -o -name '.git' \) | grep -q .; then
   fail 'bundle_contains_state: env/db/key files in the staged bundle; refusing'
 fi
-"$stage/wa" --version >/dev/null 2>&1 || fail 'candidate_does_not_run: the built wa did not answer --version'
+ran=$("$stage/wa" --version 2>&1) || fail "candidate_does_not_run: the built wa did not answer --version: $(printf '%s' "$ran" | head -2 | tr '\n' ' ')"
+"$stage/wa-sentinel" --help >/dev/null 2>&1 || "$stage/wa-sentinel" status >/dev/null 2>&1 || true
+case "$triple" in *-musl)
+  # A musl bundle is static or it is not omni: no program interpreter, no shared libraries.
+  for f in wa wa-sentinel; do
+    ! readelf -lW "$stage/$f" 2>/dev/null | grep -q 'Requesting program interpreter' && ! readelf -dW "$stage/$f" 2>/dev/null | grep -q '(NEEDED)' \
+      || fail "not_static: $f has an interpreter or NEEDED libraries; a musl bundle must be fully static"
+  done ;;
+esac
 
 ( cd "$stage" && find . -type f ! -name bundle.manifest ! -name files.sha256 -printf '%P\n' | LC_ALL=C sort \
     | while IFS= read -r f; do sha256sum -- "$f"; done ) > "$stage/files.sha256"
@@ -137,7 +193,7 @@ built_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   echo "target_triple=$triple"
   echo "arch=$arch"
   echo "rustc_version=$(rustc --version 2>/dev/null | sed 's/^rustc //')"
-  echo "glibc=$(ldd --version 2>/dev/null | head -1 | awk '{print $NF}')"
+  case "$triple" in *-musl) echo 'libc=musl-static' ;; *) echo "glibc=$(ldd --version 2>/dev/null | head -1 | awk '{print $NF}')" ;; esac
   echo "node_version=$node_version"
   echo "wa_version=$("$stage/wa" --version 2>/dev/null | head -1)"
   echo "release_tag=$tag"
@@ -152,6 +208,11 @@ say "bundle  $out/$asset ($size bytes)"
 say "manifest sha256 $manifest_sha"
 
 [ -n "$tag" ] || { say 'not published (no --publish TAG)'; exit 0; }
+else
+  manifest_sha=$(sha256sum "$stage/bundle.manifest" | cut -d' ' -f1)
+  size=$(wc -c < "$out/$asset" | tr -d ' ')
+  say "publishing prebuilt $out/$asset ($size bytes, $triple, manifest sha256 $manifest_sha)"
+fi
 
 # ---- publish ------------------------------------------------------------------------------------
 command -v gh >/dev/null || fail 'gh_missing: install the GitHub CLI to publish'
@@ -177,16 +238,18 @@ say "published $url"
   "releases": []
 }
 JSON
-python3 - "$INDEX" "$commit" "$short" "$manifest_sha" "$url" "$size" "$triple" "$arch" "$tag" "$built_utc" "$node_version" <<'PY' || fail 'index_update_failed'
-import json,sys
-path,commit,short,sha,url,size,triple,arch,tag,built,node=sys.argv[1:12]
-doc=json.load(open(path))
-entry={"tag":tag,"commit":commit,"commit_short":short,"target":triple,"arch":arch,"manifest_sha256":sha,
-       "url":url,"size":int(size),"node_version":node,"built_utc":built}
-doc["releases"]=[entry]+[r for r in doc.get("releases",[]) if not (r.get("commit")==commit and r.get("target")==triple)]
-doc["generated_utc"]=built
-with open(path,"w") as f: json.dump(doc,f,indent=2); f.write("\n")
-print("release-linux: index updated: %d entries" % len(doc["releases"]))
-PY
+# Node, not python3: the index is also written from the Windows tree (--publish-bundle), where python3 is
+# not a given and Node is (the repository already needs it).
+index_file=$INDEX; command -v cygpath >/dev/null 2>&1 && index_file=$(cygpath -m "$INDEX")
+node - "$index_file" "$commit" "$short" "$manifest_sha" "$url" "$size" "$triple" "$arch" "$tag" "$built_utc" "$node_version" <<'JS' || fail 'index_update_failed'
+const fs=require('fs');
+const [file,commit,short,sha,url,size,triple,arch,tag,built,node]=process.argv.slice(2);
+const doc=JSON.parse(fs.readFileSync(file,'utf8'));
+const entry={tag,commit,commit_short:short,target:triple,arch,manifest_sha256:sha,url,size:Number(size),node_version:node,built_utc:built};
+doc.releases=[entry,...(doc.releases||[]).filter(r=>!(r.commit===commit&&r.target===triple))];
+doc.generated_utc=built;
+fs.writeFileSync(file,JSON.stringify(doc,null,2)+'\n');
+console.log('release-linux: index updated: '+doc.releases.length+' entries');
+JS
 say 'this script does NOT commit the index; the entry is the trust root and is reviewed like code:'
 say "  git add releases/index-linux.json && git commit -m 'releases: linux $arch $tag' && git push origin main"

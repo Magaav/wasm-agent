@@ -13,15 +13,17 @@ pass=0; failed=0
 ok()  { pass=$((pass+1)); printf 'ok   %s\n' "$1"; }
 bad() { failed=$((failed+1)); printf 'FAIL %s\n' "$1"; [ -n "${2:-}" ] && printf '%s\n' "$2" | tail -5 | sed 's/^/     /'; }
 case "$(uname -m)" in aarch64|arm64) TARGET=aarch64-unknown-linux-gnu; OTHER=x86_64-unknown-linux-gnu ;; *) TARGET=x86_64-unknown-linux-gnu; OTHER=aarch64-unknown-linux-gnu ;; esac
+MUSL=${TARGET%-gnu}-musl
 NODEV=24.22.1
 COMMIT=0123456789abcdef0123456789abcdef01234567
 
-mkbundle() { # NAME [tamper] -> prints manifest sha; archive at $T/NAME.tar.gz
-  local name=$1 dir="$T/src/$1"; rm -rf "$dir"; mkdir -p "$dir/ui" "$dir/scripts"
-  cp /bin/true "$dir/wa"; cp /bin/true "$dir/wa-sentinel"; echo '<html>' > "$dir/ui/index.html"; echo '//' > "$dir/scripts/mcp-web.mjs"
+mkbundle() { # NAME [tamper] [target] -> prints manifest sha; archive at $T/NAME.tar.gz
+  local name=$1 dir="$T/src/$1" btarget=${3:-$TARGET} bin=/bin/true; rm -rf "$dir"; mkdir -p "$dir/ui" "$dir/scripts"
+  [ "${2:-}" = norun ] && bin=/bin/false
+  cp "$bin" "$dir/wa"; cp /bin/true "$dir/wa-sentinel"; echo '<html>' > "$dir/ui/index.html"; echo '//' > "$dir/scripts/mcp-web.mjs"
   ( cd "$dir" && find . -type f ! -name files.sha256 -printf '%P\n' | LC_ALL=C sort | while read -r f; do sha256sum -- "$f"; done ) > "$dir/files.sha256"
   printf 'schema=wa-linux-bundle/1\nsource_commit=%s\ntarget_triple=%s\nnode_version=%s\nwa_version=fixture\nfiles_sha256=%s\n' \
-    "$COMMIT" "$TARGET" "$NODEV" "$(sha256sum "$dir/files.sha256" | cut -d' ' -f1)" > "$dir/bundle.manifest"
+    "$COMMIT" "$btarget" "$NODEV" "$(sha256sum "$dir/files.sha256" | cut -d' ' -f1)" > "$dir/bundle.manifest"
   case "${2:-}" in member) echo tampered >> "$dir/ui/index.html" ;; elf) printf 'not an elf at all, padded to be long enough' > "$dir/wa-sentinel" ;; esac
   tar -C "$T/src" -czf "$T/$name.tar.gz" "$name"
   sha256sum "$dir/bundle.manifest" | cut -d' ' -f1
@@ -91,6 +93,22 @@ run "$T/i-good.json" "$T/p2"
 [ $rc -eq 0 ] && grep -q 'install .*: current' <<<"$out" && [ "$(stat -c %Y.%i "$T/p2/wa")" = "$before" ] \
   && ok 're-run with the same bundle: current, nothing replaced' || bad 'idempotent re-run' "$out"
 [ "$(grep -c '^WA_NODE=' "$T/home/.wasm-agent/env")" = 1 ] && ok 'config keys are written once' || bad 'config duplicated'
+
+# any libc (30/10): the static musl entry is preferred over a glibc-linked one, the detection is printed,
+# Node follows the libc, and a binary that cannot run says why instead of guessing
+musl=$(mkbundle musl '' "$MUSL")
+mkindex "$T/i-libc.json" "$(entry good "$good" "$TARGET"),$(entry musl "$musl" "$MUSL")"
+run "$T/i-libc.json" "$T/p4" --check; [ $rc -eq 0 ] && grep -q "for $MUSL" <<<"$out" && ok 'the static musl entry is picked over a glibc-linked one' || bad 'musl preference' "$out"
+grep -q "^bootstrap: detected: .*-> bundle $MUSL, Node " <<<"$out" && ok 'one line names the detected arch/libc and the choice' || bad 'detected line' "$out"
+run "$T/i-good.json" "$T/p0" --check; [ $rc -eq 0 ] && grep -q "for $TARGET" <<<"$out" && ok 'an index with only a glibc-linked entry still installs it (back-compat)' || bad 'gnu back-compat' "$out"
+out=$(WA_BOOTSTRAP_LIBC='glibc 2.17' HOME="$T/home5" XDG_CACHE_HOME="$T/cache" WA_LINUX_RELEASE_ALLOW_LOCAL=1 bash "$BOOT" --index "file://$T/i-libc.json" \
+      --prefix "$T/p5" --no-service --rendezvous none --port 59997 --client-port 59998 2>&1); rc=$?
+[ $rc -eq 0 ] && grep -q 'node_runtime_skipped: glibc 2.17 is older than Node' <<<"$out" && [ -x "$T/p5/wa" ] && ! grep -q '^WA_NODE=' "$T/home5/.wasm-agent/env" 2>/dev/null \
+  && ok 'glibc older than Node 2.28: the node installs, Node is skipped by name, no WA_NODE' || bad 'old glibc node skip' "$out"
+norun=$(mkbundle norun norun "$MUSL")
+mkindex "$T/i-norun.json" "$(entry norun "$norun" "$MUSL")"
+run "$T/i-norun.json" "$T/p6"; [ $rc -ne 0 ] && grep -q "candidate_does_not_run: wa --version failed on this machine (.*bundle $MUSL)" <<<"$out" && [ ! -e "$T/p6/wa" ] \
+  && ok 'a binary that cannot run is refused with the libc and bundle named; nothing installed' || bad 'candidate refusal' "$out"
 
 # an install this script did not make
 mkdir -p "$T/p3"; cp /bin/true "$T/p3/wa"; printf 'commit=deadbeef\nvia=deploy.sh\n' > "$T/p3/installed.txt"

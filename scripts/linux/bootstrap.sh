@@ -7,13 +7,15 @@
 #
 # What it does, and every step refuses by name:
 #   1. reads releases/index-linux.json over HTTPS from the public repository and picks the newest
-#      entry for this machine's architecture (aarch64 or x86_64, glibc);
+#      entry for this machine's architecture (aarch64 or x86_64): the static musl bundle, which runs on
+#      any Linux libc (glibc of any age, musl/Alpine), else an older glibc-linked entry;
 #   2. downloads the asset, checks its size, sha256(bundle.manifest) against the index, the manifest's
 #      files_sha256 against files.sha256, every member against files.sha256, the ELF machine of `wa`,
 #      and runs the candidate once - a mismatch installs nothing;
 #   3. installs `wa`, `wa-sentinel`, `ui/` and the MCP runtime into the install directory (default
 #      ~/.local/bin, the layout a sentinel deploy produces) and the pinned Node (SHASUMS256-verified)
-#      the MCP runtime runs on; writes installed.txt (commit, release, via=linux-bootstrap);
+#      the MCP runtime runs on - the official build on glibc >= 2.28, the unofficial-builds musl build on
+#      musl, none (named, MCP connectors unavailable) anywhere else; writes installed.txt;
 #   4. writes <config>/env keys it owns only when absent (the rendezvous, trusted masters, ports);
 #   5. installs a systemd --user unit `wa-sentinel.service`; the sentinel (autostart) starts and
 #      supervises `wa serve`. Linger is enabled when allowed without sudo, else the one sudo line is printed;
@@ -62,13 +64,27 @@ fail() { printf 'bootstrap: %s\n' "$*" >&2; exit 1; }
 [ "$(uname -s)" = Linux ] || fail "not_linux: $(uname -s) (Android/Termux: scripts/termux/bootstrap.sh; Windows: scripts/install.ps1)"
 case "${PREFIX:-}" in *com.termux*) fail 'termux_detected: Android uses scripts/termux/bootstrap.sh' ;; esac
 case "$(uname -m)" in
-  aarch64|arm64) target=aarch64-unknown-linux-gnu; elf_machine=b7 ;;
-  x86_64|amd64)  target=x86_64-unknown-linux-gnu;  elf_machine=3e ;;
+  aarch64|arm64) cpu=aarch64; narch=arm64; elf_machine=b7 ;;
+  x86_64|amd64)  cpu=x86_64;  narch=x64;   elf_machine=3e ;;
   *) fail "arch_unsupported: $(uname -m) (published: aarch64, x86_64)" ;;
 esac
+# The C library decides only which Node can run; the static musl bundle runs on every one of them (30/10:
+# the first glibc-linked bundle needed glibc 2.39 and refused on an older Ubuntu).
+glibc=$(getconf GNU_LIBC_VERSION 2>/dev/null | awk '{print $2}' || true)
+# WA_BOOTSTRAP_LIBC ("glibc 2.17" | "musl") stands in for the probe in fixtures only (test-linux-release-fetch.sh).
+case "${WA_BOOTSTRAP_LIBC:-}" in glibc\ *) glibc=${WA_BOOTSTRAP_LIBC#glibc } ;; musl) glibc= ;; esac
+if [ "${WA_BOOTSTRAP_LIBC:-}" = musl ]; then libc=musl
+elif [ -n "$glibc" ]; then libc=glibc
+elif ls /lib/ld-musl-* >/dev/null 2>&1 || ldd --version 2>&1 | grep -qi musl; then libc=musl
+else libc=unknown; fi
+targets="$cpu-unknown-linux-musl $cpu-unknown-linux-gnu"
 missing=
 for tool in curl tar sha256sum python3 od; do command -v "$tool" >/dev/null 2>&1 || missing="$missing $tool"; done
-[ -z "$missing" ] || fail "prerequisites_missing:$missing - on Ubuntu: sudo apt-get install -y curl ca-certificates tar coreutils python3"
+if [ -n "$missing" ]; then
+  if command -v apk >/dev/null 2>&1; then fail "prerequisites_missing:$missing - on Alpine: apk add bash curl ca-certificates tar coreutils python3"
+  elif command -v dnf >/dev/null 2>&1; then fail "prerequisites_missing:$missing - on Fedora/RHEL: sudo dnf install -y curl ca-certificates tar coreutils python3"
+  else fail "prerequisites_missing:$missing - on Ubuntu/Debian: sudo apt-get install -y curl ca-certificates tar coreutils python3"; fi
+fi
 work="${XDG_CACHE_HOME:-$HOME/.cache}/wasm-agent-bootstrap"
 mkdir -p "$work"
 tmp=$(mktemp -d "$work/run.XXXXXX")
@@ -85,24 +101,35 @@ fetch() { # URL DEST
 
 # ---- 1. the index entry for this machine -----------------------------------------------------------
 fetch "$index" "$tmp/index.json" || fail "index_unreachable: $index"
-entry=$(python3 - "$tmp/index.json" "$target" <<'PY'
+entry=$(python3 - "$tmp/index.json" $targets <<'PY'
 import json,sys,re
 try: doc=json.load(open(sys.argv[1]))
 except Exception: print("ERR index_invalid: not JSON"); sys.exit()
 if doc.get("schema")!="wasm-agent-linux-release-index" or doc.get("schema_version")!=1:
     print("ERR index_invalid: schema %r v%r is not wasm-agent-linux-release-index v1"%(doc.get("schema"),doc.get("schema_version"))); sys.exit()
-for r in doc.get("releases") or []:
-    if r.get("target")!=sys.argv[2]: continue
+# Preference order is the argument order (static musl first, then glibc-linked); newest entry per target.
+for want in sys.argv[2:]:
+  for r in doc.get("releases") or []:
+    if r.get("target")!=want: continue
     ok=all(isinstance(r.get(k),str) and r.get(k) for k in ("tag","commit","manifest_sha256","url","node_version")) \
        and isinstance(r.get("size"),int) and re.fullmatch(r"[0-9a-f]{64}",r["manifest_sha256"]) and re.fullmatch(r"[0-9a-f]{40}",r["commit"])
-    if not ok: print("ERR index_invalid: malformed entry for %s"%sys.argv[2]); sys.exit()
-    print("\t".join([r["tag"],r["commit"],r["manifest_sha256"],r["url"],str(r["size"]),r["node_version"]])); sys.exit()
-print("ERR no_release_for_target: the index has no entry for %s"%sys.argv[2])
+    if not ok: print("ERR index_invalid: malformed entry for %s"%want); sys.exit()
+    print("\t".join([want,r["tag"],r["commit"],r["manifest_sha256"],r["url"],str(r["size"]),r["node_version"]])); sys.exit()
+print("ERR no_release_for_target: the index has no entry for %s"%" or ".join(sys.argv[2:]))
 PY
 )
 case "$entry" in ERR*) fail "${entry#ERR }" ;; esac
-IFS=$'\t' read -r tag commit manifest_sha url size node_version <<< "$entry"
+IFS=$'\t' read -r target tag commit manifest_sha url size node_version <<< "$entry"
 short=$(printf '%.12s' "$commit")
+# Node: official on glibc >= 2.28 (its floor), the unofficial musl build on musl, else none - by name.
+node_flavor=none; node_why=
+case "$libc" in
+  glibc) if [ "$(printf '%s\n%s\n' 2.28 "$glibc" | sort -t. -k1,1n -k2,2n | head -1)" = 2.28 ]; then node_flavor=official
+         else node_why="glibc $glibc is older than Node's 2.28"; fi ;;
+  musl)  node_flavor=musl ;;
+  *)     node_why='the C library could not be identified' ;;
+esac
+say "detected: $cpu, libc ${libc}${glibc:+ $glibc} -> bundle $target, Node $node_flavor${node_why:+ ($node_why)}"
 say "release $tag ($short) for $target"
 
 # ---- 2. what is installed, and may this script touch it ---------------------------------------------
@@ -145,7 +172,7 @@ if [ "$state" != current ] || [ "$check" = 1 ]; then
   for f in wa wa-sentinel; do
     [ "$(od -An -tx1 -j18 -N1 "$bundle/$f" | tr -d ' ')" = "$elf_machine" ] || fail "elf_machine_mismatch: $f is not built for $target"
   done
-  "$bundle/wa" --version >/dev/null 2>&1 || fail 'candidate_does_not_run: wa --version failed on this machine (glibc too old?)'
+  ran=$("$bundle/wa" --version 2>&1) || fail "candidate_does_not_run: wa --version failed on this machine ($libc${glibc:+ $glibc}, bundle $target): $(printf '%s' "$ran" | head -2 | tr '\n' ' ')"
   say "verified: $(mval wa_version) - every member matches"
 fi
 
@@ -205,16 +232,23 @@ fi
 # ---- 6. Node for the MCP runtime (web search/read, mail, WhatsApp bridges) ---------------------------
 node_dir="$prefix/node"
 [ -e "$node_dir" ] && [ ! -d "$node_dir" ] && node_dir="$HOME/.wasm-agent/node"
-if [ "$("$node_dir/bin/node" --version 2>/dev/null)" != "v$node_version" ]; then
-  case "$target" in aarch64*) narch=arm64 ;; *) narch=x64 ;; esac
-  archive="node-v$node_version-linux-$narch.tar.gz"
-  say "installing Node v$node_version (SHASUMS256-verified) into $node_dir"
-  fetch "https://nodejs.org/dist/v$node_version/$archive" "$tmp/$archive" || fail "node_download_failed: $archive"
-  fetch "https://nodejs.org/dist/v$node_version/SHASUMS256.txt" "$tmp/SHASUMS256.txt" || fail 'node_shasums_unreachable'
+if [ "$node_flavor" = musl ] && [ "$("$node_dir/bin/node" --version 2>/dev/null)" != "v$node_version" ] \
+   && ! ls /usr/lib/libstdc++.so.6* /lib/libstdc++.so.6* >/dev/null 2>&1; then
+  node_flavor=none; node_why='the musl Node build needs libstdc++ (Alpine: apk add libstdc++), then re-run'
+fi
+if [ "$node_flavor" = none ]; then
+  say "node_runtime_skipped: $node_why - the node runs; MCP connectors (web, mail, WhatsApp) are unavailable"
+elif [ "$("$node_dir/bin/node" --version 2>/dev/null)" != "v$node_version" ]; then
+  if [ "$node_flavor" = musl ]; then base="https://unofficial-builds.nodejs.org/download/release/v$node_version"; archive="node-v$node_version-linux-$narch-musl.tar.gz"
+  else base="https://nodejs.org/dist/v$node_version"; archive="node-v$node_version-linux-$narch.tar.gz"; fi
+  say "installing Node v$node_version ($node_flavor, SHASUMS256-verified) into $node_dir"
+  fetch "$base/$archive" "$tmp/$archive" || fail "node_download_failed: $base/$archive"
+  fetch "$base/SHASUMS256.txt" "$tmp/SHASUMS256.txt" || fail 'node_shasums_unreachable'
   expected=$(awk -v f="$archive" '$2==f {print $1}' "$tmp/SHASUMS256.txt")
   [ -n "$expected" ] && [ "$expected" = "$(sha256sum "$tmp/$archive" | cut -d' ' -f1)" ] || fail 'node_hash_mismatch: not installed'
   rm -rf "$node_dir.new" && mkdir -p "$node_dir.new" && tar -xzf "$tmp/$archive" -C "$node_dir.new" --strip-components=1 \
     && rm -rf "$node_dir" && mv "$node_dir.new" "$node_dir" || fail 'node_install_failed'
+  "$node_dir/bin/node" --version >/dev/null 2>&1 || fail "node_does_not_run: $("$node_dir/bin/node" --version 2>&1 | head -1)"
 fi
 
 # ---- 7. configuration keys this script owns (written only when absent; nothing secret) ---------------
@@ -225,7 +259,7 @@ touch "$env_file" && chmod 600 "$env_file"
 set_key() { grep -q "^$1=" "$env_file" || { printf '%s=%s\n' "$1" "$2" >> "$env_file"; say "config: $1 set"; }; }
 [ "$rendezvous" = none ] || set_key WASM_AGENT_RENDEZVOUS "$rendezvous"
 [ -n "$masters" ] && set_key WASM_AGENT_TRUSTED_MASTERS "$masters"
-set_key WA_NODE "$node_dir/bin/node"
+[ "$node_flavor" = none ] || set_key WA_NODE "$node_dir/bin/node"
 
 # ---- 8. the supervisor -------------------------------------------------------------------------------
 if [ "$service" = 1 ]; then
