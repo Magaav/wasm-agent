@@ -1972,9 +1972,17 @@ node scripts/test-install-speed.mjs || exit 1
 run_proof_fixture orchestration 33 node scripts/test-orchestration-e2e.cjs "$BIN"
 # Private connector checks; no real account or paid inference.
 gate_run node --test --test-reporter=tap scripts/test-mcp-whatsapp.mjs
-gate_run python scripts/test-whatsapp-local.py
-if command -v go >/dev/null 2>&1; then
+# python3 first: a Linux host commonly has no `python` (openclaw, 30/10); Windows has no `python3`.
+gate_run "$(command -v python3 || command -v python)" scripts/test-whatsapp-local.py
+# The connector pins its Go in go.mod and GOTOOLCHAIN=local never downloads one: a host Go older than the
+# pin cannot build it at all, which says nothing about the connector, so it is the same SKIP as no Go.
+GO_WANT="$(sed -n 's/^go //p' connectors/whatsapp/go.mod)"
+GO_HAVE="$(command -v go >/dev/null 2>&1 && GOTOOLCHAIN=local go env GOVERSION 2>/dev/null | sed 's/^go//')"
+if [ -n "$GO_HAVE" ] && [ "$(printf '%s\n%s\n' "$GO_WANT" "$GO_HAVE" | sort -V | head -1)" = "$GO_WANT" ]; then
   (cd connectors/whatsapp && GOTOOLCHAIN=local go test ./...) || exit 1
+elif [ -n "$GO_HAVE" ]; then
+  echo "SKIP WhatsApp Go connector: local Go $GO_HAVE is older than go.mod's $GO_WANT (docs/WHATSAPP-CONNECTOR.md)"
+  SKIPPED=$((SKIPPED + 1))
 else
   echo 'SKIP WhatsApp Go connector: provision pinned Go SDK (docs/WHATSAPP-CONNECTOR.md)'
   SKIPPED=$((SKIPPED + 1))

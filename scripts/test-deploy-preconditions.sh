@@ -29,6 +29,10 @@ fail() { echo "test-deploy-preconditions: $*" >&2; exit 1; }
 [ -f "$DEPLOY" ] || fail "no $DEPLOY to test"
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/wa-deploy-preconditions-XXXXXX")" || fail "no scratch directory"
+# A fixture deploy never reads the host's service. On a machine whose wa-serve.service runs a node
+# (openclaw, 30/10) deploy.sh refused every case as "different installs" before the refusal under test
+# could be reached. Same seam as test-deploy-downgrade.sh: no unit file, no service pid.
+export WA_SERVICE_UNIT_FILE="$WORK/no-such-service.unit" WA_SERVICE_PID=0
 trap 'chmod -R u+rwX "$WORK" 2>/dev/null; rm -rf "$WORK"' EXIT
 
 # A scratch tree that is a real Git repository with a commit and a stub Rust workspace, so anything that
@@ -63,12 +67,22 @@ run_deploy() { # label [--without-cargo] [--wsl] [--uname <dir>] [--install-dir 
   local -a env_cmd=(env -u LOCALAPPDATA -u APPDATA -u USERPROFILE -u WA_PORT -u WA_INSTALL_DIR)
   local path="$PATH"
   if [ "$without_cargo" = 1 ]; then
-    # Git's own tools stay (the script needs uname, sed, date, git); the toolchain does not.
+    # Git's own tools stay (the script needs uname, sed, date, git); the toolchain does not. Node stays too,
+    # wherever it lives: since 0d05a54a the code-mode build's Node prerequisite refuses BEFORE cargo (pinned
+    # by test-codemode-shipping.mjs), so a host whose node is outside /usr/bin (mise, nvm, ~/.local/bin)
+    # got node_build_tool_unavailable here instead of the cargo refusal this case is about.
     path="/usr/bin:/bin"
+    if command -v node >/dev/null 2>&1; then
+      mkdir -p "$WORK/nocargo-node" && ln -sf "$(command -v node)" "$WORK/nocargo-node/node"
+      path="$WORK/nocargo-node:$path"
+    fi
   fi
   if [ -n "$uname_stub" ]; then path="$uname_stub:$path"; fi
   [ "$wsl" = 1 ] && env_cmd+=(WSL_DISTRO_NAME=Ubuntu WSL_INTEROP=/run/WSL/7_interop)
   [ -n "$install" ] && env_cmd+=(WA_INSTALL_DIR="$install")
+  # ...and the toolchain is gone from the environment too: build-requirements.sh finds cargo through
+  # CARGO_HOME as well as PATH, so an exported CARGO_HOME made 'no cargo' a machine that has one.
+  [ "$without_cargo" = 1 ] && env_cmd=("${env_cmd[0]}" -u CARGO_HOME -u RUSTUP_HOME -u RUSTUP_TOOLCHAIN "${env_cmd[@]:1}")
   "${env_cmd[@]}" \
     HOME="$home" WASM_AGENT_HOME="$home" PATH="$path" \
     WA_DEPLOY_ROOT="$SCRATCH" WA_PORT="$PORT" WA_CLIENT_PORT="$CLIENT_PORT" \

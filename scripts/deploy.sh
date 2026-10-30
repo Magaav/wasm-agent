@@ -854,11 +854,58 @@ fi
 # installed". The record describes the install; the sentinel proof has its own verdict in deploy-result.json.
 UPGRADE_HASH="$(sha256sum < "$INSTALL_DIR/scripts/upgrade.sh" 2>/dev/null | awk '{print $1}')"
 [ -n "$UPGRADE_HASH" ] || UPGRADE_HASH=missing
-# NOT recorded here. `record_installed` is DEFINED about a hundred lines below, and bash resolves a
-# function name at CALL time: this call ran as `record_installed: command not found`, which is how a
-# successful install on 2026-10-22 recorded commit=unknown / branch=unknown / dirty=unknown and silently
-# disabled every later staleness check. Nothing between here and the definition has a side effect, so the
-# call immediately after the definition writes exactly the same facts.
+# The install record, in one place, called twice - once here and once as this deploy's last write (step 8).
+# It is a function because the record must exist the moment the facts it names are true, and because two
+# copies of a record format drift apart.
+#
+# `record_role=final` is what separates this record from upgrade.sh's. upgrade.sh installs bytes and can
+# only certify the hash it placed (`source_provenance=unverified-binary`); when THIS script calls it, its
+# record says `record_role=interim` and `via=deploy.sh`, because the deploy is the owner of the install's
+# record - it is the only party that knows the commit the binary was built from. So a reader who finds an
+# interim record as the LAST one is looking at a deploy that did not finish its record step. That state was
+# reached on 2026-10-02 19:30 and nothing could name it: installed.txt said `commit=unknown` while the node
+# served 2f02b4c's build, and the only trace of the death was a line on a detached process's stdout. What
+# killed that run is at the ship_file rule below.
+record_installed() {
+  local record_tmp reason_line
+  record_tmp="$INSTALL_DIR/.installed.txt.deploy.$$"
+  reason_line="$(printf '%s' "$REASON" | tr '\r\n' '  ')"
+  # `install_dir=` is the record's own statement of where it was written, and of which directory the machine
+  # runs the node from. A record that cannot say that is a record a later reader has to guess about - and
+  # `~/.wasm-agent/installed.txt`, empty on the node this rule was written for, is what guessing looks like.
+  printf 'commit=%s\nbranch=%s\ndirty=%s\nsha256=%s\nsentinel_sha256=%s\nupgrade_sha256=%s\ninstall_dir=%s\nservice_install_dir=%s\nsource_provenance=clean-built-by-deploy\nrecord_role=final\nvia=deploy.sh\nat=%s\nreason=%s\n' \
+    "$COMMIT" "$BRANCH" "$DIRTY" "$HASH" "$SENTINEL_HASH" "$UPGRADE_HASH" "$INSTALL_DIR" "${WA_SERVICE_DIR:-unverified}" \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$reason_line" \
+    > "$record_tmp" || fail "node installed, but installed.txt could not be written"
+  # Appended as its own line, only when this commit is a release: a command substitution would strip the
+  # newline and leave `reason=` and `release=` sharing a line, which no reader parses.
+  if [ -n "$RELEASE" ]; then
+    printf 'release=%s\n' "$RELEASE" >> "$record_tmp" || fail "node installed, but the release line could not be written"
+  fi
+  mv -f "$record_tmp" "$INSTALL_DIR/installed.txt" \
+    || fail "node installed, but installed.txt could not be committed atomically"
+  # A record nobody can act on is worse than no record: `unknown` is exactly what a staleness check reads
+  # as "nothing to do". Measured 2026-10-22 - the install succeeded and the record said commit=unknown, so
+  # nothing downstream could tell what was running. Refuse to commit such a record instead.
+  local recorded_commit
+  recorded_commit="$(sed -n 's/^commit=//p' "$INSTALL_DIR/installed.txt" 2>/dev/null | head -1)"
+  case "$recorded_commit" in
+    ''|unknown) fail "installed.txt would record commit=unknown; refusing to write a record no check can use" ;;
+  esac
+}
+
+# Record what is installed HERE, not only at the end. Every fact this record names - the exact commit, the
+# binary hash, the sentinel hash, the install directory - is already true at this point, and the steps that
+# follow (shipping scripts, putting job definitions) can still refuse or die. Writing it now means a deploy
+# that dies after the node is installed leaves the deploy's own exact-commit record, not upgrade.sh's
+# interim one - which is the state that made `verify-install.sh` report `installed unknown is not an
+# ancestor of tree ...` on 2026-10-02. The write at step 8 confirms the same content as the deploy's last
+# act, so "the final record is deploy.sh's" holds whichever of the two the run reaches.
+record_installed
+# Defined and called here, not a hundred lines down: 7d026c71 (22/10) fixed a call that ran above the
+# definition (`command not found`, commit=unknown) by moving both below the sentinel proof, which undid
+# 44af0cc9's rule above - a refused proof again left the interim record (found by test-deploy-record.sh on the
+# v0.1.0-alpha.12 gate, 30/10).
 
 ship_file() { # source destination what
   local source="$1" destination="$2" what="$3" staged
@@ -951,54 +998,6 @@ cmp -s "$UPGRADE" "$INSTALL_DIR/scripts/upgrade.sh" || fail "the node is install
 UPGRADE_HASH="$(sha256sum < "$INSTALL_DIR/scripts/upgrade.sh" 2>/dev/null | awk '{print $1}')"
 [ -n "$UPGRADE_HASH" ] || fail "the node is installed but upgrade.sh could not be hashed"
 
-# The install record, in one place, called twice - once here and once as this deploy's last write (step 8).
-# It is a function because the record must exist the moment the facts it names are true, and because two
-# copies of a record format drift apart.
-#
-# `record_role=final` is what separates this record from upgrade.sh's. upgrade.sh installs bytes and can
-# only certify the hash it placed (`source_provenance=unverified-binary`); when THIS script calls it, its
-# record says `record_role=interim` and `via=deploy.sh`, because the deploy is the owner of the install's
-# record - it is the only party that knows the commit the binary was built from. So a reader who finds an
-# interim record as the LAST one is looking at a deploy that did not finish its record step. That state was
-# reached on 2026-10-02 19:30 and nothing could name it: installed.txt said `commit=unknown` while the node
-# served 2f02b4c's build, and the only trace of the death was a line on a detached process's stdout. What
-# killed that run is at the ship_file rule below.
-record_installed() {
-  local record_tmp reason_line
-  record_tmp="$INSTALL_DIR/.installed.txt.deploy.$$"
-  reason_line="$(printf '%s' "$REASON" | tr '\r\n' '  ')"
-  # `install_dir=` is the record's own statement of where it was written, and of which directory the machine
-  # runs the node from. A record that cannot say that is a record a later reader has to guess about - and
-  # `~/.wasm-agent/installed.txt`, empty on the node this rule was written for, is what guessing looks like.
-  printf 'commit=%s\nbranch=%s\ndirty=%s\nsha256=%s\nsentinel_sha256=%s\nupgrade_sha256=%s\ninstall_dir=%s\nservice_install_dir=%s\nsource_provenance=clean-built-by-deploy\nrecord_role=final\nvia=deploy.sh\nat=%s\nreason=%s\n' \
-    "$COMMIT" "$BRANCH" "$DIRTY" "$HASH" "$SENTINEL_HASH" "$UPGRADE_HASH" "$INSTALL_DIR" "${WA_SERVICE_DIR:-unverified}" \
-    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$reason_line" \
-    > "$record_tmp" || fail "node installed, but installed.txt could not be written"
-  # Appended as its own line, only when this commit is a release: a command substitution would strip the
-  # newline and leave `reason=` and `release=` sharing a line, which no reader parses.
-  if [ -n "$RELEASE" ]; then
-    printf 'release=%s\n' "$RELEASE" >> "$record_tmp" || fail "node installed, but the release line could not be written"
-  fi
-  mv -f "$record_tmp" "$INSTALL_DIR/installed.txt" \
-    || fail "node installed, but installed.txt could not be committed atomically"
-  # A record nobody can act on is worse than no record: `unknown` is exactly what a staleness check reads
-  # as "nothing to do". Measured 2026-10-22 - the install succeeded and the record said commit=unknown, so
-  # nothing downstream could tell what was running. Refuse to commit such a record instead.
-  local recorded_commit
-  recorded_commit="$(sed -n 's/^commit=//p' "$INSTALL_DIR/installed.txt" 2>/dev/null | head -1)"
-  case "$recorded_commit" in
-    ''|unknown) fail "installed.txt would record commit=unknown; refusing to write a record no check can use" ;;
-  esac
-}
-
-# Record what is installed HERE, not only at the end. Every fact this record names - the exact commit, the
-# binary hash, the sentinel hash, the install directory - is already true at this point, and the steps that
-# follow (shipping scripts, putting job definitions) can still refuse or die. Writing it now means a deploy
-# that dies after the node is installed leaves the deploy's own exact-commit record, not upgrade.sh's
-# interim one - which is the state that made `verify-install.sh` report `installed unknown is not an
-# ancestor of tree ...` on 2026-10-02. The write at step 8 confirms the same content as the deploy's last
-# act, so "the final record is deploy.sh's" holds whichever of the two the run reaches.
-record_installed
 
 # Ship one file beside the binary without ever rewriting a file in place.
 #

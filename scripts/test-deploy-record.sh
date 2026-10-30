@@ -118,6 +118,7 @@ run_record() { # calls [path-prefix] -> the record step's output; the prefix sha
     echo "SENTINEL_HASH=\"$SENTINEL_HASH\""
     echo "UPGRADE_HASH=\"$UPGRADE_HASH\""
     echo 'REASON="land the three reviewed deliveries"'
+    echo 'RELEASE=""'   # deploy.sh sets it before step 8 (a7bbcda9): empty, as for a commit that is no release tag
     echo "WA_SERVICE_DIR=\"$INSTALL\""
     echo 'fail() { echo "REFUSED: $*" >&2; exit 3; }'
     cat "$WORK/record.sh"
@@ -255,10 +256,18 @@ check "$([ "$(field via "$INSTALL/installed.txt")" = "deploy.sh" ] && echo 1)" \
 check "$([ "$(field source_provenance "$INSTALL/installed.txt")" = "unverified-binary" ] && echo 1)" \
   "the interim record claims only what upgrade.sh can prove" "source_provenance=unverified-binary"
 
+# c6119562 (22/10): a final record must name a commit. The interim record above says commit=unknown, so a
+# hand-run upgrade over it cannot name one and stays interim; over a record that names the commit for these
+# exact bytes it can, and is its own final record.
 OUT="$(run_upgrade_record '')"; STATUS=$?
 [ "$STATUS" = "0" ] || fail "upgrade.sh's record path refused on its own: status $STATUS - $OUT"
-check "$([ "$(field record_role "$INSTALL/installed.txt")" = "final" ] && echo 1)" \
-  "a hand-run upgrade is its own final record" "record_role=$(field record_role "$INSTALL/installed.txt") via=$(field via "$INSTALL/installed.txt")"
+check "$([ "$(field record_role "$INSTALL/installed.txt")" = "interim" ] && [ "$(field via "$INSTALL/installed.txt")" = "upgrade.sh" ] && echo 1)" \
+  "a hand-run upgrade that cannot name its commit is not a final record" "record_role=$(field record_role "$INSTALL/installed.txt") commit=$(field commit "$INSTALL/installed.txt")"
+printf 'commit=%s\nbranch=%s\ndirty=0\nsha256=%s\nrecord_role=interim\nvia=upgrade.sh\n' "$COMMIT" "$BRANCH" "$(sha "$INSTALL/wa")" > "$INSTALL/installed.txt"
+OUT="$(run_upgrade_record '')"; STATUS=$?
+[ "$STATUS" = "0" ] || fail "upgrade.sh's record path refused on its own: status $STATUS - $OUT"
+check "$([ "$(field record_role "$INSTALL/installed.txt")" = "final" ] && [ "$(field commit "$INSTALL/installed.txt")" = "$COMMIT" ] && echo 1)" \
+  "a hand-run upgrade that names its commit is its own final record" "record_role=$(field record_role "$INSTALL/installed.txt") via=$(field via "$INSTALL/installed.txt")"
 
 # 4b. F4 of the review: the role is MONOTONE. A deploy whose build is byte-identical to what is installed
 #     (the live node did exactly that on 2026-10-02: "the new binary is byte-identical to ... - nothing to
@@ -338,6 +347,8 @@ run_invocation() { # upgrade : port : client_port : reason
     echo "REASON=\"$4\""
     echo "UPGRADE=\"$1\""
     echo "NEW=\"$TREE/rust/target/release/wa\""
+    echo "CANDIDATE=\"$TREE/rust/target/release/wa\""   # the proved candidate the deploy hands upgrade.sh
+    echo 'EMBEDDED_PROVEN=1'
     cat "$WORK/invocation.sh"
   } > "$WORK/run-invocation.sh"
   bash "$WORK/run-invocation.sh" 2>&1

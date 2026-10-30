@@ -27,13 +27,13 @@ class PrivateFixtureTests(unittest.TestCase):
             root = Path(temp)
             bundle = root/'bundle'; bundle.mkdir()
             files = {}
-            for name in ('wa-whatsapp', 'whatsapp-stt-local.py', 'whatsapp-install.py', 'THIRD-PARTY-NOTICES.txt', 'LICENSE'):
+            for name in ('wa-whatsapp', 'whatsapp-stt-local.py', 'whatsapp-ocr-local.py', 'whatsapp-install.py', 'THIRD-PARTY-NOTICES.txt', 'LICENSE'):
                 (bundle/name).write_bytes(b'synthetic fixture, not executable')
                 if name == 'wa-whatsapp':
                     h=bytearray(64);h[:7]=b'\x7fELF\x02\x01\x01';h[16:18]=(2).to_bytes(2,'little');h[18:20]=(62).to_bytes(2,'little');h[20:24]=(1).to_bytes(4,'little');h[52:54]=(64).to_bytes(2,'little');(bundle/name).write_bytes(h)
                 files[name] = installer.digest(bundle/name)
             inputs={p:'0'*64 for p in ('connectors/whatsapp/go.mod','connectors/whatsapp/go.sum','scripts/whatsapp-build.py','scripts/build-whatsapp.sh')}
-            for source,name in [('scripts/whatsapp-stt-local.py','whatsapp-stt-local.py'),('scripts/whatsapp-install.py','whatsapp-install.py'),('connectors/whatsapp/THIRD-PARTY-NOTICES.txt','THIRD-PARTY-NOTICES.txt'),('LICENSE','LICENSE')]: inputs[source]=files[name]
+            for source,name in [('scripts/whatsapp-stt-local.py','whatsapp-stt-local.py'),('scripts/whatsapp-ocr-local.py','whatsapp-ocr-local.py'),('scripts/whatsapp-install.py','whatsapp-install.py'),('connectors/whatsapp/THIRD-PARTY-NOTICES.txt','THIRD-PARTY-NOTICES.txt'),('LICENSE','LICENSE')]: inputs[source]=files[name]
             manifest = {'schema':2, 'platform':'linux-amd64', 'tree':'a'*40, 'source':'b'*40, 'files':files,'source_files':inputs,'source_binding':'frozen-git-archive+pre-post-hashes','go_version':'go1.27.2','go_executable_sha256':'0'*64}
             path = bundle/'manifest.json'; path.write_text(json.dumps(manifest))
             state = root/'state';state.mkdir();(state/'unknown-send').write_text('preserve')
