@@ -18,10 +18,14 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 BIN="${WA_BIN:-rust/target/release/wa}"
+case "$BIN" in /*) ;; *) BIN="$ROOT/$BIN" ;; esac  # absolute: the server below starts from $WORK
 PORT="${1:-8961}"
 CLIENT_PORT=$((PORT + 1))
 MOCK_PORT=$((PORT + 2))
 WORK="$(mktemp -d /tmp/wa-iso-XXXXXX)"
+# The server starts from the empty work dir: from the repository root it indexed the whole tree for the
+# graph while serving, and on a 2-core host (openclaw, 30/10) the ordering read missed its 3 s timeout
+# though the conversation was stored in order. This test is about runs, not about indexing.
 
 PIDS=()
 cleanup() {
@@ -114,7 +118,7 @@ WASM_AGENT_BACKGROUND_BACKLOG=0 \
 WASM_AGENT_SESSION_QUEUE_DEPTH=4 \
 WASM_AGENT_CONTROL_WORKERS=1 \
 WASM_AGENT_SUBAGENT_AWAIT_MS=800 \
-  "$BIN" --db "$WORK/iso.db" serve --port "$PORT" --client-port "$CLIENT_PORT" --ui "$ROOT/ui" > "$WORK/serve.log" 2>&1 &
+  bash -c 'cd "$1" && shift && exec "$@"' _ "$WORK" "$BIN" --db "$WORK/iso.db" serve --port "$PORT" --client-port "$CLIENT_PORT" --ui "$ROOT/ui" > "$WORK/serve.log" 2>&1 &
 PIDS+=("$!")
 for _ in $(seq 1 60); do
   code="$(curl -s -o /dev/null -m 2 -w '%{http_code}' "http://127.0.0.1:$PORT/health" 2>/dev/null)"
