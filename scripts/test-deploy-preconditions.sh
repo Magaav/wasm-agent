@@ -67,12 +67,22 @@ run_deploy() { # label [--without-cargo] [--wsl] [--uname <dir>] [--install-dir 
   local -a env_cmd=(env -u LOCALAPPDATA -u APPDATA -u USERPROFILE -u WA_PORT -u WA_INSTALL_DIR)
   local path="$PATH"
   if [ "$without_cargo" = 1 ]; then
-    # Git's own tools stay (the script needs uname, sed, date, git); the toolchain does not.
+    # Git's own tools stay (the script needs uname, sed, date, git); the toolchain does not. Node stays too,
+    # wherever it lives: since 0d05a54a the code-mode build's Node prerequisite refuses BEFORE cargo (pinned
+    # by test-codemode-shipping.mjs), so a host whose node is outside /usr/bin (mise, nvm, ~/.local/bin)
+    # got node_build_tool_unavailable here instead of the cargo refusal this case is about.
     path="/usr/bin:/bin"
+    if command -v node >/dev/null 2>&1; then
+      mkdir -p "$WORK/nocargo-node" && ln -sf "$(command -v node)" "$WORK/nocargo-node/node"
+      path="$WORK/nocargo-node:$path"
+    fi
   fi
   if [ -n "$uname_stub" ]; then path="$uname_stub:$path"; fi
   [ "$wsl" = 1 ] && env_cmd+=(WSL_DISTRO_NAME=Ubuntu WSL_INTEROP=/run/WSL/7_interop)
   [ -n "$install" ] && env_cmd+=(WA_INSTALL_DIR="$install")
+  # ...and the toolchain is gone from the environment too: build-requirements.sh finds cargo through
+  # CARGO_HOME as well as PATH, so an exported CARGO_HOME made 'no cargo' a machine that has one.
+  [ "$without_cargo" = 1 ] && env_cmd=("${env_cmd[0]}" -u CARGO_HOME -u RUSTUP_HOME -u RUSTUP_TOOLCHAIN "${env_cmd[@]:1}")
   "${env_cmd[@]}" \
     HOME="$home" WASM_AGENT_HOME="$home" PATH="$path" \
     WA_DEPLOY_ROOT="$SCRATCH" WA_PORT="$PORT" WA_CLIENT_PORT="$CLIENT_PORT" \
