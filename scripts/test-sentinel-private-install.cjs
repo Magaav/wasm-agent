@@ -18,7 +18,10 @@ const packet=JSON.parse(fs.readFileSync(packetFile));
 const base=path.dirname(path.resolve(packetFile));
 for(const field of ['source','private_remote','home','install'])assert(path.resolve(packet[field]).startsWith(base+path.sep),'isolated '+field);
 const source=packet.source,home=packet.home,install=packet.install,box=path.join(home,'.wasm-agent/sentinel');
-const env=Object.fromEntries(Object.entries(process.env).filter(([k])=>['PATH','SYSTEMROOT','WINDIR','COMSPEC','TEMP','TMP','PATHEXT','SYSTEMDRIVE','CARGO_HOME','RUSTUP_HOME','NUMBER_OF_PROCESSORS','PROCESSOR_ARCHITECTURE','USERPROFILE','APPDATA','LOCALAPPDATA'].includes(k.toUpperCase())));
+const env=Object.fromEntries(Object.entries(process.env).filter(([k])=>['PATH','SYSTEMROOT','WINDIR','COMSPEC','TEMP','TMP','PATHEXT','SYSTEMDRIVE','CARGO_HOME','RUSTUP_HOME','NUMBER_OF_PROCESSORS','PROCESSOR_ARCHITECTURE','USERPROFILE','APPDATA','LOCALAPPDATA',
+ // The gate's build knob (scripts/test.sh, 22/10): without it wa-host's build.rs refuses an assetless build, and this
+ // proof's source build died at build.rs:76 on every Windows gate since (wasm_the_first, 30/10).
+ 'WA_CODEMODE_ALLOW_EMPTY'].includes(k.toUpperCase())));
 let privateEnv={...env,...packet.environment,WASM_AGENT_LUA_ROOT:source,WASM_AGENT_CLIENT_PORT:packet.environment.WA_CLIENT_PORT,WA_SENTINEL_WAKE_BUDGET:'100',TMPDIR:base.replaceAll('\\','/')};
 const binary=path.join(source,'rust/target/release/wa.exe'),sentinel=path.join(source,'rust/wa-sentinel/target/release/wa-sentinel.exe');
 let mock,node,watch,releaseBusy,notices=[],sequence=0;
