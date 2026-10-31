@@ -99,7 +99,7 @@ Alpine, a container or a small VPS) becomes a node from the published prebuilt b
 in one command:
 
 ```sh
-d=~/wasm-agent-bootstrap; if [ -d "$d/.git" ]; then git -C "$d" fetch -q --depth 1 origin main && git -C "$d" reset -q --hard FETCH_HEAD || exit 1; else git clone -q --depth 1 https://github.com/Magaav/wasm-agent.git "$d" || exit 1; fi; exec bash "$d/scripts/linux/bootstrap.sh"
+d=~/wasm-agent-bootstrap; if [ -d "$d/.git" ]; then git -C "$d" fetch -q --depth 1 origin main && git -C "$d" reset -q --hard FETCH_HEAD; else git clone -q --depth 1 https://github.com/Magaav/wasm-agent.git "$d"; fi && bash "$d/scripts/linux/bootstrap.sh"
 ```
 
 Prerequisites: `git curl ca-certificates tar python3` (present on Ubuntu server/cloud images; Alpine:
@@ -172,10 +172,12 @@ UI only on the phone's loopback interface.
 
 **One command**, for a fresh phone, an older preview, or a node already on the
 update track. It clones `~/wasm-agent-bootstrap` when it is absent and fetches `main` into it when it
-is there, then runs the reviewed script from that clone (there is no `curl | sh`):
+is there, then runs the reviewed script from that clone (there is no `curl | sh`). The installer runs in
+this same session: a failing step is named (`bootstrap: <reason>`) and leaves the shell open, so nothing
+vanishes with the terminal - add `| tee ~/bootstrap.log` if you want the run kept:
 
 ```sh
-d=~/wasm-agent-bootstrap; if [ -d "$d/.git" ]; then git -C "$d" fetch -q --depth 1 origin main && git -C "$d" reset -q --hard FETCH_HEAD || exit 1; else git clone -q --depth 1 https://github.com/Magaav/wasm-agent.git "$d" || exit 1; fi; exec bash "$d/scripts/termux/bootstrap.sh"
+d=~/wasm-agent-bootstrap; if [ -d "$d/.git" ]; then git -C "$d" fetch -q --depth 1 origin main && git -C "$d" reset -q --hard FETCH_HEAD; else git clone -q --depth 1 https://github.com/Magaav/wasm-agent.git "$d"; fi && bash "$d/scripts/termux/bootstrap.sh"
 ```
 
 `bootstrap.sh` picks the step from the installation's own state: a fresh install,
