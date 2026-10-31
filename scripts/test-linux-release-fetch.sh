@@ -8,7 +8,15 @@
 set -uo pipefail
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 BOOT="$ROOT/scripts/linux/bootstrap.sh"
-T=$(mktemp -d "${TMPDIR:-/tmp}/wa-linux-release-test.XXXXXX"); trap 'rm -rf "$T"' EXIT
+T=$(mktemp -d "${TMPDIR:-/tmp}/wa-linux-release-test.XXXXXX") || { printf 'FAIL tmpdir_unavailable: cannot create a temp dir under %s (set TMPDIR)\n' "${TMPDIR:-/tmp}" >&2; exit 1; }
+trap 'rm -rf "$T"' EXIT
+# A TMPDIR on a noexec mount makes every 'the candidate runs' check a false failure (31/10: a 256M noexec
+# /tmp tmpfs produced 13 confusing FAILs and no clue). Refuse by name, with the remedy.
+if ! ( cp /bin/true "$T/.exec-probe" && "$T/.exec-probe" ) >/dev/null 2>&1; then
+  printf 'FAIL tmpdir_noexec: %s cannot execute a file; set TMPDIR to a normal filesystem (not a noexec mount)\n' "$T" >&2
+  exit 1
+fi
+rm -f "$T/.exec-probe"
 # The installer writes its config under WASM_AGENT_HOME when set; the gate exports one, so the fixture's
 # own HOME is the only home here (30/10: the gate found the config in its home, not the fixture's).
 unset WASM_AGENT_HOME
