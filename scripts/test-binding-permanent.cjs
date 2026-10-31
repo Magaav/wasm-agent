@@ -86,6 +86,10 @@ function resultLine(out){return JSON.parse(out.trim().split(/\r?\n/).filter(l=>l
  ok(r.status===0&&state(phone)?.request.lifetime==='permanent','the explicit PERMANENT word submits the intent');
  const s=state(phone),b=s.request;
  ok(s.revision===1,'the pending request is generation one');
+ // The hand-off is one line the operator copies to a node of the fabric (31/10: it was buried in JSON).
+ ok((r.stdout.match(/^wa accept [0-9a-f]{12}   # phrase [0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}$/gm)||[]).length===1,'a submitted request ends in exactly one copy-able accept line');
+ ok(r.stdout.trim().split(/\r?\n/).pop()==='wa accept '+b.code+'   # phrase '+b.code.slice(0,4)+'-'+b.code.slice(4,8)+'-'+b.code.slice(8,12),'the last line is the accept command for this exact code and phrase');
+ ok(!/"state":"pending"/.test(r.stdout),'no JSON dump buries that line');
  ok(Object.keys(b).length===12,'the permanent request carries exactly the twelfth lifetime field');
  ok(b.expires_at>seconds()+STANDARD&&b.expires_at<=seconds()+PERMANENT+60,'the permanent request asks for a long but finite consent window');
  ok(b.scope==='user-account-tools','the permanent intent does not widen the capability');
@@ -133,6 +137,7 @@ function resultLine(out){return JSON.parse(out.trim().split(/\r?\n/).filter(l=>l
  ok(r.status===0,'the ordinary BIND word still submits the ordinary request');
  const ps0=state(peer),pb=ps0.request;
  ok(Object.keys(pb).length===11&&!('lifetime' in pb),'the ordinary request keeps the deployed eleven-field shape');
+ ok(r.stdout.trim().split(/\r?\n/).pop()==='wa accept '+pb.code+'   # phrase '+pb.code.slice(0,4)+'-'+pb.code.slice(4,8)+'-'+pb.code.slice(8,12),'an ordinary request also ends in that one line');
  ok(pb.expires_at<=seconds()+STANDARD+60,'the ordinary request still asks for twenty-four hours');
  r=cli(admin,['accept',pb.code],'cancel\n');
  ok(r.status===1&&r.stdout.includes('(24-hour standard consent)')&&!r.stdout.includes('no expiry'),'the ordinary acceptance preview says 24-hour, not no-expiry');

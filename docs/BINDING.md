@@ -18,7 +18,12 @@ use `wa bind run` to keep its explicit foreground, model-free transport alive.
 - `/bind [https://service]`: inspect service, display exact operator IDs and key
   fingerprints, confirm full current-user-account file/process authority by typing
   `BIND`, then submit a signed ten-minute pairing request. No noninteractive flag
-  silently approves consent. HTTP is permitted only for literal loopback fixtures.
+  silently approves consent. HTTP is permitted only for literal loopback fixtures. A
+  submitted request ends in one copy-able line - `wa accept <code>   # phrase <phrase>` -
+  to paste on any node of the same fabric; the phrase stays on that line as a shell
+  comment, so the pasted command is exactly `wa accept <code>` and both consoles can
+  still compare it. The administrator there types `ACCEPT` (`ACCEPT-PERMANENT` for a
+  no-expiry request) and nothing else is needed.
 - `/bind permanent [https://service]` / `wa bind permanent`: the same inspected consent
   with the explicit no-expiry intent, for the operator's own device. The node asks for a
   fifty-year consent and the registry accepts at most a hundred, so no stored value is

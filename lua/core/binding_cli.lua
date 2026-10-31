@@ -84,8 +84,17 @@ function M.run(command,arg,read,output)
       end
     end
   else result={error='binding_command_invalid'} end
-  output(json.encode(result))
-  if result.ok and result.state=='pending' then output('Compare pairing phrase on the administrator. This CLI must stay open; after a one-shot wa bind, use wa bind run to attach. Saved consent is not a connected runtime.') end
+  -- A submitted request ends in ONE copy-able line: paste it on any node of the same fabric and that is
+  -- the whole hand-off (`wa accept <code>` is what the administrator side takes). The pairing phrase stays
+  -- on that line as a shell comment, so a copy-paste into a terminal still runs exactly the command and
+  -- both consoles can still compare the phrase. 31/10: the actionable line was buried under a JSON dump
+  -- plus a side note, and the operator asked for one line.
+  if result.ok and result.state=='pending' then
+    if not repl then output('Saved consent is not a connected runtime: keep this foreground process, or run: wa bind run') end
+    output('wa accept '..result.code..'   # phrase '..(result.phrase or result.code))
+  else
+    output(json.encode(result))
+  end
   return result
 end
 return M
