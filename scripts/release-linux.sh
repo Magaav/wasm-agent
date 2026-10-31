@@ -221,7 +221,7 @@ if gh release view "$tag" --repo "$REPO" >/dev/null 2>&1; then
 else
   notes="Linux prebuilt node bundle(s) for $commit.
 Install on a fresh Linux machine (see README, \"Linux node\"):
-d=~/wasm-agent-bootstrap; ( [ -d \"\$d/.git\" ] || git clone --depth 1 https://github.com/$REPO.git \"\$d\" ) && bash \"\$d/scripts/linux/bootstrap.sh\"
+d=~/wasm-agent-bootstrap; if [ -d \"\$d/.git\" ]; then git -C \"\$d\" fetch -q --depth 1 origin main && git -C \"\$d\" reset -q --hard FETCH_HEAD || exit 1; else git clone -q --depth 1 https://github.com/$REPO.git \"\$d\" || exit 1; fi; exec bash \"\$d/scripts/linux/bootstrap.sh\"
 reason: ${reason:-none stated}"
   gh release create "$tag" "$out/$asset" --repo "$REPO" --target "$commit" --title "$tag" --notes "$notes" --prerelease \
     || fail 'publish_failed: gh release create'

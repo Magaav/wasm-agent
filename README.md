@@ -99,7 +99,7 @@ Alpine, a container or a small VPS) becomes a node from the published prebuilt b
 in one command:
 
 ```sh
-d=~/wasm-agent-bootstrap; ( [ -d "$d/.git" ] || git clone --depth 1 https://github.com/Magaav/wasm-agent.git "$d" ) && bash "$d/scripts/linux/bootstrap.sh"
+d=~/wasm-agent-bootstrap; if [ -d "$d/.git" ]; then git -C "$d" fetch -q --depth 1 origin main && git -C "$d" reset -q --hard FETCH_HEAD || exit 1; else git clone -q --depth 1 https://github.com/Magaav/wasm-agent.git "$d" || exit 1; fi; exec bash "$d/scripts/linux/bootstrap.sh"
 ```
 
 Prerequisites: `git curl ca-certificates tar python3` (present on Ubuntu server/cloud images; Alpine:
@@ -115,10 +115,15 @@ connectors run on: the official build on glibc >= 2.28, the unofficial-builds mu
 `systemd --user` unit for `wa-sentinel`, which starts and supervises `wa serve`. The node announces
 itself to the rendezvous; pin the masters allowed to drive it with `WASM_AGENT_TRUSTED_MASTERS` in
 `~/.wasm-agent/env` (the installer prints its node id and the exact step). Paste the same line again to
-update; `--check` verifies without changing anything, `--help` lists the options. Bundles are built with
-`scripts/release-linux.sh --target <arch>-unknown-linux-musl` (cargo-zigbuild, from any Linux host; the
-candidate is executed - through binfmt emulation for a foreign architecture - before it is bundled) and
-published with `--publish-bundle`; `scripts/test-linux-release-fetch.sh` is the installer's fixture suite.
+update: the launcher fetches `main` into `~/wasm-agent-bootstrap` first, so a re-paste also runs today's
+`bootstrap.sh` instead of the copy from the day the clone was made (a clone that predates a channel
+change keeps asking for a retired bundle); `--check` verifies without changing anything, `--help` lists
+the options.
+Bundles are built with `scripts/release-linux.sh --target <arch>-unknown-linux-musl` (cargo-zigbuild, from
+any Linux host; the candidate is executed - through binfmt emulation for a foreign architecture - before
+it is bundled) and published with `--publish-bundle`; `scripts/test-linux-release-fetch.sh` is the
+installer's fixture suite, `scripts/test-linux-launcher.sh` proves the paste-able line above refreshes its
+clone (no network).
 
 ## Running the developer preview
 
@@ -166,11 +171,11 @@ of other apps. It runs with Termux's Android app authority and serves the existi
 UI only on the phone's loopback interface.
 
 **One command**, for a fresh phone, an older preview, or a node already on the
-update track. It clones only if `~/wasm-agent-bootstrap` is absent, then runs the
-reviewed script from that clone (there is no `curl | sh`):
+update track. It clones `~/wasm-agent-bootstrap` when it is absent and fetches `main` into it when it
+is there, then runs the reviewed script from that clone (there is no `curl | sh`):
 
 ```sh
-d=~/wasm-agent-bootstrap; ( [ -d "$d/.git" ] || git clone --depth 1 https://github.com/Magaav/wasm-agent.git "$d" ) && bash "$d/scripts/termux/bootstrap.sh"
+d=~/wasm-agent-bootstrap; if [ -d "$d/.git" ]; then git -C "$d" fetch -q --depth 1 origin main && git -C "$d" reset -q --hard FETCH_HEAD || exit 1; else git clone -q --depth 1 https://github.com/Magaav/wasm-agent.git "$d" || exit 1; fi; exec bash "$d/scripts/termux/bootstrap.sh"
 ```
 
 `bootstrap.sh` picks the step from the installation's own state: a fresh install,
@@ -179,7 +184,7 @@ that already has it. Its options are `--checkout DIR`, `--repo URL`, `--upstream
 and `--check` (report without changing anything). The upstream recorded for later
 updates defaults to the checkout's own `git remote`, so `upstream_url_unknown` cannot
 happen on a normal clone. Paste the same line again later to update: the clone is
-reused and the update runs.
+refreshed from `main` first, so the update runs today's script.
 
 Then:
 

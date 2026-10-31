@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
 # Make this Linux machine a wasm-agent node from a published prebuilt bundle - one command, no compiler.
 #
-#   d=~/wasm-agent-bootstrap; ( [ -d "$d/.git" ] || git clone --depth 1 https://github.com/Magaav/wasm-agent.git "$d" ) && bash "$d/scripts/linux/bootstrap.sh"
+#   d=~/wasm-agent-bootstrap; if [ -d "$d/.git" ]; then git -C "$d" fetch -q --depth 1 origin main && git -C "$d" reset -q --hard FETCH_HEAD || exit 1; else git clone -q --depth 1 https://github.com/Magaav/wasm-agent.git "$d" || exit 1; fi; exec bash "$d/scripts/linux/bootstrap.sh"
 #
 # Paste the same line again later to update: the run is idempotent (same bundle: nothing replaced).
+# The launcher fetches main into the clone first, so a re-paste runs THIS script as it is today, not the
+# copy from the day the clone was made: a clone that predates the static-musl channel kept asking for a
+# withdrawn glibc-linked bundle and refused on every older Ubuntu with candidate_does_not_run.
 #
 # What it does, and every step refuses by name:
 #   1. reads releases/index-linux.json over HTTPS from the public repository and picks the newest
