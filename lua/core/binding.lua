@@ -144,7 +144,15 @@ function M.begin(preview,consent,renew,lifetime)
     if old.service~=fresh.service or not same_pins(old.operators,fresh.operators) then return failure('binding_renew_pins_changed') end
     local revoked=M.unbind();if not revoked.ok then return revoked end;old=M.saved()
   end
-  local preflight=decode(host.binding_transport('preflight'));if not preflight or not preflight.ok then return failure('binding_attachment_preflight_refused',preflight and preflight.error) end
+  -- A server of this same ledger holding the outbound transport must not stop a CLI from ENROLLING: on a
+  -- sentinel-managed node the sentinel owns the ledger, so this refusal left `/bind` with no possible
+  -- runtime (`bind in its owner runtime` named a conversation surface that does not exist headless) and the
+  -- operator had to stop the node by hand (31/10). Enrolling is safe beside it: the state CAS below admits
+  -- one submission, and the transport lease - not this check - guarantees one owner, so the CLI's start
+  -- stands by and the node keeps attaching. Any other preflight failure is still fatal.
+  local preflight=decode(host.binding_transport('preflight'))
+  local server_owned=preflight and not preflight.ok and tostring(preflight.error):find('binding_existing_server_owned',1,true)~=nil
+  if not server_owned and (not preflight or not preflight.ok) then return failure('binding_attachment_preflight_refused',preflight and preflight.error) end
   local now=math.floor(host.now());local i=identity();local id=host.uuid():gsub('-','');local code=host.uuid():gsub('-',''):sub(1,12)
   local name=host.read_file(paths.config()..'/node.name') or host.getenv('WASM_AGENT_NODE_NAME') or 'bound-node'
   name=name:gsub('^%s+',''):gsub('%s+$','')
@@ -162,7 +170,7 @@ function M.begin(preview,consent,renew,lifetime)
   s.phase='pending';s.revision=result.binding.revision;s.error=nil
   local saved,save_error=cas(written,s);if not saved then return failure(save_error) end
   local transport=decode(host.binding_transport('start'));if not transport or not transport.ok then return failure('binding_transport_unavailable',transport and transport.error) end
-  return {ok=true,state='pending',node_id=i.node_id,code=code,phrase=code:sub(1,4)..'-'..code:sub(5,8)..'-'..code:sub(9,12),pairing_expires_at=request.pairing_expires_at,expires_at=request.expires_at,lifetime=lifetime}
+  return {ok=true,state='pending',node_id=i.node_id,code=code,phrase=code:sub(1,4)..'-'..code:sub(5,8)..'-'..code:sub(9,12),pairing_expires_at=request.pairing_expires_at,expires_at=request.expires_at,lifetime=lifetime,attachment=server_owned and 'standby' or 'owned'}
 end
 local function request_status(s) return http(s.service,'GET','/bindings/request?id='..s.request.id,'bind-status') end
 local function valid_reply(s,v)

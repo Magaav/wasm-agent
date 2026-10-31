@@ -6,8 +6,11 @@ provider credentials and settings. They never install a package, change Git,
 expose an inbound port, enable jobs or create a login service. The CLI owns an
 outbound-only capability runtime for its lifetime. A separate process must not
 attach the same identity concurrently; a per-home native OS lease enforces this.
-A pre-existing server's ledger lease also refuses adding a CLI attachment; stop
-that server deliberately before binding here, never silently kill/restart it.
+A pre-existing server's ledger lease refuses a second outbound *owner*, not enrollment: a CLI beside a
+running node submits the request and stands by (its result says `attachment:"standby"`), and the running
+node attaches the accepted binding on its own. That is what makes `/bind` possible on a sentinel-managed
+node, where the sentinel's `wa serve` is the only runtime there is (31/10). Nothing needs to be stopped,
+and nothing should be killed or restarted silently; a broken lease is still refused by name.
 Closing the CLI disconnects transport; consent/approval survive until expiry or
 revocation. A one-shot `wa bind <service>` stores/submits pairing and then exits;
 use `wa bind run` to keep its explicit foreground, model-free transport alive.

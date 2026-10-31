@@ -31,7 +31,7 @@ function state(n){const f=path.join(n.home,'.wasm-agent/binding.json');return fs
  const serverOwner=node('server-owner'),serverPort=await port(),serverClient=await port();
  const serverChild=start(serverOwner,['serve','--port',String(serverPort),'--client-port',String(serverClient),'--ui',path.join(root,'ui')]);
  await until(async()=>{try{return(await request('http://127.0.0.1:'+serverPort+'/health')).status===200}catch{return false}},'existing server');
- const conflict=cli(serverOwner,['bind',service],'BIND\n');ok(conflict.status===1&&!state(serverOwner)&&conflict.stdout.includes('existing_server_owned'),'existing server refuses CLI attachment before consent persistence');await stop(serverChild);
+ const conflict=cli(serverOwner,['bind',service],'BIND\n');ok(conflict.status===0&&state(serverOwner)?.phase==='pending'&&conflict.stdout.includes('The running node keeps the outbound transport'),'a CLI enrolls beside the running server and stands by for the transport');await stop(serverChild);
  r=cli(app,['bind','http://example.org'],'BIND\n');ok(r.status===1&&r.stdout.includes('requires_https')&&!state(app),'nonloopback HTTP refuses before effects');
  const invalidPort=await port();r=cli(app,['bind','http://127.0.0.1:'+invalidPort],'BIND\n');ok(r.status===1&&!state(app),'missing service refuses without consent');
  const chat=start(app,['chat'],true);let output='',stderr='';chat.stdout.on('data',b=>output+=b);chat.stderr.on('data',b=>stderr+=b);

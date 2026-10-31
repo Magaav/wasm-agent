@@ -90,7 +90,15 @@ function M.run(command,arg,read,output)
   -- both consoles can still compare the phrase. 31/10: the actionable line was buried under a JSON dump
   -- plus a side note, and the operator asked for one line.
   if result.ok and result.state=='pending' then
-    if not repl then output('Saved consent is not a connected runtime: keep this foreground process, or run: wa bind run') end
+    if not repl then
+      -- Naming who keeps the transport is the difference between "this consent is live" and "start a
+      -- second process": beside a running node the CLI stands by and the node attaches by itself.
+      if result.attachment=='standby' then
+        output('The running node keeps the outbound transport: this consent is saved, nothing has to stay open.')
+      else
+        output('Saved consent is not a connected runtime: keep this foreground process, or run: wa bind run')
+      end
+    end
     output('wa accept '..result.code..'   # phrase '..(result.phrase or result.code))
   else
     output(json.encode(result))
