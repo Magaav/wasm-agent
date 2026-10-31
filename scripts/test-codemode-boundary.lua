@@ -1,5 +1,6 @@
--- What runs inside code mode and what stays ordinary (29/10): read-only history/spells/peers open,
--- operation/resource fenced per action, connectors code-mode-only, and the upfront routing hint.
+-- What runs inside code mode and what stays ordinary (29/10, widened 31/10): read-only history/spells/peers
+-- open, effects and multi-action tools open with their ordinary checks, connectors code-mode-only,
+-- delegation/session-ownership and the outer facades still refused, and the upfront routing hint.
 local json=dofile('lua/vendor/json.lua')
 local env=host.getenv
 host.getenv=function(k)if k=='WASM_AGENT_CODEMODE' then return nil end;return env(k)end
@@ -19,32 +20,37 @@ check(open.ok and tostring(open.value):find('[true,true,true,true,true,true,true
 local listed=run('const r=await tools.sessions({limit:5}); return Array.isArray(r.sessions||r)||typeof r==="object";')
 check(listed.ok,'sessions runs inside code mode: '..json.encode(listed):sub(1,300))
 
--- Control plane stays out.
-local closed=run('return JSON.stringify(["subagent","spell_run","spell_save","client","shell","session_worktree","resume_session","integrate","tool_call"].map(n=>n in tools));')
-check(closed.ok and tostring(closed.value):find('[false,false,false,false,false,false,false,false,false]',1,true),'control plane absent inside: '..json.encode(closed):sub(1,300))
+-- Control plane that is refused stays out: delegation/authority/recursion, session shaping and the outer
+-- facades. Effects, the user's shell/client, spells and multi-action tools are callable now (31/10).
+local closed=run('return JSON.stringify(["subagent","integrate","session_worktree","resume_session","tool_call","codemode","capabilities"].map(n=>n in tools));')
+check(closed.ok and tostring(closed.value):find('[false,false,false,false,false,false,false]',1,true),'delegation, session shaping and the facades stay out inside: '..json.encode(closed):sub(1,300))
+local widened=run('return JSON.stringify(["shell","client","spell_save","spell_run","operation","resource"].map(n=>n in tools));')
+check(widened.ok and tostring(widened.value):find('[true,true,true,true,true,true]',1,true),'effects, shell/client, spells and multi-action tools are callable inside: '..json.encode(widened):sub(1,300))
 -- ...but discoverable, with its route (29/10): never indistinguishable from "does not exist".
-local found=run('const s=await searchTools("subagent"); const d=await describeTool("client"); const all=await searchTools("*",{limit:200}); return JSON.stringify({s:s.tools.find(t=>t.name==="subagent"),d,listed:all.tools.filter(t=>t.callable===false).map(t=>t.name)});')
+local found=run('const s=await searchTools("subagent"); const d=await describeTool("session_worktree"); const all=await searchTools("*",{limit:200}); return JSON.stringify({s:s.tools.find(t=>t.name==="subagent"),d,listed:all.tools.filter(t=>t.callable===false).map(t=>t.name)});')
 local fv=found.value;for _=1,2 do if type(fv)=='string' then fv=json.decode(fv) end end;fv=type(fv)=='table' and fv or {}
 check(fv.s and fv.s.callable==false and tostring(fv.s.route):find('outside codemode',1,true) and fv.s.schema,'searchTools finds an outside tool with schema and route: '..json.encode(found):sub(1,400))
-check(fv.d and fv.d.callable==false and fv.d.parameters and tostring(fv.d.route):find('ordinary tool',1,true),'describeTool gives an outside tool its schema and route')
+check(fv.d and fv.d.callable==false and fv.d.parameters and tostring(fv.d.route):find('outside codemode',1,true),'describeTool gives an outside tool its schema and route')
 local listed_outside={};for _,n in ipairs(fv.listed or {}) do listed_outside[n]=true end
 check(listed_outside.subagent and listed_outside.tool_call and not listed_outside.remote,'the full listing marks outside tools; remote is callable')
+check(not listed_outside.shell and not listed_outside.spell_run and not listed_outside.client,'the widened set is not listed as outside: '..json.encode(fv.listed))
 local rd=run('return JSON.stringify(await describeTool("remote"));').value;for _=1,2 do if type(rd)=='string' then rd=json.decode(rd) end end
 check(type(rd)=='table' and rd.callable==true and rd.parameters.properties.calls,'remote is described as callable with its batch form')
 -- A remote effect from a script is refused before any network, with the route.
 local eff=run('return await tools.remote({node:"nowhere",capability:"write",path:"/x",content:"y"});')
-check(json.encode(eff):find('remote_effect_outside_codemode',1,true),'remote write refused inside: '..json.encode(eff):sub(1,300))
+check(not json.encode(eff):find('remote_effect_outside_codemode',1,true) and json.encode(eff):find('unknown_node',1,true),'remote write is no longer fenced inside; it reaches the ordinary unknown-node refusal: '..json.encode(eff):sub(1,300))
 local rb=run('return await tools.remote({node:"nowhere",capability:"bash",command:"git status --short"});')
 check(not json.encode(rb):find('remote_effect_outside_codemode',1,true),'remote read-only bash passes the fence (then meets the network)')
 
--- Per-action fences: effects refused with no admission, reads admitted.
+-- Multi-action tools: every action is admitted with its ordinary checks (31/10); the tool refuses what it
+-- refuses anywhere else, not a code-mode-only rule.
 local start=run('return await tools.operation({action:"start",command:"true"});')
 local text=json.encode(start)
-check(text:find('codemode_action_not_available',1,true) and #(start.calls or {})==0,'operation start refused inside: '..text:sub(1,300))
+check(not text:find('codemode_action_not_available',1,true) and #(start.calls or {})==1,'operation start is admitted inside: '..text:sub(1,300))
 local watch=run('return await tools.operation({action:"list"});')
 check(not json.encode(watch):find('codemode_action_not_available',1,true) and #(watch.calls or {})==1,'operation list admitted inside')
 local reconcile=run('return await tools.resource({action:"reconcile",key:"k"});')
-check(json.encode(reconcile):find('codemode_action_not_available',1,true),'resource reconcile refused inside')
+check(not json.encode(reconcile):find('codemode_action_not_available',1,true),'resource reconcile is admitted inside')
 local claims=run('return await tools.resource({action:"list"});')
 check(#(claims.calls or {})==1,'resource list admitted inside')
 

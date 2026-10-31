@@ -130,13 +130,14 @@ check(eff.error=='remote_effect_outside_codemode' and eff.index==2 and #sent==n0
 check(ptools.dispatch(memory,'remote',{node='openclaw',capability='batch',calls={{capability='write',path='/a',content='x'}}},'master',mctx).error=='remote_effect_outside_codemode','write is never batched')
 local fb=ptools.dispatch(memory,'remote',{node='old-build',capability='batch',calls={{capability='read',path='/a'},{capability='ls',path='/'}}},'master',mctx)
 check(fb.ok and fb.round_trips==3 and fb.fallback:find('peer_has_no_batch',1,true) and fb.results[2].ran=='ls','an older peer gets the same reads one call each, said')
--- Inside a script (codemode_nested) remote reads pass and effects are refused with the route.
+-- Inside a script (codemode_nested) every capability a peer authorizes now runs, reads and effects alike
+-- (31/10); the batch form stays read-only, which is a wire contract, not a code-mode rule.
 local nested={user_id='master',codemode_nested=true}
 check(ptools.dispatch(memory,'remote',{node='openclaw',capability='read',path='/a'},'master',nested).ran=='read','a nested remote read runs')
 check(ptools.dispatch(memory,'remote',{node='openclaw',capability='bash',command='git status --short',cwd='/r'},'master',nested).ran=='bash','a nested read-only bash runs')
-local w=ptools.dispatch(memory,'remote',{node='openclaw',capability='edit',path='/a'},'master',nested)
-check(w.error=='remote_effect_outside_codemode' and w.note:find('outside code mode',1,true),'a nested remote edit names its route')
-check(ptools.dispatch(memory,'remote',{node='openclaw',capability='bash',command='git status > /tmp/x'},'master',nested).error=='remote_effect_outside_codemode','redirection is an effect')
+check(ptools.dispatch(memory,'remote',{node='openclaw',capability='edit',path='/a'},'master',nested).ran=='edit','a nested remote edit runs with its ordinary checks')
+check(ptools.dispatch(memory,'remote',{node='openclaw',capability='bash',command='git status > /tmp/x'},'master',nested).ran=='bash','a nested effectful bash runs too')
+check(ptools.remote_read_refusal('bash',{command='git status > /tmp/x'})~=nil,'the batch form still refuses an effectful command')
 check(ptools.dispatch(memory,'remote',{node='openclaw',capability='bash',command='touch /x'},'master',{user_id='master'}).ran=='bash','outside a script remote keeps its effects')
 
 -- Peer side: `batch` reruns the fence under the peer's own rules.

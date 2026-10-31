@@ -1742,11 +1742,10 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
     local call, refusal = M.remote_arguments(args, function() return M.catalog(role) end)
     if not call then return refusal end
     if call.capability == "remote" then return { error = "remote_cannot_recurse" } end
-    -- Inside a script a peer is read, never changed: the effect runs as an ordinary call (29/10).
-    if ctx.codemode_nested then
-      local fenced = M.remote_read_refusal(call.capability, call.args)
-      if fenced then return fenced end
-    end
+    -- A script may now change a peer as well as read it: the peer's own binding/role checks and this
+    -- node's per-call permission and workspace checks are the gate, exactly as for an ordinary call
+    -- (31/10, the operator asked code mode to do everything it can). The `calls` batch below stays
+    -- read-only on the wire: it is one signed round trip of 1-8 reads, enforced again on the peer.
     local node = nodeslib.find(call.node)
     if not node then
       return { error = "unknown_node:" .. tostring(call.node), online_nodes = online_nodes(),

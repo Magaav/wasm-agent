@@ -8,14 +8,16 @@ local presentation=dofile('lua/core/codemode_view.lua')
 -- The node's own capability inventory: the same registry the CLI prints and `/health` digests.
 local inventory=dofile('lua/core/capability_inventory.lua')
 local M={}
--- Control plane stays ordinary: delegation, authority, recursion, the user's machine, replays and
--- session-shaping actions. Read-only history, spell lookups and the peer list are data a script filters
--- well, so they are open inside (29/10). `remote` is open too, fenced to reads in tools.lua
--- (remote_read_refusal): a peer is read from a script and changed only by an ordinary call.
-local forbidden={wave_autoflush=true,codemode=true,tool_call=true,tool_search=true,subagent=true,integrate=true,session_worktree=true,
- resume_session=true,session_debug=true,session_fixture=true,
- client=true,shell=true,mcp=true,capabilities=true,spell_run=true,spell_export=true,
- spell_save=true,spell_compose=true,spell_forget=true}
+-- Control plane stays ordinary where BEING A SINGLE REVIEWABLE ACTION, or owning the session, is the
+-- safety argument: delegation/authority/recursion (subagent, integrate, session_worktree, resume_session),
+-- session shaping (session_debug, session_fixture), the internal autoflush, and the outer facades
+-- (codemode, tool_call, tool_search, capabilities) that have in-sandbox equivalents. Everything else is now
+-- callable from a script - connectors (mcp), the user's own shell and client, spells, and every peer
+-- capability - with exactly the per-call permission, effect, workspace and binding checks an ordinary call
+-- gets (31/10: the operator asked code mode to do everything it can, after a peer effect was refused).
+local forbidden={codemode=true,tool_call=true,tool_search=true,capabilities=true,
+ subagent=true,integrate=true,session_worktree=true,resume_session=true,
+ session_debug=true,session_fixture=true,wave_autoflush=true}
 -- What a tool that is not callable here is for, so discovery never reads as "does not exist" (29/10).
 local function route_of(name,status)
  if name=='codemode' then return 'You are inside codemode; scripts do not nest.' end
@@ -26,17 +28,10 @@ local function route_of(name,status)
 end
 -- Multi-action tools whose read actions belong inside and whose effects do not: a script may watch an
 -- operation or list resource claims, never start, cancel or reconcile one.
-local read_actions={
- operation={list=true,status=true,read=true,wait=true,await=true},
- resource={list=true},
-}
-local function action_refusal(name,args)
- local allowed=read_actions[name];if not allowed then return nil end
- local action=type(args)=='table' and args.action or nil
- if allowed[action] then return nil end
- local names={};for key in pairs(allowed)do names[#names+1]=key end;table.sort(names)
- return {error='codemode_action_not_available: '..name..' action '..tostring(action)..' runs outside code mode; inside a script use '..table.concat(names,'/'),effect='none'}
-end
+-- Multi-action tools: every action is callable inside now, with the same admission, effect and workspace
+-- checks an ordinary call gets - `operation start/cancel/await` and `resource reconcile` are how a script
+-- supervises what it started (31/10). Kept as a named seam so a later fence has somewhere to live.
+local function action_refusal(name,args) return nil end
 function M.run(memory,args,role,ctx,catalog,current_catalog,dispatch,execution)
  local policy,refusal=dofile('lua/core/codemode_policy.lua').admit(memory,role,ctx)
  if not policy then return {ok=false,error=refusal,calls={},attempts={}} end
