@@ -320,6 +320,12 @@ else
   say "installed (no service): start it with  WA_SENTINEL_AUTOSTART=1 WA_INSTALL_DIR=$prefix WASM_AGENT_PORT=$port WASM_AGENT_CLIENT_PORT=$cport $prefix/wa-sentinel start"
 fi
 node_id=$("$prefix/wa" node 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin).get("node_id",""))' 2>/dev/null || true)
+# The install directory is added to PATH for NEW logins only (~/.profile); the shell this ran in still has
+# the old PATH, so `wa` would be 'command not found' right after a clean install (31/10: it was).
+case ":$PATH:" in
+  *":$prefix:"*) ;;
+  *) say "note: $prefix is not in this shell's PATH yet (a new login picks it up) - for now: export PATH=\"$prefix:\$PATH\"" ;;
+esac
 cat <<NEXT
 
   Next steps

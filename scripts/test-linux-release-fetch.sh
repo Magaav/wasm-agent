@@ -96,6 +96,11 @@ run "$T/i-good.json" "$T/p2"
 [ $rc -eq 0 ] && grep -q 'install .*: current' <<<"$out" && [ "$(stat -c %Y.%i "$T/p2/wa")" = "$before" ] \
   && ok 're-run with the same bundle: current, nothing replaced' || bad 'idempotent re-run' "$out"
 [ "$(grep -c '^WA_NODE=' "$T/home/.wasm-agent/env")" = 1 ] && ok 'config keys are written once' || bad 'config duplicated'
+# `wa` is only on PATH for new logins (~/.profile), so a clean install must say so instead of leaving
+# 'command not found' as the next surprise (31/10: on the aarch64 Nextcloud host it did).
+grep -q "note: $T/p2 is not in this shell's PATH yet" <<<"$out" && ok 'an install dir off PATH is named, with the export to use now' || bad 'PATH note missing' "$out"
+old_path=$PATH; PATH="$T/p2:$PATH"; run "$T/i-good.json" "$T/p2"; PATH=$old_path
+grep -q 'not in this shell' <<<"$out" && bad 'PATH note printed although the prefix is on PATH' "$out" || ok 'no PATH note when the prefix is already on PATH'
 
 # any libc (30/10): the static musl entry is preferred over a glibc-linked one, the detection is printed,
 # Node follows the libc, and a binary that cannot run says why instead of guessing
