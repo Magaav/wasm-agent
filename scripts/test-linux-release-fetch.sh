@@ -9,6 +9,9 @@ set -uo pipefail
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 BOOT="$ROOT/scripts/linux/bootstrap.sh"
 T=$(mktemp -d "${TMPDIR:-/tmp}/wa-linux-release-test.XXXXXX"); trap 'rm -rf "$T"' EXIT
+# The installer writes its config under WASM_AGENT_HOME when set; the gate exports one, so the fixture's
+# own HOME is the only home here (30/10: the gate found the config in its home, not the fixture's).
+unset WASM_AGENT_HOME
 pass=0; failed=0
 ok()  { pass=$((pass+1)); printf 'ok   %s\n' "$1"; }
 bad() { failed=$((failed+1)); printf 'FAIL %s\n' "$1"; [ -n "${2:-}" ] && printf '%s\n' "$2" | tail -5 | sed 's/^/     /'; }
