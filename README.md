@@ -119,8 +119,10 @@ update: the launcher fetches `main` into `~/wasm-agent-bootstrap` first, so a re
 `bootstrap.sh` instead of the copy from the day the clone was made (a clone that predates a channel
 change keeps asking for a retired bundle); `--check` verifies without changing anything, `--help` lists
 the options.
-If `~/.local/bin` was not on your `PATH` yet (it is added for new logins), the installer says so and
-prints the one-line export to use in the session you are in - `wa` is not 'command not found' silently.
+If `~/.local/bin` was not on your `PATH` yet, the installer adds it to the startup files you have
+(`~/.profile`, `~/.bashrc`, `~/.zshrc`; once, guarded, so a re-run does not duplicate it) - later shells
+find `wa` on their own. A child cannot change the shell it ran in, so for that one session it prints the
+export to use now instead of leaving `wa: command not found`.
 Bundles are built with `scripts/release-linux.sh --target <arch>-unknown-linux-musl` (cargo-zigbuild, from
 any Linux host; the candidate is executed - through binfmt emulation for a foreign architecture - before
 it is bundled) and published with `--publish-bundle`; `scripts/test-linux-release-fetch.sh` is the

@@ -90,17 +90,24 @@ if [ $rc -eq 0 ] && grep -q '^via=linux-bootstrap$' "$T/p2/installed.txt" && gre
    && [ -x "$T/p2/wa" ] && [ -f "$T/p2/ui/index.html" ] && [ -f "$T/p2/scripts/mcp-web.mjs" ]; then ok 'fresh install: files, ui/, scripts/ and installed.txt (via, release)'
 else bad 'fresh install' "$out"; fi
 grep -q "^WA_NODE=$T/p2/node/bin/node$" "$T/home/.wasm-agent/env" && ok 'WA_NODE points at the pinned Node' || bad 'WA_NODE in env' "$(cat "$T/home/.wasm-agent/env" 2>/dev/null)"
+# `wa` on PATH (31/10): a clean install that ends with 'wa: command not found' is a bad hand-off. The
+# installer writes the guarded PATH line into the user's own startup files and still prints the export
+# for the shell it ran in (a child cannot change that shell).
+grep -qF "$T/p2" "$T/home/.profile" && grep -q 'wasm-agent: `wa` lives in' "$T/home/.profile" \
+  && ok 'a clean install puts the install dir on PATH for later shells (~/.profile, guarded)' || bad 'no PATH line in ~/.profile' "$(cat "$T/home/.profile" 2>/dev/null)"
+grep -q "PATH: added $T/p2 to" <<<"$out" && ok 'the run says which files it added the directory to' || bad 'PATH add not reported' "$out"
+grep -q 'note: this shell started before the install' <<<"$out" && ok 'the shell that ran the installer gets the export to use now' || bad 'export hint missing' "$out"
 before=$(stat -c %Y.%i "$T/p2/wa")
 sleep 1
 run "$T/i-good.json" "$T/p2"
 [ $rc -eq 0 ] && grep -q 'install .*: current' <<<"$out" && [ "$(stat -c %Y.%i "$T/p2/wa")" = "$before" ] \
   && ok 're-run with the same bundle: current, nothing replaced' || bad 'idempotent re-run' "$out"
 [ "$(grep -c '^WA_NODE=' "$T/home/.wasm-agent/env")" = 1 ] && ok 'config keys are written once' || bad 'config duplicated'
-# `wa` is only on PATH for new logins (~/.profile), so a clean install must say so instead of leaving
-# 'command not found' as the next surprise (31/10: on the aarch64 Nextcloud host it did).
-grep -q "note: $T/p2 is not in this shell's PATH yet" <<<"$out" && ok 'an install dir off PATH is named, with the export to use now' || bad 'PATH note missing' "$out"
+[ "$(grep -cF 'wasm-agent: `wa` lives in' "$T/home/.profile")" = 1 ] && ok 're-runs do not duplicate the PATH guard' || bad 'duplicated PATH guard' "$(cat "$T/home/.profile")"
+profile_before=$(md5sum "$T/home/.profile" | cut -d' ' -f1)
 old_path=$PATH; PATH="$T/p2:$PATH"; run "$T/i-good.json" "$T/p2"; PATH=$old_path
-grep -q 'not in this shell' <<<"$out" && bad 'PATH note printed although the prefix is on PATH' "$out" || ok 'no PATH note when the prefix is already on PATH'
+[ "$profile_before" = "$(md5sum "$T/home/.profile" | cut -d' ' -f1)" ] && ! grep -q 'PATH: added' <<<"$out" \
+  && ok 'a prefix already on PATH is left alone: no write, no note' || bad 'touched a satisfied PATH' "$out"
 
 # any libc (30/10): the static musl entry is preferred over a glibc-linked one, the detection is printed,
 # Node follows the libc, and a binary that cannot run says why instead of guessing
