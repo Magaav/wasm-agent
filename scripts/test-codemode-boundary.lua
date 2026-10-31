@@ -86,4 +86,9 @@ check(prompt:find('- mail: list_messages',1,true) and prompt:find('- whatsapp: r
 check(prompt:find('tools.web_search(',1,true) and prompt:find('Default to code mode',1,true),'hint prefers code mode and names web inside it')
 check(prompt:find('preferred programmatic coding path',1,true) and prompt:find('Use ordinary tools for',1,true),'hint carries the routing rule')
 check(policy.prompt({catalog[1]})==policy.guidance,'no connectors, no index line')
+-- The model-facing guidance is policy text, not documentation: keep it in step with the fence above, or the
+-- model is told about a rule that no longer exists (31/10: the guidance still promised the retired peer
+-- fence). Both halves are asserted so a one-sided edit fails here.
+check(not policy.guidance:find('ordinary remote calls outside the script',1,true) and not policy.guidance:find('read-only command (git status',1,true),'the routing hint does not describe the retired read-only peer fence')
+check(policy.guidance:find('including write, edit and effectful bash',1,true) and policy.guidance:find('a batch stays read-only',1,true),'the routing hint states the widened peer rule and the batch limit')
 print(json.encode({ok=true,checks=checks}))

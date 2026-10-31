@@ -22,6 +22,15 @@ Admission rechecks deadline/cancellation before every queued native call, includ
 
 ## Peers and discovery (29/10)
 
+Where that policy lives - keep these four in step, and `scripts/test-codemode-boundary.lua` asserts both the
+behaviour and the wording: the refused-name list and the multi-action seam are `lua/core/codemode.lua`
+(`forbidden`, `action_refusal`); the peer fence for the `calls` batch is `tools.remote_read_refusal` with
+`REMOTE_READ` in `lua/core/tools.lua`; the model-facing copy of the rule is the guidance text in
+`lua/core/codemode_policy.lua`; and the behaviour is exercised by `scripts/test-codemode-boundary.lua`
+(callable/refused sets, the peer path, both suites' routing hint) and `scripts/test-federation.lua`
+(a nested remote effect runs, a batch still refuses one). A change that touches one of them and not the
+others is a stale promise to the model, which is what happened on 31/10.
+
 Discovery never hides a tool: `searchTools`/`describeTool` also return the catalogue entries a script cannot call (`callable:false`, with the schema and a `route` saying where it runs). Refused inside code mode, and unchanged: delegation/authority/recursion (`subagent`, `integrate`, `session_worktree`, `resume_session`), session shaping (`session_debug`, `session_fixture`), the internal autoflush, and the outer facades (`codemode`, `tool_call`, `tool_search`, `capabilities`) that have in-sandbox equivalents. Everything else runs from a script with exactly the per-call permission, effect, workspace and binding checks an ordinary call gets (31/10): connectors, the user's own `shell`/`client`, spell save/run/compose/forget/export, every `operation`/`resource` action, and every `remote` capability - a script may now change a peer as well as read it, and the peer's own binding/role authorization is the gate. `remote` with `capability:"batch", calls:[...]` stays reads-only: 1-8 reads in one signed round trip, each entry re-fenced on the peer under its own authorization, and a peer that predates `batch` gets the entries one call each (`fallback` says so). History is per node: `search_messages`, `sessions` and `session` take `node`, routed through `remote` and never forwarded a second hop (`peer_call`). `sessions {all_owners, path}` answers "the last agent session on that repo" from the ledger: sessions bound to a worktree/source under the path, or whose recorded file changes are under it, newest first. Nothing is written into the repository.
 
 Measured 29/10 against `openclaw` (direct, signed): ~350 ms per raw call, ~600 ms through the tool layer (registry binding lookup); a script with nodes + 3 peer reads + a refused write took ~4.6 s in one model round, against five outer rounds each paying a model call. Peers keep only what they run: `path`/`all_owners` and `batch` need the peer on this build.

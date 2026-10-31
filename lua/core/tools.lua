@@ -92,10 +92,10 @@ function M.remote_read_refusal(capability, args)
     local command = type(args) == "table" and args.command or nil
     if dofile("lua/core/orchestration_mode.lua").read_only_command(command) then return nil end
     return { error = "remote_effect_outside_codemode", capability = "bash", effect = "none",
-      note = "Only read-only bash (ls/cat/grep/rg/git status|log|diff|show..., no redirection or substitution; use cwd instead of cd or git -C) runs on a peer from a script or a calls batch. Run this command as an ordinary remote call, outside code mode." }
+      note = "A `calls` batch carries reads only (1-8 in one signed round trip): read-only bash is ls/cat/grep/rg/git status|log|diff|show..., no redirection or substitution; use cwd instead of cd or git -C. Send an effectful command as its own remote call - a script may, a batch may not." }
   end
   return { error = "remote_effect_outside_codemode", capability = tostring(capability), effect = "none",
-    note = "remote " .. tostring(capability) .. " can change the peer, so it runs as an ordinary remote call outside code mode (and never in a calls batch). Read-only here: "
+    note = "A `calls` batch carries reads only, so remote " .. tostring(capability) .. " travels as its own call, not inside one. Batches accept: "
       .. "read, read_many, ls, grep, grep_many, graph, sessions, session, session_many, search_messages, search_messages_many, recall, memories, tool_result, read-only bash." }
 end
 
