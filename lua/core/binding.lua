@@ -169,8 +169,22 @@ function M.begin(preview,consent,renew,lifetime)
   if type(result.binding)~='table' or result.binding.digest~=s.digest or type(result.binding.request)~='table' or result.binding.request.id~=id then s.phase='unknown';local kept,save_error=cas(written,s);return failure('binding_response_identity_mismatch',save_error) end
   s.phase='pending';s.revision=result.binding.revision;s.error=nil
   local saved,save_error=cas(written,s);if not saved then return failure(save_error) end
-  local transport=decode(host.binding_transport('start'));if not transport or not transport.ok then return failure('binding_transport_unavailable',transport and transport.error) end
-  return {ok=true,state='pending',node_id=i.node_id,code=code,phrase=code:sub(1,4)..'-'..code:sub(5,8)..'-'..code:sub(9,12),pairing_expires_at=request.pairing_expires_at,expires_at=request.expires_at,lifetime=lifetime,attachment=server_owned and 'standby' or 'owned'}
+  -- Which runtime ticks. A bind made in the node's OWN served conversation must ask for `serve`, not
+  -- `start`: this ledger is already served here, so the CLI branch fails its preflight by design and
+  -- stands by for "the node" - and on a node that started before `binding.json` existed there is no
+  -- serve-mode transport to hand it to. Nothing then ticks: the registry stays `accepted`, the local
+  -- state stays `pending`, `active`/`registered` stay false and no heartbeat is ever sent (measured
+  -- 2026-11-01: `transport:{"owner":"another process","state":"standby"}`, `last_seen` frozen,
+  -- `ps -T` showing a transport thread that never owned the lease).
+  local action=server_owned and 'serve' or 'start'
+  local transport=decode(host.binding_transport(action))
+  if not transport or not transport.ok then
+    -- The request is already submitted: a serve that cannot take the lease is reported, never hidden,
+    -- and never turned into a failure the operator would answer by submitting a second request.
+    if not server_owned then return failure('binding_transport_unavailable',transport and transport.error) end
+  end
+  local attachment=(transport and transport.state=='standby') and 'standby' or 'owned'
+  return {ok=true,state='pending',node_id=i.node_id,code=code,phrase=code:sub(1,4)..'-'..code:sub(5,8)..'-'..code:sub(9,12),pairing_expires_at=request.pairing_expires_at,expires_at=request.expires_at,lifetime=lifetime,attachment=attachment,transport=transport}
 end
 local function request_status(s) return http(s.service,'GET','/bindings/request?id='..s.request.id,'bind-status') end
 local function valid_reply(s,v)
@@ -265,7 +279,12 @@ function M.tick()
   local s,problem=M.saved();if not s then return failure(problem or 'not_bound') end
   if not s.consent or s.expires_at<=host.now() or s.phase=='revoked' then return {state='inactive'} end
   if s.phase~='accepted' then
-    if s.request.pairing_expires_at<=host.now() then return {state='pairing_expired'} end
+    -- The registry's `accepted` outranks this node's ten-minute PAIRING window: that window bounds how
+    -- long a request may sit unanswered, not how long an acceptance stays usable. Checked first, it made
+    -- a late tick - a node that was not running when its administrator approved, a restart, an offline
+    -- device - refuse an already-accepted grant forever: `accepted` at the registry, local phase
+    -- `pending` for good, no `/register`, and nothing anywhere naming the reason (measured 2026-11-01:
+    -- pairing_expires_at passed at 18:15:36, transport `starting`, heartbeat still frozen an hour later).
     local v,err=request_status(s);if not v then return failure('binding_status_unavailable',err) end
     if not valid_reply(s,v) then return failure('binding_response_identity_mismatch') end
     if v.binding.state=='accepted' then
