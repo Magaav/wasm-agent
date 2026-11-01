@@ -201,9 +201,61 @@ function wa_identity(session)
   return json.encode({ ok = true, user = users.public(user), role = effective_role(user) })
 end
 
+-- ---- human controls in the served conversation (1/11) ---------------------------------------------
+-- `/bind` and its siblings are human-only local controls, never model prompts. The terminal REPL had them
+-- (chat.lua); the served `/chat` path did not, so a `/bind` typed into the node's own UI became an agent
+-- prompt - and the only runtime that owns this node's transport had no way to bind at all. Same front
+-- door (binding_cli), same words (BIND / PERMANENT / ACCEPT / ACCEPT-PERMANENT / PROMOTE / DEMOTE / REVOKE).
+local control_pending = {}
+local CONTROL_TTL = 600
+local CONTROL_WORD = { BIND = true, PERMANENT = true, ACCEPT = true, ["ACCEPT-PERMANENT"] = true,
+  PROMOTE = true, DEMOTE = true, REVOKE = true }
+local CONTROL_FOR = { binding_consent_required = "BIND", binding_permanent_consent_required = "PERMANENT",
+  binding_accept_confirmation_required = "ACCEPT",
+  binding_accept_permanent_confirmation_required = "ACCEPT-PERMANENT",
+  binding_revoke_confirmation_required = "REVOKE" }
+local function run_control(command, arg, session, word)
+  local lines = {}
+  local asked = word and function() return word end or function() return "" end
+  local result = dofile("lua/core/binding_cli.lua").run(command, arg, asked,
+    function(line) lines[#lines + 1] = line end)
+  local code = type(result) == "table" and result.error or nil
+  local need = code and (CONTROL_FOR[code] or (code == "binding_role_confirmation_required"
+    and (command == "promote" and "PROMOTE" or "DEMOTE")))
+  if need then control_pending[session] = { command = command, arg = arg, word = need, at = host.now() } end
+  return table.concat(lines, "\n")
+end
+-- Returns the control's own text for a message that is one, and nil for ordinary conversation.
+function wa_served_control(text, session)
+  session = session or "default"
+  local line = tostring(text or ""):gsub("^%s+", ""):gsub("%s+$", "")
+  if line == "" then return nil end
+  local pending = control_pending[session]
+  if pending and host.now() - pending.at > CONTROL_TTL then pending = nil; control_pending[session] = nil end
+  local word = line:upper()
+  if pending and CONTROL_WORD[word] then
+    control_pending[session] = nil
+    return run_control(pending.command, pending.arg, session, word)
+  end
+  if line:sub(1, 1) ~= "/" then return nil end
+  local first, rest = line:match("^/([%a_]+)%s*(.*)$")
+  if not first then return nil end
+  first = first:lower()
+  if first == "bind" then return run_control("bind", rest, session, nil) end
+  if first == "unbind" then return run_control("unbind", "", session, nil) end
+  if first == "accept" then return run_control("accept", rest, session, nil) end
+  if first == "promote" then return run_control("promote", rest, session, nil) end
+  if first == "demote" then return run_control("demote", rest, session, nil) end
+  if first == "revoke" then return run_control("revoke", rest, session, nil) end
+  if first == "nodes" and rest:match("^pending") then return run_control("nodes", "pending", session, nil) end
+  return nil
+end
+
 function wa_reply(text, session, node)
   local prompt, images, problem, thread, resume_seq = parse_run_body(text)
   if problem then return json.encode({ error = redact.text(problem) }) end
+  local control = wa_served_control(prompt, session)
+  if control then return json.encode({ reply = control, local_control = true }) end
   if remote_target(node) then
     if resume_seq ~= nil then return json.encode({ error = "resume_requires_local_node" }) end
     local result = nodeslib.remote_call(node, "chat", { text = prompt or "" })
@@ -227,6 +279,8 @@ function wa_reply_stream(text, session, node)
     emit({ type = "error", error = redact.text(problem) })
     return ""
   end
+  local control = wa_served_control(prompt, session)
+  if control then emit({ type = "reply", text = control }); return "" end
   if remote_target(node) then
     if resume_seq ~= nil then
       emit({ type = "error", error = "resume_requires_local_node" })
