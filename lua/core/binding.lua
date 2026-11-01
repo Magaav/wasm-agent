@@ -198,7 +198,17 @@ function M.status()
   local own,lookup_error=http(s.service,'GET','/lookup?node_id='..s.request.node_id,'lookup')
   local registered=own and own.public_key==s.request.public_key and own.online==true or false
   local active=s.active==true and s.consent==true and s.expires_at>host.now() and v.binding.state=='accepted'
-  return {ok=true,state=v.binding.state,active=active,registered=registered,attached=registered and own.relay_attached==true or false,lookup_error=lookup_error,local_role_preserved=true,network_role=s.network_role,node_id=s.request.node_id,code=s.request.code,expires_at=s.expires_at,lifetime=lifetime_of(s),consent=M.lifetime_label(s),transport=transport}
+  -- A registry acceptance with a node that never attached used to look healthy here: `state` said
+  -- `accepted`, the consent line said `no expiry`, and nothing said the local phase was still `pending`
+  -- - the one fact that decides whether this node can do anything at all (measured 2026-11-01: a
+  -- permanent grant that was silent for an hour while every field read as if it were fine). Name it.
+  local note
+  if v.binding.state=='accepted' and s.phase~='accepted' then
+    note='accepted at the registry, but this node has not attached it yet: no outbound runtime has run the tick (phase '..tostring(s.phase)..')'
+  elseif v.binding.state=='pending' and s.request.pairing_expires_at<=host.now() then
+    note='no administrator has accepted this request and the ten-minute pairing window has closed; submit a new request'
+  end
+  return {ok=true,state=v.binding.state,active=active,registered=registered,attached=registered and own.relay_attached==true or false,lookup_error=lookup_error,local_role_preserved=true,phase=s.phase,attachment_note=note,pairing_expires_at=s.request.pairing_expires_at,network_role=s.network_role,node_id=s.request.node_id,code=s.request.code,expires_at=s.expires_at,lifetime=lifetime_of(s),consent=M.lifetime_label(s),transport=transport}
 end
 function M.profile(include_inactive)
   local s,err=M.saved();if not s then return nil,err or 'not_bound' end
