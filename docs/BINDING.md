@@ -21,7 +21,10 @@ use `wa bind run` to keep its explicit foreground, model-free transport alive.
 - `/bind [https://service]`: inspect service, display exact operator IDs and key
   fingerprints, confirm full current-user-account file/process authority by typing
   `BIND`, then submit a signed ten-minute pairing request. No noninteractive flag
-  silently approves consent. HTTP is permitted only for literal loopback fixtures. A
+  silently approves consent. HTTP is permitted only for literal loopback fixtures. It runs in the terminal
+  REPL **and** in the node's own served conversation (the web UI), which is the runtime that owns the
+  outbound transport: there the preview is one message and the confirmation word is the next message of
+  that session (it expires after ten minutes and belongs to that session only). A
   submitted request ends in one copy-able line - `wa accept <code>   # phrase <phrase>` -
   to paste on any node of the same fabric; the phrase stays on that line as a shell
   comment, so the pasted command is exactly `wa accept <code>` and both consoles can
