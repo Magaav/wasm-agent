@@ -560,13 +560,19 @@ if [ -n "$OLD_PID" ] && [ "$SUPERVISED" = "0" ] && [ -z "$MANAGED_UNIT" ]; then
   fi
   # Wait for the port to be free rather than sleeping a fixed two seconds. Measured: the process is
   # gone in ~150ms, so the fixed sleep was ~1.8s of outage per upgrade that nothing needed. This waits
-  # for the actual condition - and, unlike a sleep, it cannot be too short on a loaded machine. Ten
-  # seconds, not five: the tree above can outlive the pid by a moment, and a refusal costs an install.
-  for _ in $(seq 1 200); do
+  # for the actual condition - and, unlike a sleep, it cannot be too short on a loaded machine. Sixty
+  # seconds, because on this Windows node the listener outlived the process for longer than ten (2026-11-03:
+  # four installs stopped the node with taskkill /T and still found :8799 LISTENING, with no pid netstat
+  # could name, for the whole wait). A refusal costs an install; the wait costs seconds.
+  for _ in $(seq 1 1200); do
     port_busy "$PORT" || break
     sleep 0.05
   done
-  if port_busy "$PORT"; then say "port $PORT is still occupied by pid $(pid_on_port); refusing to overwrite or kill another listener"; exit 1; fi
+  if port_busy "$PORT"; then
+    say "port $PORT is still occupied by pid $(pid_on_port); refusing to overwrite or kill another listener"
+    say "occupant rows (state/pid): $(netstat -ano -p TCP 2>/dev/null | awk -v p=":$PORT" '$1 == "TCP" && $2 ~ p"$" { printf "%s/%s ", $4, $5 }')"
+    exit 1
+  fi
   # The same process holds a *second* listener, and a node that starts while it is still taken spends two
   # seconds per retry waiting for it. Measured on this node's own deploy (2026-10-28): twelve retries on
   # /proc/net/tcp's 127.0.0.1:8800, printed as "[client] bind ... Address already in use", and the health
