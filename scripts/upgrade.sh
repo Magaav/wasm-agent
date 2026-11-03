@@ -546,18 +546,27 @@ if [ -d "$SOURCE_UI" ] && [ "$SOURCE_UI" != "$UI_DIR" ]; then
 fi
 if [ -n "$OLD_PID" ] && [ "$SUPERVISED" = "0" ] && [ -z "$MANAGED_UNIT" ]; then
   if [ "$WINDOWS" = "1" ]; then
-    powershell.exe -NoProfile -Command "Stop-Process -Id $OLD_PID -Force" 2>/dev/null
+    # The tree, not the pid. `Stop-Process -Id` reaches the node, but any handle to its listening socket
+    # that the node handed elsewhere keeps :$PORT LISTENING after the process is gone, and the refusal
+    # below then blames "another listener" nobody can name. Measured on this machine (2026-11-03): three
+    # consecutive installs stopped the node and refused at the port check, while a scratch node started
+    # and stopped the same way released the port in 176 ms and PROCESS_TERMINATE on the live node was
+    # granted. `taskkill /T` takes the tree, which is the only thing that reaches whatever else holds it.
+    # Risk: it also ends a shell the node had left running - the installer has already passed the idle
+    # gate, and the node that owned those shells is being replaced anyway.
+    MSYS_NO_PATHCONV=1 taskkill /PID "$OLD_PID" /T /F >/dev/null 2>&1 || true
   else
     kill "$OLD_PID" 2>/dev/null
   fi
   # Wait for the port to be free rather than sleeping a fixed two seconds. Measured: the process is
   # gone in ~150ms, so the fixed sleep was ~1.8s of outage per upgrade that nothing needed. This waits
-  # for the actual condition - and, unlike a sleep, it cannot be too short on a loaded machine.
-  for _ in $(seq 1 100); do
+  # for the actual condition - and, unlike a sleep, it cannot be too short on a loaded machine. Ten
+  # seconds, not five: the tree above can outlive the pid by a moment, and a refusal costs an install.
+  for _ in $(seq 1 200); do
     port_busy "$PORT" || break
     sleep 0.05
   done
-  if port_busy "$PORT"; then say "port $PORT is still occupied; refusing to overwrite or kill another listener"; exit 1; fi
+  if port_busy "$PORT"; then say "port $PORT is still occupied by pid $(pid_on_port); refusing to overwrite or kill another listener"; exit 1; fi
   # The same process holds a *second* listener, and a node that starts while it is still taken spends two
   # seconds per retry waiting for it. Measured on this node's own deploy (2026-10-28): twelve retries on
   # /proc/net/tcp's 127.0.0.1:8800, printed as "[client] bind ... Address already in use", and the health
