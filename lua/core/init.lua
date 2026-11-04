@@ -72,6 +72,26 @@ if command == nil or command == "chat" then
   return
 end
 
+-- `wa update` / `wa --update`: the same request `/update` makes in the chat and the window, from a
+-- shell - so one command updates any node: a tree install queues the Sentinel deploy, a release install
+-- runs the verifying bootstrap. `--check` only asks whether a newer release is published.
+if command == "update" or command == "--update" then
+  local check = false
+  for i = 2, #args do if args[i] == "--check" then check = true end end
+  local report = dofile("lua/core/update.lua").run({ reason = "requested with `wa update`", check = check, fresh = check })
+  local redact = dofile("lua/core/redact.lua")
+  if check and report.release then
+    print(redact.text(report.release.message or json.encode(report.release)))
+  else
+    print(redact.text(report.message or json.encode(report)))
+    if report.release and report.release.state == "behind" then print(redact.text("release: " .. report.release.message)) end
+    if report.observed and not report.ok then print(redact.text("observed: " .. tostring(report.observed))) end
+  end
+  if report.next then print(redact.text("next: " .. report.next)) end
+  if report.ok == false then os.exit(1) end
+  return
+end
+
 if command == "init" then
   print(json.encode({ schema = "ok" }))
 elseif command == "remember" then
@@ -238,11 +258,12 @@ elseif command == 'bind' or command == 'unbind' or command == 'accept' or comman
   local result=dofile('lua/core/binding_cli.lua').run(command,table.concat(args,' ',2))
   if result.error or result.ok==false then os.exit(1) end
 elseif command == "network" then
-  if args[2] ~= "role" or not args[3] then
-    print(json.encode({ error = "usage: wa network role <node-id> master|guest" }))
+  if not ((args[2] == "role" or args[2] == "forget") and args[3]) then
+    print(json.encode({ error = "usage: wa network role <node-id> master|guest | wa network forget <node-id>" }))
     os.exit(2)
   end
-  local result = dofile("lua/core/nodes.lua").network_role(args[3], args[4])
+  local nodes = dofile("lua/core/nodes.lua")
+  local result = args[2] == "forget" and nodes.network_forget(args[3]) or nodes.network_role(args[3], args[4])
   print(json.encode(result))
   if result.error then os.exit(1) end
 elseif command == "access" then
@@ -271,7 +292,9 @@ elseif command == "help" then
   print('    bind [service|status|renew|run] | unbind | nodes pending | accept <pairing-code>')
   print('    promote <node> | demote <node> | revoke <node>  confirmed network controls')
   print("    network role <node-id> master|guest  administrator-controlled network role")
+  print("    network forget <node-id>  administrator: remove a stale registration from the rendezvous")
   print("    access [log]  managed-access status or recent local audit events (no model)")
+  print("    update [--check] | --update  update this node (tree: Sentinel deploy; release: verified bundle)")
 else
   print("unknown command: " .. tostring(command))
   os.exit(2)

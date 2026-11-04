@@ -154,7 +154,11 @@ function M.begin(preview,consent,renew,lifetime)
   local server_owned=preflight and not preflight.ok and tostring(preflight.error):find('binding_existing_server_owned',1,true)~=nil
   if not server_owned and (not preflight or not preflight.ok) then return failure('binding_attachment_preflight_refused',preflight and preflight.error) end
   local now=math.floor(host.now());local i=identity();local id=host.uuid():gsub('-','');local code=host.uuid():gsub('-',''):sub(1,12)
-  local name=host.read_file(paths.config()..'/node.name') or host.getenv('WASM_AGENT_NODE_NAME') or 'bound-node'
+  -- Unnamed nodes used to enrol as the literal 'bound-node', so every unnamed machine shared one name in the
+  -- registry (04/11: nextcloud and a second node both listed as bound-node). The machine name says which one.
+  local machine=host.getenv('COMPUTERNAME') or host.getenv('HOSTNAME') or (host.read_file('/etc/hostname') or '')
+  machine=tostring(machine):gsub('%s+$',''):gsub('^%s+','')
+  local name=host.read_file(paths.config()..'/node.name') or host.getenv('WASM_AGENT_NODE_NAME') or (machine~='' and machine) or 'bound-node'
   name=name:gsub('^%s+',''):gsub('%s+$','')
   -- The pairing window is ten minutes and a test may only shorten it: the knob exists so the late-accept
   -- path can be exercised with authentic digests and a genuinely elapsed window instead of a forged

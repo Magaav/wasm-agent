@@ -21,6 +21,13 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
 const ONLINE_WINDOW: i64 = 180; // seconds
+// A registration nobody has heartbeated for this long is removed. Without it the registry only ever
+// grew: a scratch home, a deleted worktree or a reinstall leaves a row whose key no longer exists, and
+// only that key may `/forget` itself - so the row stayed listed forever (26 rows, 4 real nodes, 04/11).
+// Removing a row loses nothing: a live node re-registers on its next heartbeat, its granted role lives
+// in `network_roles` and its binding in the binding tables. Admins are never pruned.
+// `WA_RENDEZVOUS_RETENTION_SECONDS` overrides it; 0 keeps every row.
+const DEFAULT_RETENTION: i64 = 7 * 24 * 3600;
 const POLL_WAIT: Duration = Duration::from_secs(25);
 const SEND_WAIT: Duration = Duration::from_secs(45);
 // How long to hold a request for a node that is not attached at all. The node
@@ -98,6 +105,8 @@ pub fn run(bind: &str, port: u16, db_path: &str) {
             return;
         }
     }
+
+    if let Ok(connection) = Connection::open(db_path) { prune(&connection); }
 
     let listener = match TcpListener::bind((bind, port)) {
         Ok(listener) => listener,
@@ -232,7 +241,7 @@ fn handle(db_path: &str, stream: &mut TcpStream, relay: &Arc<Mutex<RelayState>>)
         return register(&connection, stream, &payload, &path);
     }
     if path == "/forget" && method == "POST" {
-        return forget(&connection, stream, &payload);
+        return forget(&connection, stream, &payload, &body, &header);
     }
     if path == "/lookup" {
         let node_id = query_value(&query, "node_id");
@@ -467,6 +476,34 @@ fn banner(connection: &Connection, relay: &Arc<Mutex<RelayState>>) -> String {
     .to_string()
 }
 
+fn retention() -> i64 {
+    std::env::var("WA_RENDEZVOUS_RETENTION_SECONDS").ok()
+        .and_then(|value| value.trim().parse::<i64>().ok())
+        .filter(|value| *value >= 0)
+        .unwrap_or(DEFAULT_RETENTION)
+}
+
+/// Delete registrations unseen for longer than the retention window (never an admin). Returns the count.
+fn prune(connection: &Connection) -> usize {
+    let window = retention();
+    if window == 0 { return 0; }
+    let admins = network_admins();
+    let cutoff = now() - window;
+    let stale: Vec<String> = connection
+        .prepare("SELECT node_id FROM nodes WHERE last_seen IS NULL OR last_seen < ?1")
+        .and_then(|mut statement| {
+            let rows = statement.query_map([cutoff], |row| row.get::<_, String>(0))?;
+            Ok(rows.flatten().collect())
+        })
+        .unwrap_or_default();
+    let mut removed = 0;
+    for id in stale.iter().filter(|id| !admins.contains(id)) {
+        if connection.execute("DELETE FROM nodes WHERE node_id = ?1", [id]).unwrap_or(0) > 0 { removed += 1; }
+    }
+    if removed > 0 { eprintln!("[rendezvous] pruned {removed} registration(s) unseen for {window}s"); }
+    removed
+}
+
 fn network_admins() -> Vec<String> {
     std::env::var("WASM_AGENT_NETWORK_ADMINS").unwrap_or_default()
         .split(',').map(str::trim).filter(|s| !s.is_empty()).map(str::to_string).collect()
@@ -607,6 +644,12 @@ fn register(connection: &Connection, stream: &mut TcpStream, payload: &Value, pa
         rusqlite::params![node_id, public_key, name, role, endpoints,
             serde_json::to_string(&payload["resources"]).unwrap_or_else(|_| "null".into()), now],
     );
+    // A long-running registry prunes on its own, at most hourly, riding on heartbeats it already handles.
+    static LAST_PRUNE: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+    if outcome.is_ok() && now - LAST_PRUNE.load(std::sync::atomic::Ordering::Relaxed) > 3600 {
+        LAST_PRUNE.store(now, std::sync::atomic::Ordering::Relaxed);
+        prune(connection);
+    }
     match outcome {
         Ok(_) => respond(
             stream,
@@ -617,8 +660,24 @@ fn register(connection: &Connection, stream: &mut TcpStream, payload: &Value, pa
     }
 }
 
-fn forget(connection: &Connection, stream: &mut TcpStream, payload: &Value) -> std::io::Result<()> {
+fn forget(connection: &Connection, stream: &mut TcpStream, payload: &Value,
+          body: &[u8], header: &dyn Fn(&str) -> String) -> std::io::Result<()> {
     let node_id = payload["node_id"].as_str().unwrap_or_default();
+    // An administrator removes another node's registration: signed `forget-node|<admin>|ts|<body hash>`,
+    // the same envelope as `/role`. This is the only way to clear a row whose key is gone.
+    let from = header("x-wa-node");
+    if !from.is_empty() && from != node_id {
+        let admins = network_admins();
+        if admins.is_empty() { return respond(stream, 403, "{\"error\":\"managed_service_required\"}"); }
+        if !verify(connection, &from, "forget-node", header, Some(body), stream) { return Ok(()); }
+        if !admins.contains(&from) { return respond(stream, 403, "{\"error\":\"administrator_required\"}"); }
+        if admins.iter().any(|id| id == node_id) { return respond(stream, 400, "{\"error\":\"admin_not_forgettable\"}"); }
+        if public_key_of(connection, node_id).is_none() { return respond(stream, 404, "{\"error\":\"unknown_node\"}"); }
+        let _ = connection.execute("DELETE FROM nodes WHERE node_id = ?1", rusqlite::params![node_id]);
+        let _ = connection.execute("DELETE FROM network_roles WHERE node_id = ?1", rusqlite::params![node_id]);
+        eprintln!("[rendezvous] {} forgotten by administrator {}", &node_id[..node_id.len().min(12)], &from[..from.len().min(12)]);
+        return respond(stream, 200, &json!({"ok": true, "forgotten": node_id, "by": from}).to_string());
+    }
     let ts = payload["ts"].as_i64().unwrap_or(0);
     let signature = payload["signature"].as_str().unwrap_or_default();
     if now().abs_diff(ts) > 120 { return respond(stream, 401, "{\"error\":\"stale_request\"}"); }

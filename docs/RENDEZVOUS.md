@@ -114,6 +114,17 @@ It verifies exact installed bytes, fresh PID and unchanged administrator pins;
 A refusal after the swap is unresolved/partial, never permission to replay.
 This is not the node/UI deployment or a full release gate.
 
+## Retention and removal
+
+The registry forgets on its own: a registration unseen for `WA_RENDEZVOUS_RETENTION_SECONDS` (default 7
+days; 0 keeps everything) is pruned at start and at most hourly after that. Nothing is lost - a live node
+re-registers on its next heartbeat, granted roles live in `network_roles` and bindings in their own
+tables - and administrators are never pruned. An administrator removes a row at once with
+`wa network forget <node-id>` (signed `forget-node`, refused for another admin). Throwaway nodes do not
+register at all: a deploy's scratch proof node runs without `WASM_AGENT_RENDEZVOUS`/`WASM_AGENT_RELAY`.
+Before this, only the key holder could `/forget` its own row, so every deleted worktree, scratch home and
+reinstall left a row nobody could remove (26 rows for 4 real nodes, 04/11).
+
 ## Guest nodes
 
 A node is a **guest** when `WASM_AGENT_NODE_ROLE=guest`, or when `<config>/node.role`

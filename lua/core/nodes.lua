@@ -691,6 +691,24 @@ function M.remote_call(selector, capability, args)
   return decoded
 end
 
+-- Remove another node's registration from the rendezvous (administrators only). The one way to clear a
+-- row whose key is gone - a deleted worktree, a scratch home, a reinstall; such a key can never sign
+-- its own `/forget`. Exact node id only: a display name is self-chosen and may be shared.
+function M.network_forget(node_id)
+  if type(node_id) ~= "string" or not node_id:match("^%x+$") then return { error = "node_id_required" } end
+  local url = M.rendezvous_url()
+  if url == "" then return { error = "no_rendezvous" } end
+  local body = json.encode({ node_id = node_id, nonce = host.uuid() })
+  local headers = M.signed_headers("forget-node", body)
+  if not headers then return { error = "node_identity_unavailable" } end
+  local response = json.decode(host.http("POST", url:gsub("/+$", "") .. "/forget", json.encode(headers), body))
+  if not response or tonumber(response.status) ~= 200 then
+    return { error = "network_forget_refused", status = response and response.status, detail = response and response.body }
+  end
+  M.invalidate()
+  return json.decode(response.body)
+end
+
 -- Registry authority first, then the recipient's pinned local grant. Report partial changes.
 function M.network_role(node_id, role, preview)
   if role ~= "master" and role ~= "guest" then return { error = "invalid_role" } end

@@ -675,7 +675,11 @@ elif ! WASM_AGENT_HOME="$EMBEDDED_HOME" WASM_AGENT_LUA_ROOT='' \
   rm -rf "$SCRATCH_HOME"
   fail "embedded runtime check failed; not installing it"
 fi
-WASM_AGENT_HOME="$SCRATCH_HOME" "$NEW" serve --port "$SCRATCH" --client-port "$((SCRATCH + 1))" --ui "$ROOT/ui" >"$SCRATCH_HOME/out.log" 2>&1 &
+# The proof node is a throwaway: it must not announce itself to the fleet. Inheriting the rendezvous
+# made every deploy register a fresh key that no one could ever remove (the stale-node pile, 04/11).
+# Its own --db too: the default database follows HOME, not WASM_AGENT_HOME, so without it the proof
+# node opened the live node's memory.db, where its startup recovery could touch live sessions.
+env -u WASM_AGENT_RENDEZVOUS -u WASM_AGENT_RELAY WASM_AGENT_MANAGED=0 WASM_AGENT_HOME="$SCRATCH_HOME" "$NEW" --db "$SCRATCH_HOME/scratch.db" serve --port "$SCRATCH" --client-port "$((SCRATCH + 1))" --ui "$ROOT/ui" >"$SCRATCH_HOME/out.log" 2>&1 &
 SCRATCH_PID=$!
 ANSWERED=0
 for _ in $(seq 1 100); do
