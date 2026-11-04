@@ -341,6 +341,9 @@ not prove omitted information was unnecessary for the model's decision.
 
 ### Source-first edit guidance experiment
 
+**Retired 2026-11-04.** The switch no longer exists. Its durable rule, that shell output is not
+an edit receipt, is part of the `edit` tool description. This section is kept as history.
+
 `WASM_AGENT_EDIT_SOURCE_FIRST=1` adds a tool-aware guideline to parent and child
 prompts: read the exact source before editing, use the returned selection receipt,
 and consult the graph for cross-file relationships or patch impact when needed.

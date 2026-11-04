@@ -348,7 +348,7 @@ M.admin = {
   }, {}),
   schema("write", "Create or overwrite a text file. In a required session workspace, writes are limited to the worktree and its session scratch root; a refusal lists both in allowed_writes.", {
     path = { type = "string" }, content = { type = "string" } }, { "path", "content" }),
-  schema("edit", "Replace text in one file, using exactly one form. `edits` (old_text/new_text) quotes bytes that must occur exactly once; a miss returns the nearest region. `range_edits` copies a read `selection` unchanged with replacement_lines (optional start_line/end_line inside its edit_lines), for text you cannot quote. All ranges apply atomically; check the echo of what each replaced.", {
+  schema("edit", "Replace text in one file, using exactly one form. `edits` (old_text/new_text) quotes bytes that must occur exactly once; a miss returns the nearest region. `range_edits` copies a read `selection` unchanged with replacement_lines (optional start_line/end_line inside its edit_lines), for text you cannot quote; shell output does not provide an edit receipt. All ranges apply atomically; check the echo of what each replaced.", {
     path = { type = "string" },
     edits = { type = "array", minItems = 1, maxItems = 64, items = { type = "object",
       properties = {

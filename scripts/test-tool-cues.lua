@@ -70,31 +70,23 @@ local no_shell_child = agent.subagent_system_prompt(bot,
 ok(no_shell_child:find(rg_guidance, 1, true) == nil,
   "a child without bash must not receive ripgrep guidance")
 local real_getenv = host.getenv
-local edit_guidance = "Before editing source, use read/read_many for the exact lines"
-ok(prompt:find(edit_guidance, 1, true) == nil and child:find(edit_guidance, 1, true) == nil,
-  "source-first guidance stays opt-in")
+-- The opt-in source-first guideline (WASM_AGENT_EDIT_SOURCE_FIRST) was retired on 04/11: it
+-- pushed the receipt form the edit tool itself ranks second. Its one durable rule lives in the
+-- edit description, which reaches every envelope that can edit.
+local edit_description
+for _, item in ipairs(tool_list) do
+  if item["function"].name == "edit" then edit_description = item["function"].description end
+end
+ok(edit_description and edit_description:find("shell output does not provide an edit receipt", 1, true) ~= nil,
+  "the edit description says shell output is not an edit receipt")
+ok(prompt:find("Before editing source", 1, true) == nil and child:find("Before editing source", 1, true) == nil,
+  "the retired source-first guideline is gone")
 host.getenv = function(key)
   if key == "WASM_AGENT_EDIT_SOURCE_FIRST" then return "1" end
   return real_getenv(key)
 end
-local guided = agent.system_prompt("master", nil, nil, tool_list)
-local guided_child = agent.subagent_system_prompt(bot, tool_list)
-ok(guided:find(edit_guidance, 1, true) ~= nil and
-  guided_child:find(edit_guidance, 1, true) ~= nil,
-  "source-first guidance reaches parent and child")
-ok(guided:find("copy read.selection unchanged into edit", 1, true) ~= nil,
-  "source-first guidance names the exact edit receipt")
-ok(guided:find("use graph for cross-file relationships or patch impact when needed", 1, true) ~= nil,
-  "graph is available on demand rather than required first")
-local limited = agent.system_prompt("master", nil, nil,
-  tools.all_for({ read = true, edit = true }, "master"))
-ok(limited:find("use read for the exact lines", 1, true) ~= nil and
-  limited:find("use graph for cross-file", 1, true) == nil,
-  "guidance only names available tools")
-local no_edit = agent.system_prompt("master", nil, nil,
-  tools.all_for({ read = true, bash = true }, "master"))
-ok(no_edit:find("Before editing source", 1, true) == nil,
-  "guidance is absent when edits are unavailable")
+ok(agent.system_prompt("master", nil, nil, tool_list) == prompt,
+  "the retired switch no longer changes the prompt")
 host.getenv = real_getenv
 host.getenv = function(key)
   if key == "WASM_AGENT_TOOL_SNIPPETS" then return "names" end

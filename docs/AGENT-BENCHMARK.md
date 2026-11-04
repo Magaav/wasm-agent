@@ -217,6 +217,9 @@ scoped exception for these isolated solver processes, not general re-enabled del
 
 ## Implemented candidate1: opt-in batching guidance
 
+**Retired 2026-11-04.** The switch no longer exists; every run carries the default guidance and
+telemetry records `control`. This section is kept as history.
+
 Baseline runtime source is `dfce34ea3e159b4c3bf1afda87cef71c8759cf04`.
 The patched runtime supports `WASM_AGENT_BATCHING_GUIDANCE=1`; unset/other values
 retain the old parent and child prompt bytes. Both builders use available-tool-aware

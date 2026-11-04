@@ -440,46 +440,6 @@ local SHELL_SEARCH_GUIDELINE = "For shell text search or file discovery, prefer 
   .. "(`rg` and `rg --files`) over `grep`/`find`; if `rg` is unavailable, report the shell "
   .. "fallback in your final answer so `rg` can be installed. Keep the portable `grep` tool for bounded literal searches"
 
-local function source_edit_guideline(have)
-  if host.getenv("WASM_AGENT_EDIT_SOURCE_FIRST") ~= "1" or not (have.read and have.edit) then
-    return nil
-  end
-  local reader = have.read_many and "read/read_many" or "read"
-  local line = "Before editing source, use " .. reader .. " for the exact lines and copy "
-    .. "read.selection unchanged into edit. Shell output does not provide an edit receipt"
-  if have.graph then
-    line = line .. "; use graph for cross-file relationships or patch impact when needed"
-  end
-  return line
-end
-
--- Candidate 1: an explicit planning treatment, not a new executor or default.
--- Keep the old prompt byte-identical when unset; measure against that control.
-local function batching_guidelines(have)
-  if host.getenv("WASM_AGENT_BATCHING_GUIDANCE") ~= "1" then return nil end
-  local lines = {}
-  if have.read_many then
-    lines[#lines + 1] = "Batching candidate 1: when you already know several independent file ranges, "
-      .. "fetch them in one read_many (up to eight ranges). Keep exact contents, per-file errors "
-      .. "and continuation/version addresses; do not replace evidence with summaries"
-  elseif have.read then
-    lines[#lines + 1] = "Batching candidate 1: request already-known independent read ranges "
-      .. "together in one response; retain each exact result and error"
-  end
-  if next(have) then
-    lines[#lines + 1] = "Before requesting tools, identify independent reads/checks whose arguments "
-      .. "are already known and group them in the same response. If a later action depends on "
-      .. "interpreting a result, leave it for the next response. Keep writes, dependent commands "
-      .. "and conflicting side effects ordered; a batch is not permission to overlap arbitrary shell commands"
-  end
-  if have.bash then
-    lines[#lines + 1] = "Scope shell discovery to the named module or artifact reports and return "
-      .. "relative paths with counts; never recursively inventory retained solver worktrees. "
-      .. "If output is incomplete, narrow scope or follow exact continuation rather than discard its tail"
-  end
-  return lines
-end
-
 -- The user sees visible text and tool rows, not reasoning. A model that narrates only in its hidden
 -- reasoning leaves a run of bare tool lines: a measured DeepSeek session had 139 tool-calling steps
 -- with empty visible text. One short sentence per new step - stored and shown as commentary, not
@@ -514,20 +474,14 @@ local function guidelines_for(tool_list, envelope_mode)
   if have.bash then
     add(SHELL_SEARCH_GUIDELINE)
   end
-  local batching = batching_guidelines(have)
-  if batching then
-    for _, line in ipairs(batching) do add(line) end
-  else
-    if have.read_many then
-      add("When several known file reads are independent, request them together with read_many; "
-        .. "keep dependent reads and edits in order")
-    end
-    add("When multiple tool actions are independent, request them together in one assistant response "
-      .. "so the tool round can make progress without another model reply. The tool runner may "
-      .. "overlap independent shell commands; keep dependent actions and conflicting side effects "
-      .. "in separate responses")
+  if have.read_many then
+    add("When several known file reads are independent, request them together with read_many; "
+      .. "keep dependent reads and edits in order")
   end
-  add(source_edit_guideline(have))
+  add("When multiple tool actions are independent, request them together in one assistant response "
+    .. "so the tool round can make progress without another model reply. The tool runner may "
+    .. "overlap independent shell commands; keep conflicting side effects in separate responses, "
+    .. "and leave anything that depends on a result for the next response")
   if next(have) then add(PREAMBLE_GUIDELINE) end
   if envelope_mode~='progressive' and have.skill then
     add("When a task matches a skill in <available_skills>, load it with the skill tool before starting")
@@ -713,11 +667,6 @@ function M.subagent_system_prompt(self, tool_list)
   end
   local child_guidelines = {}
   if have.bash then child_guidelines[#child_guidelines + 1] = SHELL_SEARCH_GUIDELINE end
-  for _, line in ipairs(batching_guidelines(have) or {}) do
-    child_guidelines[#child_guidelines + 1] = line
-  end
-  local edit_guideline = source_edit_guideline(have)
-  if edit_guideline then child_guidelines[#child_guidelines + 1] = edit_guideline end
   if #child_guidelines > 0 then
     parts[#parts + 1] = "Guidelines:\n- " .. table.concat(child_guidelines, "\n- ")
   end
@@ -2334,7 +2283,9 @@ function M:run_body(text, images)
       model = self.model, reasoning = (provider.reasoning(self.model) or {}).selected }
     dispatch_ctx.steering_admit=function() return steering.admit(self.user,self.session_id,self.steering_run_id) end
     local parallel_ops = tools.start_parallel_bash(calls, memory, self.role, dispatch_ctx)
-    local batching_mode = host.getenv("WASM_AGENT_BATCHING_GUIDANCE") == "1" and "candidate-1" or "control"
+    -- The batching treatment was retired (04/11): every run now carries the default guidance, so
+    -- telemetry keeps naming it `control`, the label scripts/lib/token-audit.cjs groups by.
+    local batching_mode = "control"
 
     for tool_index, call in ipairs(calls) do
       local function_ = call["function"] or {}

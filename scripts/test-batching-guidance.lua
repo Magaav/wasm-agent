@@ -1,9 +1,11 @@
--- Model-free test of candidate-1 planning instructions and actual loop grouping.
+-- Model-free test of the default batching guidance and actual loop grouping. The opt-in
+-- "candidate 1" treatment (WASM_AGENT_BATCHING_GUIDANCE) was retired on 04/11: never measured
+-- live, it removed the default parallel-shell line. Its two useful rules are now default text.
 local json=dofile('lua/vendor/json.lua')
 local real_getenv=host.getenv
 local overrides={WASM_AGENT_PROVIDER='opencode-go',WASM_AGENT_LLM_API_KEY='fixture-only',
   WASM_AGENT_LLM_MODEL='deepseek-v4.1-flash',WASM_AGENT_PI_MODELS_STORE='missing-test-store',
-  WASM_AGENT_CONTEXT_BUDGET='0',WASM_AGENT_BATCHING_GUIDANCE='0',WASM_AGENT_MAX_TOOL_ROUNDS='3'}
+  WASM_AGENT_CONTEXT_BUDGET='0',WASM_AGENT_MAX_TOOL_ROUNDS='3'}
 host.getenv=function(k) if overrides[k]~=nil then return overrides[k] end return real_getenv(k) end
 host.http=function() error('unexpected network in batching fixture') end
 host.http_stream=host.http
@@ -15,32 +17,18 @@ local checks=0
 local function check(v,label) assert(v,label);checks=checks+1 end
 local list=tools.all('master')
 local original_schemas=json.encode(list)
-local bot={subagent={id='fixture',instructions='',limits={}},role='master'}
-local control=agent.system_prompt('master',nil,nil,list)
-local control_child=agent.subagent_system_prompt(bot,list)
-local mark='Batching candidate 1:'
-check(not control:find(mark,1,true) and not control_child:find(mark,1,true),'control prompt unchanged without switch')
-overrides.WASM_AGENT_BATCHING_GUIDANCE='1'
-local treatment=agent.system_prompt('master',nil,nil,list)
-local treatment_child=agent.subagent_system_prompt(bot,list)
-check(treatment:find(mark,1,true) and treatment_child:find(mark,1,true),'treatment reaches both prompt builders without launching children')
-check(treatment:find('one read_many (up to eight ranges)',1,true),'prefer existing ranged read tool')
-check(treatment:find('interpreting a result',1,true),'dependent reads stay sequential')
-check(treatment:find('Keep writes, dependent commands',1,true),'writes and dependent commands stay ordered')
-check(treatment:find('not permission to overlap arbitrary shell commands',1,true),'no unsafe executor authority')
-check(treatment:find('per-file errors',1,true) and treatment:find('continuation/version addresses',1,true),'exact evidence and failures retained')
-check(treatment:find('never recursively inventory retained solver worktrees',1,true),'discovery noise is scoped out')
-check(not treatment:find('When multiple tool actions are independent',1,true),'old and new batching guidance not duplicated')
+local prompt=agent.system_prompt('master',nil,nil,list)
+check(prompt:find('When multiple tool actions are independent',1,true),'default grouping guidance present')
+check(prompt:find('may overlap independent shell commands',1,true),'parallel shell line kept')
+check(prompt:find('leave anything that depends on a result for the next response',1,true),'dependent actions wait for the next response')
+check(not prompt:find('Batching candidate 1:',1,true) and not prompt:find('solver worktrees',1,true),'retired treatment text is gone')
+overrides.WASM_AGENT_BATCHING_GUIDANCE='1';overrides.WASM_AGENT_EDIT_SOURCE_FIRST='1'
+check(agent.system_prompt('master',nil,nil,list)==prompt,'retired switches no longer change the prompt')
+overrides.WASM_AGENT_BATCHING_GUIDANCE=nil;overrides.WASM_AGENT_EDIT_SOURCE_FIRST=nil
 local read_only=agent.system_prompt('master',nil,nil,tools.all_for({read=true},'master'))
--- The guidance, not the skills listing: a skill's own description (codemode-output names read_many)
--- is authored metadata shown as-is, and it failed this check on the v0.1.0-alpha.12 gate (29/10).
 local read_only_guidance=read_only:gsub('<available_skills>.-</available_skills>','')
-check(not read_only_guidance:find('read_many',1,true) and not read_only_guidance:find('Scope shell discovery',1,true),'guidance names only available readers/shell')
-local none=agent.subagent_system_prompt(bot,{})
-check(not none:find(mark,1,true) and not none:find('Before requesting tools',1,true),'no unavailable tools on reasoning-only profile')
-check(json.encode(list)==original_schemas,'treatment does not alter any schemas')
-overrides.WASM_AGENT_BATCHING_GUIDANCE='false'
-check(agent.system_prompt('master',nil,nil,list)==control,'only literal1 opts in; exact control bytes retained')
+check(not read_only_guidance:find('read_many',1,true),'guidance names only available readers')
+check(json.encode(list)==original_schemas,'prompt building does not alter any schemas')
 local root=dofile('lua/core/paths.lua').data()..'/batching/'
 local first,second=root..'first.txt',root..'second.txt'
 assert(host.write_file(first,'alpha\nbeta\n'));assert(host.write_file(second,'second\n'))
@@ -50,7 +38,6 @@ local calls={
   {id='single-range',type='function',['function']={name='read',arguments=json.encode({path=first,offset=1,limit=1})}},
 }
 local function execute(mode)
-  overrides.WASM_AGENT_BATCHING_GUIDANCE=mode
   local step,sent=0,{}
   host.http_stream=function(_,_,_,body)
     step=step+1;sent[step]=json.decode(body)
@@ -78,13 +65,13 @@ local function execute(mode)
   check(starts[1].tool_group_id==starts[2].tool_group_id and starts[1].tool_group_size==2
     and starts[1].tool_group_index==1 and starts[2].tool_group_index==2,'response group identity/count/order measured')
   check(starts[1].read_many_ranges==3 and starts[2].read_many_ranges==nil,'range count distinct from tool call count')
-  check(starts[1].batching_guidance==(mode=='1' and 'candidate-1' or 'control')
+  check(starts[1].batching_guidance=='control'
     and ends[1].batching_guidance==starts[1].batching_guidance,'both telemetry boundaries name actual treatment')
   check(ends[1].ok==false,'partial read failure not disguised as group success')
   check(not results[1].content:find('batching_guidance',1,true),'instrumentation does not enter tool results')
   return sent[1].messages[1].content,results
 end
-local a,ar=execute('0');local b,br=execute('1')
-check(not a:find(mark,1,true) and b:find(mark,1,true),'actual serialized request differs in intended instruction only')
-check(ar[1].content==br[1].content and ar[2].content==br[2].content,'control/treatment read outputs byte-identical')
+local a,ar=execute('a');local b,br=execute('b')
+check(a==b,'serialized system prompt is stable across runs')
+check(ar[1].content==br[1].content and ar[2].content==br[2].content,'read outputs byte-identical across runs')
 print('batching guidance ok ('..checks..' checks; zero paid model calls)')

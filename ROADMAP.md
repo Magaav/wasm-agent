@@ -746,6 +746,12 @@ claim. Source integrated/published at a248aba. Skill-only installation request
 manual installed-skill copy or effect replay; published repository CLI is available,
 but installed-skill convergence is explicitly unverified until supported recovery.
 
+2026-11-04, retired `WASM_AGENT_BATCHING_GUIDANCE` and `WASM_AGENT_EDIT_SOURCE_FIRST`: neither was
+ever measured live; batching removed the default parallel-shell line and source-first pushed
+the receipt form the edit tool ranks second. Their durable rules are now default text (wait
+for results that a later action depends on; shell output is not an edit receipt). Telemetry
+keeps `batching_guidance: control`. The entries below are history.
+
 2026-10-07, implemented benchmark candidate1 behind
 `WASM_AGENT_BATCHING_GUIDANCE=1`: explicit available-tool-aware grouping of known
 independent ranges/checks, exact errors/cursors, dependency/write ordering and

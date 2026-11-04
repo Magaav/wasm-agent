@@ -158,7 +158,8 @@ They help identify growth without copying prompt text into the event ledger.
 `read_many` can request up to eight independent file ranges in one step;
 each result uses the same read path and reports its own failure.
 Tool starts/ends also identify the response group (`tool_group_id`, size/index)
-and `batching_guidance` treatment; starts count `read_many_ranges` separately.
+and `batching_guidance` (always `control` since the treatment was retired on 04/11);
+starts count `read_many_ranges` separately.
 The offline audit exposes only aggregate complete/incomplete groups and counts,
 never group IDs. Historical missing group metadata stays unmeasured. This measures
 requested grouping, not proof of independence/parallel execution or saved model calls. Large combined
