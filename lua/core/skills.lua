@@ -226,26 +226,16 @@ local function xml_escape(value)
     :gsub("\"", "&quot;"):gsub("'", "&apos;")
 end
 
--- Shared procedure policy stays once in the prompt in both modes. Deferring
--- metadata must not remove safety rules or repeat this policy in every tool reply.
+-- The one procedure rule every skill needs, once in the prompt. The spell lifecycle (crystallize,
+-- compose, repair) is a procedure of its own and loads on demand from skills/spells/SKILL.md.
 function M.usage()
-  return table.concat({
-    "While using any skill, crystallize repeatable deterministic sequences into verified spells, " ..
-      "then refactor the skill to call them. Verify the postconditions before preferring the spell.",
-    "Compose consecutive spells into one reusable spell when their sequence and parameter bindings " ..
-      "are repeatable and no inference decision lies between them; preserve every boundary check.",
-    "On spell failure, use inference by default: inspect the trace and reconcile effects, then " ..
-      "finish safely, repair and reverify the segment, or retire the spell and restore inference. " ..
-      "A correct refusal is not a spell defect. Never weaken checks or blindly replay effects. " ..
-      "Stay within your allowed tools and editable skill scope.",
-    "When a skill file references a relative path, resolve it against the skill directory " ..
-      "(parent of SKILL.md / dirname of the path) and use that absolute path in tool commands.",
-  },"\n")
+  return "Relative paths in a skill resolve against its directory. Before saving, composing or "
+    .. "repairing a spell, load the `spells` skill."
 end
 
 function M.prompt_block(mode)
   if mode=='search' then
-    return M.usage()..'\n\nBefore specialized work, discover procedures with skill(query="<task keywords>"), then load the matching full instructions with skill(name="<name>"). Known names may load directly. Query "*" with offset/snapshot to inspect the complete visible catalogue; no match is not proof of absence. Metadata and discovery never grant authority.'
+    return 'Before specialized work, find a procedure with skill(query="<task keywords>") and load it with skill(name="<name>"); a known name loads directly. query="*" pages the whole catalogue (offset/snapshot); lexical search can miss synonyms.\n'..M.usage()
   end
   local visible = {}
   for _, skill in ipairs(M.list()) do

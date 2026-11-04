@@ -33,10 +33,11 @@ const PROTOCOL = 'skills/git-orchestrator/SKILL.md'; // authority, lifecycle, la
 const PRODUCER = 'skills/parallel-evolution/SKILL.md'; // the per-turn producer loop
 const RESERVATIONS = 'docs/CONCURRENCY.md'; // how many lanes fit, and what is serial
 
-// AGENTS.md is injected into every request. Growing it is the regression this refactor removed, so the
-// budget is the pre-refactor size (commit f962844: 10418 bytes) and it only goes down.
+// AGENTS.md is injected into every request made from this checkout. Growing it is the regression two
+// refactors removed (f962844: 10418 bytes; the lean-prompt rewrite: under 6000), so the budget is a
+// ratchet: it only goes down.
 const INJECTED = 'AGENTS.md';
-const INJECTED_BUDGET_BYTES = 10418;
+const INJECTED_BUDGET_BYTES = 6000;
 
 // The files this refactor owns. The vocabulary check below is enforced here and only here: the rest of
 // the repository names node-threads "workers" in code, UI and tests, which is another worker's rename
@@ -73,7 +74,7 @@ const HOMES = [
     'Follow-up', 'Sentinel', 'never replayed', 'integrate'] },
   { file: RESERVATIONS, contains: ['## Lane reservations and the serial gate', 'WA_GATE_JOBS'] },
   { file: INJECTED, contains: ['skills/git-orchestrator/SKILL.md', 'merge lane', 'The integration protocol',
-    'docs/FABRIC.md', 'node-thread', 'Operator-selected direct workflow',
+    'docs/FABRIC.md', 'node-thread', 'operator-selected direct workflow',
     'subagents or external inference agents unless the operator explicitly enables', 'Only the coordinator owns', 'self-review must be labelled self-review',
     'Unknown effects remain', 'Do not fabricate a factory receipt or disable remote protection'] },
   { file: 'docs/FABRIC.md', contains: ['Topology: the layers and their real names', 'node-threads',
@@ -82,9 +83,8 @@ const HOMES = [
     "Handle the human's requested task directly and serially", 'No subagents',
     'Self-review is', 'ordinary Git integration', 'Periodic watcher wakes remain disabled',
     'unknown', 'never replay or falsely settle',
-    'Temporary operator evaluation contract', 'until the operator explicitly removes it',
-    'harness, graph and code mode', 'used/not-used/unknown',
-    'Relay ALL original subagent feedback', 'including criticism',
+    '## Orchestration off', '## Orchestration on', 'orchestration_route_required',
+    'orchestration_delegate_required', 'Relay ALL original subagent feedback', 'including criticism',
     'never silently omit feedback', 'after settlement only',
     'pre-delegation reasoning/checks', 'guest/WhatsApp/third-party'] },
   { file: 'AGENTS.subagents.md', contains: [

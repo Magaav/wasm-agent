@@ -13,19 +13,24 @@ end
 local worker,wp=agent.role_instructions('subagents','master')
 local owner,op=agent.role_instructions('orchestrator','master')
 check(contract(worker),'worker evaluation contract')
-check(contract(owner),'coordinator evaluation contract')
+-- The coordinator's own reports follow AGENTS.md (harness evaluation only when a limitation hurt);
+-- the temporary contract stays with subagents, whose feedback the coordinator relays in full.
+check(not has(owner,'Temporary operator evaluation contract'),'coordinator follows the exception-only report rule')
 for _,s in ipairs({'Relay ALL original subagent feedback','with attribution','including criticism','preserve original evidence','never silently omit feedback','after settlement only','no active-subagent steering','automatic inference retry','runtime admission/acceptance gate','recursive','pre-delegation reasoning/checks','guest/WhatsApp/third-party'})do check(has(owner,s),'relay boundary '..s)end
 for _,kind in ipairs({'subagents','orchestrator'})do check(agent.role_instructions(kind,'guest')==nil,'guest role isolation '..kind)end
 local child=agent.subagent_system_prompt({role='master',subagent={id='orchestration-worker',allowed={read=true}}},{})
 local main=agent.system_prompt('master','PROJECT_KEEP','AGENTS.md',{},'progressive')
+local main_on=agent.system_prompt('master','PROJECT_KEEP','AGENTS.md',{},'progressive',{orchestration_enabled=true})
 local guest=agent.system_prompt('guest','GUEST_KEEP','AGENTS.guest.md',{},'full')
 check(has(child,worker),'worker sees original contract')
-check(has(main,owner),'coordinator sees original contract')
+check(has(main,agent.workflow_for_mode(owner,false)) and has(main_on,agent.workflow_for_mode(owner,true)),'coordinator sees the active section of its file')
+check(has(main_on,'Relay ALL original subagent feedback') and not has(main,'Relay ALL original subagent feedback'),'relay contract only while orchestrating')
 check(not has(child,'Relay ALL original subagent feedback'),'worker does not get coordinator contract')
 check(not has(guest,'Temporary operator evaluation contract'),'guest envelope isolation')
 check(has(guest,'GUEST_KEEP') and has(main,'PROJECT_KEEP'),'project scope retained')
-for _,s in ipairs({'bounded child task','Do not deploy/publish installed UI or use Sentinel','integrate','approved profile'})do check(has(child,s),'child boundary '..s)end
-for _,s in ipairs({'No subagents in direct mode','reason with context before native handoff','Followups wait for reports','never replay or falsely settle','Periodic watcher wakes remain disabled','self-review'})do check(has(main,s),'ordinary workflow '..s)end
+for _,s in ipairs({'bounded child task','Never deploy, publish the installed UI or use Sentinel','integrate','approved profile'})do check(has(child,s),'child boundary '..s)end
+for _,s in ipairs({'No subagents and no external inference agents','never replay or falsely settle','Periodic watcher wakes remain disabled','self-review'})do check(has(main,s),'ordinary workflow '..s)end
+for _,s in ipairs({'assess the request using this conversation','Send follow-ups only after a report settles'})do check(has(main_on,s),'orchestration workflow '..s)end
 -- The exact pre-amendment files are retained by the runner, not reconstructed approximations.
 for _,kind in ipairs({'subagents','orchestrator'})do
  local old=assert(host.read_file(assert(host.getenv('WA_EVAL_OLD_'..kind:upper()))))

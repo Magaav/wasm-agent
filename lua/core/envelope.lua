@@ -3,8 +3,8 @@
 -- baseline capability, also callable inside code mode.
 local json=dofile('lua/vendor/json.lua')
 local M={}
-local CLASSIC={remember=true,recall=true,skill=true,capabilities=true,tool_search=true,tool_call=true,read=true,read_many=true,write=true,edit=true,bash=true,tool_result=true,session_worktree=true,web_search=true,web_read=true}
-local LEAN={remember=true,recall=true,skill=true,tool_search=true,tool_call=true,read=true,read_many=true,write=true,edit=true,bash=true,session_worktree=true,web_search=true,web_read=true}
+local CLASSIC={time=true,remember=true,recall=true,skill=true,capabilities=true,tool_search=true,tool_call=true,read=true,read_many=true,write=true,edit=true,bash=true,tool_result=true,session_worktree=true,web_search=true,web_read=true}
+local LEAN={time=true,remember=true,recall=true,skill=true,tool_search=true,tool_call=true,read=true,read_many=true,write=true,edit=true,bash=true,session_worktree=true,web_search=true,web_read=true}
 -- Declared from the start in orchestration mode, never discovered: the handoff facade and the
 -- routing decision that precedes it. A child never receives either: its envelope mode is 'full'
 -- and its profile does not allow them.
@@ -41,6 +41,14 @@ function M.mode(ctx)
  local existing=rows("SELECT id FROM messages WHERE session_id=? AND role='assistant' LIMIT 1",{ctx.session_id})
  insert(k,#existing>0 and 'full' or 'progressive')
  r=rows('SELECT value FROM meta WHERE key=?',{k});return r[1].value
+end
+-- The declared core for a bootstrap mode, sorted; scripts/sync-prompt-docs.lua renders the docs from it.
+function M.core_names(mode)
+ local set=(mode or M.bootstrap_mode())=='classic' and CLASSIC or LEAN
+ local names={};for name in pairs(set)do names[#names+1]=name end;table.sort(names);return names
+end
+function M.orchestration_names()
+ local names={};for name in pairs(ORCHESTRATION_FIRST_CLASS)do names[#names+1]=name end;table.sort(names);return names
 end
 function M.bootstrap(catalog,ctx)
  local core=M.bootstrap_mode()=='lean' and LEAN or CLASSIC

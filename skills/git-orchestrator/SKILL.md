@@ -77,7 +77,7 @@ same files. Overlap is expected; the merge queue resolves it. This supersedes "o
 per hot file" for the operator-selected direct workflow: that rule assumed a hand-merged queue, and
 this one has a procedure.
 
-- **A worker commits only.** Never merges, never deploys, never pushes `main`. Its branch is its
+- **A subagent commits only.** Never merges, never deploys, never pushes `main`. Its branch is its
   delivery and its report is evidence, not verification.
 - **First green lands first.** The first lane that passes the coordinator's focused checks on a tree merged
   with current `origin/main` is merged and pushed; everything behind it waits.
@@ -106,8 +106,8 @@ written here, the checkbox was a policy nobody read.
 
 When it is **on**:
 
-1. A worker's delivery is **not accepted on the coordinator's focused checks alone**. Before merging, start ONE
-   reviewer child with: the worker's brief, its branch, and its report (if it made one).
+1. A subagent's delivery is **not accepted on the coordinator's focused checks alone**. Before merging, start ONE
+   reviewer child with: the subagent's brief, its branch, and its report (if it made one).
 2. The reviewer is a **second implementer, not a critic**: it reads the diff, pushes the branch further
    where it is wrong (same branch, its own commits), and answers once - `nothing required` or `changed
    X`. There is no agree/disagree round; that is what keeps the cost one extra step.
@@ -119,7 +119,7 @@ When it is **off**: the delivery is accepted on the coordinator's focused checks
 the report line says so. That is the operator's explicit choice, not a silent default.
 
 What the reviewer is worth, measured today rather than argued: three deliveries settled with
-`"report":"absent"`, one worker deleted another lane's 27-line doc section out of scope, and one lane
+`"report":"absent"`, one subagent deleted another lane's 27-line doc section out of scope, and one lane
 was killed by a deploy restart. The reviewer is the step that reads the branch instead of the claim.
 
 **What a landing must carry.** A landing missing any of these is not a landing:

@@ -10,9 +10,9 @@ local sid=session('empty');local ctx={session_id=sid,user_id='master',role='mast
 -- setting is native), which capabilities and tool_call, run with this ctx, never see (29/10).
 local all=tools.all('master',ctx,memory);local bootstrap,mode=tools.envelope('master',ctx)
 check(mode=='progressive','empty session progressive')
--- The lean set by name (13 since web_search/web_read joined it, 7703ce23), plus codemode only when
--- this run admits it: a fixed count broke on that addition (v0.1.0-alpha.12 gate, 29/10).
-local LEAN_NAMES={'remember','recall','skill','tool_search','tool_call','read','read_many','write','edit','bash','session_worktree','web_search','web_read'}
+-- The lean set by name (13 since web_search/web_read joined it, 7703ce23; 14 with time, so the clock
+-- rule never names an undeclared tool), plus codemode only when this run admits it.
+local LEAN_NAMES={'time','remember','recall','skill','tool_search','tool_call','read','read_many','write','edit','bash','session_worktree','web_search','web_read'}
 local function lean_exact(list)
   local declared={};for _,item in ipairs(list)do declared[(item['function'] or item).name or '']=true end
   for _,name in ipairs(LEAN_NAMES)do if not declared[name] then return false end end
@@ -33,7 +33,7 @@ local names={};for _,r in ipairs(found.tools)do names[r.name]=true end
 check(names.web_search and names.web_read,'web fixture discovery reaches both tools')
 check(json.encode(tools.envelope('master',ctx))==before,'schema prefix does not expand')
 local first=agent.new(sid,function()end,'master','master',''):build_context()[1].content
-check(first:find('Additional capabilities',1,true)~=nil,'model instructed about discovery')
+check(first:find('are called with tool_call(name, arguments)',1,true)~=nil and first:find('\n- memories: ',1,true)~=nil,'model instructed about discovery, with the on-demand index')
 check(not first:find('web_search -',1,true),'no full optional tool index')
 local second=agent.new(sid,function()end,'master','master',''):build_context()[1].content
 check(first==second,'stable system before/after discovery')

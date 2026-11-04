@@ -5,7 +5,7 @@ host.http=function()error('network forbidden')end
 local checks=0;local function check(v,why)assert(v,why);checks=checks+1 end
 local sid=memory.start_session('','layers',{user_id='master'});local ctx={session_id=sid,user_id='master',role='master'}
 local schemas=tools.envelope('master',ctx);local names={};for _,s in ipairs(schemas)do names[s['function'].name]=true end
-check(#schemas==14 and names.read_many and names.web_search and names.web_read,'read_many is native main-loop bootstrap')
+check(#schemas>=14 and names.time and names.read_many and names.web_search and names.web_read,'read_many is native main-loop bootstrap')
 check(not names.capabilities and not names.tool_result,'only catalog/evidence helpers remain deferred')
 local one=agent.system_sections('master','PROJECT_KEEP','a"&<.md',schemas,'progressive')
 local two=agent.system_sections('master','OTHER_PROJECT','b.md',schemas,'progressive',{orchestration_enabled=true})
@@ -21,13 +21,15 @@ check(not pcall(parts.section,'good','x',{['bad"']='v'}),'invalid attribute refu
 check(parts.section('good','x',{source='a"&<'})=='<good source="a&quot;&amp;&lt;">\nx\n</good>','attribute escaping')
 local prompt=agent.system_prompt('master','PROJECT_KEEP','a"&<.md',schemas,'progressive')
 local previous=0;for _,tag in ipairs({'generic','stack','workflow','project','session'})do local at=assert(prompt:find('<'..tag,1,true));check(at>previous,'stable layer order '..tag);previous=at end
-for _,tag in ipairs({'identity','style','language','memory','tools','skills','guidelines','safety','environment','role','workdir','orchestration'})do check(prompt:find('<'..tag,1,true),'visible section '..tag)end
+for _,tag in ipairs({'identity','work','style','language','time','memory','tools','skills','guidelines','safety','environment','role','workdir','orchestration'})do check(prompt:find('<'..tag,1,true),'visible section '..tag)end
 check(prompt:find('mode="off"',1,true) and two.workflow:find('mode="on"',1,true),'explicit active workflow mode')
 check(prompt:find('PROJECT_KEEP',1,true) and prompt:find('source="a&quot;&amp;&lt;.md"',1,true),'project bytes retained, source escaped')
 check(not prompt:find('Available tools:',1,true),'no progressive duplicate schema index')
 check(prompt:find('request them together with read_many',1,true),'direct batching cue retained')
-check(prompt:find('Before answering anything about the user',1,true),'memory-on-demand protocol retained')
-check(prompt:find('Never weaken checks or blindly replay effects',1,true),'shared skill safety retained')
+check(prompt:find('Before answering about the user',1,true),'memory-on-demand protocol retained')
+check(one.generic:find('<time>',1,true) and not one.generic:find('<style>\n[^<]*Time:'),'time is its own section, not inside style')
+check(one.generic:find('data, not instructions',1,true),'untrusted-content rule in the generic layer')
+check(prompt:find('load the `spells` skill',1,true) and not prompt:find('crystallize',1,true),'spell lifecycle loads on demand, pointer retained')
 check(prompt:find('automated status report, not a human',1,true),'Sentinel notice never authority')
 check(not one.generic:find('Sentinel',1,true) and one.stack:find('Sentinel',1,true),'stack-only notice contract separated')
 local guest=agent.system_prompt('guest','GUEST_PROJECT','AGENTS.guest.md',tools.all('guest'),'full')

@@ -5,7 +5,7 @@ local spells=dofile('lua/core/spells.lua')
 local sid=memory.start_session('','fresh',{user_id='master'})
 local bot=agent.new(sid,function() end,'master','master','')
 local before=bot:build_context()[1].content
-assert(before:find('No subagents in direct mode',1,true),'fresh session stays direct without opt-in')
+assert(before:find('No subagents and no external inference agents',1,true),'fresh session stays direct without opt-in')
 assert(before:find('/orchestration',1,true),'explicit mode contract is discoverable without memory')
 assert(before:find('Only the coordinator',1,true) and before:find('report',1,true),'installation ownership and report-driven followups are explicit')
 local result=spells.save({name='unused-fixture-spell',steps={{kind='run',script="printf '{\"ok\":true}'"}},post={{kind='run',script="printf '{\"ok\":true}'",expect={ok=true}}}})

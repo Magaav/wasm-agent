@@ -68,7 +68,7 @@ try {
   fs.writeFileSync(agents,text.replace(restore,'watcher restoration unavailable'));
   check(run(fixture).stdout.includes('restore stopped supervisor without a bound-workspace dead end'),'removing recovery path fails');
   fs.writeFileSync(agents,bytes);
-  fs.appendFileSync(agents,'\n'+'.'.repeat(10419));
+  fs.appendFileSync(agents,'\n'+'.'.repeat(6001));
   check(run(fixture).stdout.includes('  failed: AGENTS.md grew'),'original byte budget must remain enforced');
   fs.writeFileSync(agents,bytes);
   check(run(fixture).status===0,'restored private instructions must pass');

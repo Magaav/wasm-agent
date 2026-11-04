@@ -66,8 +66,8 @@ check(client_calls==0,'neither refusal reached the client')
 -- The relaxation and the memory correction are visible to the model: the prompt says a known name
 -- is called directly, and that a stored fact is corrected by id rather than forgotten and re-added.
 local prompt=dofile('lua/core/agent.lua').system_prompt('master',nil,nil,all,'progressive')
-check(prompt:find('call tool_call(name, arguments) with a name you already know',1,true)~=nil,'the prompt teaches calling a known name directly')
-check(prompt:find('use tool_search for a name or definition you do not know',1,true)~=nil,'the prompt keeps discovery for unknown tools')
-check(prompt:find("call `remember` with that entry's `id`",1,true)~=nil,'the prompt teaches correcting a stored fact by id')
+check(prompt:find('are called with tool_call(name, arguments)',1,true)~=nil,'the prompt teaches calling a known name directly')
+check(prompt:find('tool_search(query) finds one you do not know',1,true)~=nil,'the prompt keeps discovery for unknown tools')
+check(prompt:find("call `remember` with its `id`",1,true)~=nil,'the prompt teaches correcting a stored fact by id')
 
 print('tool-call gate ok ('..checks..' checks)')
