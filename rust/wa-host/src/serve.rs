@@ -2656,8 +2656,50 @@ fn query_value(query: &str, key: &str) -> String {
     query
         .split('&')
         .find_map(|pair| pair.strip_prefix(prefix.as_str()))
-        .map(|value| value.to_string())
+        .map(percent_decode)
         .unwrap_or_default()
+}
+
+/// `%XX` -> byte, the inverse of the window's `encodeURIComponent`. Values were handed to Lua still
+/// encoded, so `session?id=child%3Anative-browser-child` never matched the stored `child:...` id: every
+/// child session answered `unknown_session` and a window opened on one never became ready (release
+/// gate, recoveryWindows, 04/11). `+` stays `+` (encodeURIComponent never writes it); a malformed escape
+/// or a result that is not UTF-8 keeps the raw text rather than guessing.
+fn percent_decode(raw: &str) -> String {
+    if !raw.contains('%') { return raw.to_string(); }
+    let bytes = raw.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            let hex = |b: u8| (b as char).to_digit(16);
+            match (bytes.get(i + 1).copied().and_then(hex), bytes.get(i + 2).copied().and_then(hex)) {
+                (Some(h), Some(l)) => { out.push((h * 16 + l) as u8); i += 3; continue; }
+                _ => return raw.to_string(),
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8(out).unwrap_or_else(|_| raw.to_string())
+}
+
+#[cfg(test)]
+mod query_value_tests {
+    use super::{percent_decode, query_value};
+    #[test]
+    fn encoded_values_are_decoded_and_odd_ones_kept() {
+        assert_eq!(query_value("id=child%3Anative-browser-child&x=1", "id"), "child:native-browser-child");
+        assert_eq!(query_value("a=1&id=plain", "id"), "plain");
+        assert_eq!(query_value("id=", "id"), "");
+        assert_eq!(query_value("other=1", "id"), "");
+        assert_eq!(percent_decode("C%3A%5CUsers%5Cx%20y"), "C:\\Users\\x y");
+        assert_eq!(percent_decode("caf%C3%A9"), "caf\u{e9}");
+        assert_eq!(percent_decode("a+b"), "a+b");
+        assert_eq!(percent_decode("bad%zz"), "bad%zz");
+        assert_eq!(percent_decode("cut%4"), "cut%4");
+        assert_eq!(percent_decode("%FF"), "%FF");
+    }
 }
 
 fn split_path(path: &str) -> (String, String) {
