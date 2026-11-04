@@ -93,6 +93,7 @@ case "$GATE_HOME_KEEP" in
   all) ;;
   ''|*[!0-9]*) echo "gate home: WA_GATE_HOME_KEEP must be a non-negative whole number or 'all' (got '$GATE_HOME_KEEP')" >&2; exit 4 ;;
 esac
+GATE_ROOT="${TMPDIR:-/tmp}"  # where gate homes live; TMPDIR itself is re-pointed into the home below
 GATE_HOME="$(mktemp -d "${TMPDIR:-/tmp}/wa-gate-home-$$-XXXXXX")"
 if command -v cygpath >/dev/null 2>&1; then
   export WASM_AGENT_HOME="$(cygpath -w "$GATE_HOME")"
@@ -109,7 +110,7 @@ echo "gate isolated home: $WASM_AGENT_HOME (a passing run removes it; a failing 
 # never change what the gate says about the tree; that is asserted by
 # scripts/test-merge-lane-retention.mjs against a sliced copy of this very block.
 gate_home_release() {
-  local status=${1:-$?} home="$GATE_HOME" keep="$GATE_HOME_KEEP" root="${TMPDIR:-/tmp}"
+  local status=${1:-$?} home="$GATE_HOME" keep="$GATE_HOME_KEEP" root="${GATE_ROOT:-${TMPDIR:-/tmp}}"
   local ranked='' line='' path='' name='' pid='' index=0 own_kept=0 budget=0
   set +e
   # 1. This run's own home. A pass costs nothing; so does a failure when the bound is 0. `own_kept`
@@ -165,6 +166,13 @@ gate_exit() {
 trap gate_exit EXIT
 # ---- end of the bounded gate-home block: scripts/test-merge-lane-retention.mjs slices this file at
 # the line above and runs these exact bytes with its own body, so the policy is tested where it lives.
+
+# Every suite's scratch lives in the gate home, so the home's retention above removes it too. Suites
+# that `mktemp` (POSIX) or call os.tmpdir() (native Node on Windows) used to write straight into the
+# system temp and nothing removed them: 3369 wa-* directories, 16 GB, on the Windows node (04/11).
+GATE_TMP="$GATE_HOME/t"; mkdir -p "$GATE_TMP"
+export TMPDIR="$GATE_TMP"
+if command -v cygpath >/dev/null 2>&1; then export TEMP="$(cygpath -w "$GATE_TMP")" TMP="$(cygpath -w "$GATE_TMP")"; else export TEMP="$GATE_TMP" TMP="$GATE_TMP"; fi
 
 # Phase timing: instrumentation, not a redesign. Every phase marker below is a call between two
 # existing commands, so no check is added, removed, reordered or skipped; the table is printed into
