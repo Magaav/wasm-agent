@@ -1,0 +1,61 @@
+# Lua tests the fast path (scripts/fast.sh) does NOT run: each needs setup only the full gate
+# (scripts/test.sh) provides - an initialised ledger, fixtures, arguments or a running node - and failed
+# when run alone on 04/11 (main 154bbbe6, sandbox image). They stay covered by the nightly gate.
+# Moving one back into the fast path = make it self-contained, delete its line here.
+# A test-*.lua not listed here is in the fast path by default.
+scripts/test-agent-benchmark-runtime-route.lua  # lua error: [string "scripts/test-agent-benchmark-runtime-route.lu..."]:3: assertion failed
+scripts/test-append-race-check.lua  # lua error: [string "scripts/test-append-race-check.lua"]:12: expected 20 messages, found 0
+scripts/test-auth-sessions.lua  # lua error: [string "scripts/test-auth-sessions.lua"]:60: unknown fixture phase
+scripts/test-child-budget-refusal.lua  # lua error: [string "scripts/test-child-budget-refusal.lua"]:22: a child whose next request
+scripts/test-child-compaction.lua  # lua error: [string "scripts/test-child-compaction.lua"]:24: child compacts then continues:
+scripts/test-cli-input.lua  # cli input: 2 failed of 16 checks
+scripts/test-cli-terminal.lua  # lua error: [string "scripts/test-cli-terminal.lua"]:7: probe needs a real raw terminal
+scripts/test-codemode-native.lua  # lua error: [string "scripts/test-codemode-native.lua"]:24: opt-in adds one tool, read_many
+scripts/test-codemode-unprepared.lua  # lua error: [string "scripts/test-codemode-unprepared.lua"]:4: default build honestly repor
+scripts/test-context-budget.lua  # lua error: [string "scripts/test-context-budget.lua"]:13: the test must run with WASM_AGEN
+scripts/test-embedded-runtime.lua  # lua error: [string "scripts/test-embedded-runtime.lua"]:1: assertion failed!
+scripts/test-envelope-iteration.lua  # lua error: [string "scripts/test-envelope-iteration.lua"]:9: lean declarations (plus codem
+scripts/test-envelope-outcomes.lua  # lua error: [string "scripts/test-envelope-outcomes.lua"]:91: assertion failed!
+scripts/test-evaluation-feedback.lua  # lua error: [string "scripts/test-evaluation-feedback.lua"]:36: assertion failed!
+scripts/test-exec-timeout.lua  # lua error: [string "scripts/test-exec-timeout.lua"]:8: timeout is failure: {"cleanup":"ter
+scripts/test-graph-index-failure.lua  # lua error: [string "scripts/test-graph-index-failure.lua"]:5: exact parse failure visible
+scripts/test-graph-repair.lua  # lua error: [string "scripts/test-graph-repair.lua"]:8: assertion failed!
+scripts/test-graph-watch.lua  # lua error: [string "scripts/test-graph-watch.lua"]:10: external writer must settle
+scripts/test-history-search.lua  # 
+scripts/test-mcp.lua  # lua error: [string "scripts/test-mcp.lua"]:16: assertion failed!
+scripts/test-mcp-recovery.lua  # lua error: [string "scripts/test-mcp-recovery.lua"]:4: assertion failed!
+scripts/test-native-target-alias.lua  # lua error: [string "scripts/test-native-target-alias.lua"]:4: attempt to concatenate a nil
+scripts/test-native-target-resource.lua  # lua error: [string "scripts/test-native-target-resource.lua"]:7: attempt to concatenate a 
+scripts/test-operation-reconcile-json.lua  # lua error: [string "scripts/test-operation-reconcile-json.lua"]:4: assertion failed!
+scripts/test-orchestration-routing.lua  # lua error: [string "scripts/test-orchestration-routing.lua"]:4: assertion failed!
+scripts/test-placed-child-workspace.lua  # lua error: fixture scenario required
+scripts/test-prefix-stability.lua  # lua error: [string "scripts/test-prefix-stability.lua"]:15: the test must run with WASM_AG
+scripts/test-prompt-layers.lua  # lua error: [string "scripts/test-prompt-layers.lua"]:49: assertion failed!
+scripts/test-quarantined-retirement.lua  # lua error: [string "scripts/test-quarantined-retirement.lua"]:3: assertion failed!
+scripts/test-quiet-host.lua  # lua error: [string "scripts/test-quiet-host.lua"]:6: assertion failed!
+scripts/test-read-batch.lua  # lua error: [string "scripts/test-read-batch.lua"]:13: assertion failed!
+scripts/test-reasoning-replay.lua  # lua error: [string "scripts/test-reasoning-replay.lua"]:24: two turns with tool calls must
+scripts/test-resource-claims.lua  # lua error: [string "scripts/test-resource-claims.lua"]:139: unknown fixture mode
+scripts/test-selection-state.lua  # lua error: [string "scripts/test-selection-state.lua"]:4: assertion failed!
+scripts/test-serving-contract.lua  # lua error: [string "scripts/test-serving-contract.lua"]:2: attempt to call a nil value (gl
+scripts/test-session-workspaces.lua  # lua error: [string "scripts/test-session-workspaces.lua"]:6: test source repository requir
+scripts/test-session-workspace-verify.lua  # lua error: [string "scripts/test-session-workspace-verify.lua"]:6: workspace binding did n
+scripts/test-session-workspace-worker.lua  # lua error: [string "scripts/test-session-workspace-worker.lua"]:7: workspace worker needs 
+scripts/test-subagent-selection.lua  # lua error: /t/lua/core/orchestrator.lua:10: no such table: orchestration_policy
+scripts/test-subagents-integration.lua  # lua error: [string "scripts/test-subagents-integration.lua"]:14: coding-child source repos
+scripts/test-subagents-profiles.lua  # lua error: [string "scripts/test-subagents-profiles.lua"]:10: policy_fixture_requires_isol
+scripts/test-vault-keys.lua  # lua error: [string "scripts/test-vault-keys.lua"]:16: the test runs against its own store 
+scripts/test-vault-login.lua  # lua error: [string "scripts/test-vault-login.lua"]:37: attempt to call a nil value (field 
+scripts/test-wave-autoflush.lua  # lua error: [string "scripts/test-wave-autoflush.lua"]:19: assertion failed!
+scripts/test-wave-autoflush-restart.lua  # lua error: [string "scripts/test-wave-autoflush-restart.lua"]:4: assertion failed!
+scripts/test-wave-closure-baseline.lua  # lua error: [string "scripts/test-wave-closure-baseline.lua"]:14: assertion failed!
+scripts/test-wave-current-source.lua  # lua error: [string "scripts/test-wave-current-source.lua"]:4: assertion failed!
+scripts/test-wave-end-deploy.lua  # lua error: [string "scripts/test-wave-end-deploy.lua"]:23: scratch install required: WA_IN
+scripts/test-wave-native-recovery.lua  # lua error: [string "scripts/test-wave-native-recovery.lua"]:9: attempt to concatenate a ni
+scripts/test-wave-self-probe.lua  # lua error: [string "scripts/test-wave-self-probe.lua"]:3: assertion failed!
+scripts/test-wave-truncated-registry.lua  # lua error: [string "scripts/test-wave-truncated-registry.lua"]:28: fixture repository requ
+scripts/test-web-http-native.lua  # lua error: [string "scripts/test-web-http-native.lua"]:3: native recoverable human handoff
+scripts/test-worker-integrate.lua  # lua error: [string "scripts/test-worker-integrate.lua"]:4: assertion failed!
+scripts/test-workspace-cwd.lua  # lua error: [string "scripts/test-workspace-cwd.lua"]:6: assertion failed!
+scripts/test-workspace-release.lua  # lua error: /t/lua/core/memory.lua:534: no such table: sessions
+scripts/test-workspace-root-recovery.lua  # lua error: [string "scripts/test-workspace-root-recovery.lua"]:9: assertion failed!
