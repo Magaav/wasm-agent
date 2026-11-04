@@ -40,9 +40,9 @@ function state(n){const f=path.join(n.home,'.wasm-agent/binding.json');return fs
  ok(output.includes('NOT a workspace sandbox'),'human authority warning');
  ok(fs.readFileSync(path.join(app.home,'.wasm-agent/node.key')).equals(beforeKey)&&fs.readFileSync(path.join(app.home,'.wasm-agent/env')).equals(beforeEnv),'key/provider settings preserved');
  ok(b.node_id===app.node_id&&!s.active,'pending binding has no execution authority');
- r=cli(admin,['nodes','pending']);ok(r.status===0&&JSON.parse(r.stdout).bindings.length===1,'actual native pending command');
+ r=cli(admin,['nodes','pending']);ok(r.status===0&&JSON.parse(r.stdout).bindings.some(x=>x.request.id===b.id),'actual native pending command');
  const pending=(await request(service+'/bindings/pending','GET',undefined,headers(admin,'bind-pending'))).value;
- ok(pending.bindings.length===1&&pending.bindings[0].digest===s.digest,'administrator pending inventory exact request');
+ const listed=pending.bindings.filter(x=>x.request.id===b.id);ok(listed.length===1&&listed[0].digest===s.digest,'administrator pending inventory exact request');
  ok((await request(service+'/bindings/pending','GET',undefined,headers(stranger,'bind-pending'))).status===403,'ordinary guest cannot enumerate pairing');
  const original=s.raw_request;
  ok((await request(service+'/bindings/request','POST',original,headers(app,'bind-request',original))).status===200,'exact duplicate request collects same receipt');
@@ -99,5 +99,25 @@ r=spawnSync(binary,['bind','run'],{cwd:app.home,env:app.env,encoding:'utf8',time
  chat.stdin.write('/unbind\n/exit\n');await until(()=>chat.exitCode!==null,'CLI clean exit');ok(state(app).consent===false,'local unbind retained identity but disabled access');
  ok(fs.readFileSync(path.join(app.home,'.wasm-agent/node.key')).equals(beforeKey),'key unchanged through unbind');
  const restarted=start(app,['chat','--continue'],true);let resumed='';restarted.stdout.on('data',x=>resumed+=x);restarted.stderr.resume();restarted.stdin.write('/bind status\n/exit\n');await until(()=>restarted.exitCode!==null,'revoked CLI restart');ok(resumed.includes('"active":false')&&state(app).consent===false,'restart does not reactivate revoked consent');
+ // An acceptance that arrives after the ten-minute pairing window must still attach.
+ // Measured 2026-11-01 on a real node: the registry accepted the request at 18:07:15 and the window
+ // closed at 18:15:36, so every later tick answered `pairing_expired` and the node stayed `pending`
+ // for good - accepted on the fabric, unusable on the host, recoverable only by SSH. The window
+ // bounds how long a request may sit unanswered, not how long an acceptance stays usable (17648fdb).
+ const late=node('late-accept');
+ late.env.WA_BINDING_PAIRING_SECONDS='6';
+ const lateBind=cli(late,['bind',service],'BIND\n');
+ ok(lateBind.status===0&&state(late)?.phase==='pending','late-accept node submits its pairing request');
+ const lateCode=state(late).request.code;
+ r=cli(admin,['accept',lateCode],'ACCEPT\n');ok(r.status===0,'administrator accepts inside the short pairing window');
+ await until(()=>Date.now()/1000>state(late).request.pairing_expires_at,'the pairing window closes');
+ ok(state(late).phase==='pending'&&state(late).active===false,'the pairing window has provably closed before any runtime ticks');
+ const lateRun=start(late,['bind','run']);
+ await until(()=>state(late)?.phase==='accepted','a late tick attaches an accepted grant');
+ ok(state(late).active===true&&state(late).consent===true,'late acceptance attaches instead of answering pairing_expired');
+ await until(async()=>{const v=(await request(service+'/lookup?node_id='+late.node_id,'GET',undefined,headers(admin,'lookup'))).value;return v.online===true&&v.relay_attached===true},'late-accepted node on the fabric');
+ ok(true,'late-accepted node registers and attaches to the relay');
+ await stop(lateRun);
+ r=cli(admin,['revoke',late.node_id],'REVOKE\n');ok(r.status===0,'late-accept node revoked after the proof');
  fs.writeFileSync(path.join(work,'result.json'),JSON.stringify({ok:true,checks,skipped:0,paid_calls:0,source_root:root}));console.log('binding ok ('+checks+' checks, 0 skipped)');
  }finally{for(const c of children.reverse())await stop(c);console.log('evidence: '+work)}})().catch(e=>{console.error(e);process.exitCode=1});

@@ -2,13 +2,21 @@
 use crate::lua::Lua;
 use serde_json::{json,Value};
 use std::path::PathBuf;
-use std::sync::{Arc,Mutex,OnceLock};
+use std::sync::{Arc,Mutex,OnceLock,atomic::{AtomicBool,Ordering}};
 use std::time::Duration;
 
 static FACTORY:OnceLock<Arc<dyn Fn()->Lua+Send+Sync>>=OnceLock::new();
 static STARTED:Mutex<bool>=Mutex::new(false);
+/// This process is the ledger's server (`wa serve`), so it is the one that should own the outbound
+/// transport. Without this the CLI could not tell "no server" from "a server that has not attached yet":
+/// it asked for `serve` whenever the run-lease was held, took the transport lease itself, exited, and
+/// left the consent with no runtime - the state that made an operator stop a supervised node by hand
+/// (measured 2026-11-01, nextcloud).
+static SERVING:AtomicBool=AtomicBool::new(false);
 static STATUS:Mutex<Option<Value>>=Mutex::new(None);
 pub fn set_factory(factory:Arc<dyn Fn()->Lua+Send+Sync>){let _=FACTORY.set(factory);}
+/// Called once by the process that is about to serve this ledger.
+pub fn set_serving(){SERVING.store(true,Ordering::SeqCst);}
 pub fn state_path()->PathBuf{PathBuf::from(crate::resolve_home()).join(".wasm-agent/binding.json")}
 pub fn present()->bool{state_path().exists()}
 pub fn read()->Result<Option<Value>,String>{match std::fs::read(state_path()){
@@ -83,7 +91,7 @@ pub fn transport(action:&str)->Result<Value,String>{
     if action=="preflight"{return attachment_preflight().map(|_|json!({"ok":true}));}
     if action=="status"{return Ok(STATUS.lock().map_err(|e|e.to_string())?.clone().unwrap_or(json!({"state":"stopped"})));}
     if action!="start" && action!="serve"{return Err("binding_transport_action_invalid".into());}
-    let server=action=="serve";
+    let server=action=="serve"||SERVING.load(Ordering::SeqCst);
     let mut started=STARTED.lock().map_err(|e|e.to_string())?;
     if *started{return Ok(json!({"ok":true,"state":"running","reused":true}));}
     let factory=FACTORY.get().cloned().ok_or("binding_runtime_unavailable")?;
@@ -135,11 +143,17 @@ pub fn transport(action:&str)->Result<Value,String>{
     }
     std::thread::Builder::new().name("wa-binding-transport".into()).spawn(move||{
         let lua=factory();
+        // A failing tick used to be invisible: the view only reached `binding_transport('status')`, which a
+        // later process cannot read (it is per-process), so a node that could not attach printed nothing and
+        // the operator saw a healthy node with a bound registry and no reason (measured 2026-11-01).
+        let mut reported:Option<String>=None;
         loop{
             let owned=lease.lock().map(|lease|lease.is_some()).unwrap_or(false);
             if owned{
                 let result=lua.call_string("wa_binding_tick",&[]);
                 let view=match result{Ok(text)=>serde_json::from_str(&text).unwrap_or(json!({"state":"unknown","error":"binding_tick_invalid"})),Err(e)=>json!({"state":"unknown","error":e})};
+                let error=view.get("error").and_then(|v|v.as_str()).map(|s|s.to_string());
+                if error!=reported{ if let Some(error)=&error{ eprintln!("binding_tick:{error}"); } reported=error; }
                 if let Ok(mut status)=STATUS.lock(){*status=Some(view);}
             }
             std::thread::sleep(Duration::from_secs(2));

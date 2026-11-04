@@ -244,6 +244,16 @@ port_busy() {
     "$root/net/tcp" "$root/net/tcp6" 2>/dev/null
 }
 
+# Who owns a listener on a port, if anyone. An empty answer is not the same as `port_busy`'s "free":
+# it is "no live owner can be named", the state a killed process leaves behind while the stack reaps
+# its socket (Windows reports the LISTENING row with an empty pid column). Callers that stop a node
+# must wait on ownership, not on the row disappearing - measured 2026-11-03 on this node: five
+# installs refused on a row with no pid, while a scratch node on the same machine freed its port in
+# 138-176 ms.
+port_holder() {
+  netstat -ano -p TCP 2>/dev/null | awk -v p=":$1" '$1 == "TCP" && $2 ~ p"$" && $4 == "LISTENING" { print $5; exit }' | tr -d '\r'
+}
+
 # The scratch port must be one nothing else is using. 8800 is the client bridge of the node already
 # running, so a check on it answers whether or not the new binary works at all - which is exactly what
 # happened: a text file "answered", was installed, and only the rollback saved the node.
@@ -546,18 +556,41 @@ if [ -d "$SOURCE_UI" ] && [ "$SOURCE_UI" != "$UI_DIR" ]; then
 fi
 if [ -n "$OLD_PID" ] && [ "$SUPERVISED" = "0" ] && [ -z "$MANAGED_UNIT" ]; then
   if [ "$WINDOWS" = "1" ]; then
-    powershell.exe -NoProfile -Command "Stop-Process -Id $OLD_PID -Force" 2>/dev/null
+    # The tree, not the pid. `Stop-Process -Id` reaches the node, but any handle to its listening socket
+    # that the node handed elsewhere keeps :$PORT LISTENING after the process is gone, and the refusal
+    # below then blames "another listener" nobody can name. Measured on this machine (2026-11-03): three
+    # consecutive installs stopped the node and refused at the port check, while a scratch node started
+    # and stopped the same way released the port in 176 ms and PROCESS_TERMINATE on the live node was
+    # granted. `taskkill /T` takes the tree, which is the only thing that reaches whatever else holds it.
+    # Risk: it also ends a shell the node had left running - the installer has already passed the idle
+    # gate, and the node that owned those shells is being replaced anyway.
+    MSYS_NO_PATHCONV=1 taskkill /PID "$OLD_PID" /T /F >/dev/null 2>&1 || true
   else
     kill "$OLD_PID" 2>/dev/null
   fi
   # Wait for the port to be free rather than sleeping a fixed two seconds. Measured: the process is
   # gone in ~150ms, so the fixed sleep was ~1.8s of outage per upgrade that nothing needed. This waits
   # for the actual condition - and, unlike a sleep, it cannot be too short on a loaded machine.
-  for _ in $(seq 1 100); do
-    port_busy "$PORT" || break
+  #
+  # The condition is "no live pid owns the port", not "port_busy is false". A LISTENING row with no
+  # owning pid is not another listener, and refusing on it invents an occupant nobody can name: five
+  # installs on this Windows node (2026-11-03) stopped the node, waited, and refused with
+  # `still occupied by pid ;` while netstat showed either no row at all or one with an empty pid. That
+  # row is the killed node's socket still being reaped by the stack - a scratch node on the same
+  # machine releases the port in 138-176 ms even with live client connections. What this script can
+  # observe is ownership; whether the port is bindable is proved downstream by the new node's own bind
+  # and health check, which rolls this install back by name.
+  for _ in $(seq 1 1200); do
+    [ -z "$(port_holder "$PORT")" ] && break
     sleep 0.05
   done
-  if port_busy "$PORT"; then say "port $PORT is still occupied; refusing to overwrite or kill another listener"; exit 1; fi
+  if [ -n "$(port_holder "$PORT")" ]; then
+    say "port $PORT is still held by pid $(port_holder "$PORT"); refusing to overwrite or kill another listener"
+    exit 1
+  fi
+  if port_busy "$PORT"; then
+    say "port $PORT is LISTENING with no owning pid - the old listener is still being reaped; starting the new node, whose bind and health check prove the port"
+  fi
   # The same process holds a *second* listener, and a node that starts while it is still taken spends two
   # seconds per retry waiting for it. Measured on this node's own deploy (2026-10-28): twelve retries on
   # /proc/net/tcp's 127.0.0.1:8800, printed as "[client] bind ... Address already in use", and the health

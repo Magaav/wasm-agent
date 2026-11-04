@@ -34,7 +34,11 @@ wa_build_env() { # reads build.env and puts the toolchain directories on PATH (a
     done < <(grep -E '^[A-Z][A-Z0-9_]*=' "$file" 2>/dev/null)
   fi
   local IFS=:
-  for dir in "${CARGO_HOME:-$HOME/.cargo}/bin" "${WASM_AGENT_HOME:-$HOME}/.wasm-agent/node/bin" ${WA_BUILD_PATH:-}; do
+  # `.../.wasm-agent/bin` is the node's own tool directory (`host.paths().bin`), where it stages the
+  # ripgrep it runs with. Without it here, a deploy started by the sentinel cannot see the rg the node
+  # already provisioned and refuses `rg_unavailable` - measured 2026-11-03 on this node, whose
+  # ~/.wasm-agent/bin/rg had been there since July while the deploy's PATH never named it.
+  for dir in "${CARGO_HOME:-$HOME/.cargo}/bin" "${WASM_AGENT_HOME:-$HOME}/.wasm-agent/node/bin" "${WASM_AGENT_HOME:-$HOME}/.wasm-agent/bin" ${WA_BUILD_PATH:-}; do
     [ -n "$dir" ] && [ -d "$dir" ] || continue
     case ":$PATH:" in *":$dir:"*) ;; *) PATH="$PATH:$dir" ;; esac
   done

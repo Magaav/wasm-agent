@@ -1,186 +1,159 @@
 ---
 name: clean-disk
 description: >-
-  How to reclaim disk on this machine safely: measure first with cheap probes, delete only what this
-  file names, never touch the node's state, the databases, live worktrees, unmerged drafts or the
-  installed build, and report what was removed and what was skipped and why. Use it for `/clean disk`,
-  when the disk is above ~85%, when a build fails with no space, or when temp/scratch/evidence has
-  grown without bound.
+  How to reclaim disk on any device - this node (Windows, Linux or macOS), a Linux/Docker server
+  reached over SSH (a Nextcloud box, for example), or a VM behind a virtual disk. Measure first with
+  cheap probes, delete only what this file names for that platform, never touch state (databases,
+  node data, git worktrees, Docker volumes, installed builds), and report what was removed and what
+  was skipped and why. Use it for /clean disk, for any device above ~85%, when a build fails with no
+  space, or when temp/scratch/evidence has grown without bound.
 ---
 
-# Reclaiming disk on this machine
+# Reclaiming disk on any device
 
-Disk here is a single volume: `C:` ~477 GB, and it has been at **92% used (42 GB free)** with 169
-session worktrees. Measuring is the expensive part, not deleting: a `du -sm` across
-`.wasm-agent/wa-worktree-*` took **14.5 minutes**. Never start with a full-tree `du`.
+The rule that makes this safe is the same on every device, so it comes first; the targets differ per
+platform and each one is measured, never assumed.
 
-## 0. The rules that make this safe
+## 0. The rules
 
-1. **Dry run first, always.** Produce the plan (path, size, why it is safe) and delete nothing until
-   the plan has been shown. `/clean disk` runs the dry run; a second invocation with `--apply` deletes.
-2. **Delete only what this file names.** A path that is merely "surprisingly big" is not a target.
-3. **Never `rm -rf` a git worktree.** `git worktree remove` (and `session_worktree release` for
-   managed ones) is the only supported path — a plain delete loses uncommitted drafts and leaves the
-   repo's worktree metadata pointing at nothing.
-4. **Never touch state**: `~/.wasm-agent/memory.db*`, `graph.db`, `installed.txt`,
-   `deploy-result.json`, `serve.pid`, `sentinel/requests|claimed|done|failed` (that is evidence),
-   `sentinel/stop`, `~/.wasm-agent/archive/` (deliberate archives), the repo working trees, and any
-   worktree whose branch is **not** an ancestor of `origin/main`.
-5. **A skipped thing is reported as skipped**, with the reason. "Nothing to do" and "I did not look"
+1. **Name the device before the first number.** "Local" is this node's machine; "ssh <host>" is
+   another machine, and its numbers must come from `ssh <host> '…'`, never from the local disk.
+2. **Dry run first.** Produce the plan (device, path, size, why it is safe), delete nothing until it
+   has been shown. A second invocation with an explicit go deletes.
+3. **Delete only what this file names for that platform.** A path that is merely "surprisingly big"
+   is not a target.
+4. **Never touch state**: databases (`memory.db*`, `graph.db`, MySQL/Nextcloud data), `installed.txt`,
+   `deploy-result.json`, `serve.pid`, `sentinel/requests|claimed|done|failed`, `sentinel/stop`,
+   `~/.wasm-agent/archive/`, the repo working trees, **Docker volumes**, and any git worktree whose
+   branch is not an ancestor of `origin/main`.
+5. **Never `rm -rf` a git worktree.** `git worktree remove` (or `session_worktree release`) is the
+   only supported path; a plain delete loses drafts and leaves metadata pointing at nothing.
+6. **A skipped thing is reported as skipped**, with the reason. "Nothing to do" and "I did not look"
    must not read the same.
+7. **Tier 3 (something stops, or a virtual disk is rewritten) never runs in the same operation as a
+   deploy or an agent turn on that device.** Stopping Docker or a distro under a model call fails the
+   work; a deploy needs the node idle.
 
-## 1. Measure cheaply (do this, not `du -sh *`)
-
-```bash
-df -h /c                                             # the only number that decides urgency
-du -sm ~/.wasm-agent/session-scratch ~/.wasm-agent/benchmarks \
-       ~/.wasm-agent/operations ~/.wasm-agent/sentinel \
-       "$LOCALAPPDATA/Temp" rust/target | sort -rn     # targeted, ~1 min
-```
-Per-worktree sizes are the exception, and they are slow. Ask for them only when the plan needs them,
-one directory at a time, and cap the number of samples.
-
-**The measurement is the script, not a retyped command line:** `scripts/clean-disk-report.sh` is the
-DRY RUN above as one block - free space, then `path | size | verdict` for every target this file
-names, including Docker's `RECLAIMABLE`, both `.vhdx` files with the guest's own `df -h /` beside
-them, and the worktree count. It deletes nothing and encodes the traps in section 4 (a denied
-directory prints `UNREADABLE (access denied)`, never `0 MB`; the guest command sets
-`MSYS_NO_PATHCONV=1`), so the numbers a plan is built from cannot drift from this procedure:
+## 1. Identify the device and what "the disk" is
 
 ```bash
-bash scripts/clean-disk-report.sh
+uname -s; uname -m                 # Darwin, Linux, or (Git Bash) MINGW*/MSYS*
+df -hT | sort -k5 -h | tail -8     # worst-used mounts first; -T shows fs type
 ```
 
-## 2. What is safe here, by measured size
+- **Remote**: prefix every probe with `ssh <host> '…'`; measure `df -h /` *there*.
+- **Plain volume / LVM**: `df -h` is the answer; `sudo vgs`, `sudo lvs` when a volume group is thin.
+- **Container**: the host volume is what matters; `docker system df` and `du -sh /var/lib/docker`.
+- **Virtual disk image** (`*.vhdx`, `*.qcow2`): deleting inside the guest frees guest blocks, not the
+  host file. Only the gap between guest usage and image size is reclaimable, and only by compaction.
 
-| Target | Measured | Rule |
+Measure only the targets named below, one `du -sm` per area. A full-tree `du` is the expensive part:
+measured on this Windows node, `du -sm` across 169 worktrees took **14.5 minutes**.
+
+## 2. Safe targets by platform (tiered)
+
+### Tier 1 - caches, nothing stops
+
+| Platform | Target | Command | Note |
+| --- | --- | --- | --- |
+| Linux | apt package cache | `sudo apt-get clean` | re-downloads on demand; measured 85 MB on the Nextcloud box |
+| Linux | systemd journal | `sudo journalctl --vacuum-size=200M` | keeps recent entries; measured **4.1 GB** of `/var/log` there |
+| Linux | `/tmp` old entries | `sudo find /tmp -maxdepth 1 -mtime +7 -exec rm -rf {} +` | only with `-mtime`; never the whole directory |
+| Linux | user caches | `rm -rf ~/.cache/<tool>` | pip/npm/cargo caches rebuild |
+| Linux | snap old revisions | `sudo snap list --all`, `snap set system refresh.retain=2` | never `snap remove` a live revision |
+| Windows | `$LOCALAPPDATA/Temp/wa-*`, `wa-ui-test-*`, `ui-*`, `fa-*` | check no `test-ui.ps1` runs, then delete | measured 2.8 GB; the rest of Temp belongs to other tools |
+| Windows | Explorer thumbnail cache | delete `…/Explorer/thumbcache_*.db` | Windows rebuilds it |
+| Windows | npm / pip / cargo cache | `npm cache clean --force`, delete `~/.cargo/registry` | re-downloads; measured 731 MB (cargo) |
+| Windows | Recycle Bin | `Clear-RecycleBin -Force` | **ask first** - nothing is restorable afterwards; measured 9.5 GB |
+| macOS | `~/Library/Caches`, Xcode `DerivedData` | - | **not measured by this file**: measure before claiming any number |
+
+### Tier 2 - this node's build and evidence areas
+
+| Target | Rule |
+| --- | --- |
+| `~/.wasm-agent/session-scratch/*` | delete per session, oldest first, keep the newest N (default 5) and any open session; measured 29 GB on this node |
+| `~/.wasm-agent/operations/*` | per-call stdout/stderr; keep the newest N days (default 3) so a recent failure stays diagnosable |
+| `~/.wasm-agent/sentinel/{deploy.out,deploy.log,sentinel.log}` | rotate, keep the last ~50 MB each; **never** `requests/`, `done/`, `failed/`, `protocol-effect.json` |
+| `~/.wasm-agent/benchmarks/*` | **not deletable as directories** - measured 2026-10-21: each run dir holds 3 registered worktrees; release through git or leave |
+| `rust/target/{debug,incremental,*/deps}` | `cargo clean` is **opt-in**; say the rebuild cost out loud |
+| `/_clean-disk-report.sh` (this node) | `bash scripts/clean-disk-report.sh` is the Windows dry run as one block; other devices use section 1's probes |
+
+### Tier 3 - a service stops, or a virtual disk is rewritten
+
+| Device | Item | Action | Risk |
+| --- | --- | --- | --- |
+| Docker (any) | dangling images | `docker image prune` | safe |
+| Docker (any) | unused tagged images | `docker image prune -a` | safe only after `docker system df` and after naming what would be re-pulled |
+| Docker (any) | build cache | `docker builder prune` | safe |
+| Docker (any) | **volumes** | **never** `docker system prune --volumes` unasked | a volume is data |
+| Windows | `docker_data.vhdx` | quit Docker Desktop, then compact | never while the engine runs |
+| Windows | WSL `ext4.vhdx` | export backup, `--set-sparse true`, else compact | holds real work; back up first |
+
+## 3. Docker hosts, which is what a server usually is
+
+Measured 2026-11-03 on `nextcloud.colmeio` (Ubuntu 20.04, aarch64, `/` 45 G, **89 % used, 5.3 G
+free**):
+
+| Item | Measured | Verdict |
 | --- | --- | --- |
-| `~/.wasm-agent/session-scratch/*` | 29 GB | delete **per session**, oldest first, keeping the newest N (default 5) and any session that is still open; these are screenshots, probes and evidence copies |
-| `~/.wasm-agent/benchmarks/*` | 7.5 GB | **not deletable as directories.** Measured 2026-10-21: each `edit-workflow-*` run dir contains **3 REGISTERED git worktrees** (24 in total, detached HEAD `bad2cdc3`) - `rm -rf` one and the repo's worktree metadata points at nothing. Remove them only with `git worktree remove` (a repository change, so outside this skill), or leave them. `whisper-wasm` (2.5 GB) is a reusable corpus/model cache, not a finished run |
-| `rust/target/{debug,incremental,*/deps}` | 4.8 GB | `cargo clean` is **opt-in** — say the rebuild cost out loud; prefer `target/debug` before `release` |
-| `$LOCALAPPDATA/Temp/wa-*`, `wa-ui-test-*`, `ui-*`, `fa-*` | 2.8 GB | test harness output, safe anytime; check no `test-ui.ps1` is running first (the harness refuses a second instance). Measured 2026-10-21: those four patterns are only ~160 MB of a 4.3 GB Temp - the bulk is other tools' directories, which are **not** this skill's to delete |
-| `~/.wasm-agent/operations/*` | 2.7 GB | per-call stdout/stderr; keep the newest N days (default 3) so a recent failure is still diagnosable |
-| `~/.wasm-agent/sentinel/deploy.out`, `deploy.log`, `sentinel.log` | 2.6 GB | rotate, keep the last ~50 MB each; **never** delete `requests/`, `done/`, `failed/`, `protocol-effect.json` |
-| images/screenshots in the above | inside their areas | they are the bulk of session-scratch and Temp; deleting the containing area covers them |
+| `/var/lib/docker` | 19 GB | the bulk of the disk |
+| images | 5.1 GB total, **4.6 GB reclaimable (90 %)**; 13 dangling | `docker image prune` is the win |
+| build cache | 424 kB | nothing to win |
+| volumes | 6.8 GB across 154, **2 in use** | **not deletable** - Nextcloud and MySQL data live there |
+| `/var/log` | 4.1 GB | journal vacuum + rotated logs |
+| apt cache | 85 MB | `apt-get clean` |
 
-## 3. Worktrees: list, then release, never delete
+Order: `docker system df` → `docker image prune` (dangling) → `docker builder prune` → re-measure
+with `df -h /`. `-a` (unused tagged images) only when the operator accepts a re-pull, and never for
+an image a running container uses.
 
-The 169 worktrees dominate the disk, and they are the one thing this skill must not improvise:
+What must survive on such a host: running containers' images, named volumes, `docker-compose.yml` and
+its `.env`, and the certificate/config mounts.
 
-```bash
-git worktree list                                      # all of them
-git branch --no-merged origin/main                     # what may not be released
-git -C <worktree> status --porcelain                   # dirty = keep
-```
-Release only worktrees that are **clean, inactive, and merged** (`session_worktree release`), and
-leave the rest. Report the candidates with sizes so the operator can decide; a worktree holding an
-unlanded draft is evidence, not clutter.
-
-## 4. Docker and virtual disks (tier 3 — a service stops, never silently)
-
-Measured on this machine, 2026-10-21:
-
-| item | measured | action | risk |
-| --- | --- | --- | --- |
-| Docker images | **10.34 GB** reclaimable (22 images, 1 active) | `docker image prune -a` | safe — pulled or rebuilt on demand |
-| Docker build cache | **5.52 GB** | `docker builder prune` | safe |
-| `AppData/Local/Docker/wsl/disk/docker_data.vhdx` | **30.7 GB** | compaction only (below) | needs Docker Desktop stopped |
-| `…/CanonicalGroupLimited.Ubuntu_*/LocalState/ext4.vhdx` | **39.0 GB** | compaction only (below) | **holds real work — back up first** |
-
-### The VHDX rule (the one that bites)
-
-Deleting files *inside* a distro or a Docker image frees blocks in the guest, **not** space on `C:`.
-The `.vhdx` keeps its allocated size until it is compacted. "Prune 30 GB and expect 30 GB back" is
-false; recent Docker Desktop compacts its own store, a WSL distro does not.
-
-### Docker, in order
-
-1. `docker system df` — read `RECLAIMABLE` before deleting anything.
-2. `docker image prune -a`, then `docker builder prune`. Safe: images and cache are rebuilt.
-   **Never** `docker system prune --volumes` unasked — a volume may hold data, not cache.
-3. For `docker_data.vhdx`, quit Docker Desktop first, then compact. **Never compact while the engine
-   runs**: the file is open and the result is a corrupt virtual disk.
-
-### Tier 1-2: caches that re-download (no service stops, no elevation)
-
-| item | measured | action | note |
-| --- | --- | --- | --- |
-| **Recycle Bin** | **9.5 GB** | `Clear-RecycleBin -Force` | the probe that failed with `du`: read it with PowerShell (`Get-ChildItem -LiteralPath "C:\$Recycle.Bin"`). **Ask first** - nothing in it is restorable afterwards |
-| `~/.cargo/registry` | 731 MB | `cargo cache -a` or delete `registry/` | re-downloads on the next build |
-| Explorer thumbnail/icon cache | 327 MB | delete `…/Explorer/thumbcache_*.db` | Windows rebuilds it; needs the Explorer window closed, not the service |
-| Chrome `User Data/Default/Cache` | 58 MB | delete the `Cache` dir | never touch the profile directory itself |
-| npm cache | 34 MB | `npm cache clean --force` | |
-| pip cache | 1 MB | nothing to win | |
-| `C:\Windows\SoftwareDistribution\Download` | **0.0 MB, 0 entries** | nothing to win | genuinely empty here |
-| `C:\Windows\Temp`, `WinSxS` | **unreadable (access denied)**, 8.9 GB when read | needs elevation | see the traps below |
-
-### The WSL distro: report-only unless the operator says otherwise
-
-This distro holds real work (`/local/colmeio` and its evidence), so the default is **measure and
-report, do not compact**:
+## 4. Worktrees: list, then release, never delete
 
 ```bash
-wsl.exe -l -v                                        # what exists and what is running
-wsl.exe -d Ubuntu -- df -h /                         # guest usage: the only number that says what frees
-wsl.exe -d Ubuntu -- du -xh --max-depth=1 / 2>/dev/null | sort -h | tail -15
+git worktree list
+git branch --no-merged origin/main
+git -C <worktree> status --porcelain     # dirty = keep
 ```
 
-**Measured on this machine (2026-10-21): the distro's `ext4.vhdx` is 39.0 GB on disk and the guest uses
-13 GB** (`df -h /` → 14 G used of 1007 G; `du -xh --max-depth=1 /` → 13 G total). The gap is therefore
-**~26 GB reclaimable** — this is the case where compaction *is* worth it. The rule is the shape, not a
-fixed verdict: only the gap between guest usage and file size is reclaimable, and it must be measured,
-never assumed in either direction.
+Release only worktrees that are **clean, inactive and merged**; report the rest with sizes so the
+operator can decide. An unlanded draft is evidence, not clutter.
 
-From Git Bash the guest command needs path conversion OFF, or the guest receives a Windows path:
-`df: 'C:/Program Files/Git/': No such file or directory` is what this looks like (measured here).
+## 5. Remote devices
 
-```bash
-MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' wsl.exe -d Ubuntu -- df -h /
-```
+- Every command is `ssh <host> '<cmd>'`; print before and after **from the same host**, and put the
+  host name beside every number.
+- Nothing destructive without an explicit go for that host and that exact target list. A capability
+  probe (`hostname`, `whoami`, `df -h`) is not authority to delete.
+- Passwordless sudo changes what is *possible*, not what is *allowed*: still list the targets first.
+- Do not run tier 3 there while a deploy or an agent turn is active on that device.
 
-When the operator does ask, this order is what makes it defensible rather than risky:
-
-1. **Prove nothing is running inside** — no build, no agent, no database, no long job. Ask; do not
-   infer it from `wsl.exe -l -v` alone: `Running` can be an idle shell, and an idle shell can hide a job.
-2. **Back up first, and keep it**: `wsl.exe --export Ubuntu <backup.tar>` (a full, restorable image;
-   `wsl.exe --import Ubuntu <dir> <backup.tar>` restores it). Verify the exit code **and** a non-trivial
-   file size before touching the disk. This is the step that makes it non-risky — the rest is recovery.
-3. **Prefer the reversible switch**: `wsl.exe --manage Ubuntu --set-sparse true` makes the disk
-   TRIM-backed, so freed blocks return as they are freed. It does not rewrite the filesystem, and
-   `wsl.exe --manage Ubuntu --set-sparse false` reverses it. Check `wsl.exe --version` first (sparse
-   needs WSL 2.0+).
-4. **Only if sparse is unavailable**, stop the distro (`wsl.exe --terminate Ubuntu`) and compact the
-   file with `Optimize-VHD -Mode Full` (Hyper-V module) or `diskpart`'s `compact vdisk`. That rewrites
-   the file; an interrupt can corrupt it. Hence step 2 is not optional.
-5. **Verify before calling it done**: `wsl.exe -d Ubuntu -- echo ok`, a known work path still answers
-   (`ls /local/colmeio`), and the `.vhdx` size actually dropped. A size that did not drop is a result
-   to report, not a step to retry blindly.
-6. Keep the export for N days (default 7) and say where it is.
-
-**Never run tier 3 in the same operation as a node deploy or any run that is mid-turn**: stopping the
-Docker engine or the distro under a model call fails the work, and the deploy needs the node idle.
-
-### Measurement traps that have already produced wrong answers here
-
-- **`0.0 MB` from PowerShell with `-ErrorAction SilentlyContinue` means "unreadable", not "empty".**
-  `C:\Windows\Temp` reports 0.0 MB that way and is in fact denied; measure with `-ErrorAction Stop`
-  and a `catch` that says `UNREADABLE`, or do not report a number at all.
-- **`du` cannot read per-user ACL directories** like `$Recycle.Bin`; use the shell's own API.
-- **Git Bash rewrites guest paths** (`MSYS_NO_PATHCONV=1` above), so a "the distro has no df" error is
-  usually the host's path conversion, not a broken distro.
-- A size that did not change after a cleanup is a **result to report**, never a cue to retry harder.
-
-## 5. The report
+## 6. The report
 
 One block, and it is the deliverable:
 
 ```
-disk: 92% used, 42G free (before)  ->  ?% used, ?G free (after)
-deleted:  session-scratch/2026-10-14-* 4.1 GB · Temp/wa-ui-test-* 0.8 GB
-skipped:  session-scratch/6c2a… (open session) · wa-worktree-… (branch not merged)
-          rust/target/release (cargo clean not requested - rebuild is ~7 min)
-not touched: databases, installed build, sentinel evidence, archive/
+disk: <device> 89% used, 5.3G free  ->  ?% used, ?G free
+deleted:  docker images (dangling, 13) 4.6G · journal >200M 1.2G · apt cache 85M
+skipped:  docker volumes (154, 6.8G - 2 in use: nextcloud, mysql data)
+          /var/lib/docker/overlay2 (live containers)
+          git worktree <path> (branch not merged)
+not touched: databases, volumes, installed build, sentinel evidence, repo trees
 ```
 
 Every number comes from a command that was actually run. If a size was not measured, say
 `not measured` rather than guessing.
+
+## 7. Traps that have already produced wrong answers
+
+- **`0.0 MB` from PowerShell with `-ErrorAction SilentlyContinue` means "unreadable", not "empty".**
+  `C:\Windows\Temp` reports 0.0 MB that way and is in fact denied; use `-ErrorAction Stop` with a
+  `catch` that says `UNREADABLE`, or report no number.
+- **`du` cannot read per-user ACL directories** such as `C:\$Recycle.Bin`; use the shell's own API.
+- **Git Bash rewrites guest paths**: a remote/WSL `df: '…': No such file or directory` is usually the
+  host's path conversion, not a broken guest. `MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'`.
+- **A `.vhdx`/`.qcow2` keeps its size** after in-guest deletion until compaction; "prune 30 GB and get
+  30 GB back" is false.
+- **A size that did not change after a cleanup is a result to report**, never a cue to retry harder.
