@@ -129,7 +129,8 @@ end
 -- The body of the release feed. Accepts either one release object (what a fixture usually is) or the
 -- list the endpoint returns, and picks the newest entry whose tag parses as a version. Kept separate
 -- from the request so a fixture can be a file.
-function M.parse_release(text)
+function M.parse_release(text, options)
+  local include_prerelease = type(options) == "table" and options.prerelease == true
   local ok, body = pcall(json.decode, tostring(text or ""))
   if not ok or type(body) ~= "table" then return nil, "feed_invalid" end
   local chosen, reason = body, "feed_invalid"
@@ -138,9 +139,11 @@ function M.parse_release(text)
     reason = "no_versioned_release"
     for _, entry in ipairs(body) do
       local tag = type(entry) == "table" and trim(entry.tag_name) or ""
-      -- Drafts and pre-releases are skipped, because that is exactly what `/releases/latest` did: a
-      -- node must not be told to move to a pre-release the publisher has not made the latest.
-      if tag ~= "" and entry.draft ~= true and entry.prerelease ~= true
+      -- Drafts are always skipped. Pre-releases only on the pre-release channel (see M.channel): a
+      -- stable node must not be moved to one, but a node that runs a pre-release follows its channel -
+      -- skipping them unconditionally made every alpha node answer `unknown`, since every published
+      -- Linux/desktop version so far is a pre-release.
+      if tag ~= "" and entry.draft ~= true and (include_prerelease or entry.prerelease ~= true)
         and M.parse_version(tag:gsub("^[vV]", "")) then
         chosen = entry
         break
@@ -182,7 +185,7 @@ function M.fetch(options)
   if fixture ~= "" then
     local text = read(fixture)
     if not text then return nil, "feed_unreachable" end
-    return M.parse_release(text)
+    return M.parse_release(text, options)
   end
   local offline = trim(options.offline ~= nil and tostring(options.offline) or getenv("WA_OFFLINE"))
   if offline == "1" or offline == "true" or trim(getenv("WA_SKIP_UPDATE_CHECK")) == "1" then
@@ -202,7 +205,7 @@ function M.fetch(options)
   if tonumber(response.status) ~= 200 then
     return nil, "feed_status_" .. tostring(response.status or "unknown")
   end
-  return M.parse_release(response.body)
+  return M.parse_release(response.body, options)
 end
 
 -- ---- the installed side -----------------------------------------------------
@@ -271,13 +274,25 @@ end
 
 -- The whole check. `options.installed` is the release tag the install recorded (nil when it recorded
 -- none); `options.now` and `options.fresh` exist so a test never depends on the clock or the network.
+-- Which releases a node follows. `WA_RELEASE_CHANNEL=stable|prerelease` decides; unset, a node on a
+-- pre-release follows pre-releases and every other node follows stable releases only.
+function M.channel(installed)
+  local configured = trim(getenv("WA_RELEASE_CHANNEL"))
+  if configured == "stable" or configured == "prerelease" then return configured end
+  local parsed = installed and M.parse_version(trim(installed):gsub("^[vV]", ""))
+  return (parsed and tostring(installed):find("-", 1, true)) and "prerelease" or "stable"
+end
+
 function M.check(options)
   options = options or {}
+  local channel = M.channel(options.installed)
+  if options.prerelease == nil then options.prerelease = channel == "prerelease" end
   local now = tonumber(options.now) or (host.monotonic_ms and host.monotonic_ms()) or os.time() * 1000
   local path = options.cache_path or M.cache_path()
   local cached = (not options.fresh) and read_cache(path) or nil
   local release, reason, from_cache
-  if cached and tonumber(cached.at) and (now - tonumber(cached.at)) < M.CACHE_MS then
+  if cached and tonumber(cached.at) and (now - tonumber(cached.at)) < M.CACHE_MS
+    and (cached.channel or "stable") == channel then
     -- The cached value is the parsed release, and it is re-validated on the way out: a hand-edited or
     -- half-written cache answers `unknown` rather than a version nobody published.
     local held = cached.release
@@ -295,11 +310,12 @@ function M.check(options)
     end
     release, reason = M.fetch(options)
     if release then
-      pcall(host.write_file, path, json.encode({ at = now, release = release }))
+      pcall(host.write_file, path, json.encode({ at = now, channel = channel, release = release }))
     end
   end
   local verdict = M.verdict(options.installed, release, reason)
   verdict.cached = from_cache and true or false
+  verdict.channel = channel
   verdict.checked_at = now
   return verdict
 end

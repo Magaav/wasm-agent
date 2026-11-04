@@ -10,7 +10,7 @@ implementation gets four things right that a hand-rolled check usually gets wron
 
 | Pi does | here |
 | --- | --- |
-| one tiny JSON endpoint (`/api/latest-version`) | one GitHub endpoint: `GET /repos/Magaav/wasm-agent/releases?per_page=20`, newest **versioned, non-draft, non-prerelease** tag |
+| one tiny JSON endpoint (`/api/latest-version`) | one GitHub endpoint: `GET /repos/Magaav/wasm-agent/releases?per_page=20`, newest **versioned, non-draft** tag on the node's channel (`stable` skips pre-releases; a node on a pre-release follows pre-releases; `WA_RELEASE_CHANNEL` overrides) |
 | compares with `semver` and reports `1.0.0-beta` below `1.0.0` | `release.compare` implements prerelease precedence (numbers numeric, release above its prereleases) |
 | checks on start without blocking, and swallows every error | one cached check on start / on load; a failure is silent and the state is `unknown` |
 | "already up to date (vX)" when it is | `current` says so; `unknown` never says "up to date" |
@@ -67,16 +67,24 @@ for 4.7 MB and the node looked wedged while `/health` kept answering). The mitig
 plus a route that is only asked on load and on `/update` - **not** a `/version` poll, which runs every
 second. If a future editor moves this onto a hot route, that measurement is the reason not to.
 
+## One command, both kinds of node
+
+`/update` (chat and window) and `wa update` / `wa --update` (shell) are the same request:
+
+- **tree install** (`runtime-worktree.txt` names a checkout): fast-forward the tree to `origin/main`, then
+  queue a Sentinel deploy, which builds, proves on a scratch port, installs and restarts once idle;
+- **release install** (`installed.txt` says `via=linux-bootstrap`, no tree): refresh the bootstrap clone,
+  run `scripts/linux/bootstrap.sh --check` (which bundle, verified, current or not), then run the
+  bootstrap for real in a transient `systemd-run --user` unit - it stops `wa-sentinel.service`, so it must
+  not be a child of the node it replaces. Its log is `<config>/release-update.log`.
+
+`wa update --check` only asks the release feed whether a newer release is published.
+
 ## What this does not do
 
-- **It does not download or install a release.** `/update` still queues a *deploy of this node's own
-  tree* through the sentinel; a node with no tree (installed from a package, no checkout) has nothing
-  for that path to build. `scripts/release/install.ps1` is a fresh installer and refuses to overwrite
-  an existing install ("use the external upgrade procedure"), and that procedure takes a binary, not a
-  published package. Closing this needs a release artifact + a sentinel verb that fetches, verifies
-  and installs it - `docs/release/RELEASE_INDEX.md` calls the publisher side a manual step today.
-- **It does not pick a channel.** There is no stable/beta split; the answer is the newest release whose
-tag is a version and that is not a draft or a pre-release. Android bundles are published as releases of
+- **Channels are two, and inferred.** `stable` follows releases; a node that runs a pre-release follows
+pre-releases (every Linux/desktop version published so far is an alpha, so skipping them made every node
+answer `unknown`). `WA_RELEASE_CHANNEL=stable|prerelease` overrides. Android bundles are published as releases of
 their own (`wa-android-<commit>`, see `releases/index.json`), so they are filtered out by exactly that
 rule - `/releases/latest` would have handed a desktop node a commit name and the check would have
 answered `unknown` forever.

@@ -424,6 +424,78 @@ local function decorate(verdict, facts)
   return verdict
 end
 
+-- ---- a node installed from a published bundle (no tree) --------------------------------------------
+-- `scripts/linux/bootstrap.sh` installs a release bundle and records `via=linux-bootstrap`. Such a node
+-- has no tree for the deploy path to build, so `/update` used to stop at `no_runtime_tree` and the node
+-- could only be updated by re-pasting the bootstrap line by hand. The bootstrap is already the
+-- idempotent, verifying updater (same bundle: nothing replaced), so `/update` runs it - first as a
+-- read-only `--check` (which bundle, current or not), then for real in a transient systemd unit, because
+-- the update stops `wa-sentinel.service` and must not be a child of the processes it replaces.
+M.BOOTSTRAP_DIR_NAME = "wasm-agent-bootstrap"
+
+function M.release_install(record)
+  return type(record) == "table" and record.via == "linux-bootstrap"
+end
+
+local function bootstrap_launcher(dir)
+  -- The launcher line from scripts/linux/bootstrap.sh's header: fetch main into the clone first, so the
+  -- script that runs is today's, not the copy from the day the clone was made.
+  return "d=" .. quote(dir) .. "; if [ -d \"$d/.git\" ]; then git -C \"$d\" fetch -q --depth 1 origin main && " ..
+    "git -C \"$d\" reset -q --hard FETCH_HEAD; else git clone -q --depth 1 https://github.com/Magaav/wasm-agent.git \"$d\"; fi"
+end
+
+function M.run_release(options, facts, record)
+  local home = slashes(paths.home())
+  local dir = home .. "/" .. M.BOOTSTRAP_DIR_NAME
+  local base = { install = facts.install, installed_commit = facts.installed_commit, installed_release = record.release,
+                 channel = "release-bundle" }
+  local function with(fields) for k, v in pairs(base) do if fields[k] == nil then fields[k] = v end end; return fields end
+  if platform.os() ~= "linux" then
+    return with({ ok = false, status = "release_update_unsupported", error = "release_update_unsupported",
+      message = "this release install is not on Linux; only the Linux bootstrap channel can update itself here." })
+  end
+  local prepared = shell(bootstrap_launcher(dir) .. " 2>&1")
+  if not prepared or prepared.code ~= 0 then
+    return with({ ok = false, status = "bootstrap_fetch_failed", error = "bootstrap_fetch_failed",
+      observed = trim(prepared and prepared.stdout or "no result"),
+      message = "the bootstrap clone could not be refreshed from GitHub, so nothing was changed.",
+      next = "check this node's network/DNS to github.com, then ask again" })
+  end
+  local script = dir .. "/scripts/linux/bootstrap.sh"
+  local checked = shell("bash " .. quote(script) .. " --check --prefix " .. quote(facts.install) .. " 2>&1")
+  local plan = trim(checked and checked.stdout or "")
+  if not checked or checked.code ~= 0 then
+    return with({ ok = false, status = "release_check_failed", error = "release_check_failed", observed = plan,
+      message = "the published bundle did not verify for this node, so nothing was installed." })
+  end
+  local state = plan:match("bootstrap: install [^\r\n]-: (%a+)")
+  local target = plan:match("would install ([^%s]+)")
+  base.target_release = target
+  if state == "current" then
+    return with({ ok = true, status = "current", observed = plan,
+      message = "this node already runs the newest published bundle" .. (target and (" (" .. target .. ")") or "") .. "; nothing to do." })
+  end
+  local has_systemd_run = shell("command -v systemd-run >/dev/null 2>&1")
+  if not has_systemd_run or has_systemd_run.code ~= 0 then
+    return with({ ok = false, status = "release_update_unsupervised", error = "release_update_unsupervised",
+      message = "systemd-run is not available, so the update cannot run outside this node.",
+      next = "run it from a shell: bash " .. script })
+  end
+  local unit = "wa-release-update-" .. tostring(math.floor(host.now()))
+  local log = slashes(paths.config()) .. "/release-update.log"
+  local started = shell("systemd-run --user --collect --quiet --unit " .. quote(unit) ..
+    " --property=StandardOutput=append:" .. quote(log) .. " --property=StandardError=append:" .. quote(log) ..
+    " bash " .. quote(script) .. " --prefix " .. quote(facts.install) .. " 2>&1")
+  if not started or started.code ~= 0 then
+    return with({ ok = false, status = "release_update_not_started", error = "release_update_not_started",
+      observed = trim(started and started.stdout or "no result"), message = "the update unit could not be started; nothing was changed." })
+  end
+  return with({ ok = true, queued = true, status = "queue", unit = unit, log = log, observed = plan,
+    message = "queued: installing " .. tostring(target or "the newest bundle") .. " in the transient unit " .. unit ..
+      ". It stops this node, installs, verifies and restarts it. This is not done yet.",
+    next = "follow it with `journalctl --user -u " .. unit .. "` or " .. log .. "; installed.txt names the release once it is done." })
+end
+
 function M.run(options)
   if host.getenv('WASM_AGENT_PROVENANCE')=='child' then return {ok=false,error='update_coordinator_only',status='refused',message='Workers merge/report; only coordinator requests installation.'} end
   options = options or {}
@@ -450,6 +522,10 @@ function M.run(options)
   end
   -- Asked before the tree is synchronized: a request no watcher can perform is refused without moving
   -- the runtime worktree for it, and without writing anything.
+  if not facts.tree then
+    local record = installed_record(facts.install)
+    if M.release_install(record) then return M.run_release(options, facts, record) end
+  end
   local blocked = M.preconditions(facts)
   if blocked then return decorate(blocked, facts) end
   if facts.tree and (facts.dirty or 0) == 0 and not options.skip_source_sync then

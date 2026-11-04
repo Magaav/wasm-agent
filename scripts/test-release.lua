@@ -88,6 +88,11 @@ eq(newer_first and newer_first.version, "0.3.0", "the first versioned entry in a
 eq((release.parse_release('[{"tag_name":"v0.2.0"}]') or {}).version, "0.2.0", "a one-entry list is a list")
 eq((release.parse_release('[{"tag_name":"v0.9.0","prerelease":true},{"tag_name":"v0.2.0"}]') or {}).version, "0.2.0",
    "a pre-release is skipped, as /releases/latest would skip it")
+eq((release.parse_release('[{"tag_name":"v0.9.0","prerelease":true},{"tag_name":"v0.2.0"}]', {prerelease=true}) or {}).version, "0.9.0",
+   "on the pre-release channel a newer pre-release is the answer")
+eq(release.channel("0.1.0-alpha.14"), "prerelease", "a node on a pre-release follows pre-releases")
+eq(release.channel("0.1.0"), "stable", "a node on a release follows releases")
+eq(release.channel(nil), "stable", "an unknown install follows releases")
 eq((select(2, release.parse_release('[{"tag_name":"v0.9.0","draft":true}]'))), "no_versioned_release",
    "a draft-only feed publishes nothing")
 local verdict_from_list = release.verdict("0.1.0", from_list)
