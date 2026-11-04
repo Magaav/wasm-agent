@@ -3889,6 +3889,19 @@ async function restoreSessionOnce(target, epoch, node = activeNode, attempt = nu
     ]);
     if (!viewing()) return false;
     if (attempt) attempt.progressAt = Date.now();
+    // The remembered thread skips the session list (one read instead of two), so a thread the node has no
+    // row for - chosen here and never sent, or removed on the node - arrives as `unknown_session`. It is
+    // the same deliberate empty session as a blank one above, not a failure: retrying it forever left the
+    // window on "connecting..." for good (release gate nativeChildBrowser, 04/11). The node creates the
+    // row on its first message.
+    if (full && full.error === "unknown_session" && target && wanted.id === target) {
+      rememberBlankSession(target);
+      repaintMessages([]);
+      showNewThreadNotice();
+      transcriptReady = true;
+      followedSeq = 0;
+      return true;
+    }
     if (!full || full.error || !Array.isArray(full.messages)) {
       throw new Error(full?.error || "invalid session response");
     }
