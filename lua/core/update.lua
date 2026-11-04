@@ -560,6 +560,7 @@ function M.run(options)
       verdict.ok, verdict.queued, verdict.status = false, nil, "backup_failed"
       verdict.error = "backup_failed"
       verdict.observed = tostring(snapshot)
+      verdict.message = "the pre-update backup failed (" .. tostring(snapshot) .. "), so nothing was queued."
       verdict.next = "free disk space or repair the store named above, then ask again; nothing was deployed"
       return verdict
     end
@@ -582,6 +583,7 @@ function M.run(options)
     verdict.ok, verdict.queued, verdict.status = false, nil, "sentinel_unreachable"
     verdict.error = "sentinel_unreachable"
     verdict.observed = "calling " .. facts.sentinel .. " produced no answer"
+    verdict.message = "the sentinel did not answer, so nothing was queued."
     verdict.next = "run it by hand outside the node: " .. command
     return verdict
   end
@@ -590,6 +592,7 @@ function M.run(options)
     verdict.ok, verdict.queued, verdict.status = false, nil, "sentinel_refused"
     verdict.error = "sentinel_refused"
     verdict.observed = "the sentinel exited " .. tostring(result.code) .. ": " .. detail
+    verdict.message = "the sentinel refused the request, so nothing was queued."
     verdict.next = "read its log (" .. (facts.sentinel_dir or (slashes(paths.config()) .. "/sentinel")) ..
                    "/sentinel.log); a refusal is logged there with its reason"
     return verdict
@@ -607,6 +610,7 @@ function M.run(options)
   if not verdict.request then
     verdict.ok, verdict.queued, verdict.status, verdict.error = false, nil, "sentinel_unverifiable", "sentinel_unverifiable"
     verdict.observed = "sentinel exited successfully without naming a durable request"
+    verdict.message = "the sentinel did not name a durable request, so it is unknown whether anything was queued."
     verdict.next = "inspect the sentinel request box and log before retrying"
     return verdict
   end

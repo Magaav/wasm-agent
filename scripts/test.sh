@@ -739,6 +739,8 @@ WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-release.lua" "$BIN" --db "$DB.relea
 # The route's two modes on a fixture install: a read-only check (no sentinel, no request written) and
 # a deploy path that reports the cached release state without paying for a fetch.
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-update-release.lua" "$BIN" --db "$DB.update-release" | grep "update release ok"
+# The pre-update backup skips every lock file the Rust sources open (binding.transport.sqlite broke /update, 04/11).
+WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-backup-locks.lua" "$BIN" --db "$DB.backup-locks" | grep "backup locks ok"
 # The same decisions through the route, on a node whose install dir is a fixture. Its sentinel is a
 # stub: a live check that dropped a request into the operator's real request box could install a
 # placeholder over the node that is running. It also asserts that it did not.

@@ -33,8 +33,15 @@ local function list(dir)
   return value.entries or value
 end
 
-local function is_store(name)
-  if name:find("%.lease%.sqlite$") or name:find("%-lease%.sqlite$") or name:find("%-journal$") or name:find("%-wal$") or name:find("%-shm$") then
+-- Lock files are SQLite files that hold an exclusive transaction and no data: `*.lease.sqlite`,
+-- `*-lease.sqlite` (run leases) and `*.transport.sqlite` (the binding transport lease). Attaching one that
+-- a live process holds fails with "database is locked", so a missing pattern here made every bound node's
+-- pre-update backup fail and `/update` refuse (04/11). scripts/test-backup-locks.lua derives the lock
+-- names from the Rust sources so a new lock file cannot silently break backups again.
+function M.is_store(name)
+  name = tostring(name or "")
+  if name:find("%.lease%.sqlite$") or name:find("%-lease%.sqlite$") or name:find("%.transport%.sqlite$")
+    or name:find("%-journal$") or name:find("%-wal$") or name:find("%-shm$") then
     return false
   end
   return name:find("%.db$") ~= nil or name:find("%.sqlite$") ~= nil
@@ -58,7 +65,7 @@ function M.stores()
         local path = dir .. "/" .. name
         if entry.kind == "dir" and depth == 0 and name ~= "backups" and name ~= "changes" and name ~= "bin" then
           scan(path, 1)
-        elseif entry.kind == "file" and is_store(name) and not seen[path] then
+        elseif entry.kind == "file" and M.is_store(name) and not seen[path] then
           seen[path] = true
           found[#found + 1] = path
         end
