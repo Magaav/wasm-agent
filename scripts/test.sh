@@ -302,7 +302,10 @@ gate_phase_begin self-update
 BIN=rust/target/release/wa
 [ ! -f "$BIN.exe" ] || BIN="$BIN.exe"
 # BEGIN native-target recovery required proofs
-gate_run cargo test --offline --manifest-path rust/Cargo.toml -p wa-host resources::tests
+# --release like every other wa-host test here: this was the gate's only debug-profile build of the main
+# workspace, so a cold gate compiled the whole dependency tree (wasmtime, cranelift, ...) a second time
+# for one test module. resources::tests has no debug_assertions dependency (04/11).
+gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-host resources::tests
 run_proof_fixture nativeTarget 29 node scripts/test-native-target-resource.cjs "$BIN"
 run_proof_fixture resourceClaims 47 node scripts/test-resource-claims.cjs "$BIN"
 run_proof_fixture nativeAlias 12 node scripts/test-native-target-alias.cjs "$BIN"
