@@ -487,7 +487,11 @@ function M.run_release(options, facts, record)
   end
   local unit = "wa-release-update-" .. tostring(math.floor(host.now()))
   local log = slashes(paths.config()) .. "/release-update.log"
-  local started = shell("systemd-run --user --collect --quiet --unit " .. quote(unit) ..
+  -- A node started by its sentinel service has no XDG_RUNTIME_DIR, and without it `systemd-run --user`
+  -- cannot reach the user manager ("Failed to connect to bus", 04/11 on openclaw). The user's runtime
+  -- directory is fixed, so name it when the environment does not.
+  local bus = "export XDG_RUNTIME_DIR=\"${XDG_RUNTIME_DIR:-/run/user/$(id -u)}\"; "
+  local started = shell(bus .. "systemd-run --user --collect --quiet --unit " .. quote(unit) ..
     " --property=StandardOutput=append:" .. quote(log) .. " --property=StandardError=append:" .. quote(log) ..
     " bash " .. quote(script) .. " --prefix " .. quote(facts.install) .. " 2>&1")
   if not started or started.code ~= 0 then
