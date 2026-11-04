@@ -114,10 +114,13 @@ function finish(res,text){event(res,{choices:[{delta:{content:text},finish_reaso
   check(await evaluate(a,"recoveryPane.transcript.textContent.split('LIVE-A').length===2"),'repeated child reconnect does not duplicate tail');
   check((await api('health')).runs.length===2,'recovery did not require run settlement');
   await evaluate(b,'apiTimeout=80; true');delayedWrite=true;
-  await evaluate(b,"setProvider('gpt').then(()=>true)");
-  check(await evaluate(b,"settings.provider==='gpt' && document.getElementById('settings-error').textContent.includes('in effect') && document.getElementById('settings-error').textContent.includes('aborted')"),'delayed write acknowledgement is reconciled from the actually applied node state');
+  // ef56eca6 (28/10) removed the built-in `gpt` route: one provider remains, so the delayed write re-selects it.
+  // The claim is unchanged - an acknowledgement that arrives after the client aborted is reconciled from the
+  // node's applied state ("in effect"), and the write still moves the settings revision (checked below).
+  await evaluate(b,"setProvider('opencode-go').then(()=>true)");
+  check(await evaluate(b,"settings.provider==='opencode-go' && document.getElementById('settings-error').textContent.includes('in effect') && document.getElementById('settings-error').textContent.includes('aborted')"),'delayed write acknowledgement is reconciled from the actually applied node state');
   await evaluate(b,'apiTimeout=8000; true');
-  await until(()=>evaluate(a,"settings.provider==='gpt'").catch(()=>false),'other window versioned settings refresh');
+  await until(()=>evaluate(a,"settings.provider==='opencode-go'").catch(()=>false),'other window versioned settings refresh');
   const current=await api('models');const stale=await api('model',{value:'fixture-next',revision:current.settings_revision-1});check(stale.error==='settings_conflict','stale cross-window selection refuses');
   // A followed run owns this window's controls too. Wait for its settlement
   // before exercising the next-run setting; do not call a correct refusal a failure.

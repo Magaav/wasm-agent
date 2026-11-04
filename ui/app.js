@@ -7784,8 +7784,12 @@ async function nativeSessionTask(thread, signal) {
   if (result.found !== true || !result.task || typeof result.task !== 'object') throw Error('native_session_lookup_contract_invalid');
   const task=result.task;
   if(task.session_id!==thread || task.transport!=='native') throw Error('native_session_lookup_identity_mismatch');
-  if (![task.subagent_id, task.task_id, task.attempt_id, task.node_id, task.event_node_id, task.event_epoch]
-    .every(value => typeof value === 'string' && value.length > 0)) throw Error('native_event_identity_unavailable');
+  // node_id may be '' - a local session's own node (server.lua treats '' as this node); it is compared
+  // for equality, never addressed. Requiring it non-empty refused every native child of a local thread
+  // (release gate recoveryWindows, 04/11). The event identity proper must be present.
+  if (![task.subagent_id, task.task_id, task.attempt_id, task.event_node_id, task.event_epoch]
+    .every(value => typeof value === 'string' && value.length > 0) || typeof task.node_id !== 'string')
+    throw Error('native_event_identity_unavailable');
   return task;
 }
 // Native identity is intentionally opaque; never feed it to runKey or /run-events.
