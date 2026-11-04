@@ -19,41 +19,49 @@ not a new incremental provider protocol.
 
 ## Order and ownership
 
-- `<generic>`: identity, style, language and explicit-memory protocol.
-- `<stack name="wasm-agent">`: Sentinel-notice safety, tool protocol, capability-aware
-  guidelines and shared skill-use policy. Optional metadata remains discovered in
-  progressive mode; full-mode metadata stays compatible.
-- `<workflow source="...">`: the role-scoped execution file, inside
-  `<orchestration mode="off|on">`. The actual session selector supplies the mode.
-- `<project source="...">`: complete role-appropriate project instructions, retaining
-  the existing `<project_instructions path="...">` frame.
-- `<session>`: environment, `<role name="..."/>`, `<workdir path="..."/>`.
+<!-- generated:prompt-layers (scripts/sync-prompt-docs.lua) -->
+- `<generic>`: `identity`, `work`, `style`, `language`, `time`, `memory`
+- `<stack>`: `safety`, `tools`, `guidelines`, `skills`
+- `<workflow>`: `orchestration`
+- `<project>`: `project_instructions`
+- `<session>`: `environment`, `role`, `workdir`, `keys`
+<!-- /generated -->
+
+- `<generic>`: who the agent is and how it works (identity, completion and verification, style,
+  language, time, the on-demand memory protocol). A tool is named only in a form the envelope can
+  call: declared as `name`, otherwise `tool_call(name="...")`, otherwise not at all
+  (`scripts/test-prompt-tool-names.lua`).
+- `<stack name="wasm-agent">`: the Sentinel-notice rule, the tool protocol (in progressive mode
+  the generated on-demand index), capability-aware guidelines and the skill-use rule.
+- `<workflow>`: `AGENTS.orchestrator.md`, inside `<orchestration mode="off|on">`. The file has one
+  section per mode (`## Orchestration off` / `## Orchestration on`); only the active one is
+  injected. A file without those headings is injected whole.
+- `<project>`: pi-style project instructions, one `<project_instructions path="...">` frame per
+  file: `<config>/AGENTS.md`, then every `AGENTS.md` from the filesystem root down to the
+  session's workdir (its worktree when it has one), nearest last. `WASM_AGENT_AGENTS_MD` names one
+  explicit file instead. Guests get `AGENTS.guest.md` only and never fall back to operator files.
+- `<session>`: environment, `<role name="..."/>`, `<workdir path="..."/>` (the session worktree
+  when one is bound) and the vault key names for a master.
 
 Existing checkpoint summaries and unanswered-turn recovery notices get an explicit
 `<onSessionStart_injection source="session.summary|resume_notice">` frame in their
-existing separate context messages. This does not add a session-start hook,
-automatic memory retrieval, new scheduler or recurrent wake. Empty sections vanish.
-Attributes are escaped; instruction bodies remain complete. Markup is an inspection
-boundary, not a security boundary or a general XML document: native role/profile/
-workspace/effect checks remain authoritative. External web/tool data remains data.
-Guests never gain an operator workflow or fall back to operator AGENTS.md. Child
-profile declarations and mandatory child system-boundary construction stay separate.
-AGENTS.md remains10,389 bytes, delta0.
+existing separate context messages. There is no session-start hook, automatic memory
+retrieval, scheduler or recurrent wake. Empty sections vanish. Attributes are escaped;
+instruction bodies remain complete. Markup is an inspection boundary, not a security
+boundary: native role/profile/workspace/effect checks remain authoritative.
 
 ## Main-loop tools
 
-The new-session progressive bootstrap is now eleven: remember, recall, skill,
-tool_search, tool_call, read, read_many, write, edit, bash, session_worktree.
-The operator explicitly selected read_many as a main-loop capability. It needs no
-discovery round. Capabilities and tool_result remain discoverable. Existing full
-sessions keep their full catalogue; bootstrap classic restores thirteen.
+<!-- generated:bootstrap-tools (scripts/sync-prompt-docs.lua) -->
+New operator sessions declare 14 tools from the start (`lean`, the default): `bash`, `edit`, `read`, `read_many`, `recall`, `remember`, `session_worktree`, `skill`, `time`, `tool_call`, `tool_search`, `web_read`, `web_search`, `write`.
+`codemode` is also declared when code mode is admitted for the run. Orchestration mode adds `route_task`, `subagent`.
+`WASM_AGENT_BOOTSTRAP_MODE=classic` adds `capabilities`, `tool_result` (16 in all).
+Every other permitted tool is called on demand with `tool_call`; the system prompt lists it with its cue.
+<!-- /generated -->
 
-Tagged structure and restoring read_many may increase initial bytes. Do not call
-that a saving. Measure actual system/schema sections and complete task paths;
-serialized bytes are not billed tokens/cache hits or autonomous model-quality proof.
-Current native captures and focused source/embedded checks are recorded under the
-session's fresh layered-web proof generation. Earlier envelope measurements remain
-immutable historical evidence rather than being rewritten to describe this code.
+Tagged structure costs bytes; measure actual system/schema sections and complete task paths
+rather than calling a smaller prefix a saving. Serialized bytes are not billed tokens, cache hits
+or model quality.
 
 ## Verification
 

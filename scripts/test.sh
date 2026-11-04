@@ -988,6 +988,11 @@ WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-telemetry-incremental.lua" "$BIN" -
 # The prompt index is an authored cue, not a slice of the schema description. Without this,
 # the same text is sent twice and nothing in the suite notices when the slicing returns.
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-tool-cues.lua" "$BIN" --db "$DB.tool-cues" | grep 'tool cues ok'
+# Every tool the prompt names is callable in that envelope, and the on-demand index lists every
+# undeclared permitted tool; the generated prompt docs match the code (scripts/sync-prompt-docs.lua).
+WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-prompt-tool-names.lua" "$BIN" --db "$DB.prompt-tool-names" | grep 'prompt tool names ok'
+WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-project-instructions.lua" "$BIN" --db "$DB.project-instructions" | grep 'project instructions ok'
+(cd "$WASM_AGENT_LUA_ROOT" && WA_SCRIPT=scripts/sync-prompt-docs.lua "$BIN" --db "$DB.prompt-docs") | grep 'sync-prompt-docs: ok'
 # Candidate batching is opt-in; exact evidence/order and response-group telemetry stay visible.
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-batching-guidance.lua" "$BIN" --db "$DB.batching-guidance" | grep 'batching guidance ok'
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-retry-context.lua" "$BIN" --db "$DB.retry-context" | grep 'retry context ok'
@@ -1699,9 +1704,12 @@ local block = skills.prompt_block()
 assert(block and block:find("<available_skills>", 1, true),
   "the system prompt must advertise the skills")
 assert(block:find("see-your-output", 1, true), "the advertised block must name the skill")
-assert(block:find("crystallize repeatable deterministic sequences",1,true) and
-  block:find("Compose consecutive spells",1,true) and block:find("inference by default",1,true),
-  "every skill must receive the crystallization, composition and inference recovery rule")
+assert(block:find("load the `spells` skill",1,true) and not block:find("crystallize",1,true),
+  "the spell lifecycle loads on demand from the spells skill; the prompt keeps one pointer")
+local spells = tools.dispatch(memory, "skill", { name = "spells" }, "master")
+assert(spells.content and spells.content:find("crystallize", 1, true) and spells.content:find("Compose", 1, true)
+  and spells.content:find("inference by default", 1, true),
+  "the spells skill carries the crystallization, composition and inference recovery rule")
 local loaded = tools.dispatch(memory, "skill", { name = "see-your-output" }, "master")
 assert(loaded.content and #loaded.content > 200, "loading a skill must return its instructions")
 assert(loaded.path and loaded.path:find("SKILL.md", 1, true), "a loaded skill reports its file")

@@ -2,12 +2,14 @@
 
 ## Model boundary
 
-New operator sessions use eleven stable bootstrap declarations: remember, recall,
-skill, tool_search, tool_call, read, read_many, write, edit, bash and session_worktree.
-`read_many` is explicitly part of the main loop, not deferred. See
-`docs/LAYERED-PROMPT.md` for the generic/stack/workflow/project/session sections.
-`WASM_AGENT_BOOTSTRAP_MODE=classic` restores the former thirteen (including
-capabilities and tool_result); invalid values refuse. The role-filtered execution catalogue remains
+<!-- generated:bootstrap-tools (scripts/sync-prompt-docs.lua) -->
+New operator sessions declare 14 tools from the start (`lean`, the default): `bash`, `edit`, `read`, `read_many`, `recall`, `remember`, `session_worktree`, `skill`, `time`, `tool_call`, `tool_search`, `web_read`, `web_search`, `write`.
+`codemode` is also declared when code mode is admitted for the run. Orchestration mode adds `route_task`, `subagent`.
+`WASM_AGENT_BOOTSTRAP_MODE=classic` adds `capabilities`, `tool_result` (16 in all).
+Every other permitted tool is called on demand with `tool_call`; the system prompt lists it with its cue.
+<!-- /generated -->
+
+See `docs/LAYERED-PROMPT.md` for the prompt layers. Invalid `WASM_AGENT_BOOTSTRAP_MODE` values refuse. The role-filtered execution catalogue remains
 complete. `tool_search` loads matching exact definitions into the transcript;
 `tool_call(name, arguments)` routes a loaded definition through the existing
 native dispatcher. There is no JavaScript interpreter or new authority in this
@@ -166,7 +168,7 @@ one-second delay entirely to process startup or persistent connections.
 
 ## Web interface
 
-Discover `web_search` and `web_read` through tool_search, then use tool_call.
+`web_search` and `web_read` are declared from the start (see the bootstrap list above).
 They are fixed, read-only MCP-backed native facades. No generic connector enabling
 or account creation is needed. Search queries leave the machine: the live default
 is anonymous DuckDuckGo HTML. Detected challenges return an evidence-backed human

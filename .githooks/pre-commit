@@ -122,6 +122,34 @@ MESSAGE
     ;;
 esac
 
+# Generated prompt docs must match the code that generates them (scripts/sync-prompt-docs.lua). The
+# check runs only when the commit touches the prompt's sources or the generated docs, and it reads
+# the working tree (stage what you checked). No wa binary means the docs cannot be checked: that is
+# refused, not skipped, unless WA_PROMPT_DOCS_UNCHECKED=1 says so out loud.
+prompt_sources='^(lua/core/(agent|envelope|tools|skills|prompt_sections|codemode_policy)\.lua|docs/(ENVELOPE|LAYERED-PROMPT|PROGRESSIVE-ENVELOPE)\.md|scripts/sync-prompt-docs\.(lua|sh))$'
+if git diff --cached --name-only | grep -Eq "$prompt_sources"; then
+  root="$(git rev-parse --show-toplevel)"
+  errors="$(mktemp)"
+  "$root/scripts/sync-prompt-docs.sh" >/dev/null 2>"$errors"
+  status=$?
+  if [ $status -ne 0 ]; then
+    if [ $status -eq 2 ] && [ "${WA_PROMPT_DOCS_UNCHECKED:-0}" = "1" ]; then
+      echo "pre-commit: generated prompt docs NOT checked (no wa binary; WA_PROMPT_DOCS_UNCHECKED=1)" >&2
+    else
+      cat "$errors" >&2
+      cat >&2 <<'MESSAGE'
+pre-commit: refusing a commit whose generated prompt docs are stale or unchecked.
+
+Run scripts/sync-prompt-docs.sh --write, review and stage the docs, then commit again. With no wa
+binary on this machine, set WA_BIN to one (or WA_PROMPT_DOCS_UNCHECKED=1 to commit unchecked).
+MESSAGE
+      rm -f "$errors"
+      exit 1
+    fi
+  fi
+  rm -f "$errors"
+fi
+
 offenders="$(git grep --cached -I -l "$(printf '\r')" 2>/dev/null || true)"
 if [ -z "$offenders" ]; then
   exit 0
