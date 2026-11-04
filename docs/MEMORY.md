@@ -311,8 +311,13 @@ and the deploy shape, and a guest can ask the model to repeat its own context:
 
 | role | env override | then |
 | --- | --- | --- |
-| `master` | `WASM_AGENT_AGENTS_MD` | `./AGENTS.md`, `~/.wasm-agent/AGENTS.md` |
+| `master` | `WASM_AGENT_AGENTS_MD` | `~/.wasm-agent/AGENTS.md` (the user's global file), then every `AGENTS.md` from `/` down to the session workdir, all injected |
 | `guest` | `WASM_AGENT_AGENTS_MD_GUEST` | `./AGENTS.guest.md`, `~/.wasm-agent/AGENTS.guest.md` |
+
+Installers do not write `~/.wasm-agent/AGENTS.md`: it is the user's own file. An older
+`scripts/install.ps1` seeded it with the repo's `AGENTS.md`; the deploy and the installer retire
+an unedited seed to `AGENTS.md.seeded-backup` and warn about an edited one
+(`scripts/lib/seeded-agents-md.sh`). See `docs/LAYERED-PROMPT.md` for the order.
 
 A guest deliberately does **not** fall back to `AGENTS.md`: falling back would
 hand the operator instructions to exactly the role they are hidden from. A node

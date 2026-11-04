@@ -382,15 +382,8 @@ function M.project_instructions(role, workdir)
     local file = read(join(chain[i], "AGENTS.md"))
     if file then files[#files + 1] = file end
   end
-  -- scripts/install.ps1 seeds <config>/AGENTS.md with a snapshot of this repo's file as a fallback
-  -- for nodes that run outside a checkout. A global file whose title line matches a project file is
-  -- that snapshot, not a global rule set: injecting it would add a stale duplicate.
-  local function title(text) return text:match("^[^\n]*") end
-  if global then
-    for _, file in ipairs(files) do
-      if title(file.text) == title(global.text) then global = nil; break end
-    end
-  end
+  -- <config>/AGENTS.md is the user's own file, injected as is. Installers no longer seed it with the
+  -- repo's file; scripts/lib/seeded-agents-md.sh retires a copy an older installer left behind.
   if global then table.insert(files, 1, global) end
   return files
 end

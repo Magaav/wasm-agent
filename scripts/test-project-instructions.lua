@@ -41,7 +41,8 @@ for _, file in ipairs(agent.project_instructions("guest", inner)) do
   ok(not file.text:find("INNER_KEEP", 1, true) and not file.text:find("OUTER_KEEP", 1, true), "guest never reads operator files")
 end
 
--- A global file is injected first, unless it is a snapshot of a project file (same title line).
+-- The global file is the user's own: injected first, as is, whatever its title (installers no
+-- longer seed it; scripts/test-seeded-agents-md.sh covers retiring an old seed).
 local config = paths.config()
 sh("mkdir -p '" .. config .. "'")
 local global_path = config .. "/AGENTS.md"
@@ -49,10 +50,10 @@ local had = host.read_file(global_path)
 assert(host.write_file(global_path, "# Global rules\nGLOBAL_KEEP\n"))
 local with_global = agent.project_instructions("master", inner)
 ok(with_global[1].text:find("GLOBAL_KEEP", 1, true), "global file comes first")
-assert(host.write_file(global_path, "# Inner rules\nSTALE_SNAPSHOT\n"))
-for _, file in ipairs(agent.project_instructions("master", inner)) do
-  ok(not file.text:find("STALE_SNAPSHOT", 1, true), "a config snapshot of a project file is not injected twice")
-end
+assert(host.write_file(global_path, "# Inner rules\nSAME_TITLE_GLOBAL\n"))
+local same_title = agent.project_instructions("master", inner)
+ok(same_title[1].path == global_path and same_title[1].text:find("SAME_TITLE_GLOBAL", 1, true),
+  "a global file sharing a project file's title is still the user's and is injected first")
 if had then host.write_file(global_path, had) else sh("rm -f '" .. global_path .. "'") end
 
 sh("rm -rf '" .. base .. "'")

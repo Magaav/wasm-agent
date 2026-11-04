@@ -1183,6 +1183,13 @@ if [ -n "$EXPECTED_SHA" ]; then
   node "$PROOF_NODE_SCRIPT" record "$PROOF_NODE_ROOT" "$PROOF_NODE_INSTALL" \
     || fail "final source/artifact/script/UI/process identity recording failed"
 fi
+# An old scripts/install.ps1 seeded <config>/AGENTS.md with the repo's own file, which the node now
+# reads as the user's global instructions. Retire an unedited seed (moved, never deleted; an edited one
+# is kept with a warning). Advisory: it never fails a deploy that already installed.
+if [ -f "$ROOT/scripts/lib/seeded-agents-md.sh" ]; then
+  . "$ROOT/scripts/lib/seeded-agents-md.sh"
+  retire_seeded_agents_md "$SENTINEL_CONFIG" "$ROOT/scripts/lib/seeded-agents-md.sha256" || true
+fi
 write_result true "installed $COMMIT; watcher ${SENTINEL_NEW_PID:-${SENTINEL_WATCH_PID:-none}}"
 wa_phase ""
 wa_status installed done "" "$(( $(wa_status_now 2>/dev/null || date +%s) - ${WA_STATUS_STARTED:-0} ))s"

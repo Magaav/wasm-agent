@@ -157,12 +157,38 @@ if (Test-Path $envFile) {
     }
   } catch { Warn "could not read the model config from $HostAlias" }
 }
-foreach ($doc in @("AGENTS.md", "AGENTS.guest.md")) {
-  $dest = Join-Path $waHome $doc
-  if (-not (Test-Path $dest)) {
-    try {
-      Invoke-WebRequest -UseBasicParsing "https://raw.githubusercontent.com/Magaav/wasm-agent/main/$doc" -OutFile $dest -ErrorAction Stop
-    } catch { Warn "could not fetch $doc (instructions will come from the working directory)" }
+# Guests read only <config>/AGENTS.guest.md, so it is seeded. The operator's <config>/AGENTS.md is the
+# user's own global file (pi-style): project rules come from the AGENTS.md files in the session's
+# workdir, so the repo's AGENTS.md is no longer copied here (stopped 2026-11-04).
+$guestDoc = Join-Path $waHome "AGENTS.guest.md"
+if (-not (Test-Path $guestDoc)) {
+  try {
+    Invoke-WebRequest -UseBasicParsing "https://raw.githubusercontent.com/Magaav/wasm-agent/main/AGENTS.guest.md" -OutFile $guestDoc -ErrorAction Stop
+  } catch { Warn "could not fetch AGENTS.guest.md (guest instructions will come from the working directory)" }
+}
+# Retire a copy an older installer seeded: same policy as scripts/lib/seeded-agents-md.sh (moved when
+# byte-identical to a published AGENTS.md, kept with a warning when edited, never deleted).
+$seeded = Join-Path $waHome "AGENTS.md"
+if (Test-Path -LiteralPath $seeded) {
+  $hashList = $null
+  $localList = if ($PSScriptRoot) { Join-Path $PSScriptRoot "lib/seeded-agents-md.sha256" } else { $null }
+  try {
+    if ($localList -and (Test-Path -LiteralPath $localList)) { $hashList = Get-Content -LiteralPath $localList }
+    else { $hashList = (Invoke-WebRequest -UseBasicParsing "https://raw.githubusercontent.com/Magaav/wasm-agent/main/scripts/lib/seeded-agents-md.sha256" -ErrorAction Stop).Content -split "`n" }
+  } catch { Warn "could not read the seeded AGENTS.md hash list; $seeded left as is" }
+  if ($hashList) {
+    $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $seeded).Hash.ToLowerInvariant()
+    if ($hashList | Where-Object { $_.Trim() -eq $hash }) {
+      $backup = "$seeded.seeded-backup"
+      if (Test-Path -LiteralPath $backup) { $backup = "$seeded.seeded-backup." + (Get-Date -Format "yyyyMMddHHmmss") }
+      try { Move-Item -LiteralPath $seeded -Destination $backup -ErrorAction Stop; Ok "seeded AGENTS.md was an unedited copy of the repo's file; moved to $backup" }
+      catch { Warn "could not move $seeded to $backup; it stays injected as global instructions" }
+    } else {
+      $title = (Get-Content -LiteralPath $seeded -TotalCount 1)
+      if ($title -eq ("# AGENTS.md " + [char]0x2014 + " working on wasm-agent") -or $title -eq "## Operator-selected direct workflow (2026-10-05)") {
+        Warn "$seeded looks like an edited copy of the repo's AGENTS.md; it is kept and injected as your global instructions. Rename it if that is not intended."
+      }
+    }
   }
 }
 # The local server serves ui/ from disk, so the window has no network dependency.
