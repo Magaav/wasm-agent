@@ -5,6 +5,18 @@
   "notes": "newest first; one entry per published Linux bundle and target; read by scripts/linux/bootstrap.sh",
   "releases": [
     {
+      "tag": "v0.1.0-alpha.15",
+      "commit": "27bd7803aa1487015ef50a34cae337460c647920",
+      "commit_short": "27bd7803aa14",
+      "target": "aarch64-unknown-linux-musl",
+      "arch": "arm64",
+      "manifest_sha256": "7ed202012b053b4353b71c1cbcbefc34561692df117ad15cdb9c6b4341dfc694",
+      "url": "https://github.com/Magaav/wasm-agent/releases/download/v0.1.0-alpha.15/wa-linux-arm64-musl-27bd7803aa14.tar.gz",
+      "size": 10810455,
+      "node_version": "24.22.1",
+      "built_utc": "2026-11-04T18:59:04Z"
+    },
+    {
       "tag": "v0.1.0-alpha.14",
       "commit": "6712911153433f3150f62b0913bbdb7ff123db75",
       "commit_short": "671291115343",
@@ -53,5 +65,5 @@
       "built_utc": "2026-10-30T16:46:48Z"
     }
   ],
-  "generated_utc": "2026-11-01T12:32:23Z"
+  "generated_utc": "2026-11-04T18:59:04Z"
 }
