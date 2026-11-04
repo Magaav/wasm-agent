@@ -212,9 +212,13 @@ gate_run cargo build --release --offline --manifest-path rust/Cargo.toml >"$ACTU
   || { build_status=$?; cat "$ACTUAL_RELEASE_BUILD_LOG" >&2; exit "$build_status"; }
 
 # BEGIN sentinel-intake required proofs
-CARGO_BUILD_JOBS=2 gate_run cargo test --offline --manifest-path rust/wa-sentinel/Cargo.toml -- --test-threads=2
+# One thread: wa-sentinel's tests share process-wide environment (PATH, WASM_AGENT_HOME, ports) and not
+# every reader takes ENV_LOCK, so two threads raced - "program not found" / a foreign home, a different
+# test each time (04/11: 1 in 5 runs). The whole suite is ~26 s; it runs once (the release-profile rerun
+# of the same tests further down was removed: same assertions, a second compile, a second chance to race).
+gate_run cargo test --offline --manifest-path rust/wa-sentinel/Cargo.toml -- --test-threads=1
 if [ "${OS:-}" = "Windows_NT" ]; then
-CARGO_BUILD_JOBS=2 gate_run cargo build --offline --manifest-path rust/wa-sentinel/Cargo.toml
+gate_run cargo build --offline --manifest-path rust/wa-sentinel/Cargo.toml
 # ABSOLUTE, from `--absolute-git-dir`: `--git-path` prints `.git/<name>` relative to the cwd, and these
 # paths are handed to a NATIVE Windows process (`cygpath -w` of a relative path stays relative). The
 # installer refuses a non-rooted scratch (`absolute existing install/home required`) and the whole gate
@@ -282,12 +286,11 @@ gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-ho
 # cause it cannot know. A pure function of the operation record, so it is tested as one - the
 # sentence it replaced was quoted onward as a diagnosis of a read-only `grep`.
 gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-host deadline_note_tests
-gate_run cargo test --release --offline --manifest-path rust/wa-sentinel/Cargo.toml
 # The named-instance lifecycle, against two real co-located nodes: separate homes, keys, databases
 # and ports; a refused wrong listener; and a stop/restart of one that cannot reach the other. No
 # model and no network, so it belongs in the hermetic gate rather than the on-demand guest e2e.
 gate_phase_begin instances
-CARGO_BUILD_JOBS=2 cargo build --release --offline --manifest-path rust/wa-sentinel/Cargo.toml >/dev/null
+cargo build --release --offline --manifest-path rust/wa-sentinel/Cargo.toml >/dev/null
 gate_run node scripts/test-sentinel-ownership.cjs "rust/wa-sentinel/target/release/wa-sentinel"
 gate_run node scripts/test-sentinel-task-launcher.mjs
 gate_run node scripts/test-recovery-diagnosis.mjs
