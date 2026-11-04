@@ -13,12 +13,12 @@ local raw=json.encode(request)
 local original={schema=1,request=request,raw_request=raw,digest=host.sha256(raw),service=service,operators={pin},expires_at=request.expires_at,active=false,consent=true,phase='unknown',network_role='guest'}
 ok(json.decode(host.binding_state('cas',json.encode({state=original}))).ok,'native first CAS')
 ok(not json.decode(host.binding_state('cas',json.encode({state=original}))).ok,'stale CAS cannot overwrite')
-local calls,mode=0,'accepted'
+local calls,mode,reply=0,'accepted',nil
 host.http=function(method,url,headers,body)
   calls=calls+1
   local value
   if url:match('/service$') then value={protocol=1,binding_protocol=1,enrollment_ready=true,operators={pin}}
-  elseif url:find('/bindings/request?',1,true) then value={ok=true,binding={digest=original.digest,request=request,state=mode,revision=2}}
+  elseif url:find('/bindings/request?',1,true) then value={ok=true,binding=reply or {digest=original.digest,request=request,state=mode,revision=2}}
   elseif url:find('/register',1,true) then value={ok=true}
   elseif url:find('/relay/poll',1,true) then value={}
   elseif url:find('/lookup?',1,true) then value={public_key=id.public_key,role='guest',online=true,relay_attached=false}
@@ -44,7 +44,10 @@ local pending={};for k,v in pairs(binding.saved()) do pending[k]=v end
 pending.consent=true;pending.phase='pending';pending.active=false;pending.request.pairing_expires_at=1
 pending.raw_request=json.encode(pending.request);pending.digest=host.sha256(pending.raw_request)
 local old=binding.saved();ok(json.decode(host.binding_state('cas',json.encode({expected=old,state=pending}))).ok,'store private expired pairing')
-local at=calls;ok(binding.tick().state=='pairing_expired' and calls==at,'expired pairing stops observation requests')
+-- Since 17648fdb an expired PENDING pairing still asks the registry once - an acceptance that arrived while the
+-- node was not ticking must attach - and only then reports pairing_expired. Exactly one request, no polling.
+reply={digest=pending.digest,request=pending.request,state='pending',revision=2}
+local at=calls;local expired=binding.tick();reply=nil;ok(expired.state=='pairing_expired' and calls==at+1,'expired pending pairing asks the registry once, then reports pairing_expired')
 ok(select('#',host.binding_state('read','{}'))==1,'host state returns one value')
 ok(select('#',host.binding_transport('status'))==1,'host transport returns one value')
 print('binding runtime ok ('..checks..' checks, 0 skipped)')
