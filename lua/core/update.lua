@@ -475,6 +475,10 @@ function M.run_release(options, facts, record)
     return with({ ok = true, status = "current", observed = plan,
       message = "this node already runs the newest published bundle" .. (target and (" (" .. target .. ")") or "") .. "; nothing to do." })
   end
+  if options.check then
+    return with({ ok = true, status = "behind", observed = plan,
+      message = "a newer published bundle is available" .. (target and (": " .. target) or "") .. "; `wa update` installs it." })
+  end
   local has_systemd_run = shell("command -v systemd-run >/dev/null 2>&1")
   if not has_systemd_run or has_systemd_run.code ~= 0 then
     return with({ ok = false, status = "release_update_unsupervised", error = "release_update_unsupervised",
@@ -494,6 +498,44 @@ function M.run_release(options, facts, record)
     message = "queued: installing " .. tostring(target or "the newest bundle") .. " in the transient unit " .. unit ..
       ". It stops this node, installs, verifies and restarts it. This is not done yet.",
     next = "follow it with `journalctl --user -u " .. unit .. "` or " .. log .. "; installed.txt names the release once it is done." })
+end
+
+-- `wa update --check`: is THIS node behind what an update would install? A tree install compares its
+-- installed commit with origin/main (a fetch, no merge); a release install asks the bootstrap's verified
+-- check. Read-only either way. The release feed alone could not answer for a tree install - it records a
+-- commit, not a tag - so it said "cannot tell" on every tree node.
+function M.check(options)
+  options = options or {}
+  local facts = M.facts(options)
+  local record = installed_record(facts.install)
+  if not facts.tree and M.release_install(record) then
+    return M.run_release({ check = true }, facts, record)
+  end
+  if not facts.tree then
+    return { ok = false, status = "no_runtime_tree", error = "no_runtime_tree", message = "there is no tree or release record to compare with." }
+  end
+  local fetched = shell("git -C " .. quote(facts.tree) .. " fetch --quiet origin 2>&1")
+  if not fetched or fetched.code ~= 0 then
+    return { ok = false, status = "source_fetch_failed", error = "source_fetch_failed", observed = trim(fetched and fetched.stdout or ""),
+      message = "origin could not be fetched, so it is unknown whether this node is behind." }
+  end
+  local main = trim(git(facts.tree, "rev-parse --short=12 origin/main") or "")
+  local installed = trim(facts.installed_commit or "")
+  if installed == "" then
+    return { ok = true, status = "unknown", tree = facts.tree, target = main,
+      message = "installed.txt names no commit; origin/main is " .. main .. "." }
+  end
+  local behind = tonumber(trim(git(facts.tree, "rev-list --count " .. quote(installed) .. "..origin/main") or ""))
+  if not behind then
+    return { ok = true, status = "unknown", tree = facts.tree, installed = installed, target = main,
+      message = "installed " .. installed .. " is not in this tree's history, so it cannot be compared with origin/main " .. main .. "." }
+  end
+  if behind == 0 then
+    return { ok = true, status = "current", tree = facts.tree, installed = installed, target = main,
+      message = "installed " .. installed .. " is origin/main; nothing to update." }
+  end
+  return { ok = true, status = "behind", tree = facts.tree, installed = installed, target = main, behind = behind,
+    message = "installed " .. installed .. " is " .. behind .. " commit(s) behind origin/main " .. main .. "; `wa update` installs it." }
 end
 
 function M.run(options)

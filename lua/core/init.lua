@@ -74,14 +74,18 @@ end
 
 -- `wa update` / `wa --update`: the same request `/update` makes in the chat and the window, from a
 -- shell - so one command updates any node: a tree install queues the Sentinel deploy, a release install
--- runs the verifying bootstrap. `--check` only asks whether a newer release is published.
+-- runs the verifying bootstrap. `--check` is read-only: is this node behind what an update would install?
 if command == "update" or command == "--update" then
   local check = false
   for i = 2, #args do if args[i] == "--check" then check = true end end
-  local report = dofile("lua/core/update.lua").run({ reason = "requested with `wa update`", check = check, fresh = check })
+  local updater = dofile("lua/core/update.lua")
+  local report = check and updater.check({}) or updater.run({ reason = "requested with `wa update`" })
   local redact = dofile("lua/core/redact.lua")
-  if check and report.release then
-    print(redact.text(report.release.message or json.encode(report.release)))
+  if check then
+    print(redact.text(report.message or json.encode(report)))
+    -- The published release, as a second, separate fact (the window's banner reads the same check).
+    local feed = updater.run({ check = true })
+    if feed.release and feed.release.state == "behind" then print(redact.text("release feed: " .. feed.release.message)) end
   else
     print(redact.text(report.message or json.encode(report)))
     if report.release and report.release.state == "behind" then print(redact.text("release: " .. report.release.message)) end
