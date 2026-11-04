@@ -14,6 +14,10 @@ fn fixture()->(Value,Value,Value,Value,Value,Value,String) {
 }
 #[test]
 fn codemode_positive_and_complete_native_negative_matrix() {
+    // cm::source spawns `git`. Tests that blank PATH (node_script_tests, role_tests) hold ENV_LOCK while
+    // they do, so a test that runs a program must hold it too - without it this failed only when the two
+    // overlapped (release gate, --test-threads=2, 04/11: "program not found").
+    let _lock=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
     let (intent,effect,state,node,result,exit,text)=fixture();
     let binding=json!({"owner":"owner","parent":"parent"});let hash="f".repeat(64);let created=Some(134366169264516753_u64);
     cm::generation(&intent,&effect,&effect,&binding,&state,&node,11,created,&hash).unwrap();

@@ -154,6 +154,8 @@ fn reporting_a_waiting_request_leaves_it_in_the_box() {
 /// was written to install.
 #[test]
 fn the_recorded_commit_survives_a_later_main_move() {
+    // Spawns git: hold ENV_LOCK, which the tests that blank PATH hold while they do.
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let scratch = Scratch::new("main-moved");
     let repo = scratch.dir.join("repo");
     std::fs::create_dir_all(&repo).expect("repo directory");
@@ -188,6 +190,8 @@ fn the_recorded_commit_survives_a_later_main_move() {
 /// that main - it is what deploy.sh builds - and falls back to origin/main when the named ref is absent.
 #[test]
 fn a_named_deploy_remote_is_the_recorded_main() {
+    // Spawns git: hold ENV_LOCK, which the tests that blank PATH hold while they do.
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let scratch = Scratch::new("deploy-remote");
     let repo = scratch.dir.join("repo");
     std::fs::create_dir_all(&repo).expect("repo directory");
