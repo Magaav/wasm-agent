@@ -360,7 +360,12 @@ fn deadline_covers_both_streams_without_serial_graces() {
     let start = Instant::now();
     let id = m.start(spec).unwrap();
     let s = settled(&m, &id);
-    assert!(start.elapsed() < Duration::from_millis(1400), "{s}");
+    // The claim is the supervisor's: it settles both streams within one deadline, without a serial
+    // grace per stream. Its own `elapsed_ms` measures that. The test's wall clock also counts the
+    // harness waiting for a core: under the release gate's uncapped test threads it read >1400 ms for
+    // an operation that settled in 207 ms (04/11). The wall bound stays only as a hang guard.
+    assert!(s["elapsed_ms"].as_u64().unwrap_or(u64::MAX) < 1400, "{s}");
+    assert!(start.elapsed() < Duration::from_secs(10), "{s}");
     assert_eq!(s["error"], "deadline_exceeded");
     // The deadline begins at admission, before the supervisor creates its
     // record and starts the shell. On a loaded host it can expire before the
