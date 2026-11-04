@@ -318,8 +318,13 @@ function M.tick()
   local v,err=request_status(s);if not valid_reply(s,v) or v.binding.state~='accepted' then return failure('binding_approval_unavailable',err) end
   if not M.last_heartbeat or host.now()-M.last_heartbeat>=60 then
     -- Same v2 announcement as node.rs: the signature covers the name and the (empty) endpoint list.
-    local ts=math.floor(host.now());local i=identity();local sig=decode(host.sign('v2|'..i.node_id..'|'..ts..'|'..tostring(s.request.name or '')..'|[]'))
-    local r,e=http(s.service,'POST','/register',nil,{node_id=i.node_id,public_key=i.public_key,name=s.request.name,role=s.network_role,endpoints={},ts=ts,signature=sig.signature})
+    -- The name a node answers to now, not the one frozen into its binding request: a node bound before it
+    -- was named stayed 'bound-node' in the registry forever (04/11: work and nextcloud). The name is
+    -- display only - the registry binds by key - so the signed announcement carries the current one.
+    local current=tostring(host.read_file(paths.config()..'/node.name') or ''):gsub('^%s+',''):gsub('%s+$','')
+    local name=current~='' and current or tostring(s.request.name or '')
+    local ts=math.floor(host.now());local i=identity();local sig=decode(host.sign('v2|'..i.node_id..'|'..ts..'|'..name..'|[]'))
+    local r,e=http(s.service,'POST','/register',nil,{node_id=i.node_id,public_key=i.public_key,name=name,role=s.network_role,endpoints={},ts=ts,signature=sig.signature})
     if not r then return failure('binding_registration_failed',e) end;M.last_heartbeat=host.now()
   end
   local response,why=http(s.service,'GET','/relay/poll?node_id='..s.request.node_id,'relay-poll')
