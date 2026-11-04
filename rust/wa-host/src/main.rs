@@ -423,6 +423,7 @@ fn main() {
             .and_then(|value| value.parse().ok())
             .unwrap_or(8800);
         client_bridge::serve(client_port, bridge.clone());
+        binding_runtime::set_serving();
         if binding_runtime::present() {
             if let Err(error)=binding_runtime::transport("serve"){eprintln!("binding_transport:{error}");std::process::exit(2);}
         } else {
@@ -432,7 +433,7 @@ fn main() {
             // forever with the registry saying `accepted` and no outbound runtime at all - no
             // pending->accepted flip, no `/register`, `active`/`registered` false (measured 2026-11-01).
             std::thread::Builder::new().name("wa-binding-appear".into()).spawn(|| {
-                for _ in 0..10 {
+                loop {
                     std::thread::sleep(std::time::Duration::from_secs(2));
                     if !binding_runtime::present() { continue; }
                     // Never exits the node from here: it is already serving, so a refused lease is a
@@ -442,7 +443,6 @@ fn main() {
                         Err(error)=>{eprintln!("binding_transport:{error}"); std::thread::sleep(std::time::Duration::from_secs(15));}
                     }
                 }
-                eprintln!("binding_transport:the binding appeared but no outbound runtime could start");
             }).ok();
         }
         if let Ok(rendezvous_url) = std::env::var("WASM_AGENT_RENDEZVOUS") {

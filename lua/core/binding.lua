@@ -156,7 +156,13 @@ function M.begin(preview,consent,renew,lifetime)
   local now=math.floor(host.now());local i=identity();local id=host.uuid():gsub('-','');local code=host.uuid():gsub('-',''):sub(1,12)
   local name=host.read_file(paths.config()..'/node.name') or host.getenv('WASM_AGENT_NODE_NAME') or 'bound-node'
   name=name:gsub('^%s+',''):gsub('%s+$','')
-  local request={schema=1,id=id,node_id=i.node_id,public_key=i.public_key,code=code,name=name,service=fresh.service,operators=fresh.operators,scope='user-account-tools',expires_at=now+(lifetime=='permanent' and PERMANENT_CONSENT_SECONDS or STANDARD_CONSENT_SECONDS),pairing_expires_at=now+600}
+  -- The pairing window is ten minutes and a test may only shorten it: the knob exists so the late-accept
+  -- path can be exercised with authentic digests and a genuinely elapsed window instead of a forged
+  -- request, which the digest check refuses (measured here: a rewritten `pairing_expires_at` answered
+  -- `binding_response_identity_mismatch`). Anything above ten minutes is ignored.
+  local pairing_seconds=tonumber(host.getenv and host.getenv('WA_BINDING_PAIRING_SECONDS') or '') or 600
+  if pairing_seconds<1 or pairing_seconds>600 then pairing_seconds=600 end
+  local request={schema=1,id=id,node_id=i.node_id,public_key=i.public_key,code=code,name=name,service=fresh.service,operators=fresh.operators,scope='user-account-tools',expires_at=now+(lifetime=='permanent' and PERMANENT_CONSENT_SECONDS or STANDARD_CONSENT_SECONDS),pairing_expires_at=now+pairing_seconds}
   -- A standard request keeps the deployed shape byte-for-byte (eleven fields, no `lifetime`); only the
   -- explicit permanent intent adds the twelfth. The capability asked for never grows: the scope stays
   -- exactly 'user-account-tools' either way.
@@ -169,14 +175,11 @@ function M.begin(preview,consent,renew,lifetime)
   if type(result.binding)~='table' or result.binding.digest~=s.digest or type(result.binding.request)~='table' or result.binding.request.id~=id then s.phase='unknown';local kept,save_error=cas(written,s);return failure('binding_response_identity_mismatch',save_error) end
   s.phase='pending';s.revision=result.binding.revision;s.error=nil
   local saved,save_error=cas(written,s);if not saved then return failure(save_error) end
-  -- Which runtime ticks. A bind made in the node's OWN served conversation must ask for `serve`, not
-  -- `start`: this ledger is already served here, so the CLI branch fails its preflight by design and
-  -- stands by for "the node" - and on a node that started before `binding.json` existed there is no
-  -- serve-mode transport to hand it to. Nothing then ticks: the registry stays `accepted`, the local
-  -- state stays `pending`, `active`/`registered` stay false and no heartbeat is ever sent (measured
-  -- 2026-11-01: `transport:{"owner":"another process","state":"standby"}`, `last_seen` frozen,
-  -- `ps -T` showing a transport thread that never owned the lease).
-  local action=server_owned and 'serve' or 'start'
+  -- The CLI never takes the transport away from a running node: `start` stands by when this ledger is
+  -- already served (the host knows if it is the server) and takes the lease only when nothing else does.
+  -- Asking for `serve` here made a CLI steal the lease, exit, and leave the consent with no runtime at
+  -- all - which is why an operator stopped a supervised node by hand (measured 2026-11-01).
+  local action='start'
   local transport=decode(host.binding_transport(action))
   if not transport or not transport.ok then
     -- The request is already submitted: a serve that cannot take the lease is reported, never hidden,
