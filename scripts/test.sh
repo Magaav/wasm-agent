@@ -93,7 +93,7 @@ case "$GATE_HOME_KEEP" in
   all) ;;
   ''|*[!0-9]*) echo "gate home: WA_GATE_HOME_KEEP must be a non-negative whole number or 'all' (got '$GATE_HOME_KEEP')" >&2; exit 4 ;;
 esac
-GATE_ROOT="${TMPDIR:-/tmp}"  # where gate homes live; TMPDIR itself is re-pointed into the home below
+GATE_ROOT="${TMPDIR:-/tmp}"  # where gate homes (and the suites' own scratch) live
 GATE_HOME="$(mktemp -d "${TMPDIR:-/tmp}/wa-gate-home-$$-XXXXXX")"
 if command -v cygpath >/dev/null 2>&1; then
   export WASM_AGENT_HOME="$(cygpath -w "$GATE_HOME")"
@@ -167,12 +167,6 @@ trap gate_exit EXIT
 # ---- end of the bounded gate-home block: scripts/test-merge-lane-retention.mjs slices this file at
 # the line above and runs these exact bytes with its own body, so the policy is tested where it lives.
 
-# Every suite's scratch lives in the gate home, so the home's retention above removes it too. Suites
-# that `mktemp` (POSIX) or call os.tmpdir() (native Node on Windows) used to write straight into the
-# system temp and nothing removed them: 3369 wa-* directories, 16 GB, on the Windows node (04/11).
-GATE_TMP="$GATE_HOME/t"; mkdir -p "$GATE_TMP"
-export TMPDIR="$GATE_TMP"
-if command -v cygpath >/dev/null 2>&1; then export TEMP="$(cygpath -w "$GATE_TMP")" TMP="$(cygpath -w "$GATE_TMP")"; else export TEMP="$GATE_TMP" TMP="$GATE_TMP"; fi
 
 # Phase timing: instrumentation, not a redesign. Every phase marker below is a call between two
 # existing commands, so no check is added, removed, reordered or skipped; the table is printed into
@@ -416,7 +410,12 @@ SDB="$(mktemp -u /tmp/wa-status-XXXXXX.db)"
 RDB="$(mktemp -u /tmp/wa-resume-XXXXXX.db)"
 QDB="$(mktemp -u /tmp/wa-resume-q-XXXXXX.db)"
 PLUGINS="$(mktemp -d)"
-gate_fixture_cleanup() { rm -f "$DB" "$DB"-wal "$DB"-shm "$SDB" "$SDB"-wal "$SDB"-shm "$RDB" "$RDB"-wal "$RDB"-shm "$QDB" "$QDB"-wal "$QDB"-shm "$DB.title" "$DB.title"-wal "$DB.title"-shm "$DB.exec" "$DB.exec"-wal "$DB.exec"-shm; rm -rf "$PLUGINS" "$DB.home"; }
+# Suites mktemp straight into the system temp, and nothing removed them: 3369 wa-* directories, 16 GB on
+# the Windows node (04/11). Re-pointing TMPDIR/TEMP into the gate home was tried and reverted: the extra
+# 29 characters pushed a sentinel delivery path past Windows MAX_PATH (os error 3). So each gate removes
+# wa-* scratch older than two days instead - never a gate home (the sweep above owns those), never fresh.
+gate_scratch_sweep() { find "$GATE_ROOT" -maxdepth 1 -name 'wa-*' ! -name 'wa-gate-home-*' -mtime +2 -exec rm -rf {} + 2>/dev/null || true; }
+gate_fixture_cleanup() { gate_scratch_sweep; rm -f "$DB" "$DB"-wal "$DB"-shm "$SDB" "$SDB"-wal "$SDB"-shm "$RDB" "$RDB"-wal "$RDB"-shm "$QDB" "$QDB"-wal "$QDB"-shm "$DB.title" "$DB.title"-wal "$DB.title"-shm "$DB.exec" "$DB.exec"-wal "$DB.exec"-shm; rm -rf "$PLUGINS" "$DB.home"; }
 
 # Fresh retained output + process status + terminal count evidence for every new
 # integrated proof. A child that silently exits 0 or drops checks cannot pass.

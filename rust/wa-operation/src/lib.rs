@@ -250,6 +250,52 @@ fn finish_timing(state: &mut Value, total_ms: u64) {
     state["timing"]["unattributed_ms"] = json!(total_ms.saturating_sub(measured));
     state["timing"]["total_ms"] = json!(total_ms);
 }
+/// The form of `path` a raw Win32 call accepts past MAX_PATH. `std::fs` adds the `\\?\` prefix on its
+/// own; a direct `MoveFileExW` does not, so a deep home made the rename fail with ERROR_PATH_NOT_FOUND
+/// (os error 3) after the temporary file had been written - a sentinel return delivery under the release
+/// gate's private install, 04/11. Only absolute drive or UNC paths long enough to need it are changed;
+/// the verbatim form skips `/` and `.` normalisation, so separators are made `\\` first.
+#[cfg(windows)]
+pub(crate) fn long_path(path: &Path) -> std::ffi::OsString {
+    let text = path.as_os_str().to_string_lossy();
+    if text.len() < 240 || text.starts_with(r"\\?\") {
+        return path.as_os_str().to_owned();
+    }
+    let text = text.replace('/', "\\");
+    if text.as_bytes().get(1) == Some(&b':') && text.as_bytes().get(2) == Some(&b'\\') {
+        format!(r"\\?\{text}").into()
+    } else if let Some(rest) = text.strip_prefix(r"\\") {
+        format!(r"\\?\UNC\{rest}").into()
+    } else {
+        path.as_os_str().to_owned()
+    }
+}
+
+#[cfg(all(windows, test))]
+mod long_path_tests {
+    use super::*;
+    #[test]
+    fn long_absolute_paths_become_verbatim_and_short_ones_stay() {
+        let short = Path::new(r"C:\Users\a\x.json");
+        assert_eq!(long_path(short), short.as_os_str());
+        let deep = format!(r"C:\Users\Victor\{}\delivery.json", "d".repeat(260));
+        assert_eq!(long_path(Path::new(&deep)), std::ffi::OsString::from(format!(r"\\?\{deep}")));
+        let mixed = format!("C:/Users/Victor/{}/x.json", "d".repeat(260));
+        assert!(!long_path(Path::new(&mixed)).to_string_lossy().contains('/'));
+        let unc = format!(r"\\server\share\{}", "d".repeat(260));
+        assert!(long_path(Path::new(&unc)).to_string_lossy().starts_with(r"\\?\UNC\server\share\"));
+        // The real thing: write past MAX_PATH and read it back.
+        let base = std::env::temp_dir().join(format!("wa-long-path-{}", std::process::id()));
+        let mut dir = base.clone();
+        while dir.as_os_str().len() < 250 { dir = dir.join("segment-of-a-deep-tree"); }
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("delivery-with-a-long-name.json");
+        atomic_json(&file, &serde_json::json!({"ok": true})).unwrap();
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), r#"{"ok":true}"#);
+        std::fs::remove_dir_all(base).unwrap();
+    }
+}
+
 pub fn atomic_json(path: &Path, value: &Value) -> io::Result<()> {
     let temporary = path.with_extension(format!(
         "{}.{}.tmp",
@@ -269,8 +315,8 @@ pub fn atomic_json(path: &Path, value: &Value) -> io::Result<()> {
         use windows_sys::Win32::Storage::FileSystem::{
             MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
         };
-        let from: Vec<u16> = temporary.as_os_str().encode_wide().chain(Some(0)).collect();
-        let to: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+        let from: Vec<u16> = long_path(&temporary).encode_wide().chain(Some(0)).collect();
+        let to: Vec<u16> = long_path(path).encode_wide().chain(Some(0)).collect();
         if unsafe {
             MoveFileExW(
                 from.as_ptr(),
