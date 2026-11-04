@@ -6,7 +6,7 @@ made from this checkout, so it stays short; detail lives in `docs/` and loads on
 ## How work lands
 
 The default is the operator-selected direct workflow (`AGENTS.orchestrator.md`): implement,
-self-review, run focused checks, integrate through canonical main, push and read back
+self-review, run the fast path (`bash scripts/fast.sh`), integrate through canonical main, push and read back
 `origin/main`, and leave both trees clean.
 Do not start subagents or external inference agents unless the operator explicitly enables
 `/orchestration` (`docs/ORCHESTRATION-MODE.md`). Only the coordinator owns `/update`, UI
@@ -18,12 +18,14 @@ publication and Sentinel.
   self-review must be labelled self-review, never independent review.
   Do not fabricate a factory receipt or disable remote protection; remote protection is the
   boundary that cannot be skipped, hooks are a convenience.
-- **The gate is release-only.** The full release gate (`scripts/test.sh`, `finish.mjs gate`,
-  `scripts/wave-release.mjs`) runs only when a human asks for a release. Landing is focused
-  checks plus integration (ordinary Git for your change, `integrate` for a subagent's),
-  reporting `gate_verified:false` and `release_verified:false` (`lane-policy.json`). Never gate
-  a landing or wait for a gate before merging (`docs/MERGE-SPEED.md`). Release-gate
-  parallelism: `WA_GATE_JOBS` (`docs/EVOLUTION.md`).
+- **Day to day: the fast path.** `bash scripts/fast.sh` (minutes) must pass before you integrate;
+  report what it SKIPPED. It runs every self-contained `scripts/test-*.lua`, the Rust unit tests of
+  the crates you touched and the contract checks. A new Lua test belongs in it: make it
+  self-contained, don't add it to `scripts/fast-path.exclude`.
+- **The full gate is nightly, and for releases.** `scripts/test.sh` (via `scripts/wave-release.mjs`,
+  ~50 min) runs as the nightly job and when a human asks for a release. Never gate a landing or wait
+  for it before merging; landings report `gate_verified:false` and `release_verified:false`
+  (`lane-policy.json`).
 - Cleanup: back up dirty drafts, rejected code and evidence before retiring verified obsolete
   work. Unknown effects remain unresolved: never manufacture settlement or replay them. Report
   Git cleanup and runtime readiness separately.

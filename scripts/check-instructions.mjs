@@ -34,10 +34,11 @@ const PRODUCER = 'skills/parallel-evolution/SKILL.md'; // the per-turn producer 
 const RESERVATIONS = 'docs/CONCURRENCY.md'; // how many lanes fit, and what is serial
 
 // AGENTS.md is injected into every request made from this checkout. Growing it is the regression two
-// refactors removed (f962844: 10418 bytes; the lean-prompt rewrite: under 6000), so the budget is a
+// refactors removed (f962844: 10418 bytes; the lean-prompt rewrite: under 6000; raised to 7000 by the
+// operator 04/11 for the fast-path rule), so the budget is a
 // ratchet: it only goes down.
 const INJECTED = 'AGENTS.md';
-const INJECTED_BUDGET_BYTES = 6000;
+const INJECTED_BUDGET_BYTES = 7000;
 
 // The files this refactor owns. The vocabulary check below is enforced here and only here: the rest of
 // the repository names node-threads "workers" in code, UI and tests, which is another worker's rename
