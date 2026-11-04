@@ -81,6 +81,9 @@ if [ "${WA_FAST_IN_DOCKER:-}" = 1 ]; then
 elif ! command -v cargo >/dev/null 2>&1; then
   echo "fast: rust SKIPPED (cargo not on PATH)"; skipped=$((skipped + 1))
 else
+  # Test builds, not shippable ones: the same switch the gate sets (scripts/test.sh) so wa-host's build
+  # script does not demand the code-mode assets only a shipping build prepares.
+  export WA_CODEMODE_ALLOW_EMPTY=1
   base=$(git merge-base HEAD origin/main 2>/dev/null || echo HEAD)
   changed=$( { git diff --name-only "$base" -- rust; git diff --name-only -- rust; git diff --name-only --cached -- rust; } | sort -u)
   crates=""
@@ -98,7 +101,7 @@ else
     fi
     c=$?; ran=$((ran + 1))
     if [ "$c" = 0 ]; then echo "fast: rust $crate ok ($(( $(date +%s) - s ))s)"
-    else fails=$((fails + 1)); echo "FAIL rust $crate (exit $c):"; grep -E "^test .* FAILED|panicked at|^error" "$work/rust-$crate.log" | head -8; fi
+    else fails=$((fails + 1)); echo "FAIL rust $crate (exit $c):"; { grep -E "^test .* FAILED|panicked at|^error" "$work/rust-$crate.log" || tail -5 "$work/rust-$crate.log"; } | head -8; fi
   done
 fi
 
