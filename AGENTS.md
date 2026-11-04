@@ -39,7 +39,8 @@ layers and names (node-thread, subagent, run): `docs/FABRIC.md`.
 ## Rules
 
 - **Never touch the old plugin.** The v8 plugin is reference only.
-- **Keep LF.** `core.autocrlf=false`; the `pre-commit` hook is the contract.
+- **Keep LF.** `core.autocrlf=false`; the `pre-commit` hook is the contract. Hooks are armed by
+  `bash scripts/setup-hooks.sh` (deploy runs it); run it once in a fresh clone.
 - **Read before changing behaviour.** Read the relevant section of `docs/` and follow its
   cross-references; `DESIGN.md` before UI work; `docs/MEMORY.md` before memory or sessions.
 - **The host is capabilities, not logic.** Agent logic is Lua; platform capabilities are Rust

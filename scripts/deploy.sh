@@ -329,6 +329,9 @@ fi
 [ -n "$ROOT" ] || fail "cannot tell which worktree to deploy from: run this script from one, set WA_DEPLOY_ROOT, or record it in $INSTALL_DIR/runtime-worktree.txt - a deploy that cannot say what it builds does not build"
 [ -d "$ROOT" ] || fail "the worktree to deploy from does not exist: $ROOT"
 cd "$ROOT" || fail "cannot enter the worktree to deploy from: $ROOT"
+# Arm the checkout's git hooks by default (CRLF, main guard, generated prompt docs). Advisory: a
+# config write cannot dirty the tree, and a failure here never stops a deploy.
+[ -f "$ROOT/scripts/setup-hooks.sh" ] && bash "$ROOT/scripts/setup-hooks.sh" "$ROOT" || true
 # From here a failure is drawn as a failed build: the rules below (clean, current, not a downgrade, the
 # port, the toolchain) are the build's preflight, and each phase after it says how long it took.
 command -v wa_build_env >/dev/null 2>&1 && wa_build_env

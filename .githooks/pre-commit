@@ -141,7 +141,8 @@ if git diff --cached --name-only | grep -Eq "$prompt_sources"; then
 pre-commit: refusing a commit whose generated prompt docs are stale or unchecked.
 
 Run scripts/sync-prompt-docs.sh --write, review and stage the docs, then commit again. With no wa
-binary on this machine, set WA_BIN to one (or WA_PROMPT_DOCS_UNCHECKED=1 to commit unchecked).
+binary on this machine, set WA_BIN, put wa on PATH or provide the sandbox image/volume (see
+scripts/sync-prompt-docs.sh), or set WA_PROMPT_DOCS_UNCHECKED=1 to commit unchecked.
 MESSAGE
       rm -f "$errors"
       exit 1
