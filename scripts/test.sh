@@ -1723,8 +1723,9 @@ assert(block:find("see-your-output", 1, true), "the advertised block must name t
 assert(block:find("load the `spells` skill",1,true) and not block:find("crystallize",1,true),
   "the spell lifecycle loads on demand from the spells skill; the prompt keeps one pointer")
 local spells = tools.dispatch(memory, "skill", { name = "spells" }, "master")
-assert(spells.content and spells.content:find("crystallize", 1, true) and spells.content:find("Compose", 1, true)
-  and spells.content:find("inference by default", 1, true),
+local spell_text = spells.content and spells.content:lower() or ""
+assert(spell_text:find("crystallize", 1, true) and spell_text:find("compose", 1, true)
+  and spell_text:find("inference by default", 1, true),
   "the spells skill carries the crystallization, composition and inference recovery rule")
 local loaded = tools.dispatch(memory, "skill", { name = "see-your-output" }, "master")
 assert(loaded.content and #loaded.content > 200, "loading a skill must return its instructions")
