@@ -30,56 +30,60 @@ the B1 state unchanged (wa-whatsapp sha a0354660…, shadow, posting off; Go con
 - Docs: `docs/SERVICE-COMPONENTS.md` ("Speech and posting parity": settings table, rules, gaps) and
   `docs/WHATSAPP-TRANSCRIPTION.md` ("The wasm component path").
 
-## Build state (wasm_the_first, worktree C:/Users/Victor/wa-build/b2)
-- **Guest `wasm32-wasip2`:** BUILDS. Two harmless unused warnings: `alerts.rs:33` `len`, `queue.rs:64` `len`.
-- **Native `cargo test --lib`:** FAILS TO COMPILE. `store.rs` trait impls don't match the native
-  wacore traits (Send bounds differ off-wasm). The unit tests in queue.rs / alerts.rs / posting.rs
-  have NOT run yet.
-  - Fix option: move the three pure modules into a tiny test crate (`#[path]` includes, serde_json
-    only).
-  - Or gate `store` / bindings behind `cfg(target_arch = "wasm32")`.
-- **Host `wa-host`:** the build was started then killed at handoff. NOT verified to compile with
-  the new `JobState` / `Job` / `Request` shapes.
+## Build state (pi/b2 worktree, this run)
+- **Native `cargo test --lib` (component):** PASSES, 38 tests, no wasm target needed. The crate is now
+  split: `queue`, `holds`, `posting`, `alerts` are pure modules compiled on every target (their tests
+  run with `cargo test --lib`); `store` and `guest` (the old lib.rs body) are `#[cfg(target_arch =
+  "wasm32")]`, which also removes the old off-wasm trait mismatch (wacore's traits want `Send`
+  futures natively; on wasm the component uses `#[async_trait(?Send)]`).
+- **`cargo clippy --lib`:** clean.
+- **Guest `wasm32-wasip2`:** `cargo build --release --target wasm32-wasip2` BUILDS (7.9 MB,
+  `wasm-tools validate` OK, exports `wa:kernel/service@0.1.0#run`).
+- **Host:** `cargo build --release -p wa-host` BUILDS with the B2 `service_stt.rs` /
+  `service_components.rs` / WIT changes (14 pre-existing warnings).
+- Builds used `CARGO_TARGET_DIR` (`target-b2` guest, `target-b2-host` host), `--offline`, nothing
+  outside the clone except those target dirs.
 
 ## Parity checklist
 | item | status |
 | --- | --- |
-| warm worker / no idle stop | code done, host build unverified |
+| warm worker / no idle stop | code done; host compiles |
 | reply quoting the audio | code done, untested live |
-| 5-min freshness (pickup), never-late, post_expired | done (queue + lib) |
+| 5-min freshness (pickup), never-late, post_expired | done (queue + guest), unit-tested |
 | no reposts (kv dedup, restart) | done |
 | own-chat alerts batched | done, sending gated by `alerts` (default off: Go also sends them) |
-| per-message fences (revoke/edit) | done; unverified that whatsapp-rust delivers protocol messages to on_message |
-| chat holds | only static `held_chats` config; Go's unproven-mutation holds NOT ported (B3 prerequisite) |
-| express lane | not ported (one recognizer) |
-| durable queue across restart | not done (in memory; shared wa:queue component will bring it) |
-| group titles in alerts | not done (DM push name only) |
+| per-message fences (revoke/edit) | done through `holds.rs` (proven vs unproven); unverified that whatsapp-rust delivers protocol messages to `on_message` |
+| chat holds | **ported**: `holds.rs` = Go's `mutationProof`/`mutate`/`reproveHolds` (posting-only vs compute holds, strengthen never weaken, re-prove at start), plus the static `held_chats` config; unit-tested |
+| express lane | **ported**: `queue::take_express` (≤ 90 s notes, only while the main lane decodes a long one), wired in `dispatch`; unit-tested. The host's `speech` is still one worker, so the overlap is download/post, not decode |
+| durable queue across restart | **ported**: `queue::snapshot`/`restore` through kv (`queue`, `holds` keys); an item in flight at a stop returns as an `interrupted_by_restart` notice and is never re-posted; unit-tested |
+| group titles in alerts | **ported**: the group subject from `groups().get_metadata` is used instead of the sender's push name (`alerts::title_of`); unit-tested |
 | segment streaming | done (host + WIT + worker + component) |
 | post-then-edit (`stream_edits`, default off) | done, untested live |
-| unit tests | written, not run (see above) |
+| unit tests | **run**: `cd rust/components/wa-whatsapp && cargo test --lib` -> 38 passed |
 
 ## Remaining steps
-1. Make the unit tests run natively (see the fix options above). Run them, fix any failures.
-2. Host build:
-   `cd rust && CARGO_TARGET_DIR=/c/Users/Victor/wa-build/host-target-b2 WA_CODEMODE_ALLOW_EMPTY=1 cargo build --release --offline -p wa-host`.
-   Fix any errors.
-3. Gate on wasm_the_first: component blocks of `scripts/test.sh` plus the parity script.
-4. Rebase on origin/main. Step 0 (wasmtime 50) touches `service_components.rs` and
+1. ~~Make the unit tests run natively~~ done (38 tests). ~~Host build~~ done. ~~B3 prerequisites~~
+   ported (holds, express lane, durable queue, group titles).
+2. Gate on wasm_the_first: component blocks of `scripts/test.sh` (the parity script
+   `scripts/test-component-whatsapp-parity.mjs`) plus the new native test command. `scripts/test.sh`
+   has no block for `cargo test` in `rust/components/wa-whatsapp` yet (it is a separate workspace,
+   not a member of `rust/Cargo.toml`); adding one is a coordinator change, not made here.
+3. Rebase on origin/main. Step 0 (wasmtime 50) touches `service_components.rs` and
    `service_stt.rs`; C1 touches `capabilities.rs`. Check `git diff --stat` for unexpected
    deletions, then fast-forward only.
-5. Deploy only after the gate passes, and with Victor's ok:
+4. Deploy only after the gate passes, and with Victor's ok:
    - Host via the sentinel (`wa-sentinel request deploy` on openclaw after ff of
      `/local/projects/wasm-agent`).
    - Component: build on wasm_the_first, gzip, relay-copy in chunks, verify sha256, install into
      `~/.wasm-agent/components/` with the manifest, then `services restart wa-whatsapp`.
-6. Test config (own chat ONLY):
+5. Test config (own chat ONLY):
    ```json
    {"log":"info","pair_phone":"5519994939204","post_transcripts":true,"post_allow":["own"],"stream_edits":true,"header_tag":"wasm"}
    ```
    Then ask Victor for a short (<15 s) and a long (>30 s) self voice note. Measure from the log:
    `first_text_ms`, `total_ms`, `edits`, `edit_errors`. Note how WhatsApp handles repeated
    edits, as observed.
-7. Side-by-side day (posting to own chat only), then B3 cutover with Victor's go: `post_allow:["*"]`,
+6. Side-by-side day (posting to own chat only), then B3 cutover with Victor's go: `post_allow:["*"]`,
    `alerts:true`, stop Go (keep it installed for rollback).
 
 ## Safety rules (hard)
@@ -91,4 +95,16 @@ the B1 state unchanged (wa-whatsapp sha a0354660…, shadow, posting off; Go con
 ## Gotchas
 - The bindgen module is named `wa`, so the proto alias is `wap`.
 - `from` is a WIT keyword.
-- Builds use seeded target dirs `guest-target-b2` / `host-target-b2` (copied from `-b`).
+- The crate is split: `src/lib.rs` is a shell (`pub mod alerts/holds/posting/queue`, then `store` and
+  `guest` under `cfg(target_arch = "wasm32")`, with `wit_bindgen::generate!` before `mod guest` so
+  the generated `export!`/`exports` are in textual scope). `src/guest.rs` is the old `lib.rs` body.
+  Add host-testable decisions to the pure modules; anything touching `kv`/`http`/`speech` goes to
+  `guest.rs`.
+- New kv keys owned by the component: `queue` (queue snapshot), `holds` (holds + fences),
+  `tx/<chat>/<id>` (dedup record, also the author a revoke is proved against), `fence/<id>` (written
+  by older builds; still honoured, never removed).
+- `cargo test --lib` and `cargo clippy --lib` in `rust/components/wa-whatsapp` are the native path
+  (separate workspace, not a member of `rust/Cargo.toml`). The wasm build is still
+  `cargo build --release --target wasm32-wasip2` from the same directory.
+- Builds here used the seeded target dir in `$CARGO_TARGET_DIR` (`target-b2` guest,
+  `target-b2-host` host, both `--offline`).

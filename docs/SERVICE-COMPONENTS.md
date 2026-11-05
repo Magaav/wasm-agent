@@ -89,10 +89,12 @@ worker pipe (`"segments": true` in the request, which the Go connector never sen
 
 | module | does |
 | --- | --- |
-| `queue.rs` | the seam: `enqueue` / `take` / `done` / `fail` / `expire_stale`, one in flight, with a `Policy` (fresh window, retry backoff, attempts) and `Notice`s for what it gives up. A shared `wa:queue` component (WASI 0.3, kv-backed, future/stream, remote STT workers via the relay) replaces it later without touching the pipeline |
-| `posting.rs` | allowlist gate, held chats, Go-identical parts (`🤖 _Copiloto_`, 2500 characters, `(i/n)`), post-then-edit pacing |
-| `alerts.rs` | own-chat log, Go-identical wording, ≤ 1 message a minute, 12 listed, dropped after 6 h |
-| `lib.rs` | glue: admit (unsupported/fence/dedup) → download → recognize (segments) → post as a reply quoting the audio → kv record `tx/<chat>/<id>` |
+| `queue.rs` | the seam: `enqueue` / `take_main` / `take_express` / `done` / `fail` / `expire_stale` / `drop_key` / `snapshot` / `restore`, with a `Policy` (fresh window, retry backoff, attempts) and `Notice`s for what it gives up. Two lanes: the main lane takes anything, the express lane only short notes (≤ 90 s declared) while the main lane decodes a long one. A shared `wa:queue` component (WASI 0.3, kv-backed, future/stream, remote STT workers via the relay) replaces it later without touching the pipeline |
+| `holds.rs` | chat holds and message fences derived from revokes/edits (the Go journal's `mutationProof`/`mutate`/`reproveHolds`): a *provable* mutation fences the exact IDs it names, an unproven one fences its target everywhere and holds the chat for posting only, an untargeted or owner mutation holds the whole chat (no transcription either). Holds strengthen, never weaken; `reprove` releases a posting-only hold once the store can prove its evidence |
+| `posting.rs` | the single posting gate (`Gate::Post`/`Shadow`/`Held`) over the allowlist, the configured holds and the derived ones; Go-identical parts (`🤖 _Copiloto_`, 2500 characters, `(i/n)`), post-then-edit pacing |
+| `alerts.rs` | own-chat log, Go-identical wording, ≤ 1 message a minute, 12 listed, dropped after 6 h; group alerts name the group's *subject*, never the sender's push name |
+| `lib.rs` (guest) | glue: admit (unsupported/fence/held/dedup) → download → recognize (segments) → post as a reply quoting the audio → kv record `tx/<chat>/<id>` (which is also the author record a later revoke is proved against). Host I/O only: the crate is split so `queue`/`holds`/`posting`/`alerts` are pure and compiled on the host too |
+| `store.rs` (guest) | wacore's in-memory backend for reads plus write-through of the durable protocol state to `wa:kernel/kv` |
 
 Configuration (the service definition's `config`):
 
@@ -114,10 +116,32 @@ transcribed late; a ready transcript not sent within the window is never posted;
 auto-retry; a voice note already recorded in kv is never processed again (re-delivery, restart);
 history sync is never posted; `status@broadcast` and newsletters are ignored; view-once, oversized,
 untrusted-timestamp audio is `unsupported`; a revoke/edit naming a message ID fences it (never
-transcribed, never posted, even if it arrives during the decode). Not carried over yet (B3
-prerequisites): the Go journal's unproven-mutation chat holds (only the `held_chats` list), the
-express lane (one recognizer here), a durable queue across restarts (in memory; the `wa:queue`
-component brings it), chat titles for groups in alerts.
+transcribed, never posted, even if it arrives during the decode).
+
+Carried over in this stream (the B3 prerequisites): the Go journal's unproven-mutation **chat holds**
+instead of a hand-maintained list; the **express lane** for short notes; a **durable queue**: the queue
+and the holds are written to `wa:kernel/kv` (`queue`, `holds`) whenever they change and read back at
+start, where an item that was in flight when the process stopped is reported as
+`interrupted_by_restart` and never re-posted (unknown sends are not retried); and **group titles** in
+alerts (the group subject from the group metadata, fetched only when a group alert is about to be
+formatted).
+
+Known limits after this stream: the express lane overlaps download/post with a long decode but not
+recognition - the host's `wa:kernel/speech` runs one warm worker, one request at a time (a second
+worker in `service_stt.rs` is the host-side prerequisite for real two-decode parallelism). The
+component still learns about source mutations only from `on_message` (
+`protocol_message` REVOKE/`MESSAGE_EDIT` and `info.edit`); whether whatsapp-rust delivers those to
+that handler has not been verified live (unchanged from B2). The operator hold-release command has no
+counterpart: a hold is released by `reprove` or not at all.
+
+Tests: the four pure modules are compiled and tested natively, without the wasm target or the
+protocol crate's `Send` bounds:
+
+```
+cd rust/components/wa-whatsapp && cargo test --lib        # 38 tests
+cargo clippy --lib                                       # clean
+cargo build --release --target wasm32-wasip2             # the component
+```
 
 ## Decision 05/11: Rust, not Go
 

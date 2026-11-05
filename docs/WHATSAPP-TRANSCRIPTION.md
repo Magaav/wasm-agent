@@ -88,6 +88,17 @@ note of at least 15 s, the first recognized segments go out as the reply within 
 recognizer worker accepts `"segments": true` per request to stream segment text; this connector
 does not ask for it, so its progress lines stay timings-only.
 
+The component has since ported the connector's remaining B3 prerequisites (see
+[SERVICE-COMPONENTS.md](SERVICE-COMPONENTS.md)): the **unproven-mutation chat holds** of
+`reliability.go`/`mutation_mapping.go` (a provable revoke fences only the IDs it names; an unproven
+one fences its target everywhere and holds the chat for posting only; an untargeted or owner
+mutation holds the whole chat; holds strengthen and are re-proved from the recorded author when
+possible), the **express lane** for short notes (same 90 s rule as `audioLane`), a **durable
+queue** through the component's kv (an item in flight at a restart is reported, never re-posted,
+matching this connector's "an unknown send is never retried"), and **group subjects** in the
+own-chat log instead of the sender's push name. One limit: the host runs a single warm recognizer,
+so the express lane overlaps download and posting with a long decode, not the decode itself.
+
 ## Receive → transcript path (2026-10-27)
 
 Goal: an audio never ends failed because it is long or the host is slow, and a
