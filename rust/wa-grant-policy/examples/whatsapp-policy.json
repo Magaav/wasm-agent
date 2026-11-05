@@ -1,0 +1,40 @@
+{
+  "version": 1,
+  "sensitive_capabilities": [],
+  "components": {
+    "wa-whatsapp": {
+      "note": "stage 1: our own chat plus the alerts chat; stage 2 adds the allowlisted chats to whatsapp.send.allow",
+      "capabilities": {
+        "whatsapp.send": {
+          "sensitive": true,
+          "require_approval": false,
+          "allow": ["chat:self", "chat:alerts"],
+          "deny": ["*@broadcast", "*@newsletter"],
+          "rate": { "per_minute": 20, "burst": 20 },
+          "per_target": { "per_minute": 6, "burst": 6 },
+          "target_rates": [
+            { "pattern": "chat:alerts", "per_minute": 1, "burst": 1, "exempt_from_global": true }
+          ],
+          "daily_cap": 200
+        },
+        "net.dial": {
+          "allow": ["web.whatsapp.com:443", "*.whatsapp.net:443"],
+          "rate": { "per_minute": 60, "burst": 120 }
+        },
+        "credentials.read": {
+          "allow": ["WA_WHATSAPP_TOKEN"],
+          "rate": { "per_minute": 4 },
+          "require_approval": true
+        },
+        "kv.write": {
+          "allow": ["journal/*", "session/*"],
+          "rate": { "per_minute": 240, "burst": 480 }
+        },
+        "http.request": {
+          "allow": ["*.whatsapp.net:443"],
+          "rate": { "per_minute": 20 }
+        }
+      }
+    }
+  }
+}
