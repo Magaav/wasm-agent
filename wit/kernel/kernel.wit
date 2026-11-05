@@ -1,0 +1,110 @@
+/// wa:kernel v1 — what the microkernel provides to components beyond standard WASI
+/// (wasi:clocks, wasi:random, wasi:cli, wasi:http). Every interface is a grant: a component
+/// receives only the interfaces (and, inside them, the addresses/namespaces/secrets) its
+/// manifest declares and the node grants. See docs/KERNEL.md.
+package wa:kernel@0.1.0;
+
+/// Kernel-side failures, shared by every interface.
+interface types {
+    variant error {
+        /// The grant does not cover this address / namespace / secret.
+        refused(string),
+        /// The operation is not possible right now; retry later (never blocks).
+        again,
+        /// The resource is closed or gone.
+        closed,
+        /// Anything else, with a reason for the log.
+        failed(string),
+    }
+}
+
+/// Outbound websockets, TLS in the kernel. Frames cross the boundary; the guest never sees
+/// the TLS session. Replaces the wasip1 `wa_ws` imports.
+interface websocket {
+    use types.{error};
+
+    resource socket {
+        /// Open `url` (wss:// or ws://) if its host:port is granted. `origin` is sent as the
+        /// Origin header when present.
+        connect: static func(url: string, origin: option<string>) -> result<socket, error>;
+        /// Queue one binary message. Never blocks.
+        send: func(data: list<u8>) -> result<_, error>;
+        /// The next binary message, or `again` when none has arrived, or `closed`.
+        recv: func() -> result<list<u8>, error>;
+        /// Close; further calls return `closed`.
+        close: func();
+    }
+}
+
+/// A durable key-value store private to this component (one namespace per component;
+/// the kernel decides where it lives). Replaces `wa_kv`.
+interface kv {
+    use types.{error};
+
+    get: func(key: list<u8>) -> result<option<list<u8>>, error>;
+    set: func(key: list<u8>, value: list<u8>) -> result<_, error>;
+    delete: func(key: list<u8>) -> result<_, error>;
+    delete-prefix: func(prefix: list<u8>) -> result<u32, error>;
+
+    record entry {
+        key: list<u8>,
+        value: list<u8>,
+    }
+    /// One page of entries whose key starts with `prefix`, ordered by key, after `cursor`
+    /// (exclusive; none = from the start). An empty page means the end.
+    scan: func(prefix: list<u8>, cursor: option<list<u8>>, limit: u32) -> result<list<entry>, error>;
+}
+
+/// Lifecycle signals from the supervisor. Replaces `wa_ctl.stopping`.
+interface lifecycle {
+    /// True once the supervisor asked this instance to stop (upgrade, disable, shutdown).
+    /// A service checks it in its loop and returns from `run` promptly; after a grace period
+    /// the kernel stops it anyway.
+    stopping: func() -> bool;
+    /// Report health; the supervisor switches traffic to a new instance only after it reports
+    /// `ready` (transactional upgrades keep the old instance until then).
+    enum health {
+        starting,
+        ready,
+        degraded,
+    }
+    report: func(state: health, detail: option<string>);
+}
+
+/// Structured log lines into the component's log (never to another component's).
+interface log {
+    enum level {
+        trace,
+        debug,
+        info,
+        warn,
+        error,
+    }
+    write: func(level: level, target: string, message: string);
+}
+
+/// Secrets granted to this component by name. The broker scopes them: a component can only
+/// read secrets its grant names, never another component's (the gap DeepSeek Harness leaves
+/// open). Values never appear in logs.
+interface credentials {
+    use types.{error};
+    get: func(name: string) -> result<string, error>;
+}
+
+/// What a long-lived service component exports to the supervisor.
+interface service {
+    /// Run until done or until `lifecycle.stopping()`; `config` is the non-secret configuration
+    /// object (JSON text) from the registry definition.
+    run: func(config: string) -> result<_, string>;
+}
+
+/// A long-lived service (channels, workers): kernel interfaces in, `service` out.
+world service-component {
+    import types;
+    import websocket;
+    import kv;
+    import lifecycle;
+    import log;
+    import credentials;
+    export service;
+}

@@ -1,0 +1,77 @@
+/// Capability seams (docs/KERNEL.md): each is an interface package that provider components
+/// export and consumer components import. The supervisor wires imports to a running provider
+/// and starts a consumer only when everything it imports is served.
+
+package wa:seams@0.1.0;
+
+/// Speech-to-text. Providers: a wasi-nn Whisper component (planned), or a native fallback.
+interface speech-recognizer {
+    record transcript {
+        text: string,
+        /// BCP-47 language actually recognized.
+        language: string,
+        /// Decoded audio length in milliseconds.
+        duration-ms: u64,
+    }
+    variant failure {
+        no-speech,
+        unsupported-media(string),
+        too-long(u64),
+        busy,
+        failed(string),
+    }
+    /// `audio` is an encoded file (ogg/opus, mp3, wav…); `language` a hint ("pt", "en", "auto").
+    transcribe: func(audio: list<u8>, mime: string, language: string) -> result<transcript, failure>;
+}
+
+/// OCR. Providers: a wasi-nn RapidOCR component (planned).
+interface text-reader {
+    variant failure {
+        no-text,
+        unsupported-media(string),
+        busy,
+        failed(string),
+    }
+    read: func(image: list<u8>, mime: string) -> result<string, failure>;
+}
+
+/// The request-component (MCP) shape: list tools, call one. JSON text in and out, the same
+/// payloads as MCP tools/list and tools/call.
+interface mcp-server {
+    list-tools: func() -> string;
+    call-tool: func(name: string, arguments: string) -> result<string, string>;
+}
+
+/// A messaging channel (WhatsApp, Telegram, mail): inbound events and outbound sends, the shape
+/// every channel component exports and the agent/consumers import.
+interface channel {
+    record message {
+        chat: string,
+        id: string,
+        sender: string,
+        /// Unix milliseconds as reported by the network.
+        sent-at: u64,
+        kind: string,
+        text: option<string>,
+        /// Opaque media handle the channel can resolve (`fetch-media`).
+        media: option<string>,
+        reply-to: option<string>,
+    }
+    /// Next inbound message, if any (non-blocking).
+    next: func() -> option<message>;
+    fetch-media: func(media: string) -> result<list<u8>, string>;
+    /// Send text into `chat`, optionally as a reply to message `reply-to`. Returns the sent id.
+    send: func(chat: string, text: string, reply-to: option<string>) -> result<string, string>;
+}
+
+world stt-provider {
+    import wa:kernel/log@0.1.0;
+    export speech-recognizer;
+}
+world ocr-provider {
+    import wa:kernel/log@0.1.0;
+    export text-reader;
+}
+world tool-component {
+    export mcp-server;
+}
