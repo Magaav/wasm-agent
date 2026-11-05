@@ -79,7 +79,7 @@ Other languages work if they emit a WASI preview 2 command component.
 
 | component | what | notes |
 | --- | --- | --- |
-| `mcp-whatsapp` | WhatsApp linked-device read tools (port of `scripts/mcp-whatsapp.mjs`) | loopback connector only (no TLS inside); send stays on the operator route |
+| `mcp-whatsapp` | WhatsApp linked-device read tools (port of `scripts/mcp-whatsapp.mjs`) | loopback connector only (no TLS inside); send stays on the operator route; `scripts/test-component-whatsapp-parity.mjs` proves identical answers to the Node server |
 | `mcp-echo` | test fixture | proves grants, sandbox, deadline (`scripts/test-mcp-component.lua`) |
 
 ## Next: service components
