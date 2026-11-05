@@ -233,9 +233,9 @@ pub fn inventory_json() -> String {
     serde_json::to_string(&Value::Array(items)).expect("capability inventory is serializable")
 }
 
-/// SHA-256 of [`inventory_json`]. Test-only, like the parser above: [`health`] digests the text it
-/// already built, so this is the shape the tests assert rather than a second production path.
-#[cfg(test)]
+/// SHA-256 of [`inventory_json`] - the same value `/health` publishes as `sha256`. The installed Lua
+/// tree pins it (main.rs `load_lua_tree`, `wa --capability-digest`): a Lua tree only runs on a binary
+/// whose capability surface it was installed for.
 pub fn digest() -> String {
     digest_of(&inventory_json())
 }
