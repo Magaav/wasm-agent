@@ -1,0 +1,11 @@
+[package]
+name = "wa-telemetry"
+version = "0.1.0"
+edition = "2021"
+description = "Fixed-size per-component metrics, rollups and sampled traces for wasm-agent. Pure library: no wasmtime, no network."
+
+[dependencies]
+# JSON export for `wa telemetry` later. Already in the workspace lock via wa-host/wa-jobs, so no new
+# download and no second JSON dialect in the tree. Nothing else: the snapshot is a hand-written
+# little-endian format on purpose (deterministic bytes, no derive macro, no format churn).
+serde_json = "1"
