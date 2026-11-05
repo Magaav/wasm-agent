@@ -36,6 +36,30 @@ interface websocket {
     }
 }
 
+/// Outbound HTTP done by the kernel (TLS in the kernel), non-blocking for the guest. A
+/// completed exchange is `ok` whatever the status (4xx/5xx are responses, not errors).
+/// Replaces `wa_http`; standard wasi:http can replace it later without changing callers' shape.
+interface http {
+    use types.{error};
+
+    record request {
+        method: string,
+        url: string,
+        headers: list<tuple<string, string>>,
+        body: list<u8>,
+    }
+    record response {
+        status: u16,
+        body: list<u8>,
+    }
+    resource pending {
+        /// Start the exchange if the URL's host:port is granted.
+        start: static func(req: request) -> result<pending, error>;
+        /// The response once it arrived, `again` while in flight, `failed` if the exchange broke.
+        poll: func() -> result<response, error>;
+    }
+}
+
 /// A durable key-value store private to this component (one namespace per component;
 /// the kernel decides where it lives). Replaces `wa_kv`.
 interface kv {
@@ -102,6 +126,7 @@ interface service {
 world service-component {
     import types;
     import websocket;
+    import http;
     import kv;
     import lifecycle;
     import log;

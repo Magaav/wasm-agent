@@ -53,8 +53,8 @@ plugin kernel (Cordis) and ~380 plugins, including the agent loop. Taken, adapte
 
 ## The contract: `wa:kernel` WIT v1
 
-Standard WASI first: `wasi:clocks`, `wasi:random`, `wasi:cli` (args/env/stdio) and `wasi:http`
-(outgoing HTTP) are used as they are. `wa:kernel` adds only what WASI lacks, each interface a grant:
+Standard WASI first: `wasi:clocks`, `wasi:random` and `wasi:cli` (args/env/stdio) are used as they
+are. `wa:kernel` adds only what WASI lacks, each interface a grant:
 
 | interface | replaces today's | grant |
 | --- | --- | --- |
@@ -63,7 +63,7 @@ Standard WASI first: `wasi:clocks`, `wasi:random`, `wasi:cli` (args/env/stdio) a
 | `wa:kernel/lifecycle` | `wa_ctl.stopping` | always |
 | `wa:kernel/log` | stdout/stderr to the service log | always |
 | `wa:kernel/credentials` | `file_env` | named secrets scoped to this component |
-| `wasi:http/outgoing-handler` | `wa_http` | `net` addresses |
+| `wa:kernel/http` | `wa_http` | `net` addresses — a small non-blocking start/poll; standard `wasi:http` later (its host crate pulls hyper/tokio, against a light kernel) |
 
 Capability seams defined next to it (providers to come): `wa:speech/recognizer` (STT),
 `wa:vision/text-reader` (OCR), `wa:mcp/server` (tools list/call, the request-component shape),

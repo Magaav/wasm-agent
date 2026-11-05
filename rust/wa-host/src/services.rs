@@ -63,8 +63,10 @@ pub fn dial_allowed(granted: &[String], addr: &str) -> bool {
 }
 
 #[derive(Default)]
-struct Shared {
-    stop: AtomicBool,
+pub(crate) struct Shared {
+    pub(crate) stop: AtomicBool,
+    /// Last `lifecycle.report` from a component service ("" for wasip1 modules).
+    pub(crate) health: Mutex<String>,
     restarts: AtomicU64,
     sockets: AtomicU64,
     state: Mutex<String>,
@@ -528,9 +530,22 @@ pub fn start(request: &Value) -> Value {
         Ok(engine) => engine,
         Err(error) => return json!({"ok": false, "error": error.to_string()}),
     };
-    let module = match Module::new(&engine, &installed.bytes) {
-        Ok(module) => module,
-        Err(error) => return json!({"ok": false, "error": format!("compile_failed:{error}")}),
+    // A component on the wa:kernel contract runs through service_components; a core module
+    // through the wasip1 runner below. The binary's preamble says which.
+    enum Compiled {
+        Module(Module),
+        Component(wasmtime::component::Component),
+    }
+    let compiled = if crate::service_components::is_component(&installed.bytes) {
+        match wasmtime::component::Component::new(&engine, &installed.bytes) {
+            Ok(c) => Compiled::Component(c),
+            Err(error) => return json!({"ok": false, "error": format!("compile_failed:{error}")}),
+        }
+    } else {
+        match Module::new(&engine, &installed.bytes) {
+            Ok(m) => Compiled::Module(m),
+            Err(error) => return json!({"ok": false, "error": format!("compile_failed:{error}")}),
+        }
     };
     let shared = Arc::new(Shared::default());
     set(&shared, "starting");
@@ -542,7 +557,13 @@ pub fn start(request: &Value) -> Value {
             set(&thread_shared, "running");
             thread_shared.started_at.store(now(), Ordering::Relaxed);
             let began = Instant::now();
-            let outcome = run_once(&installed, &grant, &module, &thread_shared);
+            let outcome = match &compiled {
+                Compiled::Module(module) => run_once(&installed, &grant, module, &thread_shared),
+                Compiled::Component(component) => match open_log(&installed.name) {
+                    Ok(log) => crate::service_components::run_once(&installed, &grant, component, &thread_shared, log),
+                    Err(error) => format!("log_unavailable:{error}"),
+                },
+            };
             *thread_shared.last_exit.lock().unwrap() = outcome;
             if thread_shared.stop.load(Ordering::Relaxed) {
                 set(&thread_shared, "stopped");
@@ -594,6 +615,7 @@ fn describe(name: &str, handle: &Handle) -> Value {
         "sockets": s.sockets.load(Ordering::Relaxed),
         "started_at": s.started_at.load(Ordering::Relaxed),
         "last_exit": *s.last_exit.lock().unwrap(),
+        "health": *s.health.lock().unwrap(),
     })
 }
 

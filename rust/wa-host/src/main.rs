@@ -20,6 +20,7 @@ mod plugins;
 mod components;
 mod services;
 mod service_io;
+mod service_components;
 mod quickjs;
 mod subagents;
 mod resources;
