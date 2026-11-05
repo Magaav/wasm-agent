@@ -1,0 +1,12 @@
+package wa:spike@0.1.0;
+
+/// Every host.* capability the Lua core calls, through ONE generic import (names + string args).
+interface host-call {
+    call: func(name: string, args: list<string>) -> result<list<string>, string>;
+}
+
+world lua-core {
+    import host-call;
+    /// Run a Lua chunk in a fresh state; returns tostring(result) or the error text.
+    export run: func(source: string, chunk-name: string) -> result<string, string>;
+}
