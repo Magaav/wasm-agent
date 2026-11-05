@@ -60,7 +60,72 @@ fn core_source(name: &str) -> String {
             std::process::exit(2);
         });
     }
-    embedded(name).to_string()
+    match installed_tree() {
+        Some(tree) => tree.files.get(name).cloned().unwrap_or_else(|| embedded(name).to_string()),
+        None => embedded(name).to_string(),
+    }
+}
+
+/// An installed Lua tree: Lua-only deploys install `lua-core/` beside the binary instead of
+/// recompiling it (scripts/deploy.sh fast path). It replaces the compiled-in copy - not dev mode:
+/// no WASM_AGENT_LUA_ROOT semantics, no checkout paths - and only when its manifest verifies:
+/// every file's sha256, and the capability digest equal to this binary's own (a Lua change that
+/// needs a host capability this binary lacks must not run on it). Anything else: the compiled-in
+/// copy, with the reason on stderr once.
+struct LuaTree {
+    commit: String,
+    files: std::collections::BTreeMap<String, String>,
+}
+
+fn lua_tree_dir() -> Option<std::path::PathBuf> {
+    if let Ok(dir) = std::env::var("WA_LUA_TREE") {
+        return (!dir.is_empty()).then(|| PathBuf::from(dir));
+    }
+    Some(std::env::current_exe().ok()?.parent()?.join("lua-core"))
+}
+
+fn load_lua_tree() -> Result<LuaTree, String> {
+    let dir = lua_tree_dir().ok_or("no install directory")?;
+    let manifest = std::fs::read_to_string(dir.join("manifest.txt")).map_err(|_| "no manifest".to_string())?;
+    let (mut digest, mut commit, mut files) = (String::new(), String::new(), std::collections::BTreeMap::new());
+    for line in manifest.lines() {
+        if let Some(value) = line.strip_prefix("capabilities ") {
+            digest = value.trim().to_string();
+        } else if let Some(value) = line.strip_prefix("commit ") {
+            commit = value.trim().to_string();
+        } else if let Some((hash, name)) = line.split_once("  ") {
+            if name.contains("..") || name.starts_with('/') {
+                return Err(format!("unsafe path {name}"));
+            }
+            let text = std::fs::read_to_string(dir.join(name)).map_err(|_| format!("missing {name}"))?;
+            let actual: String = ring::digest::digest(&ring::digest::SHA256, text.as_bytes()).as_ref().iter().map(|b| format!("{b:02x}")).collect();
+            if actual != hash.trim() {
+                return Err(format!("hash mismatch {name}"));
+            }
+            files.insert(name.to_string(), text);
+        }
+    }
+    if digest != capabilities::digest() {
+        return Err("capability digest differs from this binary (the tree needs a rebuild)".into());
+    }
+    if !files.contains_key("lua/core/init.lua") {
+        return Err("incomplete tree (no lua/core/init.lua)".into());
+    }
+    Ok(LuaTree { commit, files })
+}
+
+fn installed_tree() -> Option<&'static LuaTree> {
+    static TREE: std::sync::OnceLock<Option<LuaTree>> = std::sync::OnceLock::new();
+    TREE.get_or_init(|| match load_lua_tree() {
+        Ok(tree) => Some(tree),
+        Err(reason) => {
+            if reason != "no manifest" {
+                eprintln!("lua: installed tree ignored ({reason}); using the compiled-in core");
+            }
+            None
+        }
+    })
+    .as_ref()
 }
 
 /// The Lua root in force, if there is one: `WASM_AGENT_LUA_ROOT` set to something
@@ -222,6 +287,17 @@ fn main() {
             }
         }
     }
+    if args.first().is_some_and(|arg| arg == "--capability-digest") {
+        println!("{}", capabilities::digest());
+        return;
+    }
+    if args.first().is_some_and(|arg| arg == "--lua-tree") {
+        match load_lua_tree() {
+            Ok(tree) => println!("installed lua tree: commit {} ({} files) at {}", tree.commit, tree.files.len(), lua_tree_dir().map(|d| d.display().to_string()).unwrap_or_default()),
+            Err(reason) => println!("compiled-in lua core ({reason})"),
+        }
+        return;
+    }
     if args.iter().any(|arg| arg == "--version" || arg == "-v") {
         println!("wasm-agent {}", env!("CARGO_PKG_VERSION"));
         return;
@@ -312,10 +388,17 @@ fn main() {
     }
     lua.set_global("args");
 
+    // The shipping copy: the verified installed Lua tree when there is one, else compiled in.
     lua.push_table();
     for (name, source) in EMBEDDED {
         lua.push_string(source);
         lua.set_field(-2, name);
+    }
+    if let Some(tree) = installed_tree() {
+        for (name, source) in &tree.files {
+            lua.push_string(source);
+            lua.set_field(-2, name);
+        }
     }
     lua.set_global("EMBEDDED");
     // `dofile` reads the embedded copy by default, so `wa` is one self-contained

@@ -474,6 +474,39 @@ elif ! git merge-base --is-ancestor "$INSTALLED_COMMIT" HEAD 2>/dev/null; then
   fail "downgrade refused: the install is commit $INSTALLED_COMMIT and this tree is $COMMIT, which does not contain it - deploying would replace newer work with older work"
 fi
 
+# 3c. Lua fast path (docs/KERNEL.md, 05/11). Half of all changes touch only files nothing compiles
+#     (Lua core, docs, scripts, tests, UI). Those keep the installed binary - built by an earlier
+#     deploy and verified then - and install only the Lua tree beside it (lua-core/, every file pinned,
+#     plus the binary's capability digest; the binary refuses a tree whose digest differs from its own).
+#     Anything compiled - rust/, wit/ (host bindings are generated from it), Cargo files, code-mode build
+#     inputs - takes the full build below. WA_DEPLOY_FULL=1 forces the full build.
+LUA_FAST=0
+# The commit whose build the installed binary is (a previous fast path keeps it in binary_commit=).
+INSTALLED_BINARY_COMMIT="$(sed -n 's/^binary_commit=//p' "$INSTALL_DIR/installed.txt" 2>/dev/null | head -1 | tr -d '[:space:]')"
+[ -n "$INSTALLED_BINARY_COMMIT" ] || INSTALLED_BINARY_COMMIT="$INSTALLED_COMMIT"
+INSTALLED_BIN="$INSTALL_DIR/wa"; [ -f "$INSTALLED_BIN.exe" ] && INSTALLED_BIN="$INSTALLED_BIN.exe"
+if [ "${WA_DEPLOY_FULL:-0}" != 1 ] && [ -n "$INSTALLED_COMMIT" ] && [ -x "$INSTALLED_BIN" ] \
+   && git merge-base --is-ancestor "$INSTALLED_COMMIT" HEAD 2>/dev/null; then
+  CHANGED="$(git diff --name-only "$INSTALLED_COMMIT" HEAD)"
+  COMPILED="$(printf '%s\n' "$CHANGED" | grep -v -E '^(lua/|docs/|tests/|ui/|modules/|skills/|jobs/|benchmarks/|reviews?/|review-evidence/|fixtures/|vault/|[^/]+\.md$)|^scripts/' ; printf '%s\n' "$CHANGED" | grep -E '^scripts/(codemode|build-|provision-codemode)')"
+  INSTALLED_DIGEST="$("$INSTALLED_BIN" --capability-digest 2>/dev/null | tr -d '[:space:]')"
+  if [ -n "$CHANGED" ] && [ -z "$(printf '%s' "$COMPILED" | tr -d '[:space:]')" ] && printf '%s' "$INSTALLED_DIGEST" | grep -qE '^[0-9a-f]{64}$'; then
+    LUA_FAST=1
+    echo "deploy: Lua fast path - $(printf '%s\n' "$CHANGED" | wc -l | tr -d ' ') changed file(s) since $INSTALLED_COMMIT, none compiled; keeping the installed binary"
+  fi
+fi
+
+if [ "$LUA_FAST" = 1 ]; then
+  wa_phase fetching
+  wa_phase compiling
+  WA_STATUS_DONE=0
+  NEW="$INSTALLED_BIN"
+  NEW_SENTINEL="$INSTALL_DIR/wa-sentinel"; [ -f "$NEW_SENTINEL.exe" ] && NEW_SENTINEL="$NEW_SENTINEL.exe"
+  [ -x "$NEW_SENTINEL" ] || fail "Lua fast path: no installed sentinel at $NEW_SENTINEL"
+  case "$(echo "$NEW_SENTINEL" | tr '[:upper:]' '[:lower:]')" in *.exe) SENTINEL_NAME="wa-sentinel.exe" ;; *) SENTINEL_NAME="wa-sentinel" ;; esac
+  BUILD_LOGS="${WASM_AGENT_DATA:-${WASM_AGENT_HOME:-$HOME}/.wasm-agent}/build-logs"
+  echo "deploy: compiled 0 crate(s) (Lua fast path)"
+else
 # 4. Build.
 echo "deploy: building"
 # NO RELEASE PROOF IS CONSULTED HERE, and that is the default. A deploy and a release are two stages,
@@ -653,6 +686,29 @@ esac
 
 # 5. Prove it answers before it goes near the running node. A build that cannot start must not replace one
 #    that is serving.
+fi
+
+# 3d. The Lua tree, on every deploy (fast or full): lua/core + lua/vendor (.lua, .sql) and the two
+#     embedded AGENTS docs, pinned, with the capability digest of the binary being installed. The binary
+#     prefers it over its compiled-in copy only when everything verifies; installing it on full builds
+#     too keeps it equal to HEAD, so a stale tree can never shadow a newer binary.
+LUA_STAGE="$INSTALL_DIR/lua-core.next"
+rm -rf "$LUA_STAGE" && mkdir -p "$LUA_STAGE" || fail "cannot stage the Lua tree"
+NEW_DIGEST="$("$NEW" --capability-digest 2>/dev/null | tr -d '[:space:]')"
+printf '%s' "$NEW_DIGEST" | grep -qE '^[0-9a-f]{64}$' || fail "the binary being installed cannot state its capability digest"
+{
+  echo "capabilities $NEW_DIGEST"
+  echo "commit $COMMIT"
+  ( cd "$ROOT" && { find lua/core lua/vendor -type f \( -name '*.lua' -o -name '*.sql' \); printf '%s\n' AGENTS.orchestrator.md AGENTS.subagents.md; } | LC_ALL=C sort ) | while read -r f; do
+    mkdir -p "$LUA_STAGE/$(dirname "$f")" && cp "$ROOT/$f" "$LUA_STAGE/$f" || exit 1
+    printf '%s  %s\n' "$(sha256sum < "$ROOT/$f" | awk '{print $1}')" "$f"
+  done
+} > "$LUA_STAGE/manifest.txt" || fail "cannot write the Lua tree"
+STAGE_CHECK="$(WA_LUA_TREE="$LUA_STAGE" "$NEW" --lua-tree 2>&1)"
+case "$STAGE_CHECK" in "installed lua tree: commit $COMMIT"*) echo "deploy: $STAGE_CHECK" ;; *) fail "the staged Lua tree does not verify against the binary: $STAGE_CHECK" ;; esac
+# Only the two proving runs below see the staged tree (WA_LUA_TREE on their command lines); upgrade.sh
+# and the restarted node must not inherit it - after the swap the node reads <install>/lua-core.
+
 wa_phase proving
 SCRATCH=$((PORT + 40))
 SCRATCH_HOME="$(mktemp -d)"
@@ -665,11 +721,11 @@ fi
 # names their hash. Run once, not three times (here and upgrade.sh 1b took ~1.5 s each; 29/10).
 NEW_HASH="$(sha256sum < "$NEW" 2>/dev/null | awk '{print $1}')"
 EMBEDDED_PROVEN=""
-if [ -n "$NEW_HASH" ] && grep -q '"native_checked":true' "${BUILD_LOGS:-/nonexistent}/wa-host.receipt.json" 2>/dev/null \
+if [ "$LUA_FAST" != 1 ] && [ -n "$NEW_HASH" ] && grep -q '"native_checked":true' "${BUILD_LOGS:-/nonexistent}/wa-host.receipt.json" 2>/dev/null \
   && grep -q "\"binary_sha256\":\"$NEW_HASH\"" "$BUILD_LOGS/wa-host.receipt.json" 2>/dev/null; then
   EMBEDDED_PROVEN="$NEW_HASH"
   echo "deploy: embedded native code mode proven by the shipping build on these bytes (${NEW_HASH:0:12})"
-elif ! WASM_AGENT_HOME="$EMBEDDED_HOME" WASM_AGENT_LUA_ROOT='' \
+elif ! WA_LUA_TREE="$LUA_STAGE" WASM_AGENT_HOME="$EMBEDDED_HOME" WASM_AGENT_LUA_ROOT='' \
   WA_EMBEDDED_SOURCE_ROOT="$EMBEDDED_ROOT" WA_SCRIPT="$EMBEDDED_SCRIPT" \
   "$NEW" --db "$EMBEDDED_HOME/embedded.db"; then
   rm -rf "$SCRATCH_HOME"
@@ -679,7 +735,7 @@ fi
 # made every deploy register a fresh key that no one could ever remove (the stale-node pile, 04/11).
 # Its own --db too: the default database follows HOME, not WASM_AGENT_HOME, so without it the proof
 # node opened the live node's memory.db, where its startup recovery could touch live sessions.
-env -u WASM_AGENT_RENDEZVOUS -u WASM_AGENT_RELAY WASM_AGENT_MANAGED=0 WASM_AGENT_HOME="$SCRATCH_HOME" "$NEW" --db "$SCRATCH_HOME/scratch.db" serve --port "$SCRATCH" --client-port "$((SCRATCH + 1))" --ui "$ROOT/ui" >"$SCRATCH_HOME/out.log" 2>&1 &
+env -u WASM_AGENT_RENDEZVOUS -u WASM_AGENT_RELAY WA_LUA_TREE="$LUA_STAGE" WASM_AGENT_MANAGED=0 WASM_AGENT_HOME="$SCRATCH_HOME" "$NEW" --db "$SCRATCH_HOME/scratch.db" serve --port "$SCRATCH" --client-port "$((SCRATCH + 1))" --ui "$ROOT/ui" >"$SCRATCH_HOME/out.log" 2>&1 &
 SCRATCH_PID=$!
 ANSWERED=0
 for _ in $(seq 1 100); do
@@ -739,6 +795,15 @@ printf '%s\n' "$RUNTIME_PATH" > "$RUNTIME_RECORD" && mv -f "$RUNTIME_RECORD" "$I
   || fail "could not atomically record runtime worktree"
 export WA_RUNTIME_WORKTREE="$RUNTIME_PATH"
 
+# The verified Lua tree replaces the previous one right before the restart. The running node read its
+# Lua once at start, so the swap is invisible to it; a failed upgrade puts the previous tree back.
+rm -rf "$INSTALL_DIR/lua-core.prev"
+{ [ ! -d "$INSTALL_DIR/lua-core" ] || mv "$INSTALL_DIR/lua-core" "$INSTALL_DIR/lua-core.prev"; } && mv "$LUA_STAGE" "$INSTALL_DIR/lua-core" \
+  || fail "cannot swap the Lua tree into $INSTALL_DIR/lua-core"
+restore_lua_tree() {
+  rm -rf "$INSTALL_DIR/lua-core"
+  [ ! -d "$INSTALL_DIR/lua-core.prev" ] || mv "$INSTALL_DIR/lua-core.prev" "$INSTALL_DIR/lua-core"
+}
 # wa-deploy-upgrade-invocation: begin
 # Everything upgrade.sh is told goes on the command's own lines, and the COMMENTS LIVE ABOVE IT on purpose.
 # That is not style. bash drops a simple command's whole `VAR=value \` prefix when a comment line sits
@@ -762,6 +827,7 @@ wa_status_unfollow
 # Reporting must never fail the deploy: with stdout gone, `sed` dies of EPIPE and pipefail would then report
 # its status instead of upgrade.sh's.
 sed "s/^/  upgrade: /" "$INSTALL_DIR/deploy-upgrade.log" 2>/dev/null | tail -20 || true
+[ "$UPGRADE_STATUS" = "0" ] || [ "$UPGRADE_STATUS" = "3" ] || restore_lua_tree
 if [ "$UPGRADE_STATUS" = "3" ]; then
   fail "the node upgraded, but its script or install record failed (exit 3); inspect the live pid and installed.txt"
 fi
@@ -888,6 +954,12 @@ record_installed() {
   # newline and leave `reason=` and `release=` sharing a line, which no reader parses.
   if [ -n "$RELEASE" ]; then
     printf 'release=%s\n' "$RELEASE" >> "$record_tmp" || fail "node installed, but the release line could not be written"
+  fi
+  # The Lua tree this install runs (lua-core/), and for a fast-path deploy the commit whose build the
+  # binary is: the binary was clean-built by that earlier deploy; this one installed only the tree.
+  printf 'lua_tree=%s\nlua_fast_path=%s\n' "$COMMIT" "$LUA_FAST" >> "$record_tmp" || fail "node installed, but the Lua tree line could not be written"
+  if [ "$LUA_FAST" = 1 ]; then
+    printf 'binary_commit=%s\n' "$INSTALLED_BINARY_COMMIT" >> "$record_tmp" || fail "node installed, but the binary commit line could not be written"
   fi
   mv -f "$record_tmp" "$INSTALL_DIR/installed.txt" \
     || fail "node installed, but installed.txt could not be committed atomically"
