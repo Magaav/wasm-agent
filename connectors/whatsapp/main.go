@@ -533,6 +533,30 @@ func run() error {
 		}
 	}
 	go audioLoop(mainLane, w)
+	// Freshness sweep + own-chat log: stale queue entries expire even while both
+	// lanes are busy, and their alerts go out coalesced at most once a minute.
+	workers.Add(1)
+	go func() {
+		defer workers.Done()
+		ticker := time.NewTicker(15 * time.Second)
+		defer ticker.Stop()
+		var last time.Time
+		for {
+			if _, err := j.expireStale(time.Now().Unix()); err != nil {
+				j.setState("degraded_fresh_journal")
+			}
+			if a.client.IsConnected() {
+				if _, err := j.sendAlerts(ctx, a, &last); err != nil {
+					j.setState("degraded_alert_journal")
+				}
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+		}
+	}()
 	if express != nil {
 		workers.Add(1)
 		go audioLoop(audioLane{Express: true, MaxSeconds: expressSeconds, Work: "audio-work-express"}, express)

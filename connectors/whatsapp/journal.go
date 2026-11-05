@@ -161,6 +161,10 @@ func openJournal(dir string) (*Journal, error) {
 		j.Close()
 		return nil, err
 	}
+	if err = installFreshness(db); err != nil {
+		j.Close()
+		return nil, err
+	}
 	os.Chmod(filepath.Join(dir, "journal.db"), 0600)
 	if _, e := os.Stat(filepath.Join(dir, "persistence-gap.json")); e == nil {
 		j.gap = true
@@ -436,6 +440,17 @@ func (j *Journal) ingest(m Message) error {
 		if err != nil {
 			return err
 		}
+		// A live audio that cannot be transcribed is logged to the own chat.
+		live := !m.History && c.Activated > 0 && m.Sent >= c.Activated && m.Sent >= time.Now().Unix()-freshSeconds
+		if live && (state == "unsupported" || state == "blocked_source") {
+			kind := "unsupported"
+			if state == "blocked_source" {
+				kind = "blocked"
+			}
+			if err = queueAlert(tx, c, m.Chat, m.ID, kind, reason, m.Sent); err != nil {
+				return err
+			}
+		}
 	}
 	if n > 0 && m.MediaKind != "" {
 		state, reason := "journal_only", "before_activation"
@@ -553,7 +568,7 @@ func (j *Journal) post(ctx context.Context, t Transport) error {
 	var source Message
 	var part int
 	var body, id string
-	err = j.db.QueryRow(`SELECT o.chat,o.source,o.part,o.body,o.send_id,m.sender,m.own FROM outbox o JOIN messages m ON m.account=o.account AND m.generation=o.generation AND m.chat=o.chat AND m.id=o.source WHERE o.account=? AND o.generation=? AND o.state='ready' AND NOT EXISTS(SELECT 1 FROM source_blocks b WHERE b.account=o.account AND b.generation=o.generation AND b.chat=o.chat AND b.id=o.source) AND NOT EXISTS(SELECT 1 FROM chat_holds h WHERE h.account=o.account AND h.generation=o.generation AND h.chat=o.chat) AND NOT EXISTS(SELECT 1 FROM post_retry r WHERE r.account=o.account AND r.generation=o.generation AND r.chat=o.chat AND r.source=o.source AND r.part=o.part AND r.next_attempt>unixepoch()) AND NOT EXISTS(SELECT 1 FROM outbox p WHERE p.account=o.account AND p.generation=o.generation AND p.chat=o.chat AND p.source=o.source AND p.part<o.part AND p.state!='confirmed') ORDER BY m.observed,o.rowid,o.part LIMIT 1`, c.Account, c.Generation).Scan(&source.Chat, &source.ID, &part, &body, &id, &source.Sender, &source.Own)
+	err = j.db.QueryRow(`SELECT o.chat,o.source,o.part,o.body,o.send_id,m.sender,m.own,m.raw FROM outbox o JOIN messages m ON m.account=o.account AND m.generation=o.generation AND m.chat=o.chat AND m.id=o.source WHERE o.account=? AND o.generation=? AND o.state='ready' AND o.created>=? AND NOT EXISTS(SELECT 1 FROM source_blocks b WHERE b.account=o.account AND b.generation=o.generation AND b.chat=o.chat AND b.id=o.source) AND NOT EXISTS(SELECT 1 FROM chat_holds h WHERE h.account=o.account AND h.generation=o.generation AND h.chat=o.chat) AND NOT EXISTS(SELECT 1 FROM post_retry r WHERE r.account=o.account AND r.generation=o.generation AND r.chat=o.chat AND r.source=o.source AND r.part=o.part AND r.next_attempt>unixepoch()) AND NOT EXISTS(SELECT 1 FROM outbox p WHERE p.account=o.account AND p.generation=o.generation AND p.chat=o.chat AND p.source=o.source AND p.part<o.part AND p.state!='confirmed') ORDER BY m.observed,o.rowid,o.part LIMIT 1`, c.Account, c.Generation, time.Now().Unix()-freshSeconds).Scan(&source.Chat, &source.ID, &part, &body, &id, &source.Sender, &source.Own, &source.Raw)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil
 	}

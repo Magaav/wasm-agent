@@ -6,8 +6,9 @@ The linked-device service journals incoming AND synchronized own outgoing audio.
 Ingestion, independent durable compute tasks and held/confirmed outbox parts are
 separate. Incoming audio **and synchronized own outgoing audio** are posted when transcript
 posting is enabled; both are transcribed for the journal and reply-linked. One failure
-does not block ingestion, and downtime backlog after the explicit first activation
-cutoff is not expired after ten minutes. Initial history is never bulk-posted. No
+does not block ingestion. Audio not picked up within 5 minutes of being sent (for
+example a downtime backlog) expires and is logged to the own chat instead of being
+transcribed late (see "Fresh-only transcripts" below). Initial history is never bulk-posted. No
 general AI responder, read marking or composer action.
 
 A persistent private local `faster-whisper` worker loads multilingual `small`,
@@ -43,6 +44,32 @@ Pin `av==18.1.0`: PyAV 19 removed `metadata_errors`, which faster-whisper 1.2.1 
 passes. The model cache must contain the full multilingual `small` snapshot.
 Image OCR is separate: see [WHATSAPP-OCR.md](WHATSAPP-OCR.md).
 No live STT quality, media compatibility or message delivery is claimed from fixtures.
+
+## Fresh-only transcripts and the own-chat log (2026-11-05)
+
+A transcript is worth posting only while the conversation is live.
+
+- **5-minute window** (`WA_WHATSAPP_FRESH_SECONDS`, default `300`). Pending audio
+  is picked up only if it was sent within the window. A sweep every 15 s moves
+  older pending audio to `expired` (`stale_over_5m`, prior reason kept in
+  parentheses), even while both lanes are busy. Audio a lane is already decoding
+  is never cut off: picked up in time means still fresh.
+- **No old reposts.** Each outbox part records `created`; a `ready` part not
+  dispatched within the window is never sent and becomes `expired`. Upgrading a
+  journal expires every pre-existing `ready` part and stale pending audio once,
+  silently (`stale_at_freshness_upgrade`).
+- **Reply to the audio.** The transcript quotes the retained `AudioMessage` itself
+  (stanza ID + participant + the voice note), so WhatsApp shows the audio bubble
+  above the transcript and a tap jumps to the original to play it. A text
+  placeholder is used only when no retained copy exists.
+- **Own-chat log.** Every live audio that ends without a posted transcript queues
+  one alert: `audio_expired`, `post_expired`, `post_held` (transcribed into a held
+  chat), `failed`, `unsupported`, `blocked`. History audio stays silent. Alerts go
+  as one plain-text message, at most once a minute (12 items listed, the rest
+  counted), to this account's own chat (`WA_WHATSAPP_ALERT_CHAT` = an exact JID, or
+  `off`). Each line has chat title, send time (America/Sao_Paulo), what happened and
+  the reason; never audio or transcript text. Undeliverable alerts drop after 6 h.
+- Schema: additive (`outbox.created`, table `alerts`); an older release ignores both.
 
 ## Receive → transcript path (2026-10-27)
 

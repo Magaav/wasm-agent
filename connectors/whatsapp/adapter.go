@@ -525,8 +525,7 @@ func (a *Adapter) Send(ctx context.Context, chat, body, id string, source Messag
 	if err != nil {
 		return "", noSubmission("chat_unproven_before_dispatch", true)
 	}
-	quoted := &waE2E.Message{Conversation: proto.String("[audio]")}
-	message := &waE2E.Message{ExtendedTextMessage: &waE2E.ExtendedTextMessage{Text: proto.String(body), ContextInfo: &waE2E.ContextInfo{StanzaID: proto.String(source.ID), Participant: proto.String(source.Sender), QuotedMessage: quoted}}}
+	message := &waE2E.Message{ExtendedTextMessage: &waE2E.ExtendedTextMessage{Text: proto.String(body), ContextInfo: replyContext(source)}}
 	if a.journal.hasGap() {
 		return "", noSubmission("persistence_gap_before_dispatch", false)
 	}
@@ -543,4 +542,36 @@ func (a *Adapter) Send(ctx context.Context, chat, body, id string, source Messag
 		return "", errors.New("send_confirmation_scope_mismatch")
 	}
 	return resp.ID, nil
+}
+
+// replyContext makes the transcript a real reply to its source audio: the quote
+// carries the retained AudioMessage itself, so WhatsApp shows the voice-note
+// bubble and a tap jumps to (and plays) the original. Only when the retained
+// copy is missing does it fall back to a text placeholder; the stanza ID and
+// participant still point at the exact source message either way.
+func replyContext(source Message) *waE2E.ContextInfo {
+	quoted := &waE2E.Message{Conversation: proto.String("🎤 áudio")}
+	var original waE2E.Message
+	if len(source.Raw) > 0 && proto.Unmarshal(source.Raw, &original) == nil && original.GetAudioMessage() != nil {
+		quoted = &waE2E.Message{AudioMessage: original.GetAudioMessage()}
+	}
+	return &waE2E.ContextInfo{StanzaID: proto.String(source.ID), Participant: proto.String(source.Sender), QuotedMessage: quoted}
+}
+
+// Notify sends one plain-text operator log message to an exact chat (the
+// account's own chat by default). It is not a transcript post: no outbox, no
+// reply link, best effort.
+func (a *Adapter) Notify(ctx context.Context, chat, body string) error {
+	if err := a.identity(); err != nil {
+		return err
+	}
+	if !a.client.IsConnected() {
+		return errors.New("disconnected")
+	}
+	to, err := types.ParseJID(chat)
+	if err != nil {
+		return err
+	}
+	_, err = a.client.SendMessage(ctx, to.ToNonAD(), &waE2E.Message{Conversation: proto.String(body)}, whatsmeow.SendRequestExtra{Timeout: 45 * time.Second})
+	return err
 }

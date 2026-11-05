@@ -201,7 +201,7 @@ func (j *Journal) processAudioLane(ctx context.Context, t Transport, r Recognize
 	// genuinely failed runs last and only after its backoff.
 	now := time.Now().Unix()
 	fresh := now - freshWindow
-	rows, err := j.db.Query(`SELECT m.chat,m.id,m.sender,m.body,m.sent,m.own,m.raw,a.language,a.failures FROM audio a JOIN messages m USING(account,generation,chat,id) WHERE a.account=? AND a.generation=? AND a.state='pending' AND`+computeFence+`AND a.next_attempt<=? ORDER BY a.failures>0,m.sent>=? DESC,CASE WHEN m.sent>=? THEN m.sent ELSE -m.sent END,m.observed LIMIT 32`, c.Account, c.Generation, now, fresh, fresh)
+	rows, err := j.db.Query(`SELECT m.chat,m.id,m.sender,m.body,m.sent,m.own,m.raw,a.language,a.failures FROM audio a JOIN messages m USING(account,generation,chat,id) WHERE a.account=? AND a.generation=? AND a.state='pending' AND m.sent>=? AND`+computeFence+`AND a.next_attempt<=? ORDER BY a.failures>0,m.sent>=? DESC,CASE WHEN m.sent>=? THEN m.sent ELSE -m.sent END,m.observed LIMIT 32`, c.Account, c.Generation, now-freshSeconds, now, fresh, fresh)
 	if err != nil {
 		return false, err
 	}
@@ -304,6 +304,9 @@ func (j *Journal) processAudioLane(ctx context.Context, t Transport, r Recognize
 		if e != nil {
 			return true, e
 		}
+		if e = queueAlert(tx, c, m.Chat, m.ID, "blocked", "source_mutation_or_chat_hold", m.Sent); e != nil {
+			return true, e
+		}
 		return true, tx.Commit()
 	}
 	held, e := postingHeld(tx, c, m.Chat)
@@ -315,12 +318,19 @@ func (j *Journal) processAudioLane(ctx context.Context, t Transport, r Recognize
 		// Journal the transcript, never enqueue a post into a held chat. A later
 		// release-hold does not replay it either (nothing is in the outbox).
 		reason = "posting_held_chat"
+		if c.TranscriptPosting {
+			var hold string
+			tx.QueryRow("SELECT reason FROM chat_holds WHERE account=? AND generation=? AND chat=?", c.Account, c.Generation, m.Chat).Scan(&hold)
+			if e = queueAlert(tx, c, m.Chat, m.ID, "post_held", hold, m.Sent); e != nil {
+				return true, e
+			}
+		}
 	}
 	for i, body := range chunks(text) {
 		if !c.TranscriptPosting || held {
 			continue
 		}
-		_, err = tx.Exec("INSERT OR IGNORE INTO outbox(account,generation,chat,source,part,body,send_id,state) VALUES(?,?,?,?,?,?,?,'ready')", c.Account, c.Generation, m.Chat, m.ID, i, body, t.NewID())
+		_, err = tx.Exec("INSERT OR IGNORE INTO outbox(account,generation,chat,source,part,body,send_id,state,created) VALUES(?,?,?,?,?,?,?,'ready',?)", c.Account, c.Generation, m.Chat, m.ID, i, body, t.NewID(), time.Now().Unix())
 		if err != nil {
 			return true, err
 		}
@@ -358,8 +368,25 @@ func (j *Journal) recordComputeFailure(ctx context.Context, c Config, m Message,
 		j.db.QueryRow("SELECT attempts FROM audio WHERE account=? AND generation=? AND chat=? AND id=?", c.Account, c.Generation, m.Chat, m.ID).Scan(&attempts)
 		next = next.Add(backoff(time.Minute, 10*time.Minute, attempts+1))
 	}
-	_, err := j.db.Exec("UPDATE audio SET state=?,reason=?,attempts=attempts+1,failures=?,next_attempt=? WHERE account=? AND generation=? AND chat=? AND id=? AND state='pending'", state, reason, failed, next.Unix(), c.Account, c.Generation, m.Chat, m.ID)
-	return err
+	tx, err := j.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	r, err := tx.Exec("UPDATE audio SET state=?,reason=?,attempts=attempts+1,failures=?,next_attempt=? WHERE account=? AND generation=? AND chat=? AND id=? AND state='pending'", state, reason, failed, next.Unix(), c.Account, c.Generation, m.Chat, m.ID)
+	if err != nil {
+		return err
+	}
+	if n, _ := r.RowsAffected(); n == 1 && state != "pending" {
+		kind := "failed"
+		if state == "unsupported" {
+			kind = "unsupported"
+		}
+		if err = queueAlert(tx, c, m.Chat, m.ID, kind, reason, m.Sent); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 // requeueReport counts what requeueHeldAudio did or would do. It carries no chat,
