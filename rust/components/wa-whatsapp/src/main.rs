@@ -269,6 +269,17 @@ impl HttpClient for HostHttp {
     }
 }
 
+// ---- the wall clock: wacore reads no clock on wasm32 unless given one ---------------------------
+// Without this every timestamp is 1970 and the phone rejects the pair-code registration
+// ("could not link device"). WASI's clock_time_get is the real wall clock under wasmtime.
+
+struct WasiClock;
+impl wacore::time::TimeProvider for WasiClock {
+    fn now_millis(&self) -> i64 {
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
+    }
+}
+
 // ---- logging: route whatsapp-rust's `log` records into the service log -------------------------
 
 struct Logger(log::LevelFilter);
@@ -295,6 +306,8 @@ fn main() {
         _ => log::LevelFilter::Info,
     };
     let _ = log::set_boxed_logger(Box::new(Logger(level))).map(|_| log::set_max_level(level));
+    let _ = wacore::time::set_time_provider(WasiClock);
+    say!("clock: {} ms since epoch", wacore::time::now_millis());
     let mut pool = LocalPool::new();
     let spawner = pool.spawner();
     let runtime = HostRuntime { spawner: spawner.clone() };
