@@ -7,7 +7,8 @@
 //!
 //! Milestone 1: pair (by code when `pair_phone` is configured, else QR), connect, receive. The log
 //! carries the pairing code, connection state and message metadata (chat, kind, id) - never content.
-//! Store: in memory (re-pair after a restart) until the host-backed store lands.
+//! Store: store.rs - in-memory reads with write-through of durable state to the host (wa_kv);
+//! a restart reconnects without pairing again.
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::executor::{LocalPool, LocalSpawner};
@@ -20,6 +21,8 @@ use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
 use wacore::net::{DisconnectReason, HttpClient, HttpRequest, HttpResponse, Transport, TransportEvent, TransportFactory, WHATSAPP_WEB_ORIGIN, WHATSAPP_WEB_WS_URL};
 use wacore::runtime::{AbortHandle, Runtime};
+
+mod store;
 
 mod host {
     #[link(wasm_import_module = "wa_ws")]
@@ -315,8 +318,22 @@ fn main() {
     say!("wa-whatsapp: starting (pairing by {})", if pair_phone.is_some() { "code" } else { "QR" });
     let _ = spawner.spawn_local(async move {
         use whatsapp_rust::prelude::*;
+        use wacore::store::traits::DeviceStore;
+        let backend = match store::PersistentBackend::open().await {
+            Ok((backend, restored)) => {
+                say!("store: {restored} entries restored");
+                backend
+            }
+            Err(error) => {
+                say!("store: unavailable ({error}); not starting");
+                return;
+            }
+        };
+        let paired = backend.load().await.ok().flatten().is_some_and(|d| d.pn.is_some());
+        let pair_phone = if paired { None } else { pair_phone };
+        say!("device: {}", if paired { "restored (no pairing needed)" } else { "new (pairing)" });
         let mut builder = Bot::builder()
-            .with_backend(wacore::store::in_memory::InMemoryBackend::new())
+            .with_backend(backend)
             .with_runtime(runtime)
             .with_transport_factory(HostTransportFactory)
             .with_http_client(HostHttp)

@@ -89,6 +89,10 @@ struct State {
     ws: Vec<Option<crate::service_io::WsConn>>,
     http: HashMap<i32, crate::service_io::HttpState>,
     next_http: i32,
+    /// `wa_kv`: the component's own key-value file (manifest `capabilities.storage: true`), opened lazily.
+    kv_path: Option<std::path::PathBuf>,
+    kv: Option<rusqlite::Connection>,
+    kv_buf: Vec<u8>,
     net: Vec<String>,
     shared: Arc<Shared>,
     limits: StoreLimits,
@@ -293,6 +297,83 @@ fn linker(engine: &wasmtime::Engine) -> Result<Linker<State>> {
         c.data_mut().http.remove(&id);
         0
     })?;
+    // wa_kv: a durable key-value store private to this component (one SQLite file in
+    // <components>/<name>.state/). Values up to 16 MiB; `get`/`dump` stage bytes for `take`.
+    fn kv(c: &mut Caller<'_, State>) -> Option<&rusqlite::Connection> {
+        if c.data().kv.is_none() {
+            let path = c.data().kv_path.clone()?;
+            std::fs::create_dir_all(path.parent()?).ok()?;
+            let conn = rusqlite::Connection::open(&path).ok()?;
+            conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; CREATE TABLE IF NOT EXISTS kv(k BLOB PRIMARY KEY, v BLOB NOT NULL);").ok()?;
+            c.data_mut().kv = Some(conn);
+        }
+        c.data().kv.as_ref()
+    }
+    linker.func_wrap("wa_kv", "put", |mut c: Caller<'_, State>, kp: i32, kl: i32, vp: i32, vl: i32| -> i32 {
+        let (Some(k), Some(v)) = (read_bytes(&mut c, kp, kl, 4096), read_bytes(&mut c, vp, vl, 16 << 20)) else { return -1 };
+        match kv(&mut c) {
+            Some(db) => db.execute("INSERT INTO kv(k,v) VALUES(?1,?2) ON CONFLICT(k) DO UPDATE SET v=excluded.v", rusqlite::params![k, v]).map(|_| 0).unwrap_or(-1),
+            None => crate::service_io::REFUSED,
+        }
+    })?;
+    linker.func_wrap("wa_kv", "del", |mut c: Caller<'_, State>, kp: i32, kl: i32| -> i32 {
+        let Some(k) = read_bytes(&mut c, kp, kl, 4096) else { return -1 };
+        match kv(&mut c) {
+            Some(db) => db.execute("DELETE FROM kv WHERE k=?1", rusqlite::params![k]).map(|n| n as i32).unwrap_or(-1),
+            None => crate::service_io::REFUSED,
+        }
+    })?;
+    linker.func_wrap("wa_kv", "del_prefix", |mut c: Caller<'_, State>, pp: i32, pl: i32| -> i32 {
+        let Some(p) = read_bytes(&mut c, pp, pl, 4096) else { return -1 };
+        match kv(&mut c) {
+            Some(db) => db.execute("DELETE FROM kv WHERE substr(k,1,?2)=?1", rusqlite::params![p, p.len() as i64]).map(|n| n as i32).unwrap_or(-1),
+            None => crate::service_io::REFUSED,
+        }
+    })?;
+    linker.func_wrap("wa_kv", "get", |mut c: Caller<'_, State>, kp: i32, kl: i32| -> i32 {
+        let Some(k) = read_bytes(&mut c, kp, kl, 4096) else { return -1 };
+        let value: Option<Vec<u8>> = match kv(&mut c) {
+            Some(db) => db.query_row("SELECT v FROM kv WHERE k=?1", rusqlite::params![k], |r| r.get(0)).ok(),
+            None => return crate::service_io::REFUSED,
+        };
+        match value {
+            Some(v) => {
+                let n = v.len() as i32;
+                c.data_mut().kv_buf = v;
+                n
+            }
+            None => -2,
+        }
+    })?;
+    // dump(prefix) -> total bytes of [u32 klen][k][u32 vlen][v]... (little endian), staged for take.
+    linker.func_wrap("wa_kv", "dump", |mut c: Caller<'_, State>, pp: i32, pl: i32| -> i32 {
+        let Some(p) = read_bytes(&mut c, pp, pl, 4096) else { return -1 };
+        let mut out = Vec::new();
+        {
+            let Some(db) = kv(&mut c) else { return crate::service_io::REFUSED };
+            let Ok(mut stmt) = db.prepare("SELECT k,v FROM kv WHERE substr(k,1,?2)=?1 ORDER BY k") else { return -1 };
+            let Ok(rows) = stmt.query_map(rusqlite::params![p, p.len() as i64], |r| Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, Vec<u8>>(1)?))) else { return -1 };
+            for (k, v) in rows.flatten() {
+                out.extend((k.len() as u32).to_le_bytes());
+                out.extend(&k);
+                out.extend((v.len() as u32).to_le_bytes());
+                out.extend(&v);
+                if out.len() > (512 << 20) {
+                    return -1;
+                }
+            }
+        }
+        let n = out.len() as i32;
+        c.data_mut().kv_buf = out;
+        n
+    })?;
+    linker.func_wrap("wa_kv", "take", |mut c: Caller<'_, State>, ptr: i32, len: i32| -> i32 {
+        let buf = std::mem::take(&mut c.data_mut().kv_buf);
+        if buf.len() > len.max(0) as usize {
+            return -1;
+        }
+        if write_bytes(&mut c, ptr, &buf) { buf.len() as i32 } else { -1 }
+    })?;
     linker.func_wrap("wa_ctl", "stopping", |c: Caller<'_, State>| -> i32 { c.data().shared.stop.load(Ordering::Relaxed) as i32 })?;
     Ok(linker)
 }
@@ -343,7 +424,9 @@ fn run_once(installed: &Installed, grant: &Grant, module: &Module, shared: &Arc<
     }
     let memory_mb = installed.manifest.get("limits").and_then(|l| l.get("memory_mb")).and_then(Value::as_u64).unwrap_or(DEFAULT_MEMORY_MB).clamp(16, 4096);
     let limits = StoreLimitsBuilder::new().memory_size((memory_mb as usize) << 20).instances(16).build();
-    let state = State { wasi: builder.build_p1(), socks: Vec::new(), ws: Vec::new(), http: HashMap::new(), next_http: 1, net: grant.net.clone(), shared: shared.clone(), limits };
+    let storage = installed.manifest.get("capabilities").and_then(|c| c.get("storage")).and_then(Value::as_bool) == Some(true);
+    let kv_path = storage.then(|| crate::components::component_dir().join(format!("{}.state", installed.name)).join("kv.sqlite"));
+    let state = State { wasi: builder.build_p1(), socks: Vec::new(), ws: Vec::new(), http: HashMap::new(), next_http: 1, kv_path, kv: None, kv_buf: Vec::new(), net: grant.net.clone(), shared: shared.clone(), limits };
     let mut store = Store::new(engine, state);
     store.limiter(|s| &mut s.limits);
     // Never preempted while running; after a stop request it gets STOP_GRACE to exit on its own
