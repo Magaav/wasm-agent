@@ -269,10 +269,32 @@ impl HttpClient for HostHttp {
     }
 }
 
+// ---- logging: route whatsapp-rust's `log` records into the service log -------------------------
+
+struct Logger(log::LevelFilter);
+impl log::Log for Logger {
+    fn enabled(&self, meta: &log::Metadata) -> bool {
+        meta.level() <= self.0
+    }
+    fn log(&self, record: &log::Record) {
+        if self.enabled(record.metadata()) {
+            say!("{} {}: {}", record.level(), record.target(), record.args());
+        }
+    }
+    fn flush(&self) {}
+}
+
 // ---- the service ----------------------------------------------------------------------------
 
 fn main() {
     let config: serde_json::Value = std::env::var("WA_COMPONENT_CONFIG").ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
+    let level = match config["log"].as_str().unwrap_or("info") {
+        "debug" => log::LevelFilter::Debug,
+        "trace" => log::LevelFilter::Trace,
+        "warn" => log::LevelFilter::Warn,
+        _ => log::LevelFilter::Info,
+    };
+    let _ = log::set_boxed_logger(Box::new(Logger(level))).map(|_| log::set_max_level(level));
     let mut pool = LocalPool::new();
     let spawner = pool.spawner();
     let runtime = HostRuntime { spawner: spawner.clone() };
