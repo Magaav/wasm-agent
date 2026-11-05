@@ -1,0 +1,15 @@
+[package]
+name = "nnguest"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Spike guest (wasm32-wasip2 command): times wasi-nn compute on a Whisper-encoder-shaped input.
+[workspace]
+
+[dependencies]
+wit-bindgen = "0.63"
+
+[profile.release]
+opt-level = "s"
+strip = true
