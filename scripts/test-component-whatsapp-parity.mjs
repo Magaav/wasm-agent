@@ -64,6 +64,8 @@ test('mcp-whatsapp component matches the Node adapter',{skip:ready?false:'WA_BIN
    ['send_message',{conversation_id:CHAT,body:'x',confirm:true}],
    ['download_audio',{conversation_id:CHAT,message_id:'m1'}],
    ['read_newest',{conversation_id:CHAT,n:2}],
+   ['read_newest',{conversation_id:GROUP,n:1}],         // unbound: the whole call fails, as in Node
+   ['read_newest',{query:'casa',n:2}],
   ];
   for(const [name,args] of cases){
    const expected=await node(name,args),actual=await component(name,args);

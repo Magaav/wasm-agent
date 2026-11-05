@@ -466,7 +466,9 @@ fn read_newest(b: &Binding, args: &Map<String, Value>) -> R<Value> {
     for (id, title) in &matched {
         threads.push(json!({"id":id,"title":title,"matched":true,"rows":0,"newest_sent_at":0}));
     }
-    let scan_leg = |rows: &mut BTreeMap<String, Value>, conversation: Option<&str>, errors: &mut Vec<Value>, pages: &mut i32, complete: &mut bool| {
+    // A refusal (Err: unbound chat, bad window) fails the whole call, as the Node reader's thrown
+    // error does; only a connector answer with ok:false is recorded per thread and scanning goes on.
+    let scan_leg = |rows: &mut BTreeMap<String, Value>, conversation: Option<&str>, errors: &mut Vec<Value>, pages: &mut i32, complete: &mut bool| -> R<()> {
         let mut before = 0i64;
         for page in 0..MAX_PAGES {
             let mut request = Map::new();
@@ -478,7 +480,7 @@ fn read_newest(b: &Binding, args: &Map<String, Value>) -> R<Value> {
             if before > 0 {
                 request.insert("before".into(), json!(before));
             }
-            let data = adapter(b, "read_snapshot", request).unwrap_or_else(|e| json!({"ok":false,"error":e}));
+            let data = adapter(b, "read_snapshot", request)?;
             *pages += 1;
             if data["ok"] != json!(true) {
                 errors.push(json!({"conversation_id":conversation,"error":data["error"]}));
@@ -497,13 +499,14 @@ fn read_newest(b: &Binding, args: &Map<String, Value>) -> R<Value> {
                 *complete = false;
             }
         }
+        Ok(())
     };
     for (id, _) in &matched {
-        scan_leg(&mut rows, Some(id), &mut errors, &mut pages, &mut complete);
+        scan_leg(&mut rows, Some(id), &mut errors, &mut pages, &mut complete)?;
     }
     // The account-wide leg makes a renamed or dual-identity thread unable to hide its rows.
     if b.wide && conv.is_none() {
-        scan_leg(&mut rows, None, &mut errors, &mut pages, &mut complete);
+        scan_leg(&mut rows, None, &mut errors, &mut pages, &mut complete)?;
     }
     let mut all: Vec<Value> = rows.into_values().collect();
     all.sort_by_key(|r| std::cmp::Reverse(r["sent_at"].as_i64().unwrap_or(0)));
