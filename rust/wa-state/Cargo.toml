@@ -1,0 +1,26 @@
+[package]
+name = "wa-state"
+version = "0.1.0"
+edition = "2021"
+description = "Component state: schema versions, never-rewritten migrations, snapshots (pure library, no wasmtime)"
+
+[features]
+# The snapshot file format (export/import) is for the host and for a sidecar: it needs zstd, whose
+# `zstd-sys` builds C. A migration *step* that ships inside a wasm component only needs the core, so
+# `default-features = false` must stay compilable for wasm32-wasip2 - the in-component migrations
+# depend on that, not on the codec.
+default = ["snapshot"]
+snapshot = ["dep:zstd"]
+
+[dependencies]
+# The snapshot header is JSON, so it stays readable/inspectable in an editor and forward compatible
+# (an unknown field is ignored, never silently dropped by a hand-rolled parser).
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# The snapshot checksum is sha256 over the uncompressed payload - the same digest the component pin
+# uses, so an operator compares one kind of hash everywhere (`sha256sum`). Pure Rust: it also runs in
+# a wasm guest, where the in-memory pre-migration snapshot is taken.
+sha2 = "0.10"
+# Snapshots are zstd-compressed. Optional on purpose (see [features]): zstd-sys compiles C, which a
+# wasm32-wasip2 component cannot do without a cross C toolchain.
+zstd = { version = "0.13", default-features = false, optional = true }
