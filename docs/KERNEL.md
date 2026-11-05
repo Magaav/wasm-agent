@@ -132,6 +132,57 @@ WASI side: stdio and env inherited, the working directory preopened as `.` (so `
 absolute path fails in the guest; the core reads files through `host.read_file`), `os.execute`,
 `os.tmpname`, `io.popen` and `io.tmpfile` fail.
 
+### WASI 0.3 step 0 — wasmtime 50 and native async (05/11, wasm_the_first)
+
+The runtime is on **wasmtime 50.0.1** (`wasmtime` + `wasmtime-wasi`; the `anyhow` feature is now
+needed because `wasmtime::Error` is no longer `anyhow::Error`). Same binary: `cargo test --release
+-p wa-host` passes all 201 tests, and the component / service / agent-core blocks of `scripts/test.sh`
+run for real (24 + 23 + 245 checks, and the svc-echo service end to end).
+
+What the upgrade needed, in the order it bites:
+
+| where | 37 → 50 |
+| --- | --- |
+| `service_components.rs` (bindgen `with`) | a resource is named `wa:kernel/websocket.socket`, not `wa:kernel/websocket/socket` |
+| `core_component.rs` | `DirPerms`/`FilePerms` → `FsPerms::ReadWrite`; `LinkOptions::cli_exit_with_code` is gone (exit-with-code is always linked) → `p2::add_to_linker_sync` |
+| `quickjs.rs` | the six `func_wrap` closures return `wasmtime::Result` (`.map_err(wasmtime::Error::from_anyhow)`) |
+| `services.rs` | the epoch callback returns `wasmtime::Error::msg("service_stopped")` |
+| `components.rs` | **capability regression, found and fixed**: 50's `AllowedNetworkUses::default()` denies TCP and UDP (37 wrote both `true`), and the address check is now also asked about the *implicit* wildcard bind of `connect` (37 checked only the address the guest named). With grant enforcement unchanged, every `TcpStream::connect` in a component failed with EACCES; `scripts/test-component-whatsapp-parity.mjs` was the test that said so |
+| `scripts/test.sh` | the component and agent-core blocks unset `CARGO_TARGET_DIR`: each component is its own cargo workspace and `build-components.sh` reads `rust/components/<name>/target/<target>/release/`, so a redirected gate target dir installed nothing and silently turned three blocks into skips |
+
+Spike (`benchmarks/wasi03-spike`): a `wasm32-wasip2` guest (wit-bindgen 0.63, 70 KB, WASI 0.2 imports
+beside the async ABI) exports `run: async func` and reads inbound frames from a host resource as
+`stream<list<u8>>`; the host side is a `StreamProducer` over a channel fed by a task, driven by
+`store.run_concurrent`. Per frame, end to end (host task → channel → producer → guest `next().await`):
+**~2.6 µs** (10 000 × 512 B in 25.6 ms; 100 000 × 64 B in 266 ms), instantiate 0.2–0.3 ms, compile
+72–76 ms. The 4 KiB / 100 µs case measures the Windows timer (15.6 ms), not wasm. A WhatsApp pump is
+tens of messages per second, so native async costs nothing this project can measure.
+
+C verdict: wit-bindgen 0.63 *does* generate async for C — `crates/c/src/lib.rs:generate_async_helpers`
+(waitable sets, subtask/stream/future events, callback codes) with upstream `.c` runtime tests under
+`tests/runtime/simple-stream*`, `simple-future`, `pending-import` — but only at the raw ABI level:
+there is no high-level `await`. The Lua core is C and single-threaded, so step 0 keeps every `host.*`
+a **sync** call and leaves the waiting to the host, which already owns the runtime. Async `host.*` for
+Lua is a step of its own, not a precondition for changing the WIT.
+
+Proposed `wa:kernel@0.2` — async only where the host may have to wait on a peer, `stream<T>` wherever
+one request can yield many items, everything local staying sync:
+
+```wit
+// websocket: the pump itself becomes the stream, recv + poll disappear
+resource socket {
+  messages: func() -> stream<list<u8>>;
+  send: async func(frame: list<u8>) -> result<_, send-error>;
+  close: func(code: u16, reason: string);
+}
+// http: one async call instead of start/poll; the body is a stream in both directions
+send: async func(request: request) -> result<response, http-error>;
+// speech: segments arrive while the recognizer is still listening
+recognize: async func(request: recognize-request) -> stream<segment>;
+// kv (put/get/del/del_prefix/scan), log, lifecycle: unchanged, sync — a local store answer is
+// sub-millisecond and a stream would buy nothing.
+```
+
 ## Order of work
 
 1. This document + `wit/` (v1 draft). ← now
