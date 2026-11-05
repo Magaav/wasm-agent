@@ -2,6 +2,12 @@
 local json = dofile("lua/vendor/json.lua")
 local memory = dofile("lua/core/memory.lua")
 
+-- Where this Lua came from: the compiled-in copy, or - on an installed node - the pinned tree
+-- deploy installs beside the binary (<install>/lua-core, verified against the binary's capability
+-- digest; `wa --lua-tree` says which). That tree is the shipping copy, not dev mode: none of the
+-- dev-mode rules below apply to it. A Lua-only change reaches a node through that tree with no
+-- compile (scripts/deploy.sh "Lua fast path").
+--
 -- A dev-mode node must not write the operator's ledger.
 --
 -- `WASM_AGENT_LUA_ROOT` makes the installed binary read `lua/` from a checkout, which is what
