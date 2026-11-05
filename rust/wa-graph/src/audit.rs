@@ -396,7 +396,12 @@ impl Store {
             .and_then(Value::as_u64)
             .unwrap_or(24_000)
             .clamp(2_048, 200_000) as usize;
-        let canonical_root=crate::store::canonical(root)?.to_string_lossy().into_owned();
+        // A host that runs this inside a sandbox (the `graph` component) reads files under a mount
+        // point but reports, budgets and keys cursors with the root path its caller knows.
+        let canonical_root=match request.get("_display_root").and_then(Value::as_str) {
+            Some(display) => display.to_string(),
+            None => crate::store::canonical(root)?.to_string_lossy().into_owned(),
+        };
         let digest = crate::store::fnv1a(&serde_json::to_vec(&json!({
             "root":canonical_root,
             "changes":request.get("changes"),"direction":direction,"depth":depth

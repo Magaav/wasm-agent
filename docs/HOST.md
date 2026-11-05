@@ -230,12 +230,22 @@ one database rather than a silent per-interpreter split.
 ## The code graph
 
 `host.graph_index|query|search|source|overview|impact|explain|path|caps|stats|status` expose `wa-graph`'s SQLite
-index of the source tree to Lua. The configured runtime graph lives beside the
-ledger (`<home>/.wasm-agent/graph.db`). Model source actions pass the session
+index of the source tree to Lua. **Since stream C (05/11) the graph is the `graph` WASI component**
+(`rust/components/graph`, wasm32-wasip2, built by `scripts/build-components.sh graph`, needs
+wasi-sdk): tree-sitter, SQLite and every query run inside it; `wa` no longer links tree-sitter or
+`wa-graph`. The host side (`rust/wa-host/src/graph.rs`) only resolves root/db, mounts the root
+read-only at `/graph/root` and a private database directory read-write at `/graph/db` (the
+`dirs` grant, docs/COMPONENTS.md), serializes calls per database (mutex + a file lock for other
+processes) and schedules background refreshes from edit hints and the OS watcher. Each call
+admits content itself (capture → compare → index changes as revision committed+1), so hints only
+make answers cheaper, never more correct. A node without the component installed answers every
+graph verb with `graph_component_unavailable: component_not_installed:graph`. The configured
+runtime graph lives beside the ledger, in its own directory (`<home>/.wasm-agent/graph.db.d/graph.db`;
+the pre-component `graph.db` is no longer read and is rebuilt once on first use). Model source actions pass the session
 worktree (or explicit `cwd`) as `root`; Git audit/impact normalize it to the Git
 top-level for both patch and index. Failed/missing required bindings refuse.
 Unbound navigation uses the configured runtime root. Other canonical roots get
-on-demand caches at `<configured-db-stem>.roots/<root-SHA256>.db`, leaving the
+on-demand caches at `<configured-db-stem>.roots/<root-SHA256>.db.d/graph.db`, leaving the
 runtime watcher/index independent. Explicit host `db` overrides are preserved.
 `WA_GRAPH_ROOT` and `WA_GRAPH_DB` override runtime defaults;
 `WA_GRAPH_WATCH=0` disables its watcher. See [GRAPH.md](GRAPH.md).
@@ -270,7 +280,9 @@ provenance; it does not assign a risk score. Impact pages use a cursor bound to
 the graph generation and request so a continuation cannot silently cross a
 source change.
 
-The watcher is a `notify` thread started only for `serve`. It registers before indexing once on
+The watcher is a `notify` watcher in the kernel's graph scheduler (one thread, which calls the
+component's `index` tool); `serve` registers the runtime root at startup, other roots register on
+first use. It registers before indexing once on
 startup (off the accept path, so a large tree never delays the port) and reindexes
 on change, debounced so one save's burst is one parse. Watcher errors are logged;
 query-time verification is the correctness backstop. This verifies a source

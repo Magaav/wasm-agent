@@ -94,8 +94,39 @@ fn compiled(engine: &Engine, sha: &str, bytes: &[u8]) -> Result<Component> {
     if let Some(found) = cache.lock().map_err(|_| anyhow!("component_cache_poisoned"))?.get(sha) {
         return Ok(found.clone());
     }
-    let component = Component::new(engine, bytes)?;
+    let component = disk_cached(engine, sha, bytes)?;
     cache.lock().map_err(|_| anyhow!("component_cache_poisoned"))?.insert(sha.to_string(), component.clone());
+    Ok(component)
+}
+
+/// Compiled code across processes: a large component (the graph is ~8 MB: tree-sitter grammars)
+/// takes seconds to compile, and every `wa` invocation is a new process. Keyed by the pin and this
+/// engine's compatibility hash, in the node's own `~/.wasm-agent/cache/components`. `WA_COMPONENT_CACHE=0` disables it.
+fn disk_cached(engine: &Engine, sha: &str, bytes: &[u8]) -> Result<Component> {
+    use std::hash::{Hash, Hasher};
+    if std::env::var("WA_COMPONENT_CACHE").map_or(false, |v| v == "0") {
+        return Ok(Component::new(engine, bytes)?);
+    }
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    engine.precompile_compatibility_hash().hash(&mut hasher);
+    let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).unwrap_or_else(|_| ".".into());
+    let dir = PathBuf::from(home).join(".wasm-agent").join("cache").join("components");
+    let path = dir.join(format!("{sha}-{:016x}.cwasm", hasher.finish()));
+    if path.is_file() {
+        // Safety: written below by this binary from bytes whose sha256 is the key, for an engine
+        // with this compatibility hash, in the node's private directory.
+        if let Ok(component) = unsafe { Component::deserialize_file(engine, &path) } {
+            return Ok(component);
+        }
+    }
+    let component = Component::new(engine, bytes)?;
+    if let Ok(serialized) = component.serialize() {
+        let _ = std::fs::create_dir_all(&dir);
+        let tmp = dir.join(format!(".{sha}.{}.tmp", std::process::id()));
+        if std::fs::write(&tmp, serialized).is_ok() && std::fs::rename(&tmp, &path).is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+    }
     Ok(component)
 }
 

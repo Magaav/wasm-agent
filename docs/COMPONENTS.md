@@ -38,6 +38,7 @@ component is instantiated.
 | `file_env` | `{KEY: "HOST_ENV_NAME"}` or `{KEY: "/abs/path"}` | the **host** reads that file (named by a host variable, or directly: a path is a location, not a secret) and the component sees its trimmed contents as `KEY`. Secrets stay file references; the component has no filesystem |
 | `net` | `["127.0.0.1:28787"]` | TCP connect to exactly these socket addresses. A manifest may declare `host:*` (any port on that host) |
 | `config` | `{...}` (registry `config`) | non-secret JSON in `WA_COMPONENT_CONFIG`. Data, not a capability |
+| `dirs` | `[{"host":"/abs","guest":"/graph/root","write":false}]` | the host directory preopened at the guest path, read-only unless `write`. The manifest declares the guest paths (`"dirs":["/graph/root"]`); the caller chooses the host directories. Used by the kernel for the `graph` component (root read-only, a private database directory writable) |
 
 Limits per run: 256 MiB memory, stdin ≤ 4 MiB, stdout ≤ 16 MiB, stderr tail 64 KiB, deadline =
 the definition's `timeout_seconds` (epoch interruption, ≤ 600 s). A run that hits the deadline after

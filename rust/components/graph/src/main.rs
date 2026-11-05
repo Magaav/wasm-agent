@@ -74,6 +74,14 @@ fn tools() -> Value {
     ])
 }
 
+/// The root and database paths the caller knows (the kernel passes its host paths); answers report
+/// these, so sizes, budgets and cursors match what the caller receives. Default: the guest paths.
+fn shown(args: &Value) -> (String, String) {
+    let root = args.get("_display_root").and_then(Value::as_str).map(str::to_string).unwrap_or_else(|| ROOT.to_string());
+    let db = args.get("_display_db").and_then(Value::as_str).map(str::to_string).unwrap_or_else(|| db_path(args).to_string_lossy().into_owned());
+    (root, db)
+}
+
 fn db_path(args: &Value) -> PathBuf {
     let file = args.get("db_file").and_then(Value::as_str).filter(|f| !f.is_empty() && !f.contains(['/', '\\'])).unwrap_or("graph.db");
     Path::new(DB_DIR).join(file)
@@ -84,7 +92,7 @@ fn s(error: impl std::fmt::Display) -> String {
 }
 
 /// The common snapshot evidence, same field names the native coordinator reported.
-fn meta(root: &Path, db: &Path, required: u64, committed: u64, work: &Value, reused: bool, started: Instant) -> Value {
+fn meta(root: &str, db: &str, required: u64, committed: u64, work: &Value, reused: bool, started: Instant) -> Value {
     json!({"root":root,"db":db,"workspace_revision":required,"committed_revision":committed,"required_revision":required,
         "reused_committed_snapshot":reused,"wait_ms":started.elapsed().as_millis() as u64,"work":work,
         "capture_domain":"supported_utf8_sources","queued":false,"active":false,"dirty_hint":false,"failure":Value::Null})
@@ -97,12 +105,12 @@ enum Admit {
 
 /// Capture → compare → index changed files as revision committed+1. Stateless: the database is the
 /// only memory between calls (the kernel holds the per-database lock around the whole call).
-fn admit(root: &Path, db: &Path, force: bool, deadline: Instant, started: Instant) -> Result<Admit, String> {
+fn admit(root: &Path, db: &Path, force: bool, deadline: Instant, started: Instant, shown: &(String, String)) -> Result<Admit, String> {
     let committed = if db.exists() { Store::open_readonly(db).and_then(|store| store.committed_revision()).map_err(s)? } else { 0 };
     let manifest = match Manifest::capture_until(root, Some(deadline), &mut |_, _| {}) {
         Ok(manifest) => manifest,
         Err(error) => {
-            let mut status = meta(root, db, committed, committed, &Value::Null, false, started);
+            let mut status = meta(&shown.0, &shown.1, committed, committed, &Value::Null, false, started);
             status["error"] = json!(format!("graph_capture_failed: {error}"));
             status["required_revision"] = Value::Null;
             status["capture_required"] = json!(true);
@@ -129,7 +137,7 @@ fn admit(root: &Path, db: &Path, force: bool, deadline: Instant, started: Instan
             Ok(Admit::Ready { required: revision, work, reused: false, skipped: manifest.skipped_non_utf8 })
         }
         Err(error) => {
-            let mut status = meta(root, db, revision, committed, &Value::Null, false, started);
+            let mut status = meta(&shown.0, &shown.1, revision, committed, &Value::Null, false, started);
             status["failure"] = json!([revision, error.to_string()]);
             status["error"] = json!(format!("graph_index_failed: {error}"));
             status["next"] = json!("Use bounded read/grep now. Inspect failure/progress and repair its cause; graph action=index force=true deliberately retries a failed derived index. No stale answer was returned.");
@@ -147,14 +155,15 @@ fn read(args: &Value, body: impl Fn(&Store, &Value, &Path) -> Result<Value, Stri
     let started = Instant::now();
     let root = Path::new(ROOT);
     let db = db_path(args);
-    let (required, work, reused, skipped) = match admit(root, &db, false, deadline_of(args, 60_000), started)? {
+    let shown = shown(args);
+    let (required, work, reused, skipped) = match admit(root, &db, false, deadline_of(args, 60_000), started, &shown)? {
         Admit::Ready { required, work, reused, skipped } => (required, work, reused, skipped),
         Admit::Failed(status) => return Ok(status),
     };
     let store = Store::open_readonly(&db).map_err(s)?;
     store.begin_read().map_err(s)?;
     let committed = store.committed_revision().map_err(s)?;
-    let mut snapshot = meta(root, &db, required, committed, &work, reused, started);
+    let mut snapshot = meta(&shown.0, &shown.1, required, committed, &work, reused, started);
     snapshot["skipped_non_utf8"] = json!(skipped);
     if committed < required {
         snapshot["error"] = json!("graph_snapshot_revision_mismatch");
@@ -210,18 +219,19 @@ fn call(name: &str, args: &Value) -> Result<Value, String> {
             let root = Path::new(ROOT);
             let db = db_path(args);
             let force = args.get("force").and_then(Value::as_bool).unwrap_or(false);
-            match admit(root, &db, force, started + Duration::from_secs(120), started)? {
+            let shown = shown(args);
+            match admit(root, &db, force, started + Duration::from_secs(120), started, &shown)? {
                 Admit::Failed(status) => Ok(status),
                 Admit::Ready { required, work, reused, skipped } => {
                     let store = Store::open_readonly(&db).map_err(s)?;
                     let stats = store.stats().map_err(s)?;
                     let committed = store.committed_revision().map_err(s)?;
-                    let mut snapshot = meta(root, &db, required, committed, &work, reused, started);
+                    let mut snapshot = meta(&shown.0, &shown.1, required, committed, &work, reused, started);
                     snapshot["skipped_non_utf8"] = json!(skipped);
                     let field = |key: &str| if reused { json!(0) } else { work[key].clone() };
                     Ok(json!({"ok":true,"indexed":field("parsed"),"unchanged":if reused {json!(stats.files)} else {work["unchanged"].clone()},
                         "removed":field("removed"),"re_resolved":field("re_resolved"),"nodes":field("nodes"),"edges":field("edges"),
-                        "resolved":stats.resolved,"unresolved":stats.unresolved,"root":root,"db":db,"graph_snapshot":snapshot}))
+                        "resolved":stats.resolved,"unresolved":stats.unresolved,"root":shown.0,"db":shown.1,"graph_snapshot":snapshot}))
                 }
             }
         }
@@ -277,7 +287,7 @@ fn call(name: &str, args: &Value) -> Result<Value, String> {
         "impact" => read(args, |store, request, root| store.impact_json(root, request).map_err(s)),
         "patch_audit" => read(args, |store, request, root| {
             let mut report = store.audit_json(root, request).map_err(s)?;
-            report["root"] = json!(root.to_string_lossy());
+            report["root"] = json!(shown(request).0);
             report["db_bytes"] = json!(std::fs::metadata(db_path(request)).map_err(s)?.len());
             Ok(report)
         }),
@@ -290,7 +300,8 @@ fn call(name: &str, args: &Value) -> Result<Value, String> {
             } else {
                 (false, 0)
             };
-            Ok(json!({"root":root,"db":db,"verified":verified,"workspace_revision":committed,"committed_revision":committed,"failure":Value::Null}))
+            let shown = shown(args);
+            Ok(json!({"root":shown.0,"db":shown.1,"verified":verified,"workspace_revision":committed,"committed_revision":committed,"failure":Value::Null}))
         }
         other => Err(format!("unknown_graph_tool:{other}")),
     }

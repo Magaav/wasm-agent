@@ -12,6 +12,8 @@ fn component_mounts_and_answers_map_back_to_host_paths() {
     assert_eq!(answer["items"][0]["path"], "a.lua", "relative selectors are untouched");
     assert_eq!(answer["items"][0]["detail"], "/graph/rootless", "only whole path prefixes map");
     assert!(indexable("x/a.lua") && indexable("go.mod") && indexable("A.TS") && !indexable("marker.txt") && !indexable("a.db-journal"));
+    assert_eq!(mountable(r"\\?\C:\Users\x"), r"C:\Users\x");
+    assert_eq!(mountable("/srv/tree"), "/srv/tree");
     assert!(excluded(Path::new("rust/target/x.rs")) && !excluded(Path::new("rust/src/x.rs")));
 }
 
@@ -32,14 +34,14 @@ impl Drop for Fixture {fn drop(&mut self) {let _=std::fs::remove_dir_all(&self.0
 fn explicit_workspace_has_stable_separate_cache_without_touching_runtime_index() {
     let fixture=Fixture::new();let config=fixture.config();
     let (runtime,db)=locations(&json!({}),Some(&config)).unwrap();
-    assert_eq!(runtime,config.root.canonicalize().unwrap());assert_eq!(db,config.db);
+    assert_eq!(runtime,config.root.canonicalize().unwrap());assert_eq!(db,db_dir(&config.db).join(DB_FILE));
     let options=json!({"root":fixture.0.join("owned")});
     let (owned,cache)=locations(&options,Some(&config)).unwrap();
     assert_ne!(owned,runtime);assert_ne!(cache,db);
-    assert_eq!(cache.parent().unwrap(),config.db.with_extension("roots"));
+    assert_eq!(cache.parent().unwrap().parent().unwrap(),config.db.with_extension("roots"));
     let alias=json!({"root":fixture.0.join("owned").join(".")});
     assert_eq!(locations(&alias,Some(&config)).unwrap(),(owned,cache));
-    assert!(!db.exists()); // Resolution itself has no index/write effect.
+    assert!(!db.exists() && !db.parent().unwrap().exists()); // Resolution itself has no index/write effect.
 }
 
 #[test]
@@ -48,7 +50,7 @@ fn explicit_database_override_is_preserved_with_verified_root() {
     let options=json!({"root":fixture.0.join("owned"),"db":db});
     assert_eq!(locations(&options,Some(&config)).unwrap().1,db);
     assert_eq!(locations(&options,None).unwrap().1,db);
-    assert_eq!(locations(&json!({"root":config.root}),Some(&config)).unwrap().1,config.db);
+    assert_eq!(locations(&json!({"root":config.root}),Some(&config)).unwrap().1,db_dir(&config.db).join(DB_FILE));
 }
 
 #[test]

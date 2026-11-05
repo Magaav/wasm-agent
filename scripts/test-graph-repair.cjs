@@ -12,7 +12,7 @@ function run(program,args,cwd=repo){const r=cp.spawnSync(program,args,{cwd,encod
 const real=path.join(out,'real104');run('git',['clone','--quiet','--shared','--no-checkout',repo,real]);run('git',['checkout','--quiet','476ccb7586f5b3cd5aae2c6783e8bc681ac06c3a'],real);
 const patch=path.join(out,'real104.patch');fs.writeFileSync(patch,run('git',['diff','--binary','476ccb7586f5b3cd5aae2c6783e8bc681ac06c3a','fdc79bfc8bd78ab5e04ab3e925bb92a7dd8fffa5']));run('git',['apply','--index',patch],real);
 fs.writeFileSync(path.join(out,'real104-index-before.txt'),run('git',['ls-files','--stage'],real));
-const envBase=Object.fromEntries(Object.entries(process.env).filter(([k])=>!/^(WA_|WASM_AGENT_|OPENAI_|OPENCODE_|ANTHROPIC_|PI_)/i.test(k)));
+const envBase=Object.fromEntries(Object.entries(process.env).filter(([k])=>k==='WA_COMPONENTS_DIR'||!/^(WA_|WASM_AGENT_|OPENAI_|OPENCODE_|ANTHROPIC_|PI_)/i.test(k)));
 for(const mode of ['source','embedded']){
  const home=path.join(out,mode,'home');fs.mkdirSync(home,{recursive:true});
  const env={...envBase,WASM_AGENT_HOME:home,WA_SCRIPT:path.join(repo,'scripts/test-graph-repair.lua'),WA_REPAIR_ROOT:path.join(out,mode,'fixtures'),WA_REPAIR_REAL104:mode==='source'?real:'',WA_GRAPH_ROOT:path.join(out,mode,'fixtures'),WA_GRAPH_WATCH:'0',WASM_AGENT_MANAGED:'0',WASM_AGENT_RENDEZVOUS:'',WASM_AGENT_RELAY:'',WASM_AGENT_LLM_BASE_URL:'http://127.0.0.1:1',WASM_AGENT_LLM_API_KEY:'fixture-only'};

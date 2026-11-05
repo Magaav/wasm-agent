@@ -57,7 +57,8 @@ fn opt_str(options: &Value, key: &str) -> Option<String> {
 }
 
 // Select root and DB together. Workspace caches are on-demand and a root never replaces another
-// root's derived snapshot.
+// root's derived snapshot. An explicit `db` is used exactly (its directory is mounted for the
+// component); the configured and derived ones live in a private `P.d/` directory.
 fn locations(options: &Value, config: Option<&Config>) -> Result<(PathBuf, PathBuf), String> {
     let root = opt_str(options, "root").map(PathBuf::from)
         .or_else(|| config.map(|c| c.root.clone()))
@@ -76,7 +77,7 @@ fn locations(options: &Value, config: Option<&Config>) -> Result<(PathBuf, PathB
         let key: String = digest.as_ref().iter().map(|byte| format!("{byte:02x}")).collect();
         config.db.with_extension("roots").join(format!("{key}.db"))
     };
-    Ok((root, db))
+    Ok((root, db_dir(&db).join(DB_FILE)))
 }
 
 /// The component's private directory for a logical database path `P`: `P.d/`, holding `graph.db`.
@@ -130,7 +131,6 @@ fn scheduler() -> &'static Arc<Scheduler> {
     INSTANCE.get_or_init(|| {
         let scheduler = Arc::new(Scheduler { entries: Mutex::new(BTreeMap::new()), ready: Mutex::new(VecDeque::new()), wake: Condvar::new(), watcher: Mutex::new(None) });
         if std::env::var("WA_GRAPH_WATCH").map_or(true, |value| value != "0") {
-            use notify::Watcher as _;
             let weak = Arc::downgrade(&scheduler);
             match notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
                 if let Some(scheduler) = weak.upgrade() {scheduler.event(event);}
@@ -272,6 +272,15 @@ fn host_paths(value: &mut Value, root: &str, db: &str) {
     }
 }
 
+/// Windows canonical paths carry the verbatim prefix (`\\?\C:\...`); the mount takes the plain
+/// drive form. Answers still report the canonical root, as before.
+fn mountable(path: &str) -> String {
+    match path.strip_prefix(r"\\?\") {
+        Some(rest) if !rest.starts_with("UNC\\") => rest.to_string(),
+        _ => path.to_string(),
+    }
+}
+
 /// Run one tool of the graph component for `entry`, holding the entry's call lock (and the
 /// database directory's file lock, for other processes on the same node) until `deadline`.
 fn call(entry: &Arc<Entry>, tool: &str, mut arguments: Value, deadline: Instant) -> Value {
@@ -285,21 +294,25 @@ fn call(entry: &Arc<Entry>, tool: &str, mut arguments: Value, deadline: Instant)
         crate::serve::beat();
         std::thread::sleep(Duration::from_millis(10));
     };
-    let dir = db_dir(&entry.db);
+    let dir = entry.db.parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
+    let file = entry.db.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| DB_FILE.into());
     if let Err(error) = std::fs::create_dir_all(&dir) {return json!({"error": format!("graph_db_unavailable: {error}")});}
-    let lock = match std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(dir.join(".lock")) {
+    let lock = match std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(dir.join(format!("{file}.lock"))) {
         Ok(file) => file,
         Err(error) => return json!({"error": format!("graph_db_unavailable: {error}")}),
     };
     if let Err(error) = lock.lock() {return json!({"error": format!("graph_db_lock_failed: {error}")});}
     let remaining = deadline.saturating_duration_since(Instant::now()).as_secs().max(1);
     if !arguments.is_object() {arguments = json!({});}
-    arguments["db_file"] = json!(DB_FILE);
     let root_text = entry.root.to_string_lossy().into_owned();
     let dir_text = dir.to_string_lossy().into_owned();
+    arguments["db_file"] = json!(file);
+    arguments["_display_root"] = json!(root_text);
+    arguments["_display_db"] = json!(entry.db.to_string_lossy());
+    guest_changes(&mut arguments, &entry.root);
     let request = json!({
         "action": "call", "component": COMPONENT, "tool": tool, "arguments": arguments,
-        "dirs": [{"host": root_text, "guest": GUEST_ROOT, "write": false}, {"host": dir_text, "guest": GUEST_DB, "write": true}],
+        "dirs": [{"host": mountable(&root_text), "guest": GUEST_ROOT, "write": false}, {"host": mountable(&dir_text), "guest": GUEST_DB, "write": true}],
         "env": {"WA_GRAPH_PARSE_TIMEOUT_MS": "WA_GRAPH_PARSE_TIMEOUT_MS"},
         "timeout_seconds": remaining,
     });
@@ -319,9 +332,27 @@ fn call(entry: &Arc<Entry>, tool: &str, mut arguments: Value, deadline: Instant)
     result
 }
 
-/// Overlay the kernel's scheduling state on a status or snapshot object.
+/// A changeset may name files by absolute host path (native changesets do); inside the component
+/// the root is `/graph/root`. Paths outside the root stay as they are and are refused there.
+fn guest_changes(arguments: &mut Value, root: &Path) {
+    let Some(changes) = arguments.get_mut("changes").and_then(Value::as_array_mut) else {return};
+    for change in changes {
+        for key in ["path", "old_path"] {
+            let Some(raw) = change.get(key).and_then(Value::as_str) else {continue};
+            let path = Path::new(raw);
+            if !path.is_absolute() {continue;}
+            let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+            if let Ok(relative) = path.strip_prefix(root) {
+                change[key] = json!(format!("{GUEST_ROOT}/{}", relative.to_string_lossy().replace('\\', "/")));
+            }
+        }
+    }
+}
+
+/// Overlay the kernel's scheduling state on a full status or snapshot object (not on the compact
+/// `{required_revision, committed_revision, wait_ms}` a budgeted view already measured itself with).
 fn overlay(entry: &Entry, value: &mut Value) {
-    if !value.is_object() {return;}
+    if value.get("workspace_revision").is_none() {return;}
     let state = entry.state.lock().unwrap();
     value["queued"] = json!(state.queued);
     value["active"] = json!(state.active);
@@ -455,6 +486,7 @@ pub extern "C-unwind" fn graph_status(l: *mut LuaState) -> std::ffi::c_int {
         let (root, db) = locations(&options, CONFIG.get())?;
         let entry = scheduler().entry(&root, &db)?;
         let mut status = call(&entry, "status", json!({}), wait_deadline(&options));
+        status["workspace_revision"] = status.get("workspace_revision").cloned().unwrap_or(json!(0));
         if status.get("error").is_some() {return Ok(status);}
         let failure = entry.state.lock().unwrap().failure.clone();
         overlay(&entry, &mut status);
@@ -478,7 +510,7 @@ pub fn watch_configured() {
     if let Some(config) = CONFIG.get() {
         if let Ok(root) = config.root.canonicalize() {
             let scheduler = scheduler();
-            match scheduler.entry(&root, &config.db) {
+            match scheduler.entry(&root, &db_dir(&config.db).join(DB_FILE)) {
                 Ok(entry) => scheduler.enqueue(&entry),
                 Err(error) => eprintln!("graph_watch_unavailable: {error}"),
             }
