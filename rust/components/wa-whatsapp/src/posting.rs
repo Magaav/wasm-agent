@@ -9,6 +9,17 @@
 pub const PART_RUNES: usize = 2500;
 pub const HEADER: &str = "🤖 _Copiloto_";
 
+/// What the gate says about one source chat.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Gate {
+    /// Post the transcript (streaming or final).
+    Post,
+    /// Do not post: the chat is not in the allowlist (shadow mode).
+    Shadow,
+    /// Do not post: the chat is held (configuration, or an unproven source mutation).
+    Held,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct PostConfig {
     pub post: bool,
@@ -56,6 +67,19 @@ impl PostConfig {
 
     pub fn held(&self, chat: &str) -> bool {
         self.held.iter().any(|c| c == chat)
+    }
+
+    /// The whole posting gate for one source chat: the configuration allowlist, the configured
+    /// holds, and the holds derived from the wire (`holds`). Kept in one place so no caller can
+    /// post from a chat the component has held.
+    pub fn gate(&self, chat: &str, own_users: &[String], holds: &crate::holds::Holds) -> Gate {
+        if !self.allowed(chat, own_users) {
+            return Gate::Shadow;
+        }
+        if self.held(chat) || holds.posting_held(chat) {
+            return Gate::Held;
+        }
+        Gate::Post
     }
 
     /// Stream (post first, then edit) for a note this long?
@@ -132,6 +156,23 @@ mod tests {
         assert!(!cfg(serde_json::json!({"post_transcripts": false, "post_allow": ["*"]})).allowed("x@g.us", &own));
         assert!(cfg(serde_json::json!({"post_transcripts": true, "post_allow": ["*"]})).allowed("x@g.us", &own));
         assert!(cfg(serde_json::json!({"post_transcripts": true, "post_allow": ["1@g.us"]})).allowed("1@g.us", &own));
+    }
+
+    #[test]
+    fn the_gate_composes_the_allowlist_with_the_configured_and_derived_holds() {
+        let own = vec!["5519994939204".to_string()];
+        let mut holds = crate::holds::Holds::new();
+        let mut gate_cfg = cfg(serde_json::json!({"post_transcripts": true, "post_allow": ["own"]}));
+        assert_eq!(gate_cfg.gate("5519994939204@s.whatsapp.net", &own, &holds), Gate::Post);
+        assert_eq!(gate_cfg.gate("5511888@s.whatsapp.net", &own, &holds), Gate::Shadow, "not in the allowlist");
+        gate_cfg.held = vec!["5519994939204@s.whatsapp.net".to_string()];
+        assert_eq!(gate_cfg.gate("5519994939204@s.whatsapp.net", &own, &holds), Gate::Held, "configured hold");
+        gate_cfg.held.clear();
+        // An unproven revoke in the chat holds posting; a proven one fences only its target.
+        holds.apply(&crate::holds::Mutation::revoke("5519994939204@s.whatsapp.net", "MSG1"), None);
+        assert_eq!(gate_cfg.gate("5519994939204@s.whatsapp.net", &own, &holds), Gate::Held);
+        // Nothing about a hold makes posting possible: the allowlist is still required.
+        assert_eq!(cfg(serde_json::json!({"post_transcripts": true, "post_allow": []})).gate("5519994939204@s.whatsapp.net", &own, &holds), Gate::Shadow);
     }
 
     #[test]

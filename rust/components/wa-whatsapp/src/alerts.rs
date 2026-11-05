@@ -34,6 +34,10 @@ impl AlertBook {
         self.pending.len()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.pending.is_empty()
+    }
+
     /// The message to send now, if one is due: something pending and a minute since the last one.
     /// Alerts older than 6 h are dropped unsent. Call `sent` after a successful send.
     pub fn due(&mut self, now: i64) -> Option<String> {
@@ -69,7 +73,7 @@ fn label(kind: &str) -> &str {
 }
 
 pub fn chat_label(chat: &str, title: &str) -> String {
-    let title: String = title.replace('\n', " ").trim().to_string();
+    let title: String = title.replace(['\n', '\r'], " ").trim().to_string();
     let title = if title.chars().count() > 40 { title.chars().take(40).collect::<String>() + "…" } else { title };
     let kind = if chat.ends_with("@g.us") { "grupo" } else { "contato" };
     if title.is_empty() {
@@ -77,6 +81,19 @@ pub fn chat_label(chat: &str, title: &str) -> String {
     } else {
         format!("{kind} {title}")
     }
+}
+
+/// The alert title for a source chat, from what the envelope and the group metadata offered.
+/// A group is named by its `subject` (the metadata title, or the subject the message carried).
+/// When a group has no known subject the title stays empty on purpose: in a group the envelope's
+/// push name is the *sender's*, and naming the sender would point the operator at the wrong chat.
+/// A direct chat is named by the contact's push name.
+pub fn title_of(is_group: bool, push_name: &str, subject: Option<&str>) -> String {
+    let clean = |s: &str| s.replace(['\n', '\r', '\t'], " ").trim().to_string();
+    if is_group {
+        return subject.map(clean).unwrap_or_default();
+    }
+    clean(push_name)
 }
 
 /// "02/01 15:04" in America/Sao_Paulo (UTC-3; Brazil has had no daylight saving time since 2019).
@@ -158,5 +175,20 @@ mod tests {
         assert_eq!(chat_label("1203@g.us", "Família"), "grupo Família");
         // 2026-11-05 21:30 UTC = 18:30 in São Paulo.
         assert_eq!(sao_paulo(1_793_914_200_000), "05/11 18:30");
+    }
+
+    #[test]
+    fn a_group_alert_names_the_group_not_the_sender() {
+        assert_eq!(title_of(true, "Maria", Some("Família")), "Família");
+        // No subject known: the envelope's push name is the sender's, so it is not used.
+        assert_eq!(title_of(true, "Maria", None), "");
+        assert_eq!(chat_label("1203@g.us", &title_of(true, "Maria", None)), "grupo 1203");
+        assert_eq!(title_of(false, "Maria", None), "Maria");
+        // A title that carries a newline or tabs cannot break the log's lines apart.
+        assert_eq!(title_of(true, "Maria", Some("Time\n  de\tdomingo ")), "Time   de domingo");
+        let long = "g".repeat(60);
+        let label = chat_label("1203@g.us", &title_of(true, "x", Some(&long)));
+        assert_eq!(label.chars().count(), "grupo ".len() + 40 + 1, "a long subject is truncated, not wrapped");
+        assert!(label.ends_with('…'));
     }
 }

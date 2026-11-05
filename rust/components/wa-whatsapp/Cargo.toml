@@ -21,7 +21,7 @@ bytes = "1"
 futures = { version = "0.3", default-features = false, features = ["std", "executor"] }
 serde_json = "1"
 wit-bindgen = "0.63"
-serde = "1"
+serde = { version = "1", features = ["derive"] }
 wacore-appstate = { version = "=0.7.0", default-features = false }
 log = { version = "0.4", features = ["std"] }
 
