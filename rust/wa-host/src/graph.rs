@@ -96,6 +96,20 @@ fn indexable(path: &str) -> bool {
     matches!(ext.as_str(), "go" | "rs" | "lua" | "sh" | "bash" | "ps1" | "psm1" | "md" | "markdown" | "js" | "mjs" | "cjs" | "jsx" | "ts" | "mts" | "cts" | "tsx")
 }
 
+/// Names the database owns inside its directory: the database, SQLite's rollback-journal siblings
+/// (`-wal`, `-shm`, `-journal`) and its dot-file lock (`<db>.lock`), plus the kernel's own
+/// cross-process lock (`.<db>.lock`). None of them is source. When the `db` option names a path
+/// under the indexed root - `scripts/test-graph-freshness.lua` does exactly that - every index run
+/// writes them inside the watched tree, and counting those writes as edits makes one refresh
+/// schedule the next forever (measured 05/11: `dirty_hint`/`active` never settled, so `ready` never
+/// came back).
+fn database_artifact(name: &str, db_file: &str) -> bool {
+    name == db_file
+        || name == format!(".{db_file}.lock")
+        || name == format!("{db_file}.lock")
+        || matches!(name.strip_prefix(db_file), Some("-wal" | "-shm" | "-journal"))
+}
+
 fn excluded(relative: &Path) -> bool {
     relative.components().any(|part| matches!(part.as_os_str().to_str(), Some(".git" | "target" | "node_modules" | ".wa-graph" | "releases" | ".orca-worktree-trash" | "vendor" | ".cache")))
 }
@@ -198,7 +212,10 @@ impl Scheduler {
         if event.as_ref().map_or(false, ignored) {return;}
         let normalize = |path: &Path| {let text = path.to_string_lossy().replace('\\', "/").trim_start_matches("//?/").to_string(); if cfg!(windows) {text.to_lowercase()} else {text}};
         let entries: Vec<_> = self.entries.lock().unwrap().values().filter(|entry| {
+            let db_file = entry.db.file_name().and_then(|name| name.to_str()).unwrap_or(DB_FILE).to_string();
             event.as_ref().map_or(true, |event| event.paths.is_empty() || event.paths.iter().any(|path| {
+                // The database's own files are not source (see `database_artifact`).
+                if path.file_name().and_then(|name| name.to_str()).map_or(false, |name| database_artifact(name, &db_file)) {return false;}
                 let root = normalize(&entry.root);
                 let path = normalize(path);
                 path == root || path.starts_with(&(root + "/"))
@@ -297,11 +314,27 @@ fn call(entry: &Arc<Entry>, tool: &str, mut arguments: Value, deadline: Instant)
     let dir = entry.db.parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
     let file = entry.db.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| DB_FILE.into());
     if let Err(error) = std::fs::create_dir_all(&dir) {return json!({"error": format!("graph_db_unavailable: {error}")});}
-    let lock = match std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(dir.join(format!("{file}.lock"))) {
+    // The cross-process lock is a file beside the database, and its NAME is load-bearing: SQLite in
+    // the component locks through its dot-file style, `%s.lock` beside the database (measured
+    // 05/11: a pre-existing `<db>.lock` made every write answer `database is locked` for the whole
+    // busy timeout). The kernel's file is therefore dot-prefixed, so it can never be mistaken for
+    // the guest's own lock.
+    let lock = match std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(dir.join(format!(".{file}.lock"))) {
         Ok(file) => file,
         Err(error) => return json!({"error": format!("graph_db_unavailable: {error}")}),
     };
     if let Err(error) = lock.lock() {return json!({"error": format!("graph_db_lock_failed: {error}")});}
+    // A component run killed mid-transaction (its deadline, or a node stop) leaves the guest's
+    // dot-file lock behind, and every later write then answers `database is locked` for the whole
+    // busy timeout - a permanently broken graph. This lock proves no graph call on this database is
+    // running: every one of them, foreground and background, is behind it. A `<db>.lock` found here
+    // therefore has no owner, so it is removed. Never the kernel's own `.<db>.lock`, which is this
+    // handle.
+    let stale = dir.join(format!("{file}.lock"));
+    if stale.symlink_metadata().is_ok() {
+        let removed = if stale.is_dir() {std::fs::remove_dir_all(&stale)} else {std::fs::remove_file(&stale)};
+        if removed.is_ok() {eprintln!("graph_db_stale_lock_removed file={file}");}
+    }
     let remaining = deadline.saturating_duration_since(Instant::now()).as_secs().max(1);
     if !arguments.is_object() {arguments = json!({});}
     let root_text = entry.root.to_string_lossy().into_owned();
@@ -478,8 +511,11 @@ pub extern "C-unwind" fn graph_impact(l: *mut LuaState) -> std::ffi::c_int {
 
 /// host.graph_status(opts_json?) -> {root, db, ready, ...} | {error}
 ///
-/// `ready` means the graph matches every indexed file's current bytes and no refresh is pending,
-/// not merely that a DB exists. Status verifies only; it never indexes.
+/// `ready` is the component's own verdict: the committed snapshot holds every indexed file's
+/// current bytes, compared byte for byte. It is not "no refresh is pending" - every call admits
+/// content before it answers, so a queued warm-up cannot make an answer stale, and a freshly
+/// written file is not ready until a call has admitted it. `queued`/`active`/`dirty_hint` report
+/// that warm-up separately. Status verifies only; it never indexes.
 pub extern "C-unwind" fn graph_status(l: *mut LuaState) -> std::ffi::c_int {
     let options = json_arg(l, 1);
     let outcome = (|| -> Result<Value, String> {
@@ -490,8 +526,7 @@ pub extern "C-unwind" fn graph_status(l: *mut LuaState) -> std::ffi::c_int {
         if status.get("error").is_some() {return Ok(status);}
         let failure = entry.state.lock().unwrap().failure.clone();
         overlay(&entry, &mut status);
-        let verified = status["verified"] == json!(true);
-        status["ready"] = json!(verified && status["dirty_hint"] != true && status["queued"] != true && status["active"] != true);
+        status["ready"] = json!(status["verified"] == json!(true));
         status["failure"] = json!(failure);
         Ok(status)
     })();

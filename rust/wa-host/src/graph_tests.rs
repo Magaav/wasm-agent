@@ -17,6 +17,18 @@ fn component_mounts_and_answers_map_back_to_host_paths() {
     assert!(excluded(Path::new("rust/target/x.rs")) && !excluded(Path::new("rust/src/x.rs")));
 }
 
+#[test]
+fn the_databases_own_files_are_never_mistaken_for_source() {
+    // The guest's SQLite writes these beside the database. With `db` inside the root they land in
+    // the watched tree, and treating them as edits made one refresh schedule the next forever.
+    for name in ["graph.db", "graph.db-wal", "graph.db-shm", "graph.db-journal", "graph.db.lock", ".graph.db.lock"] {
+        assert!(database_artifact(name, "graph.db"), "{name} is the database's own");
+    }
+    for name in ["graph.db.d", "graph.dbs", "a.rs", "graph.db.lock2", "notes.txt"] {
+        assert!(!database_artifact(name, "graph.db"), "{name} is not");
+    }
+}
+
 struct Fixture(PathBuf);
 impl Fixture {
     fn new() -> Self {
