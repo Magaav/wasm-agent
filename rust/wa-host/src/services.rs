@@ -351,9 +351,35 @@ fn linker(engine: &wasmtime::Engine) -> Result<Linker<State>> {
         let mut out = Vec::new();
         {
             let Some(db) = kv(&mut c) else { return crate::service_io::REFUSED };
-            let Ok(mut stmt) = db.prepare("SELECT k,v FROM kv WHERE substr(k,1,?2)=?1 ORDER BY k") else { return -1 };
-            let Ok(rows) = stmt.query_map(rusqlite::params![p, p.len() as i64], |r| Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, Vec<u8>>(1)?))) else { return -1 };
-            for (k, v) in rows.flatten() {
+            // The empty prefix is a plain full scan (no comparison against an empty blob).
+            let sql = if p.is_empty() { "SELECT k,v FROM kv WHERE ?2 = 0 OR ?1 IS NULL ORDER BY k" } else { "SELECT k,v FROM kv WHERE substr(k,1,?2)=?1 ORDER BY k" };
+            let mut stmt = match db.prepare(sql) {
+                Ok(stmt) => stmt,
+                Err(error) => {
+                    eprintln!("[service] wa_kv dump prepare: {error}");
+                    return -1;
+                }
+            };
+            let rows = match stmt.query_map(rusqlite::params![p, p.len() as i64], |r| Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, Vec<u8>>(1)?))) {
+                Ok(rows) => rows,
+                Err(error) => {
+                    eprintln!("[service] wa_kv dump query: {error}");
+                    return -1;
+                }
+            };
+            let (mut count, mut failed) = (0usize, 0usize);
+            for row in rows {
+                let (k, v) = match row {
+                    Ok(row) => row,
+                    Err(error) => {
+                        if failed == 0 {
+                            eprintln!("[service] wa_kv dump row: {error}");
+                        }
+                        failed += 1;
+                        continue;
+                    }
+                };
+                count += 1;
                 out.extend((k.len() as u32).to_le_bytes());
                 out.extend(&k);
                 out.extend((v.len() as u32).to_le_bytes());
@@ -362,6 +388,7 @@ fn linker(engine: &wasmtime::Engine) -> Result<Linker<State>> {
                     return -1;
                 }
             }
+            eprintln!("[service] wa_kv dump: {count} rows, {failed} unreadable, {} bytes", out.len());
         }
         let n = out.len() as i32;
         c.data_mut().kv_buf = out;

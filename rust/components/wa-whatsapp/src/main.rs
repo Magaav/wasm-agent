@@ -329,7 +329,14 @@ fn main() {
                 return;
             }
         };
+        // A paired device on disk must never be replaced by a fresh one, even if the replay failed:
+        // check the stored record itself, not only what the replay produced.
+        let stored_paired = store::stored_device_paired();
         let paired = backend.load().await.ok().flatten().is_some_and(|d| d.pn.is_some());
+        if stored_paired && !paired {
+            say!("store: a paired device is on disk but the replay did not restore it; refusing to pair over it");
+            return;
+        }
         let pair_phone = if paired { None } else { pair_phone };
         say!("device: {}", if paired { "restored (no pairing needed)" } else { "new (pairing)" });
         let mut builder = Bot::builder()

@@ -64,6 +64,11 @@ fn unhex(text: &str) -> Option<Vec<u8>> {
     (0..text.len()).step_by(2).map(|i| u8::from_str_radix(text.get(i..i + 2)?, 16).ok()).collect()
 }
 
+/// Whether the stored device record (read directly, independent of the replay) is a paired one.
+pub fn stored_device_paired() -> bool {
+    get("dev").and_then(|v| serde_json::from_slice::<serde_json::Value>(&v).ok()).is_some_and(|d| !d["pn"].is_null())
+}
+
 pub struct PersistentBackend {
     inner: InMemoryBackend,
 }
