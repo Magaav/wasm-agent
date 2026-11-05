@@ -86,6 +86,9 @@ fn registry() -> &'static Mutex<HashMap<String, Handle>> {
 struct State {
     wasi: WasiP1Ctx,
     socks: Vec<Option<TcpStream>>,
+    ws: Vec<Option<crate::service_io::WsConn>>,
+    http: HashMap<i32, crate::service_io::HttpState>,
+    next_http: i32,
     net: Vec<String>,
     shared: Arc<Shared>,
     limits: StoreLimits,
@@ -179,6 +182,117 @@ fn linker(engine: &wasmtime::Engine) -> Result<Linker<State>> {
         }
         0
     })?;
+    // Host websocket + HTTP (service_io.rs): TLS in the host, frames and bodies across the boundary.
+    fn read_bytes(c: &mut Caller<'_, State>, ptr: i32, len: i32, max: usize) -> Option<Vec<u8>> {
+        if len < 0 || len as usize > max {
+            return None;
+        }
+        let mem = memory(c)?;
+        let mut buf = vec![0u8; len as usize];
+        mem.read(&*c, ptr as usize, &mut buf).ok()?;
+        Some(buf)
+    }
+    fn write_bytes(c: &mut Caller<'_, State>, ptr: i32, data: &[u8]) -> bool {
+        memory(c).is_some_and(|mem| mem.write(&mut *c, ptr as usize, data).is_ok())
+    }
+    linker.func_wrap("wa_ws", "connect", |mut c: Caller<'_, State>, up: i32, ul: i32, op: i32, ol: i32| -> i32 {
+        let Some(url) = read_bytes(&mut c, up, ul, 2048).and_then(|b| String::from_utf8(b).ok()) else { return -1 };
+        let origin = if ol > 0 { read_bytes(&mut c, op, ol, 512).and_then(|b| String::from_utf8(b).ok()) } else { None };
+        match crate::service_io::url_authority(&url) {
+            Some(addr) if dial_allowed(&c.data().net, &addr) => {}
+            _ => return crate::service_io::REFUSED,
+        }
+        if c.data().ws.iter().filter(|w| w.is_some()).count() >= 8 {
+            return -1;
+        }
+        match crate::service_io::WsConn::open(&url, origin.as_deref()) {
+            Ok(conn) => {
+                let state = c.data_mut();
+                if let Some(slot) = state.ws.iter().position(Option::is_none) {
+                    state.ws[slot] = Some(conn);
+                    slot as i32
+                } else {
+                    state.ws.push(Some(conn));
+                    (state.ws.len() - 1) as i32
+                }
+            }
+            Err(error) => {
+                eprintln!("[service] wa_ws connect {url}: {error}");
+                -1
+            }
+        }
+    })?;
+    linker.func_wrap("wa_ws", "next", |mut c: Caller<'_, State>, h: i32| -> i32 {
+        match c.data_mut().ws.get_mut(h as usize).and_then(Option::as_mut) {
+            Some(conn) => conn.next(),
+            None => crate::service_io::CLOSED,
+        }
+    })?;
+    linker.func_wrap("wa_ws", "take", |mut c: Caller<'_, State>, h: i32, ptr: i32, len: i32| -> i32 {
+        let data = match c.data_mut().ws.get_mut(h as usize).and_then(Option::as_mut) {
+            Some(conn) => match conn.take() {
+                Some(data) if data.len() <= len.max(0) as usize => data,
+                Some(_) => return -1,
+                None => return crate::service_io::AGAIN,
+            },
+            None => return crate::service_io::CLOSED,
+        };
+        if write_bytes(&mut c, ptr, &data) { data.len() as i32 } else { -1 }
+    })?;
+    linker.func_wrap("wa_ws", "send", |mut c: Caller<'_, State>, h: i32, ptr: i32, len: i32| -> i32 {
+        let Some(data) = read_bytes(&mut c, ptr, len, 32 << 20) else { return -1 };
+        match c.data().ws.get(h as usize).and_then(Option::as_ref) {
+            Some(conn) => conn.send(data),
+            None => crate::service_io::CLOSED,
+        }
+    })?;
+    linker.func_wrap("wa_ws", "close", |mut c: Caller<'_, State>, h: i32| -> i32 {
+        if let Some(slot) = c.data_mut().ws.get_mut(h as usize) {
+            *slot = None;
+        }
+        0
+    })?;
+    linker.func_wrap("wa_http", "start", |mut c: Caller<'_, State>, mp: i32, ml: i32, bp: i32, bl: i32| -> i32 {
+        let Some(meta) = read_bytes(&mut c, mp, ml, 64 << 10).and_then(|b| serde_json::from_slice::<Value>(&b).ok()) else { return -1 };
+        let Some(body) = read_bytes(&mut c, bp, bl, 96 << 20) else { return -1 };
+        let allowed = meta.get("url").and_then(Value::as_str).and_then(crate::service_io::url_authority).is_some_and(|a| dial_allowed(&c.data().net, &a));
+        if !allowed {
+            return crate::service_io::REFUSED;
+        }
+        if c.data().http.len() >= 32 {
+            return -1;
+        }
+        match crate::service_io::http_start(&meta, body) {
+            Ok(state) => {
+                let s = c.data_mut();
+                let id = s.next_http;
+                s.next_http = s.next_http.wrapping_add(1).max(1);
+                s.http.insert(id, state);
+                id
+            }
+            Err(_) => -1,
+        }
+    })?;
+    linker.func_wrap("wa_http", "poll", |mut c: Caller<'_, State>, id: i32| -> i32 {
+        c.data_mut().http.get_mut(&id).map(|s| s.poll()).unwrap_or(-1)
+    })?;
+    linker.func_wrap("wa_http", "body_len", |c: Caller<'_, State>, id: i32| -> i32 {
+        match c.data().http.get(&id) {
+            Some(crate::service_io::HttpState::Done(_, body)) => body.len() as i32,
+            _ => -1,
+        }
+    })?;
+    linker.func_wrap("wa_http", "body", |mut c: Caller<'_, State>, id: i32, ptr: i32, len: i32| -> i32 {
+        let body = match c.data().http.get(&id) {
+            Some(crate::service_io::HttpState::Done(_, body)) if body.len() <= len.max(0) as usize => body.clone(),
+            _ => return -1,
+        };
+        if write_bytes(&mut c, ptr, &body) { body.len() as i32 } else { -1 }
+    })?;
+    linker.func_wrap("wa_http", "free", |mut c: Caller<'_, State>, id: i32| -> i32 {
+        c.data_mut().http.remove(&id);
+        0
+    })?;
     linker.func_wrap("wa_ctl", "stopping", |c: Caller<'_, State>| -> i32 { c.data().shared.stop.load(Ordering::Relaxed) as i32 })?;
     Ok(linker)
 }
@@ -229,7 +343,7 @@ fn run_once(installed: &Installed, grant: &Grant, module: &Module, shared: &Arc<
     }
     let memory_mb = installed.manifest.get("limits").and_then(|l| l.get("memory_mb")).and_then(Value::as_u64).unwrap_or(DEFAULT_MEMORY_MB).clamp(16, 4096);
     let limits = StoreLimitsBuilder::new().memory_size((memory_mb as usize) << 20).instances(16).build();
-    let state = State { wasi: builder.build_p1(), socks: Vec::new(), net: grant.net.clone(), shared: shared.clone(), limits };
+    let state = State { wasi: builder.build_p1(), socks: Vec::new(), ws: Vec::new(), http: HashMap::new(), next_http: 1, net: grant.net.clone(), shared: shared.clone(), limits };
     let mut store = Store::new(engine, state);
     store.limiter(|s| &mut s.limits);
     // Never preempted while running; after a stop request it gets STOP_GRACE to exit on its own

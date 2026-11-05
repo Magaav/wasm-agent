@@ -15,10 +15,10 @@ its manifest declares and the node grants.
 
 | piece | where | why |
 | --- | --- | --- |
-| protocol (whatsmeow), journal logic, holds/fences, outbox, freshness, alerts | **guest** (Go → wasip1) | all of `connectors/whatsapp` except the items below; it compiles with one upstream patch |
-| TLS | guest (pure Go, bundled roots) | the host never sees plaintext |
-| TCP | **host**, `net` grant | exact `host:port` list; non-blocking imports (spike: 101 in ~220 ms) |
-| SQLite (journal + device keys) | **host**, `storage` grant | a `database/sql` driver in the guest over host imports to a host-owned file in the component's own state dir; keeps the connector's SQL unchanged |
+| protocol, journal logic, holds/fences, outbox, freshness, alerts | **guest** (Rust → wasip1, `rust/components/wa-whatsapp`) | protocol = the `whatsapp-rust` crate (MIT; its core compiles to wasip1/wasip2 with defaults off, runtime/transport/HTTP/store injected); our logic rewritten lean on top |
+| TLS + websocket | **host** (`wa_ws`, rustls/ring already in the tree) | the guest speaks frames; the WhatsApp Noise session inside them stays end-to-end in the guest |
+| media HTTP | **host** (`wa_http`), `net` grant | 4xx/5xx returned as statuses (whatsapp-rust's HttpClient contract) |
+| store (device keys, sessions, journal) | **host**, `storage` grant | whatsapp-rust `Backend` over host storage in the component's own state dir (milestone 1 uses its in-memory backend) |
 | speech-to-text, OCR | **host**, `stt` / `ocr` capability | native faster-whisper/RapidOCR; wasm `small` measured ~17x slower (benchmarks/whisper-wasm). A node without them answers `unavailable` and the guest records it, as today |
 | HTTP API for MCP/operator | host-routed | the guest serves its loopback API through a host listener grant, or the MCP component calls the guest directly through the host (no TCP hop) |
 | supervision, restart, logs | **host** | the sentinel model: start at boot, restart on trap with backoff, stop on uninstall |
@@ -65,15 +65,21 @@ Example (a definition the `services` tool stores, then `enable`):
  "file_env":{"WA_STATE_KEY":"/home/ubuntu/.local/state/wa-whatsapp/api.token"},"config":{"language":"pt"}}
 ```
 
+## Decision 05/11: Rust, not Go
+
+The spike proved whatsmeow-in-Go reaches WhatsApp from wasip1, but the owner chose the lightest
+result: no Go runtime/GC in the guest (11-27 MB), protocol from `whatsapp-rust`, TLS/websocket/HTTP in
+the host. The Go spike stays in `benchmarks/service-component-spike` as evidence.
+
 ## Order of work
 
 1. ~~**Host: service runner**~~ (built, above) — wasip1 core modules (wasmtime-wasi p1) with `wa_sock` (from the spike,
    hardened: allowlist with wildcards, per-service socket table, limits), start/stop/restart, status in
    `host.components()`.
 2. **Host: `wa_sql`** — SQLite through rusqlite, one directory per service, quota.
-3. **Guest: connector build tag** — `//go:build wasip1` files: dialer via `SetWebsocketHTTPClient`,
-   SQL driver over `wa_sql`, STT/OCR over host capability; the native build unchanged. Upstream the
-   `exhttp` patch.
+3. **Guest: `wa-whatsapp`** (Rust) — whatsapp-rust with host runtime/transport (`wa_ws`)/HTTP
+   (`wa_http`); milestone 1 pair/connect/receive; then a host-backed store, STT/OCR host capabilities
+   and the journal/queue/reply/freshness/log logic.
 4. **Pairing and cutover** on a test account, then openclaw with the same backup/rollback as today.
 
 Open questions, unverified until built: whatsmeow's media download/upload paths under the injected

@@ -1,0 +1,10 @@
+{
+  "name": "wa-whatsapp",
+  "kind": "service",
+  "target": "wasm32-wasip1",
+  "description": "WhatsApp linked-device client (whatsapp-rust) with host websocket/HTTP; milestone 1: pair, connect, receive",
+  "capabilities": {
+    "net": ["web.whatsapp.com:443", "*.whatsapp.net:443", "*.whatsapp.com:443"]
+  },
+  "limits": {"memory_mb": 256}
+}

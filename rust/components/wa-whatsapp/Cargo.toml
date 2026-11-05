@@ -1,0 +1,24 @@
+[package]
+name = "wa-whatsapp"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# WhatsApp linked-device service component (wasm32-wasip1): whatsapp-rust's protocol core with the
+# runtime, transport, HTTP and store supplied by the host (docs/SERVICE-COMPONENTS.md).
+[workspace]
+
+[dependencies]
+whatsapp-rust = { version = "=0.7.0", default-features = false }
+wacore = { version = "=0.7.0", default-features = false }
+async-trait = "0.1"
+async-channel = "2"
+anyhow = "1"
+bytes = "1"
+futures = { version = "0.3", default-features = false, features = ["std", "executor"] }
+serde_json = "1"
+
+[profile.release]
+opt-level = "s"
+strip = true
+# LTO off while iterating (a full-LTO build of this graph takes >25 min); turn it on for releases.
