@@ -88,4 +88,5 @@ MCP components are one request per run. The WhatsApp connector itself (`connecto
 a **long-lived** component: a persistent socket, scoped storage, timers, and a host-provided
 speech-to-text capability (native faster-whisper stays outside wasm: the Candle-in-wasm `small`
 model measured ~17x slower, `benchmarks/whisper-wasm`). That is the next host class on this same
-manifest/grant model; it is not built yet.
+manifest/grant model; it is not built yet. Design and the feasibility spike (whatsmeow compiles to
+wasip1; a guest reached WhatsApp's websocket through host TCP): [SERVICE-COMPONENTS.md](SERVICE-COMPONENTS.md).

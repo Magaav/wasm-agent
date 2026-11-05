@@ -1,0 +1,8 @@
+//go:build wasip1
+
+package exhttp
+
+import "syscall"
+
+// wasip1 has no EHOSTDOWN; an errno that can never match.
+const hostDown = syscall.Errno(^uint32(0) >> 1)

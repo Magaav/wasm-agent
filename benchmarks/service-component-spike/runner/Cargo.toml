@@ -1,0 +1,9 @@
+[package]
+name = "sockrunner"
+version = "0.1.0"
+edition = "2021"
+[workspace]
+[dependencies]
+wasmtime = { version = "37", default-features = false, features = ["cranelift", "runtime", "std"] }
+wasmtime-wasi = { version = "37", default-features = false, features = ["p1"] }
+anyhow = "1"

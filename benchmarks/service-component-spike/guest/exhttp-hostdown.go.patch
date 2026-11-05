@@ -1,0 +1,7 @@
+//go:build !wasip1
+
+package exhttp
+
+import "syscall"
+
+const hostDown = syscall.EHOSTDOWN
