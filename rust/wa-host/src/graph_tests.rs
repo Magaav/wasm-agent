@@ -1,22 +1,18 @@
 use super::*;
 
 #[test]
-fn graph_reads_automatically_wait_for_a_frozen_committed_revision() {
-    let fixture=Fixture::new();let root=fixture.0.join("owned");let db=fixture.0.join("read.db");
-    let file=root.join("source.lua");std::fs::write(&file,"function original() return 1 end\n").unwrap();
-    let first=read_snapshot(&root,&db,&json!({"with_snapshot":true}),|store,_,_|store.query_json("original",10).map_err(|e|e.to_string())).unwrap();
-    assert!(db.exists());assert_eq!(first["items"][0]["name"],"original");
-    let revision=first["graph_snapshot"]["required_revision"].as_u64().unwrap();
-    assert!(revision>0);assert!(first["graph_snapshot"]["committed_revision"].as_u64().unwrap()>=revision);
-    std::fs::write(&file,"function changed() return 2 end\n").unwrap();
-    let second=read_snapshot(&root,&db,&json!({"with_snapshot":true}),|store,_,_|store.query_json("changed",10).map_err(|e|e.to_string())).unwrap();
-    assert_eq!(second["items"][0]["name"],"changed");assert!(second["graph_snapshot"]["required_revision"].as_u64().unwrap()>revision);
-    // Later edits do not invalidate the pinned invocation snapshot or make it chase a moving target.
-    let during=read_snapshot(&root,&db,&json!({"with_snapshot":true}),|store,_,_|{
-        std::fs::write(&file,"function raced() return 3 end\n").unwrap();store.query_json("changed",10).map_err(|e|e.to_string())
-    }).unwrap();
-    assert_eq!(during["items"][0]["name"],"changed");
-    wa_graph::coordinator::shared().stop_watch(&root);
+fn component_mounts_and_answers_map_back_to_host_paths() {
+    // The component writes only inside P.d/, never next to the ledger.
+    assert_eq!(db_dir(Path::new("/h/.wasm-agent/graph.db")), PathBuf::from("/h/.wasm-agent/graph.db.d"));
+    assert_eq!(db_dir(Path::new("/h/.wasm-agent/graph.roots/ab.db")), PathBuf::from("/h/.wasm-agent/graph.roots/ab.db.d"));
+    let mut answer = json!({"root":"/graph/root","db":"/graph/db/graph.db","items":[{"path":"a.lua","detail":"/graph/rootless"}]});
+    host_paths(&mut answer, "/srv/tree", "/h/g.db.d");
+    assert_eq!(answer["root"], "/srv/tree");
+    assert_eq!(answer["db"], format!("/h/g.db.d{}graph.db", std::path::MAIN_SEPARATOR));
+    assert_eq!(answer["items"][0]["path"], "a.lua", "relative selectors are untouched");
+    assert_eq!(answer["items"][0]["detail"], "/graph/rootless", "only whole path prefixes map");
+    assert!(indexable("x/a.lua") && indexable("go.mod") && indexable("A.TS") && !indexable("marker.txt") && !indexable("a.db-journal"));
+    assert!(excluded(Path::new("rust/target/x.rs")) && !excluded(Path::new("rust/src/x.rs")));
 }
 
 struct Fixture(PathBuf);

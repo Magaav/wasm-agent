@@ -1,17 +1,29 @@
-//! `host.graph_*` — the code graph as a capability.
+//! `host.graph_*` — the code graph as a capability, served by the `graph` WASI component.
 //!
-//! The graph is built by `wa-graph` and stored beside the ledger. Admission reconciles
-//! source content and waits for a root-isolated atomic publication covering its frozen
-//! revision; reads then pin a read-only snapshot. Explicit index still supports full rebuilds.
-//! A Lua run can
-//! ask "who calls `append_turn`" without a
-//! grep-and-read round trip, and a `host.*` reference is a typed edge to a capability node.
+//! Everything that parses, stores or answers lives in the component (rust/components/graph:
+//! wa-graph's tree-sitter indexer, SQLite store and queries, built for wasm32-wasip2). The kernel
+//! keeps only what a component cannot do by itself: choose the root and database, mount them
+//! (root read-only at `/graph/root`, a private database directory read-write at `/graph/db`),
+//! serialize calls per database (in-process mutex + cross-process file lock), and schedule
+//! background refreshes from edit hints and the OS watcher. Each component call admits content
+//! first (capture → compare → index changes as a new revision), so an answer is never older than
+//! the bytes on disk when the call began; a hint only makes that admission cheap later.
+//!
+//! The Lua-facing surface (names, arguments, answer shapes) is unchanged.
 
 use crate::lua::{arg_string, lua_pushlstring, LuaState};
 use serde_json::{json, Value};
+use std::collections::{BTreeMap, VecDeque};
 use std::ffi::c_char;
-use std::path::PathBuf;
-use std::sync::OnceLock;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
+use std::time::{Duration, Instant};
+
+const COMPONENT: &str = "graph";
+const GUEST_ROOT: &str = "/graph/root";
+const GUEST_DB: &str = "/graph/db";
+const DB_FILE: &str = "graph.db";
+const ROOT_LIMIT: usize = 32;
 
 struct Config {
     root: PathBuf,
@@ -37,21 +49,15 @@ fn push_json(l: *mut LuaState, value: &Value) {
 
 /// An optional options argument, passed as a JSON object string. Absent or malformed is `null`.
 fn json_arg(l: *mut LuaState, index: std::ffi::c_int) -> Value {
-    arg_string(l, index)
-        .and_then(|raw| serde_json::from_str(&raw).ok())
-        .unwrap_or(Value::Null)
+    arg_string(l, index).and_then(|raw| serde_json::from_str(&raw).ok()).unwrap_or(Value::Null)
 }
 
 fn opt_str(options: &Value, key: &str) -> Option<String> {
-    options
-        .get(key)
-        .and_then(Value::as_str)
-        .map(str::to_string)
-        .filter(|s| !s.is_empty())
+    options.get(key).and_then(Value::as_str).map(str::to_string).filter(|s| !s.is_empty())
 }
 
-// Select root and DB together. Workspace caches are on-demand and the shared
-// coordinator never lets one root replace another root's derived snapshot.
+// Select root and DB together. Workspace caches are on-demand and a root never replaces another
+// root's derived snapshot.
 fn locations(options: &Value, config: Option<&Config>) -> Result<(PathBuf, PathBuf), String> {
     let root = opt_str(options, "root").map(PathBuf::from)
         .or_else(|| config.map(|c| c.root.clone()))
@@ -60,7 +66,7 @@ fn locations(options: &Value, config: Option<&Config>) -> Result<(PathBuf, PathB
     if !root.is_dir() {return Err("graph_root_not_directory".into());}
     if let Some(db) = opt_str(options, "db") {return Ok((root, PathBuf::from(db)));}
     let config = config.ok_or_else(|| "graph_not_configured".to_string())?;
-    let identity = |path: &std::path::Path| {
+    let identity = |path: &Path| {
         let text = path.to_string_lossy().into_owned();
         if cfg!(windows) {text.to_lowercase()} else {text}
     };
@@ -73,43 +79,279 @@ fn locations(options: &Value, config: Option<&Config>) -> Result<(PathBuf, PathB
     Ok((root, db))
 }
 
-fn read_snapshot(
-    root: &std::path::Path,
-    db: &std::path::Path,
-    options: &Value,
-    body: impl Fn(&wa_graph::Store, &Value, &std::path::Path) -> Result<Value, String>,
-) -> Result<Value, String> {
-    let started = std::time::Instant::now();
-    let timeout=options.get("wait_ms").and_then(Value::as_u64).unwrap_or(60_000).clamp(1,120_000);
-    let deadline=started+std::time::Duration::from_millis(timeout);
-    let manager=wa_graph::coordinator::shared();let entry=manager.entry(root,db)?;
-    let required=match manager.admit_until(&entry,false,Some(deadline),&mut |_,_|crate::serve::beat()) {
-        Ok(revision)=>revision,
-        Err(error)=>{let mut status=entry.status();status["error"]=json!(error);status["required_revision"]=Value::Null;status["capture_required"]=json!(true);status["next"]=json!("Content capture failed; use read/grep and inspect the affected root. No stale answer was returned.");return Ok(status);}
-    };
-    let (store,mut meta)=match entry.snapshot(required,deadline,&mut |_|crate::serve::beat()) {Ok(snapshot)=>snapshot,Err(error)=>return Ok(error)};
-    let generation=store.generation().map_err(|e|e.to_string())?;
-    let mut captured_options=options.clone();
-    // Budgeted views account for revision metadata inside their whole-response pager.
-    // Root/generation already exist there; do not crowd out exact rows with duplicate status.
-    captured_options["_graph_snapshot"]=json!({"required_revision":meta["required_revision"],"committed_revision":meta["committed_revision"],"wait_ms":meta["wait_ms"]});
-    let answer=body(&store,&captured_options,root);
-    store.end_read().map_err(|e|e.to_string())?;
-    meta["read_ms"]=json!(started.elapsed().as_millis());meta["generation"]=json!(generation);
-    let mut answer=match answer {Ok(value)=>value,Err(error)=>{meta["error"]=json!(error);meta["next"]=json!("Inspect the selector/request and revision evidence; use read/grep. No source answer was returned.");return Ok(meta);}};
-    if answer.is_object(){if answer.get("graph_snapshot").is_none(){answer["graph_snapshot"]=meta;}}else if options.get("with_snapshot").and_then(Value::as_bool).unwrap_or(false){answer=json!({"items":answer,"graph_snapshot":meta});}
-    Ok(answer)
+/// The component's private directory for a logical database path `P`: `P.d/`, holding `graph.db`.
+/// Only this directory is mounted writable, never the directory around the ledger.
+fn db_dir(db: &Path) -> PathBuf {
+    let name = db.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "graph.db".into());
+    db.with_file_name(format!("{name}.d"))
 }
 
-fn read(
-    l: *mut LuaState,
-    options_index: std::ffi::c_int,
-    body: impl Fn(&wa_graph::Store, &Value, &std::path::Path) -> Result<Value, String>,
-) -> std::ffi::c_int {
-    let options = json_arg(l, options_index);
-    let outcome = locations(&options, CONFIG.get())
-        .and_then(|(root, db)| read_snapshot(&root, &db, &options, body));
-    push_json(l, &outcome.unwrap_or_else(|error| json!({ "error": error })));
+/// Source files the graph indexes (mirrors wa-graph's `extract::language_for`). Used only to drop
+/// irrelevant edit hints; a hint that slips through costs one no-op admission, never correctness.
+fn indexable(path: &str) -> bool {
+    let path = path.replace('\\', "/");
+    if path.rsplit('/').next() == Some("go.mod") {return true;}
+    let ext = path.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+    matches!(ext.as_str(), "go" | "rs" | "lua" | "sh" | "bash" | "ps1" | "psm1" | "md" | "markdown" | "js" | "mjs" | "cjs" | "jsx" | "ts" | "mts" | "cts" | "tsx")
+}
+
+fn excluded(relative: &Path) -> bool {
+    relative.components().any(|part| matches!(part.as_os_str().to_str(), Some(".git" | "target" | "node_modules" | ".wa-graph" | "releases" | ".orca-worktree-trash" | "vendor" | ".cache")))
+}
+
+// ---- scheduling: one entry per (root, db), one background worker, one OS watcher ---------------
+
+#[derive(Default)]
+struct State {
+    queued: bool,
+    active: bool,
+    dirty: bool,
+    watched: bool,
+    watch_error: Option<String>,
+    failure: Option<String>,
+}
+
+struct Entry {
+    root: PathBuf,
+    db: PathBuf,
+    calls: Mutex<()>,
+    state: Mutex<State>,
+}
+
+struct Scheduler {
+    entries: Mutex<BTreeMap<(PathBuf, PathBuf), Arc<Entry>>>,
+    ready: Mutex<VecDeque<Arc<Entry>>>,
+    wake: Condvar,
+    watcher: Mutex<Option<notify::RecommendedWatcher>>,
+}
+
+fn scheduler() -> &'static Arc<Scheduler> {
+    static INSTANCE: OnceLock<Arc<Scheduler>> = OnceLock::new();
+    INSTANCE.get_or_init(|| {
+        let scheduler = Arc::new(Scheduler { entries: Mutex::new(BTreeMap::new()), ready: Mutex::new(VecDeque::new()), wake: Condvar::new(), watcher: Mutex::new(None) });
+        if std::env::var("WA_GRAPH_WATCH").map_or(true, |value| value != "0") {
+            use notify::Watcher as _;
+            let weak = Arc::downgrade(&scheduler);
+            match notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
+                if let Some(scheduler) = weak.upgrade() {scheduler.event(event);}
+            }) {
+                Ok(watcher) => *scheduler.watcher.lock().unwrap() = Some(watcher),
+                Err(error) => eprintln!("graph_watch_create_failed: {error}; content admission remains authoritative"),
+            }
+        }
+        let worker = scheduler.clone();
+        if let Err(error) = std::thread::Builder::new().name("wa-graph-schedule".into()).spawn(move || worker.run()) {
+            eprintln!("graph_worker_spawn_failed: {error}; queries still admit content themselves");
+        }
+        scheduler
+    })
+}
+
+impl Scheduler {
+    fn entry(&self, root: &Path, db: &Path) -> Result<Arc<Entry>, String> {
+        let db = if db.is_absolute() {db.to_path_buf()} else {std::env::current_dir().map_err(|e| e.to_string())?.join(db)};
+        let key = (root.to_path_buf(), db.clone());
+        let mut entries = self.entries.lock().map_err(|_| "graph_scheduler_poisoned")?;
+        if let Some(entry) = entries.get(&key) {return Ok(entry.clone());}
+        if entries.len() >= ROOT_LIMIT {
+            let idle = entries.iter().find_map(|(key, entry)| {
+                let state = entry.state.try_lock().ok()?;
+                (Arc::strong_count(entry) == 1 && !state.queued && !state.active).then(|| key.clone())
+            });
+            match idle {
+                Some(key) => {
+                    let old = entries.remove(&key).unwrap();
+                    if !entries.values().any(|other| other.root == old.root) {
+                        use notify::Watcher as _;
+                        if let Some(watcher) = self.watcher.lock().unwrap().as_mut() {let _ = watcher.unwatch(&old.root);}
+                    }
+                }
+                None => return Err("graph_root_capacity: 32 active roots; finish existing work before admitting another".into()),
+            }
+        }
+        let entry = Arc::new(Entry { root: root.to_path_buf(), db, calls: Mutex::new(()), state: Mutex::new(State::default()) });
+        let shared_root = entries.values().any(|other| other.root == entry.root);
+        entries.insert(key, entry.clone());
+        drop(entries);
+        if let Some(watcher) = self.watcher.lock().unwrap().as_mut() {
+            use notify::Watcher as _;
+            let result = if shared_root {Ok(())} else {watcher.watch(&entry.root, notify::RecursiveMode::Recursive)};
+            let mut state = entry.state.lock().unwrap();
+            state.watched = result.is_ok();
+            state.watch_error = result.err().map(|error| error.to_string());
+            if let Some(error) = &state.watch_error {eprintln!("graph_watch_register_failed root={} error={error}; content admission remains authoritative", entry.root.display());}
+        }
+        Ok(entry)
+    }
+
+    fn enqueue(&self, entry: &Arc<Entry>) {
+        let mut state = entry.state.lock().unwrap();
+        state.dirty = true;
+        if state.queued || state.active {return;}
+        state.queued = true;
+        drop(state);
+        self.ready.lock().unwrap().push_back(entry.clone());
+        self.wake.notify_one();
+    }
+
+    fn event(&self, event: notify::Result<notify::Event>) {
+        if event.as_ref().map_or(false, ignored) {return;}
+        let normalize = |path: &Path| {let text = path.to_string_lossy().replace('\\', "/").trim_start_matches("//?/").to_string(); if cfg!(windows) {text.to_lowercase()} else {text}};
+        let entries: Vec<_> = self.entries.lock().unwrap().values().filter(|entry| {
+            event.as_ref().map_or(true, |event| event.paths.is_empty() || event.paths.iter().any(|path| {
+                let root = normalize(&entry.root);
+                let path = normalize(path);
+                path == root || path.starts_with(&(root + "/"))
+            }))
+        }).cloned().collect();
+        for entry in entries {self.enqueue(&entry);}
+    }
+
+    fn notify_path(&self, path: &Path) {
+        if !indexable(&path.to_string_lossy()) {return;}
+        let Ok(path) = path.canonicalize() else {return};
+        let entries: Vec<_> = self.entries.lock().unwrap().values()
+            .filter(|entry| path.strip_prefix(&entry.root).map_or(false, |relative| !excluded(relative))).cloned().collect();
+        for entry in entries {self.enqueue(&entry);}
+    }
+
+    fn run(&self) {
+        loop {
+            let entry = {
+                let mut ready = self.ready.lock().unwrap();
+                while ready.is_empty() {ready = self.wake.wait(ready).unwrap();}
+                ready.pop_front().unwrap()
+            };
+            // A bounded quiet window coalesces bursts without waiting forever for a busy writer.
+            std::thread::sleep(Duration::from_millis(75));
+            {let mut state = entry.state.lock().unwrap(); state.queued = false; state.active = true; state.dirty = false;}
+            let outcome = call(&entry, "index", json!({}), Instant::now() + Duration::from_secs(120));
+            let error = outcome.get("error").and_then(Value::as_str).map(str::to_string);
+            if let Some(error) = &error {eprintln!("graph_index_failed root={} error={error}", entry.root.display());}
+            let mut state = entry.state.lock().unwrap();
+            state.active = false;
+            state.failure = error;
+            let again = state.dirty;
+            drop(state);
+            if again {self.enqueue(&entry);}
+        }
+    }
+}
+
+/// Unsupported file events and our own DB/build writes cannot create a refresh loop.
+fn ignored(event: &notify::Event) -> bool {
+    if matches!(event.kind, notify::EventKind::Access(_)) {return true;}
+    // Empty paths represent overflow/rescan hints and must reconcile every registered root.
+    if event.paths.is_empty() {return false;}
+    event.paths.iter().all(|path| {
+        let text = path.to_string_lossy().replace('\\', "/");
+        text.split('/').any(|part| matches!(part, ".git" | "target" | ".wa-graph" | "vendor" | ".cache" | "node_modules" | "releases" | ".orca-worktree-trash"))
+            || (!path.is_dir() && !indexable(&text) && !matches!(event.kind,
+                notify::EventKind::Remove(notify::event::RemoveKind::Folder)
+                    | notify::EventKind::Modify(notify::event::ModifyKind::Name(_))
+                    | notify::EventKind::Create(notify::event::CreateKind::Folder)))
+    })
+}
+
+// ---- one component call -------------------------------------------------------------------------
+
+/// Guest paths in an answer become the host paths they stand for.
+fn host_paths(value: &mut Value, root: &str, db: &str) {
+    match value {
+        Value::String(text) => {
+            for (guest, host) in [(GUEST_ROOT, root), (GUEST_DB, db)] {
+                if let Some(rest) = text.strip_prefix(guest).filter(|rest| rest.is_empty() || rest.starts_with('/')) {
+                    *text = format!("{host}{}", rest.replace('/', std::path::MAIN_SEPARATOR_STR));
+                    break;
+                }
+            }
+        }
+        Value::Array(items) => items.iter_mut().for_each(|item| host_paths(item, root, db)),
+        Value::Object(map) => map.values_mut().for_each(|item| host_paths(item, root, db)),
+        _ => {}
+    }
+}
+
+/// Run one tool of the graph component for `entry`, holding the entry's call lock (and the
+/// database directory's file lock, for other processes on the same node) until `deadline`.
+fn call(entry: &Arc<Entry>, tool: &str, mut arguments: Value, deadline: Instant) -> Value {
+    let calls = loop {
+        match entry.calls.try_lock() {
+            Ok(guard) => break guard,
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => break poisoned.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => {}
+        }
+        if Instant::now() >= deadline {return json!({"error":"graph_wait_timeout","next":"Use bounded read/grep now. Another graph call on this root is still running. No stale answer was returned."});}
+        crate::serve::beat();
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let dir = db_dir(&entry.db);
+    if let Err(error) = std::fs::create_dir_all(&dir) {return json!({"error": format!("graph_db_unavailable: {error}")});}
+    let lock = match std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(dir.join(".lock")) {
+        Ok(file) => file,
+        Err(error) => return json!({"error": format!("graph_db_unavailable: {error}")}),
+    };
+    if let Err(error) = lock.lock() {return json!({"error": format!("graph_db_lock_failed: {error}")});}
+    let remaining = deadline.saturating_duration_since(Instant::now()).as_secs().max(1);
+    if !arguments.is_object() {arguments = json!({});}
+    arguments["db_file"] = json!(DB_FILE);
+    let root_text = entry.root.to_string_lossy().into_owned();
+    let dir_text = dir.to_string_lossy().into_owned();
+    let request = json!({
+        "action": "call", "component": COMPONENT, "tool": tool, "arguments": arguments,
+        "dirs": [{"host": root_text, "guest": GUEST_ROOT, "write": false}, {"host": dir_text, "guest": GUEST_DB, "write": true}],
+        "env": {"WA_GRAPH_PARSE_TIMEOUT_MS": "WA_GRAPH_PARSE_TIMEOUT_MS"},
+        "timeout_seconds": remaining,
+    });
+    let answer = crate::components::mcp(&request);
+    let _ = lock.unlock();
+    drop(calls);
+    if answer["ok"] != json!(true) {
+        let error = answer["error"].as_str().unwrap_or("graph_component_failed").to_string();
+        return json!({"error": format!("graph_component_unavailable: {error}"), "component": answer,
+            "next": "Use bounded read/grep now. The graph component did not answer. No stale answer was returned."});
+    }
+    let mut result = answer["result_json"].as_str()
+        .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+        .map(|result| result["structuredContent"].clone())
+        .unwrap_or_else(|| json!({"error":"graph_component_bad_answer"}));
+    host_paths(&mut result, &root_text, &dir_text);
+    result
+}
+
+/// Overlay the kernel's scheduling state on a status or snapshot object.
+fn overlay(entry: &Entry, value: &mut Value) {
+    if !value.is_object() {return;}
+    let state = entry.state.lock().unwrap();
+    value["queued"] = json!(state.queued);
+    value["active"] = json!(state.active);
+    value["dirty_hint"] = json!(state.dirty);
+    value["watch_registered"] = json!(state.watched);
+    value["watch_error"] = json!(state.watch_error);
+}
+
+fn wait_deadline(options: &Value) -> Instant {
+    Instant::now() + Duration::from_millis(options.get("wait_ms").and_then(Value::as_u64).unwrap_or(60_000).clamp(1, 120_000))
+}
+
+/// One read capability: resolve locations, register the root, run the tool.
+fn run(options: Value, tool: &str, extra: &[(&str, Value)]) -> Value {
+    let outcome = (|| -> Result<Value, String> {
+        let (root, db) = locations(&options, CONFIG.get())?;
+        let entry = scheduler().entry(&root, &db)?;
+        let deadline = if tool == "index" {Instant::now() + Duration::from_secs(120)} else {wait_deadline(&options)};
+        let mut arguments = if options.is_object() {options.clone()} else {json!({})};
+        for (key, value) in extra {arguments[*key] = value.clone();}
+        let mut answer = call(&entry, tool, arguments, deadline);
+        if let Some(snapshot) = answer.get_mut("graph_snapshot") {overlay(&entry, snapshot);}
+        if answer.get("error").is_some() && answer.get("required_revision").is_some() {overlay(&entry, &mut answer);}
+        Ok(answer)
+    })();
+    outcome.unwrap_or_else(|error| json!({ "error": error }))
+}
+
+fn reply(l: *mut LuaState, value: Value) -> std::ffi::c_int {
+    push_json(l, &value);
     1
 }
 
@@ -119,220 +361,127 @@ fn read(
 /// reparses nothing. `{ "root": "...", "force": true }` overrides the configured location.
 pub extern "C-unwind" fn graph_index(l: *mut LuaState) -> std::ffi::c_int {
     let options = json_arg(l, 1);
-    let outcome = (|| -> Result<Value, String> {
-        let (root, db) = locations(&options, CONFIG.get())?;
-        let force = options
-            .get("force")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-        let manager=wa_graph::coordinator::shared();let entry=manager.entry(&root,&db)?;
-        let started=std::time::Instant::now();let before=entry.status();
-        let required=manager.admit_until(&entry,force,Some(started+std::time::Duration::from_secs(120)),&mut |_,_|crate::serve::beat())?;
-        let (store,meta)=match entry.snapshot(required,started+std::time::Duration::from_secs(120),&mut |_|crate::serve::beat()){Ok(value)=>value,Err(error)=>return Ok(error)};
-        let no_work=!force && before["committed_revision"].as_u64().unwrap_or(0)>=required;
-        let stats=store.stats().map_err(|e|e.to_string())?;
-        let indexed=if no_work{json!(0)}else{meta["work"]["parsed"].clone()};
-        let unchanged=if no_work{json!(stats.files)}else{meta["work"]["unchanged"].clone()};
-        let removed=if no_work{json!(0)}else{meta["work"]["removed"].clone()};
-        let examined=if no_work{json!(0)}else{meta["work"]["re_resolved"].clone()};
-        let nodes=if no_work{json!(0)}else{meta["work"]["nodes"].clone()};
-        let edges=if no_work{json!(0)}else{meta["work"]["edges"].clone()};
-        store.end_read().map_err(|e|e.to_string())?;
-        Ok(json!({"ok":true,"indexed":indexed,"unchanged":unchanged,"removed":removed,"re_resolved":examined,"nodes":nodes,"edges":edges,"resolved":stats.resolved,"unresolved":stats.unresolved,"root":root,"db":db,"graph_snapshot":meta}))
-    })();
-    push_json(
-        l,
-        &outcome.unwrap_or_else(|error| json!({ "error": error })),
-    );
-    1
+    reply(l, run(options, "index", &[]))
 }
 
 /// host.graph_query(text, opts_json?) -> [ {kind,name,path,line,detail} ] | {error}
 pub extern "C-unwind" fn graph_query(l: *mut LuaState) -> std::ffi::c_int {
     let text = arg_string(l, 1).unwrap_or_default();
-    read(l, 2, |store, options, _| {
-        let limit = options
-            .get("limit")
-            .and_then(Value::as_i64)
-            .unwrap_or(50)
-            .clamp(1, 500);
-        store.query_json(&text, limit).map_err(|e| e.to_string())
-    })
+    reply(l, run(json_arg(l, 2), "query", &[("text", json!(text))]))
 }
 
 /// host.graph_search(text, opts_json?) -> ranked symbol selectors with confidence evidence.
 pub extern "C-unwind" fn graph_search(l: *mut LuaState) -> std::ffi::c_int {
     let text = arg_string(l, 1).unwrap_or_default();
-    read(l, 2, |store, options, _| {
-        let limit = options
-            .get("limit")
-            .and_then(Value::as_i64)
-            .unwrap_or(12)
-            .clamp(1, 100);
-        let prefer_implementations = options.get("prefer_implementations")
-            .and_then(Value::as_bool).unwrap_or(false);
-        store
-            .search_symbols_json_with_preference(&text, limit, prefer_implementations)
-            .map_err(|e| e.to_string())
-    })
+    reply(l, run(json_arg(l, 2), "search", &[("text", json!(text))]))
+}
+
+/// host.graph_sources(opts_json) — one root, admission revision and pinned snapshot for every selector.
+pub extern "C-unwind" fn graph_sources(l: *mut LuaState) -> std::ffi::c_int {
+    reply(l, run(json_arg(l, 1), "sources", &[]))
+}
+
+/// A successful native write is a hint: refresh that root in the background.
+pub(crate) fn native_write(path: &str) {
+    scheduler().notify_path(Path::new(path));
+}
+
+pub extern "C-unwind" fn graph_notify(l: *mut LuaState) -> std::ffi::c_int {
+    let options = json_arg(l, 1);
+    let outcome = (|| -> Result<Value, String> {
+        let (root, db) = if let Some(path) = opt_str(&options, "path") {
+            if !indexable(&path) {return Ok(json!({"ok":true,"queued":false,"reason":"not_indexable_source"}));}
+            let (root, db) = locations(&options, CONFIG.get())?;
+            let target = PathBuf::from(path).canonicalize().map_err(|e| format!("graph_edit_path_unavailable:{e}"))?;
+            let relative = match target.strip_prefix(&root) {Ok(path) => path, Err(_) => return Ok(json!({"ok":true,"queued":false,"reason":"outside_indexed_root"}))};
+            if excluded(relative) {return Ok(json!({"ok":true,"queued":false,"reason":"excluded_source_directory"}));}
+            (root, db)
+        } else {
+            locations(&options, CONFIG.get())?
+        };
+        let scheduler = scheduler();
+        let entry = scheduler.entry(&root, &db)?;
+        scheduler.enqueue(&entry);
+        Ok(json!({"ok":true,"queued":true}))
+    })();
+    reply(l, outcome.unwrap_or_else(|error| json!({"error": error})))
 }
 
 /// host.graph_source(opts_json) -> an exact, bounded page of one indexed definition.
-fn source(store:&wa_graph::Store, options:&Value)->Result<Value,String>{
-    let path=options.get("path").and_then(Value::as_str).ok_or("path_required")?;
-    let name=options.get("name").and_then(Value::as_str).ok_or("name_required")?;
-    let line=options.get("line").and_then(Value::as_i64).filter(|line|*line>0).ok_or("line_required")?;
-    let kind=options.get("kind").and_then(Value::as_str).filter(|kind|!kind.is_empty());
-    let offset=options.get("byte_offset").and_then(Value::as_u64).unwrap_or(0) as usize;
-    let max_bytes=options.get("max_bytes").and_then(Value::as_u64).unwrap_or(20_000).clamp(256,20_000) as usize;
-    let answer=store.symbol_source_json(path,name,line,kind,offset,max_bytes).map_err(|e|e.to_string())?;
-    if options.get("source_version").and_then(Value::as_str).map_or(false,|expected|answer["source_version"].as_str()!=Some(expected)){return Err("symbol_source_changed".into());}
-    Ok(answer)
-}
-/// One root, admission revision and pinned SQLite snapshot for every selector.
-pub extern "C-unwind" fn graph_sources(l:*mut LuaState)->std::ffi::c_int{
-    read(l,1,|store,options,_|{
-        let requests=options.get("requests").and_then(Value::as_array).filter(|a|!a.is_empty()&&a.len()<=8).ok_or("requests_required_1_to_8")?;
-        let results:Vec<_>=requests.iter().map(|request|source(store,request).unwrap_or_else(|error|json!({"error":error}))).collect();
-        let failed=results.iter().filter(|item|item.get("error").is_some()).count();
-        Ok(json!({"ok":failed==0,"failed":failed,"succeeded":requests.len()-failed,"results":results}))
-    })
-}
-pub(crate) fn native_write(path:&str){
-    wa_graph::coordinator::notify_known_path(std::path::Path::new(path));
-}
-
-pub extern "C-unwind" fn graph_notify(l:*mut LuaState)->std::ffi::c_int{
-    let options=json_arg(l,1);
-    let outcome=(||->Result<Value,String>{
-        if let Some(path)=opt_str(&options,"path"){
-            if wa_graph::extract::language_for(&path).is_none(){return Ok(json!({"ok":true,"queued":false,"reason":"not_indexable_source"}));}
-            let (root,db)=locations(&options,CONFIG.get())?;
-            let target=PathBuf::from(path).canonicalize().map_err(|e|format!("graph_edit_path_unavailable:{e}"))?;
-            let relative=match target.strip_prefix(&root){Ok(path)=>path,Err(_)=>return Ok(json!({"ok":true,"queued":false,"reason":"outside_indexed_root"}))};
-            if relative.components().any(|part|matches!(part.as_os_str().to_str(),Some(".git"|"target"|"node_modules"|".wa-graph"|"releases"|".orca-worktree-trash"))){return Ok(json!({"ok":true,"queued":false,"reason":"excluded_source_directory"}));}
-            wa_graph::coordinator::shared().notify(&root,&db)?;
-        }else{let (root,db)=locations(&options,CONFIG.get())?;wa_graph::coordinator::shared().notify(&root,&db)?;}
-        Ok(json!({"ok":true,"queued":true}))
-    })();
-    push_json(l,&outcome.unwrap_or_else(|error|json!({"error":error})));1
-}
 pub extern "C-unwind" fn graph_source(l: *mut LuaState) -> std::ffi::c_int {
-    read(l,1,|store,options,_|source(store,options))
+    reply(l, run(json_arg(l, 1), "source", &[]))
 }
 
 /// host.graph_explain(name, opts_json?) -> [ {node, outgoing, incoming} ] | {error}
 pub extern "C-unwind" fn graph_explain(l: *mut LuaState) -> std::ffi::c_int {
     let name = arg_string(l, 1).unwrap_or_default();
-    read(l, 2, |store, _, _| {
-        store.explain_json(&name).map_err(|e| e.to_string())
-    })
+    reply(l, run(json_arg(l, 2), "explain", &[("name", json!(name))]))
 }
 
 /// host.graph_path(from, to, opts_json?) -> [ {kind,name,path,line,via} ] | null | {error}
 pub extern "C-unwind" fn graph_path(l: *mut LuaState) -> std::ffi::c_int {
     let from = arg_string(l, 1).unwrap_or_default();
     let to = arg_string(l, 2).unwrap_or_default();
-    read(l, 3, |store, _, _| {
-        store.path_json(&from, &to).map_err(|e| e.to_string())
-    })
+    reply(l, run(json_arg(l, 3), "path", &[("from", json!(from)), ("to", json!(to))]))
 }
 
 /// host.graph_caps(opts_json?) -> [ {capability, uses} ] | {error}
 pub extern "C-unwind" fn graph_caps(l: *mut LuaState) -> std::ffi::c_int {
-    read(l, 1, |store, _, _| {
-        store.caps_json().map_err(|e| e.to_string())
-    })
+    reply(l, run(json_arg(l, 1), "caps", &[]))
 }
 
 /// host.graph_stats(opts_json?) -> {files,nodes,edges,resolved,unresolved,byKind} | {error}
 pub extern "C-unwind" fn graph_stats(l: *mut LuaState) -> std::ffi::c_int {
-    read(l, 1, |store, _, _| {
-        store
-            .stats()
-            .map(|stats| stats.to_json())
-            .map_err(|e| e.to_string())
-    })
+    reply(l, run(json_arg(l, 1), "stats", &[]))
 }
 
 /// host.graph_overview(opts_json?) -> bounded architecture sections with exact totals.
 pub extern "C-unwind" fn graph_overview(l: *mut LuaState) -> std::ffi::c_int {
-    read(l, 1, |store, options, _| {
-        let aspects = options
-            .get("aspects")
-            .and_then(Value::as_array)
-            .map(|values| {
-                values
-                    .iter()
-                    .filter_map(Value::as_str)
-                    .map(str::to_string)
-                    .collect()
-            })
-            .unwrap_or_else(Vec::new);
-        let mut limit = options
-            .get("limit")
-            .and_then(Value::as_u64)
-            .unwrap_or(8)
-            .clamp(1, 50);
-        let max_bytes = options
-            .get("max_bytes")
-            .and_then(Value::as_u64)
-            .unwrap_or(24_000)
-            .clamp(2_048, 200_000) as usize;
-        loop {
-            let mut value = store
-                .architecture_json(&aspects, limit as usize)
-                .map_err(|e| e.to_string())?;
-            value["graph_snapshot"]=options["_graph_snapshot"].clone();
-            if serde_json::to_vec(&value).map_err(|e| e.to_string())?.len() <= max_bytes {
-                return Ok(value);
-            }
-            if limit == 1 {
-                return Err("overview_budget_too_small".into());
-            }
-            limit -= 1;
-        }
-    })
+    reply(l, run(json_arg(l, 1), "overview", &[]))
 }
 
 /// host.graph_impact(request_json) -> changed definitions and bounded transitive impact evidence.
 pub extern "C-unwind" fn graph_impact(l: *mut LuaState) -> std::ffi::c_int {
-    read(l, 1, |store, request, root| {
-        store.impact_json(root, request).map_err(|e| e.to_string())
-    })
+    reply(l, run(json_arg(l, 1), "impact", &[]))
 }
 
-/// host.graph_status(opts_json?) -> {root, db, ready} | {error}
+/// host.graph_status(opts_json?) -> {root, db, ready, ...} | {error}
 ///
-/// `ready` means the graph matches every indexed file's current bytes, not merely that a DB exists.
+/// `ready` means the graph matches every indexed file's current bytes and no refresh is pending,
+/// not merely that a DB exists. Status verifies only; it never indexes.
 pub extern "C-unwind" fn graph_status(l: *mut LuaState) -> std::ffi::c_int {
     let options = json_arg(l, 1);
     let outcome = (|| -> Result<Value, String> {
         let (root, db) = locations(&options, CONFIG.get())?;
-        let ready = if db.exists() {
-            let store = wa_graph::Store::open_readonly(&db).map_err(|e| e.to_string())?;
-            store.verify_snapshot(&root).map_err(|e| e.to_string())?
-        } else {
-            false
-        };
-        let entry=wa_graph::coordinator::shared().entry(&root,&db)?;
-        let mut status=entry.status();status["ready"]=json!(ready && status["dirty_hint"]!=true && status["queued"]!=true && status["active"]!=true);Ok(status)
+        let entry = scheduler().entry(&root, &db)?;
+        let mut status = call(&entry, "status", json!({}), wait_deadline(&options));
+        if status.get("error").is_some() {return Ok(status);}
+        let failure = entry.state.lock().unwrap().failure.clone();
+        overlay(&entry, &mut status);
+        let verified = status["verified"] == json!(true);
+        status["ready"] = json!(verified && status["dirty_hint"] != true && status["queued"] != true && status["active"] != true);
+        status["failure"] = json!(failure);
+        Ok(status)
     })();
-    push_json(
-        l,
-        &outcome.unwrap_or_else(|error| json!({ "error": error })),
-    );
-    1
+    reply(l, outcome.unwrap_or_else(|error| json!({ "error": error })))
 }
 
 /// host.graph_patch_audit(request_json) -> review leads or an explicit error.
 /// Like navigation, audit captures a required revision and reads one pinned committed snapshot.
 pub extern "C-unwind" fn graph_patch_audit(l: *mut LuaState) -> std::ffi::c_int {
-    read(l, 1, |store, request, root| {
-        let mut report = store.audit_json(root, request).map_err(|e| e.to_string())?;
-        let (_, db) = locations(request, CONFIG.get())?;
-        report["root"] = json!(root.to_string_lossy());
-        report["db_bytes"] = json!(std::fs::metadata(db).map_err(|e| e.to_string())?.len());
-        Ok(report)
-    })
+    reply(l, run(json_arg(l, 1), "patch_audit", &[]))
+}
+
+/// `wa serve` keeps the configured root refreshed for the life of the node; `WA_GRAPH_WATCH=0`
+/// disables the OS watcher (hints and per-call admission still keep answers exact).
+pub fn watch_configured() {
+    if let Some(config) = CONFIG.get() {
+        if let Ok(root) = config.root.canonicalize() {
+            let scheduler = scheduler();
+            match scheduler.entry(&root, &config.db) {
+                Ok(entry) => scheduler.enqueue(&entry),
+                Err(error) => eprintln!("graph_watch_unavailable: {error}"),
+            }
+        }
+    }
 }

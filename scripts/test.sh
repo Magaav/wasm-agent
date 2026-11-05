@@ -411,6 +411,15 @@ if command -v cygpath >/dev/null 2>&1; then
 fi
 # This is a fixture, not the operator's deployment configuration.
 export WASM_AGENT_LLM_CONTEXT=128000
+# host.graph_* is served by the `graph` component (docs/KERNEL.md, stream C): every graph test below
+# runs against the component built from this tree, pinned in its own directory. Required, not
+# guarded - the graph is part of the contract. Building it needs wasi-sdk (C inside: tree-sitter,
+# SQLite); scripts/build-components.sh says so when it is missing.
+GRAPH_COMPONENTS="$GATE_HOME/components-graph"
+WA_COMPONENTS_DIR="$GRAPH_COMPONENTS" bash scripts/build-components.sh graph >&2 </dev/null \
+  || { echo "graph component build failed (needs wasi-sdk: WASI_SDK=<dir>)" >&2; exit 1; }
+export WA_COMPONENTS_DIR="$GRAPH_COMPONENTS"
+command -v cygpath >/dev/null 2>&1 && export WA_COMPONENTS_DIR="$(cygpath -w "$GRAPH_COMPONENTS")"
 gate_phase_begin cli
 DB="$(mktemp -u /tmp/wa-smoke-XXXXXX.db)"
 # `wa status` reports *the current thread*, so it gets its own database: with the

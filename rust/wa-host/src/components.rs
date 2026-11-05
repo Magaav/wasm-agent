@@ -17,6 +17,8 @@
 //!                                     by a host variable); the component sees its contents
 //!                                     (trimmed) as KEY. Secrets stay file references.
 //!   net       ["127.0.0.1:28787"]     exact TCP socket addresses it may connect to
+//!   dirs      [{"host":"/abs","guest":"/graph/root","write":false}]  a host directory preopened at
+//!                                     the guest path; the manifest declares the guest paths
 //!
 //! `mcp()` speaks MCP JSON-RPC over the component's stdin/stdout, one request per run, and returns
 //! the same answer shape as `scripts/mcp-client-core.mjs`, so the Lua MCP registry, tool schemas
@@ -135,6 +137,15 @@ pub struct Grant {
     /// Non-secret configuration (the registry definition's `config` object), as JSON text in
     /// `WA_COMPONENT_CONFIG`. Data, not a capability: it grants nothing.
     pub config: Option<String>,
+    /// Preopened directories, each declared by its guest path in the manifest's `dirs`.
+    pub dirs: Vec<DirGrant>,
+}
+
+#[derive(Debug, Clone)]
+pub struct DirGrant {
+    pub host: String,
+    pub guest: String,
+    pub write: bool,
 }
 
 /// An absolute file path (POSIX `/...` or Windows `C:\...` / `C:/...`). A path is a location, not a
@@ -168,7 +179,21 @@ impl Grant {
             file_env: string_map(request.get("file_env"), "file_env")?,
             net: Vec::new(),
             config: None,
+            dirs: Vec::new(),
         };
+        if let Some(list) = request.get("dirs") {
+            for item in list.as_array().ok_or_else(|| anyhow!("invalid_component_grant:dirs"))? {
+                let host = item.get("host").and_then(Value::as_str).unwrap_or_default();
+                let guest = item.get("guest").and_then(Value::as_str).unwrap_or_default();
+                let guest_ok = guest.starts_with('/') && guest.len() <= 128 && !guest.contains("..")
+                    && guest.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'/' | b'_' | b'-' | b'.'));
+                if !absolute_path(host) || !guest_ok || grant.dirs.len() >= 8 {
+                    return Err(anyhow!("invalid_component_grant:dirs"));
+                }
+                let write = item.get("write").and_then(Value::as_bool).unwrap_or(false);
+                grant.dirs.push(DirGrant { host: host.to_string(), guest: guest.to_string(), write });
+            }
+        }
         if let Some(config) = request.get("config") {
             if !config.is_object() {
                 return Err(anyhow!("invalid_component_grant:config"));
@@ -206,6 +231,10 @@ impl Grant {
             if let Some(key) = keys.iter().find(|key| !allowed.contains(key)) {
                 return Err(anyhow!("component_capability_not_declared:{field}:{key}"));
             }
+        }
+        let allowed = declared("dirs");
+        if let Some(dir) = self.dirs.iter().find(|dir| !allowed.contains(&dir.guest)) {
+            return Err(anyhow!("component_capability_not_declared:dirs:{}", dir.guest));
         }
         // "host:*" declares every port on that host (a loopback connector's port is per node).
         let allowed = declared("net");
@@ -269,6 +298,11 @@ pub fn run(installed: &Installed, grant: &Grant, stdin: Vec<u8>, timeout_ms: u64
         let path = if absolute_path(name) { name.clone() } else { std::env::var(name).map_err(|_| anyhow!("component_file_env_unset:{key}"))? };
         let value = std::fs::read_to_string(&path).map_err(|_| anyhow!("component_file_env_unreadable:{key}"))?;
         builder.env(key, value.trim());
+    }
+    for dir in &grant.dirs {
+        use wasmtime_wasi::{DirPerms, FilePerms};
+        let (dir_perms, file_perms) = if dir.write { (DirPerms::all(), FilePerms::all()) } else { (DirPerms::READ, FilePerms::READ) };
+        builder.preopened_dir(&dir.host, &dir.guest, dir_perms, file_perms).map_err(|_| anyhow!("component_dir_unavailable:{}", dir.guest))?;
     }
     if !grant.net.is_empty() {
         let mut allowed: Vec<SocketAddr> = Vec::new();
@@ -540,6 +574,11 @@ mod tests {
         assert!(Grant::from_request(&json!({"file_env": {"T": "/home/u/token"}})).is_ok());
         assert!(Grant::from_request(&json!({"file_env": {"T": "C:\\u\\token"}})).is_ok());
         assert!(Grant::from_request(&json!({"file_env": {"T": "relative/token"}})).is_err());
+        let dirs = Grant::from_request(&json!({"dirs": [{"host": "/srv/x", "guest": "/graph/root"}]})).unwrap();
+        assert!(dirs.check(&json!({"capabilities": {"dirs": ["/graph/root"]}})).is_ok());
+        assert!(dirs.check(&manifest).unwrap_err().to_string().contains("dirs"));
+        assert!(Grant::from_request(&json!({"dirs": [{"host": "rel", "guest": "/g"}]})).is_err());
+        assert!(Grant::from_request(&json!({"dirs": [{"host": "/srv", "guest": "/g/../etc"}]})).is_err());
     }
 
     #[test]

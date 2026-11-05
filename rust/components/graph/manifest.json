@@ -1,6 +1,7 @@
 {
   "name": "graph",
   "kind": "mcp",
+  "needs_wasi_sdk": true,
   "description": "Code graph: tree-sitter definitions/references in SQLite; index, search, source, explain, path, impact, patch audit",
   "capabilities": {
     "env": ["WA_GRAPH_PARSE_TIMEOUT_MS"],

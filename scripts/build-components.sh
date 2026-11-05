@@ -19,12 +19,21 @@ ensure_target() {
   fi
 }
 
-# The hash is read from stdin, not named as an argument: when the file name contains a backslash -
-# every Windows path the gate installs into (WA_COMPONENTS_DIR is derived from WASM_AGENT_HOME, which
-# is a Windows path) - GNU coreutils prefixes the digest with `\` as an escape marker, and a pin file
-# that starts with `\` never matches the module: `wa` refuses it as `component_hash_mismatch` and the
-# component blocks of scripts/test.sh quietly degrade to "not installed". scripts/deploy.sh pins the
-# same way, for the same reason.
+# A component with C inside (the graph: tree-sitter + SQLite) needs a wasm C toolchain: wasi-sdk
+# (WASI_SDK=<dir>, else ~/wasi-sdk*, else /opt/wasi-sdk*). Exported when found; pure-Rust
+# components build without it, and a C one fails with a clear message instead of a cc error.
+SDK="${WASI_SDK:-}"
+if [ -z "$SDK" ]; then
+  for candidate in "$HOME"/wasi-sdk* /opt/wasi-sdk*; do [ -d "$candidate/share/wasi-sysroot" ] && SDK="$candidate"; done
+fi
+if [ -n "$SDK" ] && [ -d "$SDK/share/wasi-sysroot" ]; then
+  ext=""; case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) ext=".exe";; esac
+  for t in wasm32_wasip1 wasm32_wasip2; do
+    export "CC_$t=$SDK/bin/clang$ext" "AR_$t=$SDK/bin/llvm-ar$ext"
+  done
+  export WASI_SYSROOT="$SDK/share/wasi-sysroot" WASI_SDK_PATH="$SDK"
+fi
+
 sha() { if command -v sha256sum >/dev/null 2>&1; then sha256sum < "$1" | awk '{print $1}'; else shasum -a 256 < "$1" | awk '{print $1}'; fi; }
 
 built=0
@@ -36,6 +45,9 @@ for crate in rust/components/*/; do
   TARGET="$(sed -n 's/.*"target"[[:space:]]*:[[:space:]]*"\([a-z0-9_-]*\)".*/\1/p' "$crate/manifest.json" | head -1)"
   TARGET="${TARGET:-wasm32-wasip2}"
   ensure_target "$TARGET"
+  if grep -q '"needs_wasi_sdk"[[:space:]]*:[[:space:]]*true' "$crate/manifest.json" && [ -z "${WASI_SYSROOT:-}" ]; then
+    echo "error: component $name needs wasi-sdk (C inside); set WASI_SDK=<dir>" >&2; exit 2
+  fi
   cargo build --manifest-path "$crate/Cargo.toml" --target "$TARGET" --release ${WA_COMPONENTS_OFFLINE:+--offline} >/dev/null
   wasm="$crate/target/$TARGET/release/$name.wasm"
   # A library component (cdylib) is named with underscores.

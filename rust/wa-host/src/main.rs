@@ -553,19 +553,9 @@ fn main() {
         // pointer for the life of the process; a newtype with an unsafe Send would be the same claim with
         // more ceremony.
         let factory_for_serve = interpreter_factory.clone();
-        // Keep the graph fresh for the life of the node. The watcher does the initial index on its
-        // own thread, so a large tree never delays the port coming up; `WA_GRAPH_WATCH=0` disables it.
-        let _graph_watch = if std::env::var("WA_GRAPH_WATCH").map(|value| value != "0").unwrap_or(true) {
-            match wa_graph::watch::spawn(graph_root.clone(), graph_db.clone()) {
-                Ok(handle) => Some(handle),
-                Err(error) => {
-                    eprintln!("graph_watch_unavailable: {error}");
-                    None
-                }
-            }
-        } else {
-            None
-        };
+        // Keep the graph fresh for the life of the node. The scheduler does the initial index on its
+        // own thread (through the graph component), so a large tree never delays the port coming up.
+        graph::watch_configured();
         serve::run(lua, Box::new(move || factory_for_serve()), port, PathBuf::from(ui));
         return;
     }
