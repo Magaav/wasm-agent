@@ -348,7 +348,13 @@ else
     CHECK_ROOT="$(cygpath -w "$CHECK_ROOT")"; CHECK_SCRIPT="$(cygpath -w "$CHECK_SCRIPT")"; CHECK_HOME_ARG="$(cygpath -w "$CHECK_HOME")"
   fi
   say "proving the candidate runs embedded native code mode"
-  if WASM_AGENT_HOME="$CHECK_HOME_ARG" WASM_AGENT_LUA_ROOT='' \
+  # The installed Lua tree (deploy.sh swaps <install>/lua-core in before calling this) is what the
+  # restarted node will run, so the candidate is proven against it; the binary uses it only when it
+  # verifies (pins + capability digest), and falls back to its compiled-in copy otherwise.
+  CHECK_TREE=""
+  [ -f "$INSTALL_DIR/lua-core/manifest.txt" ] && CHECK_TREE="$INSTALL_DIR/lua-core"
+  if command -v cygpath >/dev/null 2>&1 && [ -n "$CHECK_TREE" ]; then CHECK_TREE="$(cygpath -w "$CHECK_TREE")"; fi
+  if WA_LUA_TREE="$CHECK_TREE" WASM_AGENT_HOME="$CHECK_HOME_ARG" WASM_AGENT_LUA_ROOT='' \
     WA_EMBEDDED_SOURCE_ROOT="$CHECK_ROOT" WA_SCRIPT="$CHECK_SCRIPT" \
     "$NEW" --db "$CHECK_HOME_ARG/embedded.db" >"$CHECK_HOME/check.log" 2>&1; then
     say "native code-mode assets proven"
