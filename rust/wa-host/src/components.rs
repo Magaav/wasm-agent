@@ -32,6 +32,7 @@ use std::time::{Duration, Instant};
 use wasmtime::component::{Component, Linker, ResourceTable};
 use wasmtime::{Config, Engine, Store, StoreLimits, StoreLimitsBuilder};
 use wasmtime_wasi::p2::pipe::{MemoryInputPipe, MemoryOutputPipe};
+use wasmtime_wasi::sockets::SocketAddrUse;
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
 const MEMORY_LIMIT: usize = 256 << 20;
@@ -276,9 +277,29 @@ pub fn run(installed: &Installed, grant: &Grant, stdin: Vec<u8>, timeout_ms: u64
         }
         let allowed = Arc::new(allowed);
         builder.inherit_network();
+        // Two wasmtime 37 → 50 behaviour changes meet here, both of which silently turned a granted
+        // component network into "permission denied" (`Os { code: 2 }` in the guest, EACCES) until
+        // `scripts/test-component-whatsapp-parity.mjs` caught it:
+        //
+        // 1. `WasiCtx`'s blanket TCP/UDP switch: 37 wrote `udp: true, tcp: true` into
+        //    `AllowedNetworkUses::default()`, 50 derives the default, i.e. both are off, and
+        //    `inherit_network` only sets the address check. A `net` grant is what used to make them
+        //    usable, so the switch is set here and not left to the default.
+        // 2. The check itself moved into the socket implementation and is now also asked about the
+        //    *implicit* bind the OS performs during `connect`/`listen`, passing the wildcard address
+        //    with port 0 (`SocketAddrUse::TcpBind`: "the wildcard address for implicit binds"); 37
+        //    checked only the address the guest asked for. A grant names addresses to reach, not an
+        //    ephemeral local port, so the wildcard-bind case is allowed - and only that case:
+        //    `TcpConnect`, `TcpListen`, `TcpAccept` and the UDP uses keep the exact-match check, so
+        //    this cannot widen what the guest reaches or what it may serve.
+        builder.allow_tcp(true);
+        builder.allow_udp(true);
         builder.allow_ip_name_lookup(false);
-        builder.socket_addr_check(move |addr, _use| {
-            let ok = allowed.contains(&addr);
+        builder.socket_addr_check(move |addr, use_| {
+            let implicit_bind = addr.port() == 0
+                && addr.ip().is_unspecified()
+                && matches!(use_, SocketAddrUse::TcpBind | SocketAddrUse::UdpBind);
+            let ok = implicit_bind || allowed.contains(&addr);
             Box::pin(async move { ok })
         });
     }
