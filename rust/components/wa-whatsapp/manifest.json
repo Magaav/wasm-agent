@@ -1,7 +1,7 @@
 {
   "name": "wa-whatsapp",
   "kind": "service",
-  "target": "wasm32-wasip1",
+  "target": "wasm32-wasip2",
   "description": "WhatsApp linked-device client (whatsapp-rust) with host websocket/HTTP and a host-backed store",
   "capabilities": {
     "net": [

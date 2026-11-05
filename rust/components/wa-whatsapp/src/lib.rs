@@ -24,34 +24,14 @@ use wacore::runtime::{AbortHandle, Runtime};
 
 mod store;
 
-mod host {
-    #[link(wasm_import_module = "wa_ws")]
-    extern "C" {
-        pub fn connect(url: *const u8, url_len: i32, origin: *const u8, origin_len: i32) -> i32;
-        pub fn next(h: i32) -> i32;
-        pub fn take(h: i32, ptr: *mut u8, len: i32) -> i32;
-        pub fn send(h: i32, ptr: *const u8, len: i32) -> i32;
-        pub fn close(h: i32) -> i32;
-    }
-    #[link(wasm_import_module = "wa_http")]
-    extern "C" {
-        #[link_name = "start"]
-        pub fn http_start(meta: *const u8, meta_len: i32, body: *const u8, body_len: i32) -> i32;
-        #[link_name = "poll"]
-        pub fn http_poll(id: i32) -> i32;
-        #[link_name = "body_len"]
-        pub fn http_body_len(id: i32) -> i32;
-        #[link_name = "body"]
-        pub fn http_body(id: i32, ptr: *mut u8, len: i32) -> i32;
-        #[link_name = "free"]
-        pub fn http_free(id: i32) -> i32;
-    }
-    #[link(wasm_import_module = "wa_ctl")]
-    extern "C" {
-        pub fn stopping() -> i32;
-    }
-}
-const AGAIN: i32 = -11;
+wit_bindgen::generate!({
+    world: "service-component",
+    path: "../../../wit/kernel",
+});
+
+use wa::kernel::types::Error as KError;
+use wa::kernel::{http as khttp, lifecycle, websocket::Socket};
+
 
 thread_local! {
     static STARTED: Instant = Instant::now();
@@ -67,7 +47,8 @@ macro_rules! say {
 // ---- the reactor: timers and host I/O, driven by the main loop -------------------------------
 
 struct WsSlot {
-    handle: i32,
+    id: u32,
+    socket: Socket,
     events: async_channel::Sender<TransportEvent>,
 }
 
@@ -75,6 +56,7 @@ thread_local! {
     static TIMERS: RefCell<Vec<(Instant, Waker)>> = const { RefCell::new(Vec::new()) };
     static IO_WAKERS: RefCell<Vec<Waker>> = const { RefCell::new(Vec::new()) };
     static SOCKETS: RefCell<Vec<WsSlot>> = const { RefCell::new(Vec::new()) };
+    static NEXT_SOCKET: std::cell::Cell<u32> = const { std::cell::Cell::new(1) };
 }
 
 /// Move host websocket frames into their transports' channels; returns whether anything moved.
@@ -82,26 +64,21 @@ fn pump_sockets() -> bool {
     let mut moved = false;
     SOCKETS.with(|sockets| {
         sockets.borrow_mut().retain(|slot| loop {
-            let len = unsafe { host::next(slot.handle) };
-            if len == AGAIN {
-                return true;
-            }
-            if len < 0 {
-                say!("transport: host websocket {} closed", slot.handle);
-                let _ = slot.events.try_send(TransportEvent::Disconnected(DisconnectReason::StreamEnded));
-                unsafe { host::close(slot.handle) };
-                moved = true;
-                return false;
-            }
-            let mut buf = vec![0u8; len as usize];
-            let got = unsafe { host::take(slot.handle, buf.as_mut_ptr(), len) };
-            if got != len {
-                return true;
-            }
-            moved = true;
-            if slot.events.try_send(TransportEvent::DataReceived(Bytes::from(buf))).is_err() {
-                unsafe { host::close(slot.handle) };
-                return false;
+            match slot.socket.recv() {
+                Ok(data) => {
+                    moved = true;
+                    if slot.events.try_send(TransportEvent::DataReceived(Bytes::from(data))).is_err() {
+                        slot.socket.close();
+                        return false;
+                    }
+                }
+                Err(KError::Again) => return true,
+                Err(_) => {
+                    say!("transport: socket {} closed", slot.id);
+                    let _ = slot.events.try_send(TransportEvent::Disconnected(DisconnectReason::StreamEnded));
+                    moved = true;
+                    return false;
+                }
             }
         })
     });
@@ -190,7 +167,7 @@ impl Runtime for HostRuntime {
 // ---- Transport over wa_ws -------------------------------------------------------------------
 
 struct HostTransport {
-    handle: i32,
+    id: u32,
 }
 unsafe impl Send for HostTransport {}
 unsafe impl Sync for HostTransport {}
@@ -198,14 +175,22 @@ unsafe impl Sync for HostTransport {}
 #[async_trait(?Send)]
 impl Transport for HostTransport {
     async fn send(&self, data: Bytes) -> Result<(), anyhow::Error> {
-        match unsafe { host::send(self.handle, data.as_ptr(), data.len() as i32) } {
-            0 => Ok(()),
-            code => Err(anyhow::anyhow!("wa_ws send {code}")),
-        }
+        SOCKETS.with(|s| match s.borrow().iter().find(|slot| slot.id == self.id) {
+            Some(slot) => slot.socket.send(&data).map_err(|e| anyhow::anyhow!("websocket send: {e:?}")),
+            None => Err(anyhow::anyhow!("websocket closed")),
+        })
     }
     async fn disconnect(&self) {
-        SOCKETS.with(|s| s.borrow_mut().retain(|slot| slot.handle != self.handle));
-        unsafe { host::close(self.handle) };
+        SOCKETS.with(|s| {
+            s.borrow_mut().retain(|slot| {
+                if slot.id == self.id {
+                    slot.socket.close();
+                    false
+                } else {
+                    true
+                }
+            })
+        });
     }
 }
 
@@ -216,17 +201,17 @@ unsafe impl Sync for HostTransportFactory {}
 #[async_trait(?Send)]
 impl TransportFactory for HostTransportFactory {
     async fn create_transport(&self) -> Result<(Arc<dyn Transport>, async_channel::Receiver<TransportEvent>), anyhow::Error> {
-        let url = WHATSAPP_WEB_WS_URL;
-        let origin = WHATSAPP_WEB_ORIGIN;
-        let handle = unsafe { host::connect(url.as_ptr(), url.len() as i32, origin.as_ptr(), origin.len() as i32) };
-        if handle < 0 {
-            return Err(anyhow::anyhow!("wa_ws connect refused or failed ({handle})"));
-        }
+        let socket = Socket::connect(WHATSAPP_WEB_WS_URL, Some(WHATSAPP_WEB_ORIGIN)).map_err(|e| anyhow::anyhow!("websocket connect: {e:?}"))?;
+        let id = NEXT_SOCKET.with(|n| {
+            let id = n.get();
+            n.set(id + 1);
+            id
+        });
         let (tx, rx) = async_channel::unbounded();
         let _ = tx.try_send(TransportEvent::Connected);
-        SOCKETS.with(|s| s.borrow_mut().push(WsSlot { handle, events: tx }));
-        say!("transport: connected (host websocket {handle})");
-        Ok((Arc::new(HostTransport { handle }), rx))
+        SOCKETS.with(|s| s.borrow_mut().push(WsSlot { id, socket, events: tx }));
+        say!("transport: connected (socket {id})");
+        Ok((Arc::new(HostTransport { id }), rx))
     }
 }
 
@@ -236,16 +221,16 @@ struct HostHttp;
 unsafe impl Send for HostHttp {}
 unsafe impl Sync for HostHttp {}
 
-struct HttpWait(i32);
+struct HttpWait(khttp::Pending);
 impl Future for HttpWait {
-    type Output = i32;
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<i32> {
-        match unsafe { host::http_poll(self.0) } {
-            AGAIN => {
+    type Output = Result<khttp::Response, KError>;
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        match self.0.poll() {
+            Err(KError::Again) => {
                 IO_WAKERS.with(|w| w.borrow_mut().push(cx.waker().clone()));
                 Poll::Pending
             }
-            status => Poll::Ready(status),
+            other => Poll::Ready(other),
         }
     }
 }
@@ -253,22 +238,15 @@ impl Future for HttpWait {
 #[async_trait(?Send)]
 impl HttpClient for HostHttp {
     async fn execute(&self, request: HttpRequest) -> anyhow::Result<HttpResponse> {
-        let meta = serde_json::json!({"url": request.url, "method": request.method, "headers": request.headers}).to_string();
-        let body = request.body.unwrap_or_default();
-        let id = unsafe { host::http_start(meta.as_ptr(), meta.len() as i32, body.as_ptr(), body.len() as i32) };
-        if id < 0 {
-            return Err(anyhow::anyhow!("wa_http start refused or failed ({id})"));
-        }
-        let status = HttpWait(id).await;
-        if status < 0 {
-            unsafe { host::http_free(id) };
-            return Err(anyhow::anyhow!("wa_http exchange failed"));
-        }
-        let len = unsafe { host::http_body_len(id) }.max(0);
-        let mut body = vec![0u8; len as usize];
-        unsafe { host::http_body(id, body.as_mut_ptr(), len) };
-        unsafe { host::http_free(id) };
-        Ok(HttpResponse { status_code: status as u16, body })
+        let req = khttp::Request {
+            method: request.method,
+            url: request.url,
+            headers: request.headers.into_iter().collect(),
+            body: request.body.map(|b| b.to_vec()).unwrap_or_default(),
+        };
+        let pending = khttp::Pending::start(&req).map_err(|e| anyhow::anyhow!("http start: {e:?}"))?;
+        let response = HttpWait(pending).await.map_err(|e| anyhow::anyhow!("http exchange: {e:?}"))?;
+        Ok(HttpResponse { status_code: response.status, body: response.body })
     }
 }
 
@@ -300,8 +278,17 @@ impl log::Log for Logger {
 
 // ---- the service ----------------------------------------------------------------------------
 
-fn main() {
-    let config: serde_json::Value = std::env::var("WA_COMPONENT_CONFIG").ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
+struct Service;
+export!(Service);
+
+impl exports::wa::kernel::service::Guest for Service {
+    fn run(config: String) -> Result<(), String> {
+        serve(serde_json::from_str(&config).unwrap_or_default());
+        Ok(())
+    }
+}
+
+fn serve(config: serde_json::Value) {
     let level = match config["log"].as_str().unwrap_or("info") {
         "debug" => log::LevelFilter::Debug,
         "trace" => log::LevelFilter::Trace,
@@ -346,7 +333,10 @@ fn main() {
             .with_http_client(HostHttp)
             .on_qr_code(|code, _timeout| async move { say!("pairing QR: {code}") })
             .on_pair_code(|code, timeout| async move { say!("PAIRING CODE: {code} (valid {}s) - WhatsApp > Linked devices > Link with phone number", timeout.as_secs()) })
-            .on_connected(|_client| async move { say!("CONNECTED") })
+            .on_connected(|_client| async move {
+                say!("CONNECTED");
+                lifecycle::report(lifecycle::Health::Ready, None);
+            })
             .on_logged_out(|_client| async move { say!("LOGGED OUT") })
             .on_message(|ctx| {
                 let line = format!("message chat={} kind={} media={} id={}", ctx.info.source.chat, ctx.info.r#type, ctx.info.media_type, ctx.info.id);
@@ -355,6 +345,7 @@ fn main() {
         if let Some(phone) = pair_phone {
             builder = builder.with_pair_code(wacore::pair_code::PairCodeOptions { phone_number: phone, ..Default::default() });
         }
+        lifecycle::report(lifecycle::Health::Starting, None);
         match builder.build().await {
             Ok(bot) => bot.run().await,
             Err(error) => say!("build failed: {error}"),
@@ -366,7 +357,7 @@ fn main() {
         let moved = pump_sockets();
         wake_io();
         let next_timer = fire_timers();
-        if unsafe { host::stopping() } == 1 {
+        if lifecycle::stopping() {
             say!("wa-whatsapp: stopping");
             return;
         }

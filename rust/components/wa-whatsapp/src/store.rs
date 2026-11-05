@@ -19,40 +19,22 @@ use wacore::store::traits::*;
 use wacore::store::Device;
 use wacore_appstate::processor::AppStateMutationMAC;
 
-mod kv {
-    #[link(wasm_import_module = "wa_kv")]
-    extern "C" {
-        pub fn put(k: *const u8, kl: i32, v: *const u8, vl: i32) -> i32;
-        pub fn del(k: *const u8, kl: i32) -> i32;
-        pub fn del_prefix(p: *const u8, pl: i32) -> i32;
-        pub fn get(k: *const u8, kl: i32) -> i32;
-        pub fn dump(p: *const u8, pl: i32) -> i32;
-        pub fn take(ptr: *mut u8, len: i32) -> i32;
-    }
-}
+use crate::wa::kernel::kv;
 
-fn io(what: &str) -> StoreError {
-    StoreError::Io(std::io::Error::other(format!("wa_kv {what} failed")))
+fn io(what: &str, error: crate::wa::kernel::types::Error) -> StoreError {
+    StoreError::Io(std::io::Error::other(format!("kv {what} failed: {error:?}")))
 }
 fn put(key: &str, value: &[u8]) -> Result<()> {
-    match unsafe { kv::put(key.as_ptr(), key.len() as i32, value.as_ptr(), value.len() as i32) } {
-        0 => Ok(()),
-        _ => Err(io("put")),
-    }
+    kv::set(key.as_bytes(), value).map_err(|e| io("set", e))
 }
 fn del(key: &str) -> Result<()> {
-    if unsafe { kv::del(key.as_ptr(), key.len() as i32) } < 0 { Err(io("del")) } else { Ok(()) }
+    kv::delete(key.as_bytes()).map_err(|e| io("delete", e))
 }
 fn del_prefix(prefix: &str) -> Result<()> {
-    if unsafe { kv::del_prefix(prefix.as_ptr(), prefix.len() as i32) } < 0 { Err(io("del_prefix")) } else { Ok(()) }
+    kv::delete_prefix(prefix.as_bytes()).map(|_| ()).map_err(|e| io("delete-prefix", e))
 }
 fn get(key: &str) -> Option<Vec<u8>> {
-    let n = unsafe { kv::get(key.as_ptr(), key.len() as i32) };
-    if n < 0 {
-        return None;
-    }
-    let mut buf = vec![0u8; n as usize];
-    (unsafe { kv::take(buf.as_mut_ptr(), n) } == n).then_some(buf)
+    kv::get(key.as_bytes()).ok().flatten()
 }
 fn json<T: serde::Serialize>(value: &T) -> Result<Vec<u8>> {
     serde_json::to_vec(value).map_err(|e| StoreError::Serialization(Box::new(e)))
@@ -77,25 +59,16 @@ impl PersistentBackend {
     /// Open the store and replay everything persisted into memory. Returns the entry count.
     pub async fn open() -> Result<(Self, usize)> {
         let backend = PersistentBackend { inner: InMemoryBackend::new() };
-        let n = unsafe { kv::dump("".as_ptr(), 0) };
-        if n < 0 {
-            return Err(io("dump"));
-        }
-        let mut buf = vec![0u8; n as usize];
-        if n > 0 && unsafe { kv::take(buf.as_mut_ptr(), n) } != n {
-            return Err(io("take"));
-        }
-        let mut entries = Vec::new();
-        let mut at = 0usize;
-        let mut field = |at: &mut usize| -> Option<Vec<u8>> {
-            let len = u32::from_le_bytes(buf.get(*at..*at + 4)?.try_into().ok()?) as usize;
-            let value = buf.get(*at + 4..*at + 4 + len)?.to_vec();
-            *at += 4 + len;
-            Some(value)
-        };
-        while at < buf.len() {
-            let (Some(k), Some(v)) = (field(&mut at), field(&mut at)) else { break };
-            entries.push((String::from_utf8_lossy(&k).into_owned(), v));
+        // Replay in pages ordered by key (kv.scan with an exclusive cursor).
+        let mut entries: Vec<(String, Vec<u8>)> = Vec::new();
+        let mut cursor: Option<Vec<u8>> = None;
+        loop {
+            let page = kv::scan(b"", cursor.as_deref(), 1000).map_err(|e| io("scan", e))?;
+            if page.is_empty() {
+                break;
+            }
+            cursor = page.last().map(|e| e.key.clone());
+            entries.extend(page.into_iter().map(|e| (String::from_utf8_lossy(&e.key).into_owned(), e.value)));
         }
         // The device first: everything else hangs off it.
         entries.sort_by_key(|(k, _)| k != "dev");

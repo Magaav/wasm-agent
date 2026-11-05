@@ -32,6 +32,8 @@ for crate in rust/components/*/; do
   ensure_target "$TARGET"
   cargo build --manifest-path "$crate/Cargo.toml" --target "$TARGET" --release ${WA_COMPONENTS_OFFLINE:+--offline} >/dev/null
   wasm="$crate/target/$TARGET/release/$name.wasm"
+  # A library component (cdylib) is named with underscores.
+  [ -f "$wasm" ] || wasm="$crate/target/$TARGET/release/${name//-/_}.wasm"
   [ -f "$wasm" ] || { echo "skip $name: no $wasm produced" >&2; continue; }
   # Install atomically: manifest and module first under temporary names, pin last, so a reader
   # never pairs a new module with an old pin (it would be refused, never run).
