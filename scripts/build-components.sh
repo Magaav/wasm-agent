@@ -11,10 +11,13 @@ export PATH="$HOME/.cargo/bin:$PATH"
 
 OUT="${WA_COMPONENTS_DIR:-$HOME/.wasm-agent/components}"
 mkdir -p "$OUT"
-TARGET=wasm32-wasip2
-if command -v rustup >/dev/null 2>&1 && ! rustup target list --installed | grep -qx "$TARGET"; then
-  rustup target add "$TARGET" >/dev/null
-fi
+# Request components (MCP) are wasm32-wasip2; long-lived services are wasm32-wasip1 (what Go's
+# GOOS=wasip1 produces). A manifest may name its target; the default is wasm32-wasip2.
+ensure_target() {
+  if command -v rustup >/dev/null 2>&1 && ! rustup target list --installed | grep -qx "$1"; then
+    rustup target add "$1" >/dev/null
+  fi
+}
 
 sha() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'; else shasum -a 256 "$1" | awk '{print $1}'; fi; }
 
@@ -24,6 +27,9 @@ for crate in rust/components/*/; do
   name="$(basename "$crate")"
   if [ "$#" -gt 0 ] && ! printf '%s\n' "$@" | grep -qx "$name"; then continue; fi
   [ -f "$crate/manifest.json" ] || { echo "skip $name: no manifest.json" >&2; continue; }
+  TARGET="$(sed -n 's/.*"target"[[:space:]]*:[[:space:]]*"\([a-z0-9_-]*\)".*/\1/p' "$crate/manifest.json" | head -1)"
+  TARGET="${TARGET:-wasm32-wasip2}"
+  ensure_target "$TARGET"
   cargo build --manifest-path "$crate/Cargo.toml" --target "$TARGET" --release ${WA_COMPONENTS_OFFLINE:+--offline} >/dev/null
   wasm="$crate/target/$TARGET/release/$name.wasm"
   [ -f "$wasm" ] || { echo "skip $name: no $wasm produced" >&2; continue; }

@@ -174,6 +174,7 @@ pub const REGISTRY: &[Capability] = &[
     upvalue!("invoke", RunsProcess, crate::host::invoke, "Invoke one registered WASM plugin with JSON arguments"),
     // ---- WASI components ---------------------------------------------------------------------
     plain!("components", ReadOnly, crate::components::components, "List installed WASI components: pin state and declared capabilities"),
+    plain!("service", RunsProcess, crate::services::service, "Start, stop, inspect or read the log of a supervised long-lived WASI service component, with exactly its granted capabilities"),
     plain!("component_mcp", RunsProcess, crate::components::component_mcp, "One MCP request (probe or call) against a pinned WASI component, with exactly the granted env/file/network capabilities"),
     // ---- audio -------------------------------------------------------------------------------
     // The contract is one entry because it is one capability with two calls: `capture` (the ear)

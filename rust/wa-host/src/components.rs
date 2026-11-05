@@ -63,7 +63,7 @@ fn valid_name(name: &str) -> bool {
 
 /// One engine for every component: component model on, epoch interruption for the deadline, and a
 /// single ticker thread that advances the epoch.
-fn engine() -> Result<Engine> {
+pub(crate) fn engine() -> Result<Engine> {
     static ENGINE: OnceLock<Engine> = OnceLock::new();
     if let Some(engine) = ENGINE.get() {
         return Ok(engine.clone());
@@ -495,6 +495,10 @@ pub extern "C-unwind" fn components(l: *mut crate::lua::LuaState) -> std::os::ra
     1
 }
 
+/// Tests that point WA_COMPONENTS_DIR somewhere hold this: the variable is process-wide.
+#[cfg(test)]
+pub(crate) static TEST_DIR_LOCK: Mutex<()> = Mutex::new(());
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -519,6 +523,7 @@ mod tests {
 
     #[test]
     fn names_and_pins() {
+        let _dir = TEST_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         assert!(valid_name("mcp-whatsapp"));
         assert!(!valid_name("../x") && !valid_name("X") && !valid_name(""));
         let dir = std::env::temp_dir().join(format!("wa-components-{}", std::process::id()));

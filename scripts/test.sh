@@ -271,6 +271,15 @@ gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-ho
 # incremental reindex are part of the contract, not a side project.
 gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-graph
 gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-host graph::tests
+# WASI components and service components (docs/COMPONENTS.md, docs/SERVICE-COMPONENTS.md). The
+# end-to-end service test runs the svc-echo fixture when a wasm32-wasip1 toolchain can build it.
+SERVICE_FIXTURE_DIR="$(mktemp -d)"
+if WA_COMPONENTS_DIR="$SERVICE_FIXTURE_DIR" bash scripts/build-components.sh svc-echo >/dev/null 2>&1; then
+  export WA_TEST_SERVICE_WASM="$SERVICE_FIXTURE_DIR/svc-echo.wasm"
+else
+  echo "note: svc-echo not built (no wasm32-wasip1 toolchain?); service end-to-end test skipped"
+fi
+gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-host -- components::tests services::tests capabilities::tests
 # Run the serve-level invariants, each a measured regression: routing by session (a wake carries its
 # conversation in the body's `thread`, not the auth header) and the UI version tracking content rather
 # than mtime (a `cp -f` of identical files must not force every open page to reload).
@@ -1100,10 +1109,11 @@ MCP_TEST_SOURCE="$WASM_AGENT_LUA_ROOT" WA_NODE="$MCP_NODE" WA_MCP_SCRIPT_DIR="$W
 # Component MCP transport (docs/COMPONENTS.md): the mcp-echo fixture when a wasm32-wasip2 toolchain is
 # here; without one the definition/refusal checks still run and the script says what it skipped.
 COMPONENTS_PROOF="$WASM_AGENT_HOME/components-proof"
-WA_COMPONENTS_DIR="$COMPONENTS_PROOF" bash scripts/build-components.sh mcp-echo mcp-whatsapp >/dev/null 2>&1 \
+WA_COMPONENTS_DIR="$COMPONENTS_PROOF" bash scripts/build-components.sh mcp-echo mcp-whatsapp svc-echo >/dev/null 2>&1 \
   || echo "note: mcp-echo component not built (no wasm32-wasip2 toolchain?); component runtime checks skipped"
 WA_COMPONENTS_DIR="$COMPONENTS_PROOF" WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-mcp-component.lua" "$BIN" --db "$DB.component" | grep 'component checks:'
 WA_BIN="$BIN" WA_COMPONENTS_DIR="$COMPONENTS_PROOF" gate_run node --test --test-reporter=tap scripts/test-component-whatsapp-parity.mjs
+WA_COMPONENTS_DIR="$COMPONENTS_PROOF" WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-service-component.lua" "$BIN" --db "$DB.service" | grep 'service checks:'
 gate_run node --test --test-reporter=tap scripts/test-mcp.mjs scripts/test-mcp-whatsapp.mjs scripts/test-mcp-session.mjs scripts/test-web.mjs scripts/test-mcp-runtime-closure.mjs scripts/test-whatsapp-transcript-watchdog.mjs
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-envelope.lua" "$BIN" --db "$DB.envelope" | grep 'envelope ok'
 MCP_RECOVERY_BIN="$BIN"

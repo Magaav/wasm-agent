@@ -76,6 +76,7 @@ Built-in tools not declared at bootstrap, as the progressive prompt lists them (
 - `symbol_source_many`: Retrieve several selected symbol implementations
 - `write_many`: Preflight independent writes, retaining diff and undo evidence
 - `mcp`: List and manage MCP connectors; new or edited ones stay disabled until enabled
+- `services`: List and manage long-lived WASI service components: start, stop, logs
 - `capture_inspect`: Inspect retained model-request captures as bounded metadata before reading raw dumps
 <!-- /generated -->
 
@@ -139,6 +140,7 @@ runs on the client too, while `bash` runs on this node.
 | `symbol_source_many` | `requests` | Retrieve several selected symbol implementations |
 | `write_many` | `requests` | Preflight independent writes, retaining diff and undo evidence |
 | `mcp` | `action?` `definition?` `expected_revision?` `id?` | List and manage MCP connectors; new or edited ones stay disabled until enabled |
+| `services` | `action?` `bytes?` `definition?` `expected_revision?` `name?` | List and manage long-lived WASI service components: start, stop, logs |
 | `capture_inspect` | `path` `item_index?` `limit?` `offset?` `request_index?` `snapshot?` `view?` | Inspect retained model-request captures as bounded metadata before reading raw dumps |
 | `web_search` | `query` `limit?` `refresh?` | Search public web sources with retained evidence |
 | `web_read` | `limit?` `offset?` `pending_ref?` `ref?` `refresh?` `url?` | Read a public source or page an immutable cache ref |

@@ -524,6 +524,8 @@ end
 add_batches(M.admin)
 M.admin[#M.admin+1]=schema('mcp','List/manage explicit MCP connectors. New/edited definitions remain disabled; probe never grants tool/send/job authority.',{
  action={type='string',enum={'list','put','probe','enable','disable'}},id={type='string'},expected_revision={type='integer',minimum=0,description='Required for changes/probes: exact registry revision from list. Stale state refuses.'},definition={type='object',description='Reviewed connector: id/name, transport stdio or http, program/args or url, optional cwd, environment-reference env/headers, timeout_seconds; tools maps exact tool names to locally approved read/write.'}},nil)
+M.admin[#M.admin+1]=schema('services','List/manage long-lived WASI service components (docs/SERVICE-COMPONENTS.md): put a definition (disabled), enable (start now and at boot), disable, restart, remove, status, logs. Grants are references: env/file_env names or a file path, exact net addresses.',{
+ action={type='string',enum={'list','put','enable','disable','restart','remove','status','logs'}},name={type='string'},expected_revision={type='integer',minimum=0,description='Required for changes: exact registry revision from list.'},bytes={type='integer',minimum=1,maximum=262144},definition={type='object',description='name (an installed kind:service component), env/file_env references, net addresses (host:port, *.suffix:port), config object.'}},nil)
 -- Stable per-interpreter rollback knob, never automatic failure fallback or
 -- per-round schema shuffling. The operator explicitly requested these APIs.
 local batches_enabled=host.getenv('WASM_AGENT_BATCH_TOOLS')~='0'
@@ -550,7 +552,7 @@ function M.batch_enabled()return batches_enabled end
 -- listed here is a WASM plugin.
 M.tier_of = {
   capture_inspect='environment',
-  mcp='mcp', web_search='mcp', web_read='mcp',
+  mcp='mcp', web_search='mcp', web_read='mcp', services='mcp',
   remember = "memory", recall = "memory", memories = "memory", forget = "memory",
   skill = "skills",
   capabilities = "capabilities", tool_search='capabilities', tool_call='capabilities',
@@ -658,6 +660,7 @@ local CUES = {
   wave_autoflush = "Control coordinator acceptance and durable wave-end installation obligation",
   integrate = "Land an orchestration worker's tested tip; never deploy",
   mcp = "List and manage MCP connectors; new or edited ones stay disabled until enabled",
+  services = "List and manage long-lived WASI service components: start, stop, logs",
   capture_inspect = "Inspect retained model-request captures as bounded metadata before reading raw dumps",
   spell_save = "Save a verified command sequence as a reusable spell",
   spell_run = "Replay a saved spell",
@@ -1279,6 +1282,9 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
   if name=='mcp' then
     local control={role=role,subagent=ctx.subagent,session_id=ctx.session_id,cwd=session_cwd(memory,ctx)}
     return mcp.control(args,control)
+  end
+  if name=='services' then
+    return dofile('lua/core/services.lua').control(args,{role=role,subagent=ctx.subagent,session_id=ctx.session_id})
   end
   if name:sub(1,5)=='peer_' then
     if not is_master(role) then return {error='forbidden_for_role:'..role} end

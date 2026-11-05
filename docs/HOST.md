@@ -627,6 +627,7 @@ relay                network
 resource             writes files
 run_cancelled        read-only
 runtime_info         read-only
+service              runs a process
 sha256               read-only
 sign                 read-only
 sleep                read-only

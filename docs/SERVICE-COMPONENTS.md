@@ -43,9 +43,31 @@ Existing: `env`, `file_env`, `net`, `config`. New for services:
 - Every import is non-blocking (EAGAIN + guest yield): a blocking host call freezes the Go runtime.
 - Go `wasip1` is single-threaded: CPU-heavy work stays on host capabilities (STT/OCR).
 
+## Built so far (step 1, 05/11)
+
+- **Host runner** `rust/wa-host/src/services.rs`, capability `host.service` (start / stop / status / logs):
+  wasip1 core modules on their own thread, `wa_sock` (exact or `*.suffix:port` allowlist, 64 sockets,
+  non-blocking), `wa_ctl.stopping`, 5 s grace then epoch trap, restart with backoff 1 s doubling to
+  60 s (reset after 10 min healthy), memory from `limits.memory_mb` (default 512), stdout/stderr to
+  `<components>/<name>.service.log` (rotated at 8 MiB per start). Start is idempotent per pin.
+- **Registry + tool** `lua/core/services.lua`, admin tool `services`: `put` (stored disabled),
+  `enable` (start now and at boot), `disable`, `restart`, `remove`, `status`, `logs`; master only, never
+  a child agent; definitions change only while disabled. Enabled services start when `wa serve` loads.
+- **Manifest** `"kind": "service"`, `"target": "wasm32-wasip1"` (what `build-components.sh` builds).
+- **Proof** fixture `rust/components/svc-echo`: Rust test (real local echo server: granted dial, refused
+  dial `-13`, clean stop, crash restart `exit_3`, undeclared grant refused) and
+  `scripts/test-service-component.lua` (23 checks, registry lifecycle). Both in `scripts/test.sh`.
+
+Example (a definition the `services` tool stores, then `enable`):
+
+```json
+{"name":"wa-connector","net":["web.whatsapp.com:443","*.whatsapp.net:443"],
+ "file_env":{"WA_STATE_KEY":"/home/ubuntu/.local/state/wa-whatsapp/api.token"},"config":{"language":"pt"}}
+```
+
 ## Order of work
 
-1. **Host: service runner** — wasip1 core modules (wasmtime-wasi p1) with `wa_sock` (from the spike,
+1. ~~**Host: service runner**~~ (built, above) — wasip1 core modules (wasmtime-wasi p1) with `wa_sock` (from the spike,
    hardened: allowlist with wildcards, per-service socket table, limits), start/stop/restart, status in
    `host.components()`.
 2. **Host: `wa_sql`** — SQLite through rusqlite, one directory per service, quota.

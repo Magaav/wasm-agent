@@ -1,0 +1,15 @@
+[package]
+name = "svc-echo"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Fixture service component (wasm32-wasip1) for the service runner (rust/wa-host/src/services.rs).
+[workspace]
+
+[dependencies]
+serde_json = "1"
+
+[profile.release]
+opt-level = "s"
+strip = true

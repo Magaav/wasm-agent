@@ -1478,3 +1478,6 @@ function wa_observability_events(id,cursor,since,session,node)
   result.node_name=nodeslib.node_name()
   return json.encode(result)
 end
+
+-- Long-lived WASI service components marked enabled start with the node (idempotent in the host).
+pcall(function() dofile('lua/core/services.lua').autostart() end)
