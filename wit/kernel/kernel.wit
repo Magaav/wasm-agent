@@ -79,9 +79,9 @@ interface speech {
         /// The transcript once ready; `again` while queued or running; `failed(reason)` on error
         /// (`no_speech_detected`, `audio_too_large`, `worker_stalled`, …).
         poll: func() -> result<transcript, error>;
-        /// Streaming: the text segments recognized so far, from index `from` on (in order).
+        /// Streaming: the text segments recognized so far, after the first `skip` (in order).
         /// Grows while the job runs; the complete text is still `poll`'s transcript.
-        segments: func(from: u32) -> list<string>;
+        segments: func(skip: u32) -> list<string>;
     }
 }
 

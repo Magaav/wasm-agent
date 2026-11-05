@@ -75,6 +75,50 @@ preamble (component vs core module), so wasip1 modules keep working. `wa-whatsap
 through `lifecycle.report` (`status` shows it). Verified on wasm_the_first: 5372 entries restored,
 resumed IK handshake, CONNECTED in 0.68 s, live messages.
 
+## Speech and posting parity (B2, 05/11)
+
+**`wa:kernel/speech`** (manifest `capabilities.stt: true`): `job.start(audio, mime, language)`,
+`job.poll()` (the full transcript, or `again`), and `job.segments(from)` - the segment texts
+recognized so far, for streaming. The host (`service_stt.rs`) runs the node's faster-whisper worker
+(`scripts/whatsapp-stt-local.py --worker`, the same one the Go connector uses), one job at a time,
+under `nice -n 10`. It is **started when the component starts** (the model loads before the first
+note) and never stopped for idleness unless `WA_STT_IDLE_SECONDS` > 0. Segment text crosses only the
+worker pipe (`"segments": true` in the request, which the Go connector never sends), never a log.
+
+**`wa-whatsapp` pipeline** (Rust, `rust/components/wa-whatsapp/src`):
+
+| module | does |
+| --- | --- |
+| `queue.rs` | the seam: `enqueue` / `take` / `done` / `fail` / `expire_stale`, one in flight, with a `Policy` (fresh window, retry backoff, attempts) and `Notice`s for what it gives up. A shared `wa:queue` component (WASI 0.3, kv-backed, future/stream, remote STT workers via the relay) replaces it later without touching the pipeline |
+| `posting.rs` | allowlist gate, held chats, Go-identical parts (`🤖 _Copiloto_`, 2500 characters, `(i/n)`), post-then-edit pacing |
+| `alerts.rs` | own-chat log, Go-identical wording, ≤ 1 message a minute, 12 listed, dropped after 6 h |
+| `lib.rs` | glue: admit (unsupported/fence/dedup) → download → recognize (segments) → post as a reply quoting the audio → kv record `tx/<chat>/<id>` |
+
+Configuration (the service definition's `config`):
+
+| key | default | meaning |
+| --- | --- | --- |
+| `language` | `pt` | recognizer language hint (`pt`, `en`, `auto`) |
+| `post_transcripts` | `false` | posting master switch |
+| `post_allow` | `[]` | where posting may happen: `"own"` (the account's own chat, PN or LID), exact chat JIDs, or `"*"` (cutover). Empty = nowhere |
+| `held_chats` | `[]` | chats whose posting is held (transcribed and recorded, `post_held` alert) |
+| `alerts` | `false` | send the own-chat log (off while the Go connector also sends it) |
+| `stream_edits` | `false` | post-then-edit for notes ≥ `stream_min_seconds` |
+| `stream_min_seconds` | `15` | streaming threshold (declared audio length) |
+| `edit_interval_seconds` | `5` | at most one edit per interval; the final edit always goes |
+| `header_tag` | none | marker after the header (`🤖 _Copiloto_ · wasm`) to tell the component's posts from the Go connector's in the own chat during B2 |
+| `fresh_seconds` | `300` | the fresh window (`WA_WHATSAPP_FRESH_SECONDS` semantics) |
+
+Rules kept from the Go connector: a voice note not picked up within the window expires and is never
+transcribed late; a ready transcript not sent within the window is never posted; unknown sends never
+auto-retry; a voice note already recorded in kv is never processed again (re-delivery, restart);
+history sync is never posted; `status@broadcast` and newsletters are ignored; view-once, oversized,
+untrusted-timestamp audio is `unsupported`; a revoke/edit naming a message ID fences it (never
+transcribed, never posted, even if it arrives during the decode). Not carried over yet (B3
+prerequisites): the Go journal's unproven-mutation chat holds (only the `held_chats` list), the
+express lane (one recognizer here), a durable queue across restarts (in memory; the `wa:queue`
+component brings it), chat titles for groups in alerts.
+
 ## Decision 05/11: Rust, not Go
 
 The spike proved whatsmeow-in-Go reaches WhatsApp from wasip1, but the owner chose the lightest

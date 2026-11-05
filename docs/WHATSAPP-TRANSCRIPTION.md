@@ -71,6 +71,23 @@ A transcript is worth posting only while the conversation is live.
   the reason; never audio or transcript text. Undeliverable alerts drop after 6 h.
 - Schema: additive (`outbox.created`, table `alerts`); an older release ignores both.
 
+## The wasm component path (B2, 2026-11-05)
+
+The `wa-whatsapp` service component on openclaw (whatsapp-rust on `wa:kernel`) runs the same
+pipeline in parallel with this connector, for the cutover (B3). Its rules are this document's:
+5-minute freshness, no old reposts, reply quoting the audio, the same `🤖 _Copiloto_` parts, the
+same own-chat log wording. Posting is gated by an allowlist (`post_allow`); while this connector is
+the production poster the component may post only into the own chat (`"own"`), so a test never
+reaches a real chat. Details and settings: [SERVICE-COMPONENTS.md](SERVICE-COMPONENTS.md)
+("Speech and posting parity").
+
+New there, not here: **post-then-edit streaming** (`stream_edits`, off by default). For a voice
+note of at least 15 s, the first recognized segments go out as the reply within seconds
+(`🤖 _Copiloto_ ⏳` … `…`), the same message is edited as more segments arrive (at most once per
+5 s), and the final edit is the full text without the marker. Short notes get one post. The
+recognizer worker accepts `"segments": true` per request to stream segment text; this connector
+does not ask for it, so its progress lines stay timings-only.
+
 ## Receive → transcript path (2026-10-27)
 
 Goal: an audio never ends failed because it is long or the host is slow, and a

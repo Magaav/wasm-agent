@@ -148,7 +148,7 @@ impl Future for YieldOnce {
 // `post_transcripts: true` AND the chat is in `post_allow` (the native connector is the poster
 // meanwhile; the B2 deployment allows only the own chat).
 
-use whatsapp_rust::waproto::whatsapp as wa;
+use whatsapp_rust::waproto::whatsapp as wap;
 use wacore::proto_helpers::{MessageBuilderExt, MessageExt};
 
 struct AudioJob {
@@ -159,8 +159,8 @@ struct AudioJob {
     sent_ms: i64,
     received_ms: i64,
     /// The whole received message, quoted by the transcript (the audio bubble above the reply).
-    message: Arc<wa::Message>,
-    audio: wa::message::AudioMessage,
+    message: Arc<wap::Message>,
+    audio: wap::message::AudioMessage,
 }
 
 enum Outcome {
@@ -277,12 +277,12 @@ struct Posted {
     edit_errors: u32,
 }
 
-async fn send(client: &whatsapp_rust::Client, chat: &whatsapp_rust::Jid, body: String, context: &wa::ContextInfo) -> Result<String, String> {
-    client.send_message(chat.clone(), wa::Message::text_with_context(body, context.clone())).await.map(|r| r.message_id).map_err(|e| e.to_string())
+async fn send(client: &whatsapp_rust::Client, chat: &whatsapp_rust::Jid, body: String, context: &wap::ContextInfo) -> Result<String, String> {
+    client.send_message(chat.clone(), wap::Message::text_with_context(body, context.clone())).await.map(|r| r.message_id).map_err(|e| e.to_string())
 }
 
-async fn edit(client: &whatsapp_rust::Client, chat: &whatsapp_rust::Jid, id: &str, body: String, context: &wa::ContextInfo) -> Result<(), String> {
-    client.edit_message(chat.clone(), id.to_string(), wa::Message::text_with_context(body, context.clone())).await.map(|_| ()).map_err(|e| e.to_string())
+async fn edit(client: &whatsapp_rust::Client, chat: &whatsapp_rust::Jid, id: &str, body: String, context: &wap::ContextInfo) -> Result<(), String> {
+    client.edit_message(chat.clone(), id.to_string(), wap::Message::text_with_context(body, context.clone())).await.map(|_| ()).map_err(|e| e.to_string())
 }
 
 /// One voice note, start to finish. Returns how it ended; the main loop tells the queue.
@@ -315,6 +315,7 @@ async fn process(job: &AudioJob, language: &str, cfg: &posting::PostConfig) -> O
     let context = wacore::proto_helpers::build_quote_context_with_info(&job.id, &job.sender, &job.chat, &job.chat, &job.message);
     let mut posted = Posted { first_id: None, first_ms: None, edits: 0, edit_errors: 0 };
     let mut pacer = posting::EditPacer::new(cfg.edit_interval_ms);
+    let header = cfg.header();
     let mut so_far = String::new();
     let mut seen = 0u32;
     let result = loop {
@@ -335,7 +336,7 @@ async fn process(job: &AudioJob, language: &str, cfg: &posting::PostConfig) -> O
                 let now = now_ms();
                 if pacer.ready(now) && !fenced(&job.id) {
                     match &posted.first_id {
-                        None => match send(&client, &job.chat, posting::partial(&so_far), &context).await {
+                        None => match send(&client, &job.chat, posting::partial(&so_far, &header), &context).await {
                             Ok(id) => {
                                 posted.first_id = Some(id);
                                 posted.first_ms = Some(now_ms());
@@ -344,7 +345,7 @@ async fn process(job: &AudioJob, language: &str, cfg: &posting::PostConfig) -> O
                             Err(error) => say!("transcript partial post failed chat={chat} id={} reason={error}", job.id),
                         },
                         Some(first) => {
-                            match edit(&client, &job.chat, first, posting::partial(&so_far), &context).await {
+                            match edit(&client, &job.chat, first, posting::partial(&so_far, &header), &context).await {
                                 Ok(()) => posted.edits += 1,
                                 Err(error) => {
                                     posted.edit_errors += 1;
@@ -407,7 +408,7 @@ async fn process(job: &AudioJob, language: &str, cfg: &posting::PostConfig) -> O
         alert(&chat, &job.title, "post_expired", "post_stale_over_5m", job.sent_ms);
         return Outcome::Done;
     }
-    let parts = posting::chunks(&transcript.text);
+    let parts = posting::chunks(&transcript.text, &header);
     let mut ids = Vec::new();
     let mut failure = None;
     for (i, part) in parts.iter().enumerate() {
@@ -513,7 +514,7 @@ fn send_alerts(spawner: &LocalSpawner, enabled: bool) {
     let Some(text) = ALERTS.with(|a| a.borrow_mut().due(now)) else { return };
     ALERT_SENDING.with(|s| s.set(true));
     let _ = spawner.spawn_local(async move {
-        match client.send_message(own, wa::Message::text(text)).await {
+        match client.send_message(own, wap::Message::text(text)).await {
             Ok(_) => {
                 ALERTS.with(|a| a.borrow_mut().sent(now_ms()));
                 say!("alerts sent (own chat)");
@@ -756,7 +757,7 @@ fn serve(config: serde_json::Value) {
                 // Exact per-message fences: a revoke or edit names the message ID it changes.
                 if let Some(pm) = base.protocol_message.as_option() {
                     let kind = pm.r#type;
-                    if kind == Some(wa::message::protocol_message::Type::REVOKE) || kind == Some(wa::message::protocol_message::Type::MESSAGE_EDIT) {
+                    if kind == Some(wap::message::protocol_message::Type::REVOKE) || kind == Some(wap::message::protocol_message::Type::MESSAGE_EDIT) {
                         if let Some(id) = pm.key.as_option().and_then(|k| k.id.clone()) {
                             INBOX_FENCES.with(|f| f.borrow_mut().push(id));
                         }

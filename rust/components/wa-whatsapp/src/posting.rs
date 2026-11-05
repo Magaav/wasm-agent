@@ -19,6 +19,9 @@ pub struct PostConfig {
     pub stream_edits: bool,
     pub stream_min_seconds: u32,
     pub edit_interval_ms: i64,
+    /// Optional marker after the header ("🤖 _Copiloto_ · wasm"), to tell the component's posts
+    /// from the Go connector's while both post into the own chat (B2). Empty = Go-identical.
+    pub tag: String,
 }
 
 impl PostConfig {
@@ -32,6 +35,7 @@ impl PostConfig {
             stream_edits: v["stream_edits"] == serde_json::json!(true),
             stream_min_seconds: v["stream_min_seconds"].as_u64().unwrap_or(15).min(3600) as u32,
             edit_interval_ms: v["edit_interval_seconds"].as_u64().unwrap_or(5).clamp(2, 60) as i64 * 1000,
+            tag: v["header_tag"].as_str().unwrap_or("").chars().filter(|c| !c.is_control()).take(24).collect(),
         }
     }
 
@@ -58,25 +62,29 @@ impl PostConfig {
     pub fn streams(&self, declared_seconds: u32) -> bool {
         self.stream_edits && declared_seconds >= self.stream_min_seconds
     }
+
+    pub fn header(&self) -> String {
+        if self.tag.is_empty() { HEADER.to_string() } else { format!("{HEADER} · {}", self.tag) }
+    }
 }
 
 /// Split into marked parts of at most 2500 characters, like the Go connector:
 /// "🤖 _Copiloto_\n<text>" or "🤖 _Copiloto_ (i/n)\n<part>".
-pub fn chunks(text: &str) -> Vec<String> {
+pub fn chunks(text: &str, header: &str) -> Vec<String> {
     let runes: Vec<char> = text.chars().collect();
     let parts: Vec<String> = runes.chunks(PART_RUNES).map(|c| c.iter().collect()).collect();
     let n = parts.len();
     parts
         .into_iter()
         .enumerate()
-        .map(|(i, p)| if n == 1 { format!("{HEADER}\n{p}") } else { format!("{HEADER} ({}/{n})\n{p}", i + 1) })
+        .map(|(i, p)| if n == 1 { format!("{header}\n{p}") } else { format!("{header} ({}/{n})\n{p}", i + 1) })
         .collect()
 }
 
 /// The in-progress body while streaming: the text so far (capped to one part), marked unfinished.
-pub fn partial(text: &str) -> String {
+pub fn partial(text: &str, header: &str) -> String {
     let capped: String = text.chars().take(PART_RUNES).collect();
-    format!("{HEADER} ⏳\n{capped} …")
+    format!("{header} ⏳\n{capped} …")
 }
 
 /// At most one edit per interval; the final edit always goes.
@@ -128,13 +136,15 @@ mod tests {
 
     #[test]
     fn chunks_match_the_go_format() {
-        assert_eq!(chunks("olá"), vec!["🤖 _Copiloto_\nolá".to_string()]);
+        assert_eq!(chunks("olá", HEADER), vec!["🤖 _Copiloto_\nolá".to_string()]);
+        let tagged = cfg(serde_json::json!({"header_tag": "wasm"}));
+        assert_eq!(chunks("olá", &tagged.header()), vec!["🤖 _Copiloto_ · wasm\nolá".to_string()]);
         let long = "a".repeat(5001);
-        let parts = chunks(&long);
+        let parts = chunks(&long, HEADER);
         assert_eq!(parts.len(), 3);
         assert!(parts[0].starts_with("🤖 _Copiloto_ (1/3)\n") && parts[2].starts_with("🤖 _Copiloto_ (3/3)\na"));
         let accented = "é".repeat(2500);
-        assert_eq!(chunks(&accented).len(), 1, "split on characters, not bytes");
+        assert_eq!(chunks(&accented, HEADER).len(), 1, "split on characters, not bytes");
     }
 
     #[test]
@@ -149,6 +159,6 @@ mod tests {
         assert!(p.ready(5_000));
         p.mark(5_000, true);
         assert_eq!(p.edits, 1);
-        assert!(partial("abc").ends_with("abc …") && partial("abc").starts_with("🤖 _Copiloto_ ⏳"));
+        assert!(partial("abc", HEADER).ends_with("abc …") && partial("abc", HEADER).starts_with("🤖 _Copiloto_ ⏳"));
     }
 }
