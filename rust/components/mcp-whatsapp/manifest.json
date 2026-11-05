@@ -1,0 +1,10 @@
+{
+  "name": "mcp-whatsapp",
+  "kind": "mcp",
+  "description": "WhatsApp linked-device MCP read tools over the local connector API (loopback only)",
+  "capabilities": {
+    "env": ["WA_MCP_WHATSAPP_ACCOUNT", "WA_MCP_WHATSAPP_GENERATION", "WA_MCP_WHATSAPP_URL"],
+    "file_env": ["WA_MCP_WHATSAPP_TOKEN"],
+    "net": ["127.0.0.1:*", "[::1]:*"]
+  }
+}

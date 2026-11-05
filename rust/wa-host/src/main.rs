@@ -17,6 +17,7 @@ mod system_resources;
 mod relay_client;
 mod rendezvous;
 mod plugins;
+mod components;
 mod quickjs;
 mod subagents;
 mod resources;

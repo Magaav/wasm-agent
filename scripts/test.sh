@@ -1097,6 +1097,12 @@ MCP_NODE="$(command -v node)"
 if command -v cygpath >/dev/null 2>&1; then MCP_NODE="$(cygpath -m "$MCP_NODE")"; fi
 MCP_TEST_SOURCE="$WASM_AGENT_LUA_ROOT" WA_NODE="$MCP_NODE" WA_MCP_SCRIPT_DIR="$WASM_AGENT_LUA_ROOT/scripts" \
   WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-mcp.lua" "$BIN" --db "$DB.mcp" | grep 'mcp native ok'
+# Component MCP transport (docs/COMPONENTS.md): the mcp-echo fixture when a wasm32-wasip2 toolchain is
+# here; without one the definition/refusal checks still run and the script says what it skipped.
+COMPONENTS_PROOF="$WASM_AGENT_HOME/components-proof"
+WA_COMPONENTS_DIR="$COMPONENTS_PROOF" bash scripts/build-components.sh mcp-echo >/dev/null 2>&1 \
+  || echo "note: mcp-echo component not built (no wasm32-wasip2 toolchain?); component runtime checks skipped"
+WA_COMPONENTS_DIR="$COMPONENTS_PROOF" WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-mcp-component.lua" "$BIN" --db "$DB.component" | grep 'component checks:'
 gate_run node --test --test-reporter=tap scripts/test-mcp.mjs scripts/test-mcp-whatsapp.mjs scripts/test-mcp-session.mjs scripts/test-web.mjs scripts/test-mcp-runtime-closure.mjs scripts/test-whatsapp-transcript-watchdog.mjs
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-envelope.lua" "$BIN" --db "$DB.envelope" | grep 'envelope ok'
 MCP_RECOVERY_BIN="$BIN"

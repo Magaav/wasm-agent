@@ -1,0 +1,15 @@
+[package]
+name = "mcp-echo"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Test fixture component for the component MCP transport (scripts/test-mcp-component.lua).
+[workspace]
+
+[dependencies]
+serde_json = "1"
+
+[profile.release]
+opt-level = "s"
+strip = true

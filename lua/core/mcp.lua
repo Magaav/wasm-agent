@@ -125,7 +125,7 @@ local function valid_id(id)return type(id)=='string' and #id<=24 and id:match('^
 local function dense(list,maximum)if type(list)~='table' or #list>maximum then return false end;for key,value in pairs(list)do if type(key)~='number' or key<1 or key>#list or key%1~=0 or type(value)~='string' then return false end end;return true end
 function M.validate(def)
  if type(def)~='table' or not valid_id(def.id) then return 'invalid_mcp_id' end
- local allowed={id=true,name=true,transport=true,program=true,args=true,cwd=true,url=true,env=true,headers=true,secret_env=true,timeout_seconds=true,tools=true}
+ local allowed={id=true,name=true,transport=true,program=true,args=true,cwd=true,url=true,env=true,headers=true,secret_env=true,timeout_seconds=true,tools=true,component=true,file_env=true,net=true,config=true}
  for key in pairs(def)do if not allowed[key]then return 'unsupported_mcp_definition_field:'..tostring(key) end end
  if def.name~=nil and (type(def.name)~='string' or #def.name>200)then return 'invalid_mcp_name' end
  if def.transport=='stdio' then
@@ -133,8 +133,17 @@ function M.validate(def)
   if def.cwd~=nil and not absolute(def.cwd)then return 'mcp_cwd_requires_absolute_path' end
  elseif def.transport=='http' then
   if type(def.url)~='string' or #def.url>2048 or not def.url:match('^https?://') or def.url:find('[\r\n%z]')then return 'invalid_mcp_url' end
+ elseif def.transport=='component' then
+  -- A pinned WASI component (docs/COMPONENTS.md): no program, no args, no cwd. What it may touch is
+  -- exactly env/file_env/net, each of which its manifest must also declare (the host enforces it).
+  if type(def.component)~='string' or not def.component:match('^[a-z][a-z0-9-]*$') or #def.component>40 then return 'invalid_mcp_component' end
+  if def.program~=nil or def.args~=nil or def.cwd~=nil or def.url~=nil or def.headers~=nil then return 'mcp_component_takes_no_command' end
+  if def.net~=nil then if not dense(def.net,16) then return 'invalid_mcp_component_net' end
+   for _,addr in ipairs(def.net)do if not addr:match('^[%w%.%-]+:%d+$') and not addr:match('^%[[%x:]+%]:%d+$') then return 'invalid_mcp_component_net' end end end
  else return 'invalid_mcp_transport' end
- for _,field in ipairs({'env','headers'})do
+ if def.config~=nil and (type(def.config)~='table' or def.transport~='component') then return 'invalid_mcp_component_config' end
+ if def.transport~='component' and (def.component~=nil or def.file_env~=nil or def.net~=nil) then return 'mcp_component_fields_require_component_transport' end
+ for _,field in ipairs({'env','headers','file_env'})do
   if def[field]~=nil then if type(def[field])~='table' then return 'invalid_mcp_references' end
    for key,name in pairs(def[field])do if type(key)~='string' or type(name)~='string' or not name:match('^[A-Za-z_][A-Za-z0-9_]*$')then return 'mcp_credentials_require_environment_references' end end
   end
@@ -146,6 +155,7 @@ function M.validate(def)
  if def.timeout_seconds~=nil and (type(def.timeout_seconds)~='number' or def.timeout_seconds%1~=0 or def.timeout_seconds<1 or def.timeout_seconds>86400)then return 'invalid_mcp_timeout' end
  if type(def.tools)~='table' then return 'mcp_tool_permissions_required' end
  for name,effect in pairs(def.tools)do if type(name)~='string' or name=='' or #name>128 or (effect~='read' and effect~='write')then return 'invalid_mcp_tool_permission' end end
+ if def.tools.send_message and def.transport=='component' and def.component=='mcp-whatsapp' then return 'whatsapp_send_uses_operator_route' end
  if def.tools.send_message and def.transport=='stdio' then
   for _,arg in ipairs(def.args)do if arg:gsub('\\','/'):lower():match('[/]mcp%-whatsapp%.mjs$') or arg:lower()=='mcp-whatsapp.mjs' then return 'whatsapp_send_uses_operator_route' end end
  end
@@ -163,8 +173,23 @@ local function native_data(answer)
   local content=result.content;if type(content)=='table' and #content==1 and content[1].type=='text' then return decode(content[1].text) end
  end
 end
+-- A component server runs inside the host (wasmtime), not as a spawned Node process: one bounded
+-- MCP request per call, same answer shape as mcp-client.mjs, so schemas, approvals and code mode
+-- (every mcp_* tool) are unchanged.
+local function invoke_component(input)
+ local server=input.server
+ local request={action=input.action,component=server.component,env=server.env,file_env=server.file_env,net=server.net,config=server.config,
+  timeout_seconds=server.timeout_seconds or 30,tool=input.tool,schema_hash=input.schema_hash,arguments_json=input.arguments_json}
+ if input.arguments_json==nil and input.arguments~=nil then request.arguments_json=json.encode(input.arguments) end
+ if not host.component_mcp then return fail('component_runtime_unavailable',{tool_call_issued=false,outcome='not_submitted'}) end
+ local answer=decode(host.component_mcp(json.encode(request)))
+ if not answer then return fail('component_answer_unreadable',{tool_call_issued=input.action=='call',outcome=input.action=='call' and 'unknown' or 'not_submitted'}) end
+ return answer
+end
+M.invoke_component=invoke_component
 function M.invoke(input,ctx)
  ctx=ctx or {}
+ if input.server and input.server.transport=='component' then return invoke_component(input) end
  local directory=M.script_dir()
  if input.persistent_read and host.getenv('WA_MCP_SESSION_MODE')~='request' then
   if not directory or not host.read_file(directory..'/mcp-session.mjs') then return fail('mcp_session_not_installed',{outcome='not_submitted',tool_call_issued=false}) end

@@ -1,0 +1,18 @@
+[package]
+name = "mcp-whatsapp"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# A WASI component (wasm32-wasip2), built by scripts/build-components.sh, never by the core build.
+[workspace]
+
+[dependencies]
+serde_json = "1"
+base64 = "0.22"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true

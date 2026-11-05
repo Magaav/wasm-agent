@@ -1,0 +1,6 @@
+{
+  "name": "mcp-echo",
+  "kind": "mcp",
+  "description": "Fixture: echoes its arguments and reports the granted environment; proves the component MCP path",
+  "capabilities": {"env": ["WA_ECHO"], "file_env": ["WA_ECHO_SECRET"], "net": []}
+}

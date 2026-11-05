@@ -293,7 +293,7 @@ fn host_of<'a>(l: *mut LuaState) -> &'a Host {
     }
 }
 
-fn push_json(l: *mut LuaState, value: &Value) {
+pub(crate) fn push_json(l: *mut LuaState, value: &Value) {
     let text = serde_json::to_string(value).unwrap_or_else(|_| "null".to_string());
     unsafe { lua_pushlstring(l, text.as_ptr() as *const c_char, text.len()) };
 }
