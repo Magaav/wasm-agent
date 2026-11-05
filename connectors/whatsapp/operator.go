@@ -136,13 +136,16 @@ func (j *Journal) operatorSnapshot(q rowQuery, c Config, chat, reply string) (in
 	}
 	var body, sender, unsupported string
 	var own, audio bool
-	var sent, row int64
-	err = q.QueryRow("SELECT rowid,CASE WHEN length(CAST(body AS BLOB))<=4096 THEN body ELSE '' END,CASE WHEN length(CAST(sender AS BLOB))<=256 THEN sender ELSE '' END,sent,own,audio,unsupported FROM messages WHERE account=? AND generation=? AND chat=? AND id=?", c.Account, c.Generation, chat, reply).Scan(&row, &body, &sender, &sent, &own, &audio, &unsupported)
+	var sent, row, retained int64
+	err = q.QueryRow("SELECT rowid,CASE WHEN length(CAST(body AS BLOB))<=4096 THEN body ELSE '' END,CASE WHEN length(CAST(sender AS BLOB))<=256 THEN sender ELSE '' END,sent,own,audio,unsupported,COALESCE(length(raw),0) FROM messages WHERE account=? AND generation=? AND chat=? AND id=?", c.Account, c.Generation, chat, reply).Scan(&row, &body, &sender, &sent, &own, &audio, &unsupported, &retained)
 	if err != nil {
 		return 0, "", errors.New("operator_reply_source_unproven")
 	}
-	if body == "" || len(body) > 4096 || !utf8.ValidString(body) || sender == "" || sent <= 0 || audio || unsupported != "" {
-		return 0, "", errors.New("operator_reply_requires_exact_plain_text_source")
+	// A retained, supported voice note is a valid source too: the reply quotes the
+	// audio itself (quoteAudio), never a guessed text.
+	voiceNote := audio && retained > 0 && body == ""
+	if (!voiceNote && (body == "" || audio)) || len(body) > 4096 || !utf8.ValidString(body) || sender == "" || sent <= 0 || unsupported != "" {
+		return 0, "", errors.New("operator_reply_requires_exact_plain_text_or_voice_note_source")
 	}
 	var newer int
 	if err = q.QueryRow("SELECT EXISTS(SELECT 1 FROM messages WHERE account=? AND generation=? AND chat=? AND own=1 AND (rowid>? OR sent>=?) AND id<>?)", c.Account, c.Generation, chat, row, sent, reply).Scan(&newer); err != nil {

@@ -222,3 +222,24 @@ func TestOperatorReplyToAudioQuotesTheVoiceNote(t *testing.T) {
 		t.Fatal(plain)
 	}
 }
+
+// An operator reply may name a retained voice note; an unretained audio still refuses.
+func TestOperatorMayReplyToARetainedVoiceNote(t *testing.T) {
+	j, r, f := operatorFixture(t)
+	activate(t, j)
+	if err := j.ingest(voice("voice-src", 101, 4)); err != nil {
+		t.Fatal(err)
+	}
+	r.Reply = "voice-src"
+	if i := preparedOperator(t, j, r, f); i.Reply != "voice-src" {
+		t.Fatal(i)
+	}
+	m := audio("bare-audio", false, 102)
+	m.Raw = nil
+	j.ingest(m)
+	r.Reply = "bare-audio"
+	canonical, route, _ := f.ResolveOperator(context.Background(), r.Chat)
+	if _, err := j.prepareOperator(r, canonical, route, f.NewID); err == nil {
+		t.Fatal("unretained audio accepted as a reply source")
+	}
+}
