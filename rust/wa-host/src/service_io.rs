@@ -123,7 +123,8 @@ fn pump(mut socket: Socket, out: Receiver<Option<Vec<u8>>>, inbound: Sender<WsEv
         loop {
             match out.try_recv() {
                 Ok(Some(data)) => {
-                    if socket.send(Message::Binary(data.into())).is_err() {
+                    if let Err(error) = socket.send(Message::Binary(data.into())) {
+                        eprintln!("[service] wa_ws send error: {error}");
                         let _ = inbound.send(WsEvent::Closed);
                         return;
                     }
@@ -142,7 +143,13 @@ fn pump(mut socket: Socket, out: Receiver<Option<Vec<u8>>>, inbound: Sender<WsEv
                     return;
                 }
             }
-            Ok(Message::Close(_)) | Ok(Message::Binary(_)) => {
+            Ok(Message::Close(frame)) => {
+                eprintln!("[service] wa_ws closed by peer: {frame:?}");
+                let _ = inbound.send(WsEvent::Closed);
+                return;
+            }
+            Ok(Message::Binary(data)) => {
+                eprintln!("[service] wa_ws message over limit ({} bytes); closing", data.len());
                 let _ = inbound.send(WsEvent::Closed);
                 return;
             }
@@ -150,7 +157,8 @@ fn pump(mut socket: Socket, out: Receiver<Option<Vec<u8>>>, inbound: Sender<WsEv
             Err(Error::Io(e)) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => {
                 let _ = socket.flush();
             }
-            Err(_) => {
+            Err(error) => {
+                eprintln!("[service] wa_ws read error: {error}");
                 let _ = inbound.send(WsEvent::Closed);
                 return;
             }

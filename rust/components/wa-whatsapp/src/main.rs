@@ -50,6 +50,17 @@ mod host {
 }
 const AGAIN: i32 = -11;
 
+thread_local! {
+    static STARTED: Instant = Instant::now();
+}
+/// Every log line carries seconds since start, so connection events can be ordered and timed.
+macro_rules! say {
+    ($($arg:tt)*) => {{
+        let t = STARTED.with(|s| s.elapsed().as_secs_f32());
+        println!("[{t:8.2}s] {}", format!($($arg)*));
+    }};
+}
+
 // ---- the reactor: timers and host I/O, driven by the main loop -------------------------------
 
 struct WsSlot {
@@ -73,6 +84,7 @@ fn pump_sockets() -> bool {
                 return true;
             }
             if len < 0 {
+                say!("transport: host websocket {} closed", slot.handle);
                 let _ = slot.events.try_send(TransportEvent::Disconnected(DisconnectReason::StreamEnded));
                 unsafe { host::close(slot.handle) };
                 moved = true;
@@ -210,7 +222,7 @@ impl TransportFactory for HostTransportFactory {
         let (tx, rx) = async_channel::unbounded();
         let _ = tx.try_send(TransportEvent::Connected);
         SOCKETS.with(|s| s.borrow_mut().push(WsSlot { handle, events: tx }));
-        println!("transport: connected (host websocket {handle})");
+        say!("transport: connected (host websocket {handle})");
         Ok((Arc::new(HostTransport { handle }), rx))
     }
 }
@@ -265,7 +277,7 @@ fn main() {
     let spawner = pool.spawner();
     let runtime = HostRuntime { spawner: spawner.clone() };
     let pair_phone = config["pair_phone"].as_str().map(str::to_string);
-    println!("wa-whatsapp: starting (pairing by {})", if pair_phone.is_some() { "code" } else { "QR" });
+    say!("wa-whatsapp: starting (pairing by {})", if pair_phone.is_some() { "code" } else { "QR" });
     let _ = spawner.spawn_local(async move {
         use whatsapp_rust::prelude::*;
         let mut builder = Bot::builder()
@@ -273,22 +285,22 @@ fn main() {
             .with_runtime(runtime)
             .with_transport_factory(HostTransportFactory)
             .with_http_client(HostHttp)
-            .on_qr_code(|code, _timeout| async move { println!("pairing QR: {code}") })
-            .on_pair_code(|code, timeout| async move { println!("PAIRING CODE: {code} (valid {}s) - WhatsApp > Linked devices > Link with phone number", timeout.as_secs()) })
-            .on_connected(|_client| async move { println!("CONNECTED") })
-            .on_logged_out(|_client| async move { println!("LOGGED OUT") })
+            .on_qr_code(|code, _timeout| async move { say!("pairing QR: {code}") })
+            .on_pair_code(|code, timeout| async move { say!("PAIRING CODE: {code} (valid {}s) - WhatsApp > Linked devices > Link with phone number", timeout.as_secs()) })
+            .on_connected(|_client| async move { say!("CONNECTED") })
+            .on_logged_out(|_client| async move { say!("LOGGED OUT") })
             .on_message(|ctx| {
                 let line = format!("message chat={} kind={} media={} id={}", ctx.info.source.chat, ctx.info.r#type, ctx.info.media_type, ctx.info.id);
-                async move { println!("{line}") }
+                async move { say!("{line}") }
             });
         if let Some(phone) = pair_phone {
             builder = builder.with_pair_code(wacore::pair_code::PairCodeOptions { phone_number: phone, ..Default::default() });
         }
         match builder.build().await {
             Ok(bot) => bot.run().await,
-            Err(error) => println!("build failed: {error}"),
+            Err(error) => say!("build failed: {error}"),
         }
-        println!("bot stopped");
+        say!("bot stopped");
     });
     loop {
         pool.run_until_stalled();
@@ -296,7 +308,7 @@ fn main() {
         wake_io();
         let next_timer = fire_timers();
         if unsafe { host::stopping() } == 1 {
-            println!("wa-whatsapp: stopping");
+            say!("wa-whatsapp: stopping");
             return;
         }
         if !moved {
