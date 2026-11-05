@@ -94,7 +94,8 @@ fn binding() -> R<Binding> {
     }
     // Loopback http only inside a component: no TLS stack, no remote connector.
     let rest = url.strip_prefix("http://").ok_or("component_supports_loopback_connector_only")?;
-    let hostport = rest.strip_suffix('/').ok_or("connector_url_must_not_contain_credentials_or_path")?;
+    // `http://127.0.0.1:28787` and `.../` are the same origin (the Node server normalizes both).
+    let hostport = rest.strip_suffix('/').unwrap_or(rest);
     if hostport.contains('/') || hostport.contains('@') || hostport.contains('?') || hostport.contains('#') {
         return Err("connector_url_must_not_contain_credentials_or_path".into());
     }
@@ -649,6 +650,11 @@ mod tests {
         std::env::set_var("WA_COMPONENT_CONFIG", r#"{"account":"1@s.whatsapp.net","generation":2,"connector_url":"http://127.0.0.1:28787/","allowed_conversations":["c@g.us"]}"#);
         let b = binding().unwrap();
         assert_eq!((b.port, b.wide), (28787, false));
+        std::env::set_var("WA_COMPONENT_CONFIG", r#"{"account":"1@s.whatsapp.net","generation":2,"connector_url":"http://127.0.0.1:28787","allowed_conversations":["c@g.us"]}"#);
+        assert_eq!(binding().unwrap().port, 28787, "no trailing slash is the same origin");
+        std::env::set_var("WA_COMPONENT_CONFIG", r#"{"account":"1@s.whatsapp.net","generation":2,"connector_url":"http://127.0.0.1:28787/x","allowed_conversations":["c@g.us"]}"#);
+        assert!(binding().is_err(), "a path is refused");
+        std::env::set_var("WA_COMPONENT_CONFIG", r#"{"account":"1@s.whatsapp.net","generation":2,"connector_url":"http://127.0.0.1:28787/","allowed_conversations":["c@g.us"]}"#);
         let refused = adapter(&b, "inspect_chat", serde_json::from_str(r#"{"conversation_id":"other@g.us"}"#).unwrap());
         assert_eq!(refused.err().unwrap(), "whatsapp_conversation_not_bound");
         let send = adapter(&b, "send_message", serde_json::from_str(r#"{"conversation_id":"c@g.us","body":"x","confirm":true}"#).unwrap()).unwrap();

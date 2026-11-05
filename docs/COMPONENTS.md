@@ -35,7 +35,7 @@ component is instantiated.
 | capability | grant shape | what the component sees |
 | --- | --- | --- |
 | `env` | `{KEY: "HOST_ENV_NAME"}` | `KEY` = value of the host variable (a reference, never a literal) |
-| `file_env` | `{KEY: "HOST_ENV_NAME"}` | the host variable names a file; the **host** reads it and the component sees its trimmed contents as `KEY`. Secrets stay file references; the component has no filesystem |
+| `file_env` | `{KEY: "HOST_ENV_NAME"}` or `{KEY: "/abs/path"}` | the **host** reads that file (named by a host variable, or directly: a path is a location, not a secret) and the component sees its trimmed contents as `KEY`. Secrets stay file references; the component has no filesystem |
 | `net` | `["127.0.0.1:28787"]` | TCP connect to exactly these socket addresses. A manifest may declare `host:*` (any port on that host) |
 | `config` | `{...}` (registry `config`) | non-secret JSON in `WA_COMPONENT_CONFIG`. Data, not a capability |
 

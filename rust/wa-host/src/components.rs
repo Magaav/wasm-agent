@@ -13,8 +13,9 @@
 //! beyond WASI's, a memory cap and an epoch deadline. Capabilities today:
 //!
 //!   env       {KEY: "HOST_ENV_NAME"}  the component sees KEY = value of the host variable
-//!   file_env  {KEY: "HOST_ENV_NAME"}  the host variable names a file; the component sees its
-//!                                     contents (trimmed) as KEY. Secrets stay file references.
+//!   file_env  {KEY: "HOST_ENV_NAME" | "/abs/path"}  the host reads that file (named directly or
+//!                                     by a host variable); the component sees its contents
+//!                                     (trimmed) as KEY. Secrets stay file references.
 //!   net       ["127.0.0.1:28787"]     exact TCP socket addresses it may connect to
 //!
 //! `mcp()` speaks MCP JSON-RPC over the component's stdin/stdout, one request per run, and returns
@@ -135,6 +136,15 @@ pub struct Grant {
     pub config: Option<String>,
 }
 
+/// An absolute file path (POSIX `/...` or Windows `C:\...` / `C:/...`). A path is a location, not a
+/// secret: `file_env` may name the file directly instead of through a host variable.
+fn absolute_path(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    value.len() <= 4096
+        && !value.contains(['\n', '\r', '\0'])
+        && (value.starts_with('/') || (bytes.len() > 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && (bytes[2] == b'/' || bytes[2] == b'\\')))
+}
+
 fn string_map(value: Option<&Value>, field: &str) -> Result<BTreeMap<String, String>> {
     let mut out = BTreeMap::new();
     let Some(value) = value else { return Ok(out) };
@@ -142,7 +152,7 @@ fn string_map(value: Option<&Value>, field: &str) -> Result<BTreeMap<String, Str
     for (key, name) in object {
         let name = name.as_str().ok_or_else(|| anyhow!("invalid_component_grant:{field}"))?;
         let ok = |s: &str| !s.is_empty() && s.len() <= 128 && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_');
-        if !ok(key) || !ok(name) {
+        if !ok(key) || !(ok(name) || (field == "file_env" && absolute_path(name))) {
             return Err(anyhow!("invalid_component_grant:{field}"));
         }
         out.insert(key.clone(), name.to_string());
@@ -255,7 +265,7 @@ pub fn run(installed: &Installed, grant: &Grant, stdin: Vec<u8>, timeout_ms: u64
         builder.env("WA_COMPONENT_CONFIG", config);
     }
     for (key, name) in &grant.file_env {
-        let path = std::env::var(name).map_err(|_| anyhow!("component_file_env_unset:{key}"))?;
+        let path = if absolute_path(name) { name.clone() } else { std::env::var(name).map_err(|_| anyhow!("component_file_env_unset:{key}"))? };
         let value = std::fs::read_to_string(&path).map_err(|_| anyhow!("component_file_env_unreadable:{key}"))?;
         builder.env(key, value.trim());
     }
@@ -501,6 +511,10 @@ mod tests {
         let env = Grant::from_request(&json!({"env": {"B": "HOME"}})).unwrap();
         assert!(env.check(&manifest).is_err());
         assert!(Grant::from_request(&json!({"env": {"A": "bad-name"}})).is_err());
+        assert!(Grant::from_request(&json!({"env": {"A": "/etc/passwd"}})).is_err(), "env takes names only");
+        assert!(Grant::from_request(&json!({"file_env": {"T": "/home/u/token"}})).is_ok());
+        assert!(Grant::from_request(&json!({"file_env": {"T": "C:\\u\\token"}})).is_ok());
+        assert!(Grant::from_request(&json!({"file_env": {"T": "relative/token"}})).is_err());
     }
 
     #[test]

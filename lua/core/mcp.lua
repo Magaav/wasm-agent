@@ -145,7 +145,8 @@ function M.validate(def)
  if def.transport~='component' and (def.component~=nil or def.file_env~=nil or def.net~=nil) then return 'mcp_component_fields_require_component_transport' end
  for _,field in ipairs({'env','headers','file_env'})do
   if def[field]~=nil then if type(def[field])~='table' then return 'invalid_mcp_references' end
-   for key,name in pairs(def[field])do if type(key)~='string' or type(name)~='string' or not name:match('^[A-Za-z_][A-Za-z0-9_]*$')then return 'mcp_credentials_require_environment_references' end end
+   -- file_env may name the file itself: a path is a location, never the secret.
+   for key,name in pairs(def[field])do if type(key)~='string' or type(name)~='string' or not (name:match('^[A-Za-z_][A-Za-z0-9_]*$') or (field=='file_env' and absolute(name) and not name:find('[\r\n%z]')))then return 'mcp_credentials_require_environment_references' end end
   end
  end
  if def.secret_env~=nil then
