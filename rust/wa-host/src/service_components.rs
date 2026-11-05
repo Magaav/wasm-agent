@@ -146,11 +146,16 @@ impl wa::kernel::speech::HostJob for State {
     }
     fn poll(&mut self, job: Resource<SpeechJob>) -> Result<wa::kernel::speech::Transcript, KError> {
         let Ok(job) = self.table.get(&job) else { return Err(KError::Closed) };
-        match job.slot.lock().unwrap().clone() {
+        let state = job.slot.lock().unwrap().state.clone();
+        match state {
             service_stt::JobState::Queued => Err(KError::Again),
             service_stt::JobState::Done { text, elapsed_ms } => Ok(wa::kernel::speech::Transcript { text, language: job.language.clone(), elapsed_ms }),
             service_stt::JobState::Failed(reason) => Err(KError::Failed(reason)),
         }
+    }
+    fn segments(&mut self, job: Resource<SpeechJob>, from: u32) -> Vec<String> {
+        let Ok(job) = self.table.get(&job) else { return Vec::new() };
+        job.slot.lock().unwrap().segments.iter().skip(from as usize).cloned().collect()
     }
     fn drop(&mut self, job: Resource<SpeechJob>) -> wasmtime::Result<()> {
         self.table.delete(job)?;
@@ -257,6 +262,9 @@ pub fn run_once(installed: &Installed, grant: &Grant, component: &Component, sha
     let memory_mb = installed.manifest.get("limits").and_then(|l| l.get("memory_mb")).and_then(serde_json::Value::as_u64).unwrap_or(512).clamp(16, 4096);
     let storage = installed.manifest.get("capabilities").and_then(|c| c.get("storage")).and_then(serde_json::Value::as_bool) == Some(true);
     let stt = installed.manifest.get("capabilities").and_then(|c| c.get("stt")).and_then(serde_json::Value::as_bool) == Some(true);
+    if stt {
+        service_stt::prewarm(); // keep the model warm from the start: no load on the first note
+    }
     let state = State {
         wasi: builder.build(),
         table: ResourceTable::new(),

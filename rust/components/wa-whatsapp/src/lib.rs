@@ -22,6 +22,9 @@ use std::time::{Duration, Instant};
 use wacore::net::{DisconnectReason, HttpClient, HttpRequest, HttpResponse, Transport, TransportEvent, TransportFactory, WHATSAPP_WEB_ORIGIN, WHATSAPP_WEB_WS_URL};
 use wacore::runtime::{AbortHandle, Runtime};
 
+mod alerts;
+mod posting;
+mod queue;
 mod store;
 
 wit_bindgen::generate!({
@@ -59,8 +62,10 @@ thread_local! {
     static NEXT_SOCKET: std::cell::Cell<u32> = const { std::cell::Cell::new(1) };
     /// The connected client, for media downloads from the audio pipeline.
     static CLIENT: RefCell<Option<Arc<whatsapp_rust::Client>>> = const { RefCell::new(None) };
-    /// Audio messages handed over by the (Send) message handler, processed by the main loop.
-    static AUDIO_QUEUE: RefCell<Vec<AudioJob>> = const { RefCell::new(Vec::new()) };
+    /// Audio messages handed over by the (Send) message handler, admitted by the main loop.
+    static AUDIO_INBOX: RefCell<Vec<AudioJob>> = const { RefCell::new(Vec::new()) };
+    /// Message IDs named by revokes/edits, handed over by the message handler.
+    static INBOX_FENCES: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
 }
 
 /// Move host websocket frames into their transports' channels; returns whether anything moved.
@@ -135,107 +140,388 @@ impl Future for YieldOnce {
     }
 }
 
-// ---- shadow transcription ---------------------------------------------------------------------
-// A voice note: freshness check, media download (host HTTP), kernel recognizer (wa:kernel/speech),
-// transcript kept in kv. Logged with metadata only - never the text. Posting is off unless the
-// configuration says `post_transcripts: true` (the native connector is the poster meanwhile).
+// ---- transcription pipeline ------------------------------------------------------------------
+// A voice note: queue (queue.rs: freshness, retry, one at a time) -> media download (host HTTP) ->
+// kernel recognizer (wa:kernel/speech, segments streamed) -> posting policy (posting.rs: allowlist,
+// holds, chunks, post-then-edit) -> own-chat alerts for anything given up (alerts.rs).
+// Logged with metadata only - never the text. Posting is off unless the configuration says
+// `post_transcripts: true` AND the chat is in `post_allow` (the native connector is the poster
+// meanwhile; the B2 deployment allows only the own chat).
 
-const FRESH_MS: i64 = 5 * 60 * 1000;
+use whatsapp_rust::waproto::whatsapp as wa;
+use wacore::proto_helpers::{MessageBuilderExt, MessageExt};
 
 struct AudioJob {
-    chat: String,
+    chat: whatsapp_rust::Jid,
+    sender: whatsapp_rust::Jid,
     id: String,
+    title: String,
     sent_ms: i64,
-    audio: whatsapp_rust::waproto::whatsapp::message::AudioMessage,
+    received_ms: i64,
+    /// The whole received message, quoted by the transcript (the audio bubble above the reply).
+    message: Arc<wa::Message>,
+    audio: wa::message::AudioMessage,
 }
 
-struct SpeechWait(speech::Job);
-impl Future for SpeechWait {
-    type Output = Result<speech::Transcript, KError>;
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        match self.0.poll() {
-            Err(KError::Again) => {
-                IO_WAKERS.with(|w| w.borrow_mut().push(cx.waker().clone()));
-                Poll::Pending
-            }
-            other => Poll::Ready(other),
-        }
-    }
+enum Outcome {
+    Done,
+    Retry(String),
+    Permanent(String),
+}
+
+thread_local! {
+    static QUEUE: RefCell<queue::AudioQueue<AudioJob>> = RefCell::new(queue::AudioQueue::new(queue::Policy::default()));
+    static COMPLETIONS: RefCell<Vec<(queue::Item<AudioJob>, Outcome)>> = const { RefCell::new(Vec::new()) };
+    static ALERTS: RefCell<alerts::AlertBook> = RefCell::new(alerts::AlertBook::default());
+    static ALERT_SENDING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Message IDs a revoke/edit named (exact per-message fences); also kept in kv `fence/<id>`.
+    static FENCES: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
 }
 
 fn now_ms() -> i64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
 }
 
-fn record(job: &AudioJob, value: serde_json::Value) {
-    let key = format!("tx/{}/{}", job.chat, job.id);
-    let _ = kkv::set(key.as_bytes(), value.to_string().as_bytes());
+fn tx_key(chat: &str, id: &str) -> String {
+    format!("tx/{chat}/{id}")
 }
 
-/// Own-chat alert (a log line to the account's own chat). Implemented, disabled in shadow mode.
-fn alert(enabled: bool, job: &AudioJob, reason: &str) {
-    if enabled {
-        say!("alert (own chat) chat={} id={} reason={reason} - sending not wired in shadow builds", job.chat, job.id);
+fn record(chat: &str, id: &str, value: serde_json::Value) {
+    let _ = kkv::set(tx_key(chat, id).as_bytes(), value.to_string().as_bytes());
+}
+
+fn already_handled(chat: &str, id: &str) -> bool {
+    matches!(kkv::get(tx_key(chat, id).as_bytes()), Ok(Some(_)))
+}
+
+fn fence(id: &str) {
+    FENCES.with(|f| {
+        let mut f = f.borrow_mut();
+        if !f.iter().any(|x| x == id) {
+            f.push(id.to_string());
+        }
+    });
+    let _ = kkv::set(format!("fence/{id}").as_bytes(), b"1");
+}
+
+fn fenced(id: &str) -> bool {
+    FENCES.with(|f| f.borrow().iter().any(|x| x == id)) || matches!(kkv::get(format!("fence/{id}").as_bytes()), Ok(Some(_)))
+}
+
+/// Queue an own-chat alert for a live voice note that ends without a posted transcript.
+fn alert(chat: &str, title: &str, kind: &str, reason: &str, sent_ms: i64) {
+    ALERTS.with(|a| {
+        a.borrow_mut().push(alerts::Alert { chat: chat.into(), title: title.into(), kind: kind.into(), reason: reason.into(), sent_ms, at_ms: now_ms() })
+    });
+}
+
+fn own_users() -> Vec<String> {
+    CLIENT.with(|c| c.borrow().clone()).map(|client| [client.pn(), client.lid()].into_iter().flatten().map(|j| j.user.to_string()).collect()).unwrap_or_default()
+}
+
+fn permanent(reason: &str) -> bool {
+    ["no_speech_detected", "audio_too_large", "transcript_too_long", "cross_language_translation_unsupported", "language_must_be_en_pt_auto"].iter().any(|p| reason.contains(p))
+}
+
+fn reason_of(error: &KError) -> String {
+    match error {
+        KError::Failed(r) | KError::Refused(r) => r.clone(),
+        other => format!("{other:?}"),
     }
 }
 
-async fn transcribe(job: AudioJob, language: String, post: bool) {
-    let age = now_ms() - job.sent_ms;
-    if age > FRESH_MS {
-        say!("transcript expired chat={} id={} age_ms={age}", job.chat, job.id);
-        record(&job, serde_json::json!({"state": "expired", "age_ms": age}));
-        alert(post, &job, "stale_over_5m");
-        return;
+/// Hand a received voice note to the queue (or settle it at once when it cannot be transcribed).
+fn admit(job: AudioJob) {
+    let chat = job.chat.to_string();
+    if already_handled(&chat, &job.id) {
+        return; // never transcribe or post the same voice note twice (re-delivery, restart)
     }
-    let Some(client) = CLIENT.with(|c| c.borrow().clone()) else {
-        say!("transcript failed chat={} id={} reason=not_connected", job.chat, job.id);
-        return;
+    let now = now_ms();
+    let unsupported = if job.sent_ms <= 0 {
+        Some("timestamp_unknown")
+    } else if job.sent_ms > now + 300_000 {
+        Some("future_timestamp_untrusted")
+    } else if job.message.is_view_once() {
+        Some("view_once")
+    } else if job.audio.file_length.unwrap_or(0) > 20 << 20 {
+        Some("audio_too_large")
+    } else {
+        None
     };
-    let t0 = now_ms();
+    let live = job.sent_ms >= now - QUEUE.with(|q| q.borrow().policy().fresh_ms);
+    if let Some(reason) = unsupported {
+        say!("transcript unsupported chat={chat} id={} reason={reason}", job.id);
+        record(&chat, &job.id, serde_json::json!({"state": "unsupported", "reason": reason}));
+        if live && job.sent_ms > 0 {
+            alert(&chat, &job.title, "unsupported", reason, job.sent_ms);
+        }
+        return;
+    }
+    if fenced(&job.id) {
+        say!("transcript blocked chat={chat} id={} reason=source_fence", job.id);
+        record(&chat, &job.id, serde_json::json!({"state": "blocked", "reason": "source_fence"}));
+        if live {
+            alert(&chat, &job.title, "blocked", "source_fence", job.sent_ms);
+        }
+        return;
+    }
+    let key = format!("{chat}\u{0}{}", job.id);
+    let sent = job.sent_ms;
+    QUEUE.with(|q| q.borrow_mut().enqueue(key, sent, job));
+}
+
+struct Posted {
+    first_id: Option<String>,
+    first_ms: Option<i64>,
+    edits: u32,
+    edit_errors: u32,
+}
+
+async fn send(client: &whatsapp_rust::Client, chat: &whatsapp_rust::Jid, body: String, context: &wa::ContextInfo) -> Result<String, String> {
+    client.send_message(chat.clone(), wa::Message::text_with_context(body, context.clone())).await.map(|r| r.message_id).map_err(|e| e.to_string())
+}
+
+async fn edit(client: &whatsapp_rust::Client, chat: &whatsapp_rust::Jid, id: &str, body: String, context: &wa::ContextInfo) -> Result<(), String> {
+    client.edit_message(chat.clone(), id.to_string(), wa::Message::text_with_context(body, context.clone())).await.map(|_| ()).map_err(|e| e.to_string())
+}
+
+/// One voice note, start to finish. Returns how it ended; the main loop tells the queue.
+async fn process(job: &AudioJob, language: &str, cfg: &posting::PostConfig) -> Outcome {
+    let chat = job.chat.to_string();
+    let Some(client) = CLIENT.with(|c| c.borrow().clone()) else {
+        return Outcome::Retry("not_connected".into());
+    };
+    let picked = now_ms();
     let bytes = match client.download(&job.audio).await {
         Ok(bytes) => bytes,
         Err(error) => {
-            say!("transcript failed chat={} id={} reason=download:{error}", job.chat, job.id);
-            record(&job, serde_json::json!({"state": "failed", "reason": "download"}));
-            alert(post, &job, "download");
-            return;
+            say!("transcript download failed chat={chat} id={} reason={error}", job.id);
+            return Outcome::Retry("download".into());
         }
     };
     let downloaded = now_ms();
     let mime = job.audio.mimetype.clone().unwrap_or_else(|| "audio/ogg".into());
-    let started = match speech::Job::start(&bytes, &mime, &language) {
+    let recognizer = match speech::Job::start(&bytes, &mime, language) {
         Ok(started) => started,
         Err(error) => {
-            say!("transcript failed chat={} id={} reason=start:{error:?}", job.chat, job.id);
-            record(&job, serde_json::json!({"state": "failed", "reason": format!("{error:?}")}));
-            alert(post, &job, "stt_start");
-            return;
+            let reason = reason_of(&error);
+            return if permanent(&reason) { Outcome::Permanent(reason) } else { Outcome::Retry(format!("stt_start:{reason}")) };
         }
     };
-    match SpeechWait(started).await {
-        Ok(t) => {
-            let chars = t.text.chars().count();
-            let latency = now_ms() - job.sent_ms;
-            say!(
-                "transcript ready chat={} id={} ms={} chars={} latency_ms={latency} download_ms={} seconds={}",
-                job.chat,
-                job.id,
-                t.elapsed_ms,
-                chars,
-                downloaded - t0,
-                job.audio.seconds.unwrap_or(0)
-            );
-            record(&job, serde_json::json!({"state": "transcribed", "text": t.text, "elapsed_ms": t.elapsed_ms, "latency_ms": latency, "posted": false}));
-            if post {
-                say!("post_transcripts is on but posting is not wired in this shadow build; nothing sent");
+    let seconds = job.audio.seconds.unwrap_or(0);
+    let own = own_users();
+    let may_post = cfg.allowed(&chat, &own) && !cfg.held(&chat);
+    let streaming = may_post && cfg.streams(seconds);
+    let context = wacore::proto_helpers::build_quote_context_with_info(&job.id, &job.sender, &job.chat, &job.chat, &job.message);
+    let mut posted = Posted { first_id: None, first_ms: None, edits: 0, edit_errors: 0 };
+    let mut pacer = posting::EditPacer::new(cfg.edit_interval_ms);
+    let mut so_far = String::new();
+    let mut seen = 0u32;
+    let result = loop {
+        match recognizer.poll() {
+            Err(KError::Again) => {}
+            other => break other,
+        }
+        if streaming {
+            let fresh = recognizer.segments(seen);
+            if !fresh.is_empty() {
+                seen += fresh.len() as u32;
+                for segment in fresh {
+                    if !so_far.is_empty() {
+                        so_far.push(' ');
+                    }
+                    so_far.push_str(segment.trim());
+                }
+                let now = now_ms();
+                if pacer.ready(now) && !fenced(&job.id) {
+                    match &posted.first_id {
+                        None => match send(&client, &job.chat, posting::partial(&so_far), &context).await {
+                            Ok(id) => {
+                                posted.first_id = Some(id);
+                                posted.first_ms = Some(now_ms());
+                                pacer.mark(now, false);
+                            }
+                            Err(error) => say!("transcript partial post failed chat={chat} id={} reason={error}", job.id),
+                        },
+                        Some(first) => {
+                            match edit(&client, &job.chat, first, posting::partial(&so_far), &context).await {
+                                Ok(()) => posted.edits += 1,
+                                Err(error) => {
+                                    posted.edit_errors += 1;
+                                    say!("transcript edit failed chat={chat} id={} edit={} reason={error}", job.id, posted.edits + 1);
+                                }
+                            }
+                            pacer.mark(now, false);
+                        }
+                    }
+                }
             }
         }
+        Sleep(Instant::now() + Duration::from_millis(250)).await;
+    };
+    let transcript = match result {
+        Ok(t) => t,
         Err(error) => {
-            say!("transcript failed chat={} id={} reason={error:?}", job.chat, job.id);
-            record(&job, serde_json::json!({"state": "failed", "reason": format!("{error:?}")}));
-            alert(post, &job, "stt");
+            let reason = reason_of(&error);
+            say!("transcript failed chat={chat} id={} reason={reason}", job.id);
+            return if permanent(&reason) { Outcome::Permanent(reason) } else { Outcome::Retry(reason) };
+        }
+    };
+    let ready = now_ms();
+    let chars = transcript.text.chars().count();
+    say!(
+        "transcript ready chat={chat} id={} ms={} chars={chars} latency_ms={} download_ms={} wait_ms={} seconds={seconds} segments={seen}",
+        job.id,
+        transcript.elapsed_ms,
+        ready - job.sent_ms,
+        downloaded - picked,
+        picked - job.received_ms
+    );
+    let base = serde_json::json!({"state": "transcribed", "text": transcript.text, "elapsed_ms": transcript.elapsed_ms, "latency_ms": ready - job.sent_ms});
+    if !cfg.allowed(&chat, &own) {
+        let mut v = base;
+        v["posted"] = false.into();
+        v["reason"] = "shadow".into();
+        record(&chat, &job.id, v);
+        return Outcome::Done;
+    }
+    if cfg.held(&chat) {
+        let mut v = base;
+        v["posted"] = false.into();
+        v["reason"] = "posting_held_chat".into();
+        record(&chat, &job.id, v);
+        alert(&chat, &job.title, "post_held", "posting_held_chat", job.sent_ms);
+        return Outcome::Done;
+    }
+    if fenced(&job.id) {
+        let mut v = base;
+        v["posted"] = false.into();
+        v["reason"] = "source_fence_during_decode".into();
+        record(&chat, &job.id, v);
+        say!("transcript not posted chat={chat} id={} reason=source_fence_during_decode", job.id);
+        return Outcome::Done;
+    }
+    // Never post an old transcript: a ready result that could not go out within the window expires.
+    if now_ms() - ready > QUEUE.with(|q| q.borrow().policy().fresh_ms) {
+        record(&chat, &job.id, serde_json::json!({"state": "expired", "reason": "post_expired"}));
+        alert(&chat, &job.title, "post_expired", "post_stale_over_5m", job.sent_ms);
+        return Outcome::Done;
+    }
+    let parts = posting::chunks(&transcript.text);
+    let mut ids = Vec::new();
+    let mut failure = None;
+    for (i, part) in parts.iter().enumerate() {
+        let outcome = match (i, &posted.first_id) {
+            (0, Some(first)) => edit(&client, &job.chat, first, part.clone(), &context).await.map(|_| {
+                posted.edits += 1;
+                first.clone()
+            }),
+            _ => send(&client, &job.chat, part.clone(), &context).await,
+        };
+        match outcome {
+            Ok(id) => {
+                if posted.first_ms.is_none() {
+                    posted.first_ms = Some(now_ms());
+                }
+                ids.push(id)
+            }
+            Err(error) => {
+                // Unknown sends never auto-retry (a duplicate in a real chat is worse than a gap).
+                failure = Some(error);
+                break;
+            }
         }
     }
+    let done = now_ms();
+    let first_ms = posted.first_ms.unwrap_or(done);
+    say!(
+        "transcript posted chat={chat} id={} parts={}/{} edits={} edit_errors={} first_text_ms={} total_ms={} streamed={streaming}",
+        job.id,
+        ids.len(),
+        parts.len(),
+        posted.edits,
+        posted.edit_errors,
+        first_ms - job.received_ms,
+        done - job.received_ms
+    );
+    let mut v = base;
+    v["posted"] = (failure.is_none()).into();
+    v["message_ids"] = serde_json::json!(ids);
+    v["edits"] = posted.edits.into();
+    v["first_text_ms"] = (first_ms - job.received_ms).into();
+    v["total_ms"] = (done - job.received_ms).into();
+    if let Some(error) = &failure {
+        v["reason"] = format!("send:{}", error.chars().take(120).collect::<String>()).into();
+        alert(&chat, &job.title, "failed", "send", job.sent_ms);
+    }
+    record(&chat, &job.id, v);
+    Outcome::Done
+}
+
+/// Run the next queued voice note, if the recognizer is free.
+fn dispatch(spawner: &LocalSpawner, language: &str, cfg: &posting::PostConfig) {
+    let now = now_ms();
+    for notice in QUEUE.with(|q| q.borrow_mut().expire_stale(now)) {
+        settle_notice(&notice, None);
+    }
+    let Some(item) = QUEUE.with(|q| q.borrow_mut().take(now)) else { return };
+    let language = language.to_string();
+    let cfg = cfg.clone();
+    let _ = spawner.spawn_local(async move {
+        let outcome = process(&item.payload, &language, &cfg).await;
+        COMPLETIONS.with(|c| c.borrow_mut().push((item, outcome)));
+    });
+}
+
+fn settle_notice(notice: &queue::Notice, title: Option<&str>) {
+    let (chat, id) = notice.key.split_once('\u{0}').unwrap_or((notice.key.as_str(), ""));
+    let kind = if notice.kind == "failed" && permanent(&notice.reason) { "unsupported" } else { notice.kind };
+    say!("transcript {} chat={chat} id={id} reason={}", if kind == "audio_expired" { "expired" } else { kind }, notice.reason);
+    record(chat, id, serde_json::json!({"state": kind, "reason": notice.reason}));
+    alert(chat, title.unwrap_or(""), kind, &notice.reason, notice.sent_ms);
+}
+
+fn settle_completions() {
+    let now = now_ms();
+    for (item, outcome) in COMPLETIONS.with(|c| std::mem::take(&mut *c.borrow_mut())) {
+        let title = item.payload.title.clone();
+        let notice = QUEUE.with(|q| {
+            let mut q = q.borrow_mut();
+            match outcome {
+                Outcome::Done => {
+                    q.done(&item.key);
+                    None
+                }
+                Outcome::Retry(reason) => q.fail(item, now, &reason, true),
+                Outcome::Permanent(reason) => q.fail(item, now, &reason, false),
+            }
+        });
+        if let Some(notice) = notice {
+            settle_notice(&notice, Some(&title));
+        }
+    }
+}
+
+/// Send the batched own-chat log when one is due (never into a source chat).
+fn send_alerts(spawner: &LocalSpawner, enabled: bool) {
+    if !enabled || ALERT_SENDING.with(|s| s.get()) {
+        return;
+    }
+    let Some(client) = CLIENT.with(|c| c.borrow().clone()) else { return };
+    let Some(own) = client.pn().map(|j| j.to_non_ad()) else { return };
+    let now = now_ms();
+    let Some(text) = ALERTS.with(|a| a.borrow_mut().due(now)) else { return };
+    ALERT_SENDING.with(|s| s.set(true));
+    let _ = spawner.spawn_local(async move {
+        match client.send_message(own, wa::Message::text(text)).await {
+            Ok(_) => {
+                ALERTS.with(|a| a.borrow_mut().sent(now_ms()));
+                say!("alerts sent (own chat)");
+            }
+            Err(error) => say!("alerts send failed reason={error}"),
+        }
+        ALERT_SENDING.with(|s| s.set(false));
+    });
 }
 
 // ---- Runtime --------------------------------------------------------------------------------
@@ -410,8 +696,21 @@ fn serve(config: serde_json::Value) {
     let runtime = HostRuntime { spawner: spawner.clone() };
     let pair_phone = config["pair_phone"].as_str().map(str::to_string);
     let language = config["language"].as_str().unwrap_or("pt").to_string();
-    let post_transcripts = config["post_transcripts"] == serde_json::json!(true);
-    say!("transcription: shadow (language {language}, posting {})", if post_transcripts { "on" } else { "off" });
+    let post = posting::PostConfig::from_json(&config);
+    if let Some(seconds) = config["fresh_seconds"].as_i64() {
+        let policy = queue::Policy { fresh_ms: seconds.clamp(60, 86_400) * 1000, ..queue::Policy::default() };
+        QUEUE.with(|q| *q.borrow_mut() = queue::AudioQueue::new(policy));
+    }
+    say!(
+        "transcription: language {language}, posting {} (allow {:?}), alerts {}, stream_edits {} (min {} s, edit every {} s), held chats {}",
+        if post.post { "on" } else { "off" },
+        post.allow,
+        if post.alerts { "on" } else { "off" },
+        post.stream_edits,
+        post.stream_min_seconds,
+        post.edit_interval_ms / 1000,
+        post.held.len()
+    );
     say!("wa-whatsapp: starting (pairing by {})", if pair_phone.is_some() { "code" } else { "QR" });
     let _ = spawner.spawn_local(async move {
         use whatsapp_rust::prelude::*;
@@ -453,12 +752,28 @@ fn serve(config: serde_json::Value) {
             .on_logged_out(|_client| async move { say!("LOGGED OUT") })
             .on_message(|ctx| {
                 let line = format!("message chat={} kind={} media={} id={}", ctx.info.source.chat, ctx.info.r#type, ctx.info.media_type, ctx.info.id);
-                if let Some(audio) = ctx.message.get_base_message().audio_message.as_option() {
-                    AUDIO_QUEUE.with(|q| {
+                let base = ctx.message.get_base_message();
+                // Exact per-message fences: a revoke or edit names the message ID it changes.
+                if let Some(pm) = base.protocol_message.as_option() {
+                    let kind = pm.r#type;
+                    if kind == Some(wa::message::protocol_message::Type::REVOKE) || kind == Some(wa::message::protocol_message::Type::MESSAGE_EDIT) {
+                        if let Some(id) = pm.key.as_option().and_then(|k| k.id.clone()) {
+                            INBOX_FENCES.with(|f| f.borrow_mut().push(id));
+                        }
+                    }
+                }
+                let chat_str = ctx.info.source.chat.to_string();
+                let skip = chat_str == "status@broadcast" || chat_str.ends_with("@newsletter");
+                if let (Some(audio), false) = (base.audio_message.as_option(), skip) {
+                    AUDIO_INBOX.with(|q| {
                         q.borrow_mut().push(AudioJob {
-                            chat: ctx.info.source.chat.to_string(),
+                            chat: ctx.info.source.chat.clone(),
+                            sender: ctx.info.source.sender.clone(),
                             id: ctx.info.id.to_string(),
+                            title: if ctx.info.source.is_group { String::new() } else { ctx.info.push_name.to_string() },
                             sent_ms: ctx.info.timestamp.timestamp_millis(),
+                            received_ms: now_ms(),
+                            message: ctx.message.clone(),
                             audio: audio.clone(),
                         })
                     });
@@ -475,9 +790,20 @@ fn serve(config: serde_json::Value) {
         }
         say!("bot stopped");
     });
+    let mut last_tick = Instant::now();
     loop {
-        for job in AUDIO_QUEUE.with(|q| std::mem::take(&mut *q.borrow_mut())) {
-            let _ = spawner.spawn_local(transcribe(job, language.clone(), post_transcripts));
+        for id in INBOX_FENCES.with(|f| std::mem::take(&mut *f.borrow_mut())) {
+            say!("fence id={id}");
+            fence(&id);
+        }
+        for job in AUDIO_INBOX.with(|q| std::mem::take(&mut *q.borrow_mut())) {
+            admit(job);
+        }
+        settle_completions();
+        if last_tick.elapsed() >= Duration::from_millis(200) {
+            last_tick = Instant::now();
+            dispatch(&spawner, &language, &post);
+            send_alerts(&spawner, post.alerts);
         }
         pool.run_until_stalled();
         let moved = pump_sockets();

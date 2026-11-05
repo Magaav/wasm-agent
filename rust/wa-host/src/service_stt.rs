@@ -2,8 +2,15 @@
 //! worker the WhatsApp connector provisions, `scripts/whatsapp-stt-local.py --worker`) behind a
 //! non-blocking job API. One warm worker per host process, one request at a time (a 2-core node
 //! cannot afford more), started on first use under `nice -n 10` so the node's other work keeps
-//! priority, stopped after `IDLE` without jobs. Same liveness rules as connectors/whatsapp/worker.go:
-//! killed only when stuck (no line for `STALL`) or past `BUDGET_BASE + BUDGET_PER_AUDIO * seconds`.
+//! priority. The worker stays warm: it is started as soon as a component with the `stt` grant starts
+//! (`prewarm`), so the first voice note does not pay the model load (~16 s on openclaw), and it is
+//! stopped after idle only when WA_STT_IDLE_SECONDS > 0 (default 0 = never). Same liveness rules as
+//! connectors/whatsapp/worker.go: killed only when stuck (no line for `STALL`) or past
+//! `BUDGET_BASE + BUDGET_PER_AUDIO * seconds`.
+//!
+//! Streaming: every request asks the worker for segment text (`"segments": true`); each recognized
+//! segment lands in the job's `segments` as it is decoded, so a consumer can show text before the
+//! whole note is done. Segment text travels only over the worker pipe, never into a log.
 //!
 //! Paths (references, never secrets): WA_STT_PYTHON (default ~/.local/wa-stt/bin/python),
 //! WA_STT_MODELS (default ~/.local/share/wa-stt/models), WA_STT_WORKER (default
@@ -19,7 +26,6 @@ use std::time::{Duration, Instant};
 const STALL: Duration = Duration::from_secs(180);
 const BUDGET_BASE: Duration = Duration::from_secs(300);
 const BUDGET_PER_AUDIO: f64 = 6.0;
-const IDLE: Duration = Duration::from_secs(300);
 const MAX_AUDIO: usize = 20 << 20;
 
 #[derive(Clone, Debug)]
@@ -29,13 +35,24 @@ pub enum JobState {
     Failed(String),
 }
 
-pub type JobSlot = Arc<Mutex<JobState>>;
+/// A job's state plus the segment texts recognized so far (in order).
+#[derive(Debug)]
+pub struct Job {
+    pub state: JobState,
+    pub segments: Vec<String>,
+}
 
-struct Request {
-    audio: Vec<u8>,
-    ext: &'static str,
-    language: String,
-    slot: JobSlot,
+pub type JobSlot = Arc<Mutex<Job>>;
+
+enum Request {
+    Recognize { audio: Vec<u8>, ext: &'static str, language: String, slot: JobSlot },
+    /// Start the worker now (model load) without a job.
+    Warm,
+}
+
+/// Idle time after which the warm worker is stopped; None = never (the default).
+fn idle() -> Option<Duration> {
+    std::env::var("WA_STT_IDLE_SECONDS").ok().and_then(|v| v.trim().parse::<u64>().ok()).filter(|s| *s > 0).map(Duration::from_secs)
 }
 
 fn home() -> PathBuf {
@@ -84,9 +101,17 @@ pub fn submit(audio: Vec<u8>, mime: &str, language: &str) -> Result<JobSlot, Str
         "audio/mp4" | "audio/aac" | "audio/m4a" => "m4a",
         _ => "ogg",
     };
-    let slot = Arc::new(Mutex::new(JobState::Queued));
-    hub().send(Request { audio, ext, language: language.to_string(), slot: slot.clone() }).map_err(|_| "stt_hub_down".to_string())?;
+    let slot = Arc::new(Mutex::new(Job { state: JobState::Queued, segments: Vec::new() }));
+    hub().send(Request::Recognize { audio, ext, language: language.to_string(), slot: slot.clone() }).map_err(|_| "stt_hub_down".to_string())?;
     Ok(slot)
+}
+
+/// Load the model now (called when a component holding the `stt` grant starts). A no-op when the
+/// recognizer is not provisioned on this node; errors surface on the first real job instead.
+pub fn prewarm() {
+    if paths().is_ok() {
+        let _ = hub().send(Request::Warm);
+    }
 }
 
 struct Warm {
@@ -138,8 +163,13 @@ fn spawn() -> Result<Warm, String> {
 fn run_hub(rx: Receiver<Request>) {
     let mut warm: Option<Warm> = None;
     let mut counter = 0u64;
+    let idle = idle();
     loop {
-        let request = match rx.recv_timeout(IDLE) {
+        let next = match idle {
+            Some(idle) => rx.recv_timeout(idle),
+            None => rx.recv().map_err(|_| RecvTimeoutError::Disconnected),
+        };
+        let request = match next {
             Ok(request) => request,
             Err(RecvTimeoutError::Timeout) => {
                 warm = None; // idle: free the model's memory
@@ -147,23 +177,32 @@ fn run_hub(rx: Receiver<Request>) {
             }
             Err(RecvTimeoutError::Disconnected) => return,
         };
-        counter += 1;
-        let outcome = transcribe(&mut warm, &request, counter);
-        *request.slot.lock().unwrap() = outcome;
+        match request {
+            Request::Warm => {
+                if warm.is_none() {
+                    warm = spawn().ok();
+                }
+            }
+            Request::Recognize { audio, ext, language, slot } => {
+                counter += 1;
+                let outcome = transcribe(&mut warm, &audio, ext, &language, &slot, counter);
+                slot.lock().unwrap().state = outcome;
+            }
+        }
     }
 }
 
-fn transcribe(warm: &mut Option<Warm>, request: &Request, n: u64) -> JobState {
-    let path = std::env::temp_dir().join(format!("wa-stt-{}-{n}.{}", std::process::id(), request.ext));
-    if let Err(error) = std::fs::write(&path, &request.audio) {
+fn transcribe(warm: &mut Option<Warm>, audio: &[u8], ext: &str, language: &str, slot: &JobSlot, n: u64) -> JobState {
+    let path = std::env::temp_dir().join(format!("wa-stt-{}-{n}.{ext}", std::process::id()));
+    if let Err(error) = std::fs::write(&path, audio) {
         return JobState::Failed(format!("stt_temp_write:{error}"));
     }
-    let result = run_one(warm, &path, &request.language);
+    let result = run_one(warm, &path, language, slot);
     let _ = std::fs::remove_file(&path);
     result
 }
 
-fn run_one(warm: &mut Option<Warm>, path: &std::path::Path, language: &str) -> JobState {
+fn run_one(warm: &mut Option<Warm>, path: &std::path::Path, language: &str, slot: &JobSlot) -> JobState {
     if warm.is_none() {
         match spawn() {
             Ok(w) => *warm = Some(w),
@@ -171,7 +210,7 @@ fn run_one(warm: &mut Option<Warm>, path: &std::path::Path, language: &str) -> J
         }
     }
     let w = warm.as_mut().expect("spawned");
-    let line = serde_json::json!({"input": path.to_string_lossy(), "language": language, "mode": "transcribe", "tier": 0}).to_string();
+    let line = serde_json::json!({"input": path.to_string_lossy(), "language": language, "mode": "transcribe", "tier": 0, "segments": true}).to_string();
     if writeln!(w.input, "{line}").and_then(|_| w.input.flush()).is_err() {
         *warm = None;
         return JobState::Failed("worker_eof".into());
@@ -187,6 +226,12 @@ fn run_one(warm: &mut Option<Warm>, path: &std::path::Path, language: &str) -> J
                     return JobState::Failed("worker_protocol".into());
                 };
                 if value["progress"] == serde_json::json!(true) {
+                    if value["ready"] == serde_json::json!(true) {
+                        continue; // the worker's own model-loaded line (prewarm)
+                    }
+                    if let Some(text) = value["text"].as_str().filter(|t| !t.is_empty()) {
+                        slot.lock().unwrap().segments.push(text.to_string());
+                    }
                     if let Some(seconds) = value["duration"].as_f64().filter(|d| *d > 0.0) {
                         deadline = started + BUDGET_BASE + Duration::from_secs_f64(BUDGET_PER_AUDIO * seconds);
                     }

@@ -7,8 +7,10 @@ Speed knobs (environment, read once at start; see docs/WHATSAPP-TRANSCRIPTION.md
   WA_WHATSAPP_STT_THREADS         CTranslate2 CPU threads (default: usable CPU count)
   WA_WHATSAPP_STT_FALLBACK_MODEL  cheaper model for the last fallback tier (default: none)
 The worker protocol is one JSON request per stdin line. While decoding it writes
-{"progress":...} lines (timings only, never text) so the Go side can tell a slow
-decode from a stuck one, then exactly one final {"ok":...} line per request.
+{"progress":...} lines (timings only) so the Go side can tell a slow decode from
+a stuck one, then exactly one final {"ok":...} line per request. A request with
+"segments": true also gets each segment's text in its progress line (streaming;
+the wasm kernel's recognizer asks for it, never a log).
 """
 import argparse
 import json
@@ -107,7 +109,9 @@ def recognize(model, request, progress=None):
             raise ValueError("transcript_too_long")
         parts.append(text)
         if progress:
-            progress(float(getattr(segment, "end", 0) or 0), duration)
+            # Segment text only when the caller asked to stream it ("segments": true, the wasm
+            # kernel's recognizer); the Go connector never asks, so its lines stay timings-only.
+            progress(float(getattr(segment, "end", 0) or 0), duration, text if request.get("segments") is True else None)
     transcript = " ".join(filter(None, parts)).strip()
     if not transcript:
         raise ValueError("no_speech_detected")
@@ -119,8 +123,11 @@ def emit(value):
     print(json.dumps(value, ensure_ascii=False), flush=True)
 
 
-def progress_line(at, duration):
-    emit({"progress": True, "at": round(at, 1), "duration": round(duration, 1)})
+def progress_line(at, duration, text=None):
+    line = {"progress": True, "at": round(at, 1), "duration": round(duration, 1)}
+    if text:
+        line["text"] = text
+    emit(line)
 
 
 class Models:
