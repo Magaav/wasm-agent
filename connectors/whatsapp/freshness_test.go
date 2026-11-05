@@ -208,3 +208,17 @@ func TestAlertFormatting(t *testing.T) {
 		t.Fatal("off")
 	}
 }
+
+func TestOperatorReplyToAudioQuotesTheVoiceNote(t *testing.T) {
+	i := operatorIntent{Body: "teste", Reply: "src"}
+	m := operatorEnvelope(i, "200@s.whatsapp.net", "")
+	quoteAudio(m, voice("src", 1, 9).Raw)
+	if m.GetExtendedTextMessage().GetContextInfo().GetQuotedMessage().GetAudioMessage().GetSeconds() != 9 || m.GetExtendedTextMessage().GetContextInfo().GetStanzaID() != "src" {
+		t.Fatal(m)
+	}
+	plain := operatorEnvelope(i, "200@s.whatsapp.net", "Olá")
+	quoteAudio(plain, nil)
+	if plain.GetExtendedTextMessage().GetContextInfo().GetQuotedMessage().GetConversation() != "Olá" {
+		t.Fatal(plain)
+	}
+}

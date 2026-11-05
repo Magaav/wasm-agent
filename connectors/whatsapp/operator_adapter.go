@@ -92,11 +92,13 @@ func (a *Adapter) SendOperator(ctx context.Context, i operatorIntent) (string, e
 	message := operatorEnvelope(i, "", "")
 	if i.Reply != "" {
 		var sender, body string
-		err = a.journal.db.QueryRow("SELECT CASE WHEN length(CAST(sender AS BLOB))<=256 THEN sender ELSE '' END,CASE WHEN length(CAST(body AS BLOB))<=4096 THEN body ELSE '' END FROM messages WHERE account=? AND generation=? AND chat=? AND id=?", i.Account, i.Generation, i.Chat, i.Reply).Scan(&sender, &body)
+		var raw []byte
+		err = a.journal.db.QueryRow("SELECT CASE WHEN length(CAST(sender AS BLOB))<=256 THEN sender ELSE '' END,CASE WHEN length(CAST(body AS BLOB))<=4096 THEN body ELSE '' END,CASE WHEN audio=1 THEN raw ELSE NULL END FROM messages WHERE account=? AND generation=? AND chat=? AND id=?", i.Account, i.Generation, i.Chat, i.Reply).Scan(&sender, &body, &raw)
 		if err != nil {
 			return "", noSubmission("operator_quote_unproven", true)
 		}
 		message = operatorEnvelope(i, sender, body)
+		quoteAudio(message, raw)
 	}
 	// A final short check immediately before SDK invocation, not a network-held lock.
 	if err = a.journal.validateOperator(a.journal.db, i); err != nil {
@@ -110,4 +112,18 @@ func (a *Adapter) SendOperator(ctx context.Context, i operatorIntent) (string, e
 		return "", errors.New("operator_ack_mismatch")
 	}
 	return response.ID, nil
+}
+
+// quoteAudio makes a reply to a voice note quote the voice note itself (the
+// retained AudioMessage), the same shape a transcript reply uses, so the bubble
+// shows the audio and a tap opens it. Any other source keeps its text quote.
+func quoteAudio(message *waE2E.Message, raw []byte) {
+	info := message.GetExtendedTextMessage().GetContextInfo()
+	if info == nil || len(raw) == 0 {
+		return
+	}
+	var original waE2E.Message
+	if proto.Unmarshal(raw, &original) == nil && original.GetAudioMessage() != nil {
+		info.QuotedMessage = &waE2E.Message{AudioMessage: original.GetAudioMessage()}
+	}
 }
