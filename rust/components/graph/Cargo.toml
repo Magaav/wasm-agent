@@ -1,0 +1,22 @@
+[package]
+name = "graph"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# The code graph as a WASI component (docs/KERNEL.md, stream C): wa-graph's tree-sitter indexer,
+# SQLite store and queries, without the native coordinator. The kernel keeps only scheduling
+# (hints, watcher, per-root serialization) in rust/wa-host/src/graph.rs and calls this per request.
+# Built by scripts/build-components.sh; tree-sitter and SQLite are C, so it needs wasi-sdk
+# (WASI_SDK=<dir>, else ~/wasi-sdk*, else /opt/wasi-sdk*).
+[workspace]
+
+[dependencies]
+wa-graph = { path = "../../wa-graph", default-features = false }
+serde_json = "1"
+
+[profile.release]
+opt-level = 3
+strip = true
+lto = true
+codegen-units = 1

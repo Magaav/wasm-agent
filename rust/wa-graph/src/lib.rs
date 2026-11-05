@@ -9,7 +9,9 @@ pub mod extract;
 pub mod audit;
 pub mod store;
 pub mod incremental;
+#[cfg(feature = "native")]
 pub mod coordinator;
+#[cfg(feature = "native")]
 pub mod watch;
 
 #[cfg(test)]
@@ -18,4 +20,6 @@ mod tests;
 mod repair_tests;
 
 pub use store::{IndexReport, NodeRow, Stats, Store};
+#[cfg(feature = "native")]
 pub use watch::WatchHandle;
+pub use store::canonical;

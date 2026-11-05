@@ -9,7 +9,7 @@ pub struct Manifest {pub root:PathBuf,pub files:BTreeMap<String,Vec<u8>>,pub fin
 impl Manifest {
  pub fn capture(root:&Path,progress:&mut impl FnMut(&str,usize))->Result<Self>{Self::capture_until(root,None,progress)}
  pub fn capture_until(root:&Path,deadline:Option<std::time::Instant>,progress:&mut impl FnMut(&str,usize))->Result<Self>{
-  let root=root.canonicalize()?;let mut files=BTreeMap::new();let mut skipped_non_utf8=Vec::new();
+  let root=crate::store::canonical(root)?;let mut files=BTreeMap::new();let mut skipped_non_utf8=Vec::new();
   for (n,path) in collect_files_progress(&root,deadline,progress)?.iter().enumerate(){
    if deadline.map_or(false,|end|std::time::Instant::now()>=end){return Err("graph_capture_timeout".into());}
    let bytes=std::fs::read(path)?;let name=relative(&root,path);if std::str::from_utf8(&bytes).is_ok(){files.insert(name,bytes);}else{skipped_non_utf8.push(name);}progress("hashing",n+1);

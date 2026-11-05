@@ -119,14 +119,14 @@ fn nonsemantic_line(lines: &[(usize, &str)], comments: &[ByteRange], line: u32) 
 }
 
 fn relative_path(root: &Path, raw: &str) -> std::result::Result<String, String> {
-    let root = root.canonicalize().map_err(|e| e.to_string())?;
+    let root = crate::store::canonical(root).map_err(|e| e.to_string())?;
     let candidate = PathBuf::from(raw);
     let absolute = if candidate.is_absolute() {
         candidate
     } else {
         root.join(candidate)
     };
-    let absolute = absolute.canonicalize().map_err(|e| e.to_string())?;
+    let absolute = crate::store::canonical(&absolute).map_err(|e| e.to_string())?;
     let relative = absolute
         .strip_prefix(&root)
         .map_err(|_| "path_outside_graph_root")?;
@@ -396,7 +396,7 @@ impl Store {
             .and_then(Value::as_u64)
             .unwrap_or(24_000)
             .clamp(2_048, 200_000) as usize;
-        let canonical_root=root.canonicalize()?.to_string_lossy().into_owned();
+        let canonical_root=crate::store::canonical(root)?.to_string_lossy().into_owned();
         let digest = crate::store::fnv1a(&serde_json::to_vec(&json!({
             "root":canonical_root,
             "changes":request.get("changes"),"direction":direction,"depth":depth

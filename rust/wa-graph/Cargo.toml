@@ -7,6 +7,14 @@ description = "A wasm-agent-native code graph: tree-sitter defs/refs in SQLite, 
 [[bin]]
 name = "wa-graph"
 path = "src/main.rs"
+required-features = ["native"]
+
+# `native` (default): the process-wide coordinator (background worker thread + OS file watcher).
+# Without it the crate is the pure indexer/store/queries, which is what the `graph` WASI component
+# (rust/components/graph) builds for wasm32-wasip2: no threads, no watcher, no canonicalize.
+[features]
+default = ["native"]
+native = ["dep:notify"]
 
 [dependencies]
 tree-sitter = "0.24"
@@ -19,7 +27,7 @@ tree-sitter-javascript = "0.23"
 tree-sitter-typescript = "0.23"
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde_json = "1"
-notify = "8"
+notify = { version = "8", optional = true }
 ring = "0.17"
 
 [profile.release]

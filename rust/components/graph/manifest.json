@@ -1,0 +1,11 @@
+{
+  "name": "graph",
+  "kind": "mcp",
+  "description": "Code graph: tree-sitter definitions/references in SQLite; index, search, source, explain, path, impact, patch audit",
+  "capabilities": {
+    "env": ["WA_GRAPH_PARSE_TIMEOUT_MS"],
+    "file_env": [],
+    "net": [],
+    "dirs": ["/graph/root", "/graph/db"]
+  }
+}
