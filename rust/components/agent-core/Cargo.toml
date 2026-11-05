@@ -1,0 +1,23 @@
+[package]
+name = "agent-core"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# The Lua core as one wasm32-wasip2 component (docs/KERNEL.md, "A2.1"): wa-host's vendored Lua 5.4
+# compiled with wasi-sdk, every `host.*` reached through the one `wa:kernel/host.call` import.
+# Built by scripts/build-agent-core.sh (needs wasi-sdk), not by build-components.sh: no manifest.json.
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen = "0.63"
+
+[build-dependencies]
+cc = "1"
+
+[profile.release]
+opt-level = 2
+strip = true

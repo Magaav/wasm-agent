@@ -1,0 +1,35 @@
+package wa:kernel@0.1.0;
+
+/// The generic host-call bridge (docs/KERNEL.md, "A2.1"): one import through which a guest running
+/// the Lua core reaches every `host.*` capability the native interpreter has. The kernel answers by
+/// calling the capability's existing C function on a native Lua state, so the inventory in
+/// `capabilities.rs` stays the one list and nothing is reimplemented per guest.
+///
+/// v1 is deliberately untyped: a capability takes and returns Lua scalars. Lua strings are byte
+/// strings, hence `bytes` (binary-safe, no UTF-8 assumption). Lua 5.4 keeps integers and floats
+/// apart (`tostring(5)` is "5", `tostring(5.0)` is "5.0"), hence `integer` beside `number`. Capabilities that need a Lua
+/// function argument (a callback) or the live console are refused with
+/// `unsupported_in_component_v1:<name>`.
+interface host {
+    variant value {
+        nil,
+        boolean(bool),
+        integer(s64),
+        number(f64),
+        bytes(list<u8>),
+    }
+
+    /// Call `host.<name>(args...)`. `ok` carries every value the capability returned; `err` carries
+    /// a raised Lua error's text (or the refusal above).
+    call: func(name: string, args: list<value>) -> result<list<value>, string>;
+}
+
+/// The Lua core as one component: imports the bridge (+ lifecycle and log), exports `run`.
+world core-component {
+    import host;
+    import lifecycle;
+    import log;
+
+    /// Run `entry` (a script path, read through the bridge) with `args` as the global `args`.
+    run: func(entry: string, args: list<string>) -> result<_, string>;
+}

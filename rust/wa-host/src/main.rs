@@ -18,6 +18,7 @@ mod relay_client;
 mod rendezvous;
 mod plugins;
 mod components;
+mod core_component;
 mod services;
 mod service_io;
 mod service_components;
@@ -455,6 +456,16 @@ fn main() {
     let factory_for_subagents = interpreter_factory.clone();
     subagents::set_factory(Box::new(move || factory_for_subagents()));
 
+    // The same run inside the agent-core component: every `host.*` crosses wa:kernel/host.call
+    // into this interpreter (core_component.rs, docs/KERNEL.md "A2.1").
+    if lua_args.first().is_some_and(|arg| arg == "--core-component") {
+        if lua_root().is_none() {
+            eprintln!("lua root unset: using embedded modules; edits under lua/ are NOT under test");
+        }
+        let code = core_component::run_cli(lua, &lua_args[1..]);
+        host::restore_input();
+        std::process::exit(code);
+    }
     if let Ok(script) = std::env::var("WA_SCRIPT") {
         // Say which copy of the Lua this run will load, before it loads any.
         //
