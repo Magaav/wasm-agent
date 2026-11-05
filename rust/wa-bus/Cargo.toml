@@ -1,0 +1,13 @@
+[package]
+name = "wa-bus"
+version = "0.1.0"
+edition = "2021"
+description = "In-node event bus (pub/sub) next to the queue: topics, revocable subscriptions, bounded delivery, optional last-N retention"
+license = "MIT"
+
+[dependencies]
+# None on purpose. The bus is a pure library: std only. The durable topics take a `Kv` trait the
+# host implements (same shape as wa-queue's kv), so no store crate is linked in here.
+
+[dev-dependencies]
+# None: the tests use `MemoryKv` from this crate and std threads.

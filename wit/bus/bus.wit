@@ -1,0 +1,118 @@
+/// wa:bus v1 — DRAFT. In-node fan-out of facts: many consumers, no claim on an event.
+///
+/// The queue is work: one consumer, durable, an event is claimed and done. The bus is facts:
+/// `whatsapp.transcript.ready` reaches the agent, the search index and the logger without the
+/// producer knowing any of them. See docs/BUS.md for the design, the host-side library that already
+/// exists (rust/wa-bus), and the enforcement model.
+///
+/// WASI 0.3 shape: `publish` is `async` (backpressure suspends the guest task, it never blocks the
+/// runtime), and a subscription **is** a `stream<event>` — dropping the stream, or the kernel
+/// revoking the component, ends it. That is the same "revocable registrations" rule the kernel
+/// already applies to tools, routes and timers (docs/KERNEL.md): nothing of a stopped instance
+/// lingers. Nothing here carries authority: `refused` is the kernel's answer for a topic outside the
+/// component's manifest grants, and the same rule applies to the pattern a subscription asks for.
+package wa:bus@0.1.0;
+
+interface types {
+    /// Kernel-side failures, shaped like `wa:kernel/types.error`.
+    variant error {
+        /// The grant does not cover this topic (publish) or this pattern (subscribe).
+        refused(string),
+        /// Backpressure: a `block` subscriber is full. Retry after the next yield; the event has
+        /// not been delivered, so nothing was lost silently.
+        again,
+        /// The subscription is closed (revoked by the supervisor, or the component is stopping).
+        closed,
+        /// The kernel could not do it; the string is a reason for the log, never a payload.
+        failed(string),
+    }
+
+    /// One published fact. The payload is opaque bytes; the kernel never parses it, never logs it and
+    /// never shares it between components (each subscriber gets its own copy).
+    record event {
+        /// Assigned by the kernel when the publisher leaves it unset; stable across a durable replay.
+        id: u64,
+        /// Dotted path, first segment = the namespace ("whatsapp.transcript.ready").
+        topic: string,
+        /// Milliseconds since the Unix epoch, stamped by the kernel if the guest sends 0.
+        ts-ms: u64,
+        /// The producing component, set by the kernel: a guest never names itself.
+        source: string,
+        /// Payload schema name and version; a consumer refuses a version it does not know.
+        schema: string,
+        schema-version: u32,
+        /// Trace id of the run that produced the event, when there was one.
+        trace: option<string>,
+        payload: list<u8>,
+    }
+
+    /// What happens when a subscriber's bounded buffer is full.
+    enum overflow {
+        /// Keep the newest, drop the oldest, count the loss (default).
+        drop-oldest,
+        /// Keep the queued snapshot, refuse the new event, count the loss.
+        drop-newest,
+        /// Never drop: the publisher is told `again` and retries. For a critical subscriber.
+        block,
+    }
+
+    record subscription-options {
+        /// Events buffered for this subscriber before the policy applies (kernel caps it).
+        capacity: u32,
+        overflow: overflow,
+    }
+
+    /// What one publish did, so a producer can act instead of guessing.
+    record publish-report {
+        /// Subscriptions whose pattern matched the topic.
+        matched: u32,
+        /// Copies the kernel put in a buffer.
+        delivered: u32,
+        /// Copies an overflow policy discarded.
+        dropped: u32,
+    }
+}
+
+/// Publishing a fact.
+interface publisher {
+    use types.{error, event, publish-report};
+
+    /// Publish `event`. Resolves once the event is in every matching subscriber's buffer (or has been
+    /// discarded by an overflow policy and counted in the report). `again` means at least one `block`
+    /// subscriber is full and nothing was queued for it: the guest awaits and retries, or gives up
+    /// itself. The future never blocks the instance: other tasks keep running.
+    publish: async func(event: event) -> result<publish-report, error>;
+}
+
+/// Subscribing to facts.
+interface subscriber {
+    use types.{error, event, overflow, subscription-options};
+
+    /// Subscribe to `pattern`: an exact topic ("a.b"), a prefix wildcard ("a.*", which also covers
+    /// "a.b.c" but not "a" itself), or "*" for everything (needs a grant).
+    ///
+    /// The returned stream is the subscription: dropping it unsubscribes, and the kernel revokes it
+    /// when the component stops or is replaced. `replay` asks for up to N retained events first, so a
+    /// late consumer is not blind; retention is configured per exact topic by the node, and asking
+    /// for it on a pattern without retention answers `refused`.
+    ///
+    /// Delivery to a stream is at-least-once over a retention window and at-most-once for live
+    /// events that an overflow policy dropped; consumers that need exactly-once bookkeeping dedupe on
+    /// `event.id`.
+    subscribe: func(
+        pattern: string,
+        options: subscription-options,
+        replay: option<u32>,
+    ) -> result<stream<event>, error>;
+
+    /// End a subscription from the guest side. Equivalent to dropping the stream; explicit so a
+    /// component that keeps handles in a table can say what it means.
+    unsubscribe: func(subscription: stream<event>);
+}
+
+/// A component that both publishes and consumes facts (the `agent-core`, a search indexer, an
+/// audit logger). `wa:kernel` interfaces are imported alongside this world by the real component.
+world event-bus {
+    import publisher;
+    import subscriber;
+}
