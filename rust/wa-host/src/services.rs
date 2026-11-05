@@ -299,7 +299,7 @@ fn linker(engine: &wasmtime::Engine) -> Result<Linker<State>> {
     })?;
     // wa_kv: a durable key-value store private to this component (one SQLite file in
     // <components>/<name>.state/). Values up to 16 MiB; `get`/`dump` stage bytes for `take`.
-    fn kv(c: &mut Caller<'_, State>) -> Option<&rusqlite::Connection> {
+    fn kv<'a>(c: &'a mut Caller<'_, State>) -> Option<&'a rusqlite::Connection> {
         if c.data().kv.is_none() {
             let path = c.data().kv_path.clone()?;
             std::fs::create_dir_all(path.parent()?).ok()?;
