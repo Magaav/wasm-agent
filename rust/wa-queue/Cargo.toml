@@ -1,0 +1,14 @@
+[package]
+name = "wa-queue"
+version = "0.1.0"
+edition = "2021"
+description = "Durable, fresh-only, leased job queue over a small key-value trait. No wasmtime, no I/O of its own."
+license = "MIT"
+
+# Deliberately dependency-free: the queue only needs bytes in a Kv and a clock. The host adapts
+# `wa:kernel/kv` (and its injected clock) to the two traits below; tests use the in-memory Kv.
+[dependencies]
+
+[lib]
+name = "wa_queue"
+path = "src/lib.rs"
