@@ -19,7 +19,7 @@ use std::ffi::{c_char, c_int};
 use std::time::Instant;
 use wasmtime::component::{Component, HasSelf, Linker, ResourceTable};
 use wasmtime::{Config, Engine, Store};
-use wasmtime_wasi::{DirPerms, FilePerms, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
+use wasmtime_wasi::{FsPerms, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
 wasmtime::component::bindgen!({
     world: "core-component",
@@ -274,16 +274,15 @@ fn run(native: Lua, wasm: &str, script: &str, script_args: &[String]) -> wasmtim
     let loaded = ms(started);
 
     let mut linker: Linker<State> = Linker::new(&engine);
-    let mut options = wasmtime_wasi::p2::bindings::sync::LinkOptions::default();
-    options.cli_exit_with_code(true);
-    wasmtime_wasi::p2::add_to_linker_with_options_sync(&mut linker, &options)?;
+    // wasi:cli/exit `exit-with-code` is always linked since wasmtime 46 (no LinkOptions switch).
+    wasmtime_wasi::p2::add_to_linker_sync(&mut linker)?;
     CoreComponent::add_to_linker::<State, HasSelf<State>>(&mut linker, |state| state)?;
 
     // Standard WASI for what the Lua standard library itself touches (print, io.write, os.time,
     // os.getenv, io.open on relative paths); everything else goes through `host.*`.
     let mut wasi = WasiCtxBuilder::new();
     wasi.inherit_stdio().inherit_env();
-    wasi.preopened_dir(".", ".", DirPerms::all(), FilePerms::all())?;
+    wasi.preopened_dir(".", ".", FsPerms::ReadWrite)?;
     let state = State { wasi: wasi.build(), table: ResourceTable::new(), native: Native(native), calls: 0 };
     let mut store = Store::new(&engine, state);
     let instantiate_started = Instant::now();

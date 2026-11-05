@@ -20,9 +20,9 @@ wasmtime::component::bindgen!({
     world: "service-component",
     path: "../../wit/kernel",
     with: {
-        "wa:kernel/websocket/socket": WsSocket,
-        "wa:kernel/http/pending": HttpPending,
-        "wa:kernel/speech/job": SpeechJob,
+        "wa:kernel/websocket.socket": WsSocket,
+        "wa:kernel/http.pending": HttpPending,
+        "wa:kernel/speech.job": SpeechJob,
     },
 });
 

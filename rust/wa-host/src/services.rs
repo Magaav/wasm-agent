@@ -467,7 +467,7 @@ fn run_once(installed: &Installed, grant: &Grant, module: &Module, shared: &Arc<
             let mut seen = stop_seen.lock().unwrap();
             let since = *seen.get_or_insert_with(Instant::now);
             if since.elapsed() > STOP_GRACE {
-                return Err(anyhow!("service_stopped"));
+                return Err(wasmtime::Error::msg("service_stopped"));
             }
         }
         Ok(UpdateDeadline::Continue(10))

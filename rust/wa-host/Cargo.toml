@@ -17,8 +17,8 @@ ring = "0.17"
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde_json = "1"
 ureq = { version = "3", features = ["json"] }
-wasmtime = { version = "37", default-features = false, features = ["cranelift", "runtime", "std", "component-model", "gc", "gc-drc"] }
-wasmtime-wasi = { version = "37", default-features = false, features = ["p1", "p2"] }
+wasmtime = { version = "50", default-features = false, features = ["cranelift", "runtime", "std", "component-model", "gc", "gc-drc", "anyhow"] }
+wasmtime-wasi = { version = "50", default-features = false, features = ["p1", "p2"] }
 # Host-side websocket for service components (service_io.rs); rustls on the ring provider already in the tree.
 tungstenite = { version = "0.30", default-features = false, features = ["handshake", "rustls-tls-webpki-roots"] }
 

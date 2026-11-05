@@ -1,0 +1,17 @@
+package spike:ws@0.1.0;
+
+/// A websocket-shaped host resource: open, then read inbound frames as a WASI 0.3 stream.
+interface socket {
+  resource conn {
+    /// Fake peer: emits `count` frames of `size` bytes, one every `interval-us` microseconds.
+    open: static func(count: u32, size: u32, interval-us: u32) -> conn;
+    /// Inbound frames. Ends when the peer has sent everything.
+    messages: func() -> stream<list<u8>>;
+  }
+}
+
+world spike {
+  import socket;
+  /// Reads every frame with native async; returns (frames, bytes).
+  export run: async func(count: u32, size: u32, interval-us: u32) -> tuple<u32, u64>;
+}
