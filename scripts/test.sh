@@ -1114,6 +1114,18 @@ WA_COMPONENTS_DIR="$COMPONENTS_PROOF" bash scripts/build-components.sh mcp-echo 
 WA_COMPONENTS_DIR="$COMPONENTS_PROOF" WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-mcp-component.lua" "$BIN" --db "$DB.component" | grep 'component checks:'
 WA_BIN="$BIN" WA_COMPONENTS_DIR="$COMPONENTS_PROOF" gate_run node --test --test-reporter=tap scripts/test-component-whatsapp-parity.mjs
 WA_COMPONENTS_DIR="$COMPONENTS_PROOF" WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-service-component.lua" "$BIN" --db "$DB.service" | grep 'service checks:'
+# A2.1 (docs/KERNEL.md): the same scripts with the Lua core inside the agent-core component, every
+# host.* crossing wa:kernel/host.call. Guarded: building agent-core needs wasi-sdk (WASI_SDK); without
+# it this says so and the native runs above stand.
+# Own home: the scripts leave fixtures under it that a second run must not find.
+if AGENT_CORE="$(bash scripts/build-agent-core.sh 2>/dev/null)"; then
+  CORE_HOME="$WASM_AGENT_HOME/core-component"; rm -rf "$CORE_HOME"; mkdir -p "$CORE_HOME"
+  WASM_AGENT_HOME="$CORE_HOME" WA_COMPONENTS_DIR="$COMPONENTS_PROOF" "$BIN" --db "$DB.core-component" --core-component "$AGENT_CORE" "$WASM_AGENT_LUA_ROOT/scripts/test-mcp-component.lua" | grep 'component checks:'
+  WASM_AGENT_HOME="$CORE_HOME" WA_COMPONENTS_DIR="$COMPONENTS_PROOF" "$BIN" --db "$DB.core-service" --core-component "$AGENT_CORE" "$WASM_AGENT_LUA_ROOT/scripts/test-service-component.lua" | grep 'service checks:'
+  WASM_AGENT_HOME="$CORE_HOME" "$BIN" --db "$DB.core-batch-tools" --core-component "$AGENT_CORE" "$WASM_AGENT_LUA_ROOT/scripts/test-batch-tools.lua" | grep 'batch tools ok'
+else
+  echo "note: agent-core not built (no wasi-sdk); core-component checks skipped"
+fi
 gate_run node --test --test-reporter=tap scripts/test-mcp.mjs scripts/test-mcp-whatsapp.mjs scripts/test-mcp-session.mjs scripts/test-web.mjs scripts/test-mcp-runtime-closure.mjs scripts/test-whatsapp-transcript-watchdog.mjs
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-envelope.lua" "$BIN" --db "$DB.envelope" | grep 'envelope ok'
 MCP_RECOVERY_BIN="$BIN"

@@ -13,6 +13,7 @@ fn main() {
         .define("l_signalT", "int") // lstate.h would include <signal.h>, which WASI lacks
         .define("l_randomizePivot()", "0") // ltablib.c: no need for clock() in sort pivots
         .define("l_system(cmd)", "((cmd) == NULL ? 0 : -1)") // no processes in WASI: os.execute fails
+        .define("LUA_TMPNAMBUFSIZE", "32")
         .define("lua_tmpnam(b,e)", "{ b[0] = 0; e = 1; }") // no tmpnam in wasi-libc: os.tmpname fails
         .define("_WASI_EMULATED_PROCESS_CLOCKS", None) // os.clock
         .flag("-mllvm").flag("-wasm-enable-sjlj")

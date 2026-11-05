@@ -14,6 +14,10 @@
 #include "lua.h"
 #include "lauxlib.h"
 #include "lualib.h"
+#include <errno.h>
+
+/* wasi-libc declares tmpfile() but does not define it; io.tmpfile then fails like any open error. */
+FILE *tmpfile(void) { errno = ENOTSUP; return NULL; }
 
 typedef struct { int kind; long long i; double n; const char *p; size_t len; } Slot;
 
@@ -51,13 +55,24 @@ static int forward(lua_State *L, const char *name, size_t nlen, int first, int a
     free(err);
     return lua_error(L);
   }
-  luaL_checkstack(L, n, "host results");
-  for (int k = 0; k < n; k++) {
-    switch (out[k].kind) {
-      case 1: lua_pushboolean(L, (int)out[k].i); break;
-      case 2: lua_pushinteger(L, (lua_Integer)out[k].i); break;
-      case 3: lua_pushnumber(L, out[k].n); break;
-      case 4: lua_pushlstring(L, out[k].p, out[k].len); break;
+  luaL_checkstack(L, n + 2, "host results");
+  const Slot *s = out;
+  for (int k = 0; k < n; k++, s++) {
+    switch (s->kind) {
+      case 1: lua_pushboolean(L, (int)s->i); break;
+      case 2: lua_pushinteger(L, (lua_Integer)s->i); break;
+      case 3: lua_pushnumber(L, s->n); break;
+      case 4: lua_pushlstring(L, s->p, s->len); break;
+      case 5: { /* string map: 2 * entries key/value byte slots follow */
+        int entries = (int)s->i;
+        lua_createtable(L, 0, entries);
+        for (int e = 0; e < entries; e++) {
+          s++; lua_pushlstring(L, s->p, s->len);
+          s++; lua_pushlstring(L, s->p, s->len);
+          lua_rawset(L, -3);
+        }
+        break;
+      }
       default: lua_pushnil(L);
     }
   }

@@ -13,7 +13,7 @@
 use crate::lua::{
     lua_getfield, lua_getglobal, lua_gettop, lua_pcallk, lua_pushboolean, lua_pushinteger, lua_pushlstring,
     lua_pushnil, lua_pushnumber, lua_settop, lua_toboolean, lua_tointegerx, lua_tolstring, lua_tonumberx,
-    lua_type, Lua, LuaState, LUA_MULTRET, LUA_OK, LUA_TBOOLEAN, LUA_TNIL, LUA_TNUMBER, LUA_TSTRING,
+    lua_type, Lua, LuaState, LUA_MULTRET, LUA_OK, LUA_TBOOLEAN, LUA_TNIL, LUA_TNUMBER, LUA_TSTRING, LUA_TTABLE,
 };
 use std::ffi::{c_char, c_int};
 use std::time::Instant;
@@ -82,6 +82,23 @@ unsafe fn bytes_at(l: *mut LuaState, idx: c_int) -> Option<Vec<u8>> {
     }
 }
 
+/// A table of string keys to string values (what `paths` and `platform` return), else None.
+unsafe fn string_map(l: *mut LuaState, idx: c_int) -> Option<Vec<(String, Vec<u8>)>> {
+    let mut out = Vec::new();
+    crate::lua::lua_pushnil(l);
+    while crate::lua::lua_next(l, idx) != 0 {
+        // lua_tolstring on a number key would convert it in place and break lua_next: check types first.
+        if lua_type(l, -2) != LUA_TSTRING || lua_type(l, -1) != LUA_TSTRING {
+            lua_settop(l, -3);
+            return None;
+        }
+        let key = String::from_utf8_lossy(&bytes_at(l, -2).unwrap_or_default()).into_owned();
+        out.push((key, bytes_at(l, -1).unwrap_or_default()));
+        lua_settop(l, -2);
+    }
+    Some(out)
+}
+
 fn push_bytes(l: *mut LuaState, bytes: &[u8]) {
     unsafe { lua_pushlstring(l, bytes.as_ptr() as *const c_char, bytes.len()) };
 }
@@ -95,7 +112,7 @@ impl State {
             let base = lua_gettop(l);
             lua_getglobal(l, crate::lua::cstr("host").as_ptr());
             lua_getfield(l, -1, cname.as_ptr());
-            crate::lua::lua_remove(l, -2);
+            // `host` stays at base+1 under the call (lua_remove is a macro, not a symbol, in 5.4).
             for arg in &args {
                 match arg {
                     Value::Nil => lua_pushnil(l),
@@ -103,6 +120,8 @@ impl State {
                     Value::Integer(i) => lua_pushinteger(l, *i),
                     Value::Number(n) => lua_pushnumber(l, *n),
                     Value::Bytes(bytes) => push_bytes(l, bytes),
+                    // results only; the guest never sends one (it refuses table arguments)
+                    Value::StringMap(_) => lua_pushnil(l),
                 }
             }
             if lua_pcallk(l, args.len() as c_int, LUA_MULTRET, 0, 0, std::ptr::null_mut()) != LUA_OK {
@@ -113,14 +132,21 @@ impl State {
                 return Err(message);
             }
             let top = lua_gettop(l);
-            let mut out = Vec::with_capacity((top - base) as usize);
-            for idx in base + 1..=top {
+            let mut out = Vec::with_capacity((top - base - 1).max(0) as usize);
+            for idx in base + 2..=top {
                 out.push(match lua_type(l, idx) {
                     LUA_TNIL => Value::Nil,
                     LUA_TBOOLEAN => Value::Boolean(lua_toboolean(l, idx) != 0),
                     LUA_TNUMBER if lua_isinteger(l, idx) != 0 => Value::Integer(lua_tointegerx(l, idx, std::ptr::null_mut())),
                     LUA_TNUMBER => Value::Number(lua_tonumberx(l, idx, std::ptr::null_mut())),
                     LUA_TSTRING => Value::Bytes(bytes_at(l, idx).unwrap_or_default()),
+                    LUA_TTABLE => match string_map(l, idx) {
+                        Some(map) => Value::StringMap(map),
+                        None => {
+                            lua_settop(l, base);
+                            return Err(format!("unsupported_in_component_v1:{name} (returned a table that is not a flat string map)"));
+                        }
+                    },
                     other => {
                         lua_settop(l, base);
                         return Err(format!("unsupported_in_component_v1:{name} (returned a value of Lua type {other})"));

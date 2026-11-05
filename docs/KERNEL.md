@@ -95,6 +95,43 @@ runs in a wasm32-wasip2 component with every `host.*` bridged through one generi
 pure-Lua compute, ~+0.8 µs per host call, `pcall` works (wasm exceptions) and is faster, instantiate
 0.1–0.2 ms. Estimated ≈3.5–4.5 days to parity.
 
+### A2.1 results (05/11, wasm_the_first)
+
+`wa --core-component <agent-core.wasm> <script.lua> [args]` runs a script with the Lua core inside
+the `agent-core` component ([rust/components/agent-core](../rust/components/agent-core), built by
+`scripts/build-agent-core.sh`, 377 KB). Every `host.*` crosses one import, `wa:kernel/host.call`
+([wit/kernel/host.wit](../wit/kernel/host.wit), world `core-component`), and the kernel answers it by
+calling the capability's existing C function on a native Lua state booted like every other
+interpreter (`rust/wa-host/src/core_component.rs`), so nothing is reimplemented per guest. The guest
+keeps the native boot: `host.*` resolves only names in the capability registry, `EMBEDDED` resolves
+through the kernel (installed lua-core tree, else compiled in, assignment still overrides), `dofile`
+is the native bootstrap byte for byte, `print` goes to stdout. The value variant has two members beyond
+the first draft: `integer` (Lua 5.4 prints `5` and `5.0` differently) and `string-map` (results only;
+`paths` and `platform` return flat string tables).
+
+Same binary, same scripts, own home per run, 3 runs each (median wall time, ms):
+
+| script | native | component | component `run` only | host calls |
+| --- | --- | --- | --- | --- |
+| test-mcp-component (24 checks) | 5756 ✅ | 6170 ✅ | 5725 | 1 137 |
+| test-service-component (23) | 1524 ✅ | 1920 ✅ | 1482 | ~1.9 M (polling loop) |
+| test-batch-tools (245) | 5347 ✅ | 8124 ✅ | 7671 | 29 079 |
+| test-tool-cues (120) | 726 ✅ | 1154 ✅ | 731 | 1 838 |
+
+The fixed cost is compilation: 364–391 ms per cold load; with the compiled-code cache
+(`~/.wasm-agent/cache/core-component`, keyed by module sha256 + engine hash) a load is ~1 ms and
+instantiation 0.13–0.25 ms. I/O-bound scripts then run at native speed; Lua-compute-heavy ones
+(batch-tools: JSON and string work) are ~1.45×, as the spike measured. `scripts/test.sh` runs three
+of these through the component when wasi-sdk is present and says it skipped them otherwise.
+
+Refused in v1 with `unsupported_in_component_v1:<name>`: `http_sse` (Lua line callback),
+`input_start`, `input_editor`, `input_commands`, `input_held`, `input_take`, `input_stop`,
+`input_idle`, `editor_status`, `editor_footer`, `panel`, `ticker` (the live console), plus any call
+whose argument is a function or a table. `http_stream` crosses (four strings in, JSON out).
+WASI side: stdio and env inherited, the working directory preopened as `.` (so `io.open` on an
+absolute path fails in the guest; the core reads files through `host.read_file`), `os.execute`,
+`os.tmpname`, `io.popen` and `io.tmpfile` fail.
+
 ## Order of work
 
 1. This document + `wit/` (v1 draft). ← now

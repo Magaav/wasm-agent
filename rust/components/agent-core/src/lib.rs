@@ -9,7 +9,8 @@ wit_bindgen::generate!({ world: "core-component", path: "../../../wit/kernel" })
 use wa::kernel::host::{call, Value};
 
 /// One argument or result as glue.c lays it out. `kind`: 0 nil, 1 boolean (`int` 0/1),
-/// 2 integer, 3 number, 4 bytes (`ptr`, `len`).
+/// 2 integer, 3 number, 4 bytes (`ptr`, `len`), 5 string map (`int` entries follow as key/value
+/// byte slots, results only).
 #[repr(C)]
 pub struct Slot {
     kind: c_int,
@@ -59,11 +60,22 @@ pub unsafe extern "C" fn rust_host_call(name: *const u8, nlen: usize, argc: c_in
                     Value::Integer(i) => { slot.kind = 2; slot.int = *i; }
                     Value::Number(n) => { slot.kind = 3; slot.num = *n; }
                     Value::Bytes(bytes) => { slot.kind = 4; slot.ptr = bytes.as_ptr(); slot.len = bytes.len(); }
+                    Value::StringMap(map) => {
+                        slot.kind = 5;
+                        slot.int = map.len() as i64;
+                        slots.push(slot);
+                        for (key, value) in map {
+                            slots.push(Slot { kind: 4, int: 0, num: 0.0, ptr: key.as_ptr(), len: key.len() });
+                            slots.push(Slot { kind: 4, int: 0, num: 0.0, ptr: value.as_ptr(), len: value.len() });
+                        }
+                        continue;
+                    }
                 }
                 slots.push(slot);
             }
             *out = slots.as_ptr();
-            slots.len() as c_int
+            // the count of Lua values, not of slots (a string map spans 1 + 2n slots)
+            results.len() as c_int
         }
         Err(message) => {
             let buffer = malloc(message.len().max(1));
