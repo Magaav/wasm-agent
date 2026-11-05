@@ -65,6 +65,16 @@ Example (a definition the `services` tool stores, then `enable`):
  "file_env":{"WA_STATE_KEY":"/home/ubuntu/.local/state/wa-whatsapp/api.token"},"config":{"language":"pt"}}
 ```
 
+## Component services on wa:kernel (05/11)
+
+`rust/wa-host/src/service_components.rs` runs services built as **components** on the
+`wa:kernel` WIT contract (`wit/kernel`, `service-component` world: websocket, http, kv, lifecycle,
+log, credentials in; `service.run(config)` out). The supervisor picks the runner from the binary's
+preamble (component vs core module), so wasip1 modules keep working. `wa-whatsapp` is now a
+`wasm32-wasip2` library component (wit-bindgen 0.63): store replay through `kv.scan` pages, health
+through `lifecycle.report` (`status` shows it). Verified on wasm_the_first: 5372 entries restored,
+resumed IK handshake, CONNECTED in 0.68 s, live messages.
+
 ## Decision 05/11: Rust, not Go
 
 The spike proved whatsmeow-in-Go reaches WhatsApp from wasip1, but the owner chose the lightest
