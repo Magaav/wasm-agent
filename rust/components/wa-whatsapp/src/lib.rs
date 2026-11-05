@@ -30,7 +30,7 @@ wit_bindgen::generate!({
 });
 
 use wa::kernel::types::Error as KError;
-use wa::kernel::{http as khttp, lifecycle, websocket::Socket};
+use wa::kernel::{http as khttp, kv as kkv, lifecycle, speech, websocket::Socket};
 
 
 thread_local! {
@@ -57,6 +57,10 @@ thread_local! {
     static IO_WAKERS: RefCell<Vec<Waker>> = const { RefCell::new(Vec::new()) };
     static SOCKETS: RefCell<Vec<WsSlot>> = const { RefCell::new(Vec::new()) };
     static NEXT_SOCKET: std::cell::Cell<u32> = const { std::cell::Cell::new(1) };
+    /// The connected client, for media downloads from the audio pipeline.
+    static CLIENT: RefCell<Option<Arc<whatsapp_rust::Client>>> = const { RefCell::new(None) };
+    /// Audio messages handed over by the (Send) message handler, processed by the main loop.
+    static AUDIO_QUEUE: RefCell<Vec<AudioJob>> = const { RefCell::new(Vec::new()) };
 }
 
 /// Move host websocket frames into their transports' channels; returns whether anything moved.
@@ -128,6 +132,109 @@ impl Future for YieldOnce {
         self.0 = true;
         cx.waker().wake_by_ref();
         Poll::Pending
+    }
+}
+
+// ---- shadow transcription ---------------------------------------------------------------------
+// A voice note: freshness check, media download (host HTTP), kernel recognizer (wa:kernel/speech),
+// transcript kept in kv. Logged with metadata only - never the text. Posting is off unless the
+// configuration says `post_transcripts: true` (the native connector is the poster meanwhile).
+
+const FRESH_MS: i64 = 5 * 60 * 1000;
+
+struct AudioJob {
+    chat: String,
+    id: String,
+    sent_ms: i64,
+    audio: whatsapp_rust::waproto::whatsapp::message::AudioMessage,
+}
+
+struct SpeechWait(speech::Job);
+impl Future for SpeechWait {
+    type Output = Result<speech::Transcript, KError>;
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        match self.0.poll() {
+            Err(KError::Again) => {
+                IO_WAKERS.with(|w| w.borrow_mut().push(cx.waker().clone()));
+                Poll::Pending
+            }
+            other => Poll::Ready(other),
+        }
+    }
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
+}
+
+fn record(job: &AudioJob, value: serde_json::Value) {
+    let key = format!("tx/{}/{}", job.chat, job.id);
+    let _ = kkv::set(key.as_bytes(), value.to_string().as_bytes());
+}
+
+/// Own-chat alert (a log line to the account's own chat). Implemented, disabled in shadow mode.
+fn alert(enabled: bool, job: &AudioJob, reason: &str) {
+    if enabled {
+        say!("alert (own chat) chat={} id={} reason={reason} - sending not wired in shadow builds", job.chat, job.id);
+    }
+}
+
+async fn transcribe(job: AudioJob, language: String, post: bool) {
+    let age = now_ms() - job.sent_ms;
+    if age > FRESH_MS {
+        say!("transcript expired chat={} id={} age_ms={age}", job.chat, job.id);
+        record(&job, serde_json::json!({"state": "expired", "age_ms": age}));
+        alert(post, &job, "stale_over_5m");
+        return;
+    }
+    let Some(client) = CLIENT.with(|c| c.borrow().clone()) else {
+        say!("transcript failed chat={} id={} reason=not_connected", job.chat, job.id);
+        return;
+    };
+    let t0 = now_ms();
+    let bytes = match client.download(&job.audio).await {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            say!("transcript failed chat={} id={} reason=download:{error}", job.chat, job.id);
+            record(&job, serde_json::json!({"state": "failed", "reason": "download"}));
+            alert(post, &job, "download");
+            return;
+        }
+    };
+    let downloaded = now_ms();
+    let mime = job.audio.mimetype.clone().unwrap_or_else(|| "audio/ogg".into());
+    let started = match speech::Job::start(&bytes, &mime, &language) {
+        Ok(started) => started,
+        Err(error) => {
+            say!("transcript failed chat={} id={} reason=start:{error:?}", job.chat, job.id);
+            record(&job, serde_json::json!({"state": "failed", "reason": format!("{error:?}")}));
+            alert(post, &job, "stt_start");
+            return;
+        }
+    };
+    match SpeechWait(started).await {
+        Ok(t) => {
+            let chars = t.text.chars().count();
+            let latency = now_ms() - job.sent_ms;
+            say!(
+                "transcript ready chat={} id={} ms={} chars={} latency_ms={latency} download_ms={} seconds={}",
+                job.chat,
+                job.id,
+                t.elapsed_ms,
+                chars,
+                downloaded - t0,
+                job.audio.seconds.unwrap_or(0)
+            );
+            record(&job, serde_json::json!({"state": "transcribed", "text": t.text, "elapsed_ms": t.elapsed_ms, "latency_ms": latency, "posted": false}));
+            if post {
+                say!("post_transcripts is on but posting is not wired in this shadow build; nothing sent");
+            }
+        }
+        Err(error) => {
+            say!("transcript failed chat={} id={} reason={error:?}", job.chat, job.id);
+            record(&job, serde_json::json!({"state": "failed", "reason": format!("{error:?}")}));
+            alert(post, &job, "stt");
+        }
     }
 }
 
@@ -302,6 +409,9 @@ fn serve(config: serde_json::Value) {
     let spawner = pool.spawner();
     let runtime = HostRuntime { spawner: spawner.clone() };
     let pair_phone = config["pair_phone"].as_str().map(str::to_string);
+    let language = config["language"].as_str().unwrap_or("pt").to_string();
+    let post_transcripts = config["post_transcripts"] == serde_json::json!(true);
+    say!("transcription: shadow (language {language}, posting {})", if post_transcripts { "on" } else { "off" });
     say!("wa-whatsapp: starting (pairing by {})", if pair_phone.is_some() { "code" } else { "QR" });
     let _ = spawner.spawn_local(async move {
         use whatsapp_rust::prelude::*;
@@ -333,13 +443,26 @@ fn serve(config: serde_json::Value) {
             .with_http_client(HostHttp)
             .on_qr_code(|code, _timeout| async move { say!("pairing QR: {code}") })
             .on_pair_code(|code, timeout| async move { say!("PAIRING CODE: {code} (valid {}s) - WhatsApp > Linked devices > Link with phone number", timeout.as_secs()) })
-            .on_connected(|_client| async move {
-                say!("CONNECTED");
-                lifecycle::report(lifecycle::Health::Ready, None);
+            .on_connected(|client| {
+                CLIENT.with(|c| *c.borrow_mut() = Some(client));
+                async move {
+                    say!("CONNECTED");
+                    lifecycle::report(lifecycle::Health::Ready, None);
+                }
             })
             .on_logged_out(|_client| async move { say!("LOGGED OUT") })
             .on_message(|ctx| {
                 let line = format!("message chat={} kind={} media={} id={}", ctx.info.source.chat, ctx.info.r#type, ctx.info.media_type, ctx.info.id);
+                if let Some(audio) = ctx.message.get_base_message().audio_message.as_option() {
+                    AUDIO_QUEUE.with(|q| {
+                        q.borrow_mut().push(AudioJob {
+                            chat: ctx.info.source.chat.to_string(),
+                            id: ctx.info.id.to_string(),
+                            sent_ms: ctx.info.timestamp.timestamp_millis(),
+                            audio: audio.clone(),
+                        })
+                    });
+                }
                 async move { say!("{line}") }
             });
         if let Some(phone) = pair_phone {
@@ -353,6 +476,9 @@ fn serve(config: serde_json::Value) {
         say!("bot stopped");
     });
     loop {
+        for job in AUDIO_QUEUE.with(|q| std::mem::take(&mut *q.borrow_mut())) {
+            let _ = spawner.spawn_local(transcribe(job, language.clone(), post_transcripts));
+        }
         pool.run_until_stalled();
         let moved = pump_sockets();
         wake_io();

@@ -90,10 +90,6 @@ that is a mechanical change (every potentially slow call already has a non-block
 The Lua core is the largest single block: the agent loop, tool dispatch, MCP and services registries.
 Lua compiles to wasm, so it can move as one component first (the "agent" component) and then split
 along the seams above.
-Measured 05/11 ([benchmarks/lua-wasi-spike](../benchmarks/lua-wasi-spike/README.md)): wa-host's Lua 5.4
-runs in a wasm32-wasip2 component with every `host.*` bridged through one generic import — ~1.45× on
-pure-Lua compute, ~+0.8 µs per host call, `pcall` works (wasm exceptions) and is faster, instantiate
-0.1–0.2 ms. Estimated ≈3.5–4.5 days to parity.
 
 ## Order of work
 

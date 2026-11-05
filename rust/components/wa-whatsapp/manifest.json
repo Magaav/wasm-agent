@@ -2,14 +2,15 @@
   "name": "wa-whatsapp",
   "kind": "service",
   "target": "wasm32-wasip2",
-  "description": "WhatsApp linked-device client (whatsapp-rust) with host websocket/HTTP and a host-backed store",
+  "description": "WhatsApp linked-device client (whatsapp-rust) on wa:kernel; shadow transcription via the kernel recognizer (posting off by default)",
   "capabilities": {
     "net": [
       "web.whatsapp.com:443",
       "*.whatsapp.net:443",
       "*.whatsapp.com:443"
     ],
-    "storage": true
+    "storage": true,
+    "stt": true
   },
   "limits": {
     "memory_mb": 256

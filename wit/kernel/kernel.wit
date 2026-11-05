@@ -60,6 +60,28 @@ interface http {
     }
 }
 
+/// Speech-to-text done by the kernel with its native recognizer (today: the faster-whisper worker
+/// the node already provisions), non-blocking for the guest. Granted by the manifest capability
+/// `stt: true`. Long audio keeps running in the kernel; the guest polls.
+interface speech {
+    use types.{error};
+
+    record transcript {
+        text: string,
+        /// Language hint that was used ("pt", "en", "auto").
+        language: string,
+        /// Wall time the recognizer spent, milliseconds.
+        elapsed-ms: u64,
+    }
+    resource job {
+        /// Queue `audio` (an encoded file: ogg/opus, mp3, wav…) for recognition.
+        start: static func(audio: list<u8>, mime: string, language: string) -> result<job, error>;
+        /// The transcript once ready; `again` while queued or running; `failed(reason)` on error
+        /// (`no_speech_detected`, `audio_too_large`, `worker_stalled`, …).
+        poll: func() -> result<transcript, error>;
+    }
+}
+
 /// A durable key-value store private to this component (one namespace per component;
 /// the kernel decides where it lives). Replaces `wa_kv`.
 interface kv {
@@ -127,6 +149,7 @@ world service-component {
     import types;
     import websocket;
     import http;
+    import speech;
     import kv;
     import lifecycle;
     import log;

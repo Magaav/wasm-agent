@@ -12,12 +12,17 @@ use wasmtime::component::{Component, HasSelf, Linker, Resource, ResourceTable};
 use wasmtime::{Store, StoreLimits, StoreLimitsBuilder, UpdateDeadline};
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
+// The native recognizer behind wa:kernel/speech (declared here, not in main.rs).
+#[path = "service_stt.rs"]
+mod service_stt;
+
 wasmtime::component::bindgen!({
     world: "service-component",
     path: "../../wit/kernel",
     with: {
         "wa:kernel/websocket/socket": WsSocket,
         "wa:kernel/http/pending": HttpPending,
+        "wa:kernel/speech/job": SpeechJob,
     },
 });
 
@@ -25,6 +30,10 @@ use wa::kernel::types::Error as KError;
 
 pub struct WsSocket(Option<WsConn>);
 pub struct HttpPending(HttpState);
+pub struct SpeechJob {
+    slot: service_stt::JobSlot,
+    language: String,
+}
 
 pub struct State {
     wasi: WasiCtx,
@@ -36,6 +45,8 @@ pub struct State {
     kv: Option<rusqlite::Connection>,
     log: Option<std::fs::File>,
     secrets: std::collections::BTreeMap<String, String>,
+    /// Manifest `capabilities.stt == true`.
+    stt: bool,
 }
 
 impl WasiView for State {
@@ -120,6 +131,29 @@ impl wa::kernel::http::HostPending for State {
     }
     fn drop(&mut self, pending: Resource<HttpPending>) -> wasmtime::Result<()> {
         self.table.delete(pending)?;
+        Ok(())
+    }
+}
+
+impl wa::kernel::speech::Host for State {}
+impl wa::kernel::speech::HostJob for State {
+    fn start(&mut self, audio: Vec<u8>, mime: String, language: String) -> Result<Resource<SpeechJob>, KError> {
+        if !self.stt {
+            return Err(KError::Refused("stt not declared".into()));
+        }
+        let slot = service_stt::submit(audio, &mime, &language).map_err(KError::Failed)?;
+        self.table.push(SpeechJob { slot, language }).map_err(|e| KError::Failed(e.to_string()))
+    }
+    fn poll(&mut self, job: Resource<SpeechJob>) -> Result<wa::kernel::speech::Transcript, KError> {
+        let Ok(job) = self.table.get(&job) else { return Err(KError::Closed) };
+        match job.slot.lock().unwrap().clone() {
+            service_stt::JobState::Queued => Err(KError::Again),
+            service_stt::JobState::Done { text, elapsed_ms } => Ok(wa::kernel::speech::Transcript { text, language: job.language.clone(), elapsed_ms }),
+            service_stt::JobState::Failed(reason) => Err(KError::Failed(reason)),
+        }
+    }
+    fn drop(&mut self, job: Resource<SpeechJob>) -> wasmtime::Result<()> {
+        self.table.delete(job)?;
         Ok(())
     }
 }
@@ -222,6 +256,7 @@ pub fn run_once(installed: &Installed, grant: &Grant, component: &Component, sha
     }
     let memory_mb = installed.manifest.get("limits").and_then(|l| l.get("memory_mb")).and_then(serde_json::Value::as_u64).unwrap_or(512).clamp(16, 4096);
     let storage = installed.manifest.get("capabilities").and_then(|c| c.get("storage")).and_then(serde_json::Value::as_bool) == Some(true);
+    let stt = installed.manifest.get("capabilities").and_then(|c| c.get("stt")).and_then(serde_json::Value::as_bool) == Some(true);
     let state = State {
         wasi: builder.build(),
         table: ResourceTable::new(),
@@ -232,6 +267,7 @@ pub fn run_once(installed: &Installed, grant: &Grant, component: &Component, sha
         kv: None,
         log: Some(log_file),
         secrets,
+        stt,
     };
     let mut store = Store::new(engine, state);
     store.limiter(|s| &mut s.limits);
