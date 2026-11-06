@@ -85,6 +85,45 @@ fn a_search_goes_in_as_a_request_and_comes_out_as_the_answer() {
 }
 
 #[test]
+fn a_backfill_goes_in_as_a_request_and_comes_out_as_what_was_asked_for() {
+    // The sixth op travels the same queue as the other five: the answer is the request list (chat,
+    // anchor, count), never a message - the messages arrive later through the protocol.
+    let (_kv, _clock, queue) = queue_pair();
+    let request = Request {
+        op: "backfill".into(),
+        chat: Some("120363000000000001@g.us".into()),
+        limit: Some(120),
+        ..Request::default()
+    };
+    let id = produce(&queue, &request);
+    let handled = work_one(&queue, 1_000_000, |verified| {
+        assert_eq!((verified.op, verified.limit), (Op::Backfill, 120));
+        answer(
+            Op::Backfill,
+            wa_whatsapp_index::backfill_answer(
+                vec![wa_whatsapp_index::BackfillChat {
+                    chat: verified.chat.as_ref().map(|chat| chat.jid()).unwrap_or_default(),
+                    count: verified.limit,
+                    oldest_id: "3EB0OLDEST".into(),
+                    oldest_ts: 1_700_000_000_000,
+                }],
+                "asked the primary phone for 120 older messages",
+            ),
+        )
+    });
+    assert_eq!(handled, Some(id));
+    let job = queue.job(wa_queue::JobId(id)).unwrap().unwrap();
+    assert_eq!(job.state.as_str(), "done");
+    let settled: serde_json::Value = serde_json::from_slice(job.result.as_deref().unwrap()).unwrap();
+    assert_eq!(settled["op"], "backfill");
+    assert_eq!(settled["count"], 1);
+    assert_eq!(settled["chats"][0]["count"], 120);
+    assert_eq!(settled["chats"][0]["oldest_id"], "3EB0OLDEST");
+    // A different count is a different question, so it is a different job.
+    assert_ne!(id, produce(&queue, &Request { limit: Some(50), ..request }));
+}
+
+#[test]
 fn the_same_question_is_one_job() {
     let (_kv, _clock, queue) = queue_pair();
     let first = produce(&queue, &search("boleto"));

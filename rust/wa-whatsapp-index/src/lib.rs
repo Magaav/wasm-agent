@@ -26,6 +26,10 @@
 //! * [`Download`] - the manifest a `whatsapp_download` job settles with. The decrypted bytes travel
 //!   as the job's progress chunks (the queue's bounded byte stream), never in the result: a video
 //!   must not become a kv record.
+//! * [`BackfillChat`]/[`backfill_answer`] - the sixth question: "go back further in this chat". The
+//!   component answers with what it asked the phone for (chat, anchor, count), never with the
+//!   messages themselves - they arrive later, through the protocol, and are indexed by the same code
+//!   that indexes live traffic.
 //!
 //! Nothing here logs and nothing here reads a message: the answer carries text because a search
 //! result is text, and the component's log carries ids, kinds and counts.
@@ -94,7 +98,15 @@ pub const KINDS: [&str; 14] = [
     "other",
 ];
 
-/// The five questions the agent may ask about the index.
+/// How far back one `whatsapp_backfill` reaches when the caller does not say.
+pub const BACKFILL_DEFAULT: u32 = 50;
+/// Most messages one `whatsapp_backfill` asks the primary phone for, per chat.
+pub const BACKFILL_MAX: u32 = 500;
+/// Most chats one `whatsapp_backfill` without a `chat` may cover: a request per chat is a message to
+/// the phone, and a caller that names no chat is asking for "the ones I talk in", not for all of them.
+pub const BACKFILL_MAX_CHATS: usize = 20;
+
+/// The six questions the agent may ask about the index.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Op {
     /// `whatsapp_search {q, chat?, kind?, from?, since?, until?, limit}` - full-text over records.
@@ -107,6 +119,9 @@ pub enum Op {
     Media,
     /// `whatsapp_download {chat, id}` - decrypt the media to a bounded host directory.
     Download,
+    /// `whatsapp_backfill {chat?, count}` - ask the primary phone for messages *older* than what the
+    /// index already holds, so a search covers the account's past and not only the live stream.
+    Backfill,
 }
 
 impl Op {
@@ -117,6 +132,7 @@ impl Op {
             Op::Reactions => "reactions",
             Op::Media => "media",
             Op::Download => "download",
+            Op::Backfill => "backfill",
         }
     }
 
@@ -127,6 +143,7 @@ impl Op {
             "reactions" => Some(Op::Reactions),
             "media" => Some(Op::Media),
             "download" => Some(Op::Download),
+            "backfill" => Some(Op::Backfill),
             _ => None,
         }
     }
@@ -139,6 +156,7 @@ impl Op {
             Op::Reactions => "whatsapp_reactions",
             Op::Media => "whatsapp_media",
             Op::Download => "whatsapp_download",
+            Op::Backfill => "whatsapp_backfill",
         }
     }
 
@@ -149,6 +167,7 @@ impl Op {
             "whatsapp_reactions" => Some(Op::Reactions),
             "whatsapp_media" => Some(Op::Media),
             "whatsapp_download" => Some(Op::Download),
+            "whatsapp_backfill" => Some(Op::Backfill),
             _ => None,
         }
     }
@@ -189,6 +208,9 @@ pub struct Request {
     pub until: Option<i64>,
     /// A message id or an epoch; `read` returns what is *older* than it.
     pub before: Option<String>,
+    /// The count this op takes: a page size for `search`/`read` and the messages-per-chat the tool
+    /// calls `count` for `backfill`. One field, because a request carries one count and adding a
+    /// second one to the wire shape would break every producer that builds a `Request` literally.
     pub limit: Option<u32>,
     /// `download` only: how many plaintext bytes the caller will accept.
     pub max_bytes: Option<u64>,
@@ -206,6 +228,7 @@ pub struct Verified {
     pub since: Option<i64>,
     pub until: Option<i64>,
     pub before: Option<String>,
+    /// The effective count: a page size, or (for `backfill`) the messages per chat, clamped.
     pub limit: u32,
     pub max_bytes: u64,
 }
@@ -213,8 +236,9 @@ pub struct Verified {
 impl Request {
     /// Check every argument. The first refusal wins; a query is all-or-nothing.
     pub fn validate(&self) -> Result<Verified, Refusal> {
-        let op = Op::parse(self.op.trim())
-            .ok_or_else(|| Refusal::new("bad_op", "op must be search, read, reactions, media or download"))?;
+        let op = Op::parse(self.op.trim()).ok_or_else(|| {
+            Refusal::new("bad_op", "op must be search, read, reactions, media, download or backfill")
+        })?;
         let chat = match self.chat.as_deref().map(str::trim) {
             None | Some("") => None,
             Some(text) => Some(parse_chat(text)?),
@@ -296,6 +320,11 @@ impl Request {
                 let bytes = self.max_bytes.unwrap_or(MAX_DOWNLOAD_BYTES).clamp(1, MAX_DOWNLOAD_BYTES);
                 (1, bytes)
             }
+            Op::Backfill => {
+                // A chat is optional on purpose: naming none asks for the chats the index already
+                // knows, newest first, which is the useful reading of "bring me the past".
+                (clamp_limit(self.limit, BACKFILL_DEFAULT, BACKFILL_MAX), 0)
+            }
         };
         Ok(Verified { op, q, chat, id, kind, from, since, until, before, limit, max_bytes })
     }
@@ -361,6 +390,35 @@ impl Verified {
             max_bytes: Some(self.max_bytes),
         }
     }
+}
+
+/// One chat a `whatsapp_backfill` asked the primary phone about: the anchor it asked from and how
+/// many messages it asked for. Ids and numbers only - a history request never carries text.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BackfillChat {
+    pub chat: String,
+    pub count: u32,
+    /// The oldest message the index already held for that chat; empty when it held none, which asks
+    /// the phone for the newest messages it has.
+    pub oldest_id: String,
+    pub oldest_ts: i64,
+}
+
+/// The body of a `whatsapp_backfill` answer: what was asked for, and why it stopped if it did.
+///
+/// `chats` is the request list (bounded by [`BACKFILL_MAX_CHATS`]), `count` is how many requests were
+/// made, and `note` says what happened when that is not simply "all of them" - a disconnected client,
+/// a chat the index has never seen, a phone that cannot be asked. The messages themselves are not in
+/// this answer: they arrive through the protocol and land in the index like any other message, marked
+/// `source: history`.
+pub fn backfill_answer(chats: Vec<BackfillChat>, note: &str) -> serde_json::Value {
+    let count = chats.len();
+    let mut body = serde_json::json!({"chats": chats, "count": count});
+    if !note.is_empty() {
+        body["note"] = serde_json::Value::String(note.chars().take(160).collect());
+    }
+    body
 }
 
 /// The exact-JID rule, with the outbox's refusal turned into this crate's: one code, one shape.
@@ -813,6 +871,76 @@ mod tests {
         for reason in ["not_indexed", "no_media", "not_downloadable", "deleted", "download_too_large", "bad_chat", "chat_and_id_required"] {
             assert!(!retryable(reason), "{reason} can never succeed on a retry");
         }
+    }
+
+    #[test]
+    fn a_backfill_names_a_chat_or_none_and_is_bounded() {
+        // No chat: every op's other required arguments stay required, but backfill's chat is optional.
+        let all = Request { op: "backfill".into(), ..Request::default() };
+        let verified = all.validate().expect("a backfill without a chat is a valid request");
+        assert_eq!((verified.op, verified.limit), (Op::Backfill, BACKFILL_DEFAULT));
+        assert!(verified.chat.is_none());
+
+        // The count is clamped at the top (a million is a phone that has to answer for an hour) and
+        // zero means "the default", the same way it does for a page size.
+        let huge = Request { op: "backfill".into(), limit: Some(1_000_000), ..Request::default() };
+        assert_eq!(huge.validate().unwrap().limit, BACKFILL_MAX);
+        let zero = Request { op: "backfill".into(), limit: Some(0), ..Request::default() };
+        assert_eq!(zero.validate().unwrap().limit, BACKFILL_DEFAULT);
+
+        // A named chat is validated by the same exact-JID rule the send path uses.
+        let named = Request { op: "backfill".into(), chat: Some("5511999999999@lid".into()), ..Request::default() };
+        assert_eq!(named.validate().unwrap().chat.as_ref().map(|chat| chat.jid()), Some("5511999999999@lid".to_string()));
+        let bad = Request { op: "backfill".into(), chat: Some("5511999999999".into()), ..Request::default() };
+        assert_eq!(bad.validate().unwrap_err().code, "bad_chat");
+
+        // The tool names are the catalogue's, in both directions.
+        assert_eq!(Op::Backfill.tool(), "whatsapp_backfill");
+        assert_eq!(Op::parse_tool("whatsapp_backfill"), Some(Op::Backfill));
+        assert_eq!(Op::parse("backfill"), Some(Op::Backfill));
+    }
+
+    #[test]
+    fn a_backfill_payload_round_trips_and_its_dedupe_key_covers_the_count() {
+        let verified = Request {
+            op: "backfill".into(),
+            chat: Some("120363000000000001@g.us".into()),
+            limit: Some(120),
+            ..Request::default()
+        }
+        .validate()
+        .unwrap();
+        let back = Request::decode(&verified.to_request().encode()).unwrap();
+        assert_eq!(back.validate().unwrap(), verified);
+        // Asking for 120 messages is a different question from asking for 50.
+        let smaller = Request { limit: Some(50), ..verified.to_request() }.validate().unwrap();
+        assert_ne!(verified.dedupe_key(), smaller.dedupe_key());
+        assert_eq!(verified.dedupe_key(), verified.clone().dedupe_key(), "the same question is one job");
+    }
+
+    #[test]
+    fn a_backfill_answer_lists_what_was_asked_for_and_never_a_message() {
+        let chats = vec![
+            BackfillChat {
+                chat: "120363000000000001@g.us".into(),
+                count: 50,
+                oldest_id: "3EB0ABCDEF".into(),
+                oldest_ts: 1_760_000_000_000,
+            },
+            BackfillChat { chat: "5511999999999@lid".into(), count: 50, oldest_id: String::new(), oldest_ts: 0 },
+        ];
+        let body = backfill_answer(chats.clone(), "one chat has no history yet");
+        let settled = answer(Op::Backfill, body);
+        assert_eq!(settled["ok"], true);
+        assert_eq!(settled["op"], "backfill");
+        assert_eq!(settled["count"], 2);
+        assert_eq!(settled["chats"].as_array().unwrap().len(), 2);
+        assert_eq!(settled["chats"][0]["oldest_id"], "3EB0ABCDEF");
+        assert_eq!(settled["note"], "one chat has no history yet");
+        // An empty note is not a field at all, so a caller cannot mistake it for a reason.
+        let quiet = answer(Op::Backfill, backfill_answer(chats, ""));
+        assert!(quiet.get("note").is_none());
+        assert_eq!(quiet["count"], 2);
     }
 
     #[test]
