@@ -50,6 +50,13 @@ retrieval, scheduler or recurrent wake. Empty sections vanish. Attributes are es
 instruction bodies remain complete. Markup is an inspection boundary, not a security
 boundary: native role/profile/workspace/effect checks remain authoritative.
 
+The rendered prompt is what the provider sees, and it is **frozen per session**: the first turn's
+system text and declared tool list are recorded and every later request sends exactly those bytes,
+so a mid-session change (an orchestration toggle, an installed skill, a policy reload, an
+instruction edit, a new platform line) is delivered as an appended `[session update]` note rather
+than as new prefix bytes. A section's change is still named in the guard's words (`orchestration`,
+`skills`, `policy`, …). See [PROMPT-CACHE.md](PROMPT-CACHE.md).
+
 ## Main-loop tools
 
 <!-- generated:bootstrap-tools (scripts/sync-prompt-docs.lua) -->

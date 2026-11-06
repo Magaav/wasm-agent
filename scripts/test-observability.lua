@@ -214,14 +214,21 @@ check(second_request.payload.prefix_audit.relation=='append_only' and not second
   'actual provider loop records append-only messages with unchanged tool schemas')
 -- The snippet index is the full envelope's: a new session defaults to the progressive one, which has no
 -- prompt index to shorten, so both contexts came out the same length (v0.1.0-alpha.12 gate, 29/10).
+-- A session's prefix is frozen at its first turn (docs/PROMPT-CACHE.md), so the two projections are
+-- compared in a fresh session rather than by changing the mode under a running one.
 overrides.WASM_AGENT_ENVELOPE_MODE='full'
 overrides.WASM_AGENT_TOOL_SNIPPETS='full'
-local full_context=bot:build_context();local full_tools=json.encode(bot.tool_list)
+local projection=agentlib.new(session('snippet-index-full'),function() end,'master','master','')
+local full_context=projection:build_context();local full_tools=json.encode(projection.tool_list)
 overrides.WASM_AGENT_TOOL_SNIPPETS='names'
-local short_context=bot:build_context()
-check(#short_context[1].content<#full_context[1].content and json.encode(bot.tool_list)==full_tools,'opt-in short index retains every full tool schema')
+local short_bot=agentlib.new(session('snippet-index-names'),function() end,'master','master','')
+local short_context=short_bot:build_context()
+check(#short_context[1].content<#full_context[1].content and json.encode(short_bot.tool_list)==full_tools,'opt-in short index retains every full tool schema')
+-- The same setting under a *running* session changes nothing it has already sent: the prefix is frozen
+-- (docs/PROMPT-CACHE.md), so the change arrives as an appended note, never as rewritten bytes.
 overrides.WASM_AGENT_ENVELOPE_MODE=nil
-for i=2,#full_context do check(json.encode(full_context[i])==json.encode(short_context[i]),'short index never rewrites history') end
+local switched=bot:build_context()
+check(json.encode(switched[1])==json.encode(sent[1].messages[1]),'a prompt-affecting setting change cannot rewrite a live session')
 overrides.WASM_AGENT_TOOL_SNIPPETS='full'
 check(memory.session_messages(run,{all=true})[1].id==first_request.run_id,'request trace links to its actual user turn')
 report=original_dofile('lua/core/telemetry.lua').snapshot(run)

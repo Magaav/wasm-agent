@@ -50,6 +50,15 @@ revoke it); a new user turn requires a new decision. The route is recorded durab
 emitted as an `orchestration_route` telemetry event, so a misroute can be audited.
 Direct mode is unchanged: with the mode off the floor does not apply at all.
 
+Turning the mode on or off mid-conversation does not rewrite the system prompt or the declared tool
+list: a session's prompt prefix is frozen at its first turn so the provider cache keeps hitting
+([PROMPT-CACHE.md](PROMPT-CACHE.md)). The toggle is delivered as one appended `[session update]`
+user-role note that states the new mode and what it means for the turn; in a session that started
+with the mode off, `subagent` and `route_task` become callable through `tool_call` with their exact
+definitions pinned into the loadout, the same way a `tool_search` hit pins them. A session that
+starts in the mode declares both from the start. The floor, the CAS/revision rules and every
+refusal below are unchanged.
+
 The reserved `orchestration-worker` profile cannot be overridden or used from a
 mode-off/foreign/guest/remote context. After admission the parent returns without
 waiting for worker inference and remains available. Off: the direct loop runs.

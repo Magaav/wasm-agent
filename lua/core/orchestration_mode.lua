@@ -43,7 +43,11 @@ function M.control(args,ctx)
   end)
 end
 function M.is_task(text)
-  return not tostring(text):match('^%[Sentinel notice%]') and not tostring(text):match('^%[Child completion notice%]')
+  local value=tostring(text)
+  -- An appended session update is node state, not a task the reader asked for: it must not be read as
+  -- a fresh instruction to route or delegate.
+  return not value:match('^%[Sentinel notice%]') and not value:match('^%[Child completion notice%]')
+    and not value:match('^%[session update%]')
 end
 -- Compatibility for old internal callers: mode is permission, never a dispatch.
 -- A raw continuation cannot become a child before coordinator inference/context.

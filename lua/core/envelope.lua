@@ -73,6 +73,32 @@ local function loaded(ctx)
  for name,value in pairs(names)do if type(name)~='string' or type(value)~='string' or not value:match('^%x+$') or #value~=64 then error('envelope_loadout_corrupt') end end
  return names,nil,k,raw
 end
+-- Pin exact definitions into this session's loadout, the way a tool_search hit does.
+-- A caller that must make a tool callable without spending a search on it (the orchestration-mode
+-- session update) uses this: the pinned hash is the definition the model was shown, so a later
+-- change to the schema still demands a fresh tool_search rather than a blind call.
+function M.pin(ctx,items)
+ ctx=ctx or {};local k=key(ctx,'loaded');if not k then return 0,'envelope_session_required' end
+ local names,err,_,raw=loaded(ctx);if err then return 0,err end
+ local pinned=0
+ for _,item in ipairs(items or {})do
+  local name=type(item)=='table' and (item['function'] or {}).name
+  if type(name)=='string' and name~='' then
+   local digest=host.sha256(json.encode(item))
+   if names[name]~=digest then names[name]=digest;pinned=pinned+1 end
+  end
+ end
+ if pinned==0 then return 0 end
+ local encoded=json.encode(names)
+ if not raw then
+  if insert(k,encoded)~=1 then return 0,'envelope_loadout_changed' end
+ else
+  local r=json.decode(host.sql_exec('UPDATE meta SET value=? WHERE key=? AND value=?',json.encode({encoded,k,raw})))
+  if r.error or r.ok~=true then return 0,'envelope_store_write' end
+  if r.changes~=1 then return 0,'envelope_loadout_changed' end
+ end
+ return pinned
+end
 local policy=dofile('lua/core/codemode_policy.lua')
 local function codemode_only(name,ctx)return policy.connector(name) and policy.enforced(ctx) end
 local nearest -- defined below; search and the guest route both look it up at call time

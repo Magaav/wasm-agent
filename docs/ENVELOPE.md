@@ -43,6 +43,12 @@ permitted name is pinned and guided exactly like a keyword hit; a name that is u
 permitted comes back in `missing` with the nearest permitted names, drawn from the caller's own
 catalogue, so a denied name is never disclosed. Inside code mode `searchTools({names=[...]})` is the
 same request: the guest's metadata over its own ceiling, which loads and admits nothing.
+The declared tool list (and the system prompt that describes it) is **frozen per session**: it is
+recorded on the session's first turn and every later request sends exactly those bytes, so a provider
+prefix cache can hit. A later orchestration toggle, skill install, policy reload or instruction edit
+arrives as an appended `[session update]` note instead of changing the prefix - including the
+`subagent`/`route_task` definitions for a mode turned on mid-session, which are pinned into the
+loadout like a `tool_search` hit. See [PROMPT-CACHE.md](PROMPT-CACHE.md).
 
 <!-- generated:deferred-tools (scripts/sync-prompt-docs.lua) -->
 Built-in tools not declared at bootstrap, as the progressive prompt lists them (the role, profile and mode still decide visibility):
