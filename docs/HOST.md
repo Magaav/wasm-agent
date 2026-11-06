@@ -453,6 +453,10 @@ that line would have arrived to nobody.
 
 ## The CLI owns the mouse, bash mode, and restarting itself
 
+The fullscreen transcript on the alternate screen - its keys, its folds, the wheel, the scrollbar and
+how it is given back - is `docs/TERMINAL.md` (`rust/wa-term/src/scroll/`). The inline console below is
+unchanged and stays the fallback (`--inline`, a pipe, `WA_TUI=inline`).
+
 The chat is painted by this process into a scroll region (`crate::transcript`), so the terminal's own
 scrollback never holds it and its native selection only ever covered what was on screen. The editor
 therefore turns on SGR mouse reports (`?1002h ?1006h`, off again with the paste mode in

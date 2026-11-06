@@ -5,6 +5,8 @@
 //! - `selection`: what the pointer is on.
 //! - `build_status`: the deploy's progress line.
 //! - `transcript`: the scrollback, its navigation and its keys.
+//! - `scroll`: the fullscreen transcript on the alternate screen (`docs/TERMINAL.md`) - new, only
+//!   used when a caller chooses it, so the inline console above is unchanged.
 //!
 //! Moved out of `wa-host` without rewriting logic. `wa-term` is a leaf: the host draws through it and
 //! it imports nothing but `wa-host-support`, which is what makes a UI change cheap to build.
@@ -14,6 +16,7 @@
 // so the lint is allowed once here, with the reason.
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 pub mod build_status;
+pub mod scroll;
 pub mod selection;
 pub mod terminal_editor;
 pub mod transcript;
