@@ -655,6 +655,7 @@ mod tests {
             secrets: Default::default(),
             stt: false,
             name: name.into(),
+            instance: format!("{name}#1"),
         }
     }
 
