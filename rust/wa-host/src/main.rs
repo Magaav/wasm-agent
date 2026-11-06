@@ -10,10 +10,8 @@ mod host;
 mod file_search;
 mod http_transport;
 mod operations;
-mod lua;
 mod node;
 mod binding_runtime;
-mod system_resources;
 mod relay_client;
 mod rendezvous;
 mod plugins;
@@ -43,8 +41,10 @@ mod node_telemetry;
 mod store;
 
 use host::Host;
-use lua::Lua;
 use rusqlite::Connection;
+// The floor of the split: the Lua ABI, the host's paths and the shared JSON answer (docs/KERNEL.md).
+use wa_host_support::lua::Lua;
+use wa_host_support::paths::{private_dir, resolve_home};
 use std::ffi::{c_int, c_void};
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -174,33 +174,6 @@ fn flag(args: &[String], name: &str) -> Option<String> {
     None
 }
 
-/// The user's home directory, which is where `~/.wasm-agent` lives.
-///
-/// Windows does not set `HOME`, and Git Bash sets it to a POSIX path
-/// (`/c/Users/...`) that Rust cannot open - which silently disabled the whole
-/// config file, leaving the agent in "no model configured" mode. Prefer an
-/// explicit override, then the native Windows variables, then HOME.
-pub(crate) fn resolve_home() -> String {
-    if let Ok(value) = std::env::var("WASM_AGENT_HOME") {
-        if !value.is_empty() {
-            return value;
-        }
-    }
-    if cfg!(windows) {
-        if let Ok(value) = std::env::var("USERPROFILE") {
-            if !value.is_empty() {
-                return value;
-            }
-        }
-        if let (Ok(drive), Ok(path)) = (std::env::var("HOMEDRIVE"), std::env::var("HOMEPATH")) {
-            if !drive.is_empty() && !path.is_empty() {
-                return format!("{drive}{path}");
-            }
-        }
-    }
-    std::env::var("HOME").unwrap_or_else(|_| ".".into())
-}
-
 fn db_path(args: &[String]) -> String {
     flag(args, "--db").unwrap_or_else(|| {
         let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
@@ -235,21 +208,6 @@ fn open_db(path: &str) -> Connection {
         )
         .expect("pragma");
     connection
-}
-
-/// Create the node's state directory readable by its owner only. It holds transcripts, the node key
-/// and credentials; with a default umask those were readable by every local user.
-/// An existing directory is tightened only if it is the node's own `.wasm-agent`.
-pub(crate) fn private_dir(path: &std::path::Path) {
-    let existed = path.exists();
-    let _ = std::fs::create_dir_all(path);
-    #[cfg(unix)]
-    if !existed || path.file_name().is_some_and(|name| name == ".wasm-agent") {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700));
-    }
-    #[cfg(not(unix))]
-    let _ = existed;
 }
 
 /// Load KEY=VALUE pairs from ~/.wasm-agent/env without overwriting real env.

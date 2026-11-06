@@ -18,7 +18,7 @@
 //!
 //! Quotas are overridable (`WA_SERVICE_LOG_QUOTA_BYTES`, `WA_AUDIT_QUOTA_BYTES`,
 //! `WA_TELEMETRY_QUOTA_BYTES`, `WA_REPLAY_QUOTA_BYTES`) so a node can tighten them without a build.
-use crate::components::component_dir;
+use wa_host_support::paths::component_dir;
 use serde_json::{json, Map, Value};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -42,7 +42,7 @@ pub const REPLAY_MAX_AGE: Duration = wa_bounded::caps::REPLAY_MAX_AGE;
 
 /// The node's state root: `<home>/.wasm-agent`, where `home` is `WASM_AGENT_HOME` or the user's.
 pub fn state_root() -> PathBuf {
-    PathBuf::from(crate::resolve_home()).join(".wasm-agent")
+    PathBuf::from(wa_host_support::paths::resolve_home()).join(".wasm-agent")
 }
 
 fn env_bytes(name: &str, default: u64) -> u64 {

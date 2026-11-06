@@ -3,7 +3,10 @@
 //! These are the only things the Lua agent cannot do by itself. Everything the
 //! agent *decides* lives in Lua; everything it *needs from the platform* lives
 //! here, so the same Lua can later run as a WASM component with these imports.
-use crate::lua::{arg_integer, arg_string, lua_pushlstring, lua_touserdata, upvalue_index, LuaState};
+use wa_host_support::lua::{arg_integer, arg_string, lua_pushlstring, lua_touserdata, upvalue_index, LuaState};
+// The one answer shape shared with the kernel entry points (`components`, `service`, `state`), which
+// moved to `wa-host-support` with `lua.rs`: they answer through it and may not import this crate.
+use wa_host_support::json::push_json;
 use crate::plugins::PluginRegistry;
 use base64::Engine as _;
 use ring::rand::{SecureRandom, SystemRandom};
@@ -44,7 +47,7 @@ static DB_READY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::
 
 /// host.db_ready() -> boolean: has this process already migrated the schema?
 pub extern "C-unwind" fn db_ready(l: *mut LuaState) -> c_int {
-    unsafe { crate::lua::lua_pushboolean(l, DB_READY.load(std::sync::atomic::Ordering::SeqCst) as c_int) };
+    unsafe { wa_host_support::lua::lua_pushboolean(l, DB_READY.load(std::sync::atomic::Ordering::SeqCst) as c_int) };
     1
 }
 
@@ -53,7 +56,7 @@ pub extern "C-unwind" fn mark_db_ready(l: *mut LuaState) -> c_int {
     DB_READY.store(true, std::sync::atomic::Ordering::SeqCst);
     // One explicit nil, never zero results: `select('#', host.mark_db_ready())`
     // must be 1, or a caller that passes the result around gets nothing.
-    unsafe { crate::lua::lua_pushnil(l) };
+    unsafe { wa_host_support::lua::lua_pushnil(l) };
     1
 }
 
@@ -80,7 +83,7 @@ pub extern "C-unwind" fn getenv(l: *mut LuaState) -> c_int {
         // nothing when used as a function argument, so `tonumber(host.getenv(X))`
         // would become `tonumber()` and fail with "bad argument #1".
         None => {
-            unsafe { crate::lua::lua_pushnil(l) };
+            unsafe { wa_host_support::lua::lua_pushnil(l) };
             1
         }
     }
@@ -106,11 +109,11 @@ pub extern "C-unwind" fn paths(l: *mut LuaState) -> c_int {
         ("temp", std::env::temp_dir().to_string_lossy().to_string()),
     ];
     unsafe {
-        crate::lua::lua_createtable(l, 0, entries.len() as c_int);
+        wa_host_support::lua::lua_createtable(l, 0, entries.len() as c_int);
         for (key, value) in entries {
             lua_pushlstring(l, value.as_ptr() as *const c_char, value.len());
             let name = std::ffi::CString::new(key).unwrap();
-            crate::lua::lua_setfield(l, -2, name.as_ptr());
+            wa_host_support::lua::lua_setfield(l, -2, name.as_ptr());
         }
     }
     1
@@ -122,7 +125,7 @@ pub extern "C-unwind" fn canonical_path(l: *mut LuaState) -> c_int {
     if let Some(path)=path {
         let value=path.to_string_lossy().replace('\\',"/");
         unsafe {lua_pushlstring(l,value.as_ptr() as *const c_char,value.len());}
-    } else { unsafe {crate::lua::lua_pushnil(l);} }
+    } else { unsafe {wa_host_support::lua::lua_pushnil(l);} }
     1
 }
 
@@ -213,11 +216,11 @@ pub extern "C-unwind" fn platform(l: *mut LuaState) -> c_int {
         ),
     ];
     unsafe {
-        crate::lua::lua_createtable(l, 0, entries.len() as c_int);
+        wa_host_support::lua::lua_createtable(l, 0, entries.len() as c_int);
         for (key, value) in entries {
             lua_pushlstring(l, value.as_ptr() as *const c_char, value.len());
             let name = std::ffi::CString::new(key).unwrap();
-            crate::lua::lua_setfield(l, -2, name.as_ptr());
+            wa_host_support::lua::lua_setfield(l, -2, name.as_ptr());
         }
     }
     1
@@ -291,11 +294,6 @@ fn host_of<'a>(l: *mut LuaState) -> &'a Host {
         assert!(!ptr.is_null(), "host state missing");
         &*ptr
     }
-}
-
-pub(crate) fn push_json(l: *mut LuaState, value: &Value) {
-    let text = serde_json::to_string(value).unwrap_or_else(|_| "null".to_string());
-    unsafe { lua_pushlstring(l, text.as_ptr() as *const c_char, text.len()) };
 }
 
 /// An agent that returns error responses instead of raising, so provider 4xx bodies
@@ -444,7 +442,7 @@ fn params(values: &[Value]) -> Vec<Box<dyn rusqlite::ToSql>> {
 /// roll back explicitly). Forcing a rollback here would silently end the
 /// transaction, and a Lua caller that caught the error and wrote again would then
 /// autocommit the later write, breaking atomicity. A transaction is closed only at
-/// an uncaught callback error (`Lua::rollback_if_open`) or when the interpreter's
+/// an uncaught callback error (`host::rollback_if_open`) or when the interpreter's
 /// connection drops.
 pub extern "C-unwind" fn sql_exec(l: *mut LuaState) -> c_int {
     let host = host_of(l);
@@ -520,6 +518,21 @@ pub extern "C-unwind" fn sha256(l: *mut LuaState) -> c_int {
 /// /proc/sys/kernel/random/uuid and fell back to the *process id* everywhere
 /// else, which is one value per process - so off Linux the second write in any
 /// session died on a duplicate row id.
+/// Roll back a transaction this interpreter left open after a Lua call failed.
+///
+/// Moved out of `Lua::rollback_if_open` when `lua.rs` left this crate: the interpreter wrapper lives
+/// in `wa-host-support` and cannot name `Host`, so the body stays with the connection it knows about
+/// and the wrapper exposes the value the host attached with `Lua::own`.
+pub fn rollback_if_open(lua: &wa_host_support::lua::Lua) {
+    let Some(owned) = lua.owned() else { return };
+    let Some(host) = owned.downcast_ref::<Host>() else { return };
+    if let Ok(connection) = host.db.lock() {
+        if !connection.is_autocommit() {
+            let _ = connection.execute_batch("ROLLBACK");
+        }
+    }
+}
+
 pub(crate) fn new_uuid() -> String {
     let mut bytes = [0u8; 16];
     let random = SystemRandom::new();
@@ -560,7 +573,7 @@ pub extern "C-unwind" fn read_file(l: *mut LuaState) -> c_int {
             1
         }
         None => {
-            unsafe { crate::lua::lua_pushnil(l) };
+            unsafe { wa_host_support::lua::lua_pushnil(l) };
             1
         }
     }
@@ -577,7 +590,7 @@ pub extern "C-unwind" fn stream_is_terminal(l: *mut LuaState) -> c_int {
         Some("stderr") => std::io::stderr().is_terminal(),
         _ => std::io::stdout().is_terminal(),
     };
-    unsafe { crate::lua::lua_pushboolean(l, answer as c_int) };
+    unsafe { wa_host_support::lua::lua_pushboolean(l, answer as c_int) };
     1
 }
 
@@ -868,7 +881,7 @@ pub extern "C-unwind" fn write_file(l: *mut LuaState) -> c_int {
     let text = arg_string(l, 2).unwrap_or_default();
     let ok = write_atomic(&path, &text);
     if ok {crate::graph::native_write(&path);}
-    unsafe { crate::lua::lua_pushboolean(l, ok as c_int) };
+    unsafe { wa_host_support::lua::lua_pushboolean(l, ok as c_int) };
     1
 }
 
@@ -1232,7 +1245,7 @@ pub extern "C-unwind" fn verify(l: *mut LuaState) -> c_int {
     let text = arg_string(l, 2).unwrap_or_default();
     let signature = arg_string(l, 3).unwrap_or_default();
     let ok = crate::node::verify(&public_key, &text, &signature);
-    unsafe { crate::lua::lua_pushboolean(l, ok as c_int) };
+    unsafe { wa_host_support::lua::lua_pushboolean(l, ok as c_int) };
     1
 }
 
@@ -1718,9 +1731,9 @@ pub extern "C-unwind" fn ticker(l: *mut LuaState) -> c_int {
         Some(spec) => ticker_enabled() && start_ticker(spec),
     };
     if running {
-        unsafe { crate::lua::lua_pushboolean(l, 1) };
+        unsafe { wa_host_support::lua::lua_pushboolean(l, 1) };
     } else {
-        unsafe { crate::lua::lua_pushnil(l) };
+        unsafe { wa_host_support::lua::lua_pushnil(l) };
     }
     1
 }
@@ -1940,7 +1953,7 @@ pub extern "C-unwind" fn http_sse(l: *mut LuaState) -> c_int {
     let url = arg_string(l, 2).unwrap_or_default();
     let headers_json = arg_string(l, 3).unwrap_or_else(|| "{}".into());
     let body = arg_string(l, 4).unwrap_or_default();
-    let seconds = if unsafe { crate::lua::lua_type(l, 6) } <= crate::lua::LUA_TNIL {
+    let seconds = if unsafe { wa_host_support::lua::lua_type(l, 6) } <= wa_host_support::lua::LUA_TNIL {
         3600
     } else { arg_integer(l, 6).unwrap_or(0) };
     if !(1..=86400).contains(&seconds) {
@@ -1948,7 +1961,7 @@ pub extern "C-unwind" fn http_sse(l: *mut LuaState) -> c_int {
         return 1;
     }
     let headers = parse_headers(&headers_json);
-    if unsafe { crate::lua::lua_type(l, 5) } == crate::lua::LUA_TNIL {
+    if unsafe { wa_host_support::lua::lua_type(l, 5) } == wa_host_support::lua::LUA_TNIL {
         push_json(l, &json!({"error": "http_sse_requires_on_line"}));
         return 1;
     }
@@ -2057,11 +2070,11 @@ where
 /// unwinding through the C boundary. The text is redacted and bounded: it crosses into a provider
 /// error path where a token must never appear.
 fn call_lua_string(l: *mut LuaState, index: c_int, payload: &str) -> Result<bool, String> {
-    use crate::lua::{lua_gettop, lua_pcallk, lua_settop, lua_tolstring, lua_toboolean,
+    use wa_host_support::lua::{lua_gettop, lua_pcallk, lua_settop, lua_tolstring, lua_toboolean,
         lua_type, LUA_OK, LUA_TBOOLEAN};
     unsafe {
         let base = lua_gettop(l);
-        crate::lua::lua_pushvalue(l, index);
+        wa_host_support::lua::lua_pushvalue(l, index);
         lua_pushlstring(l, payload.as_ptr() as *const c_char, payload.len());
         let status = lua_pcallk(l, 1, 1, 0, 0, std::ptr::null_mut());
         if status == LUA_OK {
@@ -2611,7 +2624,7 @@ mod sse_line_tests {
 pub extern "C-unwind" fn monotonic_ms(l: *mut LuaState) -> c_int {
     static START: OnceLock<std::time::Instant> = OnceLock::new();
     let ms = START.get_or_init(std::time::Instant::now).elapsed().as_secs_f64() * 1000.0;
-    unsafe { crate::lua::lua_pushnumber(l, ms) };
+    unsafe { wa_host_support::lua::lua_pushnumber(l, ms) };
     1
 }
 
@@ -2636,7 +2649,7 @@ pub extern "C-unwind" fn runtime_info(l: *mut LuaState) -> c_int {
 
 /// host.system_resources() -> a fresh CPU, memory and workspace-filesystem sample.
 pub extern "C-unwind" fn system_resources(l: *mut LuaState) -> c_int {
-    push_json(l, &crate::system_resources::sample());
+    push_json(l, &wa_host_support::system_resources::sample());
     1
 }
 
@@ -2747,7 +2760,7 @@ fn usable_size(columns: i32, rows: i32) -> Option<(i32, i32)> {
 pub extern "C-unwind" fn terminal_size(l: *mut LuaState) -> c_int {
     match console_size() {
         Some((columns, rows)) => push_json(l, &json!({"columns": columns, "rows": rows})),
-        None => unsafe { crate::lua::lua_pushnil(l) },
+        None => unsafe { wa_host_support::lua::lua_pushnil(l) },
     }
     1
 }
@@ -2756,7 +2769,7 @@ pub extern "C-unwind" fn terminal_size(l: *mut LuaState) -> c_int {
 /// only for its real stdout; captured/plain views keep their own writers.
 pub extern "C-unwind" fn terminal_write(l: *mut LuaState) -> c_int {
     let ok = arg_string(l, 1).is_some_and(|text| write_at_editor(&text).is_ok());
-    unsafe { crate::lua::lua_pushboolean(l, if ok { 1 } else { 0 }) };
+    unsafe { wa_host_support::lua::lua_pushboolean(l, if ok { 1 } else { 0 }) };
     1
 }
 
@@ -3230,7 +3243,7 @@ pub extern "C-unwind" fn input_start(l: *mut LuaState) -> c_int {
             state.stop = false;
         }
         Err(_) => {
-            unsafe { crate::lua::lua_pushnil(l) };
+            unsafe { wa_host_support::lua::lua_pushnil(l) };
             return 1;
         }
     }
@@ -3255,7 +3268,7 @@ pub extern "C-unwind" fn input_editor(l: *mut LuaState) -> c_int {
         let frame = layout_frame(&mut state);
         crate::terminal_editor::write(&format!("\x1b[?2004h{}{frame}", crate::selection::ENABLE)).is_ok()
     } else { false };
-    unsafe { crate::lua::lua_pushboolean(l, if ok { 1 } else { 0 }) };
+    unsafe { wa_host_support::lua::lua_pushboolean(l, if ok { 1 } else { 0 }) };
     1
 }
 
@@ -3323,7 +3336,7 @@ pub extern "C-unwind" fn editor_footer(l: *mut LuaState) -> c_int {
             crate::terminal_editor::write(&frame).is_ok()
         } else { true }
     } else { false };
-    unsafe { crate::lua::lua_pushboolean(l, if ok { 1 } else { 0 }) };
+    unsafe { wa_host_support::lua::lua_pushboolean(l, if ok { 1 } else { 0 }) };
     1
 }
 
@@ -3337,7 +3350,7 @@ pub extern "C-unwind" fn transcript_write(l: *mut LuaState) -> c_int {
         let frame = layout_frame(&mut state);
         crate::terminal_editor::write(&frame).is_ok()
     } else { true };
-    unsafe { crate::lua::lua_pushboolean(l, if ok { 1 } else { 0 }) };
+    unsafe { wa_host_support::lua::lua_pushboolean(l, if ok { 1 } else { 0 }) };
     1
 }
 
@@ -3348,7 +3361,7 @@ pub extern "C-unwind" fn status_snapshot(l: *mut LuaState) -> c_int {
     let (lock, _) = console_input();
     let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
     state.status_snapshot = spec;
-    unsafe { crate::lua::lua_pushboolean(l, 1) };
+    unsafe { wa_host_support::lua::lua_pushboolean(l, 1) };
     1
 }
 
@@ -3356,7 +3369,7 @@ pub extern "C-unwind" fn status_snapshot(l: *mut LuaState) -> c_int {
 /// turning it off draws the result once. A resumed session's replay is thousands of writes, and a
 /// frame per write is thousands of full redraws for a picture nobody sees until the last one.
 pub extern "C-unwind" fn transcript_hold(l: *mut LuaState) -> c_int {
-    let on = unsafe { crate::lua::lua_toboolean(l, 1) } != 0;
+    let on = unsafe { wa_host_support::lua::lua_toboolean(l, 1) } != 0;
     let (lock, _) = console_input();
     let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
     let was = std::mem::replace(&mut state.transcript_held, on);
@@ -3365,24 +3378,24 @@ pub extern "C-unwind" fn transcript_hold(l: *mut LuaState) -> c_int {
         let frame = layout_frame(&mut state);
         let _ = crate::terminal_editor::write(&frame);
     }
-    unsafe { crate::lua::lua_pushboolean(l, 1) };
+    unsafe { wa_host_support::lua::lua_pushboolean(l, 1) };
     1
 }
 
 /// `host.transcript_block(topic)`: start a new block; `topic` = collapsible (thinking, a tool call).
 pub extern "C-unwind" fn transcript_block(l: *mut LuaState) -> c_int {
-    let topic = unsafe { crate::lua::lua_toboolean(l, 1) } != 0;
+    let topic = unsafe { wa_host_support::lua::lua_toboolean(l, 1) } != 0;
     let (lock, _) = console_input();
     let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
     state.transcript.block(topic);
-    unsafe { crate::lua::lua_pushboolean(l, 1) };
+    unsafe { wa_host_support::lua::lua_pushboolean(l, 1) };
     1
 }
 
 /// `host.editor_status(on)`: whether the status line row exists. It is there only while a run is in
 /// flight, so between runs the chat sits directly on the input.
 pub extern "C-unwind" fn editor_status(l: *mut LuaState) -> c_int {
-    let on = unsafe { crate::lua::lua_toboolean(l, 1) } != 0;
+    let on = unsafe { wa_host_support::lua::lua_toboolean(l, 1) } != 0;
     let (lock, _) = console_input();
     let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
     let ok = if let Some(editor) = state.editor.as_mut() {
@@ -3396,7 +3409,7 @@ pub extern "C-unwind" fn editor_status(l: *mut LuaState) -> c_int {
         }
         true
     } else { false };
-    unsafe { crate::lua::lua_pushboolean(l, if ok { 1 } else { 0 }) };
+    unsafe { wa_host_support::lua::lua_pushboolean(l, if ok { 1 } else { 0 }) };
     1
 }
 
@@ -3413,7 +3426,7 @@ pub extern "C-unwind" fn input_commands(l: *mut LuaState) -> c_int {
     let (lock, _) = console_input();
     let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
     let ok = if let Some(editor) = state.editor.as_mut() { editor.commands = list; true } else { false };
-    unsafe { crate::lua::lua_pushboolean(l, if ok { 1 } else { 0 }) };
+    unsafe { wa_host_support::lua::lua_pushboolean(l, if ok { 1 } else { 0 }) };
     1
 }
 
@@ -3444,7 +3457,7 @@ pub extern "C-unwind" fn input_held(l: *mut LuaState) -> c_int {
     let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
     state.held = held;
     if sync_queued(&mut state) { redraw_bottom(&mut state); }
-    unsafe { crate::lua::lua_pushboolean(l, if state.editor.is_some() { 1 } else { 0 }) };
+    unsafe { wa_host_support::lua::lua_pushboolean(l, if state.editor.is_some() { 1 } else { 0 }) };
     1
 }
 
@@ -3681,7 +3694,7 @@ pub extern "C-unwind" fn now(l: *mut LuaState) -> c_int {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs_f64())
         .unwrap_or(0.0);
-    unsafe { crate::lua::lua_pushnumber(l, seconds) };
+    unsafe { wa_host_support::lua::lua_pushnumber(l, seconds) };
     1
 }
 
@@ -3696,15 +3709,15 @@ pub extern "C-unwind" fn exec_timeout(l: *mut LuaState) -> c_int {
         Some(value) => match u64::try_from(value) {
             Ok(value) => Some(value),
             Err(_) => {
-                unsafe { crate::lua::lua_pushnil(l) };
+                unsafe { wa_host_support::lua::lua_pushnil(l) };
                 return 1;
             }
         },
         None => None,
     };
     match effective_exec_timeout_seconds(requested) {
-        Ok(seconds) => unsafe { crate::lua::lua_pushnumber(l, seconds as f64) },
-        Err(_) => unsafe { crate::lua::lua_pushnil(l) },
+        Ok(seconds) => unsafe { wa_host_support::lua::lua_pushnumber(l, seconds as f64) },
+        Err(_) => unsafe { wa_host_support::lua::lua_pushnil(l) },
     }
     1
 }

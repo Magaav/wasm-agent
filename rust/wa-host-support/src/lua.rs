@@ -124,14 +124,12 @@ impl Lua {
     /// persistent node-thread that transaction would hold the write lock until the
     /// process exits, stalling every other interpreter. The caller invokes this
     /// when a Lua call returned an error, so the failure cannot outlive the request.
-    pub fn rollback_if_open(&self) {
-        let Some(owned) = self.owned.as_ref() else { return };
-        let Some(host) = owned.downcast_ref::<crate::host::Host>() else { return };
-        if let Ok(connection) = host.db.lock() {
-            if !connection.is_autocommit() {
-                let _ = connection.execute_batch("ROLLBACK");
-            }
-        }
+    ///
+    /// The rollback itself is the host's (`crate::host::rollback_if_open`): it owns the
+    /// connection, and this crate must not know any crate above it. `owned` is the value the host
+    /// attached with [Lua::own]; reading it is all this ABI can do about it.
+    pub fn owned(&self) -> Option<&(dyn std::any::Any + Send)> {
+        self.owned.as_deref()
     }
 
     /// Run a chunk of Lua source, returning an error string on failure.

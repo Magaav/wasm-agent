@@ -15,7 +15,7 @@
 //! Two things feed the agent thread: sockets, and - when attached to a relay -
 //! requests the relay hands us (`relay_client`). Both end up in `dispatch`, so a
 //! node behaves identically whether it is reached directly or through the relay.
-use crate::lua::Lua;
+use wa_host_support::lua::Lua;
 use std::cell::RefCell;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -848,7 +848,7 @@ fn sentinel_queue_health() -> serde_json::Value {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    let dir = std::path::Path::new(&crate::resolve_home()).join(".wasm-agent/sentinel/queue");
+    let dir = std::path::Path::new(&wa_host_support::paths::resolve_home()).join(".wasm-agent/sentinel/queue");
     let mut entries: Vec<serde_json::Value> = Vec::new();
     if let Ok(read) = std::fs::read_dir(&dir) {
         for entry in read.flatten() {
@@ -977,7 +977,7 @@ fn compact_end() {
 /// /health, then posts /compact once for the session in this payload - the session that finished,
 /// which is not necessarily the node's newest main session. Subagent runs are not emitted here.
 fn emit_run_finished(session: &str, run_id: u64) {
-    let home = crate::resolve_home();
+    let home = wa_host_support::paths::resolve_home();
     let store = wa_jobs::Store::new(
         std::path::Path::new(&home).join(".wasm-agent").join("sentinel").join("jobs.db"),
     );
@@ -1677,7 +1677,7 @@ fn subagent_reply(lua: &Lua, body: &str, session: &str) -> Reply {
         Ok(text) => (200, "application/json", text.into_bytes()),
         Err(error) => {
             // Close a transaction the failed call may have left open.
-            lua.rollback_if_open();
+            crate::host::rollback_if_open(&lua);
             let (status, code) = if error.contains("invalid_session") || error.contains("unknown_user") {
                 (401, "invalid_session")
             } else {
@@ -2581,7 +2581,7 @@ fn process_relay_job(
         let node = header_of(&job.headers, "x-wa-node");
         let events = capture_events(|| {
             if let Err(error) = lua.call_string("wa_reply_stream", &[text.as_str(), session.as_str(), node.as_str()]) {
-                lua.rollback_if_open();
+                crate::host::rollback_if_open(&lua);
                 write_event(&format!("{{\"type\":\"error\",\"error\":{}}}", json_escape(&error)));
             }
             write_event("{\"type\":\"done\"}");
@@ -2977,7 +2977,7 @@ fn handle(lua: &Lua, ui: &std::path::Path, stream: &mut TcpStream, request: &Req
             }));
             let node = header_of(&node_headers, "x-wa-node");
             if let Err(error) = lua.call_string("wa_reply_stream", &[text.as_str(), session, node.as_str()]) {
-                lua.rollback_if_open();
+                crate::host::rollback_if_open(&lua);
                 write_event(&format!("{{\"type\":\"error\",\"error\":{}}}", json_escape(&error)));
             }
             write_event("{\"type\":\"done\"}");
@@ -3054,7 +3054,7 @@ fn dispatch(
             Err(error) => {
                 // A Lua error can abandon a BEGIN on this interpreter's connection;
                 // close it before answering, or the write lock outlives the request.
-                lua.rollback_if_open();
+                crate::host::rollback_if_open(&lua);
                 format!("{{\"error\":{}}}", json_escape(&error))
             }
         }
@@ -3212,7 +3212,7 @@ fn module_reply(lua: &Lua, id: &str, relative: &str, session: &str) -> Reply {
         Ok(answer) => answer,
         Err(error) => {
             // As above: a Lua error can abandon a BEGIN on this interpreter's connection.
-            lua.rollback_if_open();
+            crate::host::rollback_if_open(&lua);
             return (500, "application/json; charset=utf-8",
                 format!("{{\"error\":{}}}", json_escape(&error)).into_bytes());
         }

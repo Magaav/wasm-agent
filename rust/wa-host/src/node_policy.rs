@@ -506,10 +506,10 @@ pub fn tick() {
 }
 
 /// `host.policy_status()` -> the JSON from [`NodePolicy::status`].
-pub extern "C-unwind" fn capability(l: *mut crate::lua::LuaState) -> std::os::raw::c_int {
+pub extern "C-unwind" fn capability(l: *mut wa_host_support::lua::LuaState) -> std::os::raw::c_int {
     let text = node().status().to_string();
     unsafe {
-        crate::lua::lua_pushlstring(l, text.as_ptr() as *const std::os::raw::c_char, text.len());
+        wa_host_support::lua::lua_pushlstring(l, text.as_ptr() as *const std::os::raw::c_char, text.len());
     }
     1
 }

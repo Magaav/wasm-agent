@@ -731,8 +731,8 @@ pub fn logs(name: &str, bytes: u64) -> Value {
 }
 
 /// host.service(request_json): {action: start|stop|status|logs, name, ...grant}.
-pub extern "C-unwind" fn service(l: *mut crate::lua::LuaState) -> std::os::raw::c_int {
-    let raw = crate::lua::arg_string(l, 1).unwrap_or_default();
+pub extern "C-unwind" fn service(l: *mut wa_host_support::lua::LuaState) -> std::os::raw::c_int {
+    let raw = wa_host_support::lua::arg_string(l, 1).unwrap_or_default();
     let answer = match serde_json::from_str::<Value>(&raw) {
         Ok(request) => {
             let name = request.get("name").and_then(Value::as_str);
@@ -748,7 +748,7 @@ pub extern "C-unwind" fn service(l: *mut crate::lua::LuaState) -> std::os::raw::
         }
         Err(_) => json!({"ok": false, "error": "invalid_service_request"}),
     };
-    crate::host::push_json(l, &answer);
+    wa_host_support::json::push_json(l, &answer);
     1
 }
 

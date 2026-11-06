@@ -600,8 +600,8 @@ fn declaration_from_dir(dir: &Path, name: &str) -> Option<StateDeclaration> {
 /// `host.state(request_json)`: `{action: status|export|import|verify|dry-run, name, path, replace,
 /// target}`. An operator tool, not a component-facing one: it moves a whole namespace and a
 /// component never sees it.
-pub extern "C-unwind" fn capability(l: *mut crate::lua::LuaState) -> std::os::raw::c_int {
-    let raw = crate::lua::arg_string(l, 1).unwrap_or_default();
+pub extern "C-unwind" fn capability(l: *mut wa_host_support::lua::LuaState) -> std::os::raw::c_int {
+    let raw = wa_host_support::lua::arg_string(l, 1).unwrap_or_default();
     let answer = match serde_json::from_str::<Value>(&raw) {
         Ok(request) => {
             let name = request.get("name").and_then(Value::as_str).unwrap_or_default().to_string();
@@ -646,7 +646,7 @@ pub extern "C-unwind" fn capability(l: *mut crate::lua::LuaState) -> std::os::ra
         }
         Err(_) => json!({"ok": false, "error": "state_request_invalid"}),
     };
-    crate::host::push_json(l, &answer);
+    wa_host_support::json::push_json(l, &answer);
     1
 }
 

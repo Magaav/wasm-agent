@@ -17,7 +17,7 @@
 //!
 //! Adding a capability is one edit: a new entry here. Nothing else has to be kept in sync by hand
 //! except the documented row the drift test insists on.
-use crate::lua::HostFn;
+use wa_host_support::lua::HostFn;
 use ring::digest::{digest as ring_digest, SHA256};
 use serde_json::{json, Value};
 use std::ffi::{c_int, c_void};
@@ -268,7 +268,7 @@ pub fn health() -> Value {
 
 /// Register every capability into the `host` table. The only registration site: the interpreter
 /// cannot grow a `host.*` function this list does not name.
-pub fn register(lua: &crate::lua::Lua, host_ptr: *mut c_void) {
+pub fn register(lua: &wa_host_support::lua::Lua, host_ptr: *mut c_void) {
     for capability in REGISTRY {
         match capability.bind {
             Bind::Plain(function) => lua.register(capability.name, function),
@@ -281,10 +281,10 @@ pub fn register(lua: &crate::lua::Lua, host_ptr: *mut c_void) {
 ///
 /// One implementation, three surfaces: the CLI prints it, the codemode sandbox hands it to JS, and
 /// `/health` publishes its names and digest.
-pub extern "C-unwind" fn inventory_capability(l: *mut crate::lua::LuaState) -> c_int {
+pub extern "C-unwind" fn inventory_capability(l: *mut wa_host_support::lua::LuaState) -> c_int {
     let text = inventory_json();
     unsafe {
-        crate::lua::lua_pushlstring(l, text.as_ptr() as *const std::os::raw::c_char, text.len());
+        wa_host_support::lua::lua_pushlstring(l, text.as_ptr() as *const std::os::raw::c_char, text.len());
     }
     1
 }

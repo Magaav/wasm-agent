@@ -300,7 +300,7 @@ fn deliver_alert(component: &str, alert: &wa_queue::Alert) {
 pub fn node() -> &'static QueueHost {
     static NODE: OnceLock<QueueHost> = OnceLock::new();
     NODE.get_or_init(|| {
-        let host = QueueHost::new(crate::components::component_dir());
+        let host = QueueHost::new(wa_host_support::paths::component_dir());
         // Retention for the alert topic: a component that starts after an alert happened still sees
         // it (the bus is a fact log, not a mailbox - this is a bounded tail, not a queue).
         let namespace = crate::state_host::sub_namespace(&host.dir, "kernel", "b/");

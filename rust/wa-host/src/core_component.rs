@@ -22,7 +22,7 @@
 //! forwarded: with no CLI in front of the guest they answer exactly what they answer to a native
 //! `wa run` of the same script (a `false`, a `nil`, `{"action":"unsupported"}`), which is the point —
 //! same binary, same script, same output.
-use crate::lua::{
+use wa_host_support::lua::{
     lua_createtable, lua_getfield, lua_getglobal, lua_gettop, lua_pcallk, lua_pushboolean, lua_pushinteger,
     lua_pushlstring, lua_pushnil, lua_pushnumber, lua_rawseti, lua_settop, lua_toboolean, lua_tointegerx,
     lua_tolstring, lua_tonumberx,
@@ -48,7 +48,7 @@ use wa::kernel::host::{Value, Verdict};
 extern "C" {
     fn lua_isinteger(l: *mut LuaState, idx: c_int) -> c_int;
     fn lua_gettable(l: *mut LuaState, idx: c_int) -> c_int;
-    /// Not in `crate::lua`'s list, and this module needs both: `rawset` to build a table whose keys
+    /// Not in `wa_host_support::lua`'s list, and this module needs both: `rawset` to build a table whose keys
     /// are the JSON object's own strings (a C string key cannot carry a NUL), `checkstack` because a
     /// nested JSON value grows the stack as it is pushed.
     fn lua_rawset(l: *mut LuaState, idx: c_int);
@@ -127,8 +127,8 @@ unsafe fn bytes_at(l: *mut LuaState, idx: c_int) -> Option<Vec<u8>> {
 /// A table of string keys to string values (what `paths` and `platform` return), else None.
 unsafe fn string_map(l: *mut LuaState, idx: c_int) -> Option<Vec<(String, Vec<u8>)>> {
     let mut out = Vec::new();
-    crate::lua::lua_pushnil(l);
-    while crate::lua::lua_next(l, idx) != 0 {
+    wa_host_support::lua::lua_pushnil(l);
+    while wa_host_support::lua::lua_next(l, idx) != 0 {
         // lua_tolstring on a number key would convert it in place and break lua_next: check types first.
         if lua_type(l, -2) != LUA_TSTRING || lua_type(l, -1) != LUA_TSTRING {
             lua_settop(l, -3);
@@ -252,7 +252,7 @@ extern "C" fn sse_on_line(l: *mut LuaState) -> c_int {
                 // message is copied into the interpreter first so no Rust value is live across it.
                 lua_pushlstring(l, message.as_ptr() as *const c_char, message.len());
                 std::mem::forget(message);
-                crate::lua::lua_error(l)
+                wa_host_support::lua::lua_error(l)
             }
         }
     }
@@ -271,7 +271,7 @@ fn read_stream(args: Vec<Value>, lines: SyncSender<Vec<u8>>, verdicts: Receiver<
             // and the kernel's own callback takes its place. A nil callback stays nil, so `http_sse`
             // refuses it itself, in its own words and in its own order.
             if index == 4 && matches!(arg, Value::Boolean(true)) {
-                crate::lua::lua_pushcclosure(lua.l, sse_on_line, 0);
+                wa_host_support::lua::lua_pushcclosure(lua.l, sse_on_line, 0);
             } else if let Err(error) = push_arg(lua.l, arg) {
                 let _ = result.send(bridge_failure(&error));
                 return;
@@ -287,10 +287,10 @@ impl State {
     /// `host.<name>(args...)` on the native state, every return value converted back.
     fn dispatch(&mut self, name: &str, args: Vec<Value>) -> Result<Vec<Value>, String> {
         let l = self.native.0.l;
-        let cname = crate::lua::cstr(name);
+        let cname = wa_host_support::lua::cstr(name);
         unsafe {
             let base = lua_gettop(l);
-            lua_getglobal(l, crate::lua::cstr("host").as_ptr());
+            lua_getglobal(l, wa_host_support::lua::cstr("host").as_ptr());
             lua_getfield(l, -1, cname.as_ptr());
             // `host` stays at base+1 under the call (lua_remove is a macro, not a symbol, in 5.4).
             for arg in &args {
@@ -338,7 +338,7 @@ impl State {
         let l = self.native.0.l;
         unsafe {
             let base = lua_gettop(l);
-            lua_getglobal(l, crate::lua::cstr("EMBEDDED").as_ptr());
+            lua_getglobal(l, wa_host_support::lua::cstr("EMBEDDED").as_ptr());
             push_bytes(l, path);
             lua_gettable(l, -2);
             let value = if lua_type(l, -1) == LUA_TSTRING { bytes_at(l, -1).map(Value::Bytes) } else { None };
@@ -602,16 +602,16 @@ mod tests {
             let base = lua_gettop(l);
             push_arg(l, &Value::Json(document.to_vec())).expect("the document is this test's own JSON");
             assert_eq!(lua_gettop(l), base + 1);
-            crate::lua::lua_setglobal(l, crate::lua::cstr("t").as_ptr());
+            wa_host_support::lua::lua_setglobal(l, wa_host_support::lua::cstr("t").as_ptr());
             // Asserted from Lua, so what is checked is the interpreter's own view of the value.
             let check = "assert(type(t)=='table')
                 assert(t.n==1); assert(t.f==1.5); assert(t.s=='two words'); assert(t.b==true)
                 assert(t.z==nil); assert(#t.list==2)
                 assert(t.list[1]==1); assert(t.list[2][1]==2); assert(t.list[2][2].deep=='x')";
-            let source = crate::lua::cstr(check);
-            let name = crate::lua::cstr("check");
+            let source = wa_host_support::lua::cstr(check);
+            let name = wa_host_support::lua::cstr("check");
             assert_eq!(
-                crate::lua::luaL_loadbufferx(l, source.as_ptr(), check.len(), name.as_ptr(), std::ptr::null()),
+                wa_host_support::lua::luaL_loadbufferx(l, source.as_ptr(), check.len(), name.as_ptr(), std::ptr::null()),
                 LUA_OK
             );
             let status = lua_pcallk(l, 0, 0, 0, 0, std::ptr::null_mut());

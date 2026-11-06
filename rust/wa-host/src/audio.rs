@@ -22,7 +22,7 @@
 //! to the shipped binary for a format this small, and the parser is the part the tests can pin by
 //! sample offset. Real microphone capture (cpal/AAudio) is a later wave, deliberately absent.
 
-use crate::lua::{arg_string, lua_pushlstring, lua_pushnil, LuaState};
+use wa_host_support::lua::{arg_string, lua_pushlstring, lua_pushnil, LuaState};
 use base64::Engine as _;
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -70,7 +70,7 @@ fn sinks() -> &'static Mutex<HashMap<String, Sink>> {
 }
 
 /// The directory both calls are confined to. Explicit override first, then the node's own home -
-/// not `HOME` read here, but [`crate::resolve_home`], so a candidate node's `WASM_AGENT_HOME` moves
+/// not `HOME` read here, but [`wa_host_support::paths::resolve_home`], so a candidate node's `WASM_AGENT_HOME` moves
 /// the fixtures with it instead of writing into the operator's real home.
 fn declared_root() -> PathBuf {
     if let Ok(explicit) = std::env::var("WASM_AGENT_AUDIO_ROOT") {
@@ -79,7 +79,7 @@ fn declared_root() -> PathBuf {
             return PathBuf::from(explicit);
         }
     }
-    PathBuf::from(crate::resolve_home())
+    PathBuf::from(wa_host_support::paths::resolve_home())
         .join(".wasm-agent")
         .join("audio")
 }

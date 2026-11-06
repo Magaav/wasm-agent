@@ -11,7 +11,7 @@
 //!
 //! The Lua-facing surface (names, arguments, answer shapes) is unchanged.
 
-use crate::lua::{arg_string, lua_pushlstring, LuaState};
+use wa_host_support::lua::{arg_string, lua_pushlstring, LuaState};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, VecDeque};
 use std::ffi::c_char;

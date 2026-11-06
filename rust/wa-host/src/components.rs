@@ -49,13 +49,10 @@ fn hex(bytes: &[u8]) -> String {
     digest(&SHA256, bytes).as_ref().iter().map(|b| format!("{b:02x}")).collect()
 }
 
-pub fn component_dir() -> PathBuf {
-    if let Ok(path) = std::env::var("WA_COMPONENTS_DIR") {
-        return PathBuf::from(path);
-    }
-    let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).unwrap_or_else(|_| ".".into());
-    PathBuf::from(home).join(".wasm-agent").join("components")
-}
+/// Where installed components live. It moved to `wa-host-support` because the bound queue and the
+/// graph store ask for it and neither may depend on this crate; the name is re-exported here so the
+/// call sites in this crate read as they did.
+pub use wa_host_support::paths::component_dir;
 
 fn valid_name(name: &str) -> bool {
     !name.is_empty()
@@ -565,18 +562,18 @@ pub fn mcp(request: &Value) -> Value {
 }
 
 /// host.component_mcp(request_json) -> answer (see `mcp`).
-pub extern "C-unwind" fn component_mcp(l: *mut crate::lua::LuaState) -> std::os::raw::c_int {
-    let raw = crate::lua::arg_string(l, 1).unwrap_or_default();
+pub extern "C-unwind" fn component_mcp(l: *mut wa_host_support::lua::LuaState) -> std::os::raw::c_int {
+    let raw = wa_host_support::lua::arg_string(l, 1).unwrap_or_default();
     let answer = match serde_json::from_str::<Value>(&raw) {
         Ok(request) => mcp(&request),
         Err(_) => fail("invalid_component_request", "arguments", false),
     };
-    crate::host::push_json(l, &answer);
+    wa_host_support::json::push_json(l, &answer);
     1
 }
 
 /// host.components() -> installed components with their manifests and pin state.
-pub extern "C-unwind" fn components(l: *mut crate::lua::LuaState) -> std::os::raw::c_int {
+pub extern "C-unwind" fn components(l: *mut wa_host_support::lua::LuaState) -> std::os::raw::c_int {
     let mut list = Vec::new();
     if let Ok(entries) = std::fs::read_dir(component_dir()) {
         let mut names: Vec<String> = entries
@@ -591,7 +588,7 @@ pub extern "C-unwind" fn components(l: *mut crate::lua::LuaState) -> std::os::ra
             }
         }
     }
-    crate::host::push_json(l, &json!(list));
+    wa_host_support::json::push_json(l, &json!(list));
     1
 }
 

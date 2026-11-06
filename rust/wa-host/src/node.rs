@@ -52,7 +52,7 @@ impl Identity {
                     Ed25519KeyPair::generate_pkcs8(&rng).map_err(|error| error.to_string())?;
                 let bytes = document.as_ref().to_vec();
                 if let Some(parent) = path.parent() {
-                    crate::private_dir(parent);
+                    wa_host_support::paths::private_dir(parent);
                 }
                 // Owner-only from the first byte: the key is the node's identity on the network.
                 let mut options = std::fs::OpenOptions::new();
@@ -144,7 +144,7 @@ fn read_trimmed(path: &str) -> Option<String> {
 fn worktree_name() -> Option<String> {
     let cwd = std::env::current_dir().ok()?;
     let normal = |path: &str| path.replace('\\', "/").trim_end_matches('/').to_lowercase();
-    if normal(&cwd.to_string_lossy()) == normal(&crate::resolve_home()) {
+    if normal(&cwd.to_string_lossy()) == normal(&wa_host_support::paths::resolve_home()) {
         return None;
     }
     let name = cwd.file_name()?.to_string_lossy().to_string();
@@ -165,7 +165,7 @@ pub fn verify(public_key_hex: &str, message: &str, signature_hex: &str) -> bool 
 }
 
 fn managed_profile() -> Option<serde_json::Value> {
-    let text = std::fs::read_to_string(format!("{}/.wasm-agent/enrollment.json", crate::resolve_home())).ok()?;
+    let text = std::fs::read_to_string(format!("{}/.wasm-agent/enrollment.json", wa_host_support::paths::resolve_home())).ok()?;
     let p: serde_json::Value = serde_json::from_str(&text).ok()?;
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
     if p["schema"].as_u64() == Some(1) && p["active"].as_bool() == Some(true)
@@ -204,7 +204,7 @@ pub fn spawn_heartbeat(url: String) {
         // Resolved exactly as the Lua core resolves them, because the rendezvous is what other
         // nodes check. A node that is a guest locally and a master remotely is how a guest gets
         // master tools from a peer, and the announcement below is the only place that decides.
-        let config = format!("{}/.wasm-agent", crate::resolve_home());
+        let config = format!("{}/.wasm-agent", wa_host_support::paths::resolve_home());
         let mut registered = false;
         loop {
             if !network_active() {
@@ -219,7 +219,7 @@ pub fn spawn_heartbeat(url: String) {
                 .unwrap_or(0);
             let endpoints = json!(if endpoint.is_empty() { vec![] } else { vec![endpoint.clone()] });
             let message = announcement(&identity.node_id, ts, &name, &endpoints);
-            let resources = crate::system_resources::sample();
+            let resources = wa_host_support::system_resources::sample();
             let payload = json!({
                 "node_id": identity.node_id,
                 "public_key": identity.public_key,

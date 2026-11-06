@@ -1937,6 +1937,7 @@ dependencies = [
  "wa-bounded",
  "wa-bus",
  "wa-grant-policy",
+ "wa-host-support",
  "wa-jobs",
  "wa-kv",
  "wa-operation",
@@ -1945,6 +1946,16 @@ dependencies = [
  "wa-telemetry",
  "wasmtime",
  "wasmtime-wasi",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "wa-host-support"
+version = "0.1.0"
+dependencies = [
+ "cc",
+ "libc",
+ "serde_json",
  "windows-sys 0.61.2",
 ]
 

@@ -8,6 +8,8 @@ name = "wa"
 path = "src/main.rs"
 
 [dependencies]
+# The floor of the split: the Lua 5.4 ABI, the host paths and the JSON answer shared with the kernel.
+wa-host-support = { path = "../wa-host-support" }
 wa-operation = { path = "../wa-operation" }
 wa-jobs = { path = "../wa-jobs" }
 # The grant policy, telemetry and bounded-store libraries this host enforces (docs/GRANT-POLICY.md,

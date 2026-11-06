@@ -64,7 +64,7 @@ fn subagent_root() -> PathBuf {
     // then the native Windows variables, then HOME. Reading `HOME` alone missed
     // `WASM_AGENT_HOME`, so a candidate node's children landed in the operator's
     // real home - and a test could write it.
-    PathBuf::from(crate::resolve_home()).join(".wasm-agent/subagents")
+    PathBuf::from(wa_host_support::paths::resolve_home()).join(".wasm-agent/subagents")
 }
 
 /// Sockets the current child request is blocked on, shared with the task so a
@@ -1059,7 +1059,7 @@ fn settle_view(inner: &Arc<Inner>, id: &str, state: &str, result: Value, error: 
 
 /// Register the fresh-interpreter runner. Called once by `main.rs`; an
 /// unregistered runtime refuses `start` rather than silently doing nothing.
-pub fn set_factory(factory: Box<dyn Fn() -> crate::lua::Lua + Send + Sync>) {
+pub fn set_factory(factory: Box<dyn Fn() -> wa_host_support::lua::Lua + Send + Sync>) {
     let factory = Arc::new(factory);
     let runner: Runner = Arc::new(move |receipt: &str| {
         let lua = factory();

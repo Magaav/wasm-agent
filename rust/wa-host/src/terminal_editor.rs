@@ -42,7 +42,7 @@ impl Drop for RawMode {
 fn divert_stderr() -> Option<libc::c_int> {
     use std::os::unix::io::IntoRawFd;
     if unsafe { libc::isatty(2) } != 1 { return None; }
-    let dir = std::path::PathBuf::from(crate::resolve_home()).join(".wasm-agent").join("logs");
+    let dir = std::path::PathBuf::from(wa_host_support::paths::resolve_home()).join(".wasm-agent").join("logs");
     std::fs::create_dir_all(&dir).ok()?;
     let log = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("cli-stderr.log")).ok()?;
     let saved = unsafe { libc::dup(2) };

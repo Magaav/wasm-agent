@@ -1,5 +1,5 @@
 //! Private atomic enrollment state and one outbound runtime. All enrollment policy is Lua.
-use crate::lua::Lua;
+use wa_host_support::lua::Lua;
 use serde_json::{json,Value};
 use std::path::PathBuf;
 use std::sync::{Arc,Mutex,OnceLock,atomic::{AtomicBool,Ordering}};
@@ -17,7 +17,7 @@ static STATUS:Mutex<Option<Value>>=Mutex::new(None);
 pub fn set_factory(factory:Arc<dyn Fn()->Lua+Send+Sync>){let _=FACTORY.set(factory);}
 /// Called once by the process that is about to serve this ledger.
 pub fn set_serving(){SERVING.store(true,Ordering::SeqCst);}
-pub fn state_path()->PathBuf{PathBuf::from(crate::resolve_home()).join(".wasm-agent/binding.json")}
+pub fn state_path()->PathBuf{PathBuf::from(wa_host_support::paths::resolve_home()).join(".wasm-agent/binding.json")}
 pub fn present()->bool{state_path().exists()}
 pub fn read()->Result<Option<Value>,String>{match std::fs::read(state_path()){
     Ok(bytes)=>serde_json::from_slice(&bytes).map(Some).map_err(|e|format!("binding_state_corrupt:{e}")),

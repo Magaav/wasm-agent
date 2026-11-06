@@ -1,0 +1,23 @@
+[package]
+name = "wa-host-support"
+version = "0.1.0"
+edition = "2021"
+
+# The floor of the split (docs/KERNEL.md, "three layers"): the pieces every other crate needs and none
+# of them may define. It owns the vendored Lua 5.4 C sources and the raw ABI over them, the host's own
+# path resolution, the JSON push helper every capability function answers with, and the host resource
+# sample the heartbeat and the node report.
+#
+# Nothing here may depend on another host crate: this is what makes a change to the Lua ABI, the paths or
+# the value bridge rebuild the whole graph, while a change above it rebuilds only what imports it.
+[dependencies]
+serde_json = "1"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_SystemInformation", "Win32_System_Threading"] }
+
+[build-dependencies]
+cc = "1"

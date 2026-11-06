@@ -289,11 +289,11 @@ fn cap(mut text: String) -> String {
 }
 
 /// `host.telemetry(request_json_or_format)` -> one text answer (Prometheus or JSON).
-pub extern "C-unwind" fn capability(l: *mut crate::lua::LuaState) -> std::os::raw::c_int {
-    let raw = crate::lua::arg_string(l, 1).unwrap_or_default();
+pub extern "C-unwind" fn capability(l: *mut wa_host_support::lua::LuaState) -> std::os::raw::c_int {
+    let raw = wa_host_support::lua::arg_string(l, 1).unwrap_or_default();
     let text = answer(&raw);
     unsafe {
-        crate::lua::lua_pushlstring(l, text.as_ptr() as *const std::os::raw::c_char, text.len());
+        wa_host_support::lua::lua_pushlstring(l, text.as_ptr() as *const std::os::raw::c_char, text.len());
     }
     1
 }

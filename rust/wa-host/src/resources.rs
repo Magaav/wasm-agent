@@ -669,7 +669,7 @@ pub fn control(action: &str, args: &Value) -> Result<Value> {
         return STORE.get().ok_or("resource_context_required")?.as_ref().map_err(Clone::clone)?.control(action,args);
     }
     let store = STORE.get_or_init(|| {
-        Store::open(&PathBuf::from(crate::resolve_home()).join(".wasm-agent/resources"))
+        Store::open(&PathBuf::from(wa_host_support::paths::resolve_home()).join(".wasm-agent/resources"))
     });
     store.as_ref().map_err(Clone::clone)?.control(action, args)
 }
