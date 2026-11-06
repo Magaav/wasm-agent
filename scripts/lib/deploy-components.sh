@@ -234,7 +234,6 @@ wa_component_cache_root() {
 wa_component_fetch_assets() {
   local repo="$1" tag="$2" name="$3" dest="$4" base="${5:-}" asset local_base url_base
   [ -d "$repo" ] && repo="$(wa_component_release_repo "$repo")"
-  [ -d "$repo" ] && repo="$(wa_component_release_repo "$repo")"
   local assets="$name.wasm $name.json components.lock"
   local_base=""
   url_base=""

@@ -522,6 +522,11 @@ else
 PREBUILT_BINARIES=0
 BINARY_PROVENANCE="clean-built-by-deploy"
 BINARY_RELEASE=""
+# The directory the manifest verified (and its triple), from the `binary_verified:` line below: the
+# sentinel install step reads the prebuilt supervisor back out of it. Empty on the build path.
+BINARY_DIR=""
+BINARY_TRIPLE=""
+SENTINEL_SOURCE=""
 BINARY_STAGE="$INSTALL_DIR/node-binary.next"
 if [ "${WA_DEPLOY_BUILD_ONLY:-0}" = 1 ]; then
   echo "deploy: WA_DEPLOY_BUILD_ONLY=1 - this tree builds its own binary; no published one is installed"
@@ -542,6 +547,14 @@ else
     [ -n "$binary_line" ] || continue
     case "$binary_line" in
       binary_source:*) echo "deploy: $binary_line" ;;
+      binary_verified:*)
+        # `<triple> <dir> <sha12>`, read by field so a directory with a space in it survives: the last
+        # space separates the sha12, and what is to the left of it is the directory.
+        BINARY_VERIFIED="${binary_line#binary_verified: }"
+        BINARY_TRIPLE="${BINARY_VERIFIED%% *}"
+        BINARY_VERIFIED="${BINARY_VERIFIED#* }"
+        BINARY_DIR="${BINARY_VERIFIED% *}"
+        ;;
       *) note "binary: $binary_line" ;;
     esac
   done <<BINARY_LINES
@@ -564,6 +577,36 @@ BINARY_LINES
         BINARY_PROVENANCE="prebuilt-release"
         BINARY_COMMIT="$(git rev-parse HEAD)"
         BINARY_RELEASE="$(wa_node_release_tag "$BINARY_COMMIT")"
+      fi
+      # The supervisor comes from the SAME verified directory, and it must still be the bytes the manifest
+      # pins. WHY (openclaw, 06/11, the first prebuilt deploy of 75ac2964): the node installed and the
+      # deploy then refused - `could not install wa-sentinel - it is still the old build; the node and its
+      # supervisor would disagree` - because this script removes the staging directory (below, once the
+      # proved node has been copied to its hash-named candidate) while the sentinel step was still reading
+      # `$BINARY_STAGE/wa-sentinel` out of it. A prebuilt deploy has to install the prebuilt supervisor, so
+      # that step takes it from the directory the manifest verified, and re-reads the pin here rather than
+      # trusting the fetch: a cache entry is a directory on disk like any other.
+      SENTINEL_SOURCE=""
+      if [ -n "$BINARY_DIR" ] && command -v wa_node_sentinel_file >/dev/null 2>&1; then
+        if ! SENTINEL_SOURCE="$(wa_node_sentinel_file "$BINARY_DIR" "$BINARY_COMMIT" "$BINARY_TRIPLE" 2>&1)"; then
+          fail "refused(prebuilt_sentinel_missing): $SENTINEL_SOURCE; nothing installed"
+        fi
+        # The cache entry is a download, not a staged file: the staging copy this deploy used to install was
+        # the one wa_node_binary_stage chmod'ed, and it is gone by now. A supervisor nobody can execute is
+        # not an install, so set the bit here, on the same rule the staging step uses (best effort: a
+        # filesystem without exec bits - a Windows mount - has nothing to set).
+        chmod +x "$SENTINEL_SOURCE" 2>/dev/null || true
+        if SENTINEL_PIN="$(wa_node_sentinel_pin "$BINARY_DIR" "$BINARY_COMMIT" "$BINARY_TRIPLE" 2>/dev/null)"; then
+          SENTINEL_SHA="$(wa_node_sha256 "$SENTINEL_SOURCE")" \
+            || fail "refused(prebuilt_sentinel_unverifiable): no sha256sum or shasum here, so $SENTINEL_SOURCE cannot be checked against the manifest; nothing installed"
+          [ "$SENTINEL_SHA" = "$SENTINEL_PIN" ] \
+            || fail "refused(prebuilt_sentinel_mismatch): $SENTINEL_SOURCE is $SENTINEL_SHA and the manifest pins $SENTINEL_PIN, so this is not the supervisor that belongs to $BINARY_COMMIT; nothing installed"
+          echo "deploy: the prebuilt sentinel is the manifest's pinned bytes ($SENTINEL_SHA)"
+        else
+          note "$BINARY_DIR carries no manifest row for $BINARY_TRIPLE (WA_DEPLOY_BINARY_SOURCE), so the prebuilt sentinel is installed on the node's own proof below and not on a pin"
+        fi
+      else
+        note "the prebuilt step named no verified directory, so the supervisor is taken from the staging copy"
       fi
       echo "deploy: installing the published binary; the prove gate below runs on it, then upgrade.sh"
       ;;
@@ -1034,11 +1077,21 @@ HASH="$(sha256sum < "$INSTALLED_NODE" 2>/dev/null | awk '{print $1}')"
 # sentinel that still matches the node it supervises, rather than one rebuilt ahead of a node that
 # rolled back. A running sentinel holds its own image open on Windows, so the copy is attempted and
 # its failure is reported rather than fatal: the swap is completed by the one-shot restart below.
+#
+# WHERE THE BYTES COME FROM is one variable. The build path and the Lua fast path hand over the tree's own
+# artifact ($NEW_SENTINEL, unchanged); a prebuilt install hands over the file the release's manifest pins
+# (SENTINEL_SOURCE, resolved and sha-checked in the prebuilt branch above). The guard at the end of this
+# block - "the installed file is the bytes this deploy meant to install" - therefore compares against the
+# prebuilt supervisor's own bytes, not against a staging path that the same run may already have removed.
+# wa-deploy-sentinel-install: begin
+SENTINEL_SOURCE="${SENTINEL_SOURCE:-${NEW_SENTINEL:-}}"
+[ -f "$SENTINEL_SOURCE" ] \
+  || fail "refused(sentinel_source_missing): there is no supervisor to install at ${SENTINEL_SOURCE:-<unset>}; nothing installed"
 SENTINEL_HASH="(none)"
 SENTINEL_SWAP_STARTED=0
 if [ -f "$INSTALL_DIR/$SENTINEL_NAME" ]; then
-  cp -f "$NEW_SENTINEL" "$INSTALL_DIR/$SENTINEL_NAME" 2>/dev/null || true
-  if cmp -s "$NEW_SENTINEL" "$INSTALL_DIR/$SENTINEL_NAME"; then
+  cp -f "$SENTINEL_SOURCE" "$INSTALL_DIR/$SENTINEL_NAME" 2>/dev/null || true
+  if cmp -s "$SENTINEL_SOURCE" "$INSTALL_DIR/$SENTINEL_NAME"; then
     echo "deploy: sentinel $SENTINEL_NAME updated"
   else
     # The file is locked by the running supervisor on Windows, and there the stop/replace/start dance below is
@@ -1055,33 +1108,34 @@ if [ -f "$INSTALL_DIR/$SENTINEL_NAME" ]; then
           # after an access-denied/mismatched stop, or manufacture updated bytes.
           "$INSTALL_DIR/$SENTINEL_NAME" stop || fail "sentinel stop refused; installed supervisor left intact"
           sleep 2
-          cp -f "$NEW_SENTINEL" "$INSTALL_DIR/$SENTINEL_NAME" \
+          cp -f "$SENTINEL_SOURCE" "$INSTALL_DIR/$SENTINEL_NAME" \
             || fail "sentinel stopped but replacement failed; inspect before recovery"
           "$INSTALL_DIR/$SENTINEL_NAME" start || fail "sentinel replacement placed but manager start failed"
           SENTINEL_SWAP_STARTED=1
           ;;
         *)
-          cp -f "$NEW_SENTINEL" "$INSTALL_DIR/$SENTINEL_NAME.new.$$" 2>/dev/null || true
+          cp -f "$SENTINEL_SOURCE" "$INSTALL_DIR/$SENTINEL_NAME.new.$$" 2>/dev/null || true
           mv -f "$INSTALL_DIR/$SENTINEL_NAME.new.$$" "$INSTALL_DIR/$SENTINEL_NAME" 2>/dev/null || true
           ;;
       esac
     fi
-    if cmp -s "$NEW_SENTINEL" "$INSTALL_DIR/$SENTINEL_NAME"; then
+    if cmp -s "$SENTINEL_SOURCE" "$INSTALL_DIR/$SENTINEL_NAME"; then
       echo "deploy: sentinel $SENTINEL_NAME updated (the running watcher keeps its old image until the restart below)"
     else
       # Do not leave the staged image behind for a failure that is about to be reported: it is a whole
       # binary. What a SIGKILL here would leave is swept by sweep_stale_staging() on the next deploy.
       rm -f "$INSTALL_DIR/$SENTINEL_NAME.new.$$" 2>/dev/null || true
-      fail "could not install $SENTINEL_NAME - it is still the old build; the node and its supervisor would disagree"
+      fail "could not install $SENTINEL_NAME from $SENTINEL_SOURCE - it is still the old build; the node and its supervisor would disagree"
     fi
   fi
   SENTINEL_HASH="$(sha256sum < "$INSTALL_DIR/$SENTINEL_NAME" 2>/dev/null | awk '{print $1}')"
   [ -n "$SENTINEL_HASH" ] || SENTINEL_HASH="$(shasum -a 256 < "$INSTALL_DIR/$SENTINEL_NAME" 2>/dev/null | awk '{print $1}')"
 else
-  cp -f "$NEW_SENTINEL" "$INSTALL_DIR/$SENTINEL_NAME" 2>/dev/null || fail "could not place $SENTINEL_NAME"
+  cp -f "$SENTINEL_SOURCE" "$INSTALL_DIR/$SENTINEL_NAME" 2>/dev/null || fail "could not place $SENTINEL_NAME"
   echo "deploy: sentinel $SENTINEL_NAME installed"
   SENTINEL_HASH="$(sha256sum < "$INSTALL_DIR/$SENTINEL_NAME" 2>/dev/null | awk '{print $1}')"
 fi
+# wa-deploy-sentinel-install: end
 
 # The install's facts are true HERE - the node's bytes, the sentinel's bytes, the shipped upgrade.sh - so the
 # record is written here, before the sentinel proof below, which can refuse entirely on its own. Measured
@@ -1104,14 +1158,32 @@ UPGRADE_HASH="$(sha256sum < "$INSTALL_DIR/scripts/upgrade.sh" 2>/dev/null | awk 
 # served 2f02b4c's build, and the only trace of the death was a line on a detached process's stdout. What
 # killed that run is at the ship_file rule below.
 record_installed() {
-  local record_tmp reason_line
+  local record_tmp reason_line record_commit
   record_tmp="$INSTALL_DIR/.installed.txt.deploy.$$"
   reason_line="$(printf '%s' "$REASON" | tr '\r\n' '  ')"
+  # Which commit the record NAMES. A prebuilt install names the 40-hex id the manifest was verified
+  # against (node-binaries.sh compares source_commit to the full id; `node-<sha12>` is only the release's
+  # name, and twelve hex can collide), so `commit=` is a full id there. The build path keeps writing the
+  # short id it has always written: its ancestor and record checks read it the same way, and changing that
+  # shape is not this rule's business.
+  record_commit="$COMMIT"
+  case "${BINARY_PROVENANCE:-}" in
+    prebuilt-*) [ -n "${BINARY_COMMIT:-}" ] && record_commit="$BINARY_COMMIT" ;;
+  esac
+  # A prebuilt record's commit= is the manifest's 40-hex identity or it is not a record of a verified
+  # install: a short id is a name that can collide, and it would be the id the checks downstream compare.
+  # Checked BEFORE the write, so a record no reader can act on is never the one that lands.
+  case "${BINARY_PROVENANCE:-}" in
+    prebuilt-*)
+      if [ "${#record_commit}" != 40 ] || [ -n "$(printf '%s' "$record_commit" | tr -d '0123456789abcdef')" ]; then
+        fail "installed.txt would record commit=$record_commit for a prebuilt install, which is not a 40-hex commit id; the record must name the id the manifest was verified against"
+      fi ;;
+  esac
   # `install_dir=` is the record's own statement of where it was written, and of which directory the machine
   # runs the node from. A record that cannot say that is a record a later reader has to guess about - and
   # `~/.wasm-agent/installed.txt`, empty on the node this rule was written for, is what guessing looks like.
   printf 'commit=%s\nbranch=%s\ndirty=%s\nsha256=%s\nsentinel_sha256=%s\nupgrade_sha256=%s\ninstall_dir=%s\nservice_install_dir=%s\nsource_provenance=clean-built-by-deploy\nrecord_role=final\nvia=deploy.sh\nat=%s\nreason=%s\n' \
-    "$COMMIT" "$BRANCH" "$DIRTY" "$HASH" "$SENTINEL_HASH" "$UPGRADE_HASH" "$INSTALL_DIR" "${WA_SERVICE_DIR:-unverified}" \
+    "$record_commit" "$BRANCH" "$DIRTY" "$HASH" "$SENTINEL_HASH" "$UPGRADE_HASH" "$INSTALL_DIR" "${WA_SERVICE_DIR:-unverified}" \
     "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$reason_line" \
     > "$record_tmp" || fail "node installed, but installed.txt could not be written"
   # `source_provenance=clean-built-by-deploy` keeps its meaning - the bytes are a clean build of exactly
@@ -1302,6 +1374,11 @@ ship_file "$ROOT/scripts/lib/build-status.sh" "$INSTALL_DIR/scripts/lib/build-st
 ship_file "$ROOT/scripts/lib/build-requirements.sh" "$INSTALL_DIR/scripts/lib/build-requirements.sh" "scripts/lib/build-requirements.sh beside deploy.sh"
 
 ship_file "$ROOT/scripts/lib/deploy-components.sh" "$INSTALL_DIR/scripts/lib/deploy-components.sh" "scripts/lib/deploy-components.sh beside deploy.sh"
+# ...and the node-binary resolver, for the same reason the component lib is shipped: `request deploy` runs the
+# INSTALLED copy of this script, and a copy with no resolver beside it does not refuse - it notes "no
+# node-binaries helper" and builds the tree, which is the one thing a node without a toolchain (openclaw, 2
+# cores, no disk for ~600 crates) cannot do. Measured 06/11: the prebuilt path was reached only from the tree.
+ship_file "$ROOT/scripts/lib/node-binaries.sh" "$INSTALL_DIR/scripts/lib/node-binaries.sh" "scripts/lib/node-binaries.sh beside deploy.sh"
 ship_file "$ROOT/components.lock" "$INSTALL_DIR/components.lock" "components.lock beside deploy.sh (the pins this install verified)"
 ship_file "$ROOT/scripts/codemode-build.mjs" "$INSTALL_DIR/scripts/codemode-build.mjs" "offline native shipping build contract"
 ship_file "$ROOT/scripts/check-graph-component.lua" "$INSTALL_DIR/scripts/check-graph-component.lua" "the graph component proof the deploy runs"

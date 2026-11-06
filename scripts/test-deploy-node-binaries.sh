@@ -14,6 +14,17 @@
 #     a node below it refuses by name instead of starting a build it cannot finish;
 #   * WA_DEPLOY_BINARY_SOURCE (an operator's directory) is staged and says so.
 #
+# The supervisor half (job sentfix, the first prebuilt deploy of 75ac2964 on openclaw, 06/11: the node
+# installed and then `could not install wa-sentinel - it is still the old build`). A published release
+# carries `wa-sentinel` too, and the step that installs it is READ OUT OF deploy.sh by its own markers and
+# run against fixtures:
+#   * the prebuilt supervisor is taken from the verified directory (not from the staging directory the same
+#     deploy has already removed), installed, and its hash recorded - and the directory's manifest pin is
+#     re-checked at that point, so a cached sentinel swapped under a cache hit is REFUSED by name;
+#   * the build path is unchanged: no prebuilt source, and the tree's own artifact is installed;
+#   * installed.txt for a prebuilt install records commit=<40 hex>, binary_source=, binary_release= and
+#     binary_commit=, and refuses to write a record whose commit is not a full id.
+#
 #   bash scripts/test-deploy-node-binaries.sh
 set -uo pipefail
 cd "$(dirname "$0")/.."
@@ -88,6 +99,27 @@ expect_status 3 "$(wa_node_manifest_pin "$release/node-$SHORT.manifest" "$ARM" >
 expect_status 2 "$(wa_node_manifest_pin "$WORK/none.manifest" "$X64" >/dev/null; echo $?)" "a missing manifest"
 [ "$(wa_node_binary_shape "$release/wa-$X64-$SHORT")" = "elf:3e" ] || fail "an x86_64 ELF did not read as elf:3e"
 ok
+
+# --- the supervisor inside a verified directory -----------------------------------------------------
+# The deploy's sentinel step takes the supervisor from here (see the install-block cases below), so the two
+# answers it needs are pinned directly: which file, and which sha256 the manifest pins for it. The third
+# answer - "there is no manifest row" - must be distinguishable from a pin, because an operator's directory
+# (WA_DEPLOY_BINARY_SOURCE) has no manifest and is installed on the node's own proof instead.
+[ "$(wa_node_sentinel_file "$release" "$COMMIT" "$X64")" = "$release/wa-sentinel-$X64-$SHORT" ] \
+  || fail "the release's sentinel file was not found under its published name"
+ok
+[ "$(wa_node_sentinel_pin "$release" "$COMMIT" "$X64")" = "$ssha" ] \
+  || fail "the sentinel pin is not the manifest row's third field"
+ok
+expect_status 3 "$(wa_node_sentinel_pin "$release" "$COMMIT" "$ARM" >/dev/null 2>&1; echo $?)" "a target with no row pins no sentinel"
+plain_sentinel="$WORK/plain-sentinel"; mkdir -p "$plain_sentinel"; mkelf "$plain_sentinel/wa-sentinel" 3e
+[ "$(wa_node_sentinel_file "$plain_sentinel" "$COMMIT" "$X64")" = "$plain_sentinel/wa-sentinel" ] \
+  || fail "a plain wa-sentinel (the WA_DEPLOY_BINARY_SOURCE shape) was not found"
+ok
+expect_status 3 "$(wa_node_sentinel_pin "$plain_sentinel" "$COMMIT" "$X64" >/dev/null 2>&1; echo $?)" "an unpinned directory is unpinned, not pinned"
+no_sentinel="$WORK/no-sentinel"; mkdir -p "$no_sentinel"
+expect_status 2 "$(wa_node_sentinel_file "$no_sentinel" "$COMMIT" "$X64" >/dev/null 2>&1; echo $?)" "a directory with no supervisor at all"
+expect_status 2 "$(wa_node_sentinel_file "$no_sentinel" 1111 "$X64" >/dev/null 2>&1; echo $?)" "a commit id that is not 40-hex names no sentinel"
 
 # --- the dry run: the decision before anything is fetched -------------------------------------------
 plan="$(wa_node_binary_plan "$ROOT" "$COMMIT" "$X64" "$WORK/install")"
@@ -255,6 +287,8 @@ run_branch() { # <install dir> [env...] -> the branch's output; exit status is i
     echo 'wa_phase() { :; }'
     cat "$BRANCH"
     echo 'echo "PREBUILT=$PREBUILT_BINARIES NEW=${NEW:-} PROVENANCE=${BINARY_PROVENANCE:-} RELEASE=${BINARY_RELEASE:-}"'
+    echo 'echo "SENTINEL_SOURCE=${SENTINEL_SOURCE:-}"'
+    echo 'echo "BINARY_DIR=${BINARY_DIR:-} BINARY_TRIPLE=${BINARY_TRIPLE:-}"'
   } > "$WORK/run-branch.sh"
   ( env WA_NODE_TARGET="$X64" "$@" bash "$WORK/run-branch.sh" 2>&1 )
 }
@@ -270,6 +304,8 @@ contains "$out" "RELEASE=node-$HEAD_SHORT" "the branch records the release tag"
 out="$(run_branch "$WORK/br-override" WA_DEPLOY_BINARY_SOURCE="$WORK/explicit")"
 expect_status 0 "$?" "the branch with an operator directory"
 contains "$out" "PROVENANCE=prebuilt-source" "the override is recorded as such"
+contains "$out" "SENTINEL_SOURCE=$WORK/explicit/wa-sentinel" "the override's own wa-sentinel is the supervisor"
+contains "$out" "carries no manifest row for $X64" "an operator directory is said to be unpinned, not read as a pass"
 
 tampered="$WORK/head-tampered"; cp -r "$head_release" "$tampered"; printf 'x' >> "$tampered/wa-$X64-$HEAD_SHORT"
 out="$(run_branch "$WORK/br-tampered" WA_NODE_BINARIES_URL="$tampered")"
@@ -300,6 +336,177 @@ expect_status 0 "$?" "the branch on a host with no published target"
 contains "$out" "has no published node-binary target" "the host is told why it builds"
 contains "$out" "PREBUILT=0" "it builds, with no disk question"
 
+# --- the prebuilt supervisor: the step that failed on openclaw (06/11) -------------------------------
+# The first prebuilt deploy of 75ac2964 installed the node and then refused -
+# `could not install wa-sentinel - it is still the old build; the node and its supervisor would disagree` -
+# because deploy.sh removes the staging directory (`node-binary.next`) once the proved node is its
+# hash-named candidate, and the sentinel step was still reading `$BINARY_STAGE/wa-sentinel` out of it. So
+# the sentinel step is read out of deploy.sh by its own markers and RUN: first with the prebuilt supervisor
+# of a verified directory and the stage already removed (must install), then with the build path's own
+# artifact (must install exactly that, unchanged), then with a stage-and-no-source (must refuse by name).
+SENTINEL_BLOCK="$WORK/sentinel-install.sh"
+DEPLOY="$ROOT/scripts/deploy.sh"
+awk '/^# wa-deploy-sentinel-install: begin$/{on=1} on{print} on && /^# wa-deploy-sentinel-install: end$/{exit}' "$DEPLOY" > "$SENTINEL_BLOCK"
+[ -s "$SENTINEL_BLOCK" ] || fail "could not read the sentinel install step out of deploy.sh (its markers are gone)"
+grep -q 'SENTINEL_SOURCE' "$SENTINEL_BLOCK" || fail "the extracted sentinel step does not read SENTINEL_SOURCE"
+ok
+
+run_sentinel_install() { # <install dir> [env...] -> the block's output; exit status is its own
+  local install="$1"; shift
+  {
+    echo 'set -uo pipefail'
+    echo "INSTALL_DIR=\"$install\""
+    echo 'SENTINEL_NAME=wa-sentinel'
+    echo 'fail() { echo "REFUSED: $*" >&2; exit 3; }'
+    echo 'note() { echo "note: $*"; }'
+    echo 'sentinel_restart() { return 0; }'
+    cat "$SENTINEL_BLOCK"
+    echo 'echo "SENTINEL_HASH=${SENTINEL_HASH:-} SWAP=${SENTINEL_SWAP_STARTED:-}"'
+  } > "$WORK/run-sentinel.sh"
+  ( env "$@" bash "$WORK/run-sentinel.sh" 2>&1 )
+}
+
+si_install="$WORK/si-prebuilt"; mkdir -p "$si_install"
+printf '#!/bin/sh\necho "the supervisor that was installed before"\n' > "$si_install/wa-sentinel"
+old_sentinel_hash="$(wa_node_sha256 "$si_install/wa-sentinel")"
+out="$(run_branch "$WORK/br-sentinel" WA_NODE_BINARIES_URL="$head_release")"
+expect_status 0 "$?" "the branch with a published release, for the supervisor step"
+sentinel_src="$(printf '%s\n' "$out" | sed -n 's/^SENTINEL_SOURCE=//p' | tail -1)"
+[ -n "$sentinel_src" ] || fail "the branch handed no supervisor source to the install step: $out"
+ok
+case "$sentinel_src" in
+  "$WORK/br-sentinel/node-binaries/$HEAD_SHORT/$X64/wa-sentinel-$X64-$HEAD_SHORT") ok ;;
+  *) fail "the prebuilt supervisor does not come from the verified cache entry: $sentinel_src" ;;
+esac
+contains "$out" "the prebuilt sentinel is the manifest's pinned bytes" "the branch says the supervisor is the pinned bytes"
+# Exactly what deploy.sh does after the prove gate: the staged copy is not install state any more.
+rm -rf "$WORK/br-sentinel/node-binary.next"
+[ ! -e "$WORK/br-sentinel/node-binary.next/wa-sentinel" ] || fail "the stage the old step read from is still there"
+ok
+out="$(run_sentinel_install "$si_install" SENTINEL_SOURCE="$sentinel_src" NEW_SENTINEL="$WORK/br-sentinel/node-binary.next/wa-sentinel")"
+expect_status 0 "$?" "the sentinel step with the staging directory removed"
+contains "$out" "deploy: sentinel wa-sentinel updated" "the prebuilt supervisor replaces the installed one"
+cmp -s "$sentinel_src" "$si_install/wa-sentinel" || fail "the installed supervisor is not the prebuilt one"
+ok
+contains "$out" "SENTINEL_HASH=$(wa_node_sha256 "$sentinel_src")" "the step records the hash of the supervisor it installed"
+[ "$(wa_node_sha256 "$si_install/wa-sentinel")" != "$old_sentinel_hash" ] || fail "the supervisor was not replaced"
+ok
+# It has to be executable: the file now installed comes from the cache entry (a download), not from the
+# staging copy that used to be chmod'ed. Only asserted where the filesystem HAS an exec bit - this checkout's
+# /c mount reports every file executable, so a probe decides rather than the test's own assumption.
+exec_probe="$WORK/exec-probe"; printf '#!/bin/sh\n' > "$exec_probe"; chmod 644 "$exec_probe" 2>/dev/null
+if [ ! -x "$exec_probe" ]; then
+  [ -x "$si_install/wa-sentinel" ] || fail "the installed prebuilt supervisor is not executable"
+  ok
+else
+  echo "  (exec bit: this filesystem reports every file executable - the bit is not asserted here)"
+fi
+
+# The build path is unchanged: no prebuilt source, and the step installs the tree's own artifact. That is
+# the branch every Windows deploy and every WA_DEPLOY_BUILD_ONLY run still takes.
+bs_install="$WORK/si-build"; mkdir -p "$bs_install"
+printf '#!/bin/sh\necho "the supervisor that was installed before"\n' > "$bs_install/wa-sentinel"
+mkdir -p "$WORK/built-sentinel"
+printf '#!/bin/sh\necho "the supervisor this tree built"\n' > "$WORK/built-sentinel/wa-sentinel"
+out="$(run_sentinel_install "$bs_install" NEW_SENTINEL="$WORK/built-sentinel/wa-sentinel")"
+expect_status 0 "$?" "the sentinel step on the build path"
+cmp -s "$WORK/built-sentinel/wa-sentinel" "$bs_install/wa-sentinel" || fail "the build path's own sentinel was not what got installed"
+ok
+
+# A step with neither a prebuilt source nor a tree artifact refuses BY NAME instead of reporting an install
+# that put the old build in place. This is the shape the openclaw failure wore, said out loud.
+out="$(run_sentinel_install "$bs_install" NEW_SENTINEL="$WORK/does-not-exist/wa-sentinel")"
+expect_status 3 "$?" "the sentinel step with no supervisor to install"
+contains "$out" "refused(sentinel_source_missing)" "the missing supervisor is refused by name"
+contains "$out" "$WORK/does-not-exist/wa-sentinel" "the refusal names the path it looked at"
+
+# --- the mismatch: a verified directory whose sentinel is not the pinned bytes -----------------------
+# The check is not vacuous, and this is why it is re-read at install time rather than trusted from the
+# fetch: the cache-hit path only re-checks the NODE's sha256 (`.complete`), so a cached sentinel can be
+# swapped under a deploy that would otherwise install it. Same name, same size even - only the bytes differ.
+# Same name, same size even - only the bytes differ (`fixture-binary` -> `fixture-BINARY`), so the size
+# check cannot be what refuses it.
+mismatch="$WORK/br-sentinel-mismatch"; mkdir -p "$mismatch"
+WA_NODE_BINARIES_URL="$head_release" wa_node_binary_source_resolve "$ROOT" "$HEAD_SHA" "$X64" "$mismatch" >/dev/null 2>&1 \
+  || fail "could not populate the cache entry the mismatch case needs"
+mismatch_entry="$mismatch/node-binaries/$HEAD_SHORT/$X64"
+[ -f "$mismatch_entry/.complete" ] || fail "the mismatch case has no cache entry"
+ok
+cp -f "$mismatch_entry/wa-sentinel-$X64-$HEAD_SHORT" "$WORK/pinned-sentinel"
+sed 's/fixture-binary/fixture-BINARY/' "$WORK/pinned-sentinel" > "$mismatch_entry/wa-sentinel-$X64-$HEAD_SHORT"
+cmp -s "$WORK/pinned-sentinel" "$mismatch_entry/wa-sentinel-$X64-$HEAD_SHORT" && fail "the mismatch fixture did not change the bytes"
+ok
+[ "$(wc -c < "$mismatch_entry/wa-sentinel-$X64-$HEAD_SHORT" | tr -d '[:space:]')" = "$(wc -c < "$WORK/pinned-sentinel" | tr -d '[:space:]')" ] \
+  || fail "the mismatch fixture changed the size as well as the bytes"
+ok
+out="$(run_branch "$mismatch" WA_NODE_BINARIES_URL="$head_release")"
+expect_status 3 "$?" "the branch with a cached sentinel that is not the pinned bytes"
+contains "$out" "refused(prebuilt_sentinel_mismatch)" "the swapped supervisor is refused by name"
+contains "$out" "wa-sentinel-$X64-$HEAD_SHORT" "the refusal names the file"
+contains "$out" "nothing installed" "the refusal says nothing was installed"
+# ...and the node's own binary in that entry is still accepted, so the refusal above is about the sentinel
+# and not about the fixture being broken.
+[ "$(wa_node_sha256 "$mismatch_entry/wa-$X64-$HEAD_SHORT")" = "$(wa_node_sha256 "$head_release/wa-$X64-$HEAD_SHORT")" ] \
+  || fail "the mismatch fixture also replaced the node binary"
+ok
+
+# --- installed.txt for a prebuilt install: commit=<40 hex>, binary_source=, binary_release=, binary_commit=
+# The record step is read out of deploy.sh and run, the way scripts/test-deploy-record.sh runs it. What this
+# adds is the prebuilt half: the commit it names is the manifest's 40-hex identity (not the short id a build
+# records), and the three binary lines say where the bytes came from. openclaw's record ended at
+# `commit=unknown` because the deploy died before this step - so the step is also proved to refuse a commit
+# it cannot state as a full id rather than write a record no check can use.
+RECORD_BLOCK="$WORK/record.sh"
+awk '/^record_installed\(\) \{$/{on=1} on{print} on && /^\}$/{exit}' "$DEPLOY" > "$RECORD_BLOCK"
+[ -s "$RECORD_BLOCK" ] || fail "could not read the install record step out of deploy.sh"
+grep -q 'record_role=final' "$RECORD_BLOCK" || fail "the extracted record step is not the deploy's"
+ok
+rec_install="$WORK/rec-install"; mkdir -p "$rec_install/scripts"
+printf '#!/bin/sh\necho node\n' > "$rec_install/wa"
+printf '#!/bin/sh\necho sentinel\n' > "$rec_install/wa-sentinel"
+printf '#!/bin/sh\n' > "$rec_install/scripts/upgrade.sh"
+run_record() { # [commit the record should name] -> the record step's output, run against $rec_install
+  local bcommit="${1:-$HEAD_SHA}"
+  {
+    echo 'set -uo pipefail'
+    echo "INSTALL_DIR=\"$rec_install\""
+    echo 'COMMIT=deadbee'                 # deliberately short: a prebuilt record must NOT name this
+    echo 'BRANCH=main'
+    echo 'DIRTY=0'
+    echo 'HASH=nodehash'
+    echo 'SENTINEL_HASH=sentinelhash'
+    echo 'UPGRADE_HASH=upgradehash'
+    echo 'REASON="prebuilt install"'
+    echo 'RELEASE=""'
+    echo 'WA_SERVICE_DIR=""'
+    echo 'LUA_FAST=0'
+    echo 'COMPONENT_DIR=/nonexistent'
+    echo 'COMPONENT_SHA=deadbeef'
+    echo 'BINARY_PROVENANCE=prebuilt-release'
+    echo "BINARY_RELEASE=node-$HEAD_SHORT"
+    echo "BINARY_COMMIT=$bcommit"
+    echo 'fail() { echo "REFUSED: $*" >&2; exit 3; }'
+    cat "$RECORD_BLOCK"
+    echo 'record_installed'
+  } > "$WORK/run-record.sh"
+  ( bash "$WORK/run-record.sh" 2>&1 )
+}
+out="$(run_record)"
+expect_status 0 "$?" "the record step for a prebuilt install"
+record="$(cat "$rec_install/installed.txt")"
+contains "$record" "commit=$HEAD_SHA" "the record names the 40-hex commit"
+contains "$record" "binary_source=prebuilt-release" "the record says the binary came from a release"
+contains "$record" "binary_release=node-$HEAD_SHORT" "the record names the release"
+contains "$record" "binary_commit=$HEAD_SHA" "the record names the commit the bytes were verified against"
+contains "$record" "sentinel_sha256=sentinelhash" "the record still names the installed supervisor's hash"
+if printf '%s' "$record" | grep -q '^commit=deadbee$'; then fail "the record named the short id instead of the 40-hex commit"; fi
+ok
+# A prebuilt record whose commit is not a 40-hex id is refused, and the record that was already there stands.
+out="$(run_record abc1234)"
+expect_status 3 "$?" "the record step for a prebuilt install with a short commit"
+contains "$out" "not a 40-hex commit id" "the refusal says what a prebuilt record must name"
+contains "$(cat "$rec_install/installed.txt")" "commit=$HEAD_SHA" "the refused write did not replace the good record"
+
 
 # --- the wiring in scripts/deploy.sh ------------------------------------------------------------------
 # The lib is useless unless the deploy calls it BEFORE it asks for cargo: the whole point is that a node
@@ -314,6 +521,17 @@ ok
 grep -q 'no_prebuilt_binary_and_disk_floor' "$DEPLOY" || fail "deploy.sh has no refusal for 'no prebuilt and no disk'"
 ok
 grep -q 'binary_source=%s' "$DEPLOY" || fail "deploy.sh does not record where the binary came from in installed.txt"
+ok
+# ...and the resolver beside the INSTALLED copy of this script: `request deploy` runs that copy, so a deploy
+# whose lib was never shipped notes "no node-binaries helper" and builds - which is exactly the node that
+# cannot build (openclaw).
+grep -q 'ship_file "$ROOT/scripts/lib/node-binaries.sh"' "$DEPLOY"   || fail "deploy.sh does not ship scripts/lib/node-binaries.sh beside the installed deploy"
+ok
+# The prebuilt branch must hand the sentinel step the verified directory's own supervisor: the staging copy
+# it used to read is gone by then (see the install-block cases above).
+grep -q 'wa_node_sentinel_file' "$BRANCH" || fail "the prebuilt branch does not take the supervisor from the verified directory"
+ok
+grep -q 'wa_node_sentinel_pin' "$BRANCH" || fail "the prebuilt branch does not check the supervisor against the manifest's pin"
 ok
 prepare_line="$(grep -n 'wa_node_binaries_prepare "$ROOT"' "$DEPLOY" | head -1 | cut -d: -f1)"
 requirements_line="$(grep -n '^deploy_requirements$' "$DEPLOY" | head -1 | cut -d: -f1)"

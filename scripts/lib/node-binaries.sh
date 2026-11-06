@@ -179,7 +179,6 @@ wa_node_asset_names() {
 wa_node_fetch_asset() {
   local repo="$1" tag="$2" asset="$3" dest="$4" base="${5:-}" local_base url_base
   [ -d "$repo" ] && repo="$(wa_node_release_repo "$repo")"
-  [ -d "$repo" ] && repo="$(wa_node_release_repo "$repo")"
   mkdir -p "$dest" || { printf 'node_cache_unwritable: %s
 ' "$dest"; return 8; }
   local_base=""
@@ -435,6 +434,37 @@ wa_node_binary_plan() {
     "$short" "$triple" "$(wa_node_release_repo "$repo")" "$dir"
 }
 
+# <dir> <commit> <triple> -> the SENTINEL file a verified directory holds, on stdout:
+# `wa-sentinel-<triple>-<sha12>` when the release named it the way the manifest does, else a plain
+# `wa-sentinel` (the second shape is what WA_DEPLOY_BINARY_SOURCE allows). 2 when neither is there.
+#
+# The deploy's install step takes the supervisor from here and not from the staging directory, because a
+# prebuilt deploy deletes its staging directory as soon as the node's bytes have been copied to their
+# hash-named candidate - and a step that reads a path the same run has removed refuses an install that
+# is otherwise complete (openclaw, 06/11: the node went in, then `could not install wa-sentinel`).
+wa_node_sentinel_file() {
+  local dir="$1" commit="$2" triple="$3" short named
+  short="$(wa_node_release_tag "$commit")" || { printf 'node_commit_invalid: %s is not a 40-hex commit id\n' "${commit:-}" >&2; return 2; }
+  short="${short#node-}"
+  named="$dir/wa-sentinel-$triple-$short"
+  if [ -f "$named" ]; then printf '%s\n' "$named"; return 0; fi
+  if [ -f "$dir/wa-sentinel" ]; then printf '%s\n' "$dir/wa-sentinel"; return 0; fi
+  printf 'node_binary_missing: %s holds neither wa-sentinel-%s-%s nor wa-sentinel\n' "$dir" "$triple" "$short" >&2
+  return 2
+}
+
+# <dir> <commit> <triple> -> the sha256 the directory's manifest pins for that triple's sentinel, on
+# stdout. 3 when there is no manifest or no row for the triple: an operator's directory, or a hand-copied
+# one, is *unpinned*, and that is a fact the caller has to say out loud rather than read as a pass. 2 when
+# the commit is not a 40-hex id.
+wa_node_sentinel_pin() {
+  local dir="$1" commit="$2" triple="$3" pin short
+  short="$(wa_node_short_sha "$commit")" \
+    || { printf 'node_commit_invalid: %s is not a 40-hex (or 12-hex) commit id\n' "${commit:-}" >&2; return 2; }
+  pin="$(wa_node_manifest_pin "$dir/node-$short.manifest" "$triple")" || return 3
+  printf '%s\n' "$pin" | awk '{print $3}'
+}
+
 # <stage> <source dir> <commit> <triple>
 #
 # Copy the verified binaries into <stage> under the names the deploy installs (`wa`, `wa-sentinel`) and
@@ -459,10 +489,11 @@ wa_node_binary_stage() {
 
 # <repo> <commit> <stage> <install>   -- the deploy's one call.
 #
-# Resolve (fetch + verify), then stage `wa` and `wa-sentinel` into <stage>. One `binary_source:` line on
-# stdout on 0, the same line naming the reason on 8 (nothing published for this commit/triple, or this
-# host has no published target at all - a Windows deploy builds, as it always did), and the refusal
-# itself on 2/5/6/7.
+# Resolve (fetch + verify), then stage `wa` and `wa-sentinel` into <stage>. On 0, two lines on stdout: the
+# machine-readable `binary_verified: <triple> <dir> <sha12>` (so the deploy can name the verified directory
+# to its sentinel step without parsing prose) and the `binary_source:` line for the operator's log. On 8,
+# the same source line naming the reason (nothing published for this commit/triple, or this host has no
+# published target at all - a Windows deploy builds, as it always did); on 2/5/6/7 the refusal itself.
 wa_node_binaries_prepare() {
   local repo="$1" commit="$2" stage="$3" install="${4:-}" triple out rc dir
   triple="$(wa_node_target_triple)"; rc=$?
@@ -483,6 +514,10 @@ wa_node_binaries_prepare() {
     return "$rc"
   fi
   [ -z "$out" ] || printf '%s\n' "$out" >&2
+  # The machine-readable half of the same answer: the triple, the verified directory and its sha12. The
+  # deploy needs the directory itself for the sentinel install step, and reading it out of the prose line
+  # below would break on a directory with a space in it - so it is said as its own line, on purpose.
+  printf 'binary_verified: %s %s %s\n' "$triple" "$dir" "$(wa_node_short_sha "$commit")"
   if [ -n "${WA_DEPLOY_BINARY_SOURCE:-}" ]; then
     printf 'binary_source: %s %s (WA_DEPLOY_BINARY_SOURCE)\n' "$triple" "$dir"
   else

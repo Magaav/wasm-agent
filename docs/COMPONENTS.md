@@ -178,15 +178,33 @@ answers `/health` on a scratch port - then `upgrade.sh` installs it and rolls ba
 `installed.txt` keeps `source_provenance=clean-built-by-deploy` (the bytes are a clean build of exactly
 this commit and this deploy verified them) and adds `binary_source=prebuilt-release|
 prebuilt-source`, `binary_release=node-<sha12>` and `binary_commit=<40 hex>`, so "where did this node's
-binary come from" is a record and not a guess.
+binary come from" is a record and not a guess. Its `commit=` is the release's **40-hex** commit id (the
+id the manifest's `source_commit` was checked against), not the short id a build records.
+
+The supervisor is part of the same install, and a prebuilt deploy installs the prebuilt one. The release
+carries `wa-sentinel-<triple>-<sha12>` beside `wa-<triple>-<sha12>`; the sentinel install step takes it
+from the verified directory `wa_node_binaries_prepare` names (its `binary_verified:` line), re-reads the
+manifest's pinned sha256 for that sentinel at that moment, and installs nothing when the file is not
+those bytes (`refused(prebuilt_sentinel_mismatch)`, and `refused(prebuilt_sentinel_missing)` when the
+directory holds no supervisor). Two reasons this is not read from the staging directory the fetch wrote:
+`deploy.sh` removes that staging directory as soon as the proved node has been copied to its hash-named
+candidate, and the cache-hit path only re-checks the *node's* sha256 (`.complete`) - a cached supervisor
+can be swapped under a deploy that would otherwise install it. The build path is unchanged: with no
+prebuilt step, the step installs `rust/wa-sentinel/target/release/wa-sentinel` exactly as before.
+`scripts/lib/node-binaries.sh` is shipped beside the installed `deploy.sh` (as the component lib already
+is), because `request deploy` runs that installed copy: without it the copy notes "no node-binaries
+helper" and builds, which is the one thing the node this path exists for cannot do.
 
 `bash scripts/test-deploy-node-binaries.sh` and `bash scripts/test-node-binaries.sh` prove both halves
 with no network, no cargo, no zig, no node and no `gh` (a shim records any call): the plan, the cache,
 the cache hit with the release gone, every refusal, the disk-conditioned fallback, the publisher's
 `--check`/`--from` and every way a manifest can be wrong, the order of the calls inside `deploy.sh` (a
-prebuilt install must never reach the toolchain check or the build), and the deploy's own branch read
-out of `deploy.sh` by markers and executed against the fixtures - so a change there cannot pass by never
-running.
+prebuilt install must never reach the toolchain check or the build), and two blocks read out of
+`deploy.sh` by their own markers and executed against fixtures: the prebuilt branch (which resolves the
+bytes and hands the sentinel step the verified supervisor) and the sentinel install step itself
+(prebuilt supervisor installed with the staging directory already removed, the build path's own artifact
+installed unchanged, the unpinned operator directory, a swapped cached supervisor refused by name) -
+plus the install record step for a prebuilt install. So a change there cannot pass by never running.
 
 
 ## Capabilities: declared by the manifest, granted by the caller
