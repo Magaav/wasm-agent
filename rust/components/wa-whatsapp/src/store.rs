@@ -24,17 +24,20 @@ use crate::wa::kernel::kv;
 fn io(what: &str, error: crate::wa::kernel::types::Error) -> StoreError {
     StoreError::Io(std::io::Error::other(format!("kv {what} failed: {error:?}")))
 }
-fn put(key: &str, value: &[u8]) -> Result<()> {
-    kv::set(key.as_bytes(), value).map_err(|e| io("set", e))
+// Every kv call is awaited: `wa:kernel@0.2` declares them async. The host answers without
+// suspending (a local store), so each await completes in the poll it started in and the replay
+// costs what it did on 0.1.
+async fn put(key: &str, value: &[u8]) -> Result<()> {
+    kv::set(key.as_bytes().to_vec(), value.to_vec()).await.map_err(|e| io("set", e))
 }
-fn del(key: &str) -> Result<()> {
-    kv::delete(key.as_bytes()).map_err(|e| io("delete", e))
+async fn del(key: &str) -> Result<()> {
+    kv::delete(key.as_bytes().to_vec()).await.map_err(|e| io("delete", e))
 }
-fn del_prefix(prefix: &str) -> Result<()> {
-    kv::delete_prefix(prefix.as_bytes()).map(|_| ()).map_err(|e| io("delete-prefix", e))
+async fn del_prefix(prefix: &str) -> Result<()> {
+    kv::delete_prefix(prefix.as_bytes().to_vec()).await.map(|_| ()).map_err(|e| io("delete-prefix", e))
 }
-fn get(key: &str) -> Option<Vec<u8>> {
-    kv::get(key.as_bytes()).ok().flatten()
+async fn get(key: &str) -> Option<Vec<u8>> {
+    kv::get(key.as_bytes().to_vec()).await.ok().flatten()
 }
 fn json<T: serde::Serialize>(value: &T) -> Result<Vec<u8>> {
     serde_json::to_vec(value).map_err(|e| StoreError::Serialization(Box::new(e)))
@@ -47,8 +50,8 @@ fn unhex(text: &str) -> Option<Vec<u8>> {
 }
 
 /// Whether the stored device record (read directly, independent of the replay) is a paired one.
-pub fn stored_device_paired() -> bool {
-    get("dev").and_then(|v| serde_json::from_slice::<serde_json::Value>(&v).ok()).is_some_and(|d| !d["pn"].is_null())
+pub async fn stored_device_paired() -> bool {
+    get("dev").await.and_then(|v| serde_json::from_slice::<serde_json::Value>(&v).ok()).is_some_and(|d| !d["pn"].is_null())
 }
 
 pub struct PersistentBackend {
@@ -63,7 +66,7 @@ impl PersistentBackend {
         let mut entries: Vec<(String, Vec<u8>)> = Vec::new();
         let mut cursor: Option<Vec<u8>> = None;
         loop {
-            let page = kv::scan(b"", cursor.as_deref(), 1000).map_err(|e| io("scan", e))?;
+            let page = kv::scan(Vec::new(), cursor.clone(), 1000).await.map_err(|e| io("scan", e))?;
             if page.is_empty() {
                 break;
             }
@@ -126,25 +129,25 @@ impl PersistentBackend {
 #[async_trait(?Send)]
 impl SignalStore for PersistentBackend {
     async fn put_identity(&self, address: &str, key: [u8; 32]) -> Result<()> {
-        put(&format!("id/{address}"), &key)?;
+        put(&format!("id/{address}"), &key).await?;
         self.inner.put_identity(address, key).await
     }
     async fn load_identity(&self, address: &str) -> Result<Option<[u8; 32]>> {
         self.inner.load_identity(address).await
     }
     async fn delete_identity(&self, address: &str) -> Result<()> {
-        del(&format!("id/{address}"))?;
+        del(&format!("id/{address}")).await?;
         self.inner.delete_identity(address).await
     }
     async fn get_session(&self, address: &str) -> Result<Option<Bytes>> {
         self.inner.get_session(address).await
     }
     async fn put_session(&self, address: &str, session: &[u8]) -> Result<()> {
-        put(&format!("ses/{address}"), session)?;
+        put(&format!("ses/{address}"), session).await?;
         self.inner.put_session(address, session).await
     }
     async fn delete_session(&self, address: &str) -> Result<()> {
-        del(&format!("ses/{address}"))?;
+        del(&format!("ses/{address}")).await?;
         self.inner.delete_session(address).await
     }
     async fn has_signal_state_for_user(&self, user: &str) -> Result<bool> {
@@ -154,7 +157,7 @@ impl SignalStore for PersistentBackend {
         let mut value = Vec::with_capacity(record.len() + 1);
         value.push(uploaded as u8);
         value.extend_from_slice(record);
-        put(&format!("pk/{id}"), &value)?;
+        put(&format!("pk/{id}"), &value).await?;
         self.inner.store_prekey(id, record, uploaded).await
     }
     async fn load_prekey(&self, id: u32) -> Result<Option<Bytes>> {
@@ -163,24 +166,24 @@ impl SignalStore for PersistentBackend {
     async fn mark_prekeys_uploaded(&self, ids: &[u32]) -> Result<()> {
         for id in ids {
             let key = format!("pk/{id}");
-            if let Some(mut value) = get(&key) {
+            if let Some(mut value) = get(&key).await {
                 if !value.is_empty() && value[0] != 1 {
                     value[0] = 1;
-                    put(&key, &value)?;
+                    put(&key, &value).await?;
                 }
             }
         }
         self.inner.mark_prekeys_uploaded(ids).await
     }
     async fn remove_prekey(&self, id: u32) -> Result<()> {
-        del(&format!("pk/{id}"))?;
+        del(&format!("pk/{id}")).await?;
         self.inner.remove_prekey(id).await
     }
     async fn get_max_prekey_id(&self) -> Result<u32> {
         self.inner.get_max_prekey_id().await
     }
     async fn store_signed_prekey(&self, id: u32, record: &[u8]) -> Result<()> {
-        put(&format!("spk/{id}"), record)?;
+        put(&format!("spk/{id}"), record).await?;
         self.inner.store_signed_prekey(id, record).await
     }
     async fn load_signed_prekey(&self, id: u32) -> Result<Option<Vec<u8>>> {
@@ -190,18 +193,18 @@ impl SignalStore for PersistentBackend {
         self.inner.load_all_signed_prekeys().await
     }
     async fn remove_signed_prekey(&self, id: u32) -> Result<()> {
-        del(&format!("spk/{id}"))?;
+        del(&format!("spk/{id}")).await?;
         self.inner.remove_signed_prekey(id).await
     }
     async fn put_sender_key(&self, address: &str, record: &[u8]) -> Result<()> {
-        put(&format!("sk/{address}"), record)?;
+        put(&format!("sk/{address}"), record).await?;
         self.inner.put_sender_key(address, record).await
     }
     async fn get_sender_key(&self, address: &str) -> Result<Option<Vec<u8>>> {
         self.inner.get_sender_key(address).await
     }
     async fn delete_sender_key(&self, address: &str) -> Result<()> {
-        del(&format!("sk/{address}"))?;
+        del(&format!("sk/{address}")).await?;
         self.inner.delete_sender_key(address).await
     }
 }
@@ -212,19 +215,19 @@ impl AppSyncStore for PersistentBackend {
         self.inner.get_sync_key(key_id).await
     }
     async fn set_sync_key(&self, key_id: &[u8], key: AppStateSyncKey) -> Result<()> {
-        put(&format!("sync/{}", hex(key_id)), &json(&key)?)?;
+        put(&format!("sync/{}", hex(key_id)), &json(&key)?).await?;
         self.inner.set_sync_key(key_id, key).await
     }
     async fn get_version(&self, name: &str) -> Result<HashState> {
         self.inner.get_version(name).await
     }
     async fn set_version(&self, name: &str, state: HashState) -> Result<()> {
-        put(&format!("ver/{name}"), &json(&state)?)?;
+        put(&format!("ver/{name}"), &json(&state)?).await?;
         self.inner.set_version(name, state).await
     }
     async fn put_mutation_macs(&self, name: &str, version: u64, mutations: &[AppStateMutationMAC]) -> Result<()> {
         for m in mutations {
-            put(&format!("mac/{name}/{}", hex(&m.index_mac)), &m.value_mac)?;
+            put(&format!("mac/{name}/{}", hex(&m.index_mac)), &m.value_mac).await?;
         }
         self.inner.put_mutation_macs(name, version, mutations).await
     }
@@ -233,12 +236,12 @@ impl AppSyncStore for PersistentBackend {
     }
     async fn delete_mutation_macs(&self, name: &str, index_macs: &[Vec<u8>]) -> Result<()> {
         for idx in index_macs {
-            del(&format!("mac/{name}/{}", hex(idx)))?;
+            del(&format!("mac/{name}/{}", hex(idx))).await?;
         }
         self.inner.delete_mutation_macs(name, index_macs).await
     }
     async fn clear_mutation_macs(&self, name: &str) -> Result<()> {
-        del_prefix(&format!("mac/{name}/"))?;
+        del_prefix(&format!("mac/{name}/")).await?;
         self.inner.clear_mutation_macs(name).await
     }
     async fn get_latest_sync_key_id(&self) -> Result<Option<Vec<u8>>> {
@@ -270,7 +273,7 @@ impl ProtocolStore for PersistentBackend {
         self.inner.get_pn_mapping(phone).await
     }
     async fn put_lid_mapping(&self, entry: &LidPnMappingEntry) -> Result<()> {
-        put(&format!("lid/{}", entry.lid), &json(entry)?)?;
+        put(&format!("lid/{}", entry.lid), &json(entry)?).await?;
         self.inner.put_lid_mapping(entry).await
     }
     async fn get_all_lid_mappings(&self) -> Result<Vec<LidPnMappingEntry>> {
@@ -307,11 +310,11 @@ impl ProtocolStore for PersistentBackend {
         self.inner.get_tc_token(jid).await
     }
     async fn put_tc_token(&self, jid: &str, entry: &TcTokenEntry) -> Result<()> {
-        put(&format!("tc/{jid}"), &json(entry)?)?;
+        put(&format!("tc/{jid}"), &json(entry)?).await?;
         self.inner.put_tc_token(jid, entry).await
     }
     async fn delete_tc_token(&self, jid: &str) -> Result<()> {
-        del(&format!("tc/{jid}"))?;
+        del(&format!("tc/{jid}")).await?;
         self.inner.delete_tc_token(jid).await
     }
     async fn get_all_tc_token_jids(&self) -> Result<Vec<String>> {
@@ -323,7 +326,7 @@ impl ProtocolStore for PersistentBackend {
         if n > 0 {
             let after: std::collections::HashSet<String> = self.inner.get_all_tc_token_jids().await?.into_iter().collect();
             for jid in before.iter().filter(|j| !after.contains(*j)) {
-                del(&format!("tc/{jid}"))?;
+                del(&format!("tc/{jid}")).await?;
             }
         }
         Ok(n)
@@ -354,7 +357,7 @@ impl ProtocolStore for PersistentBackend {
 #[async_trait(?Send)]
 impl DeviceStore for PersistentBackend {
     async fn save(&self, device: &Device) -> Result<()> {
-        put("dev", &json(device)?)?;
+        put("dev", &json(device)?).await?;
         self.inner.save(device).await
     }
     async fn load(&self) -> Result<Option<Device>> {

@@ -774,6 +774,55 @@ mod tests {
         stop("svc-echo");
     }
 
+    /// The real 0.2 service component (`wa-whatsapp`, 8 MB, built outside the gate) must compile,
+    /// read as 0.2 and instantiate against this runner's linker: instantiation is where every
+    /// import name has to line up (the kernel's, `wasi:clocks@0.3.0`'s and the preview-2 WASI ones
+    /// `std` brings). Nothing of it runs, so it never dials WhatsApp.
+    #[test]
+    fn the_whatsapp_component_instantiates_on_the_v2_runner() {
+        // Opt-in (the gate does not build this 8 MB component): unset means skip, but a path that
+        // does not read is a failure - asking for the test and getting silence would be a pass by
+        // absence.
+        let Ok(path) = std::env::var("WA_TEST_WHATSAPP_WASM") else { return };
+        let bytes = std::fs::read(&path).unwrap_or_else(|error| panic!("cannot read {path}: {error}"));
+        let engine = engine().expect("engine");
+        let component = Component::new(&engine, &bytes).expect("compiles");
+        assert_eq!(Contract::of(&component), Contract::V2);
+        let mut linker: Linker<State> = Linker::new(&engine);
+        wasmtime_wasi::p2::add_to_linker_async(&mut linker).expect("wasi p2");
+        wasmtime_wasi::p3::clocks::add_to_linker::<State>(&mut linker).expect("wasi p3 clocks");
+        for added in [
+            wa::kernel::websocket::add_to_linker::<State, State>(&mut linker, |s| s),
+            wa::kernel::http::add_to_linker::<State, State>(&mut linker, |s| s),
+            wa::kernel::speech::add_to_linker::<State, State>(&mut linker, |s| s),
+            wa::kernel::kv::add_to_linker::<State, State>(&mut linker, |s| s),
+            wa::kernel::lifecycle::add_to_linker::<State, State>(&mut linker, |s| s),
+            wa::kernel::log::add_to_linker::<State, State>(&mut linker, |s| s),
+            wa::kernel::credentials::add_to_linker::<State, State>(&mut linker, |s| s),
+        ] {
+            added.expect("kernel interface links");
+        }
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_time().build().expect("runtime");
+        let state = State {
+            wasi: WasiCtxBuilder::new().build(),
+            table: ResourceTable::new(),
+            limits: StoreLimitsBuilder::new().memory_size(256 << 20).build(),
+            net: Vec::new(),
+            shared: Arc::new(Shared::default()),
+            kv: KvStore::new(None),
+            log: None,
+            secrets: Default::default(),
+            stt: false,
+        };
+        let mut store = Store::new(&engine, state);
+        // Compiling and instantiating the real component takes minutes in a debug build; the epoch
+        // ticker must not interrupt it.
+        store.set_epoch_deadline(u64::MAX);
+        runtime.block_on(async {
+            ServiceComponent::instantiate_async(&mut store, &component, &linker).await.expect("instantiates: every import the component asks for is served");
+        });
+    }
+
     /// The async engine is a real engine: it compiles a component and refuses a non-component.
     #[test]
     fn the_async_engine_compiles_a_component() {

@@ -1,9 +1,14 @@
-//! WhatsApp linked-device client as a service component.
+//! WhatsApp linked-device client as a service component on `wa:kernel@0.2` (WASI 0.3).
 //!
 //! whatsapp-rust's protocol core, with everything that touches the outside world supplied by the
-//! host: the websocket (wa_ws, TLS in the host), HTTP (wa_http), the clock (WASI) and stop
-//! (wa_ctl). Single-threaded: one LocalPool polled by a main loop that also drives timers and host
-//! I/O, so nothing ever blocks.
+//! host: the websocket (`wa:kernel/websocket`, TLS in the host), HTTP (`wa:kernel/http`), the
+//! recognizer (`wa:kernel/speech`), the clock (WASI) and stop (`wa:kernel/lifecycle`).
+//!
+//! Native async: there is no reactor and no polling loop over host I/O. The inbound websocket
+//! frames are a `stream<list<u8>>` the socket task awaits, an exchange is one `http.send`, the
+//! recognizer yields a segment stream plus one transcript future, and timers are
+//! `wasi:clocks@0.3.0.wait-for`. The only executor left is the one the protocol crate insists on
+//! (`Runtime::spawn`), and it is a plain set of futures joined with the main loop.
 //!
 //! Milestone 1: pair (by code when `pair_phone` is configured, else QR), connect, receive. The log
 //! carries the pairing code, connection state and message metadata (chat, kind, id) - never content.
@@ -27,7 +32,8 @@ mod store;
 #[cfg(target_arch = "wasm32")]
 wit_bindgen::generate!({
     world: "service-component",
-    path: "../../../wit/kernel",
+    path: "../../../wit/kernel-v2",
+    generate_all,
 });
 
 /// The service itself (host I/O, protocol, pipeline). Declared after `generate!` so the generated

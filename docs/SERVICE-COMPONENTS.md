@@ -69,11 +69,14 @@ Example (a definition the `services` tool stores, then `enable`):
 
 `rust/wa-host/src/service_components.rs` runs services built as **components** on the
 `wa:kernel` WIT contract (`wit/kernel`, `service-component` world: websocket, http, kv, lifecycle,
-log, credentials in; `service.run(config)` out). The supervisor picks the runner from the binary's
-preamble (component vs core module), so wasip1 modules keep working. `wa-whatsapp` is now a
-`wasm32-wasip2` library component (wit-bindgen 0.63): store replay through `kv.scan` pages, health
-through `lifecycle.report` (`status` shows it). Verified on wasm_the_first: 5372 entries restored,
-resumed IK handshake, CONNECTED in 0.68 s, live messages.
+log, credentials in; `service.run(config)` out). `wa:kernel@0.2` (native async) is served next to it
+by `service_components_v2.rs`; the supervisor picks the runner from the binary's preamble
+(component vs core module) and, for a component, from its own imports. Wasip1 modules keep working.
+`wa-whatsapp` is a `wasm32-wasip2` library component (wit-bindgen 0.63): store replay through
+`kv.scan` pages, health through `lifecycle.report` (`status` shows it). Verified on wasm_the_first on
+0.1: 5372 entries restored, resumed IK handshake, CONNECTED in 0.68 s, live messages. It is ported to
+0.2 now ("Component services on `wa:kernel@0.2`" below), which this lane built and instantiated but
+did not run against an account.
 
 ## Speech and posting parity (B2, 05/11)
 
@@ -142,6 +145,56 @@ cd rust/components/wa-whatsapp && cargo test --lib        # 38 tests
 cargo clippy --lib                                       # clean
 cargo build --release --target wasm32-wasip2             # the component
 ```
+
+## Component services on `wa:kernel@0.2` (WASI 0.3, native async)
+
+The same class, one contract newer: `wit/kernel-v2/kernel.wit` is `wa:kernel@0.2.0`, run by
+`rust/wa-host/src/service_components_v2.rs`. The grants, limits, log file, epoch deadline and
+supervisor are the ones described above — what changes is that the guest no longer polls. It awaits a
+`stream<list<u8>>` for inbound frames, one `http.send` for an exchange, a segment stream plus one
+transcript future for recognition, and `wasi:clocks@0.3.0.wait-for` for a timer. The contract and its
+deviations from the draft are in [KERNEL.md](KERNEL.md) ("WASI 0.3 step 1").
+
+**Which runner a module gets.** `services.rs` reads the component's own imports: any
+`wa:kernel/*@0.2.0` import means the 0.2 runner and its async-capable engine; everything else keeps
+the 0.1 runner and the engine every other component already uses (so 0.1 components — including the
+`wa-whatsapp` running on openclaw — are unaffected). A wasip1 core module is still chosen by the
+binary's preamble, before either.
+
+**`wa-whatsapp` on 0.2.** The port removed the guest's reactor: `pump_sockets`, `wake_io`, the timer
+list, the `LocalPool` polling loop and the 5 ms nap are gone. What replaces them:
+
+| 0.1 | 0.2 |
+| --- | --- |
+| `wa_ws.recv` polled from a pump loop | one socket task `select`s the inbound stream against the outbound queue (`async-channel`, which gives real backpressure) |
+| `wa_http.start` + `poll` (`HttpWait`) | one `http.send(...).await`, body drained from its stream |
+| `speech::Job::start` + `poll`/`segments` every 250 ms | `recognize(...).await`, then `select` over the segment stream and the transcript future — the streaming edits keep their pacing (`EditPacer`), the gates are the same code |
+| `wa_ctl.stopping` + epoch trap | `lifecycle.stopping()` between awaited ticks |
+| `Sleep` on a timer vector | `wasi:clocks@0.3.0.wait-for` |
+| spawned tasks run by `LocalPool::run_until_stalled` | a `FuturesUnordered` driven by the same entry point, joined with the main loop |
+
+The pipeline modules (`queue`, `holds`, `posting`, `alerts`) are unchanged and still tested natively —
+the port is host I/O, not decisions. `store.rs` awaits the kv calls (the names did not change) and
+`reprove` reads a chat's author rows in one `kv.scan` page set before the pure proof runs.
+
+Build and test:
+
+```
+cd rust/components/wa-whatsapp
+cargo test --lib                                          # 38 tests, native
+cargo build --release --target wasm32-wasip2               # the component (8 MB)
+WA_TEST_WHATSAPP_WASM=<that .wasm> cargo test -p wa-host the_whatsapp
+```
+
+That last line compiles and **instantiates** the real component on the 0.2 runner — the check that
+every import it emits (kernel 0.2, `wasi:clocks@0.3.0`, preview-2 WASI) is served — without pairing or
+sending anything. It is opt-in because the gate does not build this component, and it takes minutes in
+a debug build.
+
+**Not yet verified, and unchanged by the port:** delivery of `protocol_message` REVOKE/MESSAGE_EDIT to
+`on_message` (the component's only source of mutations), two-decode parallelism (the host recognizer is
+still one warm worker), and anything at all against a live account: this lane did not pair, connect or
+send, so the component's behaviour on a phone is the same unknown it was at B3.
 
 ## Decision 05/11: Rust, not Go
 

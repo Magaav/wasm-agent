@@ -1,32 +1,42 @@
-//! WhatsApp linked-device client as a service component.
+//! WhatsApp linked-device client as a service component on `wa:kernel@0.2`.
 //!
 //! whatsapp-rust's protocol core, with everything that touches the outside world supplied by the
-//! host: the websocket (wa_ws, TLS in the host), HTTP (wa_http), the clock (WASI) and stop
-//! (wa_ctl). Single-threaded: one LocalPool polled by a main loop that also drives timers and host
-//! I/O, so nothing ever blocks.
+//! host: the websocket (`wa:kernel/websocket`, TLS in the host), HTTP (`wa:kernel/http`), the
+//! recognizer (`wa:kernel/speech`), the store (`wa:kernel/kv`), the clock (WASI 0.3
+//! `monotonic-clock.wait-for`) and stop (`wa:kernel/lifecycle`).
+//!
+//! Native async: there is no reactor and no polling loop over host I/O. The inbound frames are a
+//! `stream<list<u8>>` the socket task awaits, an exchange is one `http.send`, the recognizer yields
+//! a segment stream plus one transcript future, and a timer is an awaited `wait-for`. The one
+//! executor left is the set the protocol crate insists on (`Runtime::spawn` returns an
+//! `AbortHandle`), and it is a plain `FuturesUnordered` joined with the main loop.
 //!
 //! Milestone 1: pair (by code when `pair_phone` is configured, else QR), connect, receive. The log
 //! carries the pairing code, connection state and message metadata (chat, kind, id) - never content.
-//! Store: store.rs - in-memory reads with write-through of durable state to the host (wa_kv);
+//! Store: store.rs - in-memory reads with write-through of durable state to the host (wa_kernel/kv);
 //! a restart reconnects without pairing again.
-use crate::holds::{Holds, Mutation};
+//!
+//! The crate is split so the decisions can be tested on the host: `queue` (freshness, retry, the
+//! express lane), `posting` (allowlist gate, holds, chunks, edit pacing), `alerts` (own-chat log,
+//! group titles) and `holds` (chats held until a revoke is proven) are pure logic with no host call
+//! and no wasm target requirement; everything else (`guest`, `store`) needs the wasm32-wasip2
+//! bindings and is compiled only for that target, so `cargo test` runs the decisions natively while
+//! `cargo build --target wasm32-wasip2` builds the component.
+use crate::holds::{Author, Holds, Mutation, POSTING_ONLY};
 use crate::wa::kernel::types::Error as KError;
-use crate::wa::kernel::{http as khttp, kv as kkv, lifecycle, speech, websocket::Socket};
+use crate::wa::kernel::{http as khttp, kv as kkv, lifecycle, speech, websocket};
+use crate::wasi::clocks::monotonic_clock;
 use crate::{alerts, export, exports, posting, queue, store};
 use async_trait::async_trait;
 use bytes::Bytes;
-use futures::executor::{LocalPool, LocalSpawner};
-use futures::task::LocalSpawnExt;
+use futures::stream::{FuturesUnordered, Stream, StreamExt};
 use std::cell::RefCell;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
 use wacore::net::{DisconnectReason, HttpClient, HttpRequest, HttpResponse, Transport, TransportEvent, TransportFactory, WHATSAPP_WEB_ORIGIN, WHATSAPP_WEB_WS_URL};
 use wacore::runtime::{AbortHandle, Runtime};
-
-
 
 thread_local! {
     static STARTED: Instant = Instant::now();
@@ -39,104 +49,78 @@ macro_rules! say {
     }};
 }
 
-// ---- the reactor: timers and host I/O, driven by the main loop -------------------------------
+// ---- the tasks: what the protocol crate spawns, polled by the runtime ------------------------
 
-struct WsSlot {
-    id: u32,
-    socket: Socket,
-    events: async_channel::Sender<TransportEvent>,
-}
+type Task = Pin<Box<dyn Future<Output = ()>>>;
 
 thread_local! {
-    static TIMERS: RefCell<Vec<(Instant, Waker)>> = const { RefCell::new(Vec::new()) };
-    static IO_WAKERS: RefCell<Vec<Waker>> = const { RefCell::new(Vec::new()) };
-    static SOCKETS: RefCell<Vec<WsSlot>> = const { RefCell::new(Vec::new()) };
-    static NEXT_SOCKET: std::cell::Cell<u32> = const { std::cell::Cell::new(1) };
-    /// The connected client, for media downloads from the audio pipeline.
-    static CLIENT: RefCell<Option<Arc<whatsapp_rust::Client>>> = const { RefCell::new(None) };
-    /// Audio messages handed over by the (Send) message handler, admitted by the main loop.
-    static AUDIO_INBOX: RefCell<Vec<AudioJob>> = const { RefCell::new(Vec::new()) };
+    /// Where a spawned task goes. Set once `serve` starts the driver; a spawn before that (there is
+    /// none) is dropped rather than run on another thread.
+    static TASKS: RefCell<Option<futures::channel::mpsc::UnboundedSender<Task>>> = const { RefCell::new(None) };
 }
 
-/// Move host websocket frames into their transports' channels; returns whether anything moved.
-fn pump_sockets() -> bool {
-    let mut moved = false;
-    SOCKETS.with(|sockets| {
-        sockets.borrow_mut().retain(|slot| loop {
-            match slot.socket.recv() {
-                Ok(data) => {
-                    moved = true;
-                    if slot.events.try_send(TransportEvent::DataReceived(Bytes::from(data))).is_err() {
-                        slot.socket.close();
-                        return false;
-                    }
-                }
-                Err(KError::Again) => return true,
-                Err(_) => {
-                    say!("transport: socket {} closed", slot.id);
-                    let _ = slot.events.try_send(TransportEvent::Disconnected(DisconnectReason::StreamEnded));
-                    moved = true;
-                    return false;
-                }
+fn spawn_task(task: Task) {
+    TASKS.with(|cell| {
+        if let Some(inbox) = cell.borrow().as_ref() {
+            if inbox.unbounded_send(task).is_err() {
+                say!("task dropped: the driver is gone");
             }
-        })
+        }
     });
-    moved
 }
 
-/// Wake due timers; returns the time to the next one.
-fn fire_timers() -> Option<Duration> {
-    let now = Instant::now();
-    TIMERS.with(|timers| {
-        let mut timers = timers.borrow_mut();
-        let (due, later): (Vec<_>, Vec<_>) = timers.drain(..).partition(|(at, _)| *at <= now);
-        *timers = later;
-        for (_, waker) in due {
-            waker.wake();
-        }
-        timers.iter().map(|(at, _)| at.saturating_duration_since(now)).min()
-    })
+/// The driver: every task the protocol crate spawned, plus everything the pipeline spawns. This is
+/// the whole of the guest's scheduling - there is no timer list and no I/O wake list any more,
+/// because a task that waits is parked by the runtime.
+struct Tasks {
+    inbox: futures::channel::mpsc::UnboundedReceiver<Task>,
+    running: FuturesUnordered<Task>,
 }
 
-fn wake_io() {
-    let wakers: Vec<Waker> = IO_WAKERS.with(|w| w.borrow_mut().drain(..).collect());
-    for waker in wakers {
-        waker.wake();
+impl Tasks {
+    fn start() -> Tasks {
+        let (inbox_tx, inbox) = futures::channel::mpsc::unbounded();
+        TASKS.with(|cell| *cell.borrow_mut() = Some(inbox_tx));
+        Tasks { inbox, running: FuturesUnordered::new() }
     }
 }
 
-struct Sleep(Instant);
-impl Future for Sleep {
+impl Future for Tasks {
     type Output = ();
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
-        if Instant::now() >= self.0 {
-            return Poll::Ready(());
+
+    fn poll(self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<()> {
+        let me = self.get_mut();
+        loop {
+            let mut took = false;
+            while let std::task::Poll::Ready(Some(task)) = Pin::new(&mut me.inbox).poll_next(cx) {
+                me.running.push(task);
+                took = true;
+            }
+            match me.running.poll_next_unpin(cx) {
+                std::task::Poll::Ready(Some(())) => continue,
+                std::task::Poll::Ready(None) => {
+                    // Nothing running: the inbox registered its waker above, so a new task wakes us.
+                    let _ = took;
+                    return std::task::Poll::Pending;
+                }
+                std::task::Poll::Pending => return std::task::Poll::Pending,
+            }
         }
-        TIMERS.with(|t| t.borrow_mut().push((self.0, cx.waker().clone())));
-        Poll::Pending
     }
 }
 
-struct YieldOnce(bool);
-impl Future for YieldOnce {
-    type Output = ();
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
-        if self.0 {
-            return Poll::Ready(());
-        }
-        self.0 = true;
-        cx.waker().wake_by_ref();
-        Poll::Pending
-    }
+/// `wasi:clocks/monotonic-clock@0.3.0.wait-for`: the timer the runtime suspends the task on. This
+/// replaces the 0.1 guest's timer list, its waker bookkeeping and its 5 ms nap.
+async fn wait(for_: Duration) {
+    monotonic_clock::wait_for(for_.as_nanos() as u64).await;
 }
 
 // ---- transcription pipeline ------------------------------------------------------------------
 // A voice note: queue (queue.rs: freshness, retry, one at a time) -> media download (host HTTP) ->
-// kernel recognizer (wa:kernel/speech, segments streamed) -> posting policy (posting.rs: allowlist,
-// holds, chunks, post-then-edit) -> own-chat alerts for anything given up (alerts.rs).
-// Logged with metadata only - never the text. Posting is off unless the configuration says
-// `post_transcripts: true` AND the chat is in `post_allow` (the native connector is the poster
-// meanwhile; the B2 deployment allows only the own chat).
+// kernel recognizer (wa:kernel/speech: a segment stream and one transcript future) -> posting
+// policy (posting.rs: allowlist, holds, chunks, post-then-edit) -> own-chat alerts for anything
+// given up (alerts.rs). Logged with metadata only - never the text. Posting is off unless the
+// configuration says `post_transcripts: true` AND the chat is in `post_allow`.
 
 use whatsapp_rust::waproto::buffa::Message as _;
 use whatsapp_rust::waproto::whatsapp as wap;
@@ -222,6 +206,10 @@ thread_local! {
     static STATE_DIRTY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// Revoke/edit envelopes, handed over by the message handler.
     static INBOX_MUTATIONS: RefCell<Vec<Mutation>> = const { RefCell::new(Vec::new()) };
+    /// The connected client, for media downloads from the audio pipeline.
+    static CLIENT: RefCell<Option<Arc<whatsapp_rust::Client>>> = const { RefCell::new(None) };
+    /// Audio messages handed over by the (Send) message handler, admitted by the main loop.
+    static AUDIO_INBOX: RefCell<Vec<AudioJob>> = const { RefCell::new(Vec::new()) };
 }
 
 fn now_ms() -> i64 {
@@ -232,24 +220,27 @@ fn tx_key(chat: &str, id: &str) -> String {
     format!("tx/{chat}/{id}")
 }
 
-fn record(chat: &str, id: &str, value: serde_json::Value) {
-    let _ = kkv::set(tx_key(chat, id).as_bytes(), value.to_string().as_bytes());
+async fn record(chat: &str, id: &str, value: serde_json::Value) {
+    let _ = kkv::set(tx_key(chat, id).into_bytes(), value.to_string().into_bytes()).await;
 }
 
-fn already_handled(chat: &str, id: &str) -> bool {
-    matches!(kkv::get(tx_key(chat, id).as_bytes()), Ok(Some(_)))
+async fn already_handled(chat: &str, id: &str) -> bool {
+    matches!(kkv::get(tx_key(chat, id).into_bytes()).await, Ok(Some(_)))
 }
 
-fn fence(id: &str) {
+async fn fence(id: &str) {
     // Kept for the targets an older build fenced directly: this build fences through holds.rs,
     // but a fence already on disk must never be forgotten.
-    let _ = kkv::set(format!("fence/{id}").as_bytes(), b"1");
+    let _ = kkv::set(format!("fence/{id}").into_bytes(), b"1".to_vec()).await;
 }
 
 /// Fenced: a proven revoke/edit of this message here, an unproven target anywhere (a DM alias may
 /// differ from the chat), or a fence written by an earlier build.
-fn fenced(chat: &str, id: &str) -> bool {
-    HOLDS.with(|h| h.borrow().blocked(chat, id)) || matches!(kkv::get(format!("fence/{id}").as_bytes()), Ok(Some(_)))
+async fn fenced(chat: &str, id: &str) -> bool {
+    if HOLDS.with(|h| h.borrow().blocked(chat, id)) {
+        return true;
+    }
+    matches!(kkv::get(format!("fence/{id}").into_bytes()).await, Ok(Some(_)))
 }
 
 /// Is this the same chat? A mutation key may carry a device part or the other address of the same
@@ -262,21 +253,25 @@ fn same_chat(a: &str, b: &str) -> bool {
     bare(a) == bare(b)
 }
 
-/// What the component recorded about a message's author when it admitted it (kv `tx/<chat>/<id>`):
-/// the only thing that can prove a revoke is about that message by the same person.
-fn known_author(chat: &str, id: &str) -> Option<crate::holds::Author> {
-    let bytes = kkv::get(tx_key(chat, id).as_bytes()).ok().flatten()?;
-    let value: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+/// What a recorded author row says (kv `tx/<chat>/<id>`): the only thing that can prove a revoke is
+/// about that message by the same person.
+fn author_of(bytes: &[u8]) -> Option<Author> {
+    let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
     let sender = value["sender"].as_str().filter(|s| !s.is_empty())?;
     let alt = value["sender_alt"].as_str().unwrap_or("");
-    Some(crate::holds::Author::new(sender, alt, value["own"] == serde_json::json!(true)))
+    Some(Author::new(sender, alt, value["own"] == serde_json::json!(true)))
+}
+
+async fn known_author(chat: &str, id: &str) -> Option<Author> {
+    let bytes = kkv::get(tx_key(chat, id).into_bytes()).await.ok().flatten()?;
+    author_of(&bytes)
 }
 
 /// Apply one revoke/edit: fence the exact message, hold the chat, or hold nothing (holds.rs decides).
-fn apply_mutation(mutation: Mutation) {
+async fn apply_mutation(mutation: Mutation) {
     let chat = mutation.chat.clone();
     let key = if mutation.target.is_empty() { None } else { Some(format!("{chat}\u{0}{}", mutation.target)) };
-    let known = known_author(&chat, &mutation.target);
+    let known = known_author(&chat, &mutation.target).await;
     let verdict = HOLDS.with(|h| h.borrow_mut().apply(&mutation, known.as_ref()));
     STATE_DIRTY.with(|d| d.set(true));
     say!(
@@ -289,25 +284,45 @@ fn apply_mutation(mutation: Mutation) {
         verdict.hold.unwrap_or("none")
     );
     for id in &verdict.fence_everywhere {
-        fence(id);
+        fence(id).await;
     }
     // A proven revoke/edit is a source we must not even transcribe: drop it if it is still queued
     // (an item already decoding finishes and is caught by the fence before it posts).
     if let (true, Some(key)) = (!verdict.fence_here.is_empty(), key) {
         if QUEUE.with(|q| q.borrow_mut().drop_key(&key)) {
-            record(&chat, &mutation.target, serde_json::json!({"state": "blocked", "reason": "source_fence"}));
+            record(&chat, &mutation.target, serde_json::json!({"state": "blocked", "reason": "source_fence"})).await;
         }
     }
     // The common unproven case (a DM revoked under its other alias) is provable as soon as the
     // target's author is on record: try at once instead of leaving the chat held until a restart.
-    if verdict.hold == Some(crate::holds::POSTING_ONLY) {
-        reprove(chat.as_str());
+    if verdict.hold == Some(POSTING_ONLY) {
+        reprove(chat.as_str()).await;
     }
 }
 
 /// Re-prove the posting-only hold of one chat from what the component recorded (hold_reprove.go).
-fn reprove(chat: &str) {
-    let report = HOLDS.with(|h| h.borrow_mut().reprove(chat, |id| known_author(chat, id)));
+/// The author rows are read in one scan of the chat's keys, so the proof itself stays the pure
+/// function holds.rs tests.
+async fn reprove(chat: &str) {
+    let prefix = format!("tx/{chat}/");
+    let mut known: std::collections::HashMap<String, Author> = std::collections::HashMap::new();
+    let mut cursor: Option<Vec<u8>> = None;
+    loop {
+        let Ok(page) = kkv::scan(prefix.clone().into_bytes(), cursor.clone(), 500).await else { break };
+        if page.is_empty() {
+            break;
+        }
+        cursor = page.last().map(|entry| entry.key.clone());
+        for entry in page {
+            let key = String::from_utf8_lossy(&entry.key).into_owned();
+            if let Some(id) = key.strip_prefix(&prefix) {
+                if let Some(author) = author_of(&entry.value) {
+                    known.insert(id.to_string(), author);
+                }
+            }
+        }
+    }
+    let report = HOLDS.with(|h| h.borrow_mut().reprove(chat, |id| known.get(id).cloned()));
     if report.reproved > 0 {
         say!("hold reproved chat={chat} fenced={}", report.fenced);
         STATE_DIRTY.with(|d| d.set(true));
@@ -317,10 +332,10 @@ fn reprove(chat: &str) {
 }
 
 /// Re-prove every posting-only hold at start: a hold left by the last run may be provable now.
-fn reprove_holds() {
+async fn reprove_holds() {
     for (chat, reason) in HOLDS.with(|h| h.borrow().held_reasons()) {
-        if reason == crate::holds::POSTING_ONLY {
-            reprove(&chat);
+        if reason == POSTING_ONLY {
+            reprove(&chat).await;
         }
     }
 }
@@ -331,23 +346,23 @@ fn compute_held(chat: &str) -> bool {
 
 /// Write the queue and the holds to kv (one key each). Called when they changed, never per tick
 /// with nothing to say.
-fn persist_state() {
+async fn persist_state() {
     if !STATE_DIRTY.with(|d| d.replace(false)) {
         return;
     }
     let now = now_ms();
     let queue = QUEUE.with(|q| q.borrow().snapshot(now));
     if let Ok(text) = serde_json::to_vec(&queue) {
-        let _ = kkv::set(b"queue", &text);
+        let _ = kkv::set(b"queue".to_vec(), text).await;
     }
     let holds = HOLDS.with(|h| h.borrow().to_json());
-    let _ = kkv::set(b"holds", holds.as_bytes());
+    let _ = kkv::set(b"holds".to_vec(), holds.into_bytes()).await;
 }
 
 /// Read what the last run left in kv: the held chats and fences, and the queue. Items that were in
 /// flight when the component stopped are reported, never re-posted (an unknown send is not retried).
-fn restore_state() {
-    if let Ok(Some(bytes)) = kkv::get(b"holds") {
+async fn restore_state() {
+    if let Ok(Some(bytes)) = kkv::get(b"holds".to_vec()).await {
         let text = String::from_utf8_lossy(&bytes).into_owned();
         let restored = Holds::from_json(&text);
         let held = restored.held_chats();
@@ -356,13 +371,13 @@ fn restore_state() {
             say!("holds: {held} chat(s) held from the last run");
         }
     }
-    let Ok(Some(bytes)) = kkv::get(b"queue") else { return };
+    let Ok(Some(bytes)) = kkv::get(b"queue".to_vec()).await else { return };
     let Ok(snapshot) = serde_json::from_slice::<serde_json::Value>(&bytes) else { return };
     let (report, notices) = QUEUE.with(|q| q.borrow_mut().restore(&snapshot));
     for notice in &notices {
         let (chat, id) = notice.key.split_once('\u{0}').unwrap_or((notice.key.as_str(), ""));
         say!("transcript interrupted chat={chat} id={id} reason={}", notice.reason);
-        record(chat, id, serde_json::json!({"state": notice.kind, "reason": notice.reason}));
+        record(chat, id, serde_json::json!({"state": notice.kind, "reason": notice.reason})).await;
         alert(chat, "", notice.kind, &notice.reason, notice.sent_ms);
     }
     say!("queue: {} restored, {} interrupted, {} dropped", report.queued, report.interrupted, report.dropped);
@@ -391,9 +406,9 @@ fn reason_of(error: &KError) -> String {
 }
 
 /// Hand a received voice note to the queue (or settle it at once when it cannot be transcribed).
-fn admit(job: AudioJob) {
+async fn admit(job: AudioJob) {
     let chat = job.chat.to_string();
-    if already_handled(&chat, &job.id) {
+    if already_handled(&chat, &job.id).await {
         return; // never transcribe or post the same voice note twice (re-delivery, restart)
     }
     let now = now_ms();
@@ -411,15 +426,15 @@ fn admit(job: AudioJob) {
     let live = job.sent_ms >= now - QUEUE.with(|q| q.borrow().policy().fresh_ms);
     if let Some(reason) = unsupported {
         say!("transcript unsupported chat={chat} id={} reason={reason}", job.id);
-        record(&chat, &job.id, serde_json::json!({"state": "unsupported", "reason": reason}));
+        record(&chat, &job.id, serde_json::json!({"state": "unsupported", "reason": reason})).await;
         if live && job.sent_ms > 0 {
             alert(&chat, &job.title, "unsupported", reason, job.sent_ms);
         }
         return;
     }
-    if fenced(&chat, &job.id) {
+    if fenced(&chat, &job.id).await {
         say!("transcript blocked chat={chat} id={} reason=source_fence", job.id);
-        record(&chat, &job.id, serde_json::json!({"state": "blocked", "reason": "source_fence"}));
+        record(&chat, &job.id, serde_json::json!({"state": "blocked", "reason": "source_fence"})).await;
         if live {
             alert(&chat, &job.title, "blocked", "source_fence", job.sent_ms);
         }
@@ -430,7 +445,7 @@ fn admit(job: AudioJob) {
         // this audio is not even transcribed (Go: blocked_source / source_mutation_or_chat_hold).
         let reason = HOLDS.with(|h| h.borrow().reason(&chat).unwrap_or("chat_hold").to_string());
         say!("transcript blocked chat={chat} id={} reason={reason}", job.id);
-        record(&chat, &job.id, serde_json::json!({"state": "blocked", "reason": reason}));
+        record(&chat, &job.id, serde_json::json!({"state": "blocked", "reason": reason})).await;
         if live {
             alert(&chat, &job.title, "blocked", &reason, job.sent_ms);
         }
@@ -440,7 +455,7 @@ fn admit(job: AudioJob) {
     let sent = job.sent_ms;
     let seconds = job.audio.seconds.unwrap_or(0);
     // The author record is what a later revoke/edit of this message is proved against.
-    record(&chat, &job.id, serde_json::json!({"state": "queued", "sender": job.sender.to_string(), "sender_alt": job.sender_alt, "own": job.own}));
+    record(&chat, &job.id, serde_json::json!({"state": "queued", "sender": job.sender.to_string(), "sender_alt": job.sender_alt, "own": job.own})).await;
     if QUEUE.with(|q| q.borrow_mut().enqueue(key, sent, seconds, job)) {
         STATE_DIRTY.with(|d| d.set(true));
     }
@@ -470,6 +485,12 @@ async fn edit(client: &whatsapp_rust::Client, chat: &whatsapp_rust::Jid, id: &st
     client.edit_message(chat.clone(), id.to_string(), wap::Message::text_with_context(body, context.clone())).await.map(|_| ()).map_err(|e| e.to_string())
 }
 
+/// One step of a recognition: a recognized segment, or the transcript once the recognizer finished.
+enum SpeechStep {
+    Segment(speech::Segment),
+    Done(Result<speech::Transcript, KError>),
+}
+
 /// One voice note, start to finish. Returns how it ended; the main loop tells the queue.
 async fn process(job: &AudioJob, language: &str, cfg: &posting::PostConfig) -> Outcome {
     let chat = job.chat.to_string();
@@ -486,7 +507,7 @@ async fn process(job: &AudioJob, language: &str, cfg: &posting::PostConfig) -> O
     };
     let downloaded = now_ms();
     let mime = job.audio.mimetype.clone().unwrap_or_else(|| "audio/ogg".into());
-    let recognizer = match speech::Job::start(&bytes, &mime, language) {
+    let recognition = match speech::recognize(bytes, mime, language.to_string()).await {
         Ok(started) => started,
         Err(error) => {
             let reason = reason_of(&error);
@@ -505,47 +526,58 @@ async fn process(job: &AudioJob, language: &str, cfg: &posting::PostConfig) -> O
     let header = cfg.header();
     let mut so_far = String::new();
     let mut seen = 0u32;
+    // The two halves the 0.1 guest polled every 250 ms are two async values now: the segments arrive
+    // on a stream while the transcript resolves once. `select` over both is the whole loop.
+    let segments = recognition.segments();
+    let transcript = recognition.transcript();
+    let recognized = futures::stream::unfold(segments, |mut segments| async move {
+        segments.next().await.map(|segment| (SpeechStep::Segment(segment), segments))
+    });
+    let settled = futures::stream::once(async move { SpeechStep::Done(transcript.await) });
+    let mut steps = Box::pin(futures::stream::select(recognized, settled));
     let result = loop {
-        match recognizer.poll() {
-            Err(KError::Again) => {}
-            other => break other,
+        let Some(step) = steps.next().await else {
+            break Err(KError::Failed("recognizer_stream_ended".into()));
+        };
+        let SpeechStep::Segment(segment) = step else {
+            let SpeechStep::Done(result) = step else { unreachable!() };
+            break result;
+        };
+        if !streaming {
+            continue;
         }
-        if streaming {
-            let fresh = recognizer.segments(seen);
-            if !fresh.is_empty() {
-                seen += fresh.len() as u32;
-                for segment in fresh {
-                    if !so_far.is_empty() {
-                        so_far.push(' ');
+        let text = segment.text.trim();
+        if text.is_empty() {
+            continue;
+        }
+        seen += 1;
+        if !so_far.is_empty() {
+            so_far.push(' ');
+        }
+        so_far.push_str(text);
+        let now = now_ms();
+        if pacer.ready(now) && !fenced(&chat, &job.id).await {
+            match &posted.first_id {
+                None => match send(&client, &job.chat, posting::partial(&so_far, &header), &context).await {
+                    Ok(id) => {
+                        posted.first_id = Some(id);
+                        posted.first_ms = Some(now_ms());
+                        pacer.mark(now, false);
                     }
-                    so_far.push_str(segment.trim());
-                }
-                let now = now_ms();
-                if pacer.ready(now) && !fenced(&chat, &job.id) {
-                    match &posted.first_id {
-                        None => match send(&client, &job.chat, posting::partial(&so_far, &header), &context).await {
-                            Ok(id) => {
-                                posted.first_id = Some(id);
-                                posted.first_ms = Some(now_ms());
-                                pacer.mark(now, false);
-                            }
-                            Err(error) => say!("transcript partial post failed chat={chat} id={} reason={error}", job.id),
-                        },
-                        Some(first) => {
-                            match edit(&client, &job.chat, first, posting::partial(&so_far, &header), &context).await {
-                                Ok(()) => posted.edits += 1,
-                                Err(error) => {
-                                    posted.edit_errors += 1;
-                                    say!("transcript edit failed chat={chat} id={} edit={} reason={error}", job.id, posted.edits + 1);
-                                }
-                            }
-                            pacer.mark(now, false);
+                    Err(error) => say!("transcript partial post failed chat={chat} id={} reason={error}", job.id),
+                },
+                Some(first) => {
+                    match edit(&client, &job.chat, first, posting::partial(&so_far, &header), &context).await {
+                        Ok(()) => posted.edits += 1,
+                        Err(error) => {
+                            posted.edit_errors += 1;
+                            say!("transcript edit failed chat={chat} id={} edit={} reason={error}", job.id, posted.edits + 1);
                         }
                     }
+                    pacer.mark(now, false);
                 }
             }
         }
-        Sleep(Instant::now() + Duration::from_millis(250)).await;
     };
     let transcript = match result {
         Ok(t) => t,
@@ -570,30 +602,30 @@ async fn process(job: &AudioJob, language: &str, cfg: &posting::PostConfig) -> O
         let mut v = base;
         v["posted"] = false.into();
         v["reason"] = "shadow".into();
-        record(&chat, &job.id, v);
+        record(&chat, &job.id, v).await;
         return Outcome::Done;
     }
     if gate == posting::Gate::Held {
         let mut v = base;
         v["posted"] = false.into();
         v["reason"] = "posting_held_chat".into();
-        record(&chat, &job.id, v);
+        record(&chat, &job.id, v).await;
         let reason = HOLDS.with(|h| h.borrow().reason(&chat).unwrap_or("posting_held_chat").to_string());
         let title = alert_title(&client, job).await;
         alert(&chat, &title, "post_held", &reason, job.sent_ms);
         return Outcome::Done;
     }
-    if fenced(&chat, &job.id) {
+    if fenced(&chat, &job.id).await {
         let mut v = base;
         v["posted"] = false.into();
         v["reason"] = "source_fence_during_decode".into();
-        record(&chat, &job.id, v);
+        record(&chat, &job.id, v).await;
         say!("transcript not posted chat={chat} id={} reason=source_fence_during_decode", job.id);
         return Outcome::Done;
     }
     // Never post an old transcript: a ready result that could not go out within the window expires.
     if now_ms() - ready > QUEUE.with(|q| q.borrow().policy().fresh_ms) {
-        record(&chat, &job.id, serde_json::json!({"state": "expired", "reason": "post_expired"}));
+        record(&chat, &job.id, serde_json::json!({"state": "expired", "reason": "post_expired"})).await;
         let title = alert_title(&client, job).await;
         alert(&chat, &title, "post_expired", "post_stale_over_5m", job.sent_ms);
         return Outcome::Done;
@@ -646,13 +678,13 @@ async fn process(job: &AudioJob, language: &str, cfg: &posting::PostConfig) -> O
         let title = alert_title(&client, job).await;
         alert(&chat, &title, "failed", "send", job.sent_ms);
     }
-    record(&chat, &job.id, v);
+    record(&chat, &job.id, v).await;
     Outcome::Done
 }
 
 /// Run the next queued voice note(s): the main lane, and the express lane while the main lane is
 /// decoding a long note, so a short note is not stuck behind it (Go: `processAudioLane`).
-fn dispatch(spawner: &LocalSpawner, language: &str, cfg: &posting::PostConfig) {
+fn dispatch(language: &str, cfg: &posting::PostConfig) {
     let now = now_ms();
     for notice in QUEUE.with(|q| q.borrow_mut().expire_stale(now)) {
         settle_notice(&notice, None);
@@ -669,23 +701,28 @@ fn dispatch(spawner: &LocalSpawner, language: &str, cfg: &posting::PostConfig) {
         say!("lane {lane:?} takes id={} seconds={}", item.payload.id, item.seconds);
         let language = language.to_string();
         let cfg = cfg.clone();
-        let _ = spawner.spawn_local(async move {
+        spawn_task(Box::pin(async move {
             let outcome = process(&item.payload, &language, &cfg).await;
             COMPLETIONS.with(|c| c.borrow_mut().push((item, outcome)));
-        });
+        }));
     }
 }
 
+/// `settle_notice` is the async half: the queue bookkeeping is sync, the record and alert are not.
 fn settle_notice(notice: &queue::Notice, title: Option<&str>) {
     let (chat, id) = notice.key.split_once('\u{0}').unwrap_or((notice.key.as_str(), ""));
     let kind = if notice.kind == "failed" && permanent(&notice.reason) { "unsupported" } else { notice.kind };
     say!("transcript {} chat={chat} id={id} reason={}", if kind == "audio_expired" { "expired" } else { kind }, notice.reason);
-    record(chat, id, serde_json::json!({"state": kind, "reason": notice.reason}));
-    alert(chat, title.unwrap_or(""), kind, &notice.reason, notice.sent_ms);
+    let (chat, id) = (chat.to_string(), id.to_string());
+    let (kind, reason, sent_ms, title) = (kind.to_string(), notice.reason.clone(), notice.sent_ms, title.unwrap_or("").to_string());
     STATE_DIRTY.with(|d| d.set(true));
+    spawn_task(Box::pin(async move {
+        record(&chat, &id, serde_json::json!({"state": kind, "reason": reason})).await;
+        alert(&chat, &title, &kind, &reason, sent_ms);
+    }));
 }
 
-fn settle_completions() {
+async fn settle_completions() {
     let now = now_ms();
     for (item, outcome) in COMPLETIONS.with(|c| std::mem::take(&mut *c.borrow_mut())) {
         let title = item.payload.title.clone();
@@ -700,15 +737,25 @@ fn settle_completions() {
                 Outcome::Permanent(reason) => q.fail(item, now, &reason, false),
             }
         });
-        if let Some(notice) = notice {
-            settle_notice(&notice, Some(&title));
+        let committed = match (&notice, title.as_str()) {
+            (Some(notice), title) => {
+                let (chat, id) = notice.key.split_once('\u{0}').unwrap_or((notice.key.as_str(), ""));
+                let kind = if notice.kind == "failed" && permanent(&notice.reason) { "unsupported" } else { notice.kind };
+                say!("transcript {} chat={chat} id={id} reason={}", if kind == "audio_expired" { "expired" } else { kind }, notice.reason);
+                Some((chat.to_string(), id.to_string(), kind.to_string(), notice.reason.clone(), notice.sent_ms, title.to_string()))
+            }
+            (None, _) => None,
+        };
+        if let Some((chat, id, kind, reason, sent_ms, title)) = committed {
+            record(&chat, &id, serde_json::json!({"state": kind, "reason": reason})).await;
+            alert(&chat, &title, &kind, &reason, sent_ms);
         }
         STATE_DIRTY.with(|d| d.set(true));
     }
 }
 
 /// Send the batched own-chat log when one is due (never into a source chat).
-fn send_alerts(spawner: &LocalSpawner, enabled: bool) {
+fn send_alerts(enabled: bool) {
     if !enabled || ALERT_SENDING.with(|s| s.get()) {
         return;
     }
@@ -717,7 +764,7 @@ fn send_alerts(spawner: &LocalSpawner, enabled: bool) {
     let now = now_ms();
     let Some(text) = ALERTS.with(|a| a.borrow_mut().due(now)) else { return };
     ALERT_SENDING.with(|s| s.set(true));
-    let _ = spawner.spawn_local(async move {
+    spawn_task(Box::pin(async move {
         match client.send_message(own, wap::Message::text(text)).await {
             Ok(_) => {
                 ALERTS.with(|a| a.borrow_mut().sent(now_ms()));
@@ -726,15 +773,13 @@ fn send_alerts(spawner: &LocalSpawner, enabled: bool) {
             Err(error) => say!("alerts send failed reason={error}"),
         }
         ALERT_SENDING.with(|s| s.set(false));
-    });
+    }));
 }
 
 // ---- Runtime --------------------------------------------------------------------------------
 
-struct HostRuntime {
-    spawner: LocalSpawner,
-}
-// Single-threaded guest: the runtime never crosses a thread.
+struct HostRuntime;
+// Single-threaded guest: the runtime never crosses a thread, and neither do the tasks it spawns.
 unsafe impl Send for HostRuntime {}
 unsafe impl Sync for HostRuntime {}
 
@@ -742,96 +787,114 @@ unsafe impl Sync for HostRuntime {}
 impl Runtime for HostRuntime {
     fn spawn(&self, future: Pin<Box<dyn Future<Output = ()> + 'static>>) -> AbortHandle {
         let (task, handle) = futures::future::abortable(future);
-        let _ = self.spawner.spawn_local(async move {
+        let abort = handle.clone();
+        spawn_task(Box::pin(async move {
             let _ = task.await;
-        });
-        AbortHandle::new(move || handle.abort())
+        }));
+        AbortHandle::new(move || abort.abort())
     }
+    /// A timer the runtime suspends this task on: `wasi:clocks@0.3.0.wait-for`, not a thread sleep
+    /// and not an entry in a timer list the guest has to wake.
     fn sleep(&self, duration: Duration) -> Pin<Box<dyn Future<Output = ()>>> {
-        Box::pin(Sleep(Instant::now() + duration))
+        Box::pin(wait(duration))
     }
     fn spawn_blocking(&self, f: Box<dyn FnOnce() + 'static>) -> Pin<Box<dyn Future<Output = ()>>> {
         f();
         Box::pin(std::future::ready(()))
     }
     fn yield_now(&self) -> Option<Pin<Box<dyn Future<Output = ()>>>> {
-        Some(Box::pin(YieldOnce(false)))
+        Some(Box::pin(std::future::ready(())))
     }
     fn yield_frequency(&self) -> u32 {
         1
     }
 }
 
-// ---- Transport over wa_ws -------------------------------------------------------------------
+// ---- Transport over wa:kernel/websocket -------------------------------------------------------
+
+/// What the protocol asks the socket to do; the socket task owns the socket itself.
+enum Outgoing {
+    Frame(Bytes),
+    Close,
+}
 
 struct HostTransport {
-    id: u32,
+    out: async_channel::Sender<Outgoing>,
 }
-unsafe impl Send for HostTransport {}
-unsafe impl Sync for HostTransport {}
 
 #[async_trait(?Send)]
 impl Transport for HostTransport {
     async fn send(&self, data: Bytes) -> Result<(), anyhow::Error> {
-        SOCKETS.with(|s| match s.borrow().iter().find(|slot| slot.id == self.id) {
-            Some(slot) => slot.socket.send(&data).map_err(|e| anyhow::anyhow!("websocket send: {e:?}")),
-            None => Err(anyhow::anyhow!("websocket closed")),
-        })
+        // `async_channel` gives backpressure: a full queue parks this task instead of dropping a
+        // frame, which is what 0.1's non-blocking `wa_ws.send` could not do.
+        self.out.send(Outgoing::Frame(data)).await.map_err(|_| anyhow::anyhow!("websocket closed"))
     }
     async fn disconnect(&self) {
-        SOCKETS.with(|s| {
-            s.borrow_mut().retain(|slot| {
-                if slot.id == self.id {
-                    slot.socket.close();
-                    false
-                } else {
-                    true
-                }
-            })
-        });
+        let _ = self.out.send(Outgoing::Close).await;
     }
 }
 
 struct HostTransportFactory;
-unsafe impl Send for HostTransportFactory {}
-unsafe impl Sync for HostTransportFactory {}
 
 #[async_trait(?Send)]
 impl TransportFactory for HostTransportFactory {
     async fn create_transport(&self) -> Result<(Arc<dyn Transport>, async_channel::Receiver<TransportEvent>), anyhow::Error> {
-        let socket = Socket::connect(WHATSAPP_WEB_WS_URL, Some(WHATSAPP_WEB_ORIGIN)).map_err(|e| anyhow::anyhow!("websocket connect: {e:?}"))?;
-        let id = NEXT_SOCKET.with(|n| {
-            let id = n.get();
-            n.set(id + 1);
-            id
-        });
-        let (tx, rx) = async_channel::unbounded();
-        let _ = tx.try_send(TransportEvent::Connected);
-        SOCKETS.with(|s| s.borrow_mut().push(WsSlot { id, socket, events: tx }));
-        say!("transport: connected (socket {id})");
-        Ok((Arc::new(HostTransport { id }), rx))
+        let socket = websocket::Socket::connect(WHATSAPP_WEB_WS_URL.to_string(), Some(WHATSAPP_WEB_ORIGIN.to_string()))
+            .await
+            .map_err(|e| anyhow::anyhow!("websocket connect: {e:?}"))?;
+        let (out, outgoing) = async_channel::unbounded::<Outgoing>();
+        let (events, received) = async_channel::unbounded::<TransportEvent>();
+        let _ = events.try_send(TransportEvent::Connected);
+        spawn_task(Box::pin(pump(socket, outgoing, events)));
+        say!("transport: connected");
+        Ok((Arc::new(HostTransport { out }), received))
     }
 }
 
-// ---- HttpClient over wa_http ----------------------------------------------------------------
-
-struct HostHttp;
-unsafe impl Send for HostHttp {}
-unsafe impl Sync for HostHttp {}
-
-struct HttpWait(khttp::Pending);
-impl Future for HttpWait {
-    type Output = Result<khttp::Response, KError>;
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        match self.0.poll() {
-            Err(KError::Again) => {
-                IO_WAKERS.with(|w| w.borrow_mut().push(cx.waker().clone()));
-                Poll::Pending
+/// The socket task: the inbound `stream<list<u8>>` and the outbound queue, joined. This is what the
+/// 0.1 guest's `pump_sockets` + `wake_io` + 5 ms nap loop did, as one select over two streams.
+async fn pump(socket: websocket::Socket, outgoing: async_channel::Receiver<Outgoing>, events: async_channel::Sender<TransportEvent>) {
+    let frames = socket.messages();
+    let inbound = futures::stream::unfold(frames, |mut frames| async move {
+        frames.next().await.map(|frame| (Step::Inbound(frame), frames))
+    });
+    // The outbound queue ends when every transport handle is dropped, which is a disconnect.
+    let outbound = outgoing.map(Step::Outbound).chain(futures::stream::once(async { Step::OutboundClosed }));
+    let mut steps = Box::pin(futures::stream::select(inbound, outbound));
+    while let Some(step) = steps.next().await {
+        match step {
+            Step::Inbound(frame) => {
+                if events.try_send(TransportEvent::DataReceived(Bytes::from(frame))).is_err() {
+                    return;
+                }
             }
-            other => Poll::Ready(other),
+            Step::Outbound(Outgoing::Frame(frame)) => {
+                if let Err(error) = socket.send(frame.to_vec()).await {
+                    say!("transport: send failed ({error:?})");
+                    let _ = events.try_send(TransportEvent::Disconnected(DisconnectReason::StreamEnded));
+                    socket.close(1000, "send failed".into());
+                    return;
+                }
+            }
+            Step::Outbound(Outgoing::Close) | Step::OutboundClosed => {
+                socket.close(1000, "bye".into());
+                return;
+            }
         }
     }
+    say!("transport: stream ended");
+    let _ = events.try_send(TransportEvent::Disconnected(DisconnectReason::StreamEnded));
 }
+
+enum Step {
+    Inbound(Vec<u8>),
+    Outbound(Outgoing),
+    OutboundClosed,
+}
+
+// ---- HttpClient over wa:kernel/http -----------------------------------------------------------
+
+struct HostHttp;
 
 #[async_trait(?Send)]
 impl HttpClient for HostHttp {
@@ -842,9 +905,16 @@ impl HttpClient for HostHttp {
             headers: request.headers.into_iter().collect(),
             body: request.body.map(|b| b.to_vec()).unwrap_or_default(),
         };
-        let pending = khttp::Pending::start(&req).map_err(|e| anyhow::anyhow!("http start: {e:?}"))?;
-        let response = HttpWait(pending).await.map_err(|e| anyhow::anyhow!("http exchange: {e:?}"))?;
-        Ok(HttpResponse { status_code: response.status, body: response.body })
+        // One awaitable exchange instead of `start` + a poll loop; the body is a stream, drained
+        // here into the bytes the protocol's HttpClient contract promises.
+        let response = khttp::send(req).await.map_err(|e| anyhow::anyhow!("http exchange: {e:?}"))?;
+        let status_code = response.status();
+        let mut body = Vec::new();
+        let mut chunks = response.body();
+        while let Some(chunk) = chunks.next().await {
+            body.extend_from_slice(&chunk);
+        }
+        Ok(HttpResponse { status_code, body })
     }
 }
 
@@ -880,13 +950,19 @@ struct Service;
 export!(Service);
 
 impl exports::wa::kernel::service::Guest for Service {
-    fn run(config: String) -> Result<(), String> {
-        serve(serde_json::from_str(&config).unwrap_or_default());
+    /// One suspendable call: the runtime parks it while it waits, and it returns when the
+    /// supervisor asks it to stop (or when the protocol loop gives up).
+    async fn run(config: String) -> Result<(), String> {
+        serve(serde_json::from_str(&config).unwrap_or_default()).await;
         Ok(())
     }
 }
 
-fn serve(config: serde_json::Value) {
+/// The main loop's cadence: how often the pipeline re-reads its own queues. It is not a poll of
+/// host I/O - the host has its own task - only of what the tasks in this process left behind.
+const TICK: Duration = Duration::from_millis(100);
+
+async fn serve(config: serde_json::Value) {
     let level = match config["log"].as_str().unwrap_or("info") {
         "debug" => log::LevelFilter::Debug,
         "trace" => log::LevelFilter::Trace,
@@ -896,9 +972,6 @@ fn serve(config: serde_json::Value) {
     let _ = log::set_boxed_logger(Box::new(Logger(level))).map(|_| log::set_max_level(level));
     let _ = wacore::time::set_time_provider(WasiClock);
     say!("clock: {} ms since epoch", wacore::time::now_millis());
-    let mut pool = LocalPool::new();
-    let spawner = pool.spawner();
-    let runtime = HostRuntime { spawner: spawner.clone() };
     let pair_phone = config["pair_phone"].as_str().map(str::to_string);
     let language = config["language"].as_str().unwrap_or("pt").to_string();
     let post = posting::PostConfig::from_json(&config);
@@ -907,8 +980,8 @@ fn serve(config: serde_json::Value) {
         QUEUE.with(|q| *q.borrow_mut() = queue::AudioQueue::new(policy));
     }
     // What the last run left behind: held chats, fences, and queued (or interrupted) voice notes.
-    restore_state();
-    reprove_holds();
+    restore_state().await;
+    reprove_holds().await;
     say!(
         "transcription: language {language}, posting {} (allow {:?}), alerts {}, stream_edits {} (min {} s, edit every {} s), held chats {} (configured {})",
         if post.post { "on" } else { "off" },
@@ -921,7 +994,10 @@ fn serve(config: serde_json::Value) {
         post.held.len()
     );
     say!("wa-whatsapp: starting (pairing by {})", if pair_phone.is_some() { "code" } else { "QR" });
-    let _ = spawner.spawn_local(async move {
+    let tasks = Tasks::start();
+    let runtime = HostRuntime;
+    say!("wa-whatsapp: starting the protocol task");
+    spawn_task(Box::pin(async move {
         use whatsapp_rust::prelude::*;
         use wacore::store::traits::DeviceStore;
         let backend = match store::PersistentBackend::open().await {
@@ -936,7 +1012,7 @@ fn serve(config: serde_json::Value) {
         };
         // A paired device on disk must never be replaced by a fresh one, even if the replay failed:
         // check the stored record itself, not only what the replay produced.
-        let stored_paired = store::stored_device_paired();
+        let stored_paired = store::stored_device_paired().await;
         let paired = backend.load().await.ok().flatten().is_some_and(|d| d.pn.is_some());
         if stored_paired && !paired {
             say!("store: a paired device is on disk but the replay did not restore it; refusing to pair over it");
@@ -1026,33 +1102,39 @@ fn serve(config: serde_json::Value) {
             Err(error) => say!("build failed: {error}"),
         }
         say!("bot stopped");
-    });
+    }));
+    futures::pin_mut!(tasks);
+    let main = main_loop(&language, &post);
+    futures::pin_mut!(main);
+    // Whichever finishes ends the service: the driver never does, so in practice the main loop.
+    futures::future::select(tasks, main).await;
+    say!("wa-whatsapp: stopped");
+}
+
+/// The pipeline's own loop: admit what the message handler handed over, settle what the tasks
+/// finished, dispatch the next lane, send the alert batch, persist. Every wait in it is an await on
+/// a runtime timer, and a stop is noticed within one tick.
+async fn main_loop(language: &str, post: &posting::PostConfig) {
     let mut last_tick = Instant::now();
     loop {
         for mutation in INBOX_MUTATIONS.with(|m| std::mem::take(&mut *m.borrow_mut())) {
-            apply_mutation(mutation);
+            apply_mutation(mutation).await;
         }
         for job in AUDIO_INBOX.with(|q| std::mem::take(&mut *q.borrow_mut())) {
-            admit(job);
+            admit(job).await;
         }
-        settle_completions();
-        if last_tick.elapsed() >= Duration::from_millis(200) {
+        settle_completions().await;
+        if last_tick.elapsed() >= TICK * 2 {
             last_tick = Instant::now();
-            dispatch(&spawner, &language, &post);
-            send_alerts(&spawner, post.alerts);
-            persist_state();
+            dispatch(language, post);
+            send_alerts(post.alerts);
+            persist_state().await;
         }
-        pool.run_until_stalled();
-        let moved = pump_sockets();
-        wake_io();
-        let next_timer = fire_timers();
         if lifecycle::stopping() {
             say!("wa-whatsapp: stopping");
+            persist_state().await;
             return;
         }
-        if !moved {
-            let nap = next_timer.unwrap_or(Duration::from_millis(5)).min(Duration::from_millis(5));
-            std::thread::sleep(nap);
-        }
+        wait(TICK).await;
     }
 }

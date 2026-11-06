@@ -73,8 +73,8 @@ Worlds: `service` (long-lived: imports the kernel interfaces it needs, exports `
 and `tool` (request: exports `wa:mcp/server`). See `wit/`.
 
 Async: WIT v1 targets WASI preview 2 (sync calls + non-blocking polling), what the toolchains build
-today. Preview 3 (native async) replaces the polling when it is stable; the interfaces are shaped so
-that is a mechanical change (every potentially slow call already has a non-blocking form).
+today. `wa:kernel@0.2` (below, step 1) is the same contract on WASI 0.3, where a slow call suspends and
+one request can yield many items as a `stream<T>`; both versions are served side by side.
 
 ## Carve-out map (first pass, from the capability inventory in HOST.md)
 
@@ -259,6 +259,61 @@ What the WASI 0.3 / wasmtime 50 upgrade should change here, in order:
    guest has none of: an index of this tree died with `graph_index_failed: disk I/O error` after
    parsing 1,533 files. It runs with `temp_store=MEMORY` today (bounded by the guest's 256 MB), which
    is a workaround for a missing mount, not a design.
+
+### WASI 0.3 step 1 — `wa:kernel@0.2` served (05/11, wasm_the_first)
+
+The proposed shape above is now a package, a runner and two fixtures:
+`wit/kernel-v2/kernel.wit` is `wa:kernel@0.2.0`; `rust/wa-host/src/service_components_v2.rs` serves it;
+`rust/components/svc-echo` is a 0.2 component and `rust/components/svc-echo-v1` the same fixture on
+0.1 (the compat proof). `wa-whatsapp` is ported and builds for `wasm32-wasip2` against 0.2.
+
+**Contract** (differs from the sketch above where noted):
+
+| item | 0.2 |
+| --- | --- |
+| `websocket` | `connect` is `async`; `messages() -> stream<list<u8>>` is the inbound pump; `send: async func(frame)` suspends instead of dropping; `close(code, reason)` |
+| `http` | `send: async func(request) -> result<response, error>`; `response` is a resource with `status`, `headers`, `body() -> stream<list<u8>>` |
+| `speech` | `recognize: async func(...)` → resource `recognition` with `segments() -> stream<segment>` and `transcript() -> future<result<transcript, error>>` (`result` is a WIT keyword, so the future's accessor is `transcript`; each `segment` carries `start-ms`/`end-ms`) |
+| `kv` | `get/set/delete/delete-prefix/scan` are `async` (the host answers without suspending); the names stay 0.1's so a port is a mechanical `await` |
+| `lifecycle`, `log`, `credentials` | unchanged |
+| `service` | `run: async func(config: string) -> result<_, string>` |
+| timers | `import wasi:clocks/monotonic-clock@0.3.0` — `wait-for`/`wait-until` are the async timers a guest awaits. Not `wa:kernel`: this is WASI 0.3, served by `wasmtime_wasi::p3::clocks` |
+
+**Why the out direction is one `async` call per frame.** The sketch drew `stream<list<u8>>` in both
+directions. A guest→host stream has to be created by the guest and consumed by the host, so every
+sender would build a stream per Noise frame — the opposite of what the protocol does. `send` suspends
+when the host cannot take the frame, which is the property the out stream was for.
+
+**Runner.** Same grants, limits, log and epoch deadline as 0.1; a component is served by the 0.1
+runner or the 0.2 one according to *its own imports* (`wa:kernel/*@0.2.0`), read from the component
+type by an engine with `component-model-async`. A 0.1 component is then compiled again on the engine
+every other component uses, so nothing about 0.1 changes. The 0.2 engine is separate on purpose:
+`components::engine()` is shared with MCP components and agent-core.
+
+Two things the async path needed that the poll path did not:
+
+- **A runtime for timers.** `wasmtime_wasi`'s WASI 0.3 clock is built on tokio's timer, so the 0.2
+  runner owns a current-thread tokio runtime (`rt` + `time`) and drives the guest with
+  `store.run_concurrent`.
+- **A watchdog for a parked guest.** The epoch deadline traps a guest that is *running*; a guest
+  sitting in `wait-for` has no wasm to interrupt, so `services::stop` would never join its thread.
+  After the grace period the runner drops the guest's future instead (measured: stop returns in
+  under a second with the fixture parked in a 300 ms timer).
+
+**Results** (`cargo test -p wa-host`, debug build, 206 tests): the three service fixtures each run
+end to end — wasip1 core module, 0.1 component, 0.2 component — including a granted and a refused
+`net` dial against real local servers, a kv round trip, a websocket echo read over the inbound
+stream, a clean stop, and the restart path. The 0.2 guest's heartbeat is a WASI 0.3 timer.
+`wa-whatsapp`'s 0.2 component (8 MB) compiles and **instantiates** on the 0.2 runner, which is the
+check that every import name it emits is served (`WA_TEST_WHATSAPP_WASM` in
+`service_components_v2::tests`). One expressiveness loss: `exit_3` cannot be named — `wasi:cli/exit`
+takes a `result`, so a component that exits non-zero is reported as `exit_1`.
+
+**Known limits, next.** A response body is buffered whole and handed out in 64 KiB chunks (a real
+streaming download needs a reader thread, not `read_to_vec`); the send backpressure is the channel
+bound, not the TCP window; a 0.1 component is compiled twice at start; and `wa-whatsapp` was not run
+against a phone from this lane (no pairing, no messages — see
+[SERVICE-COMPONENTS.md](SERVICE-COMPONENTS.md)).
 
 ## Order of work
 

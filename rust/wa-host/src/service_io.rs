@@ -282,6 +282,9 @@ fn pump(mut socket: Socket, out: Receiver<Option<Vec<u8>>>, inbound: Sender<WsEv
     }
 }
 
+/// One stored row: the key and its value, as `Kv::scan` returns them.
+pub type Entry = (Vec<u8>, Vec<u8>);
+
 /// The `wa:kernel/kv` store: one SQLite file per component
 /// (`<components>/<name>.state/kv.sqlite`), opened on the first call. The 0.1 runner polls it and
 /// the 0.2 runner awaits it, so the store itself lives here, once, for both contracts.
@@ -340,7 +343,7 @@ impl Kv {
 
     /// One page of `(key, value)` whose key starts with `prefix`, ordered by key, after `cursor`.
     /// An empty prefix means every key; ordering by key with an exclusive cursor gives stable pages.
-    pub fn scan(&mut self, prefix: Vec<u8>, cursor: Option<Vec<u8>>, limit: u32) -> Result<Vec<(Vec<u8>, Vec<u8>)>, String> {
+    pub fn scan(&mut self, prefix: Vec<u8>, cursor: Option<Vec<u8>>, limit: u32) -> Result<Vec<Entry>, String> {
         let db = self.db()?;
         let limit = limit.clamp(1, 10_000) as i64;
         let after = cursor.unwrap_or_default();
@@ -393,8 +396,11 @@ fn exchange(url: String, method: String, headers: Vec<(String, String)>, body: V
     Ok(HttpOutcome { status, headers, body })
 }
 
-/// The meta-shape both contracts take: {"url","method","headers":{..}} plus a body.
-fn parts(meta: &serde_json::Value) -> Result<(String, String, Vec<(String, String)>), String> {
+/// One exchange's url, method and headers, as the `{"url","method","headers":{..}}` meta carries
+/// them for both contracts.
+type Meta = (String, String, Vec<(String, String)>);
+
+fn parts(meta: &serde_json::Value) -> Result<Meta, String> {
     let url = meta.get("url").and_then(|v| v.as_str()).ok_or("url required")?.to_string();
     let method = meta.get("method").and_then(|v| v.as_str()).unwrap_or("GET").to_ascii_uppercase();
     let headers = meta
