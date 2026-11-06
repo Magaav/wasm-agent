@@ -64,17 +64,25 @@ pub fn set_env_overrides(values: HashMap<String, String>) {
     let _ = ENV_OVERRIDES.set(values);
 }
 
+/// The value of `name` as the host resolves it: what it resolved itself first, then the real process
+/// environment - the same order `host.getenv` uses, in one place so a Rust-side reader cannot
+/// disagree with what a guest sees. `host.paths()` and the plugin directory read it (a23fix): a boot
+/// that publishes a node's home through the override map (`boot_native_state`) must not have to
+/// rewrite the process environment for those two to resolve it.
+pub(crate) fn resolved_env(name: &str) -> Option<String> {
+    ENV_OVERRIDES
+        .get()
+        .and_then(|map| map.get(name).cloned())
+        .or_else(|| std::env::var(name).ok())
+}
+
 /// host.getenv(name) -> string | nil
 ///
 /// Env access as a capability, like the rest of `host.*`: it checks what the
 /// host resolved first and falls back to the real process environment.
 pub extern "C-unwind" fn getenv(l: *mut LuaState) -> c_int {
     let name = arg_string(l, 1).unwrap_or_default();
-    let value = ENV_OVERRIDES
-        .get()
-        .and_then(|map| map.get(&name).cloned())
-        .or_else(|| std::env::var(&name).ok());
-    match value {
+    match resolved_env(&name) {
         Some(value) => {
             unsafe { lua_pushlstring(l, value.as_ptr() as *const c_char, value.len()) };
             1
@@ -99,7 +107,7 @@ pub extern "C-unwind" fn getenv(l: *mut LuaState) -> c_int {
 /// "no values", because zero results expand to nothing when used as an argument
 /// (`tonumber(host.getenv(X))` became `tonumber()` and failed).
 pub extern "C-unwind" fn paths(l: *mut LuaState) -> c_int {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    let home = resolved_env("HOME").unwrap_or_else(|| ".".into());
     let base = format!("{home}/.wasm-agent");
     let entries: [(&str, String); 5] = [
         ("home", home),

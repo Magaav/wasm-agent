@@ -585,19 +585,26 @@ pub fn boot_native_state(home: &str, db: &str, args: &[String], embedded: &[(&st
     use std::ffi::c_void;
     // `home` is the node's home as the binary resolved it (`wa_host_support::paths::resolve_home`), and
     // it is a parameter rather than a lookup so a test or a benchmark cannot accidentally inherit the
-    // operator's: the boot publishes it through HOME and the `host.getenv` override map, because
-    // `host.paths()`, the Lua core, the plugin directory and `~/.wasm-agent/env` all derive from it. A
-    // slot that skipped this resolved `host.paths()` from the *process's* HOME instead of the node's:
-    // measured, a pooled fixture wrote into the operator's real `~/.wasm-agent` while the same script
-    // run natively wrote into the scratch home the harness had set. Process-wide by nature (one node
-    // per process), which is what the binary already assumes.
+    // operator's: the boot publishes it, because `host.paths()`, the Lua core, the plugin directory and
+    // `~/.wasm-agent/env` all derive from it. A slot that skipped this resolved `host.paths()` from the
+    // *process's* HOME instead of the node's: measured, a pooled fixture wrote into the operator's real
+    // `~/.wasm-agent` while the same script run natively wrote into the scratch home the harness had
+    // set.
+    //
+    // It publishes through the capability layer's override map (`host::set_env_overrides`, which
+    // `host.getenv` and now every Rust-side reader that resolves like it consults first) and **not**
+    // through `std::env`. This function runs once per pool slot, inside whatever process called it, and
+    // a process-wide `HOME`/`WASM_AGENT_DB` rewrite is visible to - and outlives - every other thread
+    // there: in the `wa-capabilities` test binary it changed what 160 other tests and their subprocesses
+    // saw, and `~/.wasm-agent/env` (model configuration, provider keys) was copied into the real
+    // environment of a process that never asked for it. On Windows it was only half-true anyway: the
+    // UCRT caches the environment at startup, so the C side (`os.getenv`, the `getenv` the Lua core
+    // uses) kept the old value, which is exactly why `host.getenv` exists as a capability.
     let home = home.to_string();
-    std::env::set_var("HOME", &home);
-    std::env::set_var("WASM_AGENT_DB", db);
-    load_env_file(&home);
     let mut resolved = std::collections::HashMap::new();
     resolved.insert("HOME".to_string(), home.clone());
     resolved.insert("WASM_AGENT_DB".to_string(), db.to_string());
+    load_env_file(&home, &mut resolved);
     crate::host::set_env_overrides(resolved);
     let in_memory = db.is_empty() || db == ":memory:" || db == "file::memory:";
     let database = if in_memory {
@@ -657,7 +664,12 @@ pub fn boot_native_state(home: &str, db: &str, args: &[String], embedded: &[(&st
 /// `~/.wasm-agent/env`, KEY=VALUE per line, without overriding the real environment - the same file
 /// and the same rule as `load_env_file` in `wa-host/src/main.rs`, because a node's model configuration
 /// lives there and a turn needs it whether the binary or a pool slot boots the interpreter.
-fn load_env_file(home: &str) {
+///
+/// The file is read *into* the capability override map instead of into `std::env` (a23fix): the rule
+/// stays "a value the process already has wins", but what a pooled interpreter sees through
+/// `host.getenv` is now the only thing this changes. The binary has its own boot (`main.rs`) and keeps
+/// its own `set_var`: it is the one node in the process, and children it spawns must inherit that.
+fn load_env_file(home: &str, resolved: &mut std::collections::HashMap<String, String>) {
     let Ok(text) = std::fs::read_to_string(format!("{home}/.wasm-agent/env")) else { return };
     for line in text.lines() {
         let line = line.trim();
@@ -668,7 +680,7 @@ fn load_env_file(home: &str) {
             let key = key.trim();
             let value = value.trim().trim_matches(|c| c == '"' || c == '\x27');
             if !key.is_empty() && std::env::var(key).is_err() {
-                std::env::set_var(key, value);
+                resolved.insert(key.to_string(), value.to_string());
             }
         }
     }
@@ -1352,6 +1364,25 @@ mod tests {
         std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
     }
 
+    /// A scratch home, not the operator's: the boot reads `~/.wasm-agent/env`, and a test must not
+    /// read (or write) the node it happens to run on. `CARGO_TARGET_DIR` when the harness sets one,
+    /// else the platform temp directory.
+    ///
+    /// Every one of these tests takes [`heavy`] first. A pool is the heaviest thing this test binary
+    /// builds - a pooling engine (its slot reservation), a compile of a 388 kB guest the first time, up
+    /// to eight native interpreters, and four wasm instances running at once - and `http_transport`'s
+    /// streaming tests assert on 250 ms/500 ms wall-clock budgets in the *same process*. Seven pools
+    /// live at once is what a loaded machine turns into those tests timing out (a23fix); one at a time
+    /// is all these tests need to prove what they prove.
+    static HEAVY: Mutex<()> = Mutex::new(());
+
+    /// At most one pool is alive in the process at a time, so the pool's cost is spent once and the
+    /// other tests in this binary keep their scheduling headroom. Poisoning is not a failure here: a
+    /// panicking test has already failed, and the lock is only an isolation device.
+    fn heavy() -> std::sync::MutexGuard<'static, ()> {
+        HEAVY.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     /// The pool a test uses: the real component, a native interpreter per instance (the shipping
     /// boot's shape: registry + own connection + `EMBEDDED`), one slot unless a test says otherwise.
     fn pool(max_instances: usize, warm: usize, acquire_timeout: Duration) -> Option<CoreComponentPool> {
@@ -1373,6 +1404,7 @@ mod tests {
     /// a one-shot component, the report carries the run's cost, and the lease comes back to the pool.
     #[test]
     fn a_pooled_instance_runs_a_script_and_reports_what_it_cost() {
+        let _heavy = heavy();
         let Some(pool) = pool(1, 0, Duration::from_secs(5)) else { return };
         let script = fixture("first-statement.lua");
         let mut lease = pool.acquire().expect("acquire an instance");
@@ -1396,6 +1428,7 @@ mod tests {
     /// is not.
     #[test]
     fn a_reused_instance_keeps_each_run_a_fresh_state() {
+        let _heavy = heavy();
         let Some(pool) = pool(1, 0, Duration::from_secs(5)) else { return };
         let script = fixture("fresh-state.lua");
         let mut lease = pool.acquire().expect("acquire an instance");
@@ -1411,6 +1444,7 @@ mod tests {
     #[test]
     fn parallel_acquires_each_get_their_own_instance() {
         const CALLERS: usize = 4;
+        let _heavy = heavy();
         let Some(pool) = pool(CALLERS, 0, Duration::from_secs(20)) else { return };
         let script = fixture("parallel.lua");
         let script = &script;
@@ -1448,6 +1482,7 @@ mod tests {
     /// instance to the next caller - a refusal is not a lost slot.
     #[test]
     fn an_exhausted_pool_refuses_and_recovers() {
+        let _heavy = heavy();
         let Some(pool) = pool(1, 0, Duration::from_millis(150)) else { return };
         let held = pool.acquire().expect("the only instance");
         let started = Instant::now();
@@ -1482,6 +1517,7 @@ mod tests {
     /// callers pay no instantiation - and a warm instance starts with no run behind it.
     #[test]
     fn a_warm_pool_hands_out_instances_without_creating_them() {
+        let _heavy = heavy();
         let Some(pool) = pool(2, 2, Duration::from_secs(5)) else { return };
         let stats = pool.stats();
         assert_eq!(stats.created, 2);

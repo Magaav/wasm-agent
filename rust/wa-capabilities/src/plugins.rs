@@ -251,7 +251,11 @@ pub fn plugin_dir() -> PathBuf {
     if let Ok(path) = std::env::var("WASM_AGENT_PLUGINS") {
         return PathBuf::from(path);
     }
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    // `HOME` as the host resolves it (a23fix): a pooled boot publishes the node's home through the
+    // capability override map, and the plugin directory it loads has to be the one under *that* home -
+    // otherwise a pool slot reads the operator's plugins while the guest it boots resolves `host.paths()`
+    // from the node's home.
+    let home = crate::host::resolved_env("HOME").unwrap_or_else(|| ".".into());
     PathBuf::from(home).join(".wasm-agent").join("plugins")
 }
 

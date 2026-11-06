@@ -362,6 +362,33 @@ also runs the four scripts through the pool, `diff`s one whole output against th
 run, and runs four concurrent callers holding four leases (`pool concurrency ok`). The fixtures are in
 [benchmarks/agent-core-pool/fixtures](../benchmarks/agent-core-pool/fixtures).
 
+**a23fix — the pool and the rest of the process.** Two things the first landing got wrong, both about
+cost paid *outside* the pool's own callers:
+
+1. **`boot_native_state` no longer rewrites the process environment.** It used to `std::env::set_var`
+   `HOME`, `WASM_AGENT_DB` and every `KEY=VALUE` of `~/.wasm-agent/env`. That is defensible for the
+   binary, which is one node in one process, but this function exists for callers *outside* it — the
+   tests and `wa-core-pool-bench` — and it runs once per pool slot: in the `wa-capabilities` test binary
+   it changed what the other 160 tests and their subprocesses saw (a `HOME` pointing at the pool's
+   scratch directory, a `WASM_AGENT_DB` of `:memory:`, a node's provider keys copied into a process that
+   never asked for them) and it outlived the run. It also only half-worked on Windows, where the UCRT
+   caches the environment at startup: Rust readers saw the new `HOME`, the C side did not — which is
+   exactly why `host.getenv` exists. The boot now publishes the same values through the capability
+   layer's override map only, and the two Rust readers that resolve a home (`host.paths()` and the
+   plugin directory) use `host::resolved_env`, the same order `host.getenv` uses, so a pooled slot still
+   resolves the node's home and not the operator's.
+2. **The pool's tests run one at a time.** A pool is the heaviest thing that test binary builds — a
+   pooling engine with its slot reservation, a compile of the 388 kB guest, up to eight native
+   interpreters and four wasm instances running at once. `http_transport`'s streaming tests sit in the
+   same binary and assert on wall-clock budgets (250 ms to response headers, 500 ms of body silence,
+   read from the socket this crate owns), so they measure the *process's* scheduling, not just the
+   provider's silence: with seven pools live they fail on a loaded machine, and the pool is what put the
+   process there. The pool tests take a process-wide test lock, and `scripts/fast.sh` gives the
+   streaming tests their own process (the rest of the crate with `--skip http_transport::
+   streaming_timeout_tests`, then that module alone) so a future heavy test cannot starve them either.
+   Nothing is skipped or weakened: the same five assertions run, in a process that is quiet when they
+   measure.
+
 **Not done here, and why.** The pool has no caller in the binary yet: `rust/wa-host` (its `main.rs`
 boot and CLI dispatch) was outside this lane's edit list, so the callers today are
 `wa-core-pool-bench` and the gate block. Wiring it is a small change in `main.rs` — hand

@@ -103,6 +103,17 @@ else
     s=$(date +%s)
     if [ "$crate" = wa-sentinel ]; then
       cargo test --offline --manifest-path rust/wa-sentinel/Cargo.toml -- --test-threads=1 > "$work/rust-$crate.log" 2>&1
+    elif [ "$crate" = wa-capabilities ]; then
+      # wa-capabilities holds the streaming timeout tests (http_transport's phase budgets: 250 ms for
+      # response headers, 500 ms of body silence) next to the agent-core pool's heavy ones. Those
+      # budgets are wall-clock facts about a *quiet* process, so they get their own process: the rest
+      # of the crate first (the pool's engines, compiles and wasm instances cannot starve them), then
+      # the streaming tests alone. Neither run skips anything - the split is the isolation, not a
+      # filter on what is proved (docs/KERNEL.md, "A2.3").
+      cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-capabilities \
+        -- --skip http_transport::streaming_timeout_tests > "$work/rust-$crate.log" 2>&1 \
+      && cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-capabilities \
+        -- http_transport::streaming_timeout_tests >> "$work/rust-$crate.log" 2>&1
     else
       cargo test --release --offline --manifest-path rust/Cargo.toml -p "$crate" > "$work/rust-$crate.log" 2>&1
     fi
