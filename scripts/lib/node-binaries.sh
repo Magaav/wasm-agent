@@ -179,6 +179,7 @@ wa_node_asset_names() {
 wa_node_fetch_asset() {
   local repo="$1" tag="$2" asset="$3" dest="$4" base="${5:-}" local_base url_base
   [ -d "$repo" ] && repo="$(wa_node_release_repo "$repo")"
+  [ -d "$repo" ] && repo="$(wa_node_release_repo "$repo")"
   mkdir -p "$dest" || { printf 'node_cache_unwritable: %s
 ' "$dest"; return 8; }
   local_base=""
