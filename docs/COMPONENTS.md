@@ -207,6 +207,17 @@ installed unchanged, the unpinned operator directory, a swapped cached superviso
 plus the install record step for a prebuilt install. So a change there cannot pass by never running.
 
 
+**Does this node run a newer release?** `lua/core/update_banner.lua` answers with the same release
+identity the deploy installs: `installed.txt`'s `commit=` (and `binary_release=` for a prebuilt
+install) against the newest `node-<sha12>` release, then shows
+`Update available (<sha12>): run wa update or /update` in the CLI footer, once at session start, and
+as a dismissible toast plus a topbar badge in the window. It is not the deploy and it changes nothing:
+no fetch, no merge, one cached feed read per fifteen minutes in `<state>/update-check.json`, and the
+verdict is recomputed from the current install record so the indicator disappears after the swap
+without waiting for a request. `git` is consulted only for local ancestry (`merge-base
+--is-ancestor`), which is what tells a tree ahead of the feed (no banner) from one behind a published
+release (banner). Details and knobs: `docs/RELEASE-UPDATE.md`.
+
 ## Capabilities: declared by the manifest, granted by the caller
 
 Nothing is ambient: no filesystem, no network, no inherited environment. The manifest **declares**

@@ -259,6 +259,28 @@ a[href]:focus-visible { outline: 2px solid #8bbcff; outline-offset: 2px; }
 .topbar-btn:hover, .collapse:hover { border-color: var(--accent); background: #1d2330; }
 .topbar-btn.active { color: #fff; background: var(--accent); border-color: var(--accent); }
 
+/* "Update available (<sha>): run wa update or /update". The badge is the standing signal (it stays
+   until the node runs the release), so it is a wide-enough button with a word on it rather than a
+   second unlabelled icon; the toast is the one-time notice and is dismissible. Both use the warning
+   colour and neither is a transcript row (the conversation is not the place for an install fact). */
+.topbar-btn.update-badge {
+  width: auto; padding: 0 var(--pad); font: inherit; font-size: 11.5px;
+  color: var(--warn); border-color: var(--warn);
+}
+.update-toast {
+  position: fixed; left: var(--pad); bottom: var(--pad); z-index: 40;
+  display: flex; align-items: center; gap: var(--gap); max-width: min(480px, calc(100vw - 2 * var(--pad)));
+  padding: var(--pad); color: var(--text); font-size: 12px; line-height: 1.45;
+  background: var(--panel-2); border: 1px solid var(--warn); border-left-width: 3px;
+  border-radius: var(--radius); box-shadow: 0 4px 16px #0008;
+}
+.update-toast-close {
+  flex: none; width: 22px; height: 22px; cursor: pointer; font: inherit; line-height: 1;
+  color: var(--muted); background: transparent; border: 1px solid var(--line); border-radius: var(--radius-sm);
+}
+.update-toast-close:hover { color: var(--text); border-color: var(--warn); }
+body.ui-resting .update-toast { display: none; }
+
 /* The transcript's own box - the chat content rect. It exists so a control can be pinned to that
    rect's bottom edge (see .jump): an absolutely positioned child of the scroll container itself
    would scroll away with the transcript. Everything else about the layout is the transcript's. */

@@ -17,6 +17,9 @@ local skillslib = dofile("lua/core/skills.lua")
 local redact = dofile("lua/core/redact.lua")
 local telemetry = dofile("lua/core/telemetry.lua")
 local updater = dofile("lua/core/update.lua")
+-- The "Update available (<sha>): run wa update or /update" banner: the installed commit against the
+-- newest `node-<sha12>` release, cached for fifteen minutes (`lua/core/update_banner.lua`).
+local update_banner = dofile("lua/core/update_banner.lua")
 local workspaces = dofile("lua/core/workspaces.lua")
 -- A module is one directory under `modules/`, and this is the route that lists what is on disk and
 -- serves a module's own files. Loading the file *is* registering the route: it defines `wa_modules`
@@ -567,6 +570,19 @@ function wa_update(payload, session)
     check = request.check == true,
     fresh = request.fresh == true,
   })
+  if request.check == true and type(report) == "table" then
+    -- The window's toast and badge, read from the cache only: the served node refreshes it on its
+    -- housekeeping tick, so a page load never costs a request (and never blocks this interpreter on
+    -- one). The tag-based `release` field above is kept unchanged for the command that reads it.
+    local ok, banner = pcall(update_banner.status, {})
+    if ok and type(banner) == "table" then
+      report.banner = { state = banner.state, reason = banner.reason, line = banner.line,
+        checked_at = banner.checked_at, latest = banner.latest and {
+          tag = banner.latest.tag, sha12 = banner.latest.sha12, url = banner.latest.url,
+          published_at = banner.latest.published_at } or nil,
+        installed = banner.installed }
+    end
+  end
   return json.encode(report)
 end
 
@@ -1250,6 +1266,12 @@ end
 
 -- Push everything after each peer's cursor. Called on a timer by the host.
 function wa_sync_tick()
+  -- The update banner's cache, at most one request per fifteen minutes. This is the quiet
+  -- housekeeping tick (node-thread 0, nobody waiting) - the same place the sync push already pays for
+  -- a network round trip - and the tick is a no-op while the cache is fresh. `WA_SCRIPT` means this
+  -- interpreter was started to run one test script, not a node: it must not read or write the real
+  -- node's state (every `scripts/test-*.lua` runs that way).
+  if host.getenv("WA_SCRIPT") == nil then pcall(update_banner.tick) end
   if enrollment.managed() then return json.encode({error='managed_sync_disabled'}) end
   local configured = host.getenv("WASM_AGENT_SYNC_TO") or ""
   if configured == "" then return json.encode({ ok = true, peers = 0, pushed = 0 }) end

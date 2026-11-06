@@ -407,12 +407,26 @@ function M.run(argv)
   -- is the model (see its `version-check.js`): the answer is cached, a failure is silent rather than
   -- an error on every start, and `unknown` - no recorded release, unreachable feed - prints nothing,
   -- because "I could not ask" repeated at every prompt is noise, not information.
+  --
+  -- Two checks, one line. `update_banner.lua` compares the installed *commit* with the newest
+  -- `node-<sha12>` release and prints `Update available (<sha>): run wa update or /update` - the
+  -- sentence the footer and the window show. When it cannot decide (a release-bundle install records
+  -- a version tag, not a published binary release), `release.lua`'s tag feed answers exactly as it did
+  -- before; only one of them ever prints, so the reader is told one fact in one wording.
   if not host.getenv("WA_SKIP_UPDATE_CHECK") then
-    local seen = dofile("lua/core/release.lua").check({
-      installed = dofile("lua/core/release.lua").installed(updater.installed_record()),
-    })
-    if seen.state == "behind" then
-      print(redact.text("update available: " .. (seen.message or "a newer release is published") .. " - /update installs it"))
+    local banner = dofile("lua/core/update_banner.lua")
+    local seen = banner.check({ refresh = true })
+    if seen.line then
+      view.update_note = seen.line
+      view:footer_draw()
+      print(redact.text(seen.line))
+    elseif seen.state == "unknown" and seen.reason ~= "checks_disabled" then
+      local released = dofile("lua/core/release.lua").check({
+        installed = dofile("lua/core/release.lua").installed(updater.installed_record()),
+      })
+      if released.state == "behind" then
+        print(redact.text("update available: " .. (released.message or "a newer release is published") .. " - /update installs it"))
+      end
     end
   end
 

@@ -5779,10 +5779,99 @@ function updateNotice(payload) {
   return "/update — refused: " + (payload.observed || payload.error || "no reason given") + release + tail;
 }
 
-// Ask once whether a newer release is published, and draw the same banner Pi draws: a bounded,
-// warning-coloured block that names the version and the command that acts on it. Nothing is queued
-// here - the check route is read-only - so a window reload can never install anything.
-async function showReleaseBanner() {
+// ---- the update banner: a dismissible toast and a badge, never a transcript row -------------------
+//
+// The node answers `POST /update {"check": true}` with `banner` (`lua/core/update_banner.lua`): the
+// installed commit against the newest `node-<sha12>` release of this repository, computed from a
+// fifteen-minute cache. The sentence is the node's, in the node's wording, so the CLI, its footer and
+// this page cannot drift: `banner.line` is already `Update available (<sha>): run wa update or /update`.
+// A node that predates `banner` still answers with the tag-based `release`, and that keeps its wording.
+//
+// It is a toast rather than a transcript notice: the transcript is the conversation, and a fact about
+// the install that interleaves with messages is a row nobody can scroll past. The badge in the topbar
+// stays until the node runs the release (the next load recomputes `state` from the current record).
+let updateToastDismissed = false;
+
+function updateBannerText(payload) {
+  if (!payload || typeof payload !== "object") return "";
+  const banner = payload.banner;
+  if (banner && banner.state === "behind") {
+    if (typeof banner.line === "string" && banner.line) return banner.line;
+    const sha = banner.latest && banner.latest.sha12 ? String(banner.latest.sha12) : "";
+    return "Update available" + (sha ? " (" + sha + ")" : "") + ": run wa update or /update";
+  }
+  if (!banner && payload.release && payload.release.state === "behind") {
+    return "Update available — " + (payload.release.message || "a newer release is published") + ". Run /update to install it.";
+  }
+  return "";
+}
+
+function dismissUpdateToast() {
+  updateToastDismissed = true;
+  const toast = document.querySelector("[data-update-toast]");
+  if (toast) toast.remove();
+}
+
+// The badge is the way back after the toast is dismissed, so it acts: the same request `/update` makes.
+function paintUpdateBadge(text) {
+  let badge = document.querySelector("[data-update-badge]");
+  if (!badge) {
+    const topbar = document.querySelector("#dragbar .topbar-actions") || document.getElementById("dragbar");
+    if (!topbar || typeof document.createElement !== "function") return;
+    badge = document.createElement("button");
+    badge.type = "button";
+    badge.className = "topbar-btn update-badge";
+    badge.dataset.updateBadge = "available";
+    badge.textContent = "update";
+    badge.addEventListener("click", () => { void updateNode(); });
+    (typeof topbar.append === "function" ? topbar : document.body).append(badge);
+  }
+  badge.title = text;
+  badge.setAttribute("aria-label", text);
+}
+
+function paintUpdateToast(text) {
+  if (updateToastDismissed) return;
+  let toast = document.querySelector("[data-update-toast]");
+  if (!toast) {
+    if (typeof document.createElement !== "function") return;
+    toast = document.createElement("div");
+    toast.className = "update-toast";
+    toast.dataset.updateToast = "available";
+    toast.setAttribute("role", "status");
+    toast.setAttribute("aria-live", "polite");
+    toast.textContent = text;
+    const dismiss = document.createElement("button");
+    dismiss.type = "button";
+    dismiss.className = "update-toast-close";
+    dismiss.textContent = "×";
+    dismiss.setAttribute("aria-label", "Dismiss the update notice");
+    dismiss.addEventListener("click", dismissUpdateToast);
+    toast.append(dismiss);
+    (document.body || document.documentElement).append(toast);
+  }
+}
+
+// Draw both, or clear both when the node is current. Called once per load: the node's cache is the
+// fifteen-minute clock, and the next load recomputes the state from the *current* install record, so the
+// indicator disappears as soon as the node runs the release. Returns the text it drew ("" when none).
+function applyUpdateBanner(payload) {
+  const text = updateBannerText(payload);
+  if (!text) {
+    const badge = document.querySelector("[data-update-badge]");
+    if (badge) badge.remove();
+    dismissUpdateToast();
+    return "";
+  }
+  paintUpdateBadge(text);
+  paintUpdateToast(text);
+  return text;
+}
+
+// Ask once, after the first paint rather than in front of it - the same shape as Pi's startup version
+// check, which is started and not awaited. Nothing is queued here: the check route is read-only, so a
+// window reload can never install anything.
+async function showUpdateBanner() {
   if (!chatSession) return;
   try {
     const response = await apiFetch("update", {
@@ -5791,16 +5880,7 @@ async function showReleaseBanner() {
       body: JSON.stringify({ check: true }),
     });
     const payload = await response.json();
-    const release = payload && payload.release;
-    if (!release || release.state !== "behind") return;
-    if (document.querySelector("[data-release-banner]")) return;
-    const banner = document.createElement("div");
-    banner.className = "thread-notice";
-    banner.dataset.state = "behind";
-    banner.dataset.releaseBanner = release.latest || "newer";
-    banner.textContent = "Update Available — " + release.message + ". Run /update to install it.";
-    messages.append(banner);
-    pin();
+    applyUpdateBanner(payload);
   } catch (error) {
     // Never a visible error: an unreachable feed is `unknown`, and a banner that turns a failed check
     // into a fault trains the reader to ignore banners.
@@ -9235,9 +9315,9 @@ if (!openingView) {
   sync("boot");
   setTimeout(openFromQuery, 400);
   // One release check per load, after the first paint rather than in front of it - the same shape as
-  // Pi's startup version check, which is started and not awaited. It draws a banner only when this
-  // node is actually behind, and never turns a failed check into a visible fault.
-  setTimeout(() => { void showReleaseBanner(); }, 1200);
+  // Pi's startup version check, which is started and not awaited. It draws the toast and the badge only
+  // when this node is actually behind, and never turns a failed check into a visible fault.
+  setTimeout(() => { void showUpdateBanner(); }, 1200);
 }
 // Views can wait for the renderer. Chat first draws readable fallback text;
 // later transcript updates use Markdown once the renderer is ready.

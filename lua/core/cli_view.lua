@@ -705,6 +705,10 @@ function M.new(opts)
     -- bound every in-place write is kept inside - see `METHODS:status_draw`. `screen` is the rows
     -- the view owns once it knows the console's height - see `METHODS:screen_on`.
     shown = nil, shown_cols = 0, screen = nil, logged = "", turn = nil, totals = nil, deltas = 0, warned = nil,
+    -- `Update available (<sha>): run wa update or /update` while a newer release is published
+    -- (`lua/core/update_banner.lua`). It is a footer fact, never a transcript line, and it is the
+    -- same sentence the window shows.
+    update_note = nil,
   }
   return setmetatable(view, METHODS)
 end
@@ -960,10 +964,19 @@ function METHODS:status_draw(text)
 end
 
 -- The hint row under the input box: the last run's numbers, or what to type. Boxed screens only.
+-- An available update goes first: it is the one thing on the row that has an action, and clipping the
+-- tail of the session numbers costs less than hiding the only notice that a release exists.
 function METHODS:footer_draw()
   if not (self.live and self.screen and self.screen.footer) then return end
-  local text = (self.last_summary and self.last_summary ~= "") and self.last_summary
+  local hint = (self.last_summary and self.last_summary ~= "") and self.last_summary
     or "/ for commands \194\183 /login to sign in \194\183 ctrl+c twice to quit"
+  local text = hint
+  if self.update_note and self.update_note ~= "" then
+    text = self.update_note
+    if self.last_summary and self.last_summary ~= "" then
+      text = text .. " \194\183 " .. self.last_summary
+    end
+  end
   -- The editor owns that row (the slash menu uses it), so it is handed the text, not drawn on.
   if self.editor and self.stdout and host and host.editor_footer then
     pcall(host.editor_footer, clip(text, math.max(10, self.limit - 1)), self.model or "")

@@ -30,6 +30,39 @@ The reasons are named (`feed_unreachable`, `feed_status_404`, `feed_invalid`, `c
 `not_checked`, `no_recorded_release`, `uncomparable_versions`). A node whose check failed must not
 read as "up to date" - that is the silent success this module exists to prevent.
 
+## The commit banner: `Update available (<short sha>): run wa update or /update`
+
+`lua/core/update_banner.lua` is the Claude Code/pi-shaped indicator the tags above cannot give a tree
+install: it compares the **installed commit** (`installed.txt` `commit=`, plus `binary_source=` and
+`binary_release=` when the binary came from a published release) with the newest `node-<sha12>`
+release of this repository - the per-commit binaries `scripts/lib/node-binaries.sh` publishes and the
+deploy downloads (owner/repo resolved by `wa_node_release_repo`'s rule, `WA_NODE_RELEASE_REPO` first).
+
+| state | when | what is drawn |
+| --- | --- | --- |
+| `behind` | the installed release is in the published window but not first, a prebuilt install's release fell out of it, or local git proves the release commit descends from the installed one | `Update available (<latest sha12>): run wa update or /update` in the CLI footer, once at session start, and as a dismissible toast + topbar badge in the window |
+| `current` | installed == newest release | nothing; an existing badge/toast is cleared on the next load |
+| `ahead` | local git proves the installed commit descends from the release | nothing - a tree ahead of the feed is not told to update |
+| `unknown` | no recorded commit, no feed, or a tree commit the feed does not mention and local ancestry cannot order | nothing (the reason is in the cache and the JSON) |
+
+The check **never fetches and never merges**. Local git answers one question only (`merge-base
+--is-ancestor`, on objects already on disk); the release feed is the only network fact.
+
+Caching: `<state>/update-check.json` (`host.paths().config`, i.e. `~/.wasm-agent`) holds the feed and
+when it was last asked for - **not** the verdict, which is recomputed on every read from the cached
+feed and the *current* install record. So the indicator disappears the moment the node runs the
+release, without waiting for a request. The window is claimed (written) before the request, so fifteen
+minutes is at most one call even across a failure, a crash or three processes; a failed refresh keeps
+the last good feed, so a known update survives transient outages. `POST /update {"check": true}` now
+also returns `banner` (cache only - a page load never costs a request). The served node refreshes the
+cache on its quiet housekeeping tick (`wa_sync_tick`, which only runs in a real node); the CLI asks at
+session start. A bus fact `kernel.update.available` is published per completed refresh when the host
+exposes a bus to Lua (today it does not - docs/BUS.md - so the cache is the whole surface).
+
+Knobs: `WA_UPDATE_CHECK=off`, the existing `WA_OFFLINE=1` / `WA_SKIP_UPDATE_CHECK=1`, a feed override
+`WA_UPDATE_CHECK_FEED=<url>|off`, `WA_UPDATE_CHECK_FIXTURE=<file>` (no network), `WA_UPDATE_CHECK_CACHE=<file>`
+and `WA_UPDATE_CHECK_TRANSPORT=gh|curl|http` (default: `host.http`, then `gh`, then `curl`) and `WA_UPDATE_CHECK_PER_PAGE=<n>` (the published window, default 5).
+
 ## The installed side: `release=` in `installed.txt`
 
 The comparison is on tags, so the install has to name one. `scripts/deploy.sh` writes
@@ -43,17 +76,20 @@ still writes an interim record with no tag - the deploy owns the final record.
 
 ## Where it surfaces
 
-- **CLI**, on start: one line, only when actually behind -
+- **CLI**, on start: one line, only when actually behind. The commit banner prints
+  `Update available (<latest sha12>): run wa update or /update` and puts the same sentence in the
+  footer row; when the commit feed cannot decide, the tag line above is the fallback -
   `update available: installed v0.1.0-alpha.11 is behind the latest release v0.2.0 - /update installs it`.
-  Silent for `current` and `unknown`.
+  Silent for `current`, `ahead` and `unknown`, and never inside the transcript.
 - **CLI**, `/update`: the deploy verdict, then `release: ...` when behind.
-- **Window**, on load: a banner - `Update Available - <message>. Run /update to install it` - drawn
-  once, after the first paint, from `POST /update {"check": true}`.
+- **Window**, on load: a dismissible toast and a topbar badge with the node's sentence, drawn once
+  after the first paint from `POST /update {"check": true}` (`banner`). Not a transcript row; the
+  badge stays until the node runs the release, so dismissing the toast never hides the fact.
 - **Window**, `/update`: the same sentence in its notice.
 
 `POST /update {"check": true}` is **read-only**: it never synchronizes the tree, never takes a backup
 and never writes a sentinel request. A window reload cannot install anything. `fresh: true` bypasses
-the cache.
+the tag cache; the commit banner in the same answer is always cache-only.
 
 ## Caching, and the one risk
 
@@ -93,11 +129,24 @@ answered `unknown` forever.
 
 ## Tests
 
-`scripts/test-release.lua` - 55 checks, no network: precedence (`alpha.12` below `0.1.0`, numeric
+`scripts/test-release.lua` - 68 checks, no network: precedence (`alpha.12` below `0.1.0`, numeric
 prerelease identifiers, build metadata ignored), the published body, every verdict, the installed
-record, the cache hit/miss/stale/corrupt cases, offline and a missing fixture. Run it the way the
-gate does:
+record, the cache hit/miss/stale/corrupt cases, offline and a missing fixture.
+
+`scripts/test-update-banner.lua` - 126 checks, no network: the `node-<sha12>` tag parser, the commit
+prefix rules, the identity a build and a prebuilt record produce, the release-list filter (version
+tags, Android bundles and drafts skipped, no note text carried), every compare outcome
+(older/equal/newer/unknown), the exact banner line, the fifteen-minute window (hit at `CACHE_MS - 1`,
+request at `CACHE_MS`), the claim that makes a failed request cost one call not one per tick, offline
+with and without a cache, the banner clearing when the installed record names the release and
+returning when it does not, the bus fact's shape (no message text), the served-node memo, and the
+default paths. `tests/update-banner.js` - 51 checks in the gate's `js:` set: reads the real `ui/app.js`
+functions and runs them against a stub DOM (toast + badge drawn, dismiss keeps the badge, badge acts,
+current clears both), and pins the one sentence across `lua/core/update_banner.lua`, `app.js` and the
+CLI. Run them the way the gate does:
 
 ```sh
 WASM_AGENT_LUA_ROOT=$PWD WASM_AGENT_HOME=$(mktemp -d) WA_SCRIPT=scripts/test-release.lua wa --db "$WASM_AGENT_HOME/t.db"
+WASM_AGENT_LUA_ROOT=$PWD WASM_AGENT_HOME=$(mktemp -d) WA_SCRIPT=scripts/test-update-banner.lua wa --db "$WASM_AGENT_HOME/t.db"
+node tests/update-banner.js
 ```
