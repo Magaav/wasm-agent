@@ -1,0 +1,21 @@
+[package]
+name = "wa-stt-remote"
+version = "0.1.0"
+edition = "2021"
+description = "Queue phase 2 for speech: one `stt.requests` queue whose workers may live on another of the owner's nodes — the request payload, the signed wire protocol, the remote-first preference policy and the worker loop. No wasmtime, no I/O of its own."
+license = "MIT"
+
+# Two dependencies, both already in the workspace graph:
+# * `wa-queue` is the queue itself (`stt.requests` is a `wa_queue::Queue` over the producing node's
+#   kv), so a local worker and a remote worker are two workers of one queue with one lease space and
+#   one freshness rule — not a second implementation of either.
+# * `serde_json` is what the existing signed node call already carries (`/node/call` bodies are
+#   JSON); the payload and the wire bodies are JSON objects with a strict key set, decoded by hand so
+#   an unknown field is a refusal and not silently dropped.
+[dependencies]
+wa-queue = { path = "../wa-queue" }
+serde_json = "1"
+
+[lib]
+name = "wa_stt_remote"
+path = "src/lib.rs"

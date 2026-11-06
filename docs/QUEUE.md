@@ -157,6 +157,42 @@ A queue provider on the node that owns the journal, workers anywhere on the rela
 - Migration: the lease is the only thing that must not exist on two nodes at once, and it is one Kv
   key on the provider. A node that joins or leaves changes nothing but who calls `take`.
 
+### What phase 2 has (queue `stt.requests`, speech)
+
+`rust/wa-stt-remote` — a library with no wasmtime, no threads and no I/O of its own — is the part of
+phase 2 that is not the host's and not the component's. It is built and tested (`cargo test -p
+wa-stt-remote`, 18 tests, and the gate runs it in `scripts/test.sh`); the host route and the node
+side are still open and listed at the end of this section.
+
+| piece | what it decided |
+| --- | --- |
+| `request::SttRequest` | the job payload: the audio (inline at most 256 KiB, otherwise a **short-lived fetch handle**), the language snapshot, `fresh_until`, the chat/message ids and the account/generation for the dedupe key. **No text field at all** — an unknown key is a refusal, not something dropped, so a transcript cannot be smuggled into a job record. `Debug` prints sizes and ids, never bytes |
+| `protocol::Envelope` + `Admission` | one signed node call per operation (`take`, `audio`, `beat`, `seg`, `done`, `fail`), the transport's existing `<action>\|<node_id>\|<ts>\|<sha256(body)>` signature, and the checks a producer makes before it answers: target, **caller must be one of the owner's own nodes**, timestamp inside the skew window, signature, and `rid` not replayed. Refusals are fixed words |
+| `policy::Preference` | remote first when it is online and its recent decode is faster; the local worker holds back for `fallback_after_ms` (default 3 s) and then takes the job itself; remote offline or measured slower means no wait at all. Latency is an EWMA with a sample count and a 10-minute lifetime, so a cold or an old estimate is not evidence |
+| `worker::Decoder` | the half both workers share: freshness checked **before** the decode and **before** the settle (a job that goes stale in flight is dropped, never posted late), the lease extended before each segment is published, segments streamed as progress, one settle, and the audio buffer erased and the handle discarded after the job |
+| `worker::RemoteWorker` / `producer::LocalWorker` | the remote long-poll over a `Transport` (implemented by `sim::Relay` in tests; by the node's signed call in production), and the local poll that applies the grace |
+| `producer::Producer` | enqueue (dedupe key, priority 20/10/0, freshness counted from `sent_at`, 6 attempts), `serve_audio` (only the worker that **currently holds the lease**, only while the job is fresh and the handle unexpired), `discard_audio`/`purge_audio` |
+| `metrics` | counters and two lines (`stt-remote v=1 …` totals, `stt-job v=1 job=… by=… took_ms=…`) built from numbers: ids and timings only, never text |
+
+A note on what "faster" is measured on: the remote reports the recognizer's own elapsed time in its
+`done`, so the producing node compares like with like instead of the whole relay round trip.
+
+Still open in phase 2 (each is a piece this crate does not own):
+
+1. **The host route.** Something has to accept a signed `stt-worker/1` envelope on the producing node
+   and act on it as the component's queue — either `/node/call` with the op as the action, or a
+   `/node/queue` route. That is `wa-capabilities/serve.rs` + the queue provider, deliberately not
+   touched here. Until then `sim::Relay` is the only `Transport` and the two-node proof is
+   in-process.
+2. **The node side of the role.** `<config>`/env `stt_worker`, the rendezvous feed behind
+   `RemoteHealth` (online + latency), and a Lua long-poll loop that drives `RemoteWorker` over
+   `nodes.request`. The loop is the part `lua/core` would own; it needs 1.
+3. **The component.** `rust/components/wa-whatsapp`'s `queue.rs`/`recognize.rs` still own their kv
+   queue and their warm recognizer; they would enqueue `SttRequest`s on `stt.requests` and take the
+   local fallback through `LocalWorker`. Its lane split stays the component's decision either way.
+4. **`scripts/fast.sh`** names its Rust crates explicitly; `wa-stt-remote` needs adding to that list
+   (one word) so the day-to-day fast path runs it too. `scripts/test.sh` already does.
+
 ## How the host serves it
 
 Prerequisite met: wasmtime 50 with `component-model-async`. The requirements below are kept as they
@@ -172,7 +208,7 @@ still open:
 | 5 | alert delivery | the sweeper drains `next_alerts()` per component: one bounded log line, and a `kernel.queue.alert` fact on the bus (last 64 retained). An `admin` consumer may still call `next-alerts` itself |
 | 6 | scope by queue | `gate_job` loads the job and refuses it unless its queue is granted; the worker calls also require the queue named in the call to equal the job's own |
 | 7 | observability | the `admin` interface plus `queue_host::status()` (counts per component and granted queue); **not** wired into `/health` or the UI, which this change does not touch |
-| 8 | two-node proof | **open**: one-node only. `rust/components/svc-queue-echo` + `scripts/test-queue-bus-state.lua` prove produce -> consume -> done, dedupe, the progress stream, the admin counts and a refused queue in a running component |
+| 8 | two-node proof | **in process**: `rust/wa-stt-remote`'s simulation runs two nodes (two queues, two clocks, one relay speaking the real signed wire) and proves remote-wins, remote-dies-mid-job → local finishes, stale-never-decoded and the counters. One-node, end to end, is `rust/components/svc-queue-echo` + `scripts/test-queue-bus-state.lua` (produce -> consume -> done, dedupe, the progress stream, the admin counts, a refused queue). **Open**: the host route a real remote worker would call — see "What phase 2 has" above |
 
 Two things a reader should not have to infer: `progress(job-id, after)` is a *snapshot* stream (the
 chunks that exist when it is opened, then it ends), because the library keeps no wake path per job;

@@ -2081,6 +2081,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "wa-stt-remote"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "wa-queue",
+]
+
+[[package]]
 name = "wa-telemetry"
 version = "0.1.0"
 dependencies = [

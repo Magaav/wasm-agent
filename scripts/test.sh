@@ -274,6 +274,10 @@ gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-gr
 # per-component kv through `wa-queue`, `wa-bus` and `wa-state` (docs/QUEUE.md item 1, docs/BUS.md
 # "Retention", docs/STATE.md). It has no wasmtime in it, so it runs here beside the other crates.
 gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-kv
+# Queue phase 2 (docs/QUEUE.md, "Phase 2"): the request payload, the signed worker envelope with its
+# admission rules, the remote-first preference policy and the two-node simulation (two queues, two
+# clocks and a relay in one process). No wasmtime in it, so it runs here beside the other crates.
+gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-stt-remote
 gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-capabilities graph::tests
 # WASI components and service components (docs/COMPONENTS.md, docs/SERVICE-COMPONENTS.md). Three
 # fixtures, one per runner, each with its own end-to-end test in wa-kernel-runtime: `svc-echo-wasip1` (a plain

@@ -134,6 +134,48 @@ them with this connector's `journal.db` read-only and prints ids, states, counts
 side. It never reads a transcript's text out of the journal (`length(...)` only), and its own test
 plants a canary transcript to prove that.
 
+## Remote workers: the strong node decodes for the small one (queue phase 2)
+
+The 2-core node that owns the journal does not have to be the node that decodes. A node whose config
+carries the `stt_worker` role long-polls the producing node's `stt.requests` queue through the relay,
+downloads the audio, decodes it with its own warm `faster-whisper`, and streams the segments back as
+progress. The producing node's own worker is the fallback, so nothing depends on the strong node
+being there.
+
+What is built (2026-11-06, `rust/wa-stt-remote`, `cargo test -p wa-stt-remote`): the request
+payload, the signed worker envelope and its admission rules, the preference policy, both worker
+loops, and a two-node simulation that proves remote-wins, remote-dies-mid-job → local finishes,
+stale-never-decoded and the counters. `docs/QUEUE.md` ("What phase 2 has") names the pieces and the
+four integration steps still open; the component does not enqueue on `stt.requests` yet.
+
+Rules that do not change on the remote path — and where they are enforced:
+
+- **Freshness.** The window still starts when the note was *sent* (`WA_WHATSAPP_FRESH_SECONDS`).
+  `take` on the producing node drops a stale job; a worker checks the same bound before the decode
+  and again before it settles, so a job that goes stale during a slow download is dropped instead of
+  posted late. A result that arrives after the window is never sent.
+- **First lease wins.** One queue, one lease key on the producing node. A remote that takes the job
+  first owns it; the local worker's "hold back for the remote" is only a decision not to take, so
+  two decodes of one note cannot happen.
+- **A vanished node costs a lease, not a note.** A remote that dies mid-job never settles; its lease
+  lapses and the local worker takes the job (`lease_expiries` on the record, counted as a recovery,
+  not as a failed attempt). At-least-once: a transcript whose `done` was lost is produced again.
+- **Preference is measured.** Remote first when it is online and its recent decode is faster than
+  this node's; otherwise — or after a 3 s grace with no remote take — the local worker does it. No
+  fixed "the strong node always wins", and no waiting on a node that is not attached.
+- **Privacy.** The audio crosses only between the owner's own nodes: the producing node refuses a
+  call from any node not in the owner's node list, and the signature, timestamp and request id are
+  checked before the queue is touched. The payload carries a short-lived fetch handle rather than a
+  blob above 256 KiB, only the worker currently holding the lease is served the bytes, and the audio
+  is deleted when the job settles (with a sweeper for what nobody settled). Logs carry ids and
+  timings — the same rule as the `wa-transcript` line: never the audio, never the text.
+
+Knobs: `fallback_after_ms` (default 3000) and the latency estimate's lifetime (default 10 min) are
+`policy::Preference`; the freshness window, attempts (6) and the 256 KiB inline bound are
+`producer::SttPolicy`. A remote that has never decoded anything gets one chance inside the grace,
+which is the named risk of the default: a cold strong node is preferred for up to 3 s on the first
+note before the local worker takes it.
+
 ## Receive → transcript path (2026-10-27)
 
 Goal: an audio never ends failed because it is long or the host is slow, and a
