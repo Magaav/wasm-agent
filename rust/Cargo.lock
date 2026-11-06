@@ -1957,6 +1957,7 @@ dependencies = [
  "wa-queue",
  "wa-state",
  "wa-telemetry",
+ "wa-term",
  "wasmtime",
  "wasmtime-wasi",
  "windows-sys 0.61.2",
@@ -2020,6 +2021,16 @@ name = "wa-telemetry"
 version = "0.1.0"
 dependencies = [
  "serde_json",
+]
+
+[[package]]
+name = "wa-term"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "libc",
+ "serde_json",
+ "wa-host-support",
 ]
 
 [[package]]

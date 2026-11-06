@@ -1,0 +1,15 @@
+[package]
+name = "wa-term"
+version = "0.1.0"
+edition = "2021"
+
+# The console: the terminal/editor/input/panel surface and the transcript it draws. It is a leaf in
+# the split - nothing below it needs it and nothing in it needs the host - so a UI change rebuilds it
+# and the binary, and nothing else.
+[dependencies]
+wa-host-support = { path = "../wa-host-support" }
+serde_json = "1"
+base64 = "0.23"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

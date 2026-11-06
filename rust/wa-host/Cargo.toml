@@ -12,6 +12,8 @@ path = "src/main.rs"
 wa-host-support = { path = "../wa-host-support" }
 # The node policy, its telemetry registry and the bounded stores both write into (docs/GRANT-POLICY.md).
 wa-governance = { path = "../wa-governance" }
+# The console: terminal, editor, input, panels and the transcript they draw.
+wa-term = { path = "../wa-term" }
 wa-operation = { path = "../wa-operation" }
 wa-jobs = { path = "../wa-jobs" }
 # The grant policy, telemetry and bounded-store libraries this host enforces (docs/GRANT-POLICY.md,
