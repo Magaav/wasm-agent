@@ -83,7 +83,7 @@ one request can yield many items as a `stream<T>`; both versions are served side
 | runtime, loader, pins (`components`, `service`, `component_mcp`, `plugins`, `invoke`) | `graph_*` (indexer, queries) — **done, stream C**: see "C1 results" below |
 | node identity + transport (`node_identity`, `sign`, `verify`, `relay`, `binding_*`) | code mode (`quickjs` — already wasm) |
 | supervised processes (`exec`, `operation`, `subagent`) — until a process-less design exists | providers and the agent loop (today in the Lua core) |
-| durable state for the kernel itself (`sql_*`, `db_ready`) | MCP servers (Node scripts → components, `mcp-whatsapp` done) |
+| durable state for the kernel itself (`sql_*`, `db_ready`; the `memory.db` file) | memory logic (`wa:memory` component, see below) · MCP servers (Node scripts → components, `mcp-whatsapp` done) |
 | console/device I/O for the CLI (`terminal_*`, `input_*`, `panel`, `audio`) | channels (`wa-whatsapp` done; connector logic next) |
 | files/paths under grants (`read_file`, `write_file`, `list_dir`, `grep`, `paths`) | STT, OCR (wasi-nn), file search |
 
@@ -404,3 +404,26 @@ against a phone from this lane (no pairing, no messages — see
    health-gated switch, profiles.
 5. Carve-out in batches, smallest and most frequently changed first; the Lua core as one component.
 6. Watchdog replaces the sentinel for kernel upgrades.
+
+## Memory as a component (planned, phase 4, after A2.4)
+
+Today the memory logic (`remember`/`recall`, sessions, compaction, the journal sync loop) is Lua in the
+core, and it reaches `memory.db` through the kernel's `sql_*` capabilities (docs/MEMORY.md). The split
+follows the three layers:
+
+| part | where | why |
+| --- | --- | --- |
+| memory **logic**: recall ranking, full-text and later semantic search (wasi-nn embeddings), compaction and retention policy, sync policy | a `memory` component exporting `wa:memory` (remember, recall, sessions, session, search, resume) | changes often, hot-swappable, a capability seam others can provide |
+| memory **storage**: the SQLite file, durability, locking, backups | kernel | something native owns the file; several consumers share it; it must survive any component swap |
+
+- The component gets a scoped grant to its own database (`wa:kernel/sql` limited to `memory.db`); the
+  agent (`agent-core`), the UIs and other components call `wa:memory`, never SQL. Governance audits and
+  rate-limits it like any capability; a component that only needs `recall` cannot read transcripts.
+- Journal sync moves onto the new plumbing: entries published as `memory.*` bus events, delivery to
+  each peer as queue jobs (retries, dead-letter) instead of the cursor loop; semantics unchanged (signed,
+  idempotent, never echoed).
+- The existing schema is adopted by wa-state (schema version, never-rewritten migrations).
+- Because the transcript stays the context and the file stays in the kernel, a kernel swap through the
+  watchdog loses nothing: the CLI/UI reconnect and the thread continues (seamless update).
+
+Order: after A2.4 (the agent loop already calls from inside wasm), before the seamless-update work.
