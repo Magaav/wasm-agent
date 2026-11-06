@@ -1952,6 +1952,7 @@ dependencies = [
  "wa-grant-policy",
  "wa-host-support",
  "wa-jobs",
+ "wa-kernel-runtime",
  "wa-kv",
  "wa-operation",
  "wa-queue",
@@ -1980,6 +1981,28 @@ version = "0.1.0"
 dependencies = [
  "rusqlite",
  "serde_json",
+]
+
+[[package]]
+name = "wa-kernel-runtime"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "ring",
+ "rusqlite",
+ "serde_json",
+ "tokio",
+ "tungstenite",
+ "ureq",
+ "wa-bus",
+ "wa-governance",
+ "wa-grant-policy",
+ "wa-host-support",
+ "wa-kv",
+ "wa-queue",
+ "wa-state",
+ "wasmtime",
+ "wasmtime-wasi",
 ]
 
 [[package]]

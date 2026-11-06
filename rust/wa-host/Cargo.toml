@@ -16,6 +16,9 @@ wa-governance = { path = "../wa-governance" }
 wa-term = { path = "../wa-term" }
 # Node identity and the rendezvous/relay transport (docs/KERNEL.md, carve-out map).
 wa-rendezvous = { path = "../wa-rendezvous" }
+# The wasm runtime half of the microkernel: engine, pins, the v1/v2 service runners, the queue/bus/state
+# providers (docs/COMPONENTS.md, docs/SERVICE-COMPONENTS.md).
+wa-kernel-runtime = { path = "../wa-kernel-runtime" }
 wa-operation = { path = "../wa-operation" }
 wa-jobs = { path = "../wa-jobs" }
 # The grant policy, telemetry and bounded-store libraries this host enforces (docs/GRANT-POLICY.md,

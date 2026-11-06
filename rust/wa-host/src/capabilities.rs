@@ -173,10 +173,10 @@ pub const REGISTRY: &[Capability] = &[
     upvalue!("plugins", ReadOnly, crate::host::plugins, "List the registered WASM plugins and their declared parameters"),
     upvalue!("invoke", RunsProcess, crate::host::invoke, "Invoke one registered WASM plugin with JSON arguments"),
     // ---- WASI components ---------------------------------------------------------------------
-    plain!("components", ReadOnly, crate::components::components, "List installed WASI components: pin state and declared capabilities"),
-    plain!("service", RunsProcess, crate::services::service, "Start, stop, inspect or read the log of a supervised long-lived WASI service component, with exactly its granted capabilities"),
-    plain!("component_mcp", RunsProcess, crate::components::component_mcp, "One MCP request (probe or call) against a pinned WASI component, with exactly the granted env/file/network capabilities"),
-    plain!("state", WritesFiles, crate::state_host::capability, "Component state: status, dry run, export, import and verify of a component's versioned kv namespace, its migration journal and its snapshots"),
+    plain!("components", ReadOnly, wa_kernel_runtime::components::components, "List installed WASI components: pin state and declared capabilities"),
+    plain!("service", RunsProcess, wa_kernel_runtime::services::service, "Start, stop, inspect or read the log of a supervised long-lived WASI service component, with exactly its granted capabilities"),
+    plain!("component_mcp", RunsProcess, wa_kernel_runtime::components::component_mcp, "One MCP request (probe or call) against a pinned WASI component, with exactly the granted env/file/network capabilities"),
+    plain!("state", WritesFiles, wa_kernel_runtime::state_host::capability, "Component state: status, dry run, export, import and verify of a component's versioned kv namespace, its migration journal and its snapshots"),
     // ---- node governance (docs/GRANT-POLICY.md, docs/TELEMETRY.md) ----------------------------
     plain!("policy_status", ReadOnly, wa_governance::node_policy::capability, "The grant policy's state as JSON: file and load error, decision counters, recent refusals without target text, and the audit trail's health"),
     plain!("telemetry", ReadOnly, wa_governance::node_telemetry::capability, "This node's telemetry as Prometheus text or JSON: component and host-call latency, service health, sampled spans, rollups and the bounded stores' usage"),

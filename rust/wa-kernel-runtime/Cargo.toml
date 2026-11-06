@@ -1,0 +1,36 @@
+[package]
+name = "wa-kernel-runtime"
+version = "0.1.0"
+edition = "2021"
+
+# The wasm runtime half of the microkernel (docs/KERNEL.md, docs/COMPONENTS.md,
+# docs/SERVICE-COMPONENTS.md): the engine and its pins, the v1 runner, the WASI 0.3 (`wa:kernel@0.2`)
+# async runner, the host-side websocket/http/kv the services import, the speech bridge, and the three
+# providers a component subscribes through - `wa:queue`, `wa:bus`, `wa:state`.
+#
+# It sits above `wa-governance` (the policy and telemetry every call passes through) and
+# `wa-host-support` (the Lua ABI its entry points answer on, the component directory), and below the
+# capability crate and the binary. Nothing here imports the capability crate: `push_json` is the only
+# answer shape it shares with it, and that lives in `wa-host-support`.
+[dependencies]
+wa-host-support = { path = "../wa-host-support" }
+wa-governance = { path = "../wa-governance" }
+wa-grant-policy = { path = "../wa-grant-policy" }
+wa-queue = { path = "../wa-queue" }
+wa-bus = { path = "../wa-bus" }
+wa-state = { path = "../wa-state" }
+wa-kv = { path = "../wa-kv" }
+anyhow = "1"
+ring = "0.17"
+serde_json = "1"
+rusqlite = { version = "0.32", features = ["bundled"] }
+ureq = { version = "3", features = ["json"] }
+# component-model-async: wa:kernel@0.2 components (WASI 0.3) suspend instead of polling, and the host
+# drives them with `store.run_concurrent` (service_components_v2.rs).
+wasmtime = { version = "50", default-features = false, features = ["cranelift", "runtime", "std", "component-model", "component-model-async", "async", "gc", "gc-drc", "anyhow"] }
+# p3: `wasi:clocks@0.3.0`, the suspending timer a 0.2 guest awaits; it is built on tokio's timer,
+# so the 0.2 runner owns a current-thread tokio runtime (rt + time only, no I/O driver).
+wasmtime-wasi = { version = "50", default-features = false, features = ["p1", "p2", "p3"] }
+tokio = { version = "1", features = ["rt", "time"] }
+# Host-side websocket for service components (service_io.rs).
+tungstenite = { version = "0.30", default-features = false, features = ["handshake", "rustls-tls-webpki-roots"] }

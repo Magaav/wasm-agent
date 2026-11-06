@@ -355,7 +355,7 @@ fn call(entry: &Arc<Entry>, tool: &str, mut arguments: Value, deadline: Instant)
         "env": {"WA_GRAPH_PARSE_TIMEOUT_MS": "WA_GRAPH_PARSE_TIMEOUT_MS"},
         "timeout_seconds": remaining,
     });
-    let answer = crate::components::mcp(&request);
+    let answer = wa_kernel_runtime::components::mcp(&request);
     let _ = lock.unlock();
     drop(calls);
     if answer["ok"] != json!(true) {
