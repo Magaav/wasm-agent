@@ -128,6 +128,8 @@ Refused in v1 with `unsupported_in_component_v1:<name>`: `http_sse` (Lua line ca
 `input_start`, `input_editor`, `input_commands`, `input_held`, `input_take`, `input_stop`,
 `input_idle`, `editor_status`, `editor_footer`, `panel`, `ticker` (the live console), plus any call
 whose argument is a function or a table. `http_stream` crosses (four strings in, JSON out).
+**A2.2, below, lifted the `http_sse`, table-argument and console-output refusals**; the interactive
+reader and a function argument stay refused, now naming the reason.
 WASI side: stdio and env inherited, the working directory preopened as `.` (so `io.open` on an
 absolute path fails in the guest; the core reads files through `host.read_file`), `os.execute`,
 `os.tmpname`, `io.popen` and `io.tmpfile` fail.
@@ -182,6 +184,82 @@ recognize: async func(request: recognize-request) -> stream<segment>;
 // kv (put/get/del/del_prefix/scan), log, lifecycle: unchanged, sync — a local store answer is
 // sub-millisecond and a stream would buy nothing.
 ```
+
+### A2.2 results — `http_sse` and the live console as streams (05/11, wasm_the_first)
+
+A2.1 refused every capability that takes a Lua callback, every call carrying a table argument, and
+all twelve console capabilities. A2.2 removes the first two and most of the third **without changing
+the Lua-facing API**: `lua/core` is untouched, because the guest-side shim keeps
+`host.http_sse(method, url, headers_json, body, on_line, timeout?)` exactly as the native interpreter
+has it, and a table argument now arrives as a table.
+
+**`http_sse` as a stream.** A guest cannot be re-entered while it is blocked inside a host call, so
+the kernel runs the *unchanged* native `http_sse` (`rust/wa-host/src/host.rs`) on a thread of its own,
+with the guest's line callback replaced by one that hands each line over and blocks for the guest's
+verdict. `wa:kernel/host` grew three functions beside `call` — `open`/`next`/`close`, with
+`next: func(handle, option<verdict>) -> result<option<list<u8>>, string>` — and `glue.c` loops over
+them calling the script's own callback. Because the request, the timeouts, the cancellation, the
+budget, the termination names and the JSON answer are the native code's, the answer is byte-identical
+to a native call's, including `callback_stopped` when the callback returns `false` and
+`line_callback_failed` when it raises. A verdict travels with the *next* pull and is `none` on the
+first call, which is what stops the read running ahead of the guest deciding about the last line —
+the one defect the first version had (a `stop` then ended the read one line late, `lines:4` instead
+of `lines:3`), caught by the parity test and not by review.
+
+Why not `stream<list<u8>>` yet: the C guest has the async ABI but no `await` ("WASI 0.3 step 0"
+above), so a `stream<T>` would still be pulled one item at a time from Lua's point of view and would
+have to be waited on by hand for nothing. The sync handle is the cheap direction today, and its
+contract — one item per call, nothing read ahead — is what a `stream<list<u8>>` replaces later
+without the Lua changing.
+
+**Table arguments.** A Lua table crosses as JSON (`value.json`), so the capability receives a real
+table instead of a refusal: arrays, objects and nesting round-trip, and `1` stays an integer while
+`1.0` stays a float (Lua prints them differently, so the encoder keeps the `.0`). A table JSON cannot
+carry — holding a function/thread/userdata, a key that is neither a string nor an array index, a
+non-finite number, or a non-UTF-8 string — is refused naming the cause. Function arguments are still
+refused except for the callback `http_sse` owns. **Results are unchanged** (a scalar or a flat string
+map): the guest has no JSON decoder, so a table result the kernel cannot place is still refused
+rather than encoded. That gap is the recursive `list`/`map` variant or a decoder in the guest.
+
+**The console.** `ticker`, `panel`, `editor_status` and `editor_footer` cross now and answer exactly
+what they answer to a native `wa run` with no CLI in front of them (`nil`, `{"action":"unsupported"}`,
+`false`) — same binary, same script, same output. What stays refused is the interactive **reader**
+(`input_start/editor/commands/held/take/stop/idle`), now with a reason: a `--core-component` run has
+no editor to read into, and starting the reader would take the guest's own stdin. `lua/core/chat.lua`
+already guards every one of those on `input.editor`, so nothing in the core calls them in a
+non-interactive run.
+
+Same binary, same script, fresh home and ledger per run, release build, median of 3, wall ms:
+
+| script | checks | native | component | component `run` only |
+| --- | --- | --- | --- | --- |
+| test-mcp-component | 24 | 5 807 | 6 238 | 5 777 |
+| test-service-component | 38 | 4 762 | 5 289 | 4 813 |
+| test-batch-tools | 245 | 4 897 | 7 543 | 6 945 |
+| test-tool-cues | 120 | 722 | 1 173 | 729 |
+| core-component streams (new) | 31 | 302 | 676 | — |
+
+Every block's output is identical between the two modes except `test-batch-tools`' two
+`*_measurement` rows, whose `wall_ms` and byte counts differ between any two runs of the *same* mode
+(`scripts/test.sh` already matches only its `batch tools ok` line). Compilation is the component's
+fixed cost here: 362–402 ms per cold load on this machine — the `cwasm` cache in
+`$HOME/.wasm-agent/cache/core-component` did not hit in the MSYS shell these numbers were taken in
+(`HOME` is `/c/Users/...`, which the kernel resolves as a relative path), so every run paid it.
+
+The new `scripts/fixtures/core-component-streams.lua` (a fixture, not a standalone fast-path test: it
+needs a server) runs its checks in **both** modes, and `scripts/test-core-component-streams.mjs` fails
+when the two outputs differ (one local SSE stub on
+127.0.0.1, no internet): lines in order with the blank ones counted, `callback_stopped`,
+`line_callback_failed` with the callback's own text, a 500 as `http_error` with its body, the three
+pre-socket refusals in the native words, a line delivered while the socket is still open (the stub
+holds it 250 ms after the first line, so a buffered reader would fail the timing check), table
+arguments in three shapes, and the four console answers above. What it does **not** cover: a ticker
+that actually draws (its animation frames go to the same stdout, so the harness runs with
+`WASM_AGENT_CLI_TICKER=off` and the `true` answer is unverified), and `input_start`/`input_stop`
+end-to-end (the native side would start the CLI's reader; their refusal is a unit test in
+`core_component.rs`). A stream the script abandons is stopped when the handle is dropped, not joined:
+the reader thread exits at its next line or read timeout, which is fine for the one-stream-at-a-time
+foreground use and a thing to revisit before anything opens streams concurrently.
 ### C1 results — the code graph as a component (05/11, wasm_the_first)
 
 The graph is the first capability moved out of `wa` without touching Lua. The 14 `host.graph_*`

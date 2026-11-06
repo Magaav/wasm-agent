@@ -1187,6 +1187,13 @@ if AGENT_CORE="$(env -u CARGO_TARGET_DIR bash scripts/build-agent-core.sh 2>/dev
   WASM_AGENT_HOME="$CORE_HOME" WA_COMPONENTS_DIR="$COMPONENTS_PROOF" "$BIN" --db "$DB.core-component" --core-component "$AGENT_CORE" "$WASM_AGENT_LUA_ROOT/scripts/test-mcp-component.lua" | grep 'component checks:'
   WASM_AGENT_HOME="$CORE_HOME" WA_COMPONENTS_DIR="$COMPONENTS_PROOF" "$BIN" --db "$DB.core-service" --core-component "$AGENT_CORE" "$WASM_AGENT_LUA_ROOT/scripts/test-service-component.lua" | grep 'service checks:'
   WASM_AGENT_HOME="$CORE_HOME" "$BIN" --db "$DB.core-batch-tools" --core-component "$AGENT_CORE" "$WASM_AGENT_LUA_ROOT/scripts/test-batch-tools.lua" | grep 'batch tools ok'
+  WASM_AGENT_HOME="$CORE_HOME" "$BIN" --db "$DB.core-tool-cues" --core-component "$AGENT_CORE" "$WASM_AGENT_LUA_ROOT/scripts/test-tool-cues.lua" | grep 'tool cues ok'
+  # A2.2: the streaming and console capabilities that v1 refused - `host.http_sse` (a Lua callback,
+  # now driven by the guest over the kernel's stream handle), table arguments, and the console's
+  # output capabilities - give the *same* answers native and inside the component. The harness starts
+  # a local SSE stub (no internet), runs scripts/fixtures/core-component-streams.lua both ways and fails
+  # when the two outputs differ.
+  WA_BIN="$BIN" AGENT_CORE="$AGENT_CORE" gate_run node scripts/test-core-component-streams.mjs
 else
   echo "note: agent-core not built (no wasi-sdk); core-component checks skipped"
 fi

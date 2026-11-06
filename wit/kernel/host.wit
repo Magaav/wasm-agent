@@ -1,16 +1,31 @@
 package wa:kernel@0.1.0;
 
-/// The generic host-call bridge (docs/KERNEL.md, "A2.1"): one import through which a guest running
-/// the Lua core reaches every `host.*` capability the native interpreter has. The kernel answers by
-/// calling the capability's existing C function on a native Lua state, so the inventory in
-/// `capabilities.rs` stays the one list and nothing is reimplemented per guest.
+/// The generic host-call bridge (docs/KERNEL.md, "A2.1", "A2.2"): one import through which a guest
+/// running the Lua core reaches every `host.*` capability the native interpreter has. The kernel
+/// answers by calling the capability's existing C function on a native Lua state, so the inventory
+/// in `capabilities.rs` stays the one list and nothing is reimplemented per guest.
 ///
 /// v1 is deliberately untyped: a capability takes and returns Lua scalars. Lua strings are byte
 /// strings, hence `bytes` (binary-safe, no UTF-8 assumption). Lua 5.4 keeps integers and floats
 /// apart (`tostring(5)` is "5", `tostring(5.0)` is "5.0"), hence `integer` beside `number`.
 /// Two capabilities (`paths`, `platform`) return a flat table of strings: `string-map`, results only.
-/// Capabilities that need a Lua function argument (a callback) or the live console are refused
-/// with `unsupported_in_component_v1:<name>`.
+///
+/// A2.2 added two things and refused less:
+///
+/// * `json` carries a Lua **table** across as JSON in both directions, so a call with a table
+///   argument works and the capability receives a table, not a string. Metatables, function values
+///   and non-UTF-8 strings cannot be represented and are refused with a reason naming the cause.
+/// * `open`/`next`/`close` are the **stream form** of a capability whose answer arrives one item at
+///   a time. `http_sse` was refused in v1 because it takes a Lua callback the host cannot re-enter;
+///   the guest-side shim now loops over the handle and calls the guest's callback itself, so the
+///   Lua-facing signature is unchanged. The pull shape (one item per `next`) is what keeps "one line
+///   at a time, socket still open" true without buffering, and it is the shape a WASI 0.3
+///   `stream<list<u8>>` replaces without the shim changing: the C guest has the async ABI but no
+///   `await`, so a sync handle the Lua loop drives is the cheap direction today.
+///
+/// Neither addition renames an import: `wa:kernel/host@0.1.0` is imported by exactly one guest
+/// (`rust/components/agent-core`), built from this tree by `scripts/build-agent-core.sh`, so an
+/// agent-core.wasm older than this file simply fails to link and is rebuilt.
 interface host {
     variant value {
         nil,
@@ -19,11 +34,42 @@ interface host {
         number(f64),
         bytes(list<u8>),
         string-map(list<tuple<string, list<u8>>>),
+        /// A Lua table as JSON text (`list<u8>`, so a malformed one is a parse error and not a
+        /// lossy string conversion). Arrays, objects and nesting round-trip; `1` and `1.0` stay
+        /// apart; nil holes in an array are refused rather than silently dropped.
+        json(list<u8>),
+    }
+
+    /// What the guest decided about the item it was last handed. `continue` keeps the read going,
+    /// `stop` ends it successfully (the capability's own answer says how), and `fail` replaces the
+    /// item with the guest's message - the same three outcomes a native Lua callback has by
+    /// returning true/false/raising.
+    variant verdict {
+        continue,
+        stop,
+        fail(string),
     }
 
     /// Call `host.<name>(args...)`. `ok` carries every value the capability returned; `err` carries
-    /// a raised Lua error's text (or the refusal above).
+    /// a raised Lua error's text (or a refusal naming what cannot cross).
     call: func(name: string, args: list<value>) -> result<list<value>, string>;
+
+    /// Start a capability's **stream form** and return its handle. `err` carries a raised Lua error's
+    /// text, or `unsupported_stream_capability:<name>` when the capability has no stream form.
+    open: func(name: string, args: list<value>) -> result<u64, string>;
+
+    /// The next item, or `none` when there is none left; `close` then carries the capability's
+    /// answer. `verdict` describes the item handed over by the **previous** `next`, and is `none` on
+    /// the first call: the read learns what became of a line before it reads the next one, so a
+    /// `stop`/`fail` here ends the read at that line and not one past it. Deliver a decision through
+    /// `next`; `close` cannot recall a read that has already been asked to advance.
+    next: func(handle: u64, verdict: option<verdict>) -> result<option<list<u8>>, string>;
+
+    /// End the stream and return the capability's own result - for `http_sse`, the same JSON text a
+    /// native call returns, byte for byte. `verdict` is for a guest that stops pulling without
+    /// saying so in a `next` (it stops the reader instead of leaving it blocked on a line nobody
+    /// will take). Closing an unknown or already closed handle is an error, never a silent success.
+    close: func(handle: u64, verdict: verdict) -> result<list<value>, string>;
 }
 
 /// The Lua core as one component: imports the bridge (+ lifecycle and log), exports `run`.
