@@ -1922,6 +1922,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "wa-core-pool-bench"
+version = "0.1.0"
+dependencies = [
+ "wa-capabilities",
+ "wa-host-support",
+ "wa-kernel-runtime",
+]
+
+[[package]]
 name = "wa-fake-kernel"
 version = "0.1.0"
 dependencies = [

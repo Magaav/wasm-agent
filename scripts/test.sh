@@ -1225,6 +1225,28 @@ if AGENT_CORE="$(env -u CARGO_TARGET_DIR bash scripts/build-agent-core.sh 2>/dev
   WASM_AGENT_HOME="$CORE_HOME" WA_COMPONENTS_DIR="$COMPONENTS_PROOF" "$BIN" --db "$DB.core-service" --core-component "$AGENT_CORE" "$WASM_AGENT_LUA_ROOT/scripts/test-service-component.lua" | grep 'service checks:'
   WASM_AGENT_HOME="$CORE_HOME" "$BIN" --db "$DB.core-batch-tools" --core-component "$AGENT_CORE" "$WASM_AGENT_LUA_ROOT/scripts/test-batch-tools.lua" | grep 'batch tools ok'
   WASM_AGENT_HOME="$CORE_HOME" "$BIN" --db "$DB.core-tool-cues" --core-component "$AGENT_CORE" "$WASM_AGENT_LUA_ROOT/scripts/test-tool-cues.lua" | grep 'tool cues ok'
+  # A2.3 (docs/KERNEL.md): the same guest through the *instance pool* - one compiled component on a
+  # pooling allocator, one instance per concurrent caller, acquire -> run -> release - answers exactly
+  # what the one-shot component run above answered. `wa-core-pool-bench` is the pool's caller outside
+  # the binary (rust/wa-core-pool-bench); the workspace build above produces it beside `wa`. Two
+  # proofs: the four scripts' own ok-lines, and a byte comparison of the whole output for the fast one
+  # (test-batch-tools prints two wall_ms rows that differ between any two runs, so it is grepped, not
+  # diffed). Nothing here needs the network.
+  POOL_BIN="rust/target/release/wa-core-pool-bench"
+  [ ! -f "$POOL_BIN.exe" ] || POOL_BIN="$POOL_BIN.exe"
+  if [ -x "$POOL_BIN" ] || [ -f "$POOL_BIN.exe" ]; then
+    WASM_AGENT_HOME="$CORE_HOME" WA_COMPONENTS_DIR="$COMPONENTS_PROOF" WA_AGENT_DB="$DB.core-pool-mcp" "$POOL_BIN" gate "$AGENT_CORE" "$WASM_AGENT_LUA_ROOT/scripts/test-mcp-component.lua" 2>/dev/null | grep 'component checks:'
+    WASM_AGENT_HOME="$CORE_HOME" WA_COMPONENTS_DIR="$COMPONENTS_PROOF" WA_AGENT_DB="$DB.core-pool-service" "$POOL_BIN" gate "$AGENT_CORE" "$WASM_AGENT_LUA_ROOT/scripts/test-service-component.lua" 2>/dev/null | grep 'service checks:'
+    WASM_AGENT_HOME="$CORE_HOME" WA_AGENT_DB="$DB.core-pool-batch-tools" "$POOL_BIN" gate "$AGENT_CORE" "$WASM_AGENT_LUA_ROOT/scripts/test-batch-tools.lua" 2>/dev/null | grep 'batch tools ok'
+    WASM_AGENT_HOME="$CORE_HOME" WA_AGENT_DB="$DB.core-pool-tool-cues" "$POOL_BIN" gate "$AGENT_CORE" "$WASM_AGENT_LUA_ROOT/scripts/test-tool-cues.lua" 2>/dev/null | grep 'tool cues ok'
+    diff <(WASM_AGENT_HOME="$CORE_HOME" "$BIN" --db "$DB.core-pool-component-tool-cues" --core-component "$AGENT_CORE" "$WASM_AGENT_LUA_ROOT/scripts/test-tool-cues.lua") \
+         <(WASM_AGENT_HOME="$CORE_HOME" WA_AGENT_DB="$DB.core-pool-pooled-tool-cues" "$POOL_BIN" gate "$AGENT_CORE" "$WASM_AGENT_LUA_ROOT/scripts/test-tool-cues.lua" 2>/dev/null)
+    # Four callers holding four leases at once: each runs on an instance no other caller has used, which
+    # is the promise `serve`, the subagent supervisor and the node threads need from a pool.
+    WASM_AGENT_HOME="$CORE_HOME" WA_AGENT_DB="$DB.core-pool-concurrency" "$POOL_BIN" concurrency "$AGENT_CORE" 4 "$WASM_AGENT_LUA_ROOT/benchmarks/agent-core-pool/fixtures/parallel.lua" | grep 'pool concurrency ok'
+  else
+    echo "note: wa-core-pool-bench not built; the pooled agent-core checks are skipped"
+  fi
   # A2.2: the streaming and console capabilities that v1 refused - `host.http_sse` (a Lua callback,
   # now driven by the guest over the kernel's stream handle), table arguments, and the console's
   # output capabilities - give the *same* answers native and inside the component. The harness starts

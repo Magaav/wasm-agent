@@ -1,0 +1,19 @@
+[package]
+name = "wa-core-pool-bench"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# The measurements and the pooled-path runner for A2.3 (docs/KERNEL.md): the agent-core instance pool
+# lives in `wa-capabilities::core_component`, and this crate is the caller that has no `wa-host` binary
+# behind it - the gate's pooled blocks, the medians, and the concurrency run. It is NOT part of the
+# shipping binary: the pool's home is the kernel, and the CLI wiring is the integration step A2.3
+# names for after the WASI 0.3 work lands.
+[dependencies]
+wa-capabilities = { path = "../wa-capabilities" }
+wa-kernel-runtime = { path = "../wa-kernel-runtime" }
+wa-host-support = { path = "../wa-host-support" }
+
+[[bin]]
+name = "wa-core-pool-bench"
+path = "src/main.rs"

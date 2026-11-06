@@ -7,6 +7,11 @@
  *   the same table its native interpreter has (installed lua-core tree, else compiled in), and
  *   assignment still overrides, as tests rely on.
  * - `dofile` is the native bootstrap string, byte for byte.
+ * - the two answers above are the immutable part of a boot, so they are cached for the life of the
+ *   **instance** (`snapshot_*`, A2.3): a pooled instance answers many runs, and run 2 of a script
+ *   must not pay again for what run 1 asked the kernel. Every run still gets a fresh `lua_State`, so
+ *   globals, `package.loaded` and the stack are exactly as fresh as a one-shot `--core-component`
+ *   run promises; only the kernel's own constants survive.
  * - stdout is flushed before every host call, so guest prints and host output keep their order.
  * - a **table** argument crosses as JSON (`slot_from`, `json_value`), so a capability receives a
  *   table rather than a refusal; a function argument still cannot cross, except the one place a
@@ -308,6 +313,91 @@ static int host_fn(lua_State *L) {
   return forward(L, name, nlen, 1, lua_gettop(L));
 }
 
+/* ---- the instance snapshot (A2.3) ------------------------------------------------------------
+ *
+ * A pooled instance answers many runs (rust/wa-capabilities/src/core_component.rs). Each run still
+ * gets a fresh `lua_State`, so nothing one script set can be seen by the next - that is the promise a
+ * one-shot `--core-component` run makes and it is kept. What is *not* per-run is what the kernel
+ * answers once and never changes for the life of this instance:
+ *
+ *   - `__names`: the capability registry's names, a process constant;
+ *   - `__embedded`: the shipping module sources, which the native interpreter reads into its
+ *     `EMBEDDED` table once at boot.
+ *
+ * Both are cached here, so run 2 of the same script asks the kernel for neither. That is the whole
+ * snapshot: the guest's immutable boot, reused; the guest's mutable state, discarded per run. The
+ * cache lives in the guest instance, so a new instance starts empty and a retired one takes it with
+ * it. Nothing here can go stale: the registry cannot change inside a process, and the kernel's
+ * `EMBEDDED` is built at boot from the installed tree or the compiled-in copy. */
+typedef struct SnapMod { char *path; size_t plen; char *src; size_t slen; struct SnapMod *next; } SnapMod;
+
+static SnapMod *SNAPSHOT_MODULES = NULL;
+static char *SNAPSHOT_NAMES = NULL;
+static size_t SNAPSHOT_NAMES_LEN = 0;
+static int SNAPSHOT_NAMES_READY = 0;
+
+/* The registry's names, asked of the kernel once per instance; NULL when the kernel refused (the next
+ * run asks again rather than remembering a failure). */
+static const char *snapshot_names(lua_State *L, size_t *len) {
+  if (!SNAPSHOT_NAMES_READY) {
+    int base = lua_gettop(L);
+    int n = forward(L, "__names", 7, 0, 0);
+    if (n >= 1 && lua_type(L, base + 1) == LUA_TSTRING) {
+      size_t got = 0;
+      const char *p = lua_tolstring(L, base + 1, &got);
+      SNAPSHOT_NAMES = (char *)malloc(got + 1);
+      if (SNAPSHOT_NAMES) {
+        memcpy(SNAPSHOT_NAMES, p, got);
+        SNAPSHOT_NAMES[got] = 0;
+        SNAPSHOT_NAMES_LEN = got;
+        SNAPSHOT_NAMES_READY = 1;
+      }
+    }
+    lua_settop(L, base);
+    if (!SNAPSHOT_NAMES_READY) return NULL;
+  }
+  *len = SNAPSHOT_NAMES_LEN;
+  return SNAPSHOT_NAMES;
+}
+
+/* EMBEDDED[k] from the instance snapshot: the first read of a module asks the kernel, every later
+ * read - from this run or any other - pushes the bytes already held. 1 with the string on the stack,
+ * or 0 with nothing pushed (the kernel does not know the module, exactly as before). */
+static int snapshot_embedded(lua_State *L, int idx) {
+  size_t plen = 0;
+  const char *path = lua_tolstring(L, idx, &plen);
+  if (!path) return 0;
+  for (SnapMod *m = SNAPSHOT_MODULES; m; m = m->next) {
+    if (m->plen == plen && memcmp(m->path, path, plen) == 0) {
+      lua_pushlstring(L, m->src, m->slen);
+      return 1;
+    }
+  }
+  int base = lua_gettop(L);
+  lua_pushvalue(L, idx);                                  /* argument at base + 1 */
+  int n = forward(L, "__embedded", 10, base + 1, 1);      /* answer at base + 2 */
+  if (n < 1 || lua_type(L, base + 2) != LUA_TSTRING) { lua_settop(L, base); return 0; }
+  size_t slen = 0;
+  const char *src = lua_tolstring(L, base + 2, &slen);
+  SnapMod *m = (SnapMod *)calloc(1, sizeof *m);
+  char *copy = (char *)malloc(slen + 1);
+  char *key = (char *)malloc(plen + 1);
+  if (m && copy && key) {
+    memcpy(copy, src, slen); copy[slen] = 0;
+    memcpy(key, path, plen); key[plen] = 0;
+    m->path = key; m->plen = plen; m->src = copy; m->slen = slen;
+    m->next = SNAPSHOT_MODULES;
+    SNAPSHOT_MODULES = m;
+    lua_settop(L, base);
+    lua_pushlstring(L, m->src, m->slen);
+    return 1;
+  }
+  /* Out of memory is not a cache miss to hide: hand the caller what the kernel said, uncached. */
+  free(m); free(copy); free(key);
+  lua_settop(L, base + 2);
+  return 1;
+}
+
 /* ---- http_sse: the one capability that calls back into Lua ---------------------------------
  *
  * Native, `host.http_sse(method, url, headers, body, on_line, timeout?)` keeps the socket open and
@@ -424,16 +514,15 @@ static int host_index(lua_State *L) {
   return 1;
 }
 
-/* EMBEDDED.__index(t, k): ask the kernel for module k, cache it */
+/* EMBEDDED.__index(t, k): the instance snapshot, which asks the kernel for a module once */
 static int embedded_index(lua_State *L) {
   if (lua_type(L, 2) != LUA_TSTRING) return 0;
   int base = lua_gettop(L);
-  int n = forward(L, "__embedded", 10, 2, 1);
-  if (n < 1 || lua_type(L, base + 1) != LUA_TSTRING) return 0;
-  lua_settop(L, base + 1);
+  if (!snapshot_embedded(L, 2)) return 0;
   lua_pushvalue(L, 2);
   lua_pushvalue(L, -2);
   lua_rawset(L, 1);
+  lua_settop(L, base + 1);
   return 1;
 }
 
@@ -470,12 +559,14 @@ static int boot(lua_State *L) {
   RunArgs *a = (RunArgs *)lua_touserdata(L, 1);
   lua_settop(L, 0);
 
-  /* host: the registry's names, then the lazy table */
+  /* host: the registry's names (the instance snapshot), then the lazy table */
   lua_newtable(L);                                     /* 1 host */
   lua_newtable(L);                                     /* 2 metatable */
   lua_newtable(L);                                     /* 3 names set */
-  if (forward(L, "__names", 7, 0, 0) >= 1 && lua_type(L, 4) == LUA_TSTRING) {
-    size_t len; const char *p = lua_tolstring(L, 4, &len); const char *end = p + len;
+  size_t nameslen = 0;
+  const char *names = snapshot_names(L, &nameslen);
+  if (names) {
+    size_t len = nameslen; const char *p = names; const char *end = p + len;
     while (p < end) {
       const char *nl = memchr(p, '\n', (size_t)(end - p)); if (!nl) nl = end;
       if (nl > p) { lua_pushlstring(L, p, (size_t)(nl - p)); lua_pushboolean(L, 1); lua_rawset(L, 3); }

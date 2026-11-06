@@ -84,6 +84,81 @@ pub(crate) fn engine() -> Result<Engine> {
     Ok(ENGINE.get().expect("engine initialized").clone())
 }
 
+/// Bounds for the pooling allocator (docs/KERNEL.md, "A2.3").
+///
+/// The pooling allocator reserves every slot's memories, tables and stacks up front, so a node's wasm
+/// footprint is this struct and not whatever a guest happened to ask for: the cost of a component
+/// instance stops being a page-fault bill and becomes a fixed reservation decided here. One slot per
+/// simultaneous agent-core instance; the numbers are what the pool creates, never a default the
+/// caller cannot see (the pool refuses a `max_instances` above `component_instances`).
+#[derive(Clone, Copy, Debug)]
+pub struct PoolLimits {
+    /// Component instances that can exist at once (one per pooled agent-core instance).
+    pub component_instances: u32,
+    /// Core instances: a component instance owns at least one, and a component that is a component
+    /// of components owns more; two per component instance is what the fixtures (and agent-core) use.
+    pub core_instances: u32,
+    pub memories: u32,
+    pub tables: u32,
+    /// Wasm stacks (one per core instance, plus one pinned for host calls).
+    pub stacks: u32,
+    /// GC heaps: the engine is built with `gc`/`gc-drc`, so the pooling config must carry them.
+    pub gc_heaps: u32,
+    /// Upper bound of ONE linear memory. A guest that asks for more traps instead of growing the
+    /// reservation; 256 MiB matches the per-component memory cap the MCP runner uses.
+    pub max_memory_bytes: usize,
+}
+
+impl Default for PoolLimits {
+    /// Eight instances: a `serve` foreground turn, up to four subagent turns and three node-thread
+    /// reads is the shape the pool was sized for (docs/KERNEL.md, "A2.3").
+    fn default() -> Self {
+        let n = 8u32;
+        PoolLimits {
+            component_instances: n,
+            // Instantiation needs more core instances than the component ends up holding (agent-core
+            // measured a refusal at 2 per component instance, so the reservation is generous): a
+            // bound that is too tight fails an acquire, not a guest, which is the wrong way round.
+            core_instances: n * 4 + 8,
+            memories: n * 4 + 8,
+            tables: n * 4 + 8,
+            stacks: n * 4 + 8,
+            gc_heaps: n * 2 + 8,
+            max_memory_bytes: 256 << 20,
+        }
+    }
+}
+
+/// An engine whose instances come out of wasmtime's pooling allocator: creation is a slot reset
+/// instead of fresh mappings, so an acquire costs microseconds where an on-demand instantiation costs
+/// a mapping (and, for a component, a handful of them).
+///
+/// It is a separate engine from [`engine()`] on purpose: the pooling allocator bounds the whole
+/// engine, so the MCP/service runners keep the on-demand engine that lets an arbitrarily large
+/// component start, and only the agent-core pool pays for the reservation. It also enables the wasm
+/// features agent-core needs and the MCP engine does not (exceptions: Lua's `pcall` is `setjmp`).
+pub fn pooled_engine(limits: &PoolLimits) -> Result<Engine> {
+    let mut config = Config::new();
+    config.wasm_component_model(true);
+    // Lua's error handling (setjmp/longjmp, `pcall`) is wasm exception handling.
+    config.wasm_exceptions(true);
+    // No epoch interruption here. It needs a ticker thread and a deadline set on every store, and an
+    // engine with the feature on and no ticker traps every guest on its first instruction (measured:
+    // `wasm trap: interrupt` on the pool's first run). A per-run deadline is a knob this pool should
+    // grow when a caller needs one (`serve`), not a default that makes an engine unusable by default;
+    // today a runaway script blocks its caller exactly as `--core-component` does.
+    let mut pooling = wasmtime::PoolingAllocationConfig::default();
+    pooling.total_component_instances(limits.component_instances);
+    pooling.total_core_instances(limits.core_instances);
+    pooling.total_memories(limits.memories);
+    pooling.total_tables(limits.tables);
+    pooling.total_stacks(limits.stacks);
+    pooling.total_gc_heaps(limits.gc_heaps);
+    pooling.max_memory_size(limits.max_memory_bytes);
+    config.allocation_strategy(wasmtime::InstanceAllocationStrategy::Pooling(pooling));
+    Ok(Engine::new(&config)?)
+}
+
 /// Compiled components by content hash: compiling is the expensive step, a pin change is a new key.
 fn compiled(engine: &Engine, sha: &str, bytes: &[u8]) -> Result<Component> {
     static CACHE: OnceLock<Mutex<HashMap<String, Component>>> = OnceLock::new();

@@ -261,6 +261,117 @@ end-to-end (the native side would start the CLI's reader; their refusal is a uni
 `core_component.rs`). A stream the script abandons is stopped when the handle is dropped, not joined:
 the reader thread exits at its next line or read timeout, which is fine for the one-stream-at-a-time
 foreground use and a thing to revisit before anything opens streams concurrently.
+### A2.3 results — an instance pool and a boot snapshot for agent-core (06/11, wasm_the_first)
+
+`--core-component` is one guest for one script, so every turn used to pay: a compile (365–525 ms cold,
+1–4 ms from the `cwasm` cache), an instantiation (0.13–0.25 ms), the guest's own Lua boot, and the
+answers the guest asks the kernel for on the way in (the capability registry's names, the shipping
+modules' sources). A node that answers turns, subagent turns and node-thread reads wants those once,
+not per turn. A2.3 adds a pooling engine, a bounded instance pool and an instance-level snapshot, and
+measures each.
+
+**A pooling engine.** `wa-kernel-runtime::components::pooled_engine(&PoolLimits)` builds an engine on
+wasmtime's pooling allocator (`InstanceAllocationStrategy::Pooling`, crate feature
+`pooling-allocator`): every slot's memories, tables and stacks are reserved up front, so a node's wasm
+footprint is a number in `PoolLimits` rather than whatever a guest happened to ask for, and creating an
+instance is a slot reset instead of fresh mappings. It is deliberately **a separate engine** from
+`components::engine()`: the reservation bounds the engine, so the MCP and service runners keep the
+on-demand engine that lets an arbitrarily large component start, and only agent-core pays. Two things
+the engine does *not* have: epoch interruption (a deadline needs a ticker thread and a per-store
+deadline; enabling the feature with neither traps every guest on its first instruction — measured as
+`wasm trap: interrupt` on the pool's first run), and therefore a per-run time budget, which a runaway
+script never had under `--core-component` either.
+
+**The pool.** `wa-capabilities::core_component::{CoreComponentPool, CorePoolConfig, CoreInstance}`:
+`acquire()` (an idle instance, else a new one while the pool is below `max_instances`, else wait up to
+`acquire_timeout` and answer `pool_exhausted`), `run_script(script, args)` → `RunReport { code,
+host_calls, streams_open, first_host_call_ms, run_ms, memory_bytes, runs_on_instance }`, and release by
+dropping the lease (or `release()`), which clears the per-run state and aborts any stream the run left
+open. `warm(n)` pre-creates instances, `try_acquire()` never waits, `stats()` reports
+created/idle/leased/peak/acquisitions/reuses/exhausted/runs. A `max_instances` above the allocator's
+`component_instances` is refused at construction, not on the ninth acquire of a serving node. A store
+that *trapped* cannot serve another run, so that instance is dropped and the pool's count corrected
+instead of handing a broken store to the next caller.
+
+Thread safety is the simple kind: a lease owns its `Store` and the instance's only reference to it, so
+one instance serves one caller at a time and nothing else touches it. **One native interpreter, and one
+SQLite connection, per instance** — not one shared interpreter behind host calls. A `lua_State` is
+single-threaded by construction, the upvalue-bound capabilities hold a raw pointer into that state's
+`Host`, and `Host` owns the interpreter's own connection (a transaction one interpreter holds open must
+not be visible to, or rolled back by, another). Sharing one would put a mutex around every `host.*`
+call — 29 079 of them in `test-batch-tools`, which is exactly what a pool exists to avoid — and would
+give every instance one transaction space. The bound is the pool's `max_instances`, and the cost is one
+interpreter boot each (0.26–0.38 ms): the pool keeps that instead of paying it per run.
+
+**The snapshot.** The guest (`rust/components/agent-core/glue.c`) now caches, for the life of the
+*instance*, the two answers it would otherwise re-ask on every run: the registry's names (`__names`)
+and the shipping modules' sources (`__embedded`, which the native interpreter reads into `EMBEDDED`
+once at boot). Every run still gets a **fresh `lua_State`**, so globals, `package.loaded` and the stack
+are exactly as fresh as a one-shot run promises; only the kernel's immutable boot answers survive. A
+wizer-style pre-init is not the shape here: the world exports only `run`, so there is no "boot without
+a script" entry to freeze, and what the guest asks for at run time includes the *node's* installed
+lua-core tree, which a build-time snapshot would bake stale. So the snapshot is the immutable part of
+the boot, reused — not a cloned live state.
+
+`rust/wa-core-pool-bench bench` (a workspace member, not part of the binary;
+[benchmarks/agent-core-pool](../benchmarks/agent-core-pool/README.md)): medians of 5 per run, the range
+across four runs, release, `agent-core.wasm` 388 439 B:
+
+| measurement | value |
+| --- | --- |
+| native interpreter boot (per instance, kept across runs) | 0.26–0.52 ms |
+| cold: new pool (engine + compiled component + instance + run) | 1.8–2.7 ms |
+| cold: compile alone, no `cwasm` cache | 525–1 175 ms |
+| to first Lua statement: cold / pooled (unrun instance) / snapshotted (warm instance) | 0.23–0.26 / 0.43–0.78 / 0.07–0.13 ms |
+| run, after the first statement: cold / pooled / snapshotted | 0.72–0.77 / 0.34–0.60 / 0.27–0.46 ms |
+| host calls per run: pooled → snapshotted | 6 → 4 |
+| guest linear memory per instance (after a run) | 1 152 KiB |
+| pooling allocator reservation (8 instances × 256 MiB cap) | 2 048 MiB virtual |
+
+The snapshot's 2 host calls are its whole point: from run 2 an instance asks the kernel neither for the
+registry's names nor for a module's source, and the measured effect is `to first statement`
+0.43–0.78 → 0.07–0.13 ms and `run` 0.34–0.60 → 0.27–0.46 ms. The module is still parsed per run — a compiled-chunk cache
+keyed by the source's sha256 is the next step, and would be safe because the key carries the content.
+
+The four gate scripts, same guest, same environment, medians of 5 (wall ms, `benchmarks/agent-core-pool/bench.sh`;
+every script's output identical between the component and pooled columns except `test-batch-tools`' two
+wall_ms rows, which differ between any two runs of the same mode):
+
+| script | checks | native | component | pooled | native/component | native/pooled |
+| --- | --- | --- | --- | --- | --- | --- |
+| test-mcp-component | 24 | 5 757 | 6 264 | 5 839 | 1.09× | 1.01× |
+| test-service-component | 38 | 5 085 | 5 745 | 5 064 | 1.13× | 1.00× |
+| test-batch-tools | 245 | 6 267 | 9 296 | 7 391 | 1.48× | 1.18× |
+| test-tool-cues | 120 | 711 | 1 179 | 754 | 1.66× | 1.06× |
+
+Read that carefully: part of the component column is a *per-process* cost and not the guest's — the
+binary's boot (ripgrep provisioning, plugin scan, graph configuration) and, in an MSYS shell where
+`$HOME` is a `/c/...` path the kernel cannot resolve, a missed `cwasm` cache and therefore a ~0.4–0.6 s
+compile on every run. `wa-core-pool-bench` is a leaner process and its per-slot interpreter is booted
+from the registry alone, so the pooled column is "a turn from a process that already exists", which is
+what `serve` and its subagents are. The Lua-compute gap A2.1 measured on `test-batch-tools` (1.45×,
+re-measured here at 1.48×) narrows to **1.18×** once the per-turn fixed costs are gone; what is left is
+the guest's own Lua running ~1.2× slower than native Lua, which pooling cannot change — the remaining
+distance is inside the interpreter, not around it.
+
+Tests: `cargo test -p wa-capabilities core_component` (11 tests, 6 of them new: acquire/run/release with
+the report, a reused instance keeping each run's state fresh, four callers each getting their own
+instance, an exhausted pool refusing after its timeout and recovering, a pool larger than its allocator
+refused, and a warmed pool handing out unrun instances). `scripts/test.sh`'s core-component block now
+also runs the four scripts through the pool, `diff`s one whole output against the one-shot component
+run, and runs four concurrent callers holding four leases (`pool concurrency ok`). The fixtures are in
+[benchmarks/agent-core-pool/fixtures](../benchmarks/agent-core-pool/fixtures).
+
+**Not done here, and why.** The pool has no caller in the binary yet: `rust/wa-host` (its `main.rs`
+boot and CLI dispatch) was outside this lane's edit list, so the callers today are
+`wa-core-pool-bench` and the gate block. Wiring it is a small change in `main.rs` — hand
+`CoreComponentPool` the existing `interpreter_factory` and take a lease in `serve`, in the subagent
+supervisor and in a node-thread read — and it belongs with the WASI 0.3 work, where the same pool also
+gets an async `run` and a per-turn deadline. Also unmeasured: resident memory with 8 live instances
+(the 1 152 KiB figure is one instance's linear memory; 2 048 MiB is the allocator's *virtual*
+reservation, not resident bytes), and several concurrent streams (one run per lease, one lease per
+caller, is what the pool promises; several streams inside one run stay A2.2's one-at-a-time foreground
+contract).
 ### C1 results — the code graph as a component (05/11, wasm_the_first)
 
 The graph is the first capability moved out of `wa` without touching Lua. The 14 `host.graph_*`

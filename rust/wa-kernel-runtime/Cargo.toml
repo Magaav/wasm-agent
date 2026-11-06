@@ -27,7 +27,9 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 ureq = { version = "3", features = ["json"] }
 # component-model-async: wa:kernel@0.2 components (WASI 0.3) suspend instead of polling, and the host
 # drives them with `store.run_concurrent` (service_components_v2.rs).
-wasmtime = { version = "50", default-features = false, features = ["cranelift", "runtime", "std", "component-model", "component-model-async", "async", "gc", "gc-drc", "anyhow"] }
+# pooling-allocator: `components::pooled_engine` is the engine the agent-core instance pool uses
+# (docs/KERNEL.md, "A2.3"); without the feature `InstanceAllocationStrategy` has no `Pooling` variant.
+wasmtime = { version = "50", default-features = false, features = ["cranelift", "runtime", "std", "component-model", "component-model-async", "async", "gc", "gc-drc", "anyhow", "pooling-allocator"] }
 # p3: `wasi:clocks@0.3.0`, the suspending timer a 0.2 guest awaits; it is built on tokio's timer,
 # so the 0.2 runner owns a current-thread tokio runtime (rt + time only, no I/O driver).
 wasmtime-wasi = { version = "50", default-features = false, features = ["p1", "p2", "p3"] }
