@@ -1906,29 +1906,15 @@ dependencies = [
  "tokio",
  "ureq",
  "wa-governance",
- "wa-grant-policy",
  "wa-host-support",
  "wa-jobs",
  "wa-kernel-runtime",
  "wa-operation",
- "wa-queue",
  "wa-rendezvous",
  "wa-term",
- "wa-whatsapp-outbox",
  "wasmtime",
  "wasmtime-wasi",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "wa-fake-kernel"
-version = "0.1.0"
-dependencies = [
- "serde_json",
- "tokio",
- "wa-bounded",
- "wasmtime",
- "wasmtime-wasi",
 ]
 
 [[package]]
@@ -1979,7 +1965,6 @@ dependencies = [
  "serde_json",
  "wa-capabilities",
  "wa-host-support",
- "wa-kernel-runtime",
  "wa-rendezvous",
 ]
 
@@ -2088,14 +2073,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "wa-whatsapp-outbox"
+name = "wa-watchdog"
 version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "wa-queue",
-]
 
 [[package]]
 name = "walkdir"

@@ -1,0 +1,18 @@
+[package]
+name = "wa-watchdog"
+version = "0.1.0"
+edition = "2021"
+description = "The process outside the kernel: starts it, restarts it with backoff, and replaces its binary only after the new bytes answer /health. Zero dependencies, on purpose (docs/KERNEL.md, 'three layers')."
+publish = false
+
+# ONE binary target. The fake kernel the tests use is the `selftest-kernel` subcommand of this binary, not
+# a second artefact: a watchdog is one file an operator installs and a release may not be able to explain
+# a second one.
+[[bin]]
+name = "wa-watchdog"
+path = "src/main.rs"
+
+# No dependencies at all. A supervisor that shares a dependency graph with the thing it supervises can be
+# broken by that thing's build (the reason wa-sentinel carries its own lock file); carrying nothing is the
+# same property without a second workspace, and it keeps `cargo zigbuild` for aarch64 a pure-Rust build.
+[dependencies]
