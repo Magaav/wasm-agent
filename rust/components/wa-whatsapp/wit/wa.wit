@@ -1,0 +1,21 @@
+/// The `wa-whatsapp` component's own world: the kernel service contract plus the one queue seam the
+/// explicit-send outbox needs.
+///
+/// `include` pulls in `wa:kernel/service-component@0.2.0` unchanged (the guest imports
+/// websocket/http/speech/kv/lifecycle/log/credentials and exports `service.run`), and the import below
+/// is the outbox: `wa:queue/worker` only, because this component *consumes* `whatsapp.outbox` and never
+/// produces on it (the node enqueues, `rust/wa-host/src/whatsapp_send.rs`). The manifest grants exactly
+/// that interface on exactly that namespace (`manifest.json`, `docs/SERVICE-COMPONENTS.md`), so
+/// importing more than the grant allows would be a refusal at the call, not a capability.
+///
+/// `deps/kernel.wit`, `deps/clocks.wit` and `deps/queue/queue.wit` are snapshots of `wit/kernel-v2/`
+/// and `wit/queue/` (the same arrangement `rust/components/svc-queue-echo` uses): wit-bindgen resolves
+/// a world's dependencies from `wit/deps/`, so a component that composes two contracts carries them.
+/// A change to either published contract has to be re-copied here - `scripts/test-whatsapp-send.lua`
+/// compares the copies byte for byte and fails when they drift.
+package wa:whatsapp@0.1.0;
+
+world whatsapp-service {
+    include wa:kernel/service-component@0.2.0;
+    import wa:queue/worker@0.1.0;
+}

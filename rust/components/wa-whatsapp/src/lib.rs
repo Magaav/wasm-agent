@@ -25,6 +25,9 @@
 //! `cargo build --target wasm32-wasip2` builds the component.
 pub mod alerts;
 pub mod holds;
+/// The explicit-send outbox's wire shape (quote, mentions, the exact chat) and its retry rule: pure,
+/// so `cargo test` pins it natively while the guest loop that uses it stays wasm-only.
+pub mod outbox;
 pub mod posting;
 pub mod queue;
 pub mod recognize;
@@ -35,8 +38,10 @@ mod store;
 
 #[cfg(target_arch = "wasm32")]
 wit_bindgen::generate!({
-    world: "service-component",
-    path: "../../../wit/kernel-v2",
+    // The component's own world: the kernel service contract plus `wa:queue/worker`, the outbox
+    // seam (`wit/wa.wit`). `wit/deps/` carries snapshots of the two published contracts.
+    world: "whatsapp-service",
+    path: "wit",
     generate_all,
 });
 

@@ -10,7 +10,11 @@
       "*.whatsapp.com:443"
     ],
     "storage": true,
-    "stt": true
+    "stt": true,
+    "queue": {
+      "interfaces": ["worker"],
+      "namespaces": ["whatsapp.outbox"]
+    }
   },
   "limits": {
     "memory_mb": 256

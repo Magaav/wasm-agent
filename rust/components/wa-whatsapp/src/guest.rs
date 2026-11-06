@@ -26,7 +26,7 @@ use crate::holds::{Author, Holds, Mutation, POSTING_ONLY};
 use crate::wa::kernel::types::Error as KError;
 use crate::wa::kernel::{http as khttp, kv as kkv, lifecycle, speech, websocket};
 use crate::wasi::clocks::monotonic_clock;
-use crate::{alerts, export, exports, posting, queue, recognize, store, telemetry};
+use crate::{alerts, export, exports, outbox, posting, queue, recognize, store, telemetry};
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::{FuturesUnordered, Stream, StreamExt};
@@ -842,6 +842,126 @@ fn send_alerts(enabled: bool) {
     }));
 }
 
+// ---- the explicit-send outbox (`whatsapp.outbox`) -------------------------------------------
+//
+// An ordinary message somebody asked for is a job on the shared durable queue (`wa:queue`), not a
+// side channel: the node validates the request, asks the `whatsapp.send` policy and enqueues
+// (`rust/wa-host/src/whatsapp_send.rs`); this component takes the job, sends it and settles it with
+// the message id - or fails it with a reason. One job at a time: a second concurrent send would not
+// make a chat faster, and one lease per tick is enough for the rate the policy allows.
+//
+// The payload is the only place the text lives. Nothing below logs it: the lines carry the job id,
+// the message id and a stable reason word (`docs/SERVICE-COMPONENTS.md`).
+
+/// This component's one worker identity: a lease belongs to one name.
+const OUTBOX_WORKER: &str = "wa-whatsapp";
+/// Lease length. Long enough for one text send over a slow link, short enough that a killed instance's
+/// job is recovered by the next take rather than waiting for a human.
+const OUTBOX_LEASE_MS: u64 = 60_000;
+/// How often the outbox asks the queue for work. `take` is a read over the queue's ready index, and the
+/// policy allows at most 20 sends a minute, so a poll a second is already four times the busiest rate
+/// this component can be asked for - and it keeps a requested message feeling prompt.
+const OUTBOX_EVERY: Duration = Duration::from_secs(1);
+
+thread_local! {
+    /// The one line a refused outbox logs. `wa:queue` refuses every call when the manifest does not
+    /// grant the queue, and saying that once per tick would bury the log in the only symptom there is.
+    static OUTBOX_NOTE: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
+/// Say once why the outbox is not working, then stay quiet until it works again.
+fn outbox_note(text: String) {
+    let first = OUTBOX_NOTE.with(|note| {
+        let mut note = note.borrow_mut();
+        if note.as_deref() == Some(text.as_str()) {
+            false
+        } else {
+            *note = Some(text.clone());
+            true
+        }
+    });
+    if first {
+        say!("outbox: {text}");
+    }
+}
+
+/// Send one verified request with the linked-device client: the text, the optional quote and the
+/// group mentions, to the exact chat it names.
+///
+/// The chat is sent to as given - including a LID chat, which the library addresses directly - because
+/// mapping an address we were not given is how a message reaches a stranger. The quoted body is not
+/// fetched (this component keeps no message history), so a reply is a reference-only quote; in a group
+/// WhatsApp names the quoted author and we do not know it, so the chat is named instead.
+async fn send_outbox(client: &whatsapp_rust::Client, request: &wa_whatsapp_outbox::Verified) -> Result<String, String> {
+    let chat: whatsapp_rust::Jid = request.chat.jid().parse().map_err(|_| "bad_chat".to_string())?;
+    client
+        .send_message(chat, outbox::build_message(request))
+        .await
+        .map(|result| result.message_id)
+        .map_err(|error| error.to_string())
+}
+
+/// One line, bounded, no control characters: a reason is a log field and a status answer, not a place a
+/// multi-line error can break the line it lands in.
+fn one_line(text: &str) -> String {
+    text.chars().map(|c| if c.is_control() { ' ' } else { c }).take(120).collect()
+}
+
+/// The outbox's turn: take at most one job, decide, send, settle. Returns true when a job was handled.
+async fn outbox_tick() -> bool {
+    use crate::wa::queue::worker;
+    let Some(client) = CLIENT.with(|c| c.borrow().clone()) else { return false };
+    let taken = match worker::take(wa_whatsapp_outbox::QUEUE.to_string(), OUTBOX_WORKER.to_string(), Some(OUTBOX_LEASE_MS)).await {
+        Ok(worker::TakeOutcome::Taken(lease)) => lease,
+        Ok(worker::TakeOutcome::Empty) => return false,
+        Ok(worker::TakeOutcome::Busy(leased)) => {
+            outbox_note(format!("queue busy: {leased} already leased by this component"));
+            return false;
+        }
+        Err(error) => {
+            outbox_note(format!("take refused: {error:?} (is the queue granted in the manifest?)"));
+            return false;
+        }
+    };
+    OUTBOX_NOTE.with(|note| *note.borrow_mut() = None);
+    let job = taken.job;
+    let id = job.id;
+    let decision = wa_whatsapp_outbox::decide(&job.payload, now_ms(), job.fresh_until_ms.map(|ms| ms as i64));
+    match decision {
+        wa_whatsapp_outbox::Decision::Refuse(refusal) => {
+            // Permanent: a shape or freshness refusal must not be retried into a double send, and the
+            // reason is the crate's stable word, never the caller's text.
+            say!("outbox: refused job={id} code={} ({})", refusal.code, refusal.detail);
+            if let Err(error) = worker::fail(wa_whatsapp_outbox::QUEUE.to_string(), id, OUTBOX_WORKER.to_string(), refusal.code.to_string()).await {
+                outbox_note(format!("fail refused: {error:?}"));
+            }
+        }
+        wa_whatsapp_outbox::Decision::Send(request) => match send_outbox(&client, &request).await {
+            Ok(message_id) => {
+                say!("outbox: sent job={id} message={message_id} chat={} mentions={}", request.chat.jid(), request.mentions.len());
+                let output = wa_whatsapp_outbox::Outcome { message_id: message_id.clone() }.encode();
+                if let Err(error) = worker::done(wa_whatsapp_outbox::QUEUE.to_string(), id, OUTBOX_WORKER.to_string(), output).await {
+                    // The message is out; a settle that failed is a queue problem, and retrying the
+                    // send would be a second message. Report it, let the lease lapse.
+                    outbox_note(format!("done refused for job={id} message={message_id}: {error:?}"));
+                }
+            }
+            Err(reason) => {
+                // `retryable` is the classification; the queue's attempt count is the only retry budget
+                // there is, so the reason is stored for the operator to read in
+                // `whatsapp_send_status`, one sanitized line and never the message text.
+                let kind = if outbox::retryable(&reason) { "retry" } else { "permanent" };
+                say!("outbox: send failed job={id} kind={kind} reason={}", one_line(&reason));
+                let stored = format!("{kind}:{}", one_line(&reason));
+                if let Err(error) = worker::fail(wa_whatsapp_outbox::QUEUE.to_string(), id, OUTBOX_WORKER.to_string(), stored).await {
+                    outbox_note(format!("fail refused: {error:?}"));
+                }
+            }
+        },
+    }
+    true
+}
+
 // ---- Runtime --------------------------------------------------------------------------------
 
 struct HostRuntime;
@@ -1182,6 +1302,7 @@ async fn serve(config: serde_json::Value) {
 /// a runtime timer, and a stop is noticed within one tick.
 async fn main_loop(language: &str, post: &posting::PostConfig) {
     let mut last_tick = Instant::now();
+    let mut last_outbox = Instant::now();
     loop {
         for mutation in INBOX_MUTATIONS.with(|m| std::mem::take(&mut *m.borrow_mut())) {
             apply_mutation(mutation).await;
@@ -1195,6 +1316,13 @@ async fn main_loop(language: &str, post: &posting::PostConfig) {
             dispatch(language, post);
             send_alerts(post.alerts);
             persist_state().await;
+        }
+        // The explicit-send outbox, on its own cadence and after the transcription pipeline: a
+        // requested message is never allowed to delay a voice note that is already decoding, and an
+        // idle outbox costs one read a second rather than one per pipeline tick.
+        if last_outbox.elapsed() >= OUTBOX_EVERY {
+            last_outbox = Instant::now();
+            outbox_tick().await;
         }
         if lifecycle::stopping() {
             say!("wa-whatsapp: stopping");
