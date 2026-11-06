@@ -1068,10 +1068,17 @@ if [ -f "$POLICY_INSTALLER" ]; then
   . "$POLICY_INSTALLER"
   install_default_policy "$ROOT/policies/default.json" "$WA_POLICY_DEST"
   case $? in
-    0) ;; # installed, or an operator's file kept - both lines are on stdout above
+    0) ;; # installed, merged, or an operator's file kept - every line is on stdout above
     2) note "no policies/default.json in $ROOT: policy.json was not installed; the node runs in manifest mode (the manifest grant is the only gate)" ;;
     *) note "policy.json could not be installed at $WA_POLICY_DEST; the node runs in manifest mode (the manifest grant is the only gate)" ;;
   esac
+  # What the per-rule merge could NOT bring into the node's file: a rule both sides changed (the node's
+  # version was kept) or a file with no provable base, where the release's new entries were named instead
+  # of added. `note` puts it in deploy.log; `record_installed` carries the same sentence into installed.txt,
+  # because a warning only a log reader sees is the kind nobody reads - which is how the 07/11 index writes
+  # were refused release after release with nothing on the node saying the rule had never arrived.
+  WA_POLICY_WARNINGS="$(policy_merge_warnings "$WA_POLICY_DEST")"
+  [ -z "$WA_POLICY_WARNINGS" ] || note "policy: $WA_POLICY_WARNINGS"
 else
   note "scripts/lib/install-default-policy.sh is not in this tree: policy.json was not installed"
 fi
@@ -1288,6 +1295,13 @@ record_installed() {
   printf 'components_dir=%s\ncomponent_graph_sha256=%s\n' "${COMPONENT_DIR:-unrecorded}" "${COMPONENT_SHA:-unrecorded}" >> "$record_tmp" || fail "node installed, but the component lines could not be written"
   if [ "$LUA_FAST" = 1 ]; then
     printf 'binary_commit=%s\n' "$INSTALLED_BINARY_COMMIT" >> "$record_tmp" || fail "node installed, but the binary commit line could not be written"
+  fi
+  # The policy step's own warnings (6a), on one line: the rules this deploy could not bring into the
+  # node's file because both sides had changed them, or a file with no provable base. installed.txt is what
+  # a reader trusts for "what does this install do", so a conflict is named here and not only in deploy.log.
+  if [ -n "${WA_POLICY_WARNINGS:-}" ]; then
+    printf 'policy_warnings=%s\n' "$(printf '%s' "$WA_POLICY_WARNINGS" | tr '\r\n' '  ')" >> "$record_tmp" \
+      || fail "node installed, but the policy warning line could not be written"
   fi
   mv -f "$record_tmp" "$INSTALL_DIR/installed.txt" \
     || fail "node installed, but installed.txt could not be committed atomically"

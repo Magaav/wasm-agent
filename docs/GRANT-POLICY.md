@@ -344,26 +344,43 @@ the first message. `cargo test -p wa-governance node_policy::` drives those exac
 fails if the file and the components drift apart.
 
 `scripts/deploy.sh` installs it as `<state>/policy.json` (`scripts/lib/install-default-policy.sh`,
-tested by `scripts/test-install-default-policy.sh`), with one narrow exception to "never overwrite":
+tested by `scripts/test-install-default-policy.sh`), and brings a release's **new rules** into a file that
+already exists. The unit of "a deploy never overwrites the operator's choices" is the **rule**, not the
+file:
 
-* a node with **no** policy file gets the default (**manifest mode → policy mode**: this is the one
-  deploy action that changes what the running node enforces, so the deploy says so);
-* an existing file is **refreshed only when this release can prove it is the release's own text**:
-  byte-identical to a default the tree has shipped (`policies/shipped/*.json`, kept as release
-  records, plus the current `policies/default.json` itself). Nobody's edit is overwritten by that — the
-  bytes are the release's — and the refreshed file is from then on "already the current default" and is
-  kept;
-* anything else — an edited cap, an extra chat, a half-written or broken file, a directory, a dangling
-  symlink — is **never** touched (content, size, permission bits and mtime are the test's evidence) and
-  the deploy says `kept`;
+* a node with **no** policy file gets the default, byte for byte (**manifest mode → policy mode**: this is
+  the one deploy action that changes what the running node enforces, so the deploy says so), and the bytes
+  it came from are recorded beside it as the **base** (`<state>/policy.base.json`, with its sha256 and
+  where it came from in `<state>/policy.base.sha256`);
+* an existing file is **merged per rule** (`scripts/lib/policy-merge.mjs`): base = the default this node's
+  file was installed from, ours = the node's file, theirs = the default this release ships. A rule the
+  node never touched takes the release's version (so a rule the release **added** arrives); a rule the
+  node changed and the release did not keeps the node's version; a rule **both** changed is a conflict -
+  the node's version wins, the deploy continues, the conflict is printed, and `installed.txt` records it
+  as `policy_warnings=`. The file that was replaced is kept at `<state>/policy.prev.json`;
+* a node installed before that record existed has no base; then the base is the **oldest** default in
+  `policies/default.json`'s git history whose bytes are the node's own file (the release records in
+  `policies/shipped/*.json` are tried after it), and when nothing matches the merge is
+  **additions-only**: new rules and new components are added, an **existing** rule is never modified —
+  adding entries to an `allow` list the operator narrowed would widen the limit the policy exists to
+  enforce - and the entries the release has and the node lacks are printed (and recorded) as the
+  one-line edit to make;
+* a file that is **not JSON**, a directory, a dangling symlink: nothing is written. A file that parses but
+  names a field the node's schema rejects keeps the operator's rule exactly as written (this merge is not
+  a schema validator); the node still refuses that file until it is fixed, and the deploy does not hide
+  it;
+* when the merge cannot run at all (`node` is not on PATH, or the tool is not beside the installer — the
+  installed copy of `deploy.sh` carries no `scripts/lib/`), a file whose bytes are still a default this
+  tree shipped is **refreshed** byte for byte, because nobody's choice is being overwritten; anything else
+  is kept and the deploy says why;
 * installing it **changes what the node enforces** (manifest mode → policy mode), so the deploy names
   every installed component the file does not mention and says that its sensitive capabilities will be
   refused with `no_policy` until a rule is added. The deploy does not refuse on that - a node with no
   policy file still works - but it never lets it be a surprise.
 
 **A node that already has its own `policy.json`** (the common case: it was installed by an earlier
-release and then edited, or the operator wrote it) does not get the new rule from a deploy, by design.
-The one-line change is the `whatsapp.send` object of `wa-whatsapp`:
+release and then edited, or the operator wrote it) gets the new rules a release ships, and keeps its own.
+The `whatsapp.send` rule of `wa-whatsapp` this section is about, as the release ships it:
 
 ```json
 "whatsapp.send": {
@@ -378,9 +395,16 @@ The one-line change is the `whatsapp.send` object of `wa-whatsapp`:
 
 An operator who wants only some chats keeps a narrower `allow` list
 (`["chat:120363000000000001@g.us"]`) — that is the knob, and a send to any other chat answers
-`whatsapp_send_policy_denied` with `reason: "target_not_allowed"`. If the file has not been edited at
-all (its bytes still match `policies/shipped/2026-11-06-whatsapp-own-chat.json`), the deploy performs
-this edit itself and says `refreshed`.
+`whatsapp_send_policy_denied` with `reason: "target_not_allowed"`. A node whose file was never edited ends
+up on the release's own bytes (its bytes are still a default this tree shipped) and the deploy says so; a
+node that edited this rule **and** had it changed by the release keeps its own version and reads the
+conflict on the deploy log and in `installed.txt`.
+
+The reason the unit is the rule, and not the file, is measured. openclaw, 07/11: `policy.json` had been
+installed from an older shipped default, a later release added `ix/*` to `wa-whatsapp`'s `kv.write` allow
+list, and the deploy kept the node's (unedited) file whole — so the new rule never arrived and every
+index write was refused until it was added by hand. Keeping the whole file when only one rule was the
+operator's is what was wrong.
 
 After the file exists, adding a component is: install it, then add a rule for each capability its
 manifest declares (`example-new-component` in the shipped file is the shape). Until then its
