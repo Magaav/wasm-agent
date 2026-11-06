@@ -211,6 +211,11 @@ wa-whatsapp (queue grant: worker on `whatsapp.outbox`)
 whatsapp_send_status {id}                                 state, attempts, message_id | reason
 ```
 
+* **The grant** is `queue: {consume: ["whatsapp.outbox"]}` in the manifest, which the host reads as the
+  `worker` interface on that one namespace; the long spelling
+  (`{"interfaces": ["worker"], "namespaces": ["whatsapp.outbox"]}`) means the same thing
+  (`queue_host::Grants::from_manifest` accepts both, and `scripts/test-whatsapp-send.lua` pins the
+  component's own world: worker, never producer). `admin` has no shorthand on purpose.
 * **The payload** is JSON (`{chat, text, reply_to?, mentions?}`); it is the only place the message text
   lives, and it lives in the queue's kv until the job is settled and reaped. Nothing logs it and no
   answer returns it.

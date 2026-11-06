@@ -37,6 +37,34 @@ fn a_grant_is_interfaces_and_namespaces() {
     assert!(Grants::from_manifest(&json!({"capabilities": {"queue": {"interfaces": ["owner"]}}})).is_err());
 }
 
+/// The short spelling: `consume`/`produce` are the worker/producer interfaces without the component
+/// author having to know the interface names. `wa-whatsapp`'s manifest writes `consume`, and a
+/// spelling that silently grants nothing would be refused at the first take with no hint why.
+#[test]
+fn a_grant_may_also_be_written_as_consume_and_produce() {
+    let grants = Grants::from_manifest(&json!({
+        "capabilities": {"queue": {"consume": ["whatsapp.outbox"], "produce": ["wa.stt"]}}
+    }))
+    .unwrap();
+    assert!(grants.may_use("worker") && grants.may_use("producer"));
+    assert!(!grants.may_use("admin"), "admin is never implied by a shorthand");
+    assert!(grants.may_queue("whatsapp.outbox") && grants.may_queue("wa.stt"));
+    assert!(!grants.may_queue("wa.post"));
+    // Both spellings at once are one grant, not two: nothing is listed twice.
+    let both = Grants::from_manifest(&json!({
+        "capabilities": {"queue": {"interfaces": ["worker"], "namespaces": ["whatsapp.outbox"], "consume": ["whatsapp.outbox"]}}
+    }))
+    .unwrap();
+    assert_eq!(both, grants_with(&["worker"], &["whatsapp.outbox"]));
+    // A malformed shorthand is an error, like a malformed interface list.
+    assert!(Grants::from_manifest(&json!({"capabilities": {"queue": {"consume": ["", "x"]}}})).is_err());
+    assert!(Grants::from_manifest(&json!({"capabilities": {"queue": {"consume": "whatsapp.outbox"}}})).is_err());
+}
+
+fn grants_with(interfaces: &[&str], namespaces: &[&str]) -> Grants {
+    Grants { interfaces: interfaces.iter().map(|s| s.to_string()).collect(), namespaces: namespaces.iter().map(|s| s.to_string()).collect() }
+}
+
 #[test]
 fn a_component_without_a_grant_is_refused_every_interface() {
     let dir = temp_dir("nogrant");

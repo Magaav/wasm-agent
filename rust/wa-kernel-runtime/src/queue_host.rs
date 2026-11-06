@@ -74,26 +74,66 @@ impl Grants {
     /// Read `capabilities.queue`. Absent means "no queue": a component with no grant imports nothing
     /// and is refused every call. A malformed grant is an error the loader reports, never a silent
     /// empty grant.
+    ///
+    /// Two spellings of the same grant are accepted, because both have been written down and one of
+    /// them silently granting nothing is a trap:
+    ///
+    /// * what the interface list says (`{"interfaces": ["worker"], "namespaces": ["whatsapp.outbox"]}`),
+    ///   one namespace list for every interface named;
+    /// * what reads like a sentence and needs no knowledge of the interface names
+    ///   (`{"consume": ["whatsapp.outbox"], "produce": ["wa.stt"]}`), where `consume` is the `worker`
+    ///   interface and `produce` the `producer` one. `admin` has no shorthand on purpose: a component
+    ///   that can requeue its own dead letters can retry forever, so that grant is always spelled out.
     pub fn from_manifest(manifest: &Value) -> Result<Grants, String> {
         let Some(queue) = manifest.get("capabilities").and_then(|c| c.get("queue")) else {
             return Ok(Grants::default());
         };
         let object = queue.as_object().ok_or_else(|| "invalid_component_grant:queue".to_string())?;
-        let mut interfaces = Vec::new();
-        let mut namespaces = Vec::new();
+        let mut interfaces: Vec<String> = Vec::new();
+        let mut namespaces: Vec<String> = Vec::new();
         for item in object.get("interfaces").and_then(Value::as_array).cloned().unwrap_or_default() {
             let name = item.as_str().ok_or_else(|| "invalid_component_grant:queue.interfaces".to_string())?;
             if !matches!(name, "producer" | "worker" | "admin") {
                 return Err(format!("invalid_component_grant:queue.interfaces:{name}"));
             }
-            interfaces.push(name.to_string());
-        }
-        for item in object.get("namespaces").and_then(Value::as_array).cloned().unwrap_or_default() {
-            let name = item.as_str().ok_or_else(|| "invalid_component_grant:queue.namespaces".to_string())?;
-            if name.is_empty() || name.len() > 64 {
-                return Err("invalid_component_grant:queue.namespaces".to_string());
+            if !interfaces.iter().any(|seen| seen == name) {
+                interfaces.push(name.to_string());
             }
-            namespaces.push(name.to_string());
+        }
+        let mut named = |key: &str| -> Result<Vec<String>, String> {
+            // Absent is no names; present-but-not-a-list is a malformed grant, never "no names".
+            let Some(value) = object.get(key) else { return Ok(Vec::new()) };
+            value
+                .as_array()
+                .cloned()
+                .ok_or_else(|| format!("invalid_component_grant:queue.{key}"))?
+                .iter()
+                .map(|item| {
+                    item.as_str()
+                        .filter(|name| !name.is_empty() && name.len() <= 64)
+                        .map(str::to_string)
+                        .ok_or_else(|| format!("invalid_component_grant:queue.{key}"))
+                })
+                .collect()
+        };
+        for name in named("namespaces")? {
+            if !namespaces.contains(&name) {
+                namespaces.push(name);
+            }
+        }
+        for (key, interface) in [("consume", "worker"), ("produce", "producer")] {
+            let queues = named(key)?;
+            if queues.is_empty() {
+                continue;
+            }
+            if !interfaces.iter().any(|seen| seen == interface) {
+                interfaces.push(interface.to_string());
+            }
+            for name in queues {
+                if !namespaces.contains(&name) {
+                    namespaces.push(name);
+                }
+            }
         }
         Ok(Grants { interfaces, namespaces })
     }
