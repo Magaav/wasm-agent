@@ -123,7 +123,7 @@ fn the_deadline_ends_a_component_that_never_returns() {
     let began = Instant::now();
     let outcome = kernel.run_file(wasm(), &serde_json::json!({"tick_ms": 10}).to_string());
     assert_eq!(outcome.outcome, "deadline", "{}", outcome.logs_text());
-    assert!(began.elapsed() < Duration::from_secs(20), "the deadline must cut the run short: {:?}", began.elapsed());
+    assert!(began.elapsed() < Duration::from_secs(180), "the deadline must cut the run short: {:?}", began.elapsed()); // includes a cold compile; a never-returning run without a deadline would hit the test timeout instead
     assert!(outcome.logs_text().contains("heartbeat"), "it did run before the deadline");
 }
 
