@@ -10,7 +10,7 @@ fn temp_dir(tag: &str) -> std::path::PathBuf {
         "wa-queue-host-{}-{}-{}",
         tag,
         std::process::id(),
-        crate::node_telemetry::now_ms()
+        wa_governance::node_telemetry::now_ms()
     ));
     let _ = std::fs::remove_dir_all(&base);
     std::fs::create_dir_all(&base).expect("temp dir");

@@ -32,7 +32,7 @@ const SWEEP_EVERY: u64 = 60;
 /// boundary is not a place to push tens of megabytes.
 const MAX_TEXT: usize = 256 << 10;
 
-pub(crate) fn now_ms() -> u64 {
+pub fn now_ms() -> u64 {
     SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
 }
 

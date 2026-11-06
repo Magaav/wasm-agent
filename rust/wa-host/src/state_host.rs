@@ -232,7 +232,7 @@ impl StateOutcome {
 }
 
 fn now_ms() -> u64 {
-    crate::node_telemetry::now_ms()
+    wa_governance::node_telemetry::now_ms()
 }
 
 fn info_for(declared: &StateDeclaration, installed: &Installed) -> Result<ComponentInfo, String> {

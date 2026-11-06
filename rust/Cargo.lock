@@ -1893,6 +1893,18 @@ name = "wa-bus"
 version = "0.1.0"
 
 [[package]]
+name = "wa-governance"
+version = "0.1.0"
+dependencies = [
+ "ring",
+ "serde_json",
+ "wa-bounded",
+ "wa-grant-policy",
+ "wa-host-support",
+ "wa-telemetry",
+]
+
+[[package]]
 name = "wa-grant-policy"
 version = "0.1.0"
 dependencies = [
@@ -1936,6 +1948,7 @@ dependencies = [
  "ureq",
  "wa-bounded",
  "wa-bus",
+ "wa-governance",
  "wa-grant-policy",
  "wa-host-support",
  "wa-jobs",

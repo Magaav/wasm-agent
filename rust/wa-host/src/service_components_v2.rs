@@ -25,7 +25,7 @@
 //! two different policies. Every answered host call records one telemetry observation
 //! (`node_telemetry::HostCallGuard`), attributed to the component by name.
 use crate::components::{Grant, Installed};
-use crate::node_telemetry::HostCallGuard;
+use wa_governance::node_telemetry::HostCallGuard;
 use crate::service_components::{authority_target, gate_verdict, target_of, Verdict};
 use wa_grant_policy::Decision;
 use crate::service_io::{http_exchange, url_authority, Kv as KvStore, Slot, SlotFuture, WsConn};
@@ -154,7 +154,7 @@ fn gate_decision(decision: Decision) -> Result<(), KError> {
 /// `policy.json` answers in manifest mode (the manifest grant is the only gate), a node with one
 /// enforces it, and an unruled sensitive capability is refused `no_policy`.
 fn gate(component: &str, capability: &str, target: Option<&str>) -> Result<(), KError> {
-    gate_decision(crate::node_policy::check(component, capability, target))
+    gate_decision(wa_governance::node_policy::check(component, capability, target))
 }
 
 impl wa::kernel::types::Host for State {}
@@ -313,7 +313,7 @@ impl wa::kernel::websocket::HostSocketWithStore<State> for State {
             let authority = accessor.with(|mut access| {
                 access.get().table.get(&socket).ok().map(|s| s.authority.clone()).ok_or(KError::Closed)
             })?;
-            match crate::node_policy::check_opaque_send(&name, &authority) {
+            match wa_governance::node_policy::check_opaque_send(&name, &authority) {
                 Decision::Allow => {}
                 Decision::RateLimited { retry_after_ms, .. } if retry_after_ms < 1_000 => return Err(KError::Again),
                 other => return Err(KError::Refused(other.reason_str().to_string())),
@@ -1041,13 +1041,13 @@ mod tests {
                }}}}"#,
         )
         .unwrap();
-        let paths = crate::node_policy::Paths {
+        let paths = wa_governance::node_policy::Paths {
             policy: root.join("policy.json"),
             state: root.join("state.json"),
             audit: root.join("audit").join("grant-policy.jsonl"),
         };
-        let policy = crate::node_policy::NodePolicy::open(paths);
-        assert_eq!(policy.mode(), crate::node_policy::Mode::Policy);
+        let policy = wa_governance::node_policy::NodePolicy::open(paths);
+        assert_eq!(policy.mode(), wa_governance::node_policy::Mode::Policy);
 
         // websocket.connect: the authority the manifest allows, lowercased before the check - the
         // client emitted a host name in mixed case, and the rule is written in lower case.

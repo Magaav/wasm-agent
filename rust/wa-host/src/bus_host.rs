@@ -460,7 +460,7 @@ macro_rules! bus_impls {
                 event: GuestEvent,
             ) -> Result<wa::bus::types::PublishReport, BusFault> {
                 let component = accessor.with(|mut access| access.get().component().to_string());
-                let mut call = crate::node_telemetry::HostCallGuard::start(&component, "bus.publish");
+                let mut call = wa_governance::node_telemetry::HostCallGuard::start(&component, "bus.publish");
                 let out = node().publish(&component, event).map(|report| wa::bus::types::PublishReport {
                     matched: report.matched,
                     delivered: report.delivered,
@@ -484,7 +484,7 @@ macro_rules! bus_impls {
                 replay: Option<u32>,
             ) -> wasmtime::Result<Result<wasmtime::component::StreamReader<GuestEvent>, BusFault>> {
                 let component = access.data_mut().component().to_string();
-                let mut call = crate::node_telemetry::HostCallGuard::start(&component, "bus.subscribe");
+                let mut call = wa_governance::node_telemetry::HostCallGuard::start(&component, "bus.subscribe");
                 let capacity = (options.capacity as usize).clamp(1, 4096);
                 let subscribe = SubscribeOptions::new().with_capacity(capacity).with_policy(overflow(options.overflow));
                 let subscription = match node().subscribe(&component, &pattern, subscribe, replay.map(|n| n as usize)) {

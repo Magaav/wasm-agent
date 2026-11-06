@@ -178,8 +178,8 @@ pub const REGISTRY: &[Capability] = &[
     plain!("component_mcp", RunsProcess, crate::components::component_mcp, "One MCP request (probe or call) against a pinned WASI component, with exactly the granted env/file/network capabilities"),
     plain!("state", WritesFiles, crate::state_host::capability, "Component state: status, dry run, export, import and verify of a component's versioned kv namespace, its migration journal and its snapshots"),
     // ---- node governance (docs/GRANT-POLICY.md, docs/TELEMETRY.md) ----------------------------
-    plain!("policy_status", ReadOnly, crate::node_policy::capability, "The grant policy's state as JSON: file and load error, decision counters, recent refusals without target text, and the audit trail's health"),
-    plain!("telemetry", ReadOnly, crate::node_telemetry::capability, "This node's telemetry as Prometheus text or JSON: component and host-call latency, service health, sampled spans, rollups and the bounded stores' usage"),
+    plain!("policy_status", ReadOnly, wa_governance::node_policy::capability, "The grant policy's state as JSON: file and load error, decision counters, recent refusals without target text, and the audit trail's health"),
+    plain!("telemetry", ReadOnly, wa_governance::node_telemetry::capability, "This node's telemetry as Prometheus text or JSON: component and host-call latency, service health, sampled spans, rollups and the bounded stores' usage"),
     // ---- audio -------------------------------------------------------------------------------
     // The contract is one entry because it is one capability with two calls: `capture` (the ear)
     // and `play` (the mouth). Voice itself is the `voice` WASM plugin; this is only the transport.

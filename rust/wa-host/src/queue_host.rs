@@ -497,7 +497,7 @@ macro_rules! queue_impls {
                 job_id: u64,
             ) -> Result<GuestJob, QueueFault> {
                 let component = accessor.with(|mut access| access.get().component().to_string());
-                let mut call = crate::node_telemetry::HostCallGuard::start(&component, "queue.get");
+                let mut call = wa_governance::node_telemetry::HostCallGuard::start(&component, "queue.get");
                 let out = node().gate_job(&component, "producer", JobId(job_id)).map(job_to_guest);
                 call.outcome(&out);
                 out
@@ -508,7 +508,7 @@ macro_rules! queue_impls {
                 request: GuestRequest,
             ) -> Result<Enqueued, QueueFault> {
                 let component = accessor.with(|mut access| access.get().component().to_string());
-                let mut call = crate::node_telemetry::HostCallGuard::start(&component, "queue.enqueue");
+                let mut call = wa_governance::node_telemetry::HostCallGuard::start(&component, "queue.enqueue");
                 let queue_name = request.queue.clone();
                 let out = (|| {
                     node().gate(&component, "producer", Some(&queue_name))?;
@@ -551,7 +551,7 @@ macro_rules! queue_impls {
                 lease_ms: Option<u64>,
             ) -> Result<GuestTake, QueueFault> {
                 let component = accessor.with(|mut access| access.get().component().to_string());
-                let mut call = crate::node_telemetry::HostCallGuard::start(&component, "queue.take");
+                let mut call = wa_governance::node_telemetry::HostCallGuard::start(&component, "queue.take");
                 let out = (|| {
                     node().gate(&component, "worker", Some(&queue))?;
                     let lease_ms = lease_ms.map(|ms| fresh_ms(ms));
@@ -576,7 +576,7 @@ macro_rules! queue_impls {
                 extend_ms: Option<u64>,
             ) -> Result<u64, QueueFault> {
                 let component = accessor.with(|mut access| access.get().component().to_string());
-                let mut call = crate::node_telemetry::HostCallGuard::start(&component, "queue.heartbeat");
+                let mut call = wa_governance::node_telemetry::HostCallGuard::start(&component, "queue.heartbeat");
                 let out = (|| {
                     node().gate(&component, "worker", Some(&queue))?;
                     let job = node().gate_job(&component, "worker", JobId(job_id))?;
@@ -602,7 +602,7 @@ macro_rules! queue_impls {
                 output: Vec<u8>,
             ) -> Result<GuestJob, QueueFault> {
                 let component = accessor.with(|mut access| access.get().component().to_string());
-                let mut call = crate::node_telemetry::HostCallGuard::start(&component, "queue.done");
+                let mut call = wa_governance::node_telemetry::HostCallGuard::start(&component, "queue.done");
                 let out = (|| {
                     node().gate(&component, "worker", Some(&queue))?;
                     let job = node().gate_job(&component, "worker", JobId(job_id))?;
@@ -623,7 +623,7 @@ macro_rules! queue_impls {
                 reason: String,
             ) -> Result<GuestFailOutcome, QueueFault> {
                 let component = accessor.with(|mut access| access.get().component().to_string());
-                let mut call = crate::node_telemetry::HostCallGuard::start(&component, "queue.fail");
+                let mut call = wa_governance::node_telemetry::HostCallGuard::start(&component, "queue.fail");
                 let out = (|| {
                     node().gate(&component, "worker", Some(&queue))?;
                     let job = node().gate_job(&component, "worker", JobId(job_id))?;
@@ -648,7 +648,7 @@ macro_rules! queue_impls {
                 chunk: Vec<u8>,
             ) -> Result<u64, QueueFault> {
                 let component = accessor.with(|mut access| access.get().component().to_string());
-                let mut call = crate::node_telemetry::HostCallGuard::start(&component, "queue.progress");
+                let mut call = wa_governance::node_telemetry::HostCallGuard::start(&component, "queue.progress");
                 let out = (|| {
                     node().gate(&component, "worker", Some(&queue))?;
                     let job = node().gate_job(&component, "worker", JobId(job_id))?;
@@ -670,7 +670,7 @@ macro_rules! queue_impls {
                 queue: String,
             ) -> Result<GuestStats, QueueFault> {
                 let component = accessor.with(|mut access| access.get().component().to_string());
-                let mut call = crate::node_telemetry::HostCallGuard::start(&component, "queue.stats");
+                let mut call = wa_governance::node_telemetry::HostCallGuard::start(&component, "queue.stats");
                 let out = (|| {
                     node().gate(&component, "admin", Some(&queue))?;
                     node().queue(&component).stats(&queue).map_err(fault).map(|stats| stats_to_guest(&stats))
@@ -681,7 +681,7 @@ macro_rules! queue_impls {
 
             async fn queues(accessor: &wasmtime::component::Accessor<$state, Self>) -> Result<Vec<String>, QueueFault> {
                 let component = accessor.with(|mut access| access.get().component().to_string());
-                let mut call = crate::node_telemetry::HostCallGuard::start(&component, "queue.queues");
+                let mut call = wa_governance::node_telemetry::HostCallGuard::start(&component, "queue.queues");
                 let out = (|| {
                     node().gate(&component, "admin", None)?;
                     let grants = node().grants(&component).unwrap_or_default();
@@ -699,7 +699,7 @@ macro_rules! queue_impls {
                 limit: u32,
             ) -> Result<Vec<GuestJob>, QueueFault> {
                 let component = accessor.with(|mut access| access.get().component().to_string());
-                let mut call = crate::node_telemetry::HostCallGuard::start(&component, "queue.dead_letters");
+                let mut call = wa_governance::node_telemetry::HostCallGuard::start(&component, "queue.dead_letters");
                 let out = (|| {
                     node().gate(&component, "admin", Some(&queue))?;
                     let limit = (limit as usize).clamp(1, 256);
@@ -718,7 +718,7 @@ macro_rules! queue_impls {
                 refresh_freshness: bool,
             ) -> Result<GuestJob, QueueFault> {
                 let component = accessor.with(|mut access| access.get().component().to_string());
-                let mut call = crate::node_telemetry::HostCallGuard::start(&component, "queue.requeue");
+                let mut call = wa_governance::node_telemetry::HostCallGuard::start(&component, "queue.requeue");
                 let out = (|| {
                     let job = node().gate_job(&component, "admin", JobId(job_id))?;
                     let options = wa_queue::RequeueOptions {
@@ -736,7 +736,7 @@ macro_rules! queue_impls {
                 accessor: &wasmtime::component::Accessor<$state, Self>,
             ) -> Result<Option<GuestAlertBatch>, QueueFault> {
                 let component = accessor.with(|mut access| access.get().component().to_string());
-                let mut call = crate::node_telemetry::HostCallGuard::start(&component, "queue.next_alerts");
+                let mut call = wa_governance::node_telemetry::HostCallGuard::start(&component, "queue.next_alerts");
                 let out = (|| {
                     node().gate(&component, "admin", None)?;
                     let grants = node().grants(&component).unwrap_or_default();
@@ -765,7 +765,7 @@ macro_rules! queue_impls {
 
             async fn sweep(accessor: &wasmtime::component::Accessor<$state, Self>) -> Result<GuestSweep, QueueFault> {
                 let component = accessor.with(|mut access| access.get().component().to_string());
-                let mut call = crate::node_telemetry::HostCallGuard::start(&component, "queue.sweep");
+                let mut call = wa_governance::node_telemetry::HostCallGuard::start(&component, "queue.sweep");
                 let out = (|| {
                     node().gate(&component, "admin", None)?;
                     let outcome = node().queue(&component).sweep().map_err(fault)?;

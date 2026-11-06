@@ -371,7 +371,7 @@ pub fn run(installed: &Installed, grant: &Grant, stdin: Vec<u8>, timeout_ms: u64
             let outbound = matches!(use_, SocketAddrUse::TcpConnect | SocketAddrUse::UdpSend);
             let permitted = granted
                 && (!outbound
-                    || crate::node_policy::check_if_ruled(&component, "net.dial", Some(&addr.to_string())).is_allow());
+                    || wa_governance::node_policy::check_if_ruled(&component, "net.dial", Some(&addr.to_string())).is_allow());
             Box::pin(async move { permitted })
         });
     }
@@ -384,7 +384,7 @@ pub fn run(installed: &Installed, grant: &Grant, stdin: Vec<u8>, timeout_ms: u64
     wasmtime_wasi::p2::add_to_linker_sync(&mut linker)?;
     // The run is one telemetry observation (docs/TELEMETRY.md): link, instantiate and the guest's
     // whole execution, attributed to the component. Recorded below, before the outcome is returned.
-    let start_ms = crate::node_telemetry::now_ms();
+    let start_ms = wa_governance::node_telemetry::now_ms();
     let started = Instant::now();
     let command = wasmtime_wasi::p2::bindings::sync::Command::instantiate(&mut store, &component, &linker)?;
     let outcome = command.wasi_cli_run().call_run(&mut store);
@@ -403,7 +403,7 @@ pub fn run(installed: &Installed, grant: &Grant, stdin: Vec<u8>, timeout_ms: u64
             }
         }
     };
-    crate::node_telemetry::record_component_run(&installed.name, start_ms, started.elapsed().as_micros() as u64, exit_ok);
+    wa_governance::node_telemetry::record_component_run(&installed.name, start_ms, started.elapsed().as_micros() as u64, exit_ok);
     drop(store);
     Ok(Run { stdout: stdout.contents().to_vec(), stderr: stderr.contents().to_vec(), exit_ok, error, elapsed_ms })
 }

@@ -13,7 +13,7 @@
 //! Every answered function also records one telemetry observation
 //! (`node_telemetry::HostCallGuard`): the latency of the host call, its outcome, a sampled span.
 use crate::components::{Grant, Installed};
-use crate::node_telemetry::HostCallGuard;
+use wa_governance::node_telemetry::HostCallGuard;
 use wa_grant_policy::Decision;
 use crate::service_io::{http_start, url_authority, HttpState, Kv as KvStore, WsConn, AGAIN, CLOSED};
 use crate::services::{dial_allowed, Shared};
@@ -102,7 +102,7 @@ impl wa::kernel::types::Host for State {}
 /// else is a refusal the component can report, and the reason word is the stable one the audit
 /// record carries.
 pub(crate) fn gate(component: &str, capability: &str, target: Option<&str>) -> Result<(), KError> {
-    gate_decision(crate::node_policy::check(component, capability, target))
+    gate_decision(wa_governance::node_policy::check(component, capability, target))
 }
 
 /// What a policy answer means for the guest, in the vocabulary both runners share.
@@ -179,7 +179,7 @@ impl wa::kernel::websocket::HostSocket for State {
             // The frame is opaque, so what the host can charge is the authority plus the global
             // message budget, and only for a policy rule that names no chats
             // (`node_policy::check_opaque_send`). The per-chat check needs `wa:channel/messages`.
-            match crate::node_policy::check_opaque_send(&self.name, &authority) {
+            match wa_governance::node_policy::check_opaque_send(&self.name, &authority) {
                 Decision::Allow => {}
                 Decision::RateLimited { retry_after_ms, .. } if retry_after_ms < 1_000 => return Err(KError::Again),
                 other => return Err(KError::Refused(other.reason_str().to_string())),

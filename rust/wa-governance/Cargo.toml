@@ -1,0 +1,16 @@
+[package]
+name = "wa-governance"
+version = "0.1.0"
+edition = "2021"
+
+# What the node allows and what it recorded (docs/GRANT-POLICY.md, docs/TELEMETRY.md, docs/REPLAY.md):
+# the node policy, its telemetry registry and the bounded stores both write into. It sits above
+# `wa-host-support` and below the kernel, because the component runner asks the policy before a call and
+# records the call in telemetry; the registry and the stores themselves must not import the runtime.
+[dependencies]
+wa-host-support = { path = "../wa-host-support" }
+wa-grant-policy = { path = "../wa-grant-policy" }
+wa-telemetry = { path = "../wa-telemetry" }
+wa-bounded = { path = "../wa-bounded" }
+serde_json = "1"
+ring = "0.17"
