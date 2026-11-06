@@ -1,8 +1,11 @@
 # Grant policy — rate limits, approvals and audit for capability calls
 
-Status 05/11: library built and tested (`rust/wa-grant-policy`, 40 unit tests + doctest); **not wired
-into the host yet**. This document is the schema, the decision rules, and the wiring the host needs
-before the WhatsApp component may post to a real chat beyond its own test chat. Context:
+Status 12/11: library built and tested (`rust/wa-grant-policy`, 40 unit tests + doctest) and **wired
+into `wa-host`** (`node_policy.rs`): the check runs before every sensitive `wa:kernel` host call and
+before every outbound wasi-socket connect, the audit trail is written under a bounded directory, and
+`host.policy_status` answers with the decisions. What is still open is listed at the end: approvals
+have no operator path, the wasip1 (`wa_sock`) runner is not checked, and the per-chat check needs
+`wa:channel/messages`. This document is the schema, the decision rules, and the wiring. Context:
 [KERNEL.md](KERNEL.md) (capability seams), [COMPONENTS.md](COMPONENTS.md) (manifest grants),
 [SERVICE-COMPONENTS.md](SERVICE-COMPONENTS.md) (the long-lived runner).
 
@@ -152,53 +155,93 @@ default **refuses a sensitive call it could not audit** (`deny(audit_unavailable
 uncharged). `set_fail_closed_on_audit(false)` is the documented opt-out for a node whose audit disk
 is best-effort.
 
-**Bounded store later.** The sink trait is the seam: the file sink stays the durable one; a second
-sink writes the same record into a SQLite table (`audit(ts_ms, component, capability, target_digest,
-decision, reason)`, indexed by `ts_ms`, pruned to a row budget or a day budget) served by the kernel
-component that owns policy state. Reading it must page (`WHERE ts_ms < ? ORDER BY ts_ms DESC LIMIT
-?`), never scan, and the pruning must count what it pruned — dropping evidence silently is worse
-than a bigger file. Until then: rotate at 8 MiB like the service log, and say the count in
-`host.components()`.
+**Bounded store, as built.** The host places the file sink in a bounded directory
+(`<state>/audit/`, 32 MiB quota, `store.rs`), rotates it at 8 MiB with one backup generation, reports
+the directory's usage and percentage in `host.policy_status` and `host.telemetry`, and puts the 80 %
+crossing on the node's log. The trail is therefore bounded by construction (at most ~16 MiB of
+records) and its size is visible instead of being discovered by `df`.
 
-## How the host wires it (to be done in `service_components.rs`; this document does not edit it)
+**Still open:** a SQLite table (`audit(ts_ms, component, capability, target_digest, decision,
+reason)`, indexed by `ts_ms`, pruned to a row budget or a day budget) served by the kernel component
+that owns policy state. Reading it must page (`WHERE ts_ms < ? ORDER BY ts_ms DESC LIMIT ?`), never
+scan, and the pruning must count what it pruned — dropping evidence silently is worse than a bigger
+file. The `AuditSink` trait is the seam and needs no change.
 
-1. **Load once per node.** `PolicySet::from_file` on the node policy file (`WA_GRANT_POLICY`, default
-   `<state>/grant-policy.json`) at `wa serve` start; a load error is fatal for the capability it
-   governs, not for the node: `wa` starts, every component's sensitive calls are `no_policy`, and the
-   error is in the log. `Engine::restore_json` from `<state>/grant-policy.state.json` (missing file =
-   fresh budgets). Snapshot on graceful stop and every N minutes.
-2. **One engine, one sink.** `Mutex<Engine>` plus the sink beside it in `Shared`: `FileAudit` at
-   `<state>/audit/grant-policy.jsonl` (8 MiB rotation) and a `MemoryAudit` ring of the last 512
-   records for `host.components()`. Never `await` while holding the guard (see the WASI 0.3 note).
-3. **Clock.** `now_ms` = `SystemTime::now().duration_since(UNIX_EPOCH)`, read once per call and
-   passed down; nothing inside the library reads a clock.
-4. **One check per sensitive host call**, in the `Host` impls of `service_components.rs`, before the
-   effect and *after* the grant check:
+## How the host wires it
+
+The host side is `rust/wa-host/src/node_policy.rs` (one engine, one pair of sinks, the counters); the
+call sites are `service_components.rs` (the `wa:kernel` imports), `components.rs` (the outbound
+wasi-socket path of request components) and `services.rs` (the supervisor). The numbered list below is
+the design, kept because it is the reasoning; the paragraphs after it are what the tree actually does
+where it differs.
+
+1. **Loaded once per node, lazily on the first check or the first `host.policy_status`.**
+   `WA_GRANT_POLICY`, default `<home>/.wasm-agent/policy.json`. An **absent** file is an empty
+   policy: ordinary capabilities are allowed and the six sensitive ones are refused with `no_policy`
+   exactly as the crate defines. A file that does not parse is the same empty policy plus one line on
+   the node's log and the error in `host.policy_status` — the node starts, the capabilities the
+   policy governs are refused, and nothing is guessed at. Budgets are restored from
+   `WA_GRANT_POLICY_STATE` (default `<home>/.wasm-agent/grant-policy.state.json`, missing = fresh)
+   and written back every five minutes by the telemetry ticker.
+2. **One engine, one sink pair.** `Mutex<Engine>` plus a tee sink: `FileAudit` at
+   `<home>/.wasm-agent/audit/grant-policy.jsonl` (8 MiB rotation, one backup generation) and a
+   `MemoryAudit` ring of the last 512 records. The audit directory is a `BoundedDir` (32 MiB,
+   `store.rs`), so its usage is reported and its 80 % crossing is on the node's log. A file sink that
+   cannot be opened makes a sensitive call `deny(audit_unavailable)`: fail-closed, as the crate
+   defaults, visible in the log and in `host.policy_status`.
+3. **Clock.** `now_ms` is `SystemTime::now()` read once per call; nothing in the library reads a
+   clock, and no lock is held across anything that could block on a guest.
+4. **One check per sensitive host call, after the manifest grant** (`service_components.rs`):
 
    | WIT call | capability | target passed to the policy |
    | --- | --- | --- |
    | `websocket.connect(url, origin)` | `net.dial` | `url` authority |
-   | `websocket.send(data)` | `net.send` | the socket's authority |
+   | `websocket.send(data)` | `net.send`, then the interim `whatsapp.send` | the socket's authority |
    | `http.start(request)` | `http.request` | `url` authority |
    | `kv.set` / `kv.delete` / `kv.delete_prefix` | `kv.write` | the key (or its prefix) |
    | `kv.get` / `kv.scan` | `kv.read` | the key (or its prefix) |
    | `credentials.get(name)` | `credentials.read` | `name` |
-   | `speech.start(...)` | `stt.start` | `"-"`/none |
+   | `speech.start(...)` | `stt.start` | none |
    | `log.write`, `lifecycle.*` | never checked | a log line cannot exceed anything a person sees |
 
-   Result mapping: `Allow` → proceed; `Deny(no_policy | policy_denied | target_denied |
-   target_not_allowed)` → `KError::Refused(reason.as_str())`; `RateLimited` → either
-   `KError::Refused("capability_rate_limited")` or `KError::Again` when `retry_after_ms` is under a
-   second (the guest already retries `again`), with the number in the component log;
-   `NeedsApproval` → `KError::Refused("approval_required")` and one operator notification, not a
-   notification per attempt.
-5. **Approvals.** `Engine::approve(component, capability, target, now_ms, ttl_ms)` from the operator
-   path (`services` tool / CLI, master only), one use per approval, ttl default 15 min. Pending
-   approvals are visible and revocable (`revoke_approvals`).
-6. **Same checks in the wasip1 runner** (`services.rs`, `wa_sock`) once it is not being changed by
-   another stream: `connect` → `net.dial`, `read`/`write` on an allowed socket → `net.send`.
-7. **Audit errors** are drained per tick into the node log with the sink name only (never the
-   target), and counted in `host.components()` so a silent stop of the audit trail is visible.
+   Result mapping, in one function (`service_components::gate_decision`): `Allow` → proceed;
+   `Deny(no_policy | policy_denied | target_denied | target_not_allowed | audit_unavailable)` →
+   `KError::Refused(reason)`; `RateLimited` with `retry_after_ms < 1000` → `KError::Again` (the guest
+   already retries that), otherwise `Refused(reason)`; `NeedsApproval` → `Refused("approval_required")`.
+5. **The wasi-socket path.** Request components (MCP servers, the `wasi:cli` world) reach the network
+   through wasi sockets, not `wa:kernel`. There the manifest grant is already a per-address check, so
+   the policy is applied only for a rule the operator actually wrote for that component
+   (`node_policy::check_if_ruled`): `TcpConnect` and `UdpSend` uses are checked against `net.dial`,
+   binds are not. A policy file that names no rule for a component therefore cannot break a component
+   the manifest granted, while a rule that names it is enforced per address. One check per address
+   means a name that resolves to several addresses is charged several tokens — a known over-count,
+   bounded by the rule's own rate.
+6. **The interim `whatsapp.send` cap.** `websocket.send` carries ciphertext, so the authority is the
+   only target the host sees. `node_policy::check_opaque_send` charges `whatsapp.send` per outbound
+   frame **only for a rule that names no chats** (`allow` and `deny` both empty) — which is exactly
+   how an operator writes "global cap only". A rule that lists chats is not guessed at from an opaque
+   frame: the frame is not refused by it, and the per-chat limits become real when
+   `wa:channel/messages` lands and the guest declares the chat through
+   `node_policy::check_whatsapp_send(component, chat)` (the exported hook, no caller yet).
+7. **Audit errors** are drained every minute into the node log with the sink name only (never a
+   target) and counted in `host.policy_status`, so a silent stop of the audit trail is visible.
+8. **`host.policy_status()`** (read-only) answers: the policy path and load error, component and rule
+   counts, budget counts (capability buckets, per-target buckets, daily counters, pending approvals),
+   the decision counters (`checks`, `allow`, `deny`, `rate_limited`, `needs_approval`,
+   `audit_errors`), the audit sink's written/rotated/dropped numbers with the directory's usage, and
+   the last 32 refusals as `{ts_ms, component, capability, reason}` — **never a target**, so the view
+   cannot become a second place a chat id leaks into.
+
+### What changed for a node that had no policy file
+
+Before this wiring a service component's `kv.write`, `net.dial`, `credentials.read` and
+`http.request` were governed by the manifest grant alone. Now they are refused with `no_policy` until
+the operator writes a rule — the crate's documented default, and the reason a node that runs
+wa-whatsapp wants a policy file before it starts it. To keep today's behaviour for one capability,
+write a rule with no limits (`"kv.write": {}` means "any target, no rate"); to keep it for every
+component, write the rules the node's components need. There is deliberately **no node-wide switch
+that turns the policy off**, because a switch that silently disables a limit is the failure this
+layer exists to prevent.
 
 ### The honest gap: per-chat limits and an opaque frame
 
@@ -232,6 +275,21 @@ cap needs only the `send` call, not the chat.
 * **Fail-closed audit** can turn a full disk into a stopped channel. That is the intended trade and
   is one setter away from the other policy; the operator must know which one the node runs.
 
+## What is not wired yet
+
+* **Approvals have no operator path.** `Engine::approve` / `revoke_approvals` exist and the engine
+  honours them; there is no `services` tool action, CLI verb or panel that grants one, so a rule with
+  `require_approval` currently refuses (`approval_required`) until one is added. One use per
+  approval, ttl default 15 min; the call is `NodePolicy::approve` from a master-only path.
+* **The wasip1 runner** (`services.rs` `wa_sock.connect`, used by core modules such as `svc-echo`) is
+  not policy-checked: its `connect` sits inside the linker closure another stream owns. It needs the
+  same shape as the wasi-socket check (grant, then `net.dial` per `host:port`).
+* **Per-chat limits** need `wa:channel/messages` (`wit/kernel` 0.2, another job). Until then
+  `node_policy::check_whatsapp_send` has no caller and only the global message cap is real.
+* **The policy file is a single node file.** The profile stack in [KERNEL.md](KERNEL.md) (base → node
+  → user → patch) still says a policy should be a layer, not a file an LCM edits in place; nothing
+  here decides that.
+
 ## Open questions
 
 * Who owns the policy file when nodes are managed centrally — the profile stack in
@@ -245,8 +303,10 @@ cap needs only the `send` call, not the chat.
 
 ## WASI 0.3 / wasmtime 50 note
 
-Everything here is synchronous and cheap except the audit write (one `write` + `flush`). When the
-kernel calls it from inside an async host call, that file write must not sit on a guest's future:
+Everything here is synchronous and cheap except the audit write (one `write` + `flush`). Today the
+call sites are the synchronous `wa:kernel` host functions, so the write happens in the guest's own
+call. When the kernel calls it from inside an async host call, that file write must not sit on a
+guest's future:
 with WASI 0.3 native async the host should hand records to a dedicated writer (bounded channel,
 drop-oldest counted, `AuditSink` gaining an async or fire-and-forget form) while `Engine` stays a
 plain `Mutex<Engine>` — no `await` is ever held with the guard, and `check`/`enforce` keep their

@@ -286,10 +286,20 @@ if env -u CARGO_TARGET_DIR WA_COMPONENTS_DIR="$SERVICE_FIXTURE_DIR" bash scripts
 else
   echo "note: the service fixtures were not built (no wasm32-wasip1/wasip2 toolchain?); the three service end-to-end tests are skipped"
 fi
-gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-host -- components::tests services::tests capabilities::tests service_components::tests service_components_v2::tests
+# The node governance wiring (docs/GRANT-POLICY.md, docs/TELEMETRY.md, docs/REPLAY.md): the policy
+# engine's checks in the wa:kernel host calls, the telemetry recording points and the bounded
+# stores' quotas, each with unit tests of its own. Both runners are covered: the wa:kernel@0.1
+# compat path (service_components.rs) and the wa:kernel@0.2 native-async path (service_components_v2.rs).
+gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-host -- components::tests services::tests capabilities::tests node_policy::tests node_telemetry::tests store::tests service_components::tests service_components_v2::tests
 # Run the serve-level invariants, each a measured regression: routing by session (a wake carries its
 # conversation in the body's `thread`, not the auth header) and the UI version tracking content rather
 # than mtime (a `cp -f` of identical files must not force every open page to reload).
+# The node governance surfaces themselves (docs/GRANT-POLICY.md, docs/TELEMETRY.md): the policy status
+# and the telemetry capability answer from the libraries the host enforces, over the bounded stores
+# both write into. Its own scratch home, so the policy file it writes cannot govern a later check.
+GOVERNANCE_HOME="$(mktemp -d)"
+WASM_AGENT_HOME="$GOVERNANCE_HOME" WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-node-governance.lua" "$BIN" --db "$GOVERNANCE_HOME/db.sqlite" | grep 'node governance ok'
+rm -rf "$GOVERNANCE_HOME"
 gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-host serve::
 gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-host subagents::
 # What an operation says about itself when its bound kills it: the measured phases, and never a

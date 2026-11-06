@@ -32,6 +32,12 @@ mod transcript;
 mod build_status;
 mod selection;
 mod ripgrep;
+// The three libraries this host now enforces instead of only shipping (docs/GRANT-POLICY.md,
+// docs/TELEMETRY.md, docs/REPLAY.md): the node policy, its telemetry registry and the bounded
+// stores both of them write into.
+mod node_policy;
+mod node_telemetry;
+mod store;
 
 use host::Host;
 use lua::Lua;

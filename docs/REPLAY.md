@@ -1,9 +1,12 @@
 # Record / replay — bounded, per-component, on the node only
 
-Status 05/11: **library landed, host integration not wired.** `rust/wa-bounded` (this change) is the
-pure library: quota directory, content-addressed blob store, bounded record ring, zstd replay files
-and a replay reader with blob resolution. What the kernel still has to do is described here and is
-deliberately *not* done in this change (it touches `rust/wa-host`, which other streams own).
+Status 12/11: **library landed, storage bounded by the host, recording not wired.** `rust/wa-bounded`
+is the pure library: quota directory, content-addressed blob store, bounded record ring, zstd replay
+files and a replay reader with blob resolution. The host now owns the *directory*: `store.rs` opens
+`<home>/.wasm-agent/replays/` as a `BoundedDir` with the 500 MiB quota, expires files past 7 days on
+the minute sweep, reports its usage through `host.telemetry`, and puts the 80 % crossing on the node's
+log. Nothing writes a replay yet — "Wiring status and the precise TODO" below says exactly what is
+left and why it is not in this change.
 
 A replay answers one question: **what did the host tell this component, in order?** With that, a
 failing WhatsApp turn, a transcript that never arrived, a component that trapped after 40 calls — all
@@ -138,6 +141,45 @@ Replays contain message data. Therefore:
   data with a deadline, not an archive that grows.
 * **Pins are explicit** and visible in `usage`, so "there is evidence nobody deleted" cannot be true
   while the disk says otherwise.
+
+## Wiring status and the precise TODO
+
+What exists: the replay **directory** is a bounded store (`store.rs`) — 500 MiB quota from
+`wa_bounded::caps`, files past 7 days expired by the minute sweep, usage and percentage in
+`host.telemetry` (format `store` or the default JSON), the 80 % crossing on the node's log, and
+`pinned_bytes` reported so an incident's evidence is counted rather than invisible. A save that
+cannot fit will therefore fail visibly (`replay_save_refused:<why>`) instead of filling the disk.
+
+What does not exist: **no `RecordRing` is created and no replay is saved**, because the interception
+seam is being changed by the WASI 0.3 / wasmtime 50 work (the same freezing reason the `wit/kernel`
+0.2 job has). Writing the wrapper now would mean writing it twice, against a `Store` shape that is
+about to change.
+
+The exact call sites, so the next change does not have to re-derive them:
+
+| file | seam | call |
+| --- | --- | --- |
+| `rust/wa-host/src/service_components.rs` | every `impl wa::kernel::*::Host` for `State` — and the `HostCallGuard` added by the policy/telemetry wiring is already the one place each answered call passes through | `ring.push(NewRecord { interface: "wa:kernel/<iface>", function, args, result, duration })` **after** the answer, in `seq` order, never instead of it |
+| `rust/wa-host/src/core_component.rs` | `impl wa::kernel::host::Host::call` — the single untyped bridge every `host.*` from the Lua core crosses | the same push; one function, the cheapest interception point in the tree |
+| `rust/wa-host/src/components.rs` | `run()` — a request component (`wasi:cli` world) imports no `wa:kernel` | `wasi:clocks/*` and `wasi:random/*` answers, which is where its non-determinism is |
+| `rust/wa-host/src/services.rs` | the supervisor's restart branch (already carries `restart_reason`) | `replay::save(ring, &dir, &SaveOptions { trigger: Trigger::Crash, .. }, now)` on `trap`/`error` |
+
+Rules that must survive that change (from the sections above, restated where they are enforced):
+record after the answer and never instead of it; a failed host call is recorded **with** its error;
+`log::write` bodies are recorded as digests only; `lifecycle` and credential values are recorded as
+refusals/digests and never replayed; a save inside a component run may not fail the run — it logs
+`replay_save_refused:<why>` and continues; only the operator-facing `wa replay save` reports the
+error as its result.
+
+Two things it needs before it can land: the async `Store`/`future<T>` shape from wasmtime 50 (so the
+wrapper is written once), and `wit/kernel` 0.2 frozen (so the interface/function names the records
+carry are the stable ones). Until both are true, the honest state is: **bounded, measured, not
+recording**.
+
+Privacy is unchanged and now has two more surfaces to respect: neither `host.telemetry` nor
+`host.policy_status` may ever return a replay's contents — `host.telemetry` returns the replay
+*usage* (bytes, files, pinned bytes) and nothing else, and a replay's records are readable only by an
+operator on the node (`wa replay show <file>`).
 
 ## Open questions / next steps
 

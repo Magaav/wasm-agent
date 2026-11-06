@@ -10,6 +10,12 @@ path = "src/main.rs"
 [dependencies]
 wa-operation = { path = "../wa-operation" }
 wa-jobs = { path = "../wa-jobs" }
+# The grant policy, telemetry and bounded-store libraries this host enforces (docs/GRANT-POLICY.md,
+# docs/TELEMETRY.md, docs/REPLAY.md). All three are workspace members with no new dependencies of
+# their own beyond serde/serde_json/sha2/zstd, which the lock already carries.
+wa-grant-policy = { path = "../wa-grant-policy" }
+wa-telemetry = { path = "../wa-telemetry" }
+wa-bounded = { path = "../wa-bounded" }
 anyhow = "1"
 base64 = "0.23"
 ring = "0.17"

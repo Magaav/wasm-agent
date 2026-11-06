@@ -655,6 +655,7 @@ path_kind            read-only
 paths                read-only
 platform             read-only
 plugins              read-only
+policy_status        read-only
 quickjs              runs a process
 read_file            read-only
 read_image_base64    read-only
@@ -672,6 +673,7 @@ status_snapshot      device
 stream               device
 subagent             runs a process
 system_resources     read-only
+telemetry            read-only
 terminal_size        device
 terminal_write       device
 ticker               device
@@ -682,6 +684,34 @@ uuid                 read-only
 verify               read-only
 write_file           writes files
 <!-- capability-inventory:end -->
+
+## Node governance (`host.policy_status`, `host.telemetry`)
+
+Two read-only capabilities answer "what is this node enforcing, and how is it doing" without a shell
+and without a second store. Both are views over state the host already keeps; neither changes
+anything, and neither may return message text, a chat id, a kv key, a transcript or a replay record.
+
+`host.policy_status()` returns the grant policy's state as JSON: the policy file's path and load
+error, the component and rule counts, the budget counts (capability buckets, per-target buckets,
+daily counters, pending approvals), the decision counters, the audit sink's written/rotated/dropped
+numbers with its directory's usage, and the last 32 refusals as
+`{ts_ms, component, capability, reason}`. Refusals carry **no target**: the audit record names a
+target by digest, and this view does not become a second place an id leaks into. A node with no
+policy file says so (`loaded: false`) instead of pretending it decided something; the decisions it
+then refuses are the crate's sensitive-capability defaults
+([GRANT-POLICY.md](GRANT-POLICY.md#what-changed-for-a-node-that-had-no-policy-file)).
+
+`host.telemetry(request_json_or_format)` returns at most 256 KiB of text - a truncation says so on
+its last line: `""`/`{"format":"json"}` for the whole picture (stats, registry, bounded stores,
+policy summary), `"prometheus"` for the scrape, and `"stats"`, `"store"`, `"rollups"`, `"traces"` for
+one section. Percentiles are bucket estimates with `count` beside them, gauges are last-write-wins,
+and every cap that was hit is a counter rather than missing data
+([TELEMETRY.md](TELEMETRY.md#where-the-host-records)).
+
+The bounded stores both of them read are the node's own: `<home>/.wasm-agent/audit/` (32 MiB),
+`/telemetry/` (256 MiB), `/replays/` (500 MiB, 7 days) and one 50 MiB log per service component. Each
+reports usage and percentage and writes one line to the node's log at 80 %
+([REPLAY.md](REPLAY.md#wiring-status-and-the-precise-todo)).
 
 ## Audio (`host.audio`)
 

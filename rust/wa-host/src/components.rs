@@ -360,12 +360,22 @@ pub fn run(installed: &Installed, grant: &Grant, stdin: Vec<u8>, timeout_ms: u64
         builder.allow_tcp(true);
         builder.allow_udp(true);
         builder.allow_ip_name_lookup(false);
+        let component = installed.name.clone();
         builder.socket_addr_check(move |addr, use_| {
             let implicit_bind = addr.port() == 0
                 && addr.ip().is_unspecified()
                 && matches!(use_, SocketAddrUse::TcpBind | SocketAddrUse::UdpBind);
-            let ok = implicit_bind || allowed.contains(&addr);
-            Box::pin(async move { ok })
+            let granted = implicit_bind || allowed.contains(&addr);
+            // The manifest grant is the boundary on this path; the node policy narrows it only
+            // where the operator wrote a rule for this component (`docs/GRANT-POLICY.md`). A policy
+            // file that names no rule for it must not turn a granted component into a refused one,
+            // and a rule that does name it is enforced per address - the same check the wa:kernel
+            // path makes, on the only outbound uses that leave the sandbox.
+            let outbound = matches!(use_, SocketAddrUse::TcpConnect | SocketAddrUse::UdpSend);
+            let permitted = granted
+                && (!outbound
+                    || crate::node_policy::check_if_ruled(&component, "net.dial", Some(&addr.to_string())).is_allow());
+            Box::pin(async move { permitted })
         });
     }
     let limits = StoreLimitsBuilder::new().memory_size(MEMORY_LIMIT).instances(64).build();
@@ -375,6 +385,9 @@ pub fn run(installed: &Installed, grant: &Grant, stdin: Vec<u8>, timeout_ms: u64
     store.set_epoch_deadline((timeout_ms / TICK.as_millis() as u64).max(1));
     let mut linker = Linker::<Ctx>::new(&engine);
     wasmtime_wasi::p2::add_to_linker_sync(&mut linker)?;
+    // The run is one telemetry observation (docs/TELEMETRY.md): link, instantiate and the guest's
+    // whole execution, attributed to the component. Recorded below, before the outcome is returned.
+    let start_ms = crate::node_telemetry::now_ms();
     let started = Instant::now();
     let command = wasmtime_wasi::p2::bindings::sync::Command::instantiate(&mut store, &component, &linker)?;
     let outcome = command.wasi_cli_run().call_run(&mut store);
@@ -393,6 +406,7 @@ pub fn run(installed: &Installed, grant: &Grant, stdin: Vec<u8>, timeout_ms: u64
             }
         }
     };
+    crate::node_telemetry::record_component_run(&installed.name, start_ms, started.elapsed().as_micros() as u64, exit_ok);
     drop(store);
     Ok(Run { stdout: stdout.contents().to_vec(), stderr: stderr.contents().to_vec(), exit_ok, error, elapsed_ms })
 }

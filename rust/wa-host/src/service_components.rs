@@ -1,7 +1,19 @@
 //! Service components on the `wa:kernel` WIT contract (docs/KERNEL.md): the `service-component`
 //! world, run by the same supervisor as the wasip1 services (services.rs picks by binary header).
-//! The guest imports websocket/http/kv/lifecycle/log/credentials and exports `service.run`.
+//! The guest imports websocket/http/kv/lifecycle/log/credentials/speech and exports `service.run`.
+//!
+//! Two layers are enforced here, in this order (`docs/GRANT-POLICY.md`, "How the host wires it"):
+//!
+//! 1. the **manifest grant** (`Grant`) - may this component reach this address at all;
+//! 2. the **node policy** (`node_policy.rs`) - how often, to whom, with what record. A sensitive
+//!    capability with no rule is refused (`no_policy`), which is the crate's default and the reason
+//!    a node that runs components which write state wants a policy file.
+//!
+//! Every answered function also records one telemetry observation
+//! (`node_telemetry::HostCallGuard`): the latency of the host call, its outcome, a sampled span.
 use crate::components::{Grant, Installed};
+use crate::node_telemetry::HostCallGuard;
+use wa_grant_policy::Decision;
 use crate::service_io::{http_start, url_authority, HttpState, Kv as KvStore, WsConn, AGAIN, CLOSED};
 use crate::services::{dial_allowed, Shared};
 use std::io::Write as _;
@@ -29,7 +41,13 @@ wasmtime::component::bindgen!({
 
 use wa::kernel::types::Error as KError;
 
-pub struct WsSocket(Option<WsConn>);
+/// One open socket and the authority it was granted for. The authority is kept beside the
+/// connection because `websocket.send` takes ciphertext: the address is the only target the policy
+/// layer can name (`docs/GRANT-POLICY.md`, "The honest gap").
+pub struct WsSocket {
+    conn: Option<WsConn>,
+    authority: String,
+}
 pub struct HttpPending(HttpState);
 pub struct SpeechJob {
     slot: service_stt::JobSlot,
@@ -47,6 +65,9 @@ pub struct State {
     secrets: std::collections::BTreeMap<String, String>,
     /// Manifest `capabilities.stt == true`.
     stt: bool,
+    /// The installed name: policy checks and telemetry are attributed to the component, so one
+    /// running instance answers "who called this" without a second registry.
+    name: String,
 }
 
 impl WasiView for State {
@@ -67,34 +88,88 @@ fn kv_error(error: String) -> KError {
 
 impl wa::kernel::types::Host for State {}
 
+/// Map one policy answer to the guest's error (`docs/GRANT-POLICY.md` "Result mapping"): a rate
+/// limit shorter than a second becomes `again`, because the guest already retries that; everything
+/// else is a refusal the component can report, and the reason word is the stable one the audit
+/// record carries.
+fn gate(component: &str, capability: &str, target: Option<&str>) -> Result<(), KError> {
+    gate_decision(crate::node_policy::check(component, capability, target))
+}
+
+/// The mapping itself, separate so it is testable without a policy file (and so the table in
+/// `docs/GRANT-POLICY.md` has one implementation to drift from).
+fn gate_decision(decision: Decision) -> Result<(), KError> {
+    match decision {
+        Decision::Allow => Ok(()),
+        Decision::RateLimited { retry_after_ms, .. } if retry_after_ms < 1_000 => Err(KError::Again),
+        other => Err(KError::Refused(other.reason_str().to_string())),
+    }
+}
+
+/// A key as a policy/audit target. Invalid UTF-8 is still a target (lossy), so two requests that
+/// name the same bytes share one budget; the audit caps the field at 160 characters.
+fn target_of(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes).into_owned()
+}
+
 impl wa::kernel::websocket::Host for State {}
 impl wa::kernel::websocket::HostSocket for State {
     fn connect(&mut self, url: String, origin: Option<String>) -> Result<Resource<WsSocket>, KError> {
-        match url_authority(&url) {
-            Some(addr) if dial_allowed(&self.net, &addr) => {}
-            _ => return Err(KError::Refused(url)),
-        }
-        let conn = WsConn::open(&url, origin.as_deref()).map_err(KError::Failed)?;
-        self.table.push(WsSocket(Some(conn))).map_err(|e| KError::Failed(e.to_string()))
+        let mut call = HostCallGuard::start(&self.name, "websocket.connect");
+        let out = (|| {
+            // Grant first, policy second: a rule can only ever narrow what the manifest allows.
+            let authority = url_authority(&url)
+                .filter(|addr| dial_allowed(&self.net, addr))
+                .ok_or_else(|| KError::Refused(url.clone()))?;
+            gate(&self.name, "net.dial", Some(&authority))?;
+            let conn = WsConn::open(&url, origin.as_deref()).map_err(KError::Failed)?;
+            self.table.push(WsSocket { conn: Some(conn), authority }).map_err(|e| KError::Failed(e.to_string()))
+        })();
+        call.outcome(&out);
+        out
     }
     fn send(&mut self, socket: Resource<WsSocket>, data: Vec<u8>) -> Result<(), KError> {
-        match self.table.get(&socket).ok().and_then(|s| s.0.as_ref()) {
-            Some(conn) if conn.send(data) == 0 => Ok(()),
-            _ => Err(KError::Closed),
-        }
+        let mut call = HostCallGuard::start(&self.name, "websocket.send");
+        let out = (|| {
+            let Some(socket) = self.table.get(&socket).ok() else { return Err(KError::Closed) };
+            let Some(conn) = socket.conn.as_ref() else { return Err(KError::Closed) };
+            let authority = socket.authority.clone();
+            // The frame is opaque, so what the host can charge is the authority plus the global
+            // message budget, and only for a policy rule that names no chats
+            // (`node_policy::check_opaque_send`). The per-chat check needs `wa:channel/messages`.
+            match crate::node_policy::check_opaque_send(&self.name, &authority) {
+                Decision::Allow => {}
+                Decision::RateLimited { retry_after_ms, .. } if retry_after_ms < 1_000 => return Err(KError::Again),
+                other => return Err(KError::Refused(other.reason_str().to_string())),
+            }
+            if conn.send(data) == 0 {
+                Ok(())
+            } else {
+                Err(KError::Closed)
+            }
+        })();
+        call.outcome(&out);
+        out
     }
     fn recv(&mut self, socket: Resource<WsSocket>) -> Result<Vec<u8>, KError> {
-        let Some(conn) = self.table.get_mut(&socket).ok().and_then(|s| s.0.as_mut()) else { return Err(KError::Closed) };
-        match conn.next() {
-            AGAIN => Err(KError::Again),
-            CLOSED => Err(KError::Closed),
-            _ => conn.take().ok_or(KError::Again),
-        }
+        let mut call = HostCallGuard::start(&self.name, "websocket.recv");
+        let out = (|| {
+            let Some(conn) = self.table.get_mut(&socket).ok().and_then(|s| s.conn.as_mut()) else { return Err(KError::Closed) };
+            match conn.next() {
+                AGAIN => Err(KError::Again),
+                CLOSED => Err(KError::Closed),
+                _ => conn.take().ok_or(KError::Again),
+            }
+        })();
+        call.outcome(&out);
+        out
     }
     fn close(&mut self, socket: Resource<WsSocket>) {
+        let mut call = HostCallGuard::start(&self.name, "websocket.close");
         if let Ok(s) = self.table.get_mut(&socket) {
-            s.0 = None;
+            s.conn = None;
         }
+        call.succeed();
     }
     fn drop(&mut self, socket: Resource<WsSocket>) -> wasmtime::Result<()> {
         self.table.delete(socket)?;
@@ -105,24 +180,35 @@ impl wa::kernel::websocket::HostSocket for State {
 impl wa::kernel::http::Host for State {}
 impl wa::kernel::http::HostPending for State {
     fn start(&mut self, req: wa::kernel::http::Request) -> Result<Resource<HttpPending>, KError> {
-        if !url_authority(&req.url).is_some_and(|a| dial_allowed(&self.net, &a)) {
-            return Err(KError::Refused(req.url));
-        }
-        let headers: serde_json::Map<String, serde_json::Value> = req.headers.into_iter().map(|(k, v)| (k, serde_json::Value::String(v))).collect();
-        let meta = serde_json::json!({"url": req.url, "method": req.method, "headers": headers});
-        let state = http_start(&meta, req.body).map_err(KError::Failed)?;
-        self.table.push(HttpPending(state)).map_err(|e| KError::Failed(e.to_string()))
+        let mut call = HostCallGuard::start(&self.name, "http.start");
+        let out = (|| {
+            let authority = url_authority(&req.url)
+                .filter(|addr| dial_allowed(&self.net, addr))
+                .ok_or_else(|| KError::Refused(req.url.clone()))?;
+            gate(&self.name, "http.request", Some(&authority))?;
+            let headers: serde_json::Map<String, serde_json::Value> = req.headers.into_iter().map(|(k, v)| (k, serde_json::Value::String(v))).collect();
+            let meta = serde_json::json!({"url": req.url, "method": req.method, "headers": headers});
+            let state = http_start(&meta, req.body).map_err(KError::Failed)?;
+            self.table.push(HttpPending(state)).map_err(|e| KError::Failed(e.to_string()))
+        })();
+        call.outcome(&out);
+        out
     }
     fn poll(&mut self, pending: Resource<HttpPending>) -> Result<wa::kernel::http::Response, KError> {
-        let Ok(p) = self.table.get_mut(&pending) else { return Err(KError::Closed) };
-        match p.0.poll() {
-            AGAIN => Err(KError::Again),
-            status if status >= 0 => match &p.0 {
-                HttpState::Done(_, body) => Ok(wa::kernel::http::Response { status: status as u16, body: body.clone() }),
-                _ => Err(KError::Failed("no body".into())),
-            },
-            _ => Err(KError::Failed("exchange failed".into())),
-        }
+        let mut call = HostCallGuard::start(&self.name, "http.poll");
+        let out = (|| {
+            let p = self.table.get_mut(&pending).map_err(|_| KError::Closed)?;
+            match p.0.poll() {
+                AGAIN => Err(KError::Again),
+                status if status >= 0 => match &p.0 {
+                    HttpState::Done(_, body) => Ok(wa::kernel::http::Response { status: status as u16, body: body.clone() }),
+                    _ => Err(KError::Failed("no body".into())),
+                },
+                _ => Err(KError::Failed("exchange failed".into())),
+            }
+        })();
+        call.outcome(&out);
+        out
     }
     fn drop(&mut self, pending: Resource<HttpPending>) -> wasmtime::Result<()> {
         self.table.delete(pending)?;
@@ -133,20 +219,33 @@ impl wa::kernel::http::HostPending for State {
 impl wa::kernel::speech::Host for State {}
 impl wa::kernel::speech::HostJob for State {
     fn start(&mut self, audio: Vec<u8>, mime: String, language: String) -> Result<Resource<SpeechJob>, KError> {
-        if !self.stt {
-            return Err(KError::Refused("stt not declared".into()));
-        }
-        let slot = service_stt::submit(audio, &mime, &language).map_err(KError::Failed)?;
-        self.table.push(SpeechJob { slot, language }).map_err(|e| KError::Failed(e.to_string()))
+        let mut call = HostCallGuard::start(&self.name, "speech.start");
+        let out = (|| {
+            if !self.stt {
+                return Err(KError::Refused("stt not declared".into()));
+            }
+            gate(&self.name, "stt.start", None)?;
+            let slot = service_stt::submit(audio, &mime, &language).map_err(KError::Failed)?;
+            self.table.push(SpeechJob { slot, language }).map_err(|e| KError::Failed(e.to_string()))
+        })();
+        call.outcome(&out);
+        out
     }
     fn poll(&mut self, job: Resource<SpeechJob>) -> Result<wa::kernel::speech::Transcript, KError> {
-        let Ok(job) = self.table.get(&job) else { return Err(KError::Closed) };
-        let state = job.slot.lock().unwrap().state.clone();
-        match state {
-            service_stt::JobState::Queued => Err(KError::Again),
-            service_stt::JobState::Done { text, elapsed_ms } => Ok(wa::kernel::speech::Transcript { text, language: job.language.clone(), elapsed_ms }),
-            service_stt::JobState::Failed(reason) => Err(KError::Failed(reason)),
-        }
+        let mut call = HostCallGuard::start(&self.name, "speech.poll");
+        let out = (|| {
+            let job = self.table.get(&job).map_err(|_| KError::Closed)?;
+            let state = job.slot.lock().unwrap().state.clone();
+            match state {
+                service_stt::JobState::Queued => Err(KError::Again),
+                service_stt::JobState::Done { text, elapsed_ms } => {
+                    Ok(wa::kernel::speech::Transcript { text, language: job.language.clone(), elapsed_ms })
+                }
+                service_stt::JobState::Failed(reason) => Err(KError::Failed(reason)),
+            }
+        })();
+        call.outcome(&out);
+        out
     }
     fn segments(&mut self, job: Resource<SpeechJob>, from: u32) -> Vec<String> {
         let Ok(job) = self.table.get(&job) else { return Vec::new() };
@@ -160,48 +259,100 @@ impl wa::kernel::speech::HostJob for State {
 
 impl wa::kernel::kv::Host for State {
     fn get(&mut self, key: Vec<u8>) -> Result<Option<Vec<u8>>, KError> {
-        self.kv.get(key).map_err(kv_error)
+        let mut call = HostCallGuard::start(&self.name, "kv.get");
+        let target = target_of(&key);
+        let out = (|| {
+            gate(&self.name, "kv.read", Some(&target))?;
+            self.kv.get(key).map_err(kv_error)
+        })();
+        call.outcome(&out);
+        out
     }
     fn set(&mut self, key: Vec<u8>, value: Vec<u8>) -> Result<(), KError> {
-        self.kv.set(key, value).map_err(kv_error)
+        let mut call = HostCallGuard::start(&self.name, "kv.set");
+        let target = target_of(&key);
+        let out = (|| {
+            // The component's own namespace, but a write is a shadow copy of state: sensitive by
+            // default, so a node without a rule for it refuses the write with `no_policy`.
+            gate(&self.name, "kv.write", Some(&target))?;
+            self.kv.set(key, value).map_err(kv_error)
+        })();
+        call.outcome(&out);
+        out
     }
     fn delete(&mut self, key: Vec<u8>) -> Result<(), KError> {
-        self.kv.delete(key).map_err(kv_error)
+        let mut call = HostCallGuard::start(&self.name, "kv.delete");
+        let target = target_of(&key);
+        let out = (|| {
+            gate(&self.name, "kv.write", Some(&target))?;
+            self.kv.delete(key).map_err(kv_error)
+        })();
+        call.outcome(&out);
+        out
     }
     fn delete_prefix(&mut self, prefix: Vec<u8>) -> Result<u32, KError> {
-        self.kv.delete_prefix(prefix).map_err(kv_error)
+        let mut call = HostCallGuard::start(&self.name, "kv.delete_prefix");
+        let target = target_of(&prefix);
+        let out = (|| {
+            gate(&self.name, "kv.write", Some(&target))?;
+            self.kv.delete_prefix(prefix).map_err(kv_error)
+        })();
+        call.outcome(&out);
+        out
     }
     fn scan(&mut self, prefix: Vec<u8>, cursor: Option<Vec<u8>>, limit: u32) -> Result<Vec<wa::kernel::kv::Entry>, KError> {
-        let rows = self.kv.scan(prefix, cursor, limit).map_err(kv_error)?;
-        Ok(rows.into_iter().map(|(key, value)| wa::kernel::kv::Entry { key, value }).collect())
+        let mut call = HostCallGuard::start(&self.name, "kv.scan");
+        let target = target_of(&prefix);
+        let out = (|| {
+            gate(&self.name, "kv.read", Some(&target))?;
+            let rows = self.kv.scan(prefix, cursor, limit).map_err(kv_error)?;
+            Ok(rows.into_iter().map(|(key, value)| wa::kernel::kv::Entry { key, value }).collect())
+        })();
+        call.outcome(&out);
+        out
     }
 }
 
 impl wa::kernel::lifecycle::Host for State {
     fn stopping(&mut self) -> bool {
-        self.shared.stop.load(Ordering::Relaxed)
+        let mut call = HostCallGuard::start(&self.name, "lifecycle.stopping");
+        let stopping = self.shared.stop.load(Ordering::Relaxed);
+        call.succeed();
+        stopping
     }
     fn report(&mut self, state: wa::kernel::lifecycle::Health, detail: Option<String>) {
+        let mut call = HostCallGuard::start(&self.name, "lifecycle.report");
         let text = match state {
             wa::kernel::lifecycle::Health::Starting => "starting",
             wa::kernel::lifecycle::Health::Ready => "ready",
             wa::kernel::lifecycle::Health::Degraded => "degraded",
         };
         *self.shared.health.lock().unwrap() = format!("{text}{}", detail.map(|d| format!(": {d}")).unwrap_or_default());
+        call.succeed();
     }
 }
 
 impl wa::kernel::log::Host for State {
+    /// Never policy-checked: a log line cannot exceed anything a person sees
+    /// (`docs/GRANT-POLICY.md` step 4). Recorded for its latency like every other call.
     fn write(&mut self, level: wa::kernel::log::Level, target: String, message: String) {
+        let mut call = HostCallGuard::start(&self.name, "log.write");
         if let Some(file) = self.log.as_mut() {
             let _ = writeln!(file, "{:?} {target}: {message}", level);
         }
+        call.succeed();
     }
 }
 
 impl wa::kernel::credentials::Host for State {
     fn get(&mut self, name: String) -> Result<String, KError> {
-        self.secrets.get(&name).cloned().ok_or(KError::Refused(name))
+        let mut call = HostCallGuard::start(&self.name, "credentials.get");
+        let out = (|| {
+            gate(&self.name, "credentials.read", Some(&name))?;
+            self.secrets.get(&name).cloned().ok_or(KError::Refused(name.clone()))
+        })();
+        call.outcome(&out);
+        out
     }
 }
 
@@ -245,6 +396,7 @@ pub fn run_once(installed: &Installed, grant: &Grant, component: &Component, sha
         log: Some(log_file),
         secrets,
         stt,
+        name: installed.name.clone(),
     };
     let mut store = Store::new(engine, state);
     store.limiter(|s| &mut s.limits);
@@ -337,5 +489,46 @@ mod tests {
         }
         assert!(last.starts_with("exit_1"), "{last}");
         stop("svc-echo-v1");
+    }
+
+    use wa_grant_policy::Reason;
+
+    /// The table in `docs/GRANT-POLICY.md` "Result mapping", as one test: a refusal the component
+    /// can report, a short rate limit as `again` (the guest already retries that), and the exact
+    /// reason word on the error so a component log says why.
+    #[test]
+    fn a_policy_answer_maps_to_the_guest_error() {
+        assert!(gate_decision(Decision::Allow).is_ok());
+        match gate_decision(Decision::Deny(Reason::NoPolicy)) {
+            Err(KError::Refused(reason)) => assert_eq!(reason, "no_policy"),
+            other => panic!("expected refused(no_policy), got {other:?}"),
+        }
+        match gate_decision(Decision::Deny(Reason::TargetNotAllowed)) {
+            Err(KError::Refused(reason)) => assert_eq!(reason, "target_not_allowed"),
+            other => panic!("expected refused(target_not_allowed), got {other:?}"),
+        }
+        match gate_decision(Decision::NeedsApproval(Reason::ApprovalRequired)) {
+            Err(KError::Refused(reason)) => assert_eq!(reason, "approval_required"),
+            other => panic!("expected refused(approval_required), got {other:?}"),
+        }
+        // Under a second the guest can just try again, so the host says `again`.
+        assert!(matches!(
+            gate_decision(Decision::RateLimited { retry_after_ms: 400, reason: Reason::TargetRateLimited }),
+            Err(KError::Again)
+        ));
+        // Longer than that is a refusal with a number the component can log; retrying immediately
+        // would only spend the budget.
+        match gate_decision(Decision::RateLimited { retry_after_ms: 5_000, reason: Reason::CapabilityRateLimited }) {
+            Err(KError::Refused(reason)) => assert_eq!(reason, "capability_rate_limited"),
+            other => panic!("expected refused(capability_rate_limited), got {other:?}"),
+        }
+    }
+
+    /// A kv key becomes a policy target with the same bytes the guest used: no truncation, so two
+    /// keys that differ past a prefix do not share a budget.
+    #[test]
+    fn a_kv_key_is_a_target_without_being_rewritten() {
+        assert_eq!(target_of(b"session/abc"), "session/abc");
+        assert_eq!(target_of(&[0xff, 0xfe]), "\u{fffd}\u{fffd}");
     }
 }

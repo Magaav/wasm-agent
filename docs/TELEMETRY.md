@@ -1,8 +1,11 @@
 # telemetry — bounded per-component metrics, rollups and sampled traces
 
-Status 2026-11-06: crate `rust/wa-telemetry` implemented and tested (34 unit tests); **not yet wired
-into `wa-host`**. This document is the design and the contract. Nothing here is claimed as measured
-on a live node.
+Status 12/11: crate `rust/wa-telemetry` implemented and tested (34 unit tests) and **wired into
+`wa-host`** (`node_telemetry.rs`): one registry per node process, a ticker that rolls the clock and
+saves the snapshot, `host.telemetry` for the operator, and the recording points in
+`components.rs`, `service_components.rs` and `services.rs`. This document is the design and the
+contract. Nothing here is claimed as measured on a live node — the numbers exist after a node has
+run, and the caps are the ones the crate documents, not ones read off a running deployment.
 
 Related: [OBSERVABILITY.md](OBSERVABILITY.md) (the `harness_events` ledger for engineering runs —
 a different, append-only store), [KERNEL.md](KERNEL.md) and
@@ -131,22 +134,70 @@ a small closed set: never a message, never an error text with a path or an id in
 Worst case with all defaults is 14.9 MiB of rollups (64 series × 227 KiB) plus the 200 MiB trace
 ring plus the live histograms. That is the whole point: it does not depend on how many calls or chats a node saw.
 
-## Where the host records (planned; the host is not edited here)
+## Where the host records
 
-The crate is a library and the host owns the call sites. What belongs where:
+The crate is a library; the host owns the call sites and the clock. That host side is
+`rust/wa-host/src/node_telemetry.rs`, with the recording points in `components.rs`,
+`service_components.rs` and `services.rs`.
 
 | point | what | names |
 | --- | --- | --- |
-| every component call | one span + latency + outcome, from a single call: `record_op(component, op, start_ms, duration_us, status)` | `op_duration_micros{op}`, `op_total{op,status}` |
-| every host call (`host.*` capability) | the same, attributed to the capability not the caller: `record_op("wa-kernel", capability, …)` or, for the caller's view, a histogram on the calling component | `host_call_duration_micros{capability}`, `host_call_total{capability,status}` |
-| service health | a gauge per service instance: 1 running, 0 stopped; a counter per restart reason | `service_health{service,instance}`, `service_restart_total{service,reason}` |
-| queue events | `QueueMetrics` per (component, queue) | `queue_*` above |
-| clock | `tick()` once a second from the node loop (cheap when nothing happened) | — |
-| snapshot | `save(path)` on a timer (atomic: temp + fsync + rename) | — |
-| operator view | `prometheus()` and `to_json()`; `rollups_json()` and `traces_json()` on demand | — |
+| every component run (`components::run`: one MCP/request run) | one observation, from `record_component_run` | `op_duration_micros{op="run"}`, `op_total{op="run",status}`, a sampled span |
+| every `wa:kernel` host call (`service_components.rs`, one `HostCallGuard` per call) | latency, outcome and span, attributed to the calling component | `host_call_duration_micros{capability}`, `host_call_total{capability,status}` |
+| service runs (`services.rs` supervisor) | one observation per run of a supervised service | `op_duration_micros{op="run"}` on that service |
+| service health | a gauge per service: 1 running, 0 stopped | `service_health{service,instance="0"}` |
+| service restarts | one counter per restart, `reason` from a closed set (`exit`, `trap`, `error`, `start`, `stop`, `other`) | `service_restart_total{service,reason}` |
+| clock | `tick()` once a second from the node ticker (cheap when nothing happened) | — |
+| snapshot | `save(<state>/telemetry/registry.bin)` every 5 minutes, restored on start | — |
+| bounded stores | `store::sweep` every minute: expire replays, report usage, alert at 80 % | — |
+| operator view | `host.telemetry` | see below |
 
-Not in the crate, on purpose: where the state file lives, how often it is written, whether a service
-gets its own registry, and any HTTP. No exporter, no client, no network — the host decides.
+Labels are closed sets: a capability string, a service name, an outcome word. The crate sanitises a
+label value to `[A-Za-z0-9_]`, so the scrape shows `service="wa_whatsapp"` and `capability="kv_set"`
+while the host passes the real names (`wa-whatsapp`, `kv.set`); a query from the crate uses the same
+literals and matches either form. A target (a chat id,
+a kv key, a URL) is **never** a label — that is the same rule as the audit record's digest, for the
+same reason: the scrape must not become a place a chat id leaks into.
+
+`capability` is the `wa:kernel` function name as the guest sees it (`kv.set`, `websocket.connect`,
+`http.start`, `speech.start`, `credentials.get`, `log.write`, `lifecycle.report`, …). A run is
+`op="run"`. Nothing else in the tree may add a label whose value comes from the guest.
+
+### `host.telemetry`
+
+`host.telemetry(request_json_or_format)` returns **text**, at most 256 KiB (a truncation says so at
+the end rather than reading as complete data):
+
+| request | answer |
+| --- | --- |
+| `""` or `{"format":"json"}` | `{stats, registry, store, policy, snapshot}` — the whole picture, including `store::usage_report()` and a compact policy summary |
+| `"prometheus"` | the Prometheus text scrape (`Metrics::prometheus`) |
+| `"stats"` | `{stats, store}` |
+| `"store"` | the bounded stores' quotas and usage only |
+| `"rollups"` | `rollups_json()` for every tracked series |
+| `"traces"` | the retained spans, oldest first |
+
+The registry is restored from the snapshot on first use, so a short-lived process (a `WA_SCRIPT`
+run, a one-shot CLI) answers with the last node's numbers rather than an empty registry. That is a
+*view of the snapshot*, not a live scrape of another process: there is no metrics endpoint, and this
+does not add one (`docs/TELEMETRY.md`, "What it deliberately does not do").
+
+### Bounds taken from the stores
+
+`docs/REPLAY.md`'s caps are the ones the host applies (`store.rs`): the telemetry directory is 256 MiB
+(the 200 MiB trace ring plus live series and the snapshot), the grant-policy audit directory 32 MiB,
+the replay directory 500 MiB / 7 days, a service log 50 MiB per component (rotated at service start).
+Each has an 80 % alert on the node's log and reports its usage through `host.telemetry`. A snapshot
+that would be written into a full telemetry store is refused, once, with the size in the log.
+
+### What is still missing from the wiring
+
+* **Queue metrics** (`QueueMetrics`) are not recorded: `wa-jobs` owns the queue and the call sites are
+  in its scheduler, not in the host. The five moments are ready to be called from there.
+* **No `wa telemetry` CLI.** The CLI is Lua-dispatched and `lua/core/telemetry.lua` is a *different*
+  store (per-request accounting in the ledger, [OBSERVABILITY.md](OBSERVABILITY.md)); a `telemetry`
+  verb that shadows it would be a second meaning for one word. `host.telemetry` is the sanctioned
+  read; a CLI wrapper is a product decision, not a wiring gap.
 
 ## Reading the B3 cutover
 

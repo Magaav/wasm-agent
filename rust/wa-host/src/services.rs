@@ -33,7 +33,6 @@ const EAGAIN: i32 = -11;
 const REFUSED: i32 = -13;
 const MAX_SOCKETS: usize = 64;
 const MAX_IO: usize = 256 << 10;
-const LOG_ROTATE: u64 = 8 << 20;
 const STOP_GRACE: Duration = Duration::from_secs(5);
 const BACKOFF_MAX: Duration = Duration::from_secs(60);
 const HEALTHY: Duration = Duration::from_secs(600);
@@ -412,10 +411,11 @@ fn log_path(name: &str) -> std::path::PathBuf {
 }
 
 fn open_log(name: &str) -> Result<std::fs::File> {
+    // Bounded store (store.rs): a service log has a per-component quota, applied at start - the one
+    // moment the host owns the file. While the service runs the guest holds the handle, so the
+    // sweep alerts at 80 % instead of rotating a file out from under it.
+    crate::store::enforce_service_log(&crate::components::component_dir(), name, crate::store::service_log_quota());
     let path = log_path(name);
-    if std::fs::metadata(&path).map(|m| m.len() > LOG_ROTATE).unwrap_or(false) {
-        let _ = std::fs::rename(&path, path.with_extension("log.1"));
-    }
     Ok(std::fs::OpenOptions::new().create(true).append(true).open(path)?)
 }
 
@@ -573,7 +573,11 @@ pub fn start(request: &Value) -> Value {
         let mut backoff = Duration::from_secs(1);
         loop {
             set(&thread_shared, "running");
+            // Health is a gauge, not a log line: 1 while a run is in flight, 0 when the supervisor
+            // stops for good (docs/TELEMETRY.md).
+            crate::node_telemetry::record_service_health(&installed.name, true);
             thread_shared.started_at.store(now(), Ordering::Relaxed);
+            let run_start_ms = crate::node_telemetry::now_ms();
             let began = Instant::now();
             let outcome = match &compiled {
                 Compiled::Module(module) => run_once(&installed, &grant, module, &thread_shared),
@@ -586,20 +590,30 @@ pub fn start(request: &Value) -> Value {
                     Err(error) => format!("log_unavailable:{error}"),
                 },
             };
-            *thread_shared.last_exit.lock().unwrap() = outcome;
+            crate::node_telemetry::record_component_run(
+                &installed.name,
+                run_start_ms,
+                began.elapsed().as_micros() as u64,
+                outcome == "exit_0",
+            );
+            *thread_shared.last_exit.lock().unwrap() = outcome.clone();
             if thread_shared.stop.load(Ordering::Relaxed) {
                 set(&thread_shared, "stopped");
+                crate::node_telemetry::record_service_health(&installed.name, false);
                 return;
             }
             if began.elapsed() > HEALTHY {
                 backoff = Duration::from_secs(1);
             }
             thread_shared.restarts.fetch_add(1, Ordering::Relaxed);
+            // Why a restart happened, from a closed set so the label cannot carry an error text.
+            crate::node_telemetry::record_service_restart(&installed.name, crate::node_telemetry::restart_reason(&outcome));
             set(&thread_shared, "backoff");
             let until = Instant::now() + backoff;
             while Instant::now() < until {
                 if thread_shared.stop.load(Ordering::Relaxed) {
                     set(&thread_shared, "stopped");
+                    crate::node_telemetry::record_service_health(&installed.name, false);
                     return;
                 }
                 std::thread::sleep(Duration::from_millis(100));
@@ -624,6 +638,9 @@ pub fn stop(name: &str) -> Value {
     if let Some(thread) = handle.thread.take() {
         let _ = thread.join();
     }
+    // The supervisor sets this itself when it returns; repeating it here covers a stop that raced
+    // with a start and never reached the loop's stop branch.
+    crate::node_telemetry::record_service_health(name, false);
     json!({"ok": true, "name": name, "was_running": true, "last_exit": *handle.shared.last_exit.lock().unwrap()})
 }
 
