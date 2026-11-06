@@ -67,8 +67,9 @@ pub struct State {
     /// Manifest `capabilities.stt == true`.
     stt: bool,
     /// The installed name: policy checks and telemetry are attributed to the component, so one
-    /// running instance answers "who called this" without a second registry.
-    name: String,
+    /// running instance answers "who called this" without a second registry. `pub(crate)` because
+    /// the host-side providers (`bus_host`, `queue_host`) attribute their calls to it too.
+    pub(crate) name: String,
 }
 
 impl WasiView for State {
@@ -85,6 +86,13 @@ fn kv_error(error: String) -> KError {
     } else {
         KError::Failed(error)
     }
+}
+
+/// The store's data projection is the state itself, so the store-taking imports (a bus
+/// subscription's `stream`, in `bus_host.rs`) reach it as `&mut State`. The 0.2 runner has the same
+/// impl for its own state.
+impl wasmtime::component::HasData for State {
+    type Data<'a> = &'a mut State;
 }
 
 impl wa::kernel::types::Host for State {}
@@ -453,6 +461,15 @@ pub fn run_once(installed: &Installed, grant: &Grant, component: &Component, sha
     }
     if let Err(error) = ServiceComponent::add_to_linker::<State, HasSelf<State>>(&mut linker, |s| s) {
         return format!("link_failed:{error}");
+    }
+    // The host providers beside the kernel contract: `wa:bus` and `wa:queue` are imports a component
+    // declares in its own world, so a 0.1 guest that does not import them is unaffected (the linker
+    // only defines what the guest asks for) and one that does links or fails here, not at a missing
+    // host call later.
+    for added in [crate::bus_host::link(&mut linker), crate::queue_host::link(&mut linker)] {
+        if let Err(error) = added {
+            return format!("link_failed:{error}");
+        }
     }
     let bindings = match ServiceComponent::instantiate(&mut store, component, &linker) {
         Ok(bindings) => bindings,

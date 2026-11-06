@@ -1,7 +1,12 @@
 # Queue — one durable queue for every kind of work
 
-Status 2026-11-05: `rust/wa-queue` exists and is tested; `wit/queue/queue.wit` is a **draft**. No
-component is served by a host yet. Related: [KERNEL.md](KERNEL.md) (the component contract),
+Status 2026-11-06: `rust/wa-queue` exists and is tested, and the host serves `wa:queue` to
+components (`rust/wa-host/src/queue_host.rs`) over it: a `wa_queue::Queue` per call in the
+component's own kv (`q/` inside it), a manifest `queue` grant per interface and per namespace, a host
+sweeper, and alerts written to the process log and published on the bus topic `kernel.queue.alert`.
+`wit/queue/queue.wit` is expressed with WASI 0.3 `async func`s plus one `stream<list<u8>>` (the
+draft's `future<T>` spelling is gone; see "How the host serves it" for what each of the eight
+requirements below turned into, and what is still open). Related: [KERNEL.md](KERNEL.md) (the component contract),
 [COMPONENTS.md](COMPONENTS.md), [SERVICE-COMPONENTS.md](SERVICE-COMPONENTS.md) (long-lived service
 components), [JOBS.md](JOBS.md) (automation definitions — a different thing),
 [OPERATIONS.md](OPERATIONS.md) (one supervised process), `wit/queue/queue.wit`,
@@ -152,10 +157,30 @@ A queue provider on the node that owns the journal, workers anywhere on the rela
 - Migration: the lease is the only thing that must not exist on two nodes at once, and it is one Kv
   key on the provider. A node that joins or leaves changes nothing but who calls `take`.
 
-## What the host must add to serve `wa:queue`
+## How the host serves it
 
-Prerequisite: the WASI 0.3 / wasmtime 50 upgrade (native `future`/`stream`, async component
-imports). Today wasmtime 37 has no async component ABI, so the draft cannot be served as written.
+Prerequisite met: wasmtime 50 with `component-model-async`. The requirements below are kept as they
+were written - they are the contract - and each one now names what the host does, or that it is
+still open:
+
+| # | requirement | built? |
+| --- | --- | --- |
+| 1 | a `Kv` adapter | `rust/wa-kv`: `Store` + `Namespaced`, shared with the bus and the state crate; the queue's keys live under `q/` inside the component's kv |
+| 2 | a clock | `wa_queue::SystemClock` in the host, `FixedClock` in tests; nothing in the provider reads the wall clock itself |
+| 3 | a grant | `queue_host::Grants` reads `{"interfaces": […], "namespaces": […]}`; a malformed grant refuses the start, an ungranted interface or queue is `refused`, a `wa.*` namespace covers one more segment |
+| 4 | a provider | the host serves `producer`/`worker`/`admin` (bindgen world `wa:queue/consumer`); the sweeper runs every 15 s; stopping a component flushes nothing and its lapsed lease is recovered by `take` |
+| 5 | alert delivery | the sweeper drains `next_alerts()` per component: one bounded log line, and a `kernel.queue.alert` fact on the bus (last 64 retained). An `admin` consumer may still call `next-alerts` itself |
+| 6 | scope by queue | `gate_job` loads the job and refuses it unless its queue is granted; the worker calls also require the queue named in the call to equal the job's own |
+| 7 | observability | the `admin` interface plus `queue_host::status()` (counts per component and granted queue); **not** wired into `/health` or the UI, which this change does not touch |
+| 8 | two-node proof | **open**: one-node only. `rust/components/svc-queue-echo` + `scripts/test-queue-bus-state.lua` prove produce -> consume -> done, dedupe, the progress stream, the admin counts and a refused queue in a running component |
+
+Two things a reader should not have to infer: `progress(job-id, after)` is a *snapshot* stream (the
+chunks that exist when it is opened, then it ends), because the library keeps no wake path per job;
+and `Policy::default()` is what the provider runs with - no freshness bound and no timeout unless the
+producer's request asks for one, because a host-wide default would be a guess about every queue on
+the node.
+
+## What the host had to add to serve `wa:queue` (the contract the provider meets)
 
 1. **A `Kv` adapter.** `wa:kernel/kv` is `get`/`set`/`delete`/`delete-prefix`/`scan(prefix, cursor,
    limit)`. The queue needs `scan_prefix` without a cursor and in key order, which is `scan` paged to

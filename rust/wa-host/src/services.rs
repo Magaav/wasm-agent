@@ -526,6 +526,26 @@ pub fn start(request: &Value) -> Value {
             return json!({"ok": false, "error": "service_running_with_another_pin: stop it first"});
         }
     }
+    // The transactional install (docs/STATE.md): before anything is compiled or started, a
+    // manifest that declares `state_version` must find its namespace at that version. The migration
+    // runs on a snapshot copy and is swapped in only if it succeeds; a refusal here leaves the
+    // previous instance and its state exactly as they were, and nothing has started.
+    let state = match crate::state_host::prepare_install(&installed) {
+        Ok(outcome) => outcome,
+        Err(error) => return json!({"ok": false, "name": name, "error": error}),
+    };
+    // The two component-facing providers' grants, read from the same (already checked) manifest:
+    // `bus` patterns and `queue` interfaces/namespaces. A malformed grant is a refusal here, before
+    // anything runs; a component that declares neither gets no bus grant and no queue interface, so
+    // every call it makes on them is refused by the ACL/gate rather than silently allowed.
+    let bus_grants = match crate::bus_host::register(&name, &installed.manifest) {
+        Ok(grants) => grants,
+        Err(error) => return json!({"ok": false, "name": name, "error": error}),
+    };
+    let queue_grants = match crate::queue_host::node().register(&name, &installed.manifest) {
+        Ok(grants) => grants,
+        Err(error) => return json!({"ok": false, "name": name, "error": error}),
+    };
     let engine = match crate::components::engine() {
         Ok(engine) => engine,
         Err(error) => return json!({"ok": false, "error": error.to_string()}),
@@ -624,7 +644,17 @@ pub fn start(request: &Value) -> Value {
     match thread {
         Ok(thread) => {
             services.insert(name.clone(), Handle { shared, sha256: sha256.clone(), thread: Some(thread) });
-            json!({"ok": true, "name": name, "started": true, "sha256": sha256})
+            json!({
+                "ok": true,
+                "name": name,
+                "started": true,
+                "sha256": sha256,
+                "state": state.to_json(),
+                "grants": {
+                    "bus": {"publish": bus_grants.publish, "subscribe": bus_grants.subscribe},
+                    "queue": queue_grants.to_json(),
+                },
+            })
         }
         Err(error) => json!({"ok": false, "error": format!("spawn_failed:{error}")}),
     }
@@ -633,7 +663,15 @@ pub fn start(request: &Value) -> Value {
 /// Stop a service and wait for it (grace for a clean exit, then the epoch traps it).
 pub fn stop(name: &str) -> Value {
     let handle = registry().lock().unwrap().remove(name);
-    let Some(mut handle) = handle else { return json!({"ok": true, "name": name, "was_running": false}) };
+    // Revocable registrations (`docs/BUS.md`, "Revocation"; `docs/QUEUE.md`, item 4): a stopped
+    // component is never handed one more event, and its queue grant stops applying. This runs for a
+    // component that was not running too - a grant without a process is exactly what must not
+    // linger - and it is cheap and idempotent.
+    let bus_revoked = crate::bus_host::unregister(name);
+    crate::queue_host::node().unregister(name);
+    let Some(mut handle) = handle else {
+        return json!({"ok": true, "name": name, "was_running": false, "bus_subscriptions_revoked": bus_revoked});
+    };
     handle.shared.stop.store(true, Ordering::Relaxed);
     if let Some(thread) = handle.thread.take() {
         let _ = thread.join();
@@ -641,7 +679,13 @@ pub fn stop(name: &str) -> Value {
     // The supervisor sets this itself when it returns; repeating it here covers a stop that raced
     // with a start and never reached the loop's stop branch.
     crate::node_telemetry::record_service_health(name, false);
-    json!({"ok": true, "name": name, "was_running": true, "last_exit": *handle.shared.last_exit.lock().unwrap()})
+    json!({
+        "ok": true,
+        "name": name,
+        "was_running": true,
+        "last_exit": *handle.shared.last_exit.lock().unwrap(),
+        "bus_subscriptions_revoked": bus_revoked,
+    })
 }
 
 fn describe(name: &str, handle: &Handle) -> Value {

@@ -16,6 +16,14 @@ wa-jobs = { path = "../wa-jobs" }
 wa-grant-policy = { path = "../wa-grant-policy" }
 wa-telemetry = { path = "../wa-telemetry" }
 wa-bounded = { path = "../wa-bounded" }
+# The queue, the bus and the state rule book, served to components by the host modules
+# `queue_host.rs` / `bus_host.rs` / `state_host.rs` (docs/QUEUE.md, docs/BUS.md, docs/STATE.md).
+wa-queue = { path = "../wa-queue" }
+wa-bus = { path = "../wa-bus" }
+wa-state = { path = "../wa-state" }
+# The one adapter that presents the host's per-component kv through those three crates' kv traits,
+# with a namespace per library and per component.
+wa-kv = { path = "../wa-kv" }
 anyhow = "1"
 base64 = "0.23"
 ring = "0.17"

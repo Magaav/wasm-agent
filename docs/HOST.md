@@ -669,6 +669,7 @@ sign                 read-only
 sleep                read-only
 sql_exec             writes files
 sql_query            read-only
+state                writes files
 status_snapshot      device
 stream               device
 subagent             runs a process
@@ -684,6 +685,25 @@ uuid                 read-only
 verify               read-only
 write_file           writes files
 <!-- capability-inventory:end -->
+
+## Component state (`host.state`)
+
+One admin capability, one JSON request: `{action: status|dry-run|export|import|verify, name, path,
+replace, target}`. It answers from `rust/wa-state` through `rust/wa-host/src/state_host.rs`, and it is
+the operator's view of the rule book in [STATE.md](STATE.md): the schema version, the component id
+and semver the namespace belongs to, the build that last migrated it, how many user keys it holds,
+an unfinished migration's journal (`{from, to, name, applied}`), how many snapshots exist, and
+whether this host carries migration steps for that component.
+
+`status` with no `name` lists every `<component>.state` directory under the component directory.
+`dry-run` reports what a migration to `target` would change without writing anything, not even a
+timestamp. `export` writes a `WASTATE1` snapshot (zstd, sha256 over the uncompressed payload) to
+`path` or to `<name>.state.snapshot-<unix-ms>`; `verify` checks a snapshot's header and checksum
+without importing it; `import` refuses a namespace that already holds keys unless `replace` is set,
+and always requires the header's component id to match the name it is imported as.
+
+Nothing here reports a key, a value, a payload or a secret: counts, versions, ids and paths only. The
+effect class is *writes files* because `export` and `import` do.
 
 ## Node governance (`host.policy_status`, `host.telemetry`)
 

@@ -109,7 +109,8 @@ pub struct State {
     stt: bool,
     /// The installed name: policy checks and telemetry are attributed to the component, so one
     /// running instance answers "who called this" without a second registry (as in 0.1).
-    name: String,
+    /// `pub(crate)` because the host-side providers (`bus_host`, `queue_host`) use it too.
+    pub(crate) name: String,
 }
 
 impl WasiView for State {
@@ -764,6 +765,10 @@ pub fn run_once(installed: &Installed, grant: &Grant, component: &Component, sha
         wa::kernel::lifecycle::add_to_linker::<State, State>(&mut linker, |s| s),
         wa::kernel::log::add_to_linker::<State, State>(&mut linker, |s| s),
         wa::kernel::credentials::add_to_linker::<State, State>(&mut linker, |s| s),
+        // The host providers (`docs/QUEUE.md`, `docs/BUS.md`): the queue over the component's own
+        // kv namespace and the node's one bus. A guest world that does not import them is unaffected.
+        crate::bus_host::link_v2(&mut linker),
+        crate::queue_host::link_v2(&mut linker),
     ] {
         if let Err(error) = added {
             return format!("link_failed:{error}");

@@ -5,6 +5,13 @@
 /// producer knowing any of them. See docs/BUS.md for the design, the host-side library that already
 /// exists (rust/wa-bus), and the enforcement model.
 ///
+/// Status 2026-11-06: served by `wa-host/src/bus_host.rs` as a host provider (one `wa_bus::Bus` per
+/// node, the ACL built from the components' manifest grants, `revoke_owner` on stop). A subscription
+/// is a `stream<event>`: dropping it unsubscribes, and the bus is `wa_bus::Bus` behind it.
+/// `unsubscribe` is gone from this interface for the reason the draft already gave: dropping the
+/// stream is the unsubscribe, and a stream cannot be handed back to the host without inventing a
+/// second handle for the same thing.
+///
 /// WASI 0.3 shape: `publish` is `async` (backpressure suspends the guest task, it never blocks the
 /// runtime), and a subscription **is** a `stream<event>` — dropping the stream, or the kernel
 /// revoking the component, ends it. That is the same "revocable registrations" rule the kernel
@@ -105,9 +112,9 @@ interface subscriber {
         replay: option<u32>,
     ) -> result<stream<event>, error>;
 
-    /// End a subscription from the guest side. Equivalent to dropping the stream; explicit so a
-    /// component that keeps handles in a table can say what it means.
-    unsubscribe: func(subscription: stream<event>);
+    // No `unsubscribe`: dropping the stream (or letting the runtime close it on component stop) is
+    // the unsubscribe, and the host's producer notices the drop and closes the `wa_bus`
+    // subscription. One handle, one meaning (`docs/BUS.md`, "Revocation").
 }
 
 /// A component that both publishes and consumes facts (the `agent-core`, a search indexer, an

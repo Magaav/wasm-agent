@@ -2,6 +2,12 @@
 -- components this node runs, with what grants, and whether they start at boot. The host
 -- (host.service) does the running and supervision; this file owns definitions and policy.
 -- Master only; never from a child agent. Stored like the MCP registry: one meta row, CAS writes.
+--
+-- Versioned state is the host's business, not this file's (docs/STATE.md): `host.service start`
+-- runs the manifest's `state_version` migration on a snapshot copy before the instance exists and
+-- reports it in the answer's `state` field, which this registry passes through untouched. An `enable`
+-- whose `started.ok` is false - including a refused migration - stores nothing, so a definition the
+-- node cannot run never becomes an enabled one.
 local json=dofile('lua/vendor/json.lua')
 local M={KEY='services.v1'}
 local function fail(error,extra)local r=extra or {};r.ok=false;r.error=error;return r end
@@ -98,6 +104,8 @@ function M.control(args,ctx)
   if not row then return fail('service_unknown') end
   if action=='enable' then
    local started=host_call(start_request(row.definition))
+   -- `started.state` is the install's own report (`fresh` / `up-to-date` / `migrated`); a refusal
+   -- there means the instance never started, so the definition is not enabled either.
    if not started.ok then return started end
    local saved=mutate(args.expected_revision,function(s)s.services[args.name].enabled=true;return {ok=true,name=args.name,enabled=true}end)
    if not saved.ok then host_call({action='stop',name=args.name}) end

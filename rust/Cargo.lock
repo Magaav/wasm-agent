@@ -1935,9 +1935,13 @@ dependencies = [
  "tungstenite",
  "ureq",
  "wa-bounded",
+ "wa-bus",
  "wa-grant-policy",
  "wa-jobs",
+ "wa-kv",
  "wa-operation",
+ "wa-queue",
+ "wa-state",
  "wa-telemetry",
  "wasmtime",
  "wasmtime-wasi",
@@ -1950,6 +1954,15 @@ version = "0.1.0"
 dependencies = [
  "rusqlite",
  "serde_json",
+]
+
+[[package]]
+name = "wa-kv"
+version = "0.1.0"
+dependencies = [
+ "wa-bus",
+ "wa-queue",
+ "wa-state",
 ]
 
 [[package]]

@@ -1,0 +1,17 @@
+/// The fixture's own world: the kernel service contract plus the two host providers this job adds.
+///
+/// `include` pulls in `wa:kernel/service-component` unchanged (the guest imports kv/log/lifecycle and
+/// exports `service.run`), and the two imports below are the new seams: `wa:queue` (producer, worker
+/// and admin, granted per interface in the manifest) and `wa:bus` (publisher and subscriber). A
+/// component that imports an interface its manifest does not grant links fine and is refused at the
+/// call - which is what the fixture's refusal lines prove.
+package wa:fixture@0.1.0;
+
+world svc-queue-echo {
+    include wa:kernel/service-component@0.2.0;
+    import wa:queue/producer@0.1.0;
+    import wa:queue/worker@0.1.0;
+    import wa:queue/admin@0.1.0;
+    import wa:bus/publisher@0.1.0;
+    import wa:bus/subscriber@0.1.0;
+}

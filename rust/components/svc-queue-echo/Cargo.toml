@@ -1,0 +1,21 @@
+[package]
+name = "svc-queue-echo"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Fixture service component that proves the three host providers of the p2c job end to end:
+# `wa:queue` (produce -> consume -> done), `wa:bus` (publish -> subscribe) and the transactional
+# state install (`state_version` 1 -> 2). Built for wasm32-wasip2 on `wa:kernel@0.2` (WASI 0.3).
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+serde_json = "1"
+wit-bindgen = "0.63"
+
+[profile.release]
+opt-level = "s"
+strip = true

@@ -1,0 +1,14 @@
+{
+  "name": "svc-queue-echo",
+  "kind": "service",
+  "version": "0.1.0",
+  "state_version": 1,
+  "target": "wasm32-wasip2",
+  "description": "Fixture on wa:kernel@0.2 (native async) for the queue, the bus and versioned state: produce -> consume -> done on wa:queue, publish -> subscribe on wa:bus, and a kv note whose v1 -> v2 migration the host runs at install (docs/QUEUE.md, docs/BUS.md, docs/STATE.md)",
+  "capabilities": {
+    "storage": true,
+    "queue": {"interfaces": ["producer", "worker", "admin"], "namespaces": ["wa.svc"]},
+    "bus": {"publish": ["svc-queue-echo.self", "svc-queue-echo.done"], "subscribe": ["svc-queue-echo.self"]}
+  },
+  "limits": {"memory_mb": 96}
+}

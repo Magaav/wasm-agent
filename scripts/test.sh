@@ -270,6 +270,10 @@ gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-ho
 # The graph is a capability the agent navigates its own code with, so its extractor and
 # incremental reindex are part of the contract, not a side project.
 gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-graph
+# The one store three libraries share (rust/wa-kv): the namespaced adapter that presents the host's
+# per-component kv through `wa-queue`, `wa-bus` and `wa-state` (docs/QUEUE.md item 1, docs/BUS.md
+# "Retention", docs/STATE.md). It has no wasmtime in it, so it runs here beside the other crates.
+gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-kv
 gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-host graph::tests
 # WASI components and service components (docs/COMPONENTS.md, docs/SERVICE-COMPONENTS.md). Three
 # fixtures, one per runner, each with its own end-to-end test in wa-host: `svc-echo-wasip1` (a plain
@@ -290,7 +294,7 @@ fi
 # engine's checks in the wa:kernel host calls, the telemetry recording points and the bounded
 # stores' quotas, each with unit tests of its own. Both runners are covered: the wa:kernel@0.1
 # compat path (service_components.rs) and the wa:kernel@0.2 native-async path (service_components_v2.rs).
-gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-host -- components::tests services::tests capabilities::tests node_policy::tests node_telemetry::tests store::tests service_components::tests service_components_v2::tests
+gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-host -- components::tests services::tests capabilities::tests node_policy::tests node_telemetry::tests store::tests service_components::tests service_components_v2::tests state_host::tests bus_host::tests queue_host::tests
 # Run the serve-level invariants, each a measured regression: routing by session (a wake carries its
 # conversation in the body's `thread`, not the auth header) and the UI version tracking content rather
 # than mtime (a `cp -f` of identical files must not force every open page to reload).
@@ -1178,6 +1182,22 @@ for f in svc-echo svc-echo-v1; do
   done
 done
 WASM_AGENT_HOME="$GOVERNANCE_SERVICE_HOME" WA_COMPONENTS_DIR="$GOVERNANCE_SERVICE_COMPONENTS" WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-node-governance-service.lua" "$BIN" --db "$DB.governance-service" | grep 'node governance service checks:'
+# p2c: what a component gets through its manifest, proven in a running service component.
+#   * `wa:queue` over rust/wa-queue: produce -> consume -> done, one dedupe key for two enqueues, the
+#     progress stream, the admin counts, and a queue outside the granted namespaces refused;
+#   * `wa:bus` over rust/wa-bus: publish -> subscribe on its own topic with the host-set `source`, and
+#     a topic outside its grant refused (revocation on stop is `services::stop`, unit-tested);
+#   * the transactional state install (docs/STATE.md): a v1 namespace, then a manifest declaring
+#     `state_version: 2` migrated on a snapshot copy and swapped in before the guest starts - the
+#     guest reads the v2 shape with the old value - and a version with no step in the host's registry
+#     refused, with the old state and version intact and nothing started.
+# The fixture is built into its own component directory and the block starts from an empty one: the
+# log lines and the `.state` directory it reads must come from this run, not from another block's.
+QUEUE_BUS_HOME="$WASM_AGENT_HOME/queue-bus-state"
+QUEUE_BUS_COMPONENTS="$QUEUE_BUS_HOME/components"
+rm -rf "$QUEUE_BUS_HOME"; mkdir -p "$QUEUE_BUS_COMPONENTS"
+env -u CARGO_TARGET_DIR WA_COMPONENTS_DIR="$QUEUE_BUS_COMPONENTS" bash scripts/build-components.sh svc-queue-echo >/dev/null 2>&1   || echo "note: svc-queue-echo was not built (no wasm32-wasip2 toolchain?); the queue/bus/state runtime checks are skipped"
+WASM_AGENT_HOME="$QUEUE_BUS_HOME" WA_COMPONENTS_DIR="$QUEUE_BUS_COMPONENTS" WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-queue-bus-state.lua" "$BIN" --db "$DB.queue-bus-state" | grep 'queue, bus and state checks:'
 # A2.1 (docs/KERNEL.md): the same scripts with the Lua core inside the agent-core component, every
 # host.* crossing wa:kernel/host.call. Guarded: building agent-core needs wasi-sdk (WASI_SDK); without
 # it this says so and the native runs above stand.

@@ -2,9 +2,10 @@
 
 Every component owns one kv namespace (`wa:kernel/kv`, `storage` grant). This document is the rule
 book for changing what lives in it. The implementation is `rust/wa-state` (pure library: no
-wasmtime, no clock, no filesystem); the host integration described at the end is **not built yet** —
-it is the contract the kernel has to meet, written down before the code so the two streams do not
-invent different rules. See [KERNEL.md](KERNEL.md) for the component model and
+wasmtime, no clock, no filesystem) plus the host half in `rust/wa-host/src/state_host.rs` and the
+shared kv adapter in `rust/wa-kv`: the transactional install, the snapshot admin tool (`host.state`),
+and one `Store` over the kernel's per-component SQLite kv that this crate, the queue and the bus all
+run on. The install sequence is at the end, with what is built and what is still a policy knob. See [KERNEL.md](KERNEL.md) for the component model and
 [SERVICE-COMPONENTS.md](SERVICE-COMPONENTS.md) for how a service's state directory is chosen today.
 
 ## One namespace, one owner, one version
@@ -149,7 +150,11 @@ After that window the correct rollback is not a downgrade: it is stopping the ne
 restoring the snapshot taken before the upgrade. That is also the only rollback that works when the
 new version's writes cannot be represented in the old shape.
 
-## Host integration: the transactional install (to build)
+## Host integration: the transactional install
+
+Built in `rust/wa-host/src/state_host.rs` (`prepare_install`, called by `services::start` before the
+instance exists). The sequence below is what it runs; the notes after it say where the code differs
+and what is still open.
 
 The install/upgrade sequence the kernel must run (order matters; each line names what exists today
 in `rust/wa-host`):
@@ -176,12 +181,30 @@ instance, migrate in place with the journal, start the new one, and restore the 
 not become ready. The journal makes that safe; the copy makes it cheap to abandon. Which of the two
 a node uses is a policy knob (`state.mode = copy | in_place`), not a per-upgrade decision.
 
-Still to build in the host (deliberately not touched by the `wa-state` stream):
-`impl wa_state::Kv` over the service kv connection, the `open`/`migrate` call at instance start
-before the guest runs, the snapshot directory + retention, a `state` admin tool
-(`status | dry-run | export | import | verify`), the `__wa/` refusal in the WIT kv host, and the
-copy/switch/rollback steps above. Until then a component may use the library directly (its own
-namespace only) and nothing upgrades state automatically.
+What is built, and how it differs from the sketch above:
+
+- **The manifest declares the version**: `state_version` (and optional `state_component` for a state
+  id that is not the installed name, `version` for the semver the meta records). No declaration means
+  the host does not touch the namespace - migrations inside the artifact stay the default.
+- **Copy mode only.** Step 3 exports a snapshot file (`<name>.state.snapshot-<unix-ms>`, the newest
+  three kept); step 4 imports it into `<name>.state.next/` and runs the migrator there; the swap is
+  a rename with the previous generation kept as `<name>.state.prev`. `in_place` is not implemented:
+  the knob waits for a namespace large enough that copying it hurts.
+- **The steps come from the host's registry** (the sidecar path, in-process):
+  `state_host::register_steps(component, Registry)` plus the shipped table. A manifest that declares
+  a version this host has no step for is refused (`state_migration_unavailable`) and a gap in the
+  path is refused before the snapshot (`state_no_migration_path`) - the install then starts nothing
+  and leaves the old state at its old version. The alternative (a component that migrates itself
+  inside the guest) remains the wa-state default and is unaffected.
+- **The admin tool** is the capability `host.state`: `status` (schema, component, versions, keys,
+  journal, snapshot count, whether this host has steps for it), `dry-run`, `export`, `import`,
+  `verify`. No key, no value and no payload is ever reported.
+- **Still open:** step 2's WIT-version check is still the loader's compile step (a missing import
+  fails at instantiation, after the migration); step 5's `lifecycle.report(ready)` wait is the
+  supervisor's, not the install's, so an instance that migrates and then never becomes ready is
+  caught by the supervisor's restart path rather than by refusing the install; and the `__wa/`
+  refusal in the *WIT* kv host (the library's `UserView` refuses it; the WIT host does not yet
+  filter the reserved prefix).
 
 ## Verifying a change
 

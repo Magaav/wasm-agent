@@ -1,8 +1,11 @@
 # Bus — facts fan out, work does not
 
-Status 05/11: library built and tested (`rust/wa-bus`, 31 unit tests, no dependencies); WIT draft in
-[`wit/bus/bus.wit`](../wit/bus/bus.wit) parsed and resolved with wasm-tools 1.263.0, not yet run
-against a WASI 0.3 host. Not wired into `wa-host` yet: see "Integration" below.
+Status 06/11: library built and tested (`rust/wa-bus`, 31 unit tests, no dependencies); WIT in
+[`wit/bus/bus.wit`](../wit/bus/bus.wit) parsed and resolved with wasm-tools 1.263.0, **served** by
+`rust/wa-host/src/bus_host.rs` on `wa:kernel@0.2` (WASI 0.3): one `wa_bus::Bus` per node, the ACL
+built from the components' manifest grants, `source` set by the host, a subscription delivered to the
+guest as a `stream<event>`, and `revoke_owner` on stop. See "Integration" below for what is wired and
+what is not.
 
 The queue is **work**: one consumer, durable, an event is claimed, executed and done —
 [JOBS.md](JOBS.md), [OPERATIONS.md](OPERATIONS.md). The bus is **facts**: many consumers, no claim, no
@@ -151,7 +154,26 @@ deadline that gives up without dropping), revocation on owner stop, drop-handle 
 policy replaced at runtime), durable catch-up, retention across a bus restart, catch-up refused where
 it cannot be honoured.
 
-## Integration into wa-host (after the WASI 0.3 / wasmtime 50 upgrade lands)
+## Integration into wa-host (built, with the remaining gaps named)
+
+The upgrade landed (wasmtime 50, `component-model-async`), and items 1-4 below are in
+`rust/wa-host/src/bus_host.rs`; 5 and 6 are partly done, and item 6's `scripts/fast.sh` half is still
+open because that file was out of scope for this change.
+
+* What one subscription costs: one pump thread per subscription (`wa-bus-<owner>`) polling its
+  `wa_bus::Subscription` every 5 ms and handing events to the guest's `stream<event>` through a
+  bounded queue plus a wake edge. It is honest for the numbers this node runs (a handful of
+  long-lived subscribers) and it is the part to replace first if a node ever needs hundreds.
+* `unsubscribe` is gone from the WIT: dropping the stream stops the producer, which stops the pump,
+  which drops the `wa_bus::Subscription` - the library's RAII rule, kept at the ABI. `services::stop`
+  additionally calls `revoke_owner`, so a stopped component's subscriptions end even if its stream
+  never dropped.
+* `publish` is `async` in the WIT but the host answers locally: a `block` subscriber that is full is
+  reported as a refusal (`again` in the draft's vocabulary) instead of suspending the guest task.
+  Suspending would need the library to hand out a wake edge per subscription; that is the next step
+  if `block` is used for a critical consumer.
+* The bus facts this change adds: `kernel.queue.alert` (schema `wa.queue.alert`), published by the
+  queue sweeper, last 64 retained in the node's own `kernel.state` retention namespace.
 
 1. **One bus per node**, created in `serve` and owned like the other registries; `Bus::clone()` into
    each component runner. `revoke_owner(component)` from the same place that revokes tools/routes on

@@ -196,10 +196,17 @@ impl Store for MemoryStore {
 /// a component's own `wa:kernel/kv` must not overlap a namespace the host serves a library from
 /// (`docs/QUEUE.md`, item 3), which is why the prefixes below are not reachable by a component's
 /// ordinary keys.
-#[derive(Clone)]
 pub struct Namespaced<S: Store + ?Sized> {
     inner: Arc<S>,
     prefix: Vec<u8>,
+}
+
+// Hand-written so a clone does not require `S: Clone`: the store is shared through the `Arc`, and
+// cloning a namespace is cloning a view (the host hands the queue one and the bus another).
+impl<S: Store + ?Sized> Clone for Namespaced<S> {
+    fn clone(&self) -> Namespaced<S> {
+        Namespaced { inner: self.inner.clone(), prefix: self.prefix.clone() }
+    }
 }
 
 impl<S: Store + ?Sized> Namespaced<S> {
