@@ -67,6 +67,14 @@ for the implementation boundary.
 | WhatsApp audio | Persistent linked-device journal and opt-in incoming + own-outgoing original-chat transcription; EN default/PT per-account. [Setup](docs/WHATSAPP-CONNECTOR.md). |
 | Supervision | A separate sentinel handles requested restarts/upgrades and budgeted event-triggered wakes. |
 | Worker pool | On-demand interpreters keep reads responsive and route chat work across workers. Conversation ownership and overlapping streams still need release-level isolation verification. |
+| Components (WASI) | Request components (MCP servers, the graph indexer) and long-lived service components (the WhatsApp client) run as pinned `.wasm` on WASI 0.2/0.3, each with a manifest of declared capabilities that the kernel grants. Same bytes on every node; distributed as release assets checked by sha256. [Components](docs/COMPONENTS.md), [services](docs/SERVICE-COMPONENTS.md). |
+| Kernel interface | `wa:kernel@0.2` on WASI 0.3 (native async: streams/futures for websocket, HTTP, kv, speech) beside the 0.1 interface; both runners live, so old components keep working. [Kernel](docs/KERNEL.md). |
+| Governance | Node grant policy (rate limits, allowlists, approvals, default-deny for sensitive capabilities once a policy file exists; manifest-only otherwise), audit without message text, fixed-size per-component telemetry, per-component disk quotas, record/replay buffer saved on failure. [Grant policy](docs/GRANT-POLICY.md), [telemetry](docs/TELEMETRY.md), [replay](docs/REPLAY.md). |
+| Queue, bus, state | Durable fresh-only job queue (`wa:queue`), in-node event bus (`wa:bus`), versioned component state with crash-safe migrations and snapshots, all served to components by the kernel. [Queue](docs/QUEUE.md), [bus](docs/BUS.md), [state](docs/STATE.md). |
+| WhatsApp (component) | The `wa-whatsapp` service component is the linked-device client on the node: shadow transcription with a warm speech worker, `whatsapp_send` through the durable outbox (rate-limited and audited), and an index of every message kind — text, reactions, all media, edits, deletions — queryable with `whatsapp_search` / `whatsapp_read` / `whatsapp_download`. The Go connector still posts transcripts until the cutover. |
+| Lua core as a component | The agent core can run inside the `agent-core` wasm component (`wa --core-component`), with an instance pool and a pre-initialised snapshot; the native interpreter remains the default. |
+| Fast evolution | Lua-only changes deploy in ~30 s without compiling; the host is split into crates (capability-layer edits rebuild in ~45 s); `wa dev` rebuilds a component and hot-swaps it; a fake kernel runs component tests without a node. |
+| Releases | Linux binaries (arm64/x86_64, glibc ≥ 2.31) are cross-built once and published per commit; nodes install the prebuilt, sha-checked binary instead of compiling. Components ship the same way. The CLI and web UI show “Update available”. |
 
 Default transcript retention is **seven days**; debug transcripts are retained.
 Explicit memories are a separate store. Tool artifacts and telemetry have their
@@ -494,30 +502,35 @@ documents the service, publication and verification gates.
 ## Architecture
 
 ```text
-                 Your agent / automation operator
-                   identity · task · model access
-                              │
-                    Rust host + Lua agent core
-                  tools · memory · evidence · policy
-                              │
-            ┌─────────────────┼────────────────────┐
-       own computer      own remote nodes    customer guest nodes
-                                            explicit authorization
+   watchdog (native, tiny)        starts the kernel, restarts it, swaps it with rollback
+        │
+   microkernel (native)           wasm runtime · component loader + pins · capability broker
+        │                         governance · queue · bus · state · node identity + relay
+        │
+   components (pinned .wasm)      agent core · WhatsApp · MCP servers · graph · STT/OCR · …
 ```
 
-This is the product direction; shared agent identity and customer authorization
-are not all implemented. Today the runtime has node identities and per-node state.
+Everything with logic is moving into components that the kernel loads by pin and
+grants capabilities to; the kernel is the only per-OS/CPU binary. See
+[kernel](docs/KERNEL.md) for the target architecture, the carve-out map and what is
+still on the way (hot-swap installs, start-by-imports, revocable registrations,
+the memory component, the self-loop and hooks).
 
 | Part | Responsibility |
 | --- | --- |
 | `lua/core/` | Agent loop, prompt/context policy, tools, memory, sessions and node policy. |
-| `rust/wa-host/` | Files, processes, HTTP/SSE, SQLite, cryptography, Lua and WASM execution. |
+| `rust/wa-host/` | The `wa` binary: CLI dispatch and wiring. |
+| `rust/wa-capabilities/` | The capability registry and the `host.*` surface the Lua core calls. |
+| `rust/wa-kernel-runtime/` | wasmtime engine, component/service runners (0.1 + 0.2), queue/bus/state providers. |
+| `rust/wa-governance/` | Grant policy, telemetry, bounded stores. |
+| `rust/wa-rendezvous/`, `rust/wa-term/`, `rust/wa-host-support/` | Node identity and transport; console/editor; shared floor. |
+| `rust/wa-queue`, `wa-bus`, `wa-state`, `wa-kv`, `wa-telemetry`, `wa-bounded`, `wa-grant-policy` | Libraries behind the kernel services. |
+| `rust/components/` | Components: `agent-core`, `wa-whatsapp`, `graph`, `mcp-*`, fixtures. |
+| `rust/wa-watchdog/` | Kernel supervisor with swap and rollback (opt-in, `WA_WATCHDOG=1`). |
+| `rust/wa-fake-kernel/` | In-memory `wa:kernel@0.2` host for component tests and `wa dev`. |
 | `ui/` and `rust/wa-window/` | Conversation, evidence and control surfaces; Windows desktop shell. |
-| `rust/wa-sentinel/` | External lifecycle supervision. |
-
-The core currently runs as embedded Lua, **not** a WASI component. Plugins use a
-small core-module ABI, not WIT/Component Model. Portability work remains on the
-roadmap; it does not block proving the first useful customer journey.
+| `rust/wa-sentinel/` | External lifecycle supervision and deploys (installs prebuilt releases). |
+| `wit/` | The contracts: `wa:kernel` (0.1, 0.2), `wa:seams`, `wa:queue`, `wa:bus`. |
 
 ## Development and verification
 
@@ -541,4 +554,4 @@ Further reading: [architecture](ARCHITECTURE.md), [UI contract](DESIGN.md),
 
 ## License
 
-MIT. Vendored Lua is MIT; see `rust/wa-host/vendor/lua`.
+MIT. Vendored Lua is MIT; see `rust/wa-host-support/vendor/lua` (moved with the crate split).
