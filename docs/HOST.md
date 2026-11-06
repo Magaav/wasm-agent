@@ -666,6 +666,7 @@ jobs                 writes files
 list_dir             read-only
 log                  device
 mark_db_ready        writes files
+mesh_call            network
 monotonic_ms         read-only
 node_identity        read-only
 now                  read-only
@@ -712,6 +713,44 @@ whatsapp_read        read-only
 whatsapp_search      read-only
 write_file           writes files
 <!-- capability-inventory:end -->
+
+## Direct peer calls by hierarchy (`host.mesh_call`)
+
+`host.mesh_call(request_json)` calls a peer **directly**, under the fleet's hierarchy, and is the
+client half of [MESH.md](MESH.md) (the design, the roster, the grants and the audit lines live there).
+Nothing happens unless `WA_MESH=1`: without the flag the function answers `{ok:false,
+ error:"mesh_disabled"}` before it reads a file or opens a socket, and `wa call` never asks for the
+mesh at all.
+
+The request is one JSON object:
+
+| field | meaning |
+| --- | --- |
+| `node` | the peer, by node id or by the name the roster gives it |
+| `capability` | what to ask for; it decides the **verb** (`read`/`call`/`control`) the hierarchy checks |
+| `args` | the capability's arguments, unchanged |
+| `inner_body`, `inner_headers` | the ordinary `/node/call` request the caller also built and signed — carried opaquely, so the target hands *that* to its own node path |
+| `peers` | the node's current `/nodes` answer; this is the discovery half, and the rendezvous is never asked by this call |
+| `timeout_seconds` | the whole attempt, clamped to 5..600 (default 60) |
+| `dry_run` | answer the verdict and stop: no network, no cache write |
+
+The answer always has `ok`. On success it carries `transport:"mesh"`, the peer's `node`/`node_id`,
+`address`, `addr_class` (`private`/`public`), the `verb`, the `decision`/`reason` the hierarchy gave,
+and the inner `status`/`body` — which the caller then verifies exactly as it verifies any peer reply.
+On a refusal it carries `error`:
+
+| `error` | `fallback` | what the caller does |
+| --- | --- | --- |
+| `mesh_unreachable` | `"relay"` | nobody answered: run today's direct-endpoint/relay path |
+| `mesh_denied` | `null` | the caller's own hierarchy or a `deny` grant refused; do **not** fall back |
+| `mesh_refused` | `null` | the target refused (`code`, `verified`), including its own hierarchy; do **not** fall back |
+| `mesh_unavailable` | `null` | the mesh cannot decide (no roster, bad signature, no policy, this node not in the roster); fail closed |
+| `mesh_unknown_node` | `null` | no such peer in the roster |
+| `mesh_disabled` | `null` | `WA_MESH` is not `1` |
+
+The `fallback` field is the whole point: a **denial is an answer** and must not be laundered through
+the relay, which asks an older authority and would allow it. Only a transport failure says the
+caller's existing path may run.
 
 ## Component state (`host.state`)
 

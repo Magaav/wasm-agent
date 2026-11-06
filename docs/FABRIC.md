@@ -24,7 +24,6 @@ map of who is what, so a thing can be named correctly before it is changed.
 | delegated work | a supervised child task with its own context and execution state - a session of its own, which a profile may bind to its own worktree and branch (`session_worktree`, [EXECUTION.md](EXECUTION.md)) | **a subagent** - never `factory worker`, never `child node` |
 | supervisor | the process outside the node that starts work without doing it: declared verbs, never a shell, and it installs or restarts when the node is idle | **the sentinel** (`wa-sentinel`, [SENTINEL.md](SENTINEL.md)) |
 | other machines | peer nodes carrying an identity and authenticated messages, resolved by the control plane; the relay is the fallback transport | **peers** and **the rendezvous** |
-
 Three naming rules follow from the map, and they are the same concern as "one home per rule":
 
 1. a node's execution threads are **node-threads**. `/health`'s `workers`, `workers_count`, <!-- naming-check: allow (a naming map prints the pre-rename field names on purpose, so a reader who greps for one finds the new one) -->
@@ -79,3 +78,9 @@ target is native QUIC between nodes, direct paths established through ICE/STUN w
 the Ohana relay as fallback. Browser clients use WebTransport to their node or gateway. Control and
 run events use reliable streams; replaceable telemetry may use datagrams. The current HTTPS relay
 remains the compatibility path until both ends negotiate the newer protocol.
+
+The first step of that direction exists: [MESH.md](MESH.md) is a **direct node-to-node hop** — a
+signed ed25519 call from one node's listener to another's, authorized by the fleet's hierarchy rather
+than by the rendezvous — with the relay kept as the fallback for a peer that cannot be reached
+directly. It is plain HTTP on loopback/LAN today and it is behind `WA_MESH=1`; the rendezvous stays a
+directory, which is the part of this section that does not change.

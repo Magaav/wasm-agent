@@ -124,6 +124,7 @@ pub const REGISTRY: &[Capability] = &[
     plain!("runtime_info", ReadOnly, crate::host::runtime_info, "Build and runtime identity of this binary"),
     plain!("system_resources", ReadOnly, crate::host::system_resources, "CPU, memory and disk facts for this machine"),
     plain!("node_identity", ReadOnly, crate::host::node_identity, "This node's identity and network role"),
+    plain!("mesh_call", Network, wa_mesh::host_call::mesh_call, "Call a peer directly by hierarchy, when WA_MESH=1; the roster, grants and direct transport of docs/MESH.md"),
     plain!("run_cancelled", ReadOnly, crate::host::run_cancelled, "Whether the current run has been cancelled, for cooperative loops"),
     plain!("log", Device, crate::host::log, "Print one redacted line to this process's standard error"),
     // ---- files -------------------------------------------------------------------------------

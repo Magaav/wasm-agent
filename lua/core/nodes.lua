@@ -395,6 +395,73 @@ local function normalize_headers(headers)
   return out
 end
 
+-- The mesh is the operator's flag, not a default (docs/MESH.md). Cached: the environment does not
+-- change under a running node, and the check is on the call path.
+local mesh_flag = nil
+
+function M.mesh_enabled()
+  if mesh_flag == nil then
+    mesh_flag = tostring(host.getenv("WA_MESH") or "") == "1"
+      or tostring(host.getenv("WASM_AGENT_MESH") or "") == "1"
+  end
+  return mesh_flag
+end
+
+-- The headers as the pairs the crate's envelope carries, in a stable order so the bytes are the same
+-- every time (the crate hashes them as part of the signed body).
+local function header_pairs(headers)
+  local names = {}
+  for name in pairs(headers or {}) do names[#names + 1] = name end
+  table.sort(names)
+  local out = {}
+  for _, name in ipairs(names) do out[#out + 1] = { name, tostring(headers[name]) } end
+  return out
+end
+
+-- Try the direct path before today's. Returns `{ response = ... }` when the peer answered,
+-- `{ refused = ... }` when the mesh decided against the call, and nil when nobody answered (which is
+-- the only case that may fall back). The difference is the whole point: a denial is an answer, and
+-- the relay behind this function knows none of the hierarchy and would allow it.
+function M.mesh_attempt(node, capability, args, body, headers)
+  if type(host.mesh_call) ~= "function" then return nil end
+  local ok, raw = pcall(host.mesh_call, json.encode({
+    node = node.node_id,
+    capability = capability,
+    args = args or {},
+    -- The request this call would have sent anyway, signed with this node's key: the target hands it
+    -- to its own `/node/call`, so a mesh call executes exactly like any other peer call.
+    inner_body = body,
+    inner_headers = header_pairs(headers),
+    -- Discovery the node already has (the rendezvous `/nodes` answer). The crate caches it, which is
+    -- what keeps the next call working when the rendezvous is down.
+    peers = { nodes = fetch_peers() },
+  }))
+  if not ok or type(raw) ~= "string" then return nil end
+  local decoded_ok, answer = pcall(json.decode, raw)
+  if not decoded_ok or type(answer) ~= "table" then return nil end
+  if answer.ok then
+    return { response = {
+      status = tonumber(answer.status) or 200,
+      body = tostring(answer.body or ""),
+      transport = "mesh",
+      node = node.name,
+    } }
+  end
+  if answer.error == "mesh_unreachable" or answer.error == "mesh_disabled" then return nil end
+  return { refused = {
+    error = answer.error == "mesh_denied" and "mesh_denied" or "mesh_refused",
+    reason = tostring(answer.reason or answer.code or answer.error),
+    detail = answer.detail,
+    layer = "mesh",
+    verified = answer.verified == true,
+    transport = "mesh",
+    retryable = false,
+    node = node.name,
+    node_id = node.node_id,
+    level = answer.level,
+  } }
+end
+
 -- Send a request to a node: directly when it advertises a routable endpoint,
 -- otherwise through the relay. `headers` are forwarded to the target.
 function M.request(node, path, body, inner_headers)
@@ -661,7 +728,11 @@ function M.remote_call(selector, capability, args)
   })
   local headers, problem = M.signed_headers("call", body)
   if not headers then return { error = problem } end
-  local response = M.request(node, "/node/call", body, headers)
+  -- Mesh first when the operator turned it on: the peer decides against its own roster rather than
+  -- the rendezvous, and only a transport failure falls back to the direct/relay path below.
+  local mesh = M.mesh_enabled() and M.mesh_attempt(node, capability, args, body, headers) or nil
+  if mesh and mesh.refused then return mesh.refused end
+  local response = (mesh and mesh.response) or M.request(node, "/node/call", body, headers)
   if not response then return { error = "remote_unreachable", node = node.name } end
   if response.error == "relay_refused" then
     local refusal = M.refusal("relay", response.reason, response.relay_status, node)

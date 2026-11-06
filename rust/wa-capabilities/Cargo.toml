@@ -31,6 +31,10 @@ wa-whatsapp-outbox = { path = "../wa-whatsapp-outbox" }
 # The query seam (`whatsapp.query`): the request/answer shape, its bounds and the download manifest,
 # shared with the WA component that answers it (docs/SERVICE-COMPONENTS.md).
 wa-whatsapp-index = { path = "../wa-whatsapp-index" }
+# Direct peer-to-peer calls by hierarchy (`host.mesh_call`, docs/MESH.md): the roster, the grants and
+# the transport. The node mounts its listener from `serve::run` behind `WA_MESH=1`, so this crate is
+# the only edge that names it.
+wa-mesh = { path = "../wa-mesh" }
 anyhow = "1"
 base64 = "0.23"
 ring = "0.17"

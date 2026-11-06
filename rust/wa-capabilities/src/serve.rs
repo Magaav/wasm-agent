@@ -1930,6 +1930,11 @@ pub fn run(first: Core, factory: Box<dyn Fn() -> Lua + Send + Sync>, port: u16, 
         }
     }
 
+    // `WA_MESH=1`: the direct peer listener behind the hierarchy (docs/MESH.md). One call, here and
+    // nowhere else, so a node without the flag never opens a second port and cannot start behaving
+    // differently by accident. The handle owns the listener for as long as this process serves.
+    let _mesh_listener = wa_mesh::host_call::spawn_from_env(port);
+
     // Each node-thread owns an interpreter and reads its own queue, so requests still run one at a time *per
     // interpreter* - what changed is that a running run no longer stops the node answering anything at all.
     // `/health`, `/version` and the UI files were already answered on the accept thread; the reads that need

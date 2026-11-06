@@ -1910,6 +1910,7 @@ dependencies = [
  "wa-host-support",
  "wa-jobs",
  "wa-kernel-runtime",
+ "wa-mesh",
  "wa-operation",
  "wa-queue",
  "wa-rendezvous",
@@ -2040,6 +2041,17 @@ dependencies = [
  "wa-bus",
  "wa-queue",
  "wa-state",
+]
+
+[[package]]
+name = "wa-mesh"
+version = "0.1.0"
+dependencies = [
+ "ring",
+ "serde",
+ "serde_json",
+ "wa-grant-policy",
+ "wa-host-support",
 ]
 
 [[package]]

@@ -12,6 +12,12 @@ restart re-announces itself and is recognised by `node_id`, so dynamic IPs, CGNA
 and NAT are non-issues. The only thing that cannot be solved locally is *finding*
 a node whose address changed — that is all the rendezvous does.
 
+It is also all it is allowed to do. A call itself goes **node to node**: the direct hop, its signed
+fleet roster and the hierarchy that decides who may call whom are [MESH.md](MESH.md). The rendezvous
+answers "where", the peer cache remembers the answer when the rendezvous is unreachable, and the
+relay below stays the fallback for a peer that cannot be reached directly. Nothing in this document
+is on the confidentiality path of a mesh call.
+
 ## What is implemented
 
 | Piece | Status |

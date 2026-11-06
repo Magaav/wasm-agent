@@ -1,0 +1,25 @@
+[package]
+name = "wa-mesh"
+version = "0.1.0"
+edition = "2021"
+description = "Direct node-to-node calls by hierarchy: signed fleet roster, grants, peer cache and the direct transport (the rendezvous is discovery only)"
+
+# docs/MESH.md is the design. This crate is a library: the node mounts its listener and answers
+# `host.mesh_call` through it, and neither edge points back down into it.
+#
+# Dependencies, and why each one is here:
+# - `wa-host-support`: resolves the node home and creates the private state directory the same way
+#   every other crate does (one resolution per process), and answers `host.mesh_call` with the JSON
+#   bridge the other capabilities use.
+# - `wa-grant-policy`: the `Pattern` type the operator's grant rules are written in, so the mesh's
+#   `deny`-before-`allow` rules match targets exactly the way a capability rule does.
+# - `ring`: the node's existing ed25519 identity (there is no second identity to rotate).
+# - `serde`/`serde_json`: the roster, the policy section, the cache and the wire envelopes. No new
+#   external dependency is added for HTTP: the mesh speaks one small, explicit HTTP/1.1 dialect of
+#   its own (`src/http.rs`) so that a body is never ambiguous about who wrote it.
+[dependencies]
+wa-host-support = { path = "../wa-host-support" }
+wa-grant-policy = { path = "../wa-grant-policy" }
+ring = "0.17"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
