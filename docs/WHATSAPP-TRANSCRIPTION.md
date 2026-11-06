@@ -99,6 +99,24 @@ matching this connector's "an unknown send is never retried"), and **group subje
 own-chat log instead of the sender's push name. One limit: the host runs a single warm recognizer,
 so the express lane overlaps download and posting with a long decode, not the decode itself.
 
+### Shadow run and comparison (p3a)
+
+The component is ready to be run beside this connector, transcription on and posting off
+(`config/whatsapp-shadow.json`), and then, for the post-then-edit test, with posting limited to the
+own chat (`config/whatsapp-own-chat.json`). Both are documented examples: this tree deploys nothing
+and connects to no account.
+
+The recognizer is the node's one warm worker: the kernel starts it when the component starts, and it
+is never stopped for idleness unless `WA_STT_IDLE_SECONDS` > 0 (default `0` = never), so the second
+voice note does not pay the model load. Unit tests on the host fake the worker and count its loads.
+
+For the comparison, the component writes metadata-only lines to its service log
+(`wa-transcript v=1 kind=… chat=… id=… download_ms=… first_segment_ms=… total_ms=… chars=…
+segments=…`); `scripts/compare-transcripts.mjs --log <component.log> --journal <journal.db>` joins
+them with this connector's `journal.db` read-only and prints ids, states, counts and timings side by
+side. It never reads a transcript's text out of the journal (`length(...)` only), and its own test
+plants a canary transcript to prove that.
+
 ## Receive → transcript path (2026-10-27)
 
 Goal: an audio never ends failed because it is long or the host is slow, and a

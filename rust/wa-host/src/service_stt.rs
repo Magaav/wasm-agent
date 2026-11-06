@@ -18,7 +18,7 @@
 //! ~/.local/bin/runtime-worktree.txt).
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -28,7 +28,7 @@ const BUDGET_BASE: Duration = Duration::from_secs(300);
 const BUDGET_PER_AUDIO: f64 = 6.0;
 const MAX_AUDIO: usize = 20 << 20;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum JobState {
     Queued,
     Done { text: String, elapsed_ms: u64 },
@@ -72,9 +72,16 @@ enum Request {
     Warm,
 }
 
+/// Idle shutdown from a raw setting: absent, empty, `0` or anything unparseable means **never** -
+/// which is the default, because a warm model is the point (a stopped worker pays ~16 s on the next
+/// note). A positive number of seconds is how long it may sit unused before the worker is stopped.
+fn idle_from(raw: Option<&str>) -> Option<Duration> {
+    raw.and_then(|value| value.trim().parse::<u64>().ok()).filter(|seconds| *seconds > 0).map(Duration::from_secs)
+}
+
 /// Idle time after which the warm worker is stopped; None = never (the default).
 fn idle() -> Option<Duration> {
-    std::env::var("WA_STT_IDLE_SECONDS").ok().and_then(|v| v.trim().parse::<u64>().ok()).filter(|s| *s > 0).map(Duration::from_secs)
+    idle_from(std::env::var("WA_STT_IDLE_SECONDS").ok().as_deref())
 }
 
 fn home() -> PathBuf {
@@ -136,18 +143,29 @@ pub fn prewarm() {
     }
 }
 
+/// A started worker: the process (when there is one) and the two halves of its line protocol.
+///
+/// `child` is optional and `input` is a boxed writer so a test can substitute a fake worker that
+/// speaks the same protocol without an OS process: the production path and the tested path are
+/// then the same code, not a mock of it.
 struct Warm {
-    child: Child,
-    input: ChildStdin,
+    child: Option<Child>,
+    input: Box<dyn Write + Send>,
     lines: Receiver<String>,
 }
 
 impl Drop for Warm {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        if let Some(child) = &mut self.child {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
     }
 }
+
+/// How a worker is started. The real one spawns the Python recognizer; a test passes a fake that
+/// counts the model loads it is asked for.
+type Spawner = fn() -> Result<Warm, String>;
 
 fn spawn() -> Result<Warm, String> {
     let (python, worker, models) = paths()?;
@@ -179,11 +197,108 @@ fn spawn() -> Result<Warm, String> {
             }
         })
         .map_err(|e| e.to_string())?;
-    Ok(Warm { child, input, lines: rx })
+    Ok(Warm { child: Some(child), input: Box::new(input), lines: rx })
+}
+
+/// The hub's own state, without its thread: the warm worker, how one is started, and how many
+/// times a start was needed. Every job goes through it, so a test that drives a `Hub` with a fake
+/// spawner exercises the production path - including the answer to "does a second job reload the
+/// model?" (it must not: `loads` stays where the component start left it).
+struct Hub {
+    warm: Option<Warm>,
+    spawn: Spawner,
+    /// Worker starts in this hub - one each, and each one is a model load. Counted, not inferred.
+    loads: u32,
+}
+
+impl Hub {
+    fn new(spawn: Spawner) -> Hub {
+        Hub { warm: None, spawn, loads: 0 }
+    }
+
+    /// The warm worker, started now if there is none. The only place a model load happens.
+    fn ensure(&mut self) -> Result<&mut Warm, String> {
+        if self.warm.is_none() {
+            let worker = (self.spawn)()?;
+            self.loads += 1;
+            eprintln!("[stt] worker start #{} (model load)", self.loads);
+            self.warm = Some(worker);
+        }
+        Ok(self.warm.as_mut().expect("just started"))
+    }
+
+    /// The component start's `Request::Warm`: load the model now, so the first voice note does not
+    /// pay the load. A node with no provisioned recognizer answers an error on the first real job.
+    fn warm_now(&mut self) -> bool {
+        self.ensure().is_ok()
+    }
+
+    /// Run one recognition: write the audio out, then one request line to the worker.
+    fn transcribe(&mut self, audio: &[u8], ext: &str, language: &str, slot: &JobSlot, n: u64) -> JobState {
+        let path = std::env::temp_dir().join(format!("wa-stt-{}-{n}.{ext}", std::process::id()));
+        if let Err(error) = std::fs::write(&path, audio) {
+            return JobState::Failed(format!("stt_temp_write:{error}"));
+        }
+        let result = self.run(&path, language, slot);
+        let _ = std::fs::remove_file(&path);
+        result
+    }
+
+    fn run(&mut self, path: &std::path::Path, language: &str, slot: &JobSlot) -> JobState {
+        let w = match self.ensure() {
+            Ok(w) => w,
+            Err(error) => return JobState::Failed(error),
+        };
+        let line = serde_json::json!({"input": path.to_string_lossy(), "language": language, "mode": "transcribe", "tier": 0, "segments": true}).to_string();
+        if writeln!(w.input, "{line}").and_then(|_| w.input.flush()).is_err() {
+            self.warm = None;
+            return JobState::Failed("worker_eof".into());
+        }
+        let started = Instant::now();
+        let mut deadline = started + BUDGET_BASE;
+        loop {
+            let wait = STALL.min(deadline.saturating_duration_since(Instant::now()));
+            match w.lines.recv_timeout(wait) {
+                Ok(text) => {
+                    let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+                        self.warm = None;
+                        return JobState::Failed("worker_protocol".into());
+                    };
+                    if value["progress"] == serde_json::json!(true) {
+                        if value["ready"] == serde_json::json!(true) {
+                            continue; // the worker's own model-loaded line (prewarm)
+                        }
+                        let duration_ms = value["duration"].as_f64().filter(|d| *d > 0.0).map(|seconds| (seconds * 1000.0) as u64);
+                        if let Some(seconds) = value["duration"].as_f64().filter(|d| *d > 0.0) {
+                            deadline = started + BUDGET_BASE + Duration::from_secs_f64(BUDGET_PER_AUDIO * seconds);
+                        }
+                        if let Some(text) = value["text"].as_str().filter(|t| !t.is_empty()) {
+                            slot.lock().unwrap().push_segment(text.to_string(), duration_ms);
+                        }
+                        continue;
+                    }
+                    let elapsed_ms = started.elapsed().as_millis() as u64;
+                    return if value["ok"] == serde_json::json!(true) {
+                        JobState::Done { text: value["transcript"].as_str().unwrap_or("").to_string(), elapsed_ms }
+                    } else {
+                        JobState::Failed(value["error"].as_str().unwrap_or("worker_compute_failed").to_string())
+                    };
+                }
+                Err(RecvTimeoutError::Timeout) => {
+                    self.warm = None;
+                    return JobState::Failed(if Instant::now() >= deadline { "worker_timeout" } else { "worker_stalled" }.into());
+                }
+                Err(RecvTimeoutError::Disconnected) => {
+                    self.warm = None;
+                    return JobState::Failed("worker_eof".into());
+                }
+            }
+        }
+    }
 }
 
 fn run_hub(rx: Receiver<Request>) {
-    let mut warm: Option<Warm> = None;
+    let mut hub = Hub::new(spawn);
     let mut counter = 0u64;
     let idle = idle();
     loop {
@@ -194,87 +309,170 @@ fn run_hub(rx: Receiver<Request>) {
         let request = match next {
             Ok(request) => request,
             Err(RecvTimeoutError::Timeout) => {
-                warm = None; // idle: free the model's memory
+                hub.warm = None; // idle: free the model's memory
                 continue;
             }
             Err(RecvTimeoutError::Disconnected) => return,
         };
         match request {
             Request::Warm => {
-                if warm.is_none() {
-                    warm = spawn().ok();
-                }
+                hub.warm_now();
             }
             Request::Recognize { audio, ext, language, slot } => {
                 counter += 1;
-                let outcome = transcribe(&mut warm, &audio, ext, &language, &slot, counter);
+                let outcome = hub.transcribe(&audio, ext, &language, &slot, counter);
                 slot.lock().unwrap().finish(outcome);
             }
         }
     }
 }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
-fn transcribe(warm: &mut Option<Warm>, audio: &[u8], ext: &str, language: &str, slot: &JobSlot, n: u64) -> JobState {
-    let path = std::env::temp_dir().join(format!("wa-stt-{}-{n}.{ext}", std::process::id()));
-    if let Err(error) = std::fs::write(&path, audio) {
-        return JobState::Failed(format!("stt_temp_write:{error}"));
+    /// Serialises the tests that read a fake worker's process-wide load counter.
+    fn exclusive() -> std::sync::MutexGuard<'static, ()> {
+        static GATE: Mutex<()> = Mutex::new(());
+        GATE.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
-    let result = run_one(warm, &path, language, slot);
-    let _ = std::fs::remove_file(&path);
-    result
-}
 
-fn run_one(warm: &mut Option<Warm>, path: &std::path::Path, language: &str, slot: &JobSlot) -> JobState {
-    if warm.is_none() {
-        match spawn() {
-            Ok(w) => *warm = Some(w),
-            Err(error) => return JobState::Failed(error),
+    /// A queued job, as `submit` builds one.
+    fn slot() -> JobSlot {
+        Arc::new(Mutex::new(Job { state: JobState::Queued, segments: Vec::new(), duration_ms: 0, notify: crate::service_io::Notify::new() }))
+    }
+
+    /// The `Write` half of a fake worker pipe: complete lines become requests, the way the real
+    /// worker reads stdin. Two writes per line are normal (`writeln!`), so the buffer is kept.
+    struct Pipe {
+        pending: String,
+        requests: Sender<String>,
+    }
+
+    impl std::io::Write for Pipe {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.pending.push_str(&String::from_utf8_lossy(buf));
+            while let Some(at) = self.pending.find('\n') {
+                let line: String = self.pending.drain(..=at).collect();
+                let _ = self.requests.send(line.trim().to_string());
+            }
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
         }
     }
-    let w = warm.as_mut().expect("spawned");
-    let line = serde_json::json!({"input": path.to_string_lossy(), "language": language, "mode": "transcribe", "tier": 0, "segments": true}).to_string();
-    if writeln!(w.input, "{line}").and_then(|_| w.input.flush()).is_err() {
-        *warm = None;
-        return JobState::Failed("worker_eof".into());
+
+    /// The fake recognizer's model loads: one per worker start, which is exactly what a stopped or
+    /// restarted worker costs on a node (~16 s on openclaw).
+    static FAKE_LOADS: AtomicUsize = AtomicUsize::new(0);
+
+    /// The fake recognizer's own load counter, for the assertions a test makes about the process,
+    /// not only about one hub.
+    fn fake_loads() -> usize {
+        FAKE_LOADS.load(Ordering::SeqCst)
     }
-    let started = Instant::now();
-    let mut deadline = started + BUDGET_BASE;
-    loop {
-        let wait = STALL.min(deadline.saturating_duration_since(Instant::now()));
-        match w.lines.recv_timeout(wait) {
-            Ok(text) => {
-                let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
-                    *warm = None;
-                    return JobState::Failed("worker_protocol".into());
-                };
-                if value["progress"] == serde_json::json!(true) {
-                    if value["ready"] == serde_json::json!(true) {
-                        continue; // the worker's own model-loaded line (prewarm)
-                    }
-                    let duration_ms = value["duration"].as_f64().filter(|d| *d > 0.0).map(|seconds| (seconds * 1000.0) as u64);
-                    if let Some(seconds) = value["duration"].as_f64().filter(|d| *d > 0.0) {
-                        deadline = started + BUDGET_BASE + Duration::from_secs_f64(BUDGET_PER_AUDIO * seconds);
-                    }
-                    if let Some(text) = value["text"].as_str().filter(|t| !t.is_empty()) {
-                        slot.lock().unwrap().push_segment(text.to_string(), duration_ms);
-                    }
-                    continue;
+
+    /// A worker that loads the model once per start (counted) and then answers every request the
+    /// way `scripts/whatsapp-stt-local.py --worker` does: a `ready` line, one segment line carrying
+    /// the streamed text, and one final line with the whole transcript.
+    fn fake_spawn() -> Result<Warm, String> {
+        FAKE_LOADS.fetch_add(1, Ordering::SeqCst);
+        let (requests, requests_rx) = mpsc::channel::<String>();
+        let (lines, line_rx) = mpsc::channel::<String>();
+        std::thread::Builder::new()
+            .name("fake-stt".into())
+            .spawn(move || {
+                for request in requests_rx {
+                    let value: serde_json::Value = serde_json::from_str(&request).unwrap_or_default();
+                    let language = value["language"].as_str().unwrap_or("pt").to_string();
+                    let _ = lines.send(serde_json::json!({"progress": true, "ready": true}).to_string());
+                    let _ = lines.send(serde_json::json!({"progress": true, "at": 2.0, "duration": 2.0, "text": format!("trecho {language}")}).to_string());
+                    let _ = lines.send(serde_json::json!({"ok": true, "transcript": format!("trecho {language} inteiro")}).to_string());
                 }
-                let elapsed_ms = started.elapsed().as_millis() as u64;
-                return if value["ok"] == serde_json::json!(true) {
-                    JobState::Done { text: value["transcript"].as_str().unwrap_or("").to_string(), elapsed_ms }
-                } else {
-                    JobState::Failed(value["error"].as_str().unwrap_or("worker_compute_failed").to_string())
-                };
-            }
-            Err(RecvTimeoutError::Timeout) => {
-                *warm = None;
-                return JobState::Failed(if Instant::now() >= deadline { "worker_timeout" } else { "worker_stalled" }.into());
-            }
-            Err(RecvTimeoutError::Disconnected) => {
-                *warm = None;
-                return JobState::Failed("worker_eof".into());
-            }
+            })
+            .expect("fake worker thread");
+        Ok(Warm { child: None, input: Box::new(Pipe { pending: String::new(), requests }), lines: line_rx })
+    }
+
+    /// A worker that is already gone: the request line goes nowhere and the reader is closed, which
+    /// is what a crashed worker looks like to the hub.
+    static DEAD_LOADS: AtomicUsize = AtomicUsize::new(0);
+
+    fn dead_spawn() -> Result<Warm, String> {
+        DEAD_LOADS.fetch_add(1, Ordering::SeqCst);
+        let (_lines, line_rx) = mpsc::channel::<String>();
+        let (requests, requests_rx) = mpsc::channel::<String>();
+        drop(requests_rx);
+        Ok(Warm { child: None, input: Box::new(Pipe { pending: String::new(), requests }), lines: line_rx })
+    }
+
+    #[test]
+    fn a_second_job_does_not_reload_the_model() {
+        let _gate = exclusive();
+        FAKE_LOADS.store(0, Ordering::SeqCst);
+        let mut hub = Hub::new(fake_spawn);
+        assert!(hub.warm_now(), "the component start warms the recognizer (Request::Warm)");
+        assert_eq!(hub.loads, 1, "warming costs exactly one load");
+
+        for (n, language) in [(1u64, "pt"), (2u64, "en")] {
+            let job = slot();
+            let state = hub.transcribe(b"audio-bytes", "ogg", language, &job, n);
+            assert!(matches!(&state, JobState::Done { text, .. } if text == &format!("trecho {language} inteiro")), "job {n}: {state:?}");
+            let job = job.lock().unwrap();
+            assert_eq!(job.segments, vec![format!("trecho {language}")], "the segment stream reached the job");
+            assert_eq!(job.duration_ms, 2_000, "the duration the worker reported is kept");
         }
+        assert_eq!(hub.loads, 1, "the second job reused the warm worker");
+        assert_eq!(fake_loads(), 1, "one model load for two jobs");
+    }
+
+    #[test]
+    fn a_first_job_without_a_prewarm_loads_once_and_the_next_reuses_it() {
+        let _gate = exclusive();
+        FAKE_LOADS.store(0, Ordering::SeqCst);
+        let mut hub = Hub::new(fake_spawn);
+        for n in 1..=2u64 {
+            let job = slot();
+            assert!(matches!(hub.transcribe(b"audio-bytes", "ogg", "pt", &job, n), JobState::Done { .. }));
+        }
+        assert_eq!(hub.loads, 1, "the first job loaded, the second did not");
+        assert_eq!(fake_loads(), 1);
+    }
+
+    #[test]
+    fn a_dead_worker_is_replaced_and_counts_as_a_new_load() {
+        let _gate = exclusive();
+        FAKE_LOADS.store(0, Ordering::SeqCst);
+        DEAD_LOADS.store(0, Ordering::SeqCst);
+
+        // A live worker serves both jobs from one load.
+        let mut live = Hub::new(fake_spawn);
+        live.warm_now();
+        for n in 1..=2u64 {
+            let job = slot();
+            assert!(matches!(live.transcribe(b"a", "ogg", "pt", &job, n), JobState::Done { .. }));
+        }
+        assert_eq!(live.loads, 1, "no reload while the worker is warm");
+
+        // A worker that died makes every job behind it load again: the contrast is the point.
+        let mut dead = Hub::new(dead_spawn);
+        let job = slot();
+        assert_eq!(dead.transcribe(b"a", "ogg", "pt", &job, 1), JobState::Failed("worker_eof".into()));
+        assert!(dead.warm.is_none(), "a dead worker is dropped, so the next job starts one");
+        let job = slot();
+        assert_eq!(dead.transcribe(b"a", "ogg", "pt", &job, 2), JobState::Failed("worker_eof".into()));
+        assert_eq!(dead.loads, 2, "each job behind a dead worker loads the model again");
+        assert_eq!(DEAD_LOADS.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn idle_shutdown_is_off_by_default_and_configurable() {
+        assert_eq!(idle_from(None), None, "the default is a worker that stays warm");
+        assert_eq!(idle_from(Some("")), None);
+        assert_eq!(idle_from(Some("0")), None, "0 means never, not 'stop at once'");
+        assert_eq!(idle_from(Some("nonsense")), None, "an unreadable setting keeps the worker warm");
+        assert_eq!(idle_from(Some(" 600 ")), Some(Duration::from_secs(600)));
     }
 }

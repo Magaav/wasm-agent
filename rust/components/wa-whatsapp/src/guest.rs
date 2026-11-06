@@ -26,7 +26,7 @@ use crate::holds::{Author, Holds, Mutation, POSTING_ONLY};
 use crate::wa::kernel::types::Error as KError;
 use crate::wa::kernel::{http as khttp, kv as kkv, lifecycle, speech, websocket};
 use crate::wasi::clocks::monotonic_clock;
-use crate::{alerts, export, exports, posting, queue, store};
+use crate::{alerts, export, exports, posting, queue, recognize, store, telemetry};
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::{FuturesUnordered, Stream, StreamExt};
@@ -216,6 +216,11 @@ fn now_ms() -> i64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
 }
 
+/// The same clock for the recognizer's timings (`recognize::Tracker` takes milliseconds as `u64`).
+fn now_u64() -> u64 {
+    now_ms().max(0) as u64
+}
+
 fn tx_key(chat: &str, id: &str) -> String {
     format!("tx/{chat}/{id}")
 }
@@ -377,6 +382,7 @@ async fn restore_state() {
     for notice in &notices {
         let (chat, id) = notice.key.split_once('\u{0}').unwrap_or((notice.key.as_str(), ""));
         say!("transcript interrupted chat={chat} id={id} reason={}", notice.reason);
+        note(telemetry::Note::new(note_kind(notice.kind)).about(chat, id).field("stage", "restart").field("reason", &notice.reason));
         record(chat, id, serde_json::json!({"state": notice.kind, "reason": notice.reason})).await;
         alert(chat, "", notice.kind, &notice.reason, notice.sent_ms);
     }
@@ -405,6 +411,12 @@ fn reason_of(error: &KError) -> String {
     }
 }
 
+/// One machine-parseable metadata line (`telemetry.rs`): the shadow comparison reads these, and
+/// they carry IDs, states, reasons and durations - never the audio's or the transcript's text.
+fn note(note: telemetry::Note) {
+    say!("{}", note.line());
+}
+
 /// Hand a received voice note to the queue (or settle it at once when it cannot be transcribed).
 async fn admit(job: AudioJob) {
     let chat = job.chat.to_string();
@@ -427,6 +439,7 @@ async fn admit(job: AudioJob) {
     if let Some(reason) = unsupported {
         say!("transcript unsupported chat={chat} id={} reason={reason}", job.id);
         record(&chat, &job.id, serde_json::json!({"state": "unsupported", "reason": reason})).await;
+        note(telemetry::Note::new("unsupported").about(&chat, &job.id).field("stage", "admit").field("reason", reason));
         if live && job.sent_ms > 0 {
             alert(&chat, &job.title, "unsupported", reason, job.sent_ms);
         }
@@ -435,6 +448,7 @@ async fn admit(job: AudioJob) {
     if fenced(&chat, &job.id).await {
         say!("transcript blocked chat={chat} id={} reason=source_fence", job.id);
         record(&chat, &job.id, serde_json::json!({"state": "blocked", "reason": "source_fence"})).await;
+        note(telemetry::Note::new("blocked").about(&chat, &job.id).field("stage", "admit").field("reason", "source_fence"));
         if live {
             alert(&chat, &job.title, "blocked", "source_fence", job.sent_ms);
         }
@@ -446,6 +460,7 @@ async fn admit(job: AudioJob) {
         let reason = HOLDS.with(|h| h.borrow().reason(&chat).unwrap_or("chat_hold").to_string());
         say!("transcript blocked chat={chat} id={} reason={reason}", job.id);
         record(&chat, &job.id, serde_json::json!({"state": "blocked", "reason": reason})).await;
+        note(telemetry::Note::new("blocked").about(&chat, &job.id).field("stage", "admit").field("reason", &reason));
         if live {
             alert(&chat, &job.title, "blocked", &reason, job.sent_ms);
         }
@@ -485,12 +500,6 @@ async fn edit(client: &whatsapp_rust::Client, chat: &whatsapp_rust::Jid, id: &st
     client.edit_message(chat.clone(), id.to_string(), wap::Message::text_with_context(body, context.clone())).await.map(|_| ()).map_err(|e| e.to_string())
 }
 
-/// One step of a recognition: a recognized segment, or the transcript once the recognizer finished.
-enum SpeechStep {
-    Segment(speech::Segment),
-    Done(Result<speech::Transcript, KError>),
-}
-
 /// One voice note, start to finish. Returns how it ended; the main loop tells the queue.
 async fn process(job: &AudioJob, language: &str, cfg: &posting::PostConfig) -> Outcome {
     let chat = job.chat.to_string();
@@ -502,15 +511,20 @@ async fn process(job: &AudioJob, language: &str, cfg: &posting::PostConfig) -> O
         Ok(bytes) => bytes,
         Err(error) => {
             say!("transcript download failed chat={chat} id={} reason={error}", job.id);
+            note(telemetry::Note::new("failed").about(&chat, &job.id).field("stage", "download").field("reason", &error.to_string()));
             return Outcome::Retry("download".into());
         }
     };
     let downloaded = now_ms();
     let mime = job.audio.mimetype.clone().unwrap_or_else(|| "audio/ogg".into());
+    // Two clocks, because the comparison needs both: `recognized_at` starts the recognizer's own
+    // latencies (first segment, whole recognition), `picked` the pipeline's (download, total).
+    let recognized_at = now_ms();
     let recognition = match speech::recognize(bytes, mime, language.to_string()).await {
         Ok(started) => started,
         Err(error) => {
             let reason = reason_of(&error);
+            note(telemetry::Note::new("failed").about(&chat, &job.id).field("stage", "recognize").field("reason", &reason));
             return if permanent(&reason) { Outcome::Permanent(reason) } else { Outcome::Retry(format!("stt_start:{reason}")) };
         }
     };
@@ -524,41 +538,42 @@ async fn process(job: &AudioJob, language: &str, cfg: &posting::PostConfig) -> O
     let mut posted = Posted { first_id: None, first_ms: None, edits: 0, edit_errors: 0 };
     let mut pacer = posting::EditPacer::new(cfg.edit_interval_ms);
     let header = cfg.header();
-    let mut so_far = String::new();
-    let mut seen = 0u32;
     // The two halves the 0.1 guest polled every 250 ms are two async values now: the segments arrive
-    // on a stream while the transcript resolves once. `select` over both is the whole loop.
+    // on a stream while the transcript resolves once (`recognize::steps` selects over both, and the
+    // `Tracker` is where the first-segment latency the shadow comparison reports comes from).
+    let mut tracker = recognize::Tracker::start(recognized_at.max(0) as u64);
     let segments = recognition.segments();
     let transcript = recognition.transcript();
-    let recognized = futures::stream::unfold(segments, |mut segments| async move {
-        segments.next().await.map(|segment| (SpeechStep::Segment(segment), segments))
-    });
-    let settled = futures::stream::once(async move { SpeechStep::Done(transcript.await) });
-    let mut steps = Box::pin(futures::stream::select(recognized, settled));
+    let mut steps = Box::pin(recognize::steps(
+        futures::stream::unfold(segments, |mut segments| async move {
+            segments.next().await.map(|segment| {
+                let clip = recognize::Segment { start_ms: segment.start_ms, end_ms: segment.end_ms, text: segment.text };
+                (clip, segments)
+            })
+        }),
+        async move { transcript.await.map(|t| recognize::Transcript { text: t.text, language: t.language, elapsed_ms: t.elapsed_ms }) },
+    ));
     let result = loop {
         let Some(step) = steps.next().await else {
             break Err(KError::Failed("recognizer_stream_ended".into()));
         };
-        let SpeechStep::Segment(segment) = step else {
-            let SpeechStep::Done(result) = step else { unreachable!() };
-            break result;
+        let segment = match step {
+            recognize::Step::End(result) => break result,
+            recognize::Step::Segment(segment) => segment,
         };
+        // The tracker keeps its own text (it is what a partial post shows) and counts the segments
+        // even when posting is off, so the shadow run still reports what streaming produced.
+        if !tracker.push(&segment, now_u64()) {
+            continue;
+        }
         if !streaming {
             continue;
         }
-        let text = segment.text.trim();
-        if text.is_empty() {
-            continue;
-        }
-        seen += 1;
-        if !so_far.is_empty() {
-            so_far.push(' ');
-        }
-        so_far.push_str(text);
         let now = now_ms();
         if pacer.ready(now) && !fenced(&chat, &job.id).await {
+            let body = posting::partial(tracker.so_far(), &header);
             match &posted.first_id {
-                None => match send(&client, &job.chat, posting::partial(&so_far, &header), &context).await {
+                None => match send(&client, &job.chat, body, &context).await {
                     Ok(id) => {
                         posted.first_id = Some(id);
                         posted.first_ms = Some(now_ms());
@@ -567,7 +582,7 @@ async fn process(job: &AudioJob, language: &str, cfg: &posting::PostConfig) -> O
                     Err(error) => say!("transcript partial post failed chat={chat} id={} reason={error}", job.id),
                 },
                 Some(first) => {
-                    match edit(&client, &job.chat, first, posting::partial(&so_far, &header), &context).await {
+                    match edit(&client, &job.chat, first, body, &context).await {
                         Ok(()) => posted.edits += 1,
                         Err(error) => {
                             posted.edit_errors += 1;
@@ -584,18 +599,34 @@ async fn process(job: &AudioJob, language: &str, cfg: &posting::PostConfig) -> O
         Err(error) => {
             let reason = reason_of(&error);
             say!("transcript failed chat={chat} id={} reason={reason}", job.id);
+            note(telemetry::Note::new("failed").about(&chat, &job.id).field("stage", "recognize").field("reason", &reason));
             return if permanent(&reason) { Outcome::Permanent(reason) } else { Outcome::Retry(reason) };
         }
     };
     let ready = now_ms();
+    tracker.finish(ready.max(0) as u64);
     let chars = transcript.text.chars().count();
     say!(
-        "transcript ready chat={chat} id={} ms={} chars={chars} latency_ms={} download_ms={} wait_ms={} seconds={seconds} segments={seen}",
+        "transcript ready chat={chat} id={} ms={} chars={chars} latency_ms={} download_ms={} wait_ms={} seconds={seconds} segments={}",
         job.id,
         transcript.elapsed_ms,
         ready - job.sent_ms,
         downloaded - picked,
-        picked - job.received_ms
+        picked - job.received_ms,
+        tracker.segments()
+    );
+    note(
+        telemetry::Note::new("ready")
+            .about(&chat, &job.id)
+            .field("state", "transcribed")
+            .millis("download_ms", Some((downloaded - picked).max(0) as u64))
+            .millis("first_segment_ms", tracker.first_segment_ms())
+            .millis("recognize_ms", tracker.total_ms())
+            .millis("total_ms", Some((ready - picked).max(0) as u64))
+            .millis("since_sent_ms", Some((ready - job.sent_ms).max(0) as u64))
+            .count("chars", chars as u64)
+            .count("segments", u64::from(tracker.segments()))
+            .flag("streamed", streaming),
     );
     let base = serde_json::json!({"state": "transcribed", "text": transcript.text, "elapsed_ms": transcript.elapsed_ms, "latency_ms": ready - job.sent_ms});
     if gate == posting::Gate::Shadow {
@@ -603,6 +634,7 @@ async fn process(job: &AudioJob, language: &str, cfg: &posting::PostConfig) -> O
         v["posted"] = false.into();
         v["reason"] = "shadow".into();
         record(&chat, &job.id, v).await;
+        note(telemetry::Note::new("shadow").about(&chat, &job.id).field("reason", "shadow"));
         return Outcome::Done;
     }
     if gate == posting::Gate::Held {
@@ -611,6 +643,7 @@ async fn process(job: &AudioJob, language: &str, cfg: &posting::PostConfig) -> O
         v["reason"] = "posting_held_chat".into();
         record(&chat, &job.id, v).await;
         let reason = HOLDS.with(|h| h.borrow().reason(&chat).unwrap_or("posting_held_chat").to_string());
+        note(telemetry::Note::new("held").about(&chat, &job.id).field("reason", &reason));
         let title = alert_title(&client, job).await;
         alert(&chat, &title, "post_held", &reason, job.sent_ms);
         return Outcome::Done;
@@ -621,11 +654,13 @@ async fn process(job: &AudioJob, language: &str, cfg: &posting::PostConfig) -> O
         v["reason"] = "source_fence_during_decode".into();
         record(&chat, &job.id, v).await;
         say!("transcript not posted chat={chat} id={} reason=source_fence_during_decode", job.id);
+        note(telemetry::Note::new("blocked").about(&chat, &job.id).field("reason", "source_fence_during_decode"));
         return Outcome::Done;
     }
     // Never post an old transcript: a ready result that could not go out within the window expires.
     if now_ms() - ready > QUEUE.with(|q| q.borrow().policy().fresh_ms) {
         record(&chat, &job.id, serde_json::json!({"state": "expired", "reason": "post_expired"})).await;
+        note(telemetry::Note::new("expired").about(&chat, &job.id).field("reason", "post_expired"));
         let title = alert_title(&client, job).await;
         alert(&chat, &title, "post_expired", "post_stale_over_5m", job.sent_ms);
         return Outcome::Done;
@@ -673,6 +708,20 @@ async fn process(job: &AudioJob, language: &str, cfg: &posting::PostConfig) -> O
     v["edits"] = posted.edits.into();
     v["first_text_ms"] = (first_ms - job.received_ms).into();
     v["total_ms"] = (done - job.received_ms).into();
+    let mut disposition = telemetry::Note::new(if failure.is_none() { "posted" } else { "failed" }).about(&chat, &job.id);
+    if failure.is_some() {
+        disposition = disposition.field("stage", "send");
+    }
+    note(
+        disposition
+            .count("parts", ids.len() as u64)
+            .count("expected", parts.len() as u64)
+            .count("edits", u64::from(posted.edits))
+            .millis("first_text_ms", Some((first_ms - job.received_ms).max(0) as u64))
+            .millis("total_ms", Some((done - job.received_ms).max(0) as u64))
+            .millis("first_segment_ms", tracker.first_segment_ms())
+            .flag("streamed", streaming),
+    );
     if let Some(error) = &failure {
         v["reason"] = format!("send:{}", error.chars().take(120).collect::<String>()).into();
         let title = alert_title(&client, job).await;
@@ -713,6 +762,7 @@ fn settle_notice(notice: &queue::Notice, title: Option<&str>) {
     let (chat, id) = notice.key.split_once('\u{0}').unwrap_or((notice.key.as_str(), ""));
     let kind = if notice.kind == "failed" && permanent(&notice.reason) { "unsupported" } else { notice.kind };
     say!("transcript {} chat={chat} id={id} reason={}", if kind == "audio_expired" { "expired" } else { kind }, notice.reason);
+    note(telemetry::Note::new(note_kind(kind)).about(chat, id).field("stage", "queue").field("reason", &notice.reason));
     let (chat, id) = (chat.to_string(), id.to_string());
     let (kind, reason, sent_ms, title) = (kind.to_string(), notice.reason.clone(), notice.sent_ms, title.unwrap_or("").to_string());
     STATE_DIRTY.with(|d| d.set(true));
@@ -720,6 +770,21 @@ fn settle_notice(notice: &queue::Notice, title: Option<&str>) {
         record(&chat, &id, serde_json::json!({"state": kind, "reason": reason})).await;
         alert(&chat, &title, &kind, &reason, sent_ms);
     }));
+}
+
+/// The stable telemetry kind for a queue/alert kind: an expiry is `expired`, anything else keeps
+/// its name (`failed`, `unsupported`, `blocked`), so the comparison table groups the two sides.
+fn note_kind(kind: &str) -> &'static str {
+    match kind {
+        "audio_expired" | "post_expired" => "expired",
+        "unsupported" => "unsupported",
+        "blocked" => "blocked",
+        "shadow" => "shadow",
+        "held" => "held",
+        "posted" => "posted",
+        "ready" => "ready",
+        _ => "failed",
+    }
 }
 
 async fn settle_completions() {
@@ -742,6 +807,7 @@ async fn settle_completions() {
                 let (chat, id) = notice.key.split_once('\u{0}').unwrap_or((notice.key.as_str(), ""));
                 let kind = if notice.kind == "failed" && permanent(&notice.reason) { "unsupported" } else { notice.kind };
                 say!("transcript {} chat={chat} id={id} reason={}", if kind == "audio_expired" { "expired" } else { kind }, notice.reason);
+                note(telemetry::Note::new(note_kind(kind)).about(chat, id).field("stage", "queue").field("reason", &notice.reason));
                 Some((chat.to_string(), id.to_string(), kind.to_string(), notice.reason.clone(), notice.sent_ms, title.to_string()))
             }
             (None, _) => None,

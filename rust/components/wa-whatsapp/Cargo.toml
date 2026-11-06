@@ -26,6 +26,12 @@ serde = { version = "1", features = ["derive"] }
 wacore-appstate = { version = "=0.7.0", default-features = false }
 log = { version = "0.4", features = ["std"] }
 
+[dev-dependencies]
+# The native tests drive the same futures the guest awaits (`recognize::steps`) to a conclusion;
+# `block_on` is the only executor they need and it comes from the futures crate already used above.
+# Dev-only: `cargo build --target wasm32-wasip2` does not see this feature set.
+futures = { version = "0.3", default-features = false, features = ["std", "async-await", "executor"] }
+
 [profile.release]
 opt-level = "s"
 strip = true

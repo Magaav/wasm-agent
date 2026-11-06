@@ -98,6 +98,8 @@ worker pipe (`"segments": true` in the request, which the Go connector never sen
 | `alerts.rs` | own-chat log, Go-identical wording, ≤ 1 message a minute, 12 listed, dropped after 6 h; group alerts name the group's *subject*, never the sender's push name |
 | `lib.rs` (guest) | glue: admit (unsupported/fence/held/dedup) → download → recognize (segments) → post as a reply quoting the audio → kv record `tx/<chat>/<id>` (which is also the author record a later revoke is proved against). Host I/O only: the crate is split so `queue`/`holds`/`posting`/`alerts` are pure and compiled on the host too |
 | `store.rs` (guest) | wacore's in-memory backend for reads plus write-through of the durable protocol state to `wa:kernel/kv` |
+| `recognize.rs` | the recognizer's two halves as one job: `steps` selects the segment stream against the transcript future (no poll, no timer) and `Tracker` accumulates the text and the timings (first segment, recognition). Pure `futures`; tested natively with a fake speech provider |
+| `telemetry.rs` | the stable `wa-transcript v=1 key=value` metadata lines the comparison script parses (ids, states, reasons, durations, counts — never text) |
 
 Configuration (the service definition's `config`):
 
@@ -141,7 +143,7 @@ Tests: the four pure modules are compiled and tested natively, without the wasm 
 protocol crate's `Send` bounds:
 
 ```
-cd rust/components/wa-whatsapp && cargo test --lib        # 38 tests
+cd rust/components/wa-whatsapp && cargo test --lib        # 47 tests
 cargo clippy --lib                                       # clean
 cargo build --release --target wasm32-wasip2             # the component
 ```
@@ -181,7 +183,7 @@ Build and test:
 
 ```
 cd rust/components/wa-whatsapp
-cargo test --lib                                          # 38 tests, native
+cargo test --lib                                          # 47 tests, native
 cargo build --release --target wasm32-wasip2               # the component (8 MB)
 WA_TEST_WHATSAPP_WASM=<that .wasm> cargo test -p wa-host the_whatsapp
 ```
@@ -195,6 +197,60 @@ a debug build.
 `on_message` (the component's only source of mutations), two-decode parallelism (the host recognizer is
 still one warm worker), and anything at all against a live account: this lane did not pair, connect or
 send, so the component's behaviour on a phone is the same unknown it was at B3.
+
+## The warm shadow deploy and the post-then-edit test (p3a)
+
+Two `services` definitions to run the component beside the Go connector. They are documented here
+and in `config/`; **nothing in this tree deploys them** (an operator stores one with the `services`
+tool's `put`/`enable`). A definition's `net` is not used by a component — its manifest grants it.
+
+| file | what it is for |
+| --- | --- |
+| `config/whatsapp-shadow.json` | **Shadow**: transcription on with `post_transcripts: false` and an empty `post_allow`, so the pipeline runs end to end (queue, media download, `speech.recognize` with segments, the `tx/<chat>/<id>` record, the alert queue) while the posting gate answers `Shadow` for every chat. Nothing is sent; the only output is the component log. |
+| `config/whatsapp-own-chat.json` | **Post-then-edit test**: `post_transcripts: true`, `post_allow: ["own"]`, `stream_edits: true`, `header_tag: "wasm"` (so its posts are distinguishable from the Go connector's in the same chat). A voice note of at least `stream_min_seconds` in the account's own chat is posted within seconds and edited as more segments arrive. The job brief's `edit_streaming` is this component's `stream_edits`; there is no second switch. Two independent gates keep it off third parties: `post_allow: ["own"]` and `policies/default.json` (`whatsapp.send` → `chat:self`, `chat:alerts`). |
+
+**The warm worker.** `service_stt.rs` starts the recognizer as soon as a component holding `stt: true`
+starts (`prewarm`), and one request runs at a time through one warm worker. `WA_STT_IDLE_SECONDS`
+decides how long it may sit unused: unset, `0` or unreadable = **never** (the default; a stopped
+worker pays the model load again, ~16 s on openclaw). Four tests in `service_stt.rs` assert exactly
+that, with a fake worker that speaks the same line protocol and counts its own model loads:
+`a_second_job_does_not_reload_the_model` (prewarm + two jobs = one load),
+`a_first_job_without_a_prewarm_loads_once_and_the_next_reuses_it`,
+`a_dead_worker_is_replaced_and_counts_as_a_new_load` (a crash costs a load; a warm worker does not)
+and `idle_shutdown_is_off_by_default_and_configurable`.
+
+**Speech on 0.2.** `recognize(...).await` returns the two async values; `recognize.rs` (`steps`)
+selects the segment stream against the transcript future, and `Tracker` accumulates the text and the
+timings. There is no poll, no timer and no reactor in that path. `recognize::tests` drives those same
+functions with a **fake speech provider and a fake clock**: the first segment lands at 250 ms and the
+whole recognition at 900 ms (`a_fake_provider_measures_the_first_segment_latency`), a blank segment
+does not start the clock, a failed recognition keeps the text it had, and an already-ready transcript
+loses no segment. Latency is measured, not asserted from a real decode — a real decode needs the
+model on the node, which this lane did not touch.
+
+**Telemetry and the comparison with the Go connector.** `wa:kernel@0.2` has **no guest-facing
+telemetry interface** (the kernel exports `log`, `lifecycle`, `kv`, `credentials`, … and nothing
+else; the host records its own `host_call_duration_micros` for every kernel call, `speech.recognize`
+included, but a guest cannot add a metric). So the component writes one stable metadata line per
+voice note into its own service log (`telemetry.rs`):
+
+```
+wa-transcript v=1 kind=ready chat=<jid> id=<mid> state=transcribed download_ms=250   first_segment_ms=1500 recognize_ms=4000 total_ms=4700 since_sent_ms=4900 chars=214 segments=9 streamed=false
+wa-transcript v=1 kind=posted|shadow|held|blocked|expired|failed|unsupported … reason=<code>
+```
+
+`download_ms` = pick → media downloaded; `first_segment_ms`/`recognize_ms` = from asking the
+recognizer to its first text and to the transcript; `total_ms` = pick → transcript (the whole
+pipeline after the queue); `since_sent_ms` = the source message's own latency. Values are single
+tokens (anything outside `[A-Za-z0-9_.:@/+-]` becomes `_`, capped at 120 characters), so a parser
+needs no quoting rules and no reason string can split a line. No field carries message or transcript
+text: `chars` is a count.
+
+`scripts/compare-transcripts.mjs --log <component.log> --journal <journal.db>` prints the two sides
+side by side (`chat, id, kind, dl_ms, first_ms, total_ms, c_chars, seg, journal_state, j_reason,
+j_chars, verdict`). Both sides are metadata only: the journal is opened read-only and the only thing
+read from `transcript`/`body` is `length(...)`; `scripts/test-whatsapp-compare-transcripts.mjs` plants
+a canary transcript in its fixture and fails if it reaches stdout, stderr or `--json`.
 
 ## Decision 05/11: Rust, not Go
 

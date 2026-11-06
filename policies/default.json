@@ -3,7 +3,7 @@
   "sensitive_capabilities": [],
   "components": {
     "wa-whatsapp": {
-      "note": "Stage 1 of docs/GRANT-POLICY.md: send only to our own chat and the alerts chat, <= 20 messages/min in total, <= 6/min per chat, alerts exempt from the global cap but <= 1/min. net.dial and http.request mirror the addresses in rust/components/wa-whatsapp/manifest.json; each pattern may only ever NARROW that manifest. kv.write lists the key prefixes rust/components/wa-whatsapp/src/store.rs writes (dev, id/, ses/, pk/, spk/, sk/, sync/, ver/, mac/, lid/, tc/), the transcript prefix tx/ from src/lib.rs and the message fence prefix fence/ from src/guest.rs. credentials.read names the secret the component is given. Stage 2 - an allowlisted chat - only widens whatsapp.send.allow.",
+      "note": "Stage 1 of docs/GRANT-POLICY.md: send only to our own chat and the alerts chat, <= 20 messages/min in total, <= 6/min per chat, alerts exempt from the global cap but <= 1/min. net.dial and http.request mirror the addresses in rust/components/wa-whatsapp/manifest.json; each pattern may only ever NARROW that manifest. kv.write lists the key prefixes rust/components/wa-whatsapp/src/store.rs writes (dev, id/, ses/, pk/, spk/, sk/, sync/, ver/, mac/, lid/, tc/), the transcript prefix tx/ from src/lib.rs and the message fence prefix fence/ from src/guest.rs. credentials.read names the secret the component is given. Stage 2 - an allowlisted chat - only widens whatsapp.send.allow. stt.start is not sensitive (it has no target and no rate): the recognizer itself is granted by the manifest's capabilities.stt, and the empty rule records that this component asks the kernel to run it.",
       "capabilities": {
         "whatsapp.send": {
           "sensitive": true,
@@ -32,7 +32,8 @@
         "credentials.read": {
           "allow": ["WA_WHATSAPP_TOKEN"],
           "rate": { "per_minute": 4 }
-        }
+        },
+        "stt.start": {}
       }
     },
     "mcp-whatsapp": {

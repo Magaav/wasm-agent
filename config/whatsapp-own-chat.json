@@ -1,0 +1,17 @@
+{
+  "name": "wa-whatsapp",
+  "description": "OWN-CHAT TEST example (p3a) - posting and post-then-edit streaming are ON, but only into this account's own chat (post_allow ['own']), so the test can never reach a third party. Documented, not deployed: policies/default.json allows whatsapp.send only to chat:self and chat:alerts, so a wider post_allow would be refused by the host anyway.",
+  "config": {
+    "language": "pt",
+    "log": "info",
+    "post_transcripts": true,
+    "post_allow": ["own"],
+    "alerts": false,
+    "stream_edits": true,
+    "stream_min_seconds": 15,
+    "edit_interval_seconds": 5,
+    "fresh_seconds": 300,
+    "header_tag": "wasm",
+    "_comment": "The post-then-edit test: send a voice note of at least stream_min_seconds in the own chat ('Message yourself'). The first recognized segments go out as the transcript reply within seconds (header + an hourglass marker), the same message is edited at most once per edit_interval_seconds as more segments arrive, and the last edit is the whole text without the marker. header_tag makes the component's posts distinguishable from the Go connector's in the same chat. 'edit_streaming' in the p3a brief is this component's `stream_edits`; there is no second switch."
+  }
+}

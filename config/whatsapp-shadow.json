@@ -1,0 +1,14 @@
+{
+  "name": "wa-whatsapp",
+  "description": "SHADOW example (p3a) - transcribe every voice note, post nothing. Written here as the documented shape of a service definition; nothing in this tree deploys it. Apply with the `services` tool's put/enable, never by copying bytes: see docs/SERVICE-COMPONENTS.md, 'The warm shadow deploy'.",
+  "config": {
+    "language": "pt",
+    "log": "info",
+    "post_transcripts": false,
+    "post_allow": [],
+    "alerts": false,
+    "stream_edits": false,
+    "fresh_seconds": 300,
+    "_comment": "Shadow = the pipeline runs end to end (queue, download, recognize with segments, kv record tx/<chat>/<id>, own-chat alert queue) and the posting gate answers Shadow for every chat, so nothing is sent. The recognizer is the node's warm worker: started when this component starts, never stopped for idleness unless WA_STT_IDLE_SECONDS > 0 (default 0). Telemetry: one 'wa-transcript v=1 kind=ready ...' line per note in this component's service log (ids, states, download_ms, first_segment_ms, total_ms, chars, segments - never text); compare it with the Go connector's journal.db using scripts/compare-transcripts.mjs."
+  }
+}
