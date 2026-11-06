@@ -119,7 +119,7 @@ fn an_ungranted_recognizer_is_refused() {
 #[test]
 fn the_deadline_ends_a_component_that_never_returns() {
     let mut kernel = FakeKernel::new("fake-kernel-fixture");
-    kernel.grant_storage(true).deadline(Duration::from_millis(700));
+    kernel.grant_storage(true).deadline(Duration::from_millis(5000)); // a cold compile under a busy build machine took >700 ms before the first tick
     let began = Instant::now();
     let outcome = kernel.run_file(wasm(), &serde_json::json!({"tick_ms": 10}).to_string());
     assert_eq!(outcome.outcome, "deadline", "{}", outcome.logs_text());
