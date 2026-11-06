@@ -8,7 +8,7 @@
 //! live in `wa-capabilities`, the wasm runtime in `wa-kernel-runtime`, the policy in
 //! `wa-governance`, the console in `wa-term`, the transport in `wa-rendezvous` and the Lua ABI,
 //! paths and shared JSON answer in `wa-host-support`.
-use wa_capabilities::{capabilities, client_bridge, core_component, graph, host, plugins, ripgrep, serve, subagents};
+use wa_capabilities::{capabilities, client_bridge, core_bridge, core_component, graph, host, plugins, ripgrep, serve, subagents};
 use wa_capabilities::host::Host;
 use rusqlite::Connection;
 // `wa dev` (docs/SERVICE-COMPONENTS.md): build a component crate and swap the running instance.
@@ -152,6 +152,28 @@ fn db_path(args: &[String]) -> String {
         let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
         format!("{home}/.wasm-agent/memory.db")
     })
+}
+
+/// The agent-core component a `core = "component"` node serves from (docs/KERNEL.md, "A2.4").
+///
+/// `WA_AGENT_CORE_WASM` names it explicitly; otherwise the installed component
+/// (`<components dir>/agent-core.wasm`, where a deploy puts a pinned build) is used, and a checkout
+/// that has run `scripts/build-agent-core.sh` falls back to its own build. Absent is `None`, and the
+/// caller refuses to start rather than serve the native core while the operator asked for the other.
+fn agent_core_wasm() -> Option<PathBuf> {
+    if let Ok(path) = std::env::var("WA_AGENT_CORE_WASM") {
+        if !path.is_empty() {
+            let path = PathBuf::from(path);
+            return path.is_file().then_some(path);
+        }
+    }
+    let installed = wa_host_support::paths::component_dir().join("agent-core.wasm");
+    if installed.is_file() {
+        return Some(installed);
+    }
+    let built = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../components/agent-core/target/wasm32-wasip2/release/agent_core.wasm");
+    built.is_file().then_some(built)
 }
 
 /// Open one interpreter's own SQLite connection to the node's database.
@@ -449,7 +471,7 @@ fn main() {
         && lua_args.iter().skip(1).any(|arg| arg == "--help" || arg == "-h")
     {
         if command == "serve" {
-            println!("usage: wa serve [--port 8799] [--ui <dir>] [--client-port 8800]\n  run this node's HTTP server and web UI (blocks until stopped)");
+            println!("usage: wa serve [--port 8799] [--ui <dir>] [--client-port 8800] [--core native|component]\n  run this node's HTTP server and web UI (blocks until stopped)\n  --core component runs every turn, subagent and node-thread interpreter from the agent-core\n  instance pool (docs/KERNEL.md, A2.4); the default is native");
         } else {
             println!("usage: wa rendezvous [--port 8890] [--bind 127.0.0.1] [--db <path>]\n  run a rendezvous server that nodes register with (blocks until stopped)");
         }
@@ -506,10 +528,70 @@ fn main() {
         // pointer for the life of the process; a newtype with an unsafe Send would be the same claim with
         // more ceremony.
         let factory_for_serve = interpreter_factory.clone();
+        // Which Lua core answers this node (docs/KERNEL.md, "A2.4"): the native interpreter, or the
+        // agent-core component on an instance pool. Resolved once, here, and said out loud at startup -
+        // a node that believes it runs one core and runs the other is the failure this switch must not
+        // allow. An unknown value is refused; it is never served as the default.
+        let (core_mode, core_source) = match core_bridge::CoreMode::resolve(flag(&lua_args, "--core").as_deref()) {
+            Ok(answer) => answer,
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::exit(2);
+            }
+        };
+        let mut core_pool = None;
+        if core_mode == core_bridge::CoreMode::Component {
+            let Some(wasm) = agent_core_wasm() else {
+                eprintln!(
+                    "core_component_unavailable: core = \"component\" but no agent-core.wasm was found \
+                     (set WA_AGENT_CORE_WASM, or build it with bash scripts/build-agent-core.sh)"
+                );
+                std::process::exit(2);
+            };
+            let config = core_bridge::node_pool_config(serve::node_thread_slots(), subagents::configured_concurrency());
+            match core_bridge::CoreBridge::open(interpreter_factory.clone(), &wasm, config) {
+                Ok(bridge) => {
+                    eprintln!(
+                        "[serve] core = component ({core_source}): {} ({} instances warm, at most {}), {} compiled from {}",
+                        wasm.display(),
+                        config.warm,
+                        config.max_instances,
+                        bridge.opened_ms(),
+                        bridge.compiled_from()
+                    );
+                    core_pool = Some(bridge);
+                }
+                Err(error) => {
+                    eprintln!("core_component_failed: {error:#}");
+                    std::process::exit(2);
+                }
+            }
+        } else {
+            eprintln!("[serve] core = native ({core_source})");
+        }
         // Keep the graph fresh for the life of the node. The scheduler does the initial index on its
         // own thread (through the graph component), so a large tree never delays the port coming up.
         graph::watch_configured();
-        serve::run(lua, Box::new(move || factory_for_serve()), port, PathBuf::from(ui));
+        // A subagent turn is an interpreter of its own; on the component core it is a lease from the
+        // same pool, so the whole node runs one kind of core (docs/KERNEL.md, "A2.4").
+        if let Some(bridge) = core_pool {
+            subagents::set_runner(std::sync::Arc::new(move |receipt: &str| {
+                let core = bridge.lease().map_err(|error| format!("core_bridge_pool: {error}"))?;
+                let text = core.call_string("wa_subagent_run", &[receipt])?;
+                serde_json::from_str(&text).map_err(|error| format!("subagent_result_not_json: {error}"))
+            }));
+        }
+        let first = match core_pool {
+            Some(bridge) => match bridge.lease() {
+                Ok(core) => core_bridge::Core::Component(core),
+                Err(error) => {
+                    eprintln!("core_component_failed: {error}");
+                    std::process::exit(2);
+                }
+            },
+            None => core_bridge::Core::Native(lua),
+        };
+        serve::run(first, Box::new(move || factory_for_serve()), port, PathBuf::from(ui), core_pool);
         return;
     }
 

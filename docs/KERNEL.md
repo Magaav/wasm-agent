@@ -399,6 +399,109 @@ gets an async `run` and a per-turn deadline. Also unmeasured: resident memory wi
 reservation, not resident bytes), and several concurrent streams (one run per lease, one lease per
 caller, is what the pool promises; several streams inside one run stay A2.2's one-at-a-time foreground
 contract).
+
+### A2.4 results — serve, node threads and subagents on the component core (06/11, wasm_the_first)
+
+The pool had no caller in the binary (A2.3, "Not done here"); it has one now, behind a switch.
+
+**The switch.** `core = "component" | "native"`, default `native`, resolved once at startup in this
+order: `--core` on the command line, then `WASM_AGENT_CORE` (which `<home>/.wasm-agent/env` also
+supplies), then a `core` key in `<home>/.wasm-agent/config.json`, then native. The source of the
+answer is printed at startup (`[serve] core = component (--core): …`), an unknown value is refused
+with `core_mode_invalid`, and a node asked for the component core without an `agent-core.wasm`
+refuses to start rather than serve the other one. `/health` carries `core: {mode: …}` on every node
+and, on the component core, the pool's own counters.
+
+**What runs where.** One seam, `core_bridge::Core`, is either the native `Lua` the node always used
+or a lease from the A2.3 pool. Everything the serving layer asks of an interpreter is
+`call_string(name, args)`, so the switch is one enum at the bottom of `serve.rs`; admission, the
+scheduler, the socket lanes, run events, cancellation and the hooks/selfloop paths are unchanged.
+On the component core these all come from the pool: node-thread 0, every read/control node-thread,
+the control (admission) interpreter, the placement interpreter (the 2 s `wa_orchestrator_tick` that
+fires wakes), and every subagent turn (`subagents::set_runner`, one lease per child turn). The pool
+is sized from the node's own configuration — `node_thread_slots() + subagent concurrency + 3`, and
+`WASM_AGENT_CORE_POOL_MAX` / `WASM_AGENT_CORE_POOL_WARM` override it.
+
+**How a call crosses.** The guest exports `run(entry, args) -> result<_, string>`, whose `ok` payload
+is unit, so a call cannot return a value. The bridge runs one dispatch script
+(`rust/wa-capabilities/src/core_bridge.rs`) that boots `lua/core/server.lua` (and
+`lua/core/subagents.lua` only for the calls that need it), calls the named global with the arguments
+the kernel passed as the guest's `args`, and writes `status\npayload` through `host.write_file` into
+`<home>/.wasm-agent/core-bridge/<pid>-<n>.reply`; the kernel reads it, deletes it and returns the
+payload. A `pcall` around the call turns a Lua error into the `Err` half of `call_string` in the
+script's own words; `core_bridge_*` names the bridge's own failures and none of them is silent.
+Every `host.*` still crosses A2.1's one import and is answered by the instance's own native
+interpreter **on the caller's thread** — which is why a run's SSE sink, cancel flag and run id
+(thread-locals of the node thread) still reach the guest's `host.stream` unchanged.
+
+**State.** Each run gets a fresh `lua_State` (A2.3), so a node thread rebuilds the Lua core per
+request and conversation state comes from the database, exactly as it does for a fresh `wa run`.
+What that changes: `local agent` and the in-Lua caches are rebuilt per request (correct, and slower —
+see the numbers), and the pending `/bind` confirmation table in `server.lua` does not survive between
+requests. A long-lived guest (one Lua state per node thread, work items delivered through the bridge)
+would fix both, and it is blocked on the guest: `run` creates the state and returns, and the run's
+thread-local context (sink, cancel, run id) is installed by the node thread, so a guest loop would
+need the context to travel with each work item — a guest-side export (`run_loop`/`call`) or the WASI
+0.3 async `run`. `rust/components` is outside this lane's edit list.
+
+**Parity.** `scripts/test-core-parity.sh` runs every self-contained `scripts/test-*.lua` the fast
+path runs (115 of them, `scripts/fast-path.exclude` respected) twice — `WA_SCRIPT=…` and
+`--core-component agent_core.wasm` — with its own scratch home and ledger each, and diffs the
+normalized outputs (uuids, `Nms` timings, `cpu_seconds`, `wall_ms`, the scratch path, chunk names).
+
+| result | scripts |
+| --- | --- |
+| pass on both cores, identical output | **100/115** |
+| fail identically on both cores (environment, not the core) | 12/115 |
+| differ | 3/115 |
+
+The 12 both-fail are `test-codemode-*` (the QuickJS sandbox assets are absent in this checkout),
+`test-graph-*` (the `graph` component is not installed), `test-patch-audit`, `test-toolcall-gate` and
+`test-experiment-verify` (a fixture fact that no longer matches `lua/core/agent.lua`): they fail the
+same way natively, so they say nothing about the component either way, and the harness counts them
+separately rather than as passes. The three that differ:
+
+* `test-cli-ticker`, `test-cli-view` — the console ticker draws one more frame inside the component
+  (1.0 s instead of 0.9 s; `test-cli-view` prints two frames natively none). The checks pass in both
+  (232 checks); the difference is that `host.ticker`'s animation is answered by the slot's native
+  interpreter, whose stdout/`isatty` state is not the CLI's. Cosmetic, CLI-only, and not on any
+  `serve` path.
+* `test-completion-packet` — the fixture calls `os.remove(<absolute path>)`, which fails in the guest:
+  WASI preopens the process cwd as `.` (A2.1), so Lua-level `io`/`os` file calls on an absolute path
+  fail while every `host.*` file call works. The core itself never does this; the test fixture does.
+
+**Serve smoke.** `scripts/test-serve-core-component.sh` starts the same node on both cores (a stub
+OpenAI-shaped model on loopback, scratch home and ledger per mode, every `WASM_AGENT_*` of the
+calling shell dropped) and compares the behaviour, not the log: three `/chat` turns (all `stub-ok`),
+one `UserPromptSubmit` hook (6 payloads on both), one subagent (`completed`/`stub-ok` on both) and
+one self-wake — a turn whose prompt makes the stub answer with a `wake` tool call, after which the
+node's own placement tick fires a `[self-wake · smoke]` turn with no further request from the
+harness (1 on both). Identical on both cores.
+
+**Cost.** `scripts/bench-serve-core-component.sh`, release build, one node per core, the same stub
+model, medians of 10 turns (each in its own thread) after two warm-up turns:
+
+| measurement | native | component | component/native |
+| --- | --- | --- | --- |
+| turn (`POST /chat`, stub model) | 220 ms | 1 410 ms | 6.4× (+1 190 ms) |
+| read (`GET /sessions`) | 10.5 ms | 357 ms | 34× (+346 ms) |
+| serve process RSS after the run | 108 MiB | 185 MiB | +77 MiB |
+
+The component column is almost entirely the guest's own boot: `guest_run_ms / calls` is ~680 ms per
+call, of which `lua/core/server.lua`'s module bodies (and `memory.setup()` on a real database) are the
+bulk — parsing is only ~15 ms for seven modules. Loading `lua/core/subagents.lua` lazily for the calls
+that need it already took the turn from 3 213 ms to 1 410 ms and the read from 888 ms to 357 ms; the
+rest needs the long-lived guest described above, not a cheaper boot. Memory: the pool's allocator
+reserves `max_instances × 256 MiB` of *virtual* address space per node (10 instances here), and the
+resident cost measured is +77 MiB with 4 instances alive.
+
+**Not done, and why.** (1) The long-lived guest, as above. (2) `wa --core-component <wasm> <script>`
+and `WA_SCRIPT` are unchanged: they are one-shot runs, not a node. (3) The component is found by
+`WA_AGENT_CORE_WASM`, then `<components dir>/agent-core.wasm`, then the checkout's build — a deploy
+that installs a pinned `agent-core.wasm` needs no flag. (4) Epoch interruption is still off on the
+pooling engine (A2.3), so a wedged guest has no per-run deadline; the stall watchdog reports it
+exactly as it reports a wedged native interpreter.
+
 ### C1 results — the code graph as a component (05/11, wasm_the_first)
 
 The graph is the first capability moved out of `wa` without touching Lua. The 14 `host.graph_*`

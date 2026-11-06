@@ -35,6 +35,13 @@ pub type Runner = Arc<dyn Fn(&str) -> Result<Value, String> + Send + Sync>;
 const DEFAULT_MAX_CONCURRENT: usize = 2;
 const DEFAULT_QUEUE_DEPTH: usize = 6;
 
+/// How many child runs may execute at once. Public because the component core sizes its instance pool
+/// from it: one subagent turn is one interpreter, and on that core one interpreter is one lease
+/// (docs/KERNEL.md, "A2.4").
+pub fn configured_concurrency() -> usize {
+    env_usize("WASM_AGENT_SUBAGENT_CONCURRENCY", DEFAULT_MAX_CONCURRENT).clamp(1, 16)
+}
+
 fn env_usize(name: &str, fallback: usize) -> usize {
     std::env::var(name).ok().and_then(|value| value.parse().ok()).unwrap_or(fallback)
 }
@@ -336,7 +343,7 @@ static MANAGER: OnceLock<Manager> = OnceLock::new();
 
 fn manager() -> &'static Manager {
     MANAGER.get_or_init(|| {
-        let max_concurrent = env_usize("WASM_AGENT_SUBAGENT_CONCURRENCY", DEFAULT_MAX_CONCURRENT).clamp(1, 16);
+        let max_concurrent = configured_concurrency();
         let queue_depth = env_usize("WASM_AGENT_SUBAGENT_QUEUE_DEPTH", DEFAULT_QUEUE_DEPTH).clamp(1, 64);
         let manager = Manager::with_root(subagent_root(), max_concurrent, queue_depth);
         manager.recover();
@@ -1074,6 +1081,16 @@ pub fn set_factory(factory: Box<dyn Fn() -> wa_host_support::lua::Lua + Send + S
             Err(error) => Err(error),
         }
     });
+    let _ = manager().runner.set(runner);
+}
+
+/// Register a runner that is not a native interpreter - the component core's, where a child turn is a
+/// guest run on a pooled agent-core instance (docs/KERNEL.md, "A2.4").
+///
+/// It is the same contract `set_factory` builds: one child run in, its terminal result JSON out, with
+/// the caller's thread-local cancel flag and deadline still in force (the guest runs on the caller's
+/// thread, so every `host.*` call it makes sees them). A node registers one of the two, never both.
+pub fn set_runner(runner: Runner) {
     let _ = manager().runner.set(runner);
 }
 

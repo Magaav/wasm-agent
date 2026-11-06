@@ -22,6 +22,7 @@
 pub mod audio;
 pub mod capabilities;
 pub mod client_bridge;
+pub mod core_bridge;
 pub mod core_component;
 pub mod file_search;
 pub mod graph;

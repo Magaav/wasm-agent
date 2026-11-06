@@ -558,6 +558,26 @@ permissions/effects. Prepared assets may be embedded at build time, never fetche
 by runtime. See [CODEMODE.md](CODEMODE.md) for ABI, limits, provenance, source/embedded
 Node-unavailable proofs and the separate benchmark-only Node reference host.
 
+## Which core answers a node (`--core`, `WASM_AGENT_CORE`)
+
+A node runs its Lua either in the native interpreter or inside the `agent-core` component, and the
+switch is `core = "component" | "native"` (default `native`): `--core` on `wa serve`, else
+`WASM_AGENT_CORE` (also settable in `<home>/.wasm-agent/env`), else a `core` key in
+`<home>/.wasm-agent/config.json`. The startup line and `/health`'s `core.mode` both say which one is
+in force, because a node that believes it runs one core and runs the other is the failure this must
+not allow.
+
+On the component core every node thread, the admission and placement interpreters and every subagent
+turn lease an instance from the `agent-core` pool (`WA_AGENT_CORE_WASM`, else
+`<components dir>/agent-core.wasm`, else the checkout's build), and each request is one guest run.
+`host.*` is unchanged for the Lua core — same names, same arguments, same answers — because every
+call still crosses the one bridge import and is answered by the instance's own native interpreter.
+Two things do behave differently, and both are the guest's filesystem and console, not the
+capabilities: WASI preopens the process cwd as `.`, so Lua-level `io`/`os` calls on an absolute path
+fail inside the guest (use `host.read_file`/`host.write_file`), and the CLI ticker's frames come from
+the slot's interpreter rather than the CLI's. Cost, parity results and what is still missing:
+[KERNEL.md](KERNEL.md), "A2.4 results".
+
 ## The capability inventory
 
 What this node can do is **data**, not prose. The live registry is

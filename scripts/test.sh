@@ -1257,6 +1257,19 @@ if AGENT_CORE="$(env -u CARGO_TARGET_DIR bash scripts/build-agent-core.sh 2>/dev
   # a local SSE stub (no internet), runs scripts/fixtures/core-component-streams.lua both ways and fails
   # when the two outputs differ.
   WA_BIN="$BIN" AGENT_CORE="$AGENT_CORE" gate_run node scripts/test-core-component-streams.mjs
+  # A2.4: serve, its node threads and the subagent runtime on the component core (docs/KERNEL.md,
+  # "A2.4"). Three proofs, all local (a stub model on loopback, no provider, no internet):
+  #   * the *parity* of the Lua test set - every self-contained scripts/test-*.lua the fast path runs,
+  #     once natively and once inside the guest, with the two outputs diffed (uuids, timings, the
+  #     scratch path and chunk names normalized; everything else byte for byte);
+  #   * the serve smoke - three turns, one UserPromptSubmit hook, one subagent and one self-wake on
+  #     both cores, with the replies, the subagent's terminal state and result, the hook's payloads and
+  #     the [self-wake] turn compared;
+  #   * the measurement - turn and read latency and the serve process's resident memory, printed so a
+  #     regression is visible in the gate's own log (no threshold: the numbers are the record).
+  WA_BIN="$BIN" AGENT_CORE="$AGENT_CORE" gate_run bash scripts/test-core-parity.sh --jobs 4
+  WA_BIN="$BIN" AGENT_CORE="$AGENT_CORE" gate_run bash scripts/test-serve-core-component.sh
+  WA_BIN="$BIN" AGENT_CORE="$AGENT_CORE" bash scripts/bench-serve-core-component.sh | tail -4
 else
   echo "note: agent-core not built (no wasi-sdk); core-component checks skipped"
 fi

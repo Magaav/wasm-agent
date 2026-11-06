@@ -16,6 +16,7 @@
 //! requests the relay hands us (`relay_client`). Both end up in `dispatch`, so a
 //! node behaves identically whether it is reached directly or through the relay.
 use wa_host_support::lua::Lua;
+use crate::core_bridge::{Core, CoreBridge, CoreMode};
 use std::cell::RefCell;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -186,12 +187,41 @@ struct Pool {
     /// Builds a fresh interpreter. It lives here as a boxed closure because the boot sequence belongs to
     /// main.rs - a second copy of it in the pool is how the two would drift.
     factory: Box<dyn Fn() -> Lua + Send + Sync>,
+    /// Where this node's Lua core runs (docs/KERNEL.md, "A2.4"): `None` is the native interpreter the
+    /// factory builds, `Some` is the agent-core instance pool every node thread, the control
+    /// interpreter, the placement tick and a subagent turn lease from.
+    bridge: Option<&'static CoreBridge>,
     ui: PathBuf,
     queue_depth: usize,
     /// Counters, so growing and shrinking is observable rather than something you infer from latency.
     spawned: AtomicUsize,
     retired: AtomicUsize,
     next: AtomicUsize,
+}
+
+/// One interpreter for a node thread, from whichever core this node runs on.
+///
+/// Native keeps the old shape exactly: the factory builds a fresh `Lua` inside `catch_unwind`, because a
+/// failed build is one refused request and not a dead node. The component core leases an instance from
+/// the pool instead; a lease that cannot be had is reported the same way (a 503, the caller retries)
+/// rather than served by a native interpreter the operator did not ask for.
+fn make_core(pool: &Pool) -> Result<Core, String> {
+    if let Some(bridge) = pool.bridge {
+        return bridge.lease().map(Core::Component);
+    }
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (pool.factory)()))
+        .map(Core::Native)
+        .map_err(|_| "the interpreter factory panicked".to_string())
+}
+
+/// The same, for the interpreters `serve` builds before the pool exists (control, placement).
+fn build_core(bridge: Option<&'static CoreBridge>, factory: &(dyn Fn() -> Lua + Send + Sync)) -> Result<Core, String> {
+    match bridge {
+        Some(bridge) => bridge.lease().map(Core::Component),
+        None => std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| factory()))
+            .map(Core::Native)
+            .map_err(|_| "the interpreter factory panicked".to_string()),
+    }
 }
 
 static POOL: OnceLock<Pool> = OnceLock::new();
@@ -234,6 +264,13 @@ fn warm_read_node_threads() -> usize {
 
 fn max_node_threads() -> usize {
     env_usize("WASM_AGENT_WORKERS_MAX", 4).clamp(1, 16)
+}
+
+/// The node-thread slots this node may use, index 0 included. Public because the component core sizes
+/// its instance pool from it (one instance per node thread, docs/KERNEL.md "A2.4"), and a pool sized
+/// from a second copy of this number would be a pool that runs dry on a node that grew.
+pub fn node_thread_slots() -> usize {
+    max_node_threads() + 1
 }
 
 fn read_idle_seconds() -> u64 {
@@ -473,11 +510,12 @@ fn spawn_node_thread(slots: &mut Vec<Option<std::sync::mpsc::SyncSender<Work>>>,
     }
     // Building an interpreter opens the database (`expect` on failure) on the accept thread; a full disk or
     // a permissions change then took the whole node down. A failed build is now one refused request (503,
-    // the caller retries) and a log line, and the next spawn tries again.
-    let state = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (pool.factory)())) {
+    // the caller retries) and a log line, and the next spawn tries again. On the component core the same
+    // line covers a pool that could not hand out a lease.
+    let state = match make_core(pool) {
         Ok(state) => state,
-        Err(_) => {
-            eprintln!("[serve] could not start an interpreter for node-thread {index}; refusing this request");
+        Err(error) => {
+            eprintln!("[serve] could not start an interpreter for node-thread {index} ({error}); refusing this request");
             return None;
         }
     };
@@ -988,6 +1026,37 @@ fn emit_run_finished(session: &str, run_id: u64) {
     }
 }
 
+/// Which Lua core this node runs, and what the agent-core instance pool has done (docs/KERNEL.md,
+/// "A2.4"). `mode` is always present so a client never has to infer it; the pool numbers are present
+/// only when the component core is in use, because a native node has no pool to report.
+fn core_health() -> serde_json::Value {
+    let pool = POOL.get();
+    let bridge = pool.and_then(|pool| pool.bridge);
+    let mode = if bridge.is_some() { "component" } else { "native" };
+    match bridge {
+        None => serde_json::json!({ "mode": mode }),
+        Some(bridge) => {
+            let stats = bridge.stats();
+            serde_json::json!({
+                "mode": mode,
+                "compiled_from": bridge.compiled_from(),
+                "opened_ms": bridge.opened_ms(),
+                "instances": stats.created,
+                "idle": stats.idle,
+                "leased": stats.leased,
+                "peak_leased": stats.peak_leased,
+                "acquisitions": stats.acquisitions,
+                "reuses": stats.reuses,
+                "exhausted": stats.exhausted,
+                "runs": stats.runs,
+                "calls": bridge.calls(),
+                "failures": bridge.failures(),
+                "guest_run_ms": bridge.run_ms(),
+            })
+        }
+    }
+}
+
 fn health_body() -> Vec<u8> {
     // The aggregate answers one question: *can this node do work?* Work happens on node-thread 0 - runs and
     // every route that changes something - so the aggregate is node-thread 0's age, and a wedged run node-thread is
@@ -1206,6 +1275,11 @@ fn health_body() -> Vec<u8> {
         "subagents_detail": subagent_health,
         "node_threads_spawned": POOL.get().map(|pool| pool.spawned.load(Ordering::Relaxed)).unwrap_or(0),
         "node_threads_retired": POOL.get().map(|pool| pool.retired.load(Ordering::Relaxed)).unwrap_or(0),
+        // Which Lua core answers this node, and - on the component core - what the instance pool has
+        // done: instances created/idle/leased, runs, snapshot reuses, refusals, and how many calls the
+        // bridge has carried (docs/KERNEL.md, "A2.4"). `mode` is here because a node that believes it
+        // runs one core and runs the other is the failure the switch must make impossible to hide.
+        "core": core_health(),
         // Milliseconds since a UI page last polled. `null` means no page has ever asked - a node that has
         // never been opened, which is not the same as one whose window has died.
         "ui_error": UI_ERROR.lock().ok().and_then(|slot| slot.as_ref().map(|(text, _)| text.clone())),
@@ -1352,7 +1426,7 @@ struct ResolveRequest {
 /// Resolve on the resolver thread: call the Lua resolver and shape the reply. No model call is ever
 /// made here; the functions are `users.resolve`/`memory.session`/`host.verify` and nothing else.
 fn resolve_sync(
-    control: &Lua,
+    control: &Core,
     function: &str,
     args: &[String],
 ) -> Result<serde_json::Value, (u16, String, String)> {
@@ -1671,13 +1745,13 @@ fn cap_subagent_await(body: &str) -> String {
 
 /// Call the runtime's global `wa_subagents(body, session)`. An invalid nonempty credential is a `401`
 /// at the boundary; the owner is derived from the authenticated session, never from the body.
-fn subagent_reply(lua: &Lua, body: &str, session: &str) -> Reply {
+fn subagent_reply(lua: &Core, body: &str, session: &str) -> Reply {
     let capped = cap_subagent_await(body);
     match lua.call_string("wa_subagents", &[capped.as_str(), session]) {
         Ok(text) => (200, "application/json", text.into_bytes()),
         Err(error) => {
             // Close a transaction the failed call may have left open.
-            crate::host::rollback_if_open(&lua);
+            lua.rollback();
             let (status, code) = if error.contains("invalid_session") || error.contains("unknown_user") {
                 (401, "invalid_session")
             } else {
@@ -1696,7 +1770,8 @@ pub fn bind_address() -> String {
         .unwrap_or_else(|| "127.0.0.1".to_string())
 }
 
-pub fn run(first: Lua, factory: Box<dyn Fn() -> Lua + Send + Sync>, port: u16, ui: PathBuf) {
+pub fn run(first: Core, factory: Box<dyn Fn() -> Lua + Send + Sync>, port: u16, ui: PathBuf, bridge: Option<&'static CoreBridge>) {
+    let core_mode = if bridge.is_some() { CoreMode::Component } else { CoreMode::Native };
     // Loopback unless `WASM_AGENT_BIND` says otherwise: a container publishes its port to the host's
     // loopback, and that forward never reaches a listener on the container's own 127.0.0.1.
     let address = bind_address();
@@ -1713,7 +1788,16 @@ pub fn run(first: Lua, factory: Box<dyn Fn() -> Lua + Send + Sync>, port: u16, u
     // The control interpreter, owned by the resolver thread. Admission resolves the credential and
     // the conversation in Lua *before* a node-thread is reserved. The admission dispatcher bounds its
     // wait without holding the accept thread. This interpreter never runs a model.
-    let control = factory();
+    let control = match build_core(bridge, factory.as_ref()) {
+        Ok(core) => core,
+        Err(error) => {
+            // A node that cannot build the interpreter it admits requests on must say so and stop:
+            // serving on another core would answer every request from something the operator did not
+            // configure (docs/KERNEL.md, "A2.4").
+            eprintln!("[serve] could not build the control interpreter ({error}); refusing to serve");
+            std::process::exit(1);
+        }
+    };
     let (resolve_tx, resolve_rx) = std::sync::mpsc::sync_channel::<ResolveRequest>(4);
     std::thread::spawn(move || {
         while let Ok(request) = resolve_rx.recv() {
@@ -1771,7 +1855,13 @@ pub fn run(first: Lua, factory: Box<dyn Fn() -> Lua + Send + Sync>, port: u16, u
     crate::host::set_run_cancel_probe(crate::serve::run_cancel_requested);
     // Lifetime only: ordering, eligibility and recovery policy stay in Lua.
     // Start after the run journal's process lease, never from a browser poll.
-    let placement = factory();
+    let placement = match build_core(bridge, factory.as_ref()) {
+        Ok(core) => core,
+        Err(error) => {
+            eprintln!("[serve] could not build the placement interpreter ({error}); refusing to serve");
+            std::process::exit(1);
+        }
+    };
     std::thread::Builder::new().name("wa-placement".into()).spawn(move || loop {
         if let Err(error) = placement.call_string("wa_orchestrator_tick", &[]) {
             eprintln!("[placement] {error}");
@@ -1789,6 +1879,7 @@ pub fn run(first: Lua, factory: Box<dyn Fn() -> Lua + Send + Sync>, port: u16, u
     let _ = POOL.set(Pool {
         slots: Mutex::new(Vec::new()),
         factory,
+        bridge,
         ui: ui.clone(),
         queue_depth,
         spawned: AtomicUsize::new(0),
@@ -1816,8 +1907,9 @@ pub fn run(first: Lua, factory: Box<dyn Fn() -> Lua + Send + Sync>, port: u16, u
         }
     }
     eprintln!(
-        "[serve] one run node-thread{} (reads: {warm} warm, up to {ceiling}, spawned on demand)",
-        if warm == 0 { String::new() } else { format!(" + {warm} read node-thread(s)") }
+        "[serve] one run node-thread{} (reads: {warm} warm, up to {ceiling}, spawned on demand) on the {} core",
+        if warm == 0 { String::new() } else { format!(" + {warm} read node-thread(s)") },
+        core_mode.as_str()
     );
     // A node whose ui directory has no index.html serves 404 for every UI route and looks healthy doing
     // it - the failure that made a window show "not found" for an afternoon. It says so at startup instead,
@@ -2188,7 +2280,7 @@ fn unwrap_http(work: Work) -> (TcpStream, Request) {
 /// that work is a conversation with a peer and belongs where the runs are; a read node-thread does nothing but
 /// answer reads.
 fn node_thread_loop(
-    lua: Lua,
+    lua: Core,
     index: usize,
     receiver: std::sync::mpsc::Receiver<Work>,
     agent_ui: PathBuf,
@@ -2498,7 +2590,7 @@ fn relay_conversation(job: &wa_rendezvous::relay_client::RelayJob, verified_node
 /// Verify a peer's signature on the node-thread that owns the relay housekeeping path. The result is the
 /// verified author, carried to whichever node-thread runs the job so the run never re-verifies.
 fn verify_peer_sync(
-    lua: &Lua,
+    lua: &Core,
     headers: &[(String, String)],
     body: &str,
 ) -> Result<(String, String, String), String> {
@@ -2527,7 +2619,7 @@ fn verify_peer_sync(
 /// rather than written to a socket, so the peer gets the events and can replay
 /// them locally.
 fn process_relay_job(
-    lua: &Lua,
+    lua: &Core,
     ui: &std::path::Path,
     job: &wa_rendezvous::relay_client::RelayJob,
     verified: Option<&(String, String, String)>,
@@ -2581,7 +2673,7 @@ fn process_relay_job(
         let node = header_of(&job.headers, "x-wa-node");
         let events = capture_events(|| {
             if let Err(error) = lua.call_string("wa_reply_stream", &[text.as_str(), session.as_str(), node.as_str()]) {
-                crate::host::rollback_if_open(&lua);
+                lua.rollback();
                 write_event(&format!("{{\"type\":\"error\",\"error\":{}}}", json_escape(&error)));
             }
             write_event("{\"type\":\"done\"}");
@@ -2952,7 +3044,7 @@ fn settle_cancelled_run(stream: &mut TcpStream, request: &Request) -> std::io::R
     }
 }
 
-fn handle(lua: &Lua, ui: &std::path::Path, stream: &mut TcpStream, request: &Request) -> std::io::Result<()> {
+fn handle(lua: &Core, ui: &std::path::Path, stream: &mut TcpStream, request: &Request) -> std::io::Result<()> {
     let method = request.method.as_str();
     let path = request.path.as_str();
     let session = request.session.as_str();
@@ -2977,7 +3069,7 @@ fn handle(lua: &Lua, ui: &std::path::Path, stream: &mut TcpStream, request: &Req
             }));
             let node = header_of(&node_headers, "x-wa-node");
             if let Err(error) = lua.call_string("wa_reply_stream", &[text.as_str(), session, node.as_str()]) {
-                crate::host::rollback_if_open(&lua);
+                lua.rollback();
                 write_event(&format!("{{\"type\":\"error\",\"error\":{}}}", json_escape(&error)));
             }
             write_event("{\"type\":\"done\"}");
@@ -3030,7 +3122,7 @@ fn handle(lua: &Lua, ui: &std::path::Path, stream: &mut TcpStream, request: &Req
 /// Every request/response endpoint. Streaming routes return `None` and are
 /// handled by the caller (socket or relay capture).
 fn dispatch(
-    lua: &Lua,
+    lua: &Core,
     ui: &std::path::Path,
     method: &str,
     path: &str,
@@ -3054,7 +3146,7 @@ fn dispatch(
             Err(error) => {
                 // A Lua error can abandon a BEGIN on this interpreter's connection;
                 // close it before answering, or the write lock outlives the request.
-                crate::host::rollback_if_open(&lua);
+                lua.rollback();
                 format!("{{\"error\":{}}}", json_escape(&error))
             }
         }
@@ -3207,12 +3299,12 @@ fn dispatch(
 /// page renders what it is told and the tests assert the route, so both have to answer the same
 /// question. An envelope that cannot be read is a 500, never a silent empty 200: an empty listing is
 /// a normal state of a node, so an unreadable answer that looked like one would hide a broken route.
-fn module_reply(lua: &Lua, id: &str, relative: &str, session: &str) -> Reply {
+fn module_reply(lua: &Core, id: &str, relative: &str, session: &str) -> Reply {
     let answer = match lua.call_string("wa_modules", &["file", id, relative, session]) {
         Ok(answer) => answer,
         Err(error) => {
             // As above: a Lua error can abandon a BEGIN on this interpreter's connection.
-            crate::host::rollback_if_open(&lua);
+            lua.rollback();
             return (500, "application/json; charset=utf-8",
                 format!("{{\"error\":{}}}", json_escape(&error)).into_bytes());
         }

@@ -1125,6 +1125,21 @@ impl CoreInstance<'_> {
     /// Run `script` on this instance, exactly as `--core-component` runs it (same guest, same
     /// bridge, same refusal texts), and report what it cost.
     pub fn run_script(&mut self, script: Script<'_>, args: &[String]) -> wasmtime::Result<RunReport> {
+        let (report, error) = self.run_script_outcome(script, args)?;
+        if let Some(message) = error {
+            eprintln!("lua error: {message}");
+        }
+        Ok(report)
+    }
+
+    /// The same run, with the guest's own failure text handed back instead of printed.
+    ///
+    /// `run_script` is the CLI and benchmark shape (a failed script says so on stderr and reports
+    /// `code: 1`). A caller that answers a request needs the message itself - `serve` on the
+    /// component core turns a raised Lua error into the `Err` half of `call_string` - and a caller
+    /// whose guest *reports* through its exit status must not have every answer logged as a Lua
+    /// error. A trap is still an `Err`: the store cannot serve another run.
+    pub fn run_script_outcome(&mut self, script: Script<'_>, args: &[String]) -> wasmtime::Result<(RunReport, Option<String>)> {
         let pool = self.pool;
         let slot = self.slot.as_mut().ok_or_else(|| wasmtime::Error::msg("core_instance_released: this lease was already released"))?;
         let started = Instant::now();
@@ -1159,23 +1174,28 @@ impl CoreInstance<'_> {
             let mut inner = pool.inner.lock().expect("pool lock");
             inner.runs += 1;
         }
-        let code = match outcome {
-            Ok(Ok(())) => 0,
-            Ok(Err(message)) => {
-                eprintln!("lua error: {message}");
-                1
-            }
+        match outcome {
+            Ok(Ok(())) => Ok((report, None)),
+            Ok(Err(message)) => Ok((RunReport { code: 1, ..report }, Some(message))),
             Err(error) => match error.downcast_ref::<wasmtime_wasi::I32Exit>() {
-                Some(exit) => exit.0,
+                Some(exit) => Ok((RunReport { code: exit.0, ..report }, None)),
                 // A trap leaves the store unusable, so the instance is dropped instead of being
                 // handed to the next caller - and the pool's count of what it created stays true.
                 None => {
                     self.retire();
-                    return Err(error);
+                    Err(error)
                 }
             },
-        };
-        Ok(RunReport { code, ..report })
+        }
+    }
+
+    /// The native interpreter this instance answers its guest's `host.*` calls from.
+    ///
+    /// It is the interpreter that owns the instance's database connection, so a caller that has to
+    /// close a transaction a failed call left open (`host::rollback_if_open`) asks for it here
+    /// rather than opening a second connection to the same WAL file.
+    pub fn native(&self) -> Option<&Lua> {
+        self.slot.as_ref().map(|slot| &slot.store.data().native.0)
     }
 
     /// Drop a leased instance that cannot serve another run (a trapped store) and give its slot back:
