@@ -37,7 +37,7 @@ local stored = keys.set("service_x", secret)
 ok(stored.ok and not stored.replaced, "stored", json.encode(stored))
 ok(not json.encode(stored):find(secret, 1, true), "the answer never carries the value")
 ok(host.read_file(keys.path("service_x")) == secret, "the file holds exactly the value")
--- Mode bits are POSIX: the host sets 0600 under #[cfg(unix)] (secret_file, rust/wa-host/src/host.rs). On
+-- Mode bits are POSIX: the host sets 0600 under #[cfg(unix)] (secret_file, rust/wa-capabilities/src/host.rs). On
 -- Windows the key is protected by the user profile's ACL and MSYS stat reports a synthetic 644, so the
 -- check is Unix-only and says so (wasm_the_first gate, 30/10) - not a silent pass.
 if package.config:sub(1, 1) == "/" then

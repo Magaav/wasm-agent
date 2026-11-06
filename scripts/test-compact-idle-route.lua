@@ -1,7 +1,7 @@
 -- /compact after a main run has settled.
 --
 -- The listener admits /compact node-wide: a queued or running scheduler run is answered
--- before this handler is called (rust/wa-host/src/serve.rs compact_begin). The handler's
+-- before this handler is called (rust/wa-capabilities/src/serve.rs compact_begin). The handler's
 -- own cached `agent` is only the object this node-thread built, and agent.lua leaves the
 -- last run's id on it as that run's identity. Before this test existed, wa_compact treated
 -- that settled id as liveness: after the first chat it returned node_busy forever, so

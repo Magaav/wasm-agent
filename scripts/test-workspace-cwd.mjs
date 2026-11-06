@@ -10,7 +10,7 @@ const post=process.argv[2]==='--post';
 const [binary,out,oldBinary]=process.argv.slice(post?3:2);
 assert(binary&&out&&path.isAbsolute(binary)&&path.isAbsolute(out),'absolute candidate and fresh evidence required');
 const sha=b=>crypto.createHash('sha256').update(b).digest('hex');
-const names=['lua/core/tools.lua','rust/wa-host/src/host.rs','rust/wa-host/src/operations.rs','rust/wa-operation/src/lib.rs','rust/wa-operation/src/index.rs','lua/core/codemode.lua','scripts/test-workspace-cwd.lua','scripts/test-workspace-cwd.mjs'];
+const names=['lua/core/tools.lua','rust/wa-capabilities/src/host.rs','rust/wa-capabilities/src/operations.rs','rust/wa-operation/src/lib.rs','rust/wa-operation/src/index.rs','lua/core/codemode.lua','scripts/test-workspace-cwd.lua','scripts/test-workspace-cwd.mjs'];
 const sources=names.map(name=>({name,sha256:sha(fs.readFileSync(path.join(repo,name)))}));
 const binaryHash=sha(fs.readFileSync(binary));
 if(post){

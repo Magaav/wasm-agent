@@ -436,7 +436,7 @@ function stop() {
 async function main() {
   const bytes = fs.readFileSync(binary);
   report.binary.sha256 = sha256(bytes);
-  const serveHash = sha256(fs.readFileSync(path.join(root, 'rust/wa-host/src/serve.rs')));
+  const serveHash = sha256(fs.readFileSync(path.join(root, 'rust/wa-capabilities/src/serve.rs')));
   const compiledHash = options['compiled-serve-sha256']?.toLowerCase() || null;
   report.source = { serveSha256: serveHash, compiledServeSha256: compiledHash,
     alignment: compiledHash ? (compiledHash === serveHash ? 'caller-attested-match' : 'mismatch') : 'unknown-historical-binary',

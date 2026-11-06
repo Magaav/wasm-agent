@@ -88,7 +88,7 @@ ok(view_lib.tokens(940) == "940" and view_lib.tokens(1200) == "1.2k" and view_li
   "tokens are shown at a size a person reads")
 ok(view_lib.elapsed(200) == "200ms" and view_lib.elapsed(3400) == "3.4s", "a step's duration carries its unit")
 ok(view_lib.duration(9.5) == "9.5s" and view_lib.duration(74) == "1m14s", "a run's duration grows into minutes")
--- The clock's rule, pinned here and again in rust/wa-host/src/host.rs (`ticker_duration`):
+-- The clock's rule, pinned here and again in rust/wa-capabilities/src/host.rs (`ticker_duration`):
 -- the host draws the clock while this process is blocked, so the rule exists on both sides.
 -- The same three values are asserted in both suites, so changing one alone fails a test here
 -- instead of flickering a frame on a screen.

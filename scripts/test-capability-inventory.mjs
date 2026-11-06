@@ -1,4 +1,4 @@
-// The capability inventory has one source (`rust/wa-host/src/capabilities.rs`) and four surfaces.
+// The capability inventory has one source (`rust/wa-capabilities/src/capabilities.rs`) and four surfaces.
 // This proof checks two of them against each other, byte for byte: the CLI (`wa capabilities
 // --json`) and the codemode sandbox (`capabilities()`/`describe()`), both read the registry's own
 // JSON text, so their digests must be equal. Model-free: no provider, no network.
@@ -9,7 +9,7 @@ const repo=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
 const post=process.argv[2]==='--post';const [binary,out]=process.argv.slice(post?3:2);
 assert(binary&&out&&path.isAbsolute(binary)&&path.isAbsolute(out),'usage: <absolute-binary> <fresh-evidence-dir> [--post]');
 const sha=b=>crypto.createHash('sha256').update(b).digest('hex');
-const names=['rust/wa-host/src/capabilities.rs','rust/wa-host/src/main.rs','rust/wa-host/src/serve.rs','lua/core/capability_inventory.lua','lua/core/codemode.lua','lua/core/init.lua','docs/HOST.md','scripts/test-capability-inventory.lua','scripts/test-capability-inventory.mjs'];
+const names=['rust/wa-capabilities/src/capabilities.rs','rust/wa-host/src/main.rs','rust/wa-capabilities/src/serve.rs','lua/core/capability_inventory.lua','lua/core/codemode.lua','lua/core/init.lua','docs/HOST.md','scripts/test-capability-inventory.lua','scripts/test-capability-inventory.mjs'];
 const sources=names.map(name=>({name,sha256:sha(fs.readFileSync(path.join(repo,name)))}));
 if(post){const r=JSON.parse(fs.readFileSync(out+'/receipt.json'));assert.equal(r.ok,true);assert.equal(sha(fs.readFileSync(binary)),r.binary_sha256);assert.deepEqual(r.sources,sources);for(const f of r.files)assert.equal(sha(fs.readFileSync(out+'/'+f.name)),f.sha256,f.name);console.log(JSON.stringify({ok:true,retained_hashes:true,results:r.results}));process.exit(0);}
 assert(!fs.existsSync(out),'fresh evidence dir required: '+out);fs.mkdirSync(out,{recursive:true});

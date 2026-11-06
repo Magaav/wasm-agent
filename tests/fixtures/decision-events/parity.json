@@ -1,5 +1,5 @@
 {
-  "note": "One tool call, written once in the ordinary OpenAI-compatible dialect (chat.completions SSE chunks) and once as subscription (Responses) events. Both must give the window the same reader-visible decision sequence; only the call id shape may differ (ordinary: the provider's call id; subscription: call_id|item_id). Read by rust/wa-host/src/host.rs (ordinary side) and scripts/test-decision-parity.lua (subscription side), so one shared meaning is pinned from both directions.",
+  "note": "One tool call, written once in the ordinary OpenAI-compatible dialect (chat.completions SSE chunks) and once as subscription (Responses) events. Both must give the window the same reader-visible decision sequence; only the call id shape may differ (ordinary: the provider's call id; subscription: call_id|item_id). Read by rust/wa-capabilities/src/host.rs (ordinary side) and scripts/test-decision-parity.lua (subscription side), so one shared meaning is pinned from both directions.",
   "bounded_preview_chars": 256,
   "truncation_marker": "\u2026 [preview only; complete arguments in result]",
   "expected_reader_semantics": [

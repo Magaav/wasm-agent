@@ -44,7 +44,7 @@ Object.assign(env, {WASM_AGENT_HOME:home, WASM_AGENT_LUA_ROOT:repo, WA_INSTALL_D
   WA_SCRIPT:path.join(repo, 'scripts', script),
   WASM_AGENT_LLM_BASE_URL:'http://127.0.0.1:1', WASM_AGENT_LLM_API_KEY:'fixture-only',
   WASM_AGENT_LLM_MODEL:'fixture', WASM_AGENT_RENDEZVOUS:'', WASM_AGENT_RELAY:'', WASM_AGENT_MANAGED:'0',
-  // The runtime's own ceiling defaults to 2 concurrent children (rust/wa-host/src/subagents.rs:34),
+  // The runtime's own ceiling defaults to 2 concurrent children (rust/wa-capabilities/src/subagents.rs:34),
   // which the fixture's few live runs would saturate; the live node runs with an explicit value
   // (WASM_AGENT_SUBAGENT_CONCURRENCY=4), so the fixture states its own.
   WASM_AGENT_SUBAGENT_CONCURRENCY:'8',

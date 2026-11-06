@@ -28,7 +28,7 @@
 //     CLI is `wa-sentinel job ...` and its claim lane is the sentinel's tick, which is outside
 //     this change's scope - so a `gate` lane kind added there with no runner to consume it
 //     would be dead code.
-//   * The node's durable resource claims (`rust/wa-host/src/resources.rs`,
+//   * The node's durable resource claims (`rust/wa-capabilities/src/resources.rs`,
 //     `lua/core/resources.lua`) have exactly the right *liveness* primitive - an OS-held
 //     SQLite lease, never a PID timeout ("Never use a PID timeout as proof of death") - and
 //     no queue at all: a claim is grant-or-busy in one shot, and resource names and policy are

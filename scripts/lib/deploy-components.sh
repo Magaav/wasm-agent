@@ -29,7 +29,7 @@
 # scripts/test-deploy-components.sh.
 
 # Where this machine's node reads components from. Same expression as
-# `components::component_dir()` in rust/wa-host/src/components.rs: an explicit WA_COMPONENTS_DIR
+# `components::component_dir()` in rust/wa-kernel-runtime/src/components.rs: an explicit WA_COMPONENTS_DIR
 # wins, else the home directory's `.wasm-agent/components`.
 wa_components_dir() {
   if [ -n "${WA_COMPONENTS_DIR:-}" ]; then

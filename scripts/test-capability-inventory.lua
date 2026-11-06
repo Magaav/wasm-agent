@@ -1,6 +1,6 @@
 -- The sandbox half of the capability inventory, over the real QuickJS artifact: `capabilities()` and
 -- `describe(name)` have to answer with the exact registry `wa capabilities --json` prints and
--- `/health` digests, because all three read one list (`rust/wa-host/src/capabilities.rs`).
+-- `/health` digests, because all three read one list (`rust/wa-capabilities/src/capabilities.rs`).
 -- Model-free: no provider is called, and neither global admits an effect.
 local json=dofile('lua/vendor/json.lua')
 local getenv=host.getenv

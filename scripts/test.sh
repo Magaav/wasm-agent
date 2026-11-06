@@ -248,25 +248,25 @@ gate_run node scripts/test-wave-monitor-budget.mjs
 gate_run node scripts/test-parallel-finish.mjs
 # The execution and automation contracts have native, model-free adversarial tests.
 gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-operation -p wa-jobs
-gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-host file_search::tests
+gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-capabilities file_search::tests
 # The line boundaries `host.http_sse` hands over are tested against real recorded SSE bodies (under
 # `tests/fixtures/subscription/`, kept as generic SSE recordings): a reader that re-frames or drops a
 # line fails here. Every filter above names its own module, so this one is named explicitly.
-gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-host sse_line_tests
+gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-capabilities sse_line_tests
 # The OpenAI-compatible stream must show a tool decision while the call is being written. These are
 # the reader's own events, captured from a real loopback SSE body and checked against
 # `tests/fixtures/decision-events/parity.json`.
-gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-host decision_stream
+gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-capabilities decision_stream
 # The ticker's clock is the twin of `cli_view.duration` on the Lua side: the elapsed time of a
 # call that has not finished can only be computed by the host, so both sides pin the same three
 # values and a one-sided change fails here rather than on a screen.
-gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-host ticker_tests
+gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-capabilities ticker_tests
 # The console size is the one number the CLI cannot learn for itself, and the only thing standing
 # between a detached console (which reports 0x0, not failure) and a screen wrapped to nothing.
-gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-host terminal_tests
+gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-capabilities terminal_tests
 # The native editor is the only side that can edit input while Lua is blocked. Its
 # parser, history, multiline viewport and submit/clear behavior are not Lua tests.
-gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-host terminal_editor::tests
+gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-term terminal_editor::tests
 # The graph is a capability the agent navigates its own code with, so its extractor and
 # incremental reindex are part of the contract, not a side project.
 gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-graph
@@ -274,9 +274,9 @@ gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-gr
 # per-component kv through `wa-queue`, `wa-bus` and `wa-state` (docs/QUEUE.md item 1, docs/BUS.md
 # "Retention", docs/STATE.md). It has no wasmtime in it, so it runs here beside the other crates.
 gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-kv
-gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-host graph::tests
+gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-capabilities graph::tests
 # WASI components and service components (docs/COMPONENTS.md, docs/SERVICE-COMPONENTS.md). Three
-# fixtures, one per runner, each with its own end-to-end test in wa-host: `svc-echo-wasip1` (a plain
+# fixtures, one per runner, each with its own end-to-end test in wa-kernel-runtime: `svc-echo-wasip1` (a plain
 # wasip1 core module on the raw wa_sock/wa_ctl imports), `svc-echo-v1` (a wa:kernel@0.1 component,
 # the compat path) and `svc-echo` (a wa:kernel@0.2 component, WASI 0.3 native async). A fixture that
 # did not build turns its test into a skip that says so; it never passes by absence.
@@ -294,7 +294,12 @@ fi
 # engine's checks in the wa:kernel host calls, the telemetry recording points and the bounded
 # stores' quotas, each with unit tests of its own. Both runners are covered: the wa:kernel@0.1
 # compat path (service_components.rs) and the wa:kernel@0.2 native-async path (service_components_v2.rs).
-gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-host -- components::tests services::tests capabilities::tests node_policy::tests node_telemetry::tests store::tests service_components::tests service_components_v2::tests state_host::tests bus_host::tests queue_host::tests
+# Three crates now hold these, so the filters are split: the runner and its providers
+# (wa-kernel-runtime), the policy and its stores (wa-governance), the registry and the capability
+# surface (wa-capabilities). A filter left on the binary would match nothing and pass by absence.
+gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-kernel-runtime -- components::tests services::tests service_components::tests service_components_v2::tests state_host::tests bus_host::tests queue_host::tests
+gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-governance -- node_policy::tests node_telemetry::tests store::tests
+gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-capabilities -- capabilities::tests
 # Run the serve-level invariants, each a measured regression: routing by session (a wake carries its
 # conversation in the body's `thread`, not the auth header) and the UI version tracking content rather
 # than mtime (a `cp -f` of identical files must not force every open page to reload).
@@ -313,15 +318,15 @@ rm -rf "$GOVERNANCE_HOME"
 # The shipped default policy and its install (docs/GRANT-POLICY.md, "The shipped default"): the file
 # parses, an operator's policy.json is never overwritten, a missing one is installed once, and a
 # component the file does not name is named rather than discovered as a refused write later. Hermetic:
-# scratch directories, no cargo, no network. `cargo test -p wa-host node_policy::tests` above is what
+# scratch directories, no cargo, no network. `cargo test -p wa-governance node_policy::tests` above is what
 # proves the default keeps the components of this tree working.
 gate_run bash scripts/test-install-default-policy.sh
-gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-host serve::
-gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-host subagents::
+gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-capabilities serve::
+gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-capabilities subagents::
 # What an operation says about itself when its bound kills it: the measured phases, and never a
 # cause it cannot know. A pure function of the operation record, so it is tested as one - the
 # sentence it replaced was quoted onward as a diagnosis of a read-only `grep`.
-gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-host deadline_note_tests
+gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-capabilities deadline_note_tests
 # The named-instance lifecycle, against two real co-located nodes: separate homes, keys, databases
 # and ports; a refused wrong listener; and a stop/restart of one that cannot reach the other. No
 # model and no network, so it belongs in the hermetic gate rather than the on-demand guest e2e.
@@ -352,7 +357,7 @@ BIN=rust/target/release/wa
 # --release like every other wa-host test here: this was the gate's only debug-profile build of the main
 # workspace, so a cold gate compiled the whole dependency tree (wasmtime, cranelift, ...) a second time
 # for one test module. resources::tests has no debug_assertions dependency (04/11).
-gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-host resources::tests
+gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-capabilities resources::tests
 run_proof_fixture nativeTarget 29 node scripts/test-native-target-resource.cjs "$BIN"
 run_proof_fixture resourceClaims 47 node scripts/test-resource-claims.cjs "$BIN"
 run_proof_fixture nativeAlias 12 node scripts/test-native-target-alias.cjs "$BIN"
@@ -605,7 +610,7 @@ rm -f "$DB.client.lua"
 # The three states a control failure can be in are three different sentences with
 # three different remedies, and getting them the same way round is a unit test
 # rather than a guess.
-gate_run cargo test --release --offline --manifest-path rust/Cargo.toml --bin wa client_diagnosis >/dev/null
+gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-capabilities client_diagnosis >/dev/null
 echo "client diagnosis ok"
 # And what the agent is *told* about the tool, since that is what decides whether
 # it reaches for `status` after a failure or guesses at `cdp` again.

@@ -67,8 +67,8 @@ try{
   assert.ok(proof.cleanup.fixture_home_removed&&proof.cleanup.ownedPids.every(p=>p.exited&&p.job?.drained&&p.job.accounting.active_processes===0),'mutant process/Job drain');
   assert.ok(path.resolve(stage).startsWith(path.resolve(os.tmpdir())+path.sep)&&path.basename(stage).startsWith('wa-native-mutant-'));fs.rmSync(stage,{recursive:true,force:true});
  }
- mutateRust('native-owner-bypass','rust/wa-host/src/subagents.rs','if owner != task.owner_user {','if false && owner != task.owner_user {',process.execPath,['scripts/test-native-child-browser.cjs',binary],'native refuses foreign owner before evidence');
- mutateRust('native-checkpoint-replay','rust/wa-host/src/subagents/journal.rs','let start = if archive { after } else { after.max(checkpoint) };','let start = after;',
+ mutateRust('native-owner-bypass','rust/wa-capabilities/src/subagents.rs','if owner != task.owner_user {','if false && owner != task.owner_user {',process.execPath,['scripts/test-native-child-browser.cjs',binary],'native refuses foreign owner before evidence');
+ mutateRust('native-checkpoint-replay','rust/wa-capabilities/src/subagents/journal.rs','let start = if archive { after } else { after.max(checkpoint) };','let start = after;',
   'cargo',['test','--offline','--manifest-path','rust/Cargo.toml','-p','wa-host','--target-dir',target,'subagents::journal::tests::indexed_pages_preserve_raw_content_and_checkpoint_after_reopen','--','--test-threads=2'],'indexed_pages_preserve_raw_content_and_checkpoint_after_reopen ... FAILED');
  report.restored=true;
 }finally{build();fs.writeFileSync(path.join(evidence,'report.json'),JSON.stringify(report,null,2)+'\n');console.log('mutation evidence: '+path.join(evidence,'report.json'));}

@@ -1,7 +1,7 @@
 # The build's progress, as the one file a `wa chat` draws as a row above its input (29/10).
 #
 # Sourced by deploy.sh. Writes `$WASM_AGENT_DATA/build-status.json` (else `<home>/.wasm-agent`), atomically,
-# in the format rust/wa-host/src/build_status.rs renders:
+# in the format rust/wa-term/src/build_status.rs renders:
 #   {"state":"building|installed|failed","phase":"preflight|provisioning|fetching|compiling|proving|installing|done|...",
 #    "done":n,"total":n,"crate":"..","commit":"sha12","started_at":epoch,"at":epoch}
 # On `installed`, `crate` is the elapsed time ("41s"). `total` is the lockfiles' package count, an upper bound:

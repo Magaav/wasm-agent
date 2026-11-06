@@ -9,7 +9,7 @@ const repo=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
 const post=process.argv[2]==='--post';const [binary,out,assets]=process.argv.slice(post?3:2);
 assert(binary&&out&&path.isAbsolute(binary)&&path.isAbsolute(out),'absolute binary/fresh evidence required');
 const sha=b=>crypto.createHash('sha256').update(b).digest('hex');
-const sourceNames=['lua/core/codemode.lua','lua/core/tools.lua','lua/core/envelope.lua','rust/wa-host/src/quickjs.rs','rust/wa-host/src/main.rs','rust/wa-host/build.rs','scripts/test-codemode-native.lua','scripts/test-codemode-native.mjs'];
+const sourceNames=['lua/core/codemode.lua','lua/core/tools.lua','lua/core/envelope.lua','rust/wa-capabilities/src/quickjs.rs','rust/wa-host/src/main.rs','rust/wa-host/build.rs','scripts/test-codemode-native.lua','scripts/test-codemode-native.mjs'];
 const sources=sourceNames.map(name=>({name,sha256:sha(fs.readFileSync(path.join(repo,name)))}));
 if(post){const receipt=JSON.parse(fs.readFileSync(path.join(out,'receipt.json')));assert(receipt.ok);for(const file of receipt.files)assert(sha(fs.readFileSync(path.join(out,file.name)))===file.sha256,'retained proof drift');assert(sha(fs.readFileSync(binary))===receipt.binary_sha256);assert.deepEqual(sources,receipt.sources,'tested source/fixture drift');console.log(JSON.stringify({ok:true,checks:receipt.results.reduce((n,r)=>n+r.checks,0),retained_hashes:true}));}
 else{

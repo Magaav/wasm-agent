@@ -1,7 +1,7 @@
 -- Node governance surfaces (docs/GRANT-POLICY.md, docs/TELEMETRY.md): the two read-only capabilities
 -- the host now answers from the libraries it enforces, and the bounded stores those write into. No
 -- component runs here, so this is the surfaces and their wiring, not the enforcement paths (those are
--- unit-tested in rust/wa-host/src/node_policy.rs and service_components.rs).
+-- unit-tested in rust/wa-governance/src/node_policy.rs and service_components.rs).
 --
 -- Two cases, because a policy file's PRESENCE is what turns the policy layer on and one process can
 -- only load it once (`scripts/test.sh` runs each case in its own scratch home):

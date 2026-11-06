@@ -8,7 +8,7 @@ const post=process.argv[2]==='--post',args=process.argv.slice(post?3:2),repo=pat
 assert(args[0]&&args[1],'candidate and fresh evidence required');
 const binary=path.resolve(args[0]),out=path.resolve(args[1]),baseline=args[2]&&path.resolve(args[2]);
 const hash=p=>crypto.createHash('sha256').update(fs.readFileSync(p)).digest('hex');
-const sources=()=>Object.fromEntries(['rust/wa-host/src/serve.rs','scripts/test-read-admission.cjs'].map(p=>[p,hash(path.join(repo,p))]));
+const sources=()=>Object.fromEntries(['rust/wa-capabilities/src/serve.rs','scripts/test-read-admission.cjs'].map(p=>[p,hash(path.join(repo,p))]));
 if(post){const r=JSON.parse(fs.readFileSync(out+'/receipt.json'));assert(r.ok&&r.skipped===0);assert.deepEqual(r.sources,sources());assert.equal(r.binary_sha256,hash(binary));if(baseline)assert.equal(r.baseline_sha256,hash(baseline));for(const [p,h] of Object.entries(r.logs))assert.equal(hash(out+'/'+p),h);console.log(JSON.stringify({ok:true,checks:r.checks,skipped:0,evidence_verified:true}));process.exit(0);}
 assert(!fs.existsSync(out),'fresh evidence required');fs.mkdirSync(out,{recursive:true});
 const report={ok:false,checks:[],skipped:0,sources:sources(),binary_sha256:hash(binary),...(baseline?{baseline_sha256:hash(baseline)}:{})};

@@ -71,7 +71,7 @@ if(process.argv[2]==='effect'){
     const after=new DatabaseSync(path.join(crash,'.wasm-agent/resources/claims.sqlite'),{readOnly:true});
     assert.deepEqual(after.prepare('SELECT * FROM claims WHERE key=?').get(receipt.key),original,'crash/restart preserves durable owner');after.close();
     const report={schema:1,kind:'private-native-target-capability-tests',binary,binary_sha256:hash(fs.readFileSync(binary)),
-      source_sha256:hash(fs.readFileSync(source)),resources_sha256:hash(fs.readFileSync(path.join(repo,'rust/wa-host/src/resources.rs'))),
+      source_sha256:hash(fs.readFileSync(source)),resources_sha256:hash(fs.readFileSync(path.join(repo,'rust/wa-capabilities/src/resources.rs'))),
       lua_source_sha256:hash(fs.readFileSync(path.join(repo,'scripts/test-native-target-resource.lua'))),checks:checks+3,skipped:0,
       positive,crash,production_touched:false,independent_review:'required after delivery'};
     fs.writeFileSync(path.join(evidence,'report.json'),JSON.stringify(report,null,2)+'\n');

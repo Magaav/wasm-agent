@@ -6,7 +6,7 @@ fn main() {
     let manifest = std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
     let lua = std::env::var("LUA_SRC")
         .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| manifest.join("../../wa-host/vendor/lua"));
+        .unwrap_or_else(|_| manifest.join("../../wa-host-support/vendor/lua"));
     let sysroot = std::env::var("WASI_SYSROOT").expect("WASI_SYSROOT = <wasi-sdk>/share/wasi-sysroot");
     let mut build = cc::Build::new();
     build.include(&lua).warnings(false).opt_level(2)

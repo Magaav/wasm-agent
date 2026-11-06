@@ -4,7 +4,7 @@
 # The defect this pins: `WASM_AGENT_ALLOW_MAIN=1` was the only way past the guard, and the committing
 # process types it - so the guard's real question ("is this the process that owns integration?") was
 # answered by the process itself, and a child could answer yes. The authority is now the host's answer
-# about the process: `WASM_AGENT_PROVENANCE`, exported by rust/wa-host/src/operations.rs from the
+# about the process: `WASM_AGENT_PROVENANCE`, exported by rust/wa-capabilities/src/operations.rs from the
 # thread's own task context (`orchestrator` = a run of a session, `child` = a bounded subagent task).
 # Hence the two cases that matter most: the orchestrator does not need the old flag, and a child
 # exporting it is still refused.

@@ -2,7 +2,7 @@
 # The rebuild's progress file and its requirement check (scripts/lib/build-status.sh, build-requirements.sh).
 #
 # What is pinned, and why (29/10). The sentinel owns the one rebuild path, so the progress a `wa chat` draws
-# (rust/wa-host/src/build_status.rs) is written by deploy.sh, not by an operator's script: the format must be
+# (rust/wa-term/src/build_status.rs) is written by deploy.sh, not by an operator's script: the format must be
 # the renderer's, the follower must count cargo's `Compiling` lines without forking per line and die with its
 # deploy, and a failed status write must never fail a deploy. The requirement check must be stats, not runs:
 # it is on every deploy's path, so it is timed here, and a missing or too-old toolchain must be NAMED - by

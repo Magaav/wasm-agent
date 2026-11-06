@@ -12,7 +12,7 @@
 #
 # Three things are allowed, and each says why:
 #   * a line carrying `naming-check: allow` - used where a name must stay (see the marker in
-#     `rust/wa-host/src/host.rs`);
+#     `rust/wa-capabilities/src/host.rs`);
 #   * `lua/core/memory.lua`'s `migrate_shape()`: a migration has to name what it moves. Those strings are
 #     the *matcher* for rows written before this change, and changing them would stop matching them;
 #   * `tests/naming-migration.lua`, which builds the old shape on purpose so it can be migrated, and

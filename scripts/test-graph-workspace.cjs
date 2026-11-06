@@ -12,7 +12,7 @@ if(post){
 }
 assert(!fs.existsSync(out),'fresh evidence directory required');fs.mkdirSync(out,{recursive:true});
 const env=Object.fromEntries(Object.entries(process.env).filter(([key])=>!/^(WA_|WASM_AGENT_|OPENAI_|OPENCODE_|ANTHROPIC_|PI_)/i.test(key)));
-const sources=Object.fromEntries(['lua/core/tools.lua','lua/core/graph.lua','lua/core/patch_audit.lua','scripts/test-graph-workspace.lua','rust/wa-host/src/graph.rs','rust/wa-graph/src/audit.rs'].map(name=>[name,sha(path.join(repo,name))]));
+const sources=Object.fromEntries(['lua/core/tools.lua','lua/core/graph.lua','lua/core/patch_audit.lua','scripts/test-graph-workspace.lua','rust/wa-capabilities/src/graph.rs','rust/wa-graph/src/audit.rs'].map(name=>[name,sha(path.join(repo,name))]));
 const home=path.join(out,'home');fs.mkdirSync(home);
 Object.assign(env,{WASM_AGENT_HOME:home,WASM_AGENT_LUA_ROOT:repo,WA_SCRIPT:path.join(repo,'scripts/test-graph-workspace.lua'),
  WA_GRAPH_ROOT:path.join(home,'.wasm-agent/graph-workspace-fixture/canonical'),WA_GRAPH_WATCH:'0',WASM_AGENT_RENDEZVOUS:'',WASM_AGENT_RELAY:'',WASM_AGENT_MANAGED:'0',

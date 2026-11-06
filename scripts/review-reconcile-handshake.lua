@@ -26,7 +26,7 @@ local function runtime_count(ctx)
   local listed = subagents.control({ action = "list" }, ctx)
   return tonumber(listed.count) or #(listed.subagents or {})
 end
--- `view` deliberately does not expose the idempotency key (rust/wa-host/src/subagents.rs:239), so the
+-- `view` deliberately does not expose the idempotency key (rust/wa-capabilities/src/subagents.rs:239), so the
 -- runtime's own answer about a key is the only way to ask "how many runs does this key own".
 local function owns_run(ctx, key)
   local answer = subagents.control({ action = "resolve", idempotency_key = key }, ctx)

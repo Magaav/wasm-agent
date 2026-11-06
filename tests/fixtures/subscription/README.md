@@ -4,7 +4,7 @@ Two real SSE streams, recorded from `https://chatgpt.com/backend-api/codex/respo
 **this repository's own wire** (`lua/core/subscription_wire.lua` over `host.http_sse`), with Node and
 Pi absent. They are the endpoint's bytes, not a reconstruction, and they are what
 `scripts/test-subscription-wire.lua` (the offline parser test) and the `sse_line_tests` in
-`rust/wa-host/src/host.rs` (the line reader) are tested against.
+`rust/wa-capabilities/src/host.rs` (the line reader) are tested against.
 
 | file | what it is | shape |
 | --- | --- | --- |
