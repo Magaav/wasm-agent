@@ -25,8 +25,15 @@ inside it, under keys a component can neither read nor write (`__wa/` is host-ow
 The component sees its own keys through a view that hides these and **refuses** writes to them
 (`wa-state::UserView`). That is deliberate: a component that could write `__wa/meta/schema` could
 skip a migration, and a component that could write the journal could make the next upgrade replay
-someone else's writes. The host broker must enforce the same refusal for `wa:kernel/kv` (today the
-library enforces it; the WIT host does not yet).
+someone else's writes. `wa:kernel/kv` enforces the same rule on both runners (0.1 polling and 0.2
+async) through one wrapper, `rust/wa-kernel-runtime/src/guest_kv.rs`:
+
+| call | a key or prefix under `__wa/` |
+| --- | --- |
+| `get` | `ok(none)` - the key does not exist for this component |
+| `set`, `delete` | `err(refused("reserved_prefix"))`, and the key is untouched |
+| `delete-prefix` | refused when the prefix *is* reserved; a prefix that merely *covers* `__wa/` (`""`, `"_"`) deletes only the component's own keys under it and returns how many |
+| `scan` | skipped, and the page is filled from further pages so a guest never sees a short page (an empty page means the end to the guest) |
 
 ## Schema version and component version are different numbers
 
@@ -72,7 +79,7 @@ default feature it stops at `zstd-sys` wanting clang.)*
 A step is a pure function over a batch of the component's keys (`&mut Batch`), never over the store
 directly, and it must be **deterministic**: no clock, no randomness, no network. Replay reads the
 journaled values, but a crash *before* the journal is written means the step is recomputed from the
-previous version — a step that ran at a different time must not produce a different shape. It computes the whole next batch in memory; the engine diffs old and new, journals the
+previous version ï¿½ a step that ran at a different time must not produce a different shape. It computes the whole next batch in memory; the engine diffs old and new, journals the
 full values it is about to write, then applies them. That is what makes replay exact even for a step
 that is not idempotent (append to a value, increment a counter):
 
@@ -202,9 +209,9 @@ What is built, and how it differs from the sketch above:
 - **Still open:** step 2's WIT-version check is still the loader's compile step (a missing import
   fails at instantiation, after the migration); step 5's `lifecycle.report(ready)` wait is the
   supervisor's, not the install's, so an instance that migrates and then never becomes ready is
-  caught by the supervisor's restart path rather than by refusing the install; and the `__wa/`
-  refusal in the *WIT* kv host (the library's `UserView` refuses it; the WIT host does not yet
-  filter the reserved prefix).
+  caught by the supervisor's restart path rather than by refusing the install. (The `__wa/` refusal
+  in the *WIT* kv host used to be open; it is closed in both runners now - see "One namespace, one
+  owner, one version" above and `docs/COMPONENTS.md`.)
 
 ## Verifying a change
 

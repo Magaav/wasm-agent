@@ -7,6 +7,8 @@
 //! - `dev`: the dev-loop hot swap (`wa dev`): a new instance beside the old one, health first, then
 //!   the old one stops. Not a registry - it lives in the caller's slot, beside the supervisor.
 //! - `service_io`: the host side of the socket, http and kv a service imports.
+//! - `guest_kv`: the `__wa/` guard both `wa:kernel/kv` runners put in front of a component's own
+//!   store, so a component can neither see nor write the host's meta keys (`docs/STATE.md`).
 //! - `service_components::service_stt` (declared there with `#[path]`, as it was before the split): the
 //!   speech bridge both runners share. It is deliberately NOT a module of this crate root - declaring
 //!   the same file twice compiles it twice, which would double its tests.
@@ -23,6 +25,7 @@
 pub mod bus_host;
 pub mod components;
 pub mod dev;
+pub mod guest_kv;
 pub mod queue_host;
 pub mod service_components;
 pub mod service_components_v2;

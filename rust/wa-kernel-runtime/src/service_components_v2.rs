@@ -25,6 +25,7 @@
 //! two different policies. Every answered host call records one telemetry observation
 //! (`node_telemetry::HostCallGuard`), attributed to the component by name.
 use crate::components::{Grant, Installed};
+use crate::guest_kv::{self, GuestKv};
 use wa_governance::node_telemetry::HostCallGuard;
 use crate::service_components::{authority_target, gate_verdict, target_of, Verdict};
 use wa_grant_policy::Decision;
@@ -102,7 +103,7 @@ pub struct State {
     limits: StoreLimits,
     net: Vec<String>,
     shared: Arc<Shared>,
-    kv: KvStore,
+    kv: GuestKv,
     log: Option<std::fs::File>,
     secrets: std::collections::BTreeMap<String, String>,
     /// Manifest `capabilities.stt == true`.
@@ -125,9 +126,10 @@ impl HasData for State {
     type Data<'a> = &'a mut State;
 }
 
-/// The shared store's errors as the kernel's (identical to the 0.1 runner).
+/// The shared store's errors as the kernel's (identical to the 0.1 runner): an undeclared namespace
+/// and a write aimed at the host's `__wa/` keys are refusals, anything else is a failure.
 fn kv_error(error: String) -> KError {
-    if error == "storage not declared" {
+    if error == "storage not declared" || error == crate::guest_kv::RESERVED {
         KError::Refused(error)
     } else {
         KError::Failed(error)
@@ -172,6 +174,11 @@ impl wa::kernel::kv::HostWithStore<State> for State {
         let mut call = HostCallGuard::start(&name, "kv.get");
         let target = target_of(&key);
         let out = (|| {
+            // A host-owned key is answered by the guard and never becomes a policy target: an
+            // operator's rule cannot grant what the namespace does not own (`docs/STATE.md`).
+            if guest_kv::is_reserved(&key) {
+                return Ok(None);
+            }
             gate(&name, "kv.read", Some(&target))?;
             accessor.with(|mut access| access.get().kv.get(key).map_err(kv_error))
         })();
@@ -183,6 +190,9 @@ impl wa::kernel::kv::HostWithStore<State> for State {
         let mut call = HostCallGuard::start(&name, "kv.set");
         let target = target_of(&key);
         let out = (|| {
+            if guest_kv::is_reserved(&key) {
+                return Err(KError::Refused(guest_kv::RESERVED.to_string()));
+            }
             // A write is a shadow copy of state: sensitive by default, so a node with a policy file
             // and no rule for it refuses the write with `no_policy` (a node with no policy file
             // runs in manifest mode, and the manifest grant is the only gate).
@@ -197,6 +207,9 @@ impl wa::kernel::kv::HostWithStore<State> for State {
         let mut call = HostCallGuard::start(&name, "kv.delete");
         let target = target_of(&key);
         let out = (|| {
+            if guest_kv::is_reserved(&key) {
+                return Err(KError::Refused(guest_kv::RESERVED.to_string()));
+            }
             gate(&name, "kv.write", Some(&target))?;
             accessor.with(|mut access| access.get().kv.delete(key).map_err(kv_error))
         })();
@@ -208,6 +221,11 @@ impl wa::kernel::kv::HostWithStore<State> for State {
         let mut call = HostCallGuard::start(&name, "kv.delete_prefix");
         let target = target_of(&prefix);
         let out = (|| {
+            // `__wa/` and below refuses; a prefix that merely covers it (`""`) is charged and then
+            // filtered by the guard, so a full wipe never takes the host's keys.
+            if guest_kv::is_reserved(&prefix) {
+                return Err(KError::Refused(guest_kv::RESERVED.to_string()));
+            }
             gate(&name, "kv.write", Some(&target))?;
             accessor.with(|mut access| access.get().kv.delete_prefix(prefix).map_err(kv_error))
         })();
@@ -219,6 +237,11 @@ impl wa::kernel::kv::HostWithStore<State> for State {
         let mut call = HostCallGuard::start(&name, "kv.scan");
         let target = target_of(&prefix);
         let out = (|| {
+            // A scan of a host-owned prefix is an empty page, not a refusal, so the empty prefix
+            // stays a scan of the guest's own data (`wit/kernel/kernel.wit`).
+            if guest_kv::is_reserved(&prefix) {
+                return Ok(Vec::new());
+            }
             gate(&name, "kv.read", Some(&target))?;
             accessor.with(|mut access| {
                 let rows = access.get().kv.scan(prefix, cursor, limit).map_err(kv_error)?;
@@ -728,7 +751,7 @@ pub fn run_once(installed: &Installed, grant: &Grant, component: &Component, sha
         limits: StoreLimitsBuilder::new().memory_size((memory_mb as usize) << 20).instances(64).build(),
         net: grant.net.clone(),
         shared: shared.clone(),
-        kv: KvStore::new(storage.then(|| crate::components::component_dir().join(format!("{}.state", installed.name)).join("kv.sqlite"))),
+        kv: GuestKv::new(KvStore::new(storage.then(|| crate::components::component_dir().join(format!("{}.state", installed.name)).join("kv.sqlite")))),
         log: Some(log_file),
         secrets,
         stt,
@@ -981,7 +1004,7 @@ mod tests {
             limits: StoreLimitsBuilder::new().memory_size(256 << 20).build(),
             net: Vec::new(),
             shared: Arc::new(Shared::default()),
-            kv: KvStore::new(None),
+            kv: GuestKv::new(KvStore::new(None)),
             log: None,
             secrets: Default::default(),
             stt: false,

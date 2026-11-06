@@ -13,6 +13,7 @@
 //! Every answered function also records one telemetry observation
 //! (`node_telemetry::HostCallGuard`): the latency of the host call, its outcome, a sampled span.
 use crate::components::{Grant, Installed};
+use crate::guest_kv::{self, GuestKv};
 use wa_governance::node_telemetry::HostCallGuard;
 use wa_grant_policy::Decision;
 use crate::service_io::{http_start, url_authority, HttpState, Kv as KvStore, WsConn, AGAIN, CLOSED};
@@ -61,7 +62,9 @@ pub struct State {
     limits: StoreLimits,
     net: Vec<String>,
     shared: Arc<Shared>,
-    kv: KvStore,
+    /// The component's own kv behind the `__wa/` guard (`guest_kv`): the host's meta keys in this
+    /// same store are not the component's to read or write (`docs/STATE.md`).
+    kv: GuestKv,
     log: Option<std::fs::File>,
     secrets: std::collections::BTreeMap<String, String>,
     /// Manifest `capabilities.stt == true`.
@@ -78,10 +81,11 @@ impl WasiView for State {
     }
 }
 
-/// The shared store's errors as the kernel's: an undeclared namespace is a refusal (as before),
-/// anything else the store reports is a failure.
+/// The shared store's errors as the kernel's: an undeclared namespace and a write aimed at the
+/// host's `__wa/` keys are refusals (the second carries [`crate::guest_kv::RESERVED`]), anything
+/// else the store reports is a failure.
 fn kv_error(error: String) -> KError {
-    if error == "storage not declared" {
+    if error == "storage not declared" || error == crate::guest_kv::RESERVED {
         KError::Refused(error)
     } else {
         KError::Failed(error)
@@ -304,6 +308,11 @@ impl wa::kernel::kv::Host for State {
         let mut call = HostCallGuard::start(&self.name, "kv.get");
         let target = target_of(&key);
         let out = (|| {
+            // A host-owned key is answered by the guard and never becomes a policy target: an
+            // operator's rule cannot grant what the namespace does not own (`docs/STATE.md`).
+            if guest_kv::is_reserved(&key) {
+                return Ok(None);
+            }
             gate(&self.name, "kv.read", Some(&target))?;
             self.kv.get(key).map_err(kv_error)
         })();
@@ -314,6 +323,9 @@ impl wa::kernel::kv::Host for State {
         let mut call = HostCallGuard::start(&self.name, "kv.set");
         let target = target_of(&key);
         let out = (|| {
+            if guest_kv::is_reserved(&key) {
+                return Err(KError::Refused(guest_kv::RESERVED.to_string()));
+            }
             // The component's own namespace, but a write is a shadow copy of state: sensitive by
             // default, so a node with a policy file and no rule for it refuses the write with
             // `no_policy` (a node with no policy file runs in manifest mode).
@@ -327,6 +339,9 @@ impl wa::kernel::kv::Host for State {
         let mut call = HostCallGuard::start(&self.name, "kv.delete");
         let target = target_of(&key);
         let out = (|| {
+            if guest_kv::is_reserved(&key) {
+                return Err(KError::Refused(guest_kv::RESERVED.to_string()));
+            }
             gate(&self.name, "kv.write", Some(&target))?;
             self.kv.delete(key).map_err(kv_error)
         })();
@@ -337,6 +352,11 @@ impl wa::kernel::kv::Host for State {
         let mut call = HostCallGuard::start(&self.name, "kv.delete_prefix");
         let target = target_of(&prefix);
         let out = (|| {
+            // `__wa/` and below refuses; a prefix that merely covers it (`""`) is charged and then
+            // filtered by the guard, so a full wipe never takes the host's keys.
+            if guest_kv::is_reserved(&prefix) {
+                return Err(KError::Refused(guest_kv::RESERVED.to_string()));
+            }
             gate(&self.name, "kv.write", Some(&target))?;
             self.kv.delete_prefix(prefix).map_err(kv_error)
         })();
@@ -347,6 +367,11 @@ impl wa::kernel::kv::Host for State {
         let mut call = HostCallGuard::start(&self.name, "kv.scan");
         let target = target_of(&prefix);
         let out = (|| {
+            // A scan of a host-owned prefix is an empty page, not a refusal, so the empty prefix
+            // stays a scan of the guest's own data (`wit/kernel/kernel.wit`).
+            if guest_kv::is_reserved(&prefix) {
+                return Ok(Vec::new());
+            }
             gate(&self.name, "kv.read", Some(&target))?;
             let rows = self.kv.scan(prefix, cursor, limit).map_err(kv_error)?;
             Ok(rows.into_iter().map(|(key, value)| wa::kernel::kv::Entry { key, value }).collect())
@@ -435,7 +460,7 @@ pub fn run_once(installed: &Installed, grant: &Grant, component: &Component, sha
         limits: StoreLimitsBuilder::new().memory_size((memory_mb as usize) << 20).instances(64).build(),
         net: grant.net.clone(),
         shared: shared.clone(),
-        kv: KvStore::new(storage.then(|| crate::components::component_dir().join(format!("{}.state", installed.name)).join("kv.sqlite"))),
+        kv: GuestKv::new(KvStore::new(storage.then(|| crate::components::component_dir().join(format!("{}.state", installed.name)).join("kv.sqlite")))),
         log: Some(log_file),
         secrets,
         stt,
@@ -595,5 +620,74 @@ mod tests {
     fn a_kv_key_is_a_target_without_being_rewritten() {
         assert_eq!(target_of(b"session/abc"), "session/abc");
         assert_eq!(target_of(&[0xff, 0xfe]), "\u{fffd}\u{fffd}");
+    }
+
+    /// A `State` whose kv is one file in `dir`: the same file a running component gets, with none of
+    /// the engine or the WASI context a call would need.
+    fn kv_state(dir: &std::path::Path, name: &str) -> State {
+        State {
+            wasi: WasiCtxBuilder::new().build(),
+            table: ResourceTable::new(),
+            limits: StoreLimitsBuilder::new().build(),
+            net: Vec::new(),
+            shared: Arc::new(Shared::default()),
+            kv: GuestKv::new(KvStore::new(Some(dir.join("kv.sqlite")))),
+            log: None,
+            secrets: Default::default(),
+            stt: false,
+            name: name.into(),
+        }
+    }
+
+    /// The host's `__wa/` meta keys live in the component's own kv file, and the 0.1 contract must
+    /// not hand them out: a read is not-found, a scan skips them (and still fills its page), and
+    /// every write aimed at them is refused with the stable word (`docs/STATE.md`, "One namespace,
+    /// one owner, one version"). The host still writes and reads them - `state_host` never comes
+    /// through here.
+    #[test]
+    fn the_v1_kv_contract_hides_the_host_owned_meta_keys() {
+        let dir = std::env::temp_dir().join(format!("wa-v1-kv-guard-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut state = kv_state(&dir, "svc-echo");
+        // What a host install (wa-state's migrator) leaves in the namespace, beside one guest key.
+        state.kv.store_mut().set(b"__wa/meta/schema".to_vec(), b"v2".to_vec()).unwrap();
+        state.kv.store_mut().set(b"__wa/meta/component".to_vec(), b"svc-echo".to_vec()).unwrap();
+        state.kv.store_mut().set(b"ses/a".to_vec(), b"A".to_vec()).unwrap();
+
+        // get: a host key is not found, the guest's own key still reads.
+        assert_eq!(wa::kernel::kv::Host::get(&mut state, b"__wa/meta/schema".to_vec()).unwrap(), None);
+        assert_eq!(wa::kernel::kv::Host::get(&mut state, b"ses/a".to_vec()).unwrap(), Some(b"A".to_vec()));
+
+        // set, delete, delete_prefix: refused, with the word a component log can be searched for.
+        let refusals = [
+            wa::kernel::kv::Host::set(&mut state, b"__wa/meta/schema".to_vec(), b"v1".to_vec()).map(|_| ()),
+            wa::kernel::kv::Host::delete(&mut state, b"__wa/meta/component".to_vec()),
+            wa::kernel::kv::Host::delete_prefix(&mut state, b"__wa/".to_vec()).map(|_| ()),
+            wa::kernel::kv::Host::delete_prefix(&mut state, b"__wa/meta".to_vec()).map(|_| ()),
+        ];
+        for out in refusals {
+            match out {
+                Err(KError::Refused(reason)) => assert_eq!(reason, crate::guest_kv::RESERVED),
+                other => panic!("a write aimed at the meta keys must be refused, got {other:?}"),
+            }
+        }
+
+        // scan: no meta key ever, and a page of one still answers with the guest's first key
+        // (`__wa/...` sorts before `ses/...`, so a naive filter would end the scan here).
+        let page = wa::kernel::kv::Host::scan(&mut state, Vec::new(), None, 1).unwrap();
+        assert_eq!(page.len(), 1, "the page is topped up after the reserved keys: {page:?}");
+        assert_eq!(page[0].key, b"ses/a".to_vec());
+        let all = wa::kernel::kv::Host::scan(&mut state, Vec::new(), None, 100).unwrap();
+        assert_eq!(all.iter().map(|e| e.key.clone()).collect::<Vec<_>>(), vec![b"ses/a".to_vec()]);
+        assert!(wa::kernel::kv::Host::scan(&mut state, b"__wa/".to_vec(), None, 10).unwrap().is_empty());
+
+        // The host's keys are untouched by any of it.
+        assert_eq!(state.kv.store_mut().get(b"__wa/meta/schema".to_vec()).unwrap(), Some(b"v2".to_vec()));
+        assert_eq!(
+            state.kv.store_mut().get(b"__wa/meta/component".to_vec()).unwrap(),
+            Some(b"svc-echo".to_vec())
+        );
+        std::fs::remove_dir_all(dir).ok();
     }
 }
