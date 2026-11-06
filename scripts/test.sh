@@ -825,6 +825,11 @@ WA_BIN="$BIN" bash scripts/test-update.sh 8874 | grep "the real sentinel's reque
 # The idle wait before an upgrade is bounded by *lack of progress*, not wall time. A legitimate
 # 40-minute turn must not make every queued upgrade wait, fail, and retry while the node stays busy.
 gate_run bash scripts/test-upgrade-idle.sh | grep 'upgrade idle-wait ok'
+# The watchdog (docs/KERNEL.md, "Watchdog"): its own tests plus the CLI contract the upgrade path depends on,
+# then a scratch install upgraded THROUGH the flag - including the assertion that the default path does not
+# touch the watchdog at all. The fake kernel is `wa-watchdog selftest-kernel`; no real node is involved.
+gate_run bash scripts/test-watchdog.sh | grep 'test-watchdog: ok'
+gate_run bash scripts/test-watchdog-upgrade.sh | grep 'test-watchdog-upgrade: ok'
 # Context budget is per model (provider.budget), and it is NOT the same thing as
 # provider.limits, which fetches the account's rate limits for the UI. Confusing
 # the two silently disabled compaction once: the window came back nil, so
