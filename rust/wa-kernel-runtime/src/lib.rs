@@ -4,6 +4,8 @@
 //! - `services`: the supervisor - install, start, stop, health and logs of long-lived services.
 //! - `service_components` / `service_components_v2`: the two runners, WASI 0.2 (polling) and WASI 0.3
 //!   (`wa:kernel@0.2`, native async with `future`/`stream`), served side by side.
+//! - `dev`: the dev-loop hot swap (`wa dev`): a new instance beside the old one, health first, then
+//!   the old one stops. Not a registry - it lives in the caller's slot, beside the supervisor.
 //! - `service_io`: the host side of the socket, http and kv a service imports.
 //! - `service_components::service_stt` (declared there with `#[path]`, as it was before the split): the
 //!   speech bridge both runners share. It is deliberately NOT a module of this crate root - declaring
@@ -20,6 +22,7 @@
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 pub mod bus_host;
 pub mod components;
+pub mod dev;
 pub mod queue_host;
 pub mod service_components;
 pub mod service_components_v2;

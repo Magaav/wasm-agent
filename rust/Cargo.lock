@@ -1921,6 +1921,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "wa-fake-kernel"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "tokio",
+ "wa-bounded",
+ "wasmtime",
+ "wasmtime-wasi",
+]
+
+[[package]]
 name = "wa-governance"
 version = "0.1.0"
 dependencies = [
@@ -1968,6 +1979,7 @@ dependencies = [
  "serde_json",
  "wa-capabilities",
  "wa-host-support",
+ "wa-kernel-runtime",
  "wa-rendezvous",
 ]
 

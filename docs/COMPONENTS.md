@@ -271,6 +271,17 @@ probed and enabled again: an upgrade is an explicit approval, as for any MCP ser
 Rust's std works on `wasm32-wasip2`, including `std::net::TcpStream` for granted addresses.
 Other languages work if they emit a WASI preview 2 command component.
 
+## Test a component without a node
+
+`rust/wa-fake-kernel` serves `wa:kernel@0.2` in memory, so a service component's tests run under
+`cargo test` against the real `.wasm`: the same runner the node uses, with kv, http, websocket,
+speech, secrets, log and health scripted. An exchange no rule names is refused by name (never an
+empty 200), an ungranted capability is refused as the node refuses it, and a secret's value never
+enters a record. `kernel.record()` / `kernel.save_replay()` / `kernel.replay_from()` are the
+`wa-bounded` record/replay hooks, and `wa dev <component-dir>` runs the edit-build-hot-swap loop
+(new instance healthy, then the old one stops). Design, the refusal rules and the timings are in
+[SERVICE-COMPONENTS.md](SERVICE-COMPONENTS.md), "Iterating on a component".
+
 ## Components so far
 
 | component | what | notes |

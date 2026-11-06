@@ -11,6 +11,8 @@
 use wa_capabilities::{capabilities, client_bridge, core_component, graph, host, plugins, ripgrep, serve, subagents};
 use wa_capabilities::host::Host;
 use rusqlite::Connection;
+// `wa dev` (docs/SERVICE-COMPONENTS.md): build a component crate and swap the running instance.
+mod dev;
 // The floor of the split: the Lua ABI, the host's paths and the shared JSON answer (docs/KERNEL.md).
 use wa_host_support::lua::Lua;
 use wa_host_support::paths::{private_dir, resolve_home};
@@ -208,13 +210,25 @@ fn load_env_file() -> Vec<(String, String)> {
 }
 
 fn main() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    // `wa dev` before anything that touches the node. It builds and runs a component crate from its
+    // own `.wa-dev/` directory, so it needs no database, no graph, no Lua tree, and - since it is a
+    // development loop - no node environment file either: a dev run must not pick up a node's
+    // secrets. It exits on its own when told `--once`; in watch mode it owns the terminal.
+    if args.first().is_some_and(|arg| arg == "dev") {
+        if args.iter().any(|arg| arg == "--help" || arg == "-h") {
+            println!("usage: wa dev <component-dir> [--once] [--config <json>] [--net <host:port>] [--release] [--restart]
+  build a component crate on change and hot-swap the running instance (docs/SERVICE-COMPONENTS.md)");
+            return;
+        }
+        std::process::exit(dev::run(&args[1..]));
+    }
     // Publish the resolved home through HOME before anything reads it: the Lua
     // core, the node key, the plugin directory and the config file all derive
     // their paths from HOME, so one resolution here fixes them together.
     let home = resolve_home();
     std::env::set_var("HOME", &home);
     let from_file = load_env_file();
-    let args: Vec<String> = std::env::args().skip(1).collect();
     // A detached launcher must not change the node's worktree/branch identity.
     // The deployment gate writes this explicit location; CLI one-shot commands
     // still use their caller's cwd, and scratch binaries have no such marker.

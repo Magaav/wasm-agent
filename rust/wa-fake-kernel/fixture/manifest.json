@@ -1,0 +1,8 @@
+{
+  "name": "fake-kernel-fixture",
+  "kind": "service",
+  "target": "wasm32-wasip2",
+  "description": "Fixture for wa-fake-kernel and for the `wa dev` smoke test: kv, one scripted http exchange and one refused one, a websocket echo, a scripted recognition, health, and a clean stop",
+  "capabilities": {"net": ["127.0.0.1:*"], "storage": true, "stt": true},
+  "limits": {"memory_mb": 64}
+}

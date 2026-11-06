@@ -17,7 +17,7 @@
 //! `*.suffix:port` entry for any host under that suffix. stdout/stderr go to a bounded log file
 //! beside the component (`<name>.service.log`, rotated once at 8 MiB on each start).
 use crate::components::{load, Grant, Installed};
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::io::{ErrorKind, Read, Write};
@@ -68,8 +68,10 @@ pub(crate) struct Shared {
     pub(crate) health: Mutex<String>,
     restarts: AtomicU64,
     sockets: AtomicU64,
-    state: Mutex<String>,
-    last_exit: Mutex<String>,
+    /// `starting`, `running`, `backoff`, `stopped`: read by `status` and by the dev swap.
+    pub(crate) state: Mutex<String>,
+    /// The outcome of the run that ended (`exit_0`, `trap:…`), which is what a dev swap refuses on.
+    pub(crate) last_exit: Mutex<String>,
     started_at: AtomicU64,
 }
 
@@ -526,13 +528,45 @@ pub fn start(request: &Value) -> Value {
             return json!({"ok": false, "error": "service_running_with_another_pin: stop it first"});
         }
     }
+    let spawned = match spawn_instance(installed, grant) {
+        Ok(spawned) => spawned,
+        Err(error) => return error,
+    };
+    let report = spawned.report.clone();
+    let sha256 = spawned.sha256.clone();
+    services.insert(name.clone(), Handle { shared: spawned.shared, sha256: sha256.clone(), thread: spawned.thread });
+    let mut answer = json!({"ok": true, "name": name, "started": true, "sha256": sha256});
+    for (key, value) in report.as_object().into_iter().flatten() {
+        answer[key] = value.clone();
+    }
+    answer
+}
+
+/// One supervised instance, not in the registry: the dev-loop hook below starts two of these at
+/// once (the new pin beside the old one) and stops whichever loses.
+pub(crate) struct Spawned {
+    pub(crate) name: String,
+    pub(crate) shared: Arc<Shared>,
+    pub(crate) sha256: String,
+    pub(crate) thread: Option<std::thread::JoinHandle<()>>,
+    /// What `start` puts in its answer besides the name: `state` and `grants`.
+    pub(crate) report: Value,
+}
+
+/// Compile and start one instance of an already-verified component.
+///
+/// Extracted from `start` so that a hot swap runs exactly the code a cold start runs (grants,
+/// state migration, contract detection, log, supervision) instead of a second, drifting copy.
+/// Everything that identifies *which* instance to stop later stays with the caller.
+pub(crate) fn spawn_instance(installed: Installed, grant: Grant) -> std::result::Result<Spawned, Value> {
+    let name = installed.name.clone();
     // The transactional install (docs/STATE.md): before anything is compiled or started, a
     // manifest that declares `state_version` must find its namespace at that version. The migration
     // runs on a snapshot copy and is swapped in only if it succeeds; a refusal here leaves the
     // previous instance and its state exactly as they were, and nothing has started.
     let state = match crate::state_host::prepare_install(&installed) {
         Ok(outcome) => outcome,
-        Err(error) => return json!({"ok": false, "name": name, "error": error}),
+        Err(error) => return Err(json!({"ok": false, "name": name, "error": error})),
     };
     // The two component-facing providers' grants, read from the same (already checked) manifest:
     // `bus` patterns and `queue` interfaces/namespaces. A malformed grant is a refusal here, before
@@ -540,15 +574,15 @@ pub fn start(request: &Value) -> Value {
     // every call it makes on them is refused by the ACL/gate rather than silently allowed.
     let bus_grants = match crate::bus_host::register(&name, &installed.manifest) {
         Ok(grants) => grants,
-        Err(error) => return json!({"ok": false, "name": name, "error": error}),
+        Err(error) => return Err(json!({"ok": false, "name": name, "error": error})),
     };
     let queue_grants = match crate::queue_host::node().register(&name, &installed.manifest) {
         Ok(grants) => grants,
-        Err(error) => return json!({"ok": false, "name": name, "error": error}),
+        Err(error) => return Err(json!({"ok": false, "name": name, "error": error})),
     };
     let engine = match crate::components::engine() {
         Ok(engine) => engine,
-        Err(error) => return json!({"ok": false, "error": error.to_string()}),
+        Err(error) => return Err(json!({"ok": false, "error": error.to_string()})),
     };
     // A component on the wa:kernel contract runs through service_components; a core module
     // through the wasip1 runner below. The binary's preamble says which, and for a component its
@@ -566,23 +600,23 @@ pub fn start(request: &Value) -> Value {
         // uses, so nothing about 0.1 behaviour changes.
         let async_engine = match crate::service_components_v2::engine() {
             Ok(engine) => engine,
-            Err(error) => return json!({"ok": false, "error": format!("engine_failed:{error}")}),
+            Err(error) => return Err(json!({"ok": false, "error": format!("engine_failed:{error}")})),
         };
         let probe = match wasmtime::component::Component::new(&async_engine, &installed.bytes) {
             Ok(component) => component,
-            Err(error) => return json!({"ok": false, "error": format!("compile_failed:{error}")}),
+            Err(error) => return Err(json!({"ok": false, "error": format!("compile_failed:{error}")})),
         };
         match crate::service_components_v2::Contract::of(&probe) {
             crate::service_components_v2::Contract::V2 => Compiled::ComponentV2(probe),
             crate::service_components_v2::Contract::V1 => match wasmtime::component::Component::new(&engine, &installed.bytes) {
                 Ok(c) => Compiled::Component(c),
-                Err(error) => return json!({"ok": false, "error": format!("compile_failed:{error}")}),
+                Err(error) => return Err(json!({"ok": false, "error": format!("compile_failed:{error}")})),
             },
         }
     } else {
         match Module::new(&engine, &installed.bytes) {
             Ok(m) => Compiled::Module(m),
-            Err(error) => return json!({"ok": false, "error": format!("compile_failed:{error}")}),
+            Err(error) => return Err(json!({"ok": false, "error": format!("compile_failed:{error}")})),
         }
     };
     let shared = Arc::new(Shared::default());
@@ -642,21 +676,20 @@ pub fn start(request: &Value) -> Value {
         }
     });
     match thread {
-        Ok(thread) => {
-            services.insert(name.clone(), Handle { shared, sha256: sha256.clone(), thread: Some(thread) });
-            json!({
-                "ok": true,
-                "name": name,
-                "started": true,
-                "sha256": sha256,
+        Ok(thread) => Ok(Spawned {
+            name: name.clone(),
+            shared,
+            sha256,
+            thread: Some(thread),
+            report: json!({
                 "state": state.to_json(),
                 "grants": {
                     "bus": {"publish": bus_grants.publish, "subscribe": bus_grants.subscribe},
                     "queue": queue_grants.to_json(),
                 },
-            })
-        }
-        Err(error) => json!({"ok": false, "error": format!("spawn_failed:{error}")}),
+            }),
+        }),
+        Err(error) => Err(json!({"ok": false, "error": format!("spawn_failed:{error}")})),
     }
 }
 

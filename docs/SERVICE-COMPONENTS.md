@@ -255,6 +255,100 @@ and the real enqueue on a binary that carries the capability).
 still one warm worker), and anything at all against a live account: this lane did not pair, connect or
 send, so the component's behaviour on a phone is the same unknown it was at B3.
 
+## Iterating on a component: `wa dev` and `wa-fake-kernel`
+
+A service component's loop used to be: edit, `cargo build --target wasm32-wasip2`, install the three
+files into the node's component directory, `services stop` then `services start`, and read the log.
+Two pieces make it seconds instead, and neither needs a node.
+
+**`wa-fake-kernel`** (`rust/wa-fake-kernel`) is the host half of `wa:kernel@0.2` served in memory: the
+real `.wasm` on the real 0.2 runner (the same engine configuration, WIT signatures, resource
+lifetimes and `wasi:clocks@0.3.0` timer), with every answer that would leave the machine scripted -
+kv, http, websocket, speech, secrets, log, health. A component's own tests then run under
+`cargo test` with no node, no installed pin and no model:
+
+```rust
+let mut kernel = FakeKernel::new("my-service");
+kernel.grant_net(&["127.0.0.1:9999"]).grant_storage(true)
+      .http_response(HttpRule::ok_json("POST", "http://127.0.0.1:9999/note", r#"{"ok":true}"#));
+let outcome = kernel.run_file("my_service.wasm", r#"{"dial":"http://127.0.0.1:9999/note"}"#);
+assert_eq!(outcome.outcome, "exit_0");
+assert!(outcome.logs_text().contains("dial ok"));
+```
+
+Discipline the crate keeps, because a test that lies is worse than no test: an exchange no rule
+names is **refused by name** (`http_not_scripted:GET …`), never answered with an empty 200; a
+capability the test did not grant is refused exactly as the node refuses it (`storage not declared`,
+`stt not declared`, `refused(<url>)` for an ungranted address); and a secret's **value never enters
+a record** - `credentials.get` records the name and whether it was granted, and a replay answers
+with the stand-in `replayed-secret`. The run's deadline is enforced twice (the tokio timer drops a
+parked guest, the epoch traps one that never yields), so a component that never returns fails a test
+instead of hanging it.
+
+**Record and replay** are `wa-bounded`'s: `kernel.record()` puts every answered host call through the
+same `RecordRing` the node uses, `kernel.save_replay(dir, label)` writes a `.wrz`, and
+`kernel.replay_from(file)` answers from it with every script removed. Order, interface, function and
+(arguments, when they were kept) must match; a drifted replay is `replay_mismatch:…` (or
+`replay_arguments_differ:…`, `replay_exhausted:…`) and the guest receives `failed(…)` rather than an
+answer to a question it did not ask. Two calls are not recorded, by design: `log.write` and
+`lifecycle.report` are the component's own output (nothing to feed back), and
+`lifecycle.stopping` is a live signal - a replayed component that is told to stop must stop.
+
+```
+cargo test -p wa-fake-kernel                       # the fixture, through the fake kernel (9 tests)
+cargo run -p wa-fake-kernel -- run my_service.wasm --storage --net 127.0.0.1:9999 \
+      --http '{"method":"GET","url":"http://127.0.0.1:9999/note","body":"pong"}' \
+      --config '{"dial":"http://127.0.0.1:9999/note"}' --logs --record /tmp/replays
+cargo run -p wa-fake-kernel -- build rust/components/my-service
+```
+
+The CLI prints the outcome, health, the host calls in order and (opt-in, `--logs`) the component's
+log; `--record`/`--replay` are the two hooks as flags; `--json` prints one summary line.
+
+**`wa dev <component-dir>`** (`rust/wa-host/src/dev.rs`) is the loop: it watches the crate
+(`Cargo.toml`, `Cargo.lock`, `manifest.json`, everything under `src/`), builds for
+`wasm32-wasip2` on a change, lays the artifact down as an installed component in
+`<dir>/.wa-dev/components/` (wasm, pin last, manifest), and calls `wa_kernel_runtime::dev::swap`.
+That swap is the transactional upgrade the supervisor already describes, on one instance: the new
+instance starts **beside** the old one with the same grants and state, is waited on for
+`lifecycle.report(ready)`, and only then is the old one stopped - so a build that traps, or never
+becomes healthy, leaves the previous instance running and says so (`mode=kept_previous`).
+`--restart` asks for the other order (stop, then start) for a component whose two instances cannot
+coexist (a fixed port, a device). Every cycle prints both numbers, because their sum is the loop:
+
+```
+dev: build 22925 ms (6821997 bytes)          # debug fixture: 6.8 MB of wasm
+dev: swap 17094 ms mode=start sha256=9a6e161fd609 health=ready start=17053ms ready=0ms stop=0ms
+dev: build 34519 ms (199511 bytes)           # the same fixture with --release: 200 KB
+dev: swap 9212 ms mode=start sha256=afab88d0bb57 health=ready start=9151ms ready=0ms stop=0ms
+```
+
+Push those numbers to where they matter: `swap` here is dominated by wasmtime **compiling** the
+artifact (a `.wasm` is compiled on every start; the node caches compiled components by pin, this
+loop does not yet), and the debug fixture is 34x the size of the release one - so `--release` is the
+fast loop, not the slow one, and the second cycle is the one to watch.
+
+```
+wa dev rust/components/my-service                       # watch, build, hot-swap
+wa dev rust/components/my-service --once                # one cycle, then exit (the smoke test)
+wa dev rust/components/my-service --config '{"portal":8644}' --net 127.0.0.1:28787 --release
+```
+
+`bash scripts/test-devloop.sh` is the smoke test: it copies the `wa-fake-kernel` fixture out of the
+checkout (rewriting its WIT path to the copy), runs one build+start, edits a source file and waits
+for a `mode=hot_swap`, breaks the build and proves nothing was swapped, then checks `--restart` and
+`--no-swap` - all under a temp home, so a node's state is never read or written. 22 checks, no
+network.
+
+**What this is not, yet.** `wa dev` is the local node *for the component it watches*: it runs the
+node's own start path (`services::spawn_instance`) in its own process and keeps the instance in its
+own slot. It does not join a running `wa serve`: that needs one node endpoint - "start a second
+instance of this name, keep the old one until the new reports ready, then stop it" - and a
+`services` action that answers with it, which is a change to `wa-capabilities` and the supervisor's
+registry rather than to this loop. Until then an operator with a live node still does `services`
+`disable`/`enable` across a build; the swap semantics this loop proves are the ones such an endpoint
+would use.
+
 ## The warm shadow deploy and the post-then-edit test (p3a)
 
 Two `services` definitions to run the component beside the Go connector. They are documented here
