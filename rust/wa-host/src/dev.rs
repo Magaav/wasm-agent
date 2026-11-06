@@ -105,13 +105,13 @@ pub fn run(args: &[String]) -> i32 {
         options.dir.display(),
         components.display()
     );
-    let mut fingerprint = snapshot(&options.dir);
     if options.once {
         let ok = cycle(&options, &name, &components, &request, &mut instance);
         stop(&mut instance);
         return if ok { 0 } else { 1 };
     }
     cycle(&options, &name, &components, &request, &mut instance);
+    let mut fingerprint = snapshot(&options.dir);
     loop {
         std::thread::sleep(options.interval);
         let now = snapshot(&options.dir);

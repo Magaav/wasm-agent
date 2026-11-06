@@ -60,6 +60,10 @@ impl HttpRule {
 }
 
 /// One scripted websocket: the frames the peer sends, and whether a `send` comes back.
+///
+/// `messages` ends when there is nothing more to deliver (the peer closed), so a component that
+/// awaits a frame this rule does not have ends its loop instead of parking forever - a socket with
+/// no scripted traffic is a closed socket, not a silent one.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WsRule {
     pub url: String,
