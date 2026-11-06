@@ -19,7 +19,13 @@ ensure_target() {
   fi
 }
 
-sha() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'; else shasum -a 256 "$1" | awk '{print $1}'; fi; }
+# The hash is read from stdin, not named as an argument: when the file name contains a backslash -
+# every Windows path the gate installs into (WA_COMPONENTS_DIR is derived from WASM_AGENT_HOME, which
+# is a Windows path) - GNU coreutils prefixes the digest with `\` as an escape marker, and a pin file
+# that starts with `\` never matches the module: `wa` refuses it as `component_hash_mismatch` and the
+# component blocks of scripts/test.sh quietly degrade to "not installed". scripts/deploy.sh pins the
+# same way, for the same reason.
+sha() { if command -v sha256sum >/dev/null 2>&1; then sha256sum < "$1" | awk '{print $1}'; else shasum -a 256 < "$1" | awk '{print $1}'; fi; }
 
 built=0
 for crate in rust/components/*/; do
